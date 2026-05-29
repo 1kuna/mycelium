@@ -185,3 +185,103 @@ func TestDiscoveryAndTunnelMocksRecordAndFail(t *testing.T) {
 		t.Fatal("expected close error")
 	}
 }
+
+func TestFederationMocksRecordAndFail(t *testing.T) {
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	claim := fixtures.MakeClaim(3, 4)
+	admission := &AdmissionController{}
+	offer, err := admission.Offer(context.Background(), job, claim)
+	if err != nil {
+		t.Fatalf("Offer: %v", err)
+	}
+	if offer.JobID != job.ID || offer.Claim != claim {
+		t.Fatalf("offer = %+v", offer)
+	}
+	if _, err := admission.Commit(context.Background(), offer.OfferID, offer.Fence); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := admission.Release(context.Background(), "lease-a"); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if err := admission.Preempt(context.Background(), "lease-a", "test"); err != nil {
+		t.Fatalf("Preempt: %v", err)
+	}
+
+	stale := errors.New("stale")
+	admission.CommitErr = stale
+	if _, err := admission.Commit(context.Background(), offer.OfferID, offer.Fence); !errors.Is(err, stale) {
+		t.Fatalf("commit err = %v", err)
+	}
+
+	coordinator := &Coordinator{Decision: domain.PlacementDecision{JobID: job.ID}, Lease: domain.Lease{ID: "lease-a"}}
+	if err := coordinator.ClaimJob(context.Background(), job.ID); err != nil {
+		t.Fatalf("ClaimJob: %v", err)
+	}
+	decision, err := coordinator.Plan(context.Background(), job.ID)
+	if err != nil || decision.JobID != job.ID {
+		t.Fatalf("Plan = %+v %v", decision, err)
+	}
+	lease, err := coordinator.Commit(context.Background(), decision)
+	if err != nil || lease.ID != "lease-a" {
+		t.Fatalf("Commit = %+v %v", lease, err)
+	}
+	if err := coordinator.Release(context.Background(), job.ID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	registry := &JobRegistry{}
+	record := fixtures.MakeJobRecord(fixtures.WithRecordJobID(job.ID))
+	if err := registry.Put(context.Background(), record); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	records, err := registry.Snapshot(context.Background())
+	if err != nil || len(records) != 1 || records[0].JobID != job.ID {
+		t.Fatalf("Snapshot = %+v %v", records, err)
+	}
+	watch, err := registry.Watch(context.Background(), "")
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if _, ok := <-watch; ok {
+		t.Fatal("default watch channel should be closed")
+	}
+
+	peers := &PeerDiscovery{}
+	peer := fixtures.MakePeer(fixtures.WithPeerID("peer-a"))
+	if err := peers.Advertise(context.Background(), peer); err != nil {
+		t.Fatalf("Advertise: %v", err)
+	}
+	gotPeers, err := peers.Peers(context.Background())
+	if err != nil || len(gotPeers) != 1 || gotPeers[0].ID != peer.ID {
+		t.Fatalf("Peers = %+v %v", gotPeers, err)
+	}
+	peerWatch, err := peers.WatchPeers(context.Background())
+	if err != nil {
+		t.Fatalf("WatchPeers: %v", err)
+	}
+	if _, ok := <-peerWatch; ok {
+		t.Fatal("default peer watch channel should be closed")
+	}
+
+	boom := errors.New("boom")
+	admission.OfferErr = boom
+	if _, err := admission.Offer(context.Background(), job, claim); !errors.Is(err, boom) {
+		t.Fatalf("offer err = %v", err)
+	}
+	registry.Err = boom
+	if err := registry.Put(context.Background(), record); !errors.Is(err, boom) {
+		t.Fatalf("put err = %v", err)
+	}
+	registry.WatchErr = boom
+	if _, err := registry.Watch(context.Background(), "cursor"); !errors.Is(err, boom) {
+		t.Fatalf("watch err = %v", err)
+	}
+	peers.Err = boom
+	if err := peers.Advertise(context.Background(), peer); !errors.Is(err, boom) {
+		t.Fatalf("advertise err = %v", err)
+	}
+	peers.WatchErr = boom
+	if _, err := peers.WatchPeers(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("watch peers err = %v", err)
+	}
+}

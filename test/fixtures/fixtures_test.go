@@ -97,3 +97,20 @@ func TestAllPresetAndInstanceOptions(t *testing.T) {
 		t.Fatalf("loading option = %+v", inst)
 	}
 }
+
+func TestFederationFixtures(t *testing.T) {
+	peer := MakePeer(WithPeerID("peer-a"), WithPeerAddress("127.0.0.1:9"), ComputeOff)
+	if peer.ID != "peer-a" || peer.Compute || len(peer.Addresses) != 1 || peer.Addresses[0] != "127.0.0.1:9" {
+		t.Fatalf("peer = %+v", peer)
+	}
+
+	offer := MakeLeaseOffer(WithOfferID("offer-a"), WithOfferFence(42))
+	if offer.OfferID != "offer-a" || offer.Fence != 42 || offer.Claim != MakeClaim(1, 2) {
+		t.Fatalf("offer = %+v", offer)
+	}
+
+	record := MakeJobRecord(WithRecordJobID("job-a"))
+	if record.JobID != "job-a" || record.Status != domain.JobQueued || len(record.Request) == 0 {
+		t.Fatalf("record = %+v", record)
+	}
+}

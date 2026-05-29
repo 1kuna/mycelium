@@ -75,3 +75,4 @@
 - 2026-05-29: The control CLI is shared from `cmd/internal/controlcli` so both the legacy `mycelium myce ...` path and the real `myce` binary execute the same implementation.
 - 2026-05-29: MLX adapters target the official `mlx_lm.server` executable directly, using `--model/--host/--port`; the `mlx_lm server` wrapper form is not the installed CLI shape and fails against the real runtime.
 - 2026-05-29: Smoke Make targets pass `-count=1` so hardware/engine smoke always exercises the live runtime instead of accepting Go's cached test result.
+- 2026-05-29: Peer-pivot remediation adds canonical federation contracts (`AdmissionController`, `Coordinator`, `JobRegistry`, `PeerDiscovery`) before removing all legacy server/node call sites; this keeps each commit gate-green while authority moves to owner-commit semantics.
