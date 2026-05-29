@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 
+	"mycelium/internal/domain"
 	"mycelium/internal/gateway/translate"
 )
 
@@ -48,15 +50,67 @@ func parseRequest(r *http.Request) (translate.IngressRequest, error) {
 	if err != nil {
 		return translate.IngressRequest{}, err
 	}
+	var req translate.IngressRequest
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
-		return translate.ParseOpenAIChat(body)
+		req, err = translate.ParseOpenAIChat(body)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/completions":
-		return translate.ParseOpenAICompletion(body)
+		req, err = translate.ParseOpenAICompletion(body)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/messages":
-		return translate.ParseAnthropicMessages(body)
+		req, err = translate.ParseAnthropicMessages(body)
 	default:
 		return translate.IngressRequest{}, &routeError{status: http.StatusNotFound, msg: "not found"}
+	}
+	if err != nil {
+		return translate.IngressRequest{}, err
+	}
+	req.Project = r.Header.Get(HeaderProject)
+	req.Priority = domain.Priority(r.Header.Get(HeaderPriority))
+	req.SpeedPref = domain.SpeedPref(r.Header.Get(HeaderSpeedPref))
+	req.Preemption = domain.Preemption(r.Header.Get(HeaderPreemption))
+	if !validPriority(req.Priority) {
+		return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Priority"}
+	}
+	if !validSpeedPref(req.SpeedPref) {
+		return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Speed-Pref"}
+	}
+	if !validPreemption(req.Preemption) {
+		return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Preemption"}
+	}
+	if raw := r.Header.Get(HeaderContextCap); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Context-Cap"}
+		}
+		req.ContextRequest = value
+	}
+	return req, nil
+}
+
+func validPriority(priority domain.Priority) bool {
+	switch priority {
+	case "", domain.PriorityInteractive, domain.PriorityNormal, domain.PriorityBackground:
+		return true
+	default:
+		return false
+	}
+}
+
+func validSpeedPref(speed domain.SpeedPref) bool {
+	switch speed {
+	case "", domain.SpeedThroughput, domain.SpeedLatency, domain.SpeedAuto:
+		return true
+	default:
+		return false
+	}
+}
+
+func validPreemption(preemption domain.Preemption) bool {
+	switch preemption {
+	case "", domain.PreemptInherit, domain.PreemptSoft, domain.PreemptHardForInteractive, domain.PreemptHard:
+		return true
+	default:
+		return false
 	}
 }
 

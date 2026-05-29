@@ -117,11 +117,23 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 		return "", nil, fmt.Errorf("server config/store has no presets")
 	}
 	placer := scheduler.NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), clock.System{}, presets...)
-	handler := gateway.Server{Router: &gateway.Router{
+	runtime := &scheduler.Service{
 		Placer:  placer,
 		Fleet:   fleet,
 		Nodes:   nodes,
-		Presets: gateway.NewPresetRegistry(presets...),
+		Queue:   scheduler.NewQueue(clock.System{}),
+		Store:   store,
+		Clock:   clock.System{},
+		Presets: presetMap(presets),
+	}
+	handler := gateway.Server{Router: &gateway.Router{
+		Placer:    placer,
+		Fleet:     fleet,
+		Nodes:     nodes,
+		Presets:   gateway.NewPresetRegistry(presets...),
+		Runtime:   runtime,
+		Telemetry: store,
+		Clock:     clock.System{},
 	}}
 	if mux != nil {
 		mux.Handle("/", handler)
@@ -152,4 +164,15 @@ func seedControlStore(ctx context.Context, store *storesqlite.Store, cfg ServerC
 		}
 	}
 	return nil
+}
+
+func presetMap(presets []domain.Preset) map[string]domain.Preset {
+	out := map[string]domain.Preset{}
+	for _, preset := range presets {
+		out[preset.ID] = preset
+		if preset.ModelRef != "" {
+			out[preset.ModelRef] = preset
+		}
+	}
+	return out
 }

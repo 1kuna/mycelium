@@ -32,10 +32,13 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	inst := fixtures.MakeInstance()
 	inst.Addr = upstream.URL
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
 	if err != nil {
 		t.Fatalf("ParseOpenAIChat: %v", err)
 	}
+	req.Project = "proj-a"
 
 	resp, err := router.Route(context.Background(), req)
 	if err != nil {
@@ -46,6 +49,76 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 	if !strings.Contains(string(resp.Body), "hello") {
 		t.Fatalf("body = %s", resp.Body)
+	}
+	if len(sink.Metrics) != 1 || sink.Metrics[0].Project != "proj-a" || sink.Metrics[0].ContextUsed != 4 {
+		t.Fatalf("metrics = %+v", sink.Metrics)
+	}
+	if want := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC); !sink.Metrics[0].At.Equal(want) {
+		t.Fatalf("metric time = %s want %s", sink.Metrics[0].At, want)
+	}
+}
+
+func TestParseRequestReadsMyceliumIntentHeaders(t *testing.T) {
+	raw := `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}]}`
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(raw))
+	httpReq.Header.Set(HeaderProject, "proj-a")
+	httpReq.Header.Set(HeaderPriority, string(domain.PriorityBackground))
+	httpReq.Header.Set(HeaderSpeedPref, string(domain.SpeedLatency))
+	httpReq.Header.Set(HeaderContextCap, "4096")
+	httpReq.Header.Set(HeaderPreemption, string(domain.PreemptHard))
+
+	req, err := parseRequest(httpReq)
+	if err != nil {
+		t.Fatalf("parseRequest: %v", err)
+	}
+	if req.Project != "proj-a" || req.Priority != domain.PriorityBackground || req.SpeedPref != domain.SpeedLatency || req.ContextRequest != 4096 || req.Preemption != domain.PreemptHard {
+		t.Fatalf("req = %+v", req)
+	}
+
+	httpReq.Header.Set(HeaderContextCap, "nope")
+	if _, err := parseRequest(httpReq); err == nil {
+		t.Fatal("expected invalid context cap")
+	}
+	httpReq.Header.Set(HeaderContextCap, "4096")
+	httpReq.Header.Set(HeaderPriority, "urgent")
+	if _, err := parseRequest(httpReq); err == nil {
+		t.Fatal("expected invalid priority")
+	}
+}
+
+func TestRouterRetriesContextOverflowOnLargerPreset(t *testing.T) {
+	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
+	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "request exceeds context window", http.StatusBadRequest)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("retried")))
+	}))
+	defer second.Close()
+
+	node := fixtures.MakeNode()
+	instSmall := fixtures.MakeInstance(fixtures.WithInstanceID("inst_small"), fixtures.WithInstancePreset(small.ID))
+	instSmall.Addr = first.URL
+	instLarge := fixtures.MakeInstance(fixtures.WithInstanceID("inst_large"), fixtures.WithInstancePreset(large.ID))
+	instLarge.Addr = second.URL
+	router := newTestRouter(small, domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{instSmall, instLarge},
+	}, staticResolver{}, large)
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"preset_small","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Instance.ID != "inst_large" || resp.Attempts != 2 || !strings.Contains(string(resp.Body), "retried") {
+		t.Fatalf("resp=%+v body=%s", resp, resp.Body)
 	}
 }
 
@@ -140,17 +213,20 @@ func TestNodeDirectoryCombinesSnapshots(t *testing.T) {
 	}
 }
 
-func newTestRouter(preset domain.Preset, fleet domain.FleetSnapshot, nodes NodeResolver) *Router {
+func newTestRouter(preset domain.Preset, fleet domain.FleetSnapshot, nodes NodeResolver, extra ...domain.Preset) *Router {
+	presets := append([]domain.Preset{preset}, extra...)
+	fakeClock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
 	return &Router{
 		Placer: scheduler.NewPlacer(
 			estimate.NewInMemory(),
 			lease.NewAllocator(),
-			mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
-			preset,
+			fakeClock,
+			presets...,
 		),
 		Fleet:    staticFleet{fleet: fleet},
 		Nodes:    nodes,
-		Presets:  NewPresetRegistry(preset),
+		Presets:  NewPresetRegistry(presets...),
+		Clock:    fakeClock,
 		MaxTries: 2,
 	}
 }
