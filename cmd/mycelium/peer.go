@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -114,7 +116,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 
 	var fleet gateway.FleetSource
 	var nodes gateway.NodeResolver
-	var mux *http.ServeMux
+	mux := http.NewServeMux()
 	var discovery ports.PeerDiscovery
 	if cfg.JoinToken != "" {
 		if _, err := membership.NewPersistentTokenManager(ctx, cfg.JoinToken, store); err != nil {
@@ -142,9 +144,6 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 			return "", nil, fmt.Errorf("local admission controller does not expose lease inspection")
 		}
 		agents[local.node.ID] = localPeerAgent{NodeAgent: local.agent, AdmissionController: local.admission, LeaseInspector: inspector}
-		if mux == nil {
-			mux = http.NewServeMux()
-		}
 		mountNodeHTTP(mux, local.handler)
 	}
 	if len(agents) > 0 {
@@ -185,7 +184,14 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	jobLog := peercoord.NewJobLog()
 	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
 	if discovery != nil {
-		startPeerAdvertiser(ctx, discovery, self, clock.System{}, time.Duration(cfg.DiscoveryAdvertiseMS)*time.Millisecond)
+		startPeerHeartbeat(ctx, &peercoord.Heartbeat{
+			Self:      self,
+			Discovery: discovery,
+			Clock:     clock.System{},
+			Interval:  time.Duration(cfg.DiscoveryAdvertiseMS) * time.Millisecond,
+			Probe:     probePeerHealth,
+			OnDead:    markDeadPeer(store),
+		}, clock.System{})
 	}
 	coordinator := peercoord.NewCoordinator(self, jobLog, store, placer, fleet, admissionResolver(nodes), clock.System{})
 	runtime := &scheduler.Service{
@@ -218,11 +224,18 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		Projects:       projectMap(projects),
 		DefaultProject: cfg.DefaultProject,
 	}}
-	if mux != nil {
-		mux.Handle("/", handler)
-		return cfg.Listen, mux, nil
-	}
-	return cfg.Listen, handler, nil
+	mountPeerHTTP(mux, self)
+	mux.Handle("/", handler)
+	return cfg.Listen, mux, nil
+}
+
+func mountPeerHTTP(mux *http.ServeMux, self domain.Peer) {
+	mux.HandleFunc("/peer/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(self); err != nil {
+			panic(err)
+		}
+	})
 }
 
 func mountNodeHTTP(mux *http.ServeMux, handler http.Handler) {
@@ -335,15 +348,21 @@ func parseJoinFlag(raw string) (string, error) {
 	return raw, nil
 }
 
-func startPeerAdvertiser(ctx context.Context, discovery ports.PeerDiscovery, self domain.Peer, clk ports.Clock, interval time.Duration) {
-	if discovery == nil || clk == nil || self.ID == "" || interval <= 0 {
+func startPeerHeartbeat(ctx context.Context, heartbeat *peercoord.Heartbeat, clk ports.Clock) {
+	if heartbeat == nil || heartbeat.Discovery == nil || heartbeat.Clock == nil || clk == nil || heartbeat.Self.ID == "" {
 		return
 	}
-	if err := discovery.Advertise(ctx, self); err != nil {
+	self := heartbeat.Self
+	self.LastSeen = heartbeat.Clock.Now()
+	if err := heartbeat.Discovery.Advertise(ctx, self); err != nil {
 		log.Printf("mycelium peer advertise failed: %v", err)
 	}
 	go func() {
 		for {
+			interval := heartbeat.Interval
+			if interval == 0 {
+				interval = peercoord.DefaultHeartbeatInterval
+			}
 			timer := clk.NewTimer(interval)
 			select {
 			case <-ctx.Done():
@@ -351,12 +370,65 @@ func startPeerAdvertiser(ctx context.Context, discovery ports.PeerDiscovery, sel
 				return
 			case <-timer.C():
 			}
-			self.LastSeen = clk.Now()
-			if err := discovery.Advertise(ctx, self); err != nil {
-				log.Printf("mycelium peer advertise failed: %v", err)
+			if _, err := heartbeat.Tick(ctx); err != nil {
+				log.Printf("mycelium peer heartbeat failed: %v", err)
 			}
 		}
 	}()
+}
+
+func probePeerHealth(ctx context.Context, peer domain.Peer) error {
+	if peer.ID == "" {
+		return fmt.Errorf("peer id is required")
+	}
+	if len(peer.Addresses) == 0 {
+		return fmt.Errorf("peer %q has no reachable address", peer.ID)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, peerHTTPBaseURL(peer.Addresses[0])+"/peer/health", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", domain.ErrUnreachable, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%w: peer health returned %s: %s", domain.ErrUnreachable, resp.Status, strings.TrimSpace(string(body)))
+	}
+	var got domain.Peer
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		return err
+	}
+	if got.ID != peer.ID {
+		return fmt.Errorf("peer health returned %q for %q", got.ID, peer.ID)
+	}
+	return nil
+}
+
+func peerHTTPBaseURL(address string) string {
+	if strings.HasPrefix(address, "http://") || strings.HasPrefix(address, "https://") {
+		return strings.TrimRight(address, "/")
+	}
+	return "http://" + address
+}
+
+func markDeadPeer(store interface {
+	SaveNode(ctx context.Context, node domain.Node) error
+}) peercoord.DeadPeerFunc {
+	return func(ctx context.Context, peer domain.Peer) error {
+		if store == nil || !peer.Compute {
+			return nil
+		}
+		node := domain.Node{ID: peer.ID, Name: peer.ID, Status: domain.NodeUnreachable}
+		if len(peer.Addresses) > 0 {
+			node.Address = peer.Addresses[0]
+		}
+		return store.SaveNode(ctx, node)
+	}
 }
 
 type jobLister interface {
