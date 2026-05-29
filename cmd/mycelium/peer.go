@@ -281,6 +281,24 @@ func (n combinedNodes) AdmissionController(nodeID string) (ports.AdmissionContro
 	return right.AdmissionController(nodeID)
 }
 
+func (n combinedNodes) LeaseInspector(nodeID string) (ports.LeaseInspector, error) {
+	if left, ok := n.left.(interface {
+		LeaseInspector(string) (ports.LeaseInspector, error)
+	}); ok {
+		inspector, err := left.LeaseInspector(nodeID)
+		if err == nil {
+			return inspector, nil
+		}
+	}
+	right, ok := n.right.(interface {
+		LeaseInspector(string) (ports.LeaseInspector, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("node resolver does not expose lease inspection")
+	}
+	return right.LeaseInspector(nodeID)
+}
+
 func admissionResolver(nodes gateway.NodeResolver) scheduler.AdmissionResolver {
 	admissions, ok := nodes.(scheduler.AdmissionResolver)
 	if !ok {

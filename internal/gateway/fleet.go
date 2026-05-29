@@ -45,5 +45,17 @@ func (d NodeDirectory) AdmissionController(nodeID string) (ports.AdmissionContro
 	return admission, nil
 }
 
+func (d NodeDirectory) LeaseInspector(nodeID string) (ports.LeaseInspector, error) {
+	agent, err := d.NodeAgent(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	inspector, ok := agent.(ports.LeaseInspector)
+	if !ok {
+		return nil, fmt.Errorf("node agent %q does not expose lease inspection", nodeID)
+	}
+	return inspector, nil
+}
+
 var _ FleetSource = NodeDirectory{}
 var _ NodeResolver = NodeDirectory{}

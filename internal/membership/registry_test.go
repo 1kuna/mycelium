@@ -44,6 +44,12 @@ func TestRegistryJoinDiscoversNodeAndRejectsBadToken(t *testing.T) {
 	if _, err := registry.AdmissionController("missing"); err == nil {
 		t.Fatal("missing admission controller succeeded")
 	}
+	if _, err := registry.LeaseInspector(node.ID); err != nil {
+		t.Fatalf("LeaseInspector: %v", err)
+	}
+	if _, err := registry.LeaseInspector("missing"); err == nil {
+		t.Fatal("missing lease inspector succeeded")
+	}
 	if err := registry.Announce(context.Background(), node); err == nil {
 		t.Fatal("tokenless announce succeeded")
 	}
