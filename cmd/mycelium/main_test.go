@@ -138,7 +138,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadServerConfig: %v", err)
 	}
-	if serverCfg.QueueDrainMS != 1000 || serverCfg.QueueDrainLimit != 1 {
+	if serverCfg.QueueDrainMS != 1000 || serverCfg.QueueDrainLimit != 1 || serverCfg.OptimizerEvalMS != 60000 {
 		t.Fatalf("server drain defaults = %+v", serverCfg)
 	}
 	nodePath := filepath.Join(t.TempDir(), "node.json")
@@ -370,6 +370,62 @@ func TestRestoreQueuedJobs(t *testing.T) {
 	job, ok := queue.Dequeue()
 	if !ok || job.ID != "queued" {
 		t.Fatalf("dequeue = %+v %v", job, ok)
+	}
+}
+
+func TestRunOptimizerEvaluationPersistsRecommendationsAndCalibratesSpeed(t *testing.T) {
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	project := domain.Project{ID: "project-a", ContextCap: 16000, AutoApply: true}
+	node := domain.Node{ID: "node-a", Name: "Node A", Status: domain.NodeReady}
+	if err := store.SaveProject(context.Background(), project); err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	if err := store.SaveNode(context.Background(), node); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), testPresetWithContext("small", 6000)); err != nil {
+		t.Fatalf("SavePreset small: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), testPresetWithContext("large", 16000)); err != nil {
+		t.Fatalf("SavePreset large: %v", err)
+	}
+	for _, metric := range []domain.RunMetric{
+		{JobID: "job-a", NodeID: node.ID, Project: project.ID, ContextUsed: 3500, TokensPerSec: 10, At: now},
+		{JobID: "job-b", NodeID: node.ID, Project: project.ID, ContextUsed: 4000, TokensPerSec: 20, At: now.Add(time.Second)},
+	} {
+		if err := store.Record(context.Background(), metric); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	if err := runOptimizerEvaluation(context.Background(), store, clock.System{}); err != nil {
+		t.Fatalf("runOptimizerEvaluation: %v", err)
+	}
+	appliedProject, err := store.Project(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	if appliedProject.ContextCap != 6000 {
+		t.Fatalf("project = %+v", appliedProject)
+	}
+	recs, err := store.ListRecommendations(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ListRecommendations: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Observed["avg_tokens"] != 3750 {
+		t.Fatalf("recommendations = %+v", recs)
+	}
+	calibrated, err := store.Node(context.Background(), node.ID)
+	if err != nil {
+		t.Fatalf("Node: %v", err)
+	}
+	if calibrated.SpeedClass.TokensPerSecRef != 15 || calibrated.SpeedClass.Source != "telemetry-calibrated" {
+		t.Fatalf("node = %+v", calibrated)
 	}
 }
 
