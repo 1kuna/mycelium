@@ -184,14 +184,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	jobLog := peercoord.NewJobLog()
 	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
 	if discovery != nil {
-		startPeerHeartbeat(ctx, &peercoord.Heartbeat{
-			Self:      self,
-			Discovery: discovery,
-			Clock:     clock.System{},
-			Interval:  time.Duration(cfg.DiscoveryAdvertiseMS) * time.Millisecond,
-			Probe:     probePeerHealth,
-			OnDead:    markDeadPeer(store),
-		}, clock.System{})
+		startPeerAdvertiser(ctx, discovery, self, clock.System{}, time.Duration(cfg.DiscoveryAdvertiseMS)*time.Millisecond)
 	}
 	coordinator := peercoord.NewCoordinator(self, jobLog, store, placer, fleet, admissionResolver(nodes), clock.System{})
 	runtime := &scheduler.Service{
@@ -334,6 +327,31 @@ func admissionResolver(nodes gateway.NodeResolver) scheduler.AdmissionResolver {
 	return admissions
 }
 
+func startPeerAdvertiser(ctx context.Context, discovery ports.PeerDiscovery, self domain.Peer, clk ports.Clock, interval time.Duration) {
+	if discovery == nil || clk == nil || self.ID == "" || interval <= 0 {
+		return
+	}
+	self.LastSeen = clk.Now()
+	if err := discovery.Advertise(ctx, self); err != nil {
+		log.Printf("mycelium peer advertise failed: %v", err)
+	}
+	go func() {
+		for {
+			timer := clk.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C():
+			}
+			self.LastSeen = clk.Now()
+			if err := discovery.Advertise(ctx, self); err != nil {
+				log.Printf("mycelium peer advertise failed: %v", err)
+			}
+		}
+	}()
+}
+
 func parseJoinFlag(raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("join token is required")
@@ -346,35 +364,6 @@ func parseJoinFlag(raw string) (string, error) {
 		return info.Token, nil
 	}
 	return raw, nil
-}
-
-func startPeerHeartbeat(ctx context.Context, heartbeat *peercoord.Heartbeat, clk ports.Clock) {
-	if heartbeat == nil || heartbeat.Discovery == nil || heartbeat.Clock == nil || clk == nil || heartbeat.Self.ID == "" {
-		return
-	}
-	self := heartbeat.Self
-	self.LastSeen = heartbeat.Clock.Now()
-	if err := heartbeat.Discovery.Advertise(ctx, self); err != nil {
-		log.Printf("mycelium peer advertise failed: %v", err)
-	}
-	go func() {
-		for {
-			interval := heartbeat.Interval
-			if interval == 0 {
-				interval = peercoord.DefaultHeartbeatInterval
-			}
-			timer := clk.NewTimer(interval)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C():
-			}
-			if _, err := heartbeat.Tick(ctx); err != nil {
-				log.Printf("mycelium peer heartbeat failed: %v", err)
-			}
-		}
-	}()
 }
 
 func probePeerHealth(ctx context.Context, peer domain.Peer) error {

@@ -100,3 +100,4 @@
 - 2026-05-29: Peer LAN advertisements have a configurable cadence (`discovery_advertise_ms`, default 5000) separate from discovery scan duration so smoke tests and dense LANs can avoid probabilistic scan/advertisement overlap.
 - 2026-05-29: The peer daemon no longer accepts `node_urls`; all remote compute enters through peer discovery plus owner admission, while direct node-agent HTTP clients stay confined to low-level smoke/helper tests.
 - 2026-05-29: Every peer daemon exposes `/peer/health` with its advertised peer record; liveness probes target the peer process rather than assuming every peer has a compute-node `/snapshot` endpoint.
+- 2026-05-29: Peer runtime performs continuous UDP advertisement only; active liveness heartbeat/probe logic remains a tested coordinator primitive but is not wired until discovery has a shared listener/cache, because scan-based heartbeats contend with request-time discovery on the same UDP listen port.
