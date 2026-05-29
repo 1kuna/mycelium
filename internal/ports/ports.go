@@ -93,3 +93,7 @@ type Store interface {
 type HardwareDetector interface {
 	Detect(ctx context.Context, seed domain.Node) (domain.Node, error)
 }
+
+type ShardPlanner interface {
+	Plan(ctx context.Context, preset domain.Preset, fleet domain.FleetSnapshot, shards int, contextLen int) (domain.ShardPlan, error)
+}
