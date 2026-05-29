@@ -15,7 +15,7 @@ import (
 	"mycelium/test/fixtures"
 )
 
-func TestLlamaCppConformance(t *testing.T) {
+func TestLocalLlamaCppConformance(t *testing.T) {
 	binary := os.Getenv("MYCELIUM_LLAMA_CPP_BINARY")
 	model := os.Getenv("MYCELIUM_LLAMA_CPP_MODEL")
 	if binary == "" || model == "" {

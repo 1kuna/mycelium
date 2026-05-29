@@ -9,3 +9,4 @@
 - 2026-05-29: For Phase 0 hard preemption, choose the lowest-priority eligible victim, breaking ties by lowest in-flight count and then instance id; this is deterministic and favors minimal disruption.
 - 2026-05-29: Phase 1 node-agent cold-load dedup returns the same ready instance to concurrent same-preset callers; the scheduler can choose later whether to batch or create another replica, but duplicate cold starts are never useful.
 - 2026-05-29: Pin `modernc.org/sqlite` at v1.38.2 for the telemetry store because newer releases currently declare Go 1.24+ or 1.25+, while the project contract is Go 1.23.
+- 2026-05-29: Keep reactive overflow handling as deterministic planning code in `internal/optimizer`: classify only explicit overflow errors, compute the next context cap, and let the normal scheduler prove fit.
