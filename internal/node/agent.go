@@ -11,16 +11,17 @@ import (
 )
 
 type Agent struct {
-	mu        sync.Mutex
-	node      domain.Node
-	backend   ports.BackendAdapter
-	clock     ports.Clock
-	telemetry ports.TelemetrySink
-	inspector ModelInspector
-	nextID    int
-	instances map[string]domain.ModelInstance
-	handles   map[string]ports.Handle
-	loads     map[string]*loadOp
+	mu         sync.Mutex
+	node       domain.Node
+	backend    ports.BackendAdapter
+	clock      ports.Clock
+	telemetry  ports.TelemetrySink
+	inspector  ModelInspector
+	listenAddr string
+	nextID     int
+	instances  map[string]domain.ModelInstance
+	handles    map[string]ports.Handle
+	loads      map[string]*loadOp
 }
 
 type loadOp struct {
@@ -33,12 +34,13 @@ type Option func(*Agent)
 
 func NewAgent(node domain.Node, backend ports.BackendAdapter, clock ports.Clock, opts ...Option) *Agent {
 	agent := &Agent{
-		node:      node,
-		backend:   backend,
-		clock:     clock,
-		instances: map[string]domain.ModelInstance{},
-		handles:   map[string]ports.Handle{},
-		loads:     map[string]*loadOp{},
+		node:       node,
+		backend:    backend,
+		clock:      clock,
+		listenAddr: "127.0.0.1:0",
+		instances:  map[string]domain.ModelInstance{},
+		handles:    map[string]ports.Handle{},
+		loads:      map[string]*loadOp{},
 	}
 	for _, opt := range opts {
 		opt(agent)
@@ -55,6 +57,12 @@ func WithTelemetrySink(sink ports.TelemetrySink) Option {
 func WithModelInspector(inspector ModelInspector) Option {
 	return func(a *Agent) {
 		a.inspector = inspector
+	}
+}
+
+func WithListenAddr(addr string) Option {
+	return func(a *Agent) {
+		a.listenAddr = addr
 	}
 }
 

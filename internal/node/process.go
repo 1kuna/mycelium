@@ -8,7 +8,7 @@ import (
 )
 
 func (a *Agent) launchAndWait(ctx context.Context, p domain.Preset, inst domain.ModelInstance) (domain.ModelInstance, ports.Handle, error) {
-	handle, err := a.backend.Launch(ctx, p, "127.0.0.1:0")
+	handle, err := a.backend.Launch(ctx, p, a.listenAddr)
 	if err != nil {
 		return domain.ModelInstance{}, ports.Handle{}, err
 	}
