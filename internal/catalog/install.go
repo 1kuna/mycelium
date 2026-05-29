@@ -175,6 +175,7 @@ func (i Installer) install(ctx context.Context, req InstallRequest) (InstallResu
 	preset := domain.Preset{
 		ID:            id,
 		ModelRef:      finalModel,
+		Aliases:       modelAliases(id, model, finalModel),
 		Backend:       backend,
 		ContextLength: contextLen,
 		Quant:         quant,
@@ -240,6 +241,13 @@ func (i Installer) install(ctx context.Context, req InstallRequest) (InstallResu
 		return InstallResult{Progress: progress}, err
 	}
 	return InstallResult{Preset: preset, Provenance: prov, Progress: progress}, nil
+}
+
+func modelAliases(id, model, modelRef string) []string {
+	if model == "" || model == id || model == modelRef {
+		return nil
+	}
+	return []string{model}
 }
 
 func (i Installer) now() time.Time {

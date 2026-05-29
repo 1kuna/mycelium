@@ -25,8 +25,13 @@ func NewPlacer(estimator ports.ResourceEstimator, allocator ports.Allocator, clo
 	}
 	for _, preset := range presets {
 		p.presets[preset.ID] = preset
-		if _, exists := p.presets[preset.ModelRef]; !exists {
-			p.presets[preset.ModelRef] = preset
+		for _, model := range append([]string{preset.ModelRef}, preset.Aliases...) {
+			if model == "" {
+				continue
+			}
+			if _, exists := p.presets[model]; !exists {
+				p.presets[model] = preset
+			}
 		}
 	}
 	return p

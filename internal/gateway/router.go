@@ -42,7 +42,7 @@ func NewPresetRegistry(presets ...domain.Preset) PresetRegistry {
 	r := PresetRegistry{byModel: map[string]domain.Preset{}, byID: map[string]domain.Preset{}, all: append([]domain.Preset(nil), presets...)}
 	for _, preset := range presets {
 		r.byID[preset.ID] = preset
-		r.byModel[preset.ModelRef] = preset
+		indexPresetModels(r.byModel, preset)
 	}
 	return r
 }
@@ -55,6 +55,17 @@ func (r PresetRegistry) Resolve(model string) (domain.Preset, error) {
 		return preset, nil
 	}
 	return domain.Preset{}, fmt.Errorf("unknown model %q", model)
+}
+
+func indexPresetModels(index map[string]domain.Preset, preset domain.Preset) {
+	for _, model := range append([]string{preset.ModelRef}, preset.Aliases...) {
+		if model == "" {
+			continue
+		}
+		if _, exists := index[model]; !exists {
+			index[model] = preset
+		}
+	}
 }
 
 func (r PresetRegistry) NextLargerContext(current domain.Preset) (domain.Preset, bool) {

@@ -28,7 +28,7 @@ func TestInstallLocalModelMaterializesPresetAndProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if result.Preset.ID != "tiny" || result.Preset.ModelRef == source || result.Preset.ContextLength != 4096 {
+	if result.Preset.ID != "tiny" || result.Preset.ModelRef == source || result.Preset.ContextLength != 4096 || strings.Join(result.Preset.Aliases, ",") != "tiny-model" {
 		t.Fatalf("preset = %+v", result.Preset)
 	}
 	if _, err := os.Stat(result.Preset.ModelRef); err != nil {
@@ -41,7 +41,7 @@ func TestInstallLocalModelMaterializesPresetAndProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadPreset: %v", err)
 	}
-	if stored.ModelRef != result.Preset.ModelRef {
+	if stored.ModelRef != result.Preset.ModelRef || strings.Join(stored.Aliases, ",") != "tiny-model" {
 		t.Fatalf("stored = %+v result = %+v", stored, result.Preset)
 	}
 	prov, err := ReadProvenance(store, "tiny")

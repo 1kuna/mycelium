@@ -170,6 +170,11 @@ func presetsByModel(presets []domain.Preset) map[string]domain.Preset {
 	for _, preset := range presets {
 		out[preset.ID] = preset
 		out[preset.ModelRef] = preset
+		for _, alias := range preset.Aliases {
+			if alias != "" {
+				out[alias] = preset
+			}
+		}
 	}
 	return out
 }

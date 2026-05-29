@@ -28,6 +28,10 @@ func WithModelRef(model string) func(*domain.Preset) {
 	return func(p *domain.Preset) { p.ModelRef = model }
 }
 
+func WithAliases(aliases ...string) func(*domain.Preset) {
+	return func(p *domain.Preset) { p.Aliases = append([]string(nil), aliases...) }
+}
+
 func WithWeights(mb int) func(*domain.Preset) {
 	return func(p *domain.Preset) { p.EstWeightsMB = mb }
 }

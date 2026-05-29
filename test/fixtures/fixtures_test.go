@@ -1,6 +1,7 @@
 package fixtures
 
 import (
+	"strings"
 	"testing"
 
 	"mycelium/internal/domain"
@@ -57,18 +58,18 @@ func TestAllNodeOptions(t *testing.T) {
 }
 
 func TestAllJobOptions(t *testing.T) {
-	j := MakeJob(WithJobID("job1"), Background, Auto, Hard, WithPreset("preset1"))
+	j := MakeJob(WithJobID("job1"), Background, Auto, Hard, WithPreset("preset1"), WithModel("model1"))
 	if j.ID != "job1" || j.Priority != domain.PriorityBackground || j.SpeedPref != domain.SpeedAuto {
 		t.Fatalf("job options = %+v", j)
 	}
-	if j.Preemption != domain.PreemptHard || j.PresetID != "preset1" {
+	if j.Preemption != domain.PreemptHard || j.PresetID != "preset1" || j.Model != "model1" {
 		t.Fatalf("job options = %+v", j)
 	}
 }
 
 func TestAllPresetAndInstanceOptions(t *testing.T) {
-	p := MakePreset(WithPresetID("preset1"), WithModelRef("model1"), WithWeights(12), WithKVPerToken(0.5), WithContextLength(4096), WithLaunchProfile("profile"), WithLaunchArgs("--x", "1"), WithPresetNode("node1"))
-	if p.ID != "preset1" || p.ModelRef != "model1" || p.EstWeightsMB != 12 || p.KVPerTokenMB != 0.5 || p.ContextLength != 4096 || p.NodeID != "node1" {
+	p := MakePreset(WithPresetID("preset1"), WithModelRef("model1"), WithAliases("alias1"), WithWeights(12), WithKVPerToken(0.5), WithContextLength(4096), WithLaunchProfile("profile"), WithLaunchArgs("--x", "1"), WithPresetNode("node1"))
+	if p.ID != "preset1" || p.ModelRef != "model1" || strings.Join(p.Aliases, ",") != "alias1" || p.EstWeightsMB != 12 || p.KVPerTokenMB != 0.5 || p.ContextLength != 4096 || p.NodeID != "node1" {
 		t.Fatalf("preset options = %+v", p)
 	}
 	if p.LaunchProfile != "profile" || len(p.LaunchArgs) != 2 {

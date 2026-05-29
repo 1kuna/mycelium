@@ -192,8 +192,13 @@ func presetMap(presets []domain.Preset) map[string]domain.Preset {
 	out := map[string]domain.Preset{}
 	for _, preset := range presets {
 		out[preset.ID] = preset
-		if preset.ModelRef != "" {
-			out[preset.ModelRef] = preset
+		for _, model := range append([]string{preset.ModelRef}, preset.Aliases...) {
+			if model == "" {
+				continue
+			}
+			if _, exists := out[model]; !exists {
+				out[model] = preset
+			}
 		}
 	}
 	return out

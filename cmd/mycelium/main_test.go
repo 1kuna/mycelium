@@ -56,12 +56,15 @@ func TestRunControlAddModel(t *testing.T) {
 	if preset.ModelRef == model || !strings.Contains(preset.ModelRef, "tiny-tiny.gguf") {
 		t.Fatalf("preset = %+v", preset)
 	}
+	if strings.Join(preset.Aliases, ",") != "tiny-model" {
+		t.Fatalf("preset aliases = %+v", preset.Aliases)
+	}
 	control, err := storesqlite.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open control store: %v", err)
 	}
 	defer control.Close()
-	if got, err := control.Preset(context.Background(), "tiny"); err != nil || got.ID != "tiny" {
+	if got, err := control.Preset(context.Background(), "tiny"); err != nil || got.ID != "tiny" || strings.Join(got.Aliases, ",") != "tiny-model" {
 		t.Fatalf("control preset = %+v, %v", got, err)
 	}
 }

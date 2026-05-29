@@ -175,6 +175,19 @@ func TestRouterUtilityFallbacks(t *testing.T) {
 	}
 }
 
+func TestPresetRegistryResolvesAliases(t *testing.T) {
+	preset := fixtures.MakePreset(
+		fixtures.WithPresetID("preset-a"),
+		fixtures.WithModelRef("/models/a.gguf"),
+		fixtures.WithAliases("qwen-alias"),
+	)
+	registry := NewPresetRegistry(preset)
+	got, err := registry.Resolve("qwen-alias")
+	if err != nil || got.ID != preset.ID {
+		t.Fatalf("Resolve alias = %+v %v", got, err)
+	}
+}
+
 func TestRouterRetriesContextOverflowOnLargerPreset(t *testing.T) {
 	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
 	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))
