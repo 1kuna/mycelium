@@ -18,7 +18,7 @@
 - 2026-05-29: Llama.cpp launch profiles are explicit named arg lists, and per-preset launch args carry computed tuning such as GPU layers or tensor split into the backend command; unknown profiles fail before launch.
 - 2026-05-29: Use a 5m default node load timeout, enforced with the injected `Clock`; tests can shorten it and advance `FakeClock` without real sleeps.
 - 2026-05-29: Llama.cpp launch contexts bound process start and readiness only; a successfully launched backend stays alive until explicit `Stop`.
-- 2026-05-29: `mycelium node` uses a concrete `--backend-listen` address for llama.cpp launches; port `0` is not valid until the adapter grows explicit port discovery.
+- 2026-05-29: SUPERSEDED by peer pivot: compute-on peer runtime uses a concrete `--backend-listen` address for llama.cpp launches; port `0` is not valid until the adapter grows explicit port discovery.
 - 2026-05-29: Phase 2 gateway profiles are explicit data keyed by backend; unknown backends fail instead of falling back to generic OpenAI routing.
 - 2026-05-29: Phase 2 gateway failover retries once by default, reports the failed instance, removes it from the local candidate snapshot, and then asks the scheduler again.
 - 2026-05-29: Anthropic-to-OpenAI streaming translation fails loudly until chunk-level SSE translation exists; non-streaming messages translate through OpenAI chat with strict field validation.
@@ -29,7 +29,7 @@
 - 2026-05-29: Phase 5 context recommendations use a deterministic average-with-headroom threshold snapped to an existing shared context, and recommendations carry observed stats plus a plain-language rationale.
 - 2026-05-29: Phase 5 auto-apply is a pure gate: projects with `AutoApply=false` only log the recommendation; projects with it on update the project cap and preset context together.
 - 2026-05-29: Durable control-plane state starts as a typed JSON-on-SQLite store; the schema keeps lifecycle tables explicit while avoiding premature relational fan-out before runtime flows settle.
-- 2026-05-29: `mycelium server` now boots from JSON config and seeds the durable store before serving; `myce add-model` writes the same SQLite preset record it expects the server to load.
+- 2026-05-29: SUPERSEDED by peer pivot: `mycelium run` boots from peer JSON config and seeds the durable store before serving; `myce add-model` writes the same SQLite preset record the peer loads.
 - 2026-05-29: Scheduler runtime execution is a service around the existing placer; the placer remains pure decision logic while the service owns queue persistence, node load/unload calls, and lease grants.
 - 2026-05-29: Node startup uses the same SQLite store for process refs that llama.cpp launch/stop updates; macOS hardware discovery uses `sysctl hw.memsize`, while Linux discovery fails loudly until NVIDIA probing is implemented.
 - 2026-05-29: Gateway request controls are HTTP headers mapped into scheduler jobs; context overflow retry selects the next larger persisted preset for the same backend/model instead of inventing an ad hoc preset at request time.
@@ -59,8 +59,8 @@
 - 2026-05-29: Engine recommendation application is an explicit project-default update: `myce recommendations apply` sets `Project.DefaultModel`, and the gateway only uses it when a request omits `model` for that project.
 - 2026-05-29: Linux hardware discovery uses `nvidia-smi --query-gpu=index,name,memory.total,compute_cap --format=csv,noheader,nounits` and fails loudly on malformed output; real CUDA smoke remains hardware-gated.
 - 2026-05-29: Cross-NAT overlay membership uses go-libp2p host streams behind the existing `Discovery` and `Tunnel` ports; discovery exchanges node JSON over `/mycelium/discovery/1.0.0`, tunnels proxy local TCP over `/mycelium/tunnel/1.0.0`, and the module targets Go 1.24.6 through go-libp2p v0.47.0 to avoid a patch-level toolchain dependency.
-- 2026-05-29: `mycelium node` selects its backend with `backend`/`--backend` and `backend_binary`/`--backend-binary`; llama.cpp keeps `llama_server` as a compatibility default, while MLX and vLLM use supervised process adapters with the same process-ref registry and reaper path.
-- 2026-05-29: Catalog presets keep `ModelRef` as the materialized artifact path and store user-facing model names in `Preset.Aliases`; gateway, scheduler, optimizer, and server config maps index aliases without letting them overwrite artifact provenance.
+- 2026-05-29: SUPERSEDED by peer pivot: compute-on peer runtime selects its backend with `backend`/`--backend` and `backend_binary`/`--backend-binary`; llama.cpp keeps `llama_server` as a compatibility default, while MLX and vLLM use supervised process adapters with the same process-ref registry and reaper path.
+- 2026-05-29: Catalog presets keep `ModelRef` as the materialized artifact path and store user-facing model names in `Preset.Aliases`; gateway, scheduler, optimizer, and peer config maps index aliases without letting them overwrite artifact provenance.
 - 2026-05-29: Gateway failover uses a real store-backed failure reporter in server mode; failed instances are unloaded and deleted before retry, while unload or resolver failures mark the instance `error` and stop loudly instead of retrying on a dirty runtime.
 - 2026-05-29: Context-cap optimizer records persist the observed telemetry that produced the recommendation, converting integer rollup facts into the domain record's float map so CLI/store readers see the same evidence the engine used.
 - 2026-05-29: Scheduler lease lifecycle lives on the scheduler service: request admission grants a persisted lease, `Release` deletes it by id, and `ExpireLeases` deletes only leases whose explicit expiry is at or before the injected clock while open-ended leases remain.
@@ -72,7 +72,8 @@
 - 2026-05-29: Server optimizer evaluation runs as a periodic background pass over persisted projects and telemetry; it reuses `RecommendationService` for recommendation persistence/auto-apply and calibrates node speed classes from observed tokens/sec on the same tick.
 - 2026-05-29: Gateway request job IDs use a process-wide monotonic sequence instead of model/attempt text so repeated requests emit distinct telemetry records into the durable store.
 - 2026-05-29: OCI catalog imports verify the pulled layer's manifest size and sha256 digest before returning a draft preset input; unsupported digest algorithms fail loudly instead of trusting bytes by URL alone.
-- 2026-05-29: The control CLI is shared from `cmd/internal/controlcli` so both the legacy `mycelium myce ...` path and the real `myce` binary execute the same implementation.
+- 2026-05-29: The control CLI is shared from `cmd/internal/controlcli` so both the embedded `mycelium ctl ...` path and the real `myce` binary execute the same implementation.
 - 2026-05-29: MLX adapters target the official `mlx_lm.server` executable directly, using `--model/--host/--port`; the `mlx_lm server` wrapper form is not the installed CLI shape and fails against the real runtime.
 - 2026-05-29: Smoke Make targets pass `-count=1` so hardware/engine smoke always exercises the live runtime instead of accepting Go's cached test result.
 - 2026-05-29: Peer-pivot remediation adds canonical federation contracts (`AdmissionController`, `Coordinator`, `JobRegistry`, `PeerDiscovery`) before removing all legacy server/node call sites; this keeps each commit gate-green while authority moves to owner-commit semantics.
+- 2026-05-29: The `mycelium` command now exposes `run`/bare peer startup and `ctl`; rejected `server`/`node` topology commands fail loudly instead of becoming compatibility aliases.

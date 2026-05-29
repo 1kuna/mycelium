@@ -27,8 +27,8 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "server", args: []string{"server"}, want: "read server config"},
-		{name: "myce", args: []string{"myce"}, want: "usage: myce <add-model|models|nodes|projects|jobs|recommendations>"},
+		{name: "run", args: []string{"run"}, want: "read peer config"},
+		{name: "ctl", args: []string{"ctl"}, want: "usage: myce <add-model|models|nodes|projects|jobs|recommendations>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -126,20 +126,20 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if got := defaultMyceliumHome(); got != filepath.Join(home, ".mycelium") {
 		t.Fatalf("home = %s", got)
 	}
-	serverCfg, err := loadServerConfig("")
-	if err == nil || !strings.Contains(err.Error(), "read server config") || serverCfg.Listen != "" {
-		t.Fatalf("empty server config = %+v %v", serverCfg, err)
+	peerCfg, err := loadPeerConfig("")
+	if err == nil || !strings.Contains(err.Error(), "read peer config") || peerCfg.Listen != "" {
+		t.Fatalf("empty peer config = %+v %v", peerCfg, err)
 	}
-	serverPath := filepath.Join(t.TempDir(), "server.json")
-	if err := os.WriteFile(serverPath, []byte(`{}`), 0644); err != nil {
-		t.Fatalf("write server config: %v", err)
+	peerPath := filepath.Join(t.TempDir(), "peer.json")
+	if err := os.WriteFile(peerPath, []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write peer config: %v", err)
 	}
-	serverCfg, err = loadServerConfig(serverPath)
+	peerCfg, err = loadPeerConfig(peerPath)
 	if err != nil {
-		t.Fatalf("loadServerConfig: %v", err)
+		t.Fatalf("loadPeerConfig: %v", err)
 	}
-	if serverCfg.QueueDrainMS != 1000 || serverCfg.QueueDrainLimit != 1 || serverCfg.OptimizerEvalMS != 60000 {
-		t.Fatalf("server drain defaults = %+v", serverCfg)
+	if peerCfg.QueueDrainMS != 1000 || peerCfg.QueueDrainLimit != 1 || peerCfg.OptimizerEvalMS != 60000 {
+		t.Fatalf("peer drain defaults = %+v", peerCfg)
 	}
 	nodePath := filepath.Join(t.TempDir(), "node.json")
 	nodeRaw := `{"listen":"127.0.0.1:7","backend_listen":"127.0.0.1:8","id":"node-json","name":"Node JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"state_db":"state.db","join":"mycjoin://127.0.0.1:1?token=x","gguf_parser":"parser"}`
@@ -278,7 +278,7 @@ func TestRunRecommendationsApplyEngineSetsProjectDefault(t *testing.T) {
 	}
 }
 
-func TestBuildGatewayServerWithJoinToken(t *testing.T) {
+func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 	preset := testPreset("tiny")
 	dbPath := filepath.Join(t.TempDir(), "control.db")
 	store, err := storesqlite.Open(dbPath)
@@ -291,7 +291,7 @@ func TestBuildGatewayServerWithJoinToken(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	configPath := writeServerConfig(t, ServerConfig{
+	configPath := writePeerConfig(t, PeerConfig{
 		Listen:       "127.0.0.1:0",
 		StorePath:    dbPath,
 		JoinToken:    "secret",
@@ -300,9 +300,9 @@ func TestBuildGatewayServerWithJoinToken(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	addr, handler, err := buildGatewayServer(ctx, []string{"--config", configPath})
+	addr, handler, err := buildPeerGateway(ctx, []string{"--config", configPath})
 	if err != nil {
-		t.Fatalf("buildGatewayServer: %v", err)
+		t.Fatalf("buildPeerGateway: %v", err)
 	}
 	if addr != "127.0.0.1:0" {
 		t.Fatalf("addr = %s", addr)
@@ -429,29 +429,29 @@ func TestRunOptimizerEvaluationPersistsRecommendationsAndCalibratesSpeed(t *test
 	}
 }
 
-func TestServerEstimatorUsesGGUFParserWhenConfigured(t *testing.T) {
-	if _, ok := serverEstimator(ServerConfig{}, nil).(*estimate.InMemoryEstimator); !ok {
+func TestPeerEstimatorUsesGGUFParserWhenConfigured(t *testing.T) {
+	if _, ok := peerEstimator(PeerConfig{}, nil).(*estimate.InMemoryEstimator); !ok {
 		t.Fatal("default estimator should use preset estimates")
 	}
-	if _, ok := serverEstimator(ServerConfig{GGUFParser: "gguf-parser"}, nil).(*estimate.GGUFEstimator); !ok {
+	if _, ok := peerEstimator(PeerConfig{GGUFParser: "gguf-parser"}, nil).(*estimate.GGUFEstimator); !ok {
 		t.Fatal("configured gguf parser should use GGUF estimator")
 	}
 }
 
-func TestRunNodeAndServerExitOnCanceledContext(t *testing.T) {
+func TestRunNodeAndPeerExitOnCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := runNode(ctx, []string{"--listen", "127.0.0.1:0", "--backend-listen", "127.0.0.1:0"}); err != nil {
 		t.Fatalf("runNode canceled: %v", err)
 	}
-	configPath := writeServerConfig(t, ServerConfig{
+	configPath := writePeerConfig(t, PeerConfig{
 		Listen:    "127.0.0.1:0",
 		StorePath: filepath.Join(t.TempDir(), "control.db"),
 		JoinToken: "secret",
 		Presets:   []domain.Preset{testPreset("tiny")},
 	})
-	if err := runServer(ctx, []string{"--config", configPath}); err != nil {
-		t.Fatalf("runServer canceled: %v", err)
+	if err := runPeer(ctx, []string{"--config", configPath}); err != nil {
+		t.Fatalf("runPeer canceled: %v", err)
 	}
 }
 
@@ -542,7 +542,7 @@ func TestEffectiveAdvertiseAddrUsesActualPortForZeroListen(t *testing.T) {
 }
 
 func TestRunRejectsMissingAndUnknownCommand(t *testing.T) {
-	for _, args := range [][]string{nil, []string{"bogus"}} {
+	for _, args := range [][]string{[]string{"bogus"}, []string{"server"}, []string{"node"}} {
 		err := run(context.Background(), args)
 		if err == nil {
 			t.Fatalf("run(%v) expected error", args)
@@ -550,9 +550,9 @@ func TestRunRejectsMissingAndUnknownCommand(t *testing.T) {
 	}
 }
 
-func writeServerConfig(t *testing.T, cfg ServerConfig) string {
+func writePeerConfig(t *testing.T, cfg PeerConfig) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "server.json")
+	path := filepath.Join(t.TempDir(), "peer.json")
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatalf("marshal config: %v", err)

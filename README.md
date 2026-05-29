@@ -1,10 +1,9 @@
 # Mycelium
 
 Mycelium is a hardware-aware inference control plane for a heterogeneous local fleet.
-It is a single Go binary with two long-running roles:
+It is a single Go binary with one long-running peer role:
 
-- `mycelium server`
-- `mycelium node`
+- `mycelium run`
 
 The control CLI surface is `myce`.
 
@@ -16,4 +15,3 @@ The implementation source of truth is:
 
 Those documents are read-only project contracts. Implementation decisions and blockers live in
 `DECISIONS.md` and `BLOCKERS.md`.
-
