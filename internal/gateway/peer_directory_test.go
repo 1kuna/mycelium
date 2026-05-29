@@ -3,10 +3,12 @@ package gateway
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"mycelium/internal/domain"
+	nodeagent "mycelium/internal/node"
 	"mycelium/internal/ports"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
@@ -123,6 +125,24 @@ func TestPeerDirectoryMarksUnreachablePeers(t *testing.T) {
 	}
 	if _, err := directory.NodeAgent("peer-a"); err == nil {
 		t.Fatal("unreachable peer registered an agent")
+	}
+}
+
+func TestPeerDirectoryDefaultFactorySendsAuthToken(t *testing.T) {
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	server := httptest.NewServer(nodeagent.HTTPServer{Agent: mocks.NewNodeAgent(node), AuthToken: "rpc-secret"})
+	defer server.Close()
+	directory := &PeerDirectory{
+		Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Addresses: []string{server.URL}, Compute: true}}},
+		AuthToken: "rpc-secret",
+	}
+
+	fleet, err := directory.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(fleet.Nodes) != 1 || fleet.Nodes[0].ID != node.ID {
+		t.Fatalf("fleet = %+v", fleet)
 	}
 }
 

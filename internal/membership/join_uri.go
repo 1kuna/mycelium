@@ -6,7 +6,9 @@ import (
 )
 
 type JoinInfo struct {
-	Token string
+	Token    string
+	RPCToken string
+	Address  string
 }
 
 func BuildJoinToken(token string) (string, error) {
@@ -16,6 +18,21 @@ func BuildJoinToken(token string) (string, error) {
 	out := url.URL{Scheme: "mycjoin", Host: "peer"}
 	q := out.Query()
 	q.Set("token", token)
+	out.RawQuery = q.Encode()
+	return out.String(), nil
+}
+
+func BuildJoinTokenWithRPC(token, rpcToken string) (string, error) {
+	if token == "" {
+		return "", fmt.Errorf("join token is required")
+	}
+	if rpcToken == "" {
+		return "", fmt.Errorf("rpc token is required")
+	}
+	out := url.URL{Scheme: "mycjoin", Host: "peer"}
+	q := out.Query()
+	q.Set("token", token)
+	q.Set("rpc_token", rpcToken)
 	out.RawQuery = q.Encode()
 	return out.String(), nil
 }
@@ -32,5 +49,9 @@ func ParseJoinToken(raw string) (JoinInfo, error) {
 	if token == "" {
 		return JoinInfo{}, fmt.Errorf("join token is missing token query")
 	}
-	return JoinInfo{Token: token}, nil
+	address := parsed.Host
+	if address == "peer" {
+		address = ""
+	}
+	return JoinInfo{Token: token, RPCToken: parsed.Query().Get("rpc_token"), Address: address}, nil
 }

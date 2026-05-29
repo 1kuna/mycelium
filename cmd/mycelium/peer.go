@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,6 +11,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -54,6 +56,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := fs.String("config", "", "peer config JSON path")
 	joinRaw := fs.String("join", "", "join token URI or raw join token")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
 	listen := fs.String("listen", "", "peer listen address override")
 	discoveryListen := fs.String("discovery-listen", "", "peer discovery listen address override")
 	discoveryAddr := fs.String("discovery-addr", "", "peer discovery broadcast address override")
@@ -80,11 +83,19 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	overrideString(discoveryListen, &cfg.DiscoveryListen)
 	overrideString(discoveryAddr, &cfg.DiscoveryAddr)
 	if *joinRaw != "" {
-		token, err := parseJoinFlag(*joinRaw)
+		join, err := parseJoinFlag(*joinRaw)
 		if err != nil {
 			return "", nil, err
 		}
-		cfg.JoinToken = token
+		cfg.JoinToken = join.Token
+		if join.RPCToken != "" {
+			cfg.RPCToken = join.RPCToken
+		}
+		cfg.SeedPeers = appendSeedPeer(cfg.SeedPeers, join.Address)
+	}
+	overrideString(rpcToken, &cfg.RPCToken)
+	if cfg.JoinToken != "" && cfg.RPCToken == "" {
+		return "", nil, fmt.Errorf("rpc_token is required when join_token is configured")
 	}
 	if *compute {
 		cfg.Compute = true
@@ -130,8 +141,9 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		if err := cached.Start(ctx, scan); err != nil {
 			return "", nil, err
 		}
+		startSeedPeerProber(ctx, cached, cfg.SeedPeers, cfg.JoinToken, clock.System{}, scan)
 		discovery = cached
-		directory := &gateway.PeerDirectory{Discovery: discovery, Store: store, SelfID: cfg.ID}
+		directory := &gateway.PeerDirectory{Discovery: discovery, Store: store, SelfID: cfg.ID, AuthToken: cfg.RPCToken}
 		fleet = directory
 		nodes = directory
 	}
@@ -222,13 +234,19 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		Projects:       projectMap(projects),
 		DefaultProject: cfg.DefaultProject,
 	}}
-	mountPeerHTTP(mux, self)
+	mountPeerHTTP(mux, self, cfg.JoinToken)
 	mux.Handle("/", handler)
 	return cfg.Listen, mux, nil
 }
 
-func mountPeerHTTP(mux *http.ServeMux, self domain.Peer) {
-	mux.HandleFunc("/peer/health", func(w http.ResponseWriter, _ *http.Request) {
+func mountPeerHTTP(mux *http.ServeMux, self domain.Peer, joinToken string) {
+	mux.HandleFunc("/peer/health", func(w http.ResponseWriter, r *http.Request) {
+		if !peerJoinAuthorized(r, joinToken) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "join token required"})
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(self); err != nil {
 			panic(err)
@@ -377,18 +395,74 @@ func startPeerAdvertiser(ctx context.Context, discovery ports.PeerDiscovery, sel
 	}()
 }
 
-func parseJoinFlag(raw string) (string, error) {
+func parseJoinFlag(raw string) (membership.JoinInfo, error) {
 	if raw == "" {
-		return "", fmt.Errorf("join token is required")
+		return membership.JoinInfo{}, fmt.Errorf("join token is required")
 	}
 	if strings.HasPrefix(raw, "mycjoin://") {
 		info, err := membership.ParseJoinToken(raw)
 		if err != nil {
-			return "", err
+			return membership.JoinInfo{}, err
 		}
-		return info.Token, nil
+		return info, nil
 	}
-	return raw, nil
+	return membership.JoinInfo{Token: raw}, nil
+}
+
+func appendSeedPeer(seeds []string, seed string) []string {
+	seed = strings.TrimSpace(seed)
+	if seed == "" {
+		return seeds
+	}
+	for _, existing := range seeds {
+		if existing == seed {
+			return seeds
+		}
+	}
+	return append(seeds, seed)
+}
+
+func startSeedPeerProber(ctx context.Context, cache *membership.CachedPeerDiscovery, seeds []string, joinToken string, clk ports.Clock, interval time.Duration) {
+	if cache == nil || clk == nil || len(seeds) == 0 {
+		return
+	}
+	interval = seedPeerProbeInterval(interval)
+	probe := func() {
+		probeSeedPeers(ctx, cache, seeds, joinToken)
+	}
+	probe()
+	go func() {
+		for {
+			timer := clk.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C():
+			}
+			probe()
+		}
+	}()
+}
+
+func seedPeerProbeInterval(interval time.Duration) time.Duration {
+	if interval < 5*time.Second {
+		return 5 * time.Second
+	}
+	return interval
+}
+
+func probeSeedPeers(ctx context.Context, cache *membership.CachedPeerDiscovery, seeds []string, joinToken string) {
+	for _, seed := range seeds {
+		peer, err := fetchPeerHealth(ctx, seed, joinToken)
+		if err != nil {
+			log.Printf("mycelium peer seed probe failed: seed=%s error=%v", seed, err)
+			continue
+		}
+		if err := cache.Remember(peer); err != nil {
+			log.Printf("mycelium peer seed cache failed: seed=%s error=%v", seed, err)
+		}
+	}
 }
 
 func probePeerHealth(ctx context.Context, peer domain.Peer) error {
@@ -398,23 +472,8 @@ func probePeerHealth(ctx context.Context, peer domain.Peer) error {
 	if len(peer.Addresses) == 0 {
 		return fmt.Errorf("peer %q has no reachable address", peer.ID)
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, peerHTTPBaseURL(peer.Addresses[0])+"/peer/health", nil)
+	got, err := fetchPeerHealth(ctx, peer.Addresses[0], "")
 	if err != nil {
-		return err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("%w: %v", domain.ErrUnreachable, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%w: peer health returned %s: %s", domain.ErrUnreachable, resp.Status, strings.TrimSpace(string(body)))
-	}
-	var got domain.Peer
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		return err
 	}
 	if got.ID != peer.ID {
@@ -423,11 +482,83 @@ func probePeerHealth(ctx context.Context, peer domain.Peer) error {
 	return nil
 }
 
+func fetchPeerHealth(ctx context.Context, address, joinToken string) (domain.Peer, error) {
+	reachable, err := reachablePeerAddress(address)
+	if err != nil {
+		return domain.Peer{}, err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, peerHTTPBaseURL(address)+"/peer/health", nil)
+	if err != nil {
+		return domain.Peer{}, err
+	}
+	if joinToken != "" {
+		req.Header.Set("X-Myc-Join-Token", joinToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return domain.Peer{}, fmt.Errorf("%w: %v", domain.ErrUnreachable, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return domain.Peer{}, fmt.Errorf("%w: peer health returned %s: %s", domain.ErrUnreachable, resp.Status, strings.TrimSpace(string(body)))
+	}
+	var got domain.Peer
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		return domain.Peer{}, err
+	}
+	if got.ID == "" {
+		return domain.Peer{}, fmt.Errorf("peer health returned missing id")
+	}
+	got.Addresses = prependReachableAddress(got.Addresses, reachable)
+	return got, nil
+}
+
 func peerHTTPBaseURL(address string) string {
+	address = strings.TrimRight(strings.TrimSpace(address), "/")
 	if strings.HasPrefix(address, "http://") || strings.HasPrefix(address, "https://") {
-		return strings.TrimRight(address, "/")
+		return address
 	}
 	return "http://" + address
+}
+
+func reachablePeerAddress(address string) (string, error) {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return "", fmt.Errorf("peer address is required")
+	}
+	if strings.Contains(address, "://") {
+		parsed, err := url.Parse(address)
+		if err != nil {
+			return "", err
+		}
+		if parsed.Host == "" {
+			return "", fmt.Errorf("peer address %q is missing host", address)
+		}
+		return parsed.Host, nil
+	}
+	return address, nil
+}
+
+func prependReachableAddress(addresses []string, reachable string) []string {
+	out := []string{reachable}
+	for _, address := range addresses {
+		if address == reachable {
+			continue
+		}
+		out = append(out, address)
+	}
+	return out
+}
+
+func peerJoinAuthorized(r *http.Request, joinToken string) bool {
+	if joinToken == "" {
+		return true
+	}
+	got := r.Header.Get("X-Myc-Join-Token")
+	return subtle.ConstantTimeCompare([]byte(got), []byte(joinToken)) == 1
 }
 
 func markDeadPeer(store interface {

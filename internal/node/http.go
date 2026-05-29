@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,9 +18,14 @@ import (
 type HTTPServer struct {
 	Agent     ports.NodeAgent
 	Admission ports.AdmissionController
+	AuthToken string
 }
 
 func (s HTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(r) {
+		writeError(w, http.StatusUnauthorized, "peer rpc authorization failed")
+		return
+	}
 	if s.Agent == nil && !strings.HasPrefix(r.URL.Path, "/admission/") {
 		writeError(w, http.StatusInternalServerError, "node agent is not configured")
 		return
@@ -255,8 +261,9 @@ type admissionLeaseForJobResponse struct {
 }
 
 type HTTPClient struct {
-	BaseURL string
-	Client  *http.Client
+	BaseURL   string
+	Client    *http.Client
+	AuthToken string
 }
 
 func NewHTTPClient(baseURL string) *HTTPClient {
@@ -335,6 +342,9 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, in, out any) e
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
 	resp, err := c.Client.Do(req)
 	if err != nil {
 		return err
@@ -357,6 +367,19 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, in, out any) e
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (s HTTPServer) authorized(r *http.Request) bool {
+	if s.AuthToken == "" {
+		return true
+	}
+	const prefix = "Bearer "
+	value := r.Header.Get("Authorization")
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	got := strings.TrimPrefix(value, prefix)
+	return subtle.ConstantTimeCompare([]byte(got), []byte(s.AuthToken)) == 1
 }
 
 type wireError struct {

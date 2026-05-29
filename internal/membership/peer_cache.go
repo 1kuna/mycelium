@@ -81,6 +81,13 @@ func (d *CachedPeerDiscovery) Refresh(ctx context.Context) error {
 	return d.remember(peers)
 }
 
+func (d *CachedPeerDiscovery) Remember(peers ...domain.Peer) error {
+	if err := d.validate(); err != nil {
+		return err
+	}
+	return d.remember(peers)
+}
+
 func (d *CachedPeerDiscovery) remember(peers []domain.Peer) error {
 	now := d.clock().Now()
 	d.mu.Lock()

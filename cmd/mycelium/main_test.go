@@ -21,6 +21,7 @@ import (
 	"mycelium/internal/optimizer"
 	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
+	"mycelium/test/mocks"
 )
 
 func TestRunDispatchesKnownCommands(t *testing.T) {
@@ -297,6 +298,7 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 		Listen:       "127.0.0.1:0",
 		StorePath:    dbPath,
 		JoinToken:    "secret",
+		RPCToken:     "rpc-secret",
 		Presets:      []domain.Preset{preset},
 		Reservations: []domain.Reservation{{ID: "pin-a", Kind: domain.ReservationPinned, NodeID: "node-a", PresetID: preset.ID}},
 	})
@@ -313,7 +315,9 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 		t.Fatal("handler is nil")
 	}
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/peer/health", nil))
+	req := httptest.NewRequest(http.MethodGet, "/peer/health", nil)
+	req.Header.Set("X-Myc-Join-Token", "secret")
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("peer health status/body = %d %q", rec.Code, rec.Body.String())
 	}
@@ -323,6 +327,11 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 	}
 	if peer.ID == "" || len(peer.Addresses) != 1 || peer.Addresses[0] != "127.0.0.1:0" {
 		t.Fatalf("peer health = %+v", peer)
+	}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/peer/health", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("peer health without join token status/body = %d %q", rec.Code, rec.Body.String())
 	}
 	reopened, err := storesqlite.Open(dbPath)
 	if err != nil {
@@ -342,18 +351,33 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 }
 
 func TestParseJoinFlag(t *testing.T) {
-	if token, err := parseJoinFlag("secret"); err != nil || token != "secret" {
-		t.Fatalf("raw token = %q %v", token, err)
+	if join, err := parseJoinFlag("secret"); err != nil || join.Token != "secret" || join.RPCToken != "" {
+		t.Fatalf("raw join = %+v %v", join, err)
 	}
-	join, err := membership.BuildJoinToken("secret")
+	joinURI, err := membership.BuildJoinTokenWithRPC("secret", "rpc-secret")
 	if err != nil {
 		t.Fatalf("BuildJoinToken: %v", err)
 	}
-	if token, err := parseJoinFlag(join); err != nil || token != "secret" {
-		t.Fatalf("join uri token = %q %v", token, err)
+	if join, err := parseJoinFlag(joinURI); err != nil || join.Token != "secret" || join.RPCToken != "rpc-secret" {
+		t.Fatalf("join uri = %+v %v", join, err)
+	}
+	if join, err := parseJoinFlag("mycjoin://127.0.0.1:51846?token=secret&rpc_token=rpc-secret"); err != nil || join.Address != "127.0.0.1:51846" {
+		t.Fatalf("seed join uri = %+v %v", join, err)
 	}
 	if _, err := parseJoinFlag(""); err == nil {
 		t.Fatal("empty join token accepted")
+	}
+}
+
+func TestBuildPeerGatewayRequiresRPCTokenForJoin(t *testing.T) {
+	configPath := writePeerConfig(t, PeerConfig{
+		Listen:    "127.0.0.1:0",
+		StorePath: filepath.Join(t.TempDir(), "control.db"),
+		JoinToken: "secret",
+		Presets:   []domain.Preset{testPreset("tiny")},
+	})
+	if _, _, err := buildPeerGateway(context.Background(), []string{"--config", configPath}); err == nil || !strings.Contains(err.Error(), "rpc_token") {
+		t.Fatalf("missing rpc token err = %v", err)
 	}
 }
 
@@ -397,6 +421,34 @@ func TestPeerHealthProbeAndDeadMarker(t *testing.T) {
 	}
 	if node.Status != domain.NodeUnreachable {
 		t.Fatalf("node = %+v", node)
+	}
+}
+
+func TestSeedPeerProbeRemembersReachablePeer(t *testing.T) {
+	seed := domain.Peer{ID: "seed-peer", Addresses: []string{"127.0.0.1:0"}, Compute: true}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Myc-Join-Token") != "secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(seed)
+	}))
+	defer server.Close()
+	cache := membership.NewCachedPeerDiscovery(&mocks.PeerDiscovery{}, mocks.NewFakeClock(time.Unix(1, 0).UTC()), time.Minute)
+
+	probeSeedPeers(context.Background(), cache, []string{server.URL}, "secret")
+	peers, err := cache.Peers(context.Background())
+	if err != nil {
+		t.Fatalf("Peers: %v", err)
+	}
+	if len(peers) != 1 || peers[0].ID != "seed-peer" || peers[0].Addresses[0] != strings.TrimPrefix(server.URL, "http://") {
+		t.Fatalf("seed peers = %+v", peers)
+	}
+	if _, err := fetchPeerHealth(context.Background(), server.URL, "wrong"); !errors.Is(err, domain.ErrUnreachable) {
+		t.Fatalf("wrong join token err = %v", err)
+	}
+	if got := seedPeerProbeInterval(time.Millisecond); got != 5*time.Second {
+		t.Fatalf("seed interval = %s", got)
 	}
 }
 

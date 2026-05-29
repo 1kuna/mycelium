@@ -55,16 +55,17 @@ func runPhase4AutomatedJoinSmoke(t *testing.T, binary, model string) {
 	nodeDiscoveryAddr := freeAddr(t)
 	gatewayDiscoveryAddr := freeAddr(t)
 	joinToken := "phase4-smoke"
-	nodeConfig := writePhase4ComputePeerConfig(t, nodeAddr, backendAddr, nodeDiscoveryAddr, gatewayDiscoveryAddr, joinToken, binary, model)
+	rpcToken := "phase4-smoke-rpc"
+	nodeConfig := writePhase4ComputePeerConfig(t, nodeAddr, backendAddr, nodeDiscoveryAddr, gatewayDiscoveryAddr, joinToken, rpcToken, binary, model)
 
 	node := startSmokeProcess(t, ctx, mycelium,
 		"run",
 		"--config", nodeConfig,
 	)
 	defer node.stop(t)
-	waitForNodeReady(t, ctx, "http://"+nodeAddr)
+	waitForNodeReady(t, ctx, "http://"+nodeAddr, rpcToken)
 
-	gatewayConfig := writePhase4GatewayPeerConfig(t, gatewayAddr, gatewayDiscoveryAddr, nodeDiscoveryAddr, joinToken, model)
+	gatewayConfig := writePhase4GatewayPeerConfig(t, gatewayAddr, gatewayDiscoveryAddr, nodeDiscoveryAddr, joinToken, rpcToken, model)
 	gatewayPeer := startSmokeProcess(t, ctx, mycelium, "run", "--config", gatewayConfig)
 	defer gatewayPeer.stop(t)
 
@@ -73,10 +74,10 @@ func runPhase4AutomatedJoinSmoke(t *testing.T, binary, model string) {
 	if instanceID == "" {
 		t.Fatalf("gateway response missing %s body=%s", gateway.HeaderInstance, respBody)
 	}
-	unloadJoinedInstance(t, ctx, "http://"+nodeAddr, instanceID)
+	unloadJoinedInstance(t, ctx, "http://"+nodeAddr, instanceID, rpcToken)
 }
 
-func waitForNodeReady(t *testing.T, ctx context.Context, nodeURL string) {
+func waitForNodeReady(t *testing.T, ctx context.Context, nodeURL, rpcToken string) {
 	t.Helper()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
@@ -85,6 +86,7 @@ func waitForNodeReady(t *testing.T, ctx context.Context, nodeURL string) {
 		if err != nil {
 			t.Fatalf("snapshot request: %v", err)
 		}
+		req.Header.Set("Authorization", "Bearer "+rpcToken)
 		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
 			_ = resp.Body.Close()
@@ -145,7 +147,7 @@ func tryGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model string)
 	return string(data), resp.Header.Get(gateway.HeaderInstance), true
 }
 
-func unloadJoinedInstance(t *testing.T, ctx context.Context, nodeURL, instanceID string) {
+func unloadJoinedInstance(t *testing.T, ctx context.Context, nodeURL, instanceID, rpcToken string) {
 	t.Helper()
 	body := []byte(`{"instance_id":` + quote(instanceID) + `}`)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(nodeURL, "/")+"/unload", bytes.NewReader(body))
@@ -153,6 +155,7 @@ func unloadJoinedInstance(t *testing.T, ctx context.Context, nodeURL, instanceID
 		t.Fatalf("unload request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+rpcToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("unload joined instance: %v", err)
@@ -186,13 +189,14 @@ func repoRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
 
-func writePhase4GatewayPeerConfig(t *testing.T, addr, discoveryListen, discoveryAddr, joinToken, model string) string {
+func writePhase4GatewayPeerConfig(t *testing.T, addr, discoveryListen, discoveryAddr, joinToken, rpcToken, model string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "gateway-peer.json")
 	cfg := struct {
 		Listen               string           `json:"listen"`
 		StorePath            string           `json:"store_path"`
 		JoinToken            string           `json:"join_token"`
+		RPCToken             string           `json:"rpc_token"`
 		DiscoveryListen      string           `json:"discovery_listen"`
 		DiscoveryAddr        string           `json:"discovery_addr"`
 		DiscoveryAdvertiseMS int              `json:"discovery_advertise_ms"`
@@ -203,6 +207,7 @@ func writePhase4GatewayPeerConfig(t *testing.T, addr, discoveryListen, discovery
 		Listen:               addr,
 		StorePath:            filepath.Join(t.TempDir(), "control.sqlite"),
 		JoinToken:            joinToken,
+		RPCToken:             rpcToken,
 		DiscoveryListen:      discoveryListen,
 		DiscoveryAddr:        discoveryAddr,
 		DiscoveryAdvertiseMS: 50,
@@ -233,7 +238,7 @@ func writePhase4GatewayPeerConfig(t *testing.T, addr, discoveryListen, discovery
 	return path
 }
 
-func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, discoveryListen, discoveryAddr, joinToken, binary, model string) string {
+func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, discoveryListen, discoveryAddr, joinToken, rpcToken, binary, model string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "compute-peer.json")
 	cfg := struct {
@@ -241,6 +246,7 @@ func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, discoveryList
 		StorePath            string `json:"store_path"`
 		Compute              bool   `json:"compute"`
 		JoinToken            string `json:"join_token"`
+		RPCToken             string `json:"rpc_token"`
 		DiscoveryListen      string `json:"discovery_listen"`
 		DiscoveryAddr        string `json:"discovery_addr"`
 		DiscoveryAdvertiseMS int    `json:"discovery_advertise_ms"`
@@ -257,6 +263,7 @@ func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, discoveryList
 		StorePath:            filepath.Join(t.TempDir(), "compute.sqlite"),
 		Compute:              true,
 		JoinToken:            joinToken,
+		RPCToken:             rpcToken,
 		DiscoveryListen:      discoveryListen,
 		DiscoveryAddr:        discoveryAddr,
 		DiscoveryAdvertiseMS: 50,
