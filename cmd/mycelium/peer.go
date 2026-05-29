@@ -125,7 +125,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		lan.Token = cfg.JoinToken
 		lan.ScanDuration = time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
 		discovery = lan
-		directory := &gateway.PeerDirectory{Discovery: discovery}
+		directory := &gateway.PeerDirectory{Discovery: discovery, Store: store, SelfID: cfg.ID}
 		fleet = directory
 		nodes = directory
 	}

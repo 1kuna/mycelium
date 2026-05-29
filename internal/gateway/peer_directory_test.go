@@ -18,11 +18,15 @@ func TestPeerDirectoryBuildsFleetFromComputePeers(t *testing.T) {
 	agent := admittingAgent{NodeAgent: mocks.NewNodeAgent(node), AdmissionController: &mocks.AdmissionController{}}
 	agent.Instances = []domain.ModelInstance{inst}
 	seenAddress := ""
+	store := &recordingPeerNodeStore{}
 	directory := &PeerDirectory{
 		Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{
+			{ID: "self", Addresses: []string{"127.0.0.1:9"}, Compute: true},
 			{ID: "thin", Addresses: []string{"127.0.0.1:1"}, Compute: false},
 			{ID: "compute", Addresses: []string{"127.0.0.1:2"}, Compute: true},
 		}},
+		Store:  store,
+		SelfID: "self",
 		Factory: func(address string) ports.NodeAgent {
 			seenAddress = address
 			return agent
@@ -35,6 +39,9 @@ func TestPeerDirectoryBuildsFleetFromComputePeers(t *testing.T) {
 	}
 	if seenAddress != "127.0.0.1:2" || len(fleet.Nodes) != 1 || fleet.Nodes[0].ID != node.ID || len(fleet.Instances) != 1 {
 		t.Fatalf("address=%s fleet=%+v", seenAddress, fleet)
+	}
+	if len(store.nodes) != 1 || store.nodes[0].ID != node.ID {
+		t.Fatalf("stored nodes = %+v", store.nodes)
 	}
 	if got, err := directory.NodeAgent(node.ID); err != nil || got == nil {
 		t.Fatalf("NodeAgent: %v", err)
@@ -60,9 +67,6 @@ func TestPeerDirectoryErrors(t *testing.T) {
 		{name: "discovery", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{Err: boom}}, wantErr: boom},
 		{name: "missing id", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{Addresses: []string{"127.0.0.1:1"}, Compute: true}}}}, want: "missing id"},
 		{name: "missing address", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Compute: true}}}}, want: "reachable address"},
-		{name: "snapshot", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}}}, Factory: func(string) ports.NodeAgent {
-			return failingSnapshotAgent{NodeAgent: mocks.NewNodeAgent(node), err: boom}
-		}}, wantErr: boom},
 	}
 	for _, check := range checks {
 		t.Run(check.name, func(t *testing.T) {
@@ -96,6 +100,46 @@ func TestPeerDirectoryErrors(t *testing.T) {
 	}
 }
 
+func TestPeerDirectoryMarksUnreachablePeers(t *testing.T) {
+	boom := errors.New("boom")
+	store := &recordingPeerNodeStore{}
+	directory := &PeerDirectory{
+		Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}}},
+		Store:     store,
+		Factory: func(string) ports.NodeAgent {
+			return failingSnapshotAgent{NodeAgent: mocks.NewNodeAgent(fixtures.MakeNode()), err: boom}
+		},
+	}
+
+	fleet, err := directory.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(fleet.Nodes) != 1 || fleet.Nodes[0].ID != "peer-a" || fleet.Nodes[0].Status != domain.NodeUnreachable {
+		t.Fatalf("fleet = %+v", fleet)
+	}
+	if len(store.nodes) != 1 || store.nodes[0].Status != domain.NodeUnreachable {
+		t.Fatalf("stored nodes = %+v", store.nodes)
+	}
+	if _, err := directory.NodeAgent("peer-a"); err == nil {
+		t.Fatal("unreachable peer registered an agent")
+	}
+}
+
+func TestPeerDirectoryStoreErrorsFailLoudly(t *testing.T) {
+	boom := errors.New("boom")
+	directory := &PeerDirectory{
+		Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}}},
+		Store:     &recordingPeerNodeStore{err: boom},
+		Factory: func(string) ports.NodeAgent {
+			return mocks.NewNodeAgent(fixtures.MakeNode(fixtures.WithNodeID("node-a")))
+		},
+	}
+	if _, err := directory.Snapshot(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("store err = %v", err)
+	}
+}
+
 type failingSnapshotAgent struct {
 	ports.NodeAgent
 	err error
@@ -103,4 +147,17 @@ type failingSnapshotAgent struct {
 
 func (a failingSnapshotAgent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 	return domain.NodeSnapshot{}, a.err
+}
+
+type recordingPeerNodeStore struct {
+	nodes []domain.Node
+	err   error
+}
+
+func (s *recordingPeerNodeStore) SaveNode(_ context.Context, node domain.Node) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.nodes = append(s.nodes, node)
+	return nil
 }
