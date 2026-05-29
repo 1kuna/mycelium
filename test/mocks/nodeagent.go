@@ -18,6 +18,7 @@ type NodeAgent struct {
 	BeginErr   error
 	EndErr     error
 	Calls      []string
+	Loaded     []domain.Preset
 	nextID     int
 }
 
@@ -32,6 +33,7 @@ func (m *NodeAgent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 
 func (m *NodeAgent) Load(_ context.Context, p domain.Preset) (domain.ModelInstance, error) {
 	m.Calls = append(m.Calls, "load:"+p.ID)
+	m.Loaded = append(m.Loaded, p)
 	if m.LoadErr != nil {
 		return domain.ModelInstance{}, m.LoadErr
 	}

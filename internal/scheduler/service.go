@@ -227,7 +227,15 @@ func (s *Service) resolveInstance(ctx context.Context, job domain.Job, decision 
 	if decision.NodeID == "" {
 		return domain.ModelInstance{}, fmt.Errorf("placement action %q did not select a node", decision.Action)
 	}
+	node, ok := nodeByID(fleet.Nodes, decision.NodeID)
+	if !ok {
+		return domain.ModelInstance{}, fmt.Errorf("selected node %q is missing from fleet snapshot", decision.NodeID)
+	}
 	preset, err := s.resolvePreset(job)
+	if err != nil {
+		return domain.ModelInstance{}, err
+	}
+	preset, err = tuneLaunchForPlacement(preset, decision, node)
 	if err != nil {
 		return domain.ModelInstance{}, err
 	}
@@ -281,4 +289,13 @@ func instanceByID(instances []domain.ModelInstance, id string) (domain.ModelInst
 		}
 	}
 	return domain.ModelInstance{}, false
+}
+
+func nodeByID(nodes []domain.Node, id string) (domain.Node, bool) {
+	for _, node := range nodes {
+		if node.ID == id {
+			return node, true
+		}
+	}
+	return domain.Node{}, false
 }
