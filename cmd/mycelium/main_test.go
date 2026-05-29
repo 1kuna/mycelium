@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"mycelium/internal/catalog"
+	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/estimate"
 	nodeagent "mycelium/internal/node"
 	"mycelium/internal/optimizer"
+	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
 )
 
@@ -311,6 +313,31 @@ func TestProjectMapIndexesByID(t *testing.T) {
 	projects := projectMap([]domain.Project{{ID: "proj-a", ContextCap: 4096}})
 	if projects["proj-a"].ContextCap != 4096 {
 		t.Fatalf("projects = %+v", projects)
+	}
+}
+
+func TestRestoreQueuedJobs(t *testing.T) {
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	if err := store.SaveJob(context.Background(), domain.Job{ID: "queued", Model: "tiny", Status: domain.JobQueued}); err != nil {
+		t.Fatalf("SaveJob queued: %v", err)
+	}
+	if err := store.SaveJob(context.Background(), domain.Job{ID: "done", Model: "tiny", Status: domain.JobDone}); err != nil {
+		t.Fatalf("SaveJob done: %v", err)
+	}
+	queue := scheduler.NewQueue(clock.System{})
+	if err := restoreQueuedJobs(context.Background(), store, queue); err != nil {
+		t.Fatalf("restoreQueuedJobs: %v", err)
+	}
+	if queue.Len() != 1 {
+		t.Fatalf("queue len = %d", queue.Len())
+	}
+	job, ok := queue.Dequeue()
+	if !ok || job.ID != "queued" {
+		t.Fatalf("dequeue = %+v %v", job, ok)
 	}
 }
 
