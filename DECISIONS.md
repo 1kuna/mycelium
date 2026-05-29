@@ -74,3 +74,4 @@
 - 2026-05-29: OCI catalog imports verify the pulled layer's manifest size and sha256 digest before returning a draft preset input; unsupported digest algorithms fail loudly instead of trusting bytes by URL alone.
 - 2026-05-29: The control CLI is shared from `cmd/internal/controlcli` so both the legacy `mycelium myce ...` path and the real `myce` binary execute the same implementation.
 - 2026-05-29: MLX adapters target the official `mlx_lm.server` executable directly, using `--model/--host/--port`; the `mlx_lm server` wrapper form is not the installed CLI shape and fails against the real runtime.
+- 2026-05-29: Smoke Make targets pass `-count=1` so hardware/engine smoke always exercises the live runtime instead of accepting Go's cached test result.
