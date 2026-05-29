@@ -131,11 +131,15 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 	allocator := allocatorFromReservations(reservations, presetMap(presets))
 	estimator := serverEstimator(cfg, agents)
 	placer := scheduler.NewPlacer(estimator, allocator, clock.System{}, presets...)
+	queue := scheduler.NewQueue(clock.System{})
+	if err := restoreQueuedJobs(ctx, store, queue); err != nil {
+		return "", nil, err
+	}
 	runtime := &scheduler.Service{
 		Placer:  placer,
 		Fleet:   fleet,
 		Nodes:   nodes,
-		Queue:   scheduler.NewQueue(clock.System{}),
+		Queue:   queue,
 		Store:   store,
 		Clock:   clock.System{},
 		Presets: presetMap(presets),
@@ -158,6 +162,23 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 		return cfg.Listen, mux, nil
 	}
 	return cfg.Listen, handler, nil
+}
+
+type jobLister interface {
+	ListJobs(ctx context.Context) ([]domain.Job, error)
+}
+
+func restoreQueuedJobs(ctx context.Context, store jobLister, queue *scheduler.Queue) error {
+	jobs, err := store.ListJobs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if job.Status == domain.JobQueued {
+			queue.Enqueue(job)
+		}
+	}
+	return nil
 }
 
 func seedControlStore(ctx context.Context, store *storesqlite.Store, cfg ServerConfig) error {
