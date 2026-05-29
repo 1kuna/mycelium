@@ -7,4 +7,8 @@ func TestNewAdapterNamesVLLM(t *testing.T) {
 	if adapter.Name() != "vllm" {
 		t.Fatalf("name = %s", adapter.Name())
 	}
+	configured := NewAdapterWithConfig(Config{BinaryPath: "vllm"})
+	if configured.Name() != "vllm" {
+		t.Fatalf("configured name = %s", configured.Name())
+	}
 }

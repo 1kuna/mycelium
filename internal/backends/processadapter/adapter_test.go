@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"mycelium/internal/domain"
 	"mycelium/internal/ports"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
@@ -45,6 +47,33 @@ func TestAdapterLaunchWaitReadyStop(t *testing.T) {
 	}
 }
 
+func TestAdapterPersistsProcessRefsAndLaunchArgs(t *testing.T) {
+	registry := &recordingRegistry{}
+	adapter := New(Config{
+		Name:            "test",
+		BinaryPath:      "/bin/sh",
+		Args:            []string{"-c", "sleep 30 # {model}"},
+		ProcessRegistry: registry,
+	})
+	preset := fixtures.MakePreset(
+		fixtures.WithModelRef("model.gguf"),
+		fixtures.WithLaunchArgs("--ctx", "{preset}"),
+	)
+	handle, err := adapter.Launch(context.Background(), preset, "127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if len(registry.added) != 1 || registry.added[0].PID != handle.PID {
+		t.Fatalf("added refs = %+v handle=%+v", registry.added, handle)
+	}
+	if err := adapter.Stop(context.Background(), handle); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if len(registry.removed) != 1 || registry.removed[0].PID != handle.PID {
+		t.Fatalf("removed refs = %+v handle=%+v", registry.removed, handle)
+	}
+}
+
 func TestAdapterErrorPaths(t *testing.T) {
 	adapter := New(Config{Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))})
 	if _, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1"); err == nil || !strings.Contains(err.Error(), "binary path") {
@@ -64,6 +93,11 @@ func TestAdapterErrorPaths(t *testing.T) {
 	}
 	if err := adapter.WaitReady(context.Background(), ""); err == nil {
 		t.Fatal("expected empty addr error")
+	}
+	registry := &recordingRegistry{err: errors.New("store failed")}
+	adapter = New(Config{BinaryPath: "/bin/sh", Args: []string{"-c", "sleep 30"}, ProcessRegistry: registry})
+	if _, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1"); err == nil || !strings.Contains(err.Error(), "store failed") {
+		t.Fatalf("registry err = %v", err)
 	}
 }
 
@@ -124,4 +158,28 @@ func TestStopHonorsCanceledContextAfterKill(t *testing.T) {
 
 func TestAdapterSatisfiesBackendPort(t *testing.T) {
 	var _ ports.BackendAdapter = New(Config{})
+}
+
+type recordingRegistry struct {
+	mu      sync.Mutex
+	added   []domain.ProcessRef
+	removed []domain.ProcessRef
+	err     error
+}
+
+func (r *recordingRegistry) Add(_ context.Context, ref domain.ProcessRef) error {
+	if r.err != nil {
+		return r.err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.added = append(r.added, ref)
+	return nil
+}
+
+func (r *recordingRegistry) Remove(_ context.Context, ref domain.ProcessRef) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.removed = append(r.removed, ref)
+	return nil
 }

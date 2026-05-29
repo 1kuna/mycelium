@@ -14,6 +14,7 @@ import (
 	"mycelium/internal/catalog"
 	"mycelium/internal/domain"
 	"mycelium/internal/estimate"
+	nodeagent "mycelium/internal/node"
 	"mycelium/internal/optimizer"
 	storesqlite "mycelium/internal/store/sqlite"
 )
@@ -125,7 +126,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 		t.Fatalf("empty server config = %+v %v", serverCfg, err)
 	}
 	nodePath := filepath.Join(t.TempDir(), "node.json")
-	nodeRaw := `{"listen":"127.0.0.1:7","backend_listen":"127.0.0.1:8","id":"node-json","name":"Node JSON","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"state_db":"state.db","join":"mycjoin://127.0.0.1:1?token=x","gguf_parser":"parser"}`
+	nodeRaw := `{"listen":"127.0.0.1:7","backend_listen":"127.0.0.1:8","id":"node-json","name":"Node JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"state_db":"state.db","join":"mycjoin://127.0.0.1:1?token=x","gguf_parser":"parser"}`
 	if err := os.WriteFile(nodePath, []byte(nodeRaw), 0644); err != nil {
 		t.Fatalf("write node config: %v", err)
 	}
@@ -133,7 +134,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadNodeConfig: %v", err)
 	}
-	if nodeCfg.ID != "node-json" || nodeCfg.VRAMMB != 1234 || nodeCfg.GGUFParser != "parser" {
+	if nodeCfg.ID != "node-json" || nodeCfg.VRAMMB != 1234 || nodeCfg.GGUFParser != "parser" || nodeCfg.Backend != domain.BackendMLX || nodeCfg.BackendBinary != "/bin/mlx" {
 		t.Fatalf("node config = %+v", nodeCfg)
 	}
 	if _, err := loadNodeConfig(filepath.Join(t.TempDir(), "missing.json")); err == nil {
@@ -346,6 +347,62 @@ func TestBuildNodeServer(t *testing.T) {
 	}
 	if handler == nil {
 		t.Fatal("handler is nil")
+	}
+}
+
+func TestBuildNodeServerSelectsConfiguredBackends(t *testing.T) {
+	for _, tt := range []struct {
+		backend domain.Backend
+		name    string
+	}{
+		{backend: domain.BackendMLX, name: "mlx"},
+		{backend: domain.BackendVLLM, name: "vllm"},
+	} {
+		t.Run(string(tt.backend), func(t *testing.T) {
+			spec, err := buildNodeServerSpec(context.Background(), []string{
+				"--listen", "127.0.0.1:0",
+				"--id", "node-a",
+				"--name", "Node A",
+				"--backend", string(tt.backend),
+				"--backend-binary", "/bin/echo",
+				"--vram-mb", "1024",
+				"--state-db", filepath.Join(t.TempDir(), "node.sqlite"),
+			})
+			if err != nil {
+				t.Fatalf("buildNodeServerSpec: %v", err)
+			}
+			if spec.node.Labels[LabelNodeBackend] != string(tt.backend) {
+				t.Fatalf("node labels = %+v", spec.node.Labels)
+			}
+			adapter, err := nodeBackendAdapter(NodeConfig{Backend: tt.backend, BackendBinary: "/bin/echo"}, nodeagent.StoreProcessRegistry{})
+			if err != nil {
+				t.Fatalf("nodeBackendAdapter: %v", err)
+			}
+			if adapter.Name() != tt.name {
+				t.Fatalf("adapter name = %s", adapter.Name())
+			}
+		})
+	}
+}
+
+func TestBuildNodeServerRejectsUnknownBackend(t *testing.T) {
+	_, err := buildNodeServerSpec(context.Background(), []string{
+		"--listen", "127.0.0.1:0",
+		"--backend", "unknown",
+		"--vram-mb", "1024",
+		"--state-db", filepath.Join(t.TempDir(), "node.sqlite"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown node backend") {
+		t.Fatalf("unknown backend err = %v", err)
+	}
+	if got := nodeBackendBinary(NodeConfig{Backend: domain.BackendLlamaCpp, BackendBinary: "/bin/custom", LlamaServer: "/bin/llama"}, "fallback"); got != "/bin/custom" {
+		t.Fatalf("backend binary = %s", got)
+	}
+	if got := nodeBackendBinary(NodeConfig{Backend: domain.BackendLlamaCpp, LlamaServer: "/bin/llama"}, "fallback"); got != "/bin/llama" {
+		t.Fatalf("llama binary = %s", got)
+	}
+	if got := nodeBackendBinary(NodeConfig{Backend: domain.BackendMLX}, "mlx_lm.server"); got != "mlx_lm.server" {
+		t.Fatalf("mlx binary = %s", got)
 	}
 }
 

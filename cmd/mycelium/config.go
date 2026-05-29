@@ -23,16 +23,18 @@ type ServerConfig struct {
 }
 
 type NodeConfig struct {
-	Listen        string  `json:"listen"`
-	BackendListen string  `json:"backend_listen"`
-	StorePath     string  `json:"store_path"`
-	ID            string  `json:"id"`
-	Name          string  `json:"name"`
-	LlamaServer   string  `json:"llama_server"`
-	GGUFParser    string  `json:"gguf_parser"`
-	MaxUtil       float64 `json:"max_util"`
-	VRAMMB        int     `json:"vram_mb"`
-	Join          string  `json:"join"`
+	Listen        string         `json:"listen"`
+	BackendListen string         `json:"backend_listen"`
+	StorePath     string         `json:"store_path"`
+	ID            string         `json:"id"`
+	Name          string         `json:"name"`
+	Backend       domain.Backend `json:"backend"`
+	BackendBinary string         `json:"backend_binary"`
+	LlamaServer   string         `json:"llama_server"`
+	GGUFParser    string         `json:"gguf_parser"`
+	MaxUtil       float64        `json:"max_util"`
+	VRAMMB        int            `json:"vram_mb"`
+	Join          string         `json:"join"`
 }
 
 func loadServerConfig(path string) (ServerConfig, error) {
@@ -87,6 +89,7 @@ func defaultNodeConfig() NodeConfig {
 		StorePath:     defaultControlStorePath(),
 		ID:            "node_local",
 		Name:          "local-node",
+		Backend:       domain.BackendLlamaCpp,
 		LlamaServer:   "llama-server",
 		MaxUtil:       0.90,
 	}

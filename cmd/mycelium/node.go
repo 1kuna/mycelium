@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"mycelium/internal/backends/llamacpp"
+	"mycelium/internal/backends/mlx"
+	"mycelium/internal/backends/vllm"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/estimate"
@@ -16,6 +18,7 @@ import (
 	"mycelium/internal/lease"
 	"mycelium/internal/membership"
 	nodeagent "mycelium/internal/node"
+	"mycelium/internal/ports"
 	storesqlite "mycelium/internal/store/sqlite"
 )
 
@@ -87,6 +90,8 @@ func buildNodeServerSpec(ctx context.Context, args []string) (nodeServerSpec, er
 	backendListen := fs.String("backend-listen", "", "backend inference server listen address")
 	id := fs.String("id", "", "node id")
 	name := fs.String("name", "", "node name")
+	backend := fs.String("backend", "", "backend engine (llamacpp, mlx, vllm)")
+	backendBinary := fs.String("backend-binary", "", "backend server binary override")
 	llamaServer := fs.String("llama-server", "", "llama.cpp server binary")
 	ggufParser := fs.String("gguf-parser", "", "GGUF parser binary")
 	maxUtil := fs.Float64("max-util", 0, "maximum accelerator utilization")
@@ -104,6 +109,10 @@ func buildNodeServerSpec(ctx context.Context, args []string) (nodeServerSpec, er
 	overrideString(backendListen, &cfg.BackendListen)
 	overrideString(id, &cfg.ID)
 	overrideString(name, &cfg.Name)
+	if *backend != "" {
+		cfg.Backend = domain.Backend(*backend)
+	}
+	overrideString(backendBinary, &cfg.BackendBinary)
 	overrideString(llamaServer, &cfg.LlamaServer)
 	overrideString(ggufParser, &cfg.GGUFParser)
 	overrideString(storePath, &cfg.StorePath)
@@ -148,12 +157,16 @@ func buildNodeServerSpec(ctx context.Context, args []string) (nodeServerSpec, er
 		}
 		node = detected
 	}
+	node.Labels = withNodeBackendLabel(node.Labels, cfg.Backend)
 	store, err := storesqlite.Open(cfg.StorePath)
 	if err != nil {
 		return nodeServerSpec{}, err
 	}
 	registry := nodeagent.StoreProcessRegistry{Store: store, NodeID: node.ID}
-	adapter := llamacpp.NewAdapter(llamacpp.Config{BinaryPath: cfg.LlamaServer, ProcessRegistry: registry})
+	adapter, err := nodeBackendAdapter(cfg, registry)
+	if err != nil {
+		return nodeServerSpec{}, err
+	}
 	if refs, err := store.ProcessRefs(ctx, node.ID); err == nil && len(refs) > 0 {
 		reaper := nodeagent.NewReaperFromRefs(refs, nodeagent.BackendProcessKiller{Backend: adapter})
 		if _, err := reaper.Reap(ctx); err != nil {
@@ -171,6 +184,49 @@ func buildNodeServerSpec(ctx context.Context, args []string) (nodeServerSpec, er
 	}
 	agent := nodeagent.NewAgent(node, adapter, clock.System{}, opts...)
 	return nodeServerSpec{addr: cfg.Listen, handler: nodeagent.HTTPServer{Agent: agent}, node: node, join: cfg.Join}, nil
+}
+
+const LabelNodeBackend = "mycelium.node.backend"
+
+func nodeBackendAdapter(cfg NodeConfig, registry nodeagent.StoreProcessRegistry) (ports.BackendAdapter, error) {
+	backend := cfg.Backend
+	if backend == "" {
+		backend = domain.BackendLlamaCpp
+	}
+	switch backend {
+	case domain.BackendLlamaCpp:
+		return llamacpp.NewAdapter(llamacpp.Config{BinaryPath: nodeBackendBinary(cfg, "llama-server"), ProcessRegistry: registry}), nil
+	case domain.BackendMLX:
+		return mlx.NewAdapterWithConfig(mlx.Config{BinaryPath: nodeBackendBinary(cfg, "mlx_lm.server"), ProcessRegistry: registry}), nil
+	case domain.BackendVLLM:
+		return vllm.NewAdapterWithConfig(vllm.Config{BinaryPath: nodeBackendBinary(cfg, "vllm"), ProcessRegistry: registry}), nil
+	default:
+		return nil, errors.New("unknown node backend " + string(backend))
+	}
+}
+
+func nodeBackendBinary(cfg NodeConfig, fallback string) string {
+	if cfg.BackendBinary != "" {
+		return cfg.BackendBinary
+	}
+	if cfg.Backend == "" || cfg.Backend == domain.BackendLlamaCpp {
+		if cfg.LlamaServer != "" {
+			return cfg.LlamaServer
+		}
+	}
+	return fallback
+}
+
+func withNodeBackendLabel(labels map[string]string, backend domain.Backend) map[string]string {
+	out := map[string]string{}
+	for key, value := range labels {
+		out[key] = value
+	}
+	if backend == "" {
+		backend = domain.BackendLlamaCpp
+	}
+	out[LabelNodeBackend] = string(backend)
+	return out
 }
 
 func overrideString(flagValue *string, target *string) {
