@@ -31,6 +31,7 @@ type PeerConfig struct {
 	QueueDrainMS         int                  `json:"queue_drain_ms"`
 	QueueDrainLimit      int                  `json:"queue_drain_limit"`
 	OptimizerEvalMS      int                  `json:"optimizer_eval_ms"`
+	RegistrySyncMS       int                  `json:"registry_sync_ms"`
 }
 
 type ComputeConfig struct {
@@ -77,6 +78,9 @@ func loadPeerConfig(path string) (PeerConfig, error) {
 	}
 	if cfg.OptimizerEvalMS == 0 {
 		cfg.OptimizerEvalMS = 60000
+	}
+	if cfg.RegistrySyncMS == 0 {
+		cfg.RegistrySyncMS = 1000
 	}
 	if cfg.DiscoveryScanMS == 0 {
 		cfg.DiscoveryScanMS = 250

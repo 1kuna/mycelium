@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -205,6 +206,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
 	if discovery != nil {
 		startPeerAdvertiser(ctx, discovery, self, clock.System{}, time.Duration(cfg.DiscoveryAdvertiseMS)*time.Millisecond)
+		startRegistryReplication(ctx, store, discovery, cfg.ID, cfg.RPCToken, clock.System{}, time.Duration(cfg.RegistrySyncMS)*time.Millisecond)
 	}
 	coordinator := peercoord.NewCoordinator(self, jobLog, store, placer, fleet, admissionResolver(nodes), clock.System{})
 	runtime := &scheduler.Service{
@@ -238,6 +240,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		DefaultProject: cfg.DefaultProject,
 	}}
 	mountPeerHTTP(mux, self, cfg.JoinToken)
+	mountRegistryHTTP(mux, store, cfg.RPCToken)
 	mux.Handle("/", handler)
 	return cfg.Listen, mux, nil
 }
@@ -254,6 +257,56 @@ func mountPeerHTTP(mux *http.ServeMux, self domain.Peer, joinToken string) {
 		if err := json.NewEncoder(w).Encode(self); err != nil {
 			panic(err)
 		}
+	})
+}
+
+func mountRegistryHTTP(mux *http.ServeMux, registry ports.JobRegistry, rpcToken string) {
+	mux.HandleFunc("/registry/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		records, err := registry.Snapshot(r.Context())
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(records); err != nil {
+			panic(err)
+		}
+	})
+	mux.HandleFunc("/registry/records", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var records []domain.JobRecord
+		if err := json.NewDecoder(r.Body).Decode(&records); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		for _, rec := range records {
+			if err := registry.Put(r.Context(), rec); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 }
 
@@ -563,6 +616,129 @@ func peerJoinAuthorized(r *http.Request, joinToken string) bool {
 	}
 	got := r.Header.Get("X-Myc-Join-Token")
 	return subtle.ConstantTimeCompare([]byte(got), []byte(joinToken)) == 1
+}
+
+func peerRPCAuthorized(r *http.Request, rpcToken string) bool {
+	if rpcToken == "" {
+		return true
+	}
+	const prefix = "Bearer "
+	value := r.Header.Get("Authorization")
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	got := strings.TrimPrefix(value, prefix)
+	return subtle.ConstantTimeCompare([]byte(got), []byte(rpcToken)) == 1
+}
+
+func writePeerAuthError(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "rpc token required"})
+}
+
+type registryHTTPClient struct {
+	AuthToken string
+	Client    *http.Client
+}
+
+func (c registryHTTPClient) Snapshot(ctx context.Context, peer domain.Peer) ([]domain.JobRecord, error) {
+	var records []domain.JobRecord
+	err := c.do(ctx, peer, http.MethodGet, "/registry/snapshot", nil, &records)
+	return records, err
+}
+
+func (c registryHTTPClient) Push(ctx context.Context, peer domain.Peer, records []domain.JobRecord) error {
+	return c.do(ctx, peer, http.MethodPost, "/registry/records", records, nil)
+}
+
+var _ peercoord.RegistryClient = registryHTTPClient{}
+
+func (c registryHTTPClient) do(ctx context.Context, peer domain.Peer, method, path string, in, out any) error {
+	if len(peer.Addresses) == 0 {
+		return fmt.Errorf("peer %q has no reachable address", peer.ID)
+	}
+	var body io.Reader
+	if in != nil {
+		data, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, peerHTTPBaseURL(peer.Addresses[0])+path, body)
+	if err != nil {
+		return err
+	}
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	client := c.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("registry rpc %s %s: %s", method, path, strings.TrimSpace(string(data)))
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func startRegistryReplication(ctx context.Context, registry ports.JobRegistry, discovery ports.PeerDiscovery, selfID, rpcToken string, clk ports.Clock, interval time.Duration) {
+	if registry == nil || discovery == nil || selfID == "" || clk == nil || interval <= 0 {
+		return
+	}
+	replicator := peercoord.RegistryReplicator{
+		Local:  registry,
+		Peers:  discovery,
+		Client: registryHTTPClient{AuthToken: rpcToken},
+		SelfID: selfID,
+	}
+	pushWatch, err := registry.Watch(ctx, "")
+	if err != nil {
+		log.Printf("mycelium registry watch failed: %v", err)
+		return
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case rec, ok := <-pushWatch:
+				if !ok {
+					return
+				}
+				if err := replicator.PushRecord(ctx, rec); err != nil {
+					log.Printf("mycelium registry push failed: %v", err)
+				}
+			}
+		}
+	}()
+	go func() {
+		for {
+			if err := replicator.SyncOnce(ctx); err != nil {
+				log.Printf("mycelium registry sync failed: %v", err)
+			}
+			timer := clk.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C():
+			}
+		}
+	}()
 }
 
 func markDeadPeer(store interface {
