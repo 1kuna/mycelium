@@ -29,3 +29,4 @@
 - 2026-05-29: Phase 5 context recommendations use a deterministic average-with-headroom threshold snapped to an existing shared context, and recommendations carry observed stats plus a plain-language rationale.
 - 2026-05-29: Phase 5 auto-apply is a pure gate: projects with `AutoApply=false` only log the recommendation; projects with it on update the project cap and preset context together.
 - 2026-05-29: Durable control-plane state starts as a typed JSON-on-SQLite store; the schema keeps lifecycle tables explicit while avoiding premature relational fan-out before runtime flows settle.
+- 2026-05-29: `mycelium server` now boots from JSON config and seeds the durable store before serving; `myce add-model` writes the same SQLite preset record it expects the server to load.
