@@ -41,10 +41,29 @@ func TestDarwinDetectorBuildsUnifiedMemoryNode(t *testing.T) {
 	}
 }
 
-func TestLinuxDetectorFailsUntilNVIDIAProbeExists(t *testing.T) {
-	_, err := (Detector{GOOS: "linux"}).Detect(context.Background(), domain.Node{})
-	if err == nil || !strings.Contains(err.Error(), "explicit --vram-mb") {
-		t.Fatalf("err = %v", err)
+func TestLinuxDetectorBuildsNVIDIANode(t *testing.T) {
+	detector := Detector{
+		GOOS:  "linux",
+		Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			if name != "nvidia-smi" || len(args) != 2 || !strings.Contains(args[0], "memory.total") {
+				t.Fatalf("command = %s %+v", name, args)
+			}
+			return []byte("0, NVIDIA GeForce RTX 4090, 24564, 8.9\n1, NVIDIA GeForce RTX 4070 Ti, 12282, 8.9\n"), nil
+		},
+	}
+	node, err := detector.Detect(context.Background(), domain.Node{ID: "cuda-a", MaxUtil: 0.9})
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if node.OS != "linux" || node.UnifiedMemory || len(node.Accelerators) != 2 {
+		t.Fatalf("node = %+v", node)
+	}
+	if node.Accelerators[0].Vendor != "nvidia" || node.Accelerators[0].Kind != "cuda" || node.Accelerators[0].VRAMTotalMB != 24564 || node.Accelerators[0].ComputeCapability != "8.9" {
+		t.Fatalf("accelerator = %+v", node.Accelerators[0])
+	}
+	if node.Labels["gpu.vendor"] != "nvidia" || node.OOMSeverity != domain.OOMSoft || node.SpeedClass.Source != "detected-default" {
+		t.Fatalf("labels/speed = %+v %+v", node.Labels, node.SpeedClass)
 	}
 }
 
@@ -73,6 +92,28 @@ func TestDetectorErrorPathsAndLabelMerge(t *testing.T) {
 	got := mergeLabels(map[string]string{"keep": "yes", "gpu.vendor": "old"}, map[string]string{"gpu.vendor": "apple"})
 	if got["keep"] != "yes" || got["gpu.vendor"] != "apple" {
 		t.Fatalf("labels = %+v", got)
+	}
+}
+
+func TestLinuxDetectorErrorPaths(t *testing.T) {
+	_, err := (Detector{
+		GOOS: "linux",
+		Command: func(context.Context, string, ...string) ([]byte, error) {
+			return nil, errors.New("nvidia-smi")
+		},
+	}).Detect(context.Background(), domain.Node{})
+	if err == nil || !strings.Contains(err.Error(), "nvidia-smi") {
+		t.Fatalf("command err = %v", err)
+	}
+	for _, raw := range [][]byte{
+		[]byte(""),
+		[]byte("bad,row"),
+		[]byte("x, NVIDIA, 1, 8.9"),
+		[]byte("0, NVIDIA, nope, 8.9"),
+	} {
+		if _, err := parseNVIDIASMI(raw); err == nil {
+			t.Fatalf("parse accepted %q", raw)
+		}
 	}
 }
 

@@ -32,7 +32,7 @@ func (d Detector) Detect(ctx context.Context, seed domain.Node) (domain.Node, er
 	case "darwin":
 		return d.detectDarwin(ctx, seed)
 	case "linux":
-		return domain.Node{}, fmt.Errorf("linux hardware discovery requires an explicit --vram-mb until NVIDIA probing is enabled")
+		return d.detectLinux(ctx, seed)
 	default:
 		return domain.Node{}, fmt.Errorf("unsupported hardware discovery OS %q", goos)
 	}
@@ -72,6 +72,74 @@ func (d Detector) detectDarwin(ctx context.Context, seed domain.Node) (domain.No
 		node.SpeedClass = domain.SpeedClass{TokensPerSecRef: 1, Source: "detected-default", ProbedAt: clk.Now().UTC()}
 	}
 	return node, nil
+}
+
+func (d Detector) detectLinux(ctx context.Context, seed domain.Node) (domain.Node, error) {
+	command := d.Command
+	if command == nil {
+		command = runCommand
+	}
+	out, err := command(ctx, "nvidia-smi", "--query-gpu=index,name,memory.total,compute_cap", "--format=csv,noheader,nounits")
+	if err != nil {
+		return domain.Node{}, err
+	}
+	accelerators, err := parseNVIDIASMI(out)
+	if err != nil {
+		return domain.Node{}, err
+	}
+	node := seed
+	node.OS = "linux"
+	node.Labels = mergeLabels(node.Labels, map[string]string{"gpu.vendor": "nvidia", "memory.class": "discrete"})
+	node.OOMSeverity = domain.OOMSoft
+	node.Status = domain.NodeReady
+	node.UnifiedMemory = false
+	node.Accelerators = accelerators
+	if node.SpeedClass.TokensPerSecRef == 0 {
+		clk := d.Clock
+		if clk == nil {
+			clk = clock.System{}
+		}
+		node.SpeedClass = domain.SpeedClass{TokensPerSecRef: 1, Source: "detected-default", ProbedAt: clk.Now().UTC()}
+	}
+	return node, nil
+}
+
+func parseNVIDIASMI(out []byte) ([]domain.Accelerator, error) {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	accelerators := make([]domain.Accelerator, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		if len(parts) != 4 {
+			return nil, fmt.Errorf("unexpected nvidia-smi row %q", line)
+		}
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		index, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return nil, fmt.Errorf("parse nvidia gpu index %q: %w", parts[0], err)
+		}
+		vramMB, err := strconv.Atoi(parts[2])
+		if err != nil {
+			return nil, fmt.Errorf("parse nvidia memory %q: %w", parts[2], err)
+		}
+		accelerators = append(accelerators, domain.Accelerator{
+			Index:             index,
+			Vendor:            "nvidia",
+			Kind:              "cuda",
+			VRAMTotalMB:       vramMB,
+			ComputeCapability: parts[3],
+			ArchFamily:        parts[1],
+		})
+	}
+	if len(accelerators) == 0 {
+		return nil, fmt.Errorf("nvidia-smi returned no GPUs")
+	}
+	return accelerators, nil
 }
 
 func mergeLabels(base, add map[string]string) map[string]string {
