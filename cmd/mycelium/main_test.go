@@ -474,6 +474,25 @@ func TestRegistryRPCRequiresAuthAndMergesRecords(t *testing.T) {
 	}
 }
 
+func TestMountNodeHTTPIncludesAdmissionRuntimeRoutes(t *testing.T) {
+	mux := http.NewServeMux()
+	seen := map[string]bool{}
+	mountNodeHTTP(mux, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.URL.Path] = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, path := range []string{
+		"/admission/bind-instance",
+		"/admission/lease-by-instance",
+	} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+		if rec.Code != http.StatusNoContent || !seen[path] {
+			t.Fatalf("%s status=%d seen=%+v", path, rec.Code, seen)
+		}
+	}
+}
+
 func TestRescueRecoveredJobDecodesPayloadAndSubmits(t *testing.T) {
 	job := domain.Job{ID: "job-a", Model: "tiny", Priority: domain.PriorityInteractive}
 	payload, err := peercoord.EncodeRescuePayload(job, []byte(`{"model":"tiny"}`))
