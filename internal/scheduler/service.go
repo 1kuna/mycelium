@@ -17,6 +17,10 @@ type NodeResolver interface {
 	NodeAgent(nodeID string) (ports.NodeAgent, error)
 }
 
+type AdmissionResolver interface {
+	AdmissionController(nodeID string) (ports.AdmissionController, error)
+}
+
 type RuntimeStore interface {
 	SaveJob(ctx context.Context, job domain.Job) error
 	SaveLease(ctx context.Context, lease domain.Lease) error
@@ -30,6 +34,7 @@ type Service struct {
 	Placer  ports.Placer
 	Fleet   FleetSource
 	Nodes   NodeResolver
+	Owners  AdmissionResolver
 	Queue   *Queue
 	Store   RuntimeStore
 	Clock   ports.Clock
@@ -82,10 +87,29 @@ func (s *Service) Submit(ctx context.Context, job domain.Job, hooks ...SubmitHoo
 		_ = s.Store.SaveJob(ctx, job)
 		return Result{Decision: decision}, err
 	}
+	ownerLease, owner, err := s.commitOwnerAdmission(ctx, job, decision)
+	if err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		return Result{Decision: decision}, err
+	}
+	releaseOwner := func() error {
+		if ownerLease.ID == "" {
+			return nil
+		}
+		if err := owner.Release(ctx, ownerLease.ID); err != nil {
+			return err
+		}
+		ownerLease = domain.Lease{}
+		return nil
+	}
 	if decision.InstanceID == "" {
 		if err := runBeforeColdLoadHook(ctx, decision, hooks); err != nil {
 			job.Status = domain.JobFailed
 			_ = s.Store.SaveJob(ctx, job)
+			if releaseErr := releaseOwner(); releaseErr != nil {
+				return Result{Decision: decision}, releaseErr
+			}
 			return Result{Decision: decision}, err
 		}
 	}
@@ -93,7 +117,15 @@ func (s *Service) Submit(ctx context.Context, job domain.Job, hooks ...SubmitHoo
 	if err != nil {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(ctx, job)
+		if releaseErr := releaseOwner(); releaseErr != nil {
+			return Result{Decision: decision}, releaseErr
+		}
 		return Result{Decision: decision}, err
+	}
+	if err := releaseOwner(); err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		return Result{Decision: decision, Instance: inst}, err
 	}
 	lease := s.grantLease(job, inst, decision)
 	job.Status = domain.JobRunning
@@ -165,6 +197,31 @@ func (s *Service) validate() error {
 		return fmt.Errorf("scheduler service is not fully configured")
 	}
 	return nil
+}
+
+func (s *Service) commitOwnerAdmission(ctx context.Context, job domain.Job, decision domain.PlacementDecision) (domain.Lease, ports.AdmissionController, error) {
+	if decision.InstanceID != "" || decision.Action == domain.ActionQueued {
+		return domain.Lease{}, nil, nil
+	}
+	if decision.NodeID == "" {
+		return domain.Lease{}, nil, fmt.Errorf("placement action %q did not select an owner for admission", decision.Action)
+	}
+	if s.Owners == nil {
+		return domain.Lease{}, nil, fmt.Errorf("owner admission resolver is not configured")
+	}
+	owner, err := s.Owners.AdmissionController(decision.NodeID)
+	if err != nil {
+		return domain.Lease{}, nil, err
+	}
+	offer, err := owner.Offer(ctx, job, decision.Claim)
+	if err != nil {
+		return domain.Lease{}, nil, err
+	}
+	lease, err := owner.Commit(ctx, offer.OfferID, offer.Fence)
+	if err != nil {
+		return domain.Lease{}, nil, err
+	}
+	return lease, owner, nil
 }
 
 func runBeforeColdLoadHook(ctx context.Context, decision domain.PlacementDecision, hooks []SubmitHooks) error {
