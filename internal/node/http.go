@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -53,6 +54,8 @@ func (s HTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.preempt(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/admission/lease":
 		s.leaseForJob(w, r)
+	case strings.HasPrefix(r.URL.Path, "/instances/"):
+		s.proxyInstance(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}
@@ -210,6 +213,116 @@ func (s HTTPServer) leaseForJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, admissionLeaseForJobResponse{Found: found, Lease: lease}, err)
 }
 
+func (s HTTPServer) proxyInstance(w http.ResponseWriter, r *http.Request) {
+	instanceID, upstreamPath, ok := proxyInstanceParts(w, r.URL.Path)
+	if !ok {
+		return
+	}
+	snap, err := s.Agent.Snapshot(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, inst := range snap.Instances {
+		if inst.ID != instanceID {
+			continue
+		}
+		target, err := instanceProxyURL(inst.Addr, upstreamPath, r.URL.RawQuery)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.forwardInstance(w, r, target)
+		return
+	}
+	writeError(w, http.StatusNotFound, "instance not found")
+}
+
+func (s HTTPServer) forwardInstance(w http.ResponseWriter, r *http.Request, target string) {
+	parsed, err := url.Parse(target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	req := r.Clone(r.Context())
+	req.URL = parsed
+	req.RequestURI = ""
+	req.Host = parsed.Host
+	req.Header = r.Header.Clone()
+	req.Header.Del("Authorization")
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	copyHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_ = copyProxyBody(w, resp.Body)
+}
+
+func proxyInstanceParts(w http.ResponseWriter, path string) (string, string, bool) {
+	rest := strings.TrimPrefix(path, "/instances/")
+	if rest == "" {
+		writeError(w, http.StatusBadRequest, "instance id is required")
+		return "", "", false
+	}
+	parts := strings.SplitN(rest, "/", 2)
+	instanceID, err := url.PathUnescape(parts[0])
+	if err != nil || instanceID == "" {
+		writeError(w, http.StatusBadRequest, "instance id is required")
+		return "", "", false
+	}
+	upstreamPath := "/"
+	if len(parts) == 2 {
+		upstreamPath += parts[1]
+	}
+	return instanceID, upstreamPath, true
+}
+
+func instanceProxyURL(addr, path, rawQuery string) (string, error) {
+	base := strings.TrimRight(addr, "/")
+	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
+		base = "http://" + base
+	}
+	parsed, err := url.Parse(base + path)
+	if err != nil {
+		return "", err
+	}
+	parsed.RawQuery = rawQuery
+	return parsed.String(), nil
+}
+
+func copyHeaders(dst, src http.Header) {
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func copyProxyBody(w http.ResponseWriter, body io.Reader) error {
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				return writeErr
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
 func decodeInstanceID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var req struct {
 		InstanceID string `json:"instance_id"`
@@ -273,12 +386,20 @@ func NewHTTPClient(baseURL string) *HTTPClient {
 func (c *HTTPClient) Snapshot(ctx context.Context) (domain.NodeSnapshot, error) {
 	var snap domain.NodeSnapshot
 	err := c.do(ctx, http.MethodGet, "/snapshot", nil, &snap)
+	if err == nil {
+		for i := range snap.Instances {
+			snap.Instances[i].Addr = c.instanceProxyAddr(snap.Instances[i].ID)
+		}
+	}
 	return snap, err
 }
 
 func (c *HTTPClient) Load(ctx context.Context, p domain.Preset) (domain.ModelInstance, error) {
 	var inst domain.ModelInstance
 	err := c.do(ctx, http.MethodPost, "/load", p, &inst)
+	if err == nil {
+		inst.Addr = c.instanceProxyAddr(inst.ID)
+	}
 	return inst, err
 }
 
@@ -324,6 +445,10 @@ func (c *HTTPClient) LeaseForJob(ctx context.Context, jobID string) (domain.Leas
 	var out admissionLeaseForJobResponse
 	err := c.do(ctx, http.MethodGet, "/admission/lease?job_id="+url.QueryEscape(jobID), nil, &out)
 	return out.Lease, out.Found, err
+}
+
+func (c *HTTPClient) instanceProxyAddr(instanceID string) string {
+	return c.BaseURL + "/instances/" + url.PathEscape(instanceID)
 }
 
 func (c *HTTPClient) do(ctx context.Context, method, path string, in, out any) error {

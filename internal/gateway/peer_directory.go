@@ -24,6 +24,7 @@ type PeerNodeStore interface {
 type PeerDirectory struct {
 	Discovery ports.PeerDiscovery
 	Factory   PeerAgentFactory
+	Tunnel    ports.Tunnel
 	Store     PeerNodeStore
 	SelfID    string
 	AuthToken string
@@ -49,7 +50,7 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 		if !peer.Compute {
 			continue
 		}
-		agent, err := d.agentFor(peer)
+		agent, err := d.agentFor(ctx, peer)
 		if err != nil {
 			return domain.FleetSnapshot{}, err
 		}
@@ -110,12 +111,20 @@ func (d *PeerDirectory) LeaseInspector(nodeID string) (ports.LeaseInspector, err
 	return inspector, nil
 }
 
-func (d *PeerDirectory) agentFor(peer domain.Peer) (ports.NodeAgent, error) {
+func (d *PeerDirectory) agentFor(ctx context.Context, peer domain.Peer) (ports.NodeAgent, error) {
 	if peer.ID == "" {
 		return nil, fmt.Errorf("discovered peer is missing id")
 	}
 	if len(peer.Addresses) == 0 {
 		return nil, fmt.Errorf("discovered peer %q has no reachable address", peer.ID)
+	}
+	address := peer.Addresses[0]
+	if d.Tunnel != nil {
+		loopback, err := d.Tunnel.Open(ctx, domain.Node{ID: peer.ID, Address: address})
+		if err != nil {
+			return nil, err
+		}
+		address = loopback
 	}
 	factory := d.Factory
 	if factory == nil {
@@ -132,7 +141,7 @@ func (d *PeerDirectory) agentFor(peer domain.Peer) (ports.NodeAgent, error) {
 			return client
 		}
 	}
-	return factory(peer.Addresses[0]), nil
+	return factory(address), nil
 }
 
 func (d *PeerDirectory) saveNode(ctx context.Context, node domain.Node) error {

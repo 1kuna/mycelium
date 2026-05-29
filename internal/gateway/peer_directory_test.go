@@ -21,6 +21,7 @@ func TestPeerDirectoryBuildsFleetFromComputePeers(t *testing.T) {
 	agent.Instances = []domain.ModelInstance{inst}
 	seenAddress := ""
 	store := &recordingPeerNodeStore{}
+	tunnel := &mocks.Tunnel{Addr: "127.0.0.1:6000"}
 	directory := &PeerDirectory{
 		Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{
 			{ID: "self", Addresses: []string{"127.0.0.1:9"}, Compute: true},
@@ -29,6 +30,7 @@ func TestPeerDirectoryBuildsFleetFromComputePeers(t *testing.T) {
 		}},
 		Store:  store,
 		SelfID: "self",
+		Tunnel: tunnel,
 		Factory: func(address string) ports.NodeAgent {
 			seenAddress = address
 			return agent
@@ -39,8 +41,11 @@ func TestPeerDirectoryBuildsFleetFromComputePeers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	if seenAddress != "127.0.0.1:2" || len(fleet.Nodes) != 1 || fleet.Nodes[0].ID != node.ID || len(fleet.Instances) != 1 {
+	if seenAddress != "127.0.0.1:6000" || len(fleet.Nodes) != 1 || fleet.Nodes[0].ID != node.ID || len(fleet.Instances) != 1 {
 		t.Fatalf("address=%s fleet=%+v", seenAddress, fleet)
+	}
+	if len(tunnel.Nodes) != 1 || tunnel.Nodes[0].ID != "compute" || tunnel.Nodes[0].Address != "127.0.0.1:2" {
+		t.Fatalf("tunnel nodes = %+v", tunnel.Nodes)
 	}
 	if len(store.nodes) != 1 || store.nodes[0].ID != node.ID {
 		t.Fatalf("stored nodes = %+v", store.nodes)
@@ -69,6 +74,7 @@ func TestPeerDirectoryErrors(t *testing.T) {
 		{name: "discovery", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{Err: boom}}, wantErr: boom},
 		{name: "missing id", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{Addresses: []string{"127.0.0.1:1"}, Compute: true}}}}, want: "missing id"},
 		{name: "missing address", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Compute: true}}}}, want: "reachable address"},
+		{name: "tunnel", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}}}, Tunnel: &mocks.Tunnel{Err: boom}}, wantErr: boom},
 	}
 	for _, check := range checks {
 		t.Run(check.name, func(t *testing.T) {
