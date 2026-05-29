@@ -30,3 +30,4 @@
 - 2026-05-29: Phase 5 auto-apply is a pure gate: projects with `AutoApply=false` only log the recommendation; projects with it on update the project cap and preset context together.
 - 2026-05-29: Durable control-plane state starts as a typed JSON-on-SQLite store; the schema keeps lifecycle tables explicit while avoiding premature relational fan-out before runtime flows settle.
 - 2026-05-29: `mycelium server` now boots from JSON config and seeds the durable store before serving; `myce add-model` writes the same SQLite preset record it expects the server to load.
+- 2026-05-29: Scheduler runtime execution is a service around the existing placer; the placer remains pure decision logic while the service owns queue persistence, node load/unload calls, and lease grants.
