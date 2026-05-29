@@ -125,7 +125,12 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		lan := membership.NewPeerLANDiscovery(cfg.DiscoveryListen, cfg.DiscoveryAddr)
 		lan.Token = cfg.JoinToken
 		lan.ScanDuration = time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
-		discovery = lan
+		scan := time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
+		cached := membership.NewCachedPeerDiscovery(lan, clock.System{}, peerDiscoveryTTL(scan))
+		if err := cached.Start(ctx, scan); err != nil {
+			return "", nil, err
+		}
+		discovery = cached
 		directory := &gateway.PeerDirectory{Discovery: discovery, Store: store, SelfID: cfg.ID}
 		fleet = directory
 		nodes = directory
@@ -325,6 +330,17 @@ func admissionResolver(nodes gateway.NodeResolver) scheduler.AdmissionResolver {
 		return nil
 	}
 	return admissions
+}
+
+func peerDiscoveryTTL(scan time.Duration) time.Duration {
+	if scan <= 0 {
+		scan = 250 * time.Millisecond
+	}
+	ttl := 5 * scan
+	if ttl < 5*time.Second {
+		return 5 * time.Second
+	}
+	return ttl
 }
 
 func startPeerAdvertiser(ctx context.Context, discovery ports.PeerDiscovery, self domain.Peer, clk ports.Clock, interval time.Duration) {
