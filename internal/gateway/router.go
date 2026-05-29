@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"mycelium/internal/clock"
@@ -97,6 +98,8 @@ type Router struct {
 	DefaultProject string
 	MaxTries       int
 }
+
+var gatewayJobSeq uint64
 
 type RouteResponse struct {
 	Status   int
@@ -491,6 +494,7 @@ func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, preset domain
 }
 
 func (r *Router) jobFromIngress(req translate.IngressRequest, attempt int) domain.Job {
+	seq := atomic.AddUint64(&gatewayJobSeq, 1)
 	project := req.Project
 	if project == "" {
 		project = r.DefaultProject
@@ -532,7 +536,7 @@ func (r *Router) jobFromIngress(req translate.IngressRequest, attempt int) domai
 		taskType = "completion"
 	}
 	return domain.Job{
-		ID:             fmt.Sprintf("gateway-%s-%d", req.Model, attempt),
+		ID:             fmt.Sprintf("gateway-%d-%d", seq, attempt),
 		TaskType:       taskType,
 		Model:          req.Model,
 		Project:        project,

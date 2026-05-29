@@ -64,6 +64,37 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 }
 
+func TestRouterAssignsUniqueGatewayJobIDs(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("hello")))
+	}))
+	defer upstream.Close()
+
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream.URL
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: mocks.NewNodeAgent(fixtures.MakeNode())}})
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := router.Route(context.Background(), req); err != nil {
+			t.Fatalf("Route %d: %v", i, err)
+		}
+	}
+	if len(sink.Metrics) != 2 {
+		t.Fatalf("metrics = %+v", sink.Metrics)
+	}
+	if sink.Metrics[0].JobID == "" || sink.Metrics[0].JobID == sink.Metrics[1].JobID {
+		t.Fatalf("job ids are not unique: %+v", sink.Metrics)
+	}
+}
+
 func TestRouterUsesProjectDefaultModel(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
