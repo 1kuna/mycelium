@@ -7,3 +7,4 @@
 - 2026-05-29: Use a sorted-slice scheduler queue with effective priority `base + waited_minutes`; it is deterministic under `FakeClock` and makes starvation behavior easy to inspect.
 - 2026-05-29: Score cold candidates with transparent integer components: warm/locality bonus, speed preference fit, and fit tightness; every chosen score is written into the placement trace.
 - 2026-05-29: For Phase 0 hard preemption, choose the lowest-priority eligible victim, breaking ties by lowest in-flight count and then instance id; this is deterministic and favors minimal disruption.
+- 2026-05-29: Phase 1 node-agent cold-load dedup returns the same ready instance to concurrent same-preset callers; the scheduler can choose later whether to batch or create another replica, but duplicate cold starts are never useful.
