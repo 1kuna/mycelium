@@ -15,17 +15,20 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: mycelium <server|node|myce>")
+		return runPeer(ctx, nil)
 	}
 
 	switch args[0] {
-	case "server":
-		return runServer(ctx, args[1:])
-	case "node":
-		return runNode(ctx, args[1:])
-	case "myce":
+	case "run":
+		return runPeer(ctx, args[1:])
+	case "ctl":
 		return runControl(ctx, args[1:])
+	case "server", "node":
+		return fmt.Errorf("mycelium %s was removed by the peer-native spec; use mycelium run with compute configured", args[0])
 	default:
+		if len(args[0]) > 0 && args[0][0] == '-' {
+			return runPeer(ctx, args)
+		}
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }

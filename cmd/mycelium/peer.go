@@ -23,11 +23,11 @@ import (
 	storesqlite "mycelium/internal/store/sqlite"
 )
 
-func runServer(ctx context.Context, args []string) error {
+func runPeer(ctx context.Context, args []string) error {
 	if ctx.Err() != nil {
 		return nil
 	}
-	addr, handler, err := buildGatewayServer(ctx, args)
+	addr, handler, err := buildPeerGateway(ctx, args)
 	if err != nil {
 		return err
 	}
@@ -47,14 +47,14 @@ func runServer(ctx context.Context, args []string) error {
 	return nil
 }
 
-func buildGatewayServer(ctx context.Context, args []string) (string, http.Handler, error) {
-	fs := flag.NewFlagSet("server", flag.ContinueOnError)
-	configPath := fs.String("config", "", "server config JSON path")
+func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler, error) {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	configPath := fs.String("config", "", "peer config JSON path")
 	listen := fs.String("listen", "", "gateway listen address override")
 	if err := fs.Parse(args); err != nil {
 		return "", nil, err
 	}
-	cfg, err := loadServerConfig(*configPath)
+	cfg, err := loadPeerConfig(*configPath)
 	if err != nil {
 		return "", nil, err
 	}
@@ -113,14 +113,14 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 		}
 	}
 	if fleet == nil || nodes == nil {
-		return "", nil, fmt.Errorf("server config must provide join_token or node_urls")
+		return "", nil, fmt.Errorf("peer config must provide join_token or node_urls")
 	}
 	presets, err := store.ListPresets(ctx)
 	if err != nil {
 		return "", nil, err
 	}
 	if len(presets) == 0 {
-		return "", nil, fmt.Errorf("server config/store has no presets")
+		return "", nil, fmt.Errorf("peer config/store has no presets")
 	}
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
@@ -131,7 +131,7 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 		return "", nil, err
 	}
 	allocator := allocatorFromReservations(reservations, presetMap(presets))
-	estimator := serverEstimator(cfg, agents)
+	estimator := peerEstimator(cfg, agents)
 	placer := scheduler.NewPlacer(estimator, allocator, clock.System{}, presets...)
 	queue := scheduler.NewQueue(clock.System{})
 	if err := restoreQueuedJobs(ctx, store, queue); err != nil {
@@ -258,7 +258,7 @@ func runOptimizerEvaluation(ctx context.Context, store optimizerRuntimeStore, cl
 	return err
 }
 
-func seedControlStore(ctx context.Context, store *storesqlite.Store, cfg ServerConfig) error {
+func seedControlStore(ctx context.Context, store *storesqlite.Store, cfg PeerConfig) error {
 	for _, project := range cfg.Projects {
 		if err := store.SaveProject(ctx, project); err != nil {
 			return err
@@ -311,7 +311,7 @@ func projectMap(projects []domain.Project) map[string]domain.Project {
 	return out
 }
 
-func serverEstimator(cfg ServerConfig, agents map[string]ports.NodeAgent) ports.ResourceEstimator {
+func peerEstimator(cfg PeerConfig, agents map[string]ports.NodeAgent) ports.ResourceEstimator {
 	if cfg.GGUFParser != "" {
 		return estimate.NewGGUF(estimate.NewCommandParser(cfg.GGUFParser, nil), agents)
 	}

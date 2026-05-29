@@ -9,7 +9,7 @@ import (
 	"mycelium/internal/domain"
 )
 
-type ServerConfig struct {
+type PeerConfig struct {
 	Listen          string               `json:"listen"`
 	StorePath       string               `json:"store_path"`
 	CatalogDir      string               `json:"catalog_dir"`
@@ -40,17 +40,17 @@ type NodeConfig struct {
 	Join          string         `json:"join"`
 }
 
-func loadServerConfig(path string) (ServerConfig, error) {
+func loadPeerConfig(path string) (PeerConfig, error) {
 	if path == "" {
-		path = defaultServerConfigPath()
+		path = defaultPeerConfigPath()
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ServerConfig{}, fmt.Errorf("read server config %s: %w", path, err)
+		return PeerConfig{}, fmt.Errorf("read peer config %s: %w", path, err)
 	}
-	var cfg ServerConfig
+	var cfg PeerConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return ServerConfig{}, fmt.Errorf("parse server config %s: %w", path, err)
+		return PeerConfig{}, fmt.Errorf("parse peer config %s: %w", path, err)
 	}
 	if cfg.Listen == "" {
 		cfg.Listen = "127.0.0.1:51846"
@@ -107,8 +107,8 @@ func defaultNodeConfig() NodeConfig {
 	}
 }
 
-func defaultServerConfigPath() string {
-	return filepath.Join(defaultMyceliumHome(), "server.json")
+func defaultPeerConfigPath() string {
+	return filepath.Join(defaultMyceliumHome(), "peer.json")
 }
 
 func defaultControlStorePath() string {
