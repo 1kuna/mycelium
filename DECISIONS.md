@@ -66,3 +66,4 @@
 - 2026-05-29: Scheduler lease lifecycle lives on the scheduler service: request admission grants a persisted lease, `Release` deletes it by id, and `ExpireLeases` deletes only leases whose explicit expiry is at or before the injected clock while open-ended leases remain.
 - 2026-05-29: Gateway requests release runtime leases after the upstream request finishes or fails; release errors are returned before response/retry work continues so durable lease state cannot silently drift away from the live request path.
 - 2026-05-29: Server startup rehydrates only persisted `queued` jobs into the in-memory scheduler queue; terminal/running job states remain durable history and are not replayed as new admission work after restart.
+- 2026-05-29: Server startup runs one scheduler lease-expiry pass before serving so leases left by a crashed or stopped control plane are cleared against the real clock before new requests are admitted.

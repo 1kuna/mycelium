@@ -144,6 +144,9 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 		Clock:   clock.System{},
 		Presets: presetMap(presets),
 	}
+	if _, err := runtime.ExpireLeases(ctx); err != nil {
+		return "", nil, err
+	}
 	handler := gateway.Server{Router: &gateway.Router{
 		Placer:         placer,
 		Fleet:          fleet,
