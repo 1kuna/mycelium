@@ -40,11 +40,7 @@ func runPhase4ManualJoinSmoke(t *testing.T, gatewayURL, model string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
-	nodes := waitForJoinedNodes(t, ctx, gatewayURL, "")
-	if !hasReadyNode(nodes) {
-		t.Fatalf("no ready joined node: %+v", nodes)
-	}
-	assertGatewayChat(t, ctx, gatewayURL, model)
+	assertGatewayChatEventually(t, ctx, gatewayURL, model)
 }
 
 func runPhase4AutomatedJoinSmoke(t *testing.T, binary, model string) {
@@ -56,7 +52,10 @@ func runPhase4AutomatedJoinSmoke(t *testing.T, binary, model string) {
 	nodeAddr := freeAddr(t)
 	gatewayAddr := freeAddr(t)
 	backendAddr := freeAddr(t)
-	nodeConfig := writePhase4ComputePeerConfig(t, nodeAddr, backendAddr, binary, model)
+	nodeDiscoveryAddr := freeAddr(t)
+	gatewayDiscoveryAddr := freeAddr(t)
+	joinToken := "phase4-smoke"
+	nodeConfig := writePhase4ComputePeerConfig(t, nodeAddr, backendAddr, nodeDiscoveryAddr, gatewayDiscoveryAddr, joinToken, binary, model)
 
 	node := startSmokeProcess(t, ctx, mycelium,
 		"run",
@@ -65,59 +64,16 @@ func runPhase4AutomatedJoinSmoke(t *testing.T, binary, model string) {
 	defer node.stop(t)
 	waitForNodeReady(t, ctx, "http://"+nodeAddr)
 
-	gatewayConfig := writePhase4GatewayPeerConfig(t, gatewayAddr, nodeAddr, model)
+	gatewayConfig := writePhase4GatewayPeerConfig(t, gatewayAddr, gatewayDiscoveryAddr, nodeDiscoveryAddr, joinToken, model)
 	gatewayPeer := startSmokeProcess(t, ctx, mycelium, "run", "--config", gatewayConfig)
 	defer gatewayPeer.stop(t)
 
 	gatewayURL := "http://" + gatewayAddr
-	respBody, instanceID := assertGatewayChat(t, ctx, gatewayURL, model)
+	respBody, instanceID := assertGatewayChatEventually(t, ctx, gatewayURL, model)
 	if instanceID == "" {
 		t.Fatalf("gateway response missing %s body=%s", gateway.HeaderInstance, respBody)
 	}
 	unloadJoinedInstance(t, ctx, "http://"+nodeAddr, instanceID)
-}
-
-type phase4Node struct {
-	ID      string `json:"id"`
-	Address string `json:"address"`
-	Status  string `json:"status"`
-}
-
-func waitForJoinedNodes(t *testing.T, ctx context.Context, gatewayURL, directNodeAddr string) []phase4Node {
-	t.Helper()
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	var last []phase4Node
-	for {
-		nodes, ok := fetchJoinedNodes(t, ctx, gatewayURL)
-		if ok {
-			last = nodes
-			if hasReadyNode(nodes) && (directNodeAddr == "" || joinedThroughLoopback(nodes, directNodeAddr)) {
-				return nodes
-			}
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("waiting for joined node: %v last=%+v", ctx.Err(), last)
-		case <-ticker.C:
-		}
-	}
-}
-
-func waitForGatewayReady(t *testing.T, ctx context.Context, gatewayURL string) {
-	t.Helper()
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if _, ok := fetchJoinedNodes(t, ctx, gatewayURL); ok {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("waiting for gateway: %v", ctx.Err())
-		case <-ticker.C:
-		}
-	}
 }
 
 func waitForNodeReady(t *testing.T, ctx context.Context, nodeURL string) {
@@ -144,46 +100,26 @@ func waitForNodeReady(t *testing.T, ctx context.Context, nodeURL string) {
 	}
 }
 
-func fetchJoinedNodes(t *testing.T, ctx context.Context, gatewayURL string) ([]phase4Node, bool) {
+func assertGatewayChatEventually(t *testing.T, ctx context.Context, gatewayURL, model string) (string, string) {
 	t.Helper()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(gatewayURL, "/")+"/nodes", nil)
-	if err != nil {
-		t.Fatalf("nodes request: %v", err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, false
-	}
-	var nodes []phase4Node
-	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
-		t.Fatalf("decode nodes: %v", err)
-	}
-	return nodes, true
-}
-
-func joinedThroughLoopback(nodes []phase4Node, directNodeAddr string) bool {
-	for _, node := range nodes {
-		if node.Status == "ready" && strings.HasPrefix(node.Address, "127.0.0.1:") && node.Address != directNodeAddr {
-			return true
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	var last string
+	for {
+		body, instanceID, ok := tryGatewayChat(t, ctx, gatewayURL, model)
+		if ok {
+			return body, instanceID
+		}
+		last = body
+		select {
+		case <-ctx.Done():
+			t.Fatalf("waiting for gateway chat: %v last=%s", ctx.Err(), last)
+		case <-ticker.C:
 		}
 	}
-	return false
 }
 
-func hasReadyNode(nodes []phase4Node) bool {
-	for _, node := range nodes {
-		if node.Status == "ready" {
-			return true
-		}
-	}
-	return false
-}
-
-func assertGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model string) (string, string) {
+func tryGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model string) (string, string, bool) {
 	t.Helper()
 	body := []byte(`{"model":` + quote(model) + `,"messages":[{"role":"user","content":"Say hi."}],"max_tokens":1}`)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(gatewayURL, "/")+"/v1/chat/completions", bytes.NewReader(body))
@@ -193,7 +129,7 @@ func assertGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model stri
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("gateway post: %v", err)
+		return err.Error(), "", false
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
@@ -201,12 +137,12 @@ func assertGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model stri
 		t.Fatalf("read gateway response: %v", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("gateway status = %s body=%s", resp.Status, data)
+		return string(data), "", false
 	}
 	if resp.Header.Get(gateway.HeaderNode) == "" || !strings.Contains(string(data), `"choices"`) {
 		t.Fatalf("gateway response headers=%+v body=%s", resp.Header, data)
 	}
-	return string(data), resp.Header.Get(gateway.HeaderInstance)
+	return string(data), resp.Header.Get(gateway.HeaderInstance), true
 }
 
 func unloadJoinedInstance(t *testing.T, ctx context.Context, nodeURL, instanceID string) {
@@ -250,21 +186,25 @@ func repoRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
 
-func writePhase4GatewayPeerConfig(t *testing.T, addr, nodeAddr, model string) string {
+func writePhase4GatewayPeerConfig(t *testing.T, addr, discoveryListen, discoveryAddr, joinToken, model string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "gateway-peer.json")
 	cfg := struct {
-		Listen         string           `json:"listen"`
-		StorePath      string           `json:"store_path"`
-		NodeURLs       []string         `json:"node_urls"`
-		DefaultProject string           `json:"default_project"`
-		Projects       []domain.Project `json:"projects"`
-		Presets        []domain.Preset  `json:"presets"`
+		Listen          string           `json:"listen"`
+		StorePath       string           `json:"store_path"`
+		JoinToken       string           `json:"join_token"`
+		DiscoveryListen string           `json:"discovery_listen"`
+		DiscoveryAddr   string           `json:"discovery_addr"`
+		DefaultProject  string           `json:"default_project"`
+		Projects        []domain.Project `json:"projects"`
+		Presets         []domain.Preset  `json:"presets"`
 	}{
-		Listen:         addr,
-		StorePath:      filepath.Join(t.TempDir(), "control.sqlite"),
-		NodeURLs:       []string{"http://" + nodeAddr},
-		DefaultProject: "phase4",
+		Listen:          addr,
+		StorePath:       filepath.Join(t.TempDir(), "control.sqlite"),
+		JoinToken:       joinToken,
+		DiscoveryListen: discoveryListen,
+		DiscoveryAddr:   discoveryAddr,
+		DefaultProject:  "phase4",
 		Projects: []domain.Project{{
 			ID:         "phase4",
 			Priority:   domain.PriorityInteractive,
@@ -291,14 +231,17 @@ func writePhase4GatewayPeerConfig(t *testing.T, addr, nodeAddr, model string) st
 	return path
 }
 
-func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, binary, model string) string {
+func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, discoveryListen, discoveryAddr, joinToken, binary, model string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "compute-peer.json")
 	cfg := struct {
-		Listen        string `json:"listen"`
-		StorePath     string `json:"store_path"`
-		Compute       bool   `json:"compute"`
-		ComputeConfig struct {
+		Listen          string `json:"listen"`
+		StorePath       string `json:"store_path"`
+		Compute         bool   `json:"compute"`
+		JoinToken       string `json:"join_token"`
+		DiscoveryListen string `json:"discovery_listen"`
+		DiscoveryAddr   string `json:"discovery_addr"`
+		ComputeConfig   struct {
 			ID            string `json:"id"`
 			Name          string `json:"name"`
 			BackendListen string `json:"backend_listen"`
@@ -307,9 +250,12 @@ func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, binary, model
 		} `json:"compute_config"`
 		Presets []domain.Preset `json:"presets"`
 	}{
-		Listen:    addr,
-		StorePath: filepath.Join(t.TempDir(), "compute.sqlite"),
-		Compute:   true,
+		Listen:          addr,
+		StorePath:       filepath.Join(t.TempDir(), "compute.sqlite"),
+		Compute:         true,
+		JoinToken:       joinToken,
+		DiscoveryListen: discoveryListen,
+		DiscoveryAddr:   discoveryAddr,
 		Presets: []domain.Preset{{
 			ID:            "phase4-model",
 			ModelRef:      model,

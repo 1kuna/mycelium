@@ -104,11 +104,6 @@ type Optimizer interface {
 	Recommend(ctx context.Context, project domain.Project) ([]domain.TraceStep, error)
 }
 
-type Discovery interface {
-	Announce(ctx context.Context, node domain.Node) error
-	Discover(ctx context.Context) ([]domain.Node, error)
-}
-
 type Tunnel interface {
 	Open(ctx context.Context, node domain.Node) (string, error)
 	Close(ctx context.Context, nodeID string) error

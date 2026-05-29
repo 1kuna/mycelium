@@ -145,27 +145,8 @@ func TestResourceEstimatorAllocatorTelemetryAndClock(t *testing.T) {
 	}
 }
 
-func TestDiscoveryAndTunnelMocksRecordAndFail(t *testing.T) {
+func TestTunnelMockRecordsAndFails(t *testing.T) {
 	node := domain.Node{ID: "node-a", Address: "127.0.0.1:1"}
-	discovery := &Discovery{}
-	if err := discovery.Announce(context.Background(), node); err != nil {
-		t.Fatalf("Announce: %v", err)
-	}
-	nodes, err := discovery.Discover(context.Background())
-	if err != nil {
-		t.Fatalf("Discover: %v", err)
-	}
-	if len(nodes) != 1 || nodes[0].ID != node.ID {
-		t.Fatalf("nodes = %+v", nodes)
-	}
-	discovery.Err = errors.New("boom")
-	if err := discovery.Announce(context.Background(), node); err == nil {
-		t.Fatal("expected announce error")
-	}
-	if _, err := discovery.Discover(context.Background()); err == nil {
-		t.Fatal("expected discover error")
-	}
-
 	tunnel := &Tunnel{Addr: "127.0.0.1:6000"}
 	addr, err := tunnel.Open(context.Background(), node)
 	if err != nil {
