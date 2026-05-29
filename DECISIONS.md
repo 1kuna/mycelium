@@ -57,3 +57,4 @@
 - 2026-05-29: vLLM and MLX gateway profiles are explicit OpenAI-compatible profiles for chat/completions; unknown backends still fail loudly rather than falling through to a generic route.
 - 2026-05-29: Joined-node membership persists the node's advertised address, not the transient loopback tunnel address; server restart rebuilds loopback tunnels from that durable address and marks unreachable nodes through the normal snapshot path.
 - 2026-05-29: Engine recommendation application is an explicit project-default update: `myce recommendations apply` sets `Project.DefaultModel`, and the gateway only uses it when a request omits `model` for that project.
+- 2026-05-29: Linux hardware discovery uses `nvidia-smi --query-gpu=index,name,memory.total,compute_cap --format=csv,noheader,nounits` and fails loudly on malformed output; real CUDA smoke remains hardware-gated.
