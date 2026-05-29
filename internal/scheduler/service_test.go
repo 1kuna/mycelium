@@ -433,6 +433,37 @@ func TestServiceSubmitWithPayloadRejectsMissingCoordinatorLeaseForColdLoad(t *te
 	}
 }
 
+func TestServiceSubmitWithPayloadUsesLocalLeaseForCoordinatedWarmInstance(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 56).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("warm-a"), fixtures.OnNode(node.ID))
+	store := &runtimeStore{}
+	service := &Service{
+		Placer: fakePlacer{},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Coordinator: &mocks.Coordinator{
+			Decision: domain.PlacementDecision{JobID: "job-a", InstanceID: inst.ID, NodeID: node.ID, Claim: inst.Claim, Action: domain.ActionWarmInstance},
+			Lease:    domain.Lease{JobID: "job-a", InstanceID: inst.ID, NodeID: node.ID, Claim: inst.Claim},
+		},
+		JobLog: &recordingJobLog{},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+	}
+
+	result, err := service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a")), []byte(`{"job":"a"}`))
+	if err != nil {
+		t.Fatalf("SubmitWithPayload: %v", err)
+	}
+	if result.Lease.ID != "lease-job-a" || result.Lease.InstanceID != inst.ID || result.Instance.ID != inst.ID {
+		t.Fatalf("result = %+v", result)
+	}
+	if _, ok := store.leases[result.Lease.ID]; !ok {
+		t.Fatalf("lease not stored: %+v", store.leases)
+	}
+}
+
 func TestServiceReleaseJobUsesCoordinatorThenDeletesStoreLease(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(10, 55).UTC())
 	store := &runtimeStore{leases: map[string]domain.Lease{"lease-a": {ID: "lease-a", JobID: "job-a"}}}

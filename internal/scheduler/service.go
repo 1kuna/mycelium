@@ -250,6 +250,9 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	lease.JobID = job.ID
 	lease.NodeID = inst.NodeID
 	lease.InstanceID = inst.ID
+	if lease.ID == "" && decision.InstanceID != "" {
+		lease.ID = "lease-" + job.ID
+	}
 	if lease.GrantedAt.IsZero() {
 		lease.GrantedAt = s.Clock.Now().UTC()
 	}
