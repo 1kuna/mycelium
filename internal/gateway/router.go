@@ -80,6 +80,7 @@ type Router struct {
 	Runtime   *scheduler.Service
 	Telemetry ports.TelemetrySink
 	Clock     ports.Clock
+	Sticky    *StickyTable
 	MaxTries  int
 }
 
@@ -117,7 +118,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	var lastErr error
 	for attempt := 1; attempt <= tries; attempt++ {
 		job := jobFromIngress(req, attempt)
-		decision, inst, cold, err := r.placeAndLoad(ctx, job, preset, fleet)
+		decision, inst, cold, err := r.placeStickyOrLoad(ctx, req, job, preset, fleet)
 		if err != nil {
 			return RouteResponse{}, err
 		}
@@ -159,6 +160,9 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			return RouteResponse{}, err
 		}
 		r.recordMetric(ctx, job, inst, body)
+		if r.Sticky != nil {
+			r.Sticky.Put(req.ConversationKey, inst)
+		}
 		headers := cloneHeader(resp.Header)
 		if contentType != "" {
 			headers.Set("Content-Type", contentType)
@@ -181,6 +185,26 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		}, nil
 	}
 	return RouteResponse{}, fmt.Errorf("gateway failover exhausted: %w", lastErr)
+}
+
+func (r *Router) placeStickyOrLoad(ctx context.Context, req translate.IngressRequest, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot) (domain.PlacementDecision, domain.ModelInstance, bool, error) {
+	if r.Sticky != nil {
+		if inst, ok := r.Sticky.Get(req.ConversationKey, preset, fleet); ok {
+			return domain.PlacementDecision{
+				JobID:          job.ID,
+				InstanceID:     inst.ID,
+				NodeID:         inst.NodeID,
+				AcceleratorSet: append([]int(nil), inst.AcceleratorSet...),
+				Claim:          inst.Claim,
+				Action:         domain.ActionWarmInstance,
+				Trace: []domain.TraceStep{{
+					Step:   "sticky",
+					Result: "conversation affinity selected warm instance",
+				}},
+			}, inst, false, nil
+		}
+	}
+	return r.placeAndLoad(ctx, job, preset, fleet)
 }
 
 func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot) (domain.PlacementDecision, domain.ModelInstance, bool, error) {

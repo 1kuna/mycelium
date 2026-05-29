@@ -68,6 +68,7 @@ func parseRequest(r *http.Request) (translate.IngressRequest, error) {
 	req.Priority = domain.Priority(r.Header.Get(HeaderPriority))
 	req.SpeedPref = domain.SpeedPref(r.Header.Get(HeaderSpeedPref))
 	req.Preemption = domain.Preemption(r.Header.Get(HeaderPreemption))
+	req.ConversationKey = r.Header.Get(HeaderConversation)
 	if !validPriority(req.Priority) {
 		return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Priority"}
 	}

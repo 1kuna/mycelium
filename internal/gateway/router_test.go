@@ -70,12 +70,13 @@ func TestParseRequestReadsMyceliumIntentHeaders(t *testing.T) {
 	httpReq.Header.Set(HeaderSpeedPref, string(domain.SpeedLatency))
 	httpReq.Header.Set(HeaderContextCap, "4096")
 	httpReq.Header.Set(HeaderPreemption, string(domain.PreemptHard))
+	httpReq.Header.Set(HeaderConversation, "thread-a")
 
 	req, err := parseRequest(httpReq)
 	if err != nil {
 		t.Fatalf("parseRequest: %v", err)
 	}
-	if req.Project != "proj-a" || req.Priority != domain.PriorityBackground || req.SpeedPref != domain.SpeedLatency || req.ContextRequest != 4096 || req.Preemption != domain.PreemptHard {
+	if req.Project != "proj-a" || req.Priority != domain.PriorityBackground || req.SpeedPref != domain.SpeedLatency || req.ContextRequest != 4096 || req.Preemption != domain.PreemptHard || req.ConversationKey != "thread-a" {
 		t.Fatalf("req = %+v", req)
 	}
 
@@ -123,6 +124,43 @@ func TestRouterRetriesContextOverflowOnLargerPreset(t *testing.T) {
 	}
 	if resp.Instance.ID != "inst_large" || resp.Attempts != 2 || !strings.Contains(string(resp.Body), "retried") {
 		t.Fatalf("resp=%+v body=%s", resp, resp.Body)
+	}
+}
+
+func TestRouterUsesStickyConversationInstance(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstreamA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(openAIChatBody("first")))
+	}))
+	defer upstreamA.Close()
+	upstreamB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(openAIChatBody("sticky")))
+	}))
+	defer upstreamB.Close()
+	node := fixtures.MakeNode()
+	instA := fixtures.MakeInstance(fixtures.WithInstanceID("inst_a"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
+	instA.Addr = upstreamA.URL
+	instB := fixtures.MakeInstance(fixtures.WithInstanceID("inst_b"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
+	instB.Addr = upstreamB.URL
+	agent := mocks.NewNodeAgent(node)
+	router := newTestRouter(preset, domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{instA, instB},
+	}, staticResolver{agents: map[string]ports.NodeAgent{node.ID: agent}})
+	router.Sticky = NewStickyTable(router.Clock, time.Minute)
+	router.Sticky.Put("thread-a", instB)
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.ConversationKey = "thread-a"
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Instance.ID != instB.ID || !strings.Contains(string(resp.Body), "sticky") {
+		t.Fatalf("resp = %+v body=%s", resp, resp.Body)
 	}
 }
 
