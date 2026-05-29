@@ -3,6 +3,7 @@
 ## Active
 
 - 2026-05-29: Real cross-machine MLX-distributed smoke remains hardware/engine-gated. The mocked sharding planner contract is implemented, but proving hostfile generation/rank coordination needs MLX distributed runtime configured on multiple Macs and a model known to run through that path.
+- 2026-05-29: MLX and vLLM real-engine adapter smoke is implemented but unavailable on this dev host right now. `command -v mlx_lm.server`, `command -v vllm`, and `command -v nvidia-smi` returned no binary on Darwin arm64; run `MYCELIUM_MLX_BINARY=... MYCELIUM_MLX_MODEL=...` or `MYCELIUM_VLLM_BINARY=... MYCELIUM_VLLM_MODEL=... go test -tags smoke ./test/smoke/... -run 'MLX|VLLM' -timeout 20m -v -count=1` once those runtimes/models exist.
 
 ## Resolved
 
