@@ -14,12 +14,17 @@ import (
 )
 
 func TestResolvePresetBranches(t *testing.T) {
-	preset := fixtures.MakePreset(fixtures.WithPresetID("preset_a"), fixtures.WithModelRef("model_a"))
-	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{}, mocks.NewFakeClock(time.Now()), preset)
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset_a"), fixtures.WithModelRef("model_a"), fixtures.WithAliases("alias_a"))
+	blankModel := fixtures.MakePreset(fixtures.WithPresetID("preset_blank"), fixtures.WithModelRef(""))
+	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{}, mocks.NewFakeClock(time.Now()), preset, blankModel)
 
 	got, err := placer.resolvePreset(fixtures.MakeJob(fixtures.WithPreset("preset_a")))
 	if err != nil || got.ID != "preset_a" {
 		t.Fatalf("resolve by preset = %+v %v", got, err)
+	}
+	got, err = placer.resolvePreset(fixtures.MakeJob(fixtures.WithModel("alias_a")))
+	if err != nil || got.ID != "preset_a" {
+		t.Fatalf("resolve by alias = %+v %v", got, err)
 	}
 	_, err = placer.resolvePreset(domain.Job{ID: "missing"})
 	if err == nil || !strings.Contains(err.Error(), "no model") {

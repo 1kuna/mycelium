@@ -55,3 +55,7 @@ func WithContext(n int) func(*domain.Job) {
 func WithPreset(id string) func(*domain.Job) {
 	return func(j *domain.Job) { j.PresetID = id }
 }
+
+func WithModel(model string) func(*domain.Job) {
+	return func(j *domain.Job) { j.Model = model }
+}

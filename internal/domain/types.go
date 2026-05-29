@@ -37,6 +37,7 @@ type SpeedClass struct {
 type Preset struct {
 	ID            string       `json:"id"`
 	ModelRef      string       `json:"model_ref"`
+	Aliases       []string     `json:"aliases,omitempty"`
 	Backend       Backend      `json:"backend"`
 	ContextLength int          `json:"context_length"`
 	Quant         string       `json:"quant"`
