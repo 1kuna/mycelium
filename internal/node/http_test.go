@@ -78,8 +78,17 @@ func TestHTTPAdmissionControllerRoundTrip(t *testing.T) {
 	if lease.JobID != job.ID || lease.NodeID != "node-http" || lease.Claim != claim {
 		t.Fatalf("lease = %+v", lease)
 	}
+	if got, found, err := client.LeaseForJob(context.Background(), job.ID); err != nil || !found || got.ID != lease.ID {
+		t.Fatalf("LeaseForJob = %+v %v %v", got, found, err)
+	}
+	if got, found, err := client.LeaseForJob(context.Background(), "missing"); err != nil || found || got.ID != "" {
+		t.Fatalf("missing LeaseForJob = %+v %v %v", got, found, err)
+	}
 	if err := client.Release(context.Background(), lease.ID); err != nil {
 		t.Fatalf("Release: %v", err)
+	}
+	if _, found, err := client.LeaseForJob(context.Background(), job.ID); err != nil || found {
+		t.Fatalf("released LeaseForJob found=%v err=%v", found, err)
 	}
 
 	preemptOffer, err := client.Offer(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-preempt")), claim)
@@ -187,6 +196,24 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 	if err := admissionClient.Preempt(context.Background(), "", "test"); err == nil || !strings.Contains(err.Error(), "lease_id") {
 		t.Fatalf("empty preempt err = %v", err)
 	}
+	resp, err = http.Get(admissionServer.URL + "/admission/lease")
+	if err != nil {
+		t.Fatalf("empty lease query: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("unsupported lease inspection status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
+	leaseServer := httptest.NewServer(HTTPServer{Admission: NewAdmission(fixtures.MakeNode(), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))})
+	defer leaseServer.Close()
+	resp, err = http.Get(leaseServer.URL + "/admission/lease")
+	if err != nil {
+		t.Fatalf("bad lease query: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad lease query status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
 }
 
 func TestHTTPServerHandlesMissingAgentAndNotFound(t *testing.T) {
