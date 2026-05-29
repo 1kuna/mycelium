@@ -76,7 +76,10 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 		if err != nil {
 			return "", nil, err
 		}
-		registry := membership.NewRegistry(tokens, membership.NewLANTunnel())
+		registry, err := membership.NewPersistentRegistry(ctx, tokens, membership.NewLANTunnel(), store)
+		if err != nil {
+			return "", nil, err
+		}
 		fleet = registry
 		nodes = registry
 		mux = http.NewServeMux()
