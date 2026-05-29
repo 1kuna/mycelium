@@ -72,7 +72,7 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 		opts = append(opts, nodeagent.WithModelInspector(nodeagent.ParserInspector{Parser: estimate.NewCommandParser(compute.GGUFParser, []string{"{model}"})}))
 	}
 	agent := nodeagent.NewAgent(node, adapter, clock.System{}, opts...)
-	admission := nodeagent.NewAdmission(node, lease.NewAllocator(), clock.System{})
+	admission := nodeagent.NewAdmission(node, lease.NewAllocator(), clock.System{}, nodeagent.WithAdmissionInstances(agent.Instances))
 	return computeRuntime{
 		handler:   nodeagent.HTTPServer{Agent: agent, Admission: admission},
 		node:      node,

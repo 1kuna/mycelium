@@ -106,6 +106,12 @@ func (a *Agent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 	return domain.NodeSnapshot{Node: node, Instances: instances}, nil
 }
 
+func (a *Agent) Instances() []domain.ModelInstance {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.instanceListLocked()
+}
+
 func (a *Agent) Load(ctx context.Context, p domain.Preset) (domain.ModelInstance, error) {
 	if inst, ok := a.readyInstance(p.ID); ok {
 		return inst, nil
