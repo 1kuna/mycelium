@@ -1011,11 +1011,17 @@ func TestNodeDirectoryCombinesSnapshots(t *testing.T) {
 	if _, err := directory.AdmissionController(node.ID); err == nil {
 		t.Fatal("plain node agent exposed admission")
 	}
+	if _, err := directory.LeaseInspector(node.ID); err == nil {
+		t.Fatal("plain node agent exposed lease inspection")
+	}
 
 	admitting := admittingAgent{NodeAgent: mocks.NewNodeAgent(node), AdmissionController: &mocks.AdmissionController{}}
 	directory = NodeDirectory{Agents: map[string]ports.NodeAgent{node.ID: admitting}}
 	if _, err := directory.AdmissionController(node.ID); err != nil {
 		t.Fatalf("AdmissionController: %v", err)
+	}
+	if _, err := directory.LeaseInspector(node.ID); err != nil {
+		t.Fatalf("LeaseInspector: %v", err)
 	}
 }
 
@@ -1068,6 +1074,18 @@ func (s staticResolver) AdmissionController(nodeID string) (ports.AdmissionContr
 		return nil, domain.ErrUnreachable
 	}
 	return admission, nil
+}
+
+func (s staticResolver) LeaseInspector(nodeID string) (ports.LeaseInspector, error) {
+	admission, ok := s.admissions[nodeID]
+	if !ok {
+		return nil, domain.ErrUnreachable
+	}
+	inspector, ok := admission.(ports.LeaseInspector)
+	if !ok {
+		return nil, domain.ErrUnsupported
+	}
+	return inspector, nil
 }
 
 type loadNode struct {

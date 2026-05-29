@@ -184,6 +184,18 @@ func (r *Registry) AdmissionController(nodeID string) (ports.AdmissionController
 	return admission, nil
 }
 
+func (r *Registry) LeaseInspector(nodeID string) (ports.LeaseInspector, error) {
+	agent, err := r.NodeAgent(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	inspector, ok := agent.(ports.LeaseInspector)
+	if !ok {
+		return nil, fmt.Errorf("node agent %q does not expose lease inspection", nodeID)
+	}
+	return inspector, nil
+}
+
 func (r *Registry) Announce(context.Context, domain.Node) error {
 	return fmt.Errorf("membership announce requires an explicit join token")
 }
