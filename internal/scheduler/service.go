@@ -20,6 +20,8 @@ type NodeResolver interface {
 type RuntimeStore interface {
 	SaveJob(ctx context.Context, job domain.Job) error
 	SaveLease(ctx context.Context, lease domain.Lease) error
+	ListLeases(ctx context.Context) ([]domain.Lease, error)
+	DeleteLease(ctx context.Context, id string) error
 	SaveInstance(ctx context.Context, inst domain.ModelInstance) error
 	DeleteInstance(ctx context.Context, id string) error
 }
@@ -124,6 +126,38 @@ func (s *Service) Drain(ctx context.Context, limit int) ([]Result, error) {
 		results = append(results, result)
 	}
 	return results, nil
+}
+
+func (s *Service) Release(ctx context.Context, leaseID string) error {
+	if err := s.validate(); err != nil {
+		return err
+	}
+	if leaseID == "" {
+		return fmt.Errorf("lease id is required")
+	}
+	return s.Store.DeleteLease(ctx, leaseID)
+}
+
+func (s *Service) ExpireLeases(ctx context.Context) (int, error) {
+	if err := s.validate(); err != nil {
+		return 0, err
+	}
+	leases, err := s.Store.ListLeases(ctx)
+	if err != nil {
+		return 0, err
+	}
+	now := s.Clock.Now()
+	expired := 0
+	for _, lease := range leases {
+		if lease.ExpiresAt.IsZero() || lease.ExpiresAt.After(now) {
+			continue
+		}
+		if err := s.Store.DeleteLease(ctx, lease.ID); err != nil {
+			return expired, err
+		}
+		expired++
+	}
+	return expired, nil
 }
 
 func (s *Service) validate() error {
