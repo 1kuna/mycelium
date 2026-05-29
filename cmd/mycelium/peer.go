@@ -186,6 +186,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		Placer:  placer,
 		Fleet:   fleet,
 		Nodes:   nodes,
+		Owners:  admissionResolver(nodes),
 		Queue:   queue,
 		Store:   store,
 		Clock:   clock.System{},
@@ -263,6 +264,28 @@ func (n combinedNodes) NodeAgent(nodeID string) (ports.NodeAgent, error) {
 		return agent, nil
 	}
 	return n.right.NodeAgent(nodeID)
+}
+
+func (n combinedNodes) AdmissionController(nodeID string) (ports.AdmissionController, error) {
+	if left, ok := n.left.(scheduler.AdmissionResolver); ok {
+		admission, err := left.AdmissionController(nodeID)
+		if err == nil {
+			return admission, nil
+		}
+	}
+	right, ok := n.right.(scheduler.AdmissionResolver)
+	if !ok {
+		return nil, fmt.Errorf("node resolver does not expose admission")
+	}
+	return right.AdmissionController(nodeID)
+}
+
+func admissionResolver(nodes gateway.NodeResolver) scheduler.AdmissionResolver {
+	admissions, ok := nodes.(scheduler.AdmissionResolver)
+	if !ok {
+		return nil
+	}
+	return admissions
 }
 
 type jobLister interface {

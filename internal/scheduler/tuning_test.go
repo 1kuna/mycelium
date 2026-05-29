@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"mycelium/internal/domain"
+	"mycelium/internal/ports"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
 )
@@ -59,6 +60,7 @@ func TestServicePassesLaunchTuningToColdLoad(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(1, 0).UTC())
 	node := tuningNode()
 	agent := mocks.NewNodeAgent(node)
+	admission := &mocks.AdmissionController{}
 	preset := fixtures.MakePreset(fixtures.WithPresetID("llama"))
 	service := &Service{
 		Placer: fakePlacer{decision: domain.PlacementDecision{
@@ -68,11 +70,12 @@ func TestServicePassesLaunchTuningToColdLoad(t *testing.T) {
 			Claim:          fixtures.MakeClaim(1, 1),
 			Action:         domain.ActionLoadedNew,
 		}},
-		Fleet: staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
-		Nodes: staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}},
-		Queue: NewQueue(clock),
-		Store: &runtimeStore{},
-		Clock: clock,
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}, admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Queue:  NewQueue(clock),
+		Store:  &runtimeStore{},
+		Clock:  clock,
 		Presets: map[string]domain.Preset{
 			preset.ID: preset,
 		},

@@ -33,5 +33,17 @@ func (d NodeDirectory) NodeAgent(nodeID string) (ports.NodeAgent, error) {
 	return agent, nil
 }
 
+func (d NodeDirectory) AdmissionController(nodeID string) (ports.AdmissionController, error) {
+	agent, err := d.NodeAgent(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	admission, ok := agent.(ports.AdmissionController)
+	if !ok {
+		return nil, fmt.Errorf("node agent %q does not expose admission", nodeID)
+	}
+	return admission, nil
+}
+
 var _ FleetSource = NodeDirectory{}
 var _ NodeResolver = NodeDirectory{}

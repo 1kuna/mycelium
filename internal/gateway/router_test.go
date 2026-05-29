@@ -599,7 +599,11 @@ func TestRouterUsesRuntimeServiceForColdLoad(t *testing.T) {
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_runtime"))
 	inst.Addr = upstream.URL
-	resolver := staticResolver{agents: map[string]ports.NodeAgent{node.ID: loadNode{node: node, inst: inst}}}
+	admission := &mocks.AdmissionController{}
+	resolver := staticResolver{
+		agents:     map[string]ports.NodeAgent{node.ID: loadNode{node: node, inst: inst}},
+		admissions: map[string]ports.AdmissionController{node.ID: admission},
+	}
 	fleet := staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}}
 	router := newTestRouter(preset, fleet.fleet, resolver)
 	router.Fleet = fleet
@@ -609,6 +613,7 @@ func TestRouterUsesRuntimeServiceForColdLoad(t *testing.T) {
 		Placer:  router.Placer,
 		Fleet:   fleet,
 		Nodes:   resolver,
+		Owners:  resolver,
 		Queue:   scheduler.NewQueue(router.Clock),
 		Store:   store,
 		Clock:   router.Clock,
@@ -699,7 +704,10 @@ func TestRouterReleaseLeaseReturnsRuntimeError(t *testing.T) {
 }
 
 func newRuntimeRouterForInstance(preset domain.Preset, node domain.Node, inst domain.ModelInstance, store *gatewayRuntimeStore) *Router {
-	resolver := staticResolver{agents: map[string]ports.NodeAgent{node.ID: loadNode{node: node, inst: inst}}}
+	resolver := staticResolver{
+		agents:     map[string]ports.NodeAgent{node.ID: loadNode{node: node, inst: inst}},
+		admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}},
+	}
 	fleet := staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}}
 	router := newTestRouter(preset, fleet.fleet, resolver)
 	router.Fleet = fleet
@@ -708,6 +716,7 @@ func newRuntimeRouterForInstance(preset domain.Preset, node domain.Node, inst do
 		Placer:  router.Placer,
 		Fleet:   fleet,
 		Nodes:   resolver,
+		Owners:  resolver,
 		Queue:   scheduler.NewQueue(router.Clock),
 		Store:   store,
 		Clock:   router.Clock,
@@ -999,6 +1008,15 @@ func TestNodeDirectoryCombinesSnapshots(t *testing.T) {
 	if _, err := directory.NodeAgent("missing"); err == nil {
 		t.Fatal("missing node agent succeeded")
 	}
+	if _, err := directory.AdmissionController(node.ID); err == nil {
+		t.Fatal("plain node agent exposed admission")
+	}
+
+	admitting := admittingAgent{NodeAgent: mocks.NewNodeAgent(node), AdmissionController: &mocks.AdmissionController{}}
+	directory = NodeDirectory{Agents: map[string]ports.NodeAgent{node.ID: admitting}}
+	if _, err := directory.AdmissionController(node.ID); err != nil {
+		t.Fatalf("AdmissionController: %v", err)
+	}
 }
 
 func newTestRouter(preset domain.Preset, fleet domain.FleetSnapshot, nodes NodeResolver, extra ...domain.Preset) *Router {
@@ -1032,7 +1050,8 @@ func (s staticFleet) Snapshot(context.Context) (domain.FleetSnapshot, error) {
 }
 
 type staticResolver struct {
-	agents map[string]ports.NodeAgent
+	agents     map[string]ports.NodeAgent
+	admissions map[string]ports.AdmissionController
 }
 
 func (s staticResolver) NodeAgent(nodeID string) (ports.NodeAgent, error) {
@@ -1043,9 +1062,22 @@ func (s staticResolver) NodeAgent(nodeID string) (ports.NodeAgent, error) {
 	return agent, nil
 }
 
+func (s staticResolver) AdmissionController(nodeID string) (ports.AdmissionController, error) {
+	admission, ok := s.admissions[nodeID]
+	if !ok {
+		return nil, domain.ErrUnreachable
+	}
+	return admission, nil
+}
+
 type loadNode struct {
 	node domain.Node
 	inst domain.ModelInstance
+}
+
+type admittingAgent struct {
+	*mocks.NodeAgent
+	*mocks.AdmissionController
 }
 
 func (n loadNode) Snapshot(context.Context) (domain.NodeSnapshot, error) {

@@ -172,6 +172,18 @@ func (r *Registry) NodeAgent(nodeID string) (ports.NodeAgent, error) {
 	return agent, nil
 }
 
+func (r *Registry) AdmissionController(nodeID string) (ports.AdmissionController, error) {
+	agent, err := r.NodeAgent(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	admission, ok := agent.(ports.AdmissionController)
+	if !ok {
+		return nil, fmt.Errorf("node agent %q does not expose admission", nodeID)
+	}
+	return admission, nil
+}
+
 func (r *Registry) Announce(context.Context, domain.Node) error {
 	return fmt.Errorf("membership announce requires an explicit join token")
 }
