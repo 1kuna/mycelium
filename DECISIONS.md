@@ -40,7 +40,7 @@
 - 2026-05-29: In-flight request tracking lives on the node-agent protocol; the gateway brackets upstream calls with begin/end and node unload marks an instance stopping before waiting for active requests to drain.
 - 2026-05-29: Sticky routing is keyed by `X-Myc-Conversation` with a short TTL and only reuses ready instances whose preset still matches; stale, loading, or mismatched entries fall back to normal placement.
 - 2026-05-29: Reverse benchmarks write raw per-model outputs plus objective metrics only; the runner deliberately avoids subjective ranking so the user remains the judge of answer quality.
-- 2026-05-29: MLX and vLLM adapters share a supervised process adapter with explicit command templates and health polling; real engine smoke remains hardware/env gated instead of faked in fast tests.
+- 2026-05-29: MLX and vLLM adapters share a supervised process adapter with explicit command templates and health polling; runtime-specific smoke stays gated on real installed engines instead of being faked in fast tests.
 - 2026-05-29: Server reservations are loaded from durable state into the allocator; pinned preset reservations reserve the preset's computed claim on the pinned node rather than becoming a scheduler hint only.
 - 2026-05-29: Streaming gateway requests use a direct writer path instead of the buffered route response; cold-load SSE starts before node `Load`, and later failures on an already-started stream are emitted as SSE error events because HTTP status cannot be changed after the first flush.
 - 2026-05-29: OpenAI-compatible gateway requests accept tool/function fields and content-part arrays as pass-through JSON; Anthropic tool/content blocks pass through only to Anthropic-profile backends and fail loudly when translation to OpenAI-compatible text would lose protocol meaning.
@@ -73,3 +73,4 @@
 - 2026-05-29: Gateway request job IDs use a process-wide monotonic sequence instead of model/attempt text so repeated requests emit distinct telemetry records into the durable store.
 - 2026-05-29: OCI catalog imports verify the pulled layer's manifest size and sha256 digest before returning a draft preset input; unsupported digest algorithms fail loudly instead of trusting bytes by URL alone.
 - 2026-05-29: The control CLI is shared from `cmd/internal/controlcli` so both the legacy `mycelium myce ...` path and the real `myce` binary execute the same implementation.
+- 2026-05-29: MLX adapters target the official `mlx_lm.server` executable directly, using `--model/--host/--port`; the `mlx_lm server` wrapper form is not the installed CLI shape and fails against the real runtime.

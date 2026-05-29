@@ -1,5 +1,6 @@
 /mycelium
 /myce
+/.venv-mlx/
 /.smoke-models/
 *.out
 *.test
