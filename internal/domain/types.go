@@ -42,6 +42,7 @@ type Preset struct {
 	Quant         string       `json:"quant"`
 	Capabilities  []Capability `json:"capabilities"`
 	LaunchProfile string       `json:"launch_profile"`
+	LaunchArgs    []string     `json:"launch_args,omitempty"`
 	EstWeightsMB  int          `json:"est_weights_mb"`
 	KVPerTokenMB  float64      `json:"kv_per_token_mb"`
 	NodeID        string       `json:"node_id,omitempty"`

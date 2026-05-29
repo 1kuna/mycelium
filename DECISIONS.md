@@ -15,3 +15,4 @@
 - 2026-05-29: Make the GGUF parser command template configurable and parse JSON metadata into `domain.ModelMetadata`; this avoids baking in a brittle CLI shape while still shelling out to the real parser path in production.
 - 2026-05-29: Node-side load admission uses the same allocator contract as the scheduler; saturation is a loud `ErrNoFit` rejection, leaving queueing to the control plane.
 - 2026-05-29: Use a narrow JSON HTTP node-agent transport for Phase 1 remote smoke (`snapshot`, `load`, `unload`, `inspect`); LAN discovery/onboarding remains Phase 4.
+- 2026-05-29: Llama.cpp launch profiles are explicit named arg lists, and per-preset launch args carry computed tuning such as GPU layers or tensor split into the backend command; unknown profiles fail before launch.

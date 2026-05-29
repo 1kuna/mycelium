@@ -28,6 +28,35 @@ func TestAdapterNameAndRenderArgs(t *testing.T) {
 	}
 }
 
+func TestRenderLaunchArgsIncludesProfileAndPresetTuning(t *testing.T) {
+	preset := fixtures.MakePreset(
+		fixtures.WithPresetID("preset"),
+		fixtures.WithModelRef("/models/qwen.gguf"),
+		fixtures.WithLaunchProfile("metal"),
+		fixtures.WithLaunchArgs("--n-gpu-layers", "99", "--tensor-split", "1,1"),
+	)
+	adapter := NewAdapter(Config{
+		Args:           []string{"-m", "{model}"},
+		LaunchProfiles: map[string][]string{"metal": {"--flash-attn"}},
+	})
+	args, err := adapter.renderLaunchArgs(preset, "127.0.0.1:8080")
+	if err != nil {
+		t.Fatalf("renderLaunchArgs: %v", err)
+	}
+	want := []string{"-m", "/models/qwen.gguf", "--flash-attn", "--n-gpu-layers", "99", "--tensor-split", "1,1"}
+	if strings.Join(args, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("args = %+v", args)
+	}
+}
+
+func TestUnknownLaunchProfileFailsLoud(t *testing.T) {
+	adapter := NewAdapter(Config{LaunchProfiles: map[string][]string{}})
+	_, err := adapter.renderLaunchArgs(fixtures.MakePreset(fixtures.WithLaunchProfile("missing")), "127.0.0.1:1")
+	if err == nil || !strings.Contains(err.Error(), "unknown llama.cpp launch profile") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestWaitReadyReturnsOnHealthyResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {

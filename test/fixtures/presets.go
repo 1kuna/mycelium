@@ -40,6 +40,14 @@ func WithContextLength(n int) func(*domain.Preset) {
 	return func(p *domain.Preset) { p.ContextLength = n }
 }
 
+func WithLaunchProfile(profile string) func(*domain.Preset) {
+	return func(p *domain.Preset) { p.LaunchProfile = profile }
+}
+
+func WithLaunchArgs(args ...string) func(*domain.Preset) {
+	return func(p *domain.Preset) { p.LaunchArgs = append([]string(nil), args...) }
+}
+
 func WithPresetNode(id string) func(*domain.Preset) {
 	return func(p *domain.Preset) { p.NodeID = id }
 }

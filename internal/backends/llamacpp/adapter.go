@@ -24,18 +24,23 @@ type Adapter struct {
 }
 
 type Config struct {
-	BinaryPath   string
-	Args         []string
-	HealthPath   string
-	PollInterval time.Duration
-	HTTPClient   *http.Client
-	Clock        ports.Clock
+	BinaryPath     string
+	Args           []string
+	LaunchProfiles map[string][]string
+	HealthPath     string
+	PollInterval   time.Duration
+	HTTPClient     *http.Client
+	Clock          ports.Clock
 }
 
 func DefaultConfig() Config {
 	return Config{
-		BinaryPath:   "llama-server",
-		Args:         []string{"--host", "{host}", "--port", "{port}", "-m", "{model}", "-c", "{ctx}"},
+		BinaryPath: "llama-server",
+		Args:       []string{"--host", "{host}", "--port", "{port}", "-m", "{model}", "-c", "{ctx}"},
+		LaunchProfiles: map[string][]string{
+			"llamacpp-cuda":  nil,
+			"llamacpp-metal": nil,
+		},
 		HealthPath:   "/health",
 		PollInterval: 250 * time.Millisecond,
 		HTTPClient:   http.DefaultClient,
@@ -50,6 +55,9 @@ func NewAdapter(cfg Config) *Adapter {
 	}
 	if cfg.Args == nil {
 		cfg.Args = def.Args
+	}
+	if cfg.LaunchProfiles == nil {
+		cfg.LaunchProfiles = def.LaunchProfiles
 	}
 	if cfg.HealthPath == "" {
 		cfg.HealthPath = def.HealthPath
@@ -71,7 +79,10 @@ func (a *Adapter) Name() string {
 }
 
 func (a *Adapter) Launch(ctx context.Context, p domain.Preset, addr string) (ports.Handle, error) {
-	args := renderArgs(a.cfg.Args, p, addr)
+	args, err := a.renderLaunchArgs(p, addr)
+	if err != nil {
+		return ports.Handle{}, err
+	}
 	cmd := exec.CommandContext(ctx, a.cfg.BinaryPath, args...)
 	if err := cmd.Start(); err != nil {
 		return ports.Handle{}, err
@@ -80,6 +91,19 @@ func (a *Adapter) Launch(ctx context.Context, p domain.Preset, addr string) (por
 	a.processes[cmd.Process.Pid] = cmd
 	a.mu.Unlock()
 	return ports.Handle{PID: cmd.Process.Pid, Addr: addr, Kind: "process", Ref: fmt.Sprintf("%d", cmd.Process.Pid)}, nil
+}
+
+func (a *Adapter) renderLaunchArgs(p domain.Preset, addr string) ([]string, error) {
+	args := append([]string(nil), a.cfg.Args...)
+	if p.LaunchProfile != "" {
+		profileArgs, ok := a.cfg.LaunchProfiles[p.LaunchProfile]
+		if !ok {
+			return nil, fmt.Errorf("unknown llama.cpp launch profile %q", p.LaunchProfile)
+		}
+		args = append(args, profileArgs...)
+	}
+	args = append(args, p.LaunchArgs...)
+	return renderArgs(args, p, addr), nil
 }
 
 func (a *Adapter) WaitReady(ctx context.Context, addr string) error {
