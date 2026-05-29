@@ -104,6 +104,7 @@ type RouteResponse struct {
 	Body     []byte
 	Decision domain.PlacementDecision
 	Instance domain.ModelInstance
+	Lease    domain.Lease
 	Profile  profiles.Profile
 	Attempts int
 	ColdLoad bool
@@ -138,7 +139,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		job := r.jobFromIngress(req, attempt)
 		clk := r.clock()
 		loadStart := clk.Now()
-		decision, inst, cold, err := r.placeStickyOrLoad(ctx, req, job, preset, fleet, nil)
+		decision, inst, lease, cold, err := r.placeStickyOrLoad(ctx, req, job, preset, fleet, nil)
 		if err != nil {
 			return RouteResponse{}, err
 		}
@@ -148,17 +149,26 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		}
 		endRequest, err := r.beginInstanceRequest(ctx, inst)
 		if err != nil {
+			if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
+				return RouteResponse{}, releaseErr
+			}
 			return RouteResponse{}, err
 		}
 		route, err := translate.BuildUpstream(req, profile)
 		if err != nil {
 			endRequest()
+			if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
+				return RouteResponse{}, releaseErr
+			}
 			return RouteResponse{}, err
 		}
 		upstreamStart := clk.Now()
 		resp, err := r.callUpstream(ctx, inst, route)
 		upstreamEnd := clk.Now()
 		endRequest()
+		if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
+			return RouteResponse{}, releaseErr
+		}
 		if err != nil || resp.Status >= 500 {
 			if err == nil {
 				err = fmt.Errorf("upstream returned %d", resp.Status)
@@ -212,6 +222,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			Body:     body,
 			Decision: decision,
 			Instance: inst,
+			Lease:    lease,
 			Profile:  profile,
 			Attempts: attempt,
 			ColdLoad: cold,
@@ -269,7 +280,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			flush(w)
 			return nil
 		}
-		decision, inst, cold, err := r.placeStickyOrLoad(ctx, req, job, preset, fleet, beforeCold)
+		decision, inst, lease, cold, err := r.placeStickyOrLoad(ctx, req, job, preset, fleet, beforeCold)
 		if err != nil {
 			if started {
 				writeStreamError(w, err)
@@ -289,6 +300,9 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		}
 		endRequest, err := r.beginInstanceRequest(ctx, inst)
 		if err != nil {
+			if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
+				err = releaseErr
+			}
 			if started {
 				writeStreamError(w, err)
 				return nil
@@ -298,6 +312,9 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		route, err := translate.BuildUpstream(req, profile)
 		if err != nil {
 			endRequest()
+			if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
+				err = releaseErr
+			}
 			if started {
 				writeStreamError(w, err)
 				return nil
@@ -307,6 +324,9 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		if route.Translate {
 			endRequest()
 			err := fmt.Errorf("translated streaming responses are not supported")
+			if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
+				err = releaseErr
+			}
 			if started {
 				writeStreamError(w, err)
 				return nil
@@ -317,6 +337,13 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		resp, err := r.doUpstream(ctx, inst, route)
 		if err != nil {
 			endRequest()
+			if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
+				if started {
+					writeStreamError(w, releaseErr)
+					return nil
+				}
+				return releaseErr
+			}
 			lastErr = err
 			if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
 				err = reportErr
@@ -335,6 +362,13 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			body, readErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			endRequest()
+			if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
+				if started {
+					writeStreamError(w, releaseErr)
+					return nil
+				}
+				return releaseErr
+			}
 			if readErr != nil {
 				err = readErr
 			} else {
@@ -384,6 +418,9 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		copied, copyErr := copyAndFlush(w, resp.Body, clk)
 		_ = resp.Body.Close()
 		endRequest()
+		if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
+			return releaseErr
+		}
 		if copyErr != nil {
 			return copyErr
 		}
@@ -404,7 +441,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 	return fmt.Errorf("gateway failover exhausted: %w", lastErr)
 }
 
-func (r *Router) placeStickyOrLoad(ctx context.Context, req translate.IngressRequest, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot, beforeCold func(context.Context, domain.PlacementDecision) error) (domain.PlacementDecision, domain.ModelInstance, bool, error) {
+func (r *Router) placeStickyOrLoad(ctx context.Context, req translate.IngressRequest, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot, beforeCold func(context.Context, domain.PlacementDecision) error) (domain.PlacementDecision, domain.ModelInstance, domain.Lease, bool, error) {
 	if r.Sticky != nil {
 		if inst, ok := r.Sticky.Get(req.ConversationKey, preset, fleet); ok {
 			return domain.PlacementDecision{
@@ -418,13 +455,13 @@ func (r *Router) placeStickyOrLoad(ctx context.Context, req translate.IngressReq
 					Step:   "sticky",
 					Result: "conversation affinity selected warm instance",
 				}},
-			}, inst, false, nil
+			}, inst, domain.Lease{}, false, nil
 		}
 	}
 	return r.placeAndLoad(ctx, job, preset, fleet, beforeCold)
 }
 
-func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot, beforeCold func(context.Context, domain.PlacementDecision) error) (domain.PlacementDecision, domain.ModelInstance, bool, error) {
+func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot, beforeCold func(context.Context, domain.PlacementDecision) error) (domain.PlacementDecision, domain.ModelInstance, domain.Lease, bool, error) {
 	if r.Runtime != nil {
 		var hooks []scheduler.SubmitHooks
 		if beforeCold != nil {
@@ -432,25 +469,25 @@ func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, preset domain
 		}
 		result, err := r.Runtime.Submit(ctx, job, hooks...)
 		if err != nil {
-			return result.Decision, result.Instance, false, err
+			return result.Decision, result.Instance, result.Lease, false, err
 		}
 		if result.Decision.Action == domain.ActionQueued {
-			return result.Decision, result.Instance, false, fmt.Errorf("job %q queued: no instance available", job.ID)
+			return result.Decision, result.Instance, result.Lease, false, fmt.Errorf("job %q queued: no instance available", job.ID)
 		}
 		cold := result.Decision.InstanceID == ""
-		return result.Decision, result.Instance, cold, nil
+		return result.Decision, result.Instance, result.Lease, cold, nil
 	}
 	decision, err := r.Placer.Place(ctx, job, fleet)
 	if err != nil {
-		return domain.PlacementDecision{}, domain.ModelInstance{}, false, err
+		return domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, false, err
 	}
 	if decision.InstanceID == "" && decision.Action != domain.ActionQueued && beforeCold != nil {
 		if err := beforeCold(ctx, decision); err != nil {
-			return decision, domain.ModelInstance{}, false, err
+			return decision, domain.ModelInstance{}, domain.Lease{}, false, err
 		}
 	}
 	inst, cold, err := r.resolveInstance(ctx, decision, preset, fleet)
-	return decision, inst, cold, err
+	return decision, inst, domain.Lease{}, cold, err
 }
 
 func (r *Router) jobFromIngress(req translate.IngressRequest, attempt int) domain.Job {
@@ -605,6 +642,13 @@ func (r *Router) reportFailure(ctx context.Context, instanceID string, err error
 		return r.Reporter.ReportInstanceFailure(ctx, instanceID, err)
 	}
 	return nil
+}
+
+func (r *Router) releaseLease(ctx context.Context, lease domain.Lease) error {
+	if lease.ID == "" || r.Runtime == nil {
+		return nil
+	}
+	return r.Runtime.Release(ctx, lease.ID)
 }
 
 type metricTiming struct {
