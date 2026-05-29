@@ -20,14 +20,20 @@ type Adapter struct {
 	processes map[int]*exec.Cmd
 }
 
+type ProcessRegistry interface {
+	Add(ctx context.Context, ref domain.ProcessRef) error
+	Remove(ctx context.Context, ref domain.ProcessRef) error
+}
+
 type Config struct {
-	Name         string
-	BinaryPath   string
-	Args         []string
-	HealthPath   string
-	PollInterval time.Duration
-	HTTPClient   *http.Client
-	Clock        ports.Clock
+	Name            string
+	BinaryPath      string
+	Args            []string
+	HealthPath      string
+	PollInterval    time.Duration
+	HTTPClient      *http.Client
+	Clock           ports.Clock
+	ProcessRegistry ProcessRegistry
 }
 
 func New(cfg Config) *Adapter {
@@ -57,14 +63,16 @@ func (a *Adapter) Launch(ctx context.Context, preset domain.Preset, addr string)
 	if a.cfg.BinaryPath == "" {
 		return ports.Handle{}, fmt.Errorf("%s backend binary path is required", a.cfg.Name)
 	}
-	args, err := renderArgs(a.cfg.Args, preset, addr)
+	args := append([]string(nil), a.cfg.Args...)
+	args = append(args, preset.LaunchArgs...)
+	rendered, err := renderArgs(args, preset, addr)
 	if err != nil {
 		return ports.Handle{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return ports.Handle{}, err
 	}
-	cmd := exec.Command(a.cfg.BinaryPath, args...)
+	cmd := exec.Command(a.cfg.BinaryPath, rendered...)
 	if err := cmd.Start(); err != nil {
 		return ports.Handle{}, err
 	}
@@ -78,8 +86,18 @@ func (a *Adapter) Launch(ctx context.Context, preset domain.Preset, addr string)
 	a.mu.Lock()
 	a.processes[cmd.Process.Pid] = cmd
 	a.mu.Unlock()
-	ref := fmt.Sprintf("%d", cmd.Process.Pid)
-	return ports.Handle{PID: cmd.Process.Pid, Addr: addr, Kind: "process", Ref: ref}, nil
+	ref := domain.ProcessRef{PID: cmd.Process.Pid, Kind: "process", Ref: fmt.Sprintf("%d", cmd.Process.Pid)}
+	if a.cfg.ProcessRegistry != nil {
+		if err := a.cfg.ProcessRegistry.Add(ctx, ref); err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			a.mu.Lock()
+			delete(a.processes, cmd.Process.Pid)
+			a.mu.Unlock()
+			return ports.Handle{}, err
+		}
+	}
+	return ports.Handle{PID: cmd.Process.Pid, Addr: addr, Kind: ref.Kind, Ref: ref.Ref}, nil
 }
 
 func (a *Adapter) WaitReady(ctx context.Context, addr string) error {
@@ -116,6 +134,7 @@ func (a *Adapter) Stop(ctx context.Context, handle ports.Handle) error {
 	if handle.PID == 0 {
 		return nil
 	}
+	defer a.removeProcessRef(ctx, handle)
 	a.mu.Lock()
 	cmd := a.processes[handle.PID]
 	delete(a.processes, handle.PID)
@@ -134,6 +153,13 @@ func (a *Adapter) Stop(ctx context.Context, handle ports.Handle) error {
 	case <-done:
 		return nil
 	}
+}
+
+func (a *Adapter) removeProcessRef(ctx context.Context, handle ports.Handle) {
+	if a.cfg.ProcessRegistry == nil || handle.PID == 0 {
+		return
+	}
+	_ = a.cfg.ProcessRegistry.Remove(ctx, domain.ProcessRef{PID: handle.PID, Kind: handle.Kind, Ref: handle.Ref})
 }
 
 func renderArgs(args []string, preset domain.Preset, addr string) ([]string, error) {
