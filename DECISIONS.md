@@ -22,3 +22,5 @@
 - 2026-05-29: Phase 2 gateway profiles are explicit data keyed by backend; unknown backends fail instead of falling back to generic OpenAI routing.
 - 2026-05-29: Phase 2 gateway failover retries once by default, reports the failed instance, removes it from the local candidate snapshot, and then asks the scheduler again.
 - 2026-05-29: Anthropic-to-OpenAI streaming translation fails loudly until chunk-level SSE translation exists; non-streaming messages translate through OpenAI chat with strict field validation.
+- 2026-05-29: Phase 3 implements the local-path importer first because it is the smallest real end-to-end path; `hf://` and `oci://` fail loudly until their real importers exist.
+- 2026-05-29: Catalog installs commit the preset JSON last, after the model artifact and provenance are durable, so interrupted installs cannot register a half-materialized usable preset.
