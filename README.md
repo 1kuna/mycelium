@@ -1,7 +1,9 @@
 # Mycelium
 
 Mycelium is a hardware-aware inference control plane for a heterogeneous local fleet.
-It is a single Go binary with one long-running peer role:
+It is a single Go binary with one long-running peer role. A peer can run with
+`compute: true` to own local accelerators/backends, or compute-off to submit and
+coordinate work only:
 
 - `mycelium run`
 

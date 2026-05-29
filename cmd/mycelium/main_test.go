@@ -141,27 +141,27 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if peerCfg.QueueDrainMS != 1000 || peerCfg.QueueDrainLimit != 1 || peerCfg.OptimizerEvalMS != 60000 {
 		t.Fatalf("peer drain defaults = %+v", peerCfg)
 	}
-	nodePath := filepath.Join(t.TempDir(), "node.json")
-	nodeRaw := `{"listen":"127.0.0.1:7","backend_listen":"127.0.0.1:8","id":"node-json","name":"Node JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"state_db":"state.db","join":"mycjoin://127.0.0.1:1?token=x","gguf_parser":"parser"}`
-	if err := os.WriteFile(nodePath, []byte(nodeRaw), 0644); err != nil {
-		t.Fatalf("write node config: %v", err)
+	if peerCfg.ComputeConfig.ID != "peer_local" || peerCfg.ComputeConfig.BackendListen != "127.0.0.1:51848" {
+		t.Fatalf("compute defaults = %+v", peerCfg.ComputeConfig)
 	}
-	nodeCfg, err := loadNodeConfig(nodePath)
+	computePath := filepath.Join(t.TempDir(), "compute-peer.json")
+	computeRaw := `{"compute":true,"compute_config":{"backend_listen":"127.0.0.1:8","id":"peer-json","name":"Peer JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"gguf_parser":"parser"}}`
+	if err := os.WriteFile(computePath, []byte(computeRaw), 0644); err != nil {
+		t.Fatalf("write compute peer config: %v", err)
+	}
+	computeCfg, err := loadPeerConfig(computePath)
 	if err != nil {
-		t.Fatalf("loadNodeConfig: %v", err)
+		t.Fatalf("loadPeerConfig compute: %v", err)
 	}
-	if nodeCfg.ID != "node-json" || nodeCfg.VRAMMB != 1234 || nodeCfg.GGUFParser != "parser" || nodeCfg.Backend != domain.BackendMLX || nodeCfg.BackendBinary != "/bin/mlx" {
-		t.Fatalf("node config = %+v", nodeCfg)
-	}
-	if _, err := loadNodeConfig(filepath.Join(t.TempDir(), "missing.json")); err == nil {
-		t.Fatal("expected missing node config error")
+	if !computeCfg.Compute || computeCfg.ComputeConfig.ID != "peer-json" || computeCfg.ComputeConfig.VRAMMB != 1234 || computeCfg.ComputeConfig.GGUFParser != "parser" || computeCfg.ComputeConfig.Backend != domain.BackendMLX || computeCfg.ComputeConfig.BackendBinary != "/bin/mlx" {
+		t.Fatalf("compute peer config = %+v", computeCfg)
 	}
 	badPath := filepath.Join(t.TempDir(), "bad.json")
 	if err := os.WriteFile(badPath, []byte(`{`), 0644); err != nil {
 		t.Fatalf("write bad config: %v", err)
 	}
-	if _, err := loadNodeConfig(badPath); err == nil {
-		t.Fatal("expected bad node config error")
+	if _, err := loadPeerConfig(badPath); err == nil {
+		t.Fatal("expected bad peer config error")
 	}
 }
 
@@ -441,9 +441,6 @@ func TestPeerEstimatorUsesGGUFParserWhenConfigured(t *testing.T) {
 func TestRunNodeAndPeerExitOnCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := runNode(ctx, []string{"--listen", "127.0.0.1:0", "--backend-listen", "127.0.0.1:0"}); err != nil {
-		t.Fatalf("runNode canceled: %v", err)
-	}
 	configPath := writePeerConfig(t, PeerConfig{
 		Listen:    "127.0.0.1:0",
 		StorePath: filepath.Join(t.TempDir(), "control.db"),
@@ -455,10 +452,24 @@ func TestRunNodeAndPeerExitOnCanceledContext(t *testing.T) {
 	}
 }
 
-func TestBuildNodeServer(t *testing.T) {
-	addr, handler, err := buildNodeServer([]string{"--listen", "127.0.0.1:0", "--id", "node-a", "--name", "Node A", "--llama-server", "/bin/echo", "--vram-mb", "1024"})
+func TestBuildPeerGatewayWithLocalCompute(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	configPath := writePeerConfig(t, PeerConfig{
+		Listen:    "127.0.0.1:0",
+		StorePath: dbPath,
+		Compute:   true,
+		ComputeConfig: ComputeConfig{
+			ID:            "peer-a",
+			Name:          "Peer A",
+			BackendListen: "127.0.0.1:51848",
+			LlamaServer:   "/bin/echo",
+			VRAMMB:        1024,
+		},
+		Presets: []domain.Preset{testPreset("tiny")},
+	})
+	addr, handler, err := buildPeerGateway(context.Background(), []string{"--config", configPath})
 	if err != nil {
-		t.Fatalf("buildNodeServer: %v", err)
+		t.Fatalf("buildPeerGateway: %v", err)
 	}
 	if addr != "127.0.0.1:0" {
 		t.Fatalf("addr = %s", addr)
@@ -466,9 +477,29 @@ func TestBuildNodeServer(t *testing.T) {
 	if handler == nil {
 		t.Fatal("handler is nil")
 	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/snapshot", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("snapshot status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	var snap domain.NodeSnapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatalf("snapshot json: %v", err)
+	}
+	if snap.Node.ID != "peer-a" || snap.Node.Labels[LabelPeerBackend] != string(domain.BackendLlamaCpp) {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	if got, err := store.Node(context.Background(), "peer-a"); err != nil || got.ID != "peer-a" {
+		t.Fatalf("stored node = %+v %v", got, err)
+	}
 }
 
-func TestBuildNodeServerSelectsConfiguredBackends(t *testing.T) {
+func TestBuildComputeRuntimeSelectsConfiguredBackends(t *testing.T) {
 	for _, tt := range []struct {
 		backend domain.Backend
 		name    string
@@ -477,24 +508,30 @@ func TestBuildNodeServerSelectsConfiguredBackends(t *testing.T) {
 		{backend: domain.BackendVLLM, name: "vllm"},
 	} {
 		t.Run(string(tt.backend), func(t *testing.T) {
-			spec, err := buildNodeServerSpec(context.Background(), []string{
-				"--listen", "127.0.0.1:0",
-				"--id", "node-a",
-				"--name", "Node A",
-				"--backend", string(tt.backend),
-				"--backend-binary", "/bin/echo",
-				"--vram-mb", "1024",
-				"--state-db", filepath.Join(t.TempDir(), "node.sqlite"),
-			})
+			store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
 			if err != nil {
-				t.Fatalf("buildNodeServerSpec: %v", err)
+				t.Fatalf("Open: %v", err)
 			}
-			if spec.node.Labels[LabelNodeBackend] != string(tt.backend) {
-				t.Fatalf("node labels = %+v", spec.node.Labels)
-			}
-			adapter, err := nodeBackendAdapter(NodeConfig{Backend: tt.backend, BackendBinary: "/bin/echo"}, nodeagent.StoreProcessRegistry{})
+			defer store.Close()
+			runtime, err := buildComputeRuntime(context.Background(), PeerConfig{
+				Listen: "127.0.0.1:0",
+				ComputeConfig: defaultedComputeConfig(ComputeConfig{
+					ID:            "peer-a",
+					Name:          "Peer A",
+					Backend:       tt.backend,
+					BackendBinary: "/bin/echo",
+					VRAMMB:        1024,
+				}),
+			}, store)
 			if err != nil {
-				t.Fatalf("nodeBackendAdapter: %v", err)
+				t.Fatalf("buildComputeRuntime: %v", err)
+			}
+			if runtime.node.Labels[LabelPeerBackend] != string(tt.backend) {
+				t.Fatalf("node labels = %+v", runtime.node.Labels)
+			}
+			adapter, err := computeBackendAdapter(ComputeConfig{Backend: tt.backend, BackendBinary: "/bin/echo"}, nodeagent.StoreProcessRegistry{})
+			if err != nil {
+				t.Fatalf("computeBackendAdapter: %v", err)
 			}
 			if adapter.Name() != tt.name {
 				t.Fatalf("adapter name = %s", adapter.Name())
@@ -503,41 +540,30 @@ func TestBuildNodeServerSelectsConfiguredBackends(t *testing.T) {
 	}
 }
 
-func TestBuildNodeServerRejectsUnknownBackend(t *testing.T) {
-	_, err := buildNodeServerSpec(context.Background(), []string{
-		"--listen", "127.0.0.1:0",
-		"--backend", "unknown",
-		"--vram-mb", "1024",
-		"--state-db", filepath.Join(t.TempDir(), "node.sqlite"),
-	})
-	if err == nil || !strings.Contains(err.Error(), "unknown node backend") {
+func TestBuildComputeRuntimeRejectsUnknownBackend(t *testing.T) {
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	_, err = buildComputeRuntime(context.Background(), PeerConfig{
+		Listen: "127.0.0.1:0",
+		ComputeConfig: defaultedComputeConfig(ComputeConfig{
+			Backend: domain.Backend("unknown"),
+			VRAMMB:  1024,
+		}),
+	}, store)
+	if err == nil || !strings.Contains(err.Error(), "unknown compute backend") {
 		t.Fatalf("unknown backend err = %v", err)
 	}
-	if got := nodeBackendBinary(NodeConfig{Backend: domain.BackendLlamaCpp, BackendBinary: "/bin/custom", LlamaServer: "/bin/llama"}, "fallback"); got != "/bin/custom" {
+	if got := computeBackendBinary(ComputeConfig{Backend: domain.BackendLlamaCpp, BackendBinary: "/bin/custom", LlamaServer: "/bin/llama"}, "fallback"); got != "/bin/custom" {
 		t.Fatalf("backend binary = %s", got)
 	}
-	if got := nodeBackendBinary(NodeConfig{Backend: domain.BackendLlamaCpp, LlamaServer: "/bin/llama"}, "fallback"); got != "/bin/llama" {
+	if got := computeBackendBinary(ComputeConfig{Backend: domain.BackendLlamaCpp, LlamaServer: "/bin/llama"}, "fallback"); got != "/bin/llama" {
 		t.Fatalf("llama binary = %s", got)
 	}
-	if got := nodeBackendBinary(NodeConfig{Backend: domain.BackendMLX}, "mlx_lm.server"); got != "mlx_lm.server" {
+	if got := computeBackendBinary(ComputeConfig{Backend: domain.BackendMLX}, "mlx_lm.server"); got != "mlx_lm.server" {
 		t.Fatalf("mlx binary = %s", got)
-	}
-}
-
-func TestJoinedBackendAddrRewritesLoopbackToAdvertisedLANHost(t *testing.T) {
-	got := joinedBackendAddr("127.0.0.1:51848", "192.0.2.63:51847")
-	if got != "192.0.2.63:51848" {
-		t.Fatalf("joinedBackendAddr = %s", got)
-	}
-	if got := joinedBackendAddr("10.0.0.5:6000", "192.0.2.63:51847"); got != "10.0.0.5:6000" {
-		t.Fatalf("explicit backend changed to %s", got)
-	}
-}
-
-func TestEffectiveAdvertiseAddrUsesActualPortForZeroListen(t *testing.T) {
-	got := effectiveAdvertiseAddr("0.0.0.0:0", "127.0.0.1:60000")
-	if got != "0.0.0.0:60000" {
-		t.Fatalf("effectiveAdvertiseAddr = %s", got)
 	}
 }
 
