@@ -135,6 +135,9 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	if err := store.Record(ctx, domain.RunMetric{At: time.Unix(1, 0).UTC()}); err == nil {
 		t.Fatal("Record should require job id")
 	}
+	if err := store.SaveRecommendation(ctx, domain.RecommendationRecord{ID: "rec-no-time"}); err == nil {
+		t.Fatal("SaveRecommendation should require created_at")
+	}
 	if err := store.Record(ctx, domain.RunMetric{JobID: "metric"}); err == nil {
 		t.Fatal("Record should require timestamp")
 	}
@@ -150,7 +153,7 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	if err != nil || len(filtered) != 1 || filtered[0].JobID != "m2" {
 		t.Fatalf("Metrics filtered = %+v, %v", filtered, err)
 	}
-	rec := domain.RecommendationRecord{ID: "rec-a", ProjectID: "p2", Type: "context", RecommendedValue: 30}
+	rec := domain.RecommendationRecord{ID: "rec-a", ProjectID: "p2", Type: "context", RecommendedValue: 30, CreatedAt: time.Unix(11, 0).UTC()}
 	must(t, store.SaveRecommendation(ctx, rec))
 	gotRec, err := store.Recommendation(ctx, rec.ID)
 	if err != nil || gotRec.ID != rec.ID || gotRec.CreatedAt.IsZero() {

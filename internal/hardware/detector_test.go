@@ -5,14 +5,17 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
+	"mycelium/test/mocks"
 )
 
 func TestDarwinDetectorBuildsUnifiedMemoryNode(t *testing.T) {
 	detector := Detector{
-		GOOS: "darwin",
+		GOOS:  "darwin",
+		Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
 		Command: func(context.Context, string, ...string) ([]byte, error) {
 			return []byte("68719476736\n"), nil
 		},
@@ -31,6 +34,9 @@ func TestDarwinDetectorBuildsUnifiedMemoryNode(t *testing.T) {
 	}
 	if node.Labels["gpu.vendor"] != "apple" || node.SpeedClass.Source != "detected-default" {
 		t.Fatalf("labels/speed = %+v %+v", node.Labels, node.SpeedClass)
+	}
+	if !node.SpeedClass.ProbedAt.Equal(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("probed_at = %s", node.SpeedClass.ProbedAt)
 	}
 }
 

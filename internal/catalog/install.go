@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"mycelium/internal/catalog/importers"
+	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
 )
@@ -29,7 +30,7 @@ type InstallJob struct {
 }
 
 func NewInstaller(storeDir string) Installer {
-	return Installer{StoreDir: storeDir, Now: time.Now}
+	return Installer{StoreDir: storeDir, Now: clock.System{}.Now}
 }
 
 func (i Installer) Materialize(ctx context.Context, ref string) (domain.Preset, error) {
@@ -167,7 +168,7 @@ func (i Installer) now() time.Time {
 	if i.Now != nil {
 		return i.Now()
 	}
-	return time.Now()
+	return clock.System{}.Now()
 }
 
 func ensureStore(root string) error {
