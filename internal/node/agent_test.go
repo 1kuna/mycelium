@@ -129,6 +129,28 @@ func TestLoadFailureRemovesLoadingInstanceAndStopsHandle(t *testing.T) {
 	}
 }
 
+func TestLoadTimeoutUsesInjectedClock(t *testing.T) {
+	backend := newBlockingBackend()
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	agent := NewAgent(fixtures.MakeNode(), backend, clock, WithAllocator(lease.NewAllocator()), WithLoadTimeout(time.Second))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := agent.Load(context.Background(), fixtures.MakePreset())
+		done <- err
+	}()
+	<-backend.waiting
+	clock.Advance(time.Second)
+	err := <-done
+	if err == nil {
+		t.Fatal("expected load timeout error")
+	}
+	snap, _ := agent.Snapshot(context.Background())
+	if len(snap.Instances) != 0 {
+		t.Fatalf("timed-out load left instance: %+v", snap.Instances)
+	}
+}
+
 func TestUnloadUnknownAndStopFailure(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
 	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
