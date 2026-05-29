@@ -120,6 +120,7 @@ func runProjects(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("projects set", flag.ContinueOnError)
 	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
 	id := fs.String("id", "", "project id")
+	defaultModel := fs.String("default-model", "", "default model or preset id")
 	priority := fs.String("priority", string(domain.PriorityInteractive), "priority")
 	speed := fs.String("speed-pref", string(domain.SpeedThroughput), "speed preference")
 	contextCap := fs.Int("context-cap", 0, "context cap")
@@ -137,12 +138,13 @@ func runProjects(ctx context.Context, args []string) error {
 	}
 	defer store.Close()
 	project := domain.Project{
-		ID:         *id,
-		Priority:   domain.Priority(*priority),
-		SpeedPref:  domain.SpeedPref(*speed),
-		ContextCap: *contextCap,
-		Preemption: domain.Preemption(*preemption),
-		AutoApply:  *autoApply,
+		ID:           *id,
+		DefaultModel: *defaultModel,
+		Priority:     domain.Priority(*priority),
+		SpeedPref:    domain.SpeedPref(*speed),
+		ContextCap:   *contextCap,
+		Preemption:   domain.Preemption(*preemption),
+		AutoApply:    *autoApply,
 	}
 	if err := store.SaveProject(ctx, project); err != nil {
 		return err
@@ -292,7 +294,17 @@ func runRecommendationsApply(ctx context.Context, args []string) error {
 			return err
 		}
 	case optimizer.RecommendationEngineParameter:
-		return fmt.Errorf("engine recommendations are advisory; select preset %q explicitly to apply", rec.RecommendedPresetID)
+		if rec.RecommendedPresetID == "" {
+			return fmt.Errorf("engine recommendation %q has no preset to apply", rec.ID)
+		}
+		project, err := store.Project(ctx, rec.ProjectID)
+		if err != nil {
+			return err
+		}
+		project.DefaultModel = rec.RecommendedPresetID
+		if err := store.SaveProject(ctx, project); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unknown recommendation type %q", rec.Type)
 	}

@@ -64,6 +64,38 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 }
 
+func TestRouterUsesProjectDefaultModel(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if !strings.Contains(string(body), `"model":"`+preset.ID+`"`) {
+			t.Fatalf("body = %s", body)
+		}
+		_, _ = w.Write([]byte(openAIChatBody("defaulted")))
+	}))
+	defer upstream.Close()
+	inst := fixtures.MakeInstance(fixtures.WithInstancePreset(preset.ID))
+	inst.Addr = upstream.URL
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	router.Projects = map[string]domain.Project{"proj-a": {ID: "proj-a", DefaultModel: preset.ID}}
+	req, err := translate.ParseOpenAIChat([]byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.Project = "proj-a"
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if !strings.Contains(string(resp.Body), "defaulted") {
+		t.Fatalf("body = %s", resp.Body)
+	}
+}
+
 func TestParseRequestReadsMyceliumIntentHeaders(t *testing.T) {
 	raw := `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}]}`
 	httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(raw))
@@ -483,6 +515,7 @@ func TestRouterStreamEarlyErrors(t *testing.T) {
 		want   string
 	}{
 		{name: "unconfigured", router: &Router{}, req: req, want: "not configured"},
+		{name: "missing model", router: newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{}), req: translate.IngressRequest{Kind: translate.KindOpenAIChat, Stream: true}, want: "model is required"},
 		{name: "unknown model", router: newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{}), req: translate.IngressRequest{Kind: translate.KindOpenAIChat, Model: "missing", Stream: true}, want: "unknown model"},
 		{name: "fleet", router: &Router{Placer: newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{}).Placer, Fleet: staticFleet{err: errors.New("fleet failed")}, Nodes: staticResolver{}, Presets: NewPresetRegistry(preset)}, req: req, want: "fleet failed"},
 	}

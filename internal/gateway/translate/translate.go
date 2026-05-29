@@ -47,9 +47,6 @@ func ParseOpenAIChat(body []byte) (IngressRequest, error) {
 	if err := decodeStrict(body, &req); err != nil {
 		return IngressRequest{}, err
 	}
-	if req.Model == "" {
-		return IngressRequest{}, fmt.Errorf("model is required")
-	}
 	if len(req.Messages) == 0 {
 		return IngressRequest{}, fmt.Errorf("messages are required")
 	}
@@ -61,9 +58,6 @@ func ParseOpenAICompletion(body []byte) (IngressRequest, error) {
 	if err := decodeStrict(body, &req); err != nil {
 		return IngressRequest{}, err
 	}
-	if req.Model == "" {
-		return IngressRequest{}, fmt.Errorf("model is required")
-	}
 	return IngressRequest{Kind: KindOpenAICompletion, Model: req.Model, Stream: req.Stream, Body: append([]byte(nil), body...), Complete: req}, nil
 }
 
@@ -72,9 +66,6 @@ func ParseAnthropicMessages(body []byte) (IngressRequest, error) {
 	if err := decodeStrict(body, &req); err != nil {
 		return IngressRequest{}, err
 	}
-	if req.Model == "" {
-		return IngressRequest{}, fmt.Errorf("model is required")
-	}
 	if req.MaxTokens == 0 {
 		return IngressRequest{}, fmt.Errorf("max_tokens is required")
 	}
@@ -82,6 +73,33 @@ func ParseAnthropicMessages(body []byte) (IngressRequest, error) {
 		return IngressRequest{}, fmt.Errorf("messages are required")
 	}
 	return IngressRequest{Kind: KindAnthropicMessages, Model: req.Model, Stream: req.Stream, Body: append([]byte(nil), body...), Claude: req}, nil
+}
+
+func WithModel(req IngressRequest, model string) (IngressRequest, error) {
+	if model == "" {
+		return IngressRequest{}, fmt.Errorf("model is required")
+	}
+	req.Model = model
+	var body []byte
+	var err error
+	switch req.Kind {
+	case KindOpenAIChat:
+		req.OpenAI.Model = model
+		body, err = json.Marshal(req.OpenAI)
+	case KindOpenAICompletion:
+		req.Complete.Model = model
+		body, err = json.Marshal(req.Complete)
+	case KindAnthropicMessages:
+		req.Claude.Model = model
+		body, err = json.Marshal(req.Claude)
+	default:
+		return IngressRequest{}, fmt.Errorf("unsupported ingress kind %q", req.Kind)
+	}
+	if err != nil {
+		return IngressRequest{}, err
+	}
+	req.Body = body
+	return req, nil
 }
 
 func BuildUpstream(req IngressRequest, profile profiles.Profile) (UpstreamRequest, error) {

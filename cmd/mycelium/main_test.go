@@ -14,6 +14,7 @@ import (
 	"mycelium/internal/catalog"
 	"mycelium/internal/domain"
 	"mycelium/internal/estimate"
+	"mycelium/internal/optimizer"
 	storesqlite "mycelium/internal/store/sqlite"
 )
 
@@ -91,7 +92,7 @@ func TestRunControlListCommandsAndProjectSet(t *testing.T) {
 		{"jobs", "list", "--db", dbPath},
 		{"recommendations", "list", "--db", dbPath, "--project", "project-a"},
 		{"recommendations", "calibrate-speed", "--db", dbPath},
-		{"projects", "set", "--db", dbPath, "--id", "project-b", "--priority", "background", "--speed-pref", "latency", "--context-cap", "4096", "--preemption", "hard", "--auto-apply"},
+		{"projects", "set", "--db", dbPath, "--id", "project-b", "--default-model", "preset-b", "--priority", "background", "--speed-pref", "latency", "--context-cap", "4096", "--preemption", "hard", "--auto-apply"},
 	}
 	for _, args := range commands {
 		if err := runControl(context.Background(), args); err != nil {
@@ -212,6 +213,51 @@ func TestRunRecommendationsGenerateAndApply(t *testing.T) {
 	}
 	if appliedProject.ContextCap != 6000 || appliedProject.AutoApply || appliedPreset.ContextLength != 6000 {
 		t.Fatalf("project=%+v preset=%+v", appliedProject, appliedPreset)
+	}
+}
+
+func TestRunRecommendationsApplyEngineSetsProjectDefault(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	project := domain.Project{ID: "project-a"}
+	rec := domain.RecommendationRecord{
+		ID:                  "rec-engine",
+		Type:                optimizer.RecommendationEngineParameter,
+		ProjectID:           project.ID,
+		RecommendedPresetID: "fast-preset",
+		CreatedAt:           time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC),
+	}
+	if err := store.SaveProject(context.Background(), project); err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	if err := store.SaveRecommendation(context.Background(), rec); err != nil {
+		t.Fatalf("SaveRecommendation: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := runControl(context.Background(), []string{"recommendations", "apply", "--db", dbPath, "--id", rec.ID}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	store, err = storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer store.Close()
+	gotProject, err := store.Project(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	gotRec, err := store.Recommendation(context.Background(), rec.ID)
+	if err != nil {
+		t.Fatalf("Recommendation: %v", err)
+	}
+	if gotProject.DefaultModel != rec.RecommendedPresetID || !gotRec.Applied {
+		t.Fatalf("project=%+v rec=%+v", gotProject, gotRec)
 	}
 }
 

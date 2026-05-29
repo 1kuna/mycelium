@@ -102,6 +102,10 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	if r.Placer == nil || r.Fleet == nil || r.Nodes == nil {
 		return RouteResponse{}, fmt.Errorf("gateway router is not configured")
 	}
+	req, err := r.applyRequestDefaults(req)
+	if err != nil {
+		return RouteResponse{}, err
+	}
 	preset, err := r.Presets.Resolve(req.Model)
 	if err != nil {
 		return RouteResponse{}, err
@@ -206,6 +210,10 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w http.ResponseWriter) error {
 	if r.Placer == nil || r.Fleet == nil || r.Nodes == nil {
 		return fmt.Errorf("gateway router is not configured")
+	}
+	req, err := r.applyRequestDefaults(req)
+	if err != nil {
+		return err
 	}
 	preset, err := r.Presets.Resolve(req.Model)
 	if err != nil {
@@ -474,6 +482,22 @@ func (r *Router) jobFromIngress(req translate.IngressRequest, attempt int) domai
 		Preemption:     preemption,
 		Streaming:      req.Stream,
 	}
+}
+
+func (r *Router) applyRequestDefaults(req translate.IngressRequest) (translate.IngressRequest, error) {
+	project := req.Project
+	if project == "" {
+		project = r.DefaultProject
+	}
+	if req.Model == "" && project != "" {
+		if defaults, ok := r.Projects[project]; ok && defaults.DefaultModel != "" {
+			return translate.WithModel(req, defaults.DefaultModel)
+		}
+	}
+	if req.Model == "" {
+		return translate.IngressRequest{}, fmt.Errorf("model is required")
+	}
+	return req, nil
 }
 
 func (r *Router) profileFor(preset domain.Preset) (profiles.Profile, error) {

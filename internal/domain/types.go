@@ -149,6 +149,7 @@ type Lease struct {
 
 type Project struct {
 	ID             string     `json:"id"`
+	DefaultModel   string     `json:"default_model,omitempty"`
 	Priority       Priority   `json:"priority"`
 	SpeedPref      SpeedPref  `json:"speed_pref"`
 	ContextCap     int        `json:"context_cap"`
