@@ -29,7 +29,7 @@ type NodeResolver interface {
 }
 
 type FailureReporter interface {
-	ReportInstanceFailure(ctx context.Context, instanceID string, err error)
+	ReportInstanceFailure(ctx context.Context, instanceID string, err error) error
 }
 
 type PresetRegistry struct {
@@ -164,7 +164,9 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 				err = fmt.Errorf("upstream returned %d", resp.Status)
 			}
 			lastErr = err
-			r.reportFailure(ctx, inst.ID, err)
+			if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
+				return RouteResponse{}, reportErr
+			}
 			fleet = withoutInstance(fleet, inst.ID)
 			continue
 		}
@@ -316,10 +318,15 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		if err != nil {
 			endRequest()
 			lastErr = err
-			r.reportFailure(ctx, inst.ID, err)
+			if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
+				err = reportErr
+			}
 			if started {
 				writeStreamError(w, err)
 				return nil
+			}
+			if err != lastErr {
+				return err
 			}
 			fleet = withoutInstance(fleet, inst.ID)
 			continue
@@ -335,10 +342,15 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			}
 			if resp.StatusCode >= 500 {
 				lastErr = err
-				r.reportFailure(ctx, inst.ID, err)
+				if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
+					err = reportErr
+				}
 				if started {
 					writeStreamError(w, err)
 					return nil
+				}
+				if err != lastErr {
+					return err
 				}
 				fleet = withoutInstance(fleet, inst.ID)
 				continue
@@ -588,10 +600,11 @@ func (r *Router) doUpstream(ctx context.Context, inst domain.ModelInstance, rout
 	return client.Do(httpReq)
 }
 
-func (r *Router) reportFailure(ctx context.Context, instanceID string, err error) {
+func (r *Router) reportFailure(ctx context.Context, instanceID string, err error) error {
 	if r.Reporter != nil {
-		r.Reporter.ReportInstanceFailure(ctx, instanceID, err)
+		return r.Reporter.ReportInstanceFailure(ctx, instanceID, err)
 	}
+	return nil
 }
 
 type metricTiming struct {

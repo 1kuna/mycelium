@@ -147,6 +147,7 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 		Presets:        gateway.NewPresetRegistry(presets...),
 		Runtime:        runtime,
 		Telemetry:      store,
+		Reporter:       gateway.InstanceFailureReporter{Store: store, Nodes: nodes},
 		Clock:          clock.System{},
 		Sticky:         gateway.NewStickyTable(clock.System{}, 10*time.Minute),
 		Projects:       projectMap(projects),

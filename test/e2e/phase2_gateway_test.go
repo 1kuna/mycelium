@@ -256,8 +256,9 @@ type recordingFailureReporter struct {
 	failed []string
 }
 
-func (r *recordingFailureReporter) ReportInstanceFailure(_ context.Context, instanceID string, _ error) {
+func (r *recordingFailureReporter) ReportInstanceFailure(_ context.Context, instanceID string, _ error) error {
 	r.failed = append(r.failed, instanceID)
+	return nil
 }
 
 func postJSON(t *testing.T, url, body string) *http.Response {
