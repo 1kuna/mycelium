@@ -1,0 +1,74 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestCovergatePassesAndFailsThresholds(t *testing.T) {
+	profile := writeProfile(t, `mode: atomic
+mycelium/internal/scheduler/service.go:1.1,2.1 2 1
+mycelium/internal/lease/allocator.go:1.1,2.1 1 1
+mycelium/internal/gateway/router.go:1.1,2.1 1 0
+`)
+	if err := run(profile, 0.75, []string{"internal/scheduler=1.0", "mycelium/internal/lease=100"}); err != nil {
+		t.Fatalf("run pass: %v", err)
+	}
+	if err := run(profile, 0.76, nil); err == nil || !strings.Contains(err.Error(), "total coverage") {
+		t.Fatalf("total err = %v", err)
+	}
+	if err := run(profile, 0, []string{"internal/gateway=1.0"}); err == nil || !strings.Contains(err.Error(), "internal/gateway") {
+		t.Fatalf("package err = %v", err)
+	}
+	if err := run(profile, 0, []string{"missing=1.0"}); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("missing err = %v", err)
+	}
+	if _, _, err := parseRequirement("bad"); err == nil {
+		t.Fatal("expected bad requirement")
+	}
+}
+
+func TestCovergateRejectsBadProfiles(t *testing.T) {
+	if err := run("", 0, nil); err == nil {
+		t.Fatal("expected missing profile")
+	}
+	if _, _, err := readProfile(writeProfile(t, "mode: atomic\nbad\n")); err == nil {
+		t.Fatal("expected bad line")
+	}
+	if _, _, err := readProfile(writeProfile(t, "mode: atomic\nx.go:1 a 1\n")); err == nil {
+		t.Fatal("expected bad statement count")
+	}
+	if _, _, err := readProfile(writeProfile(t, "mode: atomic\nx.go:1 1 b\n")); err == nil {
+		t.Fatal("expected bad hit count")
+	}
+	if err := run(writeProfile(t, "mode: atomic\n"), 0, nil); err == nil {
+		t.Fatal("expected empty profile")
+	}
+	if packagePath("mycelium/internal/foo/bar.go:1.1,2.1") != "internal/foo" {
+		t.Fatal("package path mismatch")
+	}
+	var flags requireFlags
+	if flags.String() != "" {
+		t.Fatalf("empty flags = %q", flags.String())
+	}
+	if err := flags.Set("internal/scheduler=1"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if flags.String() != "internal/scheduler=1" {
+		t.Fatalf("flags = %q", flags.String())
+	}
+	if (counters{}).percent() != 0 {
+		t.Fatal("empty counters percent should be zero")
+	}
+}
+
+func writeProfile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cover.out")
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+	return path
+}

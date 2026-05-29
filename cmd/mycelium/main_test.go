@@ -63,6 +63,88 @@ func TestRunControlAddModel(t *testing.T) {
 	}
 }
 
+func TestRunControlListCommandsAndProjectSet(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), testPreset("tiny")); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	if err := store.SaveNode(context.Background(), domain.Node{ID: "node-a", Name: "Node A", Address: "127.0.0.1:1", Status: domain.NodeReady}); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+	if err := store.SaveJob(context.Background(), domain.Job{ID: "job-a", Model: "tiny", Project: "project-a", Status: domain.JobQueued}); err != nil {
+		t.Fatalf("SaveJob: %v", err)
+	}
+	if err := store.SaveRecommendation(context.Background(), domain.RecommendationRecord{ID: "rec-a", ProjectID: "project-a", Type: "context", RecommendedValue: 4096}); err != nil {
+		t.Fatalf("SaveRecommendation: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	commands := [][]string{
+		{"models", "list", "--db", dbPath},
+		{"nodes", "list", "--db", dbPath},
+		{"jobs", "list", "--db", dbPath},
+		{"recommendations", "list", "--db", dbPath, "--project", "project-a"},
+		{"projects", "set", "--db", dbPath, "--id", "project-b", "--priority", "background", "--speed-pref", "latency", "--context-cap", "4096", "--preemption", "hard", "--auto-apply"},
+	}
+	for _, args := range commands {
+		if err := runControl(context.Background(), args); err != nil {
+			t.Fatalf("runControl(%v): %v", args, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"models", "bad"},
+		{"nodes", "bad"},
+		{"projects", "bad"},
+		{"jobs", "bad"},
+		{"recommendations", "bad"},
+		{"recommendations", "generate", "--db", dbPath},
+		{"recommendations", "apply", "--db", dbPath},
+	} {
+		if err := runControl(context.Background(), args); err == nil {
+			t.Fatalf("runControl(%v) expected error", args)
+		}
+	}
+}
+
+func TestLoadConfigsAndDefaultHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if got := defaultMyceliumHome(); got != filepath.Join(home, ".mycelium") {
+		t.Fatalf("home = %s", got)
+	}
+	serverCfg, err := loadServerConfig("")
+	if err == nil || !strings.Contains(err.Error(), "read server config") || serverCfg.Listen != "" {
+		t.Fatalf("empty server config = %+v %v", serverCfg, err)
+	}
+	nodePath := filepath.Join(t.TempDir(), "node.json")
+	nodeRaw := `{"listen":"127.0.0.1:7","backend_listen":"127.0.0.1:8","id":"node-json","name":"Node JSON","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"state_db":"state.db","join":"mycjoin://127.0.0.1:1?token=x","gguf_parser":"parser"}`
+	if err := os.WriteFile(nodePath, []byte(nodeRaw), 0644); err != nil {
+		t.Fatalf("write node config: %v", err)
+	}
+	nodeCfg, err := loadNodeConfig(nodePath)
+	if err != nil {
+		t.Fatalf("loadNodeConfig: %v", err)
+	}
+	if nodeCfg.ID != "node-json" || nodeCfg.VRAMMB != 1234 || nodeCfg.GGUFParser != "parser" {
+		t.Fatalf("node config = %+v", nodeCfg)
+	}
+	if _, err := loadNodeConfig(filepath.Join(t.TempDir(), "missing.json")); err == nil {
+		t.Fatal("expected missing node config error")
+	}
+	badPath := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(badPath, []byte(`{`), 0644); err != nil {
+		t.Fatalf("write bad config: %v", err)
+	}
+	if _, err := loadNodeConfig(badPath); err == nil {
+		t.Fatal("expected bad node config error")
+	}
+}
+
 func TestRunRecommendationsGenerateAndApply(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "control.db")
 	store, err := storesqlite.Open(dbPath)

@@ -108,6 +108,73 @@ func TestImportMalformedRemoteSourcesFailCleanly(t *testing.T) {
 	}
 }
 
+func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
+	statusServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusTeapot)
+	}))
+	defer statusServer.Close()
+	t.Setenv("MYCELIUM_HF_BASE_URL", statusServer.URL)
+	if _, err := Import(context.Background(), "hf://owner/repo/model.gguf"); err == nil || !strings.Contains(err.Error(), "huggingface download failed") {
+		t.Fatalf("hf status err = %v", err)
+	}
+	t.Setenv("MYCELIUM_HF_BASE_URL", "://bad")
+	if _, err := Import(context.Background(), "hf://owner/repo/model.gguf"); err == nil {
+		t.Fatal("expected bad base URL error")
+	}
+	t.Setenv("HF_TOKEN", "")
+	t.Setenv("HUGGING_FACE_HUB_TOKEN", "token-b")
+	if token := huggingFaceToken(); token != "token-b" {
+		t.Fatalf("token = %q", token)
+	}
+
+	ociServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/manifests/status"):
+			http.Error(w, "missing", http.StatusNotFound)
+		case strings.Contains(r.URL.Path, "/manifests/empty"):
+			_, _ = w.Write([]byte(`{"layers":[]}`))
+		case strings.Contains(r.URL.Path, "/manifests/badjson"):
+			_, _ = w.Write([]byte(`{`))
+		case strings.Contains(r.URL.Path, "/manifests/blobstatus"):
+			_, _ = w.Write([]byte(`{"layers":[{"digest":"sha256:dead","annotations":{"org.opencontainers.image.title":"model.gguf"}}]}`))
+		case strings.Contains(r.URL.Path, "/blobs/sha256:dead"):
+			http.Error(w, "blob missing", http.StatusNotFound)
+		default:
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+	}))
+	defer ociServer.Close()
+	t.Setenv("MYCELIUM_OCI_INSECURE", "1")
+	host := strings.TrimPrefix(ociServer.URL, "http://")
+	for _, source := range []string{
+		"oci://" + host + "/ns/model:status",
+		"oci://" + host + "/ns/model:empty",
+		"oci://" + host + "/ns/model:badjson",
+		"oci://" + host + "/ns/model:blobstatus",
+	} {
+		if _, err := Import(context.Background(), source); err == nil {
+			t.Fatalf("%s expected error", source)
+		}
+	}
+	if repo, ref, err := splitOCIReference("ns/model@sha256:abc"); err != nil || repo != "ns/model" || ref != "sha256:abc" {
+		t.Fatalf("digest split = %s %s %v", repo, ref, err)
+	}
+	if repo, ref, err := splitOCIReference("ns/model"); err != nil || repo != "ns/model" || ref != "latest" {
+		t.Fatalf("latest split = %s %s %v", repo, ref, err)
+	}
+	for _, raw := range []string{"", "ns/model:", "ns/model@"} {
+		if _, _, err := splitOCIReference(raw); err == nil {
+			t.Fatalf("%q expected error", raw)
+		}
+	}
+	if got := sanitizeTempName("../weird name!.gguf"); got != "weird-name-.gguf" {
+		t.Fatalf("sanitize = %q", got)
+	}
+	if got := sanitizeTempName(""); got != "model" {
+		t.Fatalf("empty sanitize = %q", got)
+	}
+}
+
 func TestImportRejectsDirectoriesAndCanceledContext(t *testing.T) {
 	_, err := Import(context.Background(), t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "is a directory") {
