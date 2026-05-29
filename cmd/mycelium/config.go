@@ -10,6 +10,7 @@ import (
 )
 
 type PeerConfig struct {
+	ID              string               `json:"id"`
 	Listen          string               `json:"listen"`
 	StorePath       string               `json:"store_path"`
 	CatalogDir      string               `json:"catalog_dir"`
@@ -73,6 +74,9 @@ func loadPeerConfig(path string) (PeerConfig, error) {
 		cfg.OptimizerEvalMS = 60000
 	}
 	cfg.ComputeConfig = defaultedComputeConfig(cfg.ComputeConfig)
+	if cfg.ID == "" {
+		cfg.ID = cfg.ComputeConfig.ID
+	}
 	return cfg, nil
 }
 

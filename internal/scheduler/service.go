@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -30,15 +31,21 @@ type RuntimeStore interface {
 	DeleteInstance(ctx context.Context, id string) error
 }
 
+type JobLog interface {
+	PutJob(ctx context.Context, job domain.Job, payload []byte) error
+}
+
 type Service struct {
-	Placer  ports.Placer
-	Fleet   FleetSource
-	Nodes   NodeResolver
-	Owners  AdmissionResolver
-	Queue   *Queue
-	Store   RuntimeStore
-	Clock   ports.Clock
-	Presets map[string]domain.Preset
+	Placer      ports.Placer
+	Fleet       FleetSource
+	Nodes       NodeResolver
+	Owners      AdmissionResolver
+	Coordinator ports.Coordinator
+	JobLog      JobLog
+	Queue       *Queue
+	Store       RuntimeStore
+	Clock       ports.Clock
+	Presets     map[string]domain.Preset
 }
 
 type Result struct {
@@ -52,6 +59,17 @@ type SubmitHooks struct {
 }
 
 func (s *Service) Submit(ctx context.Context, job domain.Job, hooks ...SubmitHooks) (Result, error) {
+	return s.submitLocal(ctx, job, hooks...)
+}
+
+func (s *Service) SubmitWithPayload(ctx context.Context, job domain.Job, payload []byte, hooks ...SubmitHooks) (Result, error) {
+	if s.Coordinator != nil {
+		return s.submitCoordinated(ctx, job, payload, hooks...)
+	}
+	return s.submitLocal(ctx, job, hooks...)
+}
+
+func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...SubmitHooks) (Result, error) {
 	if err := s.validate(); err != nil {
 		return Result{}, err
 	}
@@ -141,6 +159,114 @@ func (s *Service) Submit(ctx context.Context, job domain.Job, hooks ...SubmitHoo
 	return Result{Decision: decision, Instance: inst, Lease: lease}, nil
 }
 
+func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload []byte, hooks ...SubmitHooks) (Result, error) {
+	if err := s.validate(); err != nil {
+		return Result{}, err
+	}
+	if s.JobLog == nil {
+		return Result{}, fmt.Errorf("coordinated scheduler service is missing a job log")
+	}
+	if job.ID == "" {
+		return Result{}, fmt.Errorf("job id is required")
+	}
+	job.Status = domain.JobPlacing
+	if err := s.Store.SaveJob(ctx, job); err != nil {
+		return Result{}, err
+	}
+	if err := s.JobLog.PutJob(ctx, job, payload); err != nil {
+		return Result{}, err
+	}
+	if err := s.Coordinator.ClaimJob(ctx, job.ID); err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		return Result{}, err
+	}
+	decision, err := s.Coordinator.Plan(ctx, job.ID)
+	if err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		return Result{Decision: decision}, err
+	}
+	if decision.Action == domain.ActionQueued {
+		if _, err := s.Coordinator.Commit(ctx, decision); err != nil {
+			return Result{Decision: decision}, err
+		}
+		job.Status = domain.JobQueued
+		s.Queue.Enqueue(job)
+		if err := s.Store.SaveJob(ctx, job); err != nil {
+			return Result{Decision: decision}, err
+		}
+		return Result{Decision: decision}, nil
+	}
+
+	fleet, err := s.Fleet.Snapshot(ctx)
+	if err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		return Result{Decision: decision}, err
+	}
+	if err := s.enactPreemption(ctx, decision, fleet); err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		return Result{Decision: decision}, err
+	}
+	ownerLease, err := s.Coordinator.Commit(ctx, decision)
+	if err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		return Result{Decision: decision}, err
+	}
+	if ownerLease.NodeID != "" {
+		decision.NodeID = ownerLease.NodeID
+	}
+	if ownerLease.Claim != (domain.Claim{}) {
+		decision.Claim = ownerLease.Claim
+	}
+	if decision.InstanceID == "" {
+		if err := runBeforeColdLoadHook(ctx, decision, hooks); err != nil {
+			job.Status = domain.JobFailed
+			_ = s.Store.SaveJob(ctx, job)
+			if releaseErr := s.Coordinator.Release(ctx, job.ID); releaseErr != nil {
+				return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
+			}
+			return Result{Decision: decision, Lease: ownerLease}, err
+		}
+	}
+	inst, err := s.resolveInstance(ctx, job, decision, fleet)
+	if err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		if releaseErr := s.Coordinator.Release(ctx, job.ID); releaseErr != nil {
+			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
+		}
+		return Result{Decision: decision, Lease: ownerLease}, err
+	}
+	lease := ownerLease
+	lease.JobID = job.ID
+	lease.NodeID = inst.NodeID
+	lease.InstanceID = inst.ID
+	if lease.ID == "" {
+		lease.ID = "lease-" + job.ID
+	}
+	if lease.GrantedAt.IsZero() {
+		lease.GrantedAt = s.Clock.Now().UTC()
+	}
+	if lease.ExpiresAt.IsZero() {
+		lease.ExpiresAt = s.Clock.Now().Add(30 * time.Minute).UTC()
+	}
+	job.Status = domain.JobRunning
+	if err := s.Store.SaveInstance(ctx, inst); err != nil {
+		return Result{Decision: decision, Instance: inst, Lease: lease}, err
+	}
+	if err := s.Store.SaveLease(ctx, lease); err != nil {
+		return Result{Decision: decision, Instance: inst, Lease: lease}, err
+	}
+	if err := s.Store.SaveJob(ctx, job); err != nil {
+		return Result{Decision: decision, Instance: inst, Lease: lease}, err
+	}
+	return Result{Decision: decision, Instance: inst, Lease: lease}, nil
+}
+
 func (s *Service) Drain(ctx context.Context, limit int) ([]Result, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("limit must be positive")
@@ -168,6 +294,27 @@ func (s *Service) Release(ctx context.Context, leaseID string) error {
 		return fmt.Errorf("lease id is required")
 	}
 	return s.Store.DeleteLease(ctx, leaseID)
+}
+
+func (s *Service) ReleaseJob(ctx context.Context, lease domain.Lease) error {
+	if err := s.validate(); err != nil {
+		return err
+	}
+	if lease.JobID == "" {
+		if lease.ID == "" {
+			return nil
+		}
+		return s.Release(ctx, lease.ID)
+	}
+	if s.Coordinator != nil {
+		if err := s.Coordinator.Release(ctx, lease.JobID); err != nil {
+			return err
+		}
+	}
+	if lease.ID == "" {
+		return nil
+	}
+	return s.Store.DeleteLease(ctx, lease.ID)
 }
 
 func (s *Service) ExpireLeases(ctx context.Context) (int, error) {

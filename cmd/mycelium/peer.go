@@ -18,6 +18,7 @@ import (
 	"mycelium/internal/membership"
 	nodeagent "mycelium/internal/node"
 	"mycelium/internal/optimizer"
+	peercoord "mycelium/internal/peer"
 	"mycelium/internal/ports"
 	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
@@ -125,7 +126,11 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		if err := store.SaveNode(ctx, local.node); err != nil {
 			return "", nil, err
 		}
-		agents[local.node.ID] = local.agent
+		inspector, ok := local.admission.(ports.LeaseInspector)
+		if !ok {
+			return "", nil, fmt.Errorf("local admission controller does not expose lease inspection")
+		}
+		agents[local.node.ID] = localPeerAgent{NodeAgent: local.agent, AdmissionController: local.admission, LeaseInspector: inspector}
 		if mux == nil {
 			mux = http.NewServeMux()
 		}
@@ -182,15 +187,20 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	if err := restoreQueuedJobs(ctx, store, queue); err != nil {
 		return "", nil, err
 	}
+	jobLog := peercoord.NewJobLog()
+	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
+	coordinator := peercoord.NewCoordinator(self, jobLog, store, placer, fleet, admissionResolver(nodes), clock.System{})
 	runtime := &scheduler.Service{
-		Placer:  placer,
-		Fleet:   fleet,
-		Nodes:   nodes,
-		Owners:  admissionResolver(nodes),
-		Queue:   queue,
-		Store:   store,
-		Clock:   clock.System{},
-		Presets: presetMap(presets),
+		Placer:      placer,
+		Fleet:       fleet,
+		Nodes:       nodes,
+		Owners:      admissionResolver(nodes),
+		Coordinator: coordinator,
+		JobLog:      jobLog,
+		Queue:       queue,
+		Store:       store,
+		Clock:       clock.System{},
+		Presets:     presetMap(presets),
 	}
 	if _, err := runtime.ExpireLeases(ctx); err != nil {
 		return "", nil, err
@@ -257,6 +267,12 @@ func (f combinedFleet) Snapshot(ctx context.Context) (domain.FleetSnapshot, erro
 type combinedNodes struct {
 	left  gateway.NodeResolver
 	right gateway.NodeResolver
+}
+
+type localPeerAgent struct {
+	ports.NodeAgent
+	ports.AdmissionController
+	ports.LeaseInspector
 }
 
 func (n combinedNodes) NodeAgent(nodeID string) (ports.NodeAgent, error) {
