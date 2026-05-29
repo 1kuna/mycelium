@@ -17,9 +17,13 @@ import (
 	nodeagent "mycelium/internal/node"
 	"mycelium/internal/ports"
 	"mycelium/internal/scheduler"
+	storesqlite "mycelium/internal/store/sqlite"
 )
 
 func runServer(ctx context.Context, args []string) error {
+	if ctx.Err() != nil {
+		return nil
+	}
 	addr, handler, err := buildGatewayServer(ctx, args)
 	if err != nil {
 		return err
@@ -32,6 +36,9 @@ func runServer(ctx context.Context, args []string) error {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	return nil
@@ -39,29 +46,32 @@ func runServer(ctx context.Context, args []string) error {
 
 func buildGatewayServer(ctx context.Context, args []string) (string, http.Handler, error) {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
-	listen := fs.String("listen", "127.0.0.1:51846", "gateway listen address")
-	nodeAddr := fs.String("node", "", "node agent base URL, for example http://192.0.2.63:51847")
-	joinToken := fs.String("join-token", "", "membership token accepted by /join")
-	model := fs.String("model", "", "model name exposed by the gateway")
-	contextLen := fs.Int("context", 2048, "preset context length")
-	weightsMB := fs.Int("weights-mb", 1, "estimated model weights in MB")
-	kvPerToken := fs.Float64("kv-per-token-mb", 0.01, "estimated KV cache MB per token")
+	configPath := fs.String("config", "", "server config JSON path")
+	listen := fs.String("listen", "", "gateway listen address override")
 	if err := fs.Parse(args); err != nil {
 		return "", nil, err
 	}
-	if *nodeAddr == "" && *joinToken == "" {
-		return "", nil, fmt.Errorf("--node or --join-token is required")
+	cfg, err := loadServerConfig(*configPath)
+	if err != nil {
+		return "", nil, err
 	}
-	if *model == "" {
-		return "", nil, fmt.Errorf("--model is required")
+	if *listen != "" {
+		cfg.Listen = *listen
+	}
+	store, err := storesqlite.Open(cfg.StorePath)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := seedControlStore(ctx, store, cfg); err != nil {
+		_ = store.Close()
+		return "", nil, err
 	}
 
 	var fleet gateway.FleetSource
 	var nodes gateway.NodeResolver
-	var snapNodeID string
 	var mux *http.ServeMux
-	if *joinToken != "" {
-		tokens, err := membership.NewTokenManager(*joinToken)
+	if cfg.JoinToken != "" {
+		tokens, err := membership.NewTokenManager(cfg.JoinToken)
 		if err != nil {
 			return "", nil, err
 		}
@@ -72,39 +82,74 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 		mux.Handle("/join", registry)
 		mux.Handle("/nodes", registry)
 	}
-	if *nodeAddr != "" {
-		client := nodeagent.NewHTTPClient(*nodeAddr)
+	agents := map[string]ports.NodeAgent{}
+	for _, nodeURL := range cfg.NodeURLs {
+		client := nodeagent.NewHTTPClient(nodeURL)
 		snap, err := client.Snapshot(ctx)
 		if err != nil {
-			return "", nil, fmt.Errorf("snapshot node %s: %w", *nodeAddr, err)
+			return "", nil, fmt.Errorf("snapshot node %s: %w", nodeURL, err)
 		}
-		snapNodeID = snap.Node.ID
-		directory := gateway.NodeDirectory{Agents: map[string]ports.NodeAgent{snap.Node.ID: client}}
+		if err := store.SaveNode(ctx, snap.Node); err != nil {
+			return "", nil, err
+		}
+		for _, inst := range snap.Instances {
+			if err := store.SaveInstance(ctx, inst); err != nil {
+				return "", nil, err
+			}
+		}
+		agents[snap.Node.ID] = client
+	}
+	if len(agents) > 0 {
+		directory := gateway.NodeDirectory{Agents: agents}
 		if fleet == nil {
 			fleet = directory
 			nodes = directory
 		}
 	}
-	preset := domain.Preset{
-		ID:            *model,
-		ModelRef:      *model,
-		Backend:       domain.BackendLlamaCpp,
-		ContextLength: *contextLen,
-		Capabilities:  []domain.Capability{domain.CapabilityChat},
-		EstWeightsMB:  *weightsMB,
-		KVPerTokenMB:  *kvPerToken,
-		NodeID:        snapNodeID,
+	if fleet == nil || nodes == nil {
+		return "", nil, fmt.Errorf("server config must provide join_token or node_urls")
 	}
-	placer := scheduler.NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), clock.System{}, preset)
+	presets, err := store.ListPresets(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(presets) == 0 {
+		return "", nil, fmt.Errorf("server config/store has no presets")
+	}
+	placer := scheduler.NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), clock.System{}, presets...)
 	handler := gateway.Server{Router: &gateway.Router{
 		Placer:  placer,
 		Fleet:   fleet,
 		Nodes:   nodes,
-		Presets: gateway.NewPresetRegistry(preset),
+		Presets: gateway.NewPresetRegistry(presets...),
 	}}
 	if mux != nil {
 		mux.Handle("/", handler)
-		return *listen, mux, nil
+		return cfg.Listen, mux, nil
 	}
-	return *listen, handler, nil
+	return cfg.Listen, handler, nil
+}
+
+func seedControlStore(ctx context.Context, store *storesqlite.Store, cfg ServerConfig) error {
+	for _, project := range cfg.Projects {
+		if err := store.SaveProject(ctx, project); err != nil {
+			return err
+		}
+	}
+	if len(cfg.Projects) == 0 {
+		if err := store.SaveProject(ctx, domain.Project{
+			ID:         "default",
+			Priority:   domain.PriorityInteractive,
+			SpeedPref:  domain.SpeedThroughput,
+			Preemption: domain.PreemptSoft,
+		}); err != nil {
+			return err
+		}
+	}
+	for _, preset := range cfg.Presets {
+		if err := store.SavePreset(ctx, preset); err != nil {
+			return err
+		}
+	}
+	return nil
 }

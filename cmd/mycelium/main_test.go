@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"testing"
 
 	"mycelium/internal/catalog"
+	"mycelium/internal/domain"
+	storesqlite "mycelium/internal/store/sqlite"
 )
 
 func TestRunDispatchesKnownCommands(t *testing.T) {
@@ -18,8 +21,8 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "server", args: []string{"server"}, want: "--node or --join-token is required"},
-		{name: "myce", args: []string{"myce"}, want: "usage: myce <add-model>"},
+		{name: "server", args: []string{"server"}, want: "read server config"},
+		{name: "myce", args: []string{"myce"}, want: "usage: myce <add-model|models|nodes|projects|jobs|recommendations>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -33,11 +36,12 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 
 func TestRunControlAddModel(t *testing.T) {
 	store := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "control.db")
 	model := filepath.Join(t.TempDir(), "tiny.gguf")
 	if err := os.WriteFile(model, []byte("model"), 0644); err != nil {
 		t.Fatalf("write model: %v", err)
 	}
-	err := runControl(context.Background(), []string{"add-model", "--store", store, "--id", "tiny", "--model", "tiny-model", model})
+	err := runControl(context.Background(), []string{"add-model", "--store", store, "--db", dbPath, "--id", "tiny", "--model", "tiny-model", model})
 	if err != nil {
 		t.Fatalf("runControl add-model: %v", err)
 	}
@@ -48,10 +52,24 @@ func TestRunControlAddModel(t *testing.T) {
 	if preset.ModelRef == model || !strings.Contains(preset.ModelRef, "tiny-tiny.gguf") {
 		t.Fatalf("preset = %+v", preset)
 	}
+	control, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open control store: %v", err)
+	}
+	defer control.Close()
+	if got, err := control.Preset(context.Background(), "tiny"); err != nil || got.ID != "tiny" {
+		t.Fatalf("control preset = %+v, %v", got, err)
+	}
 }
 
 func TestBuildGatewayServerWithJoinToken(t *testing.T) {
-	addr, handler, err := buildGatewayServer(context.Background(), []string{"--listen", "127.0.0.1:0", "--join-token", "secret", "--model", "tiny"})
+	configPath := writeServerConfig(t, ServerConfig{
+		Listen:    "127.0.0.1:0",
+		StorePath: filepath.Join(t.TempDir(), "control.db"),
+		JoinToken: "secret",
+		Presets:   []domain.Preset{testPreset("tiny")},
+	})
+	addr, handler, err := buildGatewayServer(context.Background(), []string{"--config", configPath})
 	if err != nil {
 		t.Fatalf("buildGatewayServer: %v", err)
 	}
@@ -71,7 +89,13 @@ func TestRunNodeAndServerExitOnCanceledContext(t *testing.T) {
 	if err := runNode(ctx, []string{"--listen", "127.0.0.1:0", "--backend-listen", "127.0.0.1:0"}); err != nil {
 		t.Fatalf("runNode canceled: %v", err)
 	}
-	if err := runServer(ctx, []string{"--listen", "127.0.0.1:0", "--join-token", "secret", "--model", "tiny"}); err != nil {
+	configPath := writeServerConfig(t, ServerConfig{
+		Listen:    "127.0.0.1:0",
+		StorePath: filepath.Join(t.TempDir(), "control.db"),
+		JoinToken: "secret",
+		Presets:   []domain.Preset{testPreset("tiny")},
+	})
+	if err := runServer(ctx, []string{"--config", configPath}); err != nil {
 		t.Fatalf("runServer canceled: %v", err)
 	}
 }
@@ -112,5 +136,30 @@ func TestRunRejectsMissingAndUnknownCommand(t *testing.T) {
 		if err == nil {
 			t.Fatalf("run(%v) expected error", args)
 		}
+	}
+}
+
+func writeServerConfig(t *testing.T, cfg ServerConfig) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "server.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
+
+func testPreset(id string) domain.Preset {
+	return domain.Preset{
+		ID:            id,
+		ModelRef:      id,
+		Backend:       domain.BackendLlamaCpp,
+		ContextLength: 2048,
+		Capabilities:  []domain.Capability{domain.CapabilityChat},
+		EstWeightsMB:  1,
+		KVPerTokenMB:  0.01,
 	}
 }
