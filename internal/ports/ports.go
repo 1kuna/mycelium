@@ -45,6 +45,8 @@ type NodeAgent interface {
 	Load(ctx context.Context, p domain.Preset) (domain.ModelInstance, error)
 	Unload(ctx context.Context, instanceID string) error
 	InspectModel(ctx context.Context, p domain.Preset) (domain.ModelMetadata, error)
+	BeginRequest(ctx context.Context, instanceID string) error
+	EndRequest(ctx context.Context, instanceID string) error
 }
 
 type Placer interface {

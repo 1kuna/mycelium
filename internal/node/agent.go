@@ -26,12 +26,20 @@ type Agent struct {
 	instances   map[string]domain.ModelInstance
 	handles     map[string]ports.Handle
 	loads       map[string]*loadOp
+	inflight    map[string]*inflightState
 }
 
 type loadOp struct {
 	done chan struct{}
 	inst domain.ModelInstance
 	err  error
+}
+
+type inflightState struct {
+	count         int
+	stopping      bool
+	drained       chan struct{}
+	drainedClosed bool
 }
 
 type Option func(*Agent)
@@ -46,6 +54,7 @@ func NewAgent(node domain.Node, backend ports.BackendAdapter, clock ports.Clock,
 		instances:   map[string]domain.ModelInstance{},
 		handles:     map[string]ports.Handle{},
 		loads:       map[string]*loadOp{},
+		inflight:    map[string]*inflightState{},
 	}
 	for _, opt := range opts {
 		opt(agent)
@@ -121,9 +130,19 @@ func (a *Agent) Unload(ctx context.Context, instanceID string) error {
 	a.mu.Lock()
 	inst, ok := a.instances[instanceID]
 	handle := a.handles[instanceID]
-	a.mu.Unlock()
 	if !ok {
+		a.mu.Unlock()
 		return fmt.Errorf("unknown instance %q", instanceID)
+	}
+	state := a.inflightStateLocked(instanceID)
+	state.stopping = true
+	a.closeDrainedIfReadyLocked(state)
+	drained := state.drained
+	a.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-drained:
 	}
 
 	if err := a.backend.Stop(ctx, handle); err != nil {
@@ -133,7 +152,38 @@ func (a *Agent) Unload(ctx context.Context, instanceID string) error {
 	a.mu.Lock()
 	delete(a.instances, inst.ID)
 	delete(a.handles, inst.ID)
+	delete(a.inflight, inst.ID)
 	a.mu.Unlock()
+	return nil
+}
+
+func (a *Agent) BeginRequest(ctx context.Context, instanceID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	inst, ok := a.instances[instanceID]
+	if !ok || inst.State != domain.InstReady {
+		return fmt.Errorf("instance %q is not ready", instanceID)
+	}
+	state := a.inflightStateLocked(instanceID)
+	if state.stopping {
+		return fmt.Errorf("instance %q is stopping", instanceID)
+	}
+	state.count++
+	return nil
+}
+
+func (a *Agent) EndRequest(_ context.Context, instanceID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state, ok := a.inflight[instanceID]
+	if !ok || state.count == 0 {
+		return fmt.Errorf("instance %q has no in-flight request", instanceID)
+	}
+	state.count--
+	a.closeDrainedIfReadyLocked(state)
 	return nil
 }
 
@@ -255,6 +305,22 @@ func (a *Agent) finishLoad(presetID, instanceID string, handle ports.Handle, ins
 	op.inst = inst
 	op.err = err
 	close(op.done)
+}
+
+func (a *Agent) inflightStateLocked(instanceID string) *inflightState {
+	state := a.inflight[instanceID]
+	if state == nil {
+		state = &inflightState{drained: make(chan struct{})}
+		a.inflight[instanceID] = state
+	}
+	return state
+}
+
+func (a *Agent) closeDrainedIfReadyLocked(state *inflightState) {
+	if state.stopping && state.count == 0 && !state.drainedClosed {
+		close(state.drained)
+		state.drainedClosed = true
+	}
 }
 
 func waitLoad(ctx context.Context, op *loadOp) (domain.ModelInstance, error) {

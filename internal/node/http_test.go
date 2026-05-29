@@ -44,6 +44,12 @@ func TestHTTPNodeAgentRoundTrip(t *testing.T) {
 	if metadata.ModelRef != preset.ModelRef {
 		t.Fatalf("metadata = %+v", metadata)
 	}
+	if err := client.BeginRequest(context.Background(), inst.ID); err != nil {
+		t.Fatalf("BeginRequest: %v", err)
+	}
+	if err := client.EndRequest(context.Background(), inst.ID); err != nil {
+		t.Fatalf("EndRequest: %v", err)
+	}
 	if err := client.Unload(context.Background(), inst.ID); err != nil {
 		t.Fatalf("Unload: %v", err)
 	}
@@ -69,6 +75,20 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 	if err := client.Unload(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "instance_id") {
 		t.Fatalf("unload error = %v", err)
 	}
+	if err := client.BeginRequest(context.Background(), "inst-a"); err == nil || !strings.Contains(err.Error(), "begin failed") {
+		t.Fatalf("begin error = %v", err)
+	}
+	if err := client.EndRequest(context.Background(), "inst-a"); err == nil || !strings.Contains(err.Error(), "end failed") {
+		t.Fatalf("end error = %v", err)
+	}
+	resp, err = http.Post(server.URL+"/begin-request", "application/json", strings.NewReader("{"))
+	if err != nil {
+		t.Fatalf("bad begin post: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad begin status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
 	if _, err := client.InspectModel(context.Background(), fixtures.MakePreset()); err == nil || !strings.Contains(err.Error(), "inspect failed") {
 		t.Fatalf("inspect error = %v", err)
 	}
@@ -133,6 +153,14 @@ func (f *failingNodeAgent) Unload(context.Context, string) error {
 
 func (f *failingNodeAgent) InspectModel(context.Context, domain.Preset) (domain.ModelMetadata, error) {
 	return domain.ModelMetadata{}, errors.New("inspect failed")
+}
+
+func (f *failingNodeAgent) BeginRequest(context.Context, string) error {
+	return errors.New("begin failed")
+}
+
+func (f *failingNodeAgent) EndRequest(context.Context, string) error {
+	return errors.New("end failed")
 }
 
 var _ ports.NodeAgent = (*failingNodeAgent)(nil)

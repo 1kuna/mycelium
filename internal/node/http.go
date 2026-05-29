@@ -31,6 +31,10 @@ func (s HTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.unload(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/inspect":
 		s.inspect(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/begin-request":
+		s.beginRequest(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/end-request":
+		s.endRequest(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}
@@ -80,6 +84,37 @@ func (s HTTPServer) inspect(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, metadata, err)
 }
 
+func (s HTTPServer) beginRequest(w http.ResponseWriter, r *http.Request) {
+	instanceID, ok := decodeInstanceID(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"}, s.Agent.BeginRequest(r.Context(), instanceID))
+}
+
+func (s HTTPServer) endRequest(w http.ResponseWriter, r *http.Request) {
+	instanceID, ok := decodeInstanceID(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"}, s.Agent.EndRequest(r.Context(), instanceID))
+}
+
+func decodeInstanceID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var req struct {
+		InstanceID string `json:"instance_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return "", false
+	}
+	if req.InstanceID == "" {
+		writeError(w, http.StatusBadRequest, "instance_id is required")
+		return "", false
+	}
+	return req.InstanceID, true
+}
+
 type HTTPClient struct {
 	BaseURL string
 	Client  *http.Client
@@ -109,6 +144,14 @@ func (c *HTTPClient) InspectModel(ctx context.Context, p domain.Preset) (domain.
 	var metadata domain.ModelMetadata
 	err := c.do(ctx, http.MethodPost, "/inspect", p, &metadata)
 	return metadata, err
+}
+
+func (c *HTTPClient) BeginRequest(ctx context.Context, instanceID string) error {
+	return c.do(ctx, http.MethodPost, "/begin-request", map[string]string{"instance_id": instanceID}, nil)
+}
+
+func (c *HTTPClient) EndRequest(ctx context.Context, instanceID string) error {
+	return c.do(ctx, http.MethodPost, "/end-request", map[string]string{"instance_id": instanceID}, nil)
 }
 
 func (c *HTTPClient) do(ctx context.Context, method, path string, in, out any) error {

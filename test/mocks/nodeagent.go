@@ -15,6 +15,8 @@ type NodeAgent struct {
 	LoadErr    error
 	UnloadErr  error
 	InspectErr error
+	BeginErr   error
+	EndErr     error
 	Calls      []string
 	nextID     int
 }
@@ -77,6 +79,16 @@ func (m *NodeAgent) InspectModel(_ context.Context, p domain.Preset) (domain.Mod
 		KVPerTokenMB:  p.KVPerTokenMB,
 		ContextLength: p.ContextLength,
 	}, nil
+}
+
+func (m *NodeAgent) BeginRequest(_ context.Context, instanceID string) error {
+	m.Calls = append(m.Calls, "begin:"+instanceID)
+	return m.BeginErr
+}
+
+func (m *NodeAgent) EndRequest(_ context.Context, instanceID string) error {
+	m.Calls = append(m.Calls, "end:"+instanceID)
+	return m.EndErr
 }
 
 var _ ports.NodeAgent = (*NodeAgent)(nil)

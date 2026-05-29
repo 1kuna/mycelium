@@ -31,7 +31,8 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 
 	inst := fixtures.MakeInstance()
 	inst.Addr = upstream.URL
-	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	agent := mocks.NewNodeAgent(fixtures.MakeNode())
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
 	sink := &mocks.TelemetrySink{}
 	router.Telemetry = sink
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
@@ -55,6 +56,9 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 	if want := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC); !sink.Metrics[0].At.Equal(want) {
 		t.Fatalf("metric time = %s want %s", sink.Metrics[0].At, want)
+	}
+	if strings.Join(agent.Calls, ",") != "begin:inst_test,end:inst_test" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
 	}
 }
 
@@ -270,6 +274,14 @@ func (n loadNode) Unload(context.Context, string) error {
 
 func (n loadNode) InspectModel(context.Context, domain.Preset) (domain.ModelMetadata, error) {
 	return domain.ModelMetadata{}, domain.ErrUnsupported
+}
+
+func (n loadNode) BeginRequest(context.Context, string) error {
+	return nil
+}
+
+func (n loadNode) EndRequest(context.Context, string) error {
+	return nil
 }
 
 type testFailureReporter struct {

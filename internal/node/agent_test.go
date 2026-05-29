@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -165,6 +166,75 @@ func TestUnloadUnknownAndStopFailure(t *testing.T) {
 	backend.StopErr = errors.New("stop failed")
 	if err := agent.Unload(context.Background(), inst.ID); err == nil {
 		t.Fatal("expected stop error")
+	}
+}
+
+func TestInFlightRequestsGuardUnload(t *testing.T) {
+	backend := mocks.NewBackendAdapter()
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := agent.BeginRequest(context.Background(), inst.ID); err != nil {
+		t.Fatalf("BeginRequest: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.Unload(context.Background(), inst.ID)
+	}()
+	for {
+		agent.mu.Lock()
+		stopping := agent.inflight[inst.ID].stopping
+		agent.mu.Unlock()
+		if stopping {
+			break
+		}
+		runtime.Gosched()
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Unload finished with in-flight request: %v", err)
+	default:
+	}
+	if err := agent.BeginRequest(context.Background(), inst.ID); err == nil || !strings.Contains(err.Error(), "stopping") {
+		t.Fatalf("expected stopping error, got %v", err)
+	}
+	if err := agent.EndRequest(context.Background(), inst.ID); err != nil {
+		t.Fatalf("EndRequest: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Unload: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Unload did not drain")
+	}
+	if countCalls(backend.Calls, "stop") != 1 {
+		t.Fatalf("backend calls = %+v", backend.Calls)
+	}
+	if err := agent.EndRequest(context.Background(), inst.ID); err == nil {
+		t.Fatal("expected extra EndRequest error")
+	}
+}
+
+func TestBeginRequestRejectsMissingUnreadyAndCanceled(t *testing.T) {
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	if err := agent.BeginRequest(context.Background(), "missing"); err == nil {
+		t.Fatal("expected missing instance error")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := agent.BeginRequest(ctx, "missing"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled begin err = %v", err)
+	}
+	loading := domain.ModelInstance{ID: "loading", State: domain.InstLoading}
+	agent.mu.Lock()
+	agent.instances[loading.ID] = loading
+	agent.mu.Unlock()
+	if err := agent.BeginRequest(context.Background(), loading.ID); err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("loading begin err = %v", err)
 	}
 }
 
