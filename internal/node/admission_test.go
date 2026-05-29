@@ -117,6 +117,15 @@ func TestAdmissionReleaseAndPreemptRemoveOccupancy(t *testing.T) {
 	if got, found, err := admission.LeaseForJob(context.Background(), "job-a"); err != nil || !found || got.ID != leaseA.ID {
 		t.Fatalf("LeaseForJob = %+v %v %v", got, found, err)
 	}
+	if err := admission.BindInstance(context.Background(), leaseA.ID, "inst-a"); err != nil {
+		t.Fatalf("BindInstance: %v", err)
+	}
+	if got, found, err := admission.LeaseForInstance(context.Background(), "inst-a"); err != nil || !found || got.ID != leaseA.ID {
+		t.Fatalf("LeaseForInstance = %+v %v %v", got, found, err)
+	}
+	if got, found, err := admission.LeaseForInstance(context.Background(), "missing"); err != nil || found || got.ID != "" {
+		t.Fatalf("missing LeaseForInstance = %+v %v %v", got, found, err)
+	}
 	if got, found, err := admission.LeaseForJob(context.Background(), "missing"); err != nil || found || got.ID != "" {
 		t.Fatalf("missing LeaseForJob = %+v %v %v", got, found, err)
 	}
@@ -180,6 +189,24 @@ func TestAdmissionFailsLoudOnBadInputsAndUnavailableCapacity(t *testing.T) {
 		t.Fatal("expected missing preempt error")
 	}
 	leaseA := commitAdmissionLease(t, admission, "job-a", fixtures.MakeClaim(100, 0))
+	if err := admission.BindInstance(context.Background(), "", "inst-a"); err == nil || !strings.Contains(err.Error(), "lease id") {
+		t.Fatalf("empty bind lease err = %v", err)
+	}
+	if err := admission.BindInstance(context.Background(), leaseA.ID, ""); err == nil || !strings.Contains(err.Error(), "instance id") {
+		t.Fatalf("empty bind instance err = %v", err)
+	}
+	if err := admission.BindInstance(context.Background(), "missing", "inst-a"); err == nil {
+		t.Fatal("expected missing bind error")
+	}
+	if err := admission.BindInstance(context.Background(), leaseA.ID, "inst-a"); err != nil {
+		t.Fatalf("bind inst-a: %v", err)
+	}
+	if err := admission.BindInstance(context.Background(), leaseA.ID, "inst-b"); err == nil || !strings.Contains(err.Error(), "already bound") {
+		t.Fatalf("rebind err = %v", err)
+	}
+	if _, _, err := admission.LeaseForInstance(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "instance id") {
+		t.Fatalf("empty LeaseForInstance err = %v", err)
+	}
 	if err := admission.Preempt(context.Background(), leaseA.ID, ""); err == nil || !strings.Contains(err.Error(), "reason") {
 		t.Fatalf("empty preempt reason err = %v", err)
 	}
@@ -190,6 +217,12 @@ func TestAdmissionFailsLoudOnBadInputsAndUnavailableCapacity(t *testing.T) {
 	cancel()
 	if _, _, err := admission.LeaseForJob(canceled, "job-a"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled LeaseForJob err = %v", err)
+	}
+	if _, _, err := admission.LeaseForInstance(canceled, "inst-a"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled LeaseForInstance err = %v", err)
+	}
+	if err := admission.BindInstance(canceled, leaseA.ID, "inst-a"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled BindInstance err = %v", err)
 	}
 
 	maintenance := NewAdmission(fixtures.MakeNode(fixtures.Maintenance), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))

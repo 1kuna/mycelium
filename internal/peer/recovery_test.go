@@ -142,3 +142,7 @@ type staticLeaseInspector struct {
 func (s staticLeaseInspector) LeaseForJob(context.Context, string) (domain.Lease, bool, error) {
 	return s.lease, s.found, s.err
 }
+
+func (s staticLeaseInspector) LeaseForInstance(context.Context, string) (domain.Lease, bool, error) {
+	return s.lease, s.found, s.err
+}
