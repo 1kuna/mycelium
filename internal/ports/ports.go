@@ -53,6 +53,32 @@ type Placer interface {
 	Place(ctx context.Context, job domain.Job, fleet domain.FleetSnapshot) (domain.PlacementDecision, error)
 }
 
+type AdmissionController interface {
+	Offer(ctx context.Context, req domain.Job, claim domain.Claim) (domain.LeaseOffer, error)
+	Commit(ctx context.Context, offerID string, fence uint64) (domain.Lease, error)
+	Release(ctx context.Context, leaseID string) error
+	Preempt(ctx context.Context, leaseID, reason string) error
+}
+
+type Coordinator interface {
+	ClaimJob(ctx context.Context, jobID string) error
+	Plan(ctx context.Context, jobID string) (domain.PlacementDecision, error)
+	Commit(ctx context.Context, plan domain.PlacementDecision) (domain.Lease, error)
+	Release(ctx context.Context, jobID string) error
+}
+
+type JobRegistry interface {
+	Put(ctx context.Context, rec domain.JobRecord) error
+	Watch(ctx context.Context, fromCursor string) (<-chan domain.JobRecord, error)
+	Snapshot(ctx context.Context) ([]domain.JobRecord, error)
+}
+
+type PeerDiscovery interface {
+	Advertise(ctx context.Context, self domain.Peer) error
+	Peers(ctx context.Context) ([]domain.Peer, error)
+	WatchPeers(ctx context.Context) (<-chan domain.Peer, error)
+}
+
 type TelemetrySink interface {
 	Record(ctx context.Context, m domain.RunMetric) error
 }

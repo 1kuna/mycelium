@@ -129,6 +129,34 @@ type RunMetric struct {
 	At              time.Time `json:"at"`
 }
 
+type Peer struct {
+	ID        string    `json:"id"`
+	Addresses []string  `json:"addresses"`
+	Compute   bool      `json:"compute"`
+	LastSeen  time.Time `json:"last_seen"`
+	Version   string    `json:"version"`
+}
+
+type LeaseOffer struct {
+	OfferID    string    `json:"offer_id"`
+	JobID      string    `json:"job_id"`
+	NodeID     string    `json:"node_id"`
+	Claim      Claim     `json:"claim"`
+	Fence      uint64    `json:"fence"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	Conditions string    `json:"conditions,omitempty"`
+}
+
+type JobRecord struct {
+	JobID        string    `json:"job_id"`
+	Coordinator  string    `json:"coordinator"`
+	AssignedNode string    `json:"assigned_node,omitempty"`
+	Status       JobStatus `json:"status"`
+	Request      []byte    `json:"request"`
+	Fence        uint64    `json:"fence"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 type Reservation struct {
 	ID        string          `json:"id"`
 	Kind      ReservationKind `json:"kind"`

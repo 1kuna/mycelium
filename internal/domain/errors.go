@@ -8,5 +8,6 @@ var (
 	ErrPreempted       = errors.New("instance was preempted")
 	ErrNotReady        = errors.New("backend did not become ready before timeout")
 	ErrUnreachable     = errors.New("node is unreachable")
+	ErrStaleFence      = errors.New("plan was built on a stale resource version; re-decide")
 	ErrUnsupported     = errors.New("unsupported operation")
 )
