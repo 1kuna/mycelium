@@ -18,7 +18,6 @@ import (
 
 	"mycelium/internal/domain"
 	"mycelium/internal/gateway"
-	"mycelium/internal/membership"
 )
 
 func TestPhase4JoinedNodeGatewaySmoke(t *testing.T) {
@@ -54,37 +53,23 @@ func runPhase4AutomatedJoinSmoke(t *testing.T, binary, model string) {
 	defer cancel()
 
 	mycelium := buildSmokeBinary(t, ctx)
-	serverAddr := freeAddr(t)
 	nodeAddr := freeAddr(t)
+	gatewayAddr := freeAddr(t)
 	backendAddr := freeAddr(t)
-	serverConfig := writePhase4ServerConfig(t, serverAddr, model)
+	nodeConfig := writePhase4ComputePeerConfig(t, nodeAddr, backendAddr, binary, model)
 
-	server := startSmokeProcess(t, ctx, mycelium, "server", "--config", serverConfig)
-	defer server.stop(t)
-	gatewayURL := "http://" + serverAddr
-	waitForGatewayReady(t, ctx, gatewayURL)
-
-	join, err := membership.BuildJoinToken(gatewayURL, "phase4-secret")
-	if err != nil {
-		t.Fatalf("BuildJoinToken: %v", err)
-	}
 	node := startSmokeProcess(t, ctx, mycelium,
-		"node",
-		"--listen", nodeAddr,
-		"--backend-listen", backendAddr,
-		"--id", "phase4-node",
-		"--name", "Phase 4 Node",
-		"--llama-server", binary,
-		"--vram-mb", "8192",
-		"--state-db", filepath.Join(t.TempDir(), "node.sqlite"),
-		"--join", join,
+		"run",
+		"--config", nodeConfig,
 	)
 	defer node.stop(t)
+	waitForNodeReady(t, ctx, "http://"+nodeAddr)
 
-	nodes := waitForJoinedNodes(t, ctx, gatewayURL, nodeAddr)
-	if !hasReadyNode(nodes) {
-		t.Fatalf("no ready joined node: %+v", nodes)
-	}
+	gatewayConfig := writePhase4GatewayPeerConfig(t, gatewayAddr, nodeAddr, model)
+	gatewayPeer := startSmokeProcess(t, ctx, mycelium, "run", "--config", gatewayConfig)
+	defer gatewayPeer.stop(t)
+
+	gatewayURL := "http://" + gatewayAddr
 	respBody, instanceID := assertGatewayChat(t, ctx, gatewayURL, model)
 	if instanceID == "" {
 		t.Fatalf("gateway response missing %s body=%s", gateway.HeaderInstance, respBody)
@@ -130,6 +115,30 @@ func waitForGatewayReady(t *testing.T, ctx context.Context, gatewayURL string) {
 		select {
 		case <-ctx.Done():
 			t.Fatalf("waiting for gateway: %v", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForNodeReady(t *testing.T, ctx context.Context, nodeURL string) {
+	t.Helper()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(nodeURL, "/")+"/snapshot", nil)
+		if err != nil {
+			t.Fatalf("snapshot request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("waiting for node: %v", ctx.Err())
 		case <-ticker.C:
 		}
 	}
@@ -241,20 +250,20 @@ func repoRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
 
-func writePhase4ServerConfig(t *testing.T, addr, model string) string {
+func writePhase4GatewayPeerConfig(t *testing.T, addr, nodeAddr, model string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "server.json")
+	path := filepath.Join(t.TempDir(), "gateway-peer.json")
 	cfg := struct {
 		Listen         string           `json:"listen"`
 		StorePath      string           `json:"store_path"`
-		JoinToken      string           `json:"join_token"`
+		NodeURLs       []string         `json:"node_urls"`
 		DefaultProject string           `json:"default_project"`
 		Projects       []domain.Project `json:"projects"`
 		Presets        []domain.Preset  `json:"presets"`
 	}{
 		Listen:         addr,
 		StorePath:      filepath.Join(t.TempDir(), "control.sqlite"),
-		JoinToken:      "phase4-secret",
+		NodeURLs:       []string{"http://" + nodeAddr},
 		DefaultProject: "phase4",
 		Projects: []domain.Project{{
 			ID:         "phase4",
@@ -274,10 +283,54 @@ func writePhase4ServerConfig(t *testing.T, addr, model string) string {
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		t.Fatalf("marshal server config: %v", err)
+		t.Fatalf("marshal gateway peer config: %v", err)
 	}
 	if err := os.WriteFile(path, data, 0644); err != nil {
-		t.Fatalf("write server config: %v", err)
+		t.Fatalf("write gateway peer config: %v", err)
+	}
+	return path
+}
+
+func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, binary, model string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "compute-peer.json")
+	cfg := struct {
+		Listen        string `json:"listen"`
+		StorePath     string `json:"store_path"`
+		Compute       bool   `json:"compute"`
+		ComputeConfig struct {
+			ID            string `json:"id"`
+			Name          string `json:"name"`
+			BackendListen string `json:"backend_listen"`
+			LlamaServer   string `json:"llama_server"`
+			VRAMMB        int    `json:"vram_mb"`
+		} `json:"compute_config"`
+		Presets []domain.Preset `json:"presets"`
+	}{
+		Listen:    addr,
+		StorePath: filepath.Join(t.TempDir(), "compute.sqlite"),
+		Compute:   true,
+		Presets: []domain.Preset{{
+			ID:            "phase4-model",
+			ModelRef:      model,
+			Backend:       domain.BackendLlamaCpp,
+			ContextLength: 2048,
+			Capabilities:  []domain.Capability{domain.CapabilityChat, domain.CapabilityCompletion},
+			EstWeightsMB:  1,
+			KVPerTokenMB:  0.01,
+		}},
+	}
+	cfg.ComputeConfig.ID = "phase4-node"
+	cfg.ComputeConfig.Name = "Phase 4 Node"
+	cfg.ComputeConfig.BackendListen = backendAddr
+	cfg.ComputeConfig.LlamaServer = binary
+	cfg.ComputeConfig.VRAMMB = 8192
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal compute peer config: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write compute peer config: %v", err)
 	}
 	return path
 }
