@@ -214,11 +214,13 @@ func TestRunRecommendationsGenerateAndApply(t *testing.T) {
 }
 
 func TestBuildGatewayServerWithJoinToken(t *testing.T) {
+	preset := testPreset("tiny")
 	configPath := writeServerConfig(t, ServerConfig{
-		Listen:    "127.0.0.1:0",
-		StorePath: filepath.Join(t.TempDir(), "control.db"),
-		JoinToken: "secret",
-		Presets:   []domain.Preset{testPreset("tiny")},
+		Listen:       "127.0.0.1:0",
+		StorePath:    filepath.Join(t.TempDir(), "control.db"),
+		JoinToken:    "secret",
+		Presets:      []domain.Preset{preset},
+		Reservations: []domain.Reservation{{ID: "pin-a", Kind: domain.ReservationPinned, NodeID: "node-a", PresetID: preset.ID}},
 	})
 	addr, handler, err := buildGatewayServer(context.Background(), []string{"--config", configPath})
 	if err != nil {
@@ -231,6 +233,25 @@ func TestBuildGatewayServerWithJoinToken(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nodes", nil))
 	if rec.Code != http.StatusOK || rec.Body.String() != "[]\n" {
 		t.Fatalf("nodes status/body = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAllocatorFromReservationsReservesHeadroomAndPinnedPresets(t *testing.T) {
+	preset := testPreset("tiny")
+	preset.EstWeightsMB = 100
+	preset.ContextLength = 1000
+	preset.KVPerTokenMB = 0.5
+	allocator := allocatorFromReservations([]domain.Reservation{
+		{ID: "headroom", Kind: domain.ReservationHeadroom, NodeID: "node-a", Headroom: domain.Claim{WeightsMB: 10}},
+		{ID: "pinned", Kind: domain.ReservationPinned, NodeID: "node-b", PresetID: preset.ID},
+	}, presetMap([]domain.Preset{preset}))
+	nodeA := domain.Node{ID: "node-a", MaxUtil: 1, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 100}}}
+	if allocator.Fits(nodeA, []int{0}, nil, domain.Claim{WeightsMB: 95}) {
+		t.Fatal("headroom reservation was not enforced")
+	}
+	nodeB := domain.Node{ID: "node-b", MaxUtil: 1, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 700}}}
+	if allocator.Fits(nodeB, []int{0}, nil, domain.Claim{WeightsMB: 101}) {
+		t.Fatal("pinned preset reservation was not enforced")
 	}
 }
 

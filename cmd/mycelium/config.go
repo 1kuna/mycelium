@@ -10,14 +10,15 @@ import (
 )
 
 type ServerConfig struct {
-	Listen         string           `json:"listen"`
-	StorePath      string           `json:"store_path"`
-	CatalogDir     string           `json:"catalog_dir"`
-	JoinToken      string           `json:"join_token"`
-	NodeURLs       []string         `json:"node_urls"`
-	Projects       []domain.Project `json:"projects"`
-	Presets        []domain.Preset  `json:"presets"`
-	DefaultProject string           `json:"default_project"`
+	Listen         string               `json:"listen"`
+	StorePath      string               `json:"store_path"`
+	CatalogDir     string               `json:"catalog_dir"`
+	JoinToken      string               `json:"join_token"`
+	NodeURLs       []string             `json:"node_urls"`
+	Projects       []domain.Project     `json:"projects"`
+	Presets        []domain.Preset      `json:"presets"`
+	Reservations   []domain.Reservation `json:"reservations"`
+	DefaultProject string               `json:"default_project"`
 }
 
 type NodeConfig struct {

@@ -41,3 +41,4 @@
 - 2026-05-29: Sticky routing is keyed by `X-Myc-Conversation` with a short TTL and only reuses ready instances whose preset still matches; stale, loading, or mismatched entries fall back to normal placement.
 - 2026-05-29: Reverse benchmarks write raw per-model outputs plus objective metrics only; the runner deliberately avoids subjective ranking so the user remains the judge of answer quality.
 - 2026-05-29: MLX and vLLM adapters share a supervised process adapter with explicit command templates and health polling; real engine smoke remains hardware/env gated instead of faked in fast tests.
+- 2026-05-29: Server reservations are loaded from durable state into the allocator; pinned preset reservations reserve the preset's computed claim on the pinned node rather than becoming a scheduler hint only.
