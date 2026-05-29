@@ -40,3 +40,4 @@
 - 2026-05-29: In-flight request tracking lives on the node-agent protocol; the gateway brackets upstream calls with begin/end and node unload marks an instance stopping before waiting for active requests to drain.
 - 2026-05-29: Sticky routing is keyed by `X-Myc-Conversation` with a short TTL and only reuses ready instances whose preset still matches; stale, loading, or mismatched entries fall back to normal placement.
 - 2026-05-29: Reverse benchmarks write raw per-model outputs plus objective metrics only; the runner deliberately avoids subjective ranking so the user remains the judge of answer quality.
+- 2026-05-29: MLX and vLLM adapters share a supervised process adapter with explicit command templates and health polling; real engine smoke remains hardware/env gated instead of faked in fast tests.
