@@ -204,10 +204,6 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	jobLog := peercoord.NewJobLog()
 	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
-	if discovery != nil {
-		startPeerAdvertiser(ctx, discovery, self, clock.System{}, time.Duration(cfg.DiscoveryAdvertiseMS)*time.Millisecond)
-		startRegistryReplication(ctx, store, discovery, cfg.ID, cfg.RPCToken, clock.System{}, time.Duration(cfg.RegistrySyncMS)*time.Millisecond)
-	}
 	coordinator := peercoord.NewCoordinator(self, jobLog, store, placer, fleet, admissionResolver(nodes), clock.System{})
 	runtime := &scheduler.Service{
 		Placer:      placer,
@@ -223,6 +219,11 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	if _, err := runtime.ExpireLeases(ctx); err != nil {
 		return "", nil, err
+	}
+	if discovery != nil {
+		startPeerAdvertiser(ctx, discovery, self, clock.System{}, time.Duration(cfg.DiscoveryAdvertiseMS)*time.Millisecond)
+		startRegistryReplication(ctx, store, discovery, cfg.ID, cfg.RPCToken, clock.System{}, time.Duration(cfg.RegistrySyncMS)*time.Millisecond)
+		startPeerHeartbeat(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, clock.System{})
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
 	startOptimizerEvaluator(ctx, store, fleet, cfg.ID, cfg.Compute, clock.System{}, time.Duration(cfg.OptimizerEvalMS)*time.Millisecond)
@@ -523,13 +524,17 @@ func probeSeedPeers(ctx context.Context, cache *membership.CachedPeerDiscovery, 
 }
 
 func probePeerHealth(ctx context.Context, peer domain.Peer) error {
+	return probePeerHealthWithToken(ctx, peer, "")
+}
+
+func probePeerHealthWithToken(ctx context.Context, peer domain.Peer, joinToken string) error {
 	if peer.ID == "" {
 		return fmt.Errorf("peer id is required")
 	}
 	if len(peer.Addresses) == 0 {
 		return fmt.Errorf("peer %q has no reachable address", peer.ID)
 	}
-	got, err := fetchPeerHealth(ctx, peer.Addresses[0], "")
+	got, err := fetchPeerHealth(ctx, peer.Addresses[0], joinToken)
 	if err != nil {
 		return err
 	}
@@ -739,6 +744,76 @@ func startRegistryReplication(ctx context.Context, registry ports.JobRegistry, d
 			}
 		}
 	}()
+}
+
+type peerLeaseInspectorResolver interface {
+	LeaseInspector(string) (ports.LeaseInspector, error)
+}
+
+type peerRuntimeStore interface {
+	ports.JobRegistry
+	SaveNode(ctx context.Context, node domain.Node) error
+}
+
+type rescueRuntime interface {
+	SubmitWithPayload(ctx context.Context, job domain.Job, payload []byte, hooks ...scheduler.SubmitHooks) (scheduler.Result, error)
+}
+
+func startPeerHeartbeat(ctx context.Context, self domain.Peer, discovery ports.PeerDiscovery, nodes gateway.NodeResolver, runtime rescueRuntime, registry peerRuntimeStore, joinToken string, clk ports.Clock) {
+	if discovery == nil || runtime == nil || registry == nil || clk == nil || self.ID == "" {
+		return
+	}
+	owners, _ := nodes.(peerLeaseInspectorResolver)
+	recovery := peercoord.Recovery{Registry: registry, Owners: owners, Rescue: rescueRecoveredJob(runtime)}
+	heartbeat := &peercoord.Heartbeat{
+		Self:      self,
+		Discovery: discovery,
+		Clock:     clk,
+		Probe: func(ctx context.Context, peer domain.Peer) error {
+			return probePeerHealthWithToken(ctx, peer, joinToken)
+		},
+		OnDead: func(ctx context.Context, dead domain.Peer) error {
+			if err := markDeadPeer(registry)(ctx, dead); err != nil {
+				return err
+			}
+			rescued, err := recovery.RecoverPeer(ctx, dead.ID)
+			if err != nil {
+				return err
+			}
+			if rescued > 0 {
+				log.Printf("mycelium recovered %d unfinished jobs from dead peer %s", rescued, dead.ID)
+			}
+			return nil
+		},
+	}
+	go func() {
+		for {
+			if _, err := heartbeat.Tick(ctx); err != nil {
+				log.Printf("mycelium peer heartbeat failed: %v", err)
+			}
+			timer := clk.NewTimer(peercoord.DefaultHeartbeatInterval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C():
+			}
+		}
+	}()
+}
+
+func rescueRecoveredJob(runtime rescueRuntime) peercoord.RescueFunc {
+	return func(ctx context.Context, rec domain.JobRecord) error {
+		job, payload, err := peercoord.DecodeRescuePayload(rec.Request)
+		if err != nil {
+			return err
+		}
+		if job.ID != rec.JobID {
+			return fmt.Errorf("rescue payload job %q does not match registry job %q", job.ID, rec.JobID)
+		}
+		_, err = runtime.SubmitWithPayload(ctx, job, payload)
+		return err
+	}
 }
 
 func markDeadPeer(store interface {
