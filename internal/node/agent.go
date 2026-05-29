@@ -6,24 +6,26 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"time"
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
 )
 
 type Agent struct {
-	mu         sync.Mutex
-	node       domain.Node
-	backend    ports.BackendAdapter
-	clock      ports.Clock
-	telemetry  ports.TelemetrySink
-	inspector  ModelInspector
-	allocator  ports.Allocator
-	listenAddr string
-	nextID     int
-	instances  map[string]domain.ModelInstance
-	handles    map[string]ports.Handle
-	loads      map[string]*loadOp
+	mu          sync.Mutex
+	node        domain.Node
+	backend     ports.BackendAdapter
+	clock       ports.Clock
+	telemetry   ports.TelemetrySink
+	inspector   ModelInspector
+	allocator   ports.Allocator
+	listenAddr  string
+	loadTimeout time.Duration
+	nextID      int
+	instances   map[string]domain.ModelInstance
+	handles     map[string]ports.Handle
+	loads       map[string]*loadOp
 }
 
 type loadOp struct {
@@ -36,13 +38,14 @@ type Option func(*Agent)
 
 func NewAgent(node domain.Node, backend ports.BackendAdapter, clock ports.Clock, opts ...Option) *Agent {
 	agent := &Agent{
-		node:       node,
-		backend:    backend,
-		clock:      clock,
-		listenAddr: "127.0.0.1:0",
-		instances:  map[string]domain.ModelInstance{},
-		handles:    map[string]ports.Handle{},
-		loads:      map[string]*loadOp{},
+		node:        node,
+		backend:     backend,
+		clock:       clock,
+		listenAddr:  "127.0.0.1:0",
+		loadTimeout: 5 * time.Minute,
+		instances:   map[string]domain.ModelInstance{},
+		handles:     map[string]ports.Handle{},
+		loads:       map[string]*loadOp{},
 	}
 	for _, opt := range opts {
 		opt(agent)
@@ -71,6 +74,12 @@ func WithListenAddr(addr string) Option {
 func WithAllocator(allocator ports.Allocator) Option {
 	return func(a *Agent) {
 		a.allocator = allocator
+	}
+}
+
+func WithLoadTimeout(timeout time.Duration) Option {
+	return func(a *Agent) {
+		a.loadTimeout = timeout
 	}
 }
 
