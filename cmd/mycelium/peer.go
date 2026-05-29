@@ -143,7 +143,9 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		}
 		startSeedPeerProber(ctx, cached, cfg.SeedPeers, cfg.JoinToken, clock.System{}, scan)
 		discovery = cached
-		directory := &gateway.PeerDirectory{Discovery: discovery, Store: store, SelfID: cfg.ID, AuthToken: cfg.RPCToken}
+		tunnel := membership.NewLANTunnel()
+		tunnel.AuthToken = cfg.RPCToken
+		directory := &gateway.PeerDirectory{Discovery: discovery, Tunnel: tunnel, Store: store, SelfID: cfg.ID, AuthToken: cfg.RPCToken}
 		fleet = directory
 		nodes = directory
 	}
@@ -267,6 +269,7 @@ func mountNodeHTTP(mux *http.ServeMux, handler http.Handler) {
 		"/admission/release",
 		"/admission/preempt",
 		"/admission/lease",
+		"/instances/",
 	} {
 		mux.Handle(path, handler)
 	}

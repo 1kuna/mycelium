@@ -11,10 +11,12 @@ type Tunnel struct {
 	Addr  string
 	Err   error
 	Calls []string
+	Nodes []domain.Node
 }
 
 func (t *Tunnel) Open(_ context.Context, node domain.Node) (string, error) {
 	t.Calls = append(t.Calls, "open:"+node.ID)
+	t.Nodes = append(t.Nodes, node)
 	if t.Err != nil {
 		return "", t.Err
 	}

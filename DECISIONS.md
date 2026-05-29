@@ -106,3 +106,5 @@
 - 2026-05-29: Discovered peer node RPC clients use their own explicit HTTP transport instead of `http.DefaultClient`, keeping peer-to-peer RPC isolated from global transport state.
 - 2026-05-29: Peer owner RPC uses a separate `rpc_token` bearer credential; `join_token` remains membership/discovery only, and a fleet-joined peer fails startup without an RPC token instead of exposing backend/admission endpoints unauthenticated.
 - 2026-05-29: Seed-address joins use the `mycjoin://host:port?token=...&rpc_token=...` host as a deterministic LAN peer seed; `/peer/health` is join-token gated, while node/admission RPC remains protected by the separate `rpc_token`.
+- 2026-05-29: Peer node/admission RPC now goes through a per-peer loopback tunnel opened from the discovered reachable LAN address; the tunnel is reused while the target address is stable so snapshots do not churn active peer clients.
+- 2026-05-29: Remote `Instance.Addr` values returned through peer HTTP clients are rewritten to the owner peer's `/instances/<id>/...` proxy path, so generation streams coordinator -> loopback tunnel -> owner peer -> backend instead of exposing raw backend addresses.

@@ -3,7 +3,7 @@
 ## Active
 
 - 2026-05-29: vLLM/CUDA real-engine adapter smoke remains hardware/engine-gated. `command -v vllm` and `command -v nvidia-smi` returned no binary on Darwin arm64; run `MYCELIUM_VLLM_BINARY=... MYCELIUM_VLLM_MODEL=... go test -tags smoke ./test/smoke/... -run VLLM -timeout 20m -v -count=1` once that runtime/model exists.
-- 2026-05-29: second peer reverse-dial peer smoke is blocked by host networking behavior on `192.0.2.63`: a standalone Go process on the second peer can `GET http://192.0.2.91:<peer>/snapshot`, but a Go process serving HTTP on the second peer gets `dial tcp 192.0.2.91:<peer>: connect: no route to host` when it dials the local dev Mac from inside a handler. This blocks proving "submit to second peer, run on local dev Mac" over direct LAN HTTP; the opposite direction is proven, so the remaining fix is the authenticated/tunnel peer transport required by Phase 4 rather than more direct-LAN retries.
+- 2026-05-29: second peer reverse-dial peer smoke remains blocked by host networking behavior on `192.0.2.63`: after authenticated loopback tunnels were implemented, a second peer gateway still logs `dial tcp 192.0.2.91:<peer>: connect: no route to host` from the tunnel proxy when trying to coordinate work onto the local dev Mac. This blocks proving "submit to second peer, run on local dev Mac" on the current LAN until the host route/firewall behavior is fixed or the roadmap overlay transport exists.
 
 ## Resolved
 
@@ -14,3 +14,4 @@
 - 2026-05-29: Cross-machine MLX-distributed/model-sharding blocker is removed by spec decision D17. Mycelium now distributes jobs across peers and never shards one model across machines.
 - 2026-05-29: Peer-native local dev Mac-to-second-peer smoke is resolved. With `llama-server` at `/opt/homebrew/bin/llama-server` and `.smoke-models/stories260K.gguf` copied to the second peer, a local dev Mac gateway peer discovered `macmini-peer`, placed a request there, returned HTTP 200 from `/v1/chat/completions`, and `mycelium ctl nodes list --db <local-store>` showed `macmini-peer ... ready`.
 - 2026-05-29: Authenticated seed-address local dev Mac-to-second-peer smoke is resolved. The local dev Mac gateway joined with `mycjoin://192.0.2.63:<port>?token=...&rpc_token=...`, seeded the second peer through join-token-gated `/peer/health`, rejected unauthenticated `/snapshot` with HTTP 401, and returned HTTP 200 from `/v1/chat/completions` using the second peer llama.cpp backend.
+- 2026-05-29: Loopback-tunneled local dev Mac-to-second-peer smoke is resolved. The second peer backend listened only on `127.0.0.1:<port>`, the local dev Mac gateway reached the second peer owner through the allocated peer tunnel, `X-Myc-Node` was `macmini-peer`, and `/v1/chat/completions` returned HTTP 200.
