@@ -323,7 +323,9 @@ func mountNodeHTTP(mux *http.ServeMux, handler http.Handler) {
 		"/admission/commit",
 		"/admission/release",
 		"/admission/preempt",
+		"/admission/bind-instance",
 		"/admission/lease",
+		"/admission/lease-by-instance",
 		"/instances/",
 	} {
 		mux.Handle(path, handler)

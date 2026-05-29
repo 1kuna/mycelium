@@ -21,6 +21,13 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	if store.db.Stats().MaxOpenConnections != 1 {
+		t.Fatalf("MaxOpenConnections = %d", store.db.Stats().MaxOpenConnections)
+	}
+	var busyTimeout int
+	if err := store.db.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil || busyTimeout != 5000 {
+		t.Fatalf("busy_timeout = %d, %v", busyTimeout, err)
+	}
 
 	project := domain.Project{ID: "proj", Priority: domain.PriorityInteractive, SpeedPref: domain.SpeedLatency, ContextCap: 8192, AutoApply: true}
 	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("/models/a.gguf"))

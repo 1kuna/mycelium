@@ -37,6 +37,8 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	store := &Store{db: db}
 	if err := store.migrate(context.Background()); err != nil {
 		_ = db.Close()
@@ -581,6 +583,7 @@ func (s *Store) deleteColumn(ctx context.Context, table, column, value string) e
 
 func (s *Store) migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
+PRAGMA busy_timeout = 5000;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL);
