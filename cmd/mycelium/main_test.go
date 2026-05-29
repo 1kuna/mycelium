@@ -563,6 +563,29 @@ func TestRunOptimizerEvaluationPersistsRecommendationsAndCalibratesSpeed(t *test
 	}
 }
 
+func TestShouldRunGroupOptimizerSelectsOneReadyComputePeer(t *testing.T) {
+	ctx := context.Background()
+	clk := mocks.NewFakeClock(time.Unix(0, 0).UTC())
+	fleet := optimizerFleet{snap: domain.FleetSnapshot{Nodes: []domain.Node{
+		{ID: "node-c", Status: domain.NodeReady},
+		{ID: "node-a", Status: domain.NodeReady},
+		{ID: "node-b", Status: domain.NodeUnreachable},
+	}}}
+	ok, err := shouldRunGroupOptimizer(ctx, fleet, "node-a", clk, time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("node-a first slot ok=%v err=%v", ok, err)
+	}
+	ok, err = shouldRunGroupOptimizer(ctx, fleet, "node-c", clk, time.Minute)
+	if err != nil || ok {
+		t.Fatalf("node-c first slot ok=%v err=%v", ok, err)
+	}
+	clk.Advance(time.Minute)
+	ok, err = shouldRunGroupOptimizer(ctx, fleet, "node-c", clk, time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("node-c second slot ok=%v err=%v", ok, err)
+	}
+}
+
 func TestPeerEstimatorUsesGGUFParserWhenConfigured(t *testing.T) {
 	if _, ok := peerEstimator(PeerConfig{}, nil).(*estimate.InMemoryEstimator); !ok {
 		t.Fatal("default estimator should use preset estimates")
@@ -721,6 +744,15 @@ func writePeerConfig(t *testing.T, cfg PeerConfig) string {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
+}
+
+type optimizerFleet struct {
+	snap domain.FleetSnapshot
+	err  error
+}
+
+func (f optimizerFleet) Snapshot(context.Context) (domain.FleetSnapshot, error) {
+	return f.snap, f.err
 }
 
 func testPreset(id string) domain.Preset {

@@ -26,6 +26,7 @@ import (
 	"mycelium/internal/ports"
 	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
+	"mycelium/internal/telemetry"
 )
 
 func runPeer(ctx context.Context, args []string) error {
@@ -222,7 +223,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		return "", nil, err
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
-	startOptimizerEvaluator(ctx, store, clock.System{}, time.Duration(cfg.OptimizerEvalMS)*time.Millisecond)
+	startOptimizerEvaluator(ctx, store, fleet, cfg.ID, cfg.Compute, clock.System{}, time.Duration(cfg.OptimizerEvalMS)*time.Millisecond)
 	handler := gateway.Server{Router: &gateway.Router{
 		Placer:         placer,
 		Fleet:          fleet,
@@ -625,8 +626,8 @@ type optimizerRuntimeStore interface {
 	ListProjects(ctx context.Context) ([]domain.Project, error)
 }
 
-func startOptimizerEvaluator(ctx context.Context, store optimizerRuntimeStore, clk ports.Clock, interval time.Duration) {
-	if store == nil || clk == nil || interval <= 0 {
+func startOptimizerEvaluator(ctx context.Context, store optimizerRuntimeStore, fleet gateway.FleetSource, selfID string, compute bool, clk ports.Clock, interval time.Duration) {
+	if store == nil || fleet == nil || selfID == "" || !compute || clk == nil || interval <= 0 {
 		return
 	}
 	go func() {
@@ -638,11 +639,37 @@ func startOptimizerEvaluator(ctx context.Context, store optimizerRuntimeStore, c
 				return
 			case <-timer.C():
 			}
+			ok, err := shouldRunGroupOptimizer(ctx, fleet, selfID, clk, interval)
+			if err != nil {
+				log.Printf("mycelium optimizer group selection failed: %v", err)
+				continue
+			}
+			if !ok {
+				continue
+			}
 			if err := runOptimizerEvaluation(ctx, store, clk); err != nil {
 				log.Printf("mycelium optimizer evaluation failed: %v", err)
 			}
 		}
 	}()
+}
+
+func shouldRunGroupOptimizer(ctx context.Context, fleet gateway.FleetSource, selfID string, clk ports.Clock, interval time.Duration) (bool, error) {
+	if fleet == nil {
+		return false, fmt.Errorf("optimizer fleet source is not configured")
+	}
+	if selfID == "" {
+		return false, fmt.Errorf("optimizer self id is required")
+	}
+	if clk == nil {
+		return false, fmt.Errorf("optimizer clock is not configured")
+	}
+	snap, err := fleet.Snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	selected, ok := telemetry.SelectGroupAnalysisNode(snap.Nodes, clk.Now(), interval)
+	return ok && selected.ID == selfID, nil
 }
 
 func runOptimizerEvaluation(ctx context.Context, store optimizerRuntimeStore, clk ports.Clock) error {
