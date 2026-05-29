@@ -24,3 +24,5 @@
 - 2026-05-29: Anthropic-to-OpenAI streaming translation fails loudly until chunk-level SSE translation exists; non-streaming messages translate through OpenAI chat with strict field validation.
 - 2026-05-29: Phase 3 implements the local-path importer first because it is the smallest real end-to-end path; `hf://` and `oci://` fail loudly until their real importers exist.
 - 2026-05-29: Catalog installs commit the preset JSON last, after the model artifact and provenance are durable, so interrupted installs cannot register a half-materialized usable preset.
+- 2026-05-29: Phase 4 uses a seed-address join token (`mycjoin://host:port?token=...`) for LAN discovery; the token grants membership only and server-side validation can rotate or revoke it.
+- 2026-05-29: Joined nodes rewrite default loopback backend listens to the inferred LAN host, making loaded instances reachable from the gateway until a real loopback tunnel implementation replaces the LAN tunnel.
