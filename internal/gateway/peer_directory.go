@@ -3,8 +3,12 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"log"
+	"net"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"mycelium/internal/domain"
 	nodeagent "mycelium/internal/node"
@@ -50,6 +54,7 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 		}
 		snap, err := agent.Snapshot(ctx)
 		if err != nil {
+			log.Printf("mycelium peer snapshot failed: peer=%s address=%s error=%v", peer.ID, peer.Addresses[0], err)
 			node := unreachablePeerNode(peer)
 			if err := d.saveNode(ctx, node); err != nil {
 				return domain.FleetSnapshot{}, err
@@ -114,7 +119,15 @@ func (d *PeerDirectory) agentFor(peer domain.Peer) (ports.NodeAgent, error) {
 	factory := d.Factory
 	if factory == nil {
 		factory = func(address string) ports.NodeAgent {
-			return nodeagent.NewHTTPClient(peerAgentBaseURL(address))
+			client := nodeagent.NewHTTPClient(peerAgentBaseURL(address))
+			client.Client = &http.Client{Transport: &http.Transport{
+				Proxy: nil,
+				DialContext: (&net.Dialer{
+					Timeout:   5 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+			}}
+			return client
 		}
 	}
 	return factory(peer.Addresses[0]), nil

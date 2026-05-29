@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"syscall"
 	"time"
 
 	"mycelium/internal/clock"
@@ -47,11 +48,12 @@ func (d PeerLANDiscovery) Advertise(ctx context.Context, self domain.Peer) error
 	if addr == "" {
 		addr = DefaultPeerDiscoveryAddr
 	}
-	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	udpAddr, err := net.ResolveUDPAddr("udp4", addr)
 	if err != nil {
 		return err
 	}
-	conn, err := net.DialUDP("udp", nil, udpAddr)
+	listener := net.ListenConfig{Control: enableBroadcast}
+	conn, err := listener.ListenPacket(ctx, "udp4", "0.0.0.0:0")
 	if err != nil {
 		return err
 	}
@@ -65,12 +67,22 @@ func (d PeerLANDiscovery) Advertise(ctx context.Context, self domain.Peer) error
 	if err != nil {
 		return err
 	}
-	_, err = conn.Write(data)
+	_, err = conn.WriteTo(data, udpAddr)
 	return err
 }
 
+func enableBroadcast(_, _ string, raw syscall.RawConn) error {
+	var sockErr error
+	if err := raw.Control(func(fd uintptr) {
+		sockErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+	}); err != nil {
+		return err
+	}
+	return sockErr
+}
+
 func (d PeerLANDiscovery) Peers(ctx context.Context) ([]domain.Peer, error) {
-	conn, err := d.listen(ctx)
+	conn, err := d.listen(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +112,7 @@ func (d PeerLANDiscovery) WatchPeers(ctx context.Context) (<-chan domain.Peer, e
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	conn, err := d.listen(ctx)
+	conn, err := d.listen(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -126,12 +138,12 @@ func (d PeerLANDiscovery) WatchPeers(ctx context.Context) (<-chan domain.Peer, e
 	return ch, nil
 }
 
-func (d PeerLANDiscovery) listen(ctx context.Context) (net.PacketConn, error) {
+func (d PeerLANDiscovery) listen(ctx context.Context, bounded bool) (net.PacketConn, error) {
 	listenAddr := d.ListenAddr
 	if listenAddr == "" {
 		listenAddr = ":51850"
 	}
-	conn, err := net.ListenPacket("udp", listenAddr)
+	conn, err := net.ListenPacket("udp4", listenAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +152,7 @@ func (d PeerLANDiscovery) listen(ctx context.Context) (net.PacketConn, error) {
 			_ = conn.Close()
 			return nil, err
 		}
-	} else {
+	} else if bounded {
 		duration := d.ScanDuration
 		if duration == 0 {
 			duration = 250 * time.Millisecond
