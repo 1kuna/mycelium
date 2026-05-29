@@ -10,25 +10,26 @@ import (
 )
 
 type PeerConfig struct {
-	ID              string               `json:"id"`
-	Listen          string               `json:"listen"`
-	StorePath       string               `json:"store_path"`
-	CatalogDir      string               `json:"catalog_dir"`
-	Compute         bool                 `json:"compute"`
-	ComputeConfig   ComputeConfig        `json:"compute_config"`
-	JoinToken       string               `json:"join_token"`
-	DiscoveryListen string               `json:"discovery_listen"`
-	DiscoveryAddr   string               `json:"discovery_addr"`
-	DiscoveryScanMS int                  `json:"discovery_scan_ms"`
-	NodeURLs        []string             `json:"node_urls"`
-	GGUFParser      string               `json:"gguf_parser"`
-	Projects        []domain.Project     `json:"projects"`
-	Presets         []domain.Preset      `json:"presets"`
-	Reservations    []domain.Reservation `json:"reservations"`
-	DefaultProject  string               `json:"default_project"`
-	QueueDrainMS    int                  `json:"queue_drain_ms"`
-	QueueDrainLimit int                  `json:"queue_drain_limit"`
-	OptimizerEvalMS int                  `json:"optimizer_eval_ms"`
+	ID                   string               `json:"id"`
+	Listen               string               `json:"listen"`
+	StorePath            string               `json:"store_path"`
+	CatalogDir           string               `json:"catalog_dir"`
+	Compute              bool                 `json:"compute"`
+	ComputeConfig        ComputeConfig        `json:"compute_config"`
+	JoinToken            string               `json:"join_token"`
+	DiscoveryListen      string               `json:"discovery_listen"`
+	DiscoveryAddr        string               `json:"discovery_addr"`
+	DiscoveryScanMS      int                  `json:"discovery_scan_ms"`
+	DiscoveryAdvertiseMS int                  `json:"discovery_advertise_ms"`
+	NodeURLs             []string             `json:"node_urls"`
+	GGUFParser           string               `json:"gguf_parser"`
+	Projects             []domain.Project     `json:"projects"`
+	Presets              []domain.Preset      `json:"presets"`
+	Reservations         []domain.Reservation `json:"reservations"`
+	DefaultProject       string               `json:"default_project"`
+	QueueDrainMS         int                  `json:"queue_drain_ms"`
+	QueueDrainLimit      int                  `json:"queue_drain_limit"`
+	OptimizerEvalMS      int                  `json:"optimizer_eval_ms"`
 }
 
 type ComputeConfig struct {
@@ -78,6 +79,9 @@ func loadPeerConfig(path string) (PeerConfig, error) {
 	}
 	if cfg.DiscoveryScanMS == 0 {
 		cfg.DiscoveryScanMS = 250
+	}
+	if cfg.DiscoveryAdvertiseMS == 0 {
+		cfg.DiscoveryAdvertiseMS = 5000
 	}
 	cfg.ComputeConfig = defaultedComputeConfig(cfg.ComputeConfig)
 	if cfg.ID == "" {

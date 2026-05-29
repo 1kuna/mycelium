@@ -97,3 +97,4 @@
 - 2026-05-29: `PeerLANDiscovery.Peers` applies a bounded scan deadline even without a caller deadline, using an injected clock for deadline calculation, so request-path snapshots cannot hang on an empty LAN.
 - 2026-05-29: SUPERSEDES the earlier libp2p overlay implementation choice: cross-NAT discovery/tunnel code is now a loud roadmap stub behind `PeerDiscovery`/`Tunnel`, while the old node-oriented `Discovery`, `/join` registry, and node UDP announcer are deleted.
 - 2026-05-29: `PeerDirectory` persists successful discovered compute-node snapshots and records unreachable peers as unavailable nodes; snapshot failures shrink available capacity instead of failing the whole peer view.
+- 2026-05-29: Peer LAN advertisements have a configurable cadence (`discovery_advertise_ms`, default 5000) separate from discovery scan duration so smoke tests and dense LANs can avoid probabilistic scan/advertisement overlap.
