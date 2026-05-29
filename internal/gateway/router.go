@@ -120,7 +120,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	var lastErr error
 	for attempt := 1; attempt <= tries; attempt++ {
 		job := r.jobFromIngress(req, attempt)
-		decision, inst, cold, err := r.placeStickyOrLoad(ctx, req, job, preset, fleet)
+		decision, inst, cold, err := r.placeStickyOrLoad(ctx, req, job, preset, fleet, nil)
 		if err != nil {
 			return RouteResponse{}, err
 		}
@@ -189,7 +189,165 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	return RouteResponse{}, fmt.Errorf("gateway failover exhausted: %w", lastErr)
 }
 
-func (r *Router) placeStickyOrLoad(ctx context.Context, req translate.IngressRequest, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot) (domain.PlacementDecision, domain.ModelInstance, bool, error) {
+func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w http.ResponseWriter) error {
+	if r.Placer == nil || r.Fleet == nil || r.Nodes == nil {
+		return fmt.Errorf("gateway router is not configured")
+	}
+	preset, err := r.Presets.Resolve(req.Model)
+	if err != nil {
+		return err
+	}
+	profile, err := r.profileFor(preset)
+	if err != nil {
+		return err
+	}
+	fleet, err := r.Fleet.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	tries := r.MaxTries
+	if tries == 0 {
+		tries = 2
+	}
+	started := false
+	var lastErr error
+	for attempt := 1; attempt <= tries; attempt++ {
+		job := r.jobFromIngress(req, attempt)
+		beforeCold := func(ctx context.Context, decision domain.PlacementDecision) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if started {
+				return nil
+			}
+			headers := w.Header()
+			headers.Set("Content-Type", "text/event-stream")
+			headers.Set("X-Accel-Buffering", "no")
+			writeDecisionHeaders(headers, decision, domain.ModelInstance{NodeID: decision.NodeID}, profile, attempt)
+			w.WriteHeader(http.StatusOK)
+			started = true
+			if _, err := w.Write(loadingEvent(decision, domain.ModelInstance{NodeID: decision.NodeID})); err != nil {
+				return err
+			}
+			flush(w)
+			return nil
+		}
+		decision, inst, cold, err := r.placeStickyOrLoad(ctx, req, job, preset, fleet, beforeCold)
+		if err != nil {
+			if started {
+				writeStreamError(w, err)
+				return nil
+			}
+			return err
+		}
+		if started && cold {
+			if _, err := w.Write(readyEvent(decision, inst)); err != nil {
+				return err
+			}
+			flush(w)
+		}
+		endRequest, err := r.beginInstanceRequest(ctx, inst)
+		if err != nil {
+			if started {
+				writeStreamError(w, err)
+				return nil
+			}
+			return err
+		}
+		route, err := translate.BuildUpstream(req, profile)
+		if err != nil {
+			endRequest()
+			if started {
+				writeStreamError(w, err)
+				return nil
+			}
+			return err
+		}
+		if route.Translate {
+			endRequest()
+			err := fmt.Errorf("translated streaming responses are not supported")
+			if started {
+				writeStreamError(w, err)
+				return nil
+			}
+			return err
+		}
+		resp, err := r.doUpstream(ctx, inst, route)
+		if err != nil {
+			endRequest()
+			lastErr = err
+			r.reportFailure(ctx, inst.ID, err)
+			if started {
+				writeStreamError(w, err)
+				return nil
+			}
+			fleet = withoutInstance(fleet, inst.ID)
+			continue
+		}
+		if resp.StatusCode >= 400 {
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			endRequest()
+			if readErr != nil {
+				err = readErr
+			} else {
+				err = fmt.Errorf("upstream returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+			}
+			if resp.StatusCode >= 500 {
+				lastErr = err
+				r.reportFailure(ctx, inst.ID, err)
+				if started {
+					writeStreamError(w, err)
+					return nil
+				}
+				fleet = withoutInstance(fleet, inst.ID)
+				continue
+			}
+			if optimizer.IsContextOverflow(preset.Backend, err) {
+				next, ok := r.Presets.NextLargerContext(preset)
+				if ok && !started {
+					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", preset.ID, next.ID)
+					req.Model = next.ID
+					preset = next
+					continue
+				}
+			}
+			if started {
+				writeStreamError(w, err)
+				return nil
+			}
+			return err
+		}
+		if !started {
+			headers := cloneHeader(resp.Header)
+			if headers.Get("Content-Type") == "" {
+				headers.Set("Content-Type", "text/event-stream")
+			}
+			headers.Set("X-Accel-Buffering", "no")
+			writeResponseHeaders(w.Header(), headers)
+			writeDecisionHeaders(w.Header(), decision, inst, profile, attempt)
+			w.WriteHeader(resp.StatusCode)
+			started = true
+		}
+		body, copyErr := copyAndFlush(w, resp.Body)
+		_ = resp.Body.Close()
+		endRequest()
+		if copyErr != nil {
+			return copyErr
+		}
+		r.recordMetric(ctx, job, inst, body)
+		if r.Sticky != nil {
+			r.Sticky.Put(req.ConversationKey, inst)
+		}
+		return nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no stream placement attempts were made")
+	}
+	return fmt.Errorf("gateway failover exhausted: %w", lastErr)
+}
+
+func (r *Router) placeStickyOrLoad(ctx context.Context, req translate.IngressRequest, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot, beforeCold func(context.Context, domain.PlacementDecision) error) (domain.PlacementDecision, domain.ModelInstance, bool, error) {
 	if r.Sticky != nil {
 		if inst, ok := r.Sticky.Get(req.ConversationKey, preset, fleet); ok {
 			return domain.PlacementDecision{
@@ -206,12 +364,16 @@ func (r *Router) placeStickyOrLoad(ctx context.Context, req translate.IngressReq
 			}, inst, false, nil
 		}
 	}
-	return r.placeAndLoad(ctx, job, preset, fleet)
+	return r.placeAndLoad(ctx, job, preset, fleet, beforeCold)
 }
 
-func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot) (domain.PlacementDecision, domain.ModelInstance, bool, error) {
+func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot, beforeCold func(context.Context, domain.PlacementDecision) error) (domain.PlacementDecision, domain.ModelInstance, bool, error) {
 	if r.Runtime != nil {
-		result, err := r.Runtime.Submit(ctx, job)
+		var hooks []scheduler.SubmitHooks
+		if beforeCold != nil {
+			hooks = append(hooks, scheduler.SubmitHooks{BeforeColdLoad: beforeCold})
+		}
+		result, err := r.Runtime.Submit(ctx, job, hooks...)
 		if err != nil {
 			return result.Decision, result.Instance, false, err
 		}
@@ -224,6 +386,11 @@ func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, preset domain
 	decision, err := r.Placer.Place(ctx, job, fleet)
 	if err != nil {
 		return domain.PlacementDecision{}, domain.ModelInstance{}, false, err
+	}
+	if decision.InstanceID == "" && decision.Action != domain.ActionQueued && beforeCold != nil {
+		if err := beforeCold(ctx, decision); err != nil {
+			return decision, domain.ModelInstance{}, false, err
+		}
 	}
 	inst, cold, err := r.resolveInstance(ctx, decision, preset, fleet)
 	return decision, inst, cold, err
@@ -334,17 +501,7 @@ type upstreamResponse struct {
 }
 
 func (r *Router) callUpstream(ctx context.Context, inst domain.ModelInstance, route translate.UpstreamRequest) (upstreamResponse, error) {
-	client := r.Client
-	if client == nil {
-		client = http.DefaultClient
-	}
-	url := joinURL(inst.Addr, route.Path)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(route.Body))
-	if err != nil {
-		return upstreamResponse{}, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(httpReq)
+	resp, err := r.doUpstream(ctx, inst, route)
 	if err != nil {
 		return upstreamResponse{}, err
 	}
@@ -354,6 +511,20 @@ func (r *Router) callUpstream(ctx context.Context, inst domain.ModelInstance, ro
 		return upstreamResponse{}, err
 	}
 	return upstreamResponse{Status: resp.StatusCode, Header: resp.Header.Clone(), Body: body}, nil
+}
+
+func (r *Router) doUpstream(ctx context.Context, inst domain.ModelInstance, route translate.UpstreamRequest) (*http.Response, error) {
+	client := r.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	url := joinURL(inst.Addr, route.Path)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(route.Body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	return client.Do(httpReq)
 }
 
 func (r *Router) reportFailure(ctx context.Context, instanceID string, err error) {
@@ -414,6 +585,63 @@ func loadingEvent(decision domain.PlacementDecision, inst domain.ModelInstance) 
 		panic(err)
 	}
 	return []byte("event: loading\ndata: " + string(payload) + "\n\n")
+}
+
+func readyEvent(decision domain.PlacementDecision, inst domain.ModelInstance) []byte {
+	payload, err := json.Marshal(map[string]string{
+		"action":      string(decision.Action),
+		"node_id":     inst.NodeID,
+		"instance_id": inst.ID,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return []byte("event: ready\ndata: " + string(payload) + "\n\n")
+}
+
+func writeStreamError(w http.ResponseWriter, err error) {
+	payload, marshalErr := json.Marshal(map[string]string{"error": err.Error()})
+	if marshalErr != nil {
+		panic(marshalErr)
+	}
+	_, _ = w.Write([]byte("event: error\ndata: " + string(payload) + "\n\n"))
+	flush(w)
+}
+
+func copyAndFlush(w http.ResponseWriter, r io.Reader) ([]byte, error) {
+	var body bytes.Buffer
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			body.Write(chunk)
+			if _, err := w.Write(chunk); err != nil {
+				return body.Bytes(), err
+			}
+			flush(w)
+		}
+		if readErr == io.EOF {
+			return body.Bytes(), nil
+		}
+		if readErr != nil {
+			return body.Bytes(), readErr
+		}
+	}
+}
+
+func writeResponseHeaders(dst, src http.Header) {
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func flush(w http.ResponseWriter) {
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func joinURL(addr, path string) string {

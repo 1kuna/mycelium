@@ -1,9 +1,11 @@
 package e2e
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -75,18 +77,39 @@ func TestPhase2GatewayColdTargetStreamsLoadingState(t *testing.T) {
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_cold"))
 	inst.Addr = upstream.URL
+	allowLoad := make(chan struct{})
+	released := false
 	fleet := staticGatewayFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}}
 	server := newGatewayTestServer(t, preset, fleet, staticNodeResolver{agents: map[string]ports.NodeAgent{
-		node.ID: loadOnlyNode{node: node, inst: inst},
+		node.ID: blockingLoadNode{node: node, inst: inst, allow: allowLoad},
 	}})
+	defer func() {
+		if !released {
+			close(allowLoad)
+		}
+	}()
 
 	resp := postJSON(t, server.URL+"/v1/chat/completions", `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`)
 	defer resp.Body.Close()
-	body := readBody(t, resp)
 	if resp.Header.Get("Content-Type") != "text/event-stream" {
 		t.Fatalf("content-type = %s", resp.Header.Get("Content-Type"))
 	}
-	if !strings.Contains(body, "event: loading") || !strings.Contains(body, `"instance_id":"inst_cold"`) || !strings.Contains(body, "data: done") {
+	reader := bufio.NewReader(resp.Body)
+	first, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read first stream line: %v", err)
+	}
+	if first != "event: loading\n" {
+		t.Fatalf("first stream line = %q", first)
+	}
+	close(allowLoad)
+	released = true
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read rest: %v", err)
+	}
+	body := first + string(rest)
+	if !strings.Contains(body, "event: ready") || !strings.Contains(body, `"instance_id":"inst_cold"`) || !strings.Contains(body, "data: done") {
 		t.Fatalf("stream body = %q", body)
 	}
 }
@@ -195,6 +218,37 @@ func (n loadOnlyNode) BeginRequest(context.Context, string) error {
 }
 
 func (n loadOnlyNode) EndRequest(context.Context, string) error {
+	return nil
+}
+
+type blockingLoadNode struct {
+	node  domain.Node
+	inst  domain.ModelInstance
+	allow <-chan struct{}
+}
+
+func (n blockingLoadNode) Snapshot(context.Context) (domain.NodeSnapshot, error) {
+	return domain.NodeSnapshot{Node: n.node}, nil
+}
+
+func (n blockingLoadNode) Load(context.Context, domain.Preset) (domain.ModelInstance, error) {
+	<-n.allow
+	return n.inst, nil
+}
+
+func (n blockingLoadNode) Unload(context.Context, string) error {
+	return nil
+}
+
+func (n blockingLoadNode) InspectModel(context.Context, domain.Preset) (domain.ModelMetadata, error) {
+	return domain.ModelMetadata{}, domain.ErrUnsupported
+}
+
+func (n blockingLoadNode) BeginRequest(context.Context, string) error {
+	return nil
+}
+
+func (n blockingLoadNode) EndRequest(context.Context, string) error {
 	return nil
 }
 

@@ -42,3 +42,4 @@
 - 2026-05-29: Reverse benchmarks write raw per-model outputs plus objective metrics only; the runner deliberately avoids subjective ranking so the user remains the judge of answer quality.
 - 2026-05-29: MLX and vLLM adapters share a supervised process adapter with explicit command templates and health polling; real engine smoke remains hardware/env gated instead of faked in fast tests.
 - 2026-05-29: Server reservations are loaded from durable state into the allocator; pinned preset reservations reserve the preset's computed claim on the pinned node rather than becoming a scheduler hint only.
+- 2026-05-29: Streaming gateway requests use a direct writer path instead of the buffered route response; cold-load SSE starts before node `Load`, and later failures on an already-started stream are emitted as SSE error events because HTTP status cannot be changed after the first flush.
