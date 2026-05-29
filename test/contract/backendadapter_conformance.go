@@ -9,9 +9,13 @@ import (
 )
 
 func RunBackendAdapterConformance(t *testing.T, name string, newAdapter func() ports.BackendAdapter, p domain.Preset) {
+	RunBackendAdapterConformanceAt(t, name, newAdapter, p, "127.0.0.1:0")
+}
+
+func RunBackendAdapterConformanceAt(t *testing.T, name string, newAdapter func() ports.BackendAdapter, p domain.Preset, addr string) {
 	t.Run(name+"/launch_wait_stop_happy_path", func(t *testing.T) {
 		adapter := newAdapter()
-		handle, err := adapter.Launch(context.Background(), p, "127.0.0.1:0")
+		handle, err := adapter.Launch(context.Background(), p, addr)
 		if err != nil {
 			t.Fatalf("Launch: %v", err)
 		}
@@ -25,7 +29,7 @@ func RunBackendAdapterConformance(t *testing.T, name string, newAdapter func() p
 
 	t.Run(name+"/stop_is_idempotent", func(t *testing.T) {
 		adapter := newAdapter()
-		handle, err := adapter.Launch(context.Background(), p, "127.0.0.1:0")
+		handle, err := adapter.Launch(context.Background(), p, addr)
 		if err != nil {
 			t.Fatalf("Launch: %v", err)
 		}
