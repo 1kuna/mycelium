@@ -16,9 +16,17 @@ type Registry struct {
 	mu     sync.Mutex
 	tokens *TokenManager
 	tunnel ports.Tunnel
+	store  NodeStore
 	agents map[string]ports.NodeAgent
 	nodes  map[string]domain.Node
 }
+
+type NodeStore interface {
+	SaveNode(ctx context.Context, node domain.Node) error
+	ListNodes(ctx context.Context) ([]domain.Node, error)
+}
+
+const LabelAdvertisedAddress = "mycelium.node.advertised_addr"
 
 func NewRegistry(tokens *TokenManager, tunnel ports.Tunnel) *Registry {
 	if tunnel == nil {
@@ -32,6 +40,30 @@ func NewRegistry(tokens *TokenManager, tunnel ports.Tunnel) *Registry {
 	}
 }
 
+func NewPersistentRegistry(ctx context.Context, tokens *TokenManager, tunnel ports.Tunnel, store NodeStore) (*Registry, error) {
+	registry := NewRegistry(tokens, tunnel)
+	registry.store = store
+	if store == nil {
+		return registry, nil
+	}
+	nodes, err := store.ListNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range nodes {
+		if node.ID == "" || node.Address == "" {
+			continue
+		}
+		runtimeNode, agent, err := registry.runtimeNode(ctx, node)
+		if err != nil {
+			return nil, err
+		}
+		registry.nodes[runtimeNode.ID] = runtimeNode
+		registry.agents[runtimeNode.ID] = agent
+	}
+	return registry, nil
+}
+
 func (r *Registry) Join(ctx context.Context, req JoinRequest) (domain.Node, error) {
 	if r.tokens == nil {
 		return domain.Node{}, fmt.Errorf("join token manager is not configured")
@@ -39,24 +71,66 @@ func (r *Registry) Join(ctx context.Context, req JoinRequest) (domain.Node, erro
 	if err := r.tokens.Validate(req.Token); err != nil {
 		return domain.Node{}, err
 	}
-	node := req.Node
-	addr, err := r.tunnel.Open(ctx, node)
+	node, agent, err := r.runtimeNode(ctx, req.Node)
 	if err != nil {
 		return domain.Node{}, err
 	}
-	node.Address = addr
-	node.Status = domain.NodeReady
+	r.mu.Lock()
+	r.nodes[node.ID] = node
+	r.agents[node.ID] = agent
+	r.mu.Unlock()
+	if r.store != nil {
+		if err := r.store.SaveNode(ctx, persistedNode(node)); err != nil {
+			return domain.Node{}, err
+		}
+	}
+	return node, nil
+}
+
+func (r *Registry) runtimeNode(ctx context.Context, node domain.Node) (domain.Node, ports.NodeAgent, error) {
+	advertised := advertisedAddress(node)
+	addr, err := r.tunnel.Open(ctx, node)
+	if err != nil {
+		return domain.Node{}, nil, err
+	}
+	runtimeNode := node
+	runtimeNode.Address = addr
+	runtimeNode.Status = domain.NodeReady
+	runtimeNode.Labels = withAdvertisedAddress(runtimeNode.Labels, advertised)
 	client := nodeagent.NewHTTPClient("http://" + addr)
 	if snap, err := client.Snapshot(ctx); err == nil {
-		node = snap.Node
-		node.Address = addr
-		node.Status = domain.NodeReady
+		runtimeNode = snap.Node
+		runtimeNode.Address = addr
+		runtimeNode.Status = domain.NodeReady
+		runtimeNode.Labels = withAdvertisedAddress(runtimeNode.Labels, advertised)
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.nodes[node.ID] = node
-	r.agents[node.ID] = client
-	return node, nil
+	return runtimeNode, client, nil
+}
+
+func persistedNode(node domain.Node) domain.Node {
+	out := node
+	if advertised := advertisedAddress(node); advertised != "" {
+		out.Address = advertised
+	}
+	return out
+}
+
+func advertisedAddress(node domain.Node) string {
+	if node.Labels != nil && node.Labels[LabelAdvertisedAddress] != "" {
+		return node.Labels[LabelAdvertisedAddress]
+	}
+	return node.Address
+}
+
+func withAdvertisedAddress(labels map[string]string, address string) map[string]string {
+	out := map[string]string{}
+	for key, value := range labels {
+		out[key] = value
+	}
+	if address != "" {
+		out[LabelAdvertisedAddress] = address
+	}
+	return out
 }
 
 func (r *Registry) Snapshot(ctx context.Context) (domain.FleetSnapshot, error) {
