@@ -71,3 +71,4 @@
 - 2026-05-29: Server queue draining is a small background loop over the existing scheduler service, defaulting to one queued job per second; it also runs lease expiry each tick and never bypasses the normal placement/load/lease path.
 - 2026-05-29: Server optimizer evaluation runs as a periodic background pass over persisted projects and telemetry; it reuses `RecommendationService` for recommendation persistence/auto-apply and calibrates node speed classes from observed tokens/sec on the same tick.
 - 2026-05-29: Gateway request job IDs use a process-wide monotonic sequence instead of model/attempt text so repeated requests emit distinct telemetry records into the durable store.
+- 2026-05-29: OCI catalog imports verify the pulled layer's manifest size and sha256 digest before returning a draft preset input; unsupported digest algorithms fail loudly instead of trusting bytes by URL alone.

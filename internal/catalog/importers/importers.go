@@ -2,8 +2,10 @@ package importers
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -153,7 +155,19 @@ func importOCI(ctx context.Context, source string) (Draft, error) {
 	if token := os.Getenv("MYCELIUM_OCI_TOKEN"); token != "" {
 		blobReq.Header.Set("Authorization", "Bearer "+token)
 	}
-	return downloadDraft(ctx, blobReq, source, "oci", name)
+	draft, err := downloadDraft(ctx, blobReq, source, "oci", name)
+	if err != nil {
+		return Draft{}, err
+	}
+	if layer.Size > 0 && draft.Size != layer.Size {
+		_ = os.Remove(draft.Path)
+		return Draft{}, fmt.Errorf("oci layer size mismatch: manifest=%d downloaded=%d", layer.Size, draft.Size)
+	}
+	if err := verifyDigest(draft.Path, layer.Digest); err != nil {
+		_ = os.Remove(draft.Path)
+		return Draft{}, err
+	}
+	return draft, nil
 }
 
 func downloadDraft(ctx context.Context, req *http.Request, source, importer, name string) (Draft, error) {
@@ -226,6 +240,33 @@ func ociURL(host, p string) string {
 		scheme = "http"
 	}
 	return (&url.URL{Scheme: scheme, Host: host, Path: "/" + p}).String()
+}
+
+func verifyDigest(filePath, digest string) error {
+	algorithm, expected, ok := strings.Cut(digest, ":")
+	if !ok || expected == "" {
+		return fmt.Errorf("oci layer digest %q is malformed", digest)
+	}
+	var h hash.Hash
+	switch algorithm {
+	case "sha256":
+		h = sha256.New()
+	default:
+		return fmt.Errorf("unsupported oci layer digest algorithm %q", algorithm)
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if _, err := io.Copy(h, file); err != nil {
+		return err
+	}
+	actual := fmt.Sprintf("%x", h.Sum(nil))
+	if !strings.EqualFold(actual, expected) {
+		return fmt.Errorf("oci layer digest mismatch: expected %s:%s got %s:%s", algorithm, expected, algorithm, actual)
+	}
+	return nil
 }
 
 func huggingFaceToken() string {

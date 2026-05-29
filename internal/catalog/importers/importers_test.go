@@ -135,6 +135,10 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 	}
 
 	ociServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		layer := []byte("oci layer")
+		goodSum := sha256.Sum256(layer)
+		goodDigest := "sha256:" + hex.EncodeToString(goodSum[:])
+		badDigest := "sha256:" + strings.Repeat("0", 64)
 		switch {
 		case strings.Contains(r.URL.Path, "/manifests/status"):
 			http.Error(w, "missing", http.StatusNotFound)
@@ -144,8 +148,16 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 			_, _ = w.Write([]byte(`{`))
 		case strings.Contains(r.URL.Path, "/manifests/blobstatus"):
 			_, _ = w.Write([]byte(`{"layers":[{"digest":"sha256:dead","annotations":{"org.opencontainers.image.title":"model.gguf"}}]}`))
+		case strings.Contains(r.URL.Path, "/manifests/badsize"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"layers": []map[string]any{{"digest": goodDigest, "size": len(layer) + 1}}})
+		case strings.Contains(r.URL.Path, "/manifests/baddigest"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"layers": []map[string]any{{"digest": badDigest, "size": len(layer)}}})
+		case strings.Contains(r.URL.Path, "/manifests/badalg"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"layers": []map[string]any{{"digest": "sha512:abc", "size": len(layer)}}})
 		case strings.Contains(r.URL.Path, "/blobs/sha256:dead"):
 			http.Error(w, "blob missing", http.StatusNotFound)
+		case strings.Contains(r.URL.Path, "/blobs/"):
+			_, _ = w.Write(layer)
 		default:
 			t.Fatalf("path = %s", r.URL.Path)
 		}
@@ -158,6 +170,9 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 		"oci://" + host + "/ns/model:empty",
 		"oci://" + host + "/ns/model:badjson",
 		"oci://" + host + "/ns/model:blobstatus",
+		"oci://" + host + "/ns/model:badsize",
+		"oci://" + host + "/ns/model:baddigest",
+		"oci://" + host + "/ns/model:badalg",
 	} {
 		if _, err := Import(context.Background(), source); err == nil {
 			t.Fatalf("%s expected error", source)
