@@ -1,0 +1,6 @@
+/mycelium
+/myce
+*.out
+*.test
+coverage.html
+.DS_Store
