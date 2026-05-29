@@ -106,7 +106,11 @@ func BuildUpstream(req IngressRequest, profile profiles.Profile) (UpstreamReques
 		if req.Claude.Stream {
 			return UpstreamRequest{}, fmt.Errorf("streaming anthropic-to-openai translation is not supported")
 		}
-		body, err := json.Marshal(anthropicToOpenAI(req.Claude))
+		openai, err := anthropicToOpenAI(req.Claude)
+		if err != nil {
+			return UpstreamRequest{}, err
+		}
+		body, err := json.Marshal(openai)
 		if err != nil {
 			return UpstreamRequest{}, err
 		}
@@ -137,20 +141,27 @@ func TranslateResponse(req IngressRequest, upstream UpstreamRequest, body []byte
 	}
 }
 
-func anthropicToOpenAI(req api.AnthropicMessagesRequest) api.OpenAIChatRequest {
+func anthropicToOpenAI(req api.AnthropicMessagesRequest) (api.OpenAIChatRequest, error) {
+	if len(req.Tools) > 0 || req.ToolChoice != nil {
+		return api.OpenAIChatRequest{}, fmt.Errorf("anthropic tool use cannot be translated to openai-compatible backends without protocol loss")
+	}
 	messages := make([]api.OpenAIMessage, 0, len(req.Messages)+1)
 	if req.System != "" {
 		messages = append(messages, api.OpenAIMessage{Role: "system", Content: req.System})
 	}
 	for _, msg := range req.Messages {
-		messages = append(messages, api.OpenAIMessage{Role: msg.Role, Content: anthropicText(msg.Content)})
+		text, err := anthropicText(msg.Content)
+		if err != nil {
+			return api.OpenAIChatRequest{}, err
+		}
+		messages = append(messages, api.OpenAIMessage{Role: msg.Role, Content: text})
 	}
 	return api.OpenAIChatRequest{
 		Model:     req.Model,
 		Messages:  messages,
 		MaxTokens: req.MaxTokens,
 		Stream:    req.Stream,
-	}
+	}, nil
 }
 
 func openAIToAnthropic(resp api.OpenAIChatResponse) api.AnthropicMessagesResponse {
@@ -174,14 +185,15 @@ func openAIToAnthropic(resp api.OpenAIChatResponse) api.AnthropicMessagesRespons
 	}
 }
 
-func anthropicText(blocks []api.AnthropicContentBlock) string {
+func anthropicText(blocks []api.AnthropicContentBlock) (string, error) {
 	parts := make([]string, 0, len(blocks))
 	for _, block := range blocks {
-		if block.Type == "text" {
-			parts = append(parts, block.Text)
+		if block.Type != "text" {
+			return "", fmt.Errorf("anthropic content block %q cannot be translated to openai text", block.Type)
 		}
+		parts = append(parts, block.Text)
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), nil
 }
 
 func decodeStrict(body []byte, out any) error {

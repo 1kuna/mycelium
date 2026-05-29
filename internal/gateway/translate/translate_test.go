@@ -76,6 +76,34 @@ func TestOpenAIParseAndBuildUpstream(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatAcceptsContentPartsAndTools(t *testing.T) {
+	raw := `{
+		"model":"m",
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,xx"}}]},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"done"}
+		],
+		"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
+		"tool_choice":"auto"
+	}`
+	req, err := ParseOpenAIChat([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	if req.OpenAI.Messages[0].Content != "hi" || len(req.OpenAI.Messages[0].ContentParts) != 2 || len(req.OpenAI.Tools) != 1 || len(req.OpenAI.Messages[1].ToolCalls) != 1 {
+		t.Fatalf("parsed request = %+v", req.OpenAI)
+	}
+	profile := profiles.Profile{Format: profiles.FormatOpenAI, ChatPath: "/chat"}
+	route, err := BuildUpstream(req, profile)
+	if err != nil {
+		t.Fatalf("BuildUpstream: %v", err)
+	}
+	if string(route.Body) != string(req.Body) {
+		t.Fatalf("route body changed: %s", route.Body)
+	}
+}
+
 func TestParseRequestsFailLoudly(t *testing.T) {
 	cases := []struct {
 		name string
@@ -135,14 +163,78 @@ func TestBuildAndTranslateUnsupportedRoutesFailLoudly(t *testing.T) {
 	}
 }
 
-func TestUnsupportedFieldsFailLoudly(t *testing.T) {
+func TestUnknownFieldsFailLoudly(t *testing.T) {
 	_, err := ParseAnthropicMessages([]byte(`{
 		"model":"qwen2.5-9b-instruct",
 		"max_tokens":4,
-		"tool_choice":{"type":"auto"},
+		"banana":true,
 		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
 	}`))
 	if err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAnthropicToolsPassThroughForAnthropicProfile(t *testing.T) {
+	raw := `{
+		"model":"claude-local",
+		"max_tokens":4,
+		"tools":[{"name":"lookup","description":"look up a value","input_schema":{"type":"object"}}],
+		"tool_choice":{"type":"tool","name":"lookup"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"q":"hi"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"done"}]}
+		]
+	}`
+	req, err := ParseAnthropicMessages([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseAnthropicMessages: %v", err)
+	}
+	if len(req.Claude.Tools) != 1 || req.Claude.ToolChoice == nil || req.Claude.Messages[0].Content[0].Type != "tool_use" {
+		t.Fatalf("parsed anthropic request = %+v", req.Claude)
+	}
+	route, err := BuildUpstream(req, profiles.Profile{Format: profiles.FormatAnthropic, AnthropicPath: "/messages"})
+	if err != nil {
+		t.Fatalf("BuildUpstream: %v", err)
+	}
+	if route.Path != "/messages" || string(route.Body) != string(req.Body) {
+		t.Fatalf("route = %+v", route)
+	}
+}
+
+func TestAnthropicToolsFailForOpenAITranslation(t *testing.T) {
+	req, err := ParseAnthropicMessages([]byte(`{
+		"model":"qwen2.5-9b-instruct",
+		"max_tokens":4,
+		"tools":[{"name":"lookup","input_schema":{"type":"object"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseAnthropicMessages: %v", err)
+	}
+	profile, err := profiles.DefaultRegistry().ForBackend(domain.BackendLlamaCpp)
+	if err != nil {
+		t.Fatalf("ForBackend: %v", err)
+	}
+	if _, err := BuildUpstream(req, profile); err == nil || !strings.Contains(err.Error(), "tool use cannot be translated") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAnthropicNonTextBlocksFailForOpenAITranslation(t *testing.T) {
+	req, err := ParseAnthropicMessages([]byte(`{
+		"model":"qwen2.5-9b-instruct",
+		"max_tokens":4,
+		"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"xx"}}]}]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseAnthropicMessages: %v", err)
+	}
+	profile, err := profiles.DefaultRegistry().ForBackend(domain.BackendLlamaCpp)
+	if err != nil {
+		t.Fatalf("ForBackend: %v", err)
+	}
+	if _, err := BuildUpstream(req, profile); err == nil || !strings.Contains(err.Error(), "cannot be translated") {
 		t.Fatalf("err = %v", err)
 	}
 }
