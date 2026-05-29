@@ -13,9 +13,15 @@ import (
 
 type PeerAgentFactory func(address string) ports.NodeAgent
 
+type PeerNodeStore interface {
+	SaveNode(ctx context.Context, node domain.Node) error
+}
+
 type PeerDirectory struct {
 	Discovery ports.PeerDiscovery
 	Factory   PeerAgentFactory
+	Store     PeerNodeStore
+	SelfID    string
 
 	mu     sync.Mutex
 	agents map[string]ports.NodeAgent
@@ -32,6 +38,9 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 	agents := map[string]ports.NodeAgent{}
 	var fleet domain.FleetSnapshot
 	for _, peer := range peers {
+		if d.SelfID != "" && peer.ID == d.SelfID {
+			continue
+		}
 		if !peer.Compute {
 			continue
 		}
@@ -41,6 +50,14 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 		}
 		snap, err := agent.Snapshot(ctx)
 		if err != nil {
+			node := unreachablePeerNode(peer)
+			if err := d.saveNode(ctx, node); err != nil {
+				return domain.FleetSnapshot{}, err
+			}
+			fleet.Nodes = append(fleet.Nodes, node)
+			continue
+		}
+		if err := d.saveNode(ctx, snap.Node); err != nil {
 			return domain.FleetSnapshot{}, err
 		}
 		fleet.Nodes = append(fleet.Nodes, snap.Node)
@@ -101,6 +118,21 @@ func (d *PeerDirectory) agentFor(peer domain.Peer) (ports.NodeAgent, error) {
 		}
 	}
 	return factory(peer.Addresses[0]), nil
+}
+
+func (d *PeerDirectory) saveNode(ctx context.Context, node domain.Node) error {
+	if d.Store == nil {
+		return nil
+	}
+	return d.Store.SaveNode(ctx, node)
+}
+
+func unreachablePeerNode(peer domain.Peer) domain.Node {
+	node := domain.Node{ID: peer.ID, Name: peer.ID, Status: domain.NodeUnreachable}
+	if len(peer.Addresses) > 0 {
+		node.Address = peer.Addresses[0]
+	}
+	return node
 }
 
 func peerAgentBaseURL(address string) string {
