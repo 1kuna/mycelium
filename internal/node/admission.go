@@ -18,6 +18,7 @@ type Admission struct {
 	allocator ports.Allocator
 	clock     ports.Clock
 	offerTTL  time.Duration
+	instances func() []domain.ModelInstance
 	fence     uint64
 	nextOffer int
 	nextLease int
@@ -58,6 +59,12 @@ func NewAdmission(node domain.Node, allocator ports.Allocator, clock ports.Clock
 func WithAdmissionOfferTTL(ttl time.Duration) AdmissionOption {
 	return func(a *Admission) {
 		a.offerTTL = ttl
+	}
+}
+
+func WithAdmissionInstances(instances func() []domain.ModelInstance) AdmissionOption {
+	return func(a *Admission) {
+		a.instances = instances
 	}
 }
 
@@ -178,6 +185,9 @@ func (a *Admission) instancesLocked() []domain.ModelInstance {
 			State:          domain.InstReady,
 			Priority:       record.priority,
 		})
+	}
+	if a.instances != nil {
+		instances = append(instances, a.instances()...)
 	}
 	return instances
 }

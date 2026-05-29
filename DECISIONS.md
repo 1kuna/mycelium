@@ -81,3 +81,4 @@
 - 2026-05-29: Peer RPC exposes owner admission at `/admission/*`, and wire errors carry stable codes for `ErrNoFit` and `ErrStaleFence` so remote coordinators can still use typed `errors.Is` decisions instead of parsing strings.
 - 2026-05-29: `mycelium run` owns local compute via `compute: true` and a `compute_config` block; the old separate node config/runtime is gone, and local node RPC/admission mounts on the same peer daemon listener as the gateway.
 - 2026-05-29: Phase 4's automated smoke now uses two `mycelium run` peers with a seed `node_urls` link: one compute-on owner peer and one coordinating gateway peer. True LAN auto-discovery remains the Phase 4 implementation target, but the smoke no longer invokes deleted topology commands.
+- 2026-05-29: Local admission includes the owner agent's live instance snapshot in every fit check, so owner commits see both in-flight admission leases and already-running backend occupancy before issuing a new offer.

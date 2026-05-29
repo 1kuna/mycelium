@@ -47,6 +47,14 @@ func TestLoadReadinessGatesInstanceAndUnloadStopsBackend(t *testing.T) {
 	if len(snap.Instances) != 1 || snap.Instances[0].ID != inst.ID {
 		t.Fatalf("snapshot = %+v", snap)
 	}
+	instances := agent.Instances()
+	if len(instances) != 1 || instances[0].ID != inst.ID {
+		t.Fatalf("instances = %+v", instances)
+	}
+	instances[0].ID = "mutated"
+	if got := agent.Instances()[0].ID; got != inst.ID {
+		t.Fatalf("Instances returned mutable backing state: %s", got)
+	}
 	if err := agent.Unload(context.Background(), inst.ID); err != nil {
 		t.Fatalf("Unload: %v", err)
 	}

@@ -136,6 +136,29 @@ func TestAdmissionReleaseAndPreemptRemoveOccupancy(t *testing.T) {
 	}
 }
 
+func TestAdmissionCountsOwnerRunningInstances(t *testing.T) {
+	running := []domain.ModelInstance{fixtures.MakeInstance(
+		fixtures.WithInstanceID("running-a"),
+		fixtures.OnNode("node_test"),
+		fixtures.WithClaim(fixtures.MakeClaim(700, 0)),
+	)}
+	admission := NewAdmission(
+		fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Now()),
+		WithAdmissionInstances(func() []domain.ModelInstance {
+			return append([]domain.ModelInstance(nil), running...)
+		}),
+	)
+	if _, err := admission.Offer(context.Background(), fixtures.MakeJob(), fixtures.MakeClaim(400, 0)); !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("running instance no-fit err = %v", err)
+	}
+	running = nil
+	if _, err := admission.Offer(context.Background(), fixtures.MakeJob(), fixtures.MakeClaim(400, 0)); err != nil {
+		t.Fatalf("offer after clearing running instances: %v", err)
+	}
+}
+
 func TestAdmissionFailsLoudOnBadInputsAndUnavailableCapacity(t *testing.T) {
 	admission := NewAdmission(fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.5)), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))
 	if _, err := admission.Offer(context.Background(), fixtures.MakeJob(), fixtures.MakeClaim(600, 0)); !errors.Is(err, domain.ErrNoFit) {
