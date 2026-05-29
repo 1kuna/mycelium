@@ -35,6 +35,7 @@ func runNode(ctx context.Context, args []string) error {
 func buildNodeServer(args []string) (string, http.Handler, error) {
 	fs := flag.NewFlagSet("node", flag.ContinueOnError)
 	listen := fs.String("listen", "127.0.0.1:51847", "node agent listen address")
+	backendListen := fs.String("backend-listen", "127.0.0.1:51848", "backend inference server listen address")
 	id := fs.String("id", "node_local", "node id")
 	name := fs.String("name", "local-node", "node name")
 	llamaServer := fs.String("llama-server", "llama-server", "llama.cpp server binary")
@@ -64,6 +65,6 @@ func buildNodeServer(args []string) (string, http.Handler, error) {
 		SpeedClass:    domain.SpeedClass{TokensPerSecRef: 1, Source: "class-default"},
 	}
 	adapter := llamacpp.NewAdapter(llamacpp.Config{BinaryPath: *llamaServer})
-	agent := nodeagent.NewAgent(node, adapter, clock.System{}, nodeagent.WithAllocator(lease.NewAllocator()))
+	agent := nodeagent.NewAgent(node, adapter, clock.System{}, nodeagent.WithListenAddr(*backendListen), nodeagent.WithAllocator(lease.NewAllocator()))
 	return *listen, nodeagent.HTTPServer{Agent: agent}, nil
 }

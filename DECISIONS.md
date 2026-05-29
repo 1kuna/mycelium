@@ -18,3 +18,4 @@
 - 2026-05-29: Llama.cpp launch profiles are explicit named arg lists, and per-preset launch args carry computed tuning such as GPU layers or tensor split into the backend command; unknown profiles fail before launch.
 - 2026-05-29: Use a 5m default node load timeout, enforced with the injected `Clock`; tests can shorten it and advance `FakeClock` without real sleeps.
 - 2026-05-29: Llama.cpp launch contexts bound process start and readiness only; a successfully launched backend stays alive until explicit `Stop`.
+- 2026-05-29: `mycelium node` uses a concrete `--backend-listen` address for llama.cpp launches; port `0` is not valid until the adapter grows explicit port discovery.
