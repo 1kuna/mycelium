@@ -1,0 +1,209 @@
+package gateway
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"mycelium/internal/domain"
+	"mycelium/internal/estimate"
+	"mycelium/internal/gateway/translate"
+	"mycelium/internal/lease"
+	"mycelium/internal/ports"
+	"mycelium/internal/scheduler"
+	"mycelium/test/fixtures"
+	"mycelium/test/mocks"
+)
+
+func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("hello")))
+	}))
+	defer upstream.Close()
+
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream.URL
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Header.Get(HeaderDecision) != string(domain.ActionWarmInstance) || resp.Header.Get(HeaderInstance) != inst.ID {
+		t.Fatalf("headers = %+v", resp.Header)
+	}
+	if !strings.Contains(string(resp.Body), "hello") {
+		t.Fatalf("body = %s", resp.Body)
+	}
+}
+
+func TestRouterColdStreamPrependsLoadingState(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: done\n\n"))
+	}))
+	defer upstream.Close()
+
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_cold"))
+	inst.Addr = upstream.URL
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
+		node.ID: loadNode{node: node, inst: inst},
+	}})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	body := string(resp.Body)
+	if !resp.ColdLoad || !strings.Contains(body, "event: loading") || !strings.Contains(body, "data: done") {
+		t.Fatalf("resp = cold:%v body:%q", resp.ColdLoad, body)
+	}
+	if resp.Header.Get("X-Accel-Buffering") != "no" {
+		t.Fatalf("headers = %+v", resp.Header)
+	}
+}
+
+func TestRouterFailoverReportsFailure(t *testing.T) {
+	preset := fixtures.MakePreset()
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "dead", http.StatusInternalServerError)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("rescued")))
+	}))
+	defer second.Close()
+
+	node := fixtures.MakeNode()
+	instA := fixtures.MakeInstance(fixtures.WithInstanceID("inst_a"))
+	instA.Addr = first.URL
+	instB := fixtures.MakeInstance(fixtures.WithInstanceID("inst_b"))
+	instB.Addr = second.URL
+	reporter := &testFailureReporter{}
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{instA, instB}}, staticResolver{})
+	router.Reporter = reporter
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Instance.ID != "inst_b" || resp.Attempts != 2 || len(reporter.failed) != 1 || reporter.failed[0] != "inst_a" {
+		t.Fatalf("resp=%+v failed=%+v", resp, reporter.failed)
+	}
+}
+
+func TestServerRejectsUnknownRoute(t *testing.T) {
+	rec := httptest.NewRecorder()
+	Server{Router: &Router{}}.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nope", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNodeDirectoryCombinesSnapshots(t *testing.T) {
+	node := fixtures.MakeNode()
+	agent := mocks.NewNodeAgent(node)
+	agent.Instances = []domain.ModelInstance{fixtures.MakeInstance()}
+	directory := NodeDirectory{Agents: map[string]ports.NodeAgent{node.ID: agent}}
+	fleet, err := directory.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(fleet.Nodes) != 1 || len(fleet.Instances) != 1 {
+		t.Fatalf("fleet = %+v", fleet)
+	}
+	if _, err := directory.NodeAgent(node.ID); err != nil {
+		t.Fatalf("NodeAgent: %v", err)
+	}
+}
+
+func newTestRouter(preset domain.Preset, fleet domain.FleetSnapshot, nodes NodeResolver) *Router {
+	return &Router{
+		Placer: scheduler.NewPlacer(
+			estimate.NewInMemory(),
+			lease.NewAllocator(),
+			mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+			preset,
+		),
+		Fleet:    staticFleet{fleet: fleet},
+		Nodes:    nodes,
+		Presets:  NewPresetRegistry(preset),
+		MaxTries: 2,
+	}
+}
+
+type staticFleet struct {
+	fleet domain.FleetSnapshot
+}
+
+func (s staticFleet) Snapshot(context.Context) (domain.FleetSnapshot, error) {
+	return s.fleet, nil
+}
+
+type staticResolver struct {
+	agents map[string]ports.NodeAgent
+}
+
+func (s staticResolver) NodeAgent(nodeID string) (ports.NodeAgent, error) {
+	agent, ok := s.agents[nodeID]
+	if !ok {
+		return nil, domain.ErrUnreachable
+	}
+	return agent, nil
+}
+
+type loadNode struct {
+	node domain.Node
+	inst domain.ModelInstance
+}
+
+func (n loadNode) Snapshot(context.Context) (domain.NodeSnapshot, error) {
+	return domain.NodeSnapshot{Node: n.node}, nil
+}
+
+func (n loadNode) Load(context.Context, domain.Preset) (domain.ModelInstance, error) {
+	return n.inst, nil
+}
+
+func (n loadNode) Unload(context.Context, string) error {
+	return nil
+}
+
+func (n loadNode) InspectModel(context.Context, domain.Preset) (domain.ModelMetadata, error) {
+	return domain.ModelMetadata{}, domain.ErrUnsupported
+}
+
+type testFailureReporter struct {
+	failed []string
+}
+
+func (r *testFailureReporter) ReportInstanceFailure(_ context.Context, instanceID string, _ error) {
+	r.failed = append(r.failed, instanceID)
+}
+
+func openAIChatBody(text string) string {
+	return `{"id":"chatcmpl-test","model":"qwen2.5-9b-instruct","choices":[{"index":0,"message":{"role":"assistant","content":"` + text + `"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`
+}
