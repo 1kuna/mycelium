@@ -117,6 +117,10 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 	if len(presets) == 0 {
 		return "", nil, fmt.Errorf("server config/store has no presets")
 	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return "", nil, err
+	}
 	reservations, err := store.ListReservations(ctx)
 	if err != nil {
 		return "", nil, err
@@ -133,14 +137,16 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 		Presets: presetMap(presets),
 	}
 	handler := gateway.Server{Router: &gateway.Router{
-		Placer:    placer,
-		Fleet:     fleet,
-		Nodes:     nodes,
-		Presets:   gateway.NewPresetRegistry(presets...),
-		Runtime:   runtime,
-		Telemetry: store,
-		Clock:     clock.System{},
-		Sticky:    gateway.NewStickyTable(clock.System{}, 10*time.Minute),
+		Placer:         placer,
+		Fleet:          fleet,
+		Nodes:          nodes,
+		Presets:        gateway.NewPresetRegistry(presets...),
+		Runtime:        runtime,
+		Telemetry:      store,
+		Clock:          clock.System{},
+		Sticky:         gateway.NewStickyTable(clock.System{}, 10*time.Minute),
+		Projects:       projectMap(projects),
+		DefaultProject: cfg.DefaultProject,
 	}}
 	if mux != nil {
 		mux.Handle("/", handler)
@@ -185,6 +191,14 @@ func presetMap(presets []domain.Preset) map[string]domain.Preset {
 		if preset.ModelRef != "" {
 			out[preset.ModelRef] = preset
 		}
+	}
+	return out
+}
+
+func projectMap(projects []domain.Project) map[string]domain.Project {
+	out := map[string]domain.Project{}
+	for _, project := range projects {
+		out[project.ID] = project
 	}
 	return out
 }
