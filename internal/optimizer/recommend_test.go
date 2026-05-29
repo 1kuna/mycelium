@@ -161,6 +161,16 @@ func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
 	if len(records) != 1 || !records[0].Applied || records[0].RecommendedValue != 6000 {
 		t.Fatalf("records = %+v", records)
 	}
+	if records[0].Observed["avg_tokens"] != 3750 || records[0].Observed["p95_tokens"] != 3500 {
+		t.Fatalf("observed = %+v", records[0].Observed)
+	}
+	storedRec, err := store.Recommendation(context.Background(), records[0].ID)
+	if err != nil {
+		t.Fatalf("Recommendation: %v", err)
+	}
+	if storedRec.Observed["lifetime_max"] != 4000 {
+		t.Fatalf("stored observed = %+v", storedRec.Observed)
+	}
 	appliedProject, err := store.Project(context.Background(), project.ID)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
