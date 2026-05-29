@@ -115,6 +115,10 @@ func defaultControlStorePath() string {
 	return filepath.Join(defaultMyceliumHome(), "mycelium.db")
 }
 
+func defaultCatalogStore() string {
+	return filepath.Join(defaultMyceliumHome(), "catalog")
+}
+
 func defaultMyceliumHome() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {

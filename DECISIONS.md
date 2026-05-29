@@ -72,3 +72,4 @@
 - 2026-05-29: Server optimizer evaluation runs as a periodic background pass over persisted projects and telemetry; it reuses `RecommendationService` for recommendation persistence/auto-apply and calibrates node speed classes from observed tokens/sec on the same tick.
 - 2026-05-29: Gateway request job IDs use a process-wide monotonic sequence instead of model/attempt text so repeated requests emit distinct telemetry records into the durable store.
 - 2026-05-29: OCI catalog imports verify the pulled layer's manifest size and sha256 digest before returning a draft preset input; unsupported digest algorithms fail loudly instead of trusting bytes by URL alone.
+- 2026-05-29: The control CLI is shared from `cmd/internal/controlcli` so both the legacy `mycelium myce ...` path and the real `myce` binary execute the same implementation.
