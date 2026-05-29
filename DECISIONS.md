@@ -37,3 +37,4 @@
 - 2026-05-29: Joined LAN nodes are reached through a per-node loopback HTTP proxy, keeping the gateway's node URL local while forwarding to the advertised node agent address.
 - 2026-05-29: Optimizer runtime recommendations are generated from stored telemetry rollups and persisted presets; project auto-apply controls background mutation, while `myce recommendations apply` is the explicit manual override.
 - 2026-05-29: CI proof is centralized in `make ci`; the local covergate enforces total coverage plus the hard 100% scheduler, lease, and fixture bars that can be measured honestly from a normal Go coverprofile.
+- 2026-05-29: In-flight request tracking lives on the node-agent protocol; the gateway brackets upstream calls with begin/end and node unload marks an instance stopping before waiting for active requests to drain.

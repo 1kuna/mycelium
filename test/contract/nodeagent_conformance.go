@@ -22,6 +22,12 @@ func RunNodeAgentConformance(t *testing.T, name string, newAgent func() ports.No
 		if inst.ID == "" || inst.PresetID != p.ID {
 			t.Fatalf("loaded invalid instance: %+v", inst)
 		}
+		if err := agent.BeginRequest(context.Background(), inst.ID); err != nil {
+			t.Fatalf("BeginRequest: %v", err)
+		}
+		if err := agent.EndRequest(context.Background(), inst.ID); err != nil {
+			t.Fatalf("EndRequest: %v", err)
+		}
 		after, err := agent.Snapshot(context.Background())
 		if err != nil {
 			t.Fatalf("Snapshot after load: %v", err)

@@ -190,6 +190,14 @@ func (n loadOnlyNode) InspectModel(context.Context, domain.Preset) (domain.Model
 	return domain.ModelMetadata{}, domain.ErrUnsupported
 }
 
+func (n loadOnlyNode) BeginRequest(context.Context, string) error {
+	return nil
+}
+
+func (n loadOnlyNode) EndRequest(context.Context, string) error {
+	return nil
+}
+
 type recordingFailureReporter struct {
 	failed []string
 }

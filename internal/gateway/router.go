@@ -121,11 +121,17 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		if err != nil {
 			return RouteResponse{}, err
 		}
-		route, err := translate.BuildUpstream(req, profile)
+		endRequest, err := r.beginInstanceRequest(ctx, inst)
 		if err != nil {
 			return RouteResponse{}, err
 		}
+		route, err := translate.BuildUpstream(req, profile)
+		if err != nil {
+			endRequest()
+			return RouteResponse{}, err
+		}
 		resp, err := r.callUpstream(ctx, inst, route)
+		endRequest()
 		if err != nil || resp.Status >= 500 {
 			if err == nil {
 				err = fmt.Errorf("upstream returned %d", resp.Status)
@@ -237,6 +243,19 @@ func (r *Router) profileFor(preset domain.Preset) (profiles.Profile, error) {
 		registry = profiles.DefaultRegistry()
 	}
 	return registry.ForBackend(preset.Backend)
+}
+
+func (r *Router) beginInstanceRequest(ctx context.Context, inst domain.ModelInstance) (func(), error) {
+	agent, err := r.Nodes.NodeAgent(inst.NodeID)
+	if err != nil {
+		return func() {}, nil
+	}
+	if err := agent.BeginRequest(ctx, inst.ID); err != nil {
+		return nil, err
+	}
+	return func() {
+		_ = agent.EndRequest(context.Background(), inst.ID)
+	}, nil
 }
 
 func (r *Router) resolveInstance(ctx context.Context, decision domain.PlacementDecision, preset domain.Preset, fleet domain.FleetSnapshot) (domain.ModelInstance, bool, error) {
