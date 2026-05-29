@@ -188,6 +188,21 @@ func TestPresetRegistryResolvesAliases(t *testing.T) {
 	}
 }
 
+func TestPresetRegistrySkipsEmptyModelKeys(t *testing.T) {
+	preset := fixtures.MakePreset(
+		fixtures.WithPresetID("preset-a"),
+		fixtures.WithModelRef(""),
+		fixtures.WithAliases(""),
+	)
+	registry := NewPresetRegistry(preset)
+	if got, err := registry.Resolve("preset-a"); err != nil || got.ID != preset.ID {
+		t.Fatalf("Resolve id = %+v %v", got, err)
+	}
+	if _, err := registry.Resolve(""); err == nil {
+		t.Fatal("empty model key resolved")
+	}
+}
+
 func TestRouterRetriesContextOverflowOnLargerPreset(t *testing.T) {
 	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
 	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))
@@ -558,12 +573,13 @@ func TestRouterUsesRuntimeServiceForColdLoad(t *testing.T) {
 	router := newTestRouter(preset, fleet.fleet, resolver)
 	router.Fleet = fleet
 	router.Nodes = resolver
+	store := &gatewayRuntimeStore{}
 	router.Runtime = &scheduler.Service{
 		Placer:  router.Placer,
 		Fleet:   fleet,
 		Nodes:   resolver,
 		Queue:   scheduler.NewQueue(router.Clock),
-		Store:   &gatewayRuntimeStore{},
+		Store:   store,
 		Clock:   router.Clock,
 		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
 	}
@@ -579,6 +595,94 @@ func TestRouterUsesRuntimeServiceForColdLoad(t *testing.T) {
 	if !resp.ColdLoad || resp.Instance.ID != "inst_runtime" || !strings.Contains(string(resp.Body), "runtime") {
 		t.Fatalf("resp=%+v body=%s", resp, resp.Body)
 	}
+	if resp.Lease.ID == "" || strings.Join(store.deletedLeases, ",") != resp.Lease.ID {
+		t.Fatalf("lease=%+v deleted=%+v", resp.Lease, store.deletedLeases)
+	}
+}
+
+func TestRouterReturnsRuntimeReleaseError(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("runtime")))
+	}))
+	defer upstream.Close()
+
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_runtime"))
+	inst.Addr = upstream.URL
+	deleteErr := errors.New("delete lease")
+	router := newRuntimeRouterForInstance(preset, node, inst, &gatewayRuntimeStore{deleteLeaseErr: deleteErr})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	if _, err := router.Route(context.Background(), req); !errors.Is(err, deleteErr) {
+		t.Fatalf("Route err = %v", err)
+	}
+}
+
+func TestRouterStreamReturnsRuntimeReleaseError(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: ok\n\n"))
+	}))
+	defer upstream.Close()
+
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_runtime"))
+	inst.Addr = upstream.URL
+	deleteErr := errors.New("delete lease")
+	router := newRuntimeRouterForInstance(preset, node, inst, &gatewayRuntimeStore{deleteLeaseErr: deleteErr})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	if err := router.Stream(context.Background(), req, httptest.NewRecorder()); !errors.Is(err, deleteErr) {
+		t.Fatalf("Stream err = %v", err)
+	}
+}
+
+func TestRouterReleaseLeaseReturnsRuntimeError(t *testing.T) {
+	preset := fixtures.MakePreset()
+	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
+	deleteErr := errors.New("delete lease")
+	router.Runtime = &scheduler.Service{
+		Placer:  router.Placer,
+		Fleet:   router.Fleet,
+		Nodes:   router.Nodes,
+		Queue:   scheduler.NewQueue(router.Clock),
+		Store:   &gatewayRuntimeStore{deleteLeaseErr: deleteErr},
+		Clock:   router.Clock,
+		Presets: map[string]domain.Preset{preset.ID: preset},
+	}
+	if err := router.releaseLease(context.Background(), domain.Lease{}); err != nil {
+		t.Fatalf("empty lease release = %v", err)
+	}
+	if err := router.releaseLease(context.Background(), domain.Lease{ID: "lease-a"}); !errors.Is(err, deleteErr) {
+		t.Fatalf("release err = %v", err)
+	}
+}
+
+func newRuntimeRouterForInstance(preset domain.Preset, node domain.Node, inst domain.ModelInstance, store *gatewayRuntimeStore) *Router {
+	resolver := staticResolver{agents: map[string]ports.NodeAgent{node.ID: loadNode{node: node, inst: inst}}}
+	fleet := staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}}
+	router := newTestRouter(preset, fleet.fleet, resolver)
+	router.Fleet = fleet
+	router.Nodes = resolver
+	router.Runtime = &scheduler.Service{
+		Placer:  router.Placer,
+		Fleet:   fleet,
+		Nodes:   resolver,
+		Queue:   scheduler.NewQueue(router.Clock),
+		Store:   store,
+		Clock:   router.Clock,
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	return router
 }
 
 func TestRouterStreamRetriesContextOverflowBeforeResponseStarts(t *testing.T) {
@@ -752,6 +856,100 @@ func TestServerErrorResponses(t *testing.T) {
 	}
 }
 
+func TestServerWritesRouteResponse(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Upstream", "yes")
+		_, _ = w.Write([]byte(openAIChatBody("server")))
+	}))
+	defer upstream.Close()
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream.URL
+	router := newTestRouter(preset, domain.FleetSnapshot{
+		Nodes:     []domain.Node{fixtures.MakeNode()},
+		Instances: []domain.ModelInstance{inst},
+	}, staticResolver{})
+	rec := httptest.NewRecorder()
+
+	Server{Router: router}.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != http.StatusOK || rec.Header().Get("X-Upstream") != "yes" || !strings.Contains(rec.Body.String(), "server") {
+		t.Fatalf("status=%d headers=%+v body=%s", rec.Code, rec.Header(), rec.Body.String())
+	}
+}
+
+func TestServerWritesStreamResponse(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: server\n\n"))
+	}))
+	defer upstream.Close()
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream.URL
+	router := newTestRouter(preset, domain.FleetSnapshot{
+		Nodes:     []domain.Node{fixtures.MakeNode()},
+		Instances: []domain.ModelInstance{inst},
+	}, staticResolver{})
+	rec := httptest.NewRecorder()
+
+	Server{Router: router}.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"stream":true}`)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "data: server") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestParseRequestRoutesAndHeaders(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set(HeaderProject, "project-a")
+	req.Header.Set(HeaderPriority, string(domain.PriorityBackground))
+	req.Header.Set(HeaderSpeedPref, string(domain.SpeedAuto))
+	req.Header.Set(HeaderPreemption, string(domain.PreemptHard))
+	req.Header.Set(HeaderContextCap, "1234")
+	req.Header.Set(HeaderConversation, "thread-a")
+	got, err := parseRequest(req)
+	if err != nil {
+		t.Fatalf("parse chat: %v", err)
+	}
+	if got.Project != "project-a" || got.Priority != domain.PriorityBackground || got.SpeedPref != domain.SpeedAuto || got.Preemption != domain.PreemptHard || got.ContextRequest != 1234 || got.ConversationKey != "thread-a" {
+		t.Fatalf("parsed headers = %+v", got)
+	}
+
+	completion, err := parseRequest(httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(`{"model":"m","prompt":"hi"}`)))
+	if err != nil || completion.Kind != translate.KindOpenAICompletion {
+		t.Fatalf("parse completion = %+v %v", completion, err)
+	}
+	anthropic, err := parseRequest(httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"m","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)))
+	if err != nil || anthropic.Kind != translate.KindAnthropicMessages {
+		t.Fatalf("parse messages = %+v %v", anthropic, err)
+	}
+	notFound, err := parseRequest(httptest.NewRequest(http.MethodPost, "/missing", strings.NewReader(`{}`)))
+	if routeErr, ok := err.(*routeError); !ok || routeErr.status != http.StatusNotFound || notFound.Kind != "" {
+		t.Fatalf("not found = %+v %v", notFound, err)
+	}
+}
+
+func TestParseRequestRejectsBadControlHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header string
+		value  string
+		want   string
+	}{
+		{name: "priority", header: HeaderPriority, value: "urgent", want: "Priority"},
+		{name: "preemption", header: HeaderPreemption, value: "break-glass", want: "Preemption"},
+		{name: "context", header: HeaderContextCap, value: "0", want: "Context-Cap"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+			req.Header.Set(tc.header, tc.value)
+			_, err := parseRequest(req)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
 func TestNodeDirectoryCombinesSnapshots(t *testing.T) {
 	node := fixtures.MakeNode()
 	agent := mocks.NewNodeAgent(node)
@@ -896,7 +1094,10 @@ func (errReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
 }
 
-type gatewayRuntimeStore struct{}
+type gatewayRuntimeStore struct {
+	deletedLeases  []string
+	deleteLeaseErr error
+}
 
 func (s *gatewayRuntimeStore) SaveJob(context.Context, domain.Job) error {
 	return nil
@@ -910,7 +1111,11 @@ func (s *gatewayRuntimeStore) ListLeases(context.Context) ([]domain.Lease, error
 	return nil, nil
 }
 
-func (s *gatewayRuntimeStore) DeleteLease(context.Context, string) error {
+func (s *gatewayRuntimeStore) DeleteLease(_ context.Context, id string) error {
+	if s.deleteLeaseErr != nil {
+		return s.deleteLeaseErr
+	}
+	s.deletedLeases = append(s.deletedLeases, id)
 	return nil
 }
 
