@@ -173,3 +173,9 @@ type ProcessRef struct {
 	Kind string `json:"kind"`
 	Ref  string `json:"ref"`
 }
+
+type JoinTokenRecord struct {
+	Hash    string `json:"hash"`
+	Active  bool   `json:"active"`
+	Current bool   `json:"current"`
+}
