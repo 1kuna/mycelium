@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
 
+	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
 )
@@ -16,10 +16,11 @@ import (
 type Detector struct {
 	GOOS    string
 	Command func(ctx context.Context, name string, args ...string) ([]byte, error)
+	Clock   ports.Clock
 }
 
 func NewDetector() Detector {
-	return Detector{GOOS: runtime.GOOS, Command: runCommand}
+	return Detector{GOOS: runtime.GOOS, Command: runCommand, Clock: clock.System{}}
 }
 
 func (d Detector) Detect(ctx context.Context, seed domain.Node) (domain.Node, error) {
@@ -64,7 +65,11 @@ func (d Detector) detectDarwin(ctx context.Context, seed domain.Node) (domain.No
 		UnifiedMemory: true,
 	}}
 	if node.SpeedClass.TokensPerSecRef == 0 {
-		node.SpeedClass = domain.SpeedClass{TokensPerSecRef: 1, Source: "detected-default", ProbedAt: time.Now().UTC()}
+		clk := d.Clock
+		if clk == nil {
+			clk = clock.System{}
+		}
+		node.SpeedClass = domain.SpeedClass{TokensPerSecRef: 1, Source: "detected-default", ProbedAt: clk.Now().UTC()}
 	}
 	return node, nil
 }

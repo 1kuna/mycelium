@@ -78,7 +78,7 @@ func TestRunControlListCommandsAndProjectSet(t *testing.T) {
 	if err := store.SaveJob(context.Background(), domain.Job{ID: "job-a", Model: "tiny", Project: "project-a", Status: domain.JobQueued}); err != nil {
 		t.Fatalf("SaveJob: %v", err)
 	}
-	if err := store.SaveRecommendation(context.Background(), domain.RecommendationRecord{ID: "rec-a", ProjectID: "project-a", Type: "context", RecommendedValue: 4096}); err != nil {
+	if err := store.SaveRecommendation(context.Background(), domain.RecommendationRecord{ID: "rec-a", ProjectID: "project-a", Type: "context", RecommendedValue: 4096, CreatedAt: time.Unix(1, 0).UTC()}); err != nil {
 		t.Fatalf("SaveRecommendation: %v", err)
 	}
 	if err := store.Close(); err != nil {

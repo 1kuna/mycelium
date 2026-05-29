@@ -176,7 +176,7 @@ func (s *Store) SaveRecommendation(ctx context.Context, rec domain.Recommendatio
 		return fmt.Errorf("recommendation id is required")
 	}
 	if rec.CreatedAt.IsZero() {
-		rec.CreatedAt = time.Now().UTC()
+		return fmt.Errorf("recommendation created_at is required")
 	}
 	return s.upsertJSON(ctx, "recommendations", rec.ID, rec)
 }
