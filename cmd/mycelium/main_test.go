@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"mycelium/internal/catalog"
 )
 
 func TestRunDispatchesKnownCommands(t *testing.T) {
@@ -13,7 +17,7 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 		want string
 	}{
 		{name: "server", args: []string{"server"}, want: "--node is required"},
-		{name: "myce", args: []string{"myce"}, want: "myce is not implemented"},
+		{name: "myce", args: []string{"myce"}, want: "usage: myce <add-model>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -22,6 +26,25 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 				t.Fatalf("run(%v) err = %v", tt.args, err)
 			}
 		})
+	}
+}
+
+func TestRunControlAddModel(t *testing.T) {
+	store := t.TempDir()
+	model := filepath.Join(t.TempDir(), "tiny.gguf")
+	if err := os.WriteFile(model, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	err := runControl(context.Background(), []string{"add-model", "--store", store, "--id", "tiny", "--model", "tiny-model", model})
+	if err != nil {
+		t.Fatalf("runControl add-model: %v", err)
+	}
+	preset, err := catalog.ReadPreset(store, "tiny")
+	if err != nil {
+		t.Fatalf("ReadPreset: %v", err)
+	}
+	if preset.ModelRef == model || !strings.Contains(preset.ModelRef, "tiny-tiny.gguf") {
+		t.Fatalf("preset = %+v", preset)
 	}
 }
 
