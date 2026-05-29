@@ -26,7 +26,7 @@ func TestAgentConformance(t *testing.T) {
 
 func TestLoadReadinessGatesInstanceAndUnloadStopsBackend(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithListenAddr("127.0.0.1:1234"))
 
 	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
 	if err != nil {
@@ -34,6 +34,9 @@ func TestLoadReadinessGatesInstanceAndUnloadStopsBackend(t *testing.T) {
 	}
 	if inst.State != domain.InstReady || inst.Loading || inst.Addr == "" {
 		t.Fatalf("instance = %+v", inst)
+	}
+	if inst.Addr != "127.0.0.1:1234" {
+		t.Fatalf("addr = %s", inst.Addr)
 	}
 	snap, err := agent.Snapshot(context.Background())
 	if err != nil {

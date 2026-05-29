@@ -79,6 +79,29 @@ func TestLaunchAndStopLocalProcess(t *testing.T) {
 	}
 }
 
+func TestStopSignalsUntrackedPID(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep binary unavailable")
+	}
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	adapter := NewAdapter(Config{})
+	if err := adapter.Stop(context.Background(), ports.Handle{PID: cmd.Process.Pid, Kind: "process", Ref: "sleep"}); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("process did not stop")
+	}
+}
+
 func TestHealthURLAndSplitAddr(t *testing.T) {
 	if got := healthURL("127.0.0.1:8080", "/health"); got != "http://127.0.0.1:8080/health" {
 		t.Fatalf("healthURL = %s", got)

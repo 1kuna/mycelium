@@ -2,12 +2,14 @@ package llamacpp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"mycelium/internal/clock"
@@ -110,7 +112,7 @@ func (a *Adapter) Stop(ctx context.Context, h ports.Handle) error {
 	delete(a.processes, h.PID)
 	a.mu.Unlock()
 	if cmd == nil || cmd.Process == nil {
-		return nil
+		return signalPID(h.PID)
 	}
 
 	_ = cmd.Process.Signal(os.Interrupt)
@@ -128,6 +130,23 @@ func (a *Adapter) Stop(ctx context.Context, h ports.Handle) error {
 	case <-done:
 		return nil
 	}
+}
+
+func signalPID(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := proc.Signal(os.Interrupt); err != nil {
+		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func renderArgs(args []string, p domain.Preset, addr string) []string {
