@@ -46,3 +46,4 @@
 - 2026-05-29: OpenAI-compatible gateway requests accept tool/function fields and content-part arrays as pass-through JSON; Anthropic tool/content blocks pass through only to Anthropic-profile backends and fail loudly when translation to OpenAI-compatible text would lose protocol meaning.
 - 2026-05-29: Join-token rotation/revocation state is persisted as token hashes in the SQLite control store; the server seeds the configured token only when that hash has not already been revoked.
 - 2026-05-29: Speed-class calibration uses the deterministic average observed tokens/sec per node from persisted run metrics, rounded to two decimals and written back to the node record with source `telemetry-calibrated`.
+- 2026-05-29: Catalog installs persist job state under the catalog store and stage artifacts under a deterministic job directory; model and provenance commit before preset JSON, so reruns can resume staged work without exposing a usable preset early.
