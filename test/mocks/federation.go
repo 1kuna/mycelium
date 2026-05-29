@@ -15,6 +15,7 @@ type AdmissionController struct {
 	CommitErr  error
 	ReleaseErr error
 	PreemptErr error
+	Offers     map[string]domain.LeaseOffer
 	Calls      []string
 }
 
@@ -24,15 +25,18 @@ func (m *AdmissionController) Offer(_ context.Context, job domain.Job, claim dom
 		return domain.LeaseOffer{}, m.OfferErr
 	}
 	if m.OfferVal.OfferID != "" {
+		m.recordOffer(m.OfferVal)
 		return m.OfferVal, nil
 	}
-	return domain.LeaseOffer{
+	offer := domain.LeaseOffer{
 		OfferID: fmt.Sprintf("offer_%s", job.ID),
 		JobID:   job.ID,
 		NodeID:  "node_test",
 		Claim:   claim,
 		Fence:   1,
-	}, nil
+	}
+	m.recordOffer(offer)
+	return offer, nil
 }
 
 func (m *AdmissionController) Commit(_ context.Context, offerID string, fence uint64) (domain.Lease, error) {
@@ -43,7 +47,8 @@ func (m *AdmissionController) Commit(_ context.Context, offerID string, fence ui
 	if m.LeaseVal.ID != "" {
 		return m.LeaseVal, nil
 	}
-	return domain.Lease{ID: "lease_" + offerID, JobID: "job_test", NodeID: "node_test"}, nil
+	offer := m.Offers[offerID]
+	return domain.Lease{ID: "lease_" + offerID, JobID: offer.JobID, NodeID: offer.NodeID, Claim: offer.Claim}, nil
 }
 
 func (m *AdmissionController) Release(_ context.Context, leaseID string) error {
@@ -54,6 +59,13 @@ func (m *AdmissionController) Release(_ context.Context, leaseID string) error {
 func (m *AdmissionController) Preempt(_ context.Context, leaseID, reason string) error {
 	m.Calls = append(m.Calls, "preempt:"+leaseID+":"+reason)
 	return m.PreemptErr
+}
+
+func (m *AdmissionController) recordOffer(offer domain.LeaseOffer) {
+	if m.Offers == nil {
+		m.Offers = map[string]domain.LeaseOffer{}
+	}
+	m.Offers[offer.OfferID] = offer
 }
 
 type Coordinator struct {

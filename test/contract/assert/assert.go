@@ -22,3 +22,10 @@ func True(t testing.TB, ok bool, format string, args ...any) {
 		t.Fatalf(format, args...)
 	}
 }
+
+func Equal[T comparable](t testing.TB, want, got T, msg string) {
+	t.Helper()
+	if got != want {
+		t.Fatalf("%s: want %v, got %v", msg, want, got)
+	}
+}

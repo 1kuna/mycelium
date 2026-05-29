@@ -77,3 +77,4 @@
 - 2026-05-29: Smoke Make targets pass `-count=1` so hardware/engine smoke always exercises the live runtime instead of accepting Go's cached test result.
 - 2026-05-29: Peer-pivot remediation adds canonical federation contracts (`AdmissionController`, `Coordinator`, `JobRegistry`, `PeerDiscovery`) before removing all legacy server/node call sites; this keeps each commit gate-green while authority moves to owner-commit semantics.
 - 2026-05-29: The `mycelium` command now exposes `run`/bare peer startup and `ctl`; rejected `server`/`node` topology commands fail loudly instead of becoming compatibility aliases.
+- 2026-05-29: Owner-authority admission starts as an in-process transactional store guarded by one mutex: offers carry the current per-owner fence, commits recheck allocator fit and bump the fence, and stale same-fence races return `ErrStaleFence`; SQLite persistence can replace the store behind the same port later without changing coordinator semantics.
