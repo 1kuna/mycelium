@@ -17,6 +17,9 @@ type PeerConfig struct {
 	Compute         bool                 `json:"compute"`
 	ComputeConfig   ComputeConfig        `json:"compute_config"`
 	JoinToken       string               `json:"join_token"`
+	DiscoveryListen string               `json:"discovery_listen"`
+	DiscoveryAddr   string               `json:"discovery_addr"`
+	DiscoveryScanMS int                  `json:"discovery_scan_ms"`
 	NodeURLs        []string             `json:"node_urls"`
 	GGUFParser      string               `json:"gguf_parser"`
 	Projects        []domain.Project     `json:"projects"`
@@ -72,6 +75,9 @@ func loadPeerConfig(path string) (PeerConfig, error) {
 	}
 	if cfg.OptimizerEvalMS == 0 {
 		cfg.OptimizerEvalMS = 60000
+	}
+	if cfg.DiscoveryScanMS == 0 {
+		cfg.DiscoveryScanMS = 250
 	}
 	cfg.ComputeConfig = defaultedComputeConfig(cfg.ComputeConfig)
 	if cfg.ID == "" {

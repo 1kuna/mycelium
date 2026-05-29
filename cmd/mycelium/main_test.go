@@ -15,6 +15,7 @@ import (
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/estimate"
+	"mycelium/internal/membership"
 	nodeagent "mycelium/internal/node"
 	"mycelium/internal/optimizer"
 	"mycelium/internal/scheduler"
@@ -138,7 +139,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPeerConfig: %v", err)
 	}
-	if peerCfg.QueueDrainMS != 1000 || peerCfg.QueueDrainLimit != 1 || peerCfg.OptimizerEvalMS != 60000 {
+	if peerCfg.QueueDrainMS != 1000 || peerCfg.QueueDrainLimit != 1 || peerCfg.OptimizerEvalMS != 60000 || peerCfg.DiscoveryScanMS != 250 {
 		t.Fatalf("peer drain defaults = %+v", peerCfg)
 	}
 	if peerCfg.ComputeConfig.ID != "peer_local" || peerCfg.ComputeConfig.BackendListen != "127.0.0.1:51848" {
@@ -307,10 +308,8 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 	if addr != "127.0.0.1:0" {
 		t.Fatalf("addr = %s", addr)
 	}
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nodes", nil))
-	if rec.Code != http.StatusOK || rec.Body.String() != "[]\n" {
-		t.Fatalf("nodes status/body = %d %q", rec.Code, rec.Body.String())
+	if handler == nil {
+		t.Fatal("handler is nil")
 	}
 	reopened, err := storesqlite.Open(dbPath)
 	if err != nil {
@@ -319,6 +318,29 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 	defer reopened.Close()
 	if leases, err := reopened.ListLeases(context.Background()); err != nil || len(leases) != 0 {
 		t.Fatalf("leases after boot = %+v %v", leases, err)
+	}
+	tokens, err := reopened.ListJoinTokens(context.Background())
+	if err != nil {
+		t.Fatalf("ListJoinTokens: %v", err)
+	}
+	if len(tokens) != 1 || !tokens[0].Active || !tokens[0].Current {
+		t.Fatalf("tokens after boot = %+v", tokens)
+	}
+}
+
+func TestParseJoinFlag(t *testing.T) {
+	if token, err := parseJoinFlag("secret"); err != nil || token != "secret" {
+		t.Fatalf("raw token = %q %v", token, err)
+	}
+	join, err := membership.BuildJoinToken("http://127.0.0.1:51846", "secret")
+	if err != nil {
+		t.Fatalf("BuildJoinToken: %v", err)
+	}
+	if token, err := parseJoinFlag(join); err != nil || token != "secret" {
+		t.Fatalf("join uri token = %q %v", token, err)
+	}
+	if _, err := parseJoinFlag(""); err == nil {
+		t.Fatal("empty join token accepted")
 	}
 }
 

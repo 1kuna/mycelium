@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"mycelium/internal/domain"
+	"mycelium/test/mocks"
 )
 
 func TestPeerLANDiscoveryAdvertisesPeer(t *testing.T) {
@@ -96,9 +97,52 @@ func TestPeerLANDiscoveryPeersAndWatch(t *testing.T) {
 	}
 }
 
+func TestPeerLANDiscoveryFiltersByJoinToken(t *testing.T) {
+	addr := reserveUDPAddr(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	listener := PeerLANDiscovery{ListenAddr: addr, BroadcastAddr: addr, MaxPackets: 1, Token: "secret"}
+	matching := PeerLANDiscovery{BroadcastAddr: addr, Token: "secret"}
+	other := PeerLANDiscovery{BroadcastAddr: addr, Token: "other"}
+	peerA := domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}
+	peerB := domain.Peer{ID: "peer-b", Addresses: []string{"127.0.0.1:2"}, Compute: true}
+	results := make(chan []domain.Peer, 1)
+	errs := make(chan error, 1)
+	go func() {
+		peers, err := listener.Peers(ctx)
+		if err != nil {
+			errs <- err
+			return
+		}
+		results <- peers
+	}()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-errs:
+			t.Fatalf("Peers: %v", err)
+		case peers := <-results:
+			if len(peers) != 1 || peers[0].ID != peerA.ID {
+				t.Fatalf("peers = %+v", peers)
+			}
+			return
+		case <-ticker.C:
+			if err := other.Advertise(ctx, peerB); err != nil {
+				t.Fatalf("Advertise other: %v", err)
+			}
+			if err := matching.Advertise(ctx, peerA); err != nil {
+				t.Fatalf("Advertise matching: %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+}
+
 func TestPeerLANDiscoveryValidationAndTimeout(t *testing.T) {
 	defaulted := NewPeerLANDiscovery("", "")
-	if defaulted.ListenAddr != ":51850" || defaulted.BroadcastAddr != DefaultPeerDiscoveryAddr || defaulted.MaxPackets != 16 {
+	if defaulted.ListenAddr != ":51850" || defaulted.BroadcastAddr != DefaultPeerDiscoveryAddr || defaulted.MaxPackets != 16 || defaulted.ScanDuration == 0 {
 		t.Fatalf("defaulted = %+v", defaulted)
 	}
 	if err := (PeerLANDiscovery{BroadcastAddr: "127.0.0.1:1"}).Advertise(context.Background(), domain.Peer{}); err == nil || !strings.Contains(err.Error(), "peer id") {
@@ -129,6 +173,9 @@ func TestPeerLANDiscoveryValidationAndTimeout(t *testing.T) {
 	}
 	if _, err := (PeerLANDiscovery{ListenAddr: "%"}).WatchPeers(context.Background()); err == nil {
 		t.Fatal("bad watch listen address accepted")
+	}
+	if peers, err := (PeerLANDiscovery{ListenAddr: "127.0.0.1:0", MaxPackets: 1, ScanDuration: time.Millisecond, Clock: mocks.NewFakeClock(time.Now())}).Peers(context.Background()); err != nil || len(peers) != 0 {
+		t.Fatalf("Peers default deadline = %+v %v", peers, err)
 	}
 }
 

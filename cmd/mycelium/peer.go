@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"mycelium/internal/clock"
@@ -51,7 +52,10 @@ func runPeer(ctx context.Context, args []string) error {
 func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := fs.String("config", "", "peer config JSON path")
+	joinRaw := fs.String("join", "", "join token URI or raw join token")
 	listen := fs.String("listen", "", "peer listen address override")
+	discoveryListen := fs.String("discovery-listen", "", "peer discovery listen address override")
+	discoveryAddr := fs.String("discovery-addr", "", "peer discovery broadcast address override")
 	compute := fs.Bool("compute", false, "enable local compute runtime")
 	backendListen := fs.String("backend-listen", "", "local backend inference server listen address")
 	id := fs.String("id", "", "local compute peer id")
@@ -72,11 +76,21 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	if *listen != "" {
 		cfg.Listen = *listen
 	}
+	overrideString(discoveryListen, &cfg.DiscoveryListen)
+	overrideString(discoveryAddr, &cfg.DiscoveryAddr)
+	if *joinRaw != "" {
+		token, err := parseJoinFlag(*joinRaw)
+		if err != nil {
+			return "", nil, err
+		}
+		cfg.JoinToken = token
+	}
 	if *compute {
 		cfg.Compute = true
 	}
 	overrideString(backendListen, &cfg.ComputeConfig.BackendListen)
 	overrideString(id, &cfg.ComputeConfig.ID)
+	overrideString(id, &cfg.ID)
 	overrideString(name, &cfg.ComputeConfig.Name)
 	if *backend != "" {
 		cfg.ComputeConfig.Backend = domain.Backend(*backend)
@@ -102,20 +116,18 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	var fleet gateway.FleetSource
 	var nodes gateway.NodeResolver
 	var mux *http.ServeMux
+	var discovery ports.PeerDiscovery
 	if cfg.JoinToken != "" {
-		tokens, err := membership.NewPersistentTokenManager(ctx, cfg.JoinToken, store)
-		if err != nil {
+		if _, err := membership.NewPersistentTokenManager(ctx, cfg.JoinToken, store); err != nil {
 			return "", nil, err
 		}
-		registry, err := membership.NewPersistentRegistry(ctx, tokens, membership.NewLANTunnel(), store)
-		if err != nil {
-			return "", nil, err
-		}
-		fleet = registry
-		nodes = registry
-		mux = http.NewServeMux()
-		mux.Handle("/join", registry)
-		mux.Handle("/nodes", registry)
+		lan := membership.NewPeerLANDiscovery(cfg.DiscoveryListen, cfg.DiscoveryAddr)
+		lan.Token = cfg.JoinToken
+		lan.ScanDuration = time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
+		discovery = lan
+		directory := &gateway.PeerDirectory{Discovery: discovery}
+		fleet = directory
+		nodes = directory
 	}
 	agents := map[string]ports.NodeAgent{}
 	if cfg.Compute {
@@ -189,6 +201,9 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	jobLog := peercoord.NewJobLog()
 	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
+	if discovery != nil {
+		startPeerAdvertiser(ctx, discovery, self, clock.System{}, peercoord.DefaultHeartbeatInterval)
+	}
 	coordinator := peercoord.NewCoordinator(self, jobLog, store, placer, fleet, admissionResolver(nodes), clock.System{})
 	runtime := &scheduler.Service{
 		Placer:      placer,
@@ -321,6 +336,44 @@ func admissionResolver(nodes gateway.NodeResolver) scheduler.AdmissionResolver {
 		return nil
 	}
 	return admissions
+}
+
+func parseJoinFlag(raw string) (string, error) {
+	if raw == "" {
+		return "", fmt.Errorf("join token is required")
+	}
+	if strings.HasPrefix(raw, "mycjoin://") {
+		info, err := membership.ParseJoinToken(raw)
+		if err != nil {
+			return "", err
+		}
+		return info.Token, nil
+	}
+	return raw, nil
+}
+
+func startPeerAdvertiser(ctx context.Context, discovery ports.PeerDiscovery, self domain.Peer, clk ports.Clock, interval time.Duration) {
+	if discovery == nil || clk == nil || self.ID == "" || interval <= 0 {
+		return
+	}
+	if err := discovery.Advertise(ctx, self); err != nil {
+		log.Printf("mycelium peer advertise failed: %v", err)
+	}
+	go func() {
+		for {
+			timer := clk.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C():
+			}
+			self.LastSeen = clk.Now()
+			if err := discovery.Advertise(ctx, self); err != nil {
+				log.Printf("mycelium peer advertise failed: %v", err)
+			}
+		}
+	}()
 }
 
 type jobLister interface {
