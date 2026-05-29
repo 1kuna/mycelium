@@ -126,7 +126,8 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 		return "", nil, err
 	}
 	allocator := allocatorFromReservations(reservations, presetMap(presets))
-	placer := scheduler.NewPlacer(estimate.NewInMemory(), allocator, clock.System{}, presets...)
+	estimator := serverEstimator(cfg, agents)
+	placer := scheduler.NewPlacer(estimator, allocator, clock.System{}, presets...)
 	runtime := &scheduler.Service{
 		Placer:  placer,
 		Fleet:   fleet,
@@ -201,6 +202,13 @@ func projectMap(projects []domain.Project) map[string]domain.Project {
 		out[project.ID] = project
 	}
 	return out
+}
+
+func serverEstimator(cfg ServerConfig, agents map[string]ports.NodeAgent) ports.ResourceEstimator {
+	if cfg.GGUFParser != "" {
+		return estimate.NewGGUF(estimate.NewCommandParser(cfg.GGUFParser, nil), agents)
+	}
+	return estimate.NewInMemory()
 }
 
 func allocatorFromReservations(reservations []domain.Reservation, presets map[string]domain.Preset) *lease.Allocator {
