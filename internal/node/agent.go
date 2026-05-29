@@ -214,6 +214,9 @@ func (a *Agent) RecordRun(ctx context.Context, metric domain.RunMetric) error {
 		return fmt.Errorf("unknown instance %q", metric.InstanceID)
 	}
 	metric.NodeID = a.node.ID
+	if metric.PresetID == "" {
+		metric.PresetID = inst.PresetID
+	}
 	if metric.InstanceID == "" {
 		metric.InstanceID = inst.ID
 	}

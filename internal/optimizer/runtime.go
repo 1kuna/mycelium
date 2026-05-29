@@ -62,9 +62,10 @@ func (p TelemetryStatsProvider) Stats(ctx context.Context, projectID string) (Pr
 }
 
 type RecommendationService struct {
-	Store  RuntimeStore
-	Clock  ports.Clock
-	Policy RecommendationPolicy
+	Store        RuntimeStore
+	Clock        ports.Clock
+	Policy       RecommendationPolicy
+	EnginePolicy EnginePresetPolicy
 }
 
 func (s RecommendationService) EvaluateProject(ctx context.Context, project domain.Project) ([]domain.RecommendationRecord, error) {
@@ -82,35 +83,45 @@ func (s RecommendationService) EvaluateProject(ctx context.Context, project doma
 	if err != nil {
 		return nil, err
 	}
-	rec, ok := RecommendContextCap(project, stats, s.Policy)
-	if !ok {
-		return nil, nil
-	}
-	preset, hasPreset := selectProjectPreset(project, presets)
-	if project.AutoApply && !hasPreset {
-		return nil, fmt.Errorf("cannot auto-apply recommendation for project %q: no preset is available", project.ID)
-	}
-	record := recommendationRecord(project, preset, rec, s.Clock.Now())
-	if err := s.Store.SaveRecommendation(ctx, record); err != nil {
-		return nil, err
-	}
-	if project.AutoApply {
-		applied := ApplyRecommendation(project, preset, rec)
-		if applied.Applied {
-			if err := s.Store.SaveProject(ctx, applied.Project); err != nil {
-				return nil, err
-			}
-			if err := s.Store.SavePreset(ctx, applied.Preset); err != nil {
-				return nil, err
-			}
-			record.Applied = true
-			record.AppliedAt = s.Clock.Now().UTC()
-			if err := s.Store.SaveRecommendation(ctx, record); err != nil {
-				return nil, err
+	records := []domain.RecommendationRecord{}
+	if rec, ok := RecommendContextCap(project, stats, s.Policy); ok {
+		preset, hasPreset := selectProjectPreset(project, presets)
+		if project.AutoApply && !hasPreset {
+			return nil, fmt.Errorf("cannot auto-apply recommendation for project %q: no preset is available", project.ID)
+		}
+		record := recommendationRecord(project, preset, rec, s.Clock.Now())
+		if err := s.Store.SaveRecommendation(ctx, record); err != nil {
+			return nil, err
+		}
+		if project.AutoApply {
+			applied := ApplyRecommendation(project, preset, rec)
+			if applied.Applied {
+				if err := s.Store.SaveProject(ctx, applied.Project); err != nil {
+					return nil, err
+				}
+				if err := s.Store.SavePreset(ctx, applied.Preset); err != nil {
+					return nil, err
+				}
+				record.Applied = true
+				record.AppliedAt = s.Clock.Now().UTC()
+				if err := s.Store.SaveRecommendation(ctx, record); err != nil {
+					return nil, err
+				}
 			}
 		}
+		records = append(records, record)
 	}
-	return []domain.RecommendationRecord{record}, nil
+	metrics, err := s.Store.Metrics(ctx, project.ID)
+	if err != nil {
+		return nil, err
+	}
+	if record, ok := RecommendEnginePreset(project, presets, metrics, s.Clock.Now(), s.EnginePolicy); ok {
+		if err := s.Store.SaveRecommendation(ctx, record); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, nil
 }
 
 type staticPresetSource []domain.Preset

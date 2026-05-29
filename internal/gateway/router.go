@@ -170,7 +170,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		if err != nil {
 			return RouteResponse{}, err
 		}
-		r.recordMetric(ctx, job, inst, body, metricTiming{
+		r.recordMetric(ctx, job, preset, inst, body, metricTiming{
 			Start:           upstreamStart,
 			FirstByte:       upstreamEnd,
 			End:             upstreamEnd,
@@ -356,7 +356,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		if copyErr != nil {
 			return copyErr
 		}
-		r.recordMetric(ctx, job, inst, copied.Body, metricTiming{
+		r.recordMetric(ctx, job, preset, inst, copied.Body, metricTiming{
 			Start:           upstreamStart,
 			FirstByte:       copied.FirstByte,
 			End:             copied.End,
@@ -566,7 +566,7 @@ type metricTiming struct {
 	LoadWallClockMS int
 }
 
-func (r *Router) recordMetric(ctx context.Context, job domain.Job, inst domain.ModelInstance, body []byte, timing metricTiming) {
+func (r *Router) recordMetric(ctx context.Context, job domain.Job, preset domain.Preset, inst domain.ModelInstance, body []byte, timing metricTiming) {
 	if r.Telemetry == nil {
 		return
 	}
@@ -576,6 +576,8 @@ func (r *Router) recordMetric(ctx context.Context, job domain.Job, inst domain.M
 		JobID:           job.ID,
 		InstanceID:      inst.ID,
 		NodeID:          inst.NodeID,
+		PresetID:        inst.PresetID,
+		Backend:         preset.Backend,
 		Project:         job.Project,
 		ContextUsed:     prompt + completion,
 		TokensPerSec:    tokensPerSecond(completion, timing.FirstByte, timing.End),
