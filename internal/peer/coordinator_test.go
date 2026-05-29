@@ -113,6 +113,51 @@ func TestCoordinatorReplansOnOwnerContention(t *testing.T) {
 	}
 }
 
+func TestCoordinatorWarmInstanceRecordsWithoutOwnerLease(t *testing.T) {
+	ctx := context.Background()
+	clock := mocks.NewFakeClock(time.Unix(115, 0).UTC())
+	job := fixtures.MakeJob(fixtures.WithJobID("job-warm"))
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst-warm"), fixtures.OnNode(node.ID))
+	registry := NewJobRegistry()
+	admission := &mocks.AdmissionController{}
+	coordinator := NewCoordinator(
+		fixtures.MakePeer(fixtures.WithPeerID("peer-a")),
+		jobSource{jobs: map[string]domain.Job{job.ID: job}, payloads: map[string][]byte{job.ID: []byte(`{"job":"warm"}`)}},
+		registry,
+		&scriptedPlacer{decisions: []domain.PlacementDecision{{
+			JobID:      job.ID,
+			InstanceID: inst.ID,
+			NodeID:     node.ID,
+			Claim:      inst.Claim,
+			Action:     domain.ActionWarmInstance,
+		}}},
+		staticPeerFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}},
+		ownerResolver{owners: map[string]ports.AdmissionController{node.ID: admission}},
+		clock,
+	)
+
+	mustClaim(t, coordinator, job.ID)
+	plan, err := coordinator.Plan(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	lease, err := coordinator.Commit(ctx, plan)
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if lease.ID != "" || lease.InstanceID != inst.ID || lease.NodeID != node.ID {
+		t.Fatalf("warm lease = %+v", lease)
+	}
+	if err := coordinator.Release(ctx, job.ID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if len(admission.Calls) != 0 {
+		t.Fatalf("warm owner calls = %+v", admission.Calls)
+	}
+	assertLatestStatus(t, registry, domain.JobDone, node.ID)
+}
+
 func TestCoordinatorQueuesAndExhaustsReplans(t *testing.T) {
 	ctx := context.Background()
 	clock := mocks.NewFakeClock(time.Unix(120, 0).UTC())
@@ -375,6 +420,22 @@ func TestCoordinatorOfferNoFitReplansAndRecordFailure(t *testing.T) {
 	_, err = coordinator.Commit(ctx, domain.PlacementDecision{JobID: job.ID, NodeID: nodeA.ID, Claim: claim, Action: domain.ActionLoadedNew})
 	if !errors.Is(err, errFlakyRegistry) {
 		t.Fatalf("running record err = %v", err)
+	}
+
+	warmFailRegistry := &flakyRegistry{failAt: 2, records: map[string]domain.JobRecord{}}
+	coordinator = NewCoordinator(
+		fixtures.MakePeer(fixtures.WithPeerID("peer-a")),
+		jobSource{jobs: map[string]domain.Job{job.ID: job}, payloads: map[string][]byte{job.ID: []byte(`{"job":"a"}`)}},
+		warmFailRegistry,
+		&scriptedPlacer{},
+		staticPeerFleet{},
+		ownerResolver{},
+		clock,
+	)
+	mustClaim(t, coordinator, job.ID)
+	_, err = coordinator.Commit(ctx, domain.PlacementDecision{JobID: job.ID, InstanceID: "warm-a", NodeID: nodeA.ID, Claim: claim, Action: domain.ActionWarmInstance})
+	if !errors.Is(err, errFlakyRegistry) {
+		t.Fatalf("warm running record err = %v", err)
 	}
 }
 

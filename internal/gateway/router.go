@@ -445,7 +445,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 }
 
 func (r *Router) placeStickyOrLoad(ctx context.Context, req translate.IngressRequest, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot, beforeCold func(context.Context, domain.PlacementDecision) error) (domain.PlacementDecision, domain.ModelInstance, domain.Lease, bool, error) {
-	if r.Sticky != nil {
+	if r.Sticky != nil && (r.Runtime == nil || r.Runtime.Coordinator == nil) {
 		if inst, ok := r.Sticky.Get(req.ConversationKey, preset, fleet); ok {
 			return domain.PlacementDecision{
 				JobID:          job.ID,
@@ -461,16 +461,16 @@ func (r *Router) placeStickyOrLoad(ctx context.Context, req translate.IngressReq
 			}, inst, domain.Lease{}, false, nil
 		}
 	}
-	return r.placeAndLoad(ctx, job, preset, fleet, beforeCold)
+	return r.placeAndLoad(ctx, job, req.Body, preset, fleet, beforeCold)
 }
 
-func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot, beforeCold func(context.Context, domain.PlacementDecision) error) (domain.PlacementDecision, domain.ModelInstance, domain.Lease, bool, error) {
+func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, payload []byte, preset domain.Preset, fleet domain.FleetSnapshot, beforeCold func(context.Context, domain.PlacementDecision) error) (domain.PlacementDecision, domain.ModelInstance, domain.Lease, bool, error) {
 	if r.Runtime != nil {
 		var hooks []scheduler.SubmitHooks
 		if beforeCold != nil {
 			hooks = append(hooks, scheduler.SubmitHooks{BeforeColdLoad: beforeCold})
 		}
-		result, err := r.Runtime.Submit(ctx, job, hooks...)
+		result, err := r.Runtime.SubmitWithPayload(ctx, job, payload, hooks...)
 		if err != nil {
 			return result.Decision, result.Instance, result.Lease, false, err
 		}
@@ -650,7 +650,13 @@ func (r *Router) reportFailure(ctx context.Context, instanceID string, err error
 
 func (r *Router) releaseLease(ctx context.Context, lease domain.Lease) error {
 	if lease.ID == "" || r.Runtime == nil {
+		if lease.JobID != "" && r.Runtime != nil && r.Runtime.Coordinator != nil {
+			return r.Runtime.ReleaseJob(ctx, lease)
+		}
 		return nil
+	}
+	if r.Runtime.Coordinator != nil {
+		return r.Runtime.ReleaseJob(ctx, lease)
 	}
 	return r.Runtime.Release(ctx, lease.ID)
 }

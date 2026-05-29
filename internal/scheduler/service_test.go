@@ -101,6 +101,381 @@ func TestServiceUsesWarmInstanceWithoutOwnerAdmission(t *testing.T) {
 	}
 }
 
+func TestServiceSubmitWithPayloadUsesPeerCoordinator(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 45).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	agent := mocks.NewNodeAgent(node)
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithWeights(12))
+	store := &runtimeStore{}
+	coordinator := &mocks.Coordinator{
+		Decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(12, 3), Action: domain.ActionLoadedNew},
+		Lease:    domain.Lease{ID: "owner-lease-a", JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(12, 3), GrantedAt: clock.Now()},
+	}
+	jobLog := &recordingJobLog{}
+	service := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}},
+		Coordinator: coordinator,
+		JobLog:      jobLog,
+		Queue:       NewQueue(clock),
+		Store:       store,
+		Clock:       clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+
+	result, err := service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), []byte(`{"job":"a"}`))
+	if err != nil {
+		t.Fatalf("SubmitWithPayload: %v", err)
+	}
+	if result.Lease.ID != "owner-lease-a" || result.Lease.InstanceID == "" || result.Instance.PresetID != preset.ID {
+		t.Fatalf("result = %+v", result)
+	}
+	if strings.Join(coordinator.Calls, ",") != "claim:job-a,plan:job-a,commit:job-a" {
+		t.Fatalf("coordinator calls = %+v", coordinator.Calls)
+	}
+	if jobLog.job.ID != "job-a" || string(jobLog.payload) != `{"job":"a"}` {
+		t.Fatalf("job log = %+v payload=%s", jobLog.job, jobLog.payload)
+	}
+	if store.jobs["job-a"].Status != domain.JobRunning || len(store.leases) != 1 || len(store.instances) != 1 {
+		t.Fatalf("store jobs=%+v leases=%+v instances=%+v", store.jobs, store.leases, store.instances)
+	}
+}
+
+func TestServiceSubmitWithPayloadFallsBackWithoutCoordinator(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 47).UTC())
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", Action: domain.ActionQueued}},
+		Fleet:  staticFleet{},
+		Nodes:  staticNodes{},
+		Queue:  NewQueue(clock),
+		Store:  &runtimeStore{},
+		Clock:  clock,
+	}
+	result, err := service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a")), []byte(`{"job":"a"}`))
+	if err != nil || result.Decision.Action != domain.ActionQueued {
+		t.Fatalf("SubmitWithPayload fallback result=%+v err=%v", result, err)
+	}
+}
+
+func TestServiceSubmitWithPayloadReleasesCoordinatorOnLoadFailure(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 50).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	loadErr := errors.New("load failed")
+	coordinator := &mocks.Coordinator{
+		Decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew},
+		Lease:    domain.Lease{ID: "owner-lease-a", JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1)},
+	}
+	service := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: &mocks.NodeAgent{LoadErr: loadErr}}},
+		Coordinator: coordinator,
+		JobLog:      &recordingJobLog{},
+		Queue:       NewQueue(clock),
+		Store:       &runtimeStore{},
+		Clock:       clock,
+		Presets:     map[string]domain.Preset{preset.ID: preset},
+	}
+
+	_, err := service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), []byte(`{"job":"a"}`))
+	if !errors.Is(err, loadErr) {
+		t.Fatalf("SubmitWithPayload err = %v", err)
+	}
+	if !strings.Contains(strings.Join(coordinator.Calls, ","), "release:job-a") {
+		t.Fatalf("coordinator calls = %+v", coordinator.Calls)
+	}
+}
+
+func TestServiceSubmitWithPayloadCoordinatorErrorPaths(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 52).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	decision := domain.PlacementDecision{JobID: job.ID, NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}
+	errBoom := errors.New("boom")
+	base := func() *Service {
+		return &Service{
+			Placer:      fakePlacer{},
+			Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+			Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+			Coordinator: &mocks.Coordinator{Decision: decision, Lease: domain.Lease{ID: "owner-lease-a", JobID: job.ID, NodeID: node.ID, Claim: decision.Claim}},
+			JobLog:      &recordingJobLog{},
+			Queue:       NewQueue(clock),
+			Store:       &runtimeStore{},
+			Clock:       clock,
+			Presets:     map[string]domain.Preset{preset.ID: preset},
+		}
+	}
+	checks := []struct {
+		name    string
+		mutate  func(*Service)
+		run     func(*Service) (Result, error)
+		wantErr error
+		want    string
+	}{
+		{
+			name: "validate",
+			mutate: func(s *Service) {
+				s.Placer = nil
+			},
+			want: "not fully configured",
+		},
+		{
+			name: "missing job log",
+			mutate: func(s *Service) {
+				s.JobLog = nil
+			},
+			want: "missing a job log",
+		},
+		{
+			name: "empty job id",
+			run: func(s *Service) (Result, error) {
+				return s.SubmitWithPayload(context.Background(), domain.Job{PresetID: preset.ID}, []byte(`{}`))
+			},
+			want: "job id",
+		},
+		{
+			name: "initial save job",
+			mutate: func(s *Service) {
+				s.Store = &runtimeStore{saveJobErr: errBoom}
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "job log",
+			mutate: func(s *Service) {
+				s.JobLog = &recordingJobLog{err: errBoom}
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "claim",
+			mutate: func(s *Service) {
+				s.Coordinator = &mocks.Coordinator{Err: errBoom}
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "plan",
+			mutate: func(s *Service) {
+				s.Coordinator = &mocks.Coordinator{PlanErr: errBoom}
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "queued commit",
+			mutate: func(s *Service) {
+				s.Coordinator = &mocks.Coordinator{Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued}, CommitErr: errBoom}
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "queued save",
+			mutate: func(s *Service) {
+				s.Coordinator = &mocks.Coordinator{Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued}}
+				s.Store = &runtimeStore{saveJobErr: errBoom, saveJobErrAt: 2}
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "queued success",
+			mutate: func(s *Service) {
+				s.Coordinator = &mocks.Coordinator{Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued}}
+			},
+		},
+		{
+			name: "fleet",
+			mutate: func(s *Service) {
+				s.Fleet = staticFleet{err: errBoom}
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "preempt",
+			mutate: func(s *Service) {
+				s.Coordinator = &mocks.Coordinator{Decision: domain.PlacementDecision{JobID: job.ID, NodeID: node.ID, Action: domain.ActionHardPreempted, Preempted: []string{"missing"}}}
+			},
+			want: "preempted instance",
+		},
+		{
+			name: "commit",
+			mutate: func(s *Service) {
+				s.Coordinator = &mocks.Coordinator{Decision: decision, CommitErr: errBoom}
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "hook",
+			run: func(s *Service) (Result, error) {
+				return s.SubmitWithPayload(context.Background(), job, []byte(`{}`), SubmitHooks{BeforeColdLoad: func(context.Context, domain.PlacementDecision) error {
+					return errBoom
+				}})
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "hook release",
+			mutate: func(s *Service) {
+				s.Coordinator = &mocks.Coordinator{Decision: decision, Lease: domain.Lease{ID: "owner-lease-a", JobID: job.ID, NodeID: node.ID, Claim: decision.Claim}, ReleaseErr: errors.New("release")}
+			},
+			run: func(s *Service) (Result, error) {
+				return s.SubmitWithPayload(context.Background(), job, []byte(`{}`), SubmitHooks{BeforeColdLoad: func(context.Context, domain.PlacementDecision) error {
+					return errBoom
+				}})
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "load release",
+			mutate: func(s *Service) {
+				s.Nodes = staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: &mocks.NodeAgent{LoadErr: errBoom}}}
+				s.Coordinator = &mocks.Coordinator{Decision: decision, Lease: domain.Lease{ID: "owner-lease-a", JobID: job.ID, NodeID: node.ID, Claim: decision.Claim}, ReleaseErr: errors.New("release")}
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "save instance",
+			mutate: func(s *Service) {
+				s.Store = &runtimeStore{saveInstanceErr: errBoom}
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "save lease",
+			mutate: func(s *Service) {
+				s.Store = &runtimeStore{saveLeaseErr: errBoom}
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "final save job",
+			mutate: func(s *Service) {
+				s.Store = &runtimeStore{saveJobErr: errBoom, saveJobErrAt: 2}
+			},
+			wantErr: errBoom,
+		},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			service := base()
+			if check.mutate != nil {
+				check.mutate(service)
+			}
+			run := check.run
+			if run == nil {
+				run = func(s *Service) (Result, error) {
+					return s.SubmitWithPayload(context.Background(), job, []byte(`{"job":"a"}`))
+				}
+			}
+			_, err := run(service)
+			switch {
+			case check.wantErr != nil && !errors.Is(err, check.wantErr):
+				t.Fatalf("err = %v", err)
+			case check.want != "" && (err == nil || !strings.Contains(err.Error(), check.want)):
+				t.Fatalf("err = %v", err)
+			case check.wantErr == nil && check.want == "" && err != nil:
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestServiceSubmitWithPayloadFillsCoordinatorLeaseDefaults(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 54).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	service := &Service{
+		Placer: fakePlacer{},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Coordinator: &mocks.Coordinator{
+			Decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew},
+			Lease:    domain.Lease{},
+		},
+		JobLog:  &recordingJobLog{},
+		Queue:   NewQueue(clock),
+		Store:   &runtimeStore{},
+		Clock:   clock,
+		Presets: map[string]domain.Preset{preset.ID: preset},
+	}
+
+	result, err := service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), []byte(`{"job":"a"}`))
+	if err != nil {
+		t.Fatalf("SubmitWithPayload: %v", err)
+	}
+	if result.Lease.ID != "lease-job-a" || result.Lease.JobID != "job-a" || result.Lease.NodeID != node.ID || result.Lease.InstanceID == "" || !result.Lease.GrantedAt.Equal(clock.Now()) || result.Lease.ExpiresAt.IsZero() {
+		t.Fatalf("lease defaults = %+v", result.Lease)
+	}
+}
+
+func TestServiceReleaseJobUsesCoordinatorThenDeletesStoreLease(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 55).UTC())
+	store := &runtimeStore{leases: map[string]domain.Lease{"lease-a": {ID: "lease-a", JobID: "job-a"}}}
+	coordinator := &mocks.Coordinator{}
+	service := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{},
+		Nodes:       staticNodes{},
+		Coordinator: coordinator,
+		Queue:       NewQueue(clock),
+		Store:       store,
+		Clock:       clock,
+	}
+
+	if err := service.ReleaseJob(context.Background(), domain.Lease{ID: "lease-a", JobID: "job-a"}); err != nil {
+		t.Fatalf("ReleaseJob: %v", err)
+	}
+	if _, ok := store.leases["lease-a"]; ok || strings.Join(coordinator.Calls, ",") != "release:job-a" {
+		t.Fatalf("leases=%+v coordinator=%+v", store.leases, coordinator.Calls)
+	}
+	if err := service.ReleaseJob(context.Background(), domain.Lease{}); err != nil {
+		t.Fatalf("empty ReleaseJob: %v", err)
+	}
+	if err := (&Service{}).ReleaseJob(context.Background(), domain.Lease{ID: "lease-a"}); err == nil || !strings.Contains(err.Error(), "not fully configured") {
+		t.Fatalf("unconfigured ReleaseJob err = %v", err)
+	}
+	noCoordinator := &Service{
+		Placer: fakePlacer{},
+		Fleet:  staticFleet{},
+		Nodes:  staticNodes{},
+		Queue:  NewQueue(clock),
+		Store:  &runtimeStore{leases: map[string]domain.Lease{"lease-b": {ID: "lease-b"}}},
+		Clock:  clock,
+	}
+	if err := noCoordinator.ReleaseJob(context.Background(), domain.Lease{ID: "lease-b"}); err != nil {
+		t.Fatalf("fallback ReleaseJob: %v", err)
+	}
+	releaseErr := errors.New("release")
+	withReleaseErr := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{},
+		Nodes:       staticNodes{},
+		Coordinator: &mocks.Coordinator{ReleaseErr: releaseErr},
+		Queue:       NewQueue(clock),
+		Store:       &runtimeStore{},
+		Clock:       clock,
+	}
+	if err := withReleaseErr.ReleaseJob(context.Background(), domain.Lease{JobID: "job-b"}); !errors.Is(err, releaseErr) {
+		t.Fatalf("coordinator ReleaseJob err = %v", err)
+	}
+	withCoordinatorNoStoreLease := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{},
+		Nodes:       staticNodes{},
+		Coordinator: &mocks.Coordinator{},
+		Queue:       NewQueue(clock),
+		Store:       &runtimeStore{},
+		Clock:       clock,
+	}
+	if err := withCoordinatorNoStoreLease.ReleaseJob(context.Background(), domain.Lease{JobID: "job-c"}); err != nil {
+		t.Fatalf("coordinator-only ReleaseJob: %v", err)
+	}
+}
+
 func TestServiceRunsColdLoadHookBeforeLoading(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(11, 0).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
@@ -677,6 +1052,21 @@ type runtimeStore struct {
 	deleteLeaseErr  error
 	saveInstanceErr error
 	deleteErr       error
+}
+
+type recordingJobLog struct {
+	job     domain.Job
+	payload []byte
+	err     error
+}
+
+func (l *recordingJobLog) PutJob(_ context.Context, job domain.Job, payload []byte) error {
+	if l.err != nil {
+		return l.err
+	}
+	l.job = job
+	l.payload = append([]byte(nil), payload...)
+	return nil
 }
 
 func (s *runtimeStore) SaveJob(_ context.Context, job domain.Job) error {
