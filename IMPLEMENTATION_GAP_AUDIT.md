@@ -2,6 +2,33 @@
 
 Date: 2026-05-29
 
+## Completion Addendum - 2026-05-29
+
+This audit is preserved as the original checklist. A subsequent implementation
+pass closed the non-hardware gaps it named: durable SQLite control state,
+config-backed `mycelium server` / `mycelium node`, scheduler runtime queueing,
+lease lifecycle, startup reaping, hardware discovery, GGUF inspection wiring,
+node 429 shedding, gateway request controls, streaming proxying with loading
+SSE, gateway telemetry, reactive overflow retry, catalog-backed local/HF/OCI
+imports, resumable installs, loopback LAN tunnels, persisted join-token state,
+optimizer rollups/recommendations, speed calibration, sticky routing,
+benchmarks, CI/covergate, and the standalone `myce` control binary.
+
+Current verified gates after the completion pass:
+
+- `make ci`: passes; covergate reports total coverage 87.3%, with
+  `internal/scheduler`, `internal/lease`, `test/contract`, and `test/fixtures`
+  at 100%.
+- `MYCELIUM_LLAMA_CPP_BINARY=$(command -v llama-server) MYCELIUM_LLAMA_CPP_MODEL=<repo>/.smoke-models/stories260K.gguf make smoke-local SMOKE_JSON=/tmp/mycelium-smoke-local-final.json`:
+  `smoke ok: 8 passed, 0 skipped, 0 failed`.
+- `MYCELIUM_REMOTE_PEER_ADDR=192.0.2.63:51847 MYCELIUM_REMOTE_PEER_MODEL=$HOME/.mycelium/models/stories260K.gguf make smoke-fleet SMOKE_JSON=/tmp/mycelium-smoke-fleet-final.json`:
+  `smoke ok: 1 passed, 0 skipped, 0 failed`.
+
+Remaining open items are hardware/engine-gated and are tracked in
+`BLOCKERS.md`: real MLX, vLLM, CUDA/NVIDIA, and cross-machine
+MLX-distributed smoke proof. `command -v mlx_lm.server`, `command -v vllm`,
+and `command -v nvidia-smi` are empty on this dev host.
+
 Scope: Compared `AGENTS.md`, `01-project-spec.md`, `02-testing-architecture.md`,
 `03-development-guide.md`, and `skills/*.md` against the current code under
 `cmd/`, `internal/`, `pkg/`, and `test/`. This audit is intentionally biased
