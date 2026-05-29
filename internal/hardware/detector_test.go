@@ -2,6 +2,7 @@ package hardware
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -37,6 +38,17 @@ func TestLinuxDetectorFailsUntilNVIDIAProbeExists(t *testing.T) {
 	_, err := (Detector{GOOS: "linux"}).Detect(context.Background(), domain.Node{})
 	if err == nil || !strings.Contains(err.Error(), "explicit --vram-mb") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestNewDetectorAndRunCommand(t *testing.T) {
+	detector := NewDetector()
+	if detector.GOOS != runtime.GOOS || detector.Command == nil {
+		t.Fatalf("detector = %+v", detector)
+	}
+	out, err := runCommand(context.Background(), "printf", "ok")
+	if err != nil || string(out) != "ok" {
+		t.Fatalf("runCommand = %q %v", out, err)
 	}
 }
 

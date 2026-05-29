@@ -36,3 +36,4 @@
 - 2026-05-29: Remote catalog import uses direct Hugging Face resolve URLs and the OCI distribution manifest/blob API; downloaded bytes still flow through the same materialize-then-register installer as local files.
 - 2026-05-29: Joined LAN nodes are reached through a per-node loopback HTTP proxy, keeping the gateway's node URL local while forwarding to the advertised node agent address.
 - 2026-05-29: Optimizer runtime recommendations are generated from stored telemetry rollups and persisted presets; project auto-apply controls background mutation, while `myce recommendations apply` is the explicit manual override.
+- 2026-05-29: CI proof is centralized in `make ci`; the local covergate enforces total coverage plus the hard 100% scheduler, lease, and fixture bars that can be measured honestly from a normal Go coverprofile.

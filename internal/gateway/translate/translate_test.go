@@ -40,6 +40,101 @@ func TestAnthropicMessagesTranslateToOpenAIChat(t *testing.T) {
 	}
 }
 
+func TestOpenAIParseAndBuildUpstream(t *testing.T) {
+	profile := profiles.Profile{
+		ID:             "openai",
+		Backend:        domain.BackendLlamaCpp,
+		Format:         profiles.FormatOpenAI,
+		ChatPath:       "/chat",
+		CompletionPath: "/complete",
+	}
+	chat, err := ParseOpenAIChat([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	route, err := BuildUpstream(chat, profile)
+	if err != nil {
+		t.Fatalf("BuildUpstream chat: %v", err)
+	}
+	if route.Path != "/chat" || string(route.Body) != string(chat.Body) {
+		t.Fatalf("chat route = %+v", route)
+	}
+	completion, err := ParseOpenAICompletion([]byte(`{"model":"m","prompt":"hi","max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAICompletion: %v", err)
+	}
+	route, err = BuildUpstream(completion, profile)
+	if err != nil {
+		t.Fatalf("BuildUpstream completion: %v", err)
+	}
+	if route.Path != "/complete" || string(route.Body) != string(completion.Body) {
+		t.Fatalf("completion route = %+v", route)
+	}
+	body, contentType, err := TranslateResponse(chat, route, []byte(`{"ok":true}`))
+	if err != nil || contentType != "application/json" || string(body) != `{"ok":true}` {
+		t.Fatalf("TranslateResponse passthrough = %q %s %v", body, contentType, err)
+	}
+}
+
+func TestParseRequestsFailLoudly(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   func([]byte) (IngressRequest, error)
+		body string
+		want string
+	}{
+		{name: "chat model", fn: ParseOpenAIChat, body: `{"messages":[{"role":"user","content":"hi"}]}`, want: "model is required"},
+		{name: "chat messages", fn: ParseOpenAIChat, body: `{"model":"m"}`, want: "messages are required"},
+		{name: "completion model", fn: ParseOpenAICompletion, body: `{"prompt":"hi"}`, want: "model is required"},
+		{name: "anthropic model", fn: ParseAnthropicMessages, body: `{"max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`, want: "model is required"},
+		{name: "anthropic max tokens", fn: ParseAnthropicMessages, body: `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`, want: "max_tokens is required"},
+		{name: "anthropic messages", fn: ParseAnthropicMessages, body: `{"model":"m","max_tokens":1}`, want: "messages are required"},
+		{name: "multiple json", fn: ParseOpenAICompletion, body: `{"model":"m"} {}`, want: "multiple JSON"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.fn([]byte(tc.body))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildAndTranslateUnsupportedRoutesFailLoudly(t *testing.T) {
+	chat, err := ParseOpenAIChat([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	unsupported := profiles.Profile{Format: profiles.FormatAnthropic}
+	if _, err := BuildUpstream(chat, unsupported); err == nil || !strings.Contains(err.Error(), "openai chat") {
+		t.Fatalf("chat err = %v", err)
+	}
+	completion, err := ParseOpenAICompletion([]byte(`{"model":"m","prompt":"hi"}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAICompletion: %v", err)
+	}
+	if _, err := BuildUpstream(completion, unsupported); err == nil || !strings.Contains(err.Error(), "openai completion") {
+		t.Fatalf("completion err = %v", err)
+	}
+	claude, err := ParseAnthropicMessages([]byte(`{"model":"m","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`))
+	if err != nil {
+		t.Fatalf("ParseAnthropicMessages: %v", err)
+	}
+	if _, err := BuildUpstream(claude, profiles.Profile{Format: "custom"}); err == nil || !strings.Contains(err.Error(), "anthropic messages") {
+		t.Fatalf("anthropic err = %v", err)
+	}
+	if _, _, err := TranslateResponse(chat, UpstreamRequest{Translate: true}, nil); err == nil || !strings.Contains(err.Error(), "unsupported translated response") {
+		t.Fatalf("translate err = %v", err)
+	}
+	if _, _, err := TranslateResponse(claude, UpstreamRequest{Translate: true}, []byte(`{`)); err == nil {
+		t.Fatal("expected bad upstream json")
+	}
+	if _, _, err := TranslateResponse(claude, UpstreamRequest{Translate: true}, []byte(`{"choices":[]}`)); err != nil {
+		t.Fatalf("empty translated response should be valid: %v", err)
+	}
+}
+
 func TestUnsupportedFieldsFailLoudly(t *testing.T) {
 	_, err := ParseAnthropicMessages([]byte(`{
 		"model":"qwen2.5-9b-instruct",

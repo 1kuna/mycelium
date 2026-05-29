@@ -112,8 +112,28 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	if err := store.SaveProject(ctx, domain.Project{}); err == nil {
 		t.Fatal("SaveProject should require an id")
 	}
+	for name, err := range map[string]error{
+		"preset":         store.SavePreset(ctx, domain.Preset{}),
+		"node":           store.SaveNode(ctx, domain.Node{}),
+		"instance":       store.SaveInstance(ctx, domain.ModelInstance{}),
+		"lease":          store.SaveLease(ctx, domain.Lease{}),
+		"reservation":    store.SaveReservation(ctx, domain.Reservation{}),
+		"job":            store.SaveJob(ctx, domain.Job{}),
+		"recommendation": store.SaveRecommendation(ctx, domain.RecommendationRecord{}),
+		"process refs":   store.SaveProcessRefs(ctx, "", nil),
+	} {
+		if err == nil {
+			t.Fatalf("%s save expected id error", name)
+		}
+	}
 	if _, err := store.Project(ctx, "missing"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("missing project err = %v", err)
+	}
+	if _, err := store.ProcessRefs(ctx, ""); err == nil {
+		t.Fatal("ProcessRefs should require node id")
+	}
+	if err := store.Record(ctx, domain.RunMetric{At: time.Unix(1, 0).UTC()}); err == nil {
+		t.Fatal("Record should require job id")
 	}
 	if err := store.Record(ctx, domain.RunMetric{JobID: "metric"}); err == nil {
 		t.Fatal("Record should require timestamp")
@@ -129,6 +149,12 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	filtered, err := store.Metrics(ctx, "p2")
 	if err != nil || len(filtered) != 1 || filtered[0].JobID != "m2" {
 		t.Fatalf("Metrics filtered = %+v, %v", filtered, err)
+	}
+	rec := domain.RecommendationRecord{ID: "rec-a", ProjectID: "p2", Type: "context", RecommendedValue: 30}
+	must(t, store.SaveRecommendation(ctx, rec))
+	gotRec, err := store.Recommendation(ctx, rec.ID)
+	if err != nil || gotRec.ID != rec.ID || gotRec.CreatedAt.IsZero() {
+		t.Fatalf("Recommendation = %+v, %v", gotRec, err)
 	}
 }
 

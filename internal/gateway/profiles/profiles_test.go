@@ -22,4 +22,14 @@ func TestDefaultRegistryResolvesLlamaCpp(t *testing.T) {
 	if profile.Format != FormatOpenAI || profile.ChatPath != "/v1/chat/completions" {
 		t.Fatalf("profile = %+v", profile)
 	}
+	byID, err := DefaultRegistry().ByID(profile.ID)
+	if err != nil || byID.ID != profile.ID {
+		t.Fatalf("ByID = %+v %v", byID, err)
+	}
+	if _, err := DefaultRegistry().ByID("missing"); err == nil {
+		t.Fatal("missing profile succeeded")
+	}
+	if (Registry{}).IsZero() != true || DefaultRegistry().IsZero() {
+		t.Fatal("IsZero mismatch")
+	}
 }

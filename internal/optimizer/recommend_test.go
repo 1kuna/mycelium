@@ -173,6 +173,57 @@ func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
 	}
 }
 
+func TestRecommendationServiceErrorAndNoopPaths(t *testing.T) {
+	if _, err := (Engine{}).Recommend(context.Background(), domain.Project{ID: "p"}); err == nil {
+		t.Fatal("expected missing stats error")
+	}
+	if steps, err := (Engine{Stats: staticStats{stats: ProjectStats{ProjectID: "p"}}}).Recommend(context.Background(), domain.Project{ID: "p"}); err != nil || len(steps) != 1 || !strings.Contains(steps[0].Result, "no context") {
+		t.Fatalf("noop steps = %+v %v", steps, err)
+	}
+	if _, ok := RecommendContextCap(domain.Project{ID: "p"}, ProjectStats{CurrentCap: 1000, AvgTokens: 100}, RecommendationPolicy{AvgHeadroom: 2}); ok {
+		t.Fatal("recommendation should not grow caps")
+	}
+	if got := backendReloadCost(domain.BackendCustom); got != 5 {
+		t.Fatalf("custom reload cost = %f", got)
+	}
+	if got := backendReloadCost(domain.BackendVLLM); got != 1 {
+		t.Fatalf("vllm reload cost = %f", got)
+	}
+	if _, err := EvaluateConsolidation(ConsolidationInput{}); err == nil {
+		t.Fatal("expected invalid consolidation input")
+	}
+	if result := ApplyRecommendation(domain.Project{ID: "p", AutoApply: true}, fixtures.MakePreset(), Recommendation{Type: "other"}); result.Applied || !strings.Contains(result.Log.Result, "ignored") {
+		t.Fatalf("unsupported apply = %+v", result)
+	}
+	if _, err := (TelemetryStatsProvider{}).Stats(context.Background(), "p"); err == nil {
+		t.Fatal("expected missing telemetry error")
+	}
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	if _, err := (TelemetryStatsProvider{Telemetry: store}).Stats(context.Background(), "p"); err == nil {
+		t.Fatal("expected missing preset source error")
+	}
+	if _, err := (RecommendationService{}).EvaluateProject(context.Background(), domain.Project{ID: "p"}); err == nil {
+		t.Fatal("expected missing store error")
+	}
+	if _, err := (RecommendationService{Store: store}).EvaluateProject(context.Background(), domain.Project{ID: "p"}); err == nil {
+		t.Fatal("expected missing clock error")
+	}
+	project := domain.Project{ID: "p", ContextCap: 16000, AutoApply: true}
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	mustOptimizer(t, store.Record(context.Background(), domain.RunMetric{JobID: "job-a", Project: project.ID, ContextUsed: 3500, At: now}))
+	mustOptimizer(t, store.Record(context.Background(), domain.RunMetric{JobID: "job-b", Project: project.ID, ContextUsed: 4000, At: now.Add(time.Second)}))
+	if records, err := (RecommendationService{Store: store, Clock: mocks.NewFakeClock(now)}).EvaluateProject(context.Background(), project); err != nil || len(records) != 0 {
+		t.Fatalf("no-preset records = %+v %v", records, err)
+	}
+	if _, ok := selectProjectPreset(domain.Project{}, nil); ok {
+		t.Fatal("empty preset source selected")
+	}
+}
+
 type staticStats struct {
 	stats ProjectStats
 	err   error
@@ -180,4 +231,11 @@ type staticStats struct {
 
 func (s staticStats) Stats(context.Context, string) (ProjectStats, error) {
 	return s.stats, s.err
+}
+
+func mustOptimizer(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
 }
