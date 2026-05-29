@@ -14,6 +14,7 @@ import (
 	"mycelium/internal/backends/llamacpp"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
+	"mycelium/internal/lease"
 	"mycelium/internal/node"
 	"mycelium/internal/optimizer"
 	"mycelium/internal/telemetry"
@@ -38,7 +39,7 @@ func TestLocalPhase1LoadServeTelemetryRequeueReaper(t *testing.T) {
 
 	addr := freeAddr(t)
 	adapter := newSmokeAdapter(binary)
-	agent := node.NewAgent(fixtures.MakeNode(), adapter, clock.System{}, node.WithTelemetrySink(store), node.WithListenAddr(addr))
+	agent := node.NewAgent(fixtures.MakeNode(), adapter, clock.System{}, node.WithTelemetrySink(store), node.WithListenAddr(addr), node.WithAllocator(lease.NewAllocator()))
 	preset := fixtures.MakePreset(
 		fixtures.WithModelRef(model),
 		fixtures.WithContextLength(2048),
