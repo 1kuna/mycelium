@@ -89,6 +89,7 @@ func TestRunControlListCommandsAndProjectSet(t *testing.T) {
 		{"nodes", "list", "--db", dbPath},
 		{"jobs", "list", "--db", dbPath},
 		{"recommendations", "list", "--db", dbPath, "--project", "project-a"},
+		{"recommendations", "calibrate-speed", "--db", dbPath},
 		{"projects", "set", "--db", dbPath, "--id", "project-b", "--priority", "background", "--speed-pref", "latency", "--context-cap", "4096", "--preemption", "hard", "--auto-apply"},
 	}
 	for _, args := range commands {

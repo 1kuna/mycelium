@@ -172,7 +172,7 @@ func runJobs(ctx context.Context, args []string) error {
 
 func runRecommendations(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce recommendations <generate|list|apply>")
+		return fmt.Errorf("usage: myce recommendations <generate|list|apply|calibrate-speed>")
 	}
 	switch args[0] {
 	case "generate":
@@ -181,6 +181,8 @@ func runRecommendations(ctx context.Context, args []string) error {
 		return runRecommendationsList(ctx, args[1:])
 	case "apply":
 		return runRecommendationsApply(ctx, args[1:])
+	case "calibrate-speed":
+		return runRecommendationsCalibrateSpeed(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown recommendations command %q", args[0])
 	}
@@ -293,6 +295,27 @@ func runRecommendationsApply(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Printf("recommendation\t%s\tapplied\n", *id)
+	return nil
+}
+
+func runRecommendationsCalibrateSpeed(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("recommendations calibrate-speed", flag.ContinueOnError)
+	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	store, err := storesqlite.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	nodes, err := optimizer.CalibrateSpeedClasses(ctx, store, clock.System{})
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		fmt.Printf("%s\t%.2f\t%s\n", node.ID, node.SpeedClass.TokensPerSecRef, node.SpeedClass.Source)
+	}
 	return nil
 }
 

@@ -173,6 +173,44 @@ func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
 	}
 }
 
+func TestCalibrateSpeedClassesFromTelemetry(t *testing.T) {
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	if err := store.SaveNode(context.Background(), node); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+	for _, metric := range []domain.RunMetric{
+		{JobID: "job-a", NodeID: node.ID, Project: "project-a", TokensPerSec: 10, At: now},
+		{JobID: "job-b", NodeID: node.ID, Project: "project-a", TokensPerSec: 20, At: now.Add(time.Second)},
+		{JobID: "job-c", NodeID: "node-missing", Project: "project-a", TokensPerSec: 100, At: now.Add(2 * time.Second)},
+		{JobID: "job-d", NodeID: node.ID, Project: "project-a", At: now.Add(3 * time.Second)},
+	} {
+		if err := store.Record(context.Background(), metric); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	updated, err := CalibrateSpeedClasses(context.Background(), store, mocks.NewFakeClock(now))
+	if err != nil {
+		t.Fatalf("CalibrateSpeedClasses: %v", err)
+	}
+	if len(updated) != 1 || updated[0].SpeedClass.TokensPerSecRef != 15 || updated[0].SpeedClass.Source != "telemetry-calibrated" {
+		t.Fatalf("updated = %+v", updated)
+	}
+	persisted, err := store.Node(context.Background(), node.ID)
+	if err != nil {
+		t.Fatalf("Node: %v", err)
+	}
+	if persisted.SpeedClass.TokensPerSecRef != 15 || !persisted.SpeedClass.ProbedAt.Equal(now) {
+		t.Fatalf("persisted = %+v", persisted.SpeedClass)
+	}
+}
+
 func TestRecommendationServiceErrorAndNoopPaths(t *testing.T) {
 	if _, err := (Engine{}).Recommend(context.Background(), domain.Project{ID: "p"}); err == nil {
 		t.Fatal("expected missing stats error")
@@ -218,6 +256,12 @@ func TestRecommendationServiceErrorAndNoopPaths(t *testing.T) {
 	mustOptimizer(t, store.Record(context.Background(), domain.RunMetric{JobID: "job-b", Project: project.ID, ContextUsed: 4000, At: now.Add(time.Second)}))
 	if records, err := (RecommendationService{Store: store, Clock: mocks.NewFakeClock(now)}).EvaluateProject(context.Background(), project); err != nil || len(records) != 0 {
 		t.Fatalf("no-preset records = %+v %v", records, err)
+	}
+	if _, err := CalibrateSpeedClasses(context.Background(), nil, mocks.NewFakeClock(now)); err == nil {
+		t.Fatal("expected missing calibration store error")
+	}
+	if _, err := CalibrateSpeedClasses(context.Background(), store, nil); err == nil {
+		t.Fatal("expected missing calibration clock error")
 	}
 	if _, ok := selectProjectPreset(domain.Project{}, nil); ok {
 		t.Fatal("empty preset source selected")
