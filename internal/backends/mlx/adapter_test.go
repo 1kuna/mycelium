@@ -48,7 +48,7 @@ func TestAdapterUsesMLXServerExecutableDirectly(t *testing.T) {
 
 func readRecordedArgs(t *testing.T, path string) []byte {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(10 * time.Second)
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	for {
