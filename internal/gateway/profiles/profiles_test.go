@@ -8,19 +8,25 @@ import (
 )
 
 func TestRegistryFailsUnknownBackendLoudly(t *testing.T) {
-	_, err := DefaultRegistry().ForBackend(domain.BackendVLLM)
+	_, err := DefaultRegistry().ForBackend(domain.Backend("missing"))
 	if err == nil || !strings.Contains(err.Error(), "unknown provider profile") {
 		t.Fatalf("err = %v", err)
 	}
 }
 
-func TestDefaultRegistryResolvesLlamaCpp(t *testing.T) {
+func TestDefaultRegistryResolvesOpenAICompatibleBackends(t *testing.T) {
+	for _, backend := range []domain.Backend{domain.BackendLlamaCpp, domain.BackendVLLM, domain.BackendMLX} {
+		profile, err := DefaultRegistry().ForBackend(backend)
+		if err != nil {
+			t.Fatalf("ForBackend(%s): %v", backend, err)
+		}
+		if profile.Format != FormatOpenAI || profile.ChatPath != "/v1/chat/completions" || profile.CompletionPath != "/v1/completions" {
+			t.Fatalf("profile = %+v", profile)
+		}
+	}
 	profile, err := DefaultRegistry().ForBackend(domain.BackendLlamaCpp)
 	if err != nil {
 		t.Fatalf("ForBackend: %v", err)
-	}
-	if profile.Format != FormatOpenAI || profile.ChatPath != "/v1/chat/completions" {
-		t.Fatalf("profile = %+v", profile)
 	}
 	byID, err := DefaultRegistry().ByID(profile.ID)
 	if err != nil || byID.ID != profile.ID {
