@@ -86,6 +86,11 @@ func TestCanStackLoadRefusesConcurrentLoadOnCatastrophicUnit(t *testing.T) {
 	if !allocator.CanStackLoad(fixtures.Make4090Node(), []int{0}, existing) {
 		t.Fatal("soft unit should allow stacked loads")
 	}
+	if !allocator.CanStackLoad(node, []int{0}, []domain.ModelInstance{
+		fixtures.MakeInstance(fixtures.OnNode(node.ID), fixtures.WithClaim(fixtures.MakeClaim(1, 1))),
+	}) {
+		t.Fatal("catastrophic unit should allow load when no existing load is in flight")
+	}
 }
 
 func TestSelectedCapacityAndOverlap(t *testing.T) {
@@ -102,6 +107,9 @@ func TestSelectedCapacityAndOverlap(t *testing.T) {
 	}
 	if overlaps([]int{0}, []int{1}) {
 		t.Fatal("unexpected overlap")
+	}
+	if overlaps(nil, []int{1}) {
+		t.Fatal("empty left side should not overlap")
 	}
 	if got := reservationClaim(domain.Reservation{Kind: domain.ReservationPinned, Headroom: fixtures.MakeClaim(1, 1)}); got != (domain.Claim{}) {
 		t.Fatalf("pinned reservation claim = %+v", got)
