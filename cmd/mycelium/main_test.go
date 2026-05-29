@@ -130,6 +130,17 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "read server config") || serverCfg.Listen != "" {
 		t.Fatalf("empty server config = %+v %v", serverCfg, err)
 	}
+	serverPath := filepath.Join(t.TempDir(), "server.json")
+	if err := os.WriteFile(serverPath, []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write server config: %v", err)
+	}
+	serverCfg, err = loadServerConfig(serverPath)
+	if err != nil {
+		t.Fatalf("loadServerConfig: %v", err)
+	}
+	if serverCfg.QueueDrainMS != 1000 || serverCfg.QueueDrainLimit != 1 {
+		t.Fatalf("server drain defaults = %+v", serverCfg)
+	}
 	nodePath := filepath.Join(t.TempDir(), "node.json")
 	nodeRaw := `{"listen":"127.0.0.1:7","backend_listen":"127.0.0.1:8","id":"node-json","name":"Node JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"state_db":"state.db","join":"mycjoin://127.0.0.1:1?token=x","gguf_parser":"parser"}`
 	if err := os.WriteFile(nodePath, []byte(nodeRaw), 0644); err != nil {
@@ -287,7 +298,9 @@ func TestBuildGatewayServerWithJoinToken(t *testing.T) {
 		Presets:      []domain.Preset{preset},
 		Reservations: []domain.Reservation{{ID: "pin-a", Kind: domain.ReservationPinned, NodeID: "node-a", PresetID: preset.ID}},
 	})
-	addr, handler, err := buildGatewayServer(context.Background(), []string{"--config", configPath})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addr, handler, err := buildGatewayServer(ctx, []string{"--config", configPath})
 	if err != nil {
 		t.Fatalf("buildGatewayServer: %v", err)
 	}

@@ -68,3 +68,4 @@
 - 2026-05-29: Server startup rehydrates only persisted `queued` jobs into the in-memory scheduler queue; terminal/running job states remain durable history and are not replayed as new admission work after restart.
 - 2026-05-29: Server startup runs one scheduler lease-expiry pass before serving so leases left by a crashed or stopped control plane are cleared against the real clock before new requests are admitted.
 - 2026-05-29: Scheduler cold-load tuning mutates only the preset copy sent to the node agent: llama.cpp gets `--n-gpu-layers 999` when accelerators are selected and a deterministic `--tensor-split` from selected accelerator memory for multi-accelerator loads, while explicit user launch args win.
+- 2026-05-29: Server queue draining is a small background loop over the existing scheduler service, defaulting to one queued job per second; it also runs lease expiry each tick and never bypasses the normal placement/load/lease path.
