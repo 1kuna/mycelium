@@ -280,6 +280,63 @@ func TestServiceDrain(t *testing.T) {
 	}
 }
 
+func TestServiceReleaseAndExpireLeases(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
+	store := &runtimeStore{leases: map[string]domain.Lease{
+		"expired": {ID: "expired", ExpiresAt: time.Unix(99, 0).UTC()},
+		"future":  {ID: "future", ExpiresAt: time.Unix(101, 0).UTC()},
+		"open":    {ID: "open"},
+	}}
+	service := leaseLifecycleService(clock, store)
+
+	if err := service.Release(context.Background(), "future"); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if _, ok := store.leases["future"]; ok {
+		t.Fatalf("future lease was not released: %+v", store.leases)
+	}
+	expired, err := service.ExpireLeases(context.Background())
+	if err != nil {
+		t.Fatalf("ExpireLeases: %v", err)
+	}
+	if expired != 1 {
+		t.Fatalf("expired = %d", expired)
+	}
+	if _, ok := store.leases["expired"]; ok {
+		t.Fatalf("expired lease still stored: %+v", store.leases)
+	}
+	if _, ok := store.leases["open"]; !ok {
+		t.Fatalf("open lease should remain: %+v", store.leases)
+	}
+}
+
+func TestServiceLeaseLifecycleErrors(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
+	if err := (&Service{}).Release(context.Background(), "lease-a"); err == nil || !strings.Contains(err.Error(), "not fully configured") {
+		t.Fatalf("release validate err = %v", err)
+	}
+	if err := leaseLifecycleService(clock, &runtimeStore{}).Release(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "lease id") {
+		t.Fatalf("release id err = %v", err)
+	}
+	deleteErr := errors.New("delete lease")
+	if err := leaseLifecycleService(clock, &runtimeStore{deleteLeaseErr: deleteErr}).Release(context.Background(), "lease-a"); !errors.Is(err, deleteErr) {
+		t.Fatalf("release delete err = %v", err)
+	}
+	listErr := errors.New("list leases")
+	if _, err := leaseLifecycleService(clock, &runtimeStore{listLeaseErr: listErr}).ExpireLeases(context.Background()); !errors.Is(err, listErr) {
+		t.Fatalf("expire list err = %v", err)
+	}
+	if _, err := (&Service{}).ExpireLeases(context.Background()); err == nil || !strings.Contains(err.Error(), "not fully configured") {
+		t.Fatalf("expire validate err = %v", err)
+	}
+	if expired, err := leaseLifecycleService(clock, &runtimeStore{
+		leases:         map[string]domain.Lease{"expired": {ID: "expired", ExpiresAt: time.Unix(99, 0).UTC()}},
+		deleteLeaseErr: deleteErr,
+	}).ExpireLeases(context.Background()); !errors.Is(err, deleteErr) || expired != 0 {
+		t.Fatalf("expire delete err/count = %v %d", err, expired)
+	}
+}
+
 func TestServiceResolveAndPreemptionErrors(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(50, 0).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
@@ -379,6 +436,17 @@ func TestServiceResolveAndPreemptionErrors(t *testing.T) {
 	}
 }
 
+func leaseLifecycleService(clock *mocks.FakeClock, store *runtimeStore) *Service {
+	return &Service{
+		Placer: fakePlacer{},
+		Fleet:  staticFleet{},
+		Nodes:  staticNodes{},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+	}
+}
+
 type fakePlacer struct {
 	decision domain.PlacementDecision
 	err      error
@@ -420,6 +488,8 @@ type runtimeStore struct {
 	saveJobErrAt    int
 	saveJobCalls    int
 	saveLeaseErr    error
+	listLeaseErr    error
+	deleteLeaseErr  error
 	saveInstanceErr error
 	deleteErr       error
 }
@@ -444,6 +514,25 @@ func (s *runtimeStore) SaveLease(_ context.Context, lease domain.Lease) error {
 		s.leases = map[string]domain.Lease{}
 	}
 	s.leases[lease.ID] = lease
+	return nil
+}
+
+func (s *runtimeStore) ListLeases(_ context.Context) ([]domain.Lease, error) {
+	if s.listLeaseErr != nil {
+		return nil, s.listLeaseErr
+	}
+	leases := make([]domain.Lease, 0, len(s.leases))
+	for _, lease := range s.leases {
+		leases = append(leases, lease)
+	}
+	return leases, nil
+}
+
+func (s *runtimeStore) DeleteLease(_ context.Context, id string) error {
+	if s.deleteLeaseErr != nil {
+		return s.deleteLeaseErr
+	}
+	delete(s.leases, id)
 	return nil
 }
 

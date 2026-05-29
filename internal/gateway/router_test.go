@@ -906,6 +906,14 @@ func (s *gatewayRuntimeStore) SaveLease(context.Context, domain.Lease) error {
 	return nil
 }
 
+func (s *gatewayRuntimeStore) ListLeases(context.Context) ([]domain.Lease, error) {
+	return nil, nil
+}
+
+func (s *gatewayRuntimeStore) DeleteLease(context.Context, string) error {
+	return nil
+}
+
 func (s *gatewayRuntimeStore) SaveInstance(context.Context, domain.ModelInstance) error {
 	return nil
 }
