@@ -44,6 +44,7 @@ type NodeAgent interface {
 	Snapshot(ctx context.Context) (domain.NodeSnapshot, error)
 	Load(ctx context.Context, p domain.Preset) (domain.ModelInstance, error)
 	Unload(ctx context.Context, instanceID string) error
+	InspectModel(ctx context.Context, p domain.Preset) (domain.ModelMetadata, error)
 }
 
 type Placer interface {

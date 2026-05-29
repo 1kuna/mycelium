@@ -40,6 +40,10 @@ func WithContextLength(n int) func(*domain.Preset) {
 	return func(p *domain.Preset) { p.ContextLength = n }
 }
 
+func WithPresetNode(id string) func(*domain.Preset) {
+	return func(p *domain.Preset) { p.NodeID = id }
+}
+
 func MakeClaim(weightsMB, kvMB int) domain.Claim {
 	return domain.Claim{WeightsMB: weightsMB, KVReservedMB: kvMB}
 }

@@ -12,3 +12,4 @@
 - 2026-05-29: Keep reactive overflow handling as deterministic planning code in `internal/optimizer`: classify only explicit overflow errors, compute the next context cap, and let the normal scheduler prove fit.
 - 2026-05-29: Use a tracked-process JSON file for node startup reaping; it is explicit, testable, and avoids broad process-name killing.
 - 2026-05-29: Use a 5s heartbeat interval with 3 missed beats before marking a node unreachable; the tracker is clock-injected so tests advance time deterministically.
+- 2026-05-29: Make the GGUF parser command template configurable and parse JSON metadata into `domain.ModelMetadata`; this avoids baking in a brittle CLI shape while still shelling out to the real parser path in production.

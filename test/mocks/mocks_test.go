@@ -69,6 +69,13 @@ func TestNodeAgentRecordsLoadUnloadAndFailures(t *testing.T) {
 	if len(agent.Instances) != 0 {
 		t.Fatalf("instances = %+v", agent.Instances)
 	}
+	metadata, err := agent.InspectModel(context.Background(), fixtures.MakePreset())
+	if err != nil {
+		t.Fatalf("InspectModel: %v", err)
+	}
+	if metadata.Format != "gguf" {
+		t.Fatalf("metadata = %+v", metadata)
+	}
 
 	loadErr := errors.New("load")
 	agent.LoadErr = loadErr
@@ -79,6 +86,11 @@ func TestNodeAgentRecordsLoadUnloadAndFailures(t *testing.T) {
 	agent.UnloadErr = unloadErr
 	if err := agent.Unload(context.Background(), "missing"); !errors.Is(err, unloadErr) {
 		t.Fatalf("unload error = %v", err)
+	}
+	inspectErr := errors.New("inspect")
+	agent.InspectErr = inspectErr
+	if _, err := agent.InspectModel(context.Background(), fixtures.MakePreset()); !errors.Is(err, inspectErr) {
+		t.Fatalf("inspect error = %v", err)
 	}
 }
 

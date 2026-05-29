@@ -16,6 +16,7 @@ type Agent struct {
 	backend   ports.BackendAdapter
 	clock     ports.Clock
 	telemetry ports.TelemetrySink
+	inspector ModelInspector
 	nextID    int
 	instances map[string]domain.ModelInstance
 	handles   map[string]ports.Handle
@@ -48,6 +49,12 @@ func NewAgent(node domain.Node, backend ports.BackendAdapter, clock ports.Clock,
 func WithTelemetrySink(sink ports.TelemetrySink) Option {
 	return func(a *Agent) {
 		a.telemetry = sink
+	}
+}
+
+func WithModelInspector(inspector ModelInspector) Option {
+	return func(a *Agent) {
+		a.inspector = inspector
 	}
 }
 
@@ -99,6 +106,22 @@ func (a *Agent) Unload(ctx context.Context, instanceID string) error {
 	delete(a.handles, inst.ID)
 	a.mu.Unlock()
 	return nil
+}
+
+func (a *Agent) InspectModel(ctx context.Context, p domain.Preset) (domain.ModelMetadata, error) {
+	if a.inspector != nil {
+		return a.inspector.InspectModel(ctx, p)
+	}
+	if p.EstWeightsMB <= 0 || p.KVPerTokenMB <= 0 || p.ContextLength <= 0 {
+		return domain.ModelMetadata{}, fmt.Errorf("model inspector is not configured for preset %q", p.ID)
+	}
+	return domain.ModelMetadata{
+		ModelRef:      p.ModelRef,
+		Format:        "preset",
+		WeightsMB:     p.EstWeightsMB,
+		KVPerTokenMB:  p.KVPerTokenMB,
+		ContextLength: p.ContextLength,
+	}, nil
 }
 
 func (a *Agent) RecordRun(ctx context.Context, metric domain.RunMetric) error {
