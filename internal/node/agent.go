@@ -15,6 +15,7 @@ type Agent struct {
 	node      domain.Node
 	backend   ports.BackendAdapter
 	clock     ports.Clock
+	telemetry ports.TelemetrySink
 	nextID    int
 	instances map[string]domain.ModelInstance
 	handles   map[string]ports.Handle
@@ -27,14 +28,26 @@ type loadOp struct {
 	err  error
 }
 
-func NewAgent(node domain.Node, backend ports.BackendAdapter, clock ports.Clock) *Agent {
-	return &Agent{
+type Option func(*Agent)
+
+func NewAgent(node domain.Node, backend ports.BackendAdapter, clock ports.Clock, opts ...Option) *Agent {
+	agent := &Agent{
 		node:      node,
 		backend:   backend,
 		clock:     clock,
 		instances: map[string]domain.ModelInstance{},
 		handles:   map[string]ports.Handle{},
 		loads:     map[string]*loadOp{},
+	}
+	for _, opt := range opts {
+		opt(agent)
+	}
+	return agent
+}
+
+func WithTelemetrySink(sink ports.TelemetrySink) Option {
+	return func(a *Agent) {
+		a.telemetry = sink
 	}
 }
 
@@ -86,6 +99,26 @@ func (a *Agent) Unload(ctx context.Context, instanceID string) error {
 	delete(a.handles, inst.ID)
 	a.mu.Unlock()
 	return nil
+}
+
+func (a *Agent) RecordRun(ctx context.Context, metric domain.RunMetric) error {
+	if a.telemetry == nil {
+		return fmt.Errorf("telemetry sink is not configured")
+	}
+	a.mu.Lock()
+	inst, ok := a.instances[metric.InstanceID]
+	a.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("unknown instance %q", metric.InstanceID)
+	}
+	metric.NodeID = a.node.ID
+	if metric.InstanceID == "" {
+		metric.InstanceID = inst.ID
+	}
+	if metric.At.IsZero() {
+		metric.At = a.clock.Now()
+	}
+	return a.telemetry.Record(ctx, metric)
 }
 
 func (a *Agent) readyInstance(presetID string) (domain.ModelInstance, bool) {

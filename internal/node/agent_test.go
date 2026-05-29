@@ -142,6 +142,44 @@ func TestUnloadUnknownAndStopFailure(t *testing.T) {
 	}
 }
 
+func TestRecordRunEmitsTelemetryWithNodeAndClock(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	sink := &mocks.TelemetrySink{}
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), clock, WithTelemetrySink(sink))
+	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	err = agent.RecordRun(context.Background(), domain.RunMetric{
+		JobID:      "job",
+		InstanceID: inst.ID,
+		Project:    "project",
+	})
+	if err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+	if len(sink.Metrics) != 1 {
+		t.Fatalf("metrics = %+v", sink.Metrics)
+	}
+	got := sink.Metrics[0]
+	if got.NodeID != "node_test" || got.At != clock.Now() {
+		t.Fatalf("metric = %+v", got)
+	}
+}
+
+func TestRecordRunFailsWithoutSinkOrInstance(t *testing.T) {
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()))
+	if err := agent.RecordRun(context.Background(), domain.RunMetric{InstanceID: "missing"}); err == nil {
+		t.Fatal("expected missing sink error")
+	}
+
+	agent = NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()), WithTelemetrySink(&mocks.TelemetrySink{}))
+	if err := agent.RecordRun(context.Background(), domain.RunMetric{InstanceID: "missing"}); err == nil {
+		t.Fatal("expected missing instance error")
+	}
+}
+
 func TestWaitingLoadRespectsContextCancellation(t *testing.T) {
 	op := &loadOp{done: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
