@@ -12,7 +12,7 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "server", args: []string{"server"}, want: "server is not implemented"},
+		{name: "server", args: []string{"server"}, want: "--node is required"},
 		{name: "myce", args: []string{"myce"}, want: "myce is not implemented"},
 	}
 	for _, tt := range tests {

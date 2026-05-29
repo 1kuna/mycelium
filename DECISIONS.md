@@ -19,3 +19,6 @@
 - 2026-05-29: Use a 5m default node load timeout, enforced with the injected `Clock`; tests can shorten it and advance `FakeClock` without real sleeps.
 - 2026-05-29: Llama.cpp launch contexts bound process start and readiness only; a successfully launched backend stays alive until explicit `Stop`.
 - 2026-05-29: `mycelium node` uses a concrete `--backend-listen` address for llama.cpp launches; port `0` is not valid until the adapter grows explicit port discovery.
+- 2026-05-29: Phase 2 gateway profiles are explicit data keyed by backend; unknown backends fail instead of falling back to generic OpenAI routing.
+- 2026-05-29: Phase 2 gateway failover retries once by default, reports the failed instance, removes it from the local candidate snapshot, and then asks the scheduler again.
+- 2026-05-29: Anthropic-to-OpenAI streaming translation fails loudly until chunk-level SSE translation exists; non-streaming messages translate through OpenAI chat with strict field validation.
