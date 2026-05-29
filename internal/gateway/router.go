@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
@@ -120,9 +121,15 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	var lastErr error
 	for attempt := 1; attempt <= tries; attempt++ {
 		job := r.jobFromIngress(req, attempt)
+		clk := r.clock()
+		loadStart := clk.Now()
 		decision, inst, cold, err := r.placeStickyOrLoad(ctx, req, job, preset, fleet, nil)
 		if err != nil {
 			return RouteResponse{}, err
+		}
+		loadMS := 0
+		if cold {
+			loadMS = durationMS(loadStart, clk.Now())
 		}
 		endRequest, err := r.beginInstanceRequest(ctx, inst)
 		if err != nil {
@@ -133,7 +140,9 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			endRequest()
 			return RouteResponse{}, err
 		}
+		upstreamStart := clk.Now()
 		resp, err := r.callUpstream(ctx, inst, route)
+		upstreamEnd := clk.Now()
 		endRequest()
 		if err != nil || resp.Status >= 500 {
 			if err == nil {
@@ -161,7 +170,12 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		if err != nil {
 			return RouteResponse{}, err
 		}
-		r.recordMetric(ctx, job, inst, body)
+		r.recordMetric(ctx, job, inst, body, metricTiming{
+			Start:           upstreamStart,
+			FirstByte:       upstreamEnd,
+			End:             upstreamEnd,
+			LoadWallClockMS: loadMS,
+		})
 		if r.Sticky != nil {
 			r.Sticky.Put(req.ConversationKey, inst)
 		}
@@ -213,6 +227,8 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 	var lastErr error
 	for attempt := 1; attempt <= tries; attempt++ {
 		job := r.jobFromIngress(req, attempt)
+		clk := r.clock()
+		loadStart := clk.Now()
 		beforeCold := func(ctx context.Context, decision domain.PlacementDecision) error {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -246,6 +262,10 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			}
 			flush(w)
 		}
+		loadMS := 0
+		if cold {
+			loadMS = durationMS(loadStart, clk.Now())
+		}
 		endRequest, err := r.beginInstanceRequest(ctx, inst)
 		if err != nil {
 			if started {
@@ -272,6 +292,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			}
 			return err
 		}
+		upstreamStart := clk.Now()
 		resp, err := r.doUpstream(ctx, inst, route)
 		if err != nil {
 			endRequest()
@@ -329,13 +350,18 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			w.WriteHeader(resp.StatusCode)
 			started = true
 		}
-		body, copyErr := copyAndFlush(w, resp.Body)
+		copied, copyErr := copyAndFlush(w, resp.Body, clk)
 		_ = resp.Body.Close()
 		endRequest()
 		if copyErr != nil {
 			return copyErr
 		}
-		r.recordMetric(ctx, job, inst, body)
+		r.recordMetric(ctx, job, inst, copied.Body, metricTiming{
+			Start:           upstreamStart,
+			FirstByte:       copied.FirstByte,
+			End:             copied.End,
+			LoadWallClockMS: loadMS,
+		})
 		if r.Sticky != nil {
 			r.Sticky.Put(req.ConversationKey, inst)
 		}
@@ -533,24 +559,51 @@ func (r *Router) reportFailure(ctx context.Context, instanceID string, err error
 	}
 }
 
-func (r *Router) recordMetric(ctx context.Context, job domain.Job, inst domain.ModelInstance, body []byte) {
+type metricTiming struct {
+	Start           time.Time
+	FirstByte       time.Time
+	End             time.Time
+	LoadWallClockMS int
+}
+
+func (r *Router) recordMetric(ctx context.Context, job domain.Job, inst domain.ModelInstance, body []byte, timing metricTiming) {
 	if r.Telemetry == nil {
 		return
 	}
 	prompt, completion := usageFromBody(body)
-	clk := r.Clock
-	if clk == nil {
-		clk = clock.System{}
-	}
+	clk := r.clock()
 	_ = r.Telemetry.Record(ctx, domain.RunMetric{
-		JobID:        job.ID,
-		InstanceID:   inst.ID,
-		NodeID:       inst.NodeID,
-		Project:      job.Project,
-		ContextUsed:  prompt + completion,
-		TokensPerSec: 0,
-		At:           clk.Now().UTC(),
+		JobID:           job.ID,
+		InstanceID:      inst.ID,
+		NodeID:          inst.NodeID,
+		Project:         job.Project,
+		ContextUsed:     prompt + completion,
+		TokensPerSec:    tokensPerSecond(completion, timing.FirstByte, timing.End),
+		TTFTms:          durationMS(timing.Start, timing.FirstByte),
+		LoadWallClockMS: timing.LoadWallClockMS,
+		At:              clk.Now().UTC(),
 	})
+}
+
+func (r *Router) clock() ports.Clock {
+	if r.Clock != nil {
+		return r.Clock
+	}
+	return clock.System{}
+}
+
+func tokensPerSecond(tokens int, start, end time.Time) float64 {
+	if tokens <= 0 || start.IsZero() || end.IsZero() || !end.After(start) {
+		return 0
+	}
+	return float64(tokens) / end.Sub(start).Seconds()
+}
+
+func durationMS(start, end time.Time) int {
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return 0
+	}
+	return int(end.Sub(start) / time.Millisecond)
 }
 
 func usageFromBody(body []byte) (int, int) {
@@ -608,24 +661,42 @@ func writeStreamError(w http.ResponseWriter, err error) {
 	flush(w)
 }
 
-func copyAndFlush(w http.ResponseWriter, r io.Reader) ([]byte, error) {
+type copyResult struct {
+	Body      []byte
+	FirstByte time.Time
+	End       time.Time
+}
+
+func copyAndFlush(w http.ResponseWriter, r io.Reader, clk ports.Clock) (copyResult, error) {
 	var body bytes.Buffer
+	result := copyResult{}
 	buf := make([]byte, 32*1024)
 	for {
 		n, readErr := r.Read(buf)
 		if n > 0 {
+			now := clk.Now()
+			if result.FirstByte.IsZero() {
+				result.FirstByte = now
+			}
+			result.End = now
 			chunk := buf[:n]
 			body.Write(chunk)
 			if _, err := w.Write(chunk); err != nil {
-				return body.Bytes(), err
+				result.Body = body.Bytes()
+				return result, err
 			}
 			flush(w)
 		}
 		if readErr == io.EOF {
-			return body.Bytes(), nil
+			if result.End.IsZero() {
+				result.End = clk.Now()
+			}
+			result.Body = body.Bytes()
+			return result, nil
 		}
 		if readErr != nil {
-			return body.Bytes(), readErr
+			result.Body = body.Bytes()
+			return result, readErr
 		}
 	}
 }
