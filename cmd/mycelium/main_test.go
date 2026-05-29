@@ -13,6 +13,7 @@ import (
 
 	"mycelium/internal/catalog"
 	"mycelium/internal/domain"
+	"mycelium/internal/estimate"
 	storesqlite "mycelium/internal/store/sqlite"
 )
 
@@ -260,6 +261,15 @@ func TestProjectMapIndexesByID(t *testing.T) {
 	projects := projectMap([]domain.Project{{ID: "proj-a", ContextCap: 4096}})
 	if projects["proj-a"].ContextCap != 4096 {
 		t.Fatalf("projects = %+v", projects)
+	}
+}
+
+func TestServerEstimatorUsesGGUFParserWhenConfigured(t *testing.T) {
+	if _, ok := serverEstimator(ServerConfig{}, nil).(*estimate.InMemoryEstimator); !ok {
+		t.Fatal("default estimator should use preset estimates")
+	}
+	if _, ok := serverEstimator(ServerConfig{GGUFParser: "gguf-parser"}, nil).(*estimate.GGUFEstimator); !ok {
+		t.Fatal("configured gguf parser should use GGUF estimator")
 	}
 }
 

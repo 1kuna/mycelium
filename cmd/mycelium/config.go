@@ -15,6 +15,7 @@ type ServerConfig struct {
 	CatalogDir     string               `json:"catalog_dir"`
 	JoinToken      string               `json:"join_token"`
 	NodeURLs       []string             `json:"node_urls"`
+	GGUFParser     string               `json:"gguf_parser"`
 	Projects       []domain.Project     `json:"projects"`
 	Presets        []domain.Preset      `json:"presets"`
 	Reservations   []domain.Reservation `json:"reservations"`
