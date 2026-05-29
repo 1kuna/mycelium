@@ -33,3 +33,6 @@
 - 2026-05-29: Scheduler runtime execution is a service around the existing placer; the placer remains pure decision logic while the service owns queue persistence, node load/unload calls, and lease grants.
 - 2026-05-29: Node startup uses the same SQLite store for process refs that llama.cpp launch/stop updates; macOS hardware discovery uses `sysctl hw.memsize`, while Linux discovery fails loudly until NVIDIA probing is implemented.
 - 2026-05-29: Gateway request controls are HTTP headers mapped into scheduler jobs; context overflow retry selects the next larger persisted preset for the same backend/model instead of inventing an ad hoc preset at request time.
+- 2026-05-29: Remote catalog import uses direct Hugging Face resolve URLs and the OCI distribution manifest/blob API; downloaded bytes still flow through the same materialize-then-register installer as local files.
+- 2026-05-29: Joined LAN nodes are reached through a per-node loopback HTTP proxy, keeping the gateway's node URL local while forwarding to the advertised node agent address.
+- 2026-05-29: Optimizer runtime recommendations are generated from stored telemetry rollups and persisted presets; project auto-apply controls background mutation, while `myce recommendations apply` is the explicit manual override.

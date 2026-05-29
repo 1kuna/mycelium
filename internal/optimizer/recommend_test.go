@@ -4,9 +4,12 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"mycelium/internal/domain"
+	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/test/fixtures"
+	"mycelium/test/mocks"
 )
 
 func TestRecommendContextCapChoosesSharedContextWithRationale(t *testing.T) {
@@ -85,6 +88,88 @@ func TestConsolidationCostRecommendsCollapse(t *testing.T) {
 	}
 	if !strings.Contains(got.Rationale, "reload_cost=140.00") {
 		t.Fatalf("rationale = %s", got.Rationale)
+	}
+}
+
+func TestTelemetryStatsProviderUsesStoredMetricsAndPresetContexts(t *testing.T) {
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	if err := store.SavePreset(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("small"), fixtures.WithContextLength(6000))); err != nil {
+		t.Fatalf("SavePreset small: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("large"), fixtures.WithContextLength(16000))); err != nil {
+		t.Fatalf("SavePreset large: %v", err)
+	}
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	for _, metric := range []domain.RunMetric{
+		{JobID: "job-a", Project: "project-a", ContextUsed: 3500, At: now},
+		{JobID: "job-b", Project: "project-a", ContextUsed: 4000, At: now.Add(time.Second)},
+	} {
+		if err := store.Record(context.Background(), metric); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	stats, err := (TelemetryStatsProvider{Telemetry: store, Presets: store, CurrentCap: 16000}).Stats(context.Background(), "project-a")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.AvgTokens != 3750 || stats.LifetimeMax != 4000 || len(stats.SharedContexts) != 2 || stats.SharedContexts[0] != 6000 {
+		t.Fatalf("stats = %+v", stats)
+	}
+}
+
+func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	project := domain.Project{ID: "project-a", ContextCap: 16000, AutoApply: true}
+	preset := fixtures.MakePreset(fixtures.WithPresetID("large"), fixtures.WithContextLength(16000))
+	if err := store.SaveProject(context.Background(), project); err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("small"), fixtures.WithContextLength(6000))); err != nil {
+		t.Fatalf("SavePreset small: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), preset); err != nil {
+		t.Fatalf("SavePreset large: %v", err)
+	}
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	for _, metric := range []domain.RunMetric{
+		{JobID: "job-a", Project: project.ID, ContextUsed: 3500, At: now},
+		{JobID: "job-b", Project: project.ID, ContextUsed: 4000, At: now.Add(time.Second)},
+	} {
+		if err := store.Record(context.Background(), metric); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	service := RecommendationService{
+		Store: store,
+		Clock: mocks.NewFakeClock(now),
+	}
+
+	records, err := service.EvaluateProject(context.Background(), project)
+	if err != nil {
+		t.Fatalf("EvaluateProject: %v", err)
+	}
+	if len(records) != 1 || !records[0].Applied || records[0].RecommendedValue != 6000 {
+		t.Fatalf("records = %+v", records)
+	}
+	appliedProject, err := store.Project(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	appliedPreset, err := store.Preset(context.Background(), preset.ID)
+	if err != nil {
+		t.Fatalf("Preset: %v", err)
+	}
+	if appliedProject.ContextCap != 6000 || appliedPreset.ContextLength != 6000 {
+		t.Fatalf("project=%+v preset=%+v", appliedProject, appliedPreset)
 	}
 }
 
