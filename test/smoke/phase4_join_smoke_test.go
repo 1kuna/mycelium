@@ -190,21 +190,23 @@ func writePhase4GatewayPeerConfig(t *testing.T, addr, discoveryListen, discovery
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "gateway-peer.json")
 	cfg := struct {
-		Listen          string           `json:"listen"`
-		StorePath       string           `json:"store_path"`
-		JoinToken       string           `json:"join_token"`
-		DiscoveryListen string           `json:"discovery_listen"`
-		DiscoveryAddr   string           `json:"discovery_addr"`
-		DefaultProject  string           `json:"default_project"`
-		Projects        []domain.Project `json:"projects"`
-		Presets         []domain.Preset  `json:"presets"`
+		Listen               string           `json:"listen"`
+		StorePath            string           `json:"store_path"`
+		JoinToken            string           `json:"join_token"`
+		DiscoveryListen      string           `json:"discovery_listen"`
+		DiscoveryAddr        string           `json:"discovery_addr"`
+		DiscoveryAdvertiseMS int              `json:"discovery_advertise_ms"`
+		DefaultProject       string           `json:"default_project"`
+		Projects             []domain.Project `json:"projects"`
+		Presets              []domain.Preset  `json:"presets"`
 	}{
-		Listen:          addr,
-		StorePath:       filepath.Join(t.TempDir(), "control.sqlite"),
-		JoinToken:       joinToken,
-		DiscoveryListen: discoveryListen,
-		DiscoveryAddr:   discoveryAddr,
-		DefaultProject:  "phase4",
+		Listen:               addr,
+		StorePath:            filepath.Join(t.TempDir(), "control.sqlite"),
+		JoinToken:            joinToken,
+		DiscoveryListen:      discoveryListen,
+		DiscoveryAddr:        discoveryAddr,
+		DiscoveryAdvertiseMS: 50,
+		DefaultProject:       "phase4",
 		Projects: []domain.Project{{
 			ID:         "phase4",
 			Priority:   domain.PriorityInteractive,
@@ -235,13 +237,14 @@ func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, discoveryList
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "compute-peer.json")
 	cfg := struct {
-		Listen          string `json:"listen"`
-		StorePath       string `json:"store_path"`
-		Compute         bool   `json:"compute"`
-		JoinToken       string `json:"join_token"`
-		DiscoveryListen string `json:"discovery_listen"`
-		DiscoveryAddr   string `json:"discovery_addr"`
-		ComputeConfig   struct {
+		Listen               string `json:"listen"`
+		StorePath            string `json:"store_path"`
+		Compute              bool   `json:"compute"`
+		JoinToken            string `json:"join_token"`
+		DiscoveryListen      string `json:"discovery_listen"`
+		DiscoveryAddr        string `json:"discovery_addr"`
+		DiscoveryAdvertiseMS int    `json:"discovery_advertise_ms"`
+		ComputeConfig        struct {
 			ID            string `json:"id"`
 			Name          string `json:"name"`
 			BackendListen string `json:"backend_listen"`
@@ -250,12 +253,13 @@ func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, discoveryList
 		} `json:"compute_config"`
 		Presets []domain.Preset `json:"presets"`
 	}{
-		Listen:          addr,
-		StorePath:       filepath.Join(t.TempDir(), "compute.sqlite"),
-		Compute:         true,
-		JoinToken:       joinToken,
-		DiscoveryListen: discoveryListen,
-		DiscoveryAddr:   discoveryAddr,
+		Listen:               addr,
+		StorePath:            filepath.Join(t.TempDir(), "compute.sqlite"),
+		Compute:              true,
+		JoinToken:            joinToken,
+		DiscoveryListen:      discoveryListen,
+		DiscoveryAddr:        discoveryAddr,
+		DiscoveryAdvertiseMS: 50,
 		Presets: []domain.Preset{{
 			ID:            "phase4-model",
 			ModelRef:      model,

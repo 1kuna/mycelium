@@ -202,7 +202,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	jobLog := peercoord.NewJobLog()
 	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
 	if discovery != nil {
-		startPeerAdvertiser(ctx, discovery, self, clock.System{}, peercoord.DefaultHeartbeatInterval)
+		startPeerAdvertiser(ctx, discovery, self, clock.System{}, time.Duration(cfg.DiscoveryAdvertiseMS)*time.Millisecond)
 	}
 	coordinator := peercoord.NewCoordinator(self, jobLog, store, placer, fleet, admissionResolver(nodes), clock.System{})
 	runtime := &scheduler.Service{

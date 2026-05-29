@@ -139,7 +139,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPeerConfig: %v", err)
 	}
-	if peerCfg.QueueDrainMS != 1000 || peerCfg.QueueDrainLimit != 1 || peerCfg.OptimizerEvalMS != 60000 || peerCfg.DiscoveryScanMS != 250 {
+	if peerCfg.QueueDrainMS != 1000 || peerCfg.QueueDrainLimit != 1 || peerCfg.OptimizerEvalMS != 60000 || peerCfg.DiscoveryScanMS != 250 || peerCfg.DiscoveryAdvertiseMS != 5000 {
 		t.Fatalf("peer drain defaults = %+v", peerCfg)
 	}
 	if peerCfg.ComputeConfig.ID != "peer_local" || peerCfg.ComputeConfig.BackendListen != "127.0.0.1:51848" {
