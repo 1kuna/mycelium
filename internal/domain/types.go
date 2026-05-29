@@ -117,6 +117,8 @@ type RunMetric struct {
 	JobID           string    `json:"job_id"`
 	InstanceID      string    `json:"instance_id"`
 	NodeID          string    `json:"node_id"`
+	PresetID        string    `json:"preset_id,omitempty"`
+	Backend         Backend   `json:"backend,omitempty"`
 	Project         string    `json:"project"`
 	TokensPerSec    float64   `json:"tokens_per_sec"`
 	TTFTms          int       `json:"ttft_ms"`
@@ -156,16 +158,19 @@ type Project struct {
 }
 
 type RecommendationRecord struct {
-	ID               string    `json:"id"`
-	Type             string    `json:"type"`
-	ProjectID        string    `json:"project_id"`
-	PresetID         string    `json:"preset_id,omitempty"`
-	CurrentValue     int       `json:"current_value,omitempty"`
-	RecommendedValue int       `json:"recommended_value,omitempty"`
-	Rationale        string    `json:"rationale"`
-	Applied          bool      `json:"applied"`
-	CreatedAt        time.Time `json:"created_at"`
-	AppliedAt        time.Time `json:"applied_at,omitempty"`
+	ID                  string             `json:"id"`
+	Type                string             `json:"type"`
+	ProjectID           string             `json:"project_id"`
+	PresetID            string             `json:"preset_id,omitempty"`
+	CurrentValue        int                `json:"current_value,omitempty"`
+	RecommendedValue    int                `json:"recommended_value,omitempty"`
+	RecommendedPresetID string             `json:"recommended_preset_id,omitempty"`
+	RecommendedBackend  Backend            `json:"recommended_backend,omitempty"`
+	Observed            map[string]float64 `json:"observed,omitempty"`
+	Rationale           string             `json:"rationale"`
+	Applied             bool               `json:"applied"`
+	CreatedAt           time.Time          `json:"created_at"`
+	AppliedAt           time.Time          `json:"applied_at,omitempty"`
 }
 
 type ProcessRef struct {

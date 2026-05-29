@@ -38,6 +38,8 @@ type Result struct {
 	TTFTms        int     `json:"ttft_ms"`
 	ContextTokens int     `json:"context_tokens"`
 	DurationMS    int     `json:"duration_ms"`
+	UserPick      *bool   `json:"user_pick,omitempty"`
+	Notes         string  `json:"notes,omitempty"`
 	Error         string  `json:"error,omitempty"`
 }
 

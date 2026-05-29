@@ -149,14 +149,14 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	}
 
 	at := time.Unix(10, 0).UTC()
-	must(t, store.Record(ctx, domain.RunMetric{JobID: "m1", InstanceID: "i", NodeID: "n", Project: "p1", ContextUsed: 10, At: at}))
-	must(t, store.Record(ctx, domain.RunMetric{JobID: "m2", InstanceID: "i", NodeID: "n", Project: "p2", ContextUsed: 20, At: at.Add(time.Second)}))
+	must(t, store.Record(ctx, domain.RunMetric{JobID: "m1", InstanceID: "i", NodeID: "n", PresetID: "preset-a", Backend: domain.BackendLlamaCpp, Project: "p1", ContextUsed: 10, At: at}))
+	must(t, store.Record(ctx, domain.RunMetric{JobID: "m2", InstanceID: "i", NodeID: "n", PresetID: "preset-b", Backend: domain.BackendMLX, Project: "p2", ContextUsed: 20, At: at.Add(time.Second)}))
 	all, err := store.Metrics(ctx, "")
 	if err != nil || len(all) != 2 {
 		t.Fatalf("Metrics all len = %d, %v", len(all), err)
 	}
 	filtered, err := store.Metrics(ctx, "p2")
-	if err != nil || len(filtered) != 1 || filtered[0].JobID != "m2" {
+	if err != nil || len(filtered) != 1 || filtered[0].JobID != "m2" || filtered[0].PresetID != "preset-b" || filtered[0].Backend != domain.BackendMLX {
 		t.Fatalf("Metrics filtered = %+v, %v", filtered, err)
 	}
 	rec := domain.RecommendationRecord{ID: "rec-a", ProjectID: "p2", Type: "context", RecommendedValue: 30, CreatedAt: time.Unix(11, 0).UTC()}

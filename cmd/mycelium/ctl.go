@@ -213,7 +213,7 @@ func runRecommendationsGenerate(ctx context.Context, args []string) error {
 		return err
 	}
 	for _, rec := range records {
-		fmt.Printf("%s\t%s\t%s\t%d\t%t\n", rec.ID, rec.ProjectID, rec.Type, rec.RecommendedValue, rec.Applied)
+		fmt.Printf("%s\t%s\t%s\t%s\t%t\n", rec.ID, rec.ProjectID, rec.Type, recommendationTarget(rec), rec.Applied)
 	}
 	return nil
 }
@@ -235,7 +235,7 @@ func runRecommendationsList(ctx context.Context, args []string) error {
 		return err
 	}
 	for _, rec := range recs {
-		fmt.Printf("%s\t%s\t%s\t%d\t%t\n", rec.ID, rec.ProjectID, rec.Type, rec.RecommendedValue, rec.Applied)
+		fmt.Printf("%s\t%s\t%s\t%s\t%t\n", rec.ID, rec.ProjectID, rec.Type, recommendationTarget(rec), rec.Applied)
 	}
 	return nil
 }
@@ -259,7 +259,8 @@ func runRecommendationsApply(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if rec.Type == optimizer.RecommendationContextCap {
+	switch rec.Type {
+	case optimizer.RecommendationContextCap:
 		project, err := store.Project(ctx, rec.ProjectID)
 		if err != nil {
 			return err
@@ -290,12 +291,26 @@ func runRecommendationsApply(ctx context.Context, args []string) error {
 		if err := store.SavePreset(ctx, applied.Preset); err != nil {
 			return err
 		}
+	case optimizer.RecommendationEngineParameter:
+		return fmt.Errorf("engine recommendations are advisory; select preset %q explicitly to apply", rec.RecommendedPresetID)
+	default:
+		return fmt.Errorf("unknown recommendation type %q", rec.Type)
 	}
 	if err := store.MarkRecommendationApplied(ctx, *id, clock.System{}.Now().UTC()); err != nil {
 		return err
 	}
 	fmt.Printf("recommendation\t%s\tapplied\n", *id)
 	return nil
+}
+
+func recommendationTarget(rec domain.RecommendationRecord) string {
+	if rec.RecommendedPresetID != "" {
+		return rec.RecommendedPresetID
+	}
+	if rec.RecommendedValue != 0 {
+		return fmt.Sprint(rec.RecommendedValue)
+	}
+	return "-"
 }
 
 func runRecommendationsCalibrateSpeed(ctx context.Context, args []string) error {

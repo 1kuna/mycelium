@@ -271,12 +271,14 @@ func (s *Store) Record(ctx context.Context, m domain.RunMetric) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO run_metrics (
-	job_id, instance_id, node_id, project, tokens_per_sec, ttft_ms,
+	job_id, instance_id, node_id, preset_id, backend, project, tokens_per_sec, ttft_ms,
 	load_wall_clock_ms, peak_vram_mb, context_used, at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(job_id) DO UPDATE SET
 	instance_id = excluded.instance_id,
 	node_id = excluded.node_id,
+	preset_id = excluded.preset_id,
+	backend = excluded.backend,
 	project = excluded.project,
 	tokens_per_sec = excluded.tokens_per_sec,
 	ttft_ms = excluded.ttft_ms,
@@ -287,6 +289,8 @@ ON CONFLICT(job_id) DO UPDATE SET
 		m.JobID,
 		m.InstanceID,
 		m.NodeID,
+		m.PresetID,
+		string(m.Backend),
 		m.Project,
 		m.TokensPerSec,
 		m.TTFTms,
@@ -300,7 +304,7 @@ ON CONFLICT(job_id) DO UPDATE SET
 
 func (s *Store) Metrics(ctx context.Context, project string) ([]domain.RunMetric, error) {
 	query := `
-SELECT job_id, instance_id, node_id, project, tokens_per_sec, ttft_ms,
+SELECT job_id, instance_id, node_id, preset_id, backend, project, tokens_per_sec, ttft_ms,
 	load_wall_clock_ms, peak_vram_mb, context_used, at
 FROM run_metrics`
 	args := []any{}
@@ -319,11 +323,14 @@ FROM run_metrics`
 	var out []domain.RunMetric
 	for rows.Next() {
 		var metric domain.RunMetric
+		var backend string
 		var at string
 		if err := rows.Scan(
 			&metric.JobID,
 			&metric.InstanceID,
 			&metric.NodeID,
+			&metric.PresetID,
+			&backend,
 			&metric.Project,
 			&metric.TokensPerSec,
 			&metric.TTFTms,
@@ -334,6 +341,7 @@ FROM run_metrics`
 		); err != nil {
 			return nil, err
 		}
+		metric.Backend = domain.Backend(backend)
 		parsed, err := time.Parse(time.RFC3339Nano, at)
 		if err != nil {
 			return nil, err
@@ -435,6 +443,8 @@ CREATE TABLE IF NOT EXISTS run_metrics (
 	job_id TEXT PRIMARY KEY,
 	instance_id TEXT NOT NULL,
 	node_id TEXT NOT NULL,
+	preset_id TEXT NOT NULL DEFAULT '',
+	backend TEXT NOT NULL DEFAULT '',
 	project TEXT NOT NULL,
 	tokens_per_sec REAL NOT NULL,
 	ttft_ms INTEGER NOT NULL,
@@ -444,6 +454,37 @@ CREATE TABLE IF NOT EXISTS run_metrics (
 	at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_run_metrics_project_at ON run_metrics(project, at);`)
+	if err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "run_metrics", "preset_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	return ensureColumn(ctx, s.db, "run_metrics", "backend", "TEXT NOT NULL DEFAULT ''")
+}
+
+func ensureColumn(ctx context.Context, db *sql.DB, table, column, spec string) error {
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, spec))
 	return err
 }
 

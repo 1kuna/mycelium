@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +38,7 @@ func TestSQLiteStoreRecordsAndFiltersMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Metrics filtered: %v", err)
 	}
-	if len(filtered) != 1 || filtered[0].JobID != "job2" {
+	if len(filtered) != 1 || filtered[0].JobID != "job2" || filtered[0].PresetID != "preset-job2" || filtered[0].Backend != domain.BackendLlamaCpp {
 		t.Fatalf("filtered metrics = %+v", filtered)
 	}
 }
@@ -50,6 +52,67 @@ func TestSQLiteStoreFailsLoudOnBadMetric(t *testing.T) {
 	}
 	if err := store.Record(context.Background(), domain.RunMetric{JobID: "job"}); err == nil || !strings.Contains(err.Error(), "timestamp") {
 		t.Fatalf("missing timestamp err = %v", err)
+	}
+}
+
+func TestNewSQLiteStoreFailsOnDirectoryPath(t *testing.T) {
+	if _, err := NewSQLiteStore(t.TempDir()); err == nil {
+		t.Fatal("expected directory path error")
+	}
+}
+
+func TestSQLiteStoreMigratesOldRunMetricSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "telemetry.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE run_metrics (
+	job_id TEXT PRIMARY KEY,
+	instance_id TEXT NOT NULL,
+	node_id TEXT NOT NULL,
+	project TEXT NOT NULL,
+	tokens_per_sec REAL NOT NULL,
+	ttft_ms INTEGER NOT NULL,
+	load_wall_clock_ms INTEGER NOT NULL,
+	peak_vram_mb INTEGER NOT NULL,
+	context_used INTEGER NOT NULL,
+	at TEXT NOT NULL
+)`)
+	if err != nil {
+		t.Fatalf("create old schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw sqlite: %v", err)
+	}
+
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+	metric := metric("job-old", "project-a", 1234, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	if err := store.Record(context.Background(), metric); err != nil {
+		t.Fatalf("Record migrated metric: %v", err)
+	}
+	got, err := store.Metrics(context.Background(), "project-a")
+	if err != nil {
+		t.Fatalf("Metrics: %v", err)
+	}
+	if len(got) != 1 || got[0].PresetID != metric.PresetID || got[0].Backend != metric.Backend {
+		t.Fatalf("migrated metrics = %+v", got)
+	}
+}
+
+func TestEnsureColumnFailsForMissingTable(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	if err := ensureColumn(context.Background(), db, "missing", "new_col", "TEXT"); err == nil {
+		t.Fatal("expected missing table error")
 	}
 }
 
@@ -101,6 +164,8 @@ func metric(jobID, project string, contextUsed int, at time.Time) domain.RunMetr
 		JobID:           jobID,
 		InstanceID:      "inst",
 		NodeID:          "node",
+		PresetID:        "preset-" + jobID,
+		Backend:         domain.BackendLlamaCpp,
 		Project:         project,
 		TokensPerSec:    12.5,
 		TTFTms:          34,

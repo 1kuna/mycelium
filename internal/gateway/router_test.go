@@ -53,7 +53,7 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	if !strings.Contains(string(resp.Body), "hello") {
 		t.Fatalf("body = %s", resp.Body)
 	}
-	if len(sink.Metrics) != 1 || sink.Metrics[0].Project != "proj-a" || sink.Metrics[0].ContextUsed != 4 {
+	if len(sink.Metrics) != 1 || sink.Metrics[0].Project != "proj-a" || sink.Metrics[0].ContextUsed != 4 || sink.Metrics[0].PresetID != inst.PresetID || sink.Metrics[0].Backend != domain.BackendLlamaCpp {
 		t.Fatalf("metrics = %+v", sink.Metrics)
 	}
 	if want := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC); !sink.Metrics[0].At.Equal(want) {

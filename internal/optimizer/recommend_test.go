@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"mycelium/internal/bench"
 	"mycelium/internal/domain"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/test/fixtures"
@@ -173,6 +174,45 @@ func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
 	}
 }
 
+func TestRecommendationServicePersistsEngineRecommendation(t *testing.T) {
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	project := domain.Project{ID: "project-a"}
+	slow := fixtures.MakePreset(fixtures.WithPresetID("slow"))
+	fast := fixtures.MakePreset(fixtures.WithPresetID("fast"))
+	fast.Backend = domain.BackendMLX
+	mustOptimizer(t, store.SaveProject(context.Background(), project))
+	mustOptimizer(t, store.SavePreset(context.Background(), slow))
+	mustOptimizer(t, store.SavePreset(context.Background(), fast))
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	for _, metric := range []domain.RunMetric{
+		{JobID: "slow-a", Project: project.ID, PresetID: slow.ID, Backend: slow.Backend, TokensPerSec: 10, At: now},
+		{JobID: "slow-b", Project: project.ID, PresetID: slow.ID, Backend: slow.Backend, TokensPerSec: 10, At: now.Add(time.Second)},
+		{JobID: "fast-a", Project: project.ID, PresetID: fast.ID, Backend: fast.Backend, TokensPerSec: 20, At: now.Add(2 * time.Second)},
+		{JobID: "fast-b", Project: project.ID, PresetID: fast.ID, Backend: fast.Backend, TokensPerSec: 20, At: now.Add(3 * time.Second)},
+	} {
+		mustOptimizer(t, store.Record(context.Background(), metric))
+	}
+
+	records, err := (RecommendationService{Store: store, Clock: mocks.NewFakeClock(now)}).EvaluateProject(context.Background(), project)
+	if err != nil {
+		t.Fatalf("EvaluateProject: %v", err)
+	}
+	if len(records) != 1 || records[0].Type != RecommendationEngineParameter || records[0].RecommendedPresetID != fast.ID || records[0].Applied {
+		t.Fatalf("records = %+v", records)
+	}
+	stored, err := store.Recommendation(context.Background(), records[0].ID)
+	if err != nil {
+		t.Fatalf("Recommendation: %v", err)
+	}
+	if stored.RecommendedBackend != domain.BackendMLX || stored.Observed["best_tokens_per_sec"] != 20 {
+		t.Fatalf("stored = %+v", stored)
+	}
+}
+
 func TestCalibrateSpeedClassesFromTelemetry(t *testing.T) {
 	store, err := storesqlite.Open(":memory:")
 	if err != nil {
@@ -208,6 +248,58 @@ func TestCalibrateSpeedClassesFromTelemetry(t *testing.T) {
 	}
 	if persisted.SpeedClass.TokensPerSecRef != 15 || !persisted.SpeedClass.ProbedAt.Equal(now) {
 		t.Fatalf("persisted = %+v", persisted.SpeedClass)
+	}
+}
+
+func TestRecommendEnginePresetFromTelemetry(t *testing.T) {
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	project := domain.Project{ID: "project-a"}
+	slow := fixtures.MakePreset(fixtures.WithPresetID("llama-cpp"), fixtures.WithLaunchProfile("llamacpp-metal"))
+	fast := fixtures.MakePreset(fixtures.WithPresetID("mlx"), fixtures.WithLaunchProfile("mlx"), fixtures.WithLaunchArgs("--draft", "2"))
+	fast.Backend = domain.BackendMLX
+	metrics := []domain.RunMetric{
+		{JobID: "a", Project: project.ID, PresetID: slow.ID, Backend: slow.Backend, TokensPerSec: 10, TTFTms: 100, LoadWallClockMS: 1000, At: now},
+		{JobID: "b", Project: project.ID, PresetID: slow.ID, Backend: slow.Backend, TokensPerSec: 11, TTFTms: 90, LoadWallClockMS: 900, At: now.Add(time.Second)},
+		{JobID: "c", Project: project.ID, PresetID: fast.ID, Backend: fast.Backend, TokensPerSec: 20, TTFTms: 80, LoadWallClockMS: 600, At: now.Add(2 * time.Second)},
+		{JobID: "d", Project: project.ID, PresetID: fast.ID, Backend: fast.Backend, TokensPerSec: 22, TTFTms: 70, LoadWallClockMS: 500, At: now.Add(3 * time.Second)},
+		{JobID: "other", Project: "other", PresetID: fast.ID, TokensPerSec: 100, At: now.Add(4 * time.Second)},
+	}
+
+	rec, ok := RecommendEnginePreset(project, []domain.Preset{slow, fast}, metrics, now, EnginePresetPolicy{})
+	if !ok {
+		t.Fatal("expected engine recommendation")
+	}
+	if rec.Type != RecommendationEngineParameter || rec.RecommendedPresetID != fast.ID || rec.RecommendedBackend != domain.BackendMLX {
+		t.Fatalf("rec = %+v", rec)
+	}
+	if rec.Observed["best_tokens_per_sec"] != 21 || rec.Observed["runner_up_tokens_per_sec"] != 10.5 || !strings.Contains(rec.Rationale, "launch_profile=mlx") {
+		t.Fatalf("rec = %+v", rec)
+	}
+
+	_, ok = RecommendEnginePreset(project, []domain.Preset{slow, fast}, metrics[:3], now, EnginePresetPolicy{})
+	if ok {
+		t.Fatal("single fast sample should not recommend")
+	}
+}
+
+func TestRecommendBenchPickUsesOnlyUserJudgment(t *testing.T) {
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	picked := true
+	project := domain.Project{ID: "project-a"}
+	preset := fixtures.MakePreset(fixtures.WithPresetID("qwen9b"), fixtures.WithModelRef("qwen2.5-9b"))
+	results := []bench.Result{{Model: "qwen2.5-9b", TokensPerSec: 44, TTFTms: 12, UserPick: &picked}}
+
+	rec, ok, err := RecommendBenchPick(project, []domain.Preset{preset}, results, now)
+	if err != nil {
+		t.Fatalf("RecommendBenchPick: %v", err)
+	}
+	if !ok || rec.RecommendedPresetID != preset.ID || rec.Observed["best_tokens_per_sec"] != 44 || !strings.Contains(rec.Rationale, "user picked") {
+		t.Fatalf("rec = %+v ok=%v", rec, ok)
+	}
+
+	results = append(results, bench.Result{Model: preset.ID, UserPick: &picked})
+	if _, _, err := RecommendBenchPick(project, []domain.Preset{preset}, results, now); err == nil {
+		t.Fatal("multiple picks should fail loudly")
 	}
 }
 

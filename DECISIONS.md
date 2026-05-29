@@ -53,3 +53,4 @@
 - 2026-05-29: Gateway telemetry derives load wall-clock, TTFT, and tokens/sec from the injected clock around real placement/upstream streaming boundaries; peak memory remains zero unless a backend supplies it rather than being guessed.
 - 2026-05-29: Covergate enforces the 85% per-package floor for product packages under `internal/` and `pkg/`; command harnesses and test/tool packages stay outside that floor while hard 100% bars remain explicit requirements.
 - 2026-05-29: Conformance-suite coverage is measured on the behavioral suite package itself; fatal assertion mechanics live in a tiny helper package so the required suite code can stay 100% covered without fake failing implementations.
+- 2026-05-29: Engine/parameter recommendations are advisory records built from measured preset/backend telemetry or explicit benchmark user picks; Mycelium records objective facts and refuses to auto-apply them until routing has an explicit project opt-in surface.

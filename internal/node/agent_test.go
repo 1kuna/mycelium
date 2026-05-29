@@ -303,7 +303,7 @@ func TestRecordRunEmitsTelemetryWithNodeAndClock(t *testing.T) {
 		t.Fatalf("metrics = %+v", sink.Metrics)
 	}
 	got := sink.Metrics[0]
-	if got.NodeID != "node_test" || got.At != clock.Now() {
+	if got.NodeID != "node_test" || got.PresetID != inst.PresetID || got.At != clock.Now() {
 		t.Fatalf("metric = %+v", got)
 	}
 }
