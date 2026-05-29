@@ -21,7 +21,6 @@ type PeerConfig struct {
 	DiscoveryAddr        string               `json:"discovery_addr"`
 	DiscoveryScanMS      int                  `json:"discovery_scan_ms"`
 	DiscoveryAdvertiseMS int                  `json:"discovery_advertise_ms"`
-	NodeURLs             []string             `json:"node_urls"`
 	GGUFParser           string               `json:"gguf_parser"`
 	Projects             []domain.Project     `json:"projects"`
 	Presets              []domain.Preset      `json:"presets"`

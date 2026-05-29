@@ -17,7 +17,6 @@ import (
 	"mycelium/internal/gateway"
 	"mycelium/internal/lease"
 	"mycelium/internal/membership"
-	nodeagent "mycelium/internal/node"
 	"mycelium/internal/optimizer"
 	peercoord "mycelium/internal/peer"
 	"mycelium/internal/ports"
@@ -148,22 +147,6 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		}
 		mountNodeHTTP(mux, local.handler)
 	}
-	for _, nodeURL := range cfg.NodeURLs {
-		client := nodeagent.NewHTTPClient(nodeURL)
-		snap, err := client.Snapshot(ctx)
-		if err != nil {
-			return "", nil, fmt.Errorf("snapshot node %s: %w", nodeURL, err)
-		}
-		if err := store.SaveNode(ctx, snap.Node); err != nil {
-			return "", nil, err
-		}
-		for _, inst := range snap.Instances {
-			if err := store.SaveInstance(ctx, inst); err != nil {
-				return "", nil, err
-			}
-		}
-		agents[snap.Node.ID] = client
-	}
 	if len(agents) > 0 {
 		directory := gateway.NodeDirectory{Agents: agents}
 		if fleet == nil {
@@ -175,7 +158,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		}
 	}
 	if fleet == nil || nodes == nil {
-		return "", nil, fmt.Errorf("peer config must enable compute or provide join_token/node_urls")
+		return "", nil, fmt.Errorf("peer config must enable compute or provide join_token")
 	}
 	presets, err := store.ListPresets(ctx)
 	if err != nil {
