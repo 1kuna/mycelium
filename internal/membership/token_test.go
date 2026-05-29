@@ -1,6 +1,12 @@
 package membership
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"mycelium/internal/domain"
+)
 
 func TestTokenManagerValidateRotateRevoke(t *testing.T) {
 	manager, err := NewTokenManager("one")
@@ -44,4 +50,73 @@ func TestTokenManagerRejectsEmptyTokenOperations(t *testing.T) {
 	if err := manager.Revoke(""); err == nil {
 		t.Fatal("empty revoke accepted")
 	}
+}
+
+func TestPersistentTokenManagerLoadsRotatesAndRevokes(t *testing.T) {
+	ctx := context.Background()
+	store := &tokenStore{}
+	manager, err := NewPersistentTokenManager(ctx, "one", store)
+	if err != nil {
+		t.Fatalf("NewPersistentTokenManager: %v", err)
+	}
+	if len(store.records) != 1 {
+		t.Fatalf("records after seed = %+v", store.records)
+	}
+	if err := manager.Rotate("two"); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	if err := manager.Revoke("one"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	reopened, err := NewPersistentTokenManager(ctx, "one", store)
+	if err != nil {
+		t.Fatalf("reopen persistent manager: %v", err)
+	}
+	if err := reopened.Validate("one"); err == nil {
+		t.Fatal("revoked token validated after reopen")
+	}
+	if err := reopened.Validate("two"); err != nil {
+		t.Fatalf("rotated token did not persist: %v", err)
+	}
+}
+
+func TestPersistentTokenManagerErrors(t *testing.T) {
+	if _, err := NewPersistentTokenManager(context.Background(), "", &tokenStore{}); err == nil {
+		t.Fatal("empty persistent initial token accepted")
+	}
+	if _, err := NewPersistentTokenManager(context.Background(), "one", &tokenStore{listErr: errors.New("list")}); err == nil {
+		t.Fatal("expected list error")
+	}
+	if _, err := NewPersistentTokenManager(context.Background(), "one", &tokenStore{saveErr: errors.New("save")}); err == nil {
+		t.Fatal("expected save error")
+	}
+}
+
+type tokenStore struct {
+	records map[string]domain.JoinTokenRecord
+	listErr error
+	saveErr error
+}
+
+func (s *tokenStore) SaveJoinToken(_ context.Context, token domain.JoinTokenRecord) error {
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	if s.records == nil {
+		s.records = map[string]domain.JoinTokenRecord{}
+	}
+	s.records[token.Hash] = token
+	return nil
+}
+
+func (s *tokenStore) ListJoinTokens(context.Context) ([]domain.JoinTokenRecord, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	out := make([]domain.JoinTokenRecord, 0, len(s.records))
+	for _, record := range s.records {
+		out = append(out, record)
+	}
+	return out, nil
 }

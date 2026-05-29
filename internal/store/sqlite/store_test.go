@@ -29,6 +29,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
 	rec := domain.RecommendationRecord{ID: "rec-a", Type: "context_cap_recommendation", ProjectID: project.ID, RecommendedValue: 4096, CreatedAt: time.Unix(2, 0).UTC()}
 	refs := []domain.ProcessRef{{PID: 12, Kind: "process", Ref: "12"}}
+	token := domain.JoinTokenRecord{Hash: "hash-a", Active: true, Current: true}
 
 	must(t, store.SaveProject(ctx, project))
 	must(t, store.SavePreset(ctx, preset))
@@ -39,6 +40,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	must(t, store.SaveJob(ctx, job))
 	must(t, store.SaveRecommendation(ctx, rec))
 	must(t, store.SaveProcessRefs(ctx, node.ID, refs))
+	must(t, store.SaveJoinToken(ctx, token))
 	must(t, store.Close())
 
 	reopened, err := Open(path)
@@ -62,6 +64,9 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	}
 	if gotRefs, err := reopened.ProcessRefs(ctx, node.ID); err != nil || len(gotRefs) != 1 || gotRefs[0].PID != 12 {
 		t.Fatalf("ProcessRefs = %+v, %v", gotRefs, err)
+	}
+	if gotTokens, err := reopened.ListJoinTokens(ctx); err != nil || len(gotTokens) != 1 || gotTokens[0].Hash != token.Hash || !gotTokens[0].Current {
+		t.Fatalf("JoinTokens = %+v, %v", gotTokens, err)
 	}
 
 	if projects, err := reopened.ListProjects(ctx); err != nil || len(projects) != 1 {
@@ -121,6 +126,7 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 		"job":            store.SaveJob(ctx, domain.Job{}),
 		"recommendation": store.SaveRecommendation(ctx, domain.RecommendationRecord{}),
 		"process refs":   store.SaveProcessRefs(ctx, "", nil),
+		"join token":     store.SaveJoinToken(ctx, domain.JoinTokenRecord{}),
 	} {
 		if err == nil {
 			t.Fatalf("%s save expected id error", name)

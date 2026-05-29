@@ -249,6 +249,19 @@ func (s *Store) DeleteProcessRefs(ctx context.Context, nodeID string) error {
 	return s.deleteColumn(ctx, "process_refs", "node_id", nodeID)
 }
 
+func (s *Store) SaveJoinToken(ctx context.Context, token domain.JoinTokenRecord) error {
+	if token.Hash == "" {
+		return fmt.Errorf("join token hash is required")
+	}
+	return s.upsertJSON(ctx, "join_tokens", token.Hash, token)
+}
+
+func (s *Store) ListJoinTokens(ctx context.Context) ([]domain.JoinTokenRecord, error) {
+	var tokens []domain.JoinTokenRecord
+	err := s.listJSON(ctx, "join_tokens", &tokens)
+	return tokens, err
+}
+
 func (s *Store) Record(ctx context.Context, m domain.RunMetric) error {
 	if m.JobID == "" {
 		return fmt.Errorf("run metric missing job id")
@@ -416,6 +429,7 @@ CREATE TABLE IF NOT EXISTS reservations (id TEXT PRIMARY KEY, data TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS recommendations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS process_refs (node_id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS join_tokens (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS run_metrics (
 	job_id TEXT PRIMARY KEY,

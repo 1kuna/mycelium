@@ -72,7 +72,7 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 	var nodes gateway.NodeResolver
 	var mux *http.ServeMux
 	if cfg.JoinToken != "" {
-		tokens, err := membership.NewTokenManager(cfg.JoinToken)
+		tokens, err := membership.NewPersistentTokenManager(ctx, cfg.JoinToken, store)
 		if err != nil {
 			return "", nil, err
 		}
