@@ -3,10 +3,13 @@
 package smoke
 
 import (
-	"net"
+	"context"
 	"os"
 	"testing"
-	"time"
+
+	"mycelium/internal/domain"
+	nodeagent "mycelium/internal/node"
+	"mycelium/test/fixtures"
 )
 
 func TestFleetMacMiniSmokeRequiresAddress(t *testing.T) {
@@ -14,10 +17,29 @@ func TestFleetMacMiniSmokeRequiresAddress(t *testing.T) {
 	if addr == "" {
 		t.Skip("set MYCELIUM_REMOTE_PEER_ADDR for Phase 1 fleet smoke")
 	}
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	client := nodeagent.NewHTTPClient("http://" + addr)
+	snap, err := client.Snapshot(context.Background())
 	if err != nil {
-		t.Fatalf("second peer address %s is not reachable: %v", addr, err)
+		t.Fatalf("second peer node agent %s is not reachable: %v", addr, err)
 	}
-	_ = conn.Close()
-	t.Fatalf("second peer is reachable, but the Phase 1 remote-node run harness still needs to be completed")
+	if snap.Node.Status != domain.NodeReady {
+		t.Fatalf("second peer node is not ready: %+v", snap.Node)
+	}
+
+	model := os.Getenv("MYCELIUM_REMOTE_PEER_MODEL")
+	if model == "" {
+		t.Skip("set MYCELIUM_REMOTE_PEER_MODEL to run a remote load/unload smoke")
+	}
+	inst, err := client.Load(context.Background(), fixtures.MakePreset(
+		fixtures.WithModelRef(model),
+		fixtures.WithPresetNode(snap.Node.ID),
+		fixtures.WithWeights(1),
+		fixtures.WithKVPerToken(0.01),
+	))
+	if err != nil {
+		t.Fatalf("remote load: %v", err)
+	}
+	if err := client.Unload(context.Background(), inst.ID); err != nil {
+		t.Fatalf("remote unload: %v", err)
+	}
 }
