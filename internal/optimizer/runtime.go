@@ -139,9 +139,21 @@ func recommendationRecord(project domain.Project, preset domain.Preset, rec Reco
 		PresetID:         preset.ID,
 		CurrentValue:     rec.CurrentCap,
 		RecommendedValue: rec.RecommendedCap,
+		Observed:         observedFloats(rec.Observed),
 		Rationale:        rec.Rationale,
 		CreatedAt:        now.UTC(),
 	}
+}
+
+func observedFloats(observed map[string]int) map[string]float64 {
+	if len(observed) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(observed))
+	for key, value := range observed {
+		out[key] = float64(value)
+	}
+	return out
 }
 
 func sharedContexts(presets []domain.Preset) []int {
