@@ -26,3 +26,5 @@
 - 2026-05-29: Catalog installs commit the preset JSON last, after the model artifact and provenance are durable, so interrupted installs cannot register a half-materialized usable preset.
 - 2026-05-29: Phase 4 uses a seed-address join token (`mycjoin://host:port?token=...`) for LAN discovery; the token grants membership only and server-side validation can rotate or revoke it.
 - 2026-05-29: Joined nodes rewrite default loopback backend listens to the inferred LAN host, making loaded instances reachable from the gateway until a real loopback tunnel implementation replaces the LAN tunnel.
+- 2026-05-29: Phase 5 context recommendations use a deterministic average-with-headroom threshold snapped to an existing shared context, and recommendations carry observed stats plus a plain-language rationale.
+- 2026-05-29: Phase 5 auto-apply is a pure gate: projects with `AutoApply=false` only log the recommendation; projects with it on update the project cap and preset context together.
