@@ -92,6 +92,21 @@ func TestParseRequestReadsMyceliumIntentHeaders(t *testing.T) {
 	}
 }
 
+func TestMetricTimingCalculations(t *testing.T) {
+	start := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	first := start.Add(100 * time.Millisecond)
+	end := first.Add(2 * time.Second)
+	if got := durationMS(start, first); got != 100 {
+		t.Fatalf("durationMS = %d", got)
+	}
+	if got := tokensPerSecond(10, first, end); got != 5 {
+		t.Fatalf("tokensPerSecond = %f", got)
+	}
+	if got := tokensPerSecond(0, first, end); got != 0 {
+		t.Fatalf("zero tokens/sec = %f", got)
+	}
+}
+
 func TestRouterRetriesContextOverflowOnLargerPreset(t *testing.T) {
 	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
 	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))

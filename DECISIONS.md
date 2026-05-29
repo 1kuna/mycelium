@@ -50,3 +50,4 @@
 - 2026-05-29: UDP LAN discovery is a narrow node-announcement fallback behind `ports.Discovery`; seed-address join remains the membership authority, while UDP only discovers node advertisements and never grants backend authorization.
 - 2026-05-29: Cross-machine sharding starts as an explicit planner contract that splits estimated claims across distinct ready nodes and ranks them by calibrated speed; real distributed backend launch remains separate hardware-gated execution work.
 - 2026-05-29: Server estimation uses catalog preset estimates by default and switches to GGUF parser/remote node inspection when `gguf_parser` is configured; missing parser config is explicit config state, not a silent remote-file fallback.
+- 2026-05-29: Gateway telemetry derives load wall-clock, TTFT, and tokens/sec from the injected clock around real placement/upstream streaming boundaries; peak memory remains zero unless a backend supplies it rather than being guessed.
