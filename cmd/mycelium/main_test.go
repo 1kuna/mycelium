@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -311,6 +312,18 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 	if handler == nil {
 		t.Fatal("handler is nil")
 	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/peer/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("peer health status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	var peer domain.Peer
+	if err := json.Unmarshal(rec.Body.Bytes(), &peer); err != nil {
+		t.Fatalf("decode peer health: %v", err)
+	}
+	if peer.ID == "" || len(peer.Addresses) != 1 || peer.Addresses[0] != "127.0.0.1:0" {
+		t.Fatalf("peer health = %+v", peer)
+	}
 	reopened, err := storesqlite.Open(dbPath)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
@@ -342,6 +355,53 @@ func TestParseJoinFlag(t *testing.T) {
 	if _, err := parseJoinFlag(""); err == nil {
 		t.Fatal("empty join token accepted")
 	}
+}
+
+func TestPeerHealthProbeAndDeadMarker(t *testing.T) {
+	peer := domain.Peer{ID: "peer-a", Addresses: []string{"http://placeholder"}, Compute: true}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/peer/health" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		peer.Addresses[0] = serverURL(r)
+		_ = json.NewEncoder(w).Encode(peer)
+	}))
+	defer server.Close()
+	peer.Addresses[0] = server.URL
+
+	if err := probePeerHealth(context.Background(), peer); err != nil {
+		t.Fatalf("probePeerHealth: %v", err)
+	}
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(domain.Peer{ID: "other"})
+	}))
+	defer bad.Close()
+	if err := probePeerHealth(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{bad.URL}}); err == nil || !strings.Contains(err.Error(), "other") {
+		t.Fatalf("bad peer err = %v", err)
+	}
+	if err := probePeerHealth(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}}); !errors.Is(err, domain.ErrUnreachable) {
+		t.Fatalf("unreachable err = %v", err)
+	}
+
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	if err := markDeadPeer(store)(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}); err != nil {
+		t.Fatalf("markDeadPeer: %v", err)
+	}
+	node, err := store.Node(context.Background(), "peer-a")
+	if err != nil {
+		t.Fatalf("Node: %v", err)
+	}
+	if node.Status != domain.NodeUnreachable {
+		t.Fatalf("node = %+v", node)
+	}
+}
+
+func serverURL(r *http.Request) string {
+	return "http://" + r.Host
 }
 
 func TestAllocatorFromReservationsReservesHeadroomAndPinnedPresets(t *testing.T) {
