@@ -113,3 +113,4 @@
 - 2026-05-29: Coordinated warm-instance placements use local scheduler lease IDs for request bookkeeping while cold coordinated placements still require an owner-issued lease; this keeps owner authority strict without breaking warm request release.
 - 2026-05-29: Phase 6 job registry replication uses authenticated peer RPC plus periodic pull-merge and watch-driven push: it is eventually consistent, leaderless, and keeps owner admission as the only resource authority.
 - 2026-05-29: `JobRecord.Request` stores a Mycelium rescue envelope containing the full scheduling `Job` plus the original ingress body; opaque raw request bytes are not enough to recover a dead coordinator's work deterministically.
+- 2026-05-29: The fleet smoke target now requires peer-native Phase 4 join plus Phase 6 submit-anywhere checks; the old direct node-agent second peer smoke is removed because it proved the rejected server/node topology.

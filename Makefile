@@ -27,8 +27,8 @@ smoke-local:
 	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestLocalLlamaCppConformance -require TestLocalPhase1LoadServeTelemetryRequeueReaper -require TestPhase2GatewayLocalLlamaCppSmoke -require TestPhase3CatalogMaterializedPresetLoadsInNode -require TestPhase4JoinedNodeGatewaySmoke
 
 smoke-fleet:
-	go test -count=1 -tags smoke ./test/smoke/... -run TestFleetMacMiniSmokeRequiresAddress -timeout 20m -json > $(SMOKE_JSON)
-	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestFleetMacMiniSmokeRequiresAddress
+	go test -count=1 -tags smoke ./test/smoke/... -run 'TestPhase4JoinedNodeGatewaySmoke|TestPhase6FederationSubmitAnywhereSmoke' -timeout 20m -json > $(SMOKE_JSON)
+	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestPhase4JoinedNodeGatewaySmoke -require TestPhase6FederationSubmitAnywhereSmoke
 
 smoke-mlx:
 	go test -count=1 -tags smoke ./test/smoke/... -run TestLocalMLXConformance -timeout 20m -json > $(SMOKE_JSON)
