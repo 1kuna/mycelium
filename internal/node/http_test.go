@@ -55,6 +55,68 @@ func TestHTTPNodeAgentRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHTTPAdmissionControllerRoundTrip(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	admission := NewAdmission(fixtures.MakeNode(fixtures.WithNodeID("node-http")), lease.NewAllocator(), clock)
+	server := httptest.NewServer(HTTPServer{Admission: admission})
+	defer server.Close()
+	client := NewHTTPClient(server.URL)
+	job := fixtures.MakeJob(fixtures.WithJobID("job-http"))
+	claim := fixtures.MakeClaim(3, 4)
+
+	offer, err := client.Offer(context.Background(), job, claim)
+	if err != nil {
+		t.Fatalf("Offer: %v", err)
+	}
+	if offer.JobID != job.ID || offer.NodeID != "node-http" || offer.Claim != claim {
+		t.Fatalf("offer = %+v", offer)
+	}
+	lease, err := client.Commit(context.Background(), offer.OfferID, offer.Fence)
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if lease.JobID != job.ID || lease.NodeID != "node-http" || lease.Claim != claim {
+		t.Fatalf("lease = %+v", lease)
+	}
+	if err := client.Release(context.Background(), lease.ID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	preemptOffer, err := client.Offer(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-preempt")), claim)
+	if err != nil {
+		t.Fatalf("preempt Offer: %v", err)
+	}
+	preemptLease, err := client.Commit(context.Background(), preemptOffer.OfferID, preemptOffer.Fence)
+	if err != nil {
+		t.Fatalf("preempt Commit: %v", err)
+	}
+	if err := client.Preempt(context.Background(), preemptLease.ID, "test"); err != nil {
+		t.Fatalf("Preempt: %v", err)
+	}
+}
+
+func TestHTTPAdmissionPreservesStaleFenceError(t *testing.T) {
+	admission := NewAdmission(fixtures.MakeNode(), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))
+	server := httptest.NewServer(HTTPServer{Admission: admission})
+	defer server.Close()
+	client := NewHTTPClient(server.URL)
+
+	first, err := client.Offer(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a")), fixtures.MakeClaim(1, 1))
+	if err != nil {
+		t.Fatalf("first Offer: %v", err)
+	}
+	second, err := client.Offer(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-b")), fixtures.MakeClaim(1, 1))
+	if err != nil {
+		t.Fatalf("second Offer: %v", err)
+	}
+	if _, err := client.Commit(context.Background(), first.OfferID, first.Fence); err != nil {
+		t.Fatalf("first Commit: %v", err)
+	}
+	if _, err := client.Commit(context.Background(), second.OfferID, second.Fence); !errors.Is(err, domain.ErrStaleFence) {
+		t.Fatalf("stale Commit err = %v", err)
+	}
+}
+
 func TestHTTPServerRejectsBadRequests(t *testing.T) {
 	server := httptest.NewServer(HTTPServer{Agent: &failingNodeAgent{}})
 	defer server.Close()
@@ -91,6 +153,39 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 	_ = resp.Body.Close()
 	if _, err := client.InspectModel(context.Background(), fixtures.MakePreset()); err == nil || !strings.Contains(err.Error(), "inspect failed") {
 		t.Fatalf("inspect error = %v", err)
+	}
+
+	resp, err = http.Post(server.URL+"/admission/offer", "application/json", strings.NewReader("{"))
+	if err != nil {
+		t.Fatalf("bad offer post: %v", err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("missing admission status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
+
+	admissionServer := httptest.NewServer(HTTPServer{Admission: &failingAdmissionController{offerErr: domain.ErrNoFit}})
+	defer admissionServer.Close()
+	admissionClient := NewHTTPClient(admissionServer.URL)
+	if _, err := admissionClient.Offer(context.Background(), fixtures.MakeJob(), fixtures.MakeClaim(1, 1)); !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("offer no-fit err = %v", err)
+	}
+	resp, err = http.Post(admissionServer.URL+"/admission/commit", "application/json", strings.NewReader("{"))
+	if err != nil {
+		t.Fatalf("bad commit post: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad commit status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
+	if _, err := admissionClient.Commit(context.Background(), "", 1); err == nil || !strings.Contains(err.Error(), "offer_id") {
+		t.Fatalf("empty commit err = %v", err)
+	}
+	if err := admissionClient.Release(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "lease_id") {
+		t.Fatalf("empty release err = %v", err)
+	}
+	if err := admissionClient.Preempt(context.Background(), "", "test"); err == nil || !strings.Contains(err.Error(), "lease_id") {
+		t.Fatalf("empty preempt err = %v", err)
 	}
 }
 
@@ -130,6 +225,10 @@ func TestHTTPServerShedsNoFitAsTooManyRequests(t *testing.T) {
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("status = %s", resp.Status)
 	}
+	client := NewHTTPClient(server.URL)
+	if _, err := client.Load(context.Background(), fixtures.MakePreset()); !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("client no-fit err = %v", err)
+	}
 }
 
 type failingNodeAgent struct {
@@ -164,3 +263,34 @@ func (f *failingNodeAgent) EndRequest(context.Context, string) error {
 }
 
 var _ ports.NodeAgent = (*failingNodeAgent)(nil)
+
+type failingAdmissionController struct {
+	offerErr   error
+	commitErr  error
+	releaseErr error
+	preemptErr error
+}
+
+func (f *failingAdmissionController) Offer(context.Context, domain.Job, domain.Claim) (domain.LeaseOffer, error) {
+	if f.offerErr != nil {
+		return domain.LeaseOffer{}, f.offerErr
+	}
+	return domain.LeaseOffer{OfferID: "offer-a", JobID: "job-a", NodeID: "node-a", Fence: 1}, nil
+}
+
+func (f *failingAdmissionController) Commit(context.Context, string, uint64) (domain.Lease, error) {
+	if f.commitErr != nil {
+		return domain.Lease{}, f.commitErr
+	}
+	return domain.Lease{ID: "lease-a"}, nil
+}
+
+func (f *failingAdmissionController) Release(context.Context, string) error {
+	return f.releaseErr
+}
+
+func (f *failingAdmissionController) Preempt(context.Context, string, string) error {
+	return f.preemptErr
+}
+
+var _ ports.AdmissionController = (*failingAdmissionController)(nil)
