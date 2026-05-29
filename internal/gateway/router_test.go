@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -104,6 +105,41 @@ func TestMetricTimingCalculations(t *testing.T) {
 	}
 	if got := tokensPerSecond(0, first, end); got != 0 {
 		t.Fatalf("zero tokens/sec = %f", got)
+	}
+	if got := durationMS(end, start); got != 0 {
+		t.Fatalf("negative duration = %d", got)
+	}
+}
+
+func TestUsageFromBodyAnthropicAndFallback(t *testing.T) {
+	prompt, completion := usageFromBody([]byte(`{"usage":{"input_tokens":7,"output_tokens":3}}`))
+	if prompt != 7 || completion != 3 {
+		t.Fatalf("anthropic usage = %d/%d", prompt, completion)
+	}
+	prompt, completion = usageFromBody([]byte(`not-json`))
+	if prompt != 0 || completion != 0 {
+		t.Fatalf("fallback usage = %d/%d", prompt, completion)
+	}
+}
+
+func TestRouterUtilityFallbacks(t *testing.T) {
+	if (&Router{}).clock() == nil {
+		t.Fatal("default clock missing")
+	}
+	if got := joinURL("https://example.test/", "/v1"); got != "https://example.test/v1" {
+		t.Fatalf("joinURL = %s", got)
+	}
+	if got := cloneHeader(nil); got == nil {
+		t.Fatal("cloneHeader nil returned nil")
+	}
+	var w strings.Builder
+	result, err := copyAndFlush(noFlushWriter{Builder: &w}, errReader{}, (&Router{}).clock())
+	if err == nil || !errors.Is(err, io.ErrUnexpectedEOF) || result.Body != nil {
+		t.Fatalf("copy result=%+v err=%v", result, err)
+	}
+	table := NewStickyTable(nil, 0)
+	if table.clock == nil || table.ttl == 0 {
+		t.Fatalf("sticky defaults = %+v", table)
 	}
 }
 
@@ -647,6 +683,29 @@ func TestServerRejectsUnknownRoute(t *testing.T) {
 	}
 }
 
+func TestServerErrorResponses(t *testing.T) {
+	rec := httptest.NewRecorder()
+	Server{}.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`)))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("nil router status = %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set(HeaderSpeedPref, "warp")
+	Server{Router: &Router{}}.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "X-Myc-Speed-Pref") {
+		t.Fatalf("bad header status/body = %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	Server{Router: &Router{}}.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("route error status = %d", rec.Code)
+	}
+}
+
 func TestNodeDirectoryCombinesSnapshots(t *testing.T) {
 	node := fixtures.MakeNode()
 	agent := mocks.NewNodeAgent(node)
@@ -661,6 +720,9 @@ func TestNodeDirectoryCombinesSnapshots(t *testing.T) {
 	}
 	if _, err := directory.NodeAgent(node.ID); err != nil {
 		t.Fatalf("NodeAgent: %v", err)
+	}
+	if _, err := directory.NodeAgent("missing"); err == nil {
+		t.Fatal("missing node agent succeeded")
 	}
 }
 
@@ -769,6 +831,22 @@ type testFailureReporter struct {
 
 func (r *testFailureReporter) ReportInstanceFailure(_ context.Context, instanceID string, _ error) {
 	r.failed = append(r.failed, instanceID)
+}
+
+type noFlushWriter struct {
+	*strings.Builder
+}
+
+func (w noFlushWriter) Header() http.Header {
+	return http.Header{}
+}
+
+func (w noFlushWriter) WriteHeader(int) {}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
 }
 
 type gatewayRuntimeStore struct{}

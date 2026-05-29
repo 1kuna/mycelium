@@ -2,6 +2,7 @@ package membership
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -75,6 +76,35 @@ func TestAnnounceReturnsServerError(t *testing.T) {
 	}
 }
 
+func TestAnnounceErrorPaths(t *testing.T) {
+	if _, err := Announce(context.Background(), nil, "not-a-token", readyJoinNode("node-a", "127.0.0.1:1")); err == nil {
+		t.Fatal("bad join token accepted")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "plain", http.StatusForbidden)
+	}))
+	defer server.Close()
+	token, err := BuildJoinToken(server.URL, "secret")
+	if err != nil {
+		t.Fatalf("BuildJoinToken: %v", err)
+	}
+	_, err = Announce(context.Background(), server.Client(), token, readyJoinNode("node-a", "127.0.0.1:1"))
+	if err == nil || !strings.Contains(err.Error(), "403") {
+		t.Fatalf("plain err = %v", err)
+	}
+	badJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{`))
+	}))
+	defer badJSON.Close()
+	token, err = BuildJoinToken(badJSON.URL, "secret")
+	if err != nil {
+		t.Fatalf("BuildJoinToken badJSON: %v", err)
+	}
+	if _, err := Announce(context.Background(), badJSON.Client(), token, readyJoinNode("node-a", "127.0.0.1:1")); err == nil {
+		t.Fatal("bad join response accepted")
+	}
+}
+
 func TestAdvertiseAddrInfersLANAddressForWildcardListen(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -89,3 +119,36 @@ func TestAdvertiseAddrInfersLANAddressForWildcardListen(t *testing.T) {
 		t.Fatalf("advertise = %s", got)
 	}
 }
+
+func TestAdvertiseAddrKeepsExplicitAndRejectsBadInputs(t *testing.T) {
+	if got, err := AdvertiseAddr("127.0.0.1:51847", "http://127.0.0.1:1"); err != nil || got != "127.0.0.1:51847" {
+		t.Fatalf("explicit = %s %v", got, err)
+	}
+	if _, err := AdvertiseAddr("bad", "http://127.0.0.1:1"); err == nil {
+		t.Fatal("bad listen accepted")
+	}
+	if _, err := AdvertiseAddr("0.0.0.0:1", "://bad"); err == nil {
+		t.Fatal("bad server URL accepted")
+	}
+}
+
+func TestMembershipJSONHelpersPanicOnEncoderFailure(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic")
+		}
+	}()
+	writeMembershipJSON(errorResponseWriter{}, map[string]any{"bad": func() {}})
+}
+
+type errorResponseWriter struct{}
+
+func (errorResponseWriter) Header() http.Header {
+	return http.Header{}
+}
+
+func (errorResponseWriter) Write([]byte) (int, error) {
+	return 0, &json.UnsupportedTypeError{}
+}
+
+func (errorResponseWriter) WriteHeader(int) {}

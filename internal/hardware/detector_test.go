@@ -2,6 +2,7 @@ package hardware
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"strings"
 	"testing"
@@ -44,6 +45,34 @@ func TestLinuxDetectorFailsUntilNVIDIAProbeExists(t *testing.T) {
 	_, err := (Detector{GOOS: "linux"}).Detect(context.Background(), domain.Node{})
 	if err == nil || !strings.Contains(err.Error(), "explicit --vram-mb") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestDetectorErrorPathsAndLabelMerge(t *testing.T) {
+	if _, err := (Detector{GOOS: "plan9"}).Detect(context.Background(), domain.Node{}); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("unsupported err = %v", err)
+	}
+	_, err := (Detector{
+		GOOS: "darwin",
+		Command: func(context.Context, string, ...string) ([]byte, error) {
+			return nil, errors.New("sysctl")
+		},
+	}).Detect(context.Background(), domain.Node{})
+	if err == nil || !strings.Contains(err.Error(), "sysctl") {
+		t.Fatalf("command err = %v", err)
+	}
+	_, err = (Detector{
+		GOOS: "darwin",
+		Command: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("not-a-number"), nil
+		},
+	}).Detect(context.Background(), domain.Node{})
+	if err == nil {
+		t.Fatal("invalid sysctl output accepted")
+	}
+	got := mergeLabels(map[string]string{"keep": "yes", "gpu.vendor": "old"}, map[string]string{"gpu.vendor": "apple"})
+	if got["keep"] != "yes" || got["gpu.vendor"] != "apple" {
+		t.Fatalf("labels = %+v", got)
 	}
 }
 

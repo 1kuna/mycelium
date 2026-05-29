@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,6 +138,138 @@ func TestInstallCanceledBeforeStartDoesNotRegisterPreset(t *testing.T) {
 	}
 	if _, err := ReadPreset(store, "tiny"); err == nil {
 		t.Fatal("canceled install registered preset")
+	}
+}
+
+func TestInstallHelperErrorPaths(t *testing.T) {
+	store := t.TempDir()
+	if _, err := readInstallState(store, "missing"); err != nil {
+		t.Fatalf("missing state: %v", err)
+	}
+	badState := filepath.Join(store, "jobs", "bad.json")
+	if err := os.MkdirAll(filepath.Dir(badState), 0755); err != nil {
+		t.Fatalf("mkdir jobs: %v", err)
+	}
+	if err := os.WriteFile(badState, []byte(`{`), 0644); err != nil {
+		t.Fatalf("write bad state: %v", err)
+	}
+	if _, err := readInstallState(store, "bad"); err == nil {
+		t.Fatal("bad install state accepted")
+	}
+	if err := writeInstallState(store, InstallState{}); err == nil {
+		t.Fatal("missing job id accepted")
+	}
+	if _, err := NewInstaller("").Install(context.Background(), InstallRequest{Source: "x"}); err == nil || !strings.Contains(err.Error(), "store dir") {
+		t.Fatalf("store dir err = %v", err)
+	}
+	source := writeModel(t, "tiny.gguf", "model")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := copyFile(ctx, source, filepath.Join(t.TempDir(), "out")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("copy ctx err = %v", err)
+	}
+	out := filepath.Join(t.TempDir(), "exists.json")
+	if err := os.WriteFile(out, []byte("{}"), 0644); err != nil {
+		t.Fatalf("write exists: %v", err)
+	}
+	if err := writeJSON(out, map[string]string{"x": "y"}); err == nil {
+		t.Fatal("writeJSON overwrote existing file")
+	}
+	if err := writeJSON(filepath.Join(t.TempDir(), "bad.json"), map[string]any{"x": func() {}}); err == nil {
+		t.Fatal("writeJSON accepted unsupported value")
+	}
+	if err := writeJSONReplace(out, map[string]string{"x": "y"}); err != nil {
+		t.Fatalf("writeJSONReplace: %v", err)
+	}
+	if err := writeJSONReplace(filepath.Join(t.TempDir(), "bad.json"), map[string]any{"x": func() {}}); err == nil {
+		t.Fatal("writeJSONReplace accepted unsupported value")
+	}
+	fileRoot := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(fileRoot, []byte("x"), 0644); err != nil {
+		t.Fatalf("write file root: %v", err)
+	}
+	if err := ensureStore(fileRoot); err == nil {
+		t.Fatal("ensureStore accepted file root")
+	}
+	if got := NewInstaller(store).now(); got.IsZero() {
+		t.Fatal("default now returned zero")
+	}
+}
+
+func TestInstallValidationErrors(t *testing.T) {
+	if _, err := NewInstaller(t.TempDir()).Install(context.Background(), InstallRequest{}); err == nil || !strings.Contains(err.Error(), "source is required") {
+		t.Fatalf("source err = %v", err)
+	}
+	if _, err := NewInstaller(t.TempDir()).Materialize(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "source is required") {
+		t.Fatalf("materialize err = %v", err)
+	}
+	source := writeModel(t, "!!!", "model")
+	if _, err := NewInstaller(t.TempDir()).Install(context.Background(), InstallRequest{Source: source}); err == nil || !strings.Contains(err.Error(), "derive preset id") {
+		t.Fatalf("derive err = %v", err)
+	}
+}
+
+func TestInstallReadyStateRequiresCommittedPresetAndProvenance(t *testing.T) {
+	store := t.TempDir()
+	if err := ensureStore(store); err != nil {
+		t.Fatalf("ensureStore: %v", err)
+	}
+	if err := writeInstallState(store, InstallState{JobID: "install-tiny", Source: "tiny.gguf", PresetID: "tiny", Status: "ready"}); err != nil {
+		t.Fatalf("write ready state: %v", err)
+	}
+	if _, err := NewInstaller(store).Install(context.Background(), InstallRequest{Source: "tiny.gguf", ID: "tiny"}); err == nil {
+		t.Fatal("ready state without committed preset succeeded")
+	}
+
+	preset := domain.Preset{ID: "tiny", ModelRef: "model.gguf", Backend: domain.BackendLlamaCpp}
+	if err := writeJSON(filepath.Join(store, "presets", "tiny.json"), preset); err != nil {
+		t.Fatalf("write preset: %v", err)
+	}
+	if _, err := NewInstaller(store).Install(context.Background(), InstallRequest{Source: "tiny.gguf", ID: "tiny"}); err == nil {
+		t.Fatal("ready state without provenance succeeded")
+	}
+}
+
+func TestInstallResumedDraftWithoutArtifactFailsLoudly(t *testing.T) {
+	store := t.TempDir()
+	if err := ensureStore(store); err != nil {
+		t.Fatalf("ensureStore: %v", err)
+	}
+	if err := writeInstallState(store, InstallState{
+		JobID:         "install-tiny",
+		Source:        filepath.Join(t.TempDir(), "missing.gguf"),
+		Status:        "import",
+		DraftName:     "tiny.gguf",
+		DraftImporter: "local",
+		DraftSize:     4,
+	}); err != nil {
+		t.Fatalf("write resumed state: %v", err)
+	}
+	_, err := NewInstaller(store).Install(context.Background(), InstallRequest{Source: filepath.Join(t.TempDir(), "missing.gguf"), ID: "tiny"})
+	if err == nil || !strings.Contains(err.Error(), "no staged artifact") {
+		t.Fatalf("artifact err = %v", err)
+	}
+}
+
+func TestReadPresetAndProvenanceRejectBadJSON(t *testing.T) {
+	store := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(store, "presets"), 0755); err != nil {
+		t.Fatalf("mkdir presets: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(store, "provenance"), 0755); err != nil {
+		t.Fatalf("mkdir provenance: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "presets", "bad.json"), []byte(`{`), 0644); err != nil {
+		t.Fatalf("write preset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "provenance", "bad.json"), []byte(`{`), 0644); err != nil {
+		t.Fatalf("write provenance: %v", err)
+	}
+	if _, err := ReadPreset(store, "bad"); err == nil {
+		t.Fatal("bad preset json accepted")
+	}
+	if _, err := ReadProvenance(store, "bad"); err == nil {
+		t.Fatal("bad provenance json accepted")
 	}
 }
 

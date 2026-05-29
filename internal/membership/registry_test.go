@@ -62,9 +62,24 @@ func TestRegistryHTTPNodes(t *testing.T) {
 		t.Fatalf("bad json status = %d", rec.Code)
 	}
 	rec = httptest.NewRecorder()
+	registry.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/join", strings.NewReader(`{"token":"bad","node":{"id":"node-b","address":"127.0.0.1:1"}}`)))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("bad join status = %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
 	registry.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/missing", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("missing status = %d", rec.Code)
+	}
+}
+
+func TestRegistryHandlesMissingTokenManagerAndDefaultTunnel(t *testing.T) {
+	registry := NewRegistry(nil, nil)
+	if registry.tunnel == nil {
+		t.Fatal("default tunnel was not installed")
+	}
+	if _, err := registry.Join(context.Background(), JoinRequest{Token: "secret", Node: readyJoinNode("node-a", "127.0.0.1:1")}); err == nil {
+		t.Fatal("join without token manager succeeded")
 	}
 }
 
