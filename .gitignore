@@ -1,5 +1,6 @@
 /mycelium
 /myce
+/.smoke-models/
 *.out
 *.test
 coverage.html
