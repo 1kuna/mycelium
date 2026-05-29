@@ -50,7 +50,17 @@ func runPeer(ctx context.Context, args []string) error {
 func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := fs.String("config", "", "peer config JSON path")
-	listen := fs.String("listen", "", "gateway listen address override")
+	listen := fs.String("listen", "", "peer listen address override")
+	compute := fs.Bool("compute", false, "enable local compute runtime")
+	backendListen := fs.String("backend-listen", "", "local backend inference server listen address")
+	id := fs.String("id", "", "local compute peer id")
+	name := fs.String("name", "", "local compute peer name")
+	backend := fs.String("backend", "", "local backend engine (llamacpp, mlx, vllm)")
+	backendBinary := fs.String("backend-binary", "", "local backend server binary override")
+	llamaServer := fs.String("llama-server", "", "llama.cpp server binary")
+	ggufParser := fs.String("gguf-parser", "", "local GGUF parser binary")
+	maxUtil := fs.Float64("max-util", 0, "maximum accelerator utilization")
+	vramMB := fs.Int("vram-mb", 0, "local allocatable memory in MB")
 	if err := fs.Parse(args); err != nil {
 		return "", nil, err
 	}
@@ -60,6 +70,24 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	if *listen != "" {
 		cfg.Listen = *listen
+	}
+	if *compute {
+		cfg.Compute = true
+	}
+	overrideString(backendListen, &cfg.ComputeConfig.BackendListen)
+	overrideString(id, &cfg.ComputeConfig.ID)
+	overrideString(name, &cfg.ComputeConfig.Name)
+	if *backend != "" {
+		cfg.ComputeConfig.Backend = domain.Backend(*backend)
+	}
+	overrideString(backendBinary, &cfg.ComputeConfig.BackendBinary)
+	overrideString(llamaServer, &cfg.ComputeConfig.LlamaServer)
+	overrideString(ggufParser, &cfg.ComputeConfig.GGUFParser)
+	if *maxUtil != 0 {
+		cfg.ComputeConfig.MaxUtil = *maxUtil
+	}
+	if *vramMB != 0 {
+		cfg.ComputeConfig.VRAMMB = *vramMB
 	}
 	store, err := storesqlite.Open(cfg.StorePath)
 	if err != nil {
@@ -89,6 +117,20 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		mux.Handle("/nodes", registry)
 	}
 	agents := map[string]ports.NodeAgent{}
+	if cfg.Compute {
+		local, err := buildComputeRuntime(ctx, cfg, store)
+		if err != nil {
+			return "", nil, err
+		}
+		if err := store.SaveNode(ctx, local.node); err != nil {
+			return "", nil, err
+		}
+		agents[local.node.ID] = local.agent
+		if mux == nil {
+			mux = http.NewServeMux()
+		}
+		mountNodeHTTP(mux, local.handler)
+	}
 	for _, nodeURL := range cfg.NodeURLs {
 		client := nodeagent.NewHTTPClient(nodeURL)
 		snap, err := client.Snapshot(ctx)
@@ -110,10 +152,13 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		if fleet == nil {
 			fleet = directory
 			nodes = directory
+		} else {
+			fleet = combinedFleet{left: fleet, right: directory}
+			nodes = combinedNodes{left: nodes, right: directory}
 		}
 	}
 	if fleet == nil || nodes == nil {
-		return "", nil, fmt.Errorf("peer config must provide join_token or node_urls")
+		return "", nil, fmt.Errorf("peer config must enable compute or provide join_token/node_urls")
 	}
 	presets, err := store.ListPresets(ctx)
 	if err != nil {
@@ -169,6 +214,55 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		return cfg.Listen, mux, nil
 	}
 	return cfg.Listen, handler, nil
+}
+
+func mountNodeHTTP(mux *http.ServeMux, handler http.Handler) {
+	for _, path := range []string{
+		"/snapshot",
+		"/load",
+		"/unload",
+		"/inspect",
+		"/begin-request",
+		"/end-request",
+		"/admission/offer",
+		"/admission/commit",
+		"/admission/release",
+		"/admission/preempt",
+	} {
+		mux.Handle(path, handler)
+	}
+}
+
+type combinedFleet struct {
+	left  gateway.FleetSource
+	right gateway.FleetSource
+}
+
+func (f combinedFleet) Snapshot(ctx context.Context) (domain.FleetSnapshot, error) {
+	left, err := f.left.Snapshot(ctx)
+	if err != nil {
+		return domain.FleetSnapshot{}, err
+	}
+	right, err := f.right.Snapshot(ctx)
+	if err != nil {
+		return domain.FleetSnapshot{}, err
+	}
+	left.Nodes = append(left.Nodes, right.Nodes...)
+	left.Instances = append(left.Instances, right.Instances...)
+	return left, nil
+}
+
+type combinedNodes struct {
+	left  gateway.NodeResolver
+	right gateway.NodeResolver
+}
+
+func (n combinedNodes) NodeAgent(nodeID string) (ports.NodeAgent, error) {
+	agent, err := n.left.NodeAgent(nodeID)
+	if err == nil {
+		return agent, nil
+	}
+	return n.right.NodeAgent(nodeID)
 }
 
 type jobLister interface {

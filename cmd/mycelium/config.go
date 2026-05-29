@@ -13,6 +13,8 @@ type PeerConfig struct {
 	Listen          string               `json:"listen"`
 	StorePath       string               `json:"store_path"`
 	CatalogDir      string               `json:"catalog_dir"`
+	Compute         bool                 `json:"compute"`
+	ComputeConfig   ComputeConfig        `json:"compute_config"`
 	JoinToken       string               `json:"join_token"`
 	NodeURLs        []string             `json:"node_urls"`
 	GGUFParser      string               `json:"gguf_parser"`
@@ -25,10 +27,8 @@ type PeerConfig struct {
 	OptimizerEvalMS int                  `json:"optimizer_eval_ms"`
 }
 
-type NodeConfig struct {
-	Listen        string         `json:"listen"`
+type ComputeConfig struct {
 	BackendListen string         `json:"backend_listen"`
-	StorePath     string         `json:"store_path"`
 	ID            string         `json:"id"`
 	Name          string         `json:"name"`
 	Backend       domain.Backend `json:"backend"`
@@ -37,7 +37,6 @@ type NodeConfig struct {
 	GGUFParser    string         `json:"gguf_parser"`
 	MaxUtil       float64        `json:"max_util"`
 	VRAMMB        int            `json:"vram_mb"`
-	Join          string         `json:"join"`
 }
 
 func loadPeerConfig(path string) (PeerConfig, error) {
@@ -73,38 +72,30 @@ func loadPeerConfig(path string) (PeerConfig, error) {
 	if cfg.OptimizerEvalMS == 0 {
 		cfg.OptimizerEvalMS = 60000
 	}
+	cfg.ComputeConfig = defaultedComputeConfig(cfg.ComputeConfig)
 	return cfg, nil
 }
 
-func loadNodeConfig(path string) (NodeConfig, error) {
-	if path == "" {
-		return defaultNodeConfig(), nil
+func defaultedComputeConfig(cfg ComputeConfig) ComputeConfig {
+	if cfg.BackendListen == "" {
+		cfg.BackendListen = "127.0.0.1:51848"
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return NodeConfig{}, fmt.Errorf("read node config %s: %w", path, err)
+	if cfg.ID == "" {
+		cfg.ID = "peer_local"
 	}
-	cfg := defaultNodeConfig()
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return NodeConfig{}, fmt.Errorf("parse node config %s: %w", path, err)
+	if cfg.Name == "" {
+		cfg.Name = "local-peer"
 	}
-	if cfg.StorePath == "" {
-		cfg.StorePath = defaultControlStorePath()
+	if cfg.Backend == "" {
+		cfg.Backend = domain.BackendLlamaCpp
 	}
-	return cfg, nil
-}
-
-func defaultNodeConfig() NodeConfig {
-	return NodeConfig{
-		Listen:        "127.0.0.1:51847",
-		BackendListen: "127.0.0.1:51848",
-		StorePath:     defaultControlStorePath(),
-		ID:            "node_local",
-		Name:          "local-node",
-		Backend:       domain.BackendLlamaCpp,
-		LlamaServer:   "llama-server",
-		MaxUtil:       0.90,
+	if cfg.LlamaServer == "" {
+		cfg.LlamaServer = "llama-server"
 	}
+	if cfg.MaxUtil == 0 {
+		cfg.MaxUtil = 0.90
+	}
+	return cfg
 }
 
 func defaultPeerConfigPath() string {
