@@ -111,10 +111,7 @@ func TestParseRequestsFailLoudly(t *testing.T) {
 		body string
 		want string
 	}{
-		{name: "chat model", fn: ParseOpenAIChat, body: `{"messages":[{"role":"user","content":"hi"}]}`, want: "model is required"},
 		{name: "chat messages", fn: ParseOpenAIChat, body: `{"model":"m"}`, want: "messages are required"},
-		{name: "completion model", fn: ParseOpenAICompletion, body: `{"prompt":"hi"}`, want: "model is required"},
-		{name: "anthropic model", fn: ParseAnthropicMessages, body: `{"max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`, want: "model is required"},
 		{name: "anthropic max tokens", fn: ParseAnthropicMessages, body: `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`, want: "max_tokens is required"},
 		{name: "anthropic messages", fn: ParseAnthropicMessages, body: `{"model":"m","max_tokens":1}`, want: "messages are required"},
 		{name: "multiple json", fn: ParseOpenAICompletion, body: `{"model":"m"} {}`, want: "multiple JSON"},
@@ -126,6 +123,31 @@ func TestParseRequestsFailLoudly(t *testing.T) {
 				t.Fatalf("err = %v want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestWithModelAppliesProjectDefault(t *testing.T) {
+	chat, err := ParseOpenAIChat([]byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	chat, err = WithModel(chat, "preset-a")
+	if err != nil {
+		t.Fatalf("WithModel chat: %v", err)
+	}
+	if chat.Model != "preset-a" || !strings.Contains(string(chat.Body), `"model":"preset-a"`) {
+		t.Fatalf("chat = %+v body=%s", chat, chat.Body)
+	}
+	claude, err := ParseAnthropicMessages([]byte(`{"max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`))
+	if err != nil {
+		t.Fatalf("ParseAnthropicMessages: %v", err)
+	}
+	claude, err = WithModel(claude, "preset-a")
+	if err != nil {
+		t.Fatalf("WithModel anthropic: %v", err)
+	}
+	if claude.Model != "preset-a" || !strings.Contains(string(claude.Body), `"model":"preset-a"`) {
+		t.Fatalf("claude = %+v body=%s", claude, claude.Body)
 	}
 }
 

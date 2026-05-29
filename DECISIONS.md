@@ -56,3 +56,4 @@
 - 2026-05-29: Engine/parameter recommendations are advisory records built from measured preset/backend telemetry or explicit benchmark user picks; Mycelium records objective facts and refuses to auto-apply them until routing has an explicit project opt-in surface.
 - 2026-05-29: vLLM and MLX gateway profiles are explicit OpenAI-compatible profiles for chat/completions; unknown backends still fail loudly rather than falling through to a generic route.
 - 2026-05-29: Joined-node membership persists the node's advertised address, not the transient loopback tunnel address; server restart rebuilds loopback tunnels from that durable address and marks unreachable nodes through the normal snapshot path.
+- 2026-05-29: Engine recommendation application is an explicit project-default update: `myce recommendations apply` sets `Project.DefaultModel`, and the gateway only uses it when a request omits `model` for that project.
