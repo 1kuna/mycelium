@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +29,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	lease := domain.Lease{ID: "lease-a", JobID: "job-a", InstanceID: inst.ID, NodeID: node.ID, Claim: fixtures.MakeClaim(1, 2), GrantedAt: time.Unix(1, 0).UTC()}
 	reservation := domain.Reservation{ID: "res-a", Kind: domain.ReservationHeadroom, NodeID: node.ID, Headroom: fixtures.MakeClaim(3, 4)}
 	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	jobRecord := fixtures.MakeJobRecord(fixtures.WithRecordJobID(job.ID))
 	rec := domain.RecommendationRecord{ID: "rec-a", Type: "context_cap_recommendation", ProjectID: project.ID, RecommendedValue: 4096, CreatedAt: time.Unix(2, 0).UTC()}
 	refs := []domain.ProcessRef{{PID: 12, Kind: "process", Ref: "12"}}
 	token := domain.JoinTokenRecord{Hash: "hash-a", Active: true, Current: true}
@@ -38,6 +41,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	must(t, store.SaveLease(ctx, lease))
 	must(t, store.SaveReservation(ctx, reservation))
 	must(t, store.SaveJob(ctx, job))
+	must(t, store.Put(ctx, jobRecord))
 	must(t, store.SaveRecommendation(ctx, rec))
 	must(t, store.SaveProcessRefs(ctx, node.ID, refs))
 	must(t, store.SaveJoinToken(ctx, token))
@@ -89,6 +93,9 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	}
 	if jobs, err := reopened.ListJobs(ctx); err != nil || len(jobs) != 1 {
 		t.Fatalf("ListJobs len = %d, %v", len(jobs), err)
+	}
+	if records, err := reopened.Snapshot(ctx); err != nil || len(records) != 1 || records[0].JobID != job.ID {
+		t.Fatalf("Snapshot job records = %+v, %v", records, err)
 	}
 	if recs, err := reopened.ListRecommendations(ctx, project.ID); err != nil || len(recs) != 1 {
 		t.Fatalf("ListRecommendations len = %d, %v", len(recs), err)
@@ -147,6 +154,22 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	if err := store.Record(ctx, domain.RunMetric{JobID: "metric"}); err == nil {
 		t.Fatal("Record should require timestamp")
 	}
+	if err := store.Put(ctx, domain.JobRecord{}); err == nil {
+		t.Fatal("Put job record should require an id")
+	}
+	for name, rec := range map[string]domain.JobRecord{
+		"coordinator": recordWith(fixtures.MakeJobRecord(), func(r *domain.JobRecord) { r.Coordinator = "" }),
+		"status":      recordWith(fixtures.MakeJobRecord(), func(r *domain.JobRecord) { r.Status = "" }),
+		"request":     recordWith(fixtures.MakeJobRecord(), func(r *domain.JobRecord) { r.Request = nil }),
+		"updated":     recordWith(fixtures.MakeJobRecord(), func(r *domain.JobRecord) { r.UpdatedAt = time.Time{} }),
+	} {
+		if err := store.Put(ctx, rec); err == nil {
+			t.Fatalf("Put job record should require %s", name)
+		}
+	}
+	if _, err := store.Watch(ctx, "not-time"); err == nil {
+		t.Fatal("Watch should reject bad cursor")
+	}
 
 	at := time.Unix(10, 0).UTC()
 	must(t, store.Record(ctx, domain.RunMetric{JobID: "m1", InstanceID: "i", NodeID: "n", PresetID: "preset-a", Backend: domain.BackendLlamaCpp, Project: "p1", ContextUsed: 10, At: at}))
@@ -167,9 +190,136 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	}
 }
 
+func TestStoreJobRegistryLWWAndWatch(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	first := fixtures.MakeJobRecord(fixtures.WithRecordJobID("job-a"))
+	first.UpdatedAt = time.Unix(20, 0).UTC()
+	first.Request = []byte("first")
+	must(t, store.Put(ctx, first))
+	older := first
+	older.UpdatedAt = first.UpdatedAt.Add(-time.Second)
+	older.Status = domain.JobRunning
+	must(t, store.Put(ctx, older))
+	newer := first
+	newer.UpdatedAt = first.UpdatedAt.Add(time.Second)
+	newer.Fence = 2
+	newer.Status = domain.JobRunning
+	newer.Request = []byte("newer")
+	must(t, store.Put(ctx, newer))
+	newer.Request[0] = 'X'
+	other := fixtures.MakeJobRecord(fixtures.WithRecordJobID("job-b"))
+	other.UpdatedAt = newer.UpdatedAt
+	must(t, store.Put(ctx, other))
+	higherFence := newer
+	higherFence.Fence = 3
+	higherFence.Request = []byte("higher-fence")
+	must(t, store.Put(ctx, higherFence))
+	tieWinner := higherFence
+	tieWinner.Coordinator = "zz-peer"
+	tieWinner.Request = []byte("tie")
+	must(t, store.Put(ctx, tieWinner))
+
+	snap, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap) != 2 || snap[0].JobID != "job-a" || snap[1].JobID != "job-b" || string(snap[0].Request) != "tie" {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	snap[0].Request[0] = '!'
+	again, err := store.Snapshot(ctx)
+	if err != nil || string(again[0].Request) != "tie" {
+		t.Fatalf("snapshot clone = %+v %v", again, err)
+	}
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	watch, err := store.Watch(watchCtx, first.UpdatedAt.Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if got := receiveStoreRecord(t, watch); got.JobID != "job-a" {
+		t.Fatalf("initial watch record = %+v", got)
+	}
+	if got := receiveStoreRecord(t, watch); got.JobID != "job-b" {
+		t.Fatalf("second watch record = %+v", got)
+	}
+	future := fixtures.MakeJobRecord(fixtures.WithRecordJobID("job-c"))
+	future.UpdatedAt = newer.UpdatedAt.Add(time.Second)
+	must(t, store.Put(ctx, future))
+	if got := receiveStoreRecord(t, watch); got.JobID != "job-c" {
+		t.Fatalf("future watch record = %+v", got)
+	}
+	cancel()
+	if got, ok := receiveStoreClosed(t, watch); ok {
+		t.Fatalf("watch stayed open with record %+v", got)
+	}
+}
+
+func TestStoreJobRegistryRejectsStalledWatchers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	watch, err := store.Watch(ctx, "")
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	for i := 0; i < 128; i++ {
+		rec := fixtures.MakeJobRecord(fixtures.WithRecordJobID(fmt.Sprintf("job-%03d", i)))
+		rec.UpdatedAt = time.Unix(100+int64(i), 0).UTC()
+		must(t, store.Put(ctx, rec))
+	}
+	overflow := fixtures.MakeJobRecord(fixtures.WithRecordJobID("job-overflow"))
+	overflow.UpdatedAt = time.Unix(300, 0).UTC()
+	if err := store.Put(ctx, overflow); err == nil || !strings.Contains(err.Error(), "not draining") {
+		t.Fatalf("overflow err = %v", err)
+	}
+	for range watch {
+	}
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func recordWith(rec domain.JobRecord, mutate func(*domain.JobRecord)) domain.JobRecord {
+	mutate(&rec)
+	return rec
+}
+
+func receiveStoreRecord(t *testing.T, ch <-chan domain.JobRecord) domain.JobRecord {
+	t.Helper()
+	select {
+	case rec, ok := <-ch:
+		if !ok {
+			t.Fatal("watch closed")
+		}
+		return rec
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for record")
+	}
+	return domain.JobRecord{}
+}
+
+func receiveStoreClosed(t *testing.T, ch <-chan domain.JobRecord) (domain.JobRecord, bool) {
+	t.Helper()
+	select {
+	case rec, ok := <-ch:
+		return rec, ok
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for watch close")
+	}
+	return domain.JobRecord{}, false
 }

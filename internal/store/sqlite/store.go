@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"sync"
 	"time"
 
 	"mycelium/internal/domain"
@@ -16,7 +18,10 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db             *sql.DB
+	mu             sync.Mutex
+	jobWatchers    map[int]chan domain.JobRecord
+	nextJobWatcher int
 }
 
 func Open(path string) (*Store, error) {
@@ -169,6 +174,75 @@ func (s *Store) ListJobs(ctx context.Context) ([]domain.Job, error) {
 	var jobs []domain.Job
 	err := s.listJSON(ctx, "jobs", &jobs)
 	return jobs, err
+}
+
+func (s *Store) Put(ctx context.Context, rec domain.JobRecord) error {
+	if err := validateJobRecord(rec); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec = cloneJobRecord(rec)
+	existing, ok, err := s.jobRecord(ctx, rec.JobID)
+	if err != nil {
+		return err
+	}
+	if ok && !newerJobRecord(rec, existing) {
+		return nil
+	}
+	if err := s.upsertJSON(ctx, "job_records", rec.JobID, rec); err != nil {
+		return err
+	}
+	for id, ch := range s.jobWatchers {
+		select {
+		case ch <- cloneJobRecord(rec):
+		default:
+			delete(s.jobWatchers, id)
+			close(ch)
+			return fmt.Errorf("sqlite job registry watcher %d is not draining", id)
+		}
+	}
+	return nil
+}
+
+func (s *Store) Watch(ctx context.Context, fromCursor string) (<-chan domain.JobRecord, error) {
+	cursor, err := parseJobRecordCursor(fromCursor)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pending, err := s.jobRecordsAfter(ctx, cursor)
+	if err != nil {
+		return nil, err
+	}
+	if s.jobWatchers == nil {
+		s.jobWatchers = map[int]chan domain.JobRecord{}
+	}
+	ch := make(chan domain.JobRecord, len(pending)+128)
+	for _, rec := range pending {
+		ch <- rec
+	}
+	id := s.nextJobWatcher
+	s.nextJobWatcher++
+	s.jobWatchers[id] = ch
+	go func() {
+		<-ctx.Done()
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if current, ok := s.jobWatchers[id]; ok {
+			delete(s.jobWatchers, id)
+			close(current)
+		}
+	}()
+	return ch, nil
+}
+
+func (s *Store) Snapshot(ctx context.Context) ([]domain.JobRecord, error) {
+	return s.jobRecordsAfter(ctx, time.Time{})
 }
 
 func (s *Store) SaveRecommendation(ctx context.Context, rec domain.RecommendationRecord) error {
@@ -412,6 +486,87 @@ func (s *Store) recommendation(ctx context.Context, id string) (domain.Recommend
 	return rec, err
 }
 
+func (s *Store) jobRecord(ctx context.Context, id string) (domain.JobRecord, bool, error) {
+	var rec domain.JobRecord
+	err := s.getJSON(ctx, "job_records", id, &rec)
+	if err == sql.ErrNoRows {
+		return domain.JobRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.JobRecord{}, false, err
+	}
+	return rec, true, nil
+}
+
+func (s *Store) jobRecordsAfter(ctx context.Context, cursor time.Time) ([]domain.JobRecord, error) {
+	var records []domain.JobRecord
+	if err := s.listJSON(ctx, "job_records", &records); err != nil {
+		return nil, err
+	}
+	out := records[:0]
+	for _, rec := range records {
+		if cursor.IsZero() || rec.UpdatedAt.After(cursor) {
+			out = append(out, cloneJobRecord(rec))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].JobID < out[j].JobID
+		}
+		return out[i].UpdatedAt.Before(out[j].UpdatedAt)
+	})
+	return out, nil
+}
+
+func validateJobRecord(rec domain.JobRecord) error {
+	if rec.JobID == "" {
+		return fmt.Errorf("job record id is required")
+	}
+	if rec.Coordinator == "" {
+		return fmt.Errorf("job record coordinator is required")
+	}
+	if rec.Status == "" {
+		return fmt.Errorf("job record status is required")
+	}
+	if len(rec.Request) == 0 {
+		return fmt.Errorf("job record request payload is required")
+	}
+	if rec.UpdatedAt.IsZero() {
+		return fmt.Errorf("job record updated_at is required")
+	}
+	return nil
+}
+
+func parseJobRecordCursor(raw string) (time.Time, error) {
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	cursor, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse job registry cursor: %w", err)
+	}
+	return cursor, nil
+}
+
+func newerJobRecord(next, current domain.JobRecord) bool {
+	if !next.UpdatedAt.Equal(current.UpdatedAt) {
+		return next.UpdatedAt.After(current.UpdatedAt)
+	}
+	if next.Fence != current.Fence {
+		return next.Fence > current.Fence
+	}
+	return jobRecordTieKey(next) > jobRecordTieKey(current)
+}
+
+func jobRecordTieKey(rec domain.JobRecord) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d", rec.Coordinator, rec.AssignedNode, rec.Status, rec.Request, rec.Fence)
+}
+
+func cloneJobRecord(rec domain.JobRecord) domain.JobRecord {
+	rec.Request = append([]byte(nil), rec.Request...)
+	return rec
+}
+
 func (s *Store) deleteID(ctx context.Context, table, id string) error {
 	return s.deleteColumn(ctx, table, "id", id)
 }
@@ -435,6 +590,7 @@ CREATE TABLE IF NOT EXISTS instances (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reservations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS job_records (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS recommendations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS process_refs (node_id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS join_tokens (id TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -489,3 +645,4 @@ func ensureColumn(ctx context.Context, db *sql.DB, table, column, spec string) e
 }
 
 var _ ports.TelemetryStore = (*Store)(nil)
+var _ ports.JobRegistry = (*Store)(nil)
