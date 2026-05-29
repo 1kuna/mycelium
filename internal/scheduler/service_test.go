@@ -381,18 +381,29 @@ func TestServiceResolveAndPreemptionErrors(t *testing.T) {
 			return err
 		}},
 		{name: "node agent", fn: func() error {
-			_, err := service.resolveInstance(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID)), domain.PlacementDecision{NodeID: "missing"}, domain.FleetSnapshot{})
+			missing := fixtures.MakeNode(fixtures.WithNodeID("missing"))
+			_, err := service.resolveInstance(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID)), domain.PlacementDecision{NodeID: missing.ID}, domain.FleetSnapshot{Nodes: []domain.Node{missing}})
+			return err
+		}},
+		{name: "missing selected node", fn: func() error {
+			_, err := service.resolveInstance(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID)), domain.PlacementDecision{NodeID: node.ID}, domain.FleetSnapshot{})
 			return err
 		}},
 		{name: "resolve preset in load", fn: func() error {
-			_, err := service.resolveInstance(context.Background(), fixtures.MakeJob(fixtures.WithPreset("missing")), domain.PlacementDecision{NodeID: node.ID}, domain.FleetSnapshot{})
+			_, err := service.resolveInstance(context.Background(), fixtures.MakeJob(fixtures.WithPreset("missing")), domain.PlacementDecision{NodeID: node.ID}, domain.FleetSnapshot{Nodes: []domain.Node{node}})
+			return err
+		}},
+		{name: "tuning", fn: func() error {
+			badNode := node
+			badNode.Accelerators = []domain.Accelerator{{Index: 0, VRAMTotalMB: 1}, {Index: 1, VRAMTotalMB: 0}}
+			_, err := service.resolveInstance(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID)), domain.PlacementDecision{NodeID: node.ID, AcceleratorSet: []int{0, 1}}, domain.FleetSnapshot{Nodes: []domain.Node{badNode}})
 			return err
 		}},
 		{name: "load", fn: func() error {
 			agent := mocks.NewNodeAgent(node)
 			agent.LoadErr = errors.New("load")
 			service.Nodes = staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}}
-			_, err := service.resolveInstance(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID)), domain.PlacementDecision{NodeID: node.ID}, domain.FleetSnapshot{})
+			_, err := service.resolveInstance(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID)), domain.PlacementDecision{NodeID: node.ID}, domain.FleetSnapshot{Nodes: []domain.Node{node}})
 			service.Nodes = staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}}
 			return err
 		}},
@@ -427,7 +438,7 @@ func TestServiceResolveAndPreemptionErrors(t *testing.T) {
 	if got, err := service.resolvePreset(domain.Job{ID: "job-model", Model: preset.ModelRef}); err != nil || got.ID != preset.ID {
 		t.Fatalf("resolve model = %+v %v", got, err)
 	}
-	loaded, err := service.resolveInstance(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID)), domain.PlacementDecision{NodeID: node.ID, Claim: fixtures.MakeClaim(3, 4)}, domain.FleetSnapshot{})
+	loaded, err := service.resolveInstance(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID)), domain.PlacementDecision{NodeID: node.ID, Claim: fixtures.MakeClaim(3, 4)}, domain.FleetSnapshot{Nodes: []domain.Node{node}})
 	if err != nil {
 		t.Fatalf("resolve load: %v", err)
 	}
