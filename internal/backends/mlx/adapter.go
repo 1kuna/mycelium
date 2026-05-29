@@ -19,7 +19,7 @@ func NewAdapterWithConfig(cfg Config) *processadapter.Adapter {
 	return processadapter.New(processadapter.Config{
 		Name:            "mlx",
 		BinaryPath:      cfg.BinaryPath,
-		Args:            []string{"server", "--model", "{model}", "--host", "{host}", "--port", "{port}"},
+		Args:            []string{"--model", "{model}", "--host", "{host}", "--port", "{port}"},
 		HealthPath:      "/health",
 		PollInterval:    250 * time.Millisecond,
 		ProcessRegistry: cfg.ProcessRegistry,

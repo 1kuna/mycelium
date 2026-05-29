@@ -23,11 +23,13 @@ Current verified gates after the completion pass:
   `smoke ok: 8 passed, 0 skipped, 0 failed`.
 - `MYCELIUM_REMOTE_PEER_ADDR=192.0.2.63:51847 MYCELIUM_REMOTE_PEER_MODEL=$HOME/.mycelium/models/stories260K.gguf make smoke-fleet SMOKE_JSON=/tmp/mycelium-smoke-fleet-final.json`:
   `smoke ok: 1 passed, 0 skipped, 0 failed`.
+- `MYCELIUM_MLX_BINARY=<repo>/.venv-mlx/bin/mlx_lm.server MYCELIUM_MLX_MODEL=mlx-community/Qwen2.5-0.5B-Instruct-4bit make smoke-mlx SMOKE_JSON=/tmp/mycelium-smoke-mlx.json`:
+  `smoke ok: 4 passed, 0 skipped, 0 failed`.
 
 Remaining open items are hardware/engine-gated and are tracked in
-`BLOCKERS.md`: real MLX, vLLM, CUDA/NVIDIA, and cross-machine
-MLX-distributed smoke proof. `command -v mlx_lm.server`, `command -v vllm`,
-and `command -v nvidia-smi` are empty on this dev host.
+`BLOCKERS.md`: vLLM, CUDA/NVIDIA, and cross-machine MLX-distributed smoke
+proof. `command -v vllm` and `command -v nvidia-smi` are empty on this dev
+host.
 
 Scope: Compared `AGENTS.md`, `01-project-spec.md`, `02-testing-architecture.md`,
 `03-development-guide.md`, and `skills/*.md` against the current code under
