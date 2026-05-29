@@ -141,7 +141,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPeerConfig: %v", err)
 	}
-	if peerCfg.QueueDrainMS != 1000 || peerCfg.QueueDrainLimit != 1 || peerCfg.OptimizerEvalMS != 60000 || peerCfg.DiscoveryScanMS != 250 || peerCfg.DiscoveryAdvertiseMS != 5000 {
+	if peerCfg.QueueDrainMS != 1000 || peerCfg.QueueDrainLimit != 1 || peerCfg.OptimizerEvalMS != 60000 || peerCfg.RegistrySyncMS != 1000 || peerCfg.DiscoveryScanMS != 250 || peerCfg.DiscoveryAdvertiseMS != 5000 {
 		t.Fatalf("peer drain defaults = %+v", peerCfg)
 	}
 	if peerCfg.ComputeConfig.ID != "peer_local" || peerCfg.ComputeConfig.BackendListen != "127.0.0.1:51848" {
@@ -424,6 +424,55 @@ func TestPeerHealthProbeAndDeadMarker(t *testing.T) {
 	}
 }
 
+func TestRegistryRPCRequiresAuthAndMergesRecords(t *testing.T) {
+	ctx := context.Background()
+	store := peerTestRegistry(t)
+	local := domain.JobRecord{
+		JobID:       "job-local",
+		Coordinator: "peer-a",
+		Status:      domain.JobRunning,
+		Request:     []byte(`{"job":"local"}`),
+		UpdatedAt:   time.Unix(20, 0).UTC(),
+	}
+	if err := store.Put(ctx, local); err != nil {
+		t.Fatalf("Put local: %v", err)
+	}
+	mux := http.NewServeMux()
+	mountRegistryHTTP(mux, store, "rpc-secret")
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	peer := domain.Peer{ID: "peer-a", Addresses: []string{server.URL}}
+
+	if _, err := (registryHTTPClient{}).Snapshot(ctx, peer); err == nil || !strings.Contains(err.Error(), "rpc token") {
+		t.Fatalf("unauthorized snapshot err = %v", err)
+	}
+	client := registryHTTPClient{AuthToken: "rpc-secret"}
+	records, err := client.Snapshot(ctx, peer)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(records) != 1 || records[0].JobID != local.JobID {
+		t.Fatalf("snapshot = %+v", records)
+	}
+	remote := domain.JobRecord{
+		JobID:       "job-remote",
+		Coordinator: "peer-b",
+		Status:      domain.JobQueued,
+		Request:     []byte(`{"job":"remote"}`),
+		UpdatedAt:   time.Unix(21, 0).UTC(),
+	}
+	if err := client.Push(ctx, peer, []domain.JobRecord{remote}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	records, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot local: %v", err)
+	}
+	if len(records) != 2 || records[1].JobID != "job-remote" {
+		t.Fatalf("local registry = %+v", records)
+	}
+}
+
 func TestSeedPeerProbeRemembersReachablePeer(t *testing.T) {
 	seed := domain.Peer{ID: "seed-peer", Addresses: []string{"127.0.0.1:0"}, Compute: true}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -454,6 +503,18 @@ func TestSeedPeerProbeRemembersReachablePeer(t *testing.T) {
 
 func serverURL(r *http.Request) string {
 	return "http://" + r.Host
+}
+
+func peerTestRegistry(t *testing.T) *storesqlite.Store {
+	t.Helper()
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open registry: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	return store
 }
 
 func TestAllocatorFromReservationsReservesHeadroomAndPinnedPresets(t *testing.T) {
