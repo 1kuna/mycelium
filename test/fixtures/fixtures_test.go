@@ -45,3 +45,51 @@ func TestMakePresetDefaultsValid(t *testing.T) {
 		t.Fatalf("invalid preset defaults: %+v", p)
 	}
 }
+
+func TestAllNodeOptions(t *testing.T) {
+	n := Make4090Node(WithNodeID("n1"), WithVRAM(123), WithUsedVRAM(45), WithMaxUtil(0.75), Catastrophic, Maintenance)
+	if n.ID != "n1" || n.Accelerators[0].VRAMTotalMB != 123 || n.Accelerators[0].VRAMUsedMB != 45 {
+		t.Fatalf("node fields = %+v", n)
+	}
+	if n.MaxUtil != 0.75 || n.OOMSeverity != domain.OOMCatastrophic || n.Status != domain.NodeMaintenance {
+		t.Fatalf("node options = %+v", n)
+	}
+}
+
+func TestAllJobOptions(t *testing.T) {
+	j := MakeJob(WithJobID("job1"), Background, Auto, Hard, WithPreset("preset1"))
+	if j.ID != "job1" || j.Priority != domain.PriorityBackground || j.SpeedPref != domain.SpeedAuto {
+		t.Fatalf("job options = %+v", j)
+	}
+	if j.Preemption != domain.PreemptHard || j.PresetID != "preset1" {
+		t.Fatalf("job options = %+v", j)
+	}
+}
+
+func TestAllPresetAndInstanceOptions(t *testing.T) {
+	p := MakePreset(WithPresetID("preset1"), WithModelRef("model1"), WithWeights(12), WithKVPerToken(0.5), WithContextLength(4096))
+	if p.ID != "preset1" || p.ModelRef != "model1" || p.EstWeightsMB != 12 || p.KVPerTokenMB != 0.5 || p.ContextLength != 4096 {
+		t.Fatalf("preset options = %+v", p)
+	}
+	if MakeClaim(1, 2) != (domain.Claim{WeightsMB: 1, KVReservedMB: 2}) {
+		t.Fatal("claim factory returned wrong value")
+	}
+
+	inst := MakeInstance(
+		WithInstanceID("inst1"),
+		OnNode("node1"),
+		WithInstancePreset("preset1"),
+		WithClaim(MakeClaim(3, 4)),
+		WithInstancePriority(domain.PriorityInteractive),
+		Loading,
+	)
+	if inst.ID != "inst1" || inst.NodeID != "node1" || inst.PresetID != "preset1" {
+		t.Fatalf("instance options = %+v", inst)
+	}
+	if inst.Claim != (domain.Claim{WeightsMB: 3, KVReservedMB: 4}) || inst.Priority != domain.PriorityInteractive {
+		t.Fatalf("instance options = %+v", inst)
+	}
+	if inst.State != domain.InstLoading || !inst.Loading {
+		t.Fatalf("loading option = %+v", inst)
+	}
+}
