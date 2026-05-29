@@ -35,3 +35,10 @@ func TestMockAllocatorConformance(t *testing.T) {
 		fixtures.MakeNode(),
 		domain.Claim{WeightsMB: 1, KVReservedMB: 1})
 }
+
+func TestMockAdmissionControllerConformance(t *testing.T) {
+	RunAdmissionControllerConformance(t, "mock",
+		func() ports.AdmissionController { return &mocks.AdmissionController{} },
+		fixtures.MakeJob(),
+		fixtures.MakeClaim(1, 1))
+}
