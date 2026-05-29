@@ -179,3 +179,20 @@ type JoinTokenRecord struct {
 	Active  bool   `json:"active"`
 	Current bool   `json:"current"`
 }
+
+type ShardAssignment struct {
+	Rank           int    `json:"rank"`
+	NodeID         string `json:"node_id"`
+	AcceleratorSet []int  `json:"accelerator_set"`
+	Claim          Claim  `json:"claim"`
+}
+
+type ShardPlan struct {
+	ID          string            `json:"id"`
+	PresetID    string            `json:"preset_id"`
+	ModelRef    string            `json:"model_ref"`
+	Backend     Backend           `json:"backend"`
+	ContextLen  int               `json:"context_len"`
+	Assignments []ShardAssignment `json:"assignments"`
+	Trace       []TraceStep       `json:"trace"`
+}

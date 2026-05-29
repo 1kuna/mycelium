@@ -48,3 +48,4 @@
 - 2026-05-29: Speed-class calibration uses the deterministic average observed tokens/sec per node from persisted run metrics, rounded to two decimals and written back to the node record with source `telemetry-calibrated`.
 - 2026-05-29: Catalog installs persist job state under the catalog store and stage artifacts under a deterministic job directory; model and provenance commit before preset JSON, so reruns can resume staged work without exposing a usable preset early.
 - 2026-05-29: UDP LAN discovery is a narrow node-announcement fallback behind `ports.Discovery`; seed-address join remains the membership authority, while UDP only discovers node advertisements and never grants backend authorization.
+- 2026-05-29: Cross-machine sharding starts as an explicit planner contract that splits estimated claims across distinct ready nodes and ranks them by calibrated speed; real distributed backend launch remains separate hardware-gated execution work.
