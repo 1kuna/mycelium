@@ -134,6 +134,7 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 		Runtime:   runtime,
 		Telemetry: store,
 		Clock:     clock.System{},
+		Sticky:    gateway.NewStickyTable(clock.System{}, 10*time.Minute),
 	}}
 	if mux != nil {
 		mux.Handle("/", handler)

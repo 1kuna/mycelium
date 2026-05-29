@@ -21,18 +21,19 @@ const (
 )
 
 type IngressRequest struct {
-	Kind           IngressKind
-	Model          string
-	Stream         bool
-	Project        string
-	Priority       domain.Priority
-	SpeedPref      domain.SpeedPref
-	ContextRequest int
-	Preemption     domain.Preemption
-	Body           []byte
-	OpenAI         api.OpenAIChatRequest
-	Complete       api.OpenAICompletionRequest
-	Claude         api.AnthropicMessagesRequest
+	Kind            IngressKind
+	Model           string
+	Stream          bool
+	Project         string
+	Priority        domain.Priority
+	SpeedPref       domain.SpeedPref
+	ContextRequest  int
+	Preemption      domain.Preemption
+	ConversationKey string
+	Body            []byte
+	OpenAI          api.OpenAIChatRequest
+	Complete        api.OpenAICompletionRequest
+	Claude          api.AnthropicMessagesRequest
 }
 
 type UpstreamRequest struct {

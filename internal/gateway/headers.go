@@ -9,16 +9,17 @@ import (
 )
 
 const (
-	HeaderDecision   = "X-Myc-Decision"
-	HeaderNode       = "X-Myc-Node"
-	HeaderInstance   = "X-Myc-Instance"
-	HeaderBackend    = "X-Myc-Backend"
-	HeaderAttempts   = "X-Myc-Attempts"
-	HeaderProject    = "X-Myc-Project"
-	HeaderPriority   = "X-Myc-Priority"
-	HeaderSpeedPref  = "X-Myc-Speed-Pref"
-	HeaderContextCap = "X-Myc-Context-Cap"
-	HeaderPreemption = "X-Myc-Preemption"
+	HeaderDecision     = "X-Myc-Decision"
+	HeaderNode         = "X-Myc-Node"
+	HeaderInstance     = "X-Myc-Instance"
+	HeaderBackend      = "X-Myc-Backend"
+	HeaderAttempts     = "X-Myc-Attempts"
+	HeaderProject      = "X-Myc-Project"
+	HeaderPriority     = "X-Myc-Priority"
+	HeaderSpeedPref    = "X-Myc-Speed-Pref"
+	HeaderContextCap   = "X-Myc-Context-Cap"
+	HeaderPreemption   = "X-Myc-Preemption"
+	HeaderConversation = "X-Myc-Conversation"
 )
 
 func writeDecisionHeaders(h http.Header, decision domain.PlacementDecision, inst domain.ModelInstance, profile profiles.Profile, attempts int) {
