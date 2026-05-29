@@ -1,0 +1,140 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"mycelium/internal/domain"
+	"mycelium/test/fixtures"
+)
+
+func TestStorePersistsControlPlaneState(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "control.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	project := domain.Project{ID: "proj", Priority: domain.PriorityInteractive, SpeedPref: domain.SpeedLatency, ContextCap: 8192, AutoApply: true}
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("/models/a.gguf"))
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst-a"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
+	lease := domain.Lease{ID: "lease-a", JobID: "job-a", InstanceID: inst.ID, NodeID: node.ID, Claim: fixtures.MakeClaim(1, 2), GrantedAt: time.Unix(1, 0).UTC()}
+	reservation := domain.Reservation{ID: "res-a", Kind: domain.ReservationHeadroom, NodeID: node.ID, Headroom: fixtures.MakeClaim(3, 4)}
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	rec := domain.RecommendationRecord{ID: "rec-a", Type: "context_cap_recommendation", ProjectID: project.ID, RecommendedValue: 4096, CreatedAt: time.Unix(2, 0).UTC()}
+	refs := []domain.ProcessRef{{PID: 12, Kind: "process", Ref: "12"}}
+
+	must(t, store.SaveProject(ctx, project))
+	must(t, store.SavePreset(ctx, preset))
+	must(t, store.SaveNode(ctx, node))
+	must(t, store.SaveInstance(ctx, inst))
+	must(t, store.SaveLease(ctx, lease))
+	must(t, store.SaveReservation(ctx, reservation))
+	must(t, store.SaveJob(ctx, job))
+	must(t, store.SaveRecommendation(ctx, rec))
+	must(t, store.SaveProcessRefs(ctx, node.ID, refs))
+	must(t, store.Close())
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+
+	gotProject, err := reopened.Project(ctx, project.ID)
+	if err != nil || gotProject.ID != project.ID || !gotProject.AutoApply {
+		t.Fatalf("Project = %+v, %v", gotProject, err)
+	}
+	if gotPreset, err := reopened.Preset(ctx, preset.ID); err != nil || gotPreset.ModelRef != preset.ModelRef {
+		t.Fatalf("Preset = %+v, %v", gotPreset, err)
+	}
+	if gotNode, err := reopened.Node(ctx, node.ID); err != nil || gotNode.ID != node.ID {
+		t.Fatalf("Node = %+v, %v", gotNode, err)
+	}
+	if gotInst, err := reopened.Instance(ctx, inst.ID); err != nil || gotInst.PresetID != preset.ID {
+		t.Fatalf("Instance = %+v, %v", gotInst, err)
+	}
+	if gotRefs, err := reopened.ProcessRefs(ctx, node.ID); err != nil || len(gotRefs) != 1 || gotRefs[0].PID != 12 {
+		t.Fatalf("ProcessRefs = %+v, %v", gotRefs, err)
+	}
+
+	if projects, err := reopened.ListProjects(ctx); err != nil || len(projects) != 1 {
+		t.Fatalf("ListProjects len = %d, %v", len(projects), err)
+	}
+	if presets, err := reopened.ListPresets(ctx); err != nil || len(presets) != 1 {
+		t.Fatalf("ListPresets len = %d, %v", len(presets), err)
+	}
+	if nodes, err := reopened.ListNodes(ctx); err != nil || len(nodes) != 1 {
+		t.Fatalf("ListNodes len = %d, %v", len(nodes), err)
+	}
+	if instances, err := reopened.ListInstances(ctx); err != nil || len(instances) != 1 {
+		t.Fatalf("ListInstances len = %d, %v", len(instances), err)
+	}
+	if leases, err := reopened.ListLeases(ctx); err != nil || len(leases) != 1 {
+		t.Fatalf("ListLeases len = %d, %v", len(leases), err)
+	}
+	if reservations, err := reopened.ListReservations(ctx); err != nil || len(reservations) != 1 {
+		t.Fatalf("ListReservations len = %d, %v", len(reservations), err)
+	}
+	if jobs, err := reopened.ListJobs(ctx); err != nil || len(jobs) != 1 {
+		t.Fatalf("ListJobs len = %d, %v", len(jobs), err)
+	}
+	if recs, err := reopened.ListRecommendations(ctx, project.ID); err != nil || len(recs) != 1 {
+		t.Fatalf("ListRecommendations len = %d, %v", len(recs), err)
+	}
+
+	must(t, reopened.MarkRecommendationApplied(ctx, rec.ID, time.Unix(3, 0).UTC()))
+	recs, err := reopened.ListRecommendations(ctx, "")
+	if err != nil || !recs[0].Applied || recs[0].AppliedAt.IsZero() {
+		t.Fatalf("applied recs = %+v, %v", recs, err)
+	}
+
+	must(t, reopened.DeleteInstance(ctx, inst.ID))
+	must(t, reopened.DeleteLease(ctx, lease.ID))
+	must(t, reopened.DeleteReservation(ctx, reservation.ID))
+	must(t, reopened.DeleteProcessRefs(ctx, node.ID))
+}
+
+func TestStoreTelemetryAndErrors(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SaveProject(ctx, domain.Project{}); err == nil {
+		t.Fatal("SaveProject should require an id")
+	}
+	if _, err := store.Project(ctx, "missing"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing project err = %v", err)
+	}
+	if err := store.Record(ctx, domain.RunMetric{JobID: "metric"}); err == nil {
+		t.Fatal("Record should require timestamp")
+	}
+
+	at := time.Unix(10, 0).UTC()
+	must(t, store.Record(ctx, domain.RunMetric{JobID: "m1", InstanceID: "i", NodeID: "n", Project: "p1", ContextUsed: 10, At: at}))
+	must(t, store.Record(ctx, domain.RunMetric{JobID: "m2", InstanceID: "i", NodeID: "n", Project: "p2", ContextUsed: 20, At: at.Add(time.Second)}))
+	all, err := store.Metrics(ctx, "")
+	if err != nil || len(all) != 2 {
+		t.Fatalf("Metrics all len = %d, %v", len(all), err)
+	}
+	filtered, err := store.Metrics(ctx, "p2")
+	if err != nil || len(filtered) != 1 || filtered[0].JobID != "m2" {
+		t.Fatalf("Metrics filtered = %+v, %v", filtered, err)
+	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
