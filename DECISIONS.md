@@ -32,3 +32,4 @@
 - 2026-05-29: `mycelium server` now boots from JSON config and seeds the durable store before serving; `myce add-model` writes the same SQLite preset record it expects the server to load.
 - 2026-05-29: Scheduler runtime execution is a service around the existing placer; the placer remains pure decision logic while the service owns queue persistence, node load/unload calls, and lease grants.
 - 2026-05-29: Node startup uses the same SQLite store for process refs that llama.cpp launch/stop updates; macOS hardware discovery uses `sysctl hw.memsize`, while Linux discovery fails loudly until NVIDIA probing is implemented.
+- 2026-05-29: Gateway request controls are HTTP headers mapped into scheduler jobs; context overflow retry selects the next larger persisted preset for the same backend/model instead of inventing an ad hoc preset at request time.

@@ -9,10 +9,14 @@ import (
 	"net/http"
 	"strings"
 
+	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/gateway/profiles"
 	"mycelium/internal/gateway/translate"
+	"mycelium/internal/optimizer"
 	"mycelium/internal/ports"
+	"mycelium/internal/scheduler"
+	"mycelium/pkg/api"
 )
 
 type FleetSource interface {
@@ -30,10 +34,11 @@ type FailureReporter interface {
 type PresetRegistry struct {
 	byModel map[string]domain.Preset
 	byID    map[string]domain.Preset
+	all     []domain.Preset
 }
 
 func NewPresetRegistry(presets ...domain.Preset) PresetRegistry {
-	r := PresetRegistry{byModel: map[string]domain.Preset{}, byID: map[string]domain.Preset{}}
+	r := PresetRegistry{byModel: map[string]domain.Preset{}, byID: map[string]domain.Preset{}, all: append([]domain.Preset(nil), presets...)}
 	for _, preset := range presets {
 		r.byID[preset.ID] = preset
 		r.byModel[preset.ModelRef] = preset
@@ -51,15 +56,31 @@ func (r PresetRegistry) Resolve(model string) (domain.Preset, error) {
 	return domain.Preset{}, fmt.Errorf("unknown model %q", model)
 }
 
+func (r PresetRegistry) NextLargerContext(current domain.Preset) (domain.Preset, bool) {
+	var best domain.Preset
+	for _, preset := range r.all {
+		if preset.ID == current.ID || preset.Backend != current.Backend || preset.ModelRef != current.ModelRef || preset.ContextLength <= current.ContextLength {
+			continue
+		}
+		if best.ID == "" || preset.ContextLength < best.ContextLength {
+			best = preset
+		}
+	}
+	return best, best.ID != ""
+}
+
 type Router struct {
-	Placer   ports.Placer
-	Fleet    FleetSource
-	Nodes    NodeResolver
-	Presets  PresetRegistry
-	Profiles profiles.Registry
-	Client   *http.Client
-	Reporter FailureReporter
-	MaxTries int
+	Placer    ports.Placer
+	Fleet     FleetSource
+	Nodes     NodeResolver
+	Presets   PresetRegistry
+	Profiles  profiles.Registry
+	Client    *http.Client
+	Reporter  FailureReporter
+	Runtime   *scheduler.Service
+	Telemetry ports.TelemetrySink
+	Clock     ports.Clock
+	MaxTries  int
 }
 
 type RouteResponse struct {
@@ -95,19 +116,8 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	}
 	var lastErr error
 	for attempt := 1; attempt <= tries; attempt++ {
-		decision, err := r.Placer.Place(ctx, domain.Job{
-			ID:        fmt.Sprintf("gateway-%s-%d", req.Model, attempt),
-			TaskType:  "chat",
-			Model:     req.Model,
-			Project:   "gateway",
-			Priority:  domain.PriorityInteractive,
-			SpeedPref: domain.SpeedThroughput,
-			Streaming: req.Stream,
-		}, fleet)
-		if err != nil {
-			return RouteResponse{}, err
-		}
-		inst, cold, err := r.resolveInstance(ctx, decision, preset, fleet)
+		job := jobFromIngress(req, attempt)
+		decision, inst, cold, err := r.placeAndLoad(ctx, job, preset, fleet)
 		if err != nil {
 			return RouteResponse{}, err
 		}
@@ -126,12 +136,23 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			continue
 		}
 		if resp.Status >= 400 {
-			return RouteResponse{}, fmt.Errorf("upstream returned %d: %s", resp.Status, strings.TrimSpace(string(resp.Body)))
+			bodyText := strings.TrimSpace(string(resp.Body))
+			if optimizer.IsContextOverflow(preset.Backend, fmt.Errorf("%s", bodyText)) {
+				next, ok := r.Presets.NextLargerContext(preset)
+				if ok {
+					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", preset.ID, next.ID)
+					req.Model = next.ID
+					preset = next
+					continue
+				}
+			}
+			return RouteResponse{}, fmt.Errorf("upstream returned %d: %s", resp.Status, bodyText)
 		}
 		body, contentType, err := translate.TranslateResponse(req, route, resp.Body)
 		if err != nil {
 			return RouteResponse{}, err
 		}
+		r.recordMetric(ctx, job, inst, body)
 		headers := cloneHeader(resp.Header)
 		if contentType != "" {
 			headers.Set("Content-Type", contentType)
@@ -154,6 +175,60 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		}, nil
 	}
 	return RouteResponse{}, fmt.Errorf("gateway failover exhausted: %w", lastErr)
+}
+
+func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot) (domain.PlacementDecision, domain.ModelInstance, bool, error) {
+	if r.Runtime != nil {
+		result, err := r.Runtime.Submit(ctx, job)
+		if err != nil {
+			return result.Decision, result.Instance, false, err
+		}
+		if result.Decision.Action == domain.ActionQueued {
+			return result.Decision, result.Instance, false, fmt.Errorf("job %q queued: no instance available", job.ID)
+		}
+		cold := result.Decision.InstanceID == ""
+		return result.Decision, result.Instance, cold, nil
+	}
+	decision, err := r.Placer.Place(ctx, job, fleet)
+	if err != nil {
+		return domain.PlacementDecision{}, domain.ModelInstance{}, false, err
+	}
+	inst, cold, err := r.resolveInstance(ctx, decision, preset, fleet)
+	return decision, inst, cold, err
+}
+
+func jobFromIngress(req translate.IngressRequest, attempt int) domain.Job {
+	project := req.Project
+	if project == "" {
+		project = "gateway"
+	}
+	priority := req.Priority
+	if priority == "" {
+		priority = domain.PriorityInteractive
+	}
+	speed := req.SpeedPref
+	if speed == "" {
+		speed = domain.SpeedThroughput
+	}
+	preemption := req.Preemption
+	if preemption == "" {
+		preemption = domain.PreemptSoft
+	}
+	taskType := "chat"
+	if req.Kind == translate.KindOpenAICompletion {
+		taskType = "completion"
+	}
+	return domain.Job{
+		ID:             fmt.Sprintf("gateway-%s-%d", req.Model, attempt),
+		TaskType:       taskType,
+		Model:          req.Model,
+		Project:        project,
+		Priority:       priority,
+		SpeedPref:      speed,
+		ContextRequest: req.ContextRequest,
+		Preemption:     preemption,
+		Streaming:      req.Stream,
+	}
 }
 
 func (r *Router) profileFor(preset domain.Preset) (profiles.Profile, error) {
@@ -220,6 +295,38 @@ func (r *Router) reportFailure(ctx context.Context, instanceID string, err error
 	if r.Reporter != nil {
 		r.Reporter.ReportInstanceFailure(ctx, instanceID, err)
 	}
+}
+
+func (r *Router) recordMetric(ctx context.Context, job domain.Job, inst domain.ModelInstance, body []byte) {
+	if r.Telemetry == nil {
+		return
+	}
+	prompt, completion := usageFromBody(body)
+	clk := r.Clock
+	if clk == nil {
+		clk = clock.System{}
+	}
+	_ = r.Telemetry.Record(ctx, domain.RunMetric{
+		JobID:        job.ID,
+		InstanceID:   inst.ID,
+		NodeID:       inst.NodeID,
+		Project:      job.Project,
+		ContextUsed:  prompt + completion,
+		TokensPerSec: 0,
+		At:           clk.Now().UTC(),
+	})
+}
+
+func usageFromBody(body []byte) (int, int) {
+	var openai api.OpenAIChatResponse
+	if err := json.Unmarshal(body, &openai); err == nil && openai.Usage.TotalTokens != 0 {
+		return openai.Usage.PromptTokens, openai.Usage.CompletionTokens
+	}
+	var anthropic api.AnthropicMessagesResponse
+	if err := json.Unmarshal(body, &anthropic); err == nil && (anthropic.Usage.InputTokens != 0 || anthropic.Usage.OutputTokens != 0) {
+		return anthropic.Usage.InputTokens, anthropic.Usage.OutputTokens
+	}
+	return 0, 0
 }
 
 func withoutInstance(fleet domain.FleetSnapshot, id string) domain.FleetSnapshot {
