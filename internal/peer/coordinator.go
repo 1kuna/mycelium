@@ -268,12 +268,16 @@ func (c *Coordinator) record(ctx context.Context, jobID string, status domain.Jo
 	if err != nil {
 		return err
 	}
+	request, err := EncodeRescuePayload(claimed.job, claimed.payload)
+	if err != nil {
+		return err
+	}
 	return c.registry.Put(ctx, domain.JobRecord{
 		JobID:        jobID,
 		Coordinator:  c.selfID,
 		AssignedNode: assignedNode,
 		Status:       status,
-		Request:      append([]byte(nil), claimed.payload...),
+		Request:      request,
 		Fence:        fence,
 		UpdatedAt:    c.nextRecordTime(),
 	})

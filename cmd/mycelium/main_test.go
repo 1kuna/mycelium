@@ -19,6 +19,7 @@ import (
 	"mycelium/internal/membership"
 	nodeagent "mycelium/internal/node"
 	"mycelium/internal/optimizer"
+	peercoord "mycelium/internal/peer"
 	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/test/mocks"
@@ -473,6 +474,34 @@ func TestRegistryRPCRequiresAuthAndMergesRecords(t *testing.T) {
 	}
 }
 
+func TestRescueRecoveredJobDecodesPayloadAndSubmits(t *testing.T) {
+	job := domain.Job{ID: "job-a", Model: "tiny", Priority: domain.PriorityInteractive}
+	payload, err := peercoord.EncodeRescuePayload(job, []byte(`{"model":"tiny"}`))
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload: %v", err)
+	}
+	runtime := &recordingRescueRuntime{}
+	rescue := rescueRecoveredJob(runtime)
+
+	if err := rescue(context.Background(), domain.JobRecord{JobID: job.ID, Request: payload}); err != nil {
+		t.Fatalf("rescue: %v", err)
+	}
+	if runtime.job.ID != job.ID || string(runtime.payload) != `{"model":"tiny"}` {
+		t.Fatalf("runtime job=%+v payload=%s", runtime.job, runtime.payload)
+	}
+
+	badPayload, err := peercoord.EncodeRescuePayload(domain.Job{ID: "other"}, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload bad: %v", err)
+	}
+	if err := rescue(context.Background(), domain.JobRecord{JobID: job.ID, Request: badPayload}); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatch rescue err = %v", err)
+	}
+	if err := rescue(context.Background(), domain.JobRecord{JobID: job.ID, Request: []byte(`{}`)}); err == nil || !strings.Contains(err.Error(), "job id") {
+		t.Fatalf("bad rescue err = %v", err)
+	}
+}
+
 func TestSeedPeerProbeRemembersReachablePeer(t *testing.T) {
 	seed := domain.Peer{ID: "seed-peer", Addresses: []string{"127.0.0.1:0"}, Compute: true}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -515,6 +544,17 @@ func peerTestRegistry(t *testing.T) *storesqlite.Store {
 		_ = store.Close()
 	})
 	return store
+}
+
+type recordingRescueRuntime struct {
+	job     domain.Job
+	payload []byte
+}
+
+func (r *recordingRescueRuntime) SubmitWithPayload(_ context.Context, job domain.Job, payload []byte, _ ...scheduler.SubmitHooks) (scheduler.Result, error) {
+	r.job = job
+	r.payload = append([]byte(nil), payload...)
+	return scheduler.Result{}, nil
 }
 
 func TestAllocatorFromReservationsReservesHeadroomAndPinnedPresets(t *testing.T) {

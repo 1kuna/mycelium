@@ -59,9 +59,10 @@ func TestCoordinatorClaimPlanCommitRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	if len(snap) != 1 || snap[0].Status != domain.JobDone || snap[0].AssignedNode != node.ID || string(snap[0].Request) != `{"job":"a"}` {
+	if len(snap) != 1 || snap[0].Status != domain.JobDone || snap[0].AssignedNode != node.ID {
 		t.Fatalf("registry = %+v", snap)
 	}
+	assertRescuePayload(t, snap[0].Request, job.ID, `{"job":"a"}`)
 }
 
 func TestCoordinatorReplansOnOwnerContention(t *testing.T) {
@@ -359,6 +360,10 @@ func TestCoordinatorErrorPaths(t *testing.T) {
 	if err := coordinator.record(ctx, "missing", domain.JobFailed, "", 0); err == nil {
 		t.Fatal("record for missing job succeeded")
 	}
+	coordinator.claimed[job.ID] = claimedJob{job: job}
+	if err := coordinator.record(ctx, job.ID, domain.JobFailed, "", 0); err == nil || !strings.Contains(err.Error(), "body") {
+		t.Fatalf("record rescue payload err = %v", err)
+	}
 	if coordinator.shouldReplan(errors.New("other"), 0) {
 		t.Fatal("non-replanable error replanned")
 	}
@@ -583,6 +588,17 @@ func mustClaim(t *testing.T, coordinator *Coordinator, jobID string) {
 	t.Helper()
 	if err := coordinator.ClaimJob(context.Background(), jobID); err != nil {
 		t.Fatalf("ClaimJob: %v", err)
+	}
+}
+
+func assertRescuePayload(t *testing.T, data []byte, jobID, body string) {
+	t.Helper()
+	job, gotBody, err := DecodeRescuePayload(data)
+	if err != nil {
+		t.Fatalf("DecodeRescuePayload: %v", err)
+	}
+	if job.ID != jobID || string(gotBody) != body {
+		t.Fatalf("rescue payload job=%+v body=%s", job, gotBody)
 	}
 }
 
