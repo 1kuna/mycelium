@@ -17,3 +17,4 @@
 - 2026-05-29: Use a narrow JSON HTTP node-agent transport for Phase 1 remote smoke (`snapshot`, `load`, `unload`, `inspect`); LAN discovery/onboarding remains Phase 4.
 - 2026-05-29: Llama.cpp launch profiles are explicit named arg lists, and per-preset launch args carry computed tuning such as GPU layers or tensor split into the backend command; unknown profiles fail before launch.
 - 2026-05-29: Use a 5m default node load timeout, enforced with the injected `Clock`; tests can shorten it and advance `FakeClock` without real sleeps.
+- 2026-05-29: Llama.cpp launch contexts bound process start and readiness only; a successfully launched backend stays alive until explicit `Stop`.

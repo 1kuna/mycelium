@@ -83,9 +83,19 @@ func (a *Adapter) Launch(ctx context.Context, p domain.Preset, addr string) (por
 	if err != nil {
 		return ports.Handle{}, err
 	}
-	cmd := exec.CommandContext(ctx, a.cfg.BinaryPath, args...)
+	if err := ctx.Err(); err != nil {
+		return ports.Handle{}, err
+	}
+	cmd := exec.Command(a.cfg.BinaryPath, args...)
 	if err := cmd.Start(); err != nil {
 		return ports.Handle{}, err
+	}
+	select {
+	case <-ctx.Done():
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return ports.Handle{}, ctx.Err()
+	default:
 	}
 	a.mu.Lock()
 	a.processes[cmd.Process.Pid] = cmd

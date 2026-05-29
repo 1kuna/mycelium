@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +108,50 @@ func TestLaunchAndStopLocalProcess(t *testing.T) {
 	if err := adapter.Stop(context.Background(), handle); err != nil {
 		t.Fatalf("second Stop: %v", err)
 	}
+}
+
+func TestLaunchContextDoesNotOwnProcessLifetime(t *testing.T) {
+	marker := t.TempDir() + "/stopped"
+	adapter := NewAdapter(Config{
+		BinaryPath: os.Args[0],
+		Args:       []string{"-test.run=TestLaunchContextHelperProcess", "--", marker},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	handle, err := adapter.Launch(ctx, fixtures.MakePreset(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	cancel()
+	<-time.After(100 * time.Millisecond)
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	if err := adapter.Stop(stopCtx, handle); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("launch context killed backend process before Stop: %v", err)
+	}
+}
+
+func TestLaunchContextHelperProcess(t *testing.T) {
+	separator := -1
+	for i, arg := range os.Args {
+		if arg == "--" {
+			separator = i
+			break
+		}
+	}
+	if separator < 0 {
+		return
+	}
+	marker := os.Args[separator+1]
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	<-interrupts
+	if err := os.WriteFile(marker, []byte("stopped"), 0600); err != nil {
+		panic(err)
+	}
+	os.Exit(0)
 }
 
 func TestStopSignalsUntrackedPID(t *testing.T) {
