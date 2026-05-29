@@ -1,11 +1,15 @@
 package api
 
+import "encoding/json"
+
 type AnthropicMessagesRequest struct {
-	Model     string             `json:"model"`
-	System    string             `json:"system,omitempty"`
-	Messages  []AnthropicMessage `json:"messages"`
-	MaxTokens int                `json:"max_tokens"`
-	Stream    bool               `json:"stream,omitempty"`
+	Model      string               `json:"model"`
+	System     string               `json:"system,omitempty"`
+	Messages   []AnthropicMessage   `json:"messages"`
+	MaxTokens  int                  `json:"max_tokens"`
+	Stream     bool                 `json:"stream,omitempty"`
+	Tools      []AnthropicTool      `json:"tools,omitempty"`
+	ToolChoice *AnthropicToolChoice `json:"tool_choice,omitempty"`
 }
 
 type AnthropicMessage struct {
@@ -14,8 +18,26 @@ type AnthropicMessage struct {
 }
 
 type AnthropicContentBlock struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	Source    json.RawMessage `json:"source,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
+}
+
+type AnthropicTool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+type AnthropicToolChoice struct {
 	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
 type AnthropicMessagesResponse struct {
