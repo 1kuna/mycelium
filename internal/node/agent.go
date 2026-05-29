@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 
@@ -17,6 +18,7 @@ type Agent struct {
 	clock      ports.Clock
 	telemetry  ports.TelemetrySink
 	inspector  ModelInspector
+	allocator  ports.Allocator
 	listenAddr string
 	nextID     int
 	instances  map[string]domain.ModelInstance
@@ -66,6 +68,12 @@ func WithListenAddr(addr string) Option {
 	}
 }
 
+func WithAllocator(allocator ports.Allocator) Option {
+	return func(a *Agent) {
+		a.allocator = allocator
+	}
+}
+
 func (a *Agent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -84,11 +92,15 @@ func (a *Agent) Load(ctx context.Context, p domain.Preset) (domain.ModelInstance
 	if inst, ok := a.readyInstance(p.ID); ok {
 		return inst, nil
 	}
-
 	op, owner := a.beginLoad(p)
 	if !owner {
 		return waitLoad(ctx, op)
 	}
+	if err := a.admitLoad(p); err != nil {
+		a.finishLoad(p.ID, op.inst.ID, ports.Handle{}, domain.ModelInstance{}, op, err)
+		return waitLoad(ctx, op)
+	}
+	a.markLoading(op.inst)
 
 	loadingID := op.inst.ID
 	inst, handle, err := a.launchAndWait(ctx, p, op.inst)
@@ -175,14 +187,50 @@ func (a *Agent) beginLoad(p domain.Preset) (*loadOp, bool) {
 		PresetID:       p.ID,
 		NodeID:         a.node.ID,
 		AcceleratorSet: []int{0},
-		Claim:          domain.Claim{WeightsMB: p.EstWeightsMB},
+		Claim:          claimForPreset(p),
 		State:          domain.InstLoading,
 		Loading:        true,
 	}
 	op := &loadOp{done: make(chan struct{}), inst: inst}
 	a.loads[p.ID] = op
-	a.instances[inst.ID] = inst
 	return op, true
+}
+
+func (a *Agent) markLoading(inst domain.ModelInstance) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.instances[inst.ID] = inst
+}
+
+func (a *Agent) admitLoad(p domain.Preset) error {
+	if a.allocator == nil {
+		return fmt.Errorf("allocator is not configured")
+	}
+	a.mu.Lock()
+	node := a.node
+	existing := a.instanceListLocked()
+	a.mu.Unlock()
+	acc := []int{0}
+	if !a.allocator.CanStackLoad(node, acc, existing) {
+		return fmt.Errorf("%w: load already in flight on node %q", domain.ErrNoFit, node.ID)
+	}
+	if !a.allocator.Fits(node, acc, existing, claimForPreset(p)) {
+		return fmt.Errorf("%w: node %q is saturated", domain.ErrNoFit, node.ID)
+	}
+	return nil
+}
+
+func (a *Agent) instanceListLocked() []domain.ModelInstance {
+	instances := make([]domain.ModelInstance, 0, len(a.instances))
+	for _, inst := range a.instances {
+		instances = append(instances, inst)
+	}
+	return instances
+}
+
+func claimForPreset(p domain.Preset) domain.Claim {
+	kv := int(math.Ceil(float64(p.ContextLength) * p.KVPerTokenMB))
+	return domain.Claim{WeightsMB: p.EstWeightsMB, KVReservedMB: kv}
 }
 
 func (a *Agent) finishLoad(presetID, instanceID string, handle ports.Handle, inst domain.ModelInstance, op *loadOp, err error) {

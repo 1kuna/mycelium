@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mycelium/internal/domain"
+	"mycelium/internal/lease"
 	"mycelium/internal/ports"
 	"mycelium/test/contract"
 	"mycelium/test/fixtures"
@@ -19,14 +20,14 @@ import (
 func TestAgentConformance(t *testing.T) {
 	contract.RunNodeAgentConformance(t, "node-agent",
 		func() ports.NodeAgent {
-			return NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
+			return NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 		},
 		fixtures.MakePreset())
 }
 
 func TestLoadReadinessGatesInstanceAndUnloadStopsBackend(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithListenAddr("127.0.0.1:1234"))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithListenAddr("127.0.0.1:1234"), WithAllocator(lease.NewAllocator()))
 
 	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
 	if err != nil {
@@ -55,7 +56,7 @@ func TestLoadReadinessGatesInstanceAndUnloadStopsBackend(t *testing.T) {
 
 func TestLoadReusesReadyInstance(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
 	preset := fixtures.MakePreset()
 
 	first, err := agent.Load(context.Background(), preset)
@@ -76,7 +77,7 @@ func TestLoadReusesReadyInstance(t *testing.T) {
 
 func TestConcurrentColdLoadsDeduplicate(t *testing.T) {
 	backend := newBlockingBackend()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
 	preset := fixtures.MakePreset()
 
 	var wg sync.WaitGroup
@@ -113,7 +114,7 @@ func TestConcurrentColdLoadsDeduplicate(t *testing.T) {
 func TestLoadFailureRemovesLoadingInstanceAndStopsHandle(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
 	backend.ReadyAfter = 1
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
 
 	_, err := agent.Load(context.Background(), fixtures.MakePreset())
 	if err == nil {
@@ -130,7 +131,7 @@ func TestLoadFailureRemovesLoadingInstanceAndStopsHandle(t *testing.T) {
 
 func TestUnloadUnknownAndStopFailure(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
 	if err := agent.Unload(context.Background(), "missing"); err == nil {
 		t.Fatal("expected unknown instance error")
 	}
@@ -145,10 +146,54 @@ func TestUnloadUnknownAndStopFailure(t *testing.T) {
 	}
 }
 
+func TestLoadFailsLoudWithoutAllocatorOrCapacity(t *testing.T) {
+	backend := mocks.NewBackendAdapter()
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()))
+	_, err := agent.Load(context.Background(), fixtures.MakePreset())
+	if err == nil || !strings.Contains(err.Error(), "allocator") {
+		t.Fatalf("missing allocator err = %v", err)
+	}
+	if countCalls(backend.Calls, "launch") != 0 {
+		t.Fatalf("backend launched despite missing allocator: %+v", backend.Calls)
+	}
+
+	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.5))
+	agent = NewAgent(node, backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	_, err = agent.Load(context.Background(), fixtures.MakePreset(fixtures.WithWeights(1000), fixtures.WithKVPerToken(0)))
+	if !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("saturation err = %v", err)
+	}
+}
+
+func TestCatastrophicNodeShedsSecondColdLoadWhileFirstLoads(t *testing.T) {
+	backend := newBlockingBackend()
+	agent := NewAgent(fixtures.MakeSparkNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	firstPreset := fixtures.MakePreset(fixtures.WithPresetID("first"))
+	secondPreset := fixtures.MakePreset(fixtures.WithPresetID("second"))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := agent.Load(context.Background(), firstPreset)
+		done <- err
+	}()
+	<-backend.waiting
+	_, err := agent.Load(context.Background(), secondPreset)
+	if !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("second load err = %v", err)
+	}
+	backend.release()
+	if err := <-done; err != nil {
+		t.Fatalf("first load err = %v", err)
+	}
+	if backend.launches != 1 {
+		t.Fatalf("launches = %d", backend.launches)
+	}
+}
+
 func TestRecordRunEmitsTelemetryWithNodeAndClock(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
 	sink := &mocks.TelemetrySink{}
-	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), clock, WithTelemetrySink(sink))
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), clock, WithTelemetrySink(sink), WithAllocator(lease.NewAllocator()))
 	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
