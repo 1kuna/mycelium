@@ -9,12 +9,14 @@ import (
 )
 
 type NodeAgent struct {
-	NodeVal   domain.Node
-	Instances []domain.ModelInstance
-	LoadErr   error
-	UnloadErr error
-	Calls     []string
-	nextID    int
+	NodeVal    domain.Node
+	Instances  []domain.ModelInstance
+	Metadata   domain.ModelMetadata
+	LoadErr    error
+	UnloadErr  error
+	InspectErr error
+	Calls      []string
+	nextID     int
 }
 
 func NewNodeAgent(node domain.Node) *NodeAgent {
@@ -58,6 +60,23 @@ func (m *NodeAgent) Unload(_ context.Context, id string) error {
 	}
 	m.Instances = out
 	return nil
+}
+
+func (m *NodeAgent) InspectModel(_ context.Context, p domain.Preset) (domain.ModelMetadata, error) {
+	m.Calls = append(m.Calls, "inspect:"+p.ID)
+	if m.InspectErr != nil {
+		return domain.ModelMetadata{}, m.InspectErr
+	}
+	if m.Metadata != (domain.ModelMetadata{}) {
+		return m.Metadata, nil
+	}
+	return domain.ModelMetadata{
+		ModelRef:      p.ModelRef,
+		Format:        "gguf",
+		WeightsMB:     p.EstWeightsMB,
+		KVPerTokenMB:  p.KVPerTokenMB,
+		ContextLength: p.ContextLength,
+	}, nil
 }
 
 var _ ports.NodeAgent = (*NodeAgent)(nil)

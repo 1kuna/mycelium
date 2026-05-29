@@ -67,8 +67,8 @@ func TestAllJobOptions(t *testing.T) {
 }
 
 func TestAllPresetAndInstanceOptions(t *testing.T) {
-	p := MakePreset(WithPresetID("preset1"), WithModelRef("model1"), WithWeights(12), WithKVPerToken(0.5), WithContextLength(4096))
-	if p.ID != "preset1" || p.ModelRef != "model1" || p.EstWeightsMB != 12 || p.KVPerTokenMB != 0.5 || p.ContextLength != 4096 {
+	p := MakePreset(WithPresetID("preset1"), WithModelRef("model1"), WithWeights(12), WithKVPerToken(0.5), WithContextLength(4096), WithPresetNode("node1"))
+	if p.ID != "preset1" || p.ModelRef != "model1" || p.EstWeightsMB != 12 || p.KVPerTokenMB != 0.5 || p.ContextLength != 4096 || p.NodeID != "node1" {
 		t.Fatalf("preset options = %+v", p)
 	}
 	if MakeClaim(1, 2) != (domain.Claim{WeightsMB: 1, KVReservedMB: 2}) {

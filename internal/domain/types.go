@@ -44,6 +44,15 @@ type Preset struct {
 	LaunchProfile string       `json:"launch_profile"`
 	EstWeightsMB  int          `json:"est_weights_mb"`
 	KVPerTokenMB  float64      `json:"kv_per_token_mb"`
+	NodeID        string       `json:"node_id,omitempty"`
+}
+
+type ModelMetadata struct {
+	ModelRef      string  `json:"model_ref"`
+	Format        string  `json:"format"`
+	WeightsMB     int     `json:"weights_mb"`
+	KVPerTokenMB  float64 `json:"kv_per_token_mb"`
+	ContextLength int     `json:"context_length"`
 }
 
 type Claim struct {

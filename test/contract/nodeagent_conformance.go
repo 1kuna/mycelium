@@ -40,4 +40,15 @@ func RunNodeAgentConformance(t *testing.T, name string, newAgent func() ports.No
 			t.Fatalf("unload did not restore instance count: before=%d final=%d", len(before.Instances), len(final.Instances))
 		}
 	})
+
+	t.Run(name+"/inspect_model_returns_metadata", func(t *testing.T) {
+		agent := newAgent()
+		metadata, err := agent.InspectModel(context.Background(), p)
+		if err != nil {
+			t.Fatalf("InspectModel: %v", err)
+		}
+		if metadata.ModelRef == "" || metadata.WeightsMB <= 0 {
+			t.Fatalf("invalid metadata: %+v", metadata)
+		}
+	})
 }

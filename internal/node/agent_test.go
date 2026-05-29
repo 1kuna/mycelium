@@ -180,6 +180,41 @@ func TestRecordRunFailsWithoutSinkOrInstance(t *testing.T) {
 	}
 }
 
+func TestInspectModelUsesConfiguredInspectorOrPresetMetadata(t *testing.T) {
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()), WithModelInspector(StaticInspector{
+		Metadata: domain.ModelMetadata{ModelRef: "model", Format: "gguf", WeightsMB: 10, KVPerTokenMB: 0.1, ContextLength: 2048},
+	}))
+	metadata, err := agent.InspectModel(context.Background(), fixtures.MakePreset())
+	if err != nil {
+		t.Fatalf("InspectModel configured: %v", err)
+	}
+	if metadata.Format != "gguf" || metadata.WeightsMB != 10 {
+		t.Fatalf("metadata = %+v", metadata)
+	}
+
+	agent = NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()))
+	metadata, err = agent.InspectModel(context.Background(), fixtures.MakePreset())
+	if err != nil {
+		t.Fatalf("InspectModel preset fallback: %v", err)
+	}
+	if metadata.Format != "preset" || metadata.WeightsMB == 0 {
+		t.Fatalf("metadata = %+v", metadata)
+	}
+
+	_, err = agent.InspectModel(context.Background(), domain.Preset{ID: "empty"})
+	if err == nil {
+		t.Fatal("expected missing inspector error")
+	}
+}
+
+func TestInspectModelPropagatesInspectorError(t *testing.T) {
+	wantErr := errors.New("inspect")
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()), WithModelInspector(StaticInspector{Err: wantErr}))
+	if _, err := agent.InspectModel(context.Background(), fixtures.MakePreset()); !errors.Is(err, wantErr) {
+		t.Fatalf("InspectModel err = %v", err)
+	}
+}
+
 func TestWaitingLoadRespectsContextCancellation(t *testing.T) {
 	op := &loadOp{done: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
