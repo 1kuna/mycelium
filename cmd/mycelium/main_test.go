@@ -269,9 +269,20 @@ func TestRunRecommendationsApplyEngineSetsProjectDefault(t *testing.T) {
 
 func TestBuildGatewayServerWithJoinToken(t *testing.T) {
 	preset := testPreset("tiny")
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SaveLease(context.Background(), domain.Lease{ID: "expired", ExpiresAt: time.Unix(1, 0).UTC()}); err != nil {
+		t.Fatalf("SaveLease: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 	configPath := writeServerConfig(t, ServerConfig{
 		Listen:       "127.0.0.1:0",
-		StorePath:    filepath.Join(t.TempDir(), "control.db"),
+		StorePath:    dbPath,
 		JoinToken:    "secret",
 		Presets:      []domain.Preset{preset},
 		Reservations: []domain.Reservation{{ID: "pin-a", Kind: domain.ReservationPinned, NodeID: "node-a", PresetID: preset.ID}},
@@ -287,6 +298,14 @@ func TestBuildGatewayServerWithJoinToken(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nodes", nil))
 	if rec.Code != http.StatusOK || rec.Body.String() != "[]\n" {
 		t.Fatalf("nodes status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	reopened, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	if leases, err := reopened.ListLeases(context.Background()); err != nil || len(leases) != 0 {
+		t.Fatalf("leases after boot = %+v %v", leases, err)
 	}
 }
 
