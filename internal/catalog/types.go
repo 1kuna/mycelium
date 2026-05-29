@@ -35,3 +35,18 @@ type ProgressEvent struct {
 	Message string    `json:"message"`
 	At      time.Time `json:"at"`
 }
+
+type InstallState struct {
+	JobID          string          `json:"job_id"`
+	Source         string          `json:"source"`
+	PresetID       string          `json:"preset_id,omitempty"`
+	Status         string          `json:"status"`
+	DraftName      string          `json:"draft_name,omitempty"`
+	DraftImporter  string          `json:"draft_importer,omitempty"`
+	DraftSize      int64           `json:"draft_size,omitempty"`
+	ModelPath      string          `json:"model_path,omitempty"`
+	PresetPath     string          `json:"preset_path,omitempty"`
+	ProvenancePath string          `json:"provenance_path,omitempty"`
+	Progress       []ProgressEvent `json:"progress,omitempty"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}

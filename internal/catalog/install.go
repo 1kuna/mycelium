@@ -73,23 +73,70 @@ func (i Installer) install(ctx context.Context, req InstallRequest) (InstallResu
 	if i.StoreDir == "" {
 		return InstallResult{}, fmt.Errorf("store dir is required")
 	}
-	now := i.now()
-	progress := []ProgressEvent{}
-	emit := func(stage, msg string) {
-		progress = append(progress, ProgressEvent{JobID: installJobID(req), Stage: stage, Message: msg, At: i.now()})
+	if err := ensureStore(i.StoreDir); err != nil {
+		return InstallResult{}, err
 	}
-	emit("import", "inspecting source")
-	draft, err := importers.Import(ctx, req.Source)
+	now := i.now()
+	jobID := installJobID(req)
+	state, err := readInstallState(i.StoreDir, jobID)
 	if err != nil {
+		return InstallResult{}, err
+	}
+	if state.Status == "ready" && state.PresetID != "" {
+		preset, err := ReadPreset(i.StoreDir, state.PresetID)
+		if err != nil {
+			return InstallResult{}, err
+		}
+		prov, err := ReadProvenance(i.StoreDir, state.PresetID)
+		if err != nil {
+			return InstallResult{}, err
+		}
+		return InstallResult{Preset: preset, Provenance: prov, Progress: state.Progress}, nil
+	}
+	if state.JobID == "" {
+		state = InstallState{JobID: jobID, Source: req.Source, Status: "created", UpdatedAt: now}
+	}
+	progress := append([]ProgressEvent(nil), state.Progress...)
+	emit := func(stage, msg string) error {
+		event := ProgressEvent{JobID: jobID, Stage: stage, Message: msg, At: i.now()}
+		progress = append(progress, event)
+		state.Progress = append(state.Progress, event)
+		state.Status = stage
+		state.UpdatedAt = event.At
+		return writeInstallState(i.StoreDir, state)
+	}
+	if err := emit("import", "inspecting source"); err != nil {
 		return InstallResult{Progress: progress}, err
 	}
+	draft := importers.Draft{}
+	if state.DraftName != "" {
+		draft.Name = state.DraftName
+		draft.Importer = state.DraftImporter
+		draft.Size = state.DraftSize
+	} else {
+		draft, err = importers.Import(ctx, req.Source)
+		if err != nil {
+			return InstallResult{Progress: progress}, err
+		}
+		state.DraftName = draft.Name
+		state.DraftImporter = draft.Importer
+		state.DraftSize = draft.Size
+		state.UpdatedAt = i.now()
+		if err := writeInstallState(i.StoreDir, state); err != nil {
+			return InstallResult{Progress: progress}, err
+		}
+	}
 	id := req.ID
+	if id == "" {
+		id = state.PresetID
+	}
 	if id == "" {
 		id = sanitizeID(strings.TrimSuffix(draft.Name, filepath.Ext(draft.Name)))
 	}
 	if id == "" {
 		return InstallResult{}, fmt.Errorf("could not derive preset id from %q", req.Source)
 	}
+	state.PresetID = id
 	model := req.Model
 	if model == "" {
 		model = id
@@ -107,20 +154,23 @@ func (i Installer) install(ctx context.Context, req InstallRequest) (InstallResu
 		quant = "unknown"
 	}
 
-	if err := ensureStore(i.StoreDir); err != nil {
+	stageDir := filepath.Join(i.StoreDir, "jobs", jobID)
+	if err := os.MkdirAll(stageDir, 0755); err != nil {
 		return InstallResult{Progress: progress}, err
 	}
-	tmp, err := os.MkdirTemp(filepath.Join(i.StoreDir, "tmp"), id+".")
-	if err != nil {
-		return InstallResult{Progress: progress}, err
-	}
-	defer os.RemoveAll(tmp)
 
-	emit("copy", "copying model artifact")
-	finalModel := filepath.Join(i.StoreDir, "models", id+"-"+draft.Name)
-	tmpModel := filepath.Join(tmp, "model")
-	if err := copyFile(ctx, draft.Path, tmpModel); err != nil {
+	if err := emit("copy", "copying model artifact"); err != nil {
 		return InstallResult{Progress: progress}, err
+	}
+	finalModel := filepath.Join(i.StoreDir, "models", id+"-"+draft.Name)
+	stageModel := filepath.Join(stageDir, "model")
+	if !fileExists(finalModel) && !fileExists(stageModel) {
+		if draft.Path == "" {
+			return InstallResult{Progress: progress}, fmt.Errorf("install job %q has no staged artifact and source must be re-imported", jobID)
+		}
+		if err := copyFile(ctx, draft.Path, stageModel); err != nil {
+			return InstallResult{Progress: progress}, err
+		}
 	}
 	preset := domain.Preset{
 		ID:            id,
@@ -140,27 +190,55 @@ func (i Installer) install(ctx context.Context, req InstallRequest) (InstallResu
 		MaterializedPath: finalModel,
 		InstalledAt:      now,
 	}
-	if err := writeJSON(filepath.Join(tmp, "preset.json"), preset); err != nil {
-		return InstallResult{Progress: progress}, err
+	stagePreset := filepath.Join(stageDir, "preset.json")
+	stageProvenance := filepath.Join(stageDir, "provenance.json")
+	if !fileExists(filepath.Join(i.StoreDir, "presets", id+".json")) && !fileExists(stagePreset) {
+		if err := writeJSON(stagePreset, preset); err != nil {
+			return InstallResult{Progress: progress}, err
+		}
 	}
-	if err := writeJSON(filepath.Join(tmp, "provenance.json"), prov); err != nil {
+	if !fileExists(filepath.Join(i.StoreDir, "provenance", id+".json")) && !fileExists(stageProvenance) {
+		if err := writeJSON(stageProvenance, prov); err != nil {
+			return InstallResult{Progress: progress}, err
+		}
+	}
+	state.ModelPath = finalModel
+	state.PresetPath = filepath.Join(i.StoreDir, "presets", id+".json")
+	state.ProvenancePath = filepath.Join(i.StoreDir, "provenance", id+".json")
+	state.UpdatedAt = i.now()
+	if err := writeInstallState(i.StoreDir, state); err != nil {
 		return InstallResult{Progress: progress}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return InstallResult{Progress: progress}, err
 	}
 
-	emit("commit", "registering preset")
-	if err := os.Rename(tmpModel, finalModel); err != nil {
+	if err := emit("commit", "registering preset"); err != nil {
 		return InstallResult{Progress: progress}, err
 	}
-	if err := os.Rename(filepath.Join(tmp, "provenance.json"), filepath.Join(i.StoreDir, "provenance", id+".json")); err != nil {
+	if !fileExists(finalModel) {
+		if err := os.Rename(stageModel, finalModel); err != nil {
+			return InstallResult{Progress: progress}, err
+		}
+	}
+	if !fileExists(state.ProvenancePath) {
+		if err := os.Rename(stageProvenance, state.ProvenancePath); err != nil {
+			return InstallResult{Progress: progress}, err
+		}
+	}
+	if !fileExists(state.PresetPath) {
+		if err := os.Rename(stagePreset, state.PresetPath); err != nil {
+			return InstallResult{Progress: progress}, err
+		}
+	}
+	state.Status = "ready"
+	state.UpdatedAt = i.now()
+	if err := writeInstallState(i.StoreDir, state); err != nil {
 		return InstallResult{Progress: progress}, err
 	}
-	if err := os.Rename(filepath.Join(tmp, "preset.json"), filepath.Join(i.StoreDir, "presets", id+".json")); err != nil {
+	if err := emit("ready", "preset is materialized"); err != nil {
 		return InstallResult{Progress: progress}, err
 	}
-	emit("ready", "preset is materialized")
 	return InstallResult{Preset: preset, Provenance: prov, Progress: progress}, nil
 }
 
@@ -172,12 +250,42 @@ func (i Installer) now() time.Time {
 }
 
 func ensureStore(root string) error {
-	for _, dir := range []string{"models", "presets", "provenance", "tmp"} {
+	for _, dir := range []string{"models", "presets", "provenance", "tmp", "jobs"} {
 		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func readInstallState(root, jobID string) (InstallState, error) {
+	path := installStatePath(root, jobID)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return InstallState{}, nil
+	}
+	if err != nil {
+		return InstallState{}, err
+	}
+	var state InstallState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return InstallState{}, err
+	}
+	return state, nil
+}
+
+func writeInstallState(root string, state InstallState) error {
+	if state.JobID == "" {
+		return fmt.Errorf("install job id is required")
+	}
+	if err := os.MkdirAll(filepath.Join(root, "jobs"), 0755); err != nil {
+		return err
+	}
+	return writeJSONReplace(installStatePath(root, state.JobID), state)
+}
+
+func installStatePath(root, jobID string) string {
+	return filepath.Join(root, "jobs", jobID+".json")
 }
 
 func copyFile(ctx context.Context, src, dst string) error {
@@ -215,6 +323,25 @@ func writeJSON(path string, v any) error {
 		return err
 	}
 	return file.Close()
+}
+
+func writeJSONReplace(path string, v any) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(file)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func estimateWeightsMB(bytes int64) int {
