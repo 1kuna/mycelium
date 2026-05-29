@@ -70,18 +70,20 @@ func (r PresetRegistry) NextLargerContext(current domain.Preset) (domain.Preset,
 }
 
 type Router struct {
-	Placer    ports.Placer
-	Fleet     FleetSource
-	Nodes     NodeResolver
-	Presets   PresetRegistry
-	Profiles  profiles.Registry
-	Client    *http.Client
-	Reporter  FailureReporter
-	Runtime   *scheduler.Service
-	Telemetry ports.TelemetrySink
-	Clock     ports.Clock
-	Sticky    *StickyTable
-	MaxTries  int
+	Placer         ports.Placer
+	Fleet          FleetSource
+	Nodes          NodeResolver
+	Presets        PresetRegistry
+	Profiles       profiles.Registry
+	Client         *http.Client
+	Reporter       FailureReporter
+	Runtime        *scheduler.Service
+	Telemetry      ports.TelemetrySink
+	Clock          ports.Clock
+	Sticky         *StickyTable
+	Projects       map[string]domain.Project
+	DefaultProject string
+	MaxTries       int
 }
 
 type RouteResponse struct {
@@ -117,7 +119,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	}
 	var lastErr error
 	for attempt := 1; attempt <= tries; attempt++ {
-		job := jobFromIngress(req, attempt)
+		job := r.jobFromIngress(req, attempt)
 		decision, inst, cold, err := r.placeStickyOrLoad(ctx, req, job, preset, fleet)
 		if err != nil {
 			return RouteResponse{}, err
@@ -227,22 +229,42 @@ func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, preset domain
 	return decision, inst, cold, err
 }
 
-func jobFromIngress(req translate.IngressRequest, attempt int) domain.Job {
+func (r *Router) jobFromIngress(req translate.IngressRequest, attempt int) domain.Job {
 	project := req.Project
+	if project == "" {
+		project = r.DefaultProject
+	}
+	projectDefaults := domain.Project{}
+	if project != "" {
+		projectDefaults = r.Projects[project]
+	}
 	if project == "" {
 		project = "gateway"
 	}
 	priority := req.Priority
 	if priority == "" {
+		priority = projectDefaults.Priority
+	}
+	if priority == "" {
 		priority = domain.PriorityInteractive
 	}
 	speed := req.SpeedPref
+	if speed == "" {
+		speed = projectDefaults.SpeedPref
+	}
 	if speed == "" {
 		speed = domain.SpeedThroughput
 	}
 	preemption := req.Preemption
 	if preemption == "" {
+		preemption = projectDefaults.Preemption
+	}
+	if preemption == "" || preemption == domain.PreemptInherit {
 		preemption = domain.PreemptSoft
+	}
+	contextRequest := req.ContextRequest
+	if contextRequest == 0 {
+		contextRequest = projectDefaults.ContextCap
 	}
 	taskType := "chat"
 	if req.Kind == translate.KindOpenAICompletion {
@@ -255,7 +277,7 @@ func jobFromIngress(req translate.IngressRequest, attempt int) domain.Job {
 		Project:        project,
 		Priority:       priority,
 		SpeedPref:      speed,
-		ContextRequest: req.ContextRequest,
+		ContextRequest: contextRequest,
 		Preemption:     preemption,
 		Streaming:      req.Stream,
 	}

@@ -164,6 +164,38 @@ func TestRouterUsesStickyConversationInstance(t *testing.T) {
 	}
 }
 
+func TestRouterMergesProjectDefaultsIntoJobIntent(t *testing.T) {
+	router := &Router{
+		Projects: map[string]domain.Project{
+			"proj-a": {
+				ID:         "proj-a",
+				Priority:   domain.PriorityBackground,
+				SpeedPref:  domain.SpeedLatency,
+				ContextCap: 4096,
+				Preemption: domain.PreemptHard,
+			},
+		},
+		DefaultProject: "proj-a",
+	}
+	req := translate.IngressRequest{
+		Model: "preset-a",
+		Kind:  translate.KindOpenAIChat,
+	}
+
+	job := router.jobFromIngress(req, 1)
+	if job.Project != "proj-a" || job.Priority != domain.PriorityBackground || job.SpeedPref != domain.SpeedLatency || job.ContextRequest != 4096 || job.Preemption != domain.PreemptHard {
+		t.Fatalf("job = %+v", job)
+	}
+
+	req.Project = "proj-a"
+	req.Priority = domain.PriorityInteractive
+	req.ContextRequest = 8192
+	job = router.jobFromIngress(req, 2)
+	if job.Priority != domain.PriorityInteractive || job.ContextRequest != 8192 {
+		t.Fatalf("override job = %+v", job)
+	}
+}
+
 func TestRouterColdStreamPrependsLoadingState(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

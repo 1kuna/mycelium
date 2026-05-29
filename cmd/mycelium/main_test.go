@@ -255,6 +255,13 @@ func TestAllocatorFromReservationsReservesHeadroomAndPinnedPresets(t *testing.T)
 	}
 }
 
+func TestProjectMapIndexesByID(t *testing.T) {
+	projects := projectMap([]domain.Project{{ID: "proj-a", ContextCap: 4096}})
+	if projects["proj-a"].ContextCap != 4096 {
+		t.Fatalf("projects = %+v", projects)
+	}
+}
+
 func TestRunNodeAndServerExitOnCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
