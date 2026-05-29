@@ -156,11 +156,14 @@ func TestPersistentRegistryPropagatesStoreErrors(t *testing.T) {
 }
 
 func TestOverlayDiscoveryAndTunnelErrorPaths(t *testing.T) {
-	if err := (OverlayDiscovery{}).Announce(context.Background(), readyJoinNode("node-a", "127.0.0.1:1")); err == nil {
+	if err := (&OverlayDiscovery{}).Announce(context.Background(), readyJoinNode("node-a", "127.0.0.1:1")); err == nil {
 		t.Fatal("overlay announce succeeded")
 	}
-	if _, err := (OverlayDiscovery{}).Discover(context.Background()); err == nil {
+	if _, err := (&OverlayDiscovery{}).Discover(context.Background()); err == nil {
 		t.Fatal("overlay discover succeeded")
+	}
+	if _, err := (&OverlayTunnel{}).Open(context.Background(), readyJoinNode("node-a", "127.0.0.1:1")); err == nil {
+		t.Fatal("overlay tunnel opened without host")
 	}
 	tunnel := NewLANTunnel()
 	if _, err := tunnel.Open(context.Background(), domain.Node{Address: "127.0.0.1:1"}); err == nil {
