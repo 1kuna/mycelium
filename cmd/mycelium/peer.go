@@ -347,10 +347,22 @@ func startPeerAdvertiser(ctx context.Context, discovery ports.PeerDiscovery, sel
 	if discovery == nil || clk == nil || self.ID == "" || interval <= 0 {
 		return
 	}
-	self.LastSeen = clk.Now()
-	if err := discovery.Advertise(ctx, self); err != nil {
-		log.Printf("mycelium peer advertise failed: %v", err)
+	lastErr := ""
+	advertise := func() {
+		self.LastSeen = clk.Now()
+		if err := discovery.Advertise(ctx, self); err != nil {
+			if msg := err.Error(); msg != lastErr {
+				log.Printf("mycelium peer advertise failed: %v", err)
+				lastErr = msg
+			}
+			return
+		}
+		if lastErr != "" {
+			log.Printf("mycelium peer advertise recovered")
+			lastErr = ""
+		}
 	}
+	advertise()
 	go func() {
 		for {
 			timer := clk.NewTimer(interval)
@@ -360,10 +372,7 @@ func startPeerAdvertiser(ctx context.Context, discovery ports.PeerDiscovery, sel
 				return
 			case <-timer.C():
 			}
-			self.LastSeen = clk.Now()
-			if err := discovery.Advertise(ctx, self); err != nil {
-				log.Printf("mycelium peer advertise failed: %v", err)
-			}
+			advertise()
 		}
 	}()
 }
