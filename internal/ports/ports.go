@@ -60,6 +60,10 @@ type AdmissionController interface {
 	Preempt(ctx context.Context, leaseID, reason string) error
 }
 
+type LeaseInspector interface {
+	LeaseForJob(ctx context.Context, jobID string) (domain.Lease, bool, error)
+}
+
 type Coordinator interface {
 	ClaimJob(ctx context.Context, jobID string) error
 	Plan(ctx context.Context, jobID string) (domain.PlacementDecision, error)

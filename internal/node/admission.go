@@ -156,6 +156,24 @@ func (a *Admission) Preempt(ctx context.Context, leaseID, reason string) error {
 	return a.removeLeaseLocked(leaseID, "preempt")
 }
 
+func (a *Admission) LeaseForJob(ctx context.Context, jobID string) (domain.Lease, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.Lease{}, false, err
+	}
+	if jobID == "" {
+		return domain.Lease{}, false, fmt.Errorf("job id is required")
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, record := range a.leases {
+		if record.lease.JobID == jobID {
+			return record.lease, true, nil
+		}
+	}
+	return domain.Lease{}, false, nil
+}
+
 func (a *Admission) firstFitLocked(claim domain.Claim) ([]int, bool) {
 	if a.node.Status != domain.NodeReady {
 		return nil, false
@@ -202,3 +220,4 @@ func (a *Admission) removeLeaseLocked(leaseID, op string) error {
 }
 
 var _ ports.AdmissionController = (*Admission)(nil)
+var _ ports.LeaseInspector = (*Admission)(nil)

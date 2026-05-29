@@ -114,6 +114,12 @@ func TestAdmissionConcurrentCommitsSerializeAtOwner(t *testing.T) {
 func TestAdmissionReleaseAndPreemptRemoveOccupancy(t *testing.T) {
 	admission := NewAdmission(fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))
 	leaseA := commitAdmissionLease(t, admission, "job-a", fixtures.MakeClaim(700, 0))
+	if got, found, err := admission.LeaseForJob(context.Background(), "job-a"); err != nil || !found || got.ID != leaseA.ID {
+		t.Fatalf("LeaseForJob = %+v %v %v", got, found, err)
+	}
+	if got, found, err := admission.LeaseForJob(context.Background(), "missing"); err != nil || found || got.ID != "" {
+		t.Fatalf("missing LeaseForJob = %+v %v %v", got, found, err)
+	}
 	if _, err := admission.Offer(context.Background(), fixtures.MakeJob(fixtures.WithJobID("blocked")), fixtures.MakeClaim(400, 0)); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("blocked Offer err = %v", err)
 	}
@@ -176,6 +182,14 @@ func TestAdmissionFailsLoudOnBadInputsAndUnavailableCapacity(t *testing.T) {
 	leaseA := commitAdmissionLease(t, admission, "job-a", fixtures.MakeClaim(100, 0))
 	if err := admission.Preempt(context.Background(), leaseA.ID, ""); err == nil || !strings.Contains(err.Error(), "reason") {
 		t.Fatalf("empty preempt reason err = %v", err)
+	}
+	if _, _, err := admission.LeaseForJob(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "job id") {
+		t.Fatalf("empty LeaseForJob err = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := admission.LeaseForJob(canceled, "job-a"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled LeaseForJob err = %v", err)
 	}
 
 	maintenance := NewAdmission(fixtures.MakeNode(fixtures.Maintenance), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))

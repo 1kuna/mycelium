@@ -9,14 +9,17 @@ import (
 )
 
 type AdmissionController struct {
-	OfferVal   domain.LeaseOffer
-	LeaseVal   domain.Lease
-	OfferErr   error
-	CommitErr  error
-	ReleaseErr error
-	PreemptErr error
-	Offers     map[string]domain.LeaseOffer
-	Calls      []string
+	OfferVal         domain.LeaseOffer
+	LeaseVal         domain.Lease
+	OfferErr         error
+	CommitErr        error
+	ReleaseErr       error
+	PreemptErr       error
+	LeaseForJobVal   domain.Lease
+	LeaseForJobFound bool
+	LeaseForJobErr   error
+	Offers           map[string]domain.LeaseOffer
+	Calls            []string
 }
 
 func (m *AdmissionController) Offer(_ context.Context, job domain.Job, claim domain.Claim) (domain.LeaseOffer, error) {
@@ -59,6 +62,11 @@ func (m *AdmissionController) Release(_ context.Context, leaseID string) error {
 func (m *AdmissionController) Preempt(_ context.Context, leaseID, reason string) error {
 	m.Calls = append(m.Calls, "preempt:"+leaseID+":"+reason)
 	return m.PreemptErr
+}
+
+func (m *AdmissionController) LeaseForJob(_ context.Context, jobID string) (domain.Lease, bool, error) {
+	m.Calls = append(m.Calls, "lease-for-job:"+jobID)
+	return m.LeaseForJobVal, m.LeaseForJobFound, m.LeaseForJobErr
 }
 
 func (m *AdmissionController) recordOffer(offer domain.LeaseOffer) {
@@ -181,6 +189,7 @@ func (m *PeerDiscovery) WatchPeers(context.Context) (<-chan domain.Peer, error) 
 }
 
 var _ ports.AdmissionController = (*AdmissionController)(nil)
+var _ ports.LeaseInspector = (*AdmissionController)(nil)
 var _ ports.Coordinator = (*Coordinator)(nil)
 var _ ports.JobRegistry = (*JobRegistry)(nil)
 var _ ports.PeerDiscovery = (*PeerDiscovery)(nil)
