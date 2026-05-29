@@ -154,3 +154,22 @@ type Project struct {
 	AutoApply      bool       `json:"auto_apply"`
 	ReservedNodeID string     `json:"reserved_node_id,omitempty"`
 }
+
+type RecommendationRecord struct {
+	ID               string    `json:"id"`
+	Type             string    `json:"type"`
+	ProjectID        string    `json:"project_id"`
+	PresetID         string    `json:"preset_id,omitempty"`
+	CurrentValue     int       `json:"current_value,omitempty"`
+	RecommendedValue int       `json:"recommended_value,omitempty"`
+	Rationale        string    `json:"rationale"`
+	Applied          bool      `json:"applied"`
+	CreatedAt        time.Time `json:"created_at"`
+	AppliedAt        time.Time `json:"applied_at,omitempty"`
+}
+
+type ProcessRef struct {
+	PID  int    `json:"pid"`
+	Kind string `json:"kind"`
+	Ref  string `json:"ref"`
+}
