@@ -40,7 +40,11 @@ type Result struct {
 	Lease    domain.Lease
 }
 
-func (s *Service) Submit(ctx context.Context, job domain.Job) (Result, error) {
+type SubmitHooks struct {
+	BeforeColdLoad func(ctx context.Context, decision domain.PlacementDecision) error
+}
+
+func (s *Service) Submit(ctx context.Context, job domain.Job, hooks ...SubmitHooks) (Result, error) {
 	if err := s.validate(); err != nil {
 		return Result{}, err
 	}
@@ -75,6 +79,13 @@ func (s *Service) Submit(ctx context.Context, job domain.Job) (Result, error) {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(ctx, job)
 		return Result{Decision: decision}, err
+	}
+	if decision.InstanceID == "" {
+		if err := runBeforeColdLoadHook(ctx, decision, hooks); err != nil {
+			job.Status = domain.JobFailed
+			_ = s.Store.SaveJob(ctx, job)
+			return Result{Decision: decision}, err
+		}
 	}
 	inst, err := s.resolveInstance(ctx, job, decision, fleet)
 	if err != nil {
@@ -118,6 +129,18 @@ func (s *Service) Drain(ctx context.Context, limit int) ([]Result, error) {
 func (s *Service) validate() error {
 	if s.Placer == nil || s.Fleet == nil || s.Nodes == nil || s.Queue == nil || s.Store == nil || s.Clock == nil {
 		return fmt.Errorf("scheduler service is not fully configured")
+	}
+	return nil
+}
+
+func runBeforeColdLoadHook(ctx context.Context, decision domain.PlacementDecision, hooks []SubmitHooks) error {
+	for _, hook := range hooks {
+		if hook.BeforeColdLoad == nil {
+			continue
+		}
+		if err := hook.BeforeColdLoad(ctx, decision); err != nil {
+			return err
+		}
 	}
 	return nil
 }

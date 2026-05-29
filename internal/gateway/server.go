@@ -28,6 +28,12 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeGatewayError(w, status, err.Error())
 		return
 	}
+	if req.Stream {
+		if err := s.Router.Stream(r.Context(), req, w); err != nil {
+			writeGatewayError(w, http.StatusBadGateway, err.Error())
+		}
+		return
+	}
 	resp, err := s.Router.Route(r.Context(), req)
 	if err != nil {
 		writeGatewayError(w, http.StatusBadGateway, err.Error())

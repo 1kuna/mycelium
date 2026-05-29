@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -228,6 +229,367 @@ func TestRouterColdStreamPrependsLoadingState(t *testing.T) {
 	}
 }
 
+func TestRouterStreamColdLoadWritesLoadingReadyAndChunks(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: one\n\n"))
+		_, _ = w.Write([]byte("data: two\n\n"))
+	}))
+	defer upstream.Close()
+
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_stream"))
+	inst.Addr = upstream.URL
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
+		node.ID: loadNode{node: node, inst: inst},
+	}})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "text/event-stream" || rec.Header().Get("X-Accel-Buffering") != "no" {
+		t.Fatalf("status=%d headers=%+v", rec.Code, rec.Header())
+	}
+	if !strings.Contains(body, "event: loading") || !strings.Contains(body, "event: ready") || !strings.Contains(body, `"instance_id":"inst_stream"`) || !strings.Contains(body, "data: one") || !strings.Contains(body, "data: two") {
+		t.Fatalf("body = %q", body)
+	}
+	if strings.Index(body, "event: loading") > strings.Index(body, "data: one") {
+		t.Fatalf("loading event came after data: %q", body)
+	}
+}
+
+func TestRouterStreamWarmInstanceCopiesHeadersAndBody(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Upstream", "ok")
+		_, _ = w.Write([]byte("data: warm\n\n"))
+	}))
+	defer upstream.Close()
+
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream.URL
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if rec.Header().Get("X-Upstream") != "ok" || rec.Header().Get(HeaderDecision) != string(domain.ActionWarmInstance) || rec.Header().Get(HeaderInstance) != inst.ID {
+		t.Fatalf("headers = %+v", rec.Header())
+	}
+	if rec.Body.String() != "data: warm\n\n" {
+		t.Fatalf("body = %q", rec.Body.String())
+	}
+}
+
+func TestRouterStreamWritesErrorEventAfterStarted(t *testing.T) {
+	preset := fixtures.MakePreset()
+	node := fixtures.MakeNode()
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
+		node.ID: errorLoadNode{err: errors.New("load exploded")},
+	}})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream returned error after start: %v", err)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "event: loading") || !strings.Contains(body, "event: error") || !strings.Contains(body, "load exploded") {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestRouterStreamWritesUpstreamErrorEventAfterStarted(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad input", http.StatusBadRequest)
+	}))
+	defer upstream.Close()
+
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_bad"))
+	inst.Addr = upstream.URL
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
+		node.ID: loadNode{node: node, inst: inst},
+	}})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream returned error after start: %v", err)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "event: error") || !strings.Contains(body, "bad input") {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestRouterStreamWritesBuildErrorEventAfterStarted(t *testing.T) {
+	preset := fixtures.MakePreset()
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_translate"))
+	inst.Addr = "http://example.invalid"
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
+		node.ID: loadNode{node: node, inst: inst},
+	}})
+	req, err := translate.ParseAnthropicMessages([]byte(`{"model":"qwen2.5-9b-instruct","max_tokens":1,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`))
+	if err != nil {
+		t.Fatalf("ParseAnthropicMessages: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream returned error after start: %v", err)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "event: error") || !strings.Contains(body, "streaming anthropic-to-openai translation") {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestRouterStreamWritesTransportErrorEventAfterStarted(t *testing.T) {
+	preset := fixtures.MakePreset()
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_bad_url"))
+	inst.Addr = "http://%"
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
+		node.ID: loadNode{node: node, inst: inst},
+	}})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream returned error after start: %v", err)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "event: error") {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestRouterStreamFailoverBeforeResponseStarts(t *testing.T) {
+	preset := fixtures.MakePreset()
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "dead", http.StatusInternalServerError)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: rescued\n\n"))
+	}))
+	defer second.Close()
+
+	node := fixtures.MakeNode()
+	instA := fixtures.MakeInstance(fixtures.WithInstanceID("inst_a"))
+	instA.Addr = first.URL
+	instB := fixtures.MakeInstance(fixtures.WithInstanceID("inst_b"))
+	instB.Addr = second.URL
+	reporter := &testFailureReporter{}
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{instA, instB}}, staticResolver{})
+	router.Reporter = reporter
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if !strings.Contains(rec.Body.String(), "rescued") || rec.Header().Get(HeaderInstance) != instB.ID || len(reporter.failed) != 1 {
+		t.Fatalf("headers=%+v body=%q failed=%+v", rec.Header(), rec.Body.String(), reporter.failed)
+	}
+}
+
+func TestRouterStreamEarlyErrors(t *testing.T) {
+	preset := fixtures.MakePreset()
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	checks := []struct {
+		name   string
+		router *Router
+		req    translate.IngressRequest
+		want   string
+	}{
+		{name: "unconfigured", router: &Router{}, req: req, want: "not configured"},
+		{name: "unknown model", router: newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{}), req: translate.IngressRequest{Kind: translate.KindOpenAIChat, Model: "missing", Stream: true}, want: "unknown model"},
+		{name: "fleet", router: &Router{Placer: newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{}).Placer, Fleet: staticFleet{err: errors.New("fleet failed")}, Nodes: staticResolver{}, Presets: NewPresetRegistry(preset)}, req: req, want: "fleet failed"},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			err := check.router.Stream(context.Background(), check.req, httptest.NewRecorder())
+			if err == nil || !strings.Contains(err.Error(), check.want) {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestRouterUsesRuntimeServiceForColdLoad(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("runtime")))
+	}))
+	defer upstream.Close()
+
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_runtime"))
+	inst.Addr = upstream.URL
+	resolver := staticResolver{agents: map[string]ports.NodeAgent{node.ID: loadNode{node: node, inst: inst}}}
+	fleet := staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}}
+	router := newTestRouter(preset, fleet.fleet, resolver)
+	router.Fleet = fleet
+	router.Nodes = resolver
+	router.Runtime = &scheduler.Service{
+		Placer:  router.Placer,
+		Fleet:   fleet,
+		Nodes:   resolver,
+		Queue:   scheduler.NewQueue(router.Clock),
+		Store:   &gatewayRuntimeStore{},
+		Clock:   router.Clock,
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if !resp.ColdLoad || resp.Instance.ID != "inst_runtime" || !strings.Contains(string(resp.Body), "runtime") {
+		t.Fatalf("resp=%+v body=%s", resp, resp.Body)
+	}
+}
+
+func TestRouterStreamRetriesContextOverflowBeforeResponseStarts(t *testing.T) {
+	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
+	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "request exceeds context window", http.StatusBadRequest)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: enlarged\n\n"))
+	}))
+	defer second.Close()
+
+	node := fixtures.MakeNode()
+	instSmall := fixtures.MakeInstance(fixtures.WithInstanceID("inst_small"), fixtures.WithInstancePreset(small.ID))
+	instSmall.Addr = first.URL
+	instLarge := fixtures.MakeInstance(fixtures.WithInstanceID("inst_large"), fixtures.WithInstancePreset(large.ID))
+	instLarge.Addr = second.URL
+	router := newTestRouter(small, domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{instSmall, instLarge},
+	}, staticResolver{}, large)
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"preset_small","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if !strings.Contains(rec.Body.String(), "enlarged") || rec.Header().Get(HeaderInstance) != "inst_large" || rec.Header().Get(HeaderAttempts) != "2" {
+		t.Fatalf("headers=%+v body=%q", rec.Header(), rec.Body.String())
+	}
+}
+
+func TestRouterStreamReturnsBeginRequestErrorBeforeResponseStarts(t *testing.T) {
+	preset := fixtures.MakePreset()
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.OnNode(node.ID))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("data: should-not-run\n\n"))
+	}))
+	defer upstream.Close()
+	inst.Addr = upstream.URL
+	agent := mocks.NewNodeAgent(node)
+	agent.BeginErr = errors.New("begin failed")
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{
+		node.ID: agent,
+	}})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	err = router.Stream(context.Background(), req, httptest.NewRecorder())
+	if err == nil || !strings.Contains(err.Error(), "begin failed") {
+		t.Fatalf("Stream err = %v", err)
+	}
+}
+
+func TestRouterStreamExhaustsFailoverBeforeResponseStarts(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "dead", http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream.URL
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	router.MaxTries = 1
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	err = router.Stream(context.Background(), req, httptest.NewRecorder())
+	if err == nil || !strings.Contains(err.Error(), "failover exhausted") {
+		t.Fatalf("Stream err = %v", err)
+	}
+}
+
+func TestServerUsesStreamingRouterPath(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: server-stream\n\n"))
+	}))
+	defer upstream.Close()
+
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_server_stream"))
+	inst.Addr = upstream.URL
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
+		node.ID: loadNode{node: node, inst: inst},
+	}})
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`
+	Server{Router: router}.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "server-stream") {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRouterFailoverReportsFailure(t *testing.T) {
 	preset := fixtures.MakePreset()
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -307,9 +669,13 @@ func newTestRouter(preset domain.Preset, fleet domain.FleetSnapshot, nodes NodeR
 
 type staticFleet struct {
 	fleet domain.FleetSnapshot
+	err   error
 }
 
 func (s staticFleet) Snapshot(context.Context) (domain.FleetSnapshot, error) {
+	if s.err != nil {
+		return domain.FleetSnapshot{}, s.err
+	}
 	return s.fleet, nil
 }
 
@@ -354,12 +720,58 @@ func (n loadNode) EndRequest(context.Context, string) error {
 	return nil
 }
 
+type errorLoadNode struct {
+	err error
+}
+
+func (n errorLoadNode) Snapshot(context.Context) (domain.NodeSnapshot, error) {
+	return domain.NodeSnapshot{}, nil
+}
+
+func (n errorLoadNode) Load(context.Context, domain.Preset) (domain.ModelInstance, error) {
+	return domain.ModelInstance{}, n.err
+}
+
+func (n errorLoadNode) Unload(context.Context, string) error {
+	return nil
+}
+
+func (n errorLoadNode) InspectModel(context.Context, domain.Preset) (domain.ModelMetadata, error) {
+	return domain.ModelMetadata{}, domain.ErrUnsupported
+}
+
+func (n errorLoadNode) BeginRequest(context.Context, string) error {
+	return nil
+}
+
+func (n errorLoadNode) EndRequest(context.Context, string) error {
+	return nil
+}
+
 type testFailureReporter struct {
 	failed []string
 }
 
 func (r *testFailureReporter) ReportInstanceFailure(_ context.Context, instanceID string, _ error) {
 	r.failed = append(r.failed, instanceID)
+}
+
+type gatewayRuntimeStore struct{}
+
+func (s *gatewayRuntimeStore) SaveJob(context.Context, domain.Job) error {
+	return nil
+}
+
+func (s *gatewayRuntimeStore) SaveLease(context.Context, domain.Lease) error {
+	return nil
+}
+
+func (s *gatewayRuntimeStore) SaveInstance(context.Context, domain.ModelInstance) error {
+	return nil
+}
+
+func (s *gatewayRuntimeStore) DeleteInstance(context.Context, string) error {
+	return nil
 }
 
 func openAIChatBody(text string) string {

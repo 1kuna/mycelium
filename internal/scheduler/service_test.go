@@ -70,6 +70,55 @@ func TestServiceLoadsAndGrantsLease(t *testing.T) {
 	}
 }
 
+func TestServiceRunsColdLoadHookBeforeLoading(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(11, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	agent := mocks.NewNodeAgent(node)
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithWeights(12))
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(12, 3), Action: domain.ActionLoadedNew}},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}},
+		Queue:  NewQueue(clock),
+		Store:  &runtimeStore{},
+		Clock:  clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+	calls := []string{}
+
+	_, err := service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), SubmitHooks{
+		BeforeColdLoad: func(_ context.Context, decision domain.PlacementDecision) error {
+			calls = append(calls, "hook:"+decision.NodeID)
+			calls = append(calls, agent.Calls...)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if strings.Join(calls, ",") != "hook:node-a" || strings.Join(agent.Calls, ",") != "load:preset-a" {
+		t.Fatalf("hook calls=%+v agent calls=%+v", calls, agent.Calls)
+	}
+
+	hookErr := errors.New("hook")
+	_, err = service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-hook"), fixtures.WithPreset(preset.ID)), SubmitHooks{
+		BeforeColdLoad: func(context.Context, domain.PlacementDecision) error {
+			return hookErr
+		},
+	})
+	if !errors.Is(err, hookErr) {
+		t.Fatalf("hook err = %v", err)
+	}
+	if got := service.Store.(*runtimeStore).jobs["job-hook"].Status; got != domain.JobFailed {
+		t.Fatalf("hook failed status = %s", got)
+	}
+	if err := runBeforeColdLoadHook(context.Background(), domain.PlacementDecision{}, []SubmitHooks{{}}); err != nil {
+		t.Fatalf("nil hook err = %v", err)
+	}
+}
+
 func TestServiceEnactsPreemptionAndRequeuesVictim(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(20, 0).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
