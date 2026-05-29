@@ -10,6 +10,21 @@ type ModelInspector interface {
 	InspectModel(ctx context.Context, p domain.Preset) (domain.ModelMetadata, error)
 }
 
+type MetadataParser interface {
+	Parse(ctx context.Context, modelRef string) (domain.ModelMetadata, error)
+}
+
+type ParserInspector struct {
+	Parser MetadataParser
+}
+
+func (p ParserInspector) InspectModel(ctx context.Context, preset domain.Preset) (domain.ModelMetadata, error) {
+	if p.Parser == nil {
+		return domain.ModelMetadata{}, domain.ErrUnsupported
+	}
+	return p.Parser.Parse(ctx, preset.ModelRef)
+}
+
 type StaticInspector struct {
 	Metadata domain.ModelMetadata
 	Err      error

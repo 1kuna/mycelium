@@ -101,7 +101,7 @@ func TestRunNodeAndServerExitOnCanceledContext(t *testing.T) {
 }
 
 func TestBuildNodeServer(t *testing.T) {
-	addr, handler, err := buildNodeServer([]string{"--listen", "127.0.0.1:0", "--id", "node-a", "--name", "Node A", "--llama-server", "/bin/echo"})
+	addr, handler, err := buildNodeServer([]string{"--listen", "127.0.0.1:0", "--id", "node-a", "--name", "Node A", "--llama-server", "/bin/echo", "--vram-mb", "1024"})
 	if err != nil {
 		t.Fatalf("buildNodeServer: %v", err)
 	}

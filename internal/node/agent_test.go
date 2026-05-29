@@ -285,6 +285,28 @@ func TestInspectModelPropagatesInspectorError(t *testing.T) {
 	}
 }
 
+func TestParserInspectorUsesParser(t *testing.T) {
+	parser := parserFunc(func(context.Context, string) (domain.ModelMetadata, error) {
+		return domain.ModelMetadata{ModelRef: "model.gguf", WeightsMB: 7, KVPerTokenMB: 0.02}, nil
+	})
+	metadata, err := (ParserInspector{Parser: parser}).InspectModel(context.Background(), fixtures.MakePreset(fixtures.WithModelRef("model.gguf")))
+	if err != nil {
+		t.Fatalf("InspectModel: %v", err)
+	}
+	if metadata.WeightsMB != 7 {
+		t.Fatalf("metadata = %+v", metadata)
+	}
+	if _, err := (ParserInspector{}).InspectModel(context.Background(), fixtures.MakePreset()); !errors.Is(err, domain.ErrUnsupported) {
+		t.Fatalf("missing parser err = %v", err)
+	}
+}
+
+type parserFunc func(context.Context, string) (domain.ModelMetadata, error)
+
+func (f parserFunc) Parse(ctx context.Context, modelRef string) (domain.ModelMetadata, error) {
+	return f(ctx, modelRef)
+}
+
 func TestWaitingLoadRespectsContextCancellation(t *testing.T) {
 	op := &loadOp{done: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())

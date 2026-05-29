@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -47,6 +48,10 @@ func (s HTTPServer) load(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	inst, err := s.Agent.Load(r.Context(), preset)
+	if errors.Is(err, domain.ErrNoFit) {
+		writeError(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
 	writeJSON(w, inst, err)
 }
 

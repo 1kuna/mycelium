@@ -20,6 +20,19 @@ type ServerConfig struct {
 	DefaultProject string           `json:"default_project"`
 }
 
+type NodeConfig struct {
+	Listen        string  `json:"listen"`
+	BackendListen string  `json:"backend_listen"`
+	StorePath     string  `json:"store_path"`
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	LlamaServer   string  `json:"llama_server"`
+	GGUFParser    string  `json:"gguf_parser"`
+	MaxUtil       float64 `json:"max_util"`
+	VRAMMB        int     `json:"vram_mb"`
+	Join          string  `json:"join"`
+}
+
 func loadServerConfig(path string) (ServerConfig, error) {
 	if path == "" {
 		path = defaultServerConfigPath()
@@ -45,6 +58,36 @@ func loadServerConfig(path string) (ServerConfig, error) {
 		cfg.DefaultProject = cfg.Projects[0].ID
 	}
 	return cfg, nil
+}
+
+func loadNodeConfig(path string) (NodeConfig, error) {
+	if path == "" {
+		return defaultNodeConfig(), nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return NodeConfig{}, fmt.Errorf("read node config %s: %w", path, err)
+	}
+	cfg := defaultNodeConfig()
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return NodeConfig{}, fmt.Errorf("parse node config %s: %w", path, err)
+	}
+	if cfg.StorePath == "" {
+		cfg.StorePath = defaultControlStorePath()
+	}
+	return cfg, nil
+}
+
+func defaultNodeConfig() NodeConfig {
+	return NodeConfig{
+		Listen:        "127.0.0.1:51847",
+		BackendListen: "127.0.0.1:51848",
+		StorePath:     defaultControlStorePath(),
+		ID:            "node_local",
+		Name:          "local-node",
+		LlamaServer:   "llama-server",
+		MaxUtil:       0.90,
+	}
 }
 
 func defaultServerConfigPath() string {

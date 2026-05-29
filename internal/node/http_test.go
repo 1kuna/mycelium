@@ -98,13 +98,32 @@ func TestHTTPServerHandlesMissingAgentAndNotFound(t *testing.T) {
 	_ = resp.Body.Close()
 }
 
-type failingNodeAgent struct{}
+func TestHTTPServerShedsNoFitAsTooManyRequests(t *testing.T) {
+	server := httptest.NewServer(HTTPServer{Agent: &failingNodeAgent{loadErr: domain.ErrNoFit}})
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/load", "application/json", strings.NewReader(`{"id":"preset"}`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %s", resp.Status)
+	}
+}
+
+type failingNodeAgent struct {
+	loadErr error
+}
 
 func (f *failingNodeAgent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 	return domain.NodeSnapshot{}, errors.New("snapshot failed")
 }
 
 func (f *failingNodeAgent) Load(context.Context, domain.Preset) (domain.ModelInstance, error) {
+	if f.loadErr != nil {
+		return domain.ModelInstance{}, f.loadErr
+	}
 	return domain.ModelInstance{}, errors.New("load failed")
 }
 
