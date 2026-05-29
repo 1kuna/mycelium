@@ -17,6 +17,11 @@ import (
 	"mycelium/internal/ports"
 )
 
+type ProcessRegistry interface {
+	Add(ctx context.Context, ref domain.ProcessRef) error
+	Remove(ctx context.Context, ref domain.ProcessRef) error
+}
+
 type Adapter struct {
 	cfg       Config
 	mu        sync.Mutex
@@ -24,13 +29,14 @@ type Adapter struct {
 }
 
 type Config struct {
-	BinaryPath     string
-	Args           []string
-	LaunchProfiles map[string][]string
-	HealthPath     string
-	PollInterval   time.Duration
-	HTTPClient     *http.Client
-	Clock          ports.Clock
+	BinaryPath      string
+	Args            []string
+	LaunchProfiles  map[string][]string
+	HealthPath      string
+	PollInterval    time.Duration
+	HTTPClient      *http.Client
+	Clock           ports.Clock
+	ProcessRegistry ProcessRegistry
 }
 
 func DefaultConfig() Config {
@@ -100,7 +106,18 @@ func (a *Adapter) Launch(ctx context.Context, p domain.Preset, addr string) (por
 	a.mu.Lock()
 	a.processes[cmd.Process.Pid] = cmd
 	a.mu.Unlock()
-	return ports.Handle{PID: cmd.Process.Pid, Addr: addr, Kind: "process", Ref: fmt.Sprintf("%d", cmd.Process.Pid)}, nil
+	ref := domain.ProcessRef{PID: cmd.Process.Pid, Kind: "process", Ref: fmt.Sprintf("%d", cmd.Process.Pid)}
+	if a.cfg.ProcessRegistry != nil {
+		if err := a.cfg.ProcessRegistry.Add(ctx, ref); err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			a.mu.Lock()
+			delete(a.processes, cmd.Process.Pid)
+			a.mu.Unlock()
+			return ports.Handle{}, err
+		}
+	}
+	return ports.Handle{PID: cmd.Process.Pid, Addr: addr, Kind: ref.Kind, Ref: ref.Ref}, nil
 }
 
 func (a *Adapter) renderLaunchArgs(p domain.Preset, addr string) ([]string, error) {
@@ -146,7 +163,11 @@ func (a *Adapter) Stop(ctx context.Context, h ports.Handle) error {
 	delete(a.processes, h.PID)
 	a.mu.Unlock()
 	if cmd == nil || cmd.Process == nil {
-		return signalPID(h.PID)
+		if err := signalPID(h.PID); err != nil {
+			return err
+		}
+		a.removeProcessRef(ctx, h)
+		return nil
 	}
 
 	_ = cmd.Process.Signal(os.Interrupt)
@@ -160,10 +181,19 @@ func (a *Adapter) Stop(ctx context.Context, h ports.Handle) error {
 	case <-ctx.Done():
 		_ = cmd.Process.Kill()
 		<-done
+		a.removeProcessRef(context.Background(), h)
 		return ctx.Err()
 	case <-done:
+		a.removeProcessRef(ctx, h)
 		return nil
 	}
+}
+
+func (a *Adapter) removeProcessRef(ctx context.Context, h ports.Handle) {
+	if a.cfg.ProcessRegistry == nil {
+		return
+	}
+	_ = a.cfg.ProcessRegistry.Remove(ctx, domain.ProcessRef{PID: h.PID, Kind: h.Kind, Ref: h.Ref})
 }
 
 func signalPID(pid int) error {

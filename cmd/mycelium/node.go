@@ -11,13 +11,19 @@ import (
 	"mycelium/internal/backends/llamacpp"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
+	"mycelium/internal/estimate"
+	"mycelium/internal/hardware"
 	"mycelium/internal/lease"
 	"mycelium/internal/membership"
 	nodeagent "mycelium/internal/node"
+	storesqlite "mycelium/internal/store/sqlite"
 )
 
 func runNode(ctx context.Context, args []string) error {
-	spec, err := buildNodeServerSpec(args)
+	if ctx.Err() != nil {
+		return nil
+	}
+	spec, err := buildNodeServerSpec(ctx, args)
 	if err != nil {
 		return err
 	}
@@ -60,7 +66,7 @@ func runNode(ctx context.Context, args []string) error {
 }
 
 func buildNodeServer(args []string) (string, http.Handler, error) {
-	spec, err := buildNodeServerSpec(args)
+	spec, err := buildNodeServerSpec(context.Background(), args)
 	if err != nil {
 		return "", nil, err
 	}
@@ -74,23 +80,45 @@ type nodeServerSpec struct {
 	join    string
 }
 
-func buildNodeServerSpec(args []string) (nodeServerSpec, error) {
+func buildNodeServerSpec(ctx context.Context, args []string) (nodeServerSpec, error) {
 	fs := flag.NewFlagSet("node", flag.ContinueOnError)
-	listen := fs.String("listen", "127.0.0.1:51847", "node agent listen address")
-	backendListen := fs.String("backend-listen", "127.0.0.1:51848", "backend inference server listen address")
-	id := fs.String("id", "node_local", "node id")
-	name := fs.String("name", "local-node", "node name")
-	llamaServer := fs.String("llama-server", "llama-server", "llama.cpp server binary")
-	maxUtil := fs.Float64("max-util", 0.90, "maximum accelerator utilization")
-	vramMB := fs.Int("vram-mb", 65536, "local allocatable memory in MB")
+	configPath := fs.String("config", "", "node config JSON path")
+	listen := fs.String("listen", "", "node agent listen address")
+	backendListen := fs.String("backend-listen", "", "backend inference server listen address")
+	id := fs.String("id", "", "node id")
+	name := fs.String("name", "", "node name")
+	llamaServer := fs.String("llama-server", "", "llama.cpp server binary")
+	ggufParser := fs.String("gguf-parser", "", "GGUF parser binary")
+	maxUtil := fs.Float64("max-util", 0, "maximum accelerator utilization")
+	vramMB := fs.Int("vram-mb", 0, "local allocatable memory in MB")
+	storePath := fs.String("state-db", "", "node process-ref SQLite store")
 	join := fs.String("join", "", "mycjoin:// token for joining a server")
 	if err := fs.Parse(args); err != nil {
 		return nodeServerSpec{}, err
 	}
-	nodeAddr := *listen
-	backendAddr := *backendListen
-	if *join != "" {
-		info, err := membership.ParseJoinToken(*join)
+	cfg, err := loadNodeConfig(*configPath)
+	if err != nil {
+		return nodeServerSpec{}, err
+	}
+	overrideString(listen, &cfg.Listen)
+	overrideString(backendListen, &cfg.BackendListen)
+	overrideString(id, &cfg.ID)
+	overrideString(name, &cfg.Name)
+	overrideString(llamaServer, &cfg.LlamaServer)
+	overrideString(ggufParser, &cfg.GGUFParser)
+	overrideString(storePath, &cfg.StorePath)
+	overrideString(join, &cfg.Join)
+	if *maxUtil != 0 {
+		cfg.MaxUtil = *maxUtil
+	}
+	if *vramMB != 0 {
+		cfg.VRAMMB = *vramMB
+	}
+
+	nodeAddr := cfg.Listen
+	backendAddr := cfg.BackendListen
+	if cfg.Join != "" {
+		info, err := membership.ParseJoinToken(cfg.Join)
 		if err != nil {
 			return nodeServerSpec{}, err
 		}
@@ -102,28 +130,69 @@ func buildNodeServerSpec(args []string) (nodeServerSpec, error) {
 		backendAddr = joinedBackendAddr(backendAddr, advertise)
 	}
 
-	node := domain.Node{
-		ID:          *id,
-		Name:        *name,
-		Address:     nodeAddr,
-		OS:          "darwin",
-		Labels:      map[string]string{"gpu.vendor": "apple", "memory.class": "unified"},
-		MaxUtil:     *maxUtil,
-		OOMSeverity: domain.OOMSoft,
-		Status:      domain.NodeReady,
-		Accelerators: []domain.Accelerator{{
-			Index:         0,
-			Vendor:        "apple",
-			Kind:          "unified",
-			VRAMTotalMB:   *vramMB,
-			UnifiedMemory: true,
-		}},
-		UnifiedMemory: true,
-		SpeedClass:    domain.SpeedClass{TokensPerSecRef: 1, Source: "class-default"},
+	seed := domain.Node{
+		ID:         cfg.ID,
+		Name:       cfg.Name,
+		Address:    nodeAddr,
+		MaxUtil:    cfg.MaxUtil,
+		Status:     domain.NodeReady,
+		SpeedClass: domain.SpeedClass{TokensPerSecRef: 1, Source: "class-default"},
 	}
-	adapter := llamacpp.NewAdapter(llamacpp.Config{BinaryPath: *llamaServer})
-	agent := nodeagent.NewAgent(node, adapter, clock.System{}, nodeagent.WithListenAddr(backendAddr), nodeagent.WithAllocator(lease.NewAllocator()))
-	return nodeServerSpec{addr: *listen, handler: nodeagent.HTTPServer{Agent: agent}, node: node, join: *join}, nil
+	node := seed
+	if cfg.VRAMMB > 0 {
+		node = explicitMemoryNode(seed, cfg.VRAMMB)
+	} else {
+		detected, err := hardware.NewDetector().Detect(ctx, seed)
+		if err != nil {
+			return nodeServerSpec{}, err
+		}
+		node = detected
+	}
+	store, err := storesqlite.Open(cfg.StorePath)
+	if err != nil {
+		return nodeServerSpec{}, err
+	}
+	registry := nodeagent.StoreProcessRegistry{Store: store, NodeID: node.ID}
+	adapter := llamacpp.NewAdapter(llamacpp.Config{BinaryPath: cfg.LlamaServer, ProcessRegistry: registry})
+	if refs, err := store.ProcessRefs(ctx, node.ID); err == nil && len(refs) > 0 {
+		reaper := nodeagent.NewReaperFromRefs(refs, nodeagent.BackendProcessKiller{Backend: adapter})
+		if _, err := reaper.Reap(ctx); err != nil {
+			return nodeServerSpec{}, err
+		}
+		if err := store.DeleteProcessRefs(ctx, node.ID); err != nil {
+			return nodeServerSpec{}, err
+		}
+	} else if err != nil {
+		return nodeServerSpec{}, err
+	}
+	opts := []nodeagent.Option{nodeagent.WithListenAddr(backendAddr), nodeagent.WithAllocator(lease.NewAllocator())}
+	if cfg.GGUFParser != "" {
+		opts = append(opts, nodeagent.WithModelInspector(nodeagent.ParserInspector{Parser: estimate.NewCommandParser(cfg.GGUFParser, []string{"{model}"})}))
+	}
+	agent := nodeagent.NewAgent(node, adapter, clock.System{}, opts...)
+	return nodeServerSpec{addr: cfg.Listen, handler: nodeagent.HTTPServer{Agent: agent}, node: node, join: cfg.Join}, nil
+}
+
+func overrideString(flagValue *string, target *string) {
+	if flagValue != nil && *flagValue != "" {
+		*target = *flagValue
+	}
+}
+
+func explicitMemoryNode(seed domain.Node, vramMB int) domain.Node {
+	node := seed
+	node.OS = "darwin"
+	node.Labels = map[string]string{"gpu.vendor": "apple", "memory.class": "unified"}
+	node.OOMSeverity = domain.OOMSoft
+	node.UnifiedMemory = true
+	node.Accelerators = []domain.Accelerator{{
+		Index:         0,
+		Vendor:        "apple",
+		Kind:          "unified",
+		VRAMTotalMB:   vramMB,
+		UnifiedMemory: true,
+	}}
+	return node
 }
 
 func effectiveAdvertiseAddr(configured, actual string) string {

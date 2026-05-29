@@ -72,6 +72,38 @@ func TestBackendProcessKillerDelegatesToBackendStop(t *testing.T) {
 	}
 }
 
+func TestReaperFromRefsDoesNotNeedStateFile(t *testing.T) {
+	killer := &recordingKiller{}
+	reaped, err := NewReaperFromRefs([]ProcessRef{{PID: 7, Kind: "process", Ref: "7"}}, killer).Reap(context.Background())
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if len(reaped) != 1 || len(killer.refs) != 1 || killer.refs[0].PID != 7 {
+		t.Fatalf("reaped=%+v killed=%+v", reaped, killer.refs)
+	}
+}
+
+func TestStoreProcessRegistryAddsAndRemovesRefs(t *testing.T) {
+	store := &processRefStore{}
+	registry := StoreProcessRegistry{Store: store, NodeID: "node-a"}
+	ref := domain.ProcessRef{PID: 9, Kind: "process", Ref: "9"}
+	if err := registry.Add(context.Background(), ref); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := registry.Add(context.Background(), ref); err != nil {
+		t.Fatalf("Add duplicate: %v", err)
+	}
+	if len(store.refs["node-a"]) != 1 {
+		t.Fatalf("refs = %+v", store.refs)
+	}
+	if err := registry.Remove(context.Background(), ref); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, ok := store.refs["node-a"]; ok {
+		t.Fatalf("refs not deleted: %+v", store.refs)
+	}
+}
+
 type recordingKiller struct {
 	refs []ProcessRef
 	err  error
@@ -107,3 +139,24 @@ func (s *stopRecorder) Stop(_ context.Context, h ports.Handle) error {
 }
 
 var _ ports.BackendAdapter = (*stopRecorder)(nil)
+
+type processRefStore struct {
+	refs map[string][]domain.ProcessRef
+}
+
+func (s *processRefStore) ProcessRefs(_ context.Context, nodeID string) ([]domain.ProcessRef, error) {
+	return append([]domain.ProcessRef(nil), s.refs[nodeID]...), nil
+}
+
+func (s *processRefStore) SaveProcessRefs(_ context.Context, nodeID string, refs []domain.ProcessRef) error {
+	if s.refs == nil {
+		s.refs = map[string][]domain.ProcessRef{}
+	}
+	s.refs[nodeID] = append([]domain.ProcessRef(nil), refs...)
+	return nil
+}
+
+func (s *processRefStore) DeleteProcessRefs(_ context.Context, nodeID string) error {
+	delete(s.refs, nodeID)
+	return nil
+}

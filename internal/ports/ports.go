@@ -87,3 +87,7 @@ type Store interface {
 	Put(ctx context.Context, key string, value []byte) error
 	Delete(ctx context.Context, key string) error
 }
+
+type HardwareDetector interface {
+	Detect(ctx context.Context, seed domain.Node) (domain.Node, error)
+}
