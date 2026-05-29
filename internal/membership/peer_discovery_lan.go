@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 
+	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
 )
@@ -17,6 +19,14 @@ type PeerLANDiscovery struct {
 	ListenAddr    string
 	BroadcastAddr string
 	MaxPackets    int
+	Token         string
+	ScanDuration  time.Duration
+	Clock         ports.Clock
+}
+
+type peerAdvertisement struct {
+	Peer      domain.Peer `json:"peer"`
+	TokenHash string      `json:"token_hash,omitempty"`
 }
 
 func NewPeerLANDiscovery(listenAddr, broadcastAddr string) PeerLANDiscovery {
@@ -26,7 +36,7 @@ func NewPeerLANDiscovery(listenAddr, broadcastAddr string) PeerLANDiscovery {
 	if broadcastAddr == "" {
 		broadcastAddr = DefaultPeerDiscoveryAddr
 	}
-	return PeerLANDiscovery{ListenAddr: listenAddr, BroadcastAddr: broadcastAddr, MaxPackets: 16}
+	return PeerLANDiscovery{ListenAddr: listenAddr, BroadcastAddr: broadcastAddr, MaxPackets: 16, ScanDuration: 250 * time.Millisecond}
 }
 
 func (d PeerLANDiscovery) Advertise(ctx context.Context, self domain.Peer) error {
@@ -51,7 +61,7 @@ func (d PeerLANDiscovery) Advertise(ctx context.Context, self domain.Peer) error
 			return err
 		}
 	}
-	data, err := json.Marshal(self)
+	data, err := d.marshal(self)
 	if err != nil {
 		return err
 	}
@@ -71,12 +81,15 @@ func (d PeerLANDiscovery) Peers(ctx context.Context) ([]domain.Peer, error) {
 	}
 	peers := map[string]domain.Peer{}
 	for len(peers) < max {
-		peer, err := readPeer(ctx, conn)
+		peer, accepted, err := d.readPeer(ctx, conn)
 		if err != nil {
 			if peerReadDone(ctx, err) {
 				return peerList(peers), nil
 			}
 			return nil, err
+		}
+		if !accepted {
+			continue
 		}
 		peers[peer.ID] = peer
 	}
@@ -96,9 +109,12 @@ func (d PeerLANDiscovery) WatchPeers(ctx context.Context) (<-chan domain.Peer, e
 		defer close(ch)
 		defer conn.Close()
 		for {
-			peer, err := readPeer(ctx, conn)
+			peer, accepted, err := d.readPeer(ctx, conn)
 			if err != nil {
 				return
+			}
+			if !accepted {
+				continue
 			}
 			select {
 			case ch <- peer:
@@ -124,6 +140,19 @@ func (d PeerLANDiscovery) listen(ctx context.Context) (net.PacketConn, error) {
 			_ = conn.Close()
 			return nil, err
 		}
+	} else {
+		duration := d.ScanDuration
+		if duration == 0 {
+			duration = 250 * time.Millisecond
+		}
+		clk := d.Clock
+		if clk == nil {
+			clk = clock.System{}
+		}
+		if err := conn.SetReadDeadline(clk.Now().Add(duration)); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
 	}
 	go func() {
 		<-ctx.Done()
@@ -132,23 +161,52 @@ func (d PeerLANDiscovery) listen(ctx context.Context) (net.PacketConn, error) {
 	return conn, nil
 }
 
-func readPeer(ctx context.Context, conn net.PacketConn) (domain.Peer, error) {
+func (d PeerLANDiscovery) marshal(peer domain.Peer) ([]byte, error) {
+	if d.Token == "" {
+		return json.Marshal(peer)
+	}
+	return json.Marshal(peerAdvertisement{Peer: peer, TokenHash: tokenHash(d.Token)})
+}
+
+func (d PeerLANDiscovery) readPeer(ctx context.Context, conn net.PacketConn) (domain.Peer, bool, error) {
 	buf := make([]byte, 64*1024)
 	n, _, err := conn.ReadFrom(buf)
 	if err != nil {
-		return domain.Peer{}, err
+		return domain.Peer{}, false, err
 	}
 	if err := ctx.Err(); err != nil {
-		return domain.Peer{}, err
+		return domain.Peer{}, false, err
 	}
-	var peer domain.Peer
-	if err := json.Unmarshal(buf[:n], &peer); err != nil {
-		return domain.Peer{}, err
+	peer, tokenHash, err := decodePeerAdvertisement(buf[:n])
+	if err != nil {
+		return domain.Peer{}, false, err
+	}
+	if d.Token != "" && tokenHash != tokenHashValue(d.Token) {
+		return domain.Peer{}, false, nil
 	}
 	if err := validatePeer(peer); err != nil {
-		return domain.Peer{}, err
+		return domain.Peer{}, false, err
 	}
-	return peer, nil
+	return peer, true, nil
+}
+
+func decodePeerAdvertisement(data []byte) (domain.Peer, string, error) {
+	var advert peerAdvertisement
+	if err := json.Unmarshal(data, &advert); err == nil && advert.Peer.ID != "" {
+		return advert.Peer, advert.TokenHash, nil
+	}
+	var peer domain.Peer
+	if err := json.Unmarshal(data, &peer); err != nil {
+		return domain.Peer{}, "", err
+	}
+	return peer, "", nil
+}
+
+func tokenHashValue(token string) string {
+	if token == "" {
+		return ""
+	}
+	return tokenHash(token)
 }
 
 func validatePeer(peer domain.Peer) error {
