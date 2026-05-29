@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"mycelium/internal/lease"
 	"mycelium/internal/membership"
 	nodeagent "mycelium/internal/node"
+	"mycelium/internal/optimizer"
 	"mycelium/internal/ports"
 	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
@@ -148,6 +150,7 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 		return "", nil, err
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
+	startOptimizerEvaluator(ctx, store, clock.System{}, time.Duration(cfg.OptimizerEvalMS)*time.Millisecond)
 	handler := gateway.Server{Router: &gateway.Router{
 		Placer:         placer,
 		Fleet:          fleet,
@@ -198,10 +201,61 @@ func startQueueDrainer(ctx context.Context, runtime *scheduler.Service, clk port
 				return
 			case <-timer.C():
 			}
-			_, _ = runtime.ExpireLeases(ctx)
-			_, _ = runtime.Drain(ctx, limit)
+			if _, err := runtime.ExpireLeases(ctx); err != nil {
+				log.Printf("mycelium queue lease expiry failed: %v", err)
+			}
+			if _, err := runtime.Drain(ctx, limit); err != nil {
+				log.Printf("mycelium queue drain failed: %v", err)
+			}
 		}
 	}()
+}
+
+type optimizerRuntimeStore interface {
+	optimizer.RuntimeStore
+	optimizer.SpeedCalibrationStore
+	ListProjects(ctx context.Context) ([]domain.Project, error)
+}
+
+func startOptimizerEvaluator(ctx context.Context, store optimizerRuntimeStore, clk ports.Clock, interval time.Duration) {
+	if store == nil || clk == nil || interval <= 0 {
+		return
+	}
+	go func() {
+		for {
+			timer := clk.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C():
+			}
+			if err := runOptimizerEvaluation(ctx, store, clk); err != nil {
+				log.Printf("mycelium optimizer evaluation failed: %v", err)
+			}
+		}
+	}()
+}
+
+func runOptimizerEvaluation(ctx context.Context, store optimizerRuntimeStore, clk ports.Clock) error {
+	if store == nil {
+		return fmt.Errorf("optimizer store is not configured")
+	}
+	if clk == nil {
+		return fmt.Errorf("optimizer clock is not configured")
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	service := optimizer.RecommendationService{Store: store, Clock: clk}
+	for _, project := range projects {
+		if _, err := service.EvaluateProject(ctx, project); err != nil {
+			return err
+		}
+	}
+	_, err = optimizer.CalibrateSpeedClasses(ctx, store, clk)
+	return err
 }
 
 func seedControlStore(ctx context.Context, store *storesqlite.Store, cfg ServerConfig) error {

@@ -22,6 +22,7 @@ type ServerConfig struct {
 	DefaultProject  string               `json:"default_project"`
 	QueueDrainMS    int                  `json:"queue_drain_ms"`
 	QueueDrainLimit int                  `json:"queue_drain_limit"`
+	OptimizerEvalMS int                  `json:"optimizer_eval_ms"`
 }
 
 type NodeConfig struct {
@@ -68,6 +69,9 @@ func loadServerConfig(path string) (ServerConfig, error) {
 	}
 	if cfg.QueueDrainLimit == 0 {
 		cfg.QueueDrainLimit = 1
+	}
+	if cfg.OptimizerEvalMS == 0 {
+		cfg.OptimizerEvalMS = 60000
 	}
 	return cfg, nil
 }
