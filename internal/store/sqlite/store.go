@@ -198,6 +198,10 @@ func (s *Store) ListRecommendations(ctx context.Context, projectID string) ([]do
 	return out, nil
 }
 
+func (s *Store) Recommendation(ctx context.Context, id string) (domain.RecommendationRecord, error) {
+	return s.recommendation(ctx, id)
+}
+
 func (s *Store) MarkRecommendationApplied(ctx context.Context, id string, at time.Time) error {
 	rec, err := s.recommendation(ctx, id)
 	if err != nil {

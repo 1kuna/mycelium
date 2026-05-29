@@ -87,6 +87,36 @@ func TestOverlayDiscoveryAndTunnelErrorPaths(t *testing.T) {
 	}
 }
 
+func TestLANTunnelForwardsThroughLoopback(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/snapshot" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer target.Close()
+	tunnel := NewLANTunnel()
+	addr := strings.TrimPrefix(target.URL, "http://")
+	loopback, err := tunnel.Open(context.Background(), readyJoinNode("node-a", addr))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() {
+		if err := tunnel.Close(context.Background(), "node-a"); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}()
+
+	resp, err := http.Get("http://" + loopback + "/snapshot")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %s", resp.Status)
+	}
+}
+
 func readyJoinNode(id, addr string) domain.Node {
 	return domain.Node{
 		ID:          id,

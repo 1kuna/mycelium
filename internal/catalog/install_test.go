@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -67,10 +66,10 @@ func TestInstallCanceledBeforeStartDoesNotRegisterPreset(t *testing.T) {
 	}
 }
 
-func TestUnsupportedImportersFailCleanly(t *testing.T) {
-	for _, source := range []string{"hf://org/model", "oci://registry/model"} {
+func TestMalformedRemoteImportsFailCleanly(t *testing.T) {
+	for _, source := range []string{"hf://org", "oci://"} {
 		_, err := NewInstaller(t.TempDir()).Install(context.Background(), InstallRequest{Source: source})
-		if err == nil || !strings.Contains(err.Error(), "not implemented in Phase 3") {
+		if err == nil {
 			t.Fatalf("%s err = %v", source, err)
 		}
 	}

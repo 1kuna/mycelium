@@ -5,10 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"path/filepath"
-	"time"
 
 	"mycelium/internal/catalog"
+	"mycelium/internal/clock"
 	"mycelium/internal/domain"
+	"mycelium/internal/optimizer"
 	storesqlite "mycelium/internal/store/sqlite"
 )
 
@@ -171,9 +172,11 @@ func runJobs(ctx context.Context, args []string) error {
 
 func runRecommendations(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce recommendations <list|apply>")
+		return fmt.Errorf("usage: myce recommendations <generate|list|apply>")
 	}
 	switch args[0] {
+	case "generate":
+		return runRecommendationsGenerate(ctx, args[1:])
 	case "list":
 		return runRecommendationsList(ctx, args[1:])
 	case "apply":
@@ -181,6 +184,36 @@ func runRecommendations(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown recommendations command %q", args[0])
 	}
+}
+
+func runRecommendationsGenerate(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("recommendations generate", flag.ContinueOnError)
+	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+	projectID := fs.String("project", "", "project id")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *projectID == "" {
+		return fmt.Errorf("--project is required")
+	}
+	store, err := storesqlite.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	project, err := store.Project(ctx, *projectID)
+	if err != nil {
+		return err
+	}
+	service := optimizer.RecommendationService{Store: store, Clock: clock.System{}}
+	records, err := service.EvaluateProject(ctx, project)
+	if err != nil {
+		return err
+	}
+	for _, rec := range records {
+		fmt.Printf("%s\t%s\t%s\t%d\t%t\n", rec.ID, rec.ProjectID, rec.Type, rec.RecommendedValue, rec.Applied)
+	}
+	return nil
 }
 
 func runRecommendationsList(ctx context.Context, args []string) error {
@@ -220,7 +253,43 @@ func runRecommendationsApply(ctx context.Context, args []string) error {
 		return err
 	}
 	defer store.Close()
-	if err := store.MarkRecommendationApplied(ctx, *id, time.Now().UTC()); err != nil {
+	rec, err := store.Recommendation(ctx, *id)
+	if err != nil {
+		return err
+	}
+	if rec.Type == optimizer.RecommendationContextCap {
+		project, err := store.Project(ctx, rec.ProjectID)
+		if err != nil {
+			return err
+		}
+		if rec.PresetID == "" {
+			return fmt.Errorf("recommendation %q has no preset to apply", rec.ID)
+		}
+		preset, err := store.Preset(ctx, rec.PresetID)
+		if err != nil {
+			return err
+		}
+		forced := project
+		forced.AutoApply = true
+		applied := optimizer.ApplyRecommendation(forced, preset, optimizer.Recommendation{
+			Type:           rec.Type,
+			ProjectID:      rec.ProjectID,
+			CurrentCap:     rec.CurrentValue,
+			RecommendedCap: rec.RecommendedValue,
+			Rationale:      rec.Rationale,
+		})
+		if !applied.Applied {
+			return fmt.Errorf("recommendation %q was not applied: %s", rec.ID, applied.Log.Result)
+		}
+		applied.Project.AutoApply = project.AutoApply
+		if err := store.SaveProject(ctx, applied.Project); err != nil {
+			return err
+		}
+		if err := store.SavePreset(ctx, applied.Preset); err != nil {
+			return err
+		}
+	}
+	if err := store.MarkRecommendationApplied(ctx, *id, clock.System{}.Now().UTC()); err != nil {
 		return err
 	}
 	fmt.Printf("recommendation\t%s\tapplied\n", *id)
