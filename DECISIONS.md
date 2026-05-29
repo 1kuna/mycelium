@@ -92,3 +92,4 @@
 - 2026-05-29: Peer identity is a top-level `id` in `peer.json`, defaulting to `compute_config.id` while standalone gateway peers still exist; this keeps coordinator records tied to the peer daemon rather than only to the local compute runtime.
 - 2026-05-29: Phase 4 LAN peer discovery uses UDP peer advertisements behind `ports.PeerDiscovery`; it carries the peer id, reachable addresses, and compute flag, while join-token membership remains separate from backend authorization.
 - 2026-05-29: Peer liveness is a deterministic heartbeat tick over `PeerDiscovery` plus an injected RPC probe; after three missed beats by default it invokes recovery exactly once for that dead peer, and a later successful probe resets the peer to alive.
+- 2026-05-29: Discovered compute peers are bridged into the gateway through a `PeerDirectory`: discovery stays peer-shaped, while the gateway still receives ordinary node snapshots and node-agent/admission interfaces for scheduling.

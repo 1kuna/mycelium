@@ -1,0 +1,114 @@
+package gateway
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+
+	"mycelium/internal/domain"
+	nodeagent "mycelium/internal/node"
+	"mycelium/internal/ports"
+)
+
+type PeerAgentFactory func(address string) ports.NodeAgent
+
+type PeerDirectory struct {
+	Discovery ports.PeerDiscovery
+	Factory   PeerAgentFactory
+
+	mu     sync.Mutex
+	agents map[string]ports.NodeAgent
+}
+
+func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, error) {
+	if d.Discovery == nil {
+		return domain.FleetSnapshot{}, fmt.Errorf("peer discovery is not configured")
+	}
+	peers, err := d.Discovery.Peers(ctx)
+	if err != nil {
+		return domain.FleetSnapshot{}, err
+	}
+	agents := map[string]ports.NodeAgent{}
+	var fleet domain.FleetSnapshot
+	for _, peer := range peers {
+		if !peer.Compute {
+			continue
+		}
+		agent, err := d.agentFor(peer)
+		if err != nil {
+			return domain.FleetSnapshot{}, err
+		}
+		snap, err := agent.Snapshot(ctx)
+		if err != nil {
+			return domain.FleetSnapshot{}, err
+		}
+		fleet.Nodes = append(fleet.Nodes, snap.Node)
+		fleet.Instances = append(fleet.Instances, snap.Instances...)
+		agents[snap.Node.ID] = agent
+	}
+	d.mu.Lock()
+	d.agents = agents
+	d.mu.Unlock()
+	return fleet, nil
+}
+
+func (d *PeerDirectory) NodeAgent(nodeID string) (ports.NodeAgent, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	agent, ok := d.agents[nodeID]
+	if !ok {
+		return nil, fmt.Errorf("peer node agent %q is not registered", nodeID)
+	}
+	return agent, nil
+}
+
+func (d *PeerDirectory) AdmissionController(nodeID string) (ports.AdmissionController, error) {
+	agent, err := d.NodeAgent(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	admission, ok := agent.(ports.AdmissionController)
+	if !ok {
+		return nil, fmt.Errorf("peer node agent %q does not expose admission", nodeID)
+	}
+	return admission, nil
+}
+
+func (d *PeerDirectory) LeaseInspector(nodeID string) (ports.LeaseInspector, error) {
+	agent, err := d.NodeAgent(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	inspector, ok := agent.(ports.LeaseInspector)
+	if !ok {
+		return nil, fmt.Errorf("peer node agent %q does not expose lease inspection", nodeID)
+	}
+	return inspector, nil
+}
+
+func (d *PeerDirectory) agentFor(peer domain.Peer) (ports.NodeAgent, error) {
+	if peer.ID == "" {
+		return nil, fmt.Errorf("discovered peer is missing id")
+	}
+	if len(peer.Addresses) == 0 {
+		return nil, fmt.Errorf("discovered peer %q has no reachable address", peer.ID)
+	}
+	factory := d.Factory
+	if factory == nil {
+		factory = func(address string) ports.NodeAgent {
+			return nodeagent.NewHTTPClient(peerAgentBaseURL(address))
+		}
+	}
+	return factory(peer.Addresses[0]), nil
+}
+
+func peerAgentBaseURL(address string) string {
+	if strings.HasPrefix(address, "http://") || strings.HasPrefix(address, "https://") {
+		return address
+	}
+	return "http://" + address
+}
+
+var _ FleetSource = (*PeerDirectory)(nil)
+var _ NodeResolver = (*PeerDirectory)(nil)
