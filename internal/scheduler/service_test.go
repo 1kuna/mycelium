@@ -105,6 +105,7 @@ func TestServiceSubmitWithPayloadUsesPeerCoordinator(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(10, 45).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
 	agent := mocks.NewNodeAgent(node)
+	admission := &mocks.AdmissionController{}
 	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithWeights(12))
 	store := &runtimeStore{}
 	coordinator := &mocks.Coordinator{
@@ -116,6 +117,7 @@ func TestServiceSubmitWithPayloadUsesPeerCoordinator(t *testing.T) {
 		Placer:      fakePlacer{},
 		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
 		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}},
+		Owners:      staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
 		Coordinator: coordinator,
 		JobLog:      jobLog,
 		Queue:       NewQueue(clock),
@@ -138,6 +140,9 @@ func TestServiceSubmitWithPayloadUsesPeerCoordinator(t *testing.T) {
 	}
 	if jobLog.job.ID != "job-a" || string(jobLog.payload) != `{"job":"a"}` {
 		t.Fatalf("job log = %+v payload=%s", jobLog.job, jobLog.payload)
+	}
+	if strings.Join(admission.Calls, ",") != "bind-instance:owner-lease-a:"+result.Instance.ID {
+		t.Fatalf("admission calls = %+v", admission.Calls)
 	}
 	if store.jobs["job-a"].Status != domain.JobRunning || len(store.leases) != 1 || len(store.instances) != 1 {
 		t.Fatalf("store jobs=%+v leases=%+v instances=%+v", store.jobs, store.leases, store.instances)
@@ -198,10 +203,12 @@ func TestServiceSubmitWithPayloadCoordinatorErrorPaths(t *testing.T) {
 	decision := domain.PlacementDecision{JobID: job.ID, NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}
 	errBoom := errors.New("boom")
 	base := func() *Service {
+		admission := &mocks.AdmissionController{}
 		return &Service{
 			Placer:      fakePlacer{},
 			Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
 			Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+			Owners:      staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
 			Coordinator: &mocks.Coordinator{Decision: decision, Lease: domain.Lease{ID: "owner-lease-a", JobID: job.ID, NodeID: node.ID, Claim: decision.Claim}},
 			JobLog:      &recordingJobLog{},
 			Queue:       NewQueue(clock),
@@ -345,6 +352,23 @@ func TestServiceSubmitWithPayloadCoordinatorErrorPaths(t *testing.T) {
 			wantErr: errBoom,
 		},
 		{
+			name: "bind instance",
+			mutate: func(s *Service) {
+				s.Owners = staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{BindErr: errBoom}}}
+			},
+			wantErr: errBoom,
+		},
+		{
+			name: "bind cleanup",
+			mutate: func(s *Service) {
+				agent := mocks.NewNodeAgent(node)
+				agent.UnloadErr = errors.New("unload cleanup")
+				s.Nodes = staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}}
+				s.Owners = staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{BindErr: errBoom}}}
+			},
+			wantErr: errBoom,
+		},
+		{
 			name: "save lease",
 			mutate: func(s *Service) {
 				s.Store = &runtimeStore{saveLeaseErr: errBoom}
@@ -384,7 +408,7 @@ func TestServiceSubmitWithPayloadCoordinatorErrorPaths(t *testing.T) {
 	}
 }
 
-func TestServiceSubmitWithPayloadFillsCoordinatorLeaseDefaults(t *testing.T) {
+func TestServiceSubmitWithPayloadRejectsMissingCoordinatorLeaseForColdLoad(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(10, 54).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
 	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
@@ -403,12 +427,9 @@ func TestServiceSubmitWithPayloadFillsCoordinatorLeaseDefaults(t *testing.T) {
 		Presets: map[string]domain.Preset{preset.ID: preset},
 	}
 
-	result, err := service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), []byte(`{"job":"a"}`))
-	if err != nil {
-		t.Fatalf("SubmitWithPayload: %v", err)
-	}
-	if result.Lease.ID != "lease-job-a" || result.Lease.JobID != "job-a" || result.Lease.NodeID != node.ID || result.Lease.InstanceID == "" || !result.Lease.GrantedAt.Equal(clock.Now()) || result.Lease.ExpiresAt.IsZero() {
-		t.Fatalf("lease defaults = %+v", result.Lease)
+	_, err := service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), []byte(`{"job":"a"}`))
+	if err == nil || !strings.Contains(err.Error(), "returned no owner lease") {
+		t.Fatalf("SubmitWithPayload err = %v", err)
 	}
 }
 
@@ -704,6 +725,66 @@ func TestServiceEnactsPreemptionAndRequeuesVictim(t *testing.T) {
 	}
 }
 
+func TestServiceCoordinatedPreemptionUsesOwnerLease(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(21, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim-a"), fixtures.OnNode(node.ID), fixtures.WithInstancePriority(domain.PriorityBackground))
+	agent := mocks.NewNodeAgent(node)
+	lease := domain.Lease{ID: "lease-victim", JobID: "victim-job", InstanceID: victim.ID, NodeID: node.ID, Claim: victim.Claim}
+	admission := &mocks.AdmissionController{LeaseForInstVal: lease, LeaseForInstFound: true}
+	store := &runtimeStore{
+		instances: map[string]domain.ModelInstance{victim.ID: victim},
+		leases:    map[string]domain.Lease{lease.ID: lease},
+	}
+	service := &Service{
+		Coordinator: &mocks.Coordinator{},
+		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}},
+		Owners:      staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Queue:       NewQueue(clock),
+		Store:       store,
+		Clock:       clock,
+	}
+
+	err := service.enactPreemption(context.Background(), domain.PlacementDecision{
+		JobID:     "job-a",
+		Preempted: []string{victim.ID},
+	}, domain.FleetSnapshot{Instances: []domain.ModelInstance{victim}})
+	if err != nil {
+		t.Fatalf("enactPreemption: %v", err)
+	}
+	if strings.Join(admission.Calls, ",") != "lease-for-instance:victim-a,preempt:lease-victim:preempted for job-a" {
+		t.Fatalf("admission calls = %+v", admission.Calls)
+	}
+	if strings.Join(agent.Calls, ",") != "unload:victim-a" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+	if _, ok := store.leases[lease.ID]; ok {
+		t.Fatalf("victim lease still stored: %+v", store.leases)
+	}
+	if _, ok := store.instances[victim.ID]; ok {
+		t.Fatalf("victim instance still stored: %+v", store.instances)
+	}
+}
+
+func TestServiceOwnerBindingAndCleanupErrors(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(22, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst-a"), fixtures.OnNode(node.ID))
+
+	if err := (&Service{}).bindOwnerInstance(context.Background(), node.ID, "lease-a", inst.ID); err == nil || !strings.Contains(err.Error(), "resolver") {
+		t.Fatalf("missing owner resolver err = %v", err)
+	}
+	if err := (&Service{Owners: staticNodes{}}).bindOwnerInstance(context.Background(), node.ID, "lease-a", inst.ID); !errors.Is(err, domain.ErrUnreachable) {
+		t.Fatalf("owner resolver err = %v", err)
+	}
+	if err := (&Service{Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admissionOnly{}}}}).bindOwnerInstance(context.Background(), node.ID, "lease-a", inst.ID); err == nil || !strings.Contains(err.Error(), "lease binding") {
+		t.Fatalf("unsupported binding err = %v", err)
+	}
+	if err := (&Service{Nodes: staticNodes{}, Coordinator: &mocks.Coordinator{}, Queue: NewQueue(clock)}).cleanupCoordinatedLoad(context.Background(), "job-a", inst); !errors.Is(err, domain.ErrUnreachable) {
+		t.Fatalf("cleanup node err = %v", err)
+	}
+}
+
 func TestServiceSubmitErrorPaths(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(30, 0).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
@@ -961,6 +1042,31 @@ func TestServiceResolveAndPreemptionErrors(t *testing.T) {
 		{name: "delete", fn: func() error {
 			return (&Service{Nodes: service.Nodes, Store: &runtimeStore{deleteErr: errors.New("delete")}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
+		{name: "coordinated preempt owner resolver missing", fn: func() error {
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+		}},
+		{name: "coordinated preempt owner unreachable", fn: func() error {
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+		}},
+		{name: "coordinated preempt lease inspection unsupported", fn: func() error {
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admissionOnly{}}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+		}},
+		{name: "coordinated preempt lease inspection error", fn: func() error {
+			admission := &mocks.AdmissionController{LeaseForInstErr: errors.New("lease lookup")}
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+		}},
+		{name: "coordinated preempt missing owner lease", fn: func() error {
+			admission := &mocks.AdmissionController{}
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+		}},
+		{name: "coordinated preempt owner preempt error", fn: func() error {
+			admission := &mocks.AdmissionController{LeaseForInstVal: domain.Lease{ID: "lease-a", InstanceID: inst.ID, NodeID: node.ID}, LeaseForInstFound: true, PreemptErr: errors.New("preempt")}
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+		}},
+		{name: "coordinated preempt delete lease", fn: func() error {
+			admission := &mocks.AdmissionController{LeaseForInstVal: domain.Lease{ID: "lease-a", InstanceID: inst.ID, NodeID: node.ID}, LeaseForInstFound: true}
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{deleteLeaseErr: errors.New("delete lease")}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+		}},
 		{name: "missing requeued", fn: func() error {
 			return service.enactPreemption(context.Background(), domain.PlacementDecision{Requeued: []string{"missing"}}, domain.FleetSnapshot{})
 		}},
@@ -1038,6 +1144,24 @@ func (n staticNodes) AdmissionController(nodeID string) (ports.AdmissionControll
 		return nil, domain.ErrUnreachable
 	}
 	return admission, nil
+}
+
+type admissionOnly struct{}
+
+func (admissionOnly) Offer(context.Context, domain.Job, domain.Claim) (domain.LeaseOffer, error) {
+	return domain.LeaseOffer{}, nil
+}
+
+func (admissionOnly) Commit(context.Context, string, uint64) (domain.Lease, error) {
+	return domain.Lease{}, nil
+}
+
+func (admissionOnly) Release(context.Context, string) error {
+	return nil
+}
+
+func (admissionOnly) Preempt(context.Context, string, string) error {
+	return nil
 }
 
 type runtimeStore struct {

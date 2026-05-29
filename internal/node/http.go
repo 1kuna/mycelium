@@ -52,8 +52,12 @@ func (s HTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.release(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/admission/preempt":
 		s.preempt(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/admission/bind-instance":
+		s.bindInstance(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/admission/lease":
 		s.leaseForJob(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/admission/lease-by-instance":
+		s.leaseForInstance(w, r)
 	case strings.HasPrefix(r.URL.Path, "/instances/"):
 		s.proxyInstance(w, r)
 	default:
@@ -194,6 +198,32 @@ func (s HTTPServer) preempt(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"}, s.Admission.Preempt(r.Context(), req.LeaseID, req.Reason))
 }
 
+func (s HTTPServer) bindInstance(w http.ResponseWriter, r *http.Request) {
+	if s.Admission == nil {
+		writeError(w, http.StatusInternalServerError, "admission controller is not configured")
+		return
+	}
+	binder, ok := s.Admission.(ports.LeaseBinder)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "admission controller does not expose lease binding")
+		return
+	}
+	var req admissionBindInstanceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.LeaseID == "" {
+		writeError(w, http.StatusBadRequest, "lease_id is required")
+		return
+	}
+	if req.InstanceID == "" {
+		writeError(w, http.StatusBadRequest, "instance_id is required")
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"}, binder.BindInstance(r.Context(), req.LeaseID, req.InstanceID))
+}
+
 func (s HTTPServer) leaseForJob(w http.ResponseWriter, r *http.Request) {
 	if s.Admission == nil {
 		writeError(w, http.StatusInternalServerError, "admission controller is not configured")
@@ -210,7 +240,26 @@ func (s HTTPServer) leaseForJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lease, found, err := inspector.LeaseForJob(r.Context(), jobID)
-	writeJSON(w, admissionLeaseForJobResponse{Found: found, Lease: lease}, err)
+	writeJSON(w, admissionLeaseResponse{Found: found, Lease: lease}, err)
+}
+
+func (s HTTPServer) leaseForInstance(w http.ResponseWriter, r *http.Request) {
+	if s.Admission == nil {
+		writeError(w, http.StatusInternalServerError, "admission controller is not configured")
+		return
+	}
+	inspector, ok := s.Admission.(ports.LeaseInspector)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "admission controller does not expose lease inspection")
+		return
+	}
+	instanceID := r.URL.Query().Get("instance_id")
+	if instanceID == "" {
+		writeError(w, http.StatusBadRequest, "instance_id is required")
+		return
+	}
+	lease, found, err := inspector.LeaseForInstance(r.Context(), instanceID)
+	writeJSON(w, admissionLeaseResponse{Found: found, Lease: lease}, err)
 }
 
 func (s HTTPServer) proxyInstance(w http.ResponseWriter, r *http.Request) {
@@ -368,7 +417,12 @@ type admissionPreemptRequest struct {
 	Reason  string `json:"reason"`
 }
 
-type admissionLeaseForJobResponse struct {
+type admissionBindInstanceRequest struct {
+	LeaseID    string `json:"lease_id"`
+	InstanceID string `json:"instance_id"`
+}
+
+type admissionLeaseResponse struct {
 	Found bool         `json:"found"`
 	Lease domain.Lease `json:"lease,omitempty"`
 }
@@ -441,9 +495,19 @@ func (c *HTTPClient) Preempt(ctx context.Context, leaseID, reason string) error 
 	return c.do(ctx, http.MethodPost, "/admission/preempt", admissionPreemptRequest{LeaseID: leaseID, Reason: reason}, nil)
 }
 
+func (c *HTTPClient) BindInstance(ctx context.Context, leaseID, instanceID string) error {
+	return c.do(ctx, http.MethodPost, "/admission/bind-instance", admissionBindInstanceRequest{LeaseID: leaseID, InstanceID: instanceID}, nil)
+}
+
 func (c *HTTPClient) LeaseForJob(ctx context.Context, jobID string) (domain.Lease, bool, error) {
-	var out admissionLeaseForJobResponse
+	var out admissionLeaseResponse
 	err := c.do(ctx, http.MethodGet, "/admission/lease?job_id="+url.QueryEscape(jobID), nil, &out)
+	return out.Lease, out.Found, err
+}
+
+func (c *HTTPClient) LeaseForInstance(ctx context.Context, instanceID string) (domain.Lease, bool, error) {
+	var out admissionLeaseResponse
+	err := c.do(ctx, http.MethodGet, "/admission/lease-by-instance?instance_id="+url.QueryEscape(instanceID), nil, &out)
 	return out.Lease, out.Found, err
 }
 
@@ -547,3 +611,4 @@ func writeWireError(w http.ResponseWriter, status int, msg, code string) {
 var _ ports.NodeAgent = (*HTTPClient)(nil)
 var _ ports.AdmissionController = (*HTTPClient)(nil)
 var _ ports.LeaseInspector = (*HTTPClient)(nil)
+var _ ports.LeaseBinder = (*HTTPClient)(nil)

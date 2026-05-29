@@ -157,6 +157,15 @@ func TestHTTPAdmissionControllerRoundTrip(t *testing.T) {
 	if got, found, err := client.LeaseForJob(context.Background(), job.ID); err != nil || !found || got.ID != lease.ID {
 		t.Fatalf("LeaseForJob = %+v %v %v", got, found, err)
 	}
+	if err := client.BindInstance(context.Background(), lease.ID, "inst-http"); err != nil {
+		t.Fatalf("BindInstance: %v", err)
+	}
+	if got, found, err := client.LeaseForInstance(context.Background(), "inst-http"); err != nil || !found || got.ID != lease.ID {
+		t.Fatalf("LeaseForInstance = %+v %v %v", got, found, err)
+	}
+	if got, found, err := client.LeaseForInstance(context.Background(), "missing"); err != nil || found || got.ID != "" {
+		t.Fatalf("missing LeaseForInstance = %+v %v %v", got, found, err)
+	}
 	if got, found, err := client.LeaseForJob(context.Background(), "missing"); err != nil || found || got.ID != "" {
 		t.Fatalf("missing LeaseForJob = %+v %v %v", got, found, err)
 	}
@@ -272,6 +281,17 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 	if err := admissionClient.Preempt(context.Background(), "", "test"); err == nil || !strings.Contains(err.Error(), "lease_id") {
 		t.Fatalf("empty preempt err = %v", err)
 	}
+	if err := admissionClient.BindInstance(context.Background(), "lease-a", "inst-a"); err == nil || !strings.Contains(err.Error(), "lease binding") {
+		t.Fatalf("unsupported bind err = %v", err)
+	}
+	resp, err = http.Post(admissionServer.URL+"/admission/bind-instance", "application/json", strings.NewReader("{"))
+	if err != nil {
+		t.Fatalf("bad bind post: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("unsupported bind status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
 	resp, err = http.Get(admissionServer.URL + "/admission/lease")
 	if err != nil {
 		t.Fatalf("empty lease query: %v", err)
@@ -288,6 +308,30 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("bad lease query status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
+	resp, err = http.Get(leaseServer.URL + "/admission/lease-by-instance")
+	if err != nil {
+		t.Fatalf("bad lease-by-instance query: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad lease-by-instance query status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
+	resp, err = http.Post(leaseServer.URL+"/admission/bind-instance", "application/json", strings.NewReader(`{"instance_id":"inst-a"}`))
+	if err != nil {
+		t.Fatalf("empty bind lease post: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty bind lease status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
+	resp, err = http.Post(leaseServer.URL+"/admission/bind-instance", "application/json", strings.NewReader(`{"lease_id":"lease-a"}`))
+	if err != nil {
+		t.Fatalf("empty bind instance post: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty bind instance status = %s", resp.Status)
 	}
 	_ = resp.Body.Close()
 }

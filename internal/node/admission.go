@@ -120,12 +120,11 @@ func (a *Admission) Commit(ctx context.Context, offerID string, fence uint64) (d
 
 	a.nextLease++
 	lease := domain.Lease{
-		ID:         fmt.Sprintf("lease-%s-%d", a.node.ID, a.nextLease),
-		JobID:      offer.offer.JobID,
-		InstanceID: fmt.Sprintf("admission-%s", offer.offer.OfferID),
-		NodeID:     a.node.ID,
-		Claim:      offer.offer.Claim,
-		GrantedAt:  a.clock.Now(),
+		ID:        fmt.Sprintf("lease-%s-%d", a.node.ID, a.nextLease),
+		JobID:     offer.offer.JobID,
+		NodeID:    a.node.ID,
+		Claim:     offer.offer.Claim,
+		GrantedAt: a.clock.Now(),
 	}
 	a.leases[lease.ID] = admissionLease{lease: lease, acceleratorSet: offer.acceleratorSet, priority: offer.job.Priority}
 	delete(a.offers, offerID)
@@ -172,6 +171,49 @@ func (a *Admission) LeaseForJob(ctx context.Context, jobID string) (domain.Lease
 		}
 	}
 	return domain.Lease{}, false, nil
+}
+
+func (a *Admission) LeaseForInstance(ctx context.Context, instanceID string) (domain.Lease, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.Lease{}, false, err
+	}
+	if instanceID == "" {
+		return domain.Lease{}, false, fmt.Errorf("instance id is required")
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, record := range a.leases {
+		if record.lease.InstanceID == instanceID {
+			return record.lease, true, nil
+		}
+	}
+	return domain.Lease{}, false, nil
+}
+
+func (a *Admission) BindInstance(ctx context.Context, leaseID, instanceID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if leaseID == "" {
+		return fmt.Errorf("lease id is required")
+	}
+	if instanceID == "" {
+		return fmt.Errorf("instance id is required")
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	record, ok := a.leases[leaseID]
+	if !ok {
+		return fmt.Errorf("bind unknown lease %q", leaseID)
+	}
+	if record.lease.InstanceID != "" && record.lease.InstanceID != instanceID {
+		return fmt.Errorf("lease %q is already bound to instance %q", leaseID, record.lease.InstanceID)
+	}
+	record.lease.InstanceID = instanceID
+	a.leases[leaseID] = record
+	return nil
 }
 
 func (a *Admission) firstFitLocked(claim domain.Claim) ([]int, bool) {
@@ -221,3 +263,4 @@ func (a *Admission) removeLeaseLocked(leaseID, op string) error {
 
 var _ ports.AdmissionController = (*Admission)(nil)
 var _ ports.LeaseInspector = (*Admission)(nil)
+var _ ports.LeaseBinder = (*Admission)(nil)

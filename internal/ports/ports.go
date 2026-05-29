@@ -62,6 +62,11 @@ type AdmissionController interface {
 
 type LeaseInspector interface {
 	LeaseForJob(ctx context.Context, jobID string) (domain.Lease, bool, error)
+	LeaseForInstance(ctx context.Context, instanceID string) (domain.Lease, bool, error)
+}
+
+type LeaseBinder interface {
+	BindInstance(ctx context.Context, leaseID, instanceID string) error
 }
 
 type Coordinator interface {

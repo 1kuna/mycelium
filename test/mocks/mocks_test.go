@@ -187,6 +187,14 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	if err := admission.Preempt(context.Background(), "lease-a", "test"); err != nil {
 		t.Fatalf("Preempt: %v", err)
 	}
+	admission.LeaseForInstVal = domain.Lease{ID: "lease-a", InstanceID: "inst-a"}
+	admission.LeaseForInstFound = true
+	if got, found, err := admission.LeaseForInstance(context.Background(), "inst-a"); err != nil || !found || got.ID != "lease-a" {
+		t.Fatalf("LeaseForInstance = %+v %v %v", got, found, err)
+	}
+	if err := admission.BindInstance(context.Background(), "lease-a", "inst-a"); err != nil {
+		t.Fatalf("BindInstance: %v", err)
+	}
 
 	stale := errors.New("stale")
 	admission.CommitErr = stale

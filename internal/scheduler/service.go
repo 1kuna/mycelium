@@ -216,6 +216,11 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		_ = s.Store.SaveJob(ctx, job)
 		return Result{Decision: decision}, err
 	}
+	if decision.InstanceID == "" && ownerLease.ID == "" {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		return Result{Decision: decision}, fmt.Errorf("coordinated cold load for job %q returned no owner lease", job.ID)
+	}
 	if ownerLease.NodeID != "" {
 		decision.NodeID = ownerLease.NodeID
 	}
@@ -245,14 +250,21 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	lease.JobID = job.ID
 	lease.NodeID = inst.NodeID
 	lease.InstanceID = inst.ID
-	if lease.ID == "" {
-		lease.ID = "lease-" + job.ID
-	}
 	if lease.GrantedAt.IsZero() {
 		lease.GrantedAt = s.Clock.Now().UTC()
 	}
 	if lease.ExpiresAt.IsZero() {
 		lease.ExpiresAt = s.Clock.Now().Add(30 * time.Minute).UTC()
+	}
+	if ownerLease.ID != "" {
+		if err := s.bindOwnerInstance(ctx, lease.NodeID, lease.ID, lease.InstanceID); err != nil {
+			job.Status = domain.JobFailed
+			_ = s.Store.SaveJob(ctx, job)
+			if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
+				return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
+			}
+			return Result{Decision: decision, Instance: inst, Lease: lease}, err
+		}
 	}
 	job.Status = domain.JobRunning
 	if err := s.Store.SaveInstance(ctx, inst); err != nil {
@@ -389,6 +401,11 @@ func (s *Service) enactPreemption(ctx context.Context, decision domain.Placement
 		if !ok {
 			return fmt.Errorf("preempted instance %q is missing from fleet snapshot", victimID)
 		}
+		if s.Coordinator != nil {
+			if err := s.preemptOwnerLease(ctx, decision, victim); err != nil {
+				return err
+			}
+		}
 		agent, err := s.Nodes.NodeAgent(victim.NodeID)
 		if err != nil {
 			return err
@@ -418,6 +435,60 @@ func (s *Service) enactPreemption(ctx context.Context, decision domain.Placement
 		}
 	}
 	return nil
+}
+
+func (s *Service) preemptOwnerLease(ctx context.Context, decision domain.PlacementDecision, victim domain.ModelInstance) error {
+	if s.Owners == nil {
+		return fmt.Errorf("owner admission resolver is not configured")
+	}
+	owner, err := s.Owners.AdmissionController(victim.NodeID)
+	if err != nil {
+		return err
+	}
+	inspector, ok := owner.(ports.LeaseInspector)
+	if !ok {
+		return fmt.Errorf("owner admission for node %q does not expose lease inspection", victim.NodeID)
+	}
+	lease, found, err := inspector.LeaseForInstance(ctx, victim.ID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("preempted instance %q has no owner lease", victim.ID)
+	}
+	reason := "preempted"
+	if decision.JobID != "" {
+		reason += " for " + decision.JobID
+	}
+	if err := owner.Preempt(ctx, lease.ID, reason); err != nil {
+		return err
+	}
+	return s.Store.DeleteLease(ctx, lease.ID)
+}
+
+func (s *Service) bindOwnerInstance(ctx context.Context, nodeID, leaseID, instanceID string) error {
+	if s.Owners == nil {
+		return fmt.Errorf("owner admission resolver is not configured")
+	}
+	owner, err := s.Owners.AdmissionController(nodeID)
+	if err != nil {
+		return err
+	}
+	binder, ok := owner.(ports.LeaseBinder)
+	if !ok {
+		return fmt.Errorf("owner admission for node %q does not expose lease binding", nodeID)
+	}
+	return binder.BindInstance(ctx, leaseID, instanceID)
+}
+
+func (s *Service) cleanupCoordinatedLoad(ctx context.Context, jobID string, inst domain.ModelInstance) error {
+	agent, err := s.Nodes.NodeAgent(inst.NodeID)
+	if err != nil {
+		return err
+	}
+	unloadErr := agent.Unload(ctx, inst.ID)
+	releaseErr := s.Coordinator.Release(ctx, jobID)
+	return errors.Join(unloadErr, releaseErr)
 }
 
 func (s *Service) resolveInstance(ctx context.Context, job domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot) (domain.ModelInstance, error) {
