@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
@@ -116,7 +117,12 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 	if len(presets) == 0 {
 		return "", nil, fmt.Errorf("server config/store has no presets")
 	}
-	placer := scheduler.NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), clock.System{}, presets...)
+	reservations, err := store.ListReservations(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	allocator := allocatorFromReservations(reservations, presetMap(presets))
+	placer := scheduler.NewPlacer(estimate.NewInMemory(), allocator, clock.System{}, presets...)
 	runtime := &scheduler.Service{
 		Placer:  placer,
 		Fleet:   fleet,
@@ -164,6 +170,11 @@ func seedControlStore(ctx context.Context, store *storesqlite.Store, cfg ServerC
 			return err
 		}
 	}
+	for _, reservation := range cfg.Reservations {
+		if err := store.SaveReservation(ctx, reservation); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -176,4 +187,27 @@ func presetMap(presets []domain.Preset) map[string]domain.Preset {
 		}
 	}
 	return out
+}
+
+func allocatorFromReservations(reservations []domain.Reservation, presets map[string]domain.Preset) *lease.Allocator {
+	var opts []lease.Option
+	for _, reservation := range reservations {
+		claim := reservation.Headroom
+		if reservation.Kind == domain.ReservationPinned && reservation.PresetID != "" {
+			if preset, ok := presets[reservation.PresetID]; ok {
+				claim = presetClaim(preset)
+			}
+		}
+		if claim != (domain.Claim{}) {
+			opts = append(opts, lease.WithReservedHeadroom(reservation.NodeID, claim))
+		}
+	}
+	return lease.NewAllocator(opts...)
+}
+
+func presetClaim(preset domain.Preset) domain.Claim {
+	return domain.Claim{
+		WeightsMB:    preset.EstWeightsMB,
+		KVReservedMB: int(math.Ceil(float64(preset.ContextLength) * preset.KVPerTokenMB)),
+	}
 }
