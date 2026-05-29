@@ -875,8 +875,9 @@ type testFailureReporter struct {
 	failed []string
 }
 
-func (r *testFailureReporter) ReportInstanceFailure(_ context.Context, instanceID string, _ error) {
+func (r *testFailureReporter) ReportInstanceFailure(_ context.Context, instanceID string, _ error) error {
 	r.failed = append(r.failed, instanceID)
+	return nil
 }
 
 type noFlushWriter struct {
