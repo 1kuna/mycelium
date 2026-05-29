@@ -147,6 +147,7 @@ func buildGatewayServer(ctx context.Context, args []string) (string, http.Handle
 	if _, err := runtime.ExpireLeases(ctx); err != nil {
 		return "", nil, err
 	}
+	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
 	handler := gateway.Server{Router: &gateway.Router{
 		Placer:         placer,
 		Fleet:          fleet,
@@ -182,6 +183,25 @@ func restoreQueuedJobs(ctx context.Context, store jobLister, queue *scheduler.Qu
 		}
 	}
 	return nil
+}
+
+func startQueueDrainer(ctx context.Context, runtime *scheduler.Service, clk ports.Clock, interval time.Duration, limit int) {
+	if runtime == nil || clk == nil || interval <= 0 || limit <= 0 {
+		return
+	}
+	go func() {
+		for {
+			timer := clk.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C():
+			}
+			_, _ = runtime.ExpireLeases(ctx)
+			_, _ = runtime.Drain(ctx, limit)
+		}
+	}()
 }
 
 func seedControlStore(ctx context.Context, store *storesqlite.Store, cfg ServerConfig) error {

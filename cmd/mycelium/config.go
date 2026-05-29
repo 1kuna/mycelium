@@ -10,16 +10,18 @@ import (
 )
 
 type ServerConfig struct {
-	Listen         string               `json:"listen"`
-	StorePath      string               `json:"store_path"`
-	CatalogDir     string               `json:"catalog_dir"`
-	JoinToken      string               `json:"join_token"`
-	NodeURLs       []string             `json:"node_urls"`
-	GGUFParser     string               `json:"gguf_parser"`
-	Projects       []domain.Project     `json:"projects"`
-	Presets        []domain.Preset      `json:"presets"`
-	Reservations   []domain.Reservation `json:"reservations"`
-	DefaultProject string               `json:"default_project"`
+	Listen          string               `json:"listen"`
+	StorePath       string               `json:"store_path"`
+	CatalogDir      string               `json:"catalog_dir"`
+	JoinToken       string               `json:"join_token"`
+	NodeURLs        []string             `json:"node_urls"`
+	GGUFParser      string               `json:"gguf_parser"`
+	Projects        []domain.Project     `json:"projects"`
+	Presets         []domain.Preset      `json:"presets"`
+	Reservations    []domain.Reservation `json:"reservations"`
+	DefaultProject  string               `json:"default_project"`
+	QueueDrainMS    int                  `json:"queue_drain_ms"`
+	QueueDrainLimit int                  `json:"queue_drain_limit"`
 }
 
 type NodeConfig struct {
@@ -60,6 +62,12 @@ func loadServerConfig(path string) (ServerConfig, error) {
 	}
 	if cfg.DefaultProject == "" && len(cfg.Projects) > 0 {
 		cfg.DefaultProject = cfg.Projects[0].ID
+	}
+	if cfg.QueueDrainMS == 0 {
+		cfg.QueueDrainMS = 1000
+	}
+	if cfg.QueueDrainLimit == 0 {
+		cfg.QueueDrainLimit = 1
 	}
 	return cfg, nil
 }
