@@ -24,6 +24,12 @@ type RuntimeStore interface {
 	SaveRecommendation(ctx context.Context, rec domain.RecommendationRecord) error
 }
 
+type SpeedCalibrationStore interface {
+	ports.TelemetryStore
+	ListNodes(ctx context.Context) ([]domain.Node, error)
+	SaveNode(ctx context.Context, node domain.Node) error
+}
+
 type TelemetryStatsProvider struct {
 	Telemetry  ports.TelemetryStore
 	Presets    PresetSource
@@ -156,4 +162,56 @@ func selectProjectPreset(project domain.Project, presets []domain.Preset) (domai
 		}
 	}
 	return sorted[0], true
+}
+
+func CalibrateSpeedClasses(ctx context.Context, store SpeedCalibrationStore, clk ports.Clock) ([]domain.Node, error) {
+	if store == nil {
+		return nil, fmt.Errorf("speed calibration store is not configured")
+	}
+	if clk == nil {
+		return nil, fmt.Errorf("speed calibration clock is not configured")
+	}
+	metrics, err := store.Metrics(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	type aggregate struct {
+		sum   float64
+		count int
+	}
+	byNode := map[string]aggregate{}
+	for _, metric := range metrics {
+		if metric.NodeID == "" || metric.TokensPerSec <= 0 {
+			continue
+		}
+		agg := byNode[metric.NodeID]
+		agg.sum += metric.TokensPerSec
+		agg.count++
+		byNode[metric.NodeID] = agg
+	}
+	if len(byNode) == 0 {
+		return nil, nil
+	}
+	nodes, err := store.ListNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := clk.Now().UTC()
+	updated := make([]domain.Node, 0, len(nodes))
+	for _, node := range nodes {
+		agg, ok := byNode[node.ID]
+		if !ok || agg.count == 0 {
+			continue
+		}
+		node.SpeedClass = domain.SpeedClass{
+			TokensPerSecRef: math.Round((agg.sum/float64(agg.count))*100) / 100,
+			Source:          "telemetry-calibrated",
+			ProbedAt:        now,
+		}
+		if err := store.SaveNode(ctx, node); err != nil {
+			return nil, err
+		}
+		updated = append(updated, node)
+	}
+	return updated, nil
 }
