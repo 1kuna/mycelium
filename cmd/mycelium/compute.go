@@ -74,7 +74,7 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 	agent := nodeagent.NewAgent(node, adapter, clock.System{}, opts...)
 	admission := nodeagent.NewAdmission(node, lease.NewAllocator(), clock.System{}, nodeagent.WithAdmissionInstances(agent.Instances))
 	return computeRuntime{
-		handler:   nodeagent.HTTPServer{Agent: agent, Admission: admission},
+		handler:   nodeagent.HTTPServer{Agent: agent, Admission: admission, AuthToken: cfg.RPCToken},
 		node:      node,
 		agent:     agent,
 		admission: admission,

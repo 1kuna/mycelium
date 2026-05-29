@@ -104,3 +104,5 @@
 - 2026-05-29: Peer LAN discovery now runs through a shared cache: one background scanner owns the UDP listen port and request-time scheduling reads cached fresh peers, avoiding probabilistic empty scans and port contention during placement.
 - 2026-05-29: LAN peer advertisements use an unconnected UDP socket with `SO_BROADCAST`; advertisements are best-effort datagrams, so discovery does not create connected UDP state or depend on request-time packet timing.
 - 2026-05-29: Discovered peer node RPC clients use their own explicit HTTP transport instead of `http.DefaultClient`, keeping peer-to-peer RPC isolated from global transport state.
+- 2026-05-29: Peer owner RPC uses a separate `rpc_token` bearer credential; `join_token` remains membership/discovery only, and a fleet-joined peer fails startup without an RPC token instead of exposing backend/admission endpoints unauthenticated.
+- 2026-05-29: Seed-address joins use the `mycjoin://host:port?token=...&rpc_token=...` host as a deterministic LAN peer seed; `/peer/health` is join-token gated, while node/admission RPC remains protected by the separate `rpc_token`.

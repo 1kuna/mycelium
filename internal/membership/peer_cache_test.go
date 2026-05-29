@@ -68,6 +68,29 @@ func TestCachedPeerDiscoveryRefreshUpdatesAndSorts(t *testing.T) {
 	}
 }
 
+func TestCachedPeerDiscoveryRememberSeedsPeer(t *testing.T) {
+	clk := mocks.NewFakeClock(time.Unix(250, 0).UTC())
+	upstream := &mocks.PeerDiscovery{}
+	cache := NewCachedPeerDiscovery(upstream, clk, time.Minute)
+
+	peer := domain.Peer{ID: "seed", Addresses: []string{"127.0.0.1:2"}, Compute: true}
+	if err := cache.Remember(peer); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+	peer.Addresses[0] = "mutated"
+
+	peers, err := cache.Peers(context.Background())
+	if err != nil {
+		t.Fatalf("Peers: %v", err)
+	}
+	if len(peers) != 1 || peers[0].ID != "seed" || peers[0].Addresses[0] != "127.0.0.1:2" {
+		t.Fatalf("remembered peers = %+v", peers)
+	}
+	if err := cache.Remember(domain.Peer{}); err == nil {
+		t.Fatal("peer without id accepted")
+	}
+}
+
 func TestCachedPeerDiscoveryDelegatesAdvertiseAndErrors(t *testing.T) {
 	boom := errors.New("boom")
 	upstream := &mocks.PeerDiscovery{Err: boom}

@@ -55,6 +55,26 @@ func TestHTTPNodeAgentRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHTTPPeerRPCAuth(t *testing.T) {
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
+	server := httptest.NewServer(HTTPServer{Agent: agent, AuthToken: "rpc-secret"})
+	defer server.Close()
+
+	if _, err := NewHTTPClient(server.URL).Snapshot(context.Background()); err == nil || !strings.Contains(err.Error(), "authorization failed") {
+		t.Fatalf("unauthenticated snapshot err = %v", err)
+	}
+	wrong := NewHTTPClient(server.URL)
+	wrong.AuthToken = "wrong"
+	if _, err := wrong.Snapshot(context.Background()); err == nil || !strings.Contains(err.Error(), "authorization failed") {
+		t.Fatalf("wrong token err = %v", err)
+	}
+	client := NewHTTPClient(server.URL)
+	client.AuthToken = "rpc-secret"
+	if snap, err := client.Snapshot(context.Background()); err != nil || snap.Node.ID == "" {
+		t.Fatalf("authorized snapshot = %+v %v", snap, err)
+	}
+}
+
 func TestHTTPAdmissionControllerRoundTrip(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
 	admission := NewAdmission(fixtures.MakeNode(fixtures.WithNodeID("node-http")), lease.NewAllocator(), clock)

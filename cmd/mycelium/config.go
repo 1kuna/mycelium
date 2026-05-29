@@ -17,6 +17,8 @@ type PeerConfig struct {
 	Compute              bool                 `json:"compute"`
 	ComputeConfig        ComputeConfig        `json:"compute_config"`
 	JoinToken            string               `json:"join_token"`
+	RPCToken             string               `json:"rpc_token"`
+	SeedPeers            []string             `json:"seed_peers,omitempty"`
 	DiscoveryListen      string               `json:"discovery_listen"`
 	DiscoveryAddr        string               `json:"discovery_addr"`
 	DiscoveryScanMS      int                  `json:"discovery_scan_ms"`
