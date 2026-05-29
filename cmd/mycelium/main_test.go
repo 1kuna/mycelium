@@ -332,7 +332,7 @@ func TestParseJoinFlag(t *testing.T) {
 	if token, err := parseJoinFlag("secret"); err != nil || token != "secret" {
 		t.Fatalf("raw token = %q %v", token, err)
 	}
-	join, err := membership.BuildJoinToken("http://127.0.0.1:51846", "secret")
+	join, err := membership.BuildJoinToken("secret")
 	if err != nil {
 		t.Fatalf("BuildJoinToken: %v", err)
 	}
