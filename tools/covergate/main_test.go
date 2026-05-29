@@ -13,17 +13,26 @@ mycelium/internal/scheduler/service.go:1.1,2.1 2 1
 mycelium/internal/lease/allocator.go:1.1,2.1 1 1
 mycelium/internal/gateway/router.go:1.1,2.1 1 0
 `)
-	if err := run(profile, 0.75, []string{"internal/scheduler=1.0", "mycelium/internal/lease=100"}); err != nil {
+	if err := run(profile, gateConfig{TotalMin: 0.75, Requires: []string{"internal/scheduler=1.0", "mycelium/internal/lease=100"}}); err != nil {
 		t.Fatalf("run pass: %v", err)
 	}
-	if err := run(profile, 0.76, nil); err == nil || !strings.Contains(err.Error(), "total coverage") {
+	if err := run(profile, gateConfig{TotalMin: 0.76}); err == nil || !strings.Contains(err.Error(), "total coverage") {
 		t.Fatalf("total err = %v", err)
 	}
-	if err := run(profile, 0, []string{"internal/gateway=1.0"}); err == nil || !strings.Contains(err.Error(), "internal/gateway") {
+	if err := run(profile, gateConfig{Requires: []string{"internal/gateway=1.0"}}); err == nil || !strings.Contains(err.Error(), "internal/gateway") {
 		t.Fatalf("package err = %v", err)
 	}
-	if err := run(profile, 0, []string{"missing=1.0"}); err == nil || !strings.Contains(err.Error(), "missing") {
+	if err := run(profile, gateConfig{Requires: []string{"missing=1.0"}}); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("missing err = %v", err)
+	}
+	if err := run(profile, gateConfig{PackageMin: 0.25, PackagePrefixes: []string{"internal/"}, PackageExcludes: []string{"internal/gateway"}}); err != nil {
+		t.Fatalf("package min pass: %v", err)
+	}
+	if err := run(profile, gateConfig{PackageMin: 0.75, PackagePrefixes: []string{"internal/"}, PackageExcludes: []string{"internal/gateway"}}); err != nil {
+		t.Fatalf("package min exclude pass: %v", err)
+	}
+	if err := run(profile, gateConfig{PackageMin: 1.0, PackagePrefixes: []string{"internal/"}}); err == nil || !strings.Contains(err.Error(), "package minimum") {
+		t.Fatalf("package min err = %v", err)
 	}
 	if _, _, err := parseRequirement("bad"); err == nil {
 		t.Fatal("expected bad requirement")
@@ -31,7 +40,7 @@ mycelium/internal/gateway/router.go:1.1,2.1 1 0
 }
 
 func TestCovergateRejectsBadProfiles(t *testing.T) {
-	if err := run("", 0, nil); err == nil {
+	if err := run("", gateConfig{}); err == nil {
 		t.Fatal("expected missing profile")
 	}
 	if _, _, err := readProfile(writeProfile(t, "mode: atomic\nbad\n")); err == nil {
@@ -43,8 +52,14 @@ func TestCovergateRejectsBadProfiles(t *testing.T) {
 	if _, _, err := readProfile(writeProfile(t, "mode: atomic\nx.go:1 1 b\n")); err == nil {
 		t.Fatal("expected bad hit count")
 	}
-	if err := run(writeProfile(t, "mode: atomic\n"), 0, nil); err == nil {
+	if err := run(writeProfile(t, "mode: atomic\n"), gateConfig{}); err == nil {
 		t.Fatal("expected empty profile")
+	}
+	if prefixes := normalizePrefixes([]string{"mycelium/internal/", "pkg/"}); prefixes[0] != "internal/" || prefixes[1] != "pkg/" {
+		t.Fatalf("prefixes = %+v", prefixes)
+	}
+	if packageSelected("cmd/mycelium", []string{"internal/"}, nil) {
+		t.Fatal("cmd package selected")
 	}
 	if packagePath("mycelium/internal/foo/bar.go:1.1,2.1") != "internal/foo" {
 		t.Fatal("package path mismatch")

@@ -67,6 +67,61 @@ func TestAdapterErrorPaths(t *testing.T) {
 	}
 }
 
+func TestWaitReadyRetriesUntilHealthy(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	calls := 0
+	firstCall := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			firstCall <- struct{}{}
+			http.Error(w, "not yet", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+	adapter := New(Config{Clock: clock, PollInterval: time.Second})
+	done := make(chan error, 1)
+	go func() {
+		done <- adapter.WaitReady(context.Background(), strings.TrimPrefix(server.URL, "http://"))
+	}()
+	<-firstCall
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(time.Second)
+	for {
+		select {
+		case <-ticker.C:
+			clock.Advance(time.Second)
+		case <-timeout:
+			t.Fatal("WaitReady did not retry")
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("WaitReady: %v", err)
+			}
+			if calls < 2 {
+				t.Fatalf("calls = %d", calls)
+			}
+			return
+		}
+	}
+}
+
+func TestStopHonorsCanceledContextAfterKill(t *testing.T) {
+	adapter := New(Config{BinaryPath: "/bin/sh", Args: []string{"-c", "sleep 30"}})
+	handle, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = adapter.Stop(ctx, handle)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
 func TestAdapterSatisfiesBackendPort(t *testing.T) {
 	var _ ports.BackendAdapter = New(Config{})
 }

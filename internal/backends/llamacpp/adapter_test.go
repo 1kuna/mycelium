@@ -2,6 +2,7 @@ package llamacpp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -110,6 +111,21 @@ func TestLaunchAndStopLocalProcess(t *testing.T) {
 	}
 }
 
+func TestLaunchCleansUpWhenRegistryFails(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep binary unavailable")
+	}
+	registry := &recordingProcessRegistry{addErr: errors.New("registry")}
+	adapter := NewAdapter(Config{BinaryPath: "sleep", Args: []string{"60"}, ProcessRegistry: registry})
+	_, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1")
+	if !errors.Is(err, registry.addErr) {
+		t.Fatalf("Launch err = %v", err)
+	}
+	if len(adapter.processes) != 0 || len(registry.added) != 1 {
+		t.Fatalf("processes=%+v registry=%+v", adapter.processes, registry)
+	}
+}
+
 func TestLaunchContextDoesNotOwnProcessLifetime(t *testing.T) {
 	marker := t.TempDir() + "/stopped"
 	adapter := NewAdapter(Config{
@@ -177,6 +193,33 @@ func TestStopSignalsUntrackedPID(t *testing.T) {
 	}
 }
 
+func TestStopCanceledContextKillsTrackedProcessAndRemovesRef(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep binary unavailable")
+	}
+	registry := &recordingProcessRegistry{}
+	adapter := NewAdapter(Config{BinaryPath: "sleep", Args: []string{"60"}, ProcessRegistry: registry})
+	handle, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = adapter.Stop(ctx, handle)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stop: %v", err)
+	}
+	if len(registry.removed) != 1 {
+		t.Fatalf("removed refs = %+v", registry.removed)
+	}
+}
+
+func TestSignalPIDNoopsForInvalidPID(t *testing.T) {
+	if err := signalPID(0); err != nil {
+		t.Fatalf("signalPID: %v", err)
+	}
+}
+
 func TestHealthURLAndSplitAddr(t *testing.T) {
 	if got := healthURL("127.0.0.1:8080", "/health"); got != "http://127.0.0.1:8080/health" {
 		t.Fatalf("healthURL = %s", got)
@@ -193,4 +236,20 @@ func TestHealthURLAndSplitAddr(t *testing.T) {
 func TestAdapterSatisfiesPort(t *testing.T) {
 	var _ ports.BackendAdapter = NewAdapter(Config{})
 	var _ = domain.BackendLlamaCpp
+}
+
+type recordingProcessRegistry struct {
+	addErr  error
+	added   []domain.ProcessRef
+	removed []domain.ProcessRef
+}
+
+func (r *recordingProcessRegistry) Add(_ context.Context, ref domain.ProcessRef) error {
+	r.added = append(r.added, ref)
+	return r.addErr
+}
+
+func (r *recordingProcessRegistry) Remove(_ context.Context, ref domain.ProcessRef) error {
+	r.removed = append(r.removed, ref)
+	return nil
 }

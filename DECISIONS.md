@@ -51,3 +51,4 @@
 - 2026-05-29: Cross-machine sharding starts as an explicit planner contract that splits estimated claims across distinct ready nodes and ranks them by calibrated speed; real distributed backend launch remains separate hardware-gated execution work.
 - 2026-05-29: Server estimation uses catalog preset estimates by default and switches to GGUF parser/remote node inspection when `gguf_parser` is configured; missing parser config is explicit config state, not a silent remote-file fallback.
 - 2026-05-29: Gateway telemetry derives load wall-clock, TTFT, and tokens/sec from the injected clock around real placement/upstream streaming boundaries; peak memory remains zero unless a backend supplies it rather than being guessed.
+- 2026-05-29: Covergate enforces the 85% per-package floor for product packages under `internal/` and `pkg/`; command harnesses and test/tool packages stay outside that floor while hard 100% bars remain explicit requirements.

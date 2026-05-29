@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,6 +122,12 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 	if _, err := Import(context.Background(), "hf://owner/repo/model.gguf"); err == nil {
 		t.Fatal("expected bad base URL error")
 	}
+	if _, err := Import(context.Background(), "hf:///repo/model.gguf"); err == nil {
+		t.Fatal("expected missing hf owner error")
+	}
+	if _, err := importHuggingFace(context.Background(), "%"); err == nil {
+		t.Fatal("expected invalid hf URL error")
+	}
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGING_FACE_HUB_TOKEN", "token-b")
 	if token := huggingFaceToken(); token != "token-b" {
@@ -173,6 +180,19 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 	if got := sanitizeTempName(""); got != "model" {
 		t.Fatalf("empty sanitize = %q", got)
 	}
+	t.Setenv("MYCELIUM_OCI_INSECURE", "")
+	if got := ociURL("registry.example", "v2/ns/model"); !strings.HasPrefix(got, "https://registry.example/") {
+		t.Fatalf("ociURL = %s", got)
+	}
+	if _, err := importOCI(context.Background(), "%"); err == nil {
+		t.Fatal("expected invalid oci URL error")
+	}
+	req := &http.Request{URL: &url.URL{Scheme: "http", Host: "127.0.0.1:1"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := downloadDraft(ctx, req, "src", "test", "x.gguf"); err != context.Canceled {
+		t.Fatalf("download canceled err = %v", err)
+	}
 }
 
 func TestImportRejectsDirectoriesAndCanceledContext(t *testing.T) {
@@ -180,10 +200,18 @@ func TestImportRejectsDirectoriesAndCanceledContext(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "is a directory") {
 		t.Fatalf("dir err = %v", err)
 	}
+	_, err = Import(context.Background(), filepath.Join(t.TempDir(), "missing.gguf"))
+	if err == nil {
+		t.Fatal("missing local file imported")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err = Import(ctx, "anything.gguf")
 	if err != context.Canceled {
 		t.Fatalf("canceled err = %v", err)
+	}
+	_, err = importLocal(ctx, "anything.gguf")
+	if err != context.Canceled {
+		t.Fatalf("local canceled err = %v", err)
 	}
 }

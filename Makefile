@@ -14,7 +14,7 @@ test:
 
 coverage:
 	go test ./... -covermode=atomic -coverprofile=all.out
-	go run ./tools/covergate -profile all.out -min 0.85 -require internal/scheduler=1.0 -require internal/lease=1.0 -require test/fixtures=1.0
+	go run ./tools/covergate -profile all.out -min 0.85 -package-min 0.85 -package-prefix internal/ -package-prefix pkg/ -require internal/scheduler=1.0 -require internal/lease=1.0 -require test/fixtures=1.0
 
 smoke:
 	go test -tags smoke ./test/smoke/... -timeout 20m
