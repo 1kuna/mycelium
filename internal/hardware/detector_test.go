@@ -67,6 +67,49 @@ func TestLinuxDetectorBuildsNVIDIANode(t *testing.T) {
 	}
 }
 
+func TestLinuxDetectorBuildsIntelArcB70Node(t *testing.T) {
+	detector := Detector{
+		GOOS:  "linux",
+		Clock: mocks.NewFakeClock(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)),
+		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			switch name {
+			case "nvidia-smi":
+				return nil, errors.New("no nvidia")
+			case "clinfo":
+				if len(args) != 0 {
+					t.Fatalf("clinfo args = %+v", args)
+				}
+				return []byte(`Number of platforms                               1
+  Platform Name                                   Intel(R) OpenCL Graphics
+Number of devices                                 1
+  Device Name                                     Intel(R) Arc(TM) Pro B70 Graphics
+  Device Vendor                                   Intel(R) Corporation
+  Global memory size                              32530182144 (30.3GiB)
+NULL platform behavior
+    Device Name                                   Intel(R) Arc(TM) Pro B70 Graphics
+`), nil
+			default:
+				t.Fatalf("unexpected command %s", name)
+			}
+			return nil, nil
+		},
+	}
+	node, err := detector.Detect(context.Background(), domain.Node{ID: "b70-a", MaxUtil: 0.85})
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if node.OS != "linux" || node.UnifiedMemory || len(node.Accelerators) != 1 {
+		t.Fatalf("node = %+v", node)
+	}
+	acc := node.Accelerators[0]
+	if acc.Vendor != "intel" || acc.Kind != "arc-pro-b70" || acc.VRAMTotalMB != 31023 || !strings.Contains(acc.ArchFamily, "B70") {
+		t.Fatalf("accelerator = %+v", acc)
+	}
+	if node.Labels["gpu.vendor"] != "intel" || node.OOMSeverity != domain.OOMSoft || node.SpeedClass.Source != "detected-default" {
+		t.Fatalf("labels/speed = %+v %+v", node.Labels, node.SpeedClass)
+	}
+}
+
 func TestDetectorErrorPathsAndLabelMerge(t *testing.T) {
 	if _, err := (Detector{GOOS: "plan9"}).Detect(context.Background(), domain.Node{}); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("unsupported err = %v", err)
@@ -102,7 +145,7 @@ func TestLinuxDetectorErrorPaths(t *testing.T) {
 			return nil, errors.New("nvidia-smi")
 		},
 	}).Detect(context.Background(), domain.Node{})
-	if err == nil || !strings.Contains(err.Error(), "nvidia-smi") {
+	if err == nil || !strings.Contains(err.Error(), "nvidia-smi") || !strings.Contains(err.Error(), "clinfo") {
 		t.Fatalf("command err = %v", err)
 	}
 	for _, raw := range [][]byte{
@@ -114,6 +157,18 @@ func TestLinuxDetectorErrorPaths(t *testing.T) {
 		if _, err := parseNVIDIASMI(raw); err == nil {
 			t.Fatalf("parse accepted %q", raw)
 		}
+	}
+	for _, raw := range [][]byte{
+		[]byte(""),
+		[]byte("  Device Name Intel(R) Arc(TM) Pro B70 Graphics\n"),
+		[]byte("  Device Name Intel(R) Arc(TM) Pro B70 Graphics\n  Global memory size nope\n"),
+	} {
+		if _, err := parseIntelCLInfo(raw); err == nil {
+			t.Fatalf("parse accepted %q", raw)
+		}
+	}
+	if kind := intelKind("Intel(R) Arc(TM) Graphics"); kind != "arc" {
+		t.Fatalf("generic arc kind = %q", kind)
 	}
 }
 
