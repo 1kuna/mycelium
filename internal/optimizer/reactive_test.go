@@ -65,6 +65,9 @@ func TestIsContextOverflowByBackend(t *testing.T) {
 	if !IsContextOverflow(domain.BackendLlamaCpp, errors.New("request exceeds context window")) {
 		t.Fatal("llama context window should classify")
 	}
+	if !IsContextOverflow(domain.BackendLlamaCpp, errors.New(`{"error":{"message":"request exceeds the available context size (128 tokens)"}}`)) {
+		t.Fatal("llama available context size should classify")
+	}
 	if !IsContextOverflow(domain.BackendVLLM, errors.New("prompt is too long")) {
 		t.Fatal("vllm prompt too long should classify")
 	}

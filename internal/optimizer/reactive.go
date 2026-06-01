@@ -74,7 +74,7 @@ func IsContextOverflow(backend domain.Backend, err error) bool {
 func overflowPatterns(backend domain.Backend) []string {
 	switch backend {
 	case domain.BackendLlamaCpp:
-		return []string{"context overflow", "exceeds context", "too many tokens", "context window"}
+		return []string{"context overflow", "exceeds context", "exceeds the available context size", "too many tokens", "context window"}
 	case domain.BackendVLLM:
 		return []string{"maximum context length", "prompt is too long", "sequence length"}
 	case domain.BackendMLX:
