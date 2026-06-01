@@ -31,9 +31,13 @@ func TestPhase6PeerSubmitAnywhereRecordsSubmitterCoordinator(t *testing.T) {
 	sourceB := peerJobLog{jobs: map[string]domain.Job{jobB.ID: jobB}, payloads: map[string][]byte{jobB.ID: []byte(`{"job":"b"}`)}}
 	placerA := &peerScriptedPlacer{decisions: []domain.PlacementDecision{{JobID: jobA.ID, InstanceID: "warm-a", NodeID: nodeA.ID, Action: domain.ActionWarmInstance}}}
 	placerB := &peerScriptedPlacer{decisions: []domain.PlacementDecision{{JobID: jobB.ID, InstanceID: "warm-b", NodeID: nodeB.ID, Action: domain.ActionWarmInstance}}}
+	owners := peerOwnerResolver{owners: map[string]ports.AdmissionController{
+		nodeA.ID: &mocks.AdmissionController{},
+		nodeB.ID: &mocks.AdmissionController{},
+	}}
 
-	coordA := peer.NewCoordinator(fixtures.MakePeer(fixtures.WithPeerID("peer-a")), sourceA, registry, placerA, peerFleetSource{}, peerOwnerResolver{}, clock)
-	coordB := peer.NewCoordinator(fixtures.MakePeer(fixtures.WithPeerID("peer-b")), sourceB, registry, placerB, peerFleetSource{}, peerOwnerResolver{}, clock)
+	coordA := peer.NewCoordinator(fixtures.MakePeer(fixtures.WithPeerID("peer-a")), sourceA, registry, placerA, peerFleetSource{}, owners, clock)
+	coordB := peer.NewCoordinator(fixtures.MakePeer(fixtures.WithPeerID("peer-b")), sourceB, registry, placerB, peerFleetSource{}, owners, clock)
 	for _, run := range []struct {
 		coord *peer.Coordinator
 		job   domain.Job
@@ -128,11 +132,11 @@ func TestPhase6PeerOwnerRaceStaleFenceReplans(t *testing.T) {
 func TestPhase6PeerOwnerRejectsDirectStaleFence(t *testing.T) {
 	ctx := context.Background()
 	admission := node.NewAdmission(fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)), lease.NewAllocator(), mocks.NewFakeClock(time.Unix(620, 0).UTC()))
-	first, err := admission.Offer(ctx, fixtures.MakeJob(fixtures.WithJobID("job-a")), fixtures.MakeClaim(200, 0))
+	first, err := admission.Offer(ctx, domain.AdmissionRequest{Job: fixtures.MakeJob(fixtures.WithJobID("job-a")), Claim: fixtures.MakeClaim(200, 0)})
 	if err != nil {
 		t.Fatalf("first Offer: %v", err)
 	}
-	second, err := admission.Offer(ctx, fixtures.MakeJob(fixtures.WithJobID("job-b")), fixtures.MakeClaim(200, 0))
+	second, err := admission.Offer(ctx, domain.AdmissionRequest{Job: fixtures.MakeJob(fixtures.WithJobID("job-b")), Claim: fixtures.MakeClaim(200, 0)})
 	if err != nil {
 		t.Fatalf("second Offer: %v", err)
 	}
@@ -157,7 +161,7 @@ func TestPhase6PeerCoordinatedPreemptionUsesOwnerAuthority(t *testing.T) {
 	)
 	targetPreset := fixtures.MakePreset(fixtures.WithPresetID("target-preset"), fixtures.WithWeights(600), fixtures.WithKVPerToken(0), fixtures.WithContextLength(1))
 	admission := node.NewAdmission(nodeA, lease.NewAllocator(), clock)
-	victimOffer, err := admission.Offer(ctx, fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.Background), victim.Claim)
+	victimOffer, err := admission.Offer(ctx, domain.AdmissionRequest{Job: fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.Background), Claim: victim.Claim})
 	if err != nil {
 		t.Fatalf("victim Offer: %v", err)
 	}
@@ -424,7 +428,7 @@ type peerRaceAdmission struct {
 	commitCalls int
 }
 
-func (a *peerRaceAdmission) Offer(context.Context, domain.Job, domain.Claim) (domain.LeaseOffer, error) {
+func (a *peerRaceAdmission) Offer(context.Context, domain.AdmissionRequest) (domain.LeaseOffer, error) {
 	if a.offerCalls >= len(a.offers) {
 		return domain.LeaseOffer{}, errors.New("no offer")
 	}

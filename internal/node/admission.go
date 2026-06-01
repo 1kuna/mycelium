@@ -13,24 +13,35 @@ import (
 const defaultAdmissionOfferTTL = 30 * time.Second
 
 type Admission struct {
-	mu        sync.Mutex
-	node      domain.Node
-	allocator ports.Allocator
-	clock     ports.Clock
-	offerTTL  time.Duration
-	instances func() []domain.ModelInstance
-	policy    SubmitterPolicy
-	fence     uint64
-	nextOffer int
-	nextLease int
-	offers    map[string]admissionOffer
-	leases    map[string]admissionLease
+	mu                 sync.Mutex
+	node               domain.Node
+	allocator          ports.Allocator
+	clock              ports.Clock
+	store              AdmissionStateStore
+	offerTTL           time.Duration
+	instances          func() []domain.ModelInstance
+	policy             SubmitterPolicy
+	pinnedReservations map[string]bool
+	loaded             bool
+	fence              uint64
+	nextOffer          int
+	nextLease          int
+	offers             map[string]admissionOffer
+	leases             map[string]admissionLease
+}
+
+type AdmissionStateStore interface {
+	AdmissionState(ctx context.Context, nodeID string) (domain.AdmissionState, bool, error)
+	SaveAdmissionState(ctx context.Context, state domain.AdmissionState) error
 }
 
 type admissionOffer struct {
 	offer          domain.LeaseOffer
 	job            domain.Job
 	acceleratorSet []int
+	instanceID     string
+	reservationID  string
+	pinned         bool
 }
 
 type admissionLease struct {
@@ -75,6 +86,25 @@ func WithSubmitterPolicy(policy SubmitterPolicy) AdmissionOption {
 	}
 }
 
+func WithAdmissionStateStore(store AdmissionStateStore) AdmissionOption {
+	return func(a *Admission) {
+		a.store = store
+	}
+}
+
+func WithPinnedReservations(ids ...string) AdmissionOption {
+	return func(a *Admission) {
+		if a.pinnedReservations == nil {
+			a.pinnedReservations = map[string]bool{}
+		}
+		for _, id := range ids {
+			if id != "" {
+				a.pinnedReservations[id] = true
+			}
+		}
+	}
+}
+
 type SubmitterPolicy struct {
 	Rules map[string]SubmitterRule
 }
@@ -84,34 +114,55 @@ type SubmitterRule struct {
 	AllowPrivate bool
 }
 
-func (a *Admission) Offer(ctx context.Context, job domain.Job, claim domain.Claim) (domain.LeaseOffer, error) {
+func (a *Admission) Offer(ctx context.Context, req domain.AdmissionRequest) (domain.LeaseOffer, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.LeaseOffer{}, err
 	}
+	job := req.Job
 	if err := a.authorize(job); err != nil {
 		return domain.LeaseOffer{}, err
+	}
+	if req.NodeID != "" && req.NodeID != a.node.ID {
+		return domain.LeaseOffer{}, fmt.Errorf("admission request targeted node %q but owner is %q", req.NodeID, a.node.ID)
 	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.loadStateLocked(ctx); err != nil {
+		return domain.LeaseOffer{}, err
+	}
 	if a.allocator == nil {
 		return domain.LeaseOffer{}, fmt.Errorf("admission allocator is not configured")
 	}
-	acceleratorSet, ok := a.firstFitLocked(claim)
+	claim := incrementalClaim(req)
+	acceleratorSet, ok := a.selectAcceleratorSetLocked(req, claim)
 	if !ok {
 		return domain.LeaseOffer{}, fmt.Errorf("%w: node %q cannot offer capacity for job %q", domain.ErrNoFit, a.node.ID, job.ID)
 	}
 
 	a.nextOffer++
 	offer := domain.LeaseOffer{
-		OfferID:   fmt.Sprintf("offer-%s-%d", a.node.ID, a.nextOffer),
-		JobID:     job.ID,
-		NodeID:    a.node.ID,
-		Claim:     claim,
-		Fence:     a.fence,
-		ExpiresAt: a.clock.Now().Add(a.offerTTL),
+		OfferID:        fmt.Sprintf("offer-%s-%d", a.node.ID, a.nextOffer),
+		JobID:          job.ID,
+		NodeID:         a.node.ID,
+		Claim:          claim,
+		AcceleratorSet: append([]int(nil), acceleratorSet...),
+		InstanceID:     req.InstanceID,
+		ReservationID:  req.ReservationID,
+		Fence:          a.fence,
+		ExpiresAt:      a.clock.Now().Add(a.offerTTL),
 	}
-	a.offers[offer.OfferID] = admissionOffer{offer: offer, job: job, acceleratorSet: acceleratorSet}
+	a.offers[offer.OfferID] = admissionOffer{
+		offer:          offer,
+		job:            job,
+		acceleratorSet: append([]int(nil), acceleratorSet...),
+		instanceID:     req.InstanceID,
+		reservationID:  req.ReservationID,
+		pinned:         a.pinnedReservations[req.ReservationID],
+	}
+	if err := a.saveStateLocked(ctx); err != nil {
+		return domain.LeaseOffer{}, err
+	}
 	return offer, nil
 }
 
@@ -119,7 +170,31 @@ func (a *Admission) PreemptForJob(ctx context.Context, job domain.Job, leaseID, 
 	if err := a.authorize(job); err != nil {
 		return err
 	}
-	return a.Preempt(ctx, leaseID, reason)
+	if !admissionHardPreemptionAllowed(job) {
+		return fmt.Errorf("job %q does not allow hard preemption", job.ID)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.loadStateLocked(ctx); err != nil {
+		return err
+	}
+	record, ok := a.leases[leaseID]
+	if !ok {
+		return fmt.Errorf("preempt unknown lease %q", leaseID)
+	}
+	if record.lease.Pinned {
+		return fmt.Errorf("lease %q is pinned and cannot be preempted", leaseID)
+	}
+	if priorityRank(job.Priority) <= priorityRank(record.priority) {
+		return fmt.Errorf("job %q priority %q cannot preempt lease %q priority %q", job.ID, job.Priority, leaseID, record.priority)
+	}
+	if reason == "" {
+		return fmt.Errorf("preempt lease %q: reason is required", leaseID)
+	}
+	return a.removeLeaseLocked(ctx, leaseID, "preempt")
 }
 
 func (a *Admission) Commit(ctx context.Context, offerID string, fence uint64) (domain.Lease, error) {
@@ -129,6 +204,9 @@ func (a *Admission) Commit(ctx context.Context, offerID string, fence uint64) (d
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.loadStateLocked(ctx); err != nil {
+		return domain.Lease{}, err
+	}
 	offer, ok := a.offers[offerID]
 	if !ok {
 		return domain.Lease{}, fmt.Errorf("unknown lease offer %q", offerID)
@@ -138,6 +216,9 @@ func (a *Admission) Commit(ctx context.Context, offerID string, fence uint64) (d
 	}
 	if !offer.offer.ExpiresAt.IsZero() && !a.clock.Now().Before(offer.offer.ExpiresAt) {
 		delete(a.offers, offerID)
+		if err := a.saveStateLocked(ctx); err != nil {
+			return domain.Lease{}, err
+		}
 		return domain.Lease{}, fmt.Errorf("lease offer %q expired at %s", offerID, offer.offer.ExpiresAt.Format(time.RFC3339))
 	}
 	if !a.fitsLocked(offer.acceleratorSet, offer.offer.Claim) {
@@ -146,15 +227,23 @@ func (a *Admission) Commit(ctx context.Context, offerID string, fence uint64) (d
 
 	a.nextLease++
 	lease := domain.Lease{
-		ID:        fmt.Sprintf("lease-%s-%d", a.node.ID, a.nextLease),
-		JobID:     offer.offer.JobID,
-		NodeID:    a.node.ID,
-		Claim:     offer.offer.Claim,
-		GrantedAt: a.clock.Now(),
+		ID:             fmt.Sprintf("lease-%s-%d", a.node.ID, a.nextLease),
+		JobID:          offer.offer.JobID,
+		InstanceID:     offer.instanceID,
+		NodeID:         a.node.ID,
+		AcceleratorSet: append([]int(nil), offer.acceleratorSet...),
+		Claim:          offer.offer.Claim,
+		Priority:       offer.job.Priority,
+		ReservationID:  offer.reservationID,
+		Pinned:         offer.pinned,
+		GrantedAt:      a.clock.Now(),
 	}
 	a.leases[lease.ID] = admissionLease{lease: lease, acceleratorSet: offer.acceleratorSet, priority: offer.job.Priority}
 	delete(a.offers, offerID)
 	a.fence++
+	if err := a.saveStateLocked(ctx); err != nil {
+		return domain.Lease{}, err
+	}
 	return lease, nil
 }
 
@@ -165,7 +254,10 @@ func (a *Admission) Release(ctx context.Context, leaseID string) error {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.removeLeaseLocked(leaseID, "release")
+	if err := a.loadStateLocked(ctx); err != nil {
+		return err
+	}
+	return a.removeLeaseLocked(ctx, leaseID, "release")
 }
 
 func (a *Admission) Preempt(ctx context.Context, leaseID, reason string) error {
@@ -175,10 +267,13 @@ func (a *Admission) Preempt(ctx context.Context, leaseID, reason string) error {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.loadStateLocked(ctx); err != nil {
+		return err
+	}
 	if reason == "" {
 		return fmt.Errorf("preempt lease %q: reason is required", leaseID)
 	}
-	return a.removeLeaseLocked(leaseID, "preempt")
+	return a.removeLeaseLocked(ctx, leaseID, "preempt")
 }
 
 func (a *Admission) LeaseForJob(ctx context.Context, jobID string) (domain.Lease, bool, error) {
@@ -191,6 +286,9 @@ func (a *Admission) LeaseForJob(ctx context.Context, jobID string) (domain.Lease
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.loadStateLocked(ctx); err != nil {
+		return domain.Lease{}, false, err
+	}
 	for _, record := range a.leases {
 		if record.lease.JobID == jobID {
 			return record.lease, true, nil
@@ -209,6 +307,9 @@ func (a *Admission) LeaseForInstance(ctx context.Context, instanceID string) (do
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.loadStateLocked(ctx); err != nil {
+		return domain.Lease{}, false, err
+	}
 	for _, record := range a.leases {
 		if record.lease.InstanceID == instanceID {
 			return record.lease, true, nil
@@ -230,6 +331,9 @@ func (a *Admission) BindInstance(ctx context.Context, leaseID, instanceID string
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.loadStateLocked(ctx); err != nil {
+		return err
+	}
 	record, ok := a.leases[leaseID]
 	if !ok {
 		return fmt.Errorf("bind unknown lease %q", leaseID)
@@ -239,7 +343,7 @@ func (a *Admission) BindInstance(ctx context.Context, leaseID, instanceID string
 	}
 	record.lease.InstanceID = instanceID
 	a.leases[leaseID] = record
-	return nil
+	return a.saveStateLocked(ctx)
 }
 
 func (a *Admission) firstFitLocked(claim domain.Claim) ([]int, bool) {
@@ -253,6 +357,23 @@ func (a *Admission) firstFitLocked(claim domain.Claim) ([]int, bool) {
 		}
 	}
 	return nil, false
+}
+
+func (a *Admission) selectAcceleratorSetLocked(req domain.AdmissionRequest, claim domain.Claim) ([]int, bool) {
+	if len(req.AcceleratorSet) > 0 {
+		acceleratorSet := append([]int(nil), req.AcceleratorSet...)
+		return acceleratorSet, a.fitsLocked(acceleratorSet, claim)
+	}
+	if req.InstanceID != "" {
+		for _, inst := range a.instancesLocked() {
+			if inst.ID == req.InstanceID {
+				acceleratorSet := append([]int(nil), inst.AcceleratorSet...)
+				return acceleratorSet, a.fitsLocked(acceleratorSet, claim)
+			}
+		}
+		return nil, false
+	}
+	return a.firstFitLocked(claim)
 }
 
 func (a *Admission) fitsLocked(acceleratorSet []int, claim domain.Claim) bool {
@@ -278,13 +399,96 @@ func (a *Admission) instancesLocked() []domain.ModelInstance {
 	return instances
 }
 
-func (a *Admission) removeLeaseLocked(leaseID, op string) error {
+func (a *Admission) removeLeaseLocked(ctx context.Context, leaseID, op string) error {
 	if _, ok := a.leases[leaseID]; !ok {
 		return fmt.Errorf("%s unknown lease %q", op, leaseID)
 	}
 	delete(a.leases, leaseID)
 	a.fence++
+	return a.saveStateLocked(ctx)
+}
+
+func (a *Admission) loadStateLocked(ctx context.Context) error {
+	if a.loaded {
+		return nil
+	}
+	a.loaded = true
+	if a.store == nil {
+		return nil
+	}
+	state, found, err := a.store.AdmissionState(ctx, a.node.ID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return a.saveStateLocked(ctx)
+	}
+	if state.Fence == 0 {
+		state.Fence = 1
+	}
+	a.fence = state.Fence
+	a.nextOffer = state.NextOffer
+	a.nextLease = state.NextLease
+	a.offers = map[string]admissionOffer{}
+	for _, rec := range state.Offers {
+		a.offers[rec.Offer.OfferID] = admissionOffer{
+			offer:          rec.Offer,
+			job:            rec.Job,
+			acceleratorSet: append([]int(nil), rec.Offer.AcceleratorSet...),
+			instanceID:     rec.Offer.InstanceID,
+			reservationID:  rec.Offer.ReservationID,
+			pinned:         a.pinnedReservations[rec.Offer.ReservationID],
+		}
+	}
+	a.leases = map[string]admissionLease{}
+	for _, rec := range state.Leases {
+		a.leases[rec.Lease.ID] = admissionLease{
+			lease:          rec.Lease,
+			acceleratorSet: append([]int(nil), rec.Lease.AcceleratorSet...),
+			priority:       rec.Lease.Priority,
+		}
+	}
 	return nil
+}
+
+func (a *Admission) saveStateLocked(ctx context.Context) error {
+	if a.store == nil {
+		return nil
+	}
+	state := domain.AdmissionState{
+		NodeID:    a.node.ID,
+		Fence:     a.fence,
+		NextOffer: a.nextOffer,
+		NextLease: a.nextLease,
+		Offers:    make([]domain.AdmissionOfferRecord, 0, len(a.offers)),
+		Leases:    make([]domain.AdmissionLeaseRecord, 0, len(a.leases)),
+	}
+	for _, rec := range a.offers {
+		state.Offers = append(state.Offers, domain.AdmissionOfferRecord{Offer: rec.offer, Job: rec.job})
+	}
+	for _, rec := range a.leases {
+		state.Leases = append(state.Leases, domain.AdmissionLeaseRecord{Lease: rec.lease})
+	}
+	return a.store.SaveAdmissionState(ctx, state)
+}
+
+func incrementalClaim(req domain.AdmissionRequest) domain.Claim {
+	claim := req.Claim
+	if req.InstanceID != "" {
+		claim.WeightsMB = 0
+	}
+	return claim
+}
+
+func admissionHardPreemptionAllowed(job domain.Job) bool {
+	switch job.Preemption {
+	case domain.PreemptHard:
+		return true
+	case domain.PreemptHardForInteractive:
+		return job.Priority == domain.PriorityInteractive
+	default:
+		return false
+	}
 }
 
 func (a *Admission) authorize(job domain.Job) error {

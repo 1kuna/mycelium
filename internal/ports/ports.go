@@ -54,7 +54,7 @@ type Placer interface {
 }
 
 type AdmissionController interface {
-	Offer(ctx context.Context, req domain.Job, claim domain.Claim) (domain.LeaseOffer, error)
+	Offer(ctx context.Context, req domain.AdmissionRequest) (domain.LeaseOffer, error)
 	Commit(ctx context.Context, offerID string, fence uint64) (domain.Lease, error)
 	Release(ctx context.Context, leaseID string) error
 	Preempt(ctx context.Context, leaseID, reason string) error

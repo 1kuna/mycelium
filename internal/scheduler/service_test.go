@@ -61,7 +61,7 @@ func TestServiceLoadsAndGrantsLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	if result.Instance.PresetID != preset.ID || result.Lease.ID != "lease-job-a" {
+	if result.Instance.PresetID != preset.ID || result.Lease.ID != "lease_offer_job-a" {
 		t.Fatalf("result = %+v", result)
 	}
 	if got := store.jobs["job-a"].Status; got != domain.JobRunning {
@@ -70,20 +70,22 @@ func TestServiceLoadsAndGrantsLease(t *testing.T) {
 	if len(store.leases) != 1 || len(store.instances) != 1 {
 		t.Fatalf("leases=%+v instances=%+v", store.leases, store.instances)
 	}
-	if strings.Join(admission.Calls, ",") != "offer:job-a,commit:offer_job-a:1,release:lease_offer_job-a" {
+	if strings.Join(admission.Calls, ",") != "offer:job-a,commit:offer_job-a:1,bind-instance:lease_offer_job-a:inst_1" {
 		t.Fatalf("admission calls = %+v", admission.Calls)
 	}
 }
 
-func TestServiceUsesWarmInstanceWithoutOwnerAdmission(t *testing.T) {
+func TestServiceUsesWarmInstanceWithOwnerAdmission(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(10, 30).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("warm-a"), fixtures.OnNode(node.ID))
+	admission := &mocks.AdmissionController{}
 	store := &runtimeStore{}
 	service := &Service{
-		Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", InstanceID: inst.ID, Action: domain.ActionWarmInstance}},
+		Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", InstanceID: inst.ID, NodeID: node.ID, AcceleratorSet: inst.AcceleratorSet, Claim: inst.Claim, Action: domain.ActionWarmInstance}},
 		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}},
 		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
 		Queue:  NewQueue(clock),
 		Store:  store,
 		Clock:  clock,
@@ -98,6 +100,9 @@ func TestServiceUsesWarmInstanceWithoutOwnerAdmission(t *testing.T) {
 	}
 	if got := store.jobs["job-a"].Status; got != domain.JobRunning {
 		t.Fatalf("job status = %s", got)
+	}
+	if strings.Join(admission.Calls, ",") != "offer:job-a,commit:offer_job-a:1,bind-instance:lease_offer_job-a:warm-a" {
+		t.Fatalf("admission calls = %+v", admission.Calls)
 	}
 }
 
@@ -727,16 +732,75 @@ func TestServiceOwnerAdmissionReleaseErrorsAreLoud(t *testing.T) {
 
 	admission = &mocks.AdmissionController{ReleaseErr: releaseErr}
 	_, err = base(mocks.NewNodeAgent(node), admission).Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)))
-	if !errors.Is(err, releaseErr) {
-		t.Fatalf("success release err = %v", err)
+	if err != nil {
+		t.Fatalf("successful submit should keep owner lease instead of releasing it: %v", err)
+	}
+}
+
+func TestServiceLocalBindFailureReleasesOwnerLease(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(15, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	bindErr := errors.New("bind")
+	base := func(admission *mocks.AdmissionController) *Service {
+		return &Service{
+			Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}},
+			Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+			Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}, admissions: map[string]ports.AdmissionController{node.ID: admission}},
+			Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+			Queue:  NewQueue(clock),
+			Store:  &runtimeStore{},
+			Clock:  clock,
+			Presets: map[string]domain.Preset{
+				preset.ID: preset,
+			},
+		}
+	}
+
+	admission := &mocks.AdmissionController{BindErr: bindErr}
+	_, err := base(admission).Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)))
+	if !errors.Is(err, bindErr) || !strings.Contains(strings.Join(admission.Calls, ","), "release:lease_offer_job-a") {
+		t.Fatalf("bind err=%v calls=%+v", err, admission.Calls)
+	}
+
+	releaseErr := errors.New("release")
+	admission = &mocks.AdmissionController{BindErr: bindErr, ReleaseErr: releaseErr}
+	_, err = base(admission).Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)))
+	if !errors.Is(err, bindErr) || !errors.Is(err, releaseErr) {
+		t.Fatalf("bind+release err = %v", err)
+	}
+}
+
+func TestServiceReleaseOwnerNoopsWithoutLeaseID(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(16, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	hookErr := errors.New("hook")
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admissionOnly{}}},
+		Queue:  NewQueue(clock),
+		Store:  &runtimeStore{},
+		Clock:  clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+	_, err := service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), SubmitHooks{
+		BeforeColdLoad: func(context.Context, domain.PlacementDecision) error { return hookErr },
+	})
+	if !errors.Is(err, hookErr) {
+		t.Fatalf("hook err = %v", err)
 	}
 }
 
 func TestServiceCommitOwnerAdmissionBranches(t *testing.T) {
 	service := &Service{}
 	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
-	if lease, owner, err := service.commitOwnerAdmission(context.Background(), job, domain.PlacementDecision{InstanceID: "warm"}); err != nil || lease.ID != "" || owner != nil {
-		t.Fatalf("warm admission = %+v %v %v", lease, owner, err)
+	if lease, owner, err := service.commitOwnerAdmission(context.Background(), job, domain.PlacementDecision{Action: domain.ActionQueued}); err != nil || lease.ID != "" || owner != nil {
+		t.Fatalf("queued admission = %+v %v %v", lease, owner, err)
 	}
 	if _, _, err := service.commitOwnerAdmission(context.Background(), job, domain.PlacementDecision{Action: domain.ActionLoadedNew}); err == nil || !strings.Contains(err.Error(), "owner") {
 		t.Fatalf("missing owner err = %v", err)
@@ -751,6 +815,50 @@ func TestServiceCommitOwnerAdmissionBranches(t *testing.T) {
 	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{"node-a": &mocks.AdmissionController{OfferErr: domain.ErrNoFit}}}
 	if _, _, err := service.commitOwnerAdmission(context.Background(), job, domain.PlacementDecision{NodeID: "node-a", Action: domain.ActionLoadedNew}); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("offer err = %v", err)
+	}
+}
+
+func TestServiceReleaseJobUsesLocalOwnerAdmission(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(17, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	lease := domain.Lease{ID: "lease-a", JobID: "job-a", NodeID: node.ID}
+	admission := &mocks.AdmissionController{}
+	service := &Service{
+		Placer: fakePlacer{},
+		Fleet:  staticFleet{},
+		Nodes:  staticNodes{},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Queue:  NewQueue(clock),
+		Store:  &runtimeStore{leases: map[string]domain.Lease{lease.ID: lease}},
+		Clock:  clock,
+	}
+	if err := service.ReleaseJob(context.Background(), lease); err != nil {
+		t.Fatalf("ReleaseJob: %v", err)
+	}
+	if strings.Join(admission.Calls, ",") != "release:lease-a" {
+		t.Fatalf("admission calls = %+v", admission.Calls)
+	}
+
+	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{}}
+	if err := service.ReleaseJob(context.Background(), lease); !errors.Is(err, domain.ErrUnreachable) {
+		t.Fatalf("missing owner err = %v", err)
+	}
+	releaseErr := errors.New("release")
+	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{ReleaseErr: releaseErr}}}
+	if err := service.ReleaseJob(context.Background(), lease); !errors.Is(err, releaseErr) {
+		t.Fatalf("owner release err = %v", err)
+	}
+}
+
+func TestServiceFinalizeOwnerLeaseFillsMissingClaim(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(18, 0).UTC())
+	service := &Service{Clock: clock}
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst-a"), fixtures.OnNode("node-a"))
+	decision := domain.PlacementDecision{Claim: fixtures.MakeClaim(1, 2), AcceleratorSet: []int{0}}
+	lease := service.finalizeOwnerLease(job, inst, decision, domain.Lease{ID: "owner-lease"})
+	if lease.Claim != decision.Claim || lease.Priority != job.Priority || lease.ExpiresAt.IsZero() {
+		t.Fatalf("lease = %+v", lease)
 	}
 }
 
@@ -971,7 +1079,7 @@ func TestServiceDrain(t *testing.T) {
 	}
 	service.Queue.Enqueue(fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)))
 	results, err = service.Drain(context.Background(), 1)
-	if err != nil || len(results) != 1 || results[0].Lease.ID != "lease-job-a" {
+	if err != nil || len(results) != 1 || results[0].Lease.ID != "lease_offer_job-a" {
 		t.Fatalf("drain = %+v %v", results, err)
 	}
 	service.Queue.Enqueue(fixtures.MakeJob(fixtures.WithJobID("job-b"), fixtures.WithPreset(preset.ID)))
@@ -1232,7 +1340,7 @@ func (n staticNodes) AdmissionController(nodeID string) (ports.AdmissionControll
 
 type admissionOnly struct{}
 
-func (admissionOnly) Offer(context.Context, domain.Job, domain.Claim) (domain.LeaseOffer, error) {
+func (admissionOnly) Offer(context.Context, domain.AdmissionRequest) (domain.LeaseOffer, error) {
 	return domain.LeaseOffer{}, nil
 }
 

@@ -148,6 +148,25 @@ func (s *Store) DeleteLease(ctx context.Context, id string) error {
 	return s.deleteID(ctx, "leases", id)
 }
 
+func (s *Store) SaveAdmissionState(ctx context.Context, state domain.AdmissionState) error {
+	if state.NodeID == "" {
+		return fmt.Errorf("admission state node id is required")
+	}
+	return s.upsertJSON(ctx, "admission_states", state.NodeID, state)
+}
+
+func (s *Store) AdmissionState(ctx context.Context, nodeID string) (domain.AdmissionState, bool, error) {
+	var state domain.AdmissionState
+	err := s.getJSON(ctx, "admission_states", nodeID, &state)
+	if err == sql.ErrNoRows {
+		return domain.AdmissionState{}, false, nil
+	}
+	if err != nil {
+		return domain.AdmissionState{}, false, err
+	}
+	return state, true, nil
+}
+
 func (s *Store) SaveReservation(ctx context.Context, reservation domain.Reservation) error {
 	if reservation.ID == "" {
 		return fmt.Errorf("reservation id is required")
@@ -594,6 +613,7 @@ CREATE TABLE IF NOT EXISTS presets (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS instances (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS admission_states (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reservations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS job_records (id TEXT PRIMARY KEY, data TEXT NOT NULL);

@@ -149,22 +149,18 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 		if plan.NodeID == "" {
 			return domain.Lease{}, fmt.Errorf("plan for job %q has no owner node", plan.JobID)
 		}
-		if plan.InstanceID != "" || plan.Action == domain.ActionWarmInstance {
-			lease := domain.Lease{JobID: plan.JobID, InstanceID: plan.InstanceID, NodeID: plan.NodeID, Claim: plan.Claim}
-			c.mu.Lock()
-			c.leases[plan.JobID] = lease
-			c.mu.Unlock()
-			if err := c.record(ctx, plan.JobID, domain.JobRunning, plan.NodeID, 0); err != nil {
-				return domain.Lease{}, err
-			}
-			return lease, nil
-		}
 		owner, err := c.owners.AdmissionController(plan.NodeID)
 		if err != nil {
 			_ = c.record(ctx, plan.JobID, domain.JobQueued, "", 0)
 			return domain.Lease{}, err
 		}
-		offer, err := owner.Offer(ctx, claimed.job, plan.Claim)
+		offer, err := owner.Offer(ctx, domain.AdmissionRequest{
+			Job:            claimed.job,
+			Claim:          plan.Claim,
+			NodeID:         plan.NodeID,
+			AcceleratorSet: append([]int(nil), plan.AcceleratorSet...),
+			InstanceID:     plan.InstanceID,
+		})
 		if err != nil {
 			if c.shouldReplan(err, replans) {
 				replans++

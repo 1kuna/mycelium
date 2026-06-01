@@ -130,12 +130,12 @@ func (s HTTPServer) offer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "admission controller is not configured")
 		return
 	}
-	var req admissionOfferRequest
+	var req domain.AdmissionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	offer, err := s.Admission.Offer(r.Context(), req.Job, req.Claim)
+	offer, err := s.Admission.Offer(r.Context(), req)
 	if errors.Is(err, domain.ErrNoFit) {
 		writeDomainError(w, http.StatusTooManyRequests, err)
 		return
@@ -411,11 +411,6 @@ func decodeLeaseID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return req.LeaseID, true
 }
 
-type admissionOfferRequest struct {
-	Job   domain.Job   `json:"job"`
-	Claim domain.Claim `json:"claim"`
-}
-
 type admissionCommitRequest struct {
 	OfferID string `json:"offer_id"`
 	Fence   uint64 `json:"fence"`
@@ -485,9 +480,9 @@ func (c *HTTPClient) EndRequest(ctx context.Context, instanceID string) error {
 	return c.do(ctx, http.MethodPost, "/end-request", map[string]string{"instance_id": instanceID}, nil)
 }
 
-func (c *HTTPClient) Offer(ctx context.Context, job domain.Job, claim domain.Claim) (domain.LeaseOffer, error) {
+func (c *HTTPClient) Offer(ctx context.Context, req domain.AdmissionRequest) (domain.LeaseOffer, error) {
 	var offer domain.LeaseOffer
-	err := c.do(ctx, http.MethodPost, "/admission/offer", admissionOfferRequest{Job: job, Claim: claim}, &offer)
+	err := c.do(ctx, http.MethodPost, "/admission/offer", req, &offer)
 	return offer, err
 }
 

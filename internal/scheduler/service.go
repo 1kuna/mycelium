@@ -142,12 +142,17 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 		}
 		return Result{Decision: decision}, err
 	}
-	if err := releaseOwner(); err != nil {
-		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
-		return Result{Decision: decision, Instance: inst}, err
+	lease := s.finalizeOwnerLease(job, inst, decision, ownerLease)
+	if ownerLease.ID != "" {
+		if err := s.bindOwnerInstance(ctx, lease.NodeID, lease.ID, lease.InstanceID); err != nil {
+			job.Status = domain.JobFailed
+			_ = s.Store.SaveJob(ctx, job)
+			if releaseErr := releaseOwner(); releaseErr != nil {
+				return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, releaseErr)
+			}
+			return Result{Decision: decision, Instance: inst, Lease: lease}, err
+		}
 	}
-	lease := s.grantLease(job, inst, decision)
 	job.Status = domain.JobRunning
 	if err := s.Store.SaveInstance(ctx, inst); err != nil {
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
@@ -254,19 +259,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		}
 		return Result{Decision: decision, Lease: ownerLease}, err
 	}
-	lease := ownerLease
-	lease.JobID = job.ID
-	lease.NodeID = inst.NodeID
-	lease.InstanceID = inst.ID
-	if lease.ID == "" && decision.InstanceID != "" {
-		lease.ID = "lease-" + job.ID
-	}
-	if lease.GrantedAt.IsZero() {
-		lease.GrantedAt = s.Clock.Now().UTC()
-	}
-	if lease.ExpiresAt.IsZero() {
-		lease.ExpiresAt = s.Clock.Now().Add(30 * time.Minute).UTC()
-	}
+	lease := s.finalizeOwnerLease(job, inst, decision, ownerLease)
 	if ownerLease.ID != "" {
 		if err := s.bindOwnerInstance(ctx, lease.NodeID, lease.ID, lease.InstanceID); err != nil {
 			job.Status = domain.JobFailed
@@ -333,6 +326,14 @@ func (s *Service) ReleaseJob(ctx context.Context, lease domain.Lease) error {
 		if err := s.Coordinator.Release(ctx, lease.JobID); err != nil {
 			return err
 		}
+	} else if s.Owners != nil && lease.NodeID != "" && lease.ID != "" {
+		owner, err := s.Owners.AdmissionController(lease.NodeID)
+		if err != nil {
+			return err
+		}
+		if err := owner.Release(ctx, lease.ID); err != nil {
+			return err
+		}
 	}
 	if lease.ID == "" {
 		return nil
@@ -370,7 +371,7 @@ func (s *Service) validate() error {
 }
 
 func (s *Service) commitOwnerAdmission(ctx context.Context, job domain.Job, decision domain.PlacementDecision) (domain.Lease, ports.AdmissionController, error) {
-	if decision.InstanceID != "" || decision.Action == domain.ActionQueued {
+	if decision.Action == domain.ActionQueued {
 		return domain.Lease{}, nil, nil
 	}
 	if decision.NodeID == "" {
@@ -383,7 +384,13 @@ func (s *Service) commitOwnerAdmission(ctx context.Context, job domain.Job, deci
 	if err != nil {
 		return domain.Lease{}, nil, err
 	}
-	offer, err := owner.Offer(ctx, job, decision.Claim)
+	offer, err := owner.Offer(ctx, domain.AdmissionRequest{
+		Job:            job,
+		Claim:          decision.Claim,
+		NodeID:         decision.NodeID,
+		AcceleratorSet: append([]int(nil), decision.AcceleratorSet...),
+		InstanceID:     decision.InstanceID,
+	})
 	if err != nil {
 		return domain.Lease{}, nil, err
 	}
@@ -569,17 +576,30 @@ func (s *Service) resolvePreset(job domain.Job) (domain.Preset, error) {
 	return domain.Preset{}, fmt.Errorf("job %q has no model or preset", job.ID)
 }
 
-func (s *Service) grantLease(job domain.Job, inst domain.ModelInstance, decision domain.PlacementDecision) domain.Lease {
+func (s *Service) finalizeOwnerLease(job domain.Job, inst domain.ModelInstance, decision domain.PlacementDecision, lease domain.Lease) domain.Lease {
 	now := s.Clock.Now()
-	return domain.Lease{
-		ID:         "lease-" + job.ID,
-		JobID:      job.ID,
-		InstanceID: inst.ID,
-		NodeID:     inst.NodeID,
-		Claim:      decision.Claim,
-		GrantedAt:  now.UTC(),
-		ExpiresAt:  now.Add(30 * time.Minute).UTC(),
+	if lease.ID == "" {
+		lease.ID = "lease-" + job.ID
 	}
+	lease.JobID = job.ID
+	lease.InstanceID = inst.ID
+	lease.NodeID = inst.NodeID
+	if len(lease.AcceleratorSet) == 0 {
+		lease.AcceleratorSet = append([]int(nil), decision.AcceleratorSet...)
+	}
+	if lease.Claim == (domain.Claim{}) {
+		lease.Claim = decision.Claim
+	}
+	if lease.Priority == "" {
+		lease.Priority = job.Priority
+	}
+	if lease.GrantedAt.IsZero() {
+		lease.GrantedAt = now.UTC()
+	}
+	if lease.ExpiresAt.IsZero() {
+		lease.ExpiresAt = now.Add(30 * time.Minute).UTC()
+	}
+	return lease
 }
 
 func instanceByID(instances []domain.ModelInstance, id string) (domain.ModelInstance, bool) {

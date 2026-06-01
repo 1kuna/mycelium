@@ -114,14 +114,17 @@ func TestCoordinatorReplansOnOwnerContention(t *testing.T) {
 	}
 }
 
-func TestCoordinatorWarmInstanceRecordsWithoutOwnerLease(t *testing.T) {
+func TestCoordinatorWarmInstanceCommitsOwnerLease(t *testing.T) {
 	ctx := context.Background()
 	clock := mocks.NewFakeClock(time.Unix(115, 0).UTC())
 	job := fixtures.MakeJob(fixtures.WithJobID("job-warm"))
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst-warm"), fixtures.OnNode(node.ID))
 	registry := NewJobRegistry()
-	admission := &mocks.AdmissionController{}
+	admission := &mocks.AdmissionController{
+		OfferVal: domain.LeaseOffer{OfferID: "offer-warm", JobID: job.ID, NodeID: node.ID, Claim: domain.Claim{KVReservedMB: inst.Claim.KVReservedMB}, InstanceID: inst.ID, Fence: 3},
+		LeaseVal: domain.Lease{ID: "lease-warm", JobID: job.ID, NodeID: node.ID, InstanceID: inst.ID, Claim: domain.Claim{KVReservedMB: inst.Claim.KVReservedMB}},
+	}
 	coordinator := NewCoordinator(
 		fixtures.MakePeer(fixtures.WithPeerID("peer-a")),
 		jobSource{jobs: map[string]domain.Job{job.ID: job}, payloads: map[string][]byte{job.ID: []byte(`{"job":"warm"}`)}},
@@ -147,13 +150,13 @@ func TestCoordinatorWarmInstanceRecordsWithoutOwnerLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
-	if lease.ID != "" || lease.InstanceID != inst.ID || lease.NodeID != node.ID {
+	if lease.ID != "lease-warm" || lease.InstanceID != inst.ID || lease.NodeID != node.ID {
 		t.Fatalf("warm lease = %+v", lease)
 	}
 	if err := coordinator.Release(ctx, job.ID); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	if len(admission.Calls) != 0 {
+	if strings.Join(admission.Calls, ",") != "offer:job-warm,commit:offer-warm:3,release:lease-warm" {
 		t.Fatalf("warm owner calls = %+v", admission.Calls)
 	}
 	assertLatestStatus(t, registry, domain.JobDone, node.ID)
@@ -476,7 +479,10 @@ func TestCoordinatorOfferNoFitReplansAndRecordFailure(t *testing.T) {
 		warmFailRegistry,
 		&scriptedPlacer{},
 		staticPeerFleet{},
-		ownerResolver{},
+		ownerResolver{owners: map[string]ports.AdmissionController{nodeA.ID: &scriptedAdmission{
+			offers: []domain.LeaseOffer{{OfferID: "offer-warm", JobID: job.ID, NodeID: nodeA.ID, Claim: claim, InstanceID: "warm-a", Fence: 1}},
+			leases: []domain.Lease{{ID: "lease-warm", JobID: job.ID, NodeID: nodeA.ID, InstanceID: "warm-a", Claim: claim}},
+		}}},
 		clock,
 	)
 	mustClaim(t, coordinator, job.ID)
@@ -568,7 +574,8 @@ type scriptedAdmission struct {
 	calls      []string
 }
 
-func (a *scriptedAdmission) Offer(_ context.Context, job domain.Job, _ domain.Claim) (domain.LeaseOffer, error) {
+func (a *scriptedAdmission) Offer(_ context.Context, req domain.AdmissionRequest) (domain.LeaseOffer, error) {
+	job := req.Job
 	a.calls = append(a.calls, "offer:"+job.ID)
 	if len(a.offerErrs) > 0 {
 		err := a.offerErrs[0]

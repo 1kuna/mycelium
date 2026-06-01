@@ -12,7 +12,7 @@ import (
 func RunAdmissionControllerConformance(t *testing.T, name string, newController func() ports.AdmissionController, job domain.Job, claim domain.Claim) {
 	t.Run(name+"/offer_commit_release", func(t *testing.T) {
 		controller := newController()
-		offer, err := controller.Offer(context.Background(), job, claim)
+		offer, err := controller.Offer(context.Background(), domain.AdmissionRequest{Job: job, Claim: claim})
 		assert.NoError(t, "Offer", err)
 		assert.True(t, offer.OfferID != "", "offer id should be set: %+v", offer)
 		assert.Equal(t, job.ID, offer.JobID, "offer job")
@@ -30,7 +30,7 @@ func RunAdmissionControllerConformance(t *testing.T, name string, newController 
 
 	t.Run(name+"/offer_commit_preempt", func(t *testing.T) {
 		controller := newController()
-		offer, err := controller.Offer(context.Background(), job, claim)
+		offer, err := controller.Offer(context.Background(), domain.AdmissionRequest{Job: job, Claim: claim})
 		assert.NoError(t, "Offer", err)
 		lease, err := controller.Commit(context.Background(), offer.OfferID, offer.Fence)
 		assert.NoError(t, "Commit", err)

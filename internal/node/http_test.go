@@ -140,7 +140,7 @@ func TestHTTPAdmissionControllerRoundTrip(t *testing.T) {
 	job := fixtures.MakeJob(fixtures.WithJobID("job-http"))
 	claim := fixtures.MakeClaim(3, 4)
 
-	offer, err := client.Offer(context.Background(), job, claim)
+	offer, err := client.Offer(context.Background(), admissionReq(job, claim))
 	if err != nil {
 		t.Fatalf("Offer: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestHTTPAdmissionControllerRoundTrip(t *testing.T) {
 		t.Fatalf("released LeaseForJob found=%v err=%v", found, err)
 	}
 
-	preemptOffer, err := client.Offer(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-preempt")), claim)
+	preemptOffer, err := client.Offer(context.Background(), admissionReq(fixtures.MakeJob(fixtures.WithJobID("job-preempt")), claim))
 	if err != nil {
 		t.Fatalf("preempt Offer: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestHTTPAdmissionControllerRoundTrip(t *testing.T) {
 		t.Fatalf("Preempt: %v", err)
 	}
 
-	nextOffer, err := client.Offer(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-policy-victim")), claim)
+	nextOffer, err := client.Offer(context.Background(), admissionReq(fixtures.MakeJob(fixtures.WithJobID("job-policy-victim"), fixtures.Background), claim))
 	if err != nil {
 		t.Fatalf("policy victim Offer: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestHTTPAdmissionControllerRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("policy victim Commit: %v", err)
 	}
-	requester := fixtures.MakeJob(fixtures.WithJobID("job-policy-preempt"))
+	requester := fixtures.MakeJob(fixtures.WithJobID("job-policy-preempt"), fixtures.Interactive, fixtures.HardForInteractive)
 	if err := client.PreemptForJob(context.Background(), requester, nextLease.ID, "policy aware"); err != nil {
 		t.Fatalf("PreemptForJob: %v", err)
 	}
@@ -216,9 +216,9 @@ func TestHTTPAdmissionPreemptForJobUsesSubmitterPolicy(t *testing.T) {
 	defer server.Close()
 	client := NewHTTPClient(server.URL)
 	claim := fixtures.MakeClaim(100, 0)
-	victim := fixtures.MakeJob(fixtures.WithJobID("job-victim"))
+	victim := fixtures.MakeJob(fixtures.WithJobID("job-victim"), fixtures.Background)
 	victim.Submitter = "submitter-a"
-	offer, err := client.Offer(context.Background(), victim, claim)
+	offer, err := client.Offer(context.Background(), admissionReq(victim, claim))
 	if err != nil {
 		t.Fatalf("victim Offer: %v", err)
 	}
@@ -234,6 +234,7 @@ func TestHTTPAdmissionPreemptForJobUsesSubmitterPolicy(t *testing.T) {
 	}
 	submitter-a := fixtures.MakeJob(fixtures.WithJobID("job-submitter-a"))
 	submitter-a.Submitter = "submitter-a"
+	submitter-a.Preemption = domain.PreemptHard
 	if err := client.PreemptForJob(context.Background(), submitter-a, lease.ID, "allowed"); err != nil {
 		t.Fatalf("submitter-a PreemptForJob: %v", err)
 	}
@@ -245,11 +246,11 @@ func TestHTTPAdmissionPreservesStaleFenceError(t *testing.T) {
 	defer server.Close()
 	client := NewHTTPClient(server.URL)
 
-	first, err := client.Offer(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a")), fixtures.MakeClaim(1, 1))
+	first, err := client.Offer(context.Background(), admissionReq(fixtures.MakeJob(fixtures.WithJobID("job-a")), fixtures.MakeClaim(1, 1)))
 	if err != nil {
 		t.Fatalf("first Offer: %v", err)
 	}
-	second, err := client.Offer(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-b")), fixtures.MakeClaim(1, 1))
+	second, err := client.Offer(context.Background(), admissionReq(fixtures.MakeJob(fixtures.WithJobID("job-b")), fixtures.MakeClaim(1, 1)))
 	if err != nil {
 		t.Fatalf("second Offer: %v", err)
 	}
@@ -311,7 +312,7 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 	admissionServer := httptest.NewServer(HTTPServer{Admission: &failingAdmissionController{offerErr: domain.ErrNoFit}})
 	defer admissionServer.Close()
 	admissionClient := NewHTTPClient(admissionServer.URL)
-	if _, err := admissionClient.Offer(context.Background(), fixtures.MakeJob(), fixtures.MakeClaim(1, 1)); !errors.Is(err, domain.ErrNoFit) {
+	if _, err := admissionClient.Offer(context.Background(), admissionReq(fixtures.MakeJob(), fixtures.MakeClaim(1, 1))); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("offer no-fit err = %v", err)
 	}
 	resp, err = http.Post(admissionServer.URL+"/admission/commit", "application/json", strings.NewReader("{"))
@@ -468,7 +469,7 @@ type failingAdmissionController struct {
 	preemptErr error
 }
 
-func (f *failingAdmissionController) Offer(context.Context, domain.Job, domain.Claim) (domain.LeaseOffer, error) {
+func (f *failingAdmissionController) Offer(context.Context, domain.AdmissionRequest) (domain.LeaseOffer, error) {
 	if f.offerErr != nil {
 		return domain.LeaseOffer{}, f.offerErr
 	}
