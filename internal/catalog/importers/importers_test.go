@@ -14,6 +14,20 @@ import (
 	"testing"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func directHTTPClient(handler http.Handler) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Result(), nil
+	})}
+}
+
 func TestImportLocalPathAndFileURL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tiny.gguf")
 	if err := os.WriteFile(path, []byte("model"), 0644); err != nil {
@@ -31,7 +45,7 @@ func TestImportLocalPathAndFileURL(t *testing.T) {
 }
 
 func TestImportHuggingFaceDownloadsFile(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/owner/repo/resolve/main/model.gguf" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
@@ -40,11 +54,10 @@ func TestImportHuggingFaceDownloadsFile(t *testing.T) {
 		}
 		_, _ = w.Write([]byte("hf model"))
 	}))
-	defer server.Close()
-	t.Setenv("MYCELIUM_HF_BASE_URL", server.URL)
+	t.Setenv("MYCELIUM_HF_BASE_URL", "http://hf.test")
 	t.Setenv("HF_TOKEN", "token-a")
 
-	draft, err := Import(context.Background(), "hf://owner/repo/model.gguf")
+	draft, err := importWithClient(context.Background(), "hf://owner/repo/model.gguf", client)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -62,7 +75,7 @@ func TestImportOCIDownloadsFirstLayer(t *testing.T) {
 	layer := []byte("oci model")
 	sum := sha256.Sum256(layer)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/ns/model/manifests/v1":
 			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
@@ -82,11 +95,10 @@ func TestImportOCIDownloadsFirstLayer(t *testing.T) {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
 	}))
-	defer server.Close()
 	t.Setenv("MYCELIUM_OCI_INSECURE", "1")
-	host := strings.TrimPrefix(server.URL, "http://")
+	host := "oci.test"
 
-	draft, err := Import(context.Background(), "oci://"+host+"/ns/model:v1")
+	draft, err := importWithClient(context.Background(), "oci://"+host+"/ns/model:v1", client)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -110,12 +122,11 @@ func TestImportMalformedRemoteSourcesFailCleanly(t *testing.T) {
 }
 
 func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
-	statusServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	statusClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusTeapot)
 	}))
-	defer statusServer.Close()
-	t.Setenv("MYCELIUM_HF_BASE_URL", statusServer.URL)
-	if _, err := Import(context.Background(), "hf://owner/repo/model.gguf"); err == nil || !strings.Contains(err.Error(), "huggingface download failed") {
+	t.Setenv("MYCELIUM_HF_BASE_URL", "http://hf-status.test")
+	if _, err := importWithClient(context.Background(), "hf://owner/repo/model.gguf", statusClient); err == nil || !strings.Contains(err.Error(), "huggingface download failed") {
 		t.Fatalf("hf status err = %v", err)
 	}
 	t.Setenv("MYCELIUM_HF_BASE_URL", "://bad")
@@ -125,7 +136,7 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 	if _, err := Import(context.Background(), "hf:///repo/model.gguf"); err == nil {
 		t.Fatal("expected missing hf owner error")
 	}
-	if _, err := importHuggingFace(context.Background(), "%"); err == nil {
+	if _, err := importHuggingFace(context.Background(), "%", statusClient); err == nil {
 		t.Fatal("expected invalid hf URL error")
 	}
 	t.Setenv("HF_TOKEN", "")
@@ -134,7 +145,7 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 		t.Fatalf("token = %q", token)
 	}
 
-	ociServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ociClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		layer := []byte("oci layer")
 		goodSum := sha256.Sum256(layer)
 		goodDigest := "sha256:" + hex.EncodeToString(goodSum[:])
@@ -162,9 +173,8 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
 	}))
-	defer ociServer.Close()
 	t.Setenv("MYCELIUM_OCI_INSECURE", "1")
-	host := strings.TrimPrefix(ociServer.URL, "http://")
+	host := "oci-errors.test"
 	for _, source := range []string{
 		"oci://" + host + "/ns/model:status",
 		"oci://" + host + "/ns/model:empty",
@@ -174,7 +184,7 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 		"oci://" + host + "/ns/model:baddigest",
 		"oci://" + host + "/ns/model:badalg",
 	} {
-		if _, err := Import(context.Background(), source); err == nil {
+		if _, err := importWithClient(context.Background(), source, ociClient); err == nil {
 			t.Fatalf("%s expected error", source)
 		}
 	}
@@ -199,13 +209,13 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 	if got := ociURL("registry.example", "v2/ns/model"); !strings.HasPrefix(got, "https://registry.example/") {
 		t.Fatalf("ociURL = %s", got)
 	}
-	if _, err := importOCI(context.Background(), "%"); err == nil {
+	if _, err := importOCI(context.Background(), "%", ociClient); err == nil {
 		t.Fatal("expected invalid oci URL error")
 	}
 	req := &http.Request{URL: &url.URL{Scheme: "http", Host: "127.0.0.1:1"}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := downloadDraft(ctx, req, "src", "test", "x.gguf"); err != context.Canceled {
+	if _, err := downloadDraft(ctx, req, "src", "test", "x.gguf", statusClient); err != context.Canceled {
 		t.Fatalf("download canceled err = %v", err)
 	}
 }
