@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"mycelium/internal/clock"
@@ -31,6 +32,7 @@ type Config struct {
 	Args            []string
 	HealthPath      string
 	PollInterval    time.Duration
+	StopGracePeriod time.Duration
 	HTTPClient      *http.Client
 	Clock           ports.Clock
 	ProcessRegistry ProcessRegistry
@@ -45,6 +47,9 @@ func New(cfg Config) *Adapter {
 	}
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 250 * time.Millisecond
+	}
+	if cfg.StopGracePeriod == 0 {
+		cfg.StopGracePeriod = 2 * time.Second
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = http.DefaultClient
@@ -142,15 +147,37 @@ func (a *Adapter) Stop(ctx context.Context, handle ports.Handle) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	if err := cmd.Process.Kill(); err != nil {
-		return err
-	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			return killErr
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-done:
+			return nil
+		}
+	}
+	timer := a.cfg.Clock.NewTimer(a.cfg.StopGracePeriod)
 	select {
 	case <-ctx.Done():
+		timer.Stop()
+		_ = cmd.Process.Kill()
 		return ctx.Err()
+	case <-timer.C():
+		if err := cmd.Process.Kill(); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-done:
+			return nil
+		}
 	case <-done:
+		timer.Stop()
 		return nil
 	}
 }
