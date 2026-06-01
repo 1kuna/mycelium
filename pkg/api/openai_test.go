@@ -49,3 +49,24 @@ func TestOpenAIMessageRejectsInvalidContentShape(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestOpenAIMessageRejectsUnsupportedNestedFields(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "message", body: `{"role":"user","content":"hi","audio":{"id":"a"}}`},
+		{name: "content part", body: `{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}`},
+		{name: "tool call function", body: `{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"search","arguments":"{}","strict":true}}]}`},
+		{name: "function call", body: `{"role":"assistant","function_call":{"name":"search","arguments":"{}","strict":true}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var msg OpenAIMessage
+			err := json.Unmarshal([]byte(tc.body), &msg)
+			if err == nil || !strings.Contains(err.Error(), "unknown field") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}

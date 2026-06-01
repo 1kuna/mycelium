@@ -10,6 +10,7 @@ import (
 
 	"mycelium/internal/catalog"
 	"mycelium/internal/clock"
+	"mycelium/internal/domain"
 	"mycelium/internal/lease"
 	"mycelium/internal/node"
 	"mycelium/test/fixtures"

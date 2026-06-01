@@ -152,6 +152,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 
 	var fleet gateway.FleetSource
 	var nodes gateway.NodeResolver
+	var peerDirectory *gateway.PeerDirectory
 	mux := http.NewServeMux()
 	var discovery ports.PeerDiscovery
 	var shutdowns []func(context.Context) error
@@ -190,9 +191,9 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 			lanTunnel.AuthToken = cfg.RPCToken
 			tunnel = lanTunnel
 		}
-		directory := &gateway.PeerDirectory{Discovery: discovery, Tunnel: tunnel, Store: store, SelfID: cfg.ID, AuthToken: cfg.RPCToken}
-		fleet = directory
-		nodes = directory
+		peerDirectory = &gateway.PeerDirectory{Discovery: discovery, Tunnel: tunnel, Store: store, SelfID: cfg.ID, AuthToken: cfg.RPCToken}
+		fleet = peerDirectory
+		nodes = peerDirectory
 	}
 	agents := map[string]ports.NodeAgent{}
 	if cfg.Compute {
@@ -283,19 +284,22 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		Interval: time.Duration(cfg.OptimizerEvalMS) * time.Millisecond,
 	})
 	handler := gateway.Server{Router: &gateway.Router{
-		Placer:             placer,
-		Fleet:              fleet,
-		Nodes:              nodes,
-		Presets:            gateway.NewPresetRegistry(presets...),
-		Runtime:            runtime,
-		Telemetry:          store,
-		Reporter:           gateway.InstanceFailureReporter{Store: store, Nodes: nodes},
-		Clock:              clock.System{},
-		Sticky:             gateway.NewStickyTable(clock.System{}, 10*time.Minute),
-		Projects:           projectMap(projects),
-		DefaultProject:     cfg.DefaultProject,
-		PrivateStorage:     len(privateKey) > 0,
-		PrivateLocalNodeID: privateLocalNodeID(cfg),
+		Placer:              placer,
+		Fleet:               fleet,
+		Nodes:               nodes,
+		Presets:             gateway.NewPresetRegistry(presets...),
+		Runtime:             runtime,
+		Telemetry:           store,
+		TelemetryPeers:      peerDirectory,
+		TelemetryPeerClient: telemetryHTTPClient{AuthToken: cfg.RPCToken},
+		SelfNodeID:          privateLocalNodeID(cfg),
+		Reporter:            gateway.InstanceFailureReporter{Store: store, Nodes: nodes},
+		Clock:               clock.System{},
+		Sticky:              gateway.NewStickyTable(clock.System{}, 10*time.Minute),
+		Projects:            projectMap(projects),
+		DefaultProject:      cfg.DefaultProject,
+		PrivateStorage:      len(privateKey) > 0,
+		PrivateLocalNodeID:  privateLocalNodeID(cfg),
 	}}
 	mountPeerHTTP(mux, self, joinTokens)
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
