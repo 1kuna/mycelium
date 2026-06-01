@@ -15,6 +15,7 @@ import (
 	"mycelium/internal/peer"
 	"mycelium/internal/ports"
 	"mycelium/internal/scheduler"
+	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
 )
@@ -314,6 +315,60 @@ func TestPhase6PeerDeathRecoveryViaHeartbeat(t *testing.T) {
 	}
 }
 
+func TestPhase6RegistryReplicationRecoveryWithSeparateStores(t *testing.T) {
+	ctx := context.Background()
+	liveStore, err := storesqlite.Open(t.TempDir() + "/live.db")
+	if err != nil {
+		t.Fatalf("open live store: %v", err)
+	}
+	defer liveStore.Close()
+	deadStore, err := storesqlite.Open(t.TempDir() + "/dead.db")
+	if err != nil {
+		t.Fatalf("open dead store: %v", err)
+	}
+	defer deadStore.Close()
+	queued := peerRecoveryRecord("queued", "peer-dead", "", domain.JobQueued)
+	queued.Request = []byte(`{"job":"queued"}`)
+	finishedAtOwner := peerRecoveryRecord("finished-at-owner", "peer-dead", "node-live", domain.JobRunning)
+	finishedAtOwner.Request = []byte(`{"job":"finished"}`)
+	if err := deadStore.Put(ctx, queued); err != nil {
+		t.Fatalf("put queued: %v", err)
+	}
+	if err := deadStore.Put(ctx, finishedAtOwner); err != nil {
+		t.Fatalf("put finished: %v", err)
+	}
+	replicator := peer.RegistryReplicator{
+		Local: liveStore,
+		Peers: &mocks.PeerDiscovery{PeersVal: []domain.Peer{
+			{ID: "peer-live"},
+			{ID: "peer-dead"},
+		}},
+		Client: separateStoreRegistryClient{stores: map[string]*storesqlite.Store{"peer-dead": deadStore}},
+		SelfID: "peer-live",
+	}
+	if err := replicator.SyncOnce(ctx); err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+	rescued := []string{}
+	recovery := peer.Recovery{
+		Registry: liveStore,
+		Owners: peerLeaseInspectors{inspectors: map[string]ports.LeaseInspector{
+			"node-live": &mocks.AdmissionController{LeaseForJobVal: domain.Lease{ID: "lease-live", JobID: finishedAtOwner.JobID}, LeaseForJobFound: true},
+		}},
+		Rescue: func(_ context.Context, rec domain.JobRecord) error {
+			rescued = append(rescued, rec.JobID)
+			return nil
+		},
+	}
+	count, err := recovery.RecoverPeer(ctx, "peer-dead")
+	if err != nil {
+		t.Fatalf("RecoverPeer: %v", err)
+	}
+	if count != 1 || !reflect.DeepEqual(rescued, []string{"queued"}) {
+		t.Fatalf("count=%d rescued=%+v", count, rescued)
+	}
+}
+
 func mustPeerClaimPlanCommit(t *testing.T, ctx context.Context, coord *peer.Coordinator, jobID string) domain.Lease {
 	t.Helper()
 	if err := coord.ClaimJob(ctx, jobID); err != nil {
@@ -475,6 +530,31 @@ func (r peerLeaseInspectors) LeaseInspector(nodeID string) (ports.LeaseInspector
 		return nil, domain.ErrUnreachable
 	}
 	return inspector, nil
+}
+
+type separateStoreRegistryClient struct {
+	stores map[string]*storesqlite.Store
+}
+
+func (c separateStoreRegistryClient) Snapshot(ctx context.Context, peer domain.Peer) ([]domain.JobRecord, error) {
+	store := c.stores[peer.ID]
+	if store == nil {
+		return nil, domain.ErrUnreachable
+	}
+	return store.Snapshot(ctx)
+}
+
+func (c separateStoreRegistryClient) Push(ctx context.Context, peer domain.Peer, records []domain.JobRecord) error {
+	store := c.stores[peer.ID]
+	if store == nil {
+		return domain.ErrUnreachable
+	}
+	for _, rec := range records {
+		if err := store.Put(ctx, rec); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type peerRuntimeStore struct {
