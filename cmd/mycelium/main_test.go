@@ -477,6 +477,58 @@ func TestRegistryRPCRequiresAuthAndMergesRecords(t *testing.T) {
 	}
 }
 
+func TestTelemetryRPCRequiresAuthAndMergesMetricsAndRecommendations(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	localMetric := domain.RunMetric{JobID: "job-local", NodeID: "peer-a", Project: "project-a", TokensPerSec: 12, At: time.Unix(20, 0).UTC()}
+	if err := store.Record(ctx, localMetric); err != nil {
+		t.Fatalf("Record local: %v", err)
+	}
+	mux := http.NewServeMux()
+	mountTelemetryHTTP(mux, store, "rpc-secret")
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	peer := domain.Peer{ID: "peer-a", Addresses: []string{server.URL}}
+
+	if _, err := (telemetryHTTPClient{}).Metrics(ctx, peer); err == nil || !strings.Contains(err.Error(), "rpc token") {
+		t.Fatalf("unauthorized metrics err = %v", err)
+	}
+	client := telemetryHTTPClient{AuthToken: "rpc-secret"}
+	metrics, err := client.Metrics(ctx, peer)
+	if err != nil {
+		t.Fatalf("Metrics: %v", err)
+	}
+	if len(metrics) != 1 || metrics[0].JobID != localMetric.JobID {
+		t.Fatalf("metrics = %+v", metrics)
+	}
+	remoteMetric := domain.RunMetric{JobID: "job-remote", NodeID: "peer-b", Project: "project-a", TokensPerSec: 18, At: time.Unix(21, 0).UTC()}
+	if err := client.PushMetrics(ctx, peer, []domain.RunMetric{remoteMetric}); err != nil {
+		t.Fatalf("PushMetrics: %v", err)
+	}
+	metrics, err = store.Metrics(ctx, "")
+	if err != nil {
+		t.Fatalf("Metrics local: %v", err)
+	}
+	if len(metrics) != 2 || metrics[1].JobID != remoteMetric.JobID {
+		t.Fatalf("local metrics = %+v", metrics)
+	}
+	rec := domain.RecommendationRecord{ID: "rec-a", Type: optimizer.RecommendationContextCap, ProjectID: "project-a", CreatedAt: time.Unix(22, 0).UTC()}
+	if err := client.PushRecommendations(ctx, peer, []domain.RecommendationRecord{rec}); err != nil {
+		t.Fatalf("PushRecommendations: %v", err)
+	}
+	recs, err := client.Recommendations(ctx, peer)
+	if err != nil {
+		t.Fatalf("Recommendations: %v", err)
+	}
+	if len(recs) != 1 || recs[0].ID != rec.ID {
+		t.Fatalf("recommendations = %+v", recs)
+	}
+}
+
 func TestMountNodeHTTPIncludesAdmissionRuntimeRoutes(t *testing.T) {
 	mux := http.NewServeMux()
 	seen := map[string]bool{}
@@ -660,7 +712,7 @@ func TestRunOptimizerEvaluationPersistsRecommendationsAndCalibratesSpeed(t *test
 		}
 	}
 
-	if err := runOptimizerEvaluation(context.Background(), store, clock.System{}); err != nil {
+	if _, err := runOptimizerEvaluation(context.Background(), store, clock.System{}, telemetrySyncConfig{}); err != nil {
 		t.Fatalf("runOptimizerEvaluation: %v", err)
 	}
 	appliedProject, err := store.Project(context.Background(), project.ID)
@@ -683,6 +735,90 @@ func TestRunOptimizerEvaluationPersistsRecommendationsAndCalibratesSpeed(t *test
 	}
 	if calibrated.SpeedClass.TokensPerSecRef != 15 || calibrated.SpeedClass.Source != "telemetry-calibrated" {
 		t.Fatalf("node = %+v", calibrated)
+	}
+}
+
+func TestRunOptimizerEvaluationIncludesRemoteTelemetryAndPushesRecommendations(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	project := domain.Project{ID: "project-a", ContextCap: 16000, AutoApply: false}
+	if err := store.SaveProject(ctx, project); err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	if err := store.SavePreset(ctx, testPresetWithContext("small", 6000)); err != nil {
+		t.Fatalf("SavePreset small: %v", err)
+	}
+	if err := store.SavePreset(ctx, testPresetWithContext("large", 16000)); err != nil {
+		t.Fatalf("SavePreset large: %v", err)
+	}
+	remotePeer := domain.Peer{ID: "peer-b", Addresses: []string{"127.0.0.1:1"}, Compute: true}
+	client := &mocks.TelemetryPeerClient{
+		MetricsByPeer: map[string][]domain.RunMetric{
+			remotePeer.ID: []domain.RunMetric{
+				{JobID: "remote-a", NodeID: remotePeer.ID, Project: project.ID, ContextUsed: 3500, TokensPerSec: 10, At: time.Unix(30, 0).UTC()},
+				{JobID: "remote-b", NodeID: remotePeer.ID, Project: project.ID, ContextUsed: 4000, TokensPerSec: 20, At: time.Unix(31, 0).UTC()},
+			},
+		},
+	}
+
+	result, err := runOptimizerEvaluation(ctx, store, clock.System{}, telemetrySyncConfig{
+		SelfID: "peer-a",
+		Peers:  &mocks.PeerDiscovery{PeersVal: []domain.Peer{remotePeer}},
+		Client: client,
+	})
+	if err != nil {
+		t.Fatalf("runOptimizerEvaluation: %v", err)
+	}
+	if result.ImportedMetrics != 2 || result.PushedRecommendations != 1 || len(result.SkippedPeers) != 0 {
+		t.Fatalf("sync result = %+v", result)
+	}
+	recs, err := store.ListRecommendations(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("ListRecommendations: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Observed["avg_tokens"] != 3750 {
+		t.Fatalf("recommendations = %+v", recs)
+	}
+	appliedProject, err := store.Project(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	if appliedProject.ContextCap != project.ContextCap {
+		t.Fatalf("auto_apply=false project changed: %+v", appliedProject)
+	}
+	if pushed := client.PushedRecommendations[remotePeer.ID]; len(pushed) != 1 || pushed[0].ProjectID != project.ID {
+		t.Fatalf("pushed recommendations = %+v", pushed)
+	}
+}
+
+func TestRunOptimizerEvaluationSkipsUnreachableTelemetryPeersWithEvidence(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	if err := store.SaveProject(ctx, domain.Project{ID: "project-a", ContextCap: 16000}); err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	if err := store.SavePreset(ctx, testPresetWithContext("small", 6000)); err != nil {
+		t.Fatalf("SavePreset small: %v", err)
+	}
+	remotePeer := domain.Peer{ID: "peer-b", Addresses: []string{"127.0.0.1:1"}, Compute: true}
+	result, err := runOptimizerEvaluation(ctx, store, clock.System{}, telemetrySyncConfig{
+		SelfID: "peer-a",
+		Peers:  &mocks.PeerDiscovery{PeersVal: []domain.Peer{remotePeer}},
+		Client: &mocks.TelemetryPeerClient{MetricsErr: errors.New("dial refused")},
+	})
+	if err != nil {
+		t.Fatalf("runOptimizerEvaluation: %v", err)
+	}
+	if len(result.SkippedPeers) != 1 || !strings.Contains(result.SkippedPeers[0], "peer-b metrics: dial refused") {
+		t.Fatalf("skipped peers = %+v", result.SkippedPeers)
 	}
 }
 
