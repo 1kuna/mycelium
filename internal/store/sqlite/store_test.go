@@ -36,6 +36,13 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	lease := domain.Lease{ID: "lease-a", JobID: "job-a", InstanceID: inst.ID, NodeID: node.ID, Claim: fixtures.MakeClaim(1, 2), GrantedAt: time.Unix(1, 0).UTC()}
 	reservation := domain.Reservation{ID: "res-a", Kind: domain.ReservationHeadroom, NodeID: node.ID, Headroom: fixtures.MakeClaim(3, 4)}
 	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	admissionState := domain.AdmissionState{
+		NodeID: node.ID,
+		Fence:  4,
+		Leases: []domain.AdmissionLeaseRecord{{
+			Lease: lease,
+		}},
+	}
 	jobRecord := fixtures.MakeJobRecord(fixtures.WithRecordJobID(job.ID))
 	rec := domain.RecommendationRecord{ID: "rec-a", Type: "context_cap_recommendation", ProjectID: project.ID, RecommendedValue: 4096, CreatedAt: time.Unix(2, 0).UTC()}
 	refs := []domain.ProcessRef{{PID: 12, Kind: "process", Ref: "12"}}
@@ -48,6 +55,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	must(t, store.SaveLease(ctx, lease))
 	must(t, store.SaveReservation(ctx, reservation))
 	must(t, store.SaveJob(ctx, job))
+	must(t, store.SaveAdmissionState(ctx, admissionState))
 	must(t, store.Put(ctx, jobRecord))
 	must(t, store.SaveRecommendation(ctx, rec))
 	must(t, store.SaveProcessRefs(ctx, node.ID, refs))
@@ -95,6 +103,15 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	if leases, err := reopened.ListLeases(ctx); err != nil || len(leases) != 1 {
 		t.Fatalf("ListLeases len = %d, %v", len(leases), err)
 	}
+	if gotJob, err := reopened.Job(ctx, job.ID); err != nil || gotJob.ID != job.ID {
+		t.Fatalf("Job = %+v, %v", gotJob, err)
+	}
+	if gotAdmission, found, err := reopened.AdmissionState(ctx, node.ID); err != nil || !found || gotAdmission.Fence != 4 {
+		t.Fatalf("AdmissionState = %+v found=%v err=%v", gotAdmission, found, err)
+	}
+	if _, found, err := reopened.AdmissionState(ctx, "missing"); err != nil || found {
+		t.Fatalf("missing AdmissionState found=%v err=%v", found, err)
+	}
 	if reservations, err := reopened.ListReservations(ctx); err != nil || len(reservations) != 1 {
 		t.Fatalf("ListReservations len = %d, %v", len(reservations), err)
 	}
@@ -136,6 +153,7 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 		"node":           store.SaveNode(ctx, domain.Node{}),
 		"instance":       store.SaveInstance(ctx, domain.ModelInstance{}),
 		"lease":          store.SaveLease(ctx, domain.Lease{}),
+		"admission":      store.SaveAdmissionState(ctx, domain.AdmissionState{}),
 		"reservation":    store.SaveReservation(ctx, domain.Reservation{}),
 		"job":            store.SaveJob(ctx, domain.Job{}),
 		"recommendation": store.SaveRecommendation(ctx, domain.RecommendationRecord{}),
@@ -148,6 +166,9 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	}
 	if _, err := store.Project(ctx, "missing"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("missing project err = %v", err)
+	}
+	if _, err := store.Job(ctx, "missing"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing job err = %v", err)
 	}
 	if _, err := store.ProcessRefs(ctx, ""); err == nil {
 		t.Fatal("ProcessRefs should require node id")

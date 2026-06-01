@@ -14,7 +14,6 @@ import (
 	"mycelium/internal/domain"
 	"mycelium/internal/estimate"
 	"mycelium/internal/hardware"
-	"mycelium/internal/lease"
 	nodeagent "mycelium/internal/node"
 	"mycelium/internal/ports"
 	storesqlite "mycelium/internal/store/sqlite"
@@ -67,17 +66,22 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 		return computeRuntime{}, err
 	}
 
+	allocator, pinnedReservations, err := computeAdmissionAllocator(ctx, store, node.ID)
+	if err != nil {
+		return computeRuntime{}, err
+	}
 	opts := []nodeagent.Option{
 		nodeagent.WithListenAddr(compute.BackendListen),
-		nodeagent.WithAllocator(lease.NewAllocator()),
+		nodeagent.WithAllocator(allocator),
 	}
 	if compute.GGUFParser != "" {
 		opts = append(opts, nodeagent.WithModelInspector(nodeagent.ParserInspector{Parser: estimate.NewCommandParser(compute.GGUFParser, []string{"{model}"})}))
 	}
 	agent := nodeagent.NewAgent(node, adapter, clock.System{}, opts...)
-	admission := nodeagent.NewAdmission(node, lease.NewAllocator(), clock.System{},
+	admission := nodeagent.NewAdmission(node, allocator, clock.System{},
 		nodeagent.WithAdmissionInstances(agent.Instances),
 		nodeagent.WithAdmissionStateStore(store),
+		nodeagent.WithPinnedReservations(pinnedReservations...),
 	)
 	return computeRuntime{
 		handler:   nodeagent.HTTPServer{Agent: agent, Admission: admission, AuthToken: cfg.RPCToken},
@@ -86,6 +90,28 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 		admission: admission,
 		shutdown:  agent.Shutdown,
 	}, nil
+}
+
+func computeAdmissionAllocator(ctx context.Context, store *storesqlite.Store, nodeID string) (ports.Allocator, []string, error) {
+	reservations, err := store.ListReservations(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	presets, err := store.ListPresets(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return allocatorFromReservations(reservations, presetMap(presets)), pinnedReservationIDs(reservations, nodeID), nil
+}
+
+func pinnedReservationIDs(reservations []domain.Reservation, nodeID string) []string {
+	var ids []string
+	for _, reservation := range reservations {
+		if reservation.Kind == domain.ReservationPinned && reservation.NodeID == nodeID {
+			ids = append(ids, reservation.ID)
+		}
+	}
+	return ids
 }
 
 const LabelPeerBackend = "mycelium.peer.backend"

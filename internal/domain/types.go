@@ -77,6 +77,8 @@ type ModelInstance struct {
 	NodeID         string        `json:"node_id"`
 	AcceleratorSet []int         `json:"accelerator_set"`
 	Claim          Claim         `json:"claim"`
+	ReservationID  string        `json:"reservation_id,omitempty"`
+	Pinned         bool          `json:"pinned,omitempty"`
 	State          InstanceState `json:"state"`
 	Addr           string        `json:"addr"`
 	InFlight       int           `json:"in_flight"`

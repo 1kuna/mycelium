@@ -188,9 +188,13 @@ func TestPhase6PeerCoordinatedPreemptionUsesOwnerAuthority(t *testing.T) {
 		Coordinator: coord,
 		JobLog:      jobLog,
 		Queue:       scheduler.NewQueue(clock),
-		Store:       &peerRuntimeStore{instances: map[string]domain.ModelInstance{victim.ID: victim}, leases: map[string]domain.Lease{victimLease.ID: victimLease}},
-		Clock:       clock,
-		Presets:     map[string]domain.Preset{targetPreset.ID: targetPreset},
+		Store: &peerRuntimeStore{
+			jobs:      map[string]domain.Job{"victim-job": fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.WithPreset("victim-preset"), fixtures.Background)},
+			instances: map[string]domain.ModelInstance{victim.ID: victim},
+			leases:    map[string]domain.Lease{victimLease.ID: victimLease},
+		},
+		Clock:   clock,
+		Presets: map[string]domain.Preset{targetPreset.ID: targetPreset},
 	}
 
 	result, err := service.SubmitWithPayload(ctx, fixtures.MakeJob(fixtures.WithJobID("job-target"), fixtures.WithPreset(targetPreset.ID), fixtures.Interactive, fixtures.HardForInteractive), []byte(`{"job":"target"}`))
@@ -485,6 +489,14 @@ func (s *peerRuntimeStore) SaveJob(_ context.Context, job domain.Job) error {
 	}
 	s.jobs[job.ID] = job
 	return nil
+}
+
+func (s *peerRuntimeStore) Job(_ context.Context, id string) (domain.Job, error) {
+	job, ok := s.jobs[id]
+	if !ok {
+		return domain.Job{}, errors.New("job not found")
+	}
+	return job, nil
 }
 
 func (s *peerRuntimeStore) SaveLease(_ context.Context, lease domain.Lease) error {
