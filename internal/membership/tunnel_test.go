@@ -6,39 +6,28 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"mycelium/internal/domain"
 )
 
-func TestLANTunnelForwardsThroughLoopback(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := listener.Addr().String()
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprint(w, "ok")
-	})}
-	go func() { _ = server.Serve(listener) }()
-	defer server.Shutdown(context.Background())
-
+func TestLANTunnelOpensReusesAndClosesFakeListener(t *testing.T) {
+	first := newFakeListener("127.0.0.1:6001")
+	second := newFakeListener("127.0.0.1:6002")
+	factory := &fakeListenerFactory{listeners: []*fakeListener{first, second}}
 	tunnel := NewLANTunnel()
-	node := domain.Node{ID: "node-a", Address: addr}
+	tunnel.Listener = factory
+	node := domain.Node{ID: "node-a", Address: "10.0.0.2:51846"}
 	loopback, err := tunnel.Open(context.Background(), node)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer tunnel.Close(context.Background(), node.ID)
-
-	resp, err := http.Get("http://" + loopback)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
+	if loopback != "127.0.0.1:6001" {
+		t.Fatalf("loopback = %s", loopback)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", resp.StatusCode)
-	}
+	waitAccepted(t, first)
 
 	loopbackAgain, err := tunnel.Open(context.Background(), node)
 	if err != nil {
@@ -47,32 +36,24 @@ func TestLANTunnelForwardsThroughLoopback(t *testing.T) {
 	if loopbackAgain != loopback {
 		t.Fatalf("loopback was not reused: first=%s second=%s", loopback, loopbackAgain)
 	}
-}
 
-func TestLANTunnelAcceptsURLTarget(t *testing.T) {
-	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprint(w, "ok")
-	})}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	changed := domain.Node{ID: "node-a", Address: "http://10.0.0.3:51846"}
+	loopbackChanged, err := tunnel.Open(context.Background(), changed)
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		t.Fatalf("Open changed: %v", err)
 	}
-	go func() { _ = server.Serve(listener) }()
-	defer server.Shutdown(context.Background())
-
-	tunnel := NewLANTunnel()
-	loopback, err := tunnel.Open(context.Background(), domain.Node{ID: "node-a", Address: "http://" + listener.Addr().String()})
-	if err != nil {
-		t.Fatalf("Open url: %v", err)
+	if loopbackChanged != "127.0.0.1:6002" {
+		t.Fatalf("changed loopback = %s", loopbackChanged)
 	}
-	defer tunnel.Close(context.Background(), "node-a")
-	resp, err := http.Get("http://" + loopback)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
+	if !first.isClosed() {
+		t.Fatal("old listener was not closed after target changed")
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", resp.StatusCode)
+	waitAccepted(t, second)
+	if err := tunnel.Close(context.Background(), "node-a"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !second.isClosed() {
+		t.Fatal("current listener was not closed")
 	}
 }
 
@@ -89,5 +70,70 @@ func TestLANTunnelRejectsBadInputAndClosesMissing(t *testing.T) {
 	}
 	if _, err := tunnel.Open(context.Background(), domain.Node{ID: "node-a", Address: "http:///missing-host"}); err == nil || !strings.Contains(err.Error(), "missing host") {
 		t.Fatalf("missing host err = %v", err)
+	}
+}
+
+type fakeListenerFactory struct {
+	mu        sync.Mutex
+	listeners []*fakeListener
+}
+
+func (f *fakeListenerFactory) Listen(_ context.Context, _, _ string) (net.Listener, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.listeners) == 0 {
+		return nil, fmt.Errorf("no fake listeners left")
+	}
+	listener := f.listeners[0]
+	f.listeners = f.listeners[1:]
+	return listener, nil
+}
+
+type fakeListener struct {
+	addr     net.Addr
+	accepted chan struct{}
+	closed   chan struct{}
+	once     sync.Once
+}
+
+func newFakeListener(addr string) *fakeListener {
+	return &fakeListener{addr: fakeAddr(addr), accepted: make(chan struct{}, 1), closed: make(chan struct{})}
+}
+
+func (l *fakeListener) Accept() (net.Conn, error) {
+	l.accepted <- struct{}{}
+	<-l.closed
+	return nil, http.ErrServerClosed
+}
+
+func (l *fakeListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *fakeListener) Addr() net.Addr {
+	return l.addr
+}
+
+func (l *fakeListener) isClosed() bool {
+	select {
+	case <-l.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+type fakeAddr string
+
+func (a fakeAddr) Network() string { return "tcp" }
+func (a fakeAddr) String() string  { return string(a) }
+
+func waitAccepted(t *testing.T, listener *fakeListener) {
+	t.Helper()
+	select {
+	case <-listener.accepted:
+	case <-time.After(time.Second):
+		t.Fatal("server did not start accepting")
 	}
 }
