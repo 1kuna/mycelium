@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"mycelium/internal/domain"
 	"mycelium/internal/ports"
 )
 
@@ -46,9 +47,55 @@ type Result struct {
 type Runner struct {
 	Client Client
 	Clock  ports.Clock
+	Store  JobStore
+}
+
+type JobStore interface {
+	SaveJob(ctx context.Context, job domain.Job) error
 }
 
 func (r Runner) Run(ctx context.Context, req Request) ([]Result, error) {
+	return r.run(ctx, req, domain.Job{})
+}
+
+func (r Runner) RunJob(ctx context.Context, parent domain.Job) ([]Result, error) {
+	if parent.ID == "" {
+		return nil, fmt.Errorf("benchmark parent job id is required")
+	}
+	if parent.Benchmark == nil {
+		return nil, fmt.Errorf("benchmark spec is required")
+	}
+	if r.Store == nil {
+		return nil, fmt.Errorf("benchmark job store is not configured")
+	}
+	if parent.TaskType == "" {
+		parent.TaskType = "benchmark"
+	}
+	parent.Status = domain.JobRunning
+	if err := r.Store.SaveJob(ctx, parent); err != nil {
+		return nil, err
+	}
+	req := Request{
+		Prompt:    parent.Benchmark.Prompt,
+		Models:    append([]string(nil), parent.Benchmark.Models...),
+		OutputDir: parent.Benchmark.OutputDir,
+	}
+	results, err := r.run(ctx, req, parent)
+	if err != nil {
+		parent.Status = domain.JobFailed
+		parent.Error = err.Error()
+		_ = r.Store.SaveJob(ctx, parent)
+		return results, err
+	}
+	parent.Status = domain.JobDone
+	parent.Error = ""
+	if err := r.Store.SaveJob(ctx, parent); err != nil {
+		return results, err
+	}
+	return results, nil
+}
+
+func (r Runner) run(ctx context.Context, req Request, parent domain.Job) ([]Result, error) {
 	if r.Client == nil {
 		return nil, fmt.Errorf("bench client is not configured")
 	}
@@ -69,9 +116,17 @@ func (r Runner) Run(ctx context.Context, req Request) ([]Result, error) {
 	}
 	results := make([]Result, 0, len(req.Models))
 	used := map[string]int{}
+	usedChildIDs := map[string]int{}
 	for _, model := range req.Models {
 		if err := ctx.Err(); err != nil {
 			return results, err
+		}
+		child, hasChild := r.childJob(parent, model, usedChildIDs)
+		if hasChild {
+			child.Status = domain.JobRunning
+			if err := r.Store.SaveJob(ctx, child); err != nil {
+				return results, err
+			}
 		}
 		start := r.Clock.Now()
 		completion, err := r.Client.Complete(ctx, model, req.Prompt)
@@ -79,11 +134,23 @@ func (r Runner) Run(ctx context.Context, req Request) ([]Result, error) {
 		if err != nil {
 			result.Error = err.Error()
 			results = append(results, result)
+			if hasChild {
+				child.Status = domain.JobFailed
+				child.Error = err.Error()
+				if err := r.Store.SaveJob(ctx, child); err != nil {
+					return results, err
+				}
+			}
 			continue
 		}
 		name := uniqueName(safeName(model)+".txt", used)
 		path := filepath.Join(req.OutputDir, name)
 		if err := os.WriteFile(path, []byte(completion.Text), 0644); err != nil {
+			if hasChild {
+				child.Status = domain.JobFailed
+				child.Error = err.Error()
+				_ = r.Store.SaveJob(ctx, child)
+			}
 			return results, err
 		}
 		result.OutputPath = path
@@ -92,11 +159,33 @@ func (r Runner) Run(ctx context.Context, req Request) ([]Result, error) {
 		result.TTFTms = completion.TTFTms
 		result.ContextTokens = completion.ContextTokens
 		results = append(results, result)
+		if hasChild {
+			child.Status = domain.JobDone
+			child.Progress = []domain.JobProgress{{Stage: "output", Message: path, At: r.Clock.Now()}}
+			if err := r.Store.SaveJob(ctx, child); err != nil {
+				return results, err
+			}
+		}
 	}
 	if err := writeMetrics(req.OutputDir, results); err != nil {
 		return results, err
 	}
 	return results, nil
+}
+
+func (r Runner) childJob(parent domain.Job, model string, used map[string]int) (domain.Job, bool) {
+	if parent.ID == "" {
+		return domain.Job{}, false
+	}
+	return domain.Job{
+		ID:        parent.ID + "-" + uniqueName(safeName(model), used),
+		TaskType:  "benchmark_child",
+		Model:     model,
+		Project:   parent.Project,
+		Priority:  domain.PriorityBackground,
+		SpeedPref: parent.SpeedPref,
+		ParentID:  parent.ID,
+	}, true
 }
 
 func writeMetrics(outputDir string, results []Result) error {
