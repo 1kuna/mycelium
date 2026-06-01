@@ -38,6 +38,9 @@ func runPeer(ctx context.Context, args []string) error {
 	}
 	addr, handler, cleanup, err := buildPeerGateway(ctx, args)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	server := &http.Server{Addr: addr, Handler: handler}
