@@ -13,6 +13,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -243,7 +244,11 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		startPeerHeartbeat(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, clock.System{})
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
-	startOptimizerEvaluator(ctx, store, fleet, cfg.ID, cfg.Compute, clock.System{}, time.Duration(cfg.OptimizerEvalMS)*time.Millisecond)
+	startOptimizerEvaluator(ctx, store, fleet, cfg.ID, cfg.Compute, clock.System{}, time.Duration(cfg.OptimizerEvalMS)*time.Millisecond, telemetrySyncConfig{
+		SelfID: cfg.ID,
+		Peers:  discovery,
+		Client: telemetryHTTPClient{AuthToken: cfg.RPCToken},
+	})
 	handler := gateway.Server{Router: &gateway.Router{
 		Placer:         placer,
 		Fleet:          fleet,
@@ -259,6 +264,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}}
 	mountPeerHTTP(mux, self, cfg.JoinToken)
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
+	mountTelemetryHTTP(mux, store, cfg.RPCToken)
 	mux.Handle("/", handler)
 	return cfg.Listen, mux, combineShutdowns(shutdowns), nil
 }
@@ -340,6 +346,81 @@ func mountRegistryHTTP(mux *http.ServeMux, registry ports.JobRegistry, rpcToken 
 			}
 		}
 		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
+type telemetryRPCStore interface {
+	ports.TelemetryStore
+	SaveRecommendation(ctx context.Context, rec domain.RecommendationRecord) error
+	ListRecommendations(ctx context.Context, projectID string) ([]domain.RecommendationRecord, error)
+}
+
+func mountTelemetryHTTP(mux *http.ServeMux, store telemetryRPCStore, rpcToken string) {
+	mux.HandleFunc("/telemetry/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			metrics, err := store.Metrics(r.Context(), "")
+			if err != nil {
+				writePeerRPCError(w, http.StatusInternalServerError, err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(metrics); err != nil {
+				panic(err)
+			}
+		case http.MethodPost:
+			var metrics []domain.RunMetric
+			if err := json.NewDecoder(r.Body).Decode(&metrics); err != nil {
+				writePeerRPCError(w, http.StatusBadRequest, err)
+				return
+			}
+			for _, metric := range metrics {
+				if err := store.Record(r.Context(), metric); err != nil {
+					writePeerRPCError(w, http.StatusInternalServerError, err)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/telemetry/recommendations", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			recs, err := store.ListRecommendations(r.Context(), "")
+			if err != nil {
+				writePeerRPCError(w, http.StatusInternalServerError, err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(recs); err != nil {
+				panic(err)
+			}
+		case http.MethodPost:
+			var recs []domain.RecommendationRecord
+			if err := json.NewDecoder(r.Body).Decode(&recs); err != nil {
+				writePeerRPCError(w, http.StatusBadRequest, err)
+				return
+			}
+			for _, rec := range recs {
+				if err := store.SaveRecommendation(r.Context(), rec); err != nil {
+					writePeerRPCError(w, http.StatusInternalServerError, err)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
 	})
 }
 
@@ -689,6 +770,12 @@ func writePeerAuthError(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": "rpc token required"})
 }
 
+func writePeerRPCError(w http.ResponseWriter, status int, err error) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
 type registryHTTPClient struct {
 	AuthToken string
 	Client    *http.Client
@@ -707,6 +794,37 @@ func (c registryHTTPClient) Push(ctx context.Context, peer domain.Peer, records 
 var _ peercoord.RegistryClient = registryHTTPClient{}
 
 func (c registryHTTPClient) do(ctx context.Context, peer domain.Peer, method, path string, in, out any) error {
+	return doPeerRPC(ctx, c.Client, c.AuthToken, peer, method, path, in, out)
+}
+
+type telemetryHTTPClient struct {
+	AuthToken string
+	Client    *http.Client
+}
+
+func (c telemetryHTTPClient) Metrics(ctx context.Context, peer domain.Peer) ([]domain.RunMetric, error) {
+	var metrics []domain.RunMetric
+	err := doPeerRPC(ctx, c.Client, c.AuthToken, peer, http.MethodGet, "/telemetry/metrics", nil, &metrics)
+	return metrics, err
+}
+
+func (c telemetryHTTPClient) PushMetrics(ctx context.Context, peer domain.Peer, metrics []domain.RunMetric) error {
+	return doPeerRPC(ctx, c.Client, c.AuthToken, peer, http.MethodPost, "/telemetry/metrics", metrics, nil)
+}
+
+func (c telemetryHTTPClient) Recommendations(ctx context.Context, peer domain.Peer) ([]domain.RecommendationRecord, error) {
+	var recs []domain.RecommendationRecord
+	err := doPeerRPC(ctx, c.Client, c.AuthToken, peer, http.MethodGet, "/telemetry/recommendations", nil, &recs)
+	return recs, err
+}
+
+func (c telemetryHTTPClient) PushRecommendations(ctx context.Context, peer domain.Peer, recs []domain.RecommendationRecord) error {
+	return doPeerRPC(ctx, c.Client, c.AuthToken, peer, http.MethodPost, "/telemetry/recommendations", recs, nil)
+}
+
+var _ ports.TelemetryPeerClient = telemetryHTTPClient{}
+
+func doPeerRPC(ctx context.Context, client *http.Client, authToken string, peer domain.Peer, method, path string, in, out any) error {
 	if len(peer.Addresses) == 0 {
 		return fmt.Errorf("peer %q has no reachable address", peer.ID)
 	}
@@ -725,10 +843,9 @@ func (c registryHTTPClient) do(ctx context.Context, peer domain.Peer, method, pa
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.AuthToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
 	}
-	client := c.Client
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -739,7 +856,7 @@ func (c registryHTTPClient) do(ctx context.Context, peer domain.Peer, method, pa
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("registry rpc %s %s: %s", method, path, strings.TrimSpace(string(data)))
+		return fmt.Errorf("peer rpc %s %s: %s", method, path, strings.TrimSpace(string(data)))
 	}
 	if out == nil {
 		return nil
@@ -922,9 +1039,23 @@ type optimizerRuntimeStore interface {
 	optimizer.RuntimeStore
 	optimizer.SpeedCalibrationStore
 	ListProjects(ctx context.Context) ([]domain.Project, error)
+	ListRecommendations(ctx context.Context, projectID string) ([]domain.RecommendationRecord, error)
 }
 
-func startOptimizerEvaluator(ctx context.Context, store optimizerRuntimeStore, fleet gateway.FleetSource, selfID string, compute bool, clk ports.Clock, interval time.Duration) {
+type telemetrySyncConfig struct {
+	SelfID string
+	Peers  ports.PeerDiscovery
+	Client ports.TelemetryPeerClient
+}
+
+type telemetrySyncResult struct {
+	ImportedMetrics         int
+	ImportedRecommendations int
+	PushedRecommendations   int
+	SkippedPeers            []string
+}
+
+func startOptimizerEvaluator(ctx context.Context, store optimizerRuntimeStore, fleet gateway.FleetSource, selfID string, compute bool, clk ports.Clock, interval time.Duration, syncCfg telemetrySyncConfig) {
 	if store == nil || fleet == nil || selfID == "" || !compute || clk == nil || interval <= 0 {
 		return
 	}
@@ -945,7 +1076,11 @@ func startOptimizerEvaluator(ctx context.Context, store optimizerRuntimeStore, f
 			if !ok {
 				continue
 			}
-			if err := runOptimizerEvaluation(ctx, store, clk); err != nil {
+			result, err := runOptimizerEvaluation(ctx, store, clk, syncCfg)
+			if len(result.SkippedPeers) > 0 {
+				log.Printf("mycelium optimizer telemetry skipped peers: %s", strings.Join(result.SkippedPeers, "; "))
+			}
+			if err != nil {
 				log.Printf("mycelium optimizer evaluation failed: %v", err)
 			}
 		}
@@ -970,25 +1105,98 @@ func shouldRunGroupOptimizer(ctx context.Context, fleet gateway.FleetSource, sel
 	return ok && selected.ID == selfID, nil
 }
 
-func runOptimizerEvaluation(ctx context.Context, store optimizerRuntimeStore, clk ports.Clock) error {
+func runOptimizerEvaluation(ctx context.Context, store optimizerRuntimeStore, clk ports.Clock, syncCfg telemetrySyncConfig) (telemetrySyncResult, error) {
 	if store == nil {
-		return fmt.Errorf("optimizer store is not configured")
+		return telemetrySyncResult{}, fmt.Errorf("optimizer store is not configured")
 	}
 	if clk == nil {
-		return fmt.Errorf("optimizer clock is not configured")
+		return telemetrySyncResult{}, fmt.Errorf("optimizer clock is not configured")
+	}
+	syncResult, reachablePeers, err := pullFleetTelemetry(ctx, store, syncCfg)
+	if err != nil {
+		return syncResult, err
 	}
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
-		return err
+		return syncResult, err
 	}
 	service := optimizer.RecommendationService{Store: store, Clock: clk}
 	for _, project := range projects {
 		if _, err := service.EvaluateProject(ctx, project); err != nil {
-			return err
+			return syncResult, err
 		}
 	}
-	_, err = optimizer.CalibrateSpeedClasses(ctx, store, clk)
-	return err
+	if _, err := optimizer.CalibrateSpeedClasses(ctx, store, clk); err != nil {
+		return syncResult, err
+	}
+	if err := pushFleetRecommendations(ctx, store, syncCfg, reachablePeers, &syncResult); err != nil {
+		return syncResult, err
+	}
+	return syncResult, nil
+}
+
+func pullFleetTelemetry(ctx context.Context, store optimizerRuntimeStore, cfg telemetrySyncConfig) (telemetrySyncResult, []domain.Peer, error) {
+	if cfg.Peers == nil || cfg.Client == nil {
+		return telemetrySyncResult{}, nil, nil
+	}
+	peers, err := cfg.Peers.Peers(ctx)
+	if err != nil {
+		return telemetrySyncResult{}, nil, err
+	}
+	result := telemetrySyncResult{}
+	reachable := make([]domain.Peer, 0, len(peers))
+	for _, peer := range peers {
+		if peer.ID == "" || peer.ID == cfg.SelfID {
+			continue
+		}
+		metrics, err := cfg.Client.Metrics(ctx, peer)
+		if err != nil {
+			result.SkippedPeers = append(result.SkippedPeers, fmt.Sprintf("%s metrics: %v", peer.ID, err))
+			continue
+		}
+		reachable = append(reachable, peer)
+		for _, metric := range metrics {
+			if err := store.Record(ctx, metric); err != nil {
+				return result, reachable, fmt.Errorf("import telemetry metric %q from peer %q: %w", metric.JobID, peer.ID, err)
+			}
+			result.ImportedMetrics++
+		}
+		recs, err := cfg.Client.Recommendations(ctx, peer)
+		if err != nil {
+			result.SkippedPeers = append(result.SkippedPeers, fmt.Sprintf("%s recommendations: %v", peer.ID, err))
+			continue
+		}
+		for _, rec := range recs {
+			if err := store.SaveRecommendation(ctx, rec); err != nil {
+				return result, reachable, fmt.Errorf("import recommendation %q from peer %q: %w", rec.ID, peer.ID, err)
+			}
+			result.ImportedRecommendations++
+		}
+	}
+	sort.Strings(result.SkippedPeers)
+	return result, reachable, nil
+}
+
+func pushFleetRecommendations(ctx context.Context, store optimizerRuntimeStore, cfg telemetrySyncConfig, peers []domain.Peer, result *telemetrySyncResult) error {
+	if cfg.Client == nil || len(peers) == 0 {
+		return nil
+	}
+	recs, err := store.ListRecommendations(ctx, "")
+	if err != nil {
+		return err
+	}
+	if len(recs) == 0 {
+		return nil
+	}
+	for _, peer := range peers {
+		if err := cfg.Client.PushRecommendations(ctx, peer, recs); err != nil {
+			result.SkippedPeers = append(result.SkippedPeers, fmt.Sprintf("%s push-recommendations: %v", peer.ID, err))
+			continue
+		}
+		result.PushedRecommendations += len(recs)
+	}
+	sort.Strings(result.SkippedPeers)
+	return nil
 }
 
 func seedControlStore(ctx context.Context, store *storesqlite.Store, cfg PeerConfig) error {

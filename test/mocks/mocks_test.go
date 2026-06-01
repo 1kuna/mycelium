@@ -131,6 +131,33 @@ func TestResourceEstimatorAllocatorTelemetryAndClock(t *testing.T) {
 		t.Fatalf("record error = %v", err)
 	}
 
+	peerClient := &TelemetryPeerClient{
+		MetricsByPeer: map[string][]domain.RunMetric{
+			"peer-a": []domain.RunMetric{{JobID: "job-a"}},
+		},
+		RecommendationsByPeer: map[string][]domain.RecommendationRecord{
+			"peer-a": []domain.RecommendationRecord{{ID: "rec-a"}},
+		},
+	}
+	peer := domain.Peer{ID: "peer-a"}
+	metrics, err := peerClient.Metrics(context.Background(), peer)
+	if err != nil || len(metrics) != 1 || metrics[0].JobID != "job-a" {
+		t.Fatalf("peer metrics = %+v %v", metrics, err)
+	}
+	if err := peerClient.PushMetrics(context.Background(), peer, []domain.RunMetric{{JobID: "job-b"}}); err != nil {
+		t.Fatalf("PushMetrics: %v", err)
+	}
+	recs, err := peerClient.Recommendations(context.Background(), peer)
+	if err != nil || len(recs) != 1 || recs[0].ID != "rec-a" {
+		t.Fatalf("peer recommendations = %+v %v", recs, err)
+	}
+	if err := peerClient.PushRecommendations(context.Background(), peer, []domain.RecommendationRecord{{ID: "rec-b"}}); err != nil {
+		t.Fatalf("PushRecommendations: %v", err)
+	}
+	if len(peerClient.PushedMetrics["peer-a"]) != 1 || len(peerClient.PushedRecommendations["peer-a"]) != 1 {
+		t.Fatalf("pushed telemetry = %+v %+v", peerClient.PushedMetrics, peerClient.PushedRecommendations)
+	}
+
 	clock := NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
 	timer := clock.NewTimer(time.Second)
 	if !timer.Stop() {

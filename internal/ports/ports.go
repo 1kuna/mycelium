@@ -105,6 +105,13 @@ type TelemetryStore interface {
 	Metrics(ctx context.Context, project string) ([]domain.RunMetric, error)
 }
 
+type TelemetryPeerClient interface {
+	Metrics(ctx context.Context, peer domain.Peer) ([]domain.RunMetric, error)
+	PushMetrics(ctx context.Context, peer domain.Peer, metrics []domain.RunMetric) error
+	Recommendations(ctx context.Context, peer domain.Peer) ([]domain.RecommendationRecord, error)
+	PushRecommendations(ctx context.Context, peer domain.Peer, recs []domain.RecommendationRecord) error
+}
+
 type Optimizer interface {
 	Recommend(ctx context.Context, project domain.Project) ([]domain.TraceStep, error)
 }
