@@ -9,9 +9,10 @@ import (
 
 func TestSelectGroupAnalysisNodeRotatesReadyComputeNodes(t *testing.T) {
 	nodes := []domain.Node{
-		{ID: "node-c", Status: domain.NodeReady},
-		{ID: "node-a", Status: domain.NodeReady},
-		{ID: "node-b", Status: domain.NodeMaintenance},
+		computeNode("node-c", domain.NodeReady),
+		computeNode("node-a", domain.NodeReady),
+		computeNode("node-b", domain.NodeMaintenance),
+		{ID: "thin-peer", Status: domain.NodeReady},
 	}
 	start := time.Unix(0, 0).UTC()
 
@@ -27,13 +28,23 @@ func TestSelectGroupAnalysisNodeRotatesReadyComputeNodes(t *testing.T) {
 	if !ok || third.ID != "node-a" {
 		t.Fatalf("third = %+v ok=%v", third, ok)
 	}
+	if slot := AnalysisSlotID(start.Add(2*time.Minute), time.Minute); slot != "optimizer-slot-2" {
+		t.Fatalf("slot id = %s", slot)
+	}
 }
 
 func TestSelectGroupAnalysisNodeRejectsNoReadyNodes(t *testing.T) {
-	if node, ok := SelectGroupAnalysisNode([]domain.Node{{ID: "node-a", Status: domain.NodeUnreachable}}, time.Now(), time.Second); ok || node.ID != "" {
+	if node, ok := SelectGroupAnalysisNode([]domain.Node{computeNode("node-a", domain.NodeUnreachable)}, time.Now(), time.Second); ok || node.ID != "" {
 		t.Fatalf("node = %+v ok=%v", node, ok)
 	}
 	if node, ok := SelectGroupAnalysisNode([]domain.Node{{Status: domain.NodeReady}}, time.Now(), 0); ok || node.ID != "" {
 		t.Fatalf("missing id node = %+v ok=%v", node, ok)
 	}
+	if node, ok := SelectGroupAnalysisNode([]domain.Node{{ID: "thin-peer", Status: domain.NodeReady}}, time.Now(), 0); ok || node.ID != "" {
+		t.Fatalf("thin node = %+v ok=%v", node, ok)
+	}
+}
+
+func computeNode(id string, status domain.NodeStatus) domain.Node {
+	return domain.Node{ID: id, Status: status, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1024}}}
 }
