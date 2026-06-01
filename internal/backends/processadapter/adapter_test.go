@@ -90,7 +90,7 @@ func TestAdapterErrorPaths(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	adapter = New(Config{BinaryPath: "/bin/sh", Args: []string{"-c", "sleep 30"}, Clock: mocks.NewFakeClock(time.Now())})
+	adapter = New(Config{BinaryPath: "/bin/sh", Args: []string{"-c", "sleep 30"}, Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))})
 	if _, err := adapter.Launch(ctx, fixtures.MakePreset(), "127.0.0.1:1"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("launch ctx err = %v", err)
 	}

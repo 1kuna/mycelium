@@ -69,7 +69,7 @@ func TestWaitReadyReturnsOnHealthyResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := NewAdapter(Config{Clock: mocks.NewFakeClock(time.Now())})
+	adapter := NewAdapter(Config{Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))})
 	if err := adapter.WaitReady(context.Background(), server.URL); err != nil {
 		t.Fatalf("WaitReady: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestWaitReadyReturnsOnHealthyResponse(t *testing.T) {
 func TestWaitReadyRespectsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	adapter := NewAdapter(Config{Clock: mocks.NewFakeClock(time.Now())})
+	adapter := NewAdapter(Config{Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))})
 	if err := adapter.WaitReady(ctx, "127.0.0.1:1"); err == nil {
 		t.Fatal("expected context error")
 	}

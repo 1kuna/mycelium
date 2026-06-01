@@ -153,7 +153,7 @@ func TestRunnerFanOutBenchmarkJobRecordsChildrenAndNoWinner(t *testing.T) {
 }
 
 func TestRunnerRunJobRejectsBadBenchmarkJobs(t *testing.T) {
-	runner := Runner{Client: &fakeClient{clock: mocks.NewFakeClock(time.Now())}, Clock: mocks.NewFakeClock(time.Now()), Store: &benchJobStore{}}
+	runner := Runner{Client: &fakeClient{clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))}, Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), Store: &benchJobStore{}}
 	for _, job := range []domain.Job{
 		{Benchmark: &domain.BenchmarkSpec{Prompt: "p", Models: []string{"m"}, OutputDir: t.TempDir()}},
 		{ID: "bench-a"},

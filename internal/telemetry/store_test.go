@@ -47,7 +47,7 @@ func TestSQLiteStoreFailsLoudOnBadMetric(t *testing.T) {
 	store := newTestStore(t)
 	defer store.Close()
 
-	if err := store.Record(context.Background(), domain.RunMetric{At: time.Now()}); err == nil || !strings.Contains(err.Error(), "job id") {
+	if err := store.Record(context.Background(), domain.RunMetric{At: time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)}); err == nil || !strings.Contains(err.Error(), "job id") {
 		t.Fatalf("missing job id err = %v", err)
 	}
 	if err := store.Record(context.Background(), domain.RunMetric{JobID: "job"}); err == nil || !strings.Contains(err.Error(), "timestamp") {
