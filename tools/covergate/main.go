@@ -30,6 +30,7 @@ func main() {
 	var min float64
 	var packageMin float64
 	var requires requireFlags
+	var fileRequires requireFlags
 	var packagePrefixes requireFlags
 	var packageExcludes requireFlags
 	flag.StringVar(&profile, "profile", "", "coverage profile path")
@@ -38,6 +39,7 @@ func main() {
 	flag.Var(&packagePrefixes, "package-prefix", "package prefix included in -package-min checks; may repeat")
 	flag.Var(&packageExcludes, "package-exclude", "package prefix excluded from -package-min checks; may repeat")
 	flag.Var(&requires, "require", "package=minimum coverage requirement; may repeat")
+	flag.Var(&fileRequires, "require-file", "file=minimum coverage requirement; may repeat")
 	flag.Parse()
 	if err := run(profile, gateConfig{
 		TotalMin:        normalizeThreshold(min),
@@ -45,6 +47,7 @@ func main() {
 		PackagePrefixes: normalizePrefixes(packagePrefixes),
 		PackageExcludes: normalizePrefixes(packageExcludes),
 		Requires:        requires,
+		FileRequires:    fileRequires,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -57,13 +60,14 @@ type gateConfig struct {
 	PackagePrefixes []string
 	PackageExcludes []string
 	Requires        []string
+	FileRequires    []string
 }
 
 func run(profile string, cfg gateConfig) error {
 	if profile == "" {
 		return fmt.Errorf("-profile is required")
 	}
-	total, byPackage, err := readProfile(profile)
+	total, byPackage, byFile, err := readProfile(profile)
 	if err != nil {
 		return err
 	}
@@ -97,6 +101,19 @@ func run(profile string, cfg gateConfig) error {
 			return fmt.Errorf("%s coverage %.1f%% is below %.1f%%", pkg, count.percent()*100, threshold*100)
 		}
 	}
+	for _, raw := range cfg.FileRequires {
+		file, threshold, err := parseRequirement(raw)
+		if err != nil {
+			return err
+		}
+		count, ok := byFile[file]
+		if !ok {
+			return fmt.Errorf("required file %q is missing from coverage profile", file)
+		}
+		if count.percent()+1e-9 < threshold {
+			return fmt.Errorf("%s coverage %.1f%% is below %.1f%%", file, count.percent()*100, threshold*100)
+		}
+	}
 	fmt.Printf("coverage ok: total %.1f%%\n", totalPct*100)
 	return nil
 }
@@ -118,14 +135,15 @@ func packageSelected(pkg string, prefixes, excludes []string) bool {
 	return false
 }
 
-func readProfile(path string) (counters, map[string]counters, error) {
+func readProfile(path string) (counters, map[string]counters, map[string]counters, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return counters{}, nil, err
+		return counters{}, nil, nil, err
 	}
 	defer file.Close()
 	total := counters{}
 	byPackage := map[string]counters{}
+	byFile := map[string]counters{}
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -134,37 +152,47 @@ func readProfile(path string) (counters, map[string]counters, error) {
 		}
 		fields := strings.Fields(line)
 		if len(fields) != 3 {
-			return counters{}, nil, fmt.Errorf("invalid coverage line %q", line)
+			return counters{}, nil, nil, fmt.Errorf("invalid coverage line %q", line)
 		}
 		statements, err := strconv.Atoi(fields[1])
 		if err != nil {
-			return counters{}, nil, fmt.Errorf("invalid statement count in %q: %w", line, err)
+			return counters{}, nil, nil, fmt.Errorf("invalid statement count in %q: %w", line, err)
 		}
 		hits, err := strconv.Atoi(fields[2])
 		if err != nil {
-			return counters{}, nil, fmt.Errorf("invalid hit count in %q: %w", line, err)
+			return counters{}, nil, nil, fmt.Errorf("invalid hit count in %q: %w", line, err)
 		}
+		file := filePath(fields[0])
 		pkg := packagePath(fields[0])
 		count := byPackage[pkg]
+		fileCount := byFile[file]
 		count.total += statements
+		fileCount.total += statements
 		total.total += statements
 		if hits > 0 {
 			count.covered += statements
+			fileCount.covered += statements
 			total.covered += statements
 		}
 		byPackage[pkg] = count
+		byFile[file] = fileCount
 	}
 	if err := scanner.Err(); err != nil {
-		return counters{}, nil, err
+		return counters{}, nil, nil, err
 	}
-	return total, byPackage, nil
+	return total, byPackage, byFile, nil
 }
 
-func packagePath(location string) string {
+func filePath(location string) string {
 	file := location
 	if before, _, ok := strings.Cut(location, ":"); ok {
 		file = before
 	}
+	return strings.TrimPrefix(file, "mycelium/")
+}
+
+func packagePath(location string) string {
+	file := filePath(location)
 	dir := file
 	if idx := strings.LastIndex(dir, "/"); idx >= 0 {
 		dir = dir[:idx]
