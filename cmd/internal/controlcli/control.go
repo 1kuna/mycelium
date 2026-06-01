@@ -22,6 +22,10 @@ import (
 )
 
 func Run(ctx context.Context, args []string) error {
+	return RunWithClient(ctx, args, http.DefaultClient)
+}
+
+func RunWithClient(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: myce <add-model|models|nodes|projects|jobs|recommendations|benchmark>")
 	}
@@ -39,7 +43,7 @@ func Run(ctx context.Context, args []string) error {
 	case "recommendations":
 		return runRecommendations(ctx, args[1:])
 	case "benchmark":
-		return runBenchmark(ctx, args[1:])
+		return runBenchmark(ctx, args[1:], client)
 	default:
 		return fmt.Errorf("unknown myce command %q", args[0])
 	}
@@ -211,7 +215,7 @@ func runJobs(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runBenchmark(ctx context.Context, args []string) error {
+func runBenchmark(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 || args[0] != "run" {
 		return fmt.Errorf("usage: myce benchmark run --url gateway --prompt prompt --model id [--model id] --out dir [--db path]")
 	}
@@ -261,7 +265,7 @@ func runBenchmark(ctx context.Context, args []string) error {
 		},
 	}
 	runner := bench.Runner{
-		Client: benchmarkGatewayClient{BaseURL: *url, Client: http.DefaultClient},
+		Client: benchmarkGatewayClient{BaseURL: *url, Client: client},
 		Clock:  clock.System{},
 		Store:  store,
 	}

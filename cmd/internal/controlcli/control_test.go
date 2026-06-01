@@ -19,6 +19,20 @@ import (
 	"mycelium/pkg/api"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func directHTTPClient(handler http.Handler) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Result(), nil
+	})}
+}
+
 func TestRunAddModelPersistsCatalogAndControlPreset(t *testing.T) {
 	storeDir := t.TempDir()
 	dbPath := filepath.Join(t.TempDir(), "control.db")
@@ -154,7 +168,7 @@ func TestRunListCommandsAndProjectSet(t *testing.T) {
 }
 
 func TestRunBenchmarkFanOutPersistsJobsAndOutputs(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
@@ -170,23 +184,22 @@ func TestRunBenchmarkFanOutPersistsJobsAndOutputs(t *testing.T) {
 			Usage: api.OpenAIUsage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5},
 		})
 	}))
-	defer server.Close()
 	dbPath := filepath.Join(t.TempDir(), "control.db")
 	outDir := filepath.Join(t.TempDir(), "bench")
 
 	var err error
 	output := captureStdout(t, func() {
-		err = Run(context.Background(), []string{
+		err = RunWithClient(context.Background(), []string{
 			"benchmark", "run",
 			"--db", dbPath,
-			"--url", server.URL,
+			"--url", "http://gateway.test",
 			"--id", "bench-a",
 			"--project", "project-a",
 			"--prompt", "Say hi",
 			"--out", outDir,
 			"--model", "same/model",
 			"--model", "same/model",
-		})
+		}, client)
 	})
 	if err != nil {
 		t.Fatalf("benchmark run: %v", err)
@@ -229,23 +242,22 @@ func TestRunBenchmarkFanOutPersistsJobsAndOutputs(t *testing.T) {
 }
 
 func TestRunBenchmarkPrintsChildErrorsAndUsesDefaultID(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "backend saturated", http.StatusTooManyRequests)
 	}))
-	defer server.Close()
 	dbPath := filepath.Join(t.TempDir(), "control.db")
 	outDir := filepath.Join(t.TempDir(), "bench")
 
 	var err error
 	output := captureStdout(t, func() {
-		err = Run(context.Background(), []string{
+		err = RunWithClient(context.Background(), []string{
 			"benchmark", "run",
 			"--db", dbPath,
-			"--url", server.URL,
+			"--url", "http://gateway.test",
 			"--prompt", "Say hi",
 			"--out", outDir,
 			"--model", "tiny",
-		})
+		}, client)
 	})
 	if err != nil {
 		t.Fatalf("benchmark run with child error: %v", err)
@@ -445,27 +457,24 @@ func TestRepeatedStringAndProgressFormatting(t *testing.T) {
 
 func TestBenchmarkGatewayClientErrors(t *testing.T) {
 	ctx := context.Background()
-	errorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	errorClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "nope", http.StatusTooManyRequests)
 	}))
-	defer errorServer.Close()
-	if _, err := (benchmarkGatewayClient{BaseURL: errorServer.URL}).Complete(ctx, "tiny", "prompt"); err == nil || !strings.Contains(err.Error(), "429") {
+	if _, err := (benchmarkGatewayClient{BaseURL: "http://gateway-error.test", Client: errorClient}).Complete(ctx, "tiny", "prompt"); err == nil || !strings.Contains(err.Error(), "429") {
 		t.Fatalf("status error = %v", err)
 	}
 
-	badJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	badJSON := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{`))
 	}))
-	defer badJSON.Close()
-	if _, err := (benchmarkGatewayClient{BaseURL: badJSON.URL}).Complete(ctx, "tiny", "prompt"); err == nil {
+	if _, err := (benchmarkGatewayClient{BaseURL: "http://gateway-bad-json.test", Client: badJSON}).Complete(ctx, "tiny", "prompt"); err == nil {
 		t.Fatal("bad JSON response accepted")
 	}
 
-	noChoices := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	noChoices := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{})
 	}))
-	defer noChoices.Close()
-	if _, err := (benchmarkGatewayClient{BaseURL: noChoices.URL}).Complete(ctx, "tiny", "prompt"); err == nil || !strings.Contains(err.Error(), "no choices") {
+	if _, err := (benchmarkGatewayClient{BaseURL: "http://gateway-no-choices.test", Client: noChoices}).Complete(ctx, "tiny", "prompt"); err == nil || !strings.Contains(err.Error(), "no choices") {
 		t.Fatalf("no choices err = %v", err)
 	}
 }
