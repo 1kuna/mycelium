@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -71,7 +72,7 @@ func (m *OpenAIMessage) UnmarshalJSON(data []byte) error {
 		ToolCalls    []OpenAIToolCall    `json:"tool_calls"`
 		FunctionCall *OpenAIFunctionCall `json:"function_call"`
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := decodeStrictJSON(data, &raw); err != nil {
 		return err
 	}
 	m.Role = raw.Role
@@ -89,7 +90,7 @@ func (m *OpenAIMessage) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	if raw.Content[0] == '[' {
-		if err := json.Unmarshal(raw.Content, &m.ContentParts); err != nil {
+		if err := decodeStrictJSON(raw.Content, &m.ContentParts); err != nil {
 			return err
 		}
 		text := make([]string, 0, len(m.ContentParts))
@@ -102,6 +103,21 @@ func (m *OpenAIMessage) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	return fmt.Errorf("openai message content must be a string, array, or null")
+}
+
+func decodeStrictJSON(data []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func (m OpenAIMessage) MarshalJSON() ([]byte, error) {

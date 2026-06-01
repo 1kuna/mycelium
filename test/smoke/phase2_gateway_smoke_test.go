@@ -59,6 +59,10 @@ func TestPhase2GatewayLocalLlamaCppSmoke(t *testing.T) {
 		fixtures.WithWeights(1),
 		fixtures.WithKVPerToken(0.01),
 	)
+	largePreset := preset
+	largePreset.ID = preset.ID + "_ctx4096"
+	largePreset.ContextLength = 4096
+	largePreset.Aliases = nil
 	directory := gateway.NodeDirectory{Agents: map[string]ports.NodeAgent{agentNode.ID: agent}}
 	placer := scheduler.NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), clock.System{}, preset)
 	server := httptest.NewServer(gateway.Server{Router: &gateway.Router{
@@ -100,6 +104,23 @@ func TestPhase2GatewayLocalLlamaCppSmoke(t *testing.T) {
 	}
 	if !strings.Contains(anthropic.body, `"type":"message"`) || !strings.Contains(anthropic.body, `"content"`) {
 		t.Fatalf("gateway body lacks Anthropic message: %s", anthropic.body)
+	}
+
+	overflowPlacer := scheduler.NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), clock.System{}, preset, largePreset)
+	overflowServer := httptest.NewServer(gateway.Server{Router: &gateway.Router{
+		Placer:         overflowPlacer,
+		Fleet:          directory,
+		Nodes:          directory,
+		Presets:        gateway.NewPresetRegistry(preset, largePreset),
+		Telemetry:      store,
+		DefaultProject: "smoke",
+		MaxTries:       2,
+	}})
+	defer overflowServer.Close()
+	overflowPrompt := strings.Repeat("overflow ", preset.ContextLength+300)
+	overflow := postGateway(t, ctx, overflowServer.URL+"/v1/completions", `{"model":`+quote(model)+`,"prompt":`+quote(overflowPrompt)+`,"max_tokens":1}`)
+	if overflow.status != http.StatusOK || overflow.header.Get(gateway.HeaderAttempts) != "2" {
+		t.Fatalf("overflow requeue status=%s attempts=%s body=%s", overflow.statusText, overflow.header.Get(gateway.HeaderAttempts), overflow.body)
 	}
 
 	failed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

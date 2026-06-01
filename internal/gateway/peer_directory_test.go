@@ -53,6 +53,9 @@ func TestPeerDirectoryBuildsFleetFromComputePeers(t *testing.T) {
 	if got, err := directory.NodeAgent(node.ID); err != nil || got == nil {
 		t.Fatalf("NodeAgent: %v", err)
 	}
+	if peer, ok := directory.PeerForNode(node.ID); !ok || peer.ID != "compute" || len(peer.Addresses) == 0 || peer.Addresses[0] != "127.0.0.1:6000" {
+		t.Fatalf("PeerForNode = %+v ok=%v", peer, ok)
+	}
 	if _, err := directory.AdmissionController(node.ID); err != nil {
 		t.Fatalf("AdmissionController: %v", err)
 	}

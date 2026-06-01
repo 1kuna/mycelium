@@ -29,6 +29,14 @@ type NodeResolver interface {
 	NodeAgent(nodeID string) (ports.NodeAgent, error)
 }
 
+type TelemetryPeerResolver interface {
+	PeerForNode(nodeID string) (domain.Peer, bool)
+}
+
+type InstanceMemorySampler interface {
+	PeakMemoryMB(ctx context.Context, nodeID, instanceID string) (int, error)
+}
+
 type FailureReporter interface {
 	ReportInstanceFailure(ctx context.Context, instanceID string, err error) error
 }
@@ -92,6 +100,10 @@ type Router struct {
 	Reporter             FailureReporter
 	Runtime              *scheduler.Service
 	Telemetry            ports.TelemetrySink
+	TelemetryPeers       TelemetryPeerResolver
+	TelemetryPeerClient  ports.TelemetryPeerClient
+	SelfNodeID           string
+	MemorySampler        InstanceMemorySampler
 	Clock                ports.Clock
 	Sticky               *StickyTable
 	Projects             map[string]domain.Project
@@ -181,10 +193,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
 			return RouteResponse{}, releaseErr
 		}
-		if err != nil || resp.Status >= 500 {
-			if err == nil {
-				err = fmt.Errorf("upstream returned %d", resp.Status)
-			}
+		if err != nil {
 			lastErr = err
 			if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
 				return RouteResponse{}, reportErr
@@ -194,6 +203,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		}
 		if resp.Status >= 400 {
 			bodyText := strings.TrimSpace(string(resp.Body))
+			statusErr := fmt.Errorf("upstream returned %d: %s", resp.Status, bodyText)
 			if optimizer.IsContextOverflow(preset.Backend, fmt.Errorf("%s", bodyText)) {
 				next, ok := r.Presets.NextLargerContext(preset)
 				if ok {
@@ -203,18 +213,28 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 					continue
 				}
 			}
-			return RouteResponse{}, fmt.Errorf("upstream returned %d: %s", resp.Status, bodyText)
+			if resp.Status >= 500 {
+				lastErr = statusErr
+				if reportErr := r.reportFailure(ctx, inst.ID, statusErr); reportErr != nil {
+					return RouteResponse{}, reportErr
+				}
+				fleet = withoutInstance(fleet, inst.ID)
+				continue
+			}
+			return RouteResponse{}, statusErr
 		}
 		body, contentType, err := translate.TranslateResponse(req, route, resp.Body)
 		if err != nil {
 			return RouteResponse{}, err
 		}
-		r.recordMetric(ctx, job, preset, inst, body, metricTiming{
+		if err := r.recordMetric(ctx, job, preset, inst, body, metricTiming{
 			Start:           upstreamStart,
 			FirstByte:       upstreamEnd,
 			End:             upstreamEnd,
 			LoadWallClockMS: loadMS,
-		})
+		}); err != nil {
+			return RouteResponse{}, err
+		}
 		if r.Sticky != nil {
 			r.Sticky.Put(req.ConversationKey, inst)
 		}
@@ -396,6 +416,15 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			} else {
 				err = fmt.Errorf("upstream returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 			}
+			if optimizer.IsContextOverflow(preset.Backend, err) {
+				next, ok := r.Presets.NextLargerContext(preset)
+				if ok && !started {
+					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", preset.ID, next.ID)
+					req.Model = next.ID
+					preset = next
+					continue
+				}
+			}
 			if resp.StatusCode >= 500 {
 				lastErr = err
 				if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
@@ -410,15 +439,6 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 				}
 				fleet = withoutInstance(fleet, inst.ID)
 				continue
-			}
-			if optimizer.IsContextOverflow(preset.Backend, err) {
-				next, ok := r.Presets.NextLargerContext(preset)
-				if ok && !started {
-					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", preset.ID, next.ID)
-					req.Model = next.ID
-					preset = next
-					continue
-				}
 			}
 			if started {
 				writeStreamError(w, err)
@@ -446,12 +466,14 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		if copyErr != nil {
 			return copyErr
 		}
-		r.recordMetric(ctx, job, preset, inst, copied.Body, metricTiming{
+		if err := r.recordMetric(ctx, job, preset, inst, copied.Body, metricTiming{
 			Start:           upstreamStart,
 			FirstByte:       copied.FirstByte,
 			End:             copied.End,
 			LoadWallClockMS: loadMS,
-		})
+		}); err != nil {
+			return err
+		}
 		if r.Sticky != nil {
 			r.Sticky.Put(req.ConversationKey, inst)
 		}
@@ -753,13 +775,13 @@ type metricTiming struct {
 	LoadWallClockMS int
 }
 
-func (r *Router) recordMetric(ctx context.Context, job domain.Job, preset domain.Preset, inst domain.ModelInstance, body []byte, timing metricTiming) {
-	if r.Telemetry == nil {
-		return
+func (r *Router) recordMetric(ctx context.Context, job domain.Job, preset domain.Preset, inst domain.ModelInstance, body []byte, timing metricTiming) error {
+	if r.Telemetry == nil && r.TelemetryPeerClient == nil {
+		return nil
 	}
 	prompt, completion := usageFromBody(body)
 	clk := r.clock()
-	_ = r.Telemetry.Record(ctx, domain.RunMetric{
+	metric := domain.RunMetric{
 		JobID:           job.ID,
 		InstanceID:      inst.ID,
 		NodeID:          inst.NodeID,
@@ -771,7 +793,31 @@ func (r *Router) recordMetric(ctx context.Context, job domain.Job, preset domain
 		TTFTms:          durationMS(timing.Start, timing.FirstByte),
 		LoadWallClockMS: timing.LoadWallClockMS,
 		At:              clk.Now().UTC(),
-	})
+	}
+	if r.MemorySampler != nil {
+		peak, err := r.MemorySampler.PeakMemoryMB(ctx, inst.NodeID, inst.ID)
+		if err != nil {
+			return err
+		}
+		metric.PeakVRAMMB = peak
+	}
+	if r.SelfNodeID == "" || inst.NodeID == r.SelfNodeID {
+		if r.Telemetry == nil {
+			return fmt.Errorf("local owner telemetry sink is not configured")
+		}
+		return r.Telemetry.Record(ctx, metric)
+	}
+	if r.TelemetryPeers == nil {
+		return fmt.Errorf("remote owner telemetry peer resolver is not configured")
+	}
+	if r.TelemetryPeerClient == nil {
+		return fmt.Errorf("remote owner telemetry client is not configured")
+	}
+	peer, ok := r.TelemetryPeers.PeerForNode(inst.NodeID)
+	if !ok {
+		return fmt.Errorf("telemetry owner peer for node %q is not known", inst.NodeID)
+	}
+	return r.TelemetryPeerClient.PushMetrics(ctx, peer, []domain.RunMetric{metric})
 }
 
 func (r *Router) clock() ports.Clock {

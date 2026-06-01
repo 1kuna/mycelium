@@ -37,6 +37,7 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
 	sink := &mocks.TelemetrySink{}
 	router.Telemetry = sink
+	router.MemorySampler = fixedMemorySampler{Peak: 512}
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
 	if err != nil {
 		t.Fatalf("ParseOpenAIChat: %v", err)
@@ -53,7 +54,7 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	if !strings.Contains(string(resp.Body), "hello") {
 		t.Fatalf("body = %s", resp.Body)
 	}
-	if len(sink.Metrics) != 1 || sink.Metrics[0].Project != "proj-a" || sink.Metrics[0].ContextUsed != 4 || sink.Metrics[0].PresetID != inst.PresetID || sink.Metrics[0].Backend != domain.BackendLlamaCpp {
+	if len(sink.Metrics) != 1 || sink.Metrics[0].Project != "proj-a" || sink.Metrics[0].ContextUsed != 4 || sink.Metrics[0].PresetID != inst.PresetID || sink.Metrics[0].Backend != domain.BackendLlamaCpp || sink.Metrics[0].PeakVRAMMB != 512 {
 		t.Fatalf("metrics = %+v", sink.Metrics)
 	}
 	if want := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC); !sink.Metrics[0].At.Equal(want) {
@@ -61,6 +62,63 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 	if strings.Join(agent.Calls, ",") != "begin:inst_test,end:inst_test" {
 		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+}
+
+func TestRouterPushesMetricToRemoteOwner(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("remote")))
+	}))
+
+	inst := fixtures.MakeInstance(fixtures.OnNode("remote-node"))
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode(fixtures.WithNodeID("remote-node"))}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	localSink := &mocks.TelemetrySink{}
+	peerClient := &mocks.TelemetryPeerClient{}
+	router.Telemetry = localSink
+	router.SelfNodeID = "local-node"
+	router.TelemetryPeers = peerMap{"remote-node": {ID: "peer-remote", Addresses: []string{"127.0.0.1:62000"}, Compute: true}}
+	router.TelemetryPeerClient = peerClient
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	if _, err := router.Route(context.Background(), req); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(localSink.Metrics) != 0 {
+		t.Fatalf("local metrics = %+v", localSink.Metrics)
+	}
+	metrics := peerClient.PushedMetrics["peer-remote"]
+	if len(metrics) != 1 || metrics[0].NodeID != "remote-node" || metrics[0].InstanceID != inst.ID || metrics[0].Backend != domain.BackendLlamaCpp {
+		t.Fatalf("pushed metrics = %+v", peerClient.PushedMetrics)
+	}
+	if got := strings.Join(peerClient.Calls, ","); got != "push-metrics:peer-remote" {
+		t.Fatalf("calls = %s", got)
+	}
+}
+
+func TestRouterFailsLoudlyWhenRemoteOwnerTelemetryCannotRoute(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(openAIChatBody("remote")))
+	}))
+
+	inst := fixtures.MakeInstance(fixtures.OnNode("remote-node"))
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode(fixtures.WithNodeID("remote-node"))}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	router.Telemetry = &mocks.TelemetrySink{}
+	router.SelfNodeID = "local-node"
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	if _, err := router.Route(context.Background(), req); err == nil || !strings.Contains(err.Error(), "telemetry peer resolver") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -265,6 +323,42 @@ func TestRouterRetriesContextOverflowOnLargerPreset(t *testing.T) {
 	}
 	if resp.Instance.ID != "inst_large" || resp.Attempts != 2 || !strings.Contains(string(resp.Body), "retried") {
 		t.Fatalf("resp=%+v body=%s", resp, resp.Body)
+	}
+}
+
+func TestRouterClassifiesOverflowBeforeServerErrorFailover(t *testing.T) {
+	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
+	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))
+	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "prompt exceeds context window", http.StatusInternalServerError)
+	}))
+	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("retried")))
+	}))
+
+	node := fixtures.MakeNode()
+	instSmall := fixtures.MakeInstance(fixtures.WithInstanceID("inst_small"), fixtures.WithInstancePreset(small.ID))
+	instSmall.Addr = first
+	instLarge := fixtures.MakeInstance(fixtures.WithInstanceID("inst_large"), fixtures.WithInstancePreset(large.ID))
+	instLarge.Addr = second
+	reporter := &testFailureReporter{}
+	router := newTestRouter(small, domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{instSmall, instLarge},
+	}, staticResolver{}, large)
+	router.Reporter = reporter
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"preset_small","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Instance.ID != "inst_large" || resp.Attempts != 2 || len(reporter.failed) != 0 {
+		t.Fatalf("resp=%+v failed=%+v", resp, reporter.failed)
 	}
 }
 
@@ -1170,6 +1264,22 @@ var testUpstreams = &directUpstreams{handlers: map[string]http.Handler{}}
 
 type directUpstreams struct {
 	handlers map[string]http.Handler
+}
+
+type peerMap map[string]domain.Peer
+
+func (m peerMap) PeerForNode(nodeID string) (domain.Peer, bool) {
+	peer, ok := m[nodeID]
+	return peer, ok
+}
+
+type fixedMemorySampler struct {
+	Peak int
+	Err  error
+}
+
+func (s fixedMemorySampler) PeakMemoryMB(context.Context, string, string) (int, error) {
+	return s.Peak, s.Err
 }
 
 func directUpstream(handler http.Handler) string {

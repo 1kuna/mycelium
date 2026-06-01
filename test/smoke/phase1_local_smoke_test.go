@@ -16,7 +16,6 @@ import (
 	"mycelium/internal/domain"
 	"mycelium/internal/lease"
 	"mycelium/internal/node"
-	"mycelium/internal/optimizer"
 	"mycelium/internal/telemetry"
 	"mycelium/test/fixtures"
 )
@@ -81,20 +80,6 @@ func TestLocalPhase1LoadServeTelemetryRequeueReaper(t *testing.T) {
 	}
 	if len(metrics) != 1 || metrics[0].ContextUsed == 0 {
 		t.Fatalf("metrics = %+v", metrics)
-	}
-
-	plan, err := optimizer.PlanReactiveRequeue(
-		fixtures.MakeJob(fixtures.WithPreset(preset.ID)),
-		preset,
-		domain.ErrContextOverflow,
-		preset.ContextLength+1,
-		optimizer.ReactivePolicy{SharedContexts: []int{2048, 4096}},
-	)
-	if err != nil {
-		t.Fatalf("reactive requeue: %v", err)
-	}
-	if plan.Preset.ContextLength != 4096 {
-		t.Fatalf("requeue context = %d", plan.Preset.ContextLength)
 	}
 
 	if err := agent.Unload(ctx, inst.ID); err != nil {
