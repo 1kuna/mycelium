@@ -24,6 +24,11 @@ type PeerLANDiscovery struct {
 	TokenManager  *TokenManager
 	ScanDuration  time.Duration
 	Clock         ports.Clock
+	PacketFactory PacketFactory
+}
+
+type PacketFactory interface {
+	ListenPacket(ctx context.Context, network, address string, broadcast bool) (net.PacketConn, error)
 }
 
 type peerAdvertisement struct {
@@ -53,8 +58,8 @@ func (d PeerLANDiscovery) Advertise(ctx context.Context, self domain.Peer) error
 	if err != nil {
 		return err
 	}
-	listener := net.ListenConfig{Control: enableBroadcast}
-	conn, err := listener.ListenPacket(ctx, "udp4", "0.0.0.0:0")
+	factory := d.packetFactory()
+	conn, err := factory.ListenPacket(ctx, "udp4", "0.0.0.0:0", true)
 	if err != nil {
 		return err
 	}
@@ -144,7 +149,7 @@ func (d PeerLANDiscovery) listen(ctx context.Context, bounded bool) (net.PacketC
 	if listenAddr == "" {
 		listenAddr = ":51850"
 	}
-	conn, err := net.ListenPacket("udp4", listenAddr)
+	conn, err := d.packetFactory().ListenPacket(ctx, "udp4", listenAddr, false)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +177,23 @@ func (d PeerLANDiscovery) listen(ctx context.Context, bounded bool) (net.PacketC
 		_ = conn.Close()
 	}()
 	return conn, nil
+}
+
+func (d PeerLANDiscovery) packetFactory() PacketFactory {
+	if d.PacketFactory != nil {
+		return d.PacketFactory
+	}
+	return netPacketFactory{}
+}
+
+type netPacketFactory struct{}
+
+func (netPacketFactory) ListenPacket(ctx context.Context, network, address string, broadcast bool) (net.PacketConn, error) {
+	if broadcast {
+		listener := net.ListenConfig{Control: enableBroadcast}
+		return listener.ListenPacket(ctx, network, address)
+	}
+	return net.ListenPacket(network, address)
 }
 
 func (d PeerLANDiscovery) marshal(peer domain.Peer) ([]byte, error) {
