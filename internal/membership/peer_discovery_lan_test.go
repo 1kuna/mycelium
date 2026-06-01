@@ -227,7 +227,7 @@ func TestPeerLANDiscoveryValidationAndTimeout(t *testing.T) {
 	if _, err := (PeerLANDiscovery{ListenAddr: "%"}).WatchPeers(context.Background()); err == nil {
 		t.Fatal("bad watch listen address accepted")
 	}
-	if peers, err := (PeerLANDiscovery{ListenAddr: "127.0.0.1:0", MaxPackets: 1, ScanDuration: time.Millisecond, Clock: mocks.NewFakeClock(time.Now())}).Peers(context.Background()); err != nil || len(peers) != 0 {
+	if peers, err := (PeerLANDiscovery{ListenAddr: "127.0.0.1:0", MaxPackets: 1, ScanDuration: time.Millisecond, Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))}).Peers(context.Background()); err != nil || len(peers) != 0 {
 		t.Fatalf("Peers default deadline = %+v %v", peers, err)
 	}
 }

@@ -16,7 +16,7 @@ import (
 func TestResolvePresetBranches(t *testing.T) {
 	preset := fixtures.MakePreset(fixtures.WithPresetID("preset_a"), fixtures.WithModelRef("model_a"), fixtures.WithAliases("alias_a"))
 	blankModel := fixtures.MakePreset(fixtures.WithPresetID("preset_blank"), fixtures.WithModelRef(""))
-	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{}, mocks.NewFakeClock(time.Now()), preset, blankModel)
+	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset, blankModel)
 
 	got, err := placer.resolvePreset(fixtures.MakeJob(fixtures.WithPreset("preset_a")))
 	if err != nil || got.ID != "preset_a" {
@@ -38,7 +38,7 @@ func TestResolvePresetBranches(t *testing.T) {
 
 func TestSelectWarmInstanceChoosesLeastBusyThenID(t *testing.T) {
 	preset := fixtures.MakePreset()
-	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{}, mocks.NewFakeClock(time.Now()), preset)
+	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
 	busy := fixtures.MakeInstance(fixtures.WithInstanceID("a_busy"), fixtures.WithInstancePreset(preset.ID))
 	busy.InFlight = 2
 	later := fixtures.MakeInstance(fixtures.WithInstanceID("z_idle"), fixtures.WithInstancePreset(preset.ID))
@@ -68,7 +68,7 @@ func TestFilterCandidatesDropsStatusLoadAndFit(t *testing.T) {
 	noStack := fixtures.MakeSparkNode(fixtures.WithNodeID("nostack"))
 	fit := fixtures.MakeNode(fixtures.WithNodeID("fit"))
 
-	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{FitsVal: false, CanStackLoadVal: true}, mocks.NewFakeClock(time.Now()))
+	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{FitsVal: false, CanStackLoadVal: true}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	candidates, trace := placer.filterCandidates(domain.FleetSnapshot{Nodes: []domain.Node{down, noFit}}, claim)
 	if len(candidates) != 0 {
 		t.Fatalf("candidates = %+v", candidates)
@@ -78,14 +78,14 @@ func TestFilterCandidatesDropsStatusLoadAndFit(t *testing.T) {
 		t.Fatalf("dropped = %+v", dropped)
 	}
 
-	placer = NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{FitsVal: true, CanStackLoadVal: false}, mocks.NewFakeClock(time.Now()))
+	placer = NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{FitsVal: true, CanStackLoadVal: false}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	_, trace = placer.filterCandidates(domain.FleetSnapshot{Nodes: []domain.Node{noStack}}, claim)
 	dropped = trace.Data["dropped"].(map[string]string)
 	if dropped["nostack"] != "load_in_flight" {
 		t.Fatalf("dropped = %+v", dropped)
 	}
 
-	placer = NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{FitsVal: true, CanStackLoadVal: true}, mocks.NewFakeClock(time.Now()))
+	placer = NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{FitsVal: true, CanStackLoadVal: true}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	candidates, _ = placer.filterCandidates(domain.FleetSnapshot{Nodes: []domain.Node{fit}}, claim)
 	if len(candidates) != 1 || candidates[0].node.ID != "fit" {
 		t.Fatalf("fit candidates = %+v", candidates)
@@ -120,7 +120,7 @@ func TestScoreCandidatesTieBreaksDeterministically(t *testing.T) {
 		}
 		n.SpeedClass.TokensPerSecRef = 10
 	})
-	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{}, mocks.NewFakeClock(time.Now()))
+	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 
 	scored := placer.scoreCandidates(fixtures.MakeJob(), []candidate{
 		{node: fixtures.MakeNode(fixtures.WithNodeID("b")), acc: []int{0}},
@@ -162,7 +162,7 @@ func TestPreemptHardReplacesVictimWhenOtherNodeFits(t *testing.T) {
 		fixtures.WithClaim(fixtures.MakeClaim(100, 0)),
 		fixtures.WithInstancePriority(domain.PriorityBackground),
 	)
-	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Now()), preset)
+	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
 
 	decision, err := placer.Place(context.Background(),
 		fixtures.MakeJob(fixtures.Hard, fixtures.WithPreset(preset.ID)),
@@ -187,7 +187,7 @@ func TestPreemptSkipsUnusableCandidatesAndReturnsNoResult(t *testing.T) {
 		fixtures.WithClaim(fixtures.MakeClaim(100, 0)),
 		fixtures.WithInstancePriority(domain.PriorityBackground),
 	)
-	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Now()), preset)
+	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
 
 	result, ok := placer.tryPreempt(
 		fixtures.MakeJob(fixtures.Interactive, fixtures.HardForInteractive, fixtures.WithPreset(preset.ID)),
@@ -206,7 +206,7 @@ func TestTryPreemptSortsMultipleResults(t *testing.T) {
 		fixtures.MakeInstance(fixtures.WithInstanceID("victim-z"), fixtures.WithInstancePreset("other-a"), fixtures.OnNode(nodeA.ID), fixtures.WithClaim(fixtures.MakeClaim(100, 0)), fixtures.WithInstancePriority(domain.PriorityBackground)),
 		fixtures.MakeInstance(fixtures.WithInstanceID("victim-a"), fixtures.WithInstancePreset("other-b"), fixtures.OnNode(nodeB.ID), fixtures.WithClaim(fixtures.MakeClaim(100, 0)), fixtures.WithInstancePriority(domain.PriorityBackground)),
 	}
-	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Now()), preset)
+	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
 
 	result, ok := placer.tryPreempt(
 		fixtures.MakeJob(fixtures.Interactive, fixtures.HardForInteractive, fixtures.WithPreset(preset.ID)),

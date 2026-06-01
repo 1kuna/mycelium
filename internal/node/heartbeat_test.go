@@ -29,7 +29,7 @@ func TestAgentHeartbeatUsesInjectedClock(t *testing.T) {
 func TestAgentHeartbeatRespectsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now())).Heartbeat(ctx)
+	_, err := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))).Heartbeat(ctx)
 	if err == nil {
 		t.Fatal("expected cancellation error")
 	}

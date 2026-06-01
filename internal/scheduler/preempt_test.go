@@ -27,7 +27,7 @@ func TestPlaceHardPreemptsLowestPriorityVictim(t *testing.T) {
 		fixtures.WithClaim(fixtures.MakeClaim(1, 0)),
 		fixtures.WithInstancePriority(domain.PriorityNormal),
 	)
-	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Now()), preset)
+	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
 
 	decision, err := placer.Place(context.Background(),
 		fixtures.MakeJob(fixtures.Interactive, fixtures.HardForInteractive, fixtures.WithPreset(preset.ID)),
@@ -52,7 +52,7 @@ func TestHardForInteractiveDoesNotPreemptForNormalJob(t *testing.T) {
 	existing := []domain.ModelInstance{
 		fixtures.MakeInstance(fixtures.OnNode(node.ID), fixtures.WithInstancePreset("other"), fixtures.WithClaim(fixtures.MakeClaim(100, 0)), fixtures.WithInstancePriority(domain.PriorityBackground)),
 	}
-	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Now()), preset)
+	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
 
 	decision, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.HardForInteractive), domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: existing})
 	if err != nil {

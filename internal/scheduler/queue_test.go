@@ -39,7 +39,7 @@ func TestQueueAgingPreventsStarvation(t *testing.T) {
 }
 
 func TestQueueEmpty(t *testing.T) {
-	queue := NewQueue(mocks.NewFakeClock(time.Now()))
+	queue := NewQueue(mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	if queue.Len() != 0 {
 		t.Fatalf("Len = %d", queue.Len())
 	}

@@ -65,7 +65,7 @@ func TestLoadReadinessGatesInstanceAndUnloadStopsBackend(t *testing.T) {
 
 func TestLoadReusesReadyInstance(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	preset := fixtures.MakePreset()
 
 	first, err := agent.Load(context.Background(), preset)
@@ -86,7 +86,7 @@ func TestLoadReusesReadyInstance(t *testing.T) {
 
 func TestConcurrentColdLoadsDeduplicate(t *testing.T) {
 	backend := newBlockingBackend()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	preset := fixtures.MakePreset()
 
 	var wg sync.WaitGroup
@@ -123,7 +123,7 @@ func TestConcurrentColdLoadsDeduplicate(t *testing.T) {
 func TestLoadFailureRemovesLoadingInstanceAndStopsHandle(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
 	backend.ReadyAfter = 1
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 
 	_, err := agent.Load(context.Background(), fixtures.MakePreset())
 	if err == nil {
@@ -162,7 +162,7 @@ func TestLoadTimeoutUsesInjectedClock(t *testing.T) {
 
 func TestUnloadUnknownAndStopFailure(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	if err := agent.Unload(context.Background(), "missing"); err == nil {
 		t.Fatal("expected unknown instance error")
 	}
@@ -179,7 +179,7 @@ func TestUnloadUnknownAndStopFailure(t *testing.T) {
 
 func TestShutdownUnloadsAllInstances(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	first, err := agent.Load(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("first")))
 	if err != nil {
 		t.Fatalf("first Load: %v", err)
@@ -205,7 +205,7 @@ func TestShutdownUnloadsAllInstances(t *testing.T) {
 
 func TestShutdownReturnsUnloadErrors(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	if _, err := agent.Load(context.Background(), fixtures.MakePreset()); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestShutdownReturnsUnloadErrors(t *testing.T) {
 
 func TestInFlightRequestsGuardUnload(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -267,7 +267,7 @@ func TestInFlightRequestsGuardUnload(t *testing.T) {
 }
 
 func TestBeginRequestRejectsMissingUnreadyAndCanceled(t *testing.T) {
-	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	if err := agent.BeginRequest(context.Background(), "missing"); err == nil {
 		t.Fatal("expected missing instance error")
 	}
@@ -287,7 +287,7 @@ func TestBeginRequestRejectsMissingUnreadyAndCanceled(t *testing.T) {
 
 func TestLoadFailsLoudWithoutAllocatorOrCapacity(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	_, err := agent.Load(context.Background(), fixtures.MakePreset())
 	if err == nil || !strings.Contains(err.Error(), "allocator") {
 		t.Fatalf("missing allocator err = %v", err)
@@ -297,7 +297,7 @@ func TestLoadFailsLoudWithoutAllocatorOrCapacity(t *testing.T) {
 	}
 
 	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.5))
-	agent = NewAgent(node, backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	agent = NewAgent(node, backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	_, err = agent.Load(context.Background(), fixtures.MakePreset(fixtures.WithWeights(1000), fixtures.WithKVPerToken(0)))
 	if !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("saturation err = %v", err)
@@ -306,7 +306,7 @@ func TestLoadFailsLoudWithoutAllocatorOrCapacity(t *testing.T) {
 
 func TestCatastrophicNodeShedsSecondColdLoadWhileFirstLoads(t *testing.T) {
 	backend := newBlockingBackend()
-	agent := NewAgent(fixtures.MakeSparkNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(fixtures.MakeSparkNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	firstPreset := fixtures.MakePreset(fixtures.WithPresetID("first"))
 	secondPreset := fixtures.MakePreset(fixtures.WithPresetID("second"))
 
@@ -356,19 +356,19 @@ func TestRecordRunEmitsTelemetryWithNodeAndClock(t *testing.T) {
 }
 
 func TestRecordRunFailsWithoutSinkOrInstance(t *testing.T) {
-	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()))
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	if err := agent.RecordRun(context.Background(), domain.RunMetric{InstanceID: "missing"}); err == nil {
 		t.Fatal("expected missing sink error")
 	}
 
-	agent = NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()), WithTelemetrySink(&mocks.TelemetrySink{}))
+	agent = NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithTelemetrySink(&mocks.TelemetrySink{}))
 	if err := agent.RecordRun(context.Background(), domain.RunMetric{InstanceID: "missing"}); err == nil {
 		t.Fatal("expected missing instance error")
 	}
 }
 
 func TestProtectInstanceMarksPinnedReservation(t *testing.T) {
-	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -398,7 +398,7 @@ func TestProtectInstanceMarksPinnedReservation(t *testing.T) {
 }
 
 func TestInspectModelUsesConfiguredInspectorOrPresetMetadata(t *testing.T) {
-	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()), WithModelInspector(StaticInspector{
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithModelInspector(StaticInspector{
 		Metadata: domain.ModelMetadata{ModelRef: "model", Format: "gguf", WeightsMB: 10, KVPerTokenMB: 0.1, ContextLength: 2048},
 	}))
 	metadata, err := agent.InspectModel(context.Background(), fixtures.MakePreset())
@@ -409,7 +409,7 @@ func TestInspectModelUsesConfiguredInspectorOrPresetMetadata(t *testing.T) {
 		t.Fatalf("metadata = %+v", metadata)
 	}
 
-	agent = NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()))
+	agent = NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	metadata, err = agent.InspectModel(context.Background(), fixtures.MakePreset())
 	if err != nil {
 		t.Fatalf("InspectModel preset fallback: %v", err)
@@ -426,7 +426,7 @@ func TestInspectModelUsesConfiguredInspectorOrPresetMetadata(t *testing.T) {
 
 func TestInspectModelPropagatesInspectorError(t *testing.T) {
 	wantErr := errors.New("inspect")
-	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()), WithModelInspector(StaticInspector{Err: wantErr}))
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithModelInspector(StaticInspector{Err: wantErr}))
 	if _, err := agent.InspectModel(context.Background(), fixtures.MakePreset()); !errors.Is(err, wantErr) {
 		t.Fatalf("InspectModel err = %v", err)
 	}

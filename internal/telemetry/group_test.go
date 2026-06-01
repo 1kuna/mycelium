@@ -34,13 +34,13 @@ func TestSelectGroupAnalysisNodeRotatesReadyComputeNodes(t *testing.T) {
 }
 
 func TestSelectGroupAnalysisNodeRejectsNoReadyNodes(t *testing.T) {
-	if node, ok := SelectGroupAnalysisNode([]domain.Node{computeNode("node-a", domain.NodeUnreachable)}, time.Now(), time.Second); ok || node.ID != "" {
+	if node, ok := SelectGroupAnalysisNode([]domain.Node{computeNode("node-a", domain.NodeUnreachable)}, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC), time.Second); ok || node.ID != "" {
 		t.Fatalf("node = %+v ok=%v", node, ok)
 	}
-	if node, ok := SelectGroupAnalysisNode([]domain.Node{{Status: domain.NodeReady}}, time.Now(), 0); ok || node.ID != "" {
+	if node, ok := SelectGroupAnalysisNode([]domain.Node{{Status: domain.NodeReady}}, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC), 0); ok || node.ID != "" {
 		t.Fatalf("missing id node = %+v ok=%v", node, ok)
 	}
-	if node, ok := SelectGroupAnalysisNode([]domain.Node{{ID: "thin-peer", Status: domain.NodeReady}}, time.Now(), 0); ok || node.ID != "" {
+	if node, ok := SelectGroupAnalysisNode([]domain.Node{{ID: "thin-peer", Status: domain.NodeReady}}, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC), 0); ok || node.ID != "" {
 		t.Fatalf("thin node = %+v ok=%v", node, ok)
 	}
 }

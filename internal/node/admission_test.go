@@ -52,7 +52,7 @@ func TestAdmissionOfferAndCommitGrantLeaseWithFence(t *testing.T) {
 }
 
 func TestAdmissionRejectsStaleFence(t *testing.T) {
-	admission := NewAdmission(fixtures.MakeNode(), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))
+	admission := NewAdmission(fixtures.MakeNode(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	first, err := admission.Offer(context.Background(), admissionReq(fixtures.MakeJob(fixtures.WithJobID("job-a")), fixtures.MakeClaim(10, 1)))
 	if err != nil {
 		t.Fatalf("first Offer: %v", err)
@@ -70,7 +70,7 @@ func TestAdmissionRejectsStaleFence(t *testing.T) {
 }
 
 func TestAdmissionConcurrentCommitsSerializeAtOwner(t *testing.T) {
-	admission := NewAdmission(fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))
+	admission := NewAdmission(fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	first, err := admission.Offer(context.Background(), admissionReq(fixtures.MakeJob(fixtures.WithJobID("job-a")), fixtures.MakeClaim(600, 0)))
 	if err != nil {
 		t.Fatalf("first Offer: %v", err)
@@ -113,7 +113,7 @@ func TestAdmissionConcurrentCommitsSerializeAtOwner(t *testing.T) {
 }
 
 func TestAdmissionReleaseAndPreemptRemoveOccupancy(t *testing.T) {
-	admission := NewAdmission(fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))
+	admission := NewAdmission(fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	leaseA := commitAdmissionLease(t, admission, "job-a", fixtures.MakeClaim(700, 0))
 	if got, found, err := admission.LeaseForJob(context.Background(), "job-a"); err != nil || !found || got.ID != leaseA.ID {
 		t.Fatalf("LeaseForJob = %+v %v %v", got, found, err)
@@ -271,7 +271,7 @@ func TestAdmissionCountsOwnerRunningInstances(t *testing.T) {
 	admission := NewAdmission(
 		fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
 		lease.NewAllocator(),
-		mocks.NewFakeClock(time.Now()),
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
 		WithAdmissionInstances(func() []domain.ModelInstance {
 			return append([]domain.ModelInstance(nil), running...)
 		}),
@@ -286,13 +286,13 @@ func TestAdmissionCountsOwnerRunningInstances(t *testing.T) {
 }
 
 func TestAdmissionFailsLoudOnBadInputsAndUnavailableCapacity(t *testing.T) {
-	admission := NewAdmission(fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.5)), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))
+	admission := NewAdmission(fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.5)), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := admission.Offer(canceled, admissionReq(fixtures.MakeJob(), fixtures.MakeClaim(1, 1))); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled Offer err = %v", err)
 	}
-	if _, err := NewAdmission(fixtures.MakeNode(), nil, mocks.NewFakeClock(time.Now())).Offer(context.Background(), admissionReq(fixtures.MakeJob(), fixtures.MakeClaim(1, 1))); err == nil || !strings.Contains(err.Error(), "allocator") {
+	if _, err := NewAdmission(fixtures.MakeNode(), nil, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))).Offer(context.Background(), admissionReq(fixtures.MakeJob(), fixtures.MakeClaim(1, 1))); err == nil || !strings.Contains(err.Error(), "allocator") {
 		t.Fatalf("missing allocator err = %v", err)
 	}
 	if _, err := admission.Offer(context.Background(), admissionReq(fixtures.MakeJob(), fixtures.MakeClaim(600, 0))); !errors.Is(err, domain.ErrNoFit) {
@@ -351,7 +351,7 @@ func TestAdmissionFailsLoudOnBadInputsAndUnavailableCapacity(t *testing.T) {
 		t.Fatalf("canceled BindInstance err = %v", err)
 	}
 
-	maintenance := NewAdmission(fixtures.MakeNode(fixtures.Maintenance), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))
+	maintenance := NewAdmission(fixtures.MakeNode(fixtures.Maintenance), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	if _, err := maintenance.Offer(context.Background(), admissionReq(fixtures.MakeJob(), fixtures.MakeClaim(1, 1))); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("maintenance offer err = %v", err)
 	}
@@ -362,7 +362,7 @@ func TestAdmissionRejectsOfferThatNoLongerFitsAtCommit(t *testing.T) {
 	admission := NewAdmission(
 		fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
 		lease.NewAllocator(),
-		mocks.NewFakeClock(time.Now()),
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
 		WithAdmissionInstances(func() []domain.ModelInstance {
 			return append([]domain.ModelInstance(nil), running...)
 		}),
@@ -397,7 +397,7 @@ func TestAdmissionAppliesSubmitterPolicyToOffersAndPreemption(t *testing.T) {
 	admission := NewAdmission(
 		fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
 		lease.NewAllocator(),
-		mocks.NewFakeClock(time.Now()),
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
 		WithSubmitterPolicy(SubmitterPolicy{Rules: map[string]SubmitterRule{
 			"submitter-a":  {MaxPriority: domain.PriorityNormal, AllowPrivate: true},
 			"guest": {},
