@@ -40,7 +40,10 @@ func runPhase4ManualJoinSmoke(t *testing.T, gatewayURL, model string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
-	assertGatewayChatEventually(t, ctx, gatewayURL, model)
+	_, _, nodeID := assertGatewayChatEventually(t, ctx, gatewayURL, model)
+	if want := os.Getenv("MYCELIUM_JOIN_EXPECT_NODE"); want != "" && nodeID != want {
+		t.Fatalf("gateway placed on node %q, want %q", nodeID, want)
+	}
 }
 
 func runPhase4AutomatedJoinSmoke(t *testing.T, binary, model string) {
@@ -70,7 +73,7 @@ func runPhase4AutomatedJoinSmoke(t *testing.T, binary, model string) {
 	defer gatewayPeer.stop(t)
 
 	gatewayURL := "http://" + gatewayAddr
-	respBody, instanceID := assertGatewayChatEventually(t, ctx, gatewayURL, model)
+	respBody, instanceID, _ := assertGatewayChatEventually(t, ctx, gatewayURL, model)
 	if instanceID == "" {
 		t.Fatalf("gateway response missing %s body=%s", gateway.HeaderInstance, respBody)
 	}
@@ -102,15 +105,15 @@ func waitForNodeReady(t *testing.T, ctx context.Context, nodeURL, rpcToken strin
 	}
 }
 
-func assertGatewayChatEventually(t *testing.T, ctx context.Context, gatewayURL, model string) (string, string) {
+func assertGatewayChatEventually(t *testing.T, ctx context.Context, gatewayURL, model string) (string, string, string) {
 	t.Helper()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	var last string
 	for {
-		body, instanceID, ok := tryGatewayChat(t, ctx, gatewayURL, model)
+		body, instanceID, nodeID, ok := tryGatewayChat(t, ctx, gatewayURL, model)
 		if ok {
-			return body, instanceID
+			return body, instanceID, nodeID
 		}
 		last = body
 		select {
@@ -121,7 +124,7 @@ func assertGatewayChatEventually(t *testing.T, ctx context.Context, gatewayURL, 
 	}
 }
 
-func tryGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model string) (string, string, bool) {
+func tryGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model string) (string, string, string, bool) {
 	t.Helper()
 	body := []byte(`{"model":` + quote(model) + `,"messages":[{"role":"user","content":"Say hi."}],"max_tokens":1}`)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(gatewayURL, "/")+"/v1/chat/completions", bytes.NewReader(body))
@@ -131,7 +134,7 @@ func tryGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model string)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err.Error(), "", false
+		return err.Error(), "", "", false
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
@@ -139,12 +142,12 @@ func tryGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model string)
 		t.Fatalf("read gateway response: %v", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return string(data), "", false
+		return string(data), "", "", false
 	}
 	if resp.Header.Get(gateway.HeaderNode) == "" || !strings.Contains(string(data), `"choices"`) {
 		t.Fatalf("gateway response headers=%+v body=%s", resp.Header, data)
 	}
-	return string(data), resp.Header.Get(gateway.HeaderInstance), true
+	return string(data), resp.Header.Get(gateway.HeaderInstance), resp.Header.Get(gateway.HeaderNode), true
 }
 
 func unloadJoinedInstance(t *testing.T, ctx context.Context, nodeURL, instanceID, rpcToken string) {
