@@ -29,6 +29,7 @@ type PeerDirectory struct {
 	Store     PeerNodeStore
 	SelfID    string
 	AuthToken string
+	Client    *http.Client
 
 	mu     sync.Mutex
 	agents map[string]ports.NodeAgent
@@ -159,13 +160,16 @@ func (d *PeerDirectory) agentFor(ctx context.Context, peer domain.Peer) (ports.N
 		factory = func(address string) ports.NodeAgent {
 			client := nodeagent.NewHTTPClient(peerAgentBaseURL(address))
 			client.AuthToken = d.AuthToken
-			client.Client = &http.Client{Transport: &http.Transport{
-				Proxy: nil,
-				DialContext: (&net.Dialer{
-					Timeout:   5 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
-			}}
+			client.Client = d.Client
+			if client.Client == nil {
+				client.Client = &http.Client{Transport: &http.Transport{
+					Proxy: nil,
+					DialContext: (&net.Dialer{
+						Timeout:   5 * time.Second,
+						KeepAlive: 30 * time.Second,
+					}).DialContext,
+				}}
+			}
 			return client
 		}
 	}

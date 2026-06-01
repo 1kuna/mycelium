@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"errors"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -137,11 +136,11 @@ func TestPeerDirectoryMarksUnreachablePeers(t *testing.T) {
 
 func TestPeerDirectoryDefaultFactorySendsAuthToken(t *testing.T) {
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
-	server := httptest.NewServer(nodeagent.HTTPServer{Agent: mocks.NewNodeAgent(node), AuthToken: "rpc-secret"})
-	defer server.Close()
+	server := directUpstream(nodeagent.HTTPServer{Agent: mocks.NewNodeAgent(node), AuthToken: "rpc-secret"})
 	directory := &PeerDirectory{
-		Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Addresses: []string{server.URL}, Compute: true}}},
+		Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Addresses: []string{server}, Compute: true}}},
 		AuthToken: "rpc-secret",
+		Client:    testUpstreams.client(),
 	}
 
 	fleet, err := directory.Snapshot(context.Background())
