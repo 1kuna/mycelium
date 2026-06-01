@@ -3,11 +3,10 @@ package mlx
 import (
 	"context"
 	"os"
-	"path/filepath"
-	"strings"
+	"reflect"
 	"testing"
-	"time"
 
+	"mycelium/internal/backends/processadapter"
 	"mycelium/test/fixtures"
 )
 
@@ -23,43 +22,49 @@ func TestNewAdapterNamesMLX(t *testing.T) {
 }
 
 func TestAdapterUsesMLXServerExecutableDirectly(t *testing.T) {
-	dir := t.TempDir()
-	argsPath := filepath.Join(dir, "args.txt")
-	binaryPath := filepath.Join(dir, "mlx_lm.server")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + strings.ReplaceAll(argsPath, "'", "'\\''") + "'\nsleep 30\n"
-	if err := os.WriteFile(binaryPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake mlx server: %v", err)
-	}
+	runner := &recordingRunner{process: &fakeProcess{pid: 42}}
 
-	adapter := NewAdapter(binaryPath)
+	adapter := NewAdapterWithConfig(Config{BinaryPath: "mlx_lm.server", ProcessRunner: runner})
 	handle, err := adapter.Launch(context.Background(), fixtures.MakePreset(fixtures.WithModelRef("mlx-model")), "127.0.0.1:1")
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 	t.Cleanup(func() { _ = adapter.Stop(context.Background(), handle) })
 
-	raw := readRecordedArgs(t, argsPath)
-	got := strings.Fields(string(raw))
 	want := []string{"--model", "mlx-model", "--host", "127.0.0.1", "--port", "1"}
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("args = %q, want %q", got, want)
+	if runner.binary != "mlx_lm.server" || !reflect.DeepEqual(runner.args, want) || handle.PID != 42 {
+		t.Fatalf("binary=%q args=%q handle=%+v", runner.binary, runner.args, handle)
 	}
 }
 
-func readRecordedArgs(t *testing.T, path string) []byte {
-	t.Helper()
-	deadline := time.After(10 * time.Second)
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		raw, err := os.ReadFile(path)
-		if err == nil {
-			return raw
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("read recorded args: %v", err)
-		case <-tick.C:
-		}
-	}
+type recordingRunner struct {
+	binary  string
+	args    []string
+	process processadapter.ProcessHandle
+}
+
+func (r *recordingRunner) Start(_ context.Context, binary string, args []string) (processadapter.ProcessHandle, error) {
+	r.binary = binary
+	r.args = append([]string(nil), args...)
+	return r.process, nil
+}
+
+type fakeProcess struct {
+	pid int
+}
+
+func (p *fakeProcess) PID() int {
+	return p.pid
+}
+
+func (p *fakeProcess) Signal(os.Signal) error {
+	return nil
+}
+
+func (p *fakeProcess) Kill() error {
+	return nil
+}
+
+func (p *fakeProcess) Wait() error {
+	return nil
 }
