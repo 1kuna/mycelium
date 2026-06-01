@@ -80,10 +80,6 @@ type Coordinator interface {
 	Release(ctx context.Context, jobID string) error
 }
 
-type PreSendNegotiator interface {
-	Negotiate(ctx context.Context, job domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot) (domain.PlacementDecision, error)
-}
-
 type JobRegistry interface {
 	Put(ctx context.Context, rec domain.JobRecord) error
 	Watch(ctx context.Context, fromCursor string) (<-chan domain.JobRecord, error)

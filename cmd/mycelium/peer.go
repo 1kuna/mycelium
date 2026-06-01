@@ -240,32 +240,17 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	jobLog := peercoord.NewJobLog()
 	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
 	coordinator := peercoord.NewCoordinator(self, jobLog, store, placer, fleet, admissionResolver(nodes), clock.System{})
-	var preSend ports.PreSendNegotiator
-	if cfg.PreSendNegotiation {
-		if discovery == nil {
-			return "", nil, nil, fmt.Errorf("pre_send_negotiation requires peer discovery")
-		}
-		preSend = peercoord.PreSendNegotiator{
-			Enabled: true,
-			SelfID:  cfg.ID,
-			Peers:   discovery,
-			Client:  preSendHTTPClient{AuthToken: cfg.RPCToken},
-			Clock:   clock.System{},
-		}
-	}
 	runtime := &scheduler.Service{
-		Placer:             placer,
-		Fleet:              fleet,
-		Nodes:              nodes,
-		Owners:             admissionResolver(nodes),
-		Coordinator:        coordinator,
-		PreSend:            preSend,
-		PreSendNegotiation: cfg.PreSendNegotiation,
-		JobLog:             jobLog,
-		Queue:              queue,
-		Store:              store,
-		Clock:              clock.System{},
-		Presets:            presetMap(presets),
+		Placer:      placer,
+		Fleet:       fleet,
+		Nodes:       nodes,
+		Owners:      admissionResolver(nodes),
+		Coordinator: coordinator,
+		JobLog:      jobLog,
+		Queue:       queue,
+		Store:       store,
+		Clock:       clock.System{},
+		Presets:     presetMap(presets),
 	}
 	if _, err := runtime.ExpireLeases(ctx); err != nil {
 		return "", nil, nil, err
@@ -297,7 +282,6 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	mountPeerHTTP(mux, self, cfg.JoinToken)
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
 	mountTelemetryHTTP(mux, store, cfg.RPCToken)
-	mountPreSendHTTP(mux, peercoord.RegistryPreSendAdvisor{SelfID: cfg.ID, Registry: store}, cfg.RPCToken)
 	mux.Handle("/", handler)
 	return cfg.Listen, mux, combineShutdowns(shutdowns), nil
 }
@@ -453,33 +437,6 @@ func mountTelemetryHTTP(mux *http.ServeMux, store telemetryRPCStore, rpcToken st
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
-		}
-	})
-}
-
-func mountPreSendHTTP(mux *http.ServeMux, advisor peercoord.RegistryPreSendAdvisor, rpcToken string) {
-	mux.HandleFunc("/presend/advice", func(w http.ResponseWriter, r *http.Request) {
-		if !peerRPCAuthorized(r, rpcToken) {
-			writePeerAuthError(w)
-			return
-		}
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		var proposal peercoord.PreSendProposal
-		if err := json.NewDecoder(r.Body).Decode(&proposal); err != nil {
-			writePeerRPCError(w, http.StatusBadRequest, err)
-			return
-		}
-		advice, err := advisor.AdvisePreSend(r.Context(), proposal)
-		if err != nil {
-			writePeerRPCError(w, http.StatusInternalServerError, err)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(advice); err != nil {
-			panic(err)
 		}
 	})
 }
@@ -883,19 +840,6 @@ func (c telemetryHTTPClient) PushRecommendations(ctx context.Context, peer domai
 }
 
 var _ ports.TelemetryPeerClient = telemetryHTTPClient{}
-
-type preSendHTTPClient struct {
-	AuthToken string
-	Client    *http.Client
-}
-
-func (c preSendHTTPClient) AdvisePreSend(ctx context.Context, peer domain.Peer, proposal peercoord.PreSendProposal) (peercoord.PreSendAdvice, error) {
-	var advice peercoord.PreSendAdvice
-	err := doPeerRPC(ctx, c.Client, c.AuthToken, peer, http.MethodPost, "/presend/advice", proposal, &advice)
-	return advice, err
-}
-
-var _ peercoord.PreSendClient = preSendHTTPClient{}
 
 func doPeerRPC(ctx context.Context, client *http.Client, authToken string, peer domain.Peer, method, path string, in, out any) error {
 	if len(peer.Addresses) == 0 {

@@ -35,7 +35,6 @@ type PeerConfig struct {
 	QueueDrainLimit      int                  `json:"queue_drain_limit"`
 	OptimizerEvalMS      int                  `json:"optimizer_eval_ms"`
 	RegistrySyncMS       int                  `json:"registry_sync_ms"`
-	PreSendNegotiation   bool                 `json:"pre_send_negotiation,omitempty"`
 }
 
 type ComputeConfig struct {
