@@ -25,6 +25,16 @@ func TestTokenManagerValidateRotateRevoke(t *testing.T) {
 	if err := manager.Validate("two"); err != nil {
 		t.Fatalf("new token: %v", err)
 	}
+	hash, err := manager.CurrentHash()
+	if err != nil {
+		t.Fatalf("CurrentHash: %v", err)
+	}
+	if err := manager.ValidateHash(hash); err != nil {
+		t.Fatalf("ValidateHash current: %v", err)
+	}
+	if err := manager.ValidateHash(""); err == nil {
+		t.Fatal("empty hash validated")
+	}
 	if err := manager.Revoke("one"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
@@ -49,6 +59,12 @@ func TestTokenManagerRejectsEmptyTokenOperations(t *testing.T) {
 	}
 	if err := manager.Revoke(""); err == nil {
 		t.Fatal("empty revoke accepted")
+	}
+	if err := manager.Revoke("one"); err != nil {
+		t.Fatalf("Revoke current: %v", err)
+	}
+	if _, err := manager.CurrentHash(); err == nil {
+		t.Fatal("revoked current hash returned")
 	}
 }
 

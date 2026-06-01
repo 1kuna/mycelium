@@ -172,9 +172,13 @@ func TestLibp2pOverlayDiscoversAndTunnels(t *testing.T) {
 func TestLibp2pOverlayRejectsTokenMismatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	manager, err := NewTokenManager("token-a")
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
 	peerA, err := NewLibp2pOverlayBackend(ctx, Libp2pOverlayConfig{
-		ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"},
-		Token:       "token-a",
+		ListenAddrs:  []string{"/ip4/127.0.0.1/tcp/0"},
+		TokenManager: manager,
 	})
 	if err != nil {
 		t.Fatalf("New peerA: %v", err)

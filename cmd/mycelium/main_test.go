@@ -592,7 +592,11 @@ func TestSeedPeerProbeRemembersReachablePeer(t *testing.T) {
 	defer server.Close()
 	cache := membership.NewCachedPeerDiscovery(&mocks.PeerDiscovery{}, mocks.NewFakeClock(time.Unix(1, 0).UTC()), time.Minute)
 
-	probeSeedPeers(context.Background(), cache, []string{server.URL}, "secret")
+	manager, err := membership.NewTokenManager("secret")
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	probeSeedPeers(context.Background(), cache, []string{server.URL}, "secret", manager)
 	peers, err := cache.Peers(context.Background())
 	if err != nil {
 		t.Fatalf("Peers: %v", err)
@@ -603,8 +607,48 @@ func TestSeedPeerProbeRemembersReachablePeer(t *testing.T) {
 	if _, err := fetchPeerHealth(context.Background(), server.URL, "wrong"); !errors.Is(err, domain.ErrUnreachable) {
 		t.Fatalf("wrong join token err = %v", err)
 	}
+	if err := manager.Revoke("secret"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	cache = membership.NewCachedPeerDiscovery(&mocks.PeerDiscovery{}, mocks.NewFakeClock(time.Unix(1, 0).UTC()), time.Minute)
+	probeSeedPeers(context.Background(), cache, []string{server.URL}, "secret", manager)
+	peers, err = cache.Peers(context.Background())
+	if err != nil {
+		t.Fatalf("Peers after revoke: %v", err)
+	}
+	if len(peers) != 0 {
+		t.Fatalf("revoked token seed peers = %+v", peers)
+	}
 	if got := seedPeerProbeInterval(time.Millisecond); got != 5*time.Second {
 		t.Fatalf("seed interval = %s", got)
+	}
+}
+
+func TestPeerHealthUsesPersistentTokenManager(t *testing.T) {
+	manager, err := membership.NewTokenManager("secret")
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	mux := http.NewServeMux()
+	mountPeerHTTP(mux, domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}}, manager)
+
+	req := httptest.NewRequest(http.MethodGet, "/peer/health", nil)
+	req.Header.Set("X-Myc-Join-Token", "secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health before revoke = %d %s", rec.Code, rec.Body.String())
+	}
+
+	if err := manager.Revoke("secret"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/peer/health", nil)
+	req.Header.Set("X-Myc-Join-Token", "secret")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("health after revoke = %d %s", rec.Code, rec.Body.String())
 	}
 }
 

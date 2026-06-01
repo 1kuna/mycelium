@@ -140,6 +140,59 @@ func TestPeerLANDiscoveryFiltersByJoinToken(t *testing.T) {
 	}
 }
 
+func TestPeerLANDiscoveryFiltersWithPersistentTokenManager(t *testing.T) {
+	addr := reserveUDPAddr(t)
+	manager, err := NewTokenManager("secret")
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	listener := PeerLANDiscovery{ListenAddr: addr, BroadcastAddr: addr, MaxPackets: 1, TokenManager: manager}
+	matching := PeerLANDiscovery{BroadcastAddr: addr, TokenManager: manager}
+	other := PeerLANDiscovery{BroadcastAddr: addr, Token: "other"}
+	peerA := domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}
+	peerB := domain.Peer{ID: "peer-b", Addresses: []string{"127.0.0.1:2"}, Compute: true}
+	results := make(chan []domain.Peer, 1)
+	errs := make(chan error, 1)
+	go func() {
+		peers, err := listener.Peers(ctx)
+		if err != nil {
+			errs <- err
+			return
+		}
+		results <- peers
+	}()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-errs:
+			t.Fatalf("Peers: %v", err)
+		case peers := <-results:
+			if len(peers) != 1 || peers[0].ID != peerA.ID {
+				t.Fatalf("peers = %+v", peers)
+			}
+			if err := manager.Revoke("secret"); err != nil {
+				t.Fatalf("Revoke: %v", err)
+			}
+			if err := matching.Advertise(context.Background(), peerA); err == nil {
+				t.Fatal("advertise with revoked current token succeeded")
+			}
+			return
+		case <-ticker.C:
+			if err := other.Advertise(ctx, peerB); err != nil {
+				t.Fatalf("Advertise other: %v", err)
+			}
+			if err := matching.Advertise(ctx, peerA); err != nil {
+				t.Fatalf("Advertise matching: %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+}
+
 func TestPeerLANDiscoveryValidationAndTimeout(t *testing.T) {
 	defaulted := NewPeerLANDiscovery("", "")
 	if defaulted.ListenAddr != ":51850" || defaulted.BroadcastAddr != DefaultPeerDiscoveryAddr || defaulted.MaxPackets != 16 || defaulted.ScanDuration == 0 {
