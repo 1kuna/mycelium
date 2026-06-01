@@ -10,6 +10,7 @@ import (
 type preemptResult struct {
 	candidate candidate
 	victim    domain.ModelInstance
+	victims   []domain.ModelInstance
 	requeued  []string
 	trace     []domain.TraceStep
 }
@@ -24,27 +25,34 @@ func (p *Placer) tryPreempt(job domain.Job, fleet domain.FleetSnapshot, claim do
 		if node.Status != domain.NodeReady {
 			continue
 		}
-		for _, acc := range node.Accelerators {
-			accSet := []int{acc.Index}
+		for _, accSet := range acceleratorSets(node) {
 			victims := eligibleVictims(job, node, accSet, fleet.Instances)
+			remaining := append([]domain.ModelInstance(nil), fleet.Instances...)
+			var selected []domain.ModelInstance
 			for _, victim := range victims {
-				remaining := removeInstance(fleet.Instances, victim.ID)
+				remaining = removeInstance(remaining, victim.ID)
+				selected = append(selected, victim)
 				if !p.allocator.Fits(node, accSet, remaining, claim) {
 					continue
 				}
 				result := preemptResult{
 					candidate: candidate{node: node, acc: accSet},
 					victim:    victim,
+					victims:   append([]domain.ModelInstance(nil), selected...),
 					trace: []domain.TraceStep{{
 						Step:   "preempt",
-						Result: fmt.Sprintf("victim=%s target=%s", victim.ID, node.ID),
+						Result: fmt.Sprintf("victims=%v target=%s", instanceIDs(selected), node.ID),
 					}},
 				}
-				if !p.canReplaceVictim(victim, node.ID, fleet, remaining) {
-					result.requeued = []string{victim.ID}
-					result.trace = append(result.trace, domain.TraceStep{Step: "replace", Result: fmt.Sprintf("requeued=%s", victim.ID)})
+				for _, selectedVictim := range selected {
+					if !p.canReplaceVictim(selectedVictim, node.ID, fleet, remaining) {
+						result.requeued = append(result.requeued, selectedVictim.ID)
+					}
+				}
+				if len(result.requeued) == 0 {
+					result.trace = append(result.trace, domain.TraceStep{Step: "replace", Result: fmt.Sprintf("replaced=%v", instanceIDs(selected))})
 				} else {
-					result.trace = append(result.trace, domain.TraceStep{Step: "replace", Result: fmt.Sprintf("replaced=%s", victim.ID)})
+					result.trace = append(result.trace, domain.TraceStep{Step: "replace", Result: fmt.Sprintf("requeued=%v", result.requeued)})
 				}
 				results = append(results, result)
 				break
@@ -75,6 +83,9 @@ func eligibleVictims(job domain.Job, node domain.Node, acc []int, instances []do
 	var victims []domain.ModelInstance
 	for _, inst := range instances {
 		if inst.NodeID != node.ID || !overlaps(inst.AcceleratorSet, acc) {
+			continue
+		}
+		if inst.Pinned {
 			continue
 		}
 		if priorityRank(inst.Priority) < priorityRank(job.Priority) {
@@ -117,6 +128,14 @@ func removeInstance(instances []domain.ModelInstance, id string) []domain.ModelI
 		if inst.ID != id {
 			out = append(out, inst)
 		}
+	}
+	return out
+}
+
+func instanceIDs(instances []domain.ModelInstance) []string {
+	out := make([]string, 0, len(instances))
+	for _, inst := range instances {
+		out = append(out, inst.ID)
 	}
 	return out
 }

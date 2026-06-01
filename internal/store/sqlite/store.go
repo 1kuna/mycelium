@@ -191,6 +191,12 @@ func (s *Store) SaveJob(ctx context.Context, job domain.Job) error {
 	return s.upsertJSON(ctx, "jobs", job.ID, job)
 }
 
+func (s *Store) Job(ctx context.Context, id string) (domain.Job, error) {
+	var job domain.Job
+	err := s.getJSON(ctx, "jobs", id, &job)
+	return job, err
+}
+
 func (s *Store) ListJobs(ctx context.Context) ([]domain.Job, error) {
 	var jobs []domain.Job
 	err := s.listJSON(ctx, "jobs", &jobs)

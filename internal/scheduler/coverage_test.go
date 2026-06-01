@@ -95,8 +95,20 @@ func TestFilterCandidatesDropsStatusLoadAndFit(t *testing.T) {
 		n.Accelerators = []domain.Accelerator{{Index: 1, VRAMTotalMB: 1000}, {Index: 0, VRAMTotalMB: 1000}}
 	})
 	candidates, _ = placer.filterCandidates(domain.FleetSnapshot{Nodes: []domain.Node{multiAcc}}, claim)
-	if len(candidates) != 2 || candidates[0].acc[0] != 0 {
+	if len(candidates) != 3 || candidates[0].acc[0] != 0 || len(candidates[2].acc) != 2 {
 		t.Fatalf("accelerator sort = %+v", candidates)
+	}
+	if acceleratorSetLess([]int{0, 1}, []int{0, 1}) {
+		t.Fatal("equal accelerator sets should not sort less")
+	}
+	dedicatedInst := fixtures.MakeInstance(fixtures.WithInstanceID("busy"), fixtures.OnNode(fit.ID), func(i *domain.ModelInstance) { i.AcceleratorSet = []int{0} })
+	candidates, trace = placer.filterCandidates(domain.FleetSnapshot{Nodes: []domain.Node{fit}, Instances: []domain.ModelInstance{dedicatedInst}}, claim, true)
+	if len(candidates) != 0 || trace.Data["dropped"].(map[string]string)["fit"] != "dedicated_unit" {
+		t.Fatalf("dedicated candidates=%+v trace=%+v", candidates, trace)
+	}
+	otherNodeInst := fixtures.MakeInstance(fixtures.WithInstanceID("other"), fixtures.OnNode("other"), func(i *domain.ModelInstance) { i.AcceleratorSet = []int{0} })
+	if hasOverlappingInstance(fit.ID, []int{0}, []domain.ModelInstance{otherNodeInst}) {
+		t.Fatal("instance on another node should not overlap")
 	}
 }
 
@@ -210,6 +222,7 @@ func TestEligibleVictimsAndPriorityHelpers(t *testing.T) {
 	victims := eligibleVictims(fixtures.MakeJob(fixtures.Interactive), node, []int{0}, []domain.ModelInstance{
 		fixtures.MakeInstance(fixtures.WithInstanceID("other-node"), fixtures.OnNode("other"), fixtures.WithInstancePriority(domain.PriorityBackground)),
 		fixtures.MakeInstance(fixtures.WithInstanceID("other-acc"), fixtures.OnNode(node.ID), func(i *domain.ModelInstance) { i.AcceleratorSet = []int{1} }, fixtures.WithInstancePriority(domain.PriorityBackground)),
+		fixtures.MakeInstance(fixtures.WithInstanceID("pinned"), fixtures.OnNode(node.ID), fixtures.WithInstancePriority(domain.PriorityBackground), func(i *domain.ModelInstance) { i.Pinned = true }),
 		fixtures.MakeInstance(fixtures.WithInstanceID("same-priority"), fixtures.OnNode(node.ID), fixtures.WithInstancePriority(domain.PriorityInteractive)),
 		fixtures.MakeInstance(fixtures.WithInstanceID("victim"), fixtures.OnNode(node.ID), fixtures.WithInstancePriority(domain.PriorityBackground)),
 	})

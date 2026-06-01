@@ -31,6 +31,10 @@ type RuntimeStore interface {
 	DeleteInstance(ctx context.Context, id string) error
 }
 
+type JobReader interface {
+	Job(ctx context.Context, id string) (domain.Job, error)
+}
+
 type JobLog interface {
 	PutJob(ctx context.Context, job domain.Job, payload []byte) error
 }
@@ -424,16 +428,17 @@ func runBeforeColdLoadHook(ctx context.Context, decision domain.PlacementDecisio
 }
 
 func (s *Service) enactPreemption(ctx context.Context, job domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot) error {
+	preemptedLeases := map[string]domain.Lease{}
 	for _, victimID := range decision.Preempted {
 		victim, ok := instanceByID(fleet.Instances, victimID)
 		if !ok {
 			return fmt.Errorf("preempted instance %q is missing from fleet snapshot", victimID)
 		}
-		if s.Coordinator != nil {
-			if err := s.preemptOwnerLease(ctx, job, decision, victim); err != nil {
-				return err
-			}
+		lease, err := s.preemptOwnerLease(ctx, job, decision, victim)
+		if err != nil {
+			return err
 		}
+		preemptedLeases[victim.ID] = lease
 		agent, err := s.Nodes.NodeAgent(victim.NodeID)
 		if err != nil {
 			return err
@@ -446,16 +451,16 @@ func (s *Service) enactPreemption(ctx context.Context, job domain.Job, decision 
 		}
 	}
 	for _, instanceID := range decision.Requeued {
-		victim, ok := instanceByID(fleet.Instances, instanceID)
-		if !ok {
+		if _, ok := instanceByID(fleet.Instances, instanceID); !ok {
 			return fmt.Errorf("requeued instance %q is missing from fleet snapshot", instanceID)
 		}
-		job := domain.Job{
-			ID:       "requeued-" + instanceID,
-			PresetID: victim.PresetID,
-			Project:  "preempted",
-			Priority: domain.PriorityBackground,
-			Status:   domain.JobQueued,
+		lease, ok := preemptedLeases[instanceID]
+		if !ok || lease.JobID == "" {
+			return fmt.Errorf("requeued instance %q has no owner lease job", instanceID)
+		}
+		job, err := s.requeueJob(ctx, lease.JobID)
+		if err != nil {
+			return err
 		}
 		s.Queue.Enqueue(job)
 		if err := s.Store.SaveJob(ctx, job); err != nil {
@@ -465,37 +470,53 @@ func (s *Service) enactPreemption(ctx context.Context, job domain.Job, decision 
 	return nil
 }
 
-func (s *Service) preemptOwnerLease(ctx context.Context, job domain.Job, decision domain.PlacementDecision, victim domain.ModelInstance) error {
+func (s *Service) preemptOwnerLease(ctx context.Context, job domain.Job, decision domain.PlacementDecision, victim domain.ModelInstance) (domain.Lease, error) {
 	if s.Owners == nil {
-		return fmt.Errorf("owner admission resolver is not configured")
+		return domain.Lease{}, fmt.Errorf("owner admission resolver is not configured")
 	}
 	owner, err := s.Owners.AdmissionController(victim.NodeID)
 	if err != nil {
-		return err
+		return domain.Lease{}, err
 	}
 	inspector, ok := owner.(ports.LeaseInspector)
 	if !ok {
-		return fmt.Errorf("owner admission for node %q does not expose lease inspection", victim.NodeID)
+		return domain.Lease{}, fmt.Errorf("owner admission for node %q does not expose lease inspection", victim.NodeID)
 	}
 	lease, found, err := inspector.LeaseForInstance(ctx, victim.ID)
 	if err != nil {
-		return err
+		return domain.Lease{}, err
 	}
 	if !found {
-		return fmt.Errorf("preempted instance %q has no owner lease", victim.ID)
+		return domain.Lease{}, fmt.Errorf("preempted instance %q has no owner lease", victim.ID)
 	}
 	preempter, ok := owner.(ports.PolicyPreempter)
 	if !ok {
-		return fmt.Errorf("owner admission for node %q does not expose policy-aware preemption", victim.NodeID)
+		return domain.Lease{}, fmt.Errorf("owner admission for node %q does not expose policy-aware preemption", victim.NodeID)
 	}
 	reason := "preempted"
 	if decision.JobID != "" {
 		reason += " for " + decision.JobID
 	}
 	if err := preempter.PreemptForJob(ctx, job, lease.ID, reason); err != nil {
-		return err
+		return domain.Lease{}, err
 	}
-	return s.Store.DeleteLease(ctx, lease.ID)
+	if err := s.Store.DeleteLease(ctx, lease.ID); err != nil {
+		return domain.Lease{}, err
+	}
+	return lease, nil
+}
+
+func (s *Service) requeueJob(ctx context.Context, jobID string) (domain.Job, error) {
+	reader, ok := s.Store.(JobReader)
+	if !ok {
+		return domain.Job{}, fmt.Errorf("runtime store cannot load original job %q for requeue", jobID)
+	}
+	job, err := reader.Job(ctx, jobID)
+	if err != nil {
+		return domain.Job{}, err
+	}
+	job.Status = domain.JobQueued
+	return job, nil
 }
 
 func (s *Service) bindOwnerInstance(ctx context.Context, nodeID, leaseID, instanceID string) error {

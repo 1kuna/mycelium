@@ -86,7 +86,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 		}, nil
 	}
 
-	candidates, filterTrace := p.filterCandidates(fleet, claim)
+	candidates, filterTrace := p.filterCandidates(fleet, claim, effectiveSpeed(job.SpeedPref) == domain.SpeedLatency)
 	trace = append(trace, filterTrace)
 	if len(candidates) > 0 {
 		scored := p.scoreCandidates(job, candidates)
@@ -118,7 +118,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 			Action:           domain.ActionHardPreempted,
 			SpeedPrefApplied: effectiveSpeed(job.SpeedPref),
 			Trace:            trace,
-			Preempted:        []string{preempted.victim.ID},
+			Preempted:        instanceIDs(preempted.victims),
 			Requeued:         preempted.requeued,
 		}, nil
 	}

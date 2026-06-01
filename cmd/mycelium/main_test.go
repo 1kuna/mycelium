@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -709,6 +710,35 @@ func TestAllocatorFromReservationsReservesHeadroomAndPinnedPresets(t *testing.T)
 	nodeB := domain.Node{ID: "node-b", MaxUtil: 1, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 700}}}
 	if allocator.Fits(nodeB, []int{0}, nil, domain.Claim{WeightsMB: 101}) {
 		t.Fatal("pinned preset reservation was not enforced")
+	}
+}
+
+func TestComputeAdmissionAllocatorUsesStoreReservations(t *testing.T) {
+	ctx := context.Background()
+	store := peerTestRegistry(t)
+	preset := testPreset("tiny")
+	preset.EstWeightsMB = 100
+	preset.ContextLength = 1000
+	preset.KVPerTokenMB = 0.5
+	if err := store.SavePreset(ctx, preset); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	if err := store.SaveReservation(ctx, domain.Reservation{ID: "headroom", Kind: domain.ReservationHeadroom, NodeID: "node-a", Headroom: domain.Claim{WeightsMB: 10}}); err != nil {
+		t.Fatalf("SaveReservation headroom: %v", err)
+	}
+	if err := store.SaveReservation(ctx, domain.Reservation{ID: "pinned", Kind: domain.ReservationPinned, NodeID: "node-a", PresetID: preset.ID}); err != nil {
+		t.Fatalf("SaveReservation pinned: %v", err)
+	}
+	allocator, pinned, err := computeAdmissionAllocator(ctx, store, "node-a")
+	if err != nil {
+		t.Fatalf("computeAdmissionAllocator: %v", err)
+	}
+	node := domain.Node{ID: "node-a", MaxUtil: 1, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 700}}}
+	if allocator.Fits(node, []int{0}, nil, domain.Claim{WeightsMB: 101}) {
+		t.Fatal("store-backed reservations were not enforced")
+	}
+	if !reflect.DeepEqual(pinned, []string{"pinned"}) {
+		t.Fatalf("pinned ids = %+v", pinned)
 	}
 }
 
