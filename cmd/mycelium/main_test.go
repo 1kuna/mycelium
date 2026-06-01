@@ -1072,7 +1072,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 			t.Fatalf("Record: %v", err)
 		}
 	}
-	startOptimizerEvaluator(ctx, optimizerStore, optimizerFleet{snap: domain.FleetSnapshot{Nodes: []domain.Node{{ID: "peer-a", Status: domain.NodeReady}}}}, "peer-a", true, clk, time.Second, telemetrySyncConfig{})
+	startOptimizerEvaluator(ctx, optimizerStore, optimizerFleet{snap: domain.FleetSnapshot{Nodes: []domain.Node{optimizerComputeNode("peer-a")}}}, "peer-a", true, clk, time.Second, telemetrySyncConfig{})
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		recs, err := optimizerStore.ListRecommendations(context.Background(), project.ID)
@@ -1362,6 +1362,9 @@ func TestRunOptimizerEvaluationIncludesRemoteTelemetryAndPushesRecommendations(t
 	if result.ImportedMetrics != 2 || result.PushedRecommendations != 1 || len(result.SkippedPeers) != 0 {
 		t.Fatalf("sync result = %+v", result)
 	}
+	if result.SlotID == "" {
+		t.Fatalf("missing slot id: %+v", result)
+	}
 	recs, err := store.ListRecommendations(ctx, project.ID)
 	if err != nil {
 		t.Fatalf("ListRecommendations: %v", err)
@@ -1376,7 +1379,7 @@ func TestRunOptimizerEvaluationIncludesRemoteTelemetryAndPushesRecommendations(t
 	if appliedProject.ContextCap != project.ContextCap {
 		t.Fatalf("auto_apply=false project changed: %+v", appliedProject)
 	}
-	if pushed := client.PushedRecommendations[remotePeer.ID]; len(pushed) != 1 || pushed[0].ProjectID != project.ID {
+	if pushed := client.PushedRecommendations[remotePeer.ID]; len(pushed) != 1 || pushed[0].ProjectID != project.ID || pushed[0].SlotID != result.SlotID {
 		t.Fatalf("pushed recommendations = %+v", pushed)
 	}
 }
@@ -1448,7 +1451,7 @@ func TestOptimizerSelectionAndTelemetrySyncErrors(t *testing.T) {
 	if err := store.SavePreset(ctx, testPresetWithContext("small", 6000)); err != nil {
 		t.Fatalf("SavePreset small: %v", err)
 	}
-	if err := store.SaveRecommendation(ctx, domain.RecommendationRecord{ID: "remote-rec", Type: optimizer.RecommendationContextCap, ProjectID: project.ID, CreatedAt: time.Unix(1, 0).UTC()}); err != nil {
+	if err := store.SaveRecommendation(ctx, domain.RecommendationRecord{ID: "remote-rec", SlotID: "slot-a", Type: optimizer.RecommendationContextCap, ProjectID: project.ID, CreatedAt: time.Unix(1, 0).UTC()}); err != nil {
 		t.Fatalf("SaveRecommendation: %v", err)
 	}
 	client := &mocks.TelemetryPeerClient{
@@ -1470,11 +1473,20 @@ func TestOptimizerSelectionAndTelemetrySyncErrors(t *testing.T) {
 	if len(reachable) != 1 || result.ImportedRecommendations != 1 {
 		t.Fatalf("pull result=%+v reachable=%+v", result, reachable)
 	}
-	if err := pushFleetRecommendations(ctx, store, telemetrySyncConfig{Client: client}, reachable, &result); err != nil {
+	if err := pushFleetRecommendations(ctx, store, telemetrySyncConfig{Client: client}, reachable, "slot-a", &result); err != nil {
 		t.Fatalf("pushFleetRecommendations: %v", err)
 	}
 	if len(result.SkippedPeers) != 1 || !strings.Contains(result.SkippedPeers[0], "push boom") {
 		t.Fatalf("push skipped = %+v", result.SkippedPeers)
+	}
+	filtered := recommendationsForSlot([]domain.RecommendationRecord{
+		{ID: "rec-a", SlotID: "slot-a"},
+		{ID: "rec-a", SlotID: "slot-a"},
+		{ID: "rec-b", SlotID: "slot-b"},
+		{ID: "legacy"},
+	}, "slot-a")
+	if len(filtered) != 1 || filtered[0].ID != "rec-a" {
+		t.Fatalf("filtered recommendations = %+v", filtered)
 	}
 }
 
@@ -1482,9 +1494,10 @@ func TestShouldRunGroupOptimizerSelectsOneReadyComputePeer(t *testing.T) {
 	ctx := context.Background()
 	clk := mocks.NewFakeClock(time.Unix(0, 0).UTC())
 	fleet := optimizerFleet{snap: domain.FleetSnapshot{Nodes: []domain.Node{
-		{ID: "node-c", Status: domain.NodeReady},
-		{ID: "node-a", Status: domain.NodeReady},
+		optimizerComputeNode("node-c"),
+		optimizerComputeNode("node-a"),
 		{ID: "node-b", Status: domain.NodeUnreachable},
+		{ID: "thin-peer", Status: domain.NodeReady},
 	}}}
 	ok, err := shouldRunGroupOptimizer(ctx, fleet, "node-a", clk, time.Minute)
 	if err != nil || !ok {
@@ -1975,6 +1988,10 @@ type optimizerFleet struct {
 
 func (f optimizerFleet) Snapshot(context.Context) (domain.FleetSnapshot, error) {
 	return f.snap, f.err
+}
+
+func optimizerComputeNode(id string) domain.Node {
+	return domain.Node{ID: id, Status: domain.NodeReady, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1024}}}
 }
 
 type errorFleetSource struct {

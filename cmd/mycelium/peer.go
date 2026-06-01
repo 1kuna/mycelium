@@ -273,9 +273,10 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
 	startOptimizerEvaluator(ctx, store, fleet, cfg.ID, cfg.Compute, clock.System{}, time.Duration(cfg.OptimizerEvalMS)*time.Millisecond, telemetrySyncConfig{
-		SelfID: cfg.ID,
-		Peers:  discovery,
-		Client: telemetryHTTPClient{AuthToken: cfg.RPCToken},
+		SelfID:   cfg.ID,
+		Peers:    discovery,
+		Client:   telemetryHTTPClient{AuthToken: cfg.RPCToken},
+		Interval: time.Duration(cfg.OptimizerEvalMS) * time.Millisecond,
 	})
 	handler := gateway.Server{Router: &gateway.Router{
 		Placer:             placer,
@@ -1114,12 +1115,14 @@ type optimizerRuntimeStore interface {
 }
 
 type telemetrySyncConfig struct {
-	SelfID string
-	Peers  ports.PeerDiscovery
-	Client ports.TelemetryPeerClient
+	SelfID   string
+	Peers    ports.PeerDiscovery
+	Client   ports.TelemetryPeerClient
+	Interval time.Duration
 }
 
 type telemetrySyncResult struct {
+	SlotID                  string
 	ImportedMetrics         int
 	ImportedRecommendations int
 	PushedRecommendations   int
@@ -1183,7 +1186,9 @@ func runOptimizerEvaluation(ctx context.Context, store optimizerRuntimeStore, cl
 	if clk == nil {
 		return telemetrySyncResult{}, fmt.Errorf("optimizer clock is not configured")
 	}
+	slotID := telemetry.AnalysisSlotID(clk.Now(), syncCfg.Interval)
 	syncResult, reachablePeers, err := pullFleetTelemetry(ctx, store, syncCfg)
+	syncResult.SlotID = slotID
 	if err != nil {
 		return syncResult, err
 	}
@@ -1193,14 +1198,23 @@ func runOptimizerEvaluation(ctx context.Context, store optimizerRuntimeStore, cl
 	}
 	service := optimizer.RecommendationService{Store: store, Clock: clk}
 	for _, project := range projects {
-		if _, err := service.EvaluateProject(ctx, project); err != nil {
+		records, err := service.EvaluateProject(ctx, project)
+		if err != nil {
 			return syncResult, err
+		}
+		for _, rec := range records {
+			if rec.SlotID == "" {
+				rec.SlotID = slotID
+				if err := store.SaveRecommendation(ctx, rec); err != nil {
+					return syncResult, err
+				}
+			}
 		}
 	}
 	if _, err := optimizer.CalibrateSpeedClasses(ctx, store, clk); err != nil {
 		return syncResult, err
 	}
-	if err := pushFleetRecommendations(ctx, store, syncCfg, reachablePeers, &syncResult); err != nil {
+	if err := pushFleetRecommendations(ctx, store, syncCfg, reachablePeers, slotID, &syncResult); err != nil {
 		return syncResult, err
 	}
 	return syncResult, nil
@@ -1248,7 +1262,7 @@ func pullFleetTelemetry(ctx context.Context, store optimizerRuntimeStore, cfg te
 	return result, reachable, nil
 }
 
-func pushFleetRecommendations(ctx context.Context, store optimizerRuntimeStore, cfg telemetrySyncConfig, peers []domain.Peer, result *telemetrySyncResult) error {
+func pushFleetRecommendations(ctx context.Context, store optimizerRuntimeStore, cfg telemetrySyncConfig, peers []domain.Peer, slotID string, result *telemetrySyncResult) error {
 	if cfg.Client == nil || len(peers) == 0 {
 		return nil
 	}
@@ -1256,6 +1270,10 @@ func pushFleetRecommendations(ctx context.Context, store optimizerRuntimeStore, 
 	if err != nil {
 		return err
 	}
+	if len(recs) == 0 {
+		return nil
+	}
+	recs = recommendationsForSlot(recs, slotID)
 	if len(recs) == 0 {
 		return nil
 	}
@@ -1268,6 +1286,22 @@ func pushFleetRecommendations(ctx context.Context, store optimizerRuntimeStore, 
 	}
 	sort.Strings(result.SkippedPeers)
 	return nil
+}
+
+func recommendationsForSlot(recs []domain.RecommendationRecord, slotID string) []domain.RecommendationRecord {
+	seen := map[string]struct{}{}
+	out := make([]domain.RecommendationRecord, 0, len(recs))
+	for _, rec := range recs {
+		if slotID != "" && rec.SlotID != slotID {
+			continue
+		}
+		if _, ok := seen[rec.ID]; ok {
+			continue
+		}
+		seen[rec.ID] = struct{}{}
+		out = append(out, rec)
+	}
+	return out
 }
 
 func seedControlStore(ctx context.Context, store *storesqlite.Store, cfg PeerConfig) error {

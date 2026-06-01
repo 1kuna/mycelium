@@ -244,6 +244,7 @@ type Project struct {
 
 type RecommendationRecord struct {
 	ID                  string             `json:"id"`
+	SlotID              string             `json:"slot_id,omitempty"`
 	Type                string             `json:"type"`
 	ProjectID           string             `json:"project_id"`
 	PresetID            string             `json:"preset_id,omitempty"`
