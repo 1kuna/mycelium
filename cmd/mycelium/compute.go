@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"mycelium/internal/backends/llamacpp"
 	"mycelium/internal/backends/mlx"
+	"mycelium/internal/backends/processadapter"
 	"mycelium/internal/backends/vllm"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
@@ -97,6 +99,19 @@ func computeBackendAdapter(cfg ComputeConfig, registry nodeagent.StoreProcessReg
 		return mlx.NewAdapterWithConfig(mlx.Config{BinaryPath: computeBackendBinary(cfg, "mlx_lm.server"), ProcessRegistry: registry}), nil
 	case domain.BackendVLLM:
 		return vllm.NewAdapterWithConfig(vllm.Config{BinaryPath: computeBackendBinary(cfg, "vllm"), ProcessRegistry: registry}), nil
+	case domain.BackendCustom:
+		binary := computeBackendBinary(cfg, "")
+		if binary == "" {
+			return nil, errors.New("custom compute backend binary path is required")
+		}
+		return processadapter.New(processadapter.Config{
+			Name:            "custom",
+			BinaryPath:      binary,
+			Args:            append([]string(nil), cfg.CustomArgs...),
+			HealthPath:      cfg.HealthPath,
+			StopGracePeriod: time.Duration(cfg.StopGraceMS) * time.Millisecond,
+			ProcessRegistry: registry,
+		}), nil
 	default:
 		return nil, errors.New("unknown compute backend " + string(backend))
 	}

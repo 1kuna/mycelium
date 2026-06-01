@@ -59,12 +59,20 @@ func DefaultRegistry() Registry {
 			Backend:        domain.BackendMLX,
 		},
 		Profile{
+			ID:             "custom",
+			Format:         FormatOpenAI,
+			ChatPath:       "/v1/chat/completions",
+			CompletionPath: "/v1/completions",
+			SupportsChat:   true,
+			SupportsStream: true,
+			Backend:        domain.BackendCustom,
+		},
+		Profile{
 			ID:             "anthropic",
 			Format:         FormatAnthropic,
 			AnthropicPath:  "/v1/messages",
 			SupportsChat:   true,
 			SupportsStream: true,
-			Backend:        domain.BackendCustom,
 		},
 	)
 }
