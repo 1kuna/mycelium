@@ -2,7 +2,7 @@
 
 ## Active
 
-None.
+- 2026-06-01: Current-binary LAN fleet smoke is blocked on the second peer outbound LAN path, not on scheduler placement logic. With a fresh current `mycelium` binary and fresh stores, `TestPhase4JoinedNodeGatewaySmoke` passed against the local dev Mac gateway, but `TestPhase6FederationSubmitAnywhereSmoke` retried indefinitely because the second peer gateway could not snapshot or push registry records to the local dev Mac owner. Evidence from `/tmp/mycelium-fleet-smoke/remote/peer.log`: Mycelium PID `33718` reports `dial tcp 192.0.2.91:52091: connect: no route to host` for `/snapshot`, `/registry/records`, `/registry/snapshot`, and UDP discovery sends to `192.0.2.91:51851`. A fresh shell on the same second peer simultaneously returns HTTP 200 from `curl http://192.0.2.91:52091/peer/health`, the firewall reports disabled, and ad-hoc codesigning `/tmp/mycelium-fleet-smoke/mycelium` did not change the Mycelium process behavior. The earlier peer-agent/tunnel connection leak found during this smoke was fixed in code (`d0bfc6c`); the remaining unblock is machine-side local-network permission/routing for the Mycelium executable on the second peer, ideally by approving the Local Network prompt from the second peer GUI or installing/running a stable signed binary from the logged-in user session and rerunning `make smoke-fleet`.
 
 ## Resolved
 
