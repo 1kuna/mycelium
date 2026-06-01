@@ -36,16 +36,18 @@ type JobLog interface {
 }
 
 type Service struct {
-	Placer      ports.Placer
-	Fleet       FleetSource
-	Nodes       NodeResolver
-	Owners      AdmissionResolver
-	Coordinator ports.Coordinator
-	JobLog      JobLog
-	Queue       *Queue
-	Store       RuntimeStore
-	Clock       ports.Clock
-	Presets     map[string]domain.Preset
+	Placer             ports.Placer
+	Fleet              FleetSource
+	Nodes              NodeResolver
+	Owners             AdmissionResolver
+	Coordinator        ports.Coordinator
+	PreSend            ports.PreSendNegotiator
+	JobLog             JobLog
+	Queue              *Queue
+	Store              RuntimeStore
+	Clock              ports.Clock
+	Presets            map[string]domain.Preset
+	PreSendNegotiation bool
 }
 
 type Result struct {
@@ -200,6 +202,12 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	}
 
 	fleet, err := s.Fleet.Snapshot(ctx)
+	if err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		return Result{Decision: decision}, err
+	}
+	decision, err = s.negotiatePreSend(ctx, job, decision, fleet)
 	if err != nil {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(ctx, job)
@@ -384,6 +392,16 @@ func (s *Service) commitOwnerAdmission(ctx context.Context, job domain.Job, deci
 		return domain.Lease{}, nil, err
 	}
 	return lease, owner, nil
+}
+
+func (s *Service) negotiatePreSend(ctx context.Context, job domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot) (domain.PlacementDecision, error) {
+	if !s.PreSendNegotiation {
+		return decision, nil
+	}
+	if s.PreSend == nil {
+		return domain.PlacementDecision{}, fmt.Errorf("pre-send negotiation is enabled but no negotiator is configured")
+	}
+	return s.PreSend.Negotiate(ctx, job, decision, fleet)
 }
 
 func runBeforeColdLoadHook(ctx context.Context, decision domain.PlacementDecision, hooks []SubmitHooks) error {
