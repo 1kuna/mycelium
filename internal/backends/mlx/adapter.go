@@ -1,14 +1,21 @@
 package mlx
 
 import (
+	"net/http"
 	"time"
 
 	"mycelium/internal/backends/processadapter"
+	"mycelium/internal/ports"
 )
 
 type Config struct {
 	BinaryPath      string
 	ProcessRegistry processadapter.ProcessRegistry
+	ProcessRunner   processadapter.ProcessRunner
+	HTTPClient      *http.Client
+	Clock           ports.Clock
+	PollInterval    time.Duration
+	StopGracePeriod time.Duration
 }
 
 func NewAdapter(binaryPath string) *processadapter.Adapter {
@@ -21,7 +28,11 @@ func NewAdapterWithConfig(cfg Config) *processadapter.Adapter {
 		BinaryPath:      cfg.BinaryPath,
 		Args:            []string{"--model", "{model}", "--host", "{host}", "--port", "{port}"},
 		HealthPath:      "/health",
-		PollInterval:    250 * time.Millisecond,
+		PollInterval:    cfg.PollInterval,
+		StopGracePeriod: cfg.StopGracePeriod,
+		HTTPClient:      cfg.HTTPClient,
+		Clock:           cfg.Clock,
 		ProcessRegistry: cfg.ProcessRegistry,
+		ProcessRunner:   cfg.ProcessRunner,
 	})
 }

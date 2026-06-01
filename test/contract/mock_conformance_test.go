@@ -42,3 +42,27 @@ func TestMockAdmissionControllerConformance(t *testing.T) {
 		fixtures.MakeJob(),
 		fixtures.MakeClaim(1, 1))
 }
+
+func TestMockJobRegistryConformance(t *testing.T) {
+	RunJobRegistryConformance(t, "mock",
+		func() ports.JobRegistry { return &mocks.JobRegistry{} },
+		fixtures.MakeJobRecord())
+}
+
+func TestMockPeerDiscoveryConformance(t *testing.T) {
+	RunPeerDiscoveryConformance(t, "mock",
+		func() ports.PeerDiscovery { return &mocks.PeerDiscovery{} },
+		fixtures.MakePeer())
+}
+
+func TestMockTunnelConformance(t *testing.T) {
+	RunTunnelConformance(t, "mock",
+		func() ports.Tunnel { return &mocks.Tunnel{Addr: "127.0.0.1:6000"} },
+		fixtures.MakeNode())
+}
+
+func TestMockHardwareDetectorConformance(t *testing.T) {
+	RunHardwareDetectorConformance(t, "mock",
+		func() ports.HardwareDetector { return &mocks.HardwareDetector{} },
+		fixtures.MakeNode())
+}
