@@ -1324,10 +1324,11 @@ func projectMap(projects []domain.Project) map[string]domain.Project {
 }
 
 func peerEstimator(cfg PeerConfig, agents map[string]ports.NodeAgent) ports.ResourceEstimator {
+	explicit := estimate.NewInMemory()
 	if cfg.GGUFParser != "" {
-		return estimate.NewGGUF(estimate.NewCommandParser(cfg.GGUFParser, nil), agents)
+		return estimate.NewBackendAware(estimate.NewGGUF(estimate.NewCommandParser(cfg.GGUFParser, nil), agents), explicit)
 	}
-	return estimate.NewInMemory()
+	return estimate.NewBackendAware(nil, explicit)
 }
 
 func allocatorFromReservations(reservations []domain.Reservation, presets map[string]domain.Preset) *lease.Allocator {
