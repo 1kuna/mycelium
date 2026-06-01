@@ -165,6 +165,10 @@ func pinnedReservationIDs(reservations []domain.Reservation, nodeID string) []st
 const LabelPeerBackend = "mycelium.peer.backend"
 
 func computeBackendAdapter(cfg ComputeConfig, registry nodeagent.StoreProcessRegistry) (ports.BackendAdapter, error) {
+	return computeBackendAdapterWithProcessRunner(cfg, registry, nil)
+}
+
+func computeBackendAdapterWithProcessRunner(cfg ComputeConfig, registry nodeagent.StoreProcessRegistry, runner processadapter.ProcessRunner) (ports.BackendAdapter, error) {
 	backend := cfg.Backend
 	if backend == "" {
 		backend = domain.BackendLlamaCpp
@@ -188,6 +192,7 @@ func computeBackendAdapter(cfg ComputeConfig, registry nodeagent.StoreProcessReg
 			HealthPath:      cfg.HealthPath,
 			StopGracePeriod: time.Duration(cfg.StopGraceMS) * time.Millisecond,
 			ProcessRegistry: registry,
+			ProcessRunner:   runner,
 		}), nil
 	default:
 		return nil, errors.New("unknown compute backend " + string(backend))
