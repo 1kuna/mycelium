@@ -50,27 +50,56 @@ func runAddModel(ctx context.Context, args []string) error {
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: myce add-model [flags] <source>")
 	}
-	result, err := catalog.NewInstaller(*store).Install(ctx, catalog.InstallRequest{
+	req := catalog.InstallRequest{
 		Source:        fs.Arg(0),
 		ID:            *id,
 		Model:         *model,
 		ContextLength: *contextLen,
 		Quant:         *quant,
 		Backend:       domain.BackendLlamaCpp,
-	})
-	if err != nil {
-		return err
 	}
 	control, err := storesqlite.Open(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer control.Close()
-	if err := control.SavePreset(ctx, result.Preset); err != nil {
+	job := domain.Job{
+		ID:       catalog.InstallJobID(req),
+		TaskType: "catalog_install",
+		Model:    req.Source,
+		PresetID: req.ID,
+		Status:   domain.JobQueued,
+	}
+	if err := control.SaveJob(ctx, job); err != nil {
 		return err
 	}
-	for _, event := range result.Progress {
-		fmt.Printf("%s\t%s\n", event.Stage, event.Message)
+	fmt.Printf("job\t%s\tstarted\n", job.ID)
+	result, err := catalog.NewInstaller(*store).InstallWithProgress(ctx, req, func(event catalog.ProgressEvent, state catalog.InstallState) error {
+		job.Status = installStageStatus(event.Stage)
+		job.PresetID = state.PresetID
+		job.Progress = append(job.Progress, domain.JobProgress{Stage: event.Stage, Message: event.Message, At: event.At})
+		if err := control.SaveJob(ctx, job); err != nil {
+			return err
+		}
+		fmt.Printf("job\t%s\t%s\t%s\n", job.ID, event.Stage, event.Message)
+		return nil
+	})
+	if err != nil {
+		job.Status = domain.JobFailed
+		job.Error = err.Error()
+		_ = control.SaveJob(ctx, job)
+		return err
+	}
+	if err := control.SavePreset(ctx, result.Preset); err != nil {
+		job.Status = domain.JobFailed
+		job.Error = err.Error()
+		_ = control.SaveJob(ctx, job)
+		return err
+	}
+	job.Status = domain.JobDone
+	job.PresetID = result.Preset.ID
+	if err := control.SaveJob(ctx, job); err != nil {
+		return err
 	}
 	fmt.Printf("preset\t%s\t%s\n", result.Preset.ID, result.Preset.ModelRef)
 	return nil
@@ -168,9 +197,27 @@ func runJobs(ctx context.Context, args []string) error {
 		return err
 	}
 	for _, job := range jobs {
-		fmt.Printf("%s\t%s\t%s\t%s\n", job.ID, job.Project, job.Model, job.Status)
+		fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\n", job.ID, job.TaskType, job.Project, job.Model, job.Status, jobProgressSummary(job))
 	}
 	return nil
+}
+
+func installStageStatus(_ string) domain.JobStatus {
+	return domain.JobRunning
+}
+
+func jobProgressSummary(job domain.Job) string {
+	if job.Error != "" {
+		return job.Error
+	}
+	if len(job.Progress) == 0 {
+		return "-"
+	}
+	last := job.Progress[len(job.Progress)-1]
+	if last.Message == "" {
+		return last.Stage
+	}
+	return last.Stage + ":" + last.Message
 }
 
 func runRecommendations(ctx context.Context, args []string) error {

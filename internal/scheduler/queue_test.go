@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"mycelium/internal/domain"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
 )
@@ -44,7 +43,7 @@ func TestQueueEmpty(t *testing.T) {
 	if queue.Len() != 0 {
 		t.Fatalf("Len = %d", queue.Len())
 	}
-	if got, ok := queue.Dequeue(); ok || got != (domain.Job{}) {
+	if got, ok := queue.Dequeue(); ok || got.ID != "" {
 		t.Fatalf("Dequeue = %+v %v", got, ok)
 	}
 }

@@ -70,6 +70,34 @@ func TestInstallLocalModelMaterializesPresetAndProvenance(t *testing.T) {
 	}
 }
 
+func TestInstallWithProgressReportsDurableState(t *testing.T) {
+	source := writeModel(t, "tiny.gguf", "model")
+	store := t.TempDir()
+	var events []ProgressEvent
+	var states []InstallState
+	result, err := NewInstaller(store).InstallWithProgress(context.Background(), InstallRequest{Source: source, ID: "tiny"}, func(event ProgressEvent, state InstallState) error {
+		events = append(events, event)
+		states = append(states, state)
+		durable, err := readInstallState(store, state.JobID)
+		if err != nil {
+			return err
+		}
+		if durable.Status != state.Status || len(durable.Progress) != len(state.Progress) {
+			return errors.New("progress callback fired before durable state was written")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("InstallWithProgress: %v", err)
+	}
+	if result.Preset.ID != "tiny" || len(events) == 0 || events[len(events)-1].Stage != "ready" {
+		t.Fatalf("result=%+v events=%+v", result, events)
+	}
+	if states[len(states)-1].Status != "ready" || states[len(states)-1].PresetID != "tiny" {
+		t.Fatalf("states = %+v", states)
+	}
+}
+
 func TestInstallResumesStagedJobWithoutRegisteringEarly(t *testing.T) {
 	store := t.TempDir()
 	req := InstallRequest{Source: filepath.Join(t.TempDir(), "missing.gguf"), ID: "tiny"}

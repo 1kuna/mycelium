@@ -2,6 +2,7 @@ package controlcli
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,9 +23,15 @@ func TestRunAddModelPersistsCatalogAndControlPreset(t *testing.T) {
 		t.Fatalf("write model: %v", err)
 	}
 
-	err := Run(context.Background(), []string{"add-model", "--store", storeDir, "--db", dbPath, "--id", "tiny", "--model", "tiny-model", model})
+	var err error
+	output := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"add-model", "--store", storeDir, "--db", dbPath, "--id", "tiny", "--model", "tiny-model", model})
+	})
 	if err != nil {
 		t.Fatalf("Run add-model: %v", err)
+	}
+	if !strings.Contains(output, "job\tinstall-tiny\tstarted") || !strings.Contains(output, "job\tinstall-tiny\tready\tpreset is materialized") {
+		t.Fatalf("add-model output = %q", output)
 	}
 	preset, err := catalog.ReadPreset(storeDir, "tiny")
 	if err != nil {
@@ -40,6 +47,48 @@ func TestRunAddModelPersistsCatalogAndControlPreset(t *testing.T) {
 	defer control.Close()
 	if got, err := control.Preset(context.Background(), "tiny"); err != nil || got.ID != "tiny" || strings.Join(got.Aliases, ",") != "tiny-model" {
 		t.Fatalf("control preset = %+v, %v", got, err)
+	}
+	jobs, err := control.ListJobs(context.Background())
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != "install-tiny" || jobs[0].TaskType != "catalog_install" || jobs[0].Status != domain.JobDone || len(jobs[0].Progress) == 0 {
+		t.Fatalf("install jobs = %+v", jobs)
+	}
+	jobsOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"jobs", "list", "--db", dbPath})
+	})
+	if err != nil {
+		t.Fatalf("jobs list: %v", err)
+	}
+	if !strings.Contains(jobsOutput, "install-tiny\tcatalog_install") || !strings.Contains(jobsOutput, "ready:preset is materialized") {
+		t.Fatalf("jobs output = %q", jobsOutput)
+	}
+}
+
+func TestRunAddModelFailurePersistsFailedInstallJobWithoutPreset(t *testing.T) {
+	storeDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	missing := filepath.Join(t.TempDir(), "missing.gguf")
+
+	err := Run(context.Background(), []string{"add-model", "--store", storeDir, "--db", dbPath, "--id", "tiny", missing})
+	if err == nil {
+		t.Fatal("missing source install succeeded")
+	}
+	control, openErr := storesqlite.Open(dbPath)
+	if openErr != nil {
+		t.Fatalf("open control store: %v", openErr)
+	}
+	defer control.Close()
+	if _, presetErr := control.Preset(context.Background(), "tiny"); presetErr == nil {
+		t.Fatal("failed install registered control preset")
+	}
+	jobs, listErr := control.ListJobs(context.Background())
+	if listErr != nil {
+		t.Fatalf("ListJobs: %v", listErr)
+	}
+	if len(jobs) != 1 || jobs[0].ID != "install-tiny" || jobs[0].Status != domain.JobFailed || jobs[0].Error == "" {
+		t.Fatalf("failed install jobs = %+v", jobs)
 	}
 }
 
@@ -223,6 +272,29 @@ func TestDefaultStoresUseHome(t *testing.T) {
 	if got := defaultCatalogStore(); got != filepath.Join(home, ".mycelium", "catalog") {
 		t.Fatalf("catalog store = %s", got)
 	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	os.Stdout = old
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close reader: %v", err)
+	}
+	return string(data)
 }
 
 func testPreset(id string) domain.Preset {
