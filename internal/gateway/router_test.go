@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -304,6 +305,110 @@ func TestRouterUsesStickyConversationInstance(t *testing.T) {
 	}
 	if resp.Instance.ID != instB.ID || !strings.Contains(string(resp.Body), "sticky") {
 		t.Fatalf("resp = %+v body=%s", resp, resp.Body)
+	}
+}
+
+func TestRouterValidatesStickyInstanceThroughOwnerAdmission(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(openAIChatBody("sticky")))
+	}))
+	defer upstream.Close()
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_sticky"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
+	inst.Addr = upstream.URL
+	agent := mocks.NewNodeAgent(node)
+	admission := &mocks.AdmissionController{}
+	resolver := staticResolver{
+		agents:     map[string]ports.NodeAgent{node.ID: agent},
+		admissions: map[string]ports.AdmissionController{node.ID: admission},
+	}
+	store := &gatewayRuntimeStore{}
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}, resolver)
+	router.Runtime = &scheduler.Service{
+		Placer:      router.Placer,
+		Fleet:       router.Fleet,
+		Nodes:       resolver,
+		Owners:      resolver,
+		Coordinator: notClaimedCoordinator{},
+		Queue:       scheduler.NewQueue(router.Clock),
+		Store:       store,
+		Clock:       router.Clock,
+		Presets:     map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	router.Sticky = NewStickyTable(router.Clock, time.Minute)
+	router.Sticky.Put("thread-a", inst)
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.ConversationKey = "thread-a"
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Instance.ID != inst.ID || !strings.Contains(string(resp.Body), "sticky") {
+		t.Fatalf("resp = %+v body=%s", resp, resp.Body)
+	}
+	if len(admission.Requests) != 1 || admission.Requests[0].InstanceID != inst.ID {
+		t.Fatalf("admission requests = %+v", admission.Requests)
+	}
+	if !strings.Contains(strings.Join(admission.Calls, ","), "release:"+resp.Lease.ID) || strings.Join(store.deletedLeases, ",") != resp.Lease.ID {
+		t.Fatalf("admission calls=%+v deleted=%+v lease=%+v", admission.Calls, store.deletedLeases, resp.Lease)
+	}
+}
+
+func TestRouterIgnoresStickyWhenOwnerAdmissionRejects(t *testing.T) {
+	preset := fixtures.MakePreset()
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(openAIChatBody("fallback")))
+	}))
+	defer first.Close()
+	sticky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(openAIChatBody("stale-sticky")))
+	}))
+	defer sticky.Close()
+	node := fixtures.MakeNode()
+	instA := fixtures.MakeInstance(fixtures.WithInstanceID("inst_a"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
+	instA.Addr = first.URL
+	instB := fixtures.MakeInstance(fixtures.WithInstanceID("inst_b"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
+	instB.Addr = sticky.URL
+	agent := mocks.NewNodeAgent(node)
+	admission := &rejectStickyAdmission{rejectInstanceID: instB.ID, AdmissionController: &mocks.AdmissionController{}}
+	resolver := staticResolver{
+		agents:     map[string]ports.NodeAgent{node.ID: agent},
+		admissions: map[string]ports.AdmissionController{node.ID: admission},
+	}
+	fleet := domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{instA, instB}}
+	router := newTestRouter(preset, fleet, resolver)
+	router.Runtime = &scheduler.Service{
+		Placer:  router.Placer,
+		Fleet:   router.Fleet,
+		Nodes:   resolver,
+		Owners:  resolver,
+		Queue:   scheduler.NewQueue(router.Clock),
+		Store:   &gatewayRuntimeStore{},
+		Clock:   router.Clock,
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	router.Sticky = NewStickyTable(router.Clock, time.Minute)
+	router.Sticky.Put("thread-a", instB)
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.ConversationKey = "thread-a"
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Instance.ID != instA.ID || !strings.Contains(string(resp.Body), "fallback") {
+		t.Fatalf("resp = %+v body=%s", resp, resp.Body)
+	}
+	if len(admission.Requests) < 2 || admission.Requests[0].InstanceID != instB.ID || admission.Requests[1].InstanceID != instA.ID {
+		t.Fatalf("admission requests = %+v", admission.Requests)
 	}
 }
 
@@ -1206,6 +1311,38 @@ func (s *gatewayRuntimeStore) SaveInstance(context.Context, domain.ModelInstance
 
 func (s *gatewayRuntimeStore) DeleteInstance(context.Context, string) error {
 	return nil
+}
+
+type notClaimedCoordinator struct{}
+
+func (notClaimedCoordinator) ClaimJob(context.Context, string) error {
+	return nil
+}
+
+func (notClaimedCoordinator) Plan(context.Context, string) (domain.PlacementDecision, error) {
+	return domain.PlacementDecision{}, domain.ErrUnsupported
+}
+
+func (notClaimedCoordinator) Commit(context.Context, domain.PlacementDecision) (domain.Lease, error) {
+	return domain.Lease{}, domain.ErrUnsupported
+}
+
+func (notClaimedCoordinator) Release(_ context.Context, jobID string) error {
+	return fmt.Errorf("job %q is not claimed by this coordinator", jobID)
+}
+
+type rejectStickyAdmission struct {
+	rejectInstanceID string
+	*mocks.AdmissionController
+}
+
+func (a *rejectStickyAdmission) Offer(ctx context.Context, req domain.AdmissionRequest) (domain.LeaseOffer, error) {
+	if req.InstanceID == a.rejectInstanceID {
+		a.Calls = append(a.Calls, "offer:"+req.Job.ID)
+		a.Requests = append(a.Requests, req)
+		return domain.LeaseOffer{}, domain.ErrNoFit
+	}
+	return a.AdmissionController.Offer(ctx, req)
 }
 
 func openAIChatBody(text string) string {

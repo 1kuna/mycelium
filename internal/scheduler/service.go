@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"mycelium/internal/domain"
@@ -320,19 +321,27 @@ func (s *Service) ReleaseJob(ctx context.Context, lease domain.Lease) error {
 	}
 	if s.Coordinator != nil {
 		if err := s.Coordinator.Release(ctx, lease.JobID); err != nil {
+			if lease.ID != "" && s.Owners != nil && strings.Contains(err.Error(), "not claimed by this coordinator") {
+				return s.releaseOwnerLease(ctx, lease)
+			}
 			return err
 		}
 	} else if s.Owners != nil && lease.NodeID != "" && lease.ID != "" {
-		owner, err := s.Owners.AdmissionController(lease.NodeID)
-		if err != nil {
-			return err
-		}
-		if err := owner.Release(ctx, lease.ID); err != nil {
-			return err
-		}
+		return s.releaseOwnerLease(ctx, lease)
 	}
 	if lease.ID == "" {
 		return nil
+	}
+	return s.Store.DeleteLease(ctx, lease.ID)
+}
+
+func (s *Service) releaseOwnerLease(ctx context.Context, lease domain.Lease) error {
+	owner, err := s.Owners.AdmissionController(lease.NodeID)
+	if err != nil {
+		return err
+	}
+	if err := owner.Release(ctx, lease.ID); err != nil {
+		return err
 	}
 	return s.Store.DeleteLease(ctx, lease.ID)
 }

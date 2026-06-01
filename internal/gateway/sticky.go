@@ -62,3 +62,12 @@ func (t *StickyTable) Put(key string, inst domain.ModelInstance) {
 	defer t.mu.Unlock()
 	t.entries[key] = stickyEntry{InstanceID: inst.ID, ExpiresAt: t.clock.Now().Add(t.ttl)}
 }
+
+func (t *StickyTable) Delete(key string) {
+	if key == "" || t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.entries, key)
+}
