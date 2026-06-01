@@ -23,11 +23,15 @@ type AdmissionController struct {
 	LeaseForInstErr   error
 	BindErr           error
 	Offers            map[string]domain.LeaseOffer
+	Requests          []domain.AdmissionRequest
 	Calls             []string
 }
 
-func (m *AdmissionController) Offer(_ context.Context, job domain.Job, claim domain.Claim) (domain.LeaseOffer, error) {
+func (m *AdmissionController) Offer(_ context.Context, req domain.AdmissionRequest) (domain.LeaseOffer, error) {
+	job := req.Job
+	claim := req.Claim
 	m.Calls = append(m.Calls, "offer:"+job.ID)
+	m.Requests = append(m.Requests, req)
 	if m.OfferErr != nil {
 		return domain.LeaseOffer{}, m.OfferErr
 	}
@@ -36,11 +40,16 @@ func (m *AdmissionController) Offer(_ context.Context, job domain.Job, claim dom
 		return m.OfferVal, nil
 	}
 	offer := domain.LeaseOffer{
-		OfferID: fmt.Sprintf("offer_%s", job.ID),
-		JobID:   job.ID,
-		NodeID:  "node_test",
-		Claim:   claim,
-		Fence:   1,
+		OfferID:        fmt.Sprintf("offer_%s", job.ID),
+		JobID:          job.ID,
+		NodeID:         req.NodeID,
+		Claim:          claim,
+		AcceleratorSet: append([]int(nil), req.AcceleratorSet...),
+		InstanceID:     req.InstanceID,
+		Fence:          1,
+	}
+	if offer.NodeID == "" {
+		offer.NodeID = "node_test"
 	}
 	m.recordOffer(offer)
 	return offer, nil
@@ -55,7 +64,7 @@ func (m *AdmissionController) Commit(_ context.Context, offerID string, fence ui
 		return m.LeaseVal, nil
 	}
 	offer := m.Offers[offerID]
-	return domain.Lease{ID: "lease_" + offerID, JobID: offer.JobID, NodeID: offer.NodeID, Claim: offer.Claim}, nil
+	return domain.Lease{ID: "lease_" + offerID, JobID: offer.JobID, NodeID: offer.NodeID, InstanceID: offer.InstanceID, AcceleratorSet: offer.AcceleratorSet, Claim: offer.Claim}, nil
 }
 
 func (m *AdmissionController) Release(_ context.Context, leaseID string) error {

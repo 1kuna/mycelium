@@ -62,6 +62,15 @@ type Claim struct {
 	KVReservedMB int `json:"kv_reserved_mb"`
 }
 
+type AdmissionRequest struct {
+	Job            Job    `json:"job"`
+	Claim          Claim  `json:"claim"`
+	NodeID         string `json:"node_id,omitempty"`
+	AcceleratorSet []int  `json:"accelerator_set,omitempty"`
+	InstanceID     string `json:"instance_id,omitempty"`
+	ReservationID  string `json:"reservation_id,omitempty"`
+}
+
 type ModelInstance struct {
 	ID             string        `json:"id"`
 	PresetID       string        `json:"preset_id"`
@@ -155,13 +164,16 @@ type Peer struct {
 }
 
 type LeaseOffer struct {
-	OfferID    string    `json:"offer_id"`
-	JobID      string    `json:"job_id"`
-	NodeID     string    `json:"node_id"`
-	Claim      Claim     `json:"claim"`
-	Fence      uint64    `json:"fence"`
-	ExpiresAt  time.Time `json:"expires_at"`
-	Conditions string    `json:"conditions,omitempty"`
+	OfferID        string    `json:"offer_id"`
+	JobID          string    `json:"job_id"`
+	NodeID         string    `json:"node_id"`
+	Claim          Claim     `json:"claim"`
+	AcceleratorSet []int     `json:"accelerator_set,omitempty"`
+	InstanceID     string    `json:"instance_id,omitempty"`
+	ReservationID  string    `json:"reservation_id,omitempty"`
+	Fence          uint64    `json:"fence"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	Conditions     string    `json:"conditions,omitempty"`
 }
 
 type JobRecord struct {
@@ -186,13 +198,35 @@ type Reservation struct {
 }
 
 type Lease struct {
-	ID         string    `json:"id"`
-	JobID      string    `json:"job_id"`
-	InstanceID string    `json:"instance_id"`
-	NodeID     string    `json:"node_id"`
-	Claim      Claim     `json:"claim"`
-	GrantedAt  time.Time `json:"granted_at"`
-	ExpiresAt  time.Time `json:"expires_at,omitempty"`
+	ID             string    `json:"id"`
+	JobID          string    `json:"job_id"`
+	InstanceID     string    `json:"instance_id"`
+	NodeID         string    `json:"node_id"`
+	AcceleratorSet []int     `json:"accelerator_set,omitempty"`
+	Claim          Claim     `json:"claim"`
+	Priority       Priority  `json:"priority,omitempty"`
+	ReservationID  string    `json:"reservation_id,omitempty"`
+	Pinned         bool      `json:"pinned,omitempty"`
+	GrantedAt      time.Time `json:"granted_at"`
+	ExpiresAt      time.Time `json:"expires_at,omitempty"`
+}
+
+type AdmissionState struct {
+	NodeID    string                 `json:"node_id"`
+	Fence     uint64                 `json:"fence"`
+	NextOffer int                    `json:"next_offer"`
+	NextLease int                    `json:"next_lease"`
+	Offers    []AdmissionOfferRecord `json:"offers,omitempty"`
+	Leases    []AdmissionLeaseRecord `json:"leases,omitempty"`
+}
+
+type AdmissionOfferRecord struct {
+	Offer LeaseOffer `json:"offer"`
+	Job   Job        `json:"job"`
+}
+
+type AdmissionLeaseRecord struct {
+	Lease Lease `json:"lease"`
 }
 
 type Project struct {

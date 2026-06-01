@@ -198,7 +198,7 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
 	claim := fixtures.MakeClaim(3, 4)
 	admission := &AdmissionController{}
-	offer, err := admission.Offer(context.Background(), job, claim)
+	offer, err := admission.Offer(context.Background(), domain.AdmissionRequest{Job: job, Claim: claim})
 	if err != nil {
 		t.Fatalf("Offer: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 
 	boom := errors.New("boom")
 	admission.OfferErr = boom
-	if _, err := admission.Offer(context.Background(), job, claim); !errors.Is(err, boom) {
+	if _, err := admission.Offer(context.Background(), domain.AdmissionRequest{Job: job, Claim: claim}); !errors.Is(err, boom) {
 		t.Fatalf("offer err = %v", err)
 	}
 	registry.Err = boom

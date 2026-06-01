@@ -982,7 +982,7 @@ func TestBuildPeerGatewayWithLocalCompute(t *testing.T) {
 	defer server.Close()
 	client := nodeagent.NewHTTPClient(server.URL)
 	job := domain.Job{ID: "job-a", Priority: domain.PriorityInteractive}
-	offer, err := client.Offer(context.Background(), job, domain.Claim{WeightsMB: 1})
+	offer, err := client.Offer(context.Background(), domain.AdmissionRequest{Job: job, Claim: domain.Claim{WeightsMB: 1}})
 	if err != nil {
 		t.Fatalf("Offer: %v", err)
 	}
@@ -1119,7 +1119,7 @@ func TestComputeBackendAdapterRequiresCustomBinary(t *testing.T) {
 
 type localAdmissionOnly struct{}
 
-func (localAdmissionOnly) Offer(context.Context, domain.Job, domain.Claim) (domain.LeaseOffer, error) {
+func (localAdmissionOnly) Offer(context.Context, domain.AdmissionRequest) (domain.LeaseOffer, error) {
 	return domain.LeaseOffer{}, nil
 }
 
