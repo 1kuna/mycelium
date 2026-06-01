@@ -23,17 +23,16 @@ import (
 
 func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(openAIChatBody("hello")))
 	}))
-	defer upstream.Close()
 
 	inst := fixtures.MakeInstance()
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	agent := mocks.NewNodeAgent(fixtures.MakeNode())
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
 	sink := &mocks.TelemetrySink{}
@@ -67,14 +66,13 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 
 func TestRouterAssignsUniqueGatewayJobIDs(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(openAIChatBody("hello")))
 	}))
-	defer upstream.Close()
 
 	inst := fixtures.MakeInstance()
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: mocks.NewNodeAgent(fixtures.MakeNode())}})
 	sink := &mocks.TelemetrySink{}
 	router.Telemetry = sink
@@ -98,7 +96,7 @@ func TestRouterAssignsUniqueGatewayJobIDs(t *testing.T) {
 
 func TestRouterUsesProjectDefaultModel(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatalf("read body: %v", err)
@@ -108,9 +106,8 @@ func TestRouterUsesProjectDefaultModel(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(openAIChatBody("defaulted")))
 	}))
-	defer upstream.Close()
 	inst := fixtures.MakeInstance(fixtures.WithInstancePreset(preset.ID))
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
 	router.Projects = map[string]domain.Project{"proj-a": {ID: "proj-a", DefaultModel: preset.ID}}
 	req, err := translate.ParseOpenAIChat([]byte(`{"messages":[{"role":"user","content":"hi"}]}`))
@@ -240,21 +237,19 @@ func TestPresetRegistrySkipsEmptyModelKeys(t *testing.T) {
 func TestRouterRetriesContextOverflowOnLargerPreset(t *testing.T) {
 	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
 	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request exceeds context window", http.StatusBadRequest)
 	}))
-	defer first.Close()
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(openAIChatBody("retried")))
 	}))
-	defer second.Close()
 
 	node := fixtures.MakeNode()
 	instSmall := fixtures.MakeInstance(fixtures.WithInstanceID("inst_small"), fixtures.WithInstancePreset(small.ID))
-	instSmall.Addr = first.URL
+	instSmall.Addr = first
 	instLarge := fixtures.MakeInstance(fixtures.WithInstanceID("inst_large"), fixtures.WithInstancePreset(large.ID))
-	instLarge.Addr = second.URL
+	instLarge.Addr = second
 	router := newTestRouter(small, domain.FleetSnapshot{
 		Nodes:     []domain.Node{node},
 		Instances: []domain.ModelInstance{instSmall, instLarge},
@@ -275,19 +270,17 @@ func TestRouterRetriesContextOverflowOnLargerPreset(t *testing.T) {
 
 func TestRouterUsesStickyConversationInstance(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstreamA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamA := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(openAIChatBody("first")))
 	}))
-	defer upstreamA.Close()
-	upstreamB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamB := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(openAIChatBody("sticky")))
 	}))
-	defer upstreamB.Close()
 	node := fixtures.MakeNode()
 	instA := fixtures.MakeInstance(fixtures.WithInstanceID("inst_a"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
-	instA.Addr = upstreamA.URL
+	instA.Addr = upstreamA
 	instB := fixtures.MakeInstance(fixtures.WithInstanceID("inst_b"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
-	instB.Addr = upstreamB.URL
+	instB.Addr = upstreamB
 	agent := mocks.NewNodeAgent(node)
 	router := newTestRouter(preset, domain.FleetSnapshot{
 		Nodes:     []domain.Node{node},
@@ -312,13 +305,12 @@ func TestRouterUsesStickyConversationInstance(t *testing.T) {
 
 func TestRouterValidatesStickyInstanceThroughOwnerAdmission(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(openAIChatBody("sticky")))
 	}))
-	defer upstream.Close()
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_sticky"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	agent := mocks.NewNodeAgent(node)
 	admission := &mocks.AdmissionController{}
 	resolver := staticResolver{
@@ -363,19 +355,17 @@ func TestRouterValidatesStickyInstanceThroughOwnerAdmission(t *testing.T) {
 
 func TestRouterIgnoresStickyWhenOwnerAdmissionRejects(t *testing.T) {
 	preset := fixtures.MakePreset()
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(openAIChatBody("fallback")))
 	}))
-	defer first.Close()
-	sticky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	sticky := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(openAIChatBody("stale-sticky")))
 	}))
-	defer sticky.Close()
 	node := fixtures.MakeNode()
 	instA := fixtures.MakeInstance(fixtures.WithInstanceID("inst_a"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
-	instA.Addr = first.URL
+	instA.Addr = first
 	instB := fixtures.MakeInstance(fixtures.WithInstanceID("inst_b"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
-	instB.Addr = sticky.URL
+	instB.Addr = sticky
 	agent := mocks.NewNodeAgent(node)
 	admission := &rejectStickyAdmission{rejectInstanceID: instB.ID, AdmissionController: &mocks.AdmissionController{}}
 	resolver := staticResolver{
@@ -416,13 +406,12 @@ func TestRouterIgnoresStickyWhenOwnerAdmissionRejects(t *testing.T) {
 
 func TestRouterPrivateHandlingRequiresStorageAndLocalPlacement(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(openAIChatBody("private")))
 	}))
-	defer upstream.Close()
 	remote := fixtures.MakeNode(fixtures.WithNodeID("remote-node"))
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_remote"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(remote.ID))
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
 	if err != nil {
 		t.Fatalf("ParseOpenAIChat: %v", err)
@@ -489,15 +478,14 @@ func TestRouterMergesProjectDefaultsIntoJobIntent(t *testing.T) {
 
 func TestRouterColdStreamPrependsLoadingState(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: done\n\n"))
 	}))
-	defer upstream.Close()
 
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_cold"))
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
 		node.ID: loadNode{node: node, inst: inst},
 	}})
@@ -521,16 +509,15 @@ func TestRouterColdStreamPrependsLoadingState(t *testing.T) {
 
 func TestRouterStreamColdLoadWritesLoadingReadyAndChunks(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: one\n\n"))
 		_, _ = w.Write([]byte("data: two\n\n"))
 	}))
-	defer upstream.Close()
 
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_stream"))
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
 		node.ID: loadNode{node: node, inst: inst},
 	}})
@@ -557,15 +544,14 @@ func TestRouterStreamColdLoadWritesLoadingReadyAndChunks(t *testing.T) {
 
 func TestRouterStreamWarmInstanceCopiesHeadersAndBody(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("X-Upstream", "ok")
 		_, _ = w.Write([]byte("data: warm\n\n"))
 	}))
-	defer upstream.Close()
 
 	inst := fixtures.MakeInstance()
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
 	if err != nil {
@@ -606,14 +592,13 @@ func TestRouterStreamWritesErrorEventAfterStarted(t *testing.T) {
 
 func TestRouterStreamWritesUpstreamErrorEventAfterStarted(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad input", http.StatusBadRequest)
 	}))
-	defer upstream.Close()
 
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_bad"))
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
 		node.ID: loadNode{node: node, inst: inst},
 	}})
@@ -677,21 +662,19 @@ func TestRouterStreamWritesTransportErrorEventAfterStarted(t *testing.T) {
 
 func TestRouterStreamFailoverBeforeResponseStarts(t *testing.T) {
 	preset := fixtures.MakePreset()
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "dead", http.StatusInternalServerError)
 	}))
-	defer first.Close()
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: rescued\n\n"))
 	}))
-	defer second.Close()
 
 	node := fixtures.MakeNode()
 	instA := fixtures.MakeInstance(fixtures.WithInstanceID("inst_a"))
-	instA.Addr = first.URL
+	instA.Addr = first
 	instB := fixtures.MakeInstance(fixtures.WithInstanceID("inst_b"))
-	instB.Addr = second.URL
+	instB.Addr = second
 	reporter := &testFailureReporter{}
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{instA, instB}}, staticResolver{})
 	router.Reporter = reporter
@@ -738,15 +721,14 @@ func TestRouterStreamEarlyErrors(t *testing.T) {
 
 func TestRouterUsesRuntimeServiceForColdLoad(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(openAIChatBody("runtime")))
 	}))
-	defer upstream.Close()
 
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_runtime"))
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	admission := &mocks.AdmissionController{}
 	resolver := staticResolver{
 		agents:     map[string]ports.NodeAgent{node.ID: loadNode{node: node, inst: inst}},
@@ -786,15 +768,14 @@ func TestRouterUsesRuntimeServiceForColdLoad(t *testing.T) {
 
 func TestRouterReturnsRuntimeReleaseError(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(openAIChatBody("runtime")))
 	}))
-	defer upstream.Close()
 
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_runtime"))
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	deleteErr := errors.New("delete lease")
 	router := newRuntimeRouterForInstance(preset, node, inst, &gatewayRuntimeStore{deleteLeaseErr: deleteErr})
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
@@ -809,15 +790,14 @@ func TestRouterReturnsRuntimeReleaseError(t *testing.T) {
 
 func TestRouterStreamReturnsRuntimeReleaseError(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: ok\n\n"))
 	}))
-	defer upstream.Close()
 
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_runtime"))
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	deleteErr := errors.New("delete lease")
 	router := newRuntimeRouterForInstance(preset, node, inst, &gatewayRuntimeStore{deleteLeaseErr: deleteErr})
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
@@ -876,21 +856,19 @@ func newRuntimeRouterForInstance(preset domain.Preset, node domain.Node, inst do
 func TestRouterStreamRetriesContextOverflowBeforeResponseStarts(t *testing.T) {
 	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
 	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request exceeds context window", http.StatusBadRequest)
 	}))
-	defer first.Close()
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: enlarged\n\n"))
 	}))
-	defer second.Close()
 
 	node := fixtures.MakeNode()
 	instSmall := fixtures.MakeInstance(fixtures.WithInstanceID("inst_small"), fixtures.WithInstancePreset(small.ID))
-	instSmall.Addr = first.URL
+	instSmall.Addr = first
 	instLarge := fixtures.MakeInstance(fixtures.WithInstanceID("inst_large"), fixtures.WithInstancePreset(large.ID))
-	instLarge.Addr = second.URL
+	instLarge.Addr = second
 	router := newTestRouter(small, domain.FleetSnapshot{
 		Nodes:     []domain.Node{node},
 		Instances: []domain.ModelInstance{instSmall, instLarge},
@@ -913,11 +891,10 @@ func TestRouterStreamReturnsBeginRequestErrorBeforeResponseStarts(t *testing.T) 
 	preset := fixtures.MakePreset()
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.OnNode(node.ID))
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("data: should-not-run\n\n"))
 	}))
-	defer upstream.Close()
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	agent := mocks.NewNodeAgent(node)
 	agent.BeginErr = errors.New("begin failed")
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{
@@ -936,14 +913,13 @@ func TestRouterStreamReturnsBeginRequestErrorBeforeResponseStarts(t *testing.T) 
 
 func TestRouterStreamExhaustsFailoverBeforeResponseStarts(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "dead", http.StatusInternalServerError)
 	}))
-	defer upstream.Close()
 
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance()
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
 	router.MaxTries = 1
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
@@ -959,15 +935,14 @@ func TestRouterStreamExhaustsFailoverBeforeResponseStarts(t *testing.T) {
 
 func TestServerUsesStreamingRouterPath(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: server-stream\n\n"))
 	}))
-	defer upstream.Close()
 
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_server_stream"))
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
 		node.ID: loadNode{node: node, inst: inst},
 	}})
@@ -981,21 +956,19 @@ func TestServerUsesStreamingRouterPath(t *testing.T) {
 
 func TestRouterFailoverReportsFailure(t *testing.T) {
 	preset := fixtures.MakePreset()
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "dead", http.StatusInternalServerError)
 	}))
-	defer first.Close()
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(openAIChatBody("rescued")))
 	}))
-	defer second.Close()
 
 	node := fixtures.MakeNode()
 	instA := fixtures.MakeInstance(fixtures.WithInstanceID("inst_a"))
-	instA.Addr = first.URL
+	instA.Addr = first
 	instB := fixtures.MakeInstance(fixtures.WithInstanceID("inst_b"))
-	instB.Addr = second.URL
+	instB.Addr = second
 	reporter := &testFailureReporter{}
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{instA, instB}}, staticResolver{})
 	router.Reporter = reporter
@@ -1046,13 +1019,12 @@ func TestServerErrorResponses(t *testing.T) {
 
 func TestServerWritesRouteResponse(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Upstream", "yes")
 		_, _ = w.Write([]byte(openAIChatBody("server")))
 	}))
-	defer upstream.Close()
 	inst := fixtures.MakeInstance()
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	router := newTestRouter(preset, domain.FleetSnapshot{
 		Nodes:     []domain.Node{fixtures.MakeNode()},
 		Instances: []domain.ModelInstance{inst},
@@ -1067,13 +1039,12 @@ func TestServerWritesRouteResponse(t *testing.T) {
 
 func TestServerWritesStreamResponse(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: server\n\n"))
 	}))
-	defer upstream.Close()
 	inst := fixtures.MakeInstance()
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	router := newTestRouter(preset, domain.FleetSnapshot{
 		Nodes:     []domain.Node{fixtures.MakeNode()},
 		Instances: []domain.ModelInstance{inst},
@@ -1189,9 +1160,42 @@ func newTestRouter(preset domain.Preset, fleet domain.FleetSnapshot, nodes NodeR
 		Fleet:    staticFleet{fleet: fleet},
 		Nodes:    nodes,
 		Presets:  NewPresetRegistry(presets...),
+		Client:   testUpstreams.client(),
 		Clock:    fakeClock,
 		MaxTries: 2,
 	}
+}
+
+var testUpstreams = &directUpstreams{handlers: map[string]http.Handler{}}
+
+type directUpstreams struct {
+	handlers map[string]http.Handler
+}
+
+func directUpstream(handler http.Handler) string {
+	return testUpstreams.url(handler)
+}
+
+func (d *directUpstreams) url(handler http.Handler) string {
+	host := fmt.Sprintf("upstream-%d.mycelium.test", len(d.handlers)+1)
+	d.handlers[host] = handler
+	return "http://" + host
+}
+
+func (d *directUpstreams) client() *http.Client {
+	return &http.Client{Transport: d}
+}
+
+func (d *directUpstreams) RoundTrip(req *http.Request) (*http.Response, error) {
+	handler := d.handlers[req.URL.Host]
+	if handler == nil {
+		return nil, fmt.Errorf("unregistered test upstream %q", req.URL.Host)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	resp := rec.Result()
+	resp.Request = req
+	return resp, nil
 }
 
 type staticFleet struct {
