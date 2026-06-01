@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,6 +72,28 @@ func loadPeerConfig(path string) (PeerConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return PeerConfig{}, fmt.Errorf("parse peer config %s: %w", path, err)
 	}
+	return applyPeerConfigDefaults(cfg), nil
+}
+
+func loadOrBootstrapPeerConfig(path string, allowBootstrap bool) (PeerConfig, string, bool, error) {
+	if path == "" {
+		path = defaultPeerConfigPath()
+	}
+	cfg, err := loadPeerConfig(path)
+	if err == nil {
+		return cfg, path, false, nil
+	}
+	if !allowBootstrap || !errors.Is(err, os.ErrNotExist) {
+		return PeerConfig{}, path, false, err
+	}
+	cfg = applyPeerConfigDefaults(PeerConfig{})
+	if err := savePeerConfig(path, cfg); err != nil {
+		return PeerConfig{}, path, false, err
+	}
+	return cfg, path, true, nil
+}
+
+func applyPeerConfigDefaults(cfg PeerConfig) PeerConfig {
 	if cfg.Listen == "" {
 		cfg.Listen = "127.0.0.1:51846"
 	}
@@ -105,7 +128,21 @@ func loadPeerConfig(path string) (PeerConfig, error) {
 	if cfg.ID == "" {
 		cfg.ID = cfg.ComputeConfig.ID
 	}
-	return cfg, nil
+	return cfg
+}
+
+func savePeerConfig(path string, cfg PeerConfig) error {
+	if path == "" {
+		path = defaultPeerConfigPath()
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0600)
 }
 
 func defaultedComputeConfig(cfg ComputeConfig) ComputeConfig {

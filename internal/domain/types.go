@@ -195,6 +195,7 @@ type JobRecord struct {
 	Request         []byte        `json:"request"`
 	Handling        HandlingClass `json:"handling,omitempty"`
 	PayloadRedacted bool          `json:"payload_redacted,omitempty"`
+	RecoveryNote    string        `json:"recovery_note,omitempty"`
 	Fence           uint64        `json:"fence"`
 	UpdatedAt       time.Time     `json:"updated_at"`
 }

@@ -93,7 +93,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	if err := fs.Parse(args); err != nil {
 		return "", nil, nil, err
 	}
-	cfg, err := loadPeerConfig(*configPath)
+	cfg, resolvedConfigPath, bootstrappedConfig, err := loadOrBootstrapPeerConfig(*configPath, *joinRaw != "")
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -135,6 +135,11 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	if *vramMB != 0 {
 		cfg.ComputeConfig.VRAMMB = *vramMB
+	}
+	if bootstrappedConfig {
+		if err := savePeerConfig(resolvedConfigPath, cfg); err != nil {
+			return "", nil, nil, err
+		}
 	}
 	store, err := storesqlite.Open(cfg.StorePath)
 	if err != nil {
@@ -230,9 +235,6 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	presets, err := store.ListPresets(ctx)
 	if err != nil {
 		return "", nil, nil, err
-	}
-	if len(presets) == 0 {
-		return "", nil, nil, fmt.Errorf("peer config/store has no presets")
 	}
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
@@ -1041,7 +1043,7 @@ func startPeerHeartbeat(ctx context.Context, self domain.Peer, discovery ports.P
 		return
 	}
 	owners, _ := nodes.(peerLeaseInspectorResolver)
-	recovery := peercoord.Recovery{Registry: registry, Owners: owners, Rescue: rescueRecoveredJob(runtime)}
+	recovery := peercoord.Recovery{Registry: registry, Owners: owners, Rescue: rescueRecoveredJob(runtime), Clock: clk}
 	heartbeat := &peercoord.Heartbeat{
 		Self:      self,
 		Discovery: discovery,

@@ -455,6 +455,59 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 	}
 }
 
+func TestBuildPeerGatewayJoinBootstrapsCleanHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	join := "mycjoin://127.0.0.1:1?token=join-secret&rpc_token=join-rpc"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	addr, handler, cleanup, err := buildPeerGateway(ctx, []string{"--join", join, "--listen", "127.0.0.1:0"})
+	if err != nil {
+		t.Fatalf("buildPeerGateway clean join: %v", err)
+	}
+	if cleanup != nil {
+		t.Fatal("thin clean-home peer returned compute cleanup")
+	}
+	if addr != "127.0.0.1:0" || handler == nil {
+		t.Fatalf("addr=%s handler=%v", addr, handler)
+	}
+
+	configPath := filepath.Join(home, ".mycelium", "peer.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read bootstrapped config: %v", err)
+	}
+	var cfg PeerConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode bootstrapped config: %v", err)
+	}
+	if cfg.JoinToken != "join-secret" || cfg.RPCToken != "join-rpc" || len(cfg.SeedPeers) != 1 || cfg.SeedPeers[0] != "127.0.0.1:1" || cfg.Compute {
+		t.Fatalf("bootstrapped config = %+v", cfg)
+	}
+
+	store, err := storesqlite.Open(filepath.Join(home, ".mycelium", "mycelium.db"))
+	if err != nil {
+		t.Fatalf("open bootstrapped store: %v", err)
+	}
+	defer store.Close()
+	tokens, err := store.ListJoinTokens(context.Background())
+	if err != nil {
+		t.Fatalf("ListJoinTokens: %v", err)
+	}
+	if len(tokens) != 1 || !tokens[0].Active || !tokens[0].Current {
+		t.Fatalf("tokens = %+v", tokens)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/peer/health", nil)
+	req.Header.Set("X-Myc-Join-Token", "join-secret")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("peer health status/body = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestParseJoinFlag(t *testing.T) {
 	if join, err := parseJoinFlag("secret"); err != nil || join.Token != "secret" || join.RPCToken != "" {
 		t.Fatalf("raw join = %+v %v", join, err)
