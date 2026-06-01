@@ -33,7 +33,7 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 		want string
 	}{
 		{name: "run", args: []string{"run"}, want: "read peer config"},
-		{name: "ctl", args: []string{"ctl"}, want: "usage: myce <add-model|models|nodes|projects|jobs|recommendations>"},
+		{name: "ctl", args: []string{"ctl"}, want: "usage: myce <add-model|models|nodes|projects|jobs|recommendations|benchmark>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
