@@ -18,11 +18,14 @@ type EnginePresetPolicy struct {
 }
 
 type presetAggregate struct {
-	Preset domain.Preset
-	Count  int
-	TPS    float64
-	TTFT   float64
-	LoadMS float64
+	Preset        domain.Preset
+	Count         int
+	TPS           float64
+	TTFT          float64
+	LoadMS        float64
+	Score         float64
+	ReloadCost    float64
+	Fragmentation float64
 }
 
 func RecommendEnginePreset(project domain.Project, presets []domain.Preset, metrics []domain.RunMetric, now time.Time, policy EnginePresetPolicy) (domain.RecommendationRecord, bool) {
@@ -65,20 +68,23 @@ func RecommendEnginePreset(project domain.Project, presets []domain.Preset, metr
 		agg.TPS = round2(agg.TPS / float64(agg.Count))
 		agg.TTFT = round2(agg.TTFT / float64(agg.Count))
 		agg.LoadMS = round2(agg.LoadMS / float64(agg.Count))
+		agg.ReloadCost = backendReloadCost(agg.Preset.Backend)
+		agg.Fragmentation = presetFragmentation(agg.Preset, presets)
+		agg.Score = round2(agg.TPS - agg.TTFT/1000 - agg.LoadMS/10000 - agg.ReloadCost - agg.Fragmentation)
 		ranked = append(ranked, *agg)
 	}
 	if len(ranked) < 2 {
 		return domain.RecommendationRecord{}, false
 	}
 	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].Score != ranked[j].Score {
+			return ranked[i].Score > ranked[j].Score
+		}
 		if ranked[i].TPS != ranked[j].TPS {
 			return ranked[i].TPS > ranked[j].TPS
 		}
 		if ranked[i].TTFT != ranked[j].TTFT {
 			return ranked[i].TTFT < ranked[j].TTFT
-		}
-		if ranked[i].LoadMS != ranked[j].LoadMS {
-			return ranked[i].LoadMS < ranked[j].LoadMS
 		}
 		return ranked[i].Preset.ID < ranked[j].Preset.ID
 	})
@@ -127,13 +133,18 @@ func RecommendBenchPick(project domain.Project, presets []domain.Preset, results
 func engineRecommendationRecord(project domain.Project, best, runnerUp presetAggregate, now time.Time, source string) domain.RecommendationRecord {
 	id := fmt.Sprintf("%s-%s-%s", project.ID, RecommendationEngineParameter, best.Preset.ID)
 	observed := map[string]float64{
-		"best_tokens_per_sec": best.TPS,
-		"best_samples":        float64(best.Count),
-		"best_ttft_ms":        best.TTFT,
+		"best_tokens_per_sec":     best.TPS,
+		"best_samples":            float64(best.Count),
+		"best_ttft_ms":            best.TTFT,
+		"best_load_wall_clock_ms": best.LoadMS,
+		"best_score":              best.Score,
+		"best_reload_cost":        best.ReloadCost,
+		"best_fragmentation":      best.Fragmentation,
 	}
 	if runnerUp.Preset.ID != "" {
 		observed["runner_up_tokens_per_sec"] = runnerUp.TPS
 		observed["runner_up_samples"] = float64(runnerUp.Count)
+		observed["runner_up_score"] = runnerUp.Score
 	}
 	return domain.RecommendationRecord{
 		ID:                  id,
@@ -144,17 +155,30 @@ func engineRecommendationRecord(project domain.Project, best, runnerUp presetAgg
 		RecommendedBackend:  best.Preset.Backend,
 		Observed:            observed,
 		Rationale: fmt.Sprintf(
-			"%s recommends preset %s on backend %s: %.2f tok/s over %d samples; launch_profile=%s launch_args=%v; execution remains explicit opt-in",
+			"%s recommends preset %s on backend %s: %.2f tok/s over %d samples; score=%.2f reload_cost=%.2f fragmentation=%.2f launch_profile=%s launch_args=%v; execution remains explicit opt-in",
 			source,
 			best.Preset.ID,
 			best.Preset.Backend,
 			best.TPS,
 			best.Count,
+			best.Score,
+			best.ReloadCost,
+			best.Fragmentation,
 			best.Preset.LaunchProfile,
 			best.Preset.LaunchArgs,
 		),
 		CreatedAt: now.UTC(),
 	}
+}
+
+func presetFragmentation(preset domain.Preset, presets []domain.Preset) float64 {
+	matching := 0
+	for _, candidate := range presets {
+		if candidate.ModelRef == preset.ModelRef && candidate.ContextLength != preset.ContextLength {
+			matching++
+		}
+	}
+	return float64(matching) * 0.1
 }
 
 func presetsByID(presets []domain.Preset) map[string]domain.Preset {

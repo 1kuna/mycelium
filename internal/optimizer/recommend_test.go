@@ -134,6 +134,9 @@ func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
 	if err := store.SaveProject(context.Background(), project); err != nil {
 		t.Fatalf("SaveProject: %v", err)
 	}
+	if err := store.SaveNode(context.Background(), fixtures.MakeNode(fixtures.WithNodeID("node-a"))); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
 	if err := store.SavePreset(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("small"), fixtures.WithContextLength(6000))); err != nil {
 		t.Fatalf("SavePreset small: %v", err)
 	}
@@ -184,6 +187,63 @@ func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
 	}
 }
 
+func TestRecommendationServiceRejectsUnfitContextRecommendation(t *testing.T) {
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	project := domain.Project{ID: "project-a", ContextCap: 16000, AutoApply: true}
+	large := fixtures.MakePreset(fixtures.WithPresetID("large"), fixtures.WithContextLength(16000))
+	mustOptimizer(t, store.SaveProject(context.Background(), project))
+	mustOptimizer(t, store.SaveNode(context.Background(), fixtures.MakeNode(fixtures.WithNodeID("tiny"), fixtures.WithVRAM(100))))
+	mustOptimizer(t, store.SavePreset(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("small"), fixtures.WithContextLength(6000))))
+	mustOptimizer(t, store.SavePreset(context.Background(), large))
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	mustOptimizer(t, store.Record(context.Background(), domain.RunMetric{JobID: "job-a", Project: project.ID, ContextUsed: 3500, At: now}))
+	mustOptimizer(t, store.Record(context.Background(), domain.RunMetric{JobID: "job-b", Project: project.ID, ContextUsed: 4000, At: now.Add(time.Second)}))
+
+	records, err := (RecommendationService{Store: store, Clock: mocks.NewFakeClock(now)}).EvaluateProject(context.Background(), project)
+	if err != nil {
+		t.Fatalf("EvaluateProject: %v", err)
+	}
+	if len(records) != 1 || !records[0].Rejected || records[0].Applied || !strings.Contains(records[0].RejectReason, "does not fit") {
+		t.Fatalf("records = %+v", records)
+	}
+	appliedProject, err := store.Project(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	if appliedProject.ContextCap != project.ContextCap {
+		t.Fatalf("project should not be auto-applied: %+v", appliedProject)
+	}
+}
+
+func TestRecommendationServiceRejectsUnprovenLatencyTarget(t *testing.T) {
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	project := domain.Project{ID: "project-a", ContextCap: 16000, LatencyTargetMS: 10, AutoApply: true}
+	large := fixtures.MakePreset(fixtures.WithPresetID("large"), fixtures.WithContextLength(16000))
+	mustOptimizer(t, store.SaveProject(context.Background(), project))
+	mustOptimizer(t, store.SaveNode(context.Background(), fixtures.MakeNode(fixtures.WithNodeID("node-a"))))
+	mustOptimizer(t, store.SavePreset(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("small"), fixtures.WithContextLength(6000))))
+	mustOptimizer(t, store.SavePreset(context.Background(), large))
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	mustOptimizer(t, store.Record(context.Background(), domain.RunMetric{JobID: "job-a", Project: project.ID, ContextUsed: 3500, TTFTms: 50, At: now}))
+	mustOptimizer(t, store.Record(context.Background(), domain.RunMetric{JobID: "job-b", Project: project.ID, ContextUsed: 4000, TTFTms: 60, At: now.Add(time.Second)}))
+
+	records, err := (RecommendationService{Store: store, Clock: mocks.NewFakeClock(now)}).EvaluateProject(context.Background(), project)
+	if err != nil {
+		t.Fatalf("EvaluateProject: %v", err)
+	}
+	if len(records) != 1 || !records[0].Rejected || !strings.Contains(records[0].RejectReason, "latency target") || records[0].Observed["p95_ttft_ms"] != 60 {
+		t.Fatalf("records = %+v", records)
+	}
+}
+
 func TestRecommendationServicePersistsEngineRecommendation(t *testing.T) {
 	store, err := storesqlite.Open(":memory:")
 	if err != nil {
@@ -195,6 +255,7 @@ func TestRecommendationServicePersistsEngineRecommendation(t *testing.T) {
 	fast := fixtures.MakePreset(fixtures.WithPresetID("fast"))
 	fast.Backend = domain.BackendMLX
 	mustOptimizer(t, store.SaveProject(context.Background(), project))
+	mustOptimizer(t, store.SaveNode(context.Background(), fixtures.MakeNode(fixtures.WithNodeID("node-a"))))
 	mustOptimizer(t, store.SavePreset(context.Background(), slow))
 	mustOptimizer(t, store.SavePreset(context.Background(), fast))
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)

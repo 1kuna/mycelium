@@ -19,6 +19,7 @@ type ProjectStats struct {
 	CurrentCap     int
 	SharedContexts []int
 	ReloadsPerDay  int
+	P95TTFTMS      int
 }
 
 type Recommendation struct {
