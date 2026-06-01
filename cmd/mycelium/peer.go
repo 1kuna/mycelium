@@ -659,12 +659,16 @@ func appendSeedPeer(seeds []string, seed string) []string {
 }
 
 func startSeedPeerProber(ctx context.Context, cache *membership.CachedPeerDiscovery, seeds []string, joinToken string, joinTokens *membership.TokenManager, clk ports.Clock, interval time.Duration) {
+	startSeedPeerProberWithClient(ctx, cache, seeds, joinToken, joinTokens, clk, interval, peerControlHTTPClient())
+}
+
+func startSeedPeerProberWithClient(ctx context.Context, cache *membership.CachedPeerDiscovery, seeds []string, joinToken string, joinTokens *membership.TokenManager, clk ports.Clock, interval time.Duration, client *http.Client) {
 	if cache == nil || clk == nil || len(seeds) == 0 {
 		return
 	}
 	interval = seedPeerProbeInterval(interval)
 	probe := func() {
-		probeSeedPeers(ctx, cache, seeds, joinToken, joinTokens)
+		probeSeedPeersWithClient(ctx, cache, seeds, joinToken, joinTokens, client)
 	}
 	probe()
 	go func() {
@@ -689,13 +693,17 @@ func seedPeerProbeInterval(interval time.Duration) time.Duration {
 }
 
 func probeSeedPeers(ctx context.Context, cache *membership.CachedPeerDiscovery, seeds []string, joinToken string, joinTokens *membership.TokenManager) {
+	probeSeedPeersWithClient(ctx, cache, seeds, joinToken, joinTokens, peerControlHTTPClient())
+}
+
+func probeSeedPeersWithClient(ctx context.Context, cache *membership.CachedPeerDiscovery, seeds []string, joinToken string, joinTokens *membership.TokenManager, client *http.Client) {
 	token, err := authorizedOutboundJoinToken(joinToken, joinTokens)
 	if err != nil {
 		log.Printf("mycelium peer seed probe skipped: %v", err)
 		return
 	}
 	for _, seed := range seeds {
-		peer, err := fetchPeerHealth(ctx, seed, token)
+		peer, err := fetchPeerHealthWithClient(ctx, seed, token, client)
 		if err != nil {
 			log.Printf("mycelium peer seed probe failed: seed=%s error=%v", seed, err)
 			continue
@@ -707,17 +715,21 @@ func probeSeedPeers(ctx context.Context, cache *membership.CachedPeerDiscovery, 
 }
 
 func probePeerHealth(ctx context.Context, peer domain.Peer) error {
-	return probePeerHealthWithToken(ctx, peer, "")
+	return probePeerHealthWithClient(ctx, peer, "", peerControlHTTPClient())
 }
 
 func probePeerHealthWithToken(ctx context.Context, peer domain.Peer, joinToken string) error {
+	return probePeerHealthWithClient(ctx, peer, joinToken, peerControlHTTPClient())
+}
+
+func probePeerHealthWithClient(ctx context.Context, peer domain.Peer, joinToken string, client *http.Client) error {
 	if peer.ID == "" {
 		return fmt.Errorf("peer id is required")
 	}
 	if len(peer.Addresses) == 0 {
 		return fmt.Errorf("peer %q has no reachable address", peer.ID)
 	}
-	got, err := fetchPeerHealth(ctx, peer.Addresses[0], joinToken)
+	got, err := fetchPeerHealthWithClient(ctx, peer.Addresses[0], joinToken, client)
 	if err != nil {
 		return err
 	}
@@ -728,11 +740,15 @@ func probePeerHealthWithToken(ctx context.Context, peer domain.Peer, joinToken s
 }
 
 func probePeerHealthWithTokenManager(ctx context.Context, peer domain.Peer, joinToken string, joinTokens *membership.TokenManager) error {
+	return probePeerHealthWithTokenManagerAndClient(ctx, peer, joinToken, joinTokens, peerControlHTTPClient())
+}
+
+func probePeerHealthWithTokenManagerAndClient(ctx context.Context, peer domain.Peer, joinToken string, joinTokens *membership.TokenManager, client *http.Client) error {
 	token, err := authorizedOutboundJoinToken(joinToken, joinTokens)
 	if err != nil {
 		return err
 	}
-	return probePeerHealthWithToken(ctx, peer, token)
+	return probePeerHealthWithClient(ctx, peer, token, client)
 }
 
 func authorizedOutboundJoinToken(joinToken string, joinTokens *membership.TokenManager) (string, error) {
@@ -746,6 +762,10 @@ func authorizedOutboundJoinToken(joinToken string, joinTokens *membership.TokenM
 }
 
 func fetchPeerHealth(ctx context.Context, address, joinToken string) (domain.Peer, error) {
+	return fetchPeerHealthWithClient(ctx, address, joinToken, peerControlHTTPClient())
+}
+
+func fetchPeerHealthWithClient(ctx context.Context, address, joinToken string, client *http.Client) (domain.Peer, error) {
 	reachable, err := reachablePeerAddress(address)
 	if err != nil {
 		return domain.Peer{}, err
@@ -759,7 +779,10 @@ func fetchPeerHealth(ctx context.Context, address, joinToken string) (domain.Pee
 	if joinToken != "" {
 		req.Header.Set("X-Myc-Join-Token", joinToken)
 	}
-	resp, err := peerControlHTTPClient().Do(req)
+	if client == nil {
+		client = peerControlHTTPClient()
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return domain.Peer{}, fmt.Errorf("%w: %v", domain.ErrUnreachable, err)
 	}
