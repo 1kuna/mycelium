@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -486,24 +487,22 @@ func TestBuildPeerGatewayRequiresRPCTokenForJoin(t *testing.T) {
 
 func TestPeerHealthProbeAndDeadMarker(t *testing.T) {
 	peer := domain.Peer{ID: "peer-a", Addresses: []string{"http://placeholder"}, Compute: true}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/peer/health" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
 		peer.Addresses[0] = serverURL(r)
 		_ = json.NewEncoder(w).Encode(peer)
 	}))
-	defer server.Close()
-	peer.Addresses[0] = server.URL
+	peer.Addresses[0] = "http://peer-health.test"
 
-	if err := probePeerHealth(context.Background(), peer); err != nil {
+	if err := probePeerHealthWithClient(context.Background(), peer, "", client); err != nil {
 		t.Fatalf("probePeerHealth: %v", err)
 	}
-	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	bad := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(domain.Peer{ID: "other"})
 	}))
-	defer bad.Close()
-	if err := probePeerHealth(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{bad.URL}}); err == nil || !strings.Contains(err.Error(), "other") {
+	if err := probePeerHealthWithClient(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{"http://bad-peer-health.test"}}, "", bad); err == nil || !strings.Contains(err.Error(), "other") {
 		t.Fatalf("bad peer err = %v", err)
 	}
 	if err := probePeerHealth(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}}); !errors.Is(err, domain.ErrUnreachable) {
@@ -542,15 +541,14 @@ func TestRegistryRPCRequiresAuthAndMergesRecords(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	mountRegistryHTTP(mux, store, "rpc-secret")
-	server := httptest.NewServer(mux)
-	defer server.Close()
-	peer := domain.Peer{ID: "peer-a", Addresses: []string{server.URL}}
+	client := directHTTPClient(mux)
+	peer := domain.Peer{ID: "peer-a", Addresses: []string{"http://registry-peer.test"}}
 
-	if _, err := (registryHTTPClient{}).Snapshot(ctx, peer); err == nil || !strings.Contains(err.Error(), "rpc token") {
+	if _, err := (registryHTTPClient{Client: client}).Snapshot(ctx, peer); err == nil || !strings.Contains(err.Error(), "rpc token") {
 		t.Fatalf("unauthorized snapshot err = %v", err)
 	}
-	client := registryHTTPClient{AuthToken: "rpc-secret"}
-	records, err := client.Snapshot(ctx, peer)
+	registryClient := registryHTTPClient{AuthToken: "rpc-secret", Client: client}
+	records, err := registryClient.Snapshot(ctx, peer)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -564,7 +562,7 @@ func TestRegistryRPCRequiresAuthAndMergesRecords(t *testing.T) {
 		Request:     []byte(`{"job":"remote"}`),
 		UpdatedAt:   time.Unix(21, 0).UTC(),
 	}
-	if err := client.Push(ctx, peer, []domain.JobRecord{remote}); err != nil {
+	if err := registryClient.Push(ctx, peer, []domain.JobRecord{remote}); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	records, err = store.Snapshot(ctx)
@@ -589,15 +587,14 @@ func TestTelemetryRPCRequiresAuthAndMergesMetricsAndRecommendations(t *testing.T
 	}
 	mux := http.NewServeMux()
 	mountTelemetryHTTP(mux, store, "rpc-secret")
-	server := httptest.NewServer(mux)
-	defer server.Close()
-	peer := domain.Peer{ID: "peer-a", Addresses: []string{server.URL}}
+	client := directHTTPClient(mux)
+	peer := domain.Peer{ID: "peer-a", Addresses: []string{"http://telemetry-peer.test"}}
 
-	if _, err := (telemetryHTTPClient{}).Metrics(ctx, peer); err == nil || !strings.Contains(err.Error(), "rpc token") {
+	if _, err := (telemetryHTTPClient{Client: client}).Metrics(ctx, peer); err == nil || !strings.Contains(err.Error(), "rpc token") {
 		t.Fatalf("unauthorized metrics err = %v", err)
 	}
-	client := telemetryHTTPClient{AuthToken: "rpc-secret"}
-	metrics, err := client.Metrics(ctx, peer)
+	telemetryClient := telemetryHTTPClient{AuthToken: "rpc-secret", Client: client}
+	metrics, err := telemetryClient.Metrics(ctx, peer)
 	if err != nil {
 		t.Fatalf("Metrics: %v", err)
 	}
@@ -605,7 +602,7 @@ func TestTelemetryRPCRequiresAuthAndMergesMetricsAndRecommendations(t *testing.T
 		t.Fatalf("metrics = %+v", metrics)
 	}
 	remoteMetric := domain.RunMetric{JobID: "job-remote", NodeID: "peer-b", Project: "project-a", TokensPerSec: 18, At: time.Unix(21, 0).UTC()}
-	if err := client.PushMetrics(ctx, peer, []domain.RunMetric{remoteMetric}); err != nil {
+	if err := telemetryClient.PushMetrics(ctx, peer, []domain.RunMetric{remoteMetric}); err != nil {
 		t.Fatalf("PushMetrics: %v", err)
 	}
 	metrics, err = store.Metrics(ctx, "")
@@ -616,10 +613,10 @@ func TestTelemetryRPCRequiresAuthAndMergesMetricsAndRecommendations(t *testing.T
 		t.Fatalf("local metrics = %+v", metrics)
 	}
 	rec := domain.RecommendationRecord{ID: "rec-a", Type: optimizer.RecommendationContextCap, ProjectID: "project-a", CreatedAt: time.Unix(22, 0).UTC()}
-	if err := client.PushRecommendations(ctx, peer, []domain.RecommendationRecord{rec}); err != nil {
+	if err := telemetryClient.PushRecommendations(ctx, peer, []domain.RecommendationRecord{rec}); err != nil {
 		t.Fatalf("PushRecommendations: %v", err)
 	}
-	recs, err := client.Recommendations(ctx, peer)
+	recs, err := telemetryClient.Recommendations(ctx, peer)
 	if err != nil {
 		t.Fatalf("Recommendations: %v", err)
 	}
@@ -811,29 +808,26 @@ func TestPeerRPCClientErrorBranches(t *testing.T) {
 	if err := doPeerRPC(ctx, nil, "", domain.Peer{ID: "peer-a"}, http.MethodGet, "/x", nil, nil); err == nil {
 		t.Fatal("peer without address accepted")
 	}
-	errorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	errorClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "nope", http.StatusForbidden)
 	}))
-	defer errorServer.Close()
-	if err := doPeerRPC(ctx, errorServer.Client(), "", domain.Peer{ID: "peer-a", Addresses: []string{errorServer.URL}}, http.MethodGet, "/x", nil, nil); err == nil || !strings.Contains(err.Error(), "nope") {
+	if err := doPeerRPC(ctx, errorClient, "", domain.Peer{ID: "peer-a", Addresses: []string{"http://peer-error.test"}}, http.MethodGet, "/x", nil, nil); err == nil || !strings.Contains(err.Error(), "nope") {
 		t.Fatalf("status err = %v", err)
 	}
-	badJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	badJSON := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{`))
 	}))
-	defer badJSON.Close()
 	var out map[string]string
-	if err := doPeerRPC(ctx, badJSON.Client(), "", domain.Peer{ID: "peer-a", Addresses: []string{badJSON.URL}}, http.MethodGet, "/x", nil, &out); err == nil {
+	if err := doPeerRPC(ctx, badJSON, "", domain.Peer{ID: "peer-a", Addresses: []string{"http://peer-bad-json.test"}}, http.MethodGet, "/x", nil, &out); err == nil {
 		t.Fatal("bad JSON peer response accepted")
 	}
-	okServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	okClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer rpc-secret" || r.Header.Get("Content-Type") != "application/json" {
 			t.Fatalf("headers = %+v", r.Header)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	defer okServer.Close()
-	if err := doPeerRPC(ctx, okServer.Client(), "rpc-secret", domain.Peer{ID: "peer-a", Addresses: []string{okServer.URL}}, http.MethodPost, "/x", map[string]string{"a": "b"}, nil); err != nil {
+	if err := doPeerRPC(ctx, okClient, "rpc-secret", domain.Peer{ID: "peer-a", Addresses: []string{"http://peer-ok.test"}}, http.MethodPost, "/x", map[string]string{"a": "b"}, nil); err != nil {
 		t.Fatalf("ok peer rpc: %v", err)
 	}
 }
@@ -868,36 +862,36 @@ func TestRescueRecoveredJobDecodesPayloadAndSubmits(t *testing.T) {
 
 func TestSeedPeerProbeRemembersReachablePeer(t *testing.T) {
 	seed := domain.Peer{ID: "seed-peer", Addresses: []string{"127.0.0.1:0"}, Compute: true}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Myc-Join-Token") != "secret" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(seed)
 	}))
-	defer server.Close()
+	seedURL := "http://seed-peer.test"
 	cache := membership.NewCachedPeerDiscovery(&mocks.PeerDiscovery{}, mocks.NewFakeClock(time.Unix(1, 0).UTC()), time.Minute)
 
 	manager, err := membership.NewTokenManager("secret")
 	if err != nil {
 		t.Fatalf("NewTokenManager: %v", err)
 	}
-	probeSeedPeers(context.Background(), cache, []string{server.URL}, "secret", manager)
+	probeSeedPeersWithClient(context.Background(), cache, []string{seedURL}, "secret", manager, client)
 	peers, err := cache.Peers(context.Background())
 	if err != nil {
 		t.Fatalf("Peers: %v", err)
 	}
-	if len(peers) != 1 || peers[0].ID != "seed-peer" || peers[0].Addresses[0] != strings.TrimPrefix(server.URL, "http://") {
+	if len(peers) != 1 || peers[0].ID != "seed-peer" || peers[0].Addresses[0] != strings.TrimPrefix(seedURL, "http://") {
 		t.Fatalf("seed peers = %+v", peers)
 	}
-	if _, err := fetchPeerHealth(context.Background(), server.URL, "wrong"); !errors.Is(err, domain.ErrUnreachable) {
+	if _, err := fetchPeerHealthWithClient(context.Background(), seedURL, "wrong", client); !errors.Is(err, domain.ErrUnreachable) {
 		t.Fatalf("wrong join token err = %v", err)
 	}
 	if err := manager.Revoke("secret"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	cache = membership.NewCachedPeerDiscovery(&mocks.PeerDiscovery{}, mocks.NewFakeClock(time.Unix(1, 0).UTC()), time.Minute)
-	probeSeedPeers(context.Background(), cache, []string{server.URL}, "secret", manager)
+	probeSeedPeersWithClient(context.Background(), cache, []string{seedURL}, "secret", manager, client)
 	peers, err = cache.Peers(context.Background())
 	if err != nil {
 		t.Fatalf("Peers after revoke: %v", err)
@@ -942,20 +936,20 @@ func TestPeerBackgroundHelpersUseFakeClockAndPersistEffects(t *testing.T) {
 	})
 
 	seed := domain.Peer{ID: "seed-peer", Addresses: []string{"127.0.0.1:0"}, Compute: true}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Myc-Join-Token") != "secret" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(seed)
 	}))
-	defer server.Close()
+	seedURL := "http://seed-prober.test"
 	cache := membership.NewCachedPeerDiscovery(&mocks.PeerDiscovery{}, clk, time.Minute)
 	manager, err := membership.NewTokenManager("secret")
 	if err != nil {
 		t.Fatalf("NewTokenManager: %v", err)
 	}
-	startSeedPeerProber(ctx, cache, []string{server.URL}, "secret", manager, clk, time.Millisecond)
+	startSeedPeerProberWithClient(ctx, cache, []string{seedURL}, "secret", manager, clk, time.Millisecond, client)
 	waitForCondition(t, func() bool {
 		peers, err := cache.Peers(context.Background())
 		return err == nil && len(peers) == 1 && peers[0].ID == seed.ID
@@ -969,7 +963,7 @@ func TestPeerBackgroundHelpersUseFakeClockAndPersistEffects(t *testing.T) {
 	if got := peerDiscoveryTTL(2 * time.Second); got != 10*time.Second {
 		t.Fatalf("ttl = %s", got)
 	}
-	if err := probePeerHealthWithTokenManager(context.Background(), domain.Peer{ID: seed.ID, Addresses: []string{server.URL}}, "secret", manager); err != nil {
+	if err := probePeerHealthWithTokenManagerAndClient(context.Background(), domain.Peer{ID: seed.ID, Addresses: []string{seedURL}}, "secret", manager, client); err != nil {
 		t.Fatalf("probe with manager: %v", err)
 	}
 }
@@ -1094,6 +1088,20 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 
 func serverURL(r *http.Request) string {
 	return "http://" + r.Host
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func directHTTPClient(handler http.Handler) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Result(), nil
+	})}
 }
 
 func peerTestRegistry(t *testing.T) *storesqlite.Store {
@@ -1644,9 +1652,8 @@ func TestBuildPeerGatewayWithLocalCompute(t *testing.T) {
 	if got, err := store.Node(context.Background(), "peer-a"); err != nil || got.ID != "peer-a" {
 		t.Fatalf("stored node = %+v %v", got, err)
 	}
-	server := httptest.NewServer(handler)
-	defer server.Close()
-	client := nodeagent.NewHTTPClient(server.URL)
+	client := nodeagent.NewHTTPClient("http://local-node.test")
+	client.Client = directHTTPClient(handler)
 	job := domain.Job{ID: "job-a", Priority: domain.PriorityInteractive}
 	offer, err := client.Offer(context.Background(), domain.AdmissionRequest{Job: job, Claim: domain.Claim{WeightsMB: 1}})
 	if err != nil {
@@ -1956,31 +1963,28 @@ func writePeerConfig(t *testing.T, cfg PeerConfig) string {
 
 func waitForFile(t *testing.T, path string) []byte {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for {
+	var lastErr error
+	for i := 0; i < 10000; i++ {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			return data
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		time.Sleep(10 * time.Millisecond)
+		lastErr = err
+		runtime.Gosched()
 	}
+	t.Fatalf("read %s: %v", path, lastErr)
+	return nil
 }
 
 func waitForCondition(t *testing.T, ready func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for {
+	for i := 0; i < 10000; i++ {
 		if ready() {
 			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("condition did not become true")
-		}
-		time.Sleep(10 * time.Millisecond)
+		runtime.Gosched()
 	}
+	t.Fatal("condition did not become true")
 }
 
 func containsString(values []string, want string) bool {
