@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -41,8 +42,11 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 	if err != nil {
 		return domain.FleetSnapshot{}, err
 	}
-	agents := map[string]ports.NodeAgent{}
-	var fleet domain.FleetSnapshot
+	type peerAgent struct {
+		peer  domain.Peer
+		agent ports.NodeAgent
+	}
+	candidates := []peerAgent{}
 	for _, peer := range peers {
 		if d.SelfID != "" && peer.ID == d.SelfID {
 			continue
@@ -54,22 +58,46 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 		if err != nil {
 			return domain.FleetSnapshot{}, err
 		}
-		snap, err := agent.Snapshot(ctx)
-		if err != nil {
-			log.Printf("mycelium peer snapshot failed: peer=%s address=%s error=%v", peer.ID, peer.Addresses[0], err)
-			node := unreachablePeerNode(peer)
-			if err := d.saveNode(ctx, node); err != nil {
-				return domain.FleetSnapshot{}, err
-			}
-			fleet.Nodes = append(fleet.Nodes, node)
+		candidates = append(candidates, peerAgent{peer: peer, agent: agent})
+	}
+	type snapshotResult struct {
+		peer  domain.Peer
+		agent ports.NodeAgent
+		snap  domain.NodeSnapshot
+		err   error
+	}
+	results := make(chan snapshotResult, len(candidates))
+	for _, candidate := range candidates {
+		candidate := candidate
+		go func() {
+			snap, err := candidate.agent.Snapshot(ctx)
+			results <- snapshotResult{peer: candidate.peer, agent: candidate.agent, snap: snap, err: err}
+		}()
+	}
+	agents := map[string]ports.NodeAgent{}
+	var fleet domain.FleetSnapshot
+	for range candidates {
+		result := <-results
+		if result.err != nil {
+			log.Printf("mycelium peer snapshot failed: peer=%s address=%s error=%v", result.peer.ID, result.peer.Addresses[0], result.err)
+			fleet.Nodes = append(fleet.Nodes, unreachablePeerNode(result.peer))
 			continue
 		}
-		if err := d.saveNode(ctx, snap.Node); err != nil {
+		fleet.Nodes = append(fleet.Nodes, result.snap.Node)
+		fleet.Instances = append(fleet.Instances, result.snap.Instances...)
+		agents[result.snap.Node.ID] = result.agent
+	}
+	sort.Slice(fleet.Nodes, func(i, j int) bool { return fleet.Nodes[i].ID < fleet.Nodes[j].ID })
+	sort.Slice(fleet.Instances, func(i, j int) bool {
+		if fleet.Instances[i].NodeID == fleet.Instances[j].NodeID {
+			return fleet.Instances[i].ID < fleet.Instances[j].ID
+		}
+		return fleet.Instances[i].NodeID < fleet.Instances[j].NodeID
+	})
+	for _, node := range fleet.Nodes {
+		if err := d.saveNode(ctx, node); err != nil {
 			return domain.FleetSnapshot{}, err
 		}
-		fleet.Nodes = append(fleet.Nodes, snap.Node)
-		fleet.Instances = append(fleet.Instances, snap.Instances...)
-		agents[snap.Node.ID] = agent
 	}
 	d.mu.Lock()
 	d.agents = agents
