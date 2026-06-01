@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"mycelium/internal/domain"
 	nodeagent "mycelium/internal/node"
@@ -166,6 +167,64 @@ func TestPeerDirectoryStoreErrorsFailLoudly(t *testing.T) {
 	}
 }
 
+func TestPeerDirectorySnapshotsPeersInParallelAndSorts(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan string, 2)
+	agents := map[string]ports.NodeAgent{
+		"peer-b": blockingSnapshotAgent{node: fixtures.MakeNode(fixtures.WithNodeID("node-b")), entered: entered, release: release},
+		"peer-a": blockingSnapshotAgent{node: fixtures.MakeNode(fixtures.WithNodeID("node-a")), entered: entered, release: release},
+	}
+	directory := &PeerDirectory{
+		Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{
+			{ID: "peer-b", Addresses: []string{"127.0.0.1:2"}, Compute: true},
+			{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true},
+		}},
+	}
+	directory.Factory = func(address string) ports.NodeAgent {
+		switch address {
+		case "127.0.0.1:1":
+			return agents["peer-a"]
+		case "127.0.0.1:2":
+			return agents["peer-b"]
+		default:
+			t.Fatalf("unexpected address %s", address)
+			return nil
+		}
+	}
+
+	done := make(chan struct{})
+	var fleet domain.FleetSnapshot
+	var err error
+	go func() {
+		fleet, err = directory.Snapshot(context.Background())
+		close(done)
+	}()
+	wantEntered := map[string]bool{}
+	for len(wantEntered) < 2 {
+		select {
+		case id := <-entered:
+			wantEntered[id] = true
+		case <-time.After(time.Second):
+			t.Fatal("snapshot did not fan out to both peers")
+		}
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot did not finish after peers were released")
+	}
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(fleet.Nodes) != 2 || fleet.Nodes[0].ID != "node-a" || fleet.Nodes[1].ID != "node-b" {
+		t.Fatalf("nodes not sorted: %+v", fleet.Nodes)
+	}
+	if got, err := directory.NodeAgent("node-a"); err != nil || got == nil {
+		t.Fatalf("NodeAgent node-a: %v", err)
+	}
+}
+
 type failingSnapshotAgent struct {
 	ports.NodeAgent
 	err error
@@ -173,6 +232,42 @@ type failingSnapshotAgent struct {
 
 func (a failingSnapshotAgent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 	return domain.NodeSnapshot{}, a.err
+}
+
+type blockingSnapshotAgent struct {
+	node    domain.Node
+	entered chan<- string
+	release <-chan struct{}
+}
+
+func (a blockingSnapshotAgent) Snapshot(ctx context.Context) (domain.NodeSnapshot, error) {
+	a.entered <- a.node.ID
+	select {
+	case <-ctx.Done():
+		return domain.NodeSnapshot{}, ctx.Err()
+	case <-a.release:
+		return domain.NodeSnapshot{Node: a.node}, nil
+	}
+}
+
+func (a blockingSnapshotAgent) Load(context.Context, domain.Preset) (domain.ModelInstance, error) {
+	return domain.ModelInstance{}, errors.New("not implemented")
+}
+
+func (a blockingSnapshotAgent) Unload(context.Context, string) error {
+	return errors.New("not implemented")
+}
+
+func (a blockingSnapshotAgent) InspectModel(context.Context, domain.Preset) (domain.ModelMetadata, error) {
+	return domain.ModelMetadata{}, errors.New("not implemented")
+}
+
+func (a blockingSnapshotAgent) BeginRequest(context.Context, string) error {
+	return nil
+}
+
+func (a blockingSnapshotAgent) EndRequest(context.Context, string) error {
+	return nil
 }
 
 type recordingPeerNodeStore struct {
