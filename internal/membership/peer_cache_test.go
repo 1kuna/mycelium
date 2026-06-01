@@ -163,3 +163,29 @@ func TestCachedPeerDiscoveryStartConsumesUpstreamWatch(t *testing.T) {
 	}
 	t.Fatal("watched peer was not cached")
 }
+
+func TestCachedPeerDiscoveryDefaultAndContextPaths(t *testing.T) {
+	upstream := &mocks.PeerDiscovery{}
+	cache := NewCachedPeerDiscovery(upstream, nil, 0)
+	peer := domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}}
+	if err := cache.Remember(peer); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+	if err := cache.Advertise(context.Background(), peer); err != nil {
+		t.Fatalf("Advertise: %v", err)
+	}
+	if len(upstream.PeersVal) != 1 || upstream.PeersVal[0].ID != peer.ID {
+		t.Fatalf("upstream peers = %+v", upstream.PeersVal)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := cache.Peers(canceled); err != context.Canceled {
+		t.Fatalf("Peers canceled err = %v", err)
+	}
+	if _, err := cache.WatchPeers(canceled); err != context.Canceled {
+		t.Fatalf("WatchPeers canceled err = %v", err)
+	}
+	if err := (*CachedPeerDiscovery)(nil).Remember(peer); err == nil {
+		t.Fatal("nil Remember succeeded")
+	}
+}

@@ -71,6 +71,21 @@ func TestLANTunnelRejectsBadInputAndClosesMissing(t *testing.T) {
 	if _, err := tunnel.Open(context.Background(), domain.Node{ID: "node-a", Address: "http:///missing-host"}); err == nil || !strings.Contains(err.Error(), "missing host") {
 		t.Fatalf("missing host err = %v", err)
 	}
+	tunnel.Listener = errListenerFactory{err: fmt.Errorf("listen failed")}
+	if _, err := tunnel.Open(context.Background(), domain.Node{ID: "node-a", Address: "127.0.0.1:1"}); err == nil || !strings.Contains(err.Error(), "listen failed") {
+		t.Fatalf("listen err = %v", err)
+	}
+	if target, err := tunnelTarget(" 127.0.0.1:1 "); err != nil || target.String() != "http://127.0.0.1:1" {
+		t.Fatalf("trimmed target = %s %v", target, err)
+	}
+}
+
+type errListenerFactory struct {
+	err error
+}
+
+func (f errListenerFactory) Listen(context.Context, string, string) (net.Listener, error) {
+	return nil, f.err
 }
 
 type fakeListenerFactory struct {

@@ -218,6 +218,20 @@ func TestPeerLANDiscoveryRejectsMalformedPackets(t *testing.T) {
 	}
 }
 
+func TestPeerLANDiscoveryHelperBranches(t *testing.T) {
+	if _, ok := (PeerLANDiscovery{}).packetFactory().(netPacketFactory); !ok {
+		t.Fatal("default packet factory is not net-backed")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !peerReadDone(ctx, errors.New("boom")) {
+		t.Fatal("canceled context did not finish peer read")
+	}
+	if peerReadDone(context.Background(), errors.New("boom")) {
+		t.Fatal("ordinary read error ended peer scan")
+	}
+}
+
 func assertPeers(t *testing.T, results <-chan []domain.Peer, errs <-chan error, ids ...string) {
 	t.Helper()
 	select {
