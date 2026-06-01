@@ -988,6 +988,73 @@ func TestBuildComputeRuntimeSelectsConfiguredBackends(t *testing.T) {
 	}
 }
 
+func TestComputeBackendAdapterLaunchesCustomProcessWithRenderedArgs(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	out := filepath.Join(t.TempDir(), "custom-args.txt")
+	registry := nodeagent.StoreProcessRegistry{Store: store, NodeID: "peer-a"}
+	adapter, err := computeBackendAdapter(ComputeConfig{
+		Backend:       domain.BackendCustom,
+		BackendBinary: "/bin/sh",
+		CustomArgs: []string{
+			"-c",
+			"printf '%s\n%s\n%s\n' \"$1\" \"$2\" \"$4\" > \"$3\"; sleep 30",
+			"sh",
+			"{model}|{preset}|{host}|{port}|{addr}",
+			"base={preset}:{port}",
+			out,
+		},
+		StopGraceMS: 25,
+	}, registry)
+	if err != nil {
+		t.Fatalf("computeBackendAdapter: %v", err)
+	}
+	if adapter.Name() != "custom" {
+		t.Fatalf("adapter name = %s", adapter.Name())
+	}
+	preset := testPreset("custom-preset")
+	preset.ModelRef = "model.gguf"
+	preset.LaunchArgs = []string{"launch={preset}:{addr}"}
+	handle, err := adapter.Launch(ctx, preset, "127.0.0.1:54321")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	defer func() { _ = adapter.Stop(context.Background(), handle) }()
+
+	data := waitForFile(t, out)
+	want := "model.gguf|custom-preset|127.0.0.1|54321|127.0.0.1:54321\nbase=custom-preset:54321\nlaunch=custom-preset:127.0.0.1:54321\n"
+	if string(data) != want {
+		t.Fatalf("custom args = %q want %q", data, want)
+	}
+	refs, err := store.ProcessRefs(ctx, "peer-a")
+	if err != nil {
+		t.Fatalf("ProcessRefs: %v", err)
+	}
+	if len(refs) != 1 || refs[0].PID != handle.PID {
+		t.Fatalf("refs = %+v handle=%+v", refs, handle)
+	}
+	if err := adapter.Stop(ctx, handle); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	refs, err = store.ProcessRefs(ctx, "peer-a")
+	if err != nil {
+		t.Fatalf("ProcessRefs after stop: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("refs after stop = %+v", refs)
+	}
+}
+
+func TestComputeBackendAdapterRequiresCustomBinary(t *testing.T) {
+	if _, err := computeBackendAdapter(ComputeConfig{Backend: domain.BackendCustom}, nodeagent.StoreProcessRegistry{}); err == nil || !strings.Contains(err.Error(), "custom compute backend binary") {
+		t.Fatalf("missing custom binary err = %v", err)
+	}
+}
+
 type localAdmissionOnly struct{}
 
 func (localAdmissionOnly) Offer(context.Context, domain.Job, domain.Claim) (domain.LeaseOffer, error) {
@@ -1053,6 +1120,21 @@ func writePeerConfig(t *testing.T, cfg PeerConfig) string {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
+}
+
+func waitForFile(t *testing.T, path string) []byte {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return data
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 type optimizerFleet struct {

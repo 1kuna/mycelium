@@ -40,6 +40,9 @@ type ComputeConfig struct {
 	Name          string         `json:"name"`
 	Backend       domain.Backend `json:"backend"`
 	BackendBinary string         `json:"backend_binary"`
+	CustomArgs    []string       `json:"custom_args,omitempty"`
+	HealthPath    string         `json:"health_path,omitempty"`
+	StopGraceMS   int            `json:"stop_grace_ms,omitempty"`
 	LlamaServer   string         `json:"llama_server"`
 	GGUFParser    string         `json:"gguf_parser"`
 	MaxUtil       float64        `json:"max_util"`

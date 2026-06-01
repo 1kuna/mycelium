@@ -15,7 +15,7 @@ func TestRegistryFailsUnknownBackendLoudly(t *testing.T) {
 }
 
 func TestDefaultRegistryResolvesOpenAICompatibleBackends(t *testing.T) {
-	for _, backend := range []domain.Backend{domain.BackendLlamaCpp, domain.BackendVLLM, domain.BackendMLX} {
+	for _, backend := range []domain.Backend{domain.BackendLlamaCpp, domain.BackendVLLM, domain.BackendMLX, domain.BackendCustom} {
 		profile, err := DefaultRegistry().ForBackend(backend)
 		if err != nil {
 			t.Fatalf("ForBackend(%s): %v", backend, err)
@@ -34,6 +34,10 @@ func TestDefaultRegistryResolvesOpenAICompatibleBackends(t *testing.T) {
 	}
 	if _, err := DefaultRegistry().ByID("missing"); err == nil {
 		t.Fatal("missing profile succeeded")
+	}
+	anthropic, err := DefaultRegistry().ByID("anthropic")
+	if err != nil || anthropic.Format != FormatAnthropic || anthropic.Backend != "" {
+		t.Fatalf("anthropic profile = %+v %v", anthropic, err)
 	}
 	if (Registry{}).IsZero() != true || DefaultRegistry().IsZero() {
 		t.Fatal("IsZero mismatch")
