@@ -1,4 +1,4 @@
-.PHONY: fmt build vet test coverage smoke smoke-local smoke-fleet smoke-mlx smoke-vllm smoke-b70 ci
+.PHONY: fmt build vet test coverage smoke smoke-local smoke-fleet smoke-mlx smoke-vllm smoke-b70 smoke-spark-vllm ci
 
 SMOKE_JSON ?= smoke.out
 
@@ -41,5 +41,9 @@ smoke-vllm:
 smoke-b70:
 	MYCELIUM_EXPECT_INTEL_ARC_B70=1 go test -count=1 -tags smoke ./test/smoke/... -run TestLinuxIntelArcB70HardwareDiscovery -timeout 5m -json > $(SMOKE_JSON)
 	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestLinuxIntelArcB70HardwareDiscovery
+
+smoke-spark-vllm:
+	go test -count=1 -tags smoke ./test/smoke/... -run TestSparkVLLMPeerRoutingSmoke -timeout 30m -json > $(SMOKE_JSON)
+	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestSparkVLLMPeerRoutingSmoke
 
 ci: fmt build vet test coverage

@@ -67,6 +67,48 @@ func TestLinuxDetectorBuildsNVIDIANode(t *testing.T) {
 	}
 }
 
+func TestLinuxDetectorBuildsSparkGB10Node(t *testing.T) {
+	detector := Detector{
+		GOOS:  "linux",
+		Clock: mocks.NewFakeClock(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)),
+		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			switch name {
+			case "nvidia-smi":
+				return []byte("0, NVIDIA GB10, [N/A], 12.1\n"), nil
+			case "getconf":
+				if len(args) != 1 {
+					t.Fatalf("getconf args = %+v", args)
+				}
+				switch args[0] {
+				case "_PHYS_PAGES":
+					return []byte("31900187\n"), nil
+				case "PAGE_SIZE":
+					return []byte("4096\n"), nil
+				default:
+					t.Fatalf("unexpected getconf arg %q", args[0])
+				}
+			default:
+				t.Fatalf("unexpected command %s", name)
+			}
+			return nil, nil
+		},
+	}
+	node, err := detector.Detect(context.Background(), domain.Node{ID: "spark", MaxUtil: 0.55})
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if node.OS != "linux" || !node.UnifiedMemory || node.OOMSeverity != domain.OOMCatastrophic {
+		t.Fatalf("node = %+v", node)
+	}
+	if node.Labels["gpu.vendor"] != "nvidia" || node.Labels["gpu.kind"] != "gb10" || node.Labels["memory.class"] != "unified" {
+		t.Fatalf("labels = %+v", node.Labels)
+	}
+	acc := node.Accelerators[0]
+	if acc.Vendor != "nvidia" || acc.Kind != "gb10" || !acc.UnifiedMemory || acc.VRAMTotalMB != 124610 || acc.ComputeCapability != "12.1" {
+		t.Fatalf("accelerator = %+v", acc)
+	}
+}
+
 func TestLinuxDetectorBuildsIntelArcB70Node(t *testing.T) {
 	detector := Detector{
 		GOOS:  "linux",
@@ -154,9 +196,20 @@ func TestLinuxDetectorErrorPaths(t *testing.T) {
 		[]byte("x, NVIDIA, 1, 8.9"),
 		[]byte("0, NVIDIA, nope, 8.9"),
 	} {
-		if _, err := parseNVIDIASMI(raw); err == nil {
+		if _, err := parseNVIDIASMI(raw, 0); err == nil {
 			t.Fatalf("parse accepted %q", raw)
 		}
+	}
+	if _, err := parseNVIDIASMI([]byte("0, NVIDIA GB10, [N/A], 12.1"), 0); err == nil {
+		t.Fatal("GB10 without memory fallback accepted")
+	}
+	if _, err := linuxSystemMemoryMB(context.Background(), func(_ context.Context, name string, args ...string) ([]byte, error) {
+		return []byte("bad"), nil
+	}); err == nil {
+		t.Fatal("invalid system memory accepted")
+	}
+	if !nvidiaSMINeedsSystemMemory([]byte("0, NVIDIA GB10, [N/A], 12.1\n")) || nvidiaSMINeedsSystemMemory([]byte("0, NVIDIA GeForce RTX 4090, 24564, 8.9\n")) {
+		t.Fatal("GB10 memory fallback detection mismatch")
 	}
 	for _, raw := range [][]byte{
 		[]byte(""),
