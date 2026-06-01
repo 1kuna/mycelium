@@ -111,6 +111,21 @@ func TestJobRegistryValidationAndContext(t *testing.T) {
 			}
 		})
 	}
+	redactedStandard := recordWith(valid, func(r *domain.JobRecord) {
+		r.Request = nil
+		r.PayloadRedacted = true
+	})
+	if err := registry.Put(context.Background(), redactedStandard); err == nil || !strings.Contains(err.Error(), "private") {
+		t.Fatalf("redacted standard err = %v", err)
+	}
+	redactedPrivate := recordWith(valid, func(r *domain.JobRecord) {
+		r.Request = nil
+		r.Handling = domain.HandlingPrivate
+		r.PayloadRedacted = true
+	})
+	if err := registry.Put(context.Background(), redactedPrivate); err != nil {
+		t.Fatalf("redacted private should be accepted: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

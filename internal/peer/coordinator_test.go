@@ -159,6 +159,43 @@ func TestCoordinatorWarmInstanceRecordsWithoutOwnerLease(t *testing.T) {
 	assertLatestStatus(t, registry, domain.JobDone, node.ID)
 }
 
+func TestCoordinatorEncryptsPrivateRegistryPayload(t *testing.T) {
+	ctx := context.Background()
+	clock := mocks.NewFakeClock(time.Unix(116, 0).UTC())
+	job := fixtures.MakeJob(fixtures.WithJobID("job-private"))
+	job.Handling = domain.HandlingPrivate
+	key := []byte("0123456789abcdef0123456789abcdef")
+	registry := NewJobRegistry()
+	coordinator := NewCoordinator(
+		fixtures.MakePeer(fixtures.WithPeerID("peer-a")),
+		jobSource{jobs: map[string]domain.Job{job.ID: job}, payloads: map[string][]byte{job.ID: []byte(`{"secret":"payload"}`)}},
+		registry,
+		&scriptedPlacer{},
+		staticPeerFleet{},
+		ownerResolver{},
+		clock,
+		WithPrivatePayloadKey(key),
+	)
+
+	if err := coordinator.ClaimJob(ctx, job.ID); err != nil {
+		t.Fatalf("ClaimJob: %v", err)
+	}
+	snap, err := registry.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap) != 1 || snap[0].Handling != domain.HandlingPrivate || strings.Contains(string(snap[0].Request), "secret") || strings.Contains(string(snap[0].Request), job.ID) {
+		t.Fatalf("private record = %+v request=%s", snap, snap[0].Request)
+	}
+	gotJob, gotBody, err := DecodeRescuePayloadWithKey(snap[0].Request, key)
+	if err != nil {
+		t.Fatalf("DecodeRescuePayloadWithKey: %v", err)
+	}
+	if gotJob.ID != job.ID || gotJob.Handling != domain.HandlingPrivate || string(gotBody) != `{"secret":"payload"}` {
+		t.Fatalf("decoded job=%+v body=%s", gotJob, gotBody)
+	}
+}
+
 func TestCoordinatorQueuesAndExhaustsReplans(t *testing.T) {
 	ctx := context.Background()
 	clock := mocks.NewFakeClock(time.Unix(120, 0).UTC())
@@ -245,6 +282,11 @@ func TestCoordinatorErrorPaths(t *testing.T) {
 		return job, nil, nil
 	}), NewJobRegistry(), &scriptedPlacer{}, staticPeerFleet{}, ownerResolver{}, clock).ClaimJob(ctx, job.ID); err == nil || !strings.Contains(err.Error(), "rescue") {
 		t.Fatalf("payload err = %v", err)
+	}
+	privateJob := fixtures.MakeJob(fixtures.WithJobID("job-private"))
+	privateJob.Handling = domain.HandlingPrivate
+	if err := NewCoordinator(fixtures.MakePeer(fixtures.WithPeerID("peer-a")), jobSource{jobs: map[string]domain.Job{privateJob.ID: privateJob}, payloads: map[string][]byte{privateJob.ID: []byte(`{"secret":true}`)}}, NewJobRegistry(), &scriptedPlacer{}, staticPeerFleet{}, ownerResolver{}, clock).ClaimJob(ctx, privateJob.ID); err == nil || !strings.Contains(err.Error(), "key") {
+		t.Fatalf("private key err = %v", err)
 	}
 
 	if _, err := (&Coordinator{}).Plan(ctx, job.ID); err == nil {

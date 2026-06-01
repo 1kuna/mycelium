@@ -53,6 +53,9 @@ func (r Recovery) RecoverPeer(ctx context.Context, deadPeerID string) (int, erro
 }
 
 func (r Recovery) shouldConsider(deadPeerID string, rec domain.JobRecord) bool {
+	if rec.PayloadRedacted {
+		return false
+	}
 	return rec.Coordinator == deadPeerID && unfinished(rec.Status)
 }
 

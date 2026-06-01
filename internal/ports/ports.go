@@ -60,6 +60,10 @@ type AdmissionController interface {
 	Preempt(ctx context.Context, leaseID, reason string) error
 }
 
+type PolicyPreempter interface {
+	PreemptForJob(ctx context.Context, req domain.Job, leaseID, reason string) error
+}
+
 type LeaseInspector interface {
 	LeaseForJob(ctx context.Context, jobID string) (domain.Lease, bool, error)
 	LeaseForInstance(ctx context.Context, instanceID string) (domain.Lease, bool, error)

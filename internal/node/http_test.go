@@ -187,6 +187,56 @@ func TestHTTPAdmissionControllerRoundTrip(t *testing.T) {
 	if err := client.Preempt(context.Background(), preemptLease.ID, "test"); err != nil {
 		t.Fatalf("Preempt: %v", err)
 	}
+
+	nextOffer, err := client.Offer(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-policy-victim")), claim)
+	if err != nil {
+		t.Fatalf("policy victim Offer: %v", err)
+	}
+	nextLease, err := client.Commit(context.Background(), nextOffer.OfferID, nextOffer.Fence)
+	if err != nil {
+		t.Fatalf("policy victim Commit: %v", err)
+	}
+	requester := fixtures.MakeJob(fixtures.WithJobID("job-policy-preempt"))
+	if err := client.PreemptForJob(context.Background(), requester, nextLease.ID, "policy aware"); err != nil {
+		t.Fatalf("PreemptForJob: %v", err)
+	}
+}
+
+func TestHTTPAdmissionPreemptForJobUsesSubmitterPolicy(t *testing.T) {
+	admission := NewAdmission(
+		fixtures.MakeNode(fixtures.WithNodeID("node-http"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Now()),
+		WithSubmitterPolicy(SubmitterPolicy{Rules: map[string]SubmitterRule{
+			"submitter-a":  {MaxPriority: domain.PriorityNormal, AllowPrivate: true},
+			"guest": {},
+		}}),
+	)
+	server := httptest.NewServer(HTTPServer{Admission: admission})
+	defer server.Close()
+	client := NewHTTPClient(server.URL)
+	claim := fixtures.MakeClaim(100, 0)
+	victim := fixtures.MakeJob(fixtures.WithJobID("job-victim"))
+	victim.Submitter = "submitter-a"
+	offer, err := client.Offer(context.Background(), victim, claim)
+	if err != nil {
+		t.Fatalf("victim Offer: %v", err)
+	}
+	lease, err := client.Commit(context.Background(), offer.OfferID, offer.Fence)
+	if err != nil {
+		t.Fatalf("victim Commit: %v", err)
+	}
+
+	guest := fixtures.MakeJob(fixtures.WithJobID("job-guest"), fixtures.Interactive)
+	guest.Submitter = "guest"
+	if err := client.PreemptForJob(context.Background(), guest, lease.ID, "too high"); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("guest preempt err = %v", err)
+	}
+	submitter-a := fixtures.MakeJob(fixtures.WithJobID("job-submitter-a"))
+	submitter-a.Submitter = "submitter-a"
+	if err := client.PreemptForJob(context.Background(), submitter-a, lease.ID, "allowed"); err != nil {
+		t.Fatalf("submitter-a PreemptForJob: %v", err)
+	}
 }
 
 func TestHTTPAdmissionPreservesStaleFenceError(t *testing.T) {

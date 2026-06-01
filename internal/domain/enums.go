@@ -25,6 +25,13 @@ const (
 	PreemptHard               Preemption = "hard"
 )
 
+type HandlingClass string
+
+const (
+	HandlingStandard HandlingClass = ""
+	HandlingPrivate  HandlingClass = "private"
+)
+
 type OOMSeverity string
 
 const (

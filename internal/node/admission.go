@@ -19,6 +19,7 @@ type Admission struct {
 	clock     ports.Clock
 	offerTTL  time.Duration
 	instances func() []domain.ModelInstance
+	policy    SubmitterPolicy
 	fence     uint64
 	nextOffer int
 	nextLease int
@@ -68,8 +69,26 @@ func WithAdmissionInstances(instances func() []domain.ModelInstance) AdmissionOp
 	}
 }
 
+func WithSubmitterPolicy(policy SubmitterPolicy) AdmissionOption {
+	return func(a *Admission) {
+		a.policy = policy
+	}
+}
+
+type SubmitterPolicy struct {
+	Rules map[string]SubmitterRule
+}
+
+type SubmitterRule struct {
+	MaxPriority  domain.Priority
+	AllowPrivate bool
+}
+
 func (a *Admission) Offer(ctx context.Context, job domain.Job, claim domain.Claim) (domain.LeaseOffer, error) {
 	if err := ctx.Err(); err != nil {
+		return domain.LeaseOffer{}, err
+	}
+	if err := a.authorize(job); err != nil {
 		return domain.LeaseOffer{}, err
 	}
 
@@ -94,6 +113,13 @@ func (a *Admission) Offer(ctx context.Context, job domain.Job, claim domain.Clai
 	}
 	a.offers[offer.OfferID] = admissionOffer{offer: offer, job: job, acceleratorSet: acceleratorSet}
 	return offer, nil
+}
+
+func (a *Admission) PreemptForJob(ctx context.Context, job domain.Job, leaseID, reason string) error {
+	if err := a.authorize(job); err != nil {
+		return err
+	}
+	return a.Preempt(ctx, leaseID, reason)
 }
 
 func (a *Admission) Commit(ctx context.Context, offerID string, fence uint64) (domain.Lease, error) {
@@ -261,6 +287,47 @@ func (a *Admission) removeLeaseLocked(leaseID, op string) error {
 	return nil
 }
 
+func (a *Admission) authorize(job domain.Job) error {
+	if len(a.policy.Rules) == 0 {
+		return nil
+	}
+	if job.Submitter == "" {
+		return fmt.Errorf("submitter is required by admission policy")
+	}
+	rule, ok := a.policy.Rules[job.Submitter]
+	if !ok {
+		return fmt.Errorf("submitter %q is not authorized", job.Submitter)
+	}
+	if job.Handling == domain.HandlingPrivate && !rule.AllowPrivate {
+		return fmt.Errorf("submitter %q is not authorized for private handling", job.Submitter)
+	}
+	if priorityRank(job.Priority) > priorityRank(rule.maxPriority()) {
+		return fmt.Errorf("submitter %q priority %q exceeds maximum %q", job.Submitter, job.Priority, rule.maxPriority())
+	}
+	return nil
+}
+
+func (r SubmitterRule) maxPriority() domain.Priority {
+	if r.MaxPriority == "" {
+		return domain.PriorityBackground
+	}
+	return r.MaxPriority
+}
+
+func priorityRank(priority domain.Priority) int {
+	switch priority {
+	case domain.PriorityInteractive:
+		return 3
+	case domain.PriorityNormal, "":
+		return 2
+	case domain.PriorityBackground:
+		return 1
+	default:
+		return 0
+	}
+}
+
 var _ ports.AdmissionController = (*Admission)(nil)
+var _ ports.PolicyPreempter = (*Admission)(nil)
 var _ ports.LeaseInspector = (*Admission)(nil)
 var _ ports.LeaseBinder = (*Admission)(nil)

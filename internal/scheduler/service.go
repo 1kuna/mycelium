@@ -100,7 +100,7 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 		return Result{Decision: decision}, nil
 	}
 
-	if err := s.enactPreemption(ctx, decision, fleet); err != nil {
+	if err := s.enactPreemption(ctx, job, decision, fleet); err != nil {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(ctx, job)
 		return Result{Decision: decision}, err
@@ -205,7 +205,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		_ = s.Store.SaveJob(ctx, job)
 		return Result{Decision: decision}, err
 	}
-	if err := s.enactPreemption(ctx, decision, fleet); err != nil {
+	if err := s.enactPreemption(ctx, job, decision, fleet); err != nil {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(ctx, job)
 		return Result{Decision: decision}, err
@@ -398,14 +398,14 @@ func runBeforeColdLoadHook(ctx context.Context, decision domain.PlacementDecisio
 	return nil
 }
 
-func (s *Service) enactPreemption(ctx context.Context, decision domain.PlacementDecision, fleet domain.FleetSnapshot) error {
+func (s *Service) enactPreemption(ctx context.Context, job domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot) error {
 	for _, victimID := range decision.Preempted {
 		victim, ok := instanceByID(fleet.Instances, victimID)
 		if !ok {
 			return fmt.Errorf("preempted instance %q is missing from fleet snapshot", victimID)
 		}
 		if s.Coordinator != nil {
-			if err := s.preemptOwnerLease(ctx, decision, victim); err != nil {
+			if err := s.preemptOwnerLease(ctx, job, decision, victim); err != nil {
 				return err
 			}
 		}
@@ -440,7 +440,7 @@ func (s *Service) enactPreemption(ctx context.Context, decision domain.Placement
 	return nil
 }
 
-func (s *Service) preemptOwnerLease(ctx context.Context, decision domain.PlacementDecision, victim domain.ModelInstance) error {
+func (s *Service) preemptOwnerLease(ctx context.Context, job domain.Job, decision domain.PlacementDecision, victim domain.ModelInstance) error {
 	if s.Owners == nil {
 		return fmt.Errorf("owner admission resolver is not configured")
 	}
@@ -459,11 +459,15 @@ func (s *Service) preemptOwnerLease(ctx context.Context, decision domain.Placeme
 	if !found {
 		return fmt.Errorf("preempted instance %q has no owner lease", victim.ID)
 	}
+	preempter, ok := owner.(ports.PolicyPreempter)
+	if !ok {
+		return fmt.Errorf("owner admission for node %q does not expose policy-aware preemption", victim.NodeID)
+	}
 	reason := "preempted"
 	if decision.JobID != "" {
 		reason += " for " + decision.JobID
 	}
-	if err := owner.Preempt(ctx, lease.ID, reason); err != nil {
+	if err := preempter.PreemptForJob(ctx, job, lease.ID, reason); err != nil {
 		return err
 	}
 	return s.Store.DeleteLease(ctx, lease.ID)

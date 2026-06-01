@@ -282,6 +282,67 @@ func TestAdmissionRejectsExpiredOffer(t *testing.T) {
 	}
 }
 
+func TestAdmissionAppliesSubmitterPolicyToOffersAndPreemption(t *testing.T) {
+	admission := NewAdmission(
+		fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Now()),
+		WithSubmitterPolicy(SubmitterPolicy{Rules: map[string]SubmitterRule{
+			"submitter-a":  {MaxPriority: domain.PriorityNormal, AllowPrivate: true},
+			"guest": {},
+		}}),
+	)
+	claim := fixtures.MakeClaim(100, 0)
+
+	missingSubmitter := fixtures.MakeJob(fixtures.WithJobID("job-missing"))
+	if _, err := admission.Offer(context.Background(), missingSubmitter, claim); err == nil || !strings.Contains(err.Error(), "submitter") {
+		t.Fatalf("missing submitter err = %v", err)
+	}
+	unknown := fixtures.MakeJob(fixtures.WithJobID("job-unknown"))
+	unknown.Submitter = "stranger"
+	if _, err := admission.Offer(context.Background(), unknown, claim); err == nil || !strings.Contains(err.Error(), "not authorized") {
+		t.Fatalf("unknown submitter err = %v", err)
+	}
+	tooHigh := fixtures.MakeJob(fixtures.WithJobID("job-too-high"), fixtures.Interactive)
+	tooHigh.Submitter = "guest"
+	if _, err := admission.Offer(context.Background(), tooHigh, claim); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("too-high priority err = %v", err)
+	}
+	privateGuest := fixtures.MakeJob(fixtures.WithJobID("job-private-guest"), fixtures.Background)
+	privateGuest.Submitter = "guest"
+	privateGuest.Handling = domain.HandlingPrivate
+	if _, err := admission.Offer(context.Background(), privateGuest, claim); err == nil || !strings.Contains(err.Error(), "private") {
+		t.Fatalf("private guest err = %v", err)
+	}
+	unknownPriority := fixtures.MakeJob(fixtures.WithJobID("job-unknown-priority"))
+	unknownPriority.Submitter = "guest"
+	unknownPriority.Priority = domain.Priority("custom")
+	if _, err := admission.Offer(context.Background(), unknownPriority, claim); err != nil {
+		t.Fatalf("unknown priority should rank below policy max: %v", err)
+	}
+
+	victim := fixtures.MakeJob(fixtures.WithJobID("job-victim"))
+	victim.Submitter = "submitter-a"
+	victim.Handling = domain.HandlingPrivate
+	offer, err := admission.Offer(context.Background(), victim, claim)
+	if err != nil {
+		t.Fatalf("victim Offer: %v", err)
+	}
+	lease, err := admission.Commit(context.Background(), offer.OfferID, offer.Fence)
+	if err != nil {
+		t.Fatalf("victim Commit: %v", err)
+	}
+	if err := admission.PreemptForJob(context.Background(), tooHigh, lease.ID, "policy check"); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("preempt requester err = %v", err)
+	}
+	preempter := fixtures.MakeJob(fixtures.WithJobID("job-preempt"))
+	preempter.Submitter = "submitter-a"
+	preempter.Handling = domain.HandlingPrivate
+	if err := admission.PreemptForJob(context.Background(), preempter, lease.ID, "policy check"); err != nil {
+		t.Fatalf("PreemptForJob: %v", err)
+	}
+}
+
 func commitAdmissionLease(t *testing.T, admission *Admission, jobID string, claim domain.Claim) domain.Lease {
 	t.Helper()
 	offer, err := admission.Offer(context.Background(), fixtures.MakeJob(fixtures.WithJobID(jobID)), claim)
