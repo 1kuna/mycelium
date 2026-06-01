@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,23 +22,121 @@ import (
 	"mycelium/test/mocks"
 )
 
+var directHTTP = &directHTTPRegistry{handlers: map[string]http.Handler{}}
+
+type directHTTPRegistry struct {
+	handlers map[string]http.Handler
+}
+
+type directHTTPServer struct {
+	URL    string
+	client *http.Client
+}
+
+func directURL(handler http.Handler) string {
+	host := "e2e-" + string(rune('a'+len(directHTTP.handlers))) + ".mycelium.test"
+	directHTTP.handlers[host] = handler
+	return "http://" + host
+}
+
+func directClient() *http.Client {
+	return &http.Client{Transport: directHTTP}
+}
+
+func (d *directHTTPRegistry) RoundTrip(req *http.Request) (*http.Response, error) {
+	handler := d.handlers[req.URL.Host]
+	if handler == nil {
+		return nil, domain.ErrUnreachable
+	}
+	reader, writer := io.Pipe()
+	rec := &streamingResponseWriter{
+		header: make(http.Header),
+		code:   http.StatusOK,
+		ready:  make(chan struct{}),
+		writer: writer,
+	}
+	go func() {
+		handler.ServeHTTP(rec, req)
+		rec.WriteHeader(http.StatusOK)
+		_ = writer.Close()
+	}()
+	<-rec.ready
+	rec.mu.Lock()
+	code := rec.code
+	header := rec.header.Clone()
+	rec.mu.Unlock()
+	return &http.Response{
+		StatusCode: code,
+		Status:     http.StatusText(code),
+		Header:     header,
+		Body:       reader,
+		Request:    req,
+	}, nil
+}
+
+type streamingResponseWriter struct {
+	header http.Header
+	code   int
+	ready  chan struct{}
+	mu     sync.Mutex
+	wrote  bool
+	once   sync.Once
+	writer *io.PipeWriter
+}
+
+func (w *streamingResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *streamingResponseWriter) WriteHeader(code int) {
+	w.mu.Lock()
+	if !w.wrote {
+		w.code = code
+		w.wrote = true
+		w.once.Do(func() { close(w.ready) })
+	}
+	w.mu.Unlock()
+}
+
+func (w *streamingResponseWriter) Write(data []byte) (int, error) {
+	w.WriteHeader(w.code)
+	return w.writer.Write(data)
+}
+
+func (w *streamingResponseWriter) Flush() {
+	w.WriteHeader(w.code)
+}
+
+func (s *directHTTPServer) postJSON(t *testing.T, path, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, s.URL+path, bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("request %s: %v", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		t.Fatalf("post %s: %v", path, err)
+	}
+	return resp
+}
+
 func TestPhase2GatewayRoutesOpenAIAndAnthropicWithHeaders(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstreamCalls := []string{}
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directURL(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamCalls = append(upstreamCalls, r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(openAIChatBody("hello")))
 	}))
-	defer upstream.Close()
 
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance()
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	fleet := staticGatewayFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}}
 	server := newGatewayTestServer(t, preset, fleet, staticNodeResolver{})
 
-	resp := postJSON(t, server.URL+"/v1/chat/completions", `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`)
+	resp := server.postJSON(t, "/v1/chat/completions", `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("openai status = %s", resp.Status)
@@ -47,7 +145,7 @@ func TestPhase2GatewayRoutesOpenAIAndAnthropicWithHeaders(t *testing.T) {
 		t.Fatalf("openai headers = %+v", resp.Header)
 	}
 
-	resp = postJSON(t, server.URL+"/v1/messages", `{"model":"qwen2.5-9b-instruct","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	resp = server.postJSON(t, "/v1/messages", `{"model":"qwen2.5-9b-instruct","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 	defer resp.Body.Close()
 	var anthropic struct {
 		Type    string `json:"type"`
@@ -68,15 +166,14 @@ func TestPhase2GatewayRoutesOpenAIAndAnthropicWithHeaders(t *testing.T) {
 
 func TestPhase2GatewayColdTargetStreamsLoadingState(t *testing.T) {
 	preset := fixtures.MakePreset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := directURL(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: done\n\n"))
 	}))
-	defer upstream.Close()
 
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_cold"))
-	inst.Addr = upstream.URL
+	inst.Addr = upstream
 	allowLoad := make(chan struct{})
 	released := false
 	fleet := staticGatewayFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}}
@@ -89,7 +186,7 @@ func TestPhase2GatewayColdTargetStreamsLoadingState(t *testing.T) {
 		}
 	}()
 
-	resp := postJSON(t, server.URL+"/v1/chat/completions", `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`)
+	resp := server.postJSON(t, "/v1/chat/completions", `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`)
 	defer resp.Body.Close()
 	if resp.Header.Get("Content-Type") != "text/event-stream" {
 		t.Fatalf("content-type = %s", resp.Header.Get("Content-Type"))
@@ -116,26 +213,24 @@ func TestPhase2GatewayColdTargetStreamsLoadingState(t *testing.T) {
 
 func TestPhase2GatewayFailoverReportsFailedInstance(t *testing.T) {
 	preset := fixtures.MakePreset()
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	first := directURL(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "dead", http.StatusInternalServerError)
 	}))
-	defer first.Close()
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	second := directURL(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(openAIChatBody("rescued")))
 	}))
-	defer second.Close()
 
 	node := fixtures.MakeNode()
 	instA := fixtures.MakeInstance(fixtures.WithInstanceID("inst_a"))
-	instA.Addr = first.URL
+	instA.Addr = first
 	instB := fixtures.MakeInstance(fixtures.WithInstanceID("inst_b"))
-	instB.Addr = second.URL
+	instB.Addr = second
 	reporter := &recordingFailureReporter{}
 	fleet := staticGatewayFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{instA, instB}}}
 	server := newGatewayTestServerWithReporter(t, preset, fleet, staticNodeResolver{}, reporter)
 
-	resp := postJSON(t, server.URL+"/v1/chat/completions", `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`)
+	resp := server.postJSON(t, "/v1/chat/completions", `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`)
 	defer resp.Body.Close()
 	body := readBody(t, resp)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "rescued") {
@@ -149,12 +244,12 @@ func TestPhase2GatewayFailoverReportsFailedInstance(t *testing.T) {
 	}
 }
 
-func newGatewayTestServer(t *testing.T, preset domain.Preset, fleet gateway.FleetSource, nodes gateway.NodeResolver) *httptest.Server {
+func newGatewayTestServer(t *testing.T, preset domain.Preset, fleet gateway.FleetSource, nodes gateway.NodeResolver) *directHTTPServer {
 	t.Helper()
 	return newGatewayTestServerWithReporter(t, preset, fleet, nodes, nil)
 }
 
-func newGatewayTestServerWithReporter(t *testing.T, preset domain.Preset, fleet gateway.FleetSource, nodes gateway.NodeResolver, reporter gateway.FailureReporter) *httptest.Server {
+func newGatewayTestServerWithReporter(t *testing.T, preset domain.Preset, fleet gateway.FleetSource, nodes gateway.NodeResolver, reporter gateway.FailureReporter) *directHTTPServer {
 	t.Helper()
 	placer := scheduler.NewPlacer(
 		estimate.NewInMemory(),
@@ -162,14 +257,16 @@ func newGatewayTestServerWithReporter(t *testing.T, preset domain.Preset, fleet 
 		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
 		preset,
 	)
-	return httptest.NewServer(gateway.Server{Router: &gateway.Router{
+	handler := gateway.Server{Router: &gateway.Router{
 		Placer:   placer,
 		Fleet:    fleet,
 		Nodes:    nodes,
 		Presets:  gateway.NewPresetRegistry(preset),
+		Client:   directClient(),
 		Reporter: reporter,
 		MaxTries: 2,
-	}})
+	}}
+	return &directHTTPServer{URL: directURL(handler), client: directClient()}
 }
 
 type staticGatewayFleet struct {
@@ -259,15 +356,6 @@ type recordingFailureReporter struct {
 func (r *recordingFailureReporter) ReportInstanceFailure(_ context.Context, instanceID string, _ error) error {
 	r.failed = append(r.failed, instanceID)
 	return nil
-}
-
-func postJSON(t *testing.T, url, body string) *http.Response {
-	t.Helper()
-	resp, err := http.Post(url, "application/json", bytes.NewReader([]byte(body)))
-	if err != nil {
-		t.Fatalf("post %s: %v", url, err)
-	}
-	return resp
 }
 
 func readBody(t *testing.T, resp *http.Response) string {
