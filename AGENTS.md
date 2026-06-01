@@ -28,19 +28,20 @@ go test -tags smoke ./test/smoke/... -timeout 20m   # smoke: REAL engines/machin
 1. **Mock-first.** Every external dependency (node agent, backend engine, resource estimator, clock, telemetry sink, discovery, tunnel, store) is reached through an `internal/ports` interface and has a hand-written mock in `test/mocks` that records calls and can inject failures. Build the contract and its mock before the implementation.
 2. **Inject the clock.** Never call `time.Now()` or `time.Sleep` in code under test. Take a `ports.Clock`; tests drive time with `FakeClock`. Aging, timeouts, TTLs, heartbeats, and backoff must all be deterministic under a fake clock.
 3. **Conformance + compile-time both.** Every interface/impl pair gets a compile-time `var _ ports.X = (*Impl)(nil)` assertion **and** a behavioral conformance suite (`test/contract`) run against both the mock (fast) and the real implementation (smoke). Shape drift is caught by the compiler; behavioral drift by the suite. Do both.
-4. **Fail loud, never quiet** (Doc 1 §3.11). Do not deploy on a failed resource estimate. Do not silently fall back to OpenAI-compatible routing for an unknown provider profile (require an explicit opt-in). Do not requeue a non-overflow error as if it were a context overflow. Do not let protocol translation emit corrupted output (a malformed tool-call must error, not become `{}`). For an autonomous control plane, a loud stop beats quiet corruption.
+4. **Fail loud, never quiet** (Doc 1 §3.11). Do not deploy on a failed resource estimate. Do not silently fall back to OpenAI-compatible routing for an unknown provider profile (require an explicit opt-in). Do not requeue a non-overflow error as if it were a context overflow. Do not let protocol translation emit corrupted output (a malformed tool-call must error, not become `{}`). Do not hide a partition or a stale-fence rejection — surface it and leave registry evidence. For an autonomous control plane, a loud stop beats quiet corruption.
 5. **Constructor injection only.** No package-level singletons, no `init()` wiring, no monkey-patching. Dependencies enter through constructors.
-6. **Don't reintroduce a rejected design.** Doc 1 §6 lists 13 decisions and what each rejected. If a simpler-looking path contradicts one — naive FIFO scheduling, model-as-the-loadable-unit, hard-preemption-by-default, weights-only fit, in-process engine bindings, Docker-based Mac workers, a Python control plane — it was already ruled out. Don't "improve" back into it.
+6. **Peer model is law** (Doc 1 §3.12, D14–D18). No fleet leader and no permanent server: the per-job coordinator is whoever received the job. **Coordinator decides; the resource owner commits** — a coordinator never mutates another node's state, it proposes and the owner's local transaction commits or rejects (`ErrStaleFence`) via optimistic concurrency. Resilience is a small replicated **job registry + heartbeats**, never a consensus event-log. **Job distribution, never model distribution** — one model loads fully on one machine; do not shard a model across machines (no MLX-distributed / pipeline-parallel / hostfile / rank). No self-preference in placement. No SSH transport.
+7. **Don't reintroduce a rejected design.** Doc 1 §6 lists the decisions and what each rejected. If a simpler-looking path contradicts one — naive FIFO scheduling, model-as-the-loadable-unit, hard-preemption-by-default, weights-only fit, in-process engine bindings, Docker-based Mac workers, a Python control plane, a single fleet leader / elected scheduler host (D14), a replicated consensus event-log as source of truth (D15/D16), cross-coordinator pre-send negotiation (D15), SSH-based peer transport (D12), or model sharding across machines (D17) — it was already ruled out. Don't "improve" back into it.
 
 ## Coverage gates
 
 - 85%+ lines per module overall.
-- **100%** on `internal/scheduler`, `internal/lease`, every conformance suite, and the fixture factories.
+- **100%** on `internal/scheduler`, `internal/lease`, the federation authority/recovery packages (`internal/node/admission`, `internal/peer/coordinator`, `internal/peer/recovery`), every conformance suite, and the fixture factories.
 - Every error path tested; every public method tested; every mock's failure-injection exercised somewhere.
 
 ## Naming & layout conventions
 
-- Binary: **`mycelium`**, run as `mycelium server` or `mycelium node`. Control CLI: **`myce`**. Decision/observability headers: **`X-Myc-*`**. Module path: `mycelium`.
+- Binary: **`mycelium`** — one role, a **peer**, started with `mycelium` (compute on/off via config/flag); there is no `server`/`node` subcommand and no leader. Control CLI: **`myce`**. Decision/observability headers: **`X-Myc-*`**. Module path: `mycelium`.
 - "**fleet**" (lowercase) is the common noun for the set of machines — Mycelium is the network across the fleet. It is not a second product name; don't rename it.
 - Navigate by path: code lives under `internal/<module>` mirroring Doc 1 §5. Domain types in `internal/domain` (no logic, std-lib only); interfaces in `internal/ports`.
 
@@ -82,13 +83,15 @@ This repo is built to be implemented by a long-running autonomous agent (Codex `
 
 - **Reap orphaned backends on startup.** A crashed node agent must not leave a zombie inference server holding VRAM. The agent's startup reaper finds and cleans up processes/containers from a prior run (Doc 1 §3.10).
 - **A loading model already occupies its unit.** Count in-flight loads against capacity, not just running instances — this is why a `catastrophic` unit refuses stacked loads.
-- **The node sheds; the control plane queues.** A saturated node returns a fast 429-style rejection; it never builds a local queue. Queueing, priority, and retry live in the scheduler.
-- **Computed tuning must reach the launch.** If the scheduler computes offload layers or tensor-split, inject them into the backend command — don't compute and discard them.
-- **Node-side parsing.** When the server can't see a model file, ask the owning node to parse it (gguf-parser locally) and return metadata; the server never needs the file locally.
+- **The node sheds; the coordinator queues.** A saturated node returns a fast 429-style rejection; it never builds a local queue. Queueing, priority, and retry live in the coordinator (the Placer).
+- **Computed tuning must reach the launch.** If the Placer computes offload layers or tensor-split, inject them into the backend command — don't compute and discard them.
+- **Node-side parsing.** When the coordinator can't see a model file, ask the owning node to parse it (gguf-parser locally) and return metadata; the coordinator never needs the file locally.
 - **SSE loading-state needs the no-buffer header.** When you write early SSE headers yourself (loading-state), set `X-Accel-Buffering: no` — a self-written status writer can miss what the reverse-proxy path sets automatically.
 - **Guard the in-flight race window.** There is a window where a request has left the outer lock but hasn't registered on the per-instance in-flight wait group; a second guard at that boundary closes it before a graceful stop can race it.
 - **Thread profile detail through passthrough.** Don't hard-code `/v1/messages` for Anthropic passthrough; use the selected endpoint's profile (`messages_path`, version, limitations).
-- **Join token is membership, not auth.** Possessing the token lets a node join; it does not authorize backend operations. Make the token rotatable/revocable.
+- **Join token is membership, not auth.** Possessing the token lets a peer join; it does not authorize backend operations. Make the token rotatable/revocable.
+- **Owner commits; coordinator proposes (optimistic concurrency).** A coordinator never writes a remote node's lease state. It calls the owner's `AdmissionController.Commit` with the fence from the owner's offer; a stale fence returns `ErrStaleFence` and the coordinator re-plans. The owner's local transaction is the only serialization point — that is what prevents two coordinators double-booking one accelerator. Never add a global lock or a shared mutable queue to "fix" a race the owner already resolves.
+- **Registry is for visibility + rescue, not authority.** The job registry is eventually-consistent and may be briefly stale; always re-check the live owner before rescuing a job a dead peer was running (it may have finished). Never treat the registry as the source of truth for what's running — the owner is.
 
 ## Where the authority lives
 

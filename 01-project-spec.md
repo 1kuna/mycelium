@@ -1,6 +1,6 @@
 # Mycelium — Project Spec (Document 1 of 3)
 
-> **Mycelium** — a hardware-aware inference control plane for a heterogeneous home/lab fleet. Binary: `mycelium` (runs as `mycelium server` or `mycelium node`); control CLI: `myce`; decision headers: `X-Myc-*`. Note: lowercase "fleet" throughout is the common noun for your set of machines (Mycelium is the network across the fleet), not a second product name.
+> **Mycelium** — a hardware-aware inference control plane for a heterogeneous home/lab fleet. Binary: `mycelium` — one role, a **peer**; every peer is equal (no permanent server/leader). A peer carries a **`compute` toggle (on/off)**: compute-on peers own accelerators, run backends, and share telemetry analysis; any peer (compute on or off) can submit work and coordinate a job. Control CLI: `myce`; decision headers: `X-Myc-*`. Note: lowercase "fleet" throughout is the common noun for your set of machines (Mycelium is the network across the fleet), not a second product name.
 
 This is the "what": architecture, the core innovation, the state model with concrete data shapes, the repo layout, the design decisions (with rejected alternatives), a data-flow walkthrough, and the MVP phases. Document 2 (testing & modularity architecture) and Document 3 (the gated development guide) build on this.
 
@@ -16,8 +16,8 @@ It is explicitly **not** a new inference engine. llama.cpp, vLLM, SGLang, MLX re
 
 ### Hard constraints
 
-- **Single static Go binary** per role. No second runtime in the control plane. (Inference engines themselves remain whatever they are — Go binaries, Python containers, native subprocesses — Mycelium supervises them as processes; see Design Decision D2.)
-- **Developed and tested primarily on macOS** with no specialty hardware powered on. Every node/backend/GPU sits behind a mockable contract; real hardware appears only in `smoke/` tests. The local dev Mac plus two second peers (as real remote nodes) prove the whole control plane. This is a load-bearing constraint and drives Document 2.
+- **Single static Go binary**, one role: a **peer** (with `compute` on/off). No second runtime in the control plane, no separate server/worker builds. (Inference engines themselves remain whatever they are — Go binaries, Python containers, native subprocesses — Mycelium supervises them as processes; see Design Decision D2.)
+- **Developed and tested primarily on macOS** with no specialty hardware powered on. Every node/backend/GPU sits behind a mockable contract; real hardware appears only in `smoke/` tests. The local dev Mac (and a second peer as a second real peer) prove the whole system end-to-end. This is a load-bearing constraint and drives Document 2.
 - **CLI-subscription coding agents** (Codex, Claude Code) build this. The docs are the blueprint; the agent works phase by phase against runnable gates.
 - **Local-first.** No assumed cloud, no assumed API costs. Anthropic/OpenAI-compatible surface is for *local* backends; cloud overflow is out of scope for MVP.
 - **Heterogeneous and OS-spanning** from the design, even though the first proving ground is the Spark + B70 + a few Macs. Generalization is a goal, not a hard MVP gate.
@@ -31,57 +31,40 @@ Four existing projects were studied at the source level (GPUStack, llama-swap, O
 ## 2. Architecture overview
 
 ```
-                            ┌──────────────────────────────────────────────┐
-   apps / agents  ─────────▶│  GATEWAY  (mycelium server)                      │
-   (OpenAI &                │  • OpenAI + Anthropic compatible ingress       │
-    Anthropic clients,      │  • intent extraction + project defaults        │
-    myc)               │  • model-aware routing to a live instance      │
-                            │  • passthrough-or-translate (Anthropic↔OpenAI) │
-                            │  • failover, X-Myc-* decision headers        │
-                            └───────────────┬────────────────────────────────┘
-                                            │ submit Job (intent)
-                                            ▼
-                            ┌──────────────────────────────────────────────┐
-                            │  CONTROL PLANE  (mycelium server)                 │
-                            │  ┌────────────┐  ┌──────────────────────────┐  │
-                            │  │ Catalog +  │  │ SCHEDULER (the brain)    │  │
-                            │  │ Presets    │  │  estimate → filter →     │  │
-                            │  │ (install,  │  │  select → score →        │  │
-                            │  │ importers) │  │  admit / queue / preempt │  │
-                            │  └────────────┘  └───────────┬──────────────┘  │
-                            │  ┌────────────┐  ┌───────────▼──────────────┐  │
-                            │  │ Optimizer  │◀─│ Lease / Allocation core  │  │
-                            │  │ (recommend │  │  units, claims, headroom,│  │
-                            │  │  -first)   │  │  pinned, caps, OOM-tag    │  │
-                            │  └─────▲──────┘  └───────────┬──────────────┘  │
-                            │        │ telemetry            │ desired state   │
-                            │   ┌────┴───────────────┐      │                 │
-                            │   │ Telemetry store    │◀─────┼─── heartbeats   │
-                            │   └────────────────────┘      │    + run metrics │
-                            └───────────────────────────────┼─────────────────┘
-                                  membership / discovery     │ place / load / evict
-                                  (token + LAN; overlay      ▼
-                                   later)        ┌──────────────────────────────┐
-                                                 │  NODE AGENT  (mycelium node)     │
-                                                 │  per machine, native, no Docker│
-                                                 │  required:                     │
-                                                 │  • model-instance lifecycle    │
-                                                 │    (load/ready-gate/stop)      │
-                                                 │  • coexistence + local eviction│
-                                                 │  • lease enforcement           │
-                                                 │  • loading-state SSE           │
-                                                 │  • emits telemetry + heartbeat │
-                                                 │  ┌──────────────────────────┐  │
-                                                 │  │ Backend adapters         │  │
-                                                 │  │ llama.cpp │ vLLM │ MLX │  │  │
-                                                 │  │ custom (exec/container)  │  │
-                                                 │  └──────────────────────────┘  │
-                                                 └──────────────────────────────┘
-                                                  (Spark, B70 box, 4090 box,
-                                                   desktop GPU box, local dev Mac, 2× mini)
+   apps / agents (OpenAI & Anthropic clients, myce) ── submit to ANY peer's endpoint ──┐
+                                                                                        │
+   Every machine runs ONE `mycelium` daemon = a PEER. No leader, no required host.      │
+   The peer you submit to becomes that job's COORDINATOR (role lasts one job).          │
+                                                                                        ▼
+ ┌─────────────────────── PEER (e.g. your local dev Mac, compute:off) ───────────────────────┐
+ │  GATEWAY            ingress (OpenAI/Anthropic), intent+project defaults, X-Myc-*      │
+ │  COORDINATOR        for jobs submitted here: snapshot the fleet (ask peers in         │
+ │                     parallel) → run PLACER (the brain: filter→select→score) → pick    │
+ │                     the best host → ask that host's owner to commit → relay results   │
+ │  PLACER             pure placement logic (identical code every peer runs)             │
+ │  TELEMETRY (local)  this peer's own run-metrics                                       │
+ └───────────────┬──────────────────────────────┬───────────────────────────────────────┘
+                 │ authenticated peer RPC        │ replicated, eventually-consistent
+                 │ (LAN auto-discovery,          │ JOB REGISTRY + HEARTBEATS
+                 │  no SSH)                       │ {job_id, coordinator, owner, status,
+                 ▼                                ▼  request} → survive a peer's death
+ ┌──────────── PEER (compute:on — Spark / 4090 box / second peer / …) ─────────────────────┐
+ │  OWNER AUTHORITY    the SINGLE atomic authority for THIS machine's hardware.          │
+ │                     a coordinator DECIDES; the owner COMMITS. local transactional     │
+ │                     lease store serializes commits; stale plans rejected (versioned   │
+ │                     compare-and-swap / fence). max_util + oom_severity enforced here. │
+ │  NODE LIFECYCLE     load / ready-gate / stop / coexist; reaper; lease enforcement;    │
+ │                     loading-state SSE; emits heartbeat + run-metrics                  │
+ │  BACKEND ADAPTERS   llama.cpp │ vLLM │ MLX │ custom (exec/container)                   │
+ │                     ONE model loads fully on ONE machine — job distribution,          │
+ │                     never model distribution                                          │
+ │  TELEMETRY (local)  this peer's own run-metrics; compute peers analyze AS A GROUP     │
+ │                     (periodic, no permanent owner) — keeps that CPU off thin peers    │
+ └───────────────────────────────────────────────────────────────────────────────────────┘
+        … all peers symmetric; catalog/presets, optimizer, membership live on every peer …
 ```
 
-One binary, two long-running roles (`mycelium server`, `mycelium node`) plus a CLI (`myce`). The server holds the control plane; each machine runs a node agent; backends are subprocesses the node agent supervises.
+Every machine runs one `mycelium` daemon — a peer. There is **no server and no leader**: you submit to whichever peer you like (its own address is your endpoint, like pointing a client at one LM Studio), that peer **coordinates** that one job — gathering a fleet snapshot by asking the others in parallel, running the placer brain, and asking the chosen host to commit — and the **resource-owning peer is the sole authority** for committing leases on its own hardware. Fleet state is each peer's local truth (asked on demand, lightly gossiped for visibility) plus a small replicated **job registry** for failure recovery. Backends are subprocesses each compute peer supervises. The CLI is `myce`.
 
 ---
 
@@ -103,6 +86,7 @@ Two subsystems are the non-trivial part and the reason Mycelium exists: the **sc
   - `catastrophic` (e.g. the DGX Spark — OOM forces a power cycle): the scheduler keeps an extra margin under `max_util` **and refuses to stack concurrent model *loads*** on that unit (load-time spikes are where you blow past the line).
   - `soft` (e.g. the 4090 box — OOM crashes only the offending program): the scheduler may run closer to the ceiling.
 - You set the ceiling; severity tunes how paranoid the scheduler is *beneath* it.
+- **Enforcement is local to the owner.** `max_util` and `oom_severity` are checked and committed by the peer that owns the hardware, at commit time, in its own transactional store (§3.12) — a remote coordinator can *propose* a placement but can never make a node exceed its own ceiling.
 
 ### 3.3 The scheduler
 
@@ -175,7 +159,7 @@ Recommendation example the engine should be able to emit:
 
 These are the agent's reference. Shown as JSON; Go structs mirror them (Document 2 has the typed contracts).
 
-**Job (the intent submitted to the control plane):**
+**Job (the intent submitted to whichever peer you hit; that peer coordinates it):**
 
 ```json
 {
@@ -196,13 +180,13 @@ These are the agent's reference. Shown as JSON; Go structs mirror them (Document
 }
 ```
 
-**Node descriptor (reported by the agent; control plane's source of truth for hardware):**
+**Node descriptor (each peer's own source of truth for its hardware; shared via snapshot):**
 
 ```json
 {
   "id": "node_spark",
   "name": "dgx-spark",
-  "address": "127.0.0.1:51847",              // loopback after tunnel, or LAN host:port
+  "address": "127.0.0.1:51847",              // the peer's reachable LAN address (host:port)
   "os": "linux",
   "labels": { "gpu.vendor": "nvidia", "gpu.kind": "gb10", "memory.class": "huge" },
   "max_util": 0.90,                          // hard ceiling
@@ -288,7 +272,7 @@ Two payoffs: (1) discover which model can actually do the task, or rule the mode
 
 Responsibilities the node agent owns that are easy to overlook; the reference repos either rely on them or were explicitly flagged for lacking them.
 
-- **Node-side model-file parsing.** The control plane (running on the local dev Mac) will not have every model file on disk. When a preset's file lives only on a remote node, *that node* parses it (gguf-parser locally) and returns the structured metadata the estimator needs; the server never requires local access to the file. This is exactly GPUStack's remote-parse path and is the right shape for a heterogeneous fleet. Contract implication: the `ResourceEstimator` may delegate file inspection to the owning `NodeAgent` (a `ParseModel`/`InspectModel` method) when the file is not server-local.
+- **Node-side model-file parsing.** A coordinator deciding placement will not have every model file on disk. When a preset's file lives only on a particular node, *that node* parses it (gguf-parser locally) and returns the structured metadata the estimator needs; the coordinator never requires local access to the file. This is exactly GPUStack's remote-parse path and is the right shape for a heterogeneous fleet. Contract implication: the `ResourceEstimator` may delegate file inspection to the owning `NodeAgent` (a `ParseModel`/`InspectModel` method) when the file is not local to the coordinator.
 - **Stale-process reaping after a crash.** On startup or reconnect, the node agent must find and clean up orphaned backend processes/containers from a previous run — a crashed agent must not leave a zombie inference server holding VRAM. llama-swap *lacks* this and the research flagged it as a gap to design in, not around.
 - **Loading counts as occupancy.** A model that is mid-load occupies its unit for scheduling purposes; the slot is taken before health passes. This is already why a `catastrophic` unit refuses stacked loads (§3.2) — the general rule is that in-flight loads count against capacity, not just running instances.
 - **The node sheds; the scheduler queues.** A saturated node returns a fast rejection (429-style) rather than building its own unbounded local queue. All queueing, priority, and retry decisions live in the control plane. The node agent does lifecycle + forwarding + lease enforcement, nothing more.
@@ -303,6 +287,35 @@ For an autonomous control plane, quiet degradation is worse than a loud stop —
 - A **non-overflow backend error** must NOT be silently requeued as if it were a context overflow (§3.7 reactive path) — classify, and fail loudly on anything that isn't a clean overflow.
 - **Protocol translation** must error on an unsupported field rather than emit corrupted output — a malformed tool-call must not become `{}`, a bad SSE chunk must not be silently skipped (Olla's quiet translation degradation is dangerous for agent workflows).
 
+### 3.12 Peer model & federated scheduling
+
+Mycelium is **peer-native**: there is no server, no leader, no required host. Every machine runs one identical `mycelium` daemon — a peer — and any peer is a valid entrypoint. This is the second core subsystem alongside the scheduler/optimizer, and it is what lets the fleet keep working when any one machine goes down. The design separates two questions the old hub model conflated: *who decides where a job goes* (coordination) and *who is allowed to commit a resource* (authority). They are different, and keeping them separate is what makes "no leader" and "no consensus protocol" both true at once.
+
+**Peer roles (not topology).** Every peer can submit work and coordinate jobs. A peer carries a **`compute` toggle**: compute-on peers own accelerators, run backends, and participate in group telemetry analysis; compute-off peers (a thin laptop) only submit and coordinate. This is a capability flag, *not* a server/worker split — there is no role that holds permanent authority over the fleet.
+
+**Per-job coordinator (the dissolved leader).** The peer that receives a request becomes the **coordinator for that one job**, for its duration only; when the job ends the role evaporates. Nothing is elected, nothing is promoted, and three jobs submitted from three machines have three independent coordinators at once. There is no fleet leader to fail over because no job depends on a *fleet* leader — only on its own coordinator (the peer you submitted to, which is trivially up — you're using it) and on the owner of whatever resource it lands on. This is strictly simpler than leader election and removes the "leader is down, scramble to replace it" failure window entirely.
+
+**Coordinator decides; owner commits (optimistic concurrency).** Coordination and authority are split:
+- The coordinator **gathers a fleet snapshot by asking peers in parallel** (not a serial relay), runs the **Placer** (the exact filter→select→score brain of §3.3 — it is pure logic over a snapshot, so every peer runs identical code), and picks the best host. Polling in parallel is what enables up-front placement logic: see one machine that can host the whole job alone and leave a scarce unit (the Spark) free for a job that will actually need it, rather than stranding a 9B on the Spark.
+- The coordinator never *mutates* a remote node. It **asks the owner to commit**. The **resource-owning peer is the single atomic authority for its own hardware**: it holds a tiny local transactional lease store (e.g. SQLite `BEGIN; check capacity under max_util/oom_severity; insert lease; COMMIT`) that is the *only* truth for "what is running on me." Every competing claim on a node funnels through that one owner, so the owner's local transaction is the serialization point that breaks every tie.
+- Because decisions are made against a snapshot that may be a beat stale, commits use **optimistic concurrency**: the owner stamps its state with a monotonic version (a **fence**), the coordinator's plan references the version it saw, and the owner **rejects a stale plan at commit** ("your view is old, here's my current state, re-decide") rather than blindly obeying it. This is the same pattern as a `git push` rejected for being non-fast-forward; re-coordinating is `git pull --rebase`. **Two coordinators racing the same GPU cannot double-book it** — both ask the owner, its transaction serializes them, the first valid commit wins, the second is rejected and re-decides. No fleet-wide consensus is needed because the contended resource has exactly one owner doing the serializing. The fence token survives from the original federation idea, but shrunk to a per-resource version guard, not a distributed coordination scheme.
+
+**Contention & priority are adjudicated at the owner.** Since all claims on a resource pass through its owner, the owner is also where contention resolves — coordinators never negotiate *with each other* (that would resurrect the leader/consensus problem). Priority is a property of the job carried in the plan; the owner compares it against current occupants and applies the §3.6 preemption ladder (soft by default). **At launch there are no cross-user priority tiers** — contention between equal jobs is resolved by the owner's serialized commit (first valid commit wins; the loser re-decides). Per-job priority (interactive/normal/background, §3.8) is for your *own* work — keeping a laptop responsive while a batch runs. Multi-user priority/permission tiers are roadmap (§9).
+
+**No self-preference.** A job submitted from a compute-on peer does **not** prefer to run locally; it goes through the full host-selection process every time. The whole point is optimized compute — the machine already warm with that model (so it can run a second worker) frequently beats the one you happened to submit from, and you'd never discover that without asking the fleet first.
+
+**Result flow.** Tokens stream back **through the coordinator**: you talk only to the peer you submitted to; it relays from the owner over peer RPC. (You hit your local dev Mac's endpoint → it coordinates → the job runs on the GPU box → the result streams back to your local dev Mac → out through the endpoint to you.) This is what makes "any peer is your one clean entrypoint" real.
+
+**Resilience: a job registry + heartbeats (the right-sized "ledger").** Local-only state cannot survive a node death — if a job's existence lived only on the node running it, that node dying would erase the knowledge needed to rescue the work. So Mycelium keeps a **small replicated job registry**: `{job_id, coordinator, assigned_node, status, the submitted request}`, plus **heartbeats** for failure detection. When a peer goes silent, the others see its unfinished jobs in the registry and **re-coordinate them onto live peers** (re-running normal placement). Crucially this is **not** the proposal's consensus event-log of all scheduling state — it is a job registry, not an ordered ledger of every lease/preempt/migrate event, and it is allowed to be **eventually-consistent**, because *authority* still lives at the owner: a rescuer double-checks with the (live) owner before acting ("were you running J1?" "it finished, ignore the registry"), so a briefly-stale registry causes a redundant check, never a corruption or a double-booked accelerator. The registry holds the request payload so a job can be truly *rescued* (re-run), not merely flagged as lost.
+
+**Telemetry: collected locally, analyzed by compute peers as a group.** Collection is inherently local — every node owns and stores its own run-metrics (no owner question). *Analysis* (the optimizer's distribution-shift detection, anomaly detection, consolidation recommendations of §3.7) is the one place a fleet-wide view is wanted, and it is run by the **compute-enabled peers as a group, periodically, with no permanent owner**: on a timer, some compute peer coordinates an "analysis round" exactly like any other job (gather each node's telemetry, run the deterministic stats on a compute node with spare CPU, write recommendations back) — whichever compute peer's timer fires that interval handles that round, a different one next time. This keeps the heavy CPU **on the machines built for work and off the thin/laptop peers** (if you have a dedicated inference box, you didn't want your laptop running like a jet engine), and it reuses the per-job-coordinator pattern rather than introducing a new role.
+
+**Discovery & transport.** Peers find each other by **LAN auto-discovery** (mDNS/DNS-SD — the "node joins the hive" UX) and talk over **authenticated peer RPC**. **No SSH.** A shared join token is membership only (it lets a peer into the fleet); it is not per-operation auth and is rotatable/revocable. Cross-NAT/overlay membership (e.g. libp2p) is roadmap, behind the same discovery interface.
+
+**Partitions degrade, never corrupt.** If peers can't reach each other, each peer keeps honoring its own already-granted leases and serving its own work; nobody can claim a resource from an owner it can't reach, so there is no split-brain over who holds what. Capacity simply shrinks to what each reachable owner can grant.
+
+**One model, one machine — job distribution, never model distribution.** The full model loads on whichever single machine is selected; the fleet spreads *different jobs* across *different machines*. Mycelium deliberately does **not** shard one model across machines (no MLX-distributed / pipeline-parallel / hostfile / rank coordination, no cross-machine "unit"). That is a different problem (model distribution) that this project does not solve; it is explicitly out of scope, not a roadmap item.
+
 ---
 
 ## 4. Domain knowledge / skill files
@@ -312,6 +325,7 @@ The repo will carry an `AGENTS.md` (runtime agent behavior) and a small set of s
 - `skills/backend-adapters.md` — how a backend adapter is structured (command template, health path, env, capability map), with the llama.cpp / vLLM / MLX / custom examples worked.
 - `skills/kv-estimation.md` — backend-aware fit math; how to call gguf-parser; how vLLM/SGLang reservation maps to a claim.
 - `skills/scheduler-model.md` — the resource/lease/preemption model in §3, condensed, so the agent does not "improve" it back into a naive FIFO.
+- `skills/peer-coordination.md` — the peer model of §3.12 condensed: coordinator-decides/owner-commits, optimistic-concurrency commit (fence/version), the job registry + heartbeat recovery, group telemetry analysis, and the inviolable rule that it is **job** distribution, never **model** distribution.
 
 These are written during scaffolding (Phase 0) so later phases inherit them.
 
@@ -322,15 +336,14 @@ These are written during scaffolding (Phase 0) so later phases inherit them.
 A single Go module. Deep directories that mirror the architecture so an agent navigates by path.
 
 ```
-fleet/
+mycelium/
 ├── go.mod
 ├── AGENTS.md                         # runtime agent behavior in this repo
 ├── README.md
 ├── cmd/
 │   └── mycelium/
-│       ├── main.go                   # dispatch: server | node | (ctl delegated)
-│       ├── server.go                 # `mycelium server` — control plane + gateway
-│       ├── node.go                   # `mycelium node`   — node agent
+│       ├── main.go                   # dispatch: run (peer daemon) | ctl
+│       ├── peer.go                   # the peer daemon — gateway + coordinator + (if compute:on) node/backends
 │       └── ctl.go                    # `myce` surface (status, add-model, drain, bench…)
 ├── internal/
 │   ├── domain/                       # types shared across layers; NO logic, NO deps
@@ -341,16 +354,20 @@ fleet/
 │   │   ├── lease.go                  # Lease, Reservation (headroom|pinned)
 │   │   ├── placement.go              # PlacementDecision, Trace, Action
 │   │   ├── project.go                # Project defaults (priority, speed, ctx cap, toggles)
-│   │   └── errors.go                 # typed errors (overflow, no-fit, preempted…)
+│   │   ├── peer.go                   # Peer, Roles (compute on/off), Fence, JobRecord (registry row)
+│   │   └── errors.go                 # typed errors (overflow, no-fit, preempted, stale-fence…)
 │   ├── ports/                        # interfaces (Protocols) every module implements
 │   │   ├── scheduler.go              # Scheduler, Placer
-│   │   ├── nodeagent.go              # NodeAgent (load/stop/ready/lease)
+│   │   ├── nodeagent.go              # NodeAgent (snapshot/load/unload)
+│   │   ├── admission.go              # AdmissionController (owner-authority: offer/commit/release/preempt)
+│   │   ├── coordinator.go            # Coordinator (claim/plan/commit/release a job)
+│   │   ├── registry.go               # JobRegistry (append/watch/snapshot) + PeerDiscovery (advertise/peers/watch)
 │   │   ├── backend.go                # BackendAdapter (launch/health/stop)
 │   │   ├── estimator.go              # ResourceEstimator (KV-aware fit)
-│   │   ├── registry.go              # ModelRegistry (endpoint↔model), Catalog
+│   │   ├── catalog.go                # ModelRegistry (endpoint↔model), Catalog
 │   │   ├── telemetry.go              # TelemetrySink / TelemetryStore
 │   │   ├── optimizer.go              # Optimizer (recommend/auto)
-│   │   └── membership.go             # Discovery, Tunnel
+│   │   └── transport.go              # Clock, peer RPC, Tunnel
 │   ├── scheduler/                    # THE BRAIN (Phase 0)
 │   │   ├── scheduler.go              # admit/queue/preempt loop
 │   │   ├── queue.go                  # priority queue w/ aging
@@ -366,16 +383,25 @@ fleet/
 │   │   ├── gguf.go                   # gguf-parser preflight wrapper
 │   │   ├── vllm.go                   # utilization-fraction claim
 │   │   └── unified.go                # Apple unified-memory single-pressure-domain math
-│   ├── node/                         # NODE AGENT (Phase 1)
+│   ├── node/                         # NODE AGENT — owner of this machine (Phase 1)
 │   │   ├── agent.go                  # lifecycle owner; heartbeat; lease enforce
-│   │   ├── process.go                # spawn/stop (cmd + cmdStop), readiness gate
+│   │   ├── admission.go              # OWNER AUTHORITY: local transactional commit (max_util/oom check), fence/version, stale-plan reject
+│   │   ├── process.go                # spawn/stop (cmd + cmdStop), readiness gate, reaper
 │   │   ├── instance.go               # per-instance state machine
 │   │   └── loadingstate.go           # SSE loading-state injection
-│   ├── backends/                     # ADAPTERS (Phase 1+)
+│   ├── backends/                     # ADAPTERS (Phase 1+) — one model on one machine
 │   │   ├── llamacpp/                 # native subprocess (incl. Metal on Mac)
 │   │   ├── vllm/                     # container/subprocess
-│   │   ├── mlx/                      # native Apple subprocess; + mlx-distributed hooks
+│   │   ├── mlx/                      # native Apple subprocess (single-machine only)
 │   │   └── custom/                   # arbitrary exec/container template
+│   ├── peer/                         # FEDERATION (Phase 6) — coordinate without a leader
+│   │   ├── coordinator.go            # per-job: parallel snapshot → Placer → owner-commit, relay
+│   │   ├── discovery_lan.go          # LAN auto-discovery (mDNS/DNS-SD)
+│   │   ├── discovery_overlay.go      # cross-NAT overlay (roadmap; behind PeerDiscovery)
+│   │   ├── registry.go               # replicated job registry (eventually-consistent)
+│   │   ├── heartbeat.go              # liveness + dead-peer detection
+│   │   ├── recovery.go               # re-coordinate a dead peer's unfinished jobs
+│   │   └── rpc.go                    # authenticated peer transport (no SSH)
 │   ├── gateway/                      # INGRESS (Phase 2)
 │   │   ├── server.go                 # HTTP surface
 │   │   ├── router.go                 # model-aware routing to a live instance
@@ -389,23 +415,22 @@ fleet/
 │   │   └── provenance.go             # record where a preset came from
 │   ├── telemetry/                    # SUBSTRATE (wired Phase 1, used everywhere)
 │   │   ├── sink.go                   # ingest run metrics + heartbeats
-│   │   ├── store.go                  # persistence (SQLite)
-│   │   └── rollup.go                 # per-project distributions
+│   │   ├── store.go                  # local persistence (SQLite)
+│   │   ├── rollup.go                 # per-project distributions
+│   │   └── group.go                  # group analysis round across compute peers (Phase 6)
 │   ├── optimizer/                    # SELF-OPTIMIZER (Phase 5)
 │   │   ├── presets.go                # consolidation cost function
 │   │   ├── reactive.go               # overflow -> requeue larger preset
 │   │   ├── recommend.go              # distribution-shift detection + recommendations
 │   │   └── apply.go                  # gated auto-apply
-│   ├── membership/                   # ONBOARDING (Phase 4)
-│   │   ├── token.go                  # shared join token
-│   │   ├── discovery_lan.go          # LAN discovery (MVP)
-│   │   ├── discovery_overlay.go      # libp2p overlay (roadmap; behind interface)
+│   ├── membership/                   # ONBOARDING (Phase 4) — peer join + token
+│   │   ├── token.go                  # shared join token (membership only; rotatable/revocable)
 │   │   └── tunnel.go                 # loopback tunnel allocation
 │   ├── bench/                        # REVERSE BENCH (roadmap; interfaces stubbed early)
 │   │   ├── orchestrator.go           # explode (prompt × model) matrix
 │   │   ├── present.go                # write per-model output files + objective metrics for the user to review
-│   │   └── results.go                # run outputs + objective metrics + recorded verdict
-│   └── store/                        # control-plane persistence (SQLite)
+│   │   └── results.go                # run outputs + objective metrics + optional user-pick
+│   └── store/                        # per-peer local persistence (SQLite)
 │       └── sqlite.go
 ├── pkg/
 │   └── api/                          # public request/response types
@@ -462,7 +487,7 @@ Why not a single global utilization setting: ignores the real per-machine asymme
 Why: matches how llama.cpp/vLLM/MLX actually run; keeps Mycelium engine-agnostic; preserves exact tuning via command templates + explicit params.
 Why not in-process bindings: couples Mycelium to engine internals, breaks the polyglot reality, and makes adding an engine a code change instead of an adapter.
 
-**D9. Native Mac worker (subprocess), not Docker; unified memory is one pressure domain.**
+**D9. Native Mac node (subprocess), not Docker; unified memory is one pressure domain.**
 Why: GPUStack's Docker-only worker model is the wrong abstraction for Metal/MLX; native subprocess + treating Apple unified memory as a single reservable pool (not separate CPU-RAM and VRAM) is the clean design, and it also makes the node agent trivial to run on the dev local dev Mac.
 Why not inherit GPUStack's container worker: it is precisely why GPUStack dropped macOS support.
 
@@ -474,39 +499,66 @@ Why not add telemetry with the optimizer: you would rebuild every emit site and 
 Why: optimization decisions change latency and batching; the user wants to watch them behave before trusting them automatically. The engine is deterministic stats + anomaly detection, not LLM judgment — which keeps it debuggable.
 Why not auto-apply by default: silent context/preset changes that surprise the user erode trust in exactly the subsystem meant to build it.
 
-**D12. Onboarding MVP is token + LAN discovery; the libp2p overlay slots in behind the same interface later.**
-Why: token + LAN gives the "node joins the hive" UX with far less substrate than EdgeVPN; designing `Discovery`/`Tunnel` as interfaces lets the overlay (cross-NAT) be added without touching callers.
-Why not libp2p/EdgeVPN now: it brings DHT/relay/ledger/token-semantics complexity that is not needed for a LAN homelab MVP and fights the "dead simple" goal early.
+**D12. Onboarding MVP is a join token + LAN auto-discovery; a cross-NAT overlay slots in behind the same `PeerDiscovery` interface later.**
+Why: token + LAN auto-discovery (mDNS/DNS-SD) gives the "peer joins the hive" UX with far less substrate than an overlay/VPN; designing `PeerDiscovery`/`Tunnel` as interfaces lets the overlay (cross-NAT) be added without touching callers. The token is membership only (rotatable/revocable), never per-operation auth.
+Why not libp2p/EdgeVPN now: it brings DHT/relay/ledger/token-semantics complexity not needed for a LAN homelab MVP and fights the "dead simple" goal early.
+Why not SSH-based transport: SSH-orchestrating peers is brittle and was only ever needed for cross-machine model launch, which Mycelium does not do (D17); peers talk over their own authenticated RPC.
 
 **D13. Reverse benchmarking is composition + user-only judgment; Mycelium ships no quality heuristics and no agent integration. Roadmap, with two cheap hooks paid now.**
 Why: the fleet already provides fan-out, placement, and per-run metrics; only the results/comparison subsystem is net-new, so it is deferred — but the `Job` model is made fan-out-capable and telemetry captures the metrics from Phase 1, so adding it later is not a retrofit.
 Why v1 is just-the-output-files: what counts as the "best" output is task- and user-specific, so Mycelium computes no WER/exact-match/rubric/schema score and ships no scorer/plugin abstraction. Judging happens entirely outside Mycelium — the user reads the files, or sends them to an agent of their own choosing themselves; Mycelium does not orchestrate that hand-off or hook into any harness. A user with a hard criterion runs it on the files Mycelium produced; that is their code, not a Mycelium feature.
 Why not build it in MVP: the core scheduler must land first; why not ignore it entirely: the two hooks cost ~nothing and the substrate is uniquely suited to it.
 
+**D14. Peer-native, no leader: per-job coordinator over a permanent scheduler host.**
+Why: the user submits from multiple machines and must not depend on one always-on host — the laptop has to keep working while the project server reboots, and one machine dying must not stop the rest. So every peer is equal and the coordinator is just "whoever received the job," for that job only.
+Why not one elected scheduler leader: it makes ordinary use needlessly centralized and creates a leader-failover scramble; a per-job coordinator dissolves the leader concept entirely (nothing to elect, nothing to promote) and is strictly simpler.
+Why not a hub-and-spoke server/worker split: that is the model this replaced; it puts authority and availability in one box.
+
+**D15. Coordinator decides; resource owner commits — optimistic concurrency, not consensus.**
+Why: separating "who decides placement" from "who may commit a resource" is what makes "no leader" and "no hand-rolled consensus" both true. Each node is the sole atomic authority for its own hardware via a local transaction; coordinators propose, owners commit, and a stale plan is rejected at commit by a per-resource fence/version (the `git push` non-fast-forward pattern).
+Why not a replicated consensus log as the source of truth: keeping N copies of mutable scheduling state in agreement under failure *is* the hard distributed-systems problem; it is unnecessary because the contended resource already has exactly one owner to serialize it.
+Why not coordinators negotiating with each other before committing: that re-introduces the leader/consensus problem for no gain — the owner is already the single adjudication point where contention resolves.
+
+**D16. Resilience is a replicated job registry + heartbeats, not a consensus event-log.**
+Why: a node death must be survivable, which needs *some* replicated knowledge of "which jobs exist and who owns them" — but only that. A small eventually-consistent registry `{job_id, coordinator, owner, status, request}` plus heartbeats lets peers detect a death and re-coordinate the dead peer's unfinished jobs; authority still lives at the owner, so a stale registry causes a redundant double-check, never corruption.
+Why not the proposal's full ordered ledger of every lease/offer/preempt/migrate event: that is consensus-hard overkill; the registry is for visibility and recovery, not for authority.
+Why store the request payload: so a job can be truly re-run (rescued), not merely flagged lost.
+
+**D17. Job distribution, never model distribution.**
+Why: the user wants the whole model on one selected machine and *different jobs* spread across machines — that is what the fleet is for, and the scheduler already does it. Sharding one model across machines (MLX-distributed / pipeline-parallel / hostfile + rank coordination) is a different, much harder problem this project deliberately does not solve.
+Why this is a hard exclusion, not a roadmap item: it changes the resource model (a cross-machine "unit"), the transport (SSH/MPI), and the lease protocol (atomic multi-node commit / 2PC) — pulling in exactly the complexity the peer design removes. Keeping it out is what keeps single-machine jobs (one owner, one lease) simple.
+
+**D18. Telemetry is collected locally and analyzed by compute peers as a group.**
+Why: collection is inherently per-node; analysis wants a fleet-wide view but should run on the machines built for compute, not a thin laptop (you bought an inference box precisely so your laptop wouldn't run hot). So analysis is a periodic round coordinated by whichever compute peer's timer fires — no permanent owner — reusing the per-job-coordinator pattern.
+Why not analysis on the submitting/user machine: pushes heavy CPU onto thin peers and centralizes a fleet function on a non-compute node.
+Why not a single dedicated analyzer node: that is a soft leader with a failover gap; the rotating group avoids it.
+
 ---
 
 ## 7. Data flow — a typical request
 
-1. An app sends an OpenAI/Anthropic chat request to the **gateway**.
-2. Gateway extracts intent and merges **project defaults** (priority, speed_pref, context cap, preemption mode) with any per-request overrides → constructs a `Job`.
-3. Gateway hands the Job to the **control plane**; if a compatible warm instance already exists and has capacity, routing can be near-immediate.
-4. **Scheduler**: resolve preset (apply context cap) → **estimate** claim (weights + KV, backend-aware) → **filter** units (max_util with oom margin, labels, fit) → **select** candidates honoring speed_pref (pack vs isolate/dedicate vs fastest) → **score** → **admit/queue/preempt**.
-5. If a slot is needed and none free: **soft** → queue (aging applies); **hard** (if flagged/allowed) → displace lowest-priority occupant, which re-places elsewhere if it fits else re-queues at its own priority.
-6. The chosen **node agent** either reuses a warm instance or loads the preset (readiness-gated — no routing until health passes), grants a **lease**, and reports the **PlacementDecision + trace** back.
-7. Gateway proxies the request to the instance: **passthrough** if the backend speaks the client's wire format, else **translate** (Anthropic↔OpenAI). If the model was cold, **loading-state** SSE keeps the client alive during load.
-8. The node agent emits **telemetry** (tokens/sec, TTFT, load wall-clock, peak VRAM, context used); the gateway attaches **X-Myc-*** decision headers to the response.
-9. The **optimizer** ingests telemetry: reactively requeues on context overflow; proactively detects distribution shifts and recommends preset/context adjustments (auto-applies only if the project's toggle is on).
+1. An app sends an OpenAI/Anthropic chat request to **any peer's** endpoint (the peer you point your client at — its own address is your endpoint). That peer becomes this job's **coordinator**.
+2. The coordinator extracts intent and merges **project defaults** (priority, speed_pref, context cap, preemption mode) with any per-request overrides → constructs a `Job`, and records it in the **job registry** (so it survives a coordinator death).
+3. The coordinator **asks peers in parallel** for their current snapshots (warm instances, capacity, health). If a compatible warm instance already exists with capacity, placement can be near-immediate.
+4. **Placer** (identical code on every peer): resolve preset (apply context cap) → **estimate** claim (weights + KV, backend-aware) → **filter** units (max_util with oom margin, labels, fit) → **select** candidates honoring speed_pref (pack vs isolate/dedicate vs fastest; **no self-preference**) → **score** → choose the best host. Parallel snapshots let it reason up front (e.g. keep the Spark free for a job that needs it).
+5. The coordinator **asks the chosen host's owner to commit** the lease. The owner runs its **local transaction**: re-check fit under `max_util`/`oom_severity` against its *current* state, and either commit (insert lease, bump fence) or **reject the plan as stale** ("my view moved on") — in which case the coordinator re-decides against fresh truth. If a slot is needed and none is free, the owner applies the preemption ladder (soft → queue; hard if flagged → displace lowest-priority occupant, which re-coordinates elsewhere or re-queues).
+6. The owner (now the resource-owning node) either reuses a warm instance or loads the preset (readiness-gated — no routing until health passes), grants the **lease**, and returns the **PlacementDecision + trace** to the coordinator.
+7. The coordinator proxies the request to the instance over peer RPC and **relays the response back to the client**: **passthrough** if the backend speaks the client's wire format, else **translate** (Anthropic↔OpenAI). If the model was cold, **loading-state** SSE keeps the client alive during load. Tokens flow owner → coordinator → client; the client only ever talks to the coordinator.
+8. The owning node emits **telemetry** (tokens/sec, TTFT, load wall-clock, peak VRAM, context used) to its **local** store; the coordinator attaches **X-Myc-*** decision headers to the response. On completion/failure the registry row is updated.
+9. Periodically, the **compute peers** run a **group analysis round** over the fleet's telemetry: the optimizer reactively requeues on context overflow, and proactively detects distribution shifts to recommend preset/context adjustments (auto-applies only if the project's toggle is on).
+10. If a peer **goes silent** (missed heartbeats), the others see its unfinished jobs in the registry and **re-coordinate them onto live peers**, double-checking the relevant owners before acting. The fleet keeps serving with whatever capacity remains reachable.
 
 ---
 
 ## 8. MVP phases (brief; expanded with gates in Document 3)
 
-- **Phase 0 — Scheduler + lease + safety core.** The risky, novel piece, built first and entirely on mocks (mock nodes, mock backends, mock estimator). Proves admit/queue/soft-preempt/hard-preempt/reallocation, KV-aware fit, `max_util`/`oom_severity` enforcement, reservations. No real hardware. Runs and is fully tested on the local dev Mac.
-- **Phase 1 — Node agent + first backend (llama.cpp) + telemetry wiring.** Real per-node lifecycle (load/ready-gate/stop/coexist), lease enforcement, loading-state SSE, heartbeats, and the telemetry substrate emitting from day one. Validated on the local dev Mac (llama.cpp Metal) and the two second peers as real remote nodes.
+- **Phase 0 — Scheduler + lease + safety core.** The risky, novel piece, built first and entirely on mocks (mock nodes, mock backends, mock estimator). Proves admit/queue/soft-preempt/hard-preempt/reallocation, KV-aware fit, `max_util`/`oom_severity` enforcement, reservations. The Placer is intentionally **peer-agnostic** — pure logic over a fleet snapshot — so the same brain serves any coordinator later. No real hardware. Runs and is fully tested on the local dev Mac.
+- **Phase 1 — Node agent (owner authority) + first backend (llama.cpp) + telemetry wiring.** Real per-node lifecycle (load/ready-gate/stop/coexist), the **owner-authority local commit** (transactional lease store, `max_util`/`oom_severity` enforced locally, fence/version + stale-plan rejection), lease enforcement, loading-state SSE, heartbeats, and the telemetry substrate emitting from day one. Validated on the local dev Mac (llama.cpp Metal) and a second peer as a real remote node.
 - **Phase 2 — Gateway + routing + OpenAI/Anthropic surface.** Provider profiles, model-aware routing to a live instance, failover, passthrough-or-translate, `X-Myc-*` headers.
 - **Phase 3 — Catalog + install + presets.** Catalog item → materialized preset, importers (`hf://`/OCI/local → draft preset), async install jobs with progress, provenance. "Add a model = one-liner."
-- **Phase 4 — Membership / onboarding.** Token + LAN discovery, loopback tunnels. "Node joins the hive."
+- **Phase 4 — Peer membership + onboarding.** Join token + LAN auto-discovery, peer advertisement (incl. the `compute` flag), loopback tunnels. "A peer joins the hive."
 - **Phase 5 — Optimizer.** Consolidation cost function, proactive distribution-shift recommendations, gated auto-apply (reactive overflow-requeue already landed in Phase 1's telemetry/runtime path).
+- **Phase 6 — Federated coordination & resilience.** Make coordination peer-distributed (any peer coordinates a job: parallel-poll snapshot → Placer → owner-commit with optimistic concurrency → relay), the **job registry + heartbeats + failure recovery**, and **group telemetry analysis** across compute peers. Builds on Phase 1's owner-authority and Phase 4's discovery. This is the layer that makes "no leader, one machine down is business as usual" real.
 
 Real specialty hardware (Spark, B70, 4090, desktop GPU) enters only at the `smoke/` tier and at phase boundaries — never as a development dependency.
 
@@ -515,9 +567,11 @@ Real specialty hardware (Spark, B70, 4090, desktop GPU) enters only at the `smok
 ## 9. Roadmap (post-MVP)
 
 - **Reverse benchmarking** — the fan-out eval harness that writes per-model output files + objective metrics (§3.9); Mycelium supplies the run and the facts, the user does all the judging on their own (no agent integration). Hooks already paid in the Job model and telemetry.
-- **libp2p overlay** — cross-NAT membership behind the existing `Discovery`/`Tunnel` interfaces (D12).
+- **libp2p / cross-NAT overlay** — membership beyond the LAN, behind the existing `PeerDiscovery`/`Tunnel` interfaces (D12).
 - **Auto-calibration** — grow the join-time tokens/sec probe into fuller self-benchmarking that continuously refines `speed_class` and the optimizer's cost model.
 - **Auto-apply optimization on by default** — only after the recommend-first engine is observed behaving in practice (D11).
 - **Auto engine/param selection** — build the "best engine + params for this model on this machine" decision the four projects only seed; informed by accumulated telemetry and reverse-benchmark results. (LocalAI's meta-backend resolution — a logical name like "llama-cpp" resolving to the best concrete backend for the host — is the mechanism shape.)
 - **Sticky / KV-cache-affinity routing** — route a multi-turn conversation's follow-up requests back to the same warm instance to reuse its KV cache, as a selector decorator over a conversation→instance TTL map (Olla's sticky-session shape). A large latency win for chat; deliberately not in the MVP gateway.
-- **Cross-machine model sharding** — a unit that spans multiple nodes for pipeline-parallel inference (e.g. MLX-distributed across several Macs, hostfile + rank coordination). The resource model already treats a unit as "a set of accelerators" (§3.1); extending that set across machines is the hook. Out of MVP scope, and overlaps the standalone distributed-Apple-inference problem.
+- **Privacy / sensitive-data handling** — a per-job handling class (e.g. "PII / must stay encrypted"). This is its own scoping effort because it reshapes how peers store and move data: encryption in transit *and* at rest, what the job registry may replicate (the request payload is replicated for recovery today — that changes), whether/how telemetry and failure-recovery work for protected jobs, and the transport's security model. Functionality first; this is a deliberate later body of work, not a flag bolted on.
+- **Multi-user priority & permissions** — cross-submitter priority tiers and access control (today priority is per-job and contention is resolved equal-rights at the owner, §3.12). Adds a shared priority policy every owner applies identically, plus who-may-do-what.
+- **Cross-coordinator pre-send negotiation** — letting coordinators coordinate *before* dispatch to optimize globally (vs. today's independent decide-then-let-the-owner-arbitrate). Useful eventually but reintroduces coordinator-to-coordinator coordination, so it is deferred until the simple model's limits are felt.

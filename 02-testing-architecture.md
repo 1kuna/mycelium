@@ -94,7 +94,7 @@ type Accelerator struct {
 type Node struct {
 	ID            string
 	Name          string
-	Address       string // loopback after tunnel, or LAN host:port
+	Address       string // the peer's reachable LAN address (host:port)
 	OS            string
 	Labels        map[string]string
 	MaxUtil       float64     // hard ceiling, e.g. 0.90 — never exceeded
@@ -207,6 +207,39 @@ type RunMetric struct {
 	ContextUsed     int
 	At              time.Time
 }
+
+// --- Federation types (§3.12) ---
+
+type Peer struct {
+	ID         string
+	Addresses  []string
+	Compute    bool      // compute-on => owns accelerators, runs backends, joins group telemetry analysis
+	LastSeen   time.Time // heartbeat
+	Version    string
+}
+
+// LeaseOffer is an owner's conditional "I can run this" during planning.
+type LeaseOffer struct {
+	OfferID    string
+	JobID      string
+	NodeID     string
+	Claim      Claim
+	Fence      uint64 // the node's resource version this offer was made against
+	ExpiresAt  time.Time
+	Conditions string // e.g. "after evicting inst_x" | "reduced concurrency"
+}
+
+// JobRecord is one row of the replicated job registry (D16). Holds the request
+// payload so a dead peer's job can be re-run (rescued), not just flagged lost.
+type JobRecord struct {
+	JobID       string
+	Coordinator string // peer id currently responsible
+	AssignedNode string
+	Status      string // queued | placing | running | done | failed | orphaned
+	Request     []byte // the submitted request, for rescue
+	Fence       uint64
+	UpdatedAt   time.Time
+}
 ```
 
 ```go
@@ -221,6 +254,7 @@ var (
 	ErrPreempted       = errors.New("instance was preempted")
 	ErrNotReady        = errors.New("backend did not become ready before timeout")
 	ErrUnreachable     = errors.New("node is unreachable")
+	ErrStaleFence      = errors.New("plan was built on a stale resource version; re-decide")
 )
 ```
 
@@ -276,8 +310,8 @@ type Handle struct {
 	Ref  string // container name or pid string used for Stop
 }
 
-// NodeAgent is the control plane's view of one machine. The server talks to
-// every node through this interface; in tests it is a MockNodeAgent.
+// NodeAgent is a coordinator's view of one machine. Any peer coordinating a job
+// talks to candidate nodes through this interface; in tests it is a MockNodeAgent.
 type NodeAgent interface {
 	Snapshot(ctx context.Context) (domain.NodeSnapshot, error)
 	Load(ctx context.Context, p domain.Preset) (domain.ModelInstance, error)
@@ -285,9 +319,48 @@ type NodeAgent interface {
 }
 
 // Placer is the pure scheduling decision: given a job and a read-only fleet
-// snapshot, decide where it goes (or that it queues / preempts). No I/O.
+// snapshot, decide where it goes (or that it queues / preempts). No I/O. It is
+// peer-agnostic — identical code every coordinator runs over a snapshot.
 type Placer interface {
 	Place(ctx context.Context, job domain.Job, fleet domain.FleetSnapshot) (domain.PlacementDecision, error)
+}
+
+// AdmissionController is the OWNER side of authority (§3.12): the resource-owning
+// peer is the single atomic authority for its own hardware. A coordinator proposes;
+// the owner commits in a local transaction, enforcing max_util/oom_severity, and
+// REJECTS a stale plan via a per-resource fence/version (optimistic concurrency).
+type AdmissionController interface {
+	Offer(ctx context.Context, req domain.Job, claim domain.Claim) (domain.LeaseOffer, error)
+	Commit(ctx context.Context, offerID string, fence uint64) (domain.Lease, error) // ErrStaleFence if version moved
+	Release(ctx context.Context, leaseID string) error
+	Preempt(ctx context.Context, leaseID, reason string) error
+}
+
+// Coordinator is the per-job role (whoever received the job). It is pure
+// orchestration over Placer + NodeAgent + AdmissionController + JobRegistry; it owns
+// no resources. Role lasts one job. No leader.
+type Coordinator interface {
+	ClaimJob(ctx context.Context, jobID string) error
+	Plan(ctx context.Context, jobID string) (domain.PlacementDecision, error) // parallel snapshot → Placer
+	Commit(ctx context.Context, plan domain.PlacementDecision) (domain.Lease, error)
+	Release(ctx context.Context, jobID string) error
+}
+
+// JobRegistry is the small replicated, eventually-consistent record of which jobs
+// exist and who owns them (§3.12, D16) — NOT a consensus event-log. Backs failure
+// recovery: a dead peer's unfinished jobs are re-coordinated from registry state.
+type JobRegistry interface {
+	Put(ctx context.Context, rec domain.JobRecord) error
+	Watch(ctx context.Context, fromCursor string) (<-chan domain.JobRecord, error)
+	Snapshot(ctx context.Context) ([]domain.JobRecord, error)
+}
+
+// PeerDiscovery is LAN auto-discovery + peer advertisement (incl. the compute flag).
+// Cross-NAT overlay slots in behind this same interface later (D12).
+type PeerDiscovery interface {
+	Advertise(ctx context.Context, self domain.Peer) error
+	Peers(ctx context.Context) ([]domain.Peer, error)
+	WatchPeers(ctx context.Context) (<-chan domain.Peer, error)
 }
 
 // TelemetrySink ingests per-run metrics. Wired from Phase 1, before the optimizer.
@@ -296,7 +369,7 @@ type TelemetrySink interface {
 }
 ```
 
-The same pattern covers the remaining ports (`ModelRegistry`, `Catalog`, `TelemetryStore`, `Optimizer`, `Discovery`, `Tunnel`, `Store`). Define them in `internal/ports` before their implementations exist.
+The same pattern covers the remaining ports (`ModelRegistry`, `Catalog`, `TelemetryStore`, `Optimizer`, `Tunnel`, `Store`, `Clock`). Define them in `internal/ports` before their implementations exist. The federation ports above (`AdmissionController`, `Coordinator`, `JobRegistry`, `PeerDiscovery`) each get a hand-written recording mock (`MockAdmissionController`, `MockJobRegistry`, `MockPeerDiscovery`, and a coordinator is tested over mocks of the others) and, where there is a real+mock pair, a conformance suite (§3) — so the whole federation layer is built and tested on the local dev Mac with a mock fleet + `FakeClock`, real peers only in `smoke/`.
 
 ### Compile-time satisfaction (do this for every interface/impl pair)
 
@@ -421,7 +494,7 @@ test/
 ├── unit/            # one module, all deps mocked, fake clock        <5s   every change
 ├── contract/        # conformance suites vs mocks                    <2s   any iface/mock change
 ├── integration/     # 2+ real modules wired, external deps mocked    <10s  any module change
-├── e2e/             # full control plane, mock fleet + fake clock     <30s  before commit
+├── e2e/             # full peer (gateway+coordinator+node), mock fleet + fake clock     <30s  before commit
 ├── smoke/           # real engines / real machines (build tag smoke) 1-5m  manual / CI main
 ├── fixtures/        # factories + golden config/data
 └── mocks/           # hand-written mocks for every port
@@ -432,7 +505,7 @@ test/
 | `unit/` | none (mocked) | no | <5s | every file change |
 | `contract/` | none | no | <2s | any Protocol/mock change |
 | `integration/` | real modules, mocked externals | no | <10s | any module change |
-| `e2e/` | whole server, mock node agents + fake clock | no | <30s | before commit |
+| `e2e/` | whole peer, mock node agents + fake clock | no | <30s | before commit |
 | `smoke/` | real engines & machines (`//go:build smoke`) | **yes** | 1-5m | manual / CI main only |
 
 Everything except `smoke/` runs on the local dev Mac with nothing powered on. `smoke/` is the only place the Spark/B70/4090/Mac engines appear, and it is gated behind the `smoke` build tag so normal `go test ./...` never touches hardware.
@@ -780,7 +853,7 @@ func New(placer ports.Placer, clock ports.Clock, agents map[string]ports.NodeAge
 }
 ```
 
-Production wiring (`cmd/mycelium/server.go`):
+Production wiring (`cmd/mycelium/peer.go`):
 
 ```go
 sch := scheduler.New(
@@ -901,7 +974,10 @@ jobs:
           go run ./tools/covergate -profile cover.out \
             -min 0.85 \
             -require internal/scheduler=1.0 \
-            -require internal/lease=1.0
+            -require internal/lease=1.0 \
+            -require internal/peer/coordinator=1.0 \
+            -require internal/peer/recovery=1.0 \
+            -require internal/node/admission=1.0
   smoke:
     if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, gpu]      # a real machine in the fleet
@@ -919,7 +995,7 @@ jobs:
 
 ## 10. Coverage targets and pitfalls
 
-Targets: 85%+ lines per module; 100% on `internal/scheduler`, `internal/lease`, conformance suites, and fixture factories; every error path covered; every public method covered.
+Targets: 85%+ lines per module; 100% on `internal/scheduler`, `internal/lease`, the federation authority/recovery packages (`internal/node/admission`, `internal/peer/coordinator`, `internal/peer/recovery`), conformance suites, and fixture factories; every error path covered; every public method covered.
 
 Avoid (Go-specific reading of the standard pitfalls):
 
@@ -933,3 +1009,4 @@ Avoid (Go-specific reading of the standard pitfalls):
 8. **No error-path tests** — every mock has failure injection; every module has at least one failure test (e.g. `BackendAdapter.LaunchErr`, `NodeAgent.LoadErr`, `ReadyAfter` exceeding the load timeout).
 9. **Non-deterministic time** — never `time.Now()`/`time.Sleep` in code under test; inject `Clock`, drive with `FakeClock`.
 10. **Flat structure** — keep the deep `internal/<module>` tree from Document 1 §5 so the agent navigates by path.
+11. **Untested concurrency/federation invariants** — the federation safety properties are not "looks right," they are tests: two coordinators racing one resource (the `FakeClock`-driven optimistic-concurrency commit, exactly one wins, the loser gets `ErrStaleFence`), a stale-fence commit rejected, a partitioned peer cannot claim unreachable remote capacity, and a dead peer's unfinished jobs are re-coordinated from the registry. Drive them deterministically with mocks + `FakeClock`; never rely on real timing.
