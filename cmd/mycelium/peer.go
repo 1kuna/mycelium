@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -758,7 +759,7 @@ func fetchPeerHealth(ctx context.Context, address, joinToken string) (domain.Pee
 	if joinToken != "" {
 		req.Header.Set("X-Myc-Join-Token", joinToken)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := peerControlHTTPClient().Do(req)
 	if err != nil {
 		return domain.Peer{}, fmt.Errorf("%w: %v", domain.ErrUnreachable, err)
 	}
@@ -919,7 +920,7 @@ func doPeerRPC(ctx context.Context, client *http.Client, authToken string, peer 
 		req.Header.Set("Authorization", "Bearer "+authToken)
 	}
 	if client == nil {
-		client = http.DefaultClient
+		client = peerControlHTTPClient()
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -934,6 +935,16 @@ func doPeerRPC(ctx context.Context, client *http.Client, authToken string, peer 
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func peerControlHTTPClient() *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		Proxy: nil,
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}}
 }
 
 func startRegistryReplication(ctx context.Context, registry ports.JobRegistry, discovery ports.PeerDiscovery, selfID, rpcToken string, clk ports.Clock, interval time.Duration) {

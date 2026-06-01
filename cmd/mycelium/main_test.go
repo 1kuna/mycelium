@@ -910,6 +910,17 @@ func TestSeedPeerProbeRemembersReachablePeer(t *testing.T) {
 	}
 }
 
+func TestPeerControlHTTPClientBypassesAmbientProxy(t *testing.T) {
+	client := peerControlHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T", client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("peer control RPC must not use ambient HTTP proxy settings")
+	}
+}
+
 func TestPeerBackgroundHelpersUseFakeClockAndPersistEffects(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
