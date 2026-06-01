@@ -27,6 +27,12 @@ func runPhase6ManualFederationSmoke(t *testing.T, gatewayA, gatewayB, model stri
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
-	assertGatewayChatEventually(t, ctx, gatewayA, model)
-	assertGatewayChatEventually(t, ctx, gatewayB, model)
+	_, _, nodeA := assertGatewayChatEventually(t, ctx, gatewayA, model)
+	if want := os.Getenv("MYCELIUM_FEDERATION_EXPECT_NODE_A"); want != "" && nodeA != want {
+		t.Fatalf("gateway A placed on node %q, want %q", nodeA, want)
+	}
+	_, _, nodeB := assertGatewayChatEventually(t, ctx, gatewayB, model)
+	if want := os.Getenv("MYCELIUM_FEDERATION_EXPECT_NODE_B"); want != "" && nodeB != want {
+		t.Fatalf("gateway B placed on node %q, want %q", nodeB, want)
+	}
 }
