@@ -149,7 +149,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 		t.Fatalf("compute defaults = %+v", peerCfg.ComputeConfig)
 	}
 	computePath := filepath.Join(t.TempDir(), "compute-peer.json")
-	computeRaw := `{"compute":true,"pre_send_negotiation":true,"compute_config":{"backend_listen":"127.0.0.1:8","id":"peer-json","name":"Peer JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"gguf_parser":"parser"}}`
+	computeRaw := `{"compute":true,"pre_send_negotiation":true,"overlay":true,"overlay_listen_addrs":["/ip4/127.0.0.1/tcp/0"],"overlay_bootstrap":["/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWFake"],"compute_config":{"backend_listen":"127.0.0.1:8","id":"peer-json","name":"Peer JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"gguf_parser":"parser"}}`
 	if err := os.WriteFile(computePath, []byte(computeRaw), 0644); err != nil {
 		t.Fatalf("write compute peer config: %v", err)
 	}
@@ -159,6 +159,9 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	}
 	if !computeCfg.Compute || !computeCfg.PreSendNegotiation || computeCfg.ComputeConfig.ID != "peer-json" || computeCfg.ComputeConfig.VRAMMB != 1234 || computeCfg.ComputeConfig.GGUFParser != "parser" || computeCfg.ComputeConfig.Backend != domain.BackendMLX || computeCfg.ComputeConfig.BackendBinary != "/bin/mlx" {
 		t.Fatalf("compute peer config = %+v", computeCfg)
+	}
+	if !computeCfg.Overlay || len(computeCfg.OverlayListenAddrs) != 1 || len(computeCfg.OverlayBootstrap) != 1 {
+		t.Fatalf("overlay config = %+v", computeCfg)
 	}
 	badPath := filepath.Join(t.TempDir(), "bad.json")
 	if err := os.WriteFile(badPath, []byte(`{`), 0644); err != nil {
