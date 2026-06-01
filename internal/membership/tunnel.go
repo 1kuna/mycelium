@@ -16,9 +16,14 @@ import (
 
 type LANTunnel struct {
 	AuthToken string
+	Listener  ListenerFactory
 
 	mu    sync.Mutex
 	known map[string]*tunnelEntry
+}
+
+type ListenerFactory interface {
+	Listen(ctx context.Context, network, address string) (net.Listener, error)
 }
 
 type tunnelEntry struct {
@@ -49,7 +54,11 @@ func (t *LANTunnel) Open(ctx context.Context, node domain.Node) (string, error) 
 		return addr, nil
 	}
 	t.mu.Unlock()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	factory := t.Listener
+	if factory == nil {
+		factory = netListenerFactory{}
+	}
+	listener, err := factory.Listen(ctx, "tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", err
 	}
@@ -88,6 +97,12 @@ func (t *LANTunnel) Close(ctx context.Context, nodeID string) error {
 		return nil
 	}
 	return entry.server.Shutdown(ctx)
+}
+
+type netListenerFactory struct{}
+
+func (netListenerFactory) Listen(_ context.Context, network, address string) (net.Listener, error) {
+	return net.Listen(network, address)
 }
 
 func tunnelTarget(address string) (*url.URL, error) {

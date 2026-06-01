@@ -3,6 +3,7 @@ package membership
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 
@@ -150,7 +151,7 @@ func TestCachedPeerDiscoveryStartConsumesUpstreamWatch(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	watch <- domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}}
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1000; i++ {
 		peers, err := cache.Peers(context.Background())
 		if err != nil {
 			t.Fatalf("Peers: %v", err)
@@ -158,7 +159,7 @@ func TestCachedPeerDiscoveryStartConsumesUpstreamWatch(t *testing.T) {
 		if len(peers) == 1 && peers[0].ID == "peer-a" {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		runtime.Gosched()
 	}
 	t.Fatal("watched peer was not cached")
 }
