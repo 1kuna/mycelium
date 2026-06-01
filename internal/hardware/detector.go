@@ -2,6 +2,7 @@ package hardware
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -80,28 +81,41 @@ func (d Detector) detectLinux(ctx context.Context, seed domain.Node) (domain.Nod
 		command = runCommand
 	}
 	out, err := command(ctx, "nvidia-smi", "--query-gpu=index,name,memory.total,compute_cap", "--format=csv,noheader,nounits")
-	if err != nil {
-		return domain.Node{}, err
+	if err == nil {
+		accelerators, parseErr := parseNVIDIASMI(out)
+		if parseErr != nil {
+			return domain.Node{}, parseErr
+		}
+		return linuxNode(seed, "nvidia", accelerators, d.Clock), nil
 	}
-	accelerators, err := parseNVIDIASMI(out)
+
+	nvidiaErr := err
+	out, err = command(ctx, "clinfo")
 	if err != nil {
-		return domain.Node{}, err
+		return domain.Node{}, fmt.Errorf("linux hardware discovery failed: nvidia-smi: %w; clinfo: %w", nvidiaErr, err)
 	}
+	accelerators, err := parseIntelCLInfo(out)
+	if err != nil {
+		return domain.Node{}, fmt.Errorf("linux hardware discovery failed: nvidia-smi: %w; clinfo: %w", nvidiaErr, err)
+	}
+	return linuxNode(seed, "intel", accelerators, d.Clock), nil
+}
+
+func linuxNode(seed domain.Node, vendor string, accelerators []domain.Accelerator, clk ports.Clock) domain.Node {
 	node := seed
 	node.OS = "linux"
-	node.Labels = mergeLabels(node.Labels, map[string]string{"gpu.vendor": "nvidia", "memory.class": "discrete"})
+	node.Labels = mergeLabels(node.Labels, map[string]string{"gpu.vendor": vendor, "memory.class": "discrete"})
 	node.OOMSeverity = domain.OOMSoft
 	node.Status = domain.NodeReady
 	node.UnifiedMemory = false
 	node.Accelerators = accelerators
 	if node.SpeedClass.TokensPerSecRef == 0 {
-		clk := d.Clock
 		if clk == nil {
 			clk = clock.System{}
 		}
 		node.SpeedClass = domain.SpeedClass{TokensPerSecRef: 1, Source: "detected-default", ProbedAt: clk.Now().UTC()}
 	}
-	return node, nil
+	return node
 }
 
 func parseNVIDIASMI(out []byte) ([]domain.Accelerator, error) {
@@ -140,6 +154,75 @@ func parseNVIDIASMI(out []byte) ([]domain.Accelerator, error) {
 		return nil, fmt.Errorf("nvidia-smi returned no GPUs")
 	}
 	return accelerators, nil
+}
+
+func parseIntelCLInfo(out []byte) ([]domain.Accelerator, error) {
+	lines := strings.Split(string(out), "\n")
+	accelerators := []domain.Accelerator{}
+	var name string
+	var memoryBytes int64
+	appendCurrent := func() error {
+		if name == "" {
+			return nil
+		}
+		lower := strings.ToLower(name)
+		if !strings.Contains(lower, "intel") || !strings.Contains(lower, "arc") {
+			name = ""
+			memoryBytes = 0
+			return nil
+		}
+		if memoryBytes <= 0 {
+			return fmt.Errorf("intel accelerator %q missing global memory size", name)
+		}
+		accelerators = append(accelerators, domain.Accelerator{
+			Index:       len(accelerators),
+			Vendor:      "intel",
+			Kind:        intelKind(name),
+			VRAMTotalMB: int(memoryBytes / 1024 / 1024),
+			ArchFamily:  name,
+		})
+		name = ""
+		memoryBytes = 0
+		return nil
+	}
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "NULL platform behavior" {
+			break
+		}
+		switch {
+		case strings.HasPrefix(line, "Device Name"):
+			if err := appendCurrent(); err != nil {
+				return nil, err
+			}
+			name = strings.TrimSpace(strings.TrimPrefix(line, "Device Name"))
+		case name != "" && strings.HasPrefix(line, "Global memory size"):
+			fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "Global memory size")))
+			if len(fields) == 0 {
+				return nil, fmt.Errorf("intel accelerator %q has empty global memory size", name)
+			}
+			parsed, err := strconv.ParseInt(fields[0], 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("parse intel global memory %q: %w", fields[0], err)
+			}
+			memoryBytes = parsed
+		}
+	}
+	if err := appendCurrent(); err != nil {
+		return nil, err
+	}
+	if len(accelerators) == 0 {
+		return nil, errors.New("clinfo returned no Intel Arc GPUs")
+	}
+	return accelerators, nil
+}
+
+func intelKind(name string) string {
+	normalized := strings.NewReplacer("(r)", "", "(tm)", "", "  ", " ").Replace(strings.ToLower(name))
+	if strings.Contains(normalized, "arc pro b70") {
+		return "arc-pro-b70"
+	}
+	return "arc"
 }
 
 func mergeLabels(base, add map[string]string) map[string]string {
