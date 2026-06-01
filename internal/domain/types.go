@@ -76,19 +76,27 @@ type ModelInstance struct {
 }
 
 type Job struct {
-	ID             string     `json:"id"`
-	TaskType       string     `json:"task_type"`
-	Model          string     `json:"model"`
-	PresetID       string     `json:"preset,omitempty"`
-	Project        string     `json:"project"`
-	Priority       Priority   `json:"priority"`
-	SpeedPref      SpeedPref  `json:"speed_pref"`
-	ContextRequest int        `json:"context_request,omitempty"`
-	Preemption     Preemption `json:"preemption"`
-	Streaming      bool       `json:"streaming"`
-	DeadlineMS     int        `json:"deadline_ms,omitempty"`
-	ParentID       string     `json:"parent_id,omitempty"`
-	Status         JobStatus  `json:"status"`
+	ID             string        `json:"id"`
+	TaskType       string        `json:"task_type"`
+	Model          string        `json:"model"`
+	PresetID       string        `json:"preset,omitempty"`
+	Project        string        `json:"project"`
+	Priority       Priority      `json:"priority"`
+	SpeedPref      SpeedPref     `json:"speed_pref"`
+	ContextRequest int           `json:"context_request,omitempty"`
+	Preemption     Preemption    `json:"preemption"`
+	Streaming      bool          `json:"streaming"`
+	DeadlineMS     int           `json:"deadline_ms,omitempty"`
+	ParentID       string        `json:"parent_id,omitempty"`
+	Status         JobStatus     `json:"status"`
+	Progress       []JobProgress `json:"progress,omitempty"`
+	Error          string        `json:"error,omitempty"`
+}
+
+type JobProgress struct {
+	Stage   string    `json:"stage"`
+	Message string    `json:"message"`
+	At      time.Time `json:"at"`
 }
 
 type PlacementDecision struct {

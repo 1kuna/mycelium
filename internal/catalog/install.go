@@ -29,6 +29,8 @@ type InstallJob struct {
 	err  error
 }
 
+type ProgressFunc func(ProgressEvent, InstallState) error
+
 func NewInstaller(storeDir string) Installer {
 	return Installer{StoreDir: storeDir, Now: clock.System{}.Now}
 }
@@ -42,16 +44,24 @@ func (i Installer) Materialize(ctx context.Context, ref string) (domain.Preset, 
 }
 
 func (i Installer) Start(ctx context.Context, req InstallRequest) *InstallJob {
+	return i.StartWithProgress(ctx, req, nil)
+}
+
+func (i Installer) StartWithProgress(ctx context.Context, req InstallRequest, progress ProgressFunc) *InstallJob {
 	job := &InstallJob{done: make(chan struct{})}
 	go func() {
 		defer close(job.done)
-		job.res, job.err = i.install(ctx, req)
+		job.res, job.err = i.install(ctx, req, progress)
 	}()
 	return job
 }
 
 func (i Installer) Install(ctx context.Context, req InstallRequest) (InstallResult, error) {
 	return i.Start(ctx, req).Wait(ctx)
+}
+
+func (i Installer) InstallWithProgress(ctx context.Context, req InstallRequest, progress ProgressFunc) (InstallResult, error) {
+	return i.StartWithProgress(ctx, req, progress).Wait(ctx)
 }
 
 func (j *InstallJob) Wait(ctx context.Context) (InstallResult, error) {
@@ -63,7 +73,7 @@ func (j *InstallJob) Wait(ctx context.Context) (InstallResult, error) {
 	}
 }
 
-func (i Installer) install(ctx context.Context, req InstallRequest) (InstallResult, error) {
+func (i Installer) install(ctx context.Context, req InstallRequest, onProgress ProgressFunc) (InstallResult, error) {
 	if err := ctx.Err(); err != nil {
 		return InstallResult{}, err
 	}
@@ -103,7 +113,15 @@ func (i Installer) install(ctx context.Context, req InstallRequest) (InstallResu
 		state.Progress = append(state.Progress, event)
 		state.Status = stage
 		state.UpdatedAt = event.At
-		return writeInstallState(i.StoreDir, state)
+		if err := writeInstallState(i.StoreDir, state); err != nil {
+			return err
+		}
+		if onProgress != nil {
+			if err := onProgress(event, state); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	if err := emit("import", "inspecting source"); err != nil {
 		return InstallResult{Progress: progress}, err
@@ -367,6 +385,10 @@ func installJobID(req InstallRequest) string {
 		return "install-" + req.ID
 	}
 	return "install-" + sanitizeID(filepath.Base(req.Source))
+}
+
+func InstallJobID(req InstallRequest) string {
+	return installJobID(req)
 }
 
 var _ ports.Catalog = Installer{}
