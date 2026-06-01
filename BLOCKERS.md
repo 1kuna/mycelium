@@ -2,7 +2,8 @@
 
 ## Active
 
-- 2026-05-29: vLLM/CUDA real-engine adapter smoke remains hardware/engine-gated. `command -v vllm` and `command -v nvidia-smi` returned no binary on Darwin arm64; run `MYCELIUM_VLLM_BINARY=... MYCELIUM_VLLM_MODEL=... go test -tags smoke ./test/smoke/... -run VLLM -timeout 20m -v -count=1` once that runtime/model exists.
+- 2026-06-01: vLLM/CUDA real-engine adapter smoke is still runtime-gated, but DGX Spark hardware is now reachable. `ssh dgx-spark 'nvidia-smi --query-gpu=index,name,memory.total,compute_cap --format=csv,noheader,nounits'` returns `0, NVIDIA GB10, [N/A], 12.1`; `command -v vllm` is empty and Python import reports `No module named 'vllm'`. Run `MYCELIUM_VLLM_BINARY=... MYCELIUM_VLLM_MODEL=... go test -tags smoke ./test/smoke/... -run VLLM -timeout 20m -v -count=1` after installing/locating vLLM and a smoke model on the Spark.
+- 2026-06-01: B70 SSH access is not configured/discoverable from this dev machine yet. `operator SSH config` and operator aliases list DGX Spark, `gpu-peer-a.example`, other internal hosts, and other peers, but no B70 alias; `b70`, `b70.local`, `dgx-b70`, `dgx-b70.local`, `nvidia-b70`, and `nvidia-b70.local` do not resolve. The only extra SSH-speaking LAN candidate checked was `192.0.2.86`, but existing GPU keys/users were rejected on port 22 and port 2222 timed out during banner exchange. Need the B70 hostname/IP, user, port, and key or password.
 
 ## Resolved
 
