@@ -137,6 +137,41 @@ func TestPeerDirectoryMarksUnreachablePeers(t *testing.T) {
 	}
 }
 
+func TestPeerDirectoryReusesPeerAgentAcrossSnapshots(t *testing.T) {
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	discovery := &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}}}
+	tunnel := &mocks.Tunnel{Addr: "127.0.0.1:6000"}
+	factoryCalls := 0
+	directory := &PeerDirectory{
+		Discovery: discovery,
+		Tunnel:    tunnel,
+		Factory: func(string) ports.NodeAgent {
+			factoryCalls++
+			return mocks.NewNodeAgent(node)
+		},
+	}
+	for i := 0; i < 2; i++ {
+		fleet, err := directory.Snapshot(context.Background())
+		if err != nil {
+			t.Fatalf("Snapshot %d: %v", i, err)
+		}
+		if len(fleet.Nodes) != 1 || fleet.Nodes[0].ID != node.ID {
+			t.Fatalf("fleet %d = %+v", i, fleet)
+		}
+	}
+	if factoryCalls != 1 || len(tunnel.Nodes) != 1 {
+		t.Fatalf("factoryCalls=%d tunnelNodes=%+v", factoryCalls, tunnel.Nodes)
+	}
+
+	discovery.PeersVal = []domain.Peer{{ID: "peer-a", Addresses: []string{"127.0.0.1:2"}, Compute: true}}
+	if _, err := directory.Snapshot(context.Background()); err != nil {
+		t.Fatalf("Snapshot changed address: %v", err)
+	}
+	if factoryCalls != 2 || len(tunnel.Nodes) != 2 || tunnel.Nodes[1].Address != "127.0.0.1:2" {
+		t.Fatalf("changed address did not refresh factoryCalls=%d tunnelNodes=%+v", factoryCalls, tunnel.Nodes)
+	}
+}
+
 func TestPeerDirectoryDefaultFactorySendsAuthToken(t *testing.T) {
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
 	server := directUpstream(nodeagent.HTTPServer{Agent: mocks.NewNodeAgent(node), AuthToken: "rpc-secret"})
