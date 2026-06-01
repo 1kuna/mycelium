@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,11 +18,13 @@ import (
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/estimate"
+	"mycelium/internal/gateway"
 	"mycelium/internal/lease"
 	"mycelium/internal/membership"
 	nodeagent "mycelium/internal/node"
 	"mycelium/internal/optimizer"
 	peercoord "mycelium/internal/peer"
+	"mycelium/internal/ports"
 	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/test/mocks"
@@ -43,6 +46,19 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 				t.Fatalf("run(%v) err = %v", tt.args, err)
 			}
 		})
+	}
+}
+
+func TestMainExitCodeReportsErrorsAndSuccess(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := mainExitCode(context.Background(), []string{"bogus"}, &stderr); code != 1 || !strings.Contains(stderr.String(), "unknown command") {
+		t.Fatalf("error exit code=%d stderr=%q", code, stderr.String())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	stderr.Reset()
+	if code := mainExitCode(ctx, nil, &stderr); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("success exit code=%d stderr=%q", code, stderr.String())
 	}
 }
 
@@ -193,6 +209,62 @@ func TestPrivateStorageKeyValidation(t *testing.T) {
 	}
 	if got := privateLocalNodeID(PeerConfig{Compute: true, ComputeConfig: ComputeConfig{ID: "peer-a"}}); got != "peer-a" {
 		t.Fatalf("private node = %q", got)
+	}
+}
+
+func TestPeerConfigHelpersSeedMapsAndShutdowns(t *testing.T) {
+	var target string
+	overrideString(nil, &target)
+	if target != "" {
+		t.Fatalf("nil override changed target to %q", target)
+	}
+	empty := ""
+	overrideString(&empty, &target)
+	if target != "" {
+		t.Fatalf("empty override changed target to %q", target)
+	}
+	value := "set"
+	overrideString(&value, &target)
+	if target != "set" {
+		t.Fatalf("override target = %q", target)
+	}
+	labels := withPeerBackendLabel(map[string]string{"existing": "yes"}, domain.BackendVLLM)
+	if labels["existing"] != "yes" || labels[LabelPeerBackend] != string(domain.BackendVLLM) {
+		t.Fatalf("labels = %+v", labels)
+	}
+	if combineShutdowns(nil) != nil {
+		t.Fatal("empty shutdown list returned a function")
+	}
+	boom := errors.New("shutdown boom")
+	shutdown := combineShutdowns([]func(context.Context) error{
+		func(context.Context) error { return nil },
+		func(context.Context) error { return boom },
+	})
+	if err := shutdown(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("shutdown err = %v", err)
+	}
+
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "seed.sqlite"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	preset := testPreset("preset-a")
+	preset.ModelRef = "model-a"
+	preset.Aliases = []string{"alias-a", ""}
+	cfg := PeerConfig{
+		Projects:     []domain.Project{{ID: "project-a"}},
+		Presets:      []domain.Preset{preset},
+		Reservations: []domain.Reservation{{ID: "reservation-a", Kind: domain.ReservationHeadroom, NodeID: "node-a", Headroom: domain.Claim{WeightsMB: 1}}},
+	}
+	if err := seedControlStore(context.Background(), store, cfg); err != nil {
+		t.Fatalf("seedControlStore: %v", err)
+	}
+	if _, err := store.Project(context.Background(), "project-a"); err != nil {
+		t.Fatalf("seeded project: %v", err)
+	}
+	if got := presetMap([]domain.Preset{preset}); got["model-a"].ID != preset.ID || got["alias-a"].ID != preset.ID {
+		t.Fatalf("preset map = %+v", got)
 	}
 }
 
@@ -575,6 +647,197 @@ func TestMountNodeHTTPIncludesAdmissionRuntimeRoutes(t *testing.T) {
 	}
 }
 
+func TestCombinedFleetAndNodesDelegateAcrossSources(t *testing.T) {
+	ctx := context.Background()
+	leftAdmission := &mocks.AdmissionController{}
+	rightAdmission := &mocks.AdmissionController{}
+	leftAgent, err := newLocalPeerAgent(mocks.NewNodeAgent(domain.Node{ID: "left"}), leftAdmission)
+	if err != nil {
+		t.Fatalf("left local agent: %v", err)
+	}
+	rightAgent, err := newLocalPeerAgent(mocks.NewNodeAgent(domain.Node{ID: "right"}), rightAdmission)
+	if err != nil {
+		t.Fatalf("right local agent: %v", err)
+	}
+	leftDir := gateway.NodeDirectory{Agents: map[string]ports.NodeAgent{"left": leftAgent}}
+	rightDir := gateway.NodeDirectory{Agents: map[string]ports.NodeAgent{"right": rightAgent}}
+
+	fleet := combinedFleet{left: leftDir, right: rightDir}
+	snap, err := fleet.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Nodes) != 2 {
+		t.Fatalf("fleet snapshot = %+v", snap)
+	}
+	boom := errors.New("boom")
+	if _, err := (combinedFleet{left: errorFleetSource{err: boom}, right: rightDir}).Snapshot(ctx); !errors.Is(err, boom) {
+		t.Fatalf("left error = %v", err)
+	}
+	if _, err := (combinedFleet{left: leftDir, right: errorFleetSource{err: boom}}).Snapshot(ctx); !errors.Is(err, boom) {
+		t.Fatalf("right error = %v", err)
+	}
+
+	nodes := combinedNodes{left: leftDir, right: rightDir}
+	if agent, err := nodes.NodeAgent("left"); err != nil || agent == nil {
+		t.Fatalf("left NodeAgent = %+v %v", agent, err)
+	}
+	if agent, err := nodes.NodeAgent("right"); err != nil || agent == nil {
+		t.Fatalf("right NodeAgent = %+v %v", agent, err)
+	}
+	if admission, err := nodes.AdmissionController("right"); err != nil || admission == nil {
+		t.Fatalf("right admission = %+v %v", admission, err)
+	}
+	if inspector, err := nodes.LeaseInspector("right"); err != nil || inspector == nil {
+		t.Fatalf("right inspector = %+v %v", inspector, err)
+	}
+	if _, err := (combinedNodes{left: gateway.NodeDirectory{}, right: plainNodeResolver{}}).AdmissionController("missing"); err == nil {
+		t.Fatal("missing right admission exposure accepted")
+	}
+	if _, err := (combinedNodes{left: gateway.NodeDirectory{}, right: plainNodeResolver{}}).LeaseInspector("missing"); err == nil {
+		t.Fatal("missing right lease inspection exposure accepted")
+	}
+	if got := admissionResolver(plainNodeResolver{}); got != nil {
+		t.Fatalf("plain node resolver admission = %+v", got)
+	}
+}
+
+func TestPeerAddressAuthAndRPCErrorHelpers(t *testing.T) {
+	if got := peerHTTPBaseURL(" 127.0.0.1:1/ "); got != "http://127.0.0.1:1" {
+		t.Fatalf("base url = %q", got)
+	}
+	if got, err := reachablePeerAddress("https://example.test:9443/path"); err != nil || got != "example.test:9443" {
+		t.Fatalf("reachable url = %q %v", got, err)
+	}
+	for _, address := range []string{"", "http://"} {
+		if _, err := reachablePeerAddress(address); err == nil {
+			t.Fatalf("reachablePeerAddress(%q) expected error", address)
+		}
+	}
+	if got := prependReachableAddress([]string{"b", "a"}, "a"); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("prepended = %+v", got)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	if !peerJoinAuthorized(req, nil) || !peerRPCAuthorized(req, "") {
+		t.Fatal("empty auth should allow local peer helpers")
+	}
+	manager, err := membership.NewTokenManager("join-secret")
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	req.Header.Set("X-Myc-Join-Token", "join-secret")
+	if !peerJoinAuthorized(req, manager) {
+		t.Fatal("join token was rejected")
+	}
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	if !peerRPCAuthorized(req, "rpc-secret") {
+		t.Fatal("rpc bearer token was rejected")
+	}
+	req.Header.Set("Authorization", "rpc-secret")
+	if peerRPCAuthorized(req, "rpc-secret") {
+		t.Fatal("rpc token without bearer prefix was accepted")
+	}
+	rec := httptest.NewRecorder()
+	writePeerRPCError(rec, http.StatusTeapot, errors.New("steep"))
+	if rec.Code != http.StatusTeapot || !strings.Contains(rec.Body.String(), "steep") {
+		t.Fatalf("rpc error response = %d %q", rec.Code, rec.Body.String())
+	}
+	if err := manager.Revoke("join-secret"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if _, err := authorizedOutboundJoinToken("join-secret", manager); err == nil {
+		t.Fatal("revoked outbound join token accepted")
+	}
+}
+
+func TestRegistryAndTelemetryHTTPErrorBranches(t *testing.T) {
+	ctx := context.Background()
+	registry := &mocks.JobRegistry{Err: errors.New("registry boom")}
+	mux := http.NewServeMux()
+	mountRegistryHTTP(mux, registry, "rpc-secret")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/registry/snapshot", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "registry boom") {
+		t.Fatalf("snapshot error = %d %q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/registry/snapshot", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("snapshot method status = %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/registry/records", strings.NewReader(`{`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad registry records status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/registry/records", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("registry records method status = %d", rec.Code)
+	}
+
+	telemetryStore := &recordingTelemetryRPCStore{err: errors.New("telemetry boom")}
+	mux = http.NewServeMux()
+	mountTelemetryHTTP(mux, telemetryStore, "rpc-secret")
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/telemetry/metrics", nil),
+		httptest.NewRequest(http.MethodPost, "/telemetry/metrics", strings.NewReader(`{`)),
+		httptest.NewRequest(http.MethodPut, "/telemetry/metrics", nil),
+		httptest.NewRequest(http.MethodGet, "/telemetry/recommendations", nil),
+		httptest.NewRequest(http.MethodPost, "/telemetry/recommendations", strings.NewReader(`{`)),
+		httptest.NewRequest(http.MethodPut, "/telemetry/recommendations", nil),
+	} {
+		req = req.WithContext(ctx)
+		req.Header.Set("Authorization", "Bearer rpc-secret")
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code < 400 {
+			t.Fatalf("%s %s unexpectedly succeeded: %d", req.Method, req.URL.Path, rec.Code)
+		}
+	}
+}
+
+func TestPeerRPCClientErrorBranches(t *testing.T) {
+	ctx := context.Background()
+	if err := doPeerRPC(ctx, nil, "", domain.Peer{ID: "peer-a"}, http.MethodGet, "/x", nil, nil); err == nil {
+		t.Fatal("peer without address accepted")
+	}
+	errorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusForbidden)
+	}))
+	defer errorServer.Close()
+	if err := doPeerRPC(ctx, errorServer.Client(), "", domain.Peer{ID: "peer-a", Addresses: []string{errorServer.URL}}, http.MethodGet, "/x", nil, nil); err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("status err = %v", err)
+	}
+	badJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{`))
+	}))
+	defer badJSON.Close()
+	var out map[string]string
+	if err := doPeerRPC(ctx, badJSON.Client(), "", domain.Peer{ID: "peer-a", Addresses: []string{badJSON.URL}}, http.MethodGet, "/x", nil, &out); err == nil {
+		t.Fatal("bad JSON peer response accepted")
+	}
+	okServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer rpc-secret" || r.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("headers = %+v", r.Header)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer okServer.Close()
+	if err := doPeerRPC(ctx, okServer.Client(), "rpc-secret", domain.Peer{ID: "peer-a", Addresses: []string{okServer.URL}}, http.MethodPost, "/x", map[string]string{"a": "b"}, nil); err != nil {
+		t.Fatalf("ok peer rpc: %v", err)
+	}
+}
+
 func TestRescueRecoveredJobDecodesPayloadAndSubmits(t *testing.T) {
 	job := domain.Job{ID: "job-a", Model: "tiny", Priority: domain.PriorityInteractive}
 	payload, err := peercoord.EncodeRescuePayload(job, []byte(`{"model":"tiny"}`))
@@ -647,6 +910,59 @@ func TestSeedPeerProbeRemembersReachablePeer(t *testing.T) {
 	}
 }
 
+func TestPeerBackgroundHelpersUseFakeClockAndPersistEffects(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clk := mocks.NewFakeClock(time.Unix(100, 0).UTC())
+	discovery := &signalingPeerDiscovery{advertised: make(chan domain.Peer, 4)}
+	startPeerAdvertiser(ctx, discovery, domain.Peer{ID: "peer-a"}, clk, time.Second)
+	firstAdvertise := <-discovery.advertised
+	if firstAdvertise.ID != "peer-a" {
+		t.Fatalf("first advertise = %+v", firstAdvertise)
+	}
+	waitForCondition(t, func() bool {
+		clk.Advance(time.Second)
+		select {
+		case <-discovery.advertised:
+			return true
+		default:
+			return false
+		}
+	})
+
+	seed := domain.Peer{ID: "seed-peer", Addresses: []string{"127.0.0.1:0"}, Compute: true}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Myc-Join-Token") != "secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(seed)
+	}))
+	defer server.Close()
+	cache := membership.NewCachedPeerDiscovery(&mocks.PeerDiscovery{}, clk, time.Minute)
+	manager, err := membership.NewTokenManager("secret")
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	startSeedPeerProber(ctx, cache, []string{server.URL}, "secret", manager, clk, time.Millisecond)
+	waitForCondition(t, func() bool {
+		peers, err := cache.Peers(context.Background())
+		return err == nil && len(peers) == 1 && peers[0].ID == seed.ID
+	})
+	if got := appendSeedPeer([]string{"a"}, " a "); !reflect.DeepEqual(got, []string{"a"}) {
+		t.Fatalf("duplicate seed append = %+v", got)
+	}
+	if got := appendSeedPeer([]string{"a"}, "b"); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("new seed append = %+v", got)
+	}
+	if got := peerDiscoveryTTL(2 * time.Second); got != 10*time.Second {
+		t.Fatalf("ttl = %s", got)
+	}
+	if err := probePeerHealthWithTokenManager(context.Background(), domain.Peer{ID: seed.ID, Addresses: []string{server.URL}}, "secret", manager); err != nil {
+		t.Fatalf("probe with manager: %v", err)
+	}
+}
+
 func TestPeerHealthUsesPersistentTokenManager(t *testing.T) {
 	manager, err := membership.NewTokenManager("secret")
 	if err != nil {
@@ -673,6 +989,96 @@ func TestPeerHealthUsesPersistentTokenManager(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("health after revoke = %d %s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clk := mocks.NewFakeClock(time.Unix(0, 0).UTC())
+
+	registry := &mocks.JobRegistry{WatchCh: make(chan domain.JobRecord)}
+	discovery := &signalingPeerDiscovery{peersSeen: make(chan struct{}, 4)}
+	startRegistryReplication(ctx, registry, discovery, "peer-a", "", clk, time.Second)
+	waitForCondition(t, func() bool {
+		select {
+		case <-discovery.peersSeen:
+			return true
+		default:
+			return false
+		}
+	})
+	badRegistry := &mocks.JobRegistry{WatchErr: errors.New("watch boom")}
+	startRegistryReplication(ctx, badRegistry, discovery, "peer-a", "", clk, time.Second)
+	if !containsString(badRegistry.Calls, "watch:") {
+		t.Fatalf("bad registry calls = %+v", badRegistry.Calls)
+	}
+
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	dead := domain.Peer{ID: "dead-peer", Addresses: []string{"127.0.0.1:1"}, Compute: true}
+	startPeerHeartbeat(ctx, domain.Peer{ID: "peer-a"}, &mocks.PeerDiscovery{PeersVal: []domain.Peer{dead}}, gateway.NodeDirectory{}, &recordingRescueRuntime{}, store, "", nil, clk)
+	waitForCondition(t, func() bool {
+		clk.Advance(peercoord.DefaultHeartbeatInterval)
+		node, err := store.Node(context.Background(), dead.ID)
+		return err == nil && node.Status == domain.NodeUnreachable
+	})
+
+	queueStore, err := storesqlite.Open(filepath.Join(t.TempDir(), "queue.sqlite"))
+	if err != nil {
+		t.Fatalf("Open queue: %v", err)
+	}
+	defer queueStore.Close()
+	if err := queueStore.SaveLease(context.Background(), domain.Lease{ID: "expired", ExpiresAt: time.Unix(-1, 0).UTC()}); err != nil {
+		t.Fatalf("SaveLease: %v", err)
+	}
+	runtime := &scheduler.Service{
+		Placer: scheduler.NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), clk),
+		Fleet:  gateway.NodeDirectory{Agents: map[string]ports.NodeAgent{}},
+		Nodes:  gateway.NodeDirectory{Agents: map[string]ports.NodeAgent{}},
+		Queue:  scheduler.NewQueue(clk),
+		Store:  queueStore,
+		Clock:  clk,
+	}
+	startQueueDrainer(ctx, runtime, clk, time.Second, 1)
+	waitForCondition(t, func() bool {
+		clk.Advance(time.Second)
+		leases, err := queueStore.ListLeases(context.Background())
+		return err == nil && len(leases) == 0
+	})
+
+	optimizerStore, err := storesqlite.Open(filepath.Join(t.TempDir(), "optimizer.sqlite"))
+	if err != nil {
+		t.Fatalf("Open optimizer: %v", err)
+	}
+	defer optimizerStore.Close()
+	project := domain.Project{ID: "project-a", ContextCap: 16000}
+	if err := optimizerStore.SaveProject(context.Background(), project); err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	if err := optimizerStore.SavePreset(context.Background(), testPresetWithContext("small", 6000)); err != nil {
+		t.Fatalf("SavePreset small: %v", err)
+	}
+	if err := optimizerStore.SavePreset(context.Background(), testPresetWithContext("large", 16000)); err != nil {
+		t.Fatalf("SavePreset large: %v", err)
+	}
+	for _, metric := range []domain.RunMetric{
+		{JobID: "job-a", Project: project.ID, ContextUsed: 3500, At: time.Unix(1, 0).UTC()},
+		{JobID: "job-b", Project: project.ID, ContextUsed: 4000, At: time.Unix(2, 0).UTC()},
+	} {
+		if err := optimizerStore.Record(context.Background(), metric); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	startOptimizerEvaluator(ctx, optimizerStore, optimizerFleet{snap: domain.FleetSnapshot{Nodes: []domain.Node{{ID: "peer-a", Status: domain.NodeReady}}}}, "peer-a", true, clk, time.Second, telemetrySyncConfig{})
+	waitForCondition(t, func() bool {
+		clk.Advance(time.Second)
+		recs, err := optimizerStore.ListRecommendations(context.Background(), project.ID)
+		return err == nil && len(recs) == 1
+	})
+	cancel()
 }
 
 func serverURL(r *http.Request) string {
@@ -799,6 +1205,20 @@ func TestLoadPinnedReservationsFailsLoudly(t *testing.T) {
 	}
 	if err := loadPinnedReservations(ctx, agent, store, node.ID); err == nil {
 		t.Fatal("unknown preset accepted")
+	}
+
+	store = peerTestRegistry(t)
+	if err := store.SavePreset(ctx, testPreset("tiny")); err != nil {
+		t.Fatalf("SavePreset tiny: %v", err)
+	}
+	if err := store.SaveReservation(ctx, domain.Reservation{ID: "pin-load-fail", Kind: domain.ReservationPinned, NodeID: node.ID, PresetID: "tiny"}); err != nil {
+		t.Fatalf("SaveReservation load fail: %v", err)
+	}
+	backend := mocks.NewBackendAdapter()
+	backend.LaunchErr = errors.New("load boom")
+	agent = nodeagent.NewAgent(node, backend, mocks.NewFakeClock(time.Unix(1, 0).UTC()), nodeagent.WithAllocator(lease.NewAllocator()))
+	if err := loadPinnedReservations(ctx, agent, store, node.ID); err == nil || !strings.Contains(err.Error(), "load boom") {
+		t.Fatalf("load failure err = %v", err)
 	}
 }
 
@@ -988,6 +1408,76 @@ func TestRunOptimizerEvaluationSkipsUnreachableTelemetryPeersWithEvidence(t *tes
 	}
 }
 
+func TestOptimizerSelectionAndTelemetrySyncErrors(t *testing.T) {
+	ctx := context.Background()
+	clk := mocks.NewFakeClock(time.Unix(0, 0).UTC())
+	if _, err := shouldRunGroupOptimizer(ctx, nil, "peer-a", clk, time.Minute); err == nil {
+		t.Fatal("nil fleet accepted")
+	}
+	if _, err := shouldRunGroupOptimizer(ctx, optimizerFleet{}, "", clk, time.Minute); err == nil {
+		t.Fatal("empty self id accepted")
+	}
+	if _, err := shouldRunGroupOptimizer(ctx, optimizerFleet{}, "peer-a", nil, time.Minute); err == nil {
+		t.Fatal("nil clock accepted")
+	}
+	boom := errors.New("fleet boom")
+	if _, err := shouldRunGroupOptimizer(ctx, optimizerFleet{err: boom}, "peer-a", clk, time.Minute); !errors.Is(err, boom) {
+		t.Fatalf("fleet err = %v", err)
+	}
+
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	if _, err := runOptimizerEvaluation(ctx, nil, clk, telemetrySyncConfig{}); err == nil {
+		t.Fatal("nil optimizer store accepted")
+	}
+	if _, err := runOptimizerEvaluation(ctx, store, nil, telemetrySyncConfig{}); err == nil {
+		t.Fatal("nil optimizer clock accepted")
+	}
+	peerErr := errors.New("peers boom")
+	if _, err := runOptimizerEvaluation(ctx, store, clk, telemetrySyncConfig{Peers: &mocks.PeerDiscovery{Err: peerErr}, Client: &mocks.TelemetryPeerClient{}}); !errors.Is(err, peerErr) {
+		t.Fatalf("peer err = %v", err)
+	}
+
+	project := domain.Project{ID: "project-a", ContextCap: 16000}
+	if err := store.SaveProject(ctx, project); err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	if err := store.SavePreset(ctx, testPresetWithContext("small", 6000)); err != nil {
+		t.Fatalf("SavePreset small: %v", err)
+	}
+	if err := store.SaveRecommendation(ctx, domain.RecommendationRecord{ID: "remote-rec", Type: optimizer.RecommendationContextCap, ProjectID: project.ID, CreatedAt: time.Unix(1, 0).UTC()}); err != nil {
+		t.Fatalf("SaveRecommendation: %v", err)
+	}
+	client := &mocks.TelemetryPeerClient{
+		RecommendationsByPeer:  map[string][]domain.RecommendationRecord{"peer-b": {{ID: "rec-b", ProjectID: project.ID, Type: optimizer.RecommendationContextCap, CreatedAt: time.Unix(2, 0).UTC()}}},
+		PushRecommendationsErr: errors.New("push boom"),
+	}
+	result, reachable, err := pullFleetTelemetry(ctx, store, telemetrySyncConfig{
+		SelfID: "peer-a",
+		Peers: &mocks.PeerDiscovery{PeersVal: []domain.Peer{
+			{},
+			{ID: "peer-a"},
+			{ID: "peer-b", Compute: true},
+		}},
+		Client: client,
+	})
+	if err != nil {
+		t.Fatalf("pullFleetTelemetry: %v", err)
+	}
+	if len(reachable) != 1 || result.ImportedRecommendations != 1 {
+		t.Fatalf("pull result=%+v reachable=%+v", result, reachable)
+	}
+	if err := pushFleetRecommendations(ctx, store, telemetrySyncConfig{Client: client}, reachable, &result); err != nil {
+		t.Fatalf("pushFleetRecommendations: %v", err)
+	}
+	if len(result.SkippedPeers) != 1 || !strings.Contains(result.SkippedPeers[0], "push boom") {
+		t.Fatalf("push skipped = %+v", result.SkippedPeers)
+	}
+}
+
 func TestShouldRunGroupOptimizerSelectsOneReadyComputePeer(t *testing.T) {
 	ctx := context.Background()
 	clk := mocks.NewFakeClock(time.Unix(0, 0).UTC())
@@ -1039,6 +1529,46 @@ func TestRunNodeAndPeerExitOnCanceledContext(t *testing.T) {
 	})
 	if err := runPeer(ctx, []string{"--config", configPath}); err != nil {
 		t.Fatalf("runPeer canceled: %v", err)
+	}
+}
+
+func TestRunPeerServesUntilContextCanceled(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	configPath := writePeerConfig(t, PeerConfig{
+		Listen:    "127.0.0.1:0",
+		StorePath: dbPath,
+		Compute:   true,
+		ComputeConfig: ComputeConfig{
+			ID:            "peer-a",
+			Name:          "Peer A",
+			BackendListen: "127.0.0.1:51848",
+			LlamaServer:   "/bin/echo",
+			VRAMMB:        1024,
+		},
+		Presets: []domain.Preset{testPreset("tiny")},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runPeer(ctx, []string{"--config", configPath})
+	}()
+	waitForCondition(t, func() bool {
+		store, err := storesqlite.Open(dbPath)
+		if err != nil {
+			return false
+		}
+		defer store.Close()
+		_, err = store.Node(context.Background(), "peer-a")
+		return err == nil
+	})
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runPeer: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runPeer did not stop after context cancellation")
 	}
 }
 
@@ -1111,6 +1641,63 @@ func TestBuildPeerGatewayWithLocalCompute(t *testing.T) {
 	}
 }
 
+func TestBuildPeerGatewayAppliesFlagOverridesAndJoinURI(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	configPath := writePeerConfig(t, PeerConfig{
+		Listen:    "127.0.0.1:1111",
+		StorePath: dbPath,
+		Presets:   []domain.Preset{testPreset("tiny")},
+	})
+	addr, handler, cleanup, err := buildPeerGateway(context.Background(), []string{
+		"--config", configPath,
+		"--join", "mycjoin://127.0.0.1:1?token=join-secret&rpc_token=join-rpc",
+		"--rpc-token", "override-rpc",
+		"--listen", "127.0.0.1:0",
+		"--discovery-listen", "127.0.0.1:0",
+		"--discovery-addr", "127.0.0.1:9",
+		"--compute",
+		"--backend-listen", "127.0.0.1:51848",
+		"--id", "peer-override",
+		"--name", "Override Peer",
+		"--backend", string(domain.BackendLlamaCpp),
+		"--backend-binary", "/bin/echo",
+		"--llama-server", "/bin/false",
+		"--gguf-parser", "/bin/echo",
+		"--max-util", "0.5",
+		"--vram-mb", "2048",
+	})
+	if err != nil {
+		t.Fatalf("buildPeerGateway: %v", err)
+	}
+	if cleanup != nil {
+		defer func() { _ = cleanup(context.Background()) }()
+	}
+	if addr != "127.0.0.1:0" {
+		t.Fatalf("addr = %s", addr)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/peer/health", nil)
+	req.Header.Set("X-Myc-Join-Token", "join-secret")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("peer health = %d %q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/snapshot", nil)
+	req.Header.Set("Authorization", "Bearer override-rpc")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("snapshot = %d %q", rec.Code, rec.Body.String())
+	}
+	var snap domain.NodeSnapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatalf("snapshot json: %v", err)
+	}
+	if snap.Node.ID != "peer-override" || snap.Node.Name != "Override Peer" || snap.Node.MaxUtil != 0.5 || snap.Node.Accelerators[0].VRAMTotalMB != 2048 {
+		t.Fatalf("snapshot = %+v", snap.Node)
+	}
+}
+
 func TestNewLocalPeerAgentRequiresAdmissionExtensions(t *testing.T) {
 	agent := mocks.NewNodeAgent(domain.Node{ID: "peer-a"})
 	if got, err := newLocalPeerAgent(agent, &mocks.AdmissionController{}); err != nil || got.LeaseBinder == nil || got.LeaseInspector == nil {
@@ -1159,6 +1746,50 @@ func TestBuildComputeRuntimeSelectsConfiguredBackends(t *testing.T) {
 				t.Fatalf("adapter name = %s", adapter.Name())
 			}
 		})
+	}
+}
+
+func TestBuildComputeRuntimeWiresParserPolicyAndClosedStoreErrors(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	runtime, err := buildComputeRuntime(ctx, PeerConfig{
+		Listen: "127.0.0.1:0",
+		SubmitterPolicy: map[string]SubmitterPolicyRule{
+			"submitter-a": {MaxPriority: domain.PriorityInteractive, AllowPrivate: true},
+		},
+		ComputeConfig: defaultedComputeConfig(ComputeConfig{
+			ID:            "peer-a",
+			Name:          "Peer A",
+			Backend:       domain.BackendLlamaCpp,
+			BackendListen: "127.0.0.1:51848",
+			LlamaServer:   "/bin/echo",
+			GGUFParser:    "/bin/echo",
+			VRAMMB:        1024,
+		}),
+	}, store)
+	if err != nil {
+		t.Fatalf("buildComputeRuntime: %v", err)
+	}
+	if runtime.node.Labels[LabelPeerBackend] != string(domain.BackendLlamaCpp) || runtime.shutdown == nil {
+		t.Fatalf("runtime = %+v", runtime.node)
+	}
+	if _, err := runtime.admission.Offer(ctx, domain.AdmissionRequest{Job: domain.Job{ID: "job-a", Submitter: "unknown"}, Claim: domain.Claim{WeightsMB: 1}}); err == nil {
+		t.Fatal("unknown submitter was admitted")
+	}
+
+	closed, err := storesqlite.Open(filepath.Join(t.TempDir(), "closed.sqlite"))
+	if err != nil {
+		t.Fatalf("Open closed: %v", err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatalf("Close closed: %v", err)
+	}
+	if _, err := buildComputeRuntime(ctx, PeerConfig{ComputeConfig: defaultedComputeConfig(ComputeConfig{ID: "peer-a", VRAMMB: 1024, LlamaServer: "/bin/echo"})}, closed); err == nil {
+		t.Fatal("closed store build succeeded")
 	}
 }
 
@@ -1281,6 +1912,9 @@ func TestRunRejectsMissingAndUnknownCommand(t *testing.T) {
 			t.Fatalf("run(%v) expected error", args)
 		}
 	}
+	if err := run(nil, []string{"bogus"}); err == nil {
+		t.Fatal("nil-context unknown command expected error")
+	}
 }
 
 func writePeerConfig(t *testing.T, cfg PeerConfig) string {
@@ -1311,6 +1945,29 @@ func waitForFile(t *testing.T, path string) []byte {
 	}
 }
 
+func waitForCondition(t *testing.T, ready func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if ready() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("condition did not become true")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 type optimizerFleet struct {
 	snap domain.FleetSnapshot
 	err  error
@@ -1318,6 +1975,79 @@ type optimizerFleet struct {
 
 func (f optimizerFleet) Snapshot(context.Context) (domain.FleetSnapshot, error) {
 	return f.snap, f.err
+}
+
+type errorFleetSource struct {
+	err error
+}
+
+func (f errorFleetSource) Snapshot(context.Context) (domain.FleetSnapshot, error) {
+	return domain.FleetSnapshot{}, f.err
+}
+
+type plainNodeResolver struct{}
+
+func (plainNodeResolver) NodeAgent(string) (ports.NodeAgent, error) {
+	return nil, errors.New("not found")
+}
+
+type signalingPeerDiscovery struct {
+	peers      []domain.Peer
+	err        error
+	advertised chan domain.Peer
+	peersSeen  chan struct{}
+}
+
+func (d *signalingPeerDiscovery) Advertise(_ context.Context, self domain.Peer) error {
+	if d.err != nil {
+		return d.err
+	}
+	if d.advertised != nil {
+		d.advertised <- self
+	}
+	return nil
+}
+
+func (d *signalingPeerDiscovery) Peers(context.Context) ([]domain.Peer, error) {
+	if d.err != nil {
+		return nil, d.err
+	}
+	if d.peersSeen != nil {
+		d.peersSeen <- struct{}{}
+	}
+	return append([]domain.Peer(nil), d.peers...), nil
+}
+
+func (d *signalingPeerDiscovery) WatchPeers(context.Context) (<-chan domain.Peer, error) {
+	ch := make(chan domain.Peer)
+	close(ch)
+	return ch, nil
+}
+
+type recordingTelemetryRPCStore struct {
+	err error
+}
+
+func (s *recordingTelemetryRPCStore) Record(context.Context, domain.RunMetric) error {
+	return s.err
+}
+
+func (s *recordingTelemetryRPCStore) Metrics(context.Context, string) ([]domain.RunMetric, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return nil, nil
+}
+
+func (s *recordingTelemetryRPCStore) SaveRecommendation(context.Context, domain.RecommendationRecord) error {
+	return s.err
+}
+
+func (s *recordingTelemetryRPCStore) ListRecommendations(context.Context, string) ([]domain.RecommendationRecord, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return nil, nil
 }
 
 func testPreset(id string) domain.Preset {

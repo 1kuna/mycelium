@@ -228,6 +228,57 @@ func TestRunBenchmarkFanOutPersistsJobsAndOutputs(t *testing.T) {
 	}
 }
 
+func TestRunBenchmarkPrintsChildErrorsAndUsesDefaultID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "backend saturated", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	outDir := filepath.Join(t.TempDir(), "bench")
+
+	var err error
+	output := captureStdout(t, func() {
+		err = Run(context.Background(), []string{
+			"benchmark", "run",
+			"--db", dbPath,
+			"--url", server.URL,
+			"--prompt", "Say hi",
+			"--out", outDir,
+			"--model", "tiny",
+		})
+	})
+	if err != nil {
+		t.Fatalf("benchmark run with child error: %v", err)
+	}
+	if !strings.Contains(output, "benchmark-result\ttiny\terror") || !strings.Contains(output, "benchmark\tbenchmark-") {
+		t.Fatalf("benchmark error output = %q", output)
+	}
+	metrics, err := os.ReadFile(filepath.Join(outDir, "metrics.json"))
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	if !strings.Contains(string(metrics), "backend saturated") {
+		t.Fatalf("metrics = %s", metrics)
+	}
+}
+
+func TestListCommandsRejectBadFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"models", "list", "--bad"},
+		{"nodes", "list", "--bad"},
+		{"jobs", "list", "--bad"},
+		{"recommendations", "list", "--bad"},
+		{"recommendations", "calibrate-speed", "--bad"},
+		{"projects", "set", "--bad"},
+		{"add-model", "--bad"},
+		{"benchmark", "run", "--bad"},
+	} {
+		if err := Run(context.Background(), args); err == nil {
+			t.Fatalf("Run(%v) expected flag error", args)
+		}
+	}
+}
+
 func TestRunRecommendationsGenerateAndApply(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "control.db")
 	store, err := storesqlite.Open(dbPath)
@@ -338,6 +389,84 @@ func TestRunRecommendationsApplyEngineSetsProjectDefault(t *testing.T) {
 	}
 	if gotProject.DefaultModel != rec.RecommendedPresetID || !gotRec.Applied {
 		t.Fatalf("project=%+v rec=%+v", gotProject, gotRec)
+	}
+}
+
+func TestRunRecommendationsApplyRejectsInvalidRecords(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	project := domain.Project{ID: "project-a"}
+	for _, rec := range []domain.RecommendationRecord{
+		{ID: "rec-context-missing-preset", Type: optimizer.RecommendationContextCap, ProjectID: project.ID, CreatedAt: time.Unix(1, 0).UTC()},
+		{ID: "rec-engine-missing-preset", Type: optimizer.RecommendationEngineParameter, ProjectID: project.ID, CreatedAt: time.Unix(2, 0).UTC()},
+		{ID: "rec-unknown", Type: "unknown", ProjectID: project.ID, CreatedAt: time.Unix(3, 0).UTC()},
+	} {
+		if err := store.SaveRecommendation(context.Background(), rec); err != nil {
+			t.Fatalf("SaveRecommendation %s: %v", rec.ID, err)
+		}
+	}
+	if err := store.SaveProject(context.Background(), project); err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	for _, id := range []string{"rec-context-missing-preset", "rec-engine-missing-preset", "rec-unknown"} {
+		if err := Run(context.Background(), []string{"recommendations", "apply", "--db", dbPath, "--id", id}); err == nil {
+			t.Fatalf("apply %s expected error", id)
+		}
+	}
+}
+
+func TestRepeatedStringAndProgressFormatting(t *testing.T) {
+	var values repeatedString
+	if err := values.Set("model-a"); err != nil {
+		t.Fatalf("Set model-a: %v", err)
+	}
+	if err := values.Set(""); err == nil {
+		t.Fatal("empty model was accepted")
+	}
+	if got := values.String(); got != "model-a" {
+		t.Fatalf("String = %q", got)
+	}
+	if got := jobProgressSummary(domain.Job{Progress: []domain.JobProgress{{Stage: "download"}}}); got != "download" {
+		t.Fatalf("stage-only progress = %q", got)
+	}
+	if got := recommendationTarget(domain.RecommendationRecord{RecommendedPresetID: "preset-a", RecommendedValue: 12}); got != "preset-a" {
+		t.Fatalf("preset target = %q", got)
+	}
+	if got := recommendationTarget(domain.RecommendationRecord{}); got != "-" {
+		t.Fatalf("empty target = %q", got)
+	}
+}
+
+func TestBenchmarkGatewayClientErrors(t *testing.T) {
+	ctx := context.Background()
+	errorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusTooManyRequests)
+	}))
+	defer errorServer.Close()
+	if _, err := (benchmarkGatewayClient{BaseURL: errorServer.URL}).Complete(ctx, "tiny", "prompt"); err == nil || !strings.Contains(err.Error(), "429") {
+		t.Fatalf("status error = %v", err)
+	}
+
+	badJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{`))
+	}))
+	defer badJSON.Close()
+	if _, err := (benchmarkGatewayClient{BaseURL: badJSON.URL}).Complete(ctx, "tiny", "prompt"); err == nil {
+		t.Fatal("bad JSON response accepted")
+	}
+
+	noChoices := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{})
+	}))
+	defer noChoices.Close()
+	if _, err := (benchmarkGatewayClient{BaseURL: noChoices.URL}).Complete(ctx, "tiny", "prompt"); err == nil || !strings.Contains(err.Error(), "no choices") {
+		t.Fatalf("no choices err = %v", err)
 	}
 }
 
