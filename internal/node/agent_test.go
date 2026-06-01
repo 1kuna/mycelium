@@ -26,11 +26,22 @@ func TestAgentConformance(t *testing.T) {
 		fixtures.MakePreset())
 }
 
+func loadReq(p domain.Preset, acc ...int) domain.LoadRequest {
+	if len(acc) == 0 {
+		acc = []int{0}
+	}
+	return domain.LoadRequest{
+		Preset:         p,
+		Claim:          domain.Claim{WeightsMB: p.EstWeightsMB, KVReservedMB: 1},
+		AcceleratorSet: append([]int(nil), acc...),
+	}
+}
+
 func TestLoadReadinessGatesInstanceAndUnloadStopsBackend(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
 	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithListenAddr("127.0.0.1:1234"), WithAllocator(lease.NewAllocator()))
 
-	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
+	inst, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -68,11 +79,11 @@ func TestLoadReusesReadyInstance(t *testing.T) {
 	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	preset := fixtures.MakePreset()
 
-	first, err := agent.Load(context.Background(), preset)
+	first, err := agent.Load(context.Background(), loadReq(preset))
 	if err != nil {
 		t.Fatalf("first Load: %v", err)
 	}
-	second, err := agent.Load(context.Background(), preset)
+	second, err := agent.Load(context.Background(), loadReq(preset))
 	if err != nil {
 		t.Fatalf("second Load: %v", err)
 	}
@@ -80,6 +91,42 @@ func TestLoadReusesReadyInstance(t *testing.T) {
 		t.Fatalf("expected same warm instance, got %s and %s", first.ID, second.ID)
 	}
 	if countCalls(backend.Calls, "launch") != 1 {
+		t.Fatalf("backend calls = %+v", backend.Calls)
+	}
+}
+
+func TestLoadUsesAcceleratorSetAsRuntimeUnit(t *testing.T) {
+	backend := mocks.NewBackendAdapter()
+	node := fixtures.MakeNode()
+	node.Accelerators = []domain.Accelerator{
+		{Index: 0, Vendor: "nvidia", Kind: "rtx4090", VRAMTotalMB: 24576},
+		{Index: 1, Vendor: "nvidia", Kind: "rtx4090", VRAMTotalMB: 24576},
+	}
+	agent := NewAgent(node, backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
+	preset := fixtures.MakePreset()
+
+	first, err := agent.Load(context.Background(), loadReq(preset, 0))
+	if err != nil {
+		t.Fatalf("first Load: %v", err)
+	}
+	second, err := agent.Load(context.Background(), loadReq(preset, 1))
+	if err != nil {
+		t.Fatalf("second Load: %v", err)
+	}
+	third, err := agent.Load(context.Background(), loadReq(preset, 1))
+	if err != nil {
+		t.Fatalf("third Load: %v", err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("different accelerator sets reused one instance: first=%+v second=%+v", first, second)
+	}
+	if second.ID != third.ID {
+		t.Fatalf("same accelerator set did not reuse warm instance: second=%+v third=%+v", second, third)
+	}
+	if !sameAcceleratorSet(first.AcceleratorSet, []int{0}) || !sameAcceleratorSet(second.AcceleratorSet, []int{1}) {
+		t.Fatalf("accelerator sets not preserved: first=%+v second=%+v", first.AcceleratorSet, second.AcceleratorSet)
+	}
+	if countCalls(backend.Calls, "launch") != 2 {
 		t.Fatalf("backend calls = %+v", backend.Calls)
 	}
 }
@@ -95,7 +142,7 @@ func TestConcurrentColdLoadsDeduplicate(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			inst, err := agent.Load(context.Background(), preset)
+			inst, err := agent.Load(context.Background(), loadReq(preset))
 			if err != nil {
 				t.Errorf("Load: %v", err)
 				return
@@ -125,7 +172,7 @@ func TestLoadFailureRemovesLoadingInstanceAndStopsHandle(t *testing.T) {
 	backend.ReadyAfter = 1
 	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 
-	_, err := agent.Load(context.Background(), fixtures.MakePreset())
+	_, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
 	if err == nil {
 		t.Fatal("expected readiness error")
 	}
@@ -145,7 +192,7 @@ func TestLoadTimeoutUsesInjectedClock(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := agent.Load(context.Background(), fixtures.MakePreset())
+		_, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
 		done <- err
 	}()
 	<-backend.waiting
@@ -167,7 +214,7 @@ func TestUnloadUnknownAndStopFailure(t *testing.T) {
 		t.Fatal("expected unknown instance error")
 	}
 
-	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
+	inst, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -180,11 +227,11 @@ func TestUnloadUnknownAndStopFailure(t *testing.T) {
 func TestShutdownUnloadsAllInstances(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
 	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
-	first, err := agent.Load(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("first")))
+	first, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset(fixtures.WithPresetID("first"))))
 	if err != nil {
 		t.Fatalf("first Load: %v", err)
 	}
-	second, err := agent.Load(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("second")))
+	second, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset(fixtures.WithPresetID("second"))))
 	if err != nil {
 		t.Fatalf("second Load: %v", err)
 	}
@@ -206,7 +253,7 @@ func TestShutdownUnloadsAllInstances(t *testing.T) {
 func TestShutdownReturnsUnloadErrors(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
 	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
-	if _, err := agent.Load(context.Background(), fixtures.MakePreset()); err != nil {
+	if _, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset())); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	wantErr := errors.New("stop failed")
@@ -219,7 +266,7 @@ func TestShutdownReturnsUnloadErrors(t *testing.T) {
 func TestInFlightRequestsGuardUnload(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
 	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
-	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
+	inst, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -288,7 +335,7 @@ func TestBeginRequestRejectsMissingUnreadyAndCanceled(t *testing.T) {
 func TestLoadFailsLoudWithoutAllocatorOrCapacity(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
 	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
-	_, err := agent.Load(context.Background(), fixtures.MakePreset())
+	_, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
 	if err == nil || !strings.Contains(err.Error(), "allocator") {
 		t.Fatalf("missing allocator err = %v", err)
 	}
@@ -298,7 +345,7 @@ func TestLoadFailsLoudWithoutAllocatorOrCapacity(t *testing.T) {
 
 	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.5))
 	agent = NewAgent(node, backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
-	_, err = agent.Load(context.Background(), fixtures.MakePreset(fixtures.WithWeights(1000), fixtures.WithKVPerToken(0)))
+	_, err = agent.Load(context.Background(), loadReq(fixtures.MakePreset(fixtures.WithWeights(1000), fixtures.WithKVPerToken(0))))
 	if !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("saturation err = %v", err)
 	}
@@ -312,11 +359,11 @@ func TestCatastrophicNodeShedsSecondColdLoadWhileFirstLoads(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := agent.Load(context.Background(), firstPreset)
+		_, err := agent.Load(context.Background(), loadReq(firstPreset))
 		done <- err
 	}()
 	<-backend.waiting
-	_, err := agent.Load(context.Background(), secondPreset)
+	_, err := agent.Load(context.Background(), loadReq(secondPreset))
 	if !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("second load err = %v", err)
 	}
@@ -333,7 +380,7 @@ func TestRecordRunEmitsTelemetryWithNodeAndClock(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
 	sink := &mocks.TelemetrySink{}
 	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), clock, WithTelemetrySink(sink), WithAllocator(lease.NewAllocator()))
-	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
+	inst, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -369,7 +416,7 @@ func TestRecordRunFailsWithoutSinkOrInstance(t *testing.T) {
 
 func TestProtectInstanceMarksPinnedReservation(t *testing.T) {
 	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
-	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
+	inst, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

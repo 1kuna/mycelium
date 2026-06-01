@@ -45,7 +45,7 @@ func TestPhase3CatalogMaterializedPresetLoadsInNode(t *testing.T) {
 		node.WithListenAddr(freeAddr(t)),
 		node.WithAllocator(lease.NewAllocator()),
 	)
-	inst, err := agent.Load(ctx, result.Preset)
+	inst, err := agent.Load(ctx, domain.LoadRequest{Preset: result.Preset, Claim: fixtures.MakeClaim(result.Preset.EstWeightsMB, 1), AcceleratorSet: []int{0}})
 	if err != nil {
 		t.Fatalf("load materialized preset: %v", err)
 	}

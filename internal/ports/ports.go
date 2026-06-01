@@ -21,6 +21,10 @@ type ResourceEstimator interface {
 	Estimate(ctx context.Context, p domain.Preset, contextLen, concurrency int) (domain.Claim, error)
 }
 
+type UnitResourceEstimator interface {
+	EstimateForUnit(ctx context.Context, p domain.Preset, contextLen, concurrency int, node domain.Node, acceleratorSet []int) (domain.Claim, error)
+}
+
 type Allocator interface {
 	Fits(node domain.Node, acc []int, existing []domain.ModelInstance, want domain.Claim) bool
 	CanStackLoad(node domain.Node, acc []int, existing []domain.ModelInstance) bool
@@ -42,7 +46,7 @@ type Handle struct {
 
 type NodeAgent interface {
 	Snapshot(ctx context.Context) (domain.NodeSnapshot, error)
-	Load(ctx context.Context, p domain.Preset) (domain.ModelInstance, error)
+	Load(ctx context.Context, req domain.LoadRequest) (domain.ModelInstance, error)
 	Unload(ctx context.Context, instanceID string) error
 	InspectModel(ctx context.Context, p domain.Preset) (domain.ModelMetadata, error)
 	BeginRequest(ctx context.Context, instanceID string) error

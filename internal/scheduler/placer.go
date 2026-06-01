@@ -49,23 +49,34 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 			Result: err.Error(),
 		}}}, err
 	}
+	if err := validatePresetForJob(job, preset); err != nil {
+		return domain.PlacementDecision{JobID: job.ID, SpeedPrefApplied: job.SpeedPref, Trace: []domain.TraceStep{{
+			Step:   "filter",
+			Result: err.Error(),
+		}}}, err
+	}
 
 	contextLen := job.ContextRequest
 	if contextLen == 0 {
 		contextLen = preset.ContextLength
 	}
-	claim, err := p.estimator.Estimate(ctx, preset, contextLen, 1)
-	if err != nil {
-		return domain.PlacementDecision{JobID: job.ID, SpeedPrefApplied: job.SpeedPref, Trace: []domain.TraceStep{{
-			Step:   "estimate",
-			Result: err.Error(),
-		}}}, err
-	}
 
 	trace := []domain.TraceStep{{
 		Step:   "estimate",
-		Result: fmt.Sprintf("weights=%dMB kv=%dMB @ctx%d", claim.WeightsMB, claim.KVReservedMB, contextLen),
+		Result: fmt.Sprintf("backend-aware @ctx%d", contextLen),
 	}}
+	var fallbackClaim domain.Claim
+	if _, ok := p.estimator.(ports.UnitResourceEstimator); !ok {
+		claim, err := p.estimator.Estimate(ctx, preset, contextLen, 1)
+		if err != nil {
+			return domain.PlacementDecision{JobID: job.ID, SpeedPrefApplied: job.SpeedPref, Trace: []domain.TraceStep{{
+				Step:   "estimate",
+				Result: err.Error(),
+			}}}, err
+		}
+		fallbackClaim = claim
+		trace[0].Result = fmt.Sprintf("weights=%dMB kv=%dMB @ctx%d", claim.WeightsMB, claim.KVReservedMB, contextLen)
+	}
 
 	if warm, ok := p.selectWarmInstance(job, preset, fleet); ok {
 		trace = append(trace,
@@ -86,7 +97,13 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 		}, nil
 	}
 
-	candidates, filterTrace := p.filterCandidates(fleet, claim, effectiveSpeed(job.SpeedPref) == domain.SpeedLatency)
+	candidates, filterTrace, err := p.filterPlacementCandidates(ctx, job, preset, contextLen, fleet, effectiveSpeed(job.SpeedPref) == domain.SpeedLatency)
+	if err != nil {
+		return domain.PlacementDecision{JobID: job.ID, SpeedPrefApplied: job.SpeedPref, Trace: append(trace, domain.TraceStep{
+			Step:   "estimate",
+			Result: err.Error(),
+		})}, err
+	}
 	trace = append(trace, filterTrace)
 	if len(candidates) > 0 {
 		scored := p.scoreCandidates(job, candidates)
@@ -100,21 +117,27 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 			JobID:            job.ID,
 			NodeID:           winner.candidate.node.ID,
 			AcceleratorSet:   append([]int(nil), winner.candidate.acc...),
-			Claim:            claim,
+			Claim:            winner.candidate.claim,
 			Action:           actionForSpeed(job.SpeedPref),
 			SpeedPrefApplied: effectiveSpeed(job.SpeedPref),
 			Trace:            trace,
 		}, nil
 	}
 
-	preempted, ok := p.tryPreempt(job, fleet, claim)
+	preempted, ok, err := p.tryPreemptForPreset(ctx, job, preset, contextLen, fleet)
+	if err != nil {
+		return domain.PlacementDecision{JobID: job.ID, SpeedPrefApplied: job.SpeedPref, Trace: append(trace, domain.TraceStep{
+			Step:   "estimate",
+			Result: err.Error(),
+		})}, err
+	}
 	if ok {
 		trace = append(trace, preempted.trace...)
 		return domain.PlacementDecision{
 			JobID:            job.ID,
 			NodeID:           preempted.candidate.node.ID,
 			AcceleratorSet:   append([]int(nil), preempted.candidate.acc...),
-			Claim:            claim,
+			Claim:            preempted.claim,
 			Action:           domain.ActionHardPreempted,
 			SpeedPrefApplied: effectiveSpeed(job.SpeedPref),
 			Trace:            trace,
@@ -126,7 +149,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 	trace = append(trace, domain.TraceStep{Step: "admit", Result: "queued: no fit"})
 	return domain.PlacementDecision{
 		JobID:            job.ID,
-		Claim:            claim,
+		Claim:            fallbackClaim,
 		Action:           domain.ActionQueued,
 		SpeedPrefApplied: effectiveSpeed(job.SpeedPref),
 		Trace:            trace,
@@ -151,6 +174,21 @@ func (p *Placer) resolvePreset(job domain.Job) (domain.Preset, error) {
 	return preset, nil
 }
 
+func validatePresetForJob(job domain.Job, preset domain.Preset) error {
+	if len(preset.Capabilities) == 0 {
+		return fmt.Errorf("preset %q has no schedulable capabilities", preset.ID)
+	}
+	if job.TaskType == "" {
+		return nil
+	}
+	for _, capability := range preset.Capabilities {
+		if string(capability) == job.TaskType {
+			return nil
+		}
+	}
+	return fmt.Errorf("preset %q does not support task_type %q", preset.ID, job.TaskType)
+}
+
 func (p *Placer) selectWarmInstance(job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot) (domain.ModelInstance, bool) {
 	if effectiveSpeed(job.SpeedPref) == domain.SpeedLatency {
 		return domain.ModelInstance{}, false
@@ -159,7 +197,10 @@ func (p *Placer) selectWarmInstance(job domain.Job, preset domain.Preset, fleet 
 	var matches []domain.ModelInstance
 	for _, inst := range fleet.Instances {
 		if inst.PresetID == preset.ID && inst.State == domain.InstReady {
-			if _, ok := ready[inst.NodeID]; ok {
+			if node, ok := ready[inst.NodeID]; ok {
+				if _, mismatch := nodeSelectorMismatch(job.NodeSelector, node); mismatch {
+					continue
+				}
 				matches = append(matches, inst)
 			}
 		}

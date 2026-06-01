@@ -80,7 +80,7 @@ func TestHTTPNodeAgentRoundTrip(t *testing.T) {
 		t.Fatalf("snapshot = %+v", snap)
 	}
 	preset := fixtures.MakePreset()
-	inst, err := client.Load(context.Background(), preset)
+	inst, err := client.Load(context.Background(), loadReq(preset))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestHTTPServerShedsNoFitAsTooManyRequests(t *testing.T) {
 		t.Fatalf("status = %s", resp.Status)
 	}
 	client := server.nodeClient()
-	if _, err := client.Load(context.Background(), fixtures.MakePreset()); !errors.Is(err, domain.ErrNoFit) {
+	if _, err := client.Load(context.Background(), loadReq(fixtures.MakePreset())); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("client no-fit err = %v", err)
 	}
 }
@@ -469,7 +469,7 @@ func (f *failingNodeAgent) Snapshot(context.Context) (domain.NodeSnapshot, error
 	return domain.NodeSnapshot{}, errors.New("snapshot failed")
 }
 
-func (f *failingNodeAgent) Load(context.Context, domain.Preset) (domain.ModelInstance, error) {
+func (f *failingNodeAgent) Load(context.Context, domain.LoadRequest) (domain.ModelInstance, error) {
 	if f.loadErr != nil {
 		return domain.ModelInstance{}, f.loadErr
 	}

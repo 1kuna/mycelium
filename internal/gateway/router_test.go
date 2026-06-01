@@ -1257,7 +1257,7 @@ func (n loadNode) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 	return domain.NodeSnapshot{Node: n.node}, nil
 }
 
-func (n loadNode) Load(context.Context, domain.Preset) (domain.ModelInstance, error) {
+func (n loadNode) Load(context.Context, domain.LoadRequest) (domain.ModelInstance, error) {
 	return n.inst, nil
 }
 
@@ -1285,7 +1285,7 @@ func (n errorLoadNode) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 	return domain.NodeSnapshot{}, nil
 }
 
-func (n errorLoadNode) Load(context.Context, domain.Preset) (domain.ModelInstance, error) {
+func (n errorLoadNode) Load(context.Context, domain.LoadRequest) (domain.ModelInstance, error) {
 	return domain.ModelInstance{}, n.err
 }
 

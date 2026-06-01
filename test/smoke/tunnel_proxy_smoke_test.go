@@ -50,7 +50,8 @@ func TestLANInstanceProxyThroughAuthenticatedTunnel(t *testing.T) {
 
 	client := nodeagent.NewHTTPClient("http://" + loopback)
 	client.AuthToken = "rpc-secret"
-	inst, err := client.Load(context.Background(), fixtures.MakePreset())
+	preset := fixtures.MakePreset()
+	inst, err := client.Load(context.Background(), domain.LoadRequest{Preset: preset, Claim: fixtures.MakeClaim(1, 1), AcceleratorSet: []int{0}})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

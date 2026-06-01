@@ -1591,8 +1591,8 @@ func TestPeerEstimatorUsesGGUFParserWhenConfigured(t *testing.T) {
 	if !ok {
 		t.Fatal("default estimator should be backend-aware")
 	}
-	if defaultEstimator.LlamaCpp != nil {
-		t.Fatalf("default estimator should use explicit preset estimates for llama.cpp: %+v", defaultEstimator)
+	if _, ok := defaultEstimator.LlamaCpp.(*estimate.GGUFEstimator); !ok {
+		t.Fatalf("default estimator should use GGUF preflight for llama.cpp: %+v", defaultEstimator)
 	}
 	configured, ok := peerEstimator(PeerConfig{GGUFParser: "gguf-parser"}, nil).(*estimate.BackendAware)
 	if !ok {

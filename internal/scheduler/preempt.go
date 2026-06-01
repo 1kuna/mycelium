@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
@@ -9,6 +10,7 @@ import (
 
 type preemptResult struct {
 	candidate candidate
+	claim     domain.Claim
 	victim    domain.ModelInstance
 	victims   []domain.ModelInstance
 	requeued  []string
@@ -16,8 +18,21 @@ type preemptResult struct {
 }
 
 func (p *Placer) tryPreempt(job domain.Job, fleet domain.FleetSnapshot, claim domain.Claim) (preemptResult, bool) {
+	result, ok, _ := p.tryPreemptWithClaims(job, fleet, func(domain.Node, []int) (domain.Claim, error) {
+		return claim, nil
+	})
+	return result, ok
+}
+
+func (p *Placer) tryPreemptForPreset(ctx context.Context, job domain.Job, preset domain.Preset, contextLen int, fleet domain.FleetSnapshot) (preemptResult, bool, error) {
+	return p.tryPreemptWithClaims(job, fleet, func(node domain.Node, accSet []int) (domain.Claim, error) {
+		return p.estimateCandidateClaim(ctx, preset, contextLen, 1, node, accSet)
+	})
+}
+
+func (p *Placer) tryPreemptWithClaims(job domain.Job, fleet domain.FleetSnapshot, claimFor func(domain.Node, []int) (domain.Claim, error)) (preemptResult, bool, error) {
 	if !hardPreemptionAllowed(job) {
-		return preemptResult{trace: []domain.TraceStep{{Step: "preempt", Result: "hard preemption not allowed"}}}, false
+		return preemptResult{trace: []domain.TraceStep{{Step: "preempt", Result: "hard preemption not allowed"}}}, false, nil
 	}
 
 	var results []preemptResult
@@ -26,6 +41,13 @@ func (p *Placer) tryPreempt(job domain.Job, fleet domain.FleetSnapshot, claim do
 			continue
 		}
 		for _, accSet := range acceleratorSets(node) {
+			if _, ok := nodeSelectorMismatch(job.NodeSelector, node); ok {
+				continue
+			}
+			claim, err := claimFor(node, accSet)
+			if err != nil {
+				return preemptResult{}, false, err
+			}
 			victims := eligibleVictims(job, node, accSet, fleet.Instances)
 			remaining := append([]domain.ModelInstance(nil), fleet.Instances...)
 			var selected []domain.ModelInstance
@@ -37,6 +59,7 @@ func (p *Placer) tryPreempt(job domain.Job, fleet domain.FleetSnapshot, claim do
 				}
 				result := preemptResult{
 					candidate: candidate{node: node, acc: accSet},
+					claim:     claim,
 					victim:    victim,
 					victims:   append([]domain.ModelInstance(nil), selected...),
 					trace: []domain.TraceStep{{
@@ -60,12 +83,12 @@ func (p *Placer) tryPreempt(job domain.Job, fleet domain.FleetSnapshot, claim do
 		}
 	}
 	if len(results) == 0 {
-		return preemptResult{}, false
+		return preemptResult{}, false, nil
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return victimLess(results[i].victim, results[j].victim)
 	})
-	return results[0], true
+	return results[0], true, nil
 }
 
 func hardPreemptionAllowed(job domain.Job) bool {
