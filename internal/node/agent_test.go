@@ -177,6 +177,45 @@ func TestUnloadUnknownAndStopFailure(t *testing.T) {
 	}
 }
 
+func TestShutdownUnloadsAllInstances(t *testing.T) {
+	backend := mocks.NewBackendAdapter()
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	first, err := agent.Load(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("first")))
+	if err != nil {
+		t.Fatalf("first Load: %v", err)
+	}
+	second, err := agent.Load(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("second")))
+	if err != nil {
+		t.Fatalf("second Load: %v", err)
+	}
+	if err := agent.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if got := countCalls(backend.Calls, "stop"); got != 2 {
+		t.Fatalf("stop calls = %d calls=%+v", got, backend.Calls)
+	}
+	snap, err := agent.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Instances) != 0 {
+		t.Fatalf("shutdown left instances = %+v first=%s second=%s", snap.Instances, first.ID, second.ID)
+	}
+}
+
+func TestShutdownReturnsUnloadErrors(t *testing.T) {
+	backend := mocks.NewBackendAdapter()
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	if _, err := agent.Load(context.Background(), fixtures.MakePreset()); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	wantErr := errors.New("stop failed")
+	backend.StopErr = wantErr
+	if err := agent.Shutdown(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("Shutdown err = %v", err)
+	}
+}
+
 func TestInFlightRequestsGuardUnload(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
 	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))

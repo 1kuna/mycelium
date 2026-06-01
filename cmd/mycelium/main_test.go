@@ -305,9 +305,12 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	addr, handler, err := buildPeerGateway(ctx, []string{"--config", configPath})
+	addr, handler, cleanup, err := buildPeerGateway(ctx, []string{"--config", configPath})
 	if err != nil {
 		t.Fatalf("buildPeerGateway: %v", err)
+	}
+	if cleanup != nil {
+		t.Fatal("gateway-only peer unexpectedly returned compute cleanup")
 	}
 	if addr != "127.0.0.1:0" {
 		t.Fatalf("addr = %s", addr)
@@ -377,7 +380,7 @@ func TestBuildPeerGatewayRequiresRPCTokenForJoin(t *testing.T) {
 		JoinToken: "secret",
 		Presets:   []domain.Preset{testPreset("tiny")},
 	})
-	if _, _, err := buildPeerGateway(context.Background(), []string{"--config", configPath}); err == nil || !strings.Contains(err.Error(), "rpc_token") {
+	if _, _, _, err := buildPeerGateway(context.Background(), []string{"--config", configPath}); err == nil || !strings.Contains(err.Error(), "rpc_token") {
 		t.Fatalf("missing rpc token err = %v", err)
 	}
 }
@@ -744,9 +747,12 @@ func TestBuildPeerGatewayWithLocalCompute(t *testing.T) {
 		},
 		Presets: []domain.Preset{testPreset("tiny")},
 	})
-	addr, handler, err := buildPeerGateway(context.Background(), []string{"--config", configPath})
+	addr, handler, cleanup, err := buildPeerGateway(context.Background(), []string{"--config", configPath})
 	if err != nil {
 		t.Fatalf("buildPeerGateway: %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("local compute peer did not return cleanup")
 	}
 	if addr != "127.0.0.1:0" {
 		t.Fatalf("addr = %s", addr)
