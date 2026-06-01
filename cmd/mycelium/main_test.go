@@ -149,7 +149,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 		t.Fatalf("compute defaults = %+v", peerCfg.ComputeConfig)
 	}
 	computePath := filepath.Join(t.TempDir(), "compute-peer.json")
-	computeRaw := `{"compute":true,"compute_config":{"backend_listen":"127.0.0.1:8","id":"peer-json","name":"Peer JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"gguf_parser":"parser"}}`
+	computeRaw := `{"compute":true,"pre_send_negotiation":true,"compute_config":{"backend_listen":"127.0.0.1:8","id":"peer-json","name":"Peer JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"gguf_parser":"parser"}}`
 	if err := os.WriteFile(computePath, []byte(computeRaw), 0644); err != nil {
 		t.Fatalf("write compute peer config: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPeerConfig compute: %v", err)
 	}
-	if !computeCfg.Compute || computeCfg.ComputeConfig.ID != "peer-json" || computeCfg.ComputeConfig.VRAMMB != 1234 || computeCfg.ComputeConfig.GGUFParser != "parser" || computeCfg.ComputeConfig.Backend != domain.BackendMLX || computeCfg.ComputeConfig.BackendBinary != "/bin/mlx" {
+	if !computeCfg.Compute || !computeCfg.PreSendNegotiation || computeCfg.ComputeConfig.ID != "peer-json" || computeCfg.ComputeConfig.VRAMMB != 1234 || computeCfg.ComputeConfig.GGUFParser != "parser" || computeCfg.ComputeConfig.Backend != domain.BackendMLX || computeCfg.ComputeConfig.BackendBinary != "/bin/mlx" {
 		t.Fatalf("compute peer config = %+v", computeCfg)
 	}
 	badPath := filepath.Join(t.TempDir(), "bad.json")
@@ -527,6 +527,65 @@ func TestTelemetryRPCRequiresAuthAndMergesMetricsAndRecommendations(t *testing.T
 	if len(recs) != 1 || recs[0].ID != rec.ID {
 		t.Fatalf("recommendations = %+v", recs)
 	}
+}
+
+func TestPreSendRPCRequiresAuthAndReturnsAdvice(t *testing.T) {
+	ctx := context.Background()
+	registry := peercoord.NewJobRegistry()
+	duplicate := domain.JobRecord{
+		JobID:       "job-a",
+		Coordinator: "peer-b",
+		Status:      domain.JobRunning,
+		Request:     []byte(`{"job":"a"}`),
+		UpdatedAt:   time.Unix(30, 0).UTC(),
+	}
+	if err := registry.Put(ctx, duplicate); err != nil {
+		t.Fatalf("Put duplicate: %v", err)
+	}
+	mux := http.NewServeMux()
+	mountPreSendHTTP(mux, peercoord.RegistryPreSendAdvisor{SelfID: "peer-c", Registry: registry}, "rpc-secret")
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	remote := domain.Peer{ID: "peer-c", Addresses: []string{server.URL}}
+	proposal := peercoord.PreSendProposal{
+		From:      "peer-a",
+		Job:       domain.Job{ID: "job-a"},
+		Decision:  domain.PlacementDecision{JobID: "job-a", NodeID: "node-a"},
+		CreatedAt: time.Unix(31, 0).UTC(),
+	}
+
+	if _, err := (preSendHTTPClient{}).AdvisePreSend(ctx, remote, proposal); err == nil || !strings.Contains(err.Error(), "rpc token") {
+		t.Fatalf("unauthorized pre-send err = %v", err)
+	}
+	advice, err := (preSendHTTPClient{AuthToken: "rpc-secret"}).AdvisePreSend(ctx, remote, proposal)
+	if err != nil {
+		t.Fatalf("AdvisePreSend: %v", err)
+	}
+	if advice.PeerID != "peer-c" || advice.Accepted || !strings.Contains(advice.Reason, "peer-b") {
+		t.Fatalf("advice = %+v", advice)
+	}
+
+	resp, err := http.Post(server.URL+"/presend/advice", "application/json", strings.NewReader("{"))
+	if err != nil {
+		t.Fatalf("bad advice post: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("bad post without auth status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/presend/advice", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get advice: %v", err)
+	}
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("get status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
 }
 
 func TestMountNodeHTTPIncludesAdmissionRuntimeRoutes(t *testing.T) {
