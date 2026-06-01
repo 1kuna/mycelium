@@ -17,6 +17,7 @@ import (
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/estimate"
+	"mycelium/internal/lease"
 	"mycelium/internal/membership"
 	nodeagent "mycelium/internal/node"
 	"mycelium/internal/optimizer"
@@ -746,6 +747,58 @@ func TestComputeAdmissionAllocatorUsesStoreReservations(t *testing.T) {
 	}
 	if !reflect.DeepEqual(pinned, []string{"pinned"}) {
 		t.Fatalf("pinned ids = %+v", pinned)
+	}
+}
+
+func TestLoadPinnedReservationsWarmsAndProtectsPreset(t *testing.T) {
+	ctx := context.Background()
+	store := peerTestRegistry(t)
+	preset := testPreset("tiny")
+	preset.EstWeightsMB = 10
+	preset.KVPerTokenMB = 0.01
+	if err := store.SavePreset(ctx, preset); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	if err := store.SaveReservation(ctx, domain.Reservation{ID: "pin-a", Kind: domain.ReservationPinned, NodeID: "node-a", PresetID: preset.ID}); err != nil {
+		t.Fatalf("SaveReservation: %v", err)
+	}
+	node := domain.Node{ID: "node-a", MaxUtil: 1, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 100}}}
+	backend := mocks.NewBackendAdapter()
+	agent := nodeagent.NewAgent(node, backend, mocks.NewFakeClock(time.Unix(1, 0).UTC()), nodeagent.WithAllocator(lease.NewAllocator()))
+
+	if err := loadPinnedReservations(ctx, agent, store, node.ID); err != nil {
+		t.Fatalf("loadPinnedReservations: %v", err)
+	}
+	snap, err := agent.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Instances) != 1 || snap.Instances[0].PresetID != preset.ID || !snap.Instances[0].Pinned || snap.Instances[0].ReservationID != "pin-a" {
+		t.Fatalf("instances = %+v", snap.Instances)
+	}
+	if len(backend.Calls) == 0 || backend.Calls[0].Preset.ID != preset.ID {
+		t.Fatalf("backend calls = %+v", backend.Calls)
+	}
+}
+
+func TestLoadPinnedReservationsFailsLoudly(t *testing.T) {
+	ctx := context.Background()
+	store := peerTestRegistry(t)
+	node := domain.Node{ID: "node-a", MaxUtil: 1, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 100}}}
+	agent := nodeagent.NewAgent(node, mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Unix(1, 0).UTC()), nodeagent.WithAllocator(lease.NewAllocator()))
+	if err := store.SaveReservation(ctx, domain.Reservation{ID: "pin-missing", Kind: domain.ReservationPinned, NodeID: node.ID}); err != nil {
+		t.Fatalf("SaveReservation missing: %v", err)
+	}
+	if err := loadPinnedReservations(ctx, agent, store, node.ID); err == nil || !strings.Contains(err.Error(), "preset id") {
+		t.Fatalf("missing preset err = %v", err)
+	}
+
+	store = peerTestRegistry(t)
+	if err := store.SaveReservation(ctx, domain.Reservation{ID: "pin-unknown", Kind: domain.ReservationPinned, NodeID: node.ID, PresetID: "unknown"}); err != nil {
+		t.Fatalf("SaveReservation unknown: %v", err)
+	}
+	if err := loadPinnedReservations(ctx, agent, store, node.ID); err == nil {
+		t.Fatal("unknown preset accepted")
 	}
 }
 

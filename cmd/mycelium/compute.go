@@ -87,6 +87,9 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 		admissionOpts = append(admissionOpts, nodeagent.WithSubmitterPolicy(policy))
 	}
 	admission := nodeagent.NewAdmission(node, allocator, clock.System{}, admissionOpts...)
+	if err := loadPinnedReservations(ctx, agent, store, node.ID); err != nil {
+		return computeRuntime{}, err
+	}
 	return computeRuntime{
 		handler:   nodeagent.HTTPServer{Agent: agent, Admission: admission, AuthToken: cfg.RPCToken},
 		node:      node,
@@ -94,6 +97,33 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 		admission: admission,
 		shutdown:  agent.Shutdown,
 	}, nil
+}
+
+func loadPinnedReservations(ctx context.Context, agent *nodeagent.Agent, store *storesqlite.Store, nodeID string) error {
+	reservations, err := store.ListReservations(ctx)
+	if err != nil {
+		return err
+	}
+	for _, reservation := range reservations {
+		if reservation.Kind != domain.ReservationPinned || reservation.NodeID != nodeID {
+			continue
+		}
+		if reservation.PresetID == "" {
+			return errors.New("pinned reservation missing preset id")
+		}
+		preset, err := store.Preset(ctx, reservation.PresetID)
+		if err != nil {
+			return err
+		}
+		inst, err := agent.Load(ctx, preset)
+		if err != nil {
+			return err
+		}
+		if err := agent.ProtectInstance(inst.ID, reservation.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func submitterPolicyFromConfig(config map[string]SubmitterPolicyRule) nodeagent.SubmitterPolicy {

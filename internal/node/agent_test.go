@@ -367,6 +367,36 @@ func TestRecordRunFailsWithoutSinkOrInstance(t *testing.T) {
 	}
 }
 
+func TestProtectInstanceMarksPinnedReservation(t *testing.T) {
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()), WithAllocator(lease.NewAllocator()))
+	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := agent.ProtectInstance(inst.ID, "pin-a"); err != nil {
+		t.Fatalf("ProtectInstance: %v", err)
+	}
+	snap, err := agent.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Instances) != 1 || !snap.Instances[0].Pinned || snap.Instances[0].ReservationID != "pin-a" {
+		t.Fatalf("instances = %+v", snap.Instances)
+	}
+	if err := agent.ProtectInstance("", "pin-a"); err == nil {
+		t.Fatal("empty instance id accepted")
+	}
+	if err := agent.ProtectInstance(inst.ID, ""); err == nil {
+		t.Fatal("empty reservation id accepted")
+	}
+	if err := agent.ProtectInstance("missing", "pin-a"); err == nil {
+		t.Fatal("missing instance accepted")
+	}
+	if err := agent.ProtectInstance(inst.ID, "pin-b"); err == nil {
+		t.Fatal("conflicting reservation accepted")
+	}
+}
+
 func TestInspectModelUsesConfiguredInspectorOrPresetMetadata(t *testing.T) {
 	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Now()), WithModelInspector(StaticInspector{
 		Metadata: domain.ModelMetadata{ModelRef: "model", Format: "gguf", WeightsMB: 10, KVPerTokenMB: 0.1, ContextLength: 2048},
