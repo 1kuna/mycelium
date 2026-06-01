@@ -23,6 +23,7 @@ type computeRuntime struct {
 	node      domain.Node
 	agent     ports.NodeAgent
 	admission ports.AdmissionController
+	shutdown  func(context.Context) error
 }
 
 func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite.Store) (computeRuntime, error) {
@@ -78,6 +79,7 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 		node:      node,
 		agent:     agent,
 		admission: admission,
+		shutdown:  agent.Shutdown,
 	}, nil
 }
 

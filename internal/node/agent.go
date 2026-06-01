@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -161,6 +162,23 @@ func (a *Agent) Unload(ctx context.Context, instanceID string) error {
 	delete(a.inflight, inst.ID)
 	a.mu.Unlock()
 	return nil
+}
+
+func (a *Agent) Shutdown(ctx context.Context) error {
+	a.mu.Lock()
+	ids := make([]string, 0, len(a.instances))
+	for id := range a.instances {
+		ids = append(ids, id)
+	}
+	a.mu.Unlock()
+	sort.Strings(ids)
+	var errs []error
+	for _, id := range ids {
+		if err := a.Unload(ctx, id); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (a *Agent) BeginRequest(ctx context.Context, instanceID string) error {

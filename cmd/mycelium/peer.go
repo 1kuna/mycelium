@@ -34,27 +34,40 @@ func runPeer(ctx context.Context, args []string) error {
 	if ctx.Err() != nil {
 		return nil
 	}
-	addr, handler, err := buildPeerGateway(ctx, args)
+	addr, handler, cleanup, err := buildPeerGateway(ctx, args)
 	if err != nil {
 		return err
 	}
 	server := &http.Server{Addr: addr, Handler: handler}
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
+		cancel()
+		if cleanup != nil {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cleanupCancel()
+			if err := cleanup(cleanupCtx); err != nil {
+				log.Printf("mycelium peer cleanup failed: %v", err)
+			}
+		}
 	}()
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		if ctx.Err() != nil {
+			<-shutdownDone
 			return nil
 		}
 		return err
 	}
+	if ctx.Err() != nil {
+		<-shutdownDone
+	}
 	return nil
 }
 
-func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler, error) {
+func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler, func(context.Context) error, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := fs.String("config", "", "peer config JSON path")
 	joinRaw := fs.String("join", "", "join token URI or raw join token")
@@ -73,11 +86,11 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	maxUtil := fs.Float64("max-util", 0, "maximum accelerator utilization")
 	vramMB := fs.Int("vram-mb", 0, "local allocatable memory in MB")
 	if err := fs.Parse(args); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	cfg, err := loadPeerConfig(*configPath)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if *listen != "" {
 		cfg.Listen = *listen
@@ -87,7 +100,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	if *joinRaw != "" {
 		join, err := parseJoinFlag(*joinRaw)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		cfg.JoinToken = join.Token
 		if join.RPCToken != "" {
@@ -97,7 +110,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	overrideString(rpcToken, &cfg.RPCToken)
 	if cfg.JoinToken != "" && cfg.RPCToken == "" {
-		return "", nil, fmt.Errorf("rpc_token is required when join_token is configured")
+		return "", nil, nil, fmt.Errorf("rpc_token is required when join_token is configured")
 	}
 	if *compute {
 		cfg.Compute = true
@@ -120,20 +133,21 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	store, err := storesqlite.Open(cfg.StorePath)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if err := seedControlStore(ctx, store, cfg); err != nil {
 		_ = store.Close()
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	var fleet gateway.FleetSource
 	var nodes gateway.NodeResolver
 	mux := http.NewServeMux()
 	var discovery ports.PeerDiscovery
+	var shutdowns []func(context.Context) error
 	if cfg.JoinToken != "" {
 		if _, err := membership.NewPersistentTokenManager(ctx, cfg.JoinToken, store); err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		lan := membership.NewPeerLANDiscovery(cfg.DiscoveryListen, cfg.DiscoveryAddr)
 		lan.Token = cfg.JoinToken
@@ -141,7 +155,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		scan := time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
 		cached := membership.NewCachedPeerDiscovery(lan, clock.System{}, peerDiscoveryTTL(scan))
 		if err := cached.Start(ctx, scan); err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		startSeedPeerProber(ctx, cached, cfg.SeedPeers, cfg.JoinToken, clock.System{}, scan)
 		discovery = cached
@@ -155,16 +169,19 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	if cfg.Compute {
 		local, err := buildComputeRuntime(ctx, cfg, store)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		if err := store.SaveNode(ctx, local.node); err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		agent, err := newLocalPeerAgent(local.agent, local.admission)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		agents[local.node.ID] = agent
+		if local.shutdown != nil {
+			shutdowns = append(shutdowns, local.shutdown)
+		}
 		mountNodeHTTP(mux, local.handler)
 	}
 	if len(agents) > 0 {
@@ -178,29 +195,29 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		}
 	}
 	if fleet == nil || nodes == nil {
-		return "", nil, fmt.Errorf("peer config must enable compute or provide join_token")
+		return "", nil, nil, fmt.Errorf("peer config must enable compute or provide join_token")
 	}
 	presets, err := store.ListPresets(ctx)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if len(presets) == 0 {
-		return "", nil, fmt.Errorf("peer config/store has no presets")
+		return "", nil, nil, fmt.Errorf("peer config/store has no presets")
 	}
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	reservations, err := store.ListReservations(ctx)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	allocator := allocatorFromReservations(reservations, presetMap(presets))
 	estimator := peerEstimator(cfg, agents)
 	placer := scheduler.NewPlacer(estimator, allocator, clock.System{}, presets...)
 	queue := scheduler.NewQueue(clock.System{})
 	if err := restoreQueuedJobs(ctx, store, queue); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	jobLog := peercoord.NewJobLog()
 	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
@@ -218,7 +235,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		Presets:     presetMap(presets),
 	}
 	if _, err := runtime.ExpireLeases(ctx); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if discovery != nil {
 		startPeerAdvertiser(ctx, discovery, self, clock.System{}, time.Duration(cfg.DiscoveryAdvertiseMS)*time.Millisecond)
@@ -243,7 +260,22 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	mountPeerHTTP(mux, self, cfg.JoinToken)
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
 	mux.Handle("/", handler)
-	return cfg.Listen, mux, nil
+	return cfg.Listen, mux, combineShutdowns(shutdowns), nil
+}
+
+func combineShutdowns(shutdowns []func(context.Context) error) func(context.Context) error {
+	if len(shutdowns) == 0 {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		errs := make([]error, 0, len(shutdowns))
+		for _, shutdown := range shutdowns {
+			if err := shutdown(ctx); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}
 }
 
 func mountPeerHTTP(mux *http.ServeMux, self domain.Peer, joinToken string) {
