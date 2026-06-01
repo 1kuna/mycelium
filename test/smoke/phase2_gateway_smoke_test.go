@@ -55,14 +55,14 @@ func TestPhase2GatewayLocalLlamaCppSmoke(t *testing.T) {
 	preset := fixtures.MakePreset(
 		fixtures.WithModelRef(model),
 		fixtures.WithAliases(filepathSafeModelName(model)),
-		fixtures.WithContextLength(2048),
+		fixtures.WithContextLength(1024),
 		fixtures.WithWeights(1),
 		fixtures.WithKVPerToken(0.01),
 	)
 	preset.Capabilities = []domain.Capability{domain.CapabilityChat, domain.CapabilityCompletion}
 	largePreset := preset
-	largePreset.ID = preset.ID + "_ctx4096"
-	largePreset.ContextLength = 4096
+	largePreset.ID = preset.ID + "_ctx2048"
+	largePreset.ContextLength = 2048
 	largePreset.Aliases = nil
 	directory := gateway.NodeDirectory{Agents: map[string]ports.NodeAgent{agentNode.ID: agent}}
 	placer := scheduler.NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), clock.System{}, preset)
@@ -118,7 +118,7 @@ func TestPhase2GatewayLocalLlamaCppSmoke(t *testing.T) {
 		MaxTries:       2,
 	}})
 	defer overflowServer.Close()
-	overflowPrompt := strings.Repeat("overflow ", preset.ContextLength+300)
+	overflowPrompt := strings.Repeat("a ", 1200)
 	overflow := postGateway(t, ctx, overflowServer.URL+"/v1/completions", `{"model":`+quote(model)+`,"prompt":`+quote(overflowPrompt)+`,"max_tokens":1}`)
 	if overflow.status != http.StatusOK || overflow.header.Get(gateway.HeaderAttempts) != "2" {
 		t.Fatalf("overflow requeue status=%s attempts=%s body=%s", overflow.statusText, overflow.header.Get(gateway.HeaderAttempts), overflow.body)
