@@ -59,7 +59,8 @@ func runPhase4AutomatedJoinSmoke(t *testing.T, binary, model string) {
 	gatewayDiscoveryAddr := freeAddr(t)
 	joinToken := "phase4-smoke"
 	rpcToken := "phase4-smoke-rpc"
-	nodeConfig := writePhase4ComputePeerConfig(t, nodeAddr, backendAddr, nodeDiscoveryAddr, gatewayDiscoveryAddr, joinToken, rpcToken, binary, model)
+	parser := writePhase4GGUFParser(t)
+	nodeConfig := writePhase4ComputePeerConfig(t, nodeAddr, backendAddr, nodeDiscoveryAddr, gatewayDiscoveryAddr, joinToken, rpcToken, binary, parser, model)
 
 	node := startSmokeProcess(t, ctx, mycelium,
 		"run",
@@ -68,7 +69,7 @@ func runPhase4AutomatedJoinSmoke(t *testing.T, binary, model string) {
 	defer node.stop(t)
 	waitForNodeReady(t, ctx, "http://"+nodeAddr, rpcToken)
 
-	gatewayConfig := writePhase4GatewayPeerConfig(t, gatewayAddr, gatewayDiscoveryAddr, nodeDiscoveryAddr, joinToken, rpcToken, model)
+	gatewayConfig := writePhase4GatewayPeerConfig(t, gatewayAddr, gatewayDiscoveryAddr, nodeDiscoveryAddr, joinToken, rpcToken, parser, model)
 	gatewayPeer := startSmokeProcess(t, ctx, mycelium, "run", "--config", gatewayConfig)
 	defer gatewayPeer.stop(t)
 
@@ -192,7 +193,7 @@ func repoRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
 
-func writePhase4GatewayPeerConfig(t *testing.T, addr, discoveryListen, discoveryAddr, joinToken, rpcToken, model string) string {
+func writePhase4GatewayPeerConfig(t *testing.T, addr, discoveryListen, discoveryAddr, joinToken, rpcToken, parser, model string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "gateway-peer.json")
 	cfg := struct {
@@ -200,6 +201,7 @@ func writePhase4GatewayPeerConfig(t *testing.T, addr, discoveryListen, discovery
 		StorePath            string           `json:"store_path"`
 		JoinToken            string           `json:"join_token"`
 		RPCToken             string           `json:"rpc_token"`
+		GGUFParser           string           `json:"gguf_parser"`
 		DiscoveryListen      string           `json:"discovery_listen"`
 		DiscoveryAddr        string           `json:"discovery_addr"`
 		DiscoveryAdvertiseMS int              `json:"discovery_advertise_ms"`
@@ -211,6 +213,7 @@ func writePhase4GatewayPeerConfig(t *testing.T, addr, discoveryListen, discovery
 		StorePath:            filepath.Join(t.TempDir(), "control.sqlite"),
 		JoinToken:            joinToken,
 		RPCToken:             rpcToken,
+		GGUFParser:           parser,
 		DiscoveryListen:      discoveryListen,
 		DiscoveryAddr:        discoveryAddr,
 		DiscoveryAdvertiseMS: 50,
@@ -241,7 +244,7 @@ func writePhase4GatewayPeerConfig(t *testing.T, addr, discoveryListen, discovery
 	return path
 }
 
-func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, discoveryListen, discoveryAddr, joinToken, rpcToken, binary, model string) string {
+func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, discoveryListen, discoveryAddr, joinToken, rpcToken, binary, parser, model string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "compute-peer.json")
 	cfg := struct {
@@ -258,6 +261,7 @@ func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, discoveryList
 			Name          string `json:"name"`
 			BackendListen string `json:"backend_listen"`
 			LlamaServer   string `json:"llama_server"`
+			GGUFParser    string `json:"gguf_parser"`
 			VRAMMB        int    `json:"vram_mb"`
 		} `json:"compute_config"`
 		Presets []domain.Preset `json:"presets"`
@@ -284,6 +288,7 @@ func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, discoveryList
 	cfg.ComputeConfig.Name = "Phase 4 Node"
 	cfg.ComputeConfig.BackendListen = backendAddr
 	cfg.ComputeConfig.LlamaServer = binary
+	cfg.ComputeConfig.GGUFParser = parser
 	cfg.ComputeConfig.VRAMMB = 8192
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -291,6 +296,20 @@ func writePhase4ComputePeerConfig(t *testing.T, addr, backendAddr, discoveryList
 	}
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatalf("write compute peer config: %v", err)
+	}
+	return path
+}
+
+func writePhase4GGUFParser(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "gguf-parser")
+	script := `#!/bin/sh
+cat <<'JSON'
+{"format":"gguf","weights_mb":1,"kv_per_token_mb":0.01,"context_length":2048}
+JSON
+`
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatalf("write phase4 gguf parser: %v", err)
 	}
 	return path
 }
