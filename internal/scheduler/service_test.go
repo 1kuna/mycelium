@@ -520,6 +520,24 @@ func TestServiceReleaseJobUsesCoordinatorThenDeletesStoreLease(t *testing.T) {
 	if err := withReleaseErr.ReleaseJob(context.Background(), domain.Lease{JobID: "job-b"}); !errors.Is(err, releaseErr) {
 		t.Fatalf("coordinator ReleaseJob err = %v", err)
 	}
+	fallbackAdmission := &mocks.AdmissionController{}
+	fallbackStore := &runtimeStore{leases: map[string]domain.Lease{"lease-sticky": {ID: "lease-sticky", JobID: "job-sticky", NodeID: "node-a"}}}
+	withCoordinatorFallback := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{},
+		Nodes:       staticNodes{},
+		Owners:      staticNodes{admissions: map[string]ports.AdmissionController{"node-a": fallbackAdmission}},
+		Coordinator: &mocks.Coordinator{ReleaseErr: fmt.Errorf("job %q is not claimed by this coordinator", "job-sticky")},
+		Queue:       NewQueue(clock),
+		Store:       fallbackStore,
+		Clock:       clock,
+	}
+	if err := withCoordinatorFallback.ReleaseJob(context.Background(), domain.Lease{ID: "lease-sticky", JobID: "job-sticky", NodeID: "node-a"}); err != nil {
+		t.Fatalf("coordinator fallback ReleaseJob: %v", err)
+	}
+	if _, ok := fallbackStore.leases["lease-sticky"]; ok || strings.Join(fallbackAdmission.Calls, ",") != "release:lease-sticky" {
+		t.Fatalf("fallback leases=%+v admission=%+v", fallbackStore.leases, fallbackAdmission.Calls)
+	}
 	withCoordinatorNoStoreLease := &Service{
 		Placer:      fakePlacer{},
 		Fleet:       staticFleet{},

@@ -445,9 +445,9 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 }
 
 func (r *Router) placeStickyOrLoad(ctx context.Context, req translate.IngressRequest, job domain.Job, preset domain.Preset, fleet domain.FleetSnapshot, beforeCold func(context.Context, domain.PlacementDecision) error) (domain.PlacementDecision, domain.ModelInstance, domain.Lease, bool, error) {
-	if r.Sticky != nil && (r.Runtime == nil || r.Runtime.Coordinator == nil) {
+	if r.Sticky != nil {
 		if inst, ok := r.Sticky.Get(req.ConversationKey, preset, fleet); ok {
-			return domain.PlacementDecision{
+			decision := domain.PlacementDecision{
 				JobID:          job.ID,
 				InstanceID:     inst.ID,
 				NodeID:         inst.NodeID,
@@ -458,10 +458,46 @@ func (r *Router) placeStickyOrLoad(ctx context.Context, req translate.IngressReq
 					Step:   "sticky",
 					Result: "conversation affinity selected warm instance",
 				}},
-			}, inst, domain.Lease{}, false, nil
+			}
+			lease, accepted, err := r.commitStickyOwnerLease(ctx, job, decision)
+			if err != nil {
+				return domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, false, err
+			}
+			if accepted {
+				return decision, inst, lease, false, nil
+			}
+			r.Sticky.Delete(req.ConversationKey)
 		}
 	}
 	return r.placeAndLoad(ctx, job, req.Body, preset, fleet, beforeCold)
+}
+
+func (r *Router) commitStickyOwnerLease(ctx context.Context, job domain.Job, decision domain.PlacementDecision) (domain.Lease, bool, error) {
+	if r.Runtime == nil {
+		return domain.Lease{}, true, nil
+	}
+	if r.Runtime.Owners == nil {
+		return domain.Lease{}, false, fmt.Errorf("sticky routing requires owner admission")
+	}
+	owner, err := r.Runtime.Owners.AdmissionController(decision.NodeID)
+	if err != nil {
+		return domain.Lease{}, false, err
+	}
+	offer, err := owner.Offer(ctx, domain.AdmissionRequest{
+		Job:            job,
+		Claim:          decision.Claim,
+		NodeID:         decision.NodeID,
+		AcceleratorSet: append([]int(nil), decision.AcceleratorSet...),
+		InstanceID:     decision.InstanceID,
+	})
+	if err != nil {
+		return domain.Lease{}, false, nil
+	}
+	lease, err := owner.Commit(ctx, offer.OfferID, offer.Fence)
+	if err != nil {
+		return domain.Lease{}, false, nil
+	}
+	return lease, true, nil
 }
 
 func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, payload []byte, preset domain.Preset, fleet domain.FleetSnapshot, beforeCold func(context.Context, domain.PlacementDecision) error) (domain.PlacementDecision, domain.ModelInstance, domain.Lease, bool, error) {
