@@ -298,7 +298,7 @@ func (n loadOnlyNode) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 	return domain.NodeSnapshot{Node: n.node}, nil
 }
 
-func (n loadOnlyNode) Load(context.Context, domain.Preset) (domain.ModelInstance, error) {
+func (n loadOnlyNode) Load(context.Context, domain.LoadRequest) (domain.ModelInstance, error) {
 	return n.inst, nil
 }
 
@@ -328,7 +328,7 @@ func (n blockingLoadNode) Snapshot(context.Context) (domain.NodeSnapshot, error)
 	return domain.NodeSnapshot{Node: n.node}, nil
 }
 
-func (n blockingLoadNode) Load(context.Context, domain.Preset) (domain.ModelInstance, error) {
+func (n blockingLoadNode) Load(context.Context, domain.LoadRequest) (domain.ModelInstance, error) {
 	<-n.allow
 	return n.inst, nil
 }

@@ -135,23 +135,26 @@ func (a *Agent) ProtectInstance(instanceID, reservationID string) error {
 	return nil
 }
 
-func (a *Agent) Load(ctx context.Context, p domain.Preset) (domain.ModelInstance, error) {
-	if inst, ok := a.readyInstance(p.ID); ok {
+func (a *Agent) Load(ctx context.Context, req domain.LoadRequest) (domain.ModelInstance, error) {
+	if err := validateLoadRequest(req); err != nil {
+		return domain.ModelInstance{}, err
+	}
+	if inst, ok := a.readyInstance(req.Preset.ID, req.AcceleratorSet); ok {
 		return inst, nil
 	}
-	op, owner := a.beginLoad(p)
+	op, key, owner := a.beginLoad(req)
 	if !owner {
 		return waitLoad(ctx, op)
 	}
-	if err := a.admitLoad(p); err != nil {
-		a.finishLoad(p.ID, op.inst.ID, ports.Handle{}, domain.ModelInstance{}, op, err)
+	if err := a.admitLoad(req); err != nil {
+		a.finishLoad(key, op.inst.ID, ports.Handle{}, domain.ModelInstance{}, op, err)
 		return waitLoad(ctx, op)
 	}
 	a.markLoading(op.inst)
 
 	loadingID := op.inst.ID
-	inst, handle, err := a.launchAndWait(ctx, p, op.inst)
-	a.finishLoad(p.ID, loadingID, handle, inst, op, err)
+	inst, handle, err := a.launchAndWait(ctx, req.Preset, op.inst)
+	a.finishLoad(key, loadingID, handle, inst, op, err)
 	return waitLoad(ctx, op)
 }
 
@@ -272,36 +275,38 @@ func (a *Agent) RecordRun(ctx context.Context, metric domain.RunMetric) error {
 	return a.telemetry.Record(ctx, metric)
 }
 
-func (a *Agent) readyInstance(presetID string) (domain.ModelInstance, bool) {
+func (a *Agent) readyInstance(presetID string, acc []int) (domain.ModelInstance, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, inst := range a.instances {
-		if inst.PresetID == presetID && inst.State == domain.InstReady {
+		if inst.PresetID == presetID && sameAcceleratorSet(inst.AcceleratorSet, acc) && inst.State == domain.InstReady {
 			return inst, true
 		}
 	}
 	return domain.ModelInstance{}, false
 }
 
-func (a *Agent) beginLoad(p domain.Preset) (*loadOp, bool) {
+func (a *Agent) beginLoad(req domain.LoadRequest) (*loadOp, string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if op, ok := a.loads[p.ID]; ok {
-		return op, false
+	key := loadKey(req.Preset.ID, req.AcceleratorSet)
+	if op, ok := a.loads[key]; ok {
+		return op, key, false
 	}
 
 	inst := domain.ModelInstance{
 		ID:             a.nextInstanceID(),
-		PresetID:       p.ID,
+		PresetID:       req.Preset.ID,
 		NodeID:         a.node.ID,
-		AcceleratorSet: []int{0},
-		Claim:          claimForPreset(p),
+		AcceleratorSet: append([]int(nil), req.AcceleratorSet...),
+		Claim:          req.Claim,
+		ReservationID:  req.ReservationID,
 		State:          domain.InstLoading,
 		Loading:        true,
 	}
 	op := &loadOp{done: make(chan struct{}), inst: inst}
-	a.loads[p.ID] = op
-	return op, true
+	a.loads[key] = op
+	return op, key, true
 }
 
 func (a *Agent) markLoading(inst domain.ModelInstance) {
@@ -310,7 +315,7 @@ func (a *Agent) markLoading(inst domain.ModelInstance) {
 	a.instances[inst.ID] = inst
 }
 
-func (a *Agent) admitLoad(p domain.Preset) error {
+func (a *Agent) admitLoad(req domain.LoadRequest) error {
 	if a.allocator == nil {
 		return fmt.Errorf("allocator is not configured")
 	}
@@ -318,11 +323,10 @@ func (a *Agent) admitLoad(p domain.Preset) error {
 	node := a.node
 	existing := a.instanceListLocked()
 	a.mu.Unlock()
-	acc := []int{0}
-	if !a.allocator.CanStackLoad(node, acc, existing) {
+	if !a.allocator.CanStackLoad(node, req.AcceleratorSet, existing) {
 		return fmt.Errorf("%w: load already in flight on node %q", domain.ErrNoFit, node.ID)
 	}
-	if !a.allocator.Fits(node, acc, existing, claimForPreset(p)) {
+	if !a.allocator.Fits(node, req.AcceleratorSet, existing, req.Claim) {
 		return fmt.Errorf("%w: node %q is saturated", domain.ErrNoFit, node.ID)
 	}
 	return nil
@@ -341,7 +345,7 @@ func claimForPreset(p domain.Preset) domain.Claim {
 	return domain.Claim{WeightsMB: p.EstWeightsMB, KVReservedMB: kv}
 }
 
-func (a *Agent) finishLoad(presetID, instanceID string, handle ports.Handle, inst domain.ModelInstance, op *loadOp, err error) {
+func (a *Agent) finishLoad(key, instanceID string, handle ports.Handle, inst domain.ModelInstance, op *loadOp, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
@@ -350,10 +354,39 @@ func (a *Agent) finishLoad(presetID, instanceID string, handle ports.Handle, ins
 		a.instances[instanceID] = inst
 		a.handles[instanceID] = handle
 	}
-	delete(a.loads, presetID)
+	delete(a.loads, key)
 	op.inst = inst
 	op.err = err
 	close(op.done)
+}
+
+func validateLoadRequest(req domain.LoadRequest) error {
+	if req.Preset.ID == "" {
+		return fmt.Errorf("load preset id is required")
+	}
+	if len(req.AcceleratorSet) == 0 {
+		return fmt.Errorf("load accelerator_set is required")
+	}
+	if req.Claim == (domain.Claim{}) {
+		return fmt.Errorf("load claim is required")
+	}
+	return nil
+}
+
+func loadKey(presetID string, acc []int) string {
+	return fmt.Sprintf("%s:%v", presetID, acc)
+}
+
+func sameAcceleratorSet(left, right []int) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *Agent) inflightStateLocked(instanceID string) *inflightState {

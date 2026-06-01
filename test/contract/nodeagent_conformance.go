@@ -14,7 +14,11 @@ func RunNodeAgentConformance(t *testing.T, name string, newAgent func() ports.No
 		agent := newAgent()
 		before, err := agent.Snapshot(context.Background())
 		assert.NoError(t, "Snapshot before load", err)
-		inst, err := agent.Load(context.Background(), p)
+		inst, err := agent.Load(context.Background(), domain.LoadRequest{
+			Preset:         p,
+			Claim:          domain.Claim{WeightsMB: p.EstWeightsMB, KVReservedMB: 1},
+			AcceleratorSet: []int{0},
+		})
 		assert.NoError(t, "Load", err)
 		assert.True(t, inst.ID != "" && inst.PresetID == p.ID, "loaded invalid instance: %+v", inst)
 		assert.NoError(t, "BeginRequest", agent.BeginRequest(context.Background(), inst.ID))

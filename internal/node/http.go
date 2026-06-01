@@ -71,12 +71,12 @@ func (s HTTPServer) snapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s HTTPServer) load(w http.ResponseWriter, r *http.Request) {
-	var preset domain.Preset
-	if err := json.NewDecoder(r.Body).Decode(&preset); err != nil {
+	var req domain.LoadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	inst, err := s.Agent.Load(r.Context(), preset)
+	inst, err := s.Agent.Load(r.Context(), req)
 	if errors.Is(err, domain.ErrNoFit) {
 		writeDomainError(w, http.StatusTooManyRequests, err)
 		return
@@ -453,9 +453,9 @@ func (c *HTTPClient) Snapshot(ctx context.Context) (domain.NodeSnapshot, error) 
 	return snap, err
 }
 
-func (c *HTTPClient) Load(ctx context.Context, p domain.Preset) (domain.ModelInstance, error) {
+func (c *HTTPClient) Load(ctx context.Context, req domain.LoadRequest) (domain.ModelInstance, error) {
 	var inst domain.ModelInstance
-	err := c.do(ctx, http.MethodPost, "/load", p, &inst)
+	err := c.do(ctx, http.MethodPost, "/load", req, &inst)
 	if err == nil {
 		inst.Addr = c.instanceProxyAddr(inst.ID)
 	}

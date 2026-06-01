@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"time"
 
@@ -115,7 +116,12 @@ func loadPinnedReservations(ctx context.Context, agent *nodeagent.Agent, store *
 		if err != nil {
 			return err
 		}
-		inst, err := agent.Load(ctx, preset)
+		inst, err := agent.Load(ctx, domain.LoadRequest{
+			Preset:         preset,
+			Claim:          domain.Claim{WeightsMB: preset.EstWeightsMB, KVReservedMB: int(math.Ceil(float64(preset.ContextLength) * preset.KVPerTokenMB))},
+			AcceleratorSet: []int{0},
+			ReservationID:  reservation.ID,
+		})
 		if err != nil {
 			return err
 		}

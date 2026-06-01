@@ -38,13 +38,42 @@ func TestBackendAwareFailsLoudlyForUnknownBackendAndPropagatesErrors(t *testing.
 	estimator := NewBackendAware(nil, &recordingEstimator{err: boom})
 	preset := fixtures.MakePreset(fixtures.WithPresetID("vllm"))
 	preset.Backend = domain.BackendVLLM
-	if _, err := estimator.Estimate(context.Background(), preset, 100, 1); !errors.Is(err, boom) {
+	if _, err := estimator.Estimate(context.Background(), preset, 100, 1); err == nil || !strings.Contains(err.Error(), "unit-aware") {
+		t.Fatalf("vllm global err = %v", err)
+	}
+	mlx := fixtures.MakePreset(fixtures.WithPresetID("mlx"))
+	mlx.Backend = domain.BackendMLX
+	if _, err := estimator.Estimate(context.Background(), mlx, 100, 1); !errors.Is(err, boom) {
 		t.Fatalf("explicit err = %v", err)
 	}
 	unknown := fixtures.MakePreset(fixtures.WithPresetID("mystery"))
 	unknown.Backend = domain.Backend("mystery")
 	if _, err := estimator.Estimate(context.Background(), unknown, 100, 1); err == nil || !strings.Contains(err.Error(), "unsupported backend") {
 		t.Fatalf("unknown err = %v", err)
+	}
+}
+
+func TestBackendAwareVLLMUsesUnitReservationClaim(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithPresetID("vllm"))
+	preset.Backend = domain.BackendVLLM
+	preset.LaunchArgs = []string{"serve", "{model}", "--gpu-memory-utilization", "0.25"}
+	node := fixtures.MakeNode()
+	node.Accelerators = []domain.Accelerator{
+		{Index: 0, VRAMTotalMB: 1000},
+		{Index: 1, VRAMTotalMB: 3000},
+	}
+
+	claim, err := NewBackendAware(nil, NewInMemory()).EstimateForUnit(context.Background(), preset, 100, 1, node, []int{0, 1})
+	if err != nil {
+		t.Fatalf("EstimateForUnit: %v", err)
+	}
+	if claim != (domain.Claim{WeightsMB: 1000}) {
+		t.Fatalf("claim = %+v", claim)
+	}
+
+	preset.LaunchArgs = []string{"serve", "{model}"}
+	if _, err := NewBackendAware(nil, NewInMemory()).EstimateForUnit(context.Background(), preset, 100, 1, node, []int{0}); err == nil || !strings.Contains(err.Error(), "gpu-memory-utilization") {
+		t.Fatalf("missing reservation err = %v", err)
 	}
 }
 

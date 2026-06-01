@@ -681,7 +681,12 @@ func (r *Router) resolveInstance(ctx context.Context, decision domain.PlacementD
 	if err != nil {
 		return domain.ModelInstance{}, false, err
 	}
-	inst, err := agent.Load(ctx, preset)
+	inst, err := agent.Load(ctx, domain.LoadRequest{
+		JobID:          decision.JobID,
+		Preset:         preset,
+		Claim:          decision.Claim,
+		AcceleratorSet: append([]int(nil), decision.AcceleratorSet...),
+	})
 	if err != nil {
 		return domain.ModelInstance{}, false, err
 	}

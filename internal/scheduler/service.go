@@ -562,7 +562,12 @@ func (s *Service) resolveInstance(ctx context.Context, job domain.Job, decision 
 	if err != nil {
 		return domain.ModelInstance{}, err
 	}
-	inst, err := agent.Load(ctx, preset)
+	inst, err := agent.Load(ctx, domain.LoadRequest{
+		JobID:          job.ID,
+		Preset:         preset,
+		Claim:          decision.Claim,
+		AcceleratorSet: append([]int(nil), decision.AcceleratorSet...),
+	})
 	if err != nil {
 		return domain.ModelInstance{}, err
 	}

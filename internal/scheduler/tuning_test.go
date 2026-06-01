@@ -84,8 +84,11 @@ func TestServicePassesLaunchTuningToColdLoad(t *testing.T) {
 	if _, err := service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	if len(agent.Loaded) != 1 || strings.Join(agent.Loaded[0].LaunchArgs, " ") != "--n-gpu-layers 999 --tensor-split 100,200" {
+	if len(agent.Loaded) != 1 || strings.Join(agent.Loaded[0].Preset.LaunchArgs, " ") != "--n-gpu-layers 999 --tensor-split 100,200" {
 		t.Fatalf("loaded presets = %+v", agent.Loaded)
+	}
+	if !sameIntSet(agent.Loaded[0].AcceleratorSet, []int{0, 1}) || agent.Loaded[0].Claim != (fixtures.MakeClaim(1, 1)) {
+		t.Fatalf("loaded request = %+v", agent.Loaded[0])
 	}
 }
 
@@ -96,4 +99,16 @@ func tuningNode() domain.Node {
 		{Index: 1, Vendor: "apple", Kind: "unified", VRAMTotalMB: 200, UnifiedMemory: true},
 	}
 	return node
+}
+
+func sameIntSet(left, right []int) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }

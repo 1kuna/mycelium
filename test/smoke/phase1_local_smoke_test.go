@@ -47,7 +47,7 @@ func TestLocalPhase1LoadServeTelemetryRequeueReaper(t *testing.T) {
 		fixtures.WithKVPerToken(0.01),
 	)
 
-	inst, err := agent.Load(ctx, preset)
+	inst, err := agent.Load(ctx, domain.LoadRequest{Preset: preset, Claim: fixtures.MakeClaim(1, 1), AcceleratorSet: []int{0}})
 	if err != nil {
 		t.Fatalf("load ready-gated llama.cpp: %v", err)
 	}

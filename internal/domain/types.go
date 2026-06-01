@@ -71,6 +71,14 @@ type AdmissionRequest struct {
 	ReservationID  string `json:"reservation_id,omitempty"`
 }
 
+type LoadRequest struct {
+	JobID          string `json:"job_id,omitempty"`
+	Preset         Preset `json:"preset"`
+	Claim          Claim  `json:"claim"`
+	AcceleratorSet []int  `json:"accelerator_set"`
+	ReservationID  string `json:"reservation_id,omitempty"`
+}
+
 type ModelInstance struct {
 	ID             string        `json:"id"`
 	PresetID       string        `json:"preset_id"`
@@ -87,24 +95,25 @@ type ModelInstance struct {
 }
 
 type Job struct {
-	ID             string         `json:"id"`
-	TaskType       string         `json:"task_type"`
-	Model          string         `json:"model"`
-	PresetID       string         `json:"preset,omitempty"`
-	Project        string         `json:"project"`
-	Submitter      string         `json:"submitter,omitempty"`
-	Priority       Priority       `json:"priority"`
-	SpeedPref      SpeedPref      `json:"speed_pref"`
-	ContextRequest int            `json:"context_request,omitempty"`
-	Preemption     Preemption     `json:"preemption"`
-	Handling       HandlingClass  `json:"handling,omitempty"`
-	Streaming      bool           `json:"streaming"`
-	DeadlineMS     int            `json:"deadline_ms,omitempty"`
-	ParentID       string         `json:"parent_id,omitempty"`
-	Benchmark      *BenchmarkSpec `json:"benchmark,omitempty"`
-	Status         JobStatus      `json:"status"`
-	Progress       []JobProgress  `json:"progress,omitempty"`
-	Error          string         `json:"error,omitempty"`
+	ID             string            `json:"id"`
+	TaskType       string            `json:"task_type"`
+	Model          string            `json:"model"`
+	PresetID       string            `json:"preset,omitempty"`
+	NodeSelector   map[string]string `json:"node_selector,omitempty"`
+	Project        string            `json:"project"`
+	Submitter      string            `json:"submitter,omitempty"`
+	Priority       Priority          `json:"priority"`
+	SpeedPref      SpeedPref         `json:"speed_pref"`
+	ContextRequest int               `json:"context_request,omitempty"`
+	Preemption     Preemption        `json:"preemption"`
+	Handling       HandlingClass     `json:"handling,omitempty"`
+	Streaming      bool              `json:"streaming"`
+	DeadlineMS     int               `json:"deadline_ms,omitempty"`
+	ParentID       string            `json:"parent_id,omitempty"`
+	Benchmark      *BenchmarkSpec    `json:"benchmark,omitempty"`
+	Status         JobStatus         `json:"status"`
+	Progress       []JobProgress     `json:"progress,omitempty"`
+	Error          string            `json:"error,omitempty"`
 }
 
 type BenchmarkSpec struct {

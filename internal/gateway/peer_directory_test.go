@@ -249,7 +249,7 @@ func (a blockingSnapshotAgent) Snapshot(ctx context.Context) (domain.NodeSnapsho
 	}
 }
 
-func (a blockingSnapshotAgent) Load(context.Context, domain.Preset) (domain.ModelInstance, error) {
+func (a blockingSnapshotAgent) Load(context.Context, domain.LoadRequest) (domain.ModelInstance, error) {
 	return domain.ModelInstance{}, errors.New("not implemented")
 }
 

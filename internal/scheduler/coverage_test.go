@@ -9,6 +9,7 @@ import (
 	"mycelium/internal/domain"
 	"mycelium/internal/estimate"
 	"mycelium/internal/lease"
+	"mycelium/internal/ports"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
 )
@@ -59,6 +60,14 @@ func TestSelectWarmInstanceChoosesLeastBusyThenID(t *testing.T) {
 	if _, ok := placer.selectWarmInstance(fixtures.MakeJob(), preset, domain.FleetSnapshot{}); ok {
 		t.Fatal("empty fleet should not return warm instance")
 	}
+	if _, ok := placer.selectWarmInstance(fixtures.MakeJob(func(j *domain.Job) {
+		j.NodeSelector = map[string]string{"gpu.vendor": "amd"}
+	}), preset, domain.FleetSnapshot{
+		Nodes:     []domain.Node{fixtures.MakeNode()},
+		Instances: []domain.ModelInstance{earlier},
+	}); ok {
+		t.Fatal("warm instance on selector-mismatched node should not be selected")
+	}
 }
 
 func TestFilterCandidatesDropsStatusLoadAndFit(t *testing.T) {
@@ -90,6 +99,12 @@ func TestFilterCandidatesDropsStatusLoadAndFit(t *testing.T) {
 	if len(candidates) != 1 || candidates[0].node.ID != "fit" {
 		t.Fatalf("fit candidates = %+v", candidates)
 	}
+	nodeA := fixtures.MakeNode(fixtures.WithNodeID("a"))
+	nodeB := fixtures.MakeNode(fixtures.WithNodeID("b"))
+	candidates, _ = placer.filterCandidates(domain.FleetSnapshot{Nodes: []domain.Node{nodeB, nodeA}}, claim)
+	if len(candidates) != 2 || candidates[0].node.ID != "a" {
+		t.Fatalf("node sort = %+v", candidates)
+	}
 
 	multiAcc := fixtures.MakeNode(fixtures.WithNodeID("multi"), func(n *domain.Node) {
 		n.Accelerators = []domain.Accelerator{{Index: 1, VRAMTotalMB: 1000}, {Index: 0, VRAMTotalMB: 1000}}
@@ -109,6 +124,65 @@ func TestFilterCandidatesDropsStatusLoadAndFit(t *testing.T) {
 	otherNodeInst := fixtures.MakeInstance(fixtures.WithInstanceID("other"), fixtures.OnNode("other"), func(i *domain.ModelInstance) { i.AcceleratorSet = []int{0} })
 	if hasOverlappingInstance(fit.ID, []int{0}, []domain.ModelInstance{otherNodeInst}) {
 		t.Fatal("instance on another node should not overlap")
+	}
+}
+
+func TestFilterPlacementCandidatesCoversUnitEstimatorBranches(t *testing.T) {
+	preset := fixtures.MakePreset()
+	claim := fixtures.MakeClaim(1, 1)
+	fit := fixtures.MakeNode(fixtures.WithNodeID("fit"))
+	mismatch := fixtures.MakeNode(fixtures.WithNodeID("mismatch"))
+	mismatch.Labels = map[string]string{"gpu.vendor": "amd"}
+	down := fixtures.MakeNode(fixtures.WithNodeID("down"), fixtures.Maintenance)
+	loading := fixtures.MakeInstance(fixtures.WithInstanceID("loading"), fixtures.OnNode(fit.ID), func(i *domain.ModelInstance) {
+		i.State = domain.InstLoading
+		i.Loading = true
+	})
+	placer := NewPlacer(unitEstimator{claim: claim}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+	job := fixtures.MakeJob(func(j *domain.Job) {
+		j.NodeSelector = map[string]string{"gpu.vendor": "nvidia"}
+	})
+
+	candidates, trace, err := placer.filterPlacementCandidates(context.Background(), job, preset, 100, domain.FleetSnapshot{
+		Nodes:     []domain.Node{down, mismatch, fit},
+		Instances: []domain.ModelInstance{loading},
+	}, true)
+	if err != nil {
+		t.Fatalf("filterPlacementCandidates: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidates = %+v", candidates)
+	}
+	dropped := trace.Data["dropped"].(map[string]string)
+	if dropped["down"] != string(domain.NodeMaintenance) || dropped["mismatch"] != "label.gpu.vendor" || dropped["fit"] != "dedicated_unit" {
+		t.Fatalf("dropped = %+v", dropped)
+	}
+
+	placer = NewPlacer(unitEstimator{claim: claim}, &mocks.Allocator{FitsVal: true, CanStackLoadVal: false}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+	_, trace, err = placer.filterPlacementCandidates(context.Background(), fixtures.MakeJob(), preset, 100, domain.FleetSnapshot{Nodes: []domain.Node{fit}})
+	if err != nil {
+		t.Fatalf("filter load-in-flight: %v", err)
+	}
+	if trace.Data["dropped"].(map[string]string)["fit"] != "load_in_flight" {
+		t.Fatalf("load-in-flight dropped = %+v", trace.Data["dropped"])
+	}
+
+	multiAcc := fixtures.MakeNode(fixtures.WithNodeID("multi-placement"), func(n *domain.Node) {
+		n.Accelerators = []domain.Accelerator{{Index: 1, VRAMTotalMB: 1000}, {Index: 0, VRAMTotalMB: 1000}}
+	})
+	placer = NewPlacer(unitEstimator{claim: claim}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+	candidates, _, err = placer.filterPlacementCandidates(context.Background(), fixtures.MakeJob(), preset, 100, domain.FleetSnapshot{Nodes: []domain.Node{multiAcc}})
+	if err != nil {
+		t.Fatalf("filter placement multi-acc: %v", err)
+	}
+	if len(candidates) != 3 || candidates[0].acc[0] != 0 || len(candidates[2].acc) != 2 {
+		t.Fatalf("placement accelerator sort = %+v", candidates)
+	}
+
+	_, _, err = NewPlacer(unitEstimator{err: domain.ErrUnsupported}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset).
+		filterPlacementCandidates(context.Background(), fixtures.MakeJob(), preset, 100, domain.FleetSnapshot{Nodes: []domain.Node{fit}})
+	if err == nil || !strings.Contains(err.Error(), domain.ErrUnsupported.Error()) {
+		t.Fatalf("unit estimator err = %v", err)
 	}
 }
 
@@ -148,6 +222,12 @@ func TestEffectiveSpeedAndActionDefaults(t *testing.T) {
 	}
 	if actionForSpeed(domain.SpeedLatency) != domain.ActionDedicatedUnit {
 		t.Fatal("latency should dedicate")
+	}
+}
+
+func TestValidatePresetForJobAllowsEmptyTaskType(t *testing.T) {
+	if err := validatePresetForJob(domain.Job{ID: "job"}, fixtures.MakePreset()); err != nil {
+		t.Fatalf("empty task validation = %v", err)
 	}
 }
 
@@ -217,6 +297,54 @@ func TestTryPreemptSortsMultipleResults(t *testing.T) {
 	}
 }
 
+func TestTryPreemptForPresetPropagatesEstimateError(t *testing.T) {
+	preset := fixtures.MakePreset()
+	node := fixtures.Make4090Node(fixtures.WithNodeID("node-a"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.8))
+	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim"), fixtures.WithInstancePreset("other"), fixtures.OnNode(node.ID), fixtures.WithClaim(fixtures.MakeClaim(100, 0)), fixtures.WithInstancePriority(domain.PriorityBackground))
+	placer := NewPlacer(unitEstimator{err: domain.ErrUnsupported}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+	_, _, err := placer.tryPreemptForPreset(context.Background(), fixtures.MakeJob(fixtures.Interactive, fixtures.HardForInteractive, fixtures.WithPreset(preset.ID)), preset, 100, domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{victim},
+	})
+	if !strings.Contains(err.Error(), domain.ErrUnsupported.Error()) {
+		t.Fatalf("preempt estimate err = %v", err)
+	}
+}
+
+func TestPlacePropagatesUnitEstimateErrors(t *testing.T) {
+	preset := fixtures.MakePreset()
+	node := fixtures.MakeNode()
+	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim"), fixtures.WithInstancePreset("other"), fixtures.OnNode(node.ID), fixtures.WithClaim(fixtures.MakeClaim(1, 0)), fixtures.WithInstancePriority(domain.PriorityBackground))
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+
+	_, err := NewPlacer(unitEstimator{err: domain.ErrUnsupported}, lease.NewAllocator(), clock, preset).
+		Place(context.Background(), fixtures.MakeJob(), domain.FleetSnapshot{Nodes: []domain.Node{node}})
+	if err == nil || !strings.Contains(err.Error(), domain.ErrUnsupported.Error()) {
+		t.Fatalf("filter estimate err = %v", err)
+	}
+
+	estimator := &countingUnitEstimator{claim: fixtures.MakeClaim(1, 1), errOn: 1}
+	_, err = NewPlacer(estimator, &mocks.Allocator{FitsVal: false, CanStackLoadVal: false}, clock, preset).
+		Place(context.Background(), fixtures.MakeJob(fixtures.Hard), domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}})
+	if err == nil || !strings.Contains(err.Error(), domain.ErrUnsupported.Error()) {
+		t.Fatalf("preempt estimate err = %v", err)
+	}
+}
+
+func TestPreemptSelectorMismatchSkipsCandidate(t *testing.T) {
+	preset := fixtures.MakePreset()
+	node := fixtures.MakeNode()
+	node.Labels = map[string]string{"gpu.vendor": "intel"}
+	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim"), fixtures.OnNode(node.ID), fixtures.WithClaim(fixtures.MakeClaim(1, 0)), fixtures.WithInstancePriority(domain.PriorityBackground))
+	placer := NewPlacer(unitEstimator{claim: fixtures.MakeClaim(1, 1)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+	_, ok, err := placer.tryPreemptForPreset(context.Background(), fixtures.MakeJob(fixtures.Interactive, fixtures.HardForInteractive, func(j *domain.Job) {
+		j.NodeSelector = map[string]string{"gpu.vendor": "nvidia"}
+	}), preset, 100, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}})
+	if err != nil || ok {
+		t.Fatalf("preempt selector ok=%v err=%v", ok, err)
+	}
+}
+
 func TestEligibleVictimsAndPriorityHelpers(t *testing.T) {
 	node := fixtures.MakeNode()
 	victims := eligibleVictims(fixtures.MakeJob(fixtures.Interactive), node, []int{0}, []domain.ModelInstance{
@@ -238,4 +366,94 @@ func TestEligibleVictimsAndPriorityHelpers(t *testing.T) {
 	if overlaps([]int{0}, []int{1}) {
 		t.Fatal("different accelerator sets should not overlap")
 	}
+}
+
+func TestResolveInstanceFillsMissingLoadedClaim(t *testing.T) {
+	preset := fixtures.MakePreset()
+	node := fixtures.MakeNode()
+	service := &Service{
+		Nodes:   zeroClaimResolver{node: node},
+		Presets: map[string]domain.Preset{preset.ID: preset},
+	}
+	inst, err := service.resolveInstance(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID)), domain.PlacementDecision{
+		NodeID:         node.ID,
+		AcceleratorSet: []int{0},
+		Claim:          fixtures.MakeClaim(7, 8),
+	}, domain.FleetSnapshot{Nodes: []domain.Node{node}})
+	if err != nil {
+		t.Fatalf("resolveInstance: %v", err)
+	}
+	if inst.Claim != (fixtures.MakeClaim(7, 8)) {
+		t.Fatalf("instance claim = %+v", inst.Claim)
+	}
+}
+
+type unitEstimator struct {
+	claim domain.Claim
+	err   error
+}
+
+type countingUnitEstimator struct {
+	claim domain.Claim
+	calls int
+	errOn int
+}
+
+type zeroClaimResolver struct {
+	node domain.Node
+}
+
+func (r zeroClaimResolver) NodeAgent(nodeID string) (ports.NodeAgent, error) {
+	if nodeID != r.node.ID {
+		return nil, domain.ErrUnreachable
+	}
+	return zeroClaimAgent{node: r.node}, nil
+}
+
+type zeroClaimAgent struct {
+	node domain.Node
+}
+
+func (a zeroClaimAgent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
+	return domain.NodeSnapshot{Node: a.node}, nil
+}
+
+func (a zeroClaimAgent) Load(context.Context, domain.LoadRequest) (domain.ModelInstance, error) {
+	return domain.ModelInstance{ID: "inst-zero", PresetID: "preset_test", NodeID: a.node.ID, AcceleratorSet: []int{0}, State: domain.InstReady}, nil
+}
+
+func (a zeroClaimAgent) Unload(context.Context, string) error { return nil }
+
+func (a zeroClaimAgent) InspectModel(context.Context, domain.Preset) (domain.ModelMetadata, error) {
+	return domain.ModelMetadata{}, domain.ErrUnsupported
+}
+
+func (a zeroClaimAgent) BeginRequest(context.Context, string) error { return nil }
+
+func (a zeroClaimAgent) EndRequest(context.Context, string) error { return nil }
+
+func (e *countingUnitEstimator) Estimate(context.Context, domain.Preset, int, int) (domain.Claim, error) {
+	return e.claim, nil
+}
+
+func (e *countingUnitEstimator) EstimateForUnit(context.Context, domain.Preset, int, int, domain.Node, []int) (domain.Claim, error) {
+	e.calls++
+	if e.calls == e.errOn {
+		return domain.Claim{}, domain.ErrUnsupported
+	}
+	return e.claim, nil
+}
+
+func (e unitEstimator) Estimate(context.Context, domain.Preset, int, int) (domain.Claim, error) {
+	if e.err != nil {
+		return domain.Claim{}, e.err
+	}
+	return e.claim, nil
+}
+
+func (e unitEstimator) EstimateForUnit(context.Context, domain.Preset, int, int, domain.Node, []int) (domain.Claim, error) {
+	if e.err != nil {
+		return domain.Claim{}, e.err
+	}
+	return e.claim, nil
 }

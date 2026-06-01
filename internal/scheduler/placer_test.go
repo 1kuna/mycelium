@@ -87,6 +87,45 @@ func TestPlaceFailsLoudOnUnknownPresetAndEstimateError(t *testing.T) {
 	}
 }
 
+func TestPlaceFiltersByTaskCapabilityAndNodeSelector(t *testing.T) {
+	preset := fixtures.MakePreset()
+	wrongTask := preset
+	wrongTask.Capabilities = []domain.Capability{domain.CapabilityEmbedding}
+	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), wrongTask)
+	if _, err := placer.Place(context.Background(), fixtures.MakeJob(), domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}}); err == nil || !strings.Contains(err.Error(), "does not support") {
+		t.Fatalf("capability err = %v", err)
+	}
+
+	emptyCaps := preset
+	emptyCaps.Capabilities = nil
+	placer = NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), emptyCaps)
+	if _, err := placer.Place(context.Background(), fixtures.MakeJob(), domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}}); err == nil || !strings.Contains(err.Error(), "no schedulable capabilities") {
+		t.Fatalf("empty capabilities err = %v", err)
+	}
+
+	nvidia := fixtures.MakeNode(fixtures.WithNodeID("node-nvidia"))
+	nvidia.Labels = map[string]string{"gpu.vendor": "nvidia"}
+	intel := fixtures.MakeNode(fixtures.WithNodeID("node-intel"))
+	intel.Labels = map[string]string{"gpu.vendor": "intel"}
+	intel.SpeedClass.TokensPerSecRef = 1000
+	placer = NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+	job := fixtures.MakeJob(func(j *domain.Job) {
+		j.NodeSelector = map[string]string{"gpu.vendor": "nvidia"}
+	})
+	decision, err := placer.Place(context.Background(), job, domain.FleetSnapshot{Nodes: []domain.Node{intel, nvidia}})
+	if err != nil {
+		t.Fatalf("Place selector: %v", err)
+	}
+	if decision.NodeID != "node-nvidia" {
+		t.Fatalf("decision = %+v", decision)
+	}
+	filter := traceStep(decision.Trace, "filter")
+	dropped := filter.Data["dropped"].(map[string]string)
+	if dropped["node-intel"] != "label.gpu.vendor" {
+		t.Fatalf("dropped = %+v", dropped)
+	}
+}
+
 func TestPlaceRespectsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -95,6 +134,15 @@ func TestPlaceRespectsContextCancellation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected cancellation error")
 	}
+}
+
+func traceStep(trace []domain.TraceStep, step string) domain.TraceStep {
+	for _, got := range trace {
+		if got.Step == step {
+			return got
+		}
+	}
+	return domain.TraceStep{}
 }
 
 func assertTraceContains(t *testing.T, trace []domain.TraceStep, step string, text string) {

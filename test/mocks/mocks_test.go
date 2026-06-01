@@ -56,7 +56,8 @@ func TestNodeAgentRecordsLoadUnloadAndFailures(t *testing.T) {
 	if _, err := agent.Snapshot(context.Background()); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	inst, err := agent.Load(context.Background(), fixtures.MakePreset())
+	preset := fixtures.MakePreset()
+	inst, err := agent.Load(context.Background(), domain.LoadRequest{Preset: preset, Claim: fixtures.MakeClaim(1, 1), AcceleratorSet: []int{0}})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestNodeAgentRecordsLoadUnloadAndFailures(t *testing.T) {
 
 	loadErr := errors.New("load")
 	agent.LoadErr = loadErr
-	if _, err := agent.Load(context.Background(), fixtures.MakePreset()); !errors.Is(err, loadErr) {
+	if _, err := agent.Load(context.Background(), domain.LoadRequest{Preset: preset, Claim: fixtures.MakeClaim(1, 1), AcceleratorSet: []int{0}}); !errors.Is(err, loadErr) {
 		t.Fatalf("load error = %v", err)
 	}
 	unloadErr := errors.New("unload")

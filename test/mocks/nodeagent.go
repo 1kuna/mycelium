@@ -18,7 +18,7 @@ type NodeAgent struct {
 	BeginErr   error
 	EndErr     error
 	Calls      []string
-	Loaded     []domain.Preset
+	Loaded     []domain.LoadRequest
 	nextID     int
 }
 
@@ -31,20 +31,20 @@ func (m *NodeAgent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 	return domain.NodeSnapshot{Node: m.NodeVal, Instances: append([]domain.ModelInstance(nil), m.Instances...)}, nil
 }
 
-func (m *NodeAgent) Load(_ context.Context, p domain.Preset) (domain.ModelInstance, error) {
-	m.Calls = append(m.Calls, "load:"+p.ID)
-	m.Loaded = append(m.Loaded, p)
+func (m *NodeAgent) Load(_ context.Context, req domain.LoadRequest) (domain.ModelInstance, error) {
+	m.Calls = append(m.Calls, "load:"+req.Preset.ID)
+	m.Loaded = append(m.Loaded, req)
 	if m.LoadErr != nil {
 		return domain.ModelInstance{}, m.LoadErr
 	}
 	m.nextID++
 	inst := domain.ModelInstance{
 		ID:             fmt.Sprintf("inst_%d", m.nextID),
-		PresetID:       p.ID,
+		PresetID:       req.Preset.ID,
 		NodeID:         m.NodeVal.ID,
-		AcceleratorSet: []int{0},
+		AcceleratorSet: append([]int(nil), req.AcceleratorSet...),
 		State:          domain.InstReady,
-		Claim:          domain.Claim{WeightsMB: p.EstWeightsMB},
+		Claim:          req.Claim,
 		Addr:           fmt.Sprintf("127.0.0.1:%d", 60000+m.nextID),
 	}
 	m.Instances = append(m.Instances, inst)
