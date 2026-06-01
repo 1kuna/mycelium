@@ -32,13 +32,15 @@ type Libp2pOverlayConfig struct {
 	BootstrapPeers []string
 	LocalTarget    string
 	Token          string
+	TokenManager   *TokenManager
 }
 
 type Libp2pOverlayBackend struct {
-	host        host.Host
-	localTarget string
-	tokenHash   string
-	bootstrap   []peer.AddrInfo
+	host         host.Host
+	localTarget  string
+	tokenHash    string
+	tokenManager *TokenManager
+	bootstrap    []peer.AddrInfo
 
 	mu        sync.Mutex
 	peers     map[string]libp2pOverlayAnnouncement
@@ -92,14 +94,15 @@ func NewLibp2pOverlayBackendWithHost(ctx context.Context, h host.Host, cfg Libp2
 		return nil, err
 	}
 	backend := &Libp2pOverlayBackend{
-		host:        h,
-		localTarget: strings.TrimSpace(cfg.LocalTarget),
-		tokenHash:   tokenHashValue(cfg.Token),
-		bootstrap:   bootstrap,
-		peers:       map[string]libp2pOverlayAnnouncement{},
-		byPeerID:    map[peer.ID]string{},
-		watchers:    map[int]chan domain.Peer{},
-		tunnels:     map[string]*libp2pTunnelEntry{},
+		host:         h,
+		localTarget:  strings.TrimSpace(cfg.LocalTarget),
+		tokenHash:    tokenHashValue(cfg.Token),
+		tokenManager: cfg.TokenManager,
+		bootstrap:    bootstrap,
+		peers:        map[string]libp2pOverlayAnnouncement{},
+		byPeerID:     map[peer.ID]string{},
+		watchers:     map[int]chan domain.Peer{},
+		tunnels:      map[string]*libp2pTunnelEntry{},
 	}
 	h.SetStreamHandler(libp2pDiscoveryProtocol, backend.handleDiscoveryStream)
 	h.SetStreamHandler(libp2pTunnelProtocol, backend.handleTunnelStream)
@@ -113,7 +116,10 @@ func (b *Libp2pOverlayBackend) Advertise(ctx context.Context, self domain.Peer) 
 	if err := validatePeer(self); err != nil {
 		return err
 	}
-	announcement := b.announcement(self)
+	announcement, err := b.announcement(self)
+	if err != nil {
+		return err
+	}
 	b.mergeAnnouncement(announcement)
 	if err := b.connectBootstrap(ctx); err != nil {
 		return err
@@ -238,13 +244,24 @@ func (b *Libp2pOverlayBackend) Addrs() []string {
 	return addrs
 }
 
-func (b *Libp2pOverlayBackend) announcement(peer domain.Peer) libp2pOverlayAnnouncement {
+func (b *Libp2pOverlayBackend) announcement(peer domain.Peer) (libp2pOverlayAnnouncement, error) {
+	tokenHash, err := b.currentTokenHash()
+	if err != nil {
+		return libp2pOverlayAnnouncement{}, err
+	}
 	return libp2pOverlayAnnouncement{
 		Peer:        clonePeer(peer),
 		Libp2pID:    b.host.ID().String(),
 		Libp2pAddrs: b.Addrs(),
-		TokenHash:   b.tokenHash,
+		TokenHash:   tokenHash,
+	}, nil
+}
+
+func (b *Libp2pOverlayBackend) currentTokenHash() (string, error) {
+	if b.tokenManager != nil {
+		return b.tokenManager.CurrentHash()
 	}
+	return b.tokenHash, nil
 }
 
 func (b *Libp2pOverlayBackend) connectBootstrap(ctx context.Context) error {
@@ -388,7 +405,11 @@ func (b *Libp2pOverlayBackend) mergeAnnouncement(announcement libp2pOverlayAnnou
 	if announcement.Peer.ID == "" || announcement.Libp2pID == "" {
 		return false
 	}
-	if b.tokenHash != "" && announcement.TokenHash != b.tokenHash {
+	if b.tokenManager != nil {
+		if err := b.tokenManager.ValidateHash(announcement.TokenHash); err != nil {
+			return false
+		}
+	} else if b.tokenHash != "" && announcement.TokenHash != b.tokenHash {
 		return false
 	}
 	info, err := addrInfoFromStrings(announcement.Libp2pID, announcement.Libp2pAddrs)

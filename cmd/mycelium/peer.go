@@ -146,8 +146,10 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	mux := http.NewServeMux()
 	var discovery ports.PeerDiscovery
 	var shutdowns []func(context.Context) error
+	var joinTokens *membership.TokenManager
 	if cfg.JoinToken != "" {
-		if _, err := membership.NewPersistentTokenManager(ctx, cfg.JoinToken, store); err != nil {
+		joinTokens, err = membership.NewPersistentTokenManager(ctx, cfg.JoinToken, store)
+		if err != nil {
 			return "", nil, nil, err
 		}
 		var tunnel ports.Tunnel
@@ -156,7 +158,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 				ListenAddrs:    cfg.OverlayListenAddrs,
 				BootstrapPeers: cfg.OverlayBootstrap,
 				LocalTarget:    cfg.Listen,
-				Token:          cfg.JoinToken,
+				TokenManager:   joinTokens,
 			})
 			if err != nil {
 				return "", nil, nil, err
@@ -166,14 +168,14 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 			tunnel = membership.NewOverlayTunnel(backend)
 		} else {
 			lan := membership.NewPeerLANDiscovery(cfg.DiscoveryListen, cfg.DiscoveryAddr)
-			lan.Token = cfg.JoinToken
+			lan.TokenManager = joinTokens
 			lan.ScanDuration = time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
 			scan := time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
 			cached := membership.NewCachedPeerDiscovery(lan, clock.System{}, peerDiscoveryTTL(scan))
 			if err := cached.Start(ctx, scan); err != nil {
 				return "", nil, nil, err
 			}
-			startSeedPeerProber(ctx, cached, cfg.SeedPeers, cfg.JoinToken, clock.System{}, scan)
+			startSeedPeerProber(ctx, cached, cfg.SeedPeers, cfg.JoinToken, joinTokens, clock.System{}, scan)
 			discovery = cached
 			lanTunnel := membership.NewLANTunnel()
 			lanTunnel.AuthToken = cfg.RPCToken
@@ -258,7 +260,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	if discovery != nil {
 		startPeerAdvertiser(ctx, discovery, self, clock.System{}, time.Duration(cfg.DiscoveryAdvertiseMS)*time.Millisecond)
 		startRegistryReplication(ctx, store, discovery, cfg.ID, cfg.RPCToken, clock.System{}, time.Duration(cfg.RegistrySyncMS)*time.Millisecond)
-		startPeerHeartbeat(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, clock.System{})
+		startPeerHeartbeat(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, joinTokens, clock.System{})
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
 	startOptimizerEvaluator(ctx, store, fleet, cfg.ID, cfg.Compute, clock.System{}, time.Duration(cfg.OptimizerEvalMS)*time.Millisecond, telemetrySyncConfig{
@@ -279,7 +281,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		Projects:       projectMap(projects),
 		DefaultProject: cfg.DefaultProject,
 	}}
-	mountPeerHTTP(mux, self, cfg.JoinToken)
+	mountPeerHTTP(mux, self, joinTokens)
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
 	mountTelemetryHTTP(mux, store, cfg.RPCToken)
 	mux.Handle("/", handler)
@@ -301,9 +303,9 @@ func combineShutdowns(shutdowns []func(context.Context) error) func(context.Cont
 	}
 }
 
-func mountPeerHTTP(mux *http.ServeMux, self domain.Peer, joinToken string) {
+func mountPeerHTTP(mux *http.ServeMux, self domain.Peer, joinTokens *membership.TokenManager) {
 	mux.HandleFunc("/peer/health", func(w http.ResponseWriter, r *http.Request) {
-		if !peerJoinAuthorized(r, joinToken) {
+		if !peerJoinAuthorized(r, joinTokens) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "join token required"})
@@ -625,13 +627,13 @@ func appendSeedPeer(seeds []string, seed string) []string {
 	return append(seeds, seed)
 }
 
-func startSeedPeerProber(ctx context.Context, cache *membership.CachedPeerDiscovery, seeds []string, joinToken string, clk ports.Clock, interval time.Duration) {
+func startSeedPeerProber(ctx context.Context, cache *membership.CachedPeerDiscovery, seeds []string, joinToken string, joinTokens *membership.TokenManager, clk ports.Clock, interval time.Duration) {
 	if cache == nil || clk == nil || len(seeds) == 0 {
 		return
 	}
 	interval = seedPeerProbeInterval(interval)
 	probe := func() {
-		probeSeedPeers(ctx, cache, seeds, joinToken)
+		probeSeedPeers(ctx, cache, seeds, joinToken, joinTokens)
 	}
 	probe()
 	go func() {
@@ -655,9 +657,14 @@ func seedPeerProbeInterval(interval time.Duration) time.Duration {
 	return interval
 }
 
-func probeSeedPeers(ctx context.Context, cache *membership.CachedPeerDiscovery, seeds []string, joinToken string) {
+func probeSeedPeers(ctx context.Context, cache *membership.CachedPeerDiscovery, seeds []string, joinToken string, joinTokens *membership.TokenManager) {
+	token, err := authorizedOutboundJoinToken(joinToken, joinTokens)
+	if err != nil {
+		log.Printf("mycelium peer seed probe skipped: %v", err)
+		return
+	}
 	for _, seed := range seeds {
-		peer, err := fetchPeerHealth(ctx, seed, joinToken)
+		peer, err := fetchPeerHealth(ctx, seed, token)
 		if err != nil {
 			log.Printf("mycelium peer seed probe failed: seed=%s error=%v", seed, err)
 			continue
@@ -687,6 +694,24 @@ func probePeerHealthWithToken(ctx context.Context, peer domain.Peer, joinToken s
 		return fmt.Errorf("peer health returned %q for %q", got.ID, peer.ID)
 	}
 	return nil
+}
+
+func probePeerHealthWithTokenManager(ctx context.Context, peer domain.Peer, joinToken string, joinTokens *membership.TokenManager) error {
+	token, err := authorizedOutboundJoinToken(joinToken, joinTokens)
+	if err != nil {
+		return err
+	}
+	return probePeerHealthWithToken(ctx, peer, token)
+}
+
+func authorizedOutboundJoinToken(joinToken string, joinTokens *membership.TokenManager) (string, error) {
+	if joinTokens == nil {
+		return joinToken, nil
+	}
+	if err := joinTokens.Validate(joinToken); err != nil {
+		return "", err
+	}
+	return joinToken, nil
 }
 
 func fetchPeerHealth(ctx context.Context, address, joinToken string) (domain.Peer, error) {
@@ -760,12 +785,12 @@ func prependReachableAddress(addresses []string, reachable string) []string {
 	return out
 }
 
-func peerJoinAuthorized(r *http.Request, joinToken string) bool {
-	if joinToken == "" {
+func peerJoinAuthorized(r *http.Request, joinTokens *membership.TokenManager) bool {
+	if joinTokens == nil {
 		return true
 	}
 	got := r.Header.Get("X-Myc-Join-Token")
-	return subtle.ConstantTimeCompare([]byte(got), []byte(joinToken)) == 1
+	return joinTokens.Validate(got) == nil
 }
 
 func peerRPCAuthorized(r *http.Request, rpcToken string) bool {
@@ -940,7 +965,7 @@ type rescueRuntime interface {
 	SubmitWithPayload(ctx context.Context, job domain.Job, payload []byte, hooks ...scheduler.SubmitHooks) (scheduler.Result, error)
 }
 
-func startPeerHeartbeat(ctx context.Context, self domain.Peer, discovery ports.PeerDiscovery, nodes gateway.NodeResolver, runtime rescueRuntime, registry peerRuntimeStore, joinToken string, clk ports.Clock) {
+func startPeerHeartbeat(ctx context.Context, self domain.Peer, discovery ports.PeerDiscovery, nodes gateway.NodeResolver, runtime rescueRuntime, registry peerRuntimeStore, joinToken string, joinTokens *membership.TokenManager, clk ports.Clock) {
 	if discovery == nil || runtime == nil || registry == nil || clk == nil || self.ID == "" {
 		return
 	}
@@ -951,7 +976,7 @@ func startPeerHeartbeat(ctx context.Context, self domain.Peer, discovery ports.P
 		Discovery: discovery,
 		Clock:     clk,
 		Probe: func(ctx context.Context, peer domain.Peer) error {
-			return probePeerHealthWithToken(ctx, peer, joinToken)
+			return probePeerHealthWithTokenManager(ctx, peer, joinToken, joinTokens)
 		},
 		OnDead: func(ctx context.Context, dead domain.Peer) error {
 			if err := markDeadPeer(registry)(ctx, dead); err != nil {

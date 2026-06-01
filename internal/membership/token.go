@@ -87,7 +87,13 @@ func (m *TokenManager) Validate(token string) error {
 	if token == "" {
 		return fmt.Errorf("join token is required")
 	}
-	hash := tokenHash(token)
+	return m.ValidateHash(tokenHash(token))
+}
+
+func (m *TokenManager) ValidateHash(hash string) error {
+	if hash == "" {
+		return fmt.Errorf("join token hash is required")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, revoked := m.revoked[hash]; revoked {
@@ -99,6 +105,21 @@ func (m *TokenManager) Validate(token string) error {
 		}
 	}
 	return fmt.Errorf("join token is invalid")
+}
+
+func (m *TokenManager) CurrentHash() (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current == "" {
+		return "", fmt.Errorf("no current join token is available")
+	}
+	if _, revoked := m.revoked[m.current]; revoked {
+		return "", fmt.Errorf("current join token has been revoked")
+	}
+	if _, active := m.active[m.current]; !active {
+		return "", fmt.Errorf("current join token is not active")
+	}
+	return m.current, nil
 }
 
 func (m *TokenManager) Rotate(next string) error {

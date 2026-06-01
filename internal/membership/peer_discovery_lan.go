@@ -21,6 +21,7 @@ type PeerLANDiscovery struct {
 	BroadcastAddr string
 	MaxPackets    int
 	Token         string
+	TokenManager  *TokenManager
 	ScanDuration  time.Duration
 	Clock         ports.Clock
 }
@@ -174,6 +175,13 @@ func (d PeerLANDiscovery) listen(ctx context.Context, bounded bool) (net.PacketC
 }
 
 func (d PeerLANDiscovery) marshal(peer domain.Peer) ([]byte, error) {
+	if d.TokenManager != nil {
+		hash, err := d.TokenManager.CurrentHash()
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(peerAdvertisement{Peer: peer, TokenHash: hash})
+	}
 	if d.Token == "" {
 		return json.Marshal(peer)
 	}
@@ -193,7 +201,11 @@ func (d PeerLANDiscovery) readPeer(ctx context.Context, conn net.PacketConn) (do
 	if err != nil {
 		return domain.Peer{}, false, err
 	}
-	if d.Token != "" && tokenHash != tokenHashValue(d.Token) {
+	if d.TokenManager != nil {
+		if err := d.TokenManager.ValidateHash(tokenHash); err != nil {
+			return domain.Peer{}, false, nil
+		}
+	} else if d.Token != "" && tokenHash != tokenHashValue(d.Token) {
 		return domain.Peer{}, false, nil
 	}
 	if err := validatePeer(peer); err != nil {
