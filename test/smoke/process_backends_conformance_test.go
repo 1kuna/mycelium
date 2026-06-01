@@ -4,6 +4,7 @@ package smoke
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"mycelium/internal/backends/mlx"
@@ -36,6 +37,9 @@ func TestLocalVLLMConformance(t *testing.T) {
 	}
 	preset := fixtures.MakePreset(fixtures.WithModelRef(model), fixtures.WithContextLength(2048))
 	preset.Backend = domain.BackendVLLM
+	if rawArgs := os.Getenv("MYCELIUM_VLLM_LAUNCH_ARGS"); rawArgs != "" {
+		preset.LaunchArgs = append(preset.LaunchArgs, strings.Fields(rawArgs)...)
+	}
 	contract.RunBackendAdapterConformanceAt(t, "vllm",
 		func() ports.BackendAdapter { return vllm.NewAdapter(binary) },
 		preset,
