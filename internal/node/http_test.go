@@ -414,6 +414,53 @@ func TestHTTPServerShedsNoFitAsTooManyRequests(t *testing.T) {
 	}
 }
 
+func TestHTTPInstanceProxyFastErrorAndHelperPaths(t *testing.T) {
+	rec := httptest.NewRecorder()
+	if _, _, ok := proxyInstanceParts(rec, "/instances/"); ok || rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty instance parts ok=%v status=%d", ok, rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	id, path, ok := proxyInstanceParts(rec, "/instances/inst%2Da/v1/chat")
+	if !ok || id != "inst-a" || path != "/v1/chat" {
+		t.Fatalf("parts id=%q path=%q ok=%v", id, path, ok)
+	}
+	target, err := instanceProxyURL("127.0.0.1:8080/", "/v1/chat", "probe=1")
+	if err != nil || target != "http://127.0.0.1:8080/v1/chat?probe=1" {
+		t.Fatalf("target = %q err=%v", target, err)
+	}
+	if _, err := instanceProxyURL("http://[::1", "/", ""); err == nil {
+		t.Fatal("bad proxy URL succeeded")
+	}
+	headers := http.Header{}
+	copyHeaders(headers, http.Header{"X-Test": []string{"a", "b"}})
+	if got := strings.Join(headers.Values("X-Test"), ","); got != "a,b" {
+		t.Fatalf("headers = %q", got)
+	}
+	bodyRec := httptest.NewRecorder()
+	if err := copyProxyBody(bodyRec, strings.NewReader("proxied")); err != nil || bodyRec.Body.String() != "proxied" {
+		t.Fatalf("copy body = %q err=%v", bodyRec.Body.String(), err)
+	}
+
+	server := newDirectHTTPServer(HTTPServer{Agent: &failingNodeAgent{}})
+	resp, err := server.get("/instances/inst-a/v1/chat")
+	if err != nil {
+		t.Fatalf("failing proxy get: %v", err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("failing proxy status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
+	server = newDirectHTTPServer(HTTPServer{Agent: mocks.NewNodeAgent(fixtures.MakeNode())})
+	resp, err = server.get("/instances/missing/v1/chat")
+	if err != nil {
+		t.Fatalf("missing proxy get: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing proxy status = %s", resp.Status)
+	}
+	_ = resp.Body.Close()
+}
+
 type failingNodeAgent struct {
 	loadErr error
 }
