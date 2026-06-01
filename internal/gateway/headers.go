@@ -20,6 +20,8 @@ const (
 	HeaderContextCap   = "X-Myc-Context-Cap"
 	HeaderPreemption   = "X-Myc-Preemption"
 	HeaderConversation = "X-Myc-Conversation"
+	HeaderHandling     = "X-Myc-Handling"
+	HeaderSubmitter    = "X-Myc-Submitter"
 )
 
 func writeDecisionHeaders(h http.Header, decision domain.PlacementDecision, inst domain.ModelInstance, profile profiles.Profile, attempts int) {

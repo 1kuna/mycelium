@@ -30,6 +30,8 @@ type IngressRequest struct {
 	ContextRequest  int
 	Preemption      domain.Preemption
 	ConversationKey string
+	Handling        domain.HandlingClass
+	Submitter       string
 	Body            []byte
 	OpenAI          api.OpenAIChatRequest
 	Complete        api.OpenAICompletionRequest
