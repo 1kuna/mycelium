@@ -1,4 +1,4 @@
-.PHONY: fmt build vet test coverage smoke smoke-local smoke-fleet smoke-overlay smoke-wan-overlay smoke-mlx smoke-vllm smoke-b70 smoke-spark-vllm ci
+.PHONY: fmt build vet test coverage smoke smoke-local smoke-fleet smoke-overlay smoke-mlx smoke-vllm smoke-b70 smoke-spark-vllm ci
 
 SMOKE_JSON ?= smoke.out
 
@@ -33,10 +33,6 @@ smoke-fleet:
 smoke-overlay:
 	go test -count=1 -tags smoke ./test/smoke/... -run TestLibp2pOverlaySmoke -timeout 5m -json > $(SMOKE_JSON)
 	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestLibp2pOverlaySmoke
-
-smoke-wan-overlay:
-	go test -count=1 -tags smoke ./test/smoke/... -run TestLibp2pWANOverlaySmoke -timeout 5m -json > $(SMOKE_JSON)
-	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestLibp2pWANOverlaySmoke
 
 smoke-mlx:
 	go test -count=1 -tags smoke ./test/smoke/... -run TestLocalMLXConformance -timeout 20m -json > $(SMOKE_JSON)
