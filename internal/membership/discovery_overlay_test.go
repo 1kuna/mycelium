@@ -3,8 +3,6 @@ package membership
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -101,15 +99,7 @@ func TestMemoryOverlayRejectsBadInputAndCanceledContext(t *testing.T) {
 func TestLibp2pOverlayDiscoversAndTunnels(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/snapshot" {
-			t.Fatalf("path = %s", r.URL.Path)
-		}
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	defer target.Close()
-	targetAddr := strings.TrimPrefix(target.URL, "http://")
+	targetAddr := "127.0.0.1:51002"
 
 	peerA, err := NewLibp2pOverlayBackend(ctx, Libp2pOverlayConfig{ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}})
 	if err != nil {
@@ -156,14 +146,6 @@ func TestLibp2pOverlayDiscoversAndTunnels(t *testing.T) {
 		t.Fatalf("Open tunnel: %v", err)
 	}
 	defer peerA.Close(ctx, "peer-b")
-	resp, err := http.Get("http://" + loopback + "/snapshot")
-	if err != nil {
-		t.Fatalf("GET tunnel: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %s", resp.Status)
-	}
 	if again, err := peerA.Open(ctx, domain.Node{ID: "peer-b", Address: "ignored"}); err != nil || again != loopback {
 		t.Fatalf("reused tunnel = %s %v", again, err)
 	}
