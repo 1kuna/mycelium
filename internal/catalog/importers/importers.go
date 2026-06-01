@@ -23,15 +23,26 @@ type Draft struct {
 	Size     int64
 }
 
+type httpDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
 func Import(ctx context.Context, source string) (Draft, error) {
+	return importWithClient(ctx, source, http.DefaultClient)
+}
+
+func importWithClient(ctx context.Context, source string, client httpDoer) (Draft, error) {
 	if err := ctx.Err(); err != nil {
 		return Draft{}, err
 	}
+	if client == nil {
+		return Draft{}, fmt.Errorf("catalog importer http client is required")
+	}
 	switch {
 	case strings.HasPrefix(source, "hf://"):
-		return importHuggingFace(ctx, source)
+		return importHuggingFace(ctx, source, client)
 	case strings.HasPrefix(source, "oci://"):
-		return importOCI(ctx, source)
+		return importOCI(ctx, source, client)
 	case strings.HasPrefix(source, "file://"):
 		return importLocal(ctx, strings.TrimPrefix(source, "file://"))
 	default:
@@ -63,7 +74,7 @@ func importLocal(ctx context.Context, path string) (Draft, error) {
 	}, nil
 }
 
-func importHuggingFace(ctx context.Context, source string) (Draft, error) {
+func importHuggingFace(ctx context.Context, source string, client httpDoer) (Draft, error) {
 	parsed, err := url.Parse(source)
 	if err != nil {
 		return Draft{}, err
@@ -96,10 +107,10 @@ func importHuggingFace(ctx context.Context, source string) (Draft, error) {
 	if token := huggingFaceToken(); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	return downloadDraft(ctx, req, source, "huggingface", filepath.Base(modelPath))
+	return downloadDraft(ctx, req, source, "huggingface", filepath.Base(modelPath), client)
 }
 
-func importOCI(ctx context.Context, source string) (Draft, error) {
+func importOCI(ctx context.Context, source string, client httpDoer) (Draft, error) {
 	parsed, err := url.Parse(source)
 	if err != nil {
 		return Draft{}, err
@@ -120,7 +131,7 @@ func importOCI(ctx context.Context, source string) (Draft, error) {
 	if token := os.Getenv("MYCELIUM_OCI_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return Draft{}, err
 	}
@@ -155,7 +166,7 @@ func importOCI(ctx context.Context, source string) (Draft, error) {
 	if token := os.Getenv("MYCELIUM_OCI_TOKEN"); token != "" {
 		blobReq.Header.Set("Authorization", "Bearer "+token)
 	}
-	draft, err := downloadDraft(ctx, blobReq, source, "oci", name)
+	draft, err := downloadDraft(ctx, blobReq, source, "oci", name, client)
 	if err != nil {
 		return Draft{}, err
 	}
@@ -170,11 +181,11 @@ func importOCI(ctx context.Context, source string) (Draft, error) {
 	return draft, nil
 }
 
-func downloadDraft(ctx context.Context, req *http.Request, source, importer, name string) (Draft, error) {
+func downloadDraft(ctx context.Context, req *http.Request, source, importer, name string, client httpDoer) (Draft, error) {
 	if err := ctx.Err(); err != nil {
 		return Draft{}, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return Draft{}, err
 	}
