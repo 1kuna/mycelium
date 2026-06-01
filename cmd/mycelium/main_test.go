@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"mycelium/internal/backends/processadapter"
 	"mycelium/internal/catalog"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
@@ -1104,6 +1105,58 @@ func directHTTPClient(handler http.Handler) *http.Client {
 	})}
 }
 
+type fakeCustomProcessRunner struct {
+	next *fakeCustomProcess
+}
+
+func (r *fakeCustomProcessRunner) Start(_ context.Context, _ string, args []string) (processadapter.ProcessHandle, error) {
+	if r.next == nil {
+		r.next = newFakeCustomProcess(9999)
+	}
+	r.next.startedArgs = append([]string(nil), args...)
+	return r.next, nil
+}
+
+type fakeCustomProcess struct {
+	pid          int
+	waitCh       chan error
+	done         bool
+	exitOnSignal bool
+	startedArgs  []string
+}
+
+func newFakeCustomProcess(pid int) *fakeCustomProcess {
+	return &fakeCustomProcess{pid: pid, waitCh: make(chan error, 1)}
+}
+
+func (p *fakeCustomProcess) PID() int {
+	return p.pid
+}
+
+func (p *fakeCustomProcess) Signal(os.Signal) error {
+	if p.exitOnSignal {
+		p.finish(nil)
+	}
+	return nil
+}
+
+func (p *fakeCustomProcess) Kill() error {
+	p.finish(nil)
+	return nil
+}
+
+func (p *fakeCustomProcess) Wait() error {
+	return <-p.waitCh
+}
+
+func (p *fakeCustomProcess) finish(err error) {
+	if p.done {
+		return
+	}
+	p.done = true
+	p.waitCh <- err
+}
+
 func peerTestRegistry(t *testing.T) *storesqlite.Store {
 	t.Helper()
 	store, err := storesqlite.Open(":memory:")
@@ -1831,21 +1884,19 @@ func TestComputeBackendAdapterLaunchesCustomProcessWithRenderedArgs(t *testing.T
 		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
-	out := filepath.Join(t.TempDir(), "custom-args.txt")
 	registry := nodeagent.StoreProcessRegistry{Store: store, NodeID: "peer-a"}
-	adapter, err := computeBackendAdapter(ComputeConfig{
+	process := newFakeCustomProcess(1234)
+	process.exitOnSignal = true
+	runner := &fakeCustomProcessRunner{next: process}
+	adapter, err := computeBackendAdapterWithProcessRunner(ComputeConfig{
 		Backend:       domain.BackendCustom,
-		BackendBinary: "/bin/sh",
+		BackendBinary: "custom-backend",
 		CustomArgs: []string{
-			"-c",
-			"printf '%s\n%s\n%s\n' \"$1\" \"$2\" \"$4\" > \"$3\"; sleep 30",
-			"sh",
 			"{model}|{preset}|{host}|{port}|{addr}",
 			"base={preset}:{port}",
-			out,
 		},
 		StopGraceMS: 25,
-	}, registry)
+	}, registry, runner)
 	if err != nil {
 		t.Fatalf("computeBackendAdapter: %v", err)
 	}
@@ -1861,10 +1912,13 @@ func TestComputeBackendAdapterLaunchesCustomProcessWithRenderedArgs(t *testing.T
 	}
 	defer func() { _ = adapter.Stop(context.Background(), handle) }()
 
-	data := waitForFile(t, out)
-	want := "model.gguf|custom-preset|127.0.0.1|54321|127.0.0.1:54321\nbase=custom-preset:54321\nlaunch=custom-preset:127.0.0.1:54321\n"
-	if string(data) != want {
-		t.Fatalf("custom args = %q want %q", data, want)
+	wantArgs := []string{
+		"model.gguf|custom-preset|127.0.0.1|54321|127.0.0.1:54321",
+		"base=custom-preset:54321",
+		"launch=custom-preset:127.0.0.1:54321",
+	}
+	if !reflect.DeepEqual(process.startedArgs, wantArgs) {
+		t.Fatalf("custom args = %+v want %+v", process.startedArgs, wantArgs)
 	}
 	refs, err := store.ProcessRefs(ctx, "peer-a")
 	if err != nil {
@@ -1959,21 +2013,6 @@ func writePeerConfig(t *testing.T, cfg PeerConfig) string {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
-}
-
-func waitForFile(t *testing.T, path string) []byte {
-	t.Helper()
-	var lastErr error
-	for i := 0; i < 1000; i++ {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			return data
-		}
-		lastErr = err
-		<-time.After(time.Millisecond)
-	}
-	t.Fatalf("read %s: %v", path, lastErr)
-	return nil
 }
 
 func waitForCondition(t *testing.T, ready func() bool) {
