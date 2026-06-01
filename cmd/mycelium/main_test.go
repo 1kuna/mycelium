@@ -1964,13 +1964,13 @@ func writePeerConfig(t *testing.T, cfg PeerConfig) string {
 func waitForFile(t *testing.T, path string) []byte {
 	t.Helper()
 	var lastErr error
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < 1000; i++ {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			return data
 		}
 		lastErr = err
-		runtime.Gosched()
+		<-time.After(time.Millisecond)
 	}
 	t.Fatalf("read %s: %v", path, lastErr)
 	return nil
