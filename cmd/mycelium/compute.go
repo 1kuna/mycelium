@@ -78,11 +78,15 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 		opts = append(opts, nodeagent.WithModelInspector(nodeagent.ParserInspector{Parser: estimate.NewCommandParser(compute.GGUFParser, []string{"{model}"})}))
 	}
 	agent := nodeagent.NewAgent(node, adapter, clock.System{}, opts...)
-	admission := nodeagent.NewAdmission(node, allocator, clock.System{},
+	admissionOpts := []nodeagent.AdmissionOption{
 		nodeagent.WithAdmissionInstances(agent.Instances),
 		nodeagent.WithAdmissionStateStore(store),
 		nodeagent.WithPinnedReservations(pinnedReservations...),
-	)
+	}
+	if policy := submitterPolicyFromConfig(cfg.SubmitterPolicy); len(policy.Rules) > 0 {
+		admissionOpts = append(admissionOpts, nodeagent.WithSubmitterPolicy(policy))
+	}
+	admission := nodeagent.NewAdmission(node, allocator, clock.System{}, admissionOpts...)
 	return computeRuntime{
 		handler:   nodeagent.HTTPServer{Agent: agent, Admission: admission, AuthToken: cfg.RPCToken},
 		node:      node,
@@ -90,6 +94,20 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 		admission: admission,
 		shutdown:  agent.Shutdown,
 	}, nil
+}
+
+func submitterPolicyFromConfig(config map[string]SubmitterPolicyRule) nodeagent.SubmitterPolicy {
+	policy := nodeagent.SubmitterPolicy{Rules: map[string]nodeagent.SubmitterRule{}}
+	for submitter, rule := range config {
+		if submitter == "" {
+			continue
+		}
+		policy.Rules[submitter] = nodeagent.SubmitterRule{MaxPriority: rule.MaxPriority, AllowPrivate: rule.AllowPrivate}
+	}
+	if len(policy.Rules) == 0 {
+		return nodeagent.SubmitterPolicy{}
+	}
+	return policy
 }
 
 func computeAdmissionAllocator(ctx context.Context, store *storesqlite.Store, nodeID string) (ports.Allocator, []string, error) {

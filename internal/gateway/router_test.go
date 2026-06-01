@@ -137,12 +137,14 @@ func TestParseRequestReadsMyceliumIntentHeaders(t *testing.T) {
 	httpReq.Header.Set(HeaderContextCap, "4096")
 	httpReq.Header.Set(HeaderPreemption, string(domain.PreemptHard))
 	httpReq.Header.Set(HeaderConversation, "thread-a")
+	httpReq.Header.Set(HeaderHandling, string(domain.HandlingPrivate))
+	httpReq.Header.Set(HeaderSubmitter, "submitter-a")
 
 	req, err := parseRequest(httpReq)
 	if err != nil {
 		t.Fatalf("parseRequest: %v", err)
 	}
-	if req.Project != "proj-a" || req.Priority != domain.PriorityBackground || req.SpeedPref != domain.SpeedLatency || req.ContextRequest != 4096 || req.Preemption != domain.PreemptHard || req.ConversationKey != "thread-a" {
+	if req.Project != "proj-a" || req.Priority != domain.PriorityBackground || req.SpeedPref != domain.SpeedLatency || req.ContextRequest != 4096 || req.Preemption != domain.PreemptHard || req.ConversationKey != "thread-a" || req.Handling != domain.HandlingPrivate || req.Submitter != "submitter-a" {
 		t.Fatalf("req = %+v", req)
 	}
 
@@ -412,6 +414,45 @@ func TestRouterIgnoresStickyWhenOwnerAdmissionRejects(t *testing.T) {
 	}
 }
 
+func TestRouterPrivateHandlingRequiresStorageAndLocalPlacement(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(openAIChatBody("private")))
+	}))
+	defer upstream.Close()
+	remote := fixtures.MakeNode(fixtures.WithNodeID("remote-node"))
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_remote"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(remote.ID))
+	inst.Addr = upstream.URL
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.Handling = domain.HandlingPrivate
+
+	noKey := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{remote}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	if _, err := noKey.Route(context.Background(), req); err == nil || !strings.Contains(err.Error(), "private storage") {
+		t.Fatalf("missing private storage err = %v", err)
+	}
+
+	remoteOnly := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{remote}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	remoteOnly.PrivateStorage = true
+	remoteOnly.PrivateLocalNodeID = "local-node"
+	if _, err := remoteOnly.Route(context.Background(), req); err == nil || !strings.Contains(err.Error(), "local encrypted placement") {
+		t.Fatalf("remote private placement err = %v", err)
+	}
+
+	local := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{remote}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	local.PrivateStorage = true
+	local.PrivateLocalNodeID = remote.ID
+	resp, err := local.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("local private Route: %v", err)
+	}
+	if resp.Instance.NodeID != remote.ID || !strings.Contains(string(resp.Body), "private") {
+		t.Fatalf("resp = %+v body=%s", resp, resp.Body)
+	}
+}
+
 func TestRouterMergesProjectDefaultsIntoJobIntent(t *testing.T) {
 	router := &Router{
 		Projects: map[string]domain.Project{
@@ -426,12 +467,14 @@ func TestRouterMergesProjectDefaultsIntoJobIntent(t *testing.T) {
 		DefaultProject: "proj-a",
 	}
 	req := translate.IngressRequest{
-		Model: "preset-a",
-		Kind:  translate.KindOpenAIChat,
+		Model:     "preset-a",
+		Kind:      translate.KindOpenAIChat,
+		Submitter: "submitter-a",
+		Handling:  domain.HandlingPrivate,
 	}
 
 	job := router.jobFromIngress(req, 1)
-	if job.Project != "proj-a" || job.Priority != domain.PriorityBackground || job.SpeedPref != domain.SpeedLatency || job.ContextRequest != 4096 || job.Preemption != domain.PreemptHard {
+	if job.Project != "proj-a" || job.Priority != domain.PriorityBackground || job.SpeedPref != domain.SpeedLatency || job.ContextRequest != 4096 || job.Preemption != domain.PreemptHard || job.Submitter != "submitter-a" || job.Handling != domain.HandlingPrivate {
 		t.Fatalf("job = %+v", job)
 	}
 
@@ -1051,11 +1094,13 @@ func TestParseRequestRoutesAndHeaders(t *testing.T) {
 	req.Header.Set(HeaderPreemption, string(domain.PreemptHard))
 	req.Header.Set(HeaderContextCap, "1234")
 	req.Header.Set(HeaderConversation, "thread-a")
+	req.Header.Set(HeaderHandling, string(domain.HandlingPrivate))
+	req.Header.Set(HeaderSubmitter, "submitter-a")
 	got, err := parseRequest(req)
 	if err != nil {
 		t.Fatalf("parse chat: %v", err)
 	}
-	if got.Project != "project-a" || got.Priority != domain.PriorityBackground || got.SpeedPref != domain.SpeedAuto || got.Preemption != domain.PreemptHard || got.ContextRequest != 1234 || got.ConversationKey != "thread-a" {
+	if got.Project != "project-a" || got.Priority != domain.PriorityBackground || got.SpeedPref != domain.SpeedAuto || got.Preemption != domain.PreemptHard || got.ContextRequest != 1234 || got.ConversationKey != "thread-a" || got.Handling != domain.HandlingPrivate || got.Submitter != "submitter-a" {
 		t.Fatalf("parsed headers = %+v", got)
 	}
 
@@ -1082,6 +1127,7 @@ func TestParseRequestRejectsBadControlHeaders(t *testing.T) {
 	}{
 		{name: "priority", header: HeaderPriority, value: "urgent", want: "Priority"},
 		{name: "preemption", header: HeaderPreemption, value: "break-glass", want: "Preemption"},
+		{name: "handling", header: HeaderHandling, value: "secret", want: "Handling"},
 		{name: "context", header: HeaderContextCap, value: "0", want: "Context-Cap"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

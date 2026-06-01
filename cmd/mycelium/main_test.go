@@ -150,7 +150,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 		t.Fatalf("compute defaults = %+v", peerCfg.ComputeConfig)
 	}
 	computePath := filepath.Join(t.TempDir(), "compute-peer.json")
-	computeRaw := `{"compute":true,"overlay":true,"overlay_listen_addrs":["/ip4/127.0.0.1/tcp/0"],"overlay_bootstrap":["/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWFake"],"compute_config":{"backend_listen":"127.0.0.1:8","id":"peer-json","name":"Peer JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"gguf_parser":"parser"}}`
+	computeRaw := `{"compute":true,"overlay":true,"overlay_listen_addrs":["/ip4/127.0.0.1/tcp/0"],"overlay_bootstrap":["/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWFake"],"private_storage_key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","submitter_policy":{"submitter-a":{"max_priority":"interactive","allow_private":true}},"compute_config":{"backend_listen":"127.0.0.1:8","id":"peer-json","name":"Peer JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"gguf_parser":"parser"}}`
 	if err := os.WriteFile(computePath, []byte(computeRaw), 0644); err != nil {
 		t.Fatalf("write compute peer config: %v", err)
 	}
@@ -164,12 +164,34 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if !computeCfg.Overlay || len(computeCfg.OverlayListenAddrs) != 1 || len(computeCfg.OverlayBootstrap) != 1 {
 		t.Fatalf("overlay config = %+v", computeCfg)
 	}
+	if computeCfg.PrivateStorageKey == "" || !computeCfg.SubmitterPolicy["submitter-a"].AllowPrivate {
+		t.Fatalf("private config = %+v", computeCfg)
+	}
 	badPath := filepath.Join(t.TempDir(), "bad.json")
 	if err := os.WriteFile(badPath, []byte(`{`), 0644); err != nil {
 		t.Fatalf("write bad config: %v", err)
 	}
 	if _, err := loadPeerConfig(badPath); err == nil {
 		t.Fatal("expected bad peer config error")
+	}
+}
+
+func TestPrivateStorageKeyValidation(t *testing.T) {
+	key, err := privateStorageKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if err != nil || string(key) != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("privateStorageKey = %q %v", key, err)
+	}
+	if key, err := privateStorageKey(""); err != nil || key != nil {
+		t.Fatalf("empty privateStorageKey = %q %v", key, err)
+	}
+	if _, err := privateStorageKey("short"); err == nil {
+		t.Fatal("short private storage key accepted")
+	}
+	if got := privateLocalNodeID(PeerConfig{}); got != "" {
+		t.Fatalf("non-compute private node = %q", got)
+	}
+	if got := privateLocalNodeID(PeerConfig{Compute: true, ComputeConfig: ComputeConfig{ID: "peer-a"}}); got != "peer-a" {
+		t.Fatalf("private node = %q", got)
 	}
 }
 
@@ -724,6 +746,20 @@ func TestComputeAdmissionAllocatorUsesStoreReservations(t *testing.T) {
 	}
 	if !reflect.DeepEqual(pinned, []string{"pinned"}) {
 		t.Fatalf("pinned ids = %+v", pinned)
+	}
+}
+
+func TestSubmitterPolicyFromConfig(t *testing.T) {
+	policy := submitterPolicyFromConfig(map[string]SubmitterPolicyRule{
+		"":      {MaxPriority: domain.PriorityInteractive, AllowPrivate: true},
+		"guest": {MaxPriority: domain.PriorityBackground},
+		"submitter-a":  {MaxPriority: domain.PriorityInteractive, AllowPrivate: true},
+	})
+	if len(policy.Rules) != 2 || policy.Rules["submitter-a"].MaxPriority != domain.PriorityInteractive || !policy.Rules["submitter-a"].AllowPrivate || policy.Rules["guest"].AllowPrivate {
+		t.Fatalf("policy = %+v", policy)
+	}
+	if empty := submitterPolicyFromConfig(nil); len(empty.Rules) != 0 {
+		t.Fatalf("empty policy = %+v", empty)
 	}
 }
 

@@ -75,6 +75,8 @@ func parseRequest(r *http.Request) (translate.IngressRequest, error) {
 	req.SpeedPref = domain.SpeedPref(r.Header.Get(HeaderSpeedPref))
 	req.Preemption = domain.Preemption(r.Header.Get(HeaderPreemption))
 	req.ConversationKey = r.Header.Get(HeaderConversation)
+	req.Handling = domain.HandlingClass(r.Header.Get(HeaderHandling))
+	req.Submitter = r.Header.Get(HeaderSubmitter)
 	if !validPriority(req.Priority) {
 		return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Priority"}
 	}
@@ -84,6 +86,9 @@ func parseRequest(r *http.Request) (translate.IngressRequest, error) {
 	if !validPreemption(req.Preemption) {
 		return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Preemption"}
 	}
+	if !validHandling(req.Handling) {
+		return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Handling"}
+	}
 	if raw := r.Header.Get(HeaderContextCap); raw != "" {
 		value, err := strconv.Atoi(raw)
 		if err != nil || value <= 0 {
@@ -92,6 +97,15 @@ func parseRequest(r *http.Request) (translate.IngressRequest, error) {
 		req.ContextRequest = value
 	}
 	return req, nil
+}
+
+func validHandling(handling domain.HandlingClass) bool {
+	switch handling {
+	case "", domain.HandlingPrivate:
+		return true
+	default:
+		return false
+	}
 }
 
 func validPriority(priority domain.Priority) bool {

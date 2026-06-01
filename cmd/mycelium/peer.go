@@ -140,6 +140,11 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		_ = store.Close()
 		return "", nil, nil, err
 	}
+	privateKey, err := privateStorageKey(cfg.PrivateStorageKey)
+	if err != nil {
+		_ = store.Close()
+		return "", nil, nil, err
+	}
 
 	var fleet gateway.FleetSource
 	var nodes gateway.NodeResolver
@@ -241,7 +246,11 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	jobLog := peercoord.NewJobLog()
 	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
-	coordinator := peercoord.NewCoordinator(self, jobLog, store, placer, fleet, admissionResolver(nodes), clock.System{})
+	var coordinatorOpts []peercoord.CoordinatorOption
+	if len(privateKey) > 0 {
+		coordinatorOpts = append(coordinatorOpts, peercoord.WithPrivatePayloadKey(privateKey))
+	}
+	coordinator := peercoord.NewCoordinator(self, jobLog, store, placer, fleet, admissionResolver(nodes), clock.System{}, coordinatorOpts...)
 	runtime := &scheduler.Service{
 		Placer:      placer,
 		Fleet:       fleet,
@@ -269,17 +278,19 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		Client: telemetryHTTPClient{AuthToken: cfg.RPCToken},
 	})
 	handler := gateway.Server{Router: &gateway.Router{
-		Placer:         placer,
-		Fleet:          fleet,
-		Nodes:          nodes,
-		Presets:        gateway.NewPresetRegistry(presets...),
-		Runtime:        runtime,
-		Telemetry:      store,
-		Reporter:       gateway.InstanceFailureReporter{Store: store, Nodes: nodes},
-		Clock:          clock.System{},
-		Sticky:         gateway.NewStickyTable(clock.System{}, 10*time.Minute),
-		Projects:       projectMap(projects),
-		DefaultProject: cfg.DefaultProject,
+		Placer:             placer,
+		Fleet:              fleet,
+		Nodes:              nodes,
+		Presets:            gateway.NewPresetRegistry(presets...),
+		Runtime:            runtime,
+		Telemetry:          store,
+		Reporter:           gateway.InstanceFailureReporter{Store: store, Nodes: nodes},
+		Clock:              clock.System{},
+		Sticky:             gateway.NewStickyTable(clock.System{}, 10*time.Minute),
+		Projects:           projectMap(projects),
+		DefaultProject:     cfg.DefaultProject,
+		PrivateStorage:     len(privateKey) > 0,
+		PrivateLocalNodeID: privateLocalNodeID(cfg),
 	}}
 	mountPeerHTTP(mux, self, joinTokens)
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
@@ -301,6 +312,24 @@ func combineShutdowns(shutdowns []func(context.Context) error) func(context.Cont
 		}
 		return errors.Join(errs...)
 	}
+}
+
+func privateStorageKey(raw string) ([]byte, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	key := []byte(raw)
+	if len(key) != 32 {
+		return nil, fmt.Errorf("private_storage_key must be 32 bytes")
+	}
+	return key, nil
+}
+
+func privateLocalNodeID(cfg PeerConfig) string {
+	if !cfg.Compute {
+		return ""
+	}
+	return cfg.ComputeConfig.ID
 }
 
 func mountPeerHTTP(mux *http.ServeMux, self domain.Peer, joinTokens *membership.TokenManager) {

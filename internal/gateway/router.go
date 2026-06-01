@@ -83,20 +83,23 @@ func (r PresetRegistry) NextLargerContext(current domain.Preset) (domain.Preset,
 }
 
 type Router struct {
-	Placer         ports.Placer
-	Fleet          FleetSource
-	Nodes          NodeResolver
-	Presets        PresetRegistry
-	Profiles       profiles.Registry
-	Client         *http.Client
-	Reporter       FailureReporter
-	Runtime        *scheduler.Service
-	Telemetry      ports.TelemetrySink
-	Clock          ports.Clock
-	Sticky         *StickyTable
-	Projects       map[string]domain.Project
-	DefaultProject string
-	MaxTries       int
+	Placer               ports.Placer
+	Fleet                FleetSource
+	Nodes                NodeResolver
+	Presets              PresetRegistry
+	Profiles             profiles.Registry
+	Client               *http.Client
+	Reporter             FailureReporter
+	Runtime              *scheduler.Service
+	Telemetry            ports.TelemetrySink
+	Clock                ports.Clock
+	Sticky               *StickyTable
+	Projects             map[string]domain.Project
+	DefaultProject       string
+	PrivateStorage       bool
+	PrivateLocalNodeID   string
+	PrivateRemoteAllowed bool
+	MaxTries             int
 }
 
 var gatewayJobSeq uint64
@@ -119,6 +122,9 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	}
 	req, err := r.applyRequestDefaults(req)
 	if err != nil {
+		return RouteResponse{}, err
+	}
+	if err := r.validatePrivateRequest(req); err != nil {
 		return RouteResponse{}, err
 	}
 	preset, err := r.Presets.Resolve(req.Model)
@@ -144,6 +150,9 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		loadStart := clk.Now()
 		decision, inst, lease, cold, err := r.placeStickyOrLoad(ctx, req, job, preset, fleet, nil)
 		if err != nil {
+			return RouteResponse{}, err
+		}
+		if err := r.ensurePrivatePlacement(ctx, req, inst, lease); err != nil {
 			return RouteResponse{}, err
 		}
 		loadMS := 0
@@ -242,6 +251,9 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 	if err != nil {
 		return err
 	}
+	if err := r.validatePrivateRequest(req); err != nil {
+		return err
+	}
 	preset, err := r.Presets.Resolve(req.Model)
 	if err != nil {
 		return err
@@ -285,6 +297,13 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		}
 		decision, inst, lease, cold, err := r.placeStickyOrLoad(ctx, req, job, preset, fleet, beforeCold)
 		if err != nil {
+			if started {
+				writeStreamError(w, err)
+				return nil
+			}
+			return err
+		}
+		if err := r.ensurePrivatePlacement(ctx, req, inst, lease); err != nil {
 			if started {
 				writeStreamError(w, err)
 				return nil
@@ -581,6 +600,8 @@ func (r *Router) jobFromIngress(req translate.IngressRequest, attempt int) domai
 		ContextRequest: contextRequest,
 		Preemption:     preemption,
 		Streaming:      req.Stream,
+		Submitter:      req.Submitter,
+		Handling:       req.Handling,
 	}
 }
 
@@ -598,6 +619,29 @@ func (r *Router) applyRequestDefaults(req translate.IngressRequest) (translate.I
 		return translate.IngressRequest{}, fmt.Errorf("model is required")
 	}
 	return req, nil
+}
+
+func (r *Router) validatePrivateRequest(req translate.IngressRequest) error {
+	if req.Handling != domain.HandlingPrivate {
+		return nil
+	}
+	if !r.PrivateStorage {
+		return fmt.Errorf("private handling requires configured private storage")
+	}
+	return nil
+}
+
+func (r *Router) ensurePrivatePlacement(ctx context.Context, req translate.IngressRequest, inst domain.ModelInstance, lease domain.Lease) error {
+	if req.Handling != domain.HandlingPrivate || r.PrivateRemoteAllowed {
+		return nil
+	}
+	if r.PrivateLocalNodeID != "" && inst.NodeID == r.PrivateLocalNodeID {
+		return nil
+	}
+	if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
+		return releaseErr
+	}
+	return fmt.Errorf("private handling requires local encrypted placement; node %q is not the configured local private node", inst.NodeID)
 }
 
 func (r *Router) profileFor(preset domain.Preset) (profiles.Profile, error) {

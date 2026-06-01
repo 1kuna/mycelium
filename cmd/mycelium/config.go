@@ -10,31 +10,38 @@ import (
 )
 
 type PeerConfig struct {
-	ID                   string               `json:"id"`
-	Listen               string               `json:"listen"`
-	StorePath            string               `json:"store_path"`
-	CatalogDir           string               `json:"catalog_dir"`
-	Compute              bool                 `json:"compute"`
-	ComputeConfig        ComputeConfig        `json:"compute_config"`
-	JoinToken            string               `json:"join_token"`
-	RPCToken             string               `json:"rpc_token"`
-	SeedPeers            []string             `json:"seed_peers,omitempty"`
-	DiscoveryListen      string               `json:"discovery_listen"`
-	DiscoveryAddr        string               `json:"discovery_addr"`
-	DiscoveryScanMS      int                  `json:"discovery_scan_ms"`
-	DiscoveryAdvertiseMS int                  `json:"discovery_advertise_ms"`
-	Overlay              bool                 `json:"overlay,omitempty"`
-	OverlayListenAddrs   []string             `json:"overlay_listen_addrs,omitempty"`
-	OverlayBootstrap     []string             `json:"overlay_bootstrap,omitempty"`
-	GGUFParser           string               `json:"gguf_parser"`
-	Projects             []domain.Project     `json:"projects"`
-	Presets              []domain.Preset      `json:"presets"`
-	Reservations         []domain.Reservation `json:"reservations"`
-	DefaultProject       string               `json:"default_project"`
-	QueueDrainMS         int                  `json:"queue_drain_ms"`
-	QueueDrainLimit      int                  `json:"queue_drain_limit"`
-	OptimizerEvalMS      int                  `json:"optimizer_eval_ms"`
-	RegistrySyncMS       int                  `json:"registry_sync_ms"`
+	ID                   string                         `json:"id"`
+	Listen               string                         `json:"listen"`
+	StorePath            string                         `json:"store_path"`
+	CatalogDir           string                         `json:"catalog_dir"`
+	Compute              bool                           `json:"compute"`
+	ComputeConfig        ComputeConfig                  `json:"compute_config"`
+	JoinToken            string                         `json:"join_token"`
+	RPCToken             string                         `json:"rpc_token"`
+	SeedPeers            []string                       `json:"seed_peers,omitempty"`
+	DiscoveryListen      string                         `json:"discovery_listen"`
+	DiscoveryAddr        string                         `json:"discovery_addr"`
+	DiscoveryScanMS      int                            `json:"discovery_scan_ms"`
+	DiscoveryAdvertiseMS int                            `json:"discovery_advertise_ms"`
+	Overlay              bool                           `json:"overlay,omitempty"`
+	OverlayListenAddrs   []string                       `json:"overlay_listen_addrs,omitempty"`
+	OverlayBootstrap     []string                       `json:"overlay_bootstrap,omitempty"`
+	GGUFParser           string                         `json:"gguf_parser"`
+	Projects             []domain.Project               `json:"projects"`
+	Presets              []domain.Preset                `json:"presets"`
+	Reservations         []domain.Reservation           `json:"reservations"`
+	PrivateStorageKey    string                         `json:"private_storage_key,omitempty"`
+	SubmitterPolicy      map[string]SubmitterPolicyRule `json:"submitter_policy,omitempty"`
+	DefaultProject       string                         `json:"default_project"`
+	QueueDrainMS         int                            `json:"queue_drain_ms"`
+	QueueDrainLimit      int                            `json:"queue_drain_limit"`
+	OptimizerEvalMS      int                            `json:"optimizer_eval_ms"`
+	RegistrySyncMS       int                            `json:"registry_sync_ms"`
+}
+
+type SubmitterPolicyRule struct {
+	MaxPriority  domain.Priority `json:"max_priority,omitempty"`
+	AllowPrivate bool            `json:"allow_private,omitempty"`
 }
 
 type ComputeConfig struct {
