@@ -42,11 +42,29 @@ func TestLibp2pOverlaySmoke(t *testing.T) {
 	}
 	defer peerB.CloseHost()
 
+	watchA, err := peerA.WatchPeers(ctx)
+	if err != nil {
+		t.Fatalf("watch A: %v", err)
+	}
 	if err := peerA.Advertise(ctx, domain.Peer{ID: "overlay-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}); err != nil {
 		t.Fatalf("advertise A: %v", err)
 	}
 	if err := peerB.Advertise(ctx, domain.Peer{ID: "overlay-b", Addresses: []string{targetAddr}, Compute: true}); err != nil {
 		t.Fatalf("advertise B: %v", err)
+	}
+	if !watchSawPeer(ctx, watchA, "overlay-b") {
+		t.Fatal("peer A did not watch peer B")
+	}
+	peersA, err := peerA.Peers(ctx)
+	if err != nil {
+		t.Fatalf("peers A: %v", err)
+	}
+	peersB, err := peerB.Peers(ctx)
+	if err != nil {
+		t.Fatalf("peers B: %v", err)
+	}
+	if !hasPeer(peersA, "overlay-b") || !hasPeer(peersB, "overlay-a") {
+		t.Fatalf("peersA=%+v peersB=%+v", peersA, peersB)
 	}
 	loopback, err := peerA.Open(ctx, domain.Node{ID: "overlay-b", Address: targetAddr})
 	if err != nil {
@@ -61,4 +79,29 @@ func TestLibp2pOverlaySmoke(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %s", resp.Status)
 	}
+	if again, err := peerA.Open(ctx, domain.Node{ID: "overlay-b", Address: "ignored"}); err != nil || again != loopback {
+		t.Fatalf("reused tunnel = %s %v", again, err)
+	}
+}
+
+func watchSawPeer(ctx context.Context, ch <-chan domain.Peer, id string) bool {
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case peer := <-ch:
+			if peer.ID == id {
+				return true
+			}
+		}
+	}
+}
+
+func hasPeer(peers []domain.Peer, id string) bool {
+	for _, peer := range peers {
+		if peer.ID == id {
+			return true
+		}
+	}
+	return false
 }
