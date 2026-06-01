@@ -176,14 +176,31 @@ func TestAdmissionCountsOwnerRunningInstances(t *testing.T) {
 
 func TestAdmissionFailsLoudOnBadInputsAndUnavailableCapacity(t *testing.T) {
 	admission := NewAdmission(fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.5)), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := admission.Offer(canceled, fixtures.MakeJob(), fixtures.MakeClaim(1, 1)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Offer err = %v", err)
+	}
+	if _, err := NewAdmission(fixtures.MakeNode(), nil, mocks.NewFakeClock(time.Now())).Offer(context.Background(), fixtures.MakeJob(), fixtures.MakeClaim(1, 1)); err == nil || !strings.Contains(err.Error(), "allocator") {
+		t.Fatalf("missing allocator err = %v", err)
+	}
 	if _, err := admission.Offer(context.Background(), fixtures.MakeJob(), fixtures.MakeClaim(600, 0)); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("no fit err = %v", err)
+	}
+	if _, err := admission.Commit(canceled, "missing", 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Commit err = %v", err)
 	}
 	if _, err := admission.Commit(context.Background(), "missing", 1); err == nil {
 		t.Fatal("expected missing offer error")
 	}
+	if err := admission.Release(canceled, "missing"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Release err = %v", err)
+	}
 	if err := admission.Release(context.Background(), "missing"); err == nil {
 		t.Fatal("expected missing release error")
+	}
+	if err := admission.Preempt(canceled, "missing", "test"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Preempt err = %v", err)
 	}
 	if err := admission.Preempt(context.Background(), "missing", "test"); err == nil {
 		t.Fatal("expected missing preempt error")
@@ -213,8 +230,6 @@ func TestAdmissionFailsLoudOnBadInputsAndUnavailableCapacity(t *testing.T) {
 	if _, _, err := admission.LeaseForJob(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "job id") {
 		t.Fatalf("empty LeaseForJob err = %v", err)
 	}
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
 	if _, _, err := admission.LeaseForJob(canceled, "job-a"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled LeaseForJob err = %v", err)
 	}
@@ -228,6 +243,26 @@ func TestAdmissionFailsLoudOnBadInputsAndUnavailableCapacity(t *testing.T) {
 	maintenance := NewAdmission(fixtures.MakeNode(fixtures.Maintenance), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))
 	if _, err := maintenance.Offer(context.Background(), fixtures.MakeJob(), fixtures.MakeClaim(1, 1)); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("maintenance offer err = %v", err)
+	}
+}
+
+func TestAdmissionRejectsOfferThatNoLongerFitsAtCommit(t *testing.T) {
+	running := []domain.ModelInstance{}
+	admission := NewAdmission(
+		fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Now()),
+		WithAdmissionInstances(func() []domain.ModelInstance {
+			return append([]domain.ModelInstance(nil), running...)
+		}),
+	)
+	offer, err := admission.Offer(context.Background(), fixtures.MakeJob(), fixtures.MakeClaim(600, 0))
+	if err != nil {
+		t.Fatalf("Offer: %v", err)
+	}
+	running = append(running, fixtures.MakeInstance(fixtures.WithClaim(fixtures.MakeClaim(500, 0))))
+	if _, err := admission.Commit(context.Background(), offer.OfferID, offer.Fence); !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("Commit after capacity change err = %v", err)
 	}
 }
 
