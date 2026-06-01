@@ -171,39 +171,6 @@ func TestServiceSubmitWithPayloadFallsBackWithoutCoordinator(t *testing.T) {
 	}
 }
 
-func TestServiceSubmitWithPayloadRunsPreSendNegotiationWhenEnabled(t *testing.T) {
-	clock := mocks.NewFakeClock(time.Unix(10, 48).UTC())
-	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
-	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
-	decision := domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}
-	preSend := &recordingPreSendNegotiator{decision: decision}
-	coordinator := &mocks.Coordinator{
-		Decision: decision,
-		Lease:    domain.Lease{ID: "owner-lease-a", JobID: "job-a", NodeID: node.ID, Claim: decision.Claim},
-	}
-	service := &Service{
-		Placer:             fakePlacer{},
-		Fleet:              staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
-		Nodes:              staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
-		Owners:             staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
-		Coordinator:        coordinator,
-		PreSend:            preSend,
-		PreSendNegotiation: true,
-		JobLog:             &recordingJobLog{},
-		Queue:              NewQueue(clock),
-		Store:              &runtimeStore{},
-		Clock:              clock,
-		Presets:            map[string]domain.Preset{preset.ID: preset},
-	}
-
-	if _, err := service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), []byte(`{"job":"a"}`)); err != nil {
-		t.Fatalf("SubmitWithPayload: %v", err)
-	}
-	if strings.Join(preSend.calls, ",") != "job-a:node-a" {
-		t.Fatalf("pre-send calls = %+v", preSend.calls)
-	}
-}
-
 func TestServiceSubmitWithPayloadReleasesCoordinatorOnLoadFailure(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(10, 50).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
@@ -346,21 +313,6 @@ func TestServiceSubmitWithPayloadCoordinatorErrorPaths(t *testing.T) {
 				s.Coordinator = &mocks.Coordinator{Decision: domain.PlacementDecision{JobID: job.ID, NodeID: node.ID, Action: domain.ActionHardPreempted, Preempted: []string{"missing"}}}
 			},
 			want: "preempted instance",
-		},
-		{
-			name: "pre-send missing",
-			mutate: func(s *Service) {
-				s.PreSendNegotiation = true
-			},
-			want: "no negotiator",
-		},
-		{
-			name: "pre-send error",
-			mutate: func(s *Service) {
-				s.PreSendNegotiation = true
-				s.PreSend = &recordingPreSendNegotiator{err: errBoom}
-			},
-			wantErr: errBoom,
 		},
 		{
 			name: "commit",
@@ -1438,23 +1390,6 @@ func (l *recordingJobLog) PutJob(_ context.Context, job domain.Job, payload []by
 	l.job = job
 	l.payload = append([]byte(nil), payload...)
 	return nil
-}
-
-type recordingPreSendNegotiator struct {
-	decision domain.PlacementDecision
-	err      error
-	calls    []string
-}
-
-func (n *recordingPreSendNegotiator) Negotiate(_ context.Context, job domain.Job, decision domain.PlacementDecision, _ domain.FleetSnapshot) (domain.PlacementDecision, error) {
-	n.calls = append(n.calls, job.ID+":"+decision.NodeID)
-	if n.err != nil {
-		return domain.PlacementDecision{}, n.err
-	}
-	if n.decision.JobID != "" {
-		return n.decision, nil
-	}
-	return decision, nil
 }
 
 func (s *runtimeStore) SaveJob(_ context.Context, job domain.Job) error {
