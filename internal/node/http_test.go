@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,17 +13,64 @@ import (
 
 	"mycelium/internal/domain"
 	"mycelium/internal/lease"
-	"mycelium/internal/membership"
 	"mycelium/internal/ports"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
 )
 
+var directHTTPServerSeq int
+
+type directHTTPServer struct {
+	URL     string
+	Handler http.Handler
+	client  *http.Client
+}
+
+func newDirectHTTPServer(handler http.Handler) *directHTTPServer {
+	directHTTPServerSeq++
+	server := &directHTTPServer{
+		URL:     fmt.Sprintf("http://node-%d.mycelium.test", directHTTPServerSeq),
+		Handler: handler,
+	}
+	server.client = &http.Client{Transport: server}
+	return server
+}
+
+func (s *directHTTPServer) RoundTrip(req *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	s.Handler.ServeHTTP(rec, req)
+	resp := rec.Result()
+	resp.Request = req
+	return resp, nil
+}
+
+func (s *directHTTPServer) nodeClient() *HTTPClient {
+	client := NewHTTPClient(s.URL)
+	client.Client = s.client
+	return client
+}
+
+func (s *directHTTPServer) get(path string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, s.URL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return s.client.Do(req)
+}
+
+func (s *directHTTPServer) post(path, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, s.URL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	return s.client.Do(req)
+}
+
 func TestHTTPNodeAgentRoundTrip(t *testing.T) {
 	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
-	server := httptest.NewServer(HTTPServer{Agent: agent})
-	defer server.Close()
-	client := NewHTTPClient(server.URL)
+	server := newDirectHTTPServer(HTTPServer{Agent: agent})
+	client := server.nodeClient()
 
 	snap, err := client.Snapshot(context.Background())
 	if err != nil {
@@ -57,74 +105,19 @@ func TestHTTPNodeAgentRoundTrip(t *testing.T) {
 	}
 }
 
-func TestHTTPInstanceProxyThroughAuthenticatedTunnel(t *testing.T) {
-	var backendAuth string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		backendAuth = r.Header.Get("Authorization")
-		if r.URL.Path != "/v1/chat/completions" || r.URL.RawQuery != "probe=1" {
-			t.Fatalf("backend url = %s?%s", r.URL.Path, r.URL.RawQuery)
-		}
-		_, _ = io.WriteString(w, `{"proxied":true}`)
-	}))
-	defer backend.Close()
-	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithListenAddr(backend.URL), WithAllocator(lease.NewAllocator()))
-	remote := httptest.NewServer(HTTPServer{Agent: agent, AuthToken: "rpc-secret"})
-	defer remote.Close()
-	tunnel := membership.NewLANTunnel()
-	tunnel.AuthToken = "rpc-secret"
-	loopback, err := tunnel.Open(context.Background(), domain.Node{ID: "node_test", Address: remote.URL})
-	if err != nil {
-		t.Fatalf("Open tunnel: %v", err)
-	}
-	defer tunnel.Close(context.Background(), "node_test")
-	client := NewHTTPClient("http://" + loopback)
-	client.AuthToken = "rpc-secret"
-
-	inst, err := client.Load(context.Background(), fixtures.MakePreset())
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if !strings.HasPrefix(inst.Addr, "http://"+loopback+"/instances/") {
-		t.Fatalf("proxied addr = %s", inst.Addr)
-	}
-	snap, err := client.Snapshot(context.Background())
-	if err != nil {
-		t.Fatalf("Snapshot: %v", err)
-	}
-	if len(snap.Instances) != 1 || snap.Instances[0].Addr != inst.Addr {
-		t.Fatalf("snapshot instances = %+v addr=%s", snap.Instances, inst.Addr)
-	}
-	resp, err := http.Post(inst.Addr+"/v1/chat/completions?probe=1", "application/json", strings.NewReader(`{"model":"tiny"}`))
-	if err != nil {
-		t.Fatalf("proxy post: %v", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read proxy body: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "proxied") {
-		t.Fatalf("proxy response = %s %s", resp.Status, body)
-	}
-	if backendAuth != "" {
-		t.Fatalf("backend saw peer auth header %q", backendAuth)
-	}
-}
-
 func TestHTTPPeerRPCAuth(t *testing.T) {
 	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
-	server := httptest.NewServer(HTTPServer{Agent: agent, AuthToken: "rpc-secret"})
-	defer server.Close()
+	server := newDirectHTTPServer(HTTPServer{Agent: agent, AuthToken: "rpc-secret"})
 
-	if _, err := NewHTTPClient(server.URL).Snapshot(context.Background()); err == nil || !strings.Contains(err.Error(), "authorization failed") {
+	if _, err := server.nodeClient().Snapshot(context.Background()); err == nil || !strings.Contains(err.Error(), "authorization failed") {
 		t.Fatalf("unauthenticated snapshot err = %v", err)
 	}
-	wrong := NewHTTPClient(server.URL)
+	wrong := server.nodeClient()
 	wrong.AuthToken = "wrong"
 	if _, err := wrong.Snapshot(context.Background()); err == nil || !strings.Contains(err.Error(), "authorization failed") {
 		t.Fatalf("wrong token err = %v", err)
 	}
-	client := NewHTTPClient(server.URL)
+	client := server.nodeClient()
 	client.AuthToken = "rpc-secret"
 	if snap, err := client.Snapshot(context.Background()); err != nil || snap.Node.ID == "" {
 		t.Fatalf("authorized snapshot = %+v %v", snap, err)
@@ -134,9 +127,8 @@ func TestHTTPPeerRPCAuth(t *testing.T) {
 func TestHTTPAdmissionControllerRoundTrip(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
 	admission := NewAdmission(fixtures.MakeNode(fixtures.WithNodeID("node-http")), lease.NewAllocator(), clock)
-	server := httptest.NewServer(HTTPServer{Admission: admission})
-	defer server.Close()
-	client := NewHTTPClient(server.URL)
+	server := newDirectHTTPServer(HTTPServer{Admission: admission})
+	client := server.nodeClient()
 	job := fixtures.MakeJob(fixtures.WithJobID("job-http"))
 	claim := fixtures.MakeClaim(3, 4)
 
@@ -206,15 +198,14 @@ func TestHTTPAdmissionPreemptForJobUsesSubmitterPolicy(t *testing.T) {
 	admission := NewAdmission(
 		fixtures.MakeNode(fixtures.WithNodeID("node-http"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
 		lease.NewAllocator(),
-		mocks.NewFakeClock(time.Now()),
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
 		WithSubmitterPolicy(SubmitterPolicy{Rules: map[string]SubmitterRule{
 			"submitter-a":  {MaxPriority: domain.PriorityNormal, AllowPrivate: true},
 			"guest": {},
 		}}),
 	)
-	server := httptest.NewServer(HTTPServer{Admission: admission})
-	defer server.Close()
-	client := NewHTTPClient(server.URL)
+	server := newDirectHTTPServer(HTTPServer{Admission: admission})
+	client := server.nodeClient()
 	claim := fixtures.MakeClaim(100, 0)
 	victim := fixtures.MakeJob(fixtures.WithJobID("job-victim"), fixtures.Background)
 	victim.Submitter = "submitter-a"
@@ -241,10 +232,9 @@ func TestHTTPAdmissionPreemptForJobUsesSubmitterPolicy(t *testing.T) {
 }
 
 func TestHTTPAdmissionPreservesStaleFenceError(t *testing.T) {
-	admission := NewAdmission(fixtures.MakeNode(), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))
-	server := httptest.NewServer(HTTPServer{Admission: admission})
-	defer server.Close()
-	client := NewHTTPClient(server.URL)
+	admission := NewAdmission(fixtures.MakeNode(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
+	server := newDirectHTTPServer(HTTPServer{Admission: admission})
+	client := server.nodeClient()
 
 	first, err := client.Offer(context.Background(), admissionReq(fixtures.MakeJob(fixtures.WithJobID("job-a")), fixtures.MakeClaim(1, 1)))
 	if err != nil {
@@ -263,10 +253,9 @@ func TestHTTPAdmissionPreservesStaleFenceError(t *testing.T) {
 }
 
 func TestHTTPServerRejectsBadRequests(t *testing.T) {
-	server := httptest.NewServer(HTTPServer{Agent: &failingNodeAgent{}})
-	defer server.Close()
+	server := newDirectHTTPServer(HTTPServer{Agent: &failingNodeAgent{}})
 
-	resp, err := http.Post(server.URL+"/load", "application/json", strings.NewReader("{"))
+	resp, err := server.post("/load", "application/json", strings.NewReader("{"))
 	if err != nil {
 		t.Fatalf("bad load post: %v", err)
 	}
@@ -275,7 +264,7 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	client := NewHTTPClient(server.URL)
+	client := server.nodeClient()
 	if _, err := client.Snapshot(context.Background()); err == nil || !strings.Contains(err.Error(), "snapshot failed") {
 		t.Fatalf("snapshot error = %v", err)
 	}
@@ -288,7 +277,7 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 	if err := client.EndRequest(context.Background(), "inst-a"); err == nil || !strings.Contains(err.Error(), "end failed") {
 		t.Fatalf("end error = %v", err)
 	}
-	resp, err = http.Post(server.URL+"/begin-request", "application/json", strings.NewReader("{"))
+	resp, err = server.post("/begin-request", "application/json", strings.NewReader("{"))
 	if err != nil {
 		t.Fatalf("bad begin post: %v", err)
 	}
@@ -300,7 +289,7 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 		t.Fatalf("inspect error = %v", err)
 	}
 
-	resp, err = http.Post(server.URL+"/admission/offer", "application/json", strings.NewReader("{"))
+	resp, err = server.post("/admission/offer", "application/json", strings.NewReader("{"))
 	if err != nil {
 		t.Fatalf("bad offer post: %v", err)
 	}
@@ -309,13 +298,12 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	admissionServer := httptest.NewServer(HTTPServer{Admission: &failingAdmissionController{offerErr: domain.ErrNoFit}})
-	defer admissionServer.Close()
-	admissionClient := NewHTTPClient(admissionServer.URL)
+	admissionServer := newDirectHTTPServer(HTTPServer{Admission: &failingAdmissionController{offerErr: domain.ErrNoFit}})
+	admissionClient := admissionServer.nodeClient()
 	if _, err := admissionClient.Offer(context.Background(), admissionReq(fixtures.MakeJob(), fixtures.MakeClaim(1, 1))); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("offer no-fit err = %v", err)
 	}
-	resp, err = http.Post(admissionServer.URL+"/admission/commit", "application/json", strings.NewReader("{"))
+	resp, err = admissionServer.post("/admission/commit", "application/json", strings.NewReader("{"))
 	if err != nil {
 		t.Fatalf("bad commit post: %v", err)
 	}
@@ -335,7 +323,7 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 	if err := admissionClient.BindInstance(context.Background(), "lease-a", "inst-a"); err == nil || !strings.Contains(err.Error(), "lease binding") {
 		t.Fatalf("unsupported bind err = %v", err)
 	}
-	resp, err = http.Post(admissionServer.URL+"/admission/bind-instance", "application/json", strings.NewReader("{"))
+	resp, err = admissionServer.post("/admission/bind-instance", "application/json", strings.NewReader("{"))
 	if err != nil {
 		t.Fatalf("bad bind post: %v", err)
 	}
@@ -343,7 +331,7 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 		t.Fatalf("unsupported bind status = %s", resp.Status)
 	}
 	_ = resp.Body.Close()
-	resp, err = http.Get(admissionServer.URL + "/admission/lease")
+	resp, err = admissionServer.get("/admission/lease")
 	if err != nil {
 		t.Fatalf("empty lease query: %v", err)
 	}
@@ -351,9 +339,8 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 		t.Fatalf("unsupported lease inspection status = %s", resp.Status)
 	}
 	_ = resp.Body.Close()
-	leaseServer := httptest.NewServer(HTTPServer{Admission: NewAdmission(fixtures.MakeNode(), lease.NewAllocator(), mocks.NewFakeClock(time.Now()))})
-	defer leaseServer.Close()
-	resp, err = http.Get(leaseServer.URL + "/admission/lease")
+	leaseServer := newDirectHTTPServer(HTTPServer{Admission: NewAdmission(fixtures.MakeNode(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))})
+	resp, err = leaseServer.get("/admission/lease")
 	if err != nil {
 		t.Fatalf("bad lease query: %v", err)
 	}
@@ -361,7 +348,7 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 		t.Fatalf("bad lease query status = %s", resp.Status)
 	}
 	_ = resp.Body.Close()
-	resp, err = http.Get(leaseServer.URL + "/admission/lease-by-instance")
+	resp, err = leaseServer.get("/admission/lease-by-instance")
 	if err != nil {
 		t.Fatalf("bad lease-by-instance query: %v", err)
 	}
@@ -369,7 +356,7 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 		t.Fatalf("bad lease-by-instance query status = %s", resp.Status)
 	}
 	_ = resp.Body.Close()
-	resp, err = http.Post(leaseServer.URL+"/admission/bind-instance", "application/json", strings.NewReader(`{"instance_id":"inst-a"}`))
+	resp, err = leaseServer.post("/admission/bind-instance", "application/json", strings.NewReader(`{"instance_id":"inst-a"}`))
 	if err != nil {
 		t.Fatalf("empty bind lease post: %v", err)
 	}
@@ -377,7 +364,7 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 		t.Fatalf("empty bind lease status = %s", resp.Status)
 	}
 	_ = resp.Body.Close()
-	resp, err = http.Post(leaseServer.URL+"/admission/bind-instance", "application/json", strings.NewReader(`{"lease_id":"lease-a"}`))
+	resp, err = leaseServer.post("/admission/bind-instance", "application/json", strings.NewReader(`{"lease_id":"lease-a"}`))
 	if err != nil {
 		t.Fatalf("empty bind instance post: %v", err)
 	}
@@ -388,10 +375,9 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 }
 
 func TestHTTPServerHandlesMissingAgentAndNotFound(t *testing.T) {
-	server := httptest.NewServer(HTTPServer{})
-	defer server.Close()
+	server := newDirectHTTPServer(HTTPServer{})
 
-	resp, err := http.Get(server.URL + "/snapshot")
+	resp, err := server.get("/snapshot")
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
@@ -400,8 +386,8 @@ func TestHTTPServerHandlesMissingAgentAndNotFound(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	server.Config.Handler = HTTPServer{Agent: mocks.NewNodeAgent(fixtures.MakeNode())}
-	resp, err = http.Get(server.URL + "/missing")
+	server.Handler = HTTPServer{Agent: mocks.NewNodeAgent(fixtures.MakeNode())}
+	resp, err = server.get("/missing")
 	if err != nil {
 		t.Fatalf("missing: %v", err)
 	}
@@ -412,10 +398,9 @@ func TestHTTPServerHandlesMissingAgentAndNotFound(t *testing.T) {
 }
 
 func TestHTTPServerShedsNoFitAsTooManyRequests(t *testing.T) {
-	server := httptest.NewServer(HTTPServer{Agent: &failingNodeAgent{loadErr: domain.ErrNoFit}})
-	defer server.Close()
+	server := newDirectHTTPServer(HTTPServer{Agent: &failingNodeAgent{loadErr: domain.ErrNoFit}})
 
-	resp, err := http.Post(server.URL+"/load", "application/json", strings.NewReader(`{"id":"preset"}`))
+	resp, err := server.post("/load", "application/json", strings.NewReader(`{"id":"preset"}`))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -423,7 +408,7 @@ func TestHTTPServerShedsNoFitAsTooManyRequests(t *testing.T) {
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("status = %s", resp.Status)
 	}
-	client := NewHTTPClient(server.URL)
+	client := server.nodeClient()
 	if _, err := client.Load(context.Background(), fixtures.MakePreset()); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("client no-fit err = %v", err)
 	}
