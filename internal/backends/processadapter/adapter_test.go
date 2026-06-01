@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -78,6 +80,10 @@ func TestAdapterErrorPaths(t *testing.T) {
 	adapter := New(Config{Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))})
 	if _, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1"); err == nil || !strings.Contains(err.Error(), "binary path") {
 		t.Fatalf("binary err = %v", err)
+	}
+	adapter = New(Config{BinaryPath: "/definitely/not/a/mycelium/backend"})
+	if _, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1"); err == nil {
+		t.Fatal("expected process start error")
 	}
 	if _, err := renderArgs(nil, fixtures.MakePreset(), "bad"); err == nil || !strings.Contains(err.Error(), "host:port") {
 		t.Fatalf("addr err = %v", err)
@@ -153,6 +159,59 @@ func TestStopHonorsCanceledContextAfterKill(t *testing.T) {
 	err = adapter.Stop(ctx, handle)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestStopKillsProcessAfterGracePeriod(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC))
+	readyPath := filepath.Join(t.TempDir(), "ready")
+	adapter := New(Config{
+		BinaryPath:      "/bin/sh",
+		Args:            []string{"-c", "trap '' TERM; touch " + readyPath + "; sleep 30"},
+		Clock:           clock,
+		StopGracePeriod: time.Second,
+	})
+	handle, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	waitForFile(t, readyPath)
+
+	done := make(chan error, 1)
+	go func() { done <- adapter.Stop(context.Background(), handle) }()
+
+	timeout := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("Stop: %v", err)
+			}
+			return
+		case <-ticker.C:
+			clock.Advance(time.Second)
+		case <-timeout:
+			t.Fatal("Stop did not kill process after grace period")
+		}
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", path)
+		case <-ticker.C:
+		}
 	}
 }
 
