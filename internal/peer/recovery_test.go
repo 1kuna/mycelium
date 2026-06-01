@@ -11,6 +11,7 @@ import (
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
 	"mycelium/test/fixtures"
+	"mycelium/test/mocks"
 )
 
 func TestRecoveryRescuesDeadPeerUnfinishedJobsAfterOwnerCheck(t *testing.T) {
@@ -19,6 +20,7 @@ func TestRecoveryRescuesDeadPeerUnfinishedJobsAfterOwnerCheck(t *testing.T) {
 	records := []domain.JobRecord{
 		recoveryRecord("queued", "dead-peer", "", domain.JobQueued),
 		recoveryRecord("placing", "dead-peer", "", domain.JobPlacing),
+		recoveryRecord("owner-dead", "dead-peer", "dead-peer", domain.JobRunning),
 		recoveryRecord("owner-live", "dead-peer", "node-live", domain.JobRunning),
 		recoveryRecord("owner-finished", "dead-peer", "node-finished", domain.JobRunning),
 		recoveryRecord("owner-unreachable", "dead-peer", "node-unreachable", domain.JobRunning),
@@ -42,6 +44,7 @@ func TestRecoveryRescuesDeadPeerUnfinishedJobsAfterOwnerCheck(t *testing.T) {
 			"node-finished":    staticLeaseInspector{},
 			"node-unreachable": staticLeaseInspector{err: domain.ErrUnreachable},
 		}},
+		Clock: mocks.NewFakeClock(time.Unix(300, 0).UTC()),
 		Rescue: func(_ context.Context, rec domain.JobRecord) error {
 			rescued = append(rescued, rec.JobID)
 			return nil
@@ -52,9 +55,22 @@ func TestRecoveryRescuesDeadPeerUnfinishedJobsAfterOwnerCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecoverPeer: %v", err)
 	}
-	want := []string{"queued", "placing", "owner-missing", "owner-finished", "owner-unreachable"}
+	want := []string{"queued", "placing", "owner-dead", "owner-finished"}
 	if count != len(want) || !reflect.DeepEqual(rescued, want) {
 		t.Fatalf("rescued count=%d ids=%+v", count, rescued)
+	}
+	snap, err := registry.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	notes := map[string]string{}
+	for _, rec := range snap {
+		notes[rec.JobID] = rec.RecoveryNote
+	}
+	for _, id := range []string{"owner-unreachable", "owner-missing"} {
+		if !strings.Contains(notes[id], "partition") {
+			t.Fatalf("missing partition note for %s: %q", id, notes[id])
+		}
 	}
 }
 
@@ -112,6 +128,35 @@ func TestRecoveryErrorPaths(t *testing.T) {
 	}
 }
 
+func TestRecoveryPartitionEvidenceErrorAndDefaultClock(t *testing.T) {
+	ctx := context.Background()
+	rec := recoveryRecord("partition", "dead-peer", "node-partition", domain.JobRunning)
+	putErr := errors.New("put partition")
+	if count, err := (Recovery{
+		Registry: partitionPutFailRegistry{records: []domain.JobRecord{rec}, err: putErr},
+		Owners: recoveryOwners{inspectors: map[string]ports.LeaseInspector{
+			"node-partition": staticLeaseInspector{err: domain.ErrUnreachable},
+		}},
+		Rescue: func(context.Context, domain.JobRecord) error { return nil },
+	}).RecoverPeer(ctx, "dead-peer"); !errors.Is(err, putErr) || count != 0 {
+		t.Fatalf("partition put err/count = %v %d", err, count)
+	}
+
+	registry := NewJobRegistry()
+	future := rec
+	future.UpdatedAt = time.Now().UTC().Add(time.Hour)
+	if err := (Recovery{Registry: registry}).recordPartition(ctx, future); err != nil {
+		t.Fatalf("recordPartition: %v", err)
+	}
+	snap, err := registry.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap) != 1 || !strings.Contains(snap[0].RecoveryNote, "partition") || !snap[0].UpdatedAt.After(future.UpdatedAt) {
+		t.Fatalf("partition record = %+v future=%s", snap, future.UpdatedAt)
+	}
+}
+
 func recoveryRecord(id, coordinator, node string, status domain.JobStatus) domain.JobRecord {
 	rec := fixtures.MakeJobRecord(fixtures.WithRecordJobID(id))
 	rec.Coordinator = coordinator
@@ -150,4 +195,21 @@ func (s staticLeaseInspector) LeaseForJob(context.Context, string) (domain.Lease
 
 func (s staticLeaseInspector) LeaseForInstance(context.Context, string) (domain.Lease, bool, error) {
 	return s.lease, s.found, s.err
+}
+
+type partitionPutFailRegistry struct {
+	records []domain.JobRecord
+	err     error
+}
+
+func (r partitionPutFailRegistry) Put(context.Context, domain.JobRecord) error {
+	return r.err
+}
+
+func (r partitionPutFailRegistry) Watch(context.Context, string) (<-chan domain.JobRecord, error) {
+	return nil, r.err
+}
+
+func (r partitionPutFailRegistry) Snapshot(context.Context) ([]domain.JobRecord, error) {
+	return append([]domain.JobRecord(nil), r.records...), nil
 }
