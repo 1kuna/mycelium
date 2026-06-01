@@ -2,6 +2,8 @@ package node
 
 import (
 	"context"
+	"fmt"
+	"net"
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
@@ -11,7 +13,11 @@ func (a *Agent) launchAndWait(ctx context.Context, p domain.Preset, inst domain.
 	loadCtx, cancel := a.withLoadTimeout(ctx)
 	defer cancel()
 
-	handle, err := a.backend.Launch(loadCtx, p, a.listenAddr)
+	addr, err := resolveListenAddr(a.listenAddr)
+	if err != nil {
+		return domain.ModelInstance{}, ports.Handle{}, err
+	}
+	handle, err := a.backend.Launch(loadCtx, p, addr)
 	if err != nil {
 		return domain.ModelInstance{}, ports.Handle{}, err
 	}
@@ -23,6 +29,22 @@ func (a *Agent) launchAndWait(ctx context.Context, p domain.Preset, inst domain.
 	inst.Loading = false
 	inst.Addr = handle.Addr
 	return inst, handle, nil
+}
+
+func resolveListenAddr(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || port != "0" {
+		return addr, nil
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		return "", fmt.Errorf("allocate backend listen address: %w", err)
+	}
+	defer listener.Close()
+	return listener.Addr().String(), nil
 }
 
 func (a *Agent) withLoadTimeout(parent context.Context) (context.Context, context.CancelFunc) {

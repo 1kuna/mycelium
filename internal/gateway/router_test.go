@@ -295,8 +295,10 @@ func TestPresetRegistrySkipsEmptyModelKeys(t *testing.T) {
 func TestRouterRetriesContextOverflowOnLargerPreset(t *testing.T) {
 	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
 	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))
+	small.Capabilities = []domain.Capability{domain.CapabilityChat, domain.CapabilityCompletion}
+	large.Capabilities = []domain.Capability{domain.CapabilityChat, domain.CapabilityCompletion}
 	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "request exceeds context window", http.StatusBadRequest)
+		http.Error(w, `{"error":{"message":"request (1202 tokens) exceeds the available context size (1024 tokens), try increasing it"}}`, http.StatusBadRequest)
 	}))
 	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -312,9 +314,9 @@ func TestRouterRetriesContextOverflowOnLargerPreset(t *testing.T) {
 		Nodes:     []domain.Node{node},
 		Instances: []domain.ModelInstance{instSmall, instLarge},
 	}, staticResolver{}, large)
-	req, err := translate.ParseOpenAIChat([]byte(`{"model":"preset_small","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	req, err := translate.ParseOpenAICompletion([]byte(`{"model":"preset_small","prompt":"hi","max_tokens":1}`))
 	if err != nil {
-		t.Fatalf("ParseOpenAIChat: %v", err)
+		t.Fatalf("ParseOpenAICompletion: %v", err)
 	}
 
 	resp, err := router.Route(context.Background(), req)
@@ -323,6 +325,54 @@ func TestRouterRetriesContextOverflowOnLargerPreset(t *testing.T) {
 	}
 	if resp.Instance.ID != "inst_large" || resp.Attempts != 2 || !strings.Contains(string(resp.Body), "retried") {
 		t.Fatalf("resp=%+v body=%s", resp, resp.Body)
+	}
+}
+
+func TestRouterRetriesContextOverflowByColdLoadingLargerPreset(t *testing.T) {
+	small := fixtures.MakePreset(
+		fixtures.WithModelRef("/models/smoke.gguf"),
+		fixtures.WithAliases("smoke.gguf"),
+		fixtures.WithContextLength(1024),
+		fixtures.WithWeights(1),
+		fixtures.WithKVPerToken(0.01),
+	)
+	small.Capabilities = []domain.Capability{domain.CapabilityChat, domain.CapabilityCompletion}
+	large := small
+	large.ID = small.ID + "_ctx2048"
+	large.ContextLength = 2048
+	large.Aliases = nil
+	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"request (1202 tokens) exceeds the available context size (1024 tokens), try increasing it"}}`, http.StatusBadRequest)
+	}))
+	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAICompletionBody("retried")))
+	}))
+
+	node := fixtures.MakeNode(fixtures.WithVRAM(8192))
+	instSmall := fixtures.MakeInstance(fixtures.WithInstanceID("inst_small"), fixtures.WithInstancePreset(small.ID), fixtures.OnNode(node.ID), fixtures.WithClaim(fixtures.MakeClaim(1, 11)))
+	instSmall.Addr = first
+	instLarge := fixtures.MakeInstance(fixtures.WithInstanceID("inst_large"), fixtures.WithInstancePreset(large.ID), fixtures.OnNode(node.ID), fixtures.WithClaim(fixtures.MakeClaim(1, 21)))
+	instLarge.Addr = second
+	agent := recordingLoadAgent{node: node, inst: instLarge}
+	router := newTestRouter(small, domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{instSmall},
+	}, staticResolver{agents: map[string]ports.NodeAgent{node.ID: &agent}}, large)
+	req, err := translate.ParseOpenAICompletion([]byte(`{"model":"/models/smoke.gguf","prompt":"hi","max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAICompletion: %v", err)
+	}
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Instance.ID != "inst_large" || resp.Attempts != 2 || !strings.Contains(string(resp.Body), "retried") {
+		t.Fatalf("resp=%+v body=%s", resp, resp.Body)
+	}
+	if len(agent.loads) != 1 || agent.loads[0].Preset.ID != large.ID || agent.loads[0].Preset.ContextLength != large.ContextLength {
+		t.Fatalf("loads = %+v", agent.loads)
 	}
 }
 
@@ -1358,6 +1408,12 @@ type loadNode struct {
 	inst domain.ModelInstance
 }
 
+type recordingLoadAgent struct {
+	node  domain.Node
+	inst  domain.ModelInstance
+	loads []domain.LoadRequest
+}
+
 type admittingAgent struct {
 	*mocks.NodeAgent
 	*mocks.AdmissionController
@@ -1384,6 +1440,31 @@ func (n loadNode) BeginRequest(context.Context, string) error {
 }
 
 func (n loadNode) EndRequest(context.Context, string) error {
+	return nil
+}
+
+func (n *recordingLoadAgent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
+	return domain.NodeSnapshot{Node: n.node}, nil
+}
+
+func (n *recordingLoadAgent) Load(_ context.Context, req domain.LoadRequest) (domain.ModelInstance, error) {
+	n.loads = append(n.loads, req)
+	return n.inst, nil
+}
+
+func (n *recordingLoadAgent) Unload(context.Context, string) error {
+	return nil
+}
+
+func (n *recordingLoadAgent) InspectModel(context.Context, domain.Preset) (domain.ModelMetadata, error) {
+	return domain.ModelMetadata{}, domain.ErrUnsupported
+}
+
+func (n *recordingLoadAgent) BeginRequest(context.Context, string) error {
+	return nil
+}
+
+func (n *recordingLoadAgent) EndRequest(context.Context, string) error {
 	return nil
 }
 
@@ -1507,4 +1588,8 @@ func (a *rejectStickyAdmission) Offer(ctx context.Context, req domain.AdmissionR
 
 func openAIChatBody(text string) string {
 	return `{"id":"chatcmpl-test","model":"qwen2.5-9b-instruct","choices":[{"index":0,"message":{"role":"assistant","content":"` + text + `"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`
+}
+
+func openAICompletionBody(text string) string {
+	return `{"id":"cmpl-test","model":"qwen2.5-9b-instruct","choices":[{"index":0,"text":"` + text + `","finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`
 }

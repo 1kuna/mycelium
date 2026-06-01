@@ -41,13 +41,12 @@ func TestPhase2GatewayLocalLlamaCppSmoke(t *testing.T) {
 	}
 	defer store.Close()
 
-	backendAddr := freeAddr(t)
 	agentNode := fixtures.MakeNode()
 	agent := node.NewAgent(
 		agentNode,
 		newSmokeAdapter(binary),
 		clock.System{},
-		node.WithListenAddr(backendAddr),
+		node.WithListenAddr("127.0.0.1:0"),
 		node.WithAllocator(lease.NewAllocator()),
 	)
 	defer unloadAll(t, ctx, agent)
