@@ -774,6 +774,35 @@ func TestBuildPeerGatewayWithLocalCompute(t *testing.T) {
 	if got, err := store.Node(context.Background(), "peer-a"); err != nil || got.ID != "peer-a" {
 		t.Fatalf("stored node = %+v %v", got, err)
 	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	client := nodeagent.NewHTTPClient(server.URL)
+	job := domain.Job{ID: "job-a", Priority: domain.PriorityInteractive}
+	offer, err := client.Offer(context.Background(), job, domain.Claim{WeightsMB: 1})
+	if err != nil {
+		t.Fatalf("Offer: %v", err)
+	}
+	lease, err := client.Commit(context.Background(), offer.OfferID, offer.Fence)
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := client.BindInstance(context.Background(), lease.ID, "inst-a"); err != nil {
+		t.Fatalf("BindInstance: %v", err)
+	}
+	gotLease, found, err := client.LeaseForInstance(context.Background(), "inst-a")
+	if err != nil || !found || gotLease.ID != lease.ID {
+		t.Fatalf("LeaseForInstance = %+v found=%v err=%v", gotLease, found, err)
+	}
+}
+
+func TestNewLocalPeerAgentRequiresAdmissionExtensions(t *testing.T) {
+	agent := mocks.NewNodeAgent(domain.Node{ID: "peer-a"})
+	if got, err := newLocalPeerAgent(agent, &mocks.AdmissionController{}); err != nil || got.LeaseBinder == nil || got.LeaseInspector == nil {
+		t.Fatalf("newLocalPeerAgent = %+v err=%v", got, err)
+	}
+	if _, err := newLocalPeerAgent(agent, localAdmissionOnly{}); err == nil || !strings.Contains(err.Error(), "lease inspection") {
+		t.Fatalf("missing extension err = %v", err)
+	}
 }
 
 func TestBuildComputeRuntimeSelectsConfiguredBackends(t *testing.T) {
@@ -815,6 +844,24 @@ func TestBuildComputeRuntimeSelectsConfiguredBackends(t *testing.T) {
 			}
 		})
 	}
+}
+
+type localAdmissionOnly struct{}
+
+func (localAdmissionOnly) Offer(context.Context, domain.Job, domain.Claim) (domain.LeaseOffer, error) {
+	return domain.LeaseOffer{}, nil
+}
+
+func (localAdmissionOnly) Commit(context.Context, string, uint64) (domain.Lease, error) {
+	return domain.Lease{}, nil
+}
+
+func (localAdmissionOnly) Release(context.Context, string) error {
+	return nil
+}
+
+func (localAdmissionOnly) Preempt(context.Context, string, string) error {
+	return nil
 }
 
 func TestBuildComputeRuntimeRejectsUnknownBackend(t *testing.T) {

@@ -160,11 +160,11 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		if err := store.SaveNode(ctx, local.node); err != nil {
 			return "", nil, err
 		}
-		inspector, ok := local.admission.(ports.LeaseInspector)
-		if !ok {
-			return "", nil, fmt.Errorf("local admission controller does not expose lease inspection")
+		agent, err := newLocalPeerAgent(local.agent, local.admission)
+		if err != nil {
+			return "", nil, err
 		}
-		agents[local.node.ID] = localPeerAgent{NodeAgent: local.agent, AdmissionController: local.admission, LeaseInspector: inspector}
+		agents[local.node.ID] = agent
 		mountNodeHTTP(mux, local.handler)
 	}
 	if len(agents) > 0 {
@@ -360,6 +360,19 @@ type localPeerAgent struct {
 	ports.NodeAgent
 	ports.AdmissionController
 	ports.LeaseInspector
+	ports.LeaseBinder
+}
+
+func newLocalPeerAgent(agent ports.NodeAgent, admission ports.AdmissionController) (localPeerAgent, error) {
+	inspector, ok := admission.(ports.LeaseInspector)
+	if !ok {
+		return localPeerAgent{}, fmt.Errorf("local admission controller does not expose lease inspection")
+	}
+	binder, ok := admission.(ports.LeaseBinder)
+	if !ok {
+		return localPeerAgent{}, fmt.Errorf("local admission controller does not expose lease binding")
+	}
+	return localPeerAgent{NodeAgent: agent, AdmissionController: admission, LeaseInspector: inspector, LeaseBinder: binder}, nil
 }
 
 func (n combinedNodes) NodeAgent(nodeID string) (ports.NodeAgent, error) {
