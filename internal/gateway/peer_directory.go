@@ -33,7 +33,14 @@ type PeerDirectory struct {
 
 	mu          sync.Mutex
 	agents      map[string]ports.NodeAgent
+	peerAgents  map[string]cachedPeerAgent
 	peersByNode map[string]domain.Peer
+}
+
+type cachedPeerAgent struct {
+	sourceAddress string
+	resolvedPeer  domain.Peer
+	agent         ports.NodeAgent
 }
 
 func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, error) {
@@ -160,7 +167,15 @@ func (d *PeerDirectory) agentFor(ctx context.Context, peer domain.Peer) (ports.N
 	if len(peer.Addresses) == 0 {
 		return nil, domain.Peer{}, fmt.Errorf("discovered peer %q has no reachable address", peer.ID)
 	}
-	address := peer.Addresses[0]
+	sourceAddress := peer.Addresses[0]
+	d.mu.Lock()
+	if cached, ok := d.peerAgents[peer.ID]; ok && cached.sourceAddress == sourceAddress {
+		d.mu.Unlock()
+		return cached.agent, cached.resolvedPeer, nil
+	}
+	d.mu.Unlock()
+
+	address := sourceAddress
 	if d.Tunnel != nil {
 		loopback, err := d.Tunnel.Open(ctx, domain.Node{ID: peer.ID, Address: address})
 		if err != nil {
@@ -188,7 +203,14 @@ func (d *PeerDirectory) agentFor(ctx context.Context, peer domain.Peer) (ports.N
 			return client
 		}
 	}
-	return factory(address), resolvedPeer, nil
+	agent := factory(address)
+	d.mu.Lock()
+	if d.peerAgents == nil {
+		d.peerAgents = map[string]cachedPeerAgent{}
+	}
+	d.peerAgents[peer.ID] = cachedPeerAgent{sourceAddress: sourceAddress, resolvedPeer: resolvedPeer, agent: agent}
+	d.mu.Unlock()
+	return agent, resolvedPeer, nil
 }
 
 func (d *PeerDirectory) saveNode(ctx context.Context, node domain.Node) error {
