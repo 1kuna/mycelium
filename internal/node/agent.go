@@ -113,6 +113,28 @@ func (a *Agent) Instances() []domain.ModelInstance {
 	return a.instanceListLocked()
 }
 
+func (a *Agent) ProtectInstance(instanceID, reservationID string) error {
+	if instanceID == "" {
+		return fmt.Errorf("instance id is required")
+	}
+	if reservationID == "" {
+		return fmt.Errorf("reservation id is required")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	inst, ok := a.instances[instanceID]
+	if !ok {
+		return fmt.Errorf("unknown instance %q", instanceID)
+	}
+	if inst.ReservationID != "" && inst.ReservationID != reservationID {
+		return fmt.Errorf("instance %q is already protected by reservation %q", instanceID, inst.ReservationID)
+	}
+	inst.ReservationID = reservationID
+	inst.Pinned = true
+	a.instances[instanceID] = inst
+	return nil
+}
+
 func (a *Agent) Load(ctx context.Context, p domain.Preset) (domain.ModelInstance, error) {
 	if inst, ok := a.readyInstance(p.ID); ok {
 		return inst, nil
