@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,6 +90,23 @@ func TestCovergateRejectsBadProfiles(t *testing.T) {
 	}
 	if (counters{}).percent() != 0 {
 		t.Fatal("empty counters percent should be zero")
+	}
+}
+
+func TestCovergateCLIExitCodes(t *testing.T) {
+	profile := writeProfile(t, `mode: atomic
+mycelium/internal/scheduler/service.go:1.1,2.1 1 1
+`)
+	var stderr bytes.Buffer
+	if code := mainExit([]string{"-profile", profile, "-min", "100"}, &stderr); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("success code=%d stderr=%q", code, stderr.String())
+	}
+	stderr.Reset()
+	if code := mainExit([]string{"-profile", profile, "-min", "101"}, &stderr); code != 1 || !strings.Contains(stderr.String(), "total coverage") {
+		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
+	}
+	if err := runCLI([]string{"-bad-flag"}); err == nil {
+		t.Fatal("bad flag accepted")
 	}
 }
 
