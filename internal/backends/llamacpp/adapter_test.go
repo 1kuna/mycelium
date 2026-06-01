@@ -6,9 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
-	"os/signal"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +16,20 @@ import (
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func directHTTPClient(handler http.Handler) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Result(), nil
+	})}
+}
 
 func TestAdapterNameAndRenderArgs(t *testing.T) {
 	preset := fixtures.MakePreset(fixtures.WithPresetID("preset"), fixtures.WithModelRef("/models/qwen.gguf"), fixtures.WithContextLength(4096))
@@ -61,16 +74,15 @@ func TestUnknownLaunchProfileFailsLoud(t *testing.T) {
 }
 
 func TestWaitReadyReturnsOnHealthyResponse(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer server.Close()
 
-	adapter := NewAdapter(Config{Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))})
-	if err := adapter.WaitReady(context.Background(), server.URL); err != nil {
+	adapter := NewAdapter(Config{Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), HTTPClient: client})
+	if err := adapter.WaitReady(context.Background(), "ready.test:8080"); err != nil {
 		t.Fatalf("WaitReady: %v", err)
 	}
 }
@@ -84,26 +96,27 @@ func TestWaitReadyRespectsCancellation(t *testing.T) {
 	}
 }
 
-func TestLaunchErrorsForMissingBinary(t *testing.T) {
-	adapter := NewAdapter(Config{BinaryPath: "/missing/llama-server"})
+func TestLaunchErrorsForProcessStartFailure(t *testing.T) {
+	startErr := errors.New("start failed")
+	adapter := NewAdapter(Config{BinaryPath: "llama-server", ProcessRunner: &fakeRunner{startErr: startErr}})
 	_, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1")
-	if err == nil {
-		t.Fatal("expected missing binary error")
+	if !errors.Is(err, startErr) {
+		t.Fatalf("Launch err = %v", err)
 	}
 }
 
 func TestLaunchAndStopLocalProcess(t *testing.T) {
-	if _, err := exec.LookPath("sleep"); err != nil {
-		t.Skip("sleep binary unavailable")
-	}
-	adapter := NewAdapter(Config{BinaryPath: "sleep", Args: []string{"60"}})
-	handle, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1")
+	process := newFakeProcess(101)
+	process.exitOnSignal = true
+	adapter := NewAdapter(Config{BinaryPath: "llama-server", Args: []string{"--model", "{model}"}, ProcessRunner: &fakeRunner{next: process}})
+	handle, err := adapter.Launch(context.Background(), fixtures.MakePreset(fixtures.WithModelRef("/models/tiny.gguf")), "127.0.0.1:1")
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := adapter.Stop(ctx, handle); err != nil {
+	if got := strings.Join(process.startedArgs, " "); got != "--model /models/tiny.gguf" {
+		t.Fatalf("started args = %q", got)
+	}
+	if err := adapter.Stop(context.Background(), handle); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if err := adapter.Stop(context.Background(), handle); err != nil {
@@ -112,11 +125,9 @@ func TestLaunchAndStopLocalProcess(t *testing.T) {
 }
 
 func TestLaunchCleansUpWhenRegistryFails(t *testing.T) {
-	if _, err := exec.LookPath("sleep"); err != nil {
-		t.Skip("sleep binary unavailable")
-	}
 	registry := &recordingProcessRegistry{addErr: errors.New("registry")}
-	adapter := NewAdapter(Config{BinaryPath: "sleep", Args: []string{"60"}, ProcessRegistry: registry})
+	process := newFakeProcess(202)
+	adapter := NewAdapter(Config{BinaryPath: "llama-server", Args: []string{"60"}, ProcessRegistry: registry, ProcessRunner: &fakeRunner{next: process}})
 	_, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1")
 	if !errors.Is(err, registry.addErr) {
 		t.Fatalf("Launch err = %v", err)
@@ -124,13 +135,17 @@ func TestLaunchCleansUpWhenRegistryFails(t *testing.T) {
 	if len(adapter.processes) != 0 || len(registry.added) != 1 {
 		t.Fatalf("processes=%+v registry=%+v", adapter.processes, registry)
 	}
+	if !process.killed {
+		t.Fatal("registry failure did not kill process")
+	}
 }
 
 func TestLaunchContextDoesNotOwnProcessLifetime(t *testing.T) {
-	marker := t.TempDir() + "/stopped"
+	process := newFakeProcess(303)
+	process.exitOnSignal = true
 	adapter := NewAdapter(Config{
-		BinaryPath: os.Args[0],
-		Args:       []string{"-test.run=TestLaunchContextHelperProcess", "--", marker},
+		BinaryPath:    "llama-server",
+		ProcessRunner: &fakeRunner{next: process},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	handle, err := adapter.Launch(ctx, fixtures.MakePreset(), "127.0.0.1:1")
@@ -138,67 +153,25 @@ func TestLaunchContextDoesNotOwnProcessLifetime(t *testing.T) {
 		t.Fatalf("Launch: %v", err)
 	}
 	cancel()
-	<-time.After(100 * time.Millisecond)
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer stopCancel()
-	if err := adapter.Stop(stopCtx, handle); err != nil {
+	if process.killed {
+		t.Fatal("launch context killed backend process")
+	}
+	if err := adapter.Stop(context.Background(), handle); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("launch context killed backend process before Stop: %v", err)
-	}
-}
-
-func TestLaunchContextHelperProcess(t *testing.T) {
-	separator := -1
-	for i, arg := range os.Args {
-		if arg == "--" {
-			separator = i
-			break
-		}
-	}
-	if separator < 0 {
-		return
-	}
-	marker := os.Args[separator+1]
-	interrupts := make(chan os.Signal, 1)
-	signal.Notify(interrupts, os.Interrupt)
-	<-interrupts
-	if err := os.WriteFile(marker, []byte("stopped"), 0600); err != nil {
-		panic(err)
-	}
-	os.Exit(0)
 }
 
 func TestStopSignalsUntrackedPID(t *testing.T) {
-	if _, err := exec.LookPath("sleep"); err != nil {
-		t.Skip("sleep binary unavailable")
-	}
-	cmd := exec.Command("sleep", "60")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sleep: %v", err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-
 	adapter := NewAdapter(Config{})
-	if err := adapter.Stop(context.Background(), ports.Handle{PID: cmd.Process.Pid, Kind: "process", Ref: "sleep"}); err != nil {
+	if err := adapter.Stop(context.Background(), ports.Handle{PID: 0, Kind: "process", Ref: "sleep"}); err != nil {
 		t.Fatalf("Stop: %v", err)
-	}
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		_ = cmd.Process.Kill()
-		t.Fatal("process did not stop")
 	}
 }
 
 func TestStopCanceledContextKillsTrackedProcessAndRemovesRef(t *testing.T) {
-	if _, err := exec.LookPath("sleep"); err != nil {
-		t.Skip("sleep binary unavailable")
-	}
 	registry := &recordingProcessRegistry{}
-	adapter := NewAdapter(Config{BinaryPath: "sleep", Args: []string{"60"}, ProcessRegistry: registry})
+	process := newFakeProcess(404)
+	adapter := NewAdapter(Config{BinaryPath: "llama-server", Args: []string{"60"}, ProcessRegistry: registry, ProcessRunner: &fakeRunner{next: process}})
 	handle, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1")
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
@@ -208,6 +181,9 @@ func TestStopCanceledContextKillsTrackedProcessAndRemovesRef(t *testing.T) {
 	err = adapter.Stop(ctx, handle)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Stop: %v", err)
+	}
+	if !process.killed {
+		t.Fatal("canceled Stop did not kill tracked process")
 	}
 	if len(registry.removed) != 1 {
 		t.Fatalf("removed refs = %+v", registry.removed)
@@ -252,4 +228,79 @@ func (r *recordingProcessRegistry) Add(_ context.Context, ref domain.ProcessRef)
 func (r *recordingProcessRegistry) Remove(_ context.Context, ref domain.ProcessRef) error {
 	r.removed = append(r.removed, ref)
 	return nil
+}
+
+type fakeRunner struct {
+	next     *fakeProcess
+	startErr error
+	starts   []fakeStart
+}
+
+type fakeStart struct {
+	binary string
+	args   []string
+}
+
+func (r *fakeRunner) Start(_ context.Context, binary string, args []string) (ProcessHandle, error) {
+	r.starts = append(r.starts, fakeStart{binary: binary, args: append([]string(nil), args...)})
+	if r.startErr != nil {
+		return nil, r.startErr
+	}
+	if r.next == nil {
+		r.next = newFakeProcess(999)
+	}
+	r.next.startedArgs = append([]string(nil), args...)
+	return r.next, nil
+}
+
+type fakeProcess struct {
+	mu           sync.Mutex
+	pid          int
+	waitCh       chan error
+	done         bool
+	killed       bool
+	exitOnSignal bool
+	startedArgs  []string
+	signals      []os.Signal
+}
+
+func newFakeProcess(pid int) *fakeProcess {
+	return &fakeProcess{pid: pid, waitCh: make(chan error, 1)}
+}
+
+func (p *fakeProcess) PID() int {
+	return p.pid
+}
+
+func (p *fakeProcess) Signal(sig os.Signal) error {
+	p.mu.Lock()
+	p.signals = append(p.signals, sig)
+	exit := p.exitOnSignal
+	p.mu.Unlock()
+	if exit {
+		p.finish(nil)
+	}
+	return nil
+}
+
+func (p *fakeProcess) Kill() error {
+	p.mu.Lock()
+	p.killed = true
+	p.mu.Unlock()
+	p.finish(nil)
+	return nil
+}
+
+func (p *fakeProcess) Wait() error {
+	return <-p.waitCh
+}
+
+func (p *fakeProcess) finish(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.done {
+		return
+	}
+	p.done = true
+	p.waitCh <- err
 }

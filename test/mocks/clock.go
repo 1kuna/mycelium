@@ -43,6 +43,12 @@ func (c *FakeClock) Advance(d time.Duration) {
 	}
 }
 
+func (c *FakeClock) TimerCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.timers)
+}
+
 type fakeTimer struct {
 	ch     chan time.Time
 	fireAt time.Time
