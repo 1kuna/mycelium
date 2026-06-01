@@ -25,7 +25,18 @@ type ProcessRegistry interface {
 type Adapter struct {
 	cfg       Config
 	mu        sync.Mutex
-	processes map[int]*exec.Cmd
+	processes map[int]ProcessHandle
+}
+
+type ProcessHandle interface {
+	PID() int
+	Signal(os.Signal) error
+	Kill() error
+	Wait() error
+}
+
+type ProcessRunner interface {
+	Start(ctx context.Context, binary string, args []string) (ProcessHandle, error)
 }
 
 type Config struct {
@@ -37,6 +48,7 @@ type Config struct {
 	HTTPClient      *http.Client
 	Clock           ports.Clock
 	ProcessRegistry ProcessRegistry
+	ProcessRunner   ProcessRunner
 }
 
 func DefaultConfig() Config {
@@ -47,10 +59,11 @@ func DefaultConfig() Config {
 			"llamacpp-cuda":  nil,
 			"llamacpp-metal": nil,
 		},
-		HealthPath:   "/health",
-		PollInterval: 250 * time.Millisecond,
-		HTTPClient:   http.DefaultClient,
-		Clock:        clock.System{},
+		HealthPath:    "/health",
+		PollInterval:  250 * time.Millisecond,
+		HTTPClient:    http.DefaultClient,
+		Clock:         clock.System{},
+		ProcessRunner: execProcessRunner{},
 	}
 }
 
@@ -77,7 +90,10 @@ func NewAdapter(cfg Config) *Adapter {
 	if cfg.Clock == nil {
 		cfg.Clock = def.Clock
 	}
-	return &Adapter{cfg: cfg, processes: map[int]*exec.Cmd{}}
+	if cfg.ProcessRunner == nil {
+		cfg.ProcessRunner = def.ProcessRunner
+	}
+	return &Adapter{cfg: cfg, processes: map[int]ProcessHandle{}}
 }
 
 func (a *Adapter) Name() string {
@@ -92,32 +108,32 @@ func (a *Adapter) Launch(ctx context.Context, p domain.Preset, addr string) (por
 	if err := ctx.Err(); err != nil {
 		return ports.Handle{}, err
 	}
-	cmd := exec.Command(a.cfg.BinaryPath, args...)
-	if err := cmd.Start(); err != nil {
+	process, err := a.cfg.ProcessRunner.Start(ctx, a.cfg.BinaryPath, args)
+	if err != nil {
 		return ports.Handle{}, err
 	}
 	select {
 	case <-ctx.Done():
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = process.Kill()
+		_ = process.Wait()
 		return ports.Handle{}, ctx.Err()
 	default:
 	}
 	a.mu.Lock()
-	a.processes[cmd.Process.Pid] = cmd
+	a.processes[process.PID()] = process
 	a.mu.Unlock()
-	ref := domain.ProcessRef{PID: cmd.Process.Pid, Kind: "process", Ref: fmt.Sprintf("%d", cmd.Process.Pid)}
+	ref := domain.ProcessRef{PID: process.PID(), Kind: "process", Ref: fmt.Sprintf("%d", process.PID())}
 	if a.cfg.ProcessRegistry != nil {
 		if err := a.cfg.ProcessRegistry.Add(ctx, ref); err != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			_ = process.Kill()
+			_ = process.Wait()
 			a.mu.Lock()
-			delete(a.processes, cmd.Process.Pid)
+			delete(a.processes, process.PID())
 			a.mu.Unlock()
 			return ports.Handle{}, err
 		}
 	}
-	return ports.Handle{PID: cmd.Process.Pid, Addr: addr, Kind: ref.Kind, Ref: ref.Ref}, nil
+	return ports.Handle{PID: process.PID(), Addr: addr, Kind: ref.Kind, Ref: ref.Ref}, nil
 }
 
 func (a *Adapter) renderLaunchArgs(p domain.Preset, addr string) ([]string, error) {
@@ -159,10 +175,10 @@ func (a *Adapter) WaitReady(ctx context.Context, addr string) error {
 
 func (a *Adapter) Stop(ctx context.Context, h ports.Handle) error {
 	a.mu.Lock()
-	cmd := a.processes[h.PID]
+	process := a.processes[h.PID]
 	delete(a.processes, h.PID)
 	a.mu.Unlock()
-	if cmd == nil || cmd.Process == nil {
+	if process == nil {
 		if err := signalPID(h.PID); err != nil {
 			return err
 		}
@@ -170,16 +186,16 @@ func (a *Adapter) Stop(ctx context.Context, h ports.Handle) error {
 		return nil
 	}
 
-	_ = cmd.Process.Signal(os.Interrupt)
+	_ = process.Signal(os.Interrupt)
 	done := make(chan struct{})
 	go func() {
-		_ = cmd.Wait()
+		_ = process.Wait()
 		close(done)
 	}()
 
 	select {
 	case <-ctx.Done():
-		_ = cmd.Process.Kill()
+		_ = process.Kill()
 		<-done
 		a.removeProcessRef(context.Background(), h)
 		return ctx.Err()
@@ -228,6 +244,36 @@ func renderArgs(args []string, p domain.Preset, addr string) []string {
 		out[i] = replacer.Replace(arg)
 	}
 	return out
+}
+
+type execProcessRunner struct{}
+
+func (execProcessRunner) Start(_ context.Context, binary string, args []string) (ProcessHandle, error) {
+	cmd := exec.Command(binary, args...)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return execProcess{cmd: cmd}, nil
+}
+
+type execProcess struct {
+	cmd *exec.Cmd
+}
+
+func (p execProcess) PID() int {
+	return p.cmd.Process.Pid
+}
+
+func (p execProcess) Signal(sig os.Signal) error {
+	return p.cmd.Process.Signal(sig)
+}
+
+func (p execProcess) Kill() error {
+	return p.cmd.Process.Kill()
+}
+
+func (p execProcess) Wait() error {
+	return p.cmd.Wait()
 }
 
 func splitAddr(addr string) (host, port string) {

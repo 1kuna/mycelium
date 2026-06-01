@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -18,12 +19,23 @@ import (
 type Adapter struct {
 	cfg       Config
 	mu        sync.Mutex
-	processes map[int]*exec.Cmd
+	processes map[int]ProcessHandle
 }
 
 type ProcessRegistry interface {
 	Add(ctx context.Context, ref domain.ProcessRef) error
 	Remove(ctx context.Context, ref domain.ProcessRef) error
+}
+
+type ProcessHandle interface {
+	PID() int
+	Signal(os.Signal) error
+	Kill() error
+	Wait() error
+}
+
+type ProcessRunner interface {
+	Start(ctx context.Context, binary string, args []string) (ProcessHandle, error)
 }
 
 type Config struct {
@@ -36,6 +48,7 @@ type Config struct {
 	HTTPClient      *http.Client
 	Clock           ports.Clock
 	ProcessRegistry ProcessRegistry
+	ProcessRunner   ProcessRunner
 }
 
 func New(cfg Config) *Adapter {
@@ -57,7 +70,10 @@ func New(cfg Config) *Adapter {
 	if cfg.Clock == nil {
 		cfg.Clock = clock.System{}
 	}
-	return &Adapter{cfg: cfg, processes: map[int]*exec.Cmd{}}
+	if cfg.ProcessRunner == nil {
+		cfg.ProcessRunner = execProcessRunner{}
+	}
+	return &Adapter{cfg: cfg, processes: map[int]ProcessHandle{}}
 }
 
 func (a *Adapter) Name() string {
@@ -77,32 +93,32 @@ func (a *Adapter) Launch(ctx context.Context, preset domain.Preset, addr string)
 	if err := ctx.Err(); err != nil {
 		return ports.Handle{}, err
 	}
-	cmd := exec.Command(a.cfg.BinaryPath, rendered...)
-	if err := cmd.Start(); err != nil {
+	process, err := a.cfg.ProcessRunner.Start(ctx, a.cfg.BinaryPath, rendered)
+	if err != nil {
 		return ports.Handle{}, err
 	}
 	select {
 	case <-ctx.Done():
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = process.Kill()
+		_ = process.Wait()
 		return ports.Handle{}, ctx.Err()
 	default:
 	}
 	a.mu.Lock()
-	a.processes[cmd.Process.Pid] = cmd
+	a.processes[process.PID()] = process
 	a.mu.Unlock()
-	ref := domain.ProcessRef{PID: cmd.Process.Pid, Kind: "process", Ref: fmt.Sprintf("%d", cmd.Process.Pid)}
+	ref := domain.ProcessRef{PID: process.PID(), Kind: "process", Ref: fmt.Sprintf("%d", process.PID())}
 	if a.cfg.ProcessRegistry != nil {
 		if err := a.cfg.ProcessRegistry.Add(ctx, ref); err != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			_ = process.Kill()
+			_ = process.Wait()
 			a.mu.Lock()
-			delete(a.processes, cmd.Process.Pid)
+			delete(a.processes, process.PID())
 			a.mu.Unlock()
 			return ports.Handle{}, err
 		}
 	}
-	return ports.Handle{PID: cmd.Process.Pid, Addr: addr, Kind: ref.Kind, Ref: ref.Ref}, nil
+	return ports.Handle{PID: process.PID(), Addr: addr, Kind: ref.Kind, Ref: ref.Ref}, nil
 }
 
 func (a *Adapter) WaitReady(ctx context.Context, addr string) error {
@@ -141,16 +157,16 @@ func (a *Adapter) Stop(ctx context.Context, handle ports.Handle) error {
 	}
 	defer a.removeProcessRef(ctx, handle)
 	a.mu.Lock()
-	cmd := a.processes[handle.PID]
+	process := a.processes[handle.PID]
 	delete(a.processes, handle.PID)
 	a.mu.Unlock()
-	if cmd == nil || cmd.Process == nil {
+	if process == nil {
 		return nil
 	}
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		if killErr := cmd.Process.Kill(); killErr != nil {
+	go func() { done <- process.Wait() }()
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		if killErr := process.Kill(); killErr != nil {
 			return killErr
 		}
 		select {
@@ -164,10 +180,10 @@ func (a *Adapter) Stop(ctx context.Context, handle ports.Handle) error {
 	select {
 	case <-ctx.Done():
 		timer.Stop()
-		_ = cmd.Process.Kill()
+		_ = process.Kill()
 		return ctx.Err()
 	case <-timer.C():
-		if err := cmd.Process.Kill(); err != nil {
+		if err := process.Kill(); err != nil {
 			return err
 		}
 		select {
@@ -206,6 +222,36 @@ func renderArgs(args []string, preset domain.Preset, addr string) ([]string, err
 		out = append(out, replacer.Replace(arg))
 	}
 	return out, nil
+}
+
+type execProcessRunner struct{}
+
+func (execProcessRunner) Start(_ context.Context, binary string, args []string) (ProcessHandle, error) {
+	cmd := exec.Command(binary, args...)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return execProcess{cmd: cmd}, nil
+}
+
+type execProcess struct {
+	cmd *exec.Cmd
+}
+
+func (p execProcess) PID() int {
+	return p.cmd.Process.Pid
+}
+
+func (p execProcess) Signal(sig os.Signal) error {
+	return p.cmd.Process.Signal(sig)
+}
+
+func (p execProcess) Kill() error {
+	return p.cmd.Process.Kill()
+}
+
+func (p execProcess) Wait() error {
+	return p.cmd.Wait()
 }
 
 var _ ports.BackendAdapter = (*Adapter)(nil)
