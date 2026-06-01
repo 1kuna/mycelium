@@ -2,7 +2,10 @@ package controlcli
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +16,7 @@ import (
 	"mycelium/internal/domain"
 	"mycelium/internal/optimizer"
 	storesqlite "mycelium/internal/store/sqlite"
+	"mycelium/pkg/api"
 )
 
 func TestRunAddModelPersistsCatalogAndControlPreset(t *testing.T) {
@@ -140,10 +144,87 @@ func TestRunListCommandsAndProjectSet(t *testing.T) {
 		{"recommendations", "bad"},
 		{"recommendations", "generate", "--db", dbPath},
 		{"recommendations", "apply", "--db", dbPath},
+		{"benchmark"},
+		{"benchmark", "run", "--db", dbPath},
 	} {
 		if err := Run(context.Background(), args); err == nil {
 			t.Fatalf("Run(%v) expected error", args)
 		}
+	}
+}
+
+func TestRunBenchmarkFanOutPersistsJobsAndOutputs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		var req api.OpenAIChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{
+			Model: req.Model,
+			Choices: []api.OpenAIChatChoice{{
+				Message: api.OpenAIMessage{Role: "assistant", Content: "answer from " + req.Model},
+			}},
+			Usage: api.OpenAIUsage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5},
+		})
+	}))
+	defer server.Close()
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	outDir := filepath.Join(t.TempDir(), "bench")
+
+	var err error
+	output := captureStdout(t, func() {
+		err = Run(context.Background(), []string{
+			"benchmark", "run",
+			"--db", dbPath,
+			"--url", server.URL,
+			"--id", "bench-a",
+			"--project", "project-a",
+			"--prompt", "Say hi",
+			"--out", outDir,
+			"--model", "same/model",
+			"--model", "same/model",
+		})
+	})
+	if err != nil {
+		t.Fatalf("benchmark run: %v", err)
+	}
+	if !strings.Contains(output, "benchmark\tbench-a\tstarted") || !strings.Contains(output, "benchmark\tbench-a\tdone") {
+		t.Fatalf("benchmark output = %q", output)
+	}
+	if data, err := os.ReadFile(filepath.Join(outDir, "same-model.txt")); err != nil || !strings.Contains(string(data), "answer from same/model") {
+		t.Fatalf("first output = %q %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "same-model-2.txt")); err != nil {
+		t.Fatalf("second output missing: %v", err)
+	}
+	metrics, err := os.ReadFile(filepath.Join(outDir, "metrics.json"))
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	if strings.Contains(string(metrics), "user_pick") || !strings.Contains(string(metrics), `"context_tokens": 5`) {
+		t.Fatalf("metrics = %s", metrics)
+	}
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	jobs, err := store.ListJobs(context.Background())
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	byID := map[string]domain.Job{}
+	for _, job := range jobs {
+		byID[job.ID] = job
+	}
+	if byID["bench-a"].Status != domain.JobDone || byID["bench-a"].Benchmark == nil {
+		t.Fatalf("parent job = %+v", byID["bench-a"])
+	}
+	if byID["bench-a-same-model"].ParentID != "bench-a" || byID["bench-a-same-model-2"].ParentID != "bench-a" {
+		t.Fatalf("child jobs = %+v", byID)
 	}
 }
 

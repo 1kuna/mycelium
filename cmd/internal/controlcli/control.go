@@ -1,22 +1,29 @@
 package controlcli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"mycelium/internal/bench"
 	"mycelium/internal/catalog"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/optimizer"
 	storesqlite "mycelium/internal/store/sqlite"
+	"mycelium/pkg/api"
 )
 
 func Run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce <add-model|models|nodes|projects|jobs|recommendations>")
+		return fmt.Errorf("usage: myce <add-model|models|nodes|projects|jobs|recommendations|benchmark>")
 	}
 	switch args[0] {
 	case "add-model":
@@ -31,6 +38,8 @@ func Run(ctx context.Context, args []string) error {
 		return runJobs(ctx, args[1:])
 	case "recommendations":
 		return runRecommendations(ctx, args[1:])
+	case "benchmark":
+		return runBenchmark(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown myce command %q", args[0])
 	}
@@ -200,6 +209,140 @@ func runJobs(ctx context.Context, args []string) error {
 		fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\n", job.ID, job.TaskType, job.Project, job.Model, job.Status, jobProgressSummary(job))
 	}
 	return nil
+}
+
+func runBenchmark(ctx context.Context, args []string) error {
+	if len(args) == 0 || args[0] != "run" {
+		return fmt.Errorf("usage: myce benchmark run --url gateway --prompt prompt --model id [--model id] --out dir [--db path]")
+	}
+	fs := flag.NewFlagSet("benchmark run", flag.ContinueOnError)
+	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+	url := fs.String("url", "", "Mycelium gateway URL")
+	prompt := fs.String("prompt", "", "benchmark prompt")
+	out := fs.String("out", "", "output directory")
+	id := fs.String("id", "", "parent benchmark job id")
+	project := fs.String("project", "", "project id")
+	var models repeatedString
+	fs.Var(&models, "model", "model or preset id; may be repeated")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *url == "" {
+		return fmt.Errorf("--url is required")
+	}
+	if *prompt == "" {
+		return fmt.Errorf("--prompt is required")
+	}
+	if *out == "" {
+		return fmt.Errorf("--out is required")
+	}
+	if len(models) == 0 {
+		return fmt.Errorf("--model is required")
+	}
+	store, err := storesqlite.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	jobID := *id
+	if jobID == "" {
+		jobID = fmt.Sprintf("benchmark-%d", clock.System{}.Now().UnixNano())
+	}
+	parent := domain.Job{
+		ID:       jobID,
+		TaskType: "benchmark",
+		Project:  *project,
+		Priority: domain.PriorityBackground,
+		Status:   domain.JobQueued,
+		Benchmark: &domain.BenchmarkSpec{
+			Prompt:    *prompt,
+			Models:    append([]string(nil), models...),
+			OutputDir: *out,
+		},
+	}
+	runner := bench.Runner{
+		Client: benchmarkGatewayClient{BaseURL: *url, Client: http.DefaultClient},
+		Clock:  clock.System{},
+		Store:  store,
+	}
+	fmt.Printf("benchmark\t%s\tstarted\n", parent.ID)
+	results, err := runner.RunJob(ctx, parent)
+	for _, result := range results {
+		if result.Error != "" {
+			fmt.Printf("benchmark-result\t%s\terror\t%s\n", result.Model, result.Error)
+			continue
+		}
+		fmt.Printf("benchmark-result\t%s\t%s\n", result.Model, result.OutputPath)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("benchmark\t%s\tdone\t%s\n", parent.ID, *out)
+	return nil
+}
+
+type repeatedString []string
+
+func (r *repeatedString) String() string {
+	return strings.Join(*r, ",")
+}
+
+func (r *repeatedString) Set(value string) error {
+	if value == "" {
+		return fmt.Errorf("model must not be empty")
+	}
+	*r = append(*r, value)
+	return nil
+}
+
+type benchmarkGatewayClient struct {
+	BaseURL string
+	Client  *http.Client
+}
+
+func (c benchmarkGatewayClient) Complete(ctx context.Context, model, prompt string) (bench.Completion, error) {
+	body, err := json.Marshal(api.OpenAIChatRequest{
+		Model: model,
+		Messages: []api.OpenAIMessage{{
+			Role:    "user",
+			Content: prompt,
+		}},
+	})
+	if err != nil {
+		return bench.Completion{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return bench.Completion{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := c.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return bench.Completion{}, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return bench.Completion{}, err
+	}
+	if resp.StatusCode >= 400 {
+		return bench.Completion{}, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	var chat api.OpenAIChatResponse
+	if err := json.Unmarshal(data, &chat); err != nil {
+		return bench.Completion{}, err
+	}
+	if len(chat.Choices) == 0 {
+		return bench.Completion{}, fmt.Errorf("gateway response had no choices")
+	}
+	return bench.Completion{
+		Text:          chat.Choices[0].Message.Content,
+		ContextTokens: chat.Usage.TotalTokens,
+	}, nil
 }
 
 func installStageStatus(_ string) domain.JobStatus {
