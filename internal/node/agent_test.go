@@ -74,6 +74,34 @@ func TestLoadReadinessGatesInstanceAndUnloadStopsBackend(t *testing.T) {
 	}
 }
 
+func TestLoadAllocatesConcreteAddressPerPresetWhenListenPortIsZero(t *testing.T) {
+	backend := mocks.NewBackendAdapter()
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithListenAddr("127.0.0.1:0"), WithAllocator(lease.NewAllocator()))
+	firstPreset := fixtures.MakePreset(fixtures.WithPresetID("first"), fixtures.WithWeights(1), fixtures.WithKVPerToken(0.01))
+	secondPreset := fixtures.MakePreset(fixtures.WithPresetID("second"), fixtures.WithWeights(1), fixtures.WithKVPerToken(0.01))
+
+	first, err := agent.Load(context.Background(), loadReq(firstPreset))
+	if err != nil {
+		t.Fatalf("first Load: %v", err)
+	}
+	second, err := agent.Load(context.Background(), loadReq(secondPreset))
+	if err != nil {
+		t.Fatalf("second Load: %v", err)
+	}
+	if first.Addr == second.Addr || strings.HasSuffix(first.Addr, ":0") || strings.HasSuffix(second.Addr, ":0") {
+		t.Fatalf("allocated addrs first=%q second=%q", first.Addr, second.Addr)
+	}
+	var launchAddrs []string
+	for _, call := range backend.Calls {
+		if call.Op == "launch" {
+			launchAddrs = append(launchAddrs, call.Addr)
+		}
+	}
+	if len(launchAddrs) != 2 || launchAddrs[0] != first.Addr || launchAddrs[1] != second.Addr {
+		t.Fatalf("launch addrs=%+v first=%s second=%s", launchAddrs, first.Addr, second.Addr)
+	}
+}
+
 func TestLoadReusesReadyInstance(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
 	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
