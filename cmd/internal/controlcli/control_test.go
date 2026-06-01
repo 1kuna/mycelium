@@ -138,12 +138,26 @@ func TestRunListCommandsAndProjectSet(t *testing.T) {
 		{"jobs", "list", "--db", dbPath},
 		{"recommendations", "list", "--db", dbPath, "--project", "project-a"},
 		{"recommendations", "calibrate-speed", "--db", dbPath},
-		{"projects", "set", "--db", dbPath, "--id", "project-b", "--default-model", "preset-b", "--priority", "background", "--speed-pref", "latency", "--context-cap", "4096", "--preemption", "hard", "--auto-apply"},
+		{"projects", "set", "--db", dbPath, "--id", "project-b", "--default-model", "preset-b", "--priority", "background", "--speed-pref", "latency", "--context-cap", "4096", "--latency-target-ms", "250", "--preemption", "hard", "--auto-apply"},
 	}
 	for _, args := range commands {
 		if err := Run(context.Background(), args); err != nil {
 			t.Fatalf("Run(%v): %v", args, err)
 		}
+	}
+	verifyStore, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open verify: %v", err)
+	}
+	project, err := verifyStore.Project(context.Background(), "project-b")
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	if err := verifyStore.Close(); err != nil {
+		t.Fatalf("Close verify: %v", err)
+	}
+	if project.LatencyTargetMS != 250 {
+		t.Fatalf("project = %+v", project)
 	}
 
 	for _, args := range [][]string{
@@ -301,6 +315,14 @@ func TestRunRecommendationsGenerateAndApply(t *testing.T) {
 	if err := store.SaveProject(context.Background(), project); err != nil {
 		t.Fatalf("SaveProject: %v", err)
 	}
+	if err := store.SaveNode(context.Background(), domain.Node{
+		ID:           "node-a",
+		Status:       domain.NodeReady,
+		MaxUtil:      1,
+		Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 24576}},
+	}); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
 	if err := store.SavePreset(context.Background(), testPresetWithContext("small", 6000)); err != nil {
 		t.Fatalf("SavePreset small: %v", err)
 	}
@@ -415,6 +437,7 @@ func TestRunRecommendationsApplyRejectsInvalidRecords(t *testing.T) {
 		{ID: "rec-context-missing-preset", Type: optimizer.RecommendationContextCap, ProjectID: project.ID, CreatedAt: time.Unix(1, 0).UTC()},
 		{ID: "rec-engine-missing-preset", Type: optimizer.RecommendationEngineParameter, ProjectID: project.ID, CreatedAt: time.Unix(2, 0).UTC()},
 		{ID: "rec-unknown", Type: "unknown", ProjectID: project.ID, CreatedAt: time.Unix(3, 0).UTC()},
+		{ID: "rec-rejected", Type: optimizer.RecommendationContextCap, ProjectID: project.ID, Rejected: true, RejectReason: "fit proof failed", CreatedAt: time.Unix(4, 0).UTC()},
 	} {
 		if err := store.SaveRecommendation(context.Background(), rec); err != nil {
 			t.Fatalf("SaveRecommendation %s: %v", rec.ID, err)
@@ -426,7 +449,7 @@ func TestRunRecommendationsApplyRejectsInvalidRecords(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	for _, id := range []string{"rec-context-missing-preset", "rec-engine-missing-preset", "rec-unknown"} {
+	for _, id := range []string{"rec-context-missing-preset", "rec-engine-missing-preset", "rec-unknown", "rec-rejected"} {
 		if err := Run(context.Background(), []string{"recommendations", "apply", "--db", dbPath, "--id", id}); err == nil {
 			t.Fatalf("apply %s expected error", id)
 		}

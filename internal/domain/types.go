@@ -242,14 +242,15 @@ type AdmissionLeaseRecord struct {
 }
 
 type Project struct {
-	ID             string     `json:"id"`
-	DefaultModel   string     `json:"default_model,omitempty"`
-	Priority       Priority   `json:"priority"`
-	SpeedPref      SpeedPref  `json:"speed_pref"`
-	ContextCap     int        `json:"context_cap"`
-	Preemption     Preemption `json:"preemption"`
-	AutoApply      bool       `json:"auto_apply"`
-	ReservedNodeID string     `json:"reserved_node_id,omitempty"`
+	ID              string     `json:"id"`
+	DefaultModel    string     `json:"default_model,omitempty"`
+	Priority        Priority   `json:"priority"`
+	SpeedPref       SpeedPref  `json:"speed_pref"`
+	ContextCap      int        `json:"context_cap"`
+	LatencyTargetMS int        `json:"latency_target_ms,omitempty"`
+	Preemption      Preemption `json:"preemption"`
+	AutoApply       bool       `json:"auto_apply"`
+	ReservedNodeID  string     `json:"reserved_node_id,omitempty"`
 }
 
 type RecommendationRecord struct {
@@ -265,6 +266,8 @@ type RecommendationRecord struct {
 	Observed            map[string]float64 `json:"observed,omitempty"`
 	Rationale           string             `json:"rationale"`
 	Applied             bool               `json:"applied"`
+	Rejected            bool               `json:"rejected,omitempty"`
+	RejectReason        string             `json:"reject_reason,omitempty"`
 	CreatedAt           time.Time          `json:"created_at"`
 	AppliedAt           time.Time          `json:"applied_at,omitempty"`
 }

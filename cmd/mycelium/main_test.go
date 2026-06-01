@@ -280,6 +280,14 @@ func TestRunRecommendationsGenerateAndApply(t *testing.T) {
 	if err := store.SaveProject(context.Background(), project); err != nil {
 		t.Fatalf("SaveProject: %v", err)
 	}
+	if err := store.SaveNode(context.Background(), domain.Node{
+		ID:           "node-a",
+		Status:       domain.NodeReady,
+		MaxUtil:      1,
+		Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 24576}},
+	}); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
 	if err := store.SavePreset(context.Background(), testPresetWithContext("small", 6000)); err != nil {
 		t.Fatalf("SavePreset small: %v", err)
 	}
@@ -1401,7 +1409,13 @@ func TestRunOptimizerEvaluationPersistsRecommendationsAndCalibratesSpeed(t *test
 	defer store.Close()
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
 	project := domain.Project{ID: "project-a", ContextCap: 16000, AutoApply: true}
-	node := domain.Node{ID: "node-a", Name: "Node A", Status: domain.NodeReady}
+	node := domain.Node{
+		ID:           "node-a",
+		Name:         "Node A",
+		Status:       domain.NodeReady,
+		MaxUtil:      1,
+		Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 24576}},
+	}
 	if err := store.SaveProject(context.Background(), project); err != nil {
 		t.Fatalf("SaveProject: %v", err)
 	}
