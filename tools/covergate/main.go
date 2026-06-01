@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -26,6 +27,18 @@ type counters struct {
 }
 
 func main() {
+	os.Exit(mainExit(os.Args[1:], os.Stderr))
+}
+
+func mainExit(args []string, stderr io.Writer) int {
+	if err := runCLI(args); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return 0
+}
+
+func runCLI(args []string) error {
 	var profile string
 	var min float64
 	var packageMin float64
@@ -33,25 +46,25 @@ func main() {
 	var fileRequires requireFlags
 	var packagePrefixes requireFlags
 	var packageExcludes requireFlags
-	flag.StringVar(&profile, "profile", "", "coverage profile path")
-	flag.Float64Var(&min, "min", 0, "minimum total line coverage, as 0.85 or 85")
-	flag.Float64Var(&packageMin, "package-min", 0, "minimum coverage for matching packages, as 0.85 or 85")
-	flag.Var(&packagePrefixes, "package-prefix", "package prefix included in -package-min checks; may repeat")
-	flag.Var(&packageExcludes, "package-exclude", "package prefix excluded from -package-min checks; may repeat")
-	flag.Var(&requires, "require", "package=minimum coverage requirement; may repeat")
-	flag.Var(&fileRequires, "require-file", "file=minimum coverage requirement; may repeat")
-	flag.Parse()
-	if err := run(profile, gateConfig{
+	fs := flag.NewFlagSet("covergate", flag.ContinueOnError)
+	fs.StringVar(&profile, "profile", "", "coverage profile path")
+	fs.Float64Var(&min, "min", 0, "minimum total line coverage, as 0.85 or 85")
+	fs.Float64Var(&packageMin, "package-min", 0, "minimum coverage for matching packages, as 0.85 or 85")
+	fs.Var(&packagePrefixes, "package-prefix", "package prefix included in -package-min checks; may repeat")
+	fs.Var(&packageExcludes, "package-exclude", "package prefix excluded from -package-min checks; may repeat")
+	fs.Var(&requires, "require", "package=minimum coverage requirement; may repeat")
+	fs.Var(&fileRequires, "require-file", "file=minimum coverage requirement; may repeat")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return run(profile, gateConfig{
 		TotalMin:        normalizeThreshold(min),
 		PackageMin:      normalizeThreshold(packageMin),
 		PackagePrefixes: normalizePrefixes(packagePrefixes),
 		PackageExcludes: normalizePrefixes(packageExcludes),
 		Requires:        requires,
 		FileRequires:    fileRequires,
-	}); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	})
 }
 
 type gateConfig struct {
