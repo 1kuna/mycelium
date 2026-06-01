@@ -150,18 +150,35 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		if _, err := membership.NewPersistentTokenManager(ctx, cfg.JoinToken, store); err != nil {
 			return "", nil, nil, err
 		}
-		lan := membership.NewPeerLANDiscovery(cfg.DiscoveryListen, cfg.DiscoveryAddr)
-		lan.Token = cfg.JoinToken
-		lan.ScanDuration = time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
-		scan := time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
-		cached := membership.NewCachedPeerDiscovery(lan, clock.System{}, peerDiscoveryTTL(scan))
-		if err := cached.Start(ctx, scan); err != nil {
-			return "", nil, nil, err
+		var tunnel ports.Tunnel
+		if cfg.Overlay {
+			backend, err := membership.NewLibp2pOverlayBackend(ctx, membership.Libp2pOverlayConfig{
+				ListenAddrs:    cfg.OverlayListenAddrs,
+				BootstrapPeers: cfg.OverlayBootstrap,
+				LocalTarget:    cfg.Listen,
+				Token:          cfg.JoinToken,
+			})
+			if err != nil {
+				return "", nil, nil, err
+			}
+			shutdowns = append(shutdowns, func(context.Context) error { return backend.CloseHost() })
+			discovery = membership.NewOverlayDiscovery(backend)
+			tunnel = membership.NewOverlayTunnel(backend)
+		} else {
+			lan := membership.NewPeerLANDiscovery(cfg.DiscoveryListen, cfg.DiscoveryAddr)
+			lan.Token = cfg.JoinToken
+			lan.ScanDuration = time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
+			scan := time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
+			cached := membership.NewCachedPeerDiscovery(lan, clock.System{}, peerDiscoveryTTL(scan))
+			if err := cached.Start(ctx, scan); err != nil {
+				return "", nil, nil, err
+			}
+			startSeedPeerProber(ctx, cached, cfg.SeedPeers, cfg.JoinToken, clock.System{}, scan)
+			discovery = cached
+			lanTunnel := membership.NewLANTunnel()
+			lanTunnel.AuthToken = cfg.RPCToken
+			tunnel = lanTunnel
 		}
-		startSeedPeerProber(ctx, cached, cfg.SeedPeers, cfg.JoinToken, clock.System{}, scan)
-		discovery = cached
-		tunnel := membership.NewLANTunnel()
-		tunnel.AuthToken = cfg.RPCToken
 		directory := &gateway.PeerDirectory{Discovery: discovery, Tunnel: tunnel, Store: store, SelfID: cfg.ID, AuthToken: cfg.RPCToken}
 		fleet = directory
 		nodes = directory

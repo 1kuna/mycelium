@@ -23,6 +23,9 @@ type PeerConfig struct {
 	DiscoveryAddr        string               `json:"discovery_addr"`
 	DiscoveryScanMS      int                  `json:"discovery_scan_ms"`
 	DiscoveryAdvertiseMS int                  `json:"discovery_advertise_ms"`
+	Overlay              bool                 `json:"overlay,omitempty"`
+	OverlayListenAddrs   []string             `json:"overlay_listen_addrs,omitempty"`
+	OverlayBootstrap     []string             `json:"overlay_bootstrap,omitempty"`
 	GGUFParser           string               `json:"gguf_parser"`
 	Projects             []domain.Project     `json:"projects"`
 	Presets              []domain.Preset      `json:"presets"`
