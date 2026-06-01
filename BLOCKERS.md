@@ -2,7 +2,7 @@
 
 ## Active
 
-- None currently recorded.
+- 2026-06-01: Real cross-NAT/libp2p overlay smoke is environment-gated. The product now has a non-stub overlay contract and deterministic memory backend behind `PeerDiscovery`/`Tunnel`, but proving a real cross-NAT libp2p relay/DHT path requires configured bootstrap/relay peers and a second network outside the LAN. LAN behavior remains the current green runtime path.
 
 ## Resolved
 
