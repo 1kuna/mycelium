@@ -59,6 +59,7 @@ func TestPhase2GatewayLocalLlamaCppSmoke(t *testing.T) {
 		fixtures.WithWeights(1),
 		fixtures.WithKVPerToken(0.01),
 	)
+	preset.Capabilities = []domain.Capability{domain.CapabilityChat, domain.CapabilityCompletion}
 	largePreset := preset
 	largePreset.ID = preset.ID + "_ctx4096"
 	largePreset.ContextLength = 4096
