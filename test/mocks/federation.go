@@ -68,6 +68,11 @@ func (m *AdmissionController) Preempt(_ context.Context, leaseID, reason string)
 	return m.PreemptErr
 }
 
+func (m *AdmissionController) PreemptForJob(_ context.Context, job domain.Job, leaseID, reason string) error {
+	m.Calls = append(m.Calls, "preempt-for-job:"+job.ID+":"+leaseID+":"+reason)
+	return m.PreemptErr
+}
+
 func (m *AdmissionController) LeaseForJob(_ context.Context, jobID string) (domain.Lease, bool, error) {
 	m.Calls = append(m.Calls, "lease-for-job:"+jobID)
 	return m.LeaseForJobVal, m.LeaseForJobFound, m.LeaseForJobErr

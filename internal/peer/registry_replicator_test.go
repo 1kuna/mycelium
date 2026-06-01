@@ -62,6 +62,34 @@ func TestRegistryReplicatorPushRecordSkipsSelf(t *testing.T) {
 	}
 }
 
+func TestRegistryReplicatorRedactsPrivatePayloads(t *testing.T) {
+	ctx := context.Background()
+	local := NewJobRegistry()
+	private := registryRecord("private", "peer-a", domain.JobRunning, time.Unix(12, 0).UTC())
+	private.Handling = domain.HandlingPrivate
+	if err := local.Put(ctx, private); err != nil {
+		t.Fatalf("Put private: %v", err)
+	}
+	client := &recordingRegistryClient{}
+	discovery := &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-b"}}}
+	replicator := RegistryReplicator{Local: local, Peers: discovery, Client: client, SelfID: "peer-a"}
+
+	if err := replicator.SyncOnce(ctx); err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+	pushed := client.pushes["peer-b"]
+	if len(pushed) != 1 || len(pushed[0]) != 1 {
+		t.Fatalf("pushes = %+v", pushed)
+	}
+	got := pushed[0][0]
+	if got.JobID != private.JobID || len(got.Request) != 0 || !got.PayloadRedacted || got.Handling != domain.HandlingPrivate {
+		t.Fatalf("pushed private record = %+v", got)
+	}
+	if err := NewJobRegistry().Put(ctx, got); err != nil {
+		t.Fatalf("redacted record should remain registry-valid: %v", err)
+	}
+}
+
 func TestRegistryReplicatorReportsPeerFailuresAfterProgress(t *testing.T) {
 	ctx := context.Background()
 	local := NewJobRegistry()

@@ -174,6 +174,19 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 			t.Fatalf("Put job record should require %s", name)
 		}
 	}
+	if err := store.Put(ctx, recordWith(fixtures.MakeJobRecord(), func(r *domain.JobRecord) {
+		r.Request = nil
+		r.PayloadRedacted = true
+	})); err == nil {
+		t.Fatal("Put redacted standard job record should require private handling")
+	}
+	if err := store.Put(ctx, recordWith(fixtures.MakeJobRecord(), func(r *domain.JobRecord) {
+		r.Request = nil
+		r.Handling = domain.HandlingPrivate
+		r.PayloadRedacted = true
+	})); err != nil {
+		t.Fatalf("Put redacted private job record should be accepted: %v", err)
+	}
 	if _, err := store.Watch(ctx, "not-time"); err == nil {
 		t.Fatal("Watch should reject bad cursor")
 	}

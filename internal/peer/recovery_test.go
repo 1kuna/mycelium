@@ -23,6 +23,11 @@ func TestRecoveryRescuesDeadPeerUnfinishedJobsAfterOwnerCheck(t *testing.T) {
 		recoveryRecord("owner-finished", "dead-peer", "node-finished", domain.JobRunning),
 		recoveryRecord("owner-unreachable", "dead-peer", "node-unreachable", domain.JobRunning),
 		recoveryRecord("owner-missing", "dead-peer", "node-missing", domain.JobRunning),
+		recordWith(recoveryRecord("redacted-private", "dead-peer", "", domain.JobQueued), func(r *domain.JobRecord) {
+			r.Request = nil
+			r.Handling = domain.HandlingPrivate
+			r.PayloadRedacted = true
+		}),
 		recoveryRecord("done", "dead-peer", "", domain.JobDone),
 		recoveryRecord("other-peer", "other-peer", "", domain.JobQueued),
 	}

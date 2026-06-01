@@ -26,14 +26,15 @@ type AdmissionResolver interface {
 }
 
 type Coordinator struct {
-	selfID     string
-	jobs       JobSource
-	registry   ports.JobRegistry
-	placer     ports.Placer
-	fleet      FleetSource
-	owners     AdmissionResolver
-	clock      ports.Clock
-	maxReplans int
+	selfID            string
+	jobs              JobSource
+	registry          ports.JobRegistry
+	placer            ports.Placer
+	fleet             FleetSource
+	owners            AdmissionResolver
+	clock             ports.Clock
+	maxReplans        int
+	privatePayloadKey []byte
 
 	mu           sync.Mutex
 	claimed      map[string]claimedJob
@@ -51,6 +52,12 @@ type CoordinatorOption func(*Coordinator)
 func WithMaxReplans(n int) CoordinatorOption {
 	return func(c *Coordinator) {
 		c.maxReplans = n
+	}
+}
+
+func WithPrivatePayloadKey(key []byte) CoordinatorOption {
+	return func(c *Coordinator) {
+		c.privatePayloadKey = append([]byte(nil), key...)
 	}
 }
 
@@ -268,7 +275,7 @@ func (c *Coordinator) record(ctx context.Context, jobID string, status domain.Jo
 	if err != nil {
 		return err
 	}
-	request, err := EncodeRescuePayload(claimed.job, claimed.payload)
+	request, err := EncodeRescuePayloadWithKey(claimed.job, claimed.payload, c.privatePayloadKey)
 	if err != nil {
 		return err
 	}
@@ -278,6 +285,7 @@ func (c *Coordinator) record(ctx context.Context, jobID string, status domain.Jo
 		AssignedNode: assignedNode,
 		Status:       status,
 		Request:      request,
+		Handling:     claimed.job.Handling,
 		Fence:        fence,
 		UpdatedAt:    c.nextRecordTime(),
 	})

@@ -195,6 +195,15 @@ func (s HTTPServer) preempt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "lease_id is required")
 		return
 	}
+	if req.Job.ID != "" {
+		preempter, ok := s.Admission.(ports.PolicyPreempter)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "admission controller does not expose policy-aware preemption")
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"}, preempter.PreemptForJob(r.Context(), req.Job, req.LeaseID, req.Reason))
+		return
+	}
 	writeJSON(w, map[string]string{"status": "ok"}, s.Admission.Preempt(r.Context(), req.LeaseID, req.Reason))
 }
 
@@ -413,8 +422,9 @@ type admissionCommitRequest struct {
 }
 
 type admissionPreemptRequest struct {
-	LeaseID string `json:"lease_id"`
-	Reason  string `json:"reason"`
+	LeaseID string     `json:"lease_id"`
+	Reason  string     `json:"reason"`
+	Job     domain.Job `json:"job,omitempty"`
 }
 
 type admissionBindInstanceRequest struct {
@@ -493,6 +503,10 @@ func (c *HTTPClient) Release(ctx context.Context, leaseID string) error {
 
 func (c *HTTPClient) Preempt(ctx context.Context, leaseID, reason string) error {
 	return c.do(ctx, http.MethodPost, "/admission/preempt", admissionPreemptRequest{LeaseID: leaseID, Reason: reason}, nil)
+}
+
+func (c *HTTPClient) PreemptForJob(ctx context.Context, job domain.Job, leaseID, reason string) error {
+	return c.do(ctx, http.MethodPost, "/admission/preempt", admissionPreemptRequest{Job: job, LeaseID: leaseID, Reason: reason}, nil)
 }
 
 func (c *HTTPClient) BindInstance(ctx context.Context, leaseID, instanceID string) error {
@@ -610,5 +624,6 @@ func writeWireError(w http.ResponseWriter, status int, msg, code string) {
 
 var _ ports.NodeAgent = (*HTTPClient)(nil)
 var _ ports.AdmissionController = (*HTTPClient)(nil)
+var _ ports.PolicyPreempter = (*HTTPClient)(nil)
 var _ ports.LeaseInspector = (*HTTPClient)(nil)
 var _ ports.LeaseBinder = (*HTTPClient)(nil)

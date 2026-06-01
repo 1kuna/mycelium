@@ -81,10 +81,12 @@ type Job struct {
 	Model          string         `json:"model"`
 	PresetID       string         `json:"preset,omitempty"`
 	Project        string         `json:"project"`
+	Submitter      string         `json:"submitter,omitempty"`
 	Priority       Priority       `json:"priority"`
 	SpeedPref      SpeedPref      `json:"speed_pref"`
 	ContextRequest int            `json:"context_request,omitempty"`
 	Preemption     Preemption     `json:"preemption"`
+	Handling       HandlingClass  `json:"handling,omitempty"`
 	Streaming      bool           `json:"streaming"`
 	DeadlineMS     int            `json:"deadline_ms,omitempty"`
 	ParentID       string         `json:"parent_id,omitempty"`
@@ -163,13 +165,15 @@ type LeaseOffer struct {
 }
 
 type JobRecord struct {
-	JobID        string    `json:"job_id"`
-	Coordinator  string    `json:"coordinator"`
-	AssignedNode string    `json:"assigned_node,omitempty"`
-	Status       JobStatus `json:"status"`
-	Request      []byte    `json:"request"`
-	Fence        uint64    `json:"fence"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	JobID           string        `json:"job_id"`
+	Coordinator     string        `json:"coordinator"`
+	AssignedNode    string        `json:"assigned_node,omitempty"`
+	Status          JobStatus     `json:"status"`
+	Request         []byte        `json:"request"`
+	Handling        HandlingClass `json:"handling,omitempty"`
+	PayloadRedacted bool          `json:"payload_redacted,omitempty"`
+	Fence           uint64        `json:"fence"`
+	UpdatedAt       time.Time     `json:"updated_at"`
 }
 
 type Reservation struct {

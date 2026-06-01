@@ -530,7 +530,10 @@ func validateJobRecord(rec domain.JobRecord) error {
 	if rec.Status == "" {
 		return fmt.Errorf("job record status is required")
 	}
-	if len(rec.Request) == 0 {
+	if rec.PayloadRedacted && rec.Handling != domain.HandlingPrivate {
+		return fmt.Errorf("job record payload redaction requires private handling")
+	}
+	if len(rec.Request) == 0 && !rec.PayloadRedacted {
 		return fmt.Errorf("job record request payload is required")
 	}
 	if rec.UpdatedAt.IsZero() {

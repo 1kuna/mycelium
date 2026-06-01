@@ -776,14 +776,15 @@ func TestServiceCoordinatedPreemptionUsesOwnerLease(t *testing.T) {
 		Clock:       clock,
 	}
 
-	err := service.enactPreemption(context.Background(), domain.PlacementDecision{
+	requester := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	err := service.enactPreemption(context.Background(), requester, domain.PlacementDecision{
 		JobID:     "job-a",
 		Preempted: []string{victim.ID},
 	}, domain.FleetSnapshot{Instances: []domain.ModelInstance{victim}})
 	if err != nil {
 		t.Fatalf("enactPreemption: %v", err)
 	}
-	if strings.Join(admission.Calls, ",") != "lease-for-instance:victim-a,preempt:lease-victim:preempted for job-a" {
+	if strings.Join(admission.Calls, ",") != "lease-for-instance:victim-a,preempt-for-job:job-a:lease-victim:preempted for job-a" {
 		t.Fatalf("admission calls = %+v", admission.Calls)
 	}
 	if strings.Join(agent.Calls, ",") != "unload:victim-a" {
@@ -1060,49 +1061,53 @@ func TestServiceResolveAndPreemptionErrors(t *testing.T) {
 			return err
 		}},
 		{name: "missing preempted", fn: func() error {
-			return service.enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{"missing"}}, domain.FleetSnapshot{})
+			return service.enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{"missing"}}, domain.FleetSnapshot{})
 		}},
 		{name: "preempt node", fn: func() error {
-			return (&Service{Nodes: staticNodes{}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+			return (&Service{Nodes: staticNodes{}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 		{name: "unload", fn: func() error {
 			agent := mocks.NewNodeAgent(node)
 			agent.UnloadErr = errors.New("unload")
-			return (&Service{Nodes: staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+			return (&Service{Nodes: staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 		{name: "delete", fn: func() error {
-			return (&Service{Nodes: service.Nodes, Store: &runtimeStore{deleteErr: errors.New("delete")}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+			return (&Service{Nodes: service.Nodes, Store: &runtimeStore{deleteErr: errors.New("delete")}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 		{name: "coordinated preempt owner resolver missing", fn: func() error {
-			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 		{name: "coordinated preempt owner unreachable", fn: func() error {
-			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 		{name: "coordinated preempt lease inspection unsupported", fn: func() error {
-			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admissionOnly{}}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admissionOnly{}}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 		{name: "coordinated preempt lease inspection error", fn: func() error {
 			admission := &mocks.AdmissionController{LeaseForInstErr: errors.New("lease lookup")}
-			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 		{name: "coordinated preempt missing owner lease", fn: func() error {
 			admission := &mocks.AdmissionController{}
-			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+		}},
+		{name: "coordinated preempt policy preempter unsupported", fn: func() error {
+			admission := inspectableAdmission{lease: domain.Lease{ID: "lease-a", InstanceID: inst.ID, NodeID: node.ID}, found: true}
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 		{name: "coordinated preempt owner preempt error", fn: func() error {
 			admission := &mocks.AdmissionController{LeaseForInstVal: domain.Lease{ID: "lease-a", InstanceID: inst.ID, NodeID: node.ID}, LeaseForInstFound: true, PreemptErr: errors.New("preempt")}
-			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 		{name: "coordinated preempt delete lease", fn: func() error {
 			admission := &mocks.AdmissionController{LeaseForInstVal: domain.Lease{ID: "lease-a", InstanceID: inst.ID, NodeID: node.ID}, LeaseForInstFound: true}
-			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{deleteLeaseErr: errors.New("delete lease")}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{deleteLeaseErr: errors.New("delete lease")}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 		{name: "missing requeued", fn: func() error {
-			return service.enactPreemption(context.Background(), domain.PlacementDecision{Requeued: []string{"missing"}}, domain.FleetSnapshot{})
+			return service.enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Requeued: []string{"missing"}}, domain.FleetSnapshot{})
 		}},
 		{name: "requeue save", fn: func() error {
-			return (&Service{Store: &runtimeStore{saveJobErr: errors.New("save"), saveJobErrAt: 1}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), domain.PlacementDecision{Requeued: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+			return (&Service{Store: &runtimeStore{saveJobErr: errors.New("save"), saveJobErrAt: 1}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Requeued: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 	}
 	for _, check := range errorChecks {
@@ -1193,6 +1198,21 @@ func (admissionOnly) Release(context.Context, string) error {
 
 func (admissionOnly) Preempt(context.Context, string, string) error {
 	return nil
+}
+
+type inspectableAdmission struct {
+	admissionOnly
+	lease domain.Lease
+	found bool
+	err   error
+}
+
+func (a inspectableAdmission) LeaseForJob(context.Context, string) (domain.Lease, bool, error) {
+	return a.lease, a.found, a.err
+}
+
+func (a inspectableAdmission) LeaseForInstance(context.Context, string) (domain.Lease, bool, error) {
+	return a.lease, a.found, a.err
 }
 
 type runtimeStore struct {
