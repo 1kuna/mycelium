@@ -102,7 +102,7 @@ func TestServiceUsesWarmInstanceWithOwnerAdmission(t *testing.T) {
 	if got := store.jobs["job-a"].Status; got != domain.JobRunning {
 		t.Fatalf("job status = %s", got)
 	}
-	if strings.Join(admission.Calls, ",") != "offer:job-a,commit:offer_job-a:1,bind-instance:lease_offer_job-a:warm-a" {
+	if strings.Join(admission.Calls, ",") != "offer:job-a,commit:offer_job-a:1" {
 		t.Fatalf("admission calls = %+v", admission.Calls)
 	}
 }
@@ -152,6 +152,72 @@ func TestServiceSubmitWithPayloadUsesPeerCoordinator(t *testing.T) {
 	}
 	if store.jobs["job-a"].Status != domain.JobRunning || len(store.leases) != 1 || len(store.instances) != 1 {
 		t.Fatalf("store jobs=%+v leases=%+v instances=%+v", store.jobs, store.leases, store.instances)
+	}
+}
+
+func TestServiceSubmitWithPayloadSkipsBindForBoundWarmOwnerLease(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 46).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("warm-a"), fixtures.OnNode(node.ID))
+	admission := &mocks.AdmissionController{BindErr: errors.New("bind should not be called")}
+	coordinator := &mocks.Coordinator{
+		Decision: domain.PlacementDecision{JobID: "job-a", InstanceID: inst.ID, NodeID: node.ID, AcceleratorSet: inst.AcceleratorSet, Claim: inst.Claim, Action: domain.ActionWarmInstance},
+		Lease:    domain.Lease{ID: "owner-lease-a", JobID: "job-a", NodeID: node.ID, InstanceID: inst.ID, Claim: inst.Claim, GrantedAt: clock.Now()},
+	}
+	service := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}},
+		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Owners:      staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Coordinator: coordinator,
+		JobLog:      &recordingJobLog{},
+		Queue:       NewQueue(clock),
+		Store:       &runtimeStore{},
+		Clock:       clock,
+	}
+
+	result, err := service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a")), []byte(`{"job":"warm"}`))
+	if err != nil {
+		t.Fatalf("SubmitWithPayload: %v", err)
+	}
+	if result.Decision.Action != domain.ActionWarmInstance || result.Lease.InstanceID != inst.ID {
+		t.Fatalf("result = %+v", result)
+	}
+	if strings.Join(admission.Calls, ",") != "" {
+		t.Fatalf("admission calls = %+v", admission.Calls)
+	}
+}
+
+func TestServiceSubmitWithPayloadRejectsMismatchedBoundOwnerLeaseWithoutUnloadingWarm(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 48).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	agent := mocks.NewNodeAgent(node)
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("warm-a"), fixtures.OnNode(node.ID))
+	coordinator := &mocks.Coordinator{
+		Decision: domain.PlacementDecision{JobID: "job-a", InstanceID: inst.ID, NodeID: node.ID, AcceleratorSet: inst.AcceleratorSet, Claim: inst.Claim, Action: domain.ActionWarmInstance},
+		Lease:    domain.Lease{ID: "owner-lease-a", JobID: "job-a", NodeID: node.ID, InstanceID: "other-instance", Claim: inst.Claim, GrantedAt: clock.Now()},
+	}
+	service := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}},
+		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}},
+		Owners:      staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Coordinator: coordinator,
+		JobLog:      &recordingJobLog{},
+		Queue:       NewQueue(clock),
+		Store:       &runtimeStore{},
+		Clock:       clock,
+	}
+
+	_, err := service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a")), []byte(`{"job":"warm"}`))
+	if err == nil || !strings.Contains(err.Error(), "other-instance") {
+		t.Fatalf("SubmitWithPayload err = %v", err)
+	}
+	if strings.Contains(strings.Join(agent.Calls, ","), "unload") {
+		t.Fatalf("warm instance was unloaded: %+v", agent.Calls)
+	}
+	if !strings.Contains(strings.Join(coordinator.Calls, ","), "release:job-a") {
+		t.Fatalf("coordinator did not release warm lease: %+v", coordinator.Calls)
 	}
 }
 
@@ -947,6 +1013,21 @@ func TestServiceOwnerBindingAndCleanupErrors(t *testing.T) {
 	}
 	if err := (&Service{Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admissionOnly{}}}}).bindOwnerInstance(context.Background(), node.ID, "lease-a", inst.ID); err == nil || !strings.Contains(err.Error(), "lease binding") {
 		t.Fatalf("unsupported binding err = %v", err)
+	}
+	for _, tc := range []struct {
+		name       string
+		ownerLease domain.Lease
+		lease      domain.Lease
+		want       string
+	}{
+		{name: "bound mismatch", ownerLease: domain.Lease{ID: "lease-a", InstanceID: "other"}, lease: domain.Lease{ID: "lease-a", InstanceID: inst.ID, NodeID: node.ID}, want: "other"},
+		{name: "missing instance", lease: domain.Lease{ID: "lease-a", NodeID: node.ID}, want: "instance"},
+		{name: "missing lease id", lease: domain.Lease{InstanceID: inst.ID, NodeID: node.ID}, want: "lease id"},
+		{name: "missing node", lease: domain.Lease{ID: "lease-a", InstanceID: inst.ID}, want: "owner node"},
+	} {
+		if err := (&Service{}).ensureOwnerLeaseBound(context.Background(), tc.ownerLease, tc.lease); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s err = %v", tc.name, err)
+		}
 	}
 	if err := (&Service{Nodes: staticNodes{}, Coordinator: &mocks.Coordinator{}, Queue: NewQueue(clock)}).cleanupCoordinatedLoad(context.Background(), "job-a", inst); !errors.Is(err, domain.ErrUnreachable) {
 		t.Fatalf("cleanup node err = %v", err)
