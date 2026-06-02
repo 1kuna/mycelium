@@ -76,6 +76,52 @@ func TestOpenAIParseAndBuildUpstream(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatTranslatesToAnthropicMessages(t *testing.T) {
+	req, err := ParseOpenAIChat([]byte(`{
+		"model":"local-claude",
+		"max_tokens":8,
+		"messages":[
+			{"role":"system","content":"be terse"},
+			{"role":"user","content":[{"type":"text","text":"hi"}]}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	route, err := BuildUpstream(req, profiles.Profile{Format: profiles.FormatAnthropic, AnthropicPath: "/v1/messages"})
+	if err != nil {
+		t.Fatalf("BuildUpstream: %v", err)
+	}
+	if !route.Translate || route.Path != "/v1/messages" {
+		t.Fatalf("route = %+v", route)
+	}
+	var claude api.AnthropicMessagesRequest
+	if err := json.Unmarshal(route.Body, &claude); err != nil {
+		t.Fatalf("unmarshal claude: %v", err)
+	}
+	if claude.System != "be terse" || claude.MaxTokens != 8 || len(claude.Messages) != 1 || claude.Messages[0].Content[0].Text != "hi" {
+		t.Fatalf("claude = %+v", claude)
+	}
+}
+
+func TestOpenAICompletionTranslatesToAnthropicMessages(t *testing.T) {
+	req, err := ParseOpenAICompletion([]byte(`{"model":"local-claude","prompt":"finish this","max_tokens":4}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAICompletion: %v", err)
+	}
+	route, err := BuildUpstream(req, profiles.Profile{Format: profiles.FormatAnthropic, AnthropicPath: "/v1/messages"})
+	if err != nil {
+		t.Fatalf("BuildUpstream: %v", err)
+	}
+	var claude api.AnthropicMessagesRequest
+	if err := json.Unmarshal(route.Body, &claude); err != nil {
+		t.Fatalf("unmarshal claude: %v", err)
+	}
+	if !route.Translate || claude.Messages[0].Role != "user" || claude.Messages[0].Content[0].Text != "finish this" {
+		t.Fatalf("route = %+v claude=%+v", route, claude)
+	}
+}
+
 func TestOpenAIChatAcceptsContentPartsAndTools(t *testing.T) {
 	raw := `{
 		"model":"m",
@@ -156,15 +202,15 @@ func TestBuildAndTranslateUnsupportedRoutesFailLoudly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseOpenAIChat: %v", err)
 	}
-	unsupported := profiles.Profile{Format: profiles.FormatAnthropic}
-	if _, err := BuildUpstream(chat, unsupported); err == nil || !strings.Contains(err.Error(), "openai chat") {
+	unsupported := profiles.Profile{Format: profiles.FormatAnthropic, AnthropicPath: "/messages"}
+	if _, err := BuildUpstream(chat, unsupported); err == nil || !strings.Contains(err.Error(), "max_tokens") {
 		t.Fatalf("chat err = %v", err)
 	}
 	completion, err := ParseOpenAICompletion([]byte(`{"model":"m","prompt":"hi"}`))
 	if err != nil {
 		t.Fatalf("ParseOpenAICompletion: %v", err)
 	}
-	if _, err := BuildUpstream(completion, unsupported); err == nil || !strings.Contains(err.Error(), "openai completion") {
+	if _, err := BuildUpstream(completion, unsupported); err == nil || !strings.Contains(err.Error(), "max_tokens") {
 		t.Fatalf("completion err = %v", err)
 	}
 	claude, err := ParseAnthropicMessages([]byte(`{"model":"m","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`))
@@ -174,7 +220,7 @@ func TestBuildAndTranslateUnsupportedRoutesFailLoudly(t *testing.T) {
 	if _, err := BuildUpstream(claude, profiles.Profile{Format: "custom"}); err == nil || !strings.Contains(err.Error(), "anthropic messages") {
 		t.Fatalf("anthropic err = %v", err)
 	}
-	if _, _, err := TranslateResponse(chat, UpstreamRequest{Translate: true}, nil); err == nil || !strings.Contains(err.Error(), "unsupported translated response") {
+	if _, _, err := TranslateResponse(IngressRequest{Kind: "weird"}, UpstreamRequest{Translate: true}, nil); err == nil || !strings.Contains(err.Error(), "unsupported translated response") {
 		t.Fatalf("translate err = %v", err)
 	}
 	if _, _, err := TranslateResponse(claude, UpstreamRequest{Translate: true}, []byte(`{`)); err == nil {
@@ -279,6 +325,15 @@ func TestStreamingTranslationFailsLoudly(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "streaming anthropic-to-openai translation") {
 		t.Fatalf("err = %v", err)
 	}
+
+	openai, err := ParseOpenAIChat([]byte(`{"model":"m","max_tokens":1,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	_, err = BuildUpstream(openai, profiles.Profile{Format: profiles.FormatAnthropic, AnthropicPath: "/messages"})
+	if err == nil || !strings.Contains(err.Error(), "streaming openai-to-anthropic translation") {
+		t.Fatalf("openai err = %v", err)
+	}
 }
 
 func TestTranslatedOpenAIResponseBecomesAnthropicMessage(t *testing.T) {
@@ -309,5 +364,108 @@ func TestTranslatedOpenAIResponseBecomesAnthropicMessage(t *testing.T) {
 	}
 	if out.Content[0].Text != "hello" || out.Usage.InputTokens != 3 || out.Usage.OutputTokens != 1 {
 		t.Fatalf("out = %+v", out)
+	}
+}
+
+func TestTranslatedAnthropicResponseBecomesOpenAIResponses(t *testing.T) {
+	chat, err := ParseOpenAIChat([]byte(`{"model":"local-claude","max_tokens":4,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	body, contentType, err := TranslateResponse(chat, UpstreamRequest{Translate: true}, []byte(`{
+		"id":"msg-test",
+		"type":"message",
+		"role":"assistant",
+		"model":"local-claude",
+		"content":[{"type":"text","text":"hello"}],
+		"stop_reason":"end_turn",
+		"usage":{"input_tokens":2,"output_tokens":3}
+	}`))
+	if err != nil {
+		t.Fatalf("TranslateResponse chat: %v", err)
+	}
+	if contentType != "application/json" {
+		t.Fatalf("content type = %s", contentType)
+	}
+	var chatOut api.OpenAIChatResponse
+	if err := json.Unmarshal(body, &chatOut); err != nil {
+		t.Fatalf("unmarshal chat: %v", err)
+	}
+	if chatOut.Choices[0].Message.Content != "hello" || chatOut.Usage.TotalTokens != 5 {
+		t.Fatalf("chatOut = %+v", chatOut)
+	}
+
+	completion, err := ParseOpenAICompletion([]byte(`{"model":"local-claude","prompt":"hi","max_tokens":4}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAICompletion: %v", err)
+	}
+	body, _, err = TranslateResponse(completion, UpstreamRequest{Translate: true}, []byte(`{
+		"id":"msg-test",
+		"type":"message",
+		"role":"assistant",
+		"model":"local-claude",
+		"content":[{"type":"text","text":"done"}],
+		"usage":{"input_tokens":1,"output_tokens":2}
+	}`))
+	if err != nil {
+		t.Fatalf("TranslateResponse completion: %v", err)
+	}
+	var completionOut api.OpenAICompletionResponse
+	if err := json.Unmarshal(body, &completionOut); err != nil {
+		t.Fatalf("unmarshal completion: %v", err)
+	}
+	if completionOut.Choices[0].Text != "done" || completionOut.Usage.TotalTokens != 3 {
+		t.Fatalf("completionOut = %+v", completionOut)
+	}
+}
+
+func TestOpenAIToAnthropicUnsupportedFieldsFailLoudly(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "image", body: `{"model":"m","max_tokens":1,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"x"}}]}]}`, want: "content part"},
+		{name: "tool", body: `{"model":"m","max_tokens":1,"messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"call","type":"function","function":{"name":"x","arguments":"{}"}}]}]}`, want: "tool/function"},
+		{name: "temperature", body: `{"model":"m","max_tokens":1,"temperature":0.1,"messages":[{"role":"user","content":"hi"}]}`, want: "temperature"},
+		{name: "tool role", body: `{"model":"m","max_tokens":1,"messages":[{"role":"tool","tool_call_id":"call","content":"done"}]}`, want: "tool/function"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := ParseOpenAIChat([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("ParseOpenAIChat: %v", err)
+			}
+			_, err = BuildUpstream(req, profiles.Profile{Format: profiles.FormatAnthropic, AnthropicPath: "/messages"})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestOpenAIToAnthropicRequiresSchedulableTextExchange(t *testing.T) {
+	req, err := ParseOpenAIChat([]byte(`{"model":"m","max_tokens":1,"messages":[{"role":"system","content":"rules"}]}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	_, err = BuildUpstream(req, profiles.Profile{Format: profiles.FormatAnthropic, AnthropicPath: "/messages"})
+	if err == nil || !strings.Contains(err.Error(), "at least one user or assistant") {
+		t.Fatalf("err = %v", err)
+	}
+
+	chat, err := ParseOpenAIChat([]byte(`{"model":"m","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	_, _, err = TranslateResponse(chat, UpstreamRequest{Translate: true}, []byte(`{
+		"id":"msg-test",
+		"type":"message",
+		"role":"assistant",
+		"model":"m",
+		"content":[{"type":"tool_use","name":"x"}]
+	}`))
+	if err == nil || !strings.Contains(err.Error(), "cannot be translated") {
+		t.Fatalf("response err = %v", err)
 	}
 }

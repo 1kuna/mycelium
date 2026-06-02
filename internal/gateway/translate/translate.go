@@ -107,15 +107,43 @@ func WithModel(req IngressRequest, model string) (IngressRequest, error) {
 func BuildUpstream(req IngressRequest, profile profiles.Profile) (UpstreamRequest, error) {
 	switch req.Kind {
 	case KindOpenAIChat:
-		if profile.Format != profiles.FormatOpenAI {
+		if profile.Format == profiles.FormatOpenAI {
+			return UpstreamRequest{Path: profile.ChatPath, Body: req.Body}, nil
+		}
+		if profile.Format != profiles.FormatAnthropic {
 			return UpstreamRequest{}, fmt.Errorf("openai chat to %s translation is not supported", profile.Format)
 		}
-		return UpstreamRequest{Path: profile.ChatPath, Body: req.Body}, nil
+		if req.OpenAI.Stream {
+			return UpstreamRequest{}, fmt.Errorf("streaming openai-to-anthropic translation is not supported")
+		}
+		claude, err := openAIChatToAnthropic(req.OpenAI)
+		if err != nil {
+			return UpstreamRequest{}, err
+		}
+		body, err := json.Marshal(claude)
+		if err != nil {
+			return UpstreamRequest{}, err
+		}
+		return UpstreamRequest{Path: profile.AnthropicPath, Body: body, Translate: true}, nil
 	case KindOpenAICompletion:
-		if profile.Format != profiles.FormatOpenAI {
+		if profile.Format == profiles.FormatOpenAI {
+			return UpstreamRequest{Path: profile.CompletionPath, Body: req.Body}, nil
+		}
+		if profile.Format != profiles.FormatAnthropic {
 			return UpstreamRequest{}, fmt.Errorf("openai completion to %s translation is not supported", profile.Format)
 		}
-		return UpstreamRequest{Path: profile.CompletionPath, Body: req.Body}, nil
+		if req.Complete.Stream {
+			return UpstreamRequest{}, fmt.Errorf("streaming openai-completion-to-anthropic translation is not supported")
+		}
+		claude, err := openAICompletionToAnthropic(req.Complete)
+		if err != nil {
+			return UpstreamRequest{}, err
+		}
+		body, err := json.Marshal(claude)
+		if err != nil {
+			return UpstreamRequest{}, err
+		}
+		return UpstreamRequest{Path: profile.AnthropicPath, Body: body, Translate: true}, nil
 	case KindAnthropicMessages:
 		if profile.Format == profiles.FormatAnthropic {
 			return UpstreamRequest{Path: profile.AnthropicPath, Body: req.Body}, nil
@@ -145,6 +173,34 @@ func TranslateResponse(req IngressRequest, upstream UpstreamRequest, body []byte
 		return body, "application/json", nil
 	}
 	switch req.Kind {
+	case KindOpenAIChat:
+		var claude api.AnthropicMessagesResponse
+		if err := json.Unmarshal(body, &claude); err != nil {
+			return nil, "", err
+		}
+		out, err := anthropicToOpenAIChatResponse(claude)
+		if err != nil {
+			return nil, "", err
+		}
+		data, err := json.Marshal(out)
+		if err != nil {
+			return nil, "", err
+		}
+		return data, "application/json", nil
+	case KindOpenAICompletion:
+		var claude api.AnthropicMessagesResponse
+		if err := json.Unmarshal(body, &claude); err != nil {
+			return nil, "", err
+		}
+		out, err := anthropicToOpenAICompletionResponse(claude)
+		if err != nil {
+			return nil, "", err
+		}
+		data, err := json.Marshal(out)
+		if err != nil {
+			return nil, "", err
+		}
+		return data, "application/json", nil
 	case KindAnthropicMessages:
 		var openai api.OpenAIChatResponse
 		if err := json.Unmarshal(body, &openai); err != nil {
@@ -182,6 +238,136 @@ func anthropicToOpenAI(req api.AnthropicMessagesRequest) (api.OpenAIChatRequest,
 		MaxTokens: req.MaxTokens,
 		Stream:    req.Stream,
 	}, nil
+}
+
+func openAIChatToAnthropic(req api.OpenAIChatRequest) (api.AnthropicMessagesRequest, error) {
+	if req.MaxTokens <= 0 {
+		return api.AnthropicMessagesRequest{}, fmt.Errorf("openai chat max_tokens is required for anthropic translation")
+	}
+	if req.Stream {
+		return api.AnthropicMessagesRequest{}, fmt.Errorf("streaming openai-to-anthropic translation is not supported")
+	}
+	if req.Temperature != nil {
+		return api.AnthropicMessagesRequest{}, fmt.Errorf("openai temperature cannot be translated to anthropic without explicit support")
+	}
+	if len(req.Tools) > 0 || len(req.ToolChoice) > 0 {
+		return api.AnthropicMessagesRequest{}, fmt.Errorf("openai tool use cannot be translated to anthropic-compatible backends without protocol loss")
+	}
+	var system []string
+	messages := make([]api.AnthropicMessage, 0, len(req.Messages))
+	for _, msg := range req.Messages {
+		text, err := openAIMessageText(msg)
+		if err != nil {
+			return api.AnthropicMessagesRequest{}, err
+		}
+		switch msg.Role {
+		case "system":
+			system = append(system, text)
+		case "user", "assistant":
+			messages = append(messages, api.AnthropicMessage{Role: msg.Role, Content: []api.AnthropicContentBlock{{Type: "text", Text: text}}})
+		default:
+			return api.AnthropicMessagesRequest{}, fmt.Errorf("openai role %q cannot be translated to anthropic messages", msg.Role)
+		}
+	}
+	if len(messages) == 0 {
+		return api.AnthropicMessagesRequest{}, fmt.Errorf("openai chat translation requires at least one user or assistant message")
+	}
+	return api.AnthropicMessagesRequest{
+		Model:     req.Model,
+		System:    strings.Join(system, "\n"),
+		Messages:  messages,
+		MaxTokens: req.MaxTokens,
+	}, nil
+}
+
+func openAICompletionToAnthropic(req api.OpenAICompletionRequest) (api.AnthropicMessagesRequest, error) {
+	if req.MaxTokens <= 0 {
+		return api.AnthropicMessagesRequest{}, fmt.Errorf("openai completion max_tokens is required for anthropic translation")
+	}
+	if req.Stream {
+		return api.AnthropicMessagesRequest{}, fmt.Errorf("streaming openai-completion-to-anthropic translation is not supported")
+	}
+	if req.Prompt == "" {
+		return api.AnthropicMessagesRequest{}, fmt.Errorf("openai completion prompt is required for anthropic translation")
+	}
+	return api.AnthropicMessagesRequest{
+		Model:     req.Model,
+		MaxTokens: req.MaxTokens,
+		Messages: []api.AnthropicMessage{{
+			Role:    "user",
+			Content: []api.AnthropicContentBlock{{Type: "text", Text: req.Prompt}},
+		}},
+	}, nil
+}
+
+func openAIMessageText(msg api.OpenAIMessage) (string, error) {
+	if msg.Name != "" || msg.ToolCallID != "" || len(msg.ToolCalls) > 0 || msg.FunctionCall != nil {
+		return "", fmt.Errorf("openai message role %q contains tool/function fields that cannot be translated to anthropic", msg.Role)
+	}
+	if len(msg.ContentParts) == 0 {
+		return msg.Content, nil
+	}
+	parts := make([]string, 0, len(msg.ContentParts))
+	for _, part := range msg.ContentParts {
+		if part.Type != "text" {
+			return "", fmt.Errorf("openai content part %q cannot be translated to anthropic text", part.Type)
+		}
+		parts = append(parts, part.Text)
+	}
+	return strings.Join(parts, "\n"), nil
+}
+
+func anthropicToOpenAIChatResponse(resp api.AnthropicMessagesResponse) (api.OpenAIChatResponse, error) {
+	text, err := anthropicResponseText(resp)
+	if err != nil {
+		return api.OpenAIChatResponse{}, err
+	}
+	return api.OpenAIChatResponse{
+		ID:    resp.ID,
+		Model: resp.Model,
+		Choices: []api.OpenAIChatChoice{{
+			Index:        0,
+			Message:      api.OpenAIMessage{Role: "assistant", Content: text},
+			FinishReason: resp.StopReason,
+		}},
+		Usage: api.OpenAIUsage{
+			PromptTokens:     resp.Usage.InputTokens,
+			CompletionTokens: resp.Usage.OutputTokens,
+			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
+		},
+	}, nil
+}
+
+func anthropicToOpenAICompletionResponse(resp api.AnthropicMessagesResponse) (api.OpenAICompletionResponse, error) {
+	text, err := anthropicResponseText(resp)
+	if err != nil {
+		return api.OpenAICompletionResponse{}, err
+	}
+	return api.OpenAICompletionResponse{
+		ID:    resp.ID,
+		Model: resp.Model,
+		Choices: []api.OpenAICompletionChoice{{
+			Index:        0,
+			Text:         text,
+			FinishReason: resp.StopReason,
+		}},
+		Usage: api.OpenAIUsage{
+			PromptTokens:     resp.Usage.InputTokens,
+			CompletionTokens: resp.Usage.OutputTokens,
+			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
+		},
+	}, nil
+}
+
+func anthropicResponseText(resp api.AnthropicMessagesResponse) (string, error) {
+	parts := make([]string, 0, len(resp.Content))
+	for _, block := range resp.Content {
+		if block.Type != "text" {
+			return "", fmt.Errorf("anthropic response content block %q cannot be translated to openai text", block.Type)
+		}
+		parts = append(parts, block.Text)
+	}
+	return strings.Join(parts, "\n"), nil
 }
 
 func openAIToAnthropic(resp api.OpenAIChatResponse) api.AnthropicMessagesResponse {

@@ -152,6 +152,21 @@ type OpenAIChatResponse struct {
 	Usage   OpenAIUsage        `json:"usage,omitempty"`
 }
 
+type OpenAICompletionResponse struct {
+	ID      string                   `json:"id,omitempty"`
+	Object  string                   `json:"object,omitempty"`
+	Created int64                    `json:"created,omitempty"`
+	Model   string                   `json:"model,omitempty"`
+	Choices []OpenAICompletionChoice `json:"choices"`
+	Usage   OpenAIUsage              `json:"usage,omitempty"`
+}
+
+type OpenAICompletionChoice struct {
+	Index        int    `json:"index"`
+	Text         string `json:"text"`
+	FinishReason string `json:"finish_reason,omitempty"`
+}
+
 type OpenAIChatChoice struct {
 	Index        int           `json:"index"`
 	Message      OpenAIMessage `json:"message"`

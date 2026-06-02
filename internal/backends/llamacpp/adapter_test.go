@@ -44,6 +44,13 @@ func TestAdapterNameAndRenderArgs(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigUsesSingleServerSlot(t *testing.T) {
+	args := strings.Join(DefaultConfig().Args, " ")
+	if !strings.Contains(args, "--parallel 1") {
+		t.Fatalf("default args must keep llama.cpp context on one slot: %q", args)
+	}
+}
+
 func TestRenderLaunchArgsIncludesProfileAndPresetTuning(t *testing.T) {
 	preset := fixtures.MakePreset(
 		fixtures.WithPresetID("preset"),

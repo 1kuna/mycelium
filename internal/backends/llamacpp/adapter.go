@@ -54,7 +54,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		BinaryPath: "llama-server",
-		Args:       []string{"--host", "{host}", "--port", "{port}", "-m", "{model}", "-c", "{ctx}"},
+		Args:       []string{"--host", "{host}", "--port", "{port}", "-m", "{model}", "-c", "{ctx}", "--parallel", "1"},
 		LaunchProfiles: map[string][]string{
 			"llamacpp-cuda":  nil,
 			"llamacpp-metal": nil,
