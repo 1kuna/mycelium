@@ -65,7 +65,7 @@ func (r Recovery) shouldConsider(deadPeerID string, rec domain.JobRecord) bool {
 	if rec.PayloadRedacted {
 		return false
 	}
-	return rec.Coordinator == deadPeerID && unfinished(rec.Status)
+	return unfinished(rec.Status) && (rec.Coordinator == deadPeerID || rec.AssignedNode == deadPeerID)
 }
 
 type rescueDecision int
@@ -107,7 +107,7 @@ func (r Recovery) rescueDecision(ctx context.Context, deadPeerID string, rec dom
 }
 
 func (r Recovery) recordPartition(ctx context.Context, rec domain.JobRecord) error {
-	rec.RecoveryNote = fmt.Sprintf("partition: owner %q could not be checked while recovering dead coordinator %q", rec.AssignedNode, rec.Coordinator)
+	rec.RecoveryNote = fmt.Sprintf("partition: owner %q could not be checked while recovering dead peer for coordinator %q", rec.AssignedNode, rec.Coordinator)
 	rec.Fence++
 	now := r.clock().Now().UTC()
 	if !now.After(rec.UpdatedAt) {

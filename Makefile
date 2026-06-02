@@ -18,9 +18,7 @@ coverage:
 	go test ./... -covermode=atomic -coverprofile=all.out
 	go run ./tools/covergate -profile all.out -min 0.85 -package-min 0.85 -package-prefix cmd/ -package-prefix internal/ -package-prefix pkg/ -package-prefix tools/ -require internal/scheduler=1.0 -require internal/lease=1.0 -require internal/peer=1.0 -require test/contract=1.0 -require test/fixtures=1.0 -require-file internal/node/admission.go=1.0 -require-file internal/peer/coordinator.go=1.0 -require-file internal/peer/recovery.go=1.0
 
-smoke:
-	go test -count=1 -tags smoke ./test/smoke/... -timeout 20m -json > $(SMOKE_JSON)
-	go run ./tools/smokegate -json $(SMOKE_JSON) -min-pass 1
+smoke: smoke-local smoke-fleet
 
 smoke-local:
 	go test -count=1 -tags smoke ./test/smoke/... -run 'TestLocalLlamaCppConformance|TestLocalPhase1LoadServeTelemetryRequeueReaper|TestPhase2GatewayLocalLlamaCppSmoke|TestPhase3CatalogMaterializedPresetLoadsInNode|TestPhase4JoinedNodeGatewaySmoke' -timeout 20m -json > $(SMOKE_JSON)
