@@ -167,6 +167,7 @@ func runProjects(ctx context.Context, args []string) error {
 	priority := fs.String("priority", string(domain.PriorityInteractive), "priority")
 	speed := fs.String("speed-pref", string(domain.SpeedThroughput), "speed preference")
 	contextCap := fs.Int("context-cap", 0, "context cap")
+	expectedConcurrency := fs.Int("expected-concurrency", 1, "expected concurrent requests for resource estimates")
 	latencyTarget := fs.Int("latency-target-ms", 0, "latency target in milliseconds")
 	preemption := fs.String("preemption", string(domain.PreemptSoft), "preemption mode")
 	autoApply := fs.Bool("auto-apply", false, "enable optimizer auto-apply")
@@ -182,14 +183,15 @@ func runProjects(ctx context.Context, args []string) error {
 	}
 	defer store.Close()
 	project := domain.Project{
-		ID:              *id,
-		DefaultModel:    *defaultModel,
-		Priority:        domain.Priority(*priority),
-		SpeedPref:       domain.SpeedPref(*speed),
-		ContextCap:      *contextCap,
-		LatencyTargetMS: *latencyTarget,
-		Preemption:      domain.Preemption(*preemption),
-		AutoApply:       *autoApply,
+		ID:                  *id,
+		DefaultModel:        *defaultModel,
+		Priority:            domain.Priority(*priority),
+		SpeedPref:           domain.SpeedPref(*speed),
+		ContextCap:          *contextCap,
+		ExpectedConcurrency: *expectedConcurrency,
+		LatencyTargetMS:     *latencyTarget,
+		Preemption:          domain.Preemption(*preemption),
+		AutoApply:           *autoApply,
 	}
 	if err := store.SaveProject(ctx, project); err != nil {
 		return err

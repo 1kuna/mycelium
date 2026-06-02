@@ -39,7 +39,7 @@ func TestResolvePresetBranches(t *testing.T) {
 
 func TestSelectWarmInstanceChoosesLeastBusyThenID(t *testing.T) {
 	preset := fixtures.MakePreset()
-	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{FitsVal: true, CanStackLoadVal: true}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
 	busy := fixtures.MakeInstance(fixtures.WithInstanceID("a_busy"), fixtures.WithInstancePreset(preset.ID))
 	busy.InFlight = 2
 	later := fixtures.MakeInstance(fixtures.WithInstanceID("z_idle"), fixtures.WithInstancePreset(preset.ID))
@@ -47,26 +47,38 @@ func TestSelectWarmInstanceChoosesLeastBusyThenID(t *testing.T) {
 	earlier := fixtures.MakeInstance(fixtures.WithInstanceID("a_idle"), fixtures.WithInstancePreset(preset.ID))
 	earlier.InFlight = 0
 
-	got, ok := placer.selectWarmInstance(fixtures.MakeJob(), preset, domain.FleetSnapshot{
+	got, ok, err := placer.selectWarmInstance(context.Background(), fixtures.MakeJob(), preset, 100, 1, domain.FleetSnapshot{
 		Nodes:     []domain.Node{fixtures.MakeNode()},
 		Instances: []domain.ModelInstance{busy, later, earlier},
 	})
+	if err != nil {
+		t.Fatalf("selectWarmInstance: %v", err)
+	}
 	if !ok || got.ID != "a_idle" {
 		t.Fatalf("warm = %+v ok=%v", got, ok)
 	}
-	if _, ok := placer.selectWarmInstance(fixtures.MakeJob(fixtures.Latency), preset, domain.FleetSnapshot{}); ok {
+	if _, ok, err := placer.selectWarmInstance(context.Background(), fixtures.MakeJob(fixtures.Latency), preset, 100, 1, domain.FleetSnapshot{}); err != nil || ok {
 		t.Fatal("latency job should skip warm batching")
 	}
-	if _, ok := placer.selectWarmInstance(fixtures.MakeJob(), preset, domain.FleetSnapshot{}); ok {
+	if _, ok, err := placer.selectWarmInstance(context.Background(), fixtures.MakeJob(), preset, 100, 1, domain.FleetSnapshot{}); err != nil || ok {
 		t.Fatal("empty fleet should not return warm instance")
 	}
-	if _, ok := placer.selectWarmInstance(fixtures.MakeJob(func(j *domain.Job) {
+	if _, ok, err := placer.selectWarmInstance(context.Background(), fixtures.MakeJob(func(j *domain.Job) {
 		j.NodeSelector = map[string]string{"gpu.vendor": "amd"}
-	}), preset, domain.FleetSnapshot{
+	}), preset, 100, 1, domain.FleetSnapshot{
 		Nodes:     []domain.Node{fixtures.MakeNode()},
 		Instances: []domain.ModelInstance{earlier},
-	}); ok {
+	}); err != nil || ok {
 		t.Fatal("warm instance on selector-mismatched node should not be selected")
+	}
+
+	errPlacer := NewPlacer(unitEstimator{err: domain.ErrUnsupported}, &mocks.Allocator{FitsVal: true, CanStackLoadVal: true}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+	_, ok, err = errPlacer.selectWarmInstance(context.Background(), fixtures.MakeJob(), preset, 100, 1, domain.FleetSnapshot{
+		Nodes:     []domain.Node{fixtures.MakeNode()},
+		Instances: []domain.ModelInstance{earlier},
+	})
+	if err == nil || ok || !strings.Contains(err.Error(), domain.ErrUnsupported.Error()) {
+		t.Fatalf("warm estimate err = %v ok=%v", err, ok)
 	}
 }
 
@@ -143,7 +155,7 @@ func TestFilterPlacementCandidatesCoversUnitEstimatorBranches(t *testing.T) {
 		j.NodeSelector = map[string]string{"gpu.vendor": "nvidia"}
 	})
 
-	candidates, trace, err := placer.filterPlacementCandidates(context.Background(), job, preset, 100, domain.FleetSnapshot{
+	candidates, trace, err := placer.filterPlacementCandidates(context.Background(), job, preset, 100, 1, domain.FleetSnapshot{
 		Nodes:     []domain.Node{down, mismatch, fit},
 		Instances: []domain.ModelInstance{loading},
 	}, true)
@@ -159,7 +171,7 @@ func TestFilterPlacementCandidatesCoversUnitEstimatorBranches(t *testing.T) {
 	}
 
 	placer = NewPlacer(unitEstimator{claim: claim}, &mocks.Allocator{FitsVal: true, CanStackLoadVal: false}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
-	_, trace, err = placer.filterPlacementCandidates(context.Background(), fixtures.MakeJob(), preset, 100, domain.FleetSnapshot{Nodes: []domain.Node{fit}})
+	_, trace, err = placer.filterPlacementCandidates(context.Background(), fixtures.MakeJob(), preset, 100, 1, domain.FleetSnapshot{Nodes: []domain.Node{fit}})
 	if err != nil {
 		t.Fatalf("filter load-in-flight: %v", err)
 	}
@@ -171,7 +183,7 @@ func TestFilterPlacementCandidatesCoversUnitEstimatorBranches(t *testing.T) {
 		n.Accelerators = []domain.Accelerator{{Index: 1, VRAMTotalMB: 1000}, {Index: 0, VRAMTotalMB: 1000}}
 	})
 	placer = NewPlacer(unitEstimator{claim: claim}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
-	candidates, _, err = placer.filterPlacementCandidates(context.Background(), fixtures.MakeJob(), preset, 100, domain.FleetSnapshot{Nodes: []domain.Node{multiAcc}})
+	candidates, _, err = placer.filterPlacementCandidates(context.Background(), fixtures.MakeJob(), preset, 100, 1, domain.FleetSnapshot{Nodes: []domain.Node{multiAcc}})
 	if err != nil {
 		t.Fatalf("filter placement multi-acc: %v", err)
 	}
@@ -180,7 +192,7 @@ func TestFilterPlacementCandidatesCoversUnitEstimatorBranches(t *testing.T) {
 	}
 
 	_, _, err = NewPlacer(unitEstimator{err: domain.ErrUnsupported}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset).
-		filterPlacementCandidates(context.Background(), fixtures.MakeJob(), preset, 100, domain.FleetSnapshot{Nodes: []domain.Node{fit}})
+		filterPlacementCandidates(context.Background(), fixtures.MakeJob(), preset, 100, 1, domain.FleetSnapshot{Nodes: []domain.Node{fit}})
 	if err == nil || !strings.Contains(err.Error(), domain.ErrUnsupported.Error()) {
 		t.Fatalf("unit estimator err = %v", err)
 	}
@@ -196,7 +208,7 @@ func TestScoreCandidatesTieBreaksDeterministically(t *testing.T) {
 	})
 	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 
-	scored := placer.scoreCandidates(fixtures.MakeJob(), []candidate{
+	scored := placer.scoreCandidates(fixtures.MakeJob(), fixtures.MakePreset(), []candidate{
 		{node: fixtures.MakeNode(fixtures.WithNodeID("b")), acc: []int{0}},
 		{node: fixtures.MakeNode(fixtures.WithNodeID("a")), acc: []int{0}},
 	})
@@ -204,12 +216,21 @@ func TestScoreCandidatesTieBreaksDeterministically(t *testing.T) {
 		t.Fatalf("node id tie-break failed: %+v", scored)
 	}
 
-	scored = placer.scoreCandidates(fixtures.MakeJob(), []candidate{
+	scored = placer.scoreCandidates(fixtures.MakeJob(), fixtures.MakePreset(), []candidate{
 		{node: node, acc: []int{1}},
 		{node: node, acc: []int{0}},
 	})
 	if scored[0].candidate.acc[0] != 0 {
 		t.Fatalf("accelerator tie-break failed: %+v", scored)
+	}
+
+	localPreset := fixtures.MakePreset(fixtures.WithPresetNode("local"))
+	scored = placer.scoreCandidates(fixtures.MakeJob(), localPreset, []candidate{
+		{node: fixtures.MakeNode(fixtures.WithNodeID("remote")), acc: []int{0}},
+		{node: fixtures.MakeNode(fixtures.WithNodeID("local")), acc: []int{0}},
+	})
+	if scored[0].candidate.node.ID != "local" || scored[0].parts["model_locality"] != true {
+		t.Fatalf("locality score failed: %+v", scored)
 	}
 }
 
@@ -302,7 +323,7 @@ func TestTryPreemptForPresetPropagatesEstimateError(t *testing.T) {
 	node := fixtures.Make4090Node(fixtures.WithNodeID("node-a"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.8))
 	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim"), fixtures.WithInstancePreset("other"), fixtures.OnNode(node.ID), fixtures.WithClaim(fixtures.MakeClaim(100, 0)), fixtures.WithInstancePriority(domain.PriorityBackground))
 	placer := NewPlacer(unitEstimator{err: domain.ErrUnsupported}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
-	_, _, err := placer.tryPreemptForPreset(context.Background(), fixtures.MakeJob(fixtures.Interactive, fixtures.HardForInteractive, fixtures.WithPreset(preset.ID)), preset, 100, domain.FleetSnapshot{
+	_, _, err := placer.tryPreemptForPreset(context.Background(), fixtures.MakeJob(fixtures.Interactive, fixtures.HardForInteractive, fixtures.WithPreset(preset.ID)), preset, 100, 1, domain.FleetSnapshot{
 		Nodes:     []domain.Node{node},
 		Instances: []domain.ModelInstance{victim},
 	})
@@ -323,6 +344,13 @@ func TestPlacePropagatesUnitEstimateErrors(t *testing.T) {
 		t.Fatalf("filter estimate err = %v", err)
 	}
 
+	warm := fixtures.MakeInstance(fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
+	_, err = NewPlacer(unitEstimator{err: domain.ErrUnsupported}, &mocks.Allocator{FitsVal: true, CanStackLoadVal: true}, clock, preset).
+		Place(context.Background(), fixtures.MakeJob(), domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{warm}})
+	if err == nil || !strings.Contains(err.Error(), domain.ErrUnsupported.Error()) {
+		t.Fatalf("warm estimate err = %v", err)
+	}
+
 	estimator := &countingUnitEstimator{claim: fixtures.MakeClaim(1, 1), errOn: 1}
 	_, err = NewPlacer(estimator, &mocks.Allocator{FitsVal: false, CanStackLoadVal: false}, clock, preset).
 		Place(context.Background(), fixtures.MakeJob(fixtures.Hard), domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}})
@@ -339,7 +367,7 @@ func TestPreemptSelectorMismatchSkipsCandidate(t *testing.T) {
 	placer := NewPlacer(unitEstimator{claim: fixtures.MakeClaim(1, 1)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
 	_, ok, err := placer.tryPreemptForPreset(context.Background(), fixtures.MakeJob(fixtures.Interactive, fixtures.HardForInteractive, func(j *domain.Job) {
 		j.NodeSelector = map[string]string{"gpu.vendor": "nvidia"}
-	}), preset, 100, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}})
+	}), preset, 100, 1, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}})
 	if err != nil || ok {
 		t.Fatalf("preempt selector ok=%v err=%v", ok, err)
 	}

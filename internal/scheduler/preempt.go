@@ -24,9 +24,9 @@ func (p *Placer) tryPreempt(job domain.Job, fleet domain.FleetSnapshot, claim do
 	return result, ok
 }
 
-func (p *Placer) tryPreemptForPreset(ctx context.Context, job domain.Job, preset domain.Preset, contextLen int, fleet domain.FleetSnapshot) (preemptResult, bool, error) {
+func (p *Placer) tryPreemptForPreset(ctx context.Context, job domain.Job, preset domain.Preset, contextLen, concurrency int, fleet domain.FleetSnapshot) (preemptResult, bool, error) {
 	return p.tryPreemptWithClaims(job, fleet, func(node domain.Node, accSet []int) (domain.Claim, error) {
-		return p.estimateCandidateClaim(ctx, preset, contextLen, 1, node, accSet)
+		return p.estimateCandidateClaim(ctx, preset, contextLen, concurrency, node, accSet)
 	})
 }
 

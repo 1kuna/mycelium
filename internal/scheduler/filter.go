@@ -104,7 +104,7 @@ func hasOverlappingInstance(nodeID string, acc []int, instances []domain.ModelIn
 	return false
 }
 
-func (p *Placer) filterPlacementCandidates(ctx context.Context, job domain.Job, preset domain.Preset, contextLen int, fleet domain.FleetSnapshot, requireEmpty ...bool) ([]candidate, domain.TraceStep, error) {
+func (p *Placer) filterPlacementCandidates(ctx context.Context, job domain.Job, preset domain.Preset, contextLen, concurrency int, fleet domain.FleetSnapshot, requireEmpty ...bool) ([]candidate, domain.TraceStep, error) {
 	var candidates []candidate
 	dropped := map[string]string{}
 	dedicated := len(requireEmpty) > 0 && requireEmpty[0]
@@ -127,7 +127,7 @@ func (p *Placer) filterPlacementCandidates(ctx context.Context, job domain.Job, 
 				dropped[node.ID] = "load_in_flight"
 				continue
 			}
-			claim, err := p.estimateCandidateClaim(ctx, preset, contextLen, 1, node, accSet)
+			claim, err := p.estimateCandidateClaim(ctx, preset, contextLen, concurrency, node, accSet)
 			if err != nil {
 				return nil, domain.TraceStep{}, err
 			}

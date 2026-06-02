@@ -138,7 +138,7 @@ func TestRunListCommandsAndProjectSet(t *testing.T) {
 		{"jobs", "list", "--db", dbPath},
 		{"recommendations", "list", "--db", dbPath, "--project", "project-a"},
 		{"recommendations", "calibrate-speed", "--db", dbPath},
-		{"projects", "set", "--db", dbPath, "--id", "project-b", "--default-model", "preset-b", "--priority", "background", "--speed-pref", "latency", "--context-cap", "4096", "--latency-target-ms", "250", "--preemption", "hard", "--auto-apply"},
+		{"projects", "set", "--db", dbPath, "--id", "project-b", "--default-model", "preset-b", "--priority", "background", "--speed-pref", "latency", "--context-cap", "4096", "--expected-concurrency", "3", "--latency-target-ms", "250", "--preemption", "hard", "--auto-apply"},
 	}
 	for _, args := range commands {
 		if err := Run(context.Background(), args); err != nil {
@@ -156,7 +156,7 @@ func TestRunListCommandsAndProjectSet(t *testing.T) {
 	if err := verifyStore.Close(); err != nil {
 		t.Fatalf("Close verify: %v", err)
 	}
-	if project.LatencyTargetMS != 250 {
+	if project.LatencyTargetMS != 250 || project.ExpectedConcurrency != 3 {
 		t.Fatalf("project = %+v", project)
 	}
 

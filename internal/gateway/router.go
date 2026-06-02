@@ -608,22 +608,27 @@ func (r *Router) jobFromIngress(req translate.IngressRequest, attempt int) domai
 	if contextRequest == 0 {
 		contextRequest = projectDefaults.ContextCap
 	}
+	expectedConcurrency := projectDefaults.ExpectedConcurrency
+	if expectedConcurrency == 0 {
+		expectedConcurrency = 1
+	}
 	taskType := "chat"
 	if req.Kind == translate.KindOpenAICompletion {
 		taskType = "completion"
 	}
 	return domain.Job{
-		ID:             fmt.Sprintf("gateway-%d-%d", seq, attempt),
-		TaskType:       taskType,
-		Model:          req.Model,
-		Project:        project,
-		Priority:       priority,
-		SpeedPref:      speed,
-		ContextRequest: contextRequest,
-		Preemption:     preemption,
-		Streaming:      req.Stream,
-		Submitter:      req.Submitter,
-		Handling:       req.Handling,
+		ID:                  fmt.Sprintf("gateway-%d-%d", seq, attempt),
+		TaskType:            taskType,
+		Model:               req.Model,
+		Project:             project,
+		Priority:            priority,
+		SpeedPref:           speed,
+		ContextRequest:      contextRequest,
+		ExpectedConcurrency: expectedConcurrency,
+		Preemption:          preemption,
+		Streaming:           req.Stream,
+		Submitter:           req.Submitter,
+		Handling:            req.Handling,
 	}
 }
 

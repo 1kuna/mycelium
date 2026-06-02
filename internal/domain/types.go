@@ -95,25 +95,26 @@ type ModelInstance struct {
 }
 
 type Job struct {
-	ID             string            `json:"id"`
-	TaskType       string            `json:"task_type"`
-	Model          string            `json:"model"`
-	PresetID       string            `json:"preset,omitempty"`
-	NodeSelector   map[string]string `json:"node_selector,omitempty"`
-	Project        string            `json:"project"`
-	Submitter      string            `json:"submitter,omitempty"`
-	Priority       Priority          `json:"priority"`
-	SpeedPref      SpeedPref         `json:"speed_pref"`
-	ContextRequest int               `json:"context_request,omitempty"`
-	Preemption     Preemption        `json:"preemption"`
-	Handling       HandlingClass     `json:"handling,omitempty"`
-	Streaming      bool              `json:"streaming"`
-	DeadlineMS     int               `json:"deadline_ms,omitempty"`
-	ParentID       string            `json:"parent_id,omitempty"`
-	Benchmark      *BenchmarkSpec    `json:"benchmark,omitempty"`
-	Status         JobStatus         `json:"status"`
-	Progress       []JobProgress     `json:"progress,omitempty"`
-	Error          string            `json:"error,omitempty"`
+	ID                  string            `json:"id"`
+	TaskType            string            `json:"task_type"`
+	Model               string            `json:"model"`
+	PresetID            string            `json:"preset,omitempty"`
+	NodeSelector        map[string]string `json:"node_selector,omitempty"`
+	Project             string            `json:"project"`
+	Submitter           string            `json:"submitter,omitempty"`
+	Priority            Priority          `json:"priority"`
+	SpeedPref           SpeedPref         `json:"speed_pref"`
+	ContextRequest      int               `json:"context_request,omitempty"`
+	ExpectedConcurrency int               `json:"expected_concurrency,omitempty"`
+	Preemption          Preemption        `json:"preemption"`
+	Handling            HandlingClass     `json:"handling,omitempty"`
+	Streaming           bool              `json:"streaming"`
+	DeadlineMS          int               `json:"deadline_ms,omitempty"`
+	ParentID            string            `json:"parent_id,omitempty"`
+	Benchmark           *BenchmarkSpec    `json:"benchmark,omitempty"`
+	Status              JobStatus         `json:"status"`
+	Progress            []JobProgress     `json:"progress,omitempty"`
+	Error               string            `json:"error,omitempty"`
 }
 
 type BenchmarkSpec struct {
@@ -242,15 +243,16 @@ type AdmissionLeaseRecord struct {
 }
 
 type Project struct {
-	ID              string     `json:"id"`
-	DefaultModel    string     `json:"default_model,omitempty"`
-	Priority        Priority   `json:"priority"`
-	SpeedPref       SpeedPref  `json:"speed_pref"`
-	ContextCap      int        `json:"context_cap"`
-	LatencyTargetMS int        `json:"latency_target_ms,omitempty"`
-	Preemption      Preemption `json:"preemption"`
-	AutoApply       bool       `json:"auto_apply"`
-	ReservedNodeID  string     `json:"reserved_node_id,omitempty"`
+	ID                  string     `json:"id"`
+	DefaultModel        string     `json:"default_model,omitempty"`
+	Priority            Priority   `json:"priority"`
+	SpeedPref           SpeedPref  `json:"speed_pref"`
+	ContextCap          int        `json:"context_cap"`
+	ExpectedConcurrency int        `json:"expected_concurrency,omitempty"`
+	LatencyTargetMS     int        `json:"latency_target_ms,omitempty"`
+	Preemption          Preemption `json:"preemption"`
+	AutoApply           bool       `json:"auto_apply"`
+	ReservedNodeID      string     `json:"reserved_node_id,omitempty"`
 }
 
 type RecommendationRecord struct {

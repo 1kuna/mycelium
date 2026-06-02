@@ -29,7 +29,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 		t.Fatalf("busy_timeout = %d, %v", busyTimeout, err)
 	}
 
-	project := domain.Project{ID: "proj", Priority: domain.PriorityInteractive, SpeedPref: domain.SpeedLatency, ContextCap: 8192, AutoApply: true}
+	project := domain.Project{ID: "proj", Priority: domain.PriorityInteractive, SpeedPref: domain.SpeedLatency, ContextCap: 8192, ExpectedConcurrency: 4, AutoApply: true}
 	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("/models/a.gguf"))
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst-a"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
@@ -69,7 +69,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	defer reopened.Close()
 
 	gotProject, err := reopened.Project(ctx, project.ID)
-	if err != nil || gotProject.ID != project.ID || !gotProject.AutoApply {
+	if err != nil || gotProject.ID != project.ID || gotProject.ExpectedConcurrency != 4 || !gotProject.AutoApply {
 		t.Fatalf("Project = %+v, %v", gotProject, err)
 	}
 	if gotPreset, err := reopened.Preset(ctx, preset.ID); err != nil || gotPreset.ModelRef != preset.ModelRef {

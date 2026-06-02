@@ -129,7 +129,7 @@ func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
-	project := domain.Project{ID: "project-a", ContextCap: 16000, AutoApply: true}
+	project := domain.Project{ID: "project-a", ContextCap: 16000, ExpectedConcurrency: 3, AutoApply: true}
 	preset := fixtures.MakePreset(fixtures.WithPresetID("large"), fixtures.WithContextLength(16000))
 	if err := store.SaveProject(context.Background(), project); err != nil {
 		t.Fatalf("SaveProject: %v", err)
@@ -153,8 +153,9 @@ func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
 		}
 	}
 	service := RecommendationService{
-		Store: store,
-		Clock: mocks.NewFakeClock(now),
+		Store:     store,
+		Clock:     mocks.NewFakeClock(now),
+		Estimator: &mocks.ResourceEstimator{Claim: fixtures.MakeClaim(1, 1)},
 	}
 
 	records, err := service.EvaluateProject(context.Background(), project)
@@ -173,6 +174,10 @@ func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
 	}
 	if storedRec.Observed["lifetime_max"] != 4000 {
 		t.Fatalf("stored observed = %+v", storedRec.Observed)
+	}
+	estimator := service.Estimator.(*mocks.ResourceEstimator)
+	if len(estimator.Calls) != 1 || estimator.Calls[0].Concurrency != 3 {
+		t.Fatalf("estimator calls = %+v", estimator.Calls)
 	}
 	appliedProject, err := store.Project(context.Background(), project.ID)
 	if err != nil {
