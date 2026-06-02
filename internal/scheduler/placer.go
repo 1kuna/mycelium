@@ -79,28 +79,15 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 		trace[0].Result = fmt.Sprintf("weights=%dMB kv=%dMB @ctx%d x%d", claim.WeightsMB, claim.KVReservedMB, contextLen, concurrency)
 	}
 
-	if warm, ok, err := p.selectWarmInstance(ctx, job, preset, contextLen, concurrency, fleet); err != nil {
-		return domain.PlacementDecision{JobID: job.ID, SpeedPrefApplied: job.SpeedPref, Trace: append(trace, domain.TraceStep{
-			Step:   "estimate",
-			Result: err.Error(),
-		})}, err
-	} else if ok {
-		trace = append(trace,
-			domain.TraceStep{Step: "filter", Result: "warm compatible instance available"},
-			domain.TraceStep{Step: "select", Result: "warm instance selected"},
-			domain.TraceStep{Step: "score", Result: "warm instance locality"},
-			domain.TraceStep{Step: "admit", Result: "batched onto warm instance"},
-		)
-		return domain.PlacementDecision{
-			JobID:            job.ID,
-			InstanceID:       warm.ID,
-			NodeID:           warm.NodeID,
-			AcceleratorSet:   append([]int(nil), warm.AcceleratorSet...),
-			Claim:            warm.Claim,
-			Action:           domain.ActionWarmInstance,
-			SpeedPrefApplied: effectiveSpeed(job.SpeedPref),
-			Trace:            trace,
-		}, nil
+	if effectiveSpeed(job.SpeedPref) == domain.SpeedThroughput {
+		if warm, ok, err := p.selectWarmInstance(ctx, job, preset, contextLen, concurrency, fleet); err != nil {
+			return domain.PlacementDecision{JobID: job.ID, SpeedPrefApplied: job.SpeedPref, Trace: append(trace, domain.TraceStep{
+				Step:   "estimate",
+				Result: err.Error(),
+			})}, err
+		} else if ok {
+			return warmDecision(job, warm, trace, "warm compatible instance available"), nil
+		}
 	}
 
 	candidates, filterTrace, err := p.filterPlacementCandidates(ctx, job, preset, contextLen, concurrency, fleet, effectiveSpeed(job.SpeedPref) == domain.SpeedLatency)
@@ -128,6 +115,17 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 			SpeedPrefApplied: effectiveSpeed(job.SpeedPref),
 			Trace:            trace,
 		}, nil
+	}
+
+	if effectiveSpeed(job.SpeedPref) == domain.SpeedAuto {
+		if warm, ok, err := p.selectWarmInstance(ctx, job, preset, contextLen, concurrency, fleet); err != nil {
+			return domain.PlacementDecision{JobID: job.ID, SpeedPrefApplied: job.SpeedPref, Trace: append(trace, domain.TraceStep{
+				Step:   "estimate",
+				Result: err.Error(),
+			})}, err
+		} else if ok {
+			return warmDecision(job, warm, trace, "warm compatible instance available after cold no-fit"), nil
+		}
 	}
 
 	preempted, ok, err := p.tryPreemptForPreset(ctx, job, preset, contextLen, concurrency, fleet)
@@ -196,7 +194,7 @@ func validatePresetForJob(job domain.Job, preset domain.Preset) error {
 }
 
 func (p *Placer) selectWarmInstance(ctx context.Context, job domain.Job, preset domain.Preset, contextLen, concurrency int, fleet domain.FleetSnapshot) (domain.ModelInstance, bool, error) {
-	if effectiveSpeed(job.SpeedPref) != domain.SpeedThroughput {
+	if effectiveSpeed(job.SpeedPref) == domain.SpeedLatency {
 		return domain.ModelInstance{}, false, nil
 	}
 	ready := readyNodesByID(fleet.Nodes)
@@ -238,6 +236,25 @@ func (p *Placer) selectWarmInstance(ctx context.Context, job domain.Job, preset 
 		return matches[i].ID < matches[j].ID
 	})
 	return matches[0], true, nil
+}
+
+func warmDecision(job domain.Job, warm domain.ModelInstance, trace []domain.TraceStep, filterResult string) domain.PlacementDecision {
+	trace = append(trace,
+		domain.TraceStep{Step: "filter", Result: filterResult},
+		domain.TraceStep{Step: "select", Result: "warm instance selected"},
+		domain.TraceStep{Step: "score", Result: "warm instance locality"},
+		domain.TraceStep{Step: "admit", Result: "batched onto warm instance"},
+	)
+	return domain.PlacementDecision{
+		JobID:            job.ID,
+		InstanceID:       warm.ID,
+		NodeID:           warm.NodeID,
+		AcceleratorSet:   append([]int(nil), warm.AcceleratorSet...),
+		Claim:            warm.Claim,
+		Action:           domain.ActionWarmInstance,
+		SpeedPrefApplied: effectiveSpeed(job.SpeedPref),
+		Trace:            trace,
+	}
 }
 
 func effectiveSpeed(speed domain.SpeedPref) domain.SpeedPref {
