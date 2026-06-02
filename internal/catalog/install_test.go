@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mycelium/internal/domain"
+	"mycelium/internal/trace"
 )
 
 func TestInstallLocalModelMaterializesPresetAndProvenance(t *testing.T) {
@@ -36,6 +37,9 @@ func TestInstallLocalModelMaterializesPresetAndProvenance(t *testing.T) {
 	}
 	if len(result.Progress) < 4 || result.Progress[len(result.Progress)-1].Stage != "ready" {
 		t.Fatalf("progress = %+v", result.Progress)
+	}
+	if !hasInstallTrace(result.Trace, "install/import_source") || !hasInstallTrace(result.Trace, "install/commit_preset") {
+		t.Fatalf("trace = %+v", result.Trace)
 	}
 	stored, err := ReadPreset(store, "tiny")
 	if err != nil {
@@ -67,6 +71,9 @@ func TestInstallLocalModelMaterializesPresetAndProvenance(t *testing.T) {
 	}
 	if resumed.Preset.ID != result.Preset.ID || resumed.Provenance.MaterializedPath != result.Preset.ModelRef {
 		t.Fatalf("resumed = %+v", resumed)
+	}
+	if !hasInstallTrace(resumed.Trace, "install/read_ready_preset") {
+		t.Fatalf("resumed trace = %+v", resumed.Trace)
 	}
 }
 
@@ -328,4 +335,13 @@ func writeModel(t *testing.T, name, body string) string {
 		t.Fatalf("write model: %v", err)
 	}
 	return path
+}
+
+func hasInstallTrace(steps []trace.Step, op string) bool {
+	for _, step := range steps {
+		if step.Operation == op && step.Status == "success" {
+			return true
+		}
+	}
+	return false
 }

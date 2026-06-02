@@ -12,6 +12,7 @@ import (
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
+	"mycelium/internal/trace"
 )
 
 type Client interface {
@@ -32,16 +33,17 @@ type Request struct {
 }
 
 type Result struct {
-	Model         string  `json:"model"`
-	OutputPath    string  `json:"output_path"`
-	Bytes         int     `json:"bytes"`
-	TokensPerSec  float64 `json:"tokens_per_sec"`
-	TTFTms        int     `json:"ttft_ms"`
-	ContextTokens int     `json:"context_tokens"`
-	DurationMS    int     `json:"duration_ms"`
-	UserPick      *bool   `json:"user_pick,omitempty"`
-	Notes         string  `json:"notes,omitempty"`
-	Error         string  `json:"error,omitempty"`
+	Model         string       `json:"model"`
+	OutputPath    string       `json:"output_path"`
+	Bytes         int          `json:"bytes"`
+	TokensPerSec  float64      `json:"tokens_per_sec"`
+	TTFTms        int          `json:"ttft_ms"`
+	ContextTokens int          `json:"context_tokens"`
+	DurationMS    int          `json:"duration_ms"`
+	UserPick      *bool        `json:"user_pick,omitempty"`
+	Notes         string       `json:"notes,omitempty"`
+	Error         string       `json:"error,omitempty"`
+	Trace         []trace.Step `json:"trace,omitempty"`
 }
 
 type Runner struct {
@@ -128,9 +130,15 @@ func (r Runner) run(ctx context.Context, req Request, parent domain.Job) ([]Resu
 				return results, err
 			}
 		}
+		tr := trace.New(r.Clock.Now)
 		start := r.Clock.Now()
-		completion, err := r.Client.Complete(ctx, model, req.Prompt)
-		result := Result{Model: model, DurationMS: elapsedMS(r.Clock.Now().Sub(start))}
+		var completion Completion
+		err := tr.Do("benchmark/complete", map[string]any{"model": model}, func() error {
+			var err error
+			completion, err = r.Client.Complete(ctx, model, req.Prompt)
+			return err
+		})
+		result := Result{Model: model, DurationMS: elapsedMS(r.Clock.Now().Sub(start)), Trace: append([]trace.Step(nil), tr.Steps...)}
 		if err != nil {
 			result.Error = err.Error()
 			results = append(results, result)
@@ -145,7 +153,9 @@ func (r Runner) run(ctx context.Context, req Request, parent domain.Job) ([]Resu
 		}
 		name := uniqueName(safeName(model)+".txt", used)
 		path := filepath.Join(req.OutputDir, name)
-		if err := os.WriteFile(path, []byte(completion.Text), 0644); err != nil {
+		if err := tr.Do("benchmark/write_output", map[string]any{"model": model, "path": path}, func() error {
+			return os.WriteFile(path, []byte(completion.Text), 0644)
+		}); err != nil {
 			if hasChild {
 				child.Status = domain.JobFailed
 				child.Error = err.Error()
@@ -153,6 +163,7 @@ func (r Runner) run(ctx context.Context, req Request, parent domain.Job) ([]Resu
 			}
 			return results, err
 		}
+		result.Trace = append([]trace.Step(nil), tr.Steps...)
 		result.OutputPath = path
 		result.Bytes = len(completion.Text)
 		result.TokensPerSec = completion.TokensPerSec

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"mycelium/internal/domain"
+	"mycelium/internal/trace"
 )
 
 type InstallRequest struct {
@@ -19,6 +20,7 @@ type InstallResult struct {
 	Preset     domain.Preset
 	Provenance Provenance
 	Progress   []ProgressEvent
+	Trace      []trace.Step
 }
 
 type Provenance struct {

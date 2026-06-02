@@ -9,6 +9,7 @@ import (
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
+	"mycelium/internal/trace"
 )
 
 type LeaseInspectorResolver interface {
@@ -22,6 +23,7 @@ type Recovery struct {
 	Owners   LeaseInspectorResolver
 	Rescue   RescueFunc
 	Clock    ports.Clock
+	Trace    *trace.Trace
 }
 
 func (r Recovery) RecoverPeer(ctx context.Context, deadPeerID string) (int, error) {
@@ -31,8 +33,12 @@ func (r Recovery) RecoverPeer(ctx context.Context, deadPeerID string) (int, erro
 	if deadPeerID == "" {
 		return 0, fmt.Errorf("dead peer id is required")
 	}
-	records, err := r.Registry.Snapshot(ctx)
-	if err != nil {
+	var records []domain.JobRecord
+	if err := r.step("recovery/snapshot", map[string]any{"dead_peer": deadPeerID}, func() error {
+		var err error
+		records, err = r.Registry.Snapshot(ctx)
+		return err
+	}); err != nil {
 		return 0, err
 	}
 	rescued := 0
@@ -40,18 +46,26 @@ func (r Recovery) RecoverPeer(ctx context.Context, deadPeerID string) (int, erro
 		if !r.shouldConsider(deadPeerID, rec) {
 			continue
 		}
-		decision, err := r.rescueDecision(ctx, deadPeerID, rec)
-		if err != nil {
+		var decision rescueDecision
+		if err := r.step("recovery/decide", map[string]any{"dead_peer": deadPeerID, "job_id": rec.JobID, "owner": rec.AssignedNode}, func() error {
+			var err error
+			decision, err = r.rescueDecision(ctx, deadPeerID, rec)
+			return err
+		}); err != nil {
 			return rescued, err
 		}
 		switch decision {
 		case rescueNow:
-			if err := r.Rescue(ctx, rec); err != nil {
+			if err := r.step("recovery/rescue", map[string]any{"dead_peer": deadPeerID, "job_id": rec.JobID}, func() error {
+				return r.Rescue(ctx, rec)
+			}); err != nil {
 				return rescued, err
 			}
 			rescued++
 		case rescuePartition:
-			if err := r.recordPartition(ctx, rec); err != nil {
+			if err := r.step("recovery/partition", map[string]any{"dead_peer": deadPeerID, "job_id": rec.JobID, "owner": rec.AssignedNode}, func() error {
+				return r.recordPartition(ctx, rec)
+			}); err != nil {
 				return rescued, err
 			}
 		case rescueSkip:
@@ -59,6 +73,13 @@ func (r Recovery) RecoverPeer(ctx context.Context, deadPeerID string) (int, erro
 		}
 	}
 	return rescued, nil
+}
+
+func (r Recovery) step(op string, input map[string]any, fn func() error) error {
+	if r.Trace == nil {
+		return fn()
+	}
+	return r.Trace.Do(op, input, fn)
 }
 
 func (r Recovery) shouldConsider(deadPeerID string, rec domain.JobRecord) bool {

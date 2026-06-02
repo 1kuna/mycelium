@@ -16,6 +16,7 @@ import (
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
+	"mycelium/internal/trace"
 )
 
 type Installer struct {
@@ -74,39 +75,63 @@ func (j *InstallJob) Wait(ctx context.Context) (InstallResult, error) {
 }
 
 func (i Installer) install(ctx context.Context, req InstallRequest, onProgress ProgressFunc) (InstallResult, error) {
+	tr := trace.New(i.now)
+	var progress []ProgressEvent
+	result := func(preset domain.Preset, prov Provenance) InstallResult {
+		return InstallResult{
+			Preset:     preset,
+			Provenance: prov,
+			Progress:   append([]ProgressEvent(nil), progress...),
+			Trace:      append([]trace.Step(nil), tr.Steps...),
+		}
+	}
 	if err := ctx.Err(); err != nil {
-		return InstallResult{}, err
+		return result(domain.Preset{}, Provenance{}), err
 	}
 	if req.Source == "" {
-		return InstallResult{}, fmt.Errorf("source is required")
+		return result(domain.Preset{}, Provenance{}), fmt.Errorf("source is required")
 	}
 	if i.StoreDir == "" {
-		return InstallResult{}, fmt.Errorf("store dir is required")
+		return result(domain.Preset{}, Provenance{}), fmt.Errorf("store dir is required")
 	}
-	if err := ensureStore(i.StoreDir); err != nil {
-		return InstallResult{}, err
+	if err := tr.Do("install/ensure_store", map[string]any{"store_dir": i.StoreDir}, func() error {
+		return ensureStore(i.StoreDir)
+	}); err != nil {
+		return result(domain.Preset{}, Provenance{}), err
 	}
 	now := i.now()
 	jobID := installJobID(req)
-	state, err := readInstallState(i.StoreDir, jobID)
-	if err != nil {
-		return InstallResult{}, err
+	var state InstallState
+	if err := tr.Do("install/read_state", map[string]any{"job_id": jobID}, func() error {
+		var err error
+		state, err = readInstallState(i.StoreDir, jobID)
+		return err
+	}); err != nil {
+		return result(domain.Preset{}, Provenance{}), err
 	}
+	progress = append([]ProgressEvent(nil), state.Progress...)
 	if state.Status == "ready" && state.PresetID != "" {
-		preset, err := ReadPreset(i.StoreDir, state.PresetID)
-		if err != nil {
-			return InstallResult{}, err
+		var preset domain.Preset
+		if err := tr.Do("install/read_ready_preset", map[string]any{"preset_id": state.PresetID}, func() error {
+			var err error
+			preset, err = ReadPreset(i.StoreDir, state.PresetID)
+			return err
+		}); err != nil {
+			return result(domain.Preset{}, Provenance{}), err
 		}
-		prov, err := ReadProvenance(i.StoreDir, state.PresetID)
-		if err != nil {
-			return InstallResult{}, err
+		var prov Provenance
+		if err := tr.Do("install/read_ready_provenance", map[string]any{"preset_id": state.PresetID}, func() error {
+			var err error
+			prov, err = ReadProvenance(i.StoreDir, state.PresetID)
+			return err
+		}); err != nil {
+			return result(domain.Preset{}, Provenance{}), err
 		}
-		return InstallResult{Preset: preset, Provenance: prov, Progress: state.Progress}, nil
+		return result(preset, prov), nil
 	}
 	if state.JobID == "" {
 		state = InstallState{JobID: jobID, Source: req.Source, Status: "created", UpdatedAt: now}
 	}
-	progress := append([]ProgressEvent(nil), state.Progress...)
 	emit := func(stage, msg string) error {
 		event := ProgressEvent{JobID: jobID, Stage: stage, Message: msg, At: i.now()}
 		progress = append(progress, event)
@@ -124,7 +149,7 @@ func (i Installer) install(ctx context.Context, req InstallRequest, onProgress P
 		return nil
 	}
 	if err := emit("import", "inspecting source"); err != nil {
-		return InstallResult{Progress: progress}, err
+		return result(domain.Preset{}, Provenance{}), err
 	}
 	draft := importers.Draft{}
 	if state.DraftName != "" {
@@ -132,16 +157,21 @@ func (i Installer) install(ctx context.Context, req InstallRequest, onProgress P
 		draft.Importer = state.DraftImporter
 		draft.Size = state.DraftSize
 	} else {
-		draft, err = importers.Import(ctx, req.Source)
-		if err != nil {
-			return InstallResult{Progress: progress}, err
+		if err := tr.Do("install/import_source", map[string]any{"source": req.Source}, func() error {
+			var err error
+			draft, err = importers.Import(ctx, req.Source)
+			return err
+		}); err != nil {
+			return result(domain.Preset{}, Provenance{}), err
 		}
 		state.DraftName = draft.Name
 		state.DraftImporter = draft.Importer
 		state.DraftSize = draft.Size
 		state.UpdatedAt = i.now()
-		if err := writeInstallState(i.StoreDir, state); err != nil {
-			return InstallResult{Progress: progress}, err
+		if err := tr.Do("install/write_draft_state", map[string]any{"job_id": jobID}, func() error {
+			return writeInstallState(i.StoreDir, state)
+		}); err != nil {
+			return result(domain.Preset{}, Provenance{}), err
 		}
 	}
 	id := req.ID
@@ -152,7 +182,7 @@ func (i Installer) install(ctx context.Context, req InstallRequest, onProgress P
 		id = sanitizeID(strings.TrimSuffix(draft.Name, filepath.Ext(draft.Name)))
 	}
 	if id == "" {
-		return InstallResult{}, fmt.Errorf("could not derive preset id from %q", req.Source)
+		return result(domain.Preset{}, Provenance{}), fmt.Errorf("could not derive preset id from %q", req.Source)
 	}
 	state.PresetID = id
 	model := req.Model
@@ -173,21 +203,25 @@ func (i Installer) install(ctx context.Context, req InstallRequest, onProgress P
 	}
 
 	stageDir := filepath.Join(i.StoreDir, "jobs", jobID)
-	if err := os.MkdirAll(stageDir, 0755); err != nil {
-		return InstallResult{Progress: progress}, err
+	if err := tr.Do("install/create_stage_dir", map[string]any{"job_id": jobID}, func() error {
+		return os.MkdirAll(stageDir, 0755)
+	}); err != nil {
+		return result(domain.Preset{}, Provenance{}), err
 	}
 
 	if err := emit("copy", "copying model artifact"); err != nil {
-		return InstallResult{Progress: progress}, err
+		return result(domain.Preset{}, Provenance{}), err
 	}
 	finalModel := filepath.Join(i.StoreDir, "models", id+"-"+draft.Name)
 	stageModel := filepath.Join(stageDir, "model")
 	if !fileExists(finalModel) && !fileExists(stageModel) {
 		if draft.Path == "" {
-			return InstallResult{Progress: progress}, fmt.Errorf("install job %q has no staged artifact and source must be re-imported", jobID)
+			return result(domain.Preset{}, Provenance{}), fmt.Errorf("install job %q has no staged artifact and source must be re-imported", jobID)
 		}
-		if err := copyFile(ctx, draft.Path, stageModel); err != nil {
-			return InstallResult{Progress: progress}, err
+		if err := tr.Do("install/copy_artifact", map[string]any{"job_id": jobID, "preset_id": id}, func() error {
+			return copyFile(ctx, draft.Path, stageModel)
+		}); err != nil {
+			return result(domain.Preset{}, Provenance{}), err
 		}
 	}
 	preset := domain.Preset{
@@ -212,53 +246,67 @@ func (i Installer) install(ctx context.Context, req InstallRequest, onProgress P
 	stagePreset := filepath.Join(stageDir, "preset.json")
 	stageProvenance := filepath.Join(stageDir, "provenance.json")
 	if !fileExists(filepath.Join(i.StoreDir, "presets", id+".json")) && !fileExists(stagePreset) {
-		if err := writeJSON(stagePreset, preset); err != nil {
-			return InstallResult{Progress: progress}, err
+		if err := tr.Do("install/write_stage_preset", map[string]any{"preset_id": id}, func() error {
+			return writeJSON(stagePreset, preset)
+		}); err != nil {
+			return result(domain.Preset{}, Provenance{}), err
 		}
 	}
 	if !fileExists(filepath.Join(i.StoreDir, "provenance", id+".json")) && !fileExists(stageProvenance) {
-		if err := writeJSON(stageProvenance, prov); err != nil {
-			return InstallResult{Progress: progress}, err
+		if err := tr.Do("install/write_stage_provenance", map[string]any{"preset_id": id}, func() error {
+			return writeJSON(stageProvenance, prov)
+		}); err != nil {
+			return result(domain.Preset{}, Provenance{}), err
 		}
 	}
 	state.ModelPath = finalModel
 	state.PresetPath = filepath.Join(i.StoreDir, "presets", id+".json")
 	state.ProvenancePath = filepath.Join(i.StoreDir, "provenance", id+".json")
 	state.UpdatedAt = i.now()
-	if err := writeInstallState(i.StoreDir, state); err != nil {
-		return InstallResult{Progress: progress}, err
+	if err := tr.Do("install/write_paths_state", map[string]any{"job_id": jobID, "preset_id": id}, func() error {
+		return writeInstallState(i.StoreDir, state)
+	}); err != nil {
+		return result(domain.Preset{}, Provenance{}), err
 	}
 	if err := ctx.Err(); err != nil {
-		return InstallResult{Progress: progress}, err
+		return result(domain.Preset{}, Provenance{}), err
 	}
 
 	if err := emit("commit", "registering preset"); err != nil {
-		return InstallResult{Progress: progress}, err
+		return result(domain.Preset{}, Provenance{}), err
 	}
 	if !fileExists(finalModel) {
-		if err := os.Rename(stageModel, finalModel); err != nil {
-			return InstallResult{Progress: progress}, err
+		if err := tr.Do("install/commit_artifact", map[string]any{"preset_id": id}, func() error {
+			return os.Rename(stageModel, finalModel)
+		}); err != nil {
+			return result(domain.Preset{}, Provenance{}), err
 		}
 	}
 	if !fileExists(state.ProvenancePath) {
-		if err := os.Rename(stageProvenance, state.ProvenancePath); err != nil {
-			return InstallResult{Progress: progress}, err
+		if err := tr.Do("install/commit_provenance", map[string]any{"preset_id": id}, func() error {
+			return os.Rename(stageProvenance, state.ProvenancePath)
+		}); err != nil {
+			return result(domain.Preset{}, Provenance{}), err
 		}
 	}
 	if !fileExists(state.PresetPath) {
-		if err := os.Rename(stagePreset, state.PresetPath); err != nil {
-			return InstallResult{Progress: progress}, err
+		if err := tr.Do("install/commit_preset", map[string]any{"preset_id": id}, func() error {
+			return os.Rename(stagePreset, state.PresetPath)
+		}); err != nil {
+			return result(domain.Preset{}, Provenance{}), err
 		}
 	}
 	state.Status = "ready"
 	state.UpdatedAt = i.now()
-	if err := writeInstallState(i.StoreDir, state); err != nil {
-		return InstallResult{Progress: progress}, err
+	if err := tr.Do("install/write_ready_state", map[string]any{"job_id": jobID, "preset_id": id}, func() error {
+		return writeInstallState(i.StoreDir, state)
+	}); err != nil {
+		return result(domain.Preset{}, Provenance{}), err
 	}
 	if err := emit("ready", "preset is materialized"); err != nil {
-		return InstallResult{Progress: progress}, err
+		return result(domain.Preset{}, Provenance{}), err
 	}
-	return InstallResult{Preset: preset, Provenance: prov, Progress: progress}, nil
+	return result(preset, prov), nil
 }
 
 func modelAliases(id, model, modelRef string) []string {

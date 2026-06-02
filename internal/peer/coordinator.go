@@ -9,6 +9,7 @@ import (
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
+	"mycelium/internal/trace"
 )
 
 const defaultMaxReplans = 2
@@ -35,6 +36,7 @@ type Coordinator struct {
 	clock             ports.Clock
 	maxReplans        int
 	privatePayloadKey []byte
+	trace             *trace.Trace
 
 	mu           sync.Mutex
 	claimed      map[string]claimedJob
@@ -58,6 +60,12 @@ func WithMaxReplans(n int) CoordinatorOption {
 func WithPrivatePayloadKey(key []byte) CoordinatorOption {
 	return func(c *Coordinator) {
 		c.privatePayloadKey = append([]byte(nil), key...)
+	}
+}
+
+func WithTrace(tr *trace.Trace) CoordinatorOption {
+	return func(c *Coordinator) {
+		c.trace = tr
 	}
 }
 
@@ -87,8 +95,13 @@ func (c *Coordinator) ClaimJob(ctx context.Context, jobID string) error {
 	if jobID == "" {
 		return fmt.Errorf("job id is required")
 	}
-	job, payload, err := c.jobs.Job(ctx, jobID)
-	if err != nil {
+	var job domain.Job
+	var payload []byte
+	if err := c.step("coordinator/job_source", map[string]any{"job_id": jobID}, func() error {
+		var err error
+		job, payload, err = c.jobs.Job(ctx, jobID)
+		return err
+	}); err != nil {
 		return err
 	}
 	if job.ID != jobID {
@@ -100,7 +113,7 @@ func (c *Coordinator) ClaimJob(ctx context.Context, jobID string) error {
 	c.mu.Lock()
 	c.claimed[jobID] = claimedJob{job: job, payload: append([]byte(nil), payload...)}
 	c.mu.Unlock()
-	return c.record(ctx, jobID, domain.JobPlacing, "", 0)
+	return c.recordStep(ctx, jobID, domain.JobPlacing, "", 0)
 }
 
 func (c *Coordinator) Plan(ctx context.Context, jobID string) (domain.PlacementDecision, error) {
@@ -111,20 +124,28 @@ func (c *Coordinator) Plan(ctx context.Context, jobID string) (domain.PlacementD
 	if err != nil {
 		return domain.PlacementDecision{}, err
 	}
-	fleet, err := c.fleet.Snapshot(ctx)
-	if err != nil {
+	var fleet domain.FleetSnapshot
+	if err := c.step("coordinator/fleet_snapshot", map[string]any{"job_id": jobID}, func() error {
+		var err error
+		fleet, err = c.fleet.Snapshot(ctx)
+		return err
+	}); err != nil {
 		return domain.PlacementDecision{}, err
 	}
-	decision, err := c.placer.Place(ctx, claimed.job, fleet)
-	if err != nil {
-		_ = c.record(ctx, jobID, domain.JobFailed, "", 0)
+	var decision domain.PlacementDecision
+	if err := c.step("coordinator/place", map[string]any{"job_id": jobID}, func() error {
+		var err error
+		decision, err = c.placer.Place(ctx, claimed.job, fleet)
+		return err
+	}); err != nil {
+		_ = c.recordStep(ctx, jobID, domain.JobFailed, "", 0)
 		return decision, err
 	}
 	status := domain.JobPlacing
 	if decision.Action == domain.ActionQueued {
 		status = domain.JobQueued
 	}
-	if err := c.record(ctx, jobID, status, decision.NodeID, 0); err != nil {
+	if err := c.recordStep(ctx, jobID, status, decision.NodeID, 0); err != nil {
 		return domain.PlacementDecision{}, err
 	}
 	return decision, nil
@@ -144,24 +165,32 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 	replans := 0
 	for {
 		if plan.Action == domain.ActionQueued {
-			return domain.Lease{}, c.record(ctx, plan.JobID, domain.JobQueued, "", 0)
+			return domain.Lease{}, c.recordStep(ctx, plan.JobID, domain.JobQueued, "", 0)
 		}
 		if plan.NodeID == "" {
 			return domain.Lease{}, fmt.Errorf("plan for job %q has no owner node", plan.JobID)
 		}
-		owner, err := c.owners.AdmissionController(plan.NodeID)
-		if err != nil {
-			_ = c.record(ctx, plan.JobID, domain.JobQueued, "", 0)
+		var owner ports.AdmissionController
+		if err := c.step("coordinator/resolve_owner", map[string]any{"job_id": plan.JobID, "node_id": plan.NodeID}, func() error {
+			var err error
+			owner, err = c.owners.AdmissionController(plan.NodeID)
+			return err
+		}); err != nil {
+			_ = c.recordStep(ctx, plan.JobID, domain.JobQueued, "", 0)
 			return domain.Lease{}, err
 		}
-		offer, err := owner.Offer(ctx, domain.AdmissionRequest{
-			Job:            claimed.job,
-			Claim:          plan.Claim,
-			NodeID:         plan.NodeID,
-			AcceleratorSet: append([]int(nil), plan.AcceleratorSet...),
-			InstanceID:     plan.InstanceID,
-		})
-		if err != nil {
+		var offer domain.LeaseOffer
+		if err := c.step("coordinator/owner_offer", map[string]any{"job_id": plan.JobID, "node_id": plan.NodeID, "instance_id": plan.InstanceID}, func() error {
+			var err error
+			offer, err = owner.Offer(ctx, domain.AdmissionRequest{
+				Job:            claimed.job,
+				Claim:          plan.Claim,
+				NodeID:         plan.NodeID,
+				AcceleratorSet: append([]int(nil), plan.AcceleratorSet...),
+				InstanceID:     plan.InstanceID,
+			})
+			return err
+		}); err != nil {
 			if c.shouldReplan(err, replans) {
 				replans++
 				plan, err = c.Plan(ctx, plan.JobID)
@@ -170,11 +199,15 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 				}
 				continue
 			}
-			_ = c.record(ctx, plan.JobID, domain.JobFailed, plan.NodeID, 0)
+			_ = c.recordStep(ctx, plan.JobID, domain.JobFailed, plan.NodeID, 0)
 			return domain.Lease{}, err
 		}
-		lease, err := owner.Commit(ctx, offer.OfferID, offer.Fence)
-		if err != nil {
+		var lease domain.Lease
+		if err := c.step("coordinator/owner_commit", map[string]any{"job_id": plan.JobID, "offer_id": offer.OfferID, "fence": offer.Fence}, func() error {
+			var err error
+			lease, err = owner.Commit(ctx, offer.OfferID, offer.Fence)
+			return err
+		}); err != nil {
 			if c.shouldReplan(err, replans) {
 				replans++
 				plan, err = c.Plan(ctx, plan.JobID)
@@ -184,16 +217,16 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 				continue
 			}
 			if replanable(err) {
-				_ = c.record(ctx, plan.JobID, domain.JobQueued, "", offer.Fence)
+				_ = c.recordStep(ctx, plan.JobID, domain.JobQueued, "", offer.Fence)
 			} else {
-				_ = c.record(ctx, plan.JobID, domain.JobFailed, plan.NodeID, offer.Fence)
+				_ = c.recordStep(ctx, plan.JobID, domain.JobFailed, plan.NodeID, offer.Fence)
 			}
 			return domain.Lease{}, err
 		}
 		c.mu.Lock()
 		c.leases[plan.JobID] = lease
 		c.mu.Unlock()
-		if err := c.record(ctx, plan.JobID, domain.JobRunning, plan.NodeID, offer.Fence); err != nil {
+		if err := c.recordStep(ctx, plan.JobID, domain.JobRunning, plan.NodeID, offer.Fence); err != nil {
 			return domain.Lease{}, err
 		}
 		return lease, nil
@@ -212,18 +245,24 @@ func (c *Coordinator) Release(ctx context.Context, jobID string) error {
 		return err
 	}
 	if lease.ID != "" {
-		owner, err := c.owners.AdmissionController(lease.NodeID)
-		if err != nil {
+		var owner ports.AdmissionController
+		if err := c.step("coordinator/resolve_owner", map[string]any{"job_id": jobID, "node_id": lease.NodeID}, func() error {
+			var err error
+			owner, err = c.owners.AdmissionController(lease.NodeID)
+			return err
+		}); err != nil {
 			return err
 		}
-		if err := owner.Release(ctx, lease.ID); err != nil {
+		if err := c.step("coordinator/owner_release", map[string]any{"job_id": jobID, "lease_id": lease.ID}, func() error {
+			return owner.Release(ctx, lease.ID)
+		}); err != nil {
 			return err
 		}
 	}
 	c.mu.Lock()
 	delete(c.leases, jobID)
 	c.mu.Unlock()
-	return c.record(ctx, jobID, domain.JobDone, lease.NodeID, 0)
+	return c.recordStep(ctx, jobID, domain.JobDone, lease.NodeID, 0)
 }
 
 func (c *Coordinator) validate() error {
@@ -287,6 +326,12 @@ func (c *Coordinator) record(ctx context.Context, jobID string, status domain.Jo
 	})
 }
 
+func (c *Coordinator) recordStep(ctx context.Context, jobID string, status domain.JobStatus, assignedNode string, fence uint64) error {
+	return c.step("coordinator/record", map[string]any{"job_id": jobID, "status": string(status), "node_id": assignedNode, "fence": fence}, func() error {
+		return c.record(ctx, jobID, status, assignedNode, fence)
+	})
+}
+
 func (c *Coordinator) nextRecordTime() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -306,6 +351,13 @@ func (c *Coordinator) shouldReplan(err error, replans int) bool {
 		return false
 	}
 	return true
+}
+
+func (c *Coordinator) step(op string, input map[string]any, fn func() error) error {
+	if c.trace == nil {
+		return fn()
+	}
+	return c.trace.Do(op, input, fn)
 }
 
 func replanable(err error) bool {
