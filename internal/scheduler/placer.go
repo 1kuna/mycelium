@@ -207,6 +207,12 @@ func (p *Placer) selectWarmInstance(ctx context.Context, job domain.Job, preset 
 				if _, mismatch := nodeSelectorMismatch(job.NodeSelector, node); mismatch {
 					continue
 				}
+				if _, mismatch := presetNodeMismatch(preset, node); mismatch {
+					continue
+				}
+				if _, mismatch := presetBackendMismatch(preset, node); mismatch {
+					continue
+				}
 				if _, drop := nodeDiskDropReason(preset, node, fleet); drop {
 					continue
 				}

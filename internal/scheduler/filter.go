@@ -117,6 +117,14 @@ func (p *Placer) filterPlacementCandidates(ctx context.Context, job domain.Job, 
 			dropped[node.ID] = reason
 			continue
 		}
+		if reason, ok := presetNodeMismatch(preset, node); ok {
+			dropped[node.ID] = reason
+			continue
+		}
+		if reason, ok := presetBackendMismatch(preset, node); ok {
+			dropped[node.ID] = reason
+			continue
+		}
 		if reason, ok := nodeDiskDropReason(preset, node, fleet); ok {
 			dropped[node.ID] = reason
 			continue
@@ -170,6 +178,27 @@ func nodeSelectorMismatch(selector map[string]string, node domain.Node) (string,
 		if node.Labels[key] != want {
 			return "label." + key, true
 		}
+	}
+	return "", false
+}
+
+func presetNodeMismatch(preset domain.Preset, node domain.Node) (string, bool) {
+	if preset.NodeID != "" && preset.NodeID != node.ID {
+		return "preset.node_id", true
+	}
+	return "", false
+}
+
+func presetBackendMismatch(preset domain.Preset, node domain.Node) (string, bool) {
+	if preset.Backend == "" {
+		return "", false
+	}
+	backend := node.Labels[domain.LabelPeerBackend]
+	if backend == "" {
+		return "", false
+	}
+	if backend != string(preset.Backend) {
+		return "label." + domain.LabelPeerBackend, true
 	}
 	return "", false
 }
