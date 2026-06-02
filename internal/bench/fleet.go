@@ -644,10 +644,14 @@ func submitFleetJob(ctx context.Context, cfg FleetBenchmarkConfig, waveID string
 func collectSnapshots(ctx context.Context, cfg FleetBenchmarkConfig, client *http.Client, stage string, clk ports.Clock) []FleetSnapshotMark {
 	var out []FleetSnapshotMark
 	for _, peer := range cfg.Peers {
+		token := firstNonEmpty(peer.RPCToken, cfg.RPCToken)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(peer.URL, "/")+"/snapshot", nil)
 		if err != nil {
 			out = append(out, FleetSnapshotMark{At: clk.Now(), Stage: stage, PeerID: peer.ID, Error: err.Error()})
 			continue
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		resp, err := client.Do(req)
 		if err != nil {
