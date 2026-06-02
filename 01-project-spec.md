@@ -325,7 +325,6 @@ The repo will carry an `AGENTS.md` (runtime agent behavior) and a small set of s
 - `skills/backend-adapters.md` — how a backend adapter is structured (command template, health path, env, capability map), with the llama.cpp / vLLM / MLX / custom examples worked.
 - `skills/kv-estimation.md` — backend-aware fit math; how to call gguf-parser; how vLLM/SGLang reservation maps to a claim.
 - `skills/scheduler-model.md` — the resource/lease/preemption model in §3, condensed, so the agent does not "improve" it back into a naive FIFO.
-- `skills/peer-coordination.md` — the peer model of §3.12 condensed: coordinator-decides/owner-commits, optimistic-concurrency commit (fence/version), the job registry + heartbeat recovery, group telemetry analysis, and the inviolable rule that it is **job** distribution, never **model** distribution.
 
 These are written during scaffolding (Phase 0) so later phases inherit them.
 
