@@ -3,9 +3,9 @@ package gateway
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"mycelium/internal/domain"
 	nodeagent "mycelium/internal/node"
@@ -237,18 +237,31 @@ func TestPeerDirectorySnapshotsPeersInParallelAndSorts(t *testing.T) {
 		close(done)
 	}()
 	wantEntered := map[string]bool{}
-	for len(wantEntered) < 2 {
+	for i := 0; len(wantEntered) < 2 && i < 1000; i++ {
 		select {
 		case id := <-entered:
 			wantEntered[id] = true
-		case <-time.After(time.Second):
-			t.Fatal("snapshot did not fan out to both peers")
+		default:
+			runtime.Gosched()
 		}
 	}
+	if len(wantEntered) != 2 {
+		t.Fatal("snapshot did not fan out to both peers")
+	}
 	close(release)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
+	finished := false
+	for i := 0; i < 1000; i++ {
+		select {
+		case <-done:
+			finished = true
+		default:
+			runtime.Gosched()
+		}
+		if finished {
+			break
+		}
+	}
+	if !finished {
 		t.Fatal("snapshot did not finish after peers were released")
 	}
 	if err != nil {

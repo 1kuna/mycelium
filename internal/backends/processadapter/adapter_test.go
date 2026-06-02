@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -157,24 +158,28 @@ func TestWaitReadyRetriesUntilHealthy(t *testing.T) {
 		done <- adapter.WaitReady(context.Background(), "ready.test:8080")
 	}()
 	<-firstCall
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	timeout := time.After(time.Second)
-	for {
+	waitForFakeTimer(t, clock)
+	clock.Advance(time.Second)
+	finished := false
+	for i := 0; i < 1000; i++ {
 		select {
-		case <-ticker.C:
-			clock.Advance(time.Second)
-		case <-timeout:
-			t.Fatal("WaitReady did not retry")
 		case err := <-done:
 			if err != nil {
 				t.Fatalf("WaitReady: %v", err)
 			}
-			if calls < 2 {
-				t.Fatalf("calls = %d", calls)
-			}
-			return
+			finished = true
+		default:
+			runtime.Gosched()
 		}
+		if finished {
+			break
+		}
+	}
+	if !finished {
+		t.Fatal("WaitReady did not retry")
+	}
+	if calls < 2 {
+		t.Fatalf("calls = %d", calls)
 	}
 }
 
@@ -417,17 +422,11 @@ func (p *fakeProcess) finish(err error) {
 
 func waitForFakeTimer(t *testing.T, clock *mocks.FakeClock) {
 	t.Helper()
-	deadline := time.After(time.Second)
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
-	for {
+	for i := 0; i < 1000; i++ {
 		if clock.TimerCount() > 0 {
 			return
 		}
-		select {
-		case <-ticker.C:
-		case <-deadline:
-			t.Fatal("timer was not registered")
-		}
+		runtime.Gosched()
 	}
+	t.Fatal("timer was not registered")
 }

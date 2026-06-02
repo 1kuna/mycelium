@@ -129,14 +129,18 @@ func TestCachedPeerDiscoveryWatchPeersEmitsFreshEntries(t *testing.T) {
 		t.Fatalf("watch peer = %+v", got)
 	}
 	cancel()
-	select {
-	case _, ok := <-ch:
-		if ok {
-			t.Fatal("watch channel stayed open after cancel")
+	for i := 0; i < 1000; i++ {
+		select {
+		case _, ok := <-ch:
+			if ok {
+				t.Fatal("watch channel stayed open after cancel")
+			}
+			return
+		default:
+			runtime.Gosched()
 		}
-	case <-time.After(time.Second):
-		t.Fatal("watch channel did not close after cancel")
 	}
+	t.Fatal("watch channel did not close after cancel")
 }
 
 func TestCachedPeerDiscoveryStartConsumesUpstreamWatch(t *testing.T) {

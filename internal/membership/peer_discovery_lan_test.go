@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -234,49 +235,59 @@ func TestPeerLANDiscoveryHelperBranches(t *testing.T) {
 
 func assertPeers(t *testing.T, results <-chan []domain.Peer, errs <-chan error, ids ...string) {
 	t.Helper()
-	select {
-	case err := <-errs:
-		t.Fatalf("Peers: %v", err)
-	case peers := <-results:
-		if len(peers) != len(ids) {
-			t.Fatalf("peers = %+v", peers)
-		}
-		seen := map[string]bool{}
-		for _, peer := range peers {
-			seen[peer.ID] = true
-		}
-		for _, id := range ids {
-			if !seen[id] {
+	for i := 0; i < 1000; i++ {
+		select {
+		case err := <-errs:
+			t.Fatalf("Peers: %v", err)
+		case peers := <-results:
+			if len(peers) != len(ids) {
 				t.Fatalf("peers = %+v", peers)
 			}
+			seen := map[string]bool{}
+			for _, peer := range peers {
+				seen[peer.ID] = true
+			}
+			for _, id := range ids {
+				if !seen[id] {
+					t.Fatalf("peers = %+v", peers)
+				}
+			}
+			return
+		default:
+			runtime.Gosched()
 		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for peers")
 	}
+	t.Fatal("peers were not ready")
 }
 
 func readPeer(t *testing.T, ch <-chan domain.Peer) domain.Peer {
 	t.Helper()
-	select {
-	case peer, ok := <-ch:
-		if !ok {
-			t.Fatal("peer channel closed")
+	for i := 0; i < 1000; i++ {
+		select {
+		case peer, ok := <-ch:
+			if !ok {
+				t.Fatal("peer channel closed")
+			}
+			return peer
+		default:
+			runtime.Gosched()
 		}
-		return peer
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for peer")
 	}
+	t.Fatal("peer was not ready")
 	return domain.Peer{}
 }
 
 func readErr(t *testing.T, errs <-chan error) error {
 	t.Helper()
-	select {
-	case err := <-errs:
-		return err
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for error")
+	for i := 0; i < 1000; i++ {
+		select {
+		case err := <-errs:
+			return err
+		default:
+			runtime.Gosched()
+		}
 	}
+	t.Fatal("error was not ready")
 	return nil
 }
 
