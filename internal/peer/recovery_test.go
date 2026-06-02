@@ -21,6 +21,8 @@ func TestRecoveryRescuesDeadPeerUnfinishedJobsAfterOwnerCheck(t *testing.T) {
 		recoveryRecord("queued", "dead-peer", "", domain.JobQueued),
 		recoveryRecord("placing", "dead-peer", "", domain.JobPlacing),
 		recoveryRecord("owner-dead", "dead-peer", "dead-peer", domain.JobRunning),
+		recoveryRecord("assigned-dead", "live-peer", "dead-peer", domain.JobRunning),
+		recoveryRecord("assigned-done", "live-peer", "dead-peer", domain.JobDone),
 		recoveryRecord("owner-live", "dead-peer", "node-live", domain.JobRunning),
 		recoveryRecord("owner-finished", "dead-peer", "node-finished", domain.JobRunning),
 		recoveryRecord("owner-unreachable", "dead-peer", "node-unreachable", domain.JobRunning),
@@ -55,7 +57,7 @@ func TestRecoveryRescuesDeadPeerUnfinishedJobsAfterOwnerCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecoverPeer: %v", err)
 	}
-	want := []string{"queued", "placing", "owner-dead", "owner-finished"}
+	want := []string{"queued", "placing", "owner-dead", "assigned-dead", "owner-finished"}
 	if count != len(want) || !reflect.DeepEqual(rescued, want) {
 		t.Fatalf("rescued count=%d ids=%+v", count, rescued)
 	}
@@ -123,7 +125,7 @@ func TestRecoveryErrorPaths(t *testing.T) {
 		t.Fatalf("rescue err/count = %v %d", err, count)
 	}
 	helpers := Recovery{}
-	if !unfinished(domain.JobLoading) || unfinished(domain.JobDone) || !helpers.shouldConsider("dead-peer", recoveryRecord("queued", "dead-peer", "", domain.JobQueued)) || helpers.shouldConsider("dead-peer", recoveryRecord("other", "other-peer", "", domain.JobQueued)) {
+	if !unfinished(domain.JobLoading) || unfinished(domain.JobDone) || !helpers.shouldConsider("dead-peer", recoveryRecord("queued", "dead-peer", "", domain.JobQueued)) || !helpers.shouldConsider("dead-peer", recoveryRecord("assigned", "other-peer", "dead-peer", domain.JobRunning)) || helpers.shouldConsider("dead-peer", recoveryRecord("other", "other-peer", "", domain.JobQueued)) {
 		t.Fatal("status consideration helpers drifted")
 	}
 }
@@ -144,7 +146,7 @@ func TestRecoveryPartitionEvidenceErrorAndDefaultClock(t *testing.T) {
 
 	registry := NewJobRegistry()
 	future := rec
-	future.UpdatedAt = time.Now().UTC().Add(time.Hour)
+	future.UpdatedAt = time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC)
 	if err := (Recovery{Registry: registry}).recordPartition(ctx, future); err != nil {
 		t.Fatalf("recordPartition: %v", err)
 	}
