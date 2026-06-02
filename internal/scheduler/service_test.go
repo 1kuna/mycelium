@@ -1359,6 +1359,35 @@ func TestServiceResolveAndPreemptionErrors(t *testing.T) {
 	}
 }
 
+func TestServiceResolveWarmInstanceUsesOwnerNode(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(50, 0).UTC())
+	nodeA := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	nodeB := fixtures.MakeNode(fixtures.WithNodeID("node-b"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithWeights(0))
+	colliding := fixtures.MakeInstance(fixtures.WithInstanceID("inst_1"), fixtures.WithInstancePreset("other"), fixtures.OnNode(nodeA.ID))
+	target := fixtures.MakeInstance(fixtures.WithInstanceID("inst_1"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(nodeB.ID))
+	service := &Service{
+		Nodes: staticNodes{agents: map[string]*mocks.NodeAgent{
+			nodeA.ID: mocks.NewNodeAgent(nodeA),
+			nodeB.ID: mocks.NewNodeAgent(nodeB),
+		}},
+		Queue: NewQueue(clock),
+		Clock: clock,
+	}
+
+	got, err := service.resolveInstance(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID)), domain.PlacementDecision{
+		InstanceID: target.ID,
+		NodeID:     nodeB.ID,
+		Action:     domain.ActionWarmInstance,
+	}, domain.FleetSnapshot{Instances: []domain.ModelInstance{colliding, target}})
+	if err != nil {
+		t.Fatalf("resolveInstance: %v", err)
+	}
+	if got.NodeID != nodeB.ID || got.PresetID != preset.ID {
+		t.Fatalf("resolved wrong warm instance: %+v", got)
+	}
+}
+
 func leaseLifecycleService(clock *mocks.FakeClock, store *runtimeStore) *Service {
 	return &Service{
 		Placer: fakePlacer{},

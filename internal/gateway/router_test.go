@@ -66,6 +66,29 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 }
 
+func TestRouterResolveWarmInstanceUsesOwnerNode(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithPresetID("spark-preset"))
+	preset.Backend = domain.BackendVLLM
+	colliding := fixtures.MakeInstance(fixtures.WithInstanceID("inst_1"), fixtures.WithInstancePreset("b70-preset"), fixtures.OnNode("b70-bench"))
+	target := fixtures.MakeInstance(fixtures.WithInstanceID("inst_1"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode("spark-bench"))
+	router := &Router{}
+
+	got, loaded, err := router.resolveInstance(context.Background(), domain.PlacementDecision{
+		InstanceID: target.ID,
+		NodeID:     target.NodeID,
+		Action:     domain.ActionWarmInstance,
+	}, preset, domain.FleetSnapshot{Instances: []domain.ModelInstance{colliding, target}})
+	if err != nil {
+		t.Fatalf("resolveInstance: %v", err)
+	}
+	if loaded {
+		t.Fatal("warm resolve should not load")
+	}
+	if got.NodeID != target.NodeID || got.PresetID != preset.ID {
+		t.Fatalf("resolved wrong warm instance: %+v", got)
+	}
+}
+
 func TestRouterPushesMetricToRemoteOwner(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
