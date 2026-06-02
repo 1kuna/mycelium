@@ -147,7 +147,7 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 	}
 	lease := s.finalizeOwnerLease(job, inst, decision, ownerLease)
 	if ownerLease.ID != "" {
-		if err := s.bindOwnerInstance(ctx, lease.NodeID, lease.ID, lease.InstanceID); err != nil {
+		if err := s.ensureOwnerLeaseBound(ctx, ownerLease, lease); err != nil {
 			job.Status = domain.JobFailed
 			_ = s.Store.SaveJob(ctx, job)
 			if releaseErr := releaseOwner(); releaseErr != nil {
@@ -258,10 +258,14 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	}
 	lease := s.finalizeOwnerLease(job, inst, decision, ownerLease)
 	if ownerLease.ID != "" {
-		if err := s.bindOwnerInstance(ctx, lease.NodeID, lease.ID, lease.InstanceID); err != nil {
+		if err := s.ensureOwnerLeaseBound(ctx, ownerLease, lease); err != nil {
 			job.Status = domain.JobFailed
 			_ = s.Store.SaveJob(ctx, job)
-			if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
+			cleanupErr := s.Coordinator.Release(ctx, job.ID)
+			if decision.InstanceID == "" {
+				cleanupErr = s.cleanupCoordinatedLoad(ctx, job.ID, inst)
+			}
+			if cleanupErr != nil {
 				return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
 			}
 			return Result{Decision: decision, Instance: inst, Lease: lease}, err
@@ -523,6 +527,25 @@ func (s *Service) bindOwnerInstance(ctx context.Context, nodeID, leaseID, instan
 		return fmt.Errorf("owner admission for node %q does not expose lease binding", nodeID)
 	}
 	return binder.BindInstance(ctx, leaseID, instanceID)
+}
+
+func (s *Service) ensureOwnerLeaseBound(ctx context.Context, ownerLease, lease domain.Lease) error {
+	if ownerLease.InstanceID != "" {
+		if ownerLease.InstanceID != lease.InstanceID {
+			return fmt.Errorf("owner lease %q is bound to instance %q, not %q", ownerLease.ID, ownerLease.InstanceID, lease.InstanceID)
+		}
+		return nil
+	}
+	if lease.InstanceID == "" {
+		return fmt.Errorf("owner lease %q has no instance to bind", lease.ID)
+	}
+	if lease.ID == "" {
+		return fmt.Errorf("owner lease id is required")
+	}
+	if lease.NodeID == "" {
+		return fmt.Errorf("owner lease %q has no owner node", lease.ID)
+	}
+	return s.bindOwnerInstance(ctx, lease.NodeID, lease.ID, lease.InstanceID)
 }
 
 func (s *Service) cleanupCoordinatedLoad(ctx context.Context, jobID string, inst domain.ModelInstance) error {
