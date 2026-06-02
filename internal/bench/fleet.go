@@ -100,10 +100,19 @@ type FleetWave struct {
 }
 
 type FleetWaveJob struct {
-	ID        string `json:"id,omitempty"`
-	ModelID   string `json:"model_id"`
-	PromptID  string `json:"prompt_id,omitempty"`
-	GatewayID string `json:"gateway_id,omitempty"`
+	ID                    string   `json:"id,omitempty"`
+	ModelID               string   `json:"model_id"`
+	PromptID              string   `json:"prompt_id,omitempty"`
+	GatewayID             string   `json:"gateway_id,omitempty"`
+	DelayMS               int      `json:"delay_ms,omitempty"`
+	ExpectedStatus        int      `json:"expected_status,omitempty"`
+	ExpectedNodeID        string   `json:"expected_node_id,omitempty"`
+	ExpectedDecision      string   `json:"expected_decision,omitempty"`
+	ExpectedBackend       string   `json:"expected_backend,omitempty"`
+	ExpectedAttempts      int      `json:"expected_attempts,omitempty"`
+	ExpectedErrorContains string   `json:"expected_error_contains,omitempty"`
+	ExpectedTraceContains []string `json:"expected_trace_contains,omitempty"`
+	ExpectedFailure       bool     `json:"expected_failure,omitempty"`
 }
 
 type FleetSimulationConfig struct {
@@ -188,26 +197,28 @@ type FleetEvent struct {
 }
 
 type FleetJobResult struct {
-	WaveID        string             `json:"wave_id"`
-	JobID         string             `json:"job_id"`
-	ModelID       string             `json:"model_id"`
-	RequestModel  string             `json:"request_model"`
-	GatewayID     string             `json:"gateway_id"`
-	NodeID        string             `json:"node_id,omitempty"`
-	InstanceID    string             `json:"instance_id,omitempty"`
-	Backend       string             `json:"backend,omitempty"`
-	Decision      string             `json:"decision,omitempty"`
-	Attempts      int                `json:"attempts,omitempty"`
-	StatusCode    int                `json:"status_code"`
-	OutputPath    string             `json:"output_path,omitempty"`
-	Bytes         int                `json:"bytes"`
-	DurationMS    int                `json:"duration_ms"`
-	ContextTokens int                `json:"context_tokens,omitempty"`
-	TokensPerSec  float64            `json:"tokens_per_sec,omitempty"`
-	Headers       map[string]string  `json:"headers,omitempty"`
-	Trace         []domain.TraceStep `json:"trace,omitempty"`
-	Error         string             `json:"error,omitempty"`
-	RetryAllowed  bool               `json:"retry_allowed"`
+	WaveID            string             `json:"wave_id"`
+	JobID             string             `json:"job_id"`
+	ModelID           string             `json:"model_id"`
+	RequestModel      string             `json:"request_model"`
+	GatewayID         string             `json:"gateway_id"`
+	NodeID            string             `json:"node_id,omitempty"`
+	InstanceID        string             `json:"instance_id,omitempty"`
+	Backend           string             `json:"backend,omitempty"`
+	Decision          string             `json:"decision,omitempty"`
+	Attempts          int                `json:"attempts,omitempty"`
+	StatusCode        int                `json:"status_code"`
+	OutputPath        string             `json:"output_path,omitempty"`
+	Bytes             int                `json:"bytes"`
+	DurationMS        int                `json:"duration_ms"`
+	ContextTokens     int                `json:"context_tokens,omitempty"`
+	TokensPerSec      float64            `json:"tokens_per_sec,omitempty"`
+	Headers           map[string]string  `json:"headers,omitempty"`
+	Trace             []domain.TraceStep `json:"trace,omitempty"`
+	Error             string             `json:"error,omitempty"`
+	RetryAllowed      bool               `json:"retry_allowed"`
+	ExpectedFailure   bool               `json:"expected_failure,omitempty"`
+	ExpectationErrors []string           `json:"expectation_errors,omitempty"`
 }
 
 type FleetFailure struct {
@@ -362,6 +373,16 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 		}
 		seenPrompts[prompt.ID] = struct{}{}
 	}
+	for _, wave := range cfg.Waves {
+		for _, job := range wave.Jobs {
+			if job.DelayMS < 0 {
+				return fmt.Errorf("wave %q job %q delay_ms must be non-negative", wave.ID, job.ID)
+			}
+			if job.ExpectedStatus < 0 || job.ExpectedStatus > 599 {
+				return fmt.Errorf("wave %q job %q expected_status must be between 0 and 599", wave.ID, job.ID)
+			}
+		}
+	}
 	minDisk := cfg.Safety.MinDiskFreeRatio
 	if minDisk == 0 {
 		minDisk = domain.DefaultDiskMinFreeRatio
@@ -507,7 +528,16 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile, output
 			eventType := "complete"
 			if result.Error != "" {
 				eventType = "error"
-				state.Failures = append(state.Failures, FleetFailure{JobID: result.JobID, ModelID: result.ModelID, NodeID: result.NodeID, Error: result.Error, RetryAllowed: result.RetryAllowed})
+				if result.ExpectedFailure && len(result.ExpectationErrors) == 0 {
+					eventType = "expected_error"
+				}
+			}
+			if len(result.ExpectationErrors) > 0 || (result.Error != "" && !result.ExpectedFailure) {
+				failureText := result.Error
+				if len(result.ExpectationErrors) > 0 {
+					failureText = strings.Join(result.ExpectationErrors, "; ")
+				}
+				state.Failures = append(state.Failures, FleetFailure{JobID: result.JobID, ModelID: result.ModelID, NodeID: result.NodeID, Error: failureText, RetryAllowed: result.RetryAllowed})
 			}
 			state.Events = append(state.Events, FleetEvent{
 				At:        clk.Now(),
@@ -549,6 +579,11 @@ func submitFleetJob(ctx context.Context, cfg FleetBenchmarkConfig, waveID string
 	if requestModel == "" {
 		requestModel = firstNonEmpty(model.PresetID, model.ID)
 	}
+	if err := waitFleetDelay(ctx, clk, spec.DelayMS); err != nil {
+		result := FleetJobResult{WaveID: waveID, JobID: jobID, ModelID: model.ID, RequestModel: requestModel, GatewayID: gw.ID, Error: err.Error(), RetryAllowed: false, ExpectedFailure: spec.ExpectedFailure}
+		result.ExpectationErrors = validateFleetExpectation(spec, result)
+		return result
+	}
 	body, err := json.Marshal(api.OpenAIChatRequest{
 		Model: requestModel,
 		Messages: []api.OpenAIMessage{{
@@ -558,11 +593,15 @@ func submitFleetJob(ctx context.Context, cfg FleetBenchmarkConfig, waveID string
 		MaxTokens: model.MaxTokens,
 	})
 	if err != nil {
-		return FleetJobResult{WaveID: waveID, JobID: jobID, ModelID: model.ID, RequestModel: requestModel, GatewayID: gw.ID, Error: err.Error(), RetryAllowed: false}
+		result := FleetJobResult{WaveID: waveID, JobID: jobID, ModelID: model.ID, RequestModel: requestModel, GatewayID: gw.ID, Error: err.Error(), RetryAllowed: false, ExpectedFailure: spec.ExpectedFailure}
+		result.ExpectationErrors = validateFleetExpectation(spec, result)
+		return result
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(gw.URL, "/")+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return FleetJobResult{WaveID: waveID, JobID: jobID, ModelID: model.ID, RequestModel: requestModel, GatewayID: gw.ID, Error: err.Error(), RetryAllowed: false}
+		result := FleetJobResult{WaveID: waveID, JobID: jobID, ModelID: model.ID, RequestModel: requestModel, GatewayID: gw.ID, Error: err.Error(), RetryAllowed: false, ExpectedFailure: spec.ExpectedFailure}
+		result.ExpectationErrors = validateFleetExpectation(spec, result)
+		return result
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if cfg.Project != "" {
@@ -584,27 +623,32 @@ func submitFleetJob(ctx context.Context, cfg FleetBenchmarkConfig, waveID string
 	resp, err := client.Do(req)
 	duration := elapsedMS(clk.Now().Sub(start))
 	if err != nil {
-		return FleetJobResult{WaveID: waveID, JobID: jobID, ModelID: model.ID, RequestModel: requestModel, GatewayID: gw.ID, Error: err.Error(), DurationMS: duration, RetryAllowed: false}
+		result := FleetJobResult{WaveID: waveID, JobID: jobID, ModelID: model.ID, RequestModel: requestModel, GatewayID: gw.ID, Error: err.Error(), DurationMS: duration, RetryAllowed: false, ExpectedFailure: spec.ExpectedFailure}
+		result.ExpectationErrors = validateFleetExpectation(spec, result)
+		return result
 	}
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		return FleetJobResult{WaveID: waveID, JobID: jobID, ModelID: model.ID, RequestModel: requestModel, GatewayID: gw.ID, StatusCode: resp.StatusCode, Error: readErr.Error(), DurationMS: duration, RetryAllowed: false}
+		result := FleetJobResult{WaveID: waveID, JobID: jobID, ModelID: model.ID, RequestModel: requestModel, GatewayID: gw.ID, StatusCode: resp.StatusCode, Error: readErr.Error(), DurationMS: duration, RetryAllowed: false, ExpectedFailure: spec.ExpectedFailure}
+		result.ExpectationErrors = validateFleetExpectation(spec, result)
+		return result
 	}
 	headers := decisionHeaders(resp.Header)
 	result := FleetJobResult{
-		WaveID:       waveID,
-		JobID:        jobID,
-		ModelID:      model.ID,
-		RequestModel: requestModel,
-		GatewayID:    gw.ID,
-		NodeID:       headers[fleetHeaderNode],
-		InstanceID:   headers[fleetHeaderInstance],
-		Backend:      headers[fleetHeaderBackend],
-		Decision:     headers[fleetHeaderDecision],
-		StatusCode:   resp.StatusCode,
-		DurationMS:   duration,
-		Headers:      headers,
+		WaveID:          waveID,
+		JobID:           jobID,
+		ModelID:         model.ID,
+		RequestModel:    requestModel,
+		GatewayID:       gw.ID,
+		NodeID:          headers[fleetHeaderNode],
+		InstanceID:      headers[fleetHeaderInstance],
+		Backend:         headers[fleetHeaderBackend],
+		Decision:        headers[fleetHeaderDecision],
+		StatusCode:      resp.StatusCode,
+		DurationMS:      duration,
+		Headers:         headers,
+		ExpectedFailure: spec.ExpectedFailure,
 	}
 	if attempts, err := strconv.Atoi(headers[fleetHeaderAttempts]); err == nil {
 		result.Attempts = attempts
@@ -615,21 +659,25 @@ func submitFleetJob(ctx context.Context, cfg FleetBenchmarkConfig, waveID string
 	if resp.StatusCode >= 400 {
 		result.Error = strings.TrimSpace(string(data))
 		result.RetryAllowed = resp.StatusCode == http.StatusTooManyRequests
+		result.ExpectationErrors = validateFleetExpectation(spec, result)
 		return result
 	}
 	var chat api.OpenAIChatResponse
 	if err := json.Unmarshal(data, &chat); err != nil {
 		result.Error = err.Error()
+		result.ExpectationErrors = validateFleetExpectation(spec, result)
 		return result
 	}
 	if len(chat.Choices) == 0 {
 		result.Error = "gateway response had no choices"
+		result.ExpectationErrors = validateFleetExpectation(spec, result)
 		return result
 	}
 	text := chat.Choices[0].Message.Content
 	path := filepath.Join(outputDir, safeName(jobID)+".txt")
 	if err := os.WriteFile(path, []byte(text), 0644); err != nil {
 		result.Error = err.Error()
+		result.ExpectationErrors = validateFleetExpectation(spec, result)
 		return result
 	}
 	result.OutputPath = path
@@ -638,6 +686,7 @@ func submitFleetJob(ctx context.Context, cfg FleetBenchmarkConfig, waveID string
 	if duration > 0 && chat.Usage.CompletionTokens > 0 {
 		result.TokensPerSec = float64(chat.Usage.CompletionTokens) / (float64(duration) / 1000)
 	}
+	result.ExpectationErrors = validateFleetExpectation(spec, result)
 	return result
 }
 
@@ -674,6 +723,61 @@ func collectSnapshots(ctx context.Context, cfg FleetBenchmarkConfig, client *htt
 		out = append(out, mark)
 	}
 	return out
+}
+
+func waitFleetDelay(ctx context.Context, clk ports.Clock, delayMS int) error {
+	if delayMS <= 0 {
+		return nil
+	}
+	timer := clk.NewTimer(time.Duration(delayMS) * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C():
+		return nil
+	}
+}
+
+func validateFleetExpectation(spec FleetWaveJob, result FleetJobResult) []string {
+	var errs []string
+	if spec.ExpectedFailure && result.Error == "" {
+		errs = append(errs, "expected failure but request succeeded")
+	}
+	if !spec.ExpectedFailure && result.StatusCode >= 400 {
+		errs = append(errs, fmt.Sprintf("expected success but got HTTP %d", result.StatusCode))
+	}
+	if spec.ExpectedStatus != 0 && result.StatusCode != spec.ExpectedStatus {
+		errs = append(errs, fmt.Sprintf("expected HTTP %d, got %d", spec.ExpectedStatus, result.StatusCode))
+	}
+	if spec.ExpectedNodeID != "" && result.NodeID != spec.ExpectedNodeID {
+		errs = append(errs, fmt.Sprintf("expected node %q, got %q", spec.ExpectedNodeID, result.NodeID))
+	}
+	if spec.ExpectedDecision != "" && result.Decision != spec.ExpectedDecision {
+		errs = append(errs, fmt.Sprintf("expected decision %q, got %q", spec.ExpectedDecision, result.Decision))
+	}
+	if spec.ExpectedBackend != "" && result.Backend != spec.ExpectedBackend {
+		errs = append(errs, fmt.Sprintf("expected backend %q, got %q", spec.ExpectedBackend, result.Backend))
+	}
+	if spec.ExpectedAttempts != 0 && result.Attempts != spec.ExpectedAttempts {
+		errs = append(errs, fmt.Sprintf("expected attempts %d, got %d", spec.ExpectedAttempts, result.Attempts))
+	}
+	if spec.ExpectedErrorContains != "" && !strings.Contains(result.Error, spec.ExpectedErrorContains) {
+		errs = append(errs, fmt.Sprintf("expected error containing %q, got %q", spec.ExpectedErrorContains, result.Error))
+	}
+	if len(spec.ExpectedTraceContains) > 0 {
+		trace := result.Headers[fleetHeaderTrace]
+		if trace == "" && len(result.Trace) > 0 {
+			data, _ := json.Marshal(result.Trace)
+			trace = string(data)
+		}
+		for _, want := range spec.ExpectedTraceContains {
+			if !strings.Contains(trace, want) {
+				errs = append(errs, fmt.Sprintf("expected trace containing %q, got %q", want, trace))
+			}
+		}
+	}
+	return errs
 }
 
 func collectMetrics(ctx context.Context, cfg FleetBenchmarkConfig, client *http.Client) []domain.RunMetric {
@@ -776,10 +880,10 @@ func writeReport(path string, result FleetRunResult) error {
 	for _, proof := range result.Preflight.Proofs {
 		b.WriteString("<li>" + html.EscapeString(proof) + "</li>")
 	}
-	b.WriteString("</ul><h2>Results</h2><table><tr><th>Job</th><th>Model</th><th>Gateway</th><th>Node</th><th>Decision</th><th>Status</th><th>Duration ms</th><th>Tokens/sec</th><th>Error</th></tr>")
+	b.WriteString("</ul><h2>Results</h2><table><tr><th>Job</th><th>Model</th><th>Gateway</th><th>Node</th><th>Decision</th><th>Status</th><th>Expected failure</th><th>Duration ms</th><th>Tokens/sec</th><th>Error</th><th>Expectation errors</th></tr>")
 	for _, row := range result.Results {
 		b.WriteString("<tr>")
-		for _, cell := range []string{row.JobID, row.ModelID, row.GatewayID, row.NodeID, row.Decision, strconv.Itoa(row.StatusCode), strconv.Itoa(row.DurationMS), fmt.Sprintf("%.2f", row.TokensPerSec), row.Error} {
+		for _, cell := range []string{row.JobID, row.ModelID, row.GatewayID, row.NodeID, row.Decision, strconv.Itoa(row.StatusCode), strconv.FormatBool(row.ExpectedFailure), strconv.Itoa(row.DurationMS), fmt.Sprintf("%.2f", row.TokensPerSec), row.Error, strings.Join(row.ExpectationErrors, "; ")} {
 			b.WriteString("<td>" + html.EscapeString(cell) + "</td>")
 		}
 		b.WriteString("</tr>")

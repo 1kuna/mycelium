@@ -263,6 +263,7 @@ func TestPreemptHardReplacesVictimWhenOtherNodeFits(t *testing.T) {
 		fixtures.WithClaim(fixtures.MakeClaim(100, 0)),
 		fixtures.WithInstancePriority(domain.PriorityBackground),
 	)
+	victim.InFlight = 1
 	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
 
 	decision, err := placer.Place(context.Background(),
@@ -275,6 +276,37 @@ func TestPreemptHardReplacesVictimWhenOtherNodeFits(t *testing.T) {
 		t.Fatalf("victim should replace, requeued = %+v", decision.Requeued)
 	}
 	assertTraceContains(t, decision.Trace, "replace", "replaced")
+}
+
+func TestPreemptOnlyRequeuesActiveVictimsWithoutReplacement(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithWeights(800), fixtures.WithKVPerToken(0))
+	node := fixtures.Make4090Node(fixtures.WithNodeID("node-a"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.8))
+	victim := fixtures.MakeInstance(
+		fixtures.WithInstanceID("victim"),
+		fixtures.WithInstancePreset("other_preset"),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(100, 0)),
+		fixtures.WithInstancePriority(domain.PriorityBackground),
+	)
+	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+	job := fixtures.MakeJob(fixtures.Hard, fixtures.WithPreset(preset.ID))
+
+	decision, err := placer.Place(context.Background(), job, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}})
+	if err != nil {
+		t.Fatalf("Place idle: %v", err)
+	}
+	if decision.Action != domain.ActionHardPreempted || len(decision.Requeued) != 0 {
+		t.Fatalf("idle victim should be evicted without requeue: %+v", decision)
+	}
+
+	victim.InFlight = 1
+	decision, err = placer.Place(context.Background(), job, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}})
+	if err != nil {
+		t.Fatalf("Place active: %v", err)
+	}
+	if len(decision.Requeued) != 1 || decision.Requeued[0] != victim.ID {
+		t.Fatalf("active victim should be requeued: %+v", decision)
+	}
 }
 
 func TestPreemptSkipsUnusableCandidatesAndReturnsNoResult(t *testing.T) {

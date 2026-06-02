@@ -160,6 +160,7 @@ func TestPhase6PeerCoordinatedPreemptionUsesOwnerAuthority(t *testing.T) {
 		fixtures.WithClaim(fixtures.MakeClaim(700, 0)),
 		fixtures.WithInstancePriority(domain.PriorityBackground),
 	)
+	victim.InFlight = 1
 	targetPreset := fixtures.MakePreset(fixtures.WithPresetID("target-preset"), fixtures.WithWeights(600), fixtures.WithKVPerToken(0), fixtures.WithContextLength(1))
 	admission := node.NewAdmission(nodeA, lease.NewAllocator(), clock)
 	victimOffer, err := admission.Offer(ctx, domain.AdmissionRequest{Job: fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.Background), Claim: victim.Claim})

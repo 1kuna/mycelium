@@ -3,10 +3,12 @@ package bench
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +57,17 @@ func TestFleetBenchmarkConfigValidationRejectsBadInputs(t *testing.T) {
 	cfg.Peers = nil
 	if err := ValidateFleetConfig(cfg, FleetProfileConservative, false); err == nil || !strings.Contains(err.Error(), "telemetry") {
 		t.Fatalf("telemetry err = %v", err)
+	}
+
+	cfg = fleetTestConfig()
+	cfg.Waves[0].Jobs[0].DelayMS = -1
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "delay_ms") {
+		t.Fatalf("delay err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Waves[0].Jobs[0].ExpectedStatus = 700
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "expected_status") {
+		t.Fatalf("expected status err = %v", err)
 	}
 }
 
@@ -153,6 +166,219 @@ func TestFleetBenchmarkLiveRunnerCapturesHeadersMetricsAndOutputs(t *testing.T) 
 	}
 }
 
+func TestFleetBenchmarkLiveRunnerHonorsExpectedFailuresAndTraceExpectations(t *testing.T) {
+	cfg := fleetTestConfig()
+	cfg.Waves = []FleetWave{
+		{ID: "expected-cap", Jobs: []FleetWaveJob{{
+			ID:                    "cap-reject",
+			ModelID:               "qwen9b",
+			ExpectedFailure:       true,
+			ExpectedStatus:        http.StatusBadGateway,
+			ExpectedErrorContains: "no instance",
+		}}},
+		{ID: "dynamic-preempt", Jobs: []FleetWaveJob{{
+			ID:                    "preempt-122b",
+			ModelID:               "qwen122b",
+			ExpectedStatus:        http.StatusOK,
+			ExpectedNodeID:        "spark",
+			ExpectedDecision:      string(domain.ActionHardPreempted),
+			ExpectedBackend:       string(domain.BackendVLLM),
+			ExpectedAttempts:      1,
+			ExpectedTraceContains: []string{"preempt", "replace"},
+		}}},
+	}
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC))
+	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/snapshot":
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: cfg.Simulation.Nodes[0]})
+		case "/telemetry/metrics":
+			_ = json.NewEncoder(w).Encode([]domain.RunMetric{})
+		case "/v1/chat/completions":
+			var req api.OpenAIChatRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if req.Model == "qwen9b" {
+				http.Error(w, `{"error":"job queued: no instance available"}`, http.StatusBadGateway)
+				return
+			}
+			w.Header().Set(fleetHeaderDecision, string(domain.ActionHardPreempted))
+			w.Header().Set(fleetHeaderNode, "spark")
+			w.Header().Set(fleetHeaderInstance, "inst-preempted")
+			w.Header().Set(fleetHeaderBackend, string(domain.BackendVLLM))
+			w.Header().Set(fleetHeaderAttempts, "1")
+			w.Header().Set(fleetHeaderTrace, `[{"step":"preempt","result":"victims=[inst-a] target=spark"},{"step":"replace","result":"replaced=[inst-a]"}]`)
+			_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{
+				Model: req.Model,
+				Choices: []api.OpenAIChatChoice{{
+					Message: api.OpenAIMessage{Role: "assistant", Content: "dynamic ok"},
+				}},
+				Usage: api.OpenAIUsage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	result, err := RunFleet(context.Background(), cfg, FleetRunOptions{
+		Profile:    FleetProfileSaturation,
+		OutputRoot: t.TempDir(),
+		Client:     client,
+		Clock:      clock,
+	})
+	if err != nil {
+		t.Fatalf("RunFleet live: %v", err)
+	}
+	if len(result.Failures) != 0 || !result.Results[0].ExpectedFailure || len(result.Results[0].ExpectationErrors) != 0 {
+		t.Fatalf("result failures=%+v results=%+v", result.Failures, result.Results)
+	}
+	if result.Results[1].Decision != string(domain.ActionHardPreempted) || len(result.Results[1].ExpectationErrors) != 0 {
+		t.Fatalf("dynamic result = %+v", result.Results[1])
+	}
+}
+
+func TestFleetBenchmarkLiveRunnerFailsExpectationMismatches(t *testing.T) {
+	cfg := fleetTestConfig()
+	cfg.Waves = []FleetWave{{ID: "wrong-node", Jobs: []FleetWaveJob{{
+		ID:               "wrong-node",
+		ModelID:          "qwen9b",
+		ExpectedStatus:   http.StatusOK,
+		ExpectedNodeID:   "spark",
+		ExpectedDecision: string(domain.ActionLoadedNew),
+	}}}}
+	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/snapshot":
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: cfg.Simulation.Nodes[0]})
+		case "/telemetry/metrics":
+			_ = json.NewEncoder(w).Encode([]domain.RunMetric{})
+		case "/v1/chat/completions":
+			w.Header().Set(fleetHeaderDecision, string(domain.ActionLoadedNew))
+			w.Header().Set(fleetHeaderNode, "b70")
+			w.Header().Set(fleetHeaderInstance, "inst-b70")
+			w.Header().Set(fleetHeaderBackend, string(domain.BackendLlamaCpp))
+			_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{
+				Choices: []api.OpenAIChatChoice{{
+					Message: api.OpenAIMessage{Role: "assistant", Content: "wrong node"},
+				}},
+				Usage: api.OpenAIUsage{CompletionTokens: 2, TotalTokens: 4},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	result, err := RunFleet(context.Background(), cfg, FleetRunOptions{
+		Profile:    FleetProfileSaturation,
+		OutputRoot: t.TempDir(),
+		Client:     client,
+		Clock:      mocks.NewFakeClock(time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)),
+	})
+	if err == nil || !strings.Contains(err.Error(), "failures") {
+		t.Fatalf("RunFleet mismatch err = %v", err)
+	}
+	if len(result.Failures) != 1 || !strings.Contains(result.Failures[0].Error, `expected node "spark"`) {
+		t.Fatalf("failures = %+v", result.Failures)
+	}
+}
+
+func TestFleetExpectationValidationAndDelay(t *testing.T) {
+	spec := FleetWaveJob{
+		ExpectedStatus:        http.StatusOK,
+		ExpectedNodeID:        "spark",
+		ExpectedDecision:      string(domain.ActionHardPreempted),
+		ExpectedBackend:       string(domain.BackendVLLM),
+		ExpectedAttempts:      2,
+		ExpectedErrorContains: "overflow",
+		ExpectedTraceContains: []string{"preempt", "replace"},
+		ExpectedFailure:       true,
+	}
+	result := FleetJobResult{
+		StatusCode: http.StatusBadGateway,
+		NodeID:     "b70",
+		Decision:   string(domain.ActionLoadedNew),
+		Backend:    string(domain.BackendLlamaCpp),
+		Attempts:   1,
+		Error:      "no fit",
+		Headers:    map[string]string{fleetHeaderTrace: `[{"step":"score"}]`},
+	}
+	errs := validateFleetExpectation(spec, result)
+	for _, want := range []string{"expected HTTP 200", "expected node", "expected decision", "expected backend", "expected attempts", "expected error containing", "expected trace containing"} {
+		if !containsString(errs, want) {
+			t.Fatalf("errs missing %q: %+v", want, errs)
+		}
+	}
+	spec = FleetWaveJob{ExpectedFailure: true}
+	if errs := validateFleetExpectation(spec, FleetJobResult{StatusCode: http.StatusOK}); !containsString(errs, "expected failure") {
+		t.Fatalf("expected failure errs = %+v", errs)
+	}
+	spec = FleetWaveJob{ExpectedTraceContains: []string{"preempt"}}
+	result = FleetJobResult{StatusCode: http.StatusOK, Trace: []domain.TraceStep{{Step: "preempt", Result: "victims=[a]"}}}
+	if errs := validateFleetExpectation(spec, result); len(errs) != 0 {
+		t.Fatalf("trace expectation errs = %+v", errs)
+	}
+
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC))
+	done := make(chan error, 1)
+	go func() {
+		done <- waitFleetDelay(context.Background(), clock, 100)
+	}()
+	for clock.TimerCount() == 0 {
+		runtime.Gosched()
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("delay finished early: %v", err)
+	default:
+	}
+	clock.Advance(100 * time.Millisecond)
+	if err := <-done; err != nil {
+		t.Fatalf("delay err = %v", err)
+	}
+	if err := waitFleetDelay(context.Background(), clock, 0); err != nil {
+		t.Fatalf("zero delay err = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := waitFleetDelay(ctx, clock, 100); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled delay err = %v", err)
+	}
+}
+
+func TestSubmitFleetJobTransportAndReadFailures(t *testing.T) {
+	cfg := fleetTestConfig()
+	model := cfg.Models[0]
+	spec := FleetWaveJob{ID: "job-a", ModelID: model.ID, ExpectedStatus: http.StatusOK}
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC))
+	result := submitFleetJob(context.Background(), cfg, "wave-a", 0, spec, model, FleetGateway{ID: "bad", URL: "://bad"}, t.TempDir(), http.DefaultClient, clock)
+	if result.Error == "" || len(result.ExpectationErrors) == 0 {
+		t.Fatalf("bad url result = %+v", result)
+	}
+
+	transportErr := errors.New("transport failed")
+	client := &http.Client{Transport: fleetRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportErr
+	})}
+	result = submitFleetJob(context.Background(), cfg, "wave-a", 0, spec, model, cfg.Gateways[0], t.TempDir(), client, clock)
+	if !strings.Contains(result.Error, transportErr.Error()) {
+		t.Fatalf("transport result = %+v", result)
+	}
+
+	client = &http.Client{Transport: fleetRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{},
+			Body:       errReadCloser{err: errors.New("read failed")},
+			Request:    req,
+		}, nil
+	})}
+	result = submitFleetJob(context.Background(), cfg, "wave-a", 0, spec, model, cfg.Gateways[0], t.TempDir(), client, clock)
+	if !strings.Contains(result.Error, "read failed") {
+		t.Fatalf("read result = %+v", result)
+	}
+}
+
 func TestLoadFleetConfigAndDefaultProfiles(t *testing.T) {
 	cfg := fleetTestConfig()
 	cfg.Waves = nil
@@ -239,8 +465,12 @@ func TestFleetBenchmarkLiveRunnerRecordsHTTPFailures(t *testing.T) {
 }
 
 func containsProof(proofs []string, want string) bool {
-	for _, proof := range proofs {
-		if strings.Contains(proof, want) {
+	return containsString(proofs, want)
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if strings.Contains(value, want) {
 			return true
 		}
 	}
@@ -259,6 +489,18 @@ type fleetRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f fleetRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type errReadCloser struct {
+	err error
+}
+
+func (r errReadCloser) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func (r errReadCloser) Close() error {
+	return nil
 }
 
 func fleetTestConfig() FleetBenchmarkConfig {
