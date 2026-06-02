@@ -344,7 +344,10 @@ func TestRouterRetriesContextOverflowByColdLoadingLargerPreset(t *testing.T) {
 	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":{"message":"request (1202 tokens) exceeds the available context size (1024 tokens), try increasing it"}}`, http.StatusBadRequest)
 	}))
+	secondBody := ""
 	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		secondBody = string(data)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(openAICompletionBody("retried")))
 	}))
@@ -370,6 +373,9 @@ func TestRouterRetriesContextOverflowByColdLoadingLargerPreset(t *testing.T) {
 	}
 	if resp.Instance.ID != "inst_large" || resp.Attempts != 2 || !strings.Contains(string(resp.Body), "retried") {
 		t.Fatalf("resp=%+v body=%s", resp, resp.Body)
+	}
+	if !strings.Contains(secondBody, `"model":"`+large.ID+`"`) {
+		t.Fatalf("retry body did not switch model: %s", secondBody)
 	}
 	if len(agent.loads) != 1 || agent.loads[0].Preset.ID != large.ID || agent.loads[0].Preset.ContextLength != large.ContextLength {
 		t.Fatalf("loads = %+v", agent.loads)

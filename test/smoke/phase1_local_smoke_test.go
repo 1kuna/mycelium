@@ -110,6 +110,7 @@ func newSmokeAdapter(binary string) *llamacpp.Adapter {
 			"--port", "{port}",
 			"-m", "{model}",
 			"-c", "{ctx}",
+			"--parallel", "1",
 		},
 		Clock:        clock.System{},
 		PollInterval: 250 * time.Millisecond,
