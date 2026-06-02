@@ -1,0 +1,604 @@
+# Mycelium - Engine Bootstrap Spec (Document 4)
+
+> Status: future addition / extension spec. The current MVP and the current fleet benchmark use inference engines that are already installed and configured. This document defines the missing future layer that makes "one command joins a useful compute peer" true without manual engine setup on every machine.
+
+This document does not replace the three current SSOT documents. It extends them with a host-readiness layer that sits between peer onboarding and backend launch.
+
+## 1. What this adds
+
+Mycelium already owns backend lifecycle once an engine exists: launch, ready-gate, stop, reaper, leases, scheduler fit, telemetry, and gateway routing. Engine bootstrap is the missing step before that:
+
+1. Detect the host OS, accelerator stack, installed engines, package managers, disk state, and safety limits.
+2. Decide which engine profiles are suitable for this machine.
+3. Prefer engines already installed and usable.
+4. When asked to apply changes, install or configure the selected engine profile.
+5. Write durable peer config so the node can run as a compute peer without hand-editing `peer.json`.
+6. Prove the engine profile with a tiny readiness smoke, not a large model load.
+
+The north-star flow becomes:
+
+```bash
+mycelium bootstrap --join <mycjoin://...> --compute auto --apply
+mycelium run
+```
+
+After bootstrap, the normal product path remains unchanged: apps submit to any peer, the coordinator places jobs, and the selected owner launches a backend adapter from an explicit profile.
+
+## 2. Non-goals
+
+- Mycelium still does not become an inference engine.
+- Bootstrap does not download large models. Model artifact install stays in `myce add-model`.
+- Bootstrap does not remotely install software on another peer. No SSH product transport. The command runs locally on the machine being prepared.
+- Bootstrap does not bypass `max_util`, `oom_severity`, disk floors, owner admission, or scheduler fit.
+- Bootstrap does not hide package-manager failures. A missing package manager, missing GPU runtime, checksum mismatch, unsafe vLLM cap, or unsupported OS fails loudly.
+- Bootstrap does not select model quality winners. It may record engine facts and benchmark facts; judgment stays outside Mycelium.
+
+## 3. Relationship to existing docs
+
+- Document 1 says Mycelium conducts existing engines and supervises them as executable packages. This document defines how those executable packages can be discovered or installed.
+- Document 1 Phase 3 model install remains model/preset install. Engine bootstrap is separate from catalog/model install.
+- Document 1 Phase 4 onboarding remains join-token + LAN discovery. Engine bootstrap can be composed with onboarding but does not change peer membership authority.
+- Document 3's current MVP gates do not require this layer. Future gates in this document are additive.
+- The current fleet benchmark must use currently installed/configured engines unless the operator explicitly runs bootstrap first.
+
+## 4. User-facing commands
+
+### 4.1 Local bootstrap
+
+```bash
+mycelium bootstrap \
+  --join <mycjoin://host:port?token=...&rpc_token=...> \
+  --compute auto \
+  --engines auto \
+  --config ~/.mycelium/peer.json \
+  --apply
+```
+
+Behavior:
+
+- Without `--apply`, bootstrap is a dry-run doctor. It prints and writes an install plan but changes nothing.
+- With `--apply`, bootstrap executes only the explicit plan it printed.
+- `--join` persists membership/RPC token state through the same token manager used by normal peer join.
+- `--compute auto` enables compute only if at least one engine profile becomes ready.
+- `--engines auto` chooses supported profiles for the host. `--engines llamacpp,mlx` narrows the set.
+- The command writes `~/.mycelium/bootstrap/<job_id>/plan.json`, `events.jsonl`, and `result.json`.
+- If a peer config already exists, bootstrap updates only engine/profile fields it owns. It does not rewrite unrelated fleet, project, token, or policy settings.
+
+### 4.2 Engine doctor
+
+```bash
+mycelium bootstrap --doctor --config ~/.mycelium/peer.json
+myce engines doctor --peer local
+myce engines list
+```
+
+Behavior:
+
+- Reports installed engines, detected hardware, usable profiles, missing prerequisites, unsafe settings, and config drift.
+- `myce engines doctor --peer <id>` reads remote peer-reported readiness facts over authenticated peer RPC. It does not install remotely.
+- Doctor output is machine-readable with `--json`.
+
+### 4.3 Explicit engine setup
+
+```bash
+mycelium bootstrap --engines llamacpp --apply
+mycelium bootstrap --engines mlx --apply
+mycelium bootstrap --engines vllm --apply
+mycelium bootstrap --engines custom --backend-binary /path/to/wrapper --apply
+```
+
+Explicit setup is still profile-driven. Unknown engines fail. Custom profiles require a binary/wrapper and a health path.
+
+## 5. Architecture
+
+Engine bootstrap is a local subsystem:
+
+```text
+CLI bootstrap
+  -> HostDetector
+  -> EngineDetector
+  -> BootstrapPlanner
+  -> Package/Runtime Installer
+  -> EngineVerifier
+  -> EngineRegistry + PeerConfig writer
+```
+
+Runtime launch continues through existing backend adapters:
+
+```text
+Gateway request
+  -> scheduler chooses preset/node/unit
+  -> owner admission commits lease
+  -> node agent launches BackendAdapter using EngineProfile
+```
+
+Bootstrap produces durable readiness data. The scheduler never shells out to package managers and never installs anything on a placement path.
+
+## 6. New ports
+
+Add these interfaces under `internal/ports` when this document is implemented.
+
+```go
+type HostDetector interface {
+    DetectHost(ctx context.Context) (domain.HostFacts, error)
+}
+
+type EngineDetector interface {
+    DetectEngines(ctx context.Context, host domain.HostFacts) ([]domain.EngineDetection, error)
+}
+
+type BootstrapPlanner interface {
+    PlanBootstrap(ctx context.Context, req domain.BootstrapRequest, host domain.HostFacts, detections []domain.EngineDetection) (domain.BootstrapPlan, error)
+}
+
+type EngineInstaller interface {
+    ApplyBootstrapPlan(ctx context.Context, plan domain.BootstrapPlan, progress func(domain.BootstrapEvent)) (domain.BootstrapResult, error)
+}
+
+type EngineVerifier interface {
+    VerifyEngine(ctx context.Context, profile domain.EngineProfile) (domain.EngineVerification, error)
+}
+
+type EngineRegistry interface {
+    SaveEngineProfile(ctx context.Context, profile domain.EngineProfile) error
+    ListEngineProfiles(ctx context.Context) ([]domain.EngineProfile, error)
+    MarkEngineProfileUnready(ctx context.Context, profileID, reason string) error
+}
+```
+
+Every implementation gets a hand-written mock, compile-time assertion, and conformance suite. Fast tests use mocks only.
+
+## 7. Domain shapes
+
+The final field names can change when implemented, but the persisted shape should preserve these concepts.
+
+```go
+type HostFacts struct {
+    NodeID            string
+    OS                string // darwin, linux
+    Arch              string // arm64, amd64
+    Kernel            string
+    PackageManagers   []string // brew, apt, dnf, pacman, docker, uv, pipx
+    Accelerators      []Accelerator
+    TotalMemoryMB     int
+    DiskFreeMB        int
+    DiskTotalMB       int
+    DiskMinFreeRatio  float64
+    OOMSeverity       OOMSeverity
+}
+
+type EngineProfile struct {
+    ID                string
+    Backend           Backend
+    DisplayName       string
+    ManagedBy         string // system, mycelium, custom
+    BinaryPath        string
+    Args              []string
+    Env               map[string]string
+    HealthPath        string
+    Version           string
+    Source            EngineSource
+    SupportedModels   []ModelFormat // gguf, hf-transformers, mlx
+    RequiredLabels    map[string]string
+    MaxUtilDefault    float64
+    DiskMinFreeRatio  float64
+    Safety            EngineSafety
+    VerifiedAt        time.Time
+    Ready             bool
+    UnreadyReason     string
+}
+
+type BootstrapPlan struct {
+    ID                string
+    CreatedAt         time.Time
+    Host              HostFacts
+    RequestedEngines  []Backend
+    Actions           []BootstrapAction
+    ResultingProfiles []EngineProfile
+    Warnings          []string
+}
+
+type BootstrapAction struct {
+    ID                string
+    Kind              string // detect, install_package, pull_image, create_venv, write_wrapper, verify, write_config
+    EngineProfileID   string
+    CommandPreview    []string
+    RequiresPrivilege bool
+    EstimatedBytes    int64
+    SourceURL         string
+    Checksum          string
+}
+```
+
+Persist bootstrap jobs in the same durable job/store surface used by catalog installs. Bootstrap progress is observable in `myce jobs list`.
+
+## 8. Platform matrix
+
+### 8.1 macOS Apple Silicon
+
+Supported profiles:
+
+- llama.cpp Metal via native subprocess.
+- MLX via `mlx_lm.server` in a Mycelium-managed Python environment.
+- Custom native process.
+
+Rules:
+
+- Prefer an existing usable `llama-server` on `PATH` or configured in `peer.json`.
+- If installing llama.cpp, prefer Homebrew when present.
+- If installing MLX, create an isolated venv under `~/.mycelium/engines/mlx-lm/`.
+- Never use Docker as the default Mac compute path.
+- Treat unified memory as one pressure domain.
+- Verify with a tiny local model or a no-model/version probe where the engine supports it. Do not download a large model during engine bootstrap.
+
+Default safety:
+
+- `max_util`: conservative host-specific default, never above the configured peer ceiling.
+- `disk_min_free_ratio`: 0.25 unless the user config says stricter.
+- `oom_severity`: `soft` unless detector identifies a catastrophic host profile.
+
+### 8.2 Linux NVIDIA / DGX Spark
+
+Supported profiles:
+
+- vLLM OpenAI server through an existing binary or container wrapper.
+- SGLang through an existing binary or container wrapper.
+- llama.cpp CUDA where available.
+- Custom process/container wrapper.
+
+Rules:
+
+- Prefer an already installed NVIDIA/vLLM image or binary that passes doctor.
+- If installing container support, require Docker or compatible runtime plus NVIDIA Container Toolkit.
+- DGX Spark defaults to `oom_severity=catastrophic`.
+- For catastrophic NVIDIA hosts, bootstrap must refuse a vLLM profile whose default `--gpu-memory-utilization` is above the safe cap.
+- Default Spark cap should be <= 0.85 unless the user explicitly configures a lower value; never silently raise it.
+- Bootstrap must not start the 122B-class production path as a readiness check. Use a tiny cached model or version/health probe.
+
+Default safety:
+
+- `max_util`: <= 0.90 for Spark-class catastrophic hosts.
+- vLLM `--gpu-memory-utilization`: <= 0.85 for Spark-class catastrophic hosts.
+- no concurrent cold-load smoke on catastrophic hosts.
+
+### 8.3 Linux Intel Arc / B70
+
+Supported profiles:
+
+- SYCL llama.cpp through an existing binary or container wrapper.
+- Intel XPU/vLLM-compatible wrapper if already installed and verified.
+- Custom process/container wrapper.
+
+Rules:
+
+- Detect Intel GPUs through `clinfo`, Level Zero, or the available runtime.
+- Prefer existing local images/wrappers before installing anything.
+- If disk free is below the configured floor, bootstrap may report installed engines but must mark compute readiness blocked.
+- Do not assume NVIDIA-style vLLM flags apply to Intel profiles.
+- Engine verification should check the actual backend health path and a minimal generation only when a safe tiny model is configured.
+
+### 8.4 Linux AMD
+
+Supported profiles:
+
+- ROCm-compatible llama.cpp or vLLM profiles where the host proves support.
+- Custom process/container wrapper.
+
+Rules:
+
+- Treat AMD as supported-by-contract but not MVP smoke unless hardware is available.
+- Unknown ROCm/vLLM combinations fail with actionable doctor evidence, not generic fallback.
+
+### 8.5 CPU fallback
+
+CPU-only inference is allowed only with an explicit opt-in profile.
+
+Rules:
+
+- Never auto-select CPU fallback for a compute peer with accelerators unless the user asks for it.
+- Mark CPU profiles low speed and low priority in scheduler facts.
+- Keep CPU fallback useful for tiny smoke/debug, not as a silent production degradation.
+
+## 9. Planning rules
+
+Bootstrap planning is deterministic and conservative:
+
+1. Read host facts.
+2. Read existing peer config and engine registry.
+3. Detect usable existing engines.
+4. Reject the host if disk free is below `disk_min_free_ratio`.
+5. Generate install actions only for requested engines that are supported on the detected host.
+6. Prefer no-op adoption of an existing engine over install.
+7. Prefer native Mac engines over containers on macOS.
+8. Prefer explicit configured wrappers over generic package install on specialty hardware.
+9. Produce one plan with exact actions. No hidden fallback actions.
+10. Require `--apply` to mutate the host.
+
+If multiple profiles are ready, bootstrap may either:
+
+- write the best profile as the active `compute_config`, preserving current single-backend runtime behavior; or
+- when multi-profile runtime support exists, register all profiles and advertise all compatible backend capabilities.
+
+Until multi-profile runtime support exists, the first implementation should choose one active profile and record the others as detected-but-inactive.
+
+## 10. Safety and trust
+
+Bootstrap is allowed to install software, so it must be stricter than runtime placement.
+
+Hard requirements:
+
+- Dry-run by default.
+- Every network source, package/image name, version, estimated bytes, and checksum/digest is shown in the plan.
+- Public dataset/model downloads are never bundled into engine setup.
+- Package manager commands are explicit actions, not generated shell strings.
+- Privileged actions are marked before apply.
+- Existing user-managed binaries are never overwritten.
+- Managed installs live under `~/.mycelium/engines/` where practical.
+- Config writes use atomic replace.
+- Failed apply leaves the prior peer config usable.
+- Apply is resumable through the bootstrap job record.
+- A ready profile is saved only after install/config/verification all complete.
+- Any profile whose verification fails is recorded as unready with evidence.
+
+## 11. Disk and memory policy
+
+Engine bootstrap must respect the same safety posture as scheduler placement.
+
+Disk:
+
+- Default `disk_min_free_ratio` is 0.25.
+- Bootstrap refuses installs that would leave the host below the disk floor.
+- Bootstrap writes the disk floor into peer config if none exists.
+- Model install and scheduler placement continue to enforce disk headroom independently.
+
+Memory:
+
+- Bootstrap records host-level `max_util` and `oom_severity`.
+- Spark-class catastrophic hosts default to `max_util <= 0.90`.
+- Engine-specific memory flags must be bounded by the host cap.
+- vLLM/SGLang reservation flags become estimator metadata; if missing, placement fails loudly.
+
+## 12. Peer config integration
+
+Bootstrap writes durable config that normal `mycelium run` can consume.
+
+Minimum current-runtime output:
+
+```json
+{
+  "compute": true,
+  "join_token": "...",
+  "rpc_token": "...",
+  "seed_peers": ["192.0.2.x:52091"],
+  "compute_config": {
+    "id": "spark-peer.example",
+    "name": "DGX Spark",
+    "backend": "vllm",
+    "backend_binary": "$HOME/.mycelium/engines/vllm/run-vllm.sh",
+    "backend_listen": "0.0.0.0:52074",
+    "max_util": 0.9,
+    "disk_min_free_ratio": 0.25,
+    "oom_severity": "catastrophic"
+  }
+}
+```
+
+Future multi-profile output can add:
+
+```json
+{
+  "engine_profiles": [
+    {
+      "id": "spark-vllm-ngc",
+      "backend": "vllm",
+      "ready": true,
+      "binary_path": "/home/<user>/.mycelium/engines/vllm/run-vllm.sh"
+    }
+  ]
+}
+```
+
+The scheduler should use only ready profiles. Unknown or unverified profiles are not schedulable.
+
+## 13. Catalog/model install integration
+
+Engine bootstrap and model install are separate jobs but can inform each other:
+
+- Bootstrap tells the catalog which model formats this host can serve.
+- Catalog install checks disk floor before staging artifacts.
+- Catalog install may choose a target node based on ready engine profiles and model format.
+- Model provenance records the engine format assumptions, but not a specific engine binary.
+- A model is not registered as usable on a node unless at least one ready engine profile can serve it.
+
+## 14. Optimizer and benchmark integration
+
+The optimizer may use bootstrap facts as inputs:
+
+- engine version
+- profile source
+- launch args
+- memory cap
+- disk floor
+- model format support
+- measured smoke performance
+
+The fleet benchmark should:
+
+- default to currently installed/configured engines;
+- include engine readiness facts in `manifest.json`;
+- fail loudly if a required profile is missing;
+- never run bootstrap implicitly unless a future explicit `--bootstrap` flag is added;
+- use simulation/preflight to prove the scenario only against ready profiles.
+
+## 15. Observability
+
+Every bootstrap run emits:
+
+- `plan.json`: host facts, requested engines, exact actions, safety checks.
+- `events.jsonl`: detect/install/config/verify progress.
+- `result.json`: ready profiles, unready profiles, config changes, evidence.
+- `doctor.json`: latest host readiness summary.
+
+Peer health should include an engine-readiness summary:
+
+```json
+{
+  "engines": [
+    {
+      "profile_id": "macbook-llamacpp-metal",
+      "backend": "llamacpp",
+      "ready": true,
+      "version": "llama-server ...",
+      "source": "homebrew"
+    }
+  ]
+}
+```
+
+Do not expose secrets, tokens, full environment variables, or private paths beyond what is necessary for local diagnostics.
+
+## 16. Testing plan
+
+### Fast tests
+
+Fast tests use no real package managers, no network, no subprocesses, and no hardware.
+
+Required coverage:
+
+- Host detector mocks for macOS Apple Silicon, Linux NVIDIA/Spark, Linux Intel/B70, Linux AMD, and CPU-only.
+- Engine detector mock records existing engine binaries/images and injected failures.
+- Planner prefers existing usable engines over installs.
+- Planner rejects unsupported OS/backend combinations.
+- Planner refuses Spark vLLM caps above the safe default.
+- Planner refuses installs that violate `disk_min_free_ratio`.
+- Planner marks B70-style low disk as blocked before engine install.
+- Planner never chooses Docker as default Mac compute.
+- Installer applies actions in order and is resumable.
+- Failed install does not save a ready profile.
+- Failed verification saves an unready profile with evidence.
+- Config writer preserves unrelated peer config fields.
+- `myce jobs list` shows bootstrap progress.
+- Conformance suites for `HostDetector`, `EngineDetector`, `BootstrapPlanner`, `EngineInstaller`, `EngineVerifier`, and `EngineRegistry`.
+
+### E2E simulated tests
+
+Synthetic fleet:
+
+- local dev Mac: existing Homebrew llama.cpp and optional MLX venv.
+- second peer: no engine installed, Homebrew available.
+- DGX Spark: existing NVIDIA vLLM image, catastrophic OOM, cap required.
+- B70: existing SYCL wrapper, disk below 25% free.
+
+Expected behavior:
+
+- local dev Mac adopts existing llama.cpp.
+- second peer plans Homebrew llama.cpp install but does not mutate without `--apply`.
+- Spark adopts existing vLLM image/wrapper only if cap <= 0.85.
+- B70 reports engine candidates but compute readiness blocked by disk floor.
+- Resulting benchmark preflight uses only ready profiles.
+
+### Smoke tests
+
+Smoke tests are phase-boundary only and require explicit environment/config.
+
+Targets:
+
+```bash
+make smoke-bootstrap-macos
+make smoke-bootstrap-mlx
+make smoke-bootstrap-spark-vllm
+make smoke-bootstrap-b70
+```
+
+Rules:
+
+- Required skips fail.
+- Hardware-unavailable smoke is recorded in `BLOCKERS.md`.
+- Smoke uses tiny/safe verification workloads.
+- Spark smoke must not launch a 122B-class model or exceed the configured memory cap.
+- B70 smoke must not run if disk floor is violated unless the test is specifically proving the violation path.
+
+## 17. Implementation phases
+
+### Bootstrap Phase A - contracts and dry-run doctor
+
+Build domain types, ports, mocks, conformance suites, and `mycelium bootstrap --doctor`.
+
+Gate:
+
+```bash
+go test ./internal/bootstrap/... -race
+go test ./cmd/mycelium/... -race
+go test ./... -race
+```
+
+### Bootstrap Phase B - macOS llama.cpp
+
+Implement macOS host detection, Homebrew llama.cpp detection/install plan, config write, and verification.
+
+Gate:
+
+```bash
+go test ./internal/bootstrap/... -race
+make smoke-bootstrap-macos
+```
+
+### Bootstrap Phase C - macOS MLX
+
+Implement MLX venv detection/install plan and `mlx_lm.server` profile verification.
+
+Gate:
+
+```bash
+go test ./internal/bootstrap/... -race
+make smoke-bootstrap-mlx
+```
+
+### Bootstrap Phase D - Linux NVIDIA / Spark
+
+Implement NVIDIA host detection, Docker/NVIDIA runtime detection, vLLM profile planning, safe cap enforcement, and Spark smoke.
+
+Gate:
+
+```bash
+go test ./internal/bootstrap/... -race
+make smoke-bootstrap-spark-vllm
+```
+
+### Bootstrap Phase E - Linux Intel / B70
+
+Implement Intel GPU detection, SYCL/custom-wrapper profile planning, disk-floor blocking, and B70 smoke.
+
+Gate:
+
+```bash
+go test ./internal/bootstrap/... -race
+make smoke-bootstrap-b70
+```
+
+### Bootstrap Phase F - multi-profile runtime
+
+Allow one peer to advertise multiple ready engine profiles and let the scheduler choose among compatible profiles for a preset.
+
+Gate:
+
+```bash
+go test ./internal/scheduler/... ./internal/node/... ./internal/bootstrap/... -race
+make smoke-local
+make smoke-fleet
+make smoke-benchmark-fleet
+```
+
+## 18. Acceptance criteria
+
+Engine bootstrap is complete when:
+
+- A clean Mac can run one command that writes a compute peer config using native llama.cpp.
+- A Mac with MLX support can add an MLX profile without Docker.
+- Spark can expose a safe vLLM profile with memory caps that prevent the known OOM crash class.
+- B70 can expose its existing SYCL/custom engine when disk headroom is safe and loudly refuse compute readiness when it is not.
+- Existing installed engines are adopted without reinstall.
+- No model download occurs during engine setup.
+- All changes are durable, resumable, and visible through jobs/doctor output.
+- The fleet benchmark can consume bootstrap readiness facts but still runs only through normal gateway/scheduler/runtime paths.
+
