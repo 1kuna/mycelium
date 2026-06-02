@@ -18,3 +18,11 @@ func TestSystemClockTimer(t *testing.T) {
 		t.Fatal("fresh timer should stop")
 	}
 }
+
+func TestSystemClockTimerStopAfterFire(t *testing.T) {
+	timer := System{}.NewTimer(time.Nanosecond)
+	<-timer.C()
+	if timer.Stop() {
+		t.Fatal("fired timer should not stop")
+	}
+}

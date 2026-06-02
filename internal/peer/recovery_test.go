@@ -10,6 +10,7 @@ import (
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
+	"mycelium/internal/trace"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
 )
@@ -39,6 +40,7 @@ func TestRecoveryRescuesDeadPeerUnfinishedJobsAfterOwnerCheck(t *testing.T) {
 		t.Fatalf("Merge: %v", err)
 	}
 	var rescued []string
+	tr := trace.New(func() time.Time { return time.Unix(300, int64(len(rescued))).UTC() })
 	recovery := Recovery{
 		Registry: registry,
 		Owners: recoveryOwners{inspectors: map[string]ports.LeaseInspector{
@@ -47,6 +49,7 @@ func TestRecoveryRescuesDeadPeerUnfinishedJobsAfterOwnerCheck(t *testing.T) {
 			"node-unreachable": staticLeaseInspector{err: domain.ErrUnreachable},
 		}},
 		Clock: mocks.NewFakeClock(time.Unix(300, 0).UTC()),
+		Trace: tr,
 		Rescue: func(_ context.Context, rec domain.JobRecord) error {
 			rescued = append(rescued, rec.JobID)
 			return nil
@@ -61,6 +64,9 @@ func TestRecoveryRescuesDeadPeerUnfinishedJobsAfterOwnerCheck(t *testing.T) {
 	if count != len(want) || !reflect.DeepEqual(rescued, want) {
 		t.Fatalf("rescued count=%d ids=%+v", count, rescued)
 	}
+	if !hasPeerTrace(tr.Steps, "recovery/snapshot", "success") || !hasPeerTrace(tr.Steps, "recovery/rescue", "success") || !hasPeerTrace(tr.Steps, "recovery/partition", "success") {
+		t.Fatalf("trace = %+v", tr.Steps)
+	}
 	snap, err := registry.Snapshot(ctx)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
@@ -74,6 +80,15 @@ func TestRecoveryRescuesDeadPeerUnfinishedJobsAfterOwnerCheck(t *testing.T) {
 			t.Fatalf("missing partition note for %s: %q", id, notes[id])
 		}
 	}
+}
+
+func hasPeerTrace(steps []trace.Step, op, status string) bool {
+	for _, step := range steps {
+		if step.Operation == op && step.Status == status {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRecoveryErrorPaths(t *testing.T) {

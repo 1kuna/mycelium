@@ -33,7 +33,7 @@ func TestDarwinDetectorBuildsUnifiedMemoryNode(t *testing.T) {
 	if node.OS != "darwin" || !node.UnifiedMemory || node.Accelerators[0].VRAMTotalMB != 65536 {
 		t.Fatalf("node = %+v", node)
 	}
-	if node.Labels["gpu.vendor"] != "apple" || node.SpeedClass.Source != "detected-default" {
+	if node.Labels["gpu.vendor"] != "apple" || node.SpeedClass.Source != "class-default" {
 		t.Fatalf("labels/speed = %+v %+v", node.Labels, node.SpeedClass)
 	}
 	if !node.SpeedClass.ProbedAt.Equal(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)) {
@@ -62,7 +62,7 @@ func TestLinuxDetectorBuildsNVIDIANode(t *testing.T) {
 	if node.Accelerators[0].Vendor != "nvidia" || node.Accelerators[0].Kind != "cuda" || node.Accelerators[0].VRAMTotalMB != 24564 || node.Accelerators[0].ComputeCapability != "8.9" {
 		t.Fatalf("accelerator = %+v", node.Accelerators[0])
 	}
-	if node.Labels["gpu.vendor"] != "nvidia" || node.OOMSeverity != domain.OOMSoft || node.SpeedClass.Source != "detected-default" {
+	if node.Labels["gpu.vendor"] != "nvidia" || node.OOMSeverity != domain.OOMSoft || node.SpeedClass.Source != "class-default" {
 		t.Fatalf("labels/speed = %+v %+v", node.Labels, node.SpeedClass)
 	}
 }
@@ -147,7 +147,7 @@ NULL platform behavior
 	if acc.Vendor != "intel" || acc.Kind != "arc-pro-b70" || acc.VRAMTotalMB != 31023 || !strings.Contains(acc.ArchFamily, "B70") {
 		t.Fatalf("accelerator = %+v", acc)
 	}
-	if node.Labels["gpu.vendor"] != "intel" || node.OOMSeverity != domain.OOMSoft || node.SpeedClass.Source != "detected-default" {
+	if node.Labels["gpu.vendor"] != "intel" || node.OOMSeverity != domain.OOMSoft || node.SpeedClass.Source != "class-default" {
 		t.Fatalf("labels/speed = %+v %+v", node.Labels, node.SpeedClass)
 	}
 }
@@ -222,6 +222,27 @@ func TestLinuxDetectorErrorPaths(t *testing.T) {
 	}
 	if kind := intelKind("Intel(R) Arc(TM) Graphics"); kind != "arc" {
 		t.Fatalf("generic arc kind = %q", kind)
+	}
+}
+
+func TestLinuxDetectorGB10SystemMemoryFallbackFailure(t *testing.T) {
+	getconfErr := errors.New("getconf failed")
+	_, err := (Detector{
+		GOOS: "linux",
+		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			switch name {
+			case "nvidia-smi":
+				return []byte("0, NVIDIA GB10, [N/A], 12.1\n"), nil
+			case "getconf":
+				return nil, getconfErr
+			default:
+				t.Fatalf("unexpected command %s %+v", name, args)
+				return nil, nil
+			}
+		},
+	}).Detect(context.Background(), domain.Node{})
+	if !errors.Is(err, getconfErr) || !strings.Contains(err.Error(), "parse nvidia memory") || !strings.Contains(err.Error(), "system memory fallback") {
+		t.Fatalf("fallback err = %v", err)
 	}
 }
 

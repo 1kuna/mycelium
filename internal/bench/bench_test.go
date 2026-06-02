@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"mycelium/internal/domain"
+	"mycelium/internal/trace"
 	"mycelium/test/mocks"
 )
 
@@ -31,6 +32,9 @@ func TestRunnerWritesOneOutputPerModelAndMetrics(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].Bytes != 5 || results[0].DurationMS != 25 {
 		t.Fatalf("results = %+v", results)
+	}
+	if !hasBenchTrace(results[0].Trace, "benchmark/complete", "success") || !hasBenchTrace(results[0].Trace, "benchmark/write_output", "success") {
+		t.Fatalf("trace = %+v", results[0].Trace)
 	}
 	for _, result := range results {
 		body, err := os.ReadFile(result.OutputPath)
@@ -64,6 +68,9 @@ func TestRunnerRecordsModelErrorsAndRejectsBadRequests(t *testing.T) {
 	}
 	if len(results) != 1 || !strings.Contains(results[0].Error, "backend failed") {
 		t.Fatalf("results = %+v", results)
+	}
+	if !hasBenchTrace(results[0].Trace, "benchmark/complete", "error") {
+		t.Fatalf("error trace = %+v", results[0].Trace)
 	}
 	for _, req := range []Request{
 		{Prompt: "p", Models: []string{"m"}, OutputDir: dir},
@@ -221,6 +228,15 @@ func TestBenchNameHelpers(t *testing.T) {
 	if elapsedMS(-time.Second) != 0 {
 		t.Fatal("negative duration should clamp to zero")
 	}
+}
+
+func hasBenchTrace(steps []trace.Step, op, status string) bool {
+	for _, step := range steps {
+		if step.Operation == op && step.Status == status {
+			return true
+		}
+	}
+	return false
 }
 
 type fakeClient struct {

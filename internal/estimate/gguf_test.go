@@ -87,15 +87,15 @@ func TestGGUFEstimatorFailsLoudOnMissingInputs(t *testing.T) {
 func TestGGUFEstimatorFailsOnBadMetadataAndContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := NewGGUF(&staticParser{}, nil).Estimate(ctx, fixtures.MakePreset(), 1000, 1)
-	if err == nil {
-		t.Fatal("expected context error")
-	}
-
 	model := filepath.Join(t.TempDir(), "model.gguf")
 	if err := os.WriteFile(model, []byte("not really gguf"), 0o600); err != nil {
 		t.Fatalf("write model: %v", err)
 	}
+	_, err := NewGGUF(&staticParser{metadata: domain.ModelMetadata{WeightsMB: 1, KVPerTokenMB: 0.1}}, nil).Estimate(ctx, fixtures.MakePreset(fixtures.WithModelRef(model)), 1000, 1)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+
 	_, err = NewGGUF(nil, nil).Estimate(context.Background(), fixtures.MakePreset(fixtures.WithModelRef(model)), 1000, 1)
 	if err == nil || !strings.Contains(err.Error(), "parser") {
 		t.Fatalf("missing parser err = %v", err)

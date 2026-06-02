@@ -10,6 +10,7 @@ import (
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
+	"mycelium/internal/trace"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
 )
@@ -21,6 +22,7 @@ func TestCoordinatorClaimPlanCommitRelease(t *testing.T) {
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
 	claim := fixtures.MakeClaim(10, 2)
 	registry := NewJobRegistry()
+	tr := trace.New(clock.Now)
 	admission := &mocks.AdmissionController{
 		OfferVal: domain.LeaseOffer{OfferID: "offer-a", JobID: job.ID, NodeID: node.ID, Claim: claim, Fence: 7},
 		LeaseVal: domain.Lease{ID: "lease-a", JobID: job.ID, NodeID: node.ID, Claim: claim},
@@ -33,6 +35,7 @@ func TestCoordinatorClaimPlanCommitRelease(t *testing.T) {
 		staticPeerFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
 		ownerResolver{owners: map[string]ports.AdmissionController{node.ID: admission}},
 		clock,
+		WithTrace(tr),
 	)
 
 	if err := coordinator.ClaimJob(ctx, job.ID); err != nil {
@@ -54,6 +57,11 @@ func TestCoordinatorClaimPlanCommitRelease(t *testing.T) {
 	}
 	if strings.Join(admission.Calls, ",") != "offer:job-a,commit:offer-a:7,release:lease-a" {
 		t.Fatalf("admission calls = %+v", admission.Calls)
+	}
+	for _, op := range []string{"coordinator/job_source", "coordinator/fleet_snapshot", "coordinator/place", "coordinator/owner_offer", "coordinator/owner_commit", "coordinator/owner_release"} {
+		if !hasPeerTrace(tr.Steps, op, "success") {
+			t.Fatalf("missing trace %s in %+v", op, tr.Steps)
+		}
 	}
 	snap, err := registry.Snapshot(ctx)
 	if err != nil {

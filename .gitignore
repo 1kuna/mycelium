@@ -3,6 +3,12 @@
 /.venv-mlx/
 /.smoke-models/
 *.out
+all.out
+cmd.out
+contract.out
+covergate.out
+sched.out
+smoke.out
 *.test
 coverage.html
 .DS_Store

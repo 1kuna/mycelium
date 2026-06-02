@@ -70,7 +70,7 @@ func (d Detector) detectDarwin(ctx context.Context, seed domain.Node) (domain.No
 		if clk == nil {
 			clk = clock.System{}
 		}
-		node.SpeedClass = domain.SpeedClass{TokensPerSecRef: 1, Source: "detected-default", ProbedAt: clk.Now().UTC()}
+		node.SpeedClass = domain.SpeedClass{TokensPerSecRef: 1, Source: "class-default", ProbedAt: clk.Now().UTC()}
 	}
 	return node, nil
 }
@@ -135,7 +135,7 @@ func linuxNode(seed domain.Node, vendor string, accelerators []domain.Accelerato
 		if clk == nil {
 			clk = clock.System{}
 		}
-		node.SpeedClass = domain.SpeedClass{TokensPerSecRef: 1, Source: "detected-default", ProbedAt: clk.Now().UTC()}
+		node.SpeedClass = domain.SpeedClass{TokensPerSecRef: 1, Source: "class-default", ProbedAt: clk.Now().UTC()}
 	}
 	return node
 }
