@@ -2,6 +2,8 @@ package domain
 
 import "time"
 
+const DefaultDiskMinFreeRatio = 0.25
+
 type Accelerator struct {
 	Index             int    `json:"index"`
 	Vendor            string `json:"vendor"`
@@ -14,18 +16,21 @@ type Accelerator struct {
 }
 
 type Node struct {
-	ID            string            `json:"id"`
-	Name          string            `json:"name"`
-	Address       string            `json:"address"`
-	OS            string            `json:"os"`
-	Labels        map[string]string `json:"labels,omitempty"`
-	MaxUtil       float64           `json:"max_util"`
-	OOMSeverity   OOMSeverity       `json:"oom_severity"`
-	Accelerators  []Accelerator     `json:"accelerators"`
-	UnifiedMemory bool              `json:"unified_memory"`
-	SpeedClass    SpeedClass        `json:"speed_class"`
-	Status        NodeStatus        `json:"status"`
-	HeartbeatAt   time.Time         `json:"heartbeat_at"`
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	Address          string            `json:"address"`
+	OS               string            `json:"os"`
+	Labels           map[string]string `json:"labels,omitempty"`
+	MaxUtil          float64           `json:"max_util"`
+	DiskTotalMB      int               `json:"disk_total_mb,omitempty"`
+	DiskFreeMB       int               `json:"disk_free_mb,omitempty"`
+	DiskMinFreeRatio float64           `json:"disk_min_free_ratio,omitempty"`
+	OOMSeverity      OOMSeverity       `json:"oom_severity"`
+	Accelerators     []Accelerator     `json:"accelerators"`
+	UnifiedMemory    bool              `json:"unified_memory"`
+	SpeedClass       SpeedClass        `json:"speed_class"`
+	Status           NodeStatus        `json:"status"`
+	HeartbeatAt      time.Time         `json:"heartbeat_at"`
 }
 
 type SpeedClass struct {
@@ -35,18 +40,19 @@ type SpeedClass struct {
 }
 
 type Preset struct {
-	ID            string       `json:"id"`
-	ModelRef      string       `json:"model_ref"`
-	Aliases       []string     `json:"aliases,omitempty"`
-	Backend       Backend      `json:"backend"`
-	ContextLength int          `json:"context_length"`
-	Quant         string       `json:"quant"`
-	Capabilities  []Capability `json:"capabilities"`
-	LaunchProfile string       `json:"launch_profile"`
-	LaunchArgs    []string     `json:"launch_args,omitempty"`
-	EstWeightsMB  int          `json:"est_weights_mb"`
-	KVPerTokenMB  float64      `json:"kv_per_token_mb"`
-	NodeID        string       `json:"node_id,omitempty"`
+	ID             string       `json:"id"`
+	ModelRef       string       `json:"model_ref"`
+	Aliases        []string     `json:"aliases,omitempty"`
+	Backend        Backend      `json:"backend"`
+	ContextLength  int          `json:"context_length"`
+	Quant          string       `json:"quant"`
+	Capabilities   []Capability `json:"capabilities"`
+	LaunchProfile  string       `json:"launch_profile"`
+	LaunchArgs     []string     `json:"launch_args,omitempty"`
+	ArtifactSizeMB int          `json:"artifact_size_mb,omitempty"`
+	EstWeightsMB   int          `json:"est_weights_mb"`
+	KVPerTokenMB   float64      `json:"kv_per_token_mb"`
+	NodeID         string       `json:"node_id,omitempty"`
 }
 
 type ModelMetadata struct {

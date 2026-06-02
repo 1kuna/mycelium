@@ -27,10 +27,13 @@ func (p *Placer) tryPreempt(job domain.Job, fleet domain.FleetSnapshot, claim do
 func (p *Placer) tryPreemptForPreset(ctx context.Context, job domain.Job, preset domain.Preset, contextLen, concurrency int, fleet domain.FleetSnapshot) (preemptResult, bool, error) {
 	return p.tryPreemptWithClaims(job, fleet, func(node domain.Node, accSet []int) (domain.Claim, error) {
 		return p.estimateCandidateClaim(ctx, preset, contextLen, concurrency, node, accSet)
+	}, func(node domain.Node) bool {
+		_, drop := nodeDiskDropReason(preset, node, fleet)
+		return !drop
 	})
 }
 
-func (p *Placer) tryPreemptWithClaims(job domain.Job, fleet domain.FleetSnapshot, claimFor func(domain.Node, []int) (domain.Claim, error)) (preemptResult, bool, error) {
+func (p *Placer) tryPreemptWithClaims(job domain.Job, fleet domain.FleetSnapshot, claimFor func(domain.Node, []int) (domain.Claim, error), nodeGuards ...func(domain.Node) bool) (preemptResult, bool, error) {
 	if !hardPreemptionAllowed(job) {
 		return preemptResult{trace: []domain.TraceStep{{Step: "preempt", Result: "hard preemption not allowed"}}}, false, nil
 	}
@@ -38,6 +41,9 @@ func (p *Placer) tryPreemptWithClaims(job domain.Job, fleet domain.FleetSnapshot
 	var results []preemptResult
 	for _, node := range fleet.Nodes {
 		if node.Status != domain.NodeReady {
+			continue
+		}
+		if !preemptNodeAllowed(node, nodeGuards) {
 			continue
 		}
 		for _, accSet := range acceleratorSets(node) {
@@ -136,6 +142,11 @@ func (p *Placer) canReplaceVictim(victim domain.ModelInstance, originalNodeID st
 		if node.ID == originalNodeID || node.Status != domain.NodeReady {
 			continue
 		}
+		if preset, ok := p.presets[victim.PresetID]; ok {
+			if _, drop := nodeDiskDropReason(preset, node, fleet); drop {
+				continue
+			}
+		}
 		for _, acc := range node.Accelerators {
 			if p.allocator.Fits(node, []int{acc.Index}, instances, victim.Claim) {
 				return true
@@ -143,6 +154,15 @@ func (p *Placer) canReplaceVictim(victim domain.ModelInstance, originalNodeID st
 		}
 	}
 	return false
+}
+
+func preemptNodeAllowed(node domain.Node, guards []func(domain.Node) bool) bool {
+	for _, guard := range guards {
+		if guard != nil && !guard(node) {
+			return false
+		}
+	}
+	return true
 }
 
 func removeInstance(instances []domain.ModelInstance, id string) []domain.ModelInstance {

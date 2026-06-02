@@ -164,11 +164,11 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if peerCfg.QueueDrainMS != 1000 || peerCfg.QueueDrainLimit != 1 || peerCfg.OptimizerEvalMS != 60000 || peerCfg.RegistrySyncMS != 1000 || peerCfg.DiscoveryScanMS != 250 || peerCfg.DiscoveryAdvertiseMS != 5000 {
 		t.Fatalf("peer drain defaults = %+v", peerCfg)
 	}
-	if peerCfg.ComputeConfig.ID != "peer_local" || peerCfg.ComputeConfig.BackendListen != "127.0.0.1:51848" {
+	if peerCfg.ComputeConfig.ID != "peer_local" || peerCfg.ComputeConfig.BackendListen != "127.0.0.1:51848" || peerCfg.ComputeConfig.DiskMinFreeRatio != domain.DefaultDiskMinFreeRatio {
 		t.Fatalf("compute defaults = %+v", peerCfg.ComputeConfig)
 	}
 	computePath := filepath.Join(t.TempDir(), "compute-peer.json")
-	computeRaw := `{"compute":true,"overlay":true,"overlay_listen_addrs":["/ip4/127.0.0.1/tcp/0"],"overlay_bootstrap":["/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWFake"],"private_storage_key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","submitter_policy":{"submitter-a":{"max_priority":"interactive","allow_private":true}},"compute_config":{"backend_listen":"127.0.0.1:8","id":"peer-json","name":"Peer JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"gguf_parser":"parser"}}`
+	computeRaw := `{"compute":true,"overlay":true,"overlay_listen_addrs":["/ip4/127.0.0.1/tcp/0"],"overlay_bootstrap":["/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWFake"],"private_storage_key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","submitter_policy":{"submitter-a":{"max_priority":"interactive","allow_private":true}},"compute_config":{"backend_listen":"127.0.0.1:8","id":"peer-json","name":"Peer JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"disk_min_free_ratio":0.33,"gguf_parser":"parser"}}`
 	if err := os.WriteFile(computePath, []byte(computeRaw), 0644); err != nil {
 		t.Fatalf("write compute peer config: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPeerConfig compute: %v", err)
 	}
-	if !computeCfg.Compute || computeCfg.ComputeConfig.ID != "peer-json" || computeCfg.ComputeConfig.VRAMMB != 1234 || computeCfg.ComputeConfig.GGUFParser != "parser" || computeCfg.ComputeConfig.Backend != domain.BackendMLX || computeCfg.ComputeConfig.BackendBinary != "/bin/mlx" {
+	if !computeCfg.Compute || computeCfg.ComputeConfig.ID != "peer-json" || computeCfg.ComputeConfig.VRAMMB != 1234 || computeCfg.ComputeConfig.GGUFParser != "parser" || computeCfg.ComputeConfig.Backend != domain.BackendMLX || computeCfg.ComputeConfig.BackendBinary != "/bin/mlx" || computeCfg.ComputeConfig.DiskMinFreeRatio != 0.33 {
 		t.Fatalf("compute peer config = %+v", computeCfg)
 	}
 	if !computeCfg.Overlay || len(computeCfg.OverlayListenAddrs) != 1 || len(computeCfg.OverlayBootstrap) != 1 {
@@ -962,6 +962,17 @@ func TestSeedPeerProbeRemembersReachablePeer(t *testing.T) {
 	}
 	if got := seedPeerProbeInterval(time.Millisecond); got != 5*time.Second {
 		t.Fatalf("seed interval = %s", got)
+	}
+}
+
+func TestPeerProbeWrappersValidateBeforeNetwork(t *testing.T) {
+	cache := membership.NewCachedPeerDiscovery(&mocks.PeerDiscovery{}, mocks.NewFakeClock(time.Unix(1, 0).UTC()), time.Minute)
+	probeSeedPeers(context.Background(), cache, nil, "", nil)
+	if _, err := fetchPeerHealth(context.Background(), " ", ""); err == nil || !strings.Contains(err.Error(), "peer address") {
+		t.Fatalf("fetchPeerHealth err = %v", err)
+	}
+	if err := probePeerHealthWithToken(context.Background(), domain.Peer{}, "secret"); err == nil || !strings.Contains(err.Error(), "peer id") {
+		t.Fatalf("probePeerHealthWithToken err = %v", err)
 	}
 }
 
@@ -1824,6 +1835,7 @@ func TestBuildPeerGatewayAppliesFlagOverridesAndJoinURI(t *testing.T) {
 		"--llama-server", "/bin/false",
 		"--gguf-parser", "/bin/echo",
 		"--max-util", "0.5",
+		"--disk-min-free-ratio", "0.30",
 		"--vram-mb", "2048",
 	})
 	if err != nil {
@@ -1853,7 +1865,7 @@ func TestBuildPeerGatewayAppliesFlagOverridesAndJoinURI(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
 		t.Fatalf("snapshot json: %v", err)
 	}
-	if snap.Node.ID != "peer-override" || snap.Node.Name != "Override Peer" || snap.Node.MaxUtil != 0.5 || snap.Node.Accelerators[0].VRAMTotalMB != 2048 {
+	if snap.Node.ID != "peer-override" || snap.Node.Name != "Override Peer" || snap.Node.MaxUtil != 0.5 || snap.Node.DiskMinFreeRatio != 0.30 || snap.Node.DiskTotalMB <= 0 || snap.Node.Accelerators[0].VRAMTotalMB != 2048 {
 		t.Fatalf("snapshot = %+v", snap.Node)
 	}
 }

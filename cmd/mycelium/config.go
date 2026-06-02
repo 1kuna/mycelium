@@ -46,18 +46,22 @@ type SubmitterPolicyRule struct {
 }
 
 type ComputeConfig struct {
-	BackendListen string         `json:"backend_listen"`
-	ID            string         `json:"id"`
-	Name          string         `json:"name"`
-	Backend       domain.Backend `json:"backend"`
-	BackendBinary string         `json:"backend_binary"`
-	CustomArgs    []string       `json:"custom_args,omitempty"`
-	HealthPath    string         `json:"health_path,omitempty"`
-	StopGraceMS   int            `json:"stop_grace_ms,omitempty"`
-	LlamaServer   string         `json:"llama_server"`
-	GGUFParser    string         `json:"gguf_parser"`
-	MaxUtil       float64        `json:"max_util"`
-	VRAMMB        int            `json:"vram_mb"`
+	BackendListen    string         `json:"backend_listen"`
+	ID               string         `json:"id"`
+	Name             string         `json:"name"`
+	Backend          domain.Backend `json:"backend"`
+	BackendBinary    string         `json:"backend_binary"`
+	CustomArgs       []string       `json:"custom_args,omitempty"`
+	HealthPath       string         `json:"health_path,omitempty"`
+	StopGraceMS      int            `json:"stop_grace_ms,omitempty"`
+	LlamaServer      string         `json:"llama_server"`
+	GGUFParser       string         `json:"gguf_parser"`
+	MaxUtil          float64        `json:"max_util"`
+	DiskPath         string         `json:"disk_path,omitempty"`
+	DiskTotalMB      int            `json:"disk_total_mb,omitempty"`
+	DiskFreeMB       int            `json:"disk_free_mb,omitempty"`
+	DiskMinFreeRatio float64        `json:"disk_min_free_ratio,omitempty"`
+	VRAMMB           int            `json:"vram_mb"`
 }
 
 func loadPeerConfig(path string) (PeerConfig, error) {
@@ -163,6 +167,9 @@ func defaultedComputeConfig(cfg ComputeConfig) ComputeConfig {
 	}
 	if cfg.MaxUtil == 0 {
 		cfg.MaxUtil = 0.90
+	}
+	if cfg.DiskMinFreeRatio == 0 {
+		cfg.DiskMinFreeRatio = domain.DefaultDiskMinFreeRatio
 	}
 	return cfg
 }

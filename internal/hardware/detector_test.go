@@ -15,8 +15,9 @@ import (
 
 func TestDarwinDetectorBuildsUnifiedMemoryNode(t *testing.T) {
 	detector := Detector{
-		GOOS:  "darwin",
-		Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		GOOS:     "darwin",
+		Clock:    mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		StatDisk: fakeDiskStats,
 		Command: func(context.Context, string, ...string) ([]byte, error) {
 			return []byte("68719476736\n"), nil
 		},
@@ -36,6 +37,9 @@ func TestDarwinDetectorBuildsUnifiedMemoryNode(t *testing.T) {
 	if node.Labels["gpu.vendor"] != "apple" || node.SpeedClass.Source != "class-default" {
 		t.Fatalf("labels/speed = %+v %+v", node.Labels, node.SpeedClass)
 	}
+	if node.DiskTotalMB != 1000 || node.DiskFreeMB != 700 || node.DiskMinFreeRatio != domain.DefaultDiskMinFreeRatio {
+		t.Fatalf("disk = %+v", node)
+	}
 	if !node.SpeedClass.ProbedAt.Equal(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)) {
 		t.Fatalf("probed_at = %s", node.SpeedClass.ProbedAt)
 	}
@@ -43,8 +47,9 @@ func TestDarwinDetectorBuildsUnifiedMemoryNode(t *testing.T) {
 
 func TestLinuxDetectorBuildsNVIDIANode(t *testing.T) {
 	detector := Detector{
-		GOOS:  "linux",
-		Clock: mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		GOOS:     "linux",
+		Clock:    mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		StatDisk: fakeDiskStats,
 		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 			if name != "nvidia-smi" || len(args) != 2 || !strings.Contains(args[0], "memory.total") {
 				t.Fatalf("command = %s %+v", name, args)
@@ -69,8 +74,9 @@ func TestLinuxDetectorBuildsNVIDIANode(t *testing.T) {
 
 func TestLinuxDetectorBuildsSparkGB10Node(t *testing.T) {
 	detector := Detector{
-		GOOS:  "linux",
-		Clock: mocks.NewFakeClock(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)),
+		GOOS:     "linux",
+		Clock:    mocks.NewFakeClock(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)),
+		StatDisk: fakeDiskStats,
 		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 			switch name {
 			case "nvidia-smi":
@@ -111,8 +117,9 @@ func TestLinuxDetectorBuildsSparkGB10Node(t *testing.T) {
 
 func TestLinuxDetectorBuildsIntelArcB70Node(t *testing.T) {
 	detector := Detector{
-		GOOS:  "linux",
-		Clock: mocks.NewFakeClock(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)),
+		GOOS:     "linux",
+		Clock:    mocks.NewFakeClock(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)),
+		StatDisk: fakeDiskStats,
 		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 			switch name {
 			case "nvidia-smi":
@@ -246,6 +253,36 @@ func TestLinuxDetectorGB10SystemMemoryFallbackFailure(t *testing.T) {
 	}
 }
 
+func TestDetectorDiskErrorPaths(t *testing.T) {
+	_, err := (Detector{
+		GOOS: "darwin",
+		Command: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("1024\n"), nil
+		},
+		StatDisk: func(string) (DiskStats, error) {
+			return DiskStats{}, errors.New("statfs")
+		},
+	}).Detect(context.Background(), domain.Node{})
+	if err == nil || !strings.Contains(err.Error(), "statfs") {
+		t.Fatalf("disk err = %v", err)
+	}
+
+	_, err = (Detector{StatDisk: func(string) (DiskStats, error) {
+		return DiskStats{}, nil
+	}}).AddDiskStats(domain.Node{})
+	if err == nil || !strings.Contains(err.Error(), "invalid disk capacity") {
+		t.Fatalf("invalid disk err = %v", err)
+	}
+
+	seed := domain.Node{DiskTotalMB: 100, DiskFreeMB: 30}
+	node, err := (Detector{StatDisk: func(string) (DiskStats, error) {
+		return DiskStats{}, errors.New("should not stat")
+	}}).AddDiskStats(seed)
+	if err != nil || node.DiskTotalMB != 100 || node.DiskMinFreeRatio != domain.DefaultDiskMinFreeRatio {
+		t.Fatalf("preserved disk = %+v err=%v", node, err)
+	}
+}
+
 func TestNewDetectorAndRunCommand(t *testing.T) {
 	detector := NewDetector()
 	if detector.GOOS != runtime.GOOS || detector.Command == nil {
@@ -259,4 +296,8 @@ func TestNewDetectorAndRunCommand(t *testing.T) {
 
 func TestDetectorSatisfiesPort(t *testing.T) {
 	var _ ports.HardwareDetector = Detector{}
+}
+
+func fakeDiskStats(string) (DiskStats, error) {
+	return DiskStats{TotalMB: 1000, FreeMB: 700}, nil
 }

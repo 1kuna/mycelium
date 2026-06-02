@@ -125,6 +125,54 @@ func TestPlaceAutoScoresColdCandidatesInsteadOfBlindWarmMatch(t *testing.T) {
 	}
 }
 
+func TestPlaceFiltersNodeWhenModelDownloadWouldCrossDiskFloor(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithWeights(10), fixtures.WithArtifactSize(30))
+	tightDisk := fixtures.MakeNode(fixtures.WithNodeID("node-tight"), fixtures.WithVRAM(1000), fixtures.WithDisk(1000, 270))
+	healthyDisk := fixtures.MakeNode(fixtures.WithNodeID("node-healthy"), fixtures.WithVRAM(1000), fixtures.WithDisk(1000, 500))
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(10, 1)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.Latency), domain.FleetSnapshot{
+		Nodes: []domain.Node{tightDisk, healthyDisk},
+	})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.NodeID != healthyDisk.ID {
+		t.Fatalf("decision = %+v", decision)
+	}
+	dropped := traceStep(decision.Trace, "filter").Data["dropped"].(map[string]string)
+	if dropped[tightDisk.ID] != "disk.free_after_model" {
+		t.Fatalf("dropped = %+v", dropped)
+	}
+}
+
+func TestPlaceSkipsWarmInstanceWhenNodeIsAtDiskFloor(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithWeights(10), fixtures.WithArtifactSize(100))
+	fullNode := fixtures.MakeNode(fixtures.WithDisk(1000, 250))
+	warm := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst-warm"),
+		fixtures.WithInstancePreset(preset.ID),
+		fixtures.OnNode(fullNode.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(10, 1)),
+	)
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(10, 1)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(), domain.FleetSnapshot{
+		Nodes:     []domain.Node{fullNode},
+		Instances: []domain.ModelInstance{warm},
+	})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.Action != domain.ActionQueued {
+		t.Fatalf("decision = %+v", decision)
+	}
+	dropped := traceStep(decision.Trace, "filter").Data["dropped"].(map[string]string)
+	if dropped[fullNode.ID] != "disk.free" {
+		t.Fatalf("dropped = %+v", dropped)
+	}
+}
+
 func TestPlaceQueuesWhenNoFitAndSoftPreemption(t *testing.T) {
 	preset := fixtures.MakePreset(fixtures.WithWeights(1000), fixtures.WithKVPerToken(0))
 	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.5))
