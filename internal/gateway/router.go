@@ -143,10 +143,6 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	if err != nil {
 		return RouteResponse{}, err
 	}
-	profile, err := r.profileFor(preset)
-	if err != nil {
-		return RouteResponse{}, err
-	}
 	fleet, err := r.Fleet.Snapshot(ctx)
 	if err != nil {
 		return RouteResponse{}, err
@@ -157,6 +153,10 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	}
 	var lastErr error
 	for attempt := 1; attempt <= tries; attempt++ {
+		profile, err := r.profileFor(preset)
+		if err != nil {
+			return RouteResponse{}, err
+		}
 		job := r.jobFromIngress(req, attempt)
 		clk := r.clock()
 		loadStart := clk.Now()
@@ -208,7 +208,10 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 				next, ok := r.Presets.NextLargerContext(preset)
 				if ok {
 					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", preset.ID, next.ID)
-					req.Model = next.ID
+					req, err = translate.WithModel(req, next.ID)
+					if err != nil {
+						return RouteResponse{}, err
+					}
 					preset = next
 					continue
 				}
@@ -278,10 +281,6 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 	if err != nil {
 		return err
 	}
-	profile, err := r.profileFor(preset)
-	if err != nil {
-		return err
-	}
 	fleet, err := r.Fleet.Snapshot(ctx)
 	if err != nil {
 		return err
@@ -293,6 +292,10 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 	started := false
 	var lastErr error
 	for attempt := 1; attempt <= tries; attempt++ {
+		profile, err := r.profileFor(preset)
+		if err != nil {
+			return err
+		}
 		job := r.jobFromIngress(req, attempt)
 		clk := r.clock()
 		loadStart := clk.Now()
@@ -420,7 +423,10 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 				next, ok := r.Presets.NextLargerContext(preset)
 				if ok && !started {
 					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", preset.ID, next.ID)
-					req.Model = next.ID
+					req, err = translate.WithModel(req, next.ID)
+					if err != nil {
+						return err
+					}
 					preset = next
 					continue
 				}
