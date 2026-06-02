@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"mycelium/internal/bench"
 	"mycelium/internal/catalog"
 	"mycelium/internal/domain"
 	"mycelium/internal/optimizer"
@@ -288,6 +289,56 @@ func TestRunBenchmarkPrintsChildErrorsAndUsesDefaultID(t *testing.T) {
 	}
 }
 
+func TestRunBenchmarkFleetSimulateWritesArtifact(t *testing.T) {
+	cfg := controlFleetConfig()
+	configPath := filepath.Join(t.TempDir(), "fleet.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	outDir := filepath.Join(t.TempDir(), "fleet-out")
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = RunWithClient(context.Background(), []string{
+			"benchmark", "fleet",
+			"--config", configPath,
+			"--out", outDir,
+			"--simulate",
+		}, directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusTeapot)
+		})))
+	})
+	if runErr != nil {
+		t.Fatalf("benchmark fleet simulate: %v", runErr)
+	}
+	if !strings.Contains(output, "benchmark-fleet\tfleet-cli\tdone") {
+		t.Fatalf("output = %q", output)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "fleet-cli", "report.html")); err != nil {
+		t.Fatalf("report missing: %v", err)
+	}
+	results, err := os.ReadFile(filepath.Join(outDir, "fleet-cli", "results.json"))
+	if err != nil || !strings.Contains(string(results), "disk-headroom") {
+		t.Fatalf("results = %q %v", results, err)
+	}
+}
+
+func TestRunBenchmarkFleetRejectsBadRequests(t *testing.T) {
+	if err := RunWithClient(context.Background(), []string{"benchmark", "fleet", "--out", t.TempDir()}, nil); err == nil || !strings.Contains(err.Error(), "--config") {
+		t.Fatalf("missing config err = %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{"benchmark", "fleet", "--config", "missing.json"}, nil); err == nil || !strings.Contains(err.Error(), "--out") {
+		t.Fatalf("missing out err = %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{"benchmark", "fleet", "--config", filepath.Join(t.TempDir(), "missing.json"), "--out", t.TempDir()}, nil); err == nil {
+		t.Fatal("missing config file accepted")
+	}
+}
+
 func TestListCommandsRejectBadFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"models", "list", "--bad"},
@@ -298,6 +349,7 @@ func TestListCommandsRejectBadFlags(t *testing.T) {
 		{"projects", "set", "--bad"},
 		{"add-model", "--bad"},
 		{"benchmark", "run", "--bad"},
+		{"benchmark", "fleet", "--bad"},
 	} {
 		if err := Run(context.Background(), args); err == nil {
 			t.Fatalf("Run(%v) expected flag error", args)
@@ -555,4 +607,86 @@ func testPresetWithContext(id string, contextLen int) domain.Preset {
 	preset := testPreset(id)
 	preset.ContextLength = contextLen
 	return preset
+}
+
+func controlFleetConfig() bench.FleetBenchmarkConfig {
+	return bench.FleetBenchmarkConfig{
+		ID:       "fleet-cli",
+		Project:  "project-a",
+		RPCToken: "rpc-secret",
+		Gateways: []bench.FleetGateway{
+			{ID: "macbook-gw", URL: "http://macbook.test", NodeID: "macbook"},
+			{ID: "macmini-gw", URL: "http://macmini.test", NodeID: "mac-mini"},
+		},
+		Peers: []bench.FleetPeer{{ID: "spark", URL: "http://spark.test", RPCToken: "rpc-secret"}},
+		Prompts: []bench.FleetPrompt{{
+			ID:   "default",
+			Text: "answer briefly",
+		}},
+		Models: []bench.FleetModel{
+			{ID: "qwen9b", RequestModel: "qwen9b", PresetID: "preset-9b", PromptID: "default", Priority: domain.PriorityInteractive, SpeedPref: domain.SpeedThroughput, Preemption: domain.PreemptSoft, MaxTokens: 8},
+			{ID: "qwen122b", RequestModel: "qwen122b", PresetID: "preset-122b", PromptID: "default", Priority: domain.PriorityInteractive, SpeedPref: domain.SpeedThroughput, Preemption: domain.PreemptHardForInteractive, MaxTokens: 8},
+		},
+		Waves: []bench.FleetWave{
+			{ID: "cold-9b", Jobs: []bench.FleetWaveJob{{ModelID: "qwen9b", GatewayID: "macbook-gw"}}},
+			{ID: "warm-9b", Jobs: []bench.FleetWaveJob{{ModelID: "qwen9b", GatewayID: "macmini-gw"}}},
+			{ID: "fit-forced-122b", Jobs: []bench.FleetWaveJob{{ModelID: "qwen122b", GatewayID: "macbook-gw"}}},
+		},
+		Simulation: bench.FleetSimulationConfig{
+			Nodes: []domain.Node{
+				{
+					ID:               "spark",
+					Name:             "dgx-spark",
+					MaxUtil:          0.90,
+					DiskTotalMB:      1_000_000,
+					DiskFreeMB:       900_000,
+					DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio,
+					OOMSeverity:      domain.OOMCatastrophic,
+					Status:           domain.NodeReady,
+					Labels:           map[string]string{"gpu.kind": "gb10"},
+					Accelerators:     []domain.Accelerator{{Index: 0, VRAMTotalMB: 122000}},
+					SpeedClass:       domain.SpeedClass{TokensPerSecRef: 145},
+				},
+				{
+					ID:               "b70",
+					Name:             "arc-b70",
+					MaxUtil:          0.85,
+					DiskTotalMB:      1_000_000,
+					DiskFreeMB:       700_000,
+					DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio,
+					OOMSeverity:      domain.OOMSoft,
+					Status:           domain.NodeReady,
+					Accelerators:     []domain.Accelerator{{Index: 0, VRAMTotalMB: 32768}},
+					SpeedClass:       domain.SpeedClass{TokensPerSecRef: 70},
+				},
+				{
+					ID:               "disk-full",
+					Name:             "disk-full",
+					MaxUtil:          0.90,
+					DiskTotalMB:      1000,
+					DiskFreeMB:       250,
+					DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio,
+					OOMSeverity:      domain.OOMSoft,
+					Status:           domain.NodeReady,
+					Accelerators:     []domain.Accelerator{{Index: 0, VRAMTotalMB: 200000}},
+					SpeedClass:       domain.SpeedClass{TokensPerSecRef: 999},
+				},
+			},
+			Presets: []domain.Preset{
+				{ID: "preset-9b", ModelRef: "qwen9b", Backend: domain.BackendLlamaCpp, ContextLength: 8000, Capabilities: []domain.Capability{domain.CapabilityChat}, EstWeightsMB: 7000, ArtifactSizeMB: 7000, KVPerTokenMB: 0.05},
+				{ID: "preset-27b", ModelRef: "qwen27b", Backend: domain.BackendLlamaCpp, ContextLength: 8000, Capabilities: []domain.Capability{domain.CapabilityChat}, EstWeightsMB: 30000, ArtifactSizeMB: 30000, KVPerTokenMB: 0.25},
+				{ID: "preset-122b", ModelRef: "qwen122b", Backend: domain.BackendLlamaCpp, ContextLength: 8000, Capabilities: []domain.Capability{domain.CapabilityChat}, EstWeightsMB: 76000, ArtifactSizeMB: 76000, KVPerTokenMB: 0},
+			},
+			Instances: []domain.ModelInstance{{
+				ID:             "inst-27b-background",
+				PresetID:       "preset-27b",
+				NodeID:         "spark",
+				AcceleratorSet: []int{0},
+				Claim:          domain.Claim{WeightsMB: 30000, KVReservedMB: 2000},
+				State:          domain.InstReady,
+				Priority:       domain.PriorityBackground,
+			}},
+		},
+		Safety: bench.FleetBenchmarkSafety{MinDiskFreeRatio: domain.DefaultDiskMinFreeRatio, MaxSparkGPUMemoryUtil: 0.85},
+	}
 }

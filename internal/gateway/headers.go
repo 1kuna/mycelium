@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -14,6 +15,7 @@ const (
 	HeaderInstance     = "X-Myc-Instance"
 	HeaderBackend      = "X-Myc-Backend"
 	HeaderAttempts     = "X-Myc-Attempts"
+	HeaderTrace        = "X-Myc-Trace"
 	HeaderProject      = "X-Myc-Project"
 	HeaderPriority     = "X-Myc-Priority"
 	HeaderSpeedPref    = "X-Myc-Speed-Pref"
@@ -30,4 +32,10 @@ func writeDecisionHeaders(h http.Header, decision domain.PlacementDecision, inst
 	h.Set(HeaderInstance, inst.ID)
 	h.Set(HeaderBackend, profile.ID)
 	h.Set(HeaderAttempts, strconv.Itoa(attempts))
+	if len(decision.Trace) > 0 {
+		data, err := json.Marshal(decision.Trace)
+		if err == nil {
+			h.Set(HeaderTrace, string(data))
+		}
+	}
 }
