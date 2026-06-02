@@ -21,6 +21,7 @@ func TestPlaceHardPreemptsLowestPriorityVictim(t *testing.T) {
 		fixtures.WithClaim(fixtures.MakeClaim(100, 0)),
 		fixtures.WithInstancePriority(domain.PriorityBackground),
 	)
+	victim.InFlight = 1
 	normal := fixtures.MakeInstance(
 		fixtures.WithInstanceID("inst_normal"),
 		fixtures.OnNode(spark.ID),

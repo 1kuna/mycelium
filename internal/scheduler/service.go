@@ -433,7 +433,9 @@ func (s *Service) enactPreemption(ctx context.Context, job domain.Job, decision 
 		if err != nil {
 			return err
 		}
-		preemptedLeases[victim.ID] = lease
+		if lease.ID != "" {
+			preemptedLeases[victim.ID] = lease
+		}
 		agent, err := s.Nodes.NodeAgent(victim.NodeID)
 		if err != nil {
 			return err
@@ -482,7 +484,7 @@ func (s *Service) preemptOwnerLease(ctx context.Context, job domain.Job, decisio
 		return domain.Lease{}, err
 	}
 	if !found {
-		return domain.Lease{}, fmt.Errorf("preempted instance %q has no owner lease", victim.ID)
+		return domain.Lease{}, nil
 	}
 	preempter, ok := owner.(ports.PolicyPreempter)
 	if !ok {

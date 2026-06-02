@@ -351,6 +351,32 @@ func TestInFlightRequestsGuardUnload(t *testing.T) {
 	}
 }
 
+func TestSnapshotReportsInFlightRequests(t *testing.T) {
+	backend := mocks.NewBackendAdapter()
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
+	inst, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := agent.BeginRequest(context.Background(), inst.ID); err != nil {
+		t.Fatalf("BeginRequest: %v", err)
+	}
+	snap, err := agent.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Instances) != 1 || snap.Instances[0].InFlight != 1 {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	instances := agent.Instances()
+	if len(instances) != 1 || instances[0].InFlight != 1 {
+		t.Fatalf("instances = %+v", instances)
+	}
+	if err := agent.EndRequest(context.Background(), inst.ID); err != nil {
+		t.Fatalf("EndRequest: %v", err)
+	}
+}
+
 func TestBeginRequestRejectsMissingUnreadyAndCanceled(t *testing.T) {
 	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	if err := agent.BeginRequest(context.Background(), "missing"); err == nil {

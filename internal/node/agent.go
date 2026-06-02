@@ -101,6 +101,9 @@ func (a *Agent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 	node.HeartbeatAt = a.clock.Now()
 	instances := make([]domain.ModelInstance, 0, len(a.instances))
 	for _, inst := range a.instances {
+		if state := a.inflight[inst.ID]; state != nil {
+			inst.InFlight = state.count
+		}
 		instances = append(instances, inst)
 	}
 	sort.Slice(instances, func(i, j int) bool { return instances[i].ID < instances[j].ID })
@@ -335,6 +338,9 @@ func (a *Agent) admitLoad(req domain.LoadRequest) error {
 func (a *Agent) instanceListLocked() []domain.ModelInstance {
 	instances := make([]domain.ModelInstance, 0, len(a.instances))
 	for _, inst := range a.instances {
+		if state := a.inflight[inst.ID]; state != nil {
+			inst.InFlight = state.count
+		}
 		instances = append(instances, inst)
 	}
 	return instances

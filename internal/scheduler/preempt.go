@@ -80,7 +80,7 @@ func (p *Placer) tryPreemptWithClaims(job domain.Job, fleet domain.FleetSnapshot
 					}},
 				}
 				for _, selectedVictim := range selected {
-					if !p.canReplaceVictim(selectedVictim, node.ID, fleet, remaining) {
+					if selectedVictim.InFlight > 0 && !p.canReplaceVictim(selectedVictim, node.ID, fleet, remaining) {
 						result.requeued = append(result.requeued, selectedVictim.ID)
 					}
 				}

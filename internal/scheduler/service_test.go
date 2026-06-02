@@ -958,6 +958,61 @@ func TestServiceEnactsPreemptionAndRequeuesVictim(t *testing.T) {
 	}
 }
 
+func TestServiceEvictsIdleWarmVictimWithoutOwnerLease(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(20, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	victimPreset := fixtures.MakePreset(fixtures.WithPresetID("victim-preset"))
+	targetPreset := fixtures.MakePreset(fixtures.WithPresetID("target-preset"), fixtures.WithWeights(22))
+	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim-a"), fixtures.WithInstancePreset(victimPreset.ID), fixtures.OnNode(node.ID), fixtures.WithInstancePriority(domain.PriorityBackground))
+	agent := mocks.NewNodeAgent(node)
+	admission := &mocks.AdmissionController{}
+	store := &runtimeStore{
+		instances: map[string]domain.ModelInstance{victim.ID: victim},
+		leases:    map[string]domain.Lease{},
+		jobs:      map[string]domain.Job{},
+	}
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{
+			JobID:            "job-a",
+			NodeID:           node.ID,
+			Claim:            fixtures.MakeClaim(22, 4),
+			Action:           domain.ActionHardPreempted,
+			Preempted:        []string{victim.ID},
+			SpeedPrefApplied: domain.SpeedThroughput,
+		}},
+		Fleet: staticFleet{fleet: domain.FleetSnapshot{
+			Nodes:     []domain.Node{node},
+			Instances: []domain.ModelInstance{victim},
+		}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+		Presets: map[string]domain.Preset{
+			targetPreset.ID: targetPreset,
+			victimPreset.ID: victimPreset,
+		},
+	}
+
+	_, err := service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(targetPreset.ID), fixtures.Interactive, fixtures.HardForInteractive))
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if _, ok := store.instances[victim.ID]; ok {
+		t.Fatalf("victim still stored: %+v", store.instances)
+	}
+	if service.Queue.Len() != 0 {
+		t.Fatalf("idle eviction should not requeue, len = %d", service.Queue.Len())
+	}
+	if !strings.Contains(strings.Join(agent.Calls, ","), "unload:victim-a") {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+	if strings.Join(admission.Calls, ",") != "lease-for-instance:victim-a,offer:job-a,commit:offer_job-a:1,bind-instance:lease_offer_job-a:inst_1" {
+		t.Fatalf("admission calls = %+v", admission.Calls)
+	}
+}
+
 func TestServiceCoordinatedPreemptionUsesOwnerLease(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(21, 0).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
@@ -1310,7 +1365,7 @@ func TestServiceResolveAndPreemptionErrors(t *testing.T) {
 		}},
 		{name: "coordinated preempt missing owner lease", fn: func() error {
 			admission := &mocks.AdmissionController{}
-			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
+			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}, Requeued: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 		{name: "coordinated preempt policy preempter unsupported", fn: func() error {
 			admission := inspectableAdmission{lease: domain.Lease{ID: "lease-a", InstanceID: inst.ID, NodeID: node.ID}, found: true}
