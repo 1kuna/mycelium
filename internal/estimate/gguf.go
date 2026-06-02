@@ -18,12 +18,21 @@ type MetadataParser interface {
 }
 
 type GGUFEstimator struct {
-	parser MetadataParser
-	agents map[string]ports.NodeAgent
+	parser   MetadataParser
+	agents   map[string]ports.NodeAgent
+	resolver NodeAgentResolver
+}
+
+type NodeAgentResolver interface {
+	NodeAgent(nodeID string) (ports.NodeAgent, error)
 }
 
 func NewGGUF(parser MetadataParser, agents map[string]ports.NodeAgent) *GGUFEstimator {
 	return &GGUFEstimator{parser: parser, agents: agents}
+}
+
+func NewGGUFWithResolver(parser MetadataParser, agents map[string]ports.NodeAgent, resolver NodeAgentResolver) *GGUFEstimator {
+	return &GGUFEstimator{parser: parser, agents: agents, resolver: resolver}
 }
 
 func (e *GGUFEstimator) Estimate(ctx context.Context, p domain.Preset, contextLen, concurrency int) (domain.Claim, error) {
@@ -60,6 +69,14 @@ func (e *GGUFEstimator) metadata(ctx context.Context, p domain.Preset) (domain.M
 	}
 	if p.NodeID != "" {
 		agent, ok := e.agents[p.NodeID]
+		if !ok && e.resolver != nil {
+			var err error
+			agent, err = e.resolver.NodeAgent(p.NodeID)
+			if err != nil {
+				return domain.ModelMetadata{}, fmt.Errorf("no node agent for model %q on node %q: %w", p.ModelRef, p.NodeID, err)
+			}
+			ok = true
+		}
 		if !ok {
 			return domain.ModelMetadata{}, fmt.Errorf("no node agent for model %q on node %q", p.ModelRef, p.NodeID)
 		}

@@ -249,7 +249,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		return "", nil, nil, err
 	}
 	allocator := allocatorFromReservations(reservations, presetMap(presets))
-	estimator := peerEstimator(cfg, agents)
+	estimator := peerEstimator(cfg, agents, nodes)
 	placer := scheduler.NewPlacer(estimator, allocator, clock.System{}, presets...)
 	queue := scheduler.NewQueue(clock.System{})
 	if err := restoreQueuedJobs(ctx, store, queue); err != nil {
@@ -1405,13 +1405,13 @@ func projectMap(projects []domain.Project) map[string]domain.Project {
 	return out
 }
 
-func peerEstimator(cfg PeerConfig, agents map[string]ports.NodeAgent) ports.ResourceEstimator {
+func peerEstimator(cfg PeerConfig, agents map[string]ports.NodeAgent, resolver estimate.NodeAgentResolver) ports.ResourceEstimator {
 	explicit := estimate.NewInMemory()
 	parser := cfg.GGUFParser
 	if parser == "" {
 		parser = "gguf-parser"
 	}
-	return estimate.NewBackendAware(estimate.NewGGUF(estimate.NewCommandParser(parser, nil), agents), explicit)
+	return estimate.NewBackendAware(estimate.NewGGUFWithResolver(estimate.NewCommandParser(parser, nil), agents, resolver), explicit)
 }
 
 func allocatorFromReservations(reservations []domain.Reservation, presets map[string]domain.Preset) *lease.Allocator {

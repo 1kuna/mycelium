@@ -1664,14 +1664,14 @@ func TestShouldRunGroupOptimizerSelectsOneReadyComputePeer(t *testing.T) {
 }
 
 func TestPeerEstimatorUsesGGUFParserWhenConfigured(t *testing.T) {
-	defaultEstimator, ok := peerEstimator(PeerConfig{}, nil).(*estimate.BackendAware)
+	defaultEstimator, ok := peerEstimator(PeerConfig{}, nil, nil).(*estimate.BackendAware)
 	if !ok {
 		t.Fatal("default estimator should be backend-aware")
 	}
 	if _, ok := defaultEstimator.LlamaCpp.(*estimate.GGUFEstimator); !ok {
 		t.Fatalf("default estimator should use GGUF preflight for llama.cpp: %+v", defaultEstimator)
 	}
-	configured, ok := peerEstimator(PeerConfig{GGUFParser: "gguf-parser"}, nil).(*estimate.BackendAware)
+	configured, ok := peerEstimator(PeerConfig{GGUFParser: "gguf-parser"}, nil, nil).(*estimate.BackendAware)
 	if !ok {
 		t.Fatal("configured estimator should be backend-aware")
 	}
