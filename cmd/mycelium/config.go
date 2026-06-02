@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"mycelium/internal/domain"
 )
@@ -61,6 +62,7 @@ type ComputeConfig struct {
 	DiskTotalMB      int            `json:"disk_total_mb,omitempty"`
 	DiskFreeMB       int            `json:"disk_free_mb,omitempty"`
 	DiskMinFreeRatio float64        `json:"disk_min_free_ratio,omitempty"`
+	LoadTimeoutMS    int            `json:"load_timeout_ms,omitempty"`
 	VRAMMB           int            `json:"vram_mb"`
 }
 
@@ -170,6 +172,9 @@ func defaultedComputeConfig(cfg ComputeConfig) ComputeConfig {
 	}
 	if cfg.DiskMinFreeRatio == 0 {
 		cfg.DiskMinFreeRatio = domain.DefaultDiskMinFreeRatio
+	}
+	if cfg.LoadTimeoutMS == 0 {
+		cfg.LoadTimeoutMS = int((5 * time.Minute) / time.Millisecond)
 	}
 	return cfg
 }

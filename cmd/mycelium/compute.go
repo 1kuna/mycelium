@@ -87,6 +87,9 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 		nodeagent.WithListenAddr(compute.BackendListen),
 		nodeagent.WithAllocator(allocator),
 	}
+	if compute.LoadTimeoutMS > 0 {
+		opts = append(opts, nodeagent.WithLoadTimeout(time.Duration(compute.LoadTimeoutMS)*time.Millisecond))
+	}
 	if compute.GGUFParser != "" {
 		opts = append(opts, nodeagent.WithModelInspector(nodeagent.ParserInspector{Parser: estimate.NewCommandParser(compute.GGUFParser, []string{"{model}"})}))
 	}
@@ -180,7 +183,7 @@ func pinnedReservationIDs(reservations []domain.Reservation, nodeID string) []st
 	return ids
 }
 
-const LabelPeerBackend = "mycelium.peer.backend"
+const LabelPeerBackend = domain.LabelPeerBackend
 
 func computeBackendAdapter(cfg ComputeConfig, registry nodeagent.StoreProcessRegistry) (ports.BackendAdapter, error) {
 	return computeBackendAdapterWithProcessRunner(cfg, registry, nil)

@@ -28,6 +28,12 @@ func (p *Placer) tryPreemptForPreset(ctx context.Context, job domain.Job, preset
 	return p.tryPreemptWithClaims(job, fleet, func(node domain.Node, accSet []int) (domain.Claim, error) {
 		return p.estimateCandidateClaim(ctx, preset, contextLen, concurrency, node, accSet)
 	}, func(node domain.Node) bool {
+		if _, drop := presetNodeMismatch(preset, node); drop {
+			return false
+		}
+		if _, drop := presetBackendMismatch(preset, node); drop {
+			return false
+		}
 		_, drop := nodeDiskDropReason(preset, node, fleet)
 		return !drop
 	})
@@ -143,6 +149,12 @@ func (p *Placer) canReplaceVictim(victim domain.ModelInstance, originalNodeID st
 			continue
 		}
 		if preset, ok := p.presets[victim.PresetID]; ok {
+			if _, drop := presetNodeMismatch(preset, node); drop {
+				continue
+			}
+			if _, drop := presetBackendMismatch(preset, node); drop {
+				continue
+			}
 			if _, drop := nodeDiskDropReason(preset, node, fleet); drop {
 				continue
 			}

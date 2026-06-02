@@ -90,6 +90,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	ggufParser := fs.String("gguf-parser", "", "local GGUF parser binary")
 	maxUtil := fs.Float64("max-util", 0, "maximum accelerator utilization")
 	diskMinFreeRatio := fs.Float64("disk-min-free-ratio", 0, "minimum free disk ratio required for placement")
+	loadTimeoutMS := fs.Int("load-timeout-ms", 0, "backend load timeout in milliseconds")
 	vramMB := fs.Int("vram-mb", 0, "local allocatable memory in MB")
 	if err := fs.Parse(args); err != nil {
 		return "", nil, nil, err
@@ -136,6 +137,9 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	if *diskMinFreeRatio != 0 {
 		cfg.ComputeConfig.DiskMinFreeRatio = *diskMinFreeRatio
+	}
+	if *loadTimeoutMS != 0 {
+		cfg.ComputeConfig.LoadTimeoutMS = *loadTimeoutMS
 	}
 	if *vramMB != 0 {
 		cfg.ComputeConfig.VRAMMB = *vramMB

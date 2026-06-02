@@ -146,6 +146,53 @@ func TestPlaceFiltersNodeWhenModelDownloadWouldCrossDiskFloor(t *testing.T) {
 	}
 }
 
+func TestPlaceTreatsPresetNodeAsHardLocality(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithPresetNode("b70"))
+	b70 := fixtures.MakeNode(fixtures.WithNodeID("b70"), fixtures.WithVRAM(1000))
+	spark := fixtures.MakeSparkNode(fixtures.WithNodeID("spark"), fixtures.WithVRAM(100000))
+	spark.SpeedClass.TokensPerSecRef = 1000
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(10, 1)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(), domain.FleetSnapshot{Nodes: []domain.Node{spark, b70}})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.NodeID != "b70" {
+		t.Fatalf("decision = %+v", decision)
+	}
+	dropped := traceStep(decision.Trace, "filter").Data["dropped"].(map[string]string)
+	if dropped["spark"] != "preset.node_id" {
+		t.Fatalf("dropped = %+v", dropped)
+	}
+}
+
+func TestPlaceFiltersBackendLabelMismatch(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.Backend = domain.BackendVLLM
+		p.LaunchArgs = []string{"--gpu-memory-utilization", "0.80"}
+	})
+	llamaNode := fixtures.MakeNode(fixtures.WithNodeID("llama"), fixtures.WithVRAM(100000), func(n *domain.Node) {
+		n.Labels = map[string]string{domain.LabelPeerBackend: string(domain.BackendLlamaCpp)}
+		n.SpeedClass.TokensPerSecRef = 1000
+	})
+	vllmNode := fixtures.MakeNode(fixtures.WithNodeID("vllm"), fixtures.WithVRAM(100000), func(n *domain.Node) {
+		n.Labels = map[string]string{domain.LabelPeerBackend: string(domain.BackendVLLM)}
+	})
+	placer := NewPlacer(estimate.NewBackendAware(estimate.NewInMemory(), estimate.NewInMemory()), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(), domain.FleetSnapshot{Nodes: []domain.Node{llamaNode, vllmNode}})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.NodeID != "vllm" {
+		t.Fatalf("decision = %+v", decision)
+	}
+	dropped := traceStep(decision.Trace, "filter").Data["dropped"].(map[string]string)
+	if dropped["llama"] != "label."+domain.LabelPeerBackend {
+		t.Fatalf("dropped = %+v", dropped)
+	}
+}
+
 func TestPlaceSkipsWarmInstanceWhenNodeIsAtDiskFloor(t *testing.T) {
 	preset := fixtures.MakePreset(fixtures.WithWeights(10), fixtures.WithArtifactSize(100))
 	fullNode := fixtures.MakeNode(fixtures.WithDisk(1000, 250))

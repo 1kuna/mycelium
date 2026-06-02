@@ -373,6 +373,99 @@ func TestPreemptSelectorMismatchSkipsCandidate(t *testing.T) {
 	}
 }
 
+func TestPresetBackendMismatchHelperBranches(t *testing.T) {
+	node := fixtures.MakeNode()
+	if reason, drop := presetBackendMismatch(domain.Preset{}, node); drop || reason != "" {
+		t.Fatalf("empty backend mismatch = %q %v", reason, drop)
+	}
+	preset := fixtures.MakePreset()
+	node.Labels = nil
+	if reason, drop := presetBackendMismatch(preset, node); drop || reason != "" {
+		t.Fatalf("missing label mismatch = %q %v", reason, drop)
+	}
+}
+
+func TestWarmSelectionSkipsPresetLocalityAndBackendMismatch(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+
+	localPreset := fixtures.MakePreset(fixtures.WithPresetNode("right-node"))
+	wrongNode := fixtures.MakeNode(fixtures.WithNodeID("wrong-node"))
+	wrongWarm := fixtures.MakeInstance(fixtures.WithInstanceID("wrong-warm"), fixtures.WithInstancePreset(localPreset.ID), fixtures.OnNode(wrongNode.ID), fixtures.WithClaim(fixtures.MakeClaim(1, 0)))
+	decision, err := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(1, 0)}, lease.NewAllocator(), clock, localPreset).
+		Place(context.Background(), fixtures.MakeJob(), domain.FleetSnapshot{Nodes: []domain.Node{wrongNode}, Instances: []domain.ModelInstance{wrongWarm}})
+	if err != nil {
+		t.Fatalf("locality Place: %v", err)
+	}
+	if decision.Action == domain.ActionWarmInstance {
+		t.Fatalf("warm locality mismatch accepted: %+v", decision)
+	}
+
+	backendPreset := fixtures.MakePreset(func(p *domain.Preset) { p.Backend = domain.BackendVLLM })
+	backendNode := fixtures.MakeNode(func(n *domain.Node) {
+		n.Labels = map[string]string{domain.LabelPeerBackend: string(domain.BackendLlamaCpp)}
+	})
+	backendWarm := fixtures.MakeInstance(fixtures.WithInstanceID("backend-warm"), fixtures.WithInstancePreset(backendPreset.ID), fixtures.OnNode(backendNode.ID), fixtures.WithClaim(fixtures.MakeClaim(1, 0)))
+	decision, err = NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(1, 0)}, lease.NewAllocator(), clock, backendPreset).
+		Place(context.Background(), fixtures.MakeJob(), domain.FleetSnapshot{Nodes: []domain.Node{backendNode}, Instances: []domain.ModelInstance{backendWarm}})
+	if err != nil {
+		t.Fatalf("backend Place: %v", err)
+	}
+	if decision.Action == domain.ActionWarmInstance {
+		t.Fatalf("warm backend mismatch accepted: %+v", decision)
+	}
+}
+
+func TestPreemptSkipsPresetLocalityAndBackendMismatch(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	victim := func(nodeID string) domain.ModelInstance {
+		return fixtures.MakeInstance(fixtures.WithInstanceID("victim"), fixtures.OnNode(nodeID), fixtures.WithClaim(fixtures.MakeClaim(100, 0)), fixtures.WithInstancePriority(domain.PriorityBackground))
+	}
+
+	localPreset := fixtures.MakePreset(fixtures.WithPresetNode("right-node"))
+	wrongNode := fixtures.MakeNode(fixtures.WithNodeID("wrong-node"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	placer := NewPlacer(unitEstimator{claim: fixtures.MakeClaim(900, 0)}, lease.NewAllocator(), clock, localPreset)
+	_, ok, err := placer.tryPreemptForPreset(context.Background(), fixtures.MakeJob(fixtures.Interactive, fixtures.HardForInteractive), localPreset, 100, 1, domain.FleetSnapshot{
+		Nodes:     []domain.Node{wrongNode},
+		Instances: []domain.ModelInstance{victim(wrongNode.ID)},
+	})
+	if err != nil || ok {
+		t.Fatalf("preempt locality ok=%v err=%v", ok, err)
+	}
+
+	backendPreset := fixtures.MakePreset(func(p *domain.Preset) { p.Backend = domain.BackendVLLM })
+	backendNode := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1), func(n *domain.Node) {
+		n.Labels = map[string]string{domain.LabelPeerBackend: string(domain.BackendLlamaCpp)}
+	})
+	placer = NewPlacer(unitEstimator{claim: fixtures.MakeClaim(900, 0)}, lease.NewAllocator(), clock, backendPreset)
+	_, ok, err = placer.tryPreemptForPreset(context.Background(), fixtures.MakeJob(fixtures.Interactive, fixtures.HardForInteractive), backendPreset, 100, 1, domain.FleetSnapshot{
+		Nodes:     []domain.Node{backendNode},
+		Instances: []domain.ModelInstance{victim(backendNode.ID)},
+	})
+	if err != nil || ok {
+		t.Fatalf("preempt backend ok=%v err=%v", ok, err)
+	}
+}
+
+func TestCanReplaceVictimHonorsPresetLocalityAndBackend(t *testing.T) {
+	victimPreset := fixtures.MakePreset(fixtures.WithPresetID("victim-preset"), fixtures.WithPresetNode("home"))
+	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim"), fixtures.WithInstancePreset(victimPreset.ID), fixtures.WithClaim(fixtures.MakeClaim(1, 0)))
+	other := fixtures.MakeNode(fixtures.WithNodeID("other"))
+	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), victimPreset)
+	if placer.canReplaceVictim(victim, "original", domain.FleetSnapshot{Nodes: []domain.Node{other}}, nil) {
+		t.Fatal("victim replaced onto wrong preset node")
+	}
+
+	backendPreset := fixtures.MakePreset(fixtures.WithPresetID("backend-preset"), func(p *domain.Preset) { p.Backend = domain.BackendVLLM })
+	victim = fixtures.MakeInstance(fixtures.WithInstanceID("backend-victim"), fixtures.WithInstancePreset(backendPreset.ID), fixtures.WithClaim(fixtures.MakeClaim(1, 0)))
+	llamaNode := fixtures.MakeNode(func(n *domain.Node) {
+		n.Labels = map[string]string{domain.LabelPeerBackend: string(domain.BackendLlamaCpp)}
+	})
+	placer = NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), backendPreset)
+	if placer.canReplaceVictim(victim, "original", domain.FleetSnapshot{Nodes: []domain.Node{llamaNode}}, nil) {
+		t.Fatal("victim replaced onto wrong backend")
+	}
+}
+
 func TestEligibleVictimsAndPriorityHelpers(t *testing.T) {
 	node := fixtures.MakeNode()
 	victims := eligibleVictims(fixtures.MakeJob(fixtures.Interactive), node, []int{0}, []domain.ModelInstance{

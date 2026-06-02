@@ -2,7 +2,10 @@ package domain
 
 import "time"
 
-const DefaultDiskMinFreeRatio = 0.25
+const (
+	DefaultDiskMinFreeRatio = 0.25
+	LabelPeerBackend        = "mycelium.peer.backend"
+)
 
 type Accelerator struct {
 	Index             int    `json:"index"`
