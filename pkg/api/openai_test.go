@@ -56,6 +56,7 @@ func TestOpenAIMessageRejectsUnsupportedNestedFields(t *testing.T) {
 		body string
 	}{
 		{name: "message", body: `{"role":"user","content":"hi","audio":{"id":"a"}}`},
+		{name: "request refusal", body: `{"role":"assistant","content":"no","refusal":"policy"}`},
 		{name: "content part", body: `{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}`},
 		{name: "tool call function", body: `{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"search","arguments":"{}","strict":true}}]}`},
 		{name: "function call", body: `{"role":"assistant","function_call":{"name":"search","arguments":"{}","strict":true}}`},
@@ -68,5 +69,37 @@ func TestOpenAIMessageRejectsUnsupportedNestedFields(t *testing.T) {
 				t.Fatalf("err = %v", err)
 			}
 		})
+	}
+}
+
+func TestOpenAIChatResponseAcceptsResponseRefusalField(t *testing.T) {
+	var resp OpenAIChatResponse
+	err := json.Unmarshal([]byte(`{
+		"service_tier": null,
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "hello",
+				"refusal": null,
+				"annotations": null,
+				"audio": null,
+				"reasoning": null
+			},
+			"logprobs": null,
+			"finish_reason": "stop",
+			"stop_reason": null,
+			"token_ids": null
+		}],
+		"usage": {"completion_tokens": 1, "total_tokens": 4, "prompt_tokens_details": null},
+		"prompt_logprobs": null,
+		"prompt_token_ids": null,
+		"kv_transfer_params": null
+	}`), &resp)
+	if err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got := resp.Choices[0].Message.Content; got != "hello" {
+		t.Fatalf("content = %q", got)
 	}
 }
