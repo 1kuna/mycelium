@@ -37,6 +37,7 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
 	sink := &mocks.TelemetrySink{}
 	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
 	router.MemorySampler = fixedMemorySampler{Peak: 512}
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
 	if err != nil {
@@ -134,6 +135,7 @@ func TestRouterAssignsUniqueGatewayJobIDs(t *testing.T) {
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: mocks.NewNodeAgent(fixtures.MakeNode())}})
 	sink := &mocks.TelemetrySink{}
 	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
 	if err != nil {
 		t.Fatalf("ParseOpenAIChat: %v", err)

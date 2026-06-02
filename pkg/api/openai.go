@@ -173,6 +173,40 @@ type OpenAIChatChoice struct {
 	FinishReason string        `json:"finish_reason,omitempty"`
 }
 
+func (c *OpenAIChatChoice) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Index        int                   `json:"index"`
+		Message      openAIResponseMessage `json:"message"`
+		FinishReason string                `json:"finish_reason"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	c.Index = raw.Index
+	c.Message = raw.Message.OpenAIMessage
+	c.FinishReason = raw.FinishReason
+	return nil
+}
+
+type openAIResponseMessage struct {
+	OpenAIMessage
+}
+
+func (m *openAIResponseMessage) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, field := range []string{"annotations", "audio", "reasoning", "refusal"} {
+		delete(fields, field)
+	}
+	trimmed, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(trimmed, &m.OpenAIMessage)
+}
+
 type OpenAIUsage struct {
 	PromptTokens     int `json:"prompt_tokens,omitempty"`
 	CompletionTokens int `json:"completion_tokens,omitempty"`
