@@ -125,6 +125,55 @@ func TestPlaceAutoScoresColdCandidatesInsteadOfBlindWarmMatch(t *testing.T) {
 	}
 }
 
+func TestPlaceAutoUsesWarmInstanceWhenColdPlacementCannotFit(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithWeights(900), fixtures.WithKVPerToken(0))
+	node := fixtures.MakeNode(fixtures.WithNodeID("spark"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	warm := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst-spark-122b"),
+		fixtures.WithInstancePreset(preset.ID),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(900, 0)),
+	)
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(900, 10)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.Auto), domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{warm},
+	})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.Action != domain.ActionWarmInstance || decision.InstanceID != warm.ID {
+		t.Fatalf("decision = %+v", decision)
+	}
+	assertTraceContains(t, decision.Trace, "filter", "after cold no-fit")
+}
+
+func TestPlaceAutoWarmAfterColdNoFitPropagatesEstimateError(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithWeights(900), fixtures.WithKVPerToken(0))
+	node := fixtures.MakeNode(fixtures.WithNodeID("spark"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	warm := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst-spark-122b"),
+		fixtures.WithInstancePreset(preset.ID),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(900, 0)),
+	)
+	estimator := &countingUnitEstimator{claim: fixtures.MakeClaim(900, 10), errOn: 2}
+	placer := NewPlacer(estimator, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.Auto), domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{warm},
+	})
+	if !errors.Is(err, domain.ErrUnsupported) {
+		t.Fatalf("Place err = %v decision=%+v", err, decision)
+	}
+	if estimator.calls != 2 {
+		t.Fatalf("estimator calls = %d", estimator.calls)
+	}
+	assertTraceContains(t, decision.Trace, "estimate", domain.ErrUnsupported.Error())
+}
+
 func TestPlaceFiltersNodeWhenModelDownloadWouldCrossDiskFloor(t *testing.T) {
 	preset := fixtures.MakePreset(fixtures.WithWeights(10), fixtures.WithArtifactSize(30))
 	tightDisk := fixtures.MakeNode(fixtures.WithNodeID("node-tight"), fixtures.WithVRAM(1000), fixtures.WithDisk(1000, 270))
