@@ -157,9 +157,13 @@ type HostFacts struct {
     NodeID            string
     OS                string // darwin, linux
     Arch              string // arm64, amd64
+    Platform          string // os/arch, for example linux/arm64 or darwin/arm64
     Kernel            string
+    LibC              string // glibc, musl, none/unknown
     PackageManagers   []string // brew, apt, dnf, pacman, docker, uv, pipx
+    ContainerRuntime  string
     Accelerators      []Accelerator
+    DriverFacts       map[string]string // cuda, rocm, level-zero, metal, driver versions
     TotalMemoryMB     int
     DiskFreeMB        int
     DiskTotalMB       int
@@ -180,6 +184,8 @@ type EngineProfile struct {
     Source            EngineSource
     SupportedModels   []ModelFormat // gguf, hf-transformers, mlx
     RequiredLabels    map[string]string
+    SupportedPlatforms []string // exact os/arch keys this profile can run on
+    ArtifactPlatform  string // package/image/wheel platform actually selected
     MaxUtilDefault    float64
     DiskMinFreeRatio  float64
     Safety            EngineSafety
@@ -207,12 +213,43 @@ type BootstrapAction struct {
     EstimatedBytes    int64
     SourceURL         string
     Checksum          string
+    Platform          string // exact package/image/wheel platform for this action
 }
 ```
 
 Persist bootstrap jobs in the same durable job/store surface used by catalog installs. Bootstrap progress is observable in `myce jobs list`.
 
 ## 8. Platform matrix
+
+### 8.0 Compatibility key: OS + CPU architecture + accelerator runtime
+
+Bootstrap must treat platform compatibility as a first-class constraint. "Linux NVIDIA" is not specific enough: the DGX Spark is Linux on ARM64, while most CUDA/vLLM examples assume Linux on x86_64. The same distinction applies across the fleet: macOS Apple Silicon is `darwin/arm64`, an Intel Mac is `darwin/amd64`, most desktop GPU boxes are `linux/amd64`, and specialty systems may be `linux/arm64`.
+
+The compatibility key is:
+
+```text
+os + cpu_arch + accelerator_vendor + accelerator_runtime + driver_version + engine_distribution
+```
+
+Examples:
+
+- `darwin/arm64 + apple/metal + llama.cpp-homebrew`
+- `darwin/arm64 + apple/metal + mlx-python-wheel`
+- `darwin/amd64 + cpu-or-amd/metal-unsupported + llama.cpp-homebrew`
+- `linux/arm64 + nvidia/cuda + nvcr.io/nvidia/vllm arm64 image`
+- `linux/amd64 + nvidia/cuda + vllm x86_64 wheel/image`
+- `linux/amd64 + intel/level-zero + sycl llama.cpp wrapper`
+
+Rules:
+
+- A profile is schedulable only when its `SupportedPlatforms` contains the host platform and its accelerator runtime checks pass.
+- Bootstrap must never infer that a `linux/amd64` binary, wheel, or image is valid on `linux/arm64`.
+- Docker images must be checked for the selected platform, not just by repository/tag name. Multi-arch tags are accepted only when the manifest contains the host platform.
+- Python wheels must be checked against host arch, Python ABI, OS, and accelerator stack. A wheel name or package install that works on x86_64 is not evidence it works on ARM64.
+- Package-manager plans must record the package source and platform resolved by the package manager.
+- Existing binaries/wrappers must be probed on the local host; a path copied from another architecture is not adopted unless it executes and reports a compatible version.
+- Cross-compiled Mycelium itself is allowed, but backend engines are host-native processes/containers and must match the host platform.
+- Unknown arch/runtime combinations fail with doctor evidence and no fallback.
 
 ### 8.1 macOS Apple Silicon
 
@@ -237,6 +274,22 @@ Default safety:
 - `disk_min_free_ratio`: 0.25 unless the user config says stricter.
 - `oom_severity`: `soft` unless detector identifies a catastrophic host profile.
 
+### 8.1b macOS Intel
+
+Intel Macs are not a primary LLM target, but bootstrap must classify them correctly.
+
+Supported profiles:
+
+- llama.cpp CPU or any detected discrete-GPU path that proves support.
+- Custom native process.
+
+Rules:
+
+- Do not install or select MLX on `darwin/amd64`; MLX is Apple Silicon only for this product's supported profile.
+- Do not apply Apple Silicon/Homebrew assumptions to Intel paths.
+- Do not silently degrade an intended Metal/MLX profile to CPU. CPU fallback requires explicit opt-in.
+- Doctor should report `darwin/amd64` as supported-for-detection and usually unready-for-compute unless a valid profile is explicitly configured.
+
 ### 8.2 Linux NVIDIA / DGX Spark
 
 Supported profiles:
@@ -248,6 +301,10 @@ Supported profiles:
 
 Rules:
 
+- Split Linux NVIDIA into at least `linux/arm64` and `linux/amd64` during planning.
+- DGX Spark is `linux/arm64`; it requires ARM64-compatible vLLM/SGLang/llama.cpp builds or multi-arch container images with a matching ARM64 manifest.
+- Do not use generic x86_64 vLLM wheels/images on Spark. A tag named `latest`, `nightly`, or `cuda` is not enough evidence.
+- For Spark, prefer the known NVIDIA-provided or already-installed ARM64-compatible vLLM image/wrapper that passes doctor.
 - Prefer an already installed NVIDIA/vLLM image or binary that passes doctor.
 - If installing container support, require Docker or compatible runtime plus NVIDIA Container Toolkit.
 - DGX Spark defaults to `oom_severity=catastrophic`.
@@ -261,6 +318,20 @@ Default safety:
 - vLLM `--gpu-memory-utilization`: <= 0.85 for Spark-class catastrophic hosts.
 - no concurrent cold-load smoke on catastrophic hosts.
 
+### 8.2b Linux NVIDIA x86_64
+
+Supported profiles:
+
+- vLLM/SGLang wheels or containers that explicitly support `linux/amd64` and the detected CUDA driver/runtime.
+- llama.cpp CUDA binaries built for `linux/amd64`.
+- Custom process/container wrapper.
+
+Rules:
+
+- Match CUDA major/minor requirements before adopting a wheel/image.
+- Do not assume an ARM64 Spark-safe image has an x86_64 manifest or equivalent behavior.
+- Keep x86_64 package/image resolution separate from Spark's ARM64 path so fixes for one platform cannot silently alter the other.
+
 ### 8.3 Linux Intel Arc / B70
 
 Supported profiles:
@@ -271,11 +342,13 @@ Supported profiles:
 
 Rules:
 
+- B70-class machines are expected to be `linux/amd64` unless host detection proves otherwise.
 - Detect Intel GPUs through `clinfo`, Level Zero, or the available runtime.
 - Prefer existing local images/wrappers before installing anything.
 - If disk free is below the configured floor, bootstrap may report installed engines but must mark compute readiness blocked.
 - Do not assume NVIDIA-style vLLM flags apply to Intel profiles.
 - Engine verification should check the actual backend health path and a minimal generation only when a safe tiny model is configured.
+- SYCL/XPU profiles must record the selected architecture and runtime version; a container image tag is not enough without platform/runtime proof.
 
 ### 8.4 Linux AMD
 
@@ -307,12 +380,13 @@ Bootstrap planning is deterministic and conservative:
 2. Read existing peer config and engine registry.
 3. Detect usable existing engines.
 4. Reject the host if disk free is below `disk_min_free_ratio`.
-5. Generate install actions only for requested engines that are supported on the detected host.
-6. Prefer no-op adoption of an existing engine over install.
-7. Prefer native Mac engines over containers on macOS.
-8. Prefer explicit configured wrappers over generic package install on specialty hardware.
-9. Produce one plan with exact actions. No hidden fallback actions.
-10. Require `--apply` to mutate the host.
+5. Reject engine candidates whose package, binary, wheel, or image platform does not exactly match the detected host platform.
+6. Generate install actions only for requested engines that are supported on the detected host.
+7. Prefer no-op adoption of an existing engine over install.
+8. Prefer native Mac engines over containers on macOS.
+9. Prefer explicit configured wrappers over generic package install on specialty hardware.
+10. Produce one plan with exact actions. No hidden fallback actions.
+11. Require `--apply` to mutate the host.
 
 If multiple profiles are ready, bootstrap may either:
 
@@ -447,6 +521,8 @@ Peer health should include an engine-readiness summary:
     {
       "profile_id": "macbook-llamacpp-metal",
       "backend": "llamacpp",
+      "platform": "darwin/arm64",
+      "artifact_platform": "darwin/arm64",
       "ready": true,
       "version": "llama-server ...",
       "source": "homebrew"
@@ -466,9 +542,14 @@ Fast tests use no real package managers, no network, no subprocesses, and no har
 Required coverage:
 
 - Host detector mocks for macOS Apple Silicon, Linux NVIDIA/Spark, Linux Intel/B70, Linux AMD, and CPU-only.
+- Host detector distinguishes `darwin/arm64`, `darwin/amd64`, `linux/arm64`, and `linux/amd64`.
 - Engine detector mock records existing engine binaries/images and injected failures.
 - Planner prefers existing usable engines over installs.
 - Planner rejects unsupported OS/backend combinations.
+- Planner rejects architecture-mismatched binaries, Python wheels, and container images.
+- Planner accepts a multi-arch container tag only when its manifest includes the detected host platform.
+- Planner proves DGX Spark vLLM setup uses an ARM64-compatible image/wrapper.
+- Planner refuses to apply Apple Silicon MLX setup on Intel macOS.
 - Planner refuses Spark vLLM caps above the safe default.
 - Planner refuses installs that violate `disk_min_free_ratio`.
 - Planner marks B70-style low disk as blocked before engine install.
@@ -484,16 +565,21 @@ Required coverage:
 
 Synthetic fleet:
 
-- local dev Mac: existing Homebrew llama.cpp and optional MLX venv.
-- second peer: no engine installed, Homebrew available.
-- DGX Spark: existing NVIDIA vLLM image, catastrophic OOM, cap required.
-- B70: existing SYCL wrapper, disk below 25% free.
+- local dev Mac: `darwin/arm64`, existing Homebrew llama.cpp and optional MLX venv.
+- Intel Mac example: `darwin/amd64`, Homebrew present, MLX unsupported, CPU fallback only with explicit opt-in.
+- second peer: `darwin/arm64`, no engine installed, Homebrew available.
+- DGX Spark: `linux/arm64`, existing ARM64-compatible NVIDIA vLLM image/wrapper, catastrophic OOM, cap required.
+- x86_64 NVIDIA box: `linux/amd64`, x86_64 CUDA/vLLM image or wheel.
+- B70: `linux/amd64`, existing SYCL wrapper, disk below 25% free.
 
 Expected behavior:
 
 - local dev Mac adopts existing llama.cpp.
+- Intel Mac reports MLX unsupported and does not silently select CPU.
 - second peer plans Homebrew llama.cpp install but does not mutate without `--apply`.
-- Spark adopts existing vLLM image/wrapper only if cap <= 0.85.
+- Spark adopts existing ARM64 vLLM image/wrapper only if cap <= 0.85.
+- Spark rejects x86_64-only vLLM images/wheels even when the engine name and CUDA version look plausible.
+- x86_64 NVIDIA accepts only x86_64-compatible CUDA/vLLM artifacts.
 - B70 reports engine candidates but compute readiness blocked by disk floor.
 - Resulting benchmark preflight uses only ready profiles.
 
@@ -595,10 +681,11 @@ Engine bootstrap is complete when:
 
 - A clean Mac can run one command that writes a compute peer config using native llama.cpp.
 - A Mac with MLX support can add an MLX profile without Docker.
-- Spark can expose a safe vLLM profile with memory caps that prevent the known OOM crash class.
-- B70 can expose its existing SYCL/custom engine when disk headroom is safe and loudly refuse compute readiness when it is not.
+- Intel macOS is classified separately from Apple Silicon and never receives Apple Silicon-only MLX setup.
+- Spark can expose a safe ARM64-compatible vLLM profile with memory caps that prevent the known OOM crash class.
+- Linux x86_64 NVIDIA paths are selected independently from Spark's Linux ARM64 path.
+- B70 can expose its existing `linux/amd64` SYCL/custom engine when disk headroom is safe and loudly refuse compute readiness when it is not.
 - Existing installed engines are adopted without reinstall.
 - No model download occurs during engine setup.
 - All changes are durable, resumable, and visible through jobs/doctor output.
 - The fleet benchmark can consume bootstrap readiness facts but still runs only through normal gateway/scheduler/runtime paths.
-
