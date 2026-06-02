@@ -73,7 +73,7 @@ func TestRouterResolveWarmInstanceUsesOwnerNode(t *testing.T) {
 	target := fixtures.MakeInstance(fixtures.WithInstanceID("inst_1"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode("spark-bench"))
 	router := &Router{}
 
-	got, loaded, err := router.resolveInstance(context.Background(), domain.PlacementDecision{
+	got, loaded, err := router.resolveInstance(context.Background(), domain.Job{}, domain.PlacementDecision{
 		InstanceID: target.ID,
 		NodeID:     target.NodeID,
 		Action:     domain.ActionWarmInstance,
@@ -391,6 +391,7 @@ func TestRouterRetriesContextOverflowByColdLoadingLargerPreset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseOpenAICompletion: %v", err)
 	}
+	req.Priority = domain.PriorityBackground
 
 	resp, err := router.Route(context.Background(), req)
 	if err != nil {
@@ -404,6 +405,9 @@ func TestRouterRetriesContextOverflowByColdLoadingLargerPreset(t *testing.T) {
 	}
 	if len(agent.loads) != 1 || agent.loads[0].Preset.ID != large.ID || agent.loads[0].Preset.ContextLength != large.ContextLength {
 		t.Fatalf("loads = %+v", agent.loads)
+	}
+	if agent.loads[0].Priority != domain.PriorityBackground {
+		t.Fatalf("load priority = %q", agent.loads[0].Priority)
 	}
 }
 

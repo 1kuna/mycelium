@@ -572,7 +572,7 @@ func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, payload []byt
 			return decision, domain.ModelInstance{}, domain.Lease{}, false, err
 		}
 	}
-	inst, cold, err := r.resolveInstance(ctx, decision, preset, fleet)
+	inst, cold, err := r.resolveInstance(ctx, job, decision, preset, fleet)
 	return decision, inst, domain.Lease{}, cold, err
 }
 
@@ -698,7 +698,7 @@ func (r *Router) beginInstanceRequest(ctx context.Context, inst domain.ModelInst
 	}, nil
 }
 
-func (r *Router) resolveInstance(ctx context.Context, decision domain.PlacementDecision, preset domain.Preset, fleet domain.FleetSnapshot) (domain.ModelInstance, bool, error) {
+func (r *Router) resolveInstance(ctx context.Context, job domain.Job, decision domain.PlacementDecision, preset domain.Preset, fleet domain.FleetSnapshot) (domain.ModelInstance, bool, error) {
 	if decision.InstanceID != "" {
 		for _, inst := range fleet.Instances {
 			if inst.ID == decision.InstanceID && (decision.NodeID == "" || inst.NodeID == decision.NodeID) {
@@ -719,6 +719,7 @@ func (r *Router) resolveInstance(ctx context.Context, decision domain.PlacementD
 		Preset:         preset,
 		Claim:          decision.Claim,
 		AcceleratorSet: append([]int(nil), decision.AcceleratorSet...),
+		Priority:       job.Priority,
 	})
 	if err != nil {
 		return domain.ModelInstance{}, false, err

@@ -592,6 +592,7 @@ func (s *Service) resolveInstance(ctx context.Context, job domain.Job, decision 
 		Preset:         preset,
 		Claim:          decision.Claim,
 		AcceleratorSet: append([]int(nil), decision.AcceleratorSet...),
+		Priority:       job.Priority,
 	})
 	if err != nil {
 		return domain.ModelInstance{}, err

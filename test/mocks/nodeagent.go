@@ -45,6 +45,7 @@ func (m *NodeAgent) Load(_ context.Context, req domain.LoadRequest) (domain.Mode
 		AcceleratorSet: append([]int(nil), req.AcceleratorSet...),
 		State:          domain.InstReady,
 		Claim:          req.Claim,
+		Priority:       req.Priority,
 		Addr:           fmt.Sprintf("127.0.0.1:%d", 60000+m.nextID),
 	}
 	m.Instances = append(m.Instances, inst)

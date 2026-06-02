@@ -304,6 +304,7 @@ func (a *Agent) beginLoad(req domain.LoadRequest) (*loadOp, string, bool) {
 		AcceleratorSet: append([]int(nil), req.AcceleratorSet...),
 		Claim:          req.Claim,
 		ReservationID:  req.ReservationID,
+		Priority:       req.Priority,
 		State:          domain.InstLoading,
 		Loading:        true,
 	}
