@@ -89,6 +89,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	llamaServer := fs.String("llama-server", "", "llama.cpp server binary")
 	ggufParser := fs.String("gguf-parser", "", "local GGUF parser binary")
 	maxUtil := fs.Float64("max-util", 0, "maximum accelerator utilization")
+	diskMinFreeRatio := fs.Float64("disk-min-free-ratio", 0, "minimum free disk ratio required for placement")
 	vramMB := fs.Int("vram-mb", 0, "local allocatable memory in MB")
 	if err := fs.Parse(args); err != nil {
 		return "", nil, nil, err
@@ -132,6 +133,9 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	overrideString(ggufParser, &cfg.ComputeConfig.GGUFParser)
 	if *maxUtil != 0 {
 		cfg.ComputeConfig.MaxUtil = *maxUtil
+	}
+	if *diskMinFreeRatio != 0 {
+		cfg.ComputeConfig.DiskMinFreeRatio = *diskMinFreeRatio
 	}
 	if *vramMB != 0 {
 		cfg.ComputeConfig.VRAMMB = *vramMB

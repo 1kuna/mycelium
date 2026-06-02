@@ -63,6 +63,49 @@ func TestHardForInteractiveDoesNotPreemptForNormalJob(t *testing.T) {
 	}
 }
 
+func TestPreemptSkipsDiskUnsafeTarget(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithWeights(800), fixtures.WithKVPerToken(0), fixtures.WithArtifactSize(100))
+	node := fixtures.Make4090Node(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.90), fixtures.WithDisk(1000, 250))
+	victim := fixtures.MakeInstance(
+		fixtures.OnNode(node.ID),
+		fixtures.WithInstancePreset("other"),
+		fixtures.WithClaim(fixtures.MakeClaim(100, 0)),
+		fixtures.WithInstancePriority(domain.PriorityBackground),
+	)
+	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.Interactive, fixtures.HardForInteractive, fixtures.WithPreset(preset.ID)), domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{victim},
+	})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.Action != domain.ActionQueued {
+		t.Fatalf("decision = %+v", decision)
+	}
+}
+
+func TestCanReplaceVictimSkipsDiskUnsafeReplacement(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithPresetID("victim-preset"), fixtures.WithArtifactSize(100))
+	fullDisk := fixtures.MakeNode(fixtures.WithNodeID("full-disk"), fixtures.WithDisk(1000, 260), fixtures.WithVRAM(1000))
+	victim := fixtures.MakeInstance(
+		fixtures.WithInstancePreset(preset.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(10, 1)),
+	)
+	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	if placer.canReplaceVictim(victim, "original", domain.FleetSnapshot{Nodes: []domain.Node{fullDisk}}, nil) {
+		t.Fatal("disk-unsafe replacement accepted")
+	}
+	if !preemptNodeAllowed(fullDisk, []func(domain.Node) bool{func(domain.Node) bool { return true }}) {
+		t.Fatal("true guard rejected")
+	}
+	if preemptNodeAllowed(fullDisk, []func(domain.Node) bool{nil, func(domain.Node) bool { return false }}) {
+		t.Fatal("false guard accepted")
+	}
+}
+
 func TestVictimTieBreaksByInFlightThenID(t *testing.T) {
 	left := fixtures.MakeInstance(fixtures.WithInstanceID("b"), fixtures.WithInstancePriority(domain.PriorityBackground))
 	right := fixtures.MakeInstance(fixtures.WithInstanceID("a"), fixtures.WithInstancePriority(domain.PriorityBackground))

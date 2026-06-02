@@ -25,6 +25,13 @@ func (d *HardwareDetector) Detect(_ context.Context, seed domain.Node) (domain.N
 	if len(node.Accelerators) == 0 && !node.UnifiedMemory {
 		node.Accelerators = []domain.Accelerator{{Index: 0, VRAMTotalMB: 1024}}
 	}
+	if node.DiskTotalMB == 0 {
+		node.DiskTotalMB = 1000
+		node.DiskFreeMB = 500
+	}
+	if node.DiskMinFreeRatio == 0 {
+		node.DiskMinFreeRatio = domain.DefaultDiskMinFreeRatio
+	}
 	return node, nil
 }
 

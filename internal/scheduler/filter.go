@@ -117,6 +117,10 @@ func (p *Placer) filterPlacementCandidates(ctx context.Context, job domain.Job, 
 			dropped[node.ID] = reason
 			continue
 		}
+		if reason, ok := nodeDiskDropReason(preset, node, fleet); ok {
+			dropped[node.ID] = reason
+			continue
+		}
 		nodeFit := false
 		for _, accSet := range acceleratorSets(node) {
 			if dedicated && hasOverlappingInstance(node.ID, accSet, fleet.Instances) {

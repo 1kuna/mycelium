@@ -31,18 +31,30 @@ type computeRuntime struct {
 func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite.Store) (computeRuntime, error) {
 	compute := cfg.ComputeConfig
 	seed := domain.Node{
-		ID:         compute.ID,
-		Name:       compute.Name,
-		Address:    cfg.Listen,
-		MaxUtil:    compute.MaxUtil,
-		Status:     domain.NodeReady,
-		SpeedClass: domain.SpeedClass{TokensPerSecRef: 1, Source: "class-default"},
+		ID:               compute.ID,
+		Name:             compute.Name,
+		Address:          cfg.Listen,
+		MaxUtil:          compute.MaxUtil,
+		DiskTotalMB:      compute.DiskTotalMB,
+		DiskFreeMB:       compute.DiskFreeMB,
+		DiskMinFreeRatio: compute.DiskMinFreeRatio,
+		Status:           domain.NodeReady,
+		SpeedClass:       domain.SpeedClass{TokensPerSecRef: 1, Source: "class-default"},
+	}
+	detector := hardware.NewDetector()
+	if compute.DiskPath != "" {
+		detector.DiskPath = compute.DiskPath
 	}
 	node := seed
 	if compute.VRAMMB > 0 {
 		node = explicitMemoryNode(seed, compute.VRAMMB)
+		withDisk, err := detector.AddDiskStats(node)
+		if err != nil {
+			return computeRuntime{}, err
+		}
+		node = withDisk
 	} else {
-		detected, err := hardware.NewDetector().Detect(ctx, seed)
+		detected, err := detector.Detect(ctx, seed)
 		if err != nil {
 			return computeRuntime{}, err
 		}

@@ -225,16 +225,17 @@ func (i Installer) install(ctx context.Context, req InstallRequest, onProgress P
 		}
 	}
 	preset := domain.Preset{
-		ID:            id,
-		ModelRef:      finalModel,
-		Aliases:       modelAliases(id, model, finalModel),
-		Backend:       backend,
-		ContextLength: contextLen,
-		Quant:         quant,
-		Capabilities:  []domain.Capability{domain.CapabilityChat},
-		LaunchProfile: "llamacpp-metal",
-		EstWeightsMB:  estimateWeightsMB(draft.Size),
-		KVPerTokenMB:  0.01,
+		ID:             id,
+		ModelRef:       finalModel,
+		Aliases:        modelAliases(id, model, finalModel),
+		Backend:        backend,
+		ContextLength:  contextLen,
+		Quant:          quant,
+		Capabilities:   []domain.Capability{domain.CapabilityChat},
+		LaunchProfile:  "llamacpp-metal",
+		ArtifactSizeMB: estimateWeightsMB(draft.Size),
+		EstWeightsMB:   estimateWeightsMB(draft.Size),
+		KVPerTokenMB:   0.01,
 	}
 	prov := Provenance{
 		PresetID:         id,

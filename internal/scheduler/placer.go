@@ -207,6 +207,9 @@ func (p *Placer) selectWarmInstance(ctx context.Context, job domain.Job, preset 
 				if _, mismatch := nodeSelectorMismatch(job.NodeSelector, node); mismatch {
 					continue
 				}
+				if _, drop := nodeDiskDropReason(preset, node, fleet); drop {
+					continue
+				}
 				claim, err := p.estimateCandidateClaim(ctx, preset, contextLen, concurrency, node, inst.AcceleratorSet)
 				if err != nil {
 					return domain.ModelInstance{}, false, err

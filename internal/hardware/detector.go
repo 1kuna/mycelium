@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
@@ -15,13 +16,20 @@ import (
 )
 
 type Detector struct {
-	GOOS    string
-	Command func(ctx context.Context, name string, args ...string) ([]byte, error)
-	Clock   ports.Clock
+	GOOS     string
+	Command  func(ctx context.Context, name string, args ...string) ([]byte, error)
+	Clock    ports.Clock
+	DiskPath string
+	StatDisk func(path string) (DiskStats, error)
+}
+
+type DiskStats struct {
+	TotalMB int
+	FreeMB  int
 }
 
 func NewDetector() Detector {
-	return Detector{GOOS: runtime.GOOS, Command: runCommand, Clock: clock.System{}}
+	return Detector{GOOS: runtime.GOOS, Command: runCommand, Clock: clock.System{}, DiskPath: "/"}
 }
 
 func (d Detector) Detect(ctx context.Context, seed domain.Node) (domain.Node, error) {
@@ -29,14 +37,49 @@ func (d Detector) Detect(ctx context.Context, seed domain.Node) (domain.Node, er
 	if goos == "" {
 		goos = runtime.GOOS
 	}
+	var (
+		node domain.Node
+		err  error
+	)
 	switch goos {
 	case "darwin":
-		return d.detectDarwin(ctx, seed)
+		node, err = d.detectDarwin(ctx, seed)
 	case "linux":
-		return d.detectLinux(ctx, seed)
+		node, err = d.detectLinux(ctx, seed)
 	default:
 		return domain.Node{}, fmt.Errorf("unsupported hardware discovery OS %q", goos)
 	}
+	if err != nil {
+		return domain.Node{}, err
+	}
+	return d.AddDiskStats(node)
+}
+
+func (d Detector) AddDiskStats(node domain.Node) (domain.Node, error) {
+	if node.DiskMinFreeRatio == 0 {
+		node.DiskMinFreeRatio = domain.DefaultDiskMinFreeRatio
+	}
+	if node.DiskTotalMB > 0 {
+		return node, nil
+	}
+	path := d.DiskPath
+	if path == "" {
+		path = "/"
+	}
+	stat := d.StatDisk
+	if stat == nil {
+		stat = statDisk
+	}
+	stats, err := stat(path)
+	if err != nil {
+		return domain.Node{}, fmt.Errorf("detect disk capacity %s: %w", path, err)
+	}
+	if stats.TotalMB <= 0 || stats.FreeMB < 0 {
+		return domain.Node{}, fmt.Errorf("invalid disk capacity total_mb=%d free_mb=%d", stats.TotalMB, stats.FreeMB)
+	}
+	node.DiskTotalMB = stats.TotalMB
+	node.DiskFreeMB = stats.FreeMB
+	return node, nil
 }
 
 func (d Detector) detectDarwin(ctx context.Context, seed domain.Node) (domain.Node, error) {
@@ -310,6 +353,23 @@ func mergeLabels(base, add map[string]string) map[string]string {
 
 func runCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).Output()
+}
+
+func statDisk(path string) (DiskStats, error) {
+	var stats syscall.Statfs_t
+	if err := syscall.Statfs(path, &stats); err != nil {
+		return DiskStats{}, err
+	}
+	blockSize := int64(stats.Bsize)
+	if blockSize <= 0 {
+		return DiskStats{}, fmt.Errorf("invalid filesystem block size %d", blockSize)
+	}
+	totalBytes := int64(stats.Blocks) * blockSize
+	freeBytes := int64(stats.Bavail) * blockSize
+	return DiskStats{
+		TotalMB: int(totalBytes / 1024 / 1024),
+		FreeMB:  int(freeBytes / 1024 / 1024),
+	}, nil
 }
 
 var _ ports.HardwareDetector = Detector{}

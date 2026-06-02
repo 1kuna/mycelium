@@ -15,6 +15,9 @@ func TestMakeNodeDefaultsValid(t *testing.T) {
 	if len(n.Accelerators) == 0 {
 		t.Fatal("default node must have an accelerator")
 	}
+	if n.DiskTotalMB <= 0 || n.DiskFreeMB <= 0 || n.DiskMinFreeRatio != domain.DefaultDiskMinFreeRatio {
+		t.Fatalf("invalid disk defaults: %+v", n)
+	}
 }
 
 func TestSparkIsCatastrophicAndUnified(t *testing.T) {
@@ -51,12 +54,15 @@ func TestMakePresetDefaultsValid(t *testing.T) {
 }
 
 func TestAllNodeOptions(t *testing.T) {
-	n := Make4090Node(WithNodeID("n1"), WithVRAM(123), WithUsedVRAM(45), WithMaxUtil(0.75), Catastrophic, Maintenance)
+	n := Make4090Node(WithNodeID("n1"), WithVRAM(123), WithUsedVRAM(45), WithMaxUtil(0.75), WithDisk(1000, 300), WithDiskMinFreeRatio(0.30), Catastrophic, Maintenance)
 	if n.ID != "n1" || n.Accelerators[0].VRAMTotalMB != 123 || n.Accelerators[0].VRAMUsedMB != 45 {
 		t.Fatalf("node fields = %+v", n)
 	}
 	if n.MaxUtil != 0.75 || n.OOMSeverity != domain.OOMCatastrophic || n.Status != domain.NodeMaintenance {
 		t.Fatalf("node options = %+v", n)
+	}
+	if n.DiskTotalMB != 1000 || n.DiskFreeMB != 300 || n.DiskMinFreeRatio != 0.30 {
+		t.Fatalf("disk options = %+v", n)
 	}
 }
 
@@ -71,9 +77,12 @@ func TestAllJobOptions(t *testing.T) {
 }
 
 func TestAllPresetAndInstanceOptions(t *testing.T) {
-	p := MakePreset(WithPresetID("preset1"), WithModelRef("model1"), WithAliases("alias1"), WithWeights(12), WithKVPerToken(0.5), WithContextLength(4096), WithLaunchProfile("profile"), WithLaunchArgs("--x", "1"), WithPresetNode("node1"))
+	p := MakePreset(WithPresetID("preset1"), WithModelRef("model1"), WithAliases("alias1"), WithWeights(12), WithArtifactSize(13), WithKVPerToken(0.5), WithContextLength(4096), WithLaunchProfile("profile"), WithLaunchArgs("--x", "1"), WithPresetNode("node1"))
 	if p.ID != "preset1" || p.ModelRef != "model1" || strings.Join(p.Aliases, ",") != "alias1" || p.EstWeightsMB != 12 || p.KVPerTokenMB != 0.5 || p.ContextLength != 4096 || p.NodeID != "node1" {
 		t.Fatalf("preset options = %+v", p)
+	}
+	if p.ArtifactSizeMB != 13 {
+		t.Fatalf("artifact size = %+v", p)
 	}
 	if p.LaunchProfile != "profile" || len(p.LaunchArgs) != 2 {
 		t.Fatalf("launch options = %+v", p)

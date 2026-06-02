@@ -9,16 +9,19 @@ import (
 func MakeNode(opts ...func(*domain.Node)) domain.Node {
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
 	n := domain.Node{
-		ID:            "node_test",
-		Name:          "test-node",
-		Address:       "127.0.0.1:50000",
-		OS:            "linux",
-		Labels:        map[string]string{"gpu.vendor": "nvidia"},
-		MaxUtil:       0.90,
-		OOMSeverity:   domain.OOMSoft,
-		Status:        domain.NodeReady,
-		HeartbeatAt:   now,
-		UnifiedMemory: false,
+		ID:               "node_test",
+		Name:             "test-node",
+		Address:          "127.0.0.1:50000",
+		OS:               "linux",
+		Labels:           map[string]string{"gpu.vendor": "nvidia"},
+		MaxUtil:          0.90,
+		DiskTotalMB:      1_000_000,
+		DiskFreeMB:       500_000,
+		DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio,
+		OOMSeverity:      domain.OOMSoft,
+		Status:           domain.NodeReady,
+		HeartbeatAt:      now,
+		UnifiedMemory:    false,
 		Accelerators: []domain.Accelerator{{
 			Index:       0,
 			Vendor:      "nvidia",
@@ -47,6 +50,17 @@ func WithUsedVRAM(mb int) func(*domain.Node) {
 
 func WithMaxUtil(u float64) func(*domain.Node) {
 	return func(n *domain.Node) { n.MaxUtil = u }
+}
+
+func WithDisk(totalMB, freeMB int) func(*domain.Node) {
+	return func(n *domain.Node) {
+		n.DiskTotalMB = totalMB
+		n.DiskFreeMB = freeMB
+	}
+}
+
+func WithDiskMinFreeRatio(ratio float64) func(*domain.Node) {
+	return func(n *domain.Node) { n.DiskMinFreeRatio = ratio }
 }
 
 func Catastrophic(n *domain.Node) {
