@@ -1,6 +1,7 @@
-.PHONY: fmt build vet test coverage smoke smoke-local smoke-fleet smoke-overlay smoke-mlx smoke-vllm smoke-b70 smoke-spark-vllm ci
+.PHONY: fmt build vet test coverage smoke smoke-local smoke-fleet smoke-overlay smoke-mlx smoke-vllm smoke-b70 smoke-spark-vllm smoke-benchmark-fleet ci
 
 SMOKE_JSON ?= smoke.out
+BENCH_OUT ?= benchmark-out
 
 fmt:
 	test -z "$$(gofmt -l .)"
@@ -47,5 +48,9 @@ smoke-b70:
 smoke-spark-vllm:
 	go test -count=1 -tags smoke ./test/smoke/... -run TestSparkVLLMPeerRoutingSmoke -timeout 30m -json > $(SMOKE_JSON)
 	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestSparkVLLMPeerRoutingSmoke
+
+smoke-benchmark-fleet:
+	test -n "$(MYCELIUM_BENCHMARK_CONFIG)"
+	go run ./cmd/myce benchmark fleet --config "$(MYCELIUM_BENCHMARK_CONFIG)" --out "$(BENCH_OUT)" --profile conservative
 
 ci: fmt build vet test coverage

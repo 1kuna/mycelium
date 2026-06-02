@@ -220,7 +220,21 @@ func runJobs(ctx context.Context, args []string) error {
 }
 
 func runBenchmark(ctx context.Context, args []string, client *http.Client) error {
-	if len(args) == 0 || args[0] != "run" {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: myce benchmark <run|fleet>")
+	}
+	switch args[0] {
+	case "run":
+		return runBenchmarkFanout(ctx, args[1:], client)
+	case "fleet":
+		return runBenchmarkFleet(ctx, args[1:], client)
+	default:
+		return fmt.Errorf("usage: myce benchmark <run|fleet>")
+	}
+}
+
+func runBenchmarkFanout(ctx context.Context, args []string, client *http.Client) error {
+	if len(args) == 0 {
 		return fmt.Errorf("usage: myce benchmark run --url gateway --prompt prompt --model id [--model id] --out dir [--db path]")
 	}
 	fs := flag.NewFlagSet("benchmark run", flag.ContinueOnError)
@@ -232,7 +246,7 @@ func runBenchmark(ctx context.Context, args []string, client *http.Client) error
 	project := fs.String("project", "", "project id")
 	var models repeatedString
 	fs.Var(&models, "model", "model or preset id; may be repeated")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *url == "" {
@@ -286,6 +300,40 @@ func runBenchmark(ctx context.Context, args []string, client *http.Client) error
 		return err
 	}
 	fmt.Printf("benchmark\t%s\tdone\t%s\n", parent.ID, *out)
+	return nil
+}
+
+func runBenchmarkFleet(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("benchmark fleet", flag.ContinueOnError)
+	configPath := fs.String("config", "", "fleet benchmark config JSON")
+	out := fs.String("out", "", "output directory")
+	profile := fs.String("profile", bench.FleetProfileConservative, "benchmark profile: conservative, saturation, or soak")
+	simulate := fs.Bool("simulate", false, "run deterministic preflight only")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *configPath == "" {
+		return fmt.Errorf("--config is required")
+	}
+	if *out == "" {
+		return fmt.Errorf("--out is required")
+	}
+	cfg, err := bench.LoadFleetConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	result, err := bench.RunFleet(ctx, cfg, bench.FleetRunOptions{
+		Profile:    *profile,
+		Simulate:   *simulate,
+		OutputRoot: *out,
+		Client:     client,
+		Clock:      clock.System{},
+	})
+	if err != nil {
+		fmt.Printf("benchmark-fleet\t%s\tfailed\t%s\n", result.RunID, result.OutputDir)
+		return err
+	}
+	fmt.Printf("benchmark-fleet\t%s\tdone\t%s\n", result.RunID, result.OutputDir)
 	return nil
 }
 

@@ -48,7 +48,7 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	if resp.Header.Get(HeaderDecision) != string(domain.ActionWarmInstance) || resp.Header.Get(HeaderInstance) != inst.ID {
+	if resp.Header.Get(HeaderDecision) != string(domain.ActionWarmInstance) || resp.Header.Get(HeaderInstance) != inst.ID || !strings.Contains(resp.Header.Get(HeaderTrace), "warm compatible instance") {
 		t.Fatalf("headers = %+v", resp.Header)
 	}
 	if !strings.Contains(string(resp.Body), "hello") {
