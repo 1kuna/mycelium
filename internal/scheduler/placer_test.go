@@ -38,6 +38,27 @@ func TestPlaceUsesWarmInstanceForThroughput(t *testing.T) {
 	assertTraceContains(t, decision.Trace, "admit", "warm")
 }
 
+func TestPlaceSkipsWarmInstanceWhenIncrementalKVDoesNotFit(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithWeights(900), fixtures.WithKVPerToken(0))
+	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	warm := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst_warm"),
+		fixtures.WithInstancePreset(preset.ID),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(900, 0)),
+	)
+	fleet := domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{warm}}
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(900, 200)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(), fleet)
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.Action != domain.ActionQueued {
+		t.Fatalf("decision = %+v", decision)
+	}
+}
+
 func TestPlaceLoadsBestColdCandidate(t *testing.T) {
 	preset := fixtures.MakePreset()
 	fleet := domain.FleetSnapshot{
@@ -56,6 +77,52 @@ func TestPlaceLoadsBestColdCandidate(t *testing.T) {
 		t.Fatalf("decision = %+v", decision)
 	}
 	assertTraceContains(t, decision.Trace, "score", "node_spark")
+}
+
+func TestPlacePassesExpectedConcurrencyToEstimator(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithContextLength(4096))
+	node := fixtures.MakeNode()
+	estimator := &mocks.ResourceEstimator{Claim: fixtures.MakeClaim(10, 2)}
+	placer := NewPlacer(estimator, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	_, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.WithContext(2048), fixtures.WithConcurrency(3)), domain.FleetSnapshot{Nodes: []domain.Node{node}})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if len(estimator.Calls) == 0 {
+		t.Fatal("expected estimator calls")
+	}
+	for _, call := range estimator.Calls {
+		if call.ContextLen != 2048 || call.Concurrency != 3 {
+			t.Fatalf("estimator call = %+v", call)
+		}
+	}
+}
+
+func TestPlaceAutoScoresColdCandidatesInsteadOfBlindWarmMatch(t *testing.T) {
+	preset := fixtures.MakePreset()
+	slowWarm := fixtures.MakeNode(fixtures.WithNodeID("node-slow"))
+	slowWarm.SpeedClass.TokensPerSecRef = 5
+	fastCold := fixtures.MakeNode(fixtures.WithNodeID("node-fast"))
+	fastCold.SpeedClass.TokensPerSecRef = 100
+	warm := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst-slow"),
+		fixtures.WithInstancePreset(preset.ID),
+		fixtures.OnNode(slowWarm.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(10, 1)),
+	)
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(10, 1)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.Auto), domain.FleetSnapshot{
+		Nodes:     []domain.Node{slowWarm, fastCold},
+		Instances: []domain.ModelInstance{warm},
+	})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.Action == domain.ActionWarmInstance || decision.NodeID != fastCold.ID {
+		t.Fatalf("decision = %+v", decision)
+	}
 }
 
 func TestPlaceQueuesWhenNoFitAndSoftPreemption(t *testing.T) {

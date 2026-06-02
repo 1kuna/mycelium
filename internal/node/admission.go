@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -382,21 +383,68 @@ func (a *Admission) fitsLocked(acceleratorSet []int, claim domain.Claim) bool {
 }
 
 func (a *Admission) instancesLocked() []domain.ModelInstance {
-	instances := make([]domain.ModelInstance, 0, len(a.leases))
-	for _, record := range a.leases {
-		instances = append(instances, domain.ModelInstance{
-			ID:             record.lease.InstanceID,
-			NodeID:         record.lease.NodeID,
-			AcceleratorSet: append([]int(nil), record.acceleratorSet...),
-			Claim:          record.lease.Claim,
-			State:          domain.InstReady,
-			Priority:       record.priority,
-		})
-	}
+	live := map[string]domain.ModelInstance{}
 	if a.instances != nil {
-		instances = append(instances, a.instances()...)
+		for _, inst := range a.instances() {
+			if inst.ID != "" {
+				live[inst.ID] = inst
+			}
+		}
 	}
+
+	bound := map[string]domain.ModelInstance{}
+	for _, inst := range live {
+		bound[inst.ID] = cloneInstance(inst)
+	}
+	for _, record := range a.leases {
+		lease := record.lease
+		if lease.InstanceID == "" {
+			bound[lease.ID] = domain.ModelInstance{
+				ID:             lease.ID,
+				NodeID:         lease.NodeID,
+				AcceleratorSet: append([]int(nil), record.acceleratorSet...),
+				Claim:          lease.Claim,
+				State:          domain.InstLoading,
+				Priority:       record.priority,
+				Loading:        true,
+			}
+			continue
+		}
+		inst := bound[lease.InstanceID]
+		if inst.ID == "" {
+			inst = domain.ModelInstance{
+				ID:             lease.InstanceID,
+				NodeID:         lease.NodeID,
+				AcceleratorSet: append([]int(nil), record.acceleratorSet...),
+				State:          domain.InstReady,
+				Priority:       record.priority,
+			}
+		}
+		if inst.Claim.WeightsMB == 0 && lease.Claim.WeightsMB > 0 {
+			inst.Claim.WeightsMB = lease.Claim.WeightsMB
+		}
+		if lease.Claim.WeightsMB == 0 {
+			inst.Claim.KVReservedMB += lease.Claim.KVReservedMB
+		} else if inst.Claim.KVReservedMB == 0 {
+			inst.Claim.KVReservedMB = lease.Claim.KVReservedMB
+		}
+		if priorityRank(record.priority) > priorityRank(inst.Priority) {
+			inst.Priority = record.priority
+		}
+		bound[lease.InstanceID] = inst
+	}
+
+	instances := make([]domain.ModelInstance, 0, len(bound))
+	for _, inst := range bound {
+		instances = append(instances, inst)
+	}
+	sort.Slice(instances, func(i, j int) bool { return instances[i].ID < instances[j].ID })
 	return instances
+}
+
+func cloneInstance(inst domain.ModelInstance) domain.ModelInstance {
+	inst.AcceleratorSet = append([]int(nil), inst.AcceleratorSet...)
+	return inst
 }
 
 func (a *Admission) removeLeaseLocked(ctx context.Context, leaseID, op string) error {

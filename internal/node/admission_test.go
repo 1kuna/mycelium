@@ -285,6 +285,146 @@ func TestAdmissionCountsOwnerRunningInstances(t *testing.T) {
 	}
 }
 
+func TestAdmissionDoesNotDoubleCountBoundLeaseAndLiveInstance(t *testing.T) {
+	ctx := context.Background()
+	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	var running []domain.ModelInstance
+	admission := NewAdmission(
+		node,
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		WithAdmissionInstances(func() []domain.ModelInstance {
+			return append([]domain.ModelInstance(nil), running...)
+		}),
+	)
+
+	leaseA := commitAdmissionLease(t, admission, "job-a", fixtures.MakeClaim(700, 0))
+	if _, err := admission.Offer(ctx, admissionReq(fixtures.MakeJob(fixtures.WithJobID("blocked-loading")), fixtures.MakeClaim(400, 0))); !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("loading occupancy err = %v", err)
+	}
+
+	running = []domain.ModelInstance{fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst-a"),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(700, 0)),
+	)}
+	if err := admission.BindInstance(ctx, leaseA.ID, "inst-a"); err != nil {
+		t.Fatalf("BindInstance: %v", err)
+	}
+	if _, err := admission.Offer(ctx, admissionReq(fixtures.MakeJob(fixtures.WithJobID("fits-after-bind")), fixtures.MakeClaim(300, 0))); err != nil {
+		t.Fatalf("bound lease should count once: %v", err)
+	}
+}
+
+func TestAdmissionWarmLeasesReserveIncrementalKVOnly(t *testing.T) {
+	ctx := context.Background()
+	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	warm := fixtures.MakeInstance(
+		fixtures.WithInstanceID("warm-a"),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(600, 0)),
+	)
+	admission := NewAdmission(
+		node,
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		WithAdmissionInstances(func() []domain.ModelInstance { return []domain.ModelInstance{warm} }),
+	)
+
+	first, err := admission.Offer(ctx, domain.AdmissionRequest{
+		Job:        fixtures.MakeJob(fixtures.WithJobID("warm-1")),
+		Claim:      fixtures.MakeClaim(600, 100),
+		NodeID:     node.ID,
+		InstanceID: warm.ID,
+	})
+	if err != nil {
+		t.Fatalf("first warm Offer: %v", err)
+	}
+	if _, err := admission.Commit(ctx, first.OfferID, first.Fence); err != nil {
+		t.Fatalf("first warm Commit: %v", err)
+	}
+	if _, err := admission.Offer(ctx, domain.AdmissionRequest{
+		Job:        fixtures.MakeJob(fixtures.WithJobID("warm-fits")),
+		Claim:      fixtures.MakeClaim(600, 300),
+		NodeID:     node.ID,
+		InstanceID: warm.ID,
+	}); err != nil {
+		t.Fatalf("second warm should fit with weights counted once: %v", err)
+	}
+	if _, err := admission.Offer(ctx, domain.AdmissionRequest{
+		Job:        fixtures.MakeJob(fixtures.WithJobID("warm-blocked")),
+		Claim:      fixtures.MakeClaim(600, 350),
+		NodeID:     node.ID,
+		InstanceID: warm.ID,
+	}); !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("second warm overflow err = %v", err)
+	}
+}
+
+func TestAdmissionSynthesizesBoundLeaseOccupancy(t *testing.T) {
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	admission := NewAdmission(node, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
+	admission.leases["lease-a"] = admissionLease{
+		lease: domain.Lease{
+			ID:             "lease-a",
+			JobID:          "job-a",
+			InstanceID:     "inst-a",
+			NodeID:         node.ID,
+			AcceleratorSet: []int{0},
+			Claim:          fixtures.MakeClaim(400, 50),
+			Priority:       domain.PriorityNormal,
+		},
+		acceleratorSet: []int{0},
+		priority:       domain.PriorityNormal,
+	}
+	admission.leases["lease-loading"] = admissionLease{
+		lease: domain.Lease{
+			ID:             "lease-loading",
+			JobID:          "job-loading",
+			NodeID:         node.ID,
+			AcceleratorSet: []int{0},
+			Claim:          fixtures.MakeClaim(1, 1),
+			Priority:       domain.PriorityBackground,
+		},
+		acceleratorSet: []int{0},
+		priority:       domain.PriorityBackground,
+	}
+	instances := admission.instancesLocked()
+	if len(instances) != 2 || instances[0].ID != "inst-a" || instances[0].Claim != (fixtures.MakeClaim(400, 50)) || instances[1].ID != "lease-loading" {
+		t.Fatalf("synthesized instances = %+v", instances)
+	}
+
+	live := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst-b"),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(400, 50)),
+		fixtures.WithInstancePriority(domain.PriorityBackground),
+	)
+	admission = NewAdmission(
+		node,
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		WithAdmissionInstances(func() []domain.ModelInstance { return []domain.ModelInstance{live} }),
+	)
+	admission.leases["lease-b"] = admissionLease{
+		lease: domain.Lease{
+			ID:             "lease-b",
+			JobID:          "job-b",
+			InstanceID:     live.ID,
+			NodeID:         node.ID,
+			AcceleratorSet: []int{0},
+			Claim:          fixtures.MakeClaim(0, 25),
+			Priority:       domain.PriorityInteractive,
+		},
+		acceleratorSet: []int{0},
+		priority:       domain.PriorityInteractive,
+	}
+	instances = admission.instancesLocked()
+	if len(instances) != 1 || instances[0].Claim != (fixtures.MakeClaim(400, 75)) || instances[0].Priority != domain.PriorityInteractive {
+		t.Fatalf("grouped live instance = %+v", instances)
+	}
+}
+
 func TestAdmissionFailsLoudOnBadInputsAndUnavailableCapacity(t *testing.T) {
 	admission := NewAdmission(fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.5)), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 	canceled, cancel := context.WithCancel(context.Background())

@@ -52,6 +52,10 @@ func WithContext(n int) func(*domain.Job) {
 	return func(j *domain.Job) { j.ContextRequest = n }
 }
 
+func WithConcurrency(n int) func(*domain.Job) {
+	return func(j *domain.Job) { j.ExpectedConcurrency = n }
+}
+
 func WithPreset(id string) func(*domain.Job) {
 	return func(j *domain.Job) { j.PresetID = id }
 }

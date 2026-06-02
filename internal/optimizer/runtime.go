@@ -185,7 +185,11 @@ func (s RecommendationService) provePresetFit(ctx context.Context, project domai
 	if estimator == nil {
 		estimator = estimate.NewInMemory()
 	}
-	claim, err := estimator.Estimate(ctx, preset, preset.ContextLength, 1)
+	concurrency := project.ExpectedConcurrency
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	claim, err := estimator.Estimate(ctx, preset, preset.ContextLength, concurrency)
 	if err != nil {
 		return fitProof{Safe: false, Reason: fmt.Sprintf("fit proof estimate failed: %v", err)}
 	}

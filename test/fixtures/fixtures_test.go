@@ -25,7 +25,7 @@ func TestSparkIsCatastrophicAndUnified(t *testing.T) {
 }
 
 func TestMakeJobOptions(t *testing.T) {
-	j := MakeJob(Interactive, HardForInteractive, Latency, WithContext(12000))
+	j := MakeJob(Interactive, HardForInteractive, Latency, WithContext(12000), WithConcurrency(3))
 	if j.Priority != domain.PriorityInteractive {
 		t.Fatalf("priority = %s", j.Priority)
 	}
@@ -37,6 +37,9 @@ func TestMakeJobOptions(t *testing.T) {
 	}
 	if j.ContextRequest != 12000 {
 		t.Fatalf("context = %d", j.ContextRequest)
+	}
+	if j.ExpectedConcurrency != 3 {
+		t.Fatalf("concurrency = %d", j.ExpectedConcurrency)
 	}
 }
 

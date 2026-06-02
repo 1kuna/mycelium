@@ -1355,10 +1355,11 @@ func seedControlStore(ctx context.Context, store *storesqlite.Store, cfg PeerCon
 	}
 	if len(cfg.Projects) == 0 {
 		if err := store.SaveProject(ctx, domain.Project{
-			ID:         "default",
-			Priority:   domain.PriorityInteractive,
-			SpeedPref:  domain.SpeedThroughput,
-			Preemption: domain.PreemptSoft,
+			ID:                  "default",
+			Priority:            domain.PriorityInteractive,
+			SpeedPref:           domain.SpeedThroughput,
+			ExpectedConcurrency: 1,
+			Preemption:          domain.PreemptSoft,
 		}); err != nil {
 			return err
 		}

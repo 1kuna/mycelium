@@ -590,11 +590,12 @@ func TestRouterMergesProjectDefaultsIntoJobIntent(t *testing.T) {
 	router := &Router{
 		Projects: map[string]domain.Project{
 			"proj-a": {
-				ID:         "proj-a",
-				Priority:   domain.PriorityBackground,
-				SpeedPref:  domain.SpeedLatency,
-				ContextCap: 4096,
-				Preemption: domain.PreemptHard,
+				ID:                  "proj-a",
+				Priority:            domain.PriorityBackground,
+				SpeedPref:           domain.SpeedLatency,
+				ContextCap:          4096,
+				ExpectedConcurrency: 3,
+				Preemption:          domain.PreemptHard,
 			},
 		},
 		DefaultProject: "proj-a",
@@ -607,7 +608,7 @@ func TestRouterMergesProjectDefaultsIntoJobIntent(t *testing.T) {
 	}
 
 	job := router.jobFromIngress(req, 1)
-	if job.Project != "proj-a" || job.Priority != domain.PriorityBackground || job.SpeedPref != domain.SpeedLatency || job.ContextRequest != 4096 || job.Preemption != domain.PreemptHard || job.Submitter != "submitter-a" || job.Handling != domain.HandlingPrivate {
+	if job.Project != "proj-a" || job.Priority != domain.PriorityBackground || job.SpeedPref != domain.SpeedLatency || job.ContextRequest != 4096 || job.ExpectedConcurrency != 3 || job.Preemption != domain.PreemptHard || job.Submitter != "submitter-a" || job.Handling != domain.HandlingPrivate {
 		t.Fatalf("job = %+v", job)
 	}
 
