@@ -325,12 +325,22 @@ func TestInFlightRequestsGuardUnload(t *testing.T) {
 	if err := agent.EndRequest(context.Background(), inst.ID); err != nil {
 		t.Fatalf("EndRequest: %v", err)
 	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Unload: %v", err)
+	unloaded := false
+	for i := 0; i < 1000; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("Unload: %v", err)
+			}
+			unloaded = true
+		default:
+			runtime.Gosched()
 		}
-	case <-time.After(time.Second):
+		if unloaded {
+			break
+		}
+	}
+	if !unloaded {
 		t.Fatal("Unload did not drain")
 	}
 	if countCalls(backend.Calls, "stop") != 1 {

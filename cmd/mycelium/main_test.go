@@ -17,7 +17,6 @@ import (
 
 	"mycelium/internal/backends/processadapter"
 	"mycelium/internal/catalog"
-	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/estimate"
 	"mycelium/internal/gateway"
@@ -1388,7 +1387,7 @@ func TestRestoreQueuedJobs(t *testing.T) {
 	if err := store.SaveJob(context.Background(), domain.Job{ID: "done", Model: "tiny", Status: domain.JobDone}); err != nil {
 		t.Fatalf("SaveJob done: %v", err)
 	}
-	queue := scheduler.NewQueue(clock.System{})
+	queue := scheduler.NewQueue(mocks.NewFakeClock(time.Unix(1, 0).UTC()))
 	if err := restoreQueuedJobs(context.Background(), store, queue); err != nil {
 		t.Fatalf("restoreQueuedJobs: %v", err)
 	}
@@ -1437,7 +1436,7 @@ func TestRunOptimizerEvaluationPersistsRecommendationsAndCalibratesSpeed(t *test
 		}
 	}
 
-	if _, err := runOptimizerEvaluation(context.Background(), store, clock.System{}, telemetrySyncConfig{}); err != nil {
+	if _, err := runOptimizerEvaluation(context.Background(), store, mocks.NewFakeClock(now), telemetrySyncConfig{}); err != nil {
 		t.Fatalf("runOptimizerEvaluation: %v", err)
 	}
 	appliedProject, err := store.Project(context.Background(), project.ID)
@@ -1490,7 +1489,7 @@ func TestRunOptimizerEvaluationIncludesRemoteTelemetryAndPushesRecommendations(t
 		},
 	}
 
-	result, err := runOptimizerEvaluation(ctx, store, clock.System{}, telemetrySyncConfig{
+	result, err := runOptimizerEvaluation(ctx, store, mocks.NewFakeClock(time.Unix(40, 0).UTC()), telemetrySyncConfig{
 		SelfID: "peer-a",
 		Peers:  &mocks.PeerDiscovery{PeersVal: []domain.Peer{remotePeer}},
 		Client: client,
@@ -1537,7 +1536,7 @@ func TestRunOptimizerEvaluationSkipsUnreachableTelemetryPeersWithEvidence(t *tes
 		t.Fatalf("SavePreset small: %v", err)
 	}
 	remotePeer := domain.Peer{ID: "peer-b", Addresses: []string{"127.0.0.1:1"}, Compute: true}
-	result, err := runOptimizerEvaluation(ctx, store, clock.System{}, telemetrySyncConfig{
+	result, err := runOptimizerEvaluation(ctx, store, mocks.NewFakeClock(time.Unix(50, 0).UTC()), telemetrySyncConfig{
 		SelfID: "peer-a",
 		Peers:  &mocks.PeerDiscovery{PeersVal: []domain.Peer{remotePeer}},
 		Client: &mocks.TelemetryPeerClient{MetricsErr: errors.New("dial refused")},
@@ -1714,12 +1713,22 @@ func TestRunPeerServesUntilContextCanceled(t *testing.T) {
 		return err == nil
 	})
 	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("runPeer: %v", err)
+	stopped := false
+	for i := 0; i < 10000; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("runPeer: %v", err)
+			}
+			stopped = true
+		default:
+			runtime.Gosched()
 		}
-	case <-time.After(2 * time.Second):
+		if stopped {
+			break
+		}
+	}
+	if !stopped {
 		t.Fatal("runPeer did not stop after context cancellation")
 	}
 }

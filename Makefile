@@ -16,7 +16,7 @@ test:
 
 coverage:
 	go test ./... -covermode=atomic -coverprofile=all.out
-	go run ./tools/covergate -profile all.out -min 0.85 -package-min 0.85 -package-prefix cmd/ -package-prefix internal/ -package-prefix pkg/ -package-prefix tools/ -require internal/scheduler=1.0 -require internal/lease=1.0 -require internal/peer=1.0 -require test/contract=1.0 -require test/fixtures=1.0 -require-file internal/node/admission.go=1.0 -require-file internal/peer/coordinator.go=1.0 -require-file internal/peer/recovery.go=1.0
+	go run ./tools/covergate -profile all.out -min 0.85 -package-min 0.85 -package-prefix cmd/ -package-prefix internal/ -package-prefix pkg/ -package-prefix tools/ -package-prefix test/mocks -require internal/scheduler=1.0 -require internal/lease=1.0 -require internal/peer=1.0 -require test/contract=1.0 -require test/fixtures=1.0 -require-file internal/node/admission.go=1.0 -require-file internal/peer/coordinator.go=1.0 -require-file internal/peer/recovery.go=1.0
 
 smoke: smoke-local smoke-fleet
 

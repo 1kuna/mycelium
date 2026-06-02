@@ -171,6 +171,14 @@ func TestResourceEstimatorAllocatorTelemetryAndClock(t *testing.T) {
 	if !clock.Now().Equal(time.Date(2026, 5, 29, 12, 0, 1, 0, time.UTC)) {
 		t.Fatalf("now = %s", clock.Now())
 	}
+	live := clock.NewTimer(time.Second)
+	if clock.TimerCount() != 2 {
+		t.Fatalf("timer count = %d", clock.TimerCount())
+	}
+	clock.Advance(time.Second)
+	if fired := <-live.C(); !fired.Equal(clock.Now()) {
+		t.Fatalf("fired at %s want %s", fired, clock.Now())
+	}
 }
 
 func TestTunnelMockRecordsAndFails(t *testing.T) {
@@ -226,6 +234,11 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	if err := admission.BindInstance(context.Background(), "lease-a", "inst-a"); err != nil {
 		t.Fatalf("BindInstance: %v", err)
 	}
+	admission.LeaseForJobVal = domain.Lease{ID: "lease-job", JobID: job.ID}
+	admission.LeaseForJobFound = true
+	if got, found, err := admission.LeaseForJob(context.Background(), job.ID); err != nil || !found || got.ID != "lease-job" {
+		t.Fatalf("LeaseForJob = %+v %v %v", got, found, err)
+	}
 
 	stale := errors.New("stale")
 	admission.CommitErr = stale
@@ -247,6 +260,15 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	}
 	if err := coordinator.Release(context.Background(), job.ID); err != nil {
 		t.Fatalf("Release: %v", err)
+	}
+	coordinator.PlanErr = stale
+	if _, err := coordinator.Plan(context.Background(), job.ID); !errors.Is(err, stale) {
+		t.Fatalf("plan err = %v", err)
+	}
+	coordinator.PlanErr = nil
+	coordinator.CommitErr = stale
+	if _, err := coordinator.Commit(context.Background(), decision); !errors.Is(err, stale) {
+		t.Fatalf("coordinator commit err = %v", err)
 	}
 
 	registry := &JobRegistry{}
@@ -292,6 +314,9 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	if err := registry.Put(context.Background(), record); !errors.Is(err, boom) {
 		t.Fatalf("put err = %v", err)
 	}
+	if _, err := registry.Snapshot(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("snapshot err = %v", err)
+	}
 	registry.WatchErr = boom
 	if _, err := registry.Watch(context.Background(), "cursor"); !errors.Is(err, boom) {
 		t.Fatalf("watch err = %v", err)
@@ -300,8 +325,59 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	if err := peers.Advertise(context.Background(), peer); !errors.Is(err, boom) {
 		t.Fatalf("advertise err = %v", err)
 	}
+	if _, err := peers.Peers(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("peers err = %v", err)
+	}
 	peers.WatchErr = boom
 	if _, err := peers.WatchPeers(context.Background()); !errors.Is(err, boom) {
 		t.Fatalf("watch peers err = %v", err)
+	}
+}
+
+func TestNodeHardwareAndTelemetryMockFailureBranches(t *testing.T) {
+	boom := errors.New("boom")
+	agent := NewNodeAgent(fixtures.MakeNode())
+	if err := agent.BeginRequest(context.Background(), "inst-a"); err != nil {
+		t.Fatalf("BeginRequest: %v", err)
+	}
+	if err := agent.EndRequest(context.Background(), "inst-a"); err != nil {
+		t.Fatalf("EndRequest: %v", err)
+	}
+	agent.BeginErr = boom
+	if err := agent.BeginRequest(context.Background(), "inst-a"); !errors.Is(err, boom) {
+		t.Fatalf("begin err = %v", err)
+	}
+	agent.EndErr = boom
+	if err := agent.EndRequest(context.Background(), "inst-a"); !errors.Is(err, boom) {
+		t.Fatalf("end err = %v", err)
+	}
+
+	detector := &HardwareDetector{}
+	seed := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	node, err := detector.Detect(context.Background(), seed)
+	if err != nil || node.ID != seed.ID || len(node.Accelerators) == 0 {
+		t.Fatalf("Detect = %+v %v", node, err)
+	}
+	detector.Err = boom
+	if _, err := detector.Detect(context.Background(), seed); !errors.Is(err, boom) {
+		t.Fatalf("detect err = %v", err)
+	}
+
+	peer := domain.Peer{ID: "peer-a"}
+	client := &TelemetryPeerClient{MetricsErr: boom}
+	if _, err := client.Metrics(context.Background(), peer); !errors.Is(err, boom) {
+		t.Fatalf("metrics err = %v", err)
+	}
+	client = &TelemetryPeerClient{PushMetricsErr: boom}
+	if err := client.PushMetrics(context.Background(), peer, []domain.RunMetric{{JobID: "job"}}); !errors.Is(err, boom) {
+		t.Fatalf("push metrics err = %v", err)
+	}
+	client = &TelemetryPeerClient{RecommendationsErr: boom}
+	if _, err := client.Recommendations(context.Background(), peer); !errors.Is(err, boom) {
+		t.Fatalf("recommendations err = %v", err)
+	}
+	client = &TelemetryPeerClient{PushRecommendationsErr: boom}
+	if err := client.PushRecommendations(context.Background(), peer, []domain.RecommendationRecord{{ID: "rec"}}); !errors.Is(err, boom) {
+		t.Fatalf("push recommendations err = %v", err)
 	}
 }

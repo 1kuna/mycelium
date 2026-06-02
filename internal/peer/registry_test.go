@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -230,19 +231,22 @@ func receiveRecord(t *testing.T, ch <-chan domain.JobRecord) domain.JobRecord {
 			t.Fatal("watch closed")
 		}
 		return rec
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for record")
+	default:
+		t.Fatal("record was not ready")
 	}
 	return domain.JobRecord{}
 }
 
 func receiveClosed(t *testing.T, ch <-chan domain.JobRecord) (domain.JobRecord, bool) {
 	t.Helper()
-	select {
-	case rec, ok := <-ch:
-		return rec, ok
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for close")
+	for i := 0; i < 1000; i++ {
+		select {
+		case rec, ok := <-ch:
+			return rec, ok
+		default:
+			runtime.Gosched()
+		}
 	}
+	t.Fatal("watch close was not ready")
 	return domain.JobRecord{}, false
 }

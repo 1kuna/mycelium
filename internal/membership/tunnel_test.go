@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"mycelium/internal/domain"
 )
@@ -146,9 +146,13 @@ func (a fakeAddr) String() string  { return string(a) }
 
 func waitAccepted(t *testing.T, listener *fakeListener) {
 	t.Helper()
-	select {
-	case <-listener.accepted:
-	case <-time.After(time.Second):
-		t.Fatal("server did not start accepting")
+	for i := 0; i < 1000; i++ {
+		select {
+		case <-listener.accepted:
+			return
+		default:
+			runtime.Gosched()
+		}
 	}
+	t.Fatal("server did not start accepting")
 }
