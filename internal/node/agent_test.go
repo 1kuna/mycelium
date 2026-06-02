@@ -74,6 +74,28 @@ func TestLoadReadinessGatesInstanceAndUnloadStopsBackend(t *testing.T) {
 	}
 }
 
+func TestLoadPreservesRequestPriorityOnInstance(t *testing.T) {
+	backend := mocks.NewBackendAdapter()
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
+	req := loadReq(fixtures.MakePreset())
+	req.Priority = domain.PriorityBackground
+
+	inst, err := agent.Load(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if inst.Priority != domain.PriorityBackground {
+		t.Fatalf("priority = %q", inst.Priority)
+	}
+	snap, err := agent.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Instances) != 1 || snap.Instances[0].Priority != domain.PriorityBackground {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+}
+
 func TestLoadAllocatesConcreteAddressPerPresetWhenListenPortIsZero(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
 	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithListenAddr("127.0.0.1:0"), WithAllocator(lease.NewAllocator()))

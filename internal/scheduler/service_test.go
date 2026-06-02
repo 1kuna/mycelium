@@ -58,7 +58,7 @@ func TestServiceLoadsAndGrantsLease(t *testing.T) {
 		},
 	}
 
-	result, err := service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)))
+	result, err := service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID), fixtures.Background))
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -73,6 +73,9 @@ func TestServiceLoadsAndGrantsLease(t *testing.T) {
 	}
 	if strings.Join(admission.Calls, ",") != "offer:job-a,commit:offer_job-a:1,bind-instance:lease_offer_job-a:inst_1" {
 		t.Fatalf("admission calls = %+v", admission.Calls)
+	}
+	if len(agent.Loaded) != 1 || agent.Loaded[0].Priority != domain.PriorityBackground {
+		t.Fatalf("loaded priority = %+v", agent.Loaded)
 	}
 }
 

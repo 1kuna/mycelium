@@ -81,11 +81,12 @@ type AdmissionRequest struct {
 }
 
 type LoadRequest struct {
-	JobID          string `json:"job_id,omitempty"`
-	Preset         Preset `json:"preset"`
-	Claim          Claim  `json:"claim"`
-	AcceleratorSet []int  `json:"accelerator_set"`
-	ReservationID  string `json:"reservation_id,omitempty"`
+	JobID          string   `json:"job_id,omitempty"`
+	Preset         Preset   `json:"preset"`
+	Claim          Claim    `json:"claim"`
+	AcceleratorSet []int    `json:"accelerator_set"`
+	ReservationID  string   `json:"reservation_id,omitempty"`
+	Priority       Priority `json:"priority,omitempty"`
 }
 
 type ModelInstance struct {
