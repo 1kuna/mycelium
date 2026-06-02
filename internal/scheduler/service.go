@@ -560,9 +560,9 @@ func (s *Service) cleanupCoordinatedLoad(ctx context.Context, jobID string, inst
 
 func (s *Service) resolveInstance(ctx context.Context, job domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot) (domain.ModelInstance, error) {
 	if decision.InstanceID != "" {
-		inst, ok := instanceByID(fleet.Instances, decision.InstanceID)
+		inst, ok := instanceByNodeAndID(fleet.Instances, decision.NodeID, decision.InstanceID)
 		if !ok {
-			return domain.ModelInstance{}, fmt.Errorf("selected instance %q is missing from fleet snapshot", decision.InstanceID)
+			return domain.ModelInstance{}, fmt.Errorf("selected instance %q on node %q is missing from fleet snapshot", decision.InstanceID, decision.NodeID)
 		}
 		return inst, nil
 	}
@@ -645,6 +645,15 @@ func (s *Service) finalizeOwnerLease(job domain.Job, inst domain.ModelInstance, 
 func instanceByID(instances []domain.ModelInstance, id string) (domain.ModelInstance, bool) {
 	for _, inst := range instances {
 		if inst.ID == id {
+			return inst, true
+		}
+	}
+	return domain.ModelInstance{}, false
+}
+
+func instanceByNodeAndID(instances []domain.ModelInstance, nodeID, id string) (domain.ModelInstance, bool) {
+	for _, inst := range instances {
+		if inst.ID == id && (nodeID == "" || inst.NodeID == nodeID) {
 			return inst, true
 		}
 	}

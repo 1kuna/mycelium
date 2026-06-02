@@ -701,11 +701,11 @@ func (r *Router) beginInstanceRequest(ctx context.Context, inst domain.ModelInst
 func (r *Router) resolveInstance(ctx context.Context, decision domain.PlacementDecision, preset domain.Preset, fleet domain.FleetSnapshot) (domain.ModelInstance, bool, error) {
 	if decision.InstanceID != "" {
 		for _, inst := range fleet.Instances {
-			if inst.ID == decision.InstanceID {
+			if inst.ID == decision.InstanceID && (decision.NodeID == "" || inst.NodeID == decision.NodeID) {
 				return inst, false, nil
 			}
 		}
-		return domain.ModelInstance{}, false, fmt.Errorf("selected instance %q is missing from fleet snapshot", decision.InstanceID)
+		return domain.ModelInstance{}, false, fmt.Errorf("selected instance %q on node %q is missing from fleet snapshot", decision.InstanceID, decision.NodeID)
 	}
 	if decision.NodeID == "" {
 		return domain.ModelInstance{}, false, fmt.Errorf("placement action %q did not select a node", decision.Action)
