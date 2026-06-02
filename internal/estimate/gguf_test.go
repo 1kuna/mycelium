@@ -44,6 +44,28 @@ func TestGGUFEstimatorUsesNodeSideInspectionForRemoteModel(t *testing.T) {
 	}
 }
 
+func TestGGUFEstimatorUsesResolverForRemoteModel(t *testing.T) {
+	node := fixtures.MakeNode()
+	agent := mocks.NewNodeAgent(node)
+	agent.Metadata = domain.ModelMetadata{ModelRef: "remote.gguf", Format: "gguf", WeightsMB: 80, KVPerTokenMB: 0.25, ContextLength: 4096}
+	resolver := &staticNodeResolver{agents: map[string]ports.NodeAgent{node.ID: agent}}
+	estimator := NewGGUFWithResolver(nil, nil, resolver)
+
+	claim, err := estimator.Estimate(context.Background(), fixtures.MakePreset(fixtures.WithModelRef("remote.gguf"), fixtures.WithPresetNode(node.ID)), 1000, 2)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	if claim != (domain.Claim{WeightsMB: 80, KVReservedMB: 500}) {
+		t.Fatalf("claim = %+v", claim)
+	}
+	if resolver.requested != node.ID {
+		t.Fatalf("resolver requested %q", resolver.requested)
+	}
+	if len(agent.Calls) != 1 || agent.Calls[0] != "inspect:preset_test" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+}
+
 func TestGGUFEstimatorUsesParserForLocalFile(t *testing.T) {
 	model := filepath.Join(t.TempDir(), "model.gguf")
 	if err := os.WriteFile(model, []byte("not really gguf"), 0o600); err != nil {
@@ -154,6 +176,20 @@ type staticParser struct {
 	metadata domain.ModelMetadata
 	err      error
 	modelRef string
+}
+
+type staticNodeResolver struct {
+	agents    map[string]ports.NodeAgent
+	requested string
+}
+
+func (r *staticNodeResolver) NodeAgent(nodeID string) (ports.NodeAgent, error) {
+	r.requested = nodeID
+	agent, ok := r.agents[nodeID]
+	if !ok {
+		return nil, errors.New("missing")
+	}
+	return agent, nil
 }
 
 func (p *staticParser) Parse(_ context.Context, modelRef string) (domain.ModelMetadata, error) {
