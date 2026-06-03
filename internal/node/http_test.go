@@ -112,6 +112,48 @@ func TestHTTPNodeAgentRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHTTPUnloadReleasesBoundAdmissionLease(t *testing.T) {
+	ctx := context.Background()
+	node := fixtures.MakeNode()
+	allocator := lease.NewAllocator()
+	agent := NewAgent(node, mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(allocator))
+	admission := NewAdmission(node, allocator, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
+	server := newDirectHTTPServer(HTTPServer{Agent: agent, Admission: admission})
+	client := server.nodeClient()
+	preset := fixtures.MakePreset()
+	inst, err := client.Load(ctx, loadReq(preset))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	offer, err := client.Offer(ctx, admissionReq(fixtures.MakeJob(fixtures.WithJobID("job-bound")), domain.Claim{WeightsMB: 1}))
+	if err != nil {
+		t.Fatalf("Offer: %v", err)
+	}
+	lease, err := client.Commit(ctx, offer.OfferID, offer.Fence)
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := client.BindInstance(ctx, lease.ID, inst.ID); err != nil {
+		t.Fatalf("BindInstance: %v", err)
+	}
+	if _, found, err := client.LeaseForInstance(ctx, inst.ID); err != nil || !found {
+		t.Fatalf("LeaseForInstance before unload found=%v err=%v", found, err)
+	}
+	if err := client.Unload(ctx, inst.ID); err != nil {
+		t.Fatalf("Unload: %v", err)
+	}
+	if _, found, err := client.LeaseForInstance(ctx, inst.ID); err != nil || found {
+		t.Fatalf("LeaseForInstance after unload found=%v err=%v", found, err)
+	}
+	snap, err := client.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Instances) != 0 {
+		t.Fatalf("instances after unload = %+v", snap.Instances)
+	}
+}
+
 func TestHTTPProxyGuardsInFlightUntilUpstreamCompletes(t *testing.T) {
 	agent := NewAgent(
 		fixtures.MakeNode(),
