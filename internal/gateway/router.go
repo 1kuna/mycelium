@@ -803,7 +803,7 @@ func (r *Router) recordMetric(ctx context.Context, job domain.Job, preset domain
 		Backend:         preset.Backend,
 		Project:         job.Project,
 		ContextUsed:     prompt + completion,
-		TokensPerSec:    tokensPerSecond(completion, timing.FirstByte, timing.End),
+		TokensPerSec:    metricTokensPerSecond(completion, timing),
 		TTFTms:          durationMS(timing.Start, timing.FirstByte),
 		LoadWallClockMS: timing.LoadWallClockMS,
 		At:              clk.Now().UTC(),
@@ -846,6 +846,13 @@ func tokensPerSecond(tokens int, start, end time.Time) float64 {
 		return 0
 	}
 	return float64(tokens) / end.Sub(start).Seconds()
+}
+
+func metricTokensPerSecond(tokens int, timing metricTiming) float64 {
+	if timing.End.After(timing.FirstByte) {
+		return tokensPerSecond(tokens, timing.FirstByte, timing.End)
+	}
+	return tokensPerSecond(tokens, timing.Start, timing.End)
 }
 
 func durationMS(start, end time.Time) int {

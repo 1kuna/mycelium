@@ -249,6 +249,12 @@ func TestMetricTimingCalculations(t *testing.T) {
 	if got := tokensPerSecond(10, first, end); got != 5 {
 		t.Fatalf("tokensPerSecond = %f", got)
 	}
+	if got := metricTokensPerSecond(10, metricTiming{Start: start, FirstByte: first, End: end}); got != 5 {
+		t.Fatalf("stream metric tokens/sec = %f", got)
+	}
+	if got := metricTokensPerSecond(10, metricTiming{Start: start, FirstByte: end, End: end}); got != 10/2.1 {
+		t.Fatalf("buffered metric tokens/sec = %f", got)
+	}
 	if got := tokensPerSecond(0, first, end); got != 0 {
 		t.Fatalf("zero tokens/sec = %f", got)
 	}
