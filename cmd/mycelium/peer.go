@@ -206,7 +206,13 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 				return "", nil, nil, err
 			}
 			startSeedPeerProber(ctx, cached, cfg.SeedPeers, cfg.JoinToken, joinTokens, clock.System{}, scan)
-			discovery = cached
+			discovery = seedRefreshingDiscovery{
+				cache:      cached,
+				seeds:      cfg.SeedPeers,
+				joinToken:  cfg.JoinToken,
+				joinTokens: joinTokens,
+				client:     peerControlHTTPClient(),
+			}
 			lanTunnel := membership.NewLANTunnel()
 			lanTunnel.AuthToken = cfg.RPCToken
 			tunnel = lanTunnel
@@ -1140,6 +1146,38 @@ func seedPeerProbeInterval(interval time.Duration) time.Duration {
 	}
 	return interval
 }
+
+type seedRefreshingDiscovery struct {
+	cache      *membership.CachedPeerDiscovery
+	seeds      []string
+	joinToken  string
+	joinTokens *membership.TokenManager
+	client     *http.Client
+}
+
+func (d seedRefreshingDiscovery) Advertise(ctx context.Context, self domain.Peer) error {
+	if d.cache == nil {
+		return fmt.Errorf("seed refreshing discovery is not configured")
+	}
+	return d.cache.Advertise(ctx, self)
+}
+
+func (d seedRefreshingDiscovery) Peers(ctx context.Context) ([]domain.Peer, error) {
+	if d.cache == nil {
+		return nil, fmt.Errorf("seed refreshing discovery is not configured")
+	}
+	probeSeedPeersWithClient(ctx, d.cache, d.seeds, d.joinToken, d.joinTokens, d.client)
+	return d.cache.Peers(ctx)
+}
+
+func (d seedRefreshingDiscovery) WatchPeers(ctx context.Context) (<-chan domain.Peer, error) {
+	if d.cache == nil {
+		return nil, fmt.Errorf("seed refreshing discovery is not configured")
+	}
+	return d.cache.WatchPeers(ctx)
+}
+
+var _ ports.PeerDiscovery = seedRefreshingDiscovery{}
 
 func probeSeedPeers(ctx context.Context, cache *membership.CachedPeerDiscovery, seeds []string, joinToken string, joinTokens *membership.TokenManager) {
 	probeSeedPeersWithClient(ctx, cache, seeds, joinToken, joinTokens, peerControlHTTPClient())
