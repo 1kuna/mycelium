@@ -1144,14 +1144,39 @@ type jobLister interface {
 	ListJobs(ctx context.Context) ([]domain.Job, error)
 }
 
+type jobRegistrySnapshotter interface {
+	Snapshot(ctx context.Context) ([]domain.JobRecord, error)
+}
+
 func restoreQueuedJobs(ctx context.Context, store jobLister, queue *scheduler.Queue) error {
 	jobs, err := store.ListJobs(ctx)
 	if err != nil {
 		return err
 	}
+	payloads := map[string][]byte{}
+	if registry, ok := store.(jobRegistrySnapshotter); ok {
+		records, err := registry.Snapshot(ctx)
+		if err != nil {
+			return err
+		}
+		for _, rec := range records {
+			if rec.Status != domain.JobQueued || len(rec.Request) == 0 || rec.Handling == domain.HandlingPrivate || rec.PayloadRedacted {
+				continue
+			}
+			_, payload, err := peercoord.DecodeRescuePayload(rec.Request)
+			if err != nil {
+				return fmt.Errorf("decode queued rescue payload for job %q: %w", rec.JobID, err)
+			}
+			payloads[rec.JobID] = payload
+		}
+	}
 	for _, job := range jobs {
 		if job.Status == domain.JobQueued {
-			queue.Enqueue(job)
+			if payload, ok := payloads[job.ID]; ok {
+				queue.EnqueueWithPayload(job, payload)
+			} else {
+				queue.Enqueue(job)
+			}
 		}
 	}
 	return nil
