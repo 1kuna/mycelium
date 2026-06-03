@@ -17,6 +17,7 @@ import (
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/optimizer"
+	"mycelium/internal/ports"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/pkg/api"
 )
@@ -33,7 +34,7 @@ func RunWithClient(ctx context.Context, args []string, client *http.Client) erro
 	case "add-model":
 		return runAddModel(ctx, args[1:])
 	case "models":
-		return runModels(ctx, args[1:])
+		return runModels(ctx, args[1:], client)
 	case "nodes":
 		return runNodes(ctx, args[1:], client)
 	case "projects":
@@ -118,24 +119,158 @@ func runAddModel(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runModels(ctx context.Context, args []string) error {
-	if len(args) == 0 || args[0] != "list" {
-		return fmt.Errorf("usage: myce models list [--db path]")
+func runModels(ctx context.Context, args []string, client *http.Client) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: myce models <list|stage|locality>")
+	}
+	switch args[0] {
+	case "list":
+		store, err := openCLIStore(args[1:])
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		presets, err := store.ListPresets(ctx)
+		if err != nil {
+			return err
+		}
+		for _, preset := range presets {
+			fmt.Printf("%s\t%s\t%s\t%d\n", preset.ID, preset.ModelRef, preset.Backend, preset.ContextLength)
+		}
+		return nil
+	case "stage":
+		return runModelsStage(ctx, args[1:], client)
+	case "locality":
+		return runModelsLocality(ctx, args[1:])
+	default:
+		return fmt.Errorf("usage: myce models <list|stage|locality>")
+	}
+}
+
+func runModelsStage(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("models stage", flag.ContinueOnError)
+	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+	presetID := fs.String("preset", "", "preset id to stage")
+	nodeID := fs.String("node", "", "target node id")
+	url := fs.String("url", "", "target peer URL override")
+	rpcToken := fs.String("rpc-token", "", "target peer RPC bearer token")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *presetID == "" {
+		return fmt.Errorf("--preset is required")
+	}
+	if *nodeID == "" {
+		return fmt.Errorf("--node is required")
+	}
+	store, err := storesqlite.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	preset, err := store.Preset(ctx, *presetID)
+	if err != nil {
+		return err
+	}
+	node, err := store.Node(ctx, *nodeID)
+	if err != nil {
+		return err
+	}
+	address := *url
+	if address == "" {
+		address = node.Address
+	}
+	if address == "" {
+		return fmt.Errorf("node %q has no reachable address", node.ID)
+	}
+	peer := domain.Peer{ID: node.ID, Addresses: []string{address}, Compute: true}
+	locality, err := catalogStageHTTPClient{AuthToken: *rpcToken, Client: client}.StageModel(ctx, peer, preset)
+	if err != nil {
+		return err
+	}
+	if err := store.SaveModelLocality(ctx, locality); err != nil {
+		return err
+	}
+	fmt.Printf("stage\t%s\t%s\t%s\t%s\n", locality.PresetID, locality.NodeID, locality.State, locality.ModelRef)
+	return nil
+}
+
+func runModelsLocality(ctx context.Context, args []string) error {
+	if len(args) == 0 || args[0] != "report" {
+		return fmt.Errorf("usage: myce models locality report [--db path]")
 	}
 	store, err := openCLIStore(args[1:])
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	presets, err := store.ListPresets(ctx)
+	localities, err := store.ListModelLocalities(ctx)
 	if err != nil {
 		return err
 	}
-	for _, preset := range presets {
-		fmt.Printf("%s\t%s\t%s\t%d\n", preset.ID, preset.ModelRef, preset.Backend, preset.ContextLength)
+	for _, locality := range localities {
+		fmt.Printf("%s\t%s\t%s\t%s\t%t\t%d\t%s\n", locality.PresetID, locality.NodeID, locality.State, locality.ModelRef, locality.Managed, locality.ArtifactSizeMB, locality.Reason)
 	}
 	return nil
 }
+
+type catalogStageHTTPClient struct {
+	AuthToken string
+	Client    *http.Client
+}
+
+func (c catalogStageHTTPClient) StageModel(ctx context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error) {
+	if len(peer.Addresses) == 0 {
+		return domain.ModelLocality{}, fmt.Errorf("peer %q has no reachable address", peer.ID)
+	}
+	body, err := json.Marshal(map[string]any{"preset": preset})
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(catalogPeerBaseURL(peer.Addresses[0]), "/")+"/catalog/stage", bytes.NewReader(body))
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	client := c.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return domain.ModelLocality{}, fmt.Errorf("catalog stage %s: %s", peer.ID, strings.TrimSpace(string(data)))
+	}
+	var out struct {
+		Locality domain.ModelLocality `json:"locality"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return domain.ModelLocality{}, err
+	}
+	if out.Locality.ID == "" {
+		return domain.ModelLocality{}, fmt.Errorf("catalog stage %s returned no locality", peer.ID)
+	}
+	return out.Locality, nil
+}
+
+func catalogPeerBaseURL(address string) string {
+	if strings.HasPrefix(address, "http://") || strings.HasPrefix(address, "https://") {
+		return address
+	}
+	return "http://" + address
+}
+
+var _ ports.PeerCatalogStager = catalogStageHTTPClient{}
 
 func runNodes(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {

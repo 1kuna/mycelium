@@ -307,6 +307,58 @@ type JoinTokenRecord struct {
 	Current bool   `json:"current"`
 }
 
+type ModelLocalityState string
+
+const (
+	ModelLocalityPlanned ModelLocalityState = "planned"
+	ModelLocalityStaging ModelLocalityState = "staging"
+	ModelLocalityReady   ModelLocalityState = "ready"
+	ModelLocalityFailed  ModelLocalityState = "failed"
+	ModelLocalityEvicted ModelLocalityState = "evicted"
+)
+
+type ModelLocality struct {
+	ID             string             `json:"id"`
+	PresetID       string             `json:"preset_id"`
+	NodeID         string             `json:"node_id"`
+	State          ModelLocalityState `json:"state"`
+	ModelRef       string             `json:"model_ref,omitempty"`
+	Source         string             `json:"source,omitempty"`
+	ArtifactSizeMB int                `json:"artifact_size_mb,omitempty"`
+	Managed        bool               `json:"managed"`
+	Pinned         bool               `json:"pinned,omitempty"`
+	Warm           bool               `json:"warm,omitempty"`
+	Reason         string             `json:"reason,omitempty"`
+	UpdatedAt      time.Time          `json:"updated_at"`
+}
+
+type LocalityActionKind string
+
+const (
+	LocalityActionStage LocalityActionKind = "stage"
+	LocalityActionEvict LocalityActionKind = "evict"
+	LocalityActionKeep  LocalityActionKind = "keep"
+)
+
+type LocalityAction struct {
+	ID             string             `json:"id"`
+	Kind           LocalityActionKind `json:"kind"`
+	PresetID       string             `json:"preset_id"`
+	NodeID         string             `json:"node_id"`
+	Source         string             `json:"source,omitempty"`
+	ArtifactSizeMB int                `json:"artifact_size_mb,omitempty"`
+	Reason         string             `json:"reason,omitempty"`
+	State          ModelLocalityState `json:"state,omitempty"`
+	Error          string             `json:"error,omitempty"`
+}
+
+type LocalityPlan struct {
+	ID        string           `json:"id"`
+	CreatedAt time.Time        `json:"created_at"`
+	Actions   []LocalityAction `json:"actions,omitempty"`
+	Warnings  []string         `json:"warnings,omitempty"`
+}
+
 type HostFacts struct {
 	NodeID           string            `json:"node_id"`
 	OS               string            `json:"os"`

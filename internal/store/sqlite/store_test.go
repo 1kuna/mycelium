@@ -48,6 +48,27 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	rec := domain.RecommendationRecord{ID: "rec-a", Type: "context_cap_recommendation", ProjectID: project.ID, RecommendedValue: 4096, CreatedAt: time.Unix(2, 0).UTC()}
 	refs := []domain.ProcessRef{{PID: 12, Kind: "process", Ref: "12"}}
 	token := domain.JoinTokenRecord{Hash: "hash-a", Active: true, Current: true}
+	locality := domain.ModelLocality{
+		ID:             "node-a:preset-a",
+		PresetID:       preset.ID,
+		NodeID:         node.ID,
+		State:          domain.ModelLocalityReady,
+		ModelRef:       preset.ModelRef,
+		ArtifactSizeMB: preset.ArtifactSizeMB,
+		Managed:        true,
+		UpdatedAt:      time.Unix(4, 0).UTC(),
+	}
+	localityPlan := domain.LocalityPlan{
+		ID:        "plan-a",
+		CreatedAt: time.Unix(5, 0).UTC(),
+		Actions: []domain.LocalityAction{{
+			ID:       "stage:node-a:preset-a",
+			Kind:     domain.LocalityActionStage,
+			PresetID: preset.ID,
+			NodeID:   node.ID,
+			State:    domain.ModelLocalityReady,
+		}},
+	}
 
 	must(t, store.SaveProject(ctx, project))
 	must(t, store.SavePreset(ctx, preset))
@@ -61,6 +82,8 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	must(t, store.SaveRecommendation(ctx, rec))
 	must(t, store.SaveProcessRefs(ctx, node.ID, refs))
 	must(t, store.SaveJoinToken(ctx, token))
+	must(t, store.SaveModelLocality(ctx, locality))
+	must(t, store.SaveLocalityPlan(ctx, localityPlan))
 	must(t, store.Close())
 
 	reopened, err := Open(path)
@@ -87,6 +110,12 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	}
 	if gotTokens, err := reopened.ListJoinTokens(ctx); err != nil || len(gotTokens) != 1 || gotTokens[0].Hash != token.Hash || !gotTokens[0].Current {
 		t.Fatalf("JoinTokens = %+v, %v", gotTokens, err)
+	}
+	if gotLocalities, err := reopened.ListModelLocalities(ctx); err != nil || len(gotLocalities) != 1 || gotLocalities[0].ID != locality.ID || gotLocalities[0].State != domain.ModelLocalityReady {
+		t.Fatalf("ModelLocalities = %+v, %v", gotLocalities, err)
+	}
+	if gotPlan, err := reopened.LocalityPlan(ctx, localityPlan.ID); err != nil || gotPlan.ID != localityPlan.ID || len(gotPlan.Actions) != 1 {
+		t.Fatalf("LocalityPlan = %+v, %v", gotPlan, err)
 	}
 
 	if projects, err := reopened.ListProjects(ctx); err != nil || len(projects) != 1 {
@@ -125,6 +154,9 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	if recs, err := reopened.ListRecommendations(ctx, project.ID); err != nil || len(recs) != 1 {
 		t.Fatalf("ListRecommendations len = %d, %v", len(recs), err)
 	}
+	if plans, err := reopened.ListLocalityPlans(ctx); err != nil || len(plans) != 1 {
+		t.Fatalf("ListLocalityPlans len = %d, %v", len(plans), err)
+	}
 
 	must(t, reopened.MarkRecommendationApplied(ctx, rec.ID, time.Unix(3, 0).UTC()))
 	recs, err := reopened.ListRecommendations(ctx, "")
@@ -136,6 +168,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	must(t, reopened.DeleteLease(ctx, lease.ID))
 	must(t, reopened.DeleteReservation(ctx, reservation.ID))
 	must(t, reopened.DeleteProcessRefs(ctx, node.ID))
+	must(t, reopened.DeleteModelLocality(ctx, locality.ID))
 }
 
 func TestStoreTelemetryAndErrors(t *testing.T) {
@@ -160,10 +193,24 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 		"recommendation": store.SaveRecommendation(ctx, domain.RecommendationRecord{}),
 		"process refs":   store.SaveProcessRefs(ctx, "", nil),
 		"join token":     store.SaveJoinToken(ctx, domain.JoinTokenRecord{}),
+		"locality":       store.SaveModelLocality(ctx, domain.ModelLocality{}),
+		"locality plan":  store.SaveLocalityPlan(ctx, domain.LocalityPlan{}),
 	} {
 		if err == nil {
 			t.Fatalf("%s save expected id error", name)
 		}
+	}
+	if err := store.SaveModelLocality(ctx, domain.ModelLocality{ID: "loc"}); err == nil {
+		t.Fatal("SaveModelLocality should require preset id")
+	}
+	if err := store.SaveModelLocality(ctx, domain.ModelLocality{ID: "loc", PresetID: "preset"}); err == nil {
+		t.Fatal("SaveModelLocality should require node id")
+	}
+	if err := store.SaveModelLocality(ctx, domain.ModelLocality{ID: "loc", PresetID: "preset", NodeID: "node"}); err == nil {
+		t.Fatal("SaveModelLocality should require state")
+	}
+	if err := store.SaveLocalityPlan(ctx, domain.LocalityPlan{ID: "plan"}); err == nil {
+		t.Fatal("SaveLocalityPlan should require created_at")
 	}
 	if _, err := store.Project(ctx, "missing"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("missing project err = %v", err)

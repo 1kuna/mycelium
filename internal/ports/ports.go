@@ -108,6 +108,22 @@ type Catalog interface {
 	Materialize(ctx context.Context, ref string) (domain.Preset, error)
 }
 
+type ModelInventory interface {
+	SaveModelLocality(ctx context.Context, locality domain.ModelLocality) error
+	ListModelLocalities(ctx context.Context) ([]domain.ModelLocality, error)
+	DeleteModelLocality(ctx context.Context, id string) error
+}
+
+type LocalityPlanStore interface {
+	SaveLocalityPlan(ctx context.Context, plan domain.LocalityPlan) error
+	LocalityPlan(ctx context.Context, id string) (domain.LocalityPlan, error)
+	ListLocalityPlans(ctx context.Context) ([]domain.LocalityPlan, error)
+}
+
+type PeerCatalogStager interface {
+	StageModel(ctx context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error)
+}
+
 type TelemetryStore interface {
 	TelemetrySink
 	Metrics(ctx context.Context, project string) ([]domain.RunMetric, error)
