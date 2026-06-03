@@ -608,8 +608,12 @@ func TestFleetLivePreflightMismatchEvidence(t *testing.T) {
 	if !matched.LiveMatchesPreflight || matched.PreflightNodeID != "spark" || matched.PreflightDecision != string(domain.ActionHardPreempted) {
 		t.Fatalf("matched = %+v", matched)
 	}
+	cleanFleetEquivalent := attachPreflightResult(FleetJobResult{JobID: "job-a", ModelID: "qwen122b", NodeID: "spark", Decision: string(domain.ActionLoadedNew)}, plan)
+	if !cleanFleetEquivalent.LiveMatchesPreflight {
+		t.Fatalf("clean fleet equivalent = %+v", cleanFleetEquivalent)
+	}
 	mismatched := attachPreflightResult(FleetJobResult{JobID: "job-a", ModelID: "qwen122b", NodeID: "b70", Decision: string(domain.ActionLoadedNew)}, plan)
-	failures := livePreflightMismatchFailures([]FleetJobResult{matched, mismatched})
+	failures := livePreflightMismatchFailures([]FleetJobResult{matched, cleanFleetEquivalent, mismatched})
 	if len(failures) != 1 || !strings.Contains(failures[0].Error, "did not match preflight") {
 		t.Fatalf("mismatch failures = %+v", failures)
 	}
