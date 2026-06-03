@@ -50,23 +50,14 @@ func TestPeerLANDiscoveryPeersAndWatch(t *testing.T) {
 	discovery := PeerLANDiscovery{ListenAddr: addr, BroadcastAddr: addr, MaxPackets: 2, PacketFactory: network}
 	peerA := domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}
 	peerB := domain.Peer{ID: "peer-b", Addresses: []string{"127.0.0.1:2"}}
-	results := make(chan []domain.Peer, 1)
-	errs := make(chan error, 1)
-	go func() {
-		peers, err := discovery.Peers(ctx)
-		if err != nil {
-			errs <- err
-			return
-		}
-		results <- peers
-	}()
 	if err := discovery.Advertise(ctx, peerA); err != nil {
 		t.Fatalf("Advertise A: %v", err)
 	}
 	if err := discovery.Advertise(ctx, peerB); err != nil {
 		t.Fatalf("Advertise B: %v", err)
 	}
-	assertPeers(t, results, errs, peerA.ID, peerB.ID)
+	peers, err := discovery.Peers(ctx)
+	assertPeerList(t, peers, err, peerA.ID, peerB.ID)
 
 	watchAddr := "127.0.0.1:61003"
 	watchCtx, watchCancel := context.WithCancel(context.Background())
@@ -100,23 +91,14 @@ func TestPeerLANDiscoveryFiltersByJoinToken(t *testing.T) {
 	other := PeerLANDiscovery{BroadcastAddr: addr, Token: "other", PacketFactory: network}
 	peerA := domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}
 	peerB := domain.Peer{ID: "peer-b", Addresses: []string{"127.0.0.1:2"}, Compute: true}
-	results := make(chan []domain.Peer, 1)
-	errs := make(chan error, 1)
-	go func() {
-		peers, err := listener.Peers(ctx)
-		if err != nil {
-			errs <- err
-			return
-		}
-		results <- peers
-	}()
 	if err := other.Advertise(ctx, peerB); err != nil {
 		t.Fatalf("Advertise other: %v", err)
 	}
 	if err := matching.Advertise(ctx, peerA); err != nil {
 		t.Fatalf("Advertise matching: %v", err)
 	}
-	assertPeers(t, results, errs, peerA.ID)
+	peers, err := listener.Peers(ctx)
+	assertPeerList(t, peers, err, peerA.ID)
 }
 
 func TestPeerLANDiscoveryFiltersWithPersistentTokenManager(t *testing.T) {
@@ -133,23 +115,14 @@ func TestPeerLANDiscoveryFiltersWithPersistentTokenManager(t *testing.T) {
 	other := PeerLANDiscovery{BroadcastAddr: addr, Token: "other", PacketFactory: network}
 	peerA := domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}
 	peerB := domain.Peer{ID: "peer-b", Addresses: []string{"127.0.0.1:2"}, Compute: true}
-	results := make(chan []domain.Peer, 1)
-	errs := make(chan error, 1)
-	go func() {
-		peers, err := listener.Peers(ctx)
-		if err != nil {
-			errs <- err
-			return
-		}
-		results <- peers
-	}()
 	if err := other.Advertise(ctx, peerB); err != nil {
 		t.Fatalf("Advertise other: %v", err)
 	}
 	if err := matching.Advertise(ctx, peerA); err != nil {
 		t.Fatalf("Advertise matching: %v", err)
 	}
-	assertPeers(t, results, errs, peerA.ID)
+	peers, err := listener.Peers(ctx)
+	assertPeerList(t, peers, err, peerA.ID)
 	if err := manager.Revoke("secret"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
@@ -233,31 +206,23 @@ func TestPeerLANDiscoveryHelperBranches(t *testing.T) {
 	}
 }
 
-func assertPeers(t *testing.T, results <-chan []domain.Peer, errs <-chan error, ids ...string) {
+func assertPeerList(t *testing.T, peers []domain.Peer, err error, ids ...string) {
 	t.Helper()
-	for i := 0; i < 1000; i++ {
-		select {
-		case err := <-errs:
-			t.Fatalf("Peers: %v", err)
-		case peers := <-results:
-			if len(peers) != len(ids) {
-				t.Fatalf("peers = %+v", peers)
-			}
-			seen := map[string]bool{}
-			for _, peer := range peers {
-				seen[peer.ID] = true
-			}
-			for _, id := range ids {
-				if !seen[id] {
-					t.Fatalf("peers = %+v", peers)
-				}
-			}
-			return
-		default:
-			runtime.Gosched()
+	if err != nil {
+		t.Fatalf("Peers: %v", err)
+	}
+	if len(peers) != len(ids) {
+		t.Fatalf("peers = %+v", peers)
+	}
+	seen := map[string]bool{}
+	for _, peer := range peers {
+		seen[peer.ID] = true
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			t.Fatalf("peers = %+v", peers)
 		}
 	}
-	t.Fatal("peers were not ready")
 }
 
 func readPeer(t *testing.T, ch <-chan domain.Peer) domain.Peer {
