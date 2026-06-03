@@ -387,6 +387,9 @@ func TestServiceSpecAndRenderers(t *testing.T) {
 	if !strings.Contains(plist, "<string>run</string>") || !strings.Contains(plist, xmlEscape(configPath)) {
 		t.Fatalf("plist = %s", plist)
 	}
+	if !strings.Contains(plist, "<key>NetworkState</key>") || !strings.Contains(plist, "<key>WorkingDirectory</key>") {
+		t.Fatalf("plist missing launchd network/working directory settings: %s", plist)
+	}
 	if strings.Contains(plist, "join-secret") || strings.Contains(plist, "rpc-secret") {
 		t.Fatalf("plist leaked secret: %s", plist)
 	}
@@ -476,12 +479,18 @@ func TestServiceManagersUseExpectedCommands(t *testing.T) {
 
 func TestRunServiceStatusChecksPeerHealth(t *testing.T) {
 	var sawJoinToken bool
+	var sawRPCAuth bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/peer/health" {
+		switch r.URL.Path {
+		case "/peer/health":
+			sawJoinToken = r.Header.Get("X-Myc-Join-Token") == "join-secret"
+			w.WriteHeader(http.StatusNoContent)
+		case "/peer/diagnostics":
+			sawRPCAuth = r.Header.Get("Authorization") == "Bearer rpc-secret"
+			_ = json.NewEncoder(w).Encode(peerDiagnosticsReport{Ready: true, Seeds: []peerSeedDiagnostic{{Address: "127.0.0.1:1", Ready: true, PeerID: "seed"}}})
+		default:
 			t.Fatalf("path = %s", r.URL.Path)
 		}
-		sawJoinToken = r.Header.Get("X-Myc-Join-Token") == "join-secret"
-		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 	home := t.TempDir()
@@ -490,12 +499,16 @@ func TestRunServiceStatusChecksPeerHealth(t *testing.T) {
 		Listen:    strings.TrimPrefix(server.URL, "http://"),
 		JoinToken: "join-secret",
 		RPCToken:  "rpc-secret",
+		SeedPeers: []string{"127.0.0.1:1"},
 	})
 	if err := runServiceWithManager(context.Background(), []string{"status", "--config", configPath}, fakeServiceManager{status: "active"}, "darwin"); err != nil {
 		t.Fatalf("service status: %v", err)
 	}
 	if !sawJoinToken {
 		t.Fatal("service health did not send join token")
+	}
+	if !sawRPCAuth {
+		t.Fatal("service diagnostics did not send RPC token")
 	}
 	if err := runServiceWithManager(context.Background(), []string{"install", "--config", configPath}, fakeServiceManager{}, "darwin"); err != nil {
 		t.Fatalf("service install: %v", err)
@@ -519,6 +532,15 @@ func TestRunServiceStatusChecksPeerHealth(t *testing.T) {
 	failedConfig := writePeerConfig(t, PeerConfig{Listen: strings.TrimPrefix(failedPeer.URL, "http://")})
 	if _, err := servicePeerHealth(context.Background(), failedConfig); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
 		t.Fatalf("failed service health err = %v", err)
+	}
+	failedDiagnostics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(peerDiagnosticsReport{Ready: false, Seeds: []peerSeedDiagnostic{{Address: "seed", Error: "no route"}}})
+	}))
+	defer failedDiagnostics.Close()
+	failedDiagnosticsConfig := writePeerConfig(t, PeerConfig{Listen: strings.TrimPrefix(failedDiagnostics.URL, "http://"), RPCToken: "rpc-secret", SeedPeers: []string{"seed"}})
+	if _, err := servicePeerDiagnostics(context.Background(), failedDiagnosticsConfig); err == nil || !strings.Contains(err.Error(), "peer diagnostics") {
+		t.Fatalf("failed service diagnostics err = %v", err)
 	}
 }
 
@@ -2215,6 +2237,70 @@ func TestPeerHealthUsesPersistentTokenManager(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("health after revoke = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPeerDiagnosticsChecksSeedsInsidePeerProcess(t *testing.T) {
+	manager, err := membership.NewTokenManager("secret")
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	seedPeer := domain.Peer{ID: "seed-peer", Addresses: []string{"127.0.0.1:0"}, Compute: true}
+	seedClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Myc-Join-Token") != "secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(seedPeer)
+	}))
+	mux := http.NewServeMux()
+	mountPeerHTTPWithDiagnostics(mux, domain.Peer{ID: "self", Addresses: []string{"127.0.0.1:1"}}, manager, []string{"http://seed-ok.test"}, "secret", "rpc-secret", seedClient)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/peer/diagnostics", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("diagnostics without auth = %d %s", rec.Code, rec.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodGet, "/peer/diagnostics", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("diagnostics = %d %s", rec.Code, rec.Body.String())
+	}
+	var report peerDiagnosticsReport
+	if err := json.NewDecoder(rec.Body).Decode(&report); err != nil {
+		t.Fatalf("decode diagnostics: %v", err)
+	}
+	if !report.Ready || len(report.Seeds) != 1 || report.Seeds[0].PeerID != seedPeer.ID || !report.Seeds[0].Compute {
+		t.Fatalf("diagnostics report = %+v", report)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/peer/diagnostics", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("diagnostics method = %d", rec.Code)
+	}
+
+	badClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "blocked", http.StatusForbidden)
+	}))
+	mux = http.NewServeMux()
+	mountPeerHTTPWithDiagnostics(mux, domain.Peer{ID: "self"}, manager, []string{"http://seed-bad.test"}, "secret", "rpc-secret", badClient)
+	req = httptest.NewRequest(http.MethodGet, "/peer/diagnostics", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "blocked") {
+		t.Fatalf("bad diagnostics = %d %s", rec.Code, rec.Body.String())
+	}
+	if err := manager.Revoke("secret"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	report = buildPeerDiagnostics(context.Background(), domain.Peer{ID: "self"}, []string{"http://seed-revoked.test"}, "secret", manager, seedClient)
+	if report.Ready || len(report.Seeds) != 1 || !strings.Contains(report.Seeds[0].Error, "revoked") {
+		t.Fatalf("revoked diagnostics = %+v", report)
 	}
 }
 
