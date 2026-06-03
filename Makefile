@@ -50,7 +50,7 @@ smoke-spark-vllm:
 	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestSparkVLLMPeerRoutingSmoke
 
 smoke-benchmark-fleet:
-	test -n "$(MYCELIUM_BENCHMARK_CONFIG)"
-	go run ./cmd/myce benchmark fleet --config "$(MYCELIUM_BENCHMARK_CONFIG)" --out "$(BENCH_OUT)" --profile conservative
+	MYCELIUM_BENCHMARK_OUT="$(BENCH_OUT)" go test -count=1 -tags smoke ./test/smoke/... -run TestFleetBenchmarkConservativeSmoke -timeout 2h -json > $(SMOKE_JSON)
+	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestFleetBenchmarkConservativeSmoke
 
 ci: fmt build vet test coverage
