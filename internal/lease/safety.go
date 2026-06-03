@@ -1,26 +1,46 @@
 package lease
 
-import "mycelium/internal/domain"
+import (
+	"sort"
+
+	"mycelium/internal/domain"
+)
 
 func selectedCapacity(node domain.Node, acc []int) (totalMB int, usedMB int, ok bool) {
-	if len(acc) == 0 {
+	units, ok := selectedAccelerators(node, acc)
+	if !ok {
 		return 0, 0, false
 	}
-	for _, want := range acc {
-		found := false
-		for _, got := range node.Accelerators {
-			if got.Index == want {
-				totalMB += got.VRAMTotalMB
-				usedMB += got.VRAMUsedMB
-				found = true
-				break
-			}
-		}
-		if !found {
-			return 0, 0, false
-		}
+	for _, unit := range units {
+		totalMB += unit.VRAMTotalMB
+		usedMB += unit.VRAMUsedMB
 	}
 	return totalMB, usedMB, true
+}
+
+func selectedAccelerators(node domain.Node, acc []int) ([]domain.Accelerator, bool) {
+	if len(acc) == 0 {
+		return nil, false
+	}
+	byIndex := map[int]domain.Accelerator{}
+	for _, accelerator := range node.Accelerators {
+		byIndex[accelerator.Index] = accelerator
+	}
+	seen := map[int]struct{}{}
+	units := make([]domain.Accelerator, 0, len(acc))
+	for _, want := range acc {
+		if _, duplicate := seen[want]; duplicate {
+			return nil, false
+		}
+		unit, ok := byIndex[want]
+		if !ok {
+			return nil, false
+		}
+		seen[want] = struct{}{}
+		units = append(units, unit)
+	}
+	sort.Slice(units, func(i, j int) bool { return units[i].Index < units[j].Index })
+	return units, true
 }
 
 func overlaps(left, right []int) bool {
@@ -37,6 +57,31 @@ func overlaps(left, right []int) bool {
 		}
 	}
 	return false
+}
+
+func splitClaim(total int, acc []int) (map[int]int, bool) {
+	if total < 0 || len(acc) == 0 {
+		return nil, false
+	}
+	sorted := append([]int(nil), acc...)
+	sort.Ints(sorted)
+	seen := map[int]struct{}{}
+	for _, index := range sorted {
+		if _, duplicate := seen[index]; duplicate {
+			return nil, false
+		}
+		seen[index] = struct{}{}
+	}
+	shares := map[int]int{}
+	base := total / len(sorted)
+	remainder := total % len(sorted)
+	for i, index := range sorted {
+		shares[index] = base
+		if i < remainder {
+			shares[index]++
+		}
+	}
+	return shares, true
 }
 
 func reservationClaim(r domain.Reservation) domain.Claim {
