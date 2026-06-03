@@ -1521,6 +1521,108 @@ func TestServiceCoordinatedPreemptionUsesOwnerLease(t *testing.T) {
 	}
 }
 
+func TestServiceCoordinatedPreemptionRequeuesVictimWithPayload(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(21, 10).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("victim-preset"))
+	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim-a"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID), fixtures.WithInstancePriority(domain.PriorityBackground))
+	victimJob := fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.WithPreset(preset.ID), fixtures.Background)
+	victimLease := domain.Lease{ID: "lease-victim", JobID: victimJob.ID, InstanceID: victim.ID, NodeID: node.ID, Claim: victim.Claim, Priority: victim.Priority}
+	admission := &mocks.AdmissionController{LeaseForInstVal: victimLease, LeaseForInstFound: true}
+	agent := mocks.NewNodeAgent(node)
+	coordinator := &mocks.Coordinator{
+		Decision: domain.PlacementDecision{JobID: victimJob.ID, NodeID: node.ID, Claim: victim.Claim, Action: domain.ActionLoadedNew},
+		Lease:    domain.Lease{ID: "owner-victim", JobID: victimJob.ID, NodeID: node.ID, Claim: victim.Claim},
+	}
+	jobLog := &recordingJobLog{
+		jobs:     map[string]domain.Job{victimJob.ID: victimJob},
+		payloads: map[string][]byte{victimJob.ID: []byte(`{"job":"victim"}`)},
+	}
+	queue := NewQueue(clock)
+	store := &runtimeStore{
+		instances: map[string]domain.ModelInstance{victim.ID: victim},
+		leases:    map[string]domain.Lease{victimLease.ID: victimLease},
+		jobs:      map[string]domain.Job{victimJob.ID: victimJob},
+	}
+	service := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}},
+		Owners:      staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Coordinator: coordinator,
+		JobLog:      jobLog,
+		Queue:       queue,
+		Store:       store,
+		Clock:       clock,
+		Presets:     map[string]domain.Preset{preset.ID: preset},
+	}
+
+	err := service.enactPreemption(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.Interactive, fixtures.HardForInteractive), domain.PlacementDecision{
+		JobID:     "job-a",
+		Preempted: []string{victim.ID},
+		Requeued:  []string{victim.ID},
+	}, domain.FleetSnapshot{Instances: []domain.ModelInstance{victim}})
+	if err != nil {
+		t.Fatalf("enactPreemption: %v", err)
+	}
+	requeued, payload, ok := queue.DequeueWithPayload()
+	if !ok || requeued.ID != victimJob.ID || string(payload) != `{"job":"victim"}` {
+		t.Fatalf("queued job=%+v payload=%s ok=%v", requeued, payload, ok)
+	}
+	queue.EnqueueWithPayload(requeued, payload)
+
+	results, err := service.Drain(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(results) != 1 || results[0].Lease.ID != "owner-victim" || results[0].Instance.PresetID != preset.ID {
+		t.Fatalf("drain results = %+v", results)
+	}
+	if strings.Join(coordinator.Calls, ",") != "claim:victim-job,plan:victim-job,commit:victim-job" {
+		t.Fatalf("coordinator calls = %+v", coordinator.Calls)
+	}
+	if strings.Join(agent.Calls, ",") != "unload:victim-a,load:victim-preset" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+}
+
+func TestServiceCoordinatedPreemptionRejectsMissingRequeuePayload(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(21, 20).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim-a"), fixtures.OnNode(node.ID), fixtures.WithInstancePriority(domain.PriorityBackground))
+	victimJob := fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.Background)
+	lease := domain.Lease{ID: "lease-victim", JobID: victimJob.ID, InstanceID: victim.ID, NodeID: node.ID, Claim: victim.Claim, Priority: victim.Priority}
+	queue := NewQueue(clock)
+	service := &Service{
+		Coordinator: &mocks.Coordinator{},
+		JobLog: &recordingJobLog{
+			jobs:     map[string]domain.Job{victimJob.ID: victimJob},
+			payloads: map[string][]byte{victimJob.ID: nil},
+		},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{LeaseForInstVal: lease, LeaseForInstFound: true}}},
+		Queue:  queue,
+		Store: &runtimeStore{
+			instances: map[string]domain.ModelInstance{victim.ID: victim},
+			leases:    map[string]domain.Lease{lease.ID: lease},
+			jobs:      map[string]domain.Job{victimJob.ID: victimJob},
+		},
+		Clock: clock,
+	}
+
+	err := service.enactPreemption(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.Interactive, fixtures.HardForInteractive), domain.PlacementDecision{
+		JobID:     "job-a",
+		Preempted: []string{victim.ID},
+		Requeued:  []string{victim.ID},
+	}, domain.FleetSnapshot{Instances: []domain.ModelInstance{victim}})
+	if err == nil || !strings.Contains(err.Error(), "no rescue payload") {
+		t.Fatalf("enactPreemption err = %v", err)
+	}
+	if queue.Len() != 0 {
+		t.Fatalf("missing payload should not enqueue poison job, len = %d", queue.Len())
+	}
+}
+
 func TestServiceOwnerBindingAndCleanupErrors(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(22, 0).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
@@ -1909,6 +2011,41 @@ func TestServiceResolveWarmInstanceUsesOwnerNode(t *testing.T) {
 	}
 }
 
+func TestServiceRequeuePayloadValidation(t *testing.T) {
+	errBoom := errors.New("boom")
+	for _, tt := range []struct {
+		name   string
+		log    JobLog
+		jobID  string
+		want   string
+		wantOK bool
+	}{
+		{name: "missing reader", log: putOnlyJobLog{}, jobID: "job-a", want: "payload reader"},
+		{name: "reader error", log: &recordingJobLog{readErr: errBoom}, jobID: "job-a", want: "boom"},
+		{name: "wrong job", log: &recordingJobLog{jobs: map[string]domain.Job{"job-a": fixtures.MakeJob(fixtures.WithJobID("other"))}, payloads: map[string][]byte{"job-a": []byte(`{}`)}}, jobID: "job-a", want: "returned"},
+		{name: "empty payload", log: &recordingJobLog{jobs: map[string]domain.Job{"job-a": fixtures.MakeJob(fixtures.WithJobID("job-a"))}, payloads: map[string][]byte{"job-a": nil}}, jobID: "job-a", want: "no rescue payload"},
+		{name: "ok", log: &recordingJobLog{jobs: map[string]domain.Job{"job-a": fixtures.MakeJob(fixtures.WithJobID("job-a"))}, payloads: map[string][]byte{"job-a": []byte(`{"job":"a"}`)}}, jobID: "job-a", wantOK: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := (&Service{JobLog: tt.log}).requeuePayload(context.Background(), tt.jobID)
+			if tt.wantOK {
+				if err != nil || string(payload) != `{"job":"a"}` {
+					t.Fatalf("payload=%s err=%v", payload, err)
+				}
+				payload[0] = '['
+				payloadAgain, err := (&Service{JobLog: tt.log}).requeuePayload(context.Background(), tt.jobID)
+				if err != nil || string(payloadAgain) != `{"job":"a"}` {
+					t.Fatalf("payload was not cloned: %s err=%v", payloadAgain, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 type replacementHarness struct {
 	service     *Service
 	node        domain.Node
@@ -2104,19 +2241,51 @@ func (s storeWithoutJobReader) SaveInstance(context.Context, domain.ModelInstanc
 func (s storeWithoutJobReader) DeleteInstance(context.Context, string) error { return nil }
 
 type recordingJobLog struct {
-	job     domain.Job
-	payload []byte
-	err     error
+	job      domain.Job
+	payload  []byte
+	err      error
+	readErr  error
+	jobs     map[string]domain.Job
+	payloads map[string][]byte
 }
 
 func (l *recordingJobLog) PutJob(_ context.Context, job domain.Job, payload []byte) error {
 	if l.err != nil {
 		return l.err
 	}
+	if l.jobs == nil {
+		l.jobs = map[string]domain.Job{}
+	}
+	if l.payloads == nil {
+		l.payloads = map[string][]byte{}
+	}
 	l.job = job
 	l.payload = append([]byte(nil), payload...)
+	l.jobs[job.ID] = job
+	l.payloads[job.ID] = append([]byte(nil), payload...)
 	return nil
 }
+
+func (l *recordingJobLog) Job(_ context.Context, jobID string) (domain.Job, []byte, error) {
+	if l.readErr != nil {
+		return domain.Job{}, nil, l.readErr
+	}
+	if l.jobs != nil {
+		job, ok := l.jobs[jobID]
+		if !ok {
+			return domain.Job{}, nil, fmt.Errorf("job %q not found in job log", jobID)
+		}
+		return job, append([]byte(nil), l.payloads[jobID]...), nil
+	}
+	if l.job.ID == jobID {
+		return l.job, append([]byte(nil), l.payload...), nil
+	}
+	return domain.Job{}, nil, fmt.Errorf("job %q not found in job log", jobID)
+}
+
+type putOnlyJobLog struct{}
+
+func (putOnlyJobLog) PutJob(context.Context, domain.Job, []byte) error { return nil }
 
 func (s *runtimeStore) SaveJob(_ context.Context, job domain.Job) error {
 	s.saveJobCalls++

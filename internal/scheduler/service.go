@@ -40,6 +40,10 @@ type JobLog interface {
 	PutJob(ctx context.Context, job domain.Job, payload []byte) error
 }
 
+type JobPayloadReader interface {
+	Job(ctx context.Context, jobID string) (domain.Job, []byte, error)
+}
+
 type Service struct {
 	Placer      ports.Placer
 	Fleet       FleetSource
@@ -629,8 +633,34 @@ func (s *Service) queuePreemptedJob(ctx context.Context, instanceID string, pree
 	if err != nil {
 		return err
 	}
-	s.Queue.Enqueue(job)
+	if s.Coordinator != nil {
+		payload, err := s.requeuePayload(ctx, job.ID)
+		if err != nil {
+			return err
+		}
+		s.Queue.EnqueueWithPayload(job, payload)
+	} else {
+		s.Queue.Enqueue(job)
+	}
 	return s.Store.SaveJob(ctx, job)
+}
+
+func (s *Service) requeuePayload(ctx context.Context, jobID string) ([]byte, error) {
+	reader, ok := s.JobLog.(JobPayloadReader)
+	if !ok {
+		return nil, fmt.Errorf("coordinated requeue for job %q requires a job payload reader", jobID)
+	}
+	job, payload, err := reader.Job(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if job.ID != jobID {
+		return nil, fmt.Errorf("job payload reader returned %q for requested %q", job.ID, jobID)
+	}
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("job %q has no rescue payload for coordinated requeue", jobID)
+	}
+	return payload, nil
 }
 
 func (s *Service) preemptOwnerLease(ctx context.Context, job domain.Job, decision domain.PlacementDecision, victim domain.ModelInstance) (domain.Lease, error) {

@@ -165,7 +165,8 @@ func TestPhase6PeerCoordinatedPreemptionUsesOwnerAuthority(t *testing.T) {
 	targetPreset := fixtures.MakePreset(fixtures.WithPresetID("target-preset"), fixtures.WithWeights(600), fixtures.WithKVPerToken(0), fixtures.WithContextLength(1))
 	admission := node.NewAdmission(nodeA, lease.NewAllocator(), clock)
 	victimPreset := fixtures.MakePreset(fixtures.WithPresetID(victim.PresetID), fixtures.WithArtifactSize(1), fixtures.WithWeights(1))
-	victimOffer, err := admission.Offer(ctx, domain.AdmissionRequest{Job: fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.Background), Preset: victimPreset, Claim: victim.Claim})
+	victimJob := fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.WithPreset(victimPreset.ID), fixtures.Background)
+	victimOffer, err := admission.Offer(ctx, domain.AdmissionRequest{Job: victimJob, Preset: victimPreset, Claim: victim.Claim})
 	if err != nil {
 		t.Fatalf("victim Offer: %v", err)
 	}
@@ -178,8 +179,22 @@ func TestPhase6PeerCoordinatedPreemptionUsesOwnerAuthority(t *testing.T) {
 	}
 	agent := mocks.NewNodeAgent(nodeA)
 	agent.Instances = []domain.ModelInstance{victim}
-	jobLog := &peerJobLog{}
 	registry := peer.NewJobRegistry()
+	victimRequest, err := peer.EncodeRescuePayload(victimJob, []byte(`{"job":"victim"}`))
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload: %v", err)
+	}
+	if err := registry.Put(ctx, domain.JobRecord{
+		JobID:        victimJob.ID,
+		Coordinator:  "peer-b",
+		AssignedNode: nodeA.ID,
+		Status:       domain.JobRunning,
+		Request:      victimRequest,
+		UpdatedAt:    clock.Now(),
+	}); err != nil {
+		t.Fatalf("registry Put victim: %v", err)
+	}
+	jobLog := peer.NewRescueJobLog(peer.NewJobLog(), registry, nil)
 	fleet := peerFleetSource{fleet: domain.FleetSnapshot{Nodes: []domain.Node{nodeA}, Instances: []domain.ModelInstance{victim}}}
 	owners := peerOwnerResolver{owners: map[string]ports.AdmissionController{nodeA.ID: admission}}
 	placer := scheduler.NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), clock, targetPreset)
@@ -193,7 +208,7 @@ func TestPhase6PeerCoordinatedPreemptionUsesOwnerAuthority(t *testing.T) {
 		JobLog:      jobLog,
 		Queue:       scheduler.NewQueue(clock),
 		Store: &peerRuntimeStore{
-			jobs:      map[string]domain.Job{"victim-job": fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.WithPreset("victim-preset"), fixtures.Background)},
+			jobs:      map[string]domain.Job{victimJob.ID: victimJob},
 			instances: map[string]domain.ModelInstance{victim.ID: victim},
 			leases:    map[string]domain.Lease{victimLease.ID: victimLease},
 		},
