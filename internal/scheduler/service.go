@@ -202,7 +202,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 			return Result{Decision: decision}, err
 		}
 		job.Status = domain.JobQueued
-		s.Queue.Enqueue(job)
+		s.Queue.EnqueueWithPayload(job, payload)
 		if err := s.Store.SaveJob(ctx, job); err != nil {
 			return Result{Decision: decision}, err
 		}
@@ -222,6 +222,14 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	}
 	ownerLease, err := s.Coordinator.Commit(ctx, decision)
 	if err != nil {
+		if coordinatedQueueErr(err) {
+			job.Status = domain.JobQueued
+			s.Queue.EnqueueWithPayload(job, payload)
+			if saveErr := s.Store.SaveJob(ctx, job); saveErr != nil {
+				return Result{Decision: decision}, errors.Join(err, saveErr)
+			}
+			return Result{Decision: decision}, err
+		}
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(ctx, job)
 		return Result{Decision: decision}, err
@@ -290,11 +298,20 @@ func (s *Service) Drain(ctx context.Context, limit int) ([]Result, error) {
 	}
 	results := make([]Result, 0, limit)
 	for len(results) < limit {
-		job, ok := s.Queue.Dequeue()
+		job, payload, ok := s.Queue.DequeueWithPayload()
 		if !ok {
 			return results, nil
 		}
-		result, err := s.Submit(ctx, job)
+		var result Result
+		var err error
+		if s.Coordinator != nil {
+			if len(payload) == 0 {
+				return results, fmt.Errorf("queued job %q has no rescue payload for coordinated drain", job.ID)
+			}
+			result, err = s.SubmitWithPayload(ctx, job, payload)
+		} else {
+			result, err = s.Submit(ctx, job)
+		}
 		if err != nil {
 			return results, err
 		}
@@ -579,6 +596,10 @@ func cleanupContext(ctx context.Context) context.Context {
 		return context.Background()
 	}
 	return context.WithoutCancel(ctx)
+}
+
+func coordinatedQueueErr(err error) bool {
+	return errors.Is(err, domain.ErrStaleFence) || errors.Is(err, domain.ErrNoFit)
 }
 
 func (s *Service) replacementJob(ctx context.Context, lease domain.Lease, victim domain.ModelInstance) (domain.Job, error) {

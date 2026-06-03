@@ -18,6 +18,7 @@ type Queue struct {
 
 type queuedJob struct {
 	job        domain.Job
+	payload    []byte
 	enqueuedAt time.Time
 	seq        int64
 }
@@ -27,8 +28,12 @@ func NewQueue(clock ports.Clock) *Queue {
 }
 
 func (q *Queue) Enqueue(job domain.Job) {
+	q.EnqueueWithPayload(job, nil)
+}
+
+func (q *Queue) EnqueueWithPayload(job domain.Job, payload []byte) {
 	q.next++
-	q.items = append(q.items, queuedJob{job: job, enqueuedAt: q.clock.Now(), seq: q.next})
+	q.items = append(q.items, queuedJob{job: job, payload: append([]byte(nil), payload...), enqueuedAt: q.clock.Now(), seq: q.next})
 }
 
 func (q *Queue) Len() int {
@@ -36,13 +41,18 @@ func (q *Queue) Len() int {
 }
 
 func (q *Queue) Dequeue() (domain.Job, bool) {
+	job, _, ok := q.DequeueWithPayload()
+	return job, ok
+}
+
+func (q *Queue) DequeueWithPayload() (domain.Job, []byte, bool) {
 	if len(q.items) == 0 {
-		return domain.Job{}, false
+		return domain.Job{}, nil, false
 	}
 	q.sort()
 	item := q.items[0]
 	q.items = q.items[1:]
-	return item.job, true
+	return item.job, append([]byte(nil), item.payload...), true
 }
 
 func (q *Queue) sort() {

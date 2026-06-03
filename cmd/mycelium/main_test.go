@@ -1259,6 +1259,18 @@ func (r *recordingRescueRuntime) SubmitWithPayload(_ context.Context, job domain
 	return scheduler.Result{}, nil
 }
 
+type simpleJobLister struct {
+	jobs []domain.Job
+	err  error
+}
+
+func (l simpleJobLister) ListJobs(context.Context) ([]domain.Job, error) {
+	if l.err != nil {
+		return nil, l.err
+	}
+	return append([]domain.Job(nil), l.jobs...), nil
+}
+
 func TestAllocatorFromReservationsReservesHeadroomAndPinnedPresets(t *testing.T) {
 	preset := testPreset("tiny")
 	preset.EstWeightsMB = 100
@@ -1400,8 +1412,22 @@ func TestRestoreQueuedJobs(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
-	if err := store.SaveJob(context.Background(), domain.Job{ID: "queued", Model: "tiny", Status: domain.JobQueued}); err != nil {
+	queuedJob := domain.Job{ID: "queued", Model: "tiny", Status: domain.JobQueued}
+	if err := store.SaveJob(context.Background(), queuedJob); err != nil {
 		t.Fatalf("SaveJob queued: %v", err)
+	}
+	payload, err := peercoord.EncodeRescuePayload(queuedJob, []byte(`{"job":"queued"}`))
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload: %v", err)
+	}
+	if err := store.Put(context.Background(), domain.JobRecord{
+		JobID:       queuedJob.ID,
+		Coordinator: "peer-a",
+		Status:      domain.JobQueued,
+		Request:     payload,
+		UpdatedAt:   time.Unix(2, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("Put queued record: %v", err)
 	}
 	if err := store.SaveJob(context.Background(), domain.Job{ID: "done", Model: "tiny", Status: domain.JobDone}); err != nil {
 		t.Fatalf("SaveJob done: %v", err)
@@ -1413,9 +1439,76 @@ func TestRestoreQueuedJobs(t *testing.T) {
 	if queue.Len() != 1 {
 		t.Fatalf("queue len = %d", queue.Len())
 	}
-	job, ok := queue.Dequeue()
-	if !ok || job.ID != "queued" {
-		t.Fatalf("dequeue = %+v %v", job, ok)
+	job, gotPayload, ok := queue.DequeueWithPayload()
+	if !ok || job.ID != "queued" || string(gotPayload) != `{"job":"queued"}` {
+		t.Fatalf("dequeue = %+v payload=%s %v", job, gotPayload, ok)
+	}
+}
+
+func TestRestoreQueuedJobsWithoutRegistrySnapshot(t *testing.T) {
+	queue := scheduler.NewQueue(mocks.NewFakeClock(time.Unix(1, 0).UTC()))
+	store := simpleJobLister{jobs: []domain.Job{{ID: "queued", Model: "tiny", Status: domain.JobQueued}}}
+	if err := restoreQueuedJobs(context.Background(), store, queue); err != nil {
+		t.Fatalf("restoreQueuedJobs: %v", err)
+	}
+	job, payload, ok := queue.DequeueWithPayload()
+	if !ok || job.ID != "queued" || len(payload) != 0 {
+		t.Fatalf("dequeue = %+v payload=%s ok=%v", job, payload, ok)
+	}
+}
+
+func TestRestoreQueuedJobsSkipsPrivatePayloads(t *testing.T) {
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	queuedJob := domain.Job{ID: "queued-private", Model: "tiny", Status: domain.JobQueued, Handling: domain.HandlingPrivate}
+	if err := store.SaveJob(context.Background(), queuedJob); err != nil {
+		t.Fatalf("SaveJob queued: %v", err)
+	}
+	if err := store.Put(context.Background(), domain.JobRecord{
+		JobID:       queuedJob.ID,
+		Coordinator: "peer-a",
+		Status:      domain.JobQueued,
+		Request:     []byte(`{"encrypted":"aes-256-gcm"}`),
+		Handling:    domain.HandlingPrivate,
+		UpdatedAt:   time.Unix(2, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("Put queued record: %v", err)
+	}
+	queue := scheduler.NewQueue(mocks.NewFakeClock(time.Unix(1, 0).UTC()))
+	if err := restoreQueuedJobs(context.Background(), store, queue); err != nil {
+		t.Fatalf("restoreQueuedJobs: %v", err)
+	}
+	job, payload, ok := queue.DequeueWithPayload()
+	if !ok || job.ID != queuedJob.ID || len(payload) != 0 {
+		t.Fatalf("dequeue = %+v payload=%s ok=%v", job, payload, ok)
+	}
+}
+
+func TestRestoreQueuedJobsRejectsMalformedPublicPayload(t *testing.T) {
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	queuedJob := domain.Job{ID: "queued-bad", Model: "tiny", Status: domain.JobQueued}
+	if err := store.SaveJob(context.Background(), queuedJob); err != nil {
+		t.Fatalf("SaveJob queued: %v", err)
+	}
+	if err := store.Put(context.Background(), domain.JobRecord{
+		JobID:       queuedJob.ID,
+		Coordinator: "peer-a",
+		Status:      domain.JobQueued,
+		Request:     []byte(`{`),
+		UpdatedAt:   time.Unix(2, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("Put queued record: %v", err)
+	}
+	queue := scheduler.NewQueue(mocks.NewFakeClock(time.Unix(1, 0).UTC()))
+	if err := restoreQueuedJobs(context.Background(), store, queue); err == nil || !strings.Contains(err.Error(), "decode queued rescue payload") {
+		t.Fatalf("restoreQueuedJobs err = %v", err)
 	}
 }
 
