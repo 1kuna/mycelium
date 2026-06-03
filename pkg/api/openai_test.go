@@ -84,7 +84,8 @@ func TestOpenAIChatResponseAcceptsResponseRefusalField(t *testing.T) {
 				"refusal": null,
 				"annotations": null,
 				"audio": null,
-				"reasoning": null
+				"reasoning": null,
+				"reasoning_content": "hidden chain detail"
 			},
 			"logprobs": null,
 			"finish_reason": "stop",

@@ -43,7 +43,7 @@ func runPeer(ctx context.Context, args []string) error {
 		}
 		return err
 	}
-	server := &http.Server{Addr: addr, Handler: handler}
+	server := &http.Server{Addr: addr, Handler: handler, IdleTimeout: 5 * time.Second, ReadHeaderTimeout: 5 * time.Second}
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
@@ -283,14 +283,15 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	if discovery != nil {
 		startPeerAdvertiser(ctx, discovery, self, clock.System{}, time.Duration(cfg.DiscoveryAdvertiseMS)*time.Millisecond)
-		startRegistryReplication(ctx, store, discovery, cfg.ID, cfg.RPCToken, clock.System{}, time.Duration(cfg.RegistrySyncMS)*time.Millisecond)
-		startPeerHeartbeat(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, joinTokens, clock.System{})
+		controlClient := peerControlHTTPClient()
+		startRegistryReplicationWithClient(ctx, store, discovery, cfg.ID, cfg.RPCToken, clock.System{}, time.Duration(cfg.RegistrySyncMS)*time.Millisecond, controlClient)
+		startPeerHeartbeatWithClient(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, joinTokens, clock.System{}, controlClient)
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
 	startOptimizerEvaluator(ctx, store, fleet, cfg.ID, cfg.Compute, clock.System{}, time.Duration(cfg.OptimizerEvalMS)*time.Millisecond, telemetrySyncConfig{
 		SelfID:   cfg.ID,
 		Peers:    discovery,
-		Client:   telemetryHTTPClient{AuthToken: cfg.RPCToken},
+		Client:   telemetryHTTPClient{AuthToken: cfg.RPCToken, Client: peerControlHTTPClient()},
 		Interval: time.Duration(cfg.OptimizerEvalMS) * time.Millisecond,
 	})
 	handler := gateway.Server{Router: &gateway.Router{
@@ -787,6 +788,14 @@ func fetchPeerHealthWithClient(ctx context.Context, address, joinToken string, c
 	if err != nil {
 		return domain.Peer{}, err
 	}
+	transientClient := false
+	if client == nil {
+		client = peerControlHTTPClient()
+		transientClient = true
+	}
+	if transientClient {
+		defer client.CloseIdleConnections()
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, peerHTTPBaseURL(address)+"/peer/health", nil)
@@ -795,9 +804,6 @@ func fetchPeerHealthWithClient(ctx context.Context, address, joinToken string, c
 	}
 	if joinToken != "" {
 		req.Header.Set("X-Myc-Join-Token", joinToken)
-	}
-	if client == nil {
-		client = peerControlHTTPClient()
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -941,6 +947,14 @@ func doPeerRPC(ctx context.Context, client *http.Client, authToken string, peer 
 	if len(peer.Addresses) == 0 {
 		return fmt.Errorf("peer %q has no reachable address", peer.ID)
 	}
+	transientClient := false
+	if client == nil {
+		client = peerControlHTTPClient()
+		transientClient = true
+	}
+	if transientClient {
+		defer client.CloseIdleConnections()
+	}
 	var body io.Reader
 	if in != nil {
 		data, err := json.Marshal(in)
@@ -959,9 +973,6 @@ func doPeerRPC(ctx context.Context, client *http.Client, authToken string, peer 
 	if authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
 	}
-	if client == nil {
-		client = peerControlHTTPClient()
-	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -979,22 +990,29 @@ func doPeerRPC(ctx context.Context, client *http.Client, authToken string, peer 
 
 func peerControlHTTPClient() *http.Client {
 	return &http.Client{Transport: &http.Transport{
-		Proxy: nil,
+		Proxy:             nil,
+		DisableKeepAlives: true,
 		DialContext: (&net.Dialer{
 			Timeout:   5 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
+		IdleConnTimeout:       5 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Second,
 	}}
 }
 
 func startRegistryReplication(ctx context.Context, registry ports.JobRegistry, discovery ports.PeerDiscovery, selfID, rpcToken string, clk ports.Clock, interval time.Duration) {
+	startRegistryReplicationWithClient(ctx, registry, discovery, selfID, rpcToken, clk, interval, peerControlHTTPClient())
+}
+
+func startRegistryReplicationWithClient(ctx context.Context, registry ports.JobRegistry, discovery ports.PeerDiscovery, selfID, rpcToken string, clk ports.Clock, interval time.Duration, client *http.Client) {
 	if registry == nil || discovery == nil || selfID == "" || clk == nil || interval <= 0 {
 		return
 	}
 	replicator := peercoord.RegistryReplicator{
 		Local:  registry,
 		Peers:  discovery,
-		Client: registryHTTPClient{AuthToken: rpcToken},
+		Client: registryHTTPClient{AuthToken: rpcToken, Client: client},
 		SelfID: selfID,
 	}
 	pushWatch, err := registry.Watch(ctx, "")
@@ -1047,6 +1065,10 @@ type rescueRuntime interface {
 }
 
 func startPeerHeartbeat(ctx context.Context, self domain.Peer, discovery ports.PeerDiscovery, nodes gateway.NodeResolver, runtime rescueRuntime, registry peerRuntimeStore, joinToken string, joinTokens *membership.TokenManager, clk ports.Clock) {
+	startPeerHeartbeatWithClient(ctx, self, discovery, nodes, runtime, registry, joinToken, joinTokens, clk, peerControlHTTPClient())
+}
+
+func startPeerHeartbeatWithClient(ctx context.Context, self domain.Peer, discovery ports.PeerDiscovery, nodes gateway.NodeResolver, runtime rescueRuntime, registry peerRuntimeStore, joinToken string, joinTokens *membership.TokenManager, clk ports.Clock, client *http.Client) {
 	if discovery == nil || runtime == nil || registry == nil || clk == nil || self.ID == "" {
 		return
 	}
@@ -1057,7 +1079,7 @@ func startPeerHeartbeat(ctx context.Context, self domain.Peer, discovery ports.P
 		Discovery: discovery,
 		Clock:     clk,
 		Probe: func(ctx context.Context, peer domain.Peer) error {
-			return probePeerHealthWithTokenManager(ctx, peer, joinToken, joinTokens)
+			return probePeerHealthWithTokenManagerAndClient(ctx, peer, joinToken, joinTokens, client)
 		},
 		OnDead: func(ctx context.Context, dead domain.Peer) error {
 			if err := markDeadPeer(registry)(ctx, dead); err != nil {
