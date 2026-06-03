@@ -120,7 +120,7 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 		if ownerLease.ID == "" {
 			return nil
 		}
-		if err := owner.Release(ctx, ownerLease.ID); err != nil {
+		if err := owner.Release(cleanupContext(ctx), ownerLease.ID); err != nil {
 			return err
 		}
 		ownerLease = domain.Lease{}
@@ -241,7 +241,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		if err := runBeforeColdLoadHook(ctx, decision, hooks); err != nil {
 			job.Status = domain.JobFailed
 			_ = s.Store.SaveJob(ctx, job)
-			if releaseErr := s.Coordinator.Release(ctx, job.ID); releaseErr != nil {
+			if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
 				return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
 			}
 			return Result{Decision: decision, Lease: ownerLease}, err
@@ -251,7 +251,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	if err != nil {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(ctx, job)
-		if releaseErr := s.Coordinator.Release(ctx, job.ID); releaseErr != nil {
+		if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
 			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
 		}
 		return Result{Decision: decision, Lease: ownerLease}, err
@@ -517,7 +517,7 @@ func (s *Service) replacePreemptedInstance(ctx context.Context, lease domain.Lea
 		if ownerLease.ID == "" {
 			return nil
 		}
-		err := owner.Release(ctx, ownerLease.ID)
+		err := owner.Release(cleanupContext(ctx), ownerLease.ID)
 		ownerLease = domain.Lease{}
 		return err
 	}
@@ -572,6 +572,13 @@ func withOwnerRelease(err error, release func() error) error {
 		return errors.Join(err, releaseErr)
 	}
 	return err
+}
+
+func cleanupContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(ctx)
 }
 
 func (s *Service) replacementJob(ctx context.Context, lease domain.Lease, victim domain.ModelInstance) (domain.Job, error) {
@@ -693,8 +700,9 @@ func (s *Service) cleanupCoordinatedLoad(ctx context.Context, jobID string, inst
 	if err != nil {
 		return err
 	}
-	unloadErr := agent.Unload(ctx, inst.ID)
-	releaseErr := s.Coordinator.Release(ctx, jobID)
+	cleanupCtx := cleanupContext(ctx)
+	unloadErr := agent.Unload(cleanupCtx, inst.ID)
+	releaseErr := s.Coordinator.Release(cleanupCtx, jobID)
 	return errors.Join(unloadErr, releaseErr)
 }
 
