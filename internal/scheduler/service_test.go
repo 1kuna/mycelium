@@ -961,6 +961,309 @@ func TestServiceEnactsPreemptionAndRequeuesVictim(t *testing.T) {
 	}
 }
 
+func TestServiceEnactsPreemptionAndLoadsReplacementVictim(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(20, 0).UTC())
+	targetNode := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	replacementNode := fixtures.MakeNode(fixtures.WithNodeID("node-b"))
+	victimPreset := fixtures.MakePreset(fixtures.WithPresetID("victim-preset"))
+	targetPreset := fixtures.MakePreset(fixtures.WithPresetID("target-preset"), fixtures.WithWeights(22))
+	victim := fixtures.MakeInstance(
+		fixtures.WithInstanceID("victim-a"),
+		fixtures.WithInstancePreset(victimPreset.ID),
+		fixtures.OnNode(targetNode.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(7, 3)),
+		fixtures.WithInstancePriority(domain.PriorityBackground),
+	)
+	victim.InFlight = 1
+	targetAgent := mocks.NewNodeAgent(targetNode)
+	targetAgent.Instances = []domain.ModelInstance{victim}
+	replacementAgent := mocks.NewNodeAgent(replacementNode)
+	victimLease := domain.Lease{ID: "lease-victim", JobID: "victim-job", InstanceID: victim.ID, NodeID: targetNode.ID, Claim: victim.Claim, Priority: victim.Priority}
+	targetAdmission := &mocks.AdmissionController{LeaseForInstVal: victimLease, LeaseForInstFound: true}
+	replacementAdmission := &mocks.AdmissionController{}
+	store := &runtimeStore{
+		instances: map[string]domain.ModelInstance{victim.ID: victim},
+		leases:    map[string]domain.Lease{victimLease.ID: victimLease},
+		jobs:      map[string]domain.Job{"victim-job": fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.WithPreset(victimPreset.ID), fixtures.Background)},
+	}
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{
+			JobID:     "job-a",
+			NodeID:    targetNode.ID,
+			Claim:     fixtures.MakeClaim(22, 4),
+			Action:    domain.ActionHardPreempted,
+			Preempted: []string{victim.ID},
+			Replacements: []domain.Replacement{{
+				InstanceID:     victim.ID,
+				NodeID:         replacementNode.ID,
+				AcceleratorSet: []int{0},
+			}},
+			SpeedPrefApplied: domain.SpeedThroughput,
+		}},
+		Fleet: staticFleet{fleet: domain.FleetSnapshot{
+			Nodes:     []domain.Node{targetNode, replacementNode},
+			Instances: []domain.ModelInstance{victim},
+		}},
+		Nodes: staticNodes{agents: map[string]*mocks.NodeAgent{
+			targetNode.ID:      targetAgent,
+			replacementNode.ID: replacementAgent,
+		}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{
+			targetNode.ID:      targetAdmission,
+			replacementNode.ID: replacementAdmission,
+		}},
+		Queue: NewQueue(clock),
+		Store: store,
+		Clock: clock,
+		Presets: map[string]domain.Preset{
+			targetPreset.ID: targetPreset,
+			victimPreset.ID: victimPreset,
+		},
+	}
+
+	_, err := service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(targetPreset.ID), fixtures.Interactive, fixtures.HardForInteractive))
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if service.Queue.Len() != 0 {
+		t.Fatalf("replacement should not queue victim, len = %d", service.Queue.Len())
+	}
+	if len(replacementAgent.Loaded) != 1 || replacementAgent.Loaded[0].Preset.ID != victimPreset.ID || replacementAgent.Loaded[0].JobID != "victim-job" {
+		t.Fatalf("replacement loads = %+v", replacementAgent.Loaded)
+	}
+	if replacementAgent.Loaded[0].Claim != victim.Claim || replacementAgent.Loaded[0].AcceleratorSet[0] != 0 {
+		t.Fatalf("replacement load request = %+v", replacementAgent.Loaded[0])
+	}
+	if !strings.Contains(strings.Join(targetAgent.Calls, ","), "unload:victim-a") || !strings.Contains(strings.Join(targetAgent.Calls, ","), "load:target-preset") {
+		t.Fatalf("target agent calls = %+v", targetAgent.Calls)
+	}
+	if !strings.Contains(strings.Join(replacementAdmission.Calls, ","), "offer:victim-job,commit:offer_victim-job:1,bind-instance:lease_offer_victim-job:inst_1") {
+		t.Fatalf("replacement admission calls = %+v", replacementAdmission.Calls)
+	}
+}
+
+func TestServiceReplacementPreemptionValidationAndFallback(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(20, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	victimPreset := fixtures.MakePreset(fixtures.WithPresetID("victim-preset"))
+	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim-a"), fixtures.WithInstancePreset(victimPreset.ID), fixtures.OnNode(node.ID), fixtures.WithInstancePriority(domain.PriorityBackground))
+	lease := domain.Lease{ID: "lease-victim", JobID: "victim-job", InstanceID: victim.ID, NodeID: node.ID, Claim: victim.Claim}
+
+	service := &Service{
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{LeaseForInstVal: lease, LeaseForInstFound: true}}},
+		Store: &runtimeStore{
+			leases:    map[string]domain.Lease{lease.ID: lease},
+			instances: map[string]domain.ModelInstance{victim.ID: victim},
+			jobs:      map[string]domain.Job{"victim-job": fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.WithPreset(victimPreset.ID), fixtures.Background)},
+		},
+		Queue:   NewQueue(clock),
+		Clock:   clock,
+		Presets: map[string]domain.Preset{victimPreset.ID: victimPreset},
+	}
+	err := service.enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{
+		Replacements: []domain.Replacement{{InstanceID: victim.ID, NodeID: node.ID, AcceleratorSet: []int{0}}},
+	}, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}})
+	if err == nil || !strings.Contains(err.Error(), "was not preempted") {
+		t.Fatalf("unpreempted replacement err = %v", err)
+	}
+
+	noLeaseAdmission := &mocks.AdmissionController{}
+	noLeaseAgent := mocks.NewNodeAgent(node)
+	service = &Service{
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: noLeaseAgent}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: noLeaseAdmission}},
+		Store:  &runtimeStore{instances: map[string]domain.ModelInstance{victim.ID: victim}, leases: map[string]domain.Lease{}},
+		Queue:  NewQueue(clock),
+		Clock:  clock,
+	}
+	err = service.enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{
+		JobID:        "job-a",
+		Preempted:    []string{victim.ID},
+		Replacements: []domain.Replacement{{InstanceID: victim.ID, NodeID: node.ID, AcceleratorSet: []int{0}}},
+	}, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}})
+	if err != nil || service.Queue.Len() != 0 {
+		t.Fatalf("no-lease replacement err=%v queue=%d", err, service.Queue.Len())
+	}
+
+	failingAdmission := &mocks.AdmissionController{LeaseForInstVal: lease, LeaseForInstFound: true}
+	service = &Service{
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: failingAdmission}},
+		Store: &runtimeStore{
+			leases:    map[string]domain.Lease{lease.ID: lease},
+			instances: map[string]domain.ModelInstance{victim.ID: victim},
+		},
+		Queue:   NewQueue(clock),
+		Clock:   clock,
+		Presets: map[string]domain.Preset{},
+	}
+	err = service.enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{
+		JobID:        "job-a",
+		Preempted:    []string{victim.ID},
+		Replacements: []domain.Replacement{{InstanceID: victim.ID, NodeID: node.ID, AcceleratorSet: []int{0}}},
+	}, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}})
+	if err == nil || !strings.Contains(err.Error(), "job \"victim-job\" not found") {
+		t.Fatalf("replacement failure should include queue failure, got %v", err)
+	}
+}
+
+func TestServiceReplacePreemptedInstanceErrorPaths(t *testing.T) {
+	errBoom := errors.New("boom")
+	for _, tt := range []struct {
+		name   string
+		mutate func(*replacementHarness)
+		want   string
+	}{
+		{
+			name: "missing replacement node",
+			mutate: func(h *replacementHarness) {
+				h.fleet.Nodes = nil
+			},
+			want: "replacement node",
+		},
+		{
+			name: "unknown preset",
+			mutate: func(h *replacementHarness) {
+				h.service.Presets = map[string]domain.Preset{}
+			},
+			want: "unknown replacement preset",
+		},
+		{
+			name: "owner resolver error",
+			mutate: func(h *replacementHarness) {
+				h.service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{}}
+			},
+			want: "unreachable",
+		},
+		{
+			name: "job reader error",
+			mutate: func(h *replacementHarness) {
+				h.store.jobs = nil
+			},
+			want: "not found",
+		},
+		{
+			name: "offer error",
+			mutate: func(h *replacementHarness) {
+				h.admission.OfferErr = errBoom
+			},
+			want: "boom",
+		},
+		{
+			name: "commit error",
+			mutate: func(h *replacementHarness) {
+				h.admission.CommitErr = errBoom
+			},
+			want: "boom",
+		},
+		{
+			name: "tuning error releases owner",
+			mutate: func(h *replacementHarness) {
+				h.replacement.AcceleratorSet = []int{0, 1}
+				h.admission.ReleaseErr = errBoom
+			},
+			want: "selected accelerator",
+		},
+		{
+			name: "tuning error with empty owner lease",
+			mutate: func(h *replacementHarness) {
+				h.replacement.AcceleratorSet = []int{0, 1}
+				h.service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{h.node.ID: emptyCommitAdmission{}}}
+			},
+			want: "selected accelerator",
+		},
+		{
+			name: "agent resolver error releases owner",
+			mutate: func(h *replacementHarness) {
+				h.service.Nodes = staticNodes{agents: map[string]*mocks.NodeAgent{}}
+			},
+			want: "unreachable",
+		},
+		{
+			name: "load error releases owner",
+			mutate: func(h *replacementHarness) {
+				h.agent.LoadErr = errBoom
+			},
+			want: "boom",
+		},
+		{
+			name: "bind error unloads and releases",
+			mutate: func(h *replacementHarness) {
+				h.admission.BindErr = errBoom
+			},
+			want: "boom",
+		},
+		{
+			name: "save instance error",
+			mutate: func(h *replacementHarness) {
+				h.store.saveInstanceErr = errBoom
+			},
+			want: "boom",
+		},
+		{
+			name: "save lease error",
+			mutate: func(h *replacementHarness) {
+				h.store.saveLeaseErr = errBoom
+			},
+			want: "boom",
+		},
+		{
+			name: "save job error",
+			mutate: func(h *replacementHarness) {
+				h.store.saveJobErr = errBoom
+			},
+			want: "boom",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newReplacementHarness()
+			tt.mutate(&h)
+			err := h.service.replacePreemptedInstance(context.Background(), h.lease, h.victim, h.replacement, h.fleet)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestServiceReplacePreemptedInstanceFallbackJobAndZeroClaim(t *testing.T) {
+	h := newReplacementHarness()
+	h.service.Store = storeWithoutJobReader{}
+	if err := h.service.replacePreemptedInstance(context.Background(), h.lease, h.victim, h.replacement, h.fleet); err != nil {
+		t.Fatalf("fallback replacement job: %v", err)
+	}
+
+	h = newReplacementHarness()
+	h.service.Nodes = zeroClaimResolver{node: h.node}
+	if err := h.service.replacePreemptedInstance(context.Background(), h.lease, h.victim, h.replacement, h.fleet); err != nil {
+		t.Fatalf("zero claim replacement: %v", err)
+	}
+	got := h.store.instances["inst-zero"]
+	if got.Claim != h.victim.Claim {
+		t.Fatalf("zero claim was not filled: %+v", got)
+	}
+
+	h = newReplacementHarness()
+	h.lease.JobID = ""
+	h.service.Store = storeWithoutJobReader{}
+	if err := h.service.replacePreemptedInstance(context.Background(), h.lease, h.victim, h.replacement, h.fleet); err == nil || !strings.Contains(err.Error(), "no owner lease job") {
+		t.Fatalf("missing lease job err = %v", err)
+	}
+}
+
+func TestWithOwnerReleaseJoinsReleaseError(t *testing.T) {
+	errBoom := errors.New("boom")
+	if err := withOwnerRelease(errBoom, func() error { return nil }); !errors.Is(err, errBoom) {
+		t.Fatalf("plain release err = %v", err)
+	}
+	releaseErr := errors.New("release")
+	err := withOwnerRelease(errBoom, func() error { return releaseErr })
+	if !errors.Is(err, errBoom) || !errors.Is(err, releaseErr) {
+		t.Fatalf("joined err = %v", err)
+	}
+}
+
 func TestServiceEvictsIdleWarmVictimWithoutOwnerLease(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(20, 0).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
@@ -1446,6 +1749,58 @@ func TestServiceResolveWarmInstanceUsesOwnerNode(t *testing.T) {
 	}
 }
 
+type replacementHarness struct {
+	service     *Service
+	node        domain.Node
+	victim      domain.ModelInstance
+	lease       domain.Lease
+	replacement domain.Replacement
+	fleet       domain.FleetSnapshot
+	agent       *mocks.NodeAgent
+	admission   *mocks.AdmissionController
+	store       *runtimeStore
+}
+
+func newReplacementHarness() replacementHarness {
+	clock := mocks.NewFakeClock(time.Unix(60, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-b"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("victim-preset"), fixtures.WithWeights(1))
+	victim := fixtures.MakeInstance(
+		fixtures.WithInstanceID("victim-a"),
+		fixtures.WithInstancePreset(preset.ID),
+		fixtures.OnNode("node-a"),
+		fixtures.WithClaim(fixtures.MakeClaim(7, 3)),
+		fixtures.WithInstancePriority(domain.PriorityBackground),
+	)
+	lease := domain.Lease{ID: "lease-victim", JobID: "victim-job", InstanceID: victim.ID, NodeID: victim.NodeID, Claim: victim.Claim, Priority: victim.Priority}
+	replacement := domain.Replacement{InstanceID: victim.ID, NodeID: node.ID, AcceleratorSet: []int{0}}
+	agent := mocks.NewNodeAgent(node)
+	admission := &mocks.AdmissionController{}
+	store := &runtimeStore{
+		jobs: map[string]domain.Job{
+			"victim-job": fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.WithPreset(preset.ID), fixtures.Background),
+		},
+	}
+	service := &Service{
+		Nodes:   staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}},
+		Owners:  staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Store:   store,
+		Clock:   clock,
+		Presets: map[string]domain.Preset{preset.ID: preset},
+	}
+	return replacementHarness{
+		service:     service,
+		node:        node,
+		victim:      victim,
+		lease:       lease,
+		replacement: replacement,
+		fleet:       domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}},
+		agent:       agent,
+		admission:   admission,
+		store:       store,
+	}
+}
+
 func leaseLifecycleService(clock *mocks.FakeClock, store *runtimeStore) *Service {
 	return &Service{
 		Placer: fakePlacer{},
@@ -1530,6 +1885,18 @@ func (a inspectableAdmission) LeaseForJob(context.Context, string) (domain.Lease
 
 func (a inspectableAdmission) LeaseForInstance(context.Context, string) (domain.Lease, bool, error) {
 	return a.lease, a.found, a.err
+}
+
+type emptyCommitAdmission struct {
+	admissionOnly
+}
+
+func (emptyCommitAdmission) Offer(context.Context, domain.AdmissionRequest) (domain.LeaseOffer, error) {
+	return domain.LeaseOffer{OfferID: "offer-empty", Fence: 1}, nil
+}
+
+func (emptyCommitAdmission) Commit(context.Context, string, uint64) (domain.Lease, error) {
+	return domain.Lease{}, nil
 }
 
 type runtimeStore struct {

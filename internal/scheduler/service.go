@@ -424,11 +424,15 @@ func runBeforeColdLoadHook(ctx context.Context, decision domain.PlacementDecisio
 
 func (s *Service) enactPreemption(ctx context.Context, job domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot) error {
 	preemptedLeases := map[string]domain.Lease{}
+	preempted := map[string]struct{}{}
+	preemptedVictims := map[string]domain.ModelInstance{}
 	for _, victimID := range decision.Preempted {
 		victim, ok := instanceByID(fleet.Instances, victimID)
 		if !ok {
 			return fmt.Errorf("preempted instance %q is missing from fleet snapshot", victimID)
 		}
+		preempted[victimID] = struct{}{}
+		preemptedVictims[victimID] = victim
 		lease, err := s.preemptOwnerLease(ctx, job, decision, victim)
 		if err != nil {
 			return err
@@ -447,24 +451,150 @@ func (s *Service) enactPreemption(ctx context.Context, job domain.Job, decision 
 			return err
 		}
 	}
-	for _, instanceID := range decision.Requeued {
-		if _, ok := instanceByID(fleet.Instances, instanceID); !ok {
-			return fmt.Errorf("requeued instance %q is missing from fleet snapshot", instanceID)
+	for _, replacement := range decision.Replacements {
+		if _, ok := preempted[replacement.InstanceID]; !ok {
+			return fmt.Errorf("replacement instance %q was not preempted", replacement.InstanceID)
 		}
-		lease, ok := preemptedLeases[instanceID]
+		victim := preemptedVictims[replacement.InstanceID]
+		lease, ok := preemptedLeases[replacement.InstanceID]
 		if !ok || lease.JobID == "" {
-			return fmt.Errorf("requeued instance %q has no owner lease job", instanceID)
+			continue
 		}
-		job, err := s.requeueJob(ctx, lease.JobID)
-		if err != nil {
-			return err
+		if err := s.replacePreemptedInstance(ctx, lease, victim, replacement, fleet); err != nil {
+			if queueErr := s.queuePreemptedJob(ctx, replacement.InstanceID, preemptedLeases); queueErr != nil {
+				return errors.Join(err, queueErr)
+			}
 		}
-		s.Queue.Enqueue(job)
-		if err := s.Store.SaveJob(ctx, job); err != nil {
+	}
+	for _, instanceID := range decision.Requeued {
+		if err := s.queuePreemptedJob(ctx, instanceID, preemptedLeases); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *Service) replacePreemptedInstance(ctx context.Context, lease domain.Lease, victim domain.ModelInstance, replacement domain.Replacement, fleet domain.FleetSnapshot) error {
+	node, ok := nodeByID(fleet.Nodes, replacement.NodeID)
+	if !ok {
+		return fmt.Errorf("replacement node %q is missing from fleet snapshot", replacement.NodeID)
+	}
+	preset, ok := s.Presets[victim.PresetID]
+	if !ok {
+		return fmt.Errorf("unknown replacement preset %q", victim.PresetID)
+	}
+	owner, err := s.Owners.AdmissionController(replacement.NodeID)
+	if err != nil {
+		return err
+	}
+	replacementJob, err := s.replacementJob(ctx, lease, victim)
+	if err != nil {
+		return err
+	}
+	offer, err := owner.Offer(ctx, domain.AdmissionRequest{
+		Job:            replacementJob,
+		Claim:          victim.Claim,
+		NodeID:         replacement.NodeID,
+		AcceleratorSet: append([]int(nil), replacement.AcceleratorSet...),
+		ReservationID:  lease.ReservationID,
+	})
+	if err != nil {
+		return err
+	}
+	ownerLease, err := owner.Commit(ctx, offer.OfferID, offer.Fence)
+	if err != nil {
+		return err
+	}
+	releaseOwner := func() error {
+		if ownerLease.ID == "" {
+			return nil
+		}
+		err := owner.Release(ctx, ownerLease.ID)
+		ownerLease = domain.Lease{}
+		return err
+	}
+	decision := domain.PlacementDecision{
+		JobID:          replacementJob.ID,
+		NodeID:         replacement.NodeID,
+		AcceleratorSet: append([]int(nil), replacement.AcceleratorSet...),
+		Claim:          victim.Claim,
+	}
+	preset, err = tuneLaunchForPlacement(preset, decision, node)
+	if err != nil {
+		return withOwnerRelease(err, releaseOwner)
+	}
+	agent, err := s.Nodes.NodeAgent(replacement.NodeID)
+	if err != nil {
+		return withOwnerRelease(err, releaseOwner)
+	}
+	inst, err := agent.Load(ctx, domain.LoadRequest{
+		JobID:          replacementJob.ID,
+		Preset:         preset,
+		Claim:          victim.Claim,
+		AcceleratorSet: append([]int(nil), replacement.AcceleratorSet...),
+		ReservationID:  lease.ReservationID,
+		Priority:       victim.Priority,
+	})
+	if err != nil {
+		return withOwnerRelease(err, releaseOwner)
+	}
+	if inst.Claim == (domain.Claim{}) {
+		inst.Claim = victim.Claim
+	}
+	replacementLease := s.finalizeOwnerLease(replacementJob, inst, decision, ownerLease)
+	replacementLease.ReservationID = lease.ReservationID
+	replacementLease.Pinned = lease.Pinned
+	if err := s.ensureOwnerLeaseBound(ctx, ownerLease, replacementLease); err != nil {
+		unloadErr := agent.Unload(ctx, inst.ID)
+		releaseErr := releaseOwner()
+		return errors.Join(err, unloadErr, releaseErr)
+	}
+	replacementJob.Status = domain.JobRunning
+	if err := s.Store.SaveInstance(ctx, inst); err != nil {
+		return err
+	}
+	if err := s.Store.SaveLease(ctx, replacementLease); err != nil {
+		return err
+	}
+	return s.Store.SaveJob(ctx, replacementJob)
+}
+
+func withOwnerRelease(err error, release func() error) error {
+	if releaseErr := release(); releaseErr != nil {
+		return errors.Join(err, releaseErr)
+	}
+	return err
+}
+
+func (s *Service) replacementJob(ctx context.Context, lease domain.Lease, victim domain.ModelInstance) (domain.Job, error) {
+	if reader, ok := s.Store.(JobReader); ok && lease.JobID != "" {
+		job, err := reader.Job(ctx, lease.JobID)
+		if err != nil {
+			return domain.Job{}, err
+		}
+		return job, nil
+	}
+	if lease.JobID == "" {
+		return domain.Job{}, fmt.Errorf("preempted instance %q has no owner lease job", victim.ID)
+	}
+	return domain.Job{
+		ID:       lease.JobID,
+		PresetID: victim.PresetID,
+		Priority: victim.Priority,
+	}, nil
+}
+
+func (s *Service) queuePreemptedJob(ctx context.Context, instanceID string, preemptedLeases map[string]domain.Lease) error {
+	lease, ok := preemptedLeases[instanceID]
+	if !ok || lease.JobID == "" {
+		return fmt.Errorf("requeued instance %q has no owner lease job", instanceID)
+	}
+	job, err := s.requeueJob(ctx, lease.JobID)
+	if err != nil {
+		return err
+	}
+	s.Queue.Enqueue(job)
+	return s.Store.SaveJob(ctx, job)
 }
 
 func (s *Service) preemptOwnerLease(ctx context.Context, job domain.Job, decision domain.PlacementDecision, victim domain.ModelInstance) (domain.Lease, error) {

@@ -96,7 +96,7 @@ func TestCanReplaceVictimSkipsDiskUnsafeReplacement(t *testing.T) {
 	)
 	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
 
-	if placer.canReplaceVictim(victim, "original", domain.FleetSnapshot{Nodes: []domain.Node{fullDisk}}, nil) {
+	if _, ok := placer.replacementForVictim(victim, "original", domain.FleetSnapshot{Nodes: []domain.Node{fullDisk}}, nil); ok {
 		t.Fatal("disk-unsafe replacement accepted")
 	}
 	if !preemptNodeAllowed(fullDisk, []func(domain.Node) bool{func(domain.Node) bool { return true }}) {
@@ -104,6 +104,30 @@ func TestCanReplaceVictimSkipsDiskUnsafeReplacement(t *testing.T) {
 	}
 	if preemptNodeAllowed(fullDisk, []func(domain.Node) bool{nil, func(domain.Node) bool { return false }}) {
 		t.Fatal("false guard accepted")
+	}
+}
+
+func TestReplacementForVictimSkipsCatastrophicLoadingTarget(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithPresetID("victim-preset"))
+	spark := fixtures.MakeSparkNode(fixtures.WithNodeID("spark"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.90))
+	victim := fixtures.MakeInstance(
+		fixtures.WithInstanceID("victim"),
+		fixtures.WithInstancePreset(preset.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(10, 1)),
+	)
+	loading := fixtures.MakeInstance(
+		fixtures.WithInstanceID("loading"),
+		fixtures.OnNode(spark.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(10, 0)),
+		func(i *domain.ModelInstance) {
+			i.State = domain.InstLoading
+			i.Loading = true
+		},
+	)
+	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	if _, ok := placer.replacementForVictim(victim, "original", domain.FleetSnapshot{Nodes: []domain.Node{spark}}, []domain.ModelInstance{loading}); ok {
+		t.Fatal("replacement stacked onto catastrophic loading target")
 	}
 }
 
