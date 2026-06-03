@@ -14,6 +14,7 @@ type preemptResult struct {
 	victim    domain.ModelInstance
 	victims   []domain.ModelInstance
 	requeued  []string
+	replaced  []domain.Replacement
 	trace     []domain.TraceStep
 }
 
@@ -79,15 +80,35 @@ func (p *Placer) tryPreemptWithClaims(job domain.Job, fleet domain.FleetSnapshot
 						Result: fmt.Sprintf("victims=%v target=%s", instanceIDs(selected), node.ID),
 					}},
 				}
+				replacementPool := append([]domain.ModelInstance(nil), remaining...)
 				for _, selectedVictim := range selected {
-					if selectedVictim.InFlight > 0 && !p.canReplaceVictim(selectedVictim, node.ID, fleet, remaining) {
-						result.requeued = append(result.requeued, selectedVictim.ID)
+					if selectedVictim.InFlight <= 0 {
+						continue
 					}
+					if replacement, ok := p.replacementForVictim(selectedVictim, node.ID, fleet, replacementPool); ok {
+						result.replaced = append(result.replaced, replacement)
+						replacementPool = append(replacementPool, domain.ModelInstance{
+							ID:             "replacement:" + selectedVictim.ID,
+							PresetID:       selectedVictim.PresetID,
+							NodeID:         replacement.NodeID,
+							AcceleratorSet: append([]int(nil), replacement.AcceleratorSet...),
+							Claim:          selectedVictim.Claim,
+							State:          domain.InstLoading,
+							Priority:       selectedVictim.Priority,
+							Loading:        true,
+						})
+						continue
+					}
+					result.requeued = append(result.requeued, selectedVictim.ID)
 				}
-				if len(result.requeued) == 0 {
-					result.trace = append(result.trace, domain.TraceStep{Step: "replace", Result: fmt.Sprintf("replaced=%v", instanceIDs(selected))})
-				} else {
+				if len(result.replaced) > 0 {
+					result.trace = append(result.trace, domain.TraceStep{Step: "replace", Result: fmt.Sprintf("replaced=%v", replacementNames(result.replaced))})
+				}
+				if len(result.requeued) > 0 {
 					result.trace = append(result.trace, domain.TraceStep{Step: "replace", Result: fmt.Sprintf("requeued=%v", result.requeued)})
+				}
+				if len(result.replaced) == 0 && len(result.requeued) == 0 {
+					result.trace = append(result.trace, domain.TraceStep{Step: "replace", Result: "idle victims evicted"})
 				}
 				results = append(results, result)
 				break
@@ -143,7 +164,7 @@ func victimLess(left, right domain.ModelInstance) bool {
 	return left.ID < right.ID
 }
 
-func (p *Placer) canReplaceVictim(victim domain.ModelInstance, originalNodeID string, fleet domain.FleetSnapshot, instances []domain.ModelInstance) bool {
+func (p *Placer) replacementForVictim(victim domain.ModelInstance, originalNodeID string, fleet domain.FleetSnapshot, instances []domain.ModelInstance) (domain.Replacement, bool) {
 	for _, node := range fleet.Nodes {
 		if node.ID == originalNodeID || node.Status != domain.NodeReady {
 			continue
@@ -159,13 +180,28 @@ func (p *Placer) canReplaceVictim(victim domain.ModelInstance, originalNodeID st
 				continue
 			}
 		}
-		for _, acc := range node.Accelerators {
-			if p.allocator.Fits(node, []int{acc.Index}, instances, victim.Claim) {
-				return true
+		for _, accSet := range acceleratorSets(node) {
+			if !p.allocator.CanStackLoad(node, accSet, instances) {
+				continue
+			}
+			if p.allocator.Fits(node, accSet, instances, victim.Claim) {
+				return domain.Replacement{
+					InstanceID:     victim.ID,
+					NodeID:         node.ID,
+					AcceleratorSet: append([]int(nil), accSet...),
+				}, true
 			}
 		}
 	}
-	return false
+	return domain.Replacement{}, false
+}
+
+func replacementNames(replacements []domain.Replacement) []string {
+	out := make([]string, 0, len(replacements))
+	for _, replacement := range replacements {
+		out = append(out, fmt.Sprintf("%s->%s:%v", replacement.InstanceID, replacement.NodeID, replacement.AcceleratorSet))
+	}
+	return out
 }
 
 func preemptNodeAllowed(node domain.Node, guards []func(domain.Node) bool) bool {

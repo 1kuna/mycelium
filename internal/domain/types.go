@@ -150,6 +150,13 @@ type PlacementDecision struct {
 	Trace            []TraceStep     `json:"trace"`
 	Preempted        []string        `json:"preempted,omitempty"`
 	Requeued         []string        `json:"requeued,omitempty"`
+	Replacements     []Replacement   `json:"replacements,omitempty"`
+}
+
+type Replacement struct {
+	InstanceID     string `json:"instance_id"`
+	NodeID         string `json:"node_id"`
+	AcceleratorSet []int  `json:"accelerator_set,omitempty"`
 }
 
 type FleetSnapshot struct {

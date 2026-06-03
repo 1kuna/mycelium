@@ -275,6 +275,9 @@ func TestPreemptHardReplacesVictimWhenOtherNodeFits(t *testing.T) {
 	if len(decision.Requeued) != 0 {
 		t.Fatalf("victim should replace, requeued = %+v", decision.Requeued)
 	}
+	if len(decision.Replacements) != 1 || decision.Replacements[0].InstanceID != victim.ID || decision.Replacements[0].NodeID != other.ID {
+		t.Fatalf("replacement = %+v", decision.Replacements)
+	}
 	assertTraceContains(t, decision.Trace, "replace", "replaced")
 }
 
@@ -483,7 +486,7 @@ func TestCanReplaceVictimHonorsPresetLocalityAndBackend(t *testing.T) {
 	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim"), fixtures.WithInstancePreset(victimPreset.ID), fixtures.WithClaim(fixtures.MakeClaim(1, 0)))
 	other := fixtures.MakeNode(fixtures.WithNodeID("other"))
 	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), victimPreset)
-	if placer.canReplaceVictim(victim, "original", domain.FleetSnapshot{Nodes: []domain.Node{other}}, nil) {
+	if _, ok := placer.replacementForVictim(victim, "original", domain.FleetSnapshot{Nodes: []domain.Node{other}}, nil); ok {
 		t.Fatal("victim replaced onto wrong preset node")
 	}
 
@@ -493,7 +496,7 @@ func TestCanReplaceVictimHonorsPresetLocalityAndBackend(t *testing.T) {
 		n.Labels = map[string]string{domain.LabelPeerBackend: string(domain.BackendLlamaCpp)}
 	})
 	placer = NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), backendPreset)
-	if placer.canReplaceVictim(victim, "original", domain.FleetSnapshot{Nodes: []domain.Node{llamaNode}}, nil) {
+	if _, ok := placer.replacementForVictim(victim, "original", domain.FleetSnapshot{Nodes: []domain.Node{llamaNode}}, nil); ok {
 		t.Fatal("victim replaced onto wrong backend")
 	}
 }

@@ -147,6 +147,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 			Trace:            trace,
 			Preempted:        instanceIDs(preempted.victims),
 			Requeued:         preempted.requeued,
+			Replacements:     preempted.replaced,
 		}, nil
 	}
 
