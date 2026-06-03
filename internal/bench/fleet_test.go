@@ -155,7 +155,11 @@ func TestFleetBenchmarkLiveRunnerCapturesHeadersMetricsAndOutputs(t *testing.T) 
 	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/snapshot":
-			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: cfg.Simulation.Nodes[0]})
+			node := cfg.Simulation.Nodes[0]
+			if strings.Contains(r.Host, "b70") {
+				node = cfg.Simulation.Nodes[1]
+			}
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: node})
 		case "/telemetry/metrics":
 			if r.Header.Get("Authorization") != "Bearer rpc-secret" {
 				http.Error(w, "rpc token required", http.StatusUnauthorized)
@@ -240,7 +244,11 @@ func TestFleetBenchmarkLiveRunnerHonorsExpectedFailuresAndTraceExpectations(t *t
 	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/snapshot":
-			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: cfg.Simulation.Nodes[0]})
+			node := cfg.Simulation.Nodes[0]
+			if strings.Contains(r.Host, "b70") {
+				node = cfg.Simulation.Nodes[1]
+			}
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: node})
 		case "/telemetry/metrics":
 			_ = json.NewEncoder(w).Encode([]domain.RunMetric{})
 		case "/v1/chat/completions":
@@ -299,7 +307,11 @@ func TestFleetBenchmarkLiveRunnerFailsExpectationMismatches(t *testing.T) {
 	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/snapshot":
-			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: cfg.Simulation.Nodes[0]})
+			node := cfg.Simulation.Nodes[0]
+			if strings.Contains(r.Host, "b70") {
+				node = cfg.Simulation.Nodes[1]
+			}
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: node})
 		case "/telemetry/metrics":
 			_ = json.NewEncoder(w).Encode([]domain.RunMetric{})
 		case "/v1/chat/completions":
@@ -557,6 +569,26 @@ func TestFleetBenchmarkEvidenceHelpersFailLoudly(t *testing.T) {
 	}
 	if resources := resourcesFromSnapshots(snapshots); len(resources) != 2 || resources[0].Error == "" || resources[1].NodeID != "not-in-sim" {
 		t.Fatalf("resources = %+v", resources)
+	}
+	placementFailures := livePlacementEvidenceFailures([]FleetJobResult{
+		{JobID: "missing-node", ModelID: "qwen9b", StatusCode: http.StatusOK},
+		{JobID: "unknown-node", ModelID: "qwen9b", StatusCode: http.StatusOK, NodeID: "not-seen", InstanceID: "inst-a", Backend: string(domain.BackendLlamaCpp), Decision: string(domain.ActionLoadedNew)},
+		{JobID: "missing-headers", ModelID: "qwen9b", StatusCode: http.StatusOK, NodeID: "not-in-sim"},
+		{JobID: "failed", ModelID: "qwen9b", StatusCode: http.StatusBadGateway, Error: "failed"},
+	}, snapshots)
+	if len(placementFailures) != 5 {
+		t.Fatalf("placement failures = %+v", placementFailures)
+	}
+	unsafeResources := []FleetResourceMark{
+		{PeerID: "empty"},
+		{NodeID: "bad-disk", DiskTotalMB: 1000, DiskFreeMB: 200, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0.90, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000}}},
+		{NodeID: "bad-ratio", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: 1.2, MaxUtil: 0.90, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000}}},
+		{NodeID: "bad-util", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0},
+		{NodeID: "bad-vram", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0.90, Accelerators: []domain.Accelerator{{Index: 0}}},
+		{NodeID: "spark-hot", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0.90, OOMSeverity: domain.OOMCatastrophic, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000, VRAMUsedMB: 851}}},
+	}
+	if failures := resourceSafetyFailures(cfg, unsafeResources); len(failures) != 6 {
+		t.Fatalf("resource failures = %+v", failures)
 	}
 
 	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
