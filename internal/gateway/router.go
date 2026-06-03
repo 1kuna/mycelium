@@ -496,6 +496,7 @@ func (r *Router) placeStickyOrLoad(ctx context.Context, req translate.IngressReq
 		if inst, ok := r.Sticky.Get(req.ConversationKey, preset, fleet); ok {
 			decision := domain.PlacementDecision{
 				JobID:          job.ID,
+				Preset:         preset,
 				InstanceID:     inst.ID,
 				NodeID:         inst.NodeID,
 				AcceleratorSet: append([]int(nil), inst.AcceleratorSet...),
@@ -532,6 +533,7 @@ func (r *Router) commitStickyOwnerLease(ctx context.Context, job domain.Job, dec
 	}
 	offer, err := owner.Offer(ctx, domain.AdmissionRequest{
 		Job:            job,
+		Preset:         decision.Preset,
 		Claim:          decision.Claim,
 		NodeID:         decision.NodeID,
 		AcceleratorSet: append([]int(nil), decision.AcceleratorSet...),

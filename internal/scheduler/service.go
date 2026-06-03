@@ -393,8 +393,15 @@ func (s *Service) commitOwnerAdmission(ctx context.Context, job domain.Job, deci
 	if err != nil {
 		return domain.Lease{}, nil, err
 	}
+	preset := decision.Preset
+	if preset.ID == "" {
+		if resolved, resolveErr := s.resolvePreset(job); resolveErr == nil {
+			preset = resolved
+		}
+	}
 	offer, err := owner.Offer(ctx, domain.AdmissionRequest{
 		Job:            job,
+		Preset:         preset,
 		Claim:          decision.Claim,
 		NodeID:         decision.NodeID,
 		AcceleratorSet: append([]int(nil), decision.AcceleratorSet...),
@@ -493,6 +500,7 @@ func (s *Service) replacePreemptedInstance(ctx context.Context, lease domain.Lea
 	}
 	offer, err := owner.Offer(ctx, domain.AdmissionRequest{
 		Job:            replacementJob,
+		Preset:         preset,
 		Claim:          victim.Claim,
 		NodeID:         replacement.NodeID,
 		AcceleratorSet: append([]int(nil), replacement.AcceleratorSet...),

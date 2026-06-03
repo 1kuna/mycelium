@@ -86,7 +86,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 				Result: err.Error(),
 			})}, err
 		} else if ok {
-			return warmDecision(job, warm, trace, "warm compatible instance available"), nil
+			return warmDecision(job, preset, warm, trace, "warm compatible instance available"), nil
 		}
 	}
 
@@ -108,6 +108,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 		)
 		return domain.PlacementDecision{
 			JobID:            job.ID,
+			Preset:           preset,
 			NodeID:           winner.candidate.node.ID,
 			AcceleratorSet:   append([]int(nil), winner.candidate.acc...),
 			Claim:            winner.candidate.claim,
@@ -124,7 +125,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 				Result: err.Error(),
 			})}, err
 		} else if ok {
-			return warmDecision(job, warm, trace, "warm compatible instance available after cold no-fit"), nil
+			return warmDecision(job, preset, warm, trace, "warm compatible instance available after cold no-fit"), nil
 		}
 	}
 
@@ -139,6 +140,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 		trace = append(trace, preempted.trace...)
 		return domain.PlacementDecision{
 			JobID:            job.ID,
+			Preset:           preset,
 			NodeID:           preempted.candidate.node.ID,
 			AcceleratorSet:   append([]int(nil), preempted.candidate.acc...),
 			Claim:            preempted.claim,
@@ -154,6 +156,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 	trace = append(trace, domain.TraceStep{Step: "admit", Result: "queued: no fit"})
 	return domain.PlacementDecision{
 		JobID:            job.ID,
+		Preset:           preset,
 		Claim:            fallbackClaim,
 		Action:           domain.ActionQueued,
 		SpeedPrefApplied: effectiveSpeed(job.SpeedPref),
@@ -239,7 +242,7 @@ func (p *Placer) selectWarmInstance(ctx context.Context, job domain.Job, preset 
 	return matches[0], true, nil
 }
 
-func warmDecision(job domain.Job, warm domain.ModelInstance, trace []domain.TraceStep, filterResult string) domain.PlacementDecision {
+func warmDecision(job domain.Job, preset domain.Preset, warm domain.ModelInstance, trace []domain.TraceStep, filterResult string) domain.PlacementDecision {
 	trace = append(trace,
 		domain.TraceStep{Step: "filter", Result: filterResult},
 		domain.TraceStep{Step: "select", Result: "warm instance selected"},
@@ -248,6 +251,7 @@ func warmDecision(job domain.Job, warm domain.ModelInstance, trace []domain.Trac
 	)
 	return domain.PlacementDecision{
 		JobID:            job.ID,
+		Preset:           preset,
 		InstanceID:       warm.ID,
 		NodeID:           warm.NodeID,
 		AcceleratorSet:   append([]int(nil), warm.AcceleratorSet...),

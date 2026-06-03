@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -39,6 +40,7 @@ type AdmissionStateStore interface {
 type admissionOffer struct {
 	offer          domain.LeaseOffer
 	job            domain.Job
+	preset         domain.Preset
 	acceleratorSet []int
 	instanceID     string
 	reservationID  string
@@ -140,6 +142,9 @@ func (a *Admission) Offer(ctx context.Context, req domain.AdmissionRequest) (dom
 	if !ok {
 		return domain.LeaseOffer{}, fmt.Errorf("%w: node %q cannot offer capacity for job %q", domain.ErrNoFit, a.node.ID, job.ID)
 	}
+	if err := a.diskSafeLocked(req.Preset, req.InstanceID, claim, job.ID); err != nil {
+		return domain.LeaseOffer{}, err
+	}
 
 	a.nextOffer++
 	offer := domain.LeaseOffer{
@@ -156,6 +161,7 @@ func (a *Admission) Offer(ctx context.Context, req domain.AdmissionRequest) (dom
 	a.offers[offer.OfferID] = admissionOffer{
 		offer:          offer,
 		job:            job,
+		preset:         req.Preset,
 		acceleratorSet: append([]int(nil), acceleratorSet...),
 		instanceID:     req.InstanceID,
 		reservationID:  req.ReservationID,
@@ -224,6 +230,9 @@ func (a *Admission) Commit(ctx context.Context, offerID string, fence uint64) (d
 	}
 	if !a.fitsLocked(offer.acceleratorSet, offer.offer.Claim) {
 		return domain.Lease{}, fmt.Errorf("%w: node %q can no longer fit offer %q", domain.ErrNoFit, a.node.ID, offerID)
+	}
+	if err := a.diskSafeLocked(offer.preset, offer.instanceID, offer.offer.Claim, offer.job.ID); err != nil {
+		return domain.Lease{}, err
 	}
 
 	a.nextLease++
@@ -482,6 +491,7 @@ func (a *Admission) loadStateLocked(ctx context.Context) error {
 		a.offers[rec.Offer.OfferID] = admissionOffer{
 			offer:          rec.Offer,
 			job:            rec.Job,
+			preset:         rec.Preset,
 			acceleratorSet: append([]int(nil), rec.Offer.AcceleratorSet...),
 			instanceID:     rec.Offer.InstanceID,
 			reservationID:  rec.Offer.ReservationID,
@@ -512,7 +522,7 @@ func (a *Admission) saveStateLocked(ctx context.Context) error {
 		Leases:    make([]domain.AdmissionLeaseRecord, 0, len(a.leases)),
 	}
 	for _, rec := range a.offers {
-		state.Offers = append(state.Offers, domain.AdmissionOfferRecord{Offer: rec.offer, Job: rec.job})
+		state.Offers = append(state.Offers, domain.AdmissionOfferRecord{Offer: rec.offer, Job: rec.job, Preset: rec.preset})
 	}
 	for _, rec := range a.leases {
 		state.Leases = append(state.Leases, domain.AdmissionLeaseRecord{Lease: rec.lease})
@@ -526,6 +536,56 @@ func incrementalClaim(req domain.AdmissionRequest) domain.Claim {
 		claim.WeightsMB = 0
 	}
 	return claim
+}
+
+func (a *Admission) diskSafeLocked(preset domain.Preset, instanceID string, claim domain.Claim, jobID string) error {
+	if instanceID != "" {
+		return nil
+	}
+	if a.node.DiskTotalMB <= 0 {
+		return nil
+	}
+	requiredMB, err := admissionArtifactRequired(preset, a.node, claim)
+	if err != nil {
+		return fmt.Errorf("%w: %v", domain.ErrNoFit, err)
+	}
+	minFreeRatio := a.node.DiskMinFreeRatio
+	if minFreeRatio == 0 {
+		minFreeRatio = domain.DefaultDiskMinFreeRatio
+	}
+	if minFreeRatio <= 0 || minFreeRatio >= 1 {
+		return fmt.Errorf("%w: node %q has invalid disk_min_free_ratio %.3f", domain.ErrNoFit, a.node.ID, minFreeRatio)
+	}
+	floorMB := int(math.Ceil(float64(a.node.DiskTotalMB) * minFreeRatio))
+	if a.node.DiskFreeMB <= floorMB {
+		return fmt.Errorf("%w: node %q free disk %dMB is at configured floor %dMB for job %q", domain.ErrNoFit, a.node.ID, a.node.DiskFreeMB, floorMB, jobID)
+	}
+	if a.node.DiskFreeMB-requiredMB <= floorMB {
+		return fmt.Errorf("%w: node %q would cross disk floor %dMB by staging %dMB for job %q", domain.ErrNoFit, a.node.ID, floorMB, requiredMB, jobID)
+	}
+	return nil
+}
+
+func admissionArtifactRequired(preset domain.Preset, node domain.Node, claim domain.Claim) (int, error) {
+	if preset.ID == "" {
+		if claim.WeightsMB == 0 {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("cold admission is missing preset artifact proof")
+	}
+	if preset.NodeID != "" && preset.NodeID == node.ID {
+		return 0, nil
+	}
+	if preset.ArtifactSizeMB > 0 {
+		return preset.ArtifactSizeMB, nil
+	}
+	if preset.ArtifactSizeMB < 0 {
+		return 0, fmt.Errorf("preset %q has invalid artifact size %dMB", preset.ID, preset.ArtifactSizeMB)
+	}
+	if preset.EstWeightsMB > 0 {
+		return preset.EstWeightsMB, nil
+	}
+	return 0, fmt.Errorf("preset %q has no artifact size proof", preset.ID)
 }
 
 func admissionHardPreemptionAllowed(job domain.Job) bool {
