@@ -123,9 +123,10 @@ type FleetSimulationConfig struct {
 }
 
 type FleetBenchmarkSafety struct {
-	MinDiskFreeRatio      float64 `json:"min_disk_free_ratio,omitempty"`
-	MaxSparkGPUMemoryUtil float64 `json:"max_spark_gpu_memory_utilization,omitempty"`
-	RequireTelemetry      *bool   `json:"require_telemetry,omitempty"`
+	MinDiskFreeRatio        float64 `json:"min_disk_free_ratio,omitempty"`
+	MaxSparkGPUMemoryUtil   float64 `json:"max_spark_gpu_memory_utilization,omitempty"`
+	RequireTelemetry        *bool   `json:"require_telemetry,omitempty"`
+	ResetBenchmarkInstances bool    `json:"reset_benchmark_instances,omitempty"`
 }
 
 type FleetRunOptions struct {
@@ -629,14 +630,28 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile string,
 		waves = defaultWaves(cfg, profile)
 	}
 	state := liveRun{}
-	state.Snapshots = append(state.Snapshots, collectSnapshots(ctx, cfg, client, "before", clk)...)
-	state.Resources = append(state.Resources, resourcesFromSnapshots(cfg, state.Snapshots)...)
-	state.Failures = append(state.Failures, snapshotFailures(cfg, state.Snapshots)...)
-	state.Failures = append(state.Failures, resourceSafetyFailures(cfg, state.Resources)...)
+	beforeSnapshots := collectSnapshots(ctx, cfg, client, "before", clk)
+	state.Snapshots = append(state.Snapshots, beforeSnapshots...)
+	state.Resources = append(state.Resources, resourcesFromSnapshots(cfg, beforeSnapshots)...)
+	state.Failures = append(state.Failures, snapshotFailures(cfg, beforeSnapshots)...)
+	state.Failures = append(state.Failures, liveSnapshotMismatchFailures(cfg, beforeSnapshots)...)
+	if cfg.Safety.ResetBenchmarkInstances {
+		prepEvents, prepFailures := resetBenchmarkInstances(ctx, cfg, beforeSnapshots, client, clk)
+		state.Events = append(state.Events, prepEvents...)
+		state.Failures = append(state.Failures, prepFailures...)
+		afterReset := collectSnapshots(ctx, cfg, client, "after_reset", clk)
+		state.Snapshots = append(state.Snapshots, afterReset...)
+		afterResetResources := resourcesFromSnapshots(cfg, afterReset)
+		state.Resources = append(state.Resources, afterResetResources...)
+		state.Failures = append(state.Failures, snapshotFailures(cfg, afterReset)...)
+		state.Failures = append(state.Failures, liveSnapshotMismatchFailures(cfg, afterReset)...)
+		state.Failures = append(state.Failures, resourceSafetyFailures(cfg, afterResetResources)...)
+	} else {
+		state.Failures = append(state.Failures, resourceSafetyFailures(cfg, state.Resources)...)
+	}
 	metrics, metricFailures := collectMetrics(ctx, cfg, client)
 	state.Metrics = append(state.Metrics, metrics...)
 	state.Failures = append(state.Failures, metricFailures...)
-	state.Failures = append(state.Failures, liveSnapshotMismatchFailures(cfg, state.Snapshots)...)
 	if len(state.Failures) > 0 {
 		return state, fmt.Errorf("fleet benchmark evidence collection failed with %d failures", len(state.Failures))
 	}
@@ -725,6 +740,77 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile string,
 		return state, fmt.Errorf("fleet benchmark completed with %d failures", len(state.Failures))
 	}
 	return state, nil
+}
+
+func resetBenchmarkInstances(ctx context.Context, cfg FleetBenchmarkConfig, snapshots []FleetSnapshotMark, client *http.Client, clk ports.Clock) ([]FleetEvent, []FleetFailure) {
+	presetIDs := benchmarkPresetIDs(cfg)
+	peers := peerByID(cfg.Peers)
+	var events []FleetEvent
+	var failures []FleetFailure
+	for _, mark := range snapshots {
+		if mark.Error != "" || mark.Snapshot.Node.ID == "" {
+			continue
+		}
+		peer, ok := peers[mark.PeerID]
+		if !ok {
+			failures = append(failures, FleetFailure{NodeID: mark.PeerID, Error: "reset peer is not declared"})
+			continue
+		}
+		for _, inst := range mark.Snapshot.Instances {
+			if _, ok := presetIDs[inst.PresetID]; !ok {
+				continue
+			}
+			if inst.InFlight > 0 || inst.Loading || inst.Pinned || inst.ReservationID != "" {
+				failures = append(failures, FleetFailure{
+					NodeID: mark.Snapshot.Node.ID,
+					Error:  fmt.Sprintf("cannot reset benchmark instance %s preset=%s in_flight=%d loading=%t pinned=%t reservation=%s", inst.ID, inst.PresetID, inst.InFlight, inst.Loading, inst.Pinned, inst.ReservationID),
+				})
+				continue
+			}
+			if err := unloadFleetInstance(ctx, cfg, peer, inst.ID, client); err != nil {
+				failures = append(failures, FleetFailure{NodeID: mark.Snapshot.Node.ID, Error: fmt.Sprintf("reset unload %s: %v", inst.ID, err)})
+				continue
+			}
+			events = append(events, FleetEvent{
+				At:       clk.Now(),
+				Type:     "reset_unload",
+				NodeID:   mark.Snapshot.Node.ID,
+				Instance: inst.ID,
+				Data: map[string]any{
+					"preset_id": inst.PresetID,
+				},
+			})
+		}
+	}
+	return events, failures
+}
+
+func unloadFleetInstance(ctx context.Context, cfg FleetBenchmarkConfig, peer FleetPeer, instanceID string, client *http.Client) error {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	body, err := json.Marshal(map[string]string{"instance_id": instanceID})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(peer.URL, "/")+"/unload", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token := firstNonEmpty(peer.RPCToken, cfg.RPCToken); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		data, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	return nil
 }
 
 func submitFleetJob(ctx context.Context, cfg FleetBenchmarkConfig, waveID string, index int, spec FleetWaveJob, model FleetModel, gw FleetGateway, outputDir string, client *http.Client, clk ports.Clock) FleetJobResult {
@@ -1087,6 +1173,31 @@ func preflightByJob(plans []FleetSimulationDecision) map[string]FleetSimulationD
 	for _, plan := range plans {
 		if plan.JobID != "" {
 			out[plan.JobID] = plan
+		}
+	}
+	return out
+}
+
+func benchmarkPresetIDs(cfg FleetBenchmarkConfig) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, preset := range cfg.Simulation.Presets {
+		if preset.ID != "" {
+			out[preset.ID] = struct{}{}
+		}
+	}
+	for _, model := range cfg.Models {
+		if model.PresetID != "" {
+			out[model.PresetID] = struct{}{}
+		}
+	}
+	return out
+}
+
+func peerByID(peers []FleetPeer) map[string]FleetPeer {
+	out := map[string]FleetPeer{}
+	for _, peer := range peers {
+		if peer.ID != "" {
+			out[peer.ID] = peer
 		}
 	}
 	return out

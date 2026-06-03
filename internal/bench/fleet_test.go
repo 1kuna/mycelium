@@ -261,6 +261,149 @@ func TestFleetBenchmarkLiveRunnerCapturesHeadersMetricsAndOutputs(t *testing.T) 
 	}
 }
 
+func TestFleetBenchmarkCleanStartUnloadsBenchmarkInstances(t *testing.T) {
+	cfg := fleetTestConfig()
+	cfg.Safety.ResetBenchmarkInstances = true
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC))
+	instances := map[string][]domain.ModelInstance{
+		"b70": {
+			{ID: "inst-benchmark", NodeID: "b70", PresetID: "preset-9b", State: domain.InstReady},
+			{ID: "inst-user", NodeID: "b70", PresetID: "user-preset", State: domain.InstReady},
+		},
+	}
+	liveCalls := 0
+	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/snapshot":
+			node := cfg.Simulation.Nodes[0]
+			if strings.Contains(r.Host, "b70") {
+				node = cfg.Simulation.Nodes[1]
+			}
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: node, Instances: append([]domain.ModelInstance(nil), instances[node.ID]...)})
+		case "/unload":
+			if r.Header.Get("Authorization") != "Bearer rpc-secret" {
+				http.Error(w, "rpc token required", http.StatusUnauthorized)
+				return
+			}
+			var req struct {
+				InstanceID string `json:"instance_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode unload: %v", err)
+			}
+			for nodeID, nodeInstances := range instances {
+				var kept []domain.ModelInstance
+				for _, inst := range nodeInstances {
+					if inst.ID != req.InstanceID {
+						kept = append(kept, inst)
+					}
+				}
+				instances[nodeID] = kept
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case "/telemetry/metrics":
+			_ = json.NewEncoder(w).Encode([]domain.RunMetric{})
+		case "/v1/chat/completions":
+			liveCalls++
+			nodeID := "b70"
+			instanceID := "inst-new"
+			decision := domain.ActionLoadedNew
+			if liveCalls == 2 {
+				decision = domain.ActionWarmInstance
+			}
+			if liveCalls >= 3 {
+				nodeID = "spark"
+				instanceID = "inst-spark"
+				decision = domain.ActionHardPreempted
+				instances[nodeID] = append(instances[nodeID], domain.ModelInstance{ID: instanceID, NodeID: nodeID, PresetID: "preset-122b", State: domain.InstReady})
+			} else if liveCalls == 1 {
+				instances[nodeID] = append(instances[nodeID], domain.ModelInstance{ID: instanceID, NodeID: nodeID, PresetID: "preset-9b", State: domain.InstReady})
+			}
+			w.Header().Set(fleetHeaderDecision, string(decision))
+			w.Header().Set(fleetHeaderNode, nodeID)
+			w.Header().Set(fleetHeaderInstance, instanceID)
+			w.Header().Set(fleetHeaderBackend, string(domain.BackendLlamaCpp))
+			w.Header().Set(fleetHeaderAttempts, "1")
+			_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{
+				Choices: []api.OpenAIChatChoice{{Message: api.OpenAIMessage{Role: "assistant", Content: "cold ok"}}},
+				Usage:   api.OpenAIUsage{CompletionTokens: 2, TotalTokens: 4},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	result, err := RunFleet(context.Background(), cfg, FleetRunOptions{
+		Profile:    FleetProfileConservative,
+		OutputRoot: t.TempDir(),
+		Client:     client,
+		Clock:      clock,
+	})
+	if err != nil {
+		t.Fatalf("RunFleet clean start: %v failures=%+v", err, result.Failures)
+	}
+	for _, inst := range instances["b70"] {
+		if inst.ID == "inst-benchmark" {
+			t.Fatalf("benchmark instance was not unloaded: %+v", instances["b70"])
+		}
+		if inst.ID == "inst-user" && inst.PresetID != "user-preset" {
+			t.Fatalf("user instance changed: %+v", inst)
+		}
+	}
+	resetEventFound := false
+	for _, event := range result.Events {
+		if event.Type == "reset_unload" && event.Instance == "inst-benchmark" {
+			resetEventFound = true
+		}
+	}
+	if !resetEventFound {
+		t.Fatalf("events = %+v", result.Events)
+	}
+	if len(result.Snapshots) < 4 || result.Snapshots[2].Stage != "after_reset" {
+		t.Fatalf("snapshots = %+v", result.Snapshots)
+	}
+}
+
+func TestFleetBenchmarkCleanStartRejectsUnsafeInstances(t *testing.T) {
+	cfg := fleetTestConfig()
+	cfg.Safety.ResetBenchmarkInstances = true
+	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/snapshot":
+			node := cfg.Simulation.Nodes[0]
+			var instances []domain.ModelInstance
+			if strings.Contains(r.Host, "b70") {
+				node = cfg.Simulation.Nodes[1]
+				instances = []domain.ModelInstance{{
+					ID:       "inst-pinned",
+					NodeID:   node.ID,
+					PresetID: "preset-9b",
+					State:    domain.InstReady,
+					Pinned:   true,
+				}}
+			}
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: node, Instances: instances})
+		case "/telemetry/metrics":
+			_ = json.NewEncoder(w).Encode([]domain.RunMetric{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	result, err := RunFleet(context.Background(), cfg, FleetRunOptions{
+		Profile:    FleetProfileConservative,
+		OutputRoot: t.TempDir(),
+		Client:     client,
+		Clock:      mocks.NewFakeClock(time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)),
+	})
+	if err == nil || !strings.Contains(err.Error(), "evidence collection") {
+		t.Fatalf("RunFleet unsafe reset err = %v", err)
+	}
+	if len(result.Failures) != 1 || !strings.Contains(result.Failures[0].Error, "pinned=true") {
+		t.Fatalf("failures = %+v", result.Failures)
+	}
+}
+
 func TestFleetBenchmarkLiveRunnerHonorsExpectedFailuresAndTraceExpectations(t *testing.T) {
 	cfg := fleetTestConfig()
 	cfg.Waves = []FleetWave{
