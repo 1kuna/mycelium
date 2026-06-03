@@ -404,12 +404,14 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	configPath := writePeerConfig(t, PeerConfig{
-		Listen:       "127.0.0.1:0",
-		StorePath:    dbPath,
-		JoinToken:    "secret",
-		RPCToken:     "rpc-secret",
-		Presets:      []domain.Preset{preset},
-		Reservations: []domain.Reservation{{ID: "pin-a", Kind: domain.ReservationPinned, NodeID: "node-a", PresetID: preset.ID}},
+		Listen:          "127.0.0.1:0",
+		StorePath:       dbPath,
+		JoinToken:       "secret",
+		RPCToken:        "rpc-secret",
+		DiscoveryListen: "127.0.0.1:0",
+		DiscoveryAddr:   "127.0.0.1:9",
+		Presets:         []domain.Preset{preset},
+		Reservations:    []domain.Reservation{{ID: "pin-a", Kind: domain.ReservationPinned, NodeID: "node-a", PresetID: preset.ID}},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -469,7 +471,7 @@ func TestBuildPeerGatewayJoinBootstrapsCleanHome(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	addr, handler, cleanup, err := buildPeerGateway(ctx, []string{"--join", join, "--listen", "127.0.0.1:0"})
+	addr, handler, cleanup, err := buildPeerGateway(ctx, []string{"--join", join, "--listen", "127.0.0.1:0", "--discovery-listen", "127.0.0.1:0", "--discovery-addr", "127.0.0.1:9"})
 	if err != nil {
 		t.Fatalf("buildPeerGateway clean join: %v", err)
 	}

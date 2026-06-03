@@ -270,6 +270,43 @@ func TestServiceSubmitWithPayloadReleasesCoordinatorOnLoadFailure(t *testing.T) 
 	}
 }
 
+func TestServiceSubmitWithPayloadReleasesCoordinatorWithCleanupContextOnCanceledLoad(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 51).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	coordinator := &cleanupContextCoordinator{Coordinator: mocks.Coordinator{
+		Decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew},
+		Lease:    domain.Lease{ID: "owner-lease-a", JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1)},
+	}}
+	service := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: &mocks.NodeAgent{LoadErr: context.Canceled}}},
+		Coordinator: coordinator,
+		JobLog:      &recordingJobLog{},
+		Queue:       NewQueue(clock),
+		Store:       &runtimeStore{},
+		Clock:       clock,
+		Presets:     map[string]domain.Preset{preset.ID: preset},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.SubmitWithPayload(ctx, fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), []byte(`{"job":"a"}`))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SubmitWithPayload err = %v", err)
+	}
+	if coordinator.releaseContextErr != nil {
+		t.Fatalf("release used canceled context: %v", coordinator.releaseContextErr)
+	}
+	if !strings.Contains(strings.Join(coordinator.Calls, ","), "release:job-a") {
+		t.Fatalf("coordinator calls = %+v", coordinator.Calls)
+	}
+	if cleanupContext(nil).Err() != nil {
+		t.Fatal("nil cleanup context should be usable")
+	}
+}
+
 func TestServiceSubmitWithPayloadCoordinatorErrorPaths(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(10, 52).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
@@ -1819,6 +1856,19 @@ type fakePlacer struct {
 
 func (p fakePlacer) Place(context.Context, domain.Job, domain.FleetSnapshot) (domain.PlacementDecision, error) {
 	return p.decision, p.err
+}
+
+type cleanupContextCoordinator struct {
+	mocks.Coordinator
+	releaseContextErr error
+}
+
+func (c *cleanupContextCoordinator) Release(ctx context.Context, jobID string) error {
+	c.releaseContextErr = ctx.Err()
+	if c.releaseContextErr != nil {
+		return c.releaseContextErr
+	}
+	return c.Coordinator.Release(ctx, jobID)
 }
 
 type staticFleet struct {
