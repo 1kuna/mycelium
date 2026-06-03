@@ -99,6 +99,27 @@ func TestPlacePassesExpectedConcurrencyToEstimator(t *testing.T) {
 	}
 }
 
+func TestPlaceCarriesEffectiveContextInLaunchPreset(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithContextLength(262144))
+	node := fixtures.MakeNode(fixtures.WithVRAM(32768), fixtures.WithMaxUtil(0.85))
+	estimator := &mocks.ResourceEstimator{Claim: fixtures.MakeClaim(16039, 5120)}
+	placer := NewPlacer(estimator, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID), fixtures.WithContext(81920)), domain.FleetSnapshot{Nodes: []domain.Node{node}})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.Action == domain.ActionQueued {
+		t.Fatalf("decision queued unexpectedly: %+v", decision)
+	}
+	if decision.Preset.ContextLength != 81920 {
+		t.Fatalf("launch preset context = %d, want 81920", decision.Preset.ContextLength)
+	}
+	if len(estimator.Calls) == 0 || estimator.Calls[0].ContextLen != 81920 {
+		t.Fatalf("estimator calls = %+v", estimator.Calls)
+	}
+}
+
 func TestPlaceAutoScoresColdCandidatesInsteadOfBlindWarmMatch(t *testing.T) {
 	preset := fixtures.MakePreset()
 	slowWarm := fixtures.MakeNode(fixtures.WithNodeID("node-slow"))
