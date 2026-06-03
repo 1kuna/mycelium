@@ -1294,6 +1294,16 @@ func runOptimizerEvaluation(ctx context.Context, store optimizerRuntimeStore, cl
 	if err != nil {
 		return syncResult, err
 	}
+	hasSlot, err := hasRecommendationsForSlot(ctx, store, slotID)
+	if err != nil {
+		return syncResult, err
+	}
+	if hasSlot {
+		if err := pushFleetRecommendations(ctx, store, syncCfg, reachablePeers, slotID, &syncResult); err != nil {
+			return syncResult, err
+		}
+		return syncResult, nil
+	}
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
 		return syncResult, err
@@ -1320,6 +1330,19 @@ func runOptimizerEvaluation(ctx context.Context, store optimizerRuntimeStore, cl
 		return syncResult, err
 	}
 	return syncResult, nil
+}
+
+func hasRecommendationsForSlot(ctx context.Context, store optimizerRuntimeStore, slotID string) (bool, error) {
+	recs, err := store.ListRecommendations(ctx, "")
+	if err != nil {
+		return false, err
+	}
+	for _, rec := range recs {
+		if rec.SlotID == slotID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func pullFleetTelemetry(ctx context.Context, store optimizerRuntimeStore, cfg telemetrySyncConfig) (telemetrySyncResult, []domain.Peer, error) {
