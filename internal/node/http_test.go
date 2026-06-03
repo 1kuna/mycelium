@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,12 @@ func (s *directHTTPServer) post(path, contentType string, body io.Reader) (*http
 	return s.client.Do(req)
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestHTTPNodeAgentRoundTrip(t *testing.T) {
 	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	server := newDirectHTTPServer(HTTPServer{Agent: agent})
@@ -101,6 +108,81 @@ func TestHTTPNodeAgentRoundTrip(t *testing.T) {
 		t.Fatalf("EndRequest: %v", err)
 	}
 	if err := client.Unload(context.Background(), inst.ID); err != nil {
+		t.Fatalf("Unload: %v", err)
+	}
+}
+
+func TestHTTPProxyGuardsInFlightUntilUpstreamCompletes(t *testing.T) {
+	agent := NewAgent(
+		fixtures.MakeNode(),
+		mocks.NewBackendAdapter(),
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		WithListenAddr("backend.test:9000"),
+		WithAllocator(lease.NewAllocator()),
+	)
+	inst, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	upstreamStarted := make(chan struct{})
+	releaseUpstream := make(chan struct{})
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "backend.test:9000" || req.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected upstream request: %s", req.URL.String())
+		}
+		close(upstreamStarted)
+		<-releaseUpstream
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Request:    req,
+		}, nil
+	})
+	server := newDirectHTTPServer(HTTPServer{Agent: agent, Transport: transport})
+
+	proxyDone := make(chan error, 1)
+	go func() {
+		resp, err := server.post("/instances/"+inst.ID+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"m"}`))
+		if err != nil {
+			proxyDone <- err
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			proxyDone <- fmt.Errorf("proxy status = %s", resp.Status)
+			return
+		}
+		proxyDone <- nil
+	}()
+	<-upstreamStarted
+
+	unloadDone := make(chan error, 1)
+	go func() {
+		unloadDone <- agent.Unload(context.Background(), inst.ID)
+	}()
+	for {
+		agent.mu.Lock()
+		stopping := agent.inflight[inst.ID].stopping
+		agent.mu.Unlock()
+		if stopping {
+			break
+		}
+		runtime.Gosched()
+	}
+	select {
+	case err := <-unloadDone:
+		t.Fatalf("Unload finished while proxied request was in flight: %v", err)
+	default:
+	}
+
+	close(releaseUpstream)
+	if err := <-proxyDone; err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	if err := <-unloadDone; err != nil {
 		t.Fatalf("Unload: %v", err)
 	}
 }

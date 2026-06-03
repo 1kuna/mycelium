@@ -20,6 +20,7 @@ type HTTPServer struct {
 	Agent     ports.NodeAgent
 	Admission ports.AdmissionController
 	AuthToken string
+	Transport http.RoundTripper
 }
 
 func (s HTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -290,6 +291,15 @@ func (s HTTPServer) proxyInstance(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		if err := s.Agent.BeginRequest(r.Context(), instanceID); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		defer func() {
+			if err := s.Agent.EndRequest(r.Context(), instanceID); err != nil {
+				panic(err)
+			}
+		}()
 		s.forwardInstance(w, r, target)
 		return
 	}
@@ -308,7 +318,11 @@ func (s HTTPServer) forwardInstance(w http.ResponseWriter, r *http.Request, targ
 	req.Host = parsed.Host
 	req.Header = r.Header.Clone()
 	req.Header.Del("Authorization")
-	resp, err := http.DefaultTransport.RoundTrip(req)
+	transport := s.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	resp, err := transport.RoundTrip(req)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
