@@ -32,6 +32,8 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	switch args[0] {
+	case "config":
+		return runConfig(ctx, args[1:])
 	case "run":
 		return runPeer(ctx, args[1:])
 	case "ctl":

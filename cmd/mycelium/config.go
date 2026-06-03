@@ -78,7 +78,11 @@ func loadPeerConfig(path string) (PeerConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return PeerConfig{}, fmt.Errorf("parse peer config %s: %w", path, err)
 	}
-	return applyPeerConfigDefaults(cfg), nil
+	cfg = applyPeerConfigDefaults(cfg)
+	if err := validatePeerConfig(cfg); err != nil {
+		return PeerConfig{}, fmt.Errorf("validate peer config %s: %w", path, err)
+	}
+	return cfg, nil
 }
 
 func loadOrBootstrapPeerConfig(path string, allowBootstrap bool) (PeerConfig, string, bool, error) {
@@ -140,6 +144,10 @@ func applyPeerConfigDefaults(cfg PeerConfig) PeerConfig {
 func savePeerConfig(path string, cfg PeerConfig) error {
 	if path == "" {
 		path = defaultPeerConfigPath()
+	}
+	cfg = applyPeerConfigDefaults(cfg)
+	if err := validatePeerConfig(cfg); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
