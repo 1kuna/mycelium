@@ -465,6 +465,37 @@ func TestRouterRetriesContextOverflowByColdLoadingLargerPreset(t *testing.T) {
 	}
 }
 
+func TestRouterColdLoadUsesPlacementTunedContext(t *testing.T) {
+	preset := fixtures.MakePreset(
+		fixtures.WithPresetID("b70-qwen27b"),
+		fixtures.WithContextLength(262144),
+		fixtures.WithWeights(16039),
+		fixtures.WithKVPerToken(0.0625),
+	)
+	node := fixtures.MakeNode(fixtures.WithNodeID("b70"), fixtures.WithVRAM(31023), fixtures.WithMaxUtil(0.85))
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst-b70"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID), fixtures.WithClaim(fixtures.MakeClaim(16039, 5120)))
+	agent := recordingLoadAgent{node: node, inst: inst}
+	fleet := domain.FleetSnapshot{Nodes: []domain.Node{node}}
+	router := newTestRouter(preset, fleet, staticResolver{agents: map[string]ports.NodeAgent{node.ID: &agent}})
+	job := fixtures.MakeJob(
+		fixtures.WithJobID("b70-27b-normal"),
+		fixtures.WithPreset(preset.ID),
+		fixtures.WithContext(81920),
+		fixtures.WithModel(preset.ModelRef),
+	)
+
+	decision, _, _, _, err := router.placeAndLoad(context.Background(), job, []byte(`{}`), preset, fleet, nil)
+	if err != nil {
+		t.Fatalf("placeAndLoad: %v", err)
+	}
+	if decision.Preset.ContextLength != 81920 {
+		t.Fatalf("decision context = %d, want 81920", decision.Preset.ContextLength)
+	}
+	if len(agent.loads) != 1 || agent.loads[0].Preset.ContextLength != 81920 {
+		t.Fatalf("loads = %+v", agent.loads)
+	}
+}
+
 func TestRouterClassifiesOverflowBeforeServerErrorFailover(t *testing.T) {
 	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
 	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))

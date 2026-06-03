@@ -719,9 +719,13 @@ func (r *Router) resolveInstance(ctx context.Context, job domain.Job, decision d
 	if err != nil {
 		return domain.ModelInstance{}, false, err
 	}
+	loadPreset := decision.Preset
+	if loadPreset.ID == "" {
+		loadPreset = preset
+	}
 	inst, err := agent.Load(ctx, domain.LoadRequest{
 		JobID:          decision.JobID,
-		Preset:         preset,
+		Preset:         loadPreset,
 		Claim:          decision.Claim,
 		AcceleratorSet: append([]int(nil), decision.AcceleratorSet...),
 		Priority:       job.Priority,

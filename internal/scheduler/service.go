@@ -772,9 +772,13 @@ func (s *Service) resolveInstance(ctx context.Context, job domain.Job, decision 
 	if !ok {
 		return domain.ModelInstance{}, fmt.Errorf("selected node %q is missing from fleet snapshot", decision.NodeID)
 	}
-	preset, err := s.resolvePreset(job)
-	if err != nil {
-		return domain.ModelInstance{}, err
+	var err error
+	preset := decision.Preset
+	if preset.ID == "" {
+		preset, err = s.resolvePreset(job)
+		if err != nil {
+			return domain.ModelInstance{}, err
+		}
 	}
 	preset, err = tuneLaunchForPlacement(preset, decision, node)
 	if err != nil {

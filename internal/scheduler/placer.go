@@ -60,6 +60,8 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 	if contextLen == 0 {
 		contextLen = preset.ContextLength
 	}
+	launchPreset := preset
+	launchPreset.ContextLength = contextLen
 	concurrency := expectedConcurrency(job)
 
 	trace := []domain.TraceStep{{
@@ -86,7 +88,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 				Result: err.Error(),
 			})}, err
 		} else if ok {
-			return warmDecision(job, preset, warm, trace, "warm compatible instance available"), nil
+			return warmDecision(job, launchPreset, warm, trace, "warm compatible instance available"), nil
 		}
 	}
 
@@ -108,7 +110,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 		)
 		return domain.PlacementDecision{
 			JobID:            job.ID,
-			Preset:           preset,
+			Preset:           launchPreset,
 			NodeID:           winner.candidate.node.ID,
 			AcceleratorSet:   append([]int(nil), winner.candidate.acc...),
 			Claim:            winner.candidate.claim,
@@ -125,7 +127,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 				Result: err.Error(),
 			})}, err
 		} else if ok {
-			return warmDecision(job, preset, warm, trace, "warm compatible instance available after cold no-fit"), nil
+			return warmDecision(job, launchPreset, warm, trace, "warm compatible instance available after cold no-fit"), nil
 		}
 	}
 
@@ -140,7 +142,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 		trace = append(trace, preempted.trace...)
 		return domain.PlacementDecision{
 			JobID:            job.ID,
-			Preset:           preset,
+			Preset:           launchPreset,
 			NodeID:           preempted.candidate.node.ID,
 			AcceleratorSet:   append([]int(nil), preempted.candidate.acc...),
 			Claim:            preempted.claim,
@@ -156,7 +158,7 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 	trace = append(trace, domain.TraceStep{Step: "admit", Result: "queued: no fit"})
 	return domain.PlacementDecision{
 		JobID:            job.ID,
-		Preset:           preset,
+		Preset:           launchPreset,
 		Claim:            fallbackClaim,
 		Action:           domain.ActionQueued,
 		SpeedPrefApplied: effectiveSpeed(job.SpeedPref),

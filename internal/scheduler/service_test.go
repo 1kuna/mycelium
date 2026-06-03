@@ -79,6 +79,46 @@ func TestServiceLoadsAndGrantsLease(t *testing.T) {
 	}
 }
 
+func TestServiceLoadsPlacementTunedContext(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 10).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"), fixtures.WithVRAM(32768), fixtures.WithMaxUtil(0.85))
+	agent := mocks.NewNodeAgent(node)
+	admission := &mocks.AdmissionController{}
+	catalogPreset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithContextLength(262144))
+	launchPreset := catalogPreset
+	launchPreset.ContextLength = 81920
+	store := &runtimeStore{}
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{
+			JobID:          "job-a",
+			Preset:         launchPreset,
+			NodeID:         node.ID,
+			AcceleratorSet: []int{0},
+			Claim:          fixtures.MakeClaim(16039, 5120),
+			Action:         domain.ActionLoadedNew,
+		}},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}, admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+		Presets: map[string]domain.Preset{
+			catalogPreset.ID: catalogPreset,
+		},
+	}
+
+	if _, err := service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(catalogPreset.ID))); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if len(agent.Loaded) != 1 {
+		t.Fatalf("loads = %+v", agent.Loaded)
+	}
+	if agent.Loaded[0].Preset.ContextLength != 81920 {
+		t.Fatalf("load preset context = %d, want 81920", agent.Loaded[0].Preset.ContextLength)
+	}
+}
+
 func TestServiceUsesWarmInstanceWithOwnerAdmission(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(10, 30).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
