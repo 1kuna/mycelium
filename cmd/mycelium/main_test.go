@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -360,6 +361,197 @@ func TestValidateRuntimeComputeSafety(t *testing.T) {
 	}
 	if err := validateRuntimeComputeSafety(ComputeConfig{Backend: domain.BackendVLLM, CustomArgs: []string{"--gpu-memory-utilization=0.85"}}, catastrophic); err != nil {
 		t.Fatalf("safe cap err = %v", err)
+	}
+}
+
+func TestServiceSpecAndRenderers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".mycelium", "peer.json")
+	spec, err := parseServiceSpec("install", []string{"--config", configPath, "--name", "fleet one!"}, "darwin")
+	if err != nil {
+		t.Fatalf("parseServiceSpec darwin: %v", err)
+	}
+	if spec.Name != "fleetone" || spec.Label != "com.mycelium.fleetone" || spec.Scope != serviceScopeUser {
+		t.Fatalf("darwin spec = %+v", spec)
+	}
+	if !strings.HasPrefix(spec.UnitPath, filepath.Join(home, "Library", "LaunchAgents")) {
+		t.Fatalf("darwin unit path = %s", spec.UnitPath)
+	}
+	plist := renderLaunchdPlist(spec)
+	if !strings.Contains(plist, "<string>run</string>") || !strings.Contains(plist, xmlEscape(configPath)) {
+		t.Fatalf("plist = %s", plist)
+	}
+	if strings.Contains(plist, "join-secret") || strings.Contains(plist, "rpc-secret") {
+		t.Fatalf("plist leaked secret: %s", plist)
+	}
+	systemSpec, err := parseServiceSpec("install", []string{"--config", configPath, "--system", "--name", "spark"}, "linux")
+	if err != nil {
+		t.Fatalf("parseServiceSpec linux: %v", err)
+	}
+	if systemSpec.Scope != serviceScopeSystem || systemSpec.UnitPath != "/etc/systemd/system/mycelium-spark.service" {
+		t.Fatalf("linux system spec = %+v", systemSpec)
+	}
+	unit := renderSystemdUnit(systemSpec)
+	if !strings.Contains(unit, "ExecStart=") || !strings.Contains(unit, " run --config ") || strings.Contains(unit, "join-secret") {
+		t.Fatalf("unit = %s", unit)
+	}
+	if _, err := parseServiceSpec("install", nil, "darwin"); err == nil || !strings.Contains(err.Error(), "--config") {
+		t.Fatalf("missing config err = %v", err)
+	}
+	if _, err := parseServiceSpec("install", []string{"--config", configPath, "--user", "--system"}, "darwin"); err == nil || !strings.Contains(err.Error(), "mutually") {
+		t.Fatalf("scope err = %v", err)
+	}
+	if _, err := parseServiceSpec("install", []string{"--config", configPath}, "windows"); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("unsupported err = %v", err)
+	}
+}
+
+func TestServiceManagersUseExpectedCommands(t *testing.T) {
+	ctx := context.Background()
+	spec := serviceSpec{
+		Name:       "default",
+		Label:      "com.mycelium.default",
+		Scope:      serviceScopeUser,
+		ConfigPath: filepath.Join(t.TempDir(), "peer.json"),
+		BinaryPath: "/bin/mycelium",
+		Home:       t.TempDir(),
+		LogDir:     filepath.Join(t.TempDir(), "logs"),
+		UnitPath:   filepath.Join(t.TempDir(), "com.mycelium.default.plist"),
+	}
+	rec := &serviceCommandRecorder{}
+	launchd := launchdManager{Run: rec.Run}
+	if err := launchd.Install(ctx, spec); err != nil {
+		t.Fatalf("launchd Install: %v", err)
+	}
+	if _, err := os.Stat(spec.UnitPath); err != nil {
+		t.Fatalf("launchd unit not written: %v", err)
+	}
+	if got := strings.Join(rec.Commands, "\n"); !strings.Contains(got, "launchctl bootstrap") || !strings.Contains(got, "launchctl kickstart") {
+		t.Fatalf("launchd commands = %s", got)
+	}
+	if status, err := launchd.Status(ctx, spec); err != nil || status != "active" {
+		t.Fatalf("launchd status = %q %v", status, err)
+	}
+	if err := launchd.Uninstall(ctx, spec); err != nil {
+		t.Fatalf("launchd Uninstall: %v", err)
+	}
+	if _, err := os.Stat(spec.UnitPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("launchd unit after uninstall err = %v", err)
+	}
+
+	systemSpec := spec
+	systemSpec.UnitPath = filepath.Join(t.TempDir(), "mycelium-default.service")
+	rec = &serviceCommandRecorder{}
+	systemd := systemdManager{Run: rec.Run}
+	if err := systemd.Install(ctx, systemSpec); err != nil {
+		t.Fatalf("systemd Install: %v", err)
+	}
+	if got := strings.Join(rec.Commands, "\n"); !strings.Contains(got, "systemctl --user daemon-reload") || !strings.Contains(got, "systemctl --user enable --now mycelium-default.service") {
+		t.Fatalf("systemd commands = %s", got)
+	}
+	if status, err := systemd.Status(ctx, systemSpec); err != nil || status != "active" {
+		t.Fatalf("systemd status = %q %v", status, err)
+	}
+	if err := systemd.Uninstall(ctx, systemSpec); err != nil {
+		t.Fatalf("systemd Uninstall: %v", err)
+	}
+}
+
+func TestRunServiceStatusChecksPeerHealth(t *testing.T) {
+	var sawJoinToken bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/peer/health" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		sawJoinToken = r.Header.Get("X-Myc-Join-Token") == "join-secret"
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := writePeerConfig(t, PeerConfig{
+		Listen:    strings.TrimPrefix(server.URL, "http://"),
+		JoinToken: "join-secret",
+		RPCToken:  "rpc-secret",
+	})
+	if err := runServiceWithManager(context.Background(), []string{"status", "--config", configPath}, fakeServiceManager{status: "active"}, "darwin"); err != nil {
+		t.Fatalf("service status: %v", err)
+	}
+	if !sawJoinToken {
+		t.Fatal("service health did not send join token")
+	}
+	if err := runServiceWithManager(context.Background(), []string{"install", "--config", configPath}, fakeServiceManager{}, "darwin"); err != nil {
+		t.Fatalf("service install: %v", err)
+	}
+	if err := runServiceWithManager(context.Background(), []string{"uninstall", "--config", configPath}, fakeServiceManager{}, "darwin"); err != nil {
+		t.Fatalf("service uninstall: %v", err)
+	}
+	if err := runServiceWithManager(context.Background(), []string{"bogus", "--config", configPath}, fakeServiceManager{}, "darwin"); err == nil || !strings.Contains(err.Error(), "unknown service") {
+		t.Fatalf("unknown service err = %v", err)
+	}
+	if _, err := serviceManagerForGOOS("plan9", nil); err == nil {
+		t.Fatal("unsupported service manager accepted")
+	}
+	if got, err := servicePeerBaseURL("0.0.0.0:51846"); err != nil || got != "http://127.0.0.1:51846" {
+		t.Fatalf("service base URL = %q %v", got, err)
+	}
+}
+
+func TestServiceUtilityErrorBranches(t *testing.T) {
+	if err := runService(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("runService usage err = %v", err)
+	}
+	if err := run(context.Background(), []string{"service"}); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("run service dispatch err = %v", err)
+	}
+	for _, goos := range []string{"darwin", "linux"} {
+		if manager, err := serviceManagerForGOOS(goos, func(context.Context, string, ...string) error { return nil }); err != nil || manager == nil {
+			t.Fatalf("serviceManagerForGOOS(%s) = %T %v", goos, manager, err)
+		}
+	}
+	home := t.TempDir()
+	spec := serviceSpec{Name: "default", Label: "com.mycelium.default", Home: home, LogDir: filepath.Join(home, "logs")}
+	if path, err := serviceUnitPath(serviceSpec{Name: "default", Home: home, Scope: serviceScopeUser}, "linux"); err != nil || !strings.Contains(path, ".config/systemd/user/mycelium-default.service") {
+		t.Fatalf("linux user unit path = %q %v", path, err)
+	}
+	if got := launchdDomain(serviceSpec{Scope: serviceScopeSystem}); got != "system" {
+		t.Fatalf("system launchd domain = %s", got)
+	}
+	truePath, err := exec.LookPath("true")
+	if err == nil {
+		if err := runServiceCommand(context.Background(), truePath); err != nil {
+			t.Fatalf("runServiceCommand true: %v", err)
+		}
+	}
+	falsePath, err := exec.LookPath("false")
+	if err == nil {
+		if err := runServiceCommand(context.Background(), falsePath); err == nil {
+			t.Fatal("runServiceCommand false succeeded")
+		}
+	}
+	errBoom := errors.New("manager")
+	if err := runServiceWithManager(context.Background(), []string{"install", "--config", filepath.Join(home, "peer.json")}, fakeServiceManager{err: errBoom}, "darwin"); !errors.Is(err, errBoom) {
+		t.Fatalf("install manager err = %v", err)
+	}
+	if err := runServiceWithManager(context.Background(), []string{"status", "--config", filepath.Join(home, "peer.json")}, fakeServiceManager{err: errBoom}, "darwin"); !errors.Is(err, errBoom) {
+		t.Fatalf("status manager err = %v", err)
+	}
+	if err := runServiceWithManager(context.Background(), []string{"uninstall", "--config", filepath.Join(home, "peer.json")}, fakeServiceManager{err: errBoom}, "darwin"); !errors.Is(err, errBoom) {
+		t.Fatalf("uninstall manager err = %v", err)
+	}
+	if _, err := servicePeerHealth(context.Background(), filepath.Join(home, "missing.json")); err == nil {
+		t.Fatal("missing config health succeeded")
+	}
+	if _, err := servicePeerBaseURL("bad"); err == nil {
+		t.Fatal("bad service base URL accepted")
+	}
+	spec.UnitPath = filepath.Join(home, "unit.plist")
+	if err := writeServiceFile(spec.UnitPath, spec.LogDir, "unit"); err != nil {
+		t.Fatalf("writeServiceFile: %v", err)
+	}
+	if data, err := os.ReadFile(spec.UnitPath); err != nil || string(data) != "unit" {
+		t.Fatalf("unit data = %q %v", data, err)
 	}
 }
 
@@ -2436,6 +2628,39 @@ func (localAdmissionOnly) Release(context.Context, string) error {
 
 func (localAdmissionOnly) Preempt(context.Context, string, string) error {
 	return nil
+}
+
+type serviceCommandRecorder struct {
+	Commands []string
+	Err      error
+}
+
+func (r *serviceCommandRecorder) Run(_ context.Context, name string, args ...string) error {
+	r.Commands = append(r.Commands, strings.TrimSpace(name+" "+strings.Join(args, " ")))
+	return r.Err
+}
+
+type fakeServiceManager struct {
+	status string
+	err    error
+}
+
+func (m fakeServiceManager) Install(context.Context, serviceSpec) error {
+	return m.err
+}
+
+func (m fakeServiceManager) Status(context.Context, serviceSpec) (string, error) {
+	if m.err != nil {
+		return "", m.err
+	}
+	if m.status == "" {
+		return "active", nil
+	}
+	return m.status, nil
+}
+
+func (m fakeServiceManager) Uninstall(context.Context, serviceSpec) error {
+	return m.err
 }
 
 func TestBuildComputeRuntimeRejectsUnknownBackend(t *testing.T) {
