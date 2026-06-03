@@ -10,6 +10,7 @@ import (
 
 type Config struct {
 	BinaryPath      string
+	Args            []string
 	ProcessRegistry processadapter.ProcessRegistry
 	ProcessRunner   processadapter.ProcessRunner
 	HTTPClient      *http.Client
@@ -23,10 +24,11 @@ func NewAdapter(binaryPath string) *processadapter.Adapter {
 }
 
 func NewAdapterWithConfig(cfg Config) *processadapter.Adapter {
+	args := append([]string{"--model", "{model}", "--host", "{host}", "--port", "{port}"}, cfg.Args...)
 	return processadapter.New(processadapter.Config{
 		Name:            "mlx",
 		BinaryPath:      cfg.BinaryPath,
-		Args:            []string{"--model", "{model}", "--host", "{host}", "--port", "{port}"},
+		Args:            args,
 		HealthPath:      "/health",
 		PollInterval:    cfg.PollInterval,
 		StopGracePeriod: cfg.StopGracePeriod,

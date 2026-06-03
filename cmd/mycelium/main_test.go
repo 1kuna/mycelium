@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -192,6 +193,173 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	}
 	if _, err := loadPeerConfig(badPath); err == nil {
 		t.Fatal("expected bad peer config error")
+	}
+}
+
+func TestConfigInitGeneratesSafeComputeConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".mycelium", "peer.json")
+	nextHex := 0
+	cfg, err := generatePeerConfig(context.Background(), configInitOptions{
+		Path:    configPath,
+		Compute: "auto",
+		Listen:  "loopback",
+		Backend: "auto",
+		GOOS:    "linux",
+		GOARCH:  "arm64",
+		RandomHex: func(bytesLen int) (string, error) {
+			nextHex++
+			return strings.Repeat(strconv.Itoa(nextHex), bytesLen*2), nil
+		},
+		Detect: func(_ context.Context, seed domain.Node) (domain.Node, error) {
+			seed.OS = "linux"
+			seed.Status = domain.NodeReady
+			seed.OOMSeverity = domain.OOMCatastrophic
+			seed.DiskTotalMB = 1000
+			seed.DiskFreeMB = 400
+			seed.Accelerators = []domain.Accelerator{{Index: 0, Vendor: "nvidia", Kind: "gb10", VRAMTotalMB: 131072, UnifiedMemory: true}}
+			return seed, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("generatePeerConfig: %v", err)
+	}
+	if !cfg.Compute || cfg.Listen != "127.0.0.1:51846" || cfg.ComputeConfig.BackendListen != "127.0.0.1:51848" {
+		t.Fatalf("generated config = %+v", cfg)
+	}
+	if cfg.ComputeConfig.Backend != domain.BackendVLLM || cfg.ComputeConfig.VRAMMB != 131072 || cfg.ComputeConfig.DiskMinFreeRatio != domain.DefaultDiskMinFreeRatio {
+		t.Fatalf("compute config = %+v", cfg.ComputeConfig)
+	}
+	if !reflect.DeepEqual(cfg.ComputeConfig.CustomArgs, []string{"--gpu-memory-utilization", "0.85"}) {
+		t.Fatalf("vllm args = %+v", cfg.ComputeConfig.CustomArgs)
+	}
+	if cfg.ID == "" || cfg.JoinToken == "" || cfg.RPCToken == "" {
+		t.Fatalf("missing generated identity/tokens = %+v", cfg)
+	}
+	if err := runConfig(context.Background(), []string{"init", "--config", configPath, "--compute", "off", "--listen", "loopback"}); err != nil {
+		t.Fatalf("runConfig init: %v", err)
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat generated config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("generated config mode = %o", got)
+	}
+	loaded, err := loadPeerConfig(configPath)
+	if err != nil {
+		t.Fatalf("load generated config: %v", err)
+	}
+	if loaded.Compute {
+		t.Fatalf("compute off config = %+v", loaded)
+	}
+}
+
+func TestPeerConfigValidationRejectsUnsafeValues(t *testing.T) {
+	if err := validatePeerConfig(PeerConfig{ComputeConfig: ComputeConfig{MaxUtil: 1.2}}); err == nil || !strings.Contains(err.Error(), "max_util") {
+		t.Fatalf("max util err = %v", err)
+	}
+	if err := validatePeerConfig(PeerConfig{ComputeConfig: ComputeConfig{DiskMinFreeRatio: 1}}); err == nil || !strings.Contains(err.Error(), "disk_min_free_ratio") {
+		t.Fatalf("disk floor err = %v", err)
+	}
+	err := validatePeerConfig(PeerConfig{ComputeConfig: ComputeConfig{
+		Backend:    domain.BackendVLLM,
+		CustomArgs: []string{"--gpu-memory-utilization", "0.90"},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("unsafe vllm err = %v", err)
+	}
+	if _, _, err := vllmGPUUtilization([]string{"--gpu-memory-utilization"}); err == nil {
+		t.Fatal("missing vllm utilization value accepted")
+	}
+}
+
+func TestConfigInitHelperBranches(t *testing.T) {
+	if err := runConfig(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("empty config command err = %v", err)
+	}
+	if err := runConfig(context.Background(), []string{"bogus"}); err == nil || !strings.Contains(err.Error(), "unknown config") {
+		t.Fatalf("unknown config command err = %v", err)
+	}
+	for _, raw := range []string{"loopback", "127.0.0.1:1234", "lan"} {
+		if got, err := resolveListen(raw); err != nil || got == "" {
+			t.Fatalf("resolveListen(%q) = %q %v", raw, got, err)
+		}
+	}
+	if _, err := resolveListen("missing-port"); err == nil {
+		t.Fatal("bad listen accepted")
+	}
+	if got, err := resolveBackendListen("0.0.0.0:51846"); err != nil || got != "127.0.0.1:51848" {
+		t.Fatalf("backend listen = %q %v", got, err)
+	}
+	if _, err := resolveBackendListen("bad"); err == nil {
+		t.Fatal("bad backend listen accepted")
+	}
+	for _, raw := range []string{"llama.cpp", "llamacpp", "mlx", "vllm", "custom", "auto"} {
+		if _, err := normalizeBackend(raw); err != nil {
+			t.Fatalf("normalizeBackend(%q): %v", raw, err)
+		}
+	}
+	if _, err := normalizeBackend("bad"); err == nil {
+		t.Fatal("bad backend accepted")
+	}
+	if got := defaultBackendForHost(configInitOptions{GOOS: "darwin", GOARCH: "arm64"}, domain.Node{}); got != domain.BackendLlamaCpp {
+		t.Fatalf("darwin backend = %s", got)
+	}
+	if got := defaultBackendForHost(configInitOptions{GOOS: "linux", GOARCH: "arm64"}, domain.Node{Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}}); got != domain.BackendVLLM {
+		t.Fatalf("linux nvidia backend = %s", got)
+	}
+	if got := defaultBackendForHost(configInitOptions{GOOS: "linux", GOARCH: "amd64"}, domain.Node{}); got != domain.BackendLlamaCpp {
+		t.Fatalf("linux default backend = %s", got)
+	}
+	if _, err := prefixedRandomID("peer", func(int) (string, error) { return "", errors.New("random") }); err == nil {
+		t.Fatal("random id error swallowed")
+	}
+	if node, ok, err := detectConfigNode(context.Background(), configInitOptions{}, PeerConfig{}); err != nil || ok || node.ID != "" {
+		t.Fatalf("nil detector = %+v %v %v", node, ok, err)
+	}
+	if _, err := generatePeerConfig(context.Background(), configInitOptions{Compute: "maybe", RandomHex: func(int) (string, error) { return "abcd", nil }}); err == nil {
+		t.Fatal("bad compute accepted")
+	}
+	if _, err := generatePeerConfig(context.Background(), configInitOptions{Compute: "off", Backend: "bad", RandomHex: func(int) (string, error) { return "abcd", nil }}); err == nil {
+		t.Fatal("bad backend accepted")
+	}
+	if _, err := generatePeerConfig(context.Background(), configInitOptions{
+		Compute: "on",
+		RandomHex: func(int) (string, error) {
+			return "abcd", nil
+		},
+		Detect: func(context.Context, domain.Node) (domain.Node, error) {
+			return domain.Node{}, errors.New("detect")
+		},
+	}); err == nil || !strings.Contains(err.Error(), "detect") {
+		t.Fatalf("compute-on detect err = %v", err)
+	}
+	if _, _, err := parseGPUUtilization("not-number"); err == nil {
+		t.Fatal("bad gpu utilization accepted")
+	}
+	if _, _, err := parseGPUUtilization("1.5"); err == nil {
+		t.Fatal("out-of-range gpu utilization accepted")
+	}
+	if err := validatePeerConfig(PeerConfig{ComputeConfig: ComputeConfig{Backend: domain.Backend("wat")}}); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("unknown backend validate err = %v", err)
+	}
+}
+
+func TestValidateRuntimeComputeSafety(t *testing.T) {
+	catastrophic := domain.Node{OOMSeverity: domain.OOMCatastrophic}
+	if err := validateRuntimeComputeSafety(ComputeConfig{Backend: domain.BackendLlamaCpp}, catastrophic); err != nil {
+		t.Fatalf("non-vllm safety err = %v", err)
+	}
+	if err := validateRuntimeComputeSafety(ComputeConfig{Backend: domain.BackendVLLM}, catastrophic); err == nil || !strings.Contains(err.Error(), "gpu-memory-utilization") {
+		t.Fatalf("missing cap err = %v", err)
+	}
+	if err := validateRuntimeComputeSafety(ComputeConfig{Backend: domain.BackendVLLM, CustomArgs: []string{"--gpu-memory-utilization", "0.86"}}, catastrophic); err == nil || !strings.Contains(err.Error(), "0.85") {
+		t.Fatalf("too-high cap err = %v", err)
+	}
+	if err := validateRuntimeComputeSafety(ComputeConfig{Backend: domain.BackendVLLM, CustomArgs: []string{"--gpu-memory-utilization=0.85"}}, catastrophic); err != nil {
+		t.Fatalf("safe cap err = %v", err)
 	}
 }
 
@@ -2199,6 +2367,50 @@ func TestComputeBackendAdapterLaunchesCustomProcessWithRenderedArgs(t *testing.T
 	}
 	if len(refs) != 0 {
 		t.Fatalf("refs after stop = %+v", refs)
+	}
+}
+
+func TestComputeBackendAdapterPassesConfiguredArgsToProcessBackends(t *testing.T) {
+	ctx := context.Background()
+	for _, tt := range []struct {
+		backend domain.Backend
+		base    []string
+		custom  []string
+	}{
+		{backend: domain.BackendVLLM, base: []string{"serve", "model.gguf", "--host", "127.0.0.1", "--port", "54321"}, custom: []string{"--gpu-memory-utilization", "0.85"}},
+		{backend: domain.BackendMLX, base: []string{"--model", "model.gguf", "--host", "127.0.0.1", "--port", "54321"}, custom: []string{"--trust-remote-code"}},
+	} {
+		t.Run(string(tt.backend), func(t *testing.T) {
+			store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer store.Close()
+			process := newFakeCustomProcess(2234)
+			process.exitOnSignal = true
+			runner := &fakeCustomProcessRunner{next: process}
+			adapter, err := computeBackendAdapterWithProcessRunner(ComputeConfig{
+				Backend:       tt.backend,
+				BackendBinary: "backend",
+				CustomArgs:    append([]string(nil), tt.custom...),
+			}, nodeagent.StoreProcessRegistry{Store: store, NodeID: "peer-a"}, runner)
+			if err != nil {
+				t.Fatalf("computeBackendAdapter: %v", err)
+			}
+			preset := testPreset("preset-a")
+			preset.ModelRef = "model.gguf"
+			preset.LaunchArgs = []string{"--served-model-name", "{preset}"}
+			handle, err := adapter.Launch(ctx, preset, "127.0.0.1:54321")
+			if err != nil {
+				t.Fatalf("Launch: %v", err)
+			}
+			defer func() { _ = adapter.Stop(context.Background(), handle) }()
+			want := append(append([]string(nil), tt.base...), tt.custom...)
+			want = append(want, "--served-model-name", "preset-a")
+			if !reflect.DeepEqual(process.startedArgs, want) {
+				t.Fatalf("args = %+v want %+v", process.startedArgs, want)
+			}
+		})
 	}
 }
 

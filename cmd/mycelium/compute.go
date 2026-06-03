@@ -61,6 +61,9 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 		node = detected
 	}
 	node.Labels = withPeerBackendLabel(node.Labels, compute.Backend)
+	if err := validateRuntimeComputeSafety(compute, node); err != nil {
+		return computeRuntime{}, err
+	}
 
 	registry := nodeagent.StoreProcessRegistry{Store: store, NodeID: node.ID}
 	adapter, err := computeBackendAdapter(compute, registry)
@@ -201,9 +204,9 @@ func computeBackendAdapterWithProcessRunner(cfg ComputeConfig, registry nodeagen
 	case domain.BackendLlamaCpp:
 		return llamacpp.NewAdapter(llamacpp.Config{BinaryPath: computeBackendBinary(cfg, "llama-server"), ProcessRegistry: registry}), nil
 	case domain.BackendMLX:
-		return mlx.NewAdapterWithConfig(mlx.Config{BinaryPath: computeBackendBinary(cfg, "mlx_lm.server"), ProcessRegistry: registry}), nil
+		return mlx.NewAdapterWithConfig(mlx.Config{BinaryPath: computeBackendBinary(cfg, "mlx_lm.server"), Args: append([]string(nil), cfg.CustomArgs...), ProcessRegistry: registry, ProcessRunner: runner}), nil
 	case domain.BackendVLLM:
-		return vllm.NewAdapterWithConfig(vllm.Config{BinaryPath: computeBackendBinary(cfg, "vllm"), ProcessRegistry: registry}), nil
+		return vllm.NewAdapterWithConfig(vllm.Config{BinaryPath: computeBackendBinary(cfg, "vllm"), Args: append([]string(nil), cfg.CustomArgs...), ProcessRegistry: registry, ProcessRunner: runner}), nil
 	case domain.BackendCustom:
 		binary := computeBackendBinary(cfg, "")
 		if binary == "" {
@@ -221,6 +224,23 @@ func computeBackendAdapterWithProcessRunner(cfg ComputeConfig, registry nodeagen
 	default:
 		return nil, errors.New("unknown compute backend " + string(backend))
 	}
+}
+
+func validateRuntimeComputeSafety(cfg ComputeConfig, node domain.Node) error {
+	if cfg.Backend != domain.BackendVLLM || node.OOMSeverity != domain.OOMCatastrophic {
+		return nil
+	}
+	value, ok, err := vllmGPUUtilization(cfg.CustomArgs)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("catastrophic vllm host requires --gpu-memory-utilization <= 0.85")
+	}
+	if value > sparkSafeVLLMGPUUtil {
+		return errors.New("catastrophic vllm host requires --gpu-memory-utilization <= 0.85")
+	}
+	return nil
 }
 
 func computeBackendBinary(cfg ComputeConfig, fallback string) string {
