@@ -320,6 +320,9 @@ func selectProjectPreset(project domain.Project, presets []domain.Preset) (domai
 	}
 	sorted := append([]domain.Preset(nil), presets...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	if project.DefaultModel != "" {
+		return presetByModel(sorted, project.DefaultModel)
+	}
 	if project.ContextCap > 0 {
 		for _, preset := range sorted {
 			if preset.ContextLength == project.ContextCap {
@@ -328,6 +331,20 @@ func selectProjectPreset(project domain.Project, presets []domain.Preset) (domai
 		}
 	}
 	return sorted[0], true
+}
+
+func presetByModel(presets []domain.Preset, model string) (domain.Preset, bool) {
+	for _, preset := range presets {
+		if preset.ID == model || preset.ModelRef == model {
+			return preset, true
+		}
+		for _, alias := range preset.Aliases {
+			if alias == model {
+				return preset, true
+			}
+		}
+	}
+	return domain.Preset{}, false
 }
 
 func presetByID(presets []domain.Preset, id string) (domain.Preset, bool) {
