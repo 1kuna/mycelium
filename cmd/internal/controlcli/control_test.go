@@ -327,6 +327,290 @@ func TestCatalogStageClientAndStageFailureBranches(t *testing.T) {
 	}
 }
 
+func TestRunModelsLocalityPlanAndApply(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	preset := testPreset("tiny")
+	preset.ArtifactSizeMB = 100
+	preset.EstWeightsMB = 100
+	if err := store.SavePreset(context.Background(), preset); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	node := domain.Node{
+		ID:               "node-a",
+		Name:             "Node A",
+		Address:          "127.0.0.1:51846",
+		Status:           domain.NodeReady,
+		Labels:           map[string]string{domain.LabelPeerBackend: string(domain.BackendLlamaCpp)},
+		DiskTotalMB:      1000,
+		DiskFreeMB:       700,
+		DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio,
+		MaxUtil:          0.8,
+		Accelerators:     []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000}},
+	}
+	if err := store.SaveNode(context.Background(), node); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = Run(context.Background(), []string{"models", "locality", "plan", "--db", dbPath, "--id", "plan-a"})
+	})
+	if runErr != nil {
+		t.Fatalf("locality plan: %v", runErr)
+	}
+	if !strings.Contains(output, "locality-action\tstage:node-a:tiny\tstage\ttiny\tnode-a") {
+		t.Fatalf("plan output = %q", output)
+	}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/catalog/stage" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer rpc-secret" {
+			t.Fatalf("auth = %s", r.Header.Get("Authorization"))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"locality": domain.ModelLocality{
+				ID:             "node-a:tiny",
+				PresetID:       "tiny",
+				NodeID:         "node-a",
+				State:          domain.ModelLocalityReady,
+				ModelRef:       "/catalog/models/tiny.gguf",
+				Managed:        true,
+				ArtifactSizeMB: 100,
+				UpdatedAt:      time.Unix(1, 0).UTC(),
+			},
+		})
+	}))
+	output = captureStdout(t, func() {
+		runErr = runModelsLocalityApply(context.Background(), []string{"--db", dbPath, "--id", "plan-a", "--rpc-token", "rpc-secret"}, catalogStageHTTPClient{Client: client})
+	})
+	if runErr != nil {
+		t.Fatalf("locality apply stage: %v", runErr)
+	}
+	if !strings.Contains(output, "locality-apply\tstage\ttiny\tnode-a\tready") {
+		t.Fatalf("apply output = %q", output)
+	}
+	verify, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open verify: %v", err)
+	}
+	localities, err := verify.ListModelLocalities(context.Background())
+	if err != nil || len(localities) != 1 || localities[0].ID != "node-a:tiny" {
+		t.Fatalf("localities = %+v %v", localities, err)
+	}
+	plan, err := verify.LocalityPlan(context.Background(), "plan-a")
+	if err != nil {
+		t.Fatalf("LocalityPlan: %v", err)
+	}
+	if action := plan.Actions[0]; action.State != domain.ModelLocalityReady || action.Error != "" {
+		t.Fatalf("applied action = %+v", action)
+	}
+	if err := verify.SaveLocalityPlan(context.Background(), domain.LocalityPlan{
+		ID:        "plan-evict",
+		CreatedAt: time.Unix(2, 0).UTC(),
+		Actions: []domain.LocalityAction{{
+			ID:       "evict:node-a:tiny",
+			Kind:     domain.LocalityActionEvict,
+			PresetID: "tiny",
+			NodeID:   "node-a",
+			State:    domain.ModelLocalityPlanned,
+		}},
+	}); err != nil {
+		t.Fatalf("SaveLocalityPlan evict: %v", err)
+	}
+	if err := verify.Close(); err != nil {
+		t.Fatalf("Close verify: %v", err)
+	}
+	evictClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/catalog/evict" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"locality": domain.ModelLocality{ID: "node-a:tiny", PresetID: "tiny", NodeID: "node-a", State: domain.ModelLocalityEvicted},
+		})
+	}))
+	output = captureStdout(t, func() {
+		runErr = runModelsLocalityApply(context.Background(), []string{"--db", dbPath, "--id", "plan-evict"}, catalogStageHTTPClient{Client: evictClient})
+	})
+	if runErr != nil {
+		t.Fatalf("locality apply evict: %v", runErr)
+	}
+	if !strings.Contains(output, "locality-apply\tevict\ttiny\tnode-a\tevicted") {
+		t.Fatalf("evict output = %q", output)
+	}
+	verify, err = storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open verify evict: %v", err)
+	}
+	localities, err = verify.ListModelLocalities(context.Background())
+	if err != nil || len(localities) != 0 {
+		t.Fatalf("localities after evict = %+v %v", localities, err)
+	}
+	if err := verify.Close(); err != nil {
+		t.Fatalf("Close verify evict: %v", err)
+	}
+}
+
+func TestRunModelsLocalityApplyRecordsFailures(t *testing.T) {
+	if err := runModelsLocalityApply(context.Background(), nil, catalogStageHTTPClient{}); err == nil || !strings.Contains(err.Error(), "--id") {
+		t.Fatalf("missing id err = %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), testPreset("tiny")); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	if err := store.SaveNode(context.Background(), domain.Node{ID: "node-a", Address: "127.0.0.1:51846", Status: domain.NodeReady}); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+	if err := store.SaveLocalityPlan(context.Background(), domain.LocalityPlan{
+		ID:        "plan-fail",
+		CreatedAt: time.Unix(1, 0).UTC(),
+		Actions: []domain.LocalityAction{{
+			ID:       "stage:node-a:tiny",
+			Kind:     domain.LocalityActionStage,
+			PresetID: "tiny",
+			NodeID:   "node-a",
+		}},
+	}); err != nil {
+		t.Fatalf("SaveLocalityPlan: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"stage failed"}`))
+	}))
+	if err := runModelsLocalityApply(context.Background(), []string{"--db", dbPath, "--id", "plan-fail"}, catalogStageHTTPClient{Client: client}); err == nil || !strings.Contains(err.Error(), "stage failed") {
+		t.Fatalf("apply failure err = %v", err)
+	}
+	verify, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open verify: %v", err)
+	}
+	plan, err := verify.LocalityPlan(context.Background(), "plan-fail")
+	if err != nil {
+		t.Fatalf("LocalityPlan: %v", err)
+	}
+	if plan.Actions[0].State != domain.ModelLocalityFailed || !strings.Contains(plan.Actions[0].Error, "stage failed") {
+		t.Fatalf("failed action = %+v", plan.Actions[0])
+	}
+	if err := verify.SaveLocalityPlan(context.Background(), domain.LocalityPlan{
+		ID:        "plan-unknown",
+		CreatedAt: time.Unix(2, 0).UTC(),
+		Actions: []domain.LocalityAction{{
+			ID:       "mystery:node-a:tiny",
+			Kind:     domain.LocalityActionKind("mystery"),
+			PresetID: "tiny",
+			NodeID:   "node-a",
+		}},
+	}); err != nil {
+		t.Fatalf("SaveLocalityPlan unknown: %v", err)
+	}
+	if err := verify.SaveLocalityPlan(context.Background(), domain.LocalityPlan{
+		ID:        "plan-keep",
+		CreatedAt: time.Unix(3, 0).UTC(),
+		Actions: []domain.LocalityAction{{
+			ID:       "keep:node-a:tiny",
+			Kind:     domain.LocalityActionKeep,
+			PresetID: "tiny",
+			NodeID:   "node-a",
+		}},
+	}); err != nil {
+		t.Fatalf("SaveLocalityPlan keep: %v", err)
+	}
+	if err := verify.SaveLocalityPlan(context.Background(), domain.LocalityPlan{
+		ID:        "plan-missing-preset",
+		CreatedAt: time.Unix(4, 0).UTC(),
+		Actions: []domain.LocalityAction{{
+			ID:       "stage:node-a:missing",
+			Kind:     domain.LocalityActionStage,
+			PresetID: "missing",
+			NodeID:   "node-a",
+		}},
+	}); err != nil {
+		t.Fatalf("SaveLocalityPlan missing preset: %v", err)
+	}
+	if err := verify.SaveLocalityPlan(context.Background(), domain.LocalityPlan{
+		ID:        "plan-missing-node",
+		CreatedAt: time.Unix(5, 0).UTC(),
+		Actions: []domain.LocalityAction{{
+			ID:       "stage:missing:tiny",
+			Kind:     domain.LocalityActionStage,
+			PresetID: "tiny",
+			NodeID:   "missing",
+		}},
+	}); err != nil {
+		t.Fatalf("SaveLocalityPlan missing node: %v", err)
+	}
+	if err := verify.Close(); err != nil {
+		t.Fatalf("Close verify: %v", err)
+	}
+	if err := runModelsLocalityApply(context.Background(), []string{"--db", dbPath, "--id", "plan-keep"}, catalogStageHTTPClient{}); err != nil {
+		t.Fatalf("keep apply: %v", err)
+	}
+	if err := runModelsLocalityApply(context.Background(), []string{"--db", dbPath, "--id", "missing-plan"}, catalogStageHTTPClient{}); err == nil {
+		t.Fatal("missing plan accepted")
+	}
+	if err := runModelsLocalityApply(context.Background(), []string{"--db", dbPath, "--id", "plan-missing-preset"}, catalogStageHTTPClient{}); err == nil {
+		t.Fatal("missing preset apply accepted")
+	}
+	if err := runModelsLocalityApply(context.Background(), []string{"--db", dbPath, "--id", "plan-missing-node"}, catalogStageHTTPClient{}); err == nil {
+		t.Fatal("missing node apply accepted")
+	}
+	if err := runModelsLocalityApply(context.Background(), []string{"--db", dbPath, "--id", "plan-unknown"}, catalogStageHTTPClient{}); err == nil || !strings.Contains(err.Error(), "unknown locality action") {
+		t.Fatalf("unknown action err = %v", err)
+	}
+	warningOutput := captureStdout(t, func() {
+		printLocalityPlan(domain.LocalityPlan{ID: "warn", Warnings: []string{"disk floor"}})
+	})
+	if !strings.Contains(warningOutput, "locality-warning\tdisk floor") {
+		t.Fatalf("warning output = %q", warningOutput)
+	}
+}
+
+func TestCatalogEvictClientFailureBranches(t *testing.T) {
+	action := domain.LocalityAction{PresetID: "tiny", NodeID: "node-a"}
+	if _, err := (catalogStageHTTPClient{}).EvictModel(context.Background(), domain.Peer{ID: "empty"}, action); err == nil {
+		t.Fatal("evict accepted peer without address")
+	}
+	errorClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"protected"}`))
+	}))
+	if _, err := (catalogStageHTTPClient{Client: errorClient}).EvictModel(context.Background(), domain.Peer{ID: "node-a", Addresses: []string{"http://peer.test"}}, action); err == nil || !strings.Contains(err.Error(), "protected") {
+		t.Fatalf("evict status err = %v", err)
+	}
+	malformedClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{`))
+	}))
+	if _, err := (catalogStageHTTPClient{Client: malformedClient}).EvictModel(context.Background(), domain.Peer{ID: "node-a", Addresses: []string{"http://peer.test"}}, action); err == nil {
+		t.Fatal("malformed evict response accepted")
+	}
+	wrongStateClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"locality": domain.ModelLocality{State: domain.ModelLocalityReady}})
+	}))
+	if _, err := (catalogStageHTTPClient{Client: wrongStateClient}).EvictModel(context.Background(), domain.Peer{ID: "node-a", Addresses: []string{"http://peer.test"}}, action); err == nil || !strings.Contains(err.Error(), "returned state") {
+		t.Fatalf("wrong state err = %v", err)
+	}
+	dialErrorClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial failed")
+	})}
+	if _, err := (catalogStageHTTPClient{Client: dialErrorClient}).EvictModel(context.Background(), domain.Peer{ID: "node-a", Addresses: []string{"http://peer.test"}}, action); err == nil || !strings.Contains(err.Error(), "dial failed") {
+		t.Fatalf("evict transport err = %v", err)
+	}
+}
+
 func TestRunBenchmarkFanOutPersistsJobsAndOutputs(t *testing.T) {
 	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
@@ -489,6 +773,8 @@ func TestListCommandsRejectBadFlags(t *testing.T) {
 		{"models", "list", "--bad"},
 		{"models", "stage", "--bad"},
 		{"models", "locality", "report", "--bad"},
+		{"models", "locality", "plan", "--bad"},
+		{"models", "locality", "apply", "--bad"},
 		{"nodes", "list", "--bad"},
 		{"jobs", "list", "--bad"},
 		{"recommendations", "list", "--bad"},

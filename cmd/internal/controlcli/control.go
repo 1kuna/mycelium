@@ -16,6 +16,7 @@ import (
 	"mycelium/internal/catalog"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
+	"mycelium/internal/locality"
 	"mycelium/internal/optimizer"
 	"mycelium/internal/ports"
 	storesqlite "mycelium/internal/store/sqlite"
@@ -196,22 +197,154 @@ func runModelsStage(ctx context.Context, args []string, client *http.Client) err
 }
 
 func runModelsLocality(ctx context.Context, args []string) error {
-	if len(args) == 0 || args[0] != "report" {
-		return fmt.Errorf("usage: myce models locality report [--db path]")
+	if len(args) == 0 {
+		return fmt.Errorf("usage: myce models locality <report|plan|apply>")
 	}
-	store, err := openCLIStore(args[1:])
+	switch args[0] {
+	case "report":
+		return runModelsLocalityReport(ctx, args[1:])
+	case "plan":
+		return runModelsLocalityPlan(ctx, args[1:])
+	case "apply":
+		return runModelsLocalityApply(ctx, args[1:], catalogStageHTTPClient{})
+	default:
+		return fmt.Errorf("usage: myce models locality <report|plan|apply>")
+	}
+}
+
+func runModelsLocalityReport(ctx context.Context, args []string) error {
+	store, err := openCLIStore(args)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	localities, err := store.ListModelLocalities(ctx)
+	report, err := (locality.Planner{Store: store}).Report(ctx)
 	if err != nil {
 		return err
 	}
-	for _, locality := range localities {
+	for _, locality := range report.Localities {
 		fmt.Printf("%s\t%s\t%s\t%s\t%t\t%d\t%s\n", locality.PresetID, locality.NodeID, locality.State, locality.ModelRef, locality.Managed, locality.ArtifactSizeMB, locality.Reason)
 	}
 	return nil
+}
+
+func runModelsLocalityPlan(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("models locality plan", flag.ContinueOnError)
+	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+	id := fs.String("id", "", "locality plan id")
+	project := fs.String("project", "", "project id for telemetry demand")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	store, err := storesqlite.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	plan, err := (locality.Planner{Store: store, Clock: clock.System{}}).Plan(ctx, locality.PlanRequest{ID: *id, Project: *project})
+	if err != nil {
+		return err
+	}
+	printLocalityPlan(plan)
+	return nil
+}
+
+func runModelsLocalityApply(ctx context.Context, args []string, client catalogStageHTTPClient) error {
+	fs := flag.NewFlagSet("models locality apply", flag.ContinueOnError)
+	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+	id := fs.String("id", "", "locality plan id")
+	rpcToken := fs.String("rpc-token", "", "target peer RPC bearer token")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *id == "" {
+		return fmt.Errorf("--id is required")
+	}
+	store, err := storesqlite.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	plan, err := store.LocalityPlan(ctx, *id)
+	if err != nil {
+		return err
+	}
+	client.AuthToken = *rpcToken
+	for i := range plan.Actions {
+		action := &plan.Actions[i]
+		switch action.Kind {
+		case domain.LocalityActionKeep:
+			continue
+		case domain.LocalityActionStage:
+			preset, err := store.Preset(ctx, action.PresetID)
+			if err != nil {
+				return recordLocalityActionError(ctx, store, &plan, action, err)
+			}
+			peer, err := localityActionPeer(ctx, store, action.NodeID)
+			if err != nil {
+				return recordLocalityActionError(ctx, store, &plan, action, err)
+			}
+			localityRecord, err := client.StageModel(ctx, peer, preset)
+			if err != nil {
+				return recordLocalityActionError(ctx, store, &plan, action, err)
+			}
+			if err := store.SaveModelLocality(ctx, localityRecord); err != nil {
+				return recordLocalityActionError(ctx, store, &plan, action, err)
+			}
+			action.State = domain.ModelLocalityReady
+			action.Error = ""
+			fmt.Printf("locality-apply\tstage\t%s\t%s\tready\n", action.PresetID, action.NodeID)
+		case domain.LocalityActionEvict:
+			peer, err := localityActionPeer(ctx, store, action.NodeID)
+			if err != nil {
+				return recordLocalityActionError(ctx, store, &plan, action, err)
+			}
+			localityRecord, err := client.EvictModel(ctx, peer, *action)
+			if err != nil {
+				return recordLocalityActionError(ctx, store, &plan, action, err)
+			}
+			if err := store.DeleteModelLocality(ctx, modelLocalityID(action.NodeID, action.PresetID)); err != nil {
+				return recordLocalityActionError(ctx, store, &plan, action, err)
+			}
+			action.State = localityRecord.State
+			action.Error = ""
+			fmt.Printf("locality-apply\tevict\t%s\t%s\t%s\n", action.PresetID, action.NodeID, localityRecord.State)
+		default:
+			return recordLocalityActionError(ctx, store, &plan, action, fmt.Errorf("unknown locality action kind %q", action.Kind))
+		}
+		if err := store.SaveLocalityPlan(ctx, plan); err != nil {
+			return err
+		}
+	}
+	return store.SaveLocalityPlan(ctx, plan)
+}
+
+func localityActionPeer(ctx context.Context, store *storesqlite.Store, nodeID string) (domain.Peer, error) {
+	node, err := store.Node(ctx, nodeID)
+	if err != nil {
+		return domain.Peer{}, err
+	}
+	if node.Address == "" {
+		return domain.Peer{}, fmt.Errorf("node %q has no reachable address", node.ID)
+	}
+	return domain.Peer{ID: node.ID, Addresses: []string{node.Address}, Compute: true}, nil
+}
+
+func recordLocalityActionError(ctx context.Context, store *storesqlite.Store, plan *domain.LocalityPlan, action *domain.LocalityAction, err error) error {
+	action.State = domain.ModelLocalityFailed
+	action.Error = err.Error()
+	_ = store.SaveLocalityPlan(ctx, *plan)
+	return err
+}
+
+func printLocalityPlan(plan domain.LocalityPlan) {
+	fmt.Printf("locality-plan\t%s\t%d\twarnings=%d\n", plan.ID, len(plan.Actions), len(plan.Warnings))
+	for _, action := range plan.Actions {
+		fmt.Printf("locality-action\t%s\t%s\t%s\t%s\t%s\n", action.ID, action.Kind, action.PresetID, action.NodeID, action.Reason)
+	}
+	for _, warning := range plan.Warnings {
+		fmt.Printf("locality-warning\t%s\n", warning)
+	}
 }
 
 type catalogStageHTTPClient struct {
@@ -263,6 +396,50 @@ func (c catalogStageHTTPClient) StageModel(ctx context.Context, peer domain.Peer
 	return out.Locality, nil
 }
 
+func (c catalogStageHTTPClient) EvictModel(ctx context.Context, peer domain.Peer, action domain.LocalityAction) (domain.ModelLocality, error) {
+	if len(peer.Addresses) == 0 {
+		return domain.ModelLocality{}, fmt.Errorf("peer %q has no reachable address", peer.ID)
+	}
+	body, err := json.Marshal(map[string]string{"preset_id": action.PresetID, "node_id": action.NodeID})
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(catalogPeerBaseURL(peer.Addresses[0]), "/")+"/catalog/evict", bytes.NewReader(body))
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	client := c.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return domain.ModelLocality{}, fmt.Errorf("catalog evict %s: %s", peer.ID, strings.TrimSpace(string(data)))
+	}
+	var out struct {
+		Locality domain.ModelLocality `json:"locality"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return domain.ModelLocality{}, err
+	}
+	if out.Locality.State != domain.ModelLocalityEvicted {
+		return domain.ModelLocality{}, fmt.Errorf("catalog evict %s returned state %q", peer.ID, out.Locality.State)
+	}
+	return out.Locality, nil
+}
+
 func catalogPeerBaseURL(address string) string {
 	if strings.HasPrefix(address, "http://") || strings.HasPrefix(address, "https://") {
 		return address
@@ -271,6 +448,10 @@ func catalogPeerBaseURL(address string) string {
 }
 
 var _ ports.PeerCatalogStager = catalogStageHTTPClient{}
+
+func modelLocalityID(nodeID, presetID string) string {
+	return nodeID + ":" + presetID
+}
 
 func runNodes(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
