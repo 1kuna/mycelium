@@ -457,6 +457,17 @@ func TestServiceManagersUseExpectedCommands(t *testing.T) {
 	if err := systemd.Uninstall(ctx, systemSpec); err != nil {
 		t.Fatalf("systemd Uninstall: %v", err)
 	}
+
+	systemSpec.Scope = serviceScopeSystem
+	systemSpec.UnitPath = filepath.Join(t.TempDir(), "mycelium-system.service")
+	rec = &serviceCommandRecorder{}
+	systemd = systemdManager{Run: rec.Run}
+	if err := systemd.Install(ctx, systemSpec); err != nil {
+		t.Fatalf("systemd system Install: %v", err)
+	}
+	if got := strings.Join(rec.Commands, "\n"); strings.Contains(got, "systemctl --user") || !strings.Contains(got, "systemctl daemon-reload") {
+		t.Fatalf("systemd system commands = %s", got)
+	}
 }
 
 func TestRunServiceStatusChecksPeerHealth(t *testing.T) {
@@ -562,6 +573,13 @@ func TestServiceUtilityErrorBranches(t *testing.T) {
 	if data, err := os.ReadFile(spec.UnitPath); err != nil || string(data) != "unit" {
 		t.Fatalf("unit data = %q %v", data, err)
 	}
+	blocked := filepath.Join(home, "blocked")
+	if err := os.WriteFile(blocked, []byte("file"), 0644); err != nil {
+		t.Fatalf("blocked file: %v", err)
+	}
+	if err := writeServiceFile(filepath.Join(blocked, "unit.plist"), spec.LogDir, "unit"); err == nil {
+		t.Fatal("writeServiceFile accepted file parent")
+	}
 }
 
 func TestPrivateStorageKeyValidation(t *testing.T) {
@@ -636,6 +654,22 @@ func TestPeerConfigHelpersSeedMapsAndShutdowns(t *testing.T) {
 	}
 	if got := presetMap([]domain.Preset{preset}); got["model-a"].ID != preset.ID || got["alias-a"].ID != preset.ID {
 		t.Fatalf("preset map = %+v", got)
+	}
+
+	defaultStore, err := storesqlite.Open(filepath.Join(t.TempDir(), "default-seed.sqlite"))
+	if err != nil {
+		t.Fatalf("Open default: %v", err)
+	}
+	defer defaultStore.Close()
+	if err := seedControlStore(context.Background(), defaultStore, PeerConfig{}); err != nil {
+		t.Fatalf("seedControlStore default: %v", err)
+	}
+	defaultProject, err := defaultStore.Project(context.Background(), "default")
+	if err != nil {
+		t.Fatalf("default project: %v", err)
+	}
+	if defaultProject.Priority != domain.PriorityInteractive || defaultProject.ExpectedConcurrency != 1 || defaultProject.Preemption != domain.PreemptSoft {
+		t.Fatalf("default project = %+v", defaultProject)
 	}
 }
 
@@ -2000,6 +2034,67 @@ func TestSeedPeerProbeRemembersReachablePeer(t *testing.T) {
 	}
 	if got := seedPeerProbeInterval(time.Millisecond); got != 5*time.Second {
 		t.Fatalf("seed interval = %s", got)
+	}
+	if got := seedPeerProbeInterval(6 * time.Second); got != 6*time.Second {
+		t.Fatalf("seed interval passthrough = %s", got)
+	}
+}
+
+func TestSeedRefreshingDiscoveryProbesSeedsBeforePeers(t *testing.T) {
+	seed := domain.Peer{ID: "seed-peer", Addresses: []string{"127.0.0.1:0"}, Compute: true}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Myc-Join-Token") != "secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(seed)
+	}))
+	cache := membership.NewCachedPeerDiscovery(&mocks.PeerDiscovery{}, mocks.NewFakeClock(time.Unix(10, 0).UTC()), time.Minute)
+	manager, err := membership.NewTokenManager("secret")
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	discovery := seedRefreshingDiscovery{
+		cache:      cache,
+		seeds:      []string{"http://seed-refresh.test"},
+		joinToken:  "secret",
+		joinTokens: manager,
+		client:     client,
+	}
+
+	peers, err := discovery.Peers(context.Background())
+	if err != nil {
+		t.Fatalf("Peers: %v", err)
+	}
+	if len(peers) != 1 || peers[0].ID != seed.ID || peers[0].Addresses[0] != "seed-refresh.test" {
+		t.Fatalf("seed refreshed peers = %+v", peers)
+	}
+	if err := discovery.Advertise(context.Background(), domain.Peer{ID: "self"}); err != nil {
+		t.Fatalf("Advertise: %v", err)
+	}
+	watch, err := discovery.WatchPeers(context.Background())
+	if err != nil {
+		t.Fatalf("WatchPeers: %v", err)
+	}
+	waitForCondition(t, func() bool {
+		select {
+		case got := <-watch:
+			if got.ID != seed.ID {
+				t.Fatalf("watched peer = %+v", got)
+			}
+			return true
+		default:
+			return false
+		}
+	})
+	if err := (seedRefreshingDiscovery{}).Advertise(context.Background(), domain.Peer{}); err == nil {
+		t.Fatal("nil seed discovery advertise succeeded")
+	}
+	if _, err := (seedRefreshingDiscovery{}).Peers(context.Background()); err == nil {
+		t.Fatal("nil seed discovery peers succeeded")
+	}
+	if _, err := (seedRefreshingDiscovery{}).WatchPeers(context.Background()); err == nil {
+		t.Fatal("nil seed discovery watch succeeded")
 	}
 }
 
