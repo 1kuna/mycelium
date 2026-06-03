@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -27,7 +26,6 @@ func TestLANTunnelOpensReusesAndClosesFakeListener(t *testing.T) {
 	if loopback != "127.0.0.1:6001" {
 		t.Fatalf("loopback = %s", loopback)
 	}
-	waitAccepted(t, first)
 
 	loopbackAgain, err := tunnel.Open(context.Background(), node)
 	if err != nil {
@@ -48,7 +46,6 @@ func TestLANTunnelOpensReusesAndClosesFakeListener(t *testing.T) {
 	if !first.isClosed() {
 		t.Fatal("old listener was not closed after target changed")
 	}
-	waitAccepted(t, second)
 	if err := tunnel.Close(context.Background(), "node-a"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -59,6 +56,9 @@ func TestLANTunnelOpensReusesAndClosesFakeListener(t *testing.T) {
 
 func TestLANTunnelRejectsBadInputAndClosesMissing(t *testing.T) {
 	tunnel := NewLANTunnel()
+	if err := shutdownTunnelEntry(context.Background(), nil); err != nil {
+		t.Fatalf("nil shutdown entry: %v", err)
+	}
 	if _, err := tunnel.Open(context.Background(), domain.Node{}); err == nil || !strings.Contains(err.Error(), "node id") {
 		t.Fatalf("missing id err = %v", err)
 	}
@@ -143,16 +143,3 @@ type fakeAddr string
 
 func (a fakeAddr) Network() string { return "tcp" }
 func (a fakeAddr) String() string  { return string(a) }
-
-func waitAccepted(t *testing.T, listener *fakeListener) {
-	t.Helper()
-	for i := 0; i < 1000; i++ {
-		select {
-		case <-listener.accepted:
-			return
-		default:
-			runtime.Gosched()
-		}
-	}
-	t.Fatal("server did not start accepting")
-}

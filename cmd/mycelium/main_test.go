@@ -43,6 +43,10 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 	}{
 		{name: "run", args: []string{"run"}, want: "read peer config"},
 		{name: "ctl", args: []string{"ctl"}, want: "usage: myce <add-model|models|nodes|projects|jobs|recommendations|benchmark>"},
+		{name: "server removed", args: []string{"server"}, want: "peer-native"},
+		{name: "node removed", args: []string{"node"}, want: "peer-native"},
+		{name: "unknown", args: []string{"wat"}, want: "unknown command"},
+		{name: "flag passthrough", args: []string{"--config", filepath.Join(t.TempDir(), "missing.json")}, want: "open"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1533,6 +1537,13 @@ func TestBootstrapDoctorAndAdoptionWithFakeDetector(t *testing.T) {
 	if err := adoptBootstrapEngineWithDetector(context.Background(), &cfg, "on", fakeBootstrapEngineDetector{host: detector.host, configured: domain.EngineProfile{Backend: domain.BackendVLLM}, profiles: []domain.EngineProfile{{Backend: domain.BackendVLLM}}}); err == nil {
 		t.Fatal("compute-on no-ready engine accepted")
 	}
+	report, err = detectBootstrapEngines(context.Background(), applyPeerConfigDefaults(PeerConfig{ComputeConfig: ComputeConfig{ID: "peer-real", Backend: domain.BackendLlamaCpp}}))
+	if err != nil {
+		t.Fatalf("real bootstrap detector wrapper: %v", err)
+	}
+	if report.Host.Platform == "" || len(report.Engines) == 0 {
+		t.Fatalf("real detector report = %+v", report)
+	}
 }
 
 type fakeBootstrapEngineDetector struct {
@@ -2980,6 +2991,27 @@ func TestRunNodeAndPeerExitOnCanceledContext(t *testing.T) {
 	})
 	if err := runPeer(ctx, []string{"--config", configPath}); err != nil {
 		t.Fatalf("runPeer canceled: %v", err)
+	}
+}
+
+func TestRunPeerReportsStartupErrors(t *testing.T) {
+	if err := runPeer(context.Background(), []string{"--config", filepath.Join(t.TempDir(), "missing.json")}); err == nil || !strings.Contains(err.Error(), "open") {
+		t.Fatalf("missing config err = %v", err)
+	}
+	configPath := writePeerConfig(t, PeerConfig{
+		Listen:    "127.0.0.1:-1",
+		StorePath: filepath.Join(t.TempDir(), "control.db"),
+		Compute:   true,
+		ComputeConfig: ComputeConfig{
+			ID:            "peer-a",
+			BackendListen: "127.0.0.1:51848",
+			LlamaServer:   "/bin/echo",
+			VRAMMB:        1024,
+		},
+		Presets: []domain.Preset{testPreset("tiny")},
+	})
+	if err := runPeer(context.Background(), []string{"--config", configPath}); err == nil || !strings.Contains(err.Error(), "listen") {
+		t.Fatalf("bad listen err = %v", err)
 	}
 }
 

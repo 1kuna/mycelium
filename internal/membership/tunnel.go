@@ -2,6 +2,7 @@ package membership
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -77,11 +78,11 @@ func (t *LANTunnel) Open(ctx context.Context, node domain.Node) (string, error) 
 	t.known[node.ID] = entry
 	t.mu.Unlock()
 	if old != nil {
-		_ = old.server.Shutdown(ctx)
+		_ = shutdownTunnelEntry(ctx, old)
 	}
 	go func() {
 		err := server.Serve(listener)
-		if err != nil && err != http.ErrServerClosed {
+		if err != nil && err != http.ErrServerClosed && !errors.Is(err, net.ErrClosed) {
 			panic(err)
 		}
 	}()
@@ -96,7 +97,16 @@ func (t *LANTunnel) Close(ctx context.Context, nodeID string) error {
 	if entry == nil {
 		return nil
 	}
-	return entry.server.Shutdown(ctx)
+	return shutdownTunnelEntry(ctx, entry)
+}
+
+func shutdownTunnelEntry(ctx context.Context, entry *tunnelEntry) error {
+	if entry == nil {
+		return nil
+	}
+	err := entry.server.Shutdown(ctx)
+	_ = entry.listener.Close()
+	return err
 }
 
 type netListenerFactory struct{}

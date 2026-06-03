@@ -107,6 +107,13 @@ func TestPersistentTokenManagerErrors(t *testing.T) {
 	if _, err := NewPersistentTokenManager(context.Background(), "one", &tokenStore{saveErr: errors.New("save")}); err == nil {
 		t.Fatal("expected save error")
 	}
+	if _, err := NewPersistentTokenManager(context.Background(), "one", &tokenStore{records: map[string]domain.JoinTokenRecord{"bad": {}}}); err == nil || err.Error() != "persisted join token hash is required" {
+		t.Fatalf("expected malformed record error, got %v", err)
+	}
+	revoked := tokenHash("one")
+	if _, err := NewPersistentTokenManager(context.Background(), "one", &tokenStore{records: map[string]domain.JoinTokenRecord{revoked: {Hash: revoked, Active: false}}}); err == nil || err.Error() != "no active join token is available" {
+		t.Fatalf("expected no active token error, got %v", err)
+	}
 }
 
 type tokenStore struct {
