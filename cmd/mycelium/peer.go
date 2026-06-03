@@ -326,7 +326,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		PrivateStorage:      len(privateKey) > 0,
 		PrivateLocalNodeID:  privateLocalNodeID(cfg),
 	}}
-	mountPeerHTTP(mux, self, joinTokens)
+	mountPeerHTTPWithDiagnostics(mux, self, joinTokens, cfg.SeedPeers, cfg.JoinToken, cfg.RPCToken, peerControlHTTPClient())
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
 	mountTelemetryHTTP(mux, store, cfg.RPCToken)
 	mountCatalogHTTP(mux, cfg, store, cfg.RPCToken, clock.System{})
@@ -367,7 +367,25 @@ func privateLocalNodeID(cfg PeerConfig) string {
 	return cfg.ComputeConfig.ID
 }
 
+type peerDiagnosticsReport struct {
+	Peer  domain.Peer          `json:"peer"`
+	Seeds []peerSeedDiagnostic `json:"seeds"`
+	Ready bool                 `json:"ready"`
+}
+
+type peerSeedDiagnostic struct {
+	Address string `json:"address"`
+	PeerID  string `json:"peer_id,omitempty"`
+	Compute bool   `json:"compute,omitempty"`
+	Ready   bool   `json:"ready"`
+	Error   string `json:"error,omitempty"`
+}
+
 func mountPeerHTTP(mux *http.ServeMux, self domain.Peer, joinTokens *membership.TokenManager) {
+	mountPeerHTTPWithDiagnostics(mux, self, joinTokens, nil, "", "", nil)
+}
+
+func mountPeerHTTPWithDiagnostics(mux *http.ServeMux, self domain.Peer, joinTokens *membership.TokenManager, seeds []string, joinToken string, rpcToken string, client *http.Client) {
 	mux.HandleFunc("/peer/health", func(w http.ResponseWriter, r *http.Request) {
 		if !peerJoinAuthorized(r, joinTokens) {
 			w.Header().Set("Content-Type", "application/json")
@@ -380,6 +398,53 @@ func mountPeerHTTP(mux *http.ServeMux, self domain.Peer, joinTokens *membership.
 			panic(err)
 		}
 	})
+	mux.HandleFunc("/peer/diagnostics", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		report := buildPeerDiagnostics(r.Context(), self, seeds, joinToken, joinTokens, client)
+		w.Header().Set("Content-Type", "application/json")
+		if !report.Ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		if err := json.NewEncoder(w).Encode(report); err != nil {
+			panic(err)
+		}
+	})
+}
+
+func buildPeerDiagnostics(ctx context.Context, self domain.Peer, seeds []string, joinToken string, joinTokens *membership.TokenManager, client *http.Client) peerDiagnosticsReport {
+	report := peerDiagnosticsReport{Peer: self, Ready: true}
+	if len(seeds) == 0 {
+		return report
+	}
+	token, err := authorizedOutboundJoinToken(joinToken, joinTokens)
+	if err != nil {
+		report.Ready = false
+		for _, seed := range seeds {
+			report.Seeds = append(report.Seeds, peerSeedDiagnostic{Address: seed, Ready: false, Error: err.Error()})
+		}
+		return report
+	}
+	for _, seed := range seeds {
+		check := peerSeedDiagnostic{Address: seed}
+		peer, err := fetchPeerHealthWithClient(ctx, seed, token, client)
+		if err != nil {
+			check.Error = err.Error()
+			report.Ready = false
+		} else {
+			check.Ready = true
+			check.PeerID = peer.ID
+			check.Compute = peer.Compute
+		}
+		report.Seeds = append(report.Seeds, check)
+	}
+	return report
 }
 
 type adminTokenStore interface {

@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -82,8 +84,16 @@ func runServiceWithManager(ctx context.Context, args []string, manager serviceMa
 		if err != nil {
 			return err
 		}
+		seeds, err := servicePeerDiagnostics(ctx, spec.ConfigPath)
+		if err != nil {
+			return err
+		}
 		status := serviceStatus{Manager: managerStatus, Health: health}
-		fmt.Fprintf(os.Stdout, "service\t%s\npeer\t%s\n", status.Manager, status.Health)
+		if seeds == "" {
+			fmt.Fprintf(os.Stdout, "service\t%s\npeer\t%s\n", status.Manager, status.Health)
+			return nil
+		}
+		fmt.Fprintf(os.Stdout, "service\t%s\npeer\t%s\nseeds\t%s\n", status.Manager, status.Health, seeds)
 		return nil
 	case "uninstall":
 		if err := manager.Uninstall(ctx, spec); err != nil {
@@ -305,7 +315,9 @@ func renderLaunchdPlist(spec serviceSpec) string {
 		writePlistValue(&out, arg)
 	}
 	out.WriteString("</array>\n")
-	out.WriteString("<key>RunAtLoad</key>\n<true/>\n<key>KeepAlive</key>\n<true/>\n")
+	out.WriteString("<key>RunAtLoad</key>\n<true/>\n")
+	out.WriteString("<key>KeepAlive</key>\n<dict>\n<key>NetworkState</key>\n<true/>\n<key>SuccessfulExit</key>\n<false/>\n</dict>\n")
+	writePlistString(&out, "WorkingDirectory", spec.Home)
 	writePlistString(&out, "StandardOutPath", filepath.Join(spec.LogDir, spec.Name+".out.log"))
 	writePlistString(&out, "StandardErrorPath", filepath.Join(spec.LogDir, spec.Name+".err.log"))
 	out.WriteString("</dict>\n</plist>\n")
@@ -382,6 +394,54 @@ func servicePeerHealth(ctx context.Context, configPath string) (string, error) {
 		return "", fmt.Errorf("peer health returned HTTP %d", resp.StatusCode)
 	}
 	return "ready", nil
+}
+
+func servicePeerDiagnostics(ctx context.Context, configPath string) (string, error) {
+	cfg, err := loadPeerConfig(configPath)
+	if err != nil {
+		return "", err
+	}
+	if len(cfg.SeedPeers) == 0 {
+		return "", nil
+	}
+	base, err := servicePeerBaseURL(cfg.Listen)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/peer/diagnostics", nil)
+	if err != nil {
+		return "", err
+	}
+	if cfg.RPCToken != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.RPCToken)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("peer diagnostics failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("peer diagnostics returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var report peerDiagnosticsReport
+	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
+		return "", err
+	}
+	ready := 0
+	var failures []string
+	for _, seed := range report.Seeds {
+		if seed.Ready {
+			ready++
+			continue
+		}
+		failures = append(failures, seed.Address+": "+seed.Error)
+	}
+	if len(failures) > 0 {
+		return "", fmt.Errorf("peer diagnostics seed failures: %s", strings.Join(failures, "; "))
+	}
+	return fmt.Sprintf("ready %d/%d", ready, len(report.Seeds)), nil
 }
 
 func servicePeerBaseURL(listen string) (string, error) {
