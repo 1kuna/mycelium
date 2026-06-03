@@ -115,6 +115,31 @@ func TestFleetBenchmarkConfigValidationRejectsBadInputs(t *testing.T) {
 	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "duplicate simulation preset") {
 		t.Fatalf("duplicate preset err = %v", err)
 	}
+	cfg = fleetTestConfig()
+	cfg.Models[0].Priority = "urgent"
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "priority") {
+		t.Fatalf("priority enum err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Models[0].SpeedPref = "cheap"
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "speed_pref") {
+		t.Fatalf("speed enum err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Models[0].Preemption = "always"
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "preemption") {
+		t.Fatalf("preemption enum err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Simulation.Nodes[0].Status = "busy"
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "status") {
+		t.Fatalf("status enum err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Simulation.Nodes[0].OOMSeverity = "meltdown"
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "oom_severity") {
+		t.Fatalf("oom enum err = %v", err)
+	}
 }
 
 func TestFleetBenchmarkSimulationProvesConservativeScenarioAndWritesArtifacts(t *testing.T) {
@@ -152,14 +177,17 @@ func TestFleetBenchmarkSimulationProvesConservativeScenarioAndWritesArtifacts(t 
 func TestFleetBenchmarkLiveRunnerCapturesHeadersMetricsAndOutputs(t *testing.T) {
 	cfg := fleetTestConfig()
 	clock := mocks.NewFakeClock(time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC))
+	liveCalls := 0
 	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/snapshot":
 			node := cfg.Simulation.Nodes[0]
+			instances := []domain.ModelInstance{{ID: "inst-spark", NodeID: node.ID, PresetID: "preset-122b", AcceleratorSet: []int{0}, Claim: domain.Claim{WeightsMB: 76000}, State: domain.InstReady}}
 			if strings.Contains(r.Host, "b70") {
 				node = cfg.Simulation.Nodes[1]
+				instances = []domain.ModelInstance{{ID: "inst-live", NodeID: node.ID, PresetID: "preset-9b", State: domain.InstReady}}
 			}
-			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: node})
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: node, Instances: instances})
 		case "/telemetry/metrics":
 			if r.Header.Get("Authorization") != "Bearer rpc-secret" {
 				http.Error(w, "rpc token required", http.StatusUnauthorized)
@@ -178,12 +206,26 @@ func TestFleetBenchmarkLiveRunnerCapturesHeadersMetricsAndOutputs(t *testing.T) 
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode request: %v", err)
 			}
-			w.Header().Set(fleetHeaderDecision, string(domain.ActionLoadedNew))
-			w.Header().Set(fleetHeaderNode, "b70")
-			w.Header().Set(fleetHeaderInstance, "inst-live")
-			w.Header().Set(fleetHeaderBackend, string(domain.BackendLlamaCpp))
+			liveCalls++
+			switch liveCalls {
+			case 1:
+				w.Header().Set(fleetHeaderDecision, string(domain.ActionLoadedNew))
+				w.Header().Set(fleetHeaderNode, "b70")
+				w.Header().Set(fleetHeaderInstance, "inst-live")
+				w.Header().Set(fleetHeaderBackend, string(domain.BackendLlamaCpp))
+			case 2:
+				w.Header().Set(fleetHeaderDecision, string(domain.ActionWarmInstance))
+				w.Header().Set(fleetHeaderNode, "b70")
+				w.Header().Set(fleetHeaderInstance, "inst-live")
+				w.Header().Set(fleetHeaderBackend, string(domain.BackendLlamaCpp))
+			default:
+				w.Header().Set(fleetHeaderDecision, string(domain.ActionHardPreempted))
+				w.Header().Set(fleetHeaderNode, "spark")
+				w.Header().Set(fleetHeaderInstance, "inst-spark")
+				w.Header().Set(fleetHeaderBackend, string(domain.BackendLlamaCpp))
+			}
 			w.Header().Set(fleetHeaderAttempts, "1")
-			w.Header().Set(fleetHeaderTrace, `[{"step":"score","result":"winner=b70"}]`)
+			w.Header().Set(fleetHeaderTrace, `[{"step":"score","result":"winner"}]`)
 			_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{
 				Model: req.Model,
 				Choices: []api.OpenAIChatChoice{{
@@ -205,7 +247,7 @@ func TestFleetBenchmarkLiveRunnerCapturesHeadersMetricsAndOutputs(t *testing.T) 
 	if err != nil {
 		t.Fatalf("RunFleet live: %v", err)
 	}
-	if len(result.Results) != 3 || result.Results[0].NodeID != "b70" || result.Results[0].TokensPerSec <= 0 || len(result.Results[0].Trace) != 1 {
+	if len(result.Results) != 3 || result.Results[0].NodeID != "b70" || result.Results[1].Decision != string(domain.ActionWarmInstance) || result.Results[2].NodeID != "spark" || !result.Results[2].LiveMatchesPreflight || result.Results[0].TokensPerSec <= 0 || len(result.Results[0].Trace) != 1 {
 		t.Fatalf("results = %+v", result.Results)
 	}
 	if len(result.Metrics) != 4 || result.Metrics[0].TokensPerSec != 11 {
@@ -245,10 +287,12 @@ func TestFleetBenchmarkLiveRunnerHonorsExpectedFailuresAndTraceExpectations(t *t
 		switch r.URL.Path {
 		case "/snapshot":
 			node := cfg.Simulation.Nodes[0]
+			instances := []domain.ModelInstance{{ID: "inst-preempted", NodeID: node.ID, PresetID: "preset-122b", State: domain.InstReady}}
 			if strings.Contains(r.Host, "b70") {
 				node = cfg.Simulation.Nodes[1]
+				instances = nil
 			}
-			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: node})
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: node, Instances: instances})
 		case "/telemetry/metrics":
 			_ = json.NewEncoder(w).Encode([]domain.RunMetric{})
 		case "/v1/chat/completions":
@@ -308,10 +352,12 @@ func TestFleetBenchmarkLiveRunnerFailsExpectationMismatches(t *testing.T) {
 		switch r.URL.Path {
 		case "/snapshot":
 			node := cfg.Simulation.Nodes[0]
+			instances := []domain.ModelInstance{}
 			if strings.Contains(r.Host, "b70") {
 				node = cfg.Simulation.Nodes[1]
+				instances = []domain.ModelInstance{{ID: "inst-b70", NodeID: node.ID, PresetID: "preset-9b", State: domain.InstReady}}
 			}
-			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: node})
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: node, Instances: instances})
 		case "/telemetry/metrics":
 			_ = json.NewEncoder(w).Encode([]domain.RunMetric{})
 		case "/v1/chat/completions":
@@ -407,6 +453,29 @@ func TestFleetExpectationValidationAndDelay(t *testing.T) {
 	}
 }
 
+func TestFleetLivePreflightMismatchEvidence(t *testing.T) {
+	plan := FleetSimulationDecision{
+		JobID: "job-a",
+		Decision: domain.PlacementDecision{
+			NodeID: "spark",
+			Action: domain.ActionHardPreempted,
+		},
+	}
+	matched := attachPreflightResult(FleetJobResult{JobID: "job-a", NodeID: "spark", Decision: string(domain.ActionHardPreempted)}, plan)
+	if !matched.LiveMatchesPreflight || matched.PreflightNodeID != "spark" || matched.PreflightDecision != string(domain.ActionHardPreempted) {
+		t.Fatalf("matched = %+v", matched)
+	}
+	mismatched := attachPreflightResult(FleetJobResult{JobID: "job-a", ModelID: "qwen122b", NodeID: "b70", Decision: string(domain.ActionLoadedNew)}, plan)
+	failures := livePreflightMismatchFailures([]FleetJobResult{matched, mismatched})
+	if len(failures) != 1 || !strings.Contains(failures[0].Error, "did not match preflight") {
+		t.Fatalf("mismatch failures = %+v", failures)
+	}
+	expectedFailure := attachPreflightResult(FleetJobResult{JobID: "job-a", ModelID: "qwen122b", ExpectedFailure: true}, plan)
+	if failures := livePreflightMismatchFailures([]FleetJobResult{expectedFailure}); len(failures) != 0 {
+		t.Fatalf("expected-failure mismatch should be ignored: %+v", failures)
+	}
+}
+
 func TestSubmitFleetJobTransportAndReadFailures(t *testing.T) {
 	cfg := fleetTestConfig()
 	model := cfg.Models[0]
@@ -438,6 +507,18 @@ func TestSubmitFleetJobTransportAndReadFailures(t *testing.T) {
 	if !strings.Contains(result.Error, "read failed") {
 		t.Fatalf("read result = %+v", result)
 	}
+
+	client = directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(fleetHeaderTrace, `{`)
+		_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{
+			Choices: []api.OpenAIChatChoice{{Message: api.OpenAIMessage{Role: "assistant", Content: "bad trace"}}},
+			Usage:   api.OpenAIUsage{CompletionTokens: 1, TotalTokens: 2},
+		})
+	}))
+	result = submitFleetJob(context.Background(), cfg, "wave-a", 0, spec, model, cfg.Gateways[0], t.TempDir(), client, clock)
+	if !strings.Contains(result.Error, "X-Myc-Trace") {
+		t.Fatalf("trace result = %+v", result)
+	}
 }
 
 func TestLoadFleetConfigAndDefaultProfiles(t *testing.T) {
@@ -457,6 +538,19 @@ func TestLoadFleetConfigAndDefaultProfiles(t *testing.T) {
 	}
 	if loaded.ID != cfg.ID || len(defaultWaves(loaded, FleetProfileSaturation)) == 0 || len(defaultWaves(loaded, FleetProfileSoak)) != 5 {
 		t.Fatalf("loaded/defaults = %+v", loaded)
+	}
+	conservative := defaultWaves(loaded, FleetProfileConservative)
+	if len(conservative) != 3 || conservative[0].ID != "conservative-cold" || conservative[1].ID != "conservative-warm" || conservative[2].ID != "conservative-fit-forced" {
+		t.Fatalf("conservative defaults = %+v", conservative)
+	}
+	result, err := RunFleet(context.Background(), loaded, FleetRunOptions{
+		Profile:    FleetProfileConservative,
+		Simulate:   true,
+		OutputRoot: t.TempDir(),
+		Clock:      mocks.NewFakeClock(time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)),
+	})
+	if err != nil || !result.Preflight.Passed || len(result.Preflight.Plans) != 3 {
+		t.Fatalf("conservative default RunFleet result=%+v err=%v", result.Preflight, err)
 	}
 	if _, err := LoadFleetConfig(filepath.Join(t.TempDir(), "missing.json")); err == nil {
 		t.Fatal("missing config accepted")
@@ -567,27 +661,53 @@ func TestFleetBenchmarkEvidenceHelpersFailLoudly(t *testing.T) {
 	if failures := liveSnapshotMismatchFailures(cfg, snapshots); len(failures) != 1 || failures[0].NodeID != "not-in-sim" {
 		t.Fatalf("mismatch failures = %+v", failures)
 	}
-	if resources := resourcesFromSnapshots(snapshots); len(resources) != 2 || resources[0].Error == "" || resources[1].NodeID != "not-in-sim" {
+	if resources := resourcesFromSnapshots(cfg, snapshots); len(resources) != 2 || resources[0].Error == "" || resources[1].NodeID != "not-in-sim" {
 		t.Fatalf("resources = %+v", resources)
+	}
+	resourceSnapshot := []FleetSnapshotMark{{
+		Stage:  "after",
+		PeerID: "spark",
+		Snapshot: domain.NodeSnapshot{
+			Node: cfg.Simulation.Nodes[0],
+			Instances: []domain.ModelInstance{{
+				ID:             "inst-122b",
+				PresetID:       "preset-122b",
+				NodeID:         "spark",
+				AcceleratorSet: []int{0},
+				Claim:          domain.Claim{WeightsMB: 76000, KVReservedMB: 1024},
+				State:          domain.InstReady,
+				Priority:       domain.PriorityInteractive,
+			}},
+		},
+	}}
+	resource := resourcesFromSnapshots(cfg, resourceSnapshot)[0]
+	if resource.DiskFloorMB == 0 || resource.LargestArtifactMB == 0 || resource.DiskFreeAfterLargestArtifactMB != resource.DiskFreeMB-resource.LargestArtifactMB {
+		t.Fatalf("resource disk fields = %+v", resource)
+	}
+	if len(resource.Instances) != 1 || len(resource.AcceleratorUsage) != 1 || resource.AcceleratorUsage[0].ReservedClaimMB != 77024 || resource.AcceleratorUsage[0].BenchmarkUsedMB != 77024 {
+		t.Fatalf("resource claim fields = %+v", resource)
 	}
 	placementFailures := livePlacementEvidenceFailures([]FleetJobResult{
 		{JobID: "missing-node", ModelID: "qwen9b", StatusCode: http.StatusOK},
 		{JobID: "unknown-node", ModelID: "qwen9b", StatusCode: http.StatusOK, NodeID: "not-seen", InstanceID: "inst-a", Backend: string(domain.BackendLlamaCpp), Decision: string(domain.ActionLoadedNew)},
 		{JobID: "missing-headers", ModelID: "qwen9b", StatusCode: http.StatusOK, NodeID: "not-in-sim"},
+		{JobID: "unseen-instance", ModelID: "qwen9b", StatusCode: http.StatusOK, NodeID: "not-in-sim", InstanceID: "missing", Backend: string(domain.BackendLlamaCpp), Decision: string(domain.ActionLoadedNew)},
 		{JobID: "failed", ModelID: "qwen9b", StatusCode: http.StatusBadGateway, Error: "failed"},
 	}, snapshots)
-	if len(placementFailures) != 5 {
+	if len(placementFailures) != 6 || !containsString([]string{placementFailures[5].Error}, "instance") {
 		t.Fatalf("placement failures = %+v", placementFailures)
 	}
 	unsafeResources := []FleetResourceMark{
 		{PeerID: "empty"},
-		{NodeID: "bad-disk", DiskTotalMB: 1000, DiskFreeMB: 200, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0.90, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000}}},
-		{NodeID: "bad-ratio", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: 1.2, MaxUtil: 0.90, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000}}},
-		{NodeID: "bad-util", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0},
-		{NodeID: "bad-vram", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0.90, Accelerators: []domain.Accelerator{{Index: 0}}},
-		{NodeID: "spark-hot", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0.90, OOMSeverity: domain.OOMCatastrophic, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000, VRAMUsedMB: 851}}},
+		{NodeID: "bad-disk", DiskTotalMB: 1000, DiskFreeMB: 200, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0.90, OOMSeverity: domain.OOMSoft, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000}}},
+		{NodeID: "bad-ratio", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: 1.2, MaxUtil: 0.90, OOMSeverity: domain.OOMSoft, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000}}},
+		{NodeID: "bad-util", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0, OOMSeverity: domain.OOMSoft},
+		{NodeID: "bad-vram", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0.90, OOMSeverity: domain.OOMSoft, Accelerators: []domain.Accelerator{{Index: 0}}},
+		{NodeID: "bad-oom", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0.90, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000}}},
+		{NodeID: "bad-artifact", DiskTotalMB: 1000, DiskFreeMB: 300, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, DiskFreeAfterLargestArtifactMB: 240, LargestArtifactMB: 60, MaxUtil: 0.90, OOMSeverity: domain.OOMSoft, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000}}},
+		{NodeID: "spark-hot", DiskTotalMB: 1000, DiskFreeMB: 800, DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio, MaxUtil: 0.90, OOMSeverity: domain.OOMCatastrophic, AcceleratorUsage: []FleetAcceleratorUsage{{Index: 0, VRAMTotalMB: 1000, SnapshotUsedMB: 0, ReservedClaimMB: 851, BenchmarkUsedMB: 851, UsableMB: 850}}},
 	}
-	if failures := resourceSafetyFailures(cfg, unsafeResources); len(failures) != 6 {
+	if failures := resourceSafetyFailures(cfg, unsafeResources); len(failures) != 8 {
 		t.Fatalf("resource failures = %+v", failures)
 	}
 

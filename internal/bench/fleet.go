@@ -200,28 +200,31 @@ type FleetEvent struct {
 }
 
 type FleetJobResult struct {
-	WaveID            string             `json:"wave_id"`
-	JobID             string             `json:"job_id"`
-	ModelID           string             `json:"model_id"`
-	RequestModel      string             `json:"request_model"`
-	GatewayID         string             `json:"gateway_id"`
-	NodeID            string             `json:"node_id,omitempty"`
-	InstanceID        string             `json:"instance_id,omitempty"`
-	Backend           string             `json:"backend,omitempty"`
-	Decision          string             `json:"decision,omitempty"`
-	Attempts          int                `json:"attempts,omitempty"`
-	StatusCode        int                `json:"status_code"`
-	OutputPath        string             `json:"output_path,omitempty"`
-	Bytes             int                `json:"bytes"`
-	DurationMS        int                `json:"duration_ms"`
-	ContextTokens     int                `json:"context_tokens,omitempty"`
-	TokensPerSec      float64            `json:"tokens_per_sec,omitempty"`
-	Headers           map[string]string  `json:"headers,omitempty"`
-	Trace             []domain.TraceStep `json:"trace,omitempty"`
-	Error             string             `json:"error,omitempty"`
-	RetryAllowed      bool               `json:"retry_allowed"`
-	ExpectedFailure   bool               `json:"expected_failure,omitempty"`
-	ExpectationErrors []string           `json:"expectation_errors,omitempty"`
+	WaveID               string             `json:"wave_id"`
+	JobID                string             `json:"job_id"`
+	ModelID              string             `json:"model_id"`
+	RequestModel         string             `json:"request_model"`
+	GatewayID            string             `json:"gateway_id"`
+	PreflightNodeID      string             `json:"preflight_node_id,omitempty"`
+	PreflightDecision    string             `json:"preflight_decision,omitempty"`
+	LiveMatchesPreflight bool               `json:"live_matches_preflight,omitempty"`
+	NodeID               string             `json:"node_id,omitempty"`
+	InstanceID           string             `json:"instance_id,omitempty"`
+	Backend              string             `json:"backend,omitempty"`
+	Decision             string             `json:"decision,omitempty"`
+	Attempts             int                `json:"attempts,omitempty"`
+	StatusCode           int                `json:"status_code"`
+	OutputPath           string             `json:"output_path,omitempty"`
+	Bytes                int                `json:"bytes"`
+	DurationMS           int                `json:"duration_ms"`
+	ContextTokens        int                `json:"context_tokens,omitempty"`
+	TokensPerSec         float64            `json:"tokens_per_sec,omitempty"`
+	Headers              map[string]string  `json:"headers,omitempty"`
+	Trace                []domain.TraceStep `json:"trace,omitempty"`
+	Error                string             `json:"error,omitempty"`
+	RetryAllowed         bool               `json:"retry_allowed"`
+	ExpectedFailure      bool               `json:"expected_failure,omitempty"`
+	ExpectationErrors    []string           `json:"expectation_errors,omitempty"`
 }
 
 type FleetFailure struct {
@@ -241,17 +244,42 @@ type FleetSnapshotMark struct {
 }
 
 type FleetResourceMark struct {
-	At               time.Time            `json:"at"`
-	Stage            string               `json:"stage"`
-	PeerID           string               `json:"peer_id"`
-	NodeID           string               `json:"node_id"`
-	DiskTotalMB      int                  `json:"disk_total_mb,omitempty"`
-	DiskFreeMB       int                  `json:"disk_free_mb,omitempty"`
-	DiskMinFreeRatio float64              `json:"disk_min_free_ratio,omitempty"`
-	MaxUtil          float64              `json:"max_util,omitempty"`
-	OOMSeverity      domain.OOMSeverity   `json:"oom_severity,omitempty"`
-	Accelerators     []domain.Accelerator `json:"accelerators,omitempty"`
-	Error            string               `json:"error,omitempty"`
+	At                             time.Time               `json:"at"`
+	Stage                          string                  `json:"stage"`
+	PeerID                         string                  `json:"peer_id"`
+	NodeID                         string                  `json:"node_id"`
+	DiskTotalMB                    int                     `json:"disk_total_mb,omitempty"`
+	DiskFreeMB                     int                     `json:"disk_free_mb,omitempty"`
+	DiskMinFreeRatio               float64                 `json:"disk_min_free_ratio,omitempty"`
+	DiskFloorMB                    int                     `json:"disk_floor_mb,omitempty"`
+	DiskHeadroomMB                 int                     `json:"disk_headroom_mb,omitempty"`
+	LargestArtifactMB              int                     `json:"largest_artifact_mb,omitempty"`
+	DiskFreeAfterLargestArtifactMB int                     `json:"disk_free_after_largest_artifact_mb,omitempty"`
+	MaxUtil                        float64                 `json:"max_util,omitempty"`
+	OOMSeverity                    domain.OOMSeverity      `json:"oom_severity,omitempty"`
+	Accelerators                   []domain.Accelerator    `json:"accelerators,omitempty"`
+	AcceleratorUsage               []FleetAcceleratorUsage `json:"accelerator_usage,omitempty"`
+	Instances                      []FleetInstanceClaim    `json:"instances,omitempty"`
+	Error                          string                  `json:"error,omitempty"`
+}
+
+type FleetAcceleratorUsage struct {
+	Index                int `json:"index"`
+	VRAMTotalMB          int `json:"vram_total_mb"`
+	SnapshotUsedMB       int `json:"snapshot_used_mb"`
+	ReservedClaimMB      int `json:"reserved_claim_mb,omitempty"`
+	BenchmarkUsedMB      int `json:"benchmark_used_mb"`
+	UsableMB             int `json:"usable_mb"`
+	CatastrophicMarginMB int `json:"catastrophic_margin_mb,omitempty"`
+}
+
+type FleetInstanceClaim struct {
+	ID             string               `json:"id"`
+	PresetID       string               `json:"preset_id"`
+	AcceleratorSet []int                `json:"accelerator_set,omitempty"`
+	Claim          domain.Claim         `json:"claim"`
+	State          domain.InstanceState `json:"state,omitempty"`
+	Priority       domain.Priority      `json:"priority,omitempty"`
 }
 
 func LoadFleetConfig(path string) (FleetBenchmarkConfig, error) {
@@ -318,7 +346,7 @@ func RunFleet(ctx context.Context, cfg FleetBenchmarkConfig, opts FleetRunOption
 	}
 	result.Events = append(result.Events, FleetEvent{At: clk.Now(), Type: "preflight", Data: map[string]any{"proofs": preflight.Proofs}})
 	if !opts.Simulate {
-		live, err := runFleetLive(ctx, cfg, profile, outputDir, opts.Client, clk)
+		live, err := runFleetLive(ctx, cfg, profile, preflight, outputDir, opts.Client, clk)
 		result.Events = append(result.Events, live.Events...)
 		result.Results = append(result.Results, live.Results...)
 		result.Failures = append(result.Failures, live.Failures...)
@@ -395,6 +423,15 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 		}
 		seenModels[model.ID] = struct{}{}
 		modelsByID[model.ID] = struct{}{}
+		if model.Priority != "" && !validPriority(model.Priority) {
+			return fmt.Errorf("model %q priority %q is invalid", model.ID, model.Priority)
+		}
+		if model.SpeedPref != "" && !validSpeedPref(model.SpeedPref) {
+			return fmt.Errorf("model %q speed_pref %q is invalid", model.ID, model.SpeedPref)
+		}
+		if model.Preemption != "" && !validPreemption(model.Preemption) {
+			return fmt.Errorf("model %q preemption %q is invalid", model.ID, model.Preemption)
+		}
 	}
 	if len(cfg.Prompts) == 0 {
 		return fmt.Errorf("at least one prompt is required")
@@ -465,6 +502,12 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 		seenNodes[node.ID] = struct{}{}
 		if node.MaxUtil <= 0 || node.MaxUtil > 1 {
 			return fmt.Errorf("node %q max_util must be between 0 and 1", node.ID)
+		}
+		if !validNodeStatus(node.Status) {
+			return fmt.Errorf("node %q status %q is invalid", node.ID, node.Status)
+		}
+		if !validOOMSeverity(node.OOMSeverity) {
+			return fmt.Errorf("node %q oom_severity %q is invalid", node.ID, node.OOMSeverity)
 		}
 		if node.DiskTotalMB > 0 && node.DiskFreeMB > node.DiskTotalMB {
 			return fmt.Errorf("node %q disk_free_mb exceeds disk_total_mb", node.ID)
@@ -577,7 +620,7 @@ type liveRun struct {
 	Metrics   []domain.RunMetric
 }
 
-func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile, outputDir string, client *http.Client, clk ports.Clock) (liveRun, error) {
+func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile string, preflight FleetPreflight, outputDir string, client *http.Client, clk ports.Clock) (liveRun, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -587,7 +630,7 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile, output
 	}
 	state := liveRun{}
 	state.Snapshots = append(state.Snapshots, collectSnapshots(ctx, cfg, client, "before", clk)...)
-	state.Resources = append(state.Resources, resourcesFromSnapshots(state.Snapshots)...)
+	state.Resources = append(state.Resources, resourcesFromSnapshots(cfg, state.Snapshots)...)
 	state.Failures = append(state.Failures, snapshotFailures(cfg, state.Snapshots)...)
 	state.Failures = append(state.Failures, resourceSafetyFailures(cfg, state.Resources)...)
 	metrics, metricFailures := collectMetrics(ctx, cfg, client)
@@ -599,6 +642,7 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile, output
 	}
 	models := modelByID(cfg.Models)
 	gateways := gatewayByID(cfg.Gateways)
+	preflightPlans := preflightByJob(preflight.Plans)
 	for waveIndex, wave := range waves {
 		state.Events = append(state.Events, FleetEvent{At: clk.Now(), Type: "wave_start", WaveID: wave.ID})
 		jobs := expandedWaveJobs(wave)
@@ -625,6 +669,7 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile, output
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				result := submitFleetJob(ctx, cfg, wave.ID, idx, spec, model, gw, filepath.Join(outputDir, "outputs"), client, clk)
+				result = attachPreflightResult(result, preflightPlans[result.JobID])
 				results[idx] = result
 			}()
 		}
@@ -664,12 +709,13 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile, output
 		}
 		afterSnapshots := collectSnapshots(ctx, cfg, client, "after_"+wave.ID, clk)
 		state.Snapshots = append(state.Snapshots, afterSnapshots...)
-		afterResources := resourcesFromSnapshots(afterSnapshots)
+		afterResources := resourcesFromSnapshots(cfg, afterSnapshots)
 		state.Resources = append(state.Resources, afterResources...)
 		state.Failures = append(state.Failures, snapshotFailures(cfg, afterSnapshots)...)
 		state.Failures = append(state.Failures, liveSnapshotMismatchFailures(cfg, afterSnapshots)...)
 		state.Failures = append(state.Failures, resourceSafetyFailures(cfg, afterResources)...)
 		state.Failures = append(state.Failures, livePlacementEvidenceFailures(results, state.Snapshots)...)
+		state.Failures = append(state.Failures, livePreflightMismatchFailures(results)...)
 		state.Events = append(state.Events, FleetEvent{At: clk.Now(), Type: "wave_done", WaveID: wave.ID})
 	}
 	metrics, metricFailures = collectMetrics(ctx, cfg, client)
@@ -771,7 +817,11 @@ func submitFleetJob(ctx context.Context, cfg FleetBenchmarkConfig, waveID string
 		result.Attempts = attempts
 	}
 	if raw := headers[fleetHeaderTrace]; raw != "" {
-		_ = json.Unmarshal([]byte(raw), &result.Trace)
+		if err := json.Unmarshal([]byte(raw), &result.Trace); err != nil {
+			result.Error = "decode X-Myc-Trace: " + err.Error()
+			result.ExpectationErrors = validateFleetExpectation(spec, result)
+			return result
+		}
 	}
 	if resp.StatusCode >= 400 {
 		result.Error = strings.TrimSpace(string(data))
@@ -971,9 +1021,19 @@ func liveSnapshotMismatchFailures(cfg FleetBenchmarkConfig, snapshots []FleetSna
 
 func livePlacementEvidenceFailures(results []FleetJobResult, snapshots []FleetSnapshotMark) []FleetFailure {
 	knownNodes := map[string]struct{}{}
+	knownInstances := map[string]map[string]struct{}{}
 	for _, mark := range snapshots {
 		if mark.Error == "" && mark.Snapshot.Node.ID != "" {
-			knownNodes[mark.Snapshot.Node.ID] = struct{}{}
+			nodeID := mark.Snapshot.Node.ID
+			knownNodes[nodeID] = struct{}{}
+			if knownInstances[nodeID] == nil {
+				knownInstances[nodeID] = map[string]struct{}{}
+			}
+			for _, inst := range mark.Snapshot.Instances {
+				if inst.ID != "" {
+					knownInstances[nodeID][inst.ID] = struct{}{}
+				}
+			}
 		}
 	}
 	var failures []FleetFailure
@@ -987,9 +1047,12 @@ func livePlacementEvidenceFailures(results []FleetJobResult, snapshots []FleetSn
 		}
 		if _, ok := knownNodes[result.NodeID]; !ok {
 			failures = append(failures, FleetFailure{JobID: result.JobID, ModelID: result.ModelID, NodeID: result.NodeID, Error: "placement node was not present in authenticated fleet snapshots"})
+			continue
 		}
 		if result.InstanceID == "" {
 			failures = append(failures, FleetFailure{JobID: result.JobID, ModelID: result.ModelID, NodeID: result.NodeID, Error: "successful request did not report X-Myc-Instance"})
+		} else if _, ok := knownInstances[result.NodeID][result.InstanceID]; !ok {
+			failures = append(failures, FleetFailure{JobID: result.JobID, ModelID: result.ModelID, NodeID: result.NodeID, Error: "placement instance was not present in authenticated fleet snapshots"})
 		}
 		if result.Backend == "" {
 			failures = append(failures, FleetFailure{JobID: result.JobID, ModelID: result.ModelID, NodeID: result.NodeID, Error: "successful request did not report X-Myc-Backend"})
@@ -999,6 +1062,47 @@ func livePlacementEvidenceFailures(results []FleetJobResult, snapshots []FleetSn
 		}
 	}
 	return failures
+}
+
+func livePreflightMismatchFailures(results []FleetJobResult) []FleetFailure {
+	var failures []FleetFailure
+	for _, result := range results {
+		if result.Error != "" || result.ExpectedFailure || result.PreflightDecision == "" {
+			continue
+		}
+		if !result.LiveMatchesPreflight {
+			failures = append(failures, FleetFailure{
+				JobID:   result.JobID,
+				ModelID: result.ModelID,
+				NodeID:  result.NodeID,
+				Error:   fmt.Sprintf("live placement %s/%s did not match preflight %s/%s", result.Decision, result.NodeID, result.PreflightDecision, result.PreflightNodeID),
+			})
+		}
+	}
+	return failures
+}
+
+func preflightByJob(plans []FleetSimulationDecision) map[string]FleetSimulationDecision {
+	out := map[string]FleetSimulationDecision{}
+	for _, plan := range plans {
+		if plan.JobID != "" {
+			out[plan.JobID] = plan
+		}
+	}
+	return out
+}
+
+func attachPreflightResult(result FleetJobResult, plan FleetSimulationDecision) FleetJobResult {
+	if plan.JobID == "" {
+		return result
+	}
+	result.PreflightNodeID = plan.Decision.NodeID
+	result.PreflightDecision = string(plan.Decision.Action)
+	if result.Error != "" || result.ExpectedFailure {
+		return result
+	}
+	result.LiveMatchesPreflight = result.Decision == result.PreflightDecision && result.NodeID == result.PreflightNodeID
+	return result
 }
 
 func resourceSafetyFailures(cfg FleetBenchmarkConfig, resources []FleetResourceMark) []FleetFailure {
@@ -1015,6 +1119,9 @@ func resourceSafetyFailures(cfg FleetBenchmarkConfig, resources []FleetResourceM
 			failures = append(failures, FleetFailure{NodeID: resource.PeerID, Error: "snapshot did not include node identity"})
 			continue
 		}
+		if !validOOMSeverity(resource.OOMSeverity) {
+			failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("invalid oom_severity %q", resource.OOMSeverity)})
+		}
 		ratio := resource.DiskMinFreeRatio
 		if ratio == 0 {
 			ratio = minDisk
@@ -1028,29 +1135,44 @@ func resourceSafetyFailures(cfg FleetBenchmarkConfig, resources []FleetResourceM
 			if resource.DiskFreeMB <= floor {
 				failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("disk free %dMB is at or below floor %dMB", resource.DiskFreeMB, floor)})
 			}
+			if resource.LargestArtifactMB > 0 && resource.DiskFreeAfterLargestArtifactMB <= floor {
+				failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("largest artifact %dMB would leave disk free %dMB at or below floor %dMB", resource.LargestArtifactMB, resource.DiskFreeAfterLargestArtifactMB, floor)})
+			}
 		}
 		if resource.MaxUtil <= 0 || resource.MaxUtil > 1 {
 			failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("invalid max_util %.3f", resource.MaxUtil)})
 			continue
 		}
-		for _, acc := range resource.Accelerators {
-			if acc.VRAMTotalMB <= 0 {
-				failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("accelerator %d missing vram_total_mb", acc.Index)})
-				continue
+		if len(resource.AcceleratorUsage) > 0 {
+			for _, usage := range resource.AcceleratorUsage {
+				if usage.VRAMTotalMB <= 0 {
+					failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("accelerator %d missing vram_total_mb", usage.Index)})
+					continue
+				}
+				if usage.BenchmarkUsedMB > usage.UsableMB {
+					failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("accelerator %d used %dMB exceeds benchmark limit %dMB", usage.Index, usage.BenchmarkUsedMB, usage.UsableMB)})
+				}
 			}
-			limit := int(float64(acc.VRAMTotalMB) * resource.MaxUtil)
-			if resource.OOMSeverity == domain.OOMCatastrophic {
-				limit -= int(float64(acc.VRAMTotalMB) * 0.05)
-			}
-			if acc.VRAMUsedMB > limit {
-				failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("accelerator %d used %dMB exceeds benchmark limit %dMB", acc.Index, acc.VRAMUsedMB, limit)})
+		} else {
+			for _, acc := range resource.Accelerators {
+				if acc.VRAMTotalMB <= 0 {
+					failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("accelerator %d missing vram_total_mb", acc.Index)})
+					continue
+				}
+				limit := int(float64(acc.VRAMTotalMB) * resource.MaxUtil)
+				if resource.OOMSeverity == domain.OOMCatastrophic {
+					limit -= int(float64(acc.VRAMTotalMB) * 0.05)
+				}
+				if acc.VRAMUsedMB > limit {
+					failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("accelerator %d used %dMB exceeds benchmark limit %dMB", acc.Index, acc.VRAMUsedMB, limit)})
+				}
 			}
 		}
 	}
 	return failures
 }
 
-func resourcesFromSnapshots(snapshots []FleetSnapshotMark) []FleetResourceMark {
+func resourcesFromSnapshots(cfg FleetBenchmarkConfig, snapshots []FleetSnapshotMark) []FleetResourceMark {
 	out := make([]FleetResourceMark, 0, len(snapshots))
 	for _, mark := range snapshots {
 		resource := FleetResourceMark{
@@ -1061,17 +1183,113 @@ func resourcesFromSnapshots(snapshots []FleetSnapshotMark) []FleetResourceMark {
 		}
 		if mark.Error == "" {
 			node := mark.Snapshot.Node
+			ratio := node.DiskMinFreeRatio
+			if ratio == 0 {
+				ratio = cfg.Safety.MinDiskFreeRatio
+			}
+			if ratio == 0 {
+				ratio = domain.DefaultDiskMinFreeRatio
+			}
+			floor := 0
+			if node.DiskTotalMB > 0 {
+				floor = int(math.Ceil(float64(node.DiskTotalMB) * ratio))
+			}
+			largestArtifact := largestArtifactForNode(cfg, node.ID)
 			resource.NodeID = node.ID
 			resource.DiskTotalMB = node.DiskTotalMB
 			resource.DiskFreeMB = node.DiskFreeMB
 			resource.DiskMinFreeRatio = node.DiskMinFreeRatio
+			resource.DiskFloorMB = floor
+			resource.DiskHeadroomMB = node.DiskFreeMB - floor
+			resource.LargestArtifactMB = largestArtifact
+			resource.DiskFreeAfterLargestArtifactMB = node.DiskFreeMB - largestArtifact
 			resource.MaxUtil = node.MaxUtil
 			resource.OOMSeverity = node.OOMSeverity
 			resource.Accelerators = append([]domain.Accelerator(nil), node.Accelerators...)
+			resource.Instances = instanceClaims(mark.Snapshot.Instances)
+			resource.AcceleratorUsage = acceleratorUsage(node, mark.Snapshot.Instances)
 		}
 		out = append(out, resource)
 	}
 	return out
+}
+
+func largestArtifactForNode(cfg FleetBenchmarkConfig, nodeID string) int {
+	largest := 0
+	for _, preset := range cfg.Simulation.Presets {
+		if preset.NodeID != "" && preset.NodeID != nodeID {
+			continue
+		}
+		if preset.ArtifactSizeMB > largest {
+			largest = preset.ArtifactSizeMB
+		}
+	}
+	return largest
+}
+
+func instanceClaims(instances []domain.ModelInstance) []FleetInstanceClaim {
+	out := make([]FleetInstanceClaim, 0, len(instances))
+	for _, inst := range instances {
+		out = append(out, FleetInstanceClaim{
+			ID:             inst.ID,
+			PresetID:       inst.PresetID,
+			AcceleratorSet: append([]int(nil), inst.AcceleratorSet...),
+			Claim:          inst.Claim,
+			State:          inst.State,
+			Priority:       inst.Priority,
+		})
+	}
+	return out
+}
+
+func acceleratorUsage(node domain.Node, instances []domain.ModelInstance) []FleetAcceleratorUsage {
+	out := make([]FleetAcceleratorUsage, 0, len(node.Accelerators))
+	for _, acc := range node.Accelerators {
+		reserved := reservedClaimForAccelerator(acc.Index, instances)
+		margin := 0
+		usable := int(float64(acc.VRAMTotalMB) * node.MaxUtil)
+		if node.OOMSeverity == domain.OOMCatastrophic {
+			margin = int(float64(acc.VRAMTotalMB) * 0.05)
+			usable -= margin
+		}
+		used := acc.VRAMUsedMB
+		if reserved > used {
+			used = reserved
+		}
+		out = append(out, FleetAcceleratorUsage{
+			Index:                acc.Index,
+			VRAMTotalMB:          acc.VRAMTotalMB,
+			SnapshotUsedMB:       acc.VRAMUsedMB,
+			ReservedClaimMB:      reserved,
+			BenchmarkUsedMB:      used,
+			UsableMB:             usable,
+			CatastrophicMarginMB: margin,
+		})
+	}
+	return out
+}
+
+func reservedClaimForAccelerator(index int, instances []domain.ModelInstance) int {
+	total := 0
+	for _, inst := range instances {
+		if len(inst.AcceleratorSet) == 0 {
+			continue
+		}
+		if containsAccelerator(inst.AcceleratorSet, index) {
+			claim := inst.Claim.WeightsMB + inst.Claim.KVReservedMB
+			total += int(math.Ceil(float64(claim) / float64(len(inst.AcceleratorSet))))
+		}
+	}
+	return total
+}
+
+func containsAccelerator(set []int, index int) bool {
+	for _, got := range set {
+		if got == index {
+			return true
+		}
+	}
+	return false
 }
 
 func writeFleetArtifacts(outputDir string, result FleetRunResult) error {
@@ -1195,11 +1413,22 @@ func defaultWaves(cfg FleetBenchmarkConfig, profile string) []FleetWave {
 		}
 		return waves
 	default:
-		var jobs []FleetWaveJob
-		for _, model := range cfg.Models {
-			jobs = append(jobs, FleetWaveJob{ModelID: model.ID})
+		first := cfg.Models[0].ID
+		last := cfg.Models[len(cfg.Models)-1].ID
+		firstGateway := ""
+		secondGateway := ""
+		if len(cfg.Gateways) > 0 {
+			firstGateway = cfg.Gateways[0].ID
+			secondGateway = cfg.Gateways[0].ID
 		}
-		return []FleetWave{{ID: "conservative", Parallel: len(jobs), Jobs: jobs}}
+		if len(cfg.Gateways) > 1 {
+			secondGateway = cfg.Gateways[1].ID
+		}
+		return []FleetWave{
+			{ID: "conservative-cold", Jobs: []FleetWaveJob{{ModelID: first, GatewayID: firstGateway}}},
+			{ID: "conservative-warm", Jobs: []FleetWaveJob{{ModelID: first, GatewayID: secondGateway}}},
+			{ID: "conservative-fit-forced", Jobs: []FleetWaveJob{{ModelID: last, GatewayID: firstGateway}}},
+		}
 	}
 }
 
@@ -1234,7 +1463,7 @@ func simulationJob(cfg FleetBenchmarkConfig, model FleetModel, spec FleetWaveJob
 	}
 	id := spec.ID
 	if id == "" {
-		id = fmt.Sprintf("sim-%s-%s-%d", waveID, safeName(model.ID), idx+1)
+		id = fmt.Sprintf("%s-%s-%d", waveID, safeName(model.ID), idx+1)
 	}
 	return domain.Job{
 		ID:                  id,
@@ -1409,6 +1638,51 @@ func gatewayForJob(gateways []FleetGateway, byID map[string]FleetGateway, id str
 		return FleetGateway{}, fmt.Errorf("unknown gateway %q", id)
 	}
 	return gateways[index%len(gateways)], nil
+}
+
+func validPriority(priority domain.Priority) bool {
+	switch priority {
+	case domain.PriorityInteractive, domain.PriorityNormal, domain.PriorityBackground:
+		return true
+	default:
+		return false
+	}
+}
+
+func validSpeedPref(speed domain.SpeedPref) bool {
+	switch speed {
+	case domain.SpeedThroughput, domain.SpeedLatency, domain.SpeedAuto:
+		return true
+	default:
+		return false
+	}
+}
+
+func validPreemption(preemption domain.Preemption) bool {
+	switch preemption {
+	case domain.PreemptInherit, domain.PreemptSoft, domain.PreemptHardForInteractive, domain.PreemptHard:
+		return true
+	default:
+		return false
+	}
+}
+
+func validNodeStatus(status domain.NodeStatus) bool {
+	switch status {
+	case domain.NodeReady, domain.NodeMaintenance, domain.NodeDraining, domain.NodeUnreachable:
+		return true
+	default:
+		return false
+	}
+}
+
+func validOOMSeverity(severity domain.OOMSeverity) bool {
+	switch severity {
+	case domain.OOMSoft, domain.OOMCatastrophic:
+		return true
+	default:
+		return false
+	}
 }
 
 func telemetryRequired(cfg FleetBenchmarkConfig) bool {
