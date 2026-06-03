@@ -14,6 +14,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -397,10 +399,23 @@ type catalogStageResponse struct {
 	JobID    string               `json:"job_id"`
 }
 
+type catalogEvictRequest struct {
+	PresetID string `json:"preset_id"`
+	NodeID   string `json:"node_id"`
+}
+
+type catalogEvictResponse struct {
+	Locality domain.ModelLocality `json:"locality"`
+}
+
 type catalogStageStore interface {
 	SaveJob(ctx context.Context, job domain.Job) error
 	SavePreset(ctx context.Context, preset domain.Preset) error
 	SaveModelLocality(ctx context.Context, locality domain.ModelLocality) error
+	ListModelLocalities(ctx context.Context) ([]domain.ModelLocality, error)
+	ListInstances(ctx context.Context) ([]domain.ModelInstance, error)
+	ListReservations(ctx context.Context) ([]domain.Reservation, error)
+	DeleteModelLocality(ctx context.Context, id string) error
 }
 
 func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStore, rpcToken string, clk ports.Clock) {
@@ -492,6 +507,54 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 			panic(err)
 		}
 	})
+	mux.HandleFunc("/catalog/evict", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req catalogEvictRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writePeerRPCError(w, http.StatusBadRequest, err)
+			return
+		}
+		if req.PresetID == "" || req.NodeID == "" {
+			writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("preset_id and node_id are required"))
+			return
+		}
+		locality, err := findModelLocality(r.Context(), store, modelLocalityID(req.NodeID, req.PresetID))
+		if err != nil {
+			writePeerRPCError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := validateManagedEviction(r.Context(), store, locality); err != nil {
+			writePeerRPCError(w, http.StatusConflict, err)
+			return
+		}
+		if locality.ModelRef != "" {
+			if !isManagedCatalogModel(cfg.CatalogDir, locality.ModelRef) {
+				writePeerRPCError(w, http.StatusConflict, fmt.Errorf("locality %s is not under managed catalog models", locality.ID))
+				return
+			}
+			if err := os.Remove(locality.ModelRef); err != nil && !os.IsNotExist(err) {
+				writePeerRPCError(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+		if err := store.DeleteModelLocality(r.Context(), locality.ID); err != nil {
+			writePeerRPCError(w, http.StatusInternalServerError, err)
+			return
+		}
+		locality.State = domain.ModelLocalityEvicted
+		locality.UpdatedAt = clk.Now().UTC()
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(catalogEvictResponse{Locality: locality}); err != nil {
+			panic(err)
+		}
+	})
 }
 
 func firstPresetModelAlias(preset domain.Preset) string {
@@ -506,6 +569,54 @@ func firstPresetModelAlias(preset domain.Preset) string {
 
 func modelLocalityID(nodeID, presetID string) string {
 	return nodeID + ":" + presetID
+}
+
+func findModelLocality(ctx context.Context, store catalogStageStore, id string) (domain.ModelLocality, error) {
+	localities, err := store.ListModelLocalities(ctx)
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	for _, locality := range localities {
+		if locality.ID == id {
+			return locality, nil
+		}
+	}
+	return domain.ModelLocality{}, fmt.Errorf("model locality %q was not found", id)
+}
+
+func validateManagedEviction(ctx context.Context, store catalogStageStore, locality domain.ModelLocality) error {
+	if !locality.Managed {
+		return fmt.Errorf("locality %s is not managed by Mycelium", locality.ID)
+	}
+	if locality.Pinned || locality.Warm {
+		return fmt.Errorf("locality %s is warm or pinned", locality.ID)
+	}
+	instances, err := store.ListInstances(ctx)
+	if err != nil {
+		return err
+	}
+	for _, inst := range instances {
+		if inst.NodeID == locality.NodeID && inst.PresetID == locality.PresetID {
+			return fmt.Errorf("locality %s has a live instance", locality.ID)
+		}
+	}
+	reservations, err := store.ListReservations(ctx)
+	if err != nil {
+		return err
+	}
+	for _, reservation := range reservations {
+		if reservation.NodeID == locality.NodeID && reservation.PresetID == locality.PresetID {
+			return fmt.Errorf("locality %s has a reservation", locality.ID)
+		}
+	}
+	return nil
+}
+
+func isManagedCatalogModel(catalogDir, modelRef string) bool {
+	modelsDir := filepath.Clean(filepath.Join(catalogDir, "models"))
+	ref := filepath.Clean(modelRef)
+	rel, err := filepath.Rel(modelsDir, ref)
+	return err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." && !filepath.IsAbs(rel)
 }
 
 func mountAdminHTTP(mux *http.ServeMux, cfg *PeerConfig, configPath string, joinTokens *membership.TokenManager, tokenStore adminTokenStore, rpcToken string) {

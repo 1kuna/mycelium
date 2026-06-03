@@ -1160,6 +1160,42 @@ func TestCatalogStageHTTPMaterializesPresetAndLocality(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].TaskType != "catalog_stage" || jobs[0].Status != domain.JobDone || len(jobs[0].Progress) == 0 {
 		t.Fatalf("stage jobs = %+v", jobs)
 	}
+	if _, err := os.Stat(preset.ModelRef); err != nil {
+		t.Fatalf("staged model stat: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	evictBody, err := json.Marshal(catalogEvictRequest{PresetID: "tiny", NodeID: "node-a"})
+	if err != nil {
+		t.Fatalf("marshal evict: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/catalog/evict", bytes.NewReader(evictBody))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("evict status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(preset.ModelRef); !os.IsNotExist(err) {
+		t.Fatalf("evicted model stat err = %v", err)
+	}
+	localities, err = store.ListModelLocalities(ctx)
+	if err != nil || len(localities) != 0 {
+		t.Fatalf("localities after evict = %+v %v", localities, err)
+	}
+
+	outside := filepath.Join(t.TempDir(), "outside.gguf")
+	if err := os.WriteFile(outside, []byte("model"), 0644); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+	if err := store.SaveModelLocality(ctx, domain.ModelLocality{ID: "node-a:outside", PresetID: "outside", NodeID: "node-a", State: domain.ModelLocalityReady, ModelRef: outside, Managed: true}); err != nil {
+		t.Fatalf("SaveModelLocality outside: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/catalog/evict", strings.NewReader(`{"preset_id":"outside","node_id":"node-a"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "managed catalog") {
+		t.Fatalf("outside evict status/body = %d %q", rec.Code, rec.Body.String())
+	}
 
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/catalog/stage", strings.NewReader(`{}`)))
@@ -1199,6 +1235,74 @@ func TestCatalogStageHTTPMaterializesPresetAndLocality(t *testing.T) {
 	}
 	if got := firstPresetModelAlias(domain.Preset{ModelRef: "ref"}); got != "ref" {
 		t.Fatalf("alias fallback ref = %s", got)
+	}
+}
+
+func TestCatalogEvictHTTPProtectionBranches(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	cfg := applyPeerConfigDefaults(PeerConfig{ID: "peer-a", CatalogDir: filepath.Join(t.TempDir(), "catalog"), ComputeConfig: ComputeConfig{ID: "node-a"}})
+	modelPath := filepath.Join(cfg.CatalogDir, "models", "model.gguf")
+	if err := os.MkdirAll(filepath.Dir(modelPath), 0755); err != nil {
+		t.Fatalf("mkdir model dir: %v", err)
+	}
+	mux := http.NewServeMux()
+	mountCatalogHTTP(mux, cfg, store, "rpc-secret", mocks.NewFakeClock(time.Unix(10, 0).UTC()))
+
+	for _, tt := range []struct {
+		name     string
+		body     string
+		method   string
+		setup    func()
+		wantCode int
+		wantBody string
+	}{
+		{name: "method", method: http.MethodGet, body: `{}`, wantCode: http.StatusMethodNotAllowed},
+		{name: "bad json", method: http.MethodPost, body: `{`, wantCode: http.StatusBadRequest},
+		{name: "missing fields", method: http.MethodPost, body: `{}`, wantCode: http.StatusBadRequest, wantBody: "preset_id"},
+		{name: "missing locality", method: http.MethodPost, body: `{"preset_id":"missing","node_id":"node-a"}`, wantCode: http.StatusBadRequest, wantBody: "not found"},
+		{name: "unmanaged", method: http.MethodPost, body: `{"preset_id":"user","node_id":"node-a"}`, setup: func() {
+			mustSaveLocality(t, store, domain.ModelLocality{ID: "node-a:user", PresetID: "user", NodeID: "node-a", State: domain.ModelLocalityReady, ModelRef: modelPath})
+		}, wantCode: http.StatusConflict, wantBody: "not managed"},
+		{name: "pinned", method: http.MethodPost, body: `{"preset_id":"pinned","node_id":"node-a"}`, setup: func() {
+			mustSaveLocality(t, store, domain.ModelLocality{ID: "node-a:pinned", PresetID: "pinned", NodeID: "node-a", State: domain.ModelLocalityReady, ModelRef: modelPath, Managed: true, Pinned: true})
+		}, wantCode: http.StatusConflict, wantBody: "warm or pinned"},
+		{name: "live instance", method: http.MethodPost, body: `{"preset_id":"live","node_id":"node-a"}`, setup: func() {
+			mustSaveLocality(t, store, domain.ModelLocality{ID: "node-a:live", PresetID: "live", NodeID: "node-a", State: domain.ModelLocalityReady, ModelRef: modelPath, Managed: true})
+			if err := store.SaveInstance(ctx, domain.ModelInstance{ID: "inst-live", PresetID: "live", NodeID: "node-a", State: domain.InstReady}); err != nil {
+				t.Fatalf("SaveInstance: %v", err)
+			}
+		}, wantCode: http.StatusConflict, wantBody: "live instance"},
+		{name: "reservation", method: http.MethodPost, body: `{"preset_id":"reserved","node_id":"node-a"}`, setup: func() {
+			mustSaveLocality(t, store, domain.ModelLocality{ID: "node-a:reserved", PresetID: "reserved", NodeID: "node-a", State: domain.ModelLocalityReady, ModelRef: modelPath, Managed: true})
+			if err := store.SaveReservation(ctx, domain.Reservation{ID: "res-reserved", PresetID: "reserved", NodeID: "node-a"}); err != nil {
+				t.Fatalf("SaveReservation: %v", err)
+			}
+		}, wantCode: http.StatusConflict, wantBody: "reservation"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setup != nil {
+				tt.setup()
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tt.method, "/catalog/evict", strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer rpc-secret")
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tt.wantCode || (tt.wantBody != "" && !strings.Contains(rec.Body.String(), tt.wantBody)) {
+				t.Fatalf("status/body = %d %q", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func mustSaveLocality(t *testing.T, store *storesqlite.Store, locality domain.ModelLocality) {
+	t.Helper()
+	if err := store.SaveModelLocality(context.Background(), locality); err != nil {
+		t.Fatalf("SaveModelLocality: %v", err)
 	}
 }
 
