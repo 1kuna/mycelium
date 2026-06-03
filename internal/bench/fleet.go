@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -588,6 +589,7 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile, output
 	state.Snapshots = append(state.Snapshots, collectSnapshots(ctx, cfg, client, "before", clk)...)
 	state.Resources = append(state.Resources, resourcesFromSnapshots(state.Snapshots)...)
 	state.Failures = append(state.Failures, snapshotFailures(cfg, state.Snapshots)...)
+	state.Failures = append(state.Failures, resourceSafetyFailures(cfg, state.Resources)...)
 	metrics, metricFailures := collectMetrics(ctx, cfg, client)
 	state.Metrics = append(state.Metrics, metrics...)
 	state.Failures = append(state.Failures, metricFailures...)
@@ -662,8 +664,12 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile, output
 		}
 		afterSnapshots := collectSnapshots(ctx, cfg, client, "after_"+wave.ID, clk)
 		state.Snapshots = append(state.Snapshots, afterSnapshots...)
-		state.Resources = append(state.Resources, resourcesFromSnapshots(afterSnapshots)...)
+		afterResources := resourcesFromSnapshots(afterSnapshots)
+		state.Resources = append(state.Resources, afterResources...)
 		state.Failures = append(state.Failures, snapshotFailures(cfg, afterSnapshots)...)
+		state.Failures = append(state.Failures, liveSnapshotMismatchFailures(cfg, afterSnapshots)...)
+		state.Failures = append(state.Failures, resourceSafetyFailures(cfg, afterResources)...)
+		state.Failures = append(state.Failures, livePlacementEvidenceFailures(results, state.Snapshots)...)
 		state.Events = append(state.Events, FleetEvent{At: clk.Now(), Type: "wave_done", WaveID: wave.ID})
 	}
 	metrics, metricFailures = collectMetrics(ctx, cfg, client)
@@ -958,6 +964,87 @@ func liveSnapshotMismatchFailures(cfg FleetBenchmarkConfig, snapshots []FleetSna
 		}
 		if _, ok := simNodes[mark.Snapshot.Node.ID]; !ok {
 			failures = append(failures, FleetFailure{NodeID: mark.Snapshot.Node.ID, Error: "live snapshot node is not declared in simulation config"})
+		}
+	}
+	return failures
+}
+
+func livePlacementEvidenceFailures(results []FleetJobResult, snapshots []FleetSnapshotMark) []FleetFailure {
+	knownNodes := map[string]struct{}{}
+	for _, mark := range snapshots {
+		if mark.Error == "" && mark.Snapshot.Node.ID != "" {
+			knownNodes[mark.Snapshot.Node.ID] = struct{}{}
+		}
+	}
+	var failures []FleetFailure
+	for _, result := range results {
+		if result.Error != "" || result.ExpectedFailure {
+			continue
+		}
+		if result.NodeID == "" {
+			failures = append(failures, FleetFailure{JobID: result.JobID, ModelID: result.ModelID, Error: "successful request did not report X-Myc-Node"})
+			continue
+		}
+		if _, ok := knownNodes[result.NodeID]; !ok {
+			failures = append(failures, FleetFailure{JobID: result.JobID, ModelID: result.ModelID, NodeID: result.NodeID, Error: "placement node was not present in authenticated fleet snapshots"})
+		}
+		if result.InstanceID == "" {
+			failures = append(failures, FleetFailure{JobID: result.JobID, ModelID: result.ModelID, NodeID: result.NodeID, Error: "successful request did not report X-Myc-Instance"})
+		}
+		if result.Backend == "" {
+			failures = append(failures, FleetFailure{JobID: result.JobID, ModelID: result.ModelID, NodeID: result.NodeID, Error: "successful request did not report X-Myc-Backend"})
+		}
+		if result.Decision == "" {
+			failures = append(failures, FleetFailure{JobID: result.JobID, ModelID: result.ModelID, NodeID: result.NodeID, Error: "successful request did not report X-Myc-Decision"})
+		}
+	}
+	return failures
+}
+
+func resourceSafetyFailures(cfg FleetBenchmarkConfig, resources []FleetResourceMark) []FleetFailure {
+	minDisk := cfg.Safety.MinDiskFreeRatio
+	if minDisk == 0 {
+		minDisk = domain.DefaultDiskMinFreeRatio
+	}
+	var failures []FleetFailure
+	for _, resource := range resources {
+		if resource.Error != "" {
+			continue
+		}
+		if resource.NodeID == "" {
+			failures = append(failures, FleetFailure{NodeID: resource.PeerID, Error: "snapshot did not include node identity"})
+			continue
+		}
+		ratio := resource.DiskMinFreeRatio
+		if ratio == 0 {
+			ratio = minDisk
+		}
+		if resource.DiskTotalMB <= 0 {
+			failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: "snapshot did not include disk_total_mb"})
+		} else if ratio <= 0 || ratio >= 1 {
+			failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("invalid disk_min_free_ratio %.3f", ratio)})
+		} else {
+			floor := int(math.Ceil(float64(resource.DiskTotalMB) * ratio))
+			if resource.DiskFreeMB <= floor {
+				failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("disk free %dMB is at or below floor %dMB", resource.DiskFreeMB, floor)})
+			}
+		}
+		if resource.MaxUtil <= 0 || resource.MaxUtil > 1 {
+			failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("invalid max_util %.3f", resource.MaxUtil)})
+			continue
+		}
+		for _, acc := range resource.Accelerators {
+			if acc.VRAMTotalMB <= 0 {
+				failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("accelerator %d missing vram_total_mb", acc.Index)})
+				continue
+			}
+			limit := int(float64(acc.VRAMTotalMB) * resource.MaxUtil)
+			if resource.OOMSeverity == domain.OOMCatastrophic {
+				limit -= int(float64(acc.VRAMTotalMB) * 0.05)
+			}
+			if acc.VRAMUsedMB > limit {
+				failures = append(failures, FleetFailure{NodeID: resource.NodeID, Error: fmt.Sprintf("accelerator %d used %dMB exceeds benchmark limit %dMB", acc.Index, acc.VRAMUsedMB, limit)})
+			}
 		}
 	}
 	return failures
