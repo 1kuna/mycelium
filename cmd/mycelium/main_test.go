@@ -1970,6 +1970,20 @@ func TestBuildPeerGatewayAppliesFlagOverridesAndJoinURI(t *testing.T) {
 	if snap.Node.ID != "peer-override" || snap.Node.Name != "Override Peer" || snap.Node.MaxUtil != 0.5 || snap.Node.DiskMinFreeRatio != 0.30 || snap.Node.DiskTotalMB <= 0 || snap.Node.Accelerators[0].VRAMTotalMB != 2048 {
 		t.Fatalf("snapshot = %+v", snap.Node)
 	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read persisted config: %v", err)
+	}
+	var persisted PeerConfig
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("decode persisted config: %v", err)
+	}
+	if persisted.JoinToken != "join-secret" || persisted.RPCToken != "override-rpc" || len(persisted.SeedPeers) != 1 || persisted.SeedPeers[0] != "127.0.0.1:1" {
+		t.Fatalf("persisted join fields = %+v", persisted)
+	}
+	if persisted.Listen != "127.0.0.1:1111" || persisted.Compute {
+		t.Fatalf("one-shot flags leaked into persisted config = %+v", persisted)
+	}
 }
 
 func TestNewLocalPeerAgentRequiresAdmissionExtensions(t *testing.T) {

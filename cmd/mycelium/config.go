@@ -151,6 +151,17 @@ func savePeerConfig(path string, cfg PeerConfig) error {
 	return os.WriteFile(path, append(data, '\n'), 0600)
 }
 
+func savePeerJoinConfig(path string, joined PeerConfig) error {
+	persisted, err := loadPeerConfig(path)
+	if err != nil {
+		return err
+	}
+	persisted.JoinToken = joined.JoinToken
+	persisted.RPCToken = joined.RPCToken
+	persisted.SeedPeers = append([]string(nil), joined.SeedPeers...)
+	return savePeerConfig(path, persisted)
+}
+
 func defaultedComputeConfig(cfg ComputeConfig) ComputeConfig {
 	if cfg.BackendListen == "" {
 		cfg.BackendListen = "127.0.0.1:51848"

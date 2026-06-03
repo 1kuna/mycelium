@@ -148,6 +148,10 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		if err := savePeerConfig(resolvedConfigPath, cfg); err != nil {
 			return "", nil, nil, err
 		}
+	} else if *joinRaw != "" {
+		if err := savePeerJoinConfig(resolvedConfigPath, cfg); err != nil {
+			return "", nil, nil, err
+		}
 	}
 	store, err := storesqlite.Open(cfg.StorePath)
 	if err != nil {
