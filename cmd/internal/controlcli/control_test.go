@@ -357,6 +357,85 @@ func TestListCommandsRejectBadFlags(t *testing.T) {
 	}
 }
 
+func TestRunNodesAdminCommands(t *testing.T) {
+	var sawInviteAuth, sawRotate, sawRevoke bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/invite", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer rpc-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		sawInviteAuth = true
+		_ = json.NewEncoder(w).Encode(map[string]string{"join": "mycjoin://127.0.0.1:51846?token=join-secret&rpc_token=rpc-secret"})
+	})
+	mux.HandleFunc("/admin/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer rpc-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]domain.JoinTokenRecord{{Hash: "hash-a", Active: true, Current: true}})
+	})
+	mux.HandleFunc("/admin/tokens/rotate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer rpc-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("rotate body: %v", err)
+		}
+		sawRotate = body["token"] == "next-secret"
+		_ = json.NewEncoder(w).Encode(map[string]string{"join": "mycjoin://127.0.0.1:51846?token=next-secret&rpc_token=rpc-secret"})
+	})
+	mux.HandleFunc("/admin/tokens/revoke", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer rpc-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("revoke body: %v", err)
+		}
+		sawRevoke = body["token"] == "old-secret"
+		w.WriteHeader(http.StatusNoContent)
+	})
+	client := directHTTPClient(mux)
+	for _, tt := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"nodes", "invite", "--url", "http://peer.test", "--rpc-token", "rpc-secret"}, want: "mycjoin://127.0.0.1:51846"},
+		{args: []string{"nodes", "tokens", "list", "--url", "http://peer.test", "--rpc-token", "rpc-secret"}, want: "hash-a\ttrue\ttrue"},
+		{args: []string{"nodes", "tokens", "rotate", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--token", "next-secret"}, want: "next-secret"},
+		{args: []string{"nodes", "tokens", "revoke", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--token", "old-secret"}, want: "revoked"},
+	} {
+		output := captureStdout(t, func() {
+			if err := RunWithClient(context.Background(), tt.args, client); err != nil {
+				t.Fatalf("RunWithClient(%v): %v", tt.args, err)
+			}
+		})
+		if !strings.Contains(output, tt.want) {
+			t.Fatalf("output for %v = %q, want %q", tt.args, output, tt.want)
+		}
+	}
+	if !sawInviteAuth || !sawRotate || !sawRevoke {
+		t.Fatalf("saw invite=%t rotate=%t revoke=%t", sawInviteAuth, sawRotate, sawRevoke)
+	}
+	for _, args := range [][]string{
+		{"nodes"},
+		{"nodes", "tokens"},
+		{"nodes", "tokens", "revoke", "--url", "http://peer.test", "--rpc-token", "rpc-secret"},
+		{"nodes", "wat"},
+	} {
+		if err := RunWithClient(context.Background(), args, client); err == nil {
+			t.Fatalf("RunWithClient(%v) expected error", args)
+		}
+	}
+	if err := RunWithClient(context.Background(), []string{"nodes", "invite", "--url", "http://peer.test"}, client); err == nil {
+		t.Fatal("unauthorized invite succeeded")
+	}
+}
+
 func TestRunRecommendationsGenerateAndApply(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "control.db")
 	store, err := storesqlite.Open(dbPath)

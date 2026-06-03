@@ -23,13 +23,20 @@ func BuildJoinToken(token string) (string, error) {
 }
 
 func BuildJoinTokenWithRPC(token, rpcToken string) (string, error) {
+	return BuildJoinTokenForPeer("peer", token, rpcToken)
+}
+
+func BuildJoinTokenForPeer(address, token, rpcToken string) (string, error) {
 	if token == "" {
 		return "", fmt.Errorf("join token is required")
 	}
 	if rpcToken == "" {
 		return "", fmt.Errorf("rpc token is required")
 	}
-	out := url.URL{Scheme: "mycjoin", Host: "peer"}
+	if address == "" {
+		address = "peer"
+	}
+	out := url.URL{Scheme: "mycjoin", Host: address}
 	q := out.Query()
 	q.Set("token", token)
 	q.Set("rpc_token", rpcToken)

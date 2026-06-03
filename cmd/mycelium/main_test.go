@@ -496,6 +496,14 @@ func TestRunServiceStatusChecksPeerHealth(t *testing.T) {
 	if got, err := servicePeerBaseURL("0.0.0.0:51846"); err != nil || got != "http://127.0.0.1:51846" {
 		t.Fatalf("service base URL = %q %v", got, err)
 	}
+	failedPeer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failedPeer.Close()
+	failedConfig := writePeerConfig(t, PeerConfig{Listen: strings.TrimPrefix(failedPeer.URL, "http://")})
+	if _, err := servicePeerHealth(context.Background(), failedConfig); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("failed service health err = %v", err)
+	}
 }
 
 func TestServiceUtilityErrorBranches(t *testing.T) {
@@ -823,6 +831,117 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 	if len(tokens) != 1 || !tokens[0].Active || !tokens[0].Current {
 		t.Fatalf("tokens after boot = %+v", tokens)
 	}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/admin/invite", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("admin invite without rpc status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/admin/invite", nil)
+	req.Host = "peer-a.local:51846"
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin invite status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	var invite adminInviteResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &invite); err != nil {
+		t.Fatalf("decode invite: %v", err)
+	}
+	join, err := membership.ParseJoinToken(invite.Join)
+	if err != nil {
+		t.Fatalf("parse invite: %v", err)
+	}
+	if join.Address != "127.0.0.1:0" || join.Token != "secret" || join.RPCToken != "rpc-secret" {
+		t.Fatalf("invite join = %+v uri=%s", join, invite.Join)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/admin/tokens/rotate", strings.NewReader(`{"token":"next-secret"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rotate status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read rotated config: %v", err)
+	}
+	var rotated PeerConfig
+	if err := json.Unmarshal(data, &rotated); err != nil {
+		t.Fatalf("decode rotated config: %v", err)
+	}
+	if rotated.JoinToken != "next-secret" {
+		t.Fatalf("rotated config = %+v", rotated)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/admin/tokens", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("tokens without auth status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/admin/tokens", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tokens status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	var listed []domain.JoinTokenRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode tokens: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("listed tokens = %+v", listed)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/admin/tokens/rotate", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("generated rotate status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/admin/tokens/revoke", strings.NewReader(`{"token":"secret"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/peer/health", nil)
+	req.Header.Set("X-Myc-Join-Token", "secret")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked peer health status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	for _, tt := range []struct {
+		method string
+		path   string
+		body   string
+		want   int
+	}{
+		{method: http.MethodGet, path: "/admin/invite", want: http.StatusMethodNotAllowed},
+		{method: http.MethodPost, path: "/admin/tokens", want: http.StatusMethodNotAllowed},
+		{method: http.MethodGet, path: "/admin/tokens/rotate", want: http.StatusMethodNotAllowed},
+		{method: http.MethodGet, path: "/admin/tokens/revoke", want: http.StatusMethodNotAllowed},
+		{method: http.MethodPost, path: "/admin/tokens/rotate", body: `{`, want: http.StatusBadRequest},
+		{method: http.MethodPost, path: "/admin/tokens/revoke", body: `{`, want: http.StatusBadRequest},
+		{method: http.MethodPost, path: "/admin/tokens/revoke", body: `{}`, want: http.StatusBadRequest},
+	} {
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+		req.Header.Set("Authorization", "Bearer rpc-secret")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != tt.want {
+			t.Fatalf("%s %s status/body = %d %q want %d", tt.method, tt.path, rec.Code, rec.Body.String(), tt.want)
+		}
+	}
+	if got := adminJoinAddress("0.0.0.0:51846", "peer.local:51846"); got != "peer.local:51846" {
+		t.Fatalf("wildcard join address = %s", got)
+	}
+	if got := adminJoinAddress("bad-listen", "peer.local:51846"); got != "bad-listen" {
+		t.Fatalf("bad listen join address = %s", got)
+	}
 }
 
 func TestBuildPeerGatewayJoinBootstrapsCleanHome(t *testing.T) {
@@ -875,6 +994,96 @@ func TestBuildPeerGatewayJoinBootstrapsCleanHome(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("peer health status/body = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRunBootstrapAppliesCleanHomeJoinState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".mycelium", "peer.json")
+	join := "mycjoin://127.0.0.1:51846?token=join-secret&rpc_token=join-rpc"
+	if err := runBootstrap(context.Background(), []string{"--join", join, "--compute", "off", "--config", configPath}); err != nil {
+		t.Fatalf("dry-run bootstrap: %v", err)
+	}
+	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dry-run wrote config err=%v", err)
+	}
+	if err := runBootstrap(context.Background(), []string{"--join", join, "--compute", "off", "--config", configPath, "--apply"}); err != nil {
+		t.Fatalf("apply bootstrap: %v", err)
+	}
+	cfg, err := loadPeerConfig(configPath)
+	if err != nil {
+		t.Fatalf("load bootstrap config: %v", err)
+	}
+	if cfg.JoinToken != "join-secret" || cfg.RPCToken != "join-rpc" || len(cfg.SeedPeers) != 1 || cfg.SeedPeers[0] != "127.0.0.1:51846" || cfg.Compute {
+		t.Fatalf("bootstrap config = %+v", cfg)
+	}
+	store, err := storesqlite.Open(cfg.StorePath)
+	if err != nil {
+		t.Fatalf("Open bootstrap store: %v", err)
+	}
+	defer store.Close()
+	tokens, err := store.ListJoinTokens(context.Background())
+	if err != nil {
+		t.Fatalf("ListJoinTokens: %v", err)
+	}
+	if len(tokens) != 1 || !tokens[0].Active || !tokens[0].Current {
+		t.Fatalf("bootstrap tokens = %+v", tokens)
+	}
+	if err := runBootstrap(context.Background(), []string{"--join", "mycjoin://127.0.0.1:51846?token=join-secret", "--compute", "off"}); err == nil || !strings.Contains(err.Error(), "rpc_token") {
+		t.Fatalf("missing rpc token err = %v", err)
+	}
+	serviceConfig := filepath.Join(home, ".mycelium", "service-peer.json")
+	if err := runBootstrapWithServiceManager(context.Background(), []string{"--join", join, "--compute", "off", "--config", serviceConfig, "--apply", "--install-service"}, fakeServiceManager{}, "darwin"); err != nil {
+		t.Fatalf("bootstrap install service: %v", err)
+	}
+	if err := runBootstrapWithServiceManager(context.Background(), []string{"--join", join, "--compute", "off", "--config", filepath.Join(home, ".mycelium", "service-peer-err.json"), "--apply", "--install-service"}, fakeServiceManager{err: errors.New("service")}, "darwin"); err == nil || !strings.Contains(err.Error(), "service") {
+		t.Fatalf("bootstrap service err = %v", err)
+	}
+	if err := runBootstrap(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "--join") {
+		t.Fatalf("missing join err = %v", err)
+	}
+	if err := runBootstrap(context.Background(), []string{"--bad-flag"}); err == nil {
+		t.Fatal("bad bootstrap flag accepted")
+	}
+	if err := runBootstrap(context.Background(), []string{"--join", "not://a-join"}); err == nil {
+		t.Fatal("bad bootstrap join accepted")
+	}
+	if err := run(context.Background(), []string{"bootstrap"}); err == nil || !strings.Contains(err.Error(), "--join") {
+		t.Fatalf("run bootstrap err = %v", err)
+	}
+}
+
+func TestAdminHTTPFailureBranches(t *testing.T) {
+	manager, err := membership.NewTokenManager("secret")
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	cfg := PeerConfig{Listen: "127.0.0.1:51846", RPCToken: "rpc-secret"}
+	mux := http.NewServeMux()
+	mountAdminHTTP(mux, &cfg, filepath.Join(t.TempDir(), "peer.json"), manager, failingTokenStore{}, "rpc-secret")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/invite", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("invite bad cfg status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/admin/tokens", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("tokens bad store status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	cfg.JoinToken = "secret"
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/admin/tokens/rotate", strings.NewReader(`{"token":"next"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rotate status/body = %d %q", rec.Code, rec.Body.String())
 	}
 }
 
@@ -2661,6 +2870,12 @@ func (m fakeServiceManager) Status(context.Context, serviceSpec) (string, error)
 
 func (m fakeServiceManager) Uninstall(context.Context, serviceSpec) error {
 	return m.err
+}
+
+type failingTokenStore struct{}
+
+func (failingTokenStore) ListJoinTokens(context.Context) ([]domain.JoinTokenRecord, error) {
+	return nil, errors.New("token store")
 }
 
 func TestBuildComputeRuntimeRejectsUnknownBackend(t *testing.T) {

@@ -35,7 +35,7 @@ func RunWithClient(ctx context.Context, args []string, client *http.Client) erro
 	case "models":
 		return runModels(ctx, args[1:])
 	case "nodes":
-		return runNodes(ctx, args[1:])
+		return runNodes(ctx, args[1:], client)
 	case "projects":
 		return runProjects(ctx, args[1:])
 	case "jobs":
@@ -137,23 +137,196 @@ func runModels(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runNodes(ctx context.Context, args []string) error {
-	if len(args) == 0 || args[0] != "list" {
-		return fmt.Errorf("usage: myce nodes list [--db path]")
+func runNodes(ctx context.Context, args []string, client *http.Client) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: myce nodes <list|invite|tokens>")
 	}
-	store, err := openCLIStore(args[1:])
+	switch args[0] {
+	case "list":
+		store, err := openCLIStore(args[1:])
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		nodes, err := store.ListNodes(ctx)
+		if err != nil {
+			return err
+		}
+		for _, node := range nodes {
+			fmt.Printf("%s\t%s\t%s\t%s\n", node.ID, node.Name, node.Address, node.Status)
+		}
+		return nil
+	case "invite":
+		admin, err := nodeAdminFromArgs(args[1:], client)
+		if err != nil {
+			return err
+		}
+		join, err := admin.Invite(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s\n", join)
+		return nil
+	case "tokens":
+		return runNodeTokens(ctx, args[1:], client)
+	default:
+		return fmt.Errorf("usage: myce nodes <list|invite|tokens>")
+	}
+}
+
+func runNodeTokens(ctx context.Context, args []string, client *http.Client) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: myce nodes tokens <list|rotate|revoke>")
+	}
+	switch args[0] {
+	case "list":
+		admin, err := nodeAdminFromArgs(args[1:], client)
+		if err != nil {
+			return err
+		}
+		tokens, err := admin.Tokens(ctx)
+		if err != nil {
+			return err
+		}
+		for _, token := range tokens {
+			fmt.Printf("%s\t%t\t%t\n", token.Hash, token.Active, token.Current)
+		}
+		return nil
+	case "rotate":
+		admin, token, err := nodeAdminWithTokenFromArgs(args[1:], client, false)
+		if err != nil {
+			return err
+		}
+		join, err := admin.Rotate(ctx, token)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s\n", join)
+		return nil
+	case "revoke":
+		admin, token, err := nodeAdminWithTokenFromArgs(args[1:], client, true)
+		if err != nil {
+			return err
+		}
+		if err := admin.Revoke(ctx, token); err != nil {
+			return err
+		}
+		fmt.Printf("revoked\n")
+		return nil
+	default:
+		return fmt.Errorf("usage: myce nodes tokens <list|rotate|revoke>")
+	}
+}
+
+func nodeAdminFromArgs(args []string, client *http.Client) (nodeAdminClient, error) {
+	fs := flag.NewFlagSet("nodes admin", flag.ContinueOnError)
+	url := fs.String("url", "http://127.0.0.1:51846", "peer URL")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
+	if err := fs.Parse(args); err != nil {
+		return nodeAdminClient{}, err
+	}
+	return nodeAdminClient{BaseURL: *url, AuthToken: *rpcToken, Client: client}, nil
+}
+
+func nodeAdminWithTokenFromArgs(args []string, client *http.Client, requireToken bool) (nodeAdminClient, string, error) {
+	fs := flag.NewFlagSet("nodes tokens", flag.ContinueOnError)
+	url := fs.String("url", "http://127.0.0.1:51846", "peer URL")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
+	token := fs.String("token", "", "join token")
+	if err := fs.Parse(args); err != nil {
+		return nodeAdminClient{}, "", err
+	}
+	if requireToken && *token == "" {
+		return nodeAdminClient{}, "", fmt.Errorf("--token is required")
+	}
+	return nodeAdminClient{BaseURL: *url, AuthToken: *rpcToken, Client: client}, *token, nil
+}
+
+type nodeAdminClient struct {
+	BaseURL   string
+	AuthToken string
+	Client    *http.Client
+}
+
+type inviteResponse struct {
+	Join string `json:"join"`
+}
+
+func (c nodeAdminClient) Invite(ctx context.Context) (string, error) {
+	var out inviteResponse
+	if err := c.do(ctx, http.MethodPost, "/admin/invite", nil, &out); err != nil {
+		return "", err
+	}
+	if out.Join == "" {
+		return "", fmt.Errorf("peer returned an empty join uri")
+	}
+	return out.Join, nil
+}
+
+func (c nodeAdminClient) Tokens(ctx context.Context) ([]domain.JoinTokenRecord, error) {
+	var out []domain.JoinTokenRecord
+	err := c.do(ctx, http.MethodGet, "/admin/tokens", nil, &out)
+	return out, err
+}
+
+func (c nodeAdminClient) Rotate(ctx context.Context, token string) (string, error) {
+	var in any
+	if token != "" {
+		in = map[string]string{"token": token}
+	}
+	var out inviteResponse
+	if err := c.do(ctx, http.MethodPost, "/admin/tokens/rotate", in, &out); err != nil {
+		return "", err
+	}
+	if out.Join == "" {
+		return "", fmt.Errorf("peer returned an empty join uri")
+	}
+	return out.Join, nil
+}
+
+func (c nodeAdminClient) Revoke(ctx context.Context, token string) error {
+	return c.do(ctx, http.MethodPost, "/admin/tokens/revoke", map[string]string{"token": token}, nil)
+}
+
+func (c nodeAdminClient) do(ctx context.Context, method, path string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		data, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.BaseURL, "/")+path, body)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	nodes, err := store.ListNodes(ctx)
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	client := c.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
-	for _, node := range nodes {
-		fmt.Printf("%s\t%s\t%s\t%s\n", node.ID, node.Name, node.Address, node.Status)
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
 	}
-	return nil
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("peer admin %s %s: %s", method, path, strings.TrimSpace(string(data)))
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(data, out)
 }
 
 func runProjects(ctx context.Context, args []string) error {
