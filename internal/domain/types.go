@@ -306,3 +306,45 @@ type JoinTokenRecord struct {
 	Active  bool   `json:"active"`
 	Current bool   `json:"current"`
 }
+
+type HostFacts struct {
+	NodeID           string            `json:"node_id"`
+	OS               string            `json:"os"`
+	Arch             string            `json:"arch"`
+	Platform         string            `json:"platform"`
+	PackageManagers  []string          `json:"package_managers,omitempty"`
+	ContainerRuntime string            `json:"container_runtime,omitempty"`
+	Accelerators     []Accelerator     `json:"accelerators,omitempty"`
+	DriverFacts      map[string]string `json:"driver_facts,omitempty"`
+	TotalMemoryMB    int               `json:"total_memory_mb,omitempty"`
+	DiskFreeMB       int               `json:"disk_free_mb,omitempty"`
+	DiskTotalMB      int               `json:"disk_total_mb,omitempty"`
+	DiskMinFreeRatio float64           `json:"disk_min_free_ratio,omitempty"`
+	OOMSeverity      OOMSeverity       `json:"oom_severity,omitempty"`
+}
+
+type EngineProfile struct {
+	ID                 string            `json:"id"`
+	Backend            Backend           `json:"backend"`
+	DisplayName        string            `json:"display_name"`
+	ManagedBy          string            `json:"managed_by"`
+	BinaryPath         string            `json:"binary_path"`
+	Args               []string          `json:"args,omitempty"`
+	HealthPath         string            `json:"health_path,omitempty"`
+	Version            string            `json:"version,omitempty"`
+	SupportedModels    []string          `json:"supported_models,omitempty"`
+	RequiredLabels     map[string]string `json:"required_labels,omitempty"`
+	SupportedPlatforms []string          `json:"supported_platforms,omitempty"`
+	ArtifactPlatform   string            `json:"artifact_platform,omitempty"`
+	MaxUtilDefault     float64           `json:"max_util_default,omitempty"`
+	DiskMinFreeRatio   float64           `json:"disk_min_free_ratio,omitempty"`
+	Safety             EngineSafety      `json:"safety,omitempty"`
+	VerifiedAt         time.Time         `json:"verified_at,omitempty"`
+	Ready              bool              `json:"ready"`
+	UnreadyReason      string            `json:"unready_reason,omitempty"`
+}
+
+type EngineSafety struct {
+	OOMSeverity        OOMSeverity `json:"oom_severity,omitempty"`
+	VLLMGPUUtilization float64     `json:"vllm_gpu_utilization,omitempty"`
+}
