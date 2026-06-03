@@ -69,13 +69,18 @@ func TestRemotePeerCleanHomeJoinSmoke(t *testing.T) {
 func TestFleetLocalitySmoke(t *testing.T) {
 	dbPath := os.Getenv("MYCELIUM_LOCALITY_DB")
 	rpcToken := os.Getenv("MYCELIUM_LOCALITY_RPC_TOKEN")
-	if dbPath == "" || rpcToken == "" {
-		t.Skip("set MYCELIUM_LOCALITY_DB and MYCELIUM_LOCALITY_RPC_TOKEN for fleet locality smoke")
+	peers := strings.Fields(os.Getenv("MYCELIUM_LOCALITY_PEER_URLS"))
+	if dbPath == "" || rpcToken == "" || len(peers) == 0 {
+		t.Skip("set MYCELIUM_LOCALITY_DB, MYCELIUM_LOCALITY_RPC_TOKEN, and MYCELIUM_LOCALITY_PEER_URLS for fleet locality smoke")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
 	planID := "smoke-locality-" + time.Now().UTC().Format("20060102150405")
-	out := runSmokeCommandOutput(t, ctx, "go", "run", "./cmd/myce", "models", "locality", "plan", "--db", dbPath, "--id", planID)
+	args := []string{"run", "./cmd/myce", "models", "locality", "plan", "--db", dbPath, "--id", planID, "--rpc-token", rpcToken}
+	for _, peer := range peers {
+		args = append(args, "--peer-url", peer)
+	}
+	out := runSmokeCommandOutput(t, ctx, "go", args...)
 	if !strings.Contains(out, "locality-plan\t"+planID) {
 		t.Fatalf("locality plan output = %q", out)
 	}

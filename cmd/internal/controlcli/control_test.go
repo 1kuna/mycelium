@@ -457,6 +457,64 @@ func TestRunModelsLocalityPlanAndApply(t *testing.T) {
 	}
 }
 
+func TestRefreshLocalityPeerSnapshots(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	if err := refreshLocalityPeerSnapshots(context.Background(), store, nil, "", nil); err != nil {
+		t.Fatalf("empty refresh: %v", err)
+	}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/snapshot" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer rpc-secret" {
+			t.Fatalf("auth = %s", r.Header.Get("Authorization"))
+		}
+		_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{
+			Node:      domain.Node{ID: "node-a", Address: "127.0.0.1:1", Status: domain.NodeReady},
+			Instances: []domain.ModelInstance{{ID: "inst-a", NodeID: "node-a", PresetID: "tiny", State: domain.InstReady}},
+		})
+	}))
+	if err := refreshLocalityPeerSnapshots(context.Background(), store, []string{"peer.test"}, "rpc-secret", client); err != nil {
+		t.Fatalf("refresh snapshots: %v", err)
+	}
+	if node, err := store.Node(context.Background(), "node-a"); err != nil || node.ID != "node-a" {
+		t.Fatalf("Node = %+v %v", node, err)
+	}
+	if inst, err := store.Instance(context.Background(), "inst-a"); err != nil || inst.PresetID != "tiny" {
+		t.Fatalf("Instance = %+v %v", inst, err)
+	}
+	errorClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"no"}`))
+	}))
+	if err := refreshLocalityPeerSnapshots(context.Background(), store, []string{"http://peer.test"}, "", errorClient); err == nil || !strings.Contains(err.Error(), "snapshot") {
+		t.Fatalf("snapshot error = %v", err)
+	}
+	emptyClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{})
+	}))
+	if err := refreshLocalityPeerSnapshots(context.Background(), store, []string{"http://peer.test"}, "", emptyClient); err == nil || !strings.Contains(err.Error(), "empty node") {
+		t.Fatalf("empty snapshot err = %v", err)
+	}
+	malformedClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{`))
+	}))
+	if err := refreshLocalityPeerSnapshots(context.Background(), store, []string{"http://peer.test"}, "", malformedClient); err == nil {
+		t.Fatal("malformed snapshot accepted")
+	}
+	dialErrorClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial failed")
+	})}
+	if err := refreshLocalityPeerSnapshots(context.Background(), store, []string{"http://peer.test"}, "", dialErrorClient); err == nil || !strings.Contains(err.Error(), "dial failed") {
+		t.Fatalf("transport snapshot err = %v", err)
+	}
+}
+
 func TestRunModelsLocalityApplyRecordsFailures(t *testing.T) {
 	if err := runModelsLocalityApply(context.Background(), nil, catalogStageHTTPClient{}); err == nil || !strings.Contains(err.Error(), "--id") {
 		t.Fatalf("missing id err = %v", err)

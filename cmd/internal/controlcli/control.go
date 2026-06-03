@@ -233,6 +233,9 @@ func runModelsLocalityPlan(ctx context.Context, args []string) error {
 	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
 	id := fs.String("id", "", "locality plan id")
 	project := fs.String("project", "", "project id for telemetry demand")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token for live snapshot refresh")
+	var peerURLs repeatedString
+	fs.Var(&peerURLs, "peer-url", "compute peer URL to snapshot before planning; may be repeated")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -241,6 +244,9 @@ func runModelsLocalityPlan(ctx context.Context, args []string) error {
 		return err
 	}
 	defer store.Close()
+	if err := refreshLocalityPeerSnapshots(ctx, store, peerURLs, *rpcToken, nil); err != nil {
+		return err
+	}
 	plan, err := (locality.Planner{Store: store, Clock: clock.System{}}).Plan(ctx, locality.PlanRequest{ID: *id, Project: *project})
 	if err != nil {
 		return err
@@ -345,6 +351,52 @@ func printLocalityPlan(plan domain.LocalityPlan) {
 	for _, warning := range plan.Warnings {
 		fmt.Printf("locality-warning\t%s\n", warning)
 	}
+}
+
+func refreshLocalityPeerSnapshots(ctx context.Context, store *storesqlite.Store, peerURLs []string, rpcToken string, client *http.Client) error {
+	if len(peerURLs) == 0 {
+		return nil
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	for _, peerURL := range peerURLs {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(catalogPeerBaseURL(peerURL), "/")+"/snapshot", nil)
+		if err != nil {
+			return err
+		}
+		if rpcToken != "" {
+			req.Header.Set("Authorization", "Bearer "+rpcToken)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		data, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("snapshot %s: %s", peerURL, strings.TrimSpace(string(data)))
+		}
+		var snap domain.NodeSnapshot
+		if err := json.Unmarshal(data, &snap); err != nil {
+			return err
+		}
+		if snap.Node.ID == "" {
+			return fmt.Errorf("snapshot %s returned empty node id", peerURL)
+		}
+		if err := store.SaveNode(ctx, snap.Node); err != nil {
+			return err
+		}
+		for _, inst := range snap.Instances {
+			if err := store.SaveInstance(ctx, inst); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 type catalogStageHTTPClient struct {
