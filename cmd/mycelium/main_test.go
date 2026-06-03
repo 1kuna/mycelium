@@ -1163,6 +1163,44 @@ func TestCatalogStageHTTPMaterializesPresetAndLocality(t *testing.T) {
 	if _, err := os.Stat(preset.ModelRef); err != nil {
 		t.Fatalf("staged model stat: %v", err)
 	}
+
+	runtimeBody, err := json.Marshal(catalogStageRequest{
+		Preset: domain.Preset{
+			ID:             "runtime-hf",
+			ModelRef:       "Lorbus/Qwen3.6-27B-int4-AutoRound",
+			Aliases:        []string{"runtime-model"},
+			Backend:        domain.BackendVLLM,
+			ContextLength:  2048,
+			Quant:          "int4",
+			Capabilities:   []domain.Capability{domain.CapabilityChat},
+			ArtifactSizeMB: 18432,
+			NodeID:         "node-a",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal runtime request: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/catalog/stage", bytes.NewReader(runtimeBody))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("runtime stage status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode runtime response: %v", err)
+	}
+	if response.Locality.ID != "node-a:runtime-hf" || response.Locality.Managed || response.Locality.Reason != "runtime source adopted" {
+		t.Fatalf("runtime locality = %+v", response.Locality)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/catalog/stage", strings.NewReader(`{"preset":{"id":"wrong-node","model_ref":"repo/model","node_id":"other-node"}}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "declared local") {
+		t.Fatalf("wrong-node status/body = %d %q", rec.Code, rec.Body.String())
+	}
+
 	rec = httptest.NewRecorder()
 	evictBody, err := json.Marshal(catalogEvictRequest{PresetID: "tiny", NodeID: "node-a"})
 	if err != nil {
@@ -1178,7 +1216,7 @@ func TestCatalogStageHTTPMaterializesPresetAndLocality(t *testing.T) {
 		t.Fatalf("evicted model stat err = %v", err)
 	}
 	localities, err = store.ListModelLocalities(ctx)
-	if err != nil || len(localities) != 0 {
+	if err != nil || len(localities) != 1 || localities[0].ID != "node-a:runtime-hf" || localities[0].Managed {
 		t.Fatalf("localities after evict = %+v %v", localities, err)
 	}
 
@@ -1235,6 +1273,37 @@ func TestCatalogStageHTTPMaterializesPresetAndLocality(t *testing.T) {
 	}
 	if got := firstPresetModelAlias(domain.Preset{ModelRef: "ref"}); got != "ref" {
 		t.Fatalf("alias fallback ref = %s", got)
+	}
+}
+
+func TestShouldAdoptRuntimeSource(t *testing.T) {
+	model := filepath.Join(t.TempDir(), "model.gguf")
+	if err := os.WriteFile(model, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	dir := filepath.Join(t.TempDir(), "repo")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	preset := domain.Preset{ID: "runtime", NodeID: "node-a"}
+	for _, tt := range []struct {
+		name   string
+		preset domain.Preset
+		source string
+		nodeID string
+		want   bool
+	}{
+		{name: "bare repo", preset: preset, source: "owner/repo", nodeID: "node-a", want: true},
+		{name: "local directory", preset: preset, source: dir, nodeID: "node-a", want: true},
+		{name: "regular file", preset: preset, source: model, nodeID: "node-a"},
+		{name: "hf artifact", preset: preset, source: "hf://owner/repo/model.gguf", nodeID: "node-a"},
+		{name: "oci artifact", preset: preset, source: "oci://registry/repo:model", nodeID: "node-a"},
+		{name: "wrong node", preset: preset, source: "owner/repo", nodeID: "node-b"},
+		{name: "portable preset", preset: domain.Preset{ID: "portable"}, source: "owner/repo", nodeID: "node-a"},
+	} {
+		if got := shouldAdoptRuntimeSource(tt.preset, tt.source, tt.nodeID); got != tt.want {
+			t.Fatalf("%s: got %t want %t", tt.name, got, tt.want)
+		}
 	}
 }
 
@@ -1378,6 +1447,9 @@ func TestBootstrapDoctorConfigLoadsOrDefaults(t *testing.T) {
 	if _, err := bootstrapDoctorConfig(badPath); err == nil {
 		t.Fatal("bad doctor config accepted")
 	}
+	if err := runBootstrapDoctor(context.Background(), badPath, false); err == nil || !strings.Contains(err.Error(), "parse peer config") {
+		t.Fatalf("bad doctor wrapper err = %v", err)
+	}
 }
 
 func TestBootstrapDoctorAndAdoptionWithFakeDetector(t *testing.T) {
@@ -1511,6 +1583,29 @@ func TestPeerHealthProbeAndDeadMarker(t *testing.T) {
 	}
 	if err := probePeerHealth(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}}); !errors.Is(err, domain.ErrUnreachable) {
 		t.Fatalf("unreachable err = %v", err)
+	}
+	manager, err := membership.NewTokenManager("secret")
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	serverPeer := domain.Peer{ID: "peer-token", Compute: true}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Myc-Join-Token") != "secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		serverPeer.Addresses = []string{serverURL(r)}
+		_ = json.NewEncoder(w).Encode(serverPeer)
+	}))
+	defer server.Close()
+	if got, err := fetchPeerHealth(context.Background(), server.URL, "secret"); err != nil || got.ID != "peer-token" {
+		t.Fatalf("fetchPeerHealth = %+v %v", got, err)
+	}
+	if err := probePeerHealthWithToken(context.Background(), domain.Peer{ID: "peer-token", Addresses: []string{server.URL}}, "secret"); err != nil {
+		t.Fatalf("probe with token wrapper: %v", err)
+	}
+	if err := probePeerHealthWithTokenManager(context.Background(), domain.Peer{ID: "peer-token", Addresses: []string{server.URL}}, "secret", manager); err != nil {
+		t.Fatalf("probe with token manager wrapper: %v", err)
 	}
 
 	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))

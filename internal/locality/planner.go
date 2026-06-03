@@ -214,6 +214,19 @@ func chooseNode(nodes []domain.Node, preset domain.Preset, demand int) (domain.N
 	if hasUnsafeVLLMUtilization(preset.LaunchArgs) {
 		return domain.Node{}, "preset has unsafe vllm gpu memory utilization", false
 	}
+	if preset.NodeID != "" {
+		for _, node := range nodes {
+			if node.ID != preset.NodeID {
+				continue
+			}
+			reason, ok := nodeFitsPreset(node, preset)
+			if !ok {
+				return domain.Node{}, node.ID + ":" + reason, false
+			}
+			return node, fmt.Sprintf("selected declared source node %s with demand=%d disk/memory fit", node.ID, demand), true
+		}
+		return domain.Node{}, fmt.Sprintf("declared source node %s not found", preset.NodeID), false
+	}
 	type candidate struct {
 		node  domain.Node
 		score float64
@@ -221,32 +234,12 @@ func chooseNode(nodes []domain.Node, preset domain.Preset, demand int) (domain.N
 	candidates := make([]candidate, 0, len(nodes))
 	var drops []string
 	for _, node := range nodes {
-		if node.Status != domain.NodeReady {
-			drops = append(drops, node.ID+":not ready")
+		reason, ok := nodeFitsPreset(node, preset)
+		if !ok {
+			drops = append(drops, node.ID+":"+reason)
 			continue
-		}
-		if backend := node.Labels[domain.LabelPeerBackend]; backend != "" && domain.Backend(backend) != preset.Backend {
-			drops = append(drops, node.ID+":backend "+backend)
-			continue
-		}
-		if node.DiskTotalMB <= 0 || node.DiskFreeMB <= 0 {
-			drops = append(drops, node.ID+":missing disk facts")
-			continue
-		}
-		minFree := node.DiskMinFreeRatio
-		if minFree == 0 {
-			minFree = domain.DefaultDiskMinFreeRatio
 		}
 		freeAfter := node.DiskFreeMB - preset.ArtifactSizeMB
-		if freeAfter < 0 || float64(freeAfter)/float64(node.DiskTotalMB) < minFree {
-			drops = append(drops, node.ID+":disk floor")
-			continue
-		}
-		usableMemory := usableAcceleratorMemoryMB(node)
-		if preset.EstWeightsMB > 0 && usableMemory > 0 && preset.EstWeightsMB > usableMemory {
-			drops = append(drops, node.ID+":memory cap")
-			continue
-		}
 		score := float64(demand*1000000 + freeAfter)
 		score += node.SpeedClass.TokensPerSecRef * 100
 		candidates = append(candidates, candidate{node: node, score: score})
@@ -262,6 +255,31 @@ func chooseNode(nodes []domain.Node, preset domain.Preset, demand int) (domain.N
 		return candidates[i].score > candidates[j].score
 	})
 	return candidates[0].node, fmt.Sprintf("selected by demand=%d disk/memory fit", demand), true
+}
+
+func nodeFitsPreset(node domain.Node, preset domain.Preset) (string, bool) {
+	if node.Status != domain.NodeReady {
+		return "not ready", false
+	}
+	if backend := node.Labels[domain.LabelPeerBackend]; backend != "" && domain.Backend(backend) != preset.Backend {
+		return "backend " + backend, false
+	}
+	if node.DiskTotalMB <= 0 || node.DiskFreeMB <= 0 {
+		return "missing disk facts", false
+	}
+	minFree := node.DiskMinFreeRatio
+	if minFree == 0 {
+		minFree = domain.DefaultDiskMinFreeRatio
+	}
+	freeAfter := node.DiskFreeMB - preset.ArtifactSizeMB
+	if freeAfter < 0 || float64(freeAfter)/float64(node.DiskTotalMB) < minFree {
+		return "disk floor", false
+	}
+	usableMemory := usableAcceleratorMemoryMB(node)
+	if preset.EstWeightsMB > 0 && usableMemory > 0 && preset.EstWeightsMB > usableMemory {
+		return "memory cap", false
+	}
+	return "", true
 }
 
 func usableAcceleratorMemoryMB(node domain.Node) int {
