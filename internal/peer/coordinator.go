@@ -184,6 +184,7 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 			var err error
 			offer, err = owner.Offer(ctx, domain.AdmissionRequest{
 				Job:            claimed.job,
+				Preset:         plan.Preset,
 				Claim:          plan.Claim,
 				NodeID:         plan.NodeID,
 				AcceleratorSet: append([]int(nil), plan.AcceleratorSet...),

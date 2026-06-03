@@ -22,7 +22,7 @@ func TestAdmissionConformance(t *testing.T) {
 		func() ports.AdmissionController {
 			return NewAdmission(fixtures.MakeNode(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
 		},
-		fixtures.MakeJob(), fixtures.MakeClaim(3, 4))
+		fixtures.MakeJob(), fixtures.MakePreset(), fixtures.MakeClaim(3, 4))
 }
 
 func TestAdmissionOfferAndCommitGrantLeaseWithFence(t *testing.T) {
@@ -207,6 +207,7 @@ func TestAdmissionRequestTargetingWarmInstancesAndPinnedLeases(t *testing.T) {
 
 	if _, err := admission.Offer(ctx, domain.AdmissionRequest{
 		Job:    fixtures.MakeJob(fixtures.WithJobID("wrong-node")),
+		Preset: fixtures.MakePreset(),
 		Claim:  fixtures.MakeClaim(1, 0),
 		NodeID: "node-b",
 	}); err == nil || !strings.Contains(err.Error(), "targeted node") {
@@ -214,6 +215,7 @@ func TestAdmissionRequestTargetingWarmInstancesAndPinnedLeases(t *testing.T) {
 	}
 	offer, err := admission.Offer(ctx, domain.AdmissionRequest{
 		Job:            fixtures.MakeJob(fixtures.WithJobID("job-acc")),
+		Preset:         fixtures.MakePreset(),
 		Claim:          fixtures.MakeClaim(100, 0),
 		NodeID:         node.ID,
 		AcceleratorSet: []int{0},
@@ -358,6 +360,144 @@ func TestAdmissionWarmLeasesReserveIncrementalKVOnly(t *testing.T) {
 		InstanceID: warm.ID,
 	}); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("second warm overflow err = %v", err)
+	}
+}
+
+func TestAdmissionEnforcesDiskHeadroomAtOffer(t *testing.T) {
+	ctx := context.Background()
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1), fixtures.WithDisk(1000, 350))
+	admission := NewAdmission(node, lease.NewAllocator(), clock)
+	job := fixtures.MakeJob(fixtures.WithJobID("disk-job"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("disk-preset"), fixtures.WithArtifactSize(120), fixtures.WithWeights(100))
+	req := domain.AdmissionRequest{Job: job, Preset: preset, Claim: fixtures.MakeClaim(100, 0), NodeID: node.ID}
+
+	if _, err := admission.Offer(ctx, req); !errors.Is(err, domain.ErrNoFit) || !strings.Contains(err.Error(), "disk floor") {
+		t.Fatalf("disk Offer err = %v", err)
+	}
+
+	node = fixtures.MakeNode(fixtures.WithNodeID("node-a"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1), fixtures.WithDisk(1000, 250))
+	admission = NewAdmission(node, lease.NewAllocator(), clock)
+	req.NodeID = node.ID
+	if _, err := admission.Offer(ctx, req); !errors.Is(err, domain.ErrNoFit) || !strings.Contains(err.Error(), "free disk") {
+		t.Fatalf("floor Offer err = %v", err)
+	}
+
+	localPreset := fixtures.MakePreset(fixtures.WithPresetID("local-preset"), fixtures.WithPresetNode(node.ID), fixtures.WithArtifactSize(120), fixtures.WithWeights(100))
+	localReq := domain.AdmissionRequest{Job: fixtures.MakeJob(fixtures.WithJobID("local-job")), Preset: localPreset, Claim: fixtures.MakeClaim(100, 0), NodeID: node.ID}
+	if _, err := admission.Offer(ctx, localReq); !errors.Is(err, domain.ErrNoFit) || !strings.Contains(err.Error(), "free disk") {
+		t.Fatalf("local preset still needs current headroom err = %v", err)
+	}
+}
+
+func TestAdmissionRequiresPresetForColdDiskProof(t *testing.T) {
+	node := fixtures.MakeNode(fixtures.WithDisk(1000, 500), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	admission := NewAdmission(node, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
+
+	_, err := admission.Offer(context.Background(), domain.AdmissionRequest{
+		Job:    fixtures.MakeJob(fixtures.WithJobID("missing-preset")),
+		Claim:  fixtures.MakeClaim(100, 0),
+		NodeID: node.ID,
+	})
+	if !errors.Is(err, domain.ErrNoFit) || !strings.Contains(err.Error(), "missing preset") {
+		t.Fatalf("missing preset err = %v", err)
+	}
+}
+
+func TestAdmissionDiskProofBranches(t *testing.T) {
+	ctx := context.Background()
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+
+	noTelemetry := fixtures.MakeNode(fixtures.WithDisk(0, 0), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	admission := NewAdmission(noTelemetry, lease.NewAllocator(), clock)
+	if _, err := admission.Offer(ctx, domain.AdmissionRequest{
+		Job:    fixtures.MakeJob(fixtures.WithJobID("no-disk-telemetry")),
+		Claim:  fixtures.MakeClaim(100, 0),
+		NodeID: noTelemetry.ID,
+	}); err != nil {
+		t.Fatalf("unknown disk telemetry should not block owner admission: %v", err)
+	}
+
+	invalidRatio := fixtures.MakeNode(fixtures.WithDisk(1000, 500), fixtures.WithDiskMinFreeRatio(1.1), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	admission = NewAdmission(invalidRatio, lease.NewAllocator(), clock)
+	if _, err := admission.Offer(ctx, domain.AdmissionRequest{
+		Job:    fixtures.MakeJob(fixtures.WithJobID("invalid-ratio")),
+		Preset: fixtures.MakePreset(fixtures.WithArtifactSize(1), fixtures.WithWeights(1)),
+		Claim:  fixtures.MakeClaim(1, 0),
+		NodeID: invalidRatio.ID,
+	}); !errors.Is(err, domain.ErrNoFit) || !strings.Contains(err.Error(), "invalid disk_min_free_ratio") {
+		t.Fatalf("invalid ratio err = %v", err)
+	}
+
+	localNode := fixtures.MakeNode(fixtures.WithDisk(1000, 260), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	admission = NewAdmission(localNode, lease.NewAllocator(), clock)
+	if _, err := admission.Offer(ctx, domain.AdmissionRequest{
+		Job:    fixtures.MakeJob(fixtures.WithJobID("local-artifact")),
+		Preset: fixtures.MakePreset(fixtures.WithPresetNode(localNode.ID), fixtures.WithArtifactSize(120), fixtures.WithWeights(100)),
+		Claim:  fixtures.MakeClaim(100, 0),
+		NodeID: localNode.ID,
+	}); err != nil {
+		t.Fatalf("local artifact should not consume staging disk: %v", err)
+	}
+
+	estimateOnly := fixtures.MakeNode(fixtures.WithDisk(1000, 500), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	admission = NewAdmission(estimateOnly, lease.NewAllocator(), clock)
+	if _, err := admission.Offer(ctx, domain.AdmissionRequest{
+		Job:    fixtures.MakeJob(fixtures.WithJobID("estimate-artifact")),
+		Preset: fixtures.MakePreset(fixtures.WithArtifactSize(0), fixtures.WithWeights(50)),
+		Claim:  fixtures.MakeClaim(50, 0),
+		NodeID: estimateOnly.ID,
+	}); err != nil {
+		t.Fatalf("estimated weights should prove artifact disk when explicit size is absent: %v", err)
+	}
+
+	defaultRatio := fixtures.MakeNode(fixtures.WithDisk(1000, 500), fixtures.WithDiskMinFreeRatio(0), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	admission = NewAdmission(defaultRatio, lease.NewAllocator(), clock)
+	if _, err := admission.Offer(ctx, domain.AdmissionRequest{
+		Job:    fixtures.MakeJob(fixtures.WithJobID("default-ratio")),
+		Preset: fixtures.MakePreset(fixtures.WithArtifactSize(1), fixtures.WithWeights(1)),
+		Claim:  fixtures.MakeClaim(1, 0),
+		NodeID: defaultRatio.ID,
+	}); err != nil {
+		t.Fatalf("zero disk ratio should use default floor: %v", err)
+	}
+
+	if required, err := admissionArtifactRequired(domain.Preset{}, estimateOnly, domain.Claim{}); err != nil || required != 0 {
+		t.Fatalf("zero cold claim required=%d err=%v", required, err)
+	}
+	if _, err := admissionArtifactRequired(fixtures.MakePreset(fixtures.WithArtifactSize(-1)), estimateOnly, fixtures.MakeClaim(1, 0)); err == nil || !strings.Contains(err.Error(), "invalid artifact") {
+		t.Fatalf("negative artifact err = %v", err)
+	}
+	if _, err := admissionArtifactRequired(fixtures.MakePreset(fixtures.WithArtifactSize(0), fixtures.WithWeights(0)), estimateOnly, fixtures.MakeClaim(1, 0)); err == nil || !strings.Contains(err.Error(), "no artifact size proof") {
+		t.Fatalf("missing size proof err = %v", err)
+	}
+}
+
+func TestAdmissionRechecksDiskHeadroomAtCommitAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1), fixtures.WithDisk(1000, 500))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("disk-preset"), fixtures.WithArtifactSize(100), fixtures.WithWeights(100))
+	first := NewAdmission(node, lease.NewAllocator(), clock, WithAdmissionStateStore(store))
+	offer, err := first.Offer(ctx, domain.AdmissionRequest{
+		Job:    fixtures.MakeJob(fixtures.WithJobID("disk-commit")),
+		Preset: preset,
+		Claim:  fixtures.MakeClaim(100, 0),
+		NodeID: node.ID,
+	})
+	if err != nil {
+		t.Fatalf("Offer: %v", err)
+	}
+
+	node.DiskFreeMB = 320
+	restarted := NewAdmission(node, lease.NewAllocator(), clock, WithAdmissionStateStore(store))
+	if _, err := restarted.Commit(ctx, offer.OfferID, offer.Fence); !errors.Is(err, domain.ErrNoFit) || !strings.Contains(err.Error(), "disk floor") {
+		t.Fatalf("commit disk err = %v", err)
 	}
 }
 
@@ -663,13 +803,14 @@ func TestAdmissionStoreErrorsAreLoud(t *testing.T) {
 	}
 
 	offer := domain.LeaseOffer{OfferID: "offer-a", JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 0), AcceleratorSet: []int{0}, Fence: 1, ExpiresAt: clock.Now().Add(-time.Second)}
-	expiredStore := &fakeAdmissionStateStore{found: true, state: domain.AdmissionState{NodeID: node.ID, Fence: 1, Offers: []domain.AdmissionOfferRecord{{Offer: offer, Job: fixtures.MakeJob(fixtures.WithJobID("job-a"))}}}, saveErr: saveErr}
+	storedPreset := fixtures.MakePreset(fixtures.WithArtifactSize(1), fixtures.WithWeights(1))
+	expiredStore := &fakeAdmissionStateStore{found: true, state: domain.AdmissionState{NodeID: node.ID, Fence: 1, Offers: []domain.AdmissionOfferRecord{{Offer: offer, Job: fixtures.MakeJob(fixtures.WithJobID("job-a")), Preset: storedPreset}}}, saveErr: saveErr}
 	if _, err := newWithStore(expiredStore).Commit(ctx, offer.OfferID, offer.Fence); !errors.Is(err, saveErr) {
 		t.Fatalf("expired save err = %v", err)
 	}
 
 	offer.ExpiresAt = clock.Now().Add(time.Minute)
-	commitStore := &fakeAdmissionStateStore{found: true, state: domain.AdmissionState{NodeID: node.ID, Fence: 1, Offers: []domain.AdmissionOfferRecord{{Offer: offer, Job: fixtures.MakeJob(fixtures.WithJobID("job-a"))}}}, saveErr: saveErr}
+	commitStore := &fakeAdmissionStateStore{found: true, state: domain.AdmissionState{NodeID: node.ID, Fence: 1, Offers: []domain.AdmissionOfferRecord{{Offer: offer, Job: fixtures.MakeJob(fixtures.WithJobID("job-a")), Preset: storedPreset}}}, saveErr: saveErr}
 	if _, err := newWithStore(commitStore).Commit(ctx, offer.OfferID, offer.Fence); !errors.Is(err, saveErr) {
 		t.Fatalf("commit save err = %v", err)
 	}
@@ -693,7 +834,7 @@ func TestAdmissionRestoresZeroFenceAndOffers(t *testing.T) {
 	store := &fakeAdmissionStateStore{found: true, state: domain.AdmissionState{
 		NodeID: node.ID,
 		Fence:  0,
-		Offers: []domain.AdmissionOfferRecord{{Offer: offer, Job: fixtures.MakeJob(fixtures.WithJobID("job-a"))}},
+		Offers: []domain.AdmissionOfferRecord{{Offer: offer, Job: fixtures.MakeJob(fixtures.WithJobID("job-a")), Preset: fixtures.MakePreset(fixtures.WithArtifactSize(1), fixtures.WithWeights(1))}},
 	}}
 	admission := NewAdmission(node, lease.NewAllocator(), clock, WithAdmissionStateStore(store))
 	lease, err := admission.Commit(ctx, offer.OfferID, offer.Fence)
@@ -719,7 +860,7 @@ func commitAdmissionLease(t *testing.T, admission *Admission, jobID string, clai
 }
 
 func admissionReq(job domain.Job, claim domain.Claim) domain.AdmissionRequest {
-	return domain.AdmissionRequest{Job: job, Claim: claim}
+	return domain.AdmissionRequest{Job: job, Preset: fixtures.MakePreset(), Claim: claim}
 }
 
 type fakeAdmissionStateStore struct {

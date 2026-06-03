@@ -133,11 +133,12 @@ func TestPhase6PeerOwnerRaceStaleFenceReplans(t *testing.T) {
 func TestPhase6PeerOwnerRejectsDirectStaleFence(t *testing.T) {
 	ctx := context.Background()
 	admission := node.NewAdmission(fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)), lease.NewAllocator(), mocks.NewFakeClock(time.Unix(620, 0).UTC()))
-	first, err := admission.Offer(ctx, domain.AdmissionRequest{Job: fixtures.MakeJob(fixtures.WithJobID("job-a")), Claim: fixtures.MakeClaim(200, 0)})
+	preset := fixtures.MakePreset(fixtures.WithArtifactSize(1), fixtures.WithWeights(1))
+	first, err := admission.Offer(ctx, domain.AdmissionRequest{Job: fixtures.MakeJob(fixtures.WithJobID("job-a")), Preset: preset, Claim: fixtures.MakeClaim(200, 0)})
 	if err != nil {
 		t.Fatalf("first Offer: %v", err)
 	}
-	second, err := admission.Offer(ctx, domain.AdmissionRequest{Job: fixtures.MakeJob(fixtures.WithJobID("job-b")), Claim: fixtures.MakeClaim(200, 0)})
+	second, err := admission.Offer(ctx, domain.AdmissionRequest{Job: fixtures.MakeJob(fixtures.WithJobID("job-b")), Preset: preset, Claim: fixtures.MakeClaim(200, 0)})
 	if err != nil {
 		t.Fatalf("second Offer: %v", err)
 	}
@@ -163,7 +164,8 @@ func TestPhase6PeerCoordinatedPreemptionUsesOwnerAuthority(t *testing.T) {
 	victim.InFlight = 1
 	targetPreset := fixtures.MakePreset(fixtures.WithPresetID("target-preset"), fixtures.WithWeights(600), fixtures.WithKVPerToken(0), fixtures.WithContextLength(1))
 	admission := node.NewAdmission(nodeA, lease.NewAllocator(), clock)
-	victimOffer, err := admission.Offer(ctx, domain.AdmissionRequest{Job: fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.Background), Claim: victim.Claim})
+	victimPreset := fixtures.MakePreset(fixtures.WithPresetID(victim.PresetID), fixtures.WithArtifactSize(1), fixtures.WithWeights(1))
+	victimOffer, err := admission.Offer(ctx, domain.AdmissionRequest{Job: fixtures.MakeJob(fixtures.WithJobID("victim-job"), fixtures.Background), Preset: victimPreset, Claim: victim.Claim})
 	if err != nil {
 		t.Fatalf("victim Offer: %v", err)
 	}

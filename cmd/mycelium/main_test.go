@@ -1795,7 +1795,8 @@ func TestBuildPeerGatewayWithLocalCompute(t *testing.T) {
 	client := nodeagent.NewHTTPClient("http://local-node.test")
 	client.Client = directHTTPClient(handler)
 	job := domain.Job{ID: "job-a", Priority: domain.PriorityInteractive}
-	offer, err := client.Offer(context.Background(), domain.AdmissionRequest{Job: job, Claim: domain.Claim{WeightsMB: 1}})
+	preset := domain.Preset{ID: "preset-a", ArtifactSizeMB: 1, EstWeightsMB: 1}
+	offer, err := client.Offer(context.Background(), domain.AdmissionRequest{Job: job, Preset: preset, Claim: domain.Claim{WeightsMB: 1}})
 	if err != nil {
 		t.Fatalf("Offer: %v", err)
 	}
@@ -1949,7 +1950,8 @@ func TestBuildComputeRuntimeWiresParserPolicyAndClosedStoreErrors(t *testing.T) 
 	if runtime.node.Labels[LabelPeerBackend] != string(domain.BackendLlamaCpp) || runtime.shutdown == nil {
 		t.Fatalf("runtime = %+v", runtime.node)
 	}
-	if _, err := runtime.admission.Offer(ctx, domain.AdmissionRequest{Job: domain.Job{ID: "job-a", Submitter: "unknown"}, Claim: domain.Claim{WeightsMB: 1}}); err == nil {
+	preset := domain.Preset{ID: "preset-a", ArtifactSizeMB: 1, EstWeightsMB: 1}
+	if _, err := runtime.admission.Offer(ctx, domain.AdmissionRequest{Job: domain.Job{ID: "job-a", Submitter: "unknown"}, Preset: preset, Claim: domain.Claim{WeightsMB: 1}}); err == nil {
 		t.Fatal("unknown submitter was admitted")
 	}
 

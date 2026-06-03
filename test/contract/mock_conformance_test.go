@@ -40,6 +40,7 @@ func TestMockAdmissionControllerConformance(t *testing.T) {
 	RunAdmissionControllerConformance(t, "mock",
 		func() ports.AdmissionController { return &mocks.AdmissionController{} },
 		fixtures.MakeJob(),
+		fixtures.MakePreset(),
 		fixtures.MakeClaim(1, 1))
 }
 

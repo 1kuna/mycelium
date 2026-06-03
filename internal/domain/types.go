@@ -73,6 +73,7 @@ type Claim struct {
 
 type AdmissionRequest struct {
 	Job            Job    `json:"job"`
+	Preset         Preset `json:"preset,omitempty"`
 	Claim          Claim  `json:"claim"`
 	NodeID         string `json:"node_id,omitempty"`
 	AcceleratorSet []int  `json:"accelerator_set,omitempty"`
@@ -141,6 +142,7 @@ type JobProgress struct {
 
 type PlacementDecision struct {
 	JobID            string          `json:"job_id"`
+	Preset           Preset          `json:"preset,omitempty"`
 	InstanceID       string          `json:"instance_id,omitempty"`
 	NodeID           string          `json:"node_id,omitempty"`
 	AcceleratorSet   []int           `json:"accelerator_set,omitempty"`
@@ -251,8 +253,9 @@ type AdmissionState struct {
 }
 
 type AdmissionOfferRecord struct {
-	Offer LeaseOffer `json:"offer"`
-	Job   Job        `json:"job"`
+	Offer  LeaseOffer `json:"offer"`
+	Job    Job        `json:"job"`
+	Preset Preset     `json:"preset,omitempty"`
 }
 
 type AdmissionLeaseRecord struct {
