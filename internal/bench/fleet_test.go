@@ -69,6 +69,52 @@ func TestFleetBenchmarkConfigValidationRejectsBadInputs(t *testing.T) {
 	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "expected_status") {
 		t.Fatalf("expected status err = %v", err)
 	}
+
+	cfg = fleetTestConfig()
+	cfg.Peers = append(cfg.Peers, cfg.Peers[0])
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, false); err == nil || !strings.Contains(err.Error(), "duplicate peer") {
+		t.Fatalf("duplicate peer err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Models[0].PromptID = "missing"
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "unknown prompt") {
+		t.Fatalf("model prompt err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Waves[0].Jobs[0].GatewayID = "missing"
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "unknown gateway") {
+		t.Fatalf("wave gateway err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Waves[0].Jobs[0].ModelID = "missing"
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "unknown model") {
+		t.Fatalf("wave model err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Simulation.Nodes = append(cfg.Simulation.Nodes, cfg.Simulation.Nodes[0])
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "duplicate simulation node") {
+		t.Fatalf("duplicate node err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Simulation.Nodes[0].MaxUtil = 2
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "max_util") {
+		t.Fatalf("max util err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Simulation.Nodes[0].DiskFreeMB = cfg.Simulation.Nodes[0].DiskTotalMB + 1
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "disk_free_mb") {
+		t.Fatalf("disk free err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Simulation.Nodes[0].Accelerators[0].VRAMTotalMB = 0
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "vram_total_mb") {
+		t.Fatalf("vram err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Simulation.Presets = append(cfg.Simulation.Presets, cfg.Simulation.Presets[0])
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "duplicate simulation preset") {
+		t.Fatalf("duplicate preset err = %v", err)
+	}
 }
 
 func TestFleetBenchmarkSimulationProvesConservativeScenarioAndWritesArtifacts(t *testing.T) {
@@ -92,7 +138,7 @@ func TestFleetBenchmarkSimulationProvesConservativeScenarioAndWritesArtifacts(t 
 			t.Fatalf("proofs missing %q: %+v", want, result.Preflight.Proofs)
 		}
 	}
-	for _, name := range []string{"manifest.json", "results.json", "events.jsonl", "snapshots.jsonl", "failures.json", "report.html"} {
+	for _, name := range []string{"config.json", "manifest.json", "results.json", "events.jsonl", "snapshots.jsonl", "resources.jsonl", "metrics.json", "failures.json", "report.html"} {
 		if _, err := os.Stat(filepath.Join(result.OutputDir, name)); err != nil {
 			t.Fatalf("artifact %s missing: %v", name, err)
 		}
@@ -160,6 +206,9 @@ func TestFleetBenchmarkLiveRunnerCapturesHeadersMetricsAndOutputs(t *testing.T) 
 	}
 	if len(result.Metrics) != 4 || result.Metrics[0].TokensPerSec != 11 {
 		t.Fatalf("metrics = %+v", result.Metrics)
+	}
+	if len(result.Resources) != 8 || result.Resources[0].NodeID == "" {
+		t.Fatalf("resources = %+v", result.Resources)
 	}
 	if _, err := os.Stat(result.Results[0].OutputPath); err != nil {
 		t.Fatalf("output missing: %v", err)
@@ -433,7 +482,7 @@ func TestFleetBenchmarkFailurePathsWriteArtifacts(t *testing.T) {
 	}
 }
 
-func TestFleetBenchmarkLiveRunnerRecordsHTTPFailures(t *testing.T) {
+func TestFleetBenchmarkLiveRunnerFailsRequiredEvidenceCollection(t *testing.T) {
 	cfg := fleetTestConfig()
 	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -456,11 +505,84 @@ func TestFleetBenchmarkLiveRunnerRecordsHTTPFailures(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "failures") {
 		t.Fatalf("live failure err = %v", err)
 	}
-	if len(result.Failures) != 3 || !result.Failures[0].RetryAllowed {
+	if len(result.Failures) != 4 || result.Failures[0].RetryAllowed {
 		t.Fatalf("failures = %+v", result.Failures)
 	}
 	if len(result.Snapshots) == 0 || result.Snapshots[0].Error == "" {
 		t.Fatalf("snapshots = %+v", result.Snapshots)
+	}
+}
+
+func TestFleetBenchmarkLiveRunnerRecordsHTTPFailures(t *testing.T) {
+	cfg := fleetTestConfig()
+	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/snapshot":
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: cfg.Simulation.Nodes[0]})
+		case "/telemetry/metrics":
+			_ = json.NewEncoder(w).Encode([]domain.RunMetric{})
+		case "/v1/chat/completions":
+			http.Error(w, "backend saturated", http.StatusTooManyRequests)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	result, err := RunFleet(context.Background(), cfg, FleetRunOptions{
+		Profile:    FleetProfileConservative,
+		OutputRoot: t.TempDir(),
+		Client:     client,
+		Clock:      mocks.NewFakeClock(time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)),
+	})
+	if err == nil || !strings.Contains(err.Error(), "failures") {
+		t.Fatalf("live failure err = %v", err)
+	}
+	if len(result.Failures) != 3 || !result.Failures[0].RetryAllowed {
+		t.Fatalf("failures = %+v", result.Failures)
+	}
+}
+
+func TestFleetBenchmarkEvidenceHelpersFailLoudly(t *testing.T) {
+	cfg := fleetTestConfig()
+	required := true
+	cfg.Safety.RequireTelemetry = &required
+	snapshots := []FleetSnapshotMark{
+		{Stage: "before", PeerID: "spark", Error: "offline"},
+		{Stage: "before", PeerID: "b70", Snapshot: domain.NodeSnapshot{Node: domain.Node{ID: "not-in-sim"}}},
+	}
+	if failures := snapshotFailures(cfg, snapshots); len(failures) != 1 || !strings.Contains(failures[0].Error, "offline") {
+		t.Fatalf("snapshot failures = %+v", failures)
+	}
+	if failures := liveSnapshotMismatchFailures(cfg, snapshots); len(failures) != 1 || failures[0].NodeID != "not-in-sim" {
+		t.Fatalf("mismatch failures = %+v", failures)
+	}
+	if resources := resourcesFromSnapshots(snapshots); len(resources) != 2 || resources[0].Error == "" || resources[1].NodeID != "not-in-sim" {
+		t.Fatalf("resources = %+v", resources)
+	}
+
+	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/telemetry/metrics":
+			_, _ = w.Write([]byte(`{`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	metrics, failures := collectMetrics(context.Background(), cfg, client)
+	if len(metrics) != 0 || len(failures) != 2 || !strings.Contains(failures[0].Error, "decode") {
+		t.Fatalf("metrics=%+v failures=%+v", metrics, failures)
+	}
+
+	required = false
+	cfg.Safety.RequireTelemetry = &required
+	if failures := snapshotFailures(cfg, snapshots); len(failures) != 0 {
+		t.Fatalf("optional snapshot failures = %+v", failures)
+	}
+	_, failures = collectMetrics(context.Background(), cfg, client)
+	if len(failures) != 0 || telemetryRequired(cfg) {
+		t.Fatalf("optional telemetry failures=%+v required=%v", failures, telemetryRequired(cfg))
+	}
+	if _, err := gatewayForJob(cfg.Gateways, gatewayByID(cfg.Gateways), "missing", 0); err == nil || !strings.Contains(err.Error(), "unknown gateway") {
+		t.Fatalf("unknown gateway err = %v", err)
 	}
 }
 

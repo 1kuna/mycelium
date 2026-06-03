@@ -146,21 +146,23 @@ type FleetRunResult struct {
 	Results   []FleetJobResult    `json:"results"`
 	Failures  []FleetFailure      `json:"failures"`
 	Snapshots []FleetSnapshotMark `json:"snapshots"`
+	Resources []FleetResourceMark `json:"resources"`
 	Metrics   []domain.RunMetric  `json:"metrics"`
 }
 
 type FleetManifest struct {
-	RunID      string              `json:"run_id"`
-	ConfigID   string              `json:"config_id,omitempty"`
-	Project    string              `json:"project"`
-	Profile    string              `json:"profile"`
-	Simulated  bool                `json:"simulated"`
-	GitCommit  string              `json:"git_commit,omitempty"`
-	Gateways   []FleetGateway      `json:"gateways"`
-	Peers      []FleetPeerManifest `json:"peers,omitempty"`
-	StartedAt  time.Time           `json:"started_at"`
-	FinishedAt time.Time           `json:"finished_at"`
-	Metadata   map[string]string   `json:"metadata,omitempty"`
+	Config     FleetBenchmarkConfig `json:"-"`
+	RunID      string               `json:"run_id"`
+	ConfigID   string               `json:"config_id,omitempty"`
+	Project    string               `json:"project"`
+	Profile    string               `json:"profile"`
+	Simulated  bool                 `json:"simulated"`
+	GitCommit  string               `json:"git_commit,omitempty"`
+	Gateways   []FleetGateway       `json:"gateways"`
+	Peers      []FleetPeerManifest  `json:"peers,omitempty"`
+	StartedAt  time.Time            `json:"started_at"`
+	FinishedAt time.Time            `json:"finished_at"`
+	Metadata   map[string]string    `json:"metadata,omitempty"`
 }
 
 type FleetPeerManifest struct {
@@ -237,6 +239,20 @@ type FleetSnapshotMark struct {
 	Error    string              `json:"error,omitempty"`
 }
 
+type FleetResourceMark struct {
+	At               time.Time            `json:"at"`
+	Stage            string               `json:"stage"`
+	PeerID           string               `json:"peer_id"`
+	NodeID           string               `json:"node_id"`
+	DiskTotalMB      int                  `json:"disk_total_mb,omitempty"`
+	DiskFreeMB       int                  `json:"disk_free_mb,omitempty"`
+	DiskMinFreeRatio float64              `json:"disk_min_free_ratio,omitempty"`
+	MaxUtil          float64              `json:"max_util,omitempty"`
+	OOMSeverity      domain.OOMSeverity   `json:"oom_severity,omitempty"`
+	Accelerators     []domain.Accelerator `json:"accelerators,omitempty"`
+	Error            string               `json:"error,omitempty"`
+}
+
 func LoadFleetConfig(path string) (FleetBenchmarkConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -278,6 +294,7 @@ func RunFleet(ctx context.Context, cfg FleetBenchmarkConfig, opts FleetRunOption
 		Simulated: opts.Simulate,
 		OutputDir: outputDir,
 		Manifest: FleetManifest{
+			Config:    cfg,
 			RunID:     runID,
 			ConfigID:  cfg.ID,
 			Project:   cfg.Project,
@@ -305,6 +322,7 @@ func RunFleet(ctx context.Context, cfg FleetBenchmarkConfig, opts FleetRunOption
 		result.Results = append(result.Results, live.Results...)
 		result.Failures = append(result.Failures, live.Failures...)
 		result.Snapshots = append(result.Snapshots, live.Snapshots...)
+		result.Resources = append(result.Resources, live.Resources...)
 		result.Metrics = append(result.Metrics, live.Metrics...)
 		if err != nil {
 			result.Manifest.FinishedAt = clk.Now()
@@ -335,6 +353,7 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 		return fmt.Errorf("at least one gateway is required")
 	}
 	seenGateways := map[string]struct{}{}
+	gatewaysByID := map[string]struct{}{}
 	for _, gw := range cfg.Gateways {
 		if gw.ID == "" {
 			return fmt.Errorf("gateway id is required")
@@ -346,11 +365,26 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 			return fmt.Errorf("duplicate gateway id %q", gw.ID)
 		}
 		seenGateways[gw.ID] = struct{}{}
+		gatewaysByID[gw.ID] = struct{}{}
+	}
+	seenPeers := map[string]struct{}{}
+	for _, peer := range cfg.Peers {
+		if peer.ID == "" {
+			return fmt.Errorf("peer id is required")
+		}
+		if peer.URL == "" {
+			return fmt.Errorf("peer %q url is required", peer.ID)
+		}
+		if _, ok := seenPeers[peer.ID]; ok {
+			return fmt.Errorf("duplicate peer id %q", peer.ID)
+		}
+		seenPeers[peer.ID] = struct{}{}
 	}
 	if len(cfg.Models) == 0 {
 		return fmt.Errorf("at least one model is required")
 	}
 	seenModels := map[string]struct{}{}
+	modelsByID := map[string]struct{}{}
 	for _, model := range cfg.Models {
 		if model.ID == "" {
 			return fmt.Errorf("model id is required")
@@ -359,11 +393,13 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 			return fmt.Errorf("duplicate model id %q", model.ID)
 		}
 		seenModels[model.ID] = struct{}{}
+		modelsByID[model.ID] = struct{}{}
 	}
 	if len(cfg.Prompts) == 0 {
 		return fmt.Errorf("at least one prompt is required")
 	}
 	seenPrompts := map[string]struct{}{}
+	promptsByID := map[string]struct{}{}
 	for _, prompt := range cfg.Prompts {
 		if prompt.ID == "" || prompt.Text == "" {
 			return fmt.Errorf("prompt id and text are required")
@@ -372,9 +408,33 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 			return fmt.Errorf("duplicate prompt id %q", prompt.ID)
 		}
 		seenPrompts[prompt.ID] = struct{}{}
+		promptsByID[prompt.ID] = struct{}{}
+	}
+	for _, model := range cfg.Models {
+		if model.PromptID != "" {
+			if _, ok := promptsByID[model.PromptID]; !ok {
+				return fmt.Errorf("model %q references unknown prompt %q", model.ID, model.PromptID)
+			}
+		}
 	}
 	for _, wave := range cfg.Waves {
+		if wave.ID == "" {
+			return fmt.Errorf("wave id is required")
+		}
 		for _, job := range wave.Jobs {
+			if _, ok := modelsByID[job.ModelID]; !ok {
+				return fmt.Errorf("wave %q references unknown model %q", wave.ID, job.ModelID)
+			}
+			if job.GatewayID != "" {
+				if _, ok := gatewaysByID[job.GatewayID]; !ok {
+					return fmt.Errorf("wave %q job %q references unknown gateway %q", wave.ID, job.ID, job.GatewayID)
+				}
+			}
+			if job.PromptID != "" {
+				if _, ok := promptsByID[job.PromptID]; !ok {
+					return fmt.Errorf("wave %q job %q references unknown prompt %q", wave.ID, job.ID, job.PromptID)
+				}
+			}
 			if job.DelayMS < 0 {
 				return fmt.Errorf("wave %q job %q delay_ms must be non-negative", wave.ID, job.ID)
 			}
@@ -393,7 +453,26 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 	if len(cfg.Simulation.Nodes) == 0 || len(cfg.Simulation.Presets) == 0 {
 		return fmt.Errorf("simulation nodes and presets are required")
 	}
+	seenNodes := map[string]struct{}{}
 	for _, node := range cfg.Simulation.Nodes {
+		if node.ID == "" {
+			return fmt.Errorf("simulation node id is required")
+		}
+		if _, ok := seenNodes[node.ID]; ok {
+			return fmt.Errorf("duplicate simulation node id %q", node.ID)
+		}
+		seenNodes[node.ID] = struct{}{}
+		if node.MaxUtil <= 0 || node.MaxUtil > 1 {
+			return fmt.Errorf("node %q max_util must be between 0 and 1", node.ID)
+		}
+		if node.DiskTotalMB > 0 && node.DiskFreeMB > node.DiskTotalMB {
+			return fmt.Errorf("node %q disk_free_mb exceeds disk_total_mb", node.ID)
+		}
+		for _, acc := range node.Accelerators {
+			if acc.VRAMTotalMB <= 0 {
+				return fmt.Errorf("node %q accelerator %d vram_total_mb must be positive", node.ID, acc.Index)
+			}
+		}
 		ratio := node.DiskMinFreeRatio
 		if ratio == 0 {
 			ratio = minDisk
@@ -401,6 +480,16 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 		if ratio <= 0 || ratio >= 1 {
 			return fmt.Errorf("node %q disk_min_free_ratio must be between 0 and 1", node.ID)
 		}
+	}
+	seenPresets := map[string]struct{}{}
+	for _, preset := range cfg.Simulation.Presets {
+		if preset.ID == "" {
+			return fmt.Errorf("simulation preset id is required")
+		}
+		if _, ok := seenPresets[preset.ID]; ok {
+			return fmt.Errorf("duplicate simulation preset id %q", preset.ID)
+		}
+		seenPresets[preset.ID] = struct{}{}
 	}
 	maxSparkUtil := cfg.Safety.MaxSparkGPUMemoryUtil
 	if maxSparkUtil == 0 {
@@ -454,7 +543,10 @@ func SimulateFleet(ctx context.Context, cfg FleetBenchmarkConfig, profile string
 			if !ok {
 				return FleetPreflight{}, fmt.Errorf("wave %q references unknown model %q", wave.ID, spec.ModelID)
 			}
-			gw := gatewayForJob(cfg.Gateways, gateways, spec.GatewayID, waveIndex+jobIndex)
+			gw, err := gatewayForJob(cfg.Gateways, gateways, spec.GatewayID, waveIndex+jobIndex)
+			if err != nil {
+				return FleetPreflight{}, err
+			}
 			job := simulationJob(cfg, model, spec, wave.ID, jobIndex)
 			decision, err := placer.Place(ctx, job, fleet)
 			if err != nil {
@@ -480,6 +572,7 @@ type liveRun struct {
 	Results   []FleetJobResult
 	Failures  []FleetFailure
 	Snapshots []FleetSnapshotMark
+	Resources []FleetResourceMark
 	Metrics   []domain.RunMetric
 }
 
@@ -493,7 +586,15 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile, output
 	}
 	state := liveRun{}
 	state.Snapshots = append(state.Snapshots, collectSnapshots(ctx, cfg, client, "before", clk)...)
-	state.Metrics = append(state.Metrics, collectMetrics(ctx, cfg, client)...)
+	state.Resources = append(state.Resources, resourcesFromSnapshots(state.Snapshots)...)
+	state.Failures = append(state.Failures, snapshotFailures(cfg, state.Snapshots)...)
+	metrics, metricFailures := collectMetrics(ctx, cfg, client)
+	state.Metrics = append(state.Metrics, metrics...)
+	state.Failures = append(state.Failures, metricFailures...)
+	state.Failures = append(state.Failures, liveSnapshotMismatchFailures(cfg, state.Snapshots)...)
+	if len(state.Failures) > 0 {
+		return state, fmt.Errorf("fleet benchmark evidence collection failed with %d failures", len(state.Failures))
+	}
 	models := modelByID(cfg.Models)
 	gateways := gatewayByID(cfg.Gateways)
 	for waveIndex, wave := range waves {
@@ -512,7 +613,10 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile, output
 			if !ok {
 				return state, fmt.Errorf("wave %q references unknown model %q", wave.ID, spec.ModelID)
 			}
-			gw := gatewayForJob(cfg.Gateways, gateways, spec.GatewayID, waveIndex+idx)
+			gw, err := gatewayForJob(cfg.Gateways, gateways, spec.GatewayID, waveIndex+idx)
+			if err != nil {
+				return state, err
+			}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -556,10 +660,15 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile, output
 				},
 			})
 		}
-		state.Snapshots = append(state.Snapshots, collectSnapshots(ctx, cfg, client, "after_"+wave.ID, clk)...)
+		afterSnapshots := collectSnapshots(ctx, cfg, client, "after_"+wave.ID, clk)
+		state.Snapshots = append(state.Snapshots, afterSnapshots...)
+		state.Resources = append(state.Resources, resourcesFromSnapshots(afterSnapshots)...)
+		state.Failures = append(state.Failures, snapshotFailures(cfg, afterSnapshots)...)
 		state.Events = append(state.Events, FleetEvent{At: clk.Now(), Type: "wave_done", WaveID: wave.ID})
 	}
-	state.Metrics = append(state.Metrics, collectMetrics(ctx, cfg, client)...)
+	metrics, metricFailures = collectMetrics(ctx, cfg, client)
+	state.Metrics = append(state.Metrics, metrics...)
+	state.Failures = append(state.Failures, metricFailures...)
 	if len(state.Failures) > 0 {
 		return state, fmt.Errorf("fleet benchmark completed with %d failures", len(state.Failures))
 	}
@@ -569,7 +678,9 @@ func runFleetLive(ctx context.Context, cfg FleetBenchmarkConfig, profile, output
 func submitFleetJob(ctx context.Context, cfg FleetBenchmarkConfig, waveID string, index int, spec FleetWaveJob, model FleetModel, gw FleetGateway, outputDir string, client *http.Client, clk ports.Clock) FleetJobResult {
 	prompt, ok := promptByID(cfg.Prompts)[firstNonEmpty(spec.PromptID, model.PromptID)]
 	if !ok {
-		prompt = cfg.Prompts[0]
+		result := FleetJobResult{WaveID: waveID, JobID: firstNonEmpty(spec.ID, fmt.Sprintf("%s-%s-%d", waveID, safeName(model.ID), index+1)), ModelID: model.ID, GatewayID: gw.ID, Error: fmt.Sprintf("prompt %q is not defined", firstNonEmpty(spec.PromptID, model.PromptID)), RetryAllowed: false, ExpectedFailure: spec.ExpectedFailure}
+		result.ExpectationErrors = validateFleetExpectation(spec, result)
+		return result
 	}
 	jobID := spec.ID
 	if jobID == "" {
@@ -780,12 +891,17 @@ func validateFleetExpectation(spec FleetWaveJob, result FleetJobResult) []string
 	return errs
 }
 
-func collectMetrics(ctx context.Context, cfg FleetBenchmarkConfig, client *http.Client) []domain.RunMetric {
+func collectMetrics(ctx context.Context, cfg FleetBenchmarkConfig, client *http.Client) ([]domain.RunMetric, []FleetFailure) {
 	var out []domain.RunMetric
+	var failures []FleetFailure
+	required := telemetryRequired(cfg)
 	for _, peer := range cfg.Peers {
 		token := firstNonEmpty(peer.RPCToken, cfg.RPCToken)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(peer.URL, "/")+"/telemetry/metrics", nil)
 		if err != nil {
+			if required {
+				failures = append(failures, FleetFailure{NodeID: peer.ID, Error: "telemetry request: " + err.Error()})
+			}
 			continue
 		}
 		if token != "" {
@@ -793,23 +909,88 @@ func collectMetrics(ctx context.Context, cfg FleetBenchmarkConfig, client *http.
 		}
 		resp, err := client.Do(req)
 		if err != nil {
+			if required {
+				failures = append(failures, FleetFailure{NodeID: peer.ID, Error: "telemetry request: " + err.Error()})
+			}
 			continue
 		}
 		if resp.StatusCode >= 400 {
-			_, _ = io.Copy(io.Discard, resp.Body)
+			data, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
+			if required {
+				failures = append(failures, FleetFailure{NodeID: peer.ID, Error: "telemetry request: " + strings.TrimSpace(string(data))})
+			}
 			continue
 		}
 		var metrics []domain.RunMetric
 		if err := json.NewDecoder(resp.Body).Decode(&metrics); err == nil {
 			out = append(out, metrics...)
+		} else if required {
+			failures = append(failures, FleetFailure{NodeID: peer.ID, Error: "telemetry decode: " + err.Error()})
 		}
 		_ = resp.Body.Close()
+	}
+	return out, failures
+}
+
+func snapshotFailures(cfg FleetBenchmarkConfig, snapshots []FleetSnapshotMark) []FleetFailure {
+	if !telemetryRequired(cfg) {
+		return nil
+	}
+	var failures []FleetFailure
+	for _, mark := range snapshots {
+		if mark.Error != "" {
+			failures = append(failures, FleetFailure{NodeID: mark.PeerID, Error: "snapshot " + mark.Stage + ": " + mark.Error})
+		}
+	}
+	return failures
+}
+
+func liveSnapshotMismatchFailures(cfg FleetBenchmarkConfig, snapshots []FleetSnapshotMark) []FleetFailure {
+	simNodes := map[string]struct{}{}
+	for _, node := range cfg.Simulation.Nodes {
+		simNodes[node.ID] = struct{}{}
+	}
+	var failures []FleetFailure
+	for _, mark := range snapshots {
+		if mark.Error != "" || mark.Snapshot.Node.ID == "" {
+			continue
+		}
+		if _, ok := simNodes[mark.Snapshot.Node.ID]; !ok {
+			failures = append(failures, FleetFailure{NodeID: mark.Snapshot.Node.ID, Error: "live snapshot node is not declared in simulation config"})
+		}
+	}
+	return failures
+}
+
+func resourcesFromSnapshots(snapshots []FleetSnapshotMark) []FleetResourceMark {
+	out := make([]FleetResourceMark, 0, len(snapshots))
+	for _, mark := range snapshots {
+		resource := FleetResourceMark{
+			At:     mark.At,
+			Stage:  mark.Stage,
+			PeerID: mark.PeerID,
+			Error:  mark.Error,
+		}
+		if mark.Error == "" {
+			node := mark.Snapshot.Node
+			resource.NodeID = node.ID
+			resource.DiskTotalMB = node.DiskTotalMB
+			resource.DiskFreeMB = node.DiskFreeMB
+			resource.DiskMinFreeRatio = node.DiskMinFreeRatio
+			resource.MaxUtil = node.MaxUtil
+			resource.OOMSeverity = node.OOMSeverity
+			resource.Accelerators = append([]domain.Accelerator(nil), node.Accelerators...)
+		}
+		out = append(out, resource)
 	}
 	return out
 }
 
 func writeFleetArtifacts(outputDir string, result FleetRunResult) error {
+	if err := writeJSON(filepath.Join(outputDir, "config.json"), result.Manifest.Config); err != nil {
+		return err
+	}
 	if err := writeJSON(filepath.Join(outputDir, "manifest.json"), result.Manifest); err != nil {
 		return err
 	}
@@ -823,6 +1004,12 @@ func writeFleetArtifacts(outputDir string, result FleetRunResult) error {
 		return err
 	}
 	if err := writeJSONL(filepath.Join(outputDir, "snapshots.jsonl"), result.Snapshots); err != nil {
+		return err
+	}
+	if err := writeJSONL(filepath.Join(outputDir, "resources.jsonl"), result.Resources); err != nil {
+		return err
+	}
+	if err := writeJSON(filepath.Join(outputDir, "metrics.json"), result.Metrics); err != nil {
 		return err
 	}
 	return writeReport(filepath.Join(outputDir, "report.html"), result)
@@ -1127,13 +1314,14 @@ func gatewayByID(gateways []FleetGateway) map[string]FleetGateway {
 	return out
 }
 
-func gatewayForJob(gateways []FleetGateway, byID map[string]FleetGateway, id string, index int) FleetGateway {
+func gatewayForJob(gateways []FleetGateway, byID map[string]FleetGateway, id string, index int) (FleetGateway, error) {
 	if id != "" {
 		if gw, ok := byID[id]; ok {
-			return gw
+			return gw, nil
 		}
+		return FleetGateway{}, fmt.Errorf("unknown gateway %q", id)
 	}
-	return gateways[index%len(gateways)]
+	return gateways[index%len(gateways)], nil
 }
 
 func telemetryRequired(cfg FleetBenchmarkConfig) bool {
