@@ -25,6 +25,17 @@ func TestJoinTokenRoundTrip(t *testing.T) {
 	if info.Token != "secret" || info.RPCToken != "rpc-secret" {
 		t.Fatalf("rpc info = %+v", info)
 	}
+	raw, err = BuildJoinTokenForPeer("192.0.2.63:51846", "secret", "rpc-secret")
+	if err != nil {
+		t.Fatalf("BuildJoinTokenForPeer: %v", err)
+	}
+	info, err = ParseJoinToken(raw)
+	if err != nil {
+		t.Fatalf("ParseJoinToken peer: %v", err)
+	}
+	if info.Address != "192.0.2.63:51846" || info.Token != "secret" || info.RPCToken != "rpc-secret" {
+		t.Fatalf("peer info = %+v", info)
+	}
 	info, err = ParseJoinToken("mycjoin://192.0.2.63:51846?token=secret&rpc_token=rpc-secret")
 	if err != nil {
 		t.Fatalf("ParseJoinToken seed: %v", err)

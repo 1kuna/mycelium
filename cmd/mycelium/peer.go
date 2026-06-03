@@ -211,6 +211,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		peerDirectory = &gateway.PeerDirectory{Discovery: discovery, Tunnel: tunnel, Store: store, SelfID: cfg.ID, AuthToken: cfg.RPCToken}
 		fleet = peerDirectory
 		nodes = peerDirectory
+		mountAdminHTTP(mux, &cfg, resolvedConfigPath, joinTokens, store, cfg.RPCToken)
 	}
 	agents := map[string]ports.NodeAgent{}
 	if cfg.Compute {
@@ -369,6 +370,144 @@ func mountPeerHTTP(mux *http.ServeMux, self domain.Peer, joinTokens *membership.
 			panic(err)
 		}
 	})
+}
+
+type adminTokenStore interface {
+	ListJoinTokens(ctx context.Context) ([]domain.JoinTokenRecord, error)
+}
+
+type adminInviteResponse struct {
+	Join string `json:"join"`
+}
+
+type adminTokenRequest struct {
+	Token string `json:"token,omitempty"`
+}
+
+func mountAdminHTTP(mux *http.ServeMux, cfg *PeerConfig, configPath string, joinTokens *membership.TokenManager, tokenStore adminTokenStore, rpcToken string) {
+	mux.HandleFunc("/admin/invite", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		join, err := adminJoinURI(*cfg, r.Host)
+		if err != nil {
+			writePeerRPCError(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(adminInviteResponse{Join: join}); err != nil {
+			panic(err)
+		}
+	})
+	mux.HandleFunc("/admin/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		tokens, err := tokenStore.ListJoinTokens(r.Context())
+		if err != nil {
+			writePeerRPCError(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(tokens); err != nil {
+			panic(err)
+		}
+	})
+	mux.HandleFunc("/admin/tokens/rotate", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req adminTokenRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writePeerRPCError(w, http.StatusBadRequest, err)
+				return
+			}
+		}
+		if req.Token == "" {
+			token, err := randomHex(32)
+			if err != nil {
+				writePeerRPCError(w, http.StatusInternalServerError, err)
+				return
+			}
+			req.Token = token
+		}
+		if err := joinTokens.Rotate(req.Token); err != nil {
+			writePeerRPCError(w, http.StatusInternalServerError, err)
+			return
+		}
+		cfg.JoinToken = req.Token
+		if err := savePeerConfig(configPath, *cfg); err != nil {
+			writePeerRPCError(w, http.StatusInternalServerError, err)
+			return
+		}
+		join, err := adminJoinURI(*cfg, r.Host)
+		if err != nil {
+			writePeerRPCError(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(adminInviteResponse{Join: join}); err != nil {
+			panic(err)
+		}
+	})
+	mux.HandleFunc("/admin/tokens/revoke", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req adminTokenRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writePeerRPCError(w, http.StatusBadRequest, err)
+			return
+		}
+		if req.Token == "" {
+			writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("token is required"))
+			return
+		}
+		if err := joinTokens.Revoke(req.Token); err != nil {
+			writePeerRPCError(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
+func adminJoinURI(cfg PeerConfig, requestHost string) (string, error) {
+	return membership.BuildJoinTokenForPeer(adminJoinAddress(cfg.Listen, requestHost), cfg.JoinToken, cfg.RPCToken)
+}
+
+func adminJoinAddress(listen, requestHost string) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return listen
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		if requestHost != "" {
+			return requestHost
+		}
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func mountRegistryHTTP(mux *http.ServeMux, registry ports.JobRegistry, rpcToken string) {
