@@ -90,6 +90,36 @@ func TestPlannerRejectsUnfitAndUnsafePresets(t *testing.T) {
 	}
 }
 
+func TestPlannerStagesSourcePinnedPresetOnlyOnDeclaredNode(t *testing.T) {
+	ctx := context.Background()
+	sourcePreset := preset("source-local", domain.BackendVLLM, 1000, 1000)
+	sourcePreset.NodeID = "b70"
+	store := &fakeStore{
+		nodes: []domain.Node{
+			readyNode("b70", domain.BackendVLLM, 100000, 50000, 4000, 0.8, 10),
+			readyNode("spark", domain.BackendVLLM, 500000, 400000, 80000, 0.8, 100),
+		},
+		presets: []domain.Preset{sourcePreset},
+	}
+	plan, err := (Planner{Store: store, Clock: mocks.NewFakeClock(time.Unix(25, 0).UTC())}).Plan(ctx, PlanRequest{ID: "plan-source"})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if action := actionByID(plan, "stage:b70:source-local"); action.Kind != domain.LocalityActionStage || !strings.Contains(action.Reason, "declared source node b70") {
+		t.Fatalf("source-local action = %+v", action)
+	}
+
+	sourcePreset.NodeID = "missing"
+	store.presets = []domain.Preset{sourcePreset}
+	plan, err = (Planner{Store: store, Clock: mocks.NewFakeClock(time.Unix(26, 0).UTC())}).Plan(ctx, PlanRequest{ID: "plan-missing-source"})
+	if err != nil {
+		t.Fatalf("Plan missing source: %v", err)
+	}
+	if len(plan.Actions) != 0 || !strings.Contains(strings.Join(plan.Warnings, "\n"), "declared source node missing not found") {
+		t.Fatalf("missing-source plan = %+v", plan)
+	}
+}
+
 func TestPlannerEvictsOnlyUnprotectedManagedStaleLocalities(t *testing.T) {
 	ctx := context.Background()
 	store := &fakeStore{

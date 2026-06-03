@@ -449,10 +449,49 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 		if cfg.ComputeConfig.ID != "" {
 			nodeID = cfg.ComputeConfig.ID
 		}
+		if req.Preset.NodeID != "" && req.Preset.NodeID != nodeID {
+			writePeerRPCError(w, http.StatusConflict, fmt.Errorf("preset %q is declared local to node %q, not %q", req.Preset.ID, req.Preset.NodeID, nodeID))
+			return
+		}
 		jobID := catalog.InstallJobID(catalog.InstallRequest{Source: source, ID: req.Preset.ID})
 		job := domain.Job{ID: jobID, TaskType: "catalog_stage", Model: source, PresetID: req.Preset.ID, Status: domain.JobQueued}
 		if err := store.SaveJob(r.Context(), job); err != nil {
 			writePeerRPCError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if shouldAdoptRuntimeSource(req.Preset, source, nodeID) {
+			staged := req.Preset
+			staged.NodeID = nodeID
+			if err := store.SavePreset(r.Context(), staged); err != nil {
+				writePeerRPCError(w, http.StatusInternalServerError, err)
+				return
+			}
+			locality := domain.ModelLocality{
+				ID:             modelLocalityID(nodeID, staged.ID),
+				PresetID:       staged.ID,
+				NodeID:         nodeID,
+				State:          domain.ModelLocalityReady,
+				ModelRef:       staged.ModelRef,
+				Source:         source,
+				ArtifactSizeMB: staged.ArtifactSizeMB,
+				Managed:        false,
+				Reason:         "runtime source adopted",
+				UpdatedAt:      clk.Now().UTC(),
+			}
+			if err := store.SaveModelLocality(r.Context(), locality); err != nil {
+				writePeerRPCError(w, http.StatusInternalServerError, err)
+				return
+			}
+			job.Status = domain.JobDone
+			job.PresetID = staged.ID
+			if err := store.SaveJob(r.Context(), job); err != nil {
+				writePeerRPCError(w, http.StatusInternalServerError, err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(catalogStageResponse{Preset: staged, Locality: locality, JobID: job.ID}); err != nil {
+				panic(err)
+			}
 			return
 		}
 		result, err := catalog.NewInstaller(cfg.CatalogDir).InstallWithProgress(r.Context(), catalog.InstallRequest{
@@ -565,6 +604,20 @@ func firstPresetModelAlias(preset domain.Preset) string {
 		return preset.ID
 	}
 	return preset.ModelRef
+}
+
+func shouldAdoptRuntimeSource(preset domain.Preset, source, nodeID string) bool {
+	if preset.NodeID == "" || preset.NodeID != nodeID {
+		return false
+	}
+	if strings.HasPrefix(source, "hf://") || strings.HasPrefix(source, "oci://") {
+		return false
+	}
+	localSource := strings.TrimPrefix(source, "file://")
+	if info, err := os.Stat(localSource); err == nil && !info.IsDir() {
+		return false
+	}
+	return true
 }
 
 func modelLocalityID(nodeID, presetID string) string {
