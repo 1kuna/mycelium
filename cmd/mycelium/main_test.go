@@ -20,6 +20,7 @@ import (
 	"mycelium/internal/backends/processadapter"
 	"mycelium/internal/catalog"
 	"mycelium/internal/domain"
+	"mycelium/internal/engine"
 	"mycelium/internal/estimate"
 	"mycelium/internal/gateway"
 	"mycelium/internal/lease"
@@ -1085,6 +1086,158 @@ func TestAdminHTTPFailureBranches(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("rotate status/body = %d %q", rec.Code, rec.Body.String())
 	}
+}
+
+func TestBootstrapEngineHelpers(t *testing.T) {
+	configured := domain.EngineProfile{ID: "configured", Backend: domain.BackendVLLM, Ready: true}
+	merged := mergeEngineProfiles(configured, []domain.EngineProfile{
+		{ID: "llama", Backend: domain.BackendLlamaCpp, Ready: true},
+		{ID: "vllm-default", Backend: domain.BackendVLLM, Ready: true},
+	})
+	if len(merged) != 2 || merged[0].ID != "configured" || merged[1].ID != "llama" {
+		t.Fatalf("merged = %+v", merged)
+	}
+	if chosen, ok := chooseReadyEngine(merged, domain.BackendVLLM); !ok || chosen.ID != "configured" {
+		t.Fatalf("chosen preferred = %+v %t", chosen, ok)
+	}
+	if chosen, ok := chooseReadyEngine([]domain.EngineProfile{{ID: "mlx", Backend: domain.BackendMLX, Ready: true}}, domain.BackendVLLM); !ok || chosen.ID != "mlx" {
+		t.Fatalf("chosen fallback = %+v %t", chosen, ok)
+	}
+	if _, ok := chooseReadyEngine([]domain.EngineProfile{{ID: "bad", Backend: domain.BackendMLX}}, domain.BackendVLLM); ok {
+		t.Fatal("unready engine chosen")
+	}
+	if got := diskSummary(domain.HostFacts{}); got != "disk=unknown" {
+		t.Fatalf("empty disk summary = %s", got)
+	}
+	if got := diskSummary(domain.HostFacts{DiskFreeMB: 25, DiskTotalMB: 100}); got != "disk_free=25MB/100MB" {
+		t.Fatalf("disk summary = %s", got)
+	}
+	cfg := engineConfigFromCompute(ComputeConfig{Backend: domain.BackendCustom, BackendBinary: "/bin/custom", CustomArgs: []string{"--x"}, HealthPath: "/ready", MaxUtil: 0.5, DiskMinFreeRatio: 0.25})
+	if cfg.Backend != domain.BackendCustom || cfg.BackendBinary != "/bin/custom" || cfg.HealthPath != "/ready" || cfg.MaxUtil != 0.5 || cfg.DiskMinFreeRatio != 0.25 {
+		t.Fatalf("engine config = %+v", cfg)
+	}
+	if got := engineDefaultBinary(domain.BackendVLLM); got != "vllm" {
+		t.Fatalf("engine default = %s", got)
+	}
+	if got := engineDefaultBinary(domain.BackendMLX); got != "mlx_lm.server" {
+		t.Fatalf("mlx default = %s", got)
+	}
+	if got := engineDefaultBinary(domain.BackendLlamaCpp); got != "llama-server" {
+		t.Fatalf("llama default = %s", got)
+	}
+	if got := engineDefaultBinary(domain.BackendCustom); got != "" {
+		t.Fatalf("custom default = %s", got)
+	}
+}
+
+func TestBootstrapDoctorConfigLoadsOrDefaults(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg, err := bootstrapDoctorConfig("")
+	if err != nil {
+		t.Fatalf("default doctor config: %v", err)
+	}
+	if cfg.Listen != "127.0.0.1:51846" || cfg.ComputeConfig.ID != "peer_local" {
+		t.Fatalf("default doctor config = %+v", cfg)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "peer.json")
+	if err := savePeerConfig(configPath, PeerConfig{ID: "peer-a", Listen: "127.0.0.1:9", ComputeConfig: ComputeConfig{ID: "peer-a"}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	cfg, err = bootstrapDoctorConfig(configPath)
+	if err != nil {
+		t.Fatalf("load doctor config: %v", err)
+	}
+	if cfg.ID != "peer-a" || cfg.Listen != "127.0.0.1:9" {
+		t.Fatalf("loaded doctor config = %+v", cfg)
+	}
+
+	badPath := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(badPath, []byte(`{`), 0600); err != nil {
+		t.Fatalf("write bad config: %v", err)
+	}
+	if _, err := bootstrapDoctorConfig(badPath); err == nil {
+		t.Fatal("bad doctor config accepted")
+	}
+}
+
+func TestBootstrapDoctorAndAdoptionWithFakeDetector(t *testing.T) {
+	detector := fakeBootstrapEngineDetector{
+		host: domain.HostFacts{NodeID: "peer-a", Platform: "linux/arm64", OOMSeverity: domain.OOMCatastrophic, DiskFreeMB: 10, DiskTotalMB: 20},
+		profiles: []domain.EngineProfile{
+			{ID: "engine-vllm", Backend: domain.BackendVLLM, BinaryPath: "/opt/vllm", Args: []string{"--gpu-memory-utilization", "0.85"}, Ready: true},
+			{ID: "engine-mlx", Backend: domain.BackendMLX, Ready: false, UnreadyReason: "unsupported platform"},
+		},
+		configured: domain.EngineProfile{ID: "configured-vllm", Backend: domain.BackendVLLM, BinaryPath: "/opt/vllm", Args: []string{"--gpu-memory-utilization", "0.85"}, HealthPath: "/health", Ready: true},
+	}
+	cfg := applyPeerConfigDefaults(PeerConfig{Compute: true, ComputeConfig: ComputeConfig{ID: "peer-a", Backend: domain.BackendVLLM}})
+	if err := runBootstrapDoctorWithDetector(context.Background(), cfg, false, detector); err != nil {
+		t.Fatalf("doctor text: %v", err)
+	}
+	if err := runBootstrapDoctorWithDetector(context.Background(), cfg, true, detector); err != nil {
+		t.Fatalf("doctor json: %v", err)
+	}
+	report, err := detectBootstrapEnginesWithDetector(context.Background(), cfg, detector)
+	if err != nil {
+		t.Fatalf("detect bootstrap engines: %v", err)
+	}
+	if report.Host.Platform != "linux/arm64" || len(report.Engines) != 2 || report.Engines[0].ID != "configured-vllm" {
+		t.Fatalf("report = %+v", report)
+	}
+	if _, err := detectBootstrapEnginesWithDetector(context.Background(), cfg, fakeBootstrapEngineDetector{host: detector.host, enginesErr: errors.New("engines")}); err == nil {
+		t.Fatal("engine detection failure accepted")
+	}
+	if err := runBootstrapDoctorWithDetector(context.Background(), cfg, false, fakeBootstrapEngineDetector{err: errors.New("host")}); err == nil {
+		t.Fatal("doctor host failure accepted")
+	}
+	if err := adoptBootstrapEngineWithDetector(context.Background(), &cfg, "auto", detector); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if cfg.ComputeConfig.BackendBinary != "/opt/vllm" || !reflect.DeepEqual(cfg.ComputeConfig.CustomArgs, []string{"--gpu-memory-utilization", "0.85"}) || len(cfg.EngineProfiles) != 2 {
+		t.Fatalf("adopted config = %+v", cfg)
+	}
+	cfg = applyPeerConfigDefaults(PeerConfig{Compute: true, ComputeConfig: ComputeConfig{ID: "peer-a", Backend: domain.BackendVLLM}})
+	if err := adoptBootstrapEngineWithDetector(context.Background(), &cfg, "auto", fakeBootstrapEngineDetector{err: errors.New("detect")}); err != nil || cfg.Compute {
+		t.Fatalf("auto detect failure cfg=%+v err=%v", cfg, err)
+	}
+	cfg = applyPeerConfigDefaults(PeerConfig{Compute: true, ComputeConfig: ComputeConfig{ID: "peer-a", Backend: domain.BackendVLLM}})
+	if err := adoptBootstrapEngineWithDetector(context.Background(), &cfg, "on", fakeBootstrapEngineDetector{err: errors.New("detect")}); err == nil {
+		t.Fatal("compute-on detect failure accepted")
+	}
+	cfg = applyPeerConfigDefaults(PeerConfig{Compute: true, ComputeConfig: ComputeConfig{ID: "peer-a", Backend: domain.BackendVLLM}})
+	if err := adoptBootstrapEngineWithDetector(context.Background(), &cfg, "on", fakeBootstrapEngineDetector{host: detector.host, configured: domain.EngineProfile{Backend: domain.BackendVLLM}, profiles: []domain.EngineProfile{{Backend: domain.BackendVLLM}}}); err == nil {
+		t.Fatal("compute-on no-ready engine accepted")
+	}
+}
+
+type fakeBootstrapEngineDetector struct {
+	host       domain.HostFacts
+	profiles   []domain.EngineProfile
+	configured domain.EngineProfile
+	err        error
+	enginesErr error
+}
+
+func (f fakeBootstrapEngineDetector) DetectHost(context.Context, domain.Node) (domain.HostFacts, error) {
+	if f.err != nil {
+		return domain.HostFacts{}, f.err
+	}
+	return f.host, nil
+}
+
+func (f fakeBootstrapEngineDetector) DetectEngines(context.Context, domain.HostFacts) ([]domain.EngineProfile, error) {
+	if f.enginesErr != nil {
+		return nil, f.enginesErr
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	return append([]domain.EngineProfile(nil), f.profiles...), nil
+}
+
+func (f fakeBootstrapEngineDetector) DetectConfiguredEngine(context.Context, domain.HostFacts, engine.Config) domain.EngineProfile {
+	return f.configured
 }
 
 func TestParseJoinFlag(t *testing.T) {

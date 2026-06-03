@@ -138,3 +138,11 @@ type Store interface {
 type HardwareDetector interface {
 	Detect(ctx context.Context, seed domain.Node) (domain.Node, error)
 }
+
+type HostDetector interface {
+	DetectHost(ctx context.Context, seed domain.Node) (domain.HostFacts, error)
+}
+
+type EngineDetector interface {
+	DetectEngines(ctx context.Context, host domain.HostFacts) ([]domain.EngineProfile, error)
+}

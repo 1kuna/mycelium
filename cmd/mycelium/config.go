@@ -18,6 +18,7 @@ type PeerConfig struct {
 	CatalogDir           string                         `json:"catalog_dir"`
 	Compute              bool                           `json:"compute"`
 	ComputeConfig        ComputeConfig                  `json:"compute_config"`
+	EngineProfiles       []domain.EngineProfile         `json:"engine_profiles,omitempty"`
 	JoinToken            string                         `json:"join_token"`
 	RPCToken             string                         `json:"rpc_token"`
 	SeedPeers            []string                       `json:"seed_peers,omitempty"`
