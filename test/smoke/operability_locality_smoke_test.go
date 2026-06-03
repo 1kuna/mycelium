@@ -5,12 +5,14 @@ package smoke
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -53,19 +55,60 @@ func TestOperabilityLocalServiceSmoke(t *testing.T) {
 }
 
 func TestRemotePeerCleanHomeJoinSmoke(t *testing.T) {
-	url := os.Getenv("MYCELIUM_REMOTE_PEER_URL")
-	token := os.Getenv("MYCELIUM_REMOTE_PEER_RPC_TOKEN")
-	if url == "" || token == "" {
-		t.Skip("set MYCELIUM_REMOTE_PEER_URL and MYCELIUM_REMOTE_PEER_RPC_TOKEN for second peer join smoke")
+	seedURL := os.Getenv("MYCELIUM_REMOTE_PEER_URL")
+	rpcToken := os.Getenv("MYCELIUM_REMOTE_PEER_RPC_TOKEN")
+	sshHost := os.Getenv("MYCELIUM_REMOTE_PEER_SSH")
+	if seedURL == "" || rpcToken == "" || sshHost == "" {
+		t.Skip("set MYCELIUM_REMOTE_PEER_URL, MYCELIUM_REMOTE_PEER_RPC_TOKEN, and MYCELIUM_REMOTE_PEER_SSH for second peer clean-home join smoke")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	join := runSmokeCommandOutput(t, ctx, "go", "run", "./cmd/myce", "nodes", "invite", "--url", url, "--rpc-token", token)
+	join := runSmokeCommandOutput(t, ctx, "go", "run", "./cmd/myce", "nodes", "invite", "--url", seedURL, "--rpc-token", rpcToken)
 	if !strings.Contains(join, "mycjoin://") {
 		t.Fatalf("invite output = %q", join)
 	}
 	joinToken := inviteJoinToken(t, join)
-	waitForSmokeHTTP(t, ctx, strings.TrimRight(url, "/")+"/peer/health", joinToken)
+	joinRPC := inviteRPCToken(t, join)
+	waitForSmokeHTTP(t, ctx, strings.TrimRight(seedURL, "/")+"/peer/health", joinToken)
+
+	mycelium := buildSmokeBinaryFor(t, ctx, "darwin", "arm64")
+	workdir := "/tmp/mycelium-clean-home-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	remoteHome := workdir + "/home"
+	remoteBin := workdir + "/mycelium"
+	remoteConfig := remoteHome + "/.mycelium/peer.json"
+	runOperabilitySSH(t, ctx, sshHost, "rm -rf "+shellQuote(workdir)+"; mkdir -p "+shellQuote(remoteHome+"/.mycelium"))
+	defer runOperabilitySSH(t, context.Background(), sshHost, "if [ -f "+shellQuote(workdir+"/peer.pid")+" ]; then kill -INT $(cat "+shellQuote(workdir+"/peer.pid")+") 2>/dev/null || true; fi; rm -rf "+shellQuote(workdir))
+	scpOperabilityRemote(t, ctx, sshHost, mycelium, remoteBin)
+	runOperabilitySSH(t, ctx, sshHost, "chmod +x "+shellQuote(remoteBin))
+	runOperabilitySSH(t, ctx, sshHost, "HOME="+shellQuote(remoteHome)+" "+shellQuote(remoteBin)+" bootstrap --join "+shellQuote(strings.TrimSpace(join))+" --compute auto --config "+shellQuote(remoteConfig)+" --apply")
+	inspect := runOperabilitySSHOutput(t, ctx, sshHost, "python3 - <<'PY'\nimport json, os, stat\np="+pythonQuote(remoteConfig)+"\nwith open(p) as f: c=json.load(f)\nmode=oct(stat.S_IMODE(os.stat(p).st_mode))\nprint(c.get('listen',''))\nprint(c.get('join_token',''))\nprint(c.get('rpc_token',''))\nprint(' '.join(c.get('seed_peers',[])))\nprint(str(c.get('compute')).lower())\nprint(mode)\nPY")
+	lines := strings.Split(strings.TrimSpace(inspect), "\n")
+	if len(lines) != 6 {
+		t.Fatalf("bootstrap inspection = %q", inspect)
+	}
+	listen, gotJoin, gotRPC, seeds, computeRaw, mode := lines[0], lines[1], lines[2], lines[3], lines[4], lines[5]
+	if listen == "" || gotJoin != joinToken || gotRPC != joinRPC || !strings.Contains(seeds, seedHost(t, seedURL)) || mode != "0o600" {
+		t.Fatalf("bootstrap config listen=%q join=%q rpc=%q seeds=%q mode=%q", listen, gotJoin, gotRPC, seeds, mode)
+	}
+	if computeRaw != "true" && computeRaw != "false" {
+		t.Fatalf("bootstrap compute status = %q", computeRaw)
+	}
+	discoveryPort := operabilityRemoteFreePorts(t, ctx, sshHost, 1)[0]
+	runOperabilitySSH(t, ctx, sshHost, "python3 - <<'PY'\nimport json\np="+pythonQuote(remoteConfig)+"\nwith open(p) as f: c=json.load(f)\nc['discovery_listen']=':"+discoveryPort+"'\nc['discovery_addr']='255.255.255.255:"+discoveryPort+"'\nwith open(p, 'w') as f:\n    json.dump(c, f, indent=2)\n    f.write('\\n')\nPY")
+	remote := "cd " + shellQuote(workdir) + "; echo $$ > peer.pid; HOME=" + shellQuote(remoteHome) + " exec " + shellQuote(remoteBin) + " run --config " + shellQuote(remoteConfig)
+	proc := &smokeProcess{cmd: exec.CommandContext(ctx, "ssh", operabilitySSHArgs(sshHost, remote)...)}
+	if pass := operabilitySSHPass(); pass != "" {
+		proc.cmd = exec.CommandContext(ctx, "sshpass", append([]string{"-e", "ssh"}, operabilitySSHArgs(sshHost, remote)...)...)
+		proc.cmd.Env = append(os.Environ(), "SSHPASS="+pass)
+	}
+	proc.cmd.Stdout = &proc.stdout
+	proc.cmd.Stderr = &proc.stderr
+	if err := proc.cmd.Start(); err != nil {
+		t.Fatalf("start clean-home second peer peer: %v", err)
+	}
+	defer proc.stopRemoteSSH(t)
+	waitForSmokeHTTP(t, ctx, "http://"+listen+"/peer/health", joinToken)
+	waitForSmokeRPCDiagnostics(t, ctx, "http://"+listen+"/peer/diagnostics", joinRPC)
 }
 
 func TestFleetLocalitySmoke(t *testing.T) {
@@ -171,4 +214,132 @@ func inviteJoinToken(t *testing.T, output string) string {
 		t.Fatalf("invite output missing token: %q", raw)
 	}
 	return token
+}
+
+func inviteRPCToken(t *testing.T, output string) string {
+	t.Helper()
+	parsed, err := url.Parse(strings.TrimSpace(output))
+	if err != nil {
+		t.Fatalf("parse invite %q: %v", output, err)
+	}
+	token := parsed.Query().Get("rpc_token")
+	if token == "" {
+		t.Fatalf("invite output missing rpc_token: %q", output)
+	}
+	return token
+}
+
+func seedHost(t *testing.T, raw string) string {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse seed url %q: %v", raw, err)
+	}
+	return parsed.Host
+}
+
+func waitForSmokeRPCDiagnostics(t *testing.T, ctx context.Context, rawURL, rpcToken string) {
+	t.Helper()
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(2 * time.Minute)
+	var last string
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			t.Fatalf("diagnostics request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+rpcToken)
+		resp, err := client.Do(req)
+		if err == nil {
+			data, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			last = string(data)
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 && strings.Contains(last, `"ready":true`) {
+				return
+			}
+		} else {
+			last = err.Error()
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for diagnostics %s: %s", rawURL, last)
+}
+
+func runOperabilitySSH(t *testing.T, ctx context.Context, sshHost, command string) {
+	t.Helper()
+	_ = runOperabilitySSHOutput(t, ctx, sshHost, command)
+}
+
+func runOperabilitySSHOutput(t *testing.T, ctx context.Context, sshHost, command string) string {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "ssh", operabilitySSHArgs(sshHost, command)...)
+	if pass := operabilitySSHPass(); pass != "" {
+		cmd = exec.CommandContext(ctx, "sshpass", append([]string{"-e", "ssh"}, operabilitySSHArgs(sshHost, command)...)...)
+		cmd.Env = append(os.Environ(), "SSHPASS="+pass)
+	}
+	data, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh %s %q: %v\n%s", sshHost, command, err, data)
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func scpOperabilityRemote(t *testing.T, ctx context.Context, sshHost, local, remote string) {
+	t.Helper()
+	args := []string{"-o", "StrictHostKeyChecking=no"}
+	if operabilitySSHPass() == "" {
+		args = append(args, "-o", "BatchMode=yes")
+	} else {
+		args = append(args, "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1")
+	}
+	args = append(args, local, sshHost+":"+remote)
+	cmd := exec.CommandContext(ctx, "scp", args...)
+	if pass := operabilitySSHPass(); pass != "" {
+		cmd = exec.CommandContext(ctx, "sshpass", append([]string{"-e", "scp"}, args...)...)
+		cmd.Env = append(os.Environ(), "SSHPASS="+pass)
+	}
+	data, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("scp %s to %s:%s: %v\n%s", local, sshHost, remote, err, data)
+	}
+}
+
+func operabilityRemoteFreePorts(t *testing.T, ctx context.Context, sshHost string, count int) []string {
+	t.Helper()
+	script := `python3 - <<'PY'
+import socket
+sockets = []
+for _ in range(` + strconv.Itoa(count) + `):
+    s = socket.socket()
+    s.bind(("", 0))
+    sockets.append(s)
+print(" ".join(str(s.getsockname()[1]) for s in sockets))
+PY`
+	out := runOperabilitySSHOutput(t, ctx, sshHost, script)
+	fields := strings.Fields(out)
+	if len(fields) != count {
+		t.Fatalf("remote free ports = %q", out)
+	}
+	return fields
+}
+
+func operabilitySSHArgs(sshHost, command string) []string {
+	args := []string{"-o", "StrictHostKeyChecking=no"}
+	if operabilitySSHPass() == "" {
+		args = append(args, "-o", "BatchMode=yes")
+	} else {
+		args = append(args, "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1")
+	}
+	return append(args, sshHost, command)
+}
+
+func operabilitySSHPass() string {
+	if pass := os.Getenv("MYCELIUM_REMOTE_PEER_SSHPASS"); pass != "" {
+		return pass
+	}
+	return os.Getenv("SSHPASS")
+}
+
+func pythonQuote(value string) string {
+	return "r'" + strings.ReplaceAll(value, "'", "\\'") + "'"
 }
