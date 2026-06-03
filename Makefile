@@ -1,4 +1,4 @@
-.PHONY: fmt build vet test coverage smoke smoke-local smoke-fleet smoke-overlay smoke-mlx smoke-vllm smoke-b70 smoke-spark-vllm smoke-benchmark-fleet ci
+.PHONY: fmt build vet test coverage smoke smoke-local smoke-fleet smoke-overlay smoke-mlx smoke-vllm smoke-b70 smoke-spark-vllm smoke-operability-local smoke-join-mac-mini smoke-locality-fleet smoke-benchmark-fleet ci
 
 SMOKE_JSON ?= smoke.out
 BENCH_OUT ?= benchmark-out
@@ -48,6 +48,18 @@ smoke-b70:
 smoke-spark-vllm:
 	go test -count=1 -tags smoke ./test/smoke/... -run TestSparkVLLMPeerRoutingSmoke -timeout 30m -json > $(SMOKE_JSON)
 	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestSparkVLLMPeerRoutingSmoke
+
+smoke-operability-local:
+	go test -count=1 -tags smoke ./test/smoke/... -run TestOperabilityLocalServiceSmoke -timeout 20m -json > $(SMOKE_JSON)
+	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestOperabilityLocalServiceSmoke
+
+smoke-join-mac-mini:
+	go test -count=1 -tags smoke ./test/smoke/... -run TestRemotePeerCleanHomeJoinSmoke -timeout 30m -json > $(SMOKE_JSON)
+	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestRemotePeerCleanHomeJoinSmoke
+
+smoke-locality-fleet:
+	go test -count=1 -tags smoke ./test/smoke/... -run TestFleetLocalitySmoke -timeout 45m -json > $(SMOKE_JSON)
+	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestFleetLocalitySmoke
 
 smoke-benchmark-fleet:
 	MYCELIUM_BENCHMARK_OUT="$(BENCH_OUT)" go test -count=1 -tags smoke ./test/smoke/... -run TestFleetBenchmarkConservativeSmoke -timeout 2h -json > $(SMOKE_JSON)
