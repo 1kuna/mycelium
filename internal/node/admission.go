@@ -37,6 +37,13 @@ type AdmissionStateStore interface {
 	SaveAdmissionState(ctx context.Context, state domain.AdmissionState) error
 }
 
+type AdmissionReconcileResult struct {
+	DroppedExpiredOffers         int
+	DroppedUnboundLeases         int
+	DroppedMissingInstanceLeases int
+	DroppedDuplicateLeases       int
+}
+
 type admissionOffer struct {
 	offer          domain.LeaseOffer
 	job            domain.Job
@@ -106,6 +113,91 @@ func WithPinnedReservations(ids ...string) AdmissionOption {
 			}
 		}
 	}
+}
+
+func ReconcileAdmissionState(ctx context.Context, store AdmissionStateStore, nodeID string, live []domain.ModelInstance, now time.Time) (AdmissionReconcileResult, error) {
+	if store == nil {
+		return AdmissionReconcileResult{}, nil
+	}
+	if nodeID == "" {
+		return AdmissionReconcileResult{}, fmt.Errorf("node id is required")
+	}
+	state, found, err := store.AdmissionState(ctx, nodeID)
+	if err != nil || !found {
+		return AdmissionReconcileResult{}, err
+	}
+	if state.Fence == 0 {
+		state.Fence = 1
+	}
+	result := AdmissionReconcileResult{}
+	changed := false
+
+	offers := state.Offers[:0]
+	for _, rec := range state.Offers {
+		if !rec.Offer.ExpiresAt.IsZero() && !now.Before(rec.Offer.ExpiresAt) {
+			result.DroppedExpiredOffers++
+			changed = true
+			continue
+		}
+		offers = append(offers, rec)
+	}
+	state.Offers = offers
+
+	liveInstances := map[string]bool{}
+	for _, inst := range live {
+		if inst.ID != "" {
+			liveInstances[inst.ID] = true
+		}
+	}
+	keptByJobInstance := map[string]int{}
+	leases := make([]domain.AdmissionLeaseRecord, 0, len(state.Leases))
+	for _, rec := range state.Leases {
+		lease := rec.Lease
+		if !lease.ExpiresAt.IsZero() && !now.Before(lease.ExpiresAt) {
+			result.DroppedUnboundLeases++
+			changed = true
+			continue
+		}
+		if lease.InstanceID == "" {
+			result.DroppedUnboundLeases++
+			changed = true
+			continue
+		}
+		if !liveInstances[lease.InstanceID] {
+			result.DroppedMissingInstanceLeases++
+			changed = true
+			continue
+		}
+		key := lease.JobID + "\x00" + lease.InstanceID
+		if existing, ok := keptByJobInstance[key]; ok {
+			if betterAdmissionLease(lease, leases[existing].Lease) {
+				leases[existing] = rec
+			}
+			result.DroppedDuplicateLeases++
+			changed = true
+			continue
+		}
+		keptByJobInstance[key] = len(leases)
+		leases = append(leases, rec)
+	}
+	state.Leases = leases
+	if !changed {
+		return result, nil
+	}
+	state.Fence++
+	if err := store.SaveAdmissionState(ctx, state); err != nil {
+		return AdmissionReconcileResult{}, err
+	}
+	return result, nil
+}
+
+func betterAdmissionLease(left, right domain.Lease) bool {
+	leftClaim := left.Claim.WeightsMB + left.Claim.KVReservedMB
+	rightClaim := right.Claim.WeightsMB + right.Claim.KVReservedMB
+	if leftClaim != rightClaim {
+		return leftClaim > rightClaim
+	}
+	return left.GrantedAt.After(right.GrantedAt)
 }
 
 type SubmitterPolicy struct {

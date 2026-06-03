@@ -106,6 +106,9 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 	if err := loadPinnedReservations(ctx, agent, store, node.ID); err != nil {
 		return computeRuntime{}, err
 	}
+	if _, err := nodeagent.ReconcileAdmissionState(ctx, store, node.ID, agent.Instances(), clock.System{}.Now()); err != nil {
+		return computeRuntime{}, err
+	}
 	return computeRuntime{
 		handler:   nodeagent.HTTPServer{Agent: agent, Admission: admission, AuthToken: cfg.RPCToken},
 		node:      node,
