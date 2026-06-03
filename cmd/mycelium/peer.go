@@ -263,7 +263,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	if err := restoreQueuedJobs(ctx, store, queue); err != nil {
 		return "", nil, nil, err
 	}
-	jobLog := peercoord.NewJobLog()
+	jobLog := peercoord.NewRescueJobLog(peercoord.NewJobLog(), store, privateKey)
 	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
 	var coordinatorOpts []peercoord.CoordinatorOption
 	if len(privateKey) > 0 {
