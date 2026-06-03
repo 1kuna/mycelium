@@ -822,7 +822,7 @@ func (r *Router) recordMetric(ctx context.Context, job domain.Job, preset domain
 		}
 		metric.PeakVRAMMB = peak
 	}
-	if r.SelfNodeID != "" && inst.NodeID == r.SelfNodeID {
+	if (r.SelfNodeID != "" && inst.NodeID == r.SelfNodeID) || (r.SelfNodeID == "" && r.TelemetryPeers == nil && r.TelemetryPeerClient == nil) {
 		if r.Telemetry == nil {
 			return fmt.Errorf("local owner telemetry sink is not configured")
 		}

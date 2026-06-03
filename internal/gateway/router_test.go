@@ -173,6 +173,31 @@ func TestRouterPushesMetricToRemoteOwner(t *testing.T) {
 	}
 }
 
+func TestRouterRecordsMetricLocallyWhenEmbeddedOwnerHasNoSelfID(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("local")))
+	}))
+
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: mocks.NewNodeAgent(fixtures.MakeNode())}})
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	if _, err := router.Route(context.Background(), req); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(sink.Metrics) != 1 || sink.Metrics[0].NodeID != inst.NodeID || sink.Metrics[0].InstanceID != inst.ID {
+		t.Fatalf("metrics = %+v", sink.Metrics)
+	}
+}
+
 func TestRouterFailsLoudlyWhenRemoteOwnerTelemetryCannotRoute(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
