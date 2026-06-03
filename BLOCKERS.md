@@ -2,7 +2,7 @@
 
 ## Active
 
-- None.
+- 2026-06-03: Real 122B-class fleet benchmark smoke is not run because no 122B-class model artifact is currently installed or configured on the available Spark/B70 fleet paths. Spark's configured cache contains `Qwen-Qwen3.5-9B` only, and today's safe real benchmark used Spark 9B plus B70 27B while enforcing Spark `max_util=0.85` and vLLM `--gpu-memory-utilization 0.45`. To unblock: provide or approve staging of a 122B-class model/preset that fits below the Spark safety cap and disk floor, then rerun `make smoke-benchmark-fleet` with that model included.
 
 ## Resolved
 
