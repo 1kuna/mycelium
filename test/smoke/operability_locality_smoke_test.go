@@ -129,10 +129,13 @@ func TestFleetLocalitySmoke(t *testing.T) {
 	if !strings.Contains(out, "locality-plan\t"+planID) {
 		t.Fatalf("locality plan output = %q", out)
 	}
+	if !strings.Contains(out, "locality-action\t") {
+		t.Fatalf("locality plan did not produce any actions: %q", out)
+	}
 	runSmokeCommand(t, ctx, "go", "run", "./cmd/myce", "models", "locality", "apply", "--db", dbPath, "--id", planID, "--rpc-token", rpcToken)
 	report := runSmokeCommandOutput(t, ctx, "go", "run", "./cmd/myce", "models", "locality", "report", "--db", dbPath)
-	if strings.TrimSpace(report) == "" {
-		t.Fatalf("locality report is empty after apply")
+	if !strings.Contains(report, "\tready\t") {
+		t.Fatalf("locality report has no ready model locality after apply: %q", report)
 	}
 }
 
