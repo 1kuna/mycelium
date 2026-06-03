@@ -28,6 +28,7 @@ import (
 	"mycelium/internal/ports"
 	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
+	"mycelium/internal/telemetry"
 	"mycelium/test/mocks"
 )
 
@@ -1630,6 +1631,63 @@ func TestRunOptimizerEvaluationIncludesRemoteTelemetryAndPushesRecommendations(t
 		t.Fatalf("auto_apply=false project changed: %+v", appliedProject)
 	}
 	if pushed := client.PushedRecommendations[remotePeer.ID]; len(pushed) != 1 || pushed[0].ProjectID != project.ID || pushed[0].SlotID != result.SlotID {
+		t.Fatalf("pushed recommendations = %+v", pushed)
+	}
+}
+
+func TestRunOptimizerEvaluationSkipsLocalAnalysisWhenSlotAlreadyExists(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	project := domain.Project{ID: "project-a", ContextCap: 16000}
+	if err := store.SaveProject(ctx, project); err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	if err := store.SavePreset(ctx, testPresetWithContext("small", 6000)); err != nil {
+		t.Fatalf("SavePreset small: %v", err)
+	}
+	if err := store.SavePreset(ctx, testPresetWithContext("large", 16000)); err != nil {
+		t.Fatalf("SavePreset large: %v", err)
+	}
+	now := time.Unix(45, 0).UTC()
+	interval := time.Minute
+	slotID := telemetry.AnalysisSlotID(now, interval)
+	remotePeer := domain.Peer{ID: "peer-b", Addresses: []string{"127.0.0.1:1"}, Compute: true}
+	remoteRec := domain.RecommendationRecord{
+		ID:               "remote-slot-rec",
+		SlotID:           slotID,
+		Type:             optimizer.RecommendationContextCap,
+		ProjectID:        project.ID,
+		RecommendedValue: 6000,
+		CreatedAt:        now,
+	}
+	client := &mocks.TelemetryPeerClient{
+		RecommendationsByPeer: map[string][]domain.RecommendationRecord{remotePeer.ID: {remoteRec}},
+	}
+
+	result, err := runOptimizerEvaluation(ctx, store, mocks.NewFakeClock(now), telemetrySyncConfig{
+		SelfID:   "peer-a",
+		Peers:    &mocks.PeerDiscovery{PeersVal: []domain.Peer{remotePeer}},
+		Client:   client,
+		Interval: interval,
+	})
+	if err != nil {
+		t.Fatalf("runOptimizerEvaluation: %v", err)
+	}
+	if result.ImportedRecommendations != 1 || result.PushedRecommendations != 1 {
+		t.Fatalf("sync result = %+v", result)
+	}
+	recs, err := store.ListRecommendations(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("ListRecommendations: %v", err)
+	}
+	if len(recs) != 1 || recs[0].ID != remoteRec.ID || recs[0].SlotID != slotID {
+		t.Fatalf("recommendations = %+v", recs)
+	}
+	if pushed := client.PushedRecommendations[remotePeer.ID]; len(pushed) != 1 || pushed[0].ID != remoteRec.ID {
 		t.Fatalf("pushed recommendations = %+v", pushed)
 	}
 }
