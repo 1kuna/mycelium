@@ -846,6 +846,132 @@ func TestAdmissionRestoresZeroFenceAndOffers(t *testing.T) {
 	}
 }
 
+func TestReconcileAdmissionStateDropsStartupPoison(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(900, 0).UTC()
+	store := &fakeAdmissionStateStore{found: true, state: domain.AdmissionState{
+		NodeID:    "node-a",
+		Fence:     4,
+		NextOffer: 3,
+		NextLease: 2,
+		Offers: []domain.AdmissionOfferRecord{{
+			Offer: domain.LeaseOffer{OfferID: "expired", JobID: "old-offer", NodeID: "node-a", ExpiresAt: now.Add(-time.Second)},
+			Job:   fixtures.MakeJob(fixtures.WithJobID("old-offer")),
+		}},
+		Leases: []domain.AdmissionLeaseRecord{{
+			Lease: domain.Lease{ID: "unbound", JobID: "failed-job", NodeID: "node-a", AcceleratorSet: []int{0}, Claim: fixtures.MakeClaim(900, 0)},
+		}, {
+			Lease: domain.Lease{ID: "missing", JobID: "missing-inst", InstanceID: "gone", NodeID: "node-a", AcceleratorSet: []int{0}, Claim: fixtures.MakeClaim(100, 0)},
+		}, {
+			Lease: domain.Lease{ID: "live", JobID: "live-job", InstanceID: "inst-a", NodeID: "node-a", AcceleratorSet: []int{0}, Claim: fixtures.MakeClaim(100, 0)},
+		}},
+	}}
+	live := []domain.ModelInstance{fixtures.MakeInstance(fixtures.WithInstanceID("inst-a"), fixtures.OnNode("node-a"), fixtures.WithClaim(fixtures.MakeClaim(100, 0)))}
+
+	result, err := ReconcileAdmissionState(ctx, store, "node-a", live, now)
+	if err != nil {
+		t.Fatalf("ReconcileAdmissionState: %v", err)
+	}
+	if result.DroppedExpiredOffers != 1 || result.DroppedUnboundLeases != 1 || result.DroppedMissingInstanceLeases != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if store.state.Fence != 5 || len(store.state.Offers) != 0 || len(store.state.Leases) != 1 || store.state.Leases[0].Lease.ID != "live" {
+		t.Fatalf("state = %+v", store.state)
+	}
+
+	admission := NewAdmission(fixtures.MakeNode(fixtures.WithNodeID("node-a"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)), lease.NewAllocator(), mocks.NewFakeClock(now), WithAdmissionStateStore(store), WithAdmissionInstances(func() []domain.ModelInstance { return live }))
+	if _, err := admission.Offer(ctx, admissionReq(fixtures.MakeJob(fixtures.WithJobID("admitted")), fixtures.MakeClaim(800, 0))); err != nil {
+		t.Fatalf("Offer after reconcile: %v", err)
+	}
+}
+
+func TestReconcileAdmissionStateDedupesJobInstanceLeases(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(910, 0).UTC()
+	store := &fakeAdmissionStateStore{found: true, state: domain.AdmissionState{
+		NodeID: "node-a",
+		Fence:  7,
+		Leases: []domain.AdmissionLeaseRecord{{
+			Lease: domain.Lease{ID: "zero", JobID: "job-a", InstanceID: "inst-a", NodeID: "node-a", AcceleratorSet: []int{0}, GrantedAt: now.Add(-time.Second)},
+		}, {
+			Lease: domain.Lease{ID: "weighted", JobID: "job-a", InstanceID: "inst-a", NodeID: "node-a", AcceleratorSet: []int{0}, Claim: fixtures.MakeClaim(600, 0), GrantedAt: now},
+		}},
+	}}
+	live := []domain.ModelInstance{fixtures.MakeInstance(fixtures.WithInstanceID("inst-a"), fixtures.OnNode("node-a"), fixtures.WithClaim(fixtures.MakeClaim(600, 0)))}
+
+	result, err := ReconcileAdmissionState(ctx, store, "node-a", live, now)
+	if err != nil {
+		t.Fatalf("ReconcileAdmissionState: %v", err)
+	}
+	if result.DroppedDuplicateLeases != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(store.state.Leases) != 1 || store.state.Leases[0].Lease.ID != "weighted" || store.state.Fence != 8 {
+		t.Fatalf("state = %+v", store.state)
+	}
+}
+
+func TestReconcileAdmissionStateBranches(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(920, 0).UTC()
+	if result, err := ReconcileAdmissionState(ctx, nil, "node-a", nil, now); err != nil || result != (AdmissionReconcileResult{}) {
+		t.Fatalf("nil store result=%+v err=%v", result, err)
+	}
+	if _, err := ReconcileAdmissionState(ctx, &fakeAdmissionStateStore{}, "", nil, now); err == nil || !strings.Contains(err.Error(), "node id") {
+		t.Fatalf("empty node err = %v", err)
+	}
+	loadErr := errors.New("load")
+	if _, err := ReconcileAdmissionState(ctx, &fakeAdmissionStateStore{loadErr: loadErr}, "node-a", nil, now); !errors.Is(err, loadErr) {
+		t.Fatalf("load err = %v", err)
+	}
+	if result, err := ReconcileAdmissionState(ctx, &fakeAdmissionStateStore{}, "node-a", nil, now); err != nil || result != (AdmissionReconcileResult{}) {
+		t.Fatalf("missing state result=%+v err=%v", result, err)
+	}
+
+	live := []domain.ModelInstance{fixtures.MakeInstance(fixtures.WithInstanceID("inst-a"), fixtures.OnNode("node-a"))}
+	unchanged := &fakeAdmissionStateStore{found: true, state: domain.AdmissionState{
+		NodeID: "node-a",
+		Fence:  0,
+		Offers: []domain.AdmissionOfferRecord{{
+			Offer: domain.LeaseOffer{OfferID: "offer-a", JobID: "job-a", NodeID: "node-a", ExpiresAt: now.Add(time.Minute)},
+		}},
+		Leases: []domain.AdmissionLeaseRecord{{
+			Lease: domain.Lease{ID: "lease-a", JobID: "job-a", InstanceID: "inst-a", NodeID: "node-a", AcceleratorSet: []int{0}},
+		}},
+	}}
+	if result, err := ReconcileAdmissionState(ctx, unchanged, "node-a", live, now); err != nil || result != (AdmissionReconcileResult{}) || len(unchanged.saved) != 0 {
+		t.Fatalf("unchanged result=%+v saved=%d err=%v", result, len(unchanged.saved), err)
+	}
+
+	saveErr := errors.New("save")
+	expiredLease := &fakeAdmissionStateStore{found: true, saveErr: saveErr, state: domain.AdmissionState{
+		NodeID: "node-a",
+		Fence:  1,
+		Leases: []domain.AdmissionLeaseRecord{{
+			Lease: domain.Lease{ID: "expired", JobID: "job-a", InstanceID: "inst-a", NodeID: "node-a", AcceleratorSet: []int{0}, ExpiresAt: now.Add(-time.Second)},
+		}},
+	}}
+	if _, err := ReconcileAdmissionState(ctx, expiredLease, "node-a", live, now); !errors.Is(err, saveErr) {
+		t.Fatalf("save err = %v", err)
+	}
+
+	tie := &fakeAdmissionStateStore{found: true, state: domain.AdmissionState{
+		NodeID: "node-a",
+		Fence:  1,
+		Leases: []domain.AdmissionLeaseRecord{{
+			Lease: domain.Lease{ID: "newer", JobID: "job-a", InstanceID: "inst-a", NodeID: "node-a", AcceleratorSet: []int{0}, Claim: fixtures.MakeClaim(100, 0), GrantedAt: now},
+		}, {
+			Lease: domain.Lease{ID: "older", JobID: "job-a", InstanceID: "inst-a", NodeID: "node-a", AcceleratorSet: []int{0}, Claim: fixtures.MakeClaim(100, 0), GrantedAt: now.Add(-time.Second)},
+		}},
+	}}
+	if result, err := ReconcileAdmissionState(ctx, tie, "node-a", live, now); err != nil || result.DroppedDuplicateLeases != 1 {
+		t.Fatalf("tie result=%+v err=%v", result, err)
+	}
+	if len(tie.state.Leases) != 1 || tie.state.Leases[0].Lease.ID != "newer" {
+		t.Fatalf("tie state = %+v", tie.state)
+	}
+}
+
 func commitAdmissionLease(t *testing.T, admission *Admission, jobID string, claim domain.Claim) domain.Lease {
 	t.Helper()
 	offer, err := admission.Offer(context.Background(), admissionReq(fixtures.MakeJob(fixtures.WithJobID(jobID)), claim))
