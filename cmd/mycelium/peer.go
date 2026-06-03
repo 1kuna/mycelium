@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"mycelium/internal/catalog"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/estimate"
@@ -320,6 +321,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	mountPeerHTTP(mux, self, joinTokens)
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
 	mountTelemetryHTTP(mux, store, cfg.RPCToken)
+	mountCatalogHTTP(mux, cfg, store, cfg.RPCToken, clock.System{})
 	mux.Handle("/", handler)
 	return cfg.Listen, mux, combineShutdowns(shutdowns), nil
 }
@@ -382,6 +384,128 @@ type adminInviteResponse struct {
 
 type adminTokenRequest struct {
 	Token string `json:"token,omitempty"`
+}
+
+type catalogStageRequest struct {
+	Preset domain.Preset `json:"preset"`
+	Source string        `json:"source,omitempty"`
+}
+
+type catalogStageResponse struct {
+	Preset   domain.Preset        `json:"preset"`
+	Locality domain.ModelLocality `json:"locality"`
+	JobID    string               `json:"job_id"`
+}
+
+type catalogStageStore interface {
+	SaveJob(ctx context.Context, job domain.Job) error
+	SavePreset(ctx context.Context, preset domain.Preset) error
+	SaveModelLocality(ctx context.Context, locality domain.ModelLocality) error
+}
+
+func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStore, rpcToken string, clk ports.Clock) {
+	mux.HandleFunc("/catalog/stage", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req catalogStageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writePeerRPCError(w, http.StatusBadRequest, err)
+			return
+		}
+		if req.Preset.ID == "" {
+			writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("preset id is required"))
+			return
+		}
+		source := req.Source
+		if source == "" {
+			source = req.Preset.ModelRef
+		}
+		if source == "" {
+			writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("preset %q has no source model ref", req.Preset.ID))
+			return
+		}
+		nodeID := cfg.ID
+		if cfg.ComputeConfig.ID != "" {
+			nodeID = cfg.ComputeConfig.ID
+		}
+		jobID := catalog.InstallJobID(catalog.InstallRequest{Source: source, ID: req.Preset.ID})
+		job := domain.Job{ID: jobID, TaskType: "catalog_stage", Model: source, PresetID: req.Preset.ID, Status: domain.JobQueued}
+		if err := store.SaveJob(r.Context(), job); err != nil {
+			writePeerRPCError(w, http.StatusInternalServerError, err)
+			return
+		}
+		result, err := catalog.NewInstaller(cfg.CatalogDir).InstallWithProgress(r.Context(), catalog.InstallRequest{
+			Source:        source,
+			ID:            req.Preset.ID,
+			Model:         firstPresetModelAlias(req.Preset),
+			ContextLength: req.Preset.ContextLength,
+			Quant:         req.Preset.Quant,
+			Backend:       req.Preset.Backend,
+		}, func(event catalog.ProgressEvent, _ catalog.InstallState) error {
+			job.Status = domain.JobRunning
+			job.Progress = append(job.Progress, domain.JobProgress{Stage: event.Stage, Message: event.Message, At: event.At})
+			return store.SaveJob(r.Context(), job)
+		})
+		if err != nil {
+			job.Status = domain.JobFailed
+			job.Error = err.Error()
+			_ = store.SaveJob(r.Context(), job)
+			writePeerRPCError(w, http.StatusBadRequest, err)
+			return
+		}
+		staged := result.Preset
+		staged.NodeID = nodeID
+		if err := store.SavePreset(r.Context(), staged); err != nil {
+			writePeerRPCError(w, http.StatusInternalServerError, err)
+			return
+		}
+		locality := domain.ModelLocality{
+			ID:             modelLocalityID(nodeID, staged.ID),
+			PresetID:       staged.ID,
+			NodeID:         nodeID,
+			State:          domain.ModelLocalityReady,
+			ModelRef:       staged.ModelRef,
+			Source:         source,
+			ArtifactSizeMB: staged.ArtifactSizeMB,
+			Managed:        true,
+			Reason:         "catalog stage committed",
+			UpdatedAt:      clk.Now().UTC(),
+		}
+		if err := store.SaveModelLocality(r.Context(), locality); err != nil {
+			writePeerRPCError(w, http.StatusInternalServerError, err)
+			return
+		}
+		job.Status = domain.JobDone
+		job.PresetID = staged.ID
+		if err := store.SaveJob(r.Context(), job); err != nil {
+			writePeerRPCError(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(catalogStageResponse{Preset: staged, Locality: locality, JobID: job.ID}); err != nil {
+			panic(err)
+		}
+	})
+}
+
+func firstPresetModelAlias(preset domain.Preset) string {
+	if len(preset.Aliases) > 0 {
+		return preset.Aliases[0]
+	}
+	if preset.ID != "" {
+		return preset.ID
+	}
+	return preset.ModelRef
+}
+
+func modelLocalityID(nodeID, presetID string) string {
+	return nodeID + ":" + presetID
 }
 
 func mountAdminHTTP(mux *http.ServeMux, cfg *PeerConfig, configPath string, joinTokens *membership.TokenManager, tokenStore adminTokenStore, rpcToken string) {

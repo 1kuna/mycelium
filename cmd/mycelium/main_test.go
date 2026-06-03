@@ -1088,6 +1088,120 @@ func TestAdminHTTPFailureBranches(t *testing.T) {
 	}
 }
 
+func TestCatalogStageHTTPMaterializesPresetAndLocality(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	model := filepath.Join(t.TempDir(), "tiny.gguf")
+	if err := os.WriteFile(model, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	cfg := applyPeerConfigDefaults(PeerConfig{
+		ID:         "peer-a",
+		CatalogDir: filepath.Join(t.TempDir(), "catalog"),
+		Compute:    true,
+		ComputeConfig: ComputeConfig{
+			ID:      "node-a",
+			Backend: domain.BackendLlamaCpp,
+		},
+	})
+	mux := http.NewServeMux()
+	mountCatalogHTTP(mux, cfg, store, "rpc-secret", mocks.NewFakeClock(time.Unix(10, 0).UTC()))
+	body, err := json.Marshal(catalogStageRequest{
+		Preset: domain.Preset{
+			ID:             "tiny",
+			ModelRef:       model,
+			Aliases:        []string{"tiny-model"},
+			Backend:        domain.BackendLlamaCpp,
+			ContextLength:  2048,
+			Quant:          "Q4",
+			Capabilities:   []domain.Capability{domain.CapabilityChat},
+			ArtifactSizeMB: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/catalog/stage", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stage status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	var response catalogStageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Locality.ID != "node-a:tiny" || response.Locality.State != domain.ModelLocalityReady || !response.Locality.Managed {
+		t.Fatalf("locality response = %+v", response.Locality)
+	}
+	preset, err := store.Preset(ctx, "tiny")
+	if err != nil {
+		t.Fatalf("Preset: %v", err)
+	}
+	if preset.NodeID != "node-a" || !strings.Contains(preset.ModelRef, "tiny-tiny.gguf") {
+		t.Fatalf("staged preset = %+v", preset)
+	}
+	localities, err := store.ListModelLocalities(ctx)
+	if err != nil {
+		t.Fatalf("ListModelLocalities: %v", err)
+	}
+	if len(localities) != 1 || localities[0].ID != response.Locality.ID {
+		t.Fatalf("localities = %+v", localities)
+	}
+	jobs, err := store.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].TaskType != "catalog_stage" || jobs[0].Status != domain.JobDone || len(jobs[0].Progress) == 0 {
+		t.Fatalf("stage jobs = %+v", jobs)
+	}
+
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/catalog/stage", strings.NewReader(`{}`)))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/catalog/stage", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("method status = %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/catalog/stage", strings.NewReader(`{`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad json status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/catalog/stage", strings.NewReader(`{"preset":{}}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "preset id") {
+		t.Fatalf("missing id status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/catalog/stage", strings.NewReader(`{"preset":{"id":"no-source"}}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "source model ref") {
+		t.Fatalf("missing source status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	if got := firstPresetModelAlias(domain.Preset{ID: "id", ModelRef: "ref"}); got != "id" {
+		t.Fatalf("alias fallback id = %s", got)
+	}
+	if got := firstPresetModelAlias(domain.Preset{ModelRef: "ref"}); got != "ref" {
+		t.Fatalf("alias fallback ref = %s", got)
+	}
+}
+
 func TestBootstrapEngineHelpers(t *testing.T) {
 	configured := domain.EngineProfile{ID: "configured", Backend: domain.BackendVLLM, Ready: true}
 	merged := mergeEngineProfiles(configured, []domain.EngineProfile{

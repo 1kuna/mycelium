@@ -3,6 +3,7 @@ package controlcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -182,6 +183,150 @@ func TestRunListCommandsAndProjectSet(t *testing.T) {
 	}
 }
 
+func TestRunModelsStageAndLocalityReport(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	preset := testPreset("tiny")
+	if err := store.SavePreset(context.Background(), preset); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	if err := store.SaveNode(context.Background(), domain.Node{ID: "node-a", Name: "Node A", Address: "127.0.0.1:51846", Status: domain.NodeReady}); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/catalog/stage" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer rpc-secret" {
+			t.Fatalf("auth = %s", got)
+		}
+		var req struct {
+			Preset domain.Preset `json:"preset"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Preset.ID != "tiny" {
+			t.Fatalf("request preset = %+v", req.Preset)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"locality": domain.ModelLocality{
+				ID:             "node-a:tiny",
+				PresetID:       "tiny",
+				NodeID:         "node-a",
+				State:          domain.ModelLocalityReady,
+				ModelRef:       "/catalog/models/tiny.gguf",
+				ArtifactSizeMB: preset.ArtifactSizeMB,
+				Managed:        true,
+				Reason:         "catalog stage committed",
+				UpdatedAt:      time.Unix(10, 0).UTC(),
+			},
+		})
+	}))
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = RunWithClient(context.Background(), []string{"models", "stage", "--db", dbPath, "--preset", "tiny", "--node", "node-a", "--rpc-token", "rpc-secret"}, client)
+	})
+	if runErr != nil {
+		t.Fatalf("models stage: %v", runErr)
+	}
+	if !strings.Contains(output, "stage\ttiny\tnode-a\tready") {
+		t.Fatalf("stage output = %q", output)
+	}
+	verify, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open verify: %v", err)
+	}
+	localities, err := verify.ListModelLocalities(context.Background())
+	if err != nil {
+		t.Fatalf("ListModelLocalities: %v", err)
+	}
+	if len(localities) != 1 || localities[0].ID != "node-a:tiny" {
+		t.Fatalf("localities = %+v", localities)
+	}
+	if err := verify.Close(); err != nil {
+		t.Fatalf("Close verify: %v", err)
+	}
+	report := captureStdout(t, func() {
+		runErr = Run(context.Background(), []string{"models", "locality", "report", "--db", dbPath})
+	})
+	if runErr != nil {
+		t.Fatalf("locality report: %v", runErr)
+	}
+	if !strings.Contains(report, "tiny\tnode-a\tready\t/catalog/models/tiny.gguf\ttrue") {
+		t.Fatalf("locality report = %q", report)
+	}
+	if err := Run(context.Background(), []string{"models", "stage", "--db", dbPath, "--preset", "tiny"}); err == nil {
+		t.Fatal("models stage accepted missing node")
+	}
+	if err := Run(context.Background(), []string{"models", "locality"}); err == nil {
+		t.Fatal("models locality accepted missing subcommand")
+	}
+}
+
+func TestCatalogStageClientAndStageFailureBranches(t *testing.T) {
+	if got := catalogPeerBaseURL("127.0.0.1:51846"); got != "http://127.0.0.1:51846" {
+		t.Fatalf("base url = %s", got)
+	}
+	if got := catalogPeerBaseURL("https://peer.local"); got != "https://peer.local" {
+		t.Fatalf("https base url = %s", got)
+	}
+	client := catalogStageHTTPClient{}
+	if _, err := client.StageModel(context.Background(), domain.Peer{ID: "empty"}, testPreset("tiny")); err == nil {
+		t.Fatal("stage accepted peer without address")
+	}
+	errorClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"no source"}`))
+	}))
+	if _, err := (catalogStageHTTPClient{Client: errorClient}).StageModel(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{"http://peer.test"}}, testPreset("tiny")); err == nil || !strings.Contains(err.Error(), "no source") {
+		t.Fatalf("stage error = %v", err)
+	}
+	emptyClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"locality": domain.ModelLocality{}})
+	}))
+	if _, err := (catalogStageHTTPClient{Client: emptyClient}).StageModel(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{"http://peer.test"}}, testPreset("tiny")); err == nil || !strings.Contains(err.Error(), "returned no locality") {
+		t.Fatalf("empty locality error = %v", err)
+	}
+	malformedClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{`))
+	}))
+	if _, err := (catalogStageHTTPClient{Client: malformedClient}).StageModel(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{"http://peer.test"}}, testPreset("tiny")); err == nil {
+		t.Fatal("malformed catalog stage response accepted")
+	}
+	dialErrorClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial failed")
+	})}
+	if _, err := (catalogStageHTTPClient{Client: dialErrorClient}).StageModel(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{"http://peer.test"}}, testPreset("tiny")); err == nil || !strings.Contains(err.Error(), "dial failed") {
+		t.Fatalf("transport error = %v", err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), testPreset("tiny")); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	if err := store.SaveNode(context.Background(), domain.Node{ID: "node-a", Status: domain.NodeReady}); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := Run(context.Background(), []string{"models", "stage", "--db", dbPath, "--preset", "tiny", "--node", "node-a"}); err == nil || !strings.Contains(err.Error(), "no reachable address") {
+		t.Fatalf("missing node address err = %v", err)
+	}
+}
+
 func TestRunBenchmarkFanOutPersistsJobsAndOutputs(t *testing.T) {
 	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
@@ -342,6 +487,8 @@ func TestRunBenchmarkFleetRejectsBadRequests(t *testing.T) {
 func TestListCommandsRejectBadFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"models", "list", "--bad"},
+		{"models", "stage", "--bad"},
+		{"models", "locality", "report", "--bad"},
 		{"nodes", "list", "--bad"},
 		{"jobs", "list", "--bad"},
 		{"recommendations", "list", "--bad"},

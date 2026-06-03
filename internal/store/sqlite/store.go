@@ -363,6 +363,54 @@ func (s *Store) ListJoinTokens(ctx context.Context) ([]domain.JoinTokenRecord, e
 	return tokens, err
 }
 
+func (s *Store) SaveModelLocality(ctx context.Context, locality domain.ModelLocality) error {
+	if locality.ID == "" {
+		return fmt.Errorf("model locality id is required")
+	}
+	if locality.PresetID == "" {
+		return fmt.Errorf("model locality preset id is required")
+	}
+	if locality.NodeID == "" {
+		return fmt.Errorf("model locality node id is required")
+	}
+	if locality.State == "" {
+		return fmt.Errorf("model locality state is required")
+	}
+	return s.upsertJSON(ctx, "model_localities", locality.ID, locality)
+}
+
+func (s *Store) ListModelLocalities(ctx context.Context) ([]domain.ModelLocality, error) {
+	var localities []domain.ModelLocality
+	err := s.listJSON(ctx, "model_localities", &localities)
+	return localities, err
+}
+
+func (s *Store) DeleteModelLocality(ctx context.Context, id string) error {
+	return s.deleteID(ctx, "model_localities", id)
+}
+
+func (s *Store) SaveLocalityPlan(ctx context.Context, plan domain.LocalityPlan) error {
+	if plan.ID == "" {
+		return fmt.Errorf("locality plan id is required")
+	}
+	if plan.CreatedAt.IsZero() {
+		return fmt.Errorf("locality plan created_at is required")
+	}
+	return s.upsertJSON(ctx, "locality_plans", plan.ID, plan)
+}
+
+func (s *Store) LocalityPlan(ctx context.Context, id string) (domain.LocalityPlan, error) {
+	var plan domain.LocalityPlan
+	err := s.getJSON(ctx, "locality_plans", id, &plan)
+	return plan, err
+}
+
+func (s *Store) ListLocalityPlans(ctx context.Context) ([]domain.LocalityPlan, error) {
+	var plans []domain.LocalityPlan
+	err := s.listJSON(ctx, "locality_plans", &plans)
+	return plans, err
+}
+
 func (s *Store) Record(ctx context.Context, m domain.RunMetric) error {
 	if m.JobID == "" {
 		return fmt.Errorf("run metric missing job id")
@@ -626,6 +674,8 @@ CREATE TABLE IF NOT EXISTS job_records (id TEXT PRIMARY KEY, data TEXT NOT NULL)
 CREATE TABLE IF NOT EXISTS recommendations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS process_refs (node_id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS join_tokens (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS model_localities (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS locality_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS run_metrics (
 	job_id TEXT PRIMARY KEY,
@@ -678,3 +728,5 @@ func ensureColumn(ctx context.Context, db *sql.DB, table, column, spec string) e
 
 var _ ports.TelemetryStore = (*Store)(nil)
 var _ ports.JobRegistry = (*Store)(nil)
+var _ ports.ModelInventory = (*Store)(nil)
+var _ ports.LocalityPlanStore = (*Store)(nil)
