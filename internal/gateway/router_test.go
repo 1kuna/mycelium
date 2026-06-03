@@ -66,6 +66,54 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 }
 
+func TestRouterUsesPresetProviderProfile(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithPresetID("claude-local"))
+	preset.ProviderProfile = "anthropic"
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if !strings.Contains(string(body), `"max_tokens":1`) || !strings.Contains(string(body), `"type":"text"`) {
+			t.Fatalf("body = %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg-test","type":"message","role":"assistant","content":[{"type":"text","text":"pong"}],"usage":{"input_tokens":3,"output_tokens":1}}`))
+	}))
+	inst := fixtures.MakeInstance(fixtures.WithInstancePreset(preset.ID))
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: mocks.NewNodeAgent(fixtures.MakeNode())}})
+	req, err := translate.ParseAnthropicMessages([]byte(`{"model":"claude-local","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`))
+	if err != nil {
+		t.Fatalf("ParseAnthropicMessages: %v", err)
+	}
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Header.Get(HeaderBackend) != "anthropic" || !strings.Contains(string(resp.Body), "pong") {
+		t.Fatalf("headers=%+v body=%s", resp.Header, resp.Body)
+	}
+}
+
+func TestRouterRejectsUnknownPresetProviderProfile(t *testing.T) {
+	preset := fixtures.MakePreset()
+	preset.ProviderProfile = "missing"
+	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	_, err = router.Route(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), `unknown provider profile "missing"`) {
+		t.Fatalf("Route err = %v", err)
+	}
+}
+
 func TestRouterResolveWarmInstanceUsesOwnerNode(t *testing.T) {
 	preset := fixtures.MakePreset(fixtures.WithPresetID("spark-preset"))
 	preset.Backend = domain.BackendVLLM

@@ -684,6 +684,9 @@ func (r *Router) profileFor(preset domain.Preset) (profiles.Profile, error) {
 	if registry.IsZero() {
 		registry = profiles.DefaultRegistry()
 	}
+	if preset.ProviderProfile != "" {
+		return registry.ByID(preset.ProviderProfile)
+	}
 	return registry.ForBackend(preset.Backend)
 }
 
