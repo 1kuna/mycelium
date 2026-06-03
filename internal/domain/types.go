@@ -43,19 +43,20 @@ type SpeedClass struct {
 }
 
 type Preset struct {
-	ID             string       `json:"id"`
-	ModelRef       string       `json:"model_ref"`
-	Aliases        []string     `json:"aliases,omitempty"`
-	Backend        Backend      `json:"backend"`
-	ContextLength  int          `json:"context_length"`
-	Quant          string       `json:"quant"`
-	Capabilities   []Capability `json:"capabilities"`
-	LaunchProfile  string       `json:"launch_profile"`
-	LaunchArgs     []string     `json:"launch_args,omitempty"`
-	ArtifactSizeMB int          `json:"artifact_size_mb,omitempty"`
-	EstWeightsMB   int          `json:"est_weights_mb"`
-	KVPerTokenMB   float64      `json:"kv_per_token_mb"`
-	NodeID         string       `json:"node_id,omitempty"`
+	ID              string       `json:"id"`
+	ModelRef        string       `json:"model_ref"`
+	Aliases         []string     `json:"aliases,omitempty"`
+	Backend         Backend      `json:"backend"`
+	ContextLength   int          `json:"context_length"`
+	Quant           string       `json:"quant"`
+	Capabilities    []Capability `json:"capabilities"`
+	ProviderProfile string       `json:"provider_profile,omitempty"`
+	LaunchProfile   string       `json:"launch_profile"`
+	LaunchArgs      []string     `json:"launch_args,omitempty"`
+	ArtifactSizeMB  int          `json:"artifact_size_mb,omitempty"`
+	EstWeightsMB    int          `json:"est_weights_mb"`
+	KVPerTokenMB    float64      `json:"kv_per_token_mb"`
+	NodeID          string       `json:"node_id,omitempty"`
 }
 
 type ModelMetadata struct {
