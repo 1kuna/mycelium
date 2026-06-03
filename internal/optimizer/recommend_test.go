@@ -192,6 +192,57 @@ func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
 	}
 }
 
+func TestRecommendationServiceUsesProjectDefaultModelPreset(t *testing.T) {
+	store, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	project := domain.Project{ID: "project-a", DefaultModel: "default-alias", ContextCap: 16000, AutoApply: true}
+	small := fixtures.MakePreset(fixtures.WithPresetID("small"), fixtures.WithModelRef("small-model"), fixtures.WithContextLength(6000))
+	other := fixtures.MakePreset(fixtures.WithPresetID("aaa-other"), fixtures.WithModelRef("other-model"), fixtures.WithContextLength(16000))
+	defaultPreset := fixtures.MakePreset(fixtures.WithPresetID("zzz-default"), fixtures.WithModelRef("default-model"), fixtures.WithAliases("default-alias"), fixtures.WithContextLength(16000))
+	for _, preset := range []domain.Preset{small, other, defaultPreset} {
+		if err := store.SavePreset(context.Background(), preset); err != nil {
+			t.Fatalf("SavePreset %s: %v", preset.ID, err)
+		}
+	}
+	if err := store.SaveNode(context.Background(), fixtures.MakeNode(fixtures.WithNodeID("node-a"))); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	for _, metric := range []domain.RunMetric{
+		{JobID: "job-a", Project: project.ID, ContextUsed: 3500, At: now},
+		{JobID: "job-b", Project: project.ID, ContextUsed: 4000, At: now.Add(time.Second)},
+	} {
+		if err := store.Record(context.Background(), metric); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	records, err := (RecommendationService{
+		Store:     store,
+		Clock:     mocks.NewFakeClock(now),
+		Estimator: &mocks.ResourceEstimator{Claim: fixtures.MakeClaim(1, 1)},
+	}).EvaluateProject(context.Background(), project)
+	if err != nil {
+		t.Fatalf("EvaluateProject: %v", err)
+	}
+	if len(records) != 1 || records[0].PresetID != defaultPreset.ID || !records[0].Applied {
+		t.Fatalf("records = %+v", records)
+	}
+	gotDefault, err := store.Preset(context.Background(), defaultPreset.ID)
+	if err != nil {
+		t.Fatalf("Preset default: %v", err)
+	}
+	gotOther, err := store.Preset(context.Background(), other.ID)
+	if err != nil {
+		t.Fatalf("Preset other: %v", err)
+	}
+	if gotDefault.ContextLength != 6000 || gotOther.ContextLength != 16000 {
+		t.Fatalf("default context=%d other context=%d", gotDefault.ContextLength, gotOther.ContextLength)
+	}
+}
+
 func TestRecommendationServiceRejectsUnfitContextRecommendation(t *testing.T) {
 	store, err := storesqlite.Open(":memory:")
 	if err != nil {
