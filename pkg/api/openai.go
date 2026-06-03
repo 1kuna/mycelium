@@ -197,7 +197,7 @@ func (m *openAIResponseMessage) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	for _, field := range []string{"annotations", "audio", "reasoning", "refusal"} {
+	for _, field := range []string{"annotations", "audio", "reasoning", "reasoning_content", "refusal"} {
 		delete(fields, field)
 	}
 	trimmed, err := json.Marshal(fields)

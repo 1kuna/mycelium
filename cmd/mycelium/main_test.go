@@ -987,6 +987,12 @@ func TestPeerControlHTTPClientBypassesAmbientProxy(t *testing.T) {
 	if transport.Proxy != nil {
 		t.Fatal("peer control RPC must not use ambient HTTP proxy settings")
 	}
+	if !transport.DisableKeepAlives {
+		t.Fatal("peer control RPC must not retain idle keep-alive sockets")
+	}
+	if transport.ResponseHeaderTimeout <= 0 {
+		t.Fatal("peer control RPC must bound response header waits")
+	}
 }
 
 func TestPeerBackgroundHelpersUseFakeClockAndPersistEffects(t *testing.T) {
