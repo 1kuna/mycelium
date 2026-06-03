@@ -22,26 +22,46 @@ func NewAllocator(opts ...Option) *Allocator {
 }
 
 func (a *Allocator) Fits(node domain.Node, acc []int, existing []domain.ModelInstance, want domain.Claim) bool {
-	total, used, ok := selectedCapacity(node, acc)
-	if !ok || total <= 0 || node.MaxUtil <= 0 || node.MaxUtil > 1 {
+	units, ok := selectedAccelerators(node, acc)
+	if !ok || node.MaxUtil <= 0 || node.MaxUtil > 1 {
 		return false
 	}
 	if want.WeightsMB < 0 || want.KVReservedMB < 0 {
 		return false
 	}
 
-	claimUsed := claimTotal(a.headroomByNode[node.ID])
+	usedByAccelerator := map[int]int{}
+	limitByAccelerator := map[int]int{}
+	for _, unit := range units {
+		if unit.VRAMTotalMB <= 0 {
+			return false
+		}
+		usable := int(float64(unit.VRAMTotalMB) * node.MaxUtil)
+		if node.OOMSeverity == domain.OOMCatastrophic {
+			usable -= int(float64(unit.VRAMTotalMB) * catastrophicMargin)
+		}
+		usedByAccelerator[unit.Index] = unit.VRAMUsedMB
+		limitByAccelerator[unit.Index] = usable
+	}
+	if !addClaimShares(usedByAccelerator, acc, a.headroomByNode[node.ID]) {
+		return false
+	}
 	for _, inst := range existing {
 		if inst.NodeID == node.ID && overlaps(inst.AcceleratorSet, acc) {
-			claimUsed += claimTotal(inst.Claim)
+			if !addClaimShares(usedByAccelerator, inst.AcceleratorSet, inst.Claim) {
+				return false
+			}
 		}
 	}
-
-	usable := int(float64(total) * node.MaxUtil)
-	if node.OOMSeverity == domain.OOMCatastrophic {
-		usable -= int(float64(total) * catastrophicMargin)
+	if !addClaimShares(usedByAccelerator, acc, want) {
+		return false
 	}
-	return used+claimUsed+claimTotal(want) <= usable
+	for index, used := range usedByAccelerator {
+		if used > limitByAccelerator[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *Allocator) CanStackLoad(node domain.Node, acc []int, existing []domain.ModelInstance) bool {
@@ -60,4 +80,17 @@ var _ ports.Allocator = (*Allocator)(nil)
 
 func claimTotal(c domain.Claim) int {
 	return c.WeightsMB + c.KVReservedMB
+}
+
+func addClaimShares(used map[int]int, acc []int, claim domain.Claim) bool {
+	shares, ok := splitClaim(claimTotal(claim), acc)
+	if !ok {
+		return false
+	}
+	for index, share := range shares {
+		if _, selected := used[index]; selected {
+			used[index] += share
+		}
+	}
+	return true
 }
