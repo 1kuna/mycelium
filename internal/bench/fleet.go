@@ -1156,7 +1156,7 @@ func livePreflightMismatchFailures(results []FleetJobResult) []FleetFailure {
 		if result.Error != "" || result.ExpectedFailure || result.PreflightDecision == "" {
 			continue
 		}
-		if !result.LiveMatchesPreflight {
+		if !livePlacementMatchesPreflight(result) {
 			failures = append(failures, FleetFailure{
 				JobID:   result.JobID,
 				ModelID: result.ModelID,
@@ -1212,8 +1212,22 @@ func attachPreflightResult(result FleetJobResult, plan FleetSimulationDecision) 
 	if result.Error != "" || result.ExpectedFailure {
 		return result
 	}
-	result.LiveMatchesPreflight = result.Decision == result.PreflightDecision && result.NodeID == result.PreflightNodeID
+	result.LiveMatchesPreflight = livePlacementMatchesPreflight(result)
 	return result
+}
+
+func livePlacementMatchesPreflight(result FleetJobResult) bool {
+	if result.NodeID == "" || result.PreflightNodeID == "" || result.NodeID != result.PreflightNodeID {
+		return false
+	}
+	if result.Decision == result.PreflightDecision {
+		return true
+	}
+	// Conservative live benchmarks reset benchmark-owned instances before the
+	// run. A synthetic preflight victim still proves the scheduler's preemption
+	// path, but a clean real fleet should load the same preset without needing
+	// to evict anything.
+	return result.Decision == string(domain.ActionLoadedNew) && result.PreflightDecision == string(domain.ActionHardPreempted)
 }
 
 func resourceSafetyFailures(cfg FleetBenchmarkConfig, resources []FleetResourceMark) []FleetFailure {
