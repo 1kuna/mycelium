@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,7 +64,8 @@ func TestRemotePeerCleanHomeJoinSmoke(t *testing.T) {
 	if !strings.Contains(join, "mycjoin://") {
 		t.Fatalf("invite output = %q", join)
 	}
-	waitForSmokeHTTP(t, ctx, strings.TrimRight(url, "/")+"/peer/health", "")
+	joinToken := inviteJoinToken(t, join)
+	waitForSmokeHTTP(t, ctx, strings.TrimRight(url, "/")+"/peer/health", joinToken)
 }
 
 func TestFleetLocalitySmoke(t *testing.T) {
@@ -155,4 +157,18 @@ func waitForSmokeHTTP(t *testing.T, ctx context.Context, url, joinToken string) 
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s: %v", url, lastErr)
+}
+
+func inviteJoinToken(t *testing.T, output string) string {
+	t.Helper()
+	raw := strings.TrimSpace(output)
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse invite %q: %v", raw, err)
+	}
+	token := parsed.Query().Get("token")
+	if token == "" {
+		t.Fatalf("invite output missing token: %q", raw)
+	}
+	return token
 }
