@@ -68,7 +68,6 @@ func TestRemotePeerCleanHomeJoinSmoke(t *testing.T) {
 		t.Fatalf("invite output = %q", join)
 	}
 	joinToken := inviteJoinToken(t, join)
-	joinRPC := inviteRPCToken(t, join)
 	waitForSmokeHTTP(t, ctx, strings.TrimRight(seedURL, "/")+"/peer/health", joinToken)
 
 	mycelium := buildSmokeBinaryFor(t, ctx, "darwin", "arm64")
@@ -80,14 +79,14 @@ func TestRemotePeerCleanHomeJoinSmoke(t *testing.T) {
 	defer runOperabilitySSH(t, context.Background(), sshHost, "if [ -f "+shellQuote(workdir+"/peer.pid")+" ]; then kill -INT $(cat "+shellQuote(workdir+"/peer.pid")+") 2>/dev/null || true; fi; rm -rf "+shellQuote(workdir))
 	scpOperabilityRemote(t, ctx, sshHost, mycelium, remoteBin)
 	runOperabilitySSH(t, ctx, sshHost, "chmod +x "+shellQuote(remoteBin))
-	runOperabilitySSH(t, ctx, sshHost, "HOME="+shellQuote(remoteHome)+" "+shellQuote(remoteBin)+" bootstrap --join "+shellQuote(strings.TrimSpace(join))+" --compute auto --config "+shellQuote(remoteConfig)+" --apply")
+	runOperabilitySSH(t, ctx, sshHost, "HOME="+shellQuote(remoteHome)+" "+shellQuote(remoteBin)+" bootstrap --join "+shellQuote(strings.TrimSpace(join))+" --rpc-token "+shellQuote(rpcToken)+" --compute auto --config "+shellQuote(remoteConfig)+" --apply")
 	inspect := runOperabilitySSHOutput(t, ctx, sshHost, "python3 - <<'PY'\nimport json, os, stat\np="+pythonQuote(remoteConfig)+"\nwith open(p) as f: c=json.load(f)\nmode=oct(stat.S_IMODE(os.stat(p).st_mode))\nprint(c.get('listen',''))\nprint(c.get('join_token',''))\nprint(c.get('rpc_token',''))\nprint(' '.join(c.get('seed_peers',[])))\nprint(str(c.get('compute')).lower())\nprint(mode)\nPY")
 	lines := strings.Split(strings.TrimSpace(inspect), "\n")
 	if len(lines) != 6 {
 		t.Fatalf("bootstrap inspection = %q", inspect)
 	}
 	listen, gotJoin, gotRPC, seeds, computeRaw, mode := lines[0], lines[1], lines[2], lines[3], lines[4], lines[5]
-	if listen == "" || gotJoin != joinToken || gotRPC != joinRPC || !strings.Contains(seeds, seedHost(t, seedURL)) || mode != "0o600" {
+	if listen == "" || gotJoin != joinToken || gotRPC != rpcToken || !strings.Contains(seeds, seedHost(t, seedURL)) || mode != "0o600" {
 		t.Fatalf("bootstrap config listen=%q join=%q rpc=%q seeds=%q mode=%q", listen, gotJoin, gotRPC, seeds, mode)
 	}
 	if computeRaw != "true" && computeRaw != "false" {
@@ -108,7 +107,7 @@ func TestRemotePeerCleanHomeJoinSmoke(t *testing.T) {
 	}
 	defer proc.stopRemoteSSH(t)
 	waitForSmokeHTTP(t, ctx, "http://"+listen+"/peer/health", joinToken)
-	waitForSmokeRPCDiagnostics(t, ctx, "http://"+listen+"/peer/diagnostics", joinRPC)
+	waitForSmokeRPCDiagnostics(t, ctx, "http://"+listen+"/peer/diagnostics", rpcToken)
 }
 
 func TestFleetLocalitySmoke(t *testing.T) {
@@ -215,19 +214,6 @@ func inviteJoinToken(t *testing.T, output string) string {
 	token := parsed.Query().Get("token")
 	if token == "" {
 		t.Fatalf("invite output missing token: %q", raw)
-	}
-	return token
-}
-
-func inviteRPCToken(t *testing.T, output string) string {
-	t.Helper()
-	parsed, err := url.Parse(strings.TrimSpace(output))
-	if err != nil {
-		t.Fatalf("parse invite %q: %v", output, err)
-	}
-	token := parsed.Query().Get("rpc_token")
-	if token == "" {
-		t.Fatalf("invite output missing rpc_token: %q", output)
 	}
 	return token
 }

@@ -3,11 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"encoding/xml"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -422,11 +420,11 @@ func servicePeerDiagnostics(ctx context.Context, configPath string) (string, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readLimitedPeerRPCBody(resp.Body)
 		return "", fmt.Errorf("peer diagnostics returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var report peerDiagnosticsReport
-	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
+	if err := decodePeerRPCResponse(resp.Body, &report); err != nil {
 		return "", err
 	}
 	ready := 0

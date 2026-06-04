@@ -2,13 +2,58 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
 	"mycelium/internal/domain"
+	projectvalidation "mycelium/internal/project"
 )
 
 func validatePeerConfig(cfg PeerConfig) error {
+	listen := cfg.Listen
+	if listen == "" {
+		listen = "127.0.0.1:51846"
+	}
+	if cfg.JoinToken != "" && cfg.RPCToken == "" {
+		return fmt.Errorf("rpc_token is required when join_token is configured")
+	}
+	if peerListenRequiresAuth(listen) && cfg.RPCToken == "" {
+		return fmt.Errorf("rpc_token is required when listen is not loopback")
+	}
+	if peerListenRequiresAuth(listen) && cfg.GatewayToken == "" {
+		return fmt.Errorf("gateway_token is required when listen is not loopback")
+	}
+	if cfg.Overlay || len(cfg.OverlayListenAddrs) > 0 || len(cfg.OverlayBootstrap) > 0 {
+		return fmt.Errorf("overlay membership is disabled for the MVP; use LAN peer discovery")
+	}
+	if cfg.PrivateStorageKey != "" {
+		return fmt.Errorf("private_storage_key is disabled until private job recovery is implemented")
+	}
+	if len(cfg.SubmitterPolicy) > 0 {
+		return fmt.Errorf("submitter_policy is disabled until authenticated submitter policy is implemented")
+	}
+	if cfg.QueueDrainMS <= 0 {
+		return fmt.Errorf("queue_drain_ms must be positive")
+	}
+	if cfg.QueueDrainLimit <= 0 {
+		return fmt.Errorf("queue_drain_limit must be positive")
+	}
+	if cfg.OptimizerEvalMS <= 0 {
+		return fmt.Errorf("optimizer_eval_ms must be positive")
+	}
+	if cfg.RegistrySyncMS <= 0 {
+		return fmt.Errorf("registry_sync_ms must be positive")
+	}
+	if cfg.DiscoveryScanMS <= 0 {
+		return fmt.Errorf("discovery_scan_ms must be positive")
+	}
+	if cfg.DiscoveryAdvertiseMS <= 0 {
+		return fmt.Errorf("discovery_advertise_ms must be positive")
+	}
+	if err := projectvalidation.ValidateSet(cfg.Projects, cfg.DefaultProject); err != nil {
+		return err
+	}
 	compute := defaultedComputeConfig(cfg.ComputeConfig)
 	if compute.MaxUtil <= 0 || compute.MaxUtil > 1 {
 		return fmt.Errorf("compute_config.max_util must be in (0,1]")
@@ -19,21 +64,39 @@ func validatePeerConfig(cfg PeerConfig) error {
 	if compute.LoadTimeoutMS <= 0 {
 		return fmt.Errorf("compute_config.load_timeout_ms must be positive")
 	}
+	if compute.VRAMMB < 0 {
+		return fmt.Errorf("compute_config.vram_mb must be non-negative")
+	}
+	if compute.StopGraceMS < 0 {
+		return fmt.Errorf("compute_config.stop_grace_ms must be non-negative")
+	}
 	switch compute.Backend {
 	case "", domain.BackendLlamaCpp, domain.BackendMLX, domain.BackendVLLM, domain.BackendCustom:
 	default:
 		return fmt.Errorf("unknown compute backend %q", compute.Backend)
 	}
 	if compute.Backend == domain.BackendVLLM {
-		value, ok, err := vllmGPUUtilization(compute.CustomArgs)
+		_, _, err := vllmGPUUtilization(compute.CustomArgs)
 		if err != nil {
 			return err
 		}
-		if ok && value >= unsafeVLLMGPUUtilization {
-			return fmt.Errorf("vllm --gpu-memory-utilization %.2f is unsafe; use <= %.2f for catastrophic hosts", value, sparkSafeVLLMGPUUtil)
-		}
 	}
 	return nil
+}
+
+func peerListenRequiresAuth(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return true
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return true
+	}
+	return !ip.IsLoopback()
 }
 
 func hasVLLMGPUUtilization(args []string) bool {

@@ -21,6 +21,7 @@ type TokenManager struct {
 	current string
 	active  map[string]struct{}
 	revoked map[string]struct{}
+	secrets map[string]string
 	store   TokenStore
 }
 
@@ -33,6 +34,7 @@ func NewTokenManager(initial string) (*TokenManager, error) {
 		current: hash,
 		active:  map[string]struct{}{hash: {}},
 		revoked: map[string]struct{}{},
+		secrets: map[string]string{hash: initial},
 	}, nil
 }
 
@@ -50,6 +52,7 @@ func NewPersistentTokenManager(ctx context.Context, initial string, store TokenS
 	manager := &TokenManager{
 		active:  map[string]struct{}{},
 		revoked: map[string]struct{}{},
+		secrets: map[string]string{},
 		store:   store,
 	}
 	for _, record := range records {
@@ -66,6 +69,7 @@ func NewPersistentTokenManager(ctx context.Context, initial string, store TokenS
 		}
 	}
 	hash := tokenHash(initial)
+	manager.secrets[hash] = initial
 	if _, revoked := manager.revoked[hash]; !revoked {
 		if _, active := manager.active[hash]; !active {
 			manager.active[hash] = struct{}{}
@@ -81,6 +85,30 @@ func NewPersistentTokenManager(ctx context.Context, initial string, store TokenS
 		return nil, fmt.Errorf("no active join token is available")
 	}
 	return manager, nil
+}
+
+func (m *TokenManager) CurrentSecret() (string, string, error) {
+	hash, err := m.CurrentHash()
+	if err != nil {
+		return "", "", err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	secret := m.secrets[hash]
+	if secret == "" {
+		return "", "", fmt.Errorf("current join token secret is unavailable")
+	}
+	return hash, secret, nil
+}
+
+func (m *TokenManager) SecretForHash(hash string) (string, bool, error) {
+	if err := m.ValidateHash(hash); err != nil {
+		return "", false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	secret := m.secrets[hash]
+	return secret, secret != "", nil
 }
 
 func (m *TokenManager) Validate(token string) error {
@@ -133,6 +161,7 @@ func (m *TokenManager) Rotate(next string) error {
 	m.current = hash
 	m.active[hash] = struct{}{}
 	delete(m.revoked, hash)
+	m.secrets[hash] = next
 	if m.store != nil {
 		if oldCurrent != "" && oldCurrent != hash {
 			if err := m.save(context.Background(), oldCurrent, true, false); err != nil {
@@ -155,6 +184,7 @@ func (m *TokenManager) Revoke(token string) error {
 	defer m.mu.Unlock()
 	delete(m.active, hash)
 	m.revoked[hash] = struct{}{}
+	delete(m.secrets, hash)
 	if m.current == hash {
 		m.current = ""
 	}

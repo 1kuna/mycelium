@@ -111,7 +111,10 @@ func TestInstallWithProgressReportsDurableState(t *testing.T) {
 func TestInstallResumesStagedJobWithoutRegisteringEarly(t *testing.T) {
 	store := t.TempDir()
 	req := InstallRequest{Source: filepath.Join(t.TempDir(), "missing.gguf"), ID: "tiny"}
-	jobID := installJobID(req)
+	jobID, err := installJobID(req)
+	if err != nil {
+		t.Fatalf("installJobID: %v", err)
+	}
 	if err := ensureStore(store); err != nil {
 		t.Fatalf("ensureStore: %v", err)
 	}
@@ -242,8 +245,22 @@ func TestInstallValidationErrors(t *testing.T) {
 		t.Fatalf("materialize err = %v", err)
 	}
 	source := writeModel(t, "!!!", "model")
-	if _, err := NewInstaller(t.TempDir()).Install(context.Background(), InstallRequest{Source: source}); err == nil || !strings.Contains(err.Error(), "derive preset id") {
+	if _, err := NewInstaller(t.TempDir()).Install(context.Background(), InstallRequest{Source: source}); err == nil || !strings.Contains(err.Error(), "derive") {
 		t.Fatalf("derive err = %v", err)
+	}
+	source = writeModel(t, "tiny.gguf", "model")
+	if _, err := NewInstaller(t.TempDir()).Install(context.Background(), InstallRequest{Source: source, ID: "../escape"}); err == nil || !strings.Contains(err.Error(), "preset id") {
+		t.Fatalf("unsafe id err = %v", err)
+	}
+	store := t.TempDir()
+	if err := ensureStore(store); err != nil {
+		t.Fatalf("ensureStore: %v", err)
+	}
+	if err := writeInstallState(store, InstallState{JobID: "install-tiny", Source: source, Status: "copy", DraftName: "../tiny.gguf", DraftImporter: "local", DraftSize: 4}); err != nil {
+		t.Fatalf("write unsafe draft state: %v", err)
+	}
+	if _, err := NewInstaller(store).Install(context.Background(), InstallRequest{Source: source, ID: "tiny"}); err == nil || !strings.Contains(err.Error(), "draft name") {
+		t.Fatalf("unsafe draft err = %v", err)
 	}
 }
 
@@ -308,6 +325,12 @@ func TestReadPresetAndProvenanceRejectBadJSON(t *testing.T) {
 	}
 	if _, err := ReadProvenance(store, "bad"); err == nil {
 		t.Fatal("bad provenance json accepted")
+	}
+	if _, err := ReadPreset(store, "../bad"); err == nil {
+		t.Fatal("unsafe preset id accepted")
+	}
+	if _, err := ReadProvenance(store, "../bad"); err == nil {
+		t.Fatal("unsafe provenance id accepted")
 	}
 }
 

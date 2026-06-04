@@ -23,6 +23,7 @@ func runBootstrap(ctx context.Context, args []string) error {
 func runBootstrapWithServiceManager(ctx context.Context, args []string, manager serviceManager, goos string) error {
 	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
 	joinRaw := fs.String("join", "", "join URI")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
 	compute := fs.String("compute", "auto", "compute mode: auto, on, off")
 	configPath := fs.String("config", "", "peer config JSON path")
 	apply := fs.Bool("apply", false, "write config and state")
@@ -42,8 +43,8 @@ func runBootstrapWithServiceManager(ctx context.Context, args []string, manager 
 	if err != nil {
 		return err
 	}
-	if join.RPCToken == "" {
-		return fmt.Errorf("bootstrap join URI must include rpc_token")
+	if *rpcToken == "" {
+		return fmt.Errorf("--rpc-token is required for bootstrap")
 	}
 	path := *configPath
 	if path == "" {
@@ -64,7 +65,7 @@ func runBootstrapWithServiceManager(ctx context.Context, args []string, manager 
 		return err
 	}
 	cfg.JoinToken = join.Token
-	cfg.RPCToken = join.RPCToken
+	cfg.RPCToken = *rpcToken
 	cfg.SeedPeers = appendSeedPeer(cfg.SeedPeers, join.Address)
 	if err := adoptBootstrapEngine(ctx, &cfg, *compute); err != nil {
 		return err

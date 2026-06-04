@@ -20,9 +20,12 @@ import (
 	"mycelium/internal/locality"
 	"mycelium/internal/optimizer"
 	"mycelium/internal/ports"
+	projectvalidation "mycelium/internal/project"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/pkg/api"
 )
+
+const maxControlHTTPBodyBytes int64 = 16 << 20
 
 func Run(ctx context.Context, args []string) error {
 	return RunWithClient(ctx, args, http.DefaultClient)
@@ -81,8 +84,12 @@ func runAddModel(ctx context.Context, args []string) error {
 		return err
 	}
 	defer control.Close()
+	jobID, err := catalog.InstallJobID(req)
+	if err != nil {
+		return err
+	}
 	job := domain.Job{
-		ID:       catalog.InstallJobID(req),
+		ID:       jobID,
 		TaskType: "catalog_install",
 		Model:    req.Source,
 		PresetID: req.ID,
@@ -375,7 +382,7 @@ func refreshLocalityPeerSnapshots(ctx context.Context, store *storesqlite.Store,
 		if err != nil {
 			return err
 		}
-		data, readErr := io.ReadAll(resp.Body)
+		data, readErr := readControlHTTPBody(resp.Body, "snapshot response body")
 		_ = resp.Body.Close()
 		if readErr != nil {
 			return readErr
@@ -432,7 +439,7 @@ func (c catalogStageHTTPClient) StageModel(ctx context.Context, peer domain.Peer
 		return domain.ModelLocality{}, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := readControlHTTPBody(resp.Body, "catalog stage response body")
 	if err != nil {
 		return domain.ModelLocality{}, err
 	}
@@ -476,7 +483,7 @@ func (c catalogStageHTTPClient) EvictModel(ctx context.Context, peer domain.Peer
 		return domain.ModelLocality{}, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := readControlHTTPBody(resp.Body, "catalog evict response body")
 	if err != nil {
 		return domain.ModelLocality{}, err
 	}
@@ -591,17 +598,21 @@ func runNodeTokens(ctx context.Context, args []string, client *http.Client) erro
 
 func nodeAdminFromArgs(args []string, client *http.Client) (nodeAdminClient, error) {
 	fs := flag.NewFlagSet("nodes admin", flag.ContinueOnError)
-	url := fs.String("url", "http://127.0.0.1:51846", "peer URL")
+	url := fs.String("url", "", "peer URL")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
 	if err := fs.Parse(args); err != nil {
 		return nodeAdminClient{}, err
 	}
-	return nodeAdminClient{BaseURL: *url, AuthToken: *rpcToken, Client: client}, nil
+	defaults, err := loadNodeAdminDefaults()
+	if err != nil {
+		return nodeAdminClient{}, err
+	}
+	return nodeAdminClient{BaseURL: firstNonEmpty(*url, defaults.BaseURL, "http://127.0.0.1:51846"), AuthToken: firstNonEmpty(*rpcToken, defaults.RPCToken), Client: client}, nil
 }
 
 func nodeAdminWithTokenFromArgs(args []string, client *http.Client, requireToken bool) (nodeAdminClient, string, error) {
 	fs := flag.NewFlagSet("nodes tokens", flag.ContinueOnError)
-	url := fs.String("url", "http://127.0.0.1:51846", "peer URL")
+	url := fs.String("url", "", "peer URL")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
 	token := fs.String("token", "", "join token")
 	if err := fs.Parse(args); err != nil {
@@ -610,7 +621,54 @@ func nodeAdminWithTokenFromArgs(args []string, client *http.Client, requireToken
 	if requireToken && *token == "" {
 		return nodeAdminClient{}, "", fmt.Errorf("--token is required")
 	}
-	return nodeAdminClient{BaseURL: *url, AuthToken: *rpcToken, Client: client}, *token, nil
+	defaults, err := loadNodeAdminDefaults()
+	if err != nil {
+		return nodeAdminClient{}, "", err
+	}
+	return nodeAdminClient{BaseURL: firstNonEmpty(*url, defaults.BaseURL, "http://127.0.0.1:51846"), AuthToken: firstNonEmpty(*rpcToken, defaults.RPCToken), Client: client}, *token, nil
+}
+
+type nodeAdminDefaults struct {
+	BaseURL  string
+	RPCToken string
+}
+
+func loadNodeAdminDefaults() (nodeAdminDefaults, error) {
+	path := filepath.Join(defaultMyceliumHome(), "peer.json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nodeAdminDefaults{}, nil
+	}
+	if err != nil {
+		return nodeAdminDefaults{}, err
+	}
+	var cfg struct {
+		Listen   string `json:"listen"`
+		RPCToken string `json:"rpc_token"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nodeAdminDefaults{}, fmt.Errorf("parse peer config %s: %w", path, err)
+	}
+	return nodeAdminDefaults{BaseURL: adminBaseURL(cfg.Listen), RPCToken: cfg.RPCToken}, nil
+}
+
+func adminBaseURL(listen string) string {
+	if listen == "" {
+		return ""
+	}
+	if strings.HasPrefix(listen, "http://") || strings.HasPrefix(listen, "https://") {
+		return listen
+	}
+	return "http://" + listen
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type nodeAdminClient struct {
@@ -687,7 +745,7 @@ func (c nodeAdminClient) do(ctx context.Context, method, path string, in, out an
 		return err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := readControlHTTPBody(resp.Body, "peer admin response body")
 	if err != nil {
 		return err
 	}
@@ -736,6 +794,9 @@ func runProjects(ctx context.Context, args []string) error {
 		LatencyTargetMS:     *latencyTarget,
 		Preemption:          domain.Preemption(*preemption),
 		AutoApply:           *autoApply,
+	}
+	if err := projectvalidation.Validate(project); err != nil {
+		return err
 	}
 	if err := store.SaveProject(ctx, project); err != nil {
 		return err
@@ -999,7 +1060,7 @@ func (c benchmarkGatewayClient) Complete(ctx context.Context, model, prompt stri
 		return bench.Completion{}, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := readControlHTTPBody(resp.Body, "gateway benchmark response body")
 	if err != nil {
 		return bench.Completion{}, err
 	}
@@ -1017,6 +1078,18 @@ func (c benchmarkGatewayClient) Complete(ctx context.Context, model, prompt stri
 		Text:          chat.Choices[0].Message.Content,
 		ContextTokens: chat.Usage.TotalTokens,
 	}, nil
+}
+
+func readControlHTTPBody(r io.Reader, label string) ([]byte, error) {
+	var buf bytes.Buffer
+	n, err := buf.ReadFrom(io.LimitReader(r, maxControlHTTPBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if n > maxControlHTTPBodyBytes {
+		return nil, fmt.Errorf("%s exceeds %d bytes", label, maxControlHTTPBodyBytes)
+	}
+	return buf.Bytes(), nil
 }
 
 func installStageStatus(_ string) domain.JobStatus {

@@ -2,10 +2,8 @@ package membership
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"mycelium/internal/domain"
 	"mycelium/test/fixtures"
@@ -96,157 +94,6 @@ func TestMemoryOverlayRejectsBadInputAndCanceledContext(t *testing.T) {
 	}
 }
 
-func TestLibp2pOverlayDiscoversAndTunnels(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	targetAddr := "127.0.0.1:51002"
-
-	peerA, err := NewLibp2pOverlayBackend(ctx, Libp2pOverlayConfig{ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}})
-	if err != nil {
-		t.Fatalf("New peerA: %v", err)
-	}
-	defer peerA.CloseHost()
-	peerB, err := NewLibp2pOverlayBackend(ctx, Libp2pOverlayConfig{
-		ListenAddrs:    []string{"/ip4/127.0.0.1/tcp/0"},
-		BootstrapPeers: []string{peerA.Addrs()[0]},
-		LocalTarget:    targetAddr,
-	})
-	if err != nil {
-		t.Fatalf("New peerB: %v", err)
-	}
-	defer peerB.CloseHost()
-
-	watchA, err := peerA.WatchPeers(ctx)
-	if err != nil {
-		t.Fatalf("Watch A: %v", err)
-	}
-	if err := peerA.Advertise(ctx, fixtures.MakePeer(fixtures.WithPeerID("peer-a"), fixtures.WithPeerAddress("127.0.0.1:51001"))); err != nil {
-		t.Fatalf("Advertise A: %v", err)
-	}
-	if err := peerB.Advertise(ctx, fixtures.MakePeer(fixtures.WithPeerID("peer-b"), fixtures.WithPeerAddress(targetAddr))); err != nil {
-		t.Fatalf("Advertise B: %v", err)
-	}
-	if !watchSawPeer(ctx, watchA, "peer-b") {
-		t.Fatal("peer A did not watch peer B")
-	}
-	peersA, err := peerA.Peers(ctx)
-	if err != nil {
-		t.Fatalf("Peers A: %v", err)
-	}
-	peersB, err := peerB.Peers(ctx)
-	if err != nil {
-		t.Fatalf("Peers B: %v", err)
-	}
-	if !hasPeer(peersA, "peer-b") || !hasPeer(peersB, "peer-a") {
-		t.Fatalf("peersA=%+v peersB=%+v", peersA, peersB)
-	}
-
-	loopback, err := peerA.Open(ctx, domain.Node{ID: "peer-b", Address: targetAddr})
-	if err != nil {
-		t.Fatalf("Open tunnel: %v", err)
-	}
-	defer peerA.Close(ctx, "peer-b")
-	if again, err := peerA.Open(ctx, domain.Node{ID: "peer-b", Address: "ignored"}); err != nil || again != loopback {
-		t.Fatalf("reused tunnel = %s %v", again, err)
-	}
-}
-
-func TestLibp2pOverlayRejectsTokenMismatch(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	manager, err := NewTokenManager("token-a")
-	if err != nil {
-		t.Fatalf("NewTokenManager: %v", err)
-	}
-	peerA, err := NewLibp2pOverlayBackend(ctx, Libp2pOverlayConfig{
-		ListenAddrs:  []string{"/ip4/127.0.0.1/tcp/0"},
-		TokenManager: manager,
-	})
-	if err != nil {
-		t.Fatalf("New peerA: %v", err)
-	}
-	defer peerA.CloseHost()
-	peerB, err := NewLibp2pOverlayBackend(ctx, Libp2pOverlayConfig{
-		ListenAddrs:    []string{"/ip4/127.0.0.1/tcp/0"},
-		BootstrapPeers: []string{peerA.Addrs()[0]},
-		Token:          "token-b",
-	})
-	if err != nil {
-		t.Fatalf("New peerB: %v", err)
-	}
-	defer peerB.CloseHost()
-
-	if err := peerA.Advertise(ctx, fixtures.MakePeer(fixtures.WithPeerID("peer-a"), fixtures.WithPeerAddress("127.0.0.1:51001"))); err != nil {
-		t.Fatalf("Advertise A: %v", err)
-	}
-	if err := peerB.Advertise(ctx, fixtures.MakePeer(fixtures.WithPeerID("peer-b"), fixtures.WithPeerAddress("127.0.0.1:51002"))); err == nil {
-		t.Fatal("mismatched token advertise succeeded")
-	}
-	peers, err := peerA.Peers(ctx)
-	if err != nil {
-		t.Fatalf("Peers A: %v", err)
-	}
-	if hasPeer(peers, "peer-b") {
-		t.Fatalf("peer with mismatched token was accepted: %+v", peers)
-	}
-}
-
-func TestLibp2pOverlayErrors(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := NewLibp2pOverlayBackend(ctx, Libp2pOverlayConfig{}); err != context.Canceled {
-		t.Fatalf("canceled new err = %v", err)
-	}
-	if _, err := NewLibp2pOverlayBackend(context.Background(), Libp2pOverlayConfig{BootstrapPeers: []string{"not-a-multiaddr"}}); err == nil || !strings.Contains(err.Error(), "bootstrap") {
-		t.Fatalf("bad bootstrap err = %v", err)
-	}
-	if _, err := NewLibp2pOverlayBackendWithHost(context.Background(), nil, Libp2pOverlayConfig{}); err == nil || !strings.Contains(err.Error(), "host") {
-		t.Fatalf("nil host err = %v", err)
-	}
-
-	backend, err := NewLibp2pOverlayBackend(context.Background(), Libp2pOverlayConfig{ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}})
-	if err != nil {
-		t.Fatalf("New backend: %v", err)
-	}
-	defer backend.CloseHost()
-	if err := backend.Advertise(context.Background(), domain.Peer{}); err == nil || !strings.Contains(err.Error(), "peer id") {
-		t.Fatalf("empty advertise err = %v", err)
-	}
-	if _, err := backend.Open(context.Background(), domain.Node{}); err == nil || !strings.Contains(err.Error(), "node id") {
-		t.Fatalf("empty open err = %v", err)
-	}
-	if _, err := backend.Open(context.Background(), domain.Node{ID: "missing"}); err == nil || !strings.Contains(err.Error(), "not known") {
-		t.Fatalf("unknown open err = %v", err)
-	}
-	if err := backend.Close(ctx, "missing"); err != context.Canceled {
-		t.Fatalf("canceled close err = %v", err)
-	}
-	if err := backend.Close(context.Background(), "missing"); err != nil {
-		t.Fatalf("close missing: %v", err)
-	}
-	if _, err := backend.Peers(ctx); err != context.Canceled {
-		t.Fatalf("canceled peers err = %v", err)
-	}
-	if _, err := backend.WatchPeers(ctx); err != context.Canceled {
-		t.Fatalf("canceled watch err = %v", err)
-	}
-	if err := backend.Advertise(ctx, fixtures.MakePeer()); err != context.Canceled {
-		t.Fatalf("canceled advertise err = %v", err)
-	}
-	if _, err := backend.Open(ctx, domain.Node{ID: "missing"}); err != context.Canceled {
-		t.Fatalf("canceled open err = %v", err)
-	}
-
-	other, err := NewLibp2pOverlayBackend(context.Background(), Libp2pOverlayConfig{ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}})
-	if err != nil {
-		t.Fatalf("New other backend: %v", err)
-	}
-	defer other.CloseHost()
-	if _, err := addrInfoFromStrings(backend.host.ID().String(), other.Addrs()); err == nil || !strings.Contains(err.Error(), "does not match") {
-		t.Fatalf("mismatched multiaddr err = %v", err)
-	}
-}
-
 func watchSawPeer(ctx context.Context, ch <-chan domain.Peer, id string) bool {
 	for {
 		select {
@@ -267,15 +114,4 @@ func hasPeer(peers []domain.Peer, id string) bool {
 		}
 	}
 	return false
-}
-
-func ExampleLibp2pOverlayBackend_Addrs() {
-	ctx := context.Background()
-	backend, err := NewLibp2pOverlayBackend(ctx, Libp2pOverlayConfig{ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}})
-	if err != nil {
-		panic(err)
-	}
-	defer backend.CloseHost()
-	fmt.Println(len(backend.Addrs()) > 0)
-	// Output: true
 }

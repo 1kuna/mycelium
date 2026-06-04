@@ -13,7 +13,16 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"mycelium/internal/safeid"
 )
+
+const maxRemoteDraftBytes int64 = 512 << 30
+
+type downloadOptions struct {
+	requireContentLength bool
+	expectedDigest       string
+}
 
 type Draft struct {
 	Source   string
@@ -90,6 +99,10 @@ func importHuggingFace(ctx context.Context, source string, client httpDoer) (Dra
 	if revision == "" {
 		revision = "main"
 	}
+	digest, err := huggingFaceDigest(parsed.Query())
+	if err != nil {
+		return Draft{}, err
+	}
 	modelPath := strings.Join(parts[1:], "/")
 	base := os.Getenv("MYCELIUM_HF_BASE_URL")
 	if base == "" {
@@ -107,7 +120,10 @@ func importHuggingFace(ctx context.Context, source string, client httpDoer) (Dra
 	if token := huggingFaceToken(); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	return downloadDraft(ctx, req, source, "huggingface", filepath.Base(modelPath), client)
+	return downloadDraft(ctx, req, source, "huggingface", filepath.Base(modelPath), client, downloadOptions{
+		requireContentLength: true,
+		expectedDigest:       digest,
+	})
 }
 
 func importOCI(ctx context.Context, source string, client httpDoer) (Draft, error) {
@@ -166,7 +182,7 @@ func importOCI(ctx context.Context, source string, client httpDoer) (Draft, erro
 	if token := os.Getenv("MYCELIUM_OCI_TOKEN"); token != "" {
 		blobReq.Header.Set("Authorization", "Bearer "+token)
 	}
-	draft, err := downloadDraft(ctx, blobReq, source, "oci", name, client)
+	draft, err := downloadDraft(ctx, blobReq, source, "oci", name, client, downloadOptions{})
 	if err != nil {
 		return Draft{}, err
 	}
@@ -181,8 +197,11 @@ func importOCI(ctx context.Context, source string, client httpDoer) (Draft, erro
 	return draft, nil
 }
 
-func downloadDraft(ctx context.Context, req *http.Request, source, importer, name string, client httpDoer) (Draft, error) {
+func downloadDraft(ctx context.Context, req *http.Request, source, importer, name string, client httpDoer, opts downloadOptions) (Draft, error) {
 	if err := ctx.Err(); err != nil {
+		return Draft{}, err
+	}
+	if err := safeid.Validate("draft name", name); err != nil {
 		return Draft{}, err
 	}
 	resp, err := client.Do(req)
@@ -193,6 +212,12 @@ func downloadDraft(ctx context.Context, req *http.Request, source, importer, nam
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return Draft{}, fmt.Errorf("%s download failed: %s: %s", importer, resp.Status, strings.TrimSpace(string(body)))
+	}
+	if opts.requireContentLength && resp.ContentLength <= 0 {
+		return Draft{}, fmt.Errorf("%s download must include a positive Content-Length", importer)
+	}
+	if resp.ContentLength > maxRemoteDraftBytes {
+		return Draft{}, fmt.Errorf("%s download content length %d exceeds limit %d", importer, resp.ContentLength, maxRemoteDraftBytes)
 	}
 	tmp, err := os.CreateTemp("", "mycelium-"+importer+"-*-"+sanitizeTempName(name))
 	if err != nil {
@@ -205,12 +230,23 @@ func downloadDraft(ctx context.Context, req *http.Request, source, importer, nam
 			_ = os.Remove(tmp.Name())
 		}
 	}()
-	size, err := io.Copy(tmp, resp.Body)
+	size, err := io.Copy(tmp, io.LimitReader(resp.Body, maxRemoteDraftBytes+1))
 	if err != nil {
 		return Draft{}, err
 	}
+	if size > maxRemoteDraftBytes {
+		return Draft{}, fmt.Errorf("%s download exceeds limit %d", importer, maxRemoteDraftBytes)
+	}
 	if err := ctx.Err(); err != nil {
 		return Draft{}, err
+	}
+	if opts.expectedDigest != "" {
+		if err := tmp.Close(); err != nil {
+			return Draft{}, err
+		}
+		if err := verifyDigest(tmp.Name(), opts.expectedDigest); err != nil {
+			return Draft{}, err
+		}
 	}
 	keep = true
 	return Draft{
@@ -220,6 +256,22 @@ func downloadDraft(ctx context.Context, req *http.Request, source, importer, nam
 		Name:     name,
 		Size:     size,
 	}, nil
+}
+
+func huggingFaceDigest(query url.Values) (string, error) {
+	digest := query.Get("digest")
+	if digest == "" {
+		if sha := query.Get("sha256"); sha != "" {
+			digest = "sha256:" + sha
+		}
+	}
+	if digest == "" {
+		return "", fmt.Errorf("hf import requires sha256 digest")
+	}
+	if !strings.Contains(digest, ":") {
+		digest = "sha256:" + digest
+	}
+	return digest, nil
 }
 
 func splitOCIReference(raw string) (string, string, error) {

@@ -2,6 +2,10 @@ package membership
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +27,7 @@ type PeerLANDiscovery struct {
 	Token         string
 	TokenManager  *TokenManager
 	ScanDuration  time.Duration
+	AdvertTTL     time.Duration
 	Clock         ports.Clock
 	PacketFactory PacketFactory
 }
@@ -34,6 +39,19 @@ type PacketFactory interface {
 type peerAdvertisement struct {
 	Peer      domain.Peer `json:"peer"`
 	TokenHash string      `json:"token_hash,omitempty"`
+	ExpiresAt int64       `json:"expires_at,omitempty"`
+	Nonce     string      `json:"nonce,omitempty"`
+	Signature string      `json:"signature,omitempty"`
+}
+
+type signedAdvertisementPayload struct {
+	PeerID    string   `json:"peer_id"`
+	Addresses []string `json:"addresses"`
+	Compute   bool     `json:"compute"`
+	Version   string   `json:"version,omitempty"`
+	TokenHash string   `json:"token_hash"`
+	ExpiresAt int64    `json:"expires_at"`
+	Nonce     string   `json:"nonce"`
 }
 
 func NewPeerLANDiscovery(listenAddr, broadcastAddr string) PeerLANDiscovery {
@@ -98,8 +116,9 @@ func (d PeerLANDiscovery) Peers(ctx context.Context) ([]domain.Peer, error) {
 		max = 16
 	}
 	peers := map[string]domain.Peer{}
+	seenNonces := map[string]struct{}{}
 	for len(peers) < max {
-		peer, accepted, err := d.readPeer(ctx, conn)
+		peer, accepted, err := d.readPeer(ctx, conn, seenNonces)
 		if err != nil {
 			if peerReadDone(ctx, err) {
 				return peerList(peers), nil
@@ -126,8 +145,9 @@ func (d PeerLANDiscovery) WatchPeers(ctx context.Context) (<-chan domain.Peer, e
 	go func() {
 		defer close(ch)
 		defer conn.Close()
+		seenNonces := map[string]struct{}{}
 		for {
-			peer, accepted, err := d.readPeer(ctx, conn)
+			peer, accepted, err := d.readPeer(ctx, conn, seenNonces)
 			if err != nil {
 				return
 			}
@@ -198,19 +218,42 @@ func (netPacketFactory) ListenPacket(ctx context.Context, network, address strin
 
 func (d PeerLANDiscovery) marshal(peer domain.Peer) ([]byte, error) {
 	if d.TokenManager != nil {
-		hash, err := d.TokenManager.CurrentHash()
+		hash, secret, err := d.TokenManager.CurrentSecret()
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(peerAdvertisement{Peer: peer, TokenHash: hash})
+		return d.marshalSigned(peer, hash, secret)
 	}
 	if d.Token == "" {
 		return json.Marshal(peer)
 	}
-	return json.Marshal(peerAdvertisement{Peer: peer, TokenHash: tokenHash(d.Token)})
+	return d.marshalSigned(peer, tokenHash(d.Token), d.Token)
 }
 
-func (d PeerLANDiscovery) readPeer(ctx context.Context, conn net.PacketConn) (domain.Peer, bool, error) {
+func (d PeerLANDiscovery) marshalSigned(peer domain.Peer, tokenHashValue, secret string) ([]byte, error) {
+	nonce, err := randomNonce()
+	if err != nil {
+		return nil, err
+	}
+	ttl := d.AdvertTTL
+	if ttl == 0 {
+		ttl = 5 * time.Second
+	}
+	expiresAt := d.now().Add(ttl).Unix()
+	payload, err := canonicalAdvertisementPayload(peer, tokenHashValue, expiresAt, nonce)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(peerAdvertisement{
+		Peer:      peer,
+		TokenHash: tokenHashValue,
+		ExpiresAt: expiresAt,
+		Nonce:     nonce,
+		Signature: signAdvertisement(secret, payload),
+	})
+}
+
+func (d PeerLANDiscovery) readPeer(ctx context.Context, conn net.PacketConn, seenNonces map[string]struct{}) (domain.Peer, bool, error) {
 	buf := make([]byte, 64*1024)
 	n, _, err := conn.ReadFrom(buf)
 	if err != nil {
@@ -219,33 +262,65 @@ func (d PeerLANDiscovery) readPeer(ctx context.Context, conn net.PacketConn) (do
 	if err := ctx.Err(); err != nil {
 		return domain.Peer{}, false, err
 	}
-	peer, tokenHash, err := decodePeerAdvertisement(buf[:n])
+	advert, wrapped, err := decodePeerAdvertisement(buf[:n])
 	if err != nil {
-		return domain.Peer{}, false, err
-	}
-	if d.TokenManager != nil {
-		if err := d.TokenManager.ValidateHash(tokenHash); err != nil {
-			return domain.Peer{}, false, nil
-		}
-	} else if d.Token != "" && tokenHash != tokenHashValue(d.Token) {
 		return domain.Peer{}, false, nil
 	}
+	peer := advert.Peer
+	if d.TokenManager != nil {
+		if !wrapped || advert.Signature == "" {
+			return domain.Peer{}, false, nil
+		}
+		secret, ok, err := d.TokenManager.SecretForHash(advert.TokenHash)
+		if err != nil || !ok {
+			return domain.Peer{}, false, nil
+		}
+		if !d.verifyAdvertisement(advert, secret, seenNonces) {
+			return domain.Peer{}, false, nil
+		}
+	} else if d.Token != "" {
+		if !wrapped || advert.Signature == "" || advert.TokenHash != tokenHashValue(d.Token) {
+			return domain.Peer{}, false, nil
+		}
+		if !d.verifyAdvertisement(advert, d.Token, seenNonces) {
+			return domain.Peer{}, false, nil
+		}
+	}
 	if err := validatePeer(peer); err != nil {
-		return domain.Peer{}, false, err
+		return domain.Peer{}, false, nil
 	}
 	return peer, true, nil
 }
 
-func decodePeerAdvertisement(data []byte) (domain.Peer, string, error) {
+func (d PeerLANDiscovery) verifyAdvertisement(advert peerAdvertisement, secret string, seenNonces map[string]struct{}) bool {
+	if advert.Nonce == "" || advert.ExpiresAt <= d.now().Unix() {
+		return false
+	}
+	if _, seen := seenNonces[advert.Nonce]; seen {
+		return false
+	}
+	payload, err := canonicalAdvertisementPayload(advert.Peer, advert.TokenHash, advert.ExpiresAt, advert.Nonce)
+	if err != nil {
+		return false
+	}
+	expected := signAdvertisement(secret, payload)
+	if !hmac.Equal([]byte(expected), []byte(advert.Signature)) {
+		return false
+	}
+	seenNonces[advert.Nonce] = struct{}{}
+	return true
+}
+
+func decodePeerAdvertisement(data []byte) (peerAdvertisement, bool, error) {
 	var advert peerAdvertisement
 	if err := json.Unmarshal(data, &advert); err == nil && advert.Peer.ID != "" {
-		return advert.Peer, advert.TokenHash, nil
+		return advert, true, nil
 	}
 	var peer domain.Peer
 	if err := json.Unmarshal(data, &peer); err != nil {
-		return domain.Peer{}, "", err
+		return peerAdvertisement{}, false, err
 	}
-	return peer, "", nil
+	return peerAdvertisement{Peer: peer}, false, nil
 }
 
 func tokenHashValue(token string) string {
@@ -263,6 +338,39 @@ func validatePeer(peer domain.Peer) error {
 		return fmt.Errorf("peer %q has no reachable address", peer.ID)
 	}
 	return nil
+}
+
+func (d PeerLANDiscovery) now() time.Time {
+	if d.Clock != nil {
+		return d.Clock.Now().UTC()
+	}
+	return clock.System{}.Now().UTC()
+}
+
+func canonicalAdvertisementPayload(peer domain.Peer, tokenHashValue string, expiresAt int64, nonce string) ([]byte, error) {
+	return json.Marshal(signedAdvertisementPayload{
+		PeerID:    peer.ID,
+		Addresses: append([]string(nil), peer.Addresses...),
+		Compute:   peer.Compute,
+		Version:   peer.Version,
+		TokenHash: tokenHashValue,
+		ExpiresAt: expiresAt,
+		Nonce:     nonce,
+	})
+}
+
+func signAdvertisement(secret string, payload []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(payload)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func randomNonce() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
 }
 
 func peerReadDone(ctx context.Context, err error) bool {

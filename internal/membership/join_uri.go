@@ -6,9 +6,8 @@ import (
 )
 
 type JoinInfo struct {
-	Token    string
-	RPCToken string
-	Address  string
+	Token   string
+	Address string
 }
 
 func BuildJoinToken(token string) (string, error) {
@@ -23,15 +22,12 @@ func BuildJoinToken(token string) (string, error) {
 }
 
 func BuildJoinTokenWithRPC(token, rpcToken string) (string, error) {
-	return BuildJoinTokenForPeer("peer", token, rpcToken)
+	return "", fmt.Errorf("join URIs must not contain rpc tokens; pass the RPC token through config or --rpc-token")
 }
 
-func BuildJoinTokenForPeer(address, token, rpcToken string) (string, error) {
+func BuildJoinTokenForPeer(address, token string) (string, error) {
 	if token == "" {
 		return "", fmt.Errorf("join token is required")
-	}
-	if rpcToken == "" {
-		return "", fmt.Errorf("rpc token is required")
 	}
 	if address == "" {
 		address = "peer"
@@ -39,7 +35,6 @@ func BuildJoinTokenForPeer(address, token, rpcToken string) (string, error) {
 	out := url.URL{Scheme: "mycjoin", Host: address}
 	q := out.Query()
 	q.Set("token", token)
-	q.Set("rpc_token", rpcToken)
 	out.RawQuery = q.Encode()
 	return out.String(), nil
 }
@@ -56,9 +51,12 @@ func ParseJoinToken(raw string) (JoinInfo, error) {
 	if token == "" {
 		return JoinInfo{}, fmt.Errorf("join token is missing token query")
 	}
+	if parsed.Query().Get("rpc_token") != "" {
+		return JoinInfo{}, fmt.Errorf("join URI must not include rpc_token; pass the RPC token through config or --rpc-token")
+	}
 	address := parsed.Host
 	if address == "peer" {
 		address = ""
 	}
-	return JoinInfo{Token: token, RPCToken: parsed.Query().Get("rpc_token"), Address: address}, nil
+	return JoinInfo{Token: token, Address: address}, nil
 }

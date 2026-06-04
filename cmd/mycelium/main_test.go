@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -176,7 +178,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 		t.Fatalf("compute defaults = %+v", peerCfg.ComputeConfig)
 	}
 	computePath := filepath.Join(t.TempDir(), "compute-peer.json")
-	computeRaw := `{"compute":true,"overlay":true,"overlay_listen_addrs":["/ip4/127.0.0.1/tcp/0"],"overlay_bootstrap":["/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWFake"],"private_storage_key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","submitter_policy":{"submitter-a":{"max_priority":"interactive","allow_private":true}},"compute_config":{"backend_listen":"127.0.0.1:8","id":"peer-json","name":"Peer JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"disk_min_free_ratio":0.33,"load_timeout_ms":1200000,"gguf_parser":"parser"}}`
+	computeRaw := `{"compute":true,"compute_config":{"backend_listen":"127.0.0.1:8","id":"peer-json","name":"Peer JSON","backend":"mlx","backend_binary":"/bin/mlx","llama_server":"/bin/echo","vram_mb":1234,"max_util":0.7,"disk_min_free_ratio":0.33,"load_timeout_ms":1200000,"gguf_parser":"parser"}}`
 	if err := os.WriteFile(computePath, []byte(computeRaw), 0644); err != nil {
 		t.Fatalf("write compute peer config: %v", err)
 	}
@@ -186,12 +188,6 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	}
 	if !computeCfg.Compute || computeCfg.ComputeConfig.ID != "peer-json" || computeCfg.ComputeConfig.VRAMMB != 1234 || computeCfg.ComputeConfig.GGUFParser != "parser" || computeCfg.ComputeConfig.Backend != domain.BackendMLX || computeCfg.ComputeConfig.BackendBinary != "/bin/mlx" || computeCfg.ComputeConfig.DiskMinFreeRatio != 0.33 || computeCfg.ComputeConfig.LoadTimeoutMS != 1200000 {
 		t.Fatalf("compute peer config = %+v", computeCfg)
-	}
-	if !computeCfg.Overlay || len(computeCfg.OverlayListenAddrs) != 1 || len(computeCfg.OverlayBootstrap) != 1 {
-		t.Fatalf("overlay config = %+v", computeCfg)
-	}
-	if computeCfg.PrivateStorageKey == "" || !computeCfg.SubmitterPolicy["submitter-a"].AllowPrivate {
-		t.Fatalf("private config = %+v", computeCfg)
 	}
 	badPath := filepath.Join(t.TempDir(), "bad.json")
 	if err := os.WriteFile(badPath, []byte(`{`), 0644); err != nil {
@@ -240,7 +236,7 @@ func TestConfigInitGeneratesSafeComputeConfig(t *testing.T) {
 	if !reflect.DeepEqual(cfg.ComputeConfig.CustomArgs, []string{"--gpu-memory-utilization", "0.85"}) {
 		t.Fatalf("vllm args = %+v", cfg.ComputeConfig.CustomArgs)
 	}
-	if cfg.ID == "" || cfg.JoinToken == "" || cfg.RPCToken == "" {
+	if cfg.ID == "" || cfg.JoinToken == "" || cfg.RPCToken == "" || cfg.GatewayToken == "" {
 		t.Fatalf("missing generated identity/tokens = %+v", cfg)
 	}
 	if err := runConfig(context.Background(), []string{"init", "--config", configPath, "--compute", "off", "--listen", "loopback"}); err != nil {
@@ -263,18 +259,65 @@ func TestConfigInitGeneratesSafeComputeConfig(t *testing.T) {
 }
 
 func TestPeerConfigValidationRejectsUnsafeValues(t *testing.T) {
-	if err := validatePeerConfig(PeerConfig{ComputeConfig: ComputeConfig{MaxUtil: 1.2}}); err == nil || !strings.Contains(err.Error(), "max_util") {
+	validate := func(cfg PeerConfig) error {
+		return validatePeerConfig(applyPeerConfigDefaults(cfg))
+	}
+	if err := validate(PeerConfig{ComputeConfig: ComputeConfig{MaxUtil: 1.2}}); err == nil || !strings.Contains(err.Error(), "max_util") {
 		t.Fatalf("max util err = %v", err)
 	}
-	if err := validatePeerConfig(PeerConfig{ComputeConfig: ComputeConfig{DiskMinFreeRatio: 1}}); err == nil || !strings.Contains(err.Error(), "disk_min_free_ratio") {
+	if err := validate(PeerConfig{ComputeConfig: ComputeConfig{DiskMinFreeRatio: 1}}); err == nil || !strings.Contains(err.Error(), "disk_min_free_ratio") {
 		t.Fatalf("disk floor err = %v", err)
 	}
-	err := validatePeerConfig(PeerConfig{ComputeConfig: ComputeConfig{
+	err := validate(PeerConfig{ComputeConfig: ComputeConfig{
 		Backend:    domain.BackendVLLM,
 		CustomArgs: []string{"--gpu-memory-utilization", "0.90"},
 	}})
-	if err == nil || !strings.Contains(err.Error(), "unsafe") {
-		t.Fatalf("unsafe vllm err = %v", err)
+	if err != nil {
+		t.Fatalf("ordinary vllm config should not enforce catastrophic cap globally: %v", err)
+	}
+	if err := validate(PeerConfig{Listen: "192.168.1.10:51846"}); err == nil || !strings.Contains(err.Error(), "rpc_token") {
+		t.Fatalf("lan auth err = %v", err)
+	}
+	if err := validate(PeerConfig{Listen: "192.168.1.10:51846", RPCToken: "rpc-secret"}); err == nil || !strings.Contains(err.Error(), "gateway_token") {
+		t.Fatalf("lan gateway auth err = %v", err)
+	}
+	if err := validate(PeerConfig{Listen: "192.168.1.10:51846", RPCToken: "rpc-secret", GatewayToken: "gateway-secret"}); err != nil {
+		t.Fatalf("lan auth config = %v", err)
+	}
+	if err := validate(PeerConfig{Overlay: true}); err == nil || !strings.Contains(err.Error(), "overlay") {
+		t.Fatalf("overlay err = %v", err)
+	}
+	if err := validate(PeerConfig{PrivateStorageKey: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}); err == nil || !strings.Contains(err.Error(), "private_storage_key") {
+		t.Fatalf("private key err = %v", err)
+	}
+	if err := validate(PeerConfig{SubmitterPolicy: map[string]SubmitterPolicyRule{"submitter-a": {AllowPrivate: true}}}); err == nil || !strings.Contains(err.Error(), "submitter_policy") {
+		t.Fatalf("submitter policy err = %v", err)
+	}
+	validProject := domain.Project{ID: "project-a", Priority: domain.PriorityNormal, SpeedPref: domain.SpeedAuto, Preemption: domain.PreemptSoft}
+	if err := validate(PeerConfig{DefaultProject: "project-a", Projects: []domain.Project{validProject}}); err != nil {
+		t.Fatalf("valid project config = %v", err)
+	}
+	for _, tt := range []struct {
+		name    string
+		project domain.Project
+		want    string
+	}{
+		{name: "missing id", project: domain.Project{}, want: "project id"},
+		{name: "bad priority", project: domain.Project{ID: "project-a", Priority: "urgent"}, want: "priority"},
+		{name: "bad speed", project: domain.Project{ID: "project-a", SpeedPref: "fastest"}, want: "speed_pref"},
+		{name: "bad preemption", project: domain.Project{ID: "project-a", Preemption: "takeover"}, want: "preemption"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validate(PeerConfig{Projects: []domain.Project{tt.project}}); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("project err = %v want %q", err, tt.want)
+			}
+		})
+	}
+	if err := validate(PeerConfig{Projects: []domain.Project{validProject, validProject}}); err == nil || !strings.Contains(err.Error(), "duplicate project") {
+		t.Fatalf("duplicate project err = %v", err)
+	}
+	if err := validate(PeerConfig{DefaultProject: "missing", Projects: []domain.Project{validProject}}); err == nil || !strings.Contains(err.Error(), "default_project") {
+		t.Fatalf("missing default project err = %v", err)
 	}
 	if _, _, err := vllmGPUUtilization([]string{"--gpu-memory-utilization"}); err == nil {
 		t.Fatal("missing vllm utilization value accepted")
@@ -307,8 +350,21 @@ func TestConfigInitHelperBranches(t *testing.T) {
 			t.Fatalf("normalizeBackend(%q): %v", raw, err)
 		}
 	}
+	if backend, err := normalizeBackend("llama.cpp"); err != nil || backend != domain.BackendLlamaCpp {
+		t.Fatalf("normalize llama.cpp = %q %v", backend, err)
+	}
 	if _, err := normalizeBackend("bad"); err == nil {
 		t.Fatal("bad backend accepted")
+	}
+	var vram optionalIntFlag
+	if err := vram.Set("0"); err != nil {
+		t.Fatalf("set zero vram: %v", err)
+	}
+	if !vram.set || vram.value != 0 || vram.String() != "0" {
+		t.Fatalf("zero vram flag = %+v string=%q", vram, vram.String())
+	}
+	if err := vram.Set("bad"); err == nil {
+		t.Fatal("bad vram value accepted")
 	}
 	if got := defaultBackendForHost(configInitOptions{GOOS: "darwin", GOARCH: "arm64"}, domain.Node{}); got != domain.BackendLlamaCpp {
 		t.Fatalf("darwin backend = %s", got)
@@ -348,7 +404,7 @@ func TestConfigInitHelperBranches(t *testing.T) {
 	if _, _, err := parseGPUUtilization("1.5"); err == nil {
 		t.Fatal("out-of-range gpu utilization accepted")
 	}
-	if err := validatePeerConfig(PeerConfig{ComputeConfig: ComputeConfig{Backend: domain.Backend("wat")}}); err == nil || !strings.Contains(err.Error(), "unknown") {
+	if err := validatePeerConfig(applyPeerConfigDefaults(PeerConfig{ComputeConfig: ComputeConfig{Backend: domain.Backend("wat")}})); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("unknown backend validate err = %v", err)
 	}
 }
@@ -366,6 +422,37 @@ func TestValidateRuntimeComputeSafety(t *testing.T) {
 	}
 	if err := validateRuntimeComputeSafety(ComputeConfig{Backend: domain.BackendVLLM, CustomArgs: []string{"--gpu-memory-utilization=0.85"}}, catastrophic); err != nil {
 		t.Fatalf("safe cap err = %v", err)
+	}
+}
+
+func TestApplyExplicitVRAMPreservesDetectedHardwareFacts(t *testing.T) {
+	intel := domain.Node{
+		ID:          "b70",
+		OS:          "linux",
+		OOMSeverity: domain.OOMSoft,
+		Labels:      map[string]string{"gpu.vendor": "intel"},
+		Accelerators: []domain.Accelerator{{
+			Index:       0,
+			Vendor:      "intel",
+			Kind:        "arc-pro-b70",
+			VRAMTotalMB: 24576,
+		}},
+	}
+	overridden, err := applyExplicitVRAM(intel, 49152)
+	if err != nil {
+		t.Fatalf("applyExplicitVRAM: %v", err)
+	}
+	if overridden.OS != "linux" || overridden.OOMSeverity != domain.OOMSoft || overridden.Labels["gpu.vendor"] != "intel" {
+		t.Fatalf("node facts were rewritten = %+v", overridden)
+	}
+	if overridden.Accelerators[0].Vendor != "intel" || overridden.Accelerators[0].Kind != "arc-pro-b70" || overridden.Accelerators[0].VRAMTotalMB != 49152 {
+		t.Fatalf("accelerator facts = %+v", overridden.Accelerators[0])
+	}
+	if intel.Accelerators[0].VRAMTotalMB != 24576 {
+		t.Fatalf("source node was mutated = %+v", intel.Accelerators[0])
+	}
+	if _, err := applyExplicitVRAM(domain.Node{ID: "cpu-only"}, 1024); err == nil || !strings.Contains(err.Error(), "no detected accelerator") {
+		t.Fatalf("cpu-only override err = %v", err)
 	}
 }
 
@@ -724,14 +811,7 @@ func TestRunRecommendationsGenerateAndApply(t *testing.T) {
 		t.Fatalf("SavePreset large: %v", err)
 	}
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
-	for _, metric := range []domain.RunMetric{
-		{JobID: "job-a", Project: project.ID, ContextUsed: 3500, At: now},
-		{JobID: "job-b", Project: project.ID, ContextUsed: 4000, At: now.Add(time.Second)},
-	} {
-		if err := store.Record(context.Background(), metric); err != nil {
-			t.Fatalf("Record: %v", err)
-		}
-	}
+	recordSustainedContextMetrics(t, store, project.ID, "", now)
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -838,6 +918,7 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 		StorePath:       dbPath,
 		JoinToken:       "secret",
 		RPCToken:        "rpc-secret",
+		GatewayToken:    "gateway-secret",
 		DiscoveryListen: "127.0.0.1:0",
 		DiscoveryAddr:   "127.0.0.1:9",
 		Presets:         []domain.Preset{preset},
@@ -897,6 +978,21 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("admin invite without rpc status/body = %d %q", rec.Code, rec.Body.String())
 	}
+	body := `{"model":"tiny","messages":[{"role":"user","content":"hi"}]}`
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("gateway accepted rpc token status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	handler.ServeHTTP(rec, req)
+	if rec.Code == http.StatusUnauthorized {
+		t.Fatalf("gateway rejected gateway token status/body = %d %q", rec.Code, rec.Body.String())
+	}
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/admin/invite", nil)
 	req.Host = "peer-a.local:51846"
@@ -913,7 +1009,7 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse invite: %v", err)
 	}
-	if join.Address != "127.0.0.1:0" || join.Token != "secret" || join.RPCToken != "rpc-secret" {
+	if join.Address != "127.0.0.1:0" || join.Token != "secret" {
 		t.Fatalf("invite join = %+v uri=%s", join, invite.Join)
 	}
 	rec = httptest.NewRecorder()
@@ -1008,11 +1104,11 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 func TestBuildPeerGatewayJoinBootstrapsCleanHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	join := "mycjoin://127.0.0.1:1?token=join-secret&rpc_token=join-rpc"
+	join := "mycjoin://127.0.0.1:1?token=join-secret"
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	addr, handler, cleanup, err := buildPeerGateway(ctx, []string{"--join", join, "--listen", "127.0.0.1:0", "--discovery-listen", "127.0.0.1:0", "--discovery-addr", "127.0.0.1:9"})
+	addr, handler, cleanup, err := buildPeerGateway(ctx, []string{"--join", join, "--rpc-token", "join-rpc", "--listen", "127.0.0.1:0", "--discovery-listen", "127.0.0.1:0", "--discovery-addr", "127.0.0.1:9"})
 	if err != nil {
 		t.Fatalf("buildPeerGateway clean join: %v", err)
 	}
@@ -1034,6 +1130,9 @@ func TestBuildPeerGatewayJoinBootstrapsCleanHome(t *testing.T) {
 	}
 	if cfg.JoinToken != "join-secret" || cfg.RPCToken != "join-rpc" || len(cfg.SeedPeers) != 1 || cfg.SeedPeers[0] != "127.0.0.1:1" || cfg.Compute {
 		t.Fatalf("bootstrapped config = %+v", cfg)
+	}
+	if cfg.ID == "" || cfg.ID == "peer_local" || cfg.ComputeConfig.ID != cfg.ID {
+		t.Fatalf("bootstrapped peer id was not unique: %+v", cfg)
 	}
 
 	store, err := storesqlite.Open(filepath.Join(home, ".mycelium", "mycelium.db"))
@@ -1062,14 +1161,14 @@ func TestRunBootstrapAppliesCleanHomeJoinState(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	configPath := filepath.Join(home, ".mycelium", "peer.json")
-	join := "mycjoin://127.0.0.1:51846?token=join-secret&rpc_token=join-rpc"
-	if err := runBootstrap(context.Background(), []string{"--join", join, "--compute", "off", "--config", configPath}); err != nil {
+	join := "mycjoin://127.0.0.1:51846?token=join-secret"
+	if err := runBootstrap(context.Background(), []string{"--join", join, "--rpc-token", "join-rpc", "--compute", "off", "--config", configPath}); err != nil {
 		t.Fatalf("dry-run bootstrap: %v", err)
 	}
 	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dry-run wrote config err=%v", err)
 	}
-	if err := runBootstrap(context.Background(), []string{"--join", join, "--compute", "off", "--config", configPath, "--apply"}); err != nil {
+	if err := runBootstrap(context.Background(), []string{"--join", join, "--rpc-token", "join-rpc", "--compute", "off", "--config", configPath, "--apply"}); err != nil {
 		t.Fatalf("apply bootstrap: %v", err)
 	}
 	cfg, err := loadPeerConfig(configPath)
@@ -1091,14 +1190,14 @@ func TestRunBootstrapAppliesCleanHomeJoinState(t *testing.T) {
 	if len(tokens) != 1 || !tokens[0].Active || !tokens[0].Current {
 		t.Fatalf("bootstrap tokens = %+v", tokens)
 	}
-	if err := runBootstrap(context.Background(), []string{"--join", "mycjoin://127.0.0.1:51846?token=join-secret", "--compute", "off"}); err == nil || !strings.Contains(err.Error(), "rpc_token") {
+	if err := runBootstrap(context.Background(), []string{"--join", "mycjoin://127.0.0.1:51846?token=join-secret", "--compute", "off"}); err == nil || !strings.Contains(err.Error(), "--rpc-token") {
 		t.Fatalf("missing rpc token err = %v", err)
 	}
 	serviceConfig := filepath.Join(home, ".mycelium", "service-peer.json")
-	if err := runBootstrapWithServiceManager(context.Background(), []string{"--join", join, "--compute", "off", "--config", serviceConfig, "--apply", "--install-service"}, fakeServiceManager{}, "darwin"); err != nil {
+	if err := runBootstrapWithServiceManager(context.Background(), []string{"--join", join, "--rpc-token", "join-rpc", "--compute", "off", "--config", serviceConfig, "--apply", "--install-service"}, fakeServiceManager{}, "darwin"); err != nil {
 		t.Fatalf("bootstrap install service: %v", err)
 	}
-	if err := runBootstrapWithServiceManager(context.Background(), []string{"--join", join, "--compute", "off", "--config", filepath.Join(home, ".mycelium", "service-peer-err.json"), "--apply", "--install-service"}, fakeServiceManager{err: errors.New("service")}, "darwin"); err == nil || !strings.Contains(err.Error(), "service") {
+	if err := runBootstrapWithServiceManager(context.Background(), []string{"--join", join, "--rpc-token", "join-rpc", "--compute", "off", "--config", filepath.Join(home, ".mycelium", "service-peer-err.json"), "--apply", "--install-service"}, fakeServiceManager{err: errors.New("service")}, "darwin"); err == nil || !strings.Contains(err.Error(), "service") {
 		t.Fatalf("bootstrap service err = %v", err)
 	}
 	if err := runBootstrap(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "--join") {
@@ -1163,6 +1262,7 @@ func TestCatalogStageHTTPMaterializesPresetAndLocality(t *testing.T) {
 		ID:         "peer-a",
 		CatalogDir: filepath.Join(t.TempDir(), "catalog"),
 		Compute:    true,
+		GGUFParser: writeMetadataParser(t),
 		ComputeConfig: ComputeConfig{
 			ID:      "node-a",
 			Backend: domain.BackendLlamaCpp,
@@ -1227,9 +1327,9 @@ func TestCatalogStageHTTPMaterializesPresetAndLocality(t *testing.T) {
 	runtimeBody, err := json.Marshal(catalogStageRequest{
 		Preset: domain.Preset{
 			ID:             "runtime-hf",
-			ModelRef:       "Lorbus/Qwen3.6-27B-int4-AutoRound",
+			ModelRef:       model,
 			Aliases:        []string{"runtime-model"},
-			Backend:        domain.BackendVLLM,
+			Backend:        domain.BackendLlamaCpp,
 			ContextLength:  2048,
 			Quant:          "int4",
 			Capabilities:   []domain.Capability{domain.CapabilityChat},
@@ -1252,6 +1352,13 @@ func TestCatalogStageHTTPMaterializesPresetAndLocality(t *testing.T) {
 	}
 	if response.Locality.ID != "node-a:runtime-hf" || response.Locality.Managed || response.Locality.Reason != "runtime source adopted" {
 		t.Fatalf("runtime locality = %+v", response.Locality)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/catalog/stage", strings.NewReader(`{"preset":{"id":"missing-runtime","model_ref":"repo/model","node_id":"node-a"}}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "no such file") {
+		t.Fatalf("missing-runtime status/body = %d %q", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/catalog/stage", strings.NewReader(`{"preset":{"id":"wrong-node","model_ref":"repo/model","node_id":"other-node"}}`))
@@ -1353,9 +1460,9 @@ func TestShouldAdoptRuntimeSource(t *testing.T) {
 		nodeID string
 		want   bool
 	}{
-		{name: "bare repo", preset: preset, source: "owner/repo", nodeID: "node-a", want: true},
-		{name: "local directory", preset: preset, source: dir, nodeID: "node-a", want: true},
-		{name: "regular file", preset: preset, source: model, nodeID: "node-a"},
+		{name: "bare repo", preset: preset, source: "owner/repo", nodeID: "node-a"},
+		{name: "local directory", preset: preset, source: dir, nodeID: "node-a"},
+		{name: "regular file", preset: preset, source: model, nodeID: "node-a", want: true},
 		{name: "hf artifact", preset: preset, source: "hf://owner/repo/model.gguf", nodeID: "node-a"},
 		{name: "oci artifact", preset: preset, source: "oci://registry/repo:model", nodeID: "node-a"},
 		{name: "wrong node", preset: preset, source: "owner/repo", nodeID: "node-b"},
@@ -1364,6 +1471,61 @@ func TestShouldAdoptRuntimeSource(t *testing.T) {
 		if got := shouldAdoptRuntimeSource(tt.preset, tt.source, tt.nodeID); got != tt.want {
 			t.Fatalf("%s: got %t want %t", tt.name, got, tt.want)
 		}
+	}
+}
+
+func TestCatalogStageRuntimeAdoptionRequiresInspection(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	model := filepath.Join(t.TempDir(), "runtime.gguf")
+	if err := os.WriteFile(model, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	cfg := applyPeerConfigDefaults(PeerConfig{
+		ID:         "peer-a",
+		CatalogDir: filepath.Join(t.TempDir(), "catalog"),
+		Compute:    true,
+		ComputeConfig: ComputeConfig{
+			ID:      "node-a",
+			Backend: domain.BackendLlamaCpp,
+		},
+	})
+	mux := http.NewServeMux()
+	mountCatalogHTTP(mux, cfg, store, "rpc-secret", mocks.NewFakeClock(time.Unix(10, 0).UTC()))
+	body, err := json.Marshal(catalogStageRequest{Preset: domain.Preset{
+		ID:       "runtime",
+		ModelRef: model,
+		Backend:  domain.BackendLlamaCpp,
+		NodeID:   "node-a",
+		Aliases:  []string{"runtime"},
+	}})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/catalog/stage", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "gguf parser") {
+		t.Fatalf("runtime adoption without parser status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	jobs, err := store.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].Status != domain.JobFailed {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+	localities, err := store.ListModelLocalities(ctx)
+	if err != nil {
+		t.Fatalf("ListModelLocalities: %v", err)
+	}
+	if len(localities) != 0 {
+		t.Fatalf("runtime adoption created locality = %+v", localities)
 	}
 }
 
@@ -1598,18 +1760,21 @@ func (f fakeBootstrapEngineDetector) DetectConfiguredEngine(context.Context, dom
 }
 
 func TestParseJoinFlag(t *testing.T) {
-	if join, err := parseJoinFlag("secret"); err != nil || join.Token != "secret" || join.RPCToken != "" {
+	if join, err := parseJoinFlag("secret"); err != nil || join.Token != "secret" {
 		t.Fatalf("raw join = %+v %v", join, err)
 	}
-	joinURI, err := membership.BuildJoinTokenWithRPC("secret", "rpc-secret")
+	joinURI, err := membership.BuildJoinToken("secret")
 	if err != nil {
 		t.Fatalf("BuildJoinToken: %v", err)
 	}
-	if join, err := parseJoinFlag(joinURI); err != nil || join.Token != "secret" || join.RPCToken != "rpc-secret" {
+	if join, err := parseJoinFlag(joinURI); err != nil || join.Token != "secret" {
 		t.Fatalf("join uri = %+v %v", join, err)
 	}
-	if join, err := parseJoinFlag("mycjoin://127.0.0.1:51846?token=secret&rpc_token=rpc-secret"); err != nil || join.Address != "127.0.0.1:51846" {
+	if join, err := parseJoinFlag("mycjoin://127.0.0.1:51846?token=secret"); err != nil || join.Address != "127.0.0.1:51846" {
 		t.Fatalf("seed join uri = %+v %v", join, err)
+	}
+	if _, err := parseJoinFlag("mycjoin://127.0.0.1:51846?token=secret&rpc_token=rpc-secret"); err == nil {
+		t.Fatal("join uri with rpc token accepted")
 	}
 	if _, err := parseJoinFlag(""); err == nil {
 		t.Fatal("empty join token accepted")
@@ -1737,6 +1902,18 @@ func TestRegistryRPCRequiresAuthAndMergesRecords(t *testing.T) {
 	}
 	if len(records) != 2 || records[1].JobID != "job-remote" {
 		t.Fatalf("local registry = %+v", records)
+	}
+}
+
+func TestRegistryRPCRejectsOversizedJSONBody(t *testing.T) {
+	mux := http.NewServeMux()
+	mountRegistryHTTP(mux, peerTestRegistry(t), "rpc-secret")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/registry/records", io.LimitReader(repeatedByteReader{b: 'x'}, maxPeerRPCJSONBodyBytes+1))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "peer rpc body exceeds") {
+		t.Fatalf("oversized registry records status/body = %d %q", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1876,11 +2053,17 @@ func TestCombinedFleetAndNodesDelegateAcrossSources(t *testing.T) {
 	if inspector, err := nodes.LeaseInspector("right"); err != nil || inspector == nil {
 		t.Fatalf("right inspector = %+v %v", inspector, err)
 	}
+	if inspector, err := nodes.JobStatusInspector("right"); err != nil || inspector == nil {
+		t.Fatalf("right job status inspector = %+v %v", inspector, err)
+	}
 	if _, err := (combinedNodes{left: gateway.NodeDirectory{}, right: plainNodeResolver{}}).AdmissionController("missing"); err == nil {
 		t.Fatal("missing right admission exposure accepted")
 	}
 	if _, err := (combinedNodes{left: gateway.NodeDirectory{}, right: plainNodeResolver{}}).LeaseInspector("missing"); err == nil {
 		t.Fatal("missing right lease inspection exposure accepted")
+	}
+	if _, err := (combinedNodes{left: gateway.NodeDirectory{}, right: plainNodeResolver{}}).JobStatusInspector("missing"); err == nil {
+		t.Fatal("missing right job status inspection exposure accepted")
 	}
 	if got := admissionResolver(plainNodeResolver{}); got != nil {
 		t.Fatalf("plain node resolver admission = %+v", got)
@@ -2403,10 +2586,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 	if err := optimizerStore.SavePreset(context.Background(), testPresetWithContext("large", 16000)); err != nil {
 		t.Fatalf("SavePreset large: %v", err)
 	}
-	for _, metric := range []domain.RunMetric{
-		{JobID: "job-a", Project: project.ID, ContextUsed: 3500, At: time.Unix(1, 0).UTC()},
-		{JobID: "job-b", Project: project.ID, ContextUsed: 4000, At: time.Unix(2, 0).UTC()},
-	} {
+	for _, metric := range sustainedContextMetrics(project.ID, "", time.Unix(1, 0).UTC()) {
 		if err := optimizerStore.Record(context.Background(), metric); err != nil {
 			t.Fatalf("Record: %v", err)
 		}
@@ -2436,6 +2616,17 @@ func directHTTPClient(handler http.Handler) *http.Client {
 		handler.ServeHTTP(rec, req)
 		return rec.Result(), nil
 	})}
+}
+
+type repeatedByteReader struct {
+	b byte
+}
+
+func (r repeatedByteReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = r.b
+	}
+	return len(p), nil
 }
 
 type fakeCustomProcessRunner struct {
@@ -2639,20 +2830,6 @@ func TestLoadPinnedReservationsFailsLoudly(t *testing.T) {
 	}
 }
 
-func TestSubmitterPolicyFromConfig(t *testing.T) {
-	policy := submitterPolicyFromConfig(map[string]SubmitterPolicyRule{
-		"":            {MaxPriority: domain.PriorityInteractive, AllowPrivate: true},
-		"guest":       {MaxPriority: domain.PriorityBackground},
-		"submitter-a": {MaxPriority: domain.PriorityInteractive, AllowPrivate: true},
-	})
-	if len(policy.Rules) != 2 || policy.Rules["submitter-a"].MaxPriority != domain.PriorityInteractive || !policy.Rules["submitter-a"].AllowPrivate || policy.Rules["guest"].AllowPrivate {
-		t.Fatalf("policy = %+v", policy)
-	}
-	if empty := submitterPolicyFromConfig(nil); len(empty.Rules) != 0 {
-		t.Fatalf("empty policy = %+v", empty)
-	}
-}
-
 func TestProjectMapIndexesByID(t *testing.T) {
 	projects := projectMap([]domain.Project{{ID: "proj-a", ContextCap: 4096}})
 	if projects["proj-a"].ContextCap != 4096 {
@@ -2793,10 +2970,8 @@ func TestRunOptimizerEvaluationPersistsRecommendationsAndCalibratesSpeed(t *test
 	if err := store.SavePreset(context.Background(), testPresetWithContext("large", 16000)); err != nil {
 		t.Fatalf("SavePreset large: %v", err)
 	}
-	for _, metric := range []domain.RunMetric{
-		{JobID: "job-a", NodeID: node.ID, Project: project.ID, ContextUsed: 3500, TokensPerSec: 10, At: now},
-		{JobID: "job-b", NodeID: node.ID, Project: project.ID, ContextUsed: 4000, TokensPerSec: 20, At: now.Add(time.Second)},
-	} {
+	for _, metric := range sustainedContextMetrics(project.ID, node.ID, now) {
+		metric.TokensPerSec = 15
 		if err := store.Record(context.Background(), metric); err != nil {
 			t.Fatalf("Record: %v", err)
 		}
@@ -2816,7 +2991,7 @@ func TestRunOptimizerEvaluationPersistsRecommendationsAndCalibratesSpeed(t *test
 	if err != nil {
 		t.Fatalf("ListRecommendations: %v", err)
 	}
-	if len(recs) != 1 || recs[0].Observed["avg_tokens"] != 3750 {
+	if len(recs) != 1 || recs[0].Observed["avg_tokens"] != 3600 {
 		t.Fatalf("recommendations = %+v", recs)
 	}
 	calibrated, err := store.Node(context.Background(), node.ID)
@@ -2848,10 +3023,7 @@ func TestRunOptimizerEvaluationIncludesRemoteTelemetryAndPushesRecommendations(t
 	remotePeer := domain.Peer{ID: "peer-b", Addresses: []string{"127.0.0.1:1"}, Compute: true}
 	client := &mocks.TelemetryPeerClient{
 		MetricsByPeer: map[string][]domain.RunMetric{
-			remotePeer.ID: []domain.RunMetric{
-				{JobID: "remote-a", NodeID: remotePeer.ID, Project: project.ID, ContextUsed: 3500, TokensPerSec: 10, At: time.Unix(30, 0).UTC()},
-				{JobID: "remote-b", NodeID: remotePeer.ID, Project: project.ID, ContextUsed: 4000, TokensPerSec: 20, At: time.Unix(31, 0).UTC()},
-			},
+			remotePeer.ID: sustainedContextMetrics(project.ID, remotePeer.ID, time.Unix(30, 0).UTC()),
 		},
 		SamplesByPeer: map[string][]domain.SessionMetric{
 			remotePeer.ID: []domain.SessionMetric{
@@ -2868,7 +3040,7 @@ func TestRunOptimizerEvaluationIncludesRemoteTelemetryAndPushesRecommendations(t
 	if err != nil {
 		t.Fatalf("runOptimizerEvaluation: %v", err)
 	}
-	if result.ImportedMetrics != 2 || result.ImportedSamples != 1 || result.PushedRecommendations != 1 || len(result.SkippedPeers) != 0 {
+	if result.ImportedMetrics != 25 || result.ImportedSamples != 1 || result.PushedRecommendations != 1 || len(result.SkippedPeers) != 0 {
 		t.Fatalf("sync result = %+v", result)
 	}
 	samples, err := store.Samples(ctx, domain.SessionMetricQuery{SessionID: "session-remote"})
@@ -2885,7 +3057,7 @@ func TestRunOptimizerEvaluationIncludesRemoteTelemetryAndPushesRecommendations(t
 	if err != nil {
 		t.Fatalf("ListRecommendations: %v", err)
 	}
-	if len(recs) != 1 || recs[0].Observed["avg_tokens"] != 3750 {
+	if len(recs) != 1 || recs[0].Observed["avg_tokens"] != 3600 {
 		t.Fatalf("recommendations = %+v", recs)
 	}
 	appliedProject, err := store.Project(ctx, project.ID)
@@ -3093,15 +3265,41 @@ func TestPeerEstimatorUsesGGUFParserWhenConfigured(t *testing.T) {
 		t.Fatal("default estimator should be backend-aware")
 	}
 	if _, ok := defaultEstimator.LlamaCpp.(*estimate.GGUFEstimator); !ok {
-		t.Fatalf("default estimator should use GGUF preflight for llama.cpp: %+v", defaultEstimator)
+		t.Fatalf("default estimator should use GGUF estimator boundary for llama.cpp: %+v", defaultEstimator)
 	}
-	configured, ok := peerEstimator(PeerConfig{GGUFParser: "gguf-parser"}, nil, nil).(*estimate.BackendAware)
+	model := filepath.Join(t.TempDir(), "model.gguf")
+	if err := os.WriteFile(model, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	_, err := defaultEstimator.Estimate(context.Background(), domain.Preset{ID: "local", ModelRef: model, Backend: domain.BackendLlamaCpp}, 10, 1)
+	if err == nil || !strings.Contains(err.Error(), "gguf parser") {
+		t.Fatalf("default estimator err = %v", err)
+	}
+	configured, ok := peerEstimator(PeerConfig{GGUFParser: writeMetadataParser(t)}, nil, nil).(*estimate.BackendAware)
 	if !ok {
 		t.Fatal("configured estimator should be backend-aware")
 	}
 	if _, ok := configured.LlamaCpp.(*estimate.GGUFEstimator); !ok {
 		t.Fatal("configured gguf parser should use GGUF estimator")
 	}
+	claim, err := configured.Estimate(context.Background(), domain.Preset{ID: "local", ModelRef: model, Backend: domain.BackendLlamaCpp}, 10, 1)
+	if err != nil || claim.WeightsMB != 10 {
+		t.Fatalf("configured estimate claim=%+v err=%v", claim, err)
+	}
+}
+
+func writeMetadataParser(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "gguf-parser")
+	script := `#!/bin/sh
+cat <<'JSON'
+{"format":"gguf","weights_mb":10,"kv_per_token_mb":0.5,"context_length":2048}
+JSON
+`
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatalf("write parser: %v", err)
+	}
+	return path
 }
 
 func TestRunNodeAndPeerExitOnCanceledContext(t *testing.T) {
@@ -3130,7 +3328,6 @@ func TestRunPeerReportsStartupErrors(t *testing.T) {
 			ID:            "peer-a",
 			BackendListen: "127.0.0.1:51848",
 			LlamaServer:   "/bin/echo",
-			VRAMMB:        1024,
 		},
 		Presets: []domain.Preset{testPreset("tiny")},
 	})
@@ -3150,7 +3347,6 @@ func TestRunPeerServesUntilContextCanceled(t *testing.T) {
 			Name:          "Peer A",
 			BackendListen: "127.0.0.1:51848",
 			LlamaServer:   "/bin/echo",
-			VRAMMB:        1024,
 		},
 		Presets: []domain.Preset{testPreset("tiny")},
 	})
@@ -3200,7 +3396,6 @@ func TestBuildPeerGatewayWithLocalCompute(t *testing.T) {
 			Name:          "Peer A",
 			BackendListen: "127.0.0.1:51848",
 			LlamaServer:   "/bin/echo",
-			VRAMMB:        1024,
 		},
 		Presets: []domain.Preset{testPreset("tiny")},
 	})
@@ -3267,7 +3462,7 @@ func TestBuildPeerGatewayAppliesFlagOverridesAndJoinURI(t *testing.T) {
 	})
 	addr, handler, cleanup, err := buildPeerGateway(context.Background(), []string{
 		"--config", configPath,
-		"--join", "mycjoin://127.0.0.1:1?token=join-secret&rpc_token=join-rpc",
+		"--join", "mycjoin://127.0.0.1:1?token=join-secret",
 		"--rpc-token", "override-rpc",
 		"--listen", "127.0.0.1:0",
 		"--discovery-listen", "127.0.0.1:0",
@@ -3282,7 +3477,6 @@ func TestBuildPeerGatewayAppliesFlagOverridesAndJoinURI(t *testing.T) {
 		"--gguf-parser", "/bin/echo",
 		"--max-util", "0.5",
 		"--disk-min-free-ratio", "0.30",
-		"--vram-mb", "2048",
 	})
 	if err != nil {
 		t.Fatalf("buildPeerGateway: %v", err)
@@ -3311,7 +3505,7 @@ func TestBuildPeerGatewayAppliesFlagOverridesAndJoinURI(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
 		t.Fatalf("snapshot json: %v", err)
 	}
-	if snap.Node.ID != "peer-override" || snap.Node.Name != "Override Peer" || snap.Node.MaxUtil != 0.5 || snap.Node.DiskMinFreeRatio != 0.30 || snap.Node.DiskTotalMB <= 0 || snap.Node.Accelerators[0].VRAMTotalMB != 2048 {
+	if snap.Node.ID != "peer-override" || snap.Node.Name != "Override Peer" || snap.Node.MaxUtil != 0.5 || snap.Node.DiskMinFreeRatio != 0.30 || snap.Node.DiskTotalMB <= 0 {
 		t.Fatalf("snapshot = %+v", snap.Node)
 	}
 	data, err := os.ReadFile(configPath)
@@ -3330,14 +3524,86 @@ func TestBuildPeerGatewayAppliesFlagOverridesAndJoinURI(t *testing.T) {
 	}
 }
 
+func TestBuildPeerGatewayComputeFlagCanDisableConfiguredRuntime(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	configPath := writePeerConfig(t, PeerConfig{
+		ID:        "peer-a",
+		Listen:    "127.0.0.1:0",
+		StorePath: dbPath,
+		JoinToken: "join-secret",
+		RPCToken:  "rpc-secret",
+		Compute:   true,
+		ComputeConfig: ComputeConfig{
+			ID:            "peer-a",
+			Name:          "Peer A",
+			BackendListen: "127.0.0.1:51848",
+			LlamaServer:   "/bin/echo",
+		},
+		Presets: []domain.Preset{testPreset("tiny")},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, _, cleanup, err := buildPeerGateway(ctx, []string{
+		"--config", configPath,
+		"--compute=off",
+		"--discovery-listen", "127.0.0.1:0",
+		"--discovery-addr", "127.0.0.1:9",
+	})
+	if err != nil {
+		t.Fatalf("buildPeerGateway: %v", err)
+	}
+	if cleanup != nil {
+		defer func() { _ = cleanup(context.Background()) }()
+	}
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	nodes, err := store.ListNodes(context.Background())
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("compute-off registered local nodes = %+v", nodes)
+	}
+	if _, _, _, err := buildPeerGateway(context.Background(), []string{"--config", configPath, "--compute=maybe"}); err == nil || !strings.Contains(err.Error(), "compute must be on or off") {
+		t.Fatalf("bad compute flag err = %v", err)
+	}
+}
+
 func TestNewLocalPeerAgentRequiresAdmissionExtensions(t *testing.T) {
 	agent := mocks.NewNodeAgent(domain.Node{ID: "peer-a"})
-	if got, err := newLocalPeerAgent(agent, &mocks.AdmissionController{}); err != nil || got.LeaseBinder == nil || got.LeaseInspector == nil {
+	reader := staticJobReader{jobs: map[string]domain.Job{"job-a": {ID: "job-a", Status: domain.JobDone}}}
+	if got, err := newLocalPeerAgent(agent, &mocks.AdmissionController{}, reader); err != nil || got.LeaseBinder == nil || got.LeaseInspector == nil {
 		t.Fatalf("newLocalPeerAgent = %+v err=%v", got, err)
+	} else if status, found, err := got.JobStatus(context.Background(), "job-a"); err != nil || !found || status != domain.JobDone {
+		t.Fatalf("JobStatus = %q found=%v err=%v", status, found, err)
+	}
+	if got, err := newLocalPeerAgent(agent, &mocks.AdmissionController{}); err != nil {
+		t.Fatalf("newLocalPeerAgent no reader err=%v", err)
+	} else if status, found, err := got.JobStatus(context.Background(), "job-a"); err != nil || found || status != "" {
+		t.Fatalf("empty JobStatus = %q found=%v err=%v", status, found, err)
 	}
 	if _, err := newLocalPeerAgent(agent, localAdmissionOnly{}); err == nil || !strings.Contains(err.Error(), "lease inspection") {
 		t.Fatalf("missing extension err = %v", err)
 	}
+}
+
+type staticJobReader struct {
+	jobs map[string]domain.Job
+	err  error
+}
+
+func (r staticJobReader) Job(_ context.Context, id string) (domain.Job, error) {
+	if r.err != nil {
+		return domain.Job{}, r.err
+	}
+	job, ok := r.jobs[id]
+	if !ok {
+		return domain.Job{}, fmt.Errorf("job %q not found", id)
+	}
+	return job, nil
 }
 
 func TestBuildComputeRuntimeSelectsConfiguredBackends(t *testing.T) {
@@ -3361,7 +3627,6 @@ func TestBuildComputeRuntimeSelectsConfiguredBackends(t *testing.T) {
 					Name:          "Peer A",
 					Backend:       tt.backend,
 					BackendBinary: "/bin/echo",
-					VRAMMB:        1024,
 				}),
 			}, store)
 			if err != nil {
@@ -3381,7 +3646,7 @@ func TestBuildComputeRuntimeSelectsConfiguredBackends(t *testing.T) {
 	}
 }
 
-func TestBuildComputeRuntimeWiresParserPolicyAndClosedStoreErrors(t *testing.T) {
+func TestBuildComputeRuntimeWiresParserAndClosedStoreErrors(t *testing.T) {
 	ctx := context.Background()
 	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
 	if err != nil {
@@ -3390,9 +3655,6 @@ func TestBuildComputeRuntimeWiresParserPolicyAndClosedStoreErrors(t *testing.T) 
 	defer store.Close()
 	runtime, err := buildComputeRuntime(ctx, PeerConfig{
 		Listen: "127.0.0.1:0",
-		SubmitterPolicy: map[string]SubmitterPolicyRule{
-			"submitter-a": {MaxPriority: domain.PriorityInteractive, AllowPrivate: true},
-		},
 		ComputeConfig: defaultedComputeConfig(ComputeConfig{
 			ID:            "peer-a",
 			Name:          "Peer A",
@@ -3400,7 +3662,6 @@ func TestBuildComputeRuntimeWiresParserPolicyAndClosedStoreErrors(t *testing.T) 
 			BackendListen: "127.0.0.1:51848",
 			LlamaServer:   "/bin/echo",
 			GGUFParser:    "/bin/echo",
-			VRAMMB:        1024,
 		}),
 	}, store)
 	if err != nil {
@@ -3408,10 +3669,6 @@ func TestBuildComputeRuntimeWiresParserPolicyAndClosedStoreErrors(t *testing.T) 
 	}
 	if runtime.node.Labels[LabelPeerBackend] != string(domain.BackendLlamaCpp) || runtime.shutdown == nil {
 		t.Fatalf("runtime = %+v", runtime.node)
-	}
-	preset := domain.Preset{ID: "preset-a", ArtifactSizeMB: 1, EstWeightsMB: 1}
-	if _, err := runtime.admission.Offer(ctx, domain.AdmissionRequest{Job: domain.Job{ID: "job-a", Submitter: "unknown"}, Preset: preset, Claim: domain.Claim{WeightsMB: 1}}); err == nil {
-		t.Fatal("unknown submitter was admitted")
 	}
 
 	closed, err := storesqlite.Open(filepath.Join(t.TempDir(), "closed.sqlite"))
@@ -3421,7 +3678,7 @@ func TestBuildComputeRuntimeWiresParserPolicyAndClosedStoreErrors(t *testing.T) 
 	if err := closed.Close(); err != nil {
 		t.Fatalf("Close closed: %v", err)
 	}
-	if _, err := buildComputeRuntime(ctx, PeerConfig{ComputeConfig: defaultedComputeConfig(ComputeConfig{ID: "peer-a", VRAMMB: 1024, LlamaServer: "/bin/echo"})}, closed); err == nil {
+	if _, err := buildComputeRuntime(ctx, PeerConfig{ComputeConfig: defaultedComputeConfig(ComputeConfig{ID: "peer-a", LlamaServer: "/bin/echo"})}, closed); err == nil {
 		t.Fatal("closed store build succeeded")
 	}
 }
@@ -3485,6 +3742,43 @@ func TestComputeBackendAdapterLaunchesCustomProcessWithRenderedArgs(t *testing.T
 	}
 	if len(refs) != 0 {
 		t.Fatalf("refs after stop = %+v", refs)
+	}
+}
+
+func TestComputeBackendAdapterAppendsLlamaCustomArgsAfterDefaults(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	adapter, err := computeBackendAdapter(ComputeConfig{
+		Backend:     domain.BackendLlamaCpp,
+		LlamaServer: "/bin/echo",
+		CustomArgs:  []string{"--n-gpu-layers", "99"},
+	}, nodeagent.StoreProcessRegistry{Store: store, NodeID: "peer-a"})
+	if err != nil {
+		t.Fatalf("computeBackendAdapter: %v", err)
+	}
+	preset := testPreset("preset-a")
+	preset.ModelRef = "model.gguf"
+	preset.LaunchArgs = []string{"--tensor-split", "1,1"}
+	handle, err := adapter.Launch(ctx, preset, "127.0.0.1:54321")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	defer func() { _ = adapter.Stop(context.Background(), handle) }()
+	want := []string{
+		"--host", "127.0.0.1",
+		"--port", "54321",
+		"-m", "model.gguf",
+		"-c", "2048",
+		"--parallel", "1",
+		"--n-gpu-layers", "99",
+		"--tensor-split", "1,1",
+	}
+	if !reflect.DeepEqual(handle.Args, want) {
+		t.Fatalf("llama args = %+v want %+v", handle.Args, want)
 	}
 }
 
@@ -3605,7 +3899,6 @@ func TestBuildComputeRuntimeRejectsUnknownBackend(t *testing.T) {
 		Listen: "127.0.0.1:0",
 		ComputeConfig: defaultedComputeConfig(ComputeConfig{
 			Backend: domain.Backend("unknown"),
-			VRAMMB:  1024,
 		}),
 	}, store)
 	if err == nil || !strings.Contains(err.Error(), "unknown compute backend") {
@@ -3780,4 +4073,35 @@ func testPresetWithContext(id string, contextLen int) domain.Preset {
 	preset := testPreset(id)
 	preset.ContextLength = contextLen
 	return preset
+}
+
+type runMetricRecorder interface {
+	Record(context.Context, domain.RunMetric) error
+}
+
+func recordSustainedContextMetrics(t *testing.T, store runMetricRecorder, projectID, nodeID string, start time.Time) {
+	t.Helper()
+	for _, metric := range sustainedContextMetrics(projectID, nodeID, start) {
+		if err := store.Record(context.Background(), metric); err != nil {
+			t.Fatalf("Record sustained metric: %v", err)
+		}
+	}
+}
+
+func sustainedContextMetrics(projectID, nodeID string, start time.Time) []domain.RunMetric {
+	metrics := make([]domain.RunMetric, 0, 25)
+	for i := 0; i < 25; i++ {
+		contextUsed := 3500
+		if i >= 20 {
+			contextUsed = 4000
+		}
+		metrics = append(metrics, domain.RunMetric{
+			JobID:       "ctx-" + strconv.Itoa(i),
+			NodeID:      nodeID,
+			Project:     projectID,
+			ContextUsed: contextUsed,
+			At:          start.Add(time.Duration(i) * time.Hour),
+		})
+	}
+	return metrics
 }
