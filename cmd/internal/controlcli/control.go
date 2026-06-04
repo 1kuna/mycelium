@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"mycelium/internal/bench"
 	"mycelium/internal/catalog"
@@ -29,7 +30,7 @@ func Run(ctx context.Context, args []string) error {
 
 func RunWithClient(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce <add-model|models|nodes|projects|jobs|recommendations|benchmark>")
+		return fmt.Errorf("usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark>")
 	}
 	switch args[0] {
 	case "add-model":
@@ -42,6 +43,8 @@ func RunWithClient(ctx context.Context, args []string, client *http.Client) erro
 		return runProjects(ctx, args[1:])
 	case "jobs":
 		return runJobs(ctx, args[1:])
+	case "telemetry":
+		return runTelemetry(ctx, args[1:])
 	case "recommendations":
 		return runRecommendations(ctx, args[1:])
 	case "benchmark":
@@ -756,6 +759,80 @@ func runJobs(ctx context.Context, args []string) error {
 	}
 	for _, job := range jobs {
 		fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\n", job.ID, job.TaskType, job.Project, job.Model, job.Status, jobProgressSummary(job))
+	}
+	return nil
+}
+
+func runTelemetry(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: myce telemetry <samples>")
+	}
+	switch args[0] {
+	case "samples":
+		return runTelemetrySamples(ctx, args[1:])
+	default:
+		return fmt.Errorf("usage: myce telemetry <samples>")
+	}
+}
+
+func runTelemetrySamples(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("telemetry samples", flag.ContinueOnError)
+	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+	sessionID := fs.String("session", "", "session id")
+	project := fs.String("project", "", "project id")
+	nodeID := fs.String("node", "", "node id")
+	since := fs.String("since", "", "RFC3339 timestamp lower bound")
+	until := fs.String("until", "", "RFC3339 timestamp upper bound")
+	limit := fs.Int("limit", 0, "maximum samples to print")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	query := domain.SessionMetricQuery{
+		SessionID: *sessionID,
+		Project:   *project,
+		NodeID:    *nodeID,
+		Limit:     *limit,
+	}
+	if *since != "" {
+		at, err := time.Parse(time.RFC3339Nano, *since)
+		if err != nil {
+			return fmt.Errorf("invalid --since: %w", err)
+		}
+		query.Since = at
+	}
+	if *until != "" {
+		at, err := time.Parse(time.RFC3339Nano, *until)
+		if err != nil {
+			return fmt.Errorf("invalid --until: %w", err)
+		}
+		query.Until = at
+	}
+	store, err := storesqlite.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	samples, err := store.Samples(ctx, query)
+	if err != nil {
+		return err
+	}
+	for _, sample := range samples {
+		fmt.Printf("sample\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%.2f\t%d\t%d\t%s\n",
+			sample.SessionID,
+			sample.Sequence,
+			sample.Phase,
+			sample.JobID,
+			sample.NodeID,
+			sample.Project,
+			sample.PresetID,
+			sample.ContextUsed,
+			sample.BytesIn,
+			sample.BytesOut,
+			sample.TokensPerSec,
+			sample.TTFTms,
+			sample.ElapsedMS,
+			sample.At.UTC().Format(time.RFC3339Nano),
+		)
 	}
 	return nil
 }

@@ -187,6 +187,39 @@ type RunMetric struct {
 	At              time.Time `json:"at"`
 }
 
+type SessionMetric struct {
+	SessionID       string         `json:"session_id"`
+	Sequence        int            `json:"sequence"`
+	JobID           string         `json:"job_id"`
+	Phase           TelemetryPhase `json:"phase"`
+	InstanceID      string         `json:"instance_id"`
+	NodeID          string         `json:"node_id"`
+	PresetID        string         `json:"preset_id,omitempty"`
+	Backend         Backend        `json:"backend,omitempty"`
+	Project         string         `json:"project"`
+	TokensIn        int            `json:"tokens_in,omitempty"`
+	TokensOut       int            `json:"tokens_out,omitempty"`
+	ContextUsed     int            `json:"context_used,omitempty"`
+	BytesIn         int            `json:"bytes_in,omitempty"`
+	BytesOut        int            `json:"bytes_out,omitempty"`
+	TokensPerSec    float64        `json:"tokens_per_sec,omitempty"`
+	TTFTms          int            `json:"ttft_ms,omitempty"`
+	LoadWallClockMS int            `json:"load_wall_clock_ms,omitempty"`
+	PeakVRAMMB      int            `json:"peak_vram_mb,omitempty"`
+	ElapsedMS       int            `json:"elapsed_ms,omitempty"`
+	Error           string         `json:"error,omitempty"`
+	At              time.Time      `json:"at"`
+}
+
+type SessionMetricQuery struct {
+	SessionID string
+	Project   string
+	NodeID    string
+	Since     time.Time
+	Until     time.Time
+	Limit     int
+}
+
 type Peer struct {
 	ID        string    `json:"id"`
 	Addresses []string  `json:"addresses"`

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,15 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 	if len(sink.Metrics) != 1 || sink.Metrics[0].Project != "proj-a" || sink.Metrics[0].ContextUsed != 4 || sink.Metrics[0].PresetID != inst.PresetID || sink.Metrics[0].Backend != domain.BackendLlamaCpp || sink.Metrics[0].PeakVRAMMB != 512 {
 		t.Fatalf("metrics = %+v", sink.Metrics)
+	}
+	if len(sink.SamplesOut) != 3 {
+		t.Fatalf("samples = %+v", sink.SamplesOut)
+	}
+	if sink.SamplesOut[0].Phase != domain.TelemetryPhasePlaced || sink.SamplesOut[1].Phase != domain.TelemetryPhaseUpstreamStart || sink.SamplesOut[2].Phase != domain.TelemetryPhaseComplete {
+		t.Fatalf("sample phases = %+v", sink.SamplesOut)
+	}
+	if sink.SamplesOut[2].SessionID == "" || sink.SamplesOut[2].ContextUsed != 4 || sink.SamplesOut[2].TokensIn != 3 || sink.SamplesOut[2].TokensOut != 1 || sink.SamplesOut[2].PeakVRAMMB != 512 {
+		t.Fatalf("complete sample = %+v", sink.SamplesOut[2])
 	}
 	if want := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC); !sink.Metrics[0].At.Equal(want) {
 		t.Fatalf("metric time = %s want %s", sink.Metrics[0].At, want)
@@ -168,7 +178,11 @@ func TestRouterPushesMetricToRemoteOwner(t *testing.T) {
 	if len(metrics) != 1 || metrics[0].NodeID != "remote-node" || metrics[0].InstanceID != inst.ID || metrics[0].Backend != domain.BackendLlamaCpp {
 		t.Fatalf("pushed metrics = %+v", peerClient.PushedMetrics)
 	}
-	if got := strings.Join(peerClient.Calls, ","); got != "push-metrics:peer-remote" {
+	samples := peerClient.PushedSamples["peer-remote"]
+	if len(samples) != 3 || samples[0].Phase != domain.TelemetryPhasePlaced || samples[2].Phase != domain.TelemetryPhaseComplete || samples[2].NodeID != "remote-node" {
+		t.Fatalf("pushed samples = %+v", peerClient.PushedSamples)
+	}
+	if got := strings.Join(peerClient.Calls, ","); got != "push-samples:peer-remote,push-samples:peer-remote,push-metrics:peer-remote,push-samples:peer-remote" {
 		t.Fatalf("calls = %s", got)
 	}
 }
@@ -216,6 +230,229 @@ func TestRouterFailsLoudlyWhenRemoteOwnerTelemetryCannotRoute(t *testing.T) {
 
 	if _, err := router.Route(context.Background(), req); err == nil || !strings.Contains(err.Error(), "telemetry peer resolver") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRouterRecordsSessionErrorForNonRetryableUpstreamStatus(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: mocks.NewNodeAgent(fixtures.MakeNode())}})
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	_, err = router.Route(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "bad request") {
+		t.Fatalf("Route err = %v", err)
+	}
+	if len(sink.Metrics) != 0 {
+		t.Fatalf("metrics should not be recorded on failed run: %+v", sink.Metrics)
+	}
+	if len(sink.SamplesOut) != 3 || sink.SamplesOut[2].Phase != domain.TelemetryPhaseError || !strings.Contains(sink.SamplesOut[2].Error, "bad request") {
+		t.Fatalf("samples = %+v", sink.SamplesOut)
+	}
+}
+
+func TestRouterRecordsSessionErrorForTransportFailover(t *testing.T) {
+	preset := fixtures.MakePreset()
+	inst := fixtures.MakeInstance()
+	inst.Addr = "http://missing-upstream.mycelium.test"
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: mocks.NewNodeAgent(fixtures.MakeNode())}})
+	router.MaxTries = 1
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	_, err = router.Route(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "failover exhausted") {
+		t.Fatalf("Route err = %v", err)
+	}
+	if len(sink.SamplesOut) != 3 || sink.SamplesOut[2].Phase != domain.TelemetryPhaseError || !strings.Contains(sink.SamplesOut[2].Error, "missing-upstream") {
+		t.Fatalf("samples = %+v", sink.SamplesOut)
+	}
+}
+
+func TestRouterSessionTelemetryRoutingFailsLoudly(t *testing.T) {
+	ctx := context.Background()
+	sample := domain.SessionMetric{
+		SessionID: "session-a",
+		Sequence:  1,
+		JobID:     "job-a",
+		Phase:     domain.TelemetryPhaseComplete,
+		NodeID:    "node-a",
+		Project:   "project-a",
+		At:        time.Unix(1, 0).UTC(),
+	}
+	for _, tt := range []struct {
+		name   string
+		router Router
+		sample domain.SessionMetric
+		want   string
+	}{
+		{
+			name:   "missing owner node",
+			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node"},
+			sample: sampleWith(sample, func(s *domain.SessionMetric) { s.NodeID = "" }),
+			want:   "owner node",
+		},
+		{
+			name:   "local owner missing sink",
+			router: Router{SelfNodeID: "node-a", TelemetryPeerClient: &mocks.TelemetryPeerClient{}},
+			sample: sample,
+			want:   "local owner telemetry sink",
+		},
+		{
+			name:   "remote owner missing resolver",
+			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node"},
+			sample: sample,
+			want:   "telemetry peer resolver",
+		},
+		{
+			name:   "remote owner missing client",
+			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node", TelemetryPeers: peerMap{"node-a": {ID: "peer-a"}}},
+			sample: sample,
+			want:   "telemetry client",
+		},
+		{
+			name:   "remote owner unknown peer",
+			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node", TelemetryPeers: peerMap{}, TelemetryPeerClient: &mocks.TelemetryPeerClient{}},
+			sample: sample,
+			want:   "is not known",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.router.recordSample(ctx, tt.sample); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("recordSample err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRouterRunMetricRoutingFailsLoudly(t *testing.T) {
+	ctx := context.Background()
+	metric := domain.RunMetric{
+		JobID:      "job-a",
+		InstanceID: "inst-a",
+		NodeID:     "node-a",
+		Project:    "project-a",
+		At:         time.Unix(1, 0).UTC(),
+	}
+	for _, tt := range []struct {
+		name   string
+		router Router
+		metric domain.RunMetric
+		want   string
+	}{
+		{
+			name:   "local owner missing sink",
+			router: Router{SelfNodeID: "node-a", TelemetryPeerClient: &mocks.TelemetryPeerClient{}},
+			metric: metric,
+			want:   "local owner telemetry sink",
+		},
+		{
+			name:   "remote owner missing resolver",
+			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node"},
+			metric: metric,
+			want:   "telemetry peer resolver",
+		},
+		{
+			name:   "remote owner missing client",
+			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node", TelemetryPeers: peerMap{"node-a": {ID: "peer-a"}}},
+			metric: metric,
+			want:   "telemetry client",
+		},
+		{
+			name:   "remote owner unknown peer",
+			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node", TelemetryPeers: peerMap{}, TelemetryPeerClient: &mocks.TelemetryPeerClient{}},
+			metric: metric,
+			want:   "is not known",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.router.recordMetricValue(ctx, tt.metric); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("recordMetricValue err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRouterRecordMetricFailsOnMemorySamplerError(t *testing.T) {
+	router := &Router{
+		Telemetry:     &mocks.TelemetrySink{},
+		SelfNodeID:    "node-a",
+		Clock:         mocks.NewFakeClock(time.Unix(1, 0).UTC()),
+		MemorySampler: fixedMemorySampler{Err: errors.New("memory unavailable")},
+	}
+	_, err := router.recordMetric(context.Background(), domain.Job{ID: "job-a"}, fixtures.MakePreset(), fixtures.MakeInstance(fixtures.OnNode("node-a")), []byte(openAIChatBody("hi")), metricTiming{
+		Start:     time.Unix(1, 0).UTC(),
+		FirstByte: time.Unix(1, 0).UTC(),
+		End:       time.Unix(2, 0).UTC(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "memory unavailable") {
+		t.Fatalf("recordMetric err = %v", err)
+	}
+}
+
+func TestCopyAndFlushPropagatesChunkCallbackError(t *testing.T) {
+	var out strings.Builder
+	callbackErr := errors.New("sample write failed")
+	result, err := copyAndFlush(noFlushWriter{Builder: &out}, strings.NewReader("chunk"), (&Router{}).clock(), func(copyResult) error {
+		return callbackErr
+	})
+	if !errors.Is(err, callbackErr) || string(result.Body) != "chunk" || out.String() != "chunk" {
+		t.Fatalf("copy result=%+v out=%q err=%v", result, out.String(), err)
+	}
+}
+
+func TestCopyAndFlushEmptyReaderStillSetsEnd(t *testing.T) {
+	var out strings.Builder
+	result, err := copyAndFlush(noFlushWriter{Builder: &out}, strings.NewReader(""), (&Router{}).clock(), nil)
+	if err != nil || result.End.IsZero() || out.Len() != 0 {
+		t.Fatalf("copy result=%+v out=%q err=%v", result, out.String(), err)
+	}
+}
+
+func TestJoinURLPreservesExplicitSchemes(t *testing.T) {
+	if got := joinURL("https://peer.test/", "/v1/chat"); got != "https://peer.test/v1/chat" {
+		t.Fatalf("https join = %q", got)
+	}
+	if got := joinURL("peer.test", "/v1/chat"); got != "http://peer.test/v1/chat" {
+		t.Fatalf("plain join = %q", got)
+	}
+}
+
+func TestSessionRecorderHelpersUsePresetFallbacksAndNoopWhenNil(t *testing.T) {
+	var nilRecorder *sessionRecorder
+	if err := nilRecorder.emitMetric(context.Background(), domain.RunMetric{}, domain.TelemetryPhaseComplete, 0, 0, 0, 0); err != nil {
+		t.Fatalf("nil emitMetric: %v", err)
+	}
+	sink := &mocks.TelemetrySink{}
+	router := &Router{
+		Telemetry:  sink,
+		SelfNodeID: "node-a",
+		Clock:      mocks.NewFakeClock(time.Unix(10, 0).UTC()),
+	}
+	recorder := router.newSessionRecorder()
+	job := domain.Job{ID: "job-a", Project: "project-a"}
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst-a"), fixtures.WithInstancePreset(""), fixtures.OnNode("node-a"))
+	if err := recorder.emitAt(context.Background(), job, preset, inst, domain.TelemetryPhasePlaced, time.Time{}, nil); err != nil {
+		t.Fatalf("emitAt: %v", err)
+	}
+	if len(sink.SamplesOut) != 1 || sink.SamplesOut[0].PresetID != "preset-a" || sink.SamplesOut[0].At.IsZero() {
+		t.Fatalf("samples = %+v", sink.SamplesOut)
 	}
 }
 
@@ -358,7 +595,7 @@ func TestRouterUtilityFallbacks(t *testing.T) {
 		t.Fatal("cloneHeader nil returned nil")
 	}
 	var w strings.Builder
-	result, err := copyAndFlush(noFlushWriter{Builder: &w}, errReader{}, (&Router{}).clock())
+	result, err := copyAndFlush(noFlushWriter{Builder: &w}, errReader{}, (&Router{}).clock(), nil)
 	if err == nil || !errors.Is(err, io.ErrUnexpectedEOF) || result.Body != nil {
 		t.Fatalf("copy result=%+v err=%v", result, err)
 	}
@@ -779,6 +1016,9 @@ func TestRouterColdStreamPrependsLoadingState(t *testing.T) {
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
 		node.ID: loadNode{node: node, inst: inst},
 	}})
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = node.ID
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
 	if err != nil {
 		t.Fatalf("ParseOpenAIChat: %v", err)
@@ -811,6 +1051,9 @@ func TestRouterStreamColdLoadWritesLoadingReadyAndChunks(t *testing.T) {
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
 		node.ID: loadNode{node: node, inst: inst},
 	}})
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = node.ID
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
 	if err != nil {
 		t.Fatalf("ParseOpenAIChat: %v", err)
@@ -829,6 +1072,25 @@ func TestRouterStreamColdLoadWritesLoadingReadyAndChunks(t *testing.T) {
 	}
 	if strings.Index(body, "event: loading") > strings.Index(body, "data: one") {
 		t.Fatalf("loading event came after data: %q", body)
+	}
+	gotPhases := make([]domain.TelemetryPhase, 0, len(sink.SamplesOut))
+	for _, sample := range sink.SamplesOut {
+		gotPhases = append(gotPhases, sample.Phase)
+	}
+	wantPhases := []domain.TelemetryPhase{
+		domain.TelemetryPhasePlaced,
+		domain.TelemetryPhaseLoadReady,
+		domain.TelemetryPhaseUpstreamStart,
+		domain.TelemetryPhaseFirstByte,
+		domain.TelemetryPhaseStreamChunk,
+		domain.TelemetryPhaseComplete,
+	}
+	if !reflect.DeepEqual(gotPhases, wantPhases) {
+		t.Fatalf("sample phases = %+v", gotPhases)
+	}
+	last := sink.SamplesOut[len(sink.SamplesOut)-1]
+	if last.SessionID == "" || last.BytesOut == 0 || last.InstanceID != inst.ID || last.NodeID != node.ID {
+		t.Fatalf("complete sample = %+v", last)
 	}
 }
 
@@ -1467,6 +1729,11 @@ type peerMap map[string]domain.Peer
 func (m peerMap) PeerForNode(nodeID string) (domain.Peer, bool) {
 	peer, ok := m[nodeID]
 	return peer, ok
+}
+
+func sampleWith(sample domain.SessionMetric, mutate func(*domain.SessionMetric)) domain.SessionMetric {
+	mutate(&sample)
+	return sample
 }
 
 type fixedMemorySampler struct {

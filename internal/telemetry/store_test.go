@@ -43,6 +43,75 @@ func TestSQLiteStoreRecordsAndFiltersMetrics(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreRecordsAndFiltersSessionSamples(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+
+	samples := []domain.SessionMetric{
+		{
+			SessionID:       "session-a",
+			Sequence:        1,
+			JobID:           "job-a",
+			Phase:           domain.TelemetryPhasePlaced,
+			InstanceID:      "inst-a",
+			NodeID:          "node-a",
+			PresetID:        "preset-a",
+			Backend:         domain.BackendLlamaCpp,
+			Project:         "project-a",
+			LoadWallClockMS: 11,
+			At:              now,
+		},
+		{
+			SessionID:    "session-a",
+			Sequence:     2,
+			JobID:        "job-a",
+			Phase:        domain.TelemetryPhaseComplete,
+			InstanceID:   "inst-a",
+			NodeID:       "node-a",
+			PresetID:     "preset-a",
+			Backend:      domain.BackendLlamaCpp,
+			Project:      "project-a",
+			TokensIn:     2,
+			TokensOut:    5,
+			ContextUsed:  7,
+			TokensPerSec: 10,
+			At:           now.Add(time.Second),
+		},
+		{
+			SessionID: "session-b",
+			Sequence:  1,
+			JobID:     "job-b",
+			Phase:     domain.TelemetryPhaseError,
+			NodeID:    "node-b",
+			Project:   "project-b",
+			Error:     "backend overflow",
+			At:        now.Add(2 * time.Second),
+		},
+	}
+	for _, sample := range samples {
+		if err := store.RecordSample(context.Background(), sample); err != nil {
+			t.Fatalf("RecordSample: %v", err)
+		}
+	}
+
+	bySession, err := store.Samples(context.Background(), domain.SessionMetricQuery{SessionID: "session-a"})
+	if err != nil {
+		t.Fatalf("Samples session: %v", err)
+	}
+	if len(bySession) != 2 || bySession[0].Phase != domain.TelemetryPhasePlaced || bySession[1].ContextUsed != 7 {
+		t.Fatalf("bySession = %+v", bySession)
+	}
+
+	byNode, err := store.Samples(context.Background(), domain.SessionMetricQuery{NodeID: "node-b", Since: now.Add(time.Second), Limit: 1})
+	if err != nil {
+		t.Fatalf("Samples node: %v", err)
+	}
+	if len(byNode) != 1 || byNode[0].Error != "backend overflow" {
+		t.Fatalf("byNode = %+v", byNode)
+	}
+}
+
 func TestSQLiteStoreFailsLoudOnBadMetric(t *testing.T) {
 	store := newTestStore(t)
 	defer store.Close()
@@ -52,6 +121,18 @@ func TestSQLiteStoreFailsLoudOnBadMetric(t *testing.T) {
 	}
 	if err := store.Record(context.Background(), domain.RunMetric{JobID: "job"}); err == nil || !strings.Contains(err.Error(), "timestamp") {
 		t.Fatalf("missing timestamp err = %v", err)
+	}
+	if err := store.RecordSample(context.Background(), domain.SessionMetric{JobID: "job", Phase: domain.TelemetryPhasePlaced, At: time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)}); err == nil || !strings.Contains(err.Error(), "session id") {
+		t.Fatalf("missing session id err = %v", err)
+	}
+	if err := store.RecordSample(context.Background(), domain.SessionMetric{SessionID: "session", Phase: domain.TelemetryPhasePlaced, At: time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)}); err == nil || !strings.Contains(err.Error(), "job id") {
+		t.Fatalf("missing job id err = %v", err)
+	}
+	if err := store.RecordSample(context.Background(), domain.SessionMetric{SessionID: "session", JobID: "job", At: time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)}); err == nil || !strings.Contains(err.Error(), "phase") {
+		t.Fatalf("missing phase err = %v", err)
+	}
+	if err := store.RecordSample(context.Background(), domain.SessionMetric{SessionID: "session", JobID: "job", Phase: domain.TelemetryPhasePlaced}); err == nil || !strings.Contains(err.Error(), "timestamp") {
+		t.Fatalf("missing sample timestamp err = %v", err)
 	}
 }
 
@@ -182,7 +263,15 @@ func (failingStore) Record(context.Context, domain.RunMetric) error {
 	return nil
 }
 
+func (failingStore) RecordSample(context.Context, domain.SessionMetric) error {
+	return nil
+}
+
 func (failingStore) Metrics(context.Context, string) ([]domain.RunMetric, error) {
+	return nil, assertErr{}
+}
+
+func (failingStore) Samples(context.Context, domain.SessionMetricQuery) ([]domain.SessionMetric, error) {
 	return nil, assertErr{}
 }
 
