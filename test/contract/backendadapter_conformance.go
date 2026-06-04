@@ -10,14 +10,17 @@ import (
 )
 
 func RunBackendAdapterConformance(t *testing.T, name string, newAdapter func() ports.BackendAdapter, p domain.Preset) {
-	RunBackendAdapterConformanceAt(t, name, newAdapter, p, "127.0.0.1:0")
+	RunBackendAdapterConformanceAt(t, name, newAdapter, p, "127.0.0.1:1")
 }
 
 func RunBackendAdapterConformanceAt(t *testing.T, name string, newAdapter func() ports.BackendAdapter, p domain.Preset, addr string) {
 	t.Run(name+"/launch_wait_stop_happy_path", func(t *testing.T) {
 		adapter := newAdapter()
+		assert.True(t, adapter.Name() != "", "adapter name should not be empty")
 		handle, err := adapter.Launch(context.Background(), p, addr)
 		assert.NoError(t, "Launch", err)
+		assert.Equal(t, addr, handle.Addr, "handle addr")
+		assert.True(t, handle.Kind != "", "handle kind should not be empty: %+v", handle)
 		assert.NoError(t, "WaitReady", adapter.WaitReady(context.Background(), handle.Addr))
 		assert.NoError(t, "Stop", adapter.Stop(context.Background(), handle))
 	})

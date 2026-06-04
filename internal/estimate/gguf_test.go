@@ -19,11 +19,12 @@ import (
 func TestGGUFEstimatorConformanceWithNodeInspection(t *testing.T) {
 	node := fixtures.MakeNode()
 	agent := mocks.NewNodeAgent(node)
+	agent.Metadata = domain.ModelMetadata{ModelRef: "remote.gguf", Format: "gguf", WeightsMB: 100, KVPerTokenMB: 0.5, ContextLength: 4096}
 	contract.RunResourceEstimatorConformance(t, "gguf-node",
 		func() ports.ResourceEstimator {
 			return NewGGUF(nil, map[string]ports.NodeAgent{node.ID: agent})
 		},
-		fixtures.MakePreset(fixtures.WithPresetNode(node.ID)))
+		fixtures.MakePreset(fixtures.WithModelRef("remote.gguf"), fixtures.WithPresetNode(node.ID)))
 }
 
 func TestGGUFEstimatorUsesNodeSideInspectionForRemoteModel(t *testing.T) {

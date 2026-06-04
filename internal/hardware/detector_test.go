@@ -18,8 +18,24 @@ func TestDarwinDetectorBuildsUnifiedMemoryNode(t *testing.T) {
 		GOOS:     "darwin",
 		Clock:    mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
 		StatDisk: fakeDiskStats,
-		Command: func(context.Context, string, ...string) ([]byte, error) {
-			return []byte("68719476736\n"), nil
+		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			if name == "vm_stat" {
+				return []byte("Mach Virtual Memory Statistics:\nPages free: 1048576.\nPages inactive: 524288.\nPages speculative: 0.\n"), nil
+			}
+			if name != "sysctl" || len(args) != 2 || args[0] != "-n" {
+				t.Fatalf("command = %s %+v", name, args)
+			}
+			switch args[1] {
+			case "hw.memsize":
+				return []byte("68719476736\n"), nil
+			case "hw.optional.arm64":
+				return []byte("1\n"), nil
+			case "hw.pagesize":
+				return []byte("4096\n"), nil
+			default:
+				t.Fatalf("unexpected sysctl %q", args[1])
+				return nil, nil
+			}
 		},
 	}
 	node, err := detector.Detect(context.Background(), domain.Node{
@@ -31,7 +47,7 @@ func TestDarwinDetectorBuildsUnifiedMemoryNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Detect: %v", err)
 	}
-	if node.OS != "darwin" || !node.UnifiedMemory || node.Accelerators[0].VRAMTotalMB != 65536 {
+	if node.OS != "darwin" || !node.UnifiedMemory || node.Accelerators[0].VRAMTotalMB != 65536 || node.Accelerators[0].VRAMUsedMB != 59392 {
 		t.Fatalf("node = %+v", node)
 	}
 	if node.Labels["gpu.vendor"] != "apple" || node.SpeedClass.Source != "class-default" {
@@ -45,16 +61,44 @@ func TestDarwinDetectorBuildsUnifiedMemoryNode(t *testing.T) {
 	}
 }
 
+func TestDarwinDetectorDoesNotInventAppleAcceleratorOnIntel(t *testing.T) {
+	detector := Detector{
+		GOOS:     "darwin",
+		StatDisk: fakeDiskStats,
+		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			switch args[1] {
+			case "hw.memsize":
+				return []byte("17179869184\n"), nil
+			case "hw.optional.arm64":
+				return []byte("0\n"), nil
+			default:
+				t.Fatalf("unexpected sysctl %q", args[1])
+				return nil, nil
+			}
+		},
+	}
+	node, err := detector.Detect(context.Background(), domain.Node{ID: "intel-mac"})
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if node.OS != "darwin" || node.UnifiedMemory || len(node.Accelerators) != 0 {
+		t.Fatalf("node = %+v", node)
+	}
+	if node.Labels["gpu.vendor"] == "apple" || node.Labels["memory.class"] != "system" {
+		t.Fatalf("labels = %+v", node.Labels)
+	}
+}
+
 func TestLinuxDetectorBuildsNVIDIANode(t *testing.T) {
 	detector := Detector{
 		GOOS:     "linux",
 		Clock:    mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
 		StatDisk: fakeDiskStats,
 		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
-			if name != "nvidia-smi" || len(args) != 2 || !strings.Contains(args[0], "memory.total") {
+			if name != "nvidia-smi" || len(args) != 2 || !strings.Contains(args[0], "memory.total") || !strings.Contains(args[0], "memory.used") {
 				t.Fatalf("command = %s %+v", name, args)
 			}
-			return []byte("0, NVIDIA GeForce RTX 4090, 24564, 8.9\n1, NVIDIA GeForce RTX 4070 Ti, 12282, 8.9\n"), nil
+			return []byte("0, NVIDIA GeForce RTX 4090, 24564, 4096, 8.9\n1, NVIDIA GeForce RTX 4070 Ti, 12282, 1024, 8.9\n"), nil
 		},
 	}
 	node, err := detector.Detect(context.Background(), domain.Node{ID: "cuda-a", MaxUtil: 0.9})
@@ -64,7 +108,7 @@ func TestLinuxDetectorBuildsNVIDIANode(t *testing.T) {
 	if node.OS != "linux" || node.UnifiedMemory || len(node.Accelerators) != 2 {
 		t.Fatalf("node = %+v", node)
 	}
-	if node.Accelerators[0].Vendor != "nvidia" || node.Accelerators[0].Kind != "cuda" || node.Accelerators[0].VRAMTotalMB != 24564 || node.Accelerators[0].ComputeCapability != "8.9" {
+	if node.Accelerators[0].Vendor != "nvidia" || node.Accelerators[0].Kind != "cuda" || node.Accelerators[0].VRAMTotalMB != 24564 || node.Accelerators[0].VRAMUsedMB != 4096 || node.Accelerators[0].ComputeCapability != "8.9" {
 		t.Fatalf("accelerator = %+v", node.Accelerators[0])
 	}
 	if node.Labels["gpu.vendor"] != "nvidia" || node.OOMSeverity != domain.OOMSoft || node.SpeedClass.Source != "class-default" {
@@ -80,7 +124,7 @@ func TestLinuxDetectorBuildsSparkGB10Node(t *testing.T) {
 		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 			switch name {
 			case "nvidia-smi":
-				return []byte("0, NVIDIA GB10, [N/A], 12.1\n"), nil
+				return []byte("0, NVIDIA GB10, [N/A], [N/A], 12.1\n"), nil
 			case "getconf":
 				if len(args) != 1 {
 					t.Fatalf("getconf args = %+v", args)
@@ -98,6 +142,12 @@ func TestLinuxDetectorBuildsSparkGB10Node(t *testing.T) {
 			}
 			return nil, nil
 		},
+		ReadFile: func(path string) ([]byte, error) {
+			if path != "/proc/meminfo" {
+				t.Fatalf("read path = %s", path)
+			}
+			return []byte("MemTotal:       127631000 kB\nMemAvailable:   100000000 kB\n"), nil
+		},
 	}
 	node, err := detector.Detect(context.Background(), domain.Node{ID: "spark", MaxUtil: 0.55})
 	if err != nil {
@@ -110,7 +160,7 @@ func TestLinuxDetectorBuildsSparkGB10Node(t *testing.T) {
 		t.Fatalf("labels = %+v", node.Labels)
 	}
 	acc := node.Accelerators[0]
-	if acc.Vendor != "nvidia" || acc.Kind != "gb10" || !acc.UnifiedMemory || acc.VRAMTotalMB != 124610 || acc.ComputeCapability != "12.1" {
+	if acc.Vendor != "nvidia" || acc.Kind != "gb10" || !acc.UnifiedMemory || acc.VRAMTotalMB != 124610 || acc.VRAMUsedMB != 26983 || acc.ComputeCapability != "12.1" {
 		t.Fatalf("accelerator = %+v", acc)
 	}
 }
@@ -200,14 +250,15 @@ func TestLinuxDetectorErrorPaths(t *testing.T) {
 	for _, raw := range [][]byte{
 		[]byte(""),
 		[]byte("bad,row"),
-		[]byte("x, NVIDIA, 1, 8.9"),
-		[]byte("0, NVIDIA, nope, 8.9"),
+		[]byte("x, NVIDIA, 1, 1, 8.9"),
+		[]byte("0, NVIDIA, nope, 1, 8.9"),
+		[]byte("0, NVIDIA, 1, nope, 8.9"),
 	} {
-		if _, err := parseNVIDIASMI(raw, 0); err == nil {
+		if _, err := parseNVIDIASMI(raw, linuxUnifiedMemoryFallback{}); err == nil {
 			t.Fatalf("parse accepted %q", raw)
 		}
 	}
-	if _, err := parseNVIDIASMI([]byte("0, NVIDIA GB10, [N/A], 12.1"), 0); err == nil {
+	if _, err := parseNVIDIASMI([]byte("0, NVIDIA GB10, [N/A], [N/A], 12.1"), linuxUnifiedMemoryFallback{}); err == nil {
 		t.Fatal("GB10 without memory fallback accepted")
 	}
 	if _, err := linuxSystemMemoryMB(context.Background(), func(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -215,7 +266,13 @@ func TestLinuxDetectorErrorPaths(t *testing.T) {
 	}); err == nil {
 		t.Fatal("invalid system memory accepted")
 	}
-	if !nvidiaSMINeedsSystemMemory([]byte("0, NVIDIA GB10, [N/A], 12.1\n")) || nvidiaSMINeedsSystemMemory([]byte("0, NVIDIA GeForce RTX 4090, 24564, 8.9\n")) {
+	if _, err := parseLinuxMemoryUsedMB([]byte("MemTotal: bad kB\n")); err == nil {
+		t.Fatal("invalid meminfo accepted")
+	}
+	if _, err := parseLinuxMemoryUsedMB([]byte("MemTotal: 10 kB\nMemAvailable: 11 kB\n")); err == nil {
+		t.Fatal("invalid memory pressure accepted")
+	}
+	if !nvidiaSMINeedsSystemMemory([]byte("0, NVIDIA GB10, [N/A], [N/A], 12.1\n")) || nvidiaSMINeedsSystemMemory([]byte("0, NVIDIA GeForce RTX 4090, 24564, 4096, 8.9\n")) {
 		t.Fatal("GB10 memory fallback detection mismatch")
 	}
 	for _, raw := range [][]byte{
@@ -239,7 +296,7 @@ func TestLinuxDetectorGB10SystemMemoryFallbackFailure(t *testing.T) {
 		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 			switch name {
 			case "nvidia-smi":
-				return []byte("0, NVIDIA GB10, [N/A], 12.1\n"), nil
+				return []byte("0, NVIDIA GB10, [N/A], [N/A], 12.1\n"), nil
 			case "getconf":
 				return nil, getconfErr
 			default:
@@ -256,8 +313,24 @@ func TestLinuxDetectorGB10SystemMemoryFallbackFailure(t *testing.T) {
 func TestDetectorDiskErrorPaths(t *testing.T) {
 	_, err := (Detector{
 		GOOS: "darwin",
-		Command: func(context.Context, string, ...string) ([]byte, error) {
-			return []byte("1024\n"), nil
+		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			if name == "vm_stat" {
+				return []byte("Pages free: 0.\n"), nil
+			}
+			if name != "sysctl" {
+				t.Fatalf("unexpected command %s", name)
+			}
+			switch args[1] {
+			case "hw.memsize":
+				return []byte("1024\n"), nil
+			case "hw.optional.arm64":
+				return []byte("1\n"), nil
+			case "hw.pagesize":
+				return []byte("4096\n"), nil
+			default:
+				t.Fatalf("unexpected sysctl %q", args[1])
+				return nil, nil
+			}
 		},
 		StatDisk: func(string) (DiskStats, error) {
 			return DiskStats{}, errors.New("statfs")

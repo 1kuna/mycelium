@@ -12,9 +12,11 @@ type TelemetrySink struct {
 	SampleErr  error
 	Metrics    []domain.RunMetric
 	SamplesOut []domain.SessionMetric
+	Calls      []string
 }
 
 func (m *TelemetrySink) Record(_ context.Context, metric domain.RunMetric) error {
+	m.Calls = append(m.Calls, "record:"+metric.JobID)
 	if m.Err != nil {
 		return m.Err
 	}
@@ -23,6 +25,7 @@ func (m *TelemetrySink) Record(_ context.Context, metric domain.RunMetric) error
 }
 
 func (m *TelemetrySink) RecordSample(_ context.Context, sample domain.SessionMetric) error {
+	m.Calls = append(m.Calls, "sample:"+sample.JobID+":"+string(sample.Phase))
 	if m.SampleErr != nil {
 		return m.SampleErr
 	}

@@ -36,10 +36,12 @@ func (c *FakeClock) Advance(d time.Duration) {
 	defer c.mu.Unlock()
 	c.now = c.now.Add(d)
 	for _, timer := range c.timers {
+		timer.mu.Lock()
 		if !timer.fired && !c.now.Before(timer.fireAt) {
 			timer.fired = true
 			timer.ch <- c.now
 		}
+		timer.mu.Unlock()
 	}
 }
 
@@ -50,6 +52,7 @@ func (c *FakeClock) TimerCount() int {
 }
 
 type fakeTimer struct {
+	mu     sync.Mutex
 	ch     chan time.Time
 	fireAt time.Time
 	fired  bool
@@ -60,6 +63,8 @@ func (t *fakeTimer) C() <-chan time.Time {
 }
 
 func (t *fakeTimer) Stop() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.fired {
 		return false
 	}

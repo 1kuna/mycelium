@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,11 +17,18 @@ import (
 	"mycelium/internal/ports"
 )
 
+const MaxNodeRPCJSONBodyBytes = 16 << 20
+
 type HTTPServer struct {
 	Agent     ports.NodeAgent
 	Admission ports.AdmissionController
+	Jobs      JobStatusReader
 	AuthToken string
 	Transport http.RoundTripper
+}
+
+type JobStatusReader interface {
+	Job(ctx context.Context, id string) (domain.Job, error)
 }
 
 func (s HTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +67,8 @@ func (s HTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.leaseForJob(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/admission/lease-by-instance":
 		s.leaseForInstance(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/admission/job-status":
+		s.jobStatus(w, r)
 	case strings.HasPrefix(r.URL.Path, "/instances/"):
 		s.proxyInstance(w, r)
 	default:
@@ -73,7 +83,7 @@ func (s HTTPServer) snapshot(w http.ResponseWriter, r *http.Request) {
 
 func (s HTTPServer) load(w http.ResponseWriter, r *http.Request) {
 	var req domain.LoadRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeNodeRPCJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -89,7 +99,7 @@ func (s HTTPServer) unload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		InstanceID string `json:"instance_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeNodeRPCJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -128,7 +138,7 @@ func (s HTTPServer) unload(w http.ResponseWriter, r *http.Request) {
 
 func (s HTTPServer) inspect(w http.ResponseWriter, r *http.Request) {
 	var preset domain.Preset
-	if err := json.NewDecoder(r.Body).Decode(&preset); err != nil {
+	if err := decodeNodeRPCJSON(r, &preset); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -158,7 +168,7 @@ func (s HTTPServer) offer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req domain.AdmissionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeNodeRPCJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -176,7 +186,7 @@ func (s HTTPServer) commit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req admissionCommitRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeNodeRPCJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -214,7 +224,7 @@ func (s HTTPServer) preempt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req admissionPreemptRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeNodeRPCJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -231,7 +241,7 @@ func (s HTTPServer) preempt(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"status": "ok"}, preempter.PreemptForJob(r.Context(), req.Job, req.LeaseID, req.Reason))
 		return
 	}
-	writeJSON(w, map[string]string{"status": "ok"}, s.Admission.Preempt(r.Context(), req.LeaseID, req.Reason))
+	writeError(w, http.StatusBadRequest, "policy-aware preemption requires job context")
 }
 
 func (s HTTPServer) bindInstance(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +255,7 @@ func (s HTTPServer) bindInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req admissionBindInstanceRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeNodeRPCJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -298,6 +308,24 @@ func (s HTTPServer) leaseForInstance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, admissionLeaseResponse{Found: found, Lease: lease}, err)
 }
 
+func (s HTTPServer) jobStatus(w http.ResponseWriter, r *http.Request) {
+	if s.Jobs == nil {
+		writeError(w, http.StatusNotImplemented, "job status inspection is not configured")
+		return
+	}
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		writeError(w, http.StatusBadRequest, "job_id is required")
+		return
+	}
+	job, err := s.Jobs.Job(r.Context(), jobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, admissionJobStatusResponse{Found: false}, nil)
+		return
+	}
+	writeJSON(w, admissionJobStatusResponse{Found: err == nil, Status: job.Status}, err)
+}
+
 func (s HTTPServer) proxyInstance(w http.ResponseWriter, r *http.Request) {
 	instanceID, upstreamPath, ok := proxyInstanceParts(w, r.URL.Path)
 	if !ok {
@@ -323,25 +351,28 @@ func (s HTTPServer) proxyInstance(w http.ResponseWriter, r *http.Request) {
 		}
 		defer func() {
 			if err := s.Agent.EndRequest(r.Context(), instanceID); err != nil {
-				panic(err)
+				writeError(w, http.StatusInternalServerError, err.Error())
 			}
 		}()
-		s.forwardInstance(w, r, target)
+		proxyWriter := &trackingResponseWriter{ResponseWriter: w}
+		if err := s.forwardInstance(proxyWriter, r, target); err != nil && !proxyWriter.wroteHeader {
+			writeError(w, http.StatusBadGateway, err.Error())
+		}
 		return
 	}
 	writeError(w, http.StatusNotFound, "instance not found")
 }
 
-func (s HTTPServer) forwardInstance(w http.ResponseWriter, r *http.Request, target string) {
+func (s HTTPServer) forwardInstance(w http.ResponseWriter, r *http.Request, target string) error {
 	parsed, err := url.Parse(target)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		return err
 	}
 	req := r.Clone(r.Context())
 	req.URL = parsed
 	req.RequestURI = ""
 	req.Host = parsed.Host
+	req.Body = http.MaxBytesReader(nilResponseWriter{}, r.Body, MaxNodeRPCJSONBodyBytes)
 	req.Header = r.Header.Clone()
 	req.Header.Del("Authorization")
 	transport := s.Transport
@@ -350,14 +381,41 @@ func (s HTTPServer) forwardInstance(w http.ResponseWriter, r *http.Request, targ
 	}
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
+		return err
 	}
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	_ = copyProxyBody(w, resp.Body)
+	return copyProxyResponse(w, resp.StatusCode, resp.Body)
 }
+
+type trackingResponseWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+}
+
+func (w *trackingResponseWriter) WriteHeader(status int) {
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *trackingResponseWriter) Write(data []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *trackingResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+type nilResponseWriter struct{}
+
+func (nilResponseWriter) Header() http.Header       { return http.Header{} }
+func (nilResponseWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+func (nilResponseWriter) WriteHeader(int)           {}
 
 func proxyInstanceParts(w http.ResponseWriter, path string) (string, string, bool) {
 	rest := strings.TrimPrefix(path, "/instances/")
@@ -400,12 +458,23 @@ func copyHeaders(dst, src http.Header) {
 }
 
 func copyProxyBody(w http.ResponseWriter, body io.Reader) error {
+	return copyProxyResponse(w, http.StatusOK, body)
+}
+
+func copyProxyResponse(w http.ResponseWriter, status int, body io.Reader) error {
+	tracker, ok := w.(*trackingResponseWriter)
+	if !ok {
+		tracker = &trackingResponseWriter{ResponseWriter: w}
+	}
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := body.Read(buf)
 		if n > 0 {
-			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+			if !tracker.wroteHeader {
+				tracker.WriteHeader(status)
+			}
+			if _, writeErr := tracker.Write(buf[:n]); writeErr != nil {
 				return writeErr
 			}
 			if flusher != nil {
@@ -413,6 +482,9 @@ func copyProxyBody(w http.ResponseWriter, body io.Reader) error {
 			}
 		}
 		if errors.Is(err, io.EOF) {
+			if !tracker.wroteHeader {
+				tracker.WriteHeader(status)
+			}
 			return nil
 		}
 		if err != nil {
@@ -425,7 +497,7 @@ func decodeInstanceID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var req struct {
 		InstanceID string `json:"instance_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeNodeRPCJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return "", false
 	}
@@ -440,7 +512,7 @@ func decodeLeaseID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var req struct {
 		LeaseID string `json:"lease_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeNodeRPCJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return "", false
 	}
@@ -449,6 +521,33 @@ func decodeLeaseID(w http.ResponseWriter, r *http.Request) (string, bool) {
 		return "", false
 	}
 	return req.LeaseID, true
+}
+
+func decodeNodeRPCJSON(r *http.Request, out any) error {
+	data, err := readLimitedNodeRPCBody(r.Body)
+	if err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("node rpc request body contains multiple JSON values")
+	}
+	return nil
+}
+
+func readLimitedNodeRPCBody(r io.Reader) ([]byte, error) {
+	var buf bytes.Buffer
+	n, err := buf.ReadFrom(io.LimitReader(r, MaxNodeRPCJSONBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if n > MaxNodeRPCJSONBodyBytes {
+		return nil, fmt.Errorf("node rpc body exceeds %d bytes", MaxNodeRPCJSONBodyBytes)
+	}
+	return buf.Bytes(), nil
 }
 
 type admissionCommitRequest struct {
@@ -470,6 +569,11 @@ type admissionBindInstanceRequest struct {
 type admissionLeaseResponse struct {
 	Found bool         `json:"found"`
 	Lease domain.Lease `json:"lease,omitempty"`
+}
+
+type admissionJobStatusResponse struct {
+	Found  bool             `json:"found"`
+	Status domain.JobStatus `json:"status,omitempty"`
 }
 
 type HTTPClient struct {
@@ -560,6 +664,12 @@ func (c *HTTPClient) LeaseForInstance(ctx context.Context, instanceID string) (d
 	return out.Lease, out.Found, err
 }
 
+func (c *HTTPClient) JobStatus(ctx context.Context, jobID string) (domain.JobStatus, bool, error) {
+	var out admissionJobStatusResponse
+	err := c.do(ctx, http.MethodGet, "/admission/job-status?job_id="+url.QueryEscape(jobID), nil, &out)
+	return out.Status, out.Found, err
+}
+
 func (c *HTTPClient) instanceProxyAddr(instanceID string) string {
 	return c.BaseURL + "/instances/" + url.PathEscape(instanceID)
 }
@@ -588,9 +698,13 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, in, out any) e
 		return err
 	}
 	defer resp.Body.Close()
+	data, err := readLimitedNodeRPCBody(resp.Body)
+	if err != nil {
+		return fmt.Errorf("node http %s: %w", path, err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var e wireError
-		if err := json.NewDecoder(resp.Body).Decode(&e); err != nil {
+		if err := json.Unmarshal(data, &e); err != nil {
 			return fmt.Errorf("node http %s: %s", path, resp.Status)
 		}
 		switch e.Code {
@@ -604,7 +718,7 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, in, out any) e
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return json.Unmarshal(data, out)
 }
 
 func (s HTTPServer) authorized(r *http.Request) bool {

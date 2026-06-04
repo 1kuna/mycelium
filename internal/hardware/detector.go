@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -21,6 +22,7 @@ type Detector struct {
 	Clock    ports.Clock
 	DiskPath string
 	StatDisk func(path string) (DiskStats, error)
+	ReadFile func(path string) ([]byte, error)
 }
 
 type DiskStats struct {
@@ -95,19 +97,34 @@ func (d Detector) detectDarwin(ctx context.Context, seed domain.Node) (domain.No
 	if err != nil {
 		return domain.Node{}, err
 	}
+	appleSilicon, err := darwinAppleSilicon(ctx, command)
+	if err != nil {
+		return domain.Node{}, err
+	}
 	node := seed
 	node.OS = "darwin"
-	node.Labels = mergeLabels(node.Labels, map[string]string{"gpu.vendor": "apple", "memory.class": "unified"})
 	node.OOMSeverity = domain.OOMSoft
 	node.Status = domain.NodeReady
-	node.UnifiedMemory = true
-	node.Accelerators = []domain.Accelerator{{
-		Index:         0,
-		Vendor:        "apple",
-		Kind:          "unified",
-		VRAMTotalMB:   int(bytes / 1024 / 1024),
-		UnifiedMemory: true,
-	}}
+	if appleSilicon {
+		usedMB, err := darwinMemoryUsedMB(ctx, command, bytes)
+		if err != nil {
+			return domain.Node{}, err
+		}
+		node.Labels = mergeLabels(node.Labels, map[string]string{"gpu.vendor": "apple", "memory.class": "unified"})
+		node.UnifiedMemory = true
+		node.Accelerators = []domain.Accelerator{{
+			Index:         0,
+			Vendor:        "apple",
+			Kind:          "unified",
+			VRAMTotalMB:   int(bytes / 1024 / 1024),
+			VRAMUsedMB:    usedMB,
+			UnifiedMemory: true,
+		}}
+	} else {
+		node.Labels = mergeLabels(node.Labels, map[string]string{"memory.class": "system"})
+		node.UnifiedMemory = false
+		node.Accelerators = nil
+	}
 	if node.SpeedClass.TokensPerSecRef == 0 {
 		clk := d.Clock
 		if clk == nil {
@@ -118,20 +135,93 @@ func (d Detector) detectDarwin(ctx context.Context, seed domain.Node) (domain.No
 	return node, nil
 }
 
+func darwinMemoryUsedMB(ctx context.Context, command func(context.Context, string, ...string) ([]byte, error), totalBytes int64) (int, error) {
+	pageSizeOut, err := command(ctx, "sysctl", "-n", "hw.pagesize")
+	if err != nil {
+		return 0, err
+	}
+	pageSize, err := strconv.ParseInt(strings.TrimSpace(string(pageSizeOut)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse hw.pagesize: %w", err)
+	}
+	if pageSize <= 0 {
+		return 0, fmt.Errorf("invalid hw.pagesize %d", pageSize)
+	}
+	vmOut, err := command(ctx, "vm_stat")
+	if err != nil {
+		return 0, err
+	}
+	freePages, err := parseDarwinAvailablePages(vmOut)
+	if err != nil {
+		return 0, err
+	}
+	freeBytes := freePages * pageSize
+	if freeBytes < 0 || freeBytes > totalBytes {
+		return 0, fmt.Errorf("invalid darwin memory pressure free_bytes=%d total_bytes=%d", freeBytes, totalBytes)
+	}
+	return int((totalBytes - freeBytes) / 1024 / 1024), nil
+}
+
+func parseDarwinAvailablePages(out []byte) (int64, error) {
+	var freePages int64
+	var saw bool
+	for _, raw := range strings.Split(string(out), "\n") {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "Pages free:") && !strings.HasPrefix(line, "Pages inactive:") && !strings.HasPrefix(line, "Pages speculative:") {
+			continue
+		}
+		_, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSuffix(strings.TrimSpace(value), ".")
+		pages, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse vm_stat %q: %w", line, err)
+		}
+		freePages += pages
+		saw = true
+	}
+	if !saw {
+		return 0, errors.New("vm_stat did not report free memory pages")
+	}
+	return freePages, nil
+}
+
+func darwinAppleSilicon(ctx context.Context, command func(context.Context, string, ...string) ([]byte, error)) (bool, error) {
+	out, err := command(ctx, "sysctl", "-n", "hw.optional.arm64")
+	if err != nil {
+		return false, err
+	}
+	value := strings.TrimSpace(string(out))
+	switch value {
+	case "1":
+		return true, nil
+	case "0":
+		return false, nil
+	default:
+		return false, fmt.Errorf("parse hw.optional.arm64 %q", value)
+	}
+}
+
 func (d Detector) detectLinux(ctx context.Context, seed domain.Node) (domain.Node, error) {
 	command := d.Command
 	if command == nil {
 		command = runCommand
 	}
-	out, err := command(ctx, "nvidia-smi", "--query-gpu=index,name,memory.total,compute_cap", "--format=csv,noheader,nounits")
+	out, err := command(ctx, "nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,compute_cap", "--format=csv,noheader,nounits")
 	if err == nil {
-		accelerators, parseErr := parseNVIDIASMI(out, 0)
+		accelerators, parseErr := parseNVIDIASMI(out, linuxUnifiedMemoryFallback{})
 		if parseErr != nil && nvidiaSMINeedsSystemMemory(out) {
 			totalMB, memErr := linuxSystemMemoryMB(ctx, command)
 			if memErr != nil {
 				return domain.Node{}, fmt.Errorf("%w; system memory fallback: %w", parseErr, memErr)
 			}
-			accelerators, parseErr = parseNVIDIASMI(out, totalMB)
+			usedMB, memErr := d.linuxMemoryUsedMB()
+			if memErr != nil {
+				return domain.Node{}, fmt.Errorf("%w; system memory pressure: %w", parseErr, memErr)
+			}
+			accelerators, parseErr = parseNVIDIASMI(out, linuxUnifiedMemoryFallback{TotalMB: totalMB, UsedMB: usedMB})
 		}
 		if parseErr != nil {
 			return domain.Node{}, parseErr
@@ -183,7 +273,12 @@ func linuxNode(seed domain.Node, vendor string, accelerators []domain.Accelerato
 	return node
 }
 
-func parseNVIDIASMI(out []byte, unifiedMemoryFallbackMB int) ([]domain.Accelerator, error) {
+type linuxUnifiedMemoryFallback struct {
+	TotalMB int
+	UsedMB  int
+}
+
+func parseNVIDIASMI(out []byte, unifiedMemoryFallback linuxUnifiedMemoryFallback) ([]domain.Accelerator, error) {
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	accelerators := make([]domain.Accelerator, 0, len(lines))
 	for _, line := range lines {
@@ -192,7 +287,7 @@ func parseNVIDIASMI(out []byte, unifiedMemoryFallbackMB int) ([]domain.Accelerat
 			continue
 		}
 		parts := strings.Split(line, ",")
-		if len(parts) != 4 {
+		if len(parts) != 5 {
 			return nil, fmt.Errorf("unexpected nvidia-smi row %q", line)
 		}
 		for i := range parts {
@@ -206,18 +301,26 @@ func parseNVIDIASMI(out []byte, unifiedMemoryFallbackMB int) ([]domain.Accelerat
 		unified := kind == "gb10"
 		vramMB, err := strconv.Atoi(parts[2])
 		if err != nil {
-			if !unified || !strings.EqualFold(parts[2], "[N/A]") || unifiedMemoryFallbackMB <= 0 {
+			if !unified || !strings.EqualFold(parts[2], "[N/A]") || unifiedMemoryFallback.TotalMB <= 0 {
 				return nil, fmt.Errorf("parse nvidia memory %q: %w", parts[2], err)
 			}
-			vramMB = unifiedMemoryFallbackMB
+			vramMB = unifiedMemoryFallback.TotalMB
+		}
+		usedMB, err := strconv.Atoi(parts[3])
+		if err != nil {
+			if !unified || !strings.EqualFold(parts[3], "[N/A]") || unifiedMemoryFallback.UsedMB < 0 {
+				return nil, fmt.Errorf("parse nvidia used memory %q: %w", parts[3], err)
+			}
+			usedMB = unifiedMemoryFallback.UsedMB
 		}
 		accelerators = append(accelerators, domain.Accelerator{
 			Index:             index,
 			Vendor:            "nvidia",
 			Kind:              kind,
 			VRAMTotalMB:       vramMB,
+			VRAMUsedMB:        usedMB,
 			UnifiedMemory:     unified,
-			ComputeCapability: parts[3],
+			ComputeCapability: parts[4],
 			ArchFamily:        parts[1],
 		})
 	}
@@ -238,14 +341,54 @@ func nvidiaKind(name string) string {
 func nvidiaSMINeedsSystemMemory(out []byte) bool {
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.Split(line, ",")
-		if len(parts) != 4 {
+		if len(parts) != 5 {
 			continue
 		}
-		if nvidiaKind(strings.TrimSpace(parts[1])) == "gb10" && strings.EqualFold(strings.TrimSpace(parts[2]), "[N/A]") {
+		if nvidiaKind(strings.TrimSpace(parts[1])) == "gb10" && (strings.EqualFold(strings.TrimSpace(parts[2]), "[N/A]") || strings.EqualFold(strings.TrimSpace(parts[3]), "[N/A]")) {
 			return true
 		}
 	}
 	return false
+}
+
+func (d Detector) linuxMemoryUsedMB() (int, error) {
+	readFile := d.ReadFile
+	if readFile == nil {
+		readFile = os.ReadFile
+	}
+	data, err := readFile("/proc/meminfo")
+	if err != nil {
+		return 0, err
+	}
+	return parseLinuxMemoryUsedMB(data)
+}
+
+func parseLinuxMemoryUsedMB(data []byte) (int, error) {
+	var totalKB, availableKB int64
+	for _, line := range strings.Split(string(data), "\n") {
+		key, rest, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			continue
+		}
+		value, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse %s: %w", key, err)
+		}
+		switch key {
+		case "MemTotal":
+			totalKB = value
+		case "MemAvailable":
+			availableKB = value
+		}
+	}
+	if totalKB <= 0 || availableKB < 0 || availableKB > totalKB {
+		return 0, fmt.Errorf("invalid linux memory pressure total_kb=%d available_kb=%d", totalKB, availableKB)
+	}
+	return int((totalKB - availableKB) / 1024), nil
 }
 
 func linuxSystemMemoryMB(ctx context.Context, command func(context.Context, string, ...string) ([]byte, error)) (int, error) {

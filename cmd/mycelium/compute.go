@@ -45,20 +45,18 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 	if compute.DiskPath != "" {
 		detector.DiskPath = compute.DiskPath
 	}
-	node := seed
+	node, err := detector.Detect(ctx, seed)
+	if err != nil {
+		return computeRuntime{}, err
+	}
 	if compute.VRAMMB > 0 {
-		node = explicitMemoryNode(seed, compute.VRAMMB)
-		withDisk, err := detector.AddDiskStats(node)
+		node, err = applyExplicitVRAM(node, compute.VRAMMB)
 		if err != nil {
 			return computeRuntime{}, err
 		}
-		node = withDisk
-	} else {
-		detected, err := detector.Detect(ctx, seed)
-		if err != nil {
-			return computeRuntime{}, err
-		}
-		node = detected
+	}
+	if len(node.Accelerators) == 0 {
+		return computeRuntime{}, errors.New("compute=true requires at least one detected accelerator")
 	}
 	node.Labels = withPeerBackendLabel(node.Labels, compute.Backend)
 	if err := validateRuntimeComputeSafety(compute, node); err != nil {
@@ -94,16 +92,13 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 		opts = append(opts, nodeagent.WithLoadTimeout(time.Duration(compute.LoadTimeoutMS)*time.Millisecond))
 	}
 	if compute.GGUFParser != "" {
-		opts = append(opts, nodeagent.WithModelInspector(nodeagent.ParserInspector{Parser: estimate.NewCommandParser(compute.GGUFParser, []string{"{model}"})}))
+		opts = append(opts, nodeagent.WithModelInspector(nodeagent.ParserInspector{Parser: estimate.NewCommandParser(compute.GGUFParser, nil)}))
 	}
 	agent := nodeagent.NewAgent(node, adapter, clock.System{}, opts...)
 	admissionOpts := []nodeagent.AdmissionOption{
 		nodeagent.WithAdmissionInstances(agent.Instances),
 		nodeagent.WithAdmissionStateStore(store),
 		nodeagent.WithPinnedReservations(pinnedReservations...),
-	}
-	if policy := submitterPolicyFromConfig(cfg.SubmitterPolicy); len(policy.Rules) > 0 {
-		admissionOpts = append(admissionOpts, nodeagent.WithSubmitterPolicy(policy))
 	}
 	admission := nodeagent.NewAdmission(node, allocator, clock.System{}, admissionOpts...)
 	if err := loadPinnedReservations(ctx, agent, store, node.ID); err != nil {
@@ -113,7 +108,7 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 		return computeRuntime{}, err
 	}
 	return computeRuntime{
-		handler:   nodeagent.HTTPServer{Agent: agent, Admission: admission, AuthToken: cfg.RPCToken},
+		handler:   nodeagent.HTTPServer{Agent: agent, Admission: admission, Jobs: store, AuthToken: cfg.RPCToken},
 		node:      node,
 		agent:     agent,
 		admission: admission,
@@ -153,20 +148,6 @@ func loadPinnedReservations(ctx context.Context, agent *nodeagent.Agent, store *
 	return nil
 }
 
-func submitterPolicyFromConfig(config map[string]SubmitterPolicyRule) nodeagent.SubmitterPolicy {
-	policy := nodeagent.SubmitterPolicy{Rules: map[string]nodeagent.SubmitterRule{}}
-	for submitter, rule := range config {
-		if submitter == "" {
-			continue
-		}
-		policy.Rules[submitter] = nodeagent.SubmitterRule{MaxPriority: rule.MaxPriority, AllowPrivate: rule.AllowPrivate}
-	}
-	if len(policy.Rules) == 0 {
-		return nodeagent.SubmitterPolicy{}
-	}
-	return policy
-}
-
 func computeAdmissionAllocator(ctx context.Context, store *storesqlite.Store, nodeID string) (ports.Allocator, []string, error) {
 	reservations, err := store.ListReservations(ctx)
 	if err != nil {
@@ -202,7 +183,15 @@ func computeBackendAdapterWithProcessRunner(cfg ComputeConfig, registry nodeagen
 	}
 	switch backend {
 	case domain.BackendLlamaCpp:
-		return llamacpp.NewAdapter(llamacpp.Config{BinaryPath: computeBackendBinary(cfg, "llama-server"), ProcessRegistry: registry}), nil
+		args := append([]string(nil), llamacpp.DefaultConfig().Args...)
+		args = append(args, cfg.CustomArgs...)
+		return llamacpp.NewAdapter(llamacpp.Config{
+			BinaryPath:      computeBackendBinary(cfg, "llama-server"),
+			Args:            args,
+			HealthPath:      cfg.HealthPath,
+			StopGracePeriod: time.Duration(cfg.StopGraceMS) * time.Millisecond,
+			ProcessRegistry: registry,
+		}), nil
 	case domain.BackendMLX:
 		return mlx.NewAdapterWithConfig(mlx.Config{BinaryPath: computeBackendBinary(cfg, "mlx_lm.server"), Args: append([]string(nil), cfg.CustomArgs...), ProcessRegistry: registry, ProcessRunner: runner}), nil
 	case domain.BackendVLLM:
@@ -273,18 +262,14 @@ func overrideString(flagValue *string, target *string) {
 	}
 }
 
-func explicitMemoryNode(seed domain.Node, vramMB int) domain.Node {
-	node := seed
-	node.OS = "darwin"
-	node.Labels = map[string]string{"gpu.vendor": "apple", "memory.class": "unified"}
-	node.OOMSeverity = domain.OOMSoft
-	node.UnifiedMemory = true
-	node.Accelerators = []domain.Accelerator{{
-		Index:         0,
-		Vendor:        "apple",
-		Kind:          "unified",
-		VRAMTotalMB:   vramMB,
-		UnifiedMemory: true,
-	}}
-	return node
+func applyExplicitVRAM(node domain.Node, vramMB int) (domain.Node, error) {
+	if vramMB <= 0 {
+		return node, nil
+	}
+	if len(node.Accelerators) == 0 {
+		return domain.Node{}, errors.New("compute vram_mb cannot override a host with no detected accelerator")
+	}
+	node.Accelerators = append([]domain.Accelerator(nil), node.Accelerators...)
+	node.Accelerators[0].VRAMTotalMB = vramMB
+	return node, nil
 }

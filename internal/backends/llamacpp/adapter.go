@@ -45,6 +45,7 @@ type Config struct {
 	LaunchProfiles  map[string][]string
 	HealthPath      string
 	PollInterval    time.Duration
+	StopGracePeriod time.Duration
 	HTTPClient      *http.Client
 	Clock           ports.Clock
 	ProcessRegistry ProcessRegistry
@@ -59,11 +60,12 @@ func DefaultConfig() Config {
 			"llamacpp-cuda":  nil,
 			"llamacpp-metal": nil,
 		},
-		HealthPath:    "/health",
-		PollInterval:  250 * time.Millisecond,
-		HTTPClient:    http.DefaultClient,
-		Clock:         clock.System{},
-		ProcessRunner: execProcessRunner{},
+		HealthPath:      "/health",
+		PollInterval:    250 * time.Millisecond,
+		StopGracePeriod: 2 * time.Second,
+		HTTPClient:      http.DefaultClient,
+		Clock:           clock.System{},
+		ProcessRunner:   execProcessRunner{},
 	}
 }
 
@@ -83,6 +85,9 @@ func NewAdapter(cfg Config) *Adapter {
 	}
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = def.PollInterval
+	}
+	if cfg.StopGracePeriod == 0 {
+		cfg.StopGracePeriod = def.StopGracePeriod
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = def.HTTPClient
@@ -122,7 +127,7 @@ func (a *Adapter) Launch(ctx context.Context, p domain.Preset, addr string) (por
 	a.mu.Lock()
 	a.processes[process.PID()] = process
 	a.mu.Unlock()
-	ref := domain.ProcessRef{PID: process.PID(), Kind: "process", Ref: fmt.Sprintf("%d", process.PID())}
+	ref := processRef(process.PID(), processGroupID(process.PID()), "llamacpp", a.cfg.BinaryPath, args, a.cfg.Clock.Now())
 	if a.cfg.ProcessRegistry != nil {
 		if err := a.cfg.ProcessRegistry.Add(ctx, ref); err != nil {
 			_ = process.Kill()
@@ -133,7 +138,7 @@ func (a *Adapter) Launch(ctx context.Context, p domain.Preset, addr string) (por
 			return ports.Handle{}, err
 		}
 	}
-	return ports.Handle{PID: process.PID(), Addr: addr, Kind: ref.Kind, Ref: ref.Ref}, nil
+	return handleFromProcessRef(ref, addr), nil
 }
 
 func (a *Adapter) renderLaunchArgs(p domain.Preset, addr string) ([]string, error) {
@@ -174,42 +179,172 @@ func (a *Adapter) WaitReady(ctx context.Context, addr string) error {
 }
 
 func (a *Adapter) Stop(ctx context.Context, h ports.Handle) error {
-	a.mu.Lock()
-	process := a.processes[h.PID]
-	delete(a.processes, h.PID)
-	a.mu.Unlock()
-	if process == nil {
-		if err := signalPID(h.PID); err != nil {
-			return err
-		}
-		a.removeProcessRef(ctx, h)
+	if h.PID == 0 {
 		return nil
 	}
+	a.mu.Lock()
+	process := a.processes[h.PID]
+	a.mu.Unlock()
+	if process == nil {
+		stopped, err := a.stopStoredProcess(ctx, h)
+		if stopped {
+			err = errors.Join(err, a.removeProcessRef(context.Background(), h))
+		}
+		return err
+	}
+	stopped, err := a.stopProcess(ctx, process)
+	if stopped {
+		a.mu.Lock()
+		delete(a.processes, h.PID)
+		a.mu.Unlock()
+		err = errors.Join(err, a.removeProcessRef(context.Background(), h))
+	}
+	return err
+}
 
-	_ = process.Signal(os.Interrupt)
-	done := make(chan struct{})
+func (a *Adapter) stopProcess(ctx context.Context, process ProcessHandle) (bool, error) {
+	done := make(chan error, 1)
 	go func() {
-		_ = process.Wait()
-		close(done)
+		done <- process.Wait()
 	}()
+	if err := process.Signal(os.Interrupt); err != nil {
+		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+			return true, nil
+		}
+		if killErr := process.Kill(); killErr != nil {
+			if errors.Is(killErr, os.ErrProcessDone) || errors.Is(killErr, syscall.ESRCH) {
+				return true, nil
+			}
+			return false, killErr
+		}
+		select {
+		case <-ctx.Done():
+			waitErr := <-done
+			if waitErr != nil {
+				return true, waitErr
+			}
+			return true, ctx.Err()
+		case waitErr := <-done:
+			return true, waitErr
+		}
+	}
 
+	timer := a.cfg.Clock.NewTimer(a.cfg.StopGracePeriod)
 	select {
 	case <-ctx.Done():
-		_ = process.Kill()
-		<-done
-		a.removeProcessRef(context.Background(), h)
-		return ctx.Err()
-	case <-done:
-		a.removeProcessRef(ctx, h)
-		return nil
+		timer.Stop()
+		if err := process.Kill(); err != nil {
+			return false, err
+		}
+		waitErr := <-done
+		if waitErr != nil {
+			return true, waitErr
+		}
+		return true, ctx.Err()
+	case <-timer.C():
+		if err := process.Kill(); err != nil {
+			return false, err
+		}
+		select {
+		case <-ctx.Done():
+			waitErr := <-done
+			if waitErr != nil {
+				return true, waitErr
+			}
+			return true, ctx.Err()
+		case waitErr := <-done:
+			return true, waitErr
+		}
+	case waitErr := <-done:
+		timer.Stop()
+		return true, waitErr
 	}
 }
 
-func (a *Adapter) removeProcessRef(ctx context.Context, h ports.Handle) {
+func (a *Adapter) removeProcessRef(ctx context.Context, h ports.Handle) error {
 	if a.cfg.ProcessRegistry == nil {
-		return
+		return nil
 	}
-	_ = a.cfg.ProcessRegistry.Remove(ctx, domain.ProcessRef{PID: h.PID, Kind: h.Kind, Ref: h.Ref})
+	return a.cfg.ProcessRegistry.Remove(ctx, domain.ProcessRef{PID: h.PID, PGID: h.PGID, Kind: h.Kind, Ref: h.Ref, Binary: h.Binary, Args: append([]string(nil), h.Args...), StartedAt: h.StartedAt})
+}
+
+func (a *Adapter) stopStoredProcess(ctx context.Context, handle ports.Handle) (bool, error) {
+	process, err := os.FindProcess(handle.PID)
+	if err != nil {
+		return false, err
+	}
+	if err := verifyProcessIdentity(handle); err != nil {
+		return false, err
+	}
+	if err := signalHandle(handle, process, syscall.SIGINT); err != nil {
+		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+			return true, nil
+		}
+		if killErr := killHandle(handle, process); killErr != nil {
+			if errors.Is(killErr, os.ErrProcessDone) || errors.Is(killErr, syscall.ESRCH) {
+				return true, nil
+			}
+			return false, killErr
+		}
+		return a.waitForExternalExit(ctx, handle, process)
+	}
+	timer := a.cfg.Clock.NewTimer(a.cfg.StopGracePeriod)
+	for {
+		if exited, err := processExited(process); exited || err != nil {
+			timer.Stop()
+			return exited, err
+		}
+		poll := a.cfg.Clock.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			poll.Stop()
+			timer.Stop()
+			if err := killHandle(handle, process); err != nil {
+				return false, err
+			}
+			stopped, waitErr := a.waitForExternalExit(context.Background(), handle, process)
+			if waitErr != nil {
+				return stopped, waitErr
+			}
+			return stopped, ctx.Err()
+		case <-timer.C():
+			poll.Stop()
+			if err := killHandle(handle, process); err != nil {
+				return false, err
+			}
+			return a.waitForExternalExit(context.Background(), handle, process)
+		case <-poll.C():
+		}
+	}
+}
+
+func (a *Adapter) waitForExternalExit(ctx context.Context, handle ports.Handle, process *os.Process) (bool, error) {
+	timer := a.cfg.Clock.NewTimer(a.cfg.StopGracePeriod)
+	for {
+		if exited, err := processExited(process); exited || err != nil {
+			timer.Stop()
+			return exited, err
+		}
+		poll := a.cfg.Clock.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			poll.Stop()
+			timer.Stop()
+			return false, ctx.Err()
+		case <-timer.C():
+			poll.Stop()
+			return false, fmt.Errorf("process %d did not exit after signal", handle.PID)
+		case <-poll.C():
+		}
+	}
+}
+
+func processRef(pid, pgid int, kind, binary string, args []string, startedAt time.Time) domain.ProcessRef {
+	return domain.ProcessRef{PID: pid, PGID: pgid, Kind: kind, Ref: fmt.Sprintf("%d", pid), Binary: binary, Args: append([]string(nil), args...), StartedAt: startedAt.UTC()}
+}
+
+func handleFromProcessRef(ref domain.ProcessRef, addr string) ports.Handle {
+	return ports.Handle{PID: ref.PID, PGID: ref.PGID, Addr: addr, Kind: ref.Kind, Ref: ref.Ref, Binary: ref.Binary, Args: append([]string(nil), ref.Args...), StartedAt: ref.StartedAt}
 }
 
 func signalPID(pid int) error {
@@ -250,6 +385,7 @@ type execProcessRunner struct{}
 
 func (execProcessRunner) Start(_ context.Context, binary string, args []string) (ProcessHandle, error) {
 	cmd := exec.Command(binary, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -274,6 +410,83 @@ func (p execProcess) Kill() error {
 
 func (p execProcess) Wait() error {
 	return p.cmd.Wait()
+}
+
+type osProcessHandle struct {
+	process *os.Process
+}
+
+func (p osProcessHandle) PID() int {
+	return p.process.Pid
+}
+
+func (p osProcessHandle) Signal(sig os.Signal) error {
+	return p.process.Signal(sig)
+}
+
+func (p osProcessHandle) Kill() error {
+	return p.process.Kill()
+}
+
+func (p osProcessHandle) Wait() error {
+	_, err := p.process.Wait()
+	return err
+}
+
+func processGroupID(pid int) int {
+	if pid <= 0 {
+		return 0
+	}
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		return 0
+	}
+	return pgid
+}
+
+func verifyProcessIdentity(handle ports.Handle) error {
+	if handle.PID <= 0 {
+		return fmt.Errorf("process pid is required")
+	}
+	if handle.PGID == 0 {
+		return nil
+	}
+	pgid, err := syscall.Getpgid(handle.PID)
+	if err != nil {
+		return err
+	}
+	if pgid != handle.PGID {
+		return fmt.Errorf("process %d pgid changed from %d to %d", handle.PID, handle.PGID, pgid)
+	}
+	return nil
+}
+
+func signalHandle(handle ports.Handle, process *os.Process, sig syscall.Signal) error {
+	if safeProcessGroup(handle.PGID) {
+		return syscall.Kill(-handle.PGID, sig)
+	}
+	return process.Signal(sig)
+}
+
+func killHandle(handle ports.Handle, process *os.Process) error {
+	if safeProcessGroup(handle.PGID) {
+		return syscall.Kill(-handle.PGID, syscall.SIGKILL)
+	}
+	return process.Kill()
+}
+
+func safeProcessGroup(pgid int) bool {
+	return pgid > 1 && pgid != syscall.Getpgrp()
+}
+
+func processExited(process *os.Process) (bool, error) {
+	if err := process.Signal(syscall.Signal(0)); err != nil {
+		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 func splitAddr(addr string) (host, port string) {
