@@ -14,6 +14,7 @@ import (
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
+	projectvalidation "mycelium/internal/project"
 
 	_ "modernc.org/sqlite"
 )
@@ -53,8 +54,8 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) SaveProject(ctx context.Context, project domain.Project) error {
-	if project.ID == "" {
-		return fmt.Errorf("project id is required")
+	if err := projectvalidation.Validate(project); err != nil {
+		return err
 	}
 	return s.upsertJSON(ctx, "projects", project.ID, project)
 }
@@ -227,7 +228,6 @@ func (s *Store) Put(ctx context.Context, rec domain.JobRecord) error {
 		default:
 			delete(s.jobWatchers, id)
 			close(ch)
-			return fmt.Errorf("sqlite job registry watcher %d is not draining", id)
 		}
 	}
 	return nil
@@ -778,13 +778,20 @@ func parseJobRecordCursor(raw string) (time.Time, error) {
 }
 
 func newerJobRecord(next, current domain.JobRecord) bool {
-	if !next.UpdatedAt.Equal(current.UpdatedAt) {
-		return next.UpdatedAt.After(current.UpdatedAt)
+	if terminalJobRecordStatus(current.Status) && !terminalJobRecordStatus(next.Status) {
+		return false
 	}
 	if next.Fence != current.Fence {
 		return next.Fence > current.Fence
 	}
+	if !next.UpdatedAt.Equal(current.UpdatedAt) {
+		return next.UpdatedAt.After(current.UpdatedAt)
+	}
 	return jobRecordTieKey(next) > jobRecordTieKey(current)
+}
+
+func terminalJobRecordStatus(status domain.JobStatus) bool {
+	return status == domain.JobDone || status == domain.JobFailed
 }
 
 func jobRecordTieKey(rec domain.JobRecord) string {

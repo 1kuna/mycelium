@@ -83,6 +83,13 @@ const (
 	JobFailed    JobStatus = "failed"
 )
 
+type AdmissionLeaseState string
+
+const (
+	AdmissionLeaseActive     AdmissionLeaseState = "active"
+	AdmissionLeasePreempting AdmissionLeaseState = "preempting"
+)
+
 type InstanceState string
 
 const (

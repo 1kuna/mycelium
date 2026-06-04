@@ -298,10 +298,11 @@ func TestPhase6PeerDeathRecoveryViaHeartbeat(t *testing.T) {
 		t.Fatalf("Merge: %v", err)
 	}
 	rescued := []string{}
+	liveOwner := &mocks.AdmissionController{LeaseForJobVal: domain.Lease{ID: "lease-live", JobID: "finished-at-owner"}, LeaseForJobFound: true, JobStatusVal: domain.JobDone, JobStatusFound: true}
 	recovery := peer.Recovery{
 		Registry: registry,
-		Owners: peerLeaseInspectors{inspectors: map[string]ports.LeaseInspector{
-			"node-live": &mocks.AdmissionController{LeaseForJobVal: domain.Lease{ID: "lease-live", JobID: "finished-at-owner"}, LeaseForJobFound: true},
+		Owners: peerLeaseInspectors{owners: map[string]ports.AdmissionController{
+			"node-live": liveOwner,
 		}},
 		Rescue: func(_ context.Context, rec domain.JobRecord) error {
 			rescued = append(rescued, rec.JobID)
@@ -330,6 +331,9 @@ func TestPhase6PeerDeathRecoveryViaHeartbeat(t *testing.T) {
 	}
 	if len(dead) != 1 || dead[0].ID != "peer-dead" || !reflect.DeepEqual(rescued, []string{"queued"}) {
 		t.Fatalf("dead=%+v rescued=%+v", dead, rescued)
+	}
+	if !reflect.DeepEqual(liveOwner.Calls, []string{"job-status:finished-at-owner"}) {
+		t.Fatalf("live owner calls = %+v", liveOwner.Calls)
 	}
 }
 
@@ -368,10 +372,11 @@ func TestPhase6RegistryReplicationRecoveryWithSeparateStores(t *testing.T) {
 		t.Fatalf("SyncOnce: %v", err)
 	}
 	rescued := []string{}
+	liveOwner := &mocks.AdmissionController{LeaseForJobVal: domain.Lease{ID: "lease-live", JobID: finishedAtOwner.JobID}, LeaseForJobFound: true, JobStatusVal: domain.JobDone, JobStatusFound: true}
 	recovery := peer.Recovery{
 		Registry: liveStore,
-		Owners: peerLeaseInspectors{inspectors: map[string]ports.LeaseInspector{
-			"node-live": &mocks.AdmissionController{LeaseForJobVal: domain.Lease{ID: "lease-live", JobID: finishedAtOwner.JobID}, LeaseForJobFound: true},
+		Owners: peerLeaseInspectors{owners: map[string]ports.AdmissionController{
+			"node-live": liveOwner,
 		}},
 		Rescue: func(_ context.Context, rec domain.JobRecord) error {
 			rescued = append(rescued, rec.JobID)
@@ -384,6 +389,9 @@ func TestPhase6RegistryReplicationRecoveryWithSeparateStores(t *testing.T) {
 	}
 	if count != 1 || !reflect.DeepEqual(rescued, []string{"queued"}) {
 		t.Fatalf("count=%d rescued=%+v", count, rescued)
+	}
+	if !reflect.DeepEqual(liveOwner.Calls, []string{"job-status:finished-at-owner"}) {
+		t.Fatalf("live owner calls = %+v", liveOwner.Calls)
 	}
 }
 
@@ -535,19 +543,59 @@ func (a *peerRaceAdmission) Release(context.Context, string) error {
 }
 
 func (a *peerRaceAdmission) Preempt(context.Context, string, string) error {
-	return nil
+	return errors.New("direct lease preemption is disabled; use policy-aware owner admission preemptions")
 }
 
 type peerLeaseInspectors struct {
 	inspectors map[string]ports.LeaseInspector
+	owners     map[string]ports.AdmissionController
 }
 
 func (r peerLeaseInspectors) LeaseInspector(nodeID string) (ports.LeaseInspector, error) {
+	if owner := r.owners[nodeID]; owner != nil {
+		inspector, ok := owner.(ports.LeaseInspector)
+		if !ok {
+			return nil, domain.ErrUnsupported
+		}
+		return inspector, nil
+	}
 	inspector := r.inspectors[nodeID]
 	if inspector == nil {
 		return nil, domain.ErrUnreachable
 	}
 	return inspector, nil
+}
+
+func (r peerLeaseInspectors) JobStatusInspector(nodeID string) (ports.JobStatusInspector, error) {
+	if owner := r.owners[nodeID]; owner != nil {
+		inspector, ok := owner.(ports.JobStatusInspector)
+		if !ok {
+			return nil, domain.ErrUnsupported
+		}
+		return inspector, nil
+	}
+	inspector := r.inspectors[nodeID]
+	if inspector == nil {
+		return nil, domain.ErrUnreachable
+	}
+	if statusInspector, ok := inspector.(ports.JobStatusInspector); ok {
+		return statusInspector, nil
+	}
+	return peerStatusNotFound{}, nil
+}
+
+func (r peerLeaseInspectors) AdmissionController(nodeID string) (ports.AdmissionController, error) {
+	owner := r.owners[nodeID]
+	if owner == nil {
+		return nil, domain.ErrUnreachable
+	}
+	return owner, nil
+}
+
+type peerStatusNotFound struct{}
+
+func (peerStatusNotFound) JobStatus(context.Context, string) (domain.JobStatus, bool, error) {
+	return "", false, nil
 }
 
 type separateStoreRegistryClient struct {

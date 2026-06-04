@@ -73,13 +73,20 @@ type Claim struct {
 }
 
 type AdmissionRequest struct {
-	Job            Job    `json:"job"`
-	Preset         Preset `json:"preset,omitempty"`
-	Claim          Claim  `json:"claim"`
-	NodeID         string `json:"node_id,omitempty"`
-	AcceleratorSet []int  `json:"accelerator_set,omitempty"`
-	InstanceID     string `json:"instance_id,omitempty"`
-	ReservationID  string `json:"reservation_id,omitempty"`
+	Job            Job                `json:"job"`
+	Preset         Preset             `json:"preset,omitempty"`
+	Claim          Claim              `json:"claim"`
+	NodeID         string             `json:"node_id,omitempty"`
+	AcceleratorSet []int              `json:"accelerator_set,omitempty"`
+	InstanceID     string             `json:"instance_id,omitempty"`
+	ReservationID  string             `json:"reservation_id,omitempty"`
+	Preemptions    []PreemptionTarget `json:"preemptions,omitempty"`
+}
+
+type PreemptionTarget struct {
+	LeaseID    string `json:"lease_id"`
+	InstanceID string `json:"instance_id,omitempty"`
+	Reason     string `json:"reason"`
 }
 
 type LoadRequest struct {
@@ -249,6 +256,8 @@ type JobRecord struct {
 	Request         []byte        `json:"request"`
 	Handling        HandlingClass `json:"handling,omitempty"`
 	PayloadRedacted bool          `json:"payload_redacted,omitempty"`
+	CleanupRequired bool          `json:"cleanup_required,omitempty"`
+	CleanupError    string        `json:"cleanup_error,omitempty"`
 	RecoveryNote    string        `json:"recovery_note,omitempty"`
 	Fence           uint64        `json:"fence"`
 	UpdatedAt       time.Time     `json:"updated_at"`
@@ -287,13 +296,15 @@ type AdmissionState struct {
 }
 
 type AdmissionOfferRecord struct {
-	Offer  LeaseOffer `json:"offer"`
-	Job    Job        `json:"job"`
-	Preset Preset     `json:"preset,omitempty"`
+	Offer       LeaseOffer         `json:"offer"`
+	Job         Job                `json:"job"`
+	Preset      Preset             `json:"preset,omitempty"`
+	Preemptions []PreemptionTarget `json:"preemptions,omitempty"`
 }
 
 type AdmissionLeaseRecord struct {
-	Lease Lease `json:"lease"`
+	Lease Lease               `json:"lease"`
+	State AdmissionLeaseState `json:"state,omitempty"`
 }
 
 type Project struct {
@@ -329,9 +340,13 @@ type RecommendationRecord struct {
 }
 
 type ProcessRef struct {
-	PID  int    `json:"pid"`
-	Kind string `json:"kind"`
-	Ref  string `json:"ref"`
+	PID       int       `json:"pid"`
+	PGID      int       `json:"pgid,omitempty"`
+	Kind      string    `json:"kind"`
+	Ref       string    `json:"ref"`
+	Binary    string    `json:"binary,omitempty"`
+	Args      []string  `json:"args,omitempty"`
+	StartedAt time.Time `json:"started_at,omitempty"`
 }
 
 type JoinTokenRecord struct {

@@ -120,13 +120,14 @@ func (h *Heartbeat) miss(ctx context.Context, peer domain.Peer) (domain.Peer, er
 	}
 	beat.misses++
 	if beat.misses >= h.MaxMisses {
-		beat.dead = true
-		h.known[peer.ID] = beat
 		if h.OnDead != nil {
 			if err := h.OnDead(ctx, peer); err != nil {
+				h.known[peer.ID] = beat
 				return domain.Peer{}, err
 			}
 		}
+		beat.dead = true
+		h.known[peer.ID] = beat
 		return peer, nil
 	}
 	h.known[peer.ID] = beat

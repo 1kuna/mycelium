@@ -68,6 +68,9 @@ type SubmitHooks struct {
 }
 
 func (s *Service) Submit(ctx context.Context, job domain.Job, hooks ...SubmitHooks) (Result, error) {
+	if s.Coordinator != nil {
+		return Result{}, fmt.Errorf("coordinated scheduler service requires SubmitWithPayload")
+	}
 	return s.submitLocal(ctx, job, hooks...)
 }
 
@@ -109,12 +112,13 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 		return Result{Decision: decision}, nil
 	}
 
-	if err := s.enactPreemption(ctx, job, decision, fleet); err != nil {
+	preemptedLeases, preemptedVictims, err := s.inspectPreemptions(ctx, decision, fleet)
+	if err != nil {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(ctx, job)
 		return Result{Decision: decision}, err
 	}
-	ownerLease, owner, err := s.commitOwnerAdmission(ctx, job, decision)
+	ownerLease, owner, err := s.commitOwnerAdmission(ctx, job, decision, preemptedLeases)
 	if err != nil {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(ctx, job)
@@ -129,6 +133,14 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 		}
 		ownerLease = domain.Lease{}
 		return nil
+	}
+	if err := s.finishPreemption(ctx, decision, fleet, preemptedLeases, preemptedVictims); err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		if releaseErr := releaseOwner(); releaseErr != nil {
+			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
+		}
+		return Result{Decision: decision, Lease: ownerLease}, err
 	}
 	if decision.InstanceID == "" {
 		if err := runBeforeColdLoadHook(ctx, decision, hooks); err != nil {
@@ -162,12 +174,21 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 	}
 	job.Status = domain.JobRunning
 	if err := s.Store.SaveInstance(ctx, inst); err != nil {
+		if cleanupErr := s.cleanupLoadedInstance(ctx, inst, decision.InstanceID == "", releaseOwner); cleanupErr != nil {
+			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
+		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
 	if err := s.Store.SaveLease(ctx, lease); err != nil {
+		if cleanupErr := s.cleanupLoadedInstance(ctx, inst, decision.InstanceID == "", releaseOwner); cleanupErr != nil {
+			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
+		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
 	if err := s.Store.SaveJob(ctx, job); err != nil {
+		if cleanupErr := s.cleanupLoadedInstance(ctx, inst, decision.InstanceID == "", releaseOwner); cleanupErr != nil {
+			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
+		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
 	return Result{Decision: decision, Instance: inst, Lease: lease}, nil
@@ -219,7 +240,8 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		_ = s.Store.SaveJob(ctx, job)
 		return Result{Decision: decision}, err
 	}
-	if err := s.enactPreemption(ctx, job, decision, fleet); err != nil {
+	preemptedLeases, preemptedVictims, err := s.inspectPreemptions(ctx, decision, fleet)
+	if err != nil {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(ctx, job)
 		return Result{Decision: decision}, err
@@ -248,6 +270,14 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	}
 	if ownerLease.Claim != (domain.Claim{}) {
 		decision.Claim = ownerLease.Claim
+	}
+	if err := s.finishPreemption(ctx, decision, fleet, preemptedLeases, preemptedVictims); err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
+			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
+		}
+		return Result{Decision: decision, Lease: ownerLease}, err
 	}
 	if decision.InstanceID == "" {
 		if err := runBeforeColdLoadHook(ctx, decision, hooks); err != nil {
@@ -285,12 +315,27 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	}
 	job.Status = domain.JobRunning
 	if err := s.Store.SaveInstance(ctx, inst); err != nil {
+		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
+			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
+		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
 	if err := s.Store.SaveLease(ctx, lease); err != nil {
+		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
+			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
+		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
 	if err := s.Store.SaveJob(ctx, job); err != nil {
+		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
+			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
+		}
+		return Result{Decision: decision, Instance: inst, Lease: lease}, err
+	}
+	if err := s.Coordinator.MarkRunning(ctx, job.ID); err != nil {
+		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
+			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
+		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
 	return Result{Decision: decision, Instance: inst, Lease: lease}, nil
@@ -331,6 +376,15 @@ func (s *Service) Release(ctx context.Context, leaseID string) error {
 	if leaseID == "" {
 		return fmt.Errorf("lease id is required")
 	}
+	leases, err := s.Store.ListLeases(ctx)
+	if err != nil {
+		return err
+	}
+	for _, lease := range leases {
+		if lease.ID == leaseID {
+			return s.ReleaseJob(ctx, lease)
+		}
+	}
 	return s.Store.DeleteLease(ctx, leaseID)
 }
 
@@ -342,7 +396,10 @@ func (s *Service) ReleaseJob(ctx context.Context, lease domain.Lease) error {
 		if lease.ID == "" {
 			return nil
 		}
-		return s.Release(ctx, lease.ID)
+		if s.Owners != nil && lease.NodeID != "" {
+			return s.releaseOwnerLease(ctx, lease)
+		}
+		return s.Store.DeleteLease(ctx, lease.ID)
 	}
 	if s.Coordinator != nil {
 		if err := s.Coordinator.Release(ctx, lease.JobID); err != nil {
@@ -358,6 +415,56 @@ func (s *Service) ReleaseJob(ctx context.Context, lease domain.Lease) error {
 		return nil
 	}
 	return s.Store.DeleteLease(ctx, lease.ID)
+}
+
+func (s *Service) CompleteJob(ctx context.Context, job domain.Job, lease domain.Lease) error {
+	if err := s.validate(); err != nil {
+		return err
+	}
+	job.Status = domain.JobDone
+	job.Error = ""
+	if s.Coordinator != nil && lease.JobID != "" {
+		if err := s.Coordinator.Complete(ctx, lease.JobID); err != nil {
+			return err
+		}
+	}
+	if err := s.Store.SaveJob(ctx, job); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) FailJob(ctx context.Context, job domain.Job, lease domain.Lease, cause error) error {
+	if err := s.validate(); err != nil {
+		return err
+	}
+	job.Status = domain.JobFailed
+	if cause != nil {
+		job.Error = cause.Error()
+	}
+	if s.Coordinator != nil && lease.JobID != "" {
+		if err := s.Coordinator.Fail(ctx, lease.JobID, cause); err != nil {
+			return err
+		}
+	}
+	if err := s.Store.SaveJob(ctx, job); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) FinishJob(ctx context.Context, job domain.Job, lease domain.Lease, cause error) error {
+	cleanupCtx := cleanupContext(ctx)
+	var terminalErr error
+	if cause == nil {
+		terminalErr = s.CompleteJob(cleanupCtx, job, lease)
+	} else {
+		terminalErr = s.FailJob(cleanupCtx, job, lease, cause)
+	}
+	if terminalErr != nil {
+		return terminalErr
+	}
+	return s.ReleaseJob(cleanupCtx, lease)
 }
 
 func (s *Service) releaseOwnerLease(ctx context.Context, lease domain.Lease) error {
@@ -385,7 +492,7 @@ func (s *Service) ExpireLeases(ctx context.Context) (int, error) {
 		if lease.ExpiresAt.IsZero() || lease.ExpiresAt.After(now) {
 			continue
 		}
-		if err := s.Store.DeleteLease(ctx, lease.ID); err != nil {
+		if err := s.ReleaseJob(ctx, lease); err != nil {
 			return expired, err
 		}
 		expired++
@@ -400,7 +507,11 @@ func (s *Service) validate() error {
 	return nil
 }
 
-func (s *Service) commitOwnerAdmission(ctx context.Context, job domain.Job, decision domain.PlacementDecision) (domain.Lease, ports.AdmissionController, error) {
+func (s *Service) commitOwnerAdmission(ctx context.Context, job domain.Job, decision domain.PlacementDecision, preemptedLeaseArgs ...map[string]domain.Lease) (domain.Lease, ports.AdmissionController, error) {
+	preemptedLeases := map[string]domain.Lease{}
+	if len(preemptedLeaseArgs) > 0 && preemptedLeaseArgs[0] != nil {
+		preemptedLeases = preemptedLeaseArgs[0]
+	}
 	if decision.Action == domain.ActionQueued {
 		return domain.Lease{}, nil, nil
 	}
@@ -427,6 +538,7 @@ func (s *Service) commitOwnerAdmission(ctx context.Context, job domain.Job, deci
 		NodeID:         decision.NodeID,
 		AcceleratorSet: append([]int(nil), decision.AcceleratorSet...),
 		InstanceID:     decision.InstanceID,
+		Preemptions:    admissionPreemptions(job, decision, preemptedLeases),
 	})
 	if err != nil {
 		return domain.Lease{}, nil, err
@@ -450,39 +562,69 @@ func runBeforeColdLoadHook(ctx context.Context, decision domain.PlacementDecisio
 	return nil
 }
 
-func (s *Service) enactPreemption(ctx context.Context, job domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot) error {
+func (s *Service) inspectPreemptions(ctx context.Context, decision domain.PlacementDecision, fleet domain.FleetSnapshot) (map[string]domain.Lease, map[string]domain.ModelInstance, error) {
 	preemptedLeases := map[string]domain.Lease{}
-	preempted := map[string]struct{}{}
 	preemptedVictims := map[string]domain.ModelInstance{}
 	for _, victimID := range decision.Preempted {
 		victim, ok := instanceByID(fleet.Instances, victimID)
 		if !ok {
-			return fmt.Errorf("preempted instance %q is missing from fleet snapshot", victimID)
+			return nil, nil, fmt.Errorf("preempted instance %q is missing from fleet snapshot", victimID)
 		}
-		preempted[victimID] = struct{}{}
 		preemptedVictims[victimID] = victim
-		lease, err := s.preemptOwnerLease(ctx, job, decision, victim)
+		lease, err := s.inspectOwnerLease(ctx, victim)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		if lease.ID != "" {
 			preemptedLeases[victim.ID] = lease
 		}
-		agent, err := s.Nodes.NodeAgent(victim.NodeID)
-		if err != nil {
-			return err
+	}
+	return preemptedLeases, preemptedVictims, nil
+}
+
+func (s *Service) finishPreemption(ctx context.Context, decision domain.PlacementDecision, fleet domain.FleetSnapshot, preemptedLeases map[string]domain.Lease, preemptedVictims map[string]domain.ModelInstance) error {
+	cleanupCtx := cleanupContext(ctx)
+	preempted := map[string]struct{}{}
+	for _, victimID := range decision.Preempted {
+		if _, ok := preemptedVictims[victimID]; !ok {
+			return fmt.Errorf("preempted instance %q is missing from preemption inspection", victimID)
 		}
-		if err := agent.Unload(ctx, victim.ID); err != nil {
-			return err
-		}
-		if err := s.Store.DeleteInstance(ctx, victim.ID); err != nil {
-			return err
-		}
+		preempted[victimID] = struct{}{}
 	}
 	for _, replacement := range decision.Replacements {
 		if _, ok := preempted[replacement.InstanceID]; !ok {
 			return fmt.Errorf("replacement instance %q was not preempted", replacement.InstanceID)
 		}
+	}
+	for _, victimID := range decision.Preempted {
+		victim := preemptedVictims[victimID]
+		agent, err := s.Nodes.NodeAgent(victim.NodeID)
+		if err != nil {
+			return err
+		}
+		if err := agent.Unload(cleanupCtx, victim.ID); err != nil {
+			return err
+		}
+		if err := s.Store.DeleteInstance(cleanupCtx, victim.ID); err != nil {
+			return err
+		}
+		if lease, ok := preemptedLeases[victim.ID]; ok && lease.ID != "" {
+			if s.Owners == nil {
+				return fmt.Errorf("owner admission resolver is not configured")
+			}
+			owner, err := s.Owners.AdmissionController(victim.NodeID)
+			if err != nil {
+				return err
+			}
+			if err := owner.Release(cleanupCtx, lease.ID); err != nil {
+				return err
+			}
+			if err := s.Store.DeleteLease(cleanupCtx, lease.ID); err != nil {
+				return err
+			}
+		}
+	}
+	for _, replacement := range decision.Replacements {
 		victim := preemptedVictims[replacement.InstanceID]
 		lease, ok := preemptedLeases[replacement.InstanceID]
 		if !ok || lease.JobID == "" {
@@ -500,6 +642,14 @@ func (s *Service) enactPreemption(ctx context.Context, job domain.Job, decision 
 		}
 	}
 	return nil
+}
+
+func (s *Service) enactPreemption(ctx context.Context, _ domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot) error {
+	preemptedLeases, preemptedVictims, err := s.inspectPreemptions(ctx, decision, fleet)
+	if err != nil {
+		return err
+	}
+	return s.finishPreemption(ctx, decision, fleet, preemptedLeases, preemptedVictims)
 }
 
 func (s *Service) replacePreemptedInstance(ctx context.Context, lease domain.Lease, victim domain.ModelInstance, replacement domain.Replacement, fleet domain.FleetSnapshot) error {
@@ -578,14 +728,35 @@ func (s *Service) replacePreemptedInstance(ctx context.Context, lease domain.Lea
 		releaseErr := releaseOwner()
 		return errors.Join(err, unloadErr, releaseErr)
 	}
+	savedInstance := false
+	savedLease := false
+	cleanupReplacement := func() error {
+		cleanupCtx := cleanupContext(ctx)
+		unloadErr := agent.Unload(cleanupCtx, inst.ID)
+		releaseErr := releaseOwner()
+		var deleteInstanceErr error
+		var deleteLeaseErr error
+		if savedInstance {
+			deleteInstanceErr = s.Store.DeleteInstance(cleanupCtx, inst.ID)
+		}
+		if savedLease {
+			deleteLeaseErr = s.Store.DeleteLease(cleanupCtx, replacementLease.ID)
+		}
+		return errors.Join(unloadErr, releaseErr, deleteInstanceErr, deleteLeaseErr)
+	}
 	replacementJob.Status = domain.JobRunning
 	if err := s.Store.SaveInstance(ctx, inst); err != nil {
-		return err
+		return errors.Join(err, cleanupReplacement())
 	}
+	savedInstance = true
 	if err := s.Store.SaveLease(ctx, replacementLease); err != nil {
-		return err
+		return errors.Join(err, cleanupReplacement())
 	}
-	return s.Store.SaveJob(ctx, replacementJob)
+	savedLease = true
+	if err := s.Store.SaveJob(ctx, replacementJob); err != nil {
+		return errors.Join(err, cleanupReplacement())
+	}
+	return nil
 }
 
 func withOwnerRelease(err error, release func() error) error {
@@ -593,6 +764,22 @@ func withOwnerRelease(err error, release func() error) error {
 		return errors.Join(err, releaseErr)
 	}
 	return err
+}
+
+func (s *Service) cleanupLoadedInstance(ctx context.Context, inst domain.ModelInstance, cold bool, release func() error) error {
+	cleanupCtx := cleanupContext(ctx)
+	var unloadErr error
+	var deleteErr error
+	if cold && inst.ID != "" {
+		agent, err := s.Nodes.NodeAgent(inst.NodeID)
+		if err != nil {
+			unloadErr = err
+		} else {
+			unloadErr = agent.Unload(cleanupCtx, inst.ID)
+		}
+		deleteErr = s.Store.DeleteInstance(cleanupCtx, inst.ID)
+	}
+	return errors.Join(unloadErr, deleteErr, release())
 }
 
 func cleanupContext(ctx context.Context) context.Context {
@@ -663,7 +850,7 @@ func (s *Service) requeuePayload(ctx context.Context, jobID string) ([]byte, err
 	return payload, nil
 }
 
-func (s *Service) preemptOwnerLease(ctx context.Context, job domain.Job, decision domain.PlacementDecision, victim domain.ModelInstance) (domain.Lease, error) {
+func (s *Service) inspectOwnerLease(ctx context.Context, victim domain.ModelInstance) (domain.Lease, error) {
 	if s.Owners == nil {
 		return domain.Lease{}, fmt.Errorf("owner admission resolver is not configured")
 	}
@@ -682,21 +869,32 @@ func (s *Service) preemptOwnerLease(ctx context.Context, job domain.Job, decisio
 	if !found {
 		return domain.Lease{}, nil
 	}
-	preempter, ok := owner.(ports.PolicyPreempter)
-	if !ok {
-		return domain.Lease{}, fmt.Errorf("owner admission for node %q does not expose policy-aware preemption", victim.NodeID)
-	}
-	reason := "preempted"
-	if decision.JobID != "" {
-		reason += " for " + decision.JobID
-	}
-	if err := preempter.PreemptForJob(ctx, job, lease.ID, reason); err != nil {
-		return domain.Lease{}, err
-	}
-	if err := s.Store.DeleteLease(ctx, lease.ID); err != nil {
-		return domain.Lease{}, err
-	}
 	return lease, nil
+}
+
+func admissionPreemptions(job domain.Job, decision domain.PlacementDecision, preemptedLeases map[string]domain.Lease) []domain.PreemptionTarget {
+	if len(decision.Preempted) == 0 {
+		return nil
+	}
+	targets := make([]domain.PreemptionTarget, 0, len(decision.Preempted))
+	for _, instanceID := range decision.Preempted {
+		lease := preemptedLeases[instanceID]
+		if lease.ID == "" {
+			continue
+		}
+		reason := "preempted"
+		if decision.JobID != "" {
+			reason += " for " + decision.JobID
+		} else if job.ID != "" {
+			reason += " for " + job.ID
+		}
+		targets = append(targets, domain.PreemptionTarget{
+			LeaseID:    lease.ID,
+			InstanceID: instanceID,
+			Reason:     reason,
+		})
+	}
+	return targets
 }
 
 func (s *Service) requeueJob(ctx context.Context, jobID string) (domain.Job, error) {
@@ -754,7 +952,8 @@ func (s *Service) cleanupCoordinatedLoad(ctx context.Context, jobID string, inst
 	cleanupCtx := cleanupContext(ctx)
 	unloadErr := agent.Unload(cleanupCtx, inst.ID)
 	releaseErr := s.Coordinator.Release(cleanupCtx, jobID)
-	return errors.Join(unloadErr, releaseErr)
+	deleteErr := s.Store.DeleteInstance(cleanupCtx, inst.ID)
+	return errors.Join(unloadErr, releaseErr, deleteErr)
 }
 
 func (s *Service) resolveInstance(ctx context.Context, job domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot) (domain.ModelInstance, error) {

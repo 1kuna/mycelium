@@ -228,6 +228,7 @@ func (p *Placer) selectWarmInstance(ctx context.Context, job domain.Job, preset 
 				if !p.allocator.CanStackLoad(node, inst.AcceleratorSet, fleet.Instances) || !p.allocator.Fits(node, inst.AcceleratorSet, fleet.Instances, claim) {
 					continue
 				}
+				inst.Claim = claim
 				matches = append(matches, inst)
 			}
 		}

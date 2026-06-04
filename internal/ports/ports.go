@@ -37,11 +37,19 @@ type BackendAdapter interface {
 	Stop(ctx context.Context, h Handle) error
 }
 
+type DynamicBackendAdapter interface {
+	LaunchDynamic(ctx context.Context, p domain.Preset, addr string) (Handle, error)
+}
+
 type Handle struct {
-	PID  int
-	Addr string
-	Kind string
-	Ref  string
+	PID       int
+	PGID      int
+	Addr      string
+	Kind      string
+	Ref       string
+	Binary    string
+	Args      []string
+	StartedAt time.Time
 }
 
 type NodeAgent interface {
@@ -73,6 +81,10 @@ type LeaseInspector interface {
 	LeaseForInstance(ctx context.Context, instanceID string) (domain.Lease, bool, error)
 }
 
+type JobStatusInspector interface {
+	JobStatus(ctx context.Context, jobID string) (domain.JobStatus, bool, error)
+}
+
 type LeaseBinder interface {
 	BindInstance(ctx context.Context, leaseID, instanceID string) error
 }
@@ -81,7 +93,10 @@ type Coordinator interface {
 	ClaimJob(ctx context.Context, jobID string) error
 	Plan(ctx context.Context, jobID string) (domain.PlacementDecision, error)
 	Commit(ctx context.Context, plan domain.PlacementDecision) (domain.Lease, error)
+	MarkRunning(ctx context.Context, jobID string) error
 	Release(ctx context.Context, jobID string) error
+	Complete(ctx context.Context, jobID string) error
+	Fail(ctx context.Context, jobID string, err error) error
 }
 
 type JobRegistry interface {

@@ -56,6 +56,21 @@ func TestJobRegistryPutSnapshotAndLWW(t *testing.T) {
 	if err := registry.Put(ctx, tieWinner); err != nil {
 		t.Fatalf("Put tie winner: %v", err)
 	}
+	terminal := tieWinner
+	terminal.Status = domain.JobDone
+	terminal.Fence = 3
+	terminal.Request = []byte("done")
+	if err := registry.Put(ctx, terminal); err != nil {
+		t.Fatalf("Put terminal: %v", err)
+	}
+	staleLive := terminal
+	staleLive.Status = domain.JobRunning
+	staleLive.UpdatedAt = terminal.UpdatedAt.Add(time.Hour)
+	staleLive.Fence = 4
+	staleLive.Request = []byte("stale-live")
+	if err := registry.Put(ctx, staleLive); err != nil {
+		t.Fatalf("Put stale live: %v", err)
+	}
 
 	other := fixtures.MakeJobRecord(fixtures.WithRecordJobID("job-a"))
 	other.Coordinator = "peer-a"
@@ -79,7 +94,7 @@ func TestJobRegistryPutSnapshotAndLWW(t *testing.T) {
 	if len(snap) != 3 || snap[0].JobID != "job-a" || snap[1].JobID != "job-b" || snap[2].JobID != "job-c" {
 		t.Fatalf("snapshot order = %+v", snap)
 	}
-	if snap[1].Coordinator != "peer-z" || string(snap[1].Request) != "tie" || snap[1].Status != domain.JobRunning {
+	if snap[1].Coordinator != "peer-z" || string(snap[1].Request) != "done" || snap[1].Status != domain.JobDone {
 		t.Fatalf("lww record = %+v", snap[1])
 	}
 	snap[1].Request[0] = '!'
@@ -87,7 +102,7 @@ func TestJobRegistryPutSnapshotAndLWW(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshot again: %v", err)
 	}
-	if string(again[1].Request) != "tie" {
+	if string(again[1].Request) != "done" {
 		t.Fatalf("snapshot mutated registry request: %q", again[1].Request)
 	}
 }
@@ -194,7 +209,7 @@ func TestJobRegistryWatchAndMerge(t *testing.T) {
 	}
 }
 
-func TestJobRegistryRejectsStalledWatchers(t *testing.T) {
+func TestJobRegistryDropsStalledWatchersAfterSaving(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	registry := NewJobRegistry()
@@ -210,11 +225,18 @@ func TestJobRegistryRejectsStalledWatchers(t *testing.T) {
 		}
 	}
 	overflow := fixtures.MakeJobRecord(fixtures.WithRecordJobID("job-overflow"))
-	overflow.UpdatedAt = time.Unix(100, 0).UTC()
-	if err := registry.Put(ctx, overflow); err == nil || !strings.Contains(err.Error(), "not draining") {
-		t.Fatalf("overflow err = %v", err)
+	overflow.UpdatedAt = time.Unix(1000, 0).UTC()
+	if err := registry.Put(ctx, overflow); err != nil {
+		t.Fatalf("overflow Put: %v", err)
 	}
 	for range watch {
+	}
+	snap, err := registry.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if got := snap[len(snap)-1].JobID; got != overflow.JobID {
+		t.Fatalf("saved records = %+v", snap)
 	}
 }
 

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"sort"
+	"sync"
 	"time"
 
 	"mycelium/internal/domain"
@@ -11,6 +12,7 @@ import (
 const agingInterval = time.Minute
 
 type Queue struct {
+	mu    sync.Mutex
 	clock ports.Clock
 	next  int64
 	items []queuedJob
@@ -32,11 +34,15 @@ func (q *Queue) Enqueue(job domain.Job) {
 }
 
 func (q *Queue) EnqueueWithPayload(job domain.Job, payload []byte) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.next++
 	q.items = append(q.items, queuedJob{job: job, payload: append([]byte(nil), payload...), enqueuedAt: q.clock.Now(), seq: q.next})
 }
 
 func (q *Queue) Len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	return len(q.items)
 }
 
@@ -46,6 +52,8 @@ func (q *Queue) Dequeue() (domain.Job, bool) {
 }
 
 func (q *Queue) DequeueWithPayload() (domain.Job, []byte, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	if len(q.items) == 0 {
 		return domain.Job{}, nil, false
 	}
