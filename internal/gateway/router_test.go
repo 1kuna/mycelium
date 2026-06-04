@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -76,12 +77,42 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 }
 
+func TestRouterFailsBeforeUpstreamWhenOwnerNodeCannotBeResolved(t *testing.T) {
+	preset := fixtures.MakePreset()
+	called := false
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_, _ = w.Write([]byte(openAIChatBody("should-not-run")))
+	}))
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.OnNode(node.ID))
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{inst},
+	}, staticResolver{agents: map[string]ports.NodeAgent{}})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	if _, err := router.Route(context.Background(), req); !errors.Is(err, domain.ErrUnreachable) {
+		t.Fatalf("Route err = %v", err)
+	}
+	if called {
+		t.Fatal("upstream was called after unresolved owner node")
+	}
+}
+
 func TestRouterUsesPresetProviderProfile(t *testing.T) {
 	preset := fixtures.MakePreset(fixtures.WithPresetID("claude-local"))
 	preset.ProviderProfile = "anthropic"
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/messages" {
 			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Anthropic-Version"); got != "2023-06-01" {
+			t.Fatalf("Anthropic-Version = %q", got)
 		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -121,6 +152,54 @@ func TestRouterRejectsUnknownPresetProviderProfile(t *testing.T) {
 	_, err = router.Route(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), `unknown provider profile "missing"`) {
 		t.Fatalf("Route err = %v", err)
+	}
+}
+
+func TestRouterPreflightsUpstreamBeforeColdLoad(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithPresetID("claude-local"))
+	preset.ProviderProfile = "anthropic"
+	node := fixtures.MakeNode()
+	agent := mocks.NewNodeAgent(node)
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
+		node.ID: agent,
+	}})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"claude-local","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	_, err = router.Route(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "max_tokens") {
+		t.Fatalf("Route err = %v", err)
+	}
+	if len(agent.Loaded) != 0 || len(agent.Calls) != 0 {
+		t.Fatalf("agent should not load or begin before preflight failure: calls=%+v loaded=%+v", agent.Calls, agent.Loaded)
+	}
+}
+
+func TestRouterStreamPreflightsTranslationBeforeStartingSSE(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithPresetID("claude-local"))
+	preset.ProviderProfile = "anthropic"
+	node := fixtures.MakeNode()
+	agent := mocks.NewNodeAgent(node)
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
+		node.ID: agent,
+	}})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"claude-local","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	err = router.Stream(context.Background(), req, rec)
+	if err == nil || !strings.Contains(err.Error(), "streaming openai-to-anthropic translation") {
+		t.Fatalf("Stream err = %v", err)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("stream started before preflight failure: %q", rec.Body.String())
+	}
+	if len(agent.Loaded) != 0 || len(agent.Calls) != 0 {
+		t.Fatalf("agent should not load or begin before stream preflight failure: calls=%+v loaded=%+v", agent.Calls, agent.Loaded)
 	}
 }
 
@@ -284,6 +363,175 @@ func TestRouterRecordsSessionErrorForTransportFailover(t *testing.T) {
 	}
 }
 
+func TestRouterFailsJobWhenTranslatedResponseIsLossy(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithPresetID("claude-local"))
+	preset.ProviderProfile = "anthropic"
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg-test","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool-a","name":"lookup","input":{}}],"usage":{"input_tokens":3,"output_tokens":1}}`))
+	}))
+	inst := fixtures.MakeInstance(fixtures.WithInstancePreset(preset.ID))
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: mocks.NewNodeAgent(fixtures.MakeNode())}})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"claude-local","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	_, err = router.Route(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), `content block "tool_use" cannot be translated`) {
+		t.Fatalf("Route err = %v", err)
+	}
+}
+
+func TestRouterReturnsMetricWriteErrorsAfterUpstreamSuccess(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("metric-fails")))
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: mocks.NewNodeAgent(fixtures.MakeNode())}})
+	metricErr := errors.New("metric write failed")
+	sink := &mocks.TelemetrySink{Err: metricErr}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	_, err = router.Route(context.Background(), req)
+	if !errors.Is(err, metricErr) {
+		t.Fatalf("Route err = %v", err)
+	}
+	if len(sink.SamplesOut) != 2 || len(sink.Metrics) != 0 {
+		t.Fatalf("telemetry after metric failure: samples=%+v metrics=%+v", sink.SamplesOut, sink.Metrics)
+	}
+}
+
+func TestRouterReturnsCompleteSampleErrorsAfterMetricSuccess(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("sample-fails")))
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: mocks.NewNodeAgent(fixtures.MakeNode())}})
+	sampleErr := errors.New("complete sample failed")
+	sink := &phaseFailTelemetry{failPhase: domain.TelemetryPhaseComplete, err: sampleErr}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	_, err = router.Route(context.Background(), req)
+	if !errors.Is(err, sampleErr) {
+		t.Fatalf("Route err = %v", err)
+	}
+	if len(sink.metrics) != 1 || len(sink.samples) != 3 {
+		t.Fatalf("telemetry after complete sample failure: samples=%+v metrics=%+v", sink.samples, sink.metrics)
+	}
+}
+
+func TestRouterRouteReleasesRuntimeLeaseWhenSetupTelemetryFails(t *testing.T) {
+	for _, failPhase := range []domain.TelemetryPhase{
+		domain.TelemetryPhasePlaced,
+		domain.TelemetryPhaseLoadReady,
+		domain.TelemetryPhaseUpstreamStart,
+	} {
+		t.Run(string(failPhase), func(t *testing.T) {
+			preset := fixtures.MakePreset()
+			upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Fatal("upstream should not be called after setup telemetry failure")
+			}))
+			node := fixtures.MakeNode()
+			inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_runtime"))
+			inst.Addr = upstream
+			store := &gatewayRuntimeStore{}
+			router := newRuntimeRouterForInstance(preset, node, inst, store)
+			sampleErr := fmt.Errorf("%s sample failed", failPhase)
+			router.Telemetry = &phaseFailTelemetry{failPhase: failPhase, err: sampleErr}
+			router.SelfNodeID = node.ID
+			req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+			if err != nil {
+				t.Fatalf("ParseOpenAIChat: %v", err)
+			}
+
+			if _, err := router.Route(context.Background(), req); !errors.Is(err, sampleErr) {
+				t.Fatalf("Route err = %v", err)
+			}
+			if len(store.deletedLeases) != 1 {
+				t.Fatalf("deleted leases = %+v", store.deletedLeases)
+			}
+		})
+	}
+}
+
+func TestRouterStreamWritesSetupTelemetryErrorAfterColdStart(t *testing.T) {
+	for _, failPhase := range []domain.TelemetryPhase{
+		domain.TelemetryPhasePlaced,
+		domain.TelemetryPhaseLoadReady,
+		domain.TelemetryPhaseUpstreamStart,
+	} {
+		t.Run(string(failPhase), func(t *testing.T) {
+			preset := fixtures.MakePreset()
+			upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Fatal("upstream should not be called after setup telemetry failure")
+			}))
+			node := fixtures.MakeNode()
+			inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_runtime"))
+			inst.Addr = upstream
+			store := &gatewayRuntimeStore{}
+			router := newRuntimeRouterForInstance(preset, node, inst, store)
+			sampleErr := fmt.Errorf("stream %s sample failed", failPhase)
+			router.Telemetry = &phaseFailTelemetry{failPhase: failPhase, err: sampleErr}
+			router.SelfNodeID = node.ID
+			req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+			if err != nil {
+				t.Fatalf("ParseOpenAIChat: %v", err)
+			}
+			rec := httptest.NewRecorder()
+
+			if err := router.Stream(context.Background(), req, rec); err != nil {
+				t.Fatalf("Stream returned error after start: %v", err)
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, "event: loading") || !strings.Contains(body, "event: error") || !strings.Contains(body, sampleErr.Error()) {
+				t.Fatalf("body = %q", body)
+			}
+			if len(store.deletedLeases) != 1 {
+				t.Fatalf("deleted leases = %+v", store.deletedLeases)
+			}
+		})
+	}
+}
+
+func TestStreamEventHelpersSerializeJSON(t *testing.T) {
+	decision := domain.PlacementDecision{Action: domain.ActionLoadedNew}
+	inst := domain.ModelInstance{ID: "inst-a", NodeID: "node-a"}
+	if body := string(loadingEvent(decision, inst)); !strings.Contains(body, "event: loading") || !strings.Contains(body, `"instance_id":"inst-a"`) {
+		t.Fatalf("loading event = %q", body)
+	}
+	if body := string(readyEvent(decision, inst)); !strings.Contains(body, "event: ready") || !strings.Contains(body, `"node_id":"node-a"`) {
+		t.Fatalf("ready event = %q", body)
+	}
+	rec := httptest.NewRecorder()
+	writeStreamError(rec, errors.New("bad\n\"value\""))
+	if body := rec.Body.String(); !strings.Contains(body, "event: error") || !strings.Contains(body, `bad\n\"value\"`) {
+		t.Fatalf("error event = %q", body)
+	}
+	got := quoteJSON("bad\n\"value\"")
+	var decoded string
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil || decoded != "bad\n\"value\"" {
+		t.Fatalf("quoteJSON = %s decoded=%q err=%v", got, decoded, err)
+	}
+}
+
 func TestRouterSessionTelemetryRoutingFailsLoudly(t *testing.T) {
 	ctx := context.Background()
 	sample := domain.SessionMetric{
@@ -424,6 +672,35 @@ func TestCopyAndFlushEmptyReaderStillSetsEnd(t *testing.T) {
 	}
 }
 
+func TestCopyAndFlushCapsRetainedTelemetryButCountsAllBytes(t *testing.T) {
+	body := strings.Repeat("x", MaxStreamTelemetryBodyBytes+123)
+	var out strings.Builder
+	result, err := copyAndFlush(noFlushWriter{Builder: &out}, strings.NewReader(body), (&Router{}).clock(), nil)
+	if err != nil {
+		t.Fatalf("copyAndFlush: %v", err)
+	}
+	if result.Bytes != len(body) || len(result.Body) != MaxStreamTelemetryBodyBytes || out.Len() != len(body) {
+		t.Fatalf("copy result=%+v retained=%d written=%d want bytes=%d retained=%d", result, len(result.Body), out.Len(), len(body), MaxStreamTelemetryBodyBytes)
+	}
+}
+
+func TestReadLimitedRejectsOversizeBody(t *testing.T) {
+	body, err := readLimited(strings.NewReader("abcd"), 3, "tiny body")
+	if err == nil || !strings.Contains(err.Error(), "tiny body exceeds 3") || body != nil {
+		t.Fatalf("body=%q err=%v", body, err)
+	}
+}
+
+func TestReadLimitedReturnsBodyAndReaderErrors(t *testing.T) {
+	body, err := readLimited(strings.NewReader("abc"), 3, "tiny body")
+	if err != nil || string(body) != "abc" {
+		t.Fatalf("body=%q err=%v", body, err)
+	}
+	if body, err := readLimited(errReader{}, 3, "tiny body"); err == nil || body != nil {
+		t.Fatalf("reader error body=%q err=%v", body, err)
+	}
+}
+
 func TestJoinURLPreservesExplicitSchemes(t *testing.T) {
 	if got := joinURL("https://peer.test/", "/v1/chat"); got != "https://peer.test/v1/chat" {
 		t.Fatalf("https join = %q", got)
@@ -456,6 +733,22 @@ func TestSessionRecorderHelpersUsePresetFallbacksAndNoopWhenNil(t *testing.T) {
 	}
 }
 
+func TestCleanupContextDropsCancellationButKeepsValues(t *testing.T) {
+	type contextKey string
+	parent, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey("job"), "job-a"))
+	cancel()
+	clean := cleanupContext(parent)
+	if err := clean.Err(); err != nil {
+		t.Fatalf("cleanup context err = %v", err)
+	}
+	if got := clean.Value(contextKey("job")); got != "job-a" {
+		t.Fatalf("cleanup context value = %v", got)
+	}
+	if cleanupContext(nil).Err() != nil {
+		t.Fatal("nil cleanup context should be background")
+	}
+}
+
 func TestRouterAssignsUniqueGatewayJobIDs(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -484,6 +777,37 @@ func TestRouterAssignsUniqueGatewayJobIDs(t *testing.T) {
 	}
 	if sink.Metrics[0].JobID == "" || sink.Metrics[0].JobID == sink.Metrics[1].JobID {
 		t.Fatalf("job ids are not unique: %+v", sink.Metrics)
+	}
+}
+
+func TestRouterRequiresCoordinatorRuntimeForProductionPlacement(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("upstream should not be called without coordinator runtime")
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	fakeClock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	router := &Router{
+		Placer: scheduler.NewPlacer(
+			estimate.NewInMemory(),
+			lease.NewAllocator(),
+			fakeClock,
+			preset,
+		),
+		Fleet:   staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}},
+		Nodes:   staticResolver{},
+		Presets: NewPresetRegistry(preset),
+		Client:  testUpstreams.client(),
+		Clock:   fakeClock,
+	}
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	if _, err := router.Route(context.Background(), req); err == nil || !strings.Contains(err.Error(), "requires coordinator runtime") {
+		t.Fatalf("Route err = %v", err)
 	}
 }
 
@@ -527,17 +851,21 @@ func TestParseRequestReadsMyceliumIntentHeaders(t *testing.T) {
 	httpReq.Header.Set(HeaderContextCap, "4096")
 	httpReq.Header.Set(HeaderPreemption, string(domain.PreemptHard))
 	httpReq.Header.Set(HeaderConversation, "thread-a")
-	httpReq.Header.Set(HeaderHandling, string(domain.HandlingPrivate))
 	httpReq.Header.Set(HeaderSubmitter, "submitter-a")
 
 	req, err := parseRequest(httpReq)
 	if err != nil {
 		t.Fatalf("parseRequest: %v", err)
 	}
-	if req.Project != "proj-a" || req.Priority != domain.PriorityBackground || req.SpeedPref != domain.SpeedLatency || req.ContextRequest != 4096 || req.Preemption != domain.PreemptHard || req.ConversationKey != "thread-a" || req.Handling != domain.HandlingPrivate || req.Submitter != "submitter-a" {
+	if req.Project != "proj-a" || req.Priority != domain.PriorityBackground || req.SpeedPref != domain.SpeedLatency || req.ContextRequest != 4096 || req.Preemption != domain.PreemptHard || req.ConversationKey != "thread-a" || req.Handling != "" || req.Submitter != "submitter-a" {
 		t.Fatalf("req = %+v", req)
 	}
 
+	privateReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(raw))
+	privateReq.Header.Set(HeaderHandling, string(domain.HandlingPrivate))
+	if _, err := parseRequest(privateReq); err == nil || !strings.Contains(err.Error(), "invalid X-Myc-Handling") {
+		t.Fatalf("expected private handling rejection, got %v", err)
+	}
 	httpReq.Header.Set(HeaderContextCap, "nope")
 	if _, err := parseRequest(httpReq); err == nil {
 		t.Fatal("expected invalid context cap")
@@ -546,6 +874,23 @@ func TestParseRequestReadsMyceliumIntentHeaders(t *testing.T) {
 	httpReq.Header.Set(HeaderPriority, "urgent")
 	if _, err := parseRequest(httpReq); err == nil {
 		t.Fatal("expected invalid priority")
+	}
+}
+
+func TestParseRequestIgnoresUntrustedControlHeaders(t *testing.T) {
+	raw := `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}]}`
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(raw))
+	httpReq.Header.Set(HeaderProject, "proj-a")
+	httpReq.Header.Set(HeaderPriority, "urgent")
+	httpReq.Header.Set(HeaderPreemption, string(domain.PreemptHard))
+	httpReq.Header.Set(HeaderHandling, string(domain.HandlingPrivate))
+
+	req, err := parseRequestWithControlHeaders(httpReq, false)
+	if err != nil {
+		t.Fatalf("parse untrusted: %v", err)
+	}
+	if req.Project != "" || req.Priority != "" || req.Preemption != "" || req.Handling != "" {
+		t.Fatalf("untrusted control headers were applied: %+v", req)
 	}
 }
 
@@ -602,6 +947,20 @@ func TestRouterUtilityFallbacks(t *testing.T) {
 	table := NewStickyTable(nil, 0)
 	if table.clock == nil || table.ttl == 0 {
 		t.Fatalf("sticky defaults = %+v", table)
+	}
+	var nilTable *StickyTable
+	nilTable.Delete("thread-a")
+	table.Delete("")
+	preset := fixtures.MakePreset()
+	inst := fixtures.MakeInstance(fixtures.WithInstancePreset(preset.ID))
+	table.Put("thread-a", inst)
+	table.Delete("missing")
+	if _, ok := table.Get("thread-a", preset, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}}); !ok {
+		t.Fatal("sticky entry disappeared after deleting missing key")
+	}
+	table.Delete("thread-a")
+	if got, ok := table.Get("thread-a", preset, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}}); ok {
+		t.Fatalf("sticky entry remained after delete: %+v", got)
 	}
 }
 
@@ -794,7 +1153,7 @@ func TestRouterClassifiesOverflowBeforeServerErrorFailover(t *testing.T) {
 	}
 }
 
-func TestRouterUsesStickyConversationInstance(t *testing.T) {
+func TestRouterStickyTableDoesNotBypassCoordinatorPlacement(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstreamA := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(openAIChatBody("first")))
@@ -812,8 +1171,6 @@ func TestRouterUsesStickyConversationInstance(t *testing.T) {
 		Nodes:     []domain.Node{node},
 		Instances: []domain.ModelInstance{instA, instB},
 	}, staticResolver{agents: map[string]ports.NodeAgent{node.ID: agent}})
-	router.Sticky = NewStickyTable(router.Clock, time.Minute)
-	router.Sticky.Put("thread-a", instB)
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
 	if err != nil {
 		t.Fatalf("ParseOpenAIChat: %v", err)
@@ -824,12 +1181,12 @@ func TestRouterUsesStickyConversationInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	if resp.Instance.ID != instB.ID || !strings.Contains(string(resp.Body), "sticky") {
+	if resp.Instance.ID != instA.ID || !strings.Contains(string(resp.Body), "first") {
 		t.Fatalf("resp = %+v body=%s", resp, resp.Body)
 	}
 }
 
-func TestRouterValidatesStickyInstanceThroughOwnerAdmission(t *testing.T) {
+func TestRouterWarmPlacementUsesOwnerAdmission(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(openAIChatBody("sticky")))
@@ -846,18 +1203,15 @@ func TestRouterValidatesStickyInstanceThroughOwnerAdmission(t *testing.T) {
 	store := &gatewayRuntimeStore{}
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}, resolver)
 	router.Runtime = &scheduler.Service{
-		Placer:      router.Placer,
-		Fleet:       router.Fleet,
-		Nodes:       resolver,
-		Owners:      resolver,
-		Coordinator: notClaimedCoordinator{},
-		Queue:       scheduler.NewQueue(router.Clock),
-		Store:       store,
-		Clock:       router.Clock,
-		Presets:     map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+		Placer:  router.Placer,
+		Fleet:   router.Fleet,
+		Nodes:   resolver,
+		Owners:  resolver,
+		Queue:   scheduler.NewQueue(router.Clock),
+		Store:   store,
+		Clock:   router.Clock,
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
 	}
-	router.Sticky = NewStickyTable(router.Clock, time.Minute)
-	router.Sticky.Put("thread-a", inst)
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
 	if err != nil {
 		t.Fatalf("ParseOpenAIChat: %v", err)
@@ -879,7 +1233,7 @@ func TestRouterValidatesStickyInstanceThroughOwnerAdmission(t *testing.T) {
 	}
 }
 
-func TestRouterIgnoresStickyWhenOwnerAdmissionRejects(t *testing.T) {
+func TestRouterWarmPlacementUsesCoordinatorWhenOwnerAdmissionRejectsStaleInstance(t *testing.T) {
 	preset := fixtures.MakePreset()
 	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(openAIChatBody("fallback")))
@@ -910,8 +1264,6 @@ func TestRouterIgnoresStickyWhenOwnerAdmissionRejects(t *testing.T) {
 		Clock:   router.Clock,
 		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
 	}
-	router.Sticky = NewStickyTable(router.Clock, time.Minute)
-	router.Sticky.Put("thread-a", instB)
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
 	if err != nil {
 		t.Fatalf("ParseOpenAIChat: %v", err)
@@ -925,12 +1277,12 @@ func TestRouterIgnoresStickyWhenOwnerAdmissionRejects(t *testing.T) {
 	if resp.Instance.ID != instA.ID || !strings.Contains(string(resp.Body), "fallback") {
 		t.Fatalf("resp = %+v body=%s", resp, resp.Body)
 	}
-	if len(admission.Requests) < 2 || admission.Requests[0].InstanceID != instB.ID || admission.Requests[1].InstanceID != instA.ID {
+	if len(admission.Requests) != 1 || admission.Requests[0].InstanceID != instA.ID {
 		t.Fatalf("admission requests = %+v", admission.Requests)
 	}
 }
 
-func TestRouterPrivateHandlingRequiresStorageAndLocalPlacement(t *testing.T) {
+func TestRouterRejectsPrivateHandlingUntilRecoverySemanticsExist(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(openAIChatBody("private")))
@@ -945,26 +1297,8 @@ func TestRouterPrivateHandlingRequiresStorageAndLocalPlacement(t *testing.T) {
 	req.Handling = domain.HandlingPrivate
 
 	noKey := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{remote}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
-	if _, err := noKey.Route(context.Background(), req); err == nil || !strings.Contains(err.Error(), "private storage") {
-		t.Fatalf("missing private storage err = %v", err)
-	}
-
-	remoteOnly := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{remote}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
-	remoteOnly.PrivateStorage = true
-	remoteOnly.PrivateLocalNodeID = "local-node"
-	if _, err := remoteOnly.Route(context.Background(), req); err == nil || !strings.Contains(err.Error(), "local encrypted placement") {
-		t.Fatalf("remote private placement err = %v", err)
-	}
-
-	local := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{remote}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
-	local.PrivateStorage = true
-	local.PrivateLocalNodeID = remote.ID
-	resp, err := local.Route(context.Background(), req)
-	if err != nil {
-		t.Fatalf("local private Route: %v", err)
-	}
-	if resp.Instance.NodeID != remote.ID || !strings.Contains(string(resp.Body), "private") {
-		t.Fatalf("resp = %+v body=%s", resp, resp.Body)
+	if _, err := noKey.Route(context.Background(), req); err == nil || !strings.Contains(err.Error(), "private handling is disabled") {
+		t.Fatalf("private err = %v", err)
 	}
 }
 
@@ -1122,6 +1456,59 @@ func TestRouterStreamWarmInstanceCopiesHeadersAndBody(t *testing.T) {
 	}
 }
 
+func TestRouterStreamDoesNotAppendMetricErrorAfterProviderStarted(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: metric\n\n"))
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	metricErr := errors.New("stream metric failed")
+	router.Telemetry = &mocks.TelemetrySink{}
+	router.SelfNodeID = inst.NodeID
+	router.MemorySampler = fixedMemorySampler{Err: metricErr}
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream returned error after start: %v", err)
+	}
+	if body := rec.Body.String(); body != "data: metric\n\n" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestRouterStreamDoesNotAppendCompleteSampleErrorAfterProviderStarted(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: sample\n\n"))
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	sampleErr := errors.New("stream sample failed")
+	router.Telemetry = &phaseFailTelemetry{failPhase: domain.TelemetryPhaseComplete, err: sampleErr}
+	router.SelfNodeID = inst.NodeID
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream returned error after start: %v", err)
+	}
+	if body := rec.Body.String(); body != "data: sample\n\n" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
 func TestRouterStreamWritesErrorEventAfterStarted(t *testing.T) {
 	preset := fixtures.MakePreset()
 	node := fixtures.MakeNode()
@@ -1168,13 +1555,15 @@ func TestRouterStreamWritesUpstreamErrorEventAfterStarted(t *testing.T) {
 	}
 }
 
-func TestRouterStreamWritesBuildErrorEventAfterStarted(t *testing.T) {
+func TestRouterStreamReturnsBuildErrorBeforeStarted(t *testing.T) {
 	preset := fixtures.MakePreset()
 	node := fixtures.MakeNode()
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_translate"))
 	inst.Addr = "http://example.invalid"
-	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
-		node.ID: loadNode{node: node, inst: inst},
+	agent := mocks.NewNodeAgent(node)
+	agent.Instances = []domain.ModelInstance{inst}
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{
+		node.ID: agent,
 	}})
 	req, err := translate.ParseAnthropicMessages([]byte(`{"model":"qwen2.5-9b-instruct","max_tokens":1,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`))
 	if err != nil {
@@ -1182,11 +1571,15 @@ func TestRouterStreamWritesBuildErrorEventAfterStarted(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 
-	if err := router.Stream(context.Background(), req, rec); err != nil {
-		t.Fatalf("Stream returned error after start: %v", err)
+	err = router.Stream(context.Background(), req, rec)
+	if err == nil || !strings.Contains(err.Error(), "streaming anthropic-to-openai translation") {
+		t.Fatalf("Stream err = %v", err)
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "event: error") || !strings.Contains(body, "streaming anthropic-to-openai translation") {
-		t.Fatalf("body = %q", body)
+	if rec.Body.Len() != 0 {
+		t.Fatalf("stream started before build failure: %q", rec.Body.String())
+	}
+	if len(agent.Calls) != 0 {
+		t.Fatalf("agent should not begin before build failure: %+v", agent.Calls)
 	}
 }
 
@@ -1264,6 +1657,33 @@ func TestRouterStreamEarlyErrors(t *testing.T) {
 	for _, check := range checks {
 		t.Run(check.name, func(t *testing.T) {
 			err := check.router.Stream(context.Background(), check.req, httptest.NewRecorder())
+			if err == nil || !strings.Contains(err.Error(), check.want) {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestRouterRouteEarlyErrors(t *testing.T) {
+	preset := fixtures.MakePreset()
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	checks := []struct {
+		name   string
+		router *Router
+		req    translate.IngressRequest
+		want   string
+	}{
+		{name: "unconfigured", router: &Router{}, req: req, want: "not configured"},
+		{name: "missing model", router: newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{}), req: translate.IngressRequest{Kind: translate.KindOpenAIChat}, want: "model is required"},
+		{name: "unknown model", router: newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{}), req: translate.IngressRequest{Kind: translate.KindOpenAIChat, Model: "missing"}, want: "unknown model"},
+		{name: "fleet", router: &Router{Placer: newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{}).Placer, Fleet: staticFleet{err: errors.New("fleet failed")}, Nodes: staticResolver{}, Presets: NewPresetRegistry(preset)}, req: req, want: "fleet failed"},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			_, err := check.router.Route(context.Background(), check.req)
 			if err == nil || !strings.Contains(err.Error(), check.want) {
 				t.Fatalf("err = %v", err)
 			}
@@ -1357,8 +1777,12 @@ func TestRouterStreamReturnsRuntimeReleaseError(t *testing.T) {
 		t.Fatalf("ParseOpenAIChat: %v", err)
 	}
 
-	if err := router.Stream(context.Background(), req, httptest.NewRecorder()); !errors.Is(err, deleteErr) {
+	rec := httptest.NewRecorder()
+	if err := router.Stream(context.Background(), req, rec); err != nil {
 		t.Fatalf("Stream err = %v", err)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "data: ok") || !strings.Contains(body, "event: error") || !strings.Contains(body, deleteErr.Error()) {
+		t.Fatalf("body = %q", body)
 	}
 }
 
@@ -1557,8 +1981,16 @@ func TestServerErrorResponses(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set(HeaderSpeedPref, "warp")
 	Server{Router: &Router{}}.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "X-Myc-Speed-Pref") {
+		t.Fatalf("spoofed header status/body = %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set(HeaderSpeedPref, "warp")
+	Server{Router: &Router{}, TrustControlHeaders: true}.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "X-Myc-Speed-Pref") {
-		t.Fatalf("bad header status/body = %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("trusted bad header status/body = %d %s", rec.Code, rec.Body.String())
 	}
 
 	rec = httptest.NewRecorder()
@@ -1566,6 +1998,33 @@ func TestServerErrorResponses(t *testing.T) {
 	Server{Router: &Router{}}.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("route error status = %d", rec.Code)
+	}
+}
+
+func TestServerRequiresGatewayTokenWhenConfigured(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	server := Server{Router: &Router{}, RequireAuth: true, AuthToken: "secret"}
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status/body = %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("authorized request did not reach router: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServerRejectsOversizeRequestBody(t *testing.T) {
+	rec := httptest.NewRecorder()
+	body := io.LimitReader(repeatReader{b: 'x'}, MaxGatewayRequestBodyBytes+1)
+	Server{Router: &Router{}}.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "gateway request body exceeds") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1617,13 +2076,12 @@ func TestParseRequestRoutesAndHeaders(t *testing.T) {
 	req.Header.Set(HeaderPreemption, string(domain.PreemptHard))
 	req.Header.Set(HeaderContextCap, "1234")
 	req.Header.Set(HeaderConversation, "thread-a")
-	req.Header.Set(HeaderHandling, string(domain.HandlingPrivate))
 	req.Header.Set(HeaderSubmitter, "submitter-a")
 	got, err := parseRequest(req)
 	if err != nil {
 		t.Fatalf("parse chat: %v", err)
 	}
-	if got.Project != "project-a" || got.Priority != domain.PriorityBackground || got.SpeedPref != domain.SpeedAuto || got.Preemption != domain.PreemptHard || got.ContextRequest != 1234 || got.ConversationKey != "thread-a" || got.Handling != domain.HandlingPrivate || got.Submitter != "submitter-a" {
+	if got.Project != "project-a" || got.Priority != domain.PriorityBackground || got.SpeedPref != domain.SpeedAuto || got.Preemption != domain.PreemptHard || got.ContextRequest != 1234 || got.ConversationKey != "thread-a" || got.Handling != "" || got.Submitter != "submitter-a" {
 		t.Fatalf("parsed headers = %+v", got)
 	}
 
@@ -1688,8 +2146,11 @@ func TestNodeDirectoryCombinesSnapshots(t *testing.T) {
 	if _, err := directory.LeaseInspector(node.ID); err == nil {
 		t.Fatal("plain node agent exposed lease inspection")
 	}
+	if _, err := directory.JobStatusInspector(node.ID); err == nil {
+		t.Fatal("plain node agent exposed job status inspection")
+	}
 
-	admitting := admittingAgent{NodeAgent: mocks.NewNodeAgent(node), AdmissionController: &mocks.AdmissionController{}}
+	admitting := admittingAgent{NodeAgent: mocks.NewNodeAgent(node), AdmissionController: &mocks.AdmissionController{JobStatusVal: domain.JobDone, JobStatusFound: true}}
 	directory = NodeDirectory{Agents: map[string]ports.NodeAgent{node.ID: admitting}}
 	if _, err := directory.AdmissionController(node.ID); err != nil {
 		t.Fatalf("AdmissionController: %v", err)
@@ -1697,6 +2158,19 @@ func TestNodeDirectoryCombinesSnapshots(t *testing.T) {
 	if _, err := directory.LeaseInspector(node.ID); err != nil {
 		t.Fatalf("LeaseInspector: %v", err)
 	}
+	statusInspector, err := directory.JobStatusInspector(node.ID)
+	status, found, err := mustJobStatusInspector(t, statusInspector, err).JobStatus(context.Background(), "job-a")
+	if err != nil || !found || status != domain.JobDone {
+		t.Fatalf("JobStatus = %q found=%v err=%v", status, found, err)
+	}
+}
+
+func mustJobStatusInspector(t *testing.T, inspector ports.JobStatusInspector, err error) ports.JobStatusInspector {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("JobStatusInspector: %v", err)
+	}
+	return inspector
 }
 
 func newTestRouter(preset domain.Preset, fleet domain.FleetSnapshot, nodes NodeResolver, extra ...domain.Preset) *Router {
@@ -1715,6 +2189,8 @@ func newTestRouter(preset domain.Preset, fleet domain.FleetSnapshot, nodes NodeR
 		Client:   testUpstreams.client(),
 		Clock:    fakeClock,
 		MaxTries: 2,
+
+		allowDirectPlacement: true,
 	}
 }
 
@@ -1743,6 +2219,26 @@ type fixedMemorySampler struct {
 
 func (s fixedMemorySampler) PeakMemoryMB(context.Context, string, string) (int, error) {
 	return s.Peak, s.Err
+}
+
+type phaseFailTelemetry struct {
+	failPhase domain.TelemetryPhase
+	err       error
+	metrics   []domain.RunMetric
+	samples   []domain.SessionMetric
+}
+
+func (s *phaseFailTelemetry) Record(_ context.Context, metric domain.RunMetric) error {
+	s.metrics = append(s.metrics, metric)
+	return nil
+}
+
+func (s *phaseFailTelemetry) RecordSample(_ context.Context, sample domain.SessionMetric) error {
+	s.samples = append(s.samples, sample)
+	if sample.Phase == s.failPhase {
+		return s.err
+	}
+	return nil
 }
 
 func directUpstream(handler http.Handler) string {
@@ -1789,6 +2285,9 @@ type staticResolver struct {
 }
 
 func (s staticResolver) NodeAgent(nodeID string) (ports.NodeAgent, error) {
+	if s.agents == nil {
+		return mocks.NewNodeAgent(fixtures.MakeNode(fixtures.WithNodeID(nodeID))), nil
+	}
 	agent, ok := s.agents[nodeID]
 	if !ok {
 		return nil, domain.ErrUnreachable
@@ -1928,6 +2427,17 @@ func (w noFlushWriter) Header() http.Header {
 
 func (w noFlushWriter) WriteHeader(int) {}
 
+type repeatReader struct {
+	b byte
+}
+
+func (r repeatReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = r.b
+	}
+	return len(p), nil
+}
+
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) {
@@ -1936,6 +2446,7 @@ func (errReader) Read([]byte) (int, error) {
 
 type gatewayRuntimeStore struct {
 	deletedLeases  []string
+	leases         []domain.Lease
 	deleteLeaseErr error
 }
 
@@ -1943,12 +2454,13 @@ func (s *gatewayRuntimeStore) SaveJob(context.Context, domain.Job) error {
 	return nil
 }
 
-func (s *gatewayRuntimeStore) SaveLease(context.Context, domain.Lease) error {
+func (s *gatewayRuntimeStore) SaveLease(_ context.Context, lease domain.Lease) error {
+	s.leases = append(s.leases, lease)
 	return nil
 }
 
 func (s *gatewayRuntimeStore) ListLeases(context.Context) ([]domain.Lease, error) {
-	return nil, nil
+	return append([]domain.Lease(nil), s.leases...), nil
 }
 
 func (s *gatewayRuntimeStore) DeleteLease(_ context.Context, id string) error {
@@ -1956,6 +2468,12 @@ func (s *gatewayRuntimeStore) DeleteLease(_ context.Context, id string) error {
 		return s.deleteLeaseErr
 	}
 	s.deletedLeases = append(s.deletedLeases, id)
+	for i, lease := range s.leases {
+		if lease.ID == id {
+			s.leases = append(s.leases[:i], s.leases[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 
@@ -1981,8 +2499,20 @@ func (notClaimedCoordinator) Commit(context.Context, domain.PlacementDecision) (
 	return domain.Lease{}, domain.ErrUnsupported
 }
 
+func (notClaimedCoordinator) MarkRunning(context.Context, string) error {
+	return domain.ErrUnsupported
+}
+
 func (notClaimedCoordinator) Release(_ context.Context, jobID string) error {
 	return fmt.Errorf("job %q is not claimed by this coordinator", jobID)
+}
+
+func (notClaimedCoordinator) Complete(context.Context, string) error {
+	return domain.ErrUnsupported
+}
+
+func (notClaimedCoordinator) Fail(context.Context, string, error) error {
+	return domain.ErrUnsupported
 }
 
 type rejectStickyAdmission struct {

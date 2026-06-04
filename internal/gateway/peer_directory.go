@@ -153,6 +153,18 @@ func (d *PeerDirectory) LeaseInspector(nodeID string) (ports.LeaseInspector, err
 	return inspector, nil
 }
 
+func (d *PeerDirectory) JobStatusInspector(nodeID string) (ports.JobStatusInspector, error) {
+	agent, err := d.NodeAgent(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	inspector, ok := agent.(ports.JobStatusInspector)
+	if !ok {
+		return nil, fmt.Errorf("peer node agent %q does not expose job status inspection", nodeID)
+	}
+	return inspector, nil
+}
+
 func (d *PeerDirectory) PeerForNode(nodeID string) (domain.Peer, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

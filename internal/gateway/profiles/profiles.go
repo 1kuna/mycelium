@@ -19,6 +19,7 @@ type Profile struct {
 	ChatPath       string
 	CompletionPath string
 	AnthropicPath  string
+	Headers        map[string]string
 	SupportsChat   bool
 	SupportsStream bool
 	Backend        domain.Backend
@@ -71,6 +72,7 @@ func DefaultRegistry() Registry {
 			ID:             "anthropic",
 			Format:         FormatAnthropic,
 			AnthropicPath:  "/v1/messages",
+			Headers:        map[string]string{"Anthropic-Version": "2023-06-01"},
 			SupportsChat:   true,
 			SupportsStream: true,
 		},

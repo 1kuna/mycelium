@@ -47,6 +47,8 @@ func TestOpenAIParseAndBuildUpstream(t *testing.T) {
 		Format:         profiles.FormatOpenAI,
 		ChatPath:       "/chat",
 		CompletionPath: "/complete",
+		SupportsChat:   true,
+		SupportsStream: true,
 	}
 	chat, err := ParseOpenAIChat([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`))
 	if err != nil {
@@ -73,6 +75,72 @@ func TestOpenAIParseAndBuildUpstream(t *testing.T) {
 	body, contentType, err := TranslateResponse(chat, route, []byte(`{"ok":true}`))
 	if err != nil || contentType != "application/json" || string(body) != `{"ok":true}` {
 		t.Fatalf("TranslateResponse passthrough = %q %s %v", body, contentType, err)
+	}
+}
+
+func TestBuildUpstreamCarriesProfileHeaders(t *testing.T) {
+	req, err := ParseAnthropicMessages([]byte(`{
+		"model":"claude-local",
+		"max_tokens":4,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseAnthropicMessages: %v", err)
+	}
+	profile := profiles.Profile{
+		ID:             "anthropic",
+		Format:         profiles.FormatAnthropic,
+		AnthropicPath:  "/v1/messages",
+		Headers:        map[string]string{"Anthropic-Version": "2023-06-01"},
+		SupportsChat:   true,
+		SupportsStream: true,
+	}
+	route, err := BuildUpstream(req, profile)
+	if err != nil {
+		t.Fatalf("BuildUpstream: %v", err)
+	}
+	if route.Headers["Anthropic-Version"] != "2023-06-01" {
+		t.Fatalf("headers = %+v", route.Headers)
+	}
+	profile.Headers["Anthropic-Version"] = "mutated"
+	if route.Headers["Anthropic-Version"] != "2023-06-01" {
+		t.Fatalf("headers were not cloned: %+v", route.Headers)
+	}
+}
+
+func TestProviderProfileCapabilitiesFailBeforeUpstream(t *testing.T) {
+	chat, err := ParseOpenAIChat([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	noChat := profiles.Profile{
+		ID:             "completion-only",
+		Format:         profiles.FormatOpenAI,
+		ChatPath:       "/chat",
+		CompletionPath: "/complete",
+		SupportsChat:   false,
+		SupportsStream: true,
+	}
+	if _, err := BuildUpstream(chat, noChat); err == nil || !strings.Contains(err.Error(), "does not support chat/messages") {
+		t.Fatalf("chat err = %v", err)
+	}
+	streamingCompletion, err := ParseOpenAICompletion([]byte(`{"model":"m","prompt":"hi","stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAICompletion: %v", err)
+	}
+	noStream := noChat
+	noStream.ID = "no-stream"
+	noStream.SupportsChat = true
+	noStream.SupportsStream = false
+	if _, err := BuildUpstream(streamingCompletion, noStream); err == nil || !strings.Contains(err.Error(), "does not support streaming") {
+		t.Fatalf("stream err = %v", err)
+	}
+	missingPath := noStream
+	missingPath.ID = "missing-path"
+	missingPath.SupportsStream = true
+	missingPath.ChatPath = ""
+	if _, err := BuildUpstream(chat, missingPath); err == nil || !strings.Contains(err.Error(), "has no chat path") {
+		t.Fatalf("path err = %v", err)
 	}
 }
 
@@ -226,20 +294,47 @@ func TestBuildAndTranslateUnsupportedRoutesFailLoudly(t *testing.T) {
 	if _, _, err := TranslateResponse(claude, UpstreamRequest{Translate: true}, []byte(`{`)); err == nil {
 		t.Fatal("expected bad upstream json")
 	}
-	if _, _, err := TranslateResponse(claude, UpstreamRequest{Translate: true}, []byte(`{"choices":[]}`)); err != nil {
-		t.Fatalf("empty translated response should be valid: %v", err)
+	if _, _, err := TranslateResponse(claude, UpstreamRequest{Translate: true}, []byte(`{"choices":[]}`)); err == nil || !strings.Contains(err.Error(), "no choices") {
+		t.Fatalf("empty choices err = %v", err)
 	}
 }
 
-func TestUnknownFieldsFailLoudly(t *testing.T) {
-	_, err := ParseAnthropicMessages([]byte(`{
+func TestUnknownFieldsPassThroughSameProviderAndFailOnTranslation(t *testing.T) {
+	anthropicRaw := []byte(`{
 		"model":"qwen2.5-9b-instruct",
 		"max_tokens":4,
 		"banana":true,
 		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
-	}`))
-	if err == nil || !strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("err = %v", err)
+	}`)
+	anthropic, err := ParseAnthropicMessages(anthropicRaw)
+	if err != nil {
+		t.Fatalf("ParseAnthropicMessages: %v", err)
+	}
+	route, err := BuildUpstream(anthropic, profiles.Profile{Format: profiles.FormatAnthropic, AnthropicPath: "/messages"})
+	if err != nil {
+		t.Fatalf("BuildUpstream passthrough: %v", err)
+	}
+	if string(route.Body) != string(anthropicRaw) {
+		t.Fatalf("passthrough body changed: %s", route.Body)
+	}
+	if _, err := BuildUpstream(anthropic, profiles.Profile{Format: profiles.FormatOpenAI, ChatPath: "/chat"}); err == nil || !strings.Contains(err.Error(), "cannot be translated without protocol loss") {
+		t.Fatalf("translation err = %v", err)
+	}
+
+	openAIRaw := []byte(`{"model":"m","messages":[{"role":"user","content":"hi","vendor_extension":true}],"response_format":{"type":"json_object"}}`)
+	openAI, err := ParseOpenAIChat(openAIRaw)
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	route, err = BuildUpstream(openAI, profiles.Profile{Format: profiles.FormatOpenAI, ChatPath: "/chat"})
+	if err != nil {
+		t.Fatalf("BuildUpstream openai passthrough: %v", err)
+	}
+	if string(route.Body) != string(openAIRaw) {
+		t.Fatalf("openai body changed: %s", route.Body)
+	}
+	if _, err := BuildUpstream(openAI, profiles.Profile{Format: profiles.FormatAnthropic, AnthropicPath: "/messages"}); err == nil || !strings.Contains(err.Error(), "cannot be translated without protocol loss") {
+		t.Fatalf("openai translation err = %v", err)
 	}
 }
 
@@ -362,8 +457,38 @@ func TestTranslatedOpenAIResponseBecomesAnthropicMessage(t *testing.T) {
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("unmarshal translated response: %v", err)
 	}
-	if out.Content[0].Text != "hello" || out.Usage.InputTokens != 3 || out.Usage.OutputTokens != 1 {
+	if out.Content[0].Text != "hello" || out.StopReason != "end_turn" || out.Usage.InputTokens != 3 || out.Usage.OutputTokens != 1 {
 		t.Fatalf("out = %+v", out)
+	}
+}
+
+func TestOpenAIResponseToAnthropicUnsupportedFieldsFailLoudly(t *testing.T) {
+	req, err := ParseAnthropicMessages([]byte(`{
+		"model":"qwen2.5-9b-instruct",
+		"max_tokens":4,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseAnthropicMessages: %v", err)
+	}
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "reasoning", body: `{"choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning_content":"hidden"}}]}`, want: "unsupported fields"},
+		{name: "tool calls", body: `{"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call","type":"function","function":{"name":"x","arguments":"{}"}}]}}]}`, want: "tool/function"},
+		{name: "image content", body: `{"choices":[{"index":0,"message":{"role":"assistant","content":[{"type":"image_url","image_url":{"url":"x"}}]}}]}`, want: "content part"},
+		{name: "wrong role", body: `{"choices":[{"index":0,"message":{"role":"tool","content":"done"}}]}`, want: "role"},
+		{name: "multi choice", body: `{"choices":[{"index":0,"message":{"role":"assistant","content":"a"}},{"index":1,"message":{"role":"assistant","content":"b"}}]}`, want: "multi-choice"},
+		{name: "content filter", body: `{"choices":[{"index":0,"message":{"role":"assistant","content":"redacted"},"finish_reason":"content_filter"}]}`, want: "content-filter"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := TranslateResponse(req, UpstreamRequest{Translate: true}, []byte(tc.body)); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v want %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -391,7 +516,7 @@ func TestTranslatedAnthropicResponseBecomesOpenAIResponses(t *testing.T) {
 	if err := json.Unmarshal(body, &chatOut); err != nil {
 		t.Fatalf("unmarshal chat: %v", err)
 	}
-	if chatOut.Choices[0].Message.Content != "hello" || chatOut.Usage.TotalTokens != 5 {
+	if chatOut.Choices[0].Message.Content != "hello" || chatOut.Choices[0].FinishReason != "stop" || chatOut.Usage.TotalTokens != 5 {
 		t.Fatalf("chatOut = %+v", chatOut)
 	}
 
@@ -416,6 +541,66 @@ func TestTranslatedAnthropicResponseBecomesOpenAIResponses(t *testing.T) {
 	}
 	if completionOut.Choices[0].Text != "done" || completionOut.Usage.TotalTokens != 3 {
 		t.Fatalf("completionOut = %+v", completionOut)
+	}
+}
+
+func TestAnthropicResponseStopReasonsFailLoudlyWhenLossy(t *testing.T) {
+	chat, err := ParseOpenAIChat([]byte(`{"model":"local-claude","max_tokens":4,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	cases := []string{"tool_use", "pause_turn", "refusal", "weird"}
+	for _, reason := range cases {
+		t.Run(reason, func(t *testing.T) {
+			body := []byte(`{
+				"id":"msg-test",
+				"type":"message",
+				"role":"assistant",
+				"model":"local-claude",
+				"content":[{"type":"text","text":"hello"}],
+				"stop_reason":"` + reason + `"
+			}`)
+			if _, _, err := TranslateResponse(chat, UpstreamRequest{Translate: true}, body); err == nil || !strings.Contains(err.Error(), "stop_reason") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestStopReasonMappingContracts(t *testing.T) {
+	openAI := map[string]string{"": "", "stop": "end_turn", "length": "max_tokens"}
+	for in, want := range openAI {
+		got, err := openAIStopReasonToAnthropic(in)
+		if err != nil || got != want {
+			t.Fatalf("openai stop %q = %q %v, want %q", in, got, err, want)
+		}
+	}
+	for _, reason := range []string{"tool_calls", "function_call", "content_filter", "weird"} {
+		if _, err := openAIStopReasonToAnthropic(reason); err == nil {
+			t.Fatalf("openai stop %q accepted", reason)
+		}
+	}
+
+	anthropic := map[string]string{"": "", "end_turn": "stop", "stop_sequence": "stop", "max_tokens": "length"}
+	for in, want := range anthropic {
+		got, err := anthropicStopReasonToOpenAI(in)
+		if err != nil || got != want {
+			t.Fatalf("anthropic stop %q = %q %v, want %q", in, got, err, want)
+		}
+	}
+	for _, reason := range []string{"tool_use", "pause_turn", "refusal", "weird"} {
+		if _, err := anthropicStopReasonToOpenAI(reason); err == nil {
+			t.Fatalf("anthropic stop %q accepted", reason)
+		}
+	}
+}
+
+func TestWithModelFailsLoudOnBadBodyOrKind(t *testing.T) {
+	if _, err := WithModel(IngressRequest{Kind: KindOpenAIChat, Body: []byte(`{`)}, "m"); err == nil {
+		t.Fatal("bad JSON body accepted")
+	}
+	if _, err := WithModel(IngressRequest{Kind: "weird"}, "m"); err == nil || !strings.Contains(err.Error(), "unsupported ingress kind") {
+		t.Fatalf("kind err = %v", err)
 	}
 }
 

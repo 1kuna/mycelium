@@ -211,7 +211,7 @@ func TestRollupContextComputesStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RollupContext: %v", err)
 	}
-	if stats.Count != 5 || stats.Average != 3000 || stats.P95 != 4000 || stats.LifetimeMax != 5000 {
+	if stats.Count != 5 || stats.Average != 3000 || stats.P95 != 5000 || stats.LifetimeMax != 5000 {
 		t.Fatalf("stats = %+v", stats)
 	}
 

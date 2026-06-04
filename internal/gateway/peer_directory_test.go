@@ -17,7 +17,7 @@ import (
 func TestPeerDirectoryBuildsFleetFromComputePeers(t *testing.T) {
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
 	inst := fixtures.MakeInstance(fixtures.OnNode(node.ID))
-	agent := admittingAgent{NodeAgent: mocks.NewNodeAgent(node), AdmissionController: &mocks.AdmissionController{}}
+	agent := admittingAgent{NodeAgent: mocks.NewNodeAgent(node), AdmissionController: &mocks.AdmissionController{JobStatusVal: domain.JobDone, JobStatusFound: true}}
 	agent.Instances = []domain.ModelInstance{inst}
 	seenAddress := ""
 	store := &recordingPeerNodeStore{}
@@ -62,6 +62,11 @@ func TestPeerDirectoryBuildsFleetFromComputePeers(t *testing.T) {
 	if _, err := directory.LeaseInspector(node.ID); err != nil {
 		t.Fatalf("LeaseInspector: %v", err)
 	}
+	statusInspector, err := directory.JobStatusInspector(node.ID)
+	status, found, err := mustJobStatusInspector(t, statusInspector, err).JobStatus(context.Background(), "job-a")
+	if err != nil || !found || status != domain.JobDone {
+		t.Fatalf("JobStatus = %q found=%v err=%v", status, found, err)
+	}
 }
 
 func TestPeerDirectoryErrors(t *testing.T) {
@@ -102,6 +107,9 @@ func TestPeerDirectoryErrors(t *testing.T) {
 	}
 	if _, err := directory.LeaseInspector(node.ID); err == nil || !strings.Contains(err.Error(), "lease inspection") {
 		t.Fatalf("plain lease err = %v", err)
+	}
+	if _, err := directory.JobStatusInspector(node.ID); err == nil || !strings.Contains(err.Error(), "job status inspection") {
+		t.Fatalf("plain job status err = %v", err)
 	}
 	if got := peerAgentBaseURL("127.0.0.1:1"); got != "http://127.0.0.1:1" {
 		t.Fatalf("base = %s", got)
