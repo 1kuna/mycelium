@@ -45,6 +45,8 @@ func TestImportLocalPathAndFileURL(t *testing.T) {
 }
 
 func TestImportHuggingFaceDownloadsFile(t *testing.T) {
+	body := []byte("hf model")
+	sum := sha256.Sum256(body)
 	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/owner/repo/resolve/main/model.gguf" {
 			t.Fatalf("path = %s", r.URL.Path)
@@ -52,22 +54,23 @@ func TestImportHuggingFaceDownloadsFile(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer token-a" {
 			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
 		}
-		_, _ = w.Write([]byte("hf model"))
+		w.Header().Set("Content-Length", "8")
+		_, _ = w.Write(body)
 	}))
 	t.Setenv("MYCELIUM_HF_BASE_URL", "http://hf.test")
 	t.Setenv("HF_TOKEN", "token-a")
 
-	draft, err := importWithClient(context.Background(), "hf://owner/repo/model.gguf", client)
+	draft, err := importWithClient(context.Background(), "hf://owner/repo/model.gguf?sha256="+hex.EncodeToString(sum[:]), client)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Remove(draft.Path) })
-	body, err := os.ReadFile(draft.Path)
+	draftBody, err := os.ReadFile(draft.Path)
 	if err != nil {
 		t.Fatalf("read draft: %v", err)
 	}
-	if draft.Importer != "huggingface" || draft.Name != "model.gguf" || string(body) != "hf model" {
-		t.Fatalf("draft=%+v body=%q", draft, body)
+	if draft.Importer != "huggingface" || draft.Name != "model.gguf" || string(draftBody) != "hf model" {
+		t.Fatalf("draft=%+v body=%q", draft, draftBody)
 	}
 }
 
@@ -126,11 +129,12 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 		http.Error(w, "nope", http.StatusTeapot)
 	}))
 	t.Setenv("MYCELIUM_HF_BASE_URL", "http://hf-status.test")
-	if _, err := importWithClient(context.Background(), "hf://owner/repo/model.gguf", statusClient); err == nil || !strings.Contains(err.Error(), "huggingface download failed") {
+	hfSource := "hf://owner/repo/model.gguf?sha256=" + strings.Repeat("0", 64)
+	if _, err := importWithClient(context.Background(), hfSource, statusClient); err == nil || !strings.Contains(err.Error(), "huggingface download failed") {
 		t.Fatalf("hf status err = %v", err)
 	}
 	t.Setenv("MYCELIUM_HF_BASE_URL", "://bad")
-	if _, err := Import(context.Background(), "hf://owner/repo/model.gguf"); err == nil {
+	if _, err := Import(context.Background(), hfSource); err == nil {
 		t.Fatal("expected bad base URL error")
 	}
 	if _, err := Import(context.Background(), "hf:///repo/model.gguf"); err == nil {
@@ -138,6 +142,23 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 	}
 	if _, err := importHuggingFace(context.Background(), "%", statusClient); err == nil {
 		t.Fatal("expected invalid hf URL error")
+	}
+	if _, err := importWithClient(context.Background(), "hf://owner/repo/model.gguf", statusClient); err == nil || !strings.Contains(err.Error(), "requires sha256") {
+		t.Fatalf("hf digest err = %v", err)
+	}
+	noLengthClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("model"))
+	}))
+	modelSum := sha256.Sum256([]byte("model"))
+	t.Setenv("MYCELIUM_HF_BASE_URL", "http://hf-nolength.test")
+	if _, err := importWithClient(context.Background(), "hf://owner/repo/model.gguf?sha256="+hex.EncodeToString(modelSum[:]), noLengthClient); err == nil || !strings.Contains(err.Error(), "Content-Length") {
+		t.Fatalf("hf content length err = %v", err)
+	}
+	oversizeClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "549755813889")
+	}))
+	if _, err := importWithClient(context.Background(), "hf://owner/repo/model.gguf?sha256="+hex.EncodeToString(modelSum[:]), oversizeClient); err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("hf oversize err = %v", err)
 	}
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGING_FACE_HUB_TOKEN", "token-b")
@@ -215,7 +236,7 @@ func TestRemoteImportErrorPathsAndHelpers(t *testing.T) {
 	req := &http.Request{URL: &url.URL{Scheme: "http", Host: "127.0.0.1:1"}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := downloadDraft(ctx, req, "src", "test", "x.gguf", statusClient); err != context.Canceled {
+	if _, err := downloadDraft(ctx, req, "src", "test", "x.gguf", statusClient, downloadOptions{}); err != context.Canceled {
 		t.Fatalf("download canceled err = %v", err)
 	}
 }

@@ -21,6 +21,7 @@ type PeerConfig struct {
 	EngineProfiles       []domain.EngineProfile         `json:"engine_profiles,omitempty"`
 	JoinToken            string                         `json:"join_token"`
 	RPCToken             string                         `json:"rpc_token"`
+	GatewayToken         string                         `json:"gateway_token,omitempty"`
 	SeedPeers            []string                       `json:"seed_peers,omitempty"`
 	DiscoveryListen      string                         `json:"discovery_listen"`
 	DiscoveryAddr        string                         `json:"discovery_addr"`
@@ -114,8 +115,12 @@ func applyPeerConfigDefaults(cfg PeerConfig) PeerConfig {
 	if cfg.CatalogDir == "" {
 		cfg.CatalogDir = defaultCatalogStore()
 	}
-	if cfg.DefaultProject == "" && len(cfg.Projects) > 0 {
-		cfg.DefaultProject = cfg.Projects[0].ID
+	if cfg.DefaultProject == "" {
+		if len(cfg.Projects) > 0 {
+			cfg.DefaultProject = cfg.Projects[0].ID
+		} else {
+			cfg.DefaultProject = "default"
+		}
 	}
 	if cfg.QueueDrainMS == 0 {
 		cfg.QueueDrainMS = 1000
@@ -167,6 +172,7 @@ func savePeerJoinConfig(path string, joined PeerConfig) error {
 	}
 	persisted.JoinToken = joined.JoinToken
 	persisted.RPCToken = joined.RPCToken
+	persisted.GatewayToken = joined.GatewayToken
 	persisted.SeedPeers = append([]string(nil), joined.SeedPeers...)
 	return savePeerConfig(path, persisted)
 }

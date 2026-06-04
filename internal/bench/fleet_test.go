@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -68,6 +69,17 @@ func TestFleetBenchmarkConfigValidationRejectsBadInputs(t *testing.T) {
 	cfg.Waves[0].Jobs[0].ExpectedStatus = 700
 	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "expected_status") {
 		t.Fatalf("expected status err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Waves[0].Jobs[0].ExpectedFailure = true
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "expected_failure") {
+		t.Fatalf("expected failure without expectation err = %v", err)
+	}
+	cfg = fleetTestConfig()
+	cfg.Waves[0].Jobs[0].ExpectedFailure = true
+	cfg.Waves[0].Jobs[0].ExpectedStatus = http.StatusOK
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, true); err == nil || !strings.Contains(err.Error(), "error status") {
+		t.Fatalf("expected failure success status err = %v", err)
 	}
 
 	cfg = fleetTestConfig()
@@ -164,9 +176,29 @@ func TestFleetBenchmarkSimulationProvesConservativeScenarioAndWritesArtifacts(t 
 		}
 	}
 	for _, name := range []string{"config.json", "manifest.json", "results.json", "events.jsonl", "snapshots.jsonl", "resources.jsonl", "metrics.json", "failures.json", "report.html"} {
-		if _, err := os.Stat(filepath.Join(result.OutputDir, name)); err != nil {
+		info, err := os.Stat(filepath.Join(result.OutputDir, name))
+		if err != nil {
 			t.Fatalf("artifact %s missing: %v", name, err)
 		}
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
+			t.Fatalf("artifact %s mode = %o", name, info.Mode().Perm())
+		}
+	}
+	for _, name := range []string{result.OutputDir, filepath.Join(result.OutputDir, "outputs")} {
+		info, err := os.Stat(name)
+		if err != nil {
+			t.Fatalf("artifact dir %s missing: %v", name, err)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0700 {
+			t.Fatalf("artifact dir %s mode = %o", name, info.Mode().Perm())
+		}
+	}
+	config, err := os.ReadFile(filepath.Join(result.OutputDir, "config.json"))
+	if err != nil {
+		t.Fatalf("read config artifact: %v", err)
+	}
+	if strings.Contains(string(config), "rpc-secret") || !strings.Contains(string(config), "REDACTED") {
+		t.Fatalf("config artifact was not redacted: %s", config)
 	}
 	report, err := os.ReadFile(filepath.Join(result.OutputDir, "report.html"))
 	if err != nil || !strings.Contains(string(report), "Mycelium Fleet Benchmark") {
@@ -258,6 +290,15 @@ func TestFleetBenchmarkLiveRunnerCapturesHeadersMetricsAndOutputs(t *testing.T) 
 	}
 	if _, err := os.Stat(result.Results[0].OutputPath); err != nil {
 		t.Fatalf("output missing: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(result.Results[0].OutputPath)
+		if err != nil {
+			t.Fatalf("output stat: %v", err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("output mode = %o", info.Mode().Perm())
+		}
 	}
 }
 
@@ -733,6 +774,11 @@ func TestFleetBenchmarkFailurePathsWriteArtifacts(t *testing.T) {
 	if _, err := RunFleet(context.Background(), fleetTestConfig(), FleetRunOptions{OutputRoot: ""}); err == nil {
 		t.Fatal("missing output root accepted")
 	}
+	cfg = fleetTestConfig()
+	cfg.ID = "../escape"
+	if _, err := RunFleet(context.Background(), cfg, FleetRunOptions{OutputRoot: t.TempDir(), Simulate: true}); err == nil || !strings.Contains(err.Error(), "fleet run id") {
+		t.Fatalf("unsafe run id err = %v", err)
+	}
 }
 
 func TestFleetBenchmarkLiveRunnerFailsRequiredEvidenceCollection(t *testing.T) {
@@ -883,6 +929,23 @@ func TestFleetBenchmarkEvidenceHelpersFailLoudly(t *testing.T) {
 	if _, err := gatewayForJob(cfg.Gateways, gatewayByID(cfg.Gateways), "missing", 0); err == nil || !strings.Contains(err.Error(), "unknown gateway") {
 		t.Fatalf("unknown gateway err = %v", err)
 	}
+}
+
+func TestFleetHTTPBodyReadLimit(t *testing.T) {
+	if _, err := readFleetHTTPBody(io.LimitReader(repeatByteReader{'x'}, maxFleetHTTPBodyBytes+1), "fleet body"); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("limit err = %v", err)
+	}
+}
+
+type repeatByteReader struct {
+	b byte
+}
+
+func (r repeatByteReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = r.b
+	}
+	return len(p), nil
 }
 
 func containsProof(proofs []string, want string) bool {

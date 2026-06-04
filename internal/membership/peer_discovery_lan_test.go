@@ -101,6 +101,57 @@ func TestPeerLANDiscoveryFiltersByJoinToken(t *testing.T) {
 	assertPeerList(t, peers, err, peerA.ID)
 }
 
+func TestPeerLANDiscoveryRejectsTamperedExpiredAndReplayedSignedAdverts(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC))
+	discovery := PeerLANDiscovery{Token: "secret", Clock: clock, AdvertTTL: time.Minute}
+	peer := domain.Peer{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true, Version: "test"}
+	data, err := discovery.marshal(peer)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var advert peerAdvertisement
+	if err := json.Unmarshal(data, &advert); err != nil {
+		t.Fatalf("unmarshal advert: %v", err)
+	}
+	if advert.TokenHash == "" || advert.Nonce == "" || advert.Signature == "" || advert.ExpiresAt <= clock.Now().Unix() {
+		t.Fatalf("advert = %+v", advert)
+	}
+
+	tampered := advert
+	tampered.Peer.Addresses = []string{"127.0.0.1:9"}
+	tamperedData, err := json.Marshal(tampered)
+	if err != nil {
+		t.Fatalf("marshal tampered: %v", err)
+	}
+	seen := map[string]struct{}{}
+	conn := &fakePacketConn{readCh: make(chan packet, 4), closed: make(chan struct{})}
+	conn.readCh <- packet{data: tamperedData, addr: packetAddr("sender")}
+	if _, accepted, err := discovery.readPeer(context.Background(), conn, seen); err != nil || accepted {
+		t.Fatalf("tampered accepted=%t err=%v", accepted, err)
+	}
+
+	conn.readCh <- packet{data: data, addr: packetAddr("sender")}
+	got, accepted, err := discovery.readPeer(context.Background(), conn, seen)
+	if err != nil || !accepted || got.ID != peer.ID {
+		t.Fatalf("signed accepted=%t peer=%+v err=%v", accepted, got, err)
+	}
+	conn.readCh <- packet{data: data, addr: packetAddr("sender")}
+	if _, accepted, err := discovery.readPeer(context.Background(), conn, seen); err != nil || accepted {
+		t.Fatalf("replay accepted=%t err=%v", accepted, err)
+	}
+
+	expired := advert
+	expired.ExpiresAt = clock.Now().Add(-time.Second).Unix()
+	expiredData, err := json.Marshal(expired)
+	if err != nil {
+		t.Fatalf("marshal expired: %v", err)
+	}
+	conn.readCh <- packet{data: expiredData, addr: packetAddr("sender")}
+	if _, accepted, err := discovery.readPeer(context.Background(), conn, map[string]struct{}{}); err != nil || accepted {
+		t.Fatalf("expired accepted=%t err=%v", accepted, err)
+	}
+}
+
 func TestPeerLANDiscoveryFiltersWithPersistentTokenManager(t *testing.T) {
 	network := newPacketNetwork()
 	addr := "127.0.0.1:61005"
@@ -174,22 +225,48 @@ func TestPeerLANDiscoveryValidationAndTimeout(t *testing.T) {
 	}
 }
 
-func TestPeerLANDiscoveryRejectsMalformedPackets(t *testing.T) {
+func TestPeerLANDiscoveryIgnoresMalformedPackets(t *testing.T) {
 	network := newPacketNetwork()
 	addr := "127.0.0.1:61006"
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	discovery := PeerLANDiscovery{ListenAddr: addr, MaxPackets: 1, PacketFactory: network}
-	errs := make(chan error, 1)
+	results := make(chan struct {
+		peers []domain.Peer
+		err   error
+	}, 1)
 	go func() {
-		_, err := discovery.Peers(ctx)
-		errs <- err
+		peers, err := discovery.Peers(ctx)
+		results <- struct {
+			peers []domain.Peer
+			err   error
+		}{peers: peers, err: err}
 	}()
 	network.send(addr, []byte(`{"addresses":["127.0.0.1:1"]}`))
-	err := readErr(t, errs)
-	if err == nil || !strings.Contains(err.Error(), "peer id") {
-		t.Fatalf("malformed err = %v", err)
+	network.send(addr, []byte(`{`))
+	network.send(addr, []byte(`{"id":"peer-a","addresses":["127.0.0.1:1"]}`))
+	result := readPeerResult(t, results)
+	assertPeerList(t, result.peers, result.err, "peer-a")
+}
+
+func readPeerResult(t *testing.T, results <-chan struct {
+	peers []domain.Peer
+	err   error
+}) struct {
+	peers []domain.Peer
+	err   error
+} {
+	t.Helper()
+	select {
+	case result := <-results:
+		return result
+	case <-time.After(2 * time.Second):
+		t.Fatal("peer result was not ready")
 	}
+	return struct {
+		peers []domain.Peer
+		err   error
+	}{}
 }
 
 func TestPeerLANDiscoveryHelperBranches(t *testing.T) {
@@ -244,15 +321,12 @@ func readPeer(t *testing.T, ch <-chan domain.Peer) domain.Peer {
 
 func readErr(t *testing.T, errs <-chan error) error {
 	t.Helper()
-	for i := 0; i < 1000; i++ {
-		select {
-		case err := <-errs:
-			return err
-		default:
-			runtime.Gosched()
-		}
+	select {
+	case err := <-errs:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("error was not ready")
 	}
-	t.Fatal("error was not ready")
 	return nil
 }
 

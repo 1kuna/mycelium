@@ -239,6 +239,9 @@ func TestRunListCommandsAndProjectSet(t *testing.T) {
 	if project.LatencyTargetMS != 250 || project.ExpectedConcurrency != 3 {
 		t.Fatalf("project = %+v", project)
 	}
+	if err := Run(context.Background(), []string{"projects", "set", "--db", dbPath, "--id", "project-bad", "--priority", "urgent"}); err == nil || !strings.Contains(err.Error(), "priority") {
+		t.Fatalf("invalid project priority err = %v", err)
+	}
 
 	for _, args := range [][]string{
 		nil,
@@ -935,7 +938,7 @@ func TestRunNodesAdminCommands(t *testing.T) {
 			return
 		}
 		sawInviteAuth = true
-		_ = json.NewEncoder(w).Encode(map[string]string{"join": "mycjoin://127.0.0.1:51846?token=join-secret&rpc_token=rpc-secret"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"join": "mycjoin://127.0.0.1:51846?token=join-secret"})
 	})
 	mux.HandleFunc("/admin/tokens", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer rpc-secret" {
@@ -954,7 +957,7 @@ func TestRunNodesAdminCommands(t *testing.T) {
 			t.Fatalf("rotate body: %v", err)
 		}
 		sawRotate = body["token"] == "next-secret"
-		_ = json.NewEncoder(w).Encode(map[string]string{"join": "mycjoin://127.0.0.1:51846?token=next-secret&rpc_token=rpc-secret"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"join": "mycjoin://127.0.0.1:51846?token=next-secret"})
 	})
 	mux.HandleFunc("/admin/tokens/revoke", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer rpc-secret" {
@@ -969,10 +972,21 @@ func TestRunNodesAdminCommands(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	client := directHTTPClient(mux)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".mycelium")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "peer.json"), []byte(`{"listen":"http://peer.test","rpc_token":"rpc-secret"}`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 	for _, tt := range []struct {
 		args []string
 		want string
 	}{
+		{args: []string{"nodes", "invite"}, want: "mycjoin://127.0.0.1:51846"},
+		{args: []string{"nodes", "tokens", "list"}, want: "hash-a\ttrue\ttrue"},
 		{args: []string{"nodes", "invite", "--url", "http://peer.test", "--rpc-token", "rpc-secret"}, want: "mycjoin://127.0.0.1:51846"},
 		{args: []string{"nodes", "tokens", "list", "--url", "http://peer.test", "--rpc-token", "rpc-secret"}, want: "hash-a\ttrue\ttrue"},
 		{args: []string{"nodes", "tokens", "rotate", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--token", "next-secret"}, want: "next-secret"},
@@ -1000,8 +1014,72 @@ func TestRunNodesAdminCommands(t *testing.T) {
 			t.Fatalf("RunWithClient(%v) expected error", args)
 		}
 	}
-	if err := RunWithClient(context.Background(), []string{"nodes", "invite", "--url", "http://peer.test"}, client); err == nil {
-		t.Fatal("unauthorized invite succeeded")
+	if err := RunWithClient(context.Background(), []string{"nodes", "invite", "--url", "http://peer.test", "--rpc-token", "wrong"}, client); err == nil {
+		t.Fatal("wrong-token invite succeeded")
+	}
+}
+
+func TestNodeAdminDefaultsAndOverrides(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	defaults, err := loadNodeAdminDefaults()
+	if err != nil {
+		t.Fatalf("empty load defaults: %v", err)
+	}
+	if defaults != (nodeAdminDefaults{}) {
+		t.Fatalf("empty defaults = %+v", defaults)
+	}
+	if got := adminBaseURL(""); got != "" {
+		t.Fatalf("empty admin URL = %q", got)
+	}
+	if got := adminBaseURL("https://peer.test"); got != "https://peer.test" {
+		t.Fatalf("absolute admin URL = %q", got)
+	}
+	if got := adminBaseURL("127.0.0.1:7777"); got != "http://127.0.0.1:7777" {
+		t.Fatalf("host admin URL = %q", got)
+	}
+	if got := firstNonEmpty("", "first", "second"); got != "first" {
+		t.Fatalf("firstNonEmpty = %q", got)
+	}
+	if got := firstNonEmpty("", ""); got != "" {
+		t.Fatalf("empty firstNonEmpty = %q", got)
+	}
+
+	configDir := filepath.Join(home, ".mycelium")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	configPath := filepath.Join(configDir, "peer.json")
+	if err := os.WriteFile(configPath, []byte(`{`), 0644); err != nil {
+		t.Fatalf("write bad config: %v", err)
+	}
+	if _, err := loadNodeAdminDefaults(); err == nil || !strings.Contains(err.Error(), "parse peer config") {
+		t.Fatalf("bad config err = %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"listen":"127.0.0.1:7777","rpc_token":"rpc-secret"}`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	defaults, err = loadNodeAdminDefaults()
+	if err != nil {
+		t.Fatalf("load defaults: %v", err)
+	}
+	if defaults.BaseURL != "http://127.0.0.1:7777" || defaults.RPCToken != "rpc-secret" {
+		t.Fatalf("defaults = %+v", defaults)
+	}
+	admin, err := nodeAdminFromArgs(nil, nil)
+	if err != nil {
+		t.Fatalf("nodeAdminFromArgs: %v", err)
+	}
+	if admin.BaseURL != "http://127.0.0.1:7777" || admin.AuthToken != "rpc-secret" {
+		t.Fatalf("admin defaults = %+v", admin)
+	}
+	admin, token, err := nodeAdminWithTokenFromArgs([]string{"--url", "https://override.test", "--rpc-token", "override-secret", "--token", "join-secret"}, nil, true)
+	if err != nil {
+		t.Fatalf("nodeAdminWithTokenFromArgs: %v", err)
+	}
+	if admin.BaseURL != "https://override.test" || admin.AuthToken != "override-secret" || token != "join-secret" {
+		t.Fatalf("admin override = %+v token=%q", admin, token)
 	}
 }
 
@@ -1030,14 +1108,7 @@ func TestRunRecommendationsGenerateAndApply(t *testing.T) {
 		t.Fatalf("SavePreset large: %v", err)
 	}
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
-	for _, metric := range []domain.RunMetric{
-		{JobID: "job-a", Project: project.ID, ContextUsed: 3500, At: now},
-		{JobID: "job-b", Project: project.ID, ContextUsed: 4000, At: now.Add(time.Second)},
-	} {
-		if err := store.Record(context.Background(), metric); err != nil {
-			t.Fatalf("Record: %v", err)
-		}
-	}
+	recordSustainedContextMetrics(t, store, project.ID, now)
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -1202,6 +1273,12 @@ func TestBenchmarkGatewayClientErrors(t *testing.T) {
 	}
 }
 
+func TestControlHTTPBodyReadLimit(t *testing.T) {
+	if _, err := readControlHTTPBody(io.LimitReader(repeatByteReader{'x'}, maxControlHTTPBodyBytes+1), "control body"); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("limit err = %v", err)
+	}
+}
+
 func TestDefaultStoresUseHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1214,6 +1291,17 @@ func TestDefaultStoresUseHome(t *testing.T) {
 	if got := defaultCatalogStore(); got != filepath.Join(home, ".mycelium", "catalog") {
 		t.Fatalf("catalog store = %s", got)
 	}
+}
+
+type repeatByteReader struct {
+	b byte
+}
+
+func (r repeatByteReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = r.b
+	}
+	return len(p), nil
 }
 
 func captureStdout(t *testing.T, fn func()) string {
@@ -1255,6 +1343,26 @@ func testPresetWithContext(id string, contextLen int) domain.Preset {
 	preset := testPreset(id)
 	preset.ContextLength = contextLen
 	return preset
+}
+
+func recordSustainedContextMetrics(t *testing.T, store interface {
+	Record(context.Context, domain.RunMetric) error
+}, projectID string, start time.Time) {
+	t.Helper()
+	for i := 0; i < 25; i++ {
+		contextUsed := 3500
+		if i >= 20 {
+			contextUsed = 4000
+		}
+		if err := store.Record(context.Background(), domain.RunMetric{
+			JobID:       "ctx-" + string(rune('a'+i)),
+			Project:     projectID,
+			ContextUsed: contextUsed,
+			At:          start.Add(time.Duration(i) * time.Hour),
+		}); err != nil {
+			t.Fatalf("Record sustained metric: %v", err)
+		}
+	}
 }
 
 func controlFleetConfig() bench.FleetBenchmarkConfig {

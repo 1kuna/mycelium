@@ -4,9 +4,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"mycelium/internal/safeid"
 )
 
 func ReadProvenance(storeDir, presetID string) (Provenance, error) {
+	if err := safeid.Validate("preset id", presetID); err != nil {
+		return Provenance{}, err
+	}
 	data, err := os.ReadFile(filepath.Join(storeDir, "provenance", presetID+".json"))
 	if err != nil {
 		return Provenance{}, err

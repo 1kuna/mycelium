@@ -16,6 +16,7 @@ import (
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
+	"mycelium/internal/safeid"
 	"mycelium/internal/trace"
 )
 
@@ -100,7 +101,10 @@ func (i Installer) install(ctx context.Context, req InstallRequest, onProgress P
 		return result(domain.Preset{}, Provenance{}), err
 	}
 	now := i.now()
-	jobID := installJobID(req)
+	jobID, err := installJobID(req)
+	if err != nil {
+		return result(domain.Preset{}, Provenance{}), err
+	}
 	var state InstallState
 	if err := tr.Do("install/read_state", map[string]any{"job_id": jobID}, func() error {
 		var err error
@@ -174,6 +178,9 @@ func (i Installer) install(ctx context.Context, req InstallRequest, onProgress P
 			return result(domain.Preset{}, Provenance{}), err
 		}
 	}
+	if err := safeid.Validate("draft name", draft.Name); err != nil {
+		return result(domain.Preset{}, Provenance{}), err
+	}
 	id := req.ID
 	if id == "" {
 		id = state.PresetID
@@ -183,6 +190,9 @@ func (i Installer) install(ctx context.Context, req InstallRequest, onProgress P
 	}
 	if id == "" {
 		return result(domain.Preset{}, Provenance{}), fmt.Errorf("could not derive preset id from %q", req.Source)
+	}
+	if err := safeid.Validate("preset id", id); err != nil {
+		return result(domain.Preset{}, Provenance{}), err
 	}
 	state.PresetID = id
 	model := req.Model
@@ -334,6 +344,9 @@ func ensureStore(root string) error {
 }
 
 func readInstallState(root, jobID string) (InstallState, error) {
+	if err := safeid.Validate("install job id", jobID); err != nil {
+		return InstallState{}, err
+	}
 	path := installStatePath(root, jobID)
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -352,6 +365,9 @@ func readInstallState(root, jobID string) (InstallState, error) {
 func writeInstallState(root string, state InstallState) error {
 	if state.JobID == "" {
 		return fmt.Errorf("install job id is required")
+	}
+	if err := safeid.Validate("install job id", state.JobID); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Join(root, "jobs"), 0755); err != nil {
 		return err
@@ -429,14 +445,21 @@ func sanitizeID(s string) string {
 	return strings.Trim(idChars.ReplaceAllString(strings.ToLower(s), "-"), "-")
 }
 
-func installJobID(req InstallRequest) string {
+func installJobID(req InstallRequest) (string, error) {
 	if req.ID != "" {
-		return "install-" + req.ID
+		if err := safeid.Validate("preset id", req.ID); err != nil {
+			return "", err
+		}
+		return "install-" + req.ID, nil
 	}
-	return "install-" + sanitizeID(filepath.Base(req.Source))
+	id := sanitizeID(filepath.Base(req.Source))
+	if id == "" {
+		return "", fmt.Errorf("could not derive install job id from %q", req.Source)
+	}
+	return "install-" + id, nil
 }
 
-func InstallJobID(req InstallRequest) string {
+func InstallJobID(req InstallRequest) (string, error) {
 	return installJobID(req)
 }
 

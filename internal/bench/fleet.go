@@ -24,6 +24,7 @@ import (
 	"mycelium/internal/estimate"
 	"mycelium/internal/lease"
 	"mycelium/internal/ports"
+	"mycelium/internal/safeid"
 	"mycelium/internal/scheduler"
 	"mycelium/pkg/api"
 )
@@ -40,6 +41,8 @@ const (
 	fleetHeaderSpeedPref  = "X-Myc-Speed-Pref"
 	fleetHeaderContextCap = "X-Myc-Context-Cap"
 	fleetHeaderPreemption = "X-Myc-Preemption"
+
+	maxFleetHTTPBodyBytes int64 = 64 << 20
 )
 
 const (
@@ -307,15 +310,21 @@ func RunFleet(ctx context.Context, cfg FleetBenchmarkConfig, opts FleetRunOption
 	if err := ValidateFleetConfig(cfg, profile, opts.Simulate); err != nil {
 		return FleetRunResult{}, err
 	}
+	if opts.OutputRoot == "" {
+		return FleetRunResult{}, fmt.Errorf("output root is required")
+	}
 	runID := cfg.ID
 	if runID == "" {
 		runID = "fleet-benchmark-" + strconv.FormatInt(clk.Now().UnixNano(), 10)
 	}
-	outputDir := filepath.Join(opts.OutputRoot, runID)
-	if opts.OutputRoot == "" {
-		return FleetRunResult{}, fmt.Errorf("output root is required")
+	if err := safeid.Validate("fleet run id", runID); err != nil {
+		return FleetRunResult{}, err
 	}
-	if err := os.MkdirAll(filepath.Join(outputDir, "outputs"), 0755); err != nil {
+	outputDir := filepath.Join(opts.OutputRoot, runID)
+	if err := ensurePrivateDir(outputDir); err != nil {
+		return FleetRunResult{}, err
+	}
+	if err := ensurePrivateDir(filepath.Join(outputDir, "outputs")); err != nil {
 		return FleetRunResult{}, err
 	}
 	result := FleetRunResult{
@@ -479,6 +488,14 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 			}
 			if job.ExpectedStatus < 0 || job.ExpectedStatus > 599 {
 				return fmt.Errorf("wave %q job %q expected_status must be between 0 and 599", wave.ID, job.ID)
+			}
+			if job.ExpectedFailure {
+				if job.ExpectedStatus == 0 && job.ExpectedErrorContains == "" {
+					return fmt.Errorf("wave %q job %q expected_failure requires expected_status or expected_error_contains", wave.ID, job.ID)
+				}
+				if job.ExpectedStatus != 0 && job.ExpectedStatus < 400 {
+					return fmt.Errorf("wave %q job %q expected_failure expected_status must be an error status", wave.ID, job.ID)
+				}
 			}
 		}
 	}
@@ -807,7 +824,7 @@ func unloadFleetInstance(ctx context.Context, cfg FleetBenchmarkConfig, peer Fle
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		data, _ := io.ReadAll(resp.Body)
+		data, _ := readFleetHTTPBody(resp.Body, "fleet unload response body")
 		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(data)))
 	}
 	return nil
@@ -877,7 +894,7 @@ func submitFleetJob(ctx context.Context, cfg FleetBenchmarkConfig, waveID string
 		return result
 	}
 	defer resp.Body.Close()
-	data, readErr := io.ReadAll(resp.Body)
+	data, readErr := readFleetHTTPBody(resp.Body, "fleet gateway response body")
 	if readErr != nil {
 		result := FleetJobResult{WaveID: waveID, JobID: jobID, ModelID: model.ID, RequestModel: requestModel, GatewayID: gw.ID, StatusCode: resp.StatusCode, Error: readErr.Error(), DurationMS: duration, RetryAllowed: false, ExpectedFailure: spec.ExpectedFailure}
 		result.ExpectationErrors = validateFleetExpectation(spec, result)
@@ -928,7 +945,7 @@ func submitFleetJob(ctx context.Context, cfg FleetBenchmarkConfig, waveID string
 	}
 	text := chat.Choices[0].Message.Content
 	path := filepath.Join(outputDir, safeName(jobID)+".txt")
-	if err := os.WriteFile(path, []byte(text), 0644); err != nil {
+	if err := writePrivateFile(path, []byte(text)); err != nil {
 		result.Error = err.Error()
 		result.ExpectationErrors = validateFleetExpectation(spec, result)
 		return result
@@ -960,15 +977,20 @@ func collectSnapshots(ctx context.Context, cfg FleetBenchmarkConfig, client *htt
 			out = append(out, FleetSnapshotMark{At: clk.Now(), Stage: stage, PeerID: peer.ID, Error: err.Error()})
 			continue
 		}
-		var snap domain.NodeSnapshot
 		if resp.StatusCode >= 400 {
-			data, _ := io.ReadAll(resp.Body)
+			data, _ := readFleetHTTPBody(resp.Body, "fleet snapshot response body")
 			out = append(out, FleetSnapshotMark{At: clk.Now(), Stage: stage, PeerID: peer.ID, Error: strings.TrimSpace(string(data))})
 			_ = resp.Body.Close()
 			continue
 		}
-		err = json.NewDecoder(resp.Body).Decode(&snap)
+		data, readErr := readFleetHTTPBody(resp.Body, "fleet snapshot response body")
 		_ = resp.Body.Close()
+		var snap domain.NodeSnapshot
+		if readErr != nil {
+			out = append(out, FleetSnapshotMark{At: clk.Now(), Stage: stage, PeerID: peer.ID, Error: readErr.Error()})
+			continue
+		}
+		err = json.Unmarshal(data, &snap)
 		mark := FleetSnapshotMark{At: clk.Now(), Stage: stage, PeerID: peer.ID, Snapshot: snap}
 		if err != nil {
 			mark.Error = err.Error()
@@ -1057,22 +1079,41 @@ func collectMetrics(ctx context.Context, cfg FleetBenchmarkConfig, client *http.
 			continue
 		}
 		if resp.StatusCode >= 400 {
-			data, _ := io.ReadAll(resp.Body)
+			data, _ := readFleetHTTPBody(resp.Body, "fleet telemetry response body")
 			_ = resp.Body.Close()
 			if required {
 				failures = append(failures, FleetFailure{NodeID: peer.ID, Error: "telemetry request: " + strings.TrimSpace(string(data))})
 			}
 			continue
 		}
+		data, readErr := readFleetHTTPBody(resp.Body, "fleet telemetry response body")
+		_ = resp.Body.Close()
+		if readErr != nil {
+			if required {
+				failures = append(failures, FleetFailure{NodeID: peer.ID, Error: "telemetry read: " + readErr.Error()})
+			}
+			continue
+		}
 		var metrics []domain.RunMetric
-		if err := json.NewDecoder(resp.Body).Decode(&metrics); err == nil {
+		if err := json.Unmarshal(data, &metrics); err == nil {
 			out = append(out, metrics...)
 		} else if required {
 			failures = append(failures, FleetFailure{NodeID: peer.ID, Error: "telemetry decode: " + err.Error()})
 		}
-		_ = resp.Body.Close()
 	}
 	return out, failures
+}
+
+func readFleetHTTPBody(r io.Reader, label string) ([]byte, error) {
+	var buf bytes.Buffer
+	n, err := buf.ReadFrom(io.LimitReader(r, maxFleetHTTPBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if n > maxFleetHTTPBodyBytes {
+		return nil, fmt.Errorf("%s exceeds %d bytes", label, maxFleetHTTPBodyBytes)
+	}
+	return buf.Bytes(), nil
 }
 
 func snapshotFailures(cfg FleetBenchmarkConfig, snapshots []FleetSnapshotMark) []FleetFailure {
@@ -1418,7 +1459,7 @@ func containsAccelerator(set []int, index int) bool {
 }
 
 func writeFleetArtifacts(outputDir string, result FleetRunResult) error {
-	if err := writeJSON(filepath.Join(outputDir, "config.json"), result.Manifest.Config); err != nil {
+	if err := writeJSON(filepath.Join(outputDir, "config.json"), redactFleetConfig(result.Manifest.Config)); err != nil {
 		return err
 	}
 	if err := writeJSON(filepath.Join(outputDir, "manifest.json"), result.Manifest); err != nil {
@@ -1446,8 +1487,12 @@ func writeFleetArtifacts(outputDir string, result FleetRunResult) error {
 }
 
 func writeJSON(path string, value any) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
+		return err
+	}
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
 		return err
 	}
 	enc := json.NewEncoder(file)
@@ -1460,8 +1505,12 @@ func writeJSON(path string, value any) error {
 }
 
 func writeJSONL(path string, values any) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
+		return err
+	}
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
 		return err
 	}
 	defer file.Close()
@@ -1511,7 +1560,52 @@ func writeReport(path string, result FleetRunResult) error {
 		b.WriteString("<tr><td>" + html.EscapeString(plan.JobID) + "</td><td>" + html.EscapeString(plan.ModelID) + "</td><td>" + html.EscapeString(plan.GatewayID) + "</td><td>" + html.EscapeString(plan.Decision.NodeID) + "</td><td>" + html.EscapeString(string(plan.Decision.Action)) + "</td><td><code>" + html.EscapeString(string(trace)) + "</code></td></tr>")
 	}
 	b.WriteString("</table></body></html>")
-	return os.WriteFile(path, []byte(b.String()), 0644)
+	return writePrivateFile(path, []byte(b.String()))
+}
+
+func writePrivateFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0600)
+}
+
+func ensurePrivateDir(path string) error {
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0700)
+}
+
+func redactFleetConfig(cfg FleetBenchmarkConfig) FleetBenchmarkConfig {
+	out := cfg
+	if out.RPCToken != "" {
+		out.RPCToken = "REDACTED"
+	}
+	out.Peers = append([]FleetPeer(nil), cfg.Peers...)
+	for i := range out.Peers {
+		if out.Peers[i].RPCToken != "" {
+			out.Peers[i].RPCToken = "REDACTED"
+		}
+	}
+	out.Metadata = redactMetadata(cfg.Metadata)
+	return out
+}
+
+func redactMetadata(metadata map[string]string) map[string]string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "key") {
+			out[key] = "REDACTED"
+			continue
+		}
+		out[key] = value
+	}
+	return out
 }
 
 func defaultWaves(cfg FleetBenchmarkConfig, profile string) []FleetWave {

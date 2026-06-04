@@ -31,10 +31,13 @@ import (
 	"mycelium/internal/optimizer"
 	peercoord "mycelium/internal/peer"
 	"mycelium/internal/ports"
+	projectvalidation "mycelium/internal/project"
 	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/internal/telemetry"
 )
+
+const maxPeerRPCJSONBodyBytes = 16 << 20
 
 func runPeer(ctx context.Context, args []string) error {
 	if ctx.Err() != nil {
@@ -81,10 +84,12 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	configPath := fs.String("config", "", "peer config JSON path")
 	joinRaw := fs.String("join", "", "join token URI or raw join token")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
+	gatewayToken := fs.String("gateway-token", "", "gateway /v1 bearer token")
 	listen := fs.String("listen", "", "peer listen address override")
 	discoveryListen := fs.String("discovery-listen", "", "peer discovery listen address override")
 	discoveryAddr := fs.String("discovery-addr", "", "peer discovery broadcast address override")
-	compute := fs.Bool("compute", false, "enable local compute runtime")
+	var compute computeOverrideFlag
+	fs.Var(&compute, "compute", "local compute runtime override (on/off)")
 	backendListen := fs.String("backend-listen", "", "local backend inference server listen address")
 	id := fs.String("id", "", "local compute peer id")
 	name := fs.String("name", "", "local compute peer name")
@@ -95,7 +100,8 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	maxUtil := fs.Float64("max-util", 0, "maximum accelerator utilization")
 	diskMinFreeRatio := fs.Float64("disk-min-free-ratio", 0, "minimum free disk ratio required for placement")
 	loadTimeoutMS := fs.Int("load-timeout-ms", 0, "backend load timeout in milliseconds")
-	vramMB := fs.Int("vram-mb", 0, "local allocatable memory in MB")
+	var vramMB optionalIntFlag
+	fs.Var(&vramMB, "vram-mb", "local allocatable memory in MB; set 0 to clear config override")
 	if err := fs.Parse(args); err != nil {
 		return "", nil, nil, err
 	}
@@ -114,24 +120,37 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 			return "", nil, nil, err
 		}
 		cfg.JoinToken = join.Token
-		if join.RPCToken != "" {
-			cfg.RPCToken = join.RPCToken
-		}
 		cfg.SeedPeers = appendSeedPeer(cfg.SeedPeers, join.Address)
 	}
+	if bootstrappedConfig && *joinRaw != "" {
+		peerID, err := prefixedRandomID("peer", randomHex)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		cfg.ID = peerID
+		cfg.ComputeConfig.ID = peerID
+		if cfg.ComputeConfig.Name == "" || cfg.ComputeConfig.Name == "local-peer" || cfg.ComputeConfig.Name == "peer_local" {
+			cfg.ComputeConfig.Name = peerID
+		}
+	}
 	overrideString(rpcToken, &cfg.RPCToken)
+	overrideString(gatewayToken, &cfg.GatewayToken)
 	if cfg.JoinToken != "" && cfg.RPCToken == "" {
 		return "", nil, nil, fmt.Errorf("rpc_token is required when join_token is configured")
 	}
-	if *compute {
-		cfg.Compute = true
+	if compute.set {
+		cfg.Compute = compute.value
 	}
 	overrideString(backendListen, &cfg.ComputeConfig.BackendListen)
 	overrideString(id, &cfg.ComputeConfig.ID)
 	overrideString(id, &cfg.ID)
 	overrideString(name, &cfg.ComputeConfig.Name)
 	if *backend != "" {
-		cfg.ComputeConfig.Backend = domain.Backend(*backend)
+		normalized, err := normalizeBackend(*backend)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		cfg.ComputeConfig.Backend = normalized
 	}
 	overrideString(backendBinary, &cfg.ComputeConfig.BackendBinary)
 	overrideString(llamaServer, &cfg.ComputeConfig.LlamaServer)
@@ -145,8 +164,12 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	if *loadTimeoutMS != 0 {
 		cfg.ComputeConfig.LoadTimeoutMS = *loadTimeoutMS
 	}
-	if *vramMB != 0 {
-		cfg.ComputeConfig.VRAMMB = *vramMB
+	if vramMB.set {
+		cfg.ComputeConfig.VRAMMB = vramMB.value
+	}
+	cfg = applyPeerConfigDefaults(cfg)
+	if err := validatePeerConfig(cfg); err != nil {
+		return "", nil, nil, err
 	}
 	if bootstrappedConfig {
 		if err := savePeerConfig(resolvedConfigPath, cfg); err != nil {
@@ -184,40 +207,25 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 			return "", nil, nil, err
 		}
 		var tunnel ports.Tunnel
-		if cfg.Overlay {
-			backend, err := membership.NewLibp2pOverlayBackend(ctx, membership.Libp2pOverlayConfig{
-				ListenAddrs:    cfg.OverlayListenAddrs,
-				BootstrapPeers: cfg.OverlayBootstrap,
-				LocalTarget:    cfg.Listen,
-				TokenManager:   joinTokens,
-			})
-			if err != nil {
-				return "", nil, nil, err
-			}
-			shutdowns = append(shutdowns, func(context.Context) error { return backend.CloseHost() })
-			discovery = membership.NewOverlayDiscovery(backend)
-			tunnel = membership.NewOverlayTunnel(backend)
-		} else {
-			lan := membership.NewPeerLANDiscovery(cfg.DiscoveryListen, cfg.DiscoveryAddr)
-			lan.TokenManager = joinTokens
-			lan.ScanDuration = time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
-			scan := time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
-			cached := membership.NewCachedPeerDiscovery(lan, clock.System{}, peerDiscoveryTTL(scan))
-			if err := cached.Start(ctx, scan); err != nil {
-				return "", nil, nil, err
-			}
-			startSeedPeerProber(ctx, cached, cfg.SeedPeers, cfg.JoinToken, joinTokens, clock.System{}, scan)
-			discovery = seedRefreshingDiscovery{
-				cache:      cached,
-				seeds:      cfg.SeedPeers,
-				joinToken:  cfg.JoinToken,
-				joinTokens: joinTokens,
-				client:     peerControlHTTPClient(),
-			}
-			lanTunnel := membership.NewLANTunnel()
-			lanTunnel.AuthToken = cfg.RPCToken
-			tunnel = lanTunnel
+		lan := membership.NewPeerLANDiscovery(cfg.DiscoveryListen, cfg.DiscoveryAddr)
+		lan.TokenManager = joinTokens
+		lan.ScanDuration = time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
+		scan := time.Duration(cfg.DiscoveryScanMS) * time.Millisecond
+		cached := membership.NewCachedPeerDiscovery(lan, clock.System{}, peerDiscoveryTTL(scan))
+		if err := cached.Start(ctx, scan); err != nil {
+			return "", nil, nil, err
 		}
+		startSeedPeerProber(ctx, cached, cfg.SeedPeers, cfg.JoinToken, joinTokens, clock.System{}, scan)
+		discovery = seedRefreshingDiscovery{
+			cache:      cached,
+			seeds:      cfg.SeedPeers,
+			joinToken:  cfg.JoinToken,
+			joinTokens: joinTokens,
+			client:     peerControlHTTPClient(),
+		}
+		lanTunnel := membership.NewLANTunnel()
+		lanTunnel.AuthToken = cfg.RPCToken
+		tunnel = lanTunnel
 		peerDirectory = &gateway.PeerDirectory{Discovery: discovery, Tunnel: tunnel, Store: store, SelfID: cfg.ID, AuthToken: cfg.RPCToken}
 		fleet = peerDirectory
 		nodes = peerDirectory
@@ -232,7 +240,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		if err := store.SaveNode(ctx, local.node); err != nil {
 			return "", nil, nil, err
 		}
-		agent, err := newLocalPeerAgent(local.agent, local.admission)
+		agent, err := newLocalPeerAgent(local.agent, local.admission, store)
 		if err != nil {
 			return "", nil, nil, err
 		}
@@ -276,9 +284,18 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	jobLog := peercoord.NewRescueJobLog(peercoord.NewJobLog(), store, privateKey)
 	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
+	controlClient := peerControlHTTPClient()
 	var coordinatorOpts []peercoord.CoordinatorOption
 	if len(privateKey) > 0 {
 		coordinatorOpts = append(coordinatorOpts, peercoord.WithPrivatePayloadKey(privateKey))
+	}
+	if discovery != nil {
+		coordinatorOpts = append(coordinatorOpts, peercoord.WithRegistryPusher(peercoord.RegistryReplicator{
+			Local:  store,
+			Peers:  discovery,
+			Client: registryHTTPClient{AuthToken: cfg.RPCToken, Client: controlClient},
+			SelfID: cfg.ID,
+		}))
 	}
 	coordinator := peercoord.NewCoordinator(self, jobLog, store, placer, fleet, admissionResolver(nodes), clock.System{}, coordinatorOpts...)
 	runtime := &scheduler.Service{
@@ -298,7 +315,6 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	if discovery != nil {
 		startPeerAdvertiser(ctx, discovery, self, clock.System{}, time.Duration(cfg.DiscoveryAdvertiseMS)*time.Millisecond)
-		controlClient := peerControlHTTPClient()
 		startRegistryReplicationWithClient(ctx, store, discovery, cfg.ID, cfg.RPCToken, clock.System{}, time.Duration(cfg.RegistrySyncMS)*time.Millisecond, controlClient)
 		startPeerHeartbeatWithClient(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, joinTokens, clock.System{}, controlClient)
 	}
@@ -309,24 +325,27 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		Client:   telemetryHTTPClient{AuthToken: cfg.RPCToken, Client: peerControlHTTPClient()},
 		Interval: time.Duration(cfg.OptimizerEvalMS) * time.Millisecond,
 	})
-	handler := gateway.Server{Router: &gateway.Router{
-		Placer:              placer,
-		Fleet:               fleet,
-		Nodes:               nodes,
-		Presets:             gateway.NewPresetRegistry(presets...),
-		Runtime:             runtime,
-		Telemetry:           store,
-		TelemetryPeers:      peerDirectory,
-		TelemetryPeerClient: telemetryHTTPClient{AuthToken: cfg.RPCToken},
-		SelfNodeID:          privateLocalNodeID(cfg),
-		Reporter:            gateway.InstanceFailureReporter{Store: store, Nodes: nodes},
-		Clock:               clock.System{},
-		Sticky:              gateway.NewStickyTable(clock.System{}, 10*time.Minute),
-		Projects:            projectMap(projects),
-		DefaultProject:      cfg.DefaultProject,
-		PrivateStorage:      len(privateKey) > 0,
-		PrivateLocalNodeID:  privateLocalNodeID(cfg),
-	}}
+	authRequired := cfg.GatewayToken != "" || peerListenRequiresAuth(cfg.Listen)
+	handler := gateway.Server{
+		Router: &gateway.Router{
+			Placer:              placer,
+			Fleet:               fleet,
+			Nodes:               nodes,
+			Presets:             gateway.NewPresetRegistry(presets...),
+			Runtime:             runtime,
+			Telemetry:           store,
+			TelemetryPeers:      peerDirectory,
+			TelemetryPeerClient: telemetryHTTPClient{AuthToken: cfg.RPCToken},
+			SelfNodeID:          privateLocalNodeID(cfg),
+			Reporter:            gateway.InstanceFailureReporter{Store: store, Nodes: nodes},
+			Clock:               clock.System{},
+			Projects:            projectMap(projects),
+			DefaultProject:      cfg.DefaultProject,
+		},
+		RequireAuth:         authRequired,
+		AuthToken:           cfg.GatewayToken,
+		TrustControlHeaders: false,
+	}
 	mountPeerHTTPWithDiagnostics(mux, self, joinTokens, cfg.SeedPeers, cfg.JoinToken, cfg.RPCToken, peerControlHTTPClient())
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
 	mountTelemetryHTTP(mux, store, cfg.RPCToken)
@@ -501,7 +520,7 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 			return
 		}
 		var req catalogStageRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodePeerRPCJSON(r, &req); err != nil {
 			writePeerRPCError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -525,13 +544,25 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 			writePeerRPCError(w, http.StatusConflict, fmt.Errorf("preset %q is declared local to node %q, not %q", req.Preset.ID, req.Preset.NodeID, nodeID))
 			return
 		}
-		jobID := catalog.InstallJobID(catalog.InstallRequest{Source: source, ID: req.Preset.ID})
+		jobID, err := catalog.InstallJobID(catalog.InstallRequest{Source: source, ID: req.Preset.ID})
+		if err != nil {
+			writePeerRPCError(w, http.StatusBadRequest, err)
+			return
+		}
 		job := domain.Job{ID: jobID, TaskType: "catalog_stage", Model: source, PresetID: req.Preset.ID, Status: domain.JobQueued}
 		if err := store.SaveJob(r.Context(), job); err != nil {
 			writePeerRPCError(w, http.StatusInternalServerError, err)
 			return
 		}
-		if shouldAdoptRuntimeSource(req.Preset, source, nodeID) {
+		adoptSource, adopt, err := verifyRuntimeSourceAdoption(r.Context(), cfg, req.Preset, source, nodeID)
+		if err != nil {
+			job.Status = domain.JobFailed
+			job.Error = err.Error()
+			_ = store.SaveJob(r.Context(), job)
+			writePeerRPCError(w, http.StatusBadRequest, err)
+			return
+		}
+		if adopt {
 			staged := req.Preset
 			staged.NodeID = nodeID
 			if err := store.SavePreset(r.Context(), staged); err != nil {
@@ -544,7 +575,7 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 				NodeID:         nodeID,
 				State:          domain.ModelLocalityReady,
 				ModelRef:       staged.ModelRef,
-				Source:         source,
+				Source:         adoptSource,
 				ArtifactSizeMB: staged.ArtifactSizeMB,
 				Managed:        false,
 				Reason:         "runtime source adopted",
@@ -628,7 +659,7 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 			return
 		}
 		var req catalogEvictRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodePeerRPCJSON(r, &req); err != nil {
 			writePeerRPCError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -686,10 +717,33 @@ func shouldAdoptRuntimeSource(preset domain.Preset, source, nodeID string) bool 
 		return false
 	}
 	localSource := strings.TrimPrefix(source, "file://")
-	if info, err := os.Stat(localSource); err == nil && !info.IsDir() {
-		return false
+	info, err := os.Stat(localSource)
+	return err == nil && !info.IsDir()
+}
+
+func verifyRuntimeSourceAdoption(ctx context.Context, cfg PeerConfig, preset domain.Preset, source, nodeID string) (string, bool, error) {
+	if !shouldAdoptRuntimeSource(preset, source, nodeID) {
+		return "", false, nil
 	}
-	return true
+	if preset.Backend != "" && preset.Backend != domain.BackendLlamaCpp {
+		return "", false, fmt.Errorf("runtime source adoption for backend %s requires owner inspection; catalog stage cannot mark it ready", preset.Backend)
+	}
+	parser := cfg.GGUFParser
+	if parser == "" {
+		parser = cfg.ComputeConfig.GGUFParser
+	}
+	if parser == "" {
+		return "", false, fmt.Errorf("runtime source adoption for preset %q requires a configured gguf parser", preset.ID)
+	}
+	localSource := strings.TrimPrefix(source, "file://")
+	metadata, err := estimate.NewCommandParser(parser, nil).Parse(ctx, localSource)
+	if err != nil {
+		return "", false, err
+	}
+	if metadata.WeightsMB <= 0 {
+		return "", false, fmt.Errorf("runtime source %q reported invalid weights: %dMB", localSource, metadata.WeightsMB)
+	}
+	return localSource, true, nil
 }
 
 func modelLocalityID(nodeID, presetID string) string {
@@ -794,7 +848,7 @@ func mountAdminHTTP(mux *http.ServeMux, cfg *PeerConfig, configPath string, join
 		}
 		var req adminTokenRequest
 		if r.Body != nil && r.ContentLength != 0 {
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if err := decodePeerRPCJSON(r, &req); err != nil {
 				writePeerRPCError(w, http.StatusBadRequest, err)
 				return
 			}
@@ -836,7 +890,7 @@ func mountAdminHTTP(mux *http.ServeMux, cfg *PeerConfig, configPath string, join
 			return
 		}
 		var req adminTokenRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodePeerRPCJSON(r, &req); err != nil {
 			writePeerRPCError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -853,7 +907,7 @@ func mountAdminHTTP(mux *http.ServeMux, cfg *PeerConfig, configPath string, join
 }
 
 func adminJoinURI(cfg PeerConfig, requestHost string) (string, error) {
-	return membership.BuildJoinTokenForPeer(adminJoinAddress(cfg.Listen, requestHost), cfg.JoinToken, cfg.RPCToken)
+	return membership.BuildJoinTokenForPeer(adminJoinAddress(cfg.Listen, requestHost), cfg.JoinToken)
 }
 
 func adminJoinAddress(listen, requestHost string) string {
@@ -902,7 +956,7 @@ func mountRegistryHTTP(mux *http.ServeMux, registry ports.JobRegistry, rpcToken 
 			return
 		}
 		var records []domain.JobRecord
-		if err := json.NewDecoder(r.Body).Decode(&records); err != nil {
+		if err := decodePeerRPCJSON(r, &records); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -945,7 +999,7 @@ func mountTelemetryHTTP(mux *http.ServeMux, store telemetryRPCStore, rpcToken st
 			}
 		case http.MethodPost:
 			var metrics []domain.RunMetric
-			if err := json.NewDecoder(r.Body).Decode(&metrics); err != nil {
+			if err := decodePeerRPCJSON(r, &metrics); err != nil {
 				writePeerRPCError(w, http.StatusBadRequest, err)
 				return
 			}
@@ -983,7 +1037,7 @@ func mountTelemetryHTTP(mux *http.ServeMux, store telemetryRPCStore, rpcToken st
 			}
 		case http.MethodPost:
 			var samples []domain.SessionMetric
-			if err := json.NewDecoder(r.Body).Decode(&samples); err != nil {
+			if err := decodePeerRPCJSON(r, &samples); err != nil {
 				writePeerRPCError(w, http.StatusBadRequest, err)
 				return
 			}
@@ -1016,7 +1070,7 @@ func mountTelemetryHTTP(mux *http.ServeMux, store telemetryRPCStore, rpcToken st
 			}
 		case http.MethodPost:
 			var recs []domain.RecommendationRecord
-			if err := json.NewDecoder(r.Body).Decode(&recs); err != nil {
+			if err := decodePeerRPCJSON(r, &recs); err != nil {
 				writePeerRPCError(w, http.StatusBadRequest, err)
 				return
 			}
@@ -1077,6 +1131,7 @@ func mountNodeHTTP(mux *http.ServeMux, handler http.Handler) {
 		"/admission/bind-instance",
 		"/admission/lease",
 		"/admission/lease-by-instance",
+		"/admission/job-status",
 		"/instances/",
 	} {
 		mux.Handle(path, handler)
@@ -1112,9 +1167,14 @@ type localPeerAgent struct {
 	ports.AdmissionController
 	ports.LeaseInspector
 	ports.LeaseBinder
+	statusReader jobStatusReader
 }
 
-func newLocalPeerAgent(agent ports.NodeAgent, admission ports.AdmissionController) (localPeerAgent, error) {
+type jobStatusReader interface {
+	Job(ctx context.Context, id string) (domain.Job, error)
+}
+
+func newLocalPeerAgent(agent ports.NodeAgent, admission ports.AdmissionController, readers ...jobStatusReader) (localPeerAgent, error) {
 	inspector, ok := admission.(ports.LeaseInspector)
 	if !ok {
 		return localPeerAgent{}, fmt.Errorf("local admission controller does not expose lease inspection")
@@ -1123,7 +1183,22 @@ func newLocalPeerAgent(agent ports.NodeAgent, admission ports.AdmissionControlle
 	if !ok {
 		return localPeerAgent{}, fmt.Errorf("local admission controller does not expose lease binding")
 	}
-	return localPeerAgent{NodeAgent: agent, AdmissionController: admission, LeaseInspector: inspector, LeaseBinder: binder}, nil
+	var reader jobStatusReader
+	if len(readers) > 0 {
+		reader = readers[0]
+	}
+	return localPeerAgent{NodeAgent: agent, AdmissionController: admission, LeaseInspector: inspector, LeaseBinder: binder, statusReader: reader}, nil
+}
+
+func (a localPeerAgent) JobStatus(ctx context.Context, jobID string) (domain.JobStatus, bool, error) {
+	if a.statusReader == nil {
+		return "", false, nil
+	}
+	job, err := a.statusReader.Job(ctx, jobID)
+	if err != nil {
+		return "", false, err
+	}
+	return job.Status, true, nil
 }
 
 func (n combinedNodes) NodeAgent(nodeID string) (ports.NodeAgent, error) {
@@ -1164,6 +1239,24 @@ func (n combinedNodes) LeaseInspector(nodeID string) (ports.LeaseInspector, erro
 		return nil, fmt.Errorf("node resolver does not expose lease inspection")
 	}
 	return right.LeaseInspector(nodeID)
+}
+
+func (n combinedNodes) JobStatusInspector(nodeID string) (ports.JobStatusInspector, error) {
+	if left, ok := n.left.(interface {
+		JobStatusInspector(string) (ports.JobStatusInspector, error)
+	}); ok {
+		inspector, err := left.JobStatusInspector(nodeID)
+		if err == nil {
+			return inspector, nil
+		}
+	}
+	right, ok := n.right.(interface {
+		JobStatusInspector(string) (ports.JobStatusInspector, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("node resolver does not expose job status inspection")
+	}
+	return right.JobStatusInspector(nodeID)
 }
 
 func admissionResolver(nodes gateway.NodeResolver) scheduler.AdmissionResolver {
@@ -1231,6 +1324,59 @@ func parseJoinFlag(raw string) (membership.JoinInfo, error) {
 		return info, nil
 	}
 	return membership.JoinInfo{Token: raw}, nil
+}
+
+type computeOverrideFlag struct {
+	set   bool
+	value bool
+}
+
+func (f *computeOverrideFlag) Set(raw string) error {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "on", "yes":
+		f.set = true
+		f.value = true
+		return nil
+	case "0", "false", "off", "no":
+		f.set = true
+		f.value = false
+		return nil
+	default:
+		return fmt.Errorf("compute must be on or off, got %q", raw)
+	}
+}
+
+func (f *computeOverrideFlag) String() string {
+	if !f.set {
+		return ""
+	}
+	if f.value {
+		return "on"
+	}
+	return "off"
+}
+
+func (f *computeOverrideFlag) IsBoolFlag() bool {
+	return true
+}
+
+type optionalIntFlag struct {
+	set   bool
+	value int
+}
+
+func (f *optionalIntFlag) Set(raw string) error {
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return err
+	}
+	f.set = true
+	f.value = value
+	return nil
+}
+
+func (f *optionalIntFlag) String() string {
+	return strconv.Itoa(f.value)
 }
 
 func appendSeedPeer(seeds []string, seed string) []string {
@@ -1413,11 +1559,11 @@ func fetchPeerHealthWithClient(ctx context.Context, address, joinToken string, c
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readLimitedPeerRPCBody(resp.Body)
 		return domain.Peer{}, fmt.Errorf("%w: peer health returned %s: %s", domain.ErrUnreachable, resp.Status, strings.TrimSpace(string(body)))
 	}
 	var got domain.Peer
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+	if err := decodePeerRPCResponse(resp.Body, &got); err != nil {
 		return domain.Peer{}, err
 	}
 	if got.ID == "" {
@@ -1495,6 +1641,53 @@ func writePeerRPCError(w http.ResponseWriter, status int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+func decodePeerRPCJSON(r *http.Request, out any) error {
+	data, err := readLimitedPeerRPCBody(r.Body)
+	if err != nil {
+		return err
+	}
+	return decodePeerRPCJSONBytes(data, out)
+}
+
+func decodePeerRPCJSONBytes(data []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("peer rpc request body contains multiple JSON values")
+	}
+	return nil
+}
+
+func readLimitedPeerRPCBody(r io.Reader) ([]byte, error) {
+	var buf bytes.Buffer
+	n, err := buf.ReadFrom(io.LimitReader(r, maxPeerRPCJSONBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if n > maxPeerRPCJSONBodyBytes {
+		return nil, fmt.Errorf("peer rpc body exceeds %d bytes", maxPeerRPCJSONBodyBytes)
+	}
+	return buf.Bytes(), nil
+}
+
+func decodePeerRPCResponse(r io.Reader, out any) error {
+	data, err := readLimitedPeerRPCBody(r)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+
+func decodePeerRPCResponseStrict(r io.Reader, out any) error {
+	data, err := readLimitedPeerRPCBody(r)
+	if err != nil {
+		return err
+	}
+	return decodePeerRPCJSONBytes(data, out)
 }
 
 type registryHTTPClient struct {
@@ -1617,13 +1810,13 @@ func doPeerRPC(ctx context.Context, client *http.Client, authToken string, peer 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(resp.Body)
+		data, _ := readLimitedPeerRPCBody(resp.Body)
 		return fmt.Errorf("peer rpc %s %s: %s", method, path, strings.TrimSpace(string(data)))
 	}
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return decodePeerRPCResponse(resp.Body, out)
 }
 
 func peerControlHTTPClient() *http.Client {
@@ -1693,6 +1886,11 @@ type peerLeaseInspectorResolver interface {
 	LeaseInspector(string) (ports.LeaseInspector, error)
 }
 
+type peerOwnerInspectorResolver interface {
+	peerLeaseInspectorResolver
+	JobStatusInspector(string) (ports.JobStatusInspector, error)
+}
+
 type peerRuntimeStore interface {
 	ports.JobRegistry
 	SaveNode(ctx context.Context, node domain.Node) error
@@ -1710,7 +1908,7 @@ func startPeerHeartbeatWithClient(ctx context.Context, self domain.Peer, discove
 	if discovery == nil || runtime == nil || registry == nil || clk == nil || self.ID == "" {
 		return
 	}
-	owners, _ := nodes.(peerLeaseInspectorResolver)
+	owners, _ := nodes.(peerOwnerInspectorResolver)
 	recovery := peercoord.Recovery{Registry: registry, Owners: owners, Rescue: rescueRecoveredJob(runtime), Clock: clk}
 	heartbeat := &peercoord.Heartbeat{
 		Self:      self,
@@ -2076,6 +2274,9 @@ func recommendationsForSlot(recs []domain.RecommendationRecord, slotID string) [
 }
 
 func seedControlStore(ctx context.Context, store *storesqlite.Store, cfg PeerConfig) error {
+	if err := projectvalidation.ValidateSet(cfg.Projects, cfg.DefaultProject); err != nil {
+		return err
+	}
 	for _, project := range cfg.Projects {
 		if err := store.SaveProject(ctx, project); err != nil {
 			return err
@@ -2133,9 +2334,13 @@ func peerEstimator(cfg PeerConfig, agents map[string]ports.NodeAgent, resolver e
 	explicit := estimate.NewInMemory()
 	parser := cfg.GGUFParser
 	if parser == "" {
-		parser = "gguf-parser"
+		parser = cfg.ComputeConfig.GGUFParser
 	}
-	return estimate.NewBackendAware(estimate.NewGGUFWithResolver(estimate.NewCommandParser(parser, nil), agents, resolver), explicit)
+	var metadataParser estimate.MetadataParser
+	if parser != "" {
+		metadataParser = estimate.NewCommandParser(parser, nil)
+	}
+	return estimate.NewBackendAware(estimate.NewGGUFWithResolver(metadataParser, agents, resolver), explicit)
 }
 
 func allocatorFromReservations(reservations []domain.Reservation, presets map[string]domain.Preset) *lease.Allocator {

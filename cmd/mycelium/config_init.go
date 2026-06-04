@@ -18,11 +18,10 @@ import (
 )
 
 const (
-	defaultPeerPort          = "51846"
-	defaultBackendPort       = "51848"
-	defaultDiscoveryPort     = "51850"
-	sparkSafeVLLMGPUUtil     = 0.85
-	unsafeVLLMGPUUtilization = 0.90
+	defaultPeerPort      = "51846"
+	defaultBackendPort   = "51848"
+	defaultDiscoveryPort = "51850"
+	sparkSafeVLLMGPUUtil = 0.85
 )
 
 type configInitOptions struct {
@@ -54,7 +53,7 @@ func runConfigInit(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("config init", flag.ContinueOnError)
 	configPath := fs.String("config", "", "peer config JSON path")
 	compute := fs.String("compute", "auto", "compute mode: auto, on, off")
-	listen := fs.String("listen", "lan", "listen mode: lan, loopback, or host:port")
+	listen := fs.String("listen", "loopback", "listen mode: loopback, lan, or host:port")
 	backend := fs.String("backend", "auto", "backend: auto, llama.cpp, llamacpp, mlx, vllm, custom")
 	maxUtil := fs.Float64("max-util", 0, "maximum accelerator utilization")
 	diskMinFreeRatio := fs.Float64("disk-min-free-ratio", 0, "minimum free disk ratio required for placement")
@@ -104,6 +103,10 @@ func generatePeerConfig(ctx context.Context, opts configInitOptions) (PeerConfig
 	if err != nil {
 		return PeerConfig{}, err
 	}
+	gatewayToken, err := opts.RandomHex(32)
+	if err != nil {
+		return PeerConfig{}, err
+	}
 	listen, err := resolveListen(opts.Listen)
 	if err != nil {
 		return PeerConfig{}, err
@@ -147,6 +150,7 @@ func generatePeerConfig(ctx context.Context, opts configInitOptions) (PeerConfig
 		CatalogDir:      defaultCatalogStore(),
 		JoinToken:       joinToken,
 		RPCToken:        rpcToken,
+		GatewayToken:    gatewayToken,
 		ComputeConfig:   computeCfg,
 		DiscoveryListen: ":" + defaultDiscoveryPort,
 		DiscoveryAddr:   "255.255.255.255:" + defaultDiscoveryPort,
