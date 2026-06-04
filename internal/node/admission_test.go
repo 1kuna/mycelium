@@ -679,8 +679,8 @@ func TestAdmissionAppliesSubmitterPolicyToOffersAndPreemption(t *testing.T) {
 		lease.NewAllocator(),
 		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
 		WithSubmitterPolicy(SubmitterPolicy{Rules: map[string]SubmitterRule{
-			"submitter-a":  {MaxPriority: domain.PriorityNormal, AllowPrivate: true},
-			"guest": {},
+			"submitter-a": {MaxPriority: domain.PriorityNormal, AllowPrivate: true},
+			"guest":       {},
 		}}),
 	)
 	claim := fixtures.MakeClaim(100, 0)

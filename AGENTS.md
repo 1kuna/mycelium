@@ -75,9 +75,9 @@ This repo is built to be implemented by a long-running autonomous agent (Codex `
 
 **Hardware reality (what you can and cannot test yourself):**
 
-- The dev machine is a local dev Mac **M4 Max, 64 GB**. It runs small GGUF models via llama.cpp Metal, so it is itself a real single node. **All of Phase 0 (mocks, zero hardware) and the single-node parts of Phase 1's smoke gate — real load → ready-gate → serve → graceful-stop → telemetry metric → reactive requeue on a small model — you can and should do yourself.**
-- A **second machine (a second peer)** is available for multi-node testing, but only if its IP is in your environment/config. Anything needing a second node — the multi-node fleet smoke in Phase 1, the join smoke in Phase 4 — is a **defer-and-log** item (note "needs second peer address" in `BLOCKERS.md`) unless that IP is provided.
-- Specialty hardware (the 4090 / desktop GPU / B70 boxes, the DGX Spark, vLLM/CUDA paths, `catastrophic`-OOM behavior, large models) is **not** available to you. Build those paths to the spec and cover them with mocks + conformance suites in the fast tiers; their real-hardware smoke checks are terminal-stop / human-run items — do not grind on them.
+- The primary dev machine can run small GGUF models via llama.cpp Metal, so it is itself a real single node. **All of Phase 0 (mocks, zero hardware) and the single-node parts of Phase 1's smoke gate — real load → ready-gate → serve → graceful-stop → telemetry metric → reactive requeue on a small model — you can and should do yourself when the required local model/env values are present.**
+- A **second real peer** may be available for multi-node testing, but only if its address is in your environment/config. Anything needing a second node — the multi-node fleet smoke in Phase 1, the join smoke in Phase 4 — is a **defer-and-log** item (note "needs second peer address" in `BLOCKERS.md`) unless that address is provided.
+- Specialty hardware (large NVIDIA/Intel/Apple accelerator hosts, vLLM/CUDA paths, `catastrophic`-OOM behavior, large models) is **not** assumed to be available. Build those paths to the spec and cover them with mocks + conformance suites in the fast tiers; their real-hardware smoke checks are terminal-stop / human-run items — do not grind on them.
 
 ## Implementation gotchas (learned from the reference repos — watch for these)
 

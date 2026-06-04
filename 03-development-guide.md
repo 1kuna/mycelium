@@ -98,10 +98,10 @@ go test ./... -race                              # Phase 0 gates still green + n
 go tool cover -func=all.out | grep total         # overall still >= 85.0%
 # Smoke — REAL HARDWARE. Split into local (run yourself) and multi-node (needs a 2nd machine):
 go test -tags smoke ./test/smoke/... -run 'Local'  -timeout 20m   # local dev Mac + a small GGUF — DO THIS
-go test -tags smoke ./test/smoke/... -run 'Fleet'  -timeout 20m   # needs the second peer address — defer-and-log if absent
+go test -tags smoke ./test/smoke/... -run 'Fleet'  -timeout 20m   # needs a second peer address — defer-and-log if absent
 ```
 
-The **local smoke** (runnable by the agent on the local dev Mac with a small GGUF model) must demonstrate: (1) the llama.cpp conformance suite passes against a real model on Metal; (2) a full load → ready-gate → serve → graceful-stop cycle; (3) a `RunMetric` with real numbers lands in the telemetry store; (4) a request exceeding the preset context cap triggers a reactive requeue to a larger preset and then succeeds; (5) the startup reaper cleans up a deliberately-orphaned backend process. The **fleet smoke** (needs a second machine — provide the second peer address, else defer-and-log per AGENTS.md): a second peer registers as a remote node over LAN with a loopback tunnel and the scheduler places and runs a job on it. (A minimal manual join is fine here; polished onboarding is Phase 4.)
+The **local smoke** (runnable by the agent on a local dev Mac with a small GGUF model) must demonstrate: (1) the llama.cpp conformance suite passes against a real model on Metal; (2) a full load → ready-gate → serve → graceful-stop cycle; (3) a `RunMetric` with real numbers lands in the telemetry store; (4) a request exceeding the preset context cap triggers a reactive requeue to a larger preset and then succeeds; (5) the startup reaper cleans up a deliberately-orphaned backend process. The **fleet smoke** (needs a second machine — provide its address, else defer-and-log per AGENTS.md): a second peer registers as a remote node over LAN with a loopback tunnel and the scheduler places and runs a job on it. (A minimal manual join is fine here; polished onboarding is Phase 4.)
 
 ---
 

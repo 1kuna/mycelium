@@ -443,12 +443,12 @@ Minimum current-runtime output:
   "compute": true,
   "join_token": "...",
   "rpc_token": "...",
-  "seed_peers": ["192.0.2.x:52091"],
+  "seed_peers": ["192.0.2.10:52091"],
   "compute_config": {
-    "id": "spark-peer.example",
+    "id": "spark-peer",
     "name": "DGX Spark",
     "backend": "vllm",
-    "backend_binary": "$HOME/.mycelium/engines/vllm/run-vllm.sh",
+    "backend_binary": "/opt/mycelium/engines/vllm/run-vllm.sh",
     "backend_listen": "0.0.0.0:52074",
     "max_util": 0.9,
     "disk_min_free_ratio": 0.25,
@@ -466,7 +466,7 @@ Future multi-profile output can add:
       "id": "spark-vllm-ngc",
       "backend": "vllm",
       "ready": true,
-      "binary_path": "/home/<user>/.mycelium/engines/vllm/run-vllm.sh"
+      "binary_path": "/opt/mycelium/engines/vllm/run-vllm.sh"
     }
   ]
 }
@@ -565,9 +565,9 @@ Required coverage:
 
 Synthetic fleet:
 
-- local dev Mac: `darwin/arm64`, existing Homebrew llama.cpp and optional MLX venv.
+- Apple Silicon dev Mac: `darwin/arm64`, existing Homebrew llama.cpp and optional MLX venv.
 - Intel Mac example: `darwin/amd64`, Homebrew present, MLX unsupported, CPU fallback only with explicit opt-in.
-- second peer: `darwin/arm64`, no engine installed, Homebrew available.
+- second Apple Silicon Mac: `darwin/arm64`, no engine installed, Homebrew available.
 - DGX Spark: `linux/arm64`, existing ARM64-compatible NVIDIA vLLM image/wrapper, catastrophic OOM, cap required.
 - x86_64 NVIDIA box: `linux/amd64`, x86_64 CUDA/vLLM image or wheel.
 - B70: `linux/amd64`, existing SYCL wrapper, disk below 25% free.
