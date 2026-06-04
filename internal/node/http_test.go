@@ -324,8 +324,8 @@ func TestHTTPAdmissionPreemptForJobUsesSubmitterPolicy(t *testing.T) {
 		lease.NewAllocator(),
 		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
 		WithSubmitterPolicy(SubmitterPolicy{Rules: map[string]SubmitterRule{
-			"submitter-a":  {MaxPriority: domain.PriorityNormal, AllowPrivate: true},
-			"guest": {},
+			"submitter-a": {MaxPriority: domain.PriorityNormal, AllowPrivate: true},
+			"guest":       {},
 		}}),
 	)
 	server := newDirectHTTPServer(HTTPServer{Admission: admission})
@@ -347,11 +347,11 @@ func TestHTTPAdmissionPreemptForJobUsesSubmitterPolicy(t *testing.T) {
 	if err := client.PreemptForJob(context.Background(), guest, lease.ID, "too high"); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("guest preempt err = %v", err)
 	}
-	submitter-a := fixtures.MakeJob(fixtures.WithJobID("job-submitter-a"))
-	submitter-a.Submitter = "submitter-a"
-	submitter-a.Preemption = domain.PreemptHard
-	if err := client.PreemptForJob(context.Background(), submitter-a, lease.ID, "allowed"); err != nil {
-		t.Fatalf("submitter-a PreemptForJob: %v", err)
+	authorized := fixtures.MakeJob(fixtures.WithJobID("job-authorized"))
+	authorized.Submitter = "submitter-a"
+	authorized.Preemption = domain.PreemptHard
+	if err := client.PreemptForJob(context.Background(), authorized, lease.ID, "allowed"); err != nil {
+		t.Fatalf("authorized PreemptForJob: %v", err)
 	}
 }
 

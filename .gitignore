@@ -12,3 +12,6 @@ smoke.out
 *.test
 coverage.html
 .DS_Store
+PRIVATE_OPS.md
+*.local.md
+ops/private/

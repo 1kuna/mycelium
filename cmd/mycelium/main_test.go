@@ -2641,9 +2641,9 @@ func TestLoadPinnedReservationsFailsLoudly(t *testing.T) {
 
 func TestSubmitterPolicyFromConfig(t *testing.T) {
 	policy := submitterPolicyFromConfig(map[string]SubmitterPolicyRule{
-		"":      {MaxPriority: domain.PriorityInteractive, AllowPrivate: true},
-		"guest": {MaxPriority: domain.PriorityBackground},
-		"submitter-a":  {MaxPriority: domain.PriorityInteractive, AllowPrivate: true},
+		"":            {MaxPriority: domain.PriorityInteractive, AllowPrivate: true},
+		"guest":       {MaxPriority: domain.PriorityBackground},
+		"submitter-a": {MaxPriority: domain.PriorityInteractive, AllowPrivate: true},
 	})
 	if len(policy.Rules) != 2 || policy.Rules["submitter-a"].MaxPriority != domain.PriorityInteractive || !policy.Rules["submitter-a"].AllowPrivate || policy.Rules["guest"].AllowPrivate {
 		t.Fatalf("policy = %+v", policy)

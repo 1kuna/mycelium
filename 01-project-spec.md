@@ -559,7 +559,7 @@ Why not a single dedicated analyzer node: that is a soft leader with a failover 
 - **Phase 5 — Optimizer.** Consolidation cost function, proactive distribution-shift recommendations, gated auto-apply (reactive overflow-requeue already landed in Phase 1's telemetry/runtime path).
 - **Phase 6 — Federated coordination & resilience.** Make coordination peer-distributed (any peer coordinates a job: parallel-poll snapshot → Placer → owner-commit with optimistic concurrency → relay), the **job registry + heartbeats + failure recovery**, and **group telemetry analysis** across compute peers. Builds on Phase 1's owner-authority and Phase 4's discovery. This is the layer that makes "no leader, one machine down is business as usual" real.
 
-Real specialty hardware (Spark, B70, 4090, desktop GPU) enters only at the `smoke/` tier and at phase boundaries — never as a development dependency.
+Real specialty hardware (large NVIDIA/Intel/Apple accelerator hosts) enters only at the `smoke` tier and at phase boundaries — never as a development dependency.
 
 ---
 
