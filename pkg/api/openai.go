@@ -26,13 +26,14 @@ type OpenAICompletionRequest struct {
 }
 
 type OpenAIMessage struct {
-	Role         string              `json:"role"`
-	Content      string              `json:"content,omitempty"`
-	ContentParts []OpenAIContentPart `json:"-"`
-	Name         string              `json:"name,omitempty"`
-	ToolCallID   string              `json:"tool_call_id,omitempty"`
-	ToolCalls    []OpenAIToolCall    `json:"tool_calls,omitempty"`
-	FunctionCall *OpenAIFunctionCall `json:"function_call,omitempty"`
+	Role                      string              `json:"role"`
+	Content                   string              `json:"content,omitempty"`
+	ContentParts              []OpenAIContentPart `json:"-"`
+	Name                      string              `json:"name,omitempty"`
+	ToolCallID                string              `json:"tool_call_id,omitempty"`
+	ToolCalls                 []OpenAIToolCall    `json:"tool_calls,omitempty"`
+	FunctionCall              *OpenAIFunctionCall `json:"function_call,omitempty"`
+	UnsupportedResponseFields []string            `json:"-"`
 }
 
 type OpenAIContentPart struct {
@@ -197,14 +198,27 @@ func (m *openAIResponseMessage) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
+	var unsupported []string
 	for _, field := range []string{"annotations", "audio", "reasoning", "reasoning_content", "refusal"} {
+		if raw, ok := fields[field]; ok && !jsonNull(raw) {
+			unsupported = append(unsupported, field)
+		}
 		delete(fields, field)
 	}
 	trimmed, err := json.Marshal(fields)
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(trimmed, &m.OpenAIMessage)
+	if err := json.Unmarshal(trimmed, &m.OpenAIMessage); err != nil {
+		return err
+	}
+	m.OpenAIMessage.UnsupportedResponseFields = unsupported
+	return nil
+}
+
+func jsonNull(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }
 
 type OpenAIUsage struct {

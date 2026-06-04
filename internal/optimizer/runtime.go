@@ -59,8 +59,11 @@ func (p TelemetryStatsProvider) Stats(ctx context.Context, projectID string) (Pr
 	if err != nil {
 		return ProjectStats{}, err
 	}
+	windowSeconds := contextMetricWindowSeconds(metrics)
 	return ProjectStats{
 		ProjectID:      projectID,
+		SampleCount:    rollup.Count,
+		WindowSeconds:  windowSeconds,
 		AvgTokens:      int(math.Ceil(rollup.Average)),
 		P95Tokens:      rollup.P95,
 		LifetimeMax:    rollup.LifetimeMax,
@@ -68,6 +71,26 @@ func (p TelemetryStatsProvider) Stats(ctx context.Context, projectID string) (Pr
 		SharedContexts: sharedContexts(presets),
 		P95TTFTMS:      p95TTFT(metrics),
 	}, nil
+}
+
+func contextMetricWindowSeconds(metrics []domain.RunMetric) int {
+	var first time.Time
+	var last time.Time
+	for _, metric := range metrics {
+		if metric.ContextUsed <= 0 || metric.At.IsZero() {
+			continue
+		}
+		if first.IsZero() || metric.At.Before(first) {
+			first = metric.At
+		}
+		if last.IsZero() || metric.At.After(last) {
+			last = metric.At
+		}
+	}
+	if first.IsZero() || last.IsZero() || last.Before(first) {
+		return 0
+	}
+	return int(last.Sub(first) / time.Second)
 }
 
 type RecommendationService struct {

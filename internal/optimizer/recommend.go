@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"time"
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
@@ -11,8 +12,15 @@ import (
 
 const RecommendationContextCap = "context_cap_recommendation"
 
+const (
+	defaultContextCapMinSamples = 20
+	defaultContextCapMinWindow  = 24 * time.Hour
+)
+
 type ProjectStats struct {
 	ProjectID      string
+	SampleCount    int
+	WindowSeconds  int
 	AvgTokens      int
 	P95Tokens      int
 	LifetimeMax    int
@@ -33,6 +41,9 @@ type Recommendation struct {
 
 type RecommendationPolicy struct {
 	AvgHeadroom float64
+	P95Headroom float64
+	MinSamples  int
+	MinWindow   time.Duration
 }
 
 type StatsProvider interface {
@@ -78,11 +89,33 @@ func RecommendContextCap(project domain.Project, stats ProjectStats, policy Reco
 	if currentCap == 0 || stats.AvgTokens == 0 {
 		return Recommendation{}, false
 	}
+	minSamples := policy.MinSamples
+	if minSamples == 0 {
+		minSamples = defaultContextCapMinSamples
+	}
+	if stats.SampleCount < minSamples {
+		return Recommendation{}, false
+	}
+	minWindow := policy.MinWindow
+	if minWindow == 0 {
+		minWindow = defaultContextCapMinWindow
+	}
+	if time.Duration(stats.WindowSeconds)*time.Second < minWindow {
+		return Recommendation{}, false
+	}
 	headroom := policy.AvgHeadroom
 	if headroom == 0 {
 		headroom = 1.5
 	}
+	p95Headroom := policy.P95Headroom
+	if p95Headroom == 0 {
+		p95Headroom = 1
+	}
 	target := int(math.Ceil(float64(stats.AvgTokens) * headroom))
+	if stats.P95Tokens > 0 {
+		target = maxInt(target, int(math.Ceil(float64(stats.P95Tokens)*p95Headroom)))
+	}
+	target = maxInt(target, stats.LifetimeMax)
 	shared := nearestSharedAtLeast(target, stats.SharedContexts)
 	if shared == 0 || shared >= currentCap {
 		return Recommendation{}, false
@@ -93,11 +126,13 @@ func RecommendContextCap(project domain.Project, stats ProjectStats, policy Reco
 		CurrentCap:     currentCap,
 		RecommendedCap: shared,
 		Observed: map[string]int{
-			"avg_tokens":   stats.AvgTokens,
-			"p95_tokens":   stats.P95Tokens,
-			"lifetime_max": stats.LifetimeMax,
+			"sample_count":   stats.SampleCount,
+			"window_seconds": stats.WindowSeconds,
+			"avg_tokens":     stats.AvgTokens,
+			"p95_tokens":     stats.P95Tokens,
+			"lifetime_max":   stats.LifetimeMax,
 		},
-		Rationale: fmt.Sprintf("avg is %d tokens and p95 is %d against cap %d; %d is already a shared context, so using it can collapse presets while larger tail requests continue through reactive requeue", stats.AvgTokens, stats.P95Tokens, currentCap, shared),
+		Rationale: fmt.Sprintf("%d samples over %s show avg %d, p95 %d, and max %d tokens against cap %d; %d is a shared context that preserves observed tail usage", stats.SampleCount, time.Duration(stats.WindowSeconds)*time.Second, stats.AvgTokens, stats.P95Tokens, stats.LifetimeMax, currentCap, shared),
 	}
 	return rec, true
 }
@@ -110,6 +145,13 @@ func nearestSharedAtLeast(target int, shared []int) int {
 		}
 	}
 	return best
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 var _ ports.Optimizer = Engine{}

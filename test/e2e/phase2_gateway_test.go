@@ -134,7 +134,7 @@ func TestPhase2GatewayRoutesOpenAIAndAnthropicWithHeaders(t *testing.T) {
 	inst := fixtures.MakeInstance()
 	inst.Addr = upstream
 	fleet := staticGatewayFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}}
-	server := newGatewayTestServer(t, preset, fleet, staticNodeResolver{})
+	server := newGatewayTestServer(t, preset, fleet, staticNodeResolver{agents: map[string]ports.NodeAgent{node.ID: mocks.NewNodeAgent(node)}})
 
 	resp := server.postJSON(t, "/v1/chat/completions", `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`)
 	defer resp.Body.Close()
@@ -226,9 +226,10 @@ func TestPhase2GatewayFailoverReportsFailedInstance(t *testing.T) {
 	instA.Addr = first
 	instB := fixtures.MakeInstance(fixtures.WithInstanceID("inst_b"))
 	instB.Addr = second
-	reporter := &recordingFailureReporter{}
-	fleet := staticGatewayFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{instA, instB}}}
-	server := newGatewayTestServerWithReporter(t, preset, fleet, staticNodeResolver{}, reporter)
+	excluded := map[string]bool{}
+	reporter := &recordingFailureReporter{excluded: excluded}
+	fleet := staticGatewayFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{instA, instB}}, excluded: excluded}
+	server := newGatewayTestServerWithReporter(t, preset, fleet, staticNodeResolver{agents: map[string]ports.NodeAgent{node.ID: mocks.NewNodeAgent(node)}}, reporter)
 
 	resp := server.postJSON(t, "/v1/chat/completions", `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`)
 	defer resp.Body.Close()
@@ -251,12 +252,17 @@ func newGatewayTestServer(t *testing.T, preset domain.Preset, fleet gateway.Flee
 
 func newGatewayTestServerWithReporter(t *testing.T, preset domain.Preset, fleet gateway.FleetSource, nodes gateway.NodeResolver, reporter gateway.FailureReporter) *directHTTPServer {
 	t.Helper()
+	clk := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
 	placer := scheduler.NewPlacer(
 		estimate.NewInMemory(),
 		lease.NewAllocator(),
-		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		clk,
 		preset,
 	)
+	owners, ok := nodes.(scheduler.AdmissionResolver)
+	if !ok {
+		t.Fatalf("test node resolver does not expose admission controllers")
+	}
 	handler := gateway.Server{Router: &gateway.Router{
 		Placer:   placer,
 		Fleet:    fleet,
@@ -264,21 +270,43 @@ func newGatewayTestServerWithReporter(t *testing.T, preset domain.Preset, fleet 
 		Presets:  gateway.NewPresetRegistry(preset),
 		Client:   directClient(),
 		Reporter: reporter,
+		Runtime: &scheduler.Service{
+			Placer:  placer,
+			Fleet:   fleet,
+			Nodes:   nodes,
+			Owners:  owners,
+			Queue:   scheduler.NewQueue(clk),
+			Store:   &peerRuntimeStore{},
+			Clock:   clk,
+			Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+		},
 		MaxTries: 2,
 	}}
 	return &directHTTPServer{URL: directURL(handler), client: directClient()}
 }
 
 type staticGatewayFleet struct {
-	fleet domain.FleetSnapshot
+	fleet    domain.FleetSnapshot
+	excluded map[string]bool
 }
 
 func (s staticGatewayFleet) Snapshot(context.Context) (domain.FleetSnapshot, error) {
-	return s.fleet, nil
+	fleet := s.fleet
+	if len(s.excluded) == 0 {
+		return fleet, nil
+	}
+	fleet.Instances = nil
+	for _, inst := range s.fleet.Instances {
+		if !s.excluded[inst.ID] {
+			fleet.Instances = append(fleet.Instances, inst)
+		}
+	}
+	return fleet, nil
 }
 
 type staticNodeResolver struct {
-	agents map[string]ports.NodeAgent
+	agents     map[string]ports.NodeAgent
+	admissions map[string]ports.AdmissionController
 }
 
 func (s staticNodeResolver) NodeAgent(nodeID string) (ports.NodeAgent, error) {
@@ -287,6 +315,16 @@ func (s staticNodeResolver) NodeAgent(nodeID string) (ports.NodeAgent, error) {
 		return nil, domain.ErrUnreachable
 	}
 	return agent, nil
+}
+
+func (s staticNodeResolver) AdmissionController(nodeID string) (ports.AdmissionController, error) {
+	if admission, ok := s.admissions[nodeID]; ok {
+		return admission, nil
+	}
+	if _, ok := s.agents[nodeID]; !ok {
+		return nil, domain.ErrUnreachable
+	}
+	return &mocks.AdmissionController{}, nil
 }
 
 type loadOnlyNode struct {
@@ -350,11 +388,15 @@ func (n blockingLoadNode) EndRequest(context.Context, string) error {
 }
 
 type recordingFailureReporter struct {
-	failed []string
+	failed   []string
+	excluded map[string]bool
 }
 
 func (r *recordingFailureReporter) ReportInstanceFailure(_ context.Context, instanceID string, _ error) error {
 	r.failed = append(r.failed, instanceID)
+	if r.excluded != nil {
+		r.excluded[instanceID] = true
+	}
 	return nil
 }
 

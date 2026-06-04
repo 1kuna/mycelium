@@ -2,6 +2,7 @@ package optimizer
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -17,9 +18,11 @@ func TestRecommendContextCapChoosesSharedContextWithRationale(t *testing.T) {
 	project := domain.Project{ID: "project-a", ContextCap: 16000}
 	stats := ProjectStats{
 		ProjectID:      project.ID,
-		AvgTokens:      4000,
-		P95Tokens:      12000,
-		LifetimeMax:    16000,
+		SampleCount:    25,
+		WindowSeconds:  int((24 * time.Hour) / time.Second),
+		AvgTokens:      3600,
+		P95Tokens:      4000,
+		LifetimeMax:    4000,
 		CurrentCap:     16000,
 		SharedContexts: []int{6000, 12000},
 		ReloadsPerDay:  14,
@@ -31,16 +34,50 @@ func TestRecommendContextCapChoosesSharedContextWithRationale(t *testing.T) {
 	if rec.Type != RecommendationContextCap || rec.RecommendedCap != 6000 {
 		t.Fatalf("rec = %+v", rec)
 	}
-	if rec.Observed["avg_tokens"] != 4000 || rec.Observed["p95_tokens"] != 12000 || !strings.Contains(rec.Rationale, "shared context") {
+	if rec.Observed["sample_count"] != 25 || rec.Observed["avg_tokens"] != 3600 || rec.Observed["p95_tokens"] != 4000 || !strings.Contains(rec.Rationale, "shared context") {
 		t.Fatalf("rec = %+v", rec)
+	}
+}
+
+func TestRecommendContextCapRequiresSustainedSafeTailEvidence(t *testing.T) {
+	project := domain.Project{ID: "project-a", ContextCap: 16000}
+	base := ProjectStats{
+		ProjectID:      project.ID,
+		SampleCount:    25,
+		WindowSeconds:  int((24 * time.Hour) / time.Second),
+		AvgTokens:      3600,
+		P95Tokens:      4000,
+		LifetimeMax:    4000,
+		CurrentCap:     16000,
+		SharedContexts: []int{6000, 12000},
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ProjectStats)
+	}{
+		{name: "too few samples", mutate: func(s *ProjectStats) { s.SampleCount = defaultContextCapMinSamples - 1 }},
+		{name: "too short window", mutate: func(s *ProjectStats) { s.WindowSeconds = int(defaultContextCapMinWindow/time.Second) - 1 }},
+		{name: "p95 exceeds every lower shared context", mutate: func(s *ProjectStats) { s.P95Tokens = 13000 }},
+		{name: "lifetime max exceeds every lower shared context", mutate: func(s *ProjectStats) { s.LifetimeMax = 13000 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stats := base
+			tc.mutate(&stats)
+			if _, ok := RecommendContextCap(project, stats, RecommendationPolicy{}); ok {
+				t.Fatalf("unexpected recommendation for %+v", stats)
+			}
+		})
 	}
 }
 
 func TestEngineRecommendReturnsTraceStep(t *testing.T) {
 	engine := Engine{Stats: staticStats{stats: ProjectStats{
 		ProjectID:      "project-a",
-		AvgTokens:      4000,
-		P95Tokens:      12000,
+		SampleCount:    25,
+		WindowSeconds:  int((24 * time.Hour) / time.Second),
+		AvgTokens:      3600,
+		P95Tokens:      4000,
+		LifetimeMax:    4000,
 		CurrentCap:     16000,
 		SharedContexts: []int{6000},
 	}}}
@@ -121,6 +158,9 @@ func TestTelemetryStatsProviderUsesStoredMetricsAndPresetContexts(t *testing.T) 
 	if stats.AvgTokens != 3750 || stats.LifetimeMax != 4000 || len(stats.SharedContexts) != 2 || stats.SharedContexts[0] != 6000 {
 		t.Fatalf("stats = %+v", stats)
 	}
+	if stats.SampleCount != 2 || stats.WindowSeconds != 1 || stats.P95Tokens != 4000 {
+		t.Fatalf("stats evidence = %+v", stats)
+	}
 }
 
 func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
@@ -144,14 +184,7 @@ func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
 		t.Fatalf("SavePreset large: %v", err)
 	}
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
-	for _, metric := range []domain.RunMetric{
-		{JobID: "job-a", Project: project.ID, ContextUsed: 3500, At: now},
-		{JobID: "job-b", Project: project.ID, ContextUsed: 4000, At: now.Add(time.Second)},
-	} {
-		if err := store.Record(context.Background(), metric); err != nil {
-			t.Fatalf("Record: %v", err)
-		}
-	}
+	recordSustainedContextMetrics(t, store, project.ID, now, 0, 0)
 	service := RecommendationService{
 		Store:     store,
 		Clock:     mocks.NewFakeClock(now),
@@ -165,7 +198,7 @@ func TestRecommendationServicePersistsAndAutoApplies(t *testing.T) {
 	if len(records) != 1 || !records[0].Applied || records[0].RecommendedValue != 6000 {
 		t.Fatalf("records = %+v", records)
 	}
-	if records[0].Observed["avg_tokens"] != 3750 || records[0].Observed["p95_tokens"] != 3500 {
+	if records[0].Observed["sample_count"] != 25 || records[0].Observed["avg_tokens"] != 3600 || records[0].Observed["p95_tokens"] != 4000 {
 		t.Fatalf("observed = %+v", records[0].Observed)
 	}
 	storedRec, err := store.Recommendation(context.Background(), records[0].ID)
@@ -211,14 +244,7 @@ func TestRecommendationServiceUsesProjectDefaultModelPreset(t *testing.T) {
 		t.Fatalf("SaveNode: %v", err)
 	}
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
-	for _, metric := range []domain.RunMetric{
-		{JobID: "job-a", Project: project.ID, ContextUsed: 3500, At: now},
-		{JobID: "job-b", Project: project.ID, ContextUsed: 4000, At: now.Add(time.Second)},
-	} {
-		if err := store.Record(context.Background(), metric); err != nil {
-			t.Fatalf("Record: %v", err)
-		}
-	}
+	recordSustainedContextMetrics(t, store, project.ID, now, 0, 0)
 	records, err := (RecommendationService{
 		Store:     store,
 		Clock:     mocks.NewFakeClock(now),
@@ -256,8 +282,7 @@ func TestRecommendationServiceRejectsUnfitContextRecommendation(t *testing.T) {
 	mustOptimizer(t, store.SavePreset(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("small"), fixtures.WithContextLength(6000))))
 	mustOptimizer(t, store.SavePreset(context.Background(), large))
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
-	mustOptimizer(t, store.Record(context.Background(), domain.RunMetric{JobID: "job-a", Project: project.ID, ContextUsed: 3500, At: now}))
-	mustOptimizer(t, store.Record(context.Background(), domain.RunMetric{JobID: "job-b", Project: project.ID, ContextUsed: 4000, At: now.Add(time.Second)}))
+	recordSustainedContextMetrics(t, store, project.ID, now, 0, 0)
 
 	records, err := (RecommendationService{Store: store, Clock: mocks.NewFakeClock(now)}).EvaluateProject(context.Background(), project)
 	if err != nil {
@@ -288,8 +313,7 @@ func TestRecommendationServiceRejectsUnprovenLatencyTarget(t *testing.T) {
 	mustOptimizer(t, store.SavePreset(context.Background(), fixtures.MakePreset(fixtures.WithPresetID("small"), fixtures.WithContextLength(6000))))
 	mustOptimizer(t, store.SavePreset(context.Background(), large))
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
-	mustOptimizer(t, store.Record(context.Background(), domain.RunMetric{JobID: "job-a", Project: project.ID, ContextUsed: 3500, TTFTms: 50, At: now}))
-	mustOptimizer(t, store.Record(context.Background(), domain.RunMetric{JobID: "job-b", Project: project.ID, ContextUsed: 4000, TTFTms: 60, At: now.Add(time.Second)}))
+	recordSustainedContextMetrics(t, store, project.ID, now, 50, 60)
 
 	records, err := (RecommendationService{Store: store, Clock: mocks.NewFakeClock(now)}).EvaluateProject(context.Background(), project)
 	if err != nil {
@@ -500,5 +524,28 @@ func mustOptimizer(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+type metricRecorder interface {
+	Record(context.Context, domain.RunMetric) error
+}
+
+func recordSustainedContextMetrics(t *testing.T, store metricRecorder, projectID string, start time.Time, lowTTFT, highTTFT int) {
+	t.Helper()
+	for i := 0; i < 25; i++ {
+		contextUsed := 3500
+		ttft := lowTTFT
+		if i >= 20 {
+			contextUsed = 4000
+			ttft = highTTFT
+		}
+		mustOptimizer(t, store.Record(context.Background(), domain.RunMetric{
+			JobID:       fmt.Sprintf("ctx-%02d", i),
+			Project:     projectID,
+			ContextUsed: contextUsed,
+			TTFTms:      ttft,
+			At:          start.Add(time.Duration(i) * time.Hour),
+		}))
 	}
 }

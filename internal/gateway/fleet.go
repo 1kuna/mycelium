@@ -57,5 +57,17 @@ func (d NodeDirectory) LeaseInspector(nodeID string) (ports.LeaseInspector, erro
 	return inspector, nil
 }
 
+func (d NodeDirectory) JobStatusInspector(nodeID string) (ports.JobStatusInspector, error) {
+	agent, err := d.NodeAgent(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	inspector, ok := agent.(ports.JobStatusInspector)
+	if !ok {
+		return nil, fmt.Errorf("node agent %q does not expose job status inspection", nodeID)
+	}
+	return inspector, nil
+}
+
 var _ FleetSource = NodeDirectory{}
 var _ NodeResolver = NodeDirectory{}

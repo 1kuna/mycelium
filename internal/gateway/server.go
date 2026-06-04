@@ -1,17 +1,21 @@
 package gateway
 
 import (
+	"crypto/subtle"
 	"encoding/json"
-	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"mycelium/internal/domain"
 	"mycelium/internal/gateway/translate"
 )
 
 type Server struct {
-	Router *Router
+	Router              *Router
+	RequireAuth         bool
+	AuthToken           string
+	TrustControlHeaders bool
 }
 
 func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -19,7 +23,13 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeGatewayError(w, http.StatusInternalServerError, "gateway router is not configured")
 		return
 	}
-	req, err := parseRequest(r)
+	authorized := gatewayAuthorized(r, s.AuthToken)
+	if s.RequireAuth && !authorized {
+		writeGatewayError(w, http.StatusUnauthorized, "gateway token required")
+		return
+	}
+	trustControlHeaders := s.TrustControlHeaders
+	req, err := parseRequestWithControlHeaders(r, trustControlHeaders)
 	if err != nil {
 		status := http.StatusBadRequest
 		if routeErr, ok := err.(*routeError); ok {
@@ -52,7 +62,11 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseRequest(r *http.Request) (translate.IngressRequest, error) {
-	body, err := io.ReadAll(r.Body)
+	return parseRequestWithControlHeaders(r, true)
+}
+
+func parseRequestWithControlHeaders(r *http.Request, trustControlHeaders bool) (translate.IngressRequest, error) {
+	body, err := readLimited(r.Body, MaxGatewayRequestBodyBytes, "gateway request body")
 	if err != nil {
 		return translate.IngressRequest{}, err
 	}
@@ -69,6 +83,9 @@ func parseRequest(r *http.Request) (translate.IngressRequest, error) {
 	}
 	if err != nil {
 		return translate.IngressRequest{}, err
+	}
+	if !trustControlHeaders {
+		return req, nil
 	}
 	req.Project = r.Header.Get(HeaderProject)
 	req.Priority = domain.Priority(r.Header.Get(HeaderPriority))
@@ -99,9 +116,22 @@ func parseRequest(r *http.Request) (translate.IngressRequest, error) {
 	return req, nil
 }
 
+func gatewayAuthorized(r *http.Request, token string) bool {
+	if token == "" {
+		return false
+	}
+	const prefix = "Bearer "
+	value := r.Header.Get("Authorization")
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	got := strings.TrimPrefix(value, prefix)
+	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+}
+
 func validHandling(handling domain.HandlingClass) bool {
 	switch handling {
-	case "", domain.HandlingPrivate:
+	case "":
 		return true
 	default:
 		return false
