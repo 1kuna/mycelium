@@ -42,8 +42,9 @@ type counters struct {
 }
 
 type testEvent struct {
-	Action string `json:"Action"`
-	Test   string `json:"Test"`
+	Action  string `json:"Action"`
+	Package string `json:"Package"`
+	Test    string `json:"Test"`
 }
 
 func main() {
@@ -72,9 +73,12 @@ func run(path string, cfg gateConfig) error {
 	if path == "" {
 		return fmt.Errorf("-json is required")
 	}
-	statuses, counts, err := readStatuses(path)
+	statuses, counts, packageFailures, err := readStatuses(path)
 	if err != nil {
 		return err
+	}
+	if len(packageFailures) > 0 {
+		return fmt.Errorf("smoke package failed: %s", strings.Join(packageFailures, ", "))
 	}
 	if len(statuses) == 0 {
 		return fmt.Errorf("smoke output contains no test events")
@@ -99,13 +103,14 @@ func run(path string, cfg gateConfig) error {
 	return nil
 }
 
-func readStatuses(path string) (map[string]testStatus, counters, error) {
+func readStatuses(path string) (map[string]testStatus, counters, []string, error) {
 	reader, closeFn, err := openInput(path)
 	if err != nil {
-		return nil, counters{}, err
+		return nil, counters{}, nil, err
 	}
 	defer closeFn()
 	statuses := map[string]testStatus{}
+	var packageFailures []string
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -114,9 +119,12 @@ func readStatuses(path string) (map[string]testStatus, counters, error) {
 		}
 		var event testEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			return nil, counters{}, fmt.Errorf("invalid go test json: %w", err)
+			return nil, counters{}, nil, fmt.Errorf("invalid go test json: %w", err)
 		}
 		if event.Test == "" {
+			if event.Action == "fail" {
+				packageFailures = append(packageFailures, firstNonEmpty(event.Package, "(unknown package)"))
+			}
 			continue
 		}
 		status := statuses[event.Test]
@@ -131,9 +139,9 @@ func readStatuses(path string) (map[string]testStatus, counters, error) {
 		statuses[event.Test] = status
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, counters{}, err
+		return nil, counters{}, nil, err
 	}
-	return statuses, countStatuses(statuses), nil
+	return statuses, countStatuses(statuses), packageFailures, nil
 }
 
 func openInput(path string) (io.Reader, func(), error) {
@@ -160,4 +168,13 @@ func countStatuses(statuses map[string]testStatus) counters {
 		}
 	}
 	return counts
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
