@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
@@ -40,10 +41,14 @@ func (r *Reaper) Reap(ctx context.Context) ([]ProcessRef, error) {
 			return nil, err
 		}
 	}
+	var errs []error
 	for _, ref := range refs {
 		if err := r.killer.Kill(ctx, ref); err != nil {
-			return nil, err
+			errs = append(errs, fmt.Errorf("reap process %d: %w", ref.PID, err))
 		}
+	}
+	if len(errs) > 0 {
+		return refs, errors.Join(errs...)
 	}
 	if len(refs) > 0 && r.path != "" {
 		if err := os.Remove(r.path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -81,7 +86,15 @@ type BackendProcessKiller struct {
 }
 
 func (k BackendProcessKiller) Kill(ctx context.Context, ref ProcessRef) error {
-	return k.Backend.Stop(ctx, ports.Handle{PID: ref.PID, Kind: ref.Kind, Ref: ref.Ref})
+	return k.Backend.Stop(ctx, ports.Handle{
+		PID:       ref.PID,
+		PGID:      ref.PGID,
+		Kind:      ref.Kind,
+		Ref:       ref.Ref,
+		Binary:    ref.Binary,
+		Args:      append([]string(nil), ref.Args...),
+		StartedAt: ref.StartedAt,
+	})
 }
 
 type ProcessRefStore interface {
@@ -95,10 +108,14 @@ type StoreProcessRegistry struct {
 	NodeID string
 }
 
+var storeProcessRegistryMu sync.Mutex
+
 func (r StoreProcessRegistry) Add(ctx context.Context, ref domain.ProcessRef) error {
 	if r.Store == nil {
 		return fmt.Errorf("process ref store is not configured")
 	}
+	storeProcessRegistryMu.Lock()
+	defer storeProcessRegistryMu.Unlock()
 	refs, err := r.Store.ProcessRefs(ctx, r.NodeID)
 	if err != nil {
 		return err
@@ -116,6 +133,8 @@ func (r StoreProcessRegistry) Remove(ctx context.Context, ref domain.ProcessRef)
 	if r.Store == nil {
 		return fmt.Errorf("process ref store is not configured")
 	}
+	storeProcessRegistryMu.Lock()
+	defer storeProcessRegistryMu.Unlock()
 	refs, err := r.Store.ProcessRefs(ctx, r.NodeID)
 	if err != nil {
 		return err

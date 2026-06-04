@@ -103,6 +103,9 @@ func (a *Agent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 	for _, inst := range a.instances {
 		if state := a.inflight[inst.ID]; state != nil {
 			inst.InFlight = state.count
+			if state.stopping {
+				inst.State = domain.InstStopping
+			}
 		}
 		instances = append(instances, inst)
 	}
@@ -145,15 +148,13 @@ func (a *Agent) Load(ctx context.Context, req domain.LoadRequest) (domain.ModelI
 	if inst, ok := a.readyInstance(req.Preset.ID, req.AcceleratorSet); ok {
 		return inst, nil
 	}
-	op, key, owner := a.beginLoad(req)
+	op, key, owner, err := a.beginLoad(req)
+	if err != nil {
+		return domain.ModelInstance{}, err
+	}
 	if !owner {
 		return waitLoad(ctx, op)
 	}
-	if err := a.admitLoad(req); err != nil {
-		a.finishLoad(key, op.inst.ID, ports.Handle{}, domain.ModelInstance{}, op, err)
-		return waitLoad(ctx, op)
-	}
-	a.markLoading(op.inst)
 
 	loadingID := op.inst.ID
 	inst, handle, err := a.launchAndWait(ctx, req.Preset, op.inst)
@@ -171,6 +172,8 @@ func (a *Agent) Unload(ctx context.Context, instanceID string) error {
 	}
 	state := a.inflightStateLocked(instanceID)
 	state.stopping = true
+	inst.State = domain.InstStopping
+	a.instances[instanceID] = inst
 	a.closeDrainedIfReadyLocked(state)
 	drained := state.drained
 	a.mu.Unlock()
@@ -216,12 +219,18 @@ func (a *Agent) BeginRequest(ctx context.Context, instanceID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	inst, ok := a.instances[instanceID]
-	if !ok || inst.State != domain.InstReady {
+	if !ok {
 		return fmt.Errorf("instance %q is not ready", instanceID)
 	}
-	state := a.inflightStateLocked(instanceID)
-	if state.stopping {
+	state := a.inflight[instanceID]
+	if state != nil && state.stopping {
 		return fmt.Errorf("instance %q is stopping", instanceID)
+	}
+	if inst.State != domain.InstReady {
+		return fmt.Errorf("instance %q is not ready", instanceID)
+	}
+	if state == nil {
+		state = a.inflightStateLocked(instanceID)
 	}
 	state.count++
 	return nil
@@ -243,16 +252,7 @@ func (a *Agent) InspectModel(ctx context.Context, p domain.Preset) (domain.Model
 	if a.inspector != nil {
 		return a.inspector.InspectModel(ctx, p)
 	}
-	if p.EstWeightsMB <= 0 || p.KVPerTokenMB <= 0 || p.ContextLength <= 0 {
-		return domain.ModelMetadata{}, fmt.Errorf("model inspector is not configured for preset %q", p.ID)
-	}
-	return domain.ModelMetadata{
-		ModelRef:      p.ModelRef,
-		Format:        "preset",
-		WeightsMB:     p.EstWeightsMB,
-		KVPerTokenMB:  p.KVPerTokenMB,
-		ContextLength: p.ContextLength,
-	}, nil
+	return domain.ModelMetadata{}, fmt.Errorf("model inspector is not configured for preset %q", p.ID)
 }
 
 func (a *Agent) RecordRun(ctx context.Context, metric domain.RunMetric) error {
@@ -289,12 +289,22 @@ func (a *Agent) readyInstance(presetID string, acc []int) (domain.ModelInstance,
 	return domain.ModelInstance{}, false
 }
 
-func (a *Agent) beginLoad(req domain.LoadRequest) (*loadOp, string, bool) {
+func (a *Agent) beginLoad(req domain.LoadRequest) (*loadOp, string, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	key := loadKey(req.Preset.ID, req.AcceleratorSet)
 	if op, ok := a.loads[key]; ok {
-		return op, key, false
+		return op, key, false, nil
+	}
+	for _, inst := range a.instances {
+		if inst.PresetID == req.Preset.ID && sameAcceleratorSet(inst.AcceleratorSet, req.AcceleratorSet) && inst.State == domain.InstReady {
+			op := &loadOp{done: make(chan struct{}), inst: inst}
+			close(op.done)
+			return op, key, false, nil
+		}
+	}
+	if a.allocator == nil {
+		return nil, "", false, fmt.Errorf("allocator is not configured")
 	}
 
 	inst := domain.ModelInstance{
@@ -308,32 +318,17 @@ func (a *Agent) beginLoad(req domain.LoadRequest) (*loadOp, string, bool) {
 		State:          domain.InstLoading,
 		Loading:        true,
 	}
+	existing := a.instanceListLocked()
+	if !a.allocator.CanStackLoad(a.node, req.AcceleratorSet, existing) {
+		return nil, "", false, fmt.Errorf("%w: load already in flight on node %q", domain.ErrNoFit, a.node.ID)
+	}
+	if !a.allocator.Fits(a.node, req.AcceleratorSet, existing, req.Claim) {
+		return nil, "", false, fmt.Errorf("%w: node %q is saturated", domain.ErrNoFit, a.node.ID)
+	}
 	op := &loadOp{done: make(chan struct{}), inst: inst}
 	a.loads[key] = op
-	return op, key, true
-}
-
-func (a *Agent) markLoading(inst domain.ModelInstance) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.instances[inst.ID] = inst
-}
-
-func (a *Agent) admitLoad(req domain.LoadRequest) error {
-	if a.allocator == nil {
-		return fmt.Errorf("allocator is not configured")
-	}
-	a.mu.Lock()
-	node := a.node
-	existing := a.instanceListLocked()
-	a.mu.Unlock()
-	if !a.allocator.CanStackLoad(node, req.AcceleratorSet, existing) {
-		return fmt.Errorf("%w: load already in flight on node %q", domain.ErrNoFit, node.ID)
-	}
-	if !a.allocator.Fits(node, req.AcceleratorSet, existing, req.Claim) {
-		return fmt.Errorf("%w: node %q is saturated", domain.ErrNoFit, node.ID)
-	}
-	return nil
+	return op, key, true, nil
 }
 
 func (a *Agent) instanceListLocked() []domain.ModelInstance {
@@ -341,6 +336,9 @@ func (a *Agent) instanceListLocked() []domain.ModelInstance {
 	for _, inst := range a.instances {
 		if state := a.inflight[inst.ID]; state != nil {
 			inst.InFlight = state.count
+			if state.stopping {
+				inst.State = domain.InstStopping
+			}
 		}
 		instances = append(instances, inst)
 	}

@@ -74,8 +74,25 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+type nodeRepeatedByteReader struct {
+	b byte
+}
+
+func (r nodeRepeatedByteReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = r.b
+	}
+	return len(p), nil
+}
+
 func TestHTTPNodeAgentRoundTrip(t *testing.T) {
-	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(
+		fixtures.MakeNode(),
+		mocks.NewBackendAdapter(),
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		WithAllocator(lease.NewAllocator()),
+		WithModelInspector(StaticInspector{Metadata: domain.ModelMetadata{ModelRef: fixtures.MakePreset().ModelRef, Format: "gguf", WeightsMB: 1, KVPerTokenMB: 0.01, ContextLength: 2048}}),
+	)
 	server := newDirectHTTPServer(HTTPServer{Agent: agent})
 	client := server.nodeClient()
 
@@ -151,6 +168,22 @@ func TestHTTPUnloadReleasesBoundAdmissionLease(t *testing.T) {
 	}
 	if len(snap.Instances) != 0 {
 		t.Fatalf("instances after unload = %+v", snap.Instances)
+	}
+}
+
+func TestHTTPServerRejectsOversizedRPCBody(t *testing.T) {
+	server := newDirectHTTPServer(HTTPServer{Agent: mocks.NewNodeAgent(fixtures.MakeNode())})
+	resp, err := server.post("/load", "application/json", io.LimitReader(nodeRepeatedByteReader{b: 'x'}, MaxNodeRPCJSONBodyBytes+1))
+	if err != nil {
+		t.Fatalf("post oversized body: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "node rpc body exceeds") {
+		t.Fatalf("oversized load status/body = %s %q", resp.Status, body)
 	}
 }
 
@@ -300,8 +333,11 @@ func TestHTTPAdmissionControllerRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preempt Commit: %v", err)
 	}
-	if err := client.Preempt(context.Background(), preemptLease.ID, "test"); err != nil {
-		t.Fatalf("Preempt: %v", err)
+	if err := client.Preempt(context.Background(), preemptLease.ID, "test"); err == nil || !strings.Contains(err.Error(), "policy-aware preemption") {
+		t.Fatalf("direct Preempt err = %v", err)
+	}
+	if err := client.Release(context.Background(), preemptLease.ID); err != nil {
+		t.Fatalf("Release preempt lease: %v", err)
 	}
 
 	nextOffer, err := client.Offer(context.Background(), admissionReq(fixtures.MakeJob(fixtures.WithJobID("job-policy-victim"), fixtures.Background), claim))
@@ -583,6 +619,51 @@ func TestHTTPInstanceProxyFastErrorAndHelperPaths(t *testing.T) {
 		t.Fatalf("missing proxy status = %s", resp.Status)
 	}
 	_ = resp.Body.Close()
+}
+
+func TestHTTPInstanceProxyReportsBodyCopyErrorBeforeCommit(t *testing.T) {
+	copyErr := errors.New("copy failed")
+	agent := mocks.NewNodeAgent(fixtures.MakeNode())
+	agent.Instances = []domain.ModelInstance{{
+		ID:       "inst-a",
+		PresetID: "preset-a",
+		State:    domain.InstReady,
+		Addr:     "backend.test:8080",
+	}}
+	server := newDirectHTTPServer(HTTPServer{
+		Agent: agent,
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"X-Upstream": []string{"yes"}},
+				Body:       errorReadCloser{err: copyErr},
+			}, nil
+		}),
+	})
+	resp, err := server.get("/instances/inst-a/v1/chat")
+	if err != nil {
+		t.Fatalf("proxy get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %s", resp.Status)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), copyErr.Error()) {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+type errorReadCloser struct {
+	err error
+}
+
+func (r errorReadCloser) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func (r errorReadCloser) Close() error {
+	return nil
 }
 
 type failingNodeAgent struct {

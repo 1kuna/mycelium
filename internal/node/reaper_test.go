@@ -52,12 +52,20 @@ func TestReaperFailsOnInvalidFileAndKillError(t *testing.T) {
 	}
 
 	path := filepath.Join(dir, "processes.json")
-	if err := WriteProcessRefs(path, []ProcessRef{{PID: 1, Kind: "process", Ref: "one"}}); err != nil {
+	if err := WriteProcessRefs(path, []ProcessRef{{PID: 1, Kind: "process", Ref: "one"}, {PID: 2, Kind: "process", Ref: "two"}}); err != nil {
 		t.Fatalf("WriteProcessRefs: %v", err)
 	}
 	wantErr := errors.New("kill")
-	if _, err := NewReaper(path, &recordingKiller{err: wantErr}).Reap(context.Background()); !errors.Is(err, wantErr) {
+	killer := &recordingKiller{err: wantErr}
+	reaped, err := NewReaper(path, killer).Reap(context.Background())
+	if !errors.Is(err, wantErr) {
 		t.Fatalf("kill err = %v", err)
+	}
+	if len(reaped) != 2 || len(killer.refs) != 2 {
+		t.Fatalf("reaper did not attempt every ref: reaped=%+v killed=%+v", reaped, killer.refs)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("failed reap should preserve refs: %v", statErr)
 	}
 }
 
@@ -110,10 +118,10 @@ type recordingKiller struct {
 }
 
 func (k *recordingKiller) Kill(_ context.Context, ref ProcessRef) error {
+	k.refs = append(k.refs, ref)
 	if k.err != nil {
 		return k.err
 	}
-	k.refs = append(k.refs, ref)
 	return nil
 }
 

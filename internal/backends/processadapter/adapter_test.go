@@ -3,13 +3,16 @@ package processadapter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -74,10 +77,12 @@ func TestAdapterPersistsProcessRefsAndLaunchArgs(t *testing.T) {
 	registry := &recordingRegistry{}
 	process := newFakeProcess(202)
 	process.exitOnSignal = true
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC))
 	adapter := New(Config{
 		Name:            "test",
 		BinaryPath:      "backend",
 		Args:            []string{"--model", "{model}"},
+		Clock:           clock,
 		ProcessRegistry: registry,
 		ProcessRunner:   &fakeRunner{next: process},
 	})
@@ -92,6 +97,9 @@ func TestAdapterPersistsProcessRefsAndLaunchArgs(t *testing.T) {
 	if len(registry.added) != 1 || registry.added[0].PID != handle.PID {
 		t.Fatalf("added refs = %+v handle=%+v", registry.added, handle)
 	}
+	if registry.added[0].Kind != "test" || registry.added[0].Binary != "backend" || strings.Join(registry.added[0].Args, " ") != "--model model.gguf --ctx preset_test" || !registry.added[0].StartedAt.Equal(clock.Now()) {
+		t.Fatalf("process ref metadata = %+v", registry.added[0])
+	}
 	if got := strings.Join(process.startedArgs, " "); got != "--model model.gguf --ctx preset_test" {
 		t.Fatalf("started args = %q", got)
 	}
@@ -101,6 +109,82 @@ func TestAdapterPersistsProcessRefsAndLaunchArgs(t *testing.T) {
 	if len(registry.removed) != 1 || registry.removed[0].PID != handle.PID {
 		t.Fatalf("removed refs = %+v handle=%+v", registry.removed, handle)
 	}
+}
+
+func TestStopSurfacesProcessRegistryRemoveError(t *testing.T) {
+	removeErr := errors.New("remove failed")
+	registry := &recordingRegistry{removeErr: removeErr}
+	process := newFakeProcess(203)
+	process.exitOnSignal = true
+	adapter := New(Config{
+		Name:            "test",
+		BinaryPath:      "backend",
+		ProcessRegistry: registry,
+		ProcessRunner:   &fakeRunner{next: process},
+	})
+	handle, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if err := adapter.Stop(context.Background(), handle); !errors.Is(err, removeErr) {
+		t.Fatalf("Stop err = %v", err)
+	}
+	if len(registry.removed) != 1 {
+		t.Fatalf("removed refs = %+v", registry.removed)
+	}
+}
+
+func TestAdapterStopsUntrackedStoredProcessGroup(t *testing.T) {
+	handle, err := execProcessRunner{}.Start(context.Background(), "/bin/sleep", []string{"60"})
+	if err != nil {
+		t.Fatalf("Start sleep: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- handle.Wait() }()
+	pid := handle.PID()
+	pgid := processGroupID(pid)
+	adapter := New(Config{})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := adapter.Stop(ctx, ports.Handle{PID: pid, PGID: pgid, Kind: "process", Ref: fmt.Sprintf("%d", pid), Binary: "/bin/sleep", Args: []string{"60"}}); err != nil {
+		t.Fatalf("Stop untracked: %v", err)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("untracked process did not exit")
+	}
+}
+
+func TestAdapterKillsUntrackedStoredProcessGroupOnCanceledCleanup(t *testing.T) {
+	t.Setenv("MYCELIUM_BACKEND_IGNORE_SIGNALS_HELPER", "1")
+	handle, err := execProcessRunner{}.Start(context.Background(), os.Args[0], []string{"-test.run=TestSignalIgnoringHelperProcess"})
+	if err != nil {
+		t.Fatalf("Start helper: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- handle.Wait() }()
+	pid := handle.PID()
+	adapter := New(Config{StopGracePeriod: 200 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = adapter.Stop(ctx, ports.Handle{PID: pid, Kind: "process", Ref: fmt.Sprintf("%d", pid), Binary: os.Args[0], Args: []string{"-test.run=TestSignalIgnoringHelperProcess"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stop err = %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("untracked process group was not killed")
+	}
+}
+
+func TestSignalIgnoringHelperProcess(t *testing.T) {
+	if os.Getenv("MYCELIUM_BACKEND_IGNORE_SIGNALS_HELPER") != "1" {
+		return
+	}
+	signal.Ignore(syscall.SIGTERM, syscall.SIGINT)
+	select {}
 }
 
 func TestAdapterErrorPaths(t *testing.T) {
@@ -136,6 +220,22 @@ func TestAdapterErrorPaths(t *testing.T) {
 	}
 	if !failedProcess.killed {
 		t.Fatal("registry failure did not kill launched process")
+	}
+}
+
+func TestLaunchCleansUpWhenContextCanceledAfterStart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	process := newFakeProcess(405)
+	adapter := New(Config{
+		BinaryPath:    "backend",
+		ProcessRunner: cancelingRunner{next: process, cancel: cancel},
+	})
+	_, err := adapter.Launch(ctx, fixtures.MakePreset(), "127.0.0.1:1")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Launch err = %v", err)
+	}
+	if !process.killed {
+		t.Fatal("post-start cancellation did not kill process")
 	}
 }
 
@@ -283,6 +383,47 @@ func TestStopHandlesSignalFailure(t *testing.T) {
 	process.finish(nil)
 }
 
+func TestStopProcessTreatsAlreadyExitedProcessAsStopped(t *testing.T) {
+	adapter := New(Config{Clock: mocks.NewFakeClock(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC))})
+
+	process := newFakeProcess(809)
+	process.signalErr = os.ErrProcessDone
+	process.finish(os.ErrProcessDone)
+	stopped, err := adapter.stopProcess(context.Background(), process)
+	if !stopped || err != nil {
+		t.Fatalf("signal done stopped=%t err=%v", stopped, err)
+	}
+
+	process = newFakeProcess(810)
+	process.signalErr = errors.New("signal failed")
+	process.killErr = os.ErrProcessDone
+	process.finish(os.ErrProcessDone)
+	stopped, err = adapter.stopProcess(context.Background(), process)
+	if !stopped || err != nil {
+		t.Fatalf("kill done stopped=%t err=%v", stopped, err)
+	}
+}
+
+func TestStopProcessReturnsWaitError(t *testing.T) {
+	process := newFakeProcess(811)
+	adapter := New(Config{Clock: mocks.NewFakeClock(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC))})
+	done := make(chan error, 1)
+	go func() {
+		stopped, err := adapter.stopProcess(context.Background(), process)
+		if !stopped {
+			done <- errors.New("process was not stopped")
+			return
+		}
+		done <- err
+	}()
+	<-process.signalCalled
+	waitErr := errors.New("wait failed")
+	process.finish(waitErr)
+	if err := <-done; !errors.Is(err, waitErr) {
+		t.Fatalf("wait err = %v", err)
+	}
+}
+
 func TestStopNoopsWithoutPIDOrTrackedProcess(t *testing.T) {
 	registry := &recordingRegistry{}
 	adapter := New(Config{ProcessRegistry: registry})
@@ -304,15 +445,154 @@ func TestExecProcessPID(t *testing.T) {
 	}
 }
 
+func TestExecProcessRunnerAndProcessWrappers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process signal wrapper test uses POSIX shell")
+	}
+	handle, err := execProcessRunner{}.Start(context.Background(), "/bin/sh", []string{"-c", "exit 0"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if handle.PID() <= 0 {
+		t.Fatalf("PID = %d", handle.PID())
+	}
+	if err := handle.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	cmd := exec.Command("/bin/sh", "-c", "trap 'exit 0' TERM; sleep 10")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start signal process: %v", err)
+	}
+	process := execProcess{cmd: cmd}
+	if process.PID() <= 0 {
+		t.Fatalf("exec process PID = %d", process.PID())
+	}
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		_ = process.Kill()
+		t.Fatalf("Signal: %v", err)
+	}
+	_ = process.Wait()
+
+	cmd = exec.Command("/bin/sh", "-c", "sleep 10")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start kill process: %v", err)
+	}
+	process = execProcess{cmd: cmd}
+	if err := process.Kill(); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	_ = process.Wait()
+
+	found, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	osHandle := osProcessHandle{process: found}
+	if osHandle.PID() != os.Getpid() {
+		t.Fatalf("os handle PID = %d", osHandle.PID())
+	}
+	if err := osHandle.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("os handle signal 0: %v", err)
+	}
+}
+
+func TestStoredProcessIdentityAndExternalWaitFailures(t *testing.T) {
+	selfPID := os.Getpid()
+	selfPGID := processGroupID(selfPID)
+	if err := verifyProcessIdentity(ports.Handle{}); err == nil || !strings.Contains(err.Error(), "pid is required") {
+		t.Fatalf("missing pid err = %v", err)
+	}
+	if err := verifyProcessIdentity(ports.Handle{PID: selfPID}); err != nil {
+		t.Fatalf("zero pgid should skip pgid verification: %v", err)
+	}
+
+	wrongPGID := selfPGID + 1
+	if wrongPGID == selfPGID {
+		wrongPGID++
+	}
+	adapter := New(Config{})
+	err := adapter.Stop(context.Background(), ports.Handle{PID: selfPID, PGID: wrongPGID, Kind: "process", Ref: "self"})
+	if err == nil || !strings.Contains(err.Error(), "pgid changed") {
+		t.Fatalf("identity mismatch err = %v", err)
+	}
+
+	selfProcess, err := os.FindProcess(selfPID)
+	if err != nil {
+		t.Fatalf("FindProcess self: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	stopped, err := adapter.waitForExternalExit(ctx, ports.Handle{PID: selfPID}, selfProcess)
+	if stopped || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled wait stopped=%t err=%v", stopped, err)
+	}
+
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC))
+	adapter = New(Config{Clock: clock, StopGracePeriod: time.Nanosecond})
+	done := make(chan error, 1)
+	go func() {
+		stopped, err := adapter.waitForExternalExit(context.Background(), ports.Handle{PID: selfPID}, selfProcess)
+		if stopped {
+			done <- errors.New("self process reported stopped")
+			return
+		}
+		done <- err
+	}()
+	waitForFakeTimer(t, clock)
+	clock.Advance(time.Nanosecond)
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "did not exit after signal") {
+		t.Fatalf("timeout err = %v", err)
+	}
+}
+
+func TestProcessHandleHelpersForOwnedChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process helper test uses POSIX process signaling")
+	}
+	cmd := exec.Command("/bin/sleep", "10")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	process := cmd.Process
+	if err := signalHandle(ports.Handle{PID: process.Pid}, process, syscall.Signal(0)); err != nil {
+		_ = process.Kill()
+		_, _ = process.Wait()
+		t.Fatalf("signalHandle: %v", err)
+	}
+	if err := killHandle(ports.Handle{PID: process.Pid}, process); err != nil {
+		_ = process.Kill()
+		_, _ = process.Wait()
+		t.Fatalf("killHandle: %v", err)
+	}
+	_, _ = process.Wait()
+
+	cmd = exec.Command("/bin/sleep", "10")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start os handle child: %v", err)
+	}
+	osHandle := osProcessHandle{process: cmd.Process}
+	if osHandle.PID() != cmd.Process.Pid {
+		t.Fatalf("os handle pid = %d", osHandle.PID())
+	}
+	if err := osHandle.Kill(); err != nil {
+		t.Fatalf("os handle kill: %v", err)
+	}
+	if err := osHandle.Wait(); err != nil {
+		t.Fatalf("os handle wait: %v", err)
+	}
+}
+
 func TestAdapterSatisfiesBackendPort(t *testing.T) {
 	var _ ports.BackendAdapter = New(Config{})
 }
 
 type recordingRegistry struct {
-	mu      sync.Mutex
-	added   []domain.ProcessRef
-	removed []domain.ProcessRef
-	err     error
+	mu        sync.Mutex
+	added     []domain.ProcessRef
+	removed   []domain.ProcessRef
+	err       error
+	removeErr error
 }
 
 func (r *recordingRegistry) Add(_ context.Context, ref domain.ProcessRef) error {
@@ -329,7 +609,7 @@ func (r *recordingRegistry) Remove(_ context.Context, ref domain.ProcessRef) err
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.removed = append(r.removed, ref)
-	return nil
+	return r.removeErr
 }
 
 type fakeRunner struct {
@@ -352,6 +632,18 @@ func (r *fakeRunner) Start(_ context.Context, binary string, args []string) (Pro
 		r.next = newFakeProcess(999)
 	}
 	r.next.startedArgs = append([]string(nil), args...)
+	return r.next, nil
+}
+
+type cancelingRunner struct {
+	next   *fakeProcess
+	cancel context.CancelFunc
+}
+
+func (r cancelingRunner) Start(_ context.Context, _ string, _ []string) (ProcessHandle, error) {
+	if r.cancel != nil {
+		r.cancel()
+	}
 	return r.next, nil
 }
 

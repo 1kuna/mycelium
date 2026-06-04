@@ -75,13 +75,7 @@ func (m *NodeAgent) InspectModel(_ context.Context, p domain.Preset) (domain.Mod
 	if m.Metadata != (domain.ModelMetadata{}) {
 		return m.Metadata, nil
 	}
-	return domain.ModelMetadata{
-		ModelRef:      p.ModelRef,
-		Format:        "gguf",
-		WeightsMB:     p.EstWeightsMB,
-		KVPerTokenMB:  p.KVPerTokenMB,
-		ContextLength: p.ContextLength,
-	}, nil
+	return domain.ModelMetadata{}, fmt.Errorf("mock node agent has no metadata for preset %q", p.ID)
 }
 
 func (m *NodeAgent) BeginRequest(_ context.Context, instanceID string) error {

@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 
@@ -13,16 +14,14 @@ func (a *Agent) launchAndWait(ctx context.Context, p domain.Preset, inst domain.
 	loadCtx, cancel := a.withLoadTimeout(ctx)
 	defer cancel()
 
-	addr, err := resolveListenAddr(a.listenAddr)
-	if err != nil {
-		return domain.ModelInstance{}, ports.Handle{}, err
-	}
-	handle, err := a.backend.Launch(loadCtx, p, addr)
+	handle, err := a.launchBackend(loadCtx, p)
 	if err != nil {
 		return domain.ModelInstance{}, ports.Handle{}, err
 	}
 	if err := a.backend.WaitReady(loadCtx, handle.Addr); err != nil {
-		_ = a.backend.Stop(context.Background(), handle)
+		if stopErr := a.backend.Stop(context.Background(), handle); stopErr != nil {
+			return domain.ModelInstance{}, ports.Handle{}, errors.Join(err, stopErr)
+		}
 		return domain.ModelInstance{}, ports.Handle{}, err
 	}
 	inst.State = domain.InstReady
@@ -31,20 +30,57 @@ func (a *Agent) launchAndWait(ctx context.Context, p domain.Preset, inst domain.
 	return inst, handle, nil
 }
 
-func resolveListenAddr(addr string) (string, error) {
+func (a *Agent) launchBackend(ctx context.Context, p domain.Preset) (ports.Handle, error) {
+	addr := a.listenAddr
+	zeroPort, err := listenAddrUsesZeroPort(addr)
+	if err != nil {
+		return ports.Handle{}, err
+	}
+	if !zeroPort {
+		return a.backend.Launch(ctx, p, addr)
+	}
+	dynamic, ok := a.backend.(ports.DynamicBackendAdapter)
+	if !ok {
+		return ports.Handle{}, fmt.Errorf("backend listen address %q requires a backend that reports dynamic ports", addr)
+	}
+	launchAddr, err := normalizeDynamicListenAddr(addr)
+	if err != nil {
+		return ports.Handle{}, err
+	}
+	handle, err := dynamic.LaunchDynamic(ctx, p, launchAddr)
+	if err != nil {
+		return ports.Handle{}, err
+	}
+	if !concreteBackendAddr(handle.Addr) {
+		_ = a.backend.Stop(context.Background(), handle)
+		return ports.Handle{}, fmt.Errorf("dynamic backend returned non-concrete address %q", handle.Addr)
+	}
+	return handle, nil
+}
+
+func listenAddrUsesZeroPort(addr string) (bool, error) {
 	host, port, err := net.SplitHostPort(addr)
-	if err != nil || port != "0" {
-		return addr, nil
+	if err != nil {
+		return false, nil
+	}
+	_ = host
+	return port == "0", nil
+}
+
+func normalizeDynamicListenAddr(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
 	}
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
-	if err != nil {
-		return "", fmt.Errorf("allocate backend listen address: %w", err)
-	}
-	defer listener.Close()
-	return listener.Addr().String(), nil
+	return net.JoinHostPort(host, port), nil
+}
+
+func concreteBackendAddr(addr string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	return err == nil && host != "" && port != "" && port != "0"
 }
 
 func (a *Agent) withLoadTimeout(parent context.Context) (context.Context, context.CancelFunc) {

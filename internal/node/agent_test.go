@@ -21,7 +21,13 @@ import (
 func TestAgentConformance(t *testing.T) {
 	contract.RunNodeAgentConformance(t, "node-agent",
 		func() ports.NodeAgent {
-			return NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
+			return NewAgent(
+				fixtures.MakeNode(),
+				mocks.NewBackendAdapter(),
+				mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+				WithAllocator(lease.NewAllocator()),
+				WithModelInspector(StaticInspector{Metadata: domain.ModelMetadata{ModelRef: "model.gguf", Format: "gguf", WeightsMB: 1, KVPerTokenMB: 0.01, ContextLength: 2048}}),
+			)
 		},
 		fixtures.MakePreset())
 }
@@ -115,12 +121,24 @@ func TestLoadAllocatesConcreteAddressPerPresetWhenListenPortIsZero(t *testing.T)
 	}
 	var launchAddrs []string
 	for _, call := range backend.Calls {
-		if call.Op == "launch" {
+		if call.Op == "launch_dynamic" {
 			launchAddrs = append(launchAddrs, call.Addr)
 		}
 	}
 	if len(launchAddrs) != 2 || launchAddrs[0] != first.Addr || launchAddrs[1] != second.Addr {
 		t.Fatalf("launch addrs=%+v first=%s second=%s", launchAddrs, first.Addr, second.Addr)
+	}
+}
+
+func TestLoadWithZeroPortRequiresDynamicBackend(t *testing.T) {
+	backend := newBlockingBackend()
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithListenAddr("127.0.0.1:0"), WithAllocator(lease.NewAllocator()))
+	_, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset(fixtures.WithPresetID("static-only"))))
+	if err == nil || !strings.Contains(err.Error(), "dynamic ports") {
+		t.Fatalf("zero port err = %v", err)
+	}
+	if backend.launches != 0 {
+		t.Fatalf("static backend was launched %d times", backend.launches)
 	}
 }
 
@@ -140,7 +158,7 @@ func TestLoadReusesReadyInstance(t *testing.T) {
 	if first.ID != second.ID {
 		t.Fatalf("expected same warm instance, got %s and %s", first.ID, second.ID)
 	}
-	if countCalls(backend.Calls, "launch") != 1 {
+	if countCalls(backend.Calls, "launch_dynamic") != 1 {
 		t.Fatalf("backend calls = %+v", backend.Calls)
 	}
 }
@@ -176,14 +194,14 @@ func TestLoadUsesAcceleratorSetAsRuntimeUnit(t *testing.T) {
 	if !sameAcceleratorSet(first.AcceleratorSet, []int{0}) || !sameAcceleratorSet(second.AcceleratorSet, []int{1}) {
 		t.Fatalf("accelerator sets not preserved: first=%+v second=%+v", first.AcceleratorSet, second.AcceleratorSet)
 	}
-	if countCalls(backend.Calls, "launch") != 2 {
+	if countCalls(backend.Calls, "launch_dynamic") != 2 {
 		t.Fatalf("backend calls = %+v", backend.Calls)
 	}
 }
 
 func TestConcurrentColdLoadsDeduplicate(t *testing.T) {
 	backend := newBlockingBackend()
-	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithListenAddr("127.0.0.1:1"), WithAllocator(lease.NewAllocator()))
 	preset := fixtures.MakePreset()
 
 	var wg sync.WaitGroup
@@ -238,7 +256,7 @@ func TestLoadFailureRemovesLoadingInstanceAndStopsHandle(t *testing.T) {
 func TestLoadTimeoutUsesInjectedClock(t *testing.T) {
 	backend := newBlockingBackend()
 	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
-	agent := NewAgent(fixtures.MakeNode(), backend, clock, WithAllocator(lease.NewAllocator()), WithLoadTimeout(time.Second))
+	agent := NewAgent(fixtures.MakeNode(), backend, clock, WithListenAddr("127.0.0.1:1"), WithAllocator(lease.NewAllocator()), WithLoadTimeout(time.Second))
 
 	done := make(chan error, 1)
 	go func() {
@@ -344,6 +362,13 @@ func TestInFlightRequestsGuardUnload(t *testing.T) {
 	if err := agent.BeginRequest(context.Background(), inst.ID); err == nil || !strings.Contains(err.Error(), "stopping") {
 		t.Fatalf("expected stopping error, got %v", err)
 	}
+	snap, err := agent.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Instances) != 1 || snap.Instances[0].State != domain.InstStopping {
+		t.Fatalf("stopping instance not visible in snapshot: %+v", snap.Instances)
+	}
 	if err := agent.EndRequest(context.Background(), inst.ID); err != nil {
 		t.Fatalf("EndRequest: %v", err)
 	}
@@ -439,7 +464,7 @@ func TestLoadFailsLoudWithoutAllocatorOrCapacity(t *testing.T) {
 
 func TestCatastrophicNodeShedsSecondColdLoadWhileFirstLoads(t *testing.T) {
 	backend := newBlockingBackend()
-	agent := NewAgent(fixtures.MakeSparkNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
+	agent := NewAgent(fixtures.MakeSparkNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithListenAddr("127.0.0.1:1"), WithAllocator(lease.NewAllocator()))
 	firstPreset := fixtures.MakePreset(fixtures.WithPresetID("first"))
 	secondPreset := fixtures.MakePreset(fixtures.WithPresetID("second"))
 
@@ -530,7 +555,7 @@ func TestProtectInstanceMarksPinnedReservation(t *testing.T) {
 	}
 }
 
-func TestInspectModelUsesConfiguredInspectorOrPresetMetadata(t *testing.T) {
+func TestInspectModelRequiresConfiguredInspector(t *testing.T) {
 	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithModelInspector(StaticInspector{
 		Metadata: domain.ModelMetadata{ModelRef: "model", Format: "gguf", WeightsMB: 10, KVPerTokenMB: 0.1, ContextLength: 2048},
 	}))
@@ -543,16 +568,7 @@ func TestInspectModelUsesConfiguredInspectorOrPresetMetadata(t *testing.T) {
 	}
 
 	agent = NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
-	metadata, err = agent.InspectModel(context.Background(), fixtures.MakePreset())
-	if err != nil {
-		t.Fatalf("InspectModel preset fallback: %v", err)
-	}
-	if metadata.Format != "preset" || metadata.WeightsMB == 0 {
-		t.Fatalf("metadata = %+v", metadata)
-	}
-
-	_, err = agent.InspectModel(context.Background(), domain.Preset{ID: "empty"})
-	if err == nil {
+	if _, err = agent.InspectModel(context.Background(), fixtures.MakePreset()); err == nil {
 		t.Fatal("expected missing inspector error")
 	}
 }
