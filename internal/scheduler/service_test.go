@@ -184,7 +184,7 @@ func TestServiceSubmitWithPayloadUsesPeerCoordinator(t *testing.T) {
 	if result.Lease.ID != "owner-lease-a" || result.Lease.InstanceID == "" || result.Instance.PresetID != preset.ID {
 		t.Fatalf("result = %+v", result)
 	}
-	if strings.Join(coordinator.Calls, ",") != "claim:job-a,plan:job-a,commit:job-a" {
+	if strings.Join(coordinator.Calls, ",") != "claim:job-a,plan:job-a,commit:job-a,running:job-a" {
 		t.Fatalf("coordinator calls = %+v", coordinator.Calls)
 	}
 	if jobLog.job.ID != "job-a" || string(jobLog.payload) != `{"job":"a"}` {
@@ -195,6 +195,13 @@ func TestServiceSubmitWithPayloadUsesPeerCoordinator(t *testing.T) {
 	}
 	if store.jobs["job-a"].Status != domain.JobRunning || len(store.leases) != 1 || len(store.instances) != 1 {
 		t.Fatalf("store jobs=%+v leases=%+v instances=%+v", store.jobs, store.leases, store.instances)
+	}
+}
+
+func TestServiceSubmitRejectsCoordinatorBypass(t *testing.T) {
+	_, err := (&Service{Coordinator: &mocks.Coordinator{}}).Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a")))
+	if err == nil || !strings.Contains(err.Error(), "SubmitWithPayload") {
+		t.Fatalf("Submit bypass err = %v", err)
 	}
 }
 
@@ -652,7 +659,7 @@ func TestServiceDrainUsesCoordinatedPayload(t *testing.T) {
 	if string(jobLog.payload) != `{"job":"a"}` {
 		t.Fatalf("job log payload = %s", jobLog.payload)
 	}
-	if strings.Join(coordinator.Calls, ",") != "claim:job-a,plan:job-a,commit:job-a" {
+	if strings.Join(coordinator.Calls, ",") != "claim:job-a,plan:job-a,commit:job-a,running:job-a" {
 		t.Fatalf("coordinator calls = %+v", coordinator.Calls)
 	}
 }
@@ -1547,7 +1554,7 @@ func TestServiceCoordinatedPreemptionUsesOwnerLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enactPreemption: %v", err)
 	}
-	if strings.Join(admission.Calls, ",") != "lease-for-instance:victim-a,preempt-for-job:job-a:lease-victim:preempted for job-a" {
+	if strings.Join(admission.Calls, ",") != "lease-for-instance:victim-a,release:lease-victim" {
 		t.Fatalf("admission calls = %+v", admission.Calls)
 	}
 	if strings.Join(agent.Calls, ",") != "unload:victim-a" {
@@ -1618,7 +1625,7 @@ func TestServiceCoordinatedPreemptionRequeuesVictimWithPayload(t *testing.T) {
 	if len(results) != 1 || results[0].Lease.ID != "owner-victim" || results[0].Instance.PresetID != preset.ID {
 		t.Fatalf("drain results = %+v", results)
 	}
-	if strings.Join(coordinator.Calls, ",") != "claim:victim-job,plan:victim-job,commit:victim-job" {
+	if strings.Join(coordinator.Calls, ",") != "claim:victim-job,plan:victim-job,commit:victim-job,running:victim-job" {
 		t.Fatalf("coordinator calls = %+v", coordinator.Calls)
 	}
 	if strings.Join(agent.Calls, ",") != "unload:victim-a,load:victim-preset" {
@@ -1775,6 +1782,305 @@ func TestServiceSubmitErrorPaths(t *testing.T) {
 	resolveService.Placer = fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", Action: domain.ActionLoadedNew}}
 	if _, err := resolveService.Submit(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID))); err == nil {
 		t.Fatal("expected resolve error")
+	}
+}
+
+func TestServiceLocalSubmitCompensationErrorBranches(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(31, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	base := func(store *runtimeStore, agent *mocks.NodeAgent, admission *mocks.AdmissionController, decision domain.PlacementDecision) *Service {
+		return &Service{
+			Placer: fakePlacer{decision: decision},
+			Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+			Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}, admissions: map[string]ports.AdmissionController{node.ID: admission}},
+			Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+			Queue:  NewQueue(clock),
+			Store:  store,
+			Clock:  clock,
+			Presets: map[string]domain.Preset{
+				preset.ID: preset,
+			},
+		}
+	}
+	loadDecision := domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}
+	for _, tc := range []struct {
+		name  string
+		store *runtimeStore
+	}{
+		{name: "instance", store: &runtimeStore{saveInstanceErr: errors.New("save instance")}},
+		{name: "lease", store: &runtimeStore{saveLeaseErr: errors.New("save lease")}},
+		{name: "job", store: &runtimeStore{saveJobErr: errors.New("save job"), saveJobErrAt: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := mocks.NewNodeAgent(node)
+			agent.UnloadErr = errors.New("cleanup unload")
+			_, err := base(tc.store, agent, &mocks.AdmissionController{}, loadDecision).Submit(context.Background(), fixtures.MakeJob(fixtures.WithPreset(preset.ID)))
+			if err == nil || !strings.Contains(err.Error(), "cleanup unload") {
+				t.Fatalf("Submit err = %v", err)
+			}
+		})
+	}
+
+	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim-a"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
+	lease := domain.Lease{ID: "lease-victim", JobID: "victim-job", InstanceID: victim.ID, NodeID: node.ID}
+	admission := &mocks.AdmissionController{LeaseForInstVal: lease, LeaseForInstFound: true, ReleaseErr: errors.New("owner release")}
+	decision := domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionHardPreempted, Preempted: []string{victim.ID}, Replacements: []domain.Replacement{{InstanceID: "not-preempted", NodeID: node.ID}}}
+	service := base(&runtimeStore{leases: map[string]domain.Lease{lease.ID: lease}}, mocks.NewNodeAgent(node), admission, decision)
+	service.Fleet = staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}}}
+	_, err := service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)))
+	if err == nil || !strings.Contains(err.Error(), "not-preempted") || !strings.Contains(err.Error(), "owner release") {
+		t.Fatalf("preemption/release err = %v", err)
+	}
+
+	admission = &mocks.AdmissionController{LeaseForInstVal: lease, LeaseForInstFound: true}
+	service = base(&runtimeStore{leases: map[string]domain.Lease{lease.ID: lease}}, mocks.NewNodeAgent(node), admission, decision)
+	service.Fleet = staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}}}
+	_, err = service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)))
+	if err == nil || !strings.Contains(err.Error(), "not-preempted") || strings.Contains(err.Error(), "owner release") {
+		t.Fatalf("preemption err = %v", err)
+	}
+}
+
+func TestServiceCompleteFailAndReleaseLifecycleBranches(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(32, 0).UTC())
+	store := &runtimeStore{}
+	service := leaseLifecycleService(clock, store)
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+
+	if err := (&Service{}).CompleteJob(context.Background(), job, domain.Lease{}); err == nil || !strings.Contains(err.Error(), "not fully configured") {
+		t.Fatalf("complete validate err = %v", err)
+	}
+	saveErr := errors.New("save job")
+	if err := leaseLifecycleService(clock, &runtimeStore{saveJobErr: saveErr}).CompleteJob(context.Background(), job, domain.Lease{}); !errors.Is(err, saveErr) {
+		t.Fatalf("complete save err = %v", err)
+	}
+	if err := service.CompleteJob(context.Background(), domain.Job{ID: job.ID, Error: "old"}, domain.Lease{}); err != nil {
+		t.Fatalf("CompleteJob: %v", err)
+	}
+	if got := store.jobs[job.ID]; got.Status != domain.JobDone || got.Error != "" {
+		t.Fatalf("complete job = %+v", got)
+	}
+	completeErr := errors.New("complete coordinator")
+	coordinator := &mocks.Coordinator{CompleteErr: completeErr}
+	service.Coordinator = coordinator
+	if err := service.CompleteJob(context.Background(), job, domain.Lease{JobID: job.ID}); !errors.Is(err, completeErr) {
+		t.Fatalf("coordinator complete err = %v", err)
+	}
+
+	if err := (&Service{}).FailJob(context.Background(), job, domain.Lease{}, errors.New("cause")); err == nil || !strings.Contains(err.Error(), "not fully configured") {
+		t.Fatalf("fail validate err = %v", err)
+	}
+	if err := leaseLifecycleService(clock, &runtimeStore{saveJobErr: saveErr}).FailJob(context.Background(), job, domain.Lease{}, errors.New("cause")); !errors.Is(err, saveErr) {
+		t.Fatalf("fail save err = %v", err)
+	}
+	service = leaseLifecycleService(clock, &runtimeStore{})
+	if err := service.FailJob(context.Background(), job, domain.Lease{}, nil); err != nil {
+		t.Fatalf("FailJob nil cause: %v", err)
+	}
+	if got := service.Store.(*runtimeStore).jobs[job.ID]; got.Status != domain.JobFailed || got.Error != "" {
+		t.Fatalf("failed job nil cause = %+v", got)
+	}
+	failErr := errors.New("fail coordinator")
+	service.Coordinator = &mocks.Coordinator{FailErr: failErr}
+	if err := service.FailJob(context.Background(), job, domain.Lease{JobID: job.ID}, errors.New("cause")); !errors.Is(err, failErr) {
+		t.Fatalf("coordinator fail err = %v", err)
+	}
+
+	finishStore := &runtimeStore{leases: map[string]domain.Lease{"lease-finish": {ID: "lease-finish", JobID: "job-finish"}}}
+	finishCoordinator := &mocks.Coordinator{}
+	finishService := leaseLifecycleService(clock, finishStore)
+	finishService.Coordinator = finishCoordinator
+	finishJob := fixtures.MakeJob(fixtures.WithJobID("job-finish"))
+	finishLease := domain.Lease{ID: "lease-finish", JobID: finishJob.ID}
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := finishService.FinishJob(canceledCtx, finishJob, finishLease, nil); err != nil {
+		t.Fatalf("FinishJob success: %v", err)
+	}
+	if got := finishStore.jobs[finishJob.ID]; got.Status != domain.JobDone || got.Error != "" {
+		t.Fatalf("finished job = %+v", got)
+	}
+	if _, ok := finishStore.leases[finishLease.ID]; ok || strings.Join(finishCoordinator.Calls, ",") != "complete:job-finish,release:job-finish" {
+		t.Fatalf("finish leases=%+v coordinator=%+v", finishStore.leases, finishCoordinator.Calls)
+	}
+
+	finishStore = &runtimeStore{leases: map[string]domain.Lease{"lease-fail": {ID: "lease-fail", JobID: "job-fail"}}}
+	finishCoordinator = &mocks.Coordinator{}
+	finishService = leaseLifecycleService(clock, finishStore)
+	finishService.Coordinator = finishCoordinator
+	finishJob = fixtures.MakeJob(fixtures.WithJobID("job-fail"))
+	finishLease = domain.Lease{ID: "lease-fail", JobID: finishJob.ID}
+	cause := errors.New("upstream failed")
+	if err := finishService.FinishJob(context.Background(), finishJob, finishLease, cause); err != nil {
+		t.Fatalf("FinishJob failure: %v", err)
+	}
+	if got := finishStore.jobs[finishJob.ID]; got.Status != domain.JobFailed || got.Error != cause.Error() {
+		t.Fatalf("failed finish job = %+v", got)
+	}
+	if _, ok := finishStore.leases[finishLease.ID]; ok || strings.Join(finishCoordinator.Calls, ",") != "fail:job-fail:upstream failed,release:job-fail" {
+		t.Fatalf("fail finish leases=%+v coordinator=%+v", finishStore.leases, finishCoordinator.Calls)
+	}
+
+	completeErr = errors.New("finish complete")
+	finishService = leaseLifecycleService(clock, &runtimeStore{})
+	finishService.Coordinator = &mocks.Coordinator{CompleteErr: completeErr}
+	if err := finishService.FinishJob(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-terminal")), domain.Lease{JobID: "job-terminal"}, nil); !errors.Is(err, completeErr) {
+		t.Fatalf("FinishJob terminal err = %v", err)
+	}
+
+	listErr := errors.New("list leases")
+	if err := leaseLifecycleService(clock, &runtimeStore{listLeaseErr: listErr}).Release(context.Background(), "lease-a"); !errors.Is(err, listErr) {
+		t.Fatalf("release list err = %v", err)
+	}
+	ownerAdmission := &mocks.AdmissionController{}
+	ownerService := leaseLifecycleService(clock, &runtimeStore{})
+	ownerService.Owners = staticNodes{admissions: map[string]ports.AdmissionController{"node-a": ownerAdmission}}
+	if err := ownerService.ReleaseJob(context.Background(), domain.Lease{ID: "lease-a", NodeID: "node-a"}); err != nil {
+		t.Fatalf("owner ReleaseJob: %v", err)
+	}
+	if strings.Join(ownerAdmission.Calls, ",") != "release:lease-a" {
+		t.Fatalf("owner calls = %+v", ownerAdmission.Calls)
+	}
+}
+
+func TestServiceCoordinatedCompensationErrorBranches(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(33, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	payload := []byte(`{"job":"a"}`)
+	loadDecision := domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}
+	base := func(store *runtimeStore, agent *mocks.NodeAgent, coordinator *mocks.Coordinator, decision domain.PlacementDecision) *Service {
+		if coordinator.Decision.JobID == "" {
+			coordinator.Decision = decision
+		}
+		if coordinator.Lease.ID == "" {
+			coordinator.Lease = domain.Lease{ID: "lease-owner", JobID: "job-a", NodeID: node.ID, Claim: decision.Claim}
+		}
+		admission := &mocks.AdmissionController{}
+		return &Service{
+			Placer:      fakePlacer{decision: decision},
+			Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+			Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: agent}, admissions: map[string]ports.AdmissionController{node.ID: admission}},
+			Owners:      staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+			Coordinator: coordinator,
+			Queue:       NewQueue(clock),
+			Store:       store,
+			JobLog:      &recordingJobLog{},
+			Clock:       clock,
+			Presets: map[string]domain.Preset{
+				preset.ID: preset,
+			},
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		store *runtimeStore
+	}{
+		{name: "instance", store: &runtimeStore{saveInstanceErr: errors.New("save instance")}},
+		{name: "lease", store: &runtimeStore{saveLeaseErr: errors.New("save lease")}},
+		{name: "job", store: &runtimeStore{saveJobErr: errors.New("save job"), saveJobErrAt: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := mocks.NewNodeAgent(node)
+			agent.UnloadErr = errors.New("cleanup unload")
+			coordinator := &mocks.Coordinator{Decision: loadDecision, Lease: domain.Lease{ID: "lease-owner", JobID: "job-a", NodeID: node.ID, Claim: loadDecision.Claim}}
+			_, err := base(tc.store, agent, coordinator, loadDecision).SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), payload)
+			if err == nil || !strings.Contains(err.Error(), "cleanup unload") {
+				t.Fatalf("SubmitWithPayload err = %v", err)
+			}
+		})
+	}
+	agent := mocks.NewNodeAgent(node)
+	agent.UnloadErr = errors.New("cleanup unload")
+	coordinator := &mocks.Coordinator{Decision: loadDecision, Lease: domain.Lease{ID: "lease-owner", JobID: "job-a", NodeID: node.ID, Claim: loadDecision.Claim}, RunningErr: errors.New("mark running")}
+	_, err := base(&runtimeStore{}, agent, coordinator, loadDecision).SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), payload)
+	if err == nil || !strings.Contains(err.Error(), "mark running") || !strings.Contains(err.Error(), "cleanup unload") {
+		t.Fatalf("mark running err = %v", err)
+	}
+	coordinator = &mocks.Coordinator{Decision: loadDecision, Lease: domain.Lease{ID: "lease-owner", JobID: "job-a", NodeID: node.ID, Claim: loadDecision.Claim}, RunningErr: errors.New("mark running clean")}
+	_, err = base(&runtimeStore{}, mocks.NewNodeAgent(node), coordinator, loadDecision).SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), payload)
+	if err == nil || !strings.Contains(err.Error(), "mark running clean") {
+		t.Fatalf("clean mark running err = %v", err)
+	}
+
+	hookErr := errors.New("hook failed")
+	releaseErr := errors.New("coordinator release")
+	coordinator = &mocks.Coordinator{Decision: loadDecision, Lease: domain.Lease{ID: "lease-owner", JobID: "job-a", NodeID: node.ID, Claim: loadDecision.Claim}, ReleaseErr: releaseErr}
+	_, err = base(&runtimeStore{}, mocks.NewNodeAgent(node), coordinator, loadDecision).SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), payload, SubmitHooks{BeforeColdLoad: func(context.Context, domain.PlacementDecision) error {
+		return hookErr
+	}})
+	if !errors.Is(err, hookErr) || !errors.Is(err, releaseErr) {
+		t.Fatalf("hook release err = %v", err)
+	}
+
+	victim := fixtures.MakeInstance(fixtures.WithInstanceID("victim-a"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
+	victimLease := domain.Lease{ID: "lease-victim", JobID: "victim-job", InstanceID: victim.ID, NodeID: node.ID}
+	preemptAdmission := &mocks.AdmissionController{LeaseForInstVal: victimLease, LeaseForInstFound: true}
+	preemptDecision := domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionHardPreempted, Preempted: []string{victim.ID}, Replacements: []domain.Replacement{{InstanceID: "not-preempted", NodeID: node.ID}}}
+	coordinator = &mocks.Coordinator{Decision: preemptDecision, Lease: domain.Lease{ID: "lease-owner", JobID: "job-a", NodeID: node.ID, Claim: preemptDecision.Claim}, ReleaseErr: releaseErr}
+	service := base(&runtimeStore{leases: map[string]domain.Lease{victimLease.ID: victimLease}}, mocks.NewNodeAgent(node), coordinator, preemptDecision)
+	service.Fleet = staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}}}
+	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{node.ID: preemptAdmission}}
+	_, err = service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), payload)
+	if err == nil || !strings.Contains(err.Error(), "not-preempted") || !strings.Contains(err.Error(), "coordinator release") {
+		t.Fatalf("coordinated preemption release err = %v", err)
+	}
+
+	coordinator = &mocks.Coordinator{Decision: preemptDecision, Lease: domain.Lease{ID: "lease-owner", JobID: "job-a", NodeID: node.ID, Claim: preemptDecision.Claim}}
+	service = base(&runtimeStore{leases: map[string]domain.Lease{victimLease.ID: victimLease}}, mocks.NewNodeAgent(node), coordinator, preemptDecision)
+	service.Fleet = staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{victim}}}
+	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{node.ID: preemptAdmission}}
+	_, err = service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), payload)
+	if err == nil || !strings.Contains(err.Error(), "not-preempted") || strings.Contains(err.Error(), "coordinator release") {
+		t.Fatalf("coordinated preemption err = %v", err)
+	}
+}
+
+func TestServiceDirectRemainingBranchContracts(t *testing.T) {
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst-a"), fixtures.OnNode(node.ID))
+	service := &Service{Nodes: staticNodes{}, Store: &runtimeStore{}}
+	if err := service.finishPreemption(context.Background(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{}, map[string]domain.Lease{}, map[string]domain.ModelInstance{}); err == nil || !strings.Contains(err.Error(), "missing from preemption inspection") {
+		t.Fatalf("missing preempted victim err = %v", err)
+	}
+	preemptLease := domain.Lease{ID: "lease-a", JobID: "job-a", InstanceID: inst.ID, NodeID: node.ID}
+	preemptDecision := domain.PlacementDecision{Preempted: []string{inst.ID}}
+	preemptLeases := map[string]domain.Lease{inst.ID: preemptLease}
+	preemptVictims := map[string]domain.ModelInstance{inst.ID: inst}
+	service = &Service{
+		Nodes: staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Store: &runtimeStore{},
+	}
+	if err := service.finishPreemption(context.Background(), preemptDecision, domain.FleetSnapshot{}, preemptLeases, preemptVictims); err == nil || !strings.Contains(err.Error(), "owner admission resolver") {
+		t.Fatalf("missing owner resolver err = %v", err)
+	}
+	service = &Service{
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Owners: staticNodes{},
+		Store:  &runtimeStore{},
+	}
+	if err := service.finishPreemption(context.Background(), preemptDecision, domain.FleetSnapshot{}, preemptLeases, preemptVictims); !errors.Is(err, domain.ErrUnreachable) {
+		t.Fatalf("owner resolver err = %v", err)
+	}
+	releaseErr := errors.New("owner release")
+	service = &Service{
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{ReleaseErr: releaseErr}}},
+		Store:  &runtimeStore{},
+	}
+	if err := service.finishPreemption(context.Background(), preemptDecision, domain.FleetSnapshot{}, preemptLeases, preemptVictims); !errors.Is(err, releaseErr) {
+		t.Fatalf("owner release err = %v", err)
+	}
+	service = &Service{Nodes: staticNodes{}, Store: &runtimeStore{}}
+	if err := service.cleanupLoadedInstance(context.Background(), inst, true, func() error { return nil }); !errors.Is(err, domain.ErrUnreachable) {
+		t.Fatalf("cleanup missing node err = %v", err)
+	}
+	targets := admissionPreemptions(domain.Job{ID: "job-a"}, domain.PlacementDecision{Preempted: []string{"inst-a"}}, map[string]domain.Lease{
+		"inst-a": {ID: "lease-a"},
+	})
+	if len(targets) != 1 || targets[0].Reason != "preempted for job-a" {
+		t.Fatalf("preemption targets = %+v", targets)
 	}
 }
 
@@ -1974,14 +2280,6 @@ func TestServiceResolveAndPreemptionErrors(t *testing.T) {
 		{name: "coordinated preempt missing owner lease", fn: func() error {
 			admission := &mocks.AdmissionController{}
 			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}, Requeued: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
-		}},
-		{name: "coordinated preempt policy preempter unsupported", fn: func() error {
-			admission := inspectableAdmission{lease: domain.Lease{ID: "lease-a", InstanceID: inst.ID, NodeID: node.ID}, found: true}
-			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
-		}},
-		{name: "coordinated preempt owner preempt error", fn: func() error {
-			admission := &mocks.AdmissionController{LeaseForInstVal: domain.Lease{ID: "lease-a", InstanceID: inst.ID, NodeID: node.ID}, LeaseForInstFound: true, PreemptErr: errors.New("preempt")}
-			return (&Service{Coordinator: &mocks.Coordinator{}, Nodes: service.Nodes, Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}}, Store: &runtimeStore{}, Queue: NewQueue(clock)}).enactPreemption(context.Background(), fixtures.MakeJob(), domain.PlacementDecision{Preempted: []string{inst.ID}}, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}})
 		}},
 		{name: "coordinated preempt delete lease", fn: func() error {
 			admission := &mocks.AdmissionController{LeaseForInstVal: domain.Lease{ID: "lease-a", InstanceID: inst.ID, NodeID: node.ID}, LeaseForInstFound: true}

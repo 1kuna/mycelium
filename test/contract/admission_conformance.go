@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"mycelium/internal/domain"
@@ -28,12 +29,28 @@ func RunAdmissionControllerConformance(t *testing.T, name string, newController 
 		assert.NoError(t, "Release", controller.Release(context.Background(), lease.ID))
 	})
 
-	t.Run(name+"/offer_commit_preempt", func(t *testing.T) {
+	t.Run(name+"/commit_rejects_unknown_offer_and_stale_fence", func(t *testing.T) {
+		controller := newController()
+		_, err := controller.Commit(context.Background(), "missing-offer", 1)
+		assert.Error(t, "Commit unknown offer", err)
+
+		offer, err := controller.Offer(context.Background(), domain.AdmissionRequest{Job: job, Preset: preset, Claim: claim})
+		assert.NoError(t, "Offer", err)
+		_, err = controller.Commit(context.Background(), offer.OfferID, offer.Fence+1)
+		assert.True(t, errors.Is(err, domain.ErrStaleFence), "stale Commit err = %v, want %v", err, domain.ErrStaleFence)
+		lease, err := controller.Commit(context.Background(), offer.OfferID, offer.Fence)
+		assert.NoError(t, "Commit after stale rejection", err)
+		assert.NoError(t, "Release", controller.Release(context.Background(), lease.ID))
+	})
+
+	t.Run(name+"/direct_preempt_disabled", func(t *testing.T) {
 		controller := newController()
 		offer, err := controller.Offer(context.Background(), domain.AdmissionRequest{Job: job, Preset: preset, Claim: claim})
 		assert.NoError(t, "Offer", err)
 		lease, err := controller.Commit(context.Background(), offer.OfferID, offer.Fence)
 		assert.NoError(t, "Commit", err)
-		assert.NoError(t, "Preempt", controller.Preempt(context.Background(), lease.ID, "conformance"))
+		err = controller.Preempt(context.Background(), lease.ID, "conformance")
+		assert.True(t, err != nil, "direct Preempt should be disabled")
+		assert.NoError(t, "Release after disabled Preempt", controller.Release(context.Background(), lease.ID))
 	})
 }

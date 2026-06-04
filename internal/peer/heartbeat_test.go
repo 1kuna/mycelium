@@ -163,6 +163,17 @@ func TestHeartbeatErrorPaths(t *testing.T) {
 	if _, err := heartbeat.Tick(ctx); !errors.Is(err, boom) {
 		t.Fatalf("on dead err = %v", err)
 	}
+	if heartbeat.known[remote.ID].dead {
+		t.Fatalf("peer marked dead after failed OnDead: %+v", heartbeat.known[remote.ID])
+	}
+	recovered := 0
+	heartbeat.OnDead = func(context.Context, domain.Peer) error {
+		recovered++
+		return nil
+	}
+	if dead, err := heartbeat.Tick(ctx); err != nil || len(dead) != 1 || recovered != 1 || !heartbeat.known[remote.ID].dead {
+		t.Fatalf("retry dead=%+v recovered=%d known=%+v err=%v", dead, recovered, heartbeat.known, err)
+	}
 	heartbeat = &Heartbeat{
 		Self:      self,
 		Discovery: &mocks.PeerDiscovery{},

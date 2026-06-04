@@ -26,10 +26,15 @@ type AdmissionResolver interface {
 	AdmissionController(nodeID string) (ports.AdmissionController, error)
 }
 
+type RegistryRecordPusher interface {
+	PushRecord(ctx context.Context, rec domain.JobRecord) error
+}
+
 type Coordinator struct {
 	selfID            string
 	jobs              JobSource
 	registry          ports.JobRegistry
+	registryPusher    RegistryRecordPusher
 	placer            ports.Placer
 	fleet             FleetSource
 	owners            AdmissionResolver
@@ -41,6 +46,8 @@ type Coordinator struct {
 	mu           sync.Mutex
 	claimed      map[string]claimedJob
 	leases       map[string]domain.Lease
+	released     map[string]domain.Lease
+	fences       map[string]uint64
 	lastRecordAt time.Time
 }
 
@@ -69,6 +76,12 @@ func WithTrace(tr *trace.Trace) CoordinatorOption {
 	}
 }
 
+func WithRegistryPusher(pusher RegistryRecordPusher) CoordinatorOption {
+	return func(c *Coordinator) {
+		c.registryPusher = pusher
+	}
+}
+
 func NewCoordinator(self domain.Peer, jobs JobSource, registry ports.JobRegistry, placer ports.Placer, fleet FleetSource, owners AdmissionResolver, clock ports.Clock, opts ...CoordinatorOption) *Coordinator {
 	c := &Coordinator{
 		selfID:     self.ID,
@@ -81,6 +94,8 @@ func NewCoordinator(self domain.Peer, jobs JobSource, registry ports.JobRegistry
 		maxReplans: defaultMaxReplans,
 		claimed:    map[string]claimedJob{},
 		leases:     map[string]domain.Lease{},
+		released:   map[string]domain.Lease{},
+		fences:     map[string]uint64{},
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -182,6 +197,11 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 		var offer domain.LeaseOffer
 		if err := c.step("coordinator/owner_offer", map[string]any{"job_id": plan.JobID, "node_id": plan.NodeID, "instance_id": plan.InstanceID}, func() error {
 			var err error
+			var preemptions []domain.PreemptionTarget
+			preemptions, err = c.admissionPreemptions(ctx, claimed.job, plan, owner)
+			if err != nil {
+				return err
+			}
 			offer, err = owner.Offer(ctx, domain.AdmissionRequest{
 				Job:            claimed.job,
 				Preset:         plan.Preset,
@@ -189,6 +209,7 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 				NodeID:         plan.NodeID,
 				AcceleratorSet: append([]int(nil), plan.AcceleratorSet...),
 				InstanceID:     plan.InstanceID,
+				Preemptions:    preemptions,
 			})
 			return err
 		}); err != nil {
@@ -226,12 +247,29 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 		}
 		c.mu.Lock()
 		c.leases[plan.JobID] = lease
+		c.fences[plan.JobID] = offer.Fence
+		delete(c.released, plan.JobID)
 		c.mu.Unlock()
-		if err := c.recordStep(ctx, plan.JobID, domain.JobRunning, plan.NodeID, offer.Fence); err != nil {
+		status := domain.JobRunning
+		if plan.InstanceID == "" {
+			status = domain.JobLoading
+		}
+		if err := c.recordStep(ctx, plan.JobID, status, plan.NodeID, offer.Fence); err != nil {
 			return domain.Lease{}, err
 		}
 		return lease, nil
 	}
+}
+
+func (c *Coordinator) MarkRunning(ctx context.Context, jobID string) error {
+	if err := c.validate(); err != nil {
+		return err
+	}
+	lease, err := c.statusLease(jobID)
+	if err != nil {
+		return err
+	}
+	return c.recordStep(ctx, jobID, domain.JobRunning, lease.NodeID, c.statusFence(jobID))
 }
 
 func (c *Coordinator) Release(ctx context.Context, jobID string) error {
@@ -252,18 +290,45 @@ func (c *Coordinator) Release(ctx context.Context, jobID string) error {
 			owner, err = c.owners.AdmissionController(lease.NodeID)
 			return err
 		}); err != nil {
-			return err
+			return withCleanupEvidence(err, c.recordCleanupFailure(ctx, jobID, lease, err))
 		}
 		if err := c.step("coordinator/owner_release", map[string]any{"job_id": jobID, "lease_id": lease.ID}, func() error {
 			return owner.Release(ctx, lease.ID)
 		}); err != nil {
-			return err
+			return withCleanupEvidence(err, c.recordCleanupFailure(ctx, jobID, lease, err))
 		}
 	}
 	c.mu.Lock()
 	delete(c.leases, jobID)
+	c.released[jobID] = lease
 	c.mu.Unlock()
-	return c.recordStep(ctx, jobID, domain.JobDone, lease.NodeID, 0)
+	return nil
+}
+
+func (c *Coordinator) Complete(ctx context.Context, jobID string) error {
+	if err := c.validate(); err != nil {
+		return err
+	}
+	lease, err := c.statusLease(jobID)
+	if err != nil {
+		return err
+	}
+	return c.recordStep(ctx, jobID, domain.JobDone, lease.NodeID, c.statusFence(jobID))
+}
+
+func (c *Coordinator) Fail(ctx context.Context, jobID string, cause error) error {
+	if err := c.validate(); err != nil {
+		return err
+	}
+	lease, err := c.statusLease(jobID)
+	if err != nil {
+		return err
+	}
+	note := ""
+	if cause != nil {
+		note = cause.Error()
+	}
+	return c.recordWithNote(ctx, jobID, domain.JobFailed, lease.NodeID, c.statusFence(jobID), note)
 }
 
 func (c *Coordinator) validate() error {
@@ -278,6 +343,12 @@ func (c *Coordinator) validate() error {
 	}
 	if c.leases == nil {
 		c.leases = map[string]domain.Lease{}
+	}
+	if c.released == nil {
+		c.released = map[string]domain.Lease{}
+	}
+	if c.fences == nil {
+		c.fences = map[string]uint64{}
 	}
 	return nil
 }
@@ -306,7 +377,36 @@ func (c *Coordinator) lease(jobID string) (domain.Lease, error) {
 	return lease, nil
 }
 
+func (c *Coordinator) statusLease(jobID string) (domain.Lease, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if lease, ok := c.leases[jobID]; ok {
+		return lease, nil
+	}
+	if lease, ok := c.released[jobID]; ok {
+		return lease, nil
+	}
+	if _, ok := c.claimed[jobID]; ok {
+		return domain.Lease{JobID: jobID}, nil
+	}
+	return domain.Lease{}, fmt.Errorf("job %q is not claimed by this coordinator", jobID)
+}
+
+func (c *Coordinator) statusFence(jobID string) uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fences[jobID]
+}
+
 func (c *Coordinator) record(ctx context.Context, jobID string, status domain.JobStatus, assignedNode string, fence uint64) error {
+	return c.recordWithNote(ctx, jobID, status, assignedNode, fence, "")
+}
+
+func (c *Coordinator) recordWithNote(ctx context.Context, jobID string, status domain.JobStatus, assignedNode string, fence uint64, note string) error {
+	return c.recordWithDetails(ctx, jobID, status, assignedNode, fence, note, false, "")
+}
+
+func (c *Coordinator) recordWithDetails(ctx context.Context, jobID string, status domain.JobStatus, assignedNode string, fence uint64, note string, cleanupRequired bool, cleanupError string) error {
 	claimed, err := c.claimedJob(jobID)
 	if err != nil {
 		return err
@@ -315,16 +415,35 @@ func (c *Coordinator) record(ctx context.Context, jobID string, status domain.Jo
 	if err != nil {
 		return err
 	}
-	return c.registry.Put(ctx, domain.JobRecord{
-		JobID:        jobID,
-		Coordinator:  c.selfID,
-		AssignedNode: assignedNode,
-		Status:       status,
-		Request:      request,
-		Handling:     claimed.job.Handling,
-		Fence:        fence,
-		UpdatedAt:    c.nextRecordTime(),
-	})
+	rec := domain.JobRecord{
+		JobID:           jobID,
+		Coordinator:     c.selfID,
+		AssignedNode:    assignedNode,
+		Status:          status,
+		Request:         request,
+		Handling:        claimed.job.Handling,
+		RecoveryNote:    note,
+		CleanupRequired: cleanupRequired,
+		CleanupError:    cleanupError,
+		Fence:           fence,
+		UpdatedAt:       c.nextRecordTime(),
+	}
+	if err := c.registry.Put(ctx, rec); err != nil {
+		return err
+	}
+	if c.registryPusher == nil || !requiresRescueCopy(status) {
+		return nil
+	}
+	if err := c.registryPusher.PushRecord(ctx, rec); err != nil {
+		degraded := rec
+		degraded.RecoveryNote = appendRecoveryNote(note, fmt.Sprintf("registry rescue replication failed: %v", err))
+		degraded.UpdatedAt = c.nextRecordTime()
+		if evidenceErr := c.registry.Put(ctx, degraded); evidenceErr != nil {
+			return errors.Join(fmt.Errorf("registry rescue replication for job %q: %w", jobID, err), fmt.Errorf("record degraded registry evidence: %w", evidenceErr))
+		}
+		return nil
+	}
+	return nil
 }
 
 func (c *Coordinator) recordStep(ctx context.Context, jobID string, status domain.JobStatus, assignedNode string, fence uint64) error {
@@ -359,6 +478,84 @@ func (c *Coordinator) step(op string, input map[string]any, fn func() error) err
 		return fn()
 	}
 	return c.trace.Do(op, input, fn)
+}
+
+func requiresRescueCopy(status domain.JobStatus) bool {
+	switch status {
+	case domain.JobQueued, domain.JobPlacing, domain.JobLoading, domain.JobRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+func appendRecoveryNote(existing, next string) string {
+	if existing == "" {
+		return next
+	}
+	return existing + "; " + next
+}
+
+func withCleanupEvidence(err, evidenceErr error) error {
+	if evidenceErr != nil {
+		return errors.Join(err, evidenceErr)
+	}
+	return err
+}
+
+func (c *Coordinator) recordCleanupFailure(ctx context.Context, jobID string, lease domain.Lease, cause error) error {
+	records, err := c.registry.Snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("record terminal cleanup evidence for job %q: %w", jobID, err)
+	}
+	status := domain.JobFailed
+	assignedNode := lease.NodeID
+	fence := c.statusFence(jobID)
+	note := fmt.Sprintf("terminal cleanup failed: %v", cause)
+	for _, rec := range records {
+		if rec.JobID != jobID {
+			continue
+		}
+		status = rec.Status
+		if rec.AssignedNode != "" {
+			assignedNode = rec.AssignedNode
+		}
+		if rec.Fence > fence {
+			fence = rec.Fence
+		}
+		note = appendRecoveryNote(rec.RecoveryNote, note)
+		break
+	}
+	fence++
+	return c.recordWithDetails(ctx, jobID, status, assignedNode, fence, note, true, cause.Error())
+}
+
+func (c *Coordinator) admissionPreemptions(ctx context.Context, job domain.Job, plan domain.PlacementDecision, owner ports.AdmissionController) ([]domain.PreemptionTarget, error) {
+	if len(plan.Preempted) == 0 {
+		return nil, nil
+	}
+	inspector, ok := owner.(ports.LeaseInspector)
+	if !ok {
+		return nil, fmt.Errorf("owner admission for node %q does not expose lease inspection", plan.NodeID)
+	}
+	targets := make([]domain.PreemptionTarget, 0, len(plan.Preempted))
+	for _, instanceID := range plan.Preempted {
+		lease, found, err := inspector.LeaseForInstance(ctx, instanceID)
+		if err != nil {
+			return nil, err
+		}
+		if !found || lease.ID == "" {
+			return nil, fmt.Errorf("preempted instance %q has no owner lease on node %q", instanceID, plan.NodeID)
+		}
+		reason := "preempted"
+		if plan.JobID != "" {
+			reason += " for " + plan.JobID
+		} else if job.ID != "" {
+			reason += " for " + job.ID
+		}
+		targets = append(targets, domain.PreemptionTarget{LeaseID: lease.ID, InstanceID: instanceID, Reason: reason})
+	}
+	return targets, nil
 }
 
 func replanable(err error) bool {

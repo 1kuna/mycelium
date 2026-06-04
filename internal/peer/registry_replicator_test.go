@@ -118,8 +118,29 @@ func TestRegistryReplicatorReportsPeerFailuresAfterProgress(t *testing.T) {
 	}
 
 	err = replicator.PushRecord(ctx, registryRecord("job-a", "peer-a", domain.JobRunning, time.Unix(14, 0).UTC()))
-	if err == nil || !strings.Contains(err.Error(), "push bad") {
-		t.Fatalf("PushRecord err = %v", err)
+	if err != nil {
+		t.Fatalf("PushRecord should succeed after at least one rescue copy: %v", err)
+	}
+}
+
+func TestRegistryReplicatorPushRecordRequiresOneSuccessfulRescueCopy(t *testing.T) {
+	ctx := context.Background()
+	client := &recordingRegistryClient{
+		pushErr: map[string]error{
+			"peer-b": errors.New("push b"),
+			"peer-c": errors.New("push c"),
+		},
+	}
+	discovery := &mocks.PeerDiscovery{PeersVal: []domain.Peer{
+		{ID: "peer-a"},
+		{ID: "peer-b"},
+		{ID: "peer-c"},
+	}}
+	replicator := RegistryReplicator{Local: NewJobRegistry(), Peers: discovery, Client: client, SelfID: "peer-a"}
+
+	err := replicator.PushRecord(ctx, registryRecord("job-a", "peer-a", domain.JobRunning, time.Unix(14, 500).UTC()))
+	if err == nil || !strings.Contains(err.Error(), "no registry rescue copy") || !strings.Contains(err.Error(), "push b") || !strings.Contains(err.Error(), "push c") {
+		t.Fatalf("PushRecord all-fail err = %v", err)
 	}
 }
 
@@ -133,6 +154,10 @@ func TestRegistryReplicatorErrors(t *testing.T) {
 	}
 	if err := (RegistryReplicator{}).PushRecord(ctx, rec); err == nil || !strings.Contains(err.Error(), "not fully configured") {
 		t.Fatalf("invalid PushRecord err = %v", err)
+	}
+	noPeer := RegistryReplicator{Local: NewJobRegistry(), Peers: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a"}}}, Client: &recordingRegistryClient{}, SelfID: "peer-a"}
+	if err := noPeer.PushRecord(ctx, rec); err == nil || !strings.Contains(err.Error(), "no reachable registry peer") {
+		t.Fatalf("no-peer PushRecord err = %v", err)
 	}
 
 	peerErr := RegistryReplicator{Local: NewJobRegistry(), Peers: &mocks.PeerDiscovery{Err: boom}, Client: &recordingRegistryClient{}, SelfID: "peer-a"}

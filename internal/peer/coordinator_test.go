@@ -52,8 +52,14 @@ func TestCoordinatorClaimPlanCommitRelease(t *testing.T) {
 	if lease.ID != "lease-a" || lease.NodeID != node.ID {
 		t.Fatalf("lease = %+v", lease)
 	}
+	if err := coordinator.MarkRunning(ctx, job.ID); err != nil {
+		t.Fatalf("MarkRunning: %v", err)
+	}
 	if err := coordinator.Release(ctx, job.ID); err != nil {
 		t.Fatalf("Release: %v", err)
+	}
+	if err := coordinator.Complete(ctx, job.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
 	}
 	if strings.Join(admission.Calls, ",") != "offer:job-a,commit:offer-a:7,release:lease-a" {
 		t.Fatalf("admission calls = %+v", admission.Calls)
@@ -71,6 +77,198 @@ func TestCoordinatorClaimPlanCommitRelease(t *testing.T) {
 		t.Fatalf("registry = %+v", snap)
 	}
 	assertRescuePayload(t, snap[0].Request, job.ID, `{"job":"a"}`)
+}
+
+func TestCoordinatorRecordsTerminalCleanupEvidenceOnReleaseFailure(t *testing.T) {
+	ctx := context.Background()
+	clock := mocks.NewFakeClock(time.Unix(100, 500).UTC())
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	releaseErr := errors.New("owner release failed")
+	registry := NewJobRegistry()
+	admission := &mocks.AdmissionController{
+		OfferVal:   domain.LeaseOffer{OfferID: "offer-a", JobID: job.ID, NodeID: node.ID, Fence: 3},
+		LeaseVal:   domain.Lease{ID: "lease-a", JobID: job.ID, NodeID: node.ID},
+		ReleaseErr: releaseErr,
+	}
+	coordinator := NewCoordinator(
+		fixtures.MakePeer(fixtures.WithPeerID("peer-a")),
+		jobSource{jobs: map[string]domain.Job{job.ID: job}, payloads: map[string][]byte{job.ID: []byte(`{"job":"a"}`)}},
+		registry,
+		&scriptedPlacer{decisions: []domain.PlacementDecision{{JobID: job.ID, NodeID: node.ID, Action: domain.ActionLoadedNew}}},
+		staticPeerFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		ownerResolver{owners: map[string]ports.AdmissionController{node.ID: admission}},
+		clock,
+	)
+
+	mustClaim(t, coordinator, job.ID)
+	plan, err := coordinator.Plan(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if _, err := coordinator.Commit(ctx, plan); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := coordinator.Complete(ctx, job.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	other := domain.JobRecord{
+		JobID:       "other-job",
+		Coordinator: "peer-a",
+		Status:      domain.JobDone,
+		Request:     []byte(`{"job":"other"}`),
+		Fence:       1,
+		UpdatedAt:   clock.Now(),
+	}
+	if err := registry.Put(ctx, other); err != nil {
+		t.Fatalf("Put unrelated cleanup record: %v", err)
+	}
+	existing := domain.JobRecord{
+		JobID:        job.ID,
+		Coordinator:  "peer-a",
+		AssignedNode: node.ID,
+		Status:       domain.JobDone,
+		Request:      []byte(`{"job":"a"}`),
+		Fence:        99,
+		UpdatedAt:    clock.Now().Add(time.Second),
+	}
+	if err := registry.Put(ctx, existing); err != nil {
+		t.Fatalf("Put high-fence cleanup record: %v", err)
+	}
+	if err := coordinator.Release(ctx, job.ID); !errors.Is(err, releaseErr) {
+		t.Fatalf("Release err = %v", err)
+	}
+	snap, err := registry.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	var cleanup domain.JobRecord
+	for _, rec := range snap {
+		if rec.JobID == job.ID {
+			cleanup = rec
+			break
+		}
+	}
+	if cleanup.JobID == "" || cleanup.Status != domain.JobDone || !cleanup.CleanupRequired || cleanup.CleanupError != releaseErr.Error() || !strings.Contains(cleanup.RecoveryNote, "terminal cleanup failed") || !strings.Contains(cleanup.RecoveryNote, releaseErr.Error()) {
+		t.Fatalf("registry cleanup evidence = %+v", snap)
+	}
+	if cleanup.Fence != existing.Fence+1 {
+		t.Fatalf("cleanup evidence did not preserve higher fence: %+v", snap)
+	}
+	if _, ok := coordinator.leases[job.ID]; !ok {
+		t.Fatal("failed release dropped coordinator lease")
+	}
+}
+
+func TestCoordinatorCleanupEvidenceHelpers(t *testing.T) {
+	cause := errors.New("cause")
+	if got := withCleanupEvidence(cause, nil); !errors.Is(got, cause) {
+		t.Fatalf("withCleanupEvidence nil = %v", got)
+	}
+	evidence := errors.New("evidence")
+	if got := withCleanupEvidence(cause, evidence); !errors.Is(got, cause) || !errors.Is(got, evidence) {
+		t.Fatalf("withCleanupEvidence joined = %v", got)
+	}
+	snapshotErr := errors.New("snapshot")
+	coordinator := &Coordinator{registry: &failingRegistry{err: snapshotErr}}
+	if err := coordinator.recordCleanupFailure(context.Background(), "job-a", domain.Lease{NodeID: "node-a"}, cause); !errors.Is(err, snapshotErr) {
+		t.Fatalf("recordCleanupFailure snapshot err = %v", err)
+	}
+}
+
+func TestCoordinatorPushesClaimRecordForRescueCopy(t *testing.T) {
+	ctx := context.Background()
+	clock := mocks.NewFakeClock(time.Unix(101, 0).UTC())
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	registry := NewJobRegistry()
+	pusher := &recordingRecordPusher{}
+	coordinator := NewCoordinator(
+		fixtures.MakePeer(fixtures.WithPeerID("peer-a")),
+		jobSource{jobs: map[string]domain.Job{job.ID: job}, payloads: map[string][]byte{job.ID: []byte(`{"job":"a"}`)}},
+		registry,
+		&scriptedPlacer{},
+		staticPeerFleet{},
+		ownerResolver{},
+		clock,
+		WithRegistryPusher(pusher),
+	)
+
+	if err := coordinator.ClaimJob(ctx, job.ID); err != nil {
+		t.Fatalf("ClaimJob: %v", err)
+	}
+	if len(pusher.records) != 1 || pusher.records[0].JobID != job.ID || pusher.records[0].Status != domain.JobPlacing {
+		t.Fatalf("pushed records = %+v", pusher.records)
+	}
+}
+
+func TestCoordinatorRecordsDegradedEvidenceWhenClaimReplicationFails(t *testing.T) {
+	ctx := context.Background()
+	clock := mocks.NewFakeClock(time.Unix(102, 0).UTC())
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	registry := NewJobRegistry()
+	pushErr := errors.New("no rescue peer")
+	coordinator := NewCoordinator(
+		fixtures.MakePeer(fixtures.WithPeerID("peer-a")),
+		jobSource{jobs: map[string]domain.Job{job.ID: job}, payloads: map[string][]byte{job.ID: []byte(`{"job":"a"}`)}},
+		registry,
+		&scriptedPlacer{},
+		staticPeerFleet{},
+		ownerResolver{},
+		clock,
+		WithRegistryPusher(&recordingRecordPusher{err: pushErr}),
+	)
+
+	if err := coordinator.ClaimJob(ctx, job.ID); err != nil {
+		t.Fatalf("ClaimJob err = %v", err)
+	}
+	snap, err := registry.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap) != 1 || snap[0].Status != domain.JobPlacing || !strings.Contains(snap[0].RecoveryNote, "registry rescue replication failed") {
+		t.Fatalf("registry = %+v", snap)
+	}
+}
+
+func TestCoordinatorReturnsEvidenceErrorWhenDegradedRecordFails(t *testing.T) {
+	ctx := context.Background()
+	clock := mocks.NewFakeClock(time.Unix(103, 0).UTC())
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	pushErr := errors.New("push")
+	coordinator := NewCoordinator(
+		fixtures.MakePeer(fixtures.WithPeerID("peer-a")),
+		jobSource{jobs: map[string]domain.Job{job.ID: job}, payloads: map[string][]byte{job.ID: []byte(`{"job":"a"}`)}},
+		&flakyRegistry{failAt: 2},
+		&scriptedPlacer{},
+		staticPeerFleet{},
+		ownerResolver{},
+		clock,
+		WithRegistryPusher(&recordingRecordPusher{err: pushErr}),
+	)
+
+	err := coordinator.ClaimJob(ctx, job.ID)
+	if !errors.Is(err, pushErr) || !errors.Is(err, errFlakyRegistry) {
+		t.Fatalf("ClaimJob err = %v", err)
+	}
+}
+
+func TestCoordinatorRescueCopyHelpers(t *testing.T) {
+	for _, status := range []domain.JobStatus{domain.JobQueued, domain.JobPlacing, domain.JobLoading, domain.JobRunning} {
+		if !requiresRescueCopy(status) {
+			t.Fatalf("status %s should require rescue copy", status)
+		}
+	}
+	for _, status := range []domain.JobStatus{domain.JobDone, domain.JobFailed} {
+		if requiresRescueCopy(status) {
+			t.Fatalf("terminal status %s should not require rescue copy", status)
+		}
+	}
+	if requiresRescueCopy(domain.JobStatus("unknown")) {
+		t.Fatal("unknown status should not require a rescue copy")
+	}
+	if got := appendRecoveryNote("existing", "next"); got != "existing; next" {
+		t.Fatalf("appendRecoveryNote = %q", got)
+	}
 }
 
 func TestCoordinatorReplansOnOwnerContention(t *testing.T) {
@@ -112,6 +310,9 @@ func TestCoordinatorReplansOnOwnerContention(t *testing.T) {
 	}
 	if strings.Join(ownerA.calls, ",") != "offer:job-a,commit:offer-a:1" || strings.Join(ownerB.calls, ",") != "offer:job-a,commit:offer-b:2" {
 		t.Fatalf("ownerA=%+v ownerB=%+v", ownerA.calls, ownerB.calls)
+	}
+	if err := coordinator.MarkRunning(ctx, job.ID); err != nil {
+		t.Fatalf("MarkRunning: %v", err)
 	}
 	snap, err := registry.Snapshot(ctx)
 	if err != nil {
@@ -163,6 +364,9 @@ func TestCoordinatorWarmInstanceCommitsOwnerLease(t *testing.T) {
 	}
 	if err := coordinator.Release(ctx, job.ID); err != nil {
 		t.Fatalf("Release: %v", err)
+	}
+	if err := coordinator.Complete(ctx, job.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
 	}
 	if strings.Join(admission.Calls, ",") != "offer:job-warm,commit:offer-warm:3,release:lease-warm" {
 		t.Fatalf("warm owner calls = %+v", admission.Calls)
@@ -396,6 +600,39 @@ func TestCoordinatorErrorPaths(t *testing.T) {
 		t.Fatalf("release err = %v", err)
 	}
 
+	if err := (&Coordinator{}).MarkRunning(ctx, job.ID); err == nil {
+		t.Fatal("unconfigured MarkRunning succeeded")
+	}
+	coordinator = base(NewJobRegistry(), &scriptedPlacer{}, ownerResolver{})
+	mustClaim(t, coordinator, job.ID)
+	if err := coordinator.MarkRunning(ctx, job.ID); err != nil {
+		t.Fatalf("claimed MarkRunning without lease: %v", err)
+	}
+	if err := coordinator.MarkRunning(ctx, "missing"); err == nil || !strings.Contains(err.Error(), "not claimed") {
+		t.Fatalf("missing MarkRunning err = %v", err)
+	}
+	if err := (&Coordinator{}).Complete(ctx, job.ID); err == nil {
+		t.Fatal("unconfigured Complete succeeded")
+	}
+	if err := coordinator.Complete(ctx, "missing"); err == nil || !strings.Contains(err.Error(), "not claimed") {
+		t.Fatalf("missing Complete err = %v", err)
+	}
+	if err := coordinator.Complete(ctx, job.ID); err != nil {
+		t.Fatalf("claimed Complete without lease: %v", err)
+	}
+	if err := (&Coordinator{}).Fail(ctx, job.ID, errors.New("cause")); err == nil {
+		t.Fatal("unconfigured Fail succeeded")
+	}
+	if err := coordinator.Fail(ctx, "missing", errors.New("cause")); err == nil || !strings.Contains(err.Error(), "not claimed") {
+		t.Fatalf("missing Fail err = %v", err)
+	}
+	if err := coordinator.Fail(ctx, job.ID, nil); err != nil {
+		t.Fatalf("claimed Fail nil cause: %v", err)
+	}
+	if err := coordinator.Fail(ctx, job.ID, errors.New("cause")); err != nil {
+		t.Fatalf("claimed Fail cause: %v", err)
+	}
+
 	coordinator = base(NewJobRegistry(), &scriptedPlacer{}, ownerResolver{})
 	coordinator.maxReplans = -1
 	if err := coordinator.validate(); err == nil || !strings.Contains(err.Error(), "replans") {
@@ -404,8 +641,10 @@ func TestCoordinatorErrorPaths(t *testing.T) {
 	coordinator.maxReplans = 0
 	coordinator.claimed = nil
 	coordinator.leases = nil
-	if err := coordinator.validate(); err != nil || coordinator.claimed == nil || coordinator.leases == nil {
-		t.Fatalf("validate initialized maps err=%v claimed=%v leases=%v", err, coordinator.claimed, coordinator.leases)
+	coordinator.released = nil
+	coordinator.fences = nil
+	if err := coordinator.validate(); err != nil || coordinator.claimed == nil || coordinator.leases == nil || coordinator.released == nil || coordinator.fences == nil {
+		t.Fatalf("validate initialized maps err=%v claimed=%v leases=%v released=%v fences=%v", err, coordinator.claimed, coordinator.leases, coordinator.released, coordinator.fences)
 	}
 	if _, err := coordinator.claimedJob(""); err == nil {
 		t.Fatal("empty claimedJob succeeded")
@@ -419,6 +658,66 @@ func TestCoordinatorErrorPaths(t *testing.T) {
 	}
 	if coordinator.shouldReplan(errors.New("other"), 0) {
 		t.Fatal("non-replanable error replanned")
+	}
+}
+
+func TestCoordinatorAdmissionPreemptionBranches(t *testing.T) {
+	ctx := context.Background()
+	clock := mocks.NewFakeClock(time.Unix(135, 0).UTC())
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	claim := fixtures.MakeClaim(10, 2)
+	source := jobSource{jobs: map[string]domain.Job{job.ID: job}, payloads: map[string][]byte{job.ID: []byte(`{"job":"a"}`)}}
+	base := func(owner ports.AdmissionController, plan domain.PlacementDecision) *Coordinator {
+		return NewCoordinator(
+			fixtures.MakePeer(fixtures.WithPeerID("peer-a")),
+			source,
+			NewJobRegistry(),
+			&scriptedPlacer{},
+			staticPeerFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+			ownerResolver{owners: map[string]ports.AdmissionController{node.ID: owner}},
+			clock,
+		)
+	}
+	plan := domain.PlacementDecision{JobID: job.ID, NodeID: node.ID, Claim: claim, Action: domain.ActionLoadedNew, Preempted: []string{"victim-a"}}
+	coordinator := base(&scriptedAdmission{}, plan)
+	mustClaim(t, coordinator, job.ID)
+	if _, err := coordinator.Commit(ctx, plan); err == nil || !strings.Contains(err.Error(), "lease inspection") {
+		t.Fatalf("missing inspector err = %v", err)
+	}
+	inspectErr := errors.New("inspect")
+	coordinator = base(&mocks.AdmissionController{LeaseForInstErr: inspectErr}, plan)
+	mustClaim(t, coordinator, job.ID)
+	if _, err := coordinator.Commit(ctx, plan); !errors.Is(err, inspectErr) {
+		t.Fatalf("inspect err = %v", err)
+	}
+	coordinator = base(&mocks.AdmissionController{}, plan)
+	mustClaim(t, coordinator, job.ID)
+	if _, err := coordinator.Commit(ctx, plan); err == nil || !strings.Contains(err.Error(), "no owner lease") {
+		t.Fatalf("missing owner lease err = %v", err)
+	}
+	admission := &mocks.AdmissionController{
+		LeaseForInstVal:   domain.Lease{ID: "lease-victim", InstanceID: "victim-a", NodeID: node.ID},
+		LeaseForInstFound: true,
+		OfferVal:          domain.LeaseOffer{OfferID: "offer-a", JobID: job.ID, NodeID: node.ID, Claim: claim, Fence: 1},
+		LeaseVal:          domain.Lease{ID: "lease-a", JobID: job.ID, NodeID: node.ID, Claim: claim},
+	}
+	coordinator = base(admission, plan)
+	mustClaim(t, coordinator, job.ID)
+	if _, err := coordinator.Commit(ctx, plan); err != nil {
+		t.Fatalf("Commit with preemption: %v", err)
+	}
+	if len(admission.Requests) != 1 || len(admission.Requests[0].Preemptions) != 1 || admission.Requests[0].Preemptions[0].Reason != "preempted for job-a" {
+		t.Fatalf("preemption request = %+v", admission.Requests)
+	}
+	jobFallbackPlan := plan
+	jobFallbackPlan.JobID = ""
+	targets, err := coordinator.admissionPreemptions(ctx, job, jobFallbackPlan, admission)
+	if err != nil {
+		t.Fatalf("admissionPreemptions fallback: %v", err)
+	}
+	if len(targets) != 1 || targets[0].Reason != "preempted for job-a" {
+		t.Fatalf("fallback targets = %+v", targets)
 	}
 }
 
@@ -657,6 +956,16 @@ func assertRescuePayload(t *testing.T, data []byte, jobID, body string) {
 	if job.ID != jobID || string(gotBody) != body {
 		t.Fatalf("rescue payload job=%+v body=%s", job, gotBody)
 	}
+}
+
+type recordingRecordPusher struct {
+	records []domain.JobRecord
+	err     error
+}
+
+func (p *recordingRecordPusher) PushRecord(_ context.Context, rec domain.JobRecord) error {
+	p.records = append(p.records, rec)
+	return p.err
 }
 
 type failingRegistry struct {

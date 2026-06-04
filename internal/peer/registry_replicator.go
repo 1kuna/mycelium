@@ -68,15 +68,26 @@ func (r RegistryReplicator) PushRecord(ctx context.Context, rec domain.JobRecord
 		return err
 	}
 	var pushErr error
+	attempted := 0
+	succeeded := 0
 	for _, peer := range peers {
 		if peer.ID == r.SelfID {
 			continue
 		}
+		attempted++
 		if err := r.Client.Push(ctx, peer, []domain.JobRecord{redactPrivatePayload(rec)}); err != nil {
 			pushErr = errors.Join(pushErr, fmt.Errorf("push registry record to peer %q: %w", peer.ID, err))
+			continue
 		}
+		succeeded++
 	}
-	return pushErr
+	if attempted == 0 {
+		return fmt.Errorf("no reachable registry peer for rescue copy")
+	}
+	if succeeded == 0 {
+		return fmt.Errorf("no registry rescue copy reached a peer: %w", pushErr)
+	}
+	return nil
 }
 
 func (r RegistryReplicator) validate() error {

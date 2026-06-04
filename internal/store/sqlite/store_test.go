@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -181,6 +180,9 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 
 	if err := store.SaveProject(ctx, domain.Project{}); err == nil {
 		t.Fatal("SaveProject should require an id")
+	}
+	if err := store.SaveProject(ctx, domain.Project{ID: "project-a", Priority: "urgent"}); err == nil {
+		t.Fatal("SaveProject should reject invalid project values")
 	}
 	for name, err := range map[string]error{
 		"preset":         store.SavePreset(ctx, domain.Preset{}),
@@ -373,17 +375,28 @@ func TestStoreJobRegistryLWWAndWatch(t *testing.T) {
 	tieWinner.Coordinator = "zz-peer"
 	tieWinner.Request = []byte("tie")
 	must(t, store.Put(ctx, tieWinner))
+	terminal := tieWinner
+	terminal.Status = domain.JobDone
+	terminal.Fence = 4
+	terminal.Request = []byte("done")
+	must(t, store.Put(ctx, terminal))
+	staleLive := terminal
+	staleLive.Status = domain.JobRunning
+	staleLive.UpdatedAt = terminal.UpdatedAt.Add(time.Hour)
+	staleLive.Fence = 5
+	staleLive.Request = []byte("stale-live")
+	must(t, store.Put(ctx, staleLive))
 
 	snap, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	if len(snap) != 2 || snap[0].JobID != "job-a" || snap[1].JobID != "job-b" || string(snap[0].Request) != "tie" {
+	if len(snap) != 2 || snap[0].JobID != "job-a" || snap[1].JobID != "job-b" || string(snap[0].Request) != "done" || snap[0].Status != domain.JobDone {
 		t.Fatalf("snapshot = %+v", snap)
 	}
 	snap[0].Request[0] = '!'
 	again, err := store.Snapshot(ctx)
-	if err != nil || string(again[0].Request) != "tie" {
+	if err != nil || string(again[0].Request) != "done" {
 		t.Fatalf("snapshot clone = %+v %v", again, err)
 	}
 
@@ -410,7 +423,7 @@ func TestStoreJobRegistryLWWAndWatch(t *testing.T) {
 	}
 }
 
-func TestStoreJobRegistryRejectsStalledWatchers(t *testing.T) {
+func TestStoreJobRegistryDropsStalledWatchersAfterSaving(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	store, err := Open(":memory:")
@@ -428,11 +441,18 @@ func TestStoreJobRegistryRejectsStalledWatchers(t *testing.T) {
 		must(t, store.Put(ctx, rec))
 	}
 	overflow := fixtures.MakeJobRecord(fixtures.WithRecordJobID("job-overflow"))
-	overflow.UpdatedAt = time.Unix(300, 0).UTC()
-	if err := store.Put(ctx, overflow); err == nil || !strings.Contains(err.Error(), "not draining") {
-		t.Fatalf("overflow err = %v", err)
+	overflow.UpdatedAt = time.Unix(1000, 0).UTC()
+	if err := store.Put(ctx, overflow); err != nil {
+		t.Fatalf("overflow Put: %v", err)
 	}
 	for range watch {
+	}
+	snap, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if got := snap[len(snap)-1].JobID; got != overflow.JobID {
+		t.Fatalf("saved records = %+v", snap)
 	}
 }
 

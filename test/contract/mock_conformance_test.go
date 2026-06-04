@@ -16,9 +16,14 @@ func TestMockBackendAdapterConformance(t *testing.T) {
 }
 
 func TestMockNodeAgentConformance(t *testing.T) {
+	preset := fixtures.MakePreset()
 	RunNodeAgentConformance(t, "mock",
-		func() ports.NodeAgent { return mocks.NewNodeAgent(fixtures.MakeNode()) },
-		fixtures.MakePreset())
+		func() ports.NodeAgent {
+			agent := mocks.NewNodeAgent(fixtures.MakeNode())
+			agent.Metadata = domain.ModelMetadata{ModelRef: preset.ModelRef, Format: "gguf", WeightsMB: 1, KVPerTokenMB: 0.1, ContextLength: 2048}
+			return agent
+		},
+		preset)
 }
 
 func TestMockResourceEstimatorConformance(t *testing.T) {

@@ -3,6 +3,7 @@ package mocks
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,7 +31,17 @@ func TestBackendAdapterRecordsCallsAndFailures(t *testing.T) {
 	if err := backend.Stop(context.Background(), handle); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if len(backend.Calls) != 4 {
+	dynamic, err := backend.LaunchDynamic(context.Background(), fixtures.MakePreset(), "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("LaunchDynamic: %v", err)
+	}
+	if strings.HasSuffix(dynamic.Addr, ":0") || !strings.HasPrefix(dynamic.Addr, "127.0.0.1:") {
+		t.Fatalf("dynamic addr = %s", dynamic.Addr)
+	}
+	if _, err := backend.LaunchDynamic(context.Background(), fixtures.MakePreset(), "not-a-host-port"); err == nil {
+		t.Fatal("invalid dynamic addr succeeded")
+	}
+	if len(backend.Calls) != 5 {
 		t.Fatalf("calls = %+v", backend.Calls)
 	}
 
@@ -38,6 +49,9 @@ func TestBackendAdapterRecordsCallsAndFailures(t *testing.T) {
 	backend = &BackendAdapter{LaunchErr: launchErr}
 	if _, err := backend.Launch(context.Background(), fixtures.MakePreset(), "addr"); !errors.Is(err, launchErr) {
 		t.Fatalf("launch error = %v", err)
+	}
+	if _, err := backend.LaunchDynamic(context.Background(), fixtures.MakePreset(), "127.0.0.1:0"); !errors.Is(err, launchErr) {
+		t.Fatalf("dynamic launch error = %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -70,6 +84,7 @@ func TestNodeAgentRecordsLoadUnloadAndFailures(t *testing.T) {
 	if len(agent.Instances) != 0 {
 		t.Fatalf("instances = %+v", agent.Instances)
 	}
+	agent.Metadata = domain.ModelMetadata{ModelRef: preset.ModelRef, Format: "gguf", WeightsMB: 1, KVPerTokenMB: 0.1, ContextLength: 10}
 	metadata, err := agent.InspectModel(context.Background(), fixtures.MakePreset())
 	if err != nil {
 		t.Fatalf("InspectModel: %v", err)
@@ -92,6 +107,11 @@ func TestNodeAgentRecordsLoadUnloadAndFailures(t *testing.T) {
 	agent.InspectErr = inspectErr
 	if _, err := agent.InspectModel(context.Background(), fixtures.MakePreset()); !errors.Is(err, inspectErr) {
 		t.Fatalf("inspect error = %v", err)
+	}
+	agent.InspectErr = nil
+	agent.Metadata = domain.ModelMetadata{}
+	if _, err := agent.InspectModel(context.Background(), fixtures.MakePreset()); err == nil || !strings.Contains(err.Error(), "no metadata") {
+		t.Fatalf("missing metadata err = %v", err)
 	}
 }
 
@@ -142,6 +162,10 @@ func TestResourceEstimatorAllocatorTelemetryAndClock(t *testing.T) {
 	sink.SampleErr = sampleErr
 	if err := sink.RecordSample(context.Background(), sample); !errors.Is(err, sampleErr) {
 		t.Fatalf("sample error = %v", err)
+	}
+	wantCalls := []string{"record:job", "sample:job:placed", "record:job", "sample:job:placed"}
+	if strings.Join(sink.Calls, "\n") != strings.Join(wantCalls, "\n") {
+		t.Fatalf("telemetry calls = %+v", sink.Calls)
 	}
 
 	peerClient := &TelemetryPeerClient{
@@ -242,8 +266,8 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	if err := admission.Release(context.Background(), "lease-a"); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	if err := admission.Preempt(context.Background(), "lease-a", "test"); err != nil {
-		t.Fatalf("Preempt: %v", err)
+	if err := admission.Preempt(context.Background(), "lease-a", "test"); err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("Preempt err = %v", err)
 	}
 	if err := admission.PreemptForJob(context.Background(), job, "lease-a", "test"); err != nil {
 		t.Fatalf("PreemptForJob: %v", err)
@@ -260,6 +284,12 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	admission.LeaseForJobFound = true
 	if got, found, err := admission.LeaseForJob(context.Background(), job.ID); err != nil || !found || got.ID != "lease-job" {
 		t.Fatalf("LeaseForJob = %+v %v %v", got, found, err)
+	}
+	if _, err := admission.Commit(context.Background(), offer.OfferID, offer.Fence+1); !errors.Is(err, domain.ErrStaleFence) {
+		t.Fatalf("stale fence err = %v", err)
+	}
+	if _, err := admission.Commit(context.Background(), "missing-offer", 1); err == nil || !strings.Contains(err.Error(), "unknown offer") {
+		t.Fatalf("unknown offer err = %v", err)
 	}
 
 	stale := errors.New("stale")
@@ -280,8 +310,17 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	if err != nil || lease.ID != "lease-a" {
 		t.Fatalf("Commit = %+v %v", lease, err)
 	}
+	if err := coordinator.MarkRunning(context.Background(), job.ID); err != nil {
+		t.Fatalf("MarkRunning: %v", err)
+	}
 	if err := coordinator.Release(context.Background(), job.ID); err != nil {
 		t.Fatalf("Release: %v", err)
+	}
+	if err := coordinator.Complete(context.Background(), job.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if err := coordinator.Fail(context.Background(), job.ID, errors.New("failed upstream")); err != nil {
+		t.Fatalf("Fail: %v", err)
 	}
 	coordinator.PlanErr = stale
 	if _, err := coordinator.Plan(context.Background(), job.ID); !errors.Is(err, stale) {
@@ -291,6 +330,23 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	coordinator.CommitErr = stale
 	if _, err := coordinator.Commit(context.Background(), decision); !errors.Is(err, stale) {
 		t.Fatalf("coordinator commit err = %v", err)
+	}
+	coordinator.CommitErr = nil
+	coordinator.RunningErr = stale
+	if err := coordinator.MarkRunning(context.Background(), job.ID); !errors.Is(err, stale) {
+		t.Fatalf("running err = %v", err)
+	}
+	coordinator.ReleaseErr = stale
+	if err := coordinator.Release(context.Background(), job.ID); !errors.Is(err, stale) {
+		t.Fatalf("release err = %v", err)
+	}
+	coordinator.CompleteErr = stale
+	if err := coordinator.Complete(context.Background(), job.ID); !errors.Is(err, stale) {
+		t.Fatalf("complete err = %v", err)
+	}
+	coordinator.FailErr = stale
+	if err := coordinator.Fail(context.Background(), job.ID, nil); !errors.Is(err, stale) {
+		t.Fatalf("fail err = %v", err)
 	}
 
 	registry := &JobRegistry{}
@@ -306,9 +362,49 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Watch: %v", err)
 	}
-	if _, ok := <-watch; ok {
-		t.Fatal("default watch channel should be closed")
+	select {
+	case rec, ok := <-watch:
+		if !ok || rec.JobID != job.ID {
+			t.Fatalf("default watch replay = %+v open=%v", rec, ok)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("default watch did not replay existing record")
 	}
+	cursorWatch, err := registry.Watch(context.Background(), record.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatalf("cursor Watch: %v", err)
+	}
+	select {
+	case rec, ok := <-cursorWatch:
+		t.Fatalf("cursor watch produced %+v open=%v", rec, ok)
+	default:
+	}
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	cancelableWatch, err := registry.Watch(watchCtx, record.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatalf("cancelable Watch: %v", err)
+	}
+	cancelWatch()
+	select {
+	case _, ok := <-cancelableWatch:
+		if ok {
+			t.Fatal("cancelable watch remained open")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelable watch did not close")
+	}
+	canceledCtx, cancelCanceled := context.WithCancel(context.Background())
+	cancelCanceled()
+	if _, err := registry.Watch(canceledCtx, record.UpdatedAt.UTC().Format(time.RFC3339Nano)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled watch err = %v", err)
+	}
+	customWatch := make(chan domain.JobRecord, 1)
+	registry.WatchErr = nil
+	registry.WatchCh = customWatch
+	if got, err := registry.Watch(context.Background(), record.UpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil || got != customWatch {
+		t.Fatalf("custom watch = %v %v", got, err)
+	}
+	registry.WatchCh = nil
 
 	peers := &PeerDiscovery{}
 	peer := fixtures.MakePeer(fixtures.WithPeerID("peer-a"))
@@ -323,9 +419,36 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WatchPeers: %v", err)
 	}
-	if _, ok := <-peerWatch; ok {
-		t.Fatal("default peer watch channel should be closed")
+	select {
+	case peer, ok := <-peerWatch:
+		t.Fatalf("default peer watch channel produced %+v open=%v", peer, ok)
+	default:
 	}
+	peerWatchCtx, cancelPeerWatch := context.WithCancel(context.Background())
+	cancelablePeerWatch, err := peers.WatchPeers(peerWatchCtx)
+	if err != nil {
+		t.Fatalf("cancelable WatchPeers: %v", err)
+	}
+	cancelPeerWatch()
+	select {
+	case _, ok := <-cancelablePeerWatch:
+		if ok {
+			t.Fatal("cancelable peer watch remained open")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelable peer watch did not close")
+	}
+	peerCanceledCtx, cancelPeerCanceled := context.WithCancel(context.Background())
+	cancelPeerCanceled()
+	if _, err := peers.WatchPeers(peerCanceledCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled peer watch err = %v", err)
+	}
+	customPeerWatch := make(chan domain.Peer, 1)
+	peers.WatchCh = customPeerWatch
+	if got, err := peers.WatchPeers(context.Background()); err != nil || got != customPeerWatch {
+		t.Fatalf("custom peer watch = %v %v", got, err)
+	}
+	peers.WatchCh = nil
 
 	boom := errors.New("boom")
 	admission.OfferErr = boom
@@ -340,7 +463,7 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 		t.Fatalf("snapshot err = %v", err)
 	}
 	registry.WatchErr = boom
-	if _, err := registry.Watch(context.Background(), "cursor"); !errors.Is(err, boom) {
+	if _, err := registry.Watch(context.Background(), record.UpdatedAt.UTC().Format(time.RFC3339Nano)); !errors.Is(err, boom) {
 		t.Fatalf("watch err = %v", err)
 	}
 	peers.Err = boom
@@ -379,6 +502,14 @@ func TestNodeHardwareAndTelemetryMockFailureBranches(t *testing.T) {
 	node, err := detector.Detect(context.Background(), seed)
 	if err != nil || node.ID != seed.ID || len(node.Accelerators) == 0 {
 		t.Fatalf("Detect = %+v %v", node, err)
+	}
+	emptySeed := domain.Node{ID: "empty-hardware"}
+	empty, err := detector.Detect(context.Background(), emptySeed)
+	if err != nil {
+		t.Fatalf("Detect empty: %v", err)
+	}
+	if len(empty.Accelerators) != 0 || empty.UnifiedMemory {
+		t.Fatalf("mock invented hardware facts: %+v", empty)
 	}
 	detector.Err = boom
 	if _, err := detector.Detect(context.Background(), seed); !errors.Is(err, boom) {

@@ -57,7 +57,6 @@ func (r *JobRegistry) Put(ctx context.Context, rec domain.JobRecord) error {
 		default:
 			delete(r.watchers, id)
 			close(ch)
-			return fmt.Errorf("job registry watcher %d is not draining", id)
 		}
 	}
 	return nil
@@ -164,13 +163,20 @@ func recordsAfter(records map[string]domain.JobRecord, cursor time.Time) []domai
 }
 
 func newerRecord(next, current domain.JobRecord) bool {
-	if !next.UpdatedAt.Equal(current.UpdatedAt) {
-		return next.UpdatedAt.After(current.UpdatedAt)
+	if terminalRecordStatus(current.Status) && !terminalRecordStatus(next.Status) {
+		return false
 	}
 	if next.Fence != current.Fence {
 		return next.Fence > current.Fence
 	}
+	if !next.UpdatedAt.Equal(current.UpdatedAt) {
+		return next.UpdatedAt.After(current.UpdatedAt)
+	}
 	return recordTieKey(next) > recordTieKey(current)
+}
+
+func terminalRecordStatus(status domain.JobStatus) bool {
+	return status == domain.JobDone || status == domain.JobFailed
 }
 
 func recordTieKey(rec domain.JobRecord) string {

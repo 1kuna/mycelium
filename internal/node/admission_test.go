@@ -141,11 +141,12 @@ func TestAdmissionReleaseAndPreemptRemoveOccupancy(t *testing.T) {
 	}
 
 	leaseB := commitAdmissionLease(t, admission, "job-b", fixtures.MakeClaim(700, 0))
-	if err := admission.Preempt(context.Background(), leaseB.ID, "higher priority"); err != nil {
-		t.Fatalf("Preempt: %v", err)
+	preempting := fixtures.MakeJob(fixtures.WithJobID("job-c"), fixtures.Interactive, fixtures.HardForInteractive)
+	if err := admission.PreemptForJob(context.Background(), preempting, leaseB.ID, "higher priority"); err != nil {
+		t.Fatalf("PreemptForJob: %v", err)
 	}
-	if len(admission.leases) != 0 {
-		t.Fatalf("preempt left leases: %+v", admission.leases)
+	if len(admission.leases) != 1 || admission.leases[leaseB.ID].state != domain.AdmissionLeasePreempting {
+		t.Fatalf("preempt should preserve cleanup evidence as preempting lease, got %+v", admission.leases)
 	}
 	if _, err := admission.Offer(context.Background(), admissionReq(fixtures.MakeJob(fixtures.WithJobID("admitted")), fixtures.MakeClaim(400, 0))); err != nil {
 		t.Fatalf("Offer after release/preempt: %v", err)
@@ -360,6 +361,315 @@ func TestAdmissionWarmLeasesReserveIncrementalKVOnly(t *testing.T) {
 		InstanceID: warm.ID,
 	}); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("second warm overflow err = %v", err)
+	}
+}
+
+func TestAdmissionOfferPreemptionValidation(t *testing.T) {
+	ctx := context.Background()
+	victimLease := func(t *testing.T, opts ...func(*domain.Job)) (*Admission, domain.Lease) {
+		t.Helper()
+		admission := NewAdmission(
+			fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
+			lease.NewAllocator(),
+			mocks.NewFakeClock(time.Unix(760, 0).UTC()),
+		)
+		victim := fixtures.MakeJob(append([]func(*domain.Job){fixtures.WithJobID("victim"), fixtures.Background}, opts...)...)
+		lease := commitAdmissionLease(t, admission, victim.ID, fixtures.MakeClaim(400, 0))
+		return admission, lease
+	}
+	preemptReq := func(job domain.Job, targets ...domain.PreemptionTarget) domain.AdmissionRequest {
+		req := admissionReq(job, fixtures.MakeClaim(700, 0))
+		req.Preemptions = targets
+		return req
+	}
+	hardJob := func(id string) domain.Job {
+		return fixtures.MakeJob(fixtures.WithJobID(id), fixtures.Interactive, fixtures.HardForInteractive)
+	}
+
+	cases := []struct {
+		name     string
+		job      func(domain.Lease) domain.Job
+		targets  func(domain.Lease) []domain.PreemptionTarget
+		mutate   func(*Admission, domain.Lease)
+		contains string
+	}{{
+		name: "soft job",
+		job:  func(domain.Lease) domain.Job { return fixtures.MakeJob(fixtures.WithJobID("soft")) },
+		targets: func(l domain.Lease) []domain.PreemptionTarget {
+			return []domain.PreemptionTarget{{LeaseID: l.ID, Reason: "replace"}}
+		},
+		contains: "hard preemption",
+	}, {
+		name:     "missing lease id",
+		job:      func(domain.Lease) domain.Job { return hardJob("missing-lease-id") },
+		targets:  func(domain.Lease) []domain.PreemptionTarget { return []domain.PreemptionTarget{{Reason: "replace"}} },
+		contains: "lease id",
+	}, {
+		name:     "missing reason",
+		job:      func(domain.Lease) domain.Job { return hardJob("missing-reason") },
+		targets:  func(l domain.Lease) []domain.PreemptionTarget { return []domain.PreemptionTarget{{LeaseID: l.ID}} },
+		contains: "reason",
+	}, {
+		name: "duplicate",
+		job:  func(domain.Lease) domain.Job { return hardJob("duplicate") },
+		targets: func(l domain.Lease) []domain.PreemptionTarget {
+			return []domain.PreemptionTarget{{LeaseID: l.ID, Reason: "one"}, {LeaseID: l.ID, Reason: "two"}}
+		},
+		contains: "duplicate",
+	}, {
+		name: "unknown",
+		job:  func(domain.Lease) domain.Job { return hardJob("unknown") },
+		targets: func(domain.Lease) []domain.PreemptionTarget {
+			return []domain.PreemptionTarget{{LeaseID: "missing", Reason: "replace"}}
+		},
+		contains: "unknown",
+	}, {
+		name: "pinned",
+		job:  func(domain.Lease) domain.Job { return hardJob("pinned") },
+		mutate: func(admission *Admission, l domain.Lease) {
+			record := admission.leases[l.ID]
+			record.lease.Pinned = true
+			admission.leases[l.ID] = record
+		},
+		targets: func(l domain.Lease) []domain.PreemptionTarget {
+			return []domain.PreemptionTarget{{LeaseID: l.ID, Reason: "replace"}}
+		},
+		contains: "pinned",
+	}, {
+		name: "same priority",
+		job: func(domain.Lease) domain.Job {
+			return fixtures.MakeJob(fixtures.WithJobID("same-priority"), fixtures.Background, fixtures.Hard)
+		},
+		targets: func(l domain.Lease) []domain.PreemptionTarget {
+			return []domain.PreemptionTarget{{LeaseID: l.ID, Reason: "replace"}}
+		},
+		contains: "cannot preempt",
+	}, {
+		name: "instance mismatch",
+		job:  func(domain.Lease) domain.Job { return hardJob("instance-mismatch") },
+		mutate: func(admission *Admission, l domain.Lease) {
+			if err := admission.BindInstance(ctx, l.ID, "inst-victim"); err != nil {
+				t.Fatalf("BindInstance: %v", err)
+			}
+		},
+		targets: func(l domain.Lease) []domain.PreemptionTarget {
+			return []domain.PreemptionTarget{{LeaseID: l.ID, InstanceID: "other-inst", Reason: "replace"}}
+		},
+		contains: "not owner-bound",
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			admission, lease := victimLease(t)
+			if tc.mutate != nil {
+				tc.mutate(admission, lease)
+			}
+			_, err := admission.Offer(ctx, preemptReq(tc.job(lease), tc.targets(lease)...))
+			if err == nil || !strings.Contains(err.Error(), tc.contains) {
+				t.Fatalf("Offer err = %v, want %q", err, tc.contains)
+			}
+		})
+	}
+}
+
+func TestAdmissionPreemptionCommitIsOwnerAtomic(t *testing.T) {
+	ctx := context.Background()
+	admission := NewAdmission(
+		fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Unix(770, 0).UTC()),
+	)
+	victim := fixtures.MakeJob(fixtures.WithJobID("victim"), fixtures.Background)
+	victimLease := commitAdmissionLease(t, admission, victim.ID, fixtures.MakeClaim(700, 0))
+	if err := admission.BindInstance(ctx, victimLease.ID, "inst-victim"); err != nil {
+		t.Fatalf("BindInstance: %v", err)
+	}
+	preemptingJob := fixtures.MakeJob(fixtures.WithJobID("replacement"), fixtures.Interactive, fixtures.HardForInteractive)
+	req := admissionReq(preemptingJob, fixtures.MakeClaim(700, 0))
+	req.Preemptions = []domain.PreemptionTarget{{LeaseID: victimLease.ID, InstanceID: "inst-victim", Reason: "higher priority replacement"}}
+	offer, err := admission.Offer(ctx, req)
+	if err != nil {
+		t.Fatalf("Offer with preemption: %v", err)
+	}
+	if len(admission.offers[offer.OfferID].preemptions) != 1 {
+		t.Fatalf("stored preemptions = %+v", admission.offers[offer.OfferID].preemptions)
+	}
+	if !preemptionLeaseIDs(req.Preemptions)[victimLease.ID] || !preemptionLeaseIDs(req.Preemptions)["inst-victim"] {
+		t.Fatalf("preemption ids missing lease/instance: %+v", preemptionLeaseIDs(req.Preemptions))
+	}
+
+	lease, err := admission.Commit(ctx, offer.OfferID, offer.Fence)
+	if err != nil {
+		t.Fatalf("Commit with preemption: %v", err)
+	}
+	if lease.JobID != preemptingJob.ID {
+		t.Fatalf("replacement lease = %+v", lease)
+	}
+	if _, found, err := admission.LeaseForJob(ctx, victim.ID); err != nil || !found {
+		t.Fatalf("victim lease missing before lifecycle cleanup found=%v err=%v", found, err)
+	}
+	if len(admission.leases) != 2 {
+		t.Fatalf("leases after preempting commit = %+v", admission.leases)
+	}
+}
+
+func TestAdmissionCommitRevalidatesPreemptionTargets(t *testing.T) {
+	ctx := context.Background()
+	admission := NewAdmission(
+		fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Unix(780, 0).UTC()),
+	)
+	victimLease := commitAdmissionLease(t, admission, "victim", fixtures.MakeClaim(700, 0))
+	req := admissionReq(fixtures.MakeJob(fixtures.WithJobID("replacement"), fixtures.Interactive, fixtures.HardForInteractive), fixtures.MakeClaim(700, 0))
+	req.Preemptions = []domain.PreemptionTarget{{LeaseID: victimLease.ID, Reason: "higher priority replacement"}}
+	offer, err := admission.Offer(ctx, req)
+	if err != nil {
+		t.Fatalf("Offer with preemption: %v", err)
+	}
+	record := admission.leases[victimLease.ID]
+	record.lease.Pinned = true
+	admission.leases[victimLease.ID] = record
+
+	if _, err := admission.Commit(ctx, offer.OfferID, offer.Fence); err == nil || !strings.Contains(err.Error(), "pinned") {
+		t.Fatalf("Commit revalidation err = %v", err)
+	}
+}
+
+func TestAdmissionRollsBackOfferWhenStateSaveFails(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeAdmissionStateStore{found: true, state: domain.AdmissionState{NodeID: "node-a", Fence: 1}}
+	admission := NewAdmission(
+		fixtures.MakeNode(fixtures.WithNodeID("node-a"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Unix(785, 0).UTC()),
+		WithAdmissionStateStore(store),
+	)
+	saveErr := errors.New("save failed")
+	store.saveErr = saveErr
+
+	_, err := admission.Offer(ctx, admissionReq(fixtures.MakeJob(fixtures.WithJobID("job-a")), fixtures.MakeClaim(100, 0)))
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("Offer err = %v", err)
+	}
+	if admission.nextOffer != 0 || len(admission.offers) != 0 || admission.fence != 1 {
+		t.Fatalf("offer mutation leaked next=%d fence=%d offers=%+v", admission.nextOffer, admission.fence, admission.offers)
+	}
+
+	store.saveErr = nil
+	offer, err := admission.Offer(ctx, admissionReq(fixtures.MakeJob(fixtures.WithJobID("job-a")), fixtures.MakeClaim(100, 0)))
+	if err != nil {
+		t.Fatalf("Offer retry: %v", err)
+	}
+	if offer.OfferID != "offer-node-a-1" || len(admission.offers) != 1 {
+		t.Fatalf("retry offer = %+v offers=%+v", offer, admission.offers)
+	}
+}
+
+func TestAdmissionRollsBackPreemptingCommitWhenStateSaveFails(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeAdmissionStateStore{found: true, state: domain.AdmissionState{NodeID: "node-a", Fence: 1}}
+	admission := NewAdmission(
+		fixtures.MakeNode(fixtures.WithNodeID("node-a"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1)),
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Unix(786, 0).UTC()),
+		WithAdmissionStateStore(store),
+	)
+	victim := fixtures.MakeJob(fixtures.WithJobID("victim"), fixtures.Background)
+	victimLease := commitAdmissionLease(t, admission, victim.ID, fixtures.MakeClaim(700, 0))
+	if err := admission.BindInstance(ctx, victimLease.ID, "inst-victim"); err != nil {
+		t.Fatalf("BindInstance: %v", err)
+	}
+	preemptingJob := fixtures.MakeJob(fixtures.WithJobID("replacement"), fixtures.Interactive, fixtures.HardForInteractive)
+	req := admissionReq(preemptingJob, fixtures.MakeClaim(700, 0))
+	req.Preemptions = []domain.PreemptionTarget{{LeaseID: victimLease.ID, InstanceID: "inst-victim", Reason: "higher priority replacement"}}
+	offer, err := admission.Offer(ctx, req)
+	if err != nil {
+		t.Fatalf("Offer with preemption: %v", err)
+	}
+	beforeFence := admission.fence
+	saveErr := errors.New("save failed")
+	store.saveErr = saveErr
+
+	_, err = admission.Commit(ctx, offer.OfferID, offer.Fence)
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("Commit err = %v", err)
+	}
+	if admission.fence != beforeFence || len(admission.leases) != 1 {
+		t.Fatalf("preempting commit leaked fence=%d leases=%+v", admission.fence, admission.leases)
+	}
+	if _, found, err := admission.LeaseForJob(ctx, victim.ID); err != nil || !found {
+		t.Fatalf("victim lease after rollback found=%v err=%v", found, err)
+	}
+	if _, found, err := admission.LeaseForJob(ctx, preemptingJob.ID); err != nil || found {
+		t.Fatalf("replacement lease after rollback found=%v err=%v", found, err)
+	}
+	if _, ok := admission.offers[offer.OfferID]; !ok {
+		t.Fatalf("offer was removed after rollback: %+v", admission.offers)
+	}
+
+	store.saveErr = nil
+	lease, err := admission.Commit(ctx, offer.OfferID, offer.Fence)
+	if err != nil {
+		t.Fatalf("Commit retry: %v", err)
+	}
+	if lease.JobID != preemptingJob.ID || len(admission.leases) != 2 {
+		t.Fatalf("retry lease=%+v leases=%+v", lease, admission.leases)
+	}
+}
+
+func TestAdmissionSelectAcceleratorWithPreemptionExclusions(t *testing.T) {
+	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	node.Accelerators = append(node.Accelerators, node.Accelerators[0])
+	node.Accelerators[1].Index = 1
+	live := []domain.ModelInstance{
+		fixtures.MakeInstance(fixtures.WithInstanceID("inst-0"), fixtures.OnNode(node.ID), fixtures.WithClaim(fixtures.MakeClaim(900, 0))),
+		fixtures.MakeInstance(fixtures.WithInstanceID("inst-1"), fixtures.OnNode(node.ID), fixtures.WithClaim(fixtures.MakeClaim(900, 0))),
+	}
+	live[1].AcceleratorSet = []int{1}
+	admission := NewAdmission(
+		node,
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Unix(790, 0).UTC()),
+		WithAdmissionInstances(func() []domain.ModelInstance { return append([]domain.ModelInstance(nil), live...) }),
+	)
+
+	admission.mu.Lock()
+	got, ok := admission.selectAcceleratorSetLocked(domain.AdmissionRequest{}, fixtures.MakeClaim(500, 0), map[string]bool{"inst-0": true})
+	admission.mu.Unlock()
+	if !ok || len(got) != 1 || got[0] != 0 {
+		t.Fatalf("select with exclusion = %v ok=%v", got, ok)
+	}
+
+	admission.mu.Lock()
+	got, ok = admission.selectAcceleratorSetLocked(domain.AdmissionRequest{}, fixtures.MakeClaim(500, 0), map[string]bool{"missing": true})
+	admission.mu.Unlock()
+	if ok || got != nil {
+		t.Fatalf("select without useful exclusion = %v ok=%v", got, ok)
+	}
+
+	admission.mu.Lock()
+	got, ok = admission.selectAcceleratorSetLocked(domain.AdmissionRequest{InstanceID: "inst-0", AcceleratorSet: []int{1}}, fixtures.MakeClaim(1, 0), nil)
+	admission.mu.Unlock()
+	if ok || got != nil {
+		t.Fatalf("warm instance accelerator mismatch = %v ok=%v", got, ok)
+	}
+
+	maintenance := NewAdmission(fixtures.MakeNode(fixtures.Maintenance), lease.NewAllocator(), mocks.NewFakeClock(time.Unix(800, 0).UTC()))
+	maintenance.mu.Lock()
+	got, ok = maintenance.selectAcceleratorSetLocked(domain.AdmissionRequest{}, fixtures.MakeClaim(1, 0), map[string]bool{"lease-a": true})
+	maintenance.mu.Unlock()
+	if ok || got != nil {
+		t.Fatalf("maintenance select = %v ok=%v", got, ok)
+	}
+
+	if !sameAdmissionAcceleratorSet([]int{1, 0}, []int{0, 1}) {
+		t.Fatal("sameAdmissionAcceleratorSet should ignore order")
+	}
+	if sameAdmissionAcceleratorSet([]int{0}, []int{0, 1}) {
+		t.Fatal("different-length accelerator sets matched")
+	}
+	if sameAdmissionAcceleratorSet([]int{0, 2}, []int{0, 1}) {
+		t.Fatal("different accelerator sets matched")
 	}
 }
 
@@ -593,8 +903,8 @@ func TestAdmissionFailsLoudOnBadInputsAndUnavailableCapacity(t *testing.T) {
 	if err := admission.Preempt(canceled, "missing", "test"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled Preempt err = %v", err)
 	}
-	if err := admission.Preempt(context.Background(), "missing", "test"); err == nil {
-		t.Fatal("expected missing preempt error")
+	if err := admission.Preempt(context.Background(), "missing", "test"); err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("expected disabled preempt error, got %v", err)
 	}
 	leaseA := commitAdmissionLease(t, admission, "job-a", fixtures.MakeClaim(100, 0))
 	if err := admission.BindInstance(context.Background(), "", "inst-a"); err == nil || !strings.Contains(err.Error(), "lease id") {
@@ -615,7 +925,7 @@ func TestAdmissionFailsLoudOnBadInputsAndUnavailableCapacity(t *testing.T) {
 	if _, _, err := admission.LeaseForInstance(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "instance id") {
 		t.Fatalf("empty LeaseForInstance err = %v", err)
 	}
-	if err := admission.Preempt(context.Background(), leaseA.ID, ""); err == nil || !strings.Contains(err.Error(), "reason") {
+	if err := admission.Preempt(context.Background(), leaseA.ID, ""); err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Fatalf("empty preempt reason err = %v", err)
 	}
 	if _, _, err := admission.LeaseForJob(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "job id") {
@@ -761,6 +1071,17 @@ func TestAdmissionPreemptForJobFailsLoudOnPolicyAndLeaseState(t *testing.T) {
 	if err := admission.PreemptForJob(ctx, hard, leaseB.ID, ""); err == nil || !strings.Contains(err.Error(), "reason") {
 		t.Fatalf("empty reason err = %v", err)
 	}
+	if err := admission.PreemptForJob(ctx, hard, leaseA.ID, "first"); err != nil {
+		t.Fatalf("first preempt err = %v", err)
+	}
+	if err := admission.PreemptForJob(ctx, hard, leaseA.ID, "again"); err == nil || !strings.Contains(err.Error(), "already preempting") {
+		t.Fatalf("already preempting err = %v", err)
+	}
+	req := admissionReq(hard, fixtures.MakeClaim(100, 0))
+	req.Preemptions = []domain.PreemptionTarget{{LeaseID: leaseA.ID, Reason: "already preempting"}}
+	if _, err := admission.Offer(ctx, req); err == nil || !strings.Contains(err.Error(), "already preempting") {
+		t.Fatalf("offer already preempting err = %v", err)
+	}
 }
 
 func TestAdmissionStoreErrorsAreLoud(t *testing.T) {
@@ -797,6 +1118,9 @@ func TestAdmissionStoreErrorsAreLoud(t *testing.T) {
 	hard := fixtures.MakeJob(fixtures.WithJobID("hard"), fixtures.Interactive, fixtures.HardForInteractive)
 	if err := newWithStore(&fakeAdmissionStateStore{loadErr: loadErr}).PreemptForJob(ctx, hard, "lease-a", "test"); !errors.Is(err, loadErr) {
 		t.Fatalf("preempt-for-job load err = %v", err)
+	}
+	if _, err := newWithStore(&fakeAdmissionStateStore{saveErr: saveErr}).Offer(ctx, admissionReq(fixtures.MakeJob(), fixtures.MakeClaim(1, 0))); !errors.Is(err, saveErr) {
+		t.Fatalf("initial save err = %v", err)
 	}
 	if _, err := newWithStore(&fakeAdmissionStateStore{found: true, state: domain.AdmissionState{NodeID: node.ID, Fence: 1}, saveErr: saveErr}).Offer(ctx, admissionReq(fixtures.MakeJob(), fixtures.MakeClaim(1, 0))); !errors.Is(err, saveErr) {
 		t.Fatalf("offer save err = %v", err)
