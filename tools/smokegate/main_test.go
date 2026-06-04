@@ -46,7 +46,7 @@ func TestSmokeGateRejectsBadInput(t *testing.T) {
 	if err := run(writeJSON(t, `{"Action":"pass"}`), gateConfig{}); err == nil || !strings.Contains(err.Error(), "no test events") {
 		t.Fatalf("empty err = %v", err)
 	}
-	if _, _, err := readStatuses(filepath.Join(t.TempDir(), "missing.json")); err == nil {
+	if _, _, _, err := readStatuses(filepath.Join(t.TempDir(), "missing.json")); err == nil {
 		t.Fatal("expected missing file error")
 	}
 	if err := execute([]string{"-require", ""}); err == nil {
@@ -65,6 +65,17 @@ func TestSmokeGateRejectsBadInput(t *testing.T) {
 		"fail": {Failed: true, Passed: true},
 	}); counts.Passed != 1 || counts.Skipped != 1 || counts.Failed != 1 {
 		t.Fatalf("counts = %+v", counts)
+	}
+}
+
+func TestSmokeGateRejectsPackageLevelFailures(t *testing.T) {
+	path := writeJSON(t, `
+{"Action":"run","Package":"mycelium/test/smoke","Test":"TestLocal"}
+{"Action":"pass","Package":"mycelium/test/smoke","Test":"TestLocal"}
+{"Action":"fail","Package":"mycelium/test/smoke"}
+`)
+	if err := run(path, gateConfig{Requires: []string{"TestLocal"}}); err == nil || !strings.Contains(err.Error(), "smoke package failed") {
+		t.Fatalf("package failure err = %v", err)
 	}
 }
 
