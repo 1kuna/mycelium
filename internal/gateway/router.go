@@ -115,6 +115,7 @@ type Router struct {
 }
 
 var gatewayJobSeq uint64
+var gatewaySessionSeq uint64
 
 type RouteResponse struct {
 	Status   int
@@ -147,6 +148,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	if err != nil {
 		return RouteResponse{}, err
 	}
+	recorder := r.newSessionRecorder()
 	tries := r.MaxTries
 	if tries == 0 {
 		tries = 2
@@ -171,6 +173,20 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		if cold {
 			loadMS = durationMS(loadStart, clk.Now())
 		}
+		if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhasePlaced, func(sample *domain.SessionMetric) {
+			sample.BytesIn = len(req.Body)
+			sample.LoadWallClockMS = loadMS
+		}); err != nil {
+			return RouteResponse{}, err
+		}
+		if cold {
+			if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhaseLoadReady, func(sample *domain.SessionMetric) {
+				sample.BytesIn = len(req.Body)
+				sample.LoadWallClockMS = loadMS
+			}); err != nil {
+				return RouteResponse{}, err
+			}
+		}
 		endRequest, err := r.beginInstanceRequest(ctx, inst)
 		if err != nil {
 			if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
@@ -187,6 +203,12 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			return RouteResponse{}, err
 		}
 		upstreamStart := clk.Now()
+		if err := recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseUpstreamStart, upstreamStart, func(sample *domain.SessionMetric) {
+			sample.BytesIn = len(route.Body)
+			sample.LoadWallClockMS = loadMS
+		}); err != nil {
+			return RouteResponse{}, err
+		}
 		resp, err := r.callUpstream(ctx, inst, route)
 		upstreamEnd := clk.Now()
 		endRequest()
@@ -194,6 +216,9 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			return RouteResponse{}, releaseErr
 		}
 		if err != nil {
+			if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
+				return RouteResponse{}, sampleErr
+			}
 			lastErr = err
 			if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
 				return RouteResponse{}, reportErr
@@ -207,6 +232,9 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			if optimizer.IsContextOverflow(preset.Backend, fmt.Errorf("%s", bodyText)) {
 				next, ok := r.Presets.NextLargerContext(preset)
 				if ok {
+					if err := recorder.emitError(ctx, job, preset, inst, statusErr); err != nil {
+						return RouteResponse{}, err
+					}
 					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", preset.ID, next.ID)
 					req, err = translate.WithModel(req, next.ID)
 					if err != nil {
@@ -217,6 +245,9 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 				}
 			}
 			if resp.Status >= 500 {
+				if err := recorder.emitError(ctx, job, preset, inst, statusErr); err != nil {
+					return RouteResponse{}, err
+				}
 				lastErr = statusErr
 				if reportErr := r.reportFailure(ctx, inst.ID, statusErr); reportErr != nil {
 					return RouteResponse{}, reportErr
@@ -224,18 +255,26 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 				fleet = withoutInstance(fleet, inst.ID)
 				continue
 			}
+			if err := recorder.emitError(ctx, job, preset, inst, statusErr); err != nil {
+				return RouteResponse{}, err
+			}
 			return RouteResponse{}, statusErr
 		}
 		body, contentType, err := translate.TranslateResponse(req, route, resp.Body)
 		if err != nil {
 			return RouteResponse{}, err
 		}
-		if err := r.recordMetric(ctx, job, preset, inst, body, metricTiming{
+		metric, err := r.recordMetric(ctx, job, preset, inst, body, metricTiming{
 			Start:           upstreamStart,
 			FirstByte:       upstreamEnd,
 			End:             upstreamEnd,
 			LoadWallClockMS: loadMS,
-		}); err != nil {
+		})
+		if err != nil {
+			return RouteResponse{}, err
+		}
+		promptTokens, completionTokens := usageFromBody(body)
+		if err := recorder.emitMetric(ctx, metric, domain.TelemetryPhaseComplete, len(route.Body), len(body), promptTokens, completionTokens); err != nil {
 			return RouteResponse{}, err
 		}
 		if r.Sticky != nil {
@@ -285,6 +324,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 	if err != nil {
 		return err
 	}
+	recorder := r.newSessionRecorder()
 	tries := r.MaxTries
 	if tries == 0 {
 		tries = 2
@@ -343,6 +383,28 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		if cold {
 			loadMS = durationMS(loadStart, clk.Now())
 		}
+		if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhasePlaced, func(sample *domain.SessionMetric) {
+			sample.BytesIn = len(req.Body)
+			sample.LoadWallClockMS = loadMS
+		}); err != nil {
+			if started {
+				writeStreamError(w, err)
+				return nil
+			}
+			return err
+		}
+		if cold {
+			if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhaseLoadReady, func(sample *domain.SessionMetric) {
+				sample.BytesIn = len(req.Body)
+				sample.LoadWallClockMS = loadMS
+			}); err != nil {
+				if started {
+					writeStreamError(w, err)
+					return nil
+				}
+				return err
+			}
+		}
 		endRequest, err := r.beginInstanceRequest(ctx, inst)
 		if err != nil {
 			if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
@@ -379,6 +441,16 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			return err
 		}
 		upstreamStart := clk.Now()
+		if err := recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseUpstreamStart, upstreamStart, func(sample *domain.SessionMetric) {
+			sample.BytesIn = len(route.Body)
+			sample.LoadWallClockMS = loadMS
+		}); err != nil {
+			if started {
+				writeStreamError(w, err)
+				return nil
+			}
+			return err
+		}
 		resp, err := r.doUpstream(ctx, inst, route)
 		if err != nil {
 			endRequest()
@@ -388,6 +460,13 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 					return nil
 				}
 				return releaseErr
+			}
+			if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
+				if started {
+					writeStreamError(w, sampleErr)
+					return nil
+				}
+				return sampleErr
 			}
 			lastErr = err
 			if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
@@ -422,6 +501,9 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			if optimizer.IsContextOverflow(preset.Backend, err) {
 				next, ok := r.Presets.NextLargerContext(preset)
 				if ok && !started {
+					if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
+						return sampleErr
+					}
 					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", preset.ID, next.ID)
 					req, err = translate.WithModel(req, next.ID)
 					if err != nil {
@@ -432,6 +514,13 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 				}
 			}
 			if resp.StatusCode >= 500 {
+				if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
+					if started {
+						writeStreamError(w, sampleErr)
+						return nil
+					}
+					return sampleErr
+				}
 				lastErr = err
 				if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
 					err = reportErr
@@ -445,6 +534,13 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 				}
 				fleet = withoutInstance(fleet, inst.ID)
 				continue
+			}
+			if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
+				if started {
+					writeStreamError(w, sampleErr)
+					return nil
+				}
+				return sampleErr
 			}
 			if started {
 				writeStreamError(w, err)
@@ -463,7 +559,26 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			w.WriteHeader(resp.StatusCode)
 			started = true
 		}
-		copied, copyErr := copyAndFlush(w, resp.Body, clk)
+		firstByteSampled := false
+		copied, copyErr := copyAndFlush(w, resp.Body, clk, func(copied copyResult) error {
+			if !firstByteSampled && !copied.FirstByte.IsZero() {
+				firstByteSampled = true
+				if err := recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseFirstByte, copied.FirstByte, func(sample *domain.SessionMetric) {
+					sample.BytesIn = len(route.Body)
+					sample.BytesOut = len(copied.Body)
+					sample.LoadWallClockMS = loadMS
+					sample.TTFTms = durationMS(upstreamStart, copied.FirstByte)
+				}); err != nil {
+					return err
+				}
+			}
+			return recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseStreamChunk, copied.End, func(sample *domain.SessionMetric) {
+				sample.BytesIn = len(route.Body)
+				sample.BytesOut = len(copied.Body)
+				sample.LoadWallClockMS = loadMS
+				sample.TTFTms = durationMS(upstreamStart, copied.FirstByte)
+			})
+		})
 		_ = resp.Body.Close()
 		endRequest()
 		if releaseErr := r.releaseLease(ctx, lease); releaseErr != nil {
@@ -472,12 +587,17 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		if copyErr != nil {
 			return copyErr
 		}
-		if err := r.recordMetric(ctx, job, preset, inst, copied.Body, metricTiming{
+		metric, err := r.recordMetric(ctx, job, preset, inst, copied.Body, metricTiming{
 			Start:           upstreamStart,
 			FirstByte:       copied.FirstByte,
 			End:             copied.End,
 			LoadWallClockMS: loadMS,
-		}); err != nil {
+		})
+		if err != nil {
+			return err
+		}
+		promptTokens, completionTokens := usageFromBody(copied.Body)
+		if err := recorder.emitMetric(ctx, metric, domain.TelemetryPhaseComplete, len(route.Body), len(copied.Body), promptTokens, completionTokens); err != nil {
 			return err
 		}
 		if r.Sticky != nil {
@@ -796,9 +916,99 @@ type metricTiming struct {
 	LoadWallClockMS int
 }
 
-func (r *Router) recordMetric(ctx context.Context, job domain.Job, preset domain.Preset, inst domain.ModelInstance, body []byte, timing metricTiming) error {
-	if r.Telemetry == nil && r.TelemetryPeerClient == nil {
+type sessionRecorder struct {
+	router    *Router
+	sessionID string
+	start     time.Time
+	sequence  int
+}
+
+func (r *Router) newSessionRecorder() *sessionRecorder {
+	clk := r.clock()
+	start := clk.Now()
+	return &sessionRecorder{
+		router:    r,
+		sessionID: fmt.Sprintf("gateway-session-%d-%d", start.UnixNano(), atomic.AddUint64(&gatewaySessionSeq, 1)),
+		start:     start,
+	}
+}
+
+func (s *sessionRecorder) emit(ctx context.Context, job domain.Job, preset domain.Preset, inst domain.ModelInstance, phase domain.TelemetryPhase, update func(*domain.SessionMetric)) error {
+	return s.emitAt(ctx, job, preset, inst, phase, s.router.clock().Now(), update)
+}
+
+func (s *sessionRecorder) emitAt(ctx context.Context, job domain.Job, preset domain.Preset, inst domain.ModelInstance, phase domain.TelemetryPhase, at time.Time, update func(*domain.SessionMetric)) error {
+	if s == nil || s.router == nil {
 		return nil
+	}
+	if at.IsZero() {
+		at = s.router.clock().Now()
+	}
+	s.sequence++
+	presetID := inst.PresetID
+	if presetID == "" {
+		presetID = preset.ID
+	}
+	sample := domain.SessionMetric{
+		SessionID:  s.sessionID,
+		Sequence:   s.sequence,
+		JobID:      job.ID,
+		Phase:      phase,
+		InstanceID: inst.ID,
+		NodeID:     inst.NodeID,
+		PresetID:   presetID,
+		Backend:    preset.Backend,
+		Project:    job.Project,
+		ElapsedMS:  durationMS(s.start, at),
+		At:         at.UTC(),
+	}
+	if update != nil {
+		update(&sample)
+	}
+	return s.router.recordSample(ctx, sample)
+}
+
+func (s *sessionRecorder) emitMetric(ctx context.Context, metric domain.RunMetric, phase domain.TelemetryPhase, bytesIn, bytesOut, tokensIn, tokensOut int) error {
+	if s == nil || s.router == nil {
+		return nil
+	}
+	s.sequence++
+	sample := domain.SessionMetric{
+		SessionID:       s.sessionID,
+		Sequence:        s.sequence,
+		JobID:           metric.JobID,
+		Phase:           phase,
+		InstanceID:      metric.InstanceID,
+		NodeID:          metric.NodeID,
+		PresetID:        metric.PresetID,
+		Backend:         metric.Backend,
+		Project:         metric.Project,
+		TokensIn:        tokensIn,
+		TokensOut:       tokensOut,
+		ContextUsed:     metric.ContextUsed,
+		BytesIn:         bytesIn,
+		BytesOut:        bytesOut,
+		TokensPerSec:    metric.TokensPerSec,
+		TTFTms:          metric.TTFTms,
+		LoadWallClockMS: metric.LoadWallClockMS,
+		PeakVRAMMB:      metric.PeakVRAMMB,
+		ElapsedMS:       durationMS(s.start, metric.At),
+		At:              metric.At,
+	}
+	return s.router.recordSample(ctx, sample)
+}
+
+func (s *sessionRecorder) emitError(ctx context.Context, job domain.Job, preset domain.Preset, inst domain.ModelInstance, err error) error {
+	return s.emit(ctx, job, preset, inst, domain.TelemetryPhaseError, func(sample *domain.SessionMetric) {
+		if err != nil {
+			sample.Error = err.Error()
+		}
+	})
+}
+
+func (r *Router) recordMetric(ctx context.Context, job domain.Job, preset domain.Preset, inst domain.ModelInstance, body []byte, timing metricTiming) (domain.RunMetric, error) {
+	if r.Telemetry == nil && r.TelemetryPeerClient == nil {
+		return domain.RunMetric{}, nil
 	}
 	prompt, completion := usageFromBody(body)
 	clk := r.clock()
@@ -818,11 +1028,21 @@ func (r *Router) recordMetric(ctx context.Context, job domain.Job, preset domain
 	if r.MemorySampler != nil {
 		peak, err := r.MemorySampler.PeakMemoryMB(ctx, inst.NodeID, inst.ID)
 		if err != nil {
-			return err
+			return domain.RunMetric{}, err
 		}
 		metric.PeakVRAMMB = peak
 	}
-	if (r.SelfNodeID != "" && inst.NodeID == r.SelfNodeID) || (r.SelfNodeID == "" && r.TelemetryPeers == nil && r.TelemetryPeerClient == nil) {
+	if err := r.recordMetricValue(ctx, metric); err != nil {
+		return domain.RunMetric{}, err
+	}
+	return metric, nil
+}
+
+func (r *Router) recordMetricValue(ctx context.Context, metric domain.RunMetric) error {
+	if r.Telemetry == nil && r.TelemetryPeerClient == nil {
+		return nil
+	}
+	if (r.SelfNodeID != "" && metric.NodeID == r.SelfNodeID) || (r.SelfNodeID == "" && r.TelemetryPeers == nil && r.TelemetryPeerClient == nil) {
 		if r.Telemetry == nil {
 			return fmt.Errorf("local owner telemetry sink is not configured")
 		}
@@ -834,11 +1054,37 @@ func (r *Router) recordMetric(ctx context.Context, job domain.Job, preset domain
 	if r.TelemetryPeerClient == nil {
 		return fmt.Errorf("remote owner telemetry client is not configured")
 	}
-	peer, ok := r.TelemetryPeers.PeerForNode(inst.NodeID)
+	peer, ok := r.TelemetryPeers.PeerForNode(metric.NodeID)
 	if !ok {
-		return fmt.Errorf("telemetry owner peer for node %q is not known", inst.NodeID)
+		return fmt.Errorf("telemetry owner peer for node %q is not known", metric.NodeID)
 	}
 	return r.TelemetryPeerClient.PushMetrics(ctx, peer, []domain.RunMetric{metric})
+}
+
+func (r *Router) recordSample(ctx context.Context, sample domain.SessionMetric) error {
+	if r.Telemetry == nil && r.TelemetryPeerClient == nil {
+		return nil
+	}
+	if sample.NodeID == "" {
+		return fmt.Errorf("session telemetry owner node is required")
+	}
+	if (r.SelfNodeID != "" && sample.NodeID == r.SelfNodeID) || (r.SelfNodeID == "" && r.TelemetryPeers == nil && r.TelemetryPeerClient == nil) {
+		if r.Telemetry == nil {
+			return fmt.Errorf("local owner telemetry sink is not configured")
+		}
+		return r.Telemetry.RecordSample(ctx, sample)
+	}
+	if r.TelemetryPeers == nil {
+		return fmt.Errorf("remote owner telemetry peer resolver is not configured")
+	}
+	if r.TelemetryPeerClient == nil {
+		return fmt.Errorf("remote owner telemetry client is not configured")
+	}
+	peer, ok := r.TelemetryPeers.PeerForNode(sample.NodeID)
+	if !ok {
+		return fmt.Errorf("telemetry owner peer for node %q is not known", sample.NodeID)
+	}
+	return r.TelemetryPeerClient.PushSamples(ctx, peer, []domain.SessionMetric{sample})
 }
 
 func (r *Router) clock() ports.Clock {
@@ -930,7 +1176,7 @@ type copyResult struct {
 	End       time.Time
 }
 
-func copyAndFlush(w http.ResponseWriter, r io.Reader, clk ports.Clock) (copyResult, error) {
+func copyAndFlush(w http.ResponseWriter, r io.Reader, clk ports.Clock, onChunk func(copyResult) error) (copyResult, error) {
 	var body bytes.Buffer
 	result := copyResult{}
 	buf := make([]byte, 32*1024)
@@ -949,6 +1195,12 @@ func copyAndFlush(w http.ResponseWriter, r io.Reader, clk ports.Clock) (copyResu
 				return result, err
 			}
 			flush(w)
+			result.Body = body.Bytes()
+			if onChunk != nil {
+				if err := onChunk(result); err != nil {
+					return result, err
+				}
+			}
 		}
 		if readErr == io.EOF {
 			if result.End.IsZero() {

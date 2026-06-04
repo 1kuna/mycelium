@@ -86,6 +86,84 @@ func TestRunAddModelPersistsCatalogAndControlPreset(t *testing.T) {
 	}
 }
 
+func TestRunTelemetrySamplesPrintsFilteredSessionSeries(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	for _, sample := range []domain.SessionMetric{
+		{
+			SessionID:   "session-a",
+			Sequence:    1,
+			JobID:       "job-a",
+			Phase:       domain.TelemetryPhasePlaced,
+			NodeID:      "node-a",
+			Project:     "project-a",
+			PresetID:    "preset-a",
+			ContextUsed: 0,
+			BytesIn:     120,
+			At:          now,
+		},
+		{
+			SessionID:    "session-a",
+			Sequence:     2,
+			JobID:        "job-a",
+			Phase:        domain.TelemetryPhaseComplete,
+			NodeID:       "node-a",
+			Project:      "project-a",
+			PresetID:     "preset-a",
+			ContextUsed:  42,
+			BytesIn:      120,
+			BytesOut:     240,
+			TokensPerSec: 12.5,
+			TTFTms:       34,
+			ElapsedMS:    56,
+			At:           now.Add(time.Second),
+		},
+		{
+			SessionID: "session-b",
+			Sequence:  1,
+			JobID:     "job-b",
+			Phase:     domain.TelemetryPhaseComplete,
+			NodeID:    "node-b",
+			Project:   "project-b",
+			At:        now.Add(2 * time.Second),
+		},
+	} {
+		if err := store.RecordSample(context.Background(), sample); err != nil {
+			t.Fatalf("RecordSample: %v", err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"telemetry", "samples", "--db", dbPath, "--project", "project-a", "--session", "session-a", "--limit", "2"})
+	})
+	if err != nil {
+		t.Fatalf("telemetry samples: %v", err)
+	}
+	if !strings.Contains(output, "sample\tsession-a\t1\tplaced") || !strings.Contains(output, "sample\tsession-a\t2\tcomplete") || strings.Contains(output, "session-b") {
+		t.Fatalf("telemetry output = %q", output)
+	}
+}
+
+func TestRunTelemetrySamplesRejectsBadUsageAndTimeBounds(t *testing.T) {
+	for _, args := range [][]string{
+		{"telemetry"},
+		{"telemetry", "wat"},
+		{"telemetry", "samples", "--since", "not-time"},
+		{"telemetry", "samples", "--until", "not-time"},
+	} {
+		if err := Run(context.Background(), args); err == nil {
+			t.Fatalf("Run(%v) expected error", args)
+		}
+	}
+}
+
 func TestRunAddModelFailurePersistsFailedInstallJobWithoutPreset(t *testing.T) {
 	storeDir := t.TempDir()
 	dbPath := filepath.Join(t.TempDir(), "control.db")

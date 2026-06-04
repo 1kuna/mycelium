@@ -8,8 +8,10 @@ import (
 )
 
 type TelemetrySink struct {
-	Err     error
-	Metrics []domain.RunMetric
+	Err        error
+	SampleErr  error
+	Metrics    []domain.RunMetric
+	SamplesOut []domain.SessionMetric
 }
 
 func (m *TelemetrySink) Record(_ context.Context, metric domain.RunMetric) error {
@@ -20,16 +22,28 @@ func (m *TelemetrySink) Record(_ context.Context, metric domain.RunMetric) error
 	return nil
 }
 
+func (m *TelemetrySink) RecordSample(_ context.Context, sample domain.SessionMetric) error {
+	if m.SampleErr != nil {
+		return m.SampleErr
+	}
+	m.SamplesOut = append(m.SamplesOut, sample)
+	return nil
+}
+
 var _ ports.TelemetrySink = (*TelemetrySink)(nil)
 
 type TelemetryPeerClient struct {
 	MetricsByPeer          map[string][]domain.RunMetric
+	SamplesByPeer          map[string][]domain.SessionMetric
 	RecommendationsByPeer  map[string][]domain.RecommendationRecord
 	MetricsErr             error
 	PushMetricsErr         error
+	SamplesErr             error
+	PushSamplesErr         error
 	RecommendationsErr     error
 	PushRecommendationsErr error
 	PushedMetrics          map[string][]domain.RunMetric
+	PushedSamples          map[string][]domain.SessionMetric
 	PushedRecommendations  map[string][]domain.RecommendationRecord
 	Calls                  []string
 }
@@ -51,6 +65,26 @@ func (m *TelemetryPeerClient) PushMetrics(_ context.Context, peer domain.Peer, m
 		m.PushedMetrics = map[string][]domain.RunMetric{}
 	}
 	m.PushedMetrics[peer.ID] = append([]domain.RunMetric(nil), metrics...)
+	return nil
+}
+
+func (m *TelemetryPeerClient) Samples(_ context.Context, peer domain.Peer, _ domain.SessionMetricQuery) ([]domain.SessionMetric, error) {
+	m.Calls = append(m.Calls, "samples:"+peer.ID)
+	if m.SamplesErr != nil {
+		return nil, m.SamplesErr
+	}
+	return append([]domain.SessionMetric(nil), m.SamplesByPeer[peer.ID]...), nil
+}
+
+func (m *TelemetryPeerClient) PushSamples(_ context.Context, peer domain.Peer, samples []domain.SessionMetric) error {
+	m.Calls = append(m.Calls, "push-samples:"+peer.ID)
+	if m.PushSamplesErr != nil {
+		return m.PushSamplesErr
+	}
+	if m.PushedSamples == nil {
+		m.PushedSamples = map[string][]domain.SessionMetric{}
+	}
+	m.PushedSamples[peer.ID] = append(m.PushedSamples[peer.ID], samples...)
 	return nil
 }
 

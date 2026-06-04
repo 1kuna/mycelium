@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -959,6 +960,44 @@ func mountTelemetryHTTP(mux *http.ServeMux, store telemetryRPCStore, rpcToken st
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
+	mux.HandleFunc("/telemetry/samples", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			query, err := parseSessionMetricQuery(r.URL.Query())
+			if err != nil {
+				writePeerRPCError(w, http.StatusBadRequest, err)
+				return
+			}
+			samples, err := store.Samples(r.Context(), query)
+			if err != nil {
+				writePeerRPCError(w, http.StatusInternalServerError, err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(samples); err != nil {
+				panic(err)
+			}
+		case http.MethodPost:
+			var samples []domain.SessionMetric
+			if err := json.NewDecoder(r.Body).Decode(&samples); err != nil {
+				writePeerRPCError(w, http.StatusBadRequest, err)
+				return
+			}
+			for _, sample := range samples {
+				if err := store.RecordSample(r.Context(), sample); err != nil {
+					writePeerRPCError(w, http.StatusInternalServerError, err)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
 	mux.HandleFunc("/telemetry/recommendations", func(w http.ResponseWriter, r *http.Request) {
 		if !peerRPCAuthorized(r, rpcToken) {
 			writePeerAuthError(w)
@@ -992,6 +1031,35 @@ func mountTelemetryHTTP(mux *http.ServeMux, store telemetryRPCStore, rpcToken st
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
+}
+
+func parseSessionMetricQuery(values url.Values) (domain.SessionMetricQuery, error) {
+	var query domain.SessionMetricQuery
+	query.SessionID = values.Get("session_id")
+	query.Project = values.Get("project")
+	query.NodeID = values.Get("node_id")
+	if raw := values.Get("since"); raw != "" {
+		at, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return domain.SessionMetricQuery{}, fmt.Errorf("invalid since: %w", err)
+		}
+		query.Since = at
+	}
+	if raw := values.Get("until"); raw != "" {
+		at, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return domain.SessionMetricQuery{}, fmt.Errorf("invalid until: %w", err)
+		}
+		query.Until = at
+	}
+	if raw := values.Get("limit"); raw != "" {
+		limit, err := strconv.Atoi(raw)
+		if err != nil || limit < 0 {
+			return domain.SessionMetricQuery{}, fmt.Errorf("invalid limit %q", raw)
+		}
+		query.Limit = limit
+	}
+	return query, nil
 }
 
 func mountNodeHTTP(mux *http.ServeMux, handler http.Handler) {
@@ -1465,6 +1533,16 @@ func (c telemetryHTTPClient) PushMetrics(ctx context.Context, peer domain.Peer, 
 	return doPeerRPC(ctx, c.Client, c.AuthToken, peer, http.MethodPost, "/telemetry/metrics", metrics, nil)
 }
 
+func (c telemetryHTTPClient) Samples(ctx context.Context, peer domain.Peer, query domain.SessionMetricQuery) ([]domain.SessionMetric, error) {
+	var samples []domain.SessionMetric
+	err := doPeerRPC(ctx, c.Client, c.AuthToken, peer, http.MethodGet, telemetrySamplesPath(query), nil, &samples)
+	return samples, err
+}
+
+func (c telemetryHTTPClient) PushSamples(ctx context.Context, peer domain.Peer, samples []domain.SessionMetric) error {
+	return doPeerRPC(ctx, c.Client, c.AuthToken, peer, http.MethodPost, "/telemetry/samples", samples, nil)
+}
+
 func (c telemetryHTTPClient) Recommendations(ctx context.Context, peer domain.Peer) ([]domain.RecommendationRecord, error) {
 	var recs []domain.RecommendationRecord
 	err := doPeerRPC(ctx, c.Client, c.AuthToken, peer, http.MethodGet, "/telemetry/recommendations", nil, &recs)
@@ -1476,6 +1554,32 @@ func (c telemetryHTTPClient) PushRecommendations(ctx context.Context, peer domai
 }
 
 var _ ports.TelemetryPeerClient = telemetryHTTPClient{}
+
+func telemetrySamplesPath(query domain.SessionMetricQuery) string {
+	values := url.Values{}
+	if query.SessionID != "" {
+		values.Set("session_id", query.SessionID)
+	}
+	if query.Project != "" {
+		values.Set("project", query.Project)
+	}
+	if query.NodeID != "" {
+		values.Set("node_id", query.NodeID)
+	}
+	if !query.Since.IsZero() {
+		values.Set("since", query.Since.UTC().Format(time.RFC3339Nano))
+	}
+	if !query.Until.IsZero() {
+		values.Set("until", query.Until.UTC().Format(time.RFC3339Nano))
+	}
+	if query.Limit > 0 {
+		values.Set("limit", strconv.Itoa(query.Limit))
+	}
+	if len(values) == 0 {
+		return "/telemetry/samples"
+	}
+	return "/telemetry/samples?" + values.Encode()
+}
 
 func doPeerRPC(ctx context.Context, client *http.Client, authToken string, peer domain.Peer, method, path string, in, out any) error {
 	if len(peer.Addresses) == 0 {
@@ -1756,6 +1860,7 @@ type telemetrySyncConfig struct {
 type telemetrySyncResult struct {
 	SlotID                  string
 	ImportedMetrics         int
+	ImportedSamples         int
 	ImportedRecommendations int
 	PushedRecommendations   int
 	SkippedPeers            []string
@@ -1900,6 +2005,17 @@ func pullFleetTelemetry(ctx context.Context, store optimizerRuntimeStore, cfg te
 				return result, reachable, fmt.Errorf("import telemetry metric %q from peer %q: %w", metric.JobID, peer.ID, err)
 			}
 			result.ImportedMetrics++
+		}
+		samples, err := cfg.Client.Samples(ctx, peer, domain.SessionMetricQuery{})
+		if err != nil {
+			result.SkippedPeers = append(result.SkippedPeers, fmt.Sprintf("%s samples: %v", peer.ID, err))
+			continue
+		}
+		for _, sample := range samples {
+			if err := store.RecordSample(ctx, sample); err != nil {
+				return result, reachable, fmt.Errorf("import telemetry sample %q/%d from peer %q: %w", sample.SessionID, sample.Sequence, peer.ID, err)
+			}
+			result.ImportedSamples++
 		}
 		recs, err := cfg.Client.Recommendations(ctx, peer)
 		if err != nil {

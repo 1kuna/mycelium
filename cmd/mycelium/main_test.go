@@ -42,7 +42,7 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 		want string
 	}{
 		{name: "run", args: []string{"run"}, want: "read peer config"},
-		{name: "ctl", args: []string{"ctl"}, want: "usage: myce <add-model|models|nodes|projects|jobs|recommendations|benchmark>"},
+		{name: "ctl", args: []string{"ctl"}, want: "usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark>"},
 		{name: "server removed", args: []string{"server"}, want: "peer-native"},
 		{name: "node removed", args: []string{"node"}, want: "peer-native"},
 		{name: "unknown", args: []string{"wat"}, want: "unknown command"},
@@ -1751,6 +1751,10 @@ func TestTelemetryRPCRequiresAuthAndMergesMetricsAndRecommendations(t *testing.T
 	if err := store.Record(ctx, localMetric); err != nil {
 		t.Fatalf("Record local: %v", err)
 	}
+	localSample := domain.SessionMetric{SessionID: "session-local", Sequence: 1, JobID: "job-local", Phase: domain.TelemetryPhaseComplete, NodeID: "peer-a", Project: "project-a", At: time.Unix(20, 0).UTC()}
+	if err := store.RecordSample(ctx, localSample); err != nil {
+		t.Fatalf("RecordSample local: %v", err)
+	}
 	mux := http.NewServeMux()
 	mountTelemetryHTTP(mux, store, "rpc-secret")
 	client := directHTTPClient(mux)
@@ -1767,9 +1771,20 @@ func TestTelemetryRPCRequiresAuthAndMergesMetricsAndRecommendations(t *testing.T
 	if len(metrics) != 1 || metrics[0].JobID != localMetric.JobID {
 		t.Fatalf("metrics = %+v", metrics)
 	}
+	samples, err := telemetryClient.Samples(ctx, peer, domain.SessionMetricQuery{Project: "project-a", Limit: 1})
+	if err != nil {
+		t.Fatalf("Samples: %v", err)
+	}
+	if len(samples) != 1 || samples[0].SessionID != localSample.SessionID {
+		t.Fatalf("samples = %+v", samples)
+	}
 	remoteMetric := domain.RunMetric{JobID: "job-remote", NodeID: "peer-b", Project: "project-a", TokensPerSec: 18, At: time.Unix(21, 0).UTC()}
 	if err := telemetryClient.PushMetrics(ctx, peer, []domain.RunMetric{remoteMetric}); err != nil {
 		t.Fatalf("PushMetrics: %v", err)
+	}
+	remoteSample := domain.SessionMetric{SessionID: "session-remote", Sequence: 1, JobID: "job-remote", Phase: domain.TelemetryPhaseComplete, NodeID: "peer-b", Project: "project-a", At: time.Unix(21, 0).UTC()}
+	if err := telemetryClient.PushSamples(ctx, peer, []domain.SessionMetric{remoteSample}); err != nil {
+		t.Fatalf("PushSamples: %v", err)
 	}
 	metrics, err = store.Metrics(ctx, "")
 	if err != nil {
@@ -1777,6 +1792,13 @@ func TestTelemetryRPCRequiresAuthAndMergesMetricsAndRecommendations(t *testing.T
 	}
 	if len(metrics) != 2 || metrics[1].JobID != remoteMetric.JobID {
 		t.Fatalf("local metrics = %+v", metrics)
+	}
+	samples, err = store.Samples(ctx, domain.SessionMetricQuery{})
+	if err != nil {
+		t.Fatalf("Samples local: %v", err)
+	}
+	if len(samples) != 2 || samples[1].SessionID != remoteSample.SessionID {
+		t.Fatalf("local samples = %+v", samples)
 	}
 	rec := domain.RecommendationRecord{ID: "rec-a", Type: optimizer.RecommendationContextCap, ProjectID: "project-a", CreatedAt: time.Unix(22, 0).UTC()}
 	if err := telemetryClient.PushRecommendations(ctx, peer, []domain.RecommendationRecord{rec}); err != nil {
@@ -1955,6 +1977,10 @@ func TestRegistryAndTelemetryHTTPErrorBranches(t *testing.T) {
 		httptest.NewRequest(http.MethodGet, "/telemetry/metrics", nil),
 		httptest.NewRequest(http.MethodPost, "/telemetry/metrics", strings.NewReader(`{`)),
 		httptest.NewRequest(http.MethodPut, "/telemetry/metrics", nil),
+		httptest.NewRequest(http.MethodGet, "/telemetry/samples", nil),
+		httptest.NewRequest(http.MethodGet, "/telemetry/samples?since=bad", nil),
+		httptest.NewRequest(http.MethodPost, "/telemetry/samples", strings.NewReader(`{`)),
+		httptest.NewRequest(http.MethodPut, "/telemetry/samples", nil),
 		httptest.NewRequest(http.MethodGet, "/telemetry/recommendations", nil),
 		httptest.NewRequest(http.MethodPost, "/telemetry/recommendations", strings.NewReader(`{`)),
 		httptest.NewRequest(http.MethodPut, "/telemetry/recommendations", nil),
@@ -2827,6 +2853,11 @@ func TestRunOptimizerEvaluationIncludesRemoteTelemetryAndPushesRecommendations(t
 				{JobID: "remote-b", NodeID: remotePeer.ID, Project: project.ID, ContextUsed: 4000, TokensPerSec: 20, At: time.Unix(31, 0).UTC()},
 			},
 		},
+		SamplesByPeer: map[string][]domain.SessionMetric{
+			remotePeer.ID: []domain.SessionMetric{
+				{SessionID: "session-remote", Sequence: 1, JobID: "remote-a", Phase: domain.TelemetryPhaseComplete, NodeID: remotePeer.ID, Project: project.ID, ContextUsed: 3500, At: time.Unix(30, 0).UTC()},
+			},
+		},
 	}
 
 	result, err := runOptimizerEvaluation(ctx, store, mocks.NewFakeClock(time.Unix(40, 0).UTC()), telemetrySyncConfig{
@@ -2837,8 +2868,15 @@ func TestRunOptimizerEvaluationIncludesRemoteTelemetryAndPushesRecommendations(t
 	if err != nil {
 		t.Fatalf("runOptimizerEvaluation: %v", err)
 	}
-	if result.ImportedMetrics != 2 || result.PushedRecommendations != 1 || len(result.SkippedPeers) != 0 {
+	if result.ImportedMetrics != 2 || result.ImportedSamples != 1 || result.PushedRecommendations != 1 || len(result.SkippedPeers) != 0 {
 		t.Fatalf("sync result = %+v", result)
+	}
+	samples, err := store.Samples(ctx, domain.SessionMetricQuery{SessionID: "session-remote"})
+	if err != nil {
+		t.Fatalf("Samples: %v", err)
+	}
+	if len(samples) != 1 || samples[0].NodeID != remotePeer.ID {
+		t.Fatalf("imported samples = %+v", samples)
 	}
 	if result.SlotID == "" {
 		t.Fatalf("missing slot id: %+v", result)
@@ -3697,7 +3735,18 @@ func (s *recordingTelemetryRPCStore) Record(context.Context, domain.RunMetric) e
 	return s.err
 }
 
+func (s *recordingTelemetryRPCStore) RecordSample(context.Context, domain.SessionMetric) error {
+	return s.err
+}
+
 func (s *recordingTelemetryRPCStore) Metrics(context.Context, string) ([]domain.RunMetric, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return nil, nil
+}
+
+func (s *recordingTelemetryRPCStore) Samples(context.Context, domain.SessionMetricQuery) ([]domain.SessionMetric, error) {
 	if s.err != nil {
 		return nil, s.err
 	}

@@ -98,6 +98,7 @@ type PeerDiscovery interface {
 
 type TelemetrySink interface {
 	Record(ctx context.Context, m domain.RunMetric) error
+	RecordSample(ctx context.Context, m domain.SessionMetric) error
 }
 
 type ModelRegistry interface {
@@ -127,11 +128,14 @@ type PeerCatalogStager interface {
 type TelemetryStore interface {
 	TelemetrySink
 	Metrics(ctx context.Context, project string) ([]domain.RunMetric, error)
+	Samples(ctx context.Context, query domain.SessionMetricQuery) ([]domain.SessionMetric, error)
 }
 
 type TelemetryPeerClient interface {
 	Metrics(ctx context.Context, peer domain.Peer) ([]domain.RunMetric, error)
 	PushMetrics(ctx context.Context, peer domain.Peer, metrics []domain.RunMetric) error
+	Samples(ctx context.Context, peer domain.Peer, query domain.SessionMetricQuery) ([]domain.SessionMetric, error)
+	PushSamples(ctx context.Context, peer domain.Peer, samples []domain.SessionMetric) error
 	Recommendations(ctx context.Context, peer domain.Peer) ([]domain.RecommendationRecord, error)
 	PushRecommendations(ctx context.Context, peer domain.Peer, recs []domain.RecommendationRecord) error
 }

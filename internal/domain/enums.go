@@ -108,3 +108,15 @@ const (
 	ReservationHeadroom ReservationKind = "headroom"
 	ReservationPinned   ReservationKind = "pinned"
 )
+
+type TelemetryPhase string
+
+const (
+	TelemetryPhasePlaced        TelemetryPhase = "placed"
+	TelemetryPhaseLoadReady     TelemetryPhase = "load_ready"
+	TelemetryPhaseUpstreamStart TelemetryPhase = "upstream_start"
+	TelemetryPhaseFirstByte     TelemetryPhase = "first_byte"
+	TelemetryPhaseStreamChunk   TelemetryPhase = "stream_chunk"
+	TelemetryPhaseComplete      TelemetryPhase = "complete"
+	TelemetryPhaseError         TelemetryPhase = "error"
+)

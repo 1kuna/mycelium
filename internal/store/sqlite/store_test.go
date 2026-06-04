@@ -224,6 +224,18 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	if err := store.Record(ctx, domain.RunMetric{At: time.Unix(1, 0).UTC()}); err == nil {
 		t.Fatal("Record should require job id")
 	}
+	if err := store.RecordSample(ctx, domain.SessionMetric{JobID: "job", Phase: domain.TelemetryPhasePlaced, At: time.Unix(1, 0).UTC()}); err == nil {
+		t.Fatal("RecordSample should require session id")
+	}
+	if err := store.RecordSample(ctx, domain.SessionMetric{SessionID: "session", Phase: domain.TelemetryPhasePlaced, At: time.Unix(1, 0).UTC()}); err == nil {
+		t.Fatal("RecordSample should require job id")
+	}
+	if err := store.RecordSample(ctx, domain.SessionMetric{SessionID: "session", JobID: "job", At: time.Unix(1, 0).UTC()}); err == nil {
+		t.Fatal("RecordSample should require phase")
+	}
+	if err := store.RecordSample(ctx, domain.SessionMetric{SessionID: "session", JobID: "job", Phase: domain.TelemetryPhasePlaced}); err == nil {
+		t.Fatal("RecordSample should require timestamp")
+	}
 	if err := store.SaveRecommendation(ctx, domain.RecommendationRecord{ID: "rec-no-time"}); err == nil {
 		t.Fatal("SaveRecommendation should require created_at")
 	}
@@ -270,6 +282,54 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	filtered, err := store.Metrics(ctx, "p2")
 	if err != nil || len(filtered) != 1 || filtered[0].JobID != "m2" || filtered[0].PresetID != "preset-b" || filtered[0].Backend != domain.BackendMLX {
 		t.Fatalf("Metrics filtered = %+v, %v", filtered, err)
+	}
+	must(t, store.RecordSample(ctx, domain.SessionMetric{
+		SessionID:       "session-a",
+		Sequence:        1,
+		JobID:           "m1",
+		Phase:           domain.TelemetryPhasePlaced,
+		InstanceID:      "i",
+		NodeID:          "n1",
+		PresetID:        "preset-a",
+		Backend:         domain.BackendLlamaCpp,
+		Project:         "p1",
+		LoadWallClockMS: 7,
+		ElapsedMS:       3,
+		At:              at,
+	}))
+	must(t, store.RecordSample(ctx, domain.SessionMetric{
+		SessionID:    "session-a",
+		Sequence:     2,
+		JobID:        "m1",
+		Phase:        domain.TelemetryPhaseComplete,
+		InstanceID:   "i",
+		NodeID:       "n1",
+		PresetID:     "preset-a",
+		Backend:      domain.BackendLlamaCpp,
+		Project:      "p1",
+		TokensIn:     4,
+		TokensOut:    6,
+		ContextUsed:  10,
+		TokensPerSec: 12.5,
+		At:           at.Add(time.Second),
+	}))
+	must(t, store.RecordSample(ctx, domain.SessionMetric{
+		SessionID: "session-b",
+		Sequence:  1,
+		JobID:     "m2",
+		Phase:     domain.TelemetryPhaseError,
+		NodeID:    "n2",
+		Project:   "p2",
+		Error:     "overflow",
+		At:        at.Add(2 * time.Second),
+	}))
+	samples, err := store.Samples(ctx, domain.SessionMetricQuery{SessionID: "session-a"})
+	if err != nil || len(samples) != 2 || samples[0].Phase != domain.TelemetryPhasePlaced || samples[1].ContextUsed != 10 {
+		t.Fatalf("session samples = %+v, %v", samples, err)
+	}
+	nodeSamples, err := store.Samples(ctx, domain.SessionMetricQuery{NodeID: "n2", Since: at.Add(time.Second), Limit: 1})
+	if err != nil || len(nodeSamples) != 1 || nodeSamples[0].Error != "overflow" {
+		t.Fatalf("node samples = %+v, %v", nodeSamples, err)
 	}
 	rec := domain.RecommendationRecord{ID: "rec-a", ProjectID: "p2", Type: "context", RecommendedValue: 30, CreatedAt: time.Unix(11, 0).UTC()}
 	must(t, store.SaveRecommendation(ctx, rec))
