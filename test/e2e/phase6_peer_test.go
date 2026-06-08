@@ -118,10 +118,11 @@ func TestPhase6PeerOwnerRaceStaleFenceReplans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan B: %v", err)
 	}
-	leaseB, err := coordB.Commit(ctx, planB)
+	outcomeB, err := coordB.Commit(ctx, planB)
 	if err != nil {
 		t.Fatalf("Commit B: %v", err)
 	}
+	leaseB := outcomeB.Lease
 	if leaseB.NodeID != nodeB.ID || ownerA.commitCalls != 2 || ownerB.commitCalls != 1 {
 		t.Fatalf("leaseB=%+v ownerA commits=%d ownerB commits=%d", leaseB, ownerA.commitCalls, ownerB.commitCalls)
 	}
@@ -404,11 +405,11 @@ func mustPeerClaimPlanCommit(t *testing.T, ctx context.Context, coord *peer.Coor
 	if err != nil {
 		t.Fatalf("Plan %s: %v", jobID, err)
 	}
-	lease, err := coord.Commit(ctx, plan)
+	outcome, err := coord.Commit(ctx, plan)
 	if err != nil {
 		t.Fatalf("Commit %s: %v", jobID, err)
 	}
-	return lease
+	return outcome.Lease
 }
 
 func recordsByJob(t *testing.T, registry ports.JobRegistry) map[string]domain.JobRecord {
