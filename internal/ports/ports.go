@@ -92,7 +92,7 @@ type LeaseBinder interface {
 type Coordinator interface {
 	ClaimJob(ctx context.Context, jobID string) error
 	Plan(ctx context.Context, jobID string) (domain.PlacementDecision, error)
-	Commit(ctx context.Context, plan domain.PlacementDecision) (domain.Lease, error)
+	Commit(ctx context.Context, plan domain.PlacementDecision) (domain.CommitOutcome, error)
 	MarkRunning(ctx context.Context, jobID string) error
 	Release(ctx context.Context, jobID string) error
 	Complete(ctx context.Context, jobID string) error

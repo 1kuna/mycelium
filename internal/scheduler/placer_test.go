@@ -59,6 +59,39 @@ func TestPlaceSkipsWarmInstanceWhenIncrementalKVDoesNotFit(t *testing.T) {
 	}
 }
 
+func TestPlaceUsesWarmInstanceDuringUnrelatedCatastrophicLoad(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithWeights(100), fixtures.WithKVPerToken(0))
+	node := fixtures.MakeSparkNode(fixtures.WithNodeID("spark"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	warm := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst_warm"),
+		fixtures.WithInstancePreset(preset.ID),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(100, 0)),
+	)
+	loading := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst_loading"),
+		fixtures.WithInstancePreset("other"),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(100, 0)),
+		func(i *domain.ModelInstance) {
+			i.State = domain.InstLoading
+			i.Loading = true
+		},
+	)
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(100, 10)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)), preset)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(), domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{warm, loading},
+	})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.Action != domain.ActionWarmInstance || decision.InstanceID != warm.ID || decision.Claim != (domain.Claim{KVReservedMB: 10}) {
+		t.Fatalf("decision = %+v", decision)
+	}
+}
+
 func TestPlaceLoadsBestColdCandidate(t *testing.T) {
 	preset := fixtures.MakePreset()
 	fleet := domain.FleetSnapshot{

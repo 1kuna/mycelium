@@ -131,6 +131,7 @@ func (m *AdmissionController) recordOffer(offer domain.LeaseOffer) {
 type Coordinator struct {
 	Decision    domain.PlacementDecision
 	Lease       domain.Lease
+	Outcome     domain.CommitOutcome
 	Err         error
 	PlanErr     error
 	CommitErr   error
@@ -154,12 +155,15 @@ func (m *Coordinator) Plan(_ context.Context, jobID string) (domain.PlacementDec
 	return m.Decision, nil
 }
 
-func (m *Coordinator) Commit(_ context.Context, plan domain.PlacementDecision) (domain.Lease, error) {
+func (m *Coordinator) Commit(_ context.Context, plan domain.PlacementDecision) (domain.CommitOutcome, error) {
 	m.Calls = append(m.Calls, "commit:"+plan.JobID)
 	if m.CommitErr != nil {
-		return domain.Lease{}, m.CommitErr
+		return domain.CommitOutcome{}, m.CommitErr
 	}
-	return m.Lease, nil
+	if m.Outcome.Decision.JobID != "" || m.Outcome.Lease.ID != "" {
+		return m.Outcome, nil
+	}
+	return domain.CommitOutcome{Decision: plan, Lease: m.Lease}, nil
 }
 
 func (m *Coordinator) MarkRunning(_ context.Context, jobID string) error {

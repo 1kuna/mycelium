@@ -163,6 +163,11 @@ type PlacementDecision struct {
 	Replacements     []Replacement   `json:"replacements,omitempty"`
 }
 
+type CommitOutcome struct {
+	Decision PlacementDecision `json:"decision"`
+	Lease    Lease             `json:"lease"`
+}
+
 type Replacement struct {
 	InstanceID     string `json:"instance_id"`
 	NodeID         string `json:"node_id"`
@@ -350,9 +355,11 @@ type ProcessRef struct {
 }
 
 type JoinTokenRecord struct {
-	Hash    string `json:"hash"`
-	Active  bool   `json:"active"`
-	Current bool   `json:"current"`
+	Hash          string `json:"hash"`
+	Secret        string `json:"secret,omitempty"`
+	Active        bool   `json:"active"`
+	Current       bool   `json:"current"`
+	MigrationNote string `json:"migration_note,omitempty"`
 }
 
 type ModelLocalityState string

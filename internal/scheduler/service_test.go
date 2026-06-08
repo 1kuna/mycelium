@@ -238,6 +238,68 @@ func TestServiceSubmitWithPayloadSkipsBindForBoundWarmOwnerLease(t *testing.T) {
 	}
 }
 
+func TestServiceSubmitWithPayloadUsesQueuedCommitOutcome(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 465).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	coordinator := &mocks.Coordinator{
+		Decision: domain.PlacementDecision{JobID: job.ID, NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew},
+		Outcome: domain.CommitOutcome{
+			Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued},
+			Lease:    domain.Lease{ID: "queued-owner-lease", JobID: job.ID},
+		},
+	}
+	store := &runtimeStore{}
+	queue := NewQueue(clock)
+	service := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Coordinator: coordinator,
+		JobLog:      &recordingJobLog{},
+		Queue:       queue,
+		Store:       store,
+		Clock:       clock,
+	}
+
+	result, err := service.SubmitWithPayload(context.Background(), job, []byte(`{"job":"a"}`))
+	if err != nil {
+		t.Fatalf("SubmitWithPayload: %v", err)
+	}
+	if result.Decision.Action != domain.ActionQueued || result.Lease.ID != "queued-owner-lease" {
+		t.Fatalf("result = %+v", result)
+	}
+	gotJob, gotPayload, ok := queue.DequeueWithPayload()
+	if !ok || gotJob.Status != domain.JobQueued || string(gotPayload) != `{"job":"a"}` {
+		t.Fatalf("queued job=%+v payload=%s ok=%v", gotJob, gotPayload, ok)
+	}
+	if store.jobs[job.ID].Status != domain.JobQueued || strings.Join(coordinator.Calls, ",") != "claim:job-a,plan:job-a,commit:job-a" {
+		t.Fatalf("store=%+v calls=%+v", store.jobs[job.ID], coordinator.Calls)
+	}
+
+	saveErr := errors.New("save queued outcome")
+	failingStore := &runtimeStore{saveJobErr: saveErr, saveJobErrAt: 2}
+	failingService := &Service{
+		Placer: fakePlacer{},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Coordinator: &mocks.Coordinator{
+			Decision: coordinator.Decision,
+			Outcome: domain.CommitOutcome{
+				Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued},
+				Lease:    domain.Lease{ID: "queued-owner-lease", JobID: job.ID},
+			},
+		},
+		JobLog: &recordingJobLog{},
+		Queue:  NewQueue(clock),
+		Store:  failingStore,
+		Clock:  clock,
+	}
+	if _, err := failingService.SubmitWithPayload(context.Background(), job, []byte(`{"job":"a"}`)); !errors.Is(err, saveErr) {
+		t.Fatalf("queued outcome save err = %v", err)
+	}
+}
+
 func TestServiceSubmitWithPayloadRejectsMismatchedBoundOwnerLeaseWithoutUnloadingWarm(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(10, 48).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
@@ -461,9 +523,31 @@ func TestServiceSubmitWithPayloadCoordinatorErrorPaths(t *testing.T) {
 			wantErr: errBoom,
 		},
 		{
+			name: "fleet release",
+			mutate: func(s *Service) {
+				s.Fleet = staticFleet{err: errBoom}
+				s.Coordinator = &mocks.Coordinator{Decision: decision, Lease: domain.Lease{ID: "owner-lease-a", JobID: job.ID, NodeID: node.ID, Claim: decision.Claim}, ReleaseErr: errors.New("release")}
+			},
+			wantErr: errBoom,
+		},
+		{
 			name: "preempt",
 			mutate: func(s *Service) {
-				s.Coordinator = &mocks.Coordinator{Decision: domain.PlacementDecision{JobID: job.ID, NodeID: node.ID, Action: domain.ActionHardPreempted, Preempted: []string{"missing"}}}
+				s.Coordinator = &mocks.Coordinator{
+					Decision: domain.PlacementDecision{JobID: job.ID, NodeID: node.ID, Action: domain.ActionHardPreempted, Preempted: []string{"missing"}},
+					Lease:    domain.Lease{ID: "owner-lease-a", JobID: job.ID, NodeID: node.ID},
+				}
+			},
+			want: "preempted instance",
+		},
+		{
+			name: "preempt release",
+			mutate: func(s *Service) {
+				s.Coordinator = &mocks.Coordinator{
+					Decision:   domain.PlacementDecision{JobID: job.ID, NodeID: node.ID, Action: domain.ActionHardPreempted, Preempted: []string{"missing"}},
+					Lease:      domain.Lease{ID: "owner-lease-a", JobID: job.ID, NodeID: node.ID},
+					ReleaseErr: errors.New("release"),
+				}
 			},
 			want: "preempted instance",
 		},
@@ -743,6 +827,26 @@ func TestServiceSubmitWithPayloadUsesLocalLeaseForCoordinatedWarmInstance(t *tes
 	}
 	if _, ok := store.leases[result.Lease.ID]; !ok {
 		t.Fatalf("lease not stored: %+v", store.leases)
+	}
+}
+
+func TestDecisionWithOwnerLeaseCopiesOwnerFields(t *testing.T) {
+	decision := decisionWithOwnerLease(
+		domain.PlacementDecision{NodeID: "planned-node", InstanceID: "planned-inst", AcceleratorSet: []int{9}, Claim: fixtures.MakeClaim(1, 1)},
+		domain.Lease{NodeID: "owner-node", InstanceID: "owner-inst", AcceleratorSet: []int{0, 2}, Claim: fixtures.MakeClaim(3, 4)},
+	)
+	if decision.NodeID != "owner-node" || decision.InstanceID != "owner-inst" || decision.Claim.WeightsMB != 3 {
+		t.Fatalf("decision = %+v", decision)
+	}
+	if got := fmt.Sprint(decision.AcceleratorSet); got != "[0 2]" {
+		t.Fatalf("accelerators = %s", got)
+	}
+	decision.AcceleratorSet[0] = 99
+	lease := domain.Lease{AcceleratorSet: []int{1}}
+	copied := decisionWithOwnerLease(domain.PlacementDecision{}, lease)
+	copied.AcceleratorSet[0] = 5
+	if lease.AcceleratorSet[0] != 1 {
+		t.Fatalf("lease accelerator set was aliased: %+v", lease.AcceleratorSet)
 	}
 }
 
@@ -1927,6 +2031,43 @@ func TestServiceCompleteFailAndReleaseLifecycleBranches(t *testing.T) {
 	finishService.Coordinator = &mocks.Coordinator{CompleteErr: completeErr}
 	if err := finishService.FinishJob(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-terminal")), domain.Lease{JobID: "job-terminal"}, nil); !errors.Is(err, completeErr) {
 		t.Fatalf("FinishJob terminal err = %v", err)
+	}
+	if err := (&Service{Coordinator: &mocks.Coordinator{}}).FinishJob(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-invalid")), domain.Lease{JobID: "job-invalid"}, nil); err == nil || !strings.Contains(err.Error(), "not fully configured") {
+		t.Fatalf("FinishJob validate err = %v", err)
+	}
+	failFinishErr := errors.New("finish fail")
+	finishService = leaseLifecycleService(clock, &runtimeStore{})
+	finishService.Coordinator = &mocks.Coordinator{FailErr: failFinishErr}
+	if err := finishService.FinishJob(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-terminal-fail")), domain.Lease{JobID: "job-terminal-fail"}, cause); !errors.Is(err, failFinishErr) {
+		t.Fatalf("FinishJob coordinator fail err = %v", err)
+	}
+
+	localFinishStore := &runtimeStore{leases: map[string]domain.Lease{"lease-local": {ID: "lease-local", JobID: "job-local"}}}
+	localFinish := leaseLifecycleService(clock, localFinishStore)
+	localLease := domain.Lease{ID: "lease-local", JobID: "job-local"}
+	if err := localFinish.FinishJob(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-local")), localLease, nil); err != nil {
+		t.Fatalf("local FinishJob complete: %v", err)
+	}
+	if got := localFinishStore.jobs["job-local"]; got.Status != domain.JobDone || got.Error != "" {
+		t.Fatalf("local complete job = %+v", got)
+	}
+	if _, ok := localFinishStore.leases[localLease.ID]; ok {
+		t.Fatalf("local complete lease still present: %+v", localFinishStore.leases)
+	}
+
+	localFinishStore = &runtimeStore{leases: map[string]domain.Lease{"lease-local-fail": {ID: "lease-local-fail", JobID: "job-local-fail"}}}
+	localFinish = leaseLifecycleService(clock, localFinishStore)
+	localLease = domain.Lease{ID: "lease-local-fail", JobID: "job-local-fail"}
+	if err := localFinish.FinishJob(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-local-fail")), localLease, cause); err != nil {
+		t.Fatalf("local FinishJob fail: %v", err)
+	}
+	if got := localFinishStore.jobs["job-local-fail"]; got.Status != domain.JobFailed || got.Error != cause.Error() {
+		t.Fatalf("local failed job = %+v", got)
+	}
+
+	localFinish = leaseLifecycleService(clock, &runtimeStore{saveJobErr: completeErr})
+	if err := localFinish.FinishJob(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-local-terminal")), domain.Lease{}, nil); !errors.Is(err, completeErr) {
+		t.Fatalf("local FinishJob terminal err = %v", err)
 	}
 
 	listErr := errors.New("list leases")
