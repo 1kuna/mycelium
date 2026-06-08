@@ -855,13 +855,20 @@ func (p *fakeProcess) Kill() error {
 
 func waitForFakeTimer(t *testing.T, clock *mocks.FakeClock) {
 	t.Helper()
-	for i := 0; i < 1000; i++ {
+	deadline := time.After(2 * time.Second)
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
 		if clock.TimerCount() > 0 {
 			return
 		}
-		runtime.Gosched()
+		select {
+		case <-deadline:
+			t.Fatal("timer was not registered")
+		case <-tick.C:
+			runtime.Gosched()
+		}
 	}
-	t.Fatal("timer was not registered")
 }
 
 func waitForFakeSignal(t *testing.T, process *fakeProcess) {

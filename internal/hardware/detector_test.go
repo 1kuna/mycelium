@@ -270,6 +270,8 @@ func TestLinuxDetectorDoesNotAdvertiseIntelWithoutUsedMemory(t *testing.T) {
 				return []byte(`Device Name Intel(R) Arc(TM) Pro B70 Graphics
 Global memory size 32530182144 (30.3GiB)
 `), nil
+			case "xpu-smi":
+				return nil, errors.New("no xpu-smi")
 			default:
 				t.Fatalf("unexpected command %s", name)
 				return nil, nil
@@ -281,6 +283,55 @@ Global memory size 32530182144 (30.3GiB)
 	}).Detect(context.Background(), domain.Node{ID: "b70-a", MaxUtil: 0.85})
 	if err == nil || !strings.Contains(err.Error(), "used VRAM") && !strings.Contains(err.Error(), "DRM") {
 		t.Fatalf("intel used memory err = %v", err)
+	}
+}
+
+func TestLinuxDetectorUsesXPUSMIIntelUsedMemory(t *testing.T) {
+	detector := Detector{
+		GOOS:     "linux",
+		Clock:    mocks.NewFakeClock(time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)),
+		StatDisk: fakeDiskStats,
+		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			switch name {
+			case "nvidia-smi":
+				return nil, errors.New("no nvidia")
+			case "clinfo":
+				return []byte(`Device Name Intel(R) Arc(TM) Pro B70 Graphics
+Global memory size 32530182144 (30.3GiB)
+`), nil
+			case "xpu-smi":
+				if len(args) == 2 && args[0] == "discovery" && args[1] == "-j" {
+					return []byte(`{"device_list":[{"device_id":0,"device_type":"GPU","device_function_type":"physical","vendor_name":"Intel(R) Corporation"}]}`), nil
+				}
+				if len(args) != 4 || args[0] != "stats" || args[1] != "-d" || args[2] != "0" || args[3] != "-j" {
+					t.Fatalf("xpu-smi args = %+v", args)
+				}
+				return []byte(`{
+  "device_id": 0,
+  "device_level": [
+    {"metrics_type":"XPUM_STATS_MEMORY_USED","value":50.43359375},
+    {"metrics_type":"XPUM_STATS_GPU_UTILIZATION","value":0.0}
+  ]
+}`), nil
+			default:
+				t.Fatalf("unexpected command %s", name)
+				return nil, nil
+			}
+		},
+		ReadDir: func(string) ([]fs.DirEntry, error) {
+			return nil, errors.New("no sysfs")
+		},
+	}
+	node, err := detector.Detect(context.Background(), domain.Node{ID: "b70-a", MaxUtil: 0.85})
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if len(node.Accelerators) != 1 {
+		t.Fatalf("node = %+v", node)
+	}
+	acc := node.Accelerators[0]
+	if acc.Vendor != "intel" || acc.Kind != "arc-pro-b70" || acc.VRAMTotalMB != 31023 || acc.VRAMUsedMB != 50 {
+		t.Fatalf("accelerator = %+v", acc)
 	}
 }
 
