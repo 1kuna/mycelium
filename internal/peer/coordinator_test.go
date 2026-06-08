@@ -45,10 +45,11 @@ func TestCoordinatorClaimPlanCommitRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	lease, err := coordinator.Commit(ctx, plan)
+	outcome, err := coordinator.Commit(ctx, plan)
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
+	lease := outcome.Lease
 	if lease.ID != "lease-a" || lease.NodeID != node.ID {
 		t.Fatalf("lease = %+v", lease)
 	}
@@ -201,7 +202,7 @@ func TestCoordinatorPushesClaimRecordForRescueCopy(t *testing.T) {
 	}
 }
 
-func TestCoordinatorRecordsDegradedEvidenceWhenClaimReplicationFails(t *testing.T) {
+func TestCoordinatorFailsLoudAndRecordsEvidenceWhenClaimReplicationFails(t *testing.T) {
 	ctx := context.Background()
 	clock := mocks.NewFakeClock(time.Unix(102, 0).UTC())
 	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
@@ -218,7 +219,7 @@ func TestCoordinatorRecordsDegradedEvidenceWhenClaimReplicationFails(t *testing.
 		WithRegistryPusher(&recordingRecordPusher{err: pushErr}),
 	)
 
-	if err := coordinator.ClaimJob(ctx, job.ID); err != nil {
+	if err := coordinator.ClaimJob(ctx, job.ID); !errors.Is(err, pushErr) {
 		t.Fatalf("ClaimJob err = %v", err)
 	}
 	snap, err := registry.Snapshot(ctx)
@@ -301,10 +302,11 @@ func TestCoordinatorReplansOnOwnerContention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	lease, err := coordinator.Commit(ctx, plan)
+	outcome, err := coordinator.Commit(ctx, plan)
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
+	lease := outcome.Lease
 	if lease.NodeID != nodeB.ID || strings.Join(placer.calls, ",") != "job-a,job-a" {
 		t.Fatalf("lease=%+v placer calls=%+v", lease, placer.calls)
 	}
@@ -355,10 +357,11 @@ func TestCoordinatorWarmInstanceCommitsOwnerLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	lease, err := coordinator.Commit(ctx, plan)
+	outcome, err := coordinator.Commit(ctx, plan)
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
+	lease := outcome.Lease
 	if lease.ID != "lease-warm" || lease.InstanceID != inst.ID || lease.NodeID != node.ID {
 		t.Fatalf("warm lease = %+v", lease)
 	}
@@ -434,9 +437,9 @@ func TestCoordinatorQueuesAndExhaustsReplans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("queued Plan: %v", err)
 	}
-	lease, err := queued.Commit(ctx, plan)
-	if err != nil || lease.ID != "" {
-		t.Fatalf("queued Commit lease=%+v err=%v", lease, err)
+	outcome, err := queued.Commit(ctx, plan)
+	if err != nil || outcome.Lease.ID != "" {
+		t.Fatalf("queued Commit outcome=%+v err=%v", outcome, err)
 	}
 	assertLatestStatus(t, queuedRegistry, domain.JobQueued, "")
 
@@ -752,10 +755,11 @@ func TestCoordinatorOfferNoFitReplansAndRecordFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	lease, err := coordinator.Commit(ctx, plan)
+	outcome, err := coordinator.Commit(ctx, plan)
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
+	lease := outcome.Lease
 	if lease.NodeID != nodeB.ID {
 		t.Fatalf("lease = %+v", lease)
 	}

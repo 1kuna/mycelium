@@ -234,19 +234,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		return Result{Decision: decision}, nil
 	}
 
-	fleet, err := s.Fleet.Snapshot(ctx)
-	if err != nil {
-		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
-		return Result{Decision: decision}, err
-	}
-	preemptedLeases, preemptedVictims, err := s.inspectPreemptions(ctx, decision, fleet)
-	if err != nil {
-		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
-		return Result{Decision: decision}, err
-	}
-	ownerLease, err := s.Coordinator.Commit(ctx, decision)
+	outcome, err := s.Coordinator.Commit(ctx, decision)
 	if err != nil {
 		if coordinatedQueueErr(err) {
 			job.Status = domain.JobQueued
@@ -260,16 +248,39 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		_ = s.Store.SaveJob(ctx, job)
 		return Result{Decision: decision}, err
 	}
+	decision = outcome.Decision
+	ownerLease := outcome.Lease
+	if decision.Action == domain.ActionQueued {
+		job.Status = domain.JobQueued
+		s.Queue.EnqueueWithPayload(job, payload)
+		if err := s.Store.SaveJob(ctx, job); err != nil {
+			return Result{Decision: decision}, err
+		}
+		return Result{Decision: decision, Lease: ownerLease}, nil
+	}
 	if decision.InstanceID == "" && ownerLease.ID == "" {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(ctx, job)
 		return Result{Decision: decision}, fmt.Errorf("coordinated cold load for job %q returned no owner lease", job.ID)
 	}
-	if ownerLease.NodeID != "" {
-		decision.NodeID = ownerLease.NodeID
+	decision = decisionWithOwnerLease(decision, ownerLease)
+	fleet, err := s.Fleet.Snapshot(ctx)
+	if err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
+			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
+		}
+		return Result{Decision: decision, Lease: ownerLease}, err
 	}
-	if ownerLease.Claim != (domain.Claim{}) {
-		decision.Claim = ownerLease.Claim
+	preemptedLeases, preemptedVictims, err := s.inspectPreemptions(ctx, decision, fleet)
+	if err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(ctx, job)
+		if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
+			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
+		}
+		return Result{Decision: decision, Lease: ownerLease}, err
 	}
 	if err := s.finishPreemption(ctx, decision, fleet, preemptedLeases, preemptedVictims); err != nil {
 		job.Status = domain.JobFailed
@@ -455,6 +466,27 @@ func (s *Service) FailJob(ctx context.Context, job domain.Job, lease domain.Leas
 
 func (s *Service) FinishJob(ctx context.Context, job domain.Job, lease domain.Lease, cause error) error {
 	cleanupCtx := cleanupContext(ctx)
+	if s.Coordinator != nil && lease.JobID != "" {
+		if err := s.validate(); err != nil {
+			return err
+		}
+		if cause == nil {
+			job.Status = domain.JobDone
+			job.Error = ""
+			if err := s.Coordinator.Complete(cleanupCtx, lease.JobID); err != nil {
+				return err
+			}
+		} else {
+			job.Status = domain.JobFailed
+			job.Error = cause.Error()
+			if err := s.Coordinator.Fail(cleanupCtx, lease.JobID, cause); err != nil {
+				return err
+			}
+		}
+		saveErr := s.Store.SaveJob(cleanupCtx, job)
+		releaseErr := s.ReleaseJob(cleanupCtx, lease)
+		return errors.Join(saveErr, releaseErr)
+	}
 	var terminalErr error
 	if cause == nil {
 		terminalErr = s.CompleteJob(cleanupCtx, job, lease)
@@ -548,6 +580,22 @@ func (s *Service) commitOwnerAdmission(ctx context.Context, job domain.Job, deci
 		return domain.Lease{}, nil, err
 	}
 	return lease, owner, nil
+}
+
+func decisionWithOwnerLease(decision domain.PlacementDecision, lease domain.Lease) domain.PlacementDecision {
+	if lease.NodeID != "" {
+		decision.NodeID = lease.NodeID
+	}
+	if lease.InstanceID != "" {
+		decision.InstanceID = lease.InstanceID
+	}
+	if len(lease.AcceleratorSet) > 0 {
+		decision.AcceleratorSet = append([]int(nil), lease.AcceleratorSet...)
+	}
+	if lease.Claim != (domain.Claim{}) {
+		decision.Claim = lease.Claim
+	}
+	return decision
 }
 
 func runBeforeColdLoadHook(ctx context.Context, decision domain.PlacementDecision, hooks []SubmitHooks) error {

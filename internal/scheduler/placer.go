@@ -225,7 +225,7 @@ func (p *Placer) selectWarmInstance(ctx context.Context, job domain.Job, preset 
 					return domain.ModelInstance{}, false, err
 				}
 				claim.WeightsMB = 0
-				if !p.allocator.CanStackLoad(node, inst.AcceleratorSet, fleet.Instances) || !p.allocator.Fits(node, inst.AcceleratorSet, fleet.Instances, claim) {
+				if !p.allocator.Fits(node, inst.AcceleratorSet, fleet.Instances, claim) {
 					continue
 				}
 				inst.Claim = claim

@@ -166,24 +166,24 @@ func (c *Coordinator) Plan(ctx context.Context, jobID string) (domain.PlacementD
 	return decision, nil
 }
 
-func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision) (domain.Lease, error) {
+func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision) (domain.CommitOutcome, error) {
 	if err := c.validate(); err != nil {
-		return domain.Lease{}, err
+		return domain.CommitOutcome{}, err
 	}
 	if plan.JobID == "" {
-		return domain.Lease{}, fmt.Errorf("plan job id is required")
+		return domain.CommitOutcome{}, fmt.Errorf("plan job id is required")
 	}
 	claimed, err := c.claimedJob(plan.JobID)
 	if err != nil {
-		return domain.Lease{}, err
+		return domain.CommitOutcome{}, err
 	}
 	replans := 0
 	for {
 		if plan.Action == domain.ActionQueued {
-			return domain.Lease{}, c.recordStep(ctx, plan.JobID, domain.JobQueued, "", 0)
+			return domain.CommitOutcome{Decision: plan}, c.recordStep(ctx, plan.JobID, domain.JobQueued, "", 0)
 		}
 		if plan.NodeID == "" {
-			return domain.Lease{}, fmt.Errorf("plan for job %q has no owner node", plan.JobID)
+			return domain.CommitOutcome{}, fmt.Errorf("plan for job %q has no owner node", plan.JobID)
 		}
 		var owner ports.AdmissionController
 		if err := c.step("coordinator/resolve_owner", map[string]any{"job_id": plan.JobID, "node_id": plan.NodeID}, func() error {
@@ -192,7 +192,7 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 			return err
 		}); err != nil {
 			_ = c.recordStep(ctx, plan.JobID, domain.JobQueued, "", 0)
-			return domain.Lease{}, err
+			return domain.CommitOutcome{}, err
 		}
 		var offer domain.LeaseOffer
 		if err := c.step("coordinator/owner_offer", map[string]any{"job_id": plan.JobID, "node_id": plan.NodeID, "instance_id": plan.InstanceID}, func() error {
@@ -217,12 +217,12 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 				replans++
 				plan, err = c.Plan(ctx, plan.JobID)
 				if err != nil {
-					return domain.Lease{}, err
+					return domain.CommitOutcome{}, err
 				}
 				continue
 			}
 			_ = c.recordStep(ctx, plan.JobID, domain.JobFailed, plan.NodeID, 0)
-			return domain.Lease{}, err
+			return domain.CommitOutcome{}, err
 		}
 		var lease domain.Lease
 		if err := c.step("coordinator/owner_commit", map[string]any{"job_id": plan.JobID, "offer_id": offer.OfferID, "fence": offer.Fence}, func() error {
@@ -234,7 +234,7 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 				replans++
 				plan, err = c.Plan(ctx, plan.JobID)
 				if err != nil {
-					return domain.Lease{}, err
+					return domain.CommitOutcome{}, err
 				}
 				continue
 			}
@@ -243,7 +243,7 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 			} else {
 				_ = c.recordStep(ctx, plan.JobID, domain.JobFailed, plan.NodeID, offer.Fence)
 			}
-			return domain.Lease{}, err
+			return domain.CommitOutcome{}, err
 		}
 		c.mu.Lock()
 		c.leases[plan.JobID] = lease
@@ -255,9 +255,9 @@ func (c *Coordinator) Commit(ctx context.Context, plan domain.PlacementDecision)
 			status = domain.JobLoading
 		}
 		if err := c.recordStep(ctx, plan.JobID, status, plan.NodeID, offer.Fence); err != nil {
-			return domain.Lease{}, err
+			return domain.CommitOutcome{}, err
 		}
-		return lease, nil
+		return domain.CommitOutcome{Decision: plan, Lease: lease}, nil
 	}
 }
 
@@ -441,7 +441,7 @@ func (c *Coordinator) recordWithDetails(ctx context.Context, jobID string, statu
 		if evidenceErr := c.registry.Put(ctx, degraded); evidenceErr != nil {
 			return errors.Join(fmt.Errorf("registry rescue replication for job %q: %w", jobID, err), fmt.Errorf("record degraded registry evidence: %w", evidenceErr))
 		}
-		return nil
+		return fmt.Errorf("registry rescue replication for job %q: %w", jobID, err)
 	}
 	return nil
 }
