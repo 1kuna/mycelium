@@ -335,6 +335,71 @@ Global memory size 32530182144 (30.3GiB)
 	}
 }
 
+func TestParseXPUSMIStatsShapesAndErrors(t *testing.T) {
+	samples, err := parseXPUSMIStats([]byte(`{
+  "device_level": [
+    {"metrics_type":"XPUM_STATS_GPU_UTILIZATION","value":90},
+    {"metrics_type":"XPUM_STATS_MEMORY_USED","value":50.6}
+  ]
+}`))
+	if err != nil {
+		t.Fatalf("single-device parse: %v", err)
+	}
+	if len(samples) != 1 || samples[0].UsedMB != 51 || samples[0].TotalMB != 0 {
+		t.Fatalf("single-device samples = %+v", samples)
+	}
+
+	samples, err = parseXPUSMIStats([]byte(`[
+  {"device_level":[{"metrics_type":"XPUM_STATS_MEMORY_USED","value":1.49}]},
+  {"device_level":[{"metrics_type":"XPUM_STATS_MEMORY_USED","value":2.50}]}
+]`))
+	if err != nil {
+		t.Fatalf("multi-device parse: %v", err)
+	}
+	if len(samples) != 2 || samples[0].UsedMB != 1 || samples[1].UsedMB != 3 {
+		t.Fatalf("multi-device samples = %+v", samples)
+	}
+
+	for _, raw := range [][]byte{
+		[]byte(`not-json`),
+		[]byte(`{"device_level":[{"metrics_type":"XPUM_STATS_GPU_UTILIZATION","value":90}]}`),
+		[]byte(`[{"device_level":[{"metrics_type":"XPUM_STATS_MEMORY_USED","value":-1}]}]`),
+		[]byte(`{}`),
+	} {
+		if _, err := parseXPUSMIStats(raw); err == nil {
+			t.Fatalf("parse accepted %s", raw)
+		}
+	}
+}
+
+func TestXPUSampleFromMetrics(t *testing.T) {
+	metrics := []struct {
+		MetricsType string  `json:"metrics_type"`
+		Value       float64 `json:"value"`
+	}{
+		{MetricsType: "XPUM_STATS_GPU_UTILIZATION", Value: 100},
+		{MetricsType: "XPUM_STATS_MEMORY_USED", Value: 12.5},
+	}
+	sample, ok := xpuSampleFromMetrics(metrics)
+	if !ok || sample.UsedMB != 13 || sample.TotalMB != 0 {
+		t.Fatalf("sample = %+v ok=%v", sample, ok)
+	}
+
+	if sample, ok := xpuSampleFromMetrics([]struct {
+		MetricsType string  `json:"metrics_type"`
+		Value       float64 `json:"value"`
+	}{{MetricsType: "XPUM_STATS_GPU_UTILIZATION", Value: 100}}); ok || sample != (intelVRAMSample{}) {
+		t.Fatalf("missing metric sample = %+v ok=%v", sample, ok)
+	}
+
+	if sample, ok := xpuSampleFromMetrics([]struct {
+		MetricsType string  `json:"metrics_type"`
+		Value       float64 `json:"value"`
+	}{{MetricsType: "XPUM_STATS_MEMORY_USED", Value: -0.1}}); ok || sample != (intelVRAMSample{}) {
+		t.Fatalf("negative metric sample = %+v ok=%v", sample, ok)
+	}
+}
+
 func TestDetectorErrorPathsAndLabelMerge(t *testing.T) {
 	if _, err := (Detector{GOOS: "plan9"}).Detect(context.Background(), domain.Node{}); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("unsupported err = %v", err)
@@ -479,6 +544,20 @@ func TestDetectorDiskErrorPaths(t *testing.T) {
 	}}).AddDiskStats(seed)
 	if err != nil || node.DiskTotalMB != 100 || node.DiskMinFreeRatio != domain.DefaultDiskMinFreeRatio {
 		t.Fatalf("preserved disk = %+v err=%v", node, err)
+	}
+}
+
+func TestStatDiskLocalPaths(t *testing.T) {
+	dir := t.TempDir()
+	stats, err := statDisk(dir)
+	if err != nil {
+		t.Fatalf("statDisk temp dir: %v", err)
+	}
+	if stats.TotalMB <= 0 || stats.FreeMB < 0 || stats.FreeMB > stats.TotalMB {
+		t.Fatalf("stats = %+v", stats)
+	}
+	if _, err := statDisk(dir + "/missing"); err == nil {
+		t.Fatal("statDisk accepted missing path")
 	}
 }
 
