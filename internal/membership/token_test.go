@@ -81,6 +81,16 @@ func TestPersistentTokenManagerLoadsRotatesAndRevokes(t *testing.T) {
 	if err := manager.Rotate("two"); err != nil {
 		t.Fatalf("Rotate: %v", err)
 	}
+	reopenedWithRotation, err := NewPersistentTokenManager(ctx, "one", store)
+	if err != nil {
+		t.Fatalf("reopen with rotation: %v", err)
+	}
+	if err := reopenedWithRotation.Validate("one"); err != nil {
+		t.Fatalf("old token should remain active after rotation restart: %v", err)
+	}
+	if hash, secret, err := reopenedWithRotation.CurrentSecret(); err != nil || hash != tokenHash("two") || secret != "two" {
+		t.Fatalf("current rotated secret = hash:%s secret:%q err:%v", hash, secret, err)
+	}
 	if err := manager.Revoke("one"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
@@ -97,6 +107,33 @@ func TestPersistentTokenManagerLoadsRotatesAndRevokes(t *testing.T) {
 	}
 }
 
+func TestPersistentTokenManagerRevokesLegacyHashOnlyActiveTokens(t *testing.T) {
+	ctx := context.Background()
+	initialHash := tokenHash("one")
+	legacyHash := tokenHash("two")
+	store := &tokenStore{records: map[string]domain.JoinTokenRecord{
+		initialHash: {Hash: initialHash, Active: true},
+		legacyHash:  {Hash: legacyHash, Active: true, Current: true},
+	}}
+	manager, err := NewPersistentTokenManager(ctx, "one", store)
+	if err != nil {
+		t.Fatalf("NewPersistentTokenManager: %v", err)
+	}
+	if err := manager.Validate("one"); err != nil {
+		t.Fatalf("initial token should be reconstructed: %v", err)
+	}
+	if err := manager.Validate("two"); err == nil {
+		t.Fatal("legacy hash-only token validated after migration")
+	}
+	if hash, secret, err := manager.CurrentSecret(); err != nil || hash != initialHash || secret != "one" {
+		t.Fatalf("current after migration = hash:%s secret:%q err:%v", hash, secret, err)
+	}
+	legacy := store.records[legacyHash]
+	if legacy.Active || legacy.Current || legacy.MigrationNote == "" {
+		t.Fatalf("legacy token migration record = %+v", legacy)
+	}
+}
+
 func TestPersistentTokenManagerErrors(t *testing.T) {
 	if _, err := NewPersistentTokenManager(context.Background(), "", &tokenStore{}); err == nil {
 		t.Fatal("empty persistent initial token accepted")
@@ -109,6 +146,9 @@ func TestPersistentTokenManagerErrors(t *testing.T) {
 	}
 	if _, err := NewPersistentTokenManager(context.Background(), "one", &tokenStore{records: map[string]domain.JoinTokenRecord{"bad": {}}}); err == nil || err.Error() != "persisted join token hash is required" {
 		t.Fatalf("expected malformed record error, got %v", err)
+	}
+	if _, err := NewPersistentTokenManager(context.Background(), "one", &tokenStore{records: map[string]domain.JoinTokenRecord{"bad": {Hash: "bad", Secret: "two", Active: true}}}); err == nil || err.Error() != "persisted join token secret does not match hash" {
+		t.Fatalf("expected mismatched secret error, got %v", err)
 	}
 	revoked := tokenHash("one")
 	if _, err := NewPersistentTokenManager(context.Background(), "one", &tokenStore{records: map[string]domain.JoinTokenRecord{revoked: {Hash: revoked, Active: false}}}); err == nil || err.Error() != "no active join token is available" {

@@ -155,8 +155,13 @@ func savePeerConfig(path string, cfg PeerConfig) error {
 	if err := validatePeerConfig(cfg); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+		if err := os.Chmod(dir, 0700); err != nil {
+			return err
+		}
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

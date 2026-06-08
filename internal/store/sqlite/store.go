@@ -31,7 +31,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("store path is required")
 	}
 	if path != ":memory:" {
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		if err := ensurePrivateStorePath(path); err != nil {
 			return nil, err
 		}
 	}
@@ -47,6 +47,27 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+func ensurePrivateStorePath(path string) error {
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+		if err := os.Chmod(dir, 0700); err != nil {
+			return err
+		}
+	}
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		return err
+	}
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 func (s *Store) Close() error {
@@ -326,6 +347,100 @@ func (s *Store) SaveProcessRefs(ctx context.Context, nodeID string, refs []domai
 INSERT INTO process_refs (node_id, data) VALUES (?, ?)
 ON CONFLICT(node_id) DO UPDATE SET data = excluded.data`, nodeID, string(data))
 	return err
+}
+
+func (s *Store) AddProcessRef(ctx context.Context, nodeID string, ref domain.ProcessRef) error {
+	if nodeID == "" {
+		return fmt.Errorf("node id is required")
+	}
+	if ref.PID <= 0 {
+		return fmt.Errorf("process pid is required")
+	}
+	return s.updateProcessRefs(ctx, nodeID, func(refs []domain.ProcessRef) ([]domain.ProcessRef, error) {
+		for i, existing := range refs {
+			if existing.PID == ref.PID {
+				refs[i] = ref
+				return refs, nil
+			}
+		}
+		return append(refs, ref), nil
+	})
+}
+
+func (s *Store) RemoveProcessRef(ctx context.Context, nodeID string, ref domain.ProcessRef) error {
+	if nodeID == "" {
+		return fmt.Errorf("node id is required")
+	}
+	if ref.PID <= 0 {
+		return fmt.Errorf("process pid is required")
+	}
+	return s.updateProcessRefs(ctx, nodeID, func(refs []domain.ProcessRef) ([]domain.ProcessRef, error) {
+		out := refs[:0]
+		for _, existing := range refs {
+			if existing.PID != ref.PID {
+				out = append(out, existing)
+			}
+		}
+		return out, nil
+	})
+}
+
+func (s *Store) updateProcessRefs(ctx context.Context, nodeID string, update func([]domain.ProcessRef) ([]domain.ProcessRef, error)) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	refs, err := processRefsTx(ctx, tx, nodeID)
+	if err != nil {
+		return err
+	}
+	refs, err = update(refs)
+	if err != nil {
+		return err
+	}
+	if len(refs) == 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM process_refs WHERE node_id = ?`, nodeID); err != nil {
+			return err
+		}
+	} else {
+		data, err := json.Marshal(refs)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO process_refs (node_id, data) VALUES (?, ?)
+ON CONFLICT(node_id) DO UPDATE SET data = excluded.data`, nodeID, string(data)); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func processRefsTx(ctx context.Context, tx *sql.Tx, nodeID string) ([]domain.ProcessRef, error) {
+	var raw string
+	err := tx.QueryRowContext(ctx, `SELECT data FROM process_refs WHERE node_id = ?`, nodeID).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var refs []domain.ProcessRef
+	if err := json.Unmarshal([]byte(raw), &refs); err != nil {
+		return nil, err
+	}
+	return refs, nil
 }
 
 func (s *Store) ProcessRefs(ctx context.Context, nodeID string) ([]domain.ProcessRef, error) {

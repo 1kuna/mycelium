@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -16,10 +17,28 @@ import (
 
 func TestStorePersistsControlPlaneState(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "control.db")
+	dir := filepath.Join(t.TempDir(), "state")
+	path := filepath.Join(dir, "control.db")
 	store, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		for _, tt := range []struct {
+			path string
+			want os.FileMode
+		}{
+			{path: dir, want: 0700},
+			{path: path, want: 0600},
+		} {
+			info, err := os.Stat(tt.path)
+			if err != nil {
+				t.Fatalf("stat %s: %v", tt.path, err)
+			}
+			if info.Mode().Perm() != tt.want {
+				t.Fatalf("%s mode = %o want %o", tt.path, info.Mode().Perm(), tt.want)
+			}
+		}
 	}
 	if store.db.Stats().MaxOpenConnections != 1 {
 		t.Fatalf("MaxOpenConnections = %d", store.db.Stats().MaxOpenConnections)
@@ -46,7 +65,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	jobRecord := fixtures.MakeJobRecord(fixtures.WithRecordJobID(job.ID))
 	rec := domain.RecommendationRecord{ID: "rec-a", Type: "context_cap_recommendation", ProjectID: project.ID, RecommendedValue: 4096, CreatedAt: time.Unix(2, 0).UTC()}
 	refs := []domain.ProcessRef{{PID: 12, Kind: "process", Ref: "12"}}
-	token := domain.JoinTokenRecord{Hash: "hash-a", Active: true, Current: true}
+	token := domain.JoinTokenRecord{Hash: "hash-a", Secret: "join-secret", Active: true, Current: true}
 	locality := domain.ModelLocality{
 		ID:             "node-a:preset-a",
 		PresetID:       preset.ID,
@@ -80,6 +99,8 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	must(t, store.Put(ctx, jobRecord))
 	must(t, store.SaveRecommendation(ctx, rec))
 	must(t, store.SaveProcessRefs(ctx, node.ID, refs))
+	must(t, store.AddProcessRef(ctx, node.ID, domain.ProcessRef{PID: 13, Kind: "process", Ref: "13"}))
+	must(t, store.AddProcessRef(ctx, node.ID, domain.ProcessRef{PID: 13, Kind: "process", Ref: "13b"}))
 	must(t, store.SaveJoinToken(ctx, token))
 	must(t, store.SaveModelLocality(ctx, locality))
 	must(t, store.SaveLocalityPlan(ctx, localityPlan))
@@ -104,10 +125,10 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	if gotInst, err := reopened.Instance(ctx, inst.ID); err != nil || gotInst.PresetID != preset.ID {
 		t.Fatalf("Instance = %+v, %v", gotInst, err)
 	}
-	if gotRefs, err := reopened.ProcessRefs(ctx, node.ID); err != nil || len(gotRefs) != 1 || gotRefs[0].PID != 12 {
+	if gotRefs, err := reopened.ProcessRefs(ctx, node.ID); err != nil || len(gotRefs) != 2 || gotRefs[0].PID != 12 || gotRefs[1].Ref != "13b" {
 		t.Fatalf("ProcessRefs = %+v, %v", gotRefs, err)
 	}
-	if gotTokens, err := reopened.ListJoinTokens(ctx); err != nil || len(gotTokens) != 1 || gotTokens[0].Hash != token.Hash || !gotTokens[0].Current {
+	if gotTokens, err := reopened.ListJoinTokens(ctx); err != nil || len(gotTokens) != 1 || gotTokens[0].Hash != token.Hash || gotTokens[0].Secret != token.Secret || !gotTokens[0].Current {
 		t.Fatalf("JoinTokens = %+v, %v", gotTokens, err)
 	}
 	if gotLocalities, err := reopened.ListModelLocalities(ctx); err != nil || len(gotLocalities) != 1 || gotLocalities[0].ID != locality.ID || gotLocalities[0].State != domain.ModelLocalityReady {
@@ -166,6 +187,14 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	must(t, reopened.DeleteInstance(ctx, inst.ID))
 	must(t, reopened.DeleteLease(ctx, lease.ID))
 	must(t, reopened.DeleteReservation(ctx, reservation.ID))
+	must(t, reopened.RemoveProcessRef(ctx, node.ID, domain.ProcessRef{PID: 12}))
+	if gotRefs, err := reopened.ProcessRefs(ctx, node.ID); err != nil || len(gotRefs) != 1 || gotRefs[0].PID != 13 {
+		t.Fatalf("ProcessRefs after remove = %+v, %v", gotRefs, err)
+	}
+	must(t, reopened.RemoveProcessRef(ctx, node.ID, domain.ProcessRef{PID: 13}))
+	if gotRefs, err := reopened.ProcessRefs(ctx, node.ID); err != nil || len(gotRefs) != 0 {
+		t.Fatalf("ProcessRefs after final remove = %+v, %v", gotRefs, err)
+	}
 	must(t, reopened.DeleteProcessRefs(ctx, node.ID))
 	must(t, reopened.DeleteModelLocality(ctx, locality.ID))
 }
@@ -194,6 +223,8 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 		"job":            store.SaveJob(ctx, domain.Job{}),
 		"recommendation": store.SaveRecommendation(ctx, domain.RecommendationRecord{}),
 		"process refs":   store.SaveProcessRefs(ctx, "", nil),
+		"process add":    store.AddProcessRef(ctx, "", domain.ProcessRef{PID: 1}),
+		"process remove": store.RemoveProcessRef(ctx, "", domain.ProcessRef{PID: 1}),
 		"join token":     store.SaveJoinToken(ctx, domain.JoinTokenRecord{}),
 		"locality":       store.SaveModelLocality(ctx, domain.ModelLocality{}),
 		"locality plan":  store.SaveLocalityPlan(ctx, domain.LocalityPlan{}),
@@ -222,6 +253,12 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	}
 	if _, err := store.ProcessRefs(ctx, ""); err == nil {
 		t.Fatal("ProcessRefs should require node id")
+	}
+	if err := store.AddProcessRef(ctx, "node", domain.ProcessRef{}); err == nil {
+		t.Fatal("AddProcessRef should require process pid")
+	}
+	if err := store.RemoveProcessRef(ctx, "node", domain.ProcessRef{}); err == nil {
+		t.Fatal("RemoveProcessRef should require process pid")
 	}
 	if err := store.Record(ctx, domain.RunMetric{At: time.Unix(1, 0).UTC()}); err == nil {
 		t.Fatal("Record should require job id")

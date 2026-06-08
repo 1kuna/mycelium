@@ -25,6 +25,8 @@ type TokenManager struct {
 	store   TokenStore
 }
 
+const hashOnlyTokenMigrationNote = "revoked hash-only active join token during startup because its secret was not persisted; rotate to issue a new join secret"
+
 func NewTokenManager(initial string) (*TokenManager, error) {
 	if initial == "" {
 		return nil, fmt.Errorf("join token is required")
@@ -55,30 +57,53 @@ func NewPersistentTokenManager(ctx context.Context, initial string, store TokenS
 		secrets: map[string]string{},
 		store:   store,
 	}
+	initialHash := tokenHash(initial)
 	for _, record := range records {
 		if record.Hash == "" {
 			return nil, fmt.Errorf("persisted join token hash is required")
 		}
+		if record.Active && record.Secret == "" {
+			if record.Hash == initialHash {
+				record.Secret = initial
+				if err := store.SaveJoinToken(ctx, record); err != nil {
+					return nil, err
+				}
+			} else {
+				record.Active = false
+				record.Current = false
+				record.MigrationNote = hashOnlyTokenMigrationNote
+				if err := store.SaveJoinToken(ctx, record); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if record.Active && tokenHash(record.Secret) != record.Hash {
+			return nil, fmt.Errorf("persisted join token secret does not match hash")
+		}
 		if record.Active {
 			manager.active[record.Hash] = struct{}{}
+			manager.secrets[record.Hash] = record.Secret
 		} else {
 			manager.revoked[record.Hash] = struct{}{}
 		}
-		if record.Current {
+		if record.Current && record.Active {
 			manager.current = record.Hash
 		}
 	}
-	hash := tokenHash(initial)
+	hash := initialHash
 	manager.secrets[hash] = initial
 	if _, revoked := manager.revoked[hash]; !revoked {
 		if _, active := manager.active[hash]; !active {
 			manager.active[hash] = struct{}{}
-		}
-		if manager.current == "" {
 			manager.current = hash
-		}
-		if err := manager.save(ctx, hash, true, manager.current == hash); err != nil {
-			return nil, err
+			if err := manager.save(ctx, hash, true, true); err != nil {
+				return nil, err
+			}
+		} else if manager.current == "" {
+			manager.current = hash
+			if err := manager.save(ctx, hash, true, true); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if len(manager.active) == 0 {
@@ -200,7 +225,11 @@ func (m *TokenManager) save(ctx context.Context, hash string, active, current bo
 	if m.store == nil {
 		return nil
 	}
-	return m.store.SaveJoinToken(ctx, domain.JoinTokenRecord{Hash: hash, Active: active, Current: current})
+	secret := ""
+	if active {
+		secret = m.secrets[hash]
+	}
+	return m.store.SaveJoinToken(ctx, domain.JoinTokenRecord{Hash: hash, Secret: secret, Active: active, Current: current})
 }
 
 func tokenHash(token string) string {

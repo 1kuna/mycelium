@@ -154,6 +154,45 @@ func TestFleetBenchmarkConfigValidationRejectsBadInputs(t *testing.T) {
 	}
 }
 
+func TestFleetBenchmarkValidationProtectsProductionGateways(t *testing.T) {
+	cfg := fleetTestConfig()
+	cfg.TrustedControlHeaderTestMode = false
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, false); err == nil || !strings.Contains(err.Error(), "trusted_control_header_test_mode") {
+		t.Fatalf("control header override err = %v", err)
+	}
+
+	cfg = fleetTestConfig()
+	cfg.Project = ""
+	cfg.TrustedControlHeaderTestMode = false
+	for i := range cfg.Models {
+		cfg.Models[i].Priority = ""
+		cfg.Models[i].SpeedPref = ""
+		cfg.Models[i].Preemption = ""
+		cfg.Models[i].ContextRequest = 0
+	}
+	cfg.GatewayToken = ""
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, false); err == nil || !strings.Contains(err.Error(), "gateway_token") {
+		t.Fatalf("missing gateway token err = %v", err)
+	}
+
+	cfg.Gateways[0].URL = "http://127.0.0.1:51846"
+	cfg.Gateways[1].URL = "http://localhost:51846"
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, false); err != nil {
+		t.Fatalf("loopback tokenless config should validate: %v", err)
+	}
+
+	cfg.Gateways[0].URL = "http://gateway.test"
+	cfg.Gateways[0].TokenEnv = "MYCELIUM_TEST_MISSING_GATEWAY_TOKEN"
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, false); err == nil || !strings.Contains(err.Error(), "token env") {
+		t.Fatalf("missing token env err = %v", err)
+	}
+	t.Setenv("MYCELIUM_TEST_GATEWAY_TOKEN", "env-secret")
+	cfg.Gateways[0].TokenEnv = "MYCELIUM_TEST_GATEWAY_TOKEN"
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, false); err != nil {
+		t.Fatalf("env gateway token config should validate: %v", err)
+	}
+}
+
 func TestFleetBenchmarkSimulationProvesConservativeScenarioAndWritesArtifacts(t *testing.T) {
 	cfg := fleetTestConfig()
 	clock := mocks.NewFakeClock(time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC))
@@ -197,8 +236,17 @@ func TestFleetBenchmarkSimulationProvesConservativeScenarioAndWritesArtifacts(t 
 	if err != nil {
 		t.Fatalf("read config artifact: %v", err)
 	}
-	if strings.Contains(string(config), "rpc-secret") || !strings.Contains(string(config), "REDACTED") {
+	if strings.Contains(string(config), "rpc-secret") || strings.Contains(string(config), "gateway-secret") || !strings.Contains(string(config), "REDACTED") {
 		t.Fatalf("config artifact was not redacted: %s", config)
+	}
+	for _, artifact := range []string{"manifest.json", "results.json"} {
+		body, err := os.ReadFile(filepath.Join(result.OutputDir, artifact))
+		if err != nil {
+			t.Fatalf("read %s: %v", artifact, err)
+		}
+		if strings.Contains(string(body), "gateway-secret") || strings.Contains(string(body), "rpc-secret") {
+			t.Fatalf("%s leaked token: %s", artifact, body)
+		}
 	}
 	report, err := os.ReadFile(filepath.Join(result.OutputDir, "report.html"))
 	if err != nil || !strings.Contains(string(report), "Mycelium Fleet Benchmark") {
@@ -233,6 +281,10 @@ func TestFleetBenchmarkLiveRunnerCapturesHeadersMetricsAndOutputs(t *testing.T) 
 				At:           clock.Now(),
 			}})
 		case "/v1/chat/completions":
+			if got := r.Header.Get("Authorization"); got != "Bearer gateway-secret" {
+				http.Error(w, "gateway token required", http.StatusUnauthorized)
+				return
+			}
 			clock.Advance(100 * time.Millisecond)
 			var req api.OpenAIChatRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -709,6 +761,30 @@ func TestSubmitFleetJobTransportAndReadFailures(t *testing.T) {
 	}
 }
 
+func TestSubmitFleetJobUsesGatewayTokenEnv(t *testing.T) {
+	cfg := fleetTestConfig()
+	cfg.GatewayToken = ""
+	t.Setenv("MYCELIUM_TEST_GATEWAY_TOKEN", "env-secret")
+	gateway := cfg.Gateways[0]
+	gateway.TokenEnv = "MYCELIUM_TEST_GATEWAY_TOKEN"
+	model := cfg.Models[0]
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC))
+	client := directFleetHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer env-secret" {
+			http.Error(w, "bad auth "+got, http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{
+			Choices: []api.OpenAIChatChoice{{Message: api.OpenAIMessage{Role: "assistant", Content: "ok"}}},
+			Usage:   api.OpenAIUsage{CompletionTokens: 2, TotalTokens: 4},
+		})
+	}))
+	result := submitFleetJob(context.Background(), cfg, "wave-a", 0, FleetWaveJob{ID: "job-a", ModelID: model.ID}, model, gateway, t.TempDir(), client, clock)
+	if result.Error != "" || result.OutputPath == "" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 func TestLoadFleetConfigAndDefaultProfiles(t *testing.T) {
 	cfg := fleetTestConfig()
 	cfg.Waves = nil
@@ -1041,9 +1117,11 @@ func fleetTestConfig() FleetBenchmarkConfig {
 		SpeedClass:       domain.SpeedClass{TokensPerSecRef: 999},
 	}
 	return FleetBenchmarkConfig{
-		ID:       "fleet-test",
-		Project:  "project-a",
-		RPCToken: "rpc-secret",
+		ID:                           "fleet-test",
+		Project:                      "project-a",
+		RPCToken:                     "rpc-secret",
+		GatewayToken:                 "gateway-secret",
+		TrustedControlHeaderTestMode: true,
 		Gateways: []FleetGateway{
 			{ID: "macbook-gw", URL: "http://macbook.test", NodeID: "macbook"},
 			{ID: "macmini-gw", URL: "http://macmini.test", NodeID: "mac-mini"},

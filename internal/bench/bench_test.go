@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -44,10 +45,34 @@ func TestRunnerWritesOneOutputPerModelAndMetrics(t *testing.T) {
 		if len(body) != result.Bytes {
 			t.Fatalf("body/result mismatch: %q %+v", body, result)
 		}
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(result.OutputPath)
+			if err != nil {
+				t.Fatalf("stat output: %v", err)
+			}
+			if info.Mode().Perm() != 0600 {
+				t.Fatalf("output mode = %o", info.Mode().Perm())
+			}
+		}
 	}
 	metricsBody, err := os.ReadFile(filepath.Join(dir, "metrics.json"))
 	if err != nil {
 		t.Fatalf("read metrics: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		for _, path := range []string{dir, filepath.Join(dir, "metrics.json")} {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat %s: %v", path, err)
+			}
+			want := os.FileMode(0600)
+			if info.IsDir() {
+				want = 0700
+			}
+			if info.Mode().Perm() != want {
+				t.Fatalf("%s mode = %o want %o", path, info.Mode().Perm(), want)
+			}
+		}
 	}
 	var metrics []Result
 	if err := json.Unmarshal(metricsBody, &metrics); err != nil {

@@ -2,9 +2,7 @@ package bench
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -113,7 +111,7 @@ func (r Runner) run(ctx context.Context, req Request, parent domain.Job) ([]Resu
 	if req.OutputDir == "" {
 		return nil, fmt.Errorf("output dir is required")
 	}
-	if err := os.MkdirAll(req.OutputDir, 0755); err != nil {
+	if err := ensurePrivateDir(req.OutputDir); err != nil {
 		return nil, err
 	}
 	results := make([]Result, 0, len(req.Models))
@@ -154,7 +152,7 @@ func (r Runner) run(ctx context.Context, req Request, parent domain.Job) ([]Resu
 		name := uniqueName(safeName(model)+".txt", used)
 		path := filepath.Join(req.OutputDir, name)
 		if err := tr.Do("benchmark/write_output", map[string]any{"model": model, "path": path}, func() error {
-			return os.WriteFile(path, []byte(completion.Text), 0644)
+			return writePrivateFile(path, []byte(completion.Text))
 		}); err != nil {
 			if hasChild {
 				child.Status = domain.JobFailed
@@ -200,18 +198,7 @@ func (r Runner) childJob(parent domain.Job, model string, used map[string]int) (
 }
 
 func writeMetrics(outputDir string, results []Result) error {
-	path := filepath.Join(outputDir, "metrics.json")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	enc := json.NewEncoder(file)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(results); err != nil {
-		_ = file.Close()
-		return err
-	}
-	return file.Close()
+	return writeJSON(filepath.Join(outputDir, "metrics.json"), results)
 }
 
 func elapsedMS(d time.Duration) int {

@@ -919,6 +919,8 @@ func runBenchmarkFanout(ctx context.Context, args []string, client *http.Client)
 	fs := flag.NewFlagSet("benchmark run", flag.ContinueOnError)
 	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
 	url := fs.String("url", "", "Mycelium gateway URL")
+	gatewayToken := fs.String("gateway-token", "", "Mycelium gateway bearer token")
+	gatewayTokenEnv := fs.String("gateway-token-env", "", "environment variable containing the Mycelium gateway bearer token")
 	prompt := fs.String("prompt", "", "benchmark prompt")
 	out := fs.String("out", "", "output directory")
 	id := fs.String("id", "", "parent benchmark job id")
@@ -939,6 +941,10 @@ func runBenchmarkFanout(ctx context.Context, args []string, client *http.Client)
 	}
 	if len(models) == 0 {
 		return fmt.Errorf("--model is required")
+	}
+	authToken, err := bench.ResolveGatewayTokenForURL(*url, *gatewayToken, *gatewayTokenEnv)
+	if err != nil {
+		return err
 	}
 	store, err := storesqlite.Open(*dbPath)
 	if err != nil {
@@ -962,7 +968,7 @@ func runBenchmarkFanout(ctx context.Context, args []string, client *http.Client)
 		},
 	}
 	runner := bench.Runner{
-		Client: benchmarkGatewayClient{BaseURL: *url, Client: client},
+		Client: benchmarkGatewayClient{BaseURL: *url, AuthToken: authToken, Client: client},
 		Clock:  clock.System{},
 		Store:  store,
 	}
@@ -1031,8 +1037,9 @@ func (r *repeatedString) Set(value string) error {
 }
 
 type benchmarkGatewayClient struct {
-	BaseURL string
-	Client  *http.Client
+	BaseURL   string
+	AuthToken string
+	Client    *http.Client
 }
 
 func (c benchmarkGatewayClient) Complete(ctx context.Context, model, prompt string) (bench.Completion, error) {
@@ -1051,6 +1058,9 @@ func (c benchmarkGatewayClient) Complete(ctx context.Context, model, prompt stri
 		return bench.Completion{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
 	client := c.Client
 	if client == nil {
 		client = http.DefaultClient

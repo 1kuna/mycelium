@@ -755,6 +755,9 @@ func TestRunBenchmarkFanOutPersistsJobsAndOutputs(t *testing.T) {
 		if r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
+		if got := r.Header.Get("Authorization"); got != "Bearer gateway-secret" {
+			t.Fatalf("gateway auth = %q", got)
+		}
 		var req api.OpenAIChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
@@ -776,6 +779,7 @@ func TestRunBenchmarkFanOutPersistsJobsAndOutputs(t *testing.T) {
 			"benchmark", "run",
 			"--db", dbPath,
 			"--url", "http://gateway.test",
+			"--gateway-token", "gateway-secret",
 			"--id", "bench-a",
 			"--project", "project-a",
 			"--prompt", "Say hi",
@@ -837,6 +841,7 @@ func TestRunBenchmarkPrintsChildErrorsAndUsesDefaultID(t *testing.T) {
 			"benchmark", "run",
 			"--db", dbPath,
 			"--url", "http://gateway.test",
+			"--gateway-token", "gateway-secret",
 			"--prompt", "Say hi",
 			"--out", outDir,
 			"--model", "tiny",
@@ -854,6 +859,41 @@ func TestRunBenchmarkPrintsChildErrorsAndUsesDefaultID(t *testing.T) {
 	}
 	if !strings.Contains(string(metrics), "backend saturated") {
 		t.Fatalf("metrics = %s", metrics)
+	}
+}
+
+func TestRunBenchmarkUsesGatewayTokenEnv(t *testing.T) {
+	t.Setenv("MYCELIUM_TEST_GATEWAY_TOKEN", "env-secret")
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer env-secret" {
+			t.Fatalf("gateway auth = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{
+			Choices: []api.OpenAIChatChoice{{Message: api.OpenAIMessage{Role: "assistant", Content: "env ok"}}},
+			Usage:   api.OpenAIUsage{TotalTokens: 1},
+		})
+	}))
+	if err := RunWithClient(context.Background(), []string{
+		"benchmark", "run",
+		"--db", filepath.Join(t.TempDir(), "control.db"),
+		"--url", "http://gateway.test",
+		"--gateway-token-env", "MYCELIUM_TEST_GATEWAY_TOKEN",
+		"--prompt", "Say hi",
+		"--out", filepath.Join(t.TempDir(), "bench"),
+		"--model", "tiny",
+	}, client); err != nil {
+		t.Fatalf("benchmark env token: %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{
+		"benchmark", "run",
+		"--db", filepath.Join(t.TempDir(), "control.db"),
+		"--url", "http://gateway.test",
+		"--gateway-token-env", "MYCELIUM_TEST_MISSING_GATEWAY_TOKEN",
+		"--prompt", "Say hi",
+		"--out", filepath.Join(t.TempDir(), "bench"),
+		"--model", "tiny",
+	}, client); err == nil || !strings.Contains(err.Error(), "token env") {
+		t.Fatalf("missing env err = %v", err)
 	}
 }
 
@@ -1367,9 +1407,11 @@ func recordSustainedContextMetrics(t *testing.T, store interface {
 
 func controlFleetConfig() bench.FleetBenchmarkConfig {
 	return bench.FleetBenchmarkConfig{
-		ID:       "fleet-cli",
-		Project:  "project-a",
-		RPCToken: "rpc-secret",
+		ID:                           "fleet-cli",
+		Project:                      "project-a",
+		RPCToken:                     "rpc-secret",
+		GatewayToken:                 "gateway-secret",
+		TrustedControlHeaderTestMode: true,
 		Gateways: []bench.FleetGateway{
 			{ID: "macbook-gw", URL: "http://macbook.test", NodeID: "macbook"},
 			{ID: "macmini-gw", URL: "http://macmini.test", NodeID: "mac-mini"},

@@ -656,7 +656,7 @@ func TestRouterRecordMetricFailsOnMemorySamplerError(t *testing.T) {
 func TestCopyAndFlushPropagatesChunkCallbackError(t *testing.T) {
 	var out strings.Builder
 	callbackErr := errors.New("sample write failed")
-	result, err := copyAndFlush(noFlushWriter{Builder: &out}, strings.NewReader("chunk"), (&Router{}).clock(), func(copyResult) error {
+	result, err := copyAndFlush(noFlushWriter{Builder: &out}, strings.NewReader("chunk"), (&Router{}).clock(), false, func(copyResult) error {
 		return callbackErr
 	})
 	if !errors.Is(err, callbackErr) || string(result.Body) != "chunk" || out.String() != "chunk" {
@@ -666,7 +666,7 @@ func TestCopyAndFlushPropagatesChunkCallbackError(t *testing.T) {
 
 func TestCopyAndFlushEmptyReaderStillSetsEnd(t *testing.T) {
 	var out strings.Builder
-	result, err := copyAndFlush(noFlushWriter{Builder: &out}, strings.NewReader(""), (&Router{}).clock(), nil)
+	result, err := copyAndFlush(noFlushWriter{Builder: &out}, strings.NewReader(""), (&Router{}).clock(), false, nil)
 	if err != nil || result.End.IsZero() || out.Len() != 0 {
 		t.Fatalf("copy result=%+v out=%q err=%v", result, out.String(), err)
 	}
@@ -675,12 +675,24 @@ func TestCopyAndFlushEmptyReaderStillSetsEnd(t *testing.T) {
 func TestCopyAndFlushCapsRetainedTelemetryButCountsAllBytes(t *testing.T) {
 	body := strings.Repeat("x", MaxStreamTelemetryBodyBytes+123)
 	var out strings.Builder
-	result, err := copyAndFlush(noFlushWriter{Builder: &out}, strings.NewReader(body), (&Router{}).clock(), nil)
+	result, err := copyAndFlush(noFlushWriter{Builder: &out}, strings.NewReader(body), (&Router{}).clock(), false, nil)
 	if err != nil {
 		t.Fatalf("copyAndFlush: %v", err)
 	}
 	if result.Bytes != len(body) || len(result.Body) != MaxStreamTelemetryBodyBytes || out.Len() != len(body) {
 		t.Fatalf("copy result=%+v retained=%d written=%d want bytes=%d retained=%d", result, len(result.Body), out.Len(), len(body), MaxStreamTelemetryBodyBytes)
+	}
+}
+
+func TestCopyAndFlushTracksSSETerminalBeyondRetainedTelemetry(t *testing.T) {
+	body := strings.Repeat("x", MaxStreamTelemetryBodyBytes+123) + "\ndata: [DONE]\n\n"
+	var out strings.Builder
+	result, err := copyAndFlush(noFlushWriter{Builder: &out}, strings.NewReader(body), (&Router{}).clock(), true, nil)
+	if err != nil {
+		t.Fatalf("copyAndFlush: %v", err)
+	}
+	if !result.SSETerminal || len(result.Body) != MaxStreamTelemetryBodyBytes || out.Len() != len(body) {
+		t.Fatalf("copy result=%+v retained=%d written=%d", result, len(result.Body), out.Len())
 	}
 }
 
@@ -940,7 +952,7 @@ func TestRouterUtilityFallbacks(t *testing.T) {
 		t.Fatal("cloneHeader nil returned nil")
 	}
 	var w strings.Builder
-	result, err := copyAndFlush(noFlushWriter{Builder: &w}, errReader{}, (&Router{}).clock(), nil)
+	result, err := copyAndFlush(noFlushWriter{Builder: &w}, errReader{}, (&Router{}).clock(), false, nil)
 	if err == nil || !errors.Is(err, io.ErrUnexpectedEOF) || result.Body != nil {
 		t.Fatalf("copy result=%+v err=%v", result, err)
 	}
@@ -1341,7 +1353,7 @@ func TestRouterColdStreamPrependsLoadingState(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: done\n\n"))
+		_, _ = w.Write([]byte("data: done\n\ndata: [DONE]\n\n"))
 	}))
 
 	node := fixtures.MakeNode()
@@ -1377,6 +1389,7 @@ func TestRouterStreamColdLoadWritesLoadingReadyAndChunks(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: one\n\n"))
 		_, _ = w.Write([]byte("data: two\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))
 
 	node := fixtures.MakeNode()
@@ -1433,7 +1446,7 @@ func TestRouterStreamWarmInstanceCopiesHeadersAndBody(t *testing.T) {
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("X-Upstream", "ok")
-		_, _ = w.Write([]byte("data: warm\n\n"))
+		_, _ = w.Write([]byte("data: warm\n\ndata: [DONE]\n\n"))
 	}))
 
 	inst := fixtures.MakeInstance()
@@ -1451,7 +1464,7 @@ func TestRouterStreamWarmInstanceCopiesHeadersAndBody(t *testing.T) {
 	if rec.Header().Get("X-Upstream") != "ok" || rec.Header().Get(HeaderDecision) != string(domain.ActionWarmInstance) || rec.Header().Get(HeaderInstance) != inst.ID {
 		t.Fatalf("headers = %+v", rec.Header())
 	}
-	if rec.Body.String() != "data: warm\n\n" {
+	if rec.Body.String() != "data: warm\n\ndata: [DONE]\n\n" {
 		t.Fatalf("body = %q", rec.Body.String())
 	}
 }
@@ -1460,7 +1473,7 @@ func TestRouterStreamDoesNotAppendMetricErrorAfterProviderStarted(t *testing.T) 
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: metric\n\n"))
+		_, _ = w.Write([]byte("data: metric\n\ndata: [DONE]\n\n"))
 	}))
 	inst := fixtures.MakeInstance()
 	inst.Addr = upstream
@@ -1478,7 +1491,7 @@ func TestRouterStreamDoesNotAppendMetricErrorAfterProviderStarted(t *testing.T) 
 	if err := router.Stream(context.Background(), req, rec); err != nil {
 		t.Fatalf("Stream returned error after start: %v", err)
 	}
-	if body := rec.Body.String(); body != "data: metric\n\n" {
+	if body := rec.Body.String(); body != "data: metric\n\ndata: [DONE]\n\n" {
 		t.Fatalf("body = %q", body)
 	}
 }
@@ -1487,7 +1500,7 @@ func TestRouterStreamDoesNotAppendCompleteSampleErrorAfterProviderStarted(t *tes
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: sample\n\n"))
+		_, _ = w.Write([]byte("data: sample\n\ndata: [DONE]\n\n"))
 	}))
 	inst := fixtures.MakeInstance()
 	inst.Addr = upstream
@@ -1504,8 +1517,129 @@ func TestRouterStreamDoesNotAppendCompleteSampleErrorAfterProviderStarted(t *tes
 	if err := router.Stream(context.Background(), req, rec); err != nil {
 		t.Fatalf("Stream returned error after start: %v", err)
 	}
-	if body := rec.Body.String(); body != "data: sample\n\n" {
+	if body := rec.Body.String(); body != "data: sample\n\ndata: [DONE]\n\n" {
 		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestRouterColdStreamDoesNotAppendMyceliumFrameAfterProviderBodyStarts(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: cold\n\ndata: [DONE]\n\n"))
+	}))
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_cold_stream"), fixtures.OnNode(node.ID))
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}}, staticResolver{agents: map[string]ports.NodeAgent{
+		node.ID: loadNode{node: node, inst: inst},
+	}})
+	metricErr := errors.New("memory sample failed")
+	router.Telemetry = &mocks.TelemetrySink{}
+	router.SelfNodeID = node.ID
+	router.MemorySampler = fixedMemorySampler{Err: metricErr}
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream returned error after start: %v", err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: loading") || !strings.Contains(body, "event: ready") || !strings.Contains(body, "data: cold") {
+		t.Fatalf("body = %q", body)
+	}
+	if strings.Contains(body, "event: error") || strings.Contains(body, metricErr.Error()) {
+		t.Fatalf("provider body was followed by Mycelium error frame: %q", body)
+	}
+}
+
+func TestRouterStreamCopyErrorReportsAndRemovesFailedInstance(t *testing.T) {
+	preset := fixtures.MakePreset()
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_copy_err"), fixtures.OnNode(node.ID))
+	inst.Addr = "http://copy-error.mycelium.test"
+	agent := mocks.NewNodeAgent(node)
+	agent.Instances = []domain.ModelInstance{inst}
+	store := &gatewayRuntimeStore{}
+	router := newRuntimeRouterForWarmInstance(preset, node, inst, agent, &mocks.AdmissionController{}, store)
+	router.Client = &http.Client{Transport: gatewayRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       &chunkThenErrorReadCloser{chunk: []byte("data: partial\n\n"), err: io.ErrUnexpectedEOF},
+			Request:    req,
+		}, nil
+	})}
+	failureStore := newFailureStore(inst)
+	router.Reporter = InstanceFailureReporter{
+		Store: failureStore,
+		Nodes: NodeDirectory{Agents: map[string]ports.NodeAgent{node.ID: agent}},
+	}
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream returned error after provider start: %v", err)
+	}
+	if body := rec.Body.String(); body != "data: partial\n\n" {
+		t.Fatalf("body = %q", body)
+	}
+	if _, ok := failureStore.instances[inst.ID]; ok || strings.Join(failureStore.deleted, ",") != inst.ID {
+		t.Fatalf("failure store instances=%+v deleted=%+v", failureStore.instances, failureStore.deleted)
+	}
+	if !containsCall(agent.Calls, "unload:"+inst.ID) {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+	if !store.sawJobStatus(domain.JobFailed) || len(store.deletedLeases) != 1 {
+		t.Fatalf("jobs=%+v deletedLeases=%+v", store.jobs, store.deletedLeases)
+	}
+}
+
+func TestRouterStreamProxiedTruncatedSSEFails(t *testing.T) {
+	preset := fixtures.MakePreset()
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst_truncated"), fixtures.OnNode(node.ID))
+	inst.Addr = "http://node-proxy.mycelium.test/instances/inst_truncated"
+	agent := mocks.NewNodeAgent(node)
+	agent.Instances = []domain.ModelInstance{inst}
+	store := &gatewayRuntimeStore{}
+	router := newRuntimeRouterForWarmInstance(preset, node, inst, agent, &mocks.AdmissionController{}, store)
+	router.Client = &http.Client{Transport: gatewayRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("data: partial\n\n")),
+			Request:    req,
+		}, nil
+	})}
+	failureStore := newFailureStore(inst)
+	router.Reporter = InstanceFailureReporter{
+		Store: failureStore,
+		Nodes: NodeDirectory{Agents: map[string]ports.NodeAgent{node.ID: agent}},
+	}
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream returned error after provider start: %v", err)
+	}
+	if body := rec.Body.String(); body != "data: partial\n\n" || strings.Contains(body, "event: error") {
+		t.Fatalf("body = %q", body)
+	}
+	if !store.sawJobStatus(domain.JobFailed) || store.sawJobStatus(domain.JobDone) || len(store.deletedLeases) != 1 {
+		t.Fatalf("jobs=%+v deletedLeases=%+v", store.jobs, store.deletedLeases)
+	}
+	if _, ok := failureStore.instances[inst.ID]; ok || strings.Join(failureStore.deleted, ",") != inst.ID {
+		t.Fatalf("failure store instances=%+v deleted=%+v", failureStore.instances, failureStore.deleted)
 	}
 }
 
@@ -1612,7 +1746,7 @@ func TestRouterStreamFailoverBeforeResponseStarts(t *testing.T) {
 	}))
 	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: rescued\n\n"))
+		_, _ = w.Write([]byte("data: rescued\n\ndata: [DONE]\n\n"))
 	}))
 
 	node := fixtures.MakeNode()
@@ -1760,11 +1894,11 @@ func TestRouterReturnsRuntimeReleaseError(t *testing.T) {
 	}
 }
 
-func TestRouterStreamReturnsRuntimeReleaseError(t *testing.T) {
+func TestRouterStreamDoesNotAppendRuntimeReleaseErrorAfterProviderStarted(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: ok\n\n"))
+		_, _ = w.Write([]byte("data: ok\n\ndata: [DONE]\n\n"))
 	}))
 
 	node := fixtures.MakeNode()
@@ -1781,7 +1915,7 @@ func TestRouterStreamReturnsRuntimeReleaseError(t *testing.T) {
 	if err := router.Stream(context.Background(), req, rec); err != nil {
 		t.Fatalf("Stream err = %v", err)
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "data: ok") || !strings.Contains(body, "event: error") || !strings.Contains(body, deleteErr.Error()) {
+	if body := rec.Body.String(); !strings.Contains(body, "data: ok") || strings.Contains(body, "event: error") || strings.Contains(body, deleteErr.Error()) {
 		t.Fatalf("body = %q", body)
 	}
 }
@@ -1829,6 +1963,28 @@ func newRuntimeRouterForInstance(preset domain.Preset, node domain.Node, inst do
 	return router
 }
 
+func newRuntimeRouterForWarmInstance(preset domain.Preset, node domain.Node, inst domain.ModelInstance, agent ports.NodeAgent, admission ports.AdmissionController, store *gatewayRuntimeStore) *Router {
+	resolver := staticResolver{
+		agents:     map[string]ports.NodeAgent{node.ID: agent},
+		admissions: map[string]ports.AdmissionController{node.ID: admission},
+	}
+	fleet := staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}}
+	router := newTestRouter(preset, fleet.fleet, resolver)
+	router.Fleet = fleet
+	router.Nodes = resolver
+	router.Runtime = &scheduler.Service{
+		Placer:  router.Placer,
+		Fleet:   fleet,
+		Nodes:   resolver,
+		Owners:  resolver,
+		Queue:   scheduler.NewQueue(router.Clock),
+		Store:   store,
+		Clock:   router.Clock,
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	return router
+}
+
 func TestRouterStreamRetriesContextOverflowBeforeResponseStarts(t *testing.T) {
 	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
 	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))
@@ -1837,7 +1993,7 @@ func TestRouterStreamRetriesContextOverflowBeforeResponseStarts(t *testing.T) {
 	}))
 	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: enlarged\n\n"))
+		_, _ = w.Write([]byte("data: enlarged\n\ndata: [DONE]\n\n"))
 	}))
 
 	node := fixtures.MakeNode()
@@ -1913,7 +2069,7 @@ func TestServerUsesStreamingRouterPath(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: server-stream\n\n"))
+		_, _ = w.Write([]byte("data: server-stream\n\ndata: [DONE]\n\n"))
 	}))
 
 	node := fixtures.MakeNode()
@@ -2052,7 +2208,7 @@ func TestServerWritesStreamResponse(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: server\n\n"))
+		_, _ = w.Write([]byte("data: server\n\ndata: [DONE]\n\n"))
 	}))
 	inst := fixtures.MakeInstance()
 	inst.Addr = upstream
@@ -2198,6 +2354,12 @@ var testUpstreams = &directUpstreams{handlers: map[string]http.Handler{}}
 
 type directUpstreams struct {
 	handlers map[string]http.Handler
+}
+
+type gatewayRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f gatewayRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 type peerMap map[string]domain.Peer
@@ -2444,13 +2606,33 @@ func (errReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
 }
 
+type chunkThenErrorReadCloser struct {
+	chunk []byte
+	err   error
+	read  bool
+}
+
+func (r *chunkThenErrorReadCloser) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, r.err
+	}
+	r.read = true
+	return copy(p, r.chunk), nil
+}
+
+func (r *chunkThenErrorReadCloser) Close() error {
+	return nil
+}
+
 type gatewayRuntimeStore struct {
 	deletedLeases  []string
 	leases         []domain.Lease
+	jobs           []domain.Job
 	deleteLeaseErr error
 }
 
-func (s *gatewayRuntimeStore) SaveJob(context.Context, domain.Job) error {
+func (s *gatewayRuntimeStore) SaveJob(_ context.Context, job domain.Job) error {
+	s.jobs = append(s.jobs, job)
 	return nil
 }
 
@@ -2483,6 +2665,24 @@ func (s *gatewayRuntimeStore) SaveInstance(context.Context, domain.ModelInstance
 
 func (s *gatewayRuntimeStore) DeleteInstance(context.Context, string) error {
 	return nil
+}
+
+func (s *gatewayRuntimeStore) sawJobStatus(status domain.JobStatus) bool {
+	for _, job := range s.jobs {
+		if job.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCall(calls []string, want string) bool {
+	for _, call := range calls {
+		if call == want {
+			return true
+		}
+	}
+	return false
 }
 
 type notClaimedCoordinator struct{}
