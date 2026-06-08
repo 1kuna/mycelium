@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sync"
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
@@ -101,6 +100,8 @@ type ProcessRefStore interface {
 	ProcessRefs(ctx context.Context, nodeID string) ([]domain.ProcessRef, error)
 	SaveProcessRefs(ctx context.Context, nodeID string, refs []domain.ProcessRef) error
 	DeleteProcessRefs(ctx context.Context, nodeID string) error
+	AddProcessRef(ctx context.Context, nodeID string, ref domain.ProcessRef) error
+	RemoveProcessRef(ctx context.Context, nodeID string, ref domain.ProcessRef) error
 }
 
 type StoreProcessRegistry struct {
@@ -108,45 +109,16 @@ type StoreProcessRegistry struct {
 	NodeID string
 }
 
-var storeProcessRegistryMu sync.Mutex
-
 func (r StoreProcessRegistry) Add(ctx context.Context, ref domain.ProcessRef) error {
 	if r.Store == nil {
 		return fmt.Errorf("process ref store is not configured")
 	}
-	storeProcessRegistryMu.Lock()
-	defer storeProcessRegistryMu.Unlock()
-	refs, err := r.Store.ProcessRefs(ctx, r.NodeID)
-	if err != nil {
-		return err
-	}
-	for _, existing := range refs {
-		if existing.PID == ref.PID {
-			return nil
-		}
-	}
-	refs = append(refs, ref)
-	return r.Store.SaveProcessRefs(ctx, r.NodeID, refs)
+	return r.Store.AddProcessRef(ctx, r.NodeID, ref)
 }
 
 func (r StoreProcessRegistry) Remove(ctx context.Context, ref domain.ProcessRef) error {
 	if r.Store == nil {
 		return fmt.Errorf("process ref store is not configured")
 	}
-	storeProcessRegistryMu.Lock()
-	defer storeProcessRegistryMu.Unlock()
-	refs, err := r.Store.ProcessRefs(ctx, r.NodeID)
-	if err != nil {
-		return err
-	}
-	out := refs[:0]
-	for _, existing := range refs {
-		if existing.PID != ref.PID {
-			out = append(out, existing)
-		}
-	}
-	if len(out) == 0 {
-		return r.Store.DeleteProcessRefs(ctx, r.NodeID)
-	}
-	return r.Store.SaveProcessRefs(ctx, r.NodeID, out)
+	return r.Store.RemoveProcessRef(ctx, r.NodeID, ref)
 }

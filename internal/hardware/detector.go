@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,6 +25,8 @@ type Detector struct {
 	DiskPath string
 	StatDisk func(path string) (DiskStats, error)
 	ReadFile func(path string) ([]byte, error)
+	ReadDir  func(path string) ([]os.DirEntry, error)
+	DRMPath  string
 }
 
 type DiskStats struct {
@@ -209,9 +213,11 @@ func (d Detector) detectLinux(ctx context.Context, seed domain.Node) (domain.Nod
 	if command == nil {
 		command = runCommand
 	}
+	var accelerators []domain.Accelerator
 	out, err := command(ctx, "nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,compute_cap", "--format=csv,noheader,nounits")
+	var nvidiaErr error
 	if err == nil {
-		accelerators, parseErr := parseNVIDIASMI(out, linuxUnifiedMemoryFallback{})
+		nvidiaAccelerators, parseErr := parseNVIDIASMI(out, linuxUnifiedMemoryFallback{})
 		if parseErr != nil && nvidiaSMINeedsSystemMemory(out) {
 			totalMB, memErr := linuxSystemMemoryMB(ctx, command)
 			if memErr != nil {
@@ -221,31 +227,66 @@ func (d Detector) detectLinux(ctx context.Context, seed domain.Node) (domain.Nod
 			if memErr != nil {
 				return domain.Node{}, fmt.Errorf("%w; system memory pressure: %w", parseErr, memErr)
 			}
-			accelerators, parseErr = parseNVIDIASMI(out, linuxUnifiedMemoryFallback{TotalMB: totalMB, UsedMB: usedMB})
+			nvidiaAccelerators, parseErr = parseNVIDIASMI(out, linuxUnifiedMemoryFallback{TotalMB: totalMB, UsedMB: usedMB})
 		}
 		if parseErr != nil {
-			return domain.Node{}, parseErr
+			nvidiaErr = parseErr
+		} else {
+			accelerators = append(accelerators, nvidiaAccelerators...)
 		}
-		return linuxNode(seed, "nvidia", accelerators, d.Clock), nil
+	} else {
+		nvidiaErr = err
 	}
 
-	nvidiaErr := err
 	out, err = command(ctx, "clinfo")
 	if err != nil {
-		return domain.Node{}, fmt.Errorf("linux hardware discovery failed: nvidia-smi: %w; clinfo: %w", nvidiaErr, err)
+		if len(accelerators) == 0 {
+			return domain.Node{}, fmt.Errorf("linux hardware discovery failed: nvidia-smi: %w; clinfo: %w", nvidiaErr, err)
+		}
+		return linuxNode(seed, accelerators, d.Clock), nil
 	}
-	accelerators, err := parseIntelCLInfo(out)
-	if err != nil {
-		return domain.Node{}, fmt.Errorf("linux hardware discovery failed: nvidia-smi: %w; clinfo: %w", nvidiaErr, err)
+	intelAccelerators, intelErr := parseIntelCLInfo(out)
+	if intelErr == nil {
+		intelAccelerators, intelErr = d.withIntelUsedMemory(intelAccelerators)
 	}
-	return linuxNode(seed, "intel", accelerators, d.Clock), nil
+	if intelErr != nil {
+		if len(accelerators) == 0 {
+			return domain.Node{}, fmt.Errorf("linux hardware discovery failed: nvidia-smi: %w; clinfo/intel-memory: %w", nvidiaErr, intelErr)
+		}
+	} else {
+		offsetAcceleratorIndexes(intelAccelerators, nextAcceleratorIndex(accelerators))
+		accelerators = append(accelerators, intelAccelerators...)
+	}
+	if len(accelerators) == 0 {
+		return domain.Node{}, fmt.Errorf("linux hardware discovery failed: nvidia-smi: %w; clinfo: no usable accelerators", nvidiaErr)
+	}
+	return linuxNode(seed, accelerators, d.Clock), nil
 }
 
-func linuxNode(seed domain.Node, vendor string, accelerators []domain.Accelerator, clk ports.Clock) domain.Node {
+func nextAcceleratorIndex(accelerators []domain.Accelerator) int {
+	next := 0
+	for _, acc := range accelerators {
+		if acc.Index >= next {
+			next = acc.Index + 1
+		}
+	}
+	return next
+}
+
+func offsetAcceleratorIndexes(accelerators []domain.Accelerator, offset int) {
+	for i := range accelerators {
+		accelerators[i].Index += offset
+	}
+}
+
+func linuxNode(seed domain.Node, accelerators []domain.Accelerator, clk ports.Clock) domain.Node {
 	node := seed
 	node.OS = "linux"
-	labels := map[string]string{"gpu.vendor": vendor, "memory.class": "discrete"}
+	labels := map[string]string{"memory.class": "discrete"}
+	vendors := map[string]struct{}{}
 	for _, acc := range accelerators {
+		vendors[acc.Vendor] = struct{}{}
+		labels["gpu.vendor."+acc.Vendor] = "true"
 		if acc.Kind != "" {
 			labels["gpu.kind"] = acc.Kind
 		}
@@ -253,6 +294,13 @@ func linuxNode(seed domain.Node, vendor string, accelerators []domain.Accelerato
 			labels["memory.class"] = "unified"
 			node.UnifiedMemory = true
 		}
+	}
+	if len(vendors) == 1 {
+		for vendor := range vendors {
+			labels["gpu.vendor"] = vendor
+		}
+	} else {
+		labels["gpu.vendor"] = "mixed"
 	}
 	node.Labels = mergeLabels(node.Labels, labels)
 	node.OOMSeverity = domain.OOMSoft
@@ -473,6 +521,119 @@ func parseIntelCLInfo(out []byte) ([]domain.Accelerator, error) {
 		return nil, errors.New("clinfo returned no Intel Arc GPUs")
 	}
 	return accelerators, nil
+}
+
+type intelVRAMSample struct {
+	TotalMB int
+	UsedMB  int
+}
+
+func (d Detector) withIntelUsedMemory(accelerators []domain.Accelerator) ([]domain.Accelerator, error) {
+	if len(accelerators) == 0 {
+		return nil, errors.New("no Intel Arc accelerators to annotate")
+	}
+	samples, err := d.intelVRAMSamples()
+	if err != nil {
+		return nil, err
+	}
+	used := make([]bool, len(samples))
+	out := append([]domain.Accelerator(nil), accelerators...)
+	for i, acc := range out {
+		match := -1
+		for j, sample := range samples {
+			if used[j] {
+				continue
+			}
+			if closeMemoryMB(acc.VRAMTotalMB, sample.TotalMB) {
+				match = j
+				break
+			}
+		}
+		if match < 0 {
+			return nil, fmt.Errorf("intel accelerator %q has no trustworthy used VRAM sample", acc.ArchFamily)
+		}
+		used[match] = true
+		out[i].VRAMUsedMB = samples[match].UsedMB
+	}
+	return out, nil
+}
+
+func (d Detector) intelVRAMSamples() ([]intelVRAMSample, error) {
+	root := d.DRMPath
+	if root == "" {
+		root = "/sys/class/drm"
+	}
+	readDir := d.ReadDir
+	if readDir == nil {
+		readDir = os.ReadDir
+	}
+	readFile := d.ReadFile
+	if readFile == nil {
+		readFile = os.ReadFile
+	}
+	entries, err := readDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("read DRM devices: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, "card") && !strings.Contains(name, "-") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	var samples []intelVRAMSample
+	for _, name := range names {
+		devicePath := filepath.Join(root, name, "device")
+		vendor, err := readTrimmed(readFile, filepath.Join(devicePath, "vendor"))
+		if err != nil || !strings.EqualFold(vendor, "0x8086") {
+			continue
+		}
+		totalBytes, err := readInt64File(readFile, filepath.Join(devicePath, "mem_info_vram_total"))
+		if err != nil {
+			continue
+		}
+		usedBytes, err := readInt64File(readFile, filepath.Join(devicePath, "mem_info_vram_used"))
+		if err != nil {
+			continue
+		}
+		if totalBytes <= 0 || usedBytes < 0 || usedBytes > totalBytes {
+			return nil, fmt.Errorf("invalid Intel VRAM sample total=%d used=%d", totalBytes, usedBytes)
+		}
+		samples = append(samples, intelVRAMSample{
+			TotalMB: int(totalBytes / 1024 / 1024),
+			UsedMB:  int(usedBytes / 1024 / 1024),
+		})
+	}
+	if len(samples) == 0 {
+		return nil, errors.New("no trustworthy Intel Arc used VRAM source")
+	}
+	return samples, nil
+}
+
+func readTrimmed(readFile func(string) ([]byte, error), path string) (string, error) {
+	data, err := readFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+func readInt64File(readFile func(string) ([]byte, error), path string) (int64, error) {
+	raw, err := readTrimmed(readFile, path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(raw, 10, 64)
+}
+
+func closeMemoryMB(a, b int) bool {
+	delta := a - b
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= 256
 }
 
 func intelKind(name string) string {

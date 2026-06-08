@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -99,6 +100,39 @@ func TestWaitReadyReturnsOnHealthyResponse(t *testing.T) {
 	}
 }
 
+func TestWaitReadyRetriesUntilHealthy(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+	var calls int
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	adapter := NewAdapter(Config{Clock: clock, HTTPClient: client, PollInterval: time.Second})
+	done := make(chan error, 1)
+	go func() {
+		done <- adapter.WaitReady(context.Background(), "ready.test:8080")
+	}()
+	waitForFakeTimer(t, clock)
+	clock.Advance(time.Second)
+	if err := <-done; err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("health calls = %d", calls)
+	}
+}
+
+func TestWaitReadyFailsOnInvalidHealthURL(t *testing.T) {
+	adapter := NewAdapter(Config{})
+	if err := adapter.WaitReady(context.Background(), "\n"); err == nil {
+		t.Fatal("expected invalid URL error")
+	}
+}
+
 func TestWaitReadyRespectsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -114,6 +148,32 @@ func TestLaunchErrorsForProcessStartFailure(t *testing.T) {
 	_, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1")
 	if !errors.Is(err, startErr) {
 		t.Fatalf("Launch err = %v", err)
+	}
+}
+
+func TestLaunchFailsBeforeStartForInvalidArgsOrCanceledContext(t *testing.T) {
+	runner := &fakeRunner{}
+	adapter := NewAdapter(Config{
+		BinaryPath:     "llama-server",
+		ProcessRunner:  runner,
+		LaunchProfiles: map[string][]string{"metal": {"--metal"}},
+	})
+	_, err := adapter.Launch(context.Background(), fixtures.MakePreset(fixtures.WithLaunchProfile("missing")), "127.0.0.1:1")
+	if err == nil || !strings.Contains(err.Error(), "unknown llama.cpp launch profile") {
+		t.Fatalf("Launch err = %v", err)
+	}
+	if len(runner.starts) != 0 {
+		t.Fatalf("process started after render error: %+v", runner.starts)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = adapter.Launch(ctx, fixtures.MakePreset(fixtures.WithLaunchProfile("metal")), "127.0.0.1:1")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Launch err = %v", err)
+	}
+	if len(runner.starts) != 0 {
+		t.Fatalf("process started after canceled context: %+v", runner.starts)
 	}
 }
 
@@ -227,10 +287,11 @@ func TestStopSignalsUntrackedStoredProcessGroup(t *testing.T) {
 	go func() { done <- handle.Wait() }()
 	pid := handle.PID()
 	pgid := processGroupID(pid)
+	startedAt := time.Now().UTC()
 	adapter := NewAdapter(Config{})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := adapter.Stop(ctx, ports.Handle{PID: pid, PGID: pgid, Kind: "llamacpp", Ref: fmt.Sprintf("%d", pid), Binary: "/bin/sleep", Args: []string{"60"}}); err != nil {
+	if err := adapter.Stop(ctx, ports.Handle{PID: pid, PGID: pgid, Kind: "llamacpp", Ref: fmt.Sprintf("%d", pid), Binary: "/bin/sleep", Args: []string{"60"}, StartedAt: startedAt}); err != nil {
 		t.Fatalf("Stop untracked: %v", err)
 	}
 	select {
@@ -242,6 +303,8 @@ func TestStopSignalsUntrackedStoredProcessGroup(t *testing.T) {
 
 func TestStopKillsUntrackedStoredProcessGroupOnCanceledCleanup(t *testing.T) {
 	t.Setenv("MYCELIUM_BACKEND_IGNORE_SIGNALS_HELPER", "1")
+	readyPath := filepath.Join(t.TempDir(), "ready")
+	t.Setenv("MYCELIUM_BACKEND_IGNORE_SIGNALS_READY", readyPath)
 	handle, err := execProcessRunner{}.Start(context.Background(), os.Args[0], []string{"-test.run=TestSignalIgnoringHelperProcess"})
 	if err != nil {
 		t.Fatalf("Start helper: %v", err)
@@ -249,10 +312,13 @@ func TestStopKillsUntrackedStoredProcessGroupOnCanceledCleanup(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- handle.Wait() }()
 	pid := handle.PID()
+	pgid := processGroupID(pid)
+	startedAt := time.Now().UTC()
+	waitForHelperReady(t, readyPath)
 	adapter := NewAdapter(Config{StopGracePeriod: 200 * time.Millisecond})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err = adapter.Stop(ctx, ports.Handle{PID: pid, Kind: "llamacpp", Ref: fmt.Sprintf("%d", pid), Binary: os.Args[0], Args: []string{"-test.run=TestSignalIgnoringHelperProcess"}})
+	err = adapter.Stop(ctx, ports.Handle{PID: pid, PGID: pgid, Kind: "llamacpp", Ref: fmt.Sprintf("%d", pid), Binary: os.Args[0], Args: []string{"-test.run=TestSignalIgnoringHelperProcess"}, StartedAt: startedAt})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Stop err = %v", err)
 	}
@@ -263,11 +329,42 @@ func TestStopKillsUntrackedStoredProcessGroupOnCanceledCleanup(t *testing.T) {
 	}
 }
 
+func TestStopKillsUntrackedStoredProcessGroupAfterGracePeriod(t *testing.T) {
+	t.Setenv("MYCELIUM_BACKEND_IGNORE_SIGNALS_HELPER", "1")
+	readyPath := filepath.Join(t.TempDir(), "ready")
+	t.Setenv("MYCELIUM_BACKEND_IGNORE_SIGNALS_READY", readyPath)
+	handle, err := execProcessRunner{}.Start(context.Background(), os.Args[0], []string{"-test.run=TestSignalIgnoringHelperProcess"})
+	if err != nil {
+		t.Fatalf("Start helper: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- handle.Wait() }()
+	pid := handle.PID()
+	pgid := processGroupID(pid)
+	startedAt := time.Now().UTC()
+	waitForHelperReady(t, readyPath)
+	adapter := NewAdapter(Config{StopGracePeriod: 100 * time.Millisecond})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err = adapter.Stop(ctx, ports.Handle{PID: pid, PGID: pgid, Kind: "llamacpp", Ref: fmt.Sprintf("%d", pid), Binary: os.Args[0], Args: []string{"-test.run=TestSignalIgnoringHelperProcess"}, StartedAt: startedAt})
+	if err != nil {
+		t.Fatalf("Stop err = %v", err)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("untracked process group was not killed after grace period")
+	}
+}
+
 func TestSignalIgnoringHelperProcess(t *testing.T) {
 	if os.Getenv("MYCELIUM_BACKEND_IGNORE_SIGNALS_HELPER") != "1" {
 		return
 	}
 	signal.Ignore(syscall.SIGTERM, syscall.SIGINT)
+	if readyPath := os.Getenv("MYCELIUM_BACKEND_IGNORE_SIGNALS_READY"); readyPath != "" {
+		_ = os.WriteFile(readyPath, []byte("ready"), 0o600)
+	}
 	select {}
 }
 
@@ -387,11 +484,101 @@ func TestStopProcessReturnsWaitError(t *testing.T) {
 	}
 }
 
+func TestStopProcessSurfacesKillFailures(t *testing.T) {
+	killErr := errors.New("kill failed")
+	canceled := newFakeProcess(812)
+	canceled.killErr = killErr
+	adapter := NewAdapter(Config{Clock: mocks.NewFakeClock(time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	stopped, err := adapter.stopProcess(ctx, canceled)
+	canceled.finish(nil)
+	if !errors.Is(err, killErr) || stopped {
+		t.Fatalf("canceled stop stopped=%t err=%v", stopped, err)
+	}
+
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+	timedOut := newFakeProcess(813)
+	timedOut.killErr = killErr
+	adapter = NewAdapter(Config{Clock: clock, StopGracePeriod: time.Second})
+	done := make(chan error, 1)
+	go func() {
+		stopped, err := adapter.stopProcess(context.Background(), timedOut)
+		if stopped {
+			done <- errors.New("process reported stopped")
+			return
+		}
+		done <- err
+	}()
+	waitForFakeTimer(t, clock)
+	clock.Advance(time.Second)
+	if err := <-done; !errors.Is(err, killErr) {
+		t.Fatalf("timeout stop err = %v", err)
+	}
+	timedOut.finish(nil)
+}
+
 func TestSignalPIDNoopsForInvalidPID(t *testing.T) {
 	if err := signalPID(0); err != nil {
 		t.Fatalf("signalPID: %v", err)
 	}
 	_ = signalPID(99999999)
+	if got := processGroupID(0); got != 0 {
+		t.Fatalf("processGroupID(0) = %d", got)
+	}
+	if _, err := (execProcessRunner{}).Start(context.Background(), "/definitely/missing/llama-server", nil); err == nil {
+		t.Fatal("expected missing binary start error")
+	}
+}
+
+func TestSignalPIDStopsLiveChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process signal test uses POSIX signals")
+	}
+	handle, err := execProcessRunner{}.Start(context.Background(), "/bin/sleep", []string{"10"})
+	if err != nil {
+		t.Fatalf("Start sleep: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- handle.Wait() }()
+	if err := signalPID(handle.PID()); err != nil {
+		_ = handle.Kill()
+		t.Fatalf("signalPID: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		_ = handle.Kill()
+		t.Fatal("child did not exit after signalPID")
+	}
+}
+
+func TestKillHandleStopsSafeProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process group kill test uses POSIX signals")
+	}
+	handle, err := execProcessRunner{}.Start(context.Background(), "/bin/sleep", []string{"10"})
+	if err != nil {
+		t.Fatalf("Start sleep: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- handle.Wait() }()
+	pid := handle.PID()
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		_ = handle.Kill()
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := killHandle(ports.Handle{PID: pid, PGID: processGroupID(pid)}, process); err != nil {
+		_ = handle.Kill()
+		t.Fatalf("killHandle: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		_ = handle.Kill()
+		t.Fatal("process group did not exit after killHandle")
+	}
 }
 
 func TestStoredProcessIdentityAndExternalWaitFailures(t *testing.T) {
@@ -400,8 +587,8 @@ func TestStoredProcessIdentityAndExternalWaitFailures(t *testing.T) {
 	if err := verifyProcessIdentity(ports.Handle{}); err == nil || !strings.Contains(err.Error(), "pid is required") {
 		t.Fatalf("missing pid err = %v", err)
 	}
-	if err := verifyProcessIdentity(ports.Handle{PID: selfPID}); err != nil {
-		t.Fatalf("zero pgid should skip pgid verification: %v", err)
+	if err := verifyProcessIdentity(ports.Handle{PID: selfPID}); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("missing identity err = %v", err)
 	}
 
 	wrongPGID := selfPGID + 1
@@ -412,6 +599,13 @@ func TestStoredProcessIdentityAndExternalWaitFailures(t *testing.T) {
 	err := adapter.Stop(context.Background(), ports.Handle{PID: selfPID, PGID: wrongPGID, Kind: "llamacpp", Ref: "self"})
 	if err == nil || !strings.Contains(err.Error(), "pgid changed") {
 		t.Fatalf("identity mismatch err = %v", err)
+	}
+	err = adapter.Stop(context.Background(), ports.Handle{PID: selfPID, PGID: selfPGID, Kind: "llamacpp", Ref: "self", Binary: "/definitely/not/the/test/binary", Args: []string{"nope"}, StartedAt: time.Now().UTC()})
+	if err == nil || !strings.Contains(err.Error(), "binary mismatch") {
+		t.Fatalf("binary mismatch err = %v", err)
+	}
+	if err := syscall.Kill(selfPID, syscall.Signal(0)); err != nil {
+		t.Fatalf("wrong-process identity check signaled self: %v", err)
 	}
 
 	selfProcess, err := os.FindProcess(selfPID)
@@ -440,6 +634,28 @@ func TestStoredProcessIdentityAndExternalWaitFailures(t *testing.T) {
 	clock.Advance(time.Nanosecond)
 	if err := <-done; err == nil || !strings.Contains(err.Error(), "did not exit after signal") {
 		t.Fatalf("timeout err = %v", err)
+	}
+}
+
+func TestStopStoredProcessTreatsAlreadyExitedRefAsReaped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process signal wrapper test uses POSIX shell")
+	}
+	handle, err := execProcessRunner{}.Start(context.Background(), "/bin/sh", []string{"-c", "exit 0"})
+	if err != nil {
+		t.Fatalf("Start shell: %v", err)
+	}
+	pid := handle.PID()
+	_ = handle.Wait()
+
+	registry := &recordingProcessRegistry{}
+	adapter := NewAdapter(Config{ProcessRegistry: registry})
+	err = adapter.Stop(context.Background(), ports.Handle{PID: pid, PGID: processGroupID(pid), Kind: "llamacpp", Ref: fmt.Sprintf("%d", pid), Binary: "/bin/sh", Args: []string{"-c", "exit 0"}, StartedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("Stop exited ref: %v", err)
+	}
+	if len(registry.removed) != 1 || registry.removed[0].PID != pid {
+		t.Fatalf("removed refs = %+v", registry.removed)
 	}
 }
 
@@ -660,6 +876,18 @@ func waitForFakeSignal(t *testing.T, process *fakeProcess) {
 		runtime.Gosched()
 	}
 	t.Fatal("process was not signaled")
+}
+
+func waitForHelperReady(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatal("signal helper did not become ready")
 }
 
 func (p *fakeProcess) Wait() error {

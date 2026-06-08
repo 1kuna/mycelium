@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"mycelium/internal/backends/processadapter"
+	"mycelium/internal/backends/vllmargs"
 	"mycelium/internal/ports"
 )
 
@@ -29,6 +30,7 @@ func NewAdapterWithConfig(cfg Config) *processadapter.Adapter {
 		Name:            "vllm",
 		BinaryPath:      cfg.BinaryPath,
 		Args:            args,
+		ArgNormalizer:   vllmargs.Normalize,
 		HealthPath:      "/health",
 		PollInterval:    defaultVLLMPollInterval(cfg.PollInterval),
 		StopGracePeriod: cfg.StopGracePeriod,

@@ -79,7 +79,7 @@ func TestBackendAwareRespectsContextCancellationAtDispatch(t *testing.T) {
 func TestBackendAwareVLLMUsesUnitReservationClaim(t *testing.T) {
 	preset := fixtures.MakePreset(fixtures.WithPresetID("vllm"))
 	preset.Backend = domain.BackendVLLM
-	preset.LaunchArgs = []string{"serve", "{model}", "--gpu-memory-utilization", "0.25"}
+	preset.LaunchArgs = []string{"serve", "{model}", "--gpu-memory-utilization", "0.85", "--gpu-memory-utilization=0.25"}
 	node := fixtures.MakeNode()
 	node.Accelerators = []domain.Accelerator{
 		{Index: 0, VRAMTotalMB: 1000},

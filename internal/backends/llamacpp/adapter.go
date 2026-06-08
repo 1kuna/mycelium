@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"mycelium/internal/backends/processidentity"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
@@ -273,7 +274,13 @@ func (a *Adapter) stopStoredProcess(ctx context.Context, handle ports.Handle) (b
 	if err != nil {
 		return false, err
 	}
+	if exited, err := processidentity.Exited(handle.PID); exited || err != nil {
+		return exited, err
+	}
 	if err := verifyProcessIdentity(handle); err != nil {
+		if processidentity.IsExited(err) {
+			return true, nil
+		}
 		return false, err
 	}
 	if err := signalHandle(handle, process, syscall.SIGINT); err != nil {
@@ -445,20 +452,7 @@ func processGroupID(pid int) int {
 }
 
 func verifyProcessIdentity(handle ports.Handle) error {
-	if handle.PID <= 0 {
-		return fmt.Errorf("process pid is required")
-	}
-	if handle.PGID == 0 {
-		return nil
-	}
-	pgid, err := syscall.Getpgid(handle.PID)
-	if err != nil {
-		return err
-	}
-	if pgid != handle.PGID {
-		return fmt.Errorf("process %d pgid changed from %d to %d", handle.PID, handle.PGID, pgid)
-	}
-	return nil
+	return processidentity.Verify(handle)
 }
 
 func signalHandle(handle ports.Handle, process *os.Process, sig syscall.Signal) error {

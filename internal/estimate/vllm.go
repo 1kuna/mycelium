@@ -4,9 +4,8 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"strconv"
-	"strings"
 
+	"mycelium/internal/backends/vllmargs"
 	"mycelium/internal/domain"
 )
 
@@ -41,27 +40,12 @@ func estimateVLLMReservation(ctx context.Context, p domain.Preset, node domain.N
 }
 
 func gpuMemoryUtilization(args []string) (float64, error) {
-	for i, arg := range args {
-		if arg == "--gpu-memory-utilization" {
-			if i+1 >= len(args) {
-				return 0, fmt.Errorf("missing value")
-			}
-			return parseUtil(args[i+1])
-		}
-		if strings.HasPrefix(arg, "--gpu-memory-utilization=") {
-			return parseUtil(strings.TrimPrefix(arg, "--gpu-memory-utilization="))
-		}
-	}
-	return 0, fmt.Errorf("argument not found")
-}
-
-func parseUtil(raw string) (float64, error) {
-	value, err := strconv.ParseFloat(raw, 64)
+	value, ok, err := vllmargs.GPUMemoryUtilization(args)
 	if err != nil {
 		return 0, err
 	}
-	if value <= 0 || value > 1 {
-		return 0, fmt.Errorf("value must be > 0 and <= 1")
+	if !ok {
+		return 0, fmt.Errorf("argument not found")
 	}
 	return value, nil
 }

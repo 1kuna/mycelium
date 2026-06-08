@@ -168,3 +168,35 @@ func (s *processRefStore) DeleteProcessRefs(_ context.Context, nodeID string) er
 	delete(s.refs, nodeID)
 	return nil
 }
+
+func (s *processRefStore) AddProcessRef(_ context.Context, nodeID string, ref domain.ProcessRef) error {
+	if s.refs == nil {
+		s.refs = map[string][]domain.ProcessRef{}
+	}
+	refs := s.refs[nodeID]
+	for i, existing := range refs {
+		if existing.PID == ref.PID {
+			refs[i] = ref
+			s.refs[nodeID] = refs
+			return nil
+		}
+	}
+	s.refs[nodeID] = append(refs, ref)
+	return nil
+}
+
+func (s *processRefStore) RemoveProcessRef(_ context.Context, nodeID string, ref domain.ProcessRef) error {
+	refs := s.refs[nodeID]
+	out := refs[:0]
+	for _, existing := range refs {
+		if existing.PID != ref.PID {
+			out = append(out, existing)
+		}
+	}
+	if len(out) == 0 {
+		delete(s.refs, nodeID)
+		return nil
+	}
+	s.refs[nodeID] = out
+	return nil
+}
