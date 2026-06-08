@@ -3,7 +3,9 @@ package hardware
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -95,10 +97,18 @@ func TestLinuxDetectorBuildsNVIDIANode(t *testing.T) {
 		Clock:    mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
 		StatDisk: fakeDiskStats,
 		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
-			if name != "nvidia-smi" || len(args) != 2 || !strings.Contains(args[0], "memory.total") || !strings.Contains(args[0], "memory.used") {
-				t.Fatalf("command = %s %+v", name, args)
+			switch name {
+			case "nvidia-smi":
+				if len(args) != 2 || !strings.Contains(args[0], "memory.total") || !strings.Contains(args[0], "memory.used") {
+					t.Fatalf("command = %s %+v", name, args)
+				}
+				return []byte("0, NVIDIA GeForce RTX 4090, 24564, 4096, 8.9\n1, NVIDIA GeForce RTX 4070 Ti, 12282, 1024, 8.9\n"), nil
+			case "clinfo":
+				return nil, errors.New("no intel")
+			default:
+				t.Fatalf("unexpected command %s", name)
 			}
-			return []byte("0, NVIDIA GeForce RTX 4090, 24564, 4096, 8.9\n1, NVIDIA GeForce RTX 4070 Ti, 12282, 1024, 8.9\n"), nil
+			return nil, nil
 		},
 	}
 	node, err := detector.Detect(context.Background(), domain.Node{ID: "cuda-a", MaxUtil: 0.9})
@@ -137,6 +147,8 @@ func TestLinuxDetectorBuildsSparkGB10Node(t *testing.T) {
 				default:
 					t.Fatalf("unexpected getconf arg %q", args[0])
 				}
+			case "clinfo":
+				return nil, errors.New("no intel")
 			default:
 				t.Fatalf("unexpected command %s", name)
 			}
@@ -170,6 +182,9 @@ func TestLinuxDetectorBuildsIntelArcB70Node(t *testing.T) {
 		GOOS:     "linux",
 		Clock:    mocks.NewFakeClock(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)),
 		StatDisk: fakeDiskStats,
+		DRMPath:  "/fake/drm",
+		ReadDir:  fakeDRMDir,
+		ReadFile: fakeIntelSysfs(32530182144, 2147483648),
 		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 			switch name {
 			case "nvidia-smi":
@@ -201,11 +216,71 @@ NULL platform behavior
 		t.Fatalf("node = %+v", node)
 	}
 	acc := node.Accelerators[0]
-	if acc.Vendor != "intel" || acc.Kind != "arc-pro-b70" || acc.VRAMTotalMB != 31023 || !strings.Contains(acc.ArchFamily, "B70") {
+	if acc.Vendor != "intel" || acc.Kind != "arc-pro-b70" || acc.VRAMTotalMB != 31023 || acc.VRAMUsedMB != 2048 || !strings.Contains(acc.ArchFamily, "B70") {
 		t.Fatalf("accelerator = %+v", acc)
 	}
 	if node.Labels["gpu.vendor"] != "intel" || node.OOMSeverity != domain.OOMSoft || node.SpeedClass.Source != "class-default" {
 		t.Fatalf("labels/speed = %+v %+v", node.Labels, node.SpeedClass)
+	}
+}
+
+func TestLinuxDetectorAggregatesMixedNVIDIAAndIntelDevices(t *testing.T) {
+	detector := Detector{
+		GOOS:     "linux",
+		Clock:    mocks.NewFakeClock(time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)),
+		StatDisk: fakeDiskStats,
+		DRMPath:  "/fake/drm",
+		ReadDir:  fakeDRMDir,
+		ReadFile: fakeIntelSysfs(32530182144, 1073741824),
+		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			switch name {
+			case "nvidia-smi":
+				return []byte("0, NVIDIA GeForce RTX 4090, 24564, 4096, 8.9\n"), nil
+			case "clinfo":
+				return []byte(`Device Name Intel(R) Arc(TM) Pro B70 Graphics
+Global memory size 32530182144 (30.3GiB)
+`), nil
+			default:
+				t.Fatalf("unexpected command %s", name)
+				return nil, nil
+			}
+		},
+	}
+	node, err := detector.Detect(context.Background(), domain.Node{ID: "mixed", MaxUtil: 0.85})
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if len(node.Accelerators) != 2 || node.Labels["gpu.vendor"] != "mixed" || node.Labels["gpu.vendor.nvidia"] != "true" || node.Labels["gpu.vendor.intel"] != "true" {
+		t.Fatalf("node = %+v labels=%+v", node, node.Labels)
+	}
+	if node.Accelerators[0].Vendor != "nvidia" || node.Accelerators[1].Vendor != "intel" || node.Accelerators[1].Index != 1 || node.Accelerators[1].VRAMUsedMB != 1024 {
+		t.Fatalf("accelerators = %+v", node.Accelerators)
+	}
+}
+
+func TestLinuxDetectorDoesNotAdvertiseIntelWithoutUsedMemory(t *testing.T) {
+	_, err := (Detector{
+		GOOS:     "linux",
+		StatDisk: fakeDiskStats,
+		Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			switch name {
+			case "nvidia-smi":
+				return nil, errors.New("no nvidia")
+			case "clinfo":
+				return []byte(`Device Name Intel(R) Arc(TM) Pro B70 Graphics
+Global memory size 32530182144 (30.3GiB)
+`), nil
+			default:
+				t.Fatalf("unexpected command %s", name)
+				return nil, nil
+			}
+		},
+		ReadDir: func(string) ([]fs.DirEntry, error) {
+			return nil, errors.New("no sysfs")
+		},
+	}).Detect(context.Background(), domain.Node{ID: "b70-a", MaxUtil: 0.85})
+	if err == nil || !strings.Contains(err.Error(), "used VRAM") && !strings.Contains(err.Error(), "DRM") {
+		t.Fatalf("intel used memory err = %v", err)
 	}
 }
 
@@ -373,4 +448,46 @@ func TestDetectorSatisfiesPort(t *testing.T) {
 
 func fakeDiskStats(string) (DiskStats, error) {
 	return DiskStats{TotalMB: 1000, FreeMB: 700}, nil
+}
+
+func fakeDRMDir(path string) ([]fs.DirEntry, error) {
+	if path != "/fake/drm" {
+		return nil, errors.New("unexpected drm path")
+	}
+	return []fs.DirEntry{fakeDirEntry("card1"), fakeDirEntry("card1-render")}, nil
+}
+
+func fakeIntelSysfs(totalBytes, usedBytes int64) func(string) ([]byte, error) {
+	files := map[string]string{
+		"/fake/drm/card1/device/vendor":                "0x8086\n",
+		"/fake/drm/card1/device/mem_info_vram_total":   strconv.FormatInt(totalBytes, 10) + "\n",
+		"/fake/drm/card1/device/mem_info_vram_used":    strconv.FormatInt(usedBytes, 10) + "\n",
+		"/fake/drm/card1-render/device/vendor":         "0x8086\n",
+		"/fake/drm/card1-render/device/mem_info_total": strconv.FormatInt(totalBytes, 10) + "\n",
+	}
+	return func(path string) ([]byte, error) {
+		value, ok := files[path]
+		if !ok {
+			return nil, errors.New("missing " + path)
+		}
+		return []byte(value), nil
+	}
+}
+
+type fakeDirEntry string
+
+func (e fakeDirEntry) Name() string {
+	return string(e)
+}
+
+func (e fakeDirEntry) IsDir() bool {
+	return true
+}
+
+func (e fakeDirEntry) Type() fs.FileMode {
+	return fs.ModeDir
+}
+
+func (e fakeDirEntry) Info() (fs.FileInfo, error) {
+	return nil, nil
 }

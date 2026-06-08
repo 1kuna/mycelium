@@ -45,6 +45,32 @@ func TestGGUFEstimatorUsesNodeSideInspectionForRemoteModel(t *testing.T) {
 	}
 }
 
+func TestGGUFEstimatorUsesOwningNodeBeforeLocalFile(t *testing.T) {
+	model := filepath.Join(t.TempDir(), "model.gguf")
+	if err := os.WriteFile(model, []byte("coordinator copy"), 0o600); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	node := fixtures.MakeNode(fixtures.WithNodeID("owner"))
+	agent := mocks.NewNodeAgent(node)
+	agent.Metadata = domain.ModelMetadata{ModelRef: model, Format: "gguf", WeightsMB: 100, KVPerTokenMB: 0.5, ContextLength: 4096}
+	parser := &staticParser{metadata: domain.ModelMetadata{WeightsMB: 50, KVPerTokenMB: 0.25}}
+	estimator := NewGGUF(parser, map[string]ports.NodeAgent{node.ID: agent})
+
+	claim, err := estimator.Estimate(context.Background(), fixtures.MakePreset(fixtures.WithModelRef(model), fixtures.WithPresetNode(node.ID)), 1000, 1)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	if claim != (domain.Claim{WeightsMB: 100, KVReservedMB: 500}) {
+		t.Fatalf("claim = %+v", claim)
+	}
+	if parser.modelRef != "" {
+		t.Fatalf("parser should not inspect node-owned model, got %q", parser.modelRef)
+	}
+	if len(agent.Calls) != 1 || agent.Calls[0] != "inspect:preset_test" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+}
+
 func TestGGUFEstimatorUsesResolverForRemoteModel(t *testing.T) {
 	node := fixtures.MakeNode()
 	agent := mocks.NewNodeAgent(node)

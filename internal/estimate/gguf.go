@@ -61,12 +61,6 @@ func (e *GGUFEstimator) Estimate(ctx context.Context, p domain.Preset, contextLe
 }
 
 func (e *GGUFEstimator) metadata(ctx context.Context, p domain.Preset) (domain.ModelMetadata, error) {
-	if isLocalFile(p.ModelRef) {
-		if e.parser == nil {
-			return domain.ModelMetadata{}, fmt.Errorf("gguf parser is not configured for local model %q", p.ModelRef)
-		}
-		return e.parser.Parse(ctx, p.ModelRef)
-	}
 	if p.NodeID != "" {
 		agent, ok := e.agents[p.NodeID]
 		if !ok && e.resolver != nil {
@@ -81,6 +75,12 @@ func (e *GGUFEstimator) metadata(ctx context.Context, p domain.Preset) (domain.M
 			return domain.ModelMetadata{}, fmt.Errorf("no node agent for model %q on node %q", p.ModelRef, p.NodeID)
 		}
 		return agent.InspectModel(ctx, p)
+	}
+	if isLocalFile(p.ModelRef) {
+		if e.parser == nil {
+			return domain.ModelMetadata{}, fmt.Errorf("gguf parser is not configured for local model %q", p.ModelRef)
+		}
+		return e.parser.Parse(ctx, p.ModelRef)
 	}
 	return domain.ModelMetadata{}, fmt.Errorf("model %q is not local and has no owning node", p.ModelRef)
 }

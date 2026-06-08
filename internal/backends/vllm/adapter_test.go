@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"mycelium/internal/backends/processadapter"
+	"mycelium/internal/backends/vllmargs"
 	"mycelium/internal/domain"
 )
 
@@ -40,8 +41,8 @@ func TestAdapterLaunchRendersConfiguredArgs(t *testing.T) {
 	}
 	want := []string{
 		"serve", "model-a", "--host", "127.0.0.1", "--port", "54321",
-		"--gpu-memory-utilization", "0.85",
 		"--served-model-name", "preset-a",
+		"--gpu-memory-utilization", "0.85",
 	}
 	if !reflect.DeepEqual(runner.args, want) {
 		t.Fatalf("args = %+v want %+v", runner.args, want)
@@ -52,6 +53,41 @@ func TestAdapterLaunchRendersConfiguredArgs(t *testing.T) {
 	}
 	if !process.signaled {
 		t.Fatal("process was not signaled")
+	}
+}
+
+func TestAdapterNormalizesGPUUtilizationToPresetValue(t *testing.T) {
+	process := &fakeProcess{pid: 2346, done: make(chan struct{})}
+	runner := &recordingRunner{process: process}
+	adapter := NewAdapterWithConfig(Config{
+		BinaryPath:    "vllm",
+		Args:          []string{"--gpu-memory-utilization", "0.85", "--dtype", "auto"},
+		ProcessRunner: runner,
+	})
+	preset := domain.Preset{
+		ID:         "preset-a",
+		ModelRef:   "model-a",
+		LaunchArgs: []string{"--gpu-memory-utilization=0.25", "--served-model-name", "{preset}"},
+	}
+	handle, err := adapter.Launch(context.Background(), preset, "127.0.0.1:54321")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	process.exitOnSignal = true
+	defer func() { _ = adapter.Stop(context.Background(), handle) }()
+
+	want := []string{
+		"serve", "model-a", "--host", "127.0.0.1", "--port", "54321",
+		"--dtype", "auto",
+		"--served-model-name", "preset-a",
+		"--gpu-memory-utilization", "0.25",
+	}
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("args = %+v want %+v", runner.args, want)
+	}
+	util, ok, err := vllmargs.GPUMemoryUtilization(preset.LaunchArgs)
+	if err != nil || !ok || util != 0.25 {
+		t.Fatalf("preset utilization = %f ok=%t err=%v", util, ok, err)
 	}
 }
 
