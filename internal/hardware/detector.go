@@ -2,6 +2,7 @@ package hardware
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -247,7 +248,7 @@ func (d Detector) detectLinux(ctx context.Context, seed domain.Node) (domain.Nod
 	}
 	intelAccelerators, intelErr := parseIntelCLInfo(out)
 	if intelErr == nil {
-		intelAccelerators, intelErr = d.withIntelUsedMemory(intelAccelerators)
+		intelAccelerators, intelErr = d.withIntelUsedMemory(ctx, intelAccelerators)
 	}
 	if intelErr != nil {
 		if len(accelerators) == 0 {
@@ -528,11 +529,11 @@ type intelVRAMSample struct {
 	UsedMB  int
 }
 
-func (d Detector) withIntelUsedMemory(accelerators []domain.Accelerator) ([]domain.Accelerator, error) {
+func (d Detector) withIntelUsedMemory(ctx context.Context, accelerators []domain.Accelerator) ([]domain.Accelerator, error) {
 	if len(accelerators) == 0 {
 		return nil, errors.New("no Intel Arc accelerators to annotate")
 	}
-	samples, err := d.intelVRAMSamples()
+	samples, err := d.intelVRAMSamples(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -544,7 +545,7 @@ func (d Detector) withIntelUsedMemory(accelerators []domain.Accelerator) ([]doma
 			if used[j] {
 				continue
 			}
-			if closeMemoryMB(acc.VRAMTotalMB, sample.TotalMB) {
+			if sample.TotalMB == 0 || closeMemoryMB(acc.VRAMTotalMB, sample.TotalMB) {
 				match = j
 				break
 			}
@@ -558,7 +559,7 @@ func (d Detector) withIntelUsedMemory(accelerators []domain.Accelerator) ([]doma
 	return out, nil
 }
 
-func (d Detector) intelVRAMSamples() ([]intelVRAMSample, error) {
+func (d Detector) intelVRAMSamples(ctx context.Context) ([]intelVRAMSample, error) {
 	root := d.DRMPath
 	if root == "" {
 		root = "/sys/class/drm"
@@ -573,6 +574,10 @@ func (d Detector) intelVRAMSamples() ([]intelVRAMSample, error) {
 	}
 	entries, err := readDir(root)
 	if err != nil {
+		samples, xpuErr := d.xpuSMIVRAMSamples(ctx)
+		if xpuErr == nil {
+			return samples, nil
+		}
 		return nil, fmt.Errorf("read DRM devices: %w", err)
 	}
 	names := make([]string, 0, len(entries))
@@ -607,9 +612,133 @@ func (d Detector) intelVRAMSamples() ([]intelVRAMSample, error) {
 		})
 	}
 	if len(samples) == 0 {
-		return nil, errors.New("no trustworthy Intel Arc used VRAM source")
+		xpuSamples, err := d.xpuSMIVRAMSamples(ctx)
+		if err != nil {
+			return nil, errors.New("no trustworthy Intel Arc used VRAM source")
+		}
+		return xpuSamples, nil
 	}
 	return samples, nil
+}
+
+func (d Detector) xpuSMIVRAMSamples(ctx context.Context) ([]intelVRAMSample, error) {
+	command := d.Command
+	if command == nil {
+		command = runCommand
+	}
+	ids, err := xpuSMIDeviceIDs(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	samples := make([]intelVRAMSample, 0, len(ids))
+	for _, id := range ids {
+		out, err := command(ctx, "xpu-smi", "stats", "-d", strconv.Itoa(id), "-j")
+		if err != nil {
+			return nil, err
+		}
+		deviceSamples, err := parseXPUSMIStats(out)
+		if err != nil {
+			return nil, err
+		}
+		if len(deviceSamples) != 1 {
+			return nil, fmt.Errorf("xpu-smi stats for device %d returned %d samples", id, len(deviceSamples))
+		}
+		samples = append(samples, deviceSamples[0])
+	}
+	if len(samples) == 0 {
+		return nil, errors.New("xpu-smi returned no memory samples")
+	}
+	return samples, nil
+}
+
+func xpuSMIDeviceIDs(ctx context.Context, command func(context.Context, string, ...string) ([]byte, error)) ([]int, error) {
+	out, err := command(ctx, "xpu-smi", "discovery", "-j")
+	if err != nil {
+		return nil, err
+	}
+	var discovery struct {
+		DeviceList []struct {
+			DeviceID           int    `json:"device_id"`
+			DeviceType         string `json:"device_type"`
+			DeviceFunctionType string `json:"device_function_type"`
+			VendorName         string `json:"vendor_name"`
+		} `json:"device_list"`
+	}
+	if err := json.Unmarshal(out, &discovery); err != nil {
+		return nil, fmt.Errorf("parse xpu-smi discovery JSON: %w", err)
+	}
+	ids := make([]int, 0, len(discovery.DeviceList))
+	for _, device := range discovery.DeviceList {
+		if !strings.EqualFold(device.DeviceType, "GPU") {
+			continue
+		}
+		if device.DeviceFunctionType != "" && !strings.EqualFold(device.DeviceFunctionType, "physical") {
+			continue
+		}
+		if device.VendorName != "" && !strings.Contains(strings.ToLower(device.VendorName), "intel") {
+			continue
+		}
+		ids = append(ids, device.DeviceID)
+	}
+	if len(ids) == 0 {
+		return nil, errors.New("xpu-smi discovery returned no Intel GPU devices")
+	}
+	sort.Ints(ids)
+	return ids, nil
+}
+
+func parseXPUSMIStats(out []byte) ([]intelVRAMSample, error) {
+	var raw json.RawMessage
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("parse xpu-smi stats JSON: %w", err)
+	}
+	var one struct {
+		DeviceLevel []struct {
+			MetricsType string  `json:"metrics_type"`
+			Value       float64 `json:"value"`
+		} `json:"device_level"`
+	}
+	if err := json.Unmarshal(raw, &one); err == nil && len(one.DeviceLevel) > 0 {
+		sample, ok := xpuSampleFromMetrics(one.DeviceLevel)
+		if !ok {
+			return nil, errors.New("xpu-smi stats missing XPUM_STATS_MEMORY_USED")
+		}
+		return []intelVRAMSample{sample}, nil
+	}
+	var many []struct {
+		DeviceLevel []struct {
+			MetricsType string  `json:"metrics_type"`
+			Value       float64 `json:"value"`
+		} `json:"device_level"`
+	}
+	if err := json.Unmarshal(raw, &many); err != nil {
+		return nil, fmt.Errorf("parse xpu-smi stats devices: %w", err)
+	}
+	samples := make([]intelVRAMSample, 0, len(many))
+	for _, device := range many {
+		sample, ok := xpuSampleFromMetrics(device.DeviceLevel)
+		if !ok {
+			return nil, errors.New("xpu-smi stats missing XPUM_STATS_MEMORY_USED")
+		}
+		samples = append(samples, sample)
+	}
+	return samples, nil
+}
+
+func xpuSampleFromMetrics(metrics []struct {
+	MetricsType string  `json:"metrics_type"`
+	Value       float64 `json:"value"`
+}) (intelVRAMSample, bool) {
+	for _, metric := range metrics {
+		if metric.MetricsType != "XPUM_STATS_MEMORY_USED" {
+			continue
+		}
+		if metric.Value < 0 {
+			return intelVRAMSample{}, false
+		}
+		return intelVRAMSample{UsedMB: int(metric.Value + 0.5)}, true
+	}
+	return intelVRAMSample{}, false
 }
 
 func readTrimmed(readFile func(string) ([]byte, error), path string) (string, error) {
