@@ -306,9 +306,9 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	if err != nil || decision.JobID != job.ID {
 		t.Fatalf("Plan = %+v %v", decision, err)
 	}
-	lease, err := coordinator.Commit(context.Background(), decision)
-	if err != nil || lease.ID != "lease-a" {
-		t.Fatalf("Commit = %+v %v", lease, err)
+	outcome, err := coordinator.Commit(context.Background(), decision)
+	if err != nil || outcome.Lease.ID != "lease-a" {
+		t.Fatalf("Commit = %+v %v", outcome, err)
 	}
 	if err := coordinator.MarkRunning(context.Background(), job.ID); err != nil {
 		t.Fatalf("MarkRunning: %v", err)

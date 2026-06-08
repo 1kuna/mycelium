@@ -93,7 +93,15 @@ func TestLocalPhase1LoadServeTelemetryRequeueReaper(t *testing.T) {
 		t.Fatalf("launch orphan: %v", err)
 	}
 	processFile := t.TempDir() + "/processes.json"
-	if err := node.WriteProcessRefs(processFile, []node.ProcessRef{{PID: handle.PID, Kind: handle.Kind, Ref: handle.Ref}}); err != nil {
+	if err := node.WriteProcessRefs(processFile, []node.ProcessRef{{
+		PID:       handle.PID,
+		PGID:      handle.PGID,
+		Kind:      handle.Kind,
+		Ref:       handle.Ref,
+		Binary:    handle.Binary,
+		Args:      append([]string(nil), handle.Args...),
+		StartedAt: handle.StartedAt,
+	}}); err != nil {
 		t.Fatalf("write orphan refs: %v", err)
 	}
 	if _, err := node.NewReaper(processFile, node.BackendProcessKiller{Backend: llamacpp.NewAdapter(llamacpp.Config{})}).Reap(ctx); err != nil {
