@@ -471,6 +471,60 @@ func TestCoordinatorQueuesAndExhaustsReplans(t *testing.T) {
 	assertLatestStatus(t, staleRegistry, domain.JobQueued, "")
 }
 
+func TestCoordinatorBoundsStaleFenceReplansBeforeLaterSuccess(t *testing.T) {
+	ctx := context.Background()
+	clock := mocks.NewFakeClock(time.Unix(125, 0).UTC())
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	nodeA := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	nodeB := fixtures.MakeNode(fixtures.WithNodeID("node-b"))
+	claim := fixtures.MakeClaim(10, 2)
+	registry := NewJobRegistry()
+	placer := &scriptedPlacer{decisions: []domain.PlacementDecision{
+		{JobID: job.ID, NodeID: nodeA.ID, Claim: claim, Action: domain.ActionLoadedNew},
+		{JobID: job.ID, NodeID: nodeA.ID, Claim: claim, Action: domain.ActionLoadedNew},
+		{JobID: job.ID, NodeID: nodeB.ID, Claim: claim, Action: domain.ActionLoadedNew},
+	}}
+	ownerA := &scriptedAdmission{
+		offers: []domain.LeaseOffer{
+			{OfferID: "offer-a1", JobID: job.ID, NodeID: nodeA.ID, Claim: claim, Fence: 1},
+			{OfferID: "offer-a2", JobID: job.ID, NodeID: nodeA.ID, Claim: claim, Fence: 2},
+		},
+		commitErrs: []error{domain.ErrStaleFence, domain.ErrStaleFence},
+	}
+	ownerB := &scriptedAdmission{
+		offers: []domain.LeaseOffer{{OfferID: "offer-b", JobID: job.ID, NodeID: nodeB.ID, Claim: claim, Fence: 3}},
+		leases: []domain.Lease{{ID: "lease-b", JobID: job.ID, NodeID: nodeB.ID, Claim: claim}},
+	}
+	coordinator := NewCoordinator(
+		fixtures.MakePeer(fixtures.WithPeerID("peer-a")),
+		jobSource{jobs: map[string]domain.Job{job.ID: job}, payloads: map[string][]byte{job.ID: []byte(`{"job":"a"}`)}},
+		registry,
+		placer,
+		staticPeerFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{nodeA, nodeB}}},
+		ownerResolver{owners: map[string]ports.AdmissionController{nodeA.ID: ownerA, nodeB.ID: ownerB}},
+		clock,
+		WithMaxReplans(1),
+	)
+	mustClaim(t, coordinator, job.ID)
+	plan, err := coordinator.Plan(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if _, err := coordinator.Commit(ctx, plan); !errors.Is(err, domain.ErrStaleFence) {
+		t.Fatalf("Commit err = %v", err)
+	}
+	if strings.Join(placer.calls, ",") != "job-a,job-a" {
+		t.Fatalf("placer calls = %+v", placer.calls)
+	}
+	if strings.Join(ownerA.calls, ",") != "offer:job-a,commit:offer-a1:1,offer:job-a,commit:offer-a2:2" {
+		t.Fatalf("ownerA calls = %+v", ownerA.calls)
+	}
+	if len(ownerB.calls) != 0 {
+		t.Fatalf("ownerB should not be reached after stale-fence bound: %+v", ownerB.calls)
+	}
+	assertLatestStatus(t, registry, domain.JobQueued, "")
+}
+
 func TestCoordinatorErrorPaths(t *testing.T) {
 	ctx := context.Background()
 	clock := mocks.NewFakeClock(time.Unix(130, 0).UTC())

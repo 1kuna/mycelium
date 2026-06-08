@@ -5,6 +5,9 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,6 +131,123 @@ func TestPhase6PeerOwnerRaceStaleFenceReplans(t *testing.T) {
 	}
 	if recordsByJob(t, registry)[jobB.ID].AssignedNode != nodeB.ID {
 		t.Fatalf("registry = %+v", recordsByJob(t, registry))
+	}
+}
+
+func TestPhase6PeerOwnerRaceUsesRealConcurrentOwnerAdmission(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	clock := mocks.NewFakeClock(time.Unix(615, 0).UTC())
+	registry := peer.NewJobRegistry()
+	nodeA := fixtures.MakeNode(fixtures.WithNodeID("node-a"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	claim := fixtures.MakeClaim(600, 0)
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-race"), fixtures.WithWeights(600), fixtures.WithKVPerToken(0), fixtures.WithContextLength(1), fixtures.WithArtifactSize(1))
+	ownerA := newBarrierAdmission(node.NewAdmission(nodeA, lease.NewAllocator(), clock), 2)
+	owners := peerOwnerResolver{owners: map[string]ports.AdmissionController{nodeA.ID: ownerA}}
+	jobs := []domain.Job{
+		fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)),
+		fixtures.MakeJob(fixtures.WithJobID("job-b"), fixtures.WithPreset(preset.ID)),
+	}
+	newCoord := func(peerID string, job domain.Job) *peer.Coordinator {
+		return peer.NewCoordinator(
+			fixtures.MakePeer(fixtures.WithPeerID(peerID)),
+			peerJobLog{jobs: map[string]domain.Job{job.ID: job}, payloads: map[string][]byte{job.ID: []byte(`{"job":"` + job.ID + `"}`)}},
+			registry,
+			&peerScriptedPlacer{decisions: []domain.PlacementDecision{
+				{JobID: job.ID, NodeID: nodeA.ID, Preset: preset, Claim: claim, Action: domain.ActionLoadedNew},
+				{JobID: job.ID, NodeID: nodeA.ID, Preset: preset, Claim: claim, Action: domain.ActionLoadedNew},
+				{JobID: job.ID, Action: domain.ActionQueued},
+			}},
+			peerFleetSource{fleet: domain.FleetSnapshot{Nodes: []domain.Node{nodeA}}},
+			owners,
+			clock,
+		)
+	}
+	coords := []*peer.Coordinator{newCoord("peer-a", jobs[0]), newCoord("peer-b", jobs[1])}
+	plans := make([]domain.PlacementDecision, 2)
+	for i, coord := range coords {
+		if err := coord.ClaimJob(ctx, jobs[i].ID); err != nil {
+			t.Fatalf("ClaimJob %s: %v", jobs[i].ID, err)
+		}
+		plan, err := coord.Plan(ctx, jobs[i].ID)
+		if err != nil {
+			t.Fatalf("Plan %s: %v", jobs[i].ID, err)
+		}
+		if plan.NodeID != nodeA.ID {
+			t.Fatalf("initial plan %s = %+v", jobs[i].ID, plan)
+		}
+		plans[i] = plan
+	}
+
+	type commitResult struct {
+		outcome domain.CommitOutcome
+		err     error
+	}
+	results := make([]commitResult, 2)
+	var wg sync.WaitGroup
+	for i := range coords {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			outcome, err := coords[i].Commit(ctx, plans[i])
+			results[i] = commitResult{outcome: outcome, err: err}
+		}(i)
+	}
+	wg.Wait()
+
+	var running, queued int
+	for i, result := range results {
+		if result.err != nil {
+			t.Fatalf("Commit %s: %v", jobs[i].ID, result.err)
+		}
+		switch result.outcome.Decision.Action {
+		case domain.ActionLoadedNew:
+			running++
+			if result.outcome.Lease.NodeID != nodeA.ID || result.outcome.Lease.Claim != claim {
+				t.Fatalf("running outcome %s = %+v", jobs[i].ID, result.outcome)
+			}
+		case domain.ActionQueued:
+			queued++
+			if result.outcome.Lease.ID != "" {
+				t.Fatalf("queued outcome has lease %s = %+v", jobs[i].ID, result.outcome)
+			}
+		default:
+			t.Fatalf("unexpected outcome %s = %+v", jobs[i].ID, result.outcome)
+		}
+	}
+	if running != 1 || queued != 1 {
+		t.Fatalf("running=%d queued=%d results=%+v", running, queued, results)
+	}
+	if ownerA.firstOfferFences() != "1,1" {
+		t.Fatalf("first offers did not race on same fence: %s", ownerA.firstOfferFences())
+	}
+	var leases []domain.Lease
+	for _, job := range jobs {
+		lease, found, err := ownerA.inner.LeaseForJob(ctx, job.ID)
+		if err != nil {
+			t.Fatalf("LeaseForJob %s: %v", job.ID, err)
+		}
+		if found {
+			leases = append(leases, lease)
+		}
+	}
+	if len(leases) != 1 || leases[0].Claim != claim {
+		t.Fatalf("owner leases = %+v", leases)
+	}
+	records := recordsByJob(t, registry)
+	var queuedRecords, runningRecords int
+	for _, job := range jobs {
+		switch records[job.ID].Status {
+		case domain.JobQueued:
+			queuedRecords++
+		case domain.JobLoading:
+			runningRecords++
+		default:
+			t.Fatalf("record %s = %+v", job.ID, records[job.ID])
+		}
+	}
+	if runningRecords != 1 || queuedRecords != 1 {
+		t.Fatalf("records = %+v", records)
 	}
 }
 
@@ -545,6 +665,67 @@ func (a *peerRaceAdmission) Release(context.Context, string) error {
 
 func (a *peerRaceAdmission) Preempt(context.Context, string, string) error {
 	return errors.New("direct lease preemption is disabled; use policy-aware owner admission preemptions")
+}
+
+type barrierAdmission struct {
+	inner  *node.Admission
+	target int
+	ready  chan struct{}
+	mu     sync.Mutex
+	offers int
+	fences []uint64
+}
+
+func newBarrierAdmission(inner *node.Admission, target int) *barrierAdmission {
+	return &barrierAdmission{inner: inner, target: target, ready: make(chan struct{})}
+}
+
+func (a *barrierAdmission) Offer(ctx context.Context, req domain.AdmissionRequest) (domain.LeaseOffer, error) {
+	offer, err := a.inner.Offer(ctx, req)
+	if err != nil {
+		return domain.LeaseOffer{}, err
+	}
+	a.mu.Lock()
+	a.offers++
+	wait := a.offers <= a.target
+	if a.offers <= a.target {
+		a.fences = append(a.fences, offer.Fence)
+	}
+	if a.offers == a.target {
+		close(a.ready)
+	}
+	ready := a.ready
+	a.mu.Unlock()
+	if wait {
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			return domain.LeaseOffer{}, ctx.Err()
+		}
+	}
+	return offer, nil
+}
+
+func (a *barrierAdmission) Commit(ctx context.Context, offerID string, fence uint64) (domain.Lease, error) {
+	return a.inner.Commit(ctx, offerID, fence)
+}
+
+func (a *barrierAdmission) Release(ctx context.Context, leaseID string) error {
+	return a.inner.Release(ctx, leaseID)
+}
+
+func (a *barrierAdmission) Preempt(ctx context.Context, leaseID, reason string) error {
+	return a.inner.Preempt(ctx, leaseID, reason)
+}
+
+func (a *barrierAdmission) firstOfferFences() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	values := make([]string, 0, len(a.fences))
+	for _, fence := range a.fences {
+		values = append(values, strconv.FormatUint(fence, 10))
+	}
+	return strings.Join(values, ",")
 }
 
 type peerLeaseInspectors struct {
