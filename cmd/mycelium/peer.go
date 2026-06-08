@@ -833,7 +833,7 @@ func mountAdminHTTP(mux *http.ServeMux, cfg *PeerConfig, configPath string, join
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(tokens); err != nil {
+		if err := json.NewEncoder(w).Encode(publicJoinTokenRecords(tokens)); err != nil {
 			panic(err)
 		}
 	})
@@ -904,6 +904,14 @@ func mountAdminHTTP(mux *http.ServeMux, cfg *PeerConfig, configPath string, join
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+func publicJoinTokenRecords(tokens []domain.JoinTokenRecord) []domain.JoinTokenRecord {
+	out := append([]domain.JoinTokenRecord(nil), tokens...)
+	for i := range out {
+		out[i].Secret = ""
+	}
+	return out
 }
 
 func adminJoinURI(cfg PeerConfig, requestHost string) (string, error) {

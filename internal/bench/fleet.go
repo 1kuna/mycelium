@@ -9,7 +9,9 @@ import (
 	"html"
 	"io"
 	"math"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,23 +54,28 @@ const (
 )
 
 type FleetBenchmarkConfig struct {
-	ID         string                `json:"id,omitempty"`
-	Project    string                `json:"project"`
-	RPCToken   string                `json:"rpc_token,omitempty"`
-	Gateways   []FleetGateway        `json:"gateways"`
-	Peers      []FleetPeer           `json:"peers,omitempty"`
-	Models     []FleetModel          `json:"models"`
-	Prompts    []FleetPrompt         `json:"prompts"`
-	Waves      []FleetWave           `json:"waves,omitempty"`
-	Simulation FleetSimulationConfig `json:"simulation"`
-	Safety     FleetBenchmarkSafety  `json:"safety,omitempty"`
-	Metadata   map[string]string     `json:"metadata,omitempty"`
+	ID                           string                `json:"id,omitempty"`
+	Project                      string                `json:"project,omitempty"`
+	RPCToken                     string                `json:"rpc_token,omitempty"`
+	GatewayToken                 string                `json:"gateway_token,omitempty"`
+	GatewayTokenEnv              string                `json:"gateway_token_env,omitempty"`
+	TrustedControlHeaderTestMode bool                  `json:"trusted_control_header_test_mode,omitempty"`
+	Gateways                     []FleetGateway        `json:"gateways"`
+	Peers                        []FleetPeer           `json:"peers,omitempty"`
+	Models                       []FleetModel          `json:"models"`
+	Prompts                      []FleetPrompt         `json:"prompts"`
+	Waves                        []FleetWave           `json:"waves,omitempty"`
+	Simulation                   FleetSimulationConfig `json:"simulation"`
+	Safety                       FleetBenchmarkSafety  `json:"safety,omitempty"`
+	Metadata                     map[string]string     `json:"metadata,omitempty"`
 }
 
 type FleetGateway struct {
-	ID     string `json:"id"`
-	URL    string `json:"url"`
-	NodeID string `json:"node_id,omitempty"`
+	ID           string `json:"id"`
+	URL          string `json:"url"`
+	NodeID       string `json:"node_id,omitempty"`
+	GatewayToken string `json:"gateway_token,omitempty"`
+	TokenEnv     string `json:"token_env,omitempty"`
 }
 
 type FleetPeer struct {
@@ -340,7 +347,7 @@ func RunFleet(ctx context.Context, cfg FleetBenchmarkConfig, opts FleetRunOption
 			Profile:   profile,
 			Simulated: opts.Simulate,
 			GitCommit: gitCommit(),
-			Gateways:  append([]FleetGateway(nil), cfg.Gateways...),
+			Gateways:  redactFleetGateways(cfg.Gateways),
 			Peers:     peerManifest(cfg.Peers),
 			StartedAt: clk.Now(),
 			Metadata:  copyStringMap(cfg.Metadata),
@@ -385,9 +392,6 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 	default:
 		return fmt.Errorf("unknown fleet benchmark profile %q", profile)
 	}
-	if cfg.Project == "" {
-		return fmt.Errorf("project is required")
-	}
 	if len(cfg.Gateways) == 0 {
 		return fmt.Errorf("at least one gateway is required")
 	}
@@ -405,6 +409,16 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 		}
 		seenGateways[gw.ID] = struct{}{}
 		gatewaysByID[gw.ID] = struct{}{}
+	}
+	if !cfg.TrustedControlHeaderTestMode && fleetConfigUsesControlHeaders(cfg) {
+		return fmt.Errorf("trusted_control_header_test_mode is required when fleet benchmark config sets X-Myc control header overrides")
+	}
+	if !simulate {
+		for _, gw := range cfg.Gateways {
+			if _, err := gatewayTokenFor(cfg, gw); err != nil {
+				return err
+			}
+		}
 	}
 	seenPeers := map[string]struct{}{}
 	for _, peer := range cfg.Peers {
@@ -577,6 +591,62 @@ func ValidateFleetConfig(cfg FleetBenchmarkConfig, profile string, simulate bool
 		return fmt.Errorf("at least one telemetry peer endpoint is required for real fleet benchmark")
 	}
 	return nil
+}
+
+func fleetConfigUsesControlHeaders(cfg FleetBenchmarkConfig) bool {
+	if cfg.Project != "" {
+		return true
+	}
+	for _, model := range cfg.Models {
+		if model.Priority != "" || model.SpeedPref != "" || model.Preemption != "" || model.ContextRequest > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func gatewayTokenFor(cfg FleetBenchmarkConfig, gw FleetGateway) (string, error) {
+	return ResolveGatewayTokenForURL(gw.URL, firstNonEmpty(gw.GatewayToken, cfg.GatewayToken), firstNonEmpty(gw.TokenEnv, cfg.GatewayTokenEnv))
+}
+
+func ResolveGatewayTokenForURL(rawURL, token, tokenEnv string) (string, error) {
+	if token != "" {
+		return token, nil
+	}
+	if tokenEnv != "" {
+		value := os.Getenv(tokenEnv)
+		if value == "" {
+			return "", fmt.Errorf("gateway token env %s is not set", tokenEnv)
+		}
+		return value, nil
+	}
+	requires, err := gatewayURLRequiresToken(rawURL)
+	if err != nil {
+		return "", err
+	}
+	if requires {
+		return "", fmt.Errorf("gateway %s is not loopback; configure gateway_token or token_env", rawURL)
+	}
+	return "", nil
+}
+
+func gatewayURLRequiresToken(rawURL string) (bool, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		if err == nil {
+			err = fmt.Errorf("missing scheme or host")
+		}
+		return true, fmt.Errorf("gateway url %q is invalid: %w", rawURL, err)
+	}
+	host := parsed.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return false, nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return true, nil
+	}
+	return !ip.IsLoopback(), nil
 }
 
 func SimulateFleet(ctx context.Context, cfg FleetBenchmarkConfig, profile string, clk ports.Clock) (FleetPreflight, error) {
@@ -870,19 +940,28 @@ func submitFleetJob(ctx context.Context, cfg FleetBenchmarkConfig, waveID string
 		return result
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if cfg.Project != "" {
+	token, err := gatewayTokenFor(cfg, gw)
+	if err != nil {
+		result := FleetJobResult{WaveID: waveID, JobID: jobID, ModelID: model.ID, RequestModel: requestModel, GatewayID: gw.ID, Error: err.Error(), RetryAllowed: false, ExpectedFailure: spec.ExpectedFailure}
+		result.ExpectationErrors = validateFleetExpectation(spec, result)
+		return result
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if cfg.TrustedControlHeaderTestMode && cfg.Project != "" {
 		req.Header.Set(fleetHeaderProject, cfg.Project)
 	}
-	if model.Priority != "" {
+	if cfg.TrustedControlHeaderTestMode && model.Priority != "" {
 		req.Header.Set(fleetHeaderPriority, string(model.Priority))
 	}
-	if model.SpeedPref != "" {
+	if cfg.TrustedControlHeaderTestMode && model.SpeedPref != "" {
 		req.Header.Set(fleetHeaderSpeedPref, string(model.SpeedPref))
 	}
-	if model.Preemption != "" {
+	if cfg.TrustedControlHeaderTestMode && model.Preemption != "" {
 		req.Header.Set(fleetHeaderPreemption, string(model.Preemption))
 	}
-	if model.ContextRequest > 0 {
+	if cfg.TrustedControlHeaderTestMode && model.ContextRequest > 0 {
 		req.Header.Set(fleetHeaderContextCap, strconv.Itoa(model.ContextRequest))
 	}
 	start := clk.Now()
@@ -1582,6 +1661,10 @@ func redactFleetConfig(cfg FleetBenchmarkConfig) FleetBenchmarkConfig {
 	if out.RPCToken != "" {
 		out.RPCToken = "REDACTED"
 	}
+	if out.GatewayToken != "" {
+		out.GatewayToken = "REDACTED"
+	}
+	out.Gateways = redactFleetGateways(cfg.Gateways)
 	out.Peers = append([]FleetPeer(nil), cfg.Peers...)
 	for i := range out.Peers {
 		if out.Peers[i].RPCToken != "" {
@@ -1589,6 +1672,16 @@ func redactFleetConfig(cfg FleetBenchmarkConfig) FleetBenchmarkConfig {
 		}
 	}
 	out.Metadata = redactMetadata(cfg.Metadata)
+	return out
+}
+
+func redactFleetGateways(gateways []FleetGateway) []FleetGateway {
+	out := append([]FleetGateway(nil), gateways...)
+	for i := range out {
+		if out[i].GatewayToken != "" {
+			out[i].GatewayToken = "REDACTED"
+		}
+	}
 	return out
 }
 

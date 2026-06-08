@@ -107,31 +107,9 @@ func (s HTTPServer) unload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "instance_id is required")
 		return
 	}
-	leaseID := ""
-	if s.Admission != nil {
-		inspector, ok := s.Admission.(ports.LeaseInspector)
-		if !ok {
-			writeError(w, http.StatusInternalServerError, "admission controller does not expose lease inspection")
-			return
-		}
-		lease, found, err := inspector.LeaseForInstance(r.Context(), req.InstanceID)
-		if err != nil {
-			writeJSON(w, nil, err)
-			return
-		}
-		if found {
-			leaseID = lease.ID
-		}
-	}
 	if err := s.Agent.Unload(r.Context(), req.InstanceID); err != nil {
 		writeJSON(w, nil, err)
 		return
-	}
-	if leaseID != "" {
-		if err := s.Admission.Release(r.Context(), leaseID); err != nil {
-			writeJSON(w, nil, err)
-			return
-		}
 	}
 	writeJSON(w, map[string]string{"status": "ok"}, nil)
 }

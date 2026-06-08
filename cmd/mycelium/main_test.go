@@ -249,6 +249,15 @@ func TestConfigInitGeneratesSafeComputeConfig(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0600 {
 		t.Fatalf("generated config mode = %o", got)
 	}
+	if runtime.GOOS != "windows" {
+		dirInfo, err := os.Stat(filepath.Dir(configPath))
+		if err != nil {
+			t.Fatalf("stat config dir: %v", err)
+		}
+		if got := dirInfo.Mode().Perm(); got != 0700 {
+			t.Fatalf("generated config dir mode = %o", got)
+		}
+	}
 	loaded, err := loadPeerConfig(configPath)
 	if err != nil {
 		t.Fatalf("load generated config: %v", err)
@@ -1049,6 +1058,11 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 	}
 	if len(listed) != 2 {
 		t.Fatalf("listed tokens = %+v", listed)
+	}
+	for _, token := range listed {
+		if token.Secret != "" {
+			t.Fatalf("admin token list exposed secret: %+v", listed)
+		}
 	}
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/admin/tokens/rotate", nil)
@@ -3819,6 +3833,10 @@ func TestComputeBackendAdapterPassesConfiguredArgsToProcessBackends(t *testing.T
 			defer func() { _ = adapter.Stop(context.Background(), handle) }()
 			want := append(append([]string(nil), tt.base...), tt.custom...)
 			want = append(want, "--served-model-name", "preset-a")
+			if tt.backend == domain.BackendVLLM {
+				want = append(append([]string(nil), tt.base...), "--served-model-name", "preset-a")
+				want = append(want, tt.custom...)
+			}
 			if !reflect.DeepEqual(process.startedArgs, want) {
 				t.Fatalf("args = %+v want %+v", process.startedArgs, want)
 			}

@@ -129,7 +129,7 @@ func TestHTTPNodeAgentRoundTrip(t *testing.T) {
 	}
 }
 
-func TestHTTPUnloadReleasesBoundAdmissionLease(t *testing.T) {
+func TestHTTPUnloadOnlyStopsRuntimeAndLeavesAdmissionLeaseExplicit(t *testing.T) {
 	ctx := context.Background()
 	node := fixtures.MakeNode()
 	allocator := lease.NewAllocator()
@@ -159,8 +159,8 @@ func TestHTTPUnloadReleasesBoundAdmissionLease(t *testing.T) {
 	if err := client.Unload(ctx, inst.ID); err != nil {
 		t.Fatalf("Unload: %v", err)
 	}
-	if _, found, err := client.LeaseForInstance(ctx, inst.ID); err != nil || found {
-		t.Fatalf("LeaseForInstance after unload found=%v err=%v", found, err)
+	if got, found, err := client.LeaseForInstance(ctx, inst.ID); err != nil || !found || got.ID != lease.ID {
+		t.Fatalf("LeaseForInstance after runtime unload = %+v found=%v err=%v", got, found, err)
 	}
 	snap, err := client.Snapshot(ctx)
 	if err != nil {
@@ -168,6 +168,12 @@ func TestHTTPUnloadReleasesBoundAdmissionLease(t *testing.T) {
 	}
 	if len(snap.Instances) != 0 {
 		t.Fatalf("instances after unload = %+v", snap.Instances)
+	}
+	if err := client.Release(ctx, lease.ID); err != nil {
+		t.Fatalf("explicit Release: %v", err)
+	}
+	if _, found, err := client.LeaseForInstance(ctx, inst.ID); err != nil || found {
+		t.Fatalf("LeaseForInstance after explicit release found=%v err=%v", found, err)
 	}
 }
 

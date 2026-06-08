@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -575,9 +576,12 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			w.WriteHeader(resp.StatusCode)
 			started = true
 			providerStarted = true
+		} else {
+			providerStarted = true
 		}
 		firstByteSampled := false
-		copied, copyErr := copyAndFlush(w, resp.Body, clk, func(copied copyResult) error {
+		verifySSE := isSSEContentType(resp.Header.Get("Content-Type"))
+		copied, copyErr := copyAndFlush(w, resp.Body, clk, verifySSE, func(copied copyResult) error {
 			if !firstByteSampled && !copied.FirstByte.IsZero() {
 				firstByteSampled = true
 				if err := recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseFirstByte, copied.FirstByte, func(sample *domain.SessionMetric) {
@@ -599,15 +603,15 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		_ = resp.Body.Close()
 		endRequest()
 		if copyErr != nil {
-			if failErr := r.releaseAndFail(ctx, job, lease, copyErr); failErr != nil {
-				if !providerStarted {
-					writeStreamError(w, failErr)
-				}
-				return nil
+			r.failPlacedStream(ctx, recorder, job, preset, inst, lease, w, copyErr, providerStarted)
+			return nil
+		}
+		if verifySSE && !copied.SSETerminal {
+			err := streamCopyError{
+				kind: streamFailureUpstreamRead,
+				err:  fmt.Errorf("upstream SSE stream ended without a terminal event"),
 			}
-			if !providerStarted {
-				writeStreamError(w, copyErr)
-			}
+			r.failPlacedStream(ctx, recorder, job, preset, inst, lease, w, err, providerStarted)
 			return nil
 		}
 		metric, err := r.recordMetric(ctx, job, preset, inst, copied.Body, metricTiming{
@@ -617,28 +621,12 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			LoadWallClockMS: loadMS,
 		})
 		if err != nil {
-			if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
-				if !providerStarted {
-					writeStreamError(w, failErr)
-				}
-				return nil
-			}
-			if !providerStarted {
-				writeStreamError(w, err)
-			}
+			r.failPlacedStream(ctx, recorder, job, preset, inst, lease, w, streamCopyError{kind: streamFailureTelemetry, err: err}, providerStarted)
 			return nil
 		}
 		promptTokens, completionTokens := usageFromBody(copied.Body)
 		if err := recorder.emitMetric(ctx, metric, domain.TelemetryPhaseComplete, len(route.Body), copied.Bytes, promptTokens, completionTokens); err != nil {
-			if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
-				if !providerStarted {
-					writeStreamError(w, failErr)
-				}
-				return nil
-			}
-			if !providerStarted {
-				writeStreamError(w, err)
-			}
+			r.failPlacedStream(ctx, recorder, job, preset, inst, lease, w, streamCopyError{kind: streamFailureTelemetry, err: err}, providerStarted)
 			return nil
 		}
 		if err := r.finishJob(ctx, job, lease, nil); err != nil {
@@ -906,6 +894,24 @@ func (r *Router) failJob(ctx context.Context, job domain.Job, lease domain.Lease
 
 func (r *Router) releaseAndFail(ctx context.Context, job domain.Job, lease domain.Lease, cause error) error {
 	return r.finishJob(ctx, job, lease, cause)
+}
+
+func (r *Router) failPlacedStream(ctx context.Context, recorder *sessionRecorder, job domain.Job, preset domain.Preset, inst domain.ModelInstance, lease domain.Lease, w http.ResponseWriter, cause error, providerStarted bool) {
+	terminalCause := cause
+	if sampleErr := recorder.emitError(ctx, job, preset, inst, cause); sampleErr != nil {
+		terminalCause = errors.Join(terminalCause, sampleErr)
+	}
+	if failErr := r.releaseAndFail(ctx, job, lease, terminalCause); failErr != nil {
+		terminalCause = errors.Join(terminalCause, failErr)
+	}
+	if streamFailureIndicatesInstance(cause) {
+		if reportErr := r.reportFailure(ctx, inst.ID, cause); reportErr != nil {
+			terminalCause = errors.Join(terminalCause, reportErr)
+		}
+	}
+	if !providerStarted {
+		writeStreamError(w, terminalCause)
+	}
 }
 
 func cleanupContext(ctx context.Context) context.Context {
@@ -1177,15 +1183,43 @@ func writeStreamError(w http.ResponseWriter, err error) {
 }
 
 type copyResult struct {
-	Body      []byte
-	Bytes     int
-	FirstByte time.Time
-	End       time.Time
+	Body        []byte
+	Bytes       int
+	FirstByte   time.Time
+	End         time.Time
+	SSETerminal bool
 }
 
-func copyAndFlush(w http.ResponseWriter, r io.Reader, clk ports.Clock, onChunk func(copyResult) error) (copyResult, error) {
+type streamFailureKind string
+
+const (
+	streamFailureClientWrite  streamFailureKind = "client_write"
+	streamFailureUpstreamRead streamFailureKind = "upstream_read"
+	streamFailureTelemetry    streamFailureKind = "telemetry"
+)
+
+type streamCopyError struct {
+	kind streamFailureKind
+	err  error
+}
+
+func (e streamCopyError) Error() string {
+	return e.err.Error()
+}
+
+func (e streamCopyError) Unwrap() error {
+	return e.err
+}
+
+func streamFailureIndicatesInstance(err error) bool {
+	var copyErr streamCopyError
+	return errors.As(err, &copyErr) && copyErr.kind == streamFailureUpstreamRead
+}
+
+func copyAndFlush(w http.ResponseWriter, r io.Reader, clk ports.Clock, verifySSE bool, onChunk func(copyResult) error) (copyResult, error) {
 	var body bytes.Buffer
 	result := copyResult{}
+	var terminal sseTerminalTracker
 	buf := make([]byte, 32*1024)
 	for {
 		n, readErr := r.Read(buf)
@@ -1205,15 +1239,19 @@ func copyAndFlush(w http.ResponseWriter, r io.Reader, clk ports.Clock, onChunk f
 					body.Write(chunk)
 				}
 			}
+			if verifySSE {
+				terminal.observe(chunk)
+				result.SSETerminal = terminal.terminal()
+			}
 			if _, err := w.Write(chunk); err != nil {
 				result.Body = body.Bytes()
-				return result, err
+				return result, streamCopyError{kind: streamFailureClientWrite, err: err}
 			}
 			flush(w)
 			result.Body = body.Bytes()
 			if onChunk != nil {
 				if err := onChunk(result); err != nil {
-					return result, err
+					return result, streamCopyError{kind: streamFailureTelemetry, err: err}
 				}
 			}
 		}
@@ -1226,9 +1264,56 @@ func copyAndFlush(w http.ResponseWriter, r io.Reader, clk ports.Clock, onChunk f
 		}
 		if readErr != nil {
 			result.Body = body.Bytes()
-			return result, readErr
+			return result, streamCopyError{kind: streamFailureUpstreamRead, err: readErr}
 		}
 	}
+}
+
+type sseTerminalTracker struct {
+	tail string
+	done bool
+}
+
+func (t *sseTerminalTracker) observe(chunk []byte) {
+	if t.done {
+		return
+	}
+	t.tail += string(chunk)
+	const maxTerminalTail = 64 << 10
+	if len(t.tail) > maxTerminalTail {
+		t.tail = t.tail[len(t.tail)-maxTerminalTail:]
+	}
+	t.done = sseTailHasTerminal(t.tail)
+}
+
+func (t *sseTerminalTracker) terminal() bool {
+	return t.done
+}
+
+func isSSEContentType(contentType string) bool {
+	contentType = strings.ToLower(contentType)
+	return strings.HasPrefix(contentType, "text/event-stream")
+}
+
+func sseTailHasTerminal(tail string) bool {
+	tail = strings.ReplaceAll(tail, "\r\n", "\n")
+	for _, line := range strings.Split(tail, "\n") {
+		line = strings.TrimSpace(line)
+		lower := strings.ToLower(line)
+		switch {
+		case strings.HasPrefix(lower, "data:"):
+			data := strings.TrimSpace(line[len("data:"):])
+			if data == "[DONE]" || strings.Contains(data, `"type":"message_stop"`) || strings.Contains(data, `"event":"message_stop"`) {
+				return true
+			}
+		case strings.HasPrefix(lower, "event:"):
+			event := strings.TrimSpace(lower[len("event:"):])
+			if event == "message_stop" || event == "done" || event == "completion_done" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func writeResponseHeaders(dst, src http.Header) {

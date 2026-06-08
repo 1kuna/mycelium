@@ -62,9 +62,11 @@ func e2eHasProof(proofs []string, want string) bool {
 
 func e2eFleetBenchmarkConfig() bench.FleetBenchmarkConfig {
 	return bench.FleetBenchmarkConfig{
-		ID:       "fleet-e2e",
-		Project:  "project-a",
-		RPCToken: "rpc-secret",
+		ID:                           "fleet-e2e",
+		Project:                      "project-a",
+		RPCToken:                     "rpc-secret",
+		GatewayToken:                 "gateway-secret",
+		TrustedControlHeaderTestMode: true,
 		Gateways: []bench.FleetGateway{
 			{ID: "macbook-gw", URL: "http://macbook.test", NodeID: "macbook"},
 			{ID: "macmini-gw", URL: "http://macmini.test", NodeID: "mac-mini"},
