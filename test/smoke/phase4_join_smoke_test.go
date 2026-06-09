@@ -85,19 +85,24 @@ func waitForNodeReady(t *testing.T, ctx context.Context, nodeURL, rpcToken strin
 	t.Helper()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
+	client := &http.Client{Timeout: 2 * time.Second}
 	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(nodeURL, "/")+"/snapshot", nil)
+		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, strings.TrimRight(nodeURL, "/")+"/snapshot", nil)
 		if err != nil {
+			reqCancel()
 			t.Fatalf("snapshot request: %v", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+rpcToken)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
+				reqCancel()
 				return
 			}
 		}
+		reqCancel()
 		select {
 		case <-ctx.Done():
 			t.Fatalf("waiting for node: %v", ctx.Err())
@@ -318,16 +323,20 @@ type smokeProcess struct {
 	cmd    *exec.Cmd
 	stdout bytes.Buffer
 	stderr bytes.Buffer
+	done   chan error
+	err    error
+	exited bool
 }
 
 func startSmokeProcess(t *testing.T, ctx context.Context, bin string, args ...string) *smokeProcess {
 	t.Helper()
-	proc := &smokeProcess{cmd: exec.CommandContext(ctx, bin, args...)}
+	proc := &smokeProcess{cmd: exec.CommandContext(ctx, bin, args...), done: make(chan error, 1)}
 	proc.cmd.Stdout = &proc.stdout
 	proc.cmd.Stderr = &proc.stderr
 	if err := proc.cmd.Start(); err != nil {
 		t.Fatalf("start %s %v: %v", bin, args, err)
 	}
+	go func() { proc.done <- proc.cmd.Wait() }()
 	return proc
 }
 
@@ -336,17 +345,39 @@ func (p *smokeProcess) stop(t *testing.T) {
 	if p.cmd == nil || p.cmd.Process == nil {
 		return
 	}
+	if err, ok := p.pollExit(); ok {
+		if err != nil {
+			t.Logf("process exited before stop: %v\nstdout:\n%s\nstderr:\n%s", err, p.stdout.String(), p.stderr.String())
+		}
+		return
+	}
 	_ = p.cmd.Process.Signal(os.Interrupt)
-	done := make(chan error, 1)
-	go func() { done <- p.cmd.Wait() }()
 	select {
-	case err := <-done:
+	case err := <-p.done:
+		p.err, p.exited = err, true
 		if err != nil && !strings.Contains(err.Error(), "signal: interrupt") {
 			t.Logf("process exited: %v\nstdout:\n%s\nstderr:\n%s", err, p.stdout.String(), p.stderr.String())
 		}
 	case <-time.After(5 * time.Second):
 		_ = p.cmd.Process.Kill()
-		err := <-done
+		err := <-p.done
+		p.err, p.exited = err, true
 		t.Logf("process killed: %v\nstdout:\n%s\nstderr:\n%s", err, p.stdout.String(), p.stderr.String())
+	}
+}
+
+func (p *smokeProcess) pollExit() (error, bool) {
+	if p.exited {
+		return p.err, true
+	}
+	if p.done == nil {
+		return nil, false
+	}
+	select {
+	case err := <-p.done:
+		p.err, p.exited = err, true
+		return err, true
+	default:
+		return nil, false
 	}
 }

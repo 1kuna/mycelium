@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -92,6 +93,14 @@ func TestLocalPhase1LoadServeTelemetryRequeueReaper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch orphan: %v", err)
 	}
+	if err := orphanAdapter.WaitReady(ctx, orphanAddr); err != nil {
+		_ = orphanAdapter.Stop(ctx, handle)
+		t.Fatalf("orphan ready-gate: %v", err)
+	}
+	if err := requirePIDLive(handle.PID); err != nil {
+		_ = orphanAdapter.Stop(ctx, handle)
+		t.Fatalf("orphan pid is not live before writing refs: %v", err)
+	}
 	processFile := t.TempDir() + "/processes.json"
 	if err := node.WriteProcessRefs(processFile, []node.ProcessRef{{
 		PID:       handle.PID,
@@ -167,4 +176,12 @@ func quote(s string) string {
 		panic(err)
 	}
 	return string(data)
+}
+
+func requirePIDLive(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Signal(syscall.Signal(0))
 }
