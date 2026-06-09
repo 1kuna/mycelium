@@ -234,6 +234,41 @@ func TestStopSurfacesProcessRegistryRemoveError(t *testing.T) {
 	}
 }
 
+func TestStopTreatsExpectedSignalExitAsClean(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+	adapter := NewAdapter(Config{BinaryPath: "/bin/sleep", Args: []string{"60"}})
+	handle, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := adapter.Stop(ctx, handle); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestStopTreatsShellSignalExitCodeAsClean(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+	adapter := NewAdapter(Config{
+		BinaryPath: "/bin/sh",
+		Args:       []string{"-c", "trap 'exit 130' INT; while :; do sleep 1; done"},
+	})
+	handle, err := adapter.Launch(context.Background(), fixtures.MakePreset(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := adapter.Stop(ctx, handle); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
 func TestLaunchCleansUpWhenRegistryFails(t *testing.T) {
 	registry := &recordingProcessRegistry{addErr: errors.New("registry")}
 	process := newFakeProcess(202)
@@ -484,6 +519,60 @@ func TestStopProcessReturnsWaitError(t *testing.T) {
 	}
 }
 
+func TestStopProcessSignalFailureReturnsContextOrWaitError(t *testing.T) {
+	adapter := NewAdapter(Config{Clock: mocks.NewFakeClock(time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))})
+	finishKill := make(chan struct{})
+	canceled := newFakeProcess(814)
+	canceled.signalErr = errors.New("signal failed")
+	canceled.finishKillAfter = finishKill
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan stopResult, 1)
+	go func() {
+		stopped, err := adapter.stopProcess(ctx, canceled)
+		done <- stopResult{stopped: stopped, err: err}
+	}()
+	waitForFakeKill(t, canceled)
+	close(finishKill)
+	result := <-done
+	if !result.stopped || !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("canceled signal-failure stop stopped=%t err=%v", result.stopped, result.err)
+	}
+
+	waitErr := errors.New("wait failed")
+	waitFails := newFakeProcess(815)
+	waitFails.signalErr = errors.New("signal failed")
+	waitFails.waitErrOnKill = waitErr
+	stopped, err := adapter.stopProcess(context.Background(), waitFails)
+	if !stopped || !errors.Is(err, waitErr) {
+		t.Fatalf("wait-failure stop stopped=%t err=%v", stopped, err)
+	}
+}
+
+func TestStopProcessTimerKillCanReturnContextAfterWait(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+	finishKill := make(chan struct{})
+	process := newFakeProcess(816)
+	process.finishKillAfter = finishKill
+	adapter := NewAdapter(Config{Clock: clock, StopGracePeriod: time.Second})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan stopResult, 1)
+	go func() {
+		stopped, err := adapter.stopProcess(ctx, process)
+		done <- stopResult{stopped: stopped, err: err}
+	}()
+	waitForFakeSignal(t, process)
+	waitForFakeTimer(t, clock)
+	clock.Advance(time.Second)
+	waitForFakeKill(t, process)
+	cancel()
+	close(finishKill)
+	result := <-done
+	if !result.stopped || !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("timer canceled stop stopped=%t err=%v", result.stopped, result.err)
+	}
+}
+
 func TestStopProcessSurfacesKillFailures(t *testing.T) {
 	killErr := errors.New("kill failed")
 	canceled := newFakeProcess(812)
@@ -659,6 +748,19 @@ func TestStopStoredProcessTreatsAlreadyExitedRefAsReaped(t *testing.T) {
 	}
 }
 
+func TestClassifyPermissionStopErrorForStaleRef(t *testing.T) {
+	if stopped, err, ok := classifyPermissionStopError(ports.Handle{PID: 99999999}, syscall.EPERM); !ok || !stopped || err != nil {
+		t.Fatalf("stale ref EPERM stopped=%t err=%v ok=%t", stopped, err, ok)
+	}
+	if stopped, err, ok := classifyPermissionStopError(ports.Handle{PID: 99999999}, syscall.ESRCH); ok || stopped || err != nil {
+		t.Fatalf("non-EPERM stopped=%t err=%v ok=%t", stopped, err, ok)
+	}
+	stopped, err := classifyPermissionError(ports.Handle{PID: 99999999}, syscall.EPERM)
+	if !stopped || err != nil {
+		t.Fatalf("classifyPermissionError stopped=%t err=%v", stopped, err)
+	}
+}
+
 func TestProcessHandleHelpersForOwnedChild(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process helper test uses POSIX process signaling")
@@ -693,6 +795,27 @@ func TestProcessHandleHelpersForOwnedChild(t *testing.T) {
 	}
 	if err := osHandle.Wait(); err != nil {
 		t.Fatalf("os handle wait: %v", err)
+	}
+}
+
+func TestProcessExitedDetectsReapedChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process signal wrapper test uses POSIX shell")
+	}
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait child: %v", err)
+	}
+	exited, err := processExited(cmd.Process)
+	if err != nil || !exited {
+		t.Fatalf("processExited reaped child = %t %v", exited, err)
+	}
+	exited, err = processExited(&os.Process{Pid: -1})
+	if err == nil || exited {
+		t.Fatalf("processExited invalid process = %t %v", exited, err)
 	}
 }
 
@@ -780,6 +903,11 @@ type fakeStart struct {
 	args   []string
 }
 
+type stopResult struct {
+	stopped bool
+	err     error
+}
+
 func (r *fakeRunner) Start(_ context.Context, binary string, args []string) (ProcessHandle, error) {
 	r.starts = append(r.starts, fakeStart{binary: binary, args: append([]string(nil), args...)})
 	if r.startErr != nil {
@@ -805,16 +933,18 @@ func (r cancelingRunner) Start(_ context.Context, _ string, _ []string) (Process
 }
 
 type fakeProcess struct {
-	mu           sync.Mutex
-	pid          int
-	waitCh       chan error
-	done         bool
-	killed       bool
-	exitOnSignal bool
-	startedArgs  []string
-	signals      []os.Signal
-	signalErr    error
-	killErr      error
+	mu              sync.Mutex
+	pid             int
+	waitCh          chan error
+	done            bool
+	killed          bool
+	exitOnSignal    bool
+	startedArgs     []string
+	signals         []os.Signal
+	signalErr       error
+	killErr         error
+	waitErrOnKill   error
+	finishKillAfter chan struct{}
 }
 
 func newFakeProcess(pid int) *fakeProcess {
@@ -847,9 +977,18 @@ func (p *fakeProcess) Kill() error {
 		p.mu.Unlock()
 		return err
 	}
+	finishAfter := p.finishKillAfter
+	waitErr := p.waitErrOnKill
 	p.killed = true
 	p.mu.Unlock()
-	p.finish(nil)
+	if finishAfter != nil {
+		go func() {
+			<-finishAfter
+			p.finish(waitErr)
+		}()
+		return nil
+	}
+	p.finish(waitErr)
 	return nil
 }
 
@@ -883,6 +1022,20 @@ func waitForFakeSignal(t *testing.T, process *fakeProcess) {
 		runtime.Gosched()
 	}
 	t.Fatal("process was not signaled")
+}
+
+func waitForFakeKill(t *testing.T, process *fakeProcess) {
+	t.Helper()
+	for i := 0; i < 1000; i++ {
+		process.mu.Lock()
+		killed := process.killed
+		process.mu.Unlock()
+		if killed {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatal("process was not killed")
 }
 
 func waitForHelperReady(t *testing.T, path string) {

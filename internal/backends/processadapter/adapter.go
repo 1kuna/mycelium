@@ -201,12 +201,12 @@ func (a *Adapter) stopProcess(ctx context.Context, process ProcessHandle) (bool,
 		select {
 		case <-ctx.Done():
 			waitErr := <-done
-			if waitErr != nil {
+			if waitErr != nil && !expectedStopSignalExit(waitErr) {
 				return true, waitErr
 			}
 			return true, ctx.Err()
 		case waitErr := <-done:
-			return true, waitErr
+			return true, cleanStopWaitError(waitErr)
 		}
 	}
 	timer := a.cfg.Clock.NewTimer(a.cfg.StopGracePeriod)
@@ -217,7 +217,7 @@ func (a *Adapter) stopProcess(ctx context.Context, process ProcessHandle) (bool,
 			return false, err
 		}
 		waitErr := <-done
-		if waitErr != nil {
+		if waitErr != nil && !expectedStopSignalExit(waitErr) {
 			return true, waitErr
 		}
 		return true, ctx.Err()
@@ -228,16 +228,54 @@ func (a *Adapter) stopProcess(ctx context.Context, process ProcessHandle) (bool,
 		select {
 		case <-ctx.Done():
 			waitErr := <-done
-			if waitErr != nil {
+			if waitErr != nil && !expectedStopSignalExit(waitErr) {
 				return true, waitErr
 			}
 			return true, ctx.Err()
 		case waitErr := <-done:
-			return true, waitErr
+			return true, cleanStopWaitError(waitErr)
 		}
 	case waitErr := <-done:
 		timer.Stop()
-		return true, waitErr
+		return true, cleanStopWaitError(waitErr)
+	}
+}
+
+func cleanStopWaitError(err error) error {
+	if expectedStopSignalExit(err) {
+		return nil
+	}
+	return err
+}
+
+func expectedStopSignalExit(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok {
+		return false
+	}
+	if status.Exited() {
+		switch status.ExitStatus() {
+		case 128 + int(syscall.SIGTERM), 128 + int(syscall.SIGINT), 128 + int(syscall.SIGKILL):
+			return true
+		default:
+			return false
+		}
+	}
+	if !status.Signaled() {
+		return false
+	}
+	switch status.Signal() {
+	case syscall.SIGTERM, syscall.SIGINT, syscall.SIGKILL:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -262,6 +300,9 @@ func (a *Adapter) stopStoredProcess(ctx context.Context, handle ports.Handle) (b
 		return false, err
 	}
 	if exited, err := processidentity.Exited(handle.PID); exited || err != nil {
+		if stopped, classErr, ok := classifyPermissionStopError(handle, err); ok {
+			return stopped, classErr
+		}
 		return exited, err
 	}
 	if err := verifyProcessIdentity(handle); err != nil {
@@ -271,10 +312,16 @@ func (a *Adapter) stopStoredProcess(ctx context.Context, handle ports.Handle) (b
 		return false, err
 	}
 	if err := signalHandle(handle, process, syscall.SIGTERM); err != nil {
+		if stopped, classErr, ok := classifyPermissionStopError(handle, err); ok {
+			return stopped, classErr
+		}
 		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
 			return true, nil
 		}
 		if killErr := killHandle(handle, process); killErr != nil {
+			if stopped, classErr, ok := classifyPermissionStopError(handle, killErr); ok {
+				return stopped, classErr
+			}
 			if errors.Is(killErr, os.ErrProcessDone) || errors.Is(killErr, syscall.ESRCH) {
 				return true, nil
 			}
@@ -294,6 +341,9 @@ func (a *Adapter) stopStoredProcess(ctx context.Context, handle ports.Handle) (b
 			poll.Stop()
 			timer.Stop()
 			if err := killHandle(handle, process); err != nil {
+				if stopped, classErr, ok := classifyPermissionStopError(handle, err); ok {
+					return stopped, classErr
+				}
 				return false, err
 			}
 			stopped, waitErr := a.waitForExternalExit(context.Background(), handle, process)
@@ -304,12 +354,24 @@ func (a *Adapter) stopStoredProcess(ctx context.Context, handle ports.Handle) (b
 		case <-timer.C():
 			poll.Stop()
 			if err := killHandle(handle, process); err != nil {
+				if stopped, classErr, ok := classifyPermissionStopError(handle, err); ok {
+					return stopped, classErr
+				}
 				return false, err
 			}
 			return a.waitForExternalExit(context.Background(), handle, process)
 		case <-poll.C():
 		}
 	}
+}
+
+func classifyPermissionError(handle ports.Handle, err error) (bool, error) {
+	stopped, classErr, _ := classifyPermissionStopError(handle, err)
+	return stopped, classErr
+}
+
+func classifyPermissionStopError(handle ports.Handle, err error) (bool, error, bool) {
+	return processidentity.ClassifyPermissionError(handle, err)
 }
 
 func (a *Adapter) waitForExternalExit(ctx context.Context, handle ports.Handle, process *os.Process) (bool, error) {
