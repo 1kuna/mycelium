@@ -44,7 +44,7 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 		want string
 	}{
 		{name: "run", args: []string{"run"}, want: "read peer config"},
-		{name: "ctl", args: []string{"ctl"}, want: "usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark>"},
+		{name: "ctl", args: []string{"ctl"}, want: "usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark|doctor|debug|status>"},
 		{name: "server removed", args: []string{"server"}, want: "peer-native"},
 		{name: "node removed", args: []string{"node"}, want: "peer-native"},
 		{name: "unknown", args: []string{"wat"}, want: "unknown command"},

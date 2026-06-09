@@ -34,7 +34,7 @@ func Run(ctx context.Context, args []string) error {
 
 func RunWithClient(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark>")
+		return fmt.Errorf("usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark|doctor|debug|status>")
 	}
 	switch args[0] {
 	case "add-model":
@@ -53,6 +53,12 @@ func RunWithClient(ctx context.Context, args []string, client *http.Client) erro
 		return runRecommendations(ctx, args[1:])
 	case "benchmark":
 		return runBenchmark(ctx, args[1:], client)
+	case "doctor":
+		return runDoctor(ctx, args[1:], client)
+	case "debug":
+		return runDebug(ctx, args[1:], client)
+	case "status":
+		return runStatus(ctx, args[1:], client)
 	default:
 		return fmt.Errorf("unknown myce command %q", args[0])
 	}

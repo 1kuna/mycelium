@@ -968,6 +968,10 @@ func TestListCommandsRejectBadFlags(t *testing.T) {
 		{"add-model", "--bad"},
 		{"benchmark", "run", "--bad"},
 		{"benchmark", "fleet", "--bad"},
+		{"doctor", "--bad"},
+		{"status", "--bad"},
+		{"debug", "job", "--bad"},
+		{"debug", "bundle", "--bad"},
 	} {
 		if err := Run(context.Background(), args); err == nil {
 			t.Fatalf("Run(%v) expected flag error", args)
@@ -1126,6 +1130,136 @@ func TestNodeAdminDefaultsAndOverrides(t *testing.T) {
 	}
 	if admin.BaseURL != "https://override.test" || admin.AuthToken != "override-secret" || token != "join-secret" {
 		t.Fatalf("admin override = %+v token=%q", admin, token)
+	}
+}
+
+func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
+	dbPath, configPath := writeOperatorDebugFixture(t)
+	client := operatorSnapshotClient(t)
+
+	var err error
+	doctorOutput := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"doctor", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret"}, client)
+	})
+	if err != nil {
+		t.Fatalf("doctor: %v\n%s", err, doctorOutput)
+	}
+	for _, want := range []string{
+		"check\tconfig\tok",
+		"check\tpeer-snapshot\tok\tnode-a instances=1",
+		"check\tpresets\tok\t1 configured",
+	} {
+		if !strings.Contains(doctorOutput, want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, doctorOutput)
+		}
+	}
+
+	statusOutput := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"status", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret"}, client)
+	})
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, statusOutput)
+	}
+	for _, want := range []string{
+		"peer\tpeer-a\tlisten=http://peer.test\tcompute=true\tgateway_auth=true",
+		"queue\tqueued=0 placing=0 loading=0 running=1 done=1 preempted=0 failed=0",
+		"snapshot\tok\tnode-a\tinstances=1",
+	} {
+		if !strings.Contains(statusOutput, want) {
+			t.Fatalf("status output missing %q:\n%s", want, statusOutput)
+		}
+	}
+
+	debugOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "job", "job-a", "--db", dbPath})
+	})
+	if err != nil {
+		t.Fatalf("debug job: %v\n%s", err, debugOutput)
+	}
+	for _, want := range []string{
+		"job\tjob-a\trunning\tmodel=tiny\tproject=project-a\towner=node-a",
+		"registry\trunning\tcoordinator=peer-a\tassigned=node-a",
+		"timeline\t2026-06-09T12:00:02Z\tsample\terror",
+		"hint\trequest exceeded the selected model context",
+	} {
+		if !strings.Contains(debugOutput, want) {
+			t.Fatalf("debug output missing %q:\n%s", want, debugOutput)
+		}
+	}
+
+	jsonOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "job", "job-a", "--json", "--db", dbPath})
+	})
+	if err != nil {
+		t.Fatalf("debug job json: %v\n%s", err, jsonOutput)
+	}
+	var report jobDebugReport
+	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+		t.Fatalf("decode debug json: %v\n%s", err, jsonOutput)
+	}
+	if report.Job.ID != "job-a" || len(report.SessionTimeline) != 1 || len(report.Hints) != 1 {
+		t.Fatalf("debug report = %+v", report)
+	}
+}
+
+func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
+	dbPath, configPath := writeOperatorDebugFixture(t)
+	client := operatorSnapshotClient(t)
+	outDir := filepath.Join(t.TempDir(), "bundle")
+
+	var err error
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--job", "job-a", "--out", outDir}, client)
+	})
+	if err != nil {
+		t.Fatalf("debug bundle: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "debug-bundle\t"+outDir) {
+		t.Fatalf("bundle output = %q", output)
+	}
+	for _, name := range []string{"manifest.json", "config.redacted.json", "jobs.json", "registry.json", "run_metrics.json", "session_metrics.json", "nodes.json", "instances.json", "recommendations.json", "peer_snapshot.json", "status.txt"} {
+		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
+			t.Fatalf("missing bundle file %s: %v", name, err)
+		}
+	}
+	redacted, err := os.ReadFile(filepath.Join(outDir, "config.redacted.json"))
+	if err != nil {
+		t.Fatalf("read redacted config: %v", err)
+	}
+	if strings.Contains(string(redacted), "rpc-secret") || strings.Contains(string(redacted), "gateway-secret") || !strings.Contains(string(redacted), "[REDACTED]") {
+		t.Fatalf("redacted config = %s", redacted)
+	}
+	jobsData, err := os.ReadFile(filepath.Join(outDir, "jobs.json"))
+	if err != nil {
+		t.Fatalf("read jobs: %v", err)
+	}
+	if !strings.Contains(string(jobsData), "job-a") || strings.Contains(string(jobsData), "job-other") {
+		t.Fatalf("jobs artifact = %s", jobsData)
+	}
+}
+
+func TestRunDoctorFailsMissingNonLoopbackTokens(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	configPath := filepath.Join(dir, "peer.json")
+	if err := os.WriteFile(configPath, []byte(`{"id":"peer-a","listen":"http://peer.test","store_path":`+quoteJSON(dbPath)+`}`), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"doctor", "--config", configPath, "--db", dbPath}, operatorSnapshotClient(t))
+	})
+	if err == nil {
+		t.Fatalf("doctor succeeded unexpectedly:\n%s", output)
+	}
+	if !strings.Contains(output, "check\trpc-token\tfail") || !strings.Contains(output, "check\tgateway-token\tfail") {
+		t.Fatalf("doctor output = %s", output)
 	}
 }
 
@@ -1466,6 +1600,132 @@ func recordSustainedContextMetrics(t *testing.T, store interface {
 			t.Fatalf("Record sustained metric: %v", err)
 		}
 	}
+}
+
+func writeOperatorDebugFixture(t *testing.T) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	if err := store.SaveNode(context.Background(), domain.Node{
+		ID:           "node-a",
+		Name:         "Node A",
+		Address:      "http://peer.test",
+		Status:       domain.NodeReady,
+		HeartbeatAt:  now,
+		Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 24576}},
+	}); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), testPreset("tiny")); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	if err := store.SaveInstance(context.Background(), domain.ModelInstance{ID: "inst-a", NodeID: "node-a", PresetID: "tiny", State: domain.InstReady}); err != nil {
+		t.Fatalf("SaveInstance: %v", err)
+	}
+	if err := store.SaveJob(context.Background(), domain.Job{
+		ID:       "job-a",
+		TaskType: "chat",
+		Model:    "tiny",
+		Project:  "project-a",
+		Status:   domain.JobRunning,
+		Progress: []domain.JobProgress{{Stage: "placed", Message: "node-a", At: now}},
+	}); err != nil {
+		t.Fatalf("SaveJob job-a: %v", err)
+	}
+	if err := store.SaveJob(context.Background(), domain.Job{ID: "job-other", TaskType: "chat", Model: "tiny", Project: "project-b", Status: domain.JobDone}); err != nil {
+		t.Fatalf("SaveJob job-other: %v", err)
+	}
+	if err := store.Put(context.Background(), domain.JobRecord{
+		JobID:        "job-a",
+		Coordinator:  "peer-a",
+		AssignedNode: "node-a",
+		Status:       domain.JobRunning,
+		Request:      []byte(`{"model":"tiny"}`),
+		Fence:        3,
+		UpdatedAt:    now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("Put registry: %v", err)
+	}
+	if err := store.Record(context.Background(), domain.RunMetric{
+		JobID:        "job-a",
+		InstanceID:   "inst-a",
+		NodeID:       "node-a",
+		PresetID:     "tiny",
+		Backend:      domain.BackendLlamaCpp,
+		Project:      "project-a",
+		TokensPerSec: 42,
+		TTFTms:       12,
+		ContextUsed:  4096,
+		At:           now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("Record metric: %v", err)
+	}
+	if err := store.RecordSample(context.Background(), domain.SessionMetric{
+		SessionID:  "session-a",
+		Sequence:   1,
+		JobID:      "job-a",
+		Phase:      domain.TelemetryPhaseError,
+		InstanceID: "inst-a",
+		NodeID:     "node-a",
+		Project:    "project-a",
+		PresetID:   "tiny",
+		Error:      "context overflow",
+		At:         now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("RecordSample: %v", err)
+	}
+	if err := store.SaveRecommendation(context.Background(), domain.RecommendationRecord{
+		ID:               "rec-a",
+		ProjectID:        "project-a",
+		Type:             optimizer.RecommendationContextCap,
+		RecommendedValue: 4096,
+		CreatedAt:        now,
+	}); err != nil {
+		t.Fatalf("SaveRecommendation: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	configPath := filepath.Join(dir, "peer.json")
+	config := `{
+  "id": "peer-a",
+  "listen": "http://peer.test",
+  "store_path": ` + quoteJSON(dbPath) + `,
+  "compute": true,
+  "rpc_token": "rpc-secret",
+  "gateway_token": "gateway-secret"
+}`
+	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return dbPath, configPath
+}
+
+func operatorSnapshotClient(t *testing.T) *http.Client {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer rpc-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"rpc token required"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{
+			Node:      domain.Node{ID: "node-a", Address: "http://peer.test", Status: domain.NodeReady},
+			Instances: []domain.ModelInstance{{ID: "inst-a", NodeID: "node-a", PresetID: "tiny", State: domain.InstReady}},
+		})
+	})
+	return directHTTPClient(mux)
+}
+
+func quoteJSON(value string) string {
+	data, _ := json.Marshal(value)
+	return string(data)
 }
 
 func controlFleetConfig() bench.FleetBenchmarkConfig {
