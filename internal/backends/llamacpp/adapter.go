@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -107,6 +108,18 @@ func (a *Adapter) Name() string {
 }
 
 func (a *Adapter) Launch(ctx context.Context, p domain.Preset, addr string) (ports.Handle, error) {
+	return a.launchAt(ctx, p, addr)
+}
+
+func (a *Adapter) LaunchDynamic(ctx context.Context, p domain.Preset, addr string) (ports.Handle, error) {
+	concrete, err := reserveDynamicAddr(addr)
+	if err != nil {
+		return ports.Handle{}, err
+	}
+	return a.launchAt(ctx, p, concrete)
+}
+
+func (a *Adapter) launchAt(ctx context.Context, p domain.Preset, addr string) (ports.Handle, error) {
 	args, err := a.renderLaunchArgs(p, addr)
 	if err != nil {
 		return ports.Handle{}, err
@@ -140,6 +153,25 @@ func (a *Adapter) Launch(ctx context.Context, p domain.Preset, addr string) (por
 		}
 	}
 	return handleFromProcessRef(ref, addr), nil
+}
+
+func reserveDynamicAddr(addr string) (string, error) {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
+	}
+	if port != "0" {
+		return addr, nil
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return "", err
+	}
+	concrete := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		return "", err
+	}
+	return concrete, nil
 }
 
 func (a *Adapter) renderLaunchArgs(p domain.Preset, addr string) ([]string, error) {
@@ -561,3 +593,4 @@ func healthURL(addr, path string) string {
 }
 
 var _ ports.BackendAdapter = (*Adapter)(nil)
+var _ ports.DynamicBackendAdapter = (*Adapter)(nil)

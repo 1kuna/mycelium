@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -71,6 +72,29 @@ func TestAdapterLaunchWaitReadyStop(t *testing.T) {
 	}
 	if err := adapter.Stop(context.Background(), handle); err != nil {
 		t.Fatalf("idempotent Stop: %v", err)
+	}
+}
+
+func TestAdapterLaunchDynamicResolvesConcretePort(t *testing.T) {
+	process := newFakeProcess(111)
+	runner := &fakeRunner{next: process}
+	adapter := New(Config{
+		Name:          "test",
+		BinaryPath:    "backend",
+		Args:          []string{"--host", "{host}", "--port", "{port}", "--addr", "{addr}"},
+		ProcessRunner: runner,
+	})
+	handle, err := adapter.LaunchDynamic(context.Background(), fixtures.MakePreset(), "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("LaunchDynamic: %v", err)
+	}
+	host, port, err := net.SplitHostPort(handle.Addr)
+	if err != nil || host != "127.0.0.1" || port == "" || port == "0" {
+		t.Fatalf("dynamic addr = %q split err=%v", handle.Addr, err)
+	}
+	want := "--host 127.0.0.1 --port " + port + " --addr " + handle.Addr
+	if got := strings.Join(runner.starts[0].args, " "); got != want {
+		t.Fatalf("started args = %q, want %q", got, want)
 	}
 }
 
