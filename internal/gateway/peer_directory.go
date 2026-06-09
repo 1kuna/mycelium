@@ -39,7 +39,7 @@ type PeerDirectory struct {
 
 type cachedPeerAgent struct {
 	sourceAddress string
-	resolvedPeer  domain.Peer
+	telemetryPeer domain.Peer
 	agent         ports.NodeAgent
 }
 
@@ -52,9 +52,9 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 		return domain.FleetSnapshot{}, err
 	}
 	type peerAgent struct {
-		peer         domain.Peer
-		resolvedPeer domain.Peer
-		agent        ports.NodeAgent
+		peer          domain.Peer
+		telemetryPeer domain.Peer
+		agent         ports.NodeAgent
 	}
 	candidates := []peerAgent{}
 	for _, peer := range peers {
@@ -64,25 +64,25 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 		if !peer.Compute {
 			continue
 		}
-		agent, resolvedPeer, err := d.agentFor(ctx, peer)
+		agent, telemetryPeer, err := d.agentFor(ctx, peer)
 		if err != nil {
 			return domain.FleetSnapshot{}, err
 		}
-		candidates = append(candidates, peerAgent{peer: peer, resolvedPeer: resolvedPeer, agent: agent})
+		candidates = append(candidates, peerAgent{peer: peer, telemetryPeer: telemetryPeer, agent: agent})
 	}
 	type snapshotResult struct {
-		peer         domain.Peer
-		resolvedPeer domain.Peer
-		agent        ports.NodeAgent
-		snap         domain.NodeSnapshot
-		err          error
+		peer          domain.Peer
+		telemetryPeer domain.Peer
+		agent         ports.NodeAgent
+		snap          domain.NodeSnapshot
+		err           error
 	}
 	results := make(chan snapshotResult, len(candidates))
 	for _, candidate := range candidates {
 		candidate := candidate
 		go func() {
 			snap, err := candidate.agent.Snapshot(ctx)
-			results <- snapshotResult{peer: candidate.peer, resolvedPeer: candidate.resolvedPeer, agent: candidate.agent, snap: snap, err: err}
+			results <- snapshotResult{peer: candidate.peer, telemetryPeer: candidate.telemetryPeer, agent: candidate.agent, snap: snap, err: err}
 		}()
 	}
 	agents := map[string]ports.NodeAgent{}
@@ -98,7 +98,7 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 		fleet.Nodes = append(fleet.Nodes, result.snap.Node)
 		fleet.Instances = append(fleet.Instances, result.snap.Instances...)
 		agents[result.snap.Node.ID] = result.agent
-		peersByNode[result.snap.Node.ID] = result.resolvedPeer
+		peersByNode[result.snap.Node.ID] = result.telemetryPeer
 	}
 	sort.Slice(fleet.Nodes, func(i, j int) bool { return fleet.Nodes[i].ID < fleet.Nodes[j].ID })
 	sort.Slice(fleet.Instances, func(i, j int) bool {
@@ -183,7 +183,7 @@ func (d *PeerDirectory) agentFor(ctx context.Context, peer domain.Peer) (ports.N
 	d.mu.Lock()
 	if cached, ok := d.peerAgents[peer.ID]; ok && cached.sourceAddress == sourceAddress {
 		d.mu.Unlock()
-		return cached.agent, cached.resolvedPeer, nil
+		return cached.agent, cached.telemetryPeer, nil
 	}
 	d.mu.Unlock()
 
@@ -195,8 +195,6 @@ func (d *PeerDirectory) agentFor(ctx context.Context, peer domain.Peer) (ports.N
 		}
 		address = loopback
 	}
-	resolvedPeer := peer
-	resolvedPeer.Addresses = append([]string{address}, peer.Addresses[1:]...)
 	factory := d.Factory
 	if factory == nil {
 		factory = func(address string) ports.NodeAgent {
@@ -220,9 +218,11 @@ func (d *PeerDirectory) agentFor(ctx context.Context, peer domain.Peer) (ports.N
 	if d.peerAgents == nil {
 		d.peerAgents = map[string]cachedPeerAgent{}
 	}
-	d.peerAgents[peer.ID] = cachedPeerAgent{sourceAddress: sourceAddress, resolvedPeer: resolvedPeer, agent: agent}
+	telemetryPeer := peer
+	telemetryPeer.Addresses = append([]string{sourceAddress}, peer.Addresses[1:]...)
+	d.peerAgents[peer.ID] = cachedPeerAgent{sourceAddress: sourceAddress, telemetryPeer: telemetryPeer, agent: agent}
 	d.mu.Unlock()
-	return agent, resolvedPeer, nil
+	return agent, telemetryPeer, nil
 }
 
 func (d *PeerDirectory) saveNode(ctx context.Context, node domain.Node) error {

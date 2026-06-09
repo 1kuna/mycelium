@@ -21,8 +21,8 @@ func validatePeerConfig(cfg PeerConfig) error {
 	if peerListenRequiresAuth(listen) && cfg.RPCToken == "" {
 		return fmt.Errorf("rpc_token is required when listen is not loopback")
 	}
-	if peerListenRequiresAuth(listen) && cfg.GatewayToken == "" {
-		return fmt.Errorf("gateway_token is required when listen is not loopback")
+	if peerListenRequiresAuth(listen) && !gatewayAuthConfigured(cfg) {
+		return fmt.Errorf("gateway_token or gateway_project_tokens is required when listen is not loopback")
 	}
 	if cfg.Overlay || len(cfg.OverlayListenAddrs) > 0 || len(cfg.OverlayBootstrap) > 0 {
 		return fmt.Errorf("overlay membership is disabled for the MVP; use LAN peer discovery")
@@ -54,6 +54,29 @@ func validatePeerConfig(cfg PeerConfig) error {
 	if err := projectvalidation.ValidateSet(cfg.Projects, cfg.DefaultProject); err != nil {
 		return err
 	}
+	projects := map[string]struct{}{}
+	for _, project := range cfg.Projects {
+		projects[project.ID] = struct{}{}
+	}
+	seenGatewayTokens := map[string]struct{}{}
+	if cfg.GatewayToken != "" {
+		seenGatewayTokens[cfg.GatewayToken] = struct{}{}
+	}
+	for _, token := range cfg.GatewayProjectTokens {
+		if token.Token == "" {
+			return fmt.Errorf("gateway_project_tokens token is required")
+		}
+		if token.Project == "" {
+			return fmt.Errorf("gateway_project_tokens project is required")
+		}
+		if _, ok := projects[token.Project]; !ok {
+			return fmt.Errorf("gateway_project_tokens project %q is not configured", token.Project)
+		}
+		if _, ok := seenGatewayTokens[token.Token]; ok {
+			return fmt.Errorf("duplicate gateway token")
+		}
+		seenGatewayTokens[token.Token] = struct{}{}
+	}
 	compute := defaultedComputeConfig(cfg.ComputeConfig)
 	if compute.MaxUtil <= 0 || compute.MaxUtil > 1 {
 		return fmt.Errorf("compute_config.max_util must be in (0,1]")
@@ -82,6 +105,10 @@ func validatePeerConfig(cfg PeerConfig) error {
 		}
 	}
 	return nil
+}
+
+func gatewayAuthConfigured(cfg PeerConfig) bool {
+	return cfg.GatewayToken != "" || len(cfg.GatewayProjectTokens) > 0
 }
 
 func peerListenRequiresAuth(listen string) bool {

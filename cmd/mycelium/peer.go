@@ -325,7 +325,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		Client:   telemetryHTTPClient{AuthToken: cfg.RPCToken, Client: peerControlHTTPClient()},
 		Interval: time.Duration(cfg.OptimizerEvalMS) * time.Millisecond,
 	})
-	authRequired := cfg.GatewayToken != "" || peerListenRequiresAuth(cfg.Listen)
+	authRequired := gatewayAuthConfigured(cfg) || peerListenRequiresAuth(cfg.Listen)
 	handler := gateway.Server{
 		Router: &gateway.Router{
 			Placer:              placer,
@@ -344,6 +344,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		},
 		RequireAuth:         authRequired,
 		AuthToken:           cfg.GatewayToken,
+		AuthTokenProjects:   gatewayProjectTokenMap(cfg.GatewayProjectTokens),
 		TrustControlHeaders: false,
 	}
 	mountPeerHTTPWithDiagnostics(mux, self, joinTokens, cfg.SeedPeers, cfg.JoinToken, cfg.RPCToken, peerControlHTTPClient())
@@ -2334,6 +2335,17 @@ func projectMap(projects []domain.Project) map[string]domain.Project {
 	out := map[string]domain.Project{}
 	for _, project := range projects {
 		out[project.ID] = project
+	}
+	return out
+}
+
+func gatewayProjectTokenMap(tokens []GatewayProjectToken) map[string]string {
+	if len(tokens) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(tokens))
+	for _, token := range tokens {
+		out[token.Token] = token.Project
 	}
 	return out
 }
