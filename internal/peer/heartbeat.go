@@ -73,6 +73,10 @@ func (h *Heartbeat) Tick(ctx context.Context) ([]domain.Peer, error) {
 	}
 	for id, beat := range h.known {
 		if !seen[id] && !beat.dead {
+			if h.Probe != nil && h.probe(ctx, beat.peer) == nil {
+				h.known[id] = peerBeat{peer: beat.peer}
+				continue
+			}
 			dead, err := h.miss(ctx, beat.peer)
 			if err != nil {
 				return nil, err
