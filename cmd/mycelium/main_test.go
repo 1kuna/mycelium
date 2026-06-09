@@ -1382,6 +1382,16 @@ func TestCatalogStageHTTPMaterializesPresetAndLocality(t *testing.T) {
 	if response.Locality.ID != "node-a:runtime-hf" || response.Locality.Managed || response.Locality.Reason != "runtime source adopted" {
 		t.Fatalf("runtime locality = %+v", response.Locality)
 	}
+	if response.Preset.ModelRef != model || response.Preset.ArtifactSizeMB != 10 || response.Preset.EstWeightsMB != 10 || response.Preset.KVPerTokenMB != 0.5 || response.Preset.ContextLength != 2048 {
+		t.Fatalf("runtime preset did not adopt parsed metadata: %+v", response.Preset)
+	}
+	runtimePreset, err := store.Preset(ctx, "runtime-hf")
+	if err != nil {
+		t.Fatalf("runtime Preset: %v", err)
+	}
+	if runtimePreset.ModelRef != model || runtimePreset.ArtifactSizeMB != 10 || runtimePreset.EstWeightsMB != 10 || runtimePreset.KVPerTokenMB != 0.5 {
+		t.Fatalf("stored runtime preset = %+v", runtimePreset)
+	}
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/catalog/stage", strings.NewReader(`{"preset":{"id":"missing-runtime","model_ref":"repo/model","node_id":"node-a"}}`))
 	req.Header.Set("Authorization", "Bearer rpc-secret")

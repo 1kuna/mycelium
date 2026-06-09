@@ -319,7 +319,11 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		startPeerHeartbeatWithClient(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, joinTokens, clock.System{}, controlClient)
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
-	startOptimizerEvaluator(ctx, store, fleet, cfg.ID, cfg.Compute, clock.System{}, time.Duration(cfg.OptimizerEvalMS)*time.Millisecond, telemetrySyncConfig{
+	optimizerNodeID := cfg.ID
+	if cfg.Compute {
+		optimizerNodeID = privateLocalNodeID(cfg)
+	}
+	startOptimizerEvaluator(ctx, store, fleet, optimizerNodeID, cfg.Compute, clock.System{}, time.Duration(cfg.OptimizerEvalMS)*time.Millisecond, telemetrySyncConfig{
 		SelfID:   cfg.ID,
 		Peers:    discovery,
 		Client:   telemetryHTTPClient{AuthToken: cfg.RPCToken, Client: peerControlHTTPClient()},
@@ -555,7 +559,7 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 			writePeerRPCError(w, http.StatusInternalServerError, err)
 			return
 		}
-		adoptSource, adopt, err := verifyRuntimeSourceAdoption(r.Context(), cfg, req.Preset, source, nodeID)
+		adoptSource, metadata, adopt, err := verifyRuntimeSourceAdoption(r.Context(), cfg, req.Preset, source, nodeID)
 		if err != nil {
 			job.Status = domain.JobFailed
 			job.Error = err.Error()
@@ -566,6 +570,13 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 		if adopt {
 			staged := req.Preset
 			staged.NodeID = nodeID
+			staged.ModelRef = adoptSource
+			staged.ArtifactSizeMB = metadata.WeightsMB
+			staged.EstWeightsMB = metadata.WeightsMB
+			staged.KVPerTokenMB = metadata.KVPerTokenMB
+			if metadata.ContextLength > 0 && staged.ContextLength == 0 {
+				staged.ContextLength = metadata.ContextLength
+			}
 			if err := store.SavePreset(r.Context(), staged); err != nil {
 				writePeerRPCError(w, http.StatusInternalServerError, err)
 				return
@@ -1154,12 +1165,17 @@ type combinedFleet struct {
 
 func (f combinedFleet) Snapshot(ctx context.Context) (domain.FleetSnapshot, error) {
 	left, err := f.left.Snapshot(ctx)
-	if err != nil {
-		return domain.FleetSnapshot{}, err
-	}
+	leftErr := err
 	right, err := f.right.Snapshot(ctx)
-	if err != nil {
-		return domain.FleetSnapshot{}, err
+	rightErr := err
+	if leftErr != nil && rightErr != nil {
+		return domain.FleetSnapshot{}, errors.Join(leftErr, rightErr)
+	}
+	if leftErr != nil {
+		return right, nil
+	}
+	if rightErr != nil {
+		return left, nil
 	}
 	left.Nodes = append(left.Nodes, right.Nodes...)
 	left.Instances = append(left.Instances, right.Instances...)
