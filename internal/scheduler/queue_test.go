@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"mycelium/internal/domain"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
 )
@@ -45,5 +46,26 @@ func TestQueueEmpty(t *testing.T) {
 	}
 	if got, ok := queue.Dequeue(); ok || got.ID != "" {
 		t.Fatalf("Dequeue = %+v %v", got, ok)
+	}
+}
+
+func TestQueueDequeueFirstWithPayloadSkipsNonMatches(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	queue := NewQueue(clock)
+	queue.EnqueueWithPayload(fixtures.MakeJob(fixtures.WithJobID("blocked"), fixtures.Interactive), []byte("blocked"))
+	queue.EnqueueWithPayload(fixtures.MakeJob(fixtures.WithJobID("ready"), fixtures.Background), []byte("ready"))
+
+	got, payload, ok := queue.DequeueFirstWithPayload(func(job domain.Job, _ []byte) bool {
+		return job.ID == "ready"
+	})
+	if !ok || got.ID != "ready" || string(payload) != "ready" {
+		t.Fatalf("DequeueFirstWithPayload = %+v %q %v", got, payload, ok)
+	}
+	if queue.Len() != 1 {
+		t.Fatalf("queue len = %d", queue.Len())
+	}
+	remaining, ok := queue.Dequeue()
+	if !ok || remaining.ID != "blocked" {
+		t.Fatalf("remaining = %+v ok=%v", remaining, ok)
 	}
 }

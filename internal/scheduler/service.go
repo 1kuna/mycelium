@@ -358,26 +358,48 @@ func (s *Service) Drain(ctx context.Context, limit int) ([]Result, error) {
 	}
 	results := make([]Result, 0, limit)
 	for len(results) < limit {
-		job, payload, ok := s.Queue.DequeueWithPayload()
+		job, payload, ok, err := s.dequeueRunnable(ctx)
+		if err != nil {
+			return results, err
+		}
 		if !ok {
 			return results, nil
 		}
 		var result Result
-		var err error
+		var submitErr error
 		if s.Coordinator != nil {
 			if len(payload) == 0 {
 				return results, fmt.Errorf("queued job %q has no rescue payload for coordinated drain", job.ID)
 			}
-			result, err = s.SubmitWithPayload(ctx, job, payload)
+			result, submitErr = s.SubmitWithPayload(ctx, job, payload)
 		} else {
-			result, err = s.Submit(ctx, job)
+			result, submitErr = s.Submit(ctx, job)
 		}
-		if err != nil {
-			return results, err
+		if submitErr != nil {
+			return results, submitErr
 		}
 		results = append(results, result)
 	}
 	return results, nil
+}
+
+func (s *Service) dequeueRunnable(ctx context.Context) (domain.Job, []byte, bool, error) {
+	if s.Coordinator != nil {
+		job, payload, ok := s.Queue.DequeueWithPayload()
+		return job, payload, ok, nil
+	}
+	if s.Fleet == nil || s.Placer == nil {
+		return domain.Job{}, nil, false, fmt.Errorf("scheduler service is not fully configured")
+	}
+	fleet, err := s.Fleet.Snapshot(ctx)
+	if err != nil {
+		return domain.Job{}, nil, false, err
+	}
+	job, payload, ok := s.Queue.DequeueFirstWithPayload(func(job domain.Job, _ []byte) bool {
+		decision, err := s.Placer.Place(ctx, job, fleet)
+		return err == nil && decision.Action != domain.ActionQueued
+	})
+	return job, payload, ok, nil
 }
 
 func (s *Service) Release(ctx context.Context, leaseID string) error {
