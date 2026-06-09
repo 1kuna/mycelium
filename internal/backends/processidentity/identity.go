@@ -15,6 +15,8 @@ import (
 )
 
 var ErrExited = errors.New("process already exited")
+var ErrUnsignalable = errors.New("process is live but cannot be signaled")
+var ErrIdentityInconclusive = errors.New("process identity is inconclusive")
 
 func Exited(pid int) (bool, error) {
 	if pid <= 0 {
@@ -102,6 +104,123 @@ func IsExited(err error) bool {
 	return errors.Is(err, ErrExited)
 }
 
+func IsUnsignalable(err error) bool {
+	return errors.Is(err, ErrUnsignalable)
+}
+
+func IsInconclusive(err error) bool {
+	return errors.Is(err, ErrIdentityInconclusive)
+}
+
+type identityEvidence interface {
+	PGID(pid int) (int, error)
+	PSField(pid int, field string) (string, bool, error)
+}
+
+type systemEvidence struct{}
+
+func (systemEvidence) PGID(pid int) (int, error) {
+	return syscall.Getpgid(pid)
+}
+
+func (systemEvidence) PSField(pid int, field string) (string, bool, error) {
+	return psFieldNoSignal(pid, field)
+}
+
+func ClassifySignalPermission(handle ports.Handle) error {
+	return classifySignalPermission(handle, systemEvidence{})
+}
+
+func ClassifyPermissionError(handle ports.Handle, err error) (bool, error, bool) {
+	if !errors.Is(err, syscall.EPERM) {
+		return false, nil, false
+	}
+	classified := ClassifySignalPermission(handle)
+	if IsExited(classified) {
+		return true, nil, true
+	}
+	return false, classified, true
+}
+
+func classifySignalPermission(handle ports.Handle, evidence identityEvidence) error {
+	if handle.PID <= 0 {
+		return ErrExited
+	}
+	stat, ok, err := evidence.PSField(handle.PID, "stat=")
+	if err != nil {
+		if IsExited(err) {
+			return ErrExited
+		}
+		return fmt.Errorf("%w: read process %d state: %v", ErrIdentityInconclusive, handle.PID, err)
+	}
+	if !ok || strings.Contains(stat, "Z") {
+		return ErrExited
+	}
+
+	started, ok, err := psStartedAtWith(handle.PID, evidence)
+	if err != nil {
+		if IsExited(err) {
+			return ErrExited
+		}
+		return fmt.Errorf("%w: read process %d start time: %v", ErrIdentityInconclusive, handle.PID, err)
+	}
+	if !ok {
+		return fmt.Errorf("%w: process %d live but start time is unavailable", ErrIdentityInconclusive, handle.PID)
+	}
+	if err := classifyStartedAt(handle, started); err != nil {
+		return err
+	}
+
+	if handle.PGID != 0 {
+		pgid, err := evidence.PGID(handle.PID)
+		if err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return ErrExited
+			}
+			return fmt.Errorf("%w: read process %d pgid: %v", ErrIdentityInconclusive, handle.PID, err)
+		}
+		if pgid != handle.PGID {
+			return fmt.Errorf("%w: process %d pgid changed from %d to %d", ErrExited, handle.PID, handle.PGID, pgid)
+		}
+	}
+
+	command, ok, err := evidence.PSField(handle.PID, "command=")
+	if err != nil {
+		if IsExited(err) {
+			return ErrExited
+		}
+		return fmt.Errorf("%w: read process %d command: %v", ErrIdentityInconclusive, handle.PID, err)
+	}
+	if ok {
+		if err := classifyCommand(handle, command); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: process %d matches stored backend identity", ErrUnsignalable, handle.PID)
+}
+
+func classifyStartedAt(handle ports.Handle, live time.Time) error {
+	if handle.StartedAt.IsZero() {
+		return fmt.Errorf("%w: process %d stored ref missing start time; live start=%s", ErrIdentityInconclusive, handle.PID, live.Format(time.RFC3339))
+	}
+	if err := verifyStartedAt(handle, live); err != nil {
+		return fmt.Errorf("%w: %v", ErrExited, err)
+	}
+	return nil
+}
+
+func classifyCommand(handle ports.Handle, command string) error {
+	err := verifyCommand(handle, command)
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	if strings.Contains(message, "binary mismatch") || strings.Contains(message, "argv mismatch") {
+		return fmt.Errorf("%w: %v", ErrExited, err)
+	}
+	return fmt.Errorf("%w: %v", ErrIdentityInconclusive, err)
+}
+
 func verifyCommand(handle ports.Handle, command string) error {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
@@ -157,7 +276,23 @@ func verifyStartedAt(handle ports.Handle, live time.Time) error {
 }
 
 func psStartedAt(pid int) (time.Time, bool, error) {
-	raw, ok, err := psField(pid, "lstart=")
+	return psStartedAtWith(pid, psFieldFuncEvidence{PSFieldFunc: psField})
+}
+
+type psFieldFuncEvidence struct {
+	PSFieldFunc func(int, string) (string, bool, error)
+}
+
+func (e psFieldFuncEvidence) PGID(pid int) (int, error) {
+	return syscall.Getpgid(pid)
+}
+
+func (e psFieldFuncEvidence) PSField(pid int, field string) (string, bool, error) {
+	return e.PSFieldFunc(pid, field)
+}
+
+func psStartedAtWith(pid int, evidence identityEvidence) (time.Time, bool, error) {
+	raw, ok, err := evidence.PSField(pid, "lstart=")
 	if err != nil || !ok {
 		return time.Time{}, ok, err
 	}
@@ -176,6 +311,20 @@ func psField(pid int, field string) (string, bool, error) {
 			return "", false, exitErr
 		}
 		return "", false, nil
+	}
+	value := strings.TrimSpace(string(out))
+	return value, value != "", nil
+}
+
+func psFieldNoSignal(pid int, field string) (string, bool, error) {
+	cmd := exec.Command("ps", "-ww", "-p", strconv.Itoa(pid), "-o", field)
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return "", false, ErrExited
+		}
+		return "", false, err
 	}
 	value := strings.TrimSpace(string(out))
 	return value, value != "", nil

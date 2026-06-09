@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"mycelium/internal/backends/processidentity"
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
 )
@@ -66,6 +67,20 @@ func TestReaperFailsOnInvalidFileAndKillError(t *testing.T) {
 	}
 	if _, statErr := os.Stat(path); statErr != nil {
 		t.Fatalf("failed reap should preserve refs: %v", statErr)
+	}
+}
+
+func TestReaperKeepsRefsForLiveUnsignalableBackend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "processes.json")
+	if err := WriteProcessRefs(path, []ProcessRef{{PID: 42, Kind: "llamacpp", Ref: "42"}}); err != nil {
+		t.Fatalf("WriteProcessRefs: %v", err)
+	}
+	killer := &recordingKiller{err: processidentity.ErrUnsignalable}
+	if _, err := NewReaper(path, killer).Reap(context.Background()); !processidentity.IsUnsignalable(err) {
+		t.Fatalf("Reap err = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("unsignalable backend should preserve refs: %v", err)
 	}
 }
 
