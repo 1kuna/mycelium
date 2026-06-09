@@ -117,6 +117,46 @@ func TestHeartbeatCountsMissingKnownPeers(t *testing.T) {
 	}
 }
 
+func TestHeartbeatProbesMissingKnownPeerBeforeCountingMiss(t *testing.T) {
+	ctx := context.Background()
+	clock := mocks.NewFakeClock(time.Unix(225, 0).UTC())
+	remote := fixtures.MakePeer(fixtures.WithPeerID("peer-b"))
+	discovery := &mocks.PeerDiscovery{PeersVal: []domain.Peer{remote}}
+	probes := 0
+	heartbeat := &Heartbeat{
+		Self:      fixtures.MakePeer(fixtures.WithPeerID("peer-a")),
+		Discovery: discovery,
+		Clock:     clock,
+		MaxMisses: 1,
+		Probe: func(context.Context, domain.Peer) error {
+			probes++
+			return nil
+		},
+	}
+	if _, err := heartbeat.Tick(ctx); err != nil {
+		t.Fatalf("first Tick: %v", err)
+	}
+	discovery.PeersVal = nil
+	dead, err := heartbeat.Tick(ctx)
+	if err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
+	if len(dead) != 0 || heartbeat.known[remote.ID].misses != 0 || probes != 2 {
+		t.Fatalf("second dead=%+v known=%+v probes=%d", dead, heartbeat.known, probes)
+	}
+	heartbeat.Probe = func(context.Context, domain.Peer) error {
+		probes++
+		return domain.ErrUnreachable
+	}
+	dead, err = heartbeat.Tick(ctx)
+	if err != nil {
+		t.Fatalf("third Tick: %v", err)
+	}
+	if len(dead) != 1 || dead[0].ID != remote.ID || probes != 3 {
+		t.Fatalf("third dead=%+v probes=%d", dead, probes)
+	}
+}
+
 func TestHeartbeatErrorPaths(t *testing.T) {
 	ctx := context.Background()
 	clock := mocks.NewFakeClock(time.Unix(230, 0).UTC())

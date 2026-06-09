@@ -80,9 +80,6 @@ func TestPeerDirectoryErrors(t *testing.T) {
 	}{
 		{name: "missing discovery", directory: &PeerDirectory{}, want: "not configured"},
 		{name: "discovery", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{Err: boom}}, wantErr: boom},
-		{name: "missing id", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{Addresses: []string{"127.0.0.1:1"}, Compute: true}}}}, want: "missing id"},
-		{name: "missing address", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Compute: true}}}}, want: "reachable address"},
-		{name: "tunnel", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}}}, Tunnel: &mocks.Tunnel{Err: boom}}, wantErr: boom},
 	}
 	for _, check := range checks {
 		t.Run(check.name, func(t *testing.T) {
@@ -116,6 +113,34 @@ func TestPeerDirectoryErrors(t *testing.T) {
 	}
 	if got := peerAgentBaseURL("https://example.test"); got != "https://example.test" {
 		t.Fatalf("base https = %s", got)
+	}
+}
+
+func TestPeerDirectoryDegradesBadPeerSetup(t *testing.T) {
+	boom := errors.New("boom")
+	checks := []struct {
+		name      string
+		directory *PeerDirectory
+		wantNodes int
+		wantID    string
+	}{
+		{name: "missing id skipped", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{Addresses: []string{"127.0.0.1:1"}, Compute: true}}}}, wantNodes: 0},
+		{name: "missing address unreachable", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Compute: true}}}}, wantNodes: 1, wantID: "peer-a"},
+		{name: "tunnel unreachable", directory: &PeerDirectory{Discovery: &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}}}, Tunnel: &mocks.Tunnel{Err: boom}}, wantNodes: 1, wantID: "peer-a"},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			fleet, err := check.directory.Snapshot(context.Background())
+			if err != nil {
+				t.Fatalf("Snapshot: %v", err)
+			}
+			if len(fleet.Nodes) != check.wantNodes {
+				t.Fatalf("nodes = %+v", fleet.Nodes)
+			}
+			if check.wantID != "" && (fleet.Nodes[0].ID != check.wantID || fleet.Nodes[0].Status != domain.NodeUnreachable) {
+				t.Fatalf("node = %+v", fleet.Nodes[0])
+			}
+		})
 	}
 }
 

@@ -93,6 +93,36 @@ func TestRecoveryRescuesDeadPeerUnfinishedJobsAfterOwnerCheck(t *testing.T) {
 	}
 }
 
+func TestRecoveryContinuesAfterRecordError(t *testing.T) {
+	ctx := context.Background()
+	registry := NewJobRegistry()
+	records := []domain.JobRecord{
+		recoveryRecord("bad", "dead-peer", "", domain.JobQueued),
+		recoveryRecord("good", "dead-peer", "", domain.JobQueued),
+	}
+	if err := registry.Merge(ctx, records); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	boom := errors.New("rescue bad")
+	var rescued []string
+	count, err := (Recovery{
+		Registry: registry,
+		Rescue: func(_ context.Context, rec domain.JobRecord) error {
+			if rec.JobID == "bad" {
+				return boom
+			}
+			rescued = append(rescued, rec.JobID)
+			return nil
+		},
+	}).RecoverPeer(ctx, "dead-peer")
+	if !errors.Is(err, boom) {
+		t.Fatalf("RecoverPeer err = %v", err)
+	}
+	if count != 1 || !reflect.DeepEqual(rescued, []string{"good"}) {
+		t.Fatalf("count=%d rescued=%+v", count, rescued)
+	}
+}
+
 func TestRecoveryCleansTerminalCleanupRequiredRecordWithoutRescue(t *testing.T) {
 	ctx := context.Background()
 	registry := NewJobRegistry()

@@ -47,6 +47,7 @@ func (r Recovery) RecoverPeer(ctx context.Context, deadPeerID string) (int, erro
 		return 0, err
 	}
 	rescued := 0
+	var recordErrs []error
 	for _, rec := range records {
 		if !r.shouldConsider(deadPeerID, rec) {
 			continue
@@ -57,7 +58,8 @@ func (r Recovery) RecoverPeer(ctx context.Context, deadPeerID string) (int, erro
 			decision, err = r.rescueDecision(ctx, deadPeerID, rec)
 			return err
 		}); err != nil {
-			return rescued, err
+			recordErrs = append(recordErrs, err)
+			continue
 		}
 		switch decision.action {
 		case rescueCleanup:
@@ -65,37 +67,42 @@ func (r Recovery) RecoverPeer(ctx context.Context, deadPeerID string) (int, erro
 				if err := r.step("recovery/cleanup_release", map[string]any{"dead_peer": deadPeerID, "job_id": rec.JobID, "owner": rec.AssignedNode, "lease_id": decision.lease.ID}, func() error {
 					return r.releaseOwnerLease(ctx, rec.AssignedNode, decision.lease.ID)
 				}); err != nil {
-					return rescued, err
+					recordErrs = append(recordErrs, err)
+					continue
 				}
 			}
 			if err := r.step("recovery/cleanup_clear", map[string]any{"dead_peer": deadPeerID, "job_id": rec.JobID}, func() error {
 				return r.recordCleanupCleared(ctx, rec)
 			}); err != nil {
-				return rescued, err
+				recordErrs = append(recordErrs, err)
+				continue
 			}
 		case rescueNow:
 			if decision.lease.ID != "" {
 				if err := r.step("recovery/release_orphan", map[string]any{"dead_peer": deadPeerID, "job_id": rec.JobID, "owner": rec.AssignedNode, "lease_id": decision.lease.ID}, func() error {
 					return r.releaseOwnerLease(ctx, rec.AssignedNode, decision.lease.ID)
 				}); err != nil {
-					return rescued, err
+					recordErrs = append(recordErrs, err)
+					continue
 				}
 			}
 			if err := r.step("recovery/rescue", map[string]any{"dead_peer": deadPeerID, "job_id": rec.JobID}, func() error {
 				return r.Rescue(ctx, rec)
 			}); err != nil {
-				return rescued, err
+				recordErrs = append(recordErrs, err)
+				continue
 			}
 			rescued++
 		case rescuePartition:
 			if err := r.step("recovery/partition", map[string]any{"dead_peer": deadPeerID, "job_id": rec.JobID, "owner": rec.AssignedNode}, func() error {
 				return r.recordPartition(ctx, rec)
 			}); err != nil {
-				return rescued, err
+				recordErrs = append(recordErrs, err)
+				continue
 			}
 		}
 	}
-	return rescued, nil
+	return rescued, errors.Join(recordErrs...)
 }
 
 func (r Recovery) step(op string, input map[string]any, fn func() error) error {

@@ -57,6 +57,7 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 		agent         ports.NodeAgent
 	}
 	candidates := []peerAgent{}
+	var setupFailures []domain.Peer
 	for _, peer := range peers {
 		if d.SelfID != "" && peer.ID == d.SelfID {
 			continue
@@ -66,7 +67,11 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 		}
 		agent, telemetryPeer, err := d.agentFor(ctx, peer)
 		if err != nil {
-			return domain.FleetSnapshot{}, err
+			log.Printf("mycelium peer agent setup failed: peer=%s error=%v", peer.ID, err)
+			if peer.ID != "" {
+				setupFailures = append(setupFailures, peer)
+			}
+			continue
 		}
 		candidates = append(candidates, peerAgent{peer: peer, telemetryPeer: telemetryPeer, agent: agent})
 	}
@@ -88,6 +93,9 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 	agents := map[string]ports.NodeAgent{}
 	peersByNode := map[string]domain.Peer{}
 	var fleet domain.FleetSnapshot
+	for _, peer := range setupFailures {
+		fleet.Nodes = append(fleet.Nodes, unreachablePeerNode(peer))
+	}
 	for range candidates {
 		result := <-results
 		if result.err != nil {

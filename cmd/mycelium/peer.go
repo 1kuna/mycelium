@@ -722,29 +722,29 @@ func shouldAdoptRuntimeSource(preset domain.Preset, source, nodeID string) bool 
 	return err == nil && !info.IsDir()
 }
 
-func verifyRuntimeSourceAdoption(ctx context.Context, cfg PeerConfig, preset domain.Preset, source, nodeID string) (string, bool, error) {
+func verifyRuntimeSourceAdoption(ctx context.Context, cfg PeerConfig, preset domain.Preset, source, nodeID string) (string, domain.ModelMetadata, bool, error) {
 	if !shouldAdoptRuntimeSource(preset, source, nodeID) {
-		return "", false, nil
+		return "", domain.ModelMetadata{}, false, nil
 	}
 	if preset.Backend != "" && preset.Backend != domain.BackendLlamaCpp {
-		return "", false, fmt.Errorf("runtime source adoption for backend %s requires owner inspection; catalog stage cannot mark it ready", preset.Backend)
+		return "", domain.ModelMetadata{}, false, fmt.Errorf("runtime source adoption for backend %s requires owner inspection; catalog stage cannot mark it ready", preset.Backend)
 	}
 	parser := cfg.GGUFParser
 	if parser == "" {
 		parser = cfg.ComputeConfig.GGUFParser
 	}
 	if parser == "" {
-		return "", false, fmt.Errorf("runtime source adoption for preset %q requires a configured gguf parser", preset.ID)
+		return "", domain.ModelMetadata{}, false, fmt.Errorf("runtime source adoption for preset %q requires a configured gguf parser", preset.ID)
 	}
 	localSource := strings.TrimPrefix(source, "file://")
 	metadata, err := estimate.NewCommandParser(parser, nil).Parse(ctx, localSource)
 	if err != nil {
-		return "", false, err
+		return "", domain.ModelMetadata{}, false, err
 	}
 	if metadata.WeightsMB <= 0 {
-		return "", false, fmt.Errorf("runtime source %q reported invalid weights: %dMB", localSource, metadata.WeightsMB)
+		return "", domain.ModelMetadata{}, false, fmt.Errorf("runtime source %q reported invalid weights: %dMB", localSource, metadata.WeightsMB)
 	}
-	return localSource, true, nil
+	return localSource, metadata, true, nil
 }
 
 func modelLocalityID(nodeID, presetID string) string {

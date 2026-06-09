@@ -2062,11 +2062,16 @@ func TestCombinedFleetAndNodesDelegateAcrossSources(t *testing.T) {
 		t.Fatalf("fleet snapshot = %+v", snap)
 	}
 	boom := errors.New("boom")
-	if _, err := (combinedFleet{left: errorFleetSource{err: boom}, right: rightDir}).Snapshot(ctx); !errors.Is(err, boom) {
-		t.Fatalf("left error = %v", err)
+	snap, err = (combinedFleet{left: errorFleetSource{err: boom}, right: rightDir}).Snapshot(ctx)
+	if err != nil || len(snap.Nodes) != 1 || snap.Nodes[0].ID != "right" {
+		t.Fatalf("left error partial snapshot = %+v err=%v", snap, err)
 	}
-	if _, err := (combinedFleet{left: leftDir, right: errorFleetSource{err: boom}}).Snapshot(ctx); !errors.Is(err, boom) {
-		t.Fatalf("right error = %v", err)
+	snap, err = (combinedFleet{left: leftDir, right: errorFleetSource{err: boom}}).Snapshot(ctx)
+	if err != nil || len(snap.Nodes) != 1 || snap.Nodes[0].ID != "left" {
+		t.Fatalf("right error partial snapshot = %+v err=%v", snap, err)
+	}
+	if _, err := (combinedFleet{left: errorFleetSource{err: boom}, right: errorFleetSource{err: boom}}).Snapshot(ctx); !errors.Is(err, boom) {
+		t.Fatalf("both error = %v", err)
 	}
 
 	nodes := combinedNodes{left: leftDir, right: rightDir}
