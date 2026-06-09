@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -762,12 +763,16 @@ func TestRunBenchmarkFanOutPersistsJobsAndOutputs(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{
-			Model: req.Model,
-			Choices: []api.OpenAIChatChoice{{
-				Message: api.OpenAIMessage{Role: "assistant", Content: "answer from " + req.Model},
-			}},
-			Usage: api.OpenAIUsage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5},
+		if req.MaxTokens != 24 {
+			t.Fatalf("max tokens = %d", req.MaxTokens)
+		}
+		if !req.Stream || req.StreamOptions == nil || !req.StreamOptions.IncludeUsage {
+			t.Fatalf("stream options = stream:%v opts:%+v", req.Stream, req.StreamOptions)
+		}
+		writeBenchmarkOpenAIStream(w, []string{"answer ", "from " + req.Model}, api.OpenAIUsage{
+			PromptTokens:     3,
+			CompletionTokens: 2,
+			TotalTokens:      5,
 		})
 	}))
 	dbPath := filepath.Join(t.TempDir(), "control.db")
@@ -783,6 +788,7 @@ func TestRunBenchmarkFanOutPersistsJobsAndOutputs(t *testing.T) {
 			"--id", "bench-a",
 			"--project", "project-a",
 			"--prompt", "Say hi",
+			"--max-tokens", "24",
 			"--out", outDir,
 			"--model", "same/model",
 			"--model", "same/model",
@@ -806,6 +812,9 @@ func TestRunBenchmarkFanOutPersistsJobsAndOutputs(t *testing.T) {
 	}
 	if strings.Contains(string(metrics), "user_pick") || !strings.Contains(string(metrics), `"context_tokens": 5`) {
 		t.Fatalf("metrics = %s", metrics)
+	}
+	if !strings.Contains(string(metrics), `"tokens_per_sec"`) || !strings.Contains(string(metrics), `"ttft_ms"`) {
+		t.Fatalf("stream metrics missing = %s", metrics)
 	}
 	store, err := storesqlite.Open(dbPath)
 	if err != nil {
@@ -868,10 +877,7 @@ func TestRunBenchmarkUsesGatewayTokenEnv(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer env-secret" {
 			t.Fatalf("gateway auth = %q", got)
 		}
-		_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{
-			Choices: []api.OpenAIChatChoice{{Message: api.OpenAIMessage{Role: "assistant", Content: "env ok"}}},
-			Usage:   api.OpenAIUsage{TotalTokens: 1},
-		})
+		writeBenchmarkOpenAIStream(w, []string{"env ok"}, api.OpenAIUsage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3})
 	}))
 	if err := RunWithClient(context.Background(), []string{
 		"benchmark", "run",
@@ -1305,12 +1311,69 @@ func TestBenchmarkGatewayClientErrors(t *testing.T) {
 		t.Fatal("bad JSON response accepted")
 	}
 
-	noChoices := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(api.OpenAIChatResponse{})
+	noContent := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeBenchmarkOpenAIStream(w, nil, api.OpenAIUsage{TotalTokens: 1})
 	}))
-	if _, err := (benchmarkGatewayClient{BaseURL: "http://gateway-no-choices.test", Client: noChoices}).Complete(ctx, "tiny", "prompt"); err == nil || !strings.Contains(err.Error(), "no choices") {
-		t.Fatalf("no choices err = %v", err)
+	if _, err := (benchmarkGatewayClient{BaseURL: "http://gateway-no-content.test", Client: noContent}).Complete(ctx, "tiny", "prompt"); err == nil || !strings.Contains(err.Error(), "no assistant content") {
+		t.Fatalf("no content err = %v", err)
 	}
+}
+
+func TestReadBenchmarkStreamRecordsTTFTAndTokensPerSecond(t *testing.T) {
+	start := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	times := []time.Time{
+		start.Add(50 * time.Millisecond),
+		start.Add(150 * time.Millisecond),
+		start.Add(350 * time.Millisecond),
+		start.Add(650 * time.Millisecond),
+		start.Add(850 * time.Millisecond),
+	}
+	now := func() time.Time {
+		if len(times) == 0 {
+			t.Fatal("unexpected clock read")
+		}
+		next := times[0]
+		times = times[1:]
+		return next
+	}
+	stream := strings.NewReader(
+		"event: loading\n" +
+			"data: {\"action\":\"cold-load\"}\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"content\":\"alpha \"}}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"content\":\"beta\"}}]}\n\n" +
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7}}\n\n" +
+			"data: [DONE]\n\n",
+	)
+	completion, err := readBenchmarkStream(stream, start, now)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	if completion.Text != "alpha beta" {
+		t.Fatalf("text = %q", completion.Text)
+	}
+	if completion.TTFTms != 150 {
+		t.Fatalf("ttft = %d", completion.TTFTms)
+	}
+	if completion.ContextTokens != 7 {
+		t.Fatalf("context tokens = %d", completion.ContextTokens)
+	}
+	if completion.TokensPerSec < 5.71 || completion.TokensPerSec > 5.72 {
+		t.Fatalf("tokens/sec = %.4f", completion.TokensPerSec)
+	}
+}
+
+func writeBenchmarkOpenAIStream(w http.ResponseWriter, parts []string, usage api.OpenAIUsage) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	for _, part := range parts {
+		encoded, _ := json.Marshal(part)
+		_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%s}}]}\n\n", encoded)
+	}
+	_, _ = fmt.Fprintf(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,\"total_tokens\":%d}}\n\n",
+		usage.PromptTokens,
+		usage.CompletionTokens,
+		usage.TotalTokens,
+	)
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 }
 
 func TestControlHTTPBodyReadLimit(t *testing.T) {
