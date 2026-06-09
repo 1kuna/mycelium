@@ -2260,6 +2260,44 @@ func TestServiceDrain(t *testing.T) {
 	}
 }
 
+func TestServiceDrainSkipsNoFitHeadJob(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(41, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	service := &Service{
+		Placer: jobDecisionPlacer{decisions: map[string]domain.PlacementDecision{
+			"job-blocked": {JobID: "job-blocked", Action: domain.ActionQueued},
+			"job-ready":   {JobID: "job-ready", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew},
+		}},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}, admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Queue:  NewQueue(clock),
+		Store:  &runtimeStore{},
+		Clock:  clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+	service.Queue.Enqueue(fixtures.MakeJob(fixtures.WithJobID("job-blocked"), fixtures.WithPreset(preset.ID), fixtures.Interactive))
+	service.Queue.Enqueue(fixtures.MakeJob(fixtures.WithJobID("job-ready"), fixtures.WithPreset(preset.ID), fixtures.Background))
+
+	results, err := service.Drain(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(results) != 1 || results[0].Decision.JobID != "job-ready" {
+		t.Fatalf("drain results = %+v", results)
+	}
+	if service.Queue.Len() != 1 {
+		t.Fatalf("queue len = %d", service.Queue.Len())
+	}
+	remaining, ok := service.Queue.Dequeue()
+	if !ok || remaining.ID != "job-blocked" {
+		t.Fatalf("remaining = %+v ok=%v", remaining, ok)
+	}
+}
+
 func TestServiceReleaseAndExpireLeases(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
 	store := &runtimeStore{leases: map[string]domain.Lease{
@@ -2619,6 +2657,22 @@ type fakePlacer struct {
 
 func (p fakePlacer) Place(context.Context, domain.Job, domain.FleetSnapshot) (domain.PlacementDecision, error) {
 	return p.decision, p.err
+}
+
+type jobDecisionPlacer struct {
+	decisions map[string]domain.PlacementDecision
+	err       error
+}
+
+func (p jobDecisionPlacer) Place(_ context.Context, job domain.Job, _ domain.FleetSnapshot) (domain.PlacementDecision, error) {
+	if p.err != nil {
+		return domain.PlacementDecision{}, p.err
+	}
+	decision := p.decisions[job.ID]
+	if decision.JobID == "" {
+		decision.JobID = job.ID
+	}
+	return decision, nil
 }
 
 type cleanupContextCoordinator struct {

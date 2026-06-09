@@ -63,6 +63,24 @@ func (q *Queue) DequeueWithPayload() (domain.Job, []byte, bool) {
 	return item.job, append([]byte(nil), item.payload...), true
 }
 
+func (q *Queue) DequeueFirstWithPayload(match func(domain.Job, []byte) bool) (domain.Job, []byte, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return domain.Job{}, nil, false
+	}
+	q.sort()
+	for i, item := range q.items {
+		payload := append([]byte(nil), item.payload...)
+		if match != nil && !match(item.job, payload) {
+			continue
+		}
+		q.items = append(q.items[:i], q.items[i+1:]...)
+		return item.job, payload, true
+	}
+	return domain.Job{}, nil, false
+}
+
 func (q *Queue) sort() {
 	now := q.clock.Now()
 	sort.SliceStable(q.items, func(i, j int) bool {

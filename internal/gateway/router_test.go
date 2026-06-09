@@ -545,37 +545,37 @@ func TestRouterSessionTelemetryRoutingFailsLoudly(t *testing.T) {
 	}
 	for _, tt := range []struct {
 		name   string
-		router Router
+		router *Router
 		sample domain.SessionMetric
 		want   string
 	}{
 		{
 			name:   "missing owner node",
-			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node"},
+			router: &Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node"},
 			sample: sampleWith(sample, func(s *domain.SessionMetric) { s.NodeID = "" }),
 			want:   "owner node",
 		},
 		{
 			name:   "local owner missing sink",
-			router: Router{SelfNodeID: "node-a", TelemetryPeerClient: &mocks.TelemetryPeerClient{}},
+			router: &Router{SelfNodeID: "node-a", TelemetryPeerClient: &mocks.TelemetryPeerClient{}},
 			sample: sample,
 			want:   "local owner telemetry sink",
 		},
 		{
 			name:   "remote owner missing resolver",
-			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node"},
+			router: &Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node"},
 			sample: sample,
 			want:   "telemetry peer resolver",
 		},
 		{
 			name:   "remote owner missing client",
-			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node", TelemetryPeers: peerMap{"node-a": {ID: "peer-a"}}},
+			router: &Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node", TelemetryPeers: peerMap{"node-a": {ID: "peer-a"}}},
 			sample: sample,
 			want:   "telemetry client",
 		},
 		{
 			name:   "remote owner unknown peer",
-			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node", TelemetryPeers: peerMap{}, TelemetryPeerClient: &mocks.TelemetryPeerClient{}},
+			router: &Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node", TelemetryPeers: peerMap{}, TelemetryPeerClient: &mocks.TelemetryPeerClient{}},
 			sample: sample,
 			want:   "is not known",
 		},
@@ -599,31 +599,31 @@ func TestRouterRunMetricRoutingFailsLoudly(t *testing.T) {
 	}
 	for _, tt := range []struct {
 		name   string
-		router Router
+		router *Router
 		metric domain.RunMetric
 		want   string
 	}{
 		{
 			name:   "local owner missing sink",
-			router: Router{SelfNodeID: "node-a", TelemetryPeerClient: &mocks.TelemetryPeerClient{}},
+			router: &Router{SelfNodeID: "node-a", TelemetryPeerClient: &mocks.TelemetryPeerClient{}},
 			metric: metric,
 			want:   "local owner telemetry sink",
 		},
 		{
 			name:   "remote owner missing resolver",
-			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node"},
+			router: &Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node"},
 			metric: metric,
 			want:   "telemetry peer resolver",
 		},
 		{
 			name:   "remote owner missing client",
-			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node", TelemetryPeers: peerMap{"node-a": {ID: "peer-a"}}},
+			router: &Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node", TelemetryPeers: peerMap{"node-a": {ID: "peer-a"}}},
 			metric: metric,
 			want:   "telemetry client",
 		},
 		{
 			name:   "remote owner unknown peer",
-			router: Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node", TelemetryPeers: peerMap{}, TelemetryPeerClient: &mocks.TelemetryPeerClient{}},
+			router: &Router{Telemetry: &mocks.TelemetrySink{}, SelfNodeID: "local-node", TelemetryPeers: peerMap{}, TelemetryPeerClient: &mocks.TelemetryPeerClient{}},
 			metric: metric,
 			want:   "is not known",
 		},
@@ -1025,7 +1025,7 @@ func TestRouterRetriesContextOverflowOnLargerPreset(t *testing.T) {
 	small.Capabilities = []domain.Capability{domain.CapabilityChat, domain.CapabilityCompletion}
 	large.Capabilities = []domain.Capability{domain.CapabilityChat, domain.CapabilityCompletion}
 	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, `{"error":{"message":"request (1202 tokens) exceeds the available context size (1024 tokens), try increasing it"}}`, http.StatusBadRequest)
+		http.Error(w, `{"error":{"message":"request (3000 tokens) exceeds the available context size (2048 tokens), try increasing it"}}`, http.StatusBadRequest)
 	}))
 	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1069,7 +1069,7 @@ func TestRouterRetriesContextOverflowByColdLoadingLargerPreset(t *testing.T) {
 	large.ContextLength = 2048
 	large.Aliases = nil
 	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, `{"error":{"message":"request (1202 tokens) exceeds the available context size (1024 tokens), try increasing it"}}`, http.StatusBadRequest)
+		http.Error(w, `{"error":{"message":"request (1500 tokens) exceeds the available context size (1024 tokens), try increasing it"}}`, http.StatusBadRequest)
 	}))
 	secondBody := ""
 	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1148,7 +1148,7 @@ func TestRouterClassifiesOverflowBeforeServerErrorFailover(t *testing.T) {
 	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
 	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))
 	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "prompt exceeds context window", http.StatusInternalServerError)
+		http.Error(w, "prompt of 3000 tokens exceeds context window", http.StatusInternalServerError)
 	}))
 	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2086,7 +2086,7 @@ func TestRouterStreamRetriesContextOverflowBeforeResponseStarts(t *testing.T) {
 	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
 	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))
 	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "request exceeds context window", http.StatusBadRequest)
+		http.Error(w, "request of 3000 tokens exceeds context window", http.StatusBadRequest)
 	}))
 	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -2116,27 +2116,99 @@ func TestRouterStreamRetriesContextOverflowBeforeResponseStarts(t *testing.T) {
 	}
 }
 
-func TestRouterStreamReturnsBeginRequestErrorBeforeResponseStarts(t *testing.T) {
-	preset := fixtures.MakePreset()
+func TestRouterColdStreamRetriesContextOverflowAfterLoadingFrame(t *testing.T) {
+	small := fixtures.MakePreset(fixtures.WithPresetID("preset_small"), fixtures.WithContextLength(2048))
+	large := fixtures.MakePreset(fixtures.WithPresetID("preset_large"), fixtures.WithContextLength(8192))
+	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "request of 3000 tokens exceeds context window", http.StatusBadRequest)
+	}))
+	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: enlarged-cold\n\ndata: [DONE]\n\n"))
+	}))
+
 	node := fixtures.MakeNode()
-	inst := fixtures.MakeInstance(fixtures.OnNode(node.ID))
-	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	instSmall := fixtures.MakeInstance(fixtures.WithInstanceID("inst_small"), fixtures.WithInstancePreset(small.ID), fixtures.OnNode(node.ID))
+	instSmall.Addr = first
+	instLarge := fixtures.MakeInstance(fixtures.WithInstanceID("inst_large"), fixtures.WithInstancePreset(large.ID), fixtures.OnNode(node.ID))
+	instLarge.Addr = second
+	agent := &presetLoadAgent{
+		node: node,
+		instances: map[string]domain.ModelInstance{
+			small.ID: instSmall,
+			large.ID: instLarge,
+		},
+	}
+	resolver := staticResolver{
+		agents:     map[string]ports.NodeAgent{node.ID: agent},
+		admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}},
+	}
+	fleet := staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}}
+	router := newTestRouter(small, fleet.fleet, resolver, large)
+	router.Fleet = fleet
+	router.Runtime = &scheduler.Service{
+		Placer:  router.Placer,
+		Fleet:   fleet,
+		Nodes:   resolver,
+		Owners:  resolver,
+		Queue:   scheduler.NewQueue(router.Clock),
+		Store:   &gatewayRuntimeStore{},
+		Clock:   router.Clock,
+		Presets: map[string]domain.Preset{small.ID: small, large.ID: large},
+	}
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"preset_small","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: loading") || !strings.Contains(body, `"instance_id":"inst_large"`) || !strings.Contains(body, "enlarged-cold") || strings.Contains(body, "event: error") {
+		t.Fatalf("headers=%+v body=%q", rec.Header(), body)
+	}
+	if len(agent.loads) != 2 || agent.loads[0].Preset.ID != small.ID || agent.loads[1].Preset.ID != large.ID {
+		t.Fatalf("loads = %+v", agent.loads)
+	}
+}
+
+func TestRouterStreamFailsOverBeginRequestErrorBeforeResponseStarts(t *testing.T) {
+	preset := fixtures.MakePreset()
+	nodeA := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	nodeB := fixtures.MakeNode(fixtures.WithNodeID("node-b"))
+	instA := fixtures.MakeInstance(fixtures.WithInstanceID("inst-a"), fixtures.OnNode(nodeA.ID))
+	instB := fixtures.MakeInstance(fixtures.WithInstanceID("inst-b"), fixtures.OnNode(nodeB.ID))
+	first := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("data: should-not-run\n\n"))
 	}))
-	inst.Addr = upstream
-	agent := mocks.NewNodeAgent(node)
-	agent.BeginErr = errors.New("begin failed")
-	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{
-		node.ID: agent,
+	second := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: rescued\n\ndata: [DONE]\n\n"))
+	}))
+	instA.Addr = first
+	instB.Addr = second
+	agentA := mocks.NewNodeAgent(nodeA)
+	agentA.BeginErr = errors.New("begin failed")
+	agentB := mocks.NewNodeAgent(nodeB)
+	reporter := &testFailureReporter{}
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{nodeA, nodeB}, Instances: []domain.ModelInstance{instA, instB}}, staticResolver{agents: map[string]ports.NodeAgent{
+		nodeA.ID: agentA,
+		nodeB.ID: agentB,
 	}})
+	router.Reporter = reporter
 	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
 	if err != nil {
 		t.Fatalf("ParseOpenAIChat: %v", err)
 	}
+	rec := httptest.NewRecorder()
 
-	err = router.Stream(context.Background(), req, httptest.NewRecorder())
-	if err == nil || !strings.Contains(err.Error(), "begin failed") {
-		t.Fatalf("Stream err = %v", err)
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if rec.Header().Get(HeaderInstance) != "inst-b" || !strings.Contains(rec.Body.String(), "rescued") || len(reporter.failed) != 1 || reporter.failed[0] != "inst-a" {
+		t.Fatalf("headers=%+v body=%q failed=%+v", rec.Header(), rec.Body.String(), reporter.failed)
 	}
 }
 
@@ -2665,6 +2737,12 @@ type recordingLoadAgent struct {
 	loads []domain.LoadRequest
 }
 
+type presetLoadAgent struct {
+	node      domain.Node
+	instances map[string]domain.ModelInstance
+	loads     []domain.LoadRequest
+}
+
 type admittingAgent struct {
 	*mocks.NodeAgent
 	*mocks.AdmissionController
@@ -2716,6 +2794,35 @@ func (n *recordingLoadAgent) BeginRequest(context.Context, string) error {
 }
 
 func (n *recordingLoadAgent) EndRequest(context.Context, string) error {
+	return nil
+}
+
+func (n *presetLoadAgent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
+	return domain.NodeSnapshot{Node: n.node}, nil
+}
+
+func (n *presetLoadAgent) Load(_ context.Context, req domain.LoadRequest) (domain.ModelInstance, error) {
+	n.loads = append(n.loads, req)
+	inst, ok := n.instances[req.Preset.ID]
+	if !ok {
+		return domain.ModelInstance{}, fmt.Errorf("no instance for preset %q", req.Preset.ID)
+	}
+	return inst, nil
+}
+
+func (n *presetLoadAgent) Unload(context.Context, string) error {
+	return nil
+}
+
+func (n *presetLoadAgent) InspectModel(context.Context, domain.Preset) (domain.ModelMetadata, error) {
+	return domain.ModelMetadata{}, domain.ErrUnsupported
+}
+
+func (n *presetLoadAgent) BeginRequest(context.Context, string) error {
+	return nil
+}
+
+func (n *presetLoadAgent) EndRequest(context.Context, string) error {
 	return nil
 }
 

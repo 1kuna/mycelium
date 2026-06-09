@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -80,9 +82,13 @@ func indexPresetModels(index map[string]domain.Preset, preset domain.Preset) {
 }
 
 func (r PresetRegistry) NextLargerContext(current domain.Preset) (domain.Preset, bool) {
+	return r.SmallestContextAtLeast(current, current.ContextLength+1)
+}
+
+func (r PresetRegistry) SmallestContextAtLeast(current domain.Preset, minContext int) (domain.Preset, bool) {
 	var best domain.Preset
 	for _, preset := range r.all {
-		if preset.ID == current.ID || preset.Backend != current.Backend || preset.ModelRef != current.ModelRef || preset.ContextLength <= current.ContextLength {
+		if preset.ID == current.ID || preset.Backend != current.Backend || preset.ModelRef != current.ModelRef || preset.ContextLength <= current.ContextLength || preset.ContextLength < minContext {
 			continue
 		}
 		if best.ID == "" || preset.ContextLength < best.ContextLength {
@@ -90,6 +96,22 @@ func (r PresetRegistry) NextLargerContext(current domain.Preset) (domain.Preset,
 		}
 	}
 	return best, best.ID != ""
+}
+
+func (r PresetRegistry) ContextLengths() []int {
+	seen := map[int]struct{}{}
+	var contexts []int
+	for _, preset := range r.all {
+		if preset.ContextLength <= 0 {
+			continue
+		}
+		if _, ok := seen[preset.ContextLength]; ok {
+			continue
+		}
+		seen[preset.ContextLength] = struct{}{}
+		contexts = append(contexts, preset.ContextLength)
+	}
+	return contexts
 }
 
 type Router struct {
@@ -197,10 +219,18 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		}
 		endRequest, err := r.beginInstanceRequest(ctx, inst)
 		if err != nil {
+			if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
+				return RouteResponse{}, sampleErr
+			}
 			if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
 				return RouteResponse{}, failErr
 			}
-			return RouteResponse{}, err
+			lastErr = err
+			if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
+				return RouteResponse{}, reportErr
+			}
+			fleet = withoutInstance(fleet, inst.ID)
+			continue
 		}
 		upstreamStart := clk.Now()
 		if err := recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseUpstreamStart, upstreamStart, func(sample *domain.SessionMetric) {
@@ -234,7 +264,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			bodyText := strings.TrimSpace(string(resp.Body))
 			statusErr := fmt.Errorf("upstream returned %d: %s", resp.Status, bodyText)
 			if optimizer.IsContextOverflow(preset.Backend, fmt.Errorf("%s", bodyText)) {
-				next, ok := r.Presets.NextLargerContext(preset)
+				next, ok := r.reactiveRequeuePreset(job, preset, statusErr)
 				if ok {
 					if err := recorder.emitError(ctx, job, preset, inst, statusErr); err != nil {
 						return RouteResponse{}, err
@@ -247,6 +277,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 					if err != nil {
 						return RouteResponse{}, err
 					}
+					req.ContextRequest = next.ContextLength
 					preset = next
 					continue
 				}
@@ -437,6 +468,9 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		}
 		endRequest, err := r.beginInstanceRequest(ctx, inst)
 		if err != nil {
+			if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
+				err = sampleErr
+			}
 			if releaseErr := r.releaseAndFail(ctx, job, lease, err); releaseErr != nil {
 				err = releaseErr
 			}
@@ -444,7 +478,12 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 				writeStreamError(w, err)
 				return nil
 			}
-			return err
+			lastErr = err
+			if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
+				return reportErr
+			}
+			fleet = withoutInstance(fleet, inst.ID)
+			continue
 		}
 		upstreamStart := clk.Now()
 		if err := recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseUpstreamStart, upstreamStart, func(sample *domain.SessionMetric) {
@@ -502,8 +541,8 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 				err = fmt.Errorf("upstream returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 			}
 			if optimizer.IsContextOverflow(preset.Backend, err) {
-				next, ok := r.Presets.NextLargerContext(preset)
-				if ok && !started {
+				next, ok := r.reactiveRequeuePreset(job, preset, err)
+				if ok && !providerStarted {
 					if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
 						return sampleErr
 					}
@@ -515,6 +554,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 					if err != nil {
 						return err
 					}
+					req.ContextRequest = next.ContextLength
 					preset = next
 					continue
 				}
@@ -1058,6 +1098,39 @@ func (r *Router) recordMetric(ctx context.Context, job domain.Job, preset domain
 		return domain.RunMetric{}, err
 	}
 	return metric, nil
+}
+
+func (r *Router) reactiveRequeuePreset(job domain.Job, preset domain.Preset, cause error) (domain.Preset, bool) {
+	observed := observedOverflowTokens(cause)
+	if observed == 0 {
+		observed = job.ContextRequest
+	}
+	if observed <= 0 {
+		return domain.Preset{}, false
+	}
+	plan, err := optimizer.PlanReactiveRequeue(job, preset, cause, observed, optimizer.ReactivePolicy{SharedContexts: r.Presets.ContextLengths()})
+	if err != nil {
+		return domain.Preset{}, false
+	}
+	next, ok := r.Presets.SmallestContextAtLeast(preset, plan.Preset.ContextLength)
+	return next, ok
+}
+
+var overflowTokenCount = regexp.MustCompile(`(?i)(\d+)\s+tokens?`)
+
+func observedOverflowTokens(err error) int {
+	if err == nil {
+		return 0
+	}
+	matches := overflowTokenCount.FindStringSubmatch(err.Error())
+	if len(matches) != 2 {
+		return 0
+	}
+	n, convErr := strconv.Atoi(matches[1])
+	if convErr != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 func (r *Router) recordMetricValue(ctx context.Context, metric domain.RunMetric) error {
