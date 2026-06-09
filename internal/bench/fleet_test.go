@@ -155,6 +155,8 @@ func TestFleetBenchmarkConfigValidationRejectsBadInputs(t *testing.T) {
 }
 
 func TestFleetBenchmarkValidationProtectsProductionGateways(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
 	cfg := fleetTestConfig()
 	cfg.TrustedControlHeaderTestMode = false
 	if err := ValidateFleetConfig(cfg, FleetProfileConservative, false); err == nil || !strings.Contains(err.Error(), "trusted_control_header_test_mode") {
@@ -190,6 +192,50 @@ func TestFleetBenchmarkValidationProtectsProductionGateways(t *testing.T) {
 	cfg.Gateways[0].TokenEnv = "MYCELIUM_TEST_GATEWAY_TOKEN"
 	if err := ValidateFleetConfig(cfg, FleetProfileConservative, false); err != nil {
 		t.Fatalf("env gateway token config should validate: %v", err)
+	}
+
+	cfg = fleetTestConfig()
+	cfg.Project = ""
+	cfg.TrustedControlHeaderTestMode = false
+	cfg.GatewayToken = ""
+	for i := range cfg.Models {
+		cfg.Models[i].Priority = ""
+		cfg.Models[i].SpeedPref = ""
+		cfg.Models[i].Preemption = ""
+		cfg.Models[i].ContextRequest = 0
+	}
+	configDir := filepath.Join(os.Getenv("HOME"), ".mycelium")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "peer.json"), []byte(`{"gateway_token":"default-secret"}`), 0o600); err != nil {
+		t.Fatalf("write peer config: %v", err)
+	}
+	if err := ValidateFleetConfig(cfg, FleetProfileConservative, false); err != nil {
+		t.Fatalf("default gateway token config should validate: %v", err)
+	}
+}
+
+func TestResolveGatewayTokenDiscoversDefaults(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "env-default")
+	if got, err := ResolveGatewayTokenForURL("http://gateway.test", "", ""); err != nil || got != "env-default" {
+		t.Fatalf("env default token = %q err=%v", got, err)
+	}
+	if got, err := ResolveGatewayTokenForURL("http://gateway.test", "explicit", ""); err != nil || got != "explicit" {
+		t.Fatalf("explicit token = %q err=%v", got, err)
+	}
+
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
+	configDir := filepath.Join(os.Getenv("HOME"), ".mycelium")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "peer.json"), []byte(`{"gateway_token":"config-secret"}`), 0o600); err != nil {
+		t.Fatalf("write peer config: %v", err)
+	}
+	if got, err := ResolveGatewayTokenForURL("http://gateway.test", "", ""); err != nil || got != "config-secret" {
+		t.Fatalf("config token = %q err=%v", got, err)
 	}
 }
 

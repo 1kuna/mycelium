@@ -24,7 +24,7 @@ func TestPhase4JoinedNodeGatewaySmoke(t *testing.T) {
 	gatewayURL := os.Getenv("MYCELIUM_JOIN_GATEWAY")
 	model := os.Getenv("MYCELIUM_JOIN_MODEL")
 	if gatewayURL != "" && model != "" {
-		runPhase4ManualJoinSmoke(t, gatewayURL, model)
+		runPhase4ManualJoinSmoke(t, gatewayURL, model, smokeGatewayToken("MYCELIUM_JOIN_GATEWAY_TOKEN"))
 		return
 	}
 
@@ -36,11 +36,11 @@ func TestPhase4JoinedNodeGatewaySmoke(t *testing.T) {
 	runPhase4AutomatedJoinSmoke(t, binary, model)
 }
 
-func runPhase4ManualJoinSmoke(t *testing.T, gatewayURL, model string) {
+func runPhase4ManualJoinSmoke(t *testing.T, gatewayURL, model, token string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
-	_, _, nodeID := assertGatewayChatEventually(t, ctx, gatewayURL, model)
+	_, _, nodeID := assertGatewayChatEventually(t, ctx, gatewayURL, model, token)
 	if want := os.Getenv("MYCELIUM_JOIN_EXPECT_NODE"); want != "" && nodeID != want {
 		t.Fatalf("gateway placed on node %q, want %q", nodeID, want)
 	}
@@ -74,7 +74,7 @@ func runPhase4AutomatedJoinSmoke(t *testing.T, binary, model string) {
 	defer gatewayPeer.stop(t)
 
 	gatewayURL := "http://" + gatewayAddr
-	respBody, instanceID, _ := assertGatewayChatEventually(t, ctx, gatewayURL, model)
+	respBody, instanceID, _ := assertGatewayChatEventually(t, ctx, gatewayURL, model, "")
 	if instanceID == "" {
 		t.Fatalf("gateway response missing %s body=%s", gateway.HeaderInstance, respBody)
 	}
@@ -111,13 +111,13 @@ func waitForNodeReady(t *testing.T, ctx context.Context, nodeURL, rpcToken strin
 	}
 }
 
-func assertGatewayChatEventually(t *testing.T, ctx context.Context, gatewayURL, model string) (string, string, string) {
+func assertGatewayChatEventually(t *testing.T, ctx context.Context, gatewayURL, model, token string) (string, string, string) {
 	t.Helper()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	var last string
 	for {
-		body, instanceID, nodeID, ok := tryGatewayChat(t, ctx, gatewayURL, model)
+		body, instanceID, nodeID, ok := tryGatewayChat(t, ctx, gatewayURL, model, token)
 		if ok {
 			return body, instanceID, nodeID
 		}
@@ -130,7 +130,7 @@ func assertGatewayChatEventually(t *testing.T, ctx context.Context, gatewayURL, 
 	}
 }
 
-func tryGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model string) (string, string, string, bool) {
+func tryGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model, token string) (string, string, string, bool) {
 	t.Helper()
 	body := []byte(`{"model":` + quote(model) + `,"messages":[{"role":"user","content":"Say hi."}],"max_tokens":1}`)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(gatewayURL, "/")+"/v1/chat/completions", bytes.NewReader(body))
@@ -138,6 +138,9 @@ func tryGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model string)
 		t.Fatalf("gateway request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err.Error(), "", "", false
@@ -154,6 +157,15 @@ func tryGatewayChat(t *testing.T, ctx context.Context, gatewayURL, model string)
 		t.Fatalf("gateway response headers=%+v body=%s", resp.Header, data)
 	}
 	return string(data), resp.Header.Get(gateway.HeaderInstance), resp.Header.Get(gateway.HeaderNode), true
+}
+
+func smokeGatewayToken(specificEnv string) string {
+	if specificEnv != "" {
+		if token := strings.TrimSpace(os.Getenv(specificEnv)); token != "" {
+			return token
+		}
+	}
+	return strings.TrimSpace(os.Getenv("MYCELIUM_GATEWAY_TOKEN"))
 }
 
 func unloadJoinedInstance(t *testing.T, ctx context.Context, nodeURL, instanceID, rpcToken string) {

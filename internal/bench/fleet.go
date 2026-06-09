@@ -620,6 +620,14 @@ func ResolveGatewayTokenForURL(rawURL, token, tokenEnv string) (string, error) {
 		}
 		return value, nil
 	}
+	if value := strings.TrimSpace(os.Getenv("MYCELIUM_GATEWAY_TOKEN")); value != "" {
+		return value, nil
+	}
+	if value, err := defaultGatewayToken(); err != nil {
+		return "", err
+	} else if value != "" {
+		return value, nil
+	}
 	requires, err := gatewayURLRequiresToken(rawURL)
 	if err != nil {
 		return "", err
@@ -628,6 +636,28 @@ func ResolveGatewayTokenForURL(rawURL, token, tokenEnv string) (string, error) {
 		return "", fmt.Errorf("gateway %s is not loopback; configure gateway_token or token_env", rawURL)
 	}
 	return "", nil
+}
+
+func defaultGatewayToken() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", nil
+	}
+	path := filepath.Join(home, ".mycelium", "peer.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read default gateway token config %s: %w", path, err)
+	}
+	var cfg struct {
+		GatewayToken string `json:"gateway_token"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return "", fmt.Errorf("parse default gateway token config %s: %w", path, err)
+	}
+	return strings.TrimSpace(cfg.GatewayToken), nil
 }
 
 func gatewayURLRequiresToken(rawURL string) (bool, error) {
