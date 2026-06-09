@@ -9,13 +9,18 @@ import (
 )
 
 type OpenAIChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    []OpenAIMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	Tools       []OpenAITool    `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
+	Model         string               `json:"model"`
+	Messages      []OpenAIMessage      `json:"messages"`
+	MaxTokens     int                  `json:"max_tokens,omitempty"`
+	Stream        bool                 `json:"stream,omitempty"`
+	StreamOptions *OpenAIStreamOptions `json:"stream_options,omitempty"`
+	Temperature   *float64             `json:"temperature,omitempty"`
+	Tools         []OpenAITool         `json:"tools,omitempty"`
+	ToolChoice    json.RawMessage      `json:"tool_choice,omitempty"`
+}
+
+type OpenAIStreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 type OpenAICompletionRequest struct {

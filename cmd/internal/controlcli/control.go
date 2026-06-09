@@ -1,6 +1,7 @@
 package controlcli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -922,6 +923,7 @@ func runBenchmarkFanout(ctx context.Context, args []string, client *http.Client)
 	gatewayToken := fs.String("gateway-token", "", "Mycelium gateway bearer token")
 	gatewayTokenEnv := fs.String("gateway-token-env", "", "environment variable containing the Mycelium gateway bearer token")
 	prompt := fs.String("prompt", "", "benchmark prompt")
+	maxTokens := fs.Int("max-tokens", 0, "maximum output tokens for each gateway request")
 	out := fs.String("out", "", "output directory")
 	id := fs.String("id", "", "parent benchmark job id")
 	project := fs.String("project", "", "project id")
@@ -968,7 +970,7 @@ func runBenchmarkFanout(ctx context.Context, args []string, client *http.Client)
 		},
 	}
 	runner := bench.Runner{
-		Client: benchmarkGatewayClient{BaseURL: *url, AuthToken: authToken, Client: client},
+		Client: benchmarkGatewayClient{BaseURL: *url, AuthToken: authToken, MaxTokens: *maxTokens, Client: client},
 		Clock:  clock.System{},
 		Store:  store,
 	}
@@ -1039,6 +1041,7 @@ func (r *repeatedString) Set(value string) error {
 type benchmarkGatewayClient struct {
 	BaseURL   string
 	AuthToken string
+	MaxTokens int
 	Client    *http.Client
 }
 
@@ -1049,6 +1052,9 @@ func (c benchmarkGatewayClient) Complete(ctx context.Context, model, prompt stri
 			Role:    "user",
 			Content: prompt,
 		}},
+		MaxTokens:     c.MaxTokens,
+		Stream:        true,
+		StreamOptions: &api.OpenAIStreamOptions{IncludeUsage: true},
 	})
 	if err != nil {
 		return bench.Completion{}, err
@@ -1065,29 +1071,112 @@ func (c benchmarkGatewayClient) Complete(ctx context.Context, model, prompt stri
 	if client == nil {
 		client = http.DefaultClient
 	}
+	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
 		return bench.Completion{}, err
 	}
 	defer resp.Body.Close()
-	data, err := readControlHTTPBody(resp.Body, "gateway benchmark response body")
-	if err != nil {
-		return bench.Completion{}, err
-	}
 	if resp.StatusCode >= 400 {
+		data, err := readControlHTTPBody(resp.Body, "gateway benchmark response body")
+		if err != nil {
+			return bench.Completion{}, err
+		}
 		return bench.Completion{}, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
-	var chat api.OpenAIChatResponse
-	if err := json.Unmarshal(data, &chat); err != nil {
+	return readBenchmarkStream(resp.Body, start, time.Now)
+}
+
+func readBenchmarkStream(body io.Reader, start time.Time, now func() time.Time) (bench.Completion, error) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 4096), int(maxControlHTTPBodyBytes))
+	var text strings.Builder
+	firstTokenAt := time.Time{}
+	end := start
+	var usage api.OpenAIUsage
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		raw := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if raw == "" {
+			continue
+		}
+		end = now()
+		if raw == "[DONE]" {
+			break
+		}
+		part, gotUsage, err := parseBenchmarkStreamData(raw)
+		if err != nil {
+			return bench.Completion{}, err
+		}
+		if gotUsage.TotalTokens != 0 {
+			usage = gotUsage
+		}
+		if part != "" {
+			if firstTokenAt.IsZero() {
+				firstTokenAt = end
+			}
+			text.WriteString(part)
+		}
+	}
+	if err := scanner.Err(); err != nil {
 		return bench.Completion{}, err
 	}
-	if len(chat.Choices) == 0 {
-		return bench.Completion{}, fmt.Errorf("gateway response had no choices")
+	if text.Len() == 0 {
+		return bench.Completion{}, fmt.Errorf("gateway stream produced no assistant content")
+	}
+	if firstTokenAt.IsZero() {
+		firstTokenAt = end
+	}
+	completionTokens := usage.CompletionTokens
+	if completionTokens == 0 {
+		completionTokens = len(strings.Fields(text.String()))
+	}
+	seconds := end.Sub(firstTokenAt).Seconds()
+	if seconds <= 0 {
+		seconds = end.Sub(start).Seconds()
+	}
+	var tokensPerSec float64
+	if completionTokens > 0 && seconds > 0 {
+		tokensPerSec = float64(completionTokens) / seconds
 	}
 	return bench.Completion{
-		Text:          chat.Choices[0].Message.Content,
-		ContextTokens: chat.Usage.TotalTokens,
+		Text:          text.String(),
+		TokensPerSec:  tokensPerSec,
+		TTFTms:        int(firstTokenAt.Sub(start) / time.Millisecond),
+		ContextTokens: usage.TotalTokens,
 	}, nil
+}
+
+func parseBenchmarkStreamData(raw string) (string, api.OpenAIUsage, error) {
+	var chunk struct {
+		Choices []struct {
+			Delta struct {
+				Content string `json:"content"`
+			} `json:"delta"`
+		} `json:"choices"`
+		Usage *api.OpenAIUsage `json:"usage"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
+		return "", api.OpenAIUsage{}, fmt.Errorf("decode gateway stream chunk: %w", err)
+	}
+	if chunk.Error != nil && chunk.Error.Message != "" {
+		return "", api.OpenAIUsage{}, fmt.Errorf("gateway stream error: %s", chunk.Error.Message)
+	}
+	var text strings.Builder
+	for _, choice := range chunk.Choices {
+		text.WriteString(choice.Delta.Content)
+	}
+	var usage api.OpenAIUsage
+	if chunk.Usage != nil {
+		usage = *chunk.Usage
+	}
+	return text.String(), usage, nil
 }
 
 func readControlHTTPBody(r io.Reader, label string) ([]byte, error) {
