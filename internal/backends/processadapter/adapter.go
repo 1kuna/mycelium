@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -84,6 +85,18 @@ func (a *Adapter) Name() string {
 }
 
 func (a *Adapter) Launch(ctx context.Context, preset domain.Preset, addr string) (ports.Handle, error) {
+	return a.launchAt(ctx, preset, addr)
+}
+
+func (a *Adapter) LaunchDynamic(ctx context.Context, preset domain.Preset, addr string) (ports.Handle, error) {
+	concrete, err := reserveDynamicAddr(addr)
+	if err != nil {
+		return ports.Handle{}, err
+	}
+	return a.launchAt(ctx, preset, concrete)
+}
+
+func (a *Adapter) launchAt(ctx context.Context, preset domain.Preset, addr string) (ports.Handle, error) {
 	if a.cfg.BinaryPath == "" {
 		return ports.Handle{}, fmt.Errorf("%s backend binary path is required", a.cfg.Name)
 	}
@@ -129,6 +142,25 @@ func (a *Adapter) Launch(ctx context.Context, preset domain.Preset, addr string)
 		}
 	}
 	return handleFromProcessRef(ref, addr), nil
+}
+
+func reserveDynamicAddr(addr string) (string, error) {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
+	}
+	if port != "0" {
+		return addr, nil
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return "", err
+	}
+	concrete := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		return "", err
+	}
+	return concrete, nil
 }
 
 func (a *Adapter) WaitReady(ctx context.Context, addr string) error {
@@ -510,3 +542,4 @@ func processExited(process *os.Process) (bool, error) {
 }
 
 var _ ports.BackendAdapter = (*Adapter)(nil)
+var _ ports.DynamicBackendAdapter = (*Adapter)(nil)
