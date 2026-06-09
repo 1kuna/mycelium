@@ -414,7 +414,7 @@ func (s *Service) ReleaseJob(ctx context.Context, lease domain.Lease) error {
 	}
 	if s.Coordinator != nil {
 		if err := s.Coordinator.Release(ctx, lease.JobID); err != nil {
-			if lease.ID != "" && s.Owners != nil && strings.Contains(err.Error(), "not claimed by this coordinator") {
+			if lease.ID != "" && s.Owners != nil && releaseErrAllowsOwnerFallback(err) {
 				return s.releaseOwnerLease(ctx, lease)
 			}
 			return err
@@ -508,6 +508,14 @@ func (s *Service) releaseOwnerLease(ctx context.Context, lease domain.Lease) err
 		return err
 	}
 	return s.Store.DeleteLease(ctx, lease.ID)
+}
+
+func releaseErrAllowsOwnerFallback(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "not claimed by this coordinator") || strings.Contains(msg, "has no committed lease")
 }
 
 func (s *Service) ExpireLeases(ctx context.Context) (int, error) {

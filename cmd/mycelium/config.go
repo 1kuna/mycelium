@@ -22,6 +22,7 @@ type PeerConfig struct {
 	JoinToken            string                         `json:"join_token"`
 	RPCToken             string                         `json:"rpc_token"`
 	GatewayToken         string                         `json:"gateway_token,omitempty"`
+	GatewayProjectTokens []GatewayProjectToken          `json:"gateway_project_tokens,omitempty"`
 	SeedPeers            []string                       `json:"seed_peers,omitempty"`
 	DiscoveryListen      string                         `json:"discovery_listen"`
 	DiscoveryAddr        string                         `json:"discovery_addr"`
@@ -46,6 +47,11 @@ type PeerConfig struct {
 type SubmitterPolicyRule struct {
 	MaxPriority  domain.Priority `json:"max_priority,omitempty"`
 	AllowPrivate bool            `json:"allow_private,omitempty"`
+}
+
+type GatewayProjectToken struct {
+	Project string `json:"project"`
+	Token   string `json:"token"`
 }
 
 type ComputeConfig struct {

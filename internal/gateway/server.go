@@ -15,6 +15,7 @@ type Server struct {
 	Router              *Router
 	RequireAuth         bool
 	AuthToken           string
+	AuthTokenProjects   map[string]string
 	TrustControlHeaders bool
 }
 
@@ -23,8 +24,8 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeGatewayError(w, http.StatusInternalServerError, "gateway router is not configured")
 		return
 	}
-	authorized := gatewayAuthorized(r, s.AuthToken)
-	if s.RequireAuth && !authorized {
+	auth := s.authorize(r)
+	if s.RequireAuth && !auth.authorized {
 		writeGatewayError(w, http.StatusUnauthorized, "gateway token required")
 		return
 	}
@@ -37,6 +38,9 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeGatewayError(w, status, err.Error())
 		return
+	}
+	if auth.project != "" {
+		req.Project = auth.project
 	}
 	if req.Stream {
 		if err := s.Router.Stream(r.Context(), req, w); err != nil {
@@ -116,17 +120,27 @@ func parseRequestWithControlHeaders(r *http.Request, trustControlHeaders bool) (
 	return req, nil
 }
 
-func gatewayAuthorized(r *http.Request, token string) bool {
-	if token == "" {
-		return false
-	}
+type gatewayAuthResult struct {
+	authorized bool
+	project    string
+}
+
+func (s Server) authorize(r *http.Request) gatewayAuthResult {
 	const prefix = "Bearer "
 	value := r.Header.Get("Authorization")
 	if !strings.HasPrefix(value, prefix) {
-		return false
+		return gatewayAuthResult{}
 	}
 	got := strings.TrimPrefix(value, prefix)
-	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+	for token, project := range s.AuthTokenProjects {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1 {
+			return gatewayAuthResult{authorized: true, project: project}
+		}
+	}
+	if s.AuthToken != "" && subtle.ConstantTimeCompare([]byte(got), []byte(s.AuthToken)) == 1 {
+		return gatewayAuthResult{authorized: true}
+	}
+	return gatewayAuthResult{}
 }
 
 func validHandling(handling domain.HandlingClass) bool {

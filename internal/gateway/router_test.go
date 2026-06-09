@@ -792,6 +792,21 @@ func TestRouterAssignsUniqueGatewayJobIDs(t *testing.T) {
 	}
 }
 
+func TestRouterGatewayJobIDsDoNotReuseAfterRestart(t *testing.T) {
+	req := translate.IngressRequest{Model: "preset-a", Kind: translate.KindOpenAIChat}
+	first := &Router{Clock: mocks.NewFakeClock(time.Unix(10, 0).UTC())}
+	second := &Router{Clock: mocks.NewFakeClock(time.Unix(11, 0).UTC())}
+
+	firstJob := first.jobFromIngress(req, 1)
+	secondJob := second.jobFromIngress(req, 1)
+	if firstJob.ID == secondJob.ID {
+		t.Fatalf("restart reused gateway job id %q", firstJob.ID)
+	}
+	if !strings.HasPrefix(firstJob.ID, "gateway-10000000000-") || !strings.HasPrefix(secondJob.ID, "gateway-11000000000-") {
+		t.Fatalf("job ids do not include restart prefix: %q %q", firstJob.ID, secondJob.ID)
+	}
+}
+
 func TestRouterRequiresCoordinatorRuntimeForProductionPlacement(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -1466,6 +1481,88 @@ func TestRouterStreamWarmInstanceCopiesHeadersAndBody(t *testing.T) {
 	}
 	if rec.Body.String() != "data: warm\n\ndata: [DONE]\n\n" {
 		t.Fatalf("body = %q", rec.Body.String())
+	}
+}
+
+func TestRouterStreamPersistsFinalMetricFromSSEUsage(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":3,"stream":true,"stream_options":{"include_usage":true}}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.Project = "project-stream"
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"total_tokens":10`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(sink.Metrics) != 1 {
+		t.Fatalf("metrics = %+v", sink.Metrics)
+	}
+	metric := sink.Metrics[0]
+	if metric.Project != "project-stream" || metric.ContextUsed != 10 || metric.TTFTms < 0 {
+		t.Fatalf("metric = %+v", metric)
+	}
+	if len(sink.SamplesOut) == 0 {
+		t.Fatalf("samples = %+v", sink.SamplesOut)
+	}
+	complete := sink.SamplesOut[len(sink.SamplesOut)-1]
+	if complete.Phase != domain.TelemetryPhaseComplete || complete.Project != "project-stream" || complete.ContextUsed != 10 || complete.TokensIn != 7 || complete.TokensOut != 3 {
+		t.Fatalf("complete sample = %+v", complete)
+	}
+}
+
+func TestRouterStreamFinalTelemetryUsesCleanupContextAfterClientCancel(t *testing.T) {
+	preset := fixtures.MakePreset()
+	ctx, cancel := context.WithCancel(context.Background())
+	inst := fixtures.MakeInstance()
+	inst.Addr = "http://upstream.test"
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+	sink := &contextCheckingTelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
+	router.Client = &http.Client{Transport: gatewayRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		body := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\ndata: [DONE]\n\n")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       &cancelAfterReadBody{data: body, cancel: cancel, errAfterSent: context.Canceled},
+		}, nil
+	})}
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":3,"stream":true,"stream_options":{"include_usage":true}}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.Project = "project-stream"
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(ctx, req, rec); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("test did not cancel request context at provider EOF")
+	}
+	if len(sink.Metrics) != 1 {
+		t.Fatalf("metrics = %+v calls=%+v", sink.Metrics, sink.Calls)
+	}
+	complete := sink.SamplesOut[len(sink.SamplesOut)-1]
+	if complete.Phase != domain.TelemetryPhaseComplete || complete.ContextUsed != 10 {
+		t.Fatalf("complete sample = %+v", complete)
 	}
 }
 
@@ -2175,6 +2272,42 @@ func TestServerRequiresGatewayTokenWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestServerScopesProjectByGatewayTokenWithoutTrustingControlHeaders(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("project token ok")))
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	router := newTestRouter(preset, domain.FleetSnapshot{
+		Nodes:     []domain.Node{fixtures.MakeNode()},
+		Instances: []domain.ModelInstance{inst},
+	}, staticResolver{})
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
+	server := Server{
+		Router:            router,
+		RequireAuth:       true,
+		AuthTokenProjects: map[string]string{"project-token-a": "project-a"},
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer project-token-a")
+	req.Header.Set(HeaderProject, "spoofed-project")
+	req.Header.Set(HeaderPriority, "warp")
+
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status/body = %d %s", rec.Code, rec.Body.String())
+	}
+	if len(sink.Metrics) != 1 || sink.Metrics[0].Project != "project-a" {
+		t.Fatalf("metrics = %+v", sink.Metrics)
+	}
+}
+
 func TestServerRejectsOversizeRequestBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 	body := io.LimitReader(repeatReader{b: 'x'}, MaxGatewayRequestBodyBytes+1)
@@ -2367,6 +2500,50 @@ type peerMap map[string]domain.Peer
 func (m peerMap) PeerForNode(nodeID string) (domain.Peer, bool) {
 	peer, ok := m[nodeID]
 	return peer, ok
+}
+
+type contextCheckingTelemetrySink struct {
+	mocks.TelemetrySink
+}
+
+func (s *contextCheckingTelemetrySink) Record(ctx context.Context, metric domain.RunMetric) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.TelemetrySink.Record(ctx, metric)
+}
+
+func (s *contextCheckingTelemetrySink) RecordSample(ctx context.Context, sample domain.SessionMetric) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.TelemetrySink.RecordSample(ctx, sample)
+}
+
+type cancelAfterReadBody struct {
+	data         []byte
+	sent         bool
+	cancel       func()
+	errAfterSent error
+}
+
+func (b *cancelAfterReadBody) Read(p []byte) (int, error) {
+	if !b.sent {
+		b.sent = true
+		n := copy(p, b.data)
+		if b.cancel != nil {
+			b.cancel()
+		}
+		return n, nil
+	}
+	if b.errAfterSent != nil {
+		return 0, b.errAfterSent
+	}
+	return 0, io.EOF
+}
+
+func (b *cancelAfterReadBody) Close() error {
+	return nil
 }
 
 func sampleWith(sample domain.SessionMetric, mutate func(*domain.SessionMetric)) domain.SessionMetric {

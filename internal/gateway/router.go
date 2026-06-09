@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -111,6 +112,8 @@ type Router struct {
 	MaxTries            int
 
 	allowDirectPlacement bool
+	jobPrefixOnce        sync.Once
+	jobPrefix            string
 	jobSeq               uint64
 	sessionSeq           uint64
 }
@@ -581,10 +584,11 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		}
 		firstByteSampled := false
 		verifySSE := isSSEContentType(resp.Header.Get("Content-Type"))
+		streamTelemetryCtx := cleanupContext(ctx)
 		copied, copyErr := copyAndFlush(w, resp.Body, clk, verifySSE, func(copied copyResult) error {
 			if !firstByteSampled && !copied.FirstByte.IsZero() {
 				firstByteSampled = true
-				if err := recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseFirstByte, copied.FirstByte, func(sample *domain.SessionMetric) {
+				if err := recorder.emitAt(streamTelemetryCtx, job, preset, inst, domain.TelemetryPhaseFirstByte, copied.FirstByte, func(sample *domain.SessionMetric) {
 					sample.BytesIn = len(route.Body)
 					sample.BytesOut = copied.Bytes
 					sample.LoadWallClockMS = loadMS
@@ -593,7 +597,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 					return err
 				}
 			}
-			return recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseStreamChunk, copied.End, func(sample *domain.SessionMetric) {
+			return recorder.emitAt(streamTelemetryCtx, job, preset, inst, domain.TelemetryPhaseStreamChunk, copied.End, func(sample *domain.SessionMetric) {
 				sample.BytesIn = len(route.Body)
 				sample.BytesOut = copied.Bytes
 				sample.LoadWallClockMS = loadMS
@@ -614,7 +618,8 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			r.failPlacedStream(ctx, recorder, job, preset, inst, lease, w, err, providerStarted)
 			return nil
 		}
-		metric, err := r.recordMetric(ctx, job, preset, inst, copied.Body, metricTiming{
+		finishCtx := cleanupContext(ctx)
+		metric, err := r.recordMetric(finishCtx, job, preset, inst, copied.Body, metricTiming{
 			Start:           upstreamStart,
 			FirstByte:       copied.FirstByte,
 			End:             copied.End,
@@ -625,11 +630,11 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			return nil
 		}
 		promptTokens, completionTokens := usageFromBody(copied.Body)
-		if err := recorder.emitMetric(ctx, metric, domain.TelemetryPhaseComplete, len(route.Body), copied.Bytes, promptTokens, completionTokens); err != nil {
+		if err := recorder.emitMetric(finishCtx, metric, domain.TelemetryPhaseComplete, len(route.Body), copied.Bytes, promptTokens, completionTokens); err != nil {
 			r.failPlacedStream(ctx, recorder, job, preset, inst, lease, w, streamCopyError{kind: streamFailureTelemetry, err: err}, providerStarted)
 			return nil
 		}
-		if err := r.finishJob(ctx, job, lease, nil); err != nil {
+		if err := r.finishJob(finishCtx, job, lease, nil); err != nil {
 			if !providerStarted {
 				writeStreamError(w, err)
 			}
@@ -677,6 +682,10 @@ func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, payload []byt
 
 func (r *Router) jobFromIngress(req translate.IngressRequest, attempt int) domain.Job {
 	seq := atomic.AddUint64(&r.jobSeq, 1)
+	r.jobPrefixOnce.Do(func() {
+		r.jobPrefix = fmt.Sprintf("%d", r.clock().Now().UnixNano())
+	})
+	prefix := r.jobPrefix
 	project := req.Project
 	if project == "" {
 		project = r.DefaultProject
@@ -722,7 +731,7 @@ func (r *Router) jobFromIngress(req translate.IngressRequest, attempt int) domai
 		taskType = "completion"
 	}
 	return domain.Job{
-		ID:                  fmt.Sprintf("gateway-%d-%d", seq, attempt),
+		ID:                  fmt.Sprintf("gateway-%s-%d-%d", prefix, seq, attempt),
 		TaskType:            taskType,
 		Model:               req.Model,
 		Project:             project,
@@ -897,15 +906,16 @@ func (r *Router) releaseAndFail(ctx context.Context, job domain.Job, lease domai
 }
 
 func (r *Router) failPlacedStream(ctx context.Context, recorder *sessionRecorder, job domain.Job, preset domain.Preset, inst domain.ModelInstance, lease domain.Lease, w http.ResponseWriter, cause error, providerStarted bool) {
+	cleanup := cleanupContext(ctx)
 	terminalCause := cause
-	if sampleErr := recorder.emitError(ctx, job, preset, inst, cause); sampleErr != nil {
+	if sampleErr := recorder.emitError(cleanup, job, preset, inst, cause); sampleErr != nil {
 		terminalCause = errors.Join(terminalCause, sampleErr)
 	}
-	if failErr := r.releaseAndFail(ctx, job, lease, terminalCause); failErr != nil {
+	if failErr := r.releaseAndFail(cleanup, job, lease, terminalCause); failErr != nil {
 		terminalCause = errors.Join(terminalCause, failErr)
 	}
 	if streamFailureIndicatesInstance(cause) {
-		if reportErr := r.reportFailure(ctx, inst.ID, cause); reportErr != nil {
+		if reportErr := r.reportFailure(cleanup, inst.ID, cause); reportErr != nil {
 			terminalCause = errors.Join(terminalCause, reportErr)
 		}
 	}
@@ -1136,7 +1146,37 @@ func usageFromBody(body []byte) (int, int) {
 	if err := json.Unmarshal(body, &anthropic); err == nil && (anthropic.Usage.InputTokens != 0 || anthropic.Usage.OutputTokens != 0) {
 		return anthropic.Usage.InputTokens, anthropic.Usage.OutputTokens
 	}
+	if prompt, completion, ok := usageFromSSE(body); ok {
+		return prompt, completion
+	}
 	return 0, 0
+}
+
+func usageFromSSE(body []byte) (int, int, bool) {
+	var usage api.OpenAIUsage
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		raw := strings.TrimSpace(line[len("data:"):])
+		if raw == "" || raw == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Usage *api.OpenAIUsage `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(raw), &chunk); err != nil || chunk.Usage == nil {
+			continue
+		}
+		if chunk.Usage.TotalTokens != 0 || chunk.Usage.PromptTokens != 0 || chunk.Usage.CompletionTokens != 0 {
+			usage = *chunk.Usage
+		}
+	}
+	if usage.TotalTokens == 0 && usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
+		return 0, 0, false
+	}
+	return usage.PromptTokens, usage.CompletionTokens, true
 }
 
 func withoutInstance(fleet domain.FleetSnapshot, id string) domain.FleetSnapshot {
@@ -1264,6 +1304,9 @@ func copyAndFlush(w http.ResponseWriter, r io.Reader, clk ports.Clock, verifySSE
 		}
 		if readErr != nil {
 			result.Body = body.Bytes()
+			if verifySSE && result.SSETerminal {
+				return result, nil
+			}
 			return result, streamCopyError{kind: streamFailureUpstreamRead, err: readErr}
 		}
 	}

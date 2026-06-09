@@ -293,6 +293,15 @@ func TestPeerConfigValidationRejectsUnsafeValues(t *testing.T) {
 	if err := validate(PeerConfig{Listen: "192.168.1.10:51846", RPCToken: "rpc-secret", GatewayToken: "gateway-secret"}); err != nil {
 		t.Fatalf("lan auth config = %v", err)
 	}
+	if err := validate(PeerConfig{
+		Listen:               "192.168.1.10:51846",
+		RPCToken:             "rpc-secret",
+		DefaultProject:       "project-a",
+		Projects:             []domain.Project{{ID: "project-a"}},
+		GatewayProjectTokens: []GatewayProjectToken{{Project: "project-a", Token: "project-token-a"}},
+	}); err != nil {
+		t.Fatalf("lan project token auth config = %v", err)
+	}
 	if err := validate(PeerConfig{Overlay: true}); err == nil || !strings.Contains(err.Error(), "overlay") {
 		t.Fatalf("overlay err = %v", err)
 	}
@@ -327,6 +336,12 @@ func TestPeerConfigValidationRejectsUnsafeValues(t *testing.T) {
 	}
 	if err := validate(PeerConfig{DefaultProject: "missing", Projects: []domain.Project{validProject}}); err == nil || !strings.Contains(err.Error(), "default_project") {
 		t.Fatalf("missing default project err = %v", err)
+	}
+	if err := validate(PeerConfig{Projects: []domain.Project{validProject}, GatewayProjectTokens: []GatewayProjectToken{{Project: "missing", Token: "project-token-a"}}}); err == nil || !strings.Contains(err.Error(), "gateway_project_tokens project") {
+		t.Fatalf("missing gateway project token project err = %v", err)
+	}
+	if err := validate(PeerConfig{Projects: []domain.Project{validProject}, GatewayToken: "token-a", GatewayProjectTokens: []GatewayProjectToken{{Project: validProject.ID, Token: "token-a"}}}); err == nil || !strings.Contains(err.Error(), "duplicate gateway token") {
+		t.Fatalf("duplicate gateway token err = %v", err)
 	}
 	if _, _, err := vllmGPUUtilization([]string{"--gpu-memory-utilization"}); err == nil {
 		t.Fatal("missing vllm utilization value accepted")

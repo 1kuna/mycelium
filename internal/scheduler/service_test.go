@@ -2290,6 +2290,30 @@ func TestServiceReleaseAndExpireLeases(t *testing.T) {
 	}
 }
 
+func TestServiceReleaseJobFallsBackToOwnerLeaseAfterCoordinatorRestart(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
+	lease := domain.Lease{ID: "lease-spark-29", JobID: "gateway-6-1", NodeID: "spark", ExpiresAt: time.Unix(99, 0).UTC()}
+	store := &runtimeStore{leases: map[string]domain.Lease{lease.ID: lease}}
+	admission := &mocks.AdmissionController{}
+	service := leaseLifecycleService(clock, store)
+	service.Coordinator = &mocks.Coordinator{ReleaseErr: fmt.Errorf("job %q has no committed lease", lease.JobID)}
+	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{lease.NodeID: admission}}
+
+	expired, err := service.ExpireLeases(context.Background())
+	if err != nil {
+		t.Fatalf("ExpireLeases: %v", err)
+	}
+	if expired != 1 {
+		t.Fatalf("expired = %d", expired)
+	}
+	if _, ok := store.leases[lease.ID]; ok {
+		t.Fatalf("stale lease still stored: %+v", store.leases)
+	}
+	if got := strings.Join(admission.Calls, ","); got != "release:"+lease.ID {
+		t.Fatalf("admission calls = %s", got)
+	}
+}
+
 func TestServiceLeaseLifecycleErrors(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
 	if err := (&Service{}).Release(context.Background(), "lease-a"); err == nil || !strings.Contains(err.Error(), "not fully configured") {
