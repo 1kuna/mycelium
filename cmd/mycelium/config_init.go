@@ -54,7 +54,7 @@ func runConfigInit(ctx context.Context, args []string) error {
 	configPath := fs.String("config", "", "peer config JSON path")
 	compute := fs.String("compute", "auto", "compute mode: auto, on, off")
 	listen := fs.String("listen", "loopback", "listen mode: loopback, lan, or host:port")
-	backend := fs.String("backend", "auto", "backend: auto, llama.cpp, llamacpp, mlx, vllm, custom")
+	backend := fs.String("backend", "auto", "backend: auto, llama.cpp, llamacpp, mlx, vllm, openvino, sglang, custom")
 	maxUtil := fs.Float64("max-util", 0, "maximum accelerator utilization")
 	diskMinFreeRatio := fs.Float64("disk-min-free-ratio", 0, "minimum free disk ratio required for placement")
 	if err := fs.Parse(args); err != nil {
@@ -246,6 +246,10 @@ func normalizeBackend(raw string) (domain.Backend, error) {
 		return domain.BackendMLX, nil
 	case string(domain.BackendVLLM):
 		return domain.BackendVLLM, nil
+	case string(domain.BackendOpenVINO):
+		return domain.BackendOpenVINO, nil
+	case string(domain.BackendSGLang):
+		return domain.BackendSGLang, nil
 	case string(domain.BackendCustom):
 		return domain.BackendCustom, nil
 	default:

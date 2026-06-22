@@ -34,6 +34,10 @@ func run(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "bootstrap":
 		return runBootstrap(ctx, args[1:])
+	case "engines":
+		return runEngines(ctx, args[1:])
+	case "models":
+		return runModels(ctx, args[1:])
 	case "config":
 		return runConfig(ctx, args[1:])
 	case "service":

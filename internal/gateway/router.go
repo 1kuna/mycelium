@@ -219,14 +219,11 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		}
 		endRequest, err := r.beginInstanceRequest(ctx, inst)
 		if err != nil {
-			if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
-				return RouteResponse{}, sampleErr
-			}
-			if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
-				return RouteResponse{}, failErr
+			if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, err); failErr != nil {
+				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			lastErr = err
-			if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
+			if reportErr := r.reportFailure(cleanupContext(ctx), inst.ID, err); reportErr != nil {
 				return RouteResponse{}, reportErr
 			}
 			fleet = withoutInstance(fleet, inst.ID)
@@ -238,8 +235,8 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			sample.LoadWallClockMS = loadMS
 		}); err != nil {
 			endRequest()
-			if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
-				return RouteResponse{}, failErr
+			if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			return RouteResponse{}, err
 		}
@@ -247,14 +244,11 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		upstreamEnd := clk.Now()
 		endRequest()
 		if err != nil {
-			if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
-				return RouteResponse{}, sampleErr
-			}
-			if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
-				return RouteResponse{}, failErr
+			if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, err); failErr != nil {
+				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			lastErr = err
-			if reportErr := r.reportFailure(ctx, inst.ID, err); reportErr != nil {
+			if reportErr := r.reportFailure(cleanupContext(ctx), inst.ID, err); reportErr != nil {
 				return RouteResponse{}, reportErr
 			}
 			fleet = withoutInstance(fleet, inst.ID)
@@ -266,11 +260,8 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			if optimizer.IsContextOverflow(preset.Backend, fmt.Errorf("%s", bodyText)) {
 				next, ok := r.reactiveRequeuePreset(job, preset, statusErr)
 				if ok {
-					if err := recorder.emitError(ctx, job, preset, inst, statusErr); err != nil {
-						return RouteResponse{}, err
-					}
-					if failErr := r.releaseAndFail(ctx, job, lease, statusErr); failErr != nil {
-						return RouteResponse{}, failErr
+					if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, statusErr); failErr != nil {
+						return RouteResponse{}, errors.Join(statusErr, failErr)
 					}
 					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", preset.ID, next.ID)
 					req, err = translate.WithModel(req, next.ID)
@@ -283,31 +274,32 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 				}
 			}
 			if resp.Status >= 500 {
-				if err := recorder.emitError(ctx, job, preset, inst, statusErr); err != nil {
-					return RouteResponse{}, err
-				}
-				if failErr := r.releaseAndFail(ctx, job, lease, statusErr); failErr != nil {
-					return RouteResponse{}, failErr
+				if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, statusErr); failErr != nil {
+					return RouteResponse{}, errors.Join(statusErr, failErr)
 				}
 				lastErr = statusErr
-				if reportErr := r.reportFailure(ctx, inst.ID, statusErr); reportErr != nil {
+				if reportErr := r.reportFailure(cleanupContext(ctx), inst.ID, statusErr); reportErr != nil {
 					return RouteResponse{}, reportErr
 				}
 				fleet = withoutInstance(fleet, inst.ID)
 				continue
 			}
-			if err := recorder.emitError(ctx, job, preset, inst, statusErr); err != nil {
-				return RouteResponse{}, err
-			}
-			if failErr := r.releaseAndFail(ctx, job, lease, statusErr); failErr != nil {
-				return RouteResponse{}, failErr
+			if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, statusErr); failErr != nil {
+				return RouteResponse{}, errors.Join(statusErr, failErr)
 			}
 			return RouteResponse{}, statusErr
 		}
 		body, contentType, err := translate.TranslateResponse(req, route, resp.Body)
 		if err != nil {
-			if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
-				return RouteResponse{}, failErr
+			if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+				return RouteResponse{}, errors.Join(err, failErr)
+			}
+			return RouteResponse{}, err
+		}
+		body, err = normalizeOpenAIReasoningBoundary(req, preset, body)
+		if err != nil {
+			if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			return RouteResponse{}, err
 		}
@@ -318,15 +310,15 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			LoadWallClockMS: loadMS,
 		})
 		if err != nil {
-			if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
-				return RouteResponse{}, failErr
+			if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			return RouteResponse{}, err
 		}
 		promptTokens, completionTokens := usageFromBody(body)
 		if err := recorder.emitMetric(ctx, metric, domain.TelemetryPhaseComplete, len(route.Body), len(body), promptTokens, completionTokens); err != nil {
-			if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
-				return RouteResponse{}, failErr
+			if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			return RouteResponse{}, err
 		}
@@ -356,6 +348,95 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		}, nil
 	}
 	return RouteResponse{}, fmt.Errorf("gateway failover exhausted: %w", lastErr)
+}
+
+func normalizeOpenAIReasoningBoundary(req translate.IngressRequest, preset domain.Preset, body []byte) ([]byte, error) {
+	if req.Kind != translate.KindOpenAIChat || req.Stream || preset.Backend != domain.BackendVLLM || !isQwenReasoningPreset(preset) {
+		return body, nil
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(body, &root); err != nil {
+		return nil, fmt.Errorf("normalize qwen reasoning boundary: decode response: %w", err)
+	}
+	choicesRaw, ok := root["choices"]
+	if !ok {
+		return body, nil
+	}
+	var choices []map[string]json.RawMessage
+	if err := json.Unmarshal(choicesRaw, &choices); err != nil {
+		return nil, fmt.Errorf("normalize qwen reasoning boundary: decode choices: %w", err)
+	}
+	changed := false
+	for i := range choices {
+		if !jsonStringEquals(choices[i]["finish_reason"], "length") {
+			continue
+		}
+		var msg map[string]json.RawMessage
+		if err := json.Unmarshal(choices[i]["message"], &msg); err != nil {
+			return nil, fmt.Errorf("normalize qwen reasoning boundary: decode message: %w", err)
+		}
+		if !jsonNullOrMissing(msg["reasoning"]) || !jsonNullOrMissing(msg["reasoning_content"]) {
+			continue
+		}
+		var content string
+		if raw, ok := msg["content"]; !ok || jsonNull(raw) {
+			continue
+		} else if err := json.Unmarshal(raw, &content); err != nil {
+			return nil, fmt.Errorf("normalize qwen reasoning boundary: decode content: %w", err)
+		}
+		if content == "" {
+			continue
+		}
+		reasoning, err := json.Marshal(content)
+		if err != nil {
+			return nil, fmt.Errorf("normalize qwen reasoning boundary: encode reasoning: %w", err)
+		}
+		emptyContent, err := json.Marshal("")
+		if err != nil {
+			return nil, fmt.Errorf("normalize qwen reasoning boundary: encode content: %w", err)
+		}
+		msg["reasoning"] = reasoning
+		msg["reasoning_content"] = reasoning
+		msg["content"] = emptyContent
+		encoded, err := json.Marshal(msg)
+		if err != nil {
+			return nil, fmt.Errorf("normalize qwen reasoning boundary: encode message: %w", err)
+		}
+		choices[i]["message"] = encoded
+		changed = true
+	}
+	if !changed {
+		return body, nil
+	}
+	encodedChoices, err := json.Marshal(choices)
+	if err != nil {
+		return nil, fmt.Errorf("normalize qwen reasoning boundary: encode choices: %w", err)
+	}
+	root["choices"] = encodedChoices
+	normalized, err := json.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("normalize qwen reasoning boundary: encode response: %w", err)
+	}
+	return normalized, nil
+}
+
+func isQwenReasoningPreset(preset domain.Preset) bool {
+	haystack := strings.ToLower(preset.ID + " " + preset.ModelRef + " " + strings.Join(preset.Aliases, " "))
+	return strings.Contains(haystack, "qwen3")
+}
+
+func jsonNullOrMissing(raw json.RawMessage) bool {
+	return raw == nil || jsonNull(raw)
+}
+
+func jsonNull(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
+}
+
+func jsonStringEquals(raw json.RawMessage, want string) bool {
+	var got string
+	return raw != nil && json.Unmarshal(raw, &got) == nil && got == want
 }
 
 func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w http.ResponseWriter) error {
@@ -690,7 +771,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 
 func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, payload []byte, preset domain.Preset, fleet domain.FleetSnapshot, beforeCold func(context.Context, domain.PlacementDecision) error) (domain.PlacementDecision, domain.ModelInstance, domain.Lease, bool, error) {
 	if r.Runtime != nil {
-		var hooks []scheduler.SubmitHooks
+		hooks := []scheduler.SubmitHooks{{RejectQueued: true}}
 		if beforeCold != nil {
 			hooks = append(hooks, scheduler.SubmitHooks{BeforeColdLoad: beforeCold})
 		}
@@ -943,6 +1024,20 @@ func (r *Router) failJob(ctx context.Context, job domain.Job, lease domain.Lease
 
 func (r *Router) releaseAndFail(ctx context.Context, job domain.Job, lease domain.Lease, cause error) error {
 	return r.finishJob(ctx, job, lease, cause)
+}
+
+func (r *Router) failPlacedJob(ctx context.Context, recorder *sessionRecorder, job domain.Job, preset domain.Preset, inst domain.ModelInstance, lease domain.Lease, cause error) error {
+	cleanup := cleanupContext(ctx)
+	var errs []error
+	if recorder != nil {
+		if sampleErr := recorder.emitError(cleanup, job, preset, inst, cause); sampleErr != nil {
+			errs = append(errs, sampleErr)
+		}
+	}
+	if failErr := r.releaseAndFail(cleanup, job, lease, cause); failErr != nil {
+		errs = append(errs, failErr)
+	}
+	return errors.Join(errs...)
 }
 
 func (r *Router) failPlacedStream(ctx context.Context, recorder *sessionRecorder, job domain.Job, preset domain.Preset, inst domain.ModelInstance, lease domain.Lease, w http.ResponseWriter, cause error, providerStarted bool) {

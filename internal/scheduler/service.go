@@ -65,6 +65,7 @@ type Result struct {
 
 type SubmitHooks struct {
 	BeforeColdLoad func(ctx context.Context, decision domain.PlacementDecision) error
+	RejectQueued   bool
 }
 
 func (s *Service) Submit(ctx context.Context, job domain.Job, hooks ...SubmitHooks) (Result, error) {
@@ -104,6 +105,9 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 		return Result{Decision: decision}, err
 	}
 	if decision.Action == domain.ActionQueued {
+		if rejectQueued(hooks) {
+			return s.rejectQueuedJob(ctx, job, "no instance available")
+		}
 		job.Status = domain.JobQueued
 		s.Queue.Enqueue(job)
 		if err := s.Store.SaveJob(ctx, job); err != nil {
@@ -223,6 +227,9 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		return Result{Decision: decision}, err
 	}
 	if decision.Action == domain.ActionQueued {
+		if rejectQueued(hooks) {
+			return s.rejectCoordinatedQueuedJob(ctx, job, decision, "no instance available")
+		}
 		if _, err := s.Coordinator.Commit(ctx, decision); err != nil {
 			return Result{Decision: decision}, err
 		}
@@ -237,6 +244,9 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	outcome, err := s.Coordinator.Commit(ctx, decision)
 	if err != nil {
 		if coordinatedQueueErr(err) {
+			if rejectQueued(hooks) {
+				return s.rejectCoordinatedQueuedJob(ctx, job, decision, err.Error())
+			}
 			job.Status = domain.JobQueued
 			s.Queue.EnqueueWithPayload(job, payload)
 			if saveErr := s.Store.SaveJob(ctx, job); saveErr != nil {
@@ -251,6 +261,9 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	decision = outcome.Decision
 	ownerLease := outcome.Lease
 	if decision.Action == domain.ActionQueued {
+		if rejectQueued(hooks) {
+			return s.rejectCoordinatedQueuedJob(ctx, job, decision, "no instance available")
+		}
 		job.Status = domain.JobQueued
 		s.Queue.EnqueueWithPayload(job, payload)
 		if err := s.Store.SaveJob(ctx, job); err != nil {
@@ -638,6 +651,40 @@ func runBeforeColdLoadHook(ctx context.Context, decision domain.PlacementDecisio
 		}
 	}
 	return nil
+}
+
+func rejectQueued(hooks []SubmitHooks) bool {
+	for _, hook := range hooks {
+		if hook.RejectQueued {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) rejectQueuedJob(ctx context.Context, job domain.Job, reason string) (Result, error) {
+	err := fmt.Errorf("job %q queued: %s", job.ID, reason)
+	job.Status = domain.JobFailed
+	job.Error = err.Error()
+	if saveErr := s.Store.SaveJob(ctx, job); saveErr != nil {
+		return Result{Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued}}, errors.Join(err, saveErr)
+	}
+	return Result{Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued}}, err
+}
+
+func (s *Service) rejectCoordinatedQueuedJob(ctx context.Context, job domain.Job, decision domain.PlacementDecision, reason string) (Result, error) {
+	if decision.JobID == "" {
+		decision.JobID = job.ID
+	}
+	if decision.Action == "" {
+		decision.Action = domain.ActionQueued
+	}
+	err := fmt.Errorf("job %q queued: %s", job.ID, reason)
+	job.Status = domain.JobFailed
+	job.Error = err.Error()
+	failErr := s.Coordinator.Fail(ctx, job.ID, err)
+	saveErr := s.Store.SaveJob(ctx, job)
+	return Result{Decision: decision}, errors.Join(err, failErr, saveErr)
 }
 
 func (s *Service) inspectPreemptions(ctx context.Context, decision domain.PlacementDecision, fleet domain.FleetSnapshot) (map[string]domain.Lease, map[string]domain.ModelInstance, error) {

@@ -23,6 +23,7 @@ import (
 	"mycelium/internal/catalog"
 	"mycelium/internal/domain"
 	"mycelium/internal/engine"
+	"mycelium/internal/enginecompat"
 	"mycelium/internal/estimate"
 	"mycelium/internal/gateway"
 	"mycelium/internal/lease"
@@ -188,6 +189,27 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	}
 	if !computeCfg.Compute || computeCfg.ComputeConfig.ID != "peer-json" || computeCfg.ComputeConfig.VRAMMB != 1234 || computeCfg.ComputeConfig.GGUFParser != "parser" || computeCfg.ComputeConfig.Backend != domain.BackendMLX || computeCfg.ComputeConfig.BackendBinary != "/bin/mlx" || computeCfg.ComputeConfig.DiskMinFreeRatio != 0.33 || computeCfg.ComputeConfig.LoadTimeoutMS != 1200000 {
 		t.Fatalf("compute peer config = %+v", computeCfg)
+	}
+	multiPath := filepath.Join(t.TempDir(), "multi-peer.json")
+	multiRaw := `{"compute":true,"compute_config":{"backend_listen":"127.0.0.1:0","id":"peer-json","backends":[{"backend":"vllm","backend_binary":"/bin/vllm","custom_args":["--gpu-memory-utilization","0.70"]},{"backend":"llamacpp","llama_server":"/bin/llama","custom_args":["--n-gpu-layers","99"]}]}}`
+	if err := os.WriteFile(multiPath, []byte(multiRaw), 0644); err != nil {
+		t.Fatalf("write multi peer config: %v", err)
+	}
+	multiCfg, err := loadPeerConfig(multiPath)
+	if err != nil {
+		t.Fatalf("loadPeerConfig multi: %v", err)
+	}
+	runtimes := computeBackendRuntimes(multiCfg.ComputeConfig)
+	if len(runtimes) != 2 || runtimes[0].Backend != domain.BackendVLLM || runtimes[0].BackendBinary != "/bin/vllm" || runtimes[1].Backend != domain.BackendLlamaCpp || runtimes[1].LlamaServer != "/bin/llama" {
+		t.Fatalf("runtime configs = %+v", runtimes)
+	}
+	duplicatePath := filepath.Join(t.TempDir(), "duplicate-peer.json")
+	duplicateRaw := `{"compute_config":{"backends":[{"backend":"vllm"},{"backend":"vllm"}]}}`
+	if err := os.WriteFile(duplicatePath, []byte(duplicateRaw), 0644); err != nil {
+		t.Fatalf("write duplicate peer config: %v", err)
+	}
+	if _, err := loadPeerConfig(duplicatePath); err == nil || !strings.Contains(err.Error(), "duplicate compute backend") {
+		t.Fatalf("duplicate runtime err = %v", err)
 	}
 	badPath := filepath.Join(t.TempDir(), "bad.json")
 	if err := os.WriteFile(badPath, []byte(`{`), 0644); err != nil {
@@ -757,6 +779,10 @@ func TestPeerConfigHelpersSeedMapsAndShutdowns(t *testing.T) {
 	labels := withPeerBackendLabel(map[string]string{"existing": "yes"}, domain.BackendVLLM)
 	if labels["existing"] != "yes" || labels[LabelPeerBackend] != string(domain.BackendVLLM) {
 		t.Fatalf("labels = %+v", labels)
+	}
+	multiLabels := withPeerBackendLabels(map[string]string{"existing": "yes", LabelPeerBackend: string(domain.BackendVLLM)}, []domain.Backend{domain.BackendVLLM, domain.BackendLlamaCpp})
+	if multiLabels["existing"] != "yes" || multiLabels[domain.LabelPeerBackends] != "llamacpp,vllm" || multiLabels[LabelPeerBackend] != "" {
+		t.Fatalf("multi labels = %+v", multiLabels)
 	}
 	if combineShutdowns(nil) != nil {
 		t.Fatal("empty shutdown list returned a function")
@@ -1715,7 +1741,7 @@ func TestBootstrapDoctorConfigLoadsOrDefaults(t *testing.T) {
 
 func TestBootstrapDoctorAndAdoptionWithFakeDetector(t *testing.T) {
 	detector := fakeBootstrapEngineDetector{
-		host: domain.HostFacts{NodeID: "peer-a", Platform: "linux/arm64", OOMSeverity: domain.OOMCatastrophic, DiskFreeMB: 10, DiskTotalMB: 20},
+		host: domain.HostFacts{NodeID: "peer-a", Platform: "linux/arm64", OOMSeverity: domain.OOMCatastrophic, DiskFreeMB: 10, DiskTotalMB: 20, Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}},
 		profiles: []domain.EngineProfile{
 			{ID: "engine-vllm", Backend: domain.BackendVLLM, BinaryPath: "/opt/vllm", Args: []string{"--gpu-memory-utilization", "0.85"}, Ready: true},
 			{ID: "engine-mlx", Backend: domain.BackendMLX, Ready: false, UnreadyReason: "unsupported platform"},
@@ -1745,7 +1771,7 @@ func TestBootstrapDoctorAndAdoptionWithFakeDetector(t *testing.T) {
 	if err := adoptBootstrapEngineWithDetector(context.Background(), &cfg, "auto", detector); err != nil {
 		t.Fatalf("adopt: %v", err)
 	}
-	if cfg.ComputeConfig.BackendBinary != "/opt/vllm" || !reflect.DeepEqual(cfg.ComputeConfig.CustomArgs, []string{"--gpu-memory-utilization", "0.85"}) || len(cfg.EngineProfiles) != 2 {
+	if cfg.ComputeConfig.BackendBinary != "/opt/vllm" || !reflect.DeepEqual(cfg.ComputeConfig.CustomArgs, []string{"--gpu-memory-utilization", "0.85"}) || len(cfg.EngineProfiles) != 1 || cfg.EngineProfiles[0].Backend != domain.BackendVLLM {
 		t.Fatalf("adopted config = %+v", cfg)
 	}
 	cfg = applyPeerConfigDefaults(PeerConfig{Compute: true, ComputeConfig: ComputeConfig{ID: "peer-a", Backend: domain.BackendVLLM}})
@@ -1767,6 +1793,1150 @@ func TestBootstrapDoctorAndAdoptionWithFakeDetector(t *testing.T) {
 	if report.Host.Platform == "" || len(report.Engines) == 0 {
 		t.Fatalf("real detector report = %+v", report)
 	}
+}
+
+func TestBootstrapDoctorPlansModelRootCompatibility(t *testing.T) {
+	root := t.TempDir()
+	modelDir := filepath.Join(root, "gemma-ov")
+	if err := os.Mkdir(modelDir, 0755); err != nil {
+		t.Fatalf("mkdir model: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "openvino_language_model.xml"), []byte("<xml/>"), 0644); err != nil {
+		t.Fatalf("write xml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "openvino_language_model.bin"), []byte("weights"), 0644); err != nil {
+		t.Fatalf("write bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "config.json"), []byte(`{"model_type":"gemma4","architectures":["Gemma4ForConditionalGeneration"],"vision_config":{},"text_config":{"max_position_embeddings":262144}}`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	report, err := detectBootstrapEnginesWithDetectorOptions(context.Background(), applyPeerConfigDefaults(PeerConfig{ComputeConfig: ComputeConfig{ID: "b70", Backend: domain.BackendOpenVINO}}), bootstrapDoctorOptions{
+		RequestedEngines: []domain.Backend{domain.BackendOpenVINO},
+		ModelRoots:       []string{root},
+	}, fakeBootstrapEngineDetector{
+		host: domain.HostFacts{NodeID: "b70", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}},
+		profiles: []domain.EngineProfile{{
+			ID:                 "openvino",
+			Backend:            domain.BackendOpenVINO,
+			Ready:              true,
+			SupportedModels:    []string{catalog.FormatOpenVINOIR},
+			SupportedPlatforms: []string{"linux/amd64"},
+			ArtifactPlatform:   "linux/amd64",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("detect with model root: %v", err)
+	}
+	if len(report.Plan.ModelCandidates) != 1 || report.Plan.ModelCandidates[0].Name != "gemma-ov" {
+		t.Fatalf("model candidates = %+v", report.Plan.ModelCandidates)
+	}
+	if got := report.Plan.ModelCandidates[0].Backends; len(got) != 1 || got[0].Backend != domain.BackendOpenVINO || !got[0].Ready {
+		t.Fatalf("model backend compatibility = %+v", got)
+	}
+	if engines, err := parseBootstrapEngines("vllm,sglang,openvino"); err != nil || !reflect.DeepEqual(engines, []domain.Backend{domain.BackendVLLM, domain.BackendSGLang, domain.BackendOpenVINO}) {
+		t.Fatalf("parse engines = %+v %v", engines, err)
+	}
+	if _, err := parseBootstrapEngines("bogus"); err == nil {
+		t.Fatal("unknown engine accepted")
+	}
+}
+
+func TestBootstrapDoctorSavePlanAndEnginesCommands(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "control.db")
+	cfg := applyPeerConfigDefaults(PeerConfig{StorePath: storePath, ComputeConfig: ComputeConfig{ID: "node-a", Backend: domain.BackendVLLM}})
+	detector := fakeBootstrapEngineDetector{
+		host: domain.HostFacts{NodeID: "node-a", OS: "linux", Arch: "arm64", Platform: "linux/arm64", OOMSeverity: domain.OOMCatastrophic, Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}},
+		profiles: []domain.EngineProfile{{
+			ID:                 "engine-vllm",
+			Backend:            domain.BackendVLLM,
+			Ready:              true,
+			BinaryPath:         "/opt/vllm",
+			Args:               []string{"--gpu-memory-utilization", "0.85"},
+			SupportedModels:    []string{catalog.FormatHFTransformers},
+			SupportedPlatforms: []string{"linux/arm64"},
+			ArtifactPlatform:   "linux/arm64",
+		}},
+		configured: domain.EngineProfile{
+			ID:                 "configured-vllm",
+			Backend:            domain.BackendVLLM,
+			Ready:              true,
+			BinaryPath:         "/opt/vllm",
+			Args:               []string{"--gpu-memory-utilization", "0.85"},
+			SupportedPlatforms: []string{"linux/arm64"},
+			ArtifactPlatform:   "linux/arm64",
+		},
+	}
+	if err := runBootstrapDoctorWithDetectorOptions(context.Background(), cfg, bootstrapDoctorOptions{RequestedEngines: []domain.Backend{domain.BackendVLLM}}, detector); err != nil {
+		t.Fatalf("dry doctor: %v", err)
+	}
+	if _, err := os.Stat(storePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dry doctor wrote store err=%v", err)
+	}
+	if err := runBootstrapDoctorWithDetectorOptions(context.Background(), cfg, bootstrapDoctorOptions{RequestedEngines: []domain.Backend{domain.BackendVLLM}, SavePlan: true}, detector); err != nil {
+		t.Fatalf("save doctor: %v", err)
+	}
+	store, err := storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	profiles, err := store.ListEngineProfiles(context.Background())
+	if err != nil || len(profiles) != 1 || profiles[0].Backend != domain.BackendVLLM || !profiles[0].Ready {
+		t.Fatalf("engine profiles = %+v %v", profiles, err)
+	}
+	plans, err := store.ListBootstrapPlans(context.Background())
+	if err != nil || len(plans) != 1 || len(plans[0].ResultingProfiles) != 1 {
+		t.Fatalf("bootstrap plans = %+v %v", plans, err)
+	}
+	store.Close()
+	if err := runEngines(context.Background(), []string{"list", "--db", storePath}); err != nil {
+		t.Fatalf("engines list: %v", err)
+	}
+	if err := runEngines(context.Background(), []string{"list", "--db", storePath, "--json"}); err != nil {
+		t.Fatalf("engines list json: %v", err)
+	}
+	if err := runEngines(context.Background(), []string{"doctor", "--db", storePath}); err != nil {
+		t.Fatalf("engines doctor: %v", err)
+	}
+	if err := runEngines(context.Background(), []string{"doctor", "--db", storePath, "--json"}); err != nil {
+		t.Fatalf("engines doctor json: %v", err)
+	}
+	if err := run(context.Background(), []string{"engines", "list", "--db", storePath}); err != nil {
+		t.Fatalf("run engines list: %v", err)
+	}
+	if err := runEngines(context.Background(), nil); err == nil {
+		t.Fatal("missing engines subcommand accepted")
+	}
+	if err := runEngines(context.Background(), []string{"bogus"}); err == nil {
+		t.Fatal("bad engines subcommand accepted")
+	}
+	if err := runEngines(context.Background(), []string{"doctor", "--db", storePath, "--peer", "remote"}); err == nil {
+		t.Fatal("remote engines doctor accepted")
+	}
+}
+
+func TestEnginesPreflightUsesSavedReadinessFacts(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	host := domain.HostFacts{NodeID: "b70", OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}
+	profile := keyedTestProfile(domain.EngineProfile{
+		ID:               "engine-openvino",
+		Backend:          domain.BackendOpenVINO,
+		ManagedBy:        "system",
+		DisplayName:      "OpenVINO",
+		BinaryPath:       "openvino-genai-openai",
+		Ready:            true,
+		ArtifactPlatform: "linux/amd64",
+	}, host, "")
+	if err := store.SaveEngineProfile(context.Background(), profile); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+	if err := store.SaveBootstrapPlan(context.Background(), domain.BootstrapPlan{
+		ID:                "plan-preflight",
+		CreatedAt:         time.Unix(9, 0).UTC(),
+		Host:              host,
+		ResultingProfiles: []domain.EngineProfile{profile},
+	}); err != nil {
+		t.Fatalf("SaveBootstrapPlan: %v", err)
+	}
+	store.Close()
+
+	if err := runEngines(context.Background(), []string{"preflight", "--db", storePath, "--backend", "openvino", "--model", "google/gemma-4-31B"}); err != nil {
+		t.Fatalf("engines preflight ready: %v", err)
+	}
+	if err := runEngines(context.Background(), []string{"preflight", "--db", storePath, "--backend", "openvino", "--model", "google/gemma-4-31B", "--json"}); err != nil {
+		t.Fatalf("engines preflight json: %v", err)
+	}
+
+	emptyPath := filepath.Join(t.TempDir(), "empty.db")
+	emptyStore, err := storesqlite.Open(emptyPath)
+	if err != nil {
+		t.Fatalf("open empty store: %v", err)
+	}
+	emptyStore.Close()
+	if err := runEngines(context.Background(), []string{"preflight", "--db", emptyPath, "--backend", "vllm"}); err != nil {
+		t.Fatalf("legacy unverified preflight should be visible but non-fatal: %v", err)
+	}
+	if err := runEngines(context.Background(), []string{"preflight", "--db", emptyPath, "--backend", "vllm", "--strict"}); err == nil || !strings.Contains(err.Error(), "legacy_config_unverified") {
+		t.Fatalf("strict missing preflight err = %v", err)
+	}
+
+	unreadyPath := filepath.Join(t.TempDir(), "unready.db")
+	unreadyStore, err := storesqlite.Open(unreadyPath)
+	if err != nil {
+		t.Fatalf("open unready store: %v", err)
+	}
+	vllmHost := domain.HostFacts{OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}}
+	unreadyProfile := keyedTestProfile(domain.EngineProfile{ID: "engine-vllm", Backend: domain.BackendVLLM, ManagedBy: "system", DisplayName: "vLLM", BinaryPath: "vllm", Ready: true}, vllmHost, "")
+	if err := unreadyStore.SaveEngineProfile(context.Background(), unreadyProfile); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+	if err := unreadyStore.SaveBootstrapPlan(context.Background(), domain.BootstrapPlan{ID: "plan-unready", CreatedAt: time.Unix(9, 0).UTC(), Host: vllmHost, ResultingProfiles: []domain.EngineProfile{unreadyProfile}}); err != nil {
+		t.Fatalf("SaveBootstrapPlan: %v", err)
+	}
+	if err := unreadyStore.MarkEngineProfileUnready(context.Background(), "engine-vllm", "driver mismatch"); err != nil {
+		t.Fatalf("MarkEngineProfileUnready: %v", err)
+	}
+	unreadyStore.Close()
+	if err := runEngines(context.Background(), []string{"preflight", "--db", unreadyPath, "--backend", "vllm"}); err == nil || !strings.Contains(err.Error(), "driver mismatch") {
+		t.Fatalf("unready preflight err = %v", err)
+	}
+}
+
+func TestModelsCompatUsesSavedReadinessFacts(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	b70 := domain.HostFacts{NodeID: "b70", OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}
+	openvino := keyedTestProfile(domain.EngineProfile{
+		ID:              "engine-openvino",
+		Backend:         domain.BackendOpenVINO,
+		DisplayName:     "OpenVINO",
+		BinaryPath:      "openvino-server",
+		Ready:           true,
+		SupportedModels: []string{catalog.FormatOpenVINOIR},
+	}, b70, "")
+	spark := domain.HostFacts{NodeID: "spark", OS: "linux", Arch: "arm64", Platform: "linux/arm64", Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}}
+	vllm := keyedTestProfile(domain.EngineProfile{
+		ID:              "engine-vllm",
+		Backend:         domain.BackendVLLM,
+		DisplayName:     "vLLM",
+		BinaryPath:      "vllm",
+		Ready:           true,
+		SupportedModels: []string{catalog.FormatHFTransformers},
+	}, spark, "")
+	if err := store.SaveEngineProfile(context.Background(), openvino); err != nil {
+		t.Fatalf("SaveEngineProfile openvino: %v", err)
+	}
+	if err := store.SaveEngineProfile(context.Background(), vllm); err != nil {
+		t.Fatalf("SaveEngineProfile vllm: %v", err)
+	}
+	if err := store.SaveBootstrapPlan(context.Background(), domain.BootstrapPlan{ID: "plan-b70", CreatedAt: time.Unix(1, 0).UTC(), Host: b70, ResultingProfiles: []domain.EngineProfile{openvino}}); err != nil {
+		t.Fatalf("SaveBootstrapPlan b70: %v", err)
+	}
+	if err := store.SaveBootstrapPlan(context.Background(), domain.BootstrapPlan{ID: "plan-spark", CreatedAt: time.Unix(2, 0).UTC(), Host: spark, ResultingProfiles: []domain.EngineProfile{vllm}}); err != nil {
+		t.Fatalf("SaveBootstrapPlan spark: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), domain.Preset{ID: "manual", NodeID: "legacy", Backend: domain.BackendLlamaCpp, ModelRef: "/manual/model", ContextLength: 4096, EstWeightsMB: 1, KVPerTokenMB: 0.1}); err != nil {
+		t.Fatalf("SavePreset manual: %v", err)
+	}
+	store.Close()
+
+	args := []string{
+		"compat",
+		"--db", storePath,
+		"--model", "logical/gemma",
+		"--artifact", "/models/gemma-ov",
+		"--format", catalog.FormatOpenVINOIR,
+		"--artifact", "hf://logical/gemma",
+		"--format", "safetensors",
+	}
+	if err := runModels(context.Background(), args); err != nil {
+		t.Fatalf("models compat: %v", err)
+	}
+	if err := runModels(context.Background(), append(args, "--json")); err != nil {
+		t.Fatalf("models compat json: %v", err)
+	}
+	if err := run(context.Background(), append([]string{"models"}, args...)); err != nil {
+		t.Fatalf("run models compat: %v", err)
+	}
+	if err := runModels(context.Background(), []string{"compat", "--db", storePath, "--model", "logical/gemma", "--artifact", "/models/gemma-ov"}); err == nil || !strings.Contains(err.Error(), "one --format") {
+		t.Fatalf("models compat missing format err = %v", err)
+	}
+}
+
+func TestEnginesInstallPlanIsNonMutatingAndHostAware(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	host := domain.HostFacts{
+		NodeID:       "b70",
+		OS:           "linux",
+		Arch:         "amd64",
+		Platform:     "linux/amd64",
+		Accelerators: []domain.Accelerator{{Vendor: "intel"}},
+	}
+	if err := store.SaveBootstrapPlan(context.Background(), domain.BootstrapPlan{ID: "plan-b70", CreatedAt: time.Unix(40, 0).UTC(), Host: host}); err != nil {
+		t.Fatalf("SaveBootstrapPlan: %v", err)
+	}
+	store.Close()
+
+	if err := runEngines(context.Background(), []string{"install-plan", "--db", storePath, "--backend", "openvino", "--host", "b70"}); err != nil {
+		t.Fatalf("install-plan saved host: %v", err)
+	}
+	if err := runEngines(context.Background(), []string{"install-plan", "--db", storePath, "--backend", "openvino", "--host", "b70", "--json"}); err != nil {
+		t.Fatalf("install-plan json: %v", err)
+	}
+	store, err = storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	profiles, err := store.ListEngineProfiles(context.Background())
+	if err != nil {
+		t.Fatalf("ListEngineProfiles: %v", err)
+	}
+	plans, err := store.ListBootstrapPlans(context.Background())
+	if err != nil {
+		t.Fatalf("ListBootstrapPlans: %v", err)
+	}
+	store.Close()
+	if len(profiles) != 0 || len(plans) != 1 {
+		t.Fatalf("install-plan mutated store: profiles=%+v plans=%+v", profiles, plans)
+	}
+
+	emptyPath := filepath.Join(t.TempDir(), "empty.db")
+	emptyStore, err := storesqlite.Open(emptyPath)
+	if err != nil {
+		t.Fatalf("open empty store: %v", err)
+	}
+	emptyStore.Close()
+	if err := runEngines(context.Background(), []string{"install-plan", "--db", emptyPath, "--backend", "vllm", "--host", "linux/arm64", "--accelerator-vendor", "nvidia"}); err != nil {
+		t.Fatalf("install-plan synthetic spark: %v", err)
+	}
+	if err := runEngines(context.Background(), []string{"install-plan", "--db", emptyPath, "--backend", "mlx", "--host", "darwin/amd64"}); err != nil {
+		t.Fatalf("install-plan unsupported still reports: %v", err)
+	}
+	if err := runEngines(context.Background(), []string{"install-plan", "--db", emptyPath, "--backend", "custom", "--host", "linux/amd64", "--accelerator-vendor", "nvidia"}); err != nil {
+		t.Fatalf("install-plan custom manual: %v", err)
+	}
+	if err := runEngines(context.Background(), []string{"install-plan", "--db", emptyPath, "--backend", "vllm"}); err == nil || !strings.Contains(err.Error(), "--host is required") {
+		t.Fatalf("missing host err = %v", err)
+	}
+}
+
+func TestEnginesApplyMaterializesReadyProfilesAndGeneratedPresets(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "control.db")
+	configPath := filepath.Join(dir, "peer.json")
+	cfg := applyPeerConfigDefaults(PeerConfig{
+		StorePath: storePath,
+		Compute:   true,
+		ComputeConfig: ComputeConfig{
+			ID:      "b70",
+			Backend: domain.BackendVLLM,
+		},
+	})
+	if err := savePeerConfig(configPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	store, err := storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	binaryPath := filepath.Join(dir, "openvino-run")
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatalf("write binary: %v", err)
+	}
+	host := domain.HostFacts{NodeID: "b70", OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}
+	ready := keyedTestProfile(domain.EngineProfile{
+		ID:                 "engine-openvino",
+		Backend:            domain.BackendOpenVINO,
+		ManagedBy:          "system",
+		DisplayName:        "OpenVINO",
+		BinaryPath:         binaryPath,
+		Args:               []string{"--device", "GPU"},
+		Ready:              true,
+		SupportedModels:    []string{catalog.FormatOpenVINOIR},
+		SupportedPlatforms: []string{"linux/amd64"},
+		ArtifactPlatform:   "linux/amd64",
+	}, host, "")
+	unready := keyedTestProfile(domain.EngineProfile{
+		ID:            "engine-vllm",
+		Backend:       domain.BackendVLLM,
+		ManagedBy:     "system",
+		DisplayName:   "vLLM",
+		BinaryPath:    "vllm",
+		Ready:         false,
+		UnreadyReason: "driver mismatch",
+	}, domain.HostFacts{OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}}, "")
+	plan := domain.BootstrapPlan{
+		ID:        "plan-a",
+		CreatedAt: time.Unix(10, 0).UTC(),
+		Host:      host,
+		ResultingProfiles: []domain.EngineProfile{
+			ready,
+			unready,
+		},
+		ModelCandidates: []domain.BootstrapModelCandidate{{
+			HostID:        "b70",
+			Name:          "gemma-ov",
+			Path:          "/models/gemma-ov",
+			Format:        catalog.FormatOpenVINOIR,
+			SizeMB:        53000,
+			ContextLength: 262144,
+			Capabilities:  []domain.Capability{domain.CapabilityChat, domain.CapabilityVision},
+			Metadata:      map[string]string{"kv_per_token_mb": "0.25"},
+			Backends:      []domain.BootstrapBackendCompatibility{{Backend: domain.BackendOpenVINO, Ready: true}},
+		}},
+	}
+	if err := store.SaveEngineProfile(context.Background(), ready); err != nil {
+		t.Fatalf("SaveEngineProfile ready: %v", err)
+	}
+	if err := store.SaveEngineProfile(context.Background(), unready); err != nil {
+		t.Fatalf("SaveEngineProfile unready: %v", err)
+	}
+	if err := store.SaveBootstrapPlan(context.Background(), plan); err != nil {
+		t.Fatalf("SaveBootstrapPlan: %v", err)
+	}
+	store.Close()
+
+	if err := runEngines(context.Background(), []string{"apply", "--config", configPath, "--db", storePath}); err != nil {
+		t.Fatalf("dry apply: %v", err)
+	}
+	dryConfig, err := loadPeerConfig(configPath)
+	if err != nil {
+		t.Fatalf("load dry config: %v", err)
+	}
+	if len(dryConfig.EngineProfiles) != 0 || len(dryConfig.ComputeConfig.Backends) != 0 {
+		t.Fatalf("dry apply mutated config = %+v", dryConfig)
+	}
+	store, err = storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	if _, err := store.Preset(context.Background(), "gemma-ov"); err == nil {
+		t.Fatal("dry apply wrote generated preset")
+	}
+	store.Close()
+
+	previewStore, err := storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("preview store: %v", err)
+	}
+	previewPlan, err := previewStore.BootstrapPlan(context.Background(), plan.ID)
+	if err != nil {
+		t.Fatalf("preview plan: %v", err)
+	}
+	previewReport, _, err := buildEngineApplyReport(context.Background(), previewStore, dryConfig, configPath, previewPlan, false)
+	previewStore.Close()
+	if err != nil {
+		t.Fatalf("preview report: %v", err)
+	}
+	if !hasApplyEvidence(previewReport.Verification, "engine_binary", ready.ID, "pass") || !hasApplyEvidence(previewReport.Verification, "store_preset_visibility", "gemma-ov", "unknown") {
+		t.Fatalf("preview verification = %+v", previewReport.Verification)
+	}
+
+	if err := runEngines(context.Background(), []string{"apply", "--config", configPath, "--db", storePath, "--write"}); err != nil {
+		t.Fatalf("write apply: %v", err)
+	}
+	backups, err := filepath.Glob(configPath + ".backup.*")
+	if err != nil {
+		t.Fatalf("glob backups: %v", err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("backups = %+v", backups)
+	}
+	backupConfig, err := loadPeerConfig(backups[0])
+	if err != nil {
+		t.Fatalf("load backup config: %v", err)
+	}
+	if len(backupConfig.EngineProfiles) != 0 || backupConfig.ComputeConfig.Backend != domain.BackendVLLM {
+		t.Fatalf("backup config = %+v", backupConfig)
+	}
+	appliedConfig, err := loadPeerConfig(configPath)
+	if err != nil {
+		t.Fatalf("load applied config: %v", err)
+	}
+	if len(appliedConfig.EngineProfiles) != 1 || appliedConfig.EngineProfiles[0].ID != ready.ID || appliedConfig.EngineProfiles[0].ManagedBy != "bootstrap" {
+		t.Fatalf("engine profiles = %+v", appliedConfig.EngineProfiles)
+	}
+	if len(appliedConfig.ComputeConfig.Backends) != 1 || appliedConfig.ComputeConfig.Backends[0].Backend != domain.BackendOpenVINO || appliedConfig.ComputeConfig.Backends[0].BackendBinary != ready.BinaryPath {
+		t.Fatalf("runtime profiles = %+v", appliedConfig.ComputeConfig.Backends)
+	}
+	if appliedConfig.ComputeConfig.Backend != domain.BackendOpenVINO {
+		t.Fatalf("primary backend = %s", appliedConfig.ComputeConfig.Backend)
+	}
+	if len(appliedConfig.Presets) != 1 || appliedConfig.Presets[0].GeneratedBy != "bootstrap" || appliedConfig.Presets[0].EngineProfileID != ready.ID {
+		t.Fatalf("config presets = %+v", appliedConfig.Presets)
+	}
+	store, err = storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("reopen applied store: %v", err)
+	}
+	defer store.Close()
+	preset, err := store.Preset(context.Background(), "gemma-ov")
+	if err != nil {
+		t.Fatalf("generated preset not visible to store loader: %v", err)
+	}
+	if preset.Backend != domain.BackendOpenVINO || preset.ModelRef != "/models/gemma-ov" || preset.ContextLength != 262144 || preset.EstWeightsMB != 53000 || preset.KVPerTokenMB != 0.25 || preset.GeneratedFrom != plan.ID {
+		t.Fatalf("generated preset = %+v", preset)
+	}
+}
+
+func TestEnginesApplyReportsMissingModelMetadataWithoutWritingPreset(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "control.db")
+	configPath := filepath.Join(dir, "peer.json")
+	cfg := applyPeerConfigDefaults(PeerConfig{StorePath: storePath, Compute: true, ComputeConfig: ComputeConfig{ID: "b70", Backend: domain.BackendOpenVINO}})
+	if err := savePeerConfig(configPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	store, err := storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	host := domain.HostFacts{NodeID: "b70", OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}
+	ready := keyedTestProfile(domain.EngineProfile{ID: "engine-openvino", Backend: domain.BackendOpenVINO, ManagedBy: "system", DisplayName: "OpenVINO", BinaryPath: "/opt/openvino/run", Ready: true}, host, "")
+	plan := domain.BootstrapPlan{
+		ID:        "plan-missing-metadata",
+		CreatedAt: time.Unix(11, 0).UTC(),
+		Host:      host,
+		ResultingProfiles: []domain.EngineProfile{
+			ready,
+		},
+		ModelCandidates: []domain.BootstrapModelCandidate{{
+			HostID:        "b70",
+			Name:          "gemma-ov",
+			Path:          "/models/gemma-ov",
+			Format:        catalog.FormatOpenVINOIR,
+			SizeMB:        53000,
+			ContextLength: 262144,
+			Capabilities:  []domain.Capability{domain.CapabilityChat},
+			Backends:      []domain.BootstrapBackendCompatibility{{Backend: domain.BackendOpenVINO, Ready: true}},
+		}},
+	}
+	if err := store.SaveEngineProfile(context.Background(), ready); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+	if err := store.SaveBootstrapPlan(context.Background(), plan); err != nil {
+		t.Fatalf("SaveBootstrapPlan: %v", err)
+	}
+	store.Close()
+
+	if err := runEngines(context.Background(), []string{"apply", "--config", configPath, "--db", storePath, "--write"}); err != nil {
+		t.Fatalf("write apply: %v", err)
+	}
+	store, err = storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.Preset(context.Background(), "gemma-ov"); err == nil {
+		t.Fatal("apply wrote preset without kv metadata")
+	}
+	appliedConfig, err := loadPeerConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(appliedConfig.EngineProfiles) != 1 || len(appliedConfig.Presets) != 0 {
+		t.Fatalf("applied config = %+v", appliedConfig)
+	}
+}
+
+func TestEnginesApplyRejectsCompatibilityKeyMismatch(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "control.db")
+	configPath := filepath.Join(dir, "peer.json")
+	cfg := applyPeerConfigDefaults(PeerConfig{
+		StorePath: storePath,
+		Compute:   true,
+		ComputeConfig: ComputeConfig{
+			ID:      "b70",
+			Backend: domain.BackendVLLM,
+		},
+	})
+	if err := savePeerConfig(configPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	store, err := storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	savedHost := domain.HostFacts{NodeID: "spark", OS: "linux", Arch: "arm64", Platform: "linux/arm64", Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}}
+	targetHost := domain.HostFacts{NodeID: "b70", OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}
+	profile := keyedTestProfile(domain.EngineProfile{
+		ID:          "engine-vllm",
+		Backend:     domain.BackendVLLM,
+		ManagedBy:   "system",
+		DisplayName: "vLLM",
+		BinaryPath:  "vllm",
+		Ready:       true,
+	}, savedHost, "")
+	plan := domain.BootstrapPlan{
+		ID:                "plan-mismatch",
+		CreatedAt:         time.Unix(13, 0).UTC(),
+		Host:              targetHost,
+		ResultingProfiles: []domain.EngineProfile{profile},
+	}
+	if err := store.SaveEngineProfile(context.Background(), profile); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+	report, _, err := buildEngineApplyReport(context.Background(), store, cfg, configPath, plan, false)
+	if err == nil || !strings.Contains(err.Error(), "no saved ready engine profiles") {
+		t.Fatalf("apply mismatch err = %v", err)
+	}
+	if len(report.Blocked) != 1 || !strings.Contains(report.Blocked[0].Reason, "compatibility_key_mismatch") {
+		t.Fatalf("blocked = %+v", report.Blocked)
+	}
+}
+
+func TestBootstrapDoc04EndToEndTempContract(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "control.db")
+	configPath := filepath.Join(dir, "peer.json")
+	modelDir := filepath.Join(dir, "models", "gemma-ov")
+	if err := os.MkdirAll(modelDir, 0755); err != nil {
+		t.Fatalf("mkdir model dir: %v", err)
+	}
+	binaryPath := filepath.Join(dir, "openvino-genai-openai")
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatalf("write binary: %v", err)
+	}
+	cfg := applyPeerConfigDefaults(PeerConfig{
+		StorePath: storePath,
+		Compute:   true,
+		ComputeConfig: ComputeConfig{
+			ID:      "b70",
+			Backend: domain.BackendOpenVINO,
+		},
+	})
+	if err := savePeerConfig(configPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	host := domain.HostFacts{
+		NodeID:       "b70",
+		OS:           "linux",
+		Arch:         "amd64",
+		Platform:     "linux/amd64",
+		Accelerators: []domain.Accelerator{{Vendor: "intel", Kind: "arc-pro-b70"}},
+	}
+	openvino := keyedTestProfile(domain.EngineProfile{
+		ID:                 "engine-openvino",
+		Backend:            domain.BackendOpenVINO,
+		ManagedBy:          "system",
+		DisplayName:        "OpenVINO",
+		BinaryPath:         binaryPath,
+		Ready:              true,
+		SupportedModels:    []string{catalog.FormatOpenVINOIR},
+		SupportedPlatforms: []string{"linux/amd64"},
+		ArtifactPlatform:   "linux/amd64",
+	}, host, "")
+	vllm := keyedTestProfile(domain.EngineProfile{
+		ID:                 "engine-vllm",
+		Backend:            domain.BackendVLLM,
+		ManagedBy:          "system",
+		DisplayName:        "vLLM",
+		BinaryPath:         "vllm",
+		Ready:              false,
+		UnreadyReason:      "driver mismatch",
+		SupportedModels:    []string{catalog.FormatHFTransformers},
+		SupportedPlatforms: []string{"linux/amd64"},
+		ArtifactPlatform:   "linux/amd64",
+	}, host, "")
+	model := domain.BootstrapModelCandidate{
+		HostID:        "b70",
+		Name:          "gemma-ov",
+		Path:          modelDir,
+		Format:        catalog.FormatOpenVINOIR,
+		SizeMB:        2,
+		ContextLength: 8192,
+		Capabilities:  []domain.Capability{domain.CapabilityChat, domain.CapabilityVision},
+		Metadata:      map[string]string{"kv_per_token_mb": "0.25"},
+		Backends:      []domain.BootstrapBackendCompatibility{{Backend: domain.BackendOpenVINO}},
+	}
+
+	if err := runBootstrapDoctorWithDetectorOptions(ctx, cfg, bootstrapDoctorOptions{
+		ConfigPath:       configPath,
+		SavePlan:         true,
+		RequestedEngines: []domain.Backend{domain.BackendOpenVINO, domain.BackendVLLM},
+		ModelCandidates:  []domain.BootstrapModelCandidate{model},
+	}, fakeBootstrapEngineDetector{host: host, profiles: []domain.EngineProfile{openvino, vllm}, configured: openvino}); err != nil {
+		t.Fatalf("bootstrap doctor save plan: %v", err)
+	}
+
+	if err := runEngines(ctx, []string{"list", "--db", storePath}); err != nil {
+		t.Fatalf("engines list: %v", err)
+	}
+	if err := runEngines(ctx, []string{"doctor", "--db", storePath}); err != nil {
+		t.Fatalf("engines doctor: %v", err)
+	}
+	if err := runEngines(ctx, []string{"preflight", "--db", storePath, "--backend", "openvino", "--model-format", catalog.FormatOpenVINOIR}); err != nil {
+		t.Fatalf("matching preflight: %v", err)
+	}
+	if err := runEngines(ctx, []string{"preflight", "--db", storePath, "--backend", "openvino", "--host-platform", "linux/arm64", "--accelerator-vendor", "nvidia", "--accelerator-runtime", "cuda"}); err == nil || !strings.Contains(err.Error(), "compatibility_key_mismatch") {
+		t.Fatalf("mismatch preflight err = %v", err)
+	}
+	if err := runEngines(ctx, []string{"preflight", "--db", storePath, "--backend", "vllm"}); err == nil || !strings.Contains(err.Error(), "driver mismatch") {
+		t.Fatalf("unready preflight err = %v", err)
+	}
+
+	store, err := storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	manual := testPreset("manual-legacy")
+	manual.Backend = domain.BackendLlamaCpp
+	if err := store.SavePreset(ctx, manual); err != nil {
+		t.Fatalf("SavePreset manual: %v", err)
+	}
+	store.Close()
+
+	if err := runEngines(ctx, []string{"apply", "--config", configPath, "--db", storePath}); err != nil {
+		t.Fatalf("apply preview: %v", err)
+	}
+	previewConfig, err := loadPeerConfig(configPath)
+	if err != nil {
+		t.Fatalf("load preview config: %v", err)
+	}
+	if len(previewConfig.EngineProfiles) != 0 || len(previewConfig.ComputeConfig.Backends) != 0 {
+		t.Fatalf("preview mutated config = %+v", previewConfig)
+	}
+	store, err = storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("reopen store after preview: %v", err)
+	}
+	if _, err := store.Preset(ctx, "gemma-ov"); err == nil {
+		t.Fatal("preview materialized generated preset")
+	}
+	transient, err := loadRuntimePresets(ctx, store, domain.Node{ID: "b70", OS: "linux", Arch: "amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}})
+	if err != nil {
+		t.Fatalf("runtime presets before apply: %v", err)
+	}
+	if !hasRuntimePreset(transient.Presets, "gemma-ov", domain.EngineReadinessReadyProfile) || !hasRuntimePreset(transient.Presets, "manual-legacy", domain.EngineReadinessLegacyConfigUnverified) {
+		t.Fatalf("transient presets = %+v blocked=%+v", transient.Presets, transient.Blocked)
+	}
+	store.Close()
+
+	if err := runEngines(ctx, []string{"apply", "--config", configPath, "--db", storePath, "--write"}); err != nil {
+		t.Fatalf("apply write: %v", err)
+	}
+	appliedConfig, err := loadPeerConfig(configPath)
+	if err != nil {
+		t.Fatalf("load applied config: %v", err)
+	}
+	if len(appliedConfig.EngineProfiles) != 1 || appliedConfig.EngineProfiles[0].ID != openvino.ID || len(appliedConfig.ComputeConfig.Backends) != 1 {
+		t.Fatalf("applied config = %+v", appliedConfig)
+	}
+	backups, err := filepath.Glob(configPath + ".backup.*")
+	if err != nil {
+		t.Fatalf("glob backups: %v", err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("backups = %+v", backups)
+	}
+	store, err = storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("reopen store after write: %v", err)
+	}
+	defer store.Close()
+	generated, err := store.Preset(ctx, "gemma-ov")
+	if err != nil {
+		t.Fatalf("generated preset: %v", err)
+	}
+	if generated.EngineProfileID != openvino.ID || generated.GeneratedBy != "bootstrap" || generated.ModelFormat != catalog.FormatOpenVINOIR {
+		t.Fatalf("generated preset = %+v", generated)
+	}
+	loaded, err := loadRuntimePresets(ctx, store, domain.Node{ID: "b70", OS: "linux", Arch: "amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}})
+	if err != nil {
+		t.Fatalf("runtime presets after apply: %v", err)
+	}
+	if !hasRuntimePreset(loaded.Presets, "gemma-ov", domain.EngineReadinessReadyProfile) || !hasRuntimePreset(loaded.Presets, "manual-legacy", domain.EngineReadinessLegacyConfigUnverified) {
+		t.Fatalf("loaded presets = %+v blocked=%+v", loaded.Presets, loaded.Blocked)
+	}
+}
+
+func TestEnginesApplyRestoresBackupWhenPostWriteValidationFails(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "control.db")
+	configPath := filepath.Join(dir, "peer.json")
+	cfg := applyPeerConfigDefaults(PeerConfig{
+		StorePath: storePath,
+		Compute:   true,
+		ComputeConfig: ComputeConfig{
+			ID:      "b70",
+			Backend: domain.BackendVLLM,
+		},
+	})
+	if err := savePeerConfig(configPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	store, err := storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	host := domain.HostFacts{NodeID: "b70", OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}
+	ready := keyedTestProfile(domain.EngineProfile{ID: "engine-openvino", Backend: domain.BackendOpenVINO, ManagedBy: "system", DisplayName: "OpenVINO", BinaryPath: "openvino-genai-openai", Ready: true}, host, "")
+	plan := domain.BootstrapPlan{
+		ID:                "plan-restore",
+		CreatedAt:         time.Unix(12, 0).UTC(),
+		Host:              host,
+		ResultingProfiles: []domain.EngineProfile{ready},
+	}
+	if err := store.SaveEngineProfile(context.Background(), ready); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+	if err := store.SaveBootstrapPlan(context.Background(), plan); err != nil {
+		t.Fatalf("SaveBootstrapPlan: %v", err)
+	}
+	store.Close()
+
+	err = runEnginesApplyWithOptions(context.Background(), engineApplyOptions{
+		ConfigPath: configPath,
+		DBPath:     storePath,
+		PlanID:     plan.ID,
+		Write:      true,
+		PostWriteValidate: func(string) error {
+			return errors.New("post validation failed")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "post validation failed") {
+		t.Fatalf("apply err = %v", err)
+	}
+	backups, err := filepath.Glob(configPath + ".backup.*")
+	if err != nil {
+		t.Fatalf("glob backups: %v", err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("backups = %+v", backups)
+	}
+	restored, err := loadPeerConfig(configPath)
+	if err != nil {
+		t.Fatalf("load restored config: %v", err)
+	}
+	if len(restored.EngineProfiles) != 0 || restored.ComputeConfig.Backend != domain.BackendVLLM {
+		t.Fatalf("restored config = %+v", restored)
+	}
+}
+
+func TestEnginesApplyVerificationEvidenceReportsPassFailAndUnknown(t *testing.T) {
+	dir := t.TempDir()
+	exists := filepath.Join(dir, "engine-ok")
+	if err := os.WriteFile(exists, []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatalf("write engine: %v", err)
+	}
+	profiles := []domain.EngineProfile{
+		{ID: "exists", Backend: domain.BackendOpenVINO, BinaryPath: exists, Ready: true, Version: "1.0"},
+		{ID: "missing", Backend: domain.BackendVLLM, BinaryPath: filepath.Join(dir, "missing"), Ready: true},
+		{ID: "path-lookup", Backend: domain.BackendLlamaCpp, BinaryPath: "llama-server", Ready: true},
+	}
+	evidence := verifyEngineProfiles(profiles)
+	if !hasApplyEvidence(evidence, "engine_binary", "exists", "pass") {
+		t.Fatalf("missing binary pass evidence: %+v", evidence)
+	}
+	if !hasApplyEvidence(evidence, "engine_binary", "missing", "fail") {
+		t.Fatalf("missing binary fail evidence: %+v", evidence)
+	}
+	if !hasApplyEvidence(evidence, "engine_binary", "path-lookup", "unknown") {
+		t.Fatalf("missing binary unknown evidence: %+v", evidence)
+	}
+	if !hasApplyEvidence(evidence, "engine_version", "exists", "pass") || !hasApplyEvidence(evidence, "engine_version", "missing", "unknown") {
+		t.Fatalf("version evidence = %+v", evidence)
+	}
+}
+
+func TestRuntimePresetLoaderReadsSavedReadyBootstrapFactsWithoutApply(t *testing.T) {
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	host := domain.HostFacts{NodeID: "b70", OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}
+	profile := keyedTestProfile(domain.EngineProfile{
+		ID:              "engine-openvino",
+		Backend:         domain.BackendOpenVINO,
+		ManagedBy:       "system",
+		DisplayName:     "OpenVINO",
+		BinaryPath:      "/opt/openvino/run",
+		Ready:           true,
+		SupportedModels: []string{catalog.FormatOpenVINOIR},
+	}, host, "")
+	if err := store.SaveEngineProfile(context.Background(), profile); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+	plan := domain.BootstrapPlan{
+		ID:        "plan-runtime",
+		CreatedAt: time.Unix(20, 0).UTC(),
+		Host:      host,
+		ResultingProfiles: []domain.EngineProfile{
+			profile,
+		},
+		ModelCandidates: []domain.BootstrapModelCandidate{{
+			HostID:        "b70",
+			Name:          "gemma-ov",
+			Path:          "/models/gemma-ov",
+			Format:        catalog.FormatOpenVINOIR,
+			SizeMB:        53000,
+			ContextLength: 262144,
+			Capabilities:  []domain.Capability{domain.CapabilityChat, domain.CapabilityVision},
+			Metadata:      map[string]string{"kv_per_token_mb": "0.25"},
+			Backends:      []domain.BootstrapBackendCompatibility{{Backend: domain.BackendOpenVINO, Ready: true}},
+		}},
+	}
+	if err := store.SaveBootstrapPlan(context.Background(), plan); err != nil {
+		t.Fatalf("SaveBootstrapPlan: %v", err)
+	}
+
+	report, err := loadRuntimePresets(context.Background(), store)
+	if err != nil {
+		t.Fatalf("loadRuntimePresets: %v", err)
+	}
+	if len(report.Presets) != 1 {
+		t.Fatalf("presets = %+v blocked=%+v", report.Presets, report.Blocked)
+	}
+	preset := report.Presets[0]
+	if preset.ID != "gemma-ov" || preset.Backend != domain.BackendOpenVINO || preset.EngineProfileID != profile.ID || preset.EngineReadiness != domain.EngineReadinessReadyProfile {
+		t.Fatalf("runtime preset = %+v", preset)
+	}
+	if _, err := store.Preset(context.Background(), "gemma-ov"); err == nil {
+		t.Fatal("runtime loader materialized transient preset into store")
+	}
+}
+
+func TestEnginesReloadDryRunPreviewsRefreshedRuntimePresets(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(storePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	manual := testPreset("manual")
+	manual.Backend = domain.BackendLlamaCpp
+	if err := store.SavePreset(context.Background(), manual); err != nil {
+		t.Fatalf("SavePreset manual: %v", err)
+	}
+	initial, err := loadRuntimePresets(context.Background(), store)
+	if err != nil {
+		t.Fatalf("initial loadRuntimePresets: %v", err)
+	}
+	if !hasRuntimePreset(initial.Presets, "manual", domain.EngineReadinessLegacyConfigUnverified) {
+		t.Fatalf("initial presets = %+v", initial.Presets)
+	}
+	host := domain.HostFacts{NodeID: "b70", OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}
+	profile := keyedTestProfile(domain.EngineProfile{ID: "engine-openvino", Backend: domain.BackendOpenVINO, DisplayName: "OpenVINO", BinaryPath: "openvino", Ready: true, SupportedModels: []string{catalog.FormatOpenVINOIR}}, host, "")
+	if err := store.SaveEngineProfile(context.Background(), profile); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+	plan := domain.BootstrapPlan{
+		ID:                "plan-runtime-refresh",
+		CreatedAt:         time.Unix(30, 0).UTC(),
+		Host:              host,
+		ResultingProfiles: []domain.EngineProfile{profile},
+		ModelCandidates: []domain.BootstrapModelCandidate{{
+			HostID:        "b70",
+			Name:          "gemma-ov",
+			Path:          "/models/gemma-ov",
+			Format:        catalog.FormatOpenVINOIR,
+			SizeMB:        53000,
+			ContextLength: 262144,
+			Capabilities:  []domain.Capability{domain.CapabilityChat},
+			Metadata:      map[string]string{"kv_per_token_mb": "0.25"},
+			Backends:      []domain.BootstrapBackendCompatibility{{Backend: domain.BackendOpenVINO, Ready: true}},
+		}},
+	}
+	if err := store.SaveBootstrapPlan(context.Background(), plan); err != nil {
+		t.Fatalf("SaveBootstrapPlan: %v", err)
+	}
+	refreshed, err := loadRuntimePresets(context.Background(), store)
+	if err != nil {
+		t.Fatalf("refreshed loadRuntimePresets: %v", err)
+	}
+	if !hasRuntimePreset(refreshed.Presets, "gemma-ov", domain.EngineReadinessReadyProfile) || !hasRuntimePreset(refreshed.Presets, "manual", domain.EngineReadinessLegacyConfigUnverified) {
+		t.Fatalf("refreshed presets = %+v blocked=%+v", refreshed.Presets, refreshed.Blocked)
+	}
+	store.Close()
+
+	if err := runEngines(context.Background(), []string{"reload", "--db", storePath, "--dry-run"}); err != nil {
+		t.Fatalf("engines reload dry-run: %v", err)
+	}
+	if err := runEngines(context.Background(), []string{"reload", "--db", storePath, "--dry-run", "--json"}); err != nil {
+		t.Fatalf("engines reload dry-run json: %v", err)
+	}
+	if err := runEngines(context.Background(), []string{"reload", "--db", storePath}); err == nil || !strings.Contains(err.Error(), "not live-enabled") {
+		t.Fatalf("engines reload live err = %v", err)
+	}
+}
+
+func TestRuntimePresetLoaderBlocksSavedUnreadyProfilePreset(t *testing.T) {
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	preset := testPreset("qwen")
+	preset.Backend = domain.BackendVLLM
+	preset.GeneratedBy = "bootstrap"
+	preset.EngineProfileID = "engine-vllm"
+	if err := store.SavePreset(context.Background(), preset); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	if err := store.SaveEngineProfile(context.Background(), domain.EngineProfile{ID: "engine-vllm", Backend: domain.BackendVLLM, Ready: false, UnreadyReason: "driver mismatch"}); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+
+	report, err := loadRuntimePresets(context.Background(), store)
+	if err != nil {
+		t.Fatalf("loadRuntimePresets: %v", err)
+	}
+	if len(report.Presets) != 0 {
+		t.Fatalf("unready preset loaded = %+v", report.Presets)
+	}
+	if len(report.Blocked) != 1 || report.Blocked[0].ID != "qwen" || !strings.Contains(report.Blocked[0].Reason, "driver mismatch") {
+		t.Fatalf("blocked = %+v", report.Blocked)
+	}
+}
+
+func TestRuntimePresetLoaderKeepsManualLegacyPresetsVisible(t *testing.T) {
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	preset := testPreset("manual")
+	preset.Backend = domain.BackendVLLM
+	if err := store.SavePreset(context.Background(), preset); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+
+	report, err := loadRuntimePresets(context.Background(), store)
+	if err != nil {
+		t.Fatalf("loadRuntimePresets: %v", err)
+	}
+	if len(report.Presets) != 1 || report.Presets[0].ID != "manual" {
+		t.Fatalf("presets = %+v", report.Presets)
+	}
+	if report.Presets[0].EngineReadiness != domain.EngineReadinessLegacyConfigUnverified || !strings.Contains(report.Presets[0].EngineReadinessReason, "legacy_config_unverified") {
+		t.Fatalf("legacy readiness = %+v", report.Presets[0])
+	}
+}
+
+func TestRuntimePresetLoaderBlocksCompatibilityKeyMismatch(t *testing.T) {
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	savedHost := domain.HostFacts{NodeID: "spark", OS: "linux", Arch: "arm64", Platform: "linux/arm64", Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}}
+	profile := keyedTestProfile(domain.EngineProfile{ID: "engine-vllm", Backend: domain.BackendVLLM, ManagedBy: "system", DisplayName: "vLLM", BinaryPath: "vllm", Ready: true}, savedHost, "")
+	if err := store.SaveEngineProfile(context.Background(), profile); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+	preset := testPreset("qwen")
+	preset.Backend = domain.BackendVLLM
+	preset.GeneratedBy = "bootstrap"
+	preset.EngineProfileID = profile.ID
+	if err := store.SavePreset(context.Background(), preset); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	target := domain.Node{ID: "b70", OS: "linux", Arch: "amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}
+	report, err := loadRuntimePresets(context.Background(), store, target)
+	if err != nil {
+		t.Fatalf("loadRuntimePresets: %v", err)
+	}
+	if len(report.Presets) != 0 || len(report.Blocked) != 1 || !strings.Contains(report.Blocked[0].Reason, "compatibility_key_mismatch") {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
+func TestRuntimePresetLoaderKeepsIncompleteKeyExplicitlyUnverified(t *testing.T) {
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	profile := domain.EngineProfile{ID: "engine-vllm", Backend: domain.BackendVLLM, Ready: true}
+	if err := store.SaveEngineProfile(context.Background(), profile); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+	preset := testPreset("qwen")
+	preset.Backend = domain.BackendVLLM
+	preset.GeneratedBy = "bootstrap"
+	preset.EngineProfileID = profile.ID
+	if err := store.SavePreset(context.Background(), preset); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	report, err := loadRuntimePresets(context.Background(), store, domain.Node{OS: "linux", Arch: "amd64", Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}})
+	if err != nil {
+		t.Fatalf("loadRuntimePresets: %v", err)
+	}
+	if len(report.Presets) != 1 || report.Presets[0].EngineReadiness != domain.EngineReadinessCompatibilityKeyIncomplete || !strings.Contains(report.Presets[0].EngineReadinessReason, "compatibility_key_incomplete") {
+		t.Fatalf("presets = %+v blocked=%+v", report.Presets, report.Blocked)
+	}
+}
+
+func TestRuntimePresetLoaderDoesNotDuplicateAppliedGeneratedPreset(t *testing.T) {
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	host := domain.HostFacts{NodeID: "b70", OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}
+	profile := keyedTestProfile(domain.EngineProfile{ID: "engine-openvino", Backend: domain.BackendOpenVINO, ManagedBy: "system", DisplayName: "OpenVINO", BinaryPath: "openvino-genai-openai", Ready: true, SupportedModels: []string{catalog.FormatOpenVINOIR}}, host, "")
+	if err := store.SaveEngineProfile(context.Background(), profile); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+	preset := domain.Preset{
+		ID:              "gemma-ov",
+		ModelRef:        "/models/gemma-ov",
+		Backend:         domain.BackendOpenVINO,
+		ContextLength:   262144,
+		Capabilities:    []domain.Capability{domain.CapabilityChat},
+		EstWeightsMB:    53000,
+		KVPerTokenMB:    0.25,
+		GeneratedBy:     "bootstrap",
+		GeneratedFrom:   "plan-runtime",
+		EngineProfileID: profile.ID,
+	}
+	if err := store.SavePreset(context.Background(), preset); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	plan := domain.BootstrapPlan{
+		ID:                "plan-runtime",
+		CreatedAt:         time.Unix(21, 0).UTC(),
+		Host:              host,
+		ResultingProfiles: []domain.EngineProfile{profile},
+		ModelCandidates: []domain.BootstrapModelCandidate{{
+			HostID:        "b70",
+			Name:          "gemma-ov",
+			Path:          "/models/gemma-ov",
+			Format:        catalog.FormatOpenVINOIR,
+			SizeMB:        53000,
+			ContextLength: 262144,
+			Capabilities:  []domain.Capability{domain.CapabilityChat},
+			Metadata:      map[string]string{"kv_per_token_mb": "0.25"},
+			Backends:      []domain.BootstrapBackendCompatibility{{Backend: domain.BackendOpenVINO, Ready: true}},
+		}},
+	}
+	if err := store.SaveBootstrapPlan(context.Background(), plan); err != nil {
+		t.Fatalf("SaveBootstrapPlan: %v", err)
+	}
+
+	report, err := loadRuntimePresets(context.Background(), store)
+	if err != nil {
+		t.Fatalf("loadRuntimePresets: %v", err)
+	}
+	if len(report.Presets) != 1 || report.Presets[0].ID != "gemma-ov" || report.Presets[0].EngineReadiness != domain.EngineReadinessReadyProfile {
+		t.Fatalf("presets = %+v blocked=%+v", report.Presets, report.Blocked)
+	}
+}
+
+func keyedTestProfile(profile domain.EngineProfile, host domain.HostFacts, modelFormat string) domain.EngineProfile {
+	profile.CompatibilityKey = enginecompat.HostProfileKey(host, profile, modelFormat)
+	return profile
+}
+
+func hasRuntimePreset(presets []domain.Preset, id string, status domain.EngineReadinessStatus) bool {
+	for _, preset := range presets {
+		if preset.ID == id && preset.EngineReadiness == status {
+			return true
+		}
+	}
+	return false
+}
+
+func hasApplyEvidence(evidence []engineApplyEvidence, kind, id, status string) bool {
+	for _, item := range evidence {
+		if item.Kind == kind && item.ID == id && item.Status == status {
+			return true
+		}
+	}
+	return false
 }
 
 type fakeBootstrapEngineDetector struct {
@@ -1942,6 +3112,31 @@ func TestRegistryRPCRequiresAuthAndMergesRecords(t *testing.T) {
 	if len(records) != 2 || records[1].JobID != "job-remote" {
 		t.Fatalf("local registry = %+v", records)
 	}
+}
+
+func TestRegistrySnapshotWriteErrorDoesNotPanic(t *testing.T) {
+	ctx := context.Background()
+	store := peerTestRegistry(t)
+	if err := store.Put(ctx, domain.JobRecord{
+		JobID:       "job-local",
+		Coordinator: "peer-a",
+		Status:      domain.JobRunning,
+		Request:     []byte(`{"job":"local"}`),
+		UpdatedAt:   time.Unix(20, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("Put local: %v", err)
+	}
+	mux := http.NewServeMux()
+	mountRegistryHTTP(mux, store, "rpc-secret")
+	req := httptest.NewRequest(http.MethodGet, "/registry/snapshot", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("snapshot write error panicked: %v", recovered)
+		}
+	}()
+
+	mux.ServeHTTP(failingResponseWriter{header: http.Header{}}, req)
 }
 
 func TestRegistryRPCRejectsOversizedJSONBody(t *testing.T) {
@@ -2661,6 +3856,20 @@ func directHTTPClient(handler http.Handler) *http.Client {
 		return rec.Result(), nil
 	})}
 }
+
+type failingResponseWriter struct {
+	header http.Header
+}
+
+func (w failingResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (failingResponseWriter) Write([]byte) (int, error) {
+	return 0, io.ErrClosedPipe
+}
+
+func (failingResponseWriter) WriteHeader(int) {}
 
 type repeatedByteReader struct {
 	b byte
@@ -3690,6 +4899,32 @@ func TestBuildComputeRuntimeSelectsConfiguredBackends(t *testing.T) {
 	}
 }
 
+func TestBuildComputeRuntimeAdvertisesMultipleBackends(t *testing.T) {
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	runtime, err := buildComputeRuntime(context.Background(), PeerConfig{
+		Listen: "127.0.0.1:0",
+		ComputeConfig: defaultedComputeConfig(ComputeConfig{
+			ID:            "peer-a",
+			Name:          "Peer A",
+			BackendListen: "127.0.0.1:0",
+			Backends: []BackendRuntimeConfig{
+				{Backend: domain.BackendVLLM, BackendBinary: "/bin/echo", CustomArgs: []string{"--gpu-memory-utilization", "0.70"}},
+				{Backend: domain.BackendLlamaCpp, LlamaServer: "/bin/echo"},
+			},
+		}),
+	}, store)
+	if err != nil {
+		t.Fatalf("buildComputeRuntime: %v", err)
+	}
+	if runtime.node.Labels[domain.LabelPeerBackends] != "llamacpp,vllm" || runtime.node.Labels[LabelPeerBackend] != "" {
+		t.Fatalf("node labels = %+v", runtime.node.Labels)
+	}
+}
+
 func TestBuildComputeRuntimeWiresParserAndClosedStoreErrors(t *testing.T) {
 	ctx := context.Background()
 	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
@@ -3871,6 +5106,69 @@ func TestComputeBackendAdapterPassesConfiguredArgsToProcessBackends(t *testing.T
 				t.Fatalf("args = %+v want %+v", process.startedArgs, want)
 			}
 		})
+	}
+}
+
+func TestComputeBackendAdapterRoutesByPresetBackend(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	process := newFakeCustomProcess(3234)
+	process.exitOnSignal = true
+	runner := &fakeCustomProcessRunner{next: process}
+	adapter, err := computeBackendAdapterWithProcessRunner(ComputeConfig{
+		Backends: []BackendRuntimeConfig{
+			{Backend: domain.BackendVLLM, BackendBinary: "vllm-bin"},
+			{Backend: domain.BackendMLX, BackendBinary: "mlx-bin"},
+		},
+	}, nodeagent.StoreProcessRegistry{Store: store, NodeID: "peer-a"}, runner)
+	if err != nil {
+		t.Fatalf("computeBackendAdapter: %v", err)
+	}
+	if adapter.Name() != "multi" {
+		t.Fatalf("adapter name = %s", adapter.Name())
+	}
+	preset := testPreset("preset-vllm")
+	preset.Backend = domain.BackendVLLM
+	preset.ModelRef = "model.gguf"
+	preset.LaunchArgs = []string{"--served-model-name", "{preset}"}
+	handle, err := adapter.Launch(ctx, preset, "127.0.0.1:54321")
+	if err != nil {
+		t.Fatalf("Launch vllm: %v", err)
+	}
+	if handle.Kind != string(domain.BackendVLLM) {
+		t.Fatalf("handle = %+v", handle)
+	}
+	want := []string{"serve", "model.gguf", "--host", "127.0.0.1", "--port", "54321", "--served-model-name", "preset-vllm"}
+	if !reflect.DeepEqual(process.startedArgs, want) {
+		t.Fatalf("vllm args = %+v want %+v", process.startedArgs, want)
+	}
+	if err := adapter.Stop(ctx, handle); err != nil {
+		t.Fatalf("Stop vllm: %v", err)
+	}
+
+	process = newFakeCustomProcess(3235)
+	process.exitOnSignal = true
+	runner.next = process
+	preset = testPreset("preset-mlx")
+	preset.Backend = domain.BackendMLX
+	preset.ModelRef = "mlx-model"
+	handle, err = adapter.Launch(ctx, preset, "127.0.0.1:54322")
+	if err != nil {
+		t.Fatalf("Launch mlx: %v", err)
+	}
+	if handle.Kind != string(domain.BackendMLX) {
+		t.Fatalf("handle = %+v", handle)
+	}
+	want = []string{"--model", "mlx-model", "--host", "127.0.0.1", "--port", "54322"}
+	if !reflect.DeepEqual(process.startedArgs, want) {
+		t.Fatalf("mlx args = %+v want %+v", process.startedArgs, want)
+	}
+	if err := adapter.Stop(ctx, handle); err != nil {
+		t.Fatalf("Stop mlx: %v", err)
 	}
 }
 

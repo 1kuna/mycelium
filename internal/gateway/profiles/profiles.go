@@ -60,6 +60,14 @@ func DefaultRegistry() Registry {
 			Backend:        domain.BackendMLX,
 		},
 		Profile{
+			ID:             "openvino",
+			Format:         FormatOpenAI,
+			ChatPath:       "/v1/chat/completions",
+			SupportsChat:   true,
+			SupportsStream: false,
+			Backend:        domain.BackendOpenVINO,
+		},
+		Profile{
 			ID:             "custom",
 			Format:         FormatOpenAI,
 			ChatPath:       "/v1/chat/completions",

@@ -12,6 +12,8 @@ smoke.out
 *.test
 coverage.html
 .DS_Store
+__pycache__/
+artifacts/
 PRIVATE_OPS.md
 *.local.md
 ops/private/

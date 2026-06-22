@@ -103,6 +103,9 @@ func TestOpenAIChatResponseAcceptsResponseRefusalField(t *testing.T) {
 	if got := resp.Choices[0].Message.Content; got != "hello" {
 		t.Fatalf("content = %q", got)
 	}
+	if got := resp.Choices[0].Message.ReasoningContent; got != "hidden chain detail" {
+		t.Fatalf("reasoning_content = %q", got)
+	}
 	if got := strings.Join(resp.Choices[0].Message.UnsupportedResponseFields, ","); got != "reasoning_content" {
 		t.Fatalf("unsupported fields = %q", got)
 	}

@@ -21,6 +21,7 @@ type Agent struct {
 	telemetry   ports.TelemetrySink
 	inspector   ModelInspector
 	allocator   ports.Allocator
+	readiness   ports.EngineReadinessChecker
 	listenAddr  string
 	loadTimeout time.Duration
 	nextID      int
@@ -87,6 +88,12 @@ func WithAllocator(allocator ports.Allocator) Option {
 	}
 }
 
+func WithEngineReadinessChecker(checker ports.EngineReadinessChecker) Option {
+	return func(a *Agent) {
+		a.readiness = checker
+	}
+}
+
 func WithLoadTimeout(timeout time.Duration) Option {
 	return func(a *Agent) {
 		a.loadTimeout = timeout
@@ -148,7 +155,11 @@ func (a *Agent) Load(ctx context.Context, req domain.LoadRequest) (domain.ModelI
 	if inst, ok := a.readyInstance(req.Preset.ID, req.AcceleratorSet); ok {
 		return inst, nil
 	}
-	op, key, owner, err := a.beginLoad(req)
+	check, err := a.checkEngineReadiness(ctx, req.Preset)
+	if err != nil {
+		return domain.ModelInstance{}, err
+	}
+	op, key, owner, err := a.beginLoad(req, check)
 	if err != nil {
 		return domain.ModelInstance{}, err
 	}
@@ -289,7 +300,14 @@ func (a *Agent) readyInstance(presetID string, acc []int) (domain.ModelInstance,
 	return domain.ModelInstance{}, false
 }
 
-func (a *Agent) beginLoad(req domain.LoadRequest) (*loadOp, string, bool, error) {
+func (a *Agent) checkEngineReadiness(ctx context.Context, preset domain.Preset) (domain.EngineReadinessCheck, error) {
+	if a.readiness == nil {
+		return domain.EngineReadinessCheck{}, nil
+	}
+	return a.readiness.CheckEngineReadiness(ctx, a.node, preset)
+}
+
+func (a *Agent) beginLoad(req domain.LoadRequest, check domain.EngineReadinessCheck) (*loadOp, string, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	key := loadKey(req.Preset.ID, req.AcceleratorSet)
@@ -317,6 +335,11 @@ func (a *Agent) beginLoad(req domain.LoadRequest) (*loadOp, string, bool, error)
 		Priority:       req.Priority,
 		State:          domain.InstLoading,
 		Loading:        true,
+	}
+	if check.Status != "" {
+		inst.EngineProfileID = check.ProfileID
+		inst.EngineReadiness = check.Status
+		inst.EngineReadinessReason = check.Reason
 	}
 	existing := a.instanceListLocked()
 	if !a.allocator.CanStackLoad(a.node, req.AcceleratorSet, existing) {

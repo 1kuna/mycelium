@@ -87,6 +87,37 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 			State:    domain.ModelLocalityReady,
 		}},
 	}
+	engineProfile := domain.EngineProfile{
+		ID:               "engine-vllm",
+		Backend:          domain.BackendVLLM,
+		DisplayName:      "vLLM",
+		BinaryPath:       "/opt/vllm",
+		Version:          "vllm 1.0",
+		ArtifactPlatform: "linux/arm64",
+		Ready:            true,
+	}
+	bootstrapPlan := domain.BootstrapPlan{
+		ID:        "bootstrap-plan-a",
+		CreatedAt: time.Unix(6, 0).UTC(),
+		Host: domain.HostFacts{
+			NodeID:   "node-a",
+			OS:       "linux",
+			Arch:     "arm64",
+			Platform: "linux/arm64",
+			DriverFacts: map[string]string{
+				"nvidia.driver": "test",
+			},
+		},
+		RequestedEngines:  []domain.Backend{domain.BackendVLLM},
+		ResultingProfiles: []domain.EngineProfile{engineProfile},
+		Actions: []domain.BootstrapAction{{
+			ID:              "adopt-vllm",
+			Kind:            "adopt_engine",
+			EngineProfileID: engineProfile.ID,
+			Platform:        "linux/arm64",
+		}},
+		Incompatibilities: []domain.BootstrapIncompatibility{{Backend: domain.BackendMLX, Reason: "unsupported platform linux/arm64"}},
+	}
 
 	must(t, store.SaveProject(ctx, project))
 	must(t, store.SavePreset(ctx, preset))
@@ -104,6 +135,8 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	must(t, store.SaveJoinToken(ctx, token))
 	must(t, store.SaveModelLocality(ctx, locality))
 	must(t, store.SaveLocalityPlan(ctx, localityPlan))
+	must(t, store.SaveEngineProfile(ctx, engineProfile))
+	must(t, store.SaveBootstrapPlan(ctx, bootstrapPlan))
 	must(t, store.Close())
 
 	reopened, err := Open(path)
@@ -136,6 +169,12 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	}
 	if gotPlan, err := reopened.LocalityPlan(ctx, localityPlan.ID); err != nil || gotPlan.ID != localityPlan.ID || len(gotPlan.Actions) != 1 {
 		t.Fatalf("LocalityPlan = %+v, %v", gotPlan, err)
+	}
+	if gotProfiles, err := reopened.ListEngineProfiles(ctx); err != nil || len(gotProfiles) != 1 || gotProfiles[0].ID != engineProfile.ID || !gotProfiles[0].Ready {
+		t.Fatalf("EngineProfiles = %+v, %v", gotProfiles, err)
+	}
+	if gotPlan, err := reopened.BootstrapPlan(ctx, bootstrapPlan.ID); err != nil || gotPlan.ID != bootstrapPlan.ID || len(gotPlan.Actions) != 1 || gotPlan.Host.DriverFacts["nvidia.driver"] != "test" {
+		t.Fatalf("BootstrapPlan = %+v, %v", gotPlan, err)
 	}
 
 	if projects, err := reopened.ListProjects(ctx); err != nil || len(projects) != 1 {
@@ -177,8 +216,15 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	if plans, err := reopened.ListLocalityPlans(ctx); err != nil || len(plans) != 1 {
 		t.Fatalf("ListLocalityPlans len = %d, %v", len(plans), err)
 	}
+	if plans, err := reopened.ListBootstrapPlans(ctx); err != nil || len(plans) != 1 || plans[0].ID != bootstrapPlan.ID {
+		t.Fatalf("ListBootstrapPlans = %+v, %v", plans, err)
+	}
 
 	must(t, reopened.MarkRecommendationApplied(ctx, rec.ID, time.Unix(3, 0).UTC()))
+	must(t, reopened.MarkEngineProfileUnready(ctx, engineProfile.ID, "verification failed"))
+	if gotProfiles, err := reopened.ListEngineProfiles(ctx); err != nil || len(gotProfiles) != 1 || gotProfiles[0].Ready || gotProfiles[0].UnreadyReason != "verification failed" {
+		t.Fatalf("EngineProfiles after unready = %+v, %v", gotProfiles, err)
+	}
 	recs, err := reopened.ListRecommendations(ctx, "")
 	if err != nil || !recs[0].Applied || recs[0].AppliedAt.IsZero() {
 		t.Fatalf("applied recs = %+v, %v", recs, err)
@@ -228,6 +274,8 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 		"join token":     store.SaveJoinToken(ctx, domain.JoinTokenRecord{}),
 		"locality":       store.SaveModelLocality(ctx, domain.ModelLocality{}),
 		"locality plan":  store.SaveLocalityPlan(ctx, domain.LocalityPlan{}),
+		"engine profile": store.SaveEngineProfile(ctx, domain.EngineProfile{}),
+		"bootstrap plan": store.SaveBootstrapPlan(ctx, domain.BootstrapPlan{}),
 	} {
 		if err == nil {
 			t.Fatalf("%s save expected id error", name)
@@ -244,6 +292,18 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	}
 	if err := store.SaveLocalityPlan(ctx, domain.LocalityPlan{ID: "plan"}); err == nil {
 		t.Fatal("SaveLocalityPlan should require created_at")
+	}
+	if err := store.SaveEngineProfile(ctx, domain.EngineProfile{ID: "engine"}); err == nil {
+		t.Fatal("SaveEngineProfile should require backend")
+	}
+	if err := store.SaveBootstrapPlan(ctx, domain.BootstrapPlan{ID: "plan"}); err == nil {
+		t.Fatal("SaveBootstrapPlan should require created_at")
+	}
+	if err := store.MarkEngineProfileUnready(ctx, "", "reason"); err == nil {
+		t.Fatal("MarkEngineProfileUnready should require id")
+	}
+	if err := store.MarkEngineProfileUnready(ctx, "engine", ""); err == nil {
+		t.Fatal("MarkEngineProfileUnready should require reason")
 	}
 	if _, err := store.Project(ctx, "missing"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("missing project err = %v", err)

@@ -5,6 +5,7 @@ import "time"
 const (
 	DefaultDiskMinFreeRatio = 0.25
 	LabelPeerBackend        = "mycelium.peer.backend"
+	LabelPeerBackends       = "mycelium.peer.backends"
 )
 
 type Accelerator struct {
@@ -23,6 +24,7 @@ type Node struct {
 	Name             string            `json:"name"`
 	Address          string            `json:"address"`
 	OS               string            `json:"os"`
+	Arch             string            `json:"arch,omitempty"`
 	Labels           map[string]string `json:"labels,omitempty"`
 	MaxUtil          float64           `json:"max_util"`
 	DiskTotalMB      int               `json:"disk_total_mb,omitempty"`
@@ -43,20 +45,26 @@ type SpeedClass struct {
 }
 
 type Preset struct {
-	ID              string       `json:"id"`
-	ModelRef        string       `json:"model_ref"`
-	Aliases         []string     `json:"aliases,omitempty"`
-	Backend         Backend      `json:"backend"`
-	ContextLength   int          `json:"context_length"`
-	Quant           string       `json:"quant"`
-	Capabilities    []Capability `json:"capabilities"`
-	ProviderProfile string       `json:"provider_profile,omitempty"`
-	LaunchProfile   string       `json:"launch_profile"`
-	LaunchArgs      []string     `json:"launch_args,omitempty"`
-	ArtifactSizeMB  int          `json:"artifact_size_mb,omitempty"`
-	EstWeightsMB    int          `json:"est_weights_mb"`
-	KVPerTokenMB    float64      `json:"kv_per_token_mb"`
-	NodeID          string       `json:"node_id,omitempty"`
+	ID                    string                `json:"id"`
+	ModelRef              string                `json:"model_ref"`
+	Aliases               []string              `json:"aliases,omitempty"`
+	Backend               Backend               `json:"backend"`
+	ContextLength         int                   `json:"context_length"`
+	Quant                 string                `json:"quant"`
+	Capabilities          []Capability          `json:"capabilities"`
+	ProviderProfile       string                `json:"provider_profile,omitempty"`
+	LaunchProfile         string                `json:"launch_profile"`
+	LaunchArgs            []string              `json:"launch_args,omitempty"`
+	ArtifactSizeMB        int                   `json:"artifact_size_mb,omitempty"`
+	ModelFormat           string                `json:"model_format,omitempty"`
+	EstWeightsMB          int                   `json:"est_weights_mb"`
+	KVPerTokenMB          float64               `json:"kv_per_token_mb"`
+	NodeID                string                `json:"node_id,omitempty"`
+	GeneratedBy           string                `json:"generated_by,omitempty"`
+	GeneratedFrom         string                `json:"generated_from,omitempty"`
+	EngineProfileID       string                `json:"engine_profile_id,omitempty"`
+	EngineReadiness       EngineReadinessStatus `json:"engine_readiness,omitempty"`
+	EngineReadinessReason string                `json:"engine_readiness_reason,omitempty"`
 }
 
 type ModelMetadata struct {
@@ -99,18 +107,21 @@ type LoadRequest struct {
 }
 
 type ModelInstance struct {
-	ID             string        `json:"id"`
-	PresetID       string        `json:"preset_id"`
-	NodeID         string        `json:"node_id"`
-	AcceleratorSet []int         `json:"accelerator_set"`
-	Claim          Claim         `json:"claim"`
-	ReservationID  string        `json:"reservation_id,omitempty"`
-	Pinned         bool          `json:"pinned,omitempty"`
-	State          InstanceState `json:"state"`
-	Addr           string        `json:"addr"`
-	InFlight       int           `json:"in_flight"`
-	Priority       Priority      `json:"priority"`
-	Loading        bool          `json:"loading"`
+	ID                    string                `json:"id"`
+	PresetID              string                `json:"preset_id"`
+	NodeID                string                `json:"node_id"`
+	AcceleratorSet        []int                 `json:"accelerator_set"`
+	Claim                 Claim                 `json:"claim"`
+	ReservationID         string                `json:"reservation_id,omitempty"`
+	Pinned                bool                  `json:"pinned,omitempty"`
+	State                 InstanceState         `json:"state"`
+	Addr                  string                `json:"addr"`
+	InFlight              int                   `json:"in_flight"`
+	Priority              Priority              `json:"priority"`
+	Loading               bool                  `json:"loading"`
+	EngineProfileID       string                `json:"engine_profile_id,omitempty"`
+	EngineReadiness       EngineReadinessStatus `json:"engine_readiness,omitempty"`
+	EngineReadinessReason string                `json:"engine_readiness_reason,omitempty"`
 }
 
 type Job struct {
@@ -435,6 +446,7 @@ type EngineProfile struct {
 	Backend            Backend           `json:"backend"`
 	DisplayName        string            `json:"display_name"`
 	ManagedBy          string            `json:"managed_by"`
+	CompatibilityKey   CompatibilityKey  `json:"compatibility_key,omitempty"`
 	BinaryPath         string            `json:"binary_path"`
 	Args               []string          `json:"args,omitempty"`
 	HealthPath         string            `json:"health_path,omitempty"`
@@ -451,7 +463,123 @@ type EngineProfile struct {
 	UnreadyReason      string            `json:"unready_reason,omitempty"`
 }
 
+type EngineReadinessCheck struct {
+	Backend   Backend               `json:"backend"`
+	ProfileID string                `json:"profile_id,omitempty"`
+	Status    EngineReadinessStatus `json:"status"`
+	Ready     bool                  `json:"ready"`
+	Reason    string                `json:"reason,omitempty"`
+}
+
+type EngineDetection = EngineProfile
+
+type CompatibilityKey struct {
+	OS                 string  `json:"os,omitempty"`
+	CPUArch            string  `json:"cpu_arch,omitempty"`
+	AcceleratorVendor  string  `json:"accelerator_vendor,omitempty"`
+	AcceleratorRuntime string  `json:"accelerator_runtime,omitempty"`
+	DriverVersion      string  `json:"driver_version,omitempty"`
+	EngineDistribution string  `json:"engine_distribution,omitempty"`
+	EngineVersion      string  `json:"engine_version,omitempty"`
+	Backend            Backend `json:"backend,omitempty"`
+	ModelFormat        string  `json:"model_format,omitempty"`
+}
+
+type EngineSource string
+
+const (
+	EngineSourceSystem  EngineSource = "system"
+	EngineSourceManaged EngineSource = "mycelium"
+	EngineSourceCustom  EngineSource = "custom"
+)
+
 type EngineSafety struct {
 	OOMSeverity        OOMSeverity `json:"oom_severity,omitempty"`
 	VLLMGPUUtilization float64     `json:"vllm_gpu_utilization,omitempty"`
+}
+
+type BootstrapRequest struct {
+	ID               string                    `json:"id,omitempty"`
+	ConfigPath       string                    `json:"config_path,omitempty"`
+	RequestedEngines []Backend                 `json:"requested_engines,omitempty"`
+	Apply            bool                      `json:"apply"`
+	AllowCPUFallback bool                      `json:"allow_cpu_fallback,omitempty"`
+	ModelCandidates  []BootstrapModelCandidate `json:"model_candidates,omitempty"`
+}
+
+type BootstrapPlan struct {
+	ID                string                     `json:"id"`
+	CreatedAt         time.Time                  `json:"created_at"`
+	Host              HostFacts                  `json:"host"`
+	RequestedEngines  []Backend                  `json:"requested_engines,omitempty"`
+	Actions           []BootstrapAction          `json:"actions,omitempty"`
+	ResultingProfiles []EngineProfile            `json:"resulting_profiles,omitempty"`
+	Incompatibilities []BootstrapIncompatibility `json:"incompatibilities,omitempty"`
+	ModelCandidates   []BootstrapModelCandidate  `json:"model_candidates,omitempty"`
+	Warnings          []string                   `json:"warnings,omitempty"`
+}
+
+type BootstrapAction struct {
+	ID                string   `json:"id"`
+	Kind              string   `json:"kind"`
+	EngineProfileID   string   `json:"engine_profile_id,omitempty"`
+	CommandPreview    []string `json:"command_preview,omitempty"`
+	RequiresPrivilege bool     `json:"requires_privilege,omitempty"`
+	EstimatedBytes    int64    `json:"estimated_bytes,omitempty"`
+	SourceURL         string   `json:"source_url,omitempty"`
+	Checksum          string   `json:"checksum,omitempty"`
+	Platform          string   `json:"platform,omitempty"`
+	Reason            string   `json:"reason,omitempty"`
+}
+
+type BootstrapIncompatibility struct {
+	Backend Backend `json:"backend,omitempty"`
+	Model   string  `json:"model,omitempty"`
+	Reason  string  `json:"reason"`
+}
+
+type BootstrapModelCandidate struct {
+	HostID        string                          `json:"host_id,omitempty"`
+	Name          string                          `json:"name"`
+	Path          string                          `json:"path"`
+	Format        string                          `json:"format"`
+	SizeMB        int                             `json:"size_mb,omitempty"`
+	ContextLength int                             `json:"context_length,omitempty"`
+	Capabilities  []Capability                    `json:"capabilities,omitempty"`
+	Metadata      map[string]string               `json:"metadata,omitempty"`
+	Backends      []BootstrapBackendCompatibility `json:"backends,omitempty"`
+	Reason        string                          `json:"reason,omitempty"`
+}
+
+type BootstrapBackendCompatibility struct {
+	Backend          Backend          `json:"backend"`
+	Ready            bool             `json:"ready"`
+	Reason           string           `json:"reason,omitempty"`
+	EngineProfileID  string           `json:"engine_profile_id,omitempty"`
+	CompatibilityKey CompatibilityKey `json:"compatibility_key,omitempty"`
+}
+
+type BootstrapEvent struct {
+	PlanID          string    `json:"plan_id"`
+	ActionID        string    `json:"action_id,omitempty"`
+	EngineProfileID string    `json:"engine_profile_id,omitempty"`
+	Phase           string    `json:"phase"`
+	Message         string    `json:"message,omitempty"`
+	At              time.Time `json:"at"`
+}
+
+type BootstrapResult struct {
+	PlanID          string           `json:"plan_id"`
+	ReadyProfiles   []EngineProfile  `json:"ready_profiles,omitempty"`
+	UnreadyProfiles []EngineProfile  `json:"unready_profiles,omitempty"`
+	ConfigChanged   bool             `json:"config_changed"`
+	Events          []BootstrapEvent `json:"events,omitempty"`
+}
+
+type EngineVerification struct {
+	ProfileID string    `json:"profile_id"`
+	Ready     bool      `json:"ready"`
+	Reason    string    `json:"reason,omitempty"`
+	Version   string    `json:"version,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
 }

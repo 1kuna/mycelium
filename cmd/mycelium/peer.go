@@ -93,7 +93,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	backendListen := fs.String("backend-listen", "", "local backend inference server listen address")
 	id := fs.String("id", "", "local compute peer id")
 	name := fs.String("name", "", "local compute peer name")
-	backend := fs.String("backend", "", "local backend engine (llamacpp, mlx, vllm)")
+	backend := fs.String("backend", "", "local backend engine (llamacpp, mlx, vllm, openvino, custom)")
 	backendBinary := fs.String("backend-binary", "", "local backend server binary override")
 	llamaServer := fs.String("llama-server", "", "llama.cpp server binary")
 	ggufParser := fs.String("gguf-parser", "", "local GGUF parser binary")
@@ -232,11 +232,13 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		mountAdminHTTP(mux, &cfg, resolvedConfigPath, joinTokens, store, cfg.RPCToken)
 	}
 	agents := map[string]ports.NodeAgent{}
+	var localRuntime *computeRuntime
 	if cfg.Compute {
 		local, err := buildComputeRuntime(ctx, cfg, store)
 		if err != nil {
 			return "", nil, nil, err
 		}
+		localRuntime = &local
 		if err := store.SaveNode(ctx, local.node); err != nil {
 			return "", nil, nil, err
 		}
@@ -263,10 +265,17 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	if fleet == nil || nodes == nil {
 		return "", nil, nil, fmt.Errorf("peer config must enable compute or provide join_token")
 	}
-	presets, err := store.ListPresets(ctx)
+	var presetReport runtimePresetLoadReport
+	if localRuntime != nil {
+		presetReport, err = loadRuntimePresets(ctx, store, localRuntime.node)
+	} else {
+		presetReport, err = loadRuntimePresets(ctx, store)
+	}
 	if err != nil {
 		return "", nil, nil, err
 	}
+	logRuntimePresetLoadReport(presetReport)
+	presets := presetReport.Presets
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
 		return "", nil, nil, err
@@ -963,7 +972,7 @@ func mountRegistryHTTP(mux *http.ServeMux, registry ports.JobRegistry, rpcToken 
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(records); err != nil {
-			panic(err)
+			log.Printf("mycelium registry snapshot write failed: %v", err)
 		}
 	})
 	mux.HandleFunc("/registry/records", func(w http.ResponseWriter, r *http.Request) {

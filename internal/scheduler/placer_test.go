@@ -296,6 +296,33 @@ func TestPlaceFiltersBackendLabelMismatch(t *testing.T) {
 	}
 }
 
+func TestPlaceAcceptsNodeWithMultipleBackendRuntimes(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.Backend = domain.BackendLlamaCpp
+	})
+	multi := fixtures.MakeNode(fixtures.WithNodeID("multi"), fixtures.WithVRAM(100000), func(n *domain.Node) {
+		n.Labels = map[string]string{domain.LabelPeerBackends: "llamacpp,vllm"}
+		n.SpeedClass.TokensPerSecRef = 1000
+	})
+	vllmOnly := fixtures.MakeNode(fixtures.WithNodeID("vllm-only"), fixtures.WithVRAM(100000), func(n *domain.Node) {
+		n.Labels = map[string]string{domain.LabelPeerBackends: "vllm"}
+		n.SpeedClass.TokensPerSecRef = 100
+	})
+	placer := NewPlacer(estimate.NewBackendAware(estimate.NewInMemory(), estimate.NewInMemory()), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(), domain.FleetSnapshot{Nodes: []domain.Node{vllmOnly, multi}})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.NodeID != "multi" {
+		t.Fatalf("decision = %+v", decision)
+	}
+	dropped := traceStep(decision.Trace, "filter").Data["dropped"].(map[string]string)
+	if dropped["vllm-only"] != "label."+domain.LabelPeerBackends {
+		t.Fatalf("dropped = %+v", dropped)
+	}
+}
+
 func TestPlaceSkipsWarmInstanceWhenNodeIsAtDiskFloor(t *testing.T) {
 	preset := fixtures.MakePreset(fixtures.WithWeights(10), fixtures.WithArtifactSize(100))
 	fullNode := fixtures.MakeNode(fixtures.WithDisk(1000, 250))

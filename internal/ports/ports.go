@@ -181,3 +181,31 @@ type HostDetector interface {
 type EngineDetector interface {
 	DetectEngines(ctx context.Context, host domain.HostFacts) ([]domain.EngineProfile, error)
 }
+
+type BootstrapPlanner interface {
+	PlanBootstrap(ctx context.Context, req domain.BootstrapRequest, host domain.HostFacts, detections []domain.EngineProfile) (domain.BootstrapPlan, error)
+}
+
+type EngineInstaller interface {
+	ApplyBootstrapPlan(ctx context.Context, plan domain.BootstrapPlan, progress func(domain.BootstrapEvent)) (domain.BootstrapResult, error)
+}
+
+type EngineVerifier interface {
+	VerifyEngine(ctx context.Context, profile domain.EngineProfile) (domain.EngineVerification, error)
+}
+
+type EngineRegistry interface {
+	SaveEngineProfile(ctx context.Context, profile domain.EngineProfile) error
+	ListEngineProfiles(ctx context.Context) ([]domain.EngineProfile, error)
+	MarkEngineProfileUnready(ctx context.Context, profileID, reason string) error
+}
+
+type EngineReadinessChecker interface {
+	CheckEngineReadiness(ctx context.Context, node domain.Node, preset domain.Preset) (domain.EngineReadinessCheck, error)
+}
+
+type BootstrapPlanStore interface {
+	SaveBootstrapPlan(ctx context.Context, plan domain.BootstrapPlan) error
+	BootstrapPlan(ctx context.Context, id string) (domain.BootstrapPlan, error)
+	ListBootstrapPlans(ctx context.Context) ([]domain.BootstrapPlan, error)
+}

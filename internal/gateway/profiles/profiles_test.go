@@ -24,6 +24,13 @@ func TestDefaultRegistryResolvesOpenAICompatibleBackends(t *testing.T) {
 			t.Fatalf("profile = %+v", profile)
 		}
 	}
+	openvino, err := DefaultRegistry().ForBackend(domain.BackendOpenVINO)
+	if err != nil {
+		t.Fatalf("ForBackend(openvino): %v", err)
+	}
+	if openvino.Format != FormatOpenAI || openvino.ChatPath != "/v1/chat/completions" || openvino.CompletionPath != "" || openvino.SupportsStream {
+		t.Fatalf("openvino profile = %+v", openvino)
+	}
 	profile, err := DefaultRegistry().ForBackend(domain.BackendLlamaCpp)
 	if err != nil {
 		t.Fatalf("ForBackend: %v", err)
