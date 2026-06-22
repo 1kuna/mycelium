@@ -1,114 +1,191 @@
-# Mycelium Handoff
+# Mycelium Owner-Thread Handoff
 
 Last updated: 2026-06-22
-Repo: `/Users/zach/Developer/mycelium`
-Branch: `main`
-Remote: `origin https://github.com/1kuna/mycelium.git`
 
-## Current State
+This file supersedes the previous root `HANDOFF.md`. Treat that prior version as
+a partial coordinator draft, not as authority. This handoff is intentionally
+scoped to continuity and next steps; it does not claim new validation from this
+handoff rewrite.
 
-Mycelium is the local inference fleet conductor: peers advertise capacity, the
-coordinator schedules work, owners launch backend instances, and the gateway
-exposes OpenAI-compatible routes to downstream projects such as Atlas.
+## Current Repo State
 
-The current local tree is a checkpoint of several follow-on slices after the
-docs 01-03 SSOT audit:
+- Branch: `main`.
+- Latest observed commit before this rewrite: `f382bd2 Clarify Mycelium handoff resume state`.
+- Remote already configured: `origin https://github.com/1kuna/mycelium.git`.
+- Source-of-truth docs remain `01-project-spec.md`, `02-testing-architecture.md`,
+  and `03-development-guide.md`.
+- `04-engine-bootstrap.md` is a future/extension spec. It should guide future
+  bootstrap work, but it is not part of the current MVP proof gate unless Zach
+  explicitly promotes it.
+- GitHub Actions were intentionally disabled remotely because there are no
+  runner credits. Use local `make ci`.
 
-- SSOT audit findings were written to `CODEX-FINDINGS.md` and then a bug-fix
-  pass addressed the high-signal drift around queue draining, peer snapshot
-  degradation, gateway failover, context overflow replanning, runtime metadata,
-  and recovery continuation.
-- Atlas/qwen serving diagnostics found that qwen3.5-9b on B70/vLLM could leak
-  unfinished reasoning into OpenAI `message.content` when generation
-  length-finished before the model emitted its reasoning boundary. The gateway
-  now preserves first-class `reasoning` / `reasoning_content` fields and
-  normalizes that Qwen length-finish boundary without disabling thinking.
-- Engine/bootstrap work was expanded from static profiles into read-only host
-  discovery, saved engine readiness facts, readiness-aware preset loading,
-  model compatibility advice, and advisory install plans.
-- The engine capability catalog now covers llama.cpp, vLLM, SGLang, MLX,
-  OpenVINO, and custom profiles. It distinguishes `can_run_now`,
-  `can_run_after_engine_setup`, `needs_artifact_format`, `not_supported`,
-  blocked, incomplete compatibility keys, and legacy-unverified rows.
-- `engines install-plan` is advisory-only. It emits approval/manual/dry-run
-  actions, risks, and rollback notes. Runtime update checks and automatic
-  rollback-aware upgrades are deliberately deferred in `04-engine-bootstrap.md`.
+## Product Shape To Preserve
 
-Local diagnostic artifacts under `artifacts/` are not intended for git history.
-They include B70/Atlas serving evidence and a copied Linux binary from the live
-reasoning-boundary deployment. The durable state for transfer is this source
-tree, `HANDOFF.md`, `CODEX-FINDINGS.md`, `DECISIONS.md`, and the tests.
+Mycelium is peer-native and LAN-local:
 
-## Important Invariants
+- `mycelium` is one peer daemon. There is no permanent server/node split.
+- Any peer may coordinate a request.
+- The selected resource owner commits leases and capacity locally.
+- Registry replication is for visibility and rescue, not global authority.
+- There is no fleet leader, consensus event log, SSH product transport, public
+  WAN requirement, or model sharding across machines.
+- Runtime placement must go through scheduler/coordinator plus owner admission.
+  Do not reintroduce direct coordinator mutation of remote state.
 
-- Do not disable model thinking to hide leaked reasoning. Preserve reasoning at
-  the provider/diagnostic boundary and expose only final answer content to
-  downstream parsers.
-- Treat direct vLLM output as lower-level evidence than Mycelium gateway output.
-  Direct vLLM can still expose unfinished thinking in `content`; the Mycelium
-  boundary owns the normalized downstream contract.
-- Runtime installs, engine setup, downloads, service restarts, and upgrade checks
-  require explicit operator approval. The current install-plan path is
-  non-mutating.
-- Saved engine readiness facts may authorize or block startup preflight. Missing
-  old manual facts stay visible as `legacy_config_unverified`, not silently
-  trusted as fully ready generated profiles.
-- Before making claims about a live B70/Spark route, verify the exact preset,
-  model id, owner instance, backend process, and gateway response shape.
+## What Is Already Implemented
 
-## Most Recent Live Atlas/Qwen Evidence
+The repo has gone through several substantial implementation passes. The
+important continuity points are:
 
-The last live reasoning-boundary slice used B70 with qwen3.5-9b through vLLM
-and Mycelium. The useful artifact root is local and ignored:
+- Durable runtime/control-plane storage exists for peer state, catalog/runtime
+  metadata, jobs, leases/admission, telemetry, recommendations, and registry
+  data.
+- Owner admission and scheduler placement are the intended runtime authority:
+  placement proposes, owner admission commits or rejects with fences, and live
+  requests release through the owner path.
+- Resource fit work includes multi-accelerator/unit-aware claims, context/KV
+  accounting, reservations/pinned protection, disk-headroom placement filtering,
+  max-util limits, and backend-aware estimation paths.
+- Runtime hardening after the SSOT audits includes dynamic backend launch ports,
+  process identity/reaping, gateway retries and queue draining fixes, degraded
+  peer failures during recovery, runtime catalog metadata persistence, gateway
+  token discovery, and operator diagnostic commands.
+- Real fleet benchmarking machinery exists. It emits artifacts such as
+  `report.html`, `manifest.json`, `events.jsonl`, `results.json`,
+  `snapshots.jsonl`, `failures.json`, and per-job outputs. Historical live runs
+  included MacBook/Mac mini/B70/Spark scenarios, but do not assume those exact
+  services are still up without checking.
+- Session telemetry was added on 2026-06-04. `session_metrics` records phase
+  time-series samples alongside `run_metrics`; owner peers are authoritative for
+  run/session telemetry, and remote-owner telemetry goes over authenticated
+  telemetry RPC.
+- The CLI exposes telemetry inspection via `myce telemetry samples`.
+- Current MVP behavior intentionally rejects or disables some future-ish paths:
+  sticky/private/overlay runtime choices were disabled in the bug-debt pass,
+  `X-Myc-Handling: private` is rejected rather than accepted unsafely, and
+  submitter policy is not wired until an authenticated caller policy exists.
+- Engine bootstrap/adoption is partly implemented as host-local readiness and
+  doctor tooling rather than full automatic engine installation. Current pieces
+  include `bootstrap --doctor --save-plan`, `mycelium engines list|doctor|
+  preflight|apply`, saved exact engine readiness facts, readiness-aware preset
+  loading/preflight, `mycelium models compat`, `mycelium engines install-plan`,
+  OpenVINO profile/wrapper support, and multi-backend host support. Install
+  planning remains advisory unless explicitly applied.
 
-```text
-artifacts/atlas-serving-diagnostics/20260616-141132-qwen9b-reasoning-boundary/
+## Validation Status
+
+Do not report this handoff rewrite as a validation pass.
+
+Known from repo evidence:
+
+- `CODEX-FINDINGS.md` records a 2026-06-09 SSOT audit/triage and the fix pass
+  status. Its P1/P2 runtime findings F-01 through F-07, F-12, F-14, and F-16
+  were marked fixed there. F-08, F-09, and F-11 remain smoke proof gaps; F-13 is
+  conformance expansion; F-15 is a spec-ratification/product-decision item.
+- `BLOCKERS.md` has one active blocker from 2026-06-04: real-engine and real
+  multi-peer smoke for the obvious-bug remediation pass could not be re-proven
+  in that pass because smoke environment variables were unset. It says fast CI
+  and env-independent smoke passed from that tree, but this handoff did not
+  re-run them.
+
+This handoff pass only performed read-only inspection plus this document edit.
+It did not run `make ci`, broad tests, real smoke, or any push.
+
+## Active Blockers And Cautions
+
+- Real smoke state is drift-prone. Mac mini, B70, and Spark availability must be
+  verified live before claiming fleet health.
+- `ops/private/` contains local smoke notes/bundles. Treat them as private
+  operational evidence; do not publish secrets, tokens, host-specific paths, or
+  model artifacts.
+- Spark memory must remain capped below the danger zone. Historical safe vLLM
+  guidance used conservative caps such as `--gpu-memory-utilization 0.70`; docs
+  require rejecting unsafe Spark configs at or above the 0.90 region.
+- Disk headroom is product-important and implemented, but `CODEX-FINDINGS.md`
+  still records it as SSOT drift unless the core docs have since been ratified.
+- Full automatic cross-OS/architecture engine installation is not done. The
+  current implementation is readiness discovery, doctor, compatibility, and
+  explicit apply/adoption. `04-engine-bootstrap.md` is the spec outline for the
+  future full bootstrap layer.
+- Do not silently disable model reasoning/thinking to hide leaks or parser
+  issues. Fix the provider payload, response boundary, or gateway translation
+  path instead.
+
+## Exact Resume Steps
+
+Start every new continuation with:
+
+```bash
+git status --short
+git log --oneline -8
+sed -n '1,220p' HANDOFF.md
+sed -n '1,220p' DECISIONS.md
+sed -n '1,220p' BLOCKERS.md
+sed -n '1,260p' CODEX-FINDINGS.md
 ```
 
-Key result:
+Then choose the lane:
 
-- `reasoning_content` / equivalent is preserved separately when vLLM produces
-  it.
-- Qwen length-finished reasoning-only responses are normalized so final
-  `content` is empty instead of polluted with unfinished thinking.
-- Tiny text, one-image, and two-image canaries were run after the patched binary
-  was deployed to B70.
-- The next Atlas step was to retry Atlas overlay/source extraction through the
-  Mycelium gateway, not to change Mycelium routing again unless new raw evidence
-  shows a boundary regression.
+1. For ordinary code continuation, re-read the relevant SSOT section and the
+   local code path, then run the smallest focused tests before `make ci`.
+2. For current MVP proof, run local gates first:
 
-## Current Open Work
+   ```bash
+   make ci
+   ```
 
-This checkpoint has been committed and pushed to `origin/main`. The remaining
-work is product/runtime continuation, not repo preservation.
+3. For live fleet proof, first verify peer health and configured tokens, then
+   run phase-boundary smoke only with the required env/config:
 
-1. If resuming Mycelium implementation, run the smallest focused tests first:
-   gateway reasoning-boundary tests, model compatibility tests, engine catalog
-   tests, install-plan tests, and bootstrap/readiness tests.
-2. Before any live-serving claim, capture fresh owner/gateway facts from the
-   live route. Warm-instance state is time-sensitive.
-3. Before implementing engine apply, design the approval/apply/rollback boundary
-   from `04-engine-bootstrap.md` Future Phase G. Do not turn advisory plans into
-   mutation by shortcut.
-4. Runtime update checks and automatic upgrades belong to the later update phase,
-   not the current install-plan checkpoint.
+   ```bash
+   make smoke-local
+   make smoke-fleet
+   make smoke-benchmark-fleet
+   ```
 
-## Known Blockers Or Cautions
+   Add `make smoke-spark-vllm` and `make smoke-b70` only when those machines and
+   model paths are intentionally available.
 
-- The live artifacts are intentionally local and ignored; a new system will not
-  have the raw B70 diagnostic bodies unless they are copied separately.
-- Some audit files besides `CODEX-FINDINGS.md` (`FINDINGS.md`,
-  `FABLE-FINDINGS.md`) are broad/older audit evidence. Use `CODEX-FINDINGS.md`
-  plus current code as the primary audit handoff unless Zach asks to preserve the
-  other audit variants.
-- Live B70/Spark checks may be stale after machine restarts or model unloads.
-  Verify, do not infer from this document.
+4. For the Atlas/Qwen serving lane, do a tiny gateway canary first. Inspect the
+   selected owner, preset, backend process, response `content`, and any
+   `reasoning`/`reasoning_content` fields before running larger evals.
+5. For engine bootstrap work, stay within the current readiness/adoption line
+   unless Zach explicitly asks for install implementation. Useful commands:
 
-## Suggested Resume Prompt
+   ```bash
+   mycelium bootstrap --doctor --config ~/.mycelium/peer.json
+   mycelium engines list
+   mycelium engines doctor
+   mycelium engines preflight
+   mycelium models compat
+   mycelium engines install-plan
+   ```
 
-Read `HANDOFF.md`, `DECISIONS.md`, `CODEX-FINDINGS.md`, and
-`04-engine-bootstrap.md`. Then inspect `git status` and the latest pushed commit.
-If the task is Atlas integration, verify the current B70 qwen3.5-9b route through
-Mycelium with a tiny text canary before running any expensive Atlas page eval.
-If the task is engine bootstrap, keep the path advisory/read-only until an
-explicit apply/rollback design is approved.
+6. For long-window optimizer/autoscaling work, use the existing
+   `session_metrics` and `run_metrics` facts first. Add statistical analysis and
+   recommendations from observed series before attempting any automatic
+   saturation behavior.
+
+## Files Worth Checking First
+
+- `01-project-spec.md`, `02-testing-architecture.md`, `03-development-guide.md`
+- `04-engine-bootstrap.md`
+- `DECISIONS.md`
+- `BLOCKERS.md`
+- `CODEX-FINDINGS.md`
+- `README.md`
+- `cmd/mycelium/`
+- `cmd/internal/controlcli/`
+- `internal/gateway/`
+- `internal/node/`
+- `internal/peer/`
+- `internal/scheduler/`
+- `internal/store/sqlite/`
+- `internal/telemetry/`
+- `internal/bench/`
+
+## Commit Guidance
+
+Keep commits logical and local until the tree is proven. For this handoff task,
+commit only `HANDOFF.md` and do not push.
