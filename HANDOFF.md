@@ -79,17 +79,18 @@ Key result:
 
 ## Current Open Work
 
-1. Commit and push this checkpoint so the 12 local commits plus current working
-   tree survive transfer.
-2. If resuming Mycelium implementation, run the smallest focused tests first:
+This checkpoint has been committed and pushed to `origin/main`. The remaining
+work is product/runtime continuation, not repo preservation.
+
+1. If resuming Mycelium implementation, run the smallest focused tests first:
    gateway reasoning-boundary tests, model compatibility tests, engine catalog
    tests, install-plan tests, and bootstrap/readiness tests.
-3. Before any live-serving claim, capture fresh owner/gateway facts from the
+2. Before any live-serving claim, capture fresh owner/gateway facts from the
    live route. Warm-instance state is time-sensitive.
-4. Before implementing engine apply, design the approval/apply/rollback boundary
+3. Before implementing engine apply, design the approval/apply/rollback boundary
    from `04-engine-bootstrap.md` Future Phase G. Do not turn advisory plans into
    mutation by shortcut.
-5. Runtime update checks and automatic upgrades belong to the later update phase,
+4. Runtime update checks and automatic upgrades belong to the later update phase,
    not the current install-plan checkpoint.
 
 ## Known Blockers Or Cautions
