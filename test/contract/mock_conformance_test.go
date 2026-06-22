@@ -72,3 +72,26 @@ func TestMockHardwareDetectorConformance(t *testing.T) {
 		func() ports.HardwareDetector { return &mocks.HardwareDetector{} },
 		fixtures.MakeNode())
 }
+
+func TestMockBootstrapConformance(t *testing.T) {
+	host := domain.HostFacts{NodeID: "node-a", OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}}
+	profile := domain.EngineProfile{ID: "engine-vllm", Backend: domain.BackendVLLM, Ready: true}
+	plan := domain.BootstrapPlan{ID: "plan-a", Host: host, ResultingProfiles: []domain.EngineProfile{profile}}
+	RunBootstrapPlannerConformance(t, "mock",
+		func() ports.BootstrapPlanner { return &mocks.BootstrapPlanner{Plan: plan} },
+		host,
+		profile)
+	RunEngineInstallerConformance(t, "mock",
+		func() ports.EngineInstaller {
+			return &mocks.EngineInstaller{Result: domain.BootstrapResult{PlanID: plan.ID}}
+		},
+		plan)
+	RunEngineVerifierConformance(t, "mock",
+		func() ports.EngineVerifier {
+			return &mocks.EngineVerifier{Verification: domain.EngineVerification{ProfileID: profile.ID, Ready: true}}
+		},
+		profile)
+	RunEngineRegistryConformance(t, "mock",
+		func() ports.EngineRegistry { return &mocks.EngineRegistry{} },
+		profile)
+}

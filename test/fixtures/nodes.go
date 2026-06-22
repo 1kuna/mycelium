@@ -13,6 +13,7 @@ func MakeNode(opts ...func(*domain.Node)) domain.Node {
 		Name:             "test-node",
 		Address:          "127.0.0.1:50000",
 		OS:               "linux",
+		Arch:             "amd64",
 		Labels:           map[string]string{"gpu.vendor": "nvidia"},
 		MaxUtil:          0.90,
 		DiskTotalMB:      1_000_000,

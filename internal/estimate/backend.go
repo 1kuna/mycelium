@@ -32,7 +32,7 @@ func (e *BackendAware) Estimate(ctx context.Context, p domain.Preset, contextLen
 		return domain.Claim{}, fmt.Errorf("llamacpp preset %q requires GGUF preflight estimator", p.ID)
 	case domain.BackendVLLM:
 		return domain.Claim{}, fmt.Errorf("vllm preset %q requires unit-aware reservation estimation", p.ID)
-	case domain.BackendMLX, domain.BackendCustom:
+	case domain.BackendMLX, domain.BackendOpenVINO, domain.BackendCustom:
 		return e.Explicit.Estimate(ctx, p, contextLen, concurrency)
 	default:
 		return domain.Claim{}, fmt.Errorf("unsupported backend %q for preset %q estimation", p.Backend, p.ID)
@@ -46,7 +46,7 @@ func (e *BackendAware) EstimateForUnit(ctx context.Context, p domain.Preset, con
 	switch p.Backend {
 	case domain.BackendVLLM:
 		return estimateVLLMReservation(ctx, p, node, acceleratorSet)
-	case domain.BackendLlamaCpp, domain.BackendMLX, domain.BackendCustom:
+	case domain.BackendLlamaCpp, domain.BackendMLX, domain.BackendOpenVINO, domain.BackendCustom:
 		return e.Estimate(ctx, p, contextLen, concurrency)
 	default:
 		return domain.Claim{}, fmt.Errorf("unsupported backend %q for preset %q estimation", p.Backend, p.ID)

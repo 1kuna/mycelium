@@ -5,14 +5,19 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"runtime"
+	"sort"
+	"strings"
 	"time"
 
 	"mycelium/internal/backends/llamacpp"
 	"mycelium/internal/backends/mlx"
+	"mycelium/internal/backends/openvino"
 	"mycelium/internal/backends/processadapter"
 	"mycelium/internal/backends/vllm"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
+	"mycelium/internal/engine"
 	"mycelium/internal/estimate"
 	"mycelium/internal/hardware"
 	nodeagent "mycelium/internal/node"
@@ -49,6 +54,7 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 	if err != nil {
 		return computeRuntime{}, err
 	}
+	node.Arch = runtime.GOARCH
 	if compute.VRAMMB > 0 {
 		node, err = applyExplicitVRAM(node, compute.VRAMMB)
 		if err != nil {
@@ -58,7 +64,8 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 	if len(node.Accelerators) == 0 {
 		return computeRuntime{}, errors.New("compute=true requires at least one detected accelerator")
 	}
-	node.Labels = withPeerBackendLabel(node.Labels, compute.Backend)
+	runtimes := computeBackendRuntimes(compute)
+	node.Labels = withPeerBackendLabels(node.Labels, runtimeBackends(runtimes))
 	if err := validateRuntimeComputeSafety(compute, node); err != nil {
 		return computeRuntime{}, err
 	}
@@ -87,6 +94,7 @@ func buildComputeRuntime(ctx context.Context, cfg PeerConfig, store *storesqlite
 	opts := []nodeagent.Option{
 		nodeagent.WithListenAddr(compute.BackendListen),
 		nodeagent.WithAllocator(allocator),
+		nodeagent.WithEngineReadinessChecker(engine.NewReadinessChecker(store, domain.EngineReadinessLegacyAllow)),
 	}
 	if compute.LoadTimeoutMS > 0 {
 		opts = append(opts, nodeagent.WithLoadTimeout(time.Duration(compute.LoadTimeoutMS)*time.Millisecond))
@@ -177,6 +185,22 @@ func computeBackendAdapter(cfg ComputeConfig, registry nodeagent.StoreProcessReg
 }
 
 func computeBackendAdapterWithProcessRunner(cfg ComputeConfig, registry nodeagent.StoreProcessRegistry, runner processadapter.ProcessRunner) (ports.BackendAdapter, error) {
+	runtimes := computeBackendRuntimes(cfg)
+	if len(runtimes) > 1 {
+		adapters := map[domain.Backend]ports.BackendAdapter{}
+		for _, runtime := range runtimes {
+			adapter, err := computeBackendRuntimeAdapter(runtime, registry, runner)
+			if err != nil {
+				return nil, err
+			}
+			adapters[runtime.Backend] = adapter
+		}
+		return newBackendRouter(adapters), nil
+	}
+	return computeBackendRuntimeAdapter(runtimes[0], registry, runner)
+}
+
+func computeBackendRuntimeAdapter(cfg BackendRuntimeConfig, registry nodeagent.StoreProcessRegistry, runner processadapter.ProcessRunner) (ports.BackendAdapter, error) {
 	backend := cfg.Backend
 	if backend == "" {
 		backend = domain.BackendLlamaCpp
@@ -186,18 +210,20 @@ func computeBackendAdapterWithProcessRunner(cfg ComputeConfig, registry nodeagen
 		args := append([]string(nil), llamacpp.DefaultConfig().Args...)
 		args = append(args, cfg.CustomArgs...)
 		return llamacpp.NewAdapter(llamacpp.Config{
-			BinaryPath:      computeBackendBinary(cfg, "llama-server"),
+			BinaryPath:      computeRuntimeBackendBinary(cfg, "llama-server"),
 			Args:            args,
 			HealthPath:      cfg.HealthPath,
 			StopGracePeriod: time.Duration(cfg.StopGraceMS) * time.Millisecond,
 			ProcessRegistry: registry,
 		}), nil
 	case domain.BackendMLX:
-		return mlx.NewAdapterWithConfig(mlx.Config{BinaryPath: computeBackendBinary(cfg, "mlx_lm.server"), Args: append([]string(nil), cfg.CustomArgs...), ProcessRegistry: registry, ProcessRunner: runner}), nil
+		return mlx.NewAdapterWithConfig(mlx.Config{BinaryPath: computeRuntimeBackendBinary(cfg, "mlx_lm.server"), Args: append([]string(nil), cfg.CustomArgs...), ProcessRegistry: registry, ProcessRunner: runner}), nil
 	case domain.BackendVLLM:
-		return vllm.NewAdapterWithConfig(vllm.Config{BinaryPath: computeBackendBinary(cfg, "vllm"), Args: append([]string(nil), cfg.CustomArgs...), ProcessRegistry: registry, ProcessRunner: runner}), nil
+		return vllm.NewAdapterWithConfig(vllm.Config{BinaryPath: computeRuntimeBackendBinary(cfg, "vllm"), Args: append([]string(nil), cfg.CustomArgs...), ProcessRegistry: registry, ProcessRunner: runner}), nil
+	case domain.BackendOpenVINO:
+		return openvino.NewAdapterWithConfig(openvino.Config{BinaryPath: computeRuntimeBackendBinary(cfg, "openvino-genai-openai"), Args: append([]string(nil), cfg.CustomArgs...), ProcessRegistry: registry, ProcessRunner: runner}), nil
 	case domain.BackendCustom:
-		binary := computeBackendBinary(cfg, "")
+		binary := computeRuntimeBackendBinary(cfg, "")
 		if binary == "" {
 			return nil, errors.New("custom compute backend binary path is required")
 		}
@@ -216,23 +242,32 @@ func computeBackendAdapterWithProcessRunner(cfg ComputeConfig, registry nodeagen
 }
 
 func validateRuntimeComputeSafety(cfg ComputeConfig, node domain.Node) error {
-	if cfg.Backend != domain.BackendVLLM || node.OOMSeverity != domain.OOMCatastrophic {
+	if node.OOMSeverity != domain.OOMCatastrophic {
 		return nil
 	}
-	value, ok, err := vllmGPUUtilization(cfg.CustomArgs)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return errors.New("catastrophic vllm host requires --gpu-memory-utilization <= 0.85")
-	}
-	if value > sparkSafeVLLMGPUUtil {
-		return errors.New("catastrophic vllm host requires --gpu-memory-utilization <= 0.85")
+	for _, runtime := range computeBackendRuntimes(cfg) {
+		if runtime.Backend != domain.BackendVLLM {
+			continue
+		}
+		value, ok, err := vllmGPUUtilization(runtime.CustomArgs)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("catastrophic vllm host requires --gpu-memory-utilization <= 0.85")
+		}
+		if value > sparkSafeVLLMGPUUtil {
+			return errors.New("catastrophic vllm host requires --gpu-memory-utilization <= 0.85")
+		}
 	}
 	return nil
 }
 
 func computeBackendBinary(cfg ComputeConfig, fallback string) string {
+	return computeRuntimeBackendBinary(legacyBackendRuntime(cfg), fallback)
+}
+
+func computeRuntimeBackendBinary(cfg BackendRuntimeConfig, fallback string) string {
 	if cfg.BackendBinary != "" {
 		return cfg.BackendBinary
 	}
@@ -245,15 +280,76 @@ func computeBackendBinary(cfg ComputeConfig, fallback string) string {
 }
 
 func withPeerBackendLabel(labels map[string]string, backend domain.Backend) map[string]string {
+	return withPeerBackendLabels(labels, []domain.Backend{backend})
+}
+
+func withPeerBackendLabels(labels map[string]string, backends []domain.Backend) map[string]string {
 	out := map[string]string{}
 	for key, value := range labels {
 		out[key] = value
 	}
-	if backend == "" {
-		backend = domain.BackendLlamaCpp
+	normalized := normalizeBackendSet(backends)
+	if len(normalized) == 0 {
+		normalized = []domain.Backend{domain.BackendLlamaCpp}
 	}
-	out[LabelPeerBackend] = string(backend)
+	if len(normalized) == 1 {
+		out[LabelPeerBackend] = string(normalized[0])
+		delete(out, domain.LabelPeerBackends)
+		return out
+	}
+	delete(out, LabelPeerBackend)
+	parts := make([]string, 0, len(normalized))
+	for _, backend := range normalized {
+		parts = append(parts, string(backend))
+	}
+	out[domain.LabelPeerBackends] = strings.Join(parts, ",")
 	return out
+}
+
+func normalizeBackendSet(backends []domain.Backend) []domain.Backend {
+	seen := map[domain.Backend]struct{}{}
+	for _, backend := range backends {
+		if backend == "" {
+			backend = domain.BackendLlamaCpp
+		}
+		seen[backend] = struct{}{}
+	}
+	normalized := make([]domain.Backend, 0, len(seen))
+	for backend := range seen {
+		normalized = append(normalized, backend)
+	}
+	sort.Slice(normalized, func(i, j int) bool { return normalized[i] < normalized[j] })
+	return normalized
+}
+
+func runtimeBackends(runtimes []BackendRuntimeConfig) []domain.Backend {
+	backends := make([]domain.Backend, 0, len(runtimes))
+	for _, runtime := range runtimes {
+		backends = append(backends, runtime.Backend)
+	}
+	return backends
+}
+
+func computeBackendRuntimes(cfg ComputeConfig) []BackendRuntimeConfig {
+	if len(cfg.Backends) == 0 {
+		return []BackendRuntimeConfig{legacyBackendRuntime(cfg)}
+	}
+	runtimes := make([]BackendRuntimeConfig, len(cfg.Backends))
+	for i, runtime := range cfg.Backends {
+		runtimes[i] = defaultedBackendRuntimeConfig(runtime)
+	}
+	return runtimes
+}
+
+func legacyBackendRuntime(cfg ComputeConfig) BackendRuntimeConfig {
+	return defaultedBackendRuntimeConfig(BackendRuntimeConfig{
+		Backend:       cfg.Backend,
+		BackendBinary: cfg.BackendBinary,
+		CustomArgs:    append([]string(nil), cfg.CustomArgs...),
+		HealthPath:    cfg.HealthPath,
+		StopGraceMS:   cfg.StopGraceMS,
+		LlamaServer:   cfg.LlamaServer,
+	})
 }
 
 func overrideString(flagValue *string, target *string) {

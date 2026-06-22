@@ -38,6 +38,68 @@ func TestServiceQueuesNoFitJobs(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsQueuedJobWhenHookRequiresSynchronousOwnership(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(1, 1).UTC())
+	store := &runtimeStore{}
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", Action: domain.ActionQueued}},
+		Fleet:  staticFleet{},
+		Nodes:  staticNodes{},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+	}
+
+	result, err := service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a")), SubmitHooks{RejectQueued: true})
+	if err == nil || !strings.Contains(err.Error(), "queued: no instance available") {
+		t.Fatalf("Submit err = %v", err)
+	}
+	if result.Decision.Action != domain.ActionQueued {
+		t.Fatalf("result = %+v", result)
+	}
+	if service.Queue.Len() != 0 {
+		t.Fatalf("queue len = %d", service.Queue.Len())
+	}
+	if got := store.jobs["job-a"]; got.Status != domain.JobFailed || !strings.Contains(got.Error, "queued: no instance available") {
+		t.Fatalf("job = %+v", got)
+	}
+}
+
+func TestServiceRejectsCoordinatedQueuedJobWhenHookRequiresSynchronousOwnership(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(1, 2).UTC())
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	coordinator := &mocks.Coordinator{Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued}}
+	store := &runtimeStore{}
+	queue := NewQueue(clock)
+	service := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{},
+		Nodes:       staticNodes{},
+		Coordinator: coordinator,
+		JobLog:      &recordingJobLog{},
+		Queue:       queue,
+		Store:       store,
+		Clock:       clock,
+	}
+
+	result, err := service.SubmitWithPayload(context.Background(), job, []byte(`{"job":"a"}`), SubmitHooks{RejectQueued: true})
+	if err == nil || !strings.Contains(err.Error(), "queued: no instance available") {
+		t.Fatalf("SubmitWithPayload err = %v", err)
+	}
+	if result.Decision.Action != domain.ActionQueued {
+		t.Fatalf("result = %+v", result)
+	}
+	if queue.Len() != 0 {
+		t.Fatalf("queue len = %d", queue.Len())
+	}
+	if got := store.jobs[job.ID]; got.Status != domain.JobFailed || !strings.Contains(got.Error, "queued: no instance available") {
+		t.Fatalf("job = %+v", got)
+	}
+	if got := strings.Join(coordinator.Calls, ","); !strings.Contains(got, "fail:job-a:job \"job-a\" queued: no instance available") {
+		t.Fatalf("coordinator calls = %s", got)
+	}
+}
+
 func TestServiceLoadsAndGrantsLease(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(10, 0).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))

@@ -38,6 +38,8 @@ type OpenAIMessage struct {
 	ToolCallID                string              `json:"tool_call_id,omitempty"`
 	ToolCalls                 []OpenAIToolCall    `json:"tool_calls,omitempty"`
 	FunctionCall              *OpenAIFunctionCall `json:"function_call,omitempty"`
+	Reasoning                 string              `json:"reasoning,omitempty"`
+	ReasoningContent          string              `json:"reasoning_content,omitempty"`
 	UnsupportedResponseFields []string            `json:"-"`
 }
 
@@ -128,18 +130,22 @@ func decodeStrictJSON(data []byte, out any) error {
 
 func (m OpenAIMessage) MarshalJSON() ([]byte, error) {
 	raw := struct {
-		Role         string              `json:"role"`
-		Content      any                 `json:"content,omitempty"`
-		Name         string              `json:"name,omitempty"`
-		ToolCallID   string              `json:"tool_call_id,omitempty"`
-		ToolCalls    []OpenAIToolCall    `json:"tool_calls,omitempty"`
-		FunctionCall *OpenAIFunctionCall `json:"function_call,omitempty"`
+		Role             string              `json:"role"`
+		Content          any                 `json:"content,omitempty"`
+		Name             string              `json:"name,omitempty"`
+		ToolCallID       string              `json:"tool_call_id,omitempty"`
+		ToolCalls        []OpenAIToolCall    `json:"tool_calls,omitempty"`
+		FunctionCall     *OpenAIFunctionCall `json:"function_call,omitempty"`
+		Reasoning        string              `json:"reasoning,omitempty"`
+		ReasoningContent string              `json:"reasoning_content,omitempty"`
 	}{
-		Role:         m.Role,
-		Name:         m.Name,
-		ToolCallID:   m.ToolCallID,
-		ToolCalls:    m.ToolCalls,
-		FunctionCall: m.FunctionCall,
+		Role:             m.Role,
+		Name:             m.Name,
+		ToolCallID:       m.ToolCallID,
+		ToolCalls:        m.ToolCalls,
+		FunctionCall:     m.FunctionCall,
+		Reasoning:        m.Reasoning,
+		ReasoningContent: m.ReasoningContent,
 	}
 	if len(m.ContentParts) > 0 {
 		raw.Content = m.ContentParts
@@ -207,6 +213,16 @@ func (m *openAIResponseMessage) UnmarshalJSON(data []byte) error {
 	for _, field := range []string{"annotations", "audio", "reasoning", "reasoning_content", "refusal"} {
 		if raw, ok := fields[field]; ok && !jsonNull(raw) {
 			unsupported = append(unsupported, field)
+			if field == "reasoning" {
+				if err := json.Unmarshal(raw, &m.OpenAIMessage.Reasoning); err != nil {
+					return err
+				}
+			}
+			if field == "reasoning_content" {
+				if err := json.Unmarshal(raw, &m.OpenAIMessage.ReasoningContent); err != nil {
+					return err
+				}
+			}
 		}
 		delete(fields, field)
 	}

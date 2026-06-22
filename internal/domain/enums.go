@@ -54,6 +54,8 @@ const (
 	BackendLlamaCpp Backend = "llamacpp"
 	BackendVLLM     Backend = "vllm"
 	BackendMLX      Backend = "mlx"
+	BackendOpenVINO Backend = "openvino"
+	BackendSGLang   Backend = "sglang"
 	BackendCustom   Backend = "custom"
 )
 
@@ -97,6 +99,21 @@ const (
 	InstReady    InstanceState = "ready"
 	InstStopping InstanceState = "stopping"
 	InstError    InstanceState = "error"
+)
+
+type EngineReadinessMode string
+
+const (
+	EngineReadinessLegacyAllow EngineReadinessMode = "legacy_allow"
+	EngineReadinessStrict      EngineReadinessMode = "strict"
+)
+
+type EngineReadinessStatus string
+
+const (
+	EngineReadinessReadyProfile               EngineReadinessStatus = "ready_profile"
+	EngineReadinessLegacyConfigUnverified     EngineReadinessStatus = "legacy_config_unverified"
+	EngineReadinessCompatibilityKeyIncomplete EngineReadinessStatus = "compatibility_key_incomplete"
 )
 
 type PlacementAction string

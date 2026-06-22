@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
@@ -192,6 +193,14 @@ func presetNodeMismatch(preset domain.Preset, node domain.Node) (string, bool) {
 func presetBackendMismatch(preset domain.Preset, node domain.Node) (string, bool) {
 	if preset.Backend == "" {
 		return "", false
+	}
+	if backends := node.Labels[domain.LabelPeerBackends]; backends != "" {
+		for _, backend := range strings.Split(backends, ",") {
+			if strings.TrimSpace(backend) == string(preset.Backend) {
+				return "", false
+			}
+		}
+		return "label." + domain.LabelPeerBackends, true
 	}
 	backend := node.Labels[domain.LabelPeerBackend]
 	if backend == "" {

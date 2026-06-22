@@ -11,6 +11,7 @@ import (
 
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
+	"mycelium/internal/enginecompat"
 	"mycelium/internal/hardware"
 	"mycelium/internal/ports"
 )
@@ -79,6 +80,8 @@ func (d Detector) DetectEngines(ctx context.Context, host domain.HostFacts) ([]d
 		d.detectProfile(ctx, host, domain.BackendLlamaCpp, "llama.cpp", "llama-server", []string{"gguf"}, []string{host.Platform}, now),
 		d.detectProfile(ctx, host, domain.BackendMLX, "MLX", "mlx_lm.server", []string{"mlx", "hf-transformers"}, []string{"darwin/arm64"}, now),
 		d.detectProfile(ctx, host, domain.BackendVLLM, "vLLM", "vllm", []string{"hf-transformers"}, []string{"linux/amd64", "linux/arm64"}, now),
+		d.detectProfile(ctx, host, domain.BackendSGLang, "SGLang", "sglang", []string{"hf-transformers"}, []string{"linux/amd64", "linux/arm64"}, now),
+		d.detectProfile(ctx, host, domain.BackendOpenVINO, "OpenVINO GenAI", "openvino-genai-openai", []string{"openvino-ir"}, []string{"linux/amd64", "linux/arm64", "darwin/arm64", "darwin/amd64"}, now),
 	}
 	sort.Slice(profiles, func(i, j int) bool { return profiles[i].ID < profiles[j].ID })
 	return profiles, nil
@@ -121,6 +124,7 @@ func (d Detector) detectProfile(ctx context.Context, host domain.HostFacts, back
 		Safety:             domain.EngineSafety{OOMSeverity: host.OOMSeverity},
 		VerifiedAt:         now,
 	}
+	profile.CompatibilityKey = enginecompat.HostProfileKey(host, profile, "")
 	if !platformAllowed(host.Platform, profile.SupportedPlatforms) {
 		profile.UnreadyReason = "unsupported platform " + host.Platform
 		return profile
@@ -137,6 +141,7 @@ func (d Detector) detectProfile(ctx context.Context, host domain.HostFacts, back
 		return profile
 	}
 	profile.Version = version
+	profile.CompatibilityKey = enginecompat.HostProfileKey(host, profile, "")
 	profile.Ready = true
 	if backend == domain.BackendVLLM && host.OOMSeverity == domain.OOMCatastrophic {
 		profile.Args = []string{"--gpu-memory-utilization", "0.85"}
@@ -232,9 +237,9 @@ func supportedPlatformsForBackend(backend domain.Backend, hostPlatform string) [
 	switch backend {
 	case domain.BackendMLX:
 		return []string{"darwin/arm64"}
-	case domain.BackendVLLM:
+	case domain.BackendVLLM, domain.BackendSGLang:
 		return []string{"linux/amd64", "linux/arm64"}
-	case domain.BackendLlamaCpp, domain.BackendCustom:
+	case domain.BackendLlamaCpp, domain.BackendOpenVINO, domain.BackendCustom:
 		return []string{hostPlatform}
 	default:
 		return nil
@@ -247,6 +252,10 @@ func defaultBinary(backend domain.Backend) string {
 		return "mlx_lm.server"
 	case domain.BackendVLLM:
 		return "vllm"
+	case domain.BackendSGLang:
+		return "sglang"
+	case domain.BackendOpenVINO:
+		return "openvino-genai-openai"
 	case domain.BackendLlamaCpp:
 		return "llama-server"
 	default:

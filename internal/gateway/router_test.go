@@ -77,6 +77,77 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 }
 
+func TestNormalizeOpenAIReasoningBoundaryMovesLengthFinishedQwenContent(t *testing.T) {
+	body := []byte(`{
+		"id": "chatcmpl-test",
+		"model": "qwen3.5-9b",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "The user wants me to reason before answering."},
+			"finish_reason": "length"
+		}],
+		"usage": {"prompt_tokens": 3, "completion_tokens": 9, "total_tokens": 12}
+	}`)
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "b70-qwen35-9b-vision-vllm"
+		p.ModelRef = "/models/Qwen3.5-9B"
+		p.Aliases = []string{"qwen3.5-9b"}
+		p.Backend = domain.BackendVLLM
+	})
+	req := translate.IngressRequest{Kind: translate.KindOpenAIChat, Model: "qwen3.5-9b"}
+
+	normalized, err := normalizeOpenAIReasoningBoundary(req, preset, body)
+	if err != nil {
+		t.Fatalf("normalizeOpenAIReasoningBoundary: %v", err)
+	}
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content          string `json:"content"`
+				Reasoning        string `json:"reasoning"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(normalized, &resp); err != nil {
+		t.Fatalf("unmarshal normalized: %v", err)
+	}
+	msg := resp.Choices[0].Message
+	if msg.Content != "" {
+		t.Fatalf("content = %q, want empty final content", msg.Content)
+	}
+	if msg.Reasoning == "" || msg.ReasoningContent == "" || msg.Reasoning != msg.ReasoningContent {
+		t.Fatalf("reasoning not preserved separately: %+v", msg)
+	}
+}
+
+func TestNormalizeOpenAIReasoningBoundaryLeavesCompletedReasoningAlone(t *testing.T) {
+	body := []byte(`{
+		"id": "chatcmpl-test",
+		"model": "qwen3.5-9b",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "{\"ok\":true}", "reasoning_content": "hidden"},
+			"finish_reason": "stop"
+		}]
+	}`)
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "b70-qwen35-9b-vision-vllm"
+		p.ModelRef = "/models/Qwen3.5-9B"
+		p.Backend = domain.BackendVLLM
+	})
+	req := translate.IngressRequest{Kind: translate.KindOpenAIChat, Model: "qwen3.5-9b"}
+
+	normalized, err := normalizeOpenAIReasoningBoundary(req, preset, body)
+	if err != nil {
+		t.Fatalf("normalizeOpenAIReasoningBoundary: %v", err)
+	}
+	if string(normalized) != string(body) {
+		t.Fatalf("completed response changed: %s", normalized)
+	}
+}
+
 func TestRouterFailsBeforeUpstreamWhenOwnerNodeCannotBeResolved(t *testing.T) {
 	preset := fixtures.MakePreset()
 	called := false
@@ -359,6 +430,45 @@ func TestRouterRecordsSessionErrorForTransportFailover(t *testing.T) {
 		t.Fatalf("Route err = %v", err)
 	}
 	if len(sink.SamplesOut) != 3 || sink.SamplesOut[2].Phase != domain.TelemetryPhaseError || !strings.Contains(sink.SamplesOut[2].Error, "missing-upstream") {
+		t.Fatalf("samples = %+v", sink.SamplesOut)
+	}
+}
+
+func TestRouterRouteFinalizesJobAfterClientCanceledUpstreamError(t *testing.T) {
+	preset := fixtures.MakePreset()
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.OnNode(node.ID), fixtures.WithInstanceID("inst_cancel"))
+	inst.Addr = "http://cancel-upstream.mycelium.test"
+	agent := mocks.NewNodeAgent(node)
+	agent.Instances = []domain.ModelInstance{inst}
+	store := &gatewayRuntimeStore{}
+	router := newRuntimeRouterForWarmInstance(preset, node, inst, agent, &mocks.AdmissionController{}, store)
+	router.MaxTries = 1
+	sink := &contextCheckingTelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = node.ID
+	ctx, cancel := context.WithCancel(context.Background())
+	router.Client = &http.Client{Transport: gatewayRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		cancel()
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})}
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	_, err = router.Route(ctx, req)
+	if err == nil || !strings.Contains(err.Error(), "failover exhausted") {
+		t.Fatalf("Route err = %v", err)
+	}
+	if !store.sawJobStatus(domain.JobFailed) || store.sawJobStatus(domain.JobDone) || len(store.deletedLeases) != 1 {
+		t.Fatalf("jobs=%+v deletedLeases=%+v", store.jobs, store.deletedLeases)
+	}
+	if strings.Join(agent.Calls, ",") != "begin:inst_cancel,end:inst_cancel" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+	if len(sink.SamplesOut) == 0 || sink.SamplesOut[len(sink.SamplesOut)-1].Phase != domain.TelemetryPhaseError {
 		t.Fatalf("samples = %+v", sink.SamplesOut)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -527,6 +528,63 @@ func (s *Store) ListLocalityPlans(ctx context.Context) ([]domain.LocalityPlan, e
 	return plans, err
 }
 
+func (s *Store) SaveEngineProfile(ctx context.Context, profile domain.EngineProfile) error {
+	if profile.ID == "" {
+		return fmt.Errorf("engine profile id is required")
+	}
+	if profile.Backend == "" {
+		return fmt.Errorf("engine profile backend is required")
+	}
+	return s.upsertJSON(ctx, "engine_profiles", profile.ID, profile)
+}
+
+func (s *Store) ListEngineProfiles(ctx context.Context) ([]domain.EngineProfile, error) {
+	var profiles []domain.EngineProfile
+	err := s.listJSON(ctx, "engine_profiles", &profiles)
+	return profiles, err
+}
+
+func (s *Store) MarkEngineProfileUnready(ctx context.Context, profileID, reason string) error {
+	if profileID == "" {
+		return fmt.Errorf("engine profile id is required")
+	}
+	if reason == "" {
+		return fmt.Errorf("engine profile unready reason is required")
+	}
+	var profile domain.EngineProfile
+	err := s.getJSON(ctx, "engine_profiles", profileID, &profile)
+	if errors.Is(err, sql.ErrNoRows) {
+		profile = domain.EngineProfile{ID: profileID}
+	} else if err != nil {
+		return err
+	}
+	profile.Ready = false
+	profile.UnreadyReason = reason
+	return s.upsertJSON(ctx, "engine_profiles", profile.ID, profile)
+}
+
+func (s *Store) SaveBootstrapPlan(ctx context.Context, plan domain.BootstrapPlan) error {
+	if plan.ID == "" {
+		return fmt.Errorf("bootstrap plan id is required")
+	}
+	if plan.CreatedAt.IsZero() {
+		return fmt.Errorf("bootstrap plan created_at is required")
+	}
+	return s.upsertJSON(ctx, "bootstrap_plans", plan.ID, plan)
+}
+
+func (s *Store) BootstrapPlan(ctx context.Context, id string) (domain.BootstrapPlan, error) {
+	var plan domain.BootstrapPlan
+	err := s.getJSON(ctx, "bootstrap_plans", id, &plan)
+	return plan, err
+}
+
+func (s *Store) ListBootstrapPlans(ctx context.Context) ([]domain.BootstrapPlan, error) {
+	var plans []domain.BootstrapPlan
+	err := s.listJSON(ctx, "bootstrap_plans", &plans)
+	return plans, err
+}
+
 func (s *Store) Record(ctx context.Context, m domain.RunMetric) error {
 	if m.JobID == "" {
 		return fmt.Errorf("run metric missing job id")
@@ -949,6 +1007,8 @@ CREATE TABLE IF NOT EXISTS process_refs (node_id TEXT PRIMARY KEY, data TEXT NOT
 CREATE TABLE IF NOT EXISTS join_tokens (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS model_localities (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS locality_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS engine_profiles (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS bootstrap_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS run_metrics (
 	job_id TEXT PRIMARY KEY,
@@ -1036,3 +1096,5 @@ var _ ports.TelemetryStore = (*Store)(nil)
 var _ ports.JobRegistry = (*Store)(nil)
 var _ ports.ModelInventory = (*Store)(nil)
 var _ ports.LocalityPlanStore = (*Store)(nil)
+var _ ports.EngineRegistry = (*Store)(nil)
+var _ ports.BootstrapPlanStore = (*Store)(nil)

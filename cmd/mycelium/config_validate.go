@@ -94,14 +94,29 @@ func validatePeerConfig(cfg PeerConfig) error {
 		return fmt.Errorf("compute_config.stop_grace_ms must be non-negative")
 	}
 	switch compute.Backend {
-	case "", domain.BackendLlamaCpp, domain.BackendMLX, domain.BackendVLLM, domain.BackendCustom:
+	case "", domain.BackendLlamaCpp, domain.BackendMLX, domain.BackendVLLM, domain.BackendOpenVINO, domain.BackendCustom:
 	default:
 		return fmt.Errorf("unknown compute backend %q", compute.Backend)
 	}
-	if compute.Backend == domain.BackendVLLM {
-		_, _, err := vllmGPUUtilization(compute.CustomArgs)
-		if err != nil {
-			return err
+	seenRuntime := map[domain.Backend]struct{}{}
+	for _, runtime := range computeBackendRuntimes(compute) {
+		switch runtime.Backend {
+		case domain.BackendLlamaCpp, domain.BackendMLX, domain.BackendVLLM, domain.BackendOpenVINO, domain.BackendCustom:
+		default:
+			return fmt.Errorf("unknown compute backend %q", runtime.Backend)
+		}
+		if _, ok := seenRuntime[runtime.Backend]; ok {
+			return fmt.Errorf("duplicate compute backend %q", runtime.Backend)
+		}
+		seenRuntime[runtime.Backend] = struct{}{}
+		if runtime.StopGraceMS < 0 {
+			return fmt.Errorf("compute_config.backends stop_grace_ms must be non-negative")
+		}
+		if runtime.Backend == domain.BackendVLLM {
+			_, _, err := vllmGPUUtilization(runtime.CustomArgs)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil

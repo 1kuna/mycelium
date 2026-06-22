@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"mycelium/internal/domain"
+	"mycelium/internal/engine"
+	"mycelium/internal/enginecompat"
 	"mycelium/internal/lease"
 	"mycelium/internal/ports"
 	"mycelium/test/contract"
@@ -77,6 +79,60 @@ func TestLoadReadinessGatesInstanceAndUnloadStopsBackend(t *testing.T) {
 	}
 	if last := backend.Calls[len(backend.Calls)-1]; last.Op != "stop" {
 		t.Fatalf("last backend call = %+v", last)
+	}
+}
+
+func TestLoadStampsLegacyUnverifiedEngineReadiness(t *testing.T) {
+	backend := mocks.NewBackendAdapter()
+	agent := NewAgent(
+		fixtures.MakeNode(),
+		backend,
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		WithListenAddr("127.0.0.1:1234"),
+		WithAllocator(lease.NewAllocator()),
+		WithEngineReadinessChecker(engine.NewReadinessChecker(&mocks.EngineRegistry{}, domain.EngineReadinessLegacyAllow)),
+	)
+
+	inst, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if inst.EngineReadiness != domain.EngineReadinessLegacyConfigUnverified || !strings.Contains(inst.EngineReadinessReason, "legacy_config_unverified") {
+		t.Fatalf("instance readiness = %+v", inst)
+	}
+	if len(backend.Calls) == 0 {
+		t.Fatal("legacy unverified path did not launch backend")
+	}
+}
+
+func TestLoadRejectsSavedUnreadyEngineBeforeBackendLaunch(t *testing.T) {
+	backend := mocks.NewBackendAdapter()
+	host := domain.HostFacts{OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}}
+	profile := domain.EngineProfile{
+		ID:            "llamacpp-bad",
+		Backend:       domain.BackendLlamaCpp,
+		ManagedBy:     "system",
+		DisplayName:   "llama.cpp",
+		BinaryPath:    "llama-server",
+		Ready:         false,
+		UnreadyReason: "missing libsycl",
+	}
+	profile.CompatibilityKey = enginecompat.HostProfileKey(host, profile, "")
+	agent := NewAgent(
+		fixtures.MakeNode(),
+		backend,
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		WithListenAddr("127.0.0.1:1234"),
+		WithAllocator(lease.NewAllocator()),
+		WithEngineReadinessChecker(engine.NewReadinessChecker(&mocks.EngineRegistry{Profiles: []domain.EngineProfile{profile}}, domain.EngineReadinessLegacyAllow)),
+	)
+
+	_, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
+	if err == nil || !strings.Contains(err.Error(), "missing libsycl") {
+		t.Fatalf("Load err = %v", err)
+	}
+	if len(backend.Calls) != 0 {
+		t.Fatalf("backend launched despite unready registry evidence: %+v", backend.Calls)
 	}
 }
 

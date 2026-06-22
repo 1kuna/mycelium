@@ -675,6 +675,90 @@ make smoke-fleet
 make smoke-benchmark-fleet
 ```
 
+### Future Phase G - explicit installer apply
+
+Installer apply is future work. The current `engines install-plan` surface is advisory-only: it validates the path, planned actions, approval requirements, dry-run/manual boundaries, risks, and rollback notes, but it does not mutate the host.
+
+The apply implementation must preserve a hard approval boundary from plan to mutation:
+
+- an operator must select a specific saved install plan or freshly generated plan and pass an explicit apply flag;
+- the command must show the exact actions, network/package/image sources, expected files, expected config/profile writes, required privileges, and rollback state before mutation;
+- the applied plan must be the plan that was approved, not a silently regenerated different plan.
+
+Per-engine apply executors should stay profile-driven:
+
+- llama.cpp: Homebrew/native Metal on macOS Apple Silicon, CUDA build/container/wrapper on Linux NVIDIA, SYCL/oneAPI wrapper on Linux Intel/B70, ROCm path on Linux AMD when verified, CPU only with explicit opt-in;
+- vLLM: Linux NVIDIA arm64/amd64 wheel or container strategy with platform/CUDA/toolkit checks and safe memory caps;
+- SGLang: Linux NVIDIA wheel/container strategy only after the backend adapter/profile contract exists;
+- MLX: macOS Apple Silicon managed venv under `~/.mycelium/engines/mlx-lm/` with `mlx_lm.server`;
+- OpenVINO: Linux Intel/B70 OpenVINO GenAI or OVMS path selected by model-family support, with the existing B70 proof treated as evidence but not a generic shortcut;
+- custom/native: no generic installer; apply only validates and records an explicit user-provided binary/profile/health contract.
+
+Before any mutation, apply must re-run preflight checks and stop loudly on:
+
+- host compatibility-key mismatch or incomplete host facts;
+- disk free below `disk_min_free_ratio` after projected install size;
+- missing or incompatible package manager, Python ABI, container runtime, GPU driver/runtime, CUDA/ROCm/Level Zero/SYCL/Metal/OpenVINO facts, or container manifest platform;
+- unsafe vLLM/SGLang memory caps on catastrophic hosts;
+- peer/service ownership ambiguity, running instances that would be disrupted, or config ownership conflicts.
+
+Allowed mutation shapes are limited to the approved plan:
+
+- create managed venvs/directories under `~/.mycelium/engines/` where practical;
+- install packages, build/pull platform-checked images, or write wrappers only through explicit plan actions;
+- write peer config/profile changes atomically with backups;
+- register engine profiles only after verification succeeds.
+
+Post-install verification must be cheap and evidence-bearing:
+
+- binary/version checks for every installed or adopted runtime;
+- engine health probe where the backend supports it without loading a large model;
+- optional tiny/local model smoke only when a safe local test asset is configured;
+- no production model loads as readiness checks.
+
+Every apply run must preserve an evidence ledger:
+
+- commands planned and commands executed;
+- package/image/wheel/source versions and digests where available;
+- files/directories/configs changed and backups written;
+- engine versions detected after install;
+- verification and smoke results;
+- failure logs and manual recovery notes.
+
+Rollback is a requirement for enabling broad apply, but the full rollback system is not designed in this phase. The apply implementation must at least record whether rollback is known, manual, unsupported, or unknown for each action, and broad automatic apply must remain disabled for paths whose rollback story has not been validated.
+
+Hardware validation must cover at minimum:
+
+- macOS Apple Silicon llama.cpp Metal and MLX;
+- Intel macOS classification with CPU fallback opt-in only;
+- DGX Spark/Linux NVIDIA arm64 vLLM/SGLang/llama.cpp with platform-safe images/wheels and memory caps;
+- Linux NVIDIA x86_64 independently from Spark;
+- B70/Linux Intel SYCL llama.cpp and OpenVINO;
+- Linux AMD contract paths without claiming live smoke until hardware exists.
+
+Stop rules:
+
+- if an action fails, stop the apply sequence and preserve the evidence ledger;
+- if verification fails, do not mark the engine profile ready;
+- if config/profile write validation fails, restore the previous config where possible and require manual intervention;
+- never hide a failed install behind a fallback engine.
+
+### Future Phase H - runtime updates and rollback-aware upgrades
+
+Runtime update availability checks, automatic runtime upgrades, and rollback orchestration are intentionally deferred until after the install/adoption path has repeated hardware-specific validation.
+
+This future phase must be designed and proven separately from bootstrap install planning. It must cover:
+
+- update metadata sources for each runtime family, including package managers, Python wheels, container images, and user-managed wrappers;
+- installed-version detection that does not require launching production backends or model loads;
+- platform-specific update safety for DGX Spark, B70, macOS Apple Silicon, Intel macOS, Linux NVIDIA x86_64, and Linux AMD;
+- version pinning and compatibility with CUDA, ROCm, Level Zero/SYCL, Metal, OpenVINO, Python ABI, and container manifests;
+- rollback strategy per install source, with explicit evidence when rollback is manual, unsupported, or unknown;
+- repeated dry-run and smoke validation before any automatic deployment or upgrade behavior exists;
+- operator approval boundaries for every network lookup, package/image selection, service restart, config change, and rollback action.
+
+Until that phase is implemented, Mycelium may report that update/rollback support is future work, but it must not query package indexes on a schedule, auto-upgrade engines, restart services, or claim rollback safety.
+
 ## 18. Acceptance criteria
 
 Engine bootstrap is complete when:
