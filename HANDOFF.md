@@ -10,7 +10,7 @@ handoff rewrite.
 ## Current Repo State
 
 - Branch: `main`.
-- Latest observed commit before this rewrite: `f382bd2 Clarify Mycelium handoff resume state`.
+- Latest observed commit after this rewrite: `20be72f Rewrite owner-thread handoff`.
 - Remote already configured: `origin https://github.com/1kuna/mycelium.git`.
 - Source-of-truth docs remain `01-project-spec.md`, `02-testing-architecture.md`,
   and `03-development-guide.md`.
@@ -111,6 +111,20 @@ It did not run `make ci`, broad tests, real smoke, or any push.
 - Do not silently disable model reasoning/thinking to hide leaks or parser
   issues. Fix the provider payload, response boundary, or gateway translation
   path instead.
+- The Atlas/Qwen reasoning-boundary repair details are preserved in
+  `artifacts/atlas-serving-diagnostics/20260616-141132-qwen9b-reasoning-boundary/SUMMARY.md`.
+  The important behavior is narrow: non-streaming Qwen3-family vLLM responses
+  that length-finish inside `<think>` are normalized by moving leaked content
+  into `reasoning` / `reasoning_content` and emptying final `content`. Streaming
+  normalization was not implemented there.
+- A cold-load/client-timeout stale-job issue was observed in that lane. Treat it
+  as an active lifecycle bug to investigate before relying on unattended live
+  fleet placement: a request that starts a cold load must either wait/stream
+  through to readiness or terminalize and release cleanly.
+- Older thread dumps contain exact live-fleet endpoints, token-file locations,
+  peer ports, and TTFT/TPS observations. Treat those as stale private
+  operational evidence unless rechecked live; do not publish token values or
+  host-specific private paths.
 
 ## Exact Resume Steps
 
