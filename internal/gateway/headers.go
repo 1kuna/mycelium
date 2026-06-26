@@ -25,6 +25,13 @@ const (
 	HeaderConversation = "X-Myc-Conversation"
 	HeaderHandling     = "X-Myc-Handling"
 	HeaderSubmitter    = "X-Myc-Submitter"
+
+	HeaderColdLoad                = "X-Myc-Cold-Load"
+	HeaderLoadWallMS              = "X-Myc-Load-Wall-Ms"
+	HeaderQueueWaitMS             = "X-Myc-Queue-Wait-Ms"
+	HeaderUpstreamWallMS          = "X-Myc-Upstream-Wall-Ms"
+	HeaderStructuredOutput        = "X-Myc-Structured-Output"
+	HeaderGuidedDecodingRequested = "X-Myc-Guided-Decoding-Requested"
 )
 
 func writeDecisionHeaders(h http.Header, decision domain.PlacementDecision, inst domain.ModelInstance, profile profiles.Profile, attempts int) {
