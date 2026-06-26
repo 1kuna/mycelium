@@ -367,5 +367,6 @@ func applyExplicitVRAM(node domain.Node, vramMB int) (domain.Node, error) {
 	}
 	node.Accelerators = append([]domain.Accelerator(nil), node.Accelerators...)
 	node.Accelerators[0].VRAMTotalMB = vramMB
+	node.Accelerators[0].VRAMUsedMB = 0
 	return node, nil
 }

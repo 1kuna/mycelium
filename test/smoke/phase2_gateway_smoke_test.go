@@ -50,6 +50,7 @@ func TestPhase2GatewayLocalLlamaCppSmoke(t *testing.T) {
 		node.WithAllocator(lease.NewAllocator()),
 	)
 	defer unloadAll(t, ctx, agent)
+	admission := node.NewAdmission(agentNode, lease.NewAllocator(), clock.System{}, node.WithAdmissionInstances(agent.Instances))
 
 	preset := fixtures.MakePreset(
 		fixtures.WithModelRef(model),
@@ -63,12 +64,17 @@ func TestPhase2GatewayLocalLlamaCppSmoke(t *testing.T) {
 	largePreset.ID = preset.ID + "_ctx2048"
 	largePreset.ContextLength = 2048
 	largePreset.Aliases = nil
-	directory := gateway.NodeDirectory{Agents: map[string]ports.NodeAgent{agentNode.ID: agent}}
+	directory := smokeRuntimeDirectory{
+		agents:     map[string]ports.NodeAgent{agentNode.ID: agent},
+		admissions: map[string]ports.AdmissionController{agentNode.ID: admission},
+	}
+	runtimeStore := &smokeRuntimeStore{}
 	placer := scheduler.NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), clock.System{}, preset)
 	server := httptest.NewServer(gateway.Server{Router: &gateway.Router{
 		Placer:         placer,
 		Fleet:          directory,
 		Nodes:          directory,
+		Runtime:        smokeRuntime(placer, directory, runtimeStore, preset),
 		Presets:        gateway.NewPresetRegistry(preset),
 		Telemetry:      store,
 		DefaultProject: "smoke",
@@ -111,6 +117,7 @@ func TestPhase2GatewayLocalLlamaCppSmoke(t *testing.T) {
 		Placer:         overflowPlacer,
 		Fleet:          directory,
 		Nodes:          directory,
+		Runtime:        smokeRuntime(overflowPlacer, directory, runtimeStore, preset, largePreset),
 		Presets:        gateway.NewPresetRegistry(preset, largePreset),
 		Telemetry:      store,
 		DefaultProject: "smoke",
@@ -122,6 +129,7 @@ func TestPhase2GatewayLocalLlamaCppSmoke(t *testing.T) {
 	if overflow.status != http.StatusOK || overflow.header.Get(gateway.HeaderAttempts) != "2" {
 		t.Fatalf("overflow requeue status=%s attempts=%s body=%s", overflow.statusText, overflow.header.Get(gateway.HeaderAttempts), overflow.body)
 	}
+	unloadAll(t, ctx, agent)
 
 	failed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "dead backend", http.StatusInternalServerError)
@@ -137,12 +145,19 @@ func TestPhase2GatewayLocalLlamaCppSmoke(t *testing.T) {
 		State:          domain.InstReady,
 		Addr:           failed.URL,
 	}
-	failoverFleet := smokeFailoverFleet{Directory: directory, Failed: fakeFailed}
-	failoverResolver := smokeFailoverResolver{Agent: agent, FakeInstanceID: fakeFailed.ID}
+	failoverFleet := smokeFailoverFleet{Directory: directory, Failed: fakeFailed, Reporter: failover}
+	failoverResolver := smokeFailoverResolver{Agent: agent, Fake: fakeFailed}
+	failoverAgent := smokeFailoverAgent{NodeAgent: agent, Fake: fakeFailed}
+	failoverAdmission := node.NewAdmission(agentNode, lease.NewAllocator(), clock.System{}, node.WithAdmissionInstances(failoverAgent.Instances))
+	failoverRuntimeDirectory := smokeRuntimeDirectory{
+		agents:     map[string]ports.NodeAgent{agentNode.ID: failoverAgent},
+		admissions: map[string]ports.AdmissionController{agentNode.ID: failoverAdmission},
+	}
 	failoverServer := httptest.NewServer(gateway.Server{Router: &gateway.Router{
 		Placer:         placer,
 		Fleet:          failoverFleet,
 		Nodes:          failoverResolver,
+		Runtime:        smokeRuntimeWith(placer, failoverFleet, failoverRuntimeDirectory, failoverRuntimeDirectory, runtimeStore, preset),
 		Presets:        gateway.NewPresetRegistry(preset),
 		Telemetry:      store,
 		Reporter:       failover,
@@ -203,9 +218,112 @@ func postGateway(t *testing.T, ctx context.Context, url, body string) gatewayRes
 	return gatewayResponse{status: resp.StatusCode, statusText: resp.Status, header: resp.Header.Clone(), body: string(data)}
 }
 
+type smokeRuntimeDirectory struct {
+	agents     map[string]ports.NodeAgent
+	admissions map[string]ports.AdmissionController
+}
+
+func (d smokeRuntimeDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, error) {
+	snap := domain.FleetSnapshot{}
+	for _, agent := range d.agents {
+		nodeSnap, err := agent.Snapshot(ctx)
+		if err != nil {
+			return domain.FleetSnapshot{}, err
+		}
+		snap.Nodes = append(snap.Nodes, nodeSnap.Node)
+		snap.Instances = append(snap.Instances, nodeSnap.Instances...)
+	}
+	return snap, nil
+}
+
+func (d smokeRuntimeDirectory) NodeAgent(nodeID string) (ports.NodeAgent, error) {
+	agent, ok := d.agents[nodeID]
+	if !ok {
+		return nil, domain.ErrUnreachable
+	}
+	return agent, nil
+}
+
+func (d smokeRuntimeDirectory) AdmissionController(nodeID string) (ports.AdmissionController, error) {
+	admission, ok := d.admissions[nodeID]
+	if !ok {
+		return nil, domain.ErrUnreachable
+	}
+	return admission, nil
+}
+
+func smokeRuntime(placer *scheduler.Placer, directory smokeRuntimeDirectory, store *smokeRuntimeStore, presets ...domain.Preset) *scheduler.Service {
+	return smokeRuntimeWith(placer, directory, directory, directory, store, presets...)
+}
+
+func smokeRuntimeWith(placer *scheduler.Placer, fleet scheduler.FleetSource, nodes scheduler.NodeResolver, owners scheduler.AdmissionResolver, store *smokeRuntimeStore, presets ...domain.Preset) *scheduler.Service {
+	presetMap := map[string]domain.Preset{}
+	for _, preset := range presets {
+		presetMap[preset.ID] = preset
+		presetMap[preset.ModelRef] = preset
+		for _, alias := range preset.Aliases {
+			presetMap[alias] = preset
+		}
+	}
+	return &scheduler.Service{
+		Placer:  placer,
+		Fleet:   fleet,
+		Nodes:   nodes,
+		Owners:  owners,
+		Queue:   scheduler.NewQueue(clock.System{}),
+		Store:   store,
+		Clock:   clock.System{},
+		Presets: presetMap,
+	}
+}
+
+type smokeRuntimeStore struct {
+	leases []domain.Lease
+	jobs   []domain.Job
+}
+
+func (s *smokeRuntimeStore) SaveJob(_ context.Context, job domain.Job) error {
+	s.jobs = append(s.jobs, job)
+	return nil
+}
+
+func (s *smokeRuntimeStore) SaveLease(_ context.Context, lease domain.Lease) error {
+	for i, existing := range s.leases {
+		if existing.ID == lease.ID {
+			s.leases[i] = lease
+			return nil
+		}
+	}
+	s.leases = append(s.leases, lease)
+	return nil
+}
+
+func (s *smokeRuntimeStore) ListLeases(context.Context) ([]domain.Lease, error) {
+	return append([]domain.Lease(nil), s.leases...), nil
+}
+
+func (s *smokeRuntimeStore) DeleteLease(_ context.Context, id string) error {
+	for i, lease := range s.leases {
+		if lease.ID == id {
+			s.leases = append(s.leases[:i], s.leases[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+func (s *smokeRuntimeStore) SaveInstance(context.Context, domain.ModelInstance) error {
+	return nil
+}
+
+func (s *smokeRuntimeStore) DeleteInstance(context.Context, string) error {
+	return nil
+}
+
 type smokeFailoverFleet struct {
-	Directory gateway.NodeDirectory
+	Directory smokeRuntimeDirectory
 	Failed    domain.ModelInstance
+	Reporter  *smokeFailureReporter
 }
 
 func (f smokeFailoverFleet) Snapshot(ctx context.Context) (domain.FleetSnapshot, error) {
@@ -213,36 +331,54 @@ func (f smokeFailoverFleet) Snapshot(ctx context.Context) (domain.FleetSnapshot,
 	if err != nil {
 		return domain.FleetSnapshot{}, err
 	}
-	snap.Instances = append([]domain.ModelInstance{f.Failed}, snap.Instances...)
+	if f.Reporter == nil || !f.Reporter.Reported(f.Failed.ID) {
+		snap.Instances = append([]domain.ModelInstance{f.Failed}, snap.Instances...)
+	}
 	return snap, nil
 }
 
 type smokeFailoverResolver struct {
-	Agent          ports.NodeAgent
-	FakeInstanceID string
+	Agent ports.NodeAgent
+	Fake  domain.ModelInstance
 }
 
 func (r smokeFailoverResolver) NodeAgent(string) (ports.NodeAgent, error) {
-	return smokeFailoverAgent{NodeAgent: r.Agent, FakeInstanceID: r.FakeInstanceID}, nil
+	return smokeFailoverAgent{NodeAgent: r.Agent, Fake: r.Fake}, nil
 }
 
 type smokeFailoverAgent struct {
 	ports.NodeAgent
-	FakeInstanceID string
+	Fake domain.ModelInstance
 }
 
 func (a smokeFailoverAgent) BeginRequest(ctx context.Context, instanceID string) error {
-	if instanceID == a.FakeInstanceID {
+	if instanceID == a.Fake.ID {
 		return ctx.Err()
 	}
 	return a.NodeAgent.BeginRequest(ctx, instanceID)
 }
 
 func (a smokeFailoverAgent) EndRequest(ctx context.Context, instanceID string) error {
-	if instanceID == a.FakeInstanceID {
+	if instanceID == a.Fake.ID {
 		return ctx.Err()
 	}
 	return a.NodeAgent.EndRequest(ctx, instanceID)
+}
+
+func (a smokeFailoverAgent) Snapshot(ctx context.Context) (domain.NodeSnapshot, error) {
+	snap, err := a.NodeAgent.Snapshot(ctx)
+	if err != nil {
+		return domain.NodeSnapshot{}, err
+	}
+	snap.Instances = append([]domain.ModelInstance{a.Fake}, snap.Instances...)
+	return snap, nil
+}
+
+func (a smokeFailoverAgent) Instances() []domain.ModelInstance {
+	if source, ok := a.NodeAgent.(interface{ Instances() []domain.ModelInstance }); ok {
+		return append([]domain.ModelInstance{a.Fake}, source.Instances()...)
+	}
+	return []domain.ModelInstance{a.Fake}
 }
 
 type smokeFailureReporter struct {
@@ -252,6 +388,15 @@ type smokeFailureReporter struct {
 func (r *smokeFailureReporter) ReportInstanceFailure(_ context.Context, instanceID string, _ error) error {
 	r.failed = append(r.failed, instanceID)
 	return nil
+}
+
+func (r *smokeFailureReporter) Reported(instanceID string) bool {
+	for _, failed := range r.failed {
+		if failed == instanceID {
+			return true
+		}
+	}
+	return false
 }
 
 func filepathSafeModelName(model string) string {
