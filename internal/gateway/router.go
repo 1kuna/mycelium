@@ -152,6 +152,15 @@ type RouteResponse struct {
 	ColdLoad bool
 }
 
+type routeDiagnostics struct {
+	ColdLoad                bool
+	LoadWallMS              int
+	QueueWaitMS             int
+	UpstreamWallMS          int
+	StructuredOutput        string
+	GuidedDecodingRequested bool
+}
+
 func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (RouteResponse, error) {
 	if r.Placer == nil || r.Fleet == nil || r.Nodes == nil {
 		return RouteResponse{}, fmt.Errorf("gateway router is not configured")
@@ -329,6 +338,14 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		if contentType != "" {
 			headers.Set("Content-Type", contentType)
 		}
+		writeRouteDiagnostics(headers, routeDiagnostics{
+			ColdLoad:                cold,
+			LoadWallMS:              loadMS,
+			QueueWaitMS:             0,
+			UpstreamWallMS:          durationMS(upstreamStart, upstreamEnd),
+			StructuredOutput:        structuredOutputMode(req),
+			GuidedDecodingRequested: guidedDecodingRequested(req, preset, profile),
+		})
 		writeDecisionHeaders(headers, decision, inst, profile, attempt)
 		if cold && req.Stream {
 			headers.Set("Content-Type", "text/event-stream")
@@ -491,6 +508,13 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			headers := w.Header()
 			headers.Set("Content-Type", "text/event-stream")
 			headers.Set("X-Accel-Buffering", "no")
+			writeRouteDiagnostics(headers, routeDiagnostics{
+				ColdLoad:                true,
+				QueueWaitMS:             0,
+				UpstreamWallMS:          -1,
+				StructuredOutput:        structuredOutputMode(req),
+				GuidedDecodingRequested: guidedDecodingRequested(req, preset, profile),
+			})
 			writeDecisionHeaders(headers, decision, domain.ModelInstance{NodeID: decision.NodeID}, profile, attempt)
 			w.WriteHeader(http.StatusOK)
 			started = true
@@ -696,6 +720,14 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			}
 			headers.Set("X-Accel-Buffering", "no")
 			writeResponseHeaders(w.Header(), headers)
+			writeRouteDiagnostics(w.Header(), routeDiagnostics{
+				ColdLoad:                cold,
+				LoadWallMS:              loadMS,
+				QueueWaitMS:             0,
+				UpstreamWallMS:          -1,
+				StructuredOutput:        structuredOutputMode(req),
+				GuidedDecodingRequested: guidedDecodingRequested(req, preset, profile),
+			})
 			writeDecisionHeaders(w.Header(), decision, inst, profile, attempt)
 			w.WriteHeader(resp.StatusCode)
 			started = true
@@ -1525,6 +1557,51 @@ func sseTailHasTerminal(tail string) bool {
 		}
 	}
 	return false
+}
+
+func writeRouteDiagnostics(h http.Header, d routeDiagnostics) {
+	h.Set(HeaderColdLoad, strconv.FormatBool(d.ColdLoad))
+	h.Set(HeaderQueueWaitMS, strconv.Itoa(d.QueueWaitMS))
+	h.Set(HeaderStructuredOutput, d.StructuredOutput)
+	h.Set(HeaderGuidedDecodingRequested, strconv.FormatBool(d.GuidedDecodingRequested))
+	if d.LoadWallMS > 0 || d.ColdLoad {
+		h.Set(HeaderLoadWallMS, strconv.Itoa(d.LoadWallMS))
+	}
+	if d.UpstreamWallMS >= 0 {
+		h.Set(HeaderUpstreamWallMS, strconv.Itoa(d.UpstreamWallMS))
+	}
+}
+
+func structuredOutputMode(req translate.IngressRequest) string {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(req.Body, &fields); err != nil {
+		return "none"
+	}
+	var modes []string
+	if raw := fields["response_format"]; len(bytes.TrimSpace(raw)) > 0 && !jsonNull(raw) {
+		var responseFormat struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &responseFormat); err == nil && responseFormat.Type != "" {
+			modes = append(modes, responseFormat.Type)
+		} else {
+			modes = append(modes, "response_format")
+		}
+	}
+	if raw := fields["structured_outputs"]; len(bytes.TrimSpace(raw)) > 0 && !jsonNull(raw) {
+		modes = append(modes, "structured_outputs")
+	}
+	if len(modes) == 0 {
+		return "none"
+	}
+	return strings.Join(modes, "+")
+}
+
+func guidedDecodingRequested(req translate.IngressRequest, preset domain.Preset, profile profiles.Profile) bool {
+	if preset.Backend != domain.BackendVLLM || profile.Format != profiles.FormatOpenAI {
+		return false
+	}
+	return structuredOutputMode(req) != "none"
 }
 
 func writeResponseHeaders(dst, src http.Header) {

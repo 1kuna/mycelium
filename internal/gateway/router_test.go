@@ -54,6 +54,9 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	if resp.Header.Get(HeaderDecision) != string(domain.ActionWarmInstance) || resp.Header.Get(HeaderInstance) != inst.ID || resp.Header.Get(HeaderJob) == "" || !strings.Contains(resp.Header.Get(HeaderTrace), "warm compatible instance") {
 		t.Fatalf("headers = %+v", resp.Header)
 	}
+	if resp.Header.Get(HeaderColdLoad) != "false" || resp.Header.Get(HeaderQueueWaitMS) != "0" || resp.Header.Get(HeaderStructuredOutput) != "none" || resp.Header.Get(HeaderGuidedDecodingRequested) != "false" || resp.Header.Get(HeaderUpstreamWallMS) != "0" {
+		t.Fatalf("diagnostic headers = %+v", resp.Header)
+	}
 	if !strings.Contains(string(resp.Body), "hello") {
 		t.Fatalf("body = %s", resp.Body)
 	}
@@ -123,6 +126,12 @@ func TestRouterPassesThroughVLLMStructuredOutputControls(t *testing.T) {
 	}
 	if resp.Profile.ID != "vllm" || resp.Header.Get(HeaderBackend) != string(domain.BackendVLLM) || !strings.Contains(string(resp.Body), "structured") {
 		t.Fatalf("resp profile=%+v headers=%+v body=%s", resp.Profile, resp.Header, resp.Body)
+	}
+	if resp.Header.Get(HeaderStructuredOutput) != "json_schema+structured_outputs" || resp.Header.Get(HeaderGuidedDecodingRequested) != "true" {
+		t.Fatalf("structured diagnostics = %+v", resp.Header)
+	}
+	if resp.Header.Get(HeaderColdLoad) != "false" || resp.Header.Get(HeaderQueueWaitMS) != "0" || resp.Header.Get(HeaderUpstreamWallMS) != "0" {
+		t.Fatalf("timing diagnostics = %+v", resp.Header)
 	}
 }
 
@@ -2122,6 +2131,9 @@ func TestRouterUsesRuntimeServiceForColdLoad(t *testing.T) {
 	}
 	if !resp.ColdLoad || resp.Instance.ID != "inst_runtime" || !strings.Contains(string(resp.Body), "runtime") {
 		t.Fatalf("resp=%+v body=%s", resp, resp.Body)
+	}
+	if resp.Header.Get(HeaderColdLoad) != "true" || resp.Header.Get(HeaderLoadWallMS) != "0" || resp.Header.Get(HeaderQueueWaitMS) != "0" {
+		t.Fatalf("cold diagnostic headers = %+v", resp.Header)
 	}
 	if resp.Lease.ID == "" || strings.Join(store.deletedLeases, ",") != resp.Lease.ID {
 		t.Fatalf("lease=%+v deleted=%+v", resp.Lease, store.deletedLeases)

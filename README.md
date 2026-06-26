@@ -134,6 +134,12 @@ Useful response headers:
 - `X-Myc-Backend` - backend type.
 - `X-Myc-Attempts` - gateway attempts/failovers.
 - `X-Myc-Trace` - JSON placement trace explaining estimate/filter/select/score/admit.
+- `X-Myc-Cold-Load` - whether the request cold-loaded a new instance.
+- `X-Myc-Load-Wall-Ms` - cold-load wall time when a cold load happened.
+- `X-Myc-Queue-Wait-Ms` - gateway queue wait before placement; currently `0` for synchronous gateway requests that reject queued placement.
+- `X-Myc-Upstream-Wall-Ms` - non-streaming upstream provider wall time.
+- `X-Myc-Structured-Output` - structured-output request mode seen by Mycelium, such as `json_schema`, `json_object`, `structured_outputs`, or `none`.
+- `X-Myc-Guided-Decoding-Requested` - whether Mycelium sent a structured-output control to an OpenAI-compatible vLLM route. This is request-path evidence, not provider schema-cache proof.
 
 ## Debugging Workflow
 
