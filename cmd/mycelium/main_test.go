@@ -482,6 +482,7 @@ func TestApplyExplicitVRAMPreservesDetectedHardwareFacts(t *testing.T) {
 			Vendor:      "intel",
 			Kind:        "arc-pro-b70",
 			VRAMTotalMB: 24576,
+			VRAMUsedMB:  33048,
 		}},
 	}
 	overridden, err := applyExplicitVRAM(intel, 49152)
@@ -491,10 +492,10 @@ func TestApplyExplicitVRAMPreservesDetectedHardwareFacts(t *testing.T) {
 	if overridden.OS != "linux" || overridden.OOMSeverity != domain.OOMSoft || overridden.Labels["gpu.vendor"] != "intel" {
 		t.Fatalf("node facts were rewritten = %+v", overridden)
 	}
-	if overridden.Accelerators[0].Vendor != "intel" || overridden.Accelerators[0].Kind != "arc-pro-b70" || overridden.Accelerators[0].VRAMTotalMB != 49152 {
+	if overridden.Accelerators[0].Vendor != "intel" || overridden.Accelerators[0].Kind != "arc-pro-b70" || overridden.Accelerators[0].VRAMTotalMB != 49152 || overridden.Accelerators[0].VRAMUsedMB != 0 {
 		t.Fatalf("accelerator facts = %+v", overridden.Accelerators[0])
 	}
-	if intel.Accelerators[0].VRAMTotalMB != 24576 {
+	if intel.Accelerators[0].VRAMTotalMB != 24576 || intel.Accelerators[0].VRAMUsedMB != 33048 {
 		t.Fatalf("source node was mutated = %+v", intel.Accelerators[0])
 	}
 	if _, err := applyExplicitVRAM(domain.Node{ID: "cpu-only"}, 1024); err == nil || !strings.Contains(err.Error(), "no detected accelerator") {
