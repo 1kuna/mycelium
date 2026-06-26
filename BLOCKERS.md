@@ -2,6 +2,8 @@
 
 ## Active
 
+- 2026-06-26: Qwen/vLLM final-channel structured JSON is blocked at the live B70 provider configuration layer, not Atlas request construction or Mycelium OpenAI passthrough. Atlas sent `response_format: {"type":"json_object"}` and Mycelium accepted/routed it; a Mycelium-side tiny canary with documented `response_format.type=json_schema` also routed to B70/vLLM with HTTP 200, `finish_reason=length`, empty final content, and non-empty `reasoning_content`. A second tiny canary with vLLM `structured_outputs` extra body had the same result. Current B70 vLLM launch evidence shows `--reasoning-parser qwen3` but structured outputs disabled (`STRUCTURED_OUTPUTS_BACKEND=none`) and no `--structured-outputs-config.enable_in_reasoning=True`. Official vLLM docs require enabling structured outputs in reasoning mode for reasoning models. Smallest next action is an approved live B70 vLLM/Mycelium activation: restart/reload the B70 vLLM backend with a real structured-output backend such as `auto`/`xgrammar`/`guidance` and `--structured-outputs-config.enable_in_reasoning=True`, then rerun the Atlas row-4 canary. Do not fake this by moving reasoning into content or disabling reasoning.
+
 - 2026-06-04: Real-engine and real multi-peer smoke for the obvious-bug remediation pass could not be re-proven in this shell because the required smoke environment is unset (`MYCELIUM_LLAMA_CPP_BINARY`, `MYCELIUM_LLAMA_CPP_MODEL`, MLX/vLLM/Spark/B70/federation/join/benchmark env). Fast CI and env-independent smoke pass from the current tree; unblock by setting the relevant real hardware/model env and running `go test -tags smoke ./test/smoke/... -timeout 20m`.
 
 ## Resolved

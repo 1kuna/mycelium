@@ -77,6 +77,55 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 }
 
+func TestRouterPassesThroughVLLMStructuredOutputControls(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "b70-qwen35-9b-vision-vllm"
+		p.ModelRef = "/models/Qwen3.5-9B"
+		p.Aliases = []string{"qwen3.5-9b"}
+		p.Backend = domain.BackendVLLM
+	})
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body, &fields); err != nil {
+			t.Fatalf("decode upstream body: %v body=%s", err, body)
+		}
+		if string(fields["response_format"]) != `{"type":"json_schema","json_schema":{"name":"tiny","schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}}}` {
+			t.Fatalf("response_format = %s", fields["response_format"])
+		}
+		if string(fields["structured_outputs"]) != `{"json":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}}` {
+			t.Fatalf("structured_outputs = %s", fields["structured_outputs"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("structured")))
+	}))
+
+	inst := fixtures.MakeInstance(func(i *domain.ModelInstance) {
+		i.PresetID = preset.ID
+		i.Addr = upstream
+	})
+	agent := mocks.NewNodeAgent(fixtures.MakeNode())
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen3.5-9b","messages":[{"role":"user","content":"json"}],"max_tokens":8,"response_format":{"type":"json_schema","json_schema":{"name":"tiny","schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}}},"structured_outputs":{"json":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}}}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Profile.ID != "vllm" || resp.Header.Get(HeaderBackend) != string(domain.BackendVLLM) || !strings.Contains(string(resp.Body), "structured") {
+		t.Fatalf("resp profile=%+v headers=%+v body=%s", resp.Profile, resp.Header, resp.Body)
+	}
+}
+
 func TestNormalizeOpenAIReasoningBoundaryMovesLengthFinishedQwenContent(t *testing.T) {
 	body := []byte(`{
 		"id": "chatcmpl-test",
