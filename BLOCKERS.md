@@ -19,7 +19,14 @@
   Remaining activation route for the MacBook is a stable Local Network
   permission strategy, likely the documented system LaunchDaemon path or a
   properly bundled/signed helper, rather than another blind user-LaunchAgent
-  binary swap.
+  binary swap. The repo now has a read-only `mycelium service plan` command
+  with `--system` and `--binary` support; it prints the exact LaunchDaemon unit,
+  install/status/reload commands, and rollback command without touching the
+  live gateway. Remaining live activation is an operator maintenance step:
+  inspect `mycelium service plan --config <peer.json> --binary <stable-binary>
+  --name real-fleet --system`, install the system service with sudo, run
+  `service status`, and immediately restore the known-good binary/service if
+  seed diagnostics fail.
 - 2026-06-27: `make ci` fails at the coverage gate only. Formatting, build,
   vet, and `go test ./... -race` passed, then `go run ./tools/covergate ...`
   failed because `internal/enginecatalog` reported 78.3% statement coverage

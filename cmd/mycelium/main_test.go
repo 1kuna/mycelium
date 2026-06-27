@@ -538,6 +538,38 @@ func TestServiceSpecAndRenderers(t *testing.T) {
 	if !strings.Contains(unit, "ExecStart=") || !strings.Contains(unit, " run --config ") || strings.Contains(unit, "join-secret") {
 		t.Fatalf("unit = %s", unit)
 	}
+	darwinSystemSpec, err := parseServiceSpec("plan", []string{"--config", configPath, "--binary", "/opt/my celium/bin/mycelium", "--system", "--name", "real fleet"}, "darwin")
+	if err != nil {
+		t.Fatalf("parseServiceSpec darwin system: %v", err)
+	}
+	if darwinSystemSpec.Scope != serviceScopeSystem || darwinSystemSpec.UnitPath != "/Library/LaunchDaemons/com.mycelium.realfleet.plist" {
+		t.Fatalf("darwin system spec = %+v", darwinSystemSpec)
+	}
+	if darwinSystemSpec.BinaryPath != "/opt/my celium/bin/mycelium" {
+		t.Fatalf("darwin system binary = %s", darwinSystemSpec.BinaryPath)
+	}
+	plan := renderServicePlan(darwinSystemSpec, "darwin")
+	for _, want := range []string{
+		"scope\tsystem",
+		"sudo ",
+		"sudo '/opt/my celium/bin/mycelium' service install",
+		"launchctl bootstrap system /Library/LaunchDaemons/com.mycelium.realfleet.plist",
+		"launchctl kickstart -k system/com.mycelium.realfleet",
+		"<string>run</string>",
+	} {
+		if !strings.Contains(plan, want) {
+			t.Fatalf("plan missing %q:\n%s", want, plan)
+		}
+	}
+	if strings.Contains(plan, "join-secret") || strings.Contains(plan, "rpc-secret") {
+		t.Fatalf("plan leaked secret: %s", plan)
+	}
+	quotedSpec := darwinSystemSpec
+	quotedSpec.BinaryPath = "/tmp/my celium"
+	quotedPlan := renderServicePlan(quotedSpec, "darwin")
+	if !strings.Contains(quotedPlan, "sudo '/tmp/my celium' service install") {
+		t.Fatalf("plan did not shell-quote binary with spaces:\n%s", quotedPlan)
+	}
 	if _, err := parseServiceSpec("install", nil, "darwin"); err == nil || !strings.Contains(err.Error(), "--config") {
 		t.Fatalf("missing config err = %v", err)
 	}

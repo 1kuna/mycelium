@@ -54,11 +54,15 @@ func runService(ctx context.Context, args []string) error {
 
 func runServiceWithManager(ctx context.Context, args []string, manager serviceManager, goos string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: mycelium service <install|status|uninstall>")
+		return fmt.Errorf("usage: mycelium service <plan|install|status|uninstall>")
 	}
 	spec, err := parseServiceSpec(args[0], args[1:], goos)
 	if err != nil {
 		return err
+	}
+	if args[0] == "plan" {
+		fmt.Fprint(os.Stdout, renderServicePlan(spec, goos))
+		return nil
 	}
 	if manager == nil {
 		manager, err = serviceManagerForGOOS(goos, runServiceCommand)
@@ -107,6 +111,7 @@ func runServiceWithManager(ctx context.Context, args []string, manager serviceMa
 func parseServiceSpec(command string, args []string, goos string) (serviceSpec, error) {
 	fs := flag.NewFlagSet("service "+command, flag.ContinueOnError)
 	configPath := fs.String("config", "", "peer config JSON path")
+	binaryPath := fs.String("binary", "", "service binary path override")
 	name := fs.String("name", "default", "service name suffix")
 	user := fs.Bool("user", false, "install as a user service")
 	system := fs.Bool("system", false, "install as a system service")
@@ -120,9 +125,12 @@ func parseServiceSpec(command string, args []string, goos string) (serviceSpec, 
 	if err != nil {
 		return serviceSpec{}, err
 	}
-	binary, err := os.Executable()
-	if err != nil {
-		return serviceSpec{}, err
+	binary := strings.TrimSpace(*binaryPath)
+	if binary == "" {
+		binary, err = os.Executable()
+		if err != nil {
+			return serviceSpec{}, err
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -320,6 +328,64 @@ func renderLaunchdPlist(spec serviceSpec) string {
 	writePlistString(&out, "StandardErrorPath", filepath.Join(spec.LogDir, spec.Name+".err.log"))
 	out.WriteString("</dict>\n</plist>\n")
 	return out.String()
+}
+
+func renderServicePlan(spec serviceSpec, goos string) string {
+	var out strings.Builder
+	fmt.Fprintf(&out, "service\t%s\n", spec.Label)
+	fmt.Fprintf(&out, "scope\t%s\n", spec.Scope)
+	fmt.Fprintf(&out, "binary\t%s\n", spec.BinaryPath)
+	fmt.Fprintf(&out, "config\t%s\n", spec.ConfigPath)
+	fmt.Fprintf(&out, "unit\t%s\n", spec.UnitPath)
+	fmt.Fprintf(&out, "logs\t%s\n", spec.LogDir)
+	out.WriteString("commands\n")
+	switch goos {
+	case "darwin":
+		domain := launchdDomain(spec)
+		prefix := ""
+		if spec.Scope == serviceScopeSystem {
+			prefix = "sudo "
+		}
+		fmt.Fprintf(&out, "  install: %s%s service install --config %s --name %s --%s\n", prefix, shellQuote(spec.BinaryPath), shellQuote(spec.ConfigPath), shellQuote(spec.Name), spec.Scope)
+		fmt.Fprintf(&out, "  status:  %s%s service status --config %s --name %s --%s\n", prefix, shellQuote(spec.BinaryPath), shellQuote(spec.ConfigPath), shellQuote(spec.Name), spec.Scope)
+		fmt.Fprintf(&out, "  unload:  %slaunchctl bootout %s %s\n", prefix, domain, shellQuote(spec.UnitPath))
+		fmt.Fprintf(&out, "  reload:  %slaunchctl bootstrap %s %s && %slaunchctl enable %s/%s && %slaunchctl kickstart -k %s/%s\n", prefix, domain, shellQuote(spec.UnitPath), prefix, domain, spec.Label, prefix, domain, spec.Label)
+		fmt.Fprintf(&out, "  rollback: restore the prior binary, then run %slaunchctl kickstart -k %s/%s and service status\n", prefix, domain, spec.Label)
+		out.WriteString("unit_body\n")
+		out.WriteString(renderLaunchdPlist(spec))
+	case "linux":
+		prefix := ""
+		systemctl := "systemctl --user"
+		if spec.Scope == serviceScopeSystem {
+			prefix = "sudo "
+			systemctl = "systemctl"
+		}
+		unit := filepath.Base(spec.UnitPath)
+		fmt.Fprintf(&out, "  install: %s%s service install --config %s --name %s --%s\n", prefix, shellQuote(spec.BinaryPath), shellQuote(spec.ConfigPath), shellQuote(spec.Name), spec.Scope)
+		fmt.Fprintf(&out, "  status:  %s%s service status --config %s --name %s --%s\n", prefix, shellQuote(spec.BinaryPath), shellQuote(spec.ConfigPath), shellQuote(spec.Name), spec.Scope)
+		fmt.Fprintf(&out, "  restart: %s%s restart %s\n", prefix, systemctl, shellQuote(unit))
+		fmt.Fprintf(&out, "  rollback: restore the prior binary, then run %s%s restart %s and service status\n", prefix, systemctl, shellQuote(unit))
+		out.WriteString("unit_body\n")
+		out.WriteString(renderSystemdUnit(spec))
+	default:
+		fmt.Fprintf(&out, "unsupported\t%s\n", goos)
+	}
+	if !strings.HasSuffix(out.String(), "\n") {
+		out.WriteString("\n")
+	}
+	return out.String()
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.IndexFunc(value, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '/' || r == '.' || r == '_' || r == '-' || r == ':')
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func writePlistString(out *strings.Builder, key, value string) {

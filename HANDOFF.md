@@ -145,7 +145,11 @@ MacBook/B70 live canary, and Spark reachability classification. It did not push.
   known-good LaunchAgent-approved binary because the current Darwin binary loses
   corrected-LAN seed reachability under the user LaunchAgent. Do not replace
   `/Users/zach/.mycelium/bin/mycelium` again without a rollback-ready test or a
-  stable LaunchDaemon/bundled-signing activation plan.
+  stable LaunchDaemon/bundled-signing activation plan. The repo now provides a
+  read-only `mycelium service plan` command; use it with `--system` and
+  `--binary /Users/zach/.mycelium/bin/mycelium` to inspect the exact
+  LaunchDaemon unit, install/status/reload commands, and rollback command before
+  any privileged Mac activation attempt.
 - `ops/private/` contains local smoke notes/bundles. Treat them as private
   operational evidence; do not publish secrets, tokens, host-specific paths, or
   model artifacts.
@@ -225,7 +229,22 @@ Then choose the lane:
    mycelium engines install-plan
    ```
 
-6. For long-window optimizer/autoscaling work, use the existing
+6. For the MacBook registry-compaction activation blocker, do not swap the user
+   LaunchAgent binary blindly. First generate the non-mutating system service
+   plan:
+
+   ```bash
+   mycelium service plan \
+     --config /Users/zach/.mycelium/bench/real-fleet/peer.json \
+     --binary /Users/zach/.mycelium/bin/mycelium \
+     --name real-fleet \
+     --system
+   ```
+
+   Then install only in a maintenance window with a known-good binary backup
+   and immediate `service status` / seed-diagnostics rollback criteria.
+
+7. For long-window optimizer/autoscaling work, use the existing
    `session_metrics` and `run_metrics` facts first. Add statistical analysis and
    recommendations from observed series before attempting any automatic
    saturation behavior.
