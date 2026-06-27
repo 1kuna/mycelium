@@ -86,6 +86,42 @@ myce debug job <job-id>
 myce debug bundle --job <job-id> --out /tmp/mycelium-debug
 ```
 
+Plan a durable service install without changing the host:
+
+```bash
+mycelium service plan --config ~/.mycelium/peer.json --name real-fleet --user
+mycelium service plan \
+  --config ~/.mycelium/peer.json \
+  --binary /path/to/mycelium \
+  --name real-fleet \
+  --system
+```
+
+On macOS, use `--system` when a user LaunchAgent cannot reach LAN peers because
+of Local Network permission or binary-identity behavior. The plan command is
+read-only: it prints the target unit path, generated launchd/systemd unit body,
+install/status/reload commands, and rollback command. For a live gateway, first
+keep a known-good binary backup, run `service status` against the current
+service, inspect the `--system` plan, and install during a maintenance window:
+
+```bash
+sudo /path/to/mycelium service install \
+  --config /Users/user/.mycelium/bench/real-fleet/peer.json \
+  --binary /path/to/mycelium \
+  --name real-fleet \
+  --system
+
+sudo /path/to/mycelium service status \
+  --config /Users/user/.mycelium/bench/real-fleet/peer.json \
+  --binary /path/to/mycelium \
+  --name real-fleet \
+  --system
+```
+
+If seed diagnostics fail after activation, restore the known-good binary and
+kick the service named by `service plan`; do not keep a Mac gateway live when
+`service status` reports unreachable seeds.
+
 Generate and inspect recommendations:
 
 ```bash
