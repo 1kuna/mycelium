@@ -26,7 +26,7 @@ func RunEngineInstallerConformance(t *testing.T, name string, newInstaller func(
 		})
 		assert.NoError(t, "ApplyBootstrapPlan", err)
 		assert.Equal(t, plan.ID, result.PlanID, "result plan id")
-		_ = events
+		assert.Equal(t, len(result.Events), len(events), "progress event count")
 	})
 }
 

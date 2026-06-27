@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -217,6 +218,62 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	}
 	if _, err := loadPeerConfig(badPath); err == nil {
 		t.Fatal("expected bad peer config error")
+	}
+}
+
+func TestSavePeerConfigAtomicBacksUpAndRestoresOnValidationFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "peer.json")
+	original := applyPeerConfigDefaults(PeerConfig{ID: "peer-a", Listen: "127.0.0.1:1111", ComputeConfig: ComputeConfig{ID: "peer-a"}})
+	if err := savePeerConfig(path, original); err != nil {
+		t.Fatalf("save original: %v", err)
+	}
+	if err := os.WriteFile(path+".backup.20260627T120000Z", []byte("older backup"), 0600); err != nil {
+		t.Fatalf("write existing backup: %v", err)
+	}
+	next := original
+	next.Listen = "127.0.0.1:2222"
+	backup, err := savePeerConfigAtomic(path, next, "2026/06/27T12:00:00Z", nil)
+	if err != nil {
+		t.Fatalf("savePeerConfigAtomic: %v", err)
+	}
+	if !strings.HasSuffix(backup, ".backup.2026-06-27T12-00-00Z") {
+		t.Fatalf("backup path = %s", backup)
+	}
+	loaded, err := loadPeerConfig(path)
+	if err != nil || loaded.Listen != next.Listen {
+		t.Fatalf("loaded atomic config = %+v err=%v", loaded, err)
+	}
+	backupData, err := os.ReadFile(backup)
+	if err != nil || !strings.Contains(string(backupData), `"listen": "127.0.0.1:1111"`) {
+		t.Fatalf("backup data = %q err=%v", backupData, err)
+	}
+
+	failing := loaded
+	failing.Listen = "127.0.0.1:3333"
+	_, err = savePeerConfigAtomic(path, failing, "restore", func(string) error {
+		return errors.New("synthetic validation")
+	})
+	if err == nil || !strings.Contains(err.Error(), "post-write peer config validation failed") {
+		t.Fatalf("validation err = %v", err)
+	}
+	restored, err := loadPeerConfig(path)
+	if err != nil || restored.Listen != loaded.Listen {
+		t.Fatalf("restored config = %+v err=%v", restored, err)
+	}
+
+	newPath := filepath.Join(dir, "new-peer.json")
+	_, err = savePeerConfigAtomic(newPath, applyPeerConfigDefaults(PeerConfig{ID: "peer-new", Listen: "127.0.0.1:4444", ComputeConfig: ComputeConfig{ID: "peer-new"}}), "new", func(string) error {
+		return errors.New("new config invalid")
+	})
+	if err == nil || !strings.Contains(err.Error(), "post-write peer config validation failed") {
+		t.Fatalf("new validation err = %v", err)
+	}
+	if _, err := os.Stat(newPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("new config was not removed after failed validation: %v", err)
+	}
+	if got := backupStampForPlan(domain.BootstrapPlan{}); got != "unknown" {
+		t.Fatalf("zero backup stamp = %s", got)
 	}
 }
 
@@ -564,6 +621,31 @@ func TestServiceSpecAndRenderers(t *testing.T) {
 	if strings.Contains(plan, "join-secret") || strings.Contains(plan, "rpc-secret") {
 		t.Fatalf("plan leaked secret: %s", plan)
 	}
+	linuxUserSpec, err := parseServiceSpec("plan", []string{"--config", configPath, "--binary", "/usr/local/bin/mycelium", "--user", "--name", "dev"}, "linux")
+	if err != nil {
+		t.Fatalf("parseServiceSpec linux user: %v", err)
+	}
+	linuxUserPlan := renderServicePlan(linuxUserSpec, "linux")
+	for _, want := range []string{
+		"scope\tuser",
+		"systemctl --user restart mycelium-dev.service",
+		"ExecStart=\"/usr/local/bin/mycelium\" run --config ",
+	} {
+		if !strings.Contains(linuxUserPlan, want) {
+			t.Fatalf("linux user plan missing %q:\n%s", want, linuxUserPlan)
+		}
+	}
+	linuxSystemSpec, err := parseServiceSpec("plan", []string{"--config", configPath, "--binary", "/usr/local/bin/mycelium", "--system", "--name", "prod"}, "linux")
+	if err != nil {
+		t.Fatalf("parseServiceSpec linux system: %v", err)
+	}
+	linuxSystemPlan := renderServicePlan(linuxSystemSpec, "linux")
+	if !strings.Contains(linuxSystemPlan, "sudo systemctl restart mycelium-prod.service") || strings.Contains(linuxSystemPlan, "systemctl --user") {
+		t.Fatalf("linux system plan =\n%s", linuxSystemPlan)
+	}
+	if unsupported := renderServicePlan(linuxSystemSpec, "windows"); !strings.Contains(unsupported, "unsupported\twindows") {
+		t.Fatalf("unsupported plan =\n%s", unsupported)
+	}
 	quotedSpec := darwinSystemSpec
 	quotedSpec.BinaryPath = "/tmp/my celium"
 	quotedPlan := renderServicePlan(quotedSpec, "darwin")
@@ -707,6 +789,66 @@ func TestRunServiceStatusChecksPeerHealth(t *testing.T) {
 	failedDiagnosticsConfig := writePeerConfig(t, PeerConfig{Listen: strings.TrimPrefix(failedDiagnostics.URL, "http://"), RPCToken: "rpc-secret", SeedPeers: []string{"seed"}})
 	if _, err := servicePeerDiagnostics(context.Background(), failedDiagnosticsConfig); err == nil || !strings.Contains(err.Error(), "peer diagnostics") {
 		t.Fatalf("failed service diagnostics err = %v", err)
+	}
+
+	noSeedConfig := writePeerConfig(t, PeerConfig{Listen: "127.0.0.1:1"})
+	if got, err := servicePeerDiagnostics(context.Background(), noSeedConfig); err != nil || got != "" {
+		t.Fatalf("no seed diagnostics = %q %v", got, err)
+	}
+
+	seedFailure := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(peerDiagnosticsReport{Ready: true, Seeds: []peerSeedDiagnostic{{Address: "127.0.0.1:2", Ready: false, Error: "connection refused"}}})
+	}))
+	defer seedFailure.Close()
+	seedFailureConfig := writePeerConfig(t, PeerConfig{Listen: strings.TrimPrefix(seedFailure.URL, "http://"), SeedPeers: []string{"127.0.0.1:2"}})
+	if _, err := servicePeerDiagnostics(context.Background(), seedFailureConfig); err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("seed failure diagnostics err = %v", err)
+	}
+
+	badDiagnostics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ready":true}{}`))
+	}))
+	defer badDiagnostics.Close()
+	badDiagnosticsConfig := writePeerConfig(t, PeerConfig{Listen: strings.TrimPrefix(badDiagnostics.URL, "http://"), SeedPeers: []string{"127.0.0.1:2"}})
+	if _, err := servicePeerDiagnostics(context.Background(), badDiagnosticsConfig); err == nil || !strings.Contains(err.Error(), "after top-level value") {
+		t.Fatalf("bad diagnostics err = %v", err)
+	}
+}
+
+func TestServiceManagersPropagateCommandFailures(t *testing.T) {
+	ctx := context.Background()
+	spec := serviceSpec{
+		Name:       "real-fleet",
+		Label:      "com.mycelium.real-fleet",
+		Scope:      serviceScopeUser,
+		ConfigPath: "/tmp/peer.json",
+		BinaryPath: "/usr/local/bin/mycelium",
+		Home:       t.TempDir(),
+		LogDir:     filepath.Join(t.TempDir(), "logs"),
+		UnitPath:   filepath.Join(t.TempDir(), "com.mycelium.real-fleet.plist"),
+	}
+	rec := &serviceCommandRecorder{Err: errors.New("launchctl denied")}
+	launchd := launchdManager{Run: rec.Run}
+	if err := launchd.Install(ctx, spec); err == nil || !strings.Contains(err.Error(), "launchctl denied") {
+		t.Fatalf("launchd install err = %v", err)
+	}
+	if len(rec.Commands) < 2 || !strings.Contains(rec.Commands[1], "bootstrap") {
+		t.Fatalf("launchd install commands = %+v", rec.Commands)
+	}
+	if _, err := launchd.Status(ctx, spec); err == nil || !strings.Contains(err.Error(), "launchctl denied") {
+		t.Fatalf("launchd status err = %v", err)
+	}
+
+	systemSpec := spec
+	systemSpec.Scope = serviceScopeSystem
+	systemSpec.UnitPath = filepath.Join(t.TempDir(), "mycelium-real-fleet.service")
+	rec = &serviceCommandRecorder{Err: errors.New("systemctl denied")}
+	systemd := systemdManager{Run: rec.Run}
+	if err := systemd.Install(ctx, systemSpec); err == nil || !strings.Contains(err.Error(), "systemctl denied") {
+		t.Fatalf("systemd install err = %v", err)
+	}
+	if _, err := systemd.Status(ctx, systemSpec); err == nil || !strings.Contains(err.Error(), "systemctl denied") {
+		t.Fatalf("systemd status err = %v", err)
 	}
 }
 
@@ -2079,6 +2221,150 @@ func TestModelsCompatUsesSavedReadinessFacts(t *testing.T) {
 	}
 	if err := runModels(context.Background(), []string{"compat", "--db", storePath, "--model", "logical/gemma", "--artifact", "/models/gemma-ov"}); err == nil || !strings.Contains(err.Error(), "one --format") {
 		t.Fatalf("models compat missing format err = %v", err)
+	}
+}
+
+func TestCommandHelperFlagsStoresAndQueries(t *testing.T) {
+	var artifacts repeatedString
+	if got := artifacts.String(); got != "null" {
+		t.Fatalf("empty repeated string = %s", got)
+	}
+	if err := artifacts.Set("/models/a"); err != nil {
+		t.Fatalf("artifact set: %v", err)
+	}
+	if got := artifacts.String(); !strings.Contains(got, "/models/a") {
+		t.Fatalf("artifact string = %s", got)
+	}
+
+	var roots stringListFlag
+	if got := roots.String(); got != "" {
+		t.Fatalf("empty roots = %s", got)
+	}
+	if err := roots.Set(""); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("empty root err = %v", err)
+	}
+	if err := roots.Set("/models"); err != nil || roots.String() != "/models" {
+		t.Fatalf("roots = %s err=%v", roots.String(), err)
+	}
+
+	if err := runModels(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "models subcommand") {
+		t.Fatalf("models usage err = %v", err)
+	}
+	if err := runModels(context.Background(), []string{"unknown"}); err == nil || !strings.Contains(err.Error(), "unknown models") {
+		t.Fatalf("models unknown err = %v", err)
+	}
+
+	storePath := filepath.Join(t.TempDir(), "control.db")
+	store, err := openEngineStore("", storePath)
+	if err != nil {
+		t.Fatalf("openEngineStore db: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close db store: %v", err)
+	}
+	configPath := writePeerConfig(t, PeerConfig{StorePath: filepath.Join(t.TempDir(), "from-config.db")})
+	store, err = openEngineStore(configPath, "")
+	if err != nil {
+		t.Fatalf("openEngineStore config: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close config store: %v", err)
+	}
+	tokenMap := gatewayProjectTokenMap([]GatewayProjectToken{{Project: "project-a", Token: "token-a"}, {Project: "project-b", Token: "token-b"}})
+	if tokenMap["token-a"] != "project-a" || tokenMap["token-b"] != "project-b" || gatewayProjectTokenMap(nil) != nil {
+		t.Fatalf("gateway token map = %+v", tokenMap)
+	}
+
+	since := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	until := since.Add(time.Hour)
+	query, err := parseSessionMetricQuery(url.Values{
+		"session_id": {"session-a"},
+		"project":    {"project-a"},
+		"node_id":    {"node-a"},
+		"since":      {since.Format(time.RFC3339Nano)},
+		"until":      {until.Format(time.RFC3339Nano)},
+		"limit":      {"25"},
+	})
+	if err != nil || query.SessionID != "session-a" || query.Project != "project-a" || query.NodeID != "node-a" || !query.Since.Equal(since) || !query.Until.Equal(until) || query.Limit != 25 {
+		t.Fatalf("session query = %+v err=%v", query, err)
+	}
+	for _, values := range []url.Values{
+		{"since": {"not-time"}},
+		{"until": {"not-time"}},
+		{"limit": {"-1"}},
+		{"limit": {"nope"}},
+	} {
+		if _, err := parseSessionMetricQuery(values); err == nil {
+			t.Fatalf("bad session query accepted: %+v", values)
+		}
+	}
+}
+
+func TestCommandSmallContracts(t *testing.T) {
+	var compute computeOverrideFlag
+	if got := compute.String(); got != "" {
+		t.Fatalf("unset compute flag = %q", got)
+	}
+	if err := compute.Set("yes"); err != nil || compute.String() != "on" || !compute.value {
+		t.Fatalf("compute on = %q value=%v err=%v", compute.String(), compute.value, err)
+	}
+	if err := compute.Set("0"); err != nil || compute.String() != "off" || compute.value {
+		t.Fatalf("compute off = %q value=%v err=%v", compute.String(), compute.value, err)
+	}
+	if !compute.IsBoolFlag() {
+		t.Fatal("compute flag no longer behaves as a boolean CLI flag")
+	}
+	if !gatewayAuthConfigured(PeerConfig{GatewayToken: "token"}) || !gatewayAuthConfigured(PeerConfig{GatewayProjectTokens: []GatewayProjectToken{{Project: "project-a", Token: "token-a"}}}) || gatewayAuthConfigured(PeerConfig{}) {
+		t.Fatal("gateway auth configured classification drifted")
+	}
+	if !peerListenRequiresAuth("0.0.0.0:55291") || !peerListenRequiresAuth("mycelium.local:55291") || peerListenRequiresAuth("127.0.0.1:55291") {
+		t.Fatal("peer listen auth classification drifted")
+	}
+	if _, err := servicePeerBaseURL("not-a-listen-address"); err == nil {
+		t.Fatal("invalid peer listen address accepted")
+	}
+	if got := shellQuote(""); got != "''" {
+		t.Fatalf("empty shell quote = %q", got)
+	}
+	if got := shellQuote("/tmp/my config's/peer.json"); !strings.Contains(got, "'\"'\"'") {
+		t.Fatalf("single quote shell escaping = %q", got)
+	}
+	if got := quoteSystemdArg("/tmp/my config/peer.json"); !strings.Contains(got, "\\\"") && !strings.HasPrefix(got, "\"") {
+		t.Fatalf("systemd arg quote = %q", got)
+	}
+
+	source := map[string]string{"artifact": "model"}
+	cloned := cloneStringMap(source)
+	source["artifact"] = "mutated"
+	if cloned["artifact"] != "model" || cloneStringMap(nil) != nil {
+		t.Fatalf("cloneStringMap = %+v", cloned)
+	}
+
+	candidate := domain.BootstrapModelCandidate{Name: "gemma-ov"}
+	key := domain.CompatibilityKey{
+		OS:                 "linux",
+		CPUArch:            "amd64",
+		AcceleratorVendor:  "intel",
+		AcceleratorRuntime: "level-zero",
+		EngineDistribution: "OpenVINO GenAI:openvino-genai-openai",
+		Backend:            domain.BackendOpenVINO,
+		ModelFormat:        "openvino-ir",
+	}
+	ready := map[domain.Backend]domain.EngineProfile{
+		domain.BackendOpenVINO: {ID: "engine-openvino", Backend: domain.BackendOpenVINO, CompatibilityKey: key},
+	}
+	profile, ok, reason := readyProfileForCompatibility(domain.BootstrapPlan{}, candidate, domain.BootstrapBackendCompatibility{Backend: domain.BackendOpenVINO, Ready: true, CompatibilityKey: key}, ready)
+	if !ok || profile.ID != "engine-openvino" || reason != "" {
+		t.Fatalf("ready profile = %+v ok=%v reason=%q", profile, ok, reason)
+	}
+	if _, ok, reason := readyProfileForCompatibility(domain.BootstrapPlan{}, candidate, domain.BootstrapBackendCompatibility{Backend: domain.BackendOpenVINO}, ready); ok || reason != "backend compatibility is not ready" {
+		t.Fatalf("unready compatibility ok=%v reason=%q", ok, reason)
+	}
+	if _, ok, reason := readyProfileForCompatibility(domain.BootstrapPlan{}, candidate, domain.BootstrapBackendCompatibility{Backend: domain.BackendVLLM, Ready: true}, ready); ok || !strings.Contains(reason, "no saved ready engine profile") {
+		t.Fatalf("missing ready profile ok=%v reason=%q", ok, reason)
+	}
+	if _, ok, reason := readyProfileForCompatibility(domain.BootstrapPlan{}, candidate, domain.BootstrapBackendCompatibility{Backend: domain.BackendOpenVINO, Ready: true, EngineProfileID: "other"}, ready); ok || !strings.Contains(reason, "references engine profile") {
+		t.Fatalf("mismatched ready profile ok=%v reason=%q", ok, reason)
 	}
 }
 
@@ -5152,6 +5438,7 @@ func TestComputeBackendAdapterPassesConfiguredArgsToProcessBackends(t *testing.T
 	}{
 		{backend: domain.BackendVLLM, base: []string{"serve", "model.gguf", "--host", "127.0.0.1", "--port", "54321"}, custom: []string{"--gpu-memory-utilization", "0.85"}},
 		{backend: domain.BackendMLX, base: []string{"--model", "model.gguf", "--host", "127.0.0.1", "--port", "54321"}, custom: []string{"--trust-remote-code"}},
+		{backend: domain.BackendOpenVINO, base: []string{"--model", "model.gguf", "--host", "127.0.0.1", "--port", "54321"}, custom: []string{"--device", "GPU"}},
 	} {
 		t.Run(string(tt.backend), func(t *testing.T) {
 			store, err := storesqlite.Open(filepath.Join(t.TempDir(), "state.sqlite"))
@@ -5254,10 +5541,201 @@ func TestComputeBackendAdapterRoutesByPresetBackend(t *testing.T) {
 	}
 }
 
+func TestBackendRouterRoutesReadinessDynamicAndStopByRuntimeIdentity(t *testing.T) {
+	ctx := context.Background()
+	vllm := &routerDynamicAdapter{name: "vllm", backend: domain.BackendVLLM}
+	mlx := &routerDynamicAdapter{name: "mlx", backend: domain.BackendMLX}
+	adapter := newBackendRouter(map[domain.Backend]ports.BackendAdapter{
+		domain.BackendVLLM: vllm,
+		domain.BackendMLX:  mlx,
+	})
+	if adapter.Name() != "multi" {
+		t.Fatalf("router name = %s", adapter.Name())
+	}
+	preset := testPreset("preset-vllm")
+	preset.Backend = domain.BackendVLLM
+	preset.ModelRef = "model-a"
+	handle, err := adapter.Launch(ctx, preset, "127.0.0.1:5555")
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if handle.Kind != string(domain.BackendVLLM) || len(vllm.launches) != 1 || len(mlx.launches) != 0 {
+		t.Fatalf("handle=%+v vllm=%+v mlx=%+v", handle, vllm.launches, mlx.launches)
+	}
+	if err := adapter.WaitReady(ctx, handle.Addr); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	unknownKind := handle
+	unknownKind.Kind = ""
+	if err := adapter.Stop(ctx, unknownKind); err != nil {
+		t.Fatalf("Stop by remembered PID: %v", err)
+	}
+	if len(vllm.stops) != 1 {
+		t.Fatalf("stops = %+v", vllm.stops)
+	}
+	if err := adapter.WaitReady(ctx, handle.Addr); err == nil || !strings.Contains(err.Error(), "no backend is tracking") {
+		t.Fatalf("forgotten ready addr err = %v", err)
+	}
+
+	preset = testPreset("preset-mlx")
+	preset.Backend = domain.BackendMLX
+	preset.ModelRef = "model-b"
+	dynamic, err := adapter.(ports.DynamicBackendAdapter).LaunchDynamic(ctx, preset, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("LaunchDynamic: %v", err)
+	}
+	if dynamic.Kind != string(domain.BackendMLX) || !strings.Contains(dynamic.Addr, ":6") || len(mlx.dynamicLaunches) != 1 {
+		t.Fatalf("dynamic=%+v dynamic launches=%+v", dynamic, mlx.dynamicLaunches)
+	}
+	if err := adapter.WaitReady(ctx, dynamic.Addr); err != nil {
+		t.Fatalf("WaitReady dynamic: %v", err)
+	}
+}
+
+func TestBackendRouterFailsLoudForAmbiguousOrUnsupportedRuntime(t *testing.T) {
+	ctx := context.Background()
+	single := newBackendRouter(map[domain.Backend]ports.BackendAdapter{
+		domain.BackendVLLM: &routerDynamicAdapter{name: "vllm", backend: domain.BackendVLLM},
+	})
+	preset := testPreset("single-default")
+	preset.Backend = ""
+	preset.ModelRef = "model-a"
+	if _, err := single.Launch(ctx, preset, "127.0.0.1:5555"); err != nil {
+		t.Fatalf("single backend default launch: %v", err)
+	}
+
+	multi := newBackendRouter(map[domain.Backend]ports.BackendAdapter{
+		domain.BackendVLLM: &routerDynamicAdapter{name: "vllm", backend: domain.BackendVLLM},
+		domain.BackendMLX:  &routerStaticAdapter{name: "mlx", backend: domain.BackendMLX},
+	})
+	missingBackend := testPreset("missing-backend")
+	missingBackend.Backend = ""
+	if _, err := multi.Launch(ctx, missingBackend, "127.0.0.1:1"); err == nil || !strings.Contains(err.Error(), "requires a backend") {
+		t.Fatalf("missing backend err = %v", err)
+	}
+	unknown := testPreset("unknown-backend")
+	unknown.Backend = domain.BackendOpenVINO
+	if _, err := multi.Launch(ctx, unknown, "127.0.0.1:1"); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("unknown backend err = %v", err)
+	}
+	static := testPreset("static-mlx")
+	static.Backend = domain.BackendMLX
+	if _, err := multi.(ports.DynamicBackendAdapter).LaunchDynamic(ctx, static, "127.0.0.1:0"); err == nil || !strings.Contains(err.Error(), "does not support dynamic") {
+		t.Fatalf("static dynamic err = %v", err)
+	}
+	if err := multi.WaitReady(ctx, "127.0.0.1:9"); err == nil || !strings.Contains(err.Error(), "no backend is tracking") {
+		t.Fatalf("unknown ready err = %v", err)
+	}
+	if err := multi.Stop(ctx, ports.Handle{}); err == nil || !strings.Contains(err.Error(), "no runtime identity") {
+		t.Fatalf("identity err = %v", err)
+	}
+
+	router := multi.(*backendRouter)
+	router.remember(ports.Handle{PID: 42, Addr: "127.0.0.1:42"}, domain.BackendOpenVINO)
+	if err := multi.WaitReady(ctx, "127.0.0.1:42"); err == nil || !strings.Contains(err.Error(), "no longer configured") {
+		t.Fatalf("removed ready backend err = %v", err)
+	}
+	if err := multi.Stop(ctx, ports.Handle{PID: 42}); err == nil || !strings.Contains(err.Error(), "not configured for handle") {
+		t.Fatalf("removed stop backend err = %v", err)
+	}
+}
+
+func TestDecodePeerRPCResponseStrictRejectsTrailingJSON(t *testing.T) {
+	var out map[string]string
+	if err := decodePeerRPCResponseStrict(strings.NewReader(`{"ok":"yes"}`), &out); err != nil {
+		t.Fatalf("strict response: %v", err)
+	}
+	if out["ok"] != "yes" {
+		t.Fatalf("decoded response = %+v", out)
+	}
+	if err := decodePeerRPCResponseStrict(strings.NewReader(`{"ok":"yes"} {"extra":"no"}`), &out); err == nil || !strings.Contains(err.Error(), "multiple JSON values") {
+		t.Fatalf("trailing JSON err = %v", err)
+	}
+	if err := decodePeerRPCResponseStrict(strings.NewReader(`{`), &out); err == nil {
+		t.Fatal("invalid JSON response accepted")
+	}
+}
+
 func TestComputeBackendAdapterRequiresCustomBinary(t *testing.T) {
 	if _, err := computeBackendAdapter(ComputeConfig{Backend: domain.BackendCustom}, nodeagent.StoreProcessRegistry{}); err == nil || !strings.Contains(err.Error(), "custom compute backend binary") {
 		t.Fatalf("missing custom binary err = %v", err)
 	}
+}
+
+func TestBlockedModelCandidateReportsBackendCompatibilityRows(t *testing.T) {
+	noRows := blockedModelCandidate(domain.BootstrapModelCandidate{Name: "gemma"})
+	if len(noRows) != 1 || noRows[0].Kind != "model" || !strings.Contains(noRows[0].Reason, "no backend compatibility") {
+		t.Fatalf("no-row blocked candidate = %+v", noRows)
+	}
+	rows := blockedModelCandidate(domain.BootstrapModelCandidate{
+		Name: "gemma",
+		Backends: []domain.BootstrapBackendCompatibility{
+			{Backend: domain.BackendOpenVINO, Reason: "driver mismatch"},
+			{Backend: domain.BackendVLLM},
+		},
+	})
+	if len(rows) != 2 || rows[0].Backend != domain.BackendOpenVINO || rows[0].Reason != "driver mismatch" || rows[1].Reason != "backend compatibility is not ready" {
+		t.Fatalf("blocked candidate rows = %+v", rows)
+	}
+}
+
+type routerDynamicAdapter struct {
+	name            string
+	backend         domain.Backend
+	launches        []domain.Preset
+	dynamicLaunches []domain.Preset
+	readyAddrs      []string
+	stops           []ports.Handle
+}
+
+func (a *routerDynamicAdapter) Name() string {
+	return a.name
+}
+
+func (a *routerDynamicAdapter) Launch(_ context.Context, preset domain.Preset, addr string) (ports.Handle, error) {
+	a.launches = append(a.launches, preset)
+	return ports.Handle{PID: 100 + len(a.launches), Addr: addr, Kind: string(a.backend), Ref: string(a.backend)}, nil
+}
+
+func (a *routerDynamicAdapter) LaunchDynamic(_ context.Context, preset domain.Preset, addr string) (ports.Handle, error) {
+	a.dynamicLaunches = append(a.dynamicLaunches, preset)
+	host, _, _ := strings.Cut(addr, ":")
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	dynamicAddr := fmt.Sprintf("%s:%d", host, 6000+len(a.dynamicLaunches))
+	return ports.Handle{PID: 200 + len(a.dynamicLaunches), Addr: dynamicAddr, Kind: string(a.backend), Ref: string(a.backend)}, nil
+}
+
+func (a *routerDynamicAdapter) WaitReady(_ context.Context, addr string) error {
+	a.readyAddrs = append(a.readyAddrs, addr)
+	return nil
+}
+
+func (a *routerDynamicAdapter) Stop(_ context.Context, handle ports.Handle) error {
+	a.stops = append(a.stops, handle)
+	return nil
+}
+
+type routerStaticAdapter struct {
+	name    string
+	backend domain.Backend
+}
+
+func (a *routerStaticAdapter) Name() string {
+	return a.name
+}
+
+func (a *routerStaticAdapter) Launch(_ context.Context, _ domain.Preset, addr string) (ports.Handle, error) {
+	return ports.Handle{PID: 300, Addr: addr, Kind: string(a.backend), Ref: string(a.backend)}, nil
+}
+
+func (a *routerStaticAdapter) WaitReady(context.Context, string) error {
+	return nil
+}
+
+func (a *routerStaticAdapter) Stop(context.Context, ports.Handle) error {
+	return nil
 }
 
 type localAdmissionOnly struct{}

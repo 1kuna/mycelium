@@ -100,6 +100,85 @@ func TestServiceRejectsCoordinatedQueuedJobWhenHookRequiresSynchronousOwnership(
 	}
 }
 
+func TestServiceRejectsCoordinatedCommitQueuedWhenHookRequiresOwnership(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(1, 3).UTC())
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	base := func(coordinator *mocks.Coordinator) *Service {
+		return &Service{
+			Placer:      fakePlacer{},
+			Fleet:       staticFleet{},
+			Nodes:       staticNodes{},
+			Coordinator: coordinator,
+			JobLog:      &recordingJobLog{},
+			Queue:       NewQueue(clock),
+			Store:       &runtimeStore{},
+			Clock:       clock,
+		}
+	}
+
+	commitNoFit := &mocks.Coordinator{
+		Decision:  domain.PlacementDecision{JobID: job.ID, NodeID: "node-a", Action: domain.ActionLoadedNew},
+		CommitErr: domain.ErrNoFit,
+	}
+	if _, err := base(commitNoFit).SubmitWithPayload(context.Background(), job, []byte(`{"job":"a"}`), SubmitHooks{RejectQueued: true}); err == nil || !strings.Contains(err.Error(), "queued: no unit can fit") {
+		t.Fatalf("commit no-fit rejection err = %v", err)
+	}
+	if got := strings.Join(commitNoFit.Calls, ","); !strings.Contains(got, "fail:job-a:job \"job-a\" queued: no unit can fit") {
+		t.Fatalf("commit no-fit calls = %s", got)
+	}
+
+	commitQueued := &mocks.Coordinator{
+		Decision: domain.PlacementDecision{JobID: job.ID, NodeID: "node-a", Action: domain.ActionLoadedNew},
+		Outcome:  domain.CommitOutcome{Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued}},
+	}
+	if _, err := base(commitQueued).SubmitWithPayload(context.Background(), job, []byte(`{"job":"a"}`), SubmitHooks{RejectQueued: true}); err == nil || !strings.Contains(err.Error(), "queued: no instance available") {
+		t.Fatalf("commit queued rejection err = %v", err)
+	}
+	if got := strings.Join(commitQueued.Calls, ","); !strings.Contains(got, "fail:job-a:job \"job-a\" queued: no instance available") {
+		t.Fatalf("commit queued calls = %s", got)
+	}
+}
+
+func TestQueuedRejectionContracts(t *testing.T) {
+	if releaseErrAllowsOwnerFallback(nil) {
+		t.Fatal("nil release error allowed owner fallback")
+	}
+	if !releaseErrAllowsOwnerFallback(errors.New("lease abc not claimed by this coordinator")) {
+		t.Fatal("coordinator ownership release error did not allow owner fallback")
+	}
+	if !releaseErrAllowsOwnerFallback(errors.New("job has no committed lease")) {
+		t.Fatal("missing committed lease release error did not allow owner fallback")
+	}
+	if releaseErrAllowsOwnerFallback(errors.New("permission denied")) {
+		t.Fatal("unrelated release error allowed owner fallback")
+	}
+
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	saveErr := errors.New("save failed")
+	service := &Service{Store: &runtimeStore{saveJobErr: saveErr}}
+	result, err := service.rejectQueuedJob(context.Background(), job, "no instance available")
+	if !errors.Is(err, saveErr) || !strings.Contains(err.Error(), "queued: no instance available") {
+		t.Fatalf("reject queued err = %v", err)
+	}
+	if result.Decision.JobID != job.ID || result.Decision.Action != domain.ActionQueued {
+		t.Fatalf("reject queued result = %+v", result)
+	}
+
+	coordinator := &mocks.Coordinator{FailErr: errors.New("coordinator fail")}
+	store := &runtimeStore{saveJobErr: saveErr}
+	service = &Service{Coordinator: coordinator, Store: store}
+	result, err = service.rejectCoordinatedQueuedJob(context.Background(), job, domain.PlacementDecision{}, "no remote owner")
+	if !errors.Is(err, saveErr) || !strings.Contains(err.Error(), "coordinator fail") || !strings.Contains(err.Error(), "queued: no remote owner") {
+		t.Fatalf("reject coordinated err = %v", err)
+	}
+	if result.Decision.JobID != job.ID || result.Decision.Action != domain.ActionQueued {
+		t.Fatalf("reject coordinated result = %+v", result)
+	}
+	if got := strings.Join(coordinator.Calls, ","); !strings.Contains(got, "fail:job-a:job \"job-a\" queued: no remote owner") {
+		t.Fatalf("coordinator calls = %s", got)
+	}
+}
+
 func TestServiceLoadsAndGrantsLease(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(10, 0).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
@@ -2357,6 +2436,27 @@ func TestServiceDrainSkipsNoFitHeadJob(t *testing.T) {
 	remaining, ok := service.Queue.Dequeue()
 	if !ok || remaining.ID != "job-blocked" {
 		t.Fatalf("remaining = %+v ok=%v", remaining, ok)
+	}
+}
+
+func TestServiceDrainFailsLoudBeforeRunnableSelection(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(41, 30).UTC())
+	queue := NewQueue(clock)
+	queue.Enqueue(fixtures.MakeJob(fixtures.WithJobID("job-a")))
+	service := &Service{Queue: queue, Clock: clock}
+	if _, err := service.Drain(context.Background(), 1); err == nil || !strings.Contains(err.Error(), "not fully configured") {
+		t.Fatalf("unconfigured drain err = %v", err)
+	}
+
+	fleetErr := errors.New("fleet snapshot failed")
+	service = &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{Action: domain.ActionLoadedNew}},
+		Fleet:  staticFleet{err: fleetErr},
+		Queue:  queue,
+		Clock:  clock,
+	}
+	if _, err := service.Drain(context.Background(), 1); !errors.Is(err, fleetErr) {
+		t.Fatalf("fleet drain err = %v", err)
 	}
 }
 

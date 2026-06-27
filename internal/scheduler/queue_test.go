@@ -69,3 +69,31 @@ func TestQueueDequeueFirstWithPayloadSkipsNonMatches(t *testing.T) {
 		t.Fatalf("remaining = %+v ok=%v", remaining, ok)
 	}
 }
+
+func TestQueueDequeueFirstWithPayloadAllowsNilMatcher(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	queue := NewQueue(clock)
+	queue.EnqueueWithPayload(fixtures.MakeJob(fixtures.WithJobID("first")), []byte("payload"))
+
+	got, payload, ok := queue.DequeueFirstWithPayload(nil)
+	if !ok || got.ID != "first" || string(payload) != "payload" {
+		t.Fatalf("DequeueFirstWithPayload nil matcher = %+v %q %v", got, payload, ok)
+	}
+	if queue.Len() != 0 {
+		t.Fatalf("queue len = %d", queue.Len())
+	}
+}
+
+func TestQueueDequeueFirstWithPayloadReturnsFalseWhenNoJobMatches(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	queue := NewQueue(clock)
+	queue.EnqueueWithPayload(fixtures.MakeJob(fixtures.WithJobID("blocked")), []byte("payload"))
+
+	got, payload, ok := queue.DequeueFirstWithPayload(func(domain.Job, []byte) bool { return false })
+	if ok || got.ID != "" || payload != nil {
+		t.Fatalf("DequeueFirstWithPayload no match = %+v %q %v", got, payload, ok)
+	}
+	if queue.Len() != 1 {
+		t.Fatalf("queue len = %d", queue.Len())
+	}
+}
