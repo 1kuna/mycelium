@@ -56,16 +56,23 @@ important continuity points are:
   `snapshots.jsonl`, `failures.json`, and per-job outputs. Historical live runs
   included MacBook/Mac mini/B70/Spark scenarios, but do not assume those exact
   services are still up without checking.
-- Current Atlas-facing live route is MacBook gateway to B70 only unless Spark is
-  re-proven. On 2026-06-27 the MacBook LaunchAgent
-  `com.mycelium.real-fleet` listened at `192.168.0.143:55291`, B70 listened at
-  `192.168.0.153:55283`, and Spark's configured peer port
-  `192.168.0.16:55274` refused connections. A tiny strict JSON-schema
-  `/v1/chat/completions` request for `qwen3.5-9b` routed to B70 `inst_2` with
-  `X-Myc-Node: b70`, `X-Myc-Backend: vllm`,
+- Current Atlas-facing inference route remains MacBook gateway to B70 for proven
+  real work; Spark is now a repaired peer but not a proven inference owner. On
+  2026-06-27 the MacBook LaunchAgent `com.mycelium.real-fleet` listened at
+  `192.168.0.143:55291`, B70 listened at `192.168.0.153:55283`, and Spark was
+  repaired to listen at `192.168.0.16:55274`. Authenticated health/diagnostics
+  showed MacBook sees both B70 and Spark seeds ready, and Spark `/snapshot`
+  reported compute=true/status=ready with no live instances. A tiny strict
+  JSON-schema `/v1/chat/completions` request for `qwen3.5-9b` routed to B70
+  `inst_2` with `X-Myc-Node: b70`, `X-Myc-Backend: vllm`,
   `X-Myc-Decision: placed_on_warm_instance`, `X-Myc-Structured-Output:
   json_schema`, and `X-Myc-Guided-Decoding-Requested: true`, returning
-  parseable final JSON. This proves the current B70 path, not full fleet health.
+  parseable final JSON. The matching `spark-qwen9b` canary reached Spark loading
+  but timed out after 90s; Spark had no Mycelium vLLM/docker child process and
+  the checked Spark 9B model/cache paths were absent. Spark logs also showed
+  registry pulls from MacBook/B70 exceeding the current 16 MiB peer RPC body
+  limit. This proves repaired Spark peer reachability, not full-fleet inference
+  health.
 - Session telemetry was added on 2026-06-04. `session_metrics` records phase
   time-series samples alongside `run_metrics`; owner peers are authoritative for
   run/session telemetry, and remote-owner telemetry goes over authenticated
@@ -116,8 +123,9 @@ MacBook/B70 live canary, and Spark reachability classification. It did not push.
 
 - Real smoke state is drift-prone. Mac mini, B70, and Spark availability must be
   verified live before claiming fleet health. Current evidence proves MacBook to
-  B70 only; Spark is not part of the proven live route while
-  `192.168.0.16:55274` refuses connections.
+  B70 inference and repaired Spark peer reachability; it does not prove Spark
+  inference because the Spark canary timed out in loading and the Spark
+  model/backend artifacts need restoration or repointing.
 - `ops/private/` contains local smoke notes/bundles. Treat them as private
   operational evidence; do not publish secrets, tokens, host-specific paths, or
   model artifacts.

@@ -2,16 +2,23 @@
 
 ## Active
 
-- 2026-06-27: Current corrected-LAN live state is B70-only, not full-fleet.
-  MacBook gateway `192.168.0.143:55291` and B70 peer
-  `192.168.0.153:55283` are reachable and healthy, and a tiny strict
-  JSON-schema gateway request for `qwen3.5-9b` routed to warm B70 `inst_2` with
-  the expected Atlas telemetry headers. Spark's configured peer port
-  `192.168.0.16:55274` refused TCP and `/peer/health` connections, so Spark is
-  not currently a Mycelium compute peer in the proven route. Unblock full-fleet
-  by starting or repairing the intended Spark Mycelium peer on the corrected LAN
-  port, then re-run authenticated `/peer/health`/diagnostics plus a placement
-  canary that proves Spark is visible and selectable.
+- 2026-06-27: Corrected-LAN Spark peer is repaired, but full-fleet inference is
+  not yet proven. Spark `mycelium-real-fleet.service` now listens at
+  `192.168.0.16:55274` with the corrected config, and authenticated
+  `/peer/health`, `/peer/diagnostics`, and `/snapshot` show compute=true,
+  status=ready, and the MacBook gateway sees both B70 and Spark seeds ready.
+  A tiny strict JSON-schema B70 canary through `192.168.0.143:55291` still
+  routed to warm B70 `inst_2` and returned parseable final JSON, but the matching
+  `spark-qwen9b` gateway canary timed out after 90s with a Spark registry record
+  left in `loading`. Spark currently has no live vLLM/docker child process for
+  Mycelium, `/snapshot` reports no live instances, and the configured Spark 9B
+  model paths checked on host are absent. Spark logs also report registry pulls
+  from MacBook/B70 failing with `peer rpc body exceeds 16777216 bytes`, so
+  replicated full-fleet registry state is not healthy. Unblock full-fleet by
+  restoring or repointing the Spark model/cache/backend path, pruning the stale
+  Spark loading job if it does not clear naturally, and addressing the registry
+  snapshot size limit or compaction before rerunning a Spark placement/inference
+  canary.
 - 2026-06-27: `make ci` fails at the coverage gate only. Formatting, build,
   vet, and `go test ./... -race` passed, then `go run ./tools/covergate ...`
   failed because `internal/enginecatalog` reported 78.3% statement coverage
