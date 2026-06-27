@@ -130,20 +130,21 @@ Known from repo and live evidence:
 - `make ci` on 2026-06-27 previously passed formatting, build, vet, and
   `go test ./... -race`, but failed the coverage gate because
   `internal/enginecatalog` reported 78.3% statement coverage under the 85.0%
-  per-package floor. A later repo-local coverage pass raised
-  `internal/enginecatalog` to 96.9%, added `internal/enginecompat` coverage at
-  94.4%, raised `pkg/api` to 89.9%, raised `internal/modelcompat` to 97.5%,
-  raised `internal/catalog` to 88.2%, and raised `internal/bootstrap` to 92.6%;
-  a backend adapter pass then raised `internal/backends/llamacpp` to 85.0% and
-  `internal/backends/processadapter` to 85.2%, followed by a control CLI pass
-  that raised `cmd/internal/controlcli` to 85.2%, an OpenVINO adapter pass that
-  raised `internal/backends/openvino` to 100.0%, and a mock contract pass that
-  raised `test/mocks` to 93.5%. `make coverage` now reports `cmd/mycelium`
-  below the package floor; it is the remaining observed frontier in
-  `BLOCKERS.md`.
+  per-package floor. Follow-on repo-local coverage passes raised
+  `internal/enginecatalog`, `internal/enginecompat`, `pkg/api`,
+  `internal/modelcompat`, `internal/catalog`, `internal/bootstrap`,
+  `internal/backends/llamacpp`, `internal/backends/processadapter`,
+  `cmd/internal/controlcli`, `internal/backends/openvino`, and `test/mocks`
+  above their required floors. The final 2026-06-27 coverage pass added
+  focused behavior tests for `cmd/mycelium` command/runtime contracts, restored
+  `internal/scheduler` to its 100.0% required floor, and restored
+  `test/contract` to its 100.0% required floor. `make coverage` now passes
+  with `coverage ok: total 89.4%`.
 
 This handoff refresh performed repo authority inspection, `make ci`, a narrow
-MacBook/B70 live canary, and Spark reachability classification. It did not push.
+MacBook/B70 live canary, and Spark reachability classification. A later
+repo-local coverage continuation ran focused package tests plus `make coverage`
+and did not touch live services. It did not push.
 
 ## Active Blockers And Cautions
 

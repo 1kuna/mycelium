@@ -83,7 +83,7 @@ func TestMockBootstrapConformance(t *testing.T) {
 		profile)
 	RunEngineInstallerConformance(t, "mock",
 		func() ports.EngineInstaller {
-			return &mocks.EngineInstaller{Result: domain.BootstrapResult{PlanID: plan.ID}}
+			return &mocks.EngineInstaller{Result: domain.BootstrapResult{PlanID: plan.ID, Events: []domain.BootstrapEvent{{PlanID: plan.ID, Phase: "apply", Message: "started"}}}}
 		},
 		plan)
 	RunEngineVerifierConformance(t, "mock",

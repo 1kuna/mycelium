@@ -27,23 +27,19 @@
   --name real-fleet --system`, install the system service with sudo, run
   `service status`, and immediately restore the known-good binary/service if
   seed diagnostics fail.
-- 2026-06-27: `make ci` still fails at the coverage gate, but the original
-  `internal/enginecatalog` blocker is resolved and the below-floor frontier is
-  narrowing. Focused tests raised `internal/enginecatalog` from 78.3% to 96.9%,
-  added first coverage for `internal/enginecompat` at 94.4%, raised `pkg/api`
-  to 89.9%, raised `internal/modelcompat` from 82.4% to 97.5%, and raised
-  `internal/catalog` from 82.9% to 88.2%, raised `internal/bootstrap` from
-  73.6% to 92.6%, raised `internal/backends/llamacpp` from 83.2% to 85.0%,
-  raised `internal/backends/processadapter` from 83.0% to 85.2%, raised
-  `cmd/internal/controlcli` from 82.4% to 85.2%, and raised
-  `internal/backends/openvino` from 0.0% to 100.0%, and raised `test/mocks`
-  from 77.8% to 93.5%. The current `make coverage` run now reaches covergate
-  and reports `cmd/mycelium` at 81.7% under the 85.0% package floor. Unblock by
-  adding focused behavior tests for the command/runtime surface; do not weaken
-  the gate.
 
 ## Resolved
 
+- 2026-06-27: The repo-local coverage gate is resolved. Focused behavior tests
+  raised `cmd/mycelium` from 81.7% to the 85.0% package floor by covering
+  operator-visible command/runtime contracts: service diagnostics and service
+  manager failures, backend routing and OpenVINO process launch arguments,
+  config save/backup behavior, CLI helper parsing, auth/listen classification,
+  and bootstrap compatibility profile selection. The full gate then exposed
+  exact strict-floor gaps in `internal/scheduler` and `test/contract`; focused
+  tests restored `internal/scheduler` to 100.0% and `test/contract` to 100.0%
+  by covering queue/drain rejection paths and engine-installer progress events.
+  `make coverage` now passes with `coverage ok: total 89.4%`.
 - 2026-06-27: Corrected-LAN Spark inference and the peer-registry cap blocker
   are resolved from narrow live proof. Spark `mycelium-real-fleet.service`
   listens at `192.168.0.16:55274`; authenticated MacBook diagnostics showed
