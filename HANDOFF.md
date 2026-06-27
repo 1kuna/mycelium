@@ -133,9 +133,9 @@ Known from repo and live evidence:
   per-package floor. A later repo-local coverage pass raised
   `internal/enginecatalog` to 96.9%, added `internal/enginecompat` coverage at
   94.4%, raised `pkg/api` to 89.9%, raised `internal/modelcompat` to 97.5%,
-  and raised `internal/catalog` to 88.2%; `make coverage` now first reports
-  `internal/bootstrap` below the package floor, with the remaining frontier
-  listed in `BLOCKERS.md`.
+  raised `internal/catalog` to 88.2%, and raised `internal/bootstrap` to 92.6%;
+  `make coverage` now first reports `cmd/mycelium` below the package floor,
+  with the remaining frontier listed in `BLOCKERS.md`.
 
 This handoff refresh performed repo authority inspection, `make ci`, a narrow
 MacBook/B70 live canary, and Spark reachability classification. It did not push.
