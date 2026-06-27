@@ -79,6 +79,16 @@ important continuity points are:
   cleared from the MacBook, B70, and Spark control DBs with timestamped backups;
   authenticated `/registry/snapshot` responses then stayed small and below the
   16 MiB peer RPC body cap.
+- On 2026-06-27 the current Linux binaries containing `27a1e5f` were deployed
+  to B70 and Spark through their existing `mycelium-real-fleet.service`
+  user-systemd units. B70 reported SHA256
+  `28f56acec536eb29b32084073ce39276fac35494b0c2a52dcb6177fe816973ba`; Spark
+  reported SHA256
+  `842e62c3f81bbfa9084fe6dc1d9470decc469d4fa9f2a888758c46bd9e3ff175`.
+  Post-update diagnostics showed MacBook, B70, and Spark mutually reachable
+  across the corrected LAN, B70/Spark `/registry/snapshot` responses were
+  compact empty snapshots, and strict JSON-schema canaries through the MacBook
+  gateway succeeded on both B70 and Spark after cold load.
 - Session telemetry was added on 2026-06-04. `session_metrics` records phase
   time-series samples alongside `run_metrics`; owner peers are authoritative for
   run/session telemetry, and remote-owner telemetry goes over authenticated
@@ -131,6 +141,11 @@ MacBook/B70 live canary, and Spark reachability classification. It did not push.
   verified live before claiming fleet health. Current evidence proves MacBook to
   B70 inference and MacBook to Spark inference; re-check live health before
   treating either owner as available for new scale work.
+- The MacBook gateway binary itself remains intentionally rolled back to the
+  known-good LaunchAgent-approved binary because the current Darwin binary loses
+  corrected-LAN seed reachability under the user LaunchAgent. Do not replace
+  `/Users/zach/.mycelium/bin/mycelium` again without a rollback-ready test or a
+  stable LaunchDaemon/bundled-signing activation plan.
 - `ops/private/` contains local smoke notes/bundles. Treat them as private
   operational evidence; do not publish secrets, tokens, host-specific paths, or
   model artifacts.

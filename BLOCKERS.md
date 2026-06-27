@@ -2,6 +2,24 @@
 
 ## Active
 
+- 2026-06-27: MacBook LaunchAgent activation blocks rolling the committed
+  registry-compaction binary live on the gateway. The current built Darwin
+  binary can probe B70 and Spark when run interactively, but the same binary
+  under a user LaunchAgent returns `no route to host` for both corrected-LAN
+  seeds. A temporary LaunchAgent using the existing approved binary path and
+  old binary succeeds, while a temporary LaunchAgent using the current binary
+  path fails; Developer ID signing did not change the failure. A bounded
+  real-path repro copied the current binary over
+  `/Users/zach/.mycelium/bin/mycelium`, kicked `com.mycelium.real-fleet`, and
+  `service status` failed with both seeds unreachable; the known-good backup was
+  restored immediately and the gateway returned to `seeds ready 2/2`. B70 and
+  Spark were safely updated to the current Linux binaries through their existing
+  `mycelium-real-fleet.service` user-systemd units, and post-update strict
+  JSON-schema canaries through the MacBook gateway succeeded on both owners.
+  Remaining activation route for the MacBook is a stable Local Network
+  permission strategy, likely the documented system LaunchDaemon path or a
+  properly bundled/signed helper, rather than another blind user-LaunchAgent
+  binary swap.
 - 2026-06-27: `make ci` fails at the coverage gate only. Formatting, build,
   vet, and `go test ./... -race` passed, then `go run ./tools/covergate ...`
   failed because `internal/enginecatalog` reported 78.3% statement coverage
