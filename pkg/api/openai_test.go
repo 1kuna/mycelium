@@ -50,6 +50,20 @@ func TestOpenAIMessageRejectsInvalidContentShape(t *testing.T) {
 	}
 }
 
+func TestOpenAIMessageAcceptsNullAndRejectsTrailingValues(t *testing.T) {
+	var msg OpenAIMessage
+	if err := json.Unmarshal([]byte(`{"role":"user","content":null}`), &msg); err != nil {
+		t.Fatalf("unmarshal null content: %v", err)
+	}
+	if msg.Content != "" || len(msg.ContentParts) != 0 {
+		t.Fatalf("null content msg = %+v", msg)
+	}
+	err := json.Unmarshal([]byte(`{"role":"user","content":"hi"} {}`), &msg)
+	if err == nil {
+		t.Fatalf("trailing values err = %v", err)
+	}
+}
+
 func TestOpenAIMessageRejectsUnsupportedNestedFields(t *testing.T) {
 	cases := []struct {
 		name string
@@ -108,5 +122,45 @@ func TestOpenAIChatResponseAcceptsResponseRefusalField(t *testing.T) {
 	}
 	if got := strings.Join(resp.Choices[0].Message.UnsupportedResponseFields, ","); got != "reasoning_content" {
 		t.Fatalf("unsupported fields = %q", got)
+	}
+}
+
+func TestOpenAIChatResponseRecordsNonNullUnsupportedFields(t *testing.T) {
+	var resp OpenAIChatResponse
+	err := json.Unmarshal([]byte(`{
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "",
+				"annotations": [{"type":"url"}],
+				"audio": {"id":"aud"},
+				"reasoning": "visible reasoning side channel",
+				"refusal": "no"
+			},
+			"finish_reason": "stop"
+		}]
+	}`), &resp)
+	if err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	msg := resp.Choices[0].Message
+	if msg.Reasoning != "visible reasoning side channel" {
+		t.Fatalf("reasoning = %q", msg.Reasoning)
+	}
+	if got := strings.Join(msg.UnsupportedResponseFields, ","); got != "annotations,audio,reasoning,refusal" {
+		t.Fatalf("unsupported fields = %q", got)
+	}
+}
+
+func TestOpenAIChatResponseRejectsMalformedReasoningFields(t *testing.T) {
+	for _, body := range []string{
+		`{"choices":[{"message":{"role":"assistant","content":"","reasoning":{}}}]}`,
+		`{"choices":[{"message":{"role":"assistant","content":"","reasoning_content":{}}}]}`,
+	} {
+		var resp OpenAIChatResponse
+		if err := json.Unmarshal([]byte(body), &resp); err == nil {
+			t.Fatalf("malformed reasoning body succeeded: %s", body)
+		}
 	}
 }
