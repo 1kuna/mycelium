@@ -2,6 +2,8 @@ package catalog
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +107,108 @@ func TestDiscoverCandidatesTreatsGGUFWithMMProjAsVisionLlamaCppCandidate(t *test
 	}
 	if len(candidate.Backends) != 1 || candidate.Backends[0].Backend != domain.BackendLlamaCpp || !candidate.Backends[0].Ready {
 		t.Fatalf("backend compatibility = %+v", candidate.Backends)
+	}
+}
+
+func TestDiscoverCandidatesValidatesRootsAndHonorsCancellation(t *testing.T) {
+	if _, err := DiscoverCandidates(context.Background(), DiscoveryRequest{}); err == nil || !strings.Contains(err.Error(), "at least one discovery root") {
+		t.Fatalf("missing roots error = %v", err)
+	}
+	if _, err := DiscoverCandidates(context.Background(), DiscoveryRequest{Roots: []string{""}}); err == nil || !strings.Contains(err.Error(), "discovery root is required") {
+		t.Fatalf("blank root error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	root := t.TempDir()
+	if _, err := DiscoverCandidates(ctx, DiscoveryRequest{Roots: []string{root}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled discovery error = %v", err)
+	}
+	if _, err := DiscoverCandidates(context.Background(), DiscoveryRequest{Roots: []string{filepath.Join(root, "missing")}}); err == nil {
+		t.Fatalf("missing root should fail")
+	}
+}
+
+func TestDiscoverCandidatesFindsSafetensorsDirsAcrossRootsAndSorts(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	writeFile(t, filepath.Join(rootA, "zeta", "config.json"), `{"model_type":"qwen","max_position_embeddings":4096}`)
+	writeFile(t, filepath.Join(rootA, "zeta", "model.SAFETENSORS"), "weights")
+	writeFile(t, filepath.Join(rootB, "alpha", "config.json"), `{"model_type":"qwen","text_config":{"max_position_embeddings":8192}}`)
+	writeFile(t, filepath.Join(rootB, "alpha", "model.safetensors"), "weights")
+
+	candidates, err := DiscoverCandidates(context.Background(), DiscoveryRequest{
+		HostID: "spark",
+		Roots:  []string{rootA, rootB},
+		Engines: []domain.EngineProfile{{
+			Backend:         domain.BackendVLLM,
+			Ready:           true,
+			SupportedModels: []string{FormatGGUF},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("DiscoverCandidates: %v", err)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("candidates = %+v", candidates)
+	}
+	if candidates[0].Path > candidates[1].Path {
+		t.Fatalf("candidates not sorted by path: %+v", candidates)
+	}
+	for _, candidate := range candidates {
+		if candidate.HostID != "spark" || candidate.Format != FormatHFTransformers || candidate.ModelType != "qwen" {
+			t.Fatalf("candidate = %+v", candidate)
+		}
+		if len(candidate.Backends) != 1 || candidate.Backends[0].Ready {
+			t.Fatalf("backend compatibility = %+v", candidate.Backends)
+		}
+		if !strings.Contains(candidate.Backends[0].Reason, "does not advertise hf-transformers support") {
+			t.Fatalf("backend reason = %+v", candidate.Backends)
+		}
+	}
+	if got := candidates[0].ContextLength + candidates[1].ContextLength; got != 12288 {
+		t.Fatalf("context lengths sum = %d", got)
+	}
+}
+
+func TestDiscoveryCompatibilityAndHelpersCoverEdgeCases(t *testing.T) {
+	unready := compatibility(domain.BackendLlamaCpp, FormatGGUF, engineMap([]domain.EngineProfile{
+		{Backend: "", Ready: true},
+		{Backend: domain.BackendLlamaCpp, Ready: false},
+	}))
+	if unready.Ready || !strings.Contains(unready.Reason, "llamacpp runtime is not ready") {
+		t.Fatalf("unready compatibility = %+v", unready)
+	}
+	ready := compatibility(domain.BackendLlamaCpp, FormatGGUF, engineMap([]domain.EngineProfile{
+		{Backend: domain.BackendLlamaCpp, Ready: true},
+	}))
+	if !ready.Ready {
+		t.Fatalf("ready compatibility = %+v", ready)
+	}
+	if contains([]string{"mlx", FormatGGUF}, FormatHFTransformers) {
+		t.Fatalf("contains should reject missing value")
+	}
+	if bytesToMB(0) != 0 || bytesToMB(1) != 1 || bytesToMB(1024*1024+1) != 2 {
+		t.Fatalf("bytesToMB rounding changed")
+	}
+}
+
+func TestDiscoverySuffixAndMMProjHelpersRejectDirectories(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "model.gguf", "file"), "not-a-model")
+	writeFile(t, filepath.Join(root, "mmproj.gguf", "file"), "not-a-projector")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	byName := map[string]fs.DirEntry{}
+	for _, entry := range entries {
+		byName[entry.Name()] = entry
+	}
+	if hasSuffixEntry(byName, ".gguf") {
+		t.Fatalf("directory suffix should not count as model file")
+	}
+	if hasSiblingMMProj(filepath.Join(root, "other.gguf")) {
+		t.Fatalf("directory mmproj should not count as sibling projector")
 	}
 }
 
