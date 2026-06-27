@@ -96,12 +96,14 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 
 	fleet, err := s.Fleet.Snapshot(ctx)
 	if err != nil {
+		job.Status = domain.JobFailed
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		return Result{}, err
 	}
 	decision, err := s.Placer.Place(ctx, job, fleet)
 	if err != nil {
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		return Result{Decision: decision}, err
 	}
 	if decision.Action == domain.ActionQueued {
@@ -110,7 +112,7 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 		}
 		job.Status = domain.JobQueued
 		s.Queue.Enqueue(job)
-		if err := s.Store.SaveJob(ctx, job); err != nil {
+		if err := s.Store.SaveJob(cleanupContext(ctx), job); err != nil {
 			return Result{Decision: decision}, err
 		}
 		return Result{Decision: decision}, nil
@@ -119,13 +121,13 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 	preemptedLeases, preemptedVictims, err := s.inspectPreemptions(ctx, decision, fleet)
 	if err != nil {
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		return Result{Decision: decision}, err
 	}
 	ownerLease, owner, err := s.commitOwnerAdmission(ctx, job, decision, preemptedLeases)
 	if err != nil {
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		return Result{Decision: decision}, err
 	}
 	releaseOwner := func() error {
@@ -140,7 +142,7 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 	}
 	if err := s.finishPreemption(ctx, decision, fleet, preemptedLeases, preemptedVictims); err != nil {
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		if releaseErr := releaseOwner(); releaseErr != nil {
 			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
 		}
@@ -149,7 +151,7 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 	if decision.InstanceID == "" {
 		if err := runBeforeColdLoadHook(ctx, decision, hooks); err != nil {
 			job.Status = domain.JobFailed
-			_ = s.Store.SaveJob(ctx, job)
+			_ = s.Store.SaveJob(cleanupContext(ctx), job)
 			if releaseErr := releaseOwner(); releaseErr != nil {
 				return Result{Decision: decision}, releaseErr
 			}
@@ -159,7 +161,7 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 	inst, err := s.resolveInstance(ctx, job, decision, fleet)
 	if err != nil {
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		if releaseErr := releaseOwner(); releaseErr != nil {
 			return Result{Decision: decision}, releaseErr
 		}
@@ -169,7 +171,7 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 	if ownerLease.ID != "" {
 		if err := s.ensureOwnerLeaseBound(ctx, ownerLease, lease); err != nil {
 			job.Status = domain.JobFailed
-			_ = s.Store.SaveJob(ctx, job)
+			_ = s.Store.SaveJob(cleanupContext(ctx), job)
 			if releaseErr := releaseOwner(); releaseErr != nil {
 				return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, releaseErr)
 			}
@@ -177,19 +179,19 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 		}
 	}
 	job.Status = domain.JobRunning
-	if err := s.Store.SaveInstance(ctx, inst); err != nil {
+	if err := s.Store.SaveInstance(cleanupContext(ctx), inst); err != nil {
 		if cleanupErr := s.cleanupLoadedInstance(ctx, inst, decision.InstanceID == "", releaseOwner); cleanupErr != nil {
 			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
 		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
-	if err := s.Store.SaveLease(ctx, lease); err != nil {
+	if err := s.Store.SaveLease(cleanupContext(ctx), lease); err != nil {
 		if cleanupErr := s.cleanupLoadedInstance(ctx, inst, decision.InstanceID == "", releaseOwner); cleanupErr != nil {
 			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
 		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
-	if err := s.Store.SaveJob(ctx, job); err != nil {
+	if err := s.Store.SaveJob(cleanupContext(ctx), job); err != nil {
 		if cleanupErr := s.cleanupLoadedInstance(ctx, inst, decision.InstanceID == "", releaseOwner); cleanupErr != nil {
 			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
 		}
@@ -217,13 +219,13 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	}
 	if err := s.Coordinator.ClaimJob(ctx, job.ID); err != nil {
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		return Result{}, err
 	}
 	decision, err := s.Coordinator.Plan(ctx, job.ID)
 	if err != nil {
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		return Result{Decision: decision}, err
 	}
 	if decision.Action == domain.ActionQueued {
@@ -235,7 +237,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		}
 		job.Status = domain.JobQueued
 		s.Queue.EnqueueWithPayload(job, payload)
-		if err := s.Store.SaveJob(ctx, job); err != nil {
+		if err := s.Store.SaveJob(cleanupContext(ctx), job); err != nil {
 			return Result{Decision: decision}, err
 		}
 		return Result{Decision: decision}, nil
@@ -249,13 +251,13 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 			}
 			job.Status = domain.JobQueued
 			s.Queue.EnqueueWithPayload(job, payload)
-			if saveErr := s.Store.SaveJob(ctx, job); saveErr != nil {
+			if saveErr := s.Store.SaveJob(cleanupContext(ctx), job); saveErr != nil {
 				return Result{Decision: decision}, errors.Join(err, saveErr)
 			}
 			return Result{Decision: decision}, err
 		}
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		return Result{Decision: decision}, err
 	}
 	decision = outcome.Decision
@@ -266,21 +268,21 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		}
 		job.Status = domain.JobQueued
 		s.Queue.EnqueueWithPayload(job, payload)
-		if err := s.Store.SaveJob(ctx, job); err != nil {
+		if err := s.Store.SaveJob(cleanupContext(ctx), job); err != nil {
 			return Result{Decision: decision}, err
 		}
 		return Result{Decision: decision, Lease: ownerLease}, nil
 	}
 	if decision.InstanceID == "" && ownerLease.ID == "" {
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		return Result{Decision: decision}, fmt.Errorf("coordinated cold load for job %q returned no owner lease", job.ID)
 	}
 	decision = decisionWithOwnerLease(decision, ownerLease)
 	fleet, err := s.Fleet.Snapshot(ctx)
 	if err != nil {
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
 			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
 		}
@@ -289,7 +291,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	preemptedLeases, preemptedVictims, err := s.inspectPreemptions(ctx, decision, fleet)
 	if err != nil {
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
 			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
 		}
@@ -297,7 +299,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	}
 	if err := s.finishPreemption(ctx, decision, fleet, preemptedLeases, preemptedVictims); err != nil {
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
 			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
 		}
@@ -306,7 +308,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	if decision.InstanceID == "" {
 		if err := runBeforeColdLoadHook(ctx, decision, hooks); err != nil {
 			job.Status = domain.JobFailed
-			_ = s.Store.SaveJob(ctx, job)
+			_ = s.Store.SaveJob(cleanupContext(ctx), job)
 			if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
 				return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
 			}
@@ -316,7 +318,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	inst, err := s.resolveInstance(ctx, job, decision, fleet)
 	if err != nil {
 		job.Status = domain.JobFailed
-		_ = s.Store.SaveJob(ctx, job)
+		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
 			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
 		}
@@ -326,8 +328,8 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	if ownerLease.ID != "" {
 		if err := s.ensureOwnerLeaseBound(ctx, ownerLease, lease); err != nil {
 			job.Status = domain.JobFailed
-			_ = s.Store.SaveJob(ctx, job)
-			cleanupErr := s.Coordinator.Release(ctx, job.ID)
+			_ = s.Store.SaveJob(cleanupContext(ctx), job)
+			cleanupErr := s.Coordinator.Release(cleanupContext(ctx), job.ID)
 			if decision.InstanceID == "" {
 				cleanupErr = s.cleanupCoordinatedLoad(ctx, job.ID, inst)
 			}
@@ -338,19 +340,19 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		}
 	}
 	job.Status = domain.JobRunning
-	if err := s.Store.SaveInstance(ctx, inst); err != nil {
+	if err := s.Store.SaveInstance(cleanupContext(ctx), inst); err != nil {
 		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
 			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
 		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
-	if err := s.Store.SaveLease(ctx, lease); err != nil {
+	if err := s.Store.SaveLease(cleanupContext(ctx), lease); err != nil {
 		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
 			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
 		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
-	if err := s.Store.SaveJob(ctx, job); err != nil {
+	if err := s.Store.SaveJob(cleanupContext(ctx), job); err != nil {
 		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
 			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
 		}
@@ -666,7 +668,7 @@ func (s *Service) rejectQueuedJob(ctx context.Context, job domain.Job, reason st
 	err := fmt.Errorf("job %q queued: %s", job.ID, reason)
 	job.Status = domain.JobFailed
 	job.Error = err.Error()
-	if saveErr := s.Store.SaveJob(ctx, job); saveErr != nil {
+	if saveErr := s.Store.SaveJob(cleanupContext(ctx), job); saveErr != nil {
 		return Result{Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued}}, errors.Join(err, saveErr)
 	}
 	return Result{Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued}}, err
@@ -682,8 +684,8 @@ func (s *Service) rejectCoordinatedQueuedJob(ctx context.Context, job domain.Job
 	err := fmt.Errorf("job %q queued: %s", job.ID, reason)
 	job.Status = domain.JobFailed
 	job.Error = err.Error()
-	failErr := s.Coordinator.Fail(ctx, job.ID, err)
-	saveErr := s.Store.SaveJob(ctx, job)
+	failErr := s.Coordinator.Fail(cleanupContext(ctx), job.ID, err)
+	saveErr := s.Store.SaveJob(cleanupContext(ctx), job)
 	return Result{Decision: decision}, errors.Join(err, failErr, saveErr)
 }
 

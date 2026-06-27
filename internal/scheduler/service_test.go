@@ -557,6 +557,76 @@ func TestServiceSubmitWithPayloadReleasesCoordinatorWithCleanupContextOnCanceled
 	}
 }
 
+func TestServiceSubmitWithPayloadMarksCanceledColdLoadFailedWithCleanupContext(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 27, 10, 51, 30, 0, time.UTC))
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	coordinator := &cleanupContextCoordinator{Coordinator: mocks.Coordinator{
+		Decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew},
+		Lease:    domain.Lease{ID: "owner-lease-a", JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1)},
+	}}
+	store := &contextAwareRuntimeStore{}
+	cancelingAgent := cancelingLoadAgent{NodeAgent: *mocks.NewNodeAgent(node)}
+	service := &Service{
+		Placer:      fakePlacer{},
+		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:       staticPortNodes{agents: map[string]ports.NodeAgent{node.ID: &cancelingAgent}},
+		Coordinator: coordinator,
+		JobLog:      &recordingJobLog{},
+		Queue:       NewQueue(clock),
+		Store:       store,
+		Clock:       clock,
+		Presets:     map[string]domain.Preset{preset.ID: preset},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelingAgent.cancel = cancel
+
+	_, err := service.SubmitWithPayload(ctx, fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), []byte(`{"job":"a"}`))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SubmitWithPayload err = %v", err)
+	}
+	if got := store.jobs["job-a"]; got.Status != domain.JobFailed {
+		t.Fatalf("job after canceled cold load = %+v", got)
+	}
+	if coordinator.releaseContextErr != nil {
+		t.Fatalf("release used canceled context: %v", coordinator.releaseContextErr)
+	}
+}
+
+func TestServiceSubmitMarksCanceledLocalColdLoadFailedWithCleanupContext(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 6, 27, 10, 51, 45, 0, time.UTC))
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	store := &contextAwareRuntimeStore{}
+	cancelingAgent := cancelingLoadAgent{NodeAgent: *mocks.NewNodeAgent(node)}
+	admission := &mocks.AdmissionController{}
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticPortNodes{agents: map[string]ports.NodeAgent{node.ID: &cancelingAgent}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelingAgent.cancel = cancel
+
+	_, err := service.Submit(ctx, fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Submit err = %v", err)
+	}
+	if got := store.jobs["job-a"]; got.Status != domain.JobFailed {
+		t.Fatalf("job after canceled local cold load = %+v", got)
+	}
+	if strings.Join(admission.Calls, ",") != "offer:job-a,commit:offer_job-a:1,release:lease_offer_job-a" {
+		t.Fatalf("admission calls = %+v", admission.Calls)
+	}
+}
+
 func TestServiceSubmitWithPayloadCoordinatorErrorPaths(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(10, 52).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
@@ -2881,6 +2951,69 @@ func (n staticNodes) AdmissionController(nodeID string) (ports.AdmissionControll
 		return nil, domain.ErrUnreachable
 	}
 	return admission, nil
+}
+
+type staticPortNodes struct {
+	agents map[string]ports.NodeAgent
+}
+
+func (n staticPortNodes) NodeAgent(nodeID string) (ports.NodeAgent, error) {
+	if agent, ok := n.agents[nodeID]; ok {
+		return agent, nil
+	}
+	return nil, domain.ErrUnreachable
+}
+
+type cancelingLoadAgent struct {
+	mocks.NodeAgent
+	cancel context.CancelFunc
+}
+
+func (a *cancelingLoadAgent) Load(ctx context.Context, req domain.LoadRequest) (domain.ModelInstance, error) {
+	a.Calls = append(a.Calls, "load:"+req.Preset.ID)
+	if a.cancel != nil {
+		a.cancel()
+	}
+	return domain.ModelInstance{}, ctx.Err()
+}
+
+type contextAwareRuntimeStore struct {
+	runtimeStore
+}
+
+func (s *contextAwareRuntimeStore) SaveJob(ctx context.Context, job domain.Job) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.runtimeStore.SaveJob(ctx, job)
+}
+
+func (s *contextAwareRuntimeStore) SaveLease(ctx context.Context, lease domain.Lease) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.runtimeStore.SaveLease(ctx, lease)
+}
+
+func (s *contextAwareRuntimeStore) SaveInstance(ctx context.Context, inst domain.ModelInstance) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.runtimeStore.SaveInstance(ctx, inst)
+}
+
+func (s *contextAwareRuntimeStore) DeleteLease(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.runtimeStore.DeleteLease(ctx, id)
+}
+
+func (s *contextAwareRuntimeStore) DeleteInstance(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.runtimeStore.DeleteInstance(ctx, id)
 }
 
 type admissionOnly struct{}
