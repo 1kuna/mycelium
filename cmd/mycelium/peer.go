@@ -971,7 +971,7 @@ func mountRegistryHTTP(mux *http.ServeMux, registry ports.JobRegistry, rpcToken 
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(records); err != nil {
+		if err := json.NewEncoder(w).Encode(peercoord.RescueSnapshot(records)); err != nil {
 			log.Printf("mycelium registry snapshot write failed: %v", err)
 		}
 	})

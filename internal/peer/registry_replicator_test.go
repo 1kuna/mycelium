@@ -42,6 +42,42 @@ func TestRegistryReplicatorSyncOncePullsMergesAndPushes(t *testing.T) {
 	}
 }
 
+func TestRegistryReplicatorSyncPushesOnlyRescueSnapshot(t *testing.T) {
+	ctx := context.Background()
+	local := NewJobRegistry()
+	running := registryRecord("running", "peer-a", domain.JobRunning, time.Unix(10, 0).UTC())
+	done := registryRecord("done", "peer-a", domain.JobDone, time.Unix(11, 0).UTC())
+	cleanup := registryRecord("cleanup", "peer-a", domain.JobDone, time.Unix(12, 0).UTC())
+	cleanup.CleanupRequired = true
+	for _, rec := range []domain.JobRecord{running, done, cleanup} {
+		if err := local.Put(ctx, rec); err != nil {
+			t.Fatalf("Put %s: %v", rec.JobID, err)
+		}
+	}
+	client := &recordingRegistryClient{}
+	discovery := &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-b"}}}
+	replicator := RegistryReplicator{Local: local, Peers: discovery, Client: client, SelfID: "peer-a"}
+
+	if err := replicator.SyncOnce(ctx); err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+	pushed := client.pushes["peer-b"]
+	if len(pushed) != 1 {
+		t.Fatalf("pushes = %+v", pushed)
+	}
+	got := pushed[0]
+	if len(got) != 2 || got[0].JobID != "running" || got[1].JobID != "cleanup" {
+		t.Fatalf("rescue snapshot push = %+v", got)
+	}
+	localRecords, err := local.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(localRecords) != 3 {
+		t.Fatalf("local registry was compacted: %+v", localRecords)
+	}
+}
+
 func TestRegistryReplicatorPushRecordSkipsSelf(t *testing.T) {
 	ctx := context.Background()
 	client := &recordingRegistryClient{}
