@@ -3115,6 +3115,55 @@ func TestRegistryRPCRequiresAuthAndMergesRecords(t *testing.T) {
 	}
 }
 
+func TestRegistryRPCSnapshotCompactsTerminalHistory(t *testing.T) {
+	ctx := context.Background()
+	store := peerTestRegistry(t)
+	running := domain.JobRecord{
+		JobID:       "job-running",
+		Coordinator: "peer-a",
+		Status:      domain.JobRunning,
+		Request:     []byte(`{"job":"running"}`),
+		UpdatedAt:   time.Unix(20, 0).UTC(),
+	}
+	done := domain.JobRecord{
+		JobID:       "job-done",
+		Coordinator: "peer-a",
+		Status:      domain.JobDone,
+		Request:     []byte(`{"job":"done"}`),
+		UpdatedAt:   time.Unix(21, 0).UTC(),
+	}
+	cleanup := domain.JobRecord{
+		JobID:           "job-cleanup",
+		Coordinator:     "peer-a",
+		Status:          domain.JobDone,
+		Request:         []byte(`{"job":"cleanup"}`),
+		CleanupRequired: true,
+		UpdatedAt:       time.Unix(22, 0).UTC(),
+	}
+	for _, rec := range []domain.JobRecord{running, done, cleanup} {
+		if err := store.Put(ctx, rec); err != nil {
+			t.Fatalf("Put %s: %v", rec.JobID, err)
+		}
+	}
+	mux := http.NewServeMux()
+	mountRegistryHTTP(mux, store, "rpc-secret")
+	client := registryHTTPClient{AuthToken: "rpc-secret", Client: directHTTPClient(mux)}
+	records, err := client.Snapshot(ctx, domain.Peer{ID: "peer-a", Addresses: []string{"http://registry-peer.test"}})
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(records) != 2 || records[0].JobID != "job-running" || records[1].JobID != "job-cleanup" {
+		t.Fatalf("compact registry snapshot = %+v", records)
+	}
+	localRecords, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("local Snapshot: %v", err)
+	}
+	if len(localRecords) != 3 {
+		t.Fatalf("local registry was compacted: %+v", localRecords)
+	}
+}
+
 func TestRegistrySnapshotWriteErrorDoesNotPanic(t *testing.T) {
 	ctx := context.Background()
 	store := peerTestRegistry(t)

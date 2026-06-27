@@ -25,6 +25,17 @@ type RegistryReplicator struct {
 	SelfID string
 }
 
+func RescueSnapshot(records []domain.JobRecord) []domain.JobRecord {
+	out := make([]domain.JobRecord, 0, len(records))
+	for _, rec := range records {
+		if terminalRecordStatus(rec.Status) && !rec.CleanupRequired {
+			continue
+		}
+		out = append(out, cloneRecord(rec))
+	}
+	return out
+}
+
 func (r RegistryReplicator) SyncOnce(ctx context.Context) error {
 	if err := r.validate(); err != nil {
 		return err
@@ -52,7 +63,7 @@ func (r RegistryReplicator) SyncOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := r.Client.Push(ctx, peer, redactPrivatePayloads(local)); err != nil {
+		if err := r.Client.Push(ctx, peer, redactPrivatePayloads(RescueSnapshot(local))); err != nil {
 			syncErr = errors.Join(syncErr, fmt.Errorf("push registry to peer %q: %w", peer.ID, err))
 		}
 	}
