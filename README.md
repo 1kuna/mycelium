@@ -194,6 +194,83 @@ Telemetry worth checking:
 - `session_metrics`: phase timeline samples such as placed, load-ready, upstream-start, first-byte, stream-chunk, complete, and error.
 - recommendation records: context-cap, consolidation, and engine/parameter recommendations derived from telemetry.
 
+### Prove cold-load cancellation cleanup after activation
+
+Use this only after the gateway and owner peers are deliberately activated on a
+binary that contains the cold-load cancellation cleanup fix. It is a proof
+recipe, not an activation step. Pick a maintenance-safe model alias or preset
+that is not already warm on the chosen owner; if the request reuses a warm
+instance, it does not prove cold-load cleanup.
+
+```bash
+CANARY_ID="stale-cold-load-$(date -u +%Y%m%dT%H%M%SZ)"
+OUT="${TMPDIR:-/tmp}/mycelium-${CANARY_ID}"
+GATEWAY="http://<gateway-host>:<port>"
+MODEL="<unloaded-test-model-or-alias>"
+DB="<gateway-control-store.sqlite>"
+RPC_URL="$GATEWAY"
+
+mkdir -p "$OUT"
+
+set +e
+curl --max-time 2 -sS -D "$OUT/headers.txt" -o "$OUT/body.json" \
+  -H "Authorization: Bearer $MYCELIUM_GATEWAY_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Myc-Project: $CANARY_ID" \
+  "$GATEWAY/v1/chat/completions" \
+  -d '{
+    "model": "'"$MODEL"'",
+    "messages": [{"role": "user", "content": "Return {\"ok\":true} as JSON."}],
+    "max_tokens": 16,
+    "response_format": {"type": "json_object"}
+  }'
+CURL_RC=$?
+set -e
+printf 'curl_rc=%s\n' "$CURL_RC" | tee "$OUT/curl-status.txt"
+```
+
+Expected client-side cancellation is usually `curl_rc=28`. If curl returns 0,
+the request finished before the client timeout and the run did not exercise the
+canceled cold-load path. Shorten `--max-time` or choose a colder test alias.
+
+Find the job and inspect terminal state:
+
+```bash
+JOB_ID="$(
+  myce jobs list --db "$DB" |
+    awk -v project="$CANARY_ID" '$3 == project { id = $1 } END { print id }'
+)"
+test -n "$JOB_ID"
+
+myce debug job "$JOB_ID" --db "$DB" --json > "$OUT/job.json"
+jq -e '
+  .job.status == "failed" and
+  ((.registry == null) or
+   (.registry.status == "failed" and (.registry.cleanup_required | not)))
+' "$OUT/job.json"
+
+myce debug bundle \
+  --job "$JOB_ID" \
+  --db "$DB" \
+  --url "$RPC_URL" \
+  --rpc-token "$MYCELIUM_RPC_TOKEN" \
+  --out "$OUT/debug-bundle"
+```
+
+If the gateway is authenticated with `gateway_project_tokens`, the token pins
+the project and ignores `X-Myc-Project`; use a dedicated canary project token or
+locate the newest matching model row immediately after the run. Treat these
+outcomes as evidence:
+
+- `failed` job plus missing registry record or terminal `failed` registry with
+  `cleanup_required=false`: cleanup proof passed.
+- `placing`, `loading`, `running`, or registry `cleanup_required=true` after a
+  bounded wait: stale-job lifecycle regression; preserve the debug bundle.
+- no matching job row: the client timed out before the gateway accepted work;
+  rerun with a slightly longer client timeout.
+- `done`: the request completed; the run is valid gateway proof but not a
+  cancellation cleanup proof.
+
 ## Test Gates
 
 Fast local gates:

@@ -147,6 +147,13 @@ Known from repo and live evidence:
   rows in `placing` after an accepted cold-load attempt fails. Focused tests
   cover both coordinated and local cold-load cancellation. Live fleet
   deployment/canary proof was intentionally not run in that repo-local chunk.
+- The README now includes a non-mutating operator recipe for proving the same
+  stale-job cleanup after a future live activation. It tags a deliberately
+  client-canceled cold-load request with `X-Myc-Project`, finds the resulting
+  job in the coordinator store, verifies terminal job/registry state with
+  `myce debug job --json`, and preserves a focused `myce debug bundle`. This
+  prepares the live proof path only; it does not claim the deployed MacBook,
+  B70, or Spark services are running the stale-job fix.
 
 This handoff refresh performed repo authority inspection, `make ci`, a narrow
 MacBook/B70 live canary, and Spark reachability classification. A later
@@ -192,8 +199,8 @@ and did not touch live services. It did not push.
 - The cold-load/client-timeout stale-job issue observed in the older Atlas/Qwen
   lane now has repo-local scheduler regression coverage and a fix. Do not claim
   the deployed MacBook/B70/Spark services have this fix until they are updated
-  and a tiny live cold-load timeout canary proves terminal job cleanup on the
-  live route.
+  and the README cold-load cancellation proof recipe proves terminal job cleanup
+  on the live route.
 - Older thread dumps contain exact live-fleet endpoints, token-file locations,
   peer ports, and TTFT/TPS observations. Treat those as stale private
   operational evidence unless rechecked live; do not publish token values or
