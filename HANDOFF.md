@@ -136,9 +136,10 @@ Known from repo and live evidence:
   raised `internal/catalog` to 88.2%, and raised `internal/bootstrap` to 92.6%;
   a backend adapter pass then raised `internal/backends/llamacpp` to 85.0% and
   `internal/backends/processadapter` to 85.2%, followed by a control CLI pass
-  that raised `cmd/internal/controlcli` to 85.2%. `make coverage` now first
-  reports `internal/backends/openvino` below the package floor, with the
-  remaining frontier listed in `BLOCKERS.md`.
+  that raised `cmd/internal/controlcli` to 85.2% and an OpenVINO adapter pass
+  that raised `internal/backends/openvino` to 100.0%. `make coverage` now first
+  reports `test/mocks` below the package floor, with the remaining frontier
+  listed in `BLOCKERS.md`.
 
 This handoff refresh performed repo authority inspection, `make ci`, a narrow
 MacBook/B70 live canary, and Spark reachability classification. It did not push.

@@ -33,15 +33,16 @@
   added first coverage for `internal/enginecompat` at 94.4%, raised `pkg/api`
   to 89.9%, raised `internal/modelcompat` from 82.4% to 97.5%, and raised
   `internal/catalog` from 82.9% to 88.2%, raised `internal/bootstrap` from
-  73.6% to 92.6%, raised `internal/backends/llamacpp` from 83.2% to 85.0%, and
-  raised `internal/backends/processadapter` from 83.0% to 85.2%, and raised
-  `cmd/internal/controlcli` from 82.4% to 85.2%. The current `make coverage`
-  run now reaches covergate and first reports `internal/backends/openvino` at
-  0.0% under the 85.0% package floor; because covergate iterates package totals
+  73.6% to 92.6%, raised `internal/backends/llamacpp` from 83.2% to 85.0%,
+  raised `internal/backends/processadapter` from 83.0% to 85.2%, raised
+  `cmd/internal/controlcli` from 82.4% to 85.2%, and raised
+  `internal/backends/openvino` from 0.0% to 100.0%. The current
+  `make coverage` run now reaches covergate and first reports `test/mocks` at
+  77.8% under the 85.0% package floor; because covergate iterates package totals
   from a map, the first reported package can vary. Remaining observed
-  below-floor packages include `internal/backends/openvino` 0.0%,
-  `cmd/mycelium` 81.7%, and `test/mocks` 77.8%. Unblock by adding focused
-  behavior tests for those packages; do not weaken the gate.
+  below-floor packages include `test/mocks` 77.8% and `cmd/mycelium` 81.7%.
+  Unblock by adding focused behavior tests for those packages; do not weaken
+  the gate.
 
 ## Resolved
 
