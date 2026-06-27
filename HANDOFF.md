@@ -140,6 +140,13 @@ Known from repo and live evidence:
   `internal/scheduler` to its 100.0% required floor, and restored
   `test/contract` to its 100.0% required floor. `make coverage` now passes
   with `coverage ok: total 89.4%`.
+- A later 2026-06-27 repo-local reliability pass reproduced and fixed the
+  cold-load/client-timeout stale-job lifecycle bug in scheduler state handling:
+  after a job row exists, post-placement terminal state repair and owner cleanup
+  now use `cleanupContext(ctx)` so client cancellation cannot strand durable job
+  rows in `placing` after an accepted cold-load attempt fails. Focused tests
+  cover both coordinated and local cold-load cancellation. Live fleet
+  deployment/canary proof was intentionally not run in that repo-local chunk.
 
 This handoff refresh performed repo authority inspection, `make ci`, a narrow
 MacBook/B70 live canary, and Spark reachability classification. A later
@@ -182,9 +189,11 @@ and did not touch live services. It did not push.
   that length-finish inside `<think>` are normalized by moving leaked content
   into `reasoning` / `reasoning_content` and emptying final `content`. Streaming
   normalization was not implemented there.
-- A cold-load/client-timeout stale-job issue was observed in the older
-  Atlas/Qwen lane. The current Atlas path is warm B70 `inst_2`; investigate that
-  lifecycle issue before relying on unattended cold-load fleet placement.
+- The cold-load/client-timeout stale-job issue observed in the older Atlas/Qwen
+  lane now has repo-local scheduler regression coverage and a fix. Do not claim
+  the deployed MacBook/B70/Spark services have this fix until they are updated
+  and a tiny live cold-load timeout canary proves terminal job cleanup on the
+  live route.
 - Older thread dumps contain exact live-fleet endpoints, token-file locations,
   peer ports, and TTFT/TPS observations. Treat those as stale private
   operational evidence unless rechecked live; do not publish token values or

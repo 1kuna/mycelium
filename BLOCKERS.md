@@ -30,6 +30,19 @@
 
 ## Resolved
 
+- 2026-06-27: The cold-load/client-timeout stale-job lifecycle bug is fixed in
+  the repo-local scheduler path. The reproduced failure was: a job row was
+  saved as `placing`, the coordinator/owner accepted the cold-load attempt, the
+  request context was canceled during `NodeAgent.Load`, and the old terminal
+  `SaveJob(ctx, failed)` used the already-canceled context, leaving the durable
+  job row stuck non-terminal. Scheduler cleanup now uses `cleanupContext(ctx)`
+  for post-placement terminal job saves, queued/running state persistence, owner
+  release notifications, and instance/lease persistence after accepted work.
+  Focused regression tests prove both coordinated and local cold-load
+  cancellation now persist the job as `failed` and release accepted owner work
+  without using the canceled context. This is repo-local proof; re-run a tiny
+  live cold-load timeout canary before claiming unattended live-fleet lifecycle
+  behavior after a deployment.
 - 2026-06-27: The repo-local coverage gate is resolved. Focused behavior tests
   raised `cmd/mycelium` from 81.7% to the 85.0% package floor by covering
   operator-visible command/runtime contracts: service diagnostics and service
