@@ -1,6 +1,6 @@
 # Mycelium Owner-Thread Handoff
 
-Last updated: 2026-06-22
+Last updated: 2026-06-27
 
 This file supersedes the previous root `HANDOFF.md`. Treat that prior version as
 a partial coordinator draft, not as authority. This handoff is intentionally
@@ -10,7 +10,7 @@ handoff rewrite.
 ## Current Repo State
 
 - Branch: `main`.
-- Latest observed commit after this rewrite: `20be72f Rewrite owner-thread handoff`.
+- Latest observed commit before this handoff refresh: `3f125c9 Add gateway telemetry headers for Atlas`.
 - Remote already configured: `origin https://github.com/1kuna/mycelium.git`.
 - Source-of-truth docs remain `01-project-spec.md`, `02-testing-architecture.md`,
   and `03-development-guide.md`.
@@ -56,6 +56,16 @@ important continuity points are:
   `snapshots.jsonl`, `failures.json`, and per-job outputs. Historical live runs
   included MacBook/Mac mini/B70/Spark scenarios, but do not assume those exact
   services are still up without checking.
+- Current Atlas-facing live route is MacBook gateway to B70 only unless Spark is
+  re-proven. On 2026-06-27 the MacBook LaunchAgent
+  `com.mycelium.real-fleet` listened at `192.168.0.143:55291`, B70 listened at
+  `192.168.0.153:55283`, and Spark's configured peer port
+  `192.168.0.16:55274` refused connections. A tiny strict JSON-schema
+  `/v1/chat/completions` request for `qwen3.5-9b` routed to B70 `inst_2` with
+  `X-Myc-Node: b70`, `X-Myc-Backend: vllm`,
+  `X-Myc-Decision: placed_on_warm_instance`, `X-Myc-Structured-Output:
+  json_schema`, and `X-Myc-Guided-Decoding-Requested: true`, returning
+  parseable final JSON. This proves the current B70 path, not full fleet health.
 - Session telemetry was added on 2026-06-04. `session_metrics` records phase
   time-series samples alongside `run_metrics`; owner peers are authoritative for
   run/session telemetry, and remote-owner telemetry goes over authenticated
@@ -77,25 +87,37 @@ important continuity points are:
 
 Do not report this handoff rewrite as a validation pass.
 
-Known from repo evidence:
+Known from repo and live evidence:
 
 - `CODEX-FINDINGS.md` records a 2026-06-09 SSOT audit/triage and the fix pass
   status. Its P1/P2 runtime findings F-01 through F-07, F-12, F-14, and F-16
   were marked fixed there. F-08, F-09, and F-11 remain smoke proof gaps; F-13 is
   conformance expansion; F-15 is a spec-ratification/product-decision item.
-- `BLOCKERS.md` has one active blocker from 2026-06-04: real-engine and real
-  multi-peer smoke for the obvious-bug remediation pass could not be re-proven
-  in that pass because smoke environment variables were unset. It says fast CI
-  and env-independent smoke passed from that tree, but this handoff did not
-  re-run them.
+- Local smoke was re-proven on 2026-06-26 with an existing LM Studio Ministral
+  GGUF after fixing the stale coordinator-runtime wiring and the joined-node fit
+  bug. Do not treat the old "smoke env unset" note as the current blocker.
+- Atlas has used the live MacBook/B70 route for strict-schema semantic and
+  overlay gates. B70 Qwen/vLLM structured output is activated with vLLM
+  structured outputs enabled in reasoning while preserving the reasoning/content
+  boundary.
+- The Atlas gateway telemetry headers from `3f125c9` are live on the MacBook
+  gateway. A 2026-06-27 canary observed `X-Myc-Cold-Load`,
+  `X-Myc-Queue-Wait-Ms`, `X-Myc-Upstream-Wall-Ms`,
+  `X-Myc-Structured-Output`, and `X-Myc-Guided-Decoding-Requested`.
+- `make ci` on 2026-06-27 passed formatting, build, vet, and
+  `go test ./... -race`, but failed the coverage gate because
+  `internal/enginecatalog` reported 78.3% statement coverage under the 85.0%
+  per-package floor.
 
-This handoff pass only performed read-only inspection plus this document edit.
-It did not run `make ci`, broad tests, real smoke, or any push.
+This handoff refresh performed repo authority inspection, `make ci`, a narrow
+MacBook/B70 live canary, and Spark reachability classification. It did not push.
 
 ## Active Blockers And Cautions
 
 - Real smoke state is drift-prone. Mac mini, B70, and Spark availability must be
-  verified live before claiming fleet health.
+  verified live before claiming fleet health. Current evidence proves MacBook to
+  B70 only; Spark is not part of the proven live route while
+  `192.168.0.16:55274` refuses connections.
 - `ops/private/` contains local smoke notes/bundles. Treat them as private
   operational evidence; do not publish secrets, tokens, host-specific paths, or
   model artifacts.
@@ -117,10 +139,9 @@ It did not run `make ci`, broad tests, real smoke, or any push.
   that length-finish inside `<think>` are normalized by moving leaked content
   into `reasoning` / `reasoning_content` and emptying final `content`. Streaming
   normalization was not implemented there.
-- A cold-load/client-timeout stale-job issue was observed in that lane. Treat it
-  as an active lifecycle bug to investigate before relying on unattended live
-  fleet placement: a request that starts a cold load must either wait/stream
-  through to readiness or terminalize and release cleanly.
+- A cold-load/client-timeout stale-job issue was observed in the older
+  Atlas/Qwen lane. The current Atlas path is warm B70 `inst_2`; investigate that
+  lifecycle issue before relying on unattended cold-load fleet placement.
 - Older thread dumps contain exact live-fleet endpoints, token-file locations,
   peer ports, and TTFT/TPS observations. Treat those as stale private
   operational evidence unless rechecked live; do not publish token values or

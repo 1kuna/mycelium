@@ -2,10 +2,32 @@
 
 ## Active
 
-- 2026-06-04: Real-engine and real multi-peer smoke for the obvious-bug remediation pass could not be re-proven in this shell because the required smoke environment is unset (`MYCELIUM_LLAMA_CPP_BINARY`, `MYCELIUM_LLAMA_CPP_MODEL`, MLX/vLLM/Spark/B70/federation/join/benchmark env). Fast CI and env-independent smoke pass from the current tree; unblock by setting the relevant real hardware/model env and running `go test -tags smoke ./test/smoke/... -timeout 20m`.
+- 2026-06-27: Current corrected-LAN live state is B70-only, not full-fleet.
+  MacBook gateway `192.168.0.143:55291` and B70 peer
+  `192.168.0.153:55283` are reachable and healthy, and a tiny strict
+  JSON-schema gateway request for `qwen3.5-9b` routed to warm B70 `inst_2` with
+  the expected Atlas telemetry headers. Spark's configured peer port
+  `192.168.0.16:55274` refused TCP and `/peer/health` connections, so Spark is
+  not currently a Mycelium compute peer in the proven route. Unblock full-fleet
+  by starting or repairing the intended Spark Mycelium peer on the corrected LAN
+  port, then re-run authenticated `/peer/health`/diagnostics plus a placement
+  canary that proves Spark is visible and selectable.
+- 2026-06-27: `make ci` fails at the coverage gate only. Formatting, build,
+  vet, and `go test ./... -race` passed, then `go run ./tools/covergate ...`
+  failed because `internal/enginecatalog` reported 78.3% statement coverage
+  under the 85.0% per-package floor. Unblock by adding focused
+  `internal/enginecatalog` coverage or revisiting the package gate with a
+  deliberate decision; do not weaken the gate just to pass this operational
+  proof.
 
 ## Resolved
 
+- 2026-06-27: The old 2026-06-04 "real smoke env unset" blocker is superseded.
+  The local smoke runtime path was fixed and `make smoke-local` was re-proven
+  on 2026-06-26 with an already-present LM Studio Ministral GGUF, while the
+  corrected-LAN MacBook/B70 path has separately handled real Atlas strict-schema
+  semantic and overlay work. Remaining live-fleet uncertainty is now Spark peer
+  reachability and the current coverage gate, not missing local smoke env.
 - 2026-06-26: B70 Qwen/vLLM structured final-channel JSON is activated from the live Mycelium path. The B70 vLLM wrapper now passes `STRUCTURED_OUTPUTS_BACKEND="${MYCELIUM_B70_STRUCTURED_OUTPUTS_BACKEND:-auto}"`; the existing entrypoint converts that into `--structured-outputs-config {"backend":"auto","enable_in_reasoning":true}` while preserving `--reasoning-parser qwen3`. The old wrapper was backed up on B70 before the change. Mycelium node RPC unloaded the stale warm instance `inst_1` without restarting the B70 peer; the next MacBook gateway request cold-loaded B70 `inst_2` on `127.0.0.1:44673` with `X-Myc-Node: b70`, `X-Myc-Backend: vllm`, `X-Myc-Decision: loaded_new`, HTTP 200, `finish_reason=stop`, and final content `{"answer":"ok","row":4}` parseable as JSON from `response_format.type=json_schema`. A warm follow-up using vLLM `structured_outputs` extra body also returned parseable final JSON through the same Mycelium gateway/instance. Reasoning was not disabled or copied into content; the tiny structured canaries produced no `reasoning_content`.
 - 2026-06-26: Local `make smoke-local` is re-proven from the current tree with an already-present local GGUF that can exercise Phase 2 overflow requeue. Local model search found `/Users/zach/.mycelium/models/stories260K.gguf` with `llama.context_length=128`, plus LM Studio GGUFs including `/Users/zach/.lmstudio/models/lmstudio-community/Ministral-3-3B-Instruct-2512-GGUF/Ministral-3-3B-Instruct-2512-Q4_K_M.gguf` with `mistral3.context_length=262144`. Focused smoke passed `TestPhase2GatewayLocalLlamaCppSmoke` and `TestPhase4JoinedNodeGatewaySmoke`; full `make smoke-local` then passed with `smoke ok: 8 passed, 0 skipped, 0 failed`. The current tree keeps the stale Phase 2 direct-router fix, the explicit-VRAM joined-node fit fix, and the failover subcase isolation needed after coordinator-runtime wiring.
 - 2026-06-26: Corrected-LAN real-fleet gateway plus one B70 compute peer is resolved from live runtime proof. MacBook `com.mycelium.real-fleet` listens at `192.168.0.143:55291`; B70 `mycelium-real-fleet.service` listens at `192.168.0.153:55283` with UDP discovery `:57898`, compute=true, backend vLLM, and seed `192.168.0.143:55291`. Authenticated B70 `/peer/diagnostics` reports MacBook ready; MacBook `/peer/diagnostics` reports B70 ready while Spark remains connection-refused. A MacBook gateway `/v1/chat/completions` request for `qwen3.5-9b` cold-loaded B70 instance `inst_1` with `X-Myc-Node: b70`, `X-Myc-Backend: vllm`, `X-Myc-Decision: loaded_new`; a warm follow-up routed to the same instance with `X-Myc-Decision: placed_on_warm_instance`. B70 owner snapshot shows `inst_1` ready at `127.0.0.1:39447`. The model spent the small caps in Qwen reasoning and returned empty final content with non-empty `reasoning_content`, preserving the reasoning/content boundary.
