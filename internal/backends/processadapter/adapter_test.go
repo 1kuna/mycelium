@@ -98,6 +98,39 @@ func TestAdapterLaunchDynamicResolvesConcretePort(t *testing.T) {
 	}
 }
 
+func TestAdapterLaunchDynamicPreservesExplicitPort(t *testing.T) {
+	process := newFakeProcess(112)
+	runner := &fakeRunner{next: process}
+	adapter := New(Config{
+		Name:          "test",
+		BinaryPath:    "backend",
+		Args:          []string{"--host", "{host}", "--port", "{port}", "--addr", "{addr}"},
+		ProcessRunner: runner,
+	})
+	handle, err := adapter.LaunchDynamic(context.Background(), fixtures.MakePreset(), "127.0.0.1:51234")
+	if err != nil {
+		t.Fatalf("LaunchDynamic: %v", err)
+	}
+	if handle.Addr != "127.0.0.1:51234" {
+		t.Fatalf("handle addr = %q", handle.Addr)
+	}
+	if got := strings.Join(runner.starts[0].args, " "); got != "--host 127.0.0.1 --port 51234 --addr 127.0.0.1:51234" {
+		t.Fatalf("started args = %q", got)
+	}
+}
+
+func TestReserveDynamicAddrRejectsInvalidAddress(t *testing.T) {
+	if _, err := reserveDynamicAddr("not-a-host-port"); err == nil {
+		t.Fatalf("invalid dynamic address should fail")
+	}
+}
+
+func TestReserveDynamicAddrReportsListenFailure(t *testing.T) {
+	if _, err := reserveDynamicAddr("no-such-host.invalid:0"); err == nil {
+		t.Fatalf("unbindable dynamic address should fail")
+	}
+}
+
 func TestAdapterPersistsProcessRefsAndLaunchArgs(t *testing.T) {
 	registry := &recordingRegistry{}
 	process := newFakeProcess(202)
@@ -191,6 +224,24 @@ func TestStopTreatsShellSignalExitCodeAsClean(t *testing.T) {
 	defer cancel()
 	if err := adapter.Stop(ctx, handle); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestExpectedStopSignalExitClassifiesShellStatuses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+	if expectedStopSignalExit(nil) {
+		t.Fatalf("nil error should not be treated as a signal exit")
+	}
+	if expectedStopSignalExit(errors.New("plain wait error")) {
+		t.Fatalf("plain wait error should not be treated as a signal exit")
+	}
+	if expectedStopSignalExit(shellExitError(t, 2)) {
+		t.Fatalf("ordinary shell exit should not be treated as clean")
+	}
+	if !expectedStopSignalExit(shellExitError(t, 128+int(syscall.SIGTERM))) {
+		t.Fatalf("shell SIGTERM exit should be treated as clean")
 	}
 }
 
@@ -1050,4 +1101,13 @@ func waitForHelperReady(t *testing.T, path string) {
 		runtime.Gosched()
 	}
 	t.Fatal("signal helper did not become ready")
+}
+
+func shellExitError(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("/bin/sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	if err == nil {
+		t.Fatalf("shell exit %d returned nil", code)
+	}
+	return err
 }
