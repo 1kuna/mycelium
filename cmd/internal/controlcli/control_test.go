@@ -1202,6 +1202,174 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	}
 }
 
+func TestOperatorStatusAndDebugRejectBadUsage(t *testing.T) {
+	if err := RunWithClient(context.Background(), []string{"status", "--watch", "--interval", "0"}, operatorSnapshotClient(t)); err == nil || !strings.Contains(err.Error(), "--interval must be positive") {
+		t.Fatalf("status watch error = %v", err)
+	}
+	for _, args := range [][]string{
+		{"debug"},
+		{"debug", "unknown"},
+		{"debug", "job"},
+		{"debug", "job", "job-a", "job-b"},
+		{"debug", "job", "job-a", "--db"},
+		{"debug", "bundle"},
+	} {
+		if err := Run(context.Background(), args); err == nil {
+			t.Fatalf("Run(%v) expected error", args)
+		}
+	}
+}
+
+func TestOperatorStatusReportsConfigAndSnapshotFailures(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SaveJob(context.Background(), domain.Job{ID: "failed", Status: domain.JobFailed}); err != nil {
+		t.Fatalf("SaveJob: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	report, err := buildStatusReport(context.Background(), statusRequest{
+		ConfigPath: filepath.Join(dir, "missing-peer.json"),
+		DBPath:     dbPath,
+		URL:        "http://peer.test",
+		Client: directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("rpc token required"))
+		})),
+	})
+	if err != nil {
+		t.Fatalf("buildStatusReport: %v\n%s", err, report)
+	}
+	for _, want := range []string{
+		"config\t" + filepath.Join(dir, "missing-peer.json") + "\tfail",
+		"store\t" + dbPath + "\tok",
+		"queue\tqueued=0 placing=0 loading=0 running=0 done=0 preempted=0 failed=1",
+		"snapshot\tfail\tsnapshot http://peer.test: rpc token required",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("status report missing %q:\n%s", want, report)
+		}
+	}
+}
+
+func TestOperatorDebugReportIncludesParentChildrenAndMetricOwner(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	if err := store.SaveJob(context.Background(), domain.Job{ID: "parent", Status: domain.JobDone}); err != nil {
+		t.Fatalf("SaveJob parent: %v", err)
+	}
+	if err := store.SaveJob(context.Background(), domain.Job{
+		ID:       "job-child",
+		ParentID: "parent",
+		Status:   domain.JobFailed,
+		Error:    "health timeout while loading",
+		Progress: []domain.JobProgress{{Stage: "loading", At: now}},
+	}); err != nil {
+		t.Fatalf("SaveJob child: %v", err)
+	}
+	if err := store.SaveJob(context.Background(), domain.Job{ID: "grandchild", ParentID: "job-child", TaskType: "retry", Status: domain.JobQueued}); err != nil {
+		t.Fatalf("SaveJob grandchild: %v", err)
+	}
+	if err := store.Record(context.Background(), domain.RunMetric{JobID: "job-child", NodeID: "node-metric", InstanceID: "inst-a", PresetID: "tiny", TokensPerSec: 7, TTFTms: 9, ContextUsed: 11, At: now.Add(time.Second)}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := store.SaveRecommendation(context.Background(), domain.RecommendationRecord{ID: "rec-child", ProjectID: "", Type: optimizer.RecommendationContextCap, CreatedAt: now}); err != nil {
+		t.Fatalf("SaveRecommendation: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	report, err := buildJobDebugReport(context.Background(), dbPath, "job-child")
+	if err != nil {
+		t.Fatalf("buildJobDebugReport: %v", err)
+	}
+	if report.Parent == nil || report.Parent.ID != "parent" || len(report.Children) != 1 || len(report.RunMetrics) != 1 || len(report.Recommendations) != 1 {
+		t.Fatalf("debug report = %+v", report)
+	}
+	output := captureStdout(t, func() {
+		printJobDebugReport(os.Stdout, report)
+	})
+	for _, want := range []string{
+		"job\tjob-child\tfailed\tmodel=-\tproject=-\towner=node-metric",
+		"parent\tparent\tdone",
+		"child\tgrandchild\tretry\tqueued",
+		"timeline\t2026-06-27T10:00:00Z\tprogress\tloading\t-",
+		"hint\tbackend did not become healthy before the load timeout",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("debug output missing %q:\n%s", want, output)
+		}
+	}
+	if _, err := buildJobDebugReport(context.Background(), dbPath, "missing"); err == nil || !strings.Contains(err.Error(), `job "missing" not found`) {
+		t.Fatalf("missing job error = %v", err)
+	}
+}
+
+func TestDebugBundleRecordsConfigAndStoreIssues(t *testing.T) {
+	outDir := filepath.Join(t.TempDir(), "bundle")
+	err := writeDebugBundle(context.Background(), debugBundleRequest{
+		ConfigPath: filepath.Join(t.TempDir(), "missing-peer.json"),
+		DBPath:     t.TempDir(),
+		OutDir:     outDir,
+	})
+	if err != nil {
+		t.Fatalf("writeDebugBundle: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest debugBundleManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v\n%s", err, data)
+	}
+	if len(manifest.Issues) < 2 || !containsString(manifest.Files, "status.txt") {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+	status, err := os.ReadFile(filepath.Join(outDir, "status.txt"))
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if !strings.Contains(string(status), "config\t") || !strings.Contains(string(status), "\tfail\t") {
+		t.Fatalf("status artifact = %s", status)
+	}
+}
+
+func TestOperatorListenAndFormattingHelpers(t *testing.T) {
+	tests := map[string]string{
+		"":                        "",
+		"localhost:55291":         "localhost",
+		"127.0.0.1:55291":         "127.0.0.1",
+		"[::1]:55291":             "::1",
+		"https://peer.example:99": "peer.example",
+		"peer.example":            "peer.example",
+		"bad:addr:shape":          "",
+	}
+	for input, want := range tests {
+		if got := listenHost(input); got != want {
+			t.Fatalf("listenHost(%q)=%q want %q", input, got, want)
+		}
+	}
+	if !isLoopbackListen("") || !isLoopbackListen("localhost:55291") || !isLoopbackListen("http://127.0.0.1:55291") {
+		t.Fatalf("loopback detection rejected loopback listeners")
+	}
+	if isLoopbackListen("http://192.168.0.143:55291") {
+		t.Fatalf("loopback detection accepted LAN listener")
+	}
+	if got := formatTimeDash(time.Time{}); got != "-" {
+		t.Fatalf("zero time = %q", got)
+	}
+}
+
 func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	dbPath, configPath := writeOperatorDebugFixture(t)
 	client := operatorSnapshotClient(t)
@@ -1726,6 +1894,15 @@ func operatorSnapshotClient(t *testing.T) *http.Client {
 func quoteJSON(value string) string {
 	data, _ := json.Marshal(value)
 	return string(data)
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func controlFleetConfig() bench.FleetBenchmarkConfig {
