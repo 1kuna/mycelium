@@ -137,6 +137,23 @@ func TestResourceEstimatorAllocatorTelemetryAndClock(t *testing.T) {
 	if allocator.FitsCalls != 1 || allocator.CanStackCalls != 1 {
 		t.Fatalf("allocator calls = %d/%d", allocator.FitsCalls, allocator.CanStackCalls)
 	}
+	if allocator.Fits(fixtures.MakeNode(), []int{0}, nil, domain.Claim{WeightsMB: -1}) {
+		t.Fatal("allocator accepted negative claim")
+	}
+	if allocator.Fits(fixtures.MakeNode(), []int{0, 0}, nil, fixtures.MakeClaim(1, 1)) {
+		t.Fatal("allocator accepted duplicate accelerator request")
+	}
+	if allocator.Fits(fixtures.MakeNode(), []int{99}, nil, fixtures.MakeClaim(1, 1)) {
+		t.Fatal("allocator accepted unavailable accelerator request")
+	}
+	catastrophic := fixtures.MakeNode(fixtures.WithNodeID("cat"), fixtures.Catastrophic)
+	loading := domain.ModelInstance{NodeID: "cat", AcceleratorSet: []int{1, 0}, Loading: true}
+	if allocator.CanStackLoad(catastrophic, []int{0}, []domain.ModelInstance{loading}) {
+		t.Fatal("catastrophic allocator accepted overlapping loading instance")
+	}
+	if !allocator.CanStackLoad(catastrophic, []int{2}, []domain.ModelInstance{loading}) {
+		t.Fatal("catastrophic allocator rejected non-overlapping load")
+	}
 
 	sink := &TelemetrySink{}
 	metric := domain.RunMetric{JobID: "job"}
@@ -246,6 +263,122 @@ func TestTunnelMockRecordsAndFails(t *testing.T) {
 	}
 	if err := tunnel.Close(context.Background(), node.ID); err == nil {
 		t.Fatal("expected close error")
+	}
+}
+
+func TestBootstrapMocksRecordProgressAndRegistryState(t *testing.T) {
+	host := domain.HostFacts{NodeID: "host-a", Platform: "linux/amd64"}
+	hostDetector := &HostDetector{Host: host}
+	detected, err := hostDetector.DetectHost(context.Background(), domain.Node{ID: "seed-a"})
+	if err != nil || detected.NodeID != host.NodeID || len(hostDetector.Calls) != 1 || hostDetector.Calls[0].ID != "seed-a" {
+		t.Fatalf("DetectHost = %+v err=%v calls=%+v", detected, err, hostDetector.Calls)
+	}
+
+	profiles := []domain.EngineProfile{{ID: "openvino", Backend: domain.BackendOpenVINO, Ready: true}}
+	engineDetector := &EngineDetector{Profiles: profiles}
+	gotProfiles, err := engineDetector.DetectEngines(context.Background(), host)
+	if err != nil || len(gotProfiles) != 1 || gotProfiles[0].ID != "openvino" || len(engineDetector.Calls) != 1 {
+		t.Fatalf("DetectEngines = %+v err=%v calls=%+v", gotProfiles, err, engineDetector.Calls)
+	}
+	gotProfiles[0].ID = "mutated"
+	again, err := engineDetector.DetectEngines(context.Background(), host)
+	if err != nil || again[0].ID != "openvino" {
+		t.Fatalf("DetectEngines did not return a defensive copy: %+v err=%v", again, err)
+	}
+
+	req := domain.BootstrapRequest{ID: "bootstrap-host-a", RequestedEngines: []domain.Backend{domain.BackendOpenVINO}}
+	plan := domain.BootstrapPlan{ID: "plan-a", Host: host, ResultingProfiles: profiles}
+	planner := &BootstrapPlanner{Plan: plan}
+	gotPlan, err := planner.PlanBootstrap(context.Background(), req, host, profiles)
+	if err != nil || gotPlan.ID != plan.ID || len(planner.Calls) != 1 || planner.Calls[0].ID != req.ID {
+		t.Fatalf("PlanBootstrap = %+v err=%v calls=%+v", gotPlan, err, planner.Calls)
+	}
+
+	result := domain.BootstrapResult{PlanID: "plan-a", Events: []domain.BootstrapEvent{{PlanID: "plan-a", Phase: "verify", Message: "ok"}}}
+	installer := &EngineInstaller{Result: result}
+	var events []domain.BootstrapEvent
+	gotResult, err := installer.ApplyBootstrapPlan(context.Background(), plan, func(event domain.BootstrapEvent) {
+		events = append(events, event)
+	})
+	if err != nil || gotResult.PlanID != result.PlanID || len(events) != 1 || events[0].Phase != "verify" || len(installer.Calls) != 1 {
+		t.Fatalf("ApplyBootstrapPlan = %+v events=%+v err=%v calls=%+v", gotResult, events, err, installer.Calls)
+	}
+	if _, err := installer.ApplyBootstrapPlan(context.Background(), plan, nil); err != nil {
+		t.Fatalf("ApplyBootstrapPlan nil progress: %v", err)
+	}
+
+	verification := domain.EngineVerification{ProfileID: "openvino", Ready: true}
+	verifier := &EngineVerifier{Verification: verification}
+	gotVerification, err := verifier.VerifyEngine(context.Background(), profiles[0])
+	if err != nil || !gotVerification.Ready || len(verifier.Calls) != 1 || verifier.Calls[0].ID != profiles[0].ID {
+		t.Fatalf("VerifyEngine = %+v err=%v calls=%+v", gotVerification, err, verifier.Calls)
+	}
+
+	registry := &EngineRegistry{}
+	if err := registry.SaveEngineProfile(context.Background(), profiles[0]); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+	listed, err := registry.ListEngineProfiles(context.Background())
+	if err != nil || len(listed) != 1 || listed[0].Ready != true {
+		t.Fatalf("ListEngineProfiles = %+v err=%v", listed, err)
+	}
+	listed[0].ID = "mutated"
+	againProfiles, err := registry.ListEngineProfiles(context.Background())
+	if err != nil || againProfiles[0].ID != profiles[0].ID {
+		t.Fatalf("ListEngineProfiles did not return a defensive copy: %+v err=%v", againProfiles, err)
+	}
+	if err := registry.MarkEngineProfileUnready(context.Background(), "openvino", "probe failed"); err != nil {
+		t.Fatalf("MarkEngineProfileUnready existing: %v", err)
+	}
+	if err := registry.MarkEngineProfileUnready(context.Background(), "vllm", "missing binary"); err != nil {
+		t.Fatalf("MarkEngineProfileUnready append: %v", err)
+	}
+	listed, err = registry.ListEngineProfiles(context.Background())
+	if err != nil || len(listed) != 2 || listed[0].Ready || listed[0].UnreadyReason != "probe failed" || listed[1].ID != "vllm" {
+		t.Fatalf("unready profiles = %+v err=%v", listed, err)
+	}
+
+	boom := errors.New("boom")
+	for name, run := range map[string]func() error{
+		"host": func() error {
+			hostDetector.Err = boom
+			_, err := hostDetector.DetectHost(context.Background(), domain.Node{})
+			return err
+		},
+		"engine": func() error {
+			engineDetector.Err = boom
+			_, err := engineDetector.DetectEngines(context.Background(), host)
+			return err
+		},
+		"planner": func() error {
+			planner.Err = boom
+			_, err := planner.PlanBootstrap(context.Background(), req, host, nil)
+			return err
+		},
+		"installer": func() error {
+			installer.Err = boom
+			_, err := installer.ApplyBootstrapPlan(context.Background(), plan, nil)
+			return err
+		},
+		"verifier": func() error {
+			verifier.Err = boom
+			_, err := verifier.VerifyEngine(context.Background(), profiles[0])
+			return err
+		},
+		"registry": func() error {
+			registry.Err = boom
+			return registry.SaveEngineProfile(context.Background(), profiles[0])
+		},
+	} {
+		if err := run(); !errors.Is(err, boom) {
+			t.Fatalf("%s err = %v", name, err)
+		}
+	}
+	if _, err := registry.ListEngineProfiles(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("registry list err = %v", err)
+	}
+	if err := registry.MarkEngineProfileUnready(context.Background(), "openvino", "failed"); !errors.Is(err, boom) {
+		t.Fatalf("registry unready err = %v", err)
 	}
 }
 
@@ -476,6 +609,83 @@ func TestFederationMocksRecordAndFail(t *testing.T) {
 	peers.WatchErr = boom
 	if _, err := peers.WatchPeers(context.Background()); !errors.Is(err, boom) {
 		t.Fatalf("watch peers err = %v", err)
+	}
+}
+
+func TestJobRegistryPreservesOwnerRecordOrderingAndTerminalState(t *testing.T) {
+	base := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	registry := &JobRegistry{}
+	initial := domain.JobRecord{JobID: "job-a", Status: domain.JobRunning, Fence: 1, Coordinator: "coord-a", UpdatedAt: base, Request: []byte("first")}
+	if err := registry.Put(context.Background(), initial); err != nil {
+		t.Fatalf("Put initial: %v", err)
+	}
+	stale := initial
+	stale.Fence = 0
+	stale.Request = []byte("stale")
+	if err := registry.Put(context.Background(), stale); err != nil {
+		t.Fatalf("Put stale: %v", err)
+	}
+	terminal := initial
+	terminal.Status = domain.JobDone
+	terminal.Fence = 2
+	terminal.Request = []byte("done")
+	terminal.UpdatedAt = base.Add(time.Second)
+	if err := registry.Put(context.Background(), terminal); err != nil {
+		t.Fatalf("Put terminal: %v", err)
+	}
+	regression := terminal
+	regression.Status = domain.JobRunning
+	regression.Fence = 3
+	regression.Request = []byte("running-again")
+	regression.UpdatedAt = base.Add(2 * time.Second)
+	if err := registry.Put(context.Background(), regression); err != nil {
+		t.Fatalf("Put regression: %v", err)
+	}
+
+	records, err := registry.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(records) != 1 || records[0].Status != domain.JobDone || string(records[0].Request) != "done" {
+		t.Fatalf("terminal record regressed: %+v", records)
+	}
+	records[0].Request[0] = 'X'
+	again, err := registry.Snapshot(context.Background())
+	if err != nil || string(again[0].Request) != "done" {
+		t.Fatalf("snapshot did not clone request bytes: %+v err=%v", again, err)
+	}
+
+	sameTimeB := domain.JobRecord{JobID: "job-b", Status: domain.JobRunning, Fence: 1, UpdatedAt: base.Add(3 * time.Second)}
+	sameTimeC := domain.JobRecord{JobID: "job-c", Status: domain.JobRunning, Fence: 1, UpdatedAt: base.Add(3 * time.Second)}
+	older := domain.JobRecord{JobID: "job-old", Status: domain.JobRunning, Fence: 1, UpdatedAt: base.Add(-time.Second)}
+	for _, rec := range []domain.JobRecord{sameTimeC, older, sameTimeB} {
+		if err := registry.Put(context.Background(), rec); err != nil {
+			t.Fatalf("Put %s: %v", rec.JobID, err)
+		}
+	}
+	snapshot, err := registry.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot ordered: %v", err)
+	}
+	gotOrder := []string{snapshot[0].JobID, snapshot[1].JobID, snapshot[2].JobID, snapshot[3].JobID}
+	wantOrder := []string{"job-old", "job-a", "job-b", "job-c"}
+	if strings.Join(gotOrder, ",") != strings.Join(wantOrder, ",") {
+		t.Fatalf("snapshot order = %v want %v", gotOrder, wantOrder)
+	}
+
+	watch, err := registry.Watch(context.Background(), base.Add(2*time.Second).Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatalf("Watch cursor: %v", err)
+	}
+	for _, want := range []string{"job-b", "job-c"} {
+		select {
+		case rec := <-watch:
+			if rec.JobID != want {
+				t.Fatalf("watch rec = %s want %s", rec.JobID, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("watch timed out waiting for %s", want)
+		}
 	}
 }
 
