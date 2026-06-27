@@ -2,23 +2,6 @@
 
 ## Active
 
-- 2026-06-27: Corrected-LAN Spark peer is repaired, but full-fleet inference is
-  not yet proven. Spark `mycelium-real-fleet.service` now listens at
-  `192.168.0.16:55274` with the corrected config, and authenticated
-  `/peer/health`, `/peer/diagnostics`, and `/snapshot` show compute=true,
-  status=ready, and the MacBook gateway sees both B70 and Spark seeds ready.
-  A tiny strict JSON-schema B70 canary through `192.168.0.143:55291` still
-  routed to warm B70 `inst_2` and returned parseable final JSON, but the matching
-  `spark-qwen9b` gateway canary timed out after 90s with a Spark registry record
-  left in `loading`. Spark currently has no live vLLM/docker child process for
-  Mycelium, `/snapshot` reports no live instances, and the configured Spark 9B
-  model paths checked on host are absent. Spark logs also report registry pulls
-  from MacBook/B70 failing with `peer rpc body exceeds 16777216 bytes`, so
-  replicated full-fleet registry state is not healthy. Unblock full-fleet by
-  restoring or repointing the Spark model/cache/backend path, pruning the stale
-  Spark loading job if it does not clear naturally, and addressing the registry
-  snapshot size limit or compaction before rerunning a Spark placement/inference
-  canary.
 - 2026-06-27: `make ci` fails at the coverage gate only. Formatting, build,
   vet, and `go test ./... -race` passed, then `go run ./tools/covergate ...`
   failed because `internal/enginecatalog` reported 78.3% statement coverage
@@ -29,6 +12,24 @@
 
 ## Resolved
 
+- 2026-06-27: Corrected-LAN Spark inference and the peer-registry cap blocker
+  are resolved from narrow live proof. Spark `mycelium-real-fleet.service`
+  listens at `192.168.0.16:55274`; authenticated MacBook diagnostics showed
+  both B70 `192.168.0.153:55283` and Spark ready. The Spark 9B model snapshot
+  already existed under Spark's Hugging Face cache mount, and the Spark vLLM
+  wrapper loaded it through Docker as `spark-qwen9b` on `127.0.0.1:55374`.
+  Stale registry/runtime job records were cleared from MacBook, B70, and Spark
+  control DBs with timestamped backups after first proving the oversized
+  `/registry/snapshot` body; authenticated registry snapshots then stayed below
+  the 16 MiB peer-RPC body cap. The code fix in `27a1e5f` compacts future peer
+  registry snapshots to rescue-relevant job records only. A tiny B70 strict
+  JSON-schema canary through `192.168.0.143:55291` returned parseable final JSON
+  on warm B70 `inst_2`; a tiny Spark strict JSON-schema canary through the same
+  gateway returned HTTP 200, `X-Myc-Node: spark`, `X-Myc-Backend: vllm`,
+  `X-Myc-Decision: placed_on_warm_instance`, `X-Myc-Structured-Output:
+  json_schema`, `X-Myc-Guided-Decoding-Requested: true`, `finish_reason=stop`,
+  and parseable final JSON. Full-fleet readiness is now proven for the narrow
+  B70-plus-Spark corrected-LAN route, not for broad load or Mac mini health.
 - 2026-06-27: The old 2026-06-04 "real smoke env unset" blocker is superseded.
   The local smoke runtime path was fixed and `make smoke-local` was re-proven
   on 2026-06-26 with an already-present LM Studio Ministral GGUF, while the

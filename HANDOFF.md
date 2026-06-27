@@ -10,7 +10,7 @@ handoff rewrite.
 ## Current Repo State
 
 - Branch: `main`.
-- Latest observed commit before this handoff refresh: `3f125c9 Add gateway telemetry headers for Atlas`.
+- Latest observed commit before this handoff refresh: `27a1e5f Compact peer registry snapshots`.
 - Remote already configured: `origin https://github.com/1kuna/mycelium.git`.
 - Source-of-truth docs remain `01-project-spec.md`, `02-testing-architecture.md`,
   and `03-development-guide.md`.
@@ -57,22 +57,28 @@ important continuity points are:
   included MacBook/Mac mini/B70/Spark scenarios, but do not assume those exact
   services are still up without checking.
 - Current Atlas-facing inference route remains MacBook gateway to B70 for proven
-  real work; Spark is now a repaired peer but not a proven inference owner. On
+  real work, and Spark is now also a proven corrected-LAN inference owner. On
   2026-06-27 the MacBook LaunchAgent `com.mycelium.real-fleet` listened at
-  `192.168.0.143:55291`, B70 listened at `192.168.0.153:55283`, and Spark was
-  repaired to listen at `192.168.0.16:55274`. Authenticated health/diagnostics
-  showed MacBook sees both B70 and Spark seeds ready, and Spark `/snapshot`
-  reported compute=true/status=ready with no live instances. A tiny strict
-  JSON-schema `/v1/chat/completions` request for `qwen3.5-9b` routed to B70
-  `inst_2` with `X-Myc-Node: b70`, `X-Myc-Backend: vllm`,
+  `192.168.0.143:55291`, B70 listened at `192.168.0.153:55283`, and Spark
+  listened at `192.168.0.16:55274`. Authenticated MacBook diagnostics showed
+  both B70 and Spark seeds ready. A tiny strict JSON-schema
+  `/v1/chat/completions` request for `qwen3.5-9b` routed to warm B70 `inst_2`
+  with `X-Myc-Node: b70`, `X-Myc-Backend: vllm`,
   `X-Myc-Decision: placed_on_warm_instance`, `X-Myc-Structured-Output:
   json_schema`, and `X-Myc-Guided-Decoding-Requested: true`, returning
-  parseable final JSON. The matching `spark-qwen9b` canary reached Spark loading
-  but timed out after 90s; Spark had no Mycelium vLLM/docker child process and
-  the checked Spark 9B model/cache paths were absent. Spark logs also showed
-  registry pulls from MacBook/B70 exceeding the current 16 MiB peer RPC body
-  limit. This proves repaired Spark peer reachability, not full-fleet inference
-  health.
+  parseable final JSON. A matching strict JSON-schema request for
+  `spark-qwen9b` routed to Spark `inst_2` with `X-Myc-Node: spark`,
+  `X-Myc-Backend: vllm`, `X-Myc-Decision: placed_on_warm_instance`,
+  `X-Myc-Structured-Output: json_schema`, and
+  `X-Myc-Guided-Decoding-Requested: true`, returning parseable final JSON.
+  Spark owner snapshot reported `spark-qwen9b-vllm` ready at
+  `127.0.0.1:55374`.
+- Peer registry snapshot sync was compacted in `27a1e5f` so peer RPC snapshots
+  carry only rescue-relevant job records rather than all terminal history.
+  Before deploying that code live everywhere, stale runtime job records were
+  cleared from the MacBook, B70, and Spark control DBs with timestamped backups;
+  authenticated `/registry/snapshot` responses then stayed small and below the
+  16 MiB peer RPC body cap.
 - Session telemetry was added on 2026-06-04. `session_metrics` records phase
   time-series samples alongside `run_metrics`; owner peers are authoritative for
   run/session telemetry, and remote-owner telemetry goes over authenticated
@@ -123,9 +129,8 @@ MacBook/B70 live canary, and Spark reachability classification. It did not push.
 
 - Real smoke state is drift-prone. Mac mini, B70, and Spark availability must be
   verified live before claiming fleet health. Current evidence proves MacBook to
-  B70 inference and repaired Spark peer reachability; it does not prove Spark
-  inference because the Spark canary timed out in loading and the Spark
-  model/backend artifacts need restoration or repointing.
+  B70 inference and MacBook to Spark inference; re-check live health before
+  treating either owner as available for new scale work.
 - `ops/private/` contains local smoke notes/bundles. Treat them as private
   operational evidence; do not publish secrets, tokens, host-specific paths, or
   model artifacts.
