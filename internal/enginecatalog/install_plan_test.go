@@ -105,6 +105,13 @@ func TestPlanInstallCoversSupportedEnginePlatformMatrix(t *testing.T) {
 }
 
 func TestPlanInstallRejectsUnsupportedOrUnsafePaths(t *testing.T) {
+	if _, err := PlanInstall(InstallPlanRequest{}); err == nil || !strings.Contains(err.Error(), "backend is required") {
+		t.Fatalf("missing backend err = %v", err)
+	}
+	if _, err := PlanInstall(InstallPlanRequest{Backend: domain.Backend("bogus"), Host: domain.HostFacts{Platform: "linux/amd64"}}); err == nil || !strings.Contains(err.Error(), `unknown backend "bogus"`) {
+		t.Fatalf("unknown backend err = %v", err)
+	}
+
 	intelMac := domain.HostFacts{NodeID: "intel-mac", OS: "darwin", Arch: "amd64", Platform: "darwin/amd64"}
 	plan, err := PlanInstall(InstallPlanRequest{Backend: domain.BackendMLX, Host: intelMac})
 	if err != nil {
@@ -134,6 +141,22 @@ func TestPlanInstallRejectsUnsupportedOrUnsafePaths(t *testing.T) {
 	}
 	if plan.Status != InstallPlanBlocked || !strings.Contains(plan.Reason, "disk floor") {
 		t.Fatalf("low disk plan = %+v", plan)
+	}
+	openvinoCPU := domain.HostFacts{Platform: "linux/amd64", DiskFreeMB: -1}
+	plan, err = PlanInstall(InstallPlanRequest{Backend: domain.BackendOpenVINO, Host: openvinoCPU})
+	if err != nil {
+		t.Fatalf("PlanInstall unknown disk: %v", err)
+	}
+	if plan.Status != InstallPlanAvailable || plan.HostID != "linux/amd64" || plan.Accelerator != "cpu" || plan.HostPlatform != "linux/amd64" {
+		t.Fatalf("openvino cpu plan = %+v", plan)
+	}
+	adequateDisk := domain.HostFacts{NodeID: "b70", OS: "linux", Arch: "amd64", DiskFreeMB: 30, DiskTotalMB: 100, DiskMinFreeRatio: 0.25, Accelerators: []domain.Accelerator{{Vendor: "intel"}}}
+	plan, err = PlanInstall(InstallPlanRequest{Backend: domain.BackendOpenVINO, Host: adequateDisk})
+	if err != nil {
+		t.Fatalf("PlanInstall adequate disk: %v", err)
+	}
+	if plan.Status != InstallPlanAvailable || plan.HostPlatform != "linux/amd64" {
+		t.Fatalf("adequate disk plan = %+v", plan)
 	}
 }
 

@@ -40,6 +40,42 @@ func TestCapabilityHostAssessmentKeepsPlatformConstraintsExplicit(t *testing.T) 
 	if support := openvino.AssessHost(domain.HostFacts{OS: "linux", Arch: "amd64", Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}); !support.Supported {
 		t.Fatalf("B70 OpenVINO support = %+v", support)
 	}
+	if support := openvino.AssessHost(domain.HostFacts{Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}); !support.Supported || support.Runtime != "openvino" {
+		t.Fatalf("platform fallback support = %+v", support)
+	}
+	if support := openvino.AssessHost(domain.HostFacts{Platform: "linux", Accelerators: []domain.Accelerator{{Vendor: "intel"}}}); support.Supported || !strings.Contains(support.Reason, "/ with intel accelerator") {
+		t.Fatalf("malformed platform support = %+v", support)
+	}
+	if support := openvino.AssessHost(domain.HostFacts{Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "intel"}, {Vendor: "nvidia"}}}); support.Supported || !strings.Contains(support.Reason, "mixed accelerator") {
+		t.Fatalf("mixed accelerator support = %+v", support)
+	}
+	if support := openvino.AssessHost(domain.HostFacts{Platform: "linux/amd64", Accelerators: []domain.Accelerator{{Vendor: "  "}}}); !support.Supported || support.Runtime != "openvino" {
+		t.Fatalf("blank accelerator vendor should fall back to CPU OpenVINO support = %+v", support)
+	}
+}
+
+func TestFormatHelpersNormalizeAndExplainRequirements(t *testing.T) {
+	vllm := mustCapability(t, Default(), domain.BackendVLLM)
+	if got := vllm.NeededFormat(); got != "hf-transformers,safetensors" {
+		t.Fatalf("needed format = %q", got)
+	}
+	for _, tt := range []struct {
+		supported string
+		artifact  string
+		want      bool
+	}{
+		{catalog.FormatHFTransformers, " safetensors ", true},
+		{FormatSafetensors, "HF-TRANSFORMERS", true},
+		{catalog.FormatGGUF, " GGUF ", true},
+		{catalog.FormatGGUF, FormatMLX, false},
+	} {
+		if got := FormatsCompatible(tt.supported, tt.artifact); got != tt.want {
+			t.Fatalf("FormatsCompatible(%q, %q) = %v, want %v", tt.supported, tt.artifact, got, tt.want)
+		}
+	}
+	if vllm.SupportsFormat("gguf") {
+		t.Fatal("vLLM accepted GGUF artifact format")
+	}
 }
 
 func requireCapability(t *testing.T, caps []Capability, backend domain.Backend, formats []string) {

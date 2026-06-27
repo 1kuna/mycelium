@@ -27,13 +27,18 @@
   --name real-fleet --system`, install the system service with sudo, run
   `service status`, and immediately restore the known-good binary/service if
   seed diagnostics fail.
-- 2026-06-27: `make ci` fails at the coverage gate only. Formatting, build,
-  vet, and `go test ./... -race` passed, then `go run ./tools/covergate ...`
-  failed because `internal/enginecatalog` reported 78.3% statement coverage
-  under the 85.0% per-package floor. Unblock by adding focused
-  `internal/enginecatalog` coverage or revisiting the package gate with a
-  deliberate decision; do not weaken the gate just to pass this operational
-  proof.
+- 2026-06-27: `make ci` still fails at the coverage gate, but the original
+  `internal/enginecatalog` blocker is resolved. Focused tests raised
+  `internal/enginecatalog` from 78.3% to 96.9%, added first coverage for
+  `internal/enginecompat` at 94.4%, and raised `pkg/api` to 89.9%. The current
+  `make coverage` run now reaches covergate and fails on remaining below-floor
+  packages under the 85.0% package floor; because covergate iterates package
+  totals from a map, the first reported package can vary. Observed below-floor
+  packages include `cmd/internal/controlcli` 82.4%, `cmd/mycelium` 81.7%,
+  `internal/backends/llamacpp` 83.2%, `internal/backends/processadapter` 83.0%,
+  `internal/bootstrap` 73.6%, `internal/catalog` 82.9%,
+  `internal/modelcompat` 82.4%, and `test/mocks` 77.8%. Unblock by adding
+  focused behavior tests for those packages; do not weaken the gate.
 
 ## Resolved
 

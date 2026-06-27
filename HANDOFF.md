@@ -127,10 +127,13 @@ Known from repo and live evidence:
   gateway. A 2026-06-27 canary observed `X-Myc-Cold-Load`,
   `X-Myc-Queue-Wait-Ms`, `X-Myc-Upstream-Wall-Ms`,
   `X-Myc-Structured-Output`, and `X-Myc-Guided-Decoding-Requested`.
-- `make ci` on 2026-06-27 passed formatting, build, vet, and
+- `make ci` on 2026-06-27 previously passed formatting, build, vet, and
   `go test ./... -race`, but failed the coverage gate because
   `internal/enginecatalog` reported 78.3% statement coverage under the 85.0%
-  per-package floor.
+  per-package floor. A later repo-local coverage pass raised
+  `internal/enginecatalog` to 96.9%, added `internal/enginecompat` coverage at
+  94.4%, and raised `pkg/api` to 89.9%; `make coverage` now fails on remaining
+  below-floor packages listed in `BLOCKERS.md`.
 
 This handoff refresh performed repo authority inspection, `make ci`, a narrow
 MacBook/B70 live canary, and Spark reachability classification. It did not push.
