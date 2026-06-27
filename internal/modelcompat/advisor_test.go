@@ -111,6 +111,204 @@ func TestAdvisorRequiresDeclaredSupportedFormats(t *testing.T) {
 	}
 }
 
+func TestAdvisorValidatesRequiredInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		req  Request
+		want string
+	}{
+		{
+			name: "model required",
+			req:  Request{Artifacts: []Artifact{{Ref: "/models/model.gguf", Format: catalog.FormatGGUF}}},
+			want: "model is required",
+		},
+		{
+			name: "artifact required",
+			req:  Request{Model: "logical/model"},
+			want: "at least one artifact is required",
+		},
+		{
+			name: "artifact ref required",
+			req:  Request{Model: "logical/model", Artifacts: []Artifact{{Format: catalog.FormatGGUF}}},
+			want: "artifact ref is required",
+		},
+		{
+			name: "artifact format required",
+			req:  Request{Model: "logical/model", Artifacts: []Artifact{{Ref: "/models/model"}}},
+			want: "artifact format is required",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Advise(tt.req); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Advise error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestAdvisorUsesLatestPlanAndReportsMissingSavedProfile(t *testing.T) {
+	older := domain.BootstrapPlan{
+		ID:        "older",
+		CreatedAt: time.Unix(1, 0).UTC(),
+		Host:      domain.HostFacts{NodeID: "mac", Platform: "darwin/arm64"},
+		ResultingProfiles: []domain.EngineProfile{{
+			ID:              "old-mlx",
+			Backend:         domain.BackendMLX,
+			Ready:           true,
+			SupportedModels: []string{"mlx"},
+		}},
+	}
+	newer := domain.BootstrapPlan{
+		ID:        "newer",
+		CreatedAt: time.Unix(2, 0).UTC(),
+		Host:      domain.HostFacts{NodeID: "mac", Platform: "darwin/arm64"},
+		ResultingProfiles: []domain.EngineProfile{{
+			ID:              "missing-mlx",
+			Backend:         domain.BackendMLX,
+			Ready:           true,
+			SupportedModels: []string{"mlx"},
+		}},
+	}
+	report, err := Advise(Request{
+		Model:     "logical/model",
+		Artifacts: []Artifact{{Ref: "/models/model-mlx", Format: "mlx"}},
+		Plans:     []domain.BootstrapPlan{older, newer},
+		Profiles: []domain.EngineProfile{{
+			ID:              "old-mlx",
+			Backend:         domain.BackendMLX,
+			Ready:           true,
+			SupportedModels: []string{"mlx"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Advise: %v", err)
+	}
+	row := requireRow(t, report.Rows, "mac", "/models/model-mlx", domain.BackendMLX, StatusBlocked, "")
+	if row.EngineProfileID != "missing-mlx" || !strings.Contains(row.Reason, "not saved in registry") {
+		t.Fatalf("missing saved profile row = %+v", row)
+	}
+	if findRow(report.Rows, "mac", "/models/model-mlx", domain.BackendMLX, StatusCanRunNow) != nil {
+		t.Fatalf("older plan profile should not survive latest-plan selection: %+v", report.Rows)
+	}
+}
+
+func TestAdvisorHandlesFallbackHostIDsProfileStatesAndLegacyFilters(t *testing.T) {
+	platformPlan := domain.BootstrapPlan{
+		ID:        "platform-plan",
+		CreatedAt: time.Unix(1, 0).UTC(),
+		Host:      domain.HostFacts{Platform: "linux/amd64"},
+		ResultingProfiles: []domain.EngineProfile{{
+			ID:               "incomplete",
+			Backend:          domain.BackendLlamaCpp,
+			Ready:            true,
+			SupportedModels:  []string{catalog.FormatGGUF},
+			CompatibilityKey: domain.CompatibilityKey{OS: "linux", Backend: domain.BackendLlamaCpp},
+		}},
+	}
+	osArchPlan := domain.BootstrapPlan{
+		ID:        "os-arch-plan",
+		CreatedAt: time.Unix(1, 0).UTC(),
+		Host:      domain.HostFacts{OS: "linux", Arch: "arm64"},
+		ResultingProfiles: []domain.EngineProfile{{
+			ID:              "unready-no-reason",
+			Backend:         domain.BackendVLLM,
+			Ready:           false,
+			SupportedModels: []string{catalog.FormatHFTransformers},
+		}},
+	}
+	planIDFallback := domain.BootstrapPlan{
+		ID:                "plan-id-only",
+		CreatedAt:         time.Unix(1, 0).UTC(),
+		ResultingProfiles: []domain.EngineProfile{{Backend: domain.BackendCustom, Ready: true, SupportedModels: []string{"bin"}}},
+	}
+
+	report, err := Advise(Request{
+		Model: "logical/model",
+		Artifacts: []Artifact{
+			{Ref: "/models/model.gguf", Format: catalog.FormatGGUF},
+			{Ref: "hf://logical/model", Format: catalog.FormatHFTransformers},
+			{Ref: "/models/custom.bin", Format: "bin"},
+		},
+		Plans: []domain.BootstrapPlan{platformPlan, osArchPlan, planIDFallback},
+		Profiles: []domain.EngineProfile{
+			platformPlan.ResultingProfiles[0],
+			osArchPlan.ResultingProfiles[0],
+		},
+		LegacyPresets: []domain.Preset{
+			{ID: "generated", NodeID: "manual", Backend: domain.BackendLlamaCpp, GeneratedBy: "bootstrap"},
+			{ID: "engine-profile", NodeID: "manual", Backend: domain.BackendLlamaCpp, EngineProfileID: "profile"},
+			{ID: "known-host", NodeID: "linux/amd64", Backend: domain.BackendLlamaCpp},
+			{ID: "manual-a", Backend: domain.BackendOpenVINO},
+			{ID: "manual-b", Backend: domain.BackendOpenVINO},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Advise: %v", err)
+	}
+	incomplete := requireRow(t, report.Rows, "linux/amd64", "/models/model.gguf", domain.BackendLlamaCpp, StatusCompatibilityKeyIncomplete, "")
+	if !strings.Contains(incomplete.Reason, "compatibility_key_incomplete") {
+		t.Fatalf("incomplete compatibility row = %+v", incomplete)
+	}
+	unready := requireRow(t, report.Rows, "linux/arm64", "hf://logical/model", domain.BackendVLLM, StatusBlocked, "")
+	if unready.Reason != "saved engine profile is not ready" {
+		t.Fatalf("unready fallback reason = %+v", unready)
+	}
+	fallback := requireRow(t, report.Rows, "plan-id-only", "/models/custom.bin", domain.BackendCustom, StatusCompatibilityKeyIncomplete, "")
+	if !strings.Contains(fallback.Reason, "has no saved compatibility key") {
+		t.Fatalf("plan-id fallback row = %+v", fallback)
+	}
+	legacy := rowsMatching(report.Rows, "legacy-config", domain.BackendOpenVINO, StatusLegacyConfigUnverified)
+	if len(legacy) != 3 {
+		t.Fatalf("legacy rows = %d, want one default-host row per artifact: %+v", len(legacy), legacy)
+	}
+	if findRow(report.Rows, "manual", "/models/model.gguf", domain.BackendLlamaCpp, StatusLegacyConfigUnverified) != nil {
+		t.Fatalf("generated or engine-profile legacy presets should be filtered: %+v", report.Rows)
+	}
+	if findRow(report.Rows, "linux/amd64", "/models/model.gguf", domain.BackendLlamaCpp, StatusLegacyConfigUnverified) != nil {
+		t.Fatalf("legacy row for planned host should be filtered: %+v", report.Rows)
+	}
+}
+
+func TestAdvisorFormatAdviceAndFallbackFamilies(t *testing.T) {
+	host := domain.HostFacts{NodeID: "generic", OS: "linux", Arch: "amd64", Platform: "linux/amd64"}
+	profiles := []domain.EngineProfile{
+		keyedProfile(domain.EngineProfile{ID: "openvino", Backend: domain.BackendOpenVINO, Ready: true, SupportedModels: []string{catalog.FormatOpenVINOIR}}, host, ""),
+		keyedProfile(domain.EngineProfile{ID: "llamacpp", Backend: domain.BackendLlamaCpp, Ready: true, SupportedModels: []string{catalog.FormatGGUF}}, host, ""),
+		keyedProfile(domain.EngineProfile{ID: "sglang", Backend: domain.BackendSGLang, Ready: true, SupportedModels: []string{catalog.FormatHFTransformers}}, host, ""),
+		keyedProfile(domain.EngineProfile{ID: "unknown-advice", Backend: domain.Backend("future-advice"), Ready: true, SupportedModels: []string{"future-format"}}, host, ""),
+		keyedProfile(domain.EngineProfile{ID: "unknown-family", Backend: domain.Backend("future"), Ready: true, SupportedModels: []string{"weird"}}, host, ""),
+		keyedProfile(domain.EngineProfile{ID: "custom", Backend: domain.BackendCustom, Ready: true, SupportedModels: []string{"weird"}}, host, ""),
+	}
+	report, err := Advise(Request{
+		Model:     "logical/model",
+		Artifacts: []Artifact{{Ref: "/models/model.weird", Format: "weird"}},
+		Plans:     []domain.BootstrapPlan{{ID: "plan", CreatedAt: time.Unix(1, 0).UTC(), Host: host, ResultingProfiles: profiles}},
+		Profiles:  profiles,
+	})
+	if err != nil {
+		t.Fatalf("Advise: %v", err)
+	}
+	assertReasonContains(t, report.Rows, domain.BackendOpenVINO, "openvino-ir required")
+	assertReasonContains(t, report.Rows, domain.BackendLlamaCpp, "gguf required")
+	assertReasonContains(t, report.Rows, domain.BackendSGLang, "hf-transformers or safetensors required")
+	advice := requireRow(t, report.Rows, "generic", "/models/model.weird", domain.Backend("future-advice"), StatusNeedsArtifactFormat, "future-format")
+	if !strings.Contains(advice.Reason, "artifact format weird is not compatible") {
+		t.Fatalf("unknown backend advice = %+v", advice)
+	}
+	family := requireRow(t, report.Rows, "generic", "/models/model.weird", domain.Backend("future"), StatusCanRunNow, "")
+	if family.EngineFamily != "future" {
+		t.Fatalf("unknown backend family = %+v", family)
+	}
+	custom := requireRow(t, report.Rows, "generic", "/models/model.weird", domain.BackendCustom, StatusCanRunNow, "")
+	if custom.EngineFamily != "custom/native process" {
+		t.Fatalf("custom backend family = %+v", custom)
+	}
+	if got := artifactByRef(report.Artifacts, "/models/model.weird").Scope; got != "unknown" {
+		t.Fatalf("unknown artifact scope = %q", got)
+	}
+}
+
 func TestAdvisorCapabilityCatalogCoversMajorEngineFamilies(t *testing.T) {
 	plans := []domain.BootstrapPlan{
 		{ID: "mac-as", CreatedAt: time.Unix(1, 0).UTC(), Host: domain.HostFacts{NodeID: "mac-as", OS: "darwin", Arch: "arm64", Platform: "darwin/arm64", Accelerators: []domain.Accelerator{{Vendor: "apple"}}}},
@@ -198,4 +396,34 @@ func artifactByRef(artifacts []Artifact, ref string) Artifact {
 		}
 	}
 	return Artifact{}
+}
+
+func findRow(rows []Row, host, artifact string, backend domain.Backend, status string) *Row {
+	for i := range rows {
+		row := &rows[i]
+		if row.HostID == host && row.ArtifactRef == artifact && row.Backend == backend && row.Status == status {
+			return row
+		}
+	}
+	return nil
+}
+
+func rowsMatching(rows []Row, host string, backend domain.Backend, status string) []Row {
+	var out []Row
+	for _, row := range rows {
+		if row.HostID == host && row.Backend == backend && row.Status == status {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func assertReasonContains(t *testing.T, rows []Row, backend domain.Backend, want string) {
+	t.Helper()
+	for _, row := range rows {
+		if row.Backend == backend && row.Status == StatusNeedsArtifactFormat && strings.Contains(row.Reason, want) {
+			return
+		}
+	}
+	t.Fatalf("missing %s advice containing %q in rows %+v", backend, want, rows)
 }
