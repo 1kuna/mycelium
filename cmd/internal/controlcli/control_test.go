@@ -1974,6 +1974,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"owner-telemetry\tok\tnode=node-a\taddress=http://peer.test\tmetrics=1\tsamples=1\tttft_ms=34\tload_ms=0\ttps=12.50\tcontext=26\tphases=complete",
 		"consumer\trun=atlas-batch-7\titem=row-006\tstatus=timeout\telapsed_ms=180000\terror=client_deadline",
 		"diagnosis\towner_completed_warm\towner node-a completed warm inference; load_ms=0; ttft_ms=34; consumer_status=timeout; upstream_ms=512; structured=json_schema",
+		"optimization\tjob=job-a\tproject=atlas-batch\tconsumer_status=timeout\tnode=b70\tpreset=tiny\tmodel=qwen3.5-9b\tstream=false\ttool=true\tusage=16/10/26\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=consumer\tfailure_class=owner_completed_warm",
 	} {
 		if !strings.Contains(preflightOutput, want) {
 			t.Fatalf("preflight debug output missing %q:\n%s", want, preflightOutput)
@@ -1992,6 +1993,9 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	}
 	if preflightReport.Preflight == nil || preflightReport.Preflight.Headers["X-Myc-Node"] != "b70" || preflightReport.Preflight.ContentLength != 16 || !preflightReport.Preflight.TextualToolCall || preflightReport.OwnerTelemetry == nil || len(preflightReport.OwnerTelemetry.RunMetrics) != 1 || len(preflightReport.OwnerTelemetry.SessionTimeline) != 1 || preflightReport.Diagnosis == nil || preflightReport.Diagnosis.Class != "owner_completed_warm" {
 		t.Fatalf("preflight debug report = %+v", preflightReport)
+	}
+	if preflightReport.Optimization == nil || preflightReport.Optimization.Project != "atlas-batch" || preflightReport.Optimization.Model != "qwen3.5-9b" || preflightReport.Optimization.NodeID != "b70" || preflightReport.Optimization.PresetID != "tiny" || preflightReport.Optimization.Request.ToolName != "echo" || preflightReport.Optimization.UsageTotalTokens != 26 || preflightReport.Optimization.TTFTMS != 34 || preflightReport.Optimization.UpstreamWallMS != 512 || preflightReport.Optimization.FailureLayer != "none" {
+		t.Fatalf("preflight optimization report = %+v", preflightReport.Optimization)
 	}
 	if preflightReport.Consumer != nil {
 		t.Fatalf("unexpected consumer evidence without flags = %+v", preflightReport.Consumer)
@@ -2207,7 +2211,7 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	if !strings.Contains(output, "debug-bundle\t"+outDir) {
 		t.Fatalf("bundle output = %q", output)
 	}
-	for _, name := range []string{"manifest.json", "config.redacted.json", "preflight.json", "job_debug.json", "jobs.json", "registry.json", "run_metrics.json", "session_metrics.json", "nodes.json", "instances.json", "recommendations.json", "peer_snapshot.json", "status.txt"} {
+	for _, name := range []string{"manifest.json", "config.redacted.json", "preflight.json", "job_debug.json", "optimization.json", "jobs.json", "registry.json", "run_metrics.json", "session_metrics.json", "nodes.json", "instances.json", "recommendations.json", "peer_snapshot.json", "status.txt"} {
 		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
 			t.Fatalf("missing bundle file %s: %v", name, err)
 		}
@@ -2246,6 +2250,13 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	}
 	if strings.Contains(string(jobDebugData), "rpc-secret") || !strings.Contains(string(jobDebugData), `"owner_telemetry"`) || !strings.Contains(string(jobDebugData), `"diagnosis"`) || !strings.Contains(string(jobDebugData), `"job_id": "job-a"`) || !strings.Contains(string(jobDebugData), `"consumer"`) || !strings.Contains(string(jobDebugData), `"run_id": "verso-prod-smoke"`) || !strings.Contains(string(jobDebugData), `"status": "error"`) {
 		t.Fatalf("job debug artifact = %s", jobDebugData)
+	}
+	optimizationData, err := os.ReadFile(filepath.Join(outDir, "optimization.json"))
+	if err != nil {
+		t.Fatalf("read optimization artifact: %v", err)
+	}
+	if strings.Contains(string(optimizationData), "rpc-secret") || !strings.Contains(string(optimizationData), `"project": "atlas-batch"`) || !strings.Contains(string(optimizationData), `"consumer_status": "error"`) || !strings.Contains(string(optimizationData), `"failure_layer": "consumer"`) || !strings.Contains(string(optimizationData), `"usage_total_tokens": 26`) {
+		t.Fatalf("optimization artifact = %s", optimizationData)
 	}
 
 	inheritedOut := filepath.Join(t.TempDir(), "bundle-inherited")

@@ -126,7 +126,11 @@ important continuity points are:
   and sanitized error facts with `--consumer-run`, `--consumer-item`,
   `--consumer-status`, `--consumer-elapsed-ms`, and `--consumer-error`; those
   fields are copied into `debug job --json` and `debug bundle` artifacts without
-  requiring prompts, completions, or tokens. Current preflight artifacts can
+  requiring prompts, completions, or tokens. `debug job --json` now includes an
+  `optimization` summary object, and `debug bundle` writes the same object as
+  `optimization.json`, joining request contract, consumer labels, route headers,
+  owner timing/session phases, usage, finish/tool/JSON outcome, diagnosis class,
+  and failure layer into one secret-safe query surface. Current preflight artifacts can
   carry those same labels at request time, and `debug job --preflight` /
   `debug bundle --preflight` inherit them automatically when no explicit
   `--consumer-*` flags are provided. Explicit debug flags remain the override
