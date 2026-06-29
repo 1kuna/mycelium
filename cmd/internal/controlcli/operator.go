@@ -776,6 +776,9 @@ type jobOptimizationEvidence struct {
 	UsageCompletionTokens   int                                  `json:"usage_completion_tokens,omitempty"`
 	UsageTotalTokens        int                                  `json:"usage_total_tokens,omitempty"`
 	ContextUsed             int                                  `json:"context_used,omitempty"`
+	ContextCap              int                                  `json:"context_cap,omitempty"`
+	MinContextCap           int                                  `json:"min_context_cap,omitempty"`
+	ContextAdequate         bool                                 `json:"context_adequate,omitempty"`
 	FinishReason            string                               `json:"finish_reason,omitempty"`
 	JSONContent             bool                                 `json:"json_content,omitempty"`
 	ToolCallCount           int                                  `json:"tool_call_count,omitempty"`
@@ -823,6 +826,10 @@ func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvi
 		out.UsageCompletionTokens = report.Preflight.Usage.CompletionTokens
 		out.UsageTotalTokens = report.Preflight.Usage.TotalTokens
 		out.ContextUsed = report.Preflight.Usage.TotalTokens
+		out.ContextCap = report.Preflight.Request.ContextCap
+		if report.Preflight.Expectations != nil {
+			out.MinContextCap = report.Preflight.Expectations.MinContextCap
+		}
 	}
 	if report.Consumer != nil {
 		out.ConsumerStatus = report.Consumer.Status
@@ -846,6 +853,13 @@ func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvi
 	if report.Diagnosis != nil {
 		out.FailureClass = report.Diagnosis.Class
 		out.FailureLayer = failureLayerForDiagnosis(*report.Diagnosis, report)
+	}
+	if out.MinContextCap > 0 {
+		out.ContextAdequate = out.ContextCap >= out.MinContextCap
+		if !out.ContextAdequate {
+			out.FailureClass = "consumer_contract_context_too_small"
+			out.FailureLayer = "consumer_contract"
+		}
 	}
 	return out
 }
@@ -900,13 +914,16 @@ func failureLayerForDiagnosis(diagnosis jobDebugDiagnosis, report jobDebugReport
 }
 
 func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvidence) {
-	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tnode=%s\tpreset=%s\tmodel=%s\tstream=%t\ttool=%t\tusage=%d/%d/%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\n",
+	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tnode=%s\tpreset=%s\tmodel=%s\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\n",
 		emptyDash(evidence.JobID),
 		emptyDash(evidence.Project),
 		emptyDash(evidence.ConsumerStatus),
 		emptyDash(evidence.NodeID),
 		emptyDash(evidence.PresetID),
 		emptyDash(evidence.Model),
+		evidence.ContextCap,
+		evidence.MinContextCap,
+		evidence.ContextAdequate,
 		evidence.Request.Streaming,
 		evidence.Request.ToolRequested,
 		evidence.UsagePromptTokens,
