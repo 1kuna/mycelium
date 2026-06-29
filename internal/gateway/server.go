@@ -29,6 +29,10 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeGatewayError(w, http.StatusUnauthorized, "gateway token required")
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+		s.writeModels(w)
+		return
+	}
 	trustControlHeaders := s.TrustControlHeaders
 	req, err := parseRequestWithControlHeaders(r, trustControlHeaders)
 	if err != nil {
@@ -63,6 +67,25 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.Status)
 	_, _ = w.Write(resp.Body)
+}
+
+func (s Server) writeModels(w http.ResponseWriter) {
+	type model struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		OwnedBy string `json:"owned_by"`
+	}
+	out := struct {
+		Object string  `json:"object"`
+		Data   []model `json:"data"`
+	}{
+		Object: "list",
+	}
+	for _, id := range s.Router.Presets.PublicModelIDs() {
+		out.Data = append(out.Data, model{ID: id, Object: "model", OwnedBy: "mycelium"})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func parseRequest(r *http.Request) (translate.IngressRequest, error) {

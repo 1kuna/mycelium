@@ -1088,6 +1088,87 @@ func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 	}
 }
 
+func TestRunGatewayRoutesComparesLiveModels(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "peer.json")
+	cfg := operatorPeerConfig{
+		ID:           "macbook",
+		Listen:       "http://gateway.test",
+		GatewayToken: "global-secret",
+		Projects: []domain.Project{
+			{ID: "atlas", DefaultModel: "qwen3.5-9b"},
+			{ID: "verso-tools", DefaultModel: "spark-qwen9b-tools-8192"},
+		},
+		Presets: []domain.Preset{
+			{ID: "b70-qwen9b-vllm", ModelRef: "qwen3.5-9b", Aliases: []string{"qwen3.5-9b"}, Backend: domain.BackendVLLM, NodeID: "b70"},
+			{ID: "spark-qwen9b-tools-8192-vllm", ModelRef: "qwen3.5-9b", Aliases: []string{"spark-qwen9b-tools-8192"}, Backend: domain.BackendVLLM, NodeID: "spark"},
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal peer config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write peer config: %v", err)
+	}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer global-secret" {
+			t.Fatalf("auth = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"data": []map[string]string{
+				{"id": "qwen3.5-9b", "object": "model", "owned_by": "mycelium"},
+			},
+		})
+	}))
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = RunWithClient(context.Background(), []string{"gateway", "routes", "--config", configPath, "--live"}, client)
+	})
+	if runErr != nil {
+		t.Fatalf("gateway routes live: %v", runErr)
+	}
+	for _, want := range []string{
+		"live\tgateway=http://gateway.test\tstatus=ok\tmodels=1",
+		"route\tproject=atlas\tmodel=qwen3.5-9b",
+		"live_model=true\tlive_match=qwen3.5-9b",
+		"route\tproject=verso-tools\tmodel=spark-qwen9b-tools-8192",
+		"live_model=false\tlive_match=-",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("gateway live routes output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "global-secret") {
+		t.Fatalf("gateway live routes leaked token material: %s", output)
+	}
+
+	var jsonErr error
+	jsonOutput := captureStdout(t, func() {
+		jsonErr = RunWithClient(context.Background(), []string{"gateway", "routes", "--config", configPath, "--live", "--json"}, client)
+	})
+	if jsonErr != nil {
+		t.Fatalf("gateway routes live json: %v", jsonErr)
+	}
+	if strings.Contains(jsonOutput, "global-secret") {
+		t.Fatalf("gateway live routes JSON leaked token material: %s", jsonOutput)
+	}
+	var report gatewayRoutesReport
+	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+		t.Fatalf("decode live routes JSON: %v", err)
+	}
+	if !report.Live.Checked || report.Live.Status != "ok" || report.Live.ModelCount != 1 {
+		t.Fatalf("live report = %+v", report.Live)
+	}
+	if !report.Routes[0].LiveModelAvailable || report.Routes[1].LiveModelAvailable {
+		t.Fatalf("live route availability = %+v", report.Routes)
+	}
+}
+
 func TestRunGatewayPreflightToolCanaryRecordsResponseShape(t *testing.T) {
 	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "tool-secret")
 	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
