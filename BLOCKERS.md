@@ -27,18 +27,31 @@
   Spark, `tool_choice:"auto"` records `textual_tool_call=true` with no
   structured tool calls, and `tool_choice:"required"` hit `finish_reason=length`
   with no structured call under the tiny canary cap. A larger-context forced
-  tool route now exists on Spark as `spark-qwen9b-tools-4096` via
+  tool route first existed on Spark as `spark-qwen9b-tools-4096` via
   `http://192.168.0.16:55274`; it proved `usage.prompt_tokens=2997` and
-  `tool_call_count=1` with forced function choice. Remaining blocker: MacBook
-  gateway routing for that new alias is not live until the Mac gateway preset
-  registry can be safely refreshed, so consumers should use Spark directly for
-  this route. A 2026-06-29 authenticated MacBook probe for
-  `spark-qwen9b-tools-4096` returned HTTP 502 with
-  `unknown model "spark-qwen9b-tools-4096"`, while same-cycle route gates
-  passed for Atlas strict JSON on MacBook/B70 and Verso forced tools on direct
-  Spark. `myce gateway preflight` now has expectation flags to preserve this
-  proof shape without printing secrets: `--expect-node`, `--require-json`,
-  `--require-tool-call`, `--reject-textual-tool-call`, and
+  `tool_call_count=1` with forced function choice, but Verso's real Deep Agents
+  fixture still hit that route's 4096-token ceiling after tool-history growth.
+  Spark now also has `spark-qwen9b-tools-8192`, proved by a direct Spark
+  forced-tool preflight using a project-scoped `verso-tools` token. That canary
+  returned HTTP 200 on Spark `inst_1`, `X-Myc-Decision: loaded_new`,
+  `X-Myc-Cold-Load: true`, `X-Myc-Load-Wall-Ms: 160761`,
+  `X-Myc-Upstream-Wall-Ms: 3545`, `usage.prompt_tokens=5336`,
+  `usage.completion_tokens=12`, `usage.total_tokens=5348`,
+  `tool_call_count=1`, and `textual_tool_call=false`. Spark owner telemetry for
+  job `gateway-1782756550764336284-1-1` records `project=verso-tools`,
+  `preset=spark-qwen9b-tools-8192-vllm`, `context_request=8192`, and
+  `context_used=5348`, so optimization evidence is now grouped correctly when
+  consumers use the project token instead of the global `bench` token.
+  Remaining blockers: MacBook gateway routing for Spark tool aliases is not
+  live until the Mac gateway preset registry can be safely refreshed, and
+  reliable `tool_choice:"auto"` remains unproven for this Qwen/Hermes route.
+  Consumers should use direct Spark plus forced function choice for this route.
+  A 2026-06-29 authenticated MacBook probe for `spark-qwen9b-tools-4096`
+  returned HTTP 502 with `unknown model "spark-qwen9b-tools-4096"`, while
+  same-cycle route gates passed for Atlas strict JSON on MacBook/B70 and Verso
+  forced tools on direct Spark. `myce gateway preflight` now has expectation
+  flags to preserve this proof shape without printing secrets: `--expect-node`,
+  `--require-json`, `--require-tool-call`, `--reject-textual-tool-call`, and
   `--min-prompt-tokens`.
 - 2026-06-29: Cold-load/client-timeout stale-job live proof is blocked at the
   MacBook gateway activation step, not at the Linux peers. B70 and Spark were

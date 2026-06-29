@@ -384,7 +384,9 @@ myce gateway preflight \
 Current live larger-context tool route for Verso canaries:
 
 - Gateway: `http://192.168.0.16:55274`
-- Model: `spark-qwen9b-tools-4096`
+- Model: `spark-qwen9b-tools-8192`
+- Auth/project: use the operator-provided project token for `verso-tools`
+  rather than the global fleet token when preserving optimization evidence.
 - Tool choice: forced function choice, not `auto`
 - Expected headers: `X-Myc-Node: spark`, `X-Myc-Backend: vllm`,
   `X-Myc-Tool-Choice: function:<name>`,
@@ -393,18 +395,24 @@ Current live larger-context tool route for Verso canaries:
 - Expected evidence: `tool_call_count > 0`, `textual_tool_call=false`, and
   `usage.prompt_tokens` high enough for the consumer fixture.
 
-The route has a 4096-token model context. Leave headroom for the output cap and
-the tool schema/template. The live proof succeeded with
-`usage.prompt_tokens=2997`, `max_tokens=160`, and one structured `echo` tool
-call. The MacBook gateway may not route this alias until its preset registry is
-safely refreshed; use the Spark gateway directly unless a later handoff says the
-MacBook route is live.
+The route has an 8192-token model context. Leave headroom for the output cap,
+tool schema/template, and Deep Agents tool history growth. The live proof
+succeeded with `usage.prompt_tokens=5336`, `usage.completion_tokens=12`,
+`usage.total_tokens=5348`, `max_tokens=160`, and one structured `echo` tool
+call. Spark owner telemetry recorded `project=verso-tools`,
+`preset=spark-qwen9b-tools-8192-vllm`, `context_request=8192`, and
+`context_used=5348`. Gateways running older live binaries may not echo
+`X-Myc-Project` yet; in that case owner telemetry is the authoritative project
+join if the request used a project-scoped token. The MacBook gateway may not
+route this alias until its preset registry is safely refreshed; use the Spark
+gateway directly unless a later handoff says the MacBook route is live.
 
 ```bash
 myce gateway preflight \
   --url http://192.168.0.16:55274 \
-  --model spark-qwen9b-tools-4096 \
-  --project verso-tool-canary \
+  --model spark-qwen9b-tools-8192 \
+  --project verso-tools \
+  --gateway-token-file <operator-provided-verso-tools-token-file> \
   --prompt "Call the echo function with value ok. Do not answer directly." \
   --max-tokens 160 \
   --tool-name echo \
@@ -412,12 +420,13 @@ myce gateway preflight \
   --expect-node spark \
   --require-tool-call \
   --reject-textual-tool-call \
-  --out /tmp/mycelium-verso-tools4096
+  --min-prompt-tokens 5000 \
+  --out /tmp/mycelium-verso-tools8192
 ```
 
 When using the real compact Deep Agents fixture or another fixture-sized prompt,
-add `--min-prompt-tokens 2500` so the canary proves the larger-context route
-rather than only the tool parser.
+raise or lower `--min-prompt-tokens` to match the fixture. Keep it high enough
+to prove context headroom, not only the tool parser.
 
 ### Prove cold-load cancellation cleanup after activation
 

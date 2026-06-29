@@ -10,7 +10,7 @@ handoff rewrite.
 ## Current Repo State
 
 - Branch: `main`.
-- Latest observed commit before this handoff refresh: `88d7ae4 Document larger Spark tool route`.
+- Latest observed commit before this handoff refresh: `fc0fcc7 Harden consumer route preflight gates`.
 - Remote already configured: `origin https://github.com/1kuna/mycelium.git`.
 - Source-of-truth docs remain `01-project-spec.md`, `02-testing-architecture.md`,
   and `03-development-guide.md`.
@@ -153,21 +153,33 @@ important continuity points are:
   literal `<tool_call>` block and `required` exhausted the tiny output cap
   without a structured call. Use forced function choice for Verso canaries until
   a different model/template/parser route proves reliable auto.
-- A larger-context Spark tool route was added on 2026-06-29 without touching B70
-  or the MacBook gateway. Spark's peer config and control DB were backed up,
-  then a new `spark-qwen9b-tools-4096-vllm` preset/alias
+- Larger-context Spark tool routes were added on 2026-06-29 without touching B70
+  or the MacBook gateway. First, Spark's peer config and control DB were backed
+  up, then `spark-qwen9b-tools-4096-vllm` / alias
   `spark-qwen9b-tools-4096` was added with the same Qwen3.5-9B model,
   `--max-model-len 4096`, `--enable-auto-tool-choice`, and
-  `--tool-call-parser hermes`. Spark was restarted through its existing
-  `mycelium-real-fleet.service`; service status returned `peer ready` and
-  `seeds ready 2/2`. A secret-safe forced-tool preflight against
+  `--tool-call-parser hermes`. A secret-safe forced-tool preflight proved that
+  route with `usage.prompt_tokens=2997` and one structured `echo` tool call,
+  and provider 400 probes proved its 4096-token ceiling. After Verso's real
+  Deep Agents fixture still reached the 4096 wall, Spark was backed up again
+  and extended with `spark-qwen9b-tools-8192-vllm` / alias
+  `spark-qwen9b-tools-8192`. A project-scoped `verso-tools` gateway token and
+  project config were added so owner telemetry groups this traffic under
+  `project=verso-tools` with `context_request=8192` rather than under the
+  global `bench` token. A secret-safe forced-tool preflight against
   `http://192.168.0.16:55274` returned HTTP 200 on Spark `inst_1`,
+  `X-Myc-Decision: loaded_new`, `X-Myc-Cold-Load: true`,
+  `X-Myc-Load-Wall-Ms: 160761`, `X-Myc-Upstream-Wall-Ms: 3545`,
   `X-Myc-Tool-Choice: function:echo`, both vLLM tool headers true,
-  `usage.prompt_tokens=2997`, and `tool_call_count=1`. Provider 400 probes also
-  proved the new route enforces a 4096-token model ceiling. The current MacBook
-  gateway does not know this new alias until its own preset registry is safely
-  refreshed, so Verso should target Spark's Mycelium gateway directly for this
-  larger-context tool route.
+  `usage.prompt_tokens=5336`, `usage.completion_tokens=12`,
+  `usage.total_tokens=5348`, `tool_call_count=1`, and
+  `textual_tool_call=false`. Spark owner telemetry for job
+  `gateway-1782756550764336284-1-1` recorded `project=verso-tools`,
+  preset `spark-qwen9b-tools-8192-vllm`, `context_used=5348`,
+  `load_wall_clock_ms=160761`, TTFT/upstream time `3545ms`, and
+  `tokens_per_sec=3.38`. The current MacBook gateway does not know the Spark
+  tool aliases until its preset registry is safely refreshed, so Verso should
+  target Spark's Mycelium gateway directly for larger-context tool routes.
 - A follow-on route-gate pass added `myce gateway preflight` expectation flags:
   `--expect-node`, `--require-json`, `--require-tool-call`,
   `--reject-textual-tool-call`, and `--min-prompt-tokens`. Failed expectation
@@ -175,18 +187,23 @@ important continuity points are:
   Future deployed gateways also echo the effective `X-Myc-Project` response
   header from the already-authenticated/project-defaulted request label, giving
   Atlas/Verso a durable join key for route evidence, owner telemetry, and
-  consumer batch/item artifacts.
+  consumer batch/item artifacts. The live Spark service used for the 8192 route
+  has not yet picked up that binary, so `X-Myc-Project` may be absent in live
+  response headers even though the project-scoped token correctly records
+  `project=verso-tools` in owner telemetry.
 - The current live consumer-ready contracts are narrow and distinct. Atlas
   should continue to use the MacBook gateway `http://192.168.0.143:55291` with
   model `qwen3.5-9b`, strict `response_format.type=json_schema`, and an
   `--expect-node b70 --require-json` preflight gate. Verso larger-context
   tool-call canaries should use the direct Spark gateway
-  `http://192.168.0.16:55274` with model `spark-qwen9b-tools-4096`, forced
-  function `tool_choice`, `--expect-node spark --require-tool-call
-  --reject-textual-tool-call`, and a fixture-sized `--min-prompt-tokens` gate.
-  A live MacBook alias probe for `spark-qwen9b-tools-4096` returned HTTP 502
-  with `unknown model "spark-qwen9b-tools-4096"`, proving the MacBook gateway's
-  in-memory preset registry has not been safely refreshed for that alias.
+  `http://192.168.0.16:55274` with model `spark-qwen9b-tools-8192`, the
+  project-scoped `verso-tools` gateway token, forced function `tool_choice`,
+  `--expect-node spark --require-tool-call --reject-textual-tool-call`, and a
+  fixture-sized `--min-prompt-tokens` gate. A live MacBook alias probe for
+  `spark-qwen9b-tools-4096` returned HTTP 502 with
+  `unknown model "spark-qwen9b-tools-4096"`, proving the MacBook gateway's
+  in-memory preset registry has not been safely refreshed for Spark tool
+  aliases.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and
