@@ -112,7 +112,11 @@ important continuity points are:
   job's authoritative run/session metrics directly from the assigned owner peer
   when peer RPC auth is available; this is the post-hoc path for PM/consumer
   threads that need TTFT/load/context/tokens-per-second and owner session phases
-  after a partial batch or timeout.
+  after a partial batch or timeout. The debug report now includes a deterministic
+  `diagnosis` (`owner_completed_warm`, `owner_completed_cold_load`,
+  `owner_failed`, `cleanup_required`, `inflight_or_stale`,
+  `owner_telemetry_unavailable`, etc.) so Atlas/Verso can separate completed
+  owner inference from downstream consumer timeout/artifact issues.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and
