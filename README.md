@@ -198,16 +198,26 @@ advertises without exposing token values:
 ```bash
 myce gateway routes --config ~/.mycelium/peer.json
 myce gateway routes --config ~/.mycelium/peer.json --json
+myce gateway routes --config ~/.mycelium/peer.json --live
 ```
 
 The output joins projects to presets and reports the OpenAI base URL, model or
 alias, node, backend, context length, project context cap, auth source class,
 structured-output likelihood, streaming likelihood, and vLLM tool-parser flags.
 It only reports whether a project token or global gateway token is configured;
-it never prints token material. Treat this as catalog/config discovery, not live
-proof. A route is consumer-ready only after the matching `myce gateway
-preflight` and, for post-hoc work, `myce debug job --preflight` or
-`myce debug bundle --preflight` evidence exists.
+it never prints token material. With `--live`, the command performs an
+authenticated read-only `GET /v1/models` against the configured gateway (or
+`--url`) and annotates each configured route with `live_model` /
+`live_match`. Treat plain route output as catalog/config discovery, and `--live`
+as live catalog exposure proof. A route is consumer-ready only after the
+matching `myce gateway preflight` and, for post-hoc work, `myce debug job
+--preflight` or `myce debug bundle --preflight` evidence exists.
+
+Gateways built from the route-discovery revision expose `GET /v1/models` with
+preset IDs and aliases only; host-local model paths and artifact refs are not
+returned. If `myce gateway routes --live` reports an authenticated `404` for
+`/v1/models`, the running gateway binary is stale for catalog discovery even if
+chat/preflight routes still work.
 
 ```bash
 myce gateway preflight \

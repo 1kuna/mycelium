@@ -930,20 +930,30 @@ func runGateway(ctx context.Context, args []string, client *http.Client) error {
 	case "preflight":
 		return runGatewayPreflight(ctx, args[1:], client)
 	case "routes":
-		return runGatewayRoutes(ctx, args[1:])
+		return runGatewayRoutes(ctx, args[1:], client)
 	default:
 		return fmt.Errorf("usage: myce gateway <preflight|routes>")
 	}
 }
 
-func runGatewayRoutes(ctx context.Context, args []string) error {
+func runGatewayRoutes(ctx context.Context, args []string, client *http.Client) error {
 	fs := flag.NewFlagSet("gateway routes", flag.ContinueOnError)
 	configPath := fs.String("config", defaultPeerConfigPath(), "peer config JSON")
+	live := fs.Bool("live", false, "fetch the live gateway /v1/models catalog and compare configured routes")
+	url := fs.String("url", "", "live gateway URL override for --live")
+	gatewayTokenEnv := fs.String("gateway-token-env", "", "environment variable containing the Mycelium gateway bearer token for --live")
+	gatewayTokenFile := fs.String("gateway-token-file", "", "file containing the Mycelium gateway bearer token for --live")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	report, err := buildGatewayRoutesReport(ctx, *configPath)
+	report, err := buildGatewayRoutesReport(ctx, *configPath, gatewayRoutesLiveOptions{
+		Enabled:   *live,
+		URL:       *url,
+		TokenEnv:  *gatewayTokenEnv,
+		TokenFile: *gatewayTokenFile,
+		Client:    client,
+	})
 	if err != nil {
 		return err
 	}
@@ -959,7 +969,18 @@ type gatewayRoutesReport struct {
 	PeerID     string                 `json:"peer_id"`
 	Gateway    string                 `json:"gateway"`
 	BaseURL    string                 `json:"base_url"`
+	Live       gatewayRoutesLive      `json:"live,omitempty"`
 	Routes     []gatewayRouteContract `json:"routes"`
+}
+
+type gatewayRoutesLive struct {
+	Checked    bool     `json:"checked"`
+	Gateway    string   `json:"gateway,omitempty"`
+	AuthSource string   `json:"auth_source,omitempty"`
+	Status     string   `json:"status,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	ModelCount int      `json:"model_count,omitempty"`
+	ModelIDs   []string `json:"model_ids,omitempty"`
 }
 
 type gatewayRouteContract struct {
@@ -981,9 +1002,19 @@ type gatewayRouteContract struct {
 	AutoToolChoiceConfigured     bool                `json:"auto_tool_choice_configured"`
 	RecommendedToolChoice        string              `json:"recommended_tool_choice,omitempty"`
 	DiscoveryStatus              string              `json:"discovery_status"`
+	LiveModelAvailable           bool                `json:"live_model_available,omitempty"`
+	LiveModelMatch               string              `json:"live_model_match,omitempty"`
 }
 
-func buildGatewayRoutesReport(_ context.Context, configPath string) (gatewayRoutesReport, error) {
+type gatewayRoutesLiveOptions struct {
+	Enabled   bool
+	URL       string
+	TokenEnv  string
+	TokenFile string
+	Client    *http.Client
+}
+
+func buildGatewayRoutesReport(ctx context.Context, configPath string, live gatewayRoutesLiveOptions) (gatewayRoutesReport, error) {
 	loaded, err := loadOperatorConfig(configPath)
 	if err != nil {
 		return gatewayRoutesReport{}, err
@@ -999,13 +1030,21 @@ func buildGatewayRoutesReport(_ context.Context, configPath string) (gatewayRout
 	if gateway == "" {
 		report.BaseURL = ""
 	}
+	var liveModels map[string]struct{}
+	if live.Enabled {
+		liveReport, models := fetchGatewayRoutesLiveCatalog(ctx, loaded.Path, gateway, live)
+		report.Live = liveReport
+		liveModels = models
+	}
 	presets := cfg.Presets
 	sort.Slice(presets, func(i, j int) bool { return presets[i].ID < presets[j].ID })
 	projects := cfg.Projects
 	sort.Slice(projects, func(i, j int) bool { return projects[i].ID < projects[j].ID })
 	if len(projects) == 0 {
 		for _, preset := range presets {
-			report.Routes = append(report.Routes, routeContractForPreset(cfg, domain.Project{}, preset))
+			route := routeContractForPreset(cfg, domain.Project{}, preset)
+			annotateGatewayRouteLive(&route, preset, liveModels)
+			report.Routes = append(report.Routes, route)
 		}
 		return report, nil
 	}
@@ -1026,10 +1065,102 @@ func buildGatewayRoutesReport(_ context.Context, configPath string) (gatewayRout
 		}
 		if preset, ok := findPresetForModel(presets, project.DefaultModel); ok {
 			route = routeContractForPreset(cfg, project, preset)
+			annotateGatewayRouteLive(&route, preset, liveModels)
 		}
 		report.Routes = append(report.Routes, route)
 	}
 	return report, nil
+}
+
+func fetchGatewayRoutesLiveCatalog(ctx context.Context, configPath, configGateway string, opts gatewayRoutesLiveOptions) (gatewayRoutesLive, map[string]struct{}) {
+	live := gatewayRoutesLive{Checked: true}
+	gatewayURL := firstNonEmpty(opts.URL, configGateway)
+	live.Gateway = gatewayURL
+	if gatewayURL == "" {
+		live.Status = "unavailable"
+		live.Error = "no gateway URL configured"
+		return live, nil
+	}
+	token, source, err := resolveGatewayPreflightToken(gatewayURL, "", opts.TokenEnv, opts.TokenFile, configPath)
+	if err != nil {
+		live.Status = "auth_error"
+		live.Error = err.Error()
+		return live, nil
+	}
+	live.AuthSource = source
+	models, err := fetchGatewayLiveModels(ctx, gatewayURL, token, opts.Client)
+	if err != nil {
+		live.Status = "error"
+		live.Error = err.Error()
+		return live, nil
+	}
+	sort.Strings(models)
+	live.Status = "ok"
+	live.ModelCount = len(models)
+	live.ModelIDs = models
+	modelSet := map[string]struct{}{}
+	for _, model := range models {
+		modelSet[model] = struct{}{}
+	}
+	return live, modelSet
+}
+
+func fetchGatewayLiveModels(ctx context.Context, gatewayURL, token string, client *http.Client) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(gatewayURL, "/")+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := clientOrDefault(client).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := readControlHTTPBody(resp.Body, "gateway models response body")
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("gateway models returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	var parsed struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, fmt.Errorf("decode gateway models response: %w", err)
+	}
+	models := make([]string, 0, len(parsed.Data))
+	seen := map[string]struct{}{}
+	for _, item := range parsed.Data {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		models = append(models, id)
+	}
+	return models, nil
+}
+
+func annotateGatewayRouteLive(route *gatewayRouteContract, preset domain.Preset, liveModels map[string]struct{}) {
+	if liveModels == nil {
+		return
+	}
+	for _, id := range append([]string{route.Model, preset.ID}, preset.Aliases...) {
+		if _, ok := liveModels[id]; ok {
+			route.LiveModelAvailable = true
+			route.LiveModelMatch = id
+			return
+		}
+	}
+	route.LiveModelAvailable = false
 }
 
 func routeContractForPreset(cfg operatorPeerConfig, project domain.Project, preset domain.Preset) gatewayRouteContract {
@@ -1068,8 +1199,11 @@ func routeContractForPreset(cfg operatorPeerConfig, project domain.Project, pres
 
 func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 	fmt.Fprintf(w, "gateway\t%s\tbase_url=%s\tpeer=%s\tconfig=%s\n", emptyDash(report.Gateway), emptyDash(report.BaseURL), emptyDash(report.PeerID), report.ConfigPath)
+	if report.Live.Checked {
+		fmt.Fprintf(w, "live\tgateway=%s\tstatus=%s\tmodels=%d\tauth=%s\terror=%s\n", emptyDash(report.Live.Gateway), emptyDash(report.Live.Status), report.Live.ModelCount, emptyDash(report.Live.AuthSource), emptyDash(report.Live.Error))
+	}
 	for _, route := range report.Routes {
-		fmt.Fprintf(w, "route\tproject=%s\tmodel=%s\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tproject_cap=%d\tstatus=%s\tauth=%s\tproject_token=%t\tglobal_token=%t\tstructured=%t\tstreaming=%t\ttool_parser=%t\tauto_tool=%t\ttool_choice=%s\n",
+		fmt.Fprintf(w, "route\tproject=%s\tmodel=%s\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tproject_cap=%d\tstatus=%s\tauth=%s\tproject_token=%t\tglobal_token=%t\tstructured=%t\tstreaming=%t\ttool_parser=%t\tauto_tool=%t\ttool_choice=%s\tlive_model=%t\tlive_match=%s\n",
 			emptyDash(route.Project),
 			emptyDash(route.Model),
 			emptyDash(route.PresetID),
@@ -1086,6 +1220,8 @@ func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 			route.ToolParserConfigured,
 			route.AutoToolChoiceConfigured,
 			emptyDash(route.RecommendedToolChoice),
+			route.LiveModelAvailable,
+			emptyDash(route.LiveModelMatch),
 		)
 	}
 }

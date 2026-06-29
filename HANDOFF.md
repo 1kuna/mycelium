@@ -213,6 +213,19 @@ important continuity points are:
   config still advertises `qwen3.5-9b`/B70 and Spark plain routes but not
   `spark-qwen9b-tools-8192`; direct Spark remains the consumer-ready Verso tool
   route until MacBook gateway catalog activation is safely handled.
+- The gateway/catalog discovery contract now has a live check too. Current-code
+  gateways expose authenticated `GET /v1/models` with preset IDs and aliases
+  only, and `myce gateway routes --live` compares configured project routes to
+  that endpoint without printing token material. A 2026-06-29 live MacBook check
+  against `http://192.168.0.143:55291` returned authenticated `404` for
+  `/v1/models`, proving the running MacBook LaunchAgent binary is stale for the
+  new catalog endpoint. Same-cycle canaries still passed for Atlas strict JSON
+  on MacBook/B70 and Verso forced tools on direct Spark. Once valid Mac admin
+  credentials exist, the mechanical activation path remains:
+  `mycelium service plan --config /Users/zach/.mycelium/bench/real-fleet/peer.json --binary /Users/zach/.mycelium/bin/mycelium --name real-fleet --system`,
+  then install/status/reload exactly as printed, followed by `myce gateway
+  routes --live`, Atlas preflight, and Verso direct-Spark or MacBook alias
+  preflight as appropriate.
 - A 2026-06-29 follow-up checked the route after Verso reported friction on
   the older 4096 path. Spark's owner snapshot showed exactly one ready
   `spark-qwen9b-tools-8192-vllm` instance and no leases or non-terminal owner

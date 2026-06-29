@@ -2526,6 +2526,53 @@ func TestServerRejectsUnknownRoute(t *testing.T) {
 	}
 }
 
+func TestServerListsPublicModels(t *testing.T) {
+	preset := fixtures.MakePreset()
+	preset.ID = "preset-a"
+	preset.ModelRef = "/private/models/model.gguf"
+	preset.Aliases = []string{"public-a", "public-alt"}
+	private := fixtures.MakePreset()
+	private.ID = "preset-b"
+	private.ModelRef = "/private/models/other.gguf"
+	private.Aliases = nil
+	router := &Router{Presets: NewPresetRegistry(preset, private)}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	Server{Router: router, RequireAuth: true, AuthToken: "secret"}.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	var ids []string
+	for _, model := range out.Data {
+		ids = append(ids, model.ID)
+		if model.Object != "model" || model.OwnedBy != "mycelium" {
+			t.Fatalf("model metadata = %+v", model)
+		}
+	}
+	got := strings.Join(ids, ",")
+	for _, want := range []string{"preset-a", "public-a", "public-alt", "preset-b"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("models missing %s: %s", want, got)
+		}
+	}
+	if strings.Contains(rec.Body.String(), "/private/") {
+		t.Fatalf("models endpoint leaked private model ref: %s", rec.Body.String())
+	}
+}
+
 func TestServerErrorResponses(t *testing.T) {
 	rec := httptest.NewRecorder()
 	Server{}.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`)))

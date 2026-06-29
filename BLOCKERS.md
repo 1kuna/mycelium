@@ -51,6 +51,12 @@
   config advertises B70 strict-schema/plain Spark routes but not
   `spark-qwen9b-tools-8192`, while same-cycle direct Spark 8192 forced-tool
   preflight still passed.
+  Current-code gateways now expose authenticated `GET /v1/models` with public
+  preset IDs and aliases, and `myce gateway routes --live` compares config
+  routes to that live catalog. The current MacBook LaunchAgent returned
+  authenticated 404 for `/v1/models`, so MacBook route discovery/catalog
+  exposure is blocked on activating the current gateway binary through the
+  documented system LaunchDaemon path; it is not a Spark route-health issue.
   A 2026-06-29 authenticated MacBook probe for `spark-qwen9b-tools-4096`
   returned HTTP 502 with `unknown model "spark-qwen9b-tools-4096"`, while
   same-cycle route gates passed for Atlas strict JSON on MacBook/B70 and Verso

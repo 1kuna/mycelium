@@ -70,6 +70,40 @@ func (r PresetRegistry) Resolve(model string) (domain.Preset, error) {
 	return domain.Preset{}, fmt.Errorf("unknown model %q", model)
 }
 
+func (r PresetRegistry) PublicModelIDs() []string {
+	seen := map[string]struct{}{}
+	var ids []string
+	for _, preset := range r.all {
+		addPublicModelID(&ids, seen, preset.ID)
+		for _, alias := range preset.Aliases {
+			addPublicModelID(&ids, seen, alias)
+		}
+		if len(preset.Aliases) == 0 && publicModelRef(preset.ModelRef) {
+			addPublicModelID(&ids, seen, preset.ModelRef)
+		}
+	}
+	return ids
+}
+
+func addPublicModelID(ids *[]string, seen map[string]struct{}, id string) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	if _, ok := seen[id]; ok {
+		return
+	}
+	seen[id] = struct{}{}
+	*ids = append(*ids, id)
+}
+
+func publicModelRef(modelRef string) bool {
+	if modelRef == "" || strings.ContainsAny(modelRef, `/\`) {
+		return false
+	}
+	return true
+}
+
 func indexPresetModels(index map[string]domain.Preset, preset domain.Preset) {
 	for _, model := range append([]string{preset.ModelRef}, preset.Aliases...) {
 		if model == "" {
