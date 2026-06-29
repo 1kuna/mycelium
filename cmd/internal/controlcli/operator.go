@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -212,6 +213,7 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 		report.OwnerTelemetry = fetchJobOwnerTelemetry(ctx, storePath, report, token, clientOrDefault(client))
 	}
 	report.Diagnosis = diagnoseJobDebugReport(report)
+	report.Optimization = summarizeJobOptimizationEvidence(report)
 	if *jsonOut {
 		return writePrettyJSON(os.Stdout, report)
 	}
@@ -554,6 +556,7 @@ type jobDebugReport struct {
 	Consumer        *consumerEvidence             `json:"consumer,omitempty"`
 	OwnerTelemetry  *ownerTelemetryReport         `json:"owner_telemetry,omitempty"`
 	Diagnosis       *jobDebugDiagnosis            `json:"diagnosis,omitempty"`
+	Optimization    *jobOptimizationEvidence      `json:"optimization,omitempty"`
 	Parent          *domain.Job                   `json:"parent,omitempty"`
 	Children        []domain.Job                  `json:"children,omitempty"`
 	Registry        *domain.JobRecord             `json:"registry,omitempty"`
@@ -661,6 +664,9 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 	if report.Diagnosis != nil {
 		fmt.Fprintf(w, "diagnosis\t%s\t%s\tnext=%s\n", report.Diagnosis.Class, report.Diagnosis.Summary, report.Diagnosis.Next)
 	}
+	if report.Optimization != nil {
+		printOptimizationEvidenceSummary(w, *report.Optimization)
+	}
 	events := jobTimelineEvents(report)
 	for _, event := range events {
 		fmt.Fprintf(w, "timeline\t%s\t%s\t%s\t%s\n", formatTimeDash(event.At), event.Kind, event.Subject, event.Detail)
@@ -744,6 +750,174 @@ type jobDebugDiagnosis struct {
 	Class   string `json:"class"`
 	Summary string `json:"summary"`
 	Next    string `json:"next"`
+}
+
+type jobOptimizationEvidence struct {
+	JobID                   string                               `json:"job_id"`
+	Project                 string                               `json:"project,omitempty"`
+	Consumer                *consumerEvidence                    `json:"consumer,omitempty"`
+	Gateway                 string                               `json:"gateway,omitempty"`
+	Model                   string                               `json:"model,omitempty"`
+	Request                 gatewayPreflightRequestEvidence      `json:"request,omitempty"`
+	Expectations            *gatewayPreflightExpectationEvidence `json:"expectations,omitempty"`
+	NodeID                  string                               `json:"node_id,omitempty"`
+	Backend                 string                               `json:"backend,omitempty"`
+	InstanceID              string                               `json:"instance_id,omitempty"`
+	PresetID                string                               `json:"preset_id,omitempty"`
+	Decision                string                               `json:"decision,omitempty"`
+	Attempts                int                                  `json:"attempts,omitempty"`
+	ColdLoad                *bool                                `json:"cold_load,omitempty"`
+	QueueWaitMS             int                                  `json:"queue_wait_ms,omitempty"`
+	LoadWallMS              int                                  `json:"load_wall_ms,omitempty"`
+	TTFTMS                  int                                  `json:"ttft_ms,omitempty"`
+	UpstreamWallMS          int                                  `json:"upstream_wall_ms,omitempty"`
+	UsageAvailable          bool                                 `json:"usage_available"`
+	UsagePromptTokens       int                                  `json:"usage_prompt_tokens,omitempty"`
+	UsageCompletionTokens   int                                  `json:"usage_completion_tokens,omitempty"`
+	UsageTotalTokens        int                                  `json:"usage_total_tokens,omitempty"`
+	ContextUsed             int                                  `json:"context_used,omitempty"`
+	FinishReason            string                               `json:"finish_reason,omitempty"`
+	JSONContent             bool                                 `json:"json_content,omitempty"`
+	ToolCallCount           int                                  `json:"tool_call_count,omitempty"`
+	ToolCallNames           []string                             `json:"tool_call_names,omitempty"`
+	TextualToolCall         bool                                 `json:"textual_tool_call,omitempty"`
+	OwnerTelemetryAvailable bool                                 `json:"owner_telemetry_available"`
+	MetricSource            string                               `json:"metric_source,omitempty"`
+	SessionPhases           []string                             `json:"session_phases,omitempty"`
+	FailureClass            string                               `json:"failure_class,omitempty"`
+	FailureLayer            string                               `json:"failure_layer,omitempty"`
+	ConsumerStatus          string                               `json:"consumer_status,omitempty"`
+	ConsumerError           string                               `json:"consumer_error,omitempty"`
+}
+
+func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvidence {
+	out := &jobOptimizationEvidence{
+		JobID:    report.Job.ID,
+		Project:  report.Job.Project,
+		Model:    report.Job.Model,
+		Consumer: report.Consumer,
+	}
+	if report.Preflight != nil {
+		out.Gateway = report.Preflight.Gateway
+		out.Project = firstNonEmpty(report.Preflight.Project, out.Project)
+		out.Model = firstNonEmpty(report.Preflight.Model, out.Model)
+		out.Request = report.Preflight.Request
+		out.Expectations = report.Preflight.Expectations
+		out.Decision = preflightHeader(report, "X-Myc-Decision")
+		out.NodeID = preflightHeader(report, "X-Myc-Node")
+		out.Backend = preflightHeader(report, "X-Myc-Backend")
+		out.InstanceID = preflightHeader(report, "X-Myc-Instance")
+		out.Attempts = preflightHeaderInt(report, "X-Myc-Attempts")
+		out.QueueWaitMS = preflightHeaderInt(report, "X-Myc-Queue-Wait-Ms")
+		out.UpstreamWallMS = preflightHeaderInt(report, "X-Myc-Upstream-Wall-Ms")
+		if cold, ok := preflightHeaderBool(report, "X-Myc-Cold-Load"); ok {
+			out.ColdLoad = &cold
+		}
+		out.FinishReason = report.Preflight.FinishReason
+		out.JSONContent = report.Preflight.JSONContent
+		out.ToolCallCount = report.Preflight.ToolCallCount
+		out.ToolCallNames = report.Preflight.ToolCallNames
+		out.TextualToolCall = report.Preflight.TextualToolCall
+		out.UsageAvailable = report.Preflight.UsageAvailable
+		out.UsagePromptTokens = report.Preflight.Usage.PromptTokens
+		out.UsageCompletionTokens = report.Preflight.Usage.CompletionTokens
+		out.UsageTotalTokens = report.Preflight.Usage.TotalTokens
+		out.ContextUsed = report.Preflight.Usage.TotalTokens
+	}
+	if report.Consumer != nil {
+		out.ConsumerStatus = report.Consumer.Status
+		out.ConsumerError = report.Consumer.Error
+	}
+	if metric, ok, source := primaryRunMetric(report); ok {
+		out.MetricSource = source
+		out.NodeID = firstNonEmpty(out.NodeID, metric.NodeID)
+		out.Backend = firstNonEmpty(out.Backend, string(metric.Backend))
+		out.InstanceID = firstNonEmpty(out.InstanceID, metric.InstanceID)
+		out.PresetID = metric.PresetID
+		out.Project = firstNonEmpty(out.Project, metric.Project)
+		out.TTFTMS = metric.TTFTms
+		out.LoadWallMS = metric.LoadWallClockMS
+		if out.ContextUsed == 0 {
+			out.ContextUsed = metric.ContextUsed
+		}
+		out.OwnerTelemetryAvailable = source == "owner"
+	}
+	out.SessionPhases = sessionPhaseNames(primarySessionTimeline(report))
+	if report.Diagnosis != nil {
+		out.FailureClass = report.Diagnosis.Class
+		out.FailureLayer = failureLayerForDiagnosis(*report.Diagnosis, report)
+	}
+	return out
+}
+
+func primaryRunMetric(report jobDebugReport) (domain.RunMetric, bool, string) {
+	if report.OwnerTelemetry != nil && report.OwnerTelemetry.Error == "" && len(report.OwnerTelemetry.RunMetrics) > 0 {
+		return report.OwnerTelemetry.RunMetrics[0], true, "owner"
+	}
+	if len(report.RunMetrics) > 0 {
+		return report.RunMetrics[0], true, "coordinator"
+	}
+	return domain.RunMetric{}, false, ""
+}
+
+func primarySessionTimeline(report jobDebugReport) []domain.SessionMetric {
+	if report.OwnerTelemetry != nil && report.OwnerTelemetry.Error == "" && len(report.OwnerTelemetry.SessionTimeline) > 0 {
+		return report.OwnerTelemetry.SessionTimeline
+	}
+	return report.SessionTimeline
+}
+
+func sessionPhaseNames(samples []domain.SessionMetric) []string {
+	if len(samples) == 0 {
+		return nil
+	}
+	phases := make([]string, 0, len(samples))
+	for _, sample := range samples {
+		phases = append(phases, string(sample.Phase))
+	}
+	return phases
+}
+
+func failureLayerForDiagnosis(diagnosis jobDebugDiagnosis, report jobDebugReport) string {
+	if report.Consumer != nil && report.Consumer.Status != "" && report.Consumer.Status != "ok" && strings.HasPrefix(diagnosis.Class, "owner_completed") {
+		return "consumer"
+	}
+	switch diagnosis.Class {
+	case "owner_telemetry_unavailable":
+		return "telemetry"
+	case "owner_failed":
+		return "owner"
+	case "cleanup_required", "inflight_or_stale":
+		return "runtime"
+	case "job_done_without_owner_complete", "insufficient_evidence":
+		return "evidence"
+	default:
+		if strings.HasPrefix(diagnosis.Class, "owner_completed") {
+			return "none"
+		}
+		return ""
+	}
+}
+
+func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvidence) {
+	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tnode=%s\tpreset=%s\tmodel=%s\tstream=%t\ttool=%t\tusage=%d/%d/%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\n",
+		emptyDash(evidence.JobID),
+		emptyDash(evidence.Project),
+		emptyDash(evidence.ConsumerStatus),
+		emptyDash(evidence.NodeID),
+		emptyDash(evidence.PresetID),
+		emptyDash(evidence.Model),
+		evidence.Request.Streaming,
+		evidence.Request.ToolRequested,
+		evidence.UsagePromptTokens,
+		evidence.UsageCompletionTokens,
+		evidence.UsageTotalTokens,
+		evidence.LoadWallMS,
+		evidence.TTFTMS,
+		evidence.UpstreamWallMS,
+		emptyDash(evidence.FailureLayer),
+		emptyDash(evidence.FailureClass),
+	)
 }
 
 func diagnoseJobDebugReport(report jobDebugReport) *jobDebugDiagnosis {
@@ -887,6 +1061,30 @@ func preflightHeader(report jobDebugReport, key string) string {
 		}
 	}
 	return ""
+}
+
+func preflightHeaderInt(report jobDebugReport, key string) int {
+	value := strings.TrimSpace(preflightHeader(report, key))
+	if value == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+func preflightHeaderBool(report jobDebugReport, key string) (bool, bool) {
+	value := strings.TrimSpace(preflightHeader(report, key))
+	if value == "" {
+		return false, false
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, false
+	}
+	return parsed, true
 }
 
 func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidence) {
@@ -1257,8 +1455,14 @@ func writeDebugBundle(ctx context.Context, req debugBundleRequest) error {
 			report.Consumer = req.Consumer
 			report.OwnerTelemetry = fetchJobOwnerTelemetry(ctx, storePath, report, firstNonEmpty(req.RPCToken, cfg.RPCToken), clientOrDefault(req.Client))
 			report.Diagnosis = diagnoseJobDebugReport(report)
+			report.Optimization = summarizeJobOptimizationEvidence(report)
 			if err := writePrettyJSONFile(addFile("job_debug.json"), report); err != nil {
 				return err
+			}
+			if report.Optimization != nil {
+				if err := writePrettyJSONFile(addFile("optimization.json"), report.Optimization); err != nil {
+					return err
+				}
 			}
 		}
 	}

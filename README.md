@@ -282,7 +282,10 @@ preserve the consumer batch/item/outcome join once at request time. It
 intentionally does not write the bearer token, prompt, or raw completion
 content. Use that artifact, plus `myce debug job --preflight <preflight.json>
 --owner-telemetry --json`, as the standard consumer evidence packet for
-optimization handoffs. If the preflight artifact already has consumer labels,
+optimization handoffs. The debug JSON includes an `optimization` object that
+joins the request contract, consumer labels, route headers, owner timing,
+usage, finish/tool/JSON outcome, diagnosis class, and failure layer into one
+secret-safe summary. If the preflight artifact already has consumer labels,
 `debug job` and `debug bundle` inherit them automatically; explicit
 `--consumer-*` flags override the artifact when an operator needs to correct or
 enrich the handoff:
@@ -320,7 +323,10 @@ When a request fails or routes strangely, start with:
 5. Create `myce debug bundle --job <X-Myc-Job> --owner-telemetry --out /tmp/mycelium-debug`, or
    `myce debug bundle --preflight <preflight.json> --owner-telemetry --out /tmp/mycelium-debug`,
    before handing the issue to another agent.
-6. Check the selected owner peer logs and backend container/process logs.
+6. Read `optimization.json` in the bundle first for project/run grouping and
+   route/timing/outcome classification; read `job_debug.json` next when the
+   summary points to owner/runtime/evidence ambiguity.
+7. Check the selected owner peer logs and backend container/process logs.
 
 Telemetry worth checking:
 
