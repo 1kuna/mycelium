@@ -104,7 +104,11 @@ important continuity points are:
   printing the token. With `--out`, it also writes a redacted `preflight.json`
   evidence packet containing the gateway/model/project, auth source label,
   whitelisted route headers, finish/content/reasoning/JSON/usage facts, and no
-  bearer token, prompt, or raw completion content.
+  bearer token, prompt, or raw completion content. `myce debug job --preflight
+  <preflight.json>` and `myce debug bundle --preflight <preflight.json>` can
+  now derive `X-Myc-Job` from that artifact and join it to durable job,
+  registry, metric, session, recommendation, and bundle evidence for later
+  timeout/partial-batch triage.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and

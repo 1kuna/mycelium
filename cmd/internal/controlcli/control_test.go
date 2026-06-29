@@ -1417,6 +1417,41 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	if report.Job.ID != "job-a" || len(report.SessionTimeline) != 1 || len(report.Hints) != 1 {
 		t.Fatalf("debug report = %+v", report)
 	}
+
+	preflightPath := writeGatewayPreflightEvidenceFixture(t, "job-a")
+	preflightOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--db", dbPath})
+	})
+	if err != nil {
+		t.Fatalf("debug job with preflight: %v\n%s", err, preflightOutput)
+	}
+	for _, want := range []string{
+		"job\tjob-a\trunning\tmodel=tiny\tproject=project-a\towner=node-a",
+		"preflight\tstatus=200\tmodel=qwen3.5-9b\tproject=atlas-batch",
+		"preflight-route\tnode=b70\tbackend=vllm\tinstance=inst_2\tdecision=placed_on_warm_instance",
+		"preflight-usage\tprompt=16\tcompletion=10\ttotal=26",
+	} {
+		if !strings.Contains(preflightOutput, want) {
+			t.Fatalf("preflight debug output missing %q:\n%s", want, preflightOutput)
+		}
+	}
+
+	preflightJSONOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--json", "--db", dbPath})
+	})
+	if err != nil {
+		t.Fatalf("debug job preflight json: %v\n%s", err, preflightJSONOutput)
+	}
+	var preflightReport jobDebugReport
+	if err := json.Unmarshal([]byte(preflightJSONOutput), &preflightReport); err != nil {
+		t.Fatalf("decode preflight debug json: %v\n%s", err, preflightJSONOutput)
+	}
+	if preflightReport.Preflight == nil || preflightReport.Preflight.Headers["X-Myc-Node"] != "b70" || preflightReport.Preflight.ContentLength != 16 {
+		t.Fatalf("preflight debug report = %+v", preflightReport)
+	}
+	if err := Run(context.Background(), []string{"debug", "job", "job-other", "--preflight", preflightPath, "--db", dbPath}); err == nil || !strings.Contains(err.Error(), `does not match requested job "job-other"`) {
+		t.Fatalf("mismatched preflight error = %v", err)
+	}
 }
 
 func TestOperatorStatusAndDebugRejectBadUsage(t *testing.T) {
@@ -1591,10 +1626,11 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	dbPath, configPath := writeOperatorDebugFixture(t)
 	client := operatorSnapshotClient(t)
 	outDir := filepath.Join(t.TempDir(), "bundle")
+	preflightPath := writeGatewayPreflightEvidenceFixture(t, "job-a")
 
 	var err error
 	output := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--job", "job-a", "--out", outDir}, client)
+		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--preflight", preflightPath, "--out", outDir}, client)
 	})
 	if err != nil {
 		t.Fatalf("debug bundle: %v\n%s", err, output)
@@ -1602,7 +1638,7 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	if !strings.Contains(output, "debug-bundle\t"+outDir) {
 		t.Fatalf("bundle output = %q", output)
 	}
-	for _, name := range []string{"manifest.json", "config.redacted.json", "jobs.json", "registry.json", "run_metrics.json", "session_metrics.json", "nodes.json", "instances.json", "recommendations.json", "peer_snapshot.json", "status.txt"} {
+	for _, name := range []string{"manifest.json", "config.redacted.json", "preflight.json", "jobs.json", "registry.json", "run_metrics.json", "session_metrics.json", "nodes.json", "instances.json", "recommendations.json", "peer_snapshot.json", "status.txt"} {
 		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
 			t.Fatalf("missing bundle file %s: %v", name, err)
 		}
@@ -1620,6 +1656,63 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	}
 	if !strings.Contains(string(jobsData), "job-a") || strings.Contains(string(jobsData), "job-other") {
 		t.Fatalf("jobs artifact = %s", jobsData)
+	}
+	preflightData, err := os.ReadFile(filepath.Join(outDir, "preflight.json"))
+	if err != nil {
+		t.Fatalf("read bundled preflight: %v", err)
+	}
+	if strings.Contains(string(preflightData), "Bearer") || strings.Contains(string(preflightData), "Return") || !strings.Contains(string(preflightData), `"X-Myc-Job": "job-a"`) {
+		t.Fatalf("bundled preflight = %s", preflightData)
+	}
+	manifestData, err := os.ReadFile(filepath.Join(outDir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if !strings.Contains(string(manifestData), `"job_id": "job-a"`) || !strings.Contains(string(manifestData), `"preflight.json"`) {
+		t.Fatalf("manifest = %s", manifestData)
+	}
+}
+
+func TestGatewayPreflightEvidenceHelpers(t *testing.T) {
+	path := writeGatewayPreflightEvidenceFixture(t, "job-a")
+	evidence, err := readGatewayPreflightEvidence(path)
+	if err != nil {
+		t.Fatalf("readGatewayPreflightEvidence: %v", err)
+	}
+	if got := preflightEvidenceJobID(evidence); got != "job-a" {
+		t.Fatalf("preflightEvidenceJobID=%q", got)
+	}
+
+	evidence.Headers = map[string]string{"x-myc-job": "job-lower"}
+	if got := preflightEvidenceJobID(evidence); got != "job-lower" {
+		t.Fatalf("case-insensitive preflightEvidenceJobID=%q", got)
+	}
+	evidence.Headers = nil
+	if got := preflightEvidenceJobID(evidence); got != "" {
+		t.Fatalf("empty preflightEvidenceJobID=%q", got)
+	}
+
+	copyPath := filepath.Join(t.TempDir(), "preflight-copy.json")
+	if err := copyPreflightEvidenceFile(path, copyPath); err != nil {
+		t.Fatalf("copyPreflightEvidenceFile: %v", err)
+	}
+	copied, err := os.ReadFile(copyPath)
+	if err != nil {
+		t.Fatalf("read copied preflight: %v", err)
+	}
+	if !strings.Contains(string(copied), `"X-Myc-Job": "job-a"`) || strings.Contains(string(copied), "Bearer") {
+		t.Fatalf("copied preflight = %s", copied)
+	}
+
+	badPath := filepath.Join(t.TempDir(), "bad-preflight.json")
+	if err := os.WriteFile(badPath, []byte(`{bad json`), 0600); err != nil {
+		t.Fatalf("write bad preflight: %v", err)
+	}
+	if _, err := readGatewayPreflightEvidence(badPath); err == nil || !strings.Contains(err.Error(), "decode gateway preflight evidence") {
+		t.Fatalf("bad preflight err = %v", err)
+	}
+	if _, err := readGatewayPreflightEvidence(filepath.Join(t.TempDir(), "missing.json")); err == nil || !strings.Contains(err.Error(), "read gateway preflight evidence") {
+		t.Fatalf("missing preflight err = %v", err)
 	}
 }
 
@@ -2089,6 +2182,48 @@ func writeOperatorDebugFixture(t *testing.T) (string, string) {
 		t.Fatalf("write config: %v", err)
 	}
 	return dbPath, configPath
+}
+
+func writeGatewayPreflightEvidenceFixture(t *testing.T, jobID string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "preflight.json")
+	evidence := gatewayPreflightEvidence{
+		Gateway:         "http://gateway.test",
+		Model:           "qwen3.5-9b",
+		Project:         "atlas-batch",
+		AuthSource:      "ATLAS_MYCELIUM_API_KEY",
+		StatusCode:      http.StatusOK,
+		FinishReason:    "stop",
+		ContentLength:   16,
+		ReasoningLength: 0,
+		JSONContent:     true,
+		Usage: api.OpenAIUsage{
+			PromptTokens:     16,
+			CompletionTokens: 10,
+			TotalTokens:      26,
+		},
+		Headers: map[string]string{
+			"X-Myc-Job":                       jobID,
+			"X-Myc-Node":                      "b70",
+			"X-Myc-Instance":                  "inst_2",
+			"X-Myc-Backend":                   "vllm",
+			"X-Myc-Decision":                  "placed_on_warm_instance",
+			"X-Myc-Attempts":                  "1",
+			"X-Myc-Cold-Load":                 "false",
+			"X-Myc-Queue-Wait-Ms":             "0",
+			"X-Myc-Upstream-Wall-Ms":          "512",
+			"X-Myc-Structured-Output":         "json_schema",
+			"X-Myc-Guided-Decoding-Requested": "true",
+		},
+	}
+	data, err := json.MarshalIndent(evidence, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal preflight evidence: %v", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
+		t.Fatalf("write preflight evidence: %v", err)
+	}
+	return path
 }
 
 func operatorSnapshotClient(t *testing.T) *http.Client {

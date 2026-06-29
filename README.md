@@ -240,18 +240,22 @@ When `--out` is set, `myce gateway preflight` writes
 whitelisted `X-Myc-*` headers, finish reason, content/reasoning lengths, JSON
 parse status, and usage counts. It intentionally does not write the bearer
 token, prompt, or raw completion content. Use that artifact, plus
-`myce debug job <X-Myc-Job> --json`, as the standard consumer evidence packet
-for optimization handoffs.
+`myce debug job --preflight <preflight.json> --json`, as the standard consumer
+evidence packet for optimization handoffs.
 
 ## Debugging Workflow
 
 When a request fails or routes strangely, start with:
 
 1. Capture response status, body, and all `X-Myc-*` headers.
-2. Run `myce debug job <X-Myc-Job>`.
+2. Run `myce debug job <X-Myc-Job>`, or
+   `myce debug job --preflight <preflight.json>` if the consumer preserved the
+   preflight artifact.
 3. Inspect `X-Myc-Trace` for fit/filter/score reasons.
 4. Run `myce doctor` or `myce status` if the peer/fleet looks unhealthy.
-5. Create `myce debug bundle --job <X-Myc-Job> --out /tmp/mycelium-debug` before handing the issue to another agent.
+5. Create `myce debug bundle --job <X-Myc-Job> --out /tmp/mycelium-debug`, or
+   `myce debug bundle --preflight <preflight.json> --out /tmp/mycelium-debug`,
+   before handing the issue to another agent.
 6. Check the selected owner peer logs and backend container/process logs.
 
 Telemetry worth checking:
@@ -259,6 +263,15 @@ Telemetry worth checking:
 - `run_metrics`: per-run summary facts such as node, preset, backend, project, TTFT, tokens/sec, context used, and load wall-clock.
 - `session_metrics`: phase timeline samples such as placed, load-ready, upstream-start, first-byte, stream-chunk, complete, and error.
 - recommendation records: context-cap, consolidation, and engine/parameter recommendations derived from telemetry.
+
+For partial consumer batches, preserve one `preflight.json` or response-header
+set per failed or timed-out row. `debug job --preflight` stitches the request
+artifact to the durable job/registry/metric surfaces and prints the route,
+owner, backend, warm/cold placement, structured-output mode, usage, terminal
+job state, registry cleanup flag, and any session error samples that reached
+the control DB. If the job has no run/session metrics, the preflight artifact
+still preserves the request-time latency and usage facts; owner-side telemetry
+aggregation is the next place to improve historical recovery.
 
 ### Prove cold-load cancellation cleanup after activation
 
