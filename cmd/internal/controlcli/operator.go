@@ -873,6 +873,9 @@ func preflightHeader(report jobDebugReport, key string) string {
 func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidence) {
 	headers := evidence.Headers
 	fmt.Fprintf(w, "preflight\tstatus=%d\tmodel=%s\tproject=%s\tfinish=%s\tcontent=%d\treasoning=%d\ttool_calls=%d\ttextual_tool=%t\tjson=%t\n", evidence.StatusCode, emptyDash(evidence.Model), emptyDash(evidence.Project), emptyDash(evidence.FinishReason), evidence.ContentLength, evidence.ReasoningLength, evidence.ToolCallCount, evidence.TextualToolCall, evidence.JSONContent)
+	if evidence.Streaming {
+		fmt.Fprintf(w, "preflight-stream\tdone=%t\tusage_available=%t\n", evidence.StreamDone, evidence.UsageAvailable)
+	}
 	fmt.Fprintf(w, "preflight-route\tnode=%s\tbackend=%s\tinstance=%s\tdecision=%s\tattempts=%s\tcold=%s\tqueue_ms=%s\tupstream_ms=%s\tstructured=%s\tguided=%s\n",
 		emptyDash(headers["X-Myc-Node"]),
 		emptyDash(headers["X-Myc-Backend"]),
@@ -902,6 +905,8 @@ func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidenc
 	}
 	if evidence.Usage.TotalTokens != 0 || evidence.Usage.PromptTokens != 0 || evidence.Usage.CompletionTokens != 0 {
 		fmt.Fprintf(w, "preflight-usage\tprompt=%d\tcompletion=%d\ttotal=%d\n", evidence.Usage.PromptTokens, evidence.Usage.CompletionTokens, evidence.Usage.TotalTokens)
+	} else if evidence.Streaming {
+		fmt.Fprintln(w, "preflight-usage\tunavailable")
 	}
 }
 

@@ -951,6 +951,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	requireToolCall := fs.Bool("require-tool-call", false, "fail unless the response contains at least one structured OpenAI tool call")
 	rejectTextualToolCall := fs.Bool("reject-textual-tool-call", false, "fail if final content contains a textual <tool_call> block")
 	minPromptTokens := fs.Int("min-prompt-tokens", 0, "fail unless usage.prompt_tokens is at least this value")
+	stream := fs.Bool("stream", false, "send a streaming request and record stream completion/tool/usage evidence")
 	outDir := fs.String("out", "", "optional directory for a redacted preflight evidence packet")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -975,6 +976,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 		ToolChoice: *toolChoice,
 		Token:      token,
 		Client:     client,
+		Stream:     *stream,
 	})
 	if err != nil {
 		return err
@@ -991,8 +993,13 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	fmt.Printf("tool_calls\tcount=%d\tnames=%s\n", result.ToolCallCount, emptyDash(strings.Join(result.ToolCallNames, ",")))
 	fmt.Printf("textual_tool_call\t%t\n", result.TextualToolCall)
 	fmt.Printf("json\t%t\n", result.JSONContent)
-	if result.Usage.TotalTokens != 0 || result.Usage.PromptTokens != 0 || result.Usage.CompletionTokens != 0 {
+	if result.Streaming {
+		fmt.Printf("stream\tdone=%t\tusage_available=%t\n", result.StreamDone, result.UsageAvailable)
+	}
+	if result.UsageAvailable {
 		fmt.Printf("usage\tprompt=%d\tcompletion=%d\ttotal=%d\n", result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens)
+	} else if result.Streaming {
+		fmt.Printf("usage\tunavailable\n")
 	}
 	var evidencePath string
 	if *outDir != "" {
@@ -1003,6 +1010,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 			MaxTokens:  *maxTokens,
 			ToolName:   *toolName,
 			ToolChoice: *toolChoice,
+			Stream:     *stream,
 		}, result)
 		if err != nil {
 			return err
@@ -1040,6 +1048,9 @@ func validateGatewayPreflightExpectations(result gatewayPreflightResult, expecta
 			failures = append(failures, fmt.Sprintf("expected X-Myc-Node=%s got %s", expectations.ExpectNode, emptyDash(got)))
 		}
 	}
+	if result.Streaming && !result.StreamDone {
+		failures = append(failures, "expected terminal streaming [DONE] event")
+	}
 	if expectations.RequireJSON && !result.JSONContent {
 		failures = append(failures, "expected valid JSON final content")
 	}
@@ -1049,7 +1060,9 @@ func validateGatewayPreflightExpectations(result gatewayPreflightResult, expecta
 	if expectations.RejectTextualToolCall && result.TextualToolCall {
 		failures = append(failures, "expected no textual <tool_call> block in final content")
 	}
-	if expectations.MinPromptTokens > 0 && result.Usage.PromptTokens < expectations.MinPromptTokens {
+	if expectations.MinPromptTokens > 0 && !result.UsageAvailable {
+		failures = append(failures, fmt.Sprintf("expected prompt_tokens >= %d but usage was unavailable", expectations.MinPromptTokens))
+	} else if expectations.MinPromptTokens > 0 && result.Usage.PromptTokens < expectations.MinPromptTokens {
 		failures = append(failures, fmt.Sprintf("expected prompt_tokens >= %d got %d", expectations.MinPromptTokens, result.Usage.PromptTokens))
 	}
 	if len(failures) > 0 {
@@ -1068,11 +1081,14 @@ type gatewayPreflightConfig struct {
 	ToolChoice string
 	Token      string
 	Client     *http.Client
+	Stream     bool
 }
 
 type gatewayPreflightResult struct {
 	StatusCode      int
 	Headers         http.Header
+	Streaming       bool
+	StreamDone      bool
 	FinishReason    string
 	Content         string
 	Reasoning       string
@@ -1080,6 +1096,7 @@ type gatewayPreflightResult struct {
 	ToolCallNames   []string
 	TextualToolCall bool
 	JSONContent     bool
+	UsageAvailable  bool
 	Usage           api.OpenAIUsage
 }
 
@@ -1090,6 +1107,8 @@ type gatewayPreflightEvidence struct {
 	AuthSource      string            `json:"auth_source"`
 	StatusCode      int               `json:"status_code"`
 	Headers         map[string]string `json:"headers"`
+	Streaming       bool              `json:"streaming"`
+	StreamDone      bool              `json:"stream_done,omitempty"`
 	FinishReason    string            `json:"finish_reason"`
 	ContentLength   int               `json:"content_length"`
 	ReasoningLength int               `json:"reasoning_length"`
@@ -1097,6 +1116,7 @@ type gatewayPreflightEvidence struct {
 	ToolCallNames   []string          `json:"tool_call_names,omitempty"`
 	TextualToolCall bool              `json:"textual_tool_call"`
 	JSONContent     bool              `json:"json_content"`
+	UsageAvailable  bool              `json:"usage_available"`
 	Usage           api.OpenAIUsage   `json:"usage"`
 }
 
@@ -1111,6 +1131,8 @@ func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflig
 		AuthSource:      authSource,
 		StatusCode:      result.StatusCode,
 		Headers:         gatewayPreflightHeaderMap(result.Headers),
+		Streaming:       result.Streaming,
+		StreamDone:      result.StreamDone,
 		FinishReason:    result.FinishReason,
 		ContentLength:   len(result.Content),
 		ReasoningLength: len(result.Reasoning),
@@ -1118,6 +1140,7 @@ func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflig
 		ToolCallNames:   result.ToolCallNames,
 		TextualToolCall: result.TextualToolCall,
 		JSONContent:     result.JSONContent,
+		UsageAvailable:  result.UsageAvailable,
 		Usage:           result.Usage,
 	}
 	path := filepath.Join(outDir, "preflight.json")
@@ -1220,6 +1243,10 @@ func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (
 		"max_tokens":  cfg.MaxTokens,
 		"temperature": 0,
 	}
+	if cfg.Stream {
+		payload["stream"] = true
+		payload["stream_options"] = map[string]any{"include_usage": true}
+	}
 	if cfg.ToolName != "" {
 		payload["tools"] = []map[string]any{{
 			"type":   "function",
@@ -1301,9 +1328,17 @@ func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (
 	if resp.StatusCode >= 400 {
 		return gatewayPreflightResult{}, fmt.Errorf("gateway preflight returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
-	parsed, err := parseGatewayPreflightResponse(data)
-	if err != nil {
-		return gatewayPreflightResult{}, err
+	var parsed gatewayPreflightResult
+	if cfg.Stream {
+		parsed, err = parseGatewayPreflightStream(data)
+		if err != nil {
+			return gatewayPreflightResult{}, err
+		}
+	} else {
+		parsed, err = parseGatewayPreflightResponse(data)
+		if err != nil {
+			return gatewayPreflightResult{}, err
+		}
 	}
 	parsed.StatusCode = resp.StatusCode
 	parsed.Headers = resp.Header.Clone()
@@ -1348,8 +1383,166 @@ func parseGatewayPreflightResponse(data []byte) (gatewayPreflightResult, error) 
 		ToolCallNames:   toolNames,
 		TextualToolCall: looksLikeTextualToolCall(choice.Message.Content),
 		JSONContent:     json.Valid([]byte(strings.TrimSpace(choice.Message.Content))),
+		UsageAvailable:  usageAvailable(out.Usage),
 		Usage:           out.Usage,
 	}, nil
+}
+
+func parseGatewayPreflightStream(data []byte) (gatewayPreflightResult, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 4096), int(maxControlHTTPBodyBytes))
+	var content strings.Builder
+	var reasoning strings.Builder
+	var finishReason string
+	var usage api.OpenAIUsage
+	var usageSeen bool
+	var done bool
+	toolNamesByIndex := map[int]string{}
+	toolIDsByIndex := map[int]string{}
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		raw := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if raw == "" {
+			continue
+		}
+		if raw == "[DONE]" {
+			done = true
+			continue
+		}
+		part, err := parseGatewayPreflightStreamChunk(raw)
+		if err != nil {
+			return gatewayPreflightResult{}, err
+		}
+		content.WriteString(part.Content)
+		reasoning.WriteString(part.Reasoning)
+		if part.FinishReason != "" {
+			finishReason = part.FinishReason
+		}
+		if part.Usage != nil {
+			usage = *part.Usage
+			usageSeen = true
+		}
+		for _, call := range part.ToolCalls {
+			if call.ID != "" {
+				toolIDsByIndex[call.Index] = call.ID
+			}
+			if call.Name != "" {
+				toolNamesByIndex[call.Index] = call.Name
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return gatewayPreflightResult{}, err
+	}
+	toolNames := make([]string, 0, len(toolNamesByIndex))
+	for index := 0; index <= maxIntKey(toolNamesByIndex); index++ {
+		if name := toolNamesByIndex[index]; name != "" {
+			toolNames = append(toolNames, name)
+		}
+	}
+	if len(toolNames) == 0 {
+		for index := 0; index <= maxIntKey(toolIDsByIndex); index++ {
+			if id := toolIDsByIndex[index]; id != "" {
+				toolNames = append(toolNames, id)
+			}
+		}
+	}
+	text := content.String()
+	return gatewayPreflightResult{
+		Streaming:       true,
+		StreamDone:      done,
+		FinishReason:    finishReason,
+		Content:         text,
+		Reasoning:       reasoning.String(),
+		ToolCallCount:   len(toolNames),
+		ToolCallNames:   toolNames,
+		TextualToolCall: looksLikeTextualToolCall(text),
+		JSONContent:     json.Valid([]byte(strings.TrimSpace(text))),
+		UsageAvailable:  usageSeen && usageAvailable(usage),
+		Usage:           usage,
+	}, nil
+}
+
+type gatewayPreflightStreamPart struct {
+	Content      string
+	Reasoning    string
+	FinishReason string
+	ToolCalls    []gatewayPreflightStreamToolCall
+	Usage        *api.OpenAIUsage
+}
+
+type gatewayPreflightStreamToolCall struct {
+	Index int
+	ID    string
+	Name  string
+}
+
+func parseGatewayPreflightStreamChunk(raw string) (gatewayPreflightStreamPart, error) {
+	var chunk struct {
+		Choices []struct {
+			Delta struct {
+				Content          string `json:"content"`
+				Reasoning        string `json:"reasoning"`
+				ReasoningContent string `json:"reasoning_content"`
+				ToolCalls        []struct {
+					Index    int    `json:"index"`
+					ID       string `json:"id"`
+					Function struct {
+						Name string `json:"name"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *api.OpenAIUsage `json:"usage"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
+		return gatewayPreflightStreamPart{}, fmt.Errorf("decode gateway preflight stream chunk: %w", err)
+	}
+	if chunk.Error != nil && chunk.Error.Message != "" {
+		return gatewayPreflightStreamPart{}, fmt.Errorf("gateway preflight stream error: %s", chunk.Error.Message)
+	}
+	var out gatewayPreflightStreamPart
+	out.Usage = chunk.Usage
+	for _, choice := range chunk.Choices {
+		out.Content += choice.Delta.Content
+		if choice.Delta.Reasoning != "" {
+			out.Reasoning += choice.Delta.Reasoning
+		} else {
+			out.Reasoning += choice.Delta.ReasoningContent
+		}
+		if choice.FinishReason != "" {
+			out.FinishReason = choice.FinishReason
+		}
+		for _, call := range choice.Delta.ToolCalls {
+			out.ToolCalls = append(out.ToolCalls, gatewayPreflightStreamToolCall{
+				Index: call.Index,
+				ID:    call.ID,
+				Name:  call.Function.Name,
+			})
+		}
+	}
+	return out, nil
+}
+
+func usageAvailable(usage api.OpenAIUsage) bool {
+	return usage.TotalTokens != 0 || usage.PromptTokens != 0 || usage.CompletionTokens != 0
+}
+
+func maxIntKey(values map[int]string) int {
+	max := -1
+	for key := range values {
+		if key > max {
+			max = key
+		}
+	}
+	return max
 }
 
 func looksLikeTextualToolCall(content string) bool {

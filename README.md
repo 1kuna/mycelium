@@ -188,9 +188,9 @@ curl http://<gateway-host>:<port>/v1/chat/completions \
   }'
 ```
 
-Project consumers should first run the secret-safe preflight. It sends one
-non-streaming strict JSON-schema chat request, prints route/usage evidence, and
-never prints the bearer token:
+Project consumers should first run the secret-safe preflight. By default it
+sends one non-streaming strict JSON-schema chat request, prints route/usage
+evidence, and never prints the bearer token:
 
 ```bash
 myce gateway preflight \
@@ -242,8 +242,9 @@ Useful response headers:
 When `--out` is set, `myce gateway preflight` writes
 `preflight.json` with the gateway URL, model, project, auth source label,
 whitelisted `X-Myc-*` headers, finish reason, content/reasoning lengths, JSON
-parse status, and usage counts. It intentionally does not write the bearer
-token, prompt, or raw completion content. Use that artifact, plus
+parse status, usage availability, usage counts when available, and streaming
+completion status when `--stream` is used. It intentionally does not write the
+bearer token, prompt, or raw completion content. Use that artifact, plus
 `myce debug job --preflight <preflight.json> --owner-telemetry --json`, as the
 standard consumer evidence packet for optimization handoffs. If the consumer
 has a batch/run id, row/document id, timeout/error/cancel state, or client
@@ -355,7 +356,10 @@ myce gateway preflight \
 The redacted `preflight.json` records `tool_call_count`, `tool_call_names`,
 `textual_tool_call`, route headers, usage, content length, reasoning length, and
 finish reason, but not the bearer token, prompt, raw content, or tool
-arguments. Gateways built from this revision also echo the effective
+arguments. Add `--stream` when the consumer path itself is streaming; the
+artifact then records whether a terminal `[DONE]` event arrived and whether
+streaming usage was actually supplied. Gateways built from this revision also
+echo the effective
 `X-Myc-Project` response header so later debug bundles can join route evidence
 to consumer run labels without reading gateway internals.
 
