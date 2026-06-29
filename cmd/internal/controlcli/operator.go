@@ -163,6 +163,8 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 	consumerStatus := fs.String("consumer-status", "", "consumer outcome: ok, timeout, error, canceled, or partial")
 	consumerElapsedMS := fs.Int("consumer-elapsed-ms", 0, "consumer-observed elapsed milliseconds")
 	consumerError := fs.String("consumer-error", "", "sanitized consumer error class or short message")
+	consumerResult := fs.String("consumer-result", "", "consumer validation result: pass, fail, or unknown")
+	consumerQualityGate := fs.String("consumer-quality-gate", "", "sanitized quality or validation gate name")
 	jobID, flagArgs, err := splitDebugJobArgs(args)
 	if err != nil {
 		return err
@@ -190,7 +192,7 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 		return fmt.Errorf("usage: myce debug job <job-id> [--db path] [--json] [--preflight path] [--owner-telemetry]")
 	}
 	storePath := debugJobStorePath(*configPath, *dbPath)
-	consumer, err := consumerEvidenceFromFlags(*consumerRun, *consumerItem, *consumerStatus, *consumerElapsedMS, *consumerError)
+	consumer, err := consumerEvidenceFromFlags(*consumerRun, *consumerItem, *consumerStatus, *consumerElapsedMS, *consumerError, *consumerResult, *consumerQualityGate)
 	if err != nil {
 		return err
 	}
@@ -259,7 +261,7 @@ func debugJobFlagTakesValue(arg string) bool {
 	if strings.Contains(arg, "=") {
 		return false
 	}
-	return arg == "-config" || arg == "--config" || arg == "-db" || arg == "--db" || arg == "-preflight" || arg == "--preflight" || arg == "-rpc-token" || arg == "--rpc-token" || arg == "--consumer-run" || arg == "--consumer-item" || arg == "--consumer-status" || arg == "--consumer-elapsed-ms" || arg == "--consumer-error"
+	return arg == "-config" || arg == "--config" || arg == "-db" || arg == "--db" || arg == "-preflight" || arg == "--preflight" || arg == "-rpc-token" || arg == "--rpc-token" || arg == "--consumer-run" || arg == "--consumer-item" || arg == "--consumer-status" || arg == "--consumer-elapsed-ms" || arg == "--consumer-error" || arg == "--consumer-result" || arg == "--consumer-quality-gate"
 }
 
 func runDebugBundle(ctx context.Context, args []string, client *http.Client) error {
@@ -277,13 +279,15 @@ func runDebugBundle(ctx context.Context, args []string, client *http.Client) err
 	consumerStatus := fs.String("consumer-status", "", "consumer outcome: ok, timeout, error, canceled, or partial")
 	consumerElapsedMS := fs.Int("consumer-elapsed-ms", 0, "consumer-observed elapsed milliseconds")
 	consumerError := fs.String("consumer-error", "", "sanitized consumer error class or short message")
+	consumerResult := fs.String("consumer-result", "", "consumer validation result: pass, fail, or unknown")
+	consumerQualityGate := fs.String("consumer-quality-gate", "", "sanitized quality or validation gate name")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *out == "" {
 		return fmt.Errorf("--out is required")
 	}
-	consumer, err := consumerEvidenceFromFlags(*consumerRun, *consumerItem, *consumerStatus, *consumerElapsedMS, *consumerError)
+	consumer, err := consumerEvidenceFromFlags(*consumerRun, *consumerItem, *consumerStatus, *consumerElapsedMS, *consumerError, *consumerResult, *consumerQualityGate)
 	if err != nil {
 		return err
 	}
@@ -677,14 +681,16 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 }
 
 type consumerEvidence struct {
-	RunID     string `json:"run_id,omitempty"`
-	ItemID    string `json:"item_id,omitempty"`
-	Status    string `json:"status,omitempty"`
-	ElapsedMS int    `json:"elapsed_ms,omitempty"`
-	Error     string `json:"error,omitempty"`
+	RunID       string `json:"run_id,omitempty"`
+	ItemID      string `json:"item_id,omitempty"`
+	Status      string `json:"status,omitempty"`
+	ElapsedMS   int    `json:"elapsed_ms,omitempty"`
+	Error       string `json:"error,omitempty"`
+	Result      string `json:"result,omitempty"`
+	QualityGate string `json:"quality_gate,omitempty"`
 }
 
-func consumerEvidenceFromFlags(runID, itemID, status string, elapsedMS int, errorText string) (*consumerEvidence, error) {
+func consumerEvidenceFromFlags(runID, itemID, status string, elapsedMS int, errorText, result, qualityGate string) (*consumerEvidence, error) {
 	if elapsedMS < 0 {
 		return nil, fmt.Errorf("--consumer-elapsed-ms must be non-negative")
 	}
@@ -694,21 +700,29 @@ func consumerEvidenceFromFlags(runID, itemID, status string, elapsedMS int, erro
 	default:
 		return nil, fmt.Errorf("--consumer-status must be one of ok, timeout, error, canceled, or partial")
 	}
-	evidence := consumerEvidence{
-		RunID:     strings.TrimSpace(runID),
-		ItemID:    strings.TrimSpace(itemID),
-		Status:    status,
-		ElapsedMS: elapsedMS,
-		Error:     strings.TrimSpace(errorText),
+	result = strings.ToLower(strings.TrimSpace(result))
+	switch result {
+	case "", "pass", "fail", "unknown":
+	default:
+		return nil, fmt.Errorf("--consumer-result must be one of pass, fail, or unknown")
 	}
-	if evidence.RunID == "" && evidence.ItemID == "" && evidence.Status == "" && evidence.ElapsedMS == 0 && evidence.Error == "" {
+	evidence := consumerEvidence{
+		RunID:       strings.TrimSpace(runID),
+		ItemID:      strings.TrimSpace(itemID),
+		Status:      status,
+		ElapsedMS:   elapsedMS,
+		Error:       strings.TrimSpace(errorText),
+		Result:      result,
+		QualityGate: strings.TrimSpace(qualityGate),
+	}
+	if evidence.RunID == "" && evidence.ItemID == "" && evidence.Status == "" && evidence.ElapsedMS == 0 && evidence.Error == "" && evidence.Result == "" && evidence.QualityGate == "" {
 		return nil, nil
 	}
 	return &evidence, nil
 }
 
 func printConsumerEvidenceSummary(w io.Writer, evidence consumerEvidence) {
-	fmt.Fprintf(w, "consumer\trun=%s\titem=%s\tstatus=%s\telapsed_ms=%d\terror=%s\n", emptyDash(evidence.RunID), emptyDash(evidence.ItemID), emptyDash(evidence.Status), evidence.ElapsedMS, emptyDash(evidence.Error))
+	fmt.Fprintf(w, "consumer\trun=%s\titem=%s\tstatus=%s\telapsed_ms=%d\terror=%s\tresult=%s\tquality_gate=%s\n", emptyDash(evidence.RunID), emptyDash(evidence.ItemID), emptyDash(evidence.Status), evidence.ElapsedMS, emptyDash(evidence.Error), emptyDash(evidence.Result), emptyDash(evidence.QualityGate))
 }
 
 type ownerTelemetryReport struct {
@@ -791,6 +805,8 @@ type jobOptimizationEvidence struct {
 	FailureLayer            string                               `json:"failure_layer,omitempty"`
 	ConsumerStatus          string                               `json:"consumer_status,omitempty"`
 	ConsumerError           string                               `json:"consumer_error,omitempty"`
+	ConsumerResult          string                               `json:"consumer_result,omitempty"`
+	ConsumerQualityGate     string                               `json:"consumer_quality_gate,omitempty"`
 }
 
 func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvidence {
@@ -834,6 +850,8 @@ func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvi
 	if report.Consumer != nil {
 		out.ConsumerStatus = report.Consumer.Status
 		out.ConsumerError = report.Consumer.Error
+		out.ConsumerResult = report.Consumer.Result
+		out.ConsumerQualityGate = report.Consumer.QualityGate
 	}
 	if metric, ok, source := primaryRunMetric(report); ok {
 		out.MetricSource = source
@@ -860,6 +878,10 @@ func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvi
 			out.FailureClass = "consumer_contract_context_too_small"
 			out.FailureLayer = "consumer_contract"
 		}
+	}
+	if out.ConsumerResult == "fail" && (out.FailureLayer == "" || out.FailureLayer == "none" || out.FailureLayer == "consumer") {
+		out.FailureClass = "consumer_quality_failed"
+		out.FailureLayer = "quality"
 	}
 	return out
 }
@@ -914,10 +936,12 @@ func failureLayerForDiagnosis(diagnosis jobDebugDiagnosis, report jobDebugReport
 }
 
 func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvidence) {
-	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tnode=%s\tpreset=%s\tmodel=%s\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\n",
+	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tconsumer_result=%s\tquality_gate=%s\tnode=%s\tpreset=%s\tmodel=%s\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\n",
 		emptyDash(evidence.JobID),
 		emptyDash(evidence.Project),
 		emptyDash(evidence.ConsumerStatus),
+		emptyDash(evidence.ConsumerResult),
+		emptyDash(evidence.ConsumerQualityGate),
 		emptyDash(evidence.NodeID),
 		emptyDash(evidence.PresetID),
 		emptyDash(evidence.Model),
