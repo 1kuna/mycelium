@@ -338,6 +338,8 @@ myce gateway preflight \
   --prompt "Call the echo function with value ok. Do not answer directly." \
   --tool-name echo \
   --tool-choice function \
+  --require-tool-call \
+  --reject-textual-tool-call \
   --out /tmp/mycelium-tool-forced
 
 myce gateway preflight \
@@ -353,7 +355,31 @@ myce gateway preflight \
 The redacted `preflight.json` records `tool_call_count`, `tool_call_names`,
 `textual_tool_call`, route headers, usage, content length, reasoning length, and
 finish reason, but not the bearer token, prompt, raw content, or tool
-arguments.
+arguments. Gateways built from this revision also echo the effective
+`X-Myc-Project` response header so later debug bundles can join route evidence
+to consumer run labels without reading gateway internals.
+
+Add expectation flags when the command is used as a consumer gate:
+
+- `--expect-node <id>` fails if routing lands on the wrong owner.
+- `--require-json` fails if strict-schema final content is not parseable JSON.
+- `--require-tool-call` fails if no structured OpenAI `tool_calls` are present.
+- `--reject-textual-tool-call` fails if final content contains a textual
+  `<tool_call>` block.
+- `--min-prompt-tokens <n>` fails if the canary did not exercise enough context
+  for the consumer fixture.
+
+Atlas strict-schema route gate:
+
+```bash
+myce gateway preflight \
+  --url http://192.0.2.143:55291 \
+  --model qwen3.5-9b \
+  --project atlas-strict-schema-canary \
+  --expect-node b70 \
+  --require-json \
+  --out /tmp/mycelium-atlas-strict-schema
+```
 
 Operator-specific route and telemetry evidence is retained privately.### Prove cold-load cancellation cleanup after activation
 

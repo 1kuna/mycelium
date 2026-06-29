@@ -946,6 +946,11 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	maxTokens := fs.Int("max-tokens", 16, "maximum output tokens for the preflight request")
 	toolName := fs.String("tool-name", "", "optional echo-style function name for an OpenAI tool-call canary")
 	toolChoice := fs.String("tool-choice", "", "tool choice for --tool-name: auto, required, none, or function")
+	expectNode := fs.String("expect-node", "", "fail unless X-Myc-Node matches this node")
+	requireJSON := fs.Bool("require-json", false, "fail unless the final content is valid JSON")
+	requireToolCall := fs.Bool("require-tool-call", false, "fail unless the response contains at least one structured OpenAI tool call")
+	rejectTextualToolCall := fs.Bool("reject-textual-tool-call", false, "fail if final content contains a textual <tool_call> block")
+	minPromptTokens := fs.Int("min-prompt-tokens", 0, "fail unless usage.prompt_tokens is at least this value")
 	outDir := fs.String("out", "", "optional directory for a redacted preflight evidence packet")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -989,6 +994,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	if result.Usage.TotalTokens != 0 || result.Usage.PromptTokens != 0 || result.Usage.CompletionTokens != 0 {
 		fmt.Printf("usage\tprompt=%d\tcompletion=%d\ttotal=%d\n", result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens)
 	}
+	var evidencePath string
 	if *outDir != "" {
 		path, err := writeGatewayPreflightEvidence(*outDir, tokenSource, gatewayPreflightConfig{
 			URL:        *url,
@@ -1001,7 +1007,53 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 		if err != nil {
 			return err
 		}
+		evidencePath = path
 		fmt.Printf("evidence\t%s\n", path)
+	}
+	if err := validateGatewayPreflightExpectations(result, gatewayPreflightExpectations{
+		ExpectNode:            *expectNode,
+		RequireJSON:           *requireJSON,
+		RequireToolCall:       *requireToolCall,
+		RejectTextualToolCall: *rejectTextualToolCall,
+		MinPromptTokens:       *minPromptTokens,
+	}); err != nil {
+		if evidencePath != "" {
+			return fmt.Errorf("%w; evidence=%s", err, evidencePath)
+		}
+		return err
+	}
+	return nil
+}
+
+type gatewayPreflightExpectations struct {
+	ExpectNode            string
+	RequireJSON           bool
+	RequireToolCall       bool
+	RejectTextualToolCall bool
+	MinPromptTokens       int
+}
+
+func validateGatewayPreflightExpectations(result gatewayPreflightResult, expectations gatewayPreflightExpectations) error {
+	var failures []string
+	if expectations.ExpectNode != "" {
+		if got := result.Headers.Get("X-Myc-Node"); got != expectations.ExpectNode {
+			failures = append(failures, fmt.Sprintf("expected X-Myc-Node=%s got %s", expectations.ExpectNode, emptyDash(got)))
+		}
+	}
+	if expectations.RequireJSON && !result.JSONContent {
+		failures = append(failures, "expected valid JSON final content")
+	}
+	if expectations.RequireToolCall && result.ToolCallCount == 0 {
+		failures = append(failures, "expected at least one structured tool call")
+	}
+	if expectations.RejectTextualToolCall && result.TextualToolCall {
+		failures = append(failures, "expected no textual <tool_call> block in final content")
+	}
+	if expectations.MinPromptTokens > 0 && result.Usage.PromptTokens < expectations.MinPromptTokens {
+		failures = append(failures, fmt.Sprintf("expected prompt_tokens >= %d got %d", expectations.MinPromptTokens, result.Usage.PromptTokens))
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("gateway preflight expectation failed: %s", strings.Join(failures, "; "))
 	}
 	return nil
 }

@@ -153,6 +153,7 @@ type RouteResponse struct {
 }
 
 type routeDiagnostics struct {
+	Project                 string
 	ColdLoad                bool
 	LoadWallMS              int
 	QueueWaitMS             int
@@ -1564,6 +1565,9 @@ func sseTailHasTerminal(tail string) bool {
 }
 
 func writeRouteDiagnostics(h http.Header, d routeDiagnostics) {
+	if d.Project != "" {
+		h.Set(HeaderProject, d.Project)
+	}
 	h.Set(HeaderColdLoad, strconv.FormatBool(d.ColdLoad))
 	h.Set(HeaderQueueWaitMS, strconv.Itoa(d.QueueWaitMS))
 	h.Set(HeaderStructuredOutput, d.StructuredOutput)
@@ -1583,6 +1587,7 @@ func writeRouteDiagnostics(h http.Header, d routeDiagnostics) {
 func routeDiagnosticsFor(req translate.IngressRequest, preset domain.Preset, profile profiles.Profile, cold bool, loadMS, queueMS, upstreamMS int) routeDiagnostics {
 	parser, auto := vllmToolConfig(preset)
 	return routeDiagnostics{
+		Project:                 req.Project,
 		ColdLoad:                cold,
 		LoadWallMS:              loadMS,
 		QueueWaitMS:             queueMS,
