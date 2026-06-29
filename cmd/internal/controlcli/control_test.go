@@ -1590,7 +1590,6 @@ func TestRunGatewayPreflightUsesTokenFileAndClassifiesMissingAuth(t *testing.T) 
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
 	t.Setenv("MYCELIUM_API_KEY", "")
-	t.Setenv("ATLAS_MYCELIUM_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
 	if err := RunWithClient(context.Background(), []string{
 		"gateway", "preflight",

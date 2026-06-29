@@ -346,7 +346,7 @@ job state, registry cleanup flag, owner TTFT/load/context/tokens-per-second,
 owner session phases, and any explicit consumer run/item/outcome flags. If
 owner telemetry fetch fails, the report keeps the request-time preflight
 evidence and prints the exact owner telemetry error.
-The `diagnosis` line is the quick PM handoff:
+The `diagnosis` line is the quick operator handoff:
 
 - `owner_completed_warm` / `owner_completed_cold_load`: the assigned owner
   reached the complete phase. If the consumer timed out or missed summary
@@ -516,7 +516,7 @@ myce gateway preflight \
   --out /tmp/mycelium-tool-stream
 ```
 
-The streaming evidence to preserve for PM/debug handoff is `stream_done`,
+The streaming evidence to preserve for debug handoff is `stream_done`,
 `usage_available`, `X-Myc-*` headers, structured `tool_calls`, and absence of
 textual `<tool_call>` content. Pair any streaming run with at least one
 non-streaming preflight on the same model/project when large-fixture context and

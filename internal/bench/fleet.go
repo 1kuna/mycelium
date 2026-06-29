@@ -644,7 +644,6 @@ func DefaultGatewayTokenEnvNames() []string {
 	return []string{
 		"MYCELIUM_GATEWAY_TOKEN",
 		"MYCELIUM_API_KEY",
-		"ATLAS_MYCELIUM_API_KEY",
 		"OPENAI_API_KEY",
 	}
 }
