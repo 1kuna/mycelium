@@ -1,28 +1,26 @@
-# Mycelium Owner-Thread Handoff
+# Mycelium Public Handoff
 
 Last updated: 2026-06-29
 
-This file supersedes the previous root `HANDOFF.md`. Treat that prior version as
-a partial coordinator draft, not as authority. This handoff is intentionally
-scoped to continuity and next steps; it does not claim new validation from this
-handoff rewrite.
+This file is public repo continuity, not an operator journal. Do not record
+client/project names, private hostnames, private IP addresses, token names,
+local filesystem paths, artifact paths, or run narratives here. Put that
+material in ignored local notes such as `ops/private/*.local.md`, or keep it in
+an out-of-repo private handoff.
 
 ## Current Repo State
 
 - Branch: `main`.
-- Latest observed commit before this handoff refresh: `816fd3a Document Verso 8192 route contract`.
-- Remote already configured: `origin https://github.com/1kuna/mycelium.git`.
-- Source-of-truth docs remain `01-project-spec.md`, `02-testing-architecture.md`,
-  and `03-development-guide.md`.
+- Source-of-truth docs remain `01-project-spec.md`,
+  `02-testing-architecture.md`, and `03-development-guide.md`.
 - `04-engine-bootstrap.md` is a future/extension spec. It should guide future
-  bootstrap work, but it is not part of the current MVP proof gate unless Zach
-  explicitly promotes it.
-- GitHub Actions were intentionally disabled remotely because there are no
-  runner credits. Use local `make ci`.
+  bootstrap work, but it is not part of the current MVP proof gate unless it is
+  explicitly promoted.
+- Use local gates; the default repo proof is `make ci`.
 
 ## Product Shape To Preserve
 
-Mycelium is peer-native and LAN-local:
+Mycelium is a peer-native, LAN-local inference control plane:
 
 - `mycelium` is one peer daemon. There is no permanent server/node split.
 - Any peer may coordinate a request.
@@ -33,499 +31,65 @@ Mycelium is peer-native and LAN-local:
 - Runtime placement must go through scheduler/coordinator plus owner admission.
   Do not reintroduce direct coordinator mutation of remote state.
 
-## What Is Already Implemented
+## Implemented Public Surface
 
-The repo has gone through several substantial implementation passes. The
-important continuity points are:
+- Gateway: OpenAI-compatible `/v1/chat/completions`, route diagnostics headers,
+  strict JSON/structured-output passthrough, tool-call diagnostics, streaming
+  and non-streaming preflight evidence.
+- Control CLI: `myce gateway preflight`, `myce gateway routes`, `myce debug job`,
+  `myce debug bundle`, `myce telemetry samples`, benchmark commands, model and
+  recommendation inspection commands.
+- Runtime proof surfaces: owner telemetry, run/session metrics, job registry,
+  route headers, preflight artifacts, debug bundles, and optimization summaries.
+- Scheduler/runtime: owner-authoritative admission, resource estimation,
+  context/KV accounting, disk-headroom filtering, registry compaction,
+  stale-job cleanup, peer diagnostics, and backend adapter coverage.
+- Bootstrap/catalog: model catalog, engine readiness planning, compatibility
+  reports, and dry-run engine install planning.
 
-- Durable runtime/control-plane storage exists for peer state, catalog/runtime
-  metadata, jobs, leases/admission, telemetry, recommendations, and registry
-  data.
-- Owner admission and scheduler placement are the intended runtime authority:
-  placement proposes, owner admission commits or rejects with fences, and live
-  requests release through the owner path.
-- Resource fit work includes multi-accelerator/unit-aware claims, context/KV
-  accounting, reservations/pinned protection, disk-headroom placement filtering,
-  max-util limits, and backend-aware estimation paths.
-- Runtime hardening after the SSOT audits includes dynamic backend launch ports,
-  process identity/reaping, gateway retries and queue draining fixes, degraded
-  peer failures during recovery, runtime catalog metadata persistence, gateway
-  token discovery, and operator diagnostic commands.
-- Real fleet benchmarking machinery exists. It emits artifacts such as
-  `report.html`, `manifest.json`, `events.jsonl`, `results.json`,
-  `snapshots.jsonl`, `failures.json`, and per-job outputs. Historical live runs
-  included MacBook/Mac mini/B70/Spark scenarios, but do not assume those exact
-  services are still up without checking.
-- Current Atlas-facing inference route remains MacBook gateway to B70 for proven
-  real work, and Spark is now also a proven corrected-LAN inference owner. On
-  2026-06-27 the MacBook LaunchAgent `com.mycelium.real-fleet` listened at
-  `192.168.0.143:55291`, B70 listened at `192.168.0.153:55283`, and Spark
-  listened at `192.168.0.16:55274`. Authenticated MacBook diagnostics showed
-  both B70 and Spark seeds ready. A tiny strict JSON-schema
-  `/v1/chat/completions` request for `qwen3.5-9b` routed to warm B70 `inst_2`
-  with `X-Myc-Node: b70`, `X-Myc-Backend: vllm`,
-  `X-Myc-Decision: placed_on_warm_instance`, `X-Myc-Structured-Output:
-  json_schema`, and `X-Myc-Guided-Decoding-Requested: true`, returning
-  parseable final JSON. A matching strict JSON-schema request for
-  `spark-qwen9b` routed to Spark `inst_2` with `X-Myc-Node: spark`,
-  `X-Myc-Backend: vllm`, `X-Myc-Decision: placed_on_warm_instance`,
-  `X-Myc-Structured-Output: json_schema`, and
-  `X-Myc-Guided-Decoding-Requested: true`, returning parseable final JSON.
-  Spark owner snapshot reported `spark-qwen9b-vllm` ready at
-  `127.0.0.1:55374`.
-- Peer registry snapshot sync was compacted in `27a1e5f` so peer RPC snapshots
-  carry only rescue-relevant job records rather than all terminal history.
-  Before deploying that code live everywhere, stale runtime job records were
-  cleared from the MacBook, B70, and Spark control DBs with timestamped backups;
-  authenticated `/registry/snapshot` responses then stayed small and below the
-  16 MiB peer RPC body cap.
-- On 2026-06-27 the current Linux binaries containing `27a1e5f` were deployed
-  to B70 and Spark through their existing `mycelium-real-fleet.service`
-  user-systemd units. B70 reported SHA256
-  `28f56acec536eb29b32084073ce39276fac35494b0c2a52dcb6177fe816973ba`; Spark
-  reported SHA256
-  `842e62c3f81bbfa9084fe6dc1d9470decc469d4fa9f2a888758c46bd9e3ff175`.
-  Post-update diagnostics showed MacBook, B70, and Spark mutually reachable
-  across the corrected LAN, B70/Spark `/registry/snapshot` responses were
-  compact empty snapshots, and strict JSON-schema canaries through the MacBook
-  gateway succeeded on both B70 and Spark after cold load.
-- Session telemetry was added on 2026-06-04. `session_metrics` records phase
-  time-series samples alongside `run_metrics`; owner peers are authoritative for
-  run/session telemetry, and remote-owner telemetry goes over authenticated
-  telemetry RPC.
-- The CLI exposes telemetry inspection via `myce telemetry samples`.
-- The CLI exposes a secret-safe consumer gateway canary via
-  `myce gateway preflight`. It sends one non-streaming strict JSON-schema
-  `/v1/chat/completions` request, resolves bearer tokens from explicit flags,
-  `MYCELIUM_GATEWAY_TOKEN`, `MYCELIUM_API_KEY`, `ATLAS_MYCELIUM_API_KEY`,
-  `OPENAI_API_KEY`, a token file flag, `--config <peer.json>`, or the local
-  `~/.mycelium/peer.json` `gateway_token`, and prints route headers,
-  content/reasoning lengths, JSON parse status, and usage counts without
-  printing the token. With `--out`, it also writes a redacted `preflight.json`
-  evidence packet containing the gateway/model/project, auth source label,
-  whitelisted route headers, finish/content/reasoning/JSON/usage facts, and no
-  bearer token, prompt, or raw completion content. `myce debug job --preflight
-  <preflight.json>` and `myce debug bundle --preflight <preflight.json>` can
-  now derive `X-Myc-Job` from that artifact and join it to durable job,
-  registry, metric, session, recommendation, and bundle evidence for later
-  timeout/partial-batch triage. Current artifacts also preserve the redacted
-  request contract (`max_tokens`, streaming mode, structured-output mode, and
-  tool name/choice when a tool canary is requested) plus the preflight
-  expectation gates, so post-hoc debug can distinguish an Atlas strict-JSON
-  canary from a Verso forced-tool/8192/streaming canary without raw prompts,
-  completions, or tokens. Add `--owner-telemetry` to fetch the selected
-  job's authoritative run/session metrics directly from the assigned owner peer
-  when peer RPC auth is available; this is the post-hoc path for PM/consumer
-  threads that need TTFT/load/context/tokens-per-second and owner session phases
-  after a partial batch or timeout. The debug report now includes a deterministic
-  `diagnosis` (`owner_completed_warm`, `owner_completed_cold_load`,
-  `owner_failed`, `cleanup_required`, `inflight_or_stale`,
-  `owner_telemetry_unavailable`, etc.) so Atlas/Verso can separate completed
-  owner inference from downstream consumer timeout/artifact issues. Consumer
-  threads can attach explicit batch/run, row/document, outcome, elapsed-time,
-  and sanitized error facts with `--consumer-run`, `--consumer-item`,
-  `--consumer-status`, `--consumer-elapsed-ms`, and `--consumer-error`; those
-  fields are copied into `debug job --json` and `debug bundle` artifacts without
-  requiring prompts, completions, or tokens. `debug job --json` now includes an
-  `optimization` summary object, and `debug bundle` writes the same object as
-  `optimization.json`, joining request contract, consumer labels, route headers,
-  owner timing/session phases, usage, finish/tool/JSON outcome, diagnosis class,
-  and failure layer into one secret-safe query surface. Current preflight artifacts can
-  carry those same labels at request time, and `debug job --preflight` /
-  `debug bundle --preflight` inherit them automatically when no explicit
-  `--consumer-*` flags are provided. Explicit debug flags remain the override
-  path for operator correction.
-- The gateway now exposes OpenAI tool-call request diagnostics in
-  `X-Myc-Tools-Requested`, `X-Myc-Tool-Choice`,
-  `X-Myc-VLLM-Tool-Parser-Configured`, and
-  `X-Myc-VLLM-Auto-Tool-Choice-Configured`, and the secret-safe preflight
-  artifact preserves those headers. Non-streaming provider 4xx responses now
-  return with route headers instead of collapsing into a headerless gateway
-  502. This helps Atlas/Verso distinguish provider flag/parser gaps from
-  routing, capacity, auth, or consumer-shape problems.
-- On 2026-06-29 Spark was advanced from "provider rejects auto tools" to a
-  narrow proven tool-capable route without touching the MacBook gateway or B70.
-  Spark's existing `mycelium-real-fleet.service` and `spark-qwen9b-vllm` preset
-  were updated in place to launch vLLM with `--enable-auto-tool-choice` and
-  `--tool-call-parser hermes`; timestamped backups of Spark's peer config and
-  control DB were taken first. A direct Spark Mycelium gateway canary for
-  `spark-qwen9b` with forced function `tool_choice` returned a real OpenAI
-  `tool_calls[0]` message and route headers confirming parser/auto-tool flags
-  were configured. `tool_choice:"auto"` no longer failed with vLLM's missing
-  flag error, but the same Qwen route still emitted a literal Hermes-style
-  `<tool_call>` block in final text instead of structured `tool_calls`.
-  Treat Spark 9B as proven for forced tool calls and still unproven for reliable
-  Deep Agents auto tool choice.
-- Follow-on tool preflight hardening added `myce gateway preflight --tool-name
-  <name> --tool-choice function|auto|required|none`. The command now records
-  response-side `tool_call_count`, `tool_call_names`, and `textual_tool_call`
-  in its secret-safe output and `preflight.json`, and `debug job --preflight`
-  surfaces those fields. Live Spark probes with strict tool schemas reproduced
-  the current contract: forced function choice returned one structured
-  `tool_calls` entry, while `auto` still returned final text containing a
-  literal `<tool_call>` block and `required` exhausted the tiny output cap
-  without a structured call. Use forced function choice for Verso canaries until
-  a different model/template/parser route proves reliable auto.
-- Larger-context Spark tool routes were added on 2026-06-29 without touching B70
-  or the MacBook gateway. First, Spark's peer config and control DB were backed
-  up, then `spark-qwen9b-tools-4096-vllm` / alias
-  `spark-qwen9b-tools-4096` was added with the same Qwen3.5-9B model,
-  `--max-model-len 4096`, `--enable-auto-tool-choice`, and
-  `--tool-call-parser hermes`. A secret-safe forced-tool preflight proved that
-  route with `usage.prompt_tokens=2997` and one structured `echo` tool call,
-  and provider 400 probes proved its 4096-token ceiling. After Verso's real
-  Deep Agents fixture still reached the 4096 wall, Spark was backed up again
-  and extended with `spark-qwen9b-tools-8192-vllm` / alias
-  `spark-qwen9b-tools-8192`. A project-scoped `verso-tools` gateway token and
-  project config were added so owner telemetry groups this traffic under
-  `project=verso-tools` with `context_request=8192` rather than under the
-  global `bench` token. A secret-safe forced-tool preflight against
-  `http://192.168.0.16:55274` returned HTTP 200 on Spark `inst_1`,
-  `X-Myc-Decision: loaded_new`, `X-Myc-Cold-Load: true`,
-  `X-Myc-Load-Wall-Ms: 160761`, `X-Myc-Upstream-Wall-Ms: 3545`,
-  `X-Myc-Tool-Choice: function:echo`, both vLLM tool headers true,
-  `usage.prompt_tokens=5336`, `usage.completion_tokens=12`,
-  `usage.total_tokens=5348`, `tool_call_count=1`, and
-  `textual_tool_call=false`. Spark owner telemetry for job
-  `gateway-1782756550764336284-1-1` recorded `project=verso-tools`,
-  preset `spark-qwen9b-tools-8192-vllm`, `context_used=5348`,
-  `load_wall_clock_ms=160761`, TTFT/upstream time `3545ms`, and
-  `tokens_per_sec=3.38`. The current MacBook gateway does not know the Spark
-  tool aliases until its preset registry is safely refreshed, so Verso should
-  target Spark's Mycelium gateway directly for larger-context tool routes.
-- A follow-on route-gate pass added `myce gateway preflight` expectation flags:
-  `--expect-node`, `--require-json`, `--require-tool-call`,
-  `--reject-textual-tool-call`, and `--min-prompt-tokens`. Failed expectation
-  checks still write the redacted `preflight.json` first when `--out` is set.
-  Future deployed gateways also echo the effective `X-Myc-Project` response
-  header from the already-authenticated/project-defaulted request label, giving
-  Atlas/Verso a durable join key for route evidence, owner telemetry, and
-  consumer batch/item artifacts. The live Spark service used for the 8192 route
-  has not yet picked up that binary, so `X-Myc-Project` may be absent in live
-  response headers even though the project-scoped token correctly records
-  `project=verso-tools` in owner telemetry.
-- The current live consumer-ready contracts are narrow and distinct. Atlas
-  should continue to use the MacBook gateway `http://192.168.0.143:55291` with
-  model `qwen3.5-9b`, strict `response_format.type=json_schema`, and an
-  `--expect-node b70 --require-json` preflight gate. Verso larger-context
-  tool-call canaries should use the direct Spark gateway
-  `http://192.168.0.16:55274` with model `spark-qwen9b-tools-8192`, the
-  project-scoped `verso-tools` gateway token, forced function `tool_choice`,
-  `--expect-node spark --require-tool-call --reject-textual-tool-call`, and a
-  fixture-sized `--min-prompt-tokens` gate. A live MacBook alias probe for
-  `spark-qwen9b-tools-4096` returned HTTP 502 with
-  `unknown model "spark-qwen9b-tools-4096"`, proving the MacBook gateway's
-  in-memory preset registry has not been safely refreshed for Spark tool
-  aliases.
-- Route discovery is now a repo-local control-plane contract, not a hand-copied
-  note. `myce gateway routes --config <peer.json>` reads the service peer config
-  and prints the OpenAI base URL, project/default model, matched preset, node,
-  backend, context cap, token source class, structured/streaming hints, and vLLM
-  tool-parser flags without printing token values. A 2026-06-29 read of
-  `/Users/zach/.mycelium/bench/real-fleet/peer.json` showed the MacBook gateway
-  config still advertises `qwen3.5-9b`/B70 and Spark plain routes but not
-  `spark-qwen9b-tools-8192`; direct Spark remains the consumer-ready Verso tool
-  route until MacBook gateway catalog activation is safely handled.
-- The gateway/catalog discovery contract now has a live check too. Current-code
-  gateways expose authenticated `GET /v1/models` with preset IDs and aliases
-  only, and `myce gateway routes --live` compares configured project routes to
-  that endpoint without printing token material. A 2026-06-29 live MacBook check
-  against `http://192.168.0.143:55291` returned authenticated `404` for
-  `/v1/models`, proving the running MacBook LaunchAgent binary is stale for the
-  new catalog endpoint. Same-cycle canaries still passed for Atlas strict JSON
-  on MacBook/B70 and Verso forced tools on direct Spark. Once valid Mac admin
-  credentials exist, the mechanical activation path remains:
-  `mycelium service plan --config /Users/zach/.mycelium/bench/real-fleet/peer.json --binary /Users/zach/.mycelium/bin/mycelium --name real-fleet --system`,
-  then install/status/reload exactly as printed, followed by `myce gateway
-  routes --live`, Atlas preflight, and Verso direct-Spark or MacBook alias
-  preflight as appropriate.
-- A 2026-06-29 follow-up checked the route after Verso reported friction on
-  the older 4096 path. Spark's owner snapshot showed exactly one ready
-  `spark-qwen9b-tools-8192-vllm` instance and no leases or non-terminal owner
-  jobs. A warm direct-Spark preflight for `spark-qwen9b-tools-8192` with the
-  project-scoped `verso-tools` token returned HTTP 200,
-  `X-Myc-Decision: placed_on_warm_instance`, `X-Myc-Cold-Load: false`,
-  `X-Myc-Upstream-Wall-Ms: 1010`, `tool_call_count=1`,
-  `textual_tool_call=false`, and `usage.total_tokens=308`. A tiny streaming
-  forced-tool curl against the same route also returned HTTP 200, curl exit 0,
-  a `[DONE]` marker, structured `tool_calls` chunks, and no textual
-  `<tool_call>` blocks. This does not make the obsolete 4096 route suitable for
-  the current Verso fixture: the latest `queued: no instance available` on 4096
-  is consistent with asking Spark for the old alias while the single available
-  tool-capable slot is warm on the 8192 preset. For optimization telemetry,
-  non-streaming preflight remains the strongest token/context accounting proof;
-  streaming route headers and owner timing are available, but token usage may be
-  absent unless the provider stream includes usage.
-- A repo-local control-CLI hardening pass then made streaming evidence a first-
-  class secret-safe preflight artifact rather than a hand-rolled curl packet.
-  `myce gateway preflight --stream` sends `stream:true` with
-  `stream_options.include_usage:true`, records `streaming`, `stream_done`,
-  `usage_available`, structured `tool_call_names`, textual-tool detection, and
-  usage counts only when the provider actually supplies them. `debug job
-  --preflight` prints `preflight-stream` and either concrete
-  `preflight-usage` or `preflight-usage unavailable`. A live direct-Spark
-  streaming preflight for `spark-qwen9b-tools-8192` with the `verso-tools`
-  token returned HTTP 200, `X-Myc-Node: spark`,
-  `X-Myc-Decision: placed_on_warm_instance`, `stream done=true`,
-  `usage_available=true`, `tool_call_count=1`, `tool_call_names=echo`,
-  `textual_tool_call=false`, and usage `prompt=296 completion=12 total=308`.
-  The latest current-tree proof used job `gateway-1782756550764336284-90-1`
-  and artifact
-  `/tmp/mycelium-verso-tools8192-stream-preflight-20260629T184023Z/preflight.json`.
-- Current MVP behavior intentionally rejects or disables some future-ish paths:
-  sticky/private/overlay runtime choices were disabled in the bug-debt pass,
-  `X-Myc-Handling: private` is rejected rather than accepted unsafely, and
-  submitter policy is not wired until an authenticated caller policy exists.
-- Engine bootstrap/adoption is partly implemented as host-local readiness and
-  doctor tooling rather than full automatic engine installation. Current pieces
-  include `bootstrap --doctor --save-plan`, `mycelium engines list|doctor|
-  preflight|apply`, saved exact engine readiness facts, readiness-aware preset
-  loading/preflight, `mycelium models compat`, `mycelium engines install-plan`,
-  OpenVINO profile/wrapper support, and multi-backend host support. Install
-  planning remains advisory unless explicitly applied.
+## Consumer Evidence Contract
 
-## Validation Status
+Consumers should preserve secret-safe evidence, not private prompts or raw
+completions:
 
-Do not report this handoff rewrite as a validation pass.
+- request route: gateway URL class, model or alias, project label if applicable,
+  max tokens, streaming mode, structured-output mode, tool mode, and declared
+  minimum context requirement;
+- response headers: `X-Myc-Job`, `X-Myc-Node`, `X-Myc-Backend`,
+  `X-Myc-Instance`, `X-Myc-Decision`, timing headers, structured-output/tool
+  diagnostics, and retry/attempt fields;
+- outcome: HTTP status, provider finish reason, content length, reasoning
+  length, JSON parse status, tool-call count/names, textual-tool-call flag,
+  token usage when available, consumer elapsed time, and sanitized consumer
+  error class.
 
-Known from repo and live evidence:
+Use `myce gateway preflight --out <dir>` to write a redacted `preflight.json`.
+Use `myce debug job --preflight <preflight.json> --owner-telemetry` or
+`myce debug bundle --preflight <preflight.json> --owner-telemetry` to join
+request-time evidence to owner-side timing and durable job state.
 
-- `CODEX-FINDINGS.md` records a 2026-06-09 SSOT audit/triage and the fix pass
-  status. Its P1/P2 runtime findings F-01 through F-07, F-12, F-14, and F-16
-  were marked fixed there. F-08, F-09, and F-11 remain smoke proof gaps; F-13 is
-  conformance expansion; F-15 is a spec-ratification/product-decision item.
-- Local smoke was re-proven on 2026-06-26 with an existing LM Studio Ministral
-  GGUF after fixing the stale coordinator-runtime wiring and the joined-node fit
-  bug. Do not treat the old "smoke env unset" note as the current blocker.
-- Atlas has used the live MacBook/B70 route for strict-schema semantic and
-  overlay gates. B70 Qwen/vLLM structured output is activated with vLLM
-  structured outputs enabled in reasoning while preserving the reasoning/content
-  boundary.
-- The Atlas gateway telemetry headers from `3f125c9` are live on the MacBook
-  gateway. A 2026-06-27 canary observed `X-Myc-Cold-Load`,
-  `X-Myc-Queue-Wait-Ms`, `X-Myc-Upstream-Wall-Ms`,
-  `X-Myc-Structured-Output`, and `X-Myc-Guided-Decoding-Requested`.
-- `make ci` on 2026-06-27 previously passed formatting, build, vet, and
-  `go test ./... -race`, but failed the coverage gate because
-  `internal/enginecatalog` reported 78.3% statement coverage under the 85.0%
-  per-package floor. Follow-on repo-local coverage passes raised
-  `internal/enginecatalog`, `internal/enginecompat`, `pkg/api`,
-  `internal/modelcompat`, `internal/catalog`, `internal/bootstrap`,
-  `internal/backends/llamacpp`, `internal/backends/processadapter`,
-  `cmd/internal/controlcli`, `internal/backends/openvino`, and `test/mocks`
-  above their required floors. The final 2026-06-27 coverage pass added
-  focused behavior tests for `cmd/mycelium` command/runtime contracts, restored
-  `internal/scheduler` to its 100.0% required floor, and restored
-  `test/contract` to its 100.0% required floor. `make coverage` now passes
-  with `coverage ok: total 89.4%`.
-- A later 2026-06-27 repo-local reliability pass reproduced and fixed the
-  cold-load/client-timeout stale-job lifecycle bug in scheduler state handling:
-  after a job row exists, post-placement terminal state repair and owner cleanup
-  now use `cleanupContext(ctx)` so client cancellation cannot strand durable job
-  rows in `placing` after an accepted cold-load attempt fails. Focused tests
-  cover both coordinated and local cold-load cancellation. Live fleet
-  deployment/canary proof was intentionally not run in that repo-local chunk.
-- The README now includes a non-mutating operator recipe for proving the same
-  stale-job cleanup after a future live activation. It tags a deliberately
-  client-canceled cold-load request with `X-Myc-Project`, finds the resulting
-  job in the coordinator store, verifies terminal job/registry state with
-  `myce debug job --json`, and preserves a focused `myce debug bundle`. This
-  prepares the live proof path only; it does not claim the deployed MacBook,
-  B70, or Spark services are running the stale-job fix.
-- On 2026-06-29 the Linux peers were updated to binaries containing the
-  stale-job cleanup fix through their existing user-systemd services. B70
-  reported SHA256
-  `22adabba230d1418e13449fe9a8bcfe5b604b4fd8c2f5179c2277c9dbf9da09f` and
-  `service active`, `peer ready`, `seeds ready 1/1`; Spark reported SHA256
-  `6e19e91f8b97115f7545f33425c93f669ea5104f8f559727d1b36e966ab1df9d` and
-  `service active`, `peer ready`, `seeds ready 2/2`. The MacBook gateway was
-  not activated on the fixed binary because local `sudo` authentication failed
-  before any user LaunchAgent bootout or system LaunchDaemon install happened.
-  The existing user LaunchAgent remained on `/Users/zach/.mycelium/bin/mycelium`
-  and rechecked healthy with B70/Spark seeds ready. A named fixed Darwin binary
-  was prepared at `/Users/zach/.mycelium/bin/mycelium-99784cc`, but live Mac
-  activation still needs valid local admin credentials or Zach running the
-  documented `service install --system` command. A timeout canary against the
-  still-old Mac gateway reproduced the stale `placing` job / `loading` registry
-  bug; evidence is preserved under
-  `/tmp/mycelium-stale-job-blocker-20260629T112957Z`, and the single row created
-  by that verification attempt was manually terminalized after backing up the
-  control DB.
-- A follow-on 2026-06-29 read-only diagnostic pass found the Mac user
-  LaunchAgent LAN failure is best explained by binary identity / Local Network
-  privacy behavior rather than Mycelium config, listener binding, or launchd
-  working-directory drift. The working live LaunchAgent still uses
-  `/Users/zach/.mycelium/bin/mycelium` with the same peer config and reaches
-  B70/Spark seeds. That old binary is ad-hoc/linker-signed as identifier
-  `a.out` with CDHash `28e65885c95018a65a13c38b4251dd9edac7072f`; the prepared
-  fixed Darwin binary `/Users/zach/.mycelium/bin/mycelium-99784cc` is a
-  different ad-hoc identity, identifier
-  `mycelium-99784cc-55554944e514dd7e344b3e12f6256629593404fd`, CDHash
-  `c81c1321f2fb039cf3ef1c7a2d4eee0691068f2a`. Historical LaunchAgent logs for
-  the current-binary attempt show the peer could start but then got
-  `no route to host` for both corrected-LAN seeds, while the old binary under
-  the same user LaunchAgent succeeds. The repo README now has a read-only
-  checklist for comparing LaunchAgent plist, signing identity, quarantine/
-  provenance xattrs, and logs. Without valid sudo/admin credentials, the only
-  remaining non-root experiment is a deliberately approved stable signed
-  bundle/helper identity plus a maintenance-window user LaunchAgent swap; that
-  still mutates the live gateway and cannot live-prove the stale-job fix until
-  the swap succeeds.
+For thinking/tool-agent workloads, do not treat a low-context tool-call smoke as
+a consumer-ready route. Use `--context-cap` and `--min-context-cap` so Mycelium
+records `consumer_contract_context_too_small` when the route cannot honestly
+fit the workload.
 
-This handoff refresh performed repo authority inspection, `make ci`, a narrow
-MacBook/B70 live canary, and Spark reachability classification. A later
-repo-local coverage continuation ran focused package tests plus `make coverage`
-and did not touch live services. It did not push.
+## Public Hygiene Rules
 
-## Active Blockers And Cautions
+- Public docs may say "strict JSON consumer", "tool-calling consumer",
+  "project-scoped token", "example project", and "LAN peer".
+- Public docs must not name private consumers, customer/project names, private
+  token env vars, private hostnames/IPs, local user paths, artifact paths, or
+  one-off run IDs.
+- Test fixtures should use generic project/model/node names unless the name is
+  a real public hardware or API term.
+- Live-fleet facts are drift-prone. Verify live state before claiming a route,
+  model, node, or backend is currently healthy.
 
-- Real smoke state is drift-prone. Mac mini, B70, and Spark availability must be
-  verified live before claiming fleet health. Current evidence proves MacBook to
-  B70 inference and MacBook to Spark inference; re-check live health before
-  treating either owner as available for new scale work.
-- The MacBook gateway binary itself remains intentionally rolled back to the
-  known-good LaunchAgent-approved binary because the current Darwin binary loses
-  corrected-LAN seed reachability under the user LaunchAgent. Do not replace
-  `/Users/zach/.mycelium/bin/mycelium` again without a rollback-ready test or a
-  stable LaunchDaemon/bundled-signing activation plan. The repo now provides a
-  read-only `mycelium service plan` command; use it with `--system` and
-  `--binary /Users/zach/.mycelium/bin/mycelium` to inspect the exact
-  LaunchDaemon unit, install/status/reload commands, and rollback command before
-  any privileged Mac activation attempt.
-- `ops/private/` contains local smoke notes/bundles. Treat them as private
-  operational evidence; do not publish secrets, tokens, host-specific paths, or
-  model artifacts.
-- Spark memory must remain capped below the danger zone. Historical safe vLLM
-  guidance used conservative caps such as `--gpu-memory-utilization 0.70`; docs
-  require rejecting unsafe Spark configs at or above the 0.90 region.
-- Disk headroom is product-important and implemented, but `CODEX-FINDINGS.md`
-  still records it as SSOT drift unless the core docs have since been ratified.
-- Full automatic cross-OS/architecture engine installation is not done. The
-  current implementation is readiness discovery, doctor, compatibility, and
-  explicit apply/adoption. `04-engine-bootstrap.md` is the spec outline for the
-  future full bootstrap layer.
-- Do not silently disable model reasoning/thinking to hide leaks or parser
-  issues. Fix the provider payload, response boundary, or gateway translation
-  path instead.
-- The Atlas/Qwen reasoning-boundary repair details are preserved in
-  `artifacts/atlas-serving-diagnostics/20260616-141132-qwen9b-reasoning-boundary/SUMMARY.md`.
-  The important behavior is narrow: non-streaming Qwen3-family vLLM responses
-  that length-finish inside `<think>` are normalized by moving leaked content
-  into `reasoning` / `reasoning_content` and emptying final `content`. Streaming
-  normalization was not implemented there.
-- The cold-load/client-timeout stale-job issue observed in the older Atlas/Qwen
-  lane now has repo-local scheduler regression coverage and a fix. Do not claim
-  the deployed MacBook/B70/Spark services have this fix until they are updated
-  and the README cold-load cancellation proof recipe proves terminal job cleanup
-  on the live route.
-- As of 2026-06-29, B70 and Spark have binaries containing the stale-job fix,
-  but the MacBook gateway remains on the old known-good user LaunchAgent binary.
-  Therefore the active consumer route is not live-proven for the stale-job fix.
-  The next operator must activate the fixed Mac binary through the hardened
-  system LaunchDaemon path from commit `99784cc`, using valid local admin
-  credentials, before rerunning the cold-load cancellation proof.
-- The non-root Mac user LaunchAgent path is not yet a safe activation route.
-  Read-only diagnostics point to macOS binary identity / Local Network privacy
-  behavior: the old ad-hoc binary identity reaches LAN peers, while the newer
-  ad-hoc identity historically started but lost routes to both corrected-LAN
-  seeds under launchd. Do not perform another blind user LaunchAgent binary
-  swap. Use the README diagnostic checklist first, then either obtain valid
-  admin credentials for the system LaunchDaemon route or get explicit approval
-  for a stable signed bundle/helper identity maintenance test.
-- Older thread dumps contain exact live-fleet endpoints, token-file locations,
-  peer ports, and TTFT/TPS observations. Treat those as stale private
-  operational evidence unless rechecked live; do not publish token values or
-  host-specific private paths.
+## Next Public Work
 
-## Exact Resume Steps
-
-Start every new continuation with:
-
-```bash
-git status --short
-git log --oneline -8
-sed -n '1,220p' HANDOFF.md
-sed -n '1,220p' DECISIONS.md
-sed -n '1,220p' BLOCKERS.md
-sed -n '1,260p' CODEX-FINDINGS.md
-```
-
-Then choose the lane:
-
-1. For ordinary code continuation, re-read the relevant SSOT section and the
-   local code path, then run the smallest focused tests before `make ci`.
-2. For current MVP proof, run local gates first:
-
-   ```bash
-   make ci
-   ```
-
-3. For live fleet proof, first verify peer health and configured tokens, then
-   run phase-boundary smoke only with the required env/config:
-
-   ```bash
-   make smoke-local
-   make smoke-fleet
-   make smoke-benchmark-fleet
-   ```
-
-   Add `make smoke-spark-vllm` and `make smoke-b70` only when those machines and
-   model paths are intentionally available.
-
-4. For the Atlas/Qwen serving lane, do a tiny gateway canary first. Inspect the
-   selected owner, preset, backend process, response `content`, and any
-   `reasoning`/`reasoning_content` fields before running larger evals.
-5. For engine bootstrap work, stay within the current readiness/adoption line
-   unless Zach explicitly asks for install implementation. Useful commands:
-
-   ```bash
-   mycelium bootstrap --doctor --config ~/.mycelium/peer.json
-   mycelium engines list
-   mycelium engines doctor
-   mycelium engines preflight
-   mycelium models compat
-   mycelium engines install-plan
-   ```
-
-6. For the MacBook registry-compaction activation blocker, do not swap the user
-   LaunchAgent binary blindly. First generate the non-mutating system service
-   plan:
-
-   ```bash
-   mycelium service plan \
-     --config /Users/zach/.mycelium/bench/real-fleet/peer.json \
-     --binary /Users/zach/.mycelium/bin/mycelium \
-     --name real-fleet \
-     --system
-   ```
-
-   Then install only in a maintenance window with a known-good binary backup
-   and immediate `service status` / seed-diagnostics rollback criteria.
-
-7. For long-window optimizer/autoscaling work, use the existing
-   `session_metrics` and `run_metrics` facts first. Add statistical analysis and
-   recommendations from observed series before attempting any automatic
-   saturation behavior.
-
-## Files Worth Checking First
-
-- `01-project-spec.md`, `02-testing-architecture.md`, `03-development-guide.md`
-- `04-engine-bootstrap.md`
-- `DECISIONS.md`
-- `BLOCKERS.md`
-- `CODEX-FINDINGS.md`
-- `README.md`
-- `cmd/mycelium/`
-- `cmd/internal/controlcli/`
-- `internal/gateway/`
-- `internal/node/`
-- `internal/peer/`
-- `internal/scheduler/`
-- `internal/store/sqlite/`
-- `internal/telemetry/`
-- `internal/bench/`
-
-## Commit Guidance
-
-Keep commits logical and local until the tree is proven. For this handoff task,
-commit only `HANDOFF.md` and do not push.
+- Keep improving generic route discovery, preflight, debug, and optimization
+  evidence surfaces.
+- Keep the Mac service activation path documented as generic commands with
+  rollback/readiness checks, not host-specific narratives.
+- Move any private operational evidence into ignored `ops/private/*.local.md`
+  notes or an out-of-repo private handoff, not tracked docs.

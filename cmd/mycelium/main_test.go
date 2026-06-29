@@ -181,7 +181,7 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if err != nil || savedDefault.Listen != "127.0.0.1:5555" || savedDefault.GatewayToken != "gateway-secret" {
 		t.Fatalf("saved default peer config = %+v err=%v", savedDefault, err)
 	}
-	if err := savePeerConfig(filepath.Join(t.TempDir(), "unsafe.json"), PeerConfig{Listen: "192.168.1.10:5555"}); err == nil || !strings.Contains(err.Error(), "rpc_token") {
+	if err := savePeerConfig(filepath.Join(t.TempDir(), "unsafe.json"), PeerConfig{Listen: "peer.example:5555"}); err == nil || !strings.Contains(err.Error(), "rpc_token") {
 		t.Fatalf("unsafe save peer config err = %v", err)
 	}
 	relDir := t.TempDir()
@@ -420,17 +420,17 @@ func TestPeerConfigValidationRejectsUnsafeValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ordinary vllm config should not enforce catastrophic cap globally: %v", err)
 	}
-	if err := validate(PeerConfig{Listen: "192.168.1.10:51846"}); err == nil || !strings.Contains(err.Error(), "rpc_token") {
+	if err := validate(PeerConfig{Listen: "peer.example:51846"}); err == nil || !strings.Contains(err.Error(), "rpc_token") {
 		t.Fatalf("lan auth err = %v", err)
 	}
-	if err := validate(PeerConfig{Listen: "192.168.1.10:51846", RPCToken: "rpc-secret"}); err == nil || !strings.Contains(err.Error(), "gateway_token") {
+	if err := validate(PeerConfig{Listen: "peer.example:51846", RPCToken: "rpc-secret"}); err == nil || !strings.Contains(err.Error(), "gateway_token") {
 		t.Fatalf("lan gateway auth err = %v", err)
 	}
-	if err := validate(PeerConfig{Listen: "192.168.1.10:51846", RPCToken: "rpc-secret", GatewayToken: "gateway-secret"}); err != nil {
+	if err := validate(PeerConfig{Listen: "peer.example:51846", RPCToken: "rpc-secret", GatewayToken: "gateway-secret"}); err != nil {
 		t.Fatalf("lan auth config = %v", err)
 	}
 	if err := validate(PeerConfig{
-		Listen:               "192.168.1.10:51846",
+		Listen:               "peer.example:51846",
 		RPCToken:             "rpc-secret",
 		DefaultProject:       "project-a",
 		Projects:             []domain.Project{{ID: "project-a"}},
