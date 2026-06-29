@@ -932,6 +932,10 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 		w.Header().Set("X-Myc-Decision", "placed_on_warm_instance")
 		w.Header().Set("X-Myc-Structured-Output", "json_schema")
 		w.Header().Set("X-Myc-Guided-Decoding-Requested", "true")
+		w.Header().Set("X-Myc-Tools-Requested", "false")
+		w.Header().Set("X-Myc-Tool-Choice", "none")
+		w.Header().Set("X-Myc-VLLM-Tool-Parser-Configured", "false")
+		w.Header().Set("X-Myc-VLLM-Auto-Tool-Choice-Configured", "false")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{
 				"message":       map[string]string{"content": `{"ok":true}`, "reasoning_content": "checked"},
@@ -961,6 +965,8 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 		"header\tX-Myc-Node\tb70",
 		"header\tX-Myc-Structured-Output\tjson_schema",
 		"header\tX-Myc-Guided-Decoding-Requested\ttrue",
+		"header\tX-Myc-Tools-Requested\tfalse",
+		"header\tX-Myc-Tool-Choice\tnone",
 		"finish_reason\tstop",
 		"content_length\t11",
 		"reasoning_length\t7",
@@ -1430,6 +1436,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"job\tjob-a\trunning\tmodel=tiny\tproject=project-a\towner=node-a",
 		"preflight\tstatus=200\tmodel=qwen3.5-9b\tproject=atlas-batch",
 		"preflight-route\tnode=b70\tbackend=vllm\tinstance=inst_2\tdecision=placed_on_warm_instance",
+		"preflight-tools\trequested=true\tchoice=auto\tvllm_parser=true\tvllm_auto=false",
 		"preflight-usage\tprompt=16\tcompletion=10\ttotal=26",
 		"owner-telemetry\tok\tnode=node-a\taddress=http://peer.test\tmetrics=1\tsamples=1\tttft_ms=34\tload_ms=0\ttps=12.50\tcontext=26\tphases=complete",
 		"consumer\trun=atlas-batch-7\titem=row-006\tstatus=timeout\telapsed_ms=180000\terror=client_deadline",
@@ -2381,17 +2388,21 @@ func writeGatewayPreflightEvidenceFixture(t *testing.T, jobID string) string {
 			TotalTokens:      26,
 		},
 		Headers: map[string]string{
-			"X-Myc-Job":                       jobID,
-			"X-Myc-Node":                      "b70",
-			"X-Myc-Instance":                  "inst_2",
-			"X-Myc-Backend":                   "vllm",
-			"X-Myc-Decision":                  "placed_on_warm_instance",
-			"X-Myc-Attempts":                  "1",
-			"X-Myc-Cold-Load":                 "false",
-			"X-Myc-Queue-Wait-Ms":             "0",
-			"X-Myc-Upstream-Wall-Ms":          "512",
-			"X-Myc-Structured-Output":         "json_schema",
-			"X-Myc-Guided-Decoding-Requested": "true",
+			"X-Myc-Job":                              jobID,
+			"X-Myc-Node":                             "b70",
+			"X-Myc-Instance":                         "inst_2",
+			"X-Myc-Backend":                          "vllm",
+			"X-Myc-Decision":                         "placed_on_warm_instance",
+			"X-Myc-Attempts":                         "1",
+			"X-Myc-Cold-Load":                        "false",
+			"X-Myc-Queue-Wait-Ms":                    "0",
+			"X-Myc-Upstream-Wall-Ms":                 "512",
+			"X-Myc-Structured-Output":                "json_schema",
+			"X-Myc-Guided-Decoding-Requested":        "true",
+			"X-Myc-Tools-Requested":                  "true",
+			"X-Myc-Tool-Choice":                      "auto",
+			"X-Myc-VLLM-Tool-Parser-Configured":      "true",
+			"X-Myc-VLLM-Auto-Tool-Choice-Configured": "false",
 		},
 	}
 	data, err := json.MarshalIndent(evidence, "", "  ")

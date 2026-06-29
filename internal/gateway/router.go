@@ -159,6 +159,10 @@ type routeDiagnostics struct {
 	UpstreamWallMS          int
 	StructuredOutput        string
 	GuidedDecodingRequested bool
+	ToolsRequested          bool
+	ToolChoice              string
+	VLLMToolParser          bool
+	VLLMAutoToolChoice      bool
 }
 
 func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (RouteResponse, error) {
@@ -296,7 +300,27 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, statusErr); failErr != nil {
 				return RouteResponse{}, errors.Join(statusErr, failErr)
 			}
-			return RouteResponse{}, statusErr
+			headers := cloneHeader(resp.Header)
+			if headers.Get("Content-Type") == "" {
+				headers.Set("Content-Type", "application/json")
+			}
+			writeRouteDiagnostics(headers, routeDiagnosticsFor(req, preset, profile, cold, loadMS, 0, durationMS(upstreamStart, upstreamEnd)))
+			writeDecisionHeaders(headers, decision, inst, profile, attempt)
+			body := resp.Body
+			if len(body) == 0 {
+				body = []byte(fmt.Sprintf(`{"error":%q}`, statusErr.Error()))
+			}
+			return RouteResponse{
+				Status:   resp.Status,
+				Header:   headers,
+				Body:     body,
+				Decision: decision,
+				Instance: inst,
+				Lease:    lease,
+				Profile:  profile,
+				Attempts: attempt,
+				ColdLoad: cold,
+			}, nil
 		}
 		body, contentType, err := translate.TranslateResponse(req, route, resp.Body)
 		if err != nil {
@@ -338,14 +362,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		if contentType != "" {
 			headers.Set("Content-Type", contentType)
 		}
-		writeRouteDiagnostics(headers, routeDiagnostics{
-			ColdLoad:                cold,
-			LoadWallMS:              loadMS,
-			QueueWaitMS:             0,
-			UpstreamWallMS:          durationMS(upstreamStart, upstreamEnd),
-			StructuredOutput:        structuredOutputMode(req),
-			GuidedDecodingRequested: guidedDecodingRequested(req, preset, profile),
-		})
+		writeRouteDiagnostics(headers, routeDiagnosticsFor(req, preset, profile, cold, loadMS, 0, durationMS(upstreamStart, upstreamEnd)))
 		writeDecisionHeaders(headers, decision, inst, profile, attempt)
 		if cold && req.Stream {
 			headers.Set("Content-Type", "text/event-stream")
@@ -508,13 +525,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			headers := w.Header()
 			headers.Set("Content-Type", "text/event-stream")
 			headers.Set("X-Accel-Buffering", "no")
-			writeRouteDiagnostics(headers, routeDiagnostics{
-				ColdLoad:                true,
-				QueueWaitMS:             0,
-				UpstreamWallMS:          -1,
-				StructuredOutput:        structuredOutputMode(req),
-				GuidedDecodingRequested: guidedDecodingRequested(req, preset, profile),
-			})
+			writeRouteDiagnostics(headers, routeDiagnosticsFor(req, preset, profile, true, 0, 0, -1))
 			writeDecisionHeaders(headers, decision, domain.ModelInstance{NodeID: decision.NodeID}, profile, attempt)
 			w.WriteHeader(http.StatusOK)
 			started = true
@@ -720,14 +731,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			}
 			headers.Set("X-Accel-Buffering", "no")
 			writeResponseHeaders(w.Header(), headers)
-			writeRouteDiagnostics(w.Header(), routeDiagnostics{
-				ColdLoad:                cold,
-				LoadWallMS:              loadMS,
-				QueueWaitMS:             0,
-				UpstreamWallMS:          -1,
-				StructuredOutput:        structuredOutputMode(req),
-				GuidedDecodingRequested: guidedDecodingRequested(req, preset, profile),
-			})
+			writeRouteDiagnostics(w.Header(), routeDiagnosticsFor(req, preset, profile, cold, loadMS, 0, -1))
 			writeDecisionHeaders(w.Header(), decision, inst, profile, attempt)
 			w.WriteHeader(resp.StatusCode)
 			started = true
@@ -1564,11 +1568,31 @@ func writeRouteDiagnostics(h http.Header, d routeDiagnostics) {
 	h.Set(HeaderQueueWaitMS, strconv.Itoa(d.QueueWaitMS))
 	h.Set(HeaderStructuredOutput, d.StructuredOutput)
 	h.Set(HeaderGuidedDecodingRequested, strconv.FormatBool(d.GuidedDecodingRequested))
+	h.Set(HeaderToolsRequested, strconv.FormatBool(d.ToolsRequested))
+	h.Set(HeaderToolChoice, d.ToolChoice)
+	h.Set(HeaderVLLMToolParser, strconv.FormatBool(d.VLLMToolParser))
+	h.Set(HeaderVLLMAutoToolChoice, strconv.FormatBool(d.VLLMAutoToolChoice))
 	if d.LoadWallMS > 0 || d.ColdLoad {
 		h.Set(HeaderLoadWallMS, strconv.Itoa(d.LoadWallMS))
 	}
 	if d.UpstreamWallMS >= 0 {
 		h.Set(HeaderUpstreamWallMS, strconv.Itoa(d.UpstreamWallMS))
+	}
+}
+
+func routeDiagnosticsFor(req translate.IngressRequest, preset domain.Preset, profile profiles.Profile, cold bool, loadMS, queueMS, upstreamMS int) routeDiagnostics {
+	parser, auto := vllmToolConfig(preset)
+	return routeDiagnostics{
+		ColdLoad:                cold,
+		LoadWallMS:              loadMS,
+		QueueWaitMS:             queueMS,
+		UpstreamWallMS:          upstreamMS,
+		StructuredOutput:        structuredOutputMode(req),
+		GuidedDecodingRequested: guidedDecodingRequested(req, preset, profile),
+		ToolsRequested:          toolsRequested(req),
+		ToolChoice:              toolChoiceMode(req),
+		VLLMToolParser:          parser,
+		VLLMAutoToolChoice:      auto,
 	}
 }
 
@@ -1595,6 +1619,74 @@ func structuredOutputMode(req translate.IngressRequest) string {
 		return "none"
 	}
 	return strings.Join(modes, "+")
+}
+
+func toolsRequested(req translate.IngressRequest) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(req.Body, &fields); err != nil {
+		return false
+	}
+	raw := bytes.TrimSpace(fields["tools"])
+	return len(raw) > 0 && !jsonNull(raw) && string(raw) != "[]"
+}
+
+func toolChoiceMode(req translate.IngressRequest) string {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(req.Body, &fields); err != nil {
+		return "none"
+	}
+	raw := bytes.TrimSpace(fields["tool_choice"])
+	if len(raw) == 0 || jsonNull(raw) {
+		if toolsRequested(req) {
+			return "auto_default"
+		}
+		return "none"
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return "none"
+		}
+		return text
+	}
+	var object struct {
+		Type     string `json:"type"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(raw, &object); err == nil {
+		if object.Type == "function" && object.Function.Name != "" {
+			return "function:" + object.Function.Name
+		}
+		if object.Type != "" {
+			return object.Type
+		}
+	}
+	return "custom"
+}
+
+func vllmToolConfig(preset domain.Preset) (bool, bool) {
+	if preset.Backend != domain.BackendVLLM {
+		return false, false
+	}
+	hasParser := false
+	hasAuto := false
+	for i, arg := range preset.LaunchArgs {
+		switch arg {
+		case "--tool-call-parser":
+			if i+1 < len(preset.LaunchArgs) && strings.TrimSpace(preset.LaunchArgs[i+1]) != "" {
+				hasParser = true
+			}
+		case "--enable-auto-tool-choice":
+			hasAuto = true
+		}
+		if strings.HasPrefix(arg, "--tool-call-parser=") && strings.TrimSpace(strings.TrimPrefix(arg, "--tool-call-parser=")) != "" {
+			hasParser = true
+		}
+	}
+	return hasParser, hasAuto
 }
 
 func guidedDecodingRequested(req translate.IngressRequest, preset domain.Preset, profile profiles.Profile) bool {

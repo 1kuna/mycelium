@@ -122,6 +122,14 @@ important continuity points are:
   `--consumer-status`, `--consumer-elapsed-ms`, and `--consumer-error`; those
   fields are copied into `debug job --json` and `debug bundle` artifacts without
   requiring prompts, completions, or tokens.
+- The gateway now exposes OpenAI tool-call request diagnostics in
+  `X-Myc-Tools-Requested`, `X-Myc-Tool-Choice`,
+  `X-Myc-VLLM-Tool-Parser-Configured`, and
+  `X-Myc-VLLM-Auto-Tool-Choice-Configured`, and the secret-safe preflight
+  artifact preserves those headers. Non-streaming provider 4xx responses now
+  return with route headers instead of collapsing into a headerless gateway
+  502. This helps Atlas/Verso distinguish provider flag/parser gaps from
+  routing, capacity, auth, or consumer-shape problems.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and
