@@ -234,6 +234,10 @@ Useful response headers:
 - `X-Myc-Upstream-Wall-Ms` - non-streaming upstream provider wall time.
 - `X-Myc-Structured-Output` - structured-output request mode seen by Mycelium, such as `json_schema`, `json_object`, `structured_outputs`, or `none`.
 - `X-Myc-Guided-Decoding-Requested` - whether Mycelium sent a structured-output control to an OpenAI-compatible vLLM route. This is request-path evidence, not provider schema-cache proof.
+- `X-Myc-Tools-Requested` - whether the request carried OpenAI-compatible `tools`.
+- `X-Myc-Tool-Choice` - the request's tool-choice mode, such as `auto`, `required`, `function:<name>`, `auto_default`, or `none`.
+- `X-Myc-VLLM-Tool-Parser-Configured` - whether the selected vLLM preset declares a `--tool-call-parser` launch argument.
+- `X-Myc-VLLM-Auto-Tool-Choice-Configured` - whether the selected vLLM preset declares `--enable-auto-tool-choice`.
 
 When `--out` is set, `myce gateway preflight` writes
 `preflight.json` with the gateway URL, model, project, auth source label,
@@ -303,6 +307,17 @@ The `diagnosis` line is the quick PM handoff:
   owner state before retrying scale work.
 - `owner_telemetry_unavailable`: fix peer RPC auth/address or keep relying on
   the request-time headers until owner telemetry can be fetched.
+
+For OpenAI-compatible tool-calling consumers such as Deep Agents, treat both
+vLLM tool headers as required for `tool_choice:"auto"`. If a response has
+`X-Myc-Tools-Requested: true` but
+`X-Myc-VLLM-Tool-Parser-Configured: false` or
+`X-Myc-VLLM-Auto-Tool-Choice-Configured: false`, the selected route is not
+tool-call ready even if plain chat or strict JSON works. Preserve the response
+body too: vLLM usually states the exact missing launch flag when it rejects
+auto tool choice. If the request returns `queued: no instance available`, the
+tool-capable preset may exist but cannot currently be placed without unloading
+or changing live capacity.
 
 ### Prove cold-load cancellation cleanup after activation
 

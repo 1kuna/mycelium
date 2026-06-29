@@ -32,6 +32,10 @@ const (
 	HeaderUpstreamWallMS          = "X-Myc-Upstream-Wall-Ms"
 	HeaderStructuredOutput        = "X-Myc-Structured-Output"
 	HeaderGuidedDecodingRequested = "X-Myc-Guided-Decoding-Requested"
+	HeaderToolsRequested          = "X-Myc-Tools-Requested"
+	HeaderToolChoice              = "X-Myc-Tool-Choice"
+	HeaderVLLMToolParser          = "X-Myc-VLLM-Tool-Parser-Configured"
+	HeaderVLLMAutoToolChoice      = "X-Myc-VLLM-Auto-Tool-Choice-Configured"
 )
 
 func writeDecisionHeaders(h http.Header, decision domain.PlacementDecision, inst domain.ModelInstance, profile profiles.Profile, attempts int) {

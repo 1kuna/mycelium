@@ -1250,6 +1250,10 @@ func gatewayPreflightHeaders() []string {
 		"X-Myc-Upstream-Wall-Ms",
 		"X-Myc-Structured-Output",
 		"X-Myc-Guided-Decoding-Requested",
+		"X-Myc-Tools-Requested",
+		"X-Myc-Tool-Choice",
+		"X-Myc-VLLM-Tool-Parser-Configured",
+		"X-Myc-VLLM-Auto-Tool-Choice-Configured",
 	}
 }
 

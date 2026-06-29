@@ -885,6 +885,14 @@ func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidenc
 		emptyDash(headers["X-Myc-Structured-Output"]),
 		emptyDash(headers["X-Myc-Guided-Decoding-Requested"]),
 	)
+	if headers["X-Myc-Tools-Requested"] != "" || headers["X-Myc-Tool-Choice"] != "" || headers["X-Myc-VLLM-Tool-Parser-Configured"] != "" || headers["X-Myc-VLLM-Auto-Tool-Choice-Configured"] != "" {
+		fmt.Fprintf(w, "preflight-tools\trequested=%s\tchoice=%s\tvllm_parser=%s\tvllm_auto=%s\n",
+			emptyDash(headers["X-Myc-Tools-Requested"]),
+			emptyDash(headers["X-Myc-Tool-Choice"]),
+			emptyDash(headers["X-Myc-VLLM-Tool-Parser-Configured"]),
+			emptyDash(headers["X-Myc-VLLM-Auto-Tool-Choice-Configured"]),
+		)
+	}
 	if evidence.Usage.TotalTokens != 0 || evidence.Usage.PromptTokens != 0 || evidence.Usage.CompletionTokens != 0 {
 		fmt.Fprintf(w, "preflight-usage\tprompt=%d\tcompletion=%d\ttotal=%d\n", evidence.Usage.PromptTokens, evidence.Usage.CompletionTokens, evidence.Usage.TotalTokens)
 	}

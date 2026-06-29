@@ -57,6 +57,9 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	if resp.Header.Get(HeaderColdLoad) != "false" || resp.Header.Get(HeaderQueueWaitMS) != "0" || resp.Header.Get(HeaderStructuredOutput) != "none" || resp.Header.Get(HeaderGuidedDecodingRequested) != "false" || resp.Header.Get(HeaderUpstreamWallMS) != "0" {
 		t.Fatalf("diagnostic headers = %+v", resp.Header)
 	}
+	if resp.Header.Get(HeaderToolsRequested) != "false" || resp.Header.Get(HeaderToolChoice) != "none" || resp.Header.Get(HeaderVLLMToolParser) != "false" || resp.Header.Get(HeaderVLLMAutoToolChoice) != "false" {
+		t.Fatalf("tool diagnostics = %+v", resp.Header)
+	}
 	if !strings.Contains(string(resp.Body), "hello") {
 		t.Fatalf("body = %s", resp.Body)
 	}
@@ -132,6 +135,50 @@ func TestRouterPassesThroughVLLMStructuredOutputControls(t *testing.T) {
 	}
 	if resp.Header.Get(HeaderColdLoad) != "false" || resp.Header.Get(HeaderQueueWaitMS) != "0" || resp.Header.Get(HeaderUpstreamWallMS) != "0" {
 		t.Fatalf("timing diagnostics = %+v", resp.Header)
+	}
+}
+
+func TestRouterReportsToolRequestDiagnostics(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "b70-qwen27b-vllm"
+		p.Backend = domain.BackendVLLM
+		p.LaunchArgs = []string{"--served-model-name", "b70-qwen27b", "--enable-auto-tool-choice", "--tool-call-parser", "hermes"}
+	})
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body, &fields); err != nil {
+			t.Fatalf("decode upstream body: %v body=%s", err, body)
+		}
+		if string(fields["tool_choice"]) != `"auto"` || !strings.Contains(string(fields["tools"]), `"echo"`) {
+			t.Fatalf("tool request not passed through: %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"value\":\"ok\"}"}}]},"finish_reason":"tool_calls"}]}`))
+	}))
+	inst := fixtures.MakeInstance(func(i *domain.ModelInstance) {
+		i.PresetID = preset.ID
+		i.Addr = upstream
+	})
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: mocks.NewNodeAgent(fixtures.MakeNode())}})
+	router.SelfNodeID = inst.NodeID
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"use echo"}],"tools":[{"type":"function","function":{"name":"echo","parameters":{"type":"object"}}}],"tool_choice":"auto","max_tokens":8}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Header.Get(HeaderToolsRequested) != "true" || resp.Header.Get(HeaderToolChoice) != "auto" || resp.Header.Get(HeaderVLLMToolParser) != "true" || resp.Header.Get(HeaderVLLMAutoToolChoice) != "true" {
+		t.Fatalf("tool diagnostics = %+v", resp.Header)
+	}
+	if !strings.Contains(string(resp.Body), `"tool_calls"`) {
+		t.Fatalf("body = %s", resp.Body)
 	}
 }
 
@@ -441,30 +488,40 @@ func TestRouterFailsLoudlyWhenRemoteOwnerTelemetryCannotRoute(t *testing.T) {
 	}
 }
 
-func TestRouterRecordsSessionErrorForNonRetryableUpstreamStatus(t *testing.T) {
-	preset := fixtures.MakePreset()
+func TestRouterReturnsRouteHeadersForNonRetryableUpstreamStatus(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.Backend = domain.BackendVLLM
+		p.LaunchArgs = []string{"--tool-call-parser", "hermes"}
+	})
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		http.Error(w, `"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set`, http.StatusBadRequest)
 	}))
 	inst := fixtures.MakeInstance()
+	inst.PresetID = preset.ID
 	inst.Addr = upstream
 	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: mocks.NewNodeAgent(fixtures.MakeNode())}})
 	sink := &mocks.TelemetrySink{}
 	router.Telemetry = sink
 	router.SelfNodeID = inst.NodeID
-	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"echo","parameters":{"type":"object"}}}],"tool_choice":"auto","max_tokens":1}`))
 	if err != nil {
 		t.Fatalf("ParseOpenAIChat: %v", err)
 	}
 
-	_, err = router.Route(context.Background(), req)
-	if err == nil || !strings.Contains(err.Error(), "bad request") {
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
 		t.Fatalf("Route err = %v", err)
+	}
+	if resp.Status != http.StatusBadRequest || !strings.Contains(string(resp.Body), "tool choice requires") {
+		t.Fatalf("resp status=%d body=%s", resp.Status, resp.Body)
+	}
+	if resp.Header.Get(HeaderNode) == "" || resp.Header.Get(HeaderBackend) != "vllm" || resp.Header.Get(HeaderToolsRequested) != "true" || resp.Header.Get(HeaderToolChoice) != "auto" || resp.Header.Get(HeaderVLLMToolParser) != "true" || resp.Header.Get(HeaderVLLMAutoToolChoice) != "false" {
+		t.Fatalf("diagnostic headers = %+v", resp.Header)
 	}
 	if len(sink.Metrics) != 0 {
 		t.Fatalf("metrics should not be recorded on failed run: %+v", sink.Metrics)
 	}
-	if len(sink.SamplesOut) != 3 || sink.SamplesOut[2].Phase != domain.TelemetryPhaseError || !strings.Contains(sink.SamplesOut[2].Error, "bad request") {
+	if len(sink.SamplesOut) != 3 || sink.SamplesOut[2].Phase != domain.TelemetryPhaseError || !strings.Contains(sink.SamplesOut[2].Error, "tool choice requires") {
 		t.Fatalf("samples = %+v", sink.SamplesOut)
 	}
 }
