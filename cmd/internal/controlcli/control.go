@@ -944,6 +944,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	project := fs.String("project", "", "optional project id to send as X-Myc-Project")
 	prompt := fs.String("prompt", `Return {"ok":true}.`, "preflight prompt")
 	maxTokens := fs.Int("max-tokens", 16, "maximum output tokens for the preflight request")
+	outDir := fs.String("out", "", "optional directory for a redacted preflight evidence packet")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -982,6 +983,18 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	if result.Usage.TotalTokens != 0 || result.Usage.PromptTokens != 0 || result.Usage.CompletionTokens != 0 {
 		fmt.Printf("usage\tprompt=%d\tcompletion=%d\ttotal=%d\n", result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens)
 	}
+	if *outDir != "" {
+		path, err := writeGatewayPreflightEvidence(*outDir, tokenSource, gatewayPreflightConfig{
+			URL:       *url,
+			Model:     *model,
+			Project:   *project,
+			MaxTokens: *maxTokens,
+		}, result)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("evidence\t%s\n", path)
+	}
 	return nil
 }
 
@@ -1003,6 +1016,58 @@ type gatewayPreflightResult struct {
 	Reasoning    string
 	JSONContent  bool
 	Usage        api.OpenAIUsage
+}
+
+type gatewayPreflightEvidence struct {
+	Gateway         string            `json:"gateway"`
+	Model           string            `json:"model"`
+	Project         string            `json:"project,omitempty"`
+	AuthSource      string            `json:"auth_source"`
+	StatusCode      int               `json:"status_code"`
+	Headers         map[string]string `json:"headers"`
+	FinishReason    string            `json:"finish_reason"`
+	ContentLength   int               `json:"content_length"`
+	ReasoningLength int               `json:"reasoning_length"`
+	JSONContent     bool              `json:"json_content"`
+	Usage           api.OpenAIUsage   `json:"usage"`
+}
+
+func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflightConfig, result gatewayPreflightResult) (string, error) {
+	if err := os.MkdirAll(outDir, 0o700); err != nil {
+		return "", fmt.Errorf("create gateway preflight evidence dir: %w", err)
+	}
+	evidence := gatewayPreflightEvidence{
+		Gateway:         strings.TrimRight(cfg.URL, "/"),
+		Model:           cfg.Model,
+		Project:         cfg.Project,
+		AuthSource:      authSource,
+		StatusCode:      result.StatusCode,
+		Headers:         gatewayPreflightHeaderMap(result.Headers),
+		FinishReason:    result.FinishReason,
+		ContentLength:   len(result.Content),
+		ReasoningLength: len(result.Reasoning),
+		JSONContent:     result.JSONContent,
+		Usage:           result.Usage,
+	}
+	path := filepath.Join(outDir, "preflight.json")
+	data, err := json.MarshalIndent(evidence, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		return "", fmt.Errorf("write gateway preflight evidence: %w", err)
+	}
+	return path, nil
+}
+
+func gatewayPreflightHeaderMap(headers http.Header) map[string]string {
+	out := map[string]string{}
+	for _, name := range gatewayPreflightHeaders() {
+		if value := headers.Get(name); value != "" {
+			out[name] = value
+		}
+	}
+	return out
 }
 
 func resolveGatewayPreflightToken(rawURL, token, tokenEnv, tokenFile, configPath string) (string, string, error) {

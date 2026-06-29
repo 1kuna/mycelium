@@ -197,7 +197,8 @@ myce gateway preflight \
   --url http://<gateway-host>:<port> \
   --model <model-or-alias> \
   --project <consumer-canary-id> \
-  --config <local-mycelium-peer.json>
+  --config <local-mycelium-peer.json> \
+  --out /tmp/mycelium-preflight
 ```
 
 Token resolution for `myce gateway preflight` is:
@@ -233,6 +234,14 @@ Useful response headers:
 - `X-Myc-Upstream-Wall-Ms` - non-streaming upstream provider wall time.
 - `X-Myc-Structured-Output` - structured-output request mode seen by Mycelium, such as `json_schema`, `json_object`, `structured_outputs`, or `none`.
 - `X-Myc-Guided-Decoding-Requested` - whether Mycelium sent a structured-output control to an OpenAI-compatible vLLM route. This is request-path evidence, not provider schema-cache proof.
+
+When `--out` is set, `myce gateway preflight` writes
+`preflight.json` with the gateway URL, model, project, auth source label,
+whitelisted `X-Myc-*` headers, finish reason, content/reasoning lengths, JSON
+parse status, and usage counts. It intentionally does not write the bearer
+token, prompt, or raw completion content. Use that artifact, plus
+`myce debug job <X-Myc-Job> --json`, as the standard consumer evidence packet
+for optimization handoffs.
 
 ## Debugging Workflow
 

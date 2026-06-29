@@ -942,12 +942,14 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 	}))
 
 	var err error
+	outDir := filepath.Join(t.TempDir(), "preflight-evidence")
 	output := captureStdout(t, func() {
 		err = RunWithClient(context.Background(), []string{
 			"gateway", "preflight",
 			"--url", "http://gateway.test",
 			"--model", "qwen3.5-9b",
 			"--project", "atlas-canary",
+			"--out", outDir,
 		}, client)
 	})
 	if err != nil {
@@ -964,6 +966,7 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 		"reasoning_length\t7",
 		"json\ttrue",
 		"usage\tprompt=4\tcompletion=3\ttotal=7",
+		"evidence\t" + filepath.Join(outDir, "preflight.json"),
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("preflight output missing %q:\n%s", want, output)
@@ -971,6 +974,20 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 	}
 	if strings.Contains(output, "atlas-secret") || strings.Contains(output, "openai-secret") {
 		t.Fatalf("preflight output leaked token: %s", output)
+	}
+	evidenceData, err := os.ReadFile(filepath.Join(outDir, "preflight.json"))
+	if err != nil {
+		t.Fatalf("read preflight evidence: %v", err)
+	}
+	if strings.Contains(string(evidenceData), "atlas-secret") || strings.Contains(string(evidenceData), "openai-secret") || strings.Contains(string(evidenceData), "Return") || strings.Contains(string(evidenceData), `{"ok":true}`) {
+		t.Fatalf("preflight evidence leaked secret/prompt/content: %s", evidenceData)
+	}
+	var evidence gatewayPreflightEvidence
+	if err := json.Unmarshal(evidenceData, &evidence); err != nil {
+		t.Fatalf("decode preflight evidence: %v", err)
+	}
+	if evidence.AuthSource != "ATLAS_MYCELIUM_API_KEY" || evidence.Headers["X-Myc-Node"] != "b70" || evidence.ContentLength != 11 || evidence.ReasoningLength != 7 || !evidence.JSONContent || evidence.Usage.TotalTokens != 7 {
+		t.Fatalf("preflight evidence = %+v", evidence)
 	}
 }
 
@@ -1025,6 +1042,13 @@ func TestRunGatewayPreflightUsesTokenFileAndClassifiesMissingAuth(t *testing.T) 
 	}
 	if !sawConfigToken {
 		t.Fatal("gateway preflight did not use config token")
+	}
+	missingConfigTokenPath := filepath.Join(t.TempDir(), "peer-no-token.json")
+	if err := os.WriteFile(missingConfigTokenPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write missing token config: %v", err)
+	}
+	if _, _, err := resolveGatewayPreflightToken("http://gateway.test", "", "", "", missingConfigTokenPath); err == nil || !strings.Contains(err.Error(), "has no gateway_token") {
+		t.Fatalf("missing config token err = %v", err)
 	}
 
 	t.Setenv("HOME", t.TempDir())

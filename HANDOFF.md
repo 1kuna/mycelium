@@ -101,7 +101,10 @@ important continuity points are:
   `OPENAI_API_KEY`, a token file flag, `--config <peer.json>`, or the local
   `~/.mycelium/peer.json` `gateway_token`, and prints route headers,
   content/reasoning lengths, JSON parse status, and usage counts without
-  printing the token.
+  printing the token. With `--out`, it also writes a redacted `preflight.json`
+  evidence packet containing the gateway/model/project, auth source label,
+  whitelisted route headers, finish/content/reasoning/JSON/usage facts, and no
+  bearer token, prompt, or raw completion content.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and
