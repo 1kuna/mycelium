@@ -49,8 +49,16 @@
   A 2026-06-29 authenticated MacBook probe for `spark-qwen9b-tools-4096`
   returned HTTP 502 with `unknown model "spark-qwen9b-tools-4096"`, while
   same-cycle route gates passed for Atlas strict JSON on MacBook/B70 and Verso
-  forced tools on direct Spark. `myce gateway preflight` now has expectation
-  flags to preserve this proof shape without printing secrets: `--expect-node`,
+  forced tools on direct Spark. A follow-up after Verso saw streaming and
+  preflight friction on the older 4096 path found Spark owner state clean:
+  one ready `spark-qwen9b-tools-8192-vllm` instance, no leases, and no
+  non-terminal owner jobs. The 8192 route then passed both a warm non-streaming
+  forced-tool preflight and a tiny streaming forced-tool curl with a complete
+  `[DONE]` marker and structured tool-call chunks. Therefore the immediate
+  Verso route fix is not Spark cleanup; it is to stop using the obsolete 4096
+  alias for the current fixture and use the `verso-tools` project token with
+  `spark-qwen9b-tools-8192`. `myce gateway preflight` now has expectation flags
+  to preserve this proof shape without printing secrets: `--expect-node`,
   `--require-json`, `--require-tool-call`, `--reject-textual-tool-call`, and
   `--min-prompt-tokens`.
 - 2026-06-29: Cold-load/client-timeout stale-job live proof is blocked at the

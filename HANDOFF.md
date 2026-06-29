@@ -10,7 +10,7 @@ handoff rewrite.
 ## Current Repo State
 
 - Branch: `main`.
-- Latest observed commit before this handoff refresh: `fc0fcc7 Harden consumer route preflight gates`.
+- Latest observed commit before this handoff refresh: `04abec6 Document Spark 8192 tool route`.
 - Remote already configured: `origin https://github.com/1kuna/mycelium.git`.
 - Source-of-truth docs remain `01-project-spec.md`, `02-testing-architecture.md`,
   and `03-development-guide.md`.
@@ -204,6 +204,23 @@ important continuity points are:
   `unknown model "spark-qwen9b-tools-4096"`, proving the MacBook gateway's
   in-memory preset registry has not been safely refreshed for Spark tool
   aliases.
+- A 2026-06-29 follow-up checked the route after Verso reported friction on
+  the older 4096 path. Spark's owner snapshot showed exactly one ready
+  `spark-qwen9b-tools-8192-vllm` instance and no leases or non-terminal owner
+  jobs. A warm direct-Spark preflight for `spark-qwen9b-tools-8192` with the
+  project-scoped `verso-tools` token returned HTTP 200,
+  `X-Myc-Decision: placed_on_warm_instance`, `X-Myc-Cold-Load: false`,
+  `X-Myc-Upstream-Wall-Ms: 1010`, `tool_call_count=1`,
+  `textual_tool_call=false`, and `usage.total_tokens=308`. A tiny streaming
+  forced-tool curl against the same route also returned HTTP 200, curl exit 0,
+  a `[DONE]` marker, structured `tool_calls` chunks, and no textual
+  `<tool_call>` blocks. This does not make the obsolete 4096 route suitable for
+  the current Verso fixture: the latest `queued: no instance available` on 4096
+  is consistent with asking Spark for the old alias while the single available
+  tool-capable slot is warm on the 8192 preset. For optimization telemetry,
+  non-streaming preflight remains the strongest token/context accounting proof;
+  streaming route headers and owner timing are available, but token usage may be
+  absent unless the provider stream includes usage.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and

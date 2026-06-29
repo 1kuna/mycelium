@@ -407,6 +407,20 @@ join if the request used a project-scoped token. The MacBook gateway may not
 route this alias until its preset registry is safely refreshed; use the Spark
 gateway directly unless a later handoff says the MacBook route is live.
 
+For an OpenAI-compatible project runtime, the secret-safe handoff is:
+
+- base URL: `http://192.168.0.16:55274/v1`
+- model: `spark-qwen9b-tools-8192`
+- API key: the out-of-band `verso-tools` project token, supplied through the
+  consumer's normal API-key env var or a local token file
+- request shape: forced function `tool_choice` for the first Deep Agents tool
+  call; do not rely on `tool_choice:"auto"` for this Qwen/Hermes route yet
+
+Do not use `spark-qwen9b-tools-4096` for the current Gushaw/Schaefer-style
+fixture. Spark currently has one warm tool-capable slot on the 8192 preset, so
+requests for the older 4096 alias may report `queued: no instance available`
+even while the correct 8192 route is healthy.
+
 ```bash
 myce gateway preflight \
   --url http://192.168.0.16:55274 \
@@ -427,6 +441,14 @@ myce gateway preflight \
 When using the real compact Deep Agents fixture or another fixture-sized prompt,
 raise or lower `--min-prompt-tokens` to match the fixture. Keep it high enough
 to prove context headroom, not only the tool parser.
+
+Streaming is usable for the warmed 8192 route, but streaming token accounting is
+weaker than non-streaming preflight unless the provider stream includes usage.
+The streaming proof to preserve for PM/debug handoff is curl exit status,
+`X-Myc-*` headers, `[DONE]` marker presence, structured `tool_calls` chunks, and
+absence of textual `<tool_call>` content. Pair any streaming run with at least
+one non-streaming preflight on the same model/project when context and usage
+numbers matter for optimization.
 
 ### Prove cold-load cancellation cleanup after activation
 
