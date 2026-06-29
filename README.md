@@ -103,6 +103,8 @@ read-only: it prints the target unit path, generated launchd/systemd unit body,
 install/status/reload commands, and rollback command. For a live gateway, first
 keep a known-good binary backup, run `service status` against the current
 service, inspect the `--system` plan, and install during a maintenance window:
+the generated system LaunchDaemon runs as the invoking non-root user so it keeps
+the existing user-owned config, logs, and control DB.
 
 ```bash
 sudo /path/to/mycelium service install \

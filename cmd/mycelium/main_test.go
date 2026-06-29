@@ -605,13 +605,19 @@ func TestServiceSpecAndRenderers(t *testing.T) {
 	if darwinSystemSpec.BinaryPath != "/opt/my celium/bin/mycelium" {
 		t.Fatalf("darwin system binary = %s", darwinSystemSpec.BinaryPath)
 	}
+	if darwinSystemSpec.RunUser == "" {
+		t.Fatalf("darwin system spec did not select a run user: %+v", darwinSystemSpec)
+	}
 	plan := renderServicePlan(darwinSystemSpec, "darwin")
 	for _, want := range []string{
 		"scope\tsystem",
+		"run_user\t" + darwinSystemSpec.RunUser,
 		"sudo ",
 		"sudo '/opt/my celium/bin/mycelium' service install",
 		"launchctl bootstrap system /Library/LaunchDaemons/com.mycelium.realfleet.plist",
 		"launchctl kickstart -k system/com.mycelium.realfleet",
+		"<key>UserName</key>",
+		"<string>" + darwinSystemSpec.RunUser + "</string>",
 		"<string>run</string>",
 	} {
 		if !strings.Contains(plan, want) {
@@ -620,6 +626,14 @@ func TestServiceSpecAndRenderers(t *testing.T) {
 	}
 	if strings.Contains(plan, "join-secret") || strings.Contains(plan, "rpc-secret") {
 		t.Fatalf("plan leaked secret: %s", plan)
+	}
+	t.Setenv("SUDO_USER", darwinSystemSpec.RunUser)
+	sudoSpec, err := parseServiceSpec("plan", []string{"--config", configPath, "--binary", "/opt/mycelium", "--system"}, "darwin")
+	if err != nil {
+		t.Fatalf("parseServiceSpec darwin sudo system: %v", err)
+	}
+	if sudoSpec.Home != darwinSystemSpec.Home || sudoSpec.LogDir != filepath.Join(darwinSystemSpec.Home, ".mycelium", "logs") {
+		t.Fatalf("sudo system home/logs = %s %s want %s", sudoSpec.Home, sudoSpec.LogDir, darwinSystemSpec.Home)
 	}
 	linuxUserSpec, err := parseServiceSpec("plan", []string{"--config", configPath, "--binary", "/usr/local/bin/mycelium", "--user", "--name", "dev"}, "linux")
 	if err != nil {

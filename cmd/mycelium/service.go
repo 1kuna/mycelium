@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	osuser "os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -33,6 +34,7 @@ type serviceSpec struct {
 	Home       string
 	LogDir     string
 	UnitPath   string
+	RunUser    string
 }
 
 type serviceStatus struct {
@@ -115,6 +117,7 @@ func parseServiceSpec(command string, args []string, goos string) (serviceSpec, 
 	name := fs.String("name", "default", "service name suffix")
 	user := fs.Bool("user", false, "install as a user service")
 	system := fs.Bool("system", false, "install as a system service")
+	runUser := fs.String("run-user", "", "user account for a system LaunchDaemon")
 	if err := fs.Parse(args); err != nil {
 		return serviceSpec{}, err
 	}
@@ -136,6 +139,17 @@ func parseServiceSpec(command string, args []string, goos string) (serviceSpec, 
 	if err != nil || home == "" {
 		return serviceSpec{}, fmt.Errorf("user home is required")
 	}
+	serviceRunUser := strings.TrimSpace(*runUser)
+	if serviceRunUser == "" {
+		serviceRunUser = defaultServiceRunUser(scope, goos)
+	}
+	if serviceRunUser != "" && scope == serviceScopeSystem && goos == "darwin" {
+		resolvedHome, err := userHome(serviceRunUser)
+		if err != nil {
+			return serviceSpec{}, err
+		}
+		home = resolvedHome
+	}
 	spec := serviceSpec{
 		Name:       sanitizeServiceName(*name),
 		Scope:      scope,
@@ -143,6 +157,7 @@ func parseServiceSpec(command string, args []string, goos string) (serviceSpec, 
 		BinaryPath: binary,
 		Home:       home,
 		LogDir:     filepath.Join(home, ".mycelium", "logs"),
+		RunUser:    serviceRunUser,
 	}
 	if spec.Name == "" {
 		return serviceSpec{}, fmt.Errorf("service name must contain a letter, digit, dot, underscore, or dash")
@@ -153,6 +168,41 @@ func parseServiceSpec(command string, args []string, goos string) (serviceSpec, 
 		return serviceSpec{}, err
 	}
 	return spec, nil
+}
+
+func defaultServiceRunUser(scope serviceScope, goos string) string {
+	if scope != serviceScopeSystem || goos != "darwin" {
+		return ""
+	}
+	if sudoUser := strings.TrimSpace(os.Getenv("SUDO_USER")); sudoUser != "" && sudoUser != "root" {
+		return sudoUser
+	}
+	if envUser := strings.TrimSpace(os.Getenv("USER")); envUser != "" && envUser != "root" {
+		return envUser
+	}
+	current, err := osuser.Current()
+	if err != nil {
+		return ""
+	}
+	name := strings.TrimSpace(current.Username)
+	if i := strings.LastIndexAny(name, `\`); i >= 0 {
+		name = name[i+1:]
+	}
+	if name == "root" {
+		return ""
+	}
+	return name
+}
+
+func userHome(name string) (string, error) {
+	user, err := osuser.Lookup(name)
+	if err != nil {
+		return "", fmt.Errorf("lookup run user %q: %w", name, err)
+	}
+	if user.HomeDir == "" {
+		return "", fmt.Errorf("run user %q has no home directory", name)
+	}
+	return user.HomeDir, nil
 }
 
 func parseServiceScope(user, system bool) (serviceScope, error) {
@@ -321,6 +371,9 @@ func renderLaunchdPlist(spec serviceSpec) string {
 		writePlistValue(&out, arg)
 	}
 	out.WriteString("</array>\n")
+	if spec.RunUser != "" && spec.Scope == serviceScopeSystem {
+		writePlistString(&out, "UserName", spec.RunUser)
+	}
 	out.WriteString("<key>RunAtLoad</key>\n<true/>\n")
 	out.WriteString("<key>KeepAlive</key>\n<dict>\n<key>NetworkState</key>\n<true/>\n<key>SuccessfulExit</key>\n<false/>\n</dict>\n")
 	writePlistString(&out, "WorkingDirectory", spec.Home)
@@ -338,6 +391,9 @@ func renderServicePlan(spec serviceSpec, goos string) string {
 	fmt.Fprintf(&out, "config\t%s\n", spec.ConfigPath)
 	fmt.Fprintf(&out, "unit\t%s\n", spec.UnitPath)
 	fmt.Fprintf(&out, "logs\t%s\n", spec.LogDir)
+	if spec.RunUser != "" {
+		fmt.Fprintf(&out, "run_user\t%s\n", spec.RunUser)
+	}
 	out.WriteString("commands\n")
 	switch goos {
 	case "darwin":
