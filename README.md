@@ -108,13 +108,13 @@ the existing user-owned config, logs, and control DB.
 
 ```bash
 sudo /path/to/mycelium service install \
-  --config /Users/zach/.mycelium/bench/real-fleet/peer.json \
+  --config ~/.mycelium/peer.json \
   --binary /path/to/mycelium \
   --name real-fleet \
   --system
 
 sudo /path/to/mycelium service status \
-  --config /Users/zach/.mycelium/bench/real-fleet/peer.json \
+  --config ~/.mycelium/peer.json \
   --binary /path/to/mycelium \
   --name real-fleet \
   --system
@@ -129,10 +129,10 @@ binary update:
 
 ```bash
 launchctl print gui/$(id -u)/com.mycelium.real-fleet
-codesign -dv --verbose=4 /Users/zach/.mycelium/bin/mycelium 2>&1
+codesign -dv --verbose=4 ~/.mycelium/bin/mycelium 2>&1
 codesign -dv --verbose=4 /path/to/new/mycelium 2>&1
-spctl -a -vv /Users/zach/.mycelium/bin/mycelium /path/to/new/mycelium
-xattr -l /Users/zach/.mycelium/bin/mycelium /path/to/new/mycelium
+spctl -a -vv ~/.mycelium/bin/mycelium /path/to/new/mycelium
+xattr -l ~/.mycelium/bin/mycelium /path/to/new/mycelium
 log show --style compact --last 2h \
   --predicate 'process == "mycelium" OR eventMessage CONTAINS[c] "mycelium"'
 ```
@@ -169,9 +169,8 @@ For authenticated non-loopback gateways, `myce benchmark` resolves the gateway t
 2. `--gateway-token-env`
 3. `MYCELIUM_GATEWAY_TOKEN`
 4. `MYCELIUM_API_KEY`
-5. `ATLAS_MYCELIUM_API_KEY`
-6. `OPENAI_API_KEY`
-7. `~/.mycelium/peer.json` field `gateway_token`
+5. `OPENAI_API_KEY`
+6. `~/.mycelium/peer.json` field `gateway_token`
 
 ## Calling The Gateway
 
@@ -182,7 +181,7 @@ curl http://<gateway-host>:<port>/v1/chat/completions \
   -H "Authorization: Bearer $MYCELIUM_GATEWAY_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "spark-qwen122b",
+    "model": "<model-or-alias>",
     "messages": [{"role": "user", "content": "Say hi."}],
     "max_tokens": 32
   }'
@@ -199,6 +198,7 @@ advertises without exposing token values:
 myce gateway routes --config ~/.mycelium/peer.json
 myce gateway routes --config ~/.mycelium/peer.json --json
 myce gateway routes --config ~/.mycelium/peer.json --live
+myce gateway routes --config ~/.mycelium/peer.json --min-context-cap <minimum-for-this-workload>
 ```
 
 The output joins projects to presets and reports the OpenAI base URL, model or
@@ -212,6 +212,10 @@ authenticated read-only `GET /v1/models` against the configured gateway (or
 as live catalog exposure proof. A route is consumer-ready only after the
 matching `myce gateway preflight` and, for post-hoc work, `myce debug job
 --preflight` or `myce debug bundle --preflight` evidence exists.
+Use `--min-context-cap` to classify routes against the actual consumer workload
+before running it. For example, an 8192-token route can be valid transport/tool
+smoke and still print `context_issue=undersized_context` for a reasoning-heavy
+tool-agent workload.
 
 Gateways built from the route-discovery revision expose `GET /v1/models` with
 preset IDs and aliases only; host-local model paths and artifact refs are not
@@ -238,15 +242,13 @@ Token resolution for `myce gateway preflight` is:
 4. `--config <peer.json>` field `gateway_token`
 5. `MYCELIUM_GATEWAY_TOKEN`
 6. `MYCELIUM_API_KEY`
-7. `ATLAS_MYCELIUM_API_KEY`
-8. `OPENAI_API_KEY`
-9. `~/.mycelium/peer.json` field `gateway_token`
+7. `OPENAI_API_KEY`
+8. `~/.mycelium/peer.json` field `gateway_token`
 
 For an OpenAI-compatible consumer, set the base URL to the Mycelium gateway and
-put the Mycelium gateway token in the env var that consumer already reads. For
-example, Atlas can use `ATLAS_MYCELIUM_API_KEY` or `OPENAI_API_KEY`; local
-Mycelium operator commands can use `MYCELIUM_GATEWAY_TOKEN`. Do not store token
-values in repo docs or run logs.
+put the Mycelium gateway token in an env var or local token file that the
+consumer already reads. Local Mycelium operator commands can use
+`MYCELIUM_GATEWAY_TOKEN`. Do not store token values in repo docs or run logs.
 
 Useful response headers:
 
@@ -356,7 +358,7 @@ The `diagnosis` line is the quick PM handoff:
 - `owner_telemetry_unavailable`: fix peer RPC auth/address or keep relying on
   the request-time headers until owner telemetry can be fetched.
 
-For OpenAI-compatible tool-calling consumers such as Deep Agents, treat both
+For OpenAI-compatible tool-calling consumers, treat both
 vLLM tool headers as required for `tool_choice:"auto"`. If a response has
 `X-Myc-Tools-Requested: true` but
 `X-Myc-VLLM-Tool-Parser-Configured: false` or
@@ -382,7 +384,7 @@ raw completions:
 myce gateway preflight \
   --url http://<gateway-host>:<port> \
   --model <model-alias> \
-  --project verso-tool-canary \
+  --project tool-canary \
   --prompt "Call the echo function with value ok. Do not answer directly." \
   --tool-name echo \
   --tool-choice function \
@@ -393,7 +395,7 @@ myce gateway preflight \
 myce gateway preflight \
   --url http://<gateway-host>:<port> \
   --model <model-alias> \
-  --project verso-tool-canary \
+  --project tool-canary \
   --prompt "Call the echo function with value ok. Do not answer directly." \
   --tool-name echo \
   --tool-choice auto \
@@ -419,99 +421,99 @@ Add expectation flags when the command is used as a consumer gate:
   `<tool_call>` block.
 - `--min-prompt-tokens <n>` fails if the canary did not exercise enough context
   for the consumer fixture.
+- `--context-cap <n>` records the selected route's known context limit in the
+  redacted artifact.
+- `--min-context-cap <n>` fails if that selected route is too small for the
+  declared consumer workload. Use this for thinking/tool-agent workloads so a
+  route can pass transport/tool-call smoke while still failing the actual
+  consumer contract.
 
-Atlas strict-schema route gate:
+Strict JSON route gate:
 
 ```bash
 myce gateway preflight \
-  --url http://192.168.0.143:55291 \
-  --model qwen3.5-9b \
-  --project atlas-strict-schema-canary \
-  --expect-node b70 \
+  --url http://<gateway-host>:<port> \
+  --model <strict-json-model-alias> \
+  --project strict-json-canary \
+  --expect-node <expected-owner-node> \
   --require-json \
-  --out /tmp/mycelium-atlas-strict-schema
+  --out /tmp/mycelium-strict-json
 ```
 
-Current live larger-context tool route for Verso canaries:
+Tool transport route gate:
 
-- Gateway: `http://192.168.0.16:55274`
-- Model: `spark-qwen9b-tools-8192`
-- Auth/project: use the operator-provided project token for `verso-tools`
+- Gateway: `http://<gateway-host>:<port>`
+- Model: `<tool-capable-model-alias>`
+- Auth/project: use the operator-provided project-scoped token
   rather than the global fleet token when preserving optimization evidence.
 - Tool choice: forced function choice, not `auto`
-- Expected headers: `X-Myc-Node: spark`, `X-Myc-Backend: vllm`,
+- Expected headers: `X-Myc-Node: <expected-owner-node>`, `X-Myc-Backend: vllm`,
   `X-Myc-Tool-Choice: function:<name>`,
   `X-Myc-VLLM-Tool-Parser-Configured: true`, and
   `X-Myc-VLLM-Auto-Tool-Choice-Configured: true`
 - Expected evidence: `tool_call_count > 0`, `textual_tool_call=false`, and
   `usage.prompt_tokens` high enough for the consumer fixture.
 
-The route has an 8192-token model context. Leave headroom for the output cap,
-tool schema/template, and Deep Agents tool history growth. The live proof
-succeeded with `usage.prompt_tokens=5336`, `usage.completion_tokens=12`,
-`usage.total_tokens=5348`, `max_tokens=160`, and one structured `echo` tool
-call. Spark owner telemetry recorded `project=verso-tools`,
-`preset=spark-qwen9b-tools-8192-vllm`, `context_request=8192`, and
-`context_used=5348`. Gateways running older live binaries may not echo
-`X-Myc-Project` yet; in that case owner telemetry is the authoritative project
-join if the request used a project-scoped token. The MacBook gateway may not
-route this alias until its preset registry is safely refreshed; use the Spark
-gateway directly unless a later handoff says the MacBook route is live.
+Always leave headroom for the output cap, tool schema/template, reasoning, tool
+calls, and any growing tool history. A low-context route can be useful
+transport/tool-call smoke while still being unsuitable for a reasoning-heavy
+tool-agent workload. Declare the workload minimum explicitly with
+`--min-context-cap` so Mycelium records `consumer_contract_context_too_small`
+instead of letting a too-small route look like a consumer-ready success.
 
 For an OpenAI-compatible project runtime, the secret-safe handoff is:
 
-- base URL: `http://192.168.0.16:55274/v1`
-- model: `spark-qwen9b-tools-8192`
-- API key: the out-of-band `verso-tools` project token, supplied through the
+- base URL: `http://<gateway-host>:<port>/v1`
+- model: `<tool-capable-model-alias>`
+- API key: the out-of-band project-scoped token, supplied through the
   consumer's normal API-key env var or a local token file
-- request shape: forced function `tool_choice` for the first Deep Agents tool
-  call; do not rely on `tool_choice:"auto"` for this Qwen/Hermes route yet
-
-Do not use `spark-qwen9b-tools-4096` for the current Gushaw/Schaefer-style
-fixture. Spark currently has one warm tool-capable slot on the 8192 preset, so
-requests for the older 4096 alias may report `queued: no instance available`
-even while the correct 8192 route is healthy.
+- request shape: forced function `tool_choice` until `tool_choice:"auto"` is
+  proven for the selected model/template/parser route
 
 ```bash
 myce gateway preflight \
-  --url http://192.168.0.16:55274 \
-  --model spark-qwen9b-tools-8192 \
-  --project verso-tools \
-  --gateway-token-file <operator-provided-verso-tools-token-file> \
+  --url http://<gateway-host>:<port> \
+  --model <tool-capable-model-alias> \
+  --project <project-id> \
+  --gateway-token-file <operator-provided-project-token-file> \
   --prompt "Call the echo function with value ok. Do not answer directly." \
   --max-tokens 160 \
+  --context-cap <selected-route-context-cap> \
+  --min-context-cap <minimum-for-this-workload> \
   --tool-name echo \
   --tool-choice function \
-  --expect-node spark \
+  --expect-node <expected-owner-node> \
   --require-tool-call \
   --reject-textual-tool-call \
-  --min-prompt-tokens 5000 \
-  --out /tmp/mycelium-verso-tools8192
+  --min-prompt-tokens <fixture-sized-prompt-token-floor> \
+  --out /tmp/mycelium-tool-context-gate
 ```
 
-When using the real compact Deep Agents fixture or another fixture-sized prompt,
-raise or lower `--min-prompt-tokens` to match the fixture. Keep it high enough
-to prove context headroom, not only the tool parser.
+When using a fixture-sized prompt, raise or lower `--min-prompt-tokens` to
+match the fixture, and set `--min-context-cap` to the minimum context window
+the workload actually needs. If a route is only meant to prove transport/tool
+behavior, say that in the project-local handoff and do not promote it as a full
+consumer route.
 
-Streaming is usable for the warmed 8192 route, but streaming token accounting is
-weaker than non-streaming preflight unless the provider stream includes usage.
-Use `--stream` to make that explicit in the redacted artifact:
+Streaming token accounting is weaker than non-streaming preflight unless the
+provider stream includes usage. Use `--stream` to make that explicit in the
+redacted artifact:
 
 ```bash
 myce gateway preflight \
-  --url http://192.168.0.16:55274 \
-  --model spark-qwen9b-tools-8192 \
-  --project verso-tools \
-  --gateway-token-file <operator-provided-verso-tools-token-file> \
+  --url http://<gateway-host>:<port> \
+  --model <tool-capable-model-alias> \
+  --project <project-id> \
+  --gateway-token-file <operator-provided-project-token-file> \
   --prompt "Call the echo function with value ok. Do not answer directly." \
   --max-tokens 80 \
   --tool-name echo \
   --tool-choice function \
   --stream \
-  --expect-node spark \
+  --expect-node <expected-owner-node> \
   --require-tool-call \
   --reject-textual-tool-call \
-  --out /tmp/mycelium-verso-tools8192-stream
+  --out /tmp/mycelium-tool-stream
 ```
 
 The streaming evidence to preserve for PM/debug handoff is `stream_done`,

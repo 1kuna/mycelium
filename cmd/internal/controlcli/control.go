@@ -943,6 +943,7 @@ func runGatewayRoutes(ctx context.Context, args []string, client *http.Client) e
 	url := fs.String("url", "", "live gateway URL override for --live")
 	gatewayTokenEnv := fs.String("gateway-token-env", "", "environment variable containing the Mycelium gateway bearer token for --live")
 	gatewayTokenFile := fs.String("gateway-token-file", "", "file containing the Mycelium gateway bearer token for --live")
+	minContextCap := fs.Int("min-context-cap", 0, "mark routes below this context cap as undersized")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -957,6 +958,7 @@ func runGatewayRoutes(ctx context.Context, args []string, client *http.Client) e
 	if err != nil {
 		return err
 	}
+	annotateGatewayRoutesContextMinimum(&report, *minContextCap)
 	if *jsonOut {
 		return writePrettyJSON(os.Stdout, report)
 	}
@@ -1001,6 +1003,10 @@ type gatewayRouteContract struct {
 	ToolParserConfigured         bool                `json:"tool_parser_configured"`
 	AutoToolChoiceConfigured     bool                `json:"auto_tool_choice_configured"`
 	RecommendedToolChoice        string              `json:"recommended_tool_choice,omitempty"`
+	MinContextCap                int                 `json:"min_context_cap,omitempty"`
+	EffectiveContextCap          int                 `json:"effective_context_cap,omitempty"`
+	ContextAdequate              bool                `json:"context_adequate,omitempty"`
+	ContextIssue                 string              `json:"context_issue,omitempty"`
 	DiscoveryStatus              string              `json:"discovery_status"`
 	LiveModelAvailable           bool                `json:"live_model_available,omitempty"`
 	LiveModelMatch               string              `json:"live_model_match,omitempty"`
@@ -1203,7 +1209,7 @@ func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 		fmt.Fprintf(w, "live\tgateway=%s\tstatus=%s\tmodels=%d\tauth=%s\terror=%s\n", emptyDash(report.Live.Gateway), emptyDash(report.Live.Status), report.Live.ModelCount, emptyDash(report.Live.AuthSource), emptyDash(report.Live.Error))
 	}
 	for _, route := range report.Routes {
-		fmt.Fprintf(w, "route\tproject=%s\tmodel=%s\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tproject_cap=%d\tstatus=%s\tauth=%s\tproject_token=%t\tglobal_token=%t\tstructured=%t\tstreaming=%t\ttool_parser=%t\tauto_tool=%t\ttool_choice=%s\tlive_model=%t\tlive_match=%s\n",
+		fmt.Fprintf(w, "route\tproject=%s\tmodel=%s\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tproject_cap=%d\teffective_context=%d\tmin_context=%d\tcontext_issue=%s\tstatus=%s\tauth=%s\tproject_token=%t\tglobal_token=%t\tstructured=%t\tstreaming=%t\ttool_parser=%t\tauto_tool=%t\ttool_choice=%s\tlive_model=%t\tlive_match=%s\n",
 			emptyDash(route.Project),
 			emptyDash(route.Model),
 			emptyDash(route.PresetID),
@@ -1211,6 +1217,9 @@ func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 			emptyDash(string(route.Backend)),
 			route.ContextLength,
 			route.ProjectContextCap,
+			route.EffectiveContextCap,
+			route.MinContextCap,
+			emptyDash(route.ContextIssue),
 			route.DiscoveryStatus,
 			route.AuthHint,
 			route.ProjectTokenConfigured,
@@ -1224,6 +1233,30 @@ func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 			emptyDash(route.LiveModelMatch),
 		)
 	}
+}
+
+func annotateGatewayRoutesContextMinimum(report *gatewayRoutesReport, minContextCap int) {
+	for i := range report.Routes {
+		effective := effectiveRouteContextCap(report.Routes[i])
+		report.Routes[i].EffectiveContextCap = effective
+		if minContextCap <= 0 {
+			continue
+		}
+		report.Routes[i].MinContextCap = minContextCap
+		if effective >= minContextCap {
+			report.Routes[i].ContextAdequate = true
+			continue
+		}
+		report.Routes[i].ContextIssue = "undersized_context"
+	}
+}
+
+func effectiveRouteContextCap(route gatewayRouteContract) int {
+	effective := route.ContextLength
+	if route.ProjectContextCap > 0 && (effective == 0 || route.ProjectContextCap < effective) {
+		effective = route.ProjectContextCap
+	}
+	return effective
 }
 
 func findPresetForModel(presets []domain.Preset, model string) (domain.Preset, bool) {
@@ -1289,6 +1322,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	project := fs.String("project", "", "optional project id to send as X-Myc-Project")
 	prompt := fs.String("prompt", `Return {"ok":true}.`, "preflight prompt")
 	maxTokens := fs.Int("max-tokens", 16, "maximum output tokens for the preflight request")
+	contextCap := fs.Int("context-cap", 0, "known selected route context cap to preserve in evidence")
 	toolName := fs.String("tool-name", "", "optional echo-style function name for an OpenAI tool-call canary")
 	toolChoice := fs.String("tool-choice", "", "tool choice for --tool-name: auto, required, none, or function")
 	expectNode := fs.String("expect-node", "", "fail unless X-Myc-Node matches this node")
@@ -1296,6 +1330,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	requireToolCall := fs.Bool("require-tool-call", false, "fail unless the response contains at least one structured OpenAI tool call")
 	rejectTextualToolCall := fs.Bool("reject-textual-tool-call", false, "fail if final content contains a textual <tool_call> block")
 	minPromptTokens := fs.Int("min-prompt-tokens", 0, "fail unless usage.prompt_tokens is at least this value")
+	minContextCap := fs.Int("min-context-cap", 0, "fail unless --context-cap is at least this value")
 	stream := fs.Bool("stream", false, "send a streaming request and record stream completion/tool/usage evidence")
 	outDir := fs.String("out", "", "optional directory for a redacted preflight evidence packet")
 	consumerRun := fs.String("consumer-run", "", "consumer batch/run id to preserve in preflight evidence")
@@ -1325,6 +1360,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 		Model:      *model,
 		Prompt:     *prompt,
 		MaxTokens:  *maxTokens,
+		ContextCap: *contextCap,
 		Project:    *project,
 		ToolName:   *toolName,
 		ToolChoice: *toolChoice,
@@ -1338,6 +1374,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 		RequireToolCall:       *requireToolCall,
 		RejectTextualToolCall: *rejectTextualToolCall,
 		MinPromptTokens:       *minPromptTokens,
+		MinContextCap:         *minContextCap,
 	}
 	result, err := gatewayPreflightComplete(ctx, cfg)
 	if err != nil {
@@ -1395,6 +1432,7 @@ type gatewayPreflightExpectations struct {
 	RequireToolCall       bool
 	RejectTextualToolCall bool
 	MinPromptTokens       int
+	MinContextCap         int
 }
 
 func validateGatewayPreflightExpectations(result gatewayPreflightResult, expectations gatewayPreflightExpectations) error {
@@ -1421,6 +1459,11 @@ func validateGatewayPreflightExpectations(result gatewayPreflightResult, expecta
 	} else if expectations.MinPromptTokens > 0 && result.Usage.PromptTokens < expectations.MinPromptTokens {
 		failures = append(failures, fmt.Sprintf("expected prompt_tokens >= %d got %d", expectations.MinPromptTokens, result.Usage.PromptTokens))
 	}
+	if expectations.MinContextCap > 0 && result.ContextCap == 0 {
+		failures = append(failures, fmt.Sprintf("expected context cap >= %d but --context-cap was not set", expectations.MinContextCap))
+	} else if expectations.MinContextCap > 0 && result.ContextCap < expectations.MinContextCap {
+		failures = append(failures, fmt.Sprintf("expected context cap >= %d got %d", expectations.MinContextCap, result.ContextCap))
+	}
 	if len(failures) > 0 {
 		return fmt.Errorf("gateway preflight expectation failed: %s", strings.Join(failures, "; "))
 	}
@@ -1432,6 +1475,7 @@ type gatewayPreflightConfig struct {
 	Model      string
 	Prompt     string
 	MaxTokens  int
+	ContextCap int
 	Project    string
 	ToolName   string
 	ToolChoice string
@@ -1455,6 +1499,7 @@ type gatewayPreflightResult struct {
 	JSONContent     bool
 	UsageAvailable  bool
 	Usage           api.OpenAIUsage
+	ContextCap      int
 }
 
 type gatewayPreflightEvidence struct {
@@ -1482,6 +1527,7 @@ type gatewayPreflightEvidence struct {
 
 type gatewayPreflightRequestEvidence struct {
 	MaxTokens        int    `json:"max_tokens"`
+	ContextCap       int    `json:"context_cap,omitempty"`
 	Streaming        bool   `json:"streaming"`
 	StructuredOutput string `json:"structured_output"`
 	ToolRequested    bool   `json:"tool_requested"`
@@ -1495,6 +1541,7 @@ type gatewayPreflightExpectationEvidence struct {
 	RequireToolCall       bool   `json:"require_tool_call,omitempty"`
 	RejectTextualToolCall bool   `json:"reject_textual_tool_call,omitempty"`
 	MinPromptTokens       int    `json:"min_prompt_tokens,omitempty"`
+	MinContextCap         int    `json:"min_context_cap,omitempty"`
 }
 
 func gatewayPreflightRequestEvidenceFromConfig(cfg gatewayPreflightConfig) gatewayPreflightRequestEvidence {
@@ -1509,6 +1556,7 @@ func gatewayPreflightRequestEvidenceFromConfig(cfg gatewayPreflightConfig) gatew
 	}
 	return gatewayPreflightRequestEvidence{
 		MaxTokens:        cfg.MaxTokens,
+		ContextCap:       cfg.ContextCap,
 		Streaming:        cfg.Stream,
 		StructuredOutput: structuredOutput,
 		ToolRequested:    toolName != "",
@@ -1518,7 +1566,7 @@ func gatewayPreflightRequestEvidenceFromConfig(cfg gatewayPreflightConfig) gatew
 }
 
 func gatewayPreflightExpectationEvidenceFromExpectations(expectations gatewayPreflightExpectations) *gatewayPreflightExpectationEvidence {
-	if expectations.ExpectNode == "" && !expectations.RequireJSON && !expectations.RequireToolCall && !expectations.RejectTextualToolCall && expectations.MinPromptTokens == 0 {
+	if expectations.ExpectNode == "" && !expectations.RequireJSON && !expectations.RequireToolCall && !expectations.RejectTextualToolCall && expectations.MinPromptTokens == 0 && expectations.MinContextCap == 0 {
 		return nil
 	}
 	return &gatewayPreflightExpectationEvidence{
@@ -1527,6 +1575,7 @@ func gatewayPreflightExpectationEvidenceFromExpectations(expectations gatewayPre
 		RequireToolCall:       expectations.RequireToolCall,
 		RejectTextualToolCall: expectations.RejectTextualToolCall,
 		MinPromptTokens:       expectations.MinPromptTokens,
+		MinContextCap:         expectations.MinContextCap,
 	}
 }
 
@@ -1755,6 +1804,7 @@ func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (
 	}
 	parsed.StatusCode = resp.StatusCode
 	parsed.Headers = resp.Header.Clone()
+	parsed.ContextCap = cfg.ContextCap
 	return parsed, nil
 }
 

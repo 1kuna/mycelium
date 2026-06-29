@@ -906,17 +906,16 @@ func TestRunBenchmarkUsesGatewayTokenEnv(t *testing.T) {
 
 func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing.T) {
 	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
-	t.Setenv("MYCELIUM_API_KEY", "")
-	t.Setenv("ATLAS_MYCELIUM_API_KEY", "atlas-secret")
+	t.Setenv("MYCELIUM_API_KEY", "project-secret")
 	t.Setenv("OPENAI_API_KEY", "openai-secret")
 	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer atlas-secret" {
+		if got := r.Header.Get("Authorization"); got != "Bearer project-secret" {
 			t.Fatalf("gateway auth = %q", got)
 		}
-		if got := r.Header.Get("X-Myc-Project"); got != "atlas-canary" {
+		if got := r.Header.Get("X-Myc-Project"); got != "strict-json-canary" {
 			t.Fatalf("project = %q", got)
 		}
 		var req map[string]any
@@ -952,9 +951,9 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 		err = RunWithClient(context.Background(), []string{
 			"gateway", "preflight",
 			"--url", "http://gateway.test",
-			"--model", "qwen3.5-9b",
-			"--project", "atlas-canary",
-			"--consumer-run", "atlas-sow-001",
+			"--model", "strict-json-model",
+			"--project", "strict-json-canary",
+			"--consumer-run", "strict-json-run-001",
 			"--consumer-item", "row-004",
 			"--consumer-status", "ok",
 			"--consumer-elapsed-ms", "1200",
@@ -966,7 +965,7 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 	}
 	for _, want := range []string{
 		"gateway\thttp://gateway.test\tok",
-		"auth\tATLAS_MYCELIUM_API_KEY\tconfigured",
+		"auth\tMYCELIUM_API_KEY\tconfigured",
 		"header\tX-Myc-Node\tb70",
 		"header\tX-Myc-Structured-Output\tjson_schema",
 		"header\tX-Myc-Guided-Decoding-Requested\ttrue",
@@ -979,28 +978,28 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 		"textual_tool_call\tfalse",
 		"json\ttrue",
 		"usage\tprompt=4\tcompletion=3\ttotal=7",
-		"consumer\trun=atlas-sow-001\titem=row-004\tstatus=ok\telapsed_ms=1200\terror=-",
+		"consumer\trun=strict-json-run-001\titem=row-004\tstatus=ok\telapsed_ms=1200\terror=-",
 		"evidence\t" + filepath.Join(outDir, "preflight.json"),
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("preflight output missing %q:\n%s", want, output)
 		}
 	}
-	if strings.Contains(output, "atlas-secret") || strings.Contains(output, "openai-secret") {
+	if strings.Contains(output, "project-secret") || strings.Contains(output, "openai-secret") {
 		t.Fatalf("preflight output leaked token: %s", output)
 	}
 	evidenceData, err := os.ReadFile(filepath.Join(outDir, "preflight.json"))
 	if err != nil {
 		t.Fatalf("read preflight evidence: %v", err)
 	}
-	if strings.Contains(string(evidenceData), "atlas-secret") || strings.Contains(string(evidenceData), "openai-secret") || strings.Contains(string(evidenceData), "Return") || strings.Contains(string(evidenceData), `{"ok":true}`) {
+	if strings.Contains(string(evidenceData), "project-secret") || strings.Contains(string(evidenceData), "openai-secret") || strings.Contains(string(evidenceData), "Return") || strings.Contains(string(evidenceData), `{"ok":true}`) {
 		t.Fatalf("preflight evidence leaked secret/prompt/content: %s", evidenceData)
 	}
 	var evidence gatewayPreflightEvidence
 	if err := json.Unmarshal(evidenceData, &evidence); err != nil {
 		t.Fatalf("decode preflight evidence: %v", err)
 	}
-	if evidence.AuthSource != "ATLAS_MYCELIUM_API_KEY" || evidence.Headers["X-Myc-Node"] != "b70" || evidence.ContentLength != 11 || evidence.ReasoningLength != 7 || evidence.ToolCallCount != 0 || evidence.TextualToolCall || !evidence.JSONContent || evidence.Usage.TotalTokens != 7 {
+	if evidence.AuthSource != "MYCELIUM_API_KEY" || evidence.Headers["X-Myc-Node"] != "b70" || evidence.ContentLength != 11 || evidence.ReasoningLength != 7 || evidence.ToolCallCount != 0 || evidence.TextualToolCall || !evidence.JSONContent || evidence.Usage.TotalTokens != 7 {
 		t.Fatalf("preflight evidence = %+v", evidence)
 	}
 	if evidence.Request.MaxTokens != 16 || evidence.Request.Streaming || evidence.Request.StructuredOutput != "json_schema" || evidence.Request.ToolRequested || evidence.Request.ToolName != "" || evidence.Request.ToolChoice != "" {
@@ -1009,7 +1008,7 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 	if evidence.Expectations != nil {
 		t.Fatalf("unexpected preflight expectations = %+v", evidence.Expectations)
 	}
-	if evidence.Consumer == nil || evidence.Consumer.RunID != "atlas-sow-001" || evidence.Consumer.ItemID != "row-004" || evidence.Consumer.Status != "ok" || evidence.Consumer.ElapsedMS != 1200 {
+	if evidence.Consumer == nil || evidence.Consumer.RunID != "strict-json-run-001" || evidence.Consumer.ItemID != "row-004" || evidence.Consumer.Status != "ok" || evidence.Consumer.ElapsedMS != 1200 {
 		t.Fatalf("preflight consumer evidence = %+v", evidence.Consumer)
 	}
 }
@@ -1017,35 +1016,35 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "peer.json")
 	cfg := operatorPeerConfig{
-		ID:           "spark",
-		Listen:       "192.168.0.16:55274",
+		ID:           "tool-node",
+		Listen:       "10.0.0.16:55274",
 		GatewayToken: "global-secret",
 		GatewayProjectTokens: []operatorProjectToken{
-			{Project: "verso-tools", Token: "verso-secret"},
+			{Project: "tool-project", Token: "project-secret"},
 		},
 		Projects: []domain.Project{
-			{ID: "atlas-semantic", DefaultModel: "qwen3.5-9b", ContextCap: 4096},
-			{ID: "verso-tools", DefaultModel: "spark-qwen9b-tools-8192", ContextCap: 8192},
+			{ID: "strict-json-project", DefaultModel: "strict-json-model", ContextCap: 4096},
+			{ID: "tool-project", DefaultModel: "tool-model-8192", ContextCap: 8192},
 			{ID: "missing-route", DefaultModel: "does-not-exist", ContextCap: 2048},
 		},
 		Presets: []domain.Preset{
 			{
-				ID:            "b70-qwen9b-vllm",
-				ModelRef:      "qwen3.5-9b",
-				Aliases:       []string{"qwen3.5-9b"},
+				ID:            "strict-json-vllm",
+				ModelRef:      "strict-json-model",
+				Aliases:       []string{"strict-json-model"},
 				Backend:       domain.BackendVLLM,
 				ContextLength: 4096,
 				Capabilities:  []domain.Capability{domain.CapabilityChat},
-				NodeID:        "b70",
+				NodeID:        "node-json",
 			},
 			{
-				ID:              "spark-qwen9b-tools-8192-vllm",
-				ModelRef:        "qwen3.5-9b",
-				Aliases:         []string{"spark-qwen9b-tools-8192"},
+				ID:              "tool-model-8192-vllm",
+				ModelRef:        "tool-model",
+				Aliases:         []string{"tool-model-8192"},
 				Backend:         domain.BackendVLLM,
 				ContextLength:   8192,
 				Capabilities:    []domain.Capability{domain.CapabilityChat},
-				NodeID:          "spark",
+				NodeID:          "node-tool",
 				ProviderProfile: "openai-compatible",
 				LaunchArgs:      []string{"--enable-auto-tool-choice", "--tool-call-parser", "hermes"},
 			},
@@ -1067,38 +1066,38 @@ func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 		t.Fatalf("gateway routes: %v", runErr)
 	}
 	for _, want := range []string{
-		"gateway\thttp://192.168.0.16:55274\tbase_url=http://192.168.0.16:55274/v1\tpeer=spark",
-		"route\tproject=atlas-semantic\tmodel=qwen3.5-9b\tpreset=b70-qwen9b-vllm\tnode=b70\tbackend=vllm\tcontext=4096\tproject_cap=4096\tstatus=ready_from_config\tauth=global_gateway_token\tproject_token=false\tglobal_token=true\tstructured=true\tstreaming=true\ttool_parser=false\tauto_tool=false",
-		"route\tproject=verso-tools\tmodel=spark-qwen9b-tools-8192\tpreset=spark-qwen9b-tools-8192-vllm\tnode=spark\tbackend=vllm\tcontext=8192\tproject_cap=8192\tstatus=ready_from_config\tauth=project_token\tproject_token=true\tglobal_token=true\tstructured=true\tstreaming=true\ttool_parser=true\tauto_tool=true\ttool_choice=forced-function-first; auto requires model/template proof",
-		"route\tproject=missing-route\tmodel=does-not-exist\tpreset=-\tnode=-\tbackend=-\tcontext=0\tproject_cap=2048\tstatus=preset_missing\tauth=global_gateway_token",
+		"gateway\thttp://10.0.0.16:55274\tbase_url=http://10.0.0.16:55274/v1\tpeer=tool-node",
+		"route\tproject=strict-json-project\tmodel=strict-json-model\tpreset=strict-json-vllm\tnode=node-json\tbackend=vllm\tcontext=4096\tproject_cap=4096\teffective_context=4096\tmin_context=0\tcontext_issue=-\tstatus=ready_from_config\tauth=global_gateway_token\tproject_token=false\tglobal_token=true\tstructured=true\tstreaming=true\ttool_parser=false\tauto_tool=false",
+		"route\tproject=tool-project\tmodel=tool-model-8192\tpreset=tool-model-8192-vllm\tnode=node-tool\tbackend=vllm\tcontext=8192\tproject_cap=8192\teffective_context=8192\tmin_context=0\tcontext_issue=-\tstatus=ready_from_config\tauth=project_token\tproject_token=true\tglobal_token=true\tstructured=true\tstreaming=true\ttool_parser=true\tauto_tool=true\ttool_choice=forced-function-first; auto requires model/template proof",
+		"route\tproject=missing-route\tmodel=does-not-exist\tpreset=-\tnode=-\tbackend=-\tcontext=0\tproject_cap=2048\teffective_context=2048\tmin_context=0\tcontext_issue=-\tstatus=preset_missing\tauth=global_gateway_token",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("gateway routes output missing %q:\n%s", want, output)
 		}
 	}
-	if strings.Contains(output, "global-secret") || strings.Contains(output, "verso-secret") {
+	if strings.Contains(output, "global-secret") || strings.Contains(output, "project-secret") {
 		t.Fatalf("gateway routes leaked token material: %s", output)
 	}
 
 	var jsonErr error
 	jsonOutput := captureStdout(t, func() {
-		jsonErr = RunWithClient(context.Background(), []string{"gateway", "routes", "--config", configPath, "--json"}, nil)
+		jsonErr = RunWithClient(context.Background(), []string{"gateway", "routes", "--config", configPath, "--min-context-cap", "32768", "--json"}, nil)
 	})
 	if jsonErr != nil {
 		t.Fatalf("gateway routes json: %v", jsonErr)
 	}
-	if strings.Contains(jsonOutput, "global-secret") || strings.Contains(jsonOutput, "verso-secret") {
+	if strings.Contains(jsonOutput, "global-secret") || strings.Contains(jsonOutput, "project-secret") {
 		t.Fatalf("gateway routes JSON leaked token material: %s", jsonOutput)
 	}
 	var report gatewayRoutesReport
 	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
 		t.Fatalf("decode gateway routes JSON: %v", err)
 	}
-	if report.BaseURL != "http://192.168.0.16:55274/v1" || len(report.Routes) != 3 {
+	if report.BaseURL != "http://10.0.0.16:55274/v1" || len(report.Routes) != 3 {
 		t.Fatalf("gateway routes report = %+v", report)
 	}
-	if got := report.Routes[2]; got.Project != "verso-tools" || !got.ProjectTokenConfigured || !got.ToolParserConfigured || !got.AutoToolChoiceConfigured {
-		t.Fatalf("verso route contract = %+v", got)
+	if got := report.Routes[2]; got.Project != "tool-project" || !got.ProjectTokenConfigured || !got.ToolParserConfigured || !got.AutoToolChoiceConfigured || got.MinContextCap != 32768 || got.EffectiveContextCap != 8192 || got.ContextIssue != "undersized_context" || got.ContextAdequate {
+		t.Fatalf("tool route contract = %+v", got)
 	}
 }
 
@@ -1109,12 +1108,12 @@ func TestRunGatewayRoutesComparesLiveModels(t *testing.T) {
 		Listen:       "http://gateway.test",
 		GatewayToken: "global-secret",
 		Projects: []domain.Project{
-			{ID: "atlas", DefaultModel: "qwen3.5-9b"},
-			{ID: "verso-tools", DefaultModel: "spark-qwen9b-tools-8192"},
+			{ID: "strict-json-project", DefaultModel: "strict-json-model"},
+			{ID: "tool-project", DefaultModel: "tool-model-8192"},
 		},
 		Presets: []domain.Preset{
-			{ID: "b70-qwen9b-vllm", ModelRef: "qwen3.5-9b", Aliases: []string{"qwen3.5-9b"}, Backend: domain.BackendVLLM, NodeID: "b70"},
-			{ID: "spark-qwen9b-tools-8192-vllm", ModelRef: "qwen3.5-9b", Aliases: []string{"spark-qwen9b-tools-8192"}, Backend: domain.BackendVLLM, NodeID: "spark"},
+			{ID: "strict-json-vllm", ModelRef: "strict-json-model", Aliases: []string{"strict-json-model"}, Backend: domain.BackendVLLM, NodeID: "node-json"},
+			{ID: "tool-model-8192-vllm", ModelRef: "tool-model", Aliases: []string{"tool-model-8192"}, Backend: domain.BackendVLLM, NodeID: "node-tool"},
 		},
 	}
 	data, err := json.Marshal(cfg)
@@ -1134,7 +1133,7 @@ func TestRunGatewayRoutesComparesLiveModels(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"object": "list",
 			"data": []map[string]string{
-				{"id": "qwen3.5-9b", "object": "model", "owned_by": "mycelium"},
+				{"id": "strict-json-model", "object": "model", "owned_by": "mycelium"},
 			},
 		})
 	}))
@@ -1148,9 +1147,9 @@ func TestRunGatewayRoutesComparesLiveModels(t *testing.T) {
 	}
 	for _, want := range []string{
 		"live\tgateway=http://gateway.test\tstatus=ok\tmodels=1",
-		"route\tproject=atlas\tmodel=qwen3.5-9b",
-		"live_model=true\tlive_match=qwen3.5-9b",
-		"route\tproject=verso-tools\tmodel=spark-qwen9b-tools-8192",
+		"route\tproject=strict-json-project\tmodel=strict-json-model",
+		"live_model=true\tlive_match=strict-json-model",
+		"route\tproject=tool-project\tmodel=tool-model-8192",
 		"live_model=false\tlive_match=-",
 	} {
 		if !strings.Contains(output, want) {
@@ -1241,7 +1240,7 @@ func TestRunGatewayPreflightToolCanaryRecordsResponseShape(t *testing.T) {
 			"gateway", "preflight",
 			"--url", "http://gateway.test",
 			"--model", "spark-qwen9b",
-			"--project", "verso-tool",
+			"--project", "tool-canary",
 			"--prompt", "Call echo with value ok.",
 			"--tool-name", "echo",
 			"--tool-choice", "function",
@@ -1329,8 +1328,8 @@ func TestRunGatewayPreflightStreamRecordsToolAndUsageEvidence(t *testing.T) {
 		err = RunWithClient(context.Background(), []string{
 			"gateway", "preflight",
 			"--url", "http://gateway.test",
-			"--model", "spark-qwen9b-tools-8192",
-			"--project", "verso-tools",
+			"--model", "tool-model-8192",
+			"--project", "tool-project",
 			"--tool-name", "echo",
 			"--tool-choice", "function",
 			"--stream",
@@ -1488,15 +1487,17 @@ func TestRunGatewayPreflightExpectationsFailAfterWritingEvidence(t *testing.T) {
 			"gateway", "preflight",
 			"--url", "http://gateway.test",
 			"--model", "spark-qwen9b",
+			"--context-cap", "8192",
 			"--tool-name", "echo",
 			"--tool-choice", "auto",
 			"--require-tool-call",
 			"--reject-textual-tool-call",
 			"--min-prompt-tokens", "1000",
+			"--min-context-cap", "32768",
 			"--out", outDir,
 		}, client)
 	})
-	if err == nil || !strings.Contains(err.Error(), "expected at least one structured tool call") || !strings.Contains(err.Error(), "expected no textual <tool_call>") || !strings.Contains(err.Error(), "expected prompt_tokens >= 1000") || !strings.Contains(err.Error(), "preflight.json") {
+	if err == nil || !strings.Contains(err.Error(), "expected at least one structured tool call") || !strings.Contains(err.Error(), "expected no textual <tool_call>") || !strings.Contains(err.Error(), "expected prompt_tokens >= 1000") || !strings.Contains(err.Error(), "expected context cap >= 32768 got 8192") || !strings.Contains(err.Error(), "preflight.json") {
 		t.Fatalf("expectation err = %v\noutput=%s", err, output)
 	}
 	if !strings.Contains(output, "tool_calls\tcount=0") || !strings.Contains(output, "textual_tool_call\ttrue") {
@@ -1513,8 +1514,16 @@ func TestRunGatewayPreflightExpectationsFailAfterWritingEvidence(t *testing.T) {
 	if evidence.ToolCallCount != 0 || !evidence.TextualToolCall || evidence.Usage.PromptTokens != 64 {
 		t.Fatalf("failed evidence = %+v", evidence)
 	}
-	if evidence.Request.ToolChoice != "auto" || evidence.Request.ToolName != "echo" || evidence.Expectations == nil || !evidence.Expectations.RequireToolCall || !evidence.Expectations.RejectTextualToolCall || evidence.Expectations.MinPromptTokens != 1000 {
+	if evidence.Request.ContextCap != 8192 || evidence.Request.ToolChoice != "auto" || evidence.Request.ToolName != "echo" || evidence.Expectations == nil || !evidence.Expectations.RequireToolCall || !evidence.Expectations.RejectTextualToolCall || evidence.Expectations.MinPromptTokens != 1000 || evidence.Expectations.MinContextCap != 32768 {
 		t.Fatalf("failed request/expectation evidence = request:%+v expectations:%+v", evidence.Request, evidence.Expectations)
+	}
+	optimization := summarizeJobOptimizationEvidence(jobDebugReport{
+		Job:       domain.Job{ID: "job-auto"},
+		Preflight: &evidence,
+		Diagnosis: &jobDebugDiagnosis{Class: "owner_completed_warm"},
+	})
+	if optimization.ContextCap != 8192 || optimization.MinContextCap != 32768 || optimization.ContextAdequate || optimization.FailureLayer != "consumer_contract" || optimization.FailureClass != "consumer_contract_context_too_small" {
+		t.Fatalf("context optimization evidence = %+v", optimization)
 	}
 }
 
@@ -1957,14 +1966,14 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	preflightPath := writeGatewayPreflightEvidenceFixture(t, "job-a")
 	ownerClient := operatorOwnerTelemetryClient(t)
 	preflightOutput := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--owner-telemetry", "--rpc-token", "rpc-secret", "--consumer-run", "atlas-batch-7", "--consumer-item", "row-006", "--consumer-status", "timeout", "--consumer-elapsed-ms", "180000", "--consumer-error", "client_deadline", "--db", dbPath}, ownerClient)
+		err = RunWithClient(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--owner-telemetry", "--rpc-token", "rpc-secret", "--consumer-run", "strict-json-batch-7", "--consumer-item", "row-006", "--consumer-status", "timeout", "--consumer-elapsed-ms", "180000", "--consumer-error", "client_deadline", "--db", dbPath}, ownerClient)
 	})
 	if err != nil {
 		t.Fatalf("debug job with preflight: %v\n%s", err, preflightOutput)
 	}
 	for _, want := range []string{
 		"job\tjob-a\trunning\tmodel=tiny\tproject=project-a\towner=node-a",
-		"preflight\tstatus=200\tmodel=qwen3.5-9b\tproject=atlas-batch",
+		"preflight\tstatus=200\tmodel=strict-json-model\tproject=strict-json-batch",
 		"preflight-request\tmax_tokens=32\tstream=false\tstructured=none\ttool_requested=true\ttool_name=echo\ttool_choice=auto",
 		"preflight-expectations\texpect_node=b70\trequire_json=false\trequire_tool_call=true\treject_textual_tool_call=true\tmin_prompt_tokens=16",
 		"preflight-route\tnode=b70\tbackend=vllm\tinstance=inst_2\tdecision=placed_on_warm_instance",
@@ -1972,9 +1981,9 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"preflight-tool-result\tcount=0\tnames=-\ttextual=true",
 		"preflight-usage\tprompt=16\tcompletion=10\ttotal=26",
 		"owner-telemetry\tok\tnode=node-a\taddress=http://peer.test\tmetrics=1\tsamples=1\tttft_ms=34\tload_ms=0\ttps=12.50\tcontext=26\tphases=complete",
-		"consumer\trun=atlas-batch-7\titem=row-006\tstatus=timeout\telapsed_ms=180000\terror=client_deadline",
+		"consumer\trun=strict-json-batch-7\titem=row-006\tstatus=timeout\telapsed_ms=180000\terror=client_deadline",
 		"diagnosis\towner_completed_warm\towner node-a completed warm inference; load_ms=0; ttft_ms=34; consumer_status=timeout; upstream_ms=512; structured=json_schema",
-		"optimization\tjob=job-a\tproject=atlas-batch\tconsumer_status=timeout\tnode=b70\tpreset=tiny\tmodel=qwen3.5-9b\tstream=false\ttool=true\tusage=16/10/26\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=consumer\tfailure_class=owner_completed_warm",
+		"optimization\tjob=job-a\tproject=strict-json-batch\tconsumer_status=timeout\tnode=b70\tpreset=tiny\tmodel=strict-json-model\tcontext_cap=0\tmin_context=0\tcontext_ok=false\tstream=false\ttool=true\tusage=16/10/26\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=consumer\tfailure_class=owner_completed_warm",
 	} {
 		if !strings.Contains(preflightOutput, want) {
 			t.Fatalf("preflight debug output missing %q:\n%s", want, preflightOutput)
@@ -1994,15 +2003,15 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	if preflightReport.Preflight == nil || preflightReport.Preflight.Headers["X-Myc-Node"] != "b70" || preflightReport.Preflight.ContentLength != 16 || !preflightReport.Preflight.TextualToolCall || preflightReport.OwnerTelemetry == nil || len(preflightReport.OwnerTelemetry.RunMetrics) != 1 || len(preflightReport.OwnerTelemetry.SessionTimeline) != 1 || preflightReport.Diagnosis == nil || preflightReport.Diagnosis.Class != "owner_completed_warm" {
 		t.Fatalf("preflight debug report = %+v", preflightReport)
 	}
-	if preflightReport.Optimization == nil || preflightReport.Optimization.Project != "atlas-batch" || preflightReport.Optimization.Model != "qwen3.5-9b" || preflightReport.Optimization.NodeID != "b70" || preflightReport.Optimization.PresetID != "tiny" || preflightReport.Optimization.Request.ToolName != "echo" || preflightReport.Optimization.UsageTotalTokens != 26 || preflightReport.Optimization.TTFTMS != 34 || preflightReport.Optimization.UpstreamWallMS != 512 || preflightReport.Optimization.FailureLayer != "none" {
+	if preflightReport.Optimization == nil || preflightReport.Optimization.Project != "strict-json-batch" || preflightReport.Optimization.Model != "strict-json-model" || preflightReport.Optimization.NodeID != "b70" || preflightReport.Optimization.PresetID != "tiny" || preflightReport.Optimization.Request.ToolName != "echo" || preflightReport.Optimization.UsageTotalTokens != 26 || preflightReport.Optimization.TTFTMS != 34 || preflightReport.Optimization.UpstreamWallMS != 512 || preflightReport.Optimization.FailureLayer != "none" {
 		t.Fatalf("preflight optimization report = %+v", preflightReport.Optimization)
 	}
 	if preflightReport.Consumer != nil {
 		t.Fatalf("unexpected consumer evidence without flags = %+v", preflightReport.Consumer)
 	}
 	labeledPreflightPath := writeGatewayPreflightEvidenceFixtureWithConsumer(t, "job-a", consumerEvidence{
-		RunID:     "verso-hold-only",
-		ItemID:    "gushaw-compact",
+		RunID:     "tool-run-hold",
+		ItemID:    "fixture-compact",
 		Status:    "partial",
 		ElapsedMS: 42000,
 		Error:     "client_timeout",
@@ -2017,7 +2026,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	if err := json.Unmarshal([]byte(labeledJSONOutput), &labeledReport); err != nil {
 		t.Fatalf("decode labeled preflight debug json: %v\n%s", err, labeledJSONOutput)
 	}
-	if labeledReport.Consumer == nil || labeledReport.Consumer.RunID != "verso-hold-only" || labeledReport.Consumer.ItemID != "gushaw-compact" || labeledReport.Consumer.Status != "partial" || labeledReport.Consumer.ElapsedMS != 42000 || labeledReport.Consumer.Error != "client_timeout" {
+	if labeledReport.Consumer == nil || labeledReport.Consumer.RunID != "tool-run-hold" || labeledReport.Consumer.ItemID != "fixture-compact" || labeledReport.Consumer.Status != "partial" || labeledReport.Consumer.ElapsedMS != 42000 || labeledReport.Consumer.Error != "client_timeout" {
 		t.Fatalf("labeled preflight consumer = %+v", labeledReport.Consumer)
 	}
 	if err := Run(context.Background(), []string{"debug", "job", "job-other", "--preflight", preflightPath, "--db", dbPath}); err == nil || !strings.Contains(err.Error(), `does not match requested job "job-other"`) {
@@ -2187,7 +2196,7 @@ func TestOperatorListenAndFormattingHelpers(t *testing.T) {
 	if !isLoopbackListen("") || !isLoopbackListen("localhost:55291") || !isLoopbackListen("http://127.0.0.1:55291") {
 		t.Fatalf("loopback detection rejected loopback listeners")
 	}
-	if isLoopbackListen("http://192.168.0.143:55291") {
+	if isLoopbackListen("http://10.0.0.143:55291") {
 		t.Fatalf("loopback detection accepted LAN listener")
 	}
 	if got := formatTimeDash(time.Time{}); got != "-" {
@@ -2203,7 +2212,7 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 
 	var err error
 	output := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--preflight", preflightPath, "--owner-telemetry", "--consumer-run", "verso-prod-smoke", "--consumer-item", "lab-42", "--consumer-status", "error", "--consumer-elapsed-ms", "3210", "--consumer-error", "response_parse_error", "--out", outDir}, client)
+		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--preflight", preflightPath, "--owner-telemetry", "--consumer-run", "tool-prod-smoke", "--consumer-item", "item-42", "--consumer-status", "error", "--consumer-elapsed-ms", "3210", "--consumer-error", "response_parse_error", "--out", outDir}, client)
 	})
 	if err != nil {
 		t.Fatalf("debug bundle: %v\n%s", err, output)
@@ -2248,20 +2257,20 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read job debug: %v", err)
 	}
-	if strings.Contains(string(jobDebugData), "rpc-secret") || !strings.Contains(string(jobDebugData), `"owner_telemetry"`) || !strings.Contains(string(jobDebugData), `"diagnosis"`) || !strings.Contains(string(jobDebugData), `"job_id": "job-a"`) || !strings.Contains(string(jobDebugData), `"consumer"`) || !strings.Contains(string(jobDebugData), `"run_id": "verso-prod-smoke"`) || !strings.Contains(string(jobDebugData), `"status": "error"`) {
+	if strings.Contains(string(jobDebugData), "rpc-secret") || !strings.Contains(string(jobDebugData), `"owner_telemetry"`) || !strings.Contains(string(jobDebugData), `"diagnosis"`) || !strings.Contains(string(jobDebugData), `"job_id": "job-a"`) || !strings.Contains(string(jobDebugData), `"consumer"`) || !strings.Contains(string(jobDebugData), `"run_id": "tool-prod-smoke"`) || !strings.Contains(string(jobDebugData), `"status": "error"`) {
 		t.Fatalf("job debug artifact = %s", jobDebugData)
 	}
 	optimizationData, err := os.ReadFile(filepath.Join(outDir, "optimization.json"))
 	if err != nil {
 		t.Fatalf("read optimization artifact: %v", err)
 	}
-	if strings.Contains(string(optimizationData), "rpc-secret") || !strings.Contains(string(optimizationData), `"project": "atlas-batch"`) || !strings.Contains(string(optimizationData), `"consumer_status": "error"`) || !strings.Contains(string(optimizationData), `"failure_layer": "consumer"`) || !strings.Contains(string(optimizationData), `"usage_total_tokens": 26`) {
+	if strings.Contains(string(optimizationData), "rpc-secret") || !strings.Contains(string(optimizationData), `"project": "strict-json-batch"`) || !strings.Contains(string(optimizationData), `"consumer_status": "error"`) || !strings.Contains(string(optimizationData), `"failure_layer": "consumer"`) || !strings.Contains(string(optimizationData), `"usage_total_tokens": 26`) {
 		t.Fatalf("optimization artifact = %s", optimizationData)
 	}
 
 	inheritedOut := filepath.Join(t.TempDir(), "bundle-inherited")
 	labeledPreflightPath := writeGatewayPreflightEvidenceFixtureWithConsumer(t, "job-a", consumerEvidence{
-		RunID:  "atlas-semantic-batch",
+		RunID:  "strict-json-batch",
 		ItemID: "row-004",
 		Status: "ok",
 	})
@@ -2275,7 +2284,7 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read inherited job debug: %v", err)
 	}
-	if !strings.Contains(string(inheritedJobDebugData), `"run_id": "atlas-semantic-batch"`) || !strings.Contains(string(inheritedJobDebugData), `"item_id": "row-004"`) || !strings.Contains(string(inheritedJobDebugData), `"status": "ok"`) {
+	if !strings.Contains(string(inheritedJobDebugData), `"run_id": "strict-json-batch"`) || !strings.Contains(string(inheritedJobDebugData), `"item_id": "row-004"`) || !strings.Contains(string(inheritedJobDebugData), `"status": "ok"`) {
 		t.Fatalf("inherited job debug artifact = %s", inheritedJobDebugData)
 	}
 }
@@ -2968,9 +2977,9 @@ func writeGatewayPreflightEvidenceFixture(t *testing.T, jobID string) string {
 	path := filepath.Join(t.TempDir(), "preflight.json")
 	evidence := gatewayPreflightEvidence{
 		Gateway:    "http://gateway.test",
-		Model:      "qwen3.5-9b",
-		Project:    "atlas-batch",
-		AuthSource: "ATLAS_MYCELIUM_API_KEY",
+		Model:      "strict-json-model",
+		Project:    "strict-json-batch",
+		AuthSource: "MYCELIUM_API_KEY",
 		Request: gatewayPreflightRequestEvidence{
 			MaxTokens:        32,
 			StructuredOutput: "none",
