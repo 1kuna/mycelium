@@ -152,7 +152,7 @@ func runDebug(ctx context.Context, args []string, client *http.Client) error {
 func runDebugJob(ctx context.Context, args []string, client *http.Client) error {
 	fs := flag.NewFlagSet("debug job", flag.ContinueOnError)
 	configPath := fs.String("config", defaultPeerConfigPath(), "peer config JSON")
-	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+	dbPath := fs.String("db", "", "control-plane SQLite store")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	preflightPath := fs.String("preflight", "", "redacted gateway preflight evidence JSON")
 	ownerTelemetry := fs.Bool("owner-telemetry", false, "fetch selected-job run/session telemetry from the owner peer")
@@ -188,11 +188,15 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 	if jobID == "" {
 		return fmt.Errorf("usage: myce debug job <job-id> [--db path] [--json] [--preflight path] [--owner-telemetry]")
 	}
+	storePath := debugJobStorePath(*configPath, *dbPath)
 	consumer, err := consumerEvidenceFromFlags(*consumerRun, *consumerItem, *consumerStatus, *consumerElapsedMS, *consumerError)
 	if err != nil {
 		return err
 	}
-	report, err := buildJobDebugReport(ctx, *dbPath, jobID)
+	if consumer == nil && preflight != nil {
+		consumer = preflight.Consumer
+	}
+	report, err := buildJobDebugReport(ctx, storePath, jobID)
 	if err != nil {
 		return err
 	}
@@ -205,7 +209,7 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 				token = loaded.Config.RPCToken
 			}
 		}
-		report.OwnerTelemetry = fetchJobOwnerTelemetry(ctx, *dbPath, report, token, clientOrDefault(client))
+		report.OwnerTelemetry = fetchJobOwnerTelemetry(ctx, storePath, report, token, clientOrDefault(client))
 	}
 	report.Diagnosis = diagnoseJobDebugReport(report)
 	if *jsonOut {
@@ -213,6 +217,16 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 	}
 	printJobDebugReport(os.Stdout, report)
 	return nil
+}
+
+func debugJobStorePath(configPath, dbPath string) string {
+	if dbPath != "" {
+		return dbPath
+	}
+	if loaded, err := loadOperatorConfig(configPath); err == nil && loaded.Config.StorePath != "" {
+		return loaded.Config.StorePath
+	}
+	return defaultControlStorePath()
 }
 
 func splitDebugJobArgs(args []string) (string, []string, error) {
@@ -271,11 +285,13 @@ func runDebugBundle(ctx context.Context, args []string, client *http.Client) err
 	if err != nil {
 		return err
 	}
+	var preflightConsumer *consumerEvidence
 	if *preflightPath != "" {
 		evidence, err := readGatewayPreflightEvidence(*preflightPath)
 		if err != nil {
 			return err
 		}
+		preflightConsumer = evidence.Consumer
 		evidenceJobID := preflightEvidenceJobID(evidence)
 		if evidenceJobID == "" {
 			return fmt.Errorf("preflight evidence %s has no X-Myc-Job header", *preflightPath)
@@ -284,6 +300,9 @@ func runDebugBundle(ctx context.Context, args []string, client *http.Client) err
 			return fmt.Errorf("preflight evidence job %q does not match requested job %q", evidenceJobID, *jobID)
 		}
 		*jobID = evidenceJobID
+	}
+	if consumer == nil {
+		consumer = preflightConsumer
 	}
 	if err := writeDebugBundle(ctx, debugBundleRequest{
 		ConfigPath:     *configPath,

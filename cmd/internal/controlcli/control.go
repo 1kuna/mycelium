@@ -1298,6 +1298,11 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	minPromptTokens := fs.Int("min-prompt-tokens", 0, "fail unless usage.prompt_tokens is at least this value")
 	stream := fs.Bool("stream", false, "send a streaming request and record stream completion/tool/usage evidence")
 	outDir := fs.String("out", "", "optional directory for a redacted preflight evidence packet")
+	consumerRun := fs.String("consumer-run", "", "consumer batch/run id to preserve in preflight evidence")
+	consumerItem := fs.String("consumer-item", "", "consumer item/row/document id to preserve in preflight evidence")
+	consumerStatus := fs.String("consumer-status", "", "consumer outcome: ok, timeout, error, canceled, or partial")
+	consumerElapsedMS := fs.Int("consumer-elapsed-ms", 0, "consumer-observed elapsed milliseconds")
+	consumerError := fs.String("consumer-error", "", "sanitized consumer error class or short message")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1306,6 +1311,10 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	}
 	if *model == "" {
 		return fmt.Errorf("--model is required")
+	}
+	consumer, err := consumerEvidenceFromFlags(*consumerRun, *consumerItem, *consumerStatus, *consumerElapsedMS, *consumerError)
+	if err != nil {
+		return err
 	}
 	token, tokenSource, err := resolveGatewayPreflightToken(*url, *gatewayToken, *gatewayTokenEnv, *gatewayTokenFile, *configPath)
 	if err != nil {
@@ -1346,6 +1355,9 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	} else if result.Streaming {
 		fmt.Printf("usage\tunavailable\n")
 	}
+	if consumer != nil {
+		printConsumerEvidenceSummary(os.Stdout, *consumer)
+	}
 	var evidencePath string
 	if *outDir != "" {
 		path, err := writeGatewayPreflightEvidence(*outDir, tokenSource, gatewayPreflightConfig{
@@ -1356,6 +1368,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 			ToolName:   *toolName,
 			ToolChoice: *toolChoice,
 			Stream:     *stream,
+			Consumer:   consumer,
 		}, result)
 		if err != nil {
 			return err
@@ -1427,6 +1440,7 @@ type gatewayPreflightConfig struct {
 	Token      string
 	Client     *http.Client
 	Stream     bool
+	Consumer   *consumerEvidence
 }
 
 type gatewayPreflightResult struct {
@@ -1463,6 +1477,7 @@ type gatewayPreflightEvidence struct {
 	JSONContent     bool              `json:"json_content"`
 	UsageAvailable  bool              `json:"usage_available"`
 	Usage           api.OpenAIUsage   `json:"usage"`
+	Consumer        *consumerEvidence `json:"consumer,omitempty"`
 }
 
 func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflightConfig, result gatewayPreflightResult) (string, error) {
@@ -1487,6 +1502,7 @@ func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflig
 		JSONContent:     result.JSONContent,
 		UsageAvailable:  result.UsageAvailable,
 		Usage:           result.Usage,
+		Consumer:        cfg.Consumer,
 	}
 	path := filepath.Join(outDir, "preflight.json")
 	data, err := json.MarshalIndent(evidence, "", "  ")

@@ -954,6 +954,10 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 			"--url", "http://gateway.test",
 			"--model", "qwen3.5-9b",
 			"--project", "atlas-canary",
+			"--consumer-run", "atlas-sow-001",
+			"--consumer-item", "row-004",
+			"--consumer-status", "ok",
+			"--consumer-elapsed-ms", "1200",
 			"--out", outDir,
 		}, client)
 	})
@@ -975,6 +979,7 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 		"textual_tool_call\tfalse",
 		"json\ttrue",
 		"usage\tprompt=4\tcompletion=3\ttotal=7",
+		"consumer\trun=atlas-sow-001\titem=row-004\tstatus=ok\telapsed_ms=1200\terror=-",
 		"evidence\t" + filepath.Join(outDir, "preflight.json"),
 	} {
 		if !strings.Contains(output, want) {
@@ -997,6 +1002,9 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 	}
 	if evidence.AuthSource != "ATLAS_MYCELIUM_API_KEY" || evidence.Headers["X-Myc-Node"] != "b70" || evidence.ContentLength != 11 || evidence.ReasoningLength != 7 || evidence.ToolCallCount != 0 || evidence.TextualToolCall || !evidence.JSONContent || evidence.Usage.TotalTokens != 7 {
 		t.Fatalf("preflight evidence = %+v", evidence)
+	}
+	if evidence.Consumer == nil || evidence.Consumer.RunID != "atlas-sow-001" || evidence.Consumer.ItemID != "row-004" || evidence.Consumer.Status != "ok" || evidence.Consumer.ElapsedMS != 1200 {
+		t.Fatalf("preflight consumer evidence = %+v", evidence.Consumer)
 	}
 }
 
@@ -1895,6 +1903,15 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 			t.Fatalf("debug output missing %q:\n%s", want, debugOutput)
 		}
 	}
+	configDefaultOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "job", "job-a", "--config", configPath})
+	})
+	if err != nil {
+		t.Fatalf("debug job config store default: %v\n%s", err, configDefaultOutput)
+	}
+	if !strings.Contains(configDefaultOutput, "job\tjob-a\trunning\tmodel=tiny\tproject=project-a\towner=node-a") {
+		t.Fatalf("debug config store output = %s", configDefaultOutput)
+	}
 
 	jsonOutput := captureStdout(t, func() {
 		err = Run(context.Background(), []string{"debug", "job", "job-a", "--json", "--db", dbPath})
@@ -1949,6 +1966,26 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	}
 	if preflightReport.Consumer != nil {
 		t.Fatalf("unexpected consumer evidence without flags = %+v", preflightReport.Consumer)
+	}
+	labeledPreflightPath := writeGatewayPreflightEvidenceFixtureWithConsumer(t, "job-a", consumerEvidence{
+		RunID:     "verso-hold-only",
+		ItemID:    "example-customer-compact",
+		Status:    "partial",
+		ElapsedMS: 42000,
+		Error:     "client_timeout",
+	})
+	labeledJSONOutput := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"debug", "job", "--preflight", labeledPreflightPath, "--json", "--db", dbPath}, ownerClient)
+	})
+	if err != nil {
+		t.Fatalf("debug job labeled preflight json: %v\n%s", err, labeledJSONOutput)
+	}
+	var labeledReport jobDebugReport
+	if err := json.Unmarshal([]byte(labeledJSONOutput), &labeledReport); err != nil {
+		t.Fatalf("decode labeled preflight debug json: %v\n%s", err, labeledJSONOutput)
+	}
+	if labeledReport.Consumer == nil || labeledReport.Consumer.RunID != "verso-hold-only" || labeledReport.Consumer.ItemID != "example-customer-compact" || labeledReport.Consumer.Status != "partial" || labeledReport.Consumer.ElapsedMS != 42000 || labeledReport.Consumer.Error != "client_timeout" {
+		t.Fatalf("labeled preflight consumer = %+v", labeledReport.Consumer)
 	}
 	if err := Run(context.Background(), []string{"debug", "job", "job-other", "--preflight", preflightPath, "--db", dbPath}); err == nil || !strings.Contains(err.Error(), `does not match requested job "job-other"`) {
 		t.Fatalf("mismatched preflight error = %v", err)
@@ -2180,6 +2217,26 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	}
 	if strings.Contains(string(jobDebugData), "rpc-secret") || !strings.Contains(string(jobDebugData), `"owner_telemetry"`) || !strings.Contains(string(jobDebugData), `"diagnosis"`) || !strings.Contains(string(jobDebugData), `"job_id": "job-a"`) || !strings.Contains(string(jobDebugData), `"consumer"`) || !strings.Contains(string(jobDebugData), `"run_id": "verso-prod-smoke"`) || !strings.Contains(string(jobDebugData), `"status": "error"`) {
 		t.Fatalf("job debug artifact = %s", jobDebugData)
+	}
+
+	inheritedOut := filepath.Join(t.TempDir(), "bundle-inherited")
+	labeledPreflightPath := writeGatewayPreflightEvidenceFixtureWithConsumer(t, "job-a", consumerEvidence{
+		RunID:  "atlas-semantic-batch",
+		ItemID: "row-004",
+		Status: "ok",
+	})
+	output = captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--preflight", labeledPreflightPath, "--owner-telemetry", "--out", inheritedOut}, client)
+	})
+	if err != nil {
+		t.Fatalf("debug inherited bundle: %v\n%s", err, output)
+	}
+	inheritedJobDebugData, err := os.ReadFile(filepath.Join(inheritedOut, "job_debug.json"))
+	if err != nil {
+		t.Fatalf("read inherited job debug: %v", err)
+	}
+	if !strings.Contains(string(inheritedJobDebugData), `"run_id": "atlas-semantic-batch"`) || !strings.Contains(string(inheritedJobDebugData), `"item_id": "row-004"`) || !strings.Contains(string(inheritedJobDebugData), `"status": "ok"`) {
+		t.Fatalf("inherited job debug artifact = %s", inheritedJobDebugData)
 	}
 }
 
@@ -2910,6 +2967,24 @@ func writeGatewayPreflightEvidenceFixture(t *testing.T, jobID string) string {
 	}
 	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
 		t.Fatalf("write preflight evidence: %v", err)
+	}
+	return path
+}
+
+func writeGatewayPreflightEvidenceFixtureWithConsumer(t *testing.T, jobID string, consumer consumerEvidence) string {
+	t.Helper()
+	path := writeGatewayPreflightEvidenceFixture(t, jobID)
+	evidence, err := readGatewayPreflightEvidence(path)
+	if err != nil {
+		t.Fatalf("read preflight evidence fixture: %v", err)
+	}
+	evidence.Consumer = &consumer
+	data, err := json.MarshalIndent(evidence, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal labeled preflight evidence: %v", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
+		t.Fatalf("write labeled preflight evidence: %v", err)
 	}
 	return path
 }
