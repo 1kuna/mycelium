@@ -34,7 +34,7 @@ func Run(ctx context.Context, args []string) error {
 
 func RunWithClient(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark|doctor|debug|status>")
+		return fmt.Errorf("usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark|gateway|doctor|debug|status>")
 	}
 	switch args[0] {
 	case "add-model":
@@ -53,6 +53,8 @@ func RunWithClient(ctx context.Context, args []string, client *http.Client) erro
 		return runRecommendations(ctx, args[1:])
 	case "benchmark":
 		return runBenchmark(ctx, args[1:], client)
+	case "gateway":
+		return runGateway(ctx, args[1:], client)
 	case "doctor":
 		return runDoctor(ctx, args[1:], client)
 	case "debug":
@@ -916,6 +918,273 @@ func runBenchmark(ctx context.Context, args []string, client *http.Client) error
 		return runBenchmarkFleet(ctx, args[1:], client)
 	default:
 		return fmt.Errorf("usage: myce benchmark <run|fleet>")
+	}
+}
+
+func runGateway(ctx context.Context, args []string, client *http.Client) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: myce gateway <preflight>")
+	}
+	switch args[0] {
+	case "preflight":
+		return runGatewayPreflight(ctx, args[1:], client)
+	default:
+		return fmt.Errorf("usage: myce gateway <preflight>")
+	}
+}
+
+func runGatewayPreflight(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("gateway preflight", flag.ContinueOnError)
+	url := fs.String("url", "", "Mycelium gateway URL")
+	model := fs.String("model", "", "model or preset alias")
+	gatewayToken := fs.String("gateway-token", "", "Mycelium gateway bearer token")
+	gatewayTokenEnv := fs.String("gateway-token-env", "", "environment variable containing the Mycelium gateway bearer token")
+	gatewayTokenFile := fs.String("gateway-token-file", "", "file containing the Mycelium gateway bearer token")
+	configPath := fs.String("config", "", "peer config JSON to read gateway_token from")
+	project := fs.String("project", "", "optional project id to send as X-Myc-Project")
+	prompt := fs.String("prompt", `Return {"ok":true}.`, "preflight prompt")
+	maxTokens := fs.Int("max-tokens", 16, "maximum output tokens for the preflight request")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *url == "" {
+		return fmt.Errorf("--url is required")
+	}
+	if *model == "" {
+		return fmt.Errorf("--model is required")
+	}
+	token, tokenSource, err := resolveGatewayPreflightToken(*url, *gatewayToken, *gatewayTokenEnv, *gatewayTokenFile, *configPath)
+	if err != nil {
+		return err
+	}
+	result, err := gatewayPreflightComplete(ctx, gatewayPreflightConfig{
+		URL:       *url,
+		Model:     *model,
+		Prompt:    *prompt,
+		MaxTokens: *maxTokens,
+		Project:   *project,
+		Token:     token,
+		Client:    client,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("gateway\t%s\tok\n", strings.TrimRight(*url, "/"))
+	fmt.Printf("auth\t%s\tconfigured\n", tokenSource)
+	fmt.Printf("status\t%d\n", result.StatusCode)
+	for _, name := range gatewayPreflightHeaders() {
+		fmt.Printf("header\t%s\t%s\n", name, emptyDash(result.Headers.Get(name)))
+	}
+	fmt.Printf("finish_reason\t%s\n", emptyDash(result.FinishReason))
+	fmt.Printf("content_length\t%d\n", len(result.Content))
+	fmt.Printf("reasoning_length\t%d\n", len(result.Reasoning))
+	fmt.Printf("json\t%t\n", result.JSONContent)
+	if result.Usage.TotalTokens != 0 || result.Usage.PromptTokens != 0 || result.Usage.CompletionTokens != 0 {
+		fmt.Printf("usage\tprompt=%d\tcompletion=%d\ttotal=%d\n", result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens)
+	}
+	return nil
+}
+
+type gatewayPreflightConfig struct {
+	URL       string
+	Model     string
+	Prompt    string
+	MaxTokens int
+	Project   string
+	Token     string
+	Client    *http.Client
+}
+
+type gatewayPreflightResult struct {
+	StatusCode   int
+	Headers      http.Header
+	FinishReason string
+	Content      string
+	Reasoning    string
+	JSONContent  bool
+	Usage        api.OpenAIUsage
+}
+
+func resolveGatewayPreflightToken(rawURL, token, tokenEnv, tokenFile, configPath string) (string, string, error) {
+	if token != "" {
+		return token, "--gateway-token", nil
+	}
+	if tokenEnv != "" {
+		value := strings.TrimSpace(os.Getenv(tokenEnv))
+		if value == "" {
+			return "", "", fmt.Errorf("gateway token env %s is not set", tokenEnv)
+		}
+		return value, tokenEnv, nil
+	}
+	if tokenFile != "" {
+		value, err := readGatewayTokenFile(tokenFile)
+		if err != nil {
+			return "", "", err
+		}
+		return value, tokenFile, nil
+	}
+	if configPath != "" {
+		value, err := gatewayTokenFromConfig(configPath)
+		if err != nil {
+			return "", "", err
+		}
+		if value == "" {
+			return "", "", fmt.Errorf("peer config %s has no gateway_token", configPath)
+		}
+		return value, configPath + " gateway_token", nil
+	}
+	for _, name := range bench.DefaultGatewayTokenEnvNames() {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value, name, nil
+		}
+	}
+	token, err := bench.ResolveGatewayTokenForURL(rawURL, "", "")
+	if err != nil {
+		return "", "", fmt.Errorf("%w; checked env %s, --gateway-token-file, --config gateway_token, and ~/.mycelium/peer.json gateway_token", err, strings.Join(bench.DefaultGatewayTokenEnvNames(), ", "))
+	}
+	if token != "" {
+		return token, "~/.mycelium/peer.json gateway_token", nil
+	}
+	return "", "none", nil
+}
+
+func gatewayTokenFromConfig(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read peer config %s: %w", path, err)
+	}
+	var cfg struct {
+		GatewayToken string `json:"gateway_token"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return "", fmt.Errorf("parse peer config %s: %w", path, err)
+	}
+	return strings.TrimSpace(cfg.GatewayToken), nil
+}
+
+func readGatewayTokenFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read gateway token file %s: %w", path, err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("gateway token file %s is empty", path)
+	}
+	return token, nil
+}
+
+func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (gatewayPreflightResult, error) {
+	body, err := json.Marshal(map[string]any{
+		"model": cfg.Model,
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": cfg.Prompt,
+		}},
+		"max_tokens":  cfg.MaxTokens,
+		"temperature": 0,
+		"response_format": map[string]any{
+			"type": "json_schema",
+			"json_schema": map[string]any{
+				"name":   "mycelium_preflight",
+				"strict": true,
+				"schema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"ok": map[string]string{"type": "boolean"},
+					},
+					"required":             []string{"ok"},
+					"additionalProperties": false,
+				},
+			},
+		},
+	})
+	if err != nil {
+		return gatewayPreflightResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cfg.URL, "/")+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return gatewayPreflightResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if cfg.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	}
+	if cfg.Project != "" {
+		req.Header.Set("X-Myc-Project", cfg.Project)
+	}
+	client := cfg.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return gatewayPreflightResult{}, err
+	}
+	defer resp.Body.Close()
+	data, err := readControlHTTPBody(resp.Body, "gateway preflight response body")
+	if err != nil {
+		return gatewayPreflightResult{}, err
+	}
+	if resp.StatusCode >= 400 {
+		return gatewayPreflightResult{}, fmt.Errorf("gateway preflight returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	parsed, err := parseGatewayPreflightResponse(data)
+	if err != nil {
+		return gatewayPreflightResult{}, err
+	}
+	parsed.StatusCode = resp.StatusCode
+	parsed.Headers = resp.Header.Clone()
+	return parsed, nil
+}
+
+func parseGatewayPreflightResponse(data []byte) (gatewayPreflightResult, error) {
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content          string `json:"content"`
+				Reasoning        string `json:"reasoning"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage api.OpenAIUsage `json:"usage"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return gatewayPreflightResult{}, fmt.Errorf("decode gateway preflight response: %w", err)
+	}
+	if len(out.Choices) == 0 {
+		return gatewayPreflightResult{}, fmt.Errorf("gateway preflight response had no choices")
+	}
+	choice := out.Choices[0]
+	reasoning := choice.Message.Reasoning
+	if reasoning == "" {
+		reasoning = choice.Message.ReasoningContent
+	}
+	return gatewayPreflightResult{
+		FinishReason: choice.FinishReason,
+		Content:      choice.Message.Content,
+		Reasoning:    reasoning,
+		JSONContent:  json.Valid([]byte(strings.TrimSpace(choice.Message.Content))),
+		Usage:        out.Usage,
+	}, nil
+}
+
+func gatewayPreflightHeaders() []string {
+	return []string{
+		"X-Myc-Job",
+		"X-Myc-Project",
+		"X-Myc-Node",
+		"X-Myc-Instance",
+		"X-Myc-Backend",
+		"X-Myc-Decision",
+		"X-Myc-Attempts",
+		"X-Myc-Cold-Load",
+		"X-Myc-Load-Wall-Ms",
+		"X-Myc-Queue-Wait-Ms",
+		"X-Myc-Upstream-Wall-Ms",
+		"X-Myc-Structured-Output",
+		"X-Myc-Guided-Decoding-Requested",
 	}
 }
 

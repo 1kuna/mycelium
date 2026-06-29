@@ -239,6 +239,21 @@ func TestResolveGatewayTokenDiscoversDefaults(t *testing.T) {
 	}
 }
 
+func TestResolveGatewayTokenAcceptsOpenAICompatibleEnvNames(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
+	t.Setenv("MYCELIUM_API_KEY", "")
+	t.Setenv("ATLAS_MYCELIUM_API_KEY", "atlas-secret")
+	t.Setenv("OPENAI_API_KEY", "openai-secret")
+	if got, err := ResolveGatewayTokenForURL("http://gateway.test", "", ""); err != nil || got != "atlas-secret" {
+		t.Fatalf("atlas env token = %q err=%v", got, err)
+	}
+	t.Setenv("ATLAS_MYCELIUM_API_KEY", "")
+	if got, err := ResolveGatewayTokenForURL("http://gateway.test", "", ""); err != nil || got != "openai-secret" {
+		t.Fatalf("openai env token = %q err=%v", got, err)
+	}
+}
+
 func TestFleetBenchmarkSimulationProvesConservativeScenarioAndWritesArtifacts(t *testing.T) {
 	cfg := fleetTestConfig()
 	clock := mocks.NewFakeClock(time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC))

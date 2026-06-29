@@ -620,8 +620,10 @@ func ResolveGatewayTokenForURL(rawURL, token, tokenEnv string) (string, error) {
 		}
 		return value, nil
 	}
-	if value := strings.TrimSpace(os.Getenv("MYCELIUM_GATEWAY_TOKEN")); value != "" {
-		return value, nil
+	for _, name := range DefaultGatewayTokenEnvNames() {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value, nil
+		}
 	}
 	if value, err := defaultGatewayToken(); err != nil {
 		return "", err
@@ -636,6 +638,15 @@ func ResolveGatewayTokenForURL(rawURL, token, tokenEnv string) (string, error) {
 		return "", fmt.Errorf("gateway %s is not loopback; configure gateway_token or token_env", rawURL)
 	}
 	return "", nil
+}
+
+func DefaultGatewayTokenEnvNames() []string {
+	return []string{
+		"MYCELIUM_GATEWAY_TOKEN",
+		"MYCELIUM_API_KEY",
+		"ATLAS_MYCELIUM_API_KEY",
+		"OPENAI_API_KEY",
+	}
 }
 
 func defaultGatewayToken() (string, error) {

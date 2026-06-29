@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	osuser "os/user"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -46,7 +47,8 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 		want string
 	}{
 		{name: "run", args: []string{"run"}, want: "read peer config"},
-		{name: "ctl", args: []string{"ctl"}, want: "usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark|doctor|debug|status>"},
+		{name: "ctl gateway preflight", args: []string{"ctl", "gateway", "preflight"}, want: "--url is required"},
+		{name: "ctl", args: []string{"ctl"}, want: "usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark|gateway|doctor|debug|status>"},
 		{name: "server removed", args: []string{"server"}, want: "peer-native"},
 		{name: "node removed", args: []string{"node"}, want: "peer-native"},
 		{name: "unknown", args: []string{"wat"}, want: "unknown command"},
@@ -164,6 +166,42 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	peerCfg, err := loadPeerConfig("")
 	if err == nil || !strings.Contains(err.Error(), "read peer config") || peerCfg.Listen != "" {
 		t.Fatalf("empty peer config = %+v %v", peerCfg, err)
+	}
+	defaultCfg := applyPeerConfigDefaults(PeerConfig{
+		Listen:        "127.0.0.1:5555",
+		JoinToken:     "join-secret",
+		RPCToken:      "rpc-secret",
+		GatewayToken:  "gateway-secret",
+		ComputeConfig: ComputeConfig{ID: "peer-default"},
+	})
+	if err := savePeerConfig("", defaultCfg); err != nil {
+		t.Fatalf("save default peer config: %v", err)
+	}
+	savedDefault, err := loadPeerConfig("")
+	if err != nil || savedDefault.Listen != "127.0.0.1:5555" || savedDefault.GatewayToken != "gateway-secret" {
+		t.Fatalf("saved default peer config = %+v err=%v", savedDefault, err)
+	}
+	if err := savePeerConfig(filepath.Join(t.TempDir(), "unsafe.json"), PeerConfig{Listen: "192.0.2.10:5555"}); err == nil || !strings.Contains(err.Error(), "rpc_token") {
+		t.Fatalf("unsafe save peer config err = %v", err)
+	}
+	relDir := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	})
+	if err := os.Chdir(relDir); err != nil {
+		t.Fatalf("chdir relative config dir: %v", err)
+	}
+	if err := savePeerConfig("relative-peer.json", defaultCfg); err != nil {
+		t.Fatalf("save relative peer config: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(relDir, "relative-peer.json")); err != nil {
+		t.Fatalf("relative peer config missing: %v", err)
 	}
 	peerPath := filepath.Join(t.TempDir(), "peer.json")
 	if err := os.WriteFile(peerPath, []byte(`{}`), 0644); err != nil {
@@ -344,6 +382,25 @@ func TestConfigInitGeneratesSafeComputeConfig(t *testing.T) {
 	if loaded.Compute {
 		t.Fatalf("compute off config = %+v", loaded)
 	}
+	explicitPath := filepath.Join(home, ".mycelium", "explicit-peer.json")
+	if err := runConfig(context.Background(), []string{
+		"init",
+		"--config", explicitPath,
+		"--compute", "on",
+		"--listen", "127.0.0.1:5566",
+		"--backend", "mlx",
+		"--max-util", "0.75",
+		"--disk-min-free-ratio", "0.30",
+	}); err != nil {
+		t.Fatalf("runConfig explicit init: %v", err)
+	}
+	explicit, err := loadPeerConfig(explicitPath)
+	if err != nil {
+		t.Fatalf("load explicit config: %v", err)
+	}
+	if !explicit.Compute || explicit.Listen != "127.0.0.1:5566" || explicit.ComputeConfig.Backend != domain.BackendMLX || explicit.ComputeConfig.MaxUtil != 0.75 || explicit.ComputeConfig.DiskMinFreeRatio != 0.30 {
+		t.Fatalf("explicit config = %+v", explicit)
+	}
 }
 
 func TestPeerConfigValidationRejectsUnsafeValues(t *testing.T) {
@@ -430,6 +487,9 @@ func TestPeerConfigValidationRejectsUnsafeValues(t *testing.T) {
 func TestConfigInitHelperBranches(t *testing.T) {
 	if err := runConfig(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "usage") {
 		t.Fatalf("empty config command err = %v", err)
+	}
+	if _, err := prefixedRandomID("peer", func(int) (string, error) { return "", errors.New("entropy unavailable") }); err == nil || !strings.Contains(err.Error(), "entropy unavailable") {
+		t.Fatalf("prefixed random id err = %v", err)
 	}
 	if err := runConfig(context.Background(), []string{"bogus"}); err == nil || !strings.Contains(err.Error(), "unknown config") {
 		t.Fatalf("unknown config command err = %v", err)
@@ -795,6 +855,13 @@ func TestRunServiceStatusChecksPeerHealth(t *testing.T) {
 	if _, err := servicePeerHealth(context.Background(), failedConfig); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
 		t.Fatalf("failed service health err = %v", err)
 	}
+	refusedPeer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	refusedURL := refusedPeer.URL
+	refusedPeer.Close()
+	refusedConfig := writePeerConfig(t, PeerConfig{Listen: strings.TrimPrefix(refusedURL, "http://")})
+	if _, err := servicePeerHealth(context.Background(), refusedConfig); err == nil || !strings.Contains(err.Error(), "peer health failed") {
+		t.Fatalf("refused service health err = %v", err)
+	}
 	failedDiagnostics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(peerDiagnosticsReport{Ready: false, Seeds: []peerSeedDiagnostic{{Address: "seed", Error: "no route"}}})
@@ -803,6 +870,13 @@ func TestRunServiceStatusChecksPeerHealth(t *testing.T) {
 	failedDiagnosticsConfig := writePeerConfig(t, PeerConfig{Listen: strings.TrimPrefix(failedDiagnostics.URL, "http://"), RPCToken: "rpc-secret", SeedPeers: []string{"seed"}})
 	if _, err := servicePeerDiagnostics(context.Background(), failedDiagnosticsConfig); err == nil || !strings.Contains(err.Error(), "peer diagnostics") {
 		t.Fatalf("failed service diagnostics err = %v", err)
+	}
+	refusedDiagnostics := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	refusedDiagnosticsURL := refusedDiagnostics.URL
+	refusedDiagnostics.Close()
+	refusedDiagnosticsConfig := writePeerConfig(t, PeerConfig{Listen: strings.TrimPrefix(refusedDiagnosticsURL, "http://"), SeedPeers: []string{"seed"}})
+	if _, err := servicePeerDiagnostics(context.Background(), refusedDiagnosticsConfig); err == nil || !strings.Contains(err.Error(), "peer diagnostics failed") {
+		t.Fatalf("refused service diagnostics err = %v", err)
 	}
 
 	noSeedConfig := writePeerConfig(t, PeerConfig{Listen: "127.0.0.1:1"})
@@ -886,6 +960,11 @@ func TestServiceUtilityErrorBranches(t *testing.T) {
 	if got := launchdDomain(serviceSpec{Scope: serviceScopeSystem}); got != "system" {
 		t.Fatalf("system launchd domain = %s", got)
 	}
+	if current, err := osuser.Current(); err == nil && current.Username != "" {
+		if homeDir, err := userHome(current.Username); err != nil || homeDir == "" {
+			t.Fatalf("current user home = %q %v", homeDir, err)
+		}
+	}
 	truePath, err := exec.LookPath("true")
 	if err == nil {
 		if err := runServiceCommand(context.Background(), truePath); err != nil {
@@ -897,6 +976,68 @@ func TestServiceUtilityErrorBranches(t *testing.T) {
 		if err := runServiceCommand(context.Background(), falsePath); err == nil {
 			t.Fatal("runServiceCommand false succeeded")
 		}
+	}
+	if truePath != "" {
+		if err := (launchdManager{}).run(context.Background(), truePath); err != nil {
+			t.Fatalf("launchd default runner: %v", err)
+		}
+	}
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0755); err != nil {
+		t.Fatalf("fake bin: %v", err)
+	}
+	fakeSystemctl := filepath.Join(fakeBin, "systemctl")
+	if err := os.WriteFile(fakeSystemctl, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("fake systemctl: %v", err)
+	}
+	fakeLaunchctl := filepath.Join(fakeBin, "launchctl")
+	if err := os.WriteFile(fakeLaunchctl, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("fake launchctl: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	defaultLaunchdSpec := serviceSpec{
+		Scope:      serviceScopeUser,
+		Label:      "com.mycelium.default",
+		ConfigPath: filepath.Join(home, "peer.json"),
+		BinaryPath: "/bin/mycelium",
+		LogDir:     filepath.Join(home, "logs"),
+		UnitPath:   filepath.Join(home, "unit.plist"),
+	}
+	if err := (launchdManager{}).Install(context.Background(), defaultLaunchdSpec); err != nil {
+		t.Fatalf("launchd default runner install: %v", err)
+	}
+	if status, err := (launchdManager{}).Status(context.Background(), defaultLaunchdSpec); err != nil || status != "active" {
+		t.Fatalf("launchd default runner status = %q %v", status, err)
+	}
+	if err := (launchdManager{}).Uninstall(context.Background(), defaultLaunchdSpec); err != nil {
+		t.Fatalf("launchd default runner uninstall: %v", err)
+	}
+	defaultSystemdSpec := serviceSpec{
+		Scope:      serviceScopeSystem,
+		ConfigPath: filepath.Join(home, "peer.json"),
+		BinaryPath: "/bin/mycelium",
+		LogDir:     filepath.Join(home, "logs"),
+		UnitPath:   filepath.Join(home, "unit.service"),
+	}
+	if err := (systemdManager{}).Install(context.Background(), defaultSystemdSpec); err != nil {
+		t.Fatalf("systemd default runner install: %v", err)
+	}
+	if status, err := (systemdManager{}).Status(context.Background(), defaultSystemdSpec); err != nil || status != "active" {
+		t.Fatalf("systemd default runner status = %q %v", status, err)
+	}
+	if err := (systemdManager{}).Uninstall(context.Background(), defaultSystemdSpec); err != nil {
+		t.Fatalf("systemd default runner uninstall: %v", err)
+	}
+	defaultSystemdSpec.Scope = serviceScopeUser
+	defaultSystemdSpec.UnitPath = filepath.Join(home, "user-unit.service")
+	if err := (systemdManager{}).Install(context.Background(), defaultSystemdSpec); err != nil {
+		t.Fatalf("systemd user default runner install: %v", err)
+	}
+	if status, err := (systemdManager{}).Status(context.Background(), defaultSystemdSpec); err != nil || status != "active" {
+		t.Fatalf("systemd user default runner status = %q %v", status, err)
+	}
+	if err := (systemdManager{}).Uninstall(context.Background(), defaultSystemdSpec); err != nil {
+		t.Fatalf("systemd user default runner uninstall: %v", err)
 	}
 	errBoom := errors.New("manager")
 	if err := runServiceWithManager(context.Background(), []string{"install", "--config", filepath.Join(home, "peer.json")}, fakeServiceManager{err: errBoom}, "darwin"); !errors.Is(err, errBoom) {
@@ -950,6 +1091,9 @@ func TestPrivateStorageKeyValidation(t *testing.T) {
 }
 
 func TestPeerConfigHelpersSeedMapsAndShutdowns(t *testing.T) {
+	if got := defaultedBackendRuntimeConfig(BackendRuntimeConfig{}); got.Backend != domain.BackendLlamaCpp || got.LlamaServer != "llama-server" {
+		t.Fatalf("default backend runtime = %+v", got)
+	}
 	var target string
 	overrideString(nil, &target)
 	if target != "" {
