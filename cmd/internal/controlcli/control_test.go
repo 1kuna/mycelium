@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -970,6 +971,8 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 		"finish_reason\tstop",
 		"content_length\t11",
 		"reasoning_length\t7",
+		"tool_calls\tcount=0\tnames=-",
+		"textual_tool_call\tfalse",
 		"json\ttrue",
 		"usage\tprompt=4\tcompletion=3\ttotal=7",
 		"evidence\t" + filepath.Join(outDir, "preflight.json"),
@@ -992,8 +995,103 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 	if err := json.Unmarshal(evidenceData, &evidence); err != nil {
 		t.Fatalf("decode preflight evidence: %v", err)
 	}
-	if evidence.AuthSource != "ATLAS_MYCELIUM_API_KEY" || evidence.Headers["X-Myc-Node"] != "b70" || evidence.ContentLength != 11 || evidence.ReasoningLength != 7 || !evidence.JSONContent || evidence.Usage.TotalTokens != 7 {
+	if evidence.AuthSource != "ATLAS_MYCELIUM_API_KEY" || evidence.Headers["X-Myc-Node"] != "b70" || evidence.ContentLength != 11 || evidence.ReasoningLength != 7 || evidence.ToolCallCount != 0 || evidence.TextualToolCall || !evidence.JSONContent || evidence.Usage.TotalTokens != 7 {
 		t.Fatalf("preflight evidence = %+v", evidence)
+	}
+}
+
+func TestRunGatewayPreflightToolCanaryRecordsResponseShape(t *testing.T) {
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "tool-secret")
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer tool-secret" {
+			t.Fatalf("gateway auth = %q", got)
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if _, hasSchema := req["response_format"]; hasSchema {
+			t.Fatalf("tool preflight should not request schema response_format: %#v", req["response_format"])
+		}
+		tools, ok := req["tools"].([]any)
+		if !ok || len(tools) != 1 {
+			t.Fatalf("tools = %#v", req["tools"])
+		}
+		tool, ok := tools[0].(map[string]any)
+		if !ok || tool["strict"] != true {
+			t.Fatalf("tool strict flag = %#v", tools[0])
+		}
+		choice, ok := req["tool_choice"].(map[string]any)
+		if !ok || choice["type"] != "function" {
+			t.Fatalf("tool_choice = %#v", req["tool_choice"])
+		}
+		w.Header().Set("X-Myc-Job", "job-tool")
+		w.Header().Set("X-Myc-Node", "spark")
+		w.Header().Set("X-Myc-Backend", "vllm")
+		w.Header().Set("X-Myc-Decision", "placed_on_warm_instance")
+		w.Header().Set("X-Myc-Tools-Requested", "true")
+		w.Header().Set("X-Myc-Tool-Choice", "function:echo")
+		w.Header().Set("X-Myc-VLLM-Tool-Parser-Configured", "true")
+		w.Header().Set("X-Myc-VLLM-Auto-Tool-Choice-Configured", "true")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"tool_calls": []map[string]any{{
+						"id":   "call_1",
+						"type": "function",
+						"function": map[string]string{
+							"name":      "echo",
+							"arguments": `{"value":"ok"}`,
+						},
+					}},
+				},
+				"finish_reason": "tool_calls",
+			}},
+			"usage": map[string]int{"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16},
+		})
+	}))
+
+	outDir := filepath.Join(t.TempDir(), "tool-preflight")
+	var err error
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{
+			"gateway", "preflight",
+			"--url", "http://gateway.test",
+			"--model", "spark-qwen9b",
+			"--project", "verso-tool",
+			"--prompt", "Call echo with value ok.",
+			"--tool-name", "echo",
+			"--tool-choice", "function",
+			"--out", outDir,
+		}, client)
+	})
+	if err != nil {
+		t.Fatalf("tool gateway preflight: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"header\tX-Myc-Node\tspark",
+		"header\tX-Myc-Tool-Choice\tfunction:echo",
+		"finish_reason\ttool_calls",
+		"tool_calls\tcount=1\tnames=echo",
+		"textual_tool_call\tfalse",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("tool preflight output missing %q:\n%s", want, output)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, "preflight.json"))
+	if err != nil {
+		t.Fatalf("read tool preflight evidence: %v", err)
+	}
+	if strings.Contains(string(data), "tool-secret") || strings.Contains(string(data), "Call echo") || strings.Contains(string(data), `{"value":"ok"}`) {
+		t.Fatalf("tool evidence leaked secret/prompt/content: %s", data)
+	}
+	var evidence gatewayPreflightEvidence
+	if err := json.Unmarshal(data, &evidence); err != nil {
+		t.Fatalf("decode tool preflight evidence: %v", err)
+	}
+	if evidence.ToolCallCount != 1 || !reflect.DeepEqual(evidence.ToolCallNames, []string{"echo"}) || evidence.TextualToolCall {
+		t.Fatalf("tool preflight evidence = %+v", evidence)
 	}
 }
 
@@ -1437,6 +1535,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"preflight\tstatus=200\tmodel=qwen3.5-9b\tproject=atlas-batch",
 		"preflight-route\tnode=b70\tbackend=vllm\tinstance=inst_2\tdecision=placed_on_warm_instance",
 		"preflight-tools\trequested=true\tchoice=auto\tvllm_parser=true\tvllm_auto=false",
+		"preflight-tool-result\tcount=0\tnames=-\ttextual=true",
 		"preflight-usage\tprompt=16\tcompletion=10\ttotal=26",
 		"owner-telemetry\tok\tnode=node-a\taddress=http://peer.test\tmetrics=1\tsamples=1\tttft_ms=34\tload_ms=0\ttps=12.50\tcontext=26\tphases=complete",
 		"consumer\trun=atlas-batch-7\titem=row-006\tstatus=timeout\telapsed_ms=180000\terror=client_deadline",
@@ -1457,7 +1556,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	if err := json.Unmarshal([]byte(preflightJSONOutput), &preflightReport); err != nil {
 		t.Fatalf("decode preflight debug json: %v\n%s", err, preflightJSONOutput)
 	}
-	if preflightReport.Preflight == nil || preflightReport.Preflight.Headers["X-Myc-Node"] != "b70" || preflightReport.Preflight.ContentLength != 16 || preflightReport.OwnerTelemetry == nil || len(preflightReport.OwnerTelemetry.RunMetrics) != 1 || len(preflightReport.OwnerTelemetry.SessionTimeline) != 1 || preflightReport.Diagnosis == nil || preflightReport.Diagnosis.Class != "owner_completed_warm" {
+	if preflightReport.Preflight == nil || preflightReport.Preflight.Headers["X-Myc-Node"] != "b70" || preflightReport.Preflight.ContentLength != 16 || !preflightReport.Preflight.TextualToolCall || preflightReport.OwnerTelemetry == nil || len(preflightReport.OwnerTelemetry.RunMetrics) != 1 || len(preflightReport.OwnerTelemetry.SessionTimeline) != 1 || preflightReport.Diagnosis == nil || preflightReport.Diagnosis.Class != "owner_completed_warm" {
 		t.Fatalf("preflight debug report = %+v", preflightReport)
 	}
 	if preflightReport.Consumer != nil {
@@ -2381,6 +2480,7 @@ func writeGatewayPreflightEvidenceFixture(t *testing.T, jobID string) string {
 		FinishReason:    "stop",
 		ContentLength:   16,
 		ReasoningLength: 0,
+		TextualToolCall: true,
 		JSONContent:     true,
 		Usage: api.OpenAIUsage{
 			PromptTokens:     16,

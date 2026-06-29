@@ -872,7 +872,7 @@ func preflightHeader(report jobDebugReport, key string) string {
 
 func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidence) {
 	headers := evidence.Headers
-	fmt.Fprintf(w, "preflight\tstatus=%d\tmodel=%s\tproject=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\n", evidence.StatusCode, emptyDash(evidence.Model), emptyDash(evidence.Project), emptyDash(evidence.FinishReason), evidence.ContentLength, evidence.ReasoningLength, evidence.JSONContent)
+	fmt.Fprintf(w, "preflight\tstatus=%d\tmodel=%s\tproject=%s\tfinish=%s\tcontent=%d\treasoning=%d\ttool_calls=%d\ttextual_tool=%t\tjson=%t\n", evidence.StatusCode, emptyDash(evidence.Model), emptyDash(evidence.Project), emptyDash(evidence.FinishReason), evidence.ContentLength, evidence.ReasoningLength, evidence.ToolCallCount, evidence.TextualToolCall, evidence.JSONContent)
 	fmt.Fprintf(w, "preflight-route\tnode=%s\tbackend=%s\tinstance=%s\tdecision=%s\tattempts=%s\tcold=%s\tqueue_ms=%s\tupstream_ms=%s\tstructured=%s\tguided=%s\n",
 		emptyDash(headers["X-Myc-Node"]),
 		emptyDash(headers["X-Myc-Backend"]),
@@ -891,6 +891,13 @@ func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidenc
 			emptyDash(headers["X-Myc-Tool-Choice"]),
 			emptyDash(headers["X-Myc-VLLM-Tool-Parser-Configured"]),
 			emptyDash(headers["X-Myc-VLLM-Auto-Tool-Choice-Configured"]),
+		)
+	}
+	if evidence.ToolCallCount > 0 || evidence.TextualToolCall {
+		fmt.Fprintf(w, "preflight-tool-result\tcount=%d\tnames=%s\ttextual=%t\n",
+			evidence.ToolCallCount,
+			emptyDash(strings.Join(evidence.ToolCallNames, ",")),
+			evidence.TextualToolCall,
 		)
 	}
 	if evidence.Usage.TotalTokens != 0 || evidence.Usage.PromptTokens != 0 || evidence.Usage.CompletionTokens != 0 {
