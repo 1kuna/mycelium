@@ -60,7 +60,10 @@
   `spark-qwen9b-tools-8192`. `myce gateway preflight` now has expectation flags
   to preserve this proof shape without printing secrets: `--expect-node`,
   `--require-json`, `--require-tool-call`, `--reject-textual-tool-call`, and
-  `--min-prompt-tokens`.
+  `--min-prompt-tokens`. It also has `--stream` for streaming consumer paths;
+  the redacted artifact records terminal stream completion and whether usage
+  was actually supplied, so missing streaming usage is now explicit evidence
+  rather than an assumed zero.
 - 2026-06-29: Cold-load/client-timeout stale-job live proof is blocked at the
   MacBook gateway activation step, not at the Linux peers. B70 and Spark were
   updated through their existing `mycelium-real-fleet.service` user-systemd

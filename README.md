@@ -188,9 +188,9 @@ curl http://<gateway-host>:<port>/v1/chat/completions \
   }'
 ```
 
-Project consumers should first run the secret-safe preflight. It sends one
-non-streaming strict JSON-schema chat request, prints route/usage evidence, and
-never prints the bearer token:
+Project consumers should first run the secret-safe preflight. By default it
+sends one non-streaming strict JSON-schema chat request, prints route/usage
+evidence, and never prints the bearer token:
 
 ```bash
 myce gateway preflight \
@@ -242,8 +242,9 @@ Useful response headers:
 When `--out` is set, `myce gateway preflight` writes
 `preflight.json` with the gateway URL, model, project, auth source label,
 whitelisted `X-Myc-*` headers, finish reason, content/reasoning lengths, JSON
-parse status, and usage counts. It intentionally does not write the bearer
-token, prompt, or raw completion content. Use that artifact, plus
+parse status, usage availability, usage counts when available, and streaming
+completion status when `--stream` is used. It intentionally does not write the
+bearer token, prompt, or raw completion content. Use that artifact, plus
 `myce debug job --preflight <preflight.json> --owner-telemetry --json`, as the
 standard consumer evidence packet for optimization handoffs. If the consumer
 has a batch/run id, row/document id, timeout/error/cancel state, or client
@@ -355,7 +356,10 @@ myce gateway preflight \
 The redacted `preflight.json` records `tool_call_count`, `tool_call_names`,
 `textual_tool_call`, route headers, usage, content length, reasoning length, and
 finish reason, but not the bearer token, prompt, raw content, or tool
-arguments. Gateways built from this revision also echo the effective
+arguments. Add `--stream` when the consumer path itself is streaming; the
+artifact then records whether a terminal `[DONE]` event arrived and whether
+streaming usage was actually supplied. Gateways built from this revision also
+echo the effective
 `X-Myc-Project` response header so later debug bundles can join route evidence
 to consumer run labels without reading gateway internals.
 
@@ -444,11 +448,30 @@ to prove context headroom, not only the tool parser.
 
 Streaming is usable for the warmed 8192 route, but streaming token accounting is
 weaker than non-streaming preflight unless the provider stream includes usage.
-The streaming proof to preserve for PM/debug handoff is curl exit status,
-`X-Myc-*` headers, `[DONE]` marker presence, structured `tool_calls` chunks, and
-absence of textual `<tool_call>` content. Pair any streaming run with at least
-one non-streaming preflight on the same model/project when context and usage
-numbers matter for optimization.
+Use `--stream` to make that explicit in the redacted artifact:
+
+```bash
+myce gateway preflight \
+  --url http://192.168.0.16:55274 \
+  --model spark-qwen9b-tools-8192 \
+  --project verso-tools \
+  --gateway-token-file <operator-provided-verso-tools-token-file> \
+  --prompt "Call the echo function with value ok. Do not answer directly." \
+  --max-tokens 80 \
+  --tool-name echo \
+  --tool-choice function \
+  --stream \
+  --expect-node spark \
+  --require-tool-call \
+  --reject-textual-tool-call \
+  --out /tmp/mycelium-verso-tools8192-stream
+```
+
+The streaming evidence to preserve for PM/debug handoff is `stream_done`,
+`usage_available`, `X-Myc-*` headers, structured `tool_calls`, and absence of
+textual `<tool_call>` content. Pair any streaming run with at least one
+non-streaming preflight on the same model/project when large-fixture context and
+usage numbers matter for optimization.
 
 ### Prove cold-load cancellation cleanup after activation
 

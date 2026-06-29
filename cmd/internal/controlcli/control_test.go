@@ -1099,6 +1099,171 @@ func TestRunGatewayPreflightToolCanaryRecordsResponseShape(t *testing.T) {
 	}
 }
 
+func TestRunGatewayPreflightStreamRecordsToolAndUsageEvidence(t *testing.T) {
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "stream-secret")
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer stream-secret" {
+			t.Fatalf("gateway auth = %q", got)
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req["stream"] != true {
+			t.Fatalf("stream = %#v", req["stream"])
+		}
+		streamOptions, ok := req["stream_options"].(map[string]any)
+		if !ok || streamOptions["include_usage"] != true {
+			t.Fatalf("stream_options = %#v", req["stream_options"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Myc-Job", "job-stream-tool")
+		w.Header().Set("X-Myc-Node", "spark")
+		w.Header().Set("X-Myc-Backend", "vllm")
+		w.Header().Set("X-Myc-Decision", "placed_on_warm_instance")
+		w.Header().Set("X-Myc-Tools-Requested", "true")
+		w.Header().Set("X-Myc-Tool-Choice", "function:echo")
+		w.Header().Set("X-Myc-VLLM-Tool-Parser-Configured", "true")
+		w.Header().Set("X-Myc-VLLM-Auto-Tool-Choice-Configured", "true")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"echo","arguments":""}}]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"value\":\"ok\"}"}}]},"finish_reason":"tool_calls"}]}`,
+			`data: {"choices":[],"usage":{"prompt_tokens":21,"completion_tokens":4,"total_tokens":25}}`,
+			`data: [DONE]`,
+			``,
+		}, "\n\n")))
+	}))
+
+	outDir := filepath.Join(t.TempDir(), "stream-preflight")
+	var err error
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{
+			"gateway", "preflight",
+			"--url", "http://gateway.test",
+			"--model", "spark-qwen9b-tools-8192",
+			"--project", "verso-tools",
+			"--tool-name", "echo",
+			"--tool-choice", "function",
+			"--stream",
+			"--expect-node", "spark",
+			"--require-tool-call",
+			"--reject-textual-tool-call",
+			"--min-prompt-tokens", "20",
+			"--out", outDir,
+		}, client)
+	})
+	if err != nil {
+		t.Fatalf("stream gateway preflight: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"header\tX-Myc-Node\tspark",
+		"finish_reason\ttool_calls",
+		"tool_calls\tcount=1\tnames=echo",
+		"stream\tdone=true\tusage_available=true",
+		"usage\tprompt=21\tcompletion=4\ttotal=25",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("stream preflight output missing %q:\n%s", want, output)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, "preflight.json"))
+	if err != nil {
+		t.Fatalf("read stream preflight evidence: %v", err)
+	}
+	if strings.Contains(string(data), "stream-secret") || strings.Contains(string(data), "Call") || strings.Contains(string(data), `{"value":"ok"}`) {
+		t.Fatalf("stream evidence leaked secret/prompt/content: %s", data)
+	}
+	var evidence gatewayPreflightEvidence
+	if err := json.Unmarshal(data, &evidence); err != nil {
+		t.Fatalf("decode stream evidence: %v", err)
+	}
+	if !evidence.Streaming || !evidence.StreamDone || !evidence.UsageAvailable || evidence.Usage.TotalTokens != 25 || evidence.ToolCallCount != 1 || !reflect.DeepEqual(evidence.ToolCallNames, []string{"echo"}) {
+		t.Fatalf("stream evidence = %+v", evidence)
+	}
+}
+
+func TestRunGatewayPreflightStreamMakesMissingUsageExplicit(t *testing.T) {
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "stream-secret")
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Myc-Node", "spark")
+		w.Header().Set("X-Myc-Tool-Choice", "function:echo")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"echo","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n\n")))
+	}))
+	outDir := filepath.Join(t.TempDir(), "stream-no-usage")
+	var err error
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{
+			"gateway", "preflight",
+			"--url", "http://gateway.test",
+			"--model", "spark-qwen9b-tools-8192",
+			"--tool-name", "echo",
+			"--tool-choice", "function",
+			"--stream",
+			"--require-tool-call",
+			"--out", outDir,
+		}, client)
+	})
+	if err != nil {
+		t.Fatalf("stream no-usage preflight: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "stream\tdone=true\tusage_available=false") || !strings.Contains(output, "usage\tunavailable") {
+		t.Fatalf("missing usage not explicit:\n%s", output)
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, "preflight.json"))
+	if err != nil {
+		t.Fatalf("read stream no-usage evidence: %v", err)
+	}
+	var evidence gatewayPreflightEvidence
+	if err := json.Unmarshal(data, &evidence); err != nil {
+		t.Fatalf("decode stream no-usage evidence: %v", err)
+	}
+	if !evidence.Streaming || !evidence.StreamDone || evidence.UsageAvailable || evidence.Usage.TotalTokens != 0 {
+		t.Fatalf("stream no-usage evidence = %+v", evidence)
+	}
+}
+
+func TestRunGatewayPreflightStreamRequiresTerminalDoneAfterWritingEvidence(t *testing.T) {
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "stream-secret")
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Myc-Node", "spark")
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}` + "\n\n"))
+	}))
+	outDir := filepath.Join(t.TempDir(), "stream-missing-done")
+	var err error
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{
+			"gateway", "preflight",
+			"--url", "http://gateway.test",
+			"--model", "spark-qwen9b-tools-8192",
+			"--stream",
+			"--out", outDir,
+		}, client)
+	})
+	if err == nil || !strings.Contains(err.Error(), "expected terminal streaming [DONE] event") || !strings.Contains(err.Error(), "preflight.json") {
+		t.Fatalf("missing done err = %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "stream\tdone=false\tusage_available=false") {
+		t.Fatalf("missing done output = %s", output)
+	}
+	var evidence gatewayPreflightEvidence
+	data, readErr := os.ReadFile(filepath.Join(outDir, "preflight.json"))
+	if readErr != nil {
+		t.Fatalf("read missing done evidence: %v", readErr)
+	}
+	if err := json.Unmarshal(data, &evidence); err != nil {
+		t.Fatalf("decode missing done evidence: %v", err)
+	}
+	if !evidence.Streaming || evidence.StreamDone {
+		t.Fatalf("missing done evidence = %+v", evidence)
+	}
+}
+
 func TestRunGatewayPreflightExpectationsFailAfterWritingEvidence(t *testing.T) {
 	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "tool-secret")
 	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1913,6 +2078,16 @@ func TestGatewayPreflightEvidenceHelpers(t *testing.T) {
 	if _, err := readGatewayPreflightEvidence(filepath.Join(t.TempDir(), "missing.json")); err == nil || !strings.Contains(err.Error(), "read gateway preflight evidence") {
 		t.Fatalf("missing preflight err = %v", err)
 	}
+
+	evidence.Streaming = true
+	evidence.StreamDone = true
+	evidence.UsageAvailable = false
+	evidence.Usage = api.OpenAIUsage{}
+	var summary strings.Builder
+	printPreflightEvidenceSummary(&summary, evidence)
+	if !strings.Contains(summary.String(), "preflight-stream\tdone=true\tusage_available=false") || !strings.Contains(summary.String(), "preflight-usage\tunavailable") {
+		t.Fatalf("streaming preflight summary = %s", summary.String())
+	}
 }
 
 func TestOwnerTelemetryFetchFailureModes(t *testing.T) {
@@ -2536,6 +2711,7 @@ func writeGatewayPreflightEvidenceFixture(t *testing.T, jobID string) string {
 		ReasoningLength: 0,
 		TextualToolCall: true,
 		JSONContent:     true,
+		UsageAvailable:  true,
 		Usage: api.OpenAIUsage{
 			PromptTokens:     16,
 			CompletionTokens: 10,

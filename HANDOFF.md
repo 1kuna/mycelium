@@ -10,7 +10,7 @@ handoff rewrite.
 ## Current Repo State
 
 - Branch: `main`.
-- Latest observed commit before this handoff refresh: `04abec6 Document Spark 8192 tool route`.
+- Latest observed commit before this handoff refresh: `816fd3a Document Verso 8192 route contract`.
 - Remote already configured: `origin https://github.com/1kuna/mycelium.git`.
 - Source-of-truth docs remain `01-project-spec.md`, `02-testing-architecture.md`,
   and `03-development-guide.md`.
@@ -221,6 +221,22 @@ important continuity points are:
   non-streaming preflight remains the strongest token/context accounting proof;
   streaming route headers and owner timing are available, but token usage may be
   absent unless the provider stream includes usage.
+- A repo-local control-CLI hardening pass then made streaming evidence a first-
+  class secret-safe preflight artifact rather than a hand-rolled curl packet.
+  `myce gateway preflight --stream` sends `stream:true` with
+  `stream_options.include_usage:true`, records `streaming`, `stream_done`,
+  `usage_available`, structured `tool_call_names`, textual-tool detection, and
+  usage counts only when the provider actually supplies them. `debug job
+  --preflight` prints `preflight-stream` and either concrete
+  `preflight-usage` or `preflight-usage unavailable`. A live direct-Spark
+  streaming preflight for `spark-qwen9b-tools-8192` with the `verso-tools`
+  token returned HTTP 200, `X-Myc-Node: spark`,
+  `X-Myc-Decision: placed_on_warm_instance`, `stream done=true`,
+  `usage_available=true`, `tool_call_count=1`, `tool_call_names=echo`,
+  `textual_tool_call=false`, and usage `prompt=296 completion=12 total=308`.
+  The latest current-tree proof used job `gateway-1782756550764336284-90-1`
+  and artifact
+  `/tmp/mycelium-verso-tools8192-stream-preflight-20260629T184023Z/preflight.json`.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and
