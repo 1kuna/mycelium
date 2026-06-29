@@ -61,7 +61,9 @@ completions:
 - outcome: HTTP status, provider finish reason, content length, reasoning
   length, JSON parse status, tool-call count/names, textual-tool-call flag,
   token usage when available, consumer elapsed time, and sanitized consumer
-  error class.
+  error class;
+- quality: sanitized consumer validation result and quality gate, such as
+  schema validity, parser success, or review status.
 
 Use `myce gateway preflight --out <dir>` to write a redacted `preflight.json`.
 Use `myce debug job --preflight <preflight.json> --owner-telemetry` or

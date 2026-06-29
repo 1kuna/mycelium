@@ -957,6 +957,8 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 			"--consumer-item", "row-004",
 			"--consumer-status", "ok",
 			"--consumer-elapsed-ms", "1200",
+			"--consumer-result", "pass",
+			"--consumer-quality-gate", "strict-json-validation",
 			"--out", outDir,
 		}, client)
 	})
@@ -978,7 +980,7 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 		"textual_tool_call\tfalse",
 		"json\ttrue",
 		"usage\tprompt=4\tcompletion=3\ttotal=7",
-		"consumer\trun=strict-json-run-001\titem=row-004\tstatus=ok\telapsed_ms=1200\terror=-",
+		"consumer\trun=strict-json-run-001\titem=row-004\tstatus=ok\telapsed_ms=1200\terror=-\tresult=pass\tquality_gate=strict-json-validation",
 		"evidence\t" + filepath.Join(outDir, "preflight.json"),
 	} {
 		if !strings.Contains(output, want) {
@@ -1008,7 +1010,7 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 	if evidence.Expectations != nil {
 		t.Fatalf("unexpected preflight expectations = %+v", evidence.Expectations)
 	}
-	if evidence.Consumer == nil || evidence.Consumer.RunID != "strict-json-run-001" || evidence.Consumer.ItemID != "row-004" || evidence.Consumer.Status != "ok" || evidence.Consumer.ElapsedMS != 1200 {
+	if evidence.Consumer == nil || evidence.Consumer.RunID != "strict-json-run-001" || evidence.Consumer.ItemID != "row-004" || evidence.Consumer.Status != "ok" || evidence.Consumer.ElapsedMS != 1200 || evidence.Consumer.Result != "pass" || evidence.Consumer.QualityGate != "strict-json-validation" {
 		t.Fatalf("preflight consumer evidence = %+v", evidence.Consumer)
 	}
 }
@@ -1965,7 +1967,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	preflightPath := writeGatewayPreflightEvidenceFixture(t, "job-a")
 	ownerClient := operatorOwnerTelemetryClient(t)
 	preflightOutput := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--owner-telemetry", "--rpc-token", "rpc-secret", "--consumer-run", "strict-json-batch-7", "--consumer-item", "row-006", "--consumer-status", "timeout", "--consumer-elapsed-ms", "180000", "--consumer-error", "client_deadline", "--db", dbPath}, ownerClient)
+		err = RunWithClient(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--owner-telemetry", "--rpc-token", "rpc-secret", "--consumer-run", "strict-json-batch-7", "--consumer-item", "row-006", "--consumer-status", "timeout", "--consumer-elapsed-ms", "180000", "--consumer-error", "client_deadline", "--consumer-result", "fail", "--consumer-quality-gate", "strict-json-validation", "--db", dbPath}, ownerClient)
 	})
 	if err != nil {
 		t.Fatalf("debug job with preflight: %v\n%s", err, preflightOutput)
@@ -1980,9 +1982,9 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"preflight-tool-result\tcount=0\tnames=-\ttextual=true",
 		"preflight-usage\tprompt=16\tcompletion=10\ttotal=26",
 		"owner-telemetry\tok\tnode=node-a\taddress=http://peer.test\tmetrics=1\tsamples=1\tttft_ms=34\tload_ms=0\ttps=12.50\tcontext=26\tphases=complete",
-		"consumer\trun=strict-json-batch-7\titem=row-006\tstatus=timeout\telapsed_ms=180000\terror=client_deadline",
+		"consumer\trun=strict-json-batch-7\titem=row-006\tstatus=timeout\telapsed_ms=180000\terror=client_deadline\tresult=fail\tquality_gate=strict-json-validation",
 		"diagnosis\towner_completed_warm\towner node-a completed warm inference; load_ms=0; ttft_ms=34; consumer_status=timeout; upstream_ms=512; structured=json_schema",
-		"optimization\tjob=job-a\tproject=strict-json-batch\tconsumer_status=timeout\tnode=b70\tpreset=tiny\tmodel=strict-json-model\tcontext_cap=0\tmin_context=0\tcontext_ok=false\tstream=false\ttool=true\tusage=16/10/26\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=consumer\tfailure_class=owner_completed_warm",
+		"optimization\tjob=job-a\tproject=strict-json-batch\tconsumer_status=timeout\tconsumer_result=fail\tquality_gate=strict-json-validation\tnode=b70\tpreset=tiny\tmodel=strict-json-model\tcontext_cap=0\tmin_context=0\tcontext_ok=false\tstream=false\ttool=true\tusage=16/10/26\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=quality\tfailure_class=consumer_quality_failed",
 	} {
 		if !strings.Contains(preflightOutput, want) {
 			t.Fatalf("preflight debug output missing %q:\n%s", want, preflightOutput)
@@ -2014,6 +2016,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		Status:    "partial",
 		ElapsedMS: 42000,
 		Error:     "client_timeout",
+		Result:    "unknown",
 	})
 	labeledJSONOutput := captureStdout(t, func() {
 		err = RunWithClient(context.Background(), []string{"debug", "job", "--preflight", labeledPreflightPath, "--json", "--db", dbPath}, ownerClient)
@@ -2025,7 +2028,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	if err := json.Unmarshal([]byte(labeledJSONOutput), &labeledReport); err != nil {
 		t.Fatalf("decode labeled preflight debug json: %v\n%s", err, labeledJSONOutput)
 	}
-	if labeledReport.Consumer == nil || labeledReport.Consumer.RunID != "tool-run-hold" || labeledReport.Consumer.ItemID != "fixture-compact" || labeledReport.Consumer.Status != "partial" || labeledReport.Consumer.ElapsedMS != 42000 || labeledReport.Consumer.Error != "client_timeout" {
+	if labeledReport.Consumer == nil || labeledReport.Consumer.RunID != "tool-run-hold" || labeledReport.Consumer.ItemID != "fixture-compact" || labeledReport.Consumer.Status != "partial" || labeledReport.Consumer.ElapsedMS != 42000 || labeledReport.Consumer.Error != "client_timeout" || labeledReport.Consumer.Result != "unknown" {
 		t.Fatalf("labeled preflight consumer = %+v", labeledReport.Consumer)
 	}
 	if err := Run(context.Background(), []string{"debug", "job", "job-other", "--preflight", preflightPath, "--db", dbPath}); err == nil || !strings.Contains(err.Error(), `does not match requested job "job-other"`) {
@@ -2211,7 +2214,7 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 
 	var err error
 	output := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--preflight", preflightPath, "--owner-telemetry", "--consumer-run", "tool-prod-smoke", "--consumer-item", "item-42", "--consumer-status", "error", "--consumer-elapsed-ms", "3210", "--consumer-error", "response_parse_error", "--out", outDir}, client)
+		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--preflight", preflightPath, "--owner-telemetry", "--consumer-run", "tool-prod-smoke", "--consumer-item", "item-42", "--consumer-status", "error", "--consumer-elapsed-ms", "3210", "--consumer-error", "response_parse_error", "--consumer-result", "fail", "--consumer-quality-gate", "response-parser", "--out", outDir}, client)
 	})
 	if err != nil {
 		t.Fatalf("debug bundle: %v\n%s", err, output)
@@ -2263,7 +2266,7 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read optimization artifact: %v", err)
 	}
-	if strings.Contains(string(optimizationData), "rpc-secret") || !strings.Contains(string(optimizationData), `"project": "strict-json-batch"`) || !strings.Contains(string(optimizationData), `"consumer_status": "error"`) || !strings.Contains(string(optimizationData), `"failure_layer": "consumer"`) || !strings.Contains(string(optimizationData), `"usage_total_tokens": 26`) {
+	if strings.Contains(string(optimizationData), "rpc-secret") || !strings.Contains(string(optimizationData), `"project": "strict-json-batch"`) || !strings.Contains(string(optimizationData), `"consumer_status": "error"`) || !strings.Contains(string(optimizationData), `"consumer_result": "fail"`) || !strings.Contains(string(optimizationData), `"consumer_quality_gate": "response-parser"`) || !strings.Contains(string(optimizationData), `"failure_layer": "quality"`) || !strings.Contains(string(optimizationData), `"usage_total_tokens": 26`) {
 		t.Fatalf("optimization artifact = %s", optimizationData)
 	}
 
@@ -2289,25 +2292,28 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 }
 
 func TestConsumerEvidenceFromFlags(t *testing.T) {
-	evidence, err := consumerEvidenceFromFlags(" run ", " item ", "TIMEOUT", 42, " deadline ")
+	evidence, err := consumerEvidenceFromFlags(" run ", " item ", "TIMEOUT", 42, " deadline ", "FAIL", " schema ")
 	if err != nil {
 		t.Fatalf("consumerEvidenceFromFlags: %v", err)
 	}
-	if evidence.RunID != "run" || evidence.ItemID != "item" || evidence.Status != "timeout" || evidence.ElapsedMS != 42 || evidence.Error != "deadline" {
+	if evidence.RunID != "run" || evidence.ItemID != "item" || evidence.Status != "timeout" || evidence.ElapsedMS != 42 || evidence.Error != "deadline" || evidence.Result != "fail" || evidence.QualityGate != "schema" {
 		t.Fatalf("consumer evidence = %+v", evidence)
 	}
-	empty, err := consumerEvidenceFromFlags("", "", "", 0, "")
+	empty, err := consumerEvidenceFromFlags("", "", "", 0, "", "", "")
 	if err != nil {
 		t.Fatalf("empty consumer evidence: %v", err)
 	}
 	if empty != nil {
 		t.Fatalf("empty consumer evidence = %+v", empty)
 	}
-	if _, err := consumerEvidenceFromFlags("", "", "lost", 0, ""); err == nil || !strings.Contains(err.Error(), "--consumer-status") {
+	if _, err := consumerEvidenceFromFlags("", "", "lost", 0, "", "", ""); err == nil || !strings.Contains(err.Error(), "--consumer-status") {
 		t.Fatalf("bad status err = %v", err)
 	}
-	if _, err := consumerEvidenceFromFlags("", "", "", -1, ""); err == nil || !strings.Contains(err.Error(), "--consumer-elapsed-ms") {
+	if _, err := consumerEvidenceFromFlags("", "", "", -1, "", "", ""); err == nil || !strings.Contains(err.Error(), "--consumer-elapsed-ms") {
 		t.Fatalf("bad elapsed err = %v", err)
+	}
+	if _, err := consumerEvidenceFromFlags("", "", "", 0, "", "maybe", ""); err == nil || !strings.Contains(err.Error(), "--consumer-result") {
+		t.Fatalf("bad result err = %v", err)
 	}
 }
 

@@ -1338,6 +1338,8 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	consumerStatus := fs.String("consumer-status", "", "consumer outcome: ok, timeout, error, canceled, or partial")
 	consumerElapsedMS := fs.Int("consumer-elapsed-ms", 0, "consumer-observed elapsed milliseconds")
 	consumerError := fs.String("consumer-error", "", "sanitized consumer error class or short message")
+	consumerResult := fs.String("consumer-result", "", "consumer validation result: pass, fail, or unknown")
+	consumerQualityGate := fs.String("consumer-quality-gate", "", "sanitized quality or validation gate name")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1347,7 +1349,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	if *model == "" {
 		return fmt.Errorf("--model is required")
 	}
-	consumer, err := consumerEvidenceFromFlags(*consumerRun, *consumerItem, *consumerStatus, *consumerElapsedMS, *consumerError)
+	consumer, err := consumerEvidenceFromFlags(*consumerRun, *consumerItem, *consumerStatus, *consumerElapsedMS, *consumerError, *consumerResult, *consumerQualityGate)
 	if err != nil {
 		return err
 	}

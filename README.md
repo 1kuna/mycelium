@@ -279,8 +279,9 @@ content/reasoning lengths, JSON parse status, usage availability, usage counts
 when available, and streaming completion status when `--stream` is used. It
 also accepts optional
 `--consumer-run`, `--consumer-item`, `--consumer-status`,
-`--consumer-elapsed-ms`, and `--consumer-error` labels so a project thread can
-preserve the consumer batch/item/outcome join once at request time. It
+`--consumer-elapsed-ms`, `--consumer-error`, `--consumer-result`, and
+`--consumer-quality-gate` labels so a project thread can preserve the consumer
+batch/item/outcome join once at request time. It
 intentionally does not write the bearer token, prompt, or raw completion
 content. Use that artifact, plus `myce debug job --preflight <preflight.json>
 --owner-telemetry --json`, as the standard consumer evidence packet for
@@ -302,12 +303,19 @@ myce debug job \
   --consumer-status <ok|timeout|error|canceled|partial> \
   --consumer-elapsed-ms <client-elapsed-ms> \
   --consumer-error <sanitized-error-class> \
+  --consumer-result <pass|fail|unknown> \
+  --consumer-quality-gate <sanitized-quality-gate> \
   --json
 ```
 
 Use `--consumer-error` for a short sanitized class such as `client_timeout`,
 `schema_validation_failed`, or `response_parse_error`; do not put bearer
 tokens, raw prompts, raw completions, or private document text in that field.
+Use `--consumer-result` and `--consumer-quality-gate` for deterministic
+consumer validation outcomes such as schema validity, parser success, or manual
+review gate status. A failed consumer result is classified as
+`consumer_quality_failed` when the owner-side inference otherwise completed,
+so later optimization can distinguish "served quickly" from "served usefully."
 When `--db` is omitted, `debug job --config <peer.json>` reads that config's
 `store_path`; use `--db` only when intentionally inspecting a different control
 store.
