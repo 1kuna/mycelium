@@ -1,6 +1,6 @@
 # Mycelium Owner-Thread Handoff
 
-Last updated: 2026-06-27
+Last updated: 2026-06-29
 
 This file supersedes the previous root `HANDOFF.md`. Treat that prior version as
 a partial coordinator draft, not as authority. This handoff is intentionally
@@ -10,7 +10,7 @@ handoff rewrite.
 ## Current Repo State
 
 - Branch: `main`.
-- Latest observed commit before this handoff refresh: `27a1e5f Compact peer registry snapshots`.
+- Latest observed commit before this handoff refresh: `88d7ae4 Document larger Spark tool route`.
 - Remote already configured: `origin https://github.com/1kuna/mycelium.git`.
 - Source-of-truth docs remain `01-project-spec.md`, `02-testing-architecture.md`,
   and `03-development-guide.md`.
@@ -168,6 +168,25 @@ important continuity points are:
   gateway does not know this new alias until its own preset registry is safely
   refreshed, so Verso should target Spark's Mycelium gateway directly for this
   larger-context tool route.
+- A follow-on route-gate pass added `myce gateway preflight` expectation flags:
+  `--expect-node`, `--require-json`, `--require-tool-call`,
+  `--reject-textual-tool-call`, and `--min-prompt-tokens`. Failed expectation
+  checks still write the redacted `preflight.json` first when `--out` is set.
+  Future deployed gateways also echo the effective `X-Myc-Project` response
+  header from the already-authenticated/project-defaulted request label, giving
+  Atlas/Verso a durable join key for route evidence, owner telemetry, and
+  consumer batch/item artifacts.
+- The current live consumer-ready contracts are narrow and distinct. Atlas
+  should continue to use the MacBook gateway `http://192.168.0.143:55291` with
+  model `qwen3.5-9b`, strict `response_format.type=json_schema`, and an
+  `--expect-node b70 --require-json` preflight gate. Verso larger-context
+  tool-call canaries should use the direct Spark gateway
+  `http://192.168.0.16:55274` with model `spark-qwen9b-tools-4096`, forced
+  function `tool_choice`, `--expect-node spark --require-tool-call
+  --reject-textual-tool-call`, and a fixture-sized `--min-prompt-tokens` gate.
+  A live MacBook alias probe for `spark-qwen9b-tools-4096` returned HTTP 502
+  with `unknown model "spark-qwen9b-tools-4096"`, proving the MacBook gateway's
+  in-memory preset registry has not been safely refreshed for that alias.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and

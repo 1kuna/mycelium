@@ -54,6 +54,9 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	if resp.Header.Get(HeaderDecision) != string(domain.ActionWarmInstance) || resp.Header.Get(HeaderInstance) != inst.ID || resp.Header.Get(HeaderJob) == "" || !strings.Contains(resp.Header.Get(HeaderTrace), "warm compatible instance") {
 		t.Fatalf("headers = %+v", resp.Header)
 	}
+	if resp.Header.Get(HeaderProject) != "proj-a" {
+		t.Fatalf("project header = %q headers=%+v", resp.Header.Get(HeaderProject), resp.Header)
+	}
 	if resp.Header.Get(HeaderColdLoad) != "false" || resp.Header.Get(HeaderQueueWaitMS) != "0" || resp.Header.Get(HeaderStructuredOutput) != "none" || resp.Header.Get(HeaderGuidedDecodingRequested) != "false" || resp.Header.Get(HeaderUpstreamWallMS) != "0" {
 		t.Fatalf("diagnostic headers = %+v", resp.Header)
 	}

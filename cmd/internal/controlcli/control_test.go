@@ -1062,6 +1062,10 @@ func TestRunGatewayPreflightToolCanaryRecordsResponseShape(t *testing.T) {
 			"--prompt", "Call echo with value ok.",
 			"--tool-name", "echo",
 			"--tool-choice", "function",
+			"--expect-node", "spark",
+			"--require-tool-call",
+			"--reject-textual-tool-call",
+			"--min-prompt-tokens", "10",
 			"--out", outDir,
 		}, client)
 	})
@@ -1092,6 +1096,56 @@ func TestRunGatewayPreflightToolCanaryRecordsResponseShape(t *testing.T) {
 	}
 	if evidence.ToolCallCount != 1 || !reflect.DeepEqual(evidence.ToolCallNames, []string{"echo"}) || evidence.TextualToolCall {
 		t.Fatalf("tool preflight evidence = %+v", evidence)
+	}
+}
+
+func TestRunGatewayPreflightExpectationsFailAfterWritingEvidence(t *testing.T) {
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "tool-secret")
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Myc-Job", "job-auto")
+		w.Header().Set("X-Myc-Node", "spark")
+		w.Header().Set("X-Myc-Backend", "vllm")
+		w.Header().Set("X-Myc-Tools-Requested", "true")
+		w.Header().Set("X-Myc-Tool-Choice", "auto")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]string{"content": "<tool_call><function=echo></function></tool_call>"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]int{"prompt_tokens": 64, "completion_tokens": 8, "total_tokens": 72},
+		})
+	}))
+	outDir := filepath.Join(t.TempDir(), "failed-preflight")
+	var err error
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{
+			"gateway", "preflight",
+			"--url", "http://gateway.test",
+			"--model", "spark-qwen9b",
+			"--tool-name", "echo",
+			"--tool-choice", "auto",
+			"--require-tool-call",
+			"--reject-textual-tool-call",
+			"--min-prompt-tokens", "1000",
+			"--out", outDir,
+		}, client)
+	})
+	if err == nil || !strings.Contains(err.Error(), "expected at least one structured tool call") || !strings.Contains(err.Error(), "expected no textual <tool_call>") || !strings.Contains(err.Error(), "expected prompt_tokens >= 1000") || !strings.Contains(err.Error(), "preflight.json") {
+		t.Fatalf("expectation err = %v\noutput=%s", err, output)
+	}
+	if !strings.Contains(output, "tool_calls\tcount=0") || !strings.Contains(output, "textual_tool_call\ttrue") {
+		t.Fatalf("failed preflight output = %s", output)
+	}
+	data, readErr := os.ReadFile(filepath.Join(outDir, "preflight.json"))
+	if readErr != nil {
+		t.Fatalf("read failed evidence: %v", readErr)
+	}
+	var evidence gatewayPreflightEvidence
+	if err := json.Unmarshal(data, &evidence); err != nil {
+		t.Fatalf("decode failed evidence: %v", err)
+	}
+	if evidence.ToolCallCount != 0 || !evidence.TextualToolCall || evidence.Usage.PromptTokens != 64 {
+		t.Fatalf("failed evidence = %+v", evidence)
 	}
 }
 

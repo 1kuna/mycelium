@@ -338,6 +338,8 @@ myce gateway preflight \
   --prompt "Call the echo function with value ok. Do not answer directly." \
   --tool-name echo \
   --tool-choice function \
+  --require-tool-call \
+  --reject-textual-tool-call \
   --out /tmp/mycelium-tool-forced
 
 myce gateway preflight \
@@ -353,7 +355,31 @@ myce gateway preflight \
 The redacted `preflight.json` records `tool_call_count`, `tool_call_names`,
 `textual_tool_call`, route headers, usage, content length, reasoning length, and
 finish reason, but not the bearer token, prompt, raw content, or tool
-arguments.
+arguments. Gateways built from this revision also echo the effective
+`X-Myc-Project` response header so later debug bundles can join route evidence
+to consumer run labels without reading gateway internals.
+
+Add expectation flags when the command is used as a consumer gate:
+
+- `--expect-node <id>` fails if routing lands on the wrong owner.
+- `--require-json` fails if strict-schema final content is not parseable JSON.
+- `--require-tool-call` fails if no structured OpenAI `tool_calls` are present.
+- `--reject-textual-tool-call` fails if final content contains a textual
+  `<tool_call>` block.
+- `--min-prompt-tokens <n>` fails if the canary did not exercise enough context
+  for the consumer fixture.
+
+Atlas strict-schema route gate:
+
+```bash
+myce gateway preflight \
+  --url http://192.168.0.143:55291 \
+  --model qwen3.5-9b \
+  --project atlas-strict-schema-canary \
+  --expect-node b70 \
+  --require-json \
+  --out /tmp/mycelium-atlas-strict-schema
+```
 
 Current live larger-context tool route for Verso canaries:
 
@@ -373,6 +399,25 @@ the tool schema/template. The live proof succeeded with
 call. The MacBook gateway may not route this alias until its preset registry is
 safely refreshed; use the Spark gateway directly unless a later handoff says the
 MacBook route is live.
+
+```bash
+myce gateway preflight \
+  --url http://192.168.0.16:55274 \
+  --model spark-qwen9b-tools-4096 \
+  --project verso-tool-canary \
+  --prompt "Call the echo function with value ok. Do not answer directly." \
+  --max-tokens 160 \
+  --tool-name echo \
+  --tool-choice function \
+  --expect-node spark \
+  --require-tool-call \
+  --reject-textual-tool-call \
+  --out /tmp/mycelium-verso-tools4096
+```
+
+When using the real compact Deep Agents fixture or another fixture-sized prompt,
+add `--min-prompt-tokens 2500` so the canary proves the larger-context route
+rather than only the tool parser.
 
 ### Prove cold-load cancellation cleanup after activation
 
