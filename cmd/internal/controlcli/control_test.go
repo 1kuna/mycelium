@@ -1000,6 +1000,94 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 	}
 }
 
+func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "peer.json")
+	cfg := operatorPeerConfig{
+		ID:           "spark",
+		Listen:       "192.0.2.16:55274",
+		GatewayToken: "global-secret",
+		GatewayProjectTokens: []operatorProjectToken{
+			{Project: "verso-tools", Token: "verso-secret"},
+		},
+		Projects: []domain.Project{
+			{ID: "atlas-semantic", DefaultModel: "qwen3.5-9b", ContextCap: 4096},
+			{ID: "verso-tools", DefaultModel: "spark-qwen9b-tools-8192", ContextCap: 8192},
+			{ID: "missing-route", DefaultModel: "does-not-exist", ContextCap: 2048},
+		},
+		Presets: []domain.Preset{
+			{
+				ID:            "b70-qwen9b-vllm",
+				ModelRef:      "qwen3.5-9b",
+				Aliases:       []string{"qwen3.5-9b"},
+				Backend:       domain.BackendVLLM,
+				ContextLength: 4096,
+				Capabilities:  []domain.Capability{domain.CapabilityChat},
+				NodeID:        "b70",
+			},
+			{
+				ID:              "spark-qwen9b-tools-8192-vllm",
+				ModelRef:        "qwen3.5-9b",
+				Aliases:         []string{"spark-qwen9b-tools-8192"},
+				Backend:         domain.BackendVLLM,
+				ContextLength:   8192,
+				Capabilities:    []domain.Capability{domain.CapabilityChat},
+				NodeID:          "spark",
+				ProviderProfile: "openai-compatible",
+				LaunchArgs:      []string{"--enable-auto-tool-choice", "--tool-call-parser", "hermes"},
+			},
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal peer config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write peer config: %v", err)
+	}
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = RunWithClient(context.Background(), []string{"gateway", "routes", "--config", configPath}, nil)
+	})
+	if runErr != nil {
+		t.Fatalf("gateway routes: %v", runErr)
+	}
+	for _, want := range []string{
+		"gateway\thttp://192.0.2.16:55274\tbase_url=http://192.0.2.16:55274/v1\tpeer=spark",
+		"route\tproject=atlas-semantic\tmodel=qwen3.5-9b\tpreset=b70-qwen9b-vllm\tnode=b70\tbackend=vllm\tcontext=4096\tproject_cap=4096\tstatus=ready_from_config\tauth=global_gateway_token\tproject_token=false\tglobal_token=true\tstructured=true\tstreaming=true\ttool_parser=false\tauto_tool=false",
+		"route\tproject=verso-tools\tmodel=spark-qwen9b-tools-8192\tpreset=spark-qwen9b-tools-8192-vllm\tnode=spark\tbackend=vllm\tcontext=8192\tproject_cap=8192\tstatus=ready_from_config\tauth=project_token\tproject_token=true\tglobal_token=true\tstructured=true\tstreaming=true\ttool_parser=true\tauto_tool=true\ttool_choice=forced-function-first; auto requires model/template proof",
+		"route\tproject=missing-route\tmodel=does-not-exist\tpreset=-\tnode=-\tbackend=-\tcontext=0\tproject_cap=2048\tstatus=preset_missing\tauth=global_gateway_token",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("gateway routes output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "global-secret") || strings.Contains(output, "verso-secret") {
+		t.Fatalf("gateway routes leaked token material: %s", output)
+	}
+
+	var jsonErr error
+	jsonOutput := captureStdout(t, func() {
+		jsonErr = RunWithClient(context.Background(), []string{"gateway", "routes", "--config", configPath, "--json"}, nil)
+	})
+	if jsonErr != nil {
+		t.Fatalf("gateway routes json: %v", jsonErr)
+	}
+	if strings.Contains(jsonOutput, "global-secret") || strings.Contains(jsonOutput, "verso-secret") {
+		t.Fatalf("gateway routes JSON leaked token material: %s", jsonOutput)
+	}
+	var report gatewayRoutesReport
+	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+		t.Fatalf("decode gateway routes JSON: %v", err)
+	}
+	if report.BaseURL != "http://192.0.2.16:55274/v1" || len(report.Routes) != 3 {
+		t.Fatalf("gateway routes report = %+v", report)
+	}
+	if got := report.Routes[2]; got.Project != "verso-tools" || !got.ProjectTokenConfigured || !got.ToolParserConfigured || !got.AutoToolChoiceConfigured {
+		t.Fatalf("verso route contract = %+v", got)
+	}
+}
+
 func TestRunGatewayPreflightToolCanaryRecordsResponseShape(t *testing.T) {
 	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "tool-secret")
 	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

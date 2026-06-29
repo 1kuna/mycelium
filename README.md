@@ -192,6 +192,23 @@ Project consumers should first run the secret-safe preflight. By default it
 sends one non-streaming strict JSON-schema chat request, prints route/usage
 evidence, and never prints the bearer token:
 
+Before preflight, operators can inspect the route contract a peer config
+advertises without exposing token values:
+
+```bash
+myce gateway routes --config ~/.mycelium/peer.json
+myce gateway routes --config ~/.mycelium/peer.json --json
+```
+
+The output joins projects to presets and reports the OpenAI base URL, model or
+alias, node, backend, context length, project context cap, auth source class,
+structured-output likelihood, streaming likelihood, and vLLM tool-parser flags.
+It only reports whether a project token or global gateway token is configured;
+it never prints token material. Treat this as catalog/config discovery, not live
+proof. A route is consumer-ready only after the matching `myce gateway
+preflight` and, for post-hoc work, `myce debug job --preflight` or
+`myce debug bundle --preflight` evidence exists.
+
 ```bash
 myce gateway preflight \
   --url http://<gateway-host>:<port> \
