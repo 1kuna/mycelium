@@ -141,7 +141,7 @@ func runDebug(ctx context.Context, args []string, client *http.Client) error {
 	}
 	switch args[0] {
 	case "job":
-		return runDebugJob(ctx, args[1:])
+		return runDebugJob(ctx, args[1:], client)
 	case "bundle":
 		return runDebugBundle(ctx, args[1:], client)
 	default:
@@ -149,11 +149,14 @@ func runDebug(ctx context.Context, args []string, client *http.Client) error {
 	}
 }
 
-func runDebugJob(ctx context.Context, args []string) error {
+func runDebugJob(ctx context.Context, args []string, client *http.Client) error {
 	fs := flag.NewFlagSet("debug job", flag.ContinueOnError)
+	configPath := fs.String("config", defaultPeerConfigPath(), "peer config JSON")
 	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	preflightPath := fs.String("preflight", "", "redacted gateway preflight evidence JSON")
+	ownerTelemetry := fs.Bool("owner-telemetry", false, "fetch selected-job run/session telemetry from the owner peer")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token override")
 	jobID, flagArgs, err := splitDebugJobArgs(args)
 	if err != nil {
 		return err
@@ -178,13 +181,22 @@ func runDebugJob(ctx context.Context, args []string) error {
 		jobID = evidenceJobID
 	}
 	if jobID == "" {
-		return fmt.Errorf("usage: myce debug job <job-id> [--db path] [--json] [--preflight path]")
+		return fmt.Errorf("usage: myce debug job <job-id> [--db path] [--json] [--preflight path] [--owner-telemetry]")
 	}
 	report, err := buildJobDebugReport(ctx, *dbPath, jobID)
 	if err != nil {
 		return err
 	}
 	report.Preflight = preflight
+	if *ownerTelemetry {
+		token := *rpcToken
+		if token == "" {
+			if loaded, err := loadOperatorConfig(*configPath); err == nil {
+				token = loaded.Config.RPCToken
+			}
+		}
+		report.OwnerTelemetry = fetchJobOwnerTelemetry(ctx, *dbPath, report, token, clientOrDefault(client))
+	}
 	if *jsonOut {
 		return writePrettyJSON(os.Stdout, report)
 	}
@@ -220,7 +232,7 @@ func debugJobFlagTakesValue(arg string) bool {
 	if strings.Contains(arg, "=") {
 		return false
 	}
-	return arg == "-db" || arg == "--db" || arg == "-preflight" || arg == "--preflight"
+	return arg == "-config" || arg == "--config" || arg == "-db" || arg == "--db" || arg == "-preflight" || arg == "--preflight" || arg == "-rpc-token" || arg == "--rpc-token"
 }
 
 func runDebugBundle(ctx context.Context, args []string, client *http.Client) error {
@@ -229,6 +241,7 @@ func runDebugBundle(ctx context.Context, args []string, client *http.Client) err
 	dbPath := fs.String("db", "", "control-plane SQLite store")
 	jobID := fs.String("job", "", "job id to focus")
 	preflightPath := fs.String("preflight", "", "redacted gateway preflight evidence JSON")
+	ownerTelemetry := fs.Bool("owner-telemetry", false, "fetch selected-job run/session telemetry from the owner peer")
 	out := fs.String("out", "", "output directory")
 	url := fs.String("url", "", "peer URL override")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token override")
@@ -253,14 +266,15 @@ func runDebugBundle(ctx context.Context, args []string, client *http.Client) err
 		*jobID = evidenceJobID
 	}
 	if err := writeDebugBundle(ctx, debugBundleRequest{
-		ConfigPath:    *configPath,
-		DBPath:        *dbPath,
-		JobID:         *jobID,
-		PreflightPath: *preflightPath,
-		OutDir:        *out,
-		URL:           *url,
-		RPCToken:      *rpcToken,
-		Client:        client,
+		ConfigPath:     *configPath,
+		DBPath:         *dbPath,
+		JobID:          *jobID,
+		PreflightPath:  *preflightPath,
+		OwnerTelemetry: *ownerTelemetry,
+		OutDir:         *out,
+		URL:            *url,
+		RPCToken:       *rpcToken,
+		Client:         client,
 	}); err != nil {
 		return err
 	}
@@ -497,6 +511,7 @@ func buildStatusReport(ctx context.Context, req statusRequest) (string, error) {
 type jobDebugReport struct {
 	Job             domain.Job                    `json:"job"`
 	Preflight       *gatewayPreflightEvidence     `json:"preflight,omitempty"`
+	OwnerTelemetry  *ownerTelemetryReport         `json:"owner_telemetry,omitempty"`
 	Parent          *domain.Job                   `json:"parent,omitempty"`
 	Children        []domain.Job                  `json:"children,omitempty"`
 	Registry        *domain.JobRecord             `json:"registry,omitempty"`
@@ -595,6 +610,9 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 	if report.Preflight != nil {
 		printPreflightEvidenceSummary(w, *report.Preflight)
 	}
+	if report.OwnerTelemetry != nil {
+		printOwnerTelemetrySummary(w, *report.OwnerTelemetry)
+	}
 	events := jobTimelineEvents(report)
 	for _, event := range events {
 		fmt.Fprintf(w, "timeline\t%s\t%s\t%s\t%s\n", formatTimeDash(event.At), event.Kind, event.Subject, event.Detail)
@@ -602,6 +620,41 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 	for _, hint := range report.Hints {
 		fmt.Fprintf(w, "hint\t%s\n", hint)
 	}
+}
+
+type ownerTelemetryReport struct {
+	NodeID          string                 `json:"node_id"`
+	Address         string                 `json:"address,omitempty"`
+	RunMetrics      []domain.RunMetric     `json:"run_metrics,omitempty"`
+	SessionTimeline []domain.SessionMetric `json:"session_timeline,omitempty"`
+	Error           string                 `json:"error,omitempty"`
+}
+
+func printOwnerTelemetrySummary(w io.Writer, report ownerTelemetryReport) {
+	status := "ok"
+	if report.Error != "" {
+		status = "fail"
+	}
+	fmt.Fprintf(w, "owner-telemetry\t%s\tnode=%s\taddress=%s\tmetrics=%d\tsamples=%d", status, emptyDash(report.NodeID), emptyDash(report.Address), len(report.RunMetrics), len(report.SessionTimeline))
+	if len(report.RunMetrics) > 0 {
+		metric := report.RunMetrics[0]
+		fmt.Fprintf(w, "\tttft_ms=%d\tload_ms=%d\ttps=%.2f\tcontext=%d", metric.TTFTms, metric.LoadWallClockMS, metric.TokensPerSec, metric.ContextUsed)
+	}
+	if len(report.SessionTimeline) > 0 {
+		fmt.Fprintf(w, "\tphases=%s", ownerTelemetryPhases(report.SessionTimeline))
+	}
+	if report.Error != "" {
+		fmt.Fprintf(w, "\terror=%s", report.Error)
+	}
+	fmt.Fprintln(w)
+}
+
+func ownerTelemetryPhases(samples []domain.SessionMetric) string {
+	phases := make([]string, 0, len(samples))
+	for _, sample := range samples {
+		phases = append(phases, string(sample.Phase))
+	}
+	return strings.Join(phases, ",")
 }
 
 func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidence) {
@@ -661,6 +714,127 @@ func copyPreflightEvidenceFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, append(data, '\n'), 0600)
+}
+
+func fetchJobOwnerTelemetry(ctx context.Context, dbPath string, report jobDebugReport, rpcToken string, client *http.Client) *ownerTelemetryReport {
+	owner := jobOwnerNode(report)
+	out := &ownerTelemetryReport{NodeID: owner}
+	if owner == "" {
+		out.Error = "owner node is not known"
+		return out
+	}
+	if rpcToken == "" {
+		out.Error = "rpc token is required for owner telemetry"
+		return out
+	}
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	defer store.Close()
+	nodes, err := store.ListNodes(ctx)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	for _, node := range nodes {
+		if node.ID == owner {
+			out.Address = node.Address
+			break
+		}
+	}
+	if out.Address == "" {
+		out.Error = fmt.Sprintf("owner node %q has no known address", owner)
+		return out
+	}
+	metrics, err := fetchOwnerRunMetrics(ctx, client, out.Address, rpcToken)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	for _, metric := range metrics {
+		if metric.JobID == report.Job.ID {
+			out.RunMetrics = append(out.RunMetrics, metric)
+		}
+	}
+	samples, err := fetchOwnerSessionMetrics(ctx, client, out.Address, rpcToken, report.Job.ID)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	for _, sample := range samples {
+		if sample.JobID == report.Job.ID {
+			out.SessionTimeline = append(out.SessionTimeline, sample)
+		}
+	}
+	return out
+}
+
+func jobOwnerNode(report jobDebugReport) string {
+	if report.Registry != nil && report.Registry.AssignedNode != "" {
+		return report.Registry.AssignedNode
+	}
+	if report.Preflight != nil {
+		if node := report.Preflight.Headers["X-Myc-Node"]; node != "" {
+			return node
+		}
+		for name, value := range report.Preflight.Headers {
+			if strings.EqualFold(name, "X-Myc-Node") {
+				return value
+			}
+		}
+	}
+	if len(report.RunMetrics) > 0 && report.RunMetrics[0].NodeID != "" {
+		return report.RunMetrics[0].NodeID
+	}
+	return ""
+}
+
+func fetchOwnerRunMetrics(ctx context.Context, client *http.Client, address, rpcToken string) ([]domain.RunMetric, error) {
+	var metrics []domain.RunMetric
+	if err := fetchOwnerTelemetryJSON(ctx, client, address, rpcToken, "/telemetry/metrics", &metrics); err != nil {
+		return nil, err
+	}
+	return metrics, nil
+}
+
+func fetchOwnerSessionMetrics(ctx context.Context, client *http.Client, address, rpcToken, jobID string) ([]domain.SessionMetric, error) {
+	var samples []domain.SessionMetric
+	path := "/telemetry/samples"
+	if jobID != "" {
+		values := neturl.Values{}
+		values.Set("job_id", jobID)
+		path += "?" + values.Encode()
+	}
+	if err := fetchOwnerTelemetryJSON(ctx, client, address, rpcToken, path, &samples); err != nil {
+		return nil, err
+	}
+	return samples, nil
+}
+
+func fetchOwnerTelemetryJSON(ctx context.Context, client *http.Client, address, rpcToken, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(catalogPeerBaseURL(address), "/")+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+rpcToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, err := readControlHTTPBody(resp.Body, "owner telemetry response body")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("owner telemetry %s: %s", address, strings.TrimSpace(string(data)))
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("decode owner telemetry %s: %w", address, err)
+	}
+	return nil
 }
 
 type jobTimelineEvent struct {
@@ -735,14 +909,15 @@ func jobDebugHints(report jobDebugReport) []string {
 }
 
 type debugBundleRequest struct {
-	ConfigPath    string
-	DBPath        string
-	JobID         string
-	PreflightPath string
-	OutDir        string
-	URL           string
-	RPCToken      string
-	Client        *http.Client
+	ConfigPath     string
+	DBPath         string
+	JobID          string
+	PreflightPath  string
+	OwnerTelemetry bool
+	OutDir         string
+	URL            string
+	RPCToken       string
+	Client         *http.Client
 }
 
 type debugBundleManifest struct {
@@ -793,6 +968,24 @@ func writeDebugBundle(ctx context.Context, req debugBundleRequest) error {
 		defer store.Close()
 		if err := writeStoreBundleFiles(ctx, store, req.JobID, addFile); err != nil {
 			return err
+		}
+	}
+	if req.OwnerTelemetry && req.JobID != "" {
+		report, err := buildJobDebugReport(ctx, storePath, req.JobID)
+		if err != nil {
+			manifest.Issues = append(manifest.Issues, err.Error())
+		} else {
+			if req.PreflightPath != "" {
+				if evidence, err := readGatewayPreflightEvidence(req.PreflightPath); err == nil {
+					report.Preflight = &evidence
+				} else {
+					manifest.Issues = append(manifest.Issues, err.Error())
+				}
+			}
+			report.OwnerTelemetry = fetchJobOwnerTelemetry(ctx, storePath, report, firstNonEmpty(req.RPCToken, cfg.RPCToken), clientOrDefault(req.Client))
+			if err := writePrettyJSONFile(addFile("job_debug.json"), report); err != nil {
+				return err
+			}
 		}
 	}
 	baseURL := firstNonEmpty(req.URL, adminBaseURL(cfg.Listen))

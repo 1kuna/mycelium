@@ -108,7 +108,11 @@ important continuity points are:
   <preflight.json>` and `myce debug bundle --preflight <preflight.json>` can
   now derive `X-Myc-Job` from that artifact and join it to durable job,
   registry, metric, session, recommendation, and bundle evidence for later
-  timeout/partial-batch triage.
+  timeout/partial-batch triage. Add `--owner-telemetry` to fetch the selected
+  job's authoritative run/session metrics directly from the assigned owner peer
+  when peer RPC auth is available; this is the post-hoc path for PM/consumer
+  threads that need TTFT/load/context/tokens-per-second and owner session phases
+  after a partial batch or timeout.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and

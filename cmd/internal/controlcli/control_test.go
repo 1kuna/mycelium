@@ -1419,8 +1419,9 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	}
 
 	preflightPath := writeGatewayPreflightEvidenceFixture(t, "job-a")
+	ownerClient := operatorOwnerTelemetryClient(t)
 	preflightOutput := captureStdout(t, func() {
-		err = Run(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--db", dbPath})
+		err = RunWithClient(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--owner-telemetry", "--rpc-token", "rpc-secret", "--db", dbPath}, ownerClient)
 	})
 	if err != nil {
 		t.Fatalf("debug job with preflight: %v\n%s", err, preflightOutput)
@@ -1430,6 +1431,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"preflight\tstatus=200\tmodel=qwen3.5-9b\tproject=atlas-batch",
 		"preflight-route\tnode=b70\tbackend=vllm\tinstance=inst_2\tdecision=placed_on_warm_instance",
 		"preflight-usage\tprompt=16\tcompletion=10\ttotal=26",
+		"owner-telemetry\tok\tnode=node-a\taddress=http://peer.test\tmetrics=1\tsamples=1\tttft_ms=34\tload_ms=0\ttps=12.50\tcontext=26\tphases=complete",
 	} {
 		if !strings.Contains(preflightOutput, want) {
 			t.Fatalf("preflight debug output missing %q:\n%s", want, preflightOutput)
@@ -1437,7 +1439,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	}
 
 	preflightJSONOutput := captureStdout(t, func() {
-		err = Run(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--json", "--db", dbPath})
+		err = RunWithClient(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--owner-telemetry", "--rpc-token", "rpc-secret", "--json", "--db", dbPath}, ownerClient)
 	})
 	if err != nil {
 		t.Fatalf("debug job preflight json: %v\n%s", err, preflightJSONOutput)
@@ -1446,7 +1448,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	if err := json.Unmarshal([]byte(preflightJSONOutput), &preflightReport); err != nil {
 		t.Fatalf("decode preflight debug json: %v\n%s", err, preflightJSONOutput)
 	}
-	if preflightReport.Preflight == nil || preflightReport.Preflight.Headers["X-Myc-Node"] != "b70" || preflightReport.Preflight.ContentLength != 16 {
+	if preflightReport.Preflight == nil || preflightReport.Preflight.Headers["X-Myc-Node"] != "b70" || preflightReport.Preflight.ContentLength != 16 || preflightReport.OwnerTelemetry == nil || len(preflightReport.OwnerTelemetry.RunMetrics) != 1 || len(preflightReport.OwnerTelemetry.SessionTimeline) != 1 {
 		t.Fatalf("preflight debug report = %+v", preflightReport)
 	}
 	if err := Run(context.Background(), []string{"debug", "job", "job-other", "--preflight", preflightPath, "--db", dbPath}); err == nil || !strings.Contains(err.Error(), `does not match requested job "job-other"`) {
@@ -1630,7 +1632,7 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 
 	var err error
 	output := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--preflight", preflightPath, "--out", outDir}, client)
+		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--preflight", preflightPath, "--owner-telemetry", "--out", outDir}, client)
 	})
 	if err != nil {
 		t.Fatalf("debug bundle: %v\n%s", err, output)
@@ -1638,7 +1640,7 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	if !strings.Contains(output, "debug-bundle\t"+outDir) {
 		t.Fatalf("bundle output = %q", output)
 	}
-	for _, name := range []string{"manifest.json", "config.redacted.json", "preflight.json", "jobs.json", "registry.json", "run_metrics.json", "session_metrics.json", "nodes.json", "instances.json", "recommendations.json", "peer_snapshot.json", "status.txt"} {
+	for _, name := range []string{"manifest.json", "config.redacted.json", "preflight.json", "job_debug.json", "jobs.json", "registry.json", "run_metrics.json", "session_metrics.json", "nodes.json", "instances.json", "recommendations.json", "peer_snapshot.json", "status.txt"} {
 		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
 			t.Fatalf("missing bundle file %s: %v", name, err)
 		}
@@ -1668,8 +1670,15 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
-	if !strings.Contains(string(manifestData), `"job_id": "job-a"`) || !strings.Contains(string(manifestData), `"preflight.json"`) {
+	if !strings.Contains(string(manifestData), `"job_id": "job-a"`) || !strings.Contains(string(manifestData), `"preflight.json"`) || !strings.Contains(string(manifestData), `"job_debug.json"`) {
 		t.Fatalf("manifest = %s", manifestData)
+	}
+	jobDebugData, err := os.ReadFile(filepath.Join(outDir, "job_debug.json"))
+	if err != nil {
+		t.Fatalf("read job debug: %v", err)
+	}
+	if strings.Contains(string(jobDebugData), "rpc-secret") || !strings.Contains(string(jobDebugData), `"owner_telemetry"`) || !strings.Contains(string(jobDebugData), `"job_id": "job-a"`) {
+		t.Fatalf("job debug artifact = %s", jobDebugData)
 	}
 }
 
@@ -1713,6 +1722,73 @@ func TestGatewayPreflightEvidenceHelpers(t *testing.T) {
 	}
 	if _, err := readGatewayPreflightEvidence(filepath.Join(t.TempDir(), "missing.json")); err == nil || !strings.Contains(err.Error(), "read gateway preflight evidence") {
 		t.Fatalf("missing preflight err = %v", err)
+	}
+}
+
+func TestOwnerTelemetryFetchFailureModes(t *testing.T) {
+	dbPath, _ := writeOperatorDebugFixture(t)
+	baseReport, err := buildJobDebugReport(context.Background(), dbPath, "job-a")
+	if err != nil {
+		t.Fatalf("buildJobDebugReport: %v", err)
+	}
+
+	noOwner := fetchJobOwnerTelemetry(context.Background(), dbPath, jobDebugReport{Job: domain.Job{ID: "job-missing-owner"}}, "rpc-secret", operatorOwnerTelemetryClient(t))
+	if noOwner.Error != "owner node is not known" {
+		t.Fatalf("no owner telemetry = %+v", noOwner)
+	}
+	noToken := fetchJobOwnerTelemetry(context.Background(), dbPath, baseReport, "", operatorOwnerTelemetryClient(t))
+	if noToken.Error != "rpc token is required for owner telemetry" {
+		t.Fatalf("no token telemetry = %+v", noToken)
+	}
+
+	missingAddressDir := t.TempDir()
+	missingAddressDB := filepath.Join(missingAddressDir, "control.db")
+	store, err := storesqlite.Open(missingAddressDB)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SaveNode(context.Background(), domain.Node{ID: "node-a", Status: domain.NodeReady}); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	noAddress := fetchJobOwnerTelemetry(context.Background(), missingAddressDB, baseReport, "rpc-secret", operatorOwnerTelemetryClient(t))
+	if !strings.Contains(noAddress.Error, `owner node "node-a" has no known address`) {
+		t.Fatalf("no address telemetry = %+v", noAddress)
+	}
+
+	unauthorized := fetchJobOwnerTelemetry(context.Background(), dbPath, baseReport, "bad-token", operatorOwnerTelemetryClient(t))
+	if !strings.Contains(unauthorized.Error, "rpc token required") {
+		t.Fatalf("unauthorized telemetry = %+v", unauthorized)
+	}
+
+	badJSONClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer rpc-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"rpc token required"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{bad json`))
+	}))
+	badJSON := fetchJobOwnerTelemetry(context.Background(), dbPath, baseReport, "rpc-secret", badJSONClient)
+	if !strings.Contains(badJSON.Error, "decode owner telemetry") {
+		t.Fatalf("bad json telemetry = %+v", badJSON)
+	}
+
+	preflight := gatewayPreflightEvidence{Headers: map[string]string{"x-myc-node": "node-a"}}
+	if got := jobOwnerNode(jobDebugReport{Job: domain.Job{ID: "job-a"}, Preflight: &preflight}); got != "node-a" {
+		t.Fatalf("jobOwnerNode from preflight = %q", got)
+	}
+	if phases := ownerTelemetryPhases([]domain.SessionMetric{{Phase: domain.TelemetryPhasePlaced}, {Phase: domain.TelemetryPhaseComplete}}); phases != "placed,complete" {
+		t.Fatalf("ownerTelemetryPhases = %q", phases)
+	}
+	if clientOrDefault(nil) != http.DefaultClient {
+		t.Fatalf("clientOrDefault(nil) did not return default client")
+	}
+	limited := limitTail([]int{1, 2, 3}, 0)
+	if len(limited) != 3 {
+		t.Fatalf("limitTail zero limit = %v", limited)
 	}
 }
 
@@ -2240,7 +2316,59 @@ func operatorSnapshotClient(t *testing.T) *http.Client {
 			Instances: []domain.ModelInstance{{ID: "inst-a", NodeID: "node-a", PresetID: "tiny", State: domain.InstReady}},
 		})
 	})
+	mountOperatorTelemetryHandlers(t, mux)
 	return directHTTPClient(mux)
+}
+
+func operatorOwnerTelemetryClient(t *testing.T) *http.Client {
+	t.Helper()
+	mux := http.NewServeMux()
+	mountOperatorTelemetryHandlers(t, mux)
+	return directHTTPClient(mux)
+}
+
+func mountOperatorTelemetryHandlers(t *testing.T, mux *http.ServeMux) {
+	t.Helper()
+	checkAuth := func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Header.Get("Authorization") != "Bearer rpc-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"rpc token required"}`))
+			return false
+		}
+		return true
+	}
+	mux.HandleFunc("/telemetry/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if !checkAuth(w, r) {
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]domain.RunMetric{{
+			JobID:        "job-a",
+			InstanceID:   "inst-a",
+			NodeID:       "node-a",
+			PresetID:     "tiny",
+			Backend:      domain.BackendVLLM,
+			Project:      "project-a",
+			TokensPerSec: 12.5,
+			TTFTms:       34,
+			ContextUsed:  26,
+			At:           time.Date(2026, 6, 29, 13, 30, 0, 0, time.UTC),
+		}})
+	})
+	mux.HandleFunc("/telemetry/samples", func(w http.ResponseWriter, r *http.Request) {
+		if !checkAuth(w, r) {
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]domain.SessionMetric{{
+			SessionID: "session-owner",
+			Sequence:  1,
+			JobID:     "job-a",
+			Phase:     domain.TelemetryPhaseComplete,
+			NodeID:    "node-a",
+			Project:   "project-a",
+			PresetID:  "tiny",
+			At:        time.Date(2026, 6, 29, 13, 30, 1, 0, time.UTC),
+		}})
+	})
 }
 
 func quoteJSON(value string) string {
