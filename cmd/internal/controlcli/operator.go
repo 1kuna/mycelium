@@ -892,6 +892,25 @@ func preflightHeader(report jobDebugReport, key string) string {
 func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidence) {
 	headers := evidence.Headers
 	fmt.Fprintf(w, "preflight\tstatus=%d\tmodel=%s\tproject=%s\tfinish=%s\tcontent=%d\treasoning=%d\ttool_calls=%d\ttextual_tool=%t\tjson=%t\n", evidence.StatusCode, emptyDash(evidence.Model), emptyDash(evidence.Project), emptyDash(evidence.FinishReason), evidence.ContentLength, evidence.ReasoningLength, evidence.ToolCallCount, evidence.TextualToolCall, evidence.JSONContent)
+	if evidence.Request.MaxTokens != 0 || evidence.Request.StructuredOutput != "" || evidence.Request.ToolRequested || evidence.Request.Streaming {
+		fmt.Fprintf(w, "preflight-request\tmax_tokens=%d\tstream=%t\tstructured=%s\ttool_requested=%t\ttool_name=%s\ttool_choice=%s\n",
+			evidence.Request.MaxTokens,
+			evidence.Request.Streaming,
+			emptyDash(evidence.Request.StructuredOutput),
+			evidence.Request.ToolRequested,
+			emptyDash(evidence.Request.ToolName),
+			emptyDash(evidence.Request.ToolChoice),
+		)
+	}
+	if evidence.Expectations != nil {
+		fmt.Fprintf(w, "preflight-expectations\texpect_node=%s\trequire_json=%t\trequire_tool_call=%t\treject_textual_tool_call=%t\tmin_prompt_tokens=%d\n",
+			emptyDash(evidence.Expectations.ExpectNode),
+			evidence.Expectations.RequireJSON,
+			evidence.Expectations.RequireToolCall,
+			evidence.Expectations.RejectTextualToolCall,
+			evidence.Expectations.MinPromptTokens,
+		)
+	}
 	if evidence.Streaming {
 		fmt.Fprintf(w, "preflight-stream\tdone=%t\tusage_available=%t\n", evidence.StreamDone, evidence.UsageAvailable)
 	}

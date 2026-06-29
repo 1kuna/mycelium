@@ -1003,6 +1003,12 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 	if evidence.AuthSource != "ATLAS_MYCELIUM_API_KEY" || evidence.Headers["X-Myc-Node"] != "b70" || evidence.ContentLength != 11 || evidence.ReasoningLength != 7 || evidence.ToolCallCount != 0 || evidence.TextualToolCall || !evidence.JSONContent || evidence.Usage.TotalTokens != 7 {
 		t.Fatalf("preflight evidence = %+v", evidence)
 	}
+	if evidence.Request.MaxTokens != 16 || evidence.Request.Streaming || evidence.Request.StructuredOutput != "json_schema" || evidence.Request.ToolRequested || evidence.Request.ToolName != "" || evidence.Request.ToolChoice != "" {
+		t.Fatalf("preflight request evidence = %+v", evidence.Request)
+	}
+	if evidence.Expectations != nil {
+		t.Fatalf("unexpected preflight expectations = %+v", evidence.Expectations)
+	}
 	if evidence.Consumer == nil || evidence.Consumer.RunID != "atlas-sow-001" || evidence.Consumer.ItemID != "row-004" || evidence.Consumer.Status != "ok" || evidence.Consumer.ElapsedMS != 1200 {
 		t.Fatalf("preflight consumer evidence = %+v", evidence.Consumer)
 	}
@@ -1274,6 +1280,12 @@ func TestRunGatewayPreflightToolCanaryRecordsResponseShape(t *testing.T) {
 	if evidence.ToolCallCount != 1 || !reflect.DeepEqual(evidence.ToolCallNames, []string{"echo"}) || evidence.TextualToolCall {
 		t.Fatalf("tool preflight evidence = %+v", evidence)
 	}
+	if evidence.Request.MaxTokens != 16 || evidence.Request.StructuredOutput != "none" || !evidence.Request.ToolRequested || evidence.Request.ToolName != "echo" || evidence.Request.ToolChoice != "function" {
+		t.Fatalf("tool request evidence = %+v", evidence.Request)
+	}
+	if evidence.Expectations == nil || evidence.Expectations.ExpectNode != "spark" || !evidence.Expectations.RequireToolCall || !evidence.Expectations.RejectTextualToolCall || evidence.Expectations.MinPromptTokens != 10 {
+		t.Fatalf("tool expectation evidence = %+v", evidence.Expectations)
+	}
 }
 
 func TestRunGatewayPreflightStreamRecordsToolAndUsageEvidence(t *testing.T) {
@@ -1357,6 +1369,12 @@ func TestRunGatewayPreflightStreamRecordsToolAndUsageEvidence(t *testing.T) {
 	if !evidence.Streaming || !evidence.StreamDone || !evidence.UsageAvailable || evidence.Usage.TotalTokens != 25 || evidence.ToolCallCount != 1 || !reflect.DeepEqual(evidence.ToolCallNames, []string{"echo"}) {
 		t.Fatalf("stream evidence = %+v", evidence)
 	}
+	if !evidence.Request.Streaming || evidence.Request.StructuredOutput != "none" || !evidence.Request.ToolRequested || evidence.Request.ToolName != "echo" || evidence.Request.ToolChoice != "function" {
+		t.Fatalf("stream request evidence = %+v", evidence.Request)
+	}
+	if evidence.Expectations == nil || evidence.Expectations.ExpectNode != "spark" || !evidence.Expectations.RequireToolCall || !evidence.Expectations.RejectTextualToolCall || evidence.Expectations.MinPromptTokens != 20 {
+		t.Fatalf("stream expectation evidence = %+v", evidence.Expectations)
+	}
 }
 
 func TestRunGatewayPreflightStreamMakesMissingUsageExplicit(t *testing.T) {
@@ -1402,6 +1420,9 @@ func TestRunGatewayPreflightStreamMakesMissingUsageExplicit(t *testing.T) {
 	if !evidence.Streaming || !evidence.StreamDone || evidence.UsageAvailable || evidence.Usage.TotalTokens != 0 {
 		t.Fatalf("stream no-usage evidence = %+v", evidence)
 	}
+	if !evidence.Request.Streaming || !evidence.Request.ToolRequested || evidence.Request.ToolChoice != "function" {
+		t.Fatalf("stream no-usage request evidence = %+v", evidence.Request)
+	}
 }
 
 func TestRunGatewayPreflightStreamRequiresTerminalDoneAfterWritingEvidence(t *testing.T) {
@@ -1438,6 +1459,9 @@ func TestRunGatewayPreflightStreamRequiresTerminalDoneAfterWritingEvidence(t *te
 	}
 	if !evidence.Streaming || evidence.StreamDone {
 		t.Fatalf("missing done evidence = %+v", evidence)
+	}
+	if !evidence.Request.Streaming || evidence.Request.StructuredOutput != "json_schema" {
+		t.Fatalf("missing done request evidence = %+v", evidence.Request)
 	}
 }
 
@@ -1488,6 +1512,9 @@ func TestRunGatewayPreflightExpectationsFailAfterWritingEvidence(t *testing.T) {
 	}
 	if evidence.ToolCallCount != 0 || !evidence.TextualToolCall || evidence.Usage.PromptTokens != 64 {
 		t.Fatalf("failed evidence = %+v", evidence)
+	}
+	if evidence.Request.ToolChoice != "auto" || evidence.Request.ToolName != "echo" || evidence.Expectations == nil || !evidence.Expectations.RequireToolCall || !evidence.Expectations.RejectTextualToolCall || evidence.Expectations.MinPromptTokens != 1000 {
+		t.Fatalf("failed request/expectation evidence = request:%+v expectations:%+v", evidence.Request, evidence.Expectations)
 	}
 }
 
@@ -1938,6 +1965,8 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	for _, want := range []string{
 		"job\tjob-a\trunning\tmodel=tiny\tproject=project-a\towner=node-a",
 		"preflight\tstatus=200\tmodel=qwen3.5-9b\tproject=atlas-batch",
+		"preflight-request\tmax_tokens=32\tstream=false\tstructured=none\ttool_requested=true\ttool_name=echo\ttool_choice=auto",
+		"preflight-expectations\texpect_node=b70\trequire_json=false\trequire_tool_call=true\treject_textual_tool_call=true\tmin_prompt_tokens=16",
 		"preflight-route\tnode=b70\tbackend=vllm\tinstance=inst_2\tdecision=placed_on_warm_instance",
 		"preflight-tools\trequested=true\tchoice=auto\tvllm_parser=true\tvllm_auto=false",
 		"preflight-tool-result\tcount=0\tnames=-\ttextual=true",
@@ -2927,10 +2956,23 @@ func writeGatewayPreflightEvidenceFixture(t *testing.T, jobID string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "preflight.json")
 	evidence := gatewayPreflightEvidence{
-		Gateway:         "http://gateway.test",
-		Model:           "qwen3.5-9b",
-		Project:         "atlas-batch",
-		AuthSource:      "ATLAS_MYCELIUM_API_KEY",
+		Gateway:    "http://gateway.test",
+		Model:      "qwen3.5-9b",
+		Project:    "atlas-batch",
+		AuthSource: "ATLAS_MYCELIUM_API_KEY",
+		Request: gatewayPreflightRequestEvidence{
+			MaxTokens:        32,
+			StructuredOutput: "none",
+			ToolRequested:    true,
+			ToolName:         "echo",
+			ToolChoice:       "auto",
+		},
+		Expectations: &gatewayPreflightExpectationEvidence{
+			ExpectNode:            "b70",
+			RequireToolCall:       true,
+			RejectTextualToolCall: true,
+			MinPromptTokens:       16,
+		},
 		StatusCode:      http.StatusOK,
 		FinishReason:    "stop",
 		ContentLength:   16,
