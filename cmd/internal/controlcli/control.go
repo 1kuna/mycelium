@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -923,14 +924,222 @@ func runBenchmark(ctx context.Context, args []string, client *http.Client) error
 
 func runGateway(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce gateway <preflight>")
+		return fmt.Errorf("usage: myce gateway <preflight|routes>")
 	}
 	switch args[0] {
 	case "preflight":
 		return runGatewayPreflight(ctx, args[1:], client)
+	case "routes":
+		return runGatewayRoutes(ctx, args[1:])
 	default:
-		return fmt.Errorf("usage: myce gateway <preflight>")
+		return fmt.Errorf("usage: myce gateway <preflight|routes>")
 	}
+}
+
+func runGatewayRoutes(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("gateway routes", flag.ContinueOnError)
+	configPath := fs.String("config", defaultPeerConfigPath(), "peer config JSON")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	report, err := buildGatewayRoutesReport(ctx, *configPath)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return writePrettyJSON(os.Stdout, report)
+	}
+	printGatewayRoutesReport(os.Stdout, report)
+	return nil
+}
+
+type gatewayRoutesReport struct {
+	ConfigPath string                 `json:"config_path"`
+	PeerID     string                 `json:"peer_id"`
+	Gateway    string                 `json:"gateway"`
+	BaseURL    string                 `json:"base_url"`
+	Routes     []gatewayRouteContract `json:"routes"`
+}
+
+type gatewayRouteContract struct {
+	Project                      string              `json:"project"`
+	Model                        string              `json:"model"`
+	PresetID                     string              `json:"preset_id,omitempty"`
+	NodeID                       string              `json:"node_id,omitempty"`
+	Backend                      domain.Backend      `json:"backend,omitempty"`
+	ProviderProfile              string              `json:"provider_profile,omitempty"`
+	ContextLength                int                 `json:"context_length,omitempty"`
+	ProjectContextCap            int                 `json:"project_context_cap,omitempty"`
+	Capabilities                 []domain.Capability `json:"capabilities,omitempty"`
+	ProjectTokenConfigured       bool                `json:"project_token_configured"`
+	GlobalGatewayTokenConfigured bool                `json:"global_gateway_token_configured"`
+	AuthHint                     string              `json:"auth_hint"`
+	StructuredOutputLikely       bool                `json:"structured_output_likely"`
+	StreamingLikely              bool                `json:"streaming_likely"`
+	ToolParserConfigured         bool                `json:"tool_parser_configured"`
+	AutoToolChoiceConfigured     bool                `json:"auto_tool_choice_configured"`
+	RecommendedToolChoice        string              `json:"recommended_tool_choice,omitempty"`
+	DiscoveryStatus              string              `json:"discovery_status"`
+}
+
+func buildGatewayRoutesReport(_ context.Context, configPath string) (gatewayRoutesReport, error) {
+	loaded, err := loadOperatorConfig(configPath)
+	if err != nil {
+		return gatewayRoutesReport{}, err
+	}
+	cfg := loaded.Config
+	gateway := adminBaseURL(cfg.Listen)
+	report := gatewayRoutesReport{
+		ConfigPath: loaded.Path,
+		PeerID:     cfg.ID,
+		Gateway:    gateway,
+		BaseURL:    strings.TrimRight(gateway, "/") + "/v1",
+	}
+	if gateway == "" {
+		report.BaseURL = ""
+	}
+	presets := cfg.Presets
+	sort.Slice(presets, func(i, j int) bool { return presets[i].ID < presets[j].ID })
+	projects := cfg.Projects
+	sort.Slice(projects, func(i, j int) bool { return projects[i].ID < projects[j].ID })
+	if len(projects) == 0 {
+		for _, preset := range presets {
+			report.Routes = append(report.Routes, routeContractForPreset(cfg, domain.Project{}, preset))
+		}
+		return report, nil
+	}
+	for _, project := range projects {
+		route := gatewayRouteContract{
+			Project:                      project.ID,
+			Model:                        project.DefaultModel,
+			ProjectContextCap:            project.ContextCap,
+			ProjectTokenConfigured:       projectTokenConfigured(cfg, project.ID),
+			GlobalGatewayTokenConfigured: strings.TrimSpace(cfg.GatewayToken) != "",
+			AuthHint:                     gatewayRoutesAuthHint(cfg, project.ID),
+			DiscoveryStatus:              "preset_missing",
+		}
+		if project.DefaultModel == "" {
+			route.DiscoveryStatus = "project_default_model_missing"
+			report.Routes = append(report.Routes, route)
+			continue
+		}
+		if preset, ok := findPresetForModel(presets, project.DefaultModel); ok {
+			route = routeContractForPreset(cfg, project, preset)
+		}
+		report.Routes = append(report.Routes, route)
+	}
+	return report, nil
+}
+
+func routeContractForPreset(cfg operatorPeerConfig, project domain.Project, preset domain.Preset) gatewayRouteContract {
+	model := project.DefaultModel
+	if model == "" {
+		model = preferredPresetModel(preset)
+	}
+	contract := gatewayRouteContract{
+		Project:                      project.ID,
+		Model:                        model,
+		PresetID:                     preset.ID,
+		NodeID:                       preset.NodeID,
+		Backend:                      preset.Backend,
+		ProviderProfile:              preset.ProviderProfile,
+		ContextLength:                preset.ContextLength,
+		ProjectContextCap:            project.ContextCap,
+		Capabilities:                 append([]domain.Capability(nil), preset.Capabilities...),
+		ProjectTokenConfigured:       project.ID != "" && projectTokenConfigured(cfg, project.ID),
+		GlobalGatewayTokenConfigured: strings.TrimSpace(cfg.GatewayToken) != "",
+		AuthHint:                     gatewayRoutesAuthHint(cfg, project.ID),
+		StructuredOutputLikely:       preset.Backend == domain.BackendVLLM,
+		StreamingLikely:              preset.Backend == domain.BackendVLLM,
+		ToolParserConfigured:         launchArgConfigured(preset.LaunchArgs, "--tool-call-parser"),
+		AutoToolChoiceConfigured:     launchArgConfigured(preset.LaunchArgs, "--enable-auto-tool-choice"),
+		DiscoveryStatus:              "ready_from_config",
+	}
+	if contract.ToolParserConfigured {
+		if contract.AutoToolChoiceConfigured {
+			contract.RecommendedToolChoice = "forced-function-first; auto requires model/template proof"
+		} else {
+			contract.RecommendedToolChoice = "forced-function-only"
+		}
+	}
+	return contract
+}
+
+func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
+	fmt.Fprintf(w, "gateway\t%s\tbase_url=%s\tpeer=%s\tconfig=%s\n", emptyDash(report.Gateway), emptyDash(report.BaseURL), emptyDash(report.PeerID), report.ConfigPath)
+	for _, route := range report.Routes {
+		fmt.Fprintf(w, "route\tproject=%s\tmodel=%s\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tproject_cap=%d\tstatus=%s\tauth=%s\tproject_token=%t\tglobal_token=%t\tstructured=%t\tstreaming=%t\ttool_parser=%t\tauto_tool=%t\ttool_choice=%s\n",
+			emptyDash(route.Project),
+			emptyDash(route.Model),
+			emptyDash(route.PresetID),
+			emptyDash(route.NodeID),
+			emptyDash(string(route.Backend)),
+			route.ContextLength,
+			route.ProjectContextCap,
+			route.DiscoveryStatus,
+			route.AuthHint,
+			route.ProjectTokenConfigured,
+			route.GlobalGatewayTokenConfigured,
+			route.StructuredOutputLikely,
+			route.StreamingLikely,
+			route.ToolParserConfigured,
+			route.AutoToolChoiceConfigured,
+			emptyDash(route.RecommendedToolChoice),
+		)
+	}
+}
+
+func findPresetForModel(presets []domain.Preset, model string) (domain.Preset, bool) {
+	for _, preset := range presets {
+		if preset.ID == model || preset.ModelRef == model {
+			return preset, true
+		}
+		for _, alias := range preset.Aliases {
+			if alias == model {
+				return preset, true
+			}
+		}
+	}
+	return domain.Preset{}, false
+}
+
+func preferredPresetModel(preset domain.Preset) string {
+	if len(preset.Aliases) > 0 {
+		return preset.Aliases[0]
+	}
+	if preset.ModelRef != "" {
+		return preset.ModelRef
+	}
+	return preset.ID
+}
+
+func projectTokenConfigured(cfg operatorPeerConfig, projectID string) bool {
+	for _, token := range cfg.GatewayProjectTokens {
+		if token.Project == projectID && strings.TrimSpace(token.Token) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func gatewayRoutesAuthHint(cfg operatorPeerConfig, projectID string) string {
+	if projectID != "" && projectTokenConfigured(cfg, projectID) {
+		return "project_token"
+	}
+	if strings.TrimSpace(cfg.GatewayToken) != "" {
+		return "global_gateway_token"
+	}
+	return "missing"
+}
+
+func launchArgConfigured(args []string, flagName string) bool {
+	for _, arg := range args {
+		if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func runGatewayPreflight(ctx context.Context, args []string, client *http.Client) error {

@@ -204,6 +204,15 @@ important continuity points are:
   `unknown model "spark-qwen9b-tools-4096"`, proving the MacBook gateway's
   in-memory preset registry has not been safely refreshed for Spark tool
   aliases.
+- Route discovery is now a repo-local control-plane contract, not a hand-copied
+  note. `myce gateway routes --config <peer.json>` reads the service peer config
+  and prints the OpenAI base URL, project/default model, matched preset, node,
+  backend, context cap, token source class, structured/streaming hints, and vLLM
+  tool-parser flags without printing token values. A 2026-06-29 read of
+  `/Users/zach/.mycelium/bench/real-fleet/peer.json` showed the MacBook gateway
+  config still advertises `qwen3.5-9b`/B70 and Spark plain routes but not
+  `spark-qwen9b-tools-8192`; direct Spark remains the consumer-ready Verso tool
+  route until MacBook gateway catalog activation is safely handled.
 - A 2026-06-29 follow-up checked the route after Verso reported friction on
   the older 4096 path. Spark's owner snapshot showed exactly one ready
   `spark-qwen9b-tools-8192-vllm` instance and no leases or non-terminal owner

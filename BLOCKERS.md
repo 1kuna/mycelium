@@ -46,6 +46,11 @@
   live until the Mac gateway preset registry can be safely refreshed, and
   reliable `tool_choice:"auto"` remains unproven for this Qwen/Hermes route.
   Consumers should use direct Spark plus forced function choice for this route.
+  A 2026-06-29 `myce gateway routes --config
+  /Users/zach/.mycelium/bench/real-fleet/peer.json` read confirmed the MacBook
+  config advertises B70 strict-schema/plain Spark routes but not
+  `spark-qwen9b-tools-8192`, while same-cycle direct Spark 8192 forced-tool
+  preflight still passed.
   A 2026-06-29 authenticated MacBook probe for `spark-qwen9b-tools-4096`
   returned HTTP 502 with `unknown model "spark-qwen9b-tools-4096"`, while
   same-cycle route gates passed for Atlas strict JSON on MacBook/B70 and Verso
