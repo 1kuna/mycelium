@@ -153,6 +153,7 @@ func runDebugJob(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("debug job", flag.ContinueOnError)
 	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
 	jsonOut := fs.Bool("json", false, "print JSON")
+	preflightPath := fs.String("preflight", "", "redacted gateway preflight evidence JSON")
 	jobID, flagArgs, err := splitDebugJobArgs(args)
 	if err != nil {
 		return err
@@ -160,13 +161,30 @@ func runDebugJob(ctx context.Context, args []string) error {
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
 	}
+	var preflight *gatewayPreflightEvidence
+	if *preflightPath != "" {
+		evidence, err := readGatewayPreflightEvidence(*preflightPath)
+		if err != nil {
+			return err
+		}
+		preflight = &evidence
+		evidenceJobID := preflightEvidenceJobID(evidence)
+		if evidenceJobID == "" {
+			return fmt.Errorf("preflight evidence %s has no X-Myc-Job header", *preflightPath)
+		}
+		if jobID != "" && jobID != evidenceJobID {
+			return fmt.Errorf("preflight evidence job %q does not match requested job %q", evidenceJobID, jobID)
+		}
+		jobID = evidenceJobID
+	}
 	if jobID == "" {
-		return fmt.Errorf("usage: myce debug job <job-id> [--db path] [--json]")
+		return fmt.Errorf("usage: myce debug job <job-id> [--db path] [--json] [--preflight path]")
 	}
 	report, err := buildJobDebugReport(ctx, *dbPath, jobID)
 	if err != nil {
 		return err
 	}
+	report.Preflight = preflight
 	if *jsonOut {
 		return writePrettyJSON(os.Stdout, report)
 	}
@@ -202,7 +220,7 @@ func debugJobFlagTakesValue(arg string) bool {
 	if strings.Contains(arg, "=") {
 		return false
 	}
-	return arg == "-db" || arg == "--db"
+	return arg == "-db" || arg == "--db" || arg == "-preflight" || arg == "--preflight"
 }
 
 func runDebugBundle(ctx context.Context, args []string, client *http.Client) error {
@@ -210,6 +228,7 @@ func runDebugBundle(ctx context.Context, args []string, client *http.Client) err
 	configPath := fs.String("config", defaultPeerConfigPath(), "peer config JSON")
 	dbPath := fs.String("db", "", "control-plane SQLite store")
 	jobID := fs.String("job", "", "job id to focus")
+	preflightPath := fs.String("preflight", "", "redacted gateway preflight evidence JSON")
 	out := fs.String("out", "", "output directory")
 	url := fs.String("url", "", "peer URL override")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token override")
@@ -219,14 +238,29 @@ func runDebugBundle(ctx context.Context, args []string, client *http.Client) err
 	if *out == "" {
 		return fmt.Errorf("--out is required")
 	}
+	if *preflightPath != "" {
+		evidence, err := readGatewayPreflightEvidence(*preflightPath)
+		if err != nil {
+			return err
+		}
+		evidenceJobID := preflightEvidenceJobID(evidence)
+		if evidenceJobID == "" {
+			return fmt.Errorf("preflight evidence %s has no X-Myc-Job header", *preflightPath)
+		}
+		if *jobID != "" && *jobID != evidenceJobID {
+			return fmt.Errorf("preflight evidence job %q does not match requested job %q", evidenceJobID, *jobID)
+		}
+		*jobID = evidenceJobID
+	}
 	if err := writeDebugBundle(ctx, debugBundleRequest{
-		ConfigPath: *configPath,
-		DBPath:     *dbPath,
-		JobID:      *jobID,
-		OutDir:     *out,
-		URL:        *url,
-		RPCToken:   *rpcToken,
-		Client:     client,
+		ConfigPath:    *configPath,
+		DBPath:        *dbPath,
+		JobID:         *jobID,
+		PreflightPath: *preflightPath,
+		OutDir:        *out,
+		URL:           *url,
+		RPCToken:      *rpcToken,
+		Client:        client,
 	}); err != nil {
 		return err
 	}
@@ -462,6 +496,7 @@ func buildStatusReport(ctx context.Context, req statusRequest) (string, error) {
 
 type jobDebugReport struct {
 	Job             domain.Job                    `json:"job"`
+	Preflight       *gatewayPreflightEvidence     `json:"preflight,omitempty"`
 	Parent          *domain.Job                   `json:"parent,omitempty"`
 	Children        []domain.Job                  `json:"children,omitempty"`
 	Registry        *domain.JobRecord             `json:"registry,omitempty"`
@@ -557,6 +592,9 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 	if report.Registry != nil {
 		fmt.Fprintf(w, "registry\t%s\tcoordinator=%s\tassigned=%s\tcleanup=%t\tfence=%d\t%s\n", report.Registry.Status, emptyDash(report.Registry.Coordinator), emptyDash(report.Registry.AssignedNode), report.Registry.CleanupRequired, report.Registry.Fence, emptyDash(report.Registry.RecoveryNote))
 	}
+	if report.Preflight != nil {
+		printPreflightEvidenceSummary(w, *report.Preflight)
+	}
 	events := jobTimelineEvents(report)
 	for _, event := range events {
 		fmt.Fprintf(w, "timeline\t%s\t%s\t%s\t%s\n", formatTimeDash(event.At), event.Kind, event.Subject, event.Detail)
@@ -564,6 +602,65 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 	for _, hint := range report.Hints {
 		fmt.Fprintf(w, "hint\t%s\n", hint)
 	}
+}
+
+func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidence) {
+	headers := evidence.Headers
+	fmt.Fprintf(w, "preflight\tstatus=%d\tmodel=%s\tproject=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\n", evidence.StatusCode, emptyDash(evidence.Model), emptyDash(evidence.Project), emptyDash(evidence.FinishReason), evidence.ContentLength, evidence.ReasoningLength, evidence.JSONContent)
+	fmt.Fprintf(w, "preflight-route\tnode=%s\tbackend=%s\tinstance=%s\tdecision=%s\tattempts=%s\tcold=%s\tqueue_ms=%s\tupstream_ms=%s\tstructured=%s\tguided=%s\n",
+		emptyDash(headers["X-Myc-Node"]),
+		emptyDash(headers["X-Myc-Backend"]),
+		emptyDash(headers["X-Myc-Instance"]),
+		emptyDash(headers["X-Myc-Decision"]),
+		emptyDash(headers["X-Myc-Attempts"]),
+		emptyDash(headers["X-Myc-Cold-Load"]),
+		emptyDash(headers["X-Myc-Queue-Wait-Ms"]),
+		emptyDash(headers["X-Myc-Upstream-Wall-Ms"]),
+		emptyDash(headers["X-Myc-Structured-Output"]),
+		emptyDash(headers["X-Myc-Guided-Decoding-Requested"]),
+	)
+	if evidence.Usage.TotalTokens != 0 || evidence.Usage.PromptTokens != 0 || evidence.Usage.CompletionTokens != 0 {
+		fmt.Fprintf(w, "preflight-usage\tprompt=%d\tcompletion=%d\ttotal=%d\n", evidence.Usage.PromptTokens, evidence.Usage.CompletionTokens, evidence.Usage.TotalTokens)
+	}
+}
+
+func readGatewayPreflightEvidence(path string) (gatewayPreflightEvidence, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return gatewayPreflightEvidence{}, fmt.Errorf("read gateway preflight evidence: %w", err)
+	}
+	var evidence gatewayPreflightEvidence
+	if err := json.Unmarshal(data, &evidence); err != nil {
+		return gatewayPreflightEvidence{}, fmt.Errorf("decode gateway preflight evidence: %w", err)
+	}
+	return evidence, nil
+}
+
+func preflightEvidenceJobID(evidence gatewayPreflightEvidence) string {
+	if evidence.Headers == nil {
+		return ""
+	}
+	if value := evidence.Headers["X-Myc-Job"]; value != "" {
+		return value
+	}
+	for name, value := range evidence.Headers {
+		if strings.EqualFold(name, "X-Myc-Job") {
+			return value
+		}
+	}
+	return ""
+}
+
+func copyPreflightEvidenceFile(src, dst string) error {
+	evidence, err := readGatewayPreflightEvidence(src)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(evidence, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, append(data, '\n'), 0600)
 }
 
 type jobTimelineEvent struct {
@@ -638,13 +735,14 @@ func jobDebugHints(report jobDebugReport) []string {
 }
 
 type debugBundleRequest struct {
-	ConfigPath string
-	DBPath     string
-	JobID      string
-	OutDir     string
-	URL        string
-	RPCToken   string
-	Client     *http.Client
+	ConfigPath    string
+	DBPath        string
+	JobID         string
+	PreflightPath string
+	OutDir        string
+	URL           string
+	RPCToken      string
+	Client        *http.Client
 }
 
 type debugBundleManifest struct {
@@ -678,6 +776,11 @@ func writeDebugBundle(ctx context.Context, req debugBundleRequest) error {
 		manifest.Issues = append(manifest.Issues, cfgErr.Error())
 	} else {
 		if err := writeRedactedConfigFile(req.ConfigPath, addFile("config.redacted.json")); err != nil {
+			return err
+		}
+	}
+	if req.PreflightPath != "" {
+		if err := copyPreflightEvidenceFile(req.PreflightPath, addFile("preflight.json")); err != nil {
 			return err
 		}
 	}
