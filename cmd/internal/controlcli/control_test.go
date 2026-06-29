@@ -1432,6 +1432,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"preflight-route\tnode=b70\tbackend=vllm\tinstance=inst_2\tdecision=placed_on_warm_instance",
 		"preflight-usage\tprompt=16\tcompletion=10\ttotal=26",
 		"owner-telemetry\tok\tnode=node-a\taddress=http://peer.test\tmetrics=1\tsamples=1\tttft_ms=34\tload_ms=0\ttps=12.50\tcontext=26\tphases=complete",
+		"diagnosis\towner_completed_warm\towner node-a completed warm inference; load_ms=0; ttft_ms=34; upstream_ms=512; structured=json_schema",
 	} {
 		if !strings.Contains(preflightOutput, want) {
 			t.Fatalf("preflight debug output missing %q:\n%s", want, preflightOutput)
@@ -1448,7 +1449,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	if err := json.Unmarshal([]byte(preflightJSONOutput), &preflightReport); err != nil {
 		t.Fatalf("decode preflight debug json: %v\n%s", err, preflightJSONOutput)
 	}
-	if preflightReport.Preflight == nil || preflightReport.Preflight.Headers["X-Myc-Node"] != "b70" || preflightReport.Preflight.ContentLength != 16 || preflightReport.OwnerTelemetry == nil || len(preflightReport.OwnerTelemetry.RunMetrics) != 1 || len(preflightReport.OwnerTelemetry.SessionTimeline) != 1 {
+	if preflightReport.Preflight == nil || preflightReport.Preflight.Headers["X-Myc-Node"] != "b70" || preflightReport.Preflight.ContentLength != 16 || preflightReport.OwnerTelemetry == nil || len(preflightReport.OwnerTelemetry.RunMetrics) != 1 || len(preflightReport.OwnerTelemetry.SessionTimeline) != 1 || preflightReport.Diagnosis == nil || preflightReport.Diagnosis.Class != "owner_completed_warm" {
 		t.Fatalf("preflight debug report = %+v", preflightReport)
 	}
 	if err := Run(context.Background(), []string{"debug", "job", "job-other", "--preflight", preflightPath, "--db", dbPath}); err == nil || !strings.Contains(err.Error(), `does not match requested job "job-other"`) {
@@ -1677,7 +1678,7 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read job debug: %v", err)
 	}
-	if strings.Contains(string(jobDebugData), "rpc-secret") || !strings.Contains(string(jobDebugData), `"owner_telemetry"`) || !strings.Contains(string(jobDebugData), `"job_id": "job-a"`) {
+	if strings.Contains(string(jobDebugData), "rpc-secret") || !strings.Contains(string(jobDebugData), `"owner_telemetry"`) || !strings.Contains(string(jobDebugData), `"diagnosis"`) || !strings.Contains(string(jobDebugData), `"job_id": "job-a"`) {
 		t.Fatalf("job debug artifact = %s", jobDebugData)
 	}
 }
@@ -1789,6 +1790,78 @@ func TestOwnerTelemetryFetchFailureModes(t *testing.T) {
 	limited := limitTail([]int{1, 2, 3}, 0)
 	if len(limited) != 3 {
 		t.Fatalf("limitTail zero limit = %v", limited)
+	}
+}
+
+func TestJobDebugDiagnosisClassifiesConsumerEdges(t *testing.T) {
+	completeCold := diagnoseJobDebugReport(jobDebugReport{
+		Job: domain.Job{ID: "job-cold", Status: domain.JobDone},
+		Preflight: &gatewayPreflightEvidence{Headers: map[string]string{
+			"X-Myc-Node":              "spark",
+			"X-Myc-Cold-Load":         "true",
+			"X-Myc-Upstream-Wall-Ms":  "1759",
+			"X-Myc-Structured-Output": "json_schema",
+		}},
+		OwnerTelemetry: &ownerTelemetryReport{
+			RunMetrics: []domain.RunMetric{{NodeID: "spark", LoadWallClockMS: 158807, TTFTms: 1759}},
+			SessionTimeline: []domain.SessionMetric{
+				{Phase: domain.TelemetryPhasePlaced},
+				{Phase: domain.TelemetryPhaseLoadReady},
+				{Phase: domain.TelemetryPhaseUpstreamStart},
+				{Phase: domain.TelemetryPhaseComplete},
+			},
+		},
+	})
+	if completeCold.Class != "owner_completed_cold_load" || !strings.Contains(completeCold.Summary, "load_ms=158807") || !strings.Contains(completeCold.Next, "consumer timed out") {
+		t.Fatalf("complete cold diagnosis = %+v", completeCold)
+	}
+
+	telemetryMissing := diagnoseJobDebugReport(jobDebugReport{OwnerTelemetry: &ownerTelemetryReport{Error: "rpc token required"}})
+	if telemetryMissing.Class != "owner_telemetry_unavailable" {
+		t.Fatalf("telemetry missing diagnosis = %+v", telemetryMissing)
+	}
+
+	cleanupRequired := diagnoseJobDebugReport(jobDebugReport{Registry: &domain.JobRecord{CleanupRequired: true}})
+	if cleanupRequired.Class != "cleanup_required" {
+		t.Fatalf("cleanup diagnosis = %+v", cleanupRequired)
+	}
+
+	failed := diagnoseJobDebugReport(jobDebugReport{
+		Job:            domain.Job{ID: "job-failed", Status: domain.JobFailed},
+		OwnerTelemetry: &ownerTelemetryReport{SessionTimeline: []domain.SessionMetric{{Phase: domain.TelemetryPhaseError, Error: "context overflow"}}},
+	})
+	if failed.Class != "owner_failed" || !strings.Contains(failed.Summary, "context overflow") {
+		t.Fatalf("failed diagnosis = %+v", failed)
+	}
+
+	inflight := diagnoseJobDebugReport(jobDebugReport{Job: domain.Job{ID: "job-loading", Status: domain.JobLoading}})
+	if inflight.Class != "inflight_or_stale" {
+		t.Fatalf("inflight diagnosis = %+v", inflight)
+	}
+
+	doneNoOwner := diagnoseJobDebugReport(jobDebugReport{Job: domain.Job{ID: "job-done", Status: domain.JobDone}})
+	if doneNoOwner.Class != "job_done_without_owner_complete" {
+		t.Fatalf("done no owner diagnosis = %+v", doneNoOwner)
+	}
+
+	registryFailure := jobFailureText(jobDebugReport{Registry: &domain.JobRecord{CleanupError: "cleanup failed"}})
+	if registryFailure != "cleanup failed" {
+		t.Fatalf("registry cleanup failure text = %q", registryFailure)
+	}
+	recoveryFailure := jobFailureText(jobDebugReport{Registry: &domain.JobRecord{RecoveryNote: "recovery note"}})
+	if recoveryFailure != "recovery note" {
+		t.Fatalf("registry recovery failure text = %q", recoveryFailure)
+	}
+	localSampleFailure := jobFailureText(jobDebugReport{SessionTimeline: []domain.SessionMetric{{Error: "local sample error"}}})
+	if localSampleFailure != "local sample error" {
+		t.Fatalf("local sample failure text = %q", localSampleFailure)
+	}
+	headers := jobDebugReport{Preflight: &gatewayPreflightEvidence{Headers: map[string]string{"x-myc-cold-load": "true"}}}
+	if got := preflightHeader(headers, "X-Myc-Cold-Load"); got != "true" {
+		t.Fatalf("case-insensitive preflightHeader = %q", got)
+	}
+	if got := preflightHeader(jobDebugReport{}, "X-Myc-Cold-Load"); got != "" {
+		t.Fatalf("empty preflightHeader = %q", got)
 	}
 }
 

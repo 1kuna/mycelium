@@ -273,6 +273,17 @@ owner, backend, warm/cold placement, structured-output mode, usage, terminal
 job state, registry cleanup flag, owner TTFT/load/context/tokens-per-second,
 and owner session phases. If owner telemetry fetch fails, the report keeps the
 request-time preflight evidence and prints the exact owner telemetry error.
+The `diagnosis` line is the quick PM handoff:
+
+- `owner_completed_warm` / `owner_completed_cold_load`: the assigned owner
+  reached the complete phase. If the consumer timed out or missed summary
+  output, investigate the consumer timeout/artifact boundary rather than owner
+  inference.
+- `owner_failed`: Mycelium or the owner recorded a failed job or error phase.
+- `cleanup_required` / `inflight_or_stale`: preserve a debug bundle and inspect
+  owner state before retrying scale work.
+- `owner_telemetry_unavailable`: fix peer RPC auth/address or keep relying on
+  the request-time headers until owner telemetry can be fetched.
 
 ### Prove cold-load cancellation cleanup after activation
 

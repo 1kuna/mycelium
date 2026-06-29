@@ -197,6 +197,7 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 		}
 		report.OwnerTelemetry = fetchJobOwnerTelemetry(ctx, *dbPath, report, token, clientOrDefault(client))
 	}
+	report.Diagnosis = diagnoseJobDebugReport(report)
 	if *jsonOut {
 		return writePrettyJSON(os.Stdout, report)
 	}
@@ -512,6 +513,7 @@ type jobDebugReport struct {
 	Job             domain.Job                    `json:"job"`
 	Preflight       *gatewayPreflightEvidence     `json:"preflight,omitempty"`
 	OwnerTelemetry  *ownerTelemetryReport         `json:"owner_telemetry,omitempty"`
+	Diagnosis       *jobDebugDiagnosis            `json:"diagnosis,omitempty"`
 	Parent          *domain.Job                   `json:"parent,omitempty"`
 	Children        []domain.Job                  `json:"children,omitempty"`
 	Registry        *domain.JobRecord             `json:"registry,omitempty"`
@@ -613,6 +615,9 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 	if report.OwnerTelemetry != nil {
 		printOwnerTelemetrySummary(w, *report.OwnerTelemetry)
 	}
+	if report.Diagnosis != nil {
+		fmt.Fprintf(w, "diagnosis\t%s\t%s\tnext=%s\n", report.Diagnosis.Class, report.Diagnosis.Summary, report.Diagnosis.Next)
+	}
 	events := jobTimelineEvents(report)
 	for _, event := range events {
 		fmt.Fprintf(w, "timeline\t%s\t%s\t%s\t%s\n", formatTimeDash(event.At), event.Kind, event.Subject, event.Detail)
@@ -655,6 +660,152 @@ func ownerTelemetryPhases(samples []domain.SessionMetric) string {
 		phases = append(phases, string(sample.Phase))
 	}
 	return strings.Join(phases, ",")
+}
+
+type jobDebugDiagnosis struct {
+	Class   string `json:"class"`
+	Summary string `json:"summary"`
+	Next    string `json:"next"`
+}
+
+func diagnoseJobDebugReport(report jobDebugReport) *jobDebugDiagnosis {
+	if report.OwnerTelemetry != nil && report.OwnerTelemetry.Error != "" {
+		return &jobDebugDiagnosis{
+			Class:   "owner_telemetry_unavailable",
+			Summary: report.OwnerTelemetry.Error,
+			Next:    "fix peer RPC auth/address or preserve request-time preflight headers",
+		}
+	}
+	if report.Registry != nil && report.Registry.CleanupRequired {
+		return &jobDebugDiagnosis{
+			Class:   "cleanup_required",
+			Summary: "registry still requires cleanup on the assigned owner",
+			Next:    "preserve a debug bundle and inspect owner state before retrying scale work",
+		}
+	}
+	if ownerTelemetryHasPhase(report.OwnerTelemetry, domain.TelemetryPhaseComplete) {
+		return &jobDebugDiagnosis{
+			Class:   completedDiagnosisClass(report),
+			Summary: completedDiagnosisSummary(report),
+			Next:    "if the consumer timed out or missed summary output, classify it as downstream of completed owner inference",
+		}
+	}
+	if ownerTelemetryHasPhase(report.OwnerTelemetry, domain.TelemetryPhaseError) || report.Job.Status == domain.JobFailed || (report.Registry != nil && report.Registry.Status == domain.JobFailed) {
+		return &jobDebugDiagnosis{
+			Class:   "owner_failed",
+			Summary: firstNonEmpty(jobFailureText(report), "owner or coordinator recorded a failed job"),
+			Next:    "inspect hints, owner session error samples, and backend logs for the selected owner",
+		}
+	}
+	if report.Job.Status == domain.JobDone || (report.Registry != nil && report.Registry.Status == domain.JobDone) {
+		return &jobDebugDiagnosis{
+			Class:   "job_done_without_owner_complete",
+			Summary: "durable job is done but owner completion telemetry was not recovered",
+			Next:    "rerun with --owner-telemetry and valid peer RPC auth or inspect the owner control DB",
+		}
+	}
+	if report.Job.Status == domain.JobPlacing || report.Job.Status == domain.JobLoading || report.Job.Status == domain.JobRunning || (report.Registry != nil && (report.Registry.Status == domain.JobPlacing || report.Registry.Status == domain.JobLoading || report.Registry.Status == domain.JobRunning)) {
+		return &jobDebugDiagnosis{
+			Class:   "inflight_or_stale",
+			Summary: "job or registry is still non-terminal",
+			Next:    "wait a bounded interval, rerun debug job, then preserve a bundle if state remains non-terminal",
+		}
+	}
+	return &jobDebugDiagnosis{
+		Class:   "insufficient_evidence",
+		Summary: "job state does not identify owner completion, owner failure, or stale cleanup",
+		Next:    "preserve X-Myc-Job/preflight evidence and rerun with --owner-telemetry",
+	}
+}
+
+func ownerTelemetryHasPhase(report *ownerTelemetryReport, phase domain.TelemetryPhase) bool {
+	if report == nil || report.Error != "" {
+		return false
+	}
+	for _, sample := range report.SessionTimeline {
+		if sample.Phase == phase {
+			return true
+		}
+	}
+	return false
+}
+
+func completedDiagnosisClass(report jobDebugReport) string {
+	if preflightHeader(report, "X-Myc-Cold-Load") == "true" {
+		return "owner_completed_cold_load"
+	}
+	if report.OwnerTelemetry != nil && len(report.OwnerTelemetry.RunMetrics) > 0 && report.OwnerTelemetry.RunMetrics[0].LoadWallClockMS > 0 {
+		return "owner_completed_cold_load"
+	}
+	return "owner_completed_warm"
+}
+
+func completedDiagnosisSummary(report jobDebugReport) string {
+	owner := jobOwnerNode(report)
+	loadMS, ttftMS := 0, 0
+	if report.OwnerTelemetry != nil && len(report.OwnerTelemetry.RunMetrics) > 0 {
+		metric := report.OwnerTelemetry.RunMetrics[0]
+		loadMS = metric.LoadWallClockMS
+		ttftMS = metric.TTFTms
+	}
+	placement := "warm"
+	if preflightHeader(report, "X-Myc-Cold-Load") == "true" || loadMS > 0 {
+		placement = "cold"
+	}
+	parts := []string{
+		fmt.Sprintf("owner %s completed %s inference", emptyDash(owner), placement),
+		fmt.Sprintf("load_ms=%d", loadMS),
+		fmt.Sprintf("ttft_ms=%d", ttftMS),
+	}
+	if upstreamMS := preflightHeader(report, "X-Myc-Upstream-Wall-Ms"); upstreamMS != "" {
+		parts = append(parts, "upstream_ms="+upstreamMS)
+	}
+	if structured := preflightHeader(report, "X-Myc-Structured-Output"); structured != "" {
+		parts = append(parts, "structured="+structured)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func jobFailureText(report jobDebugReport) string {
+	if report.Job.Error != "" {
+		return report.Job.Error
+	}
+	if report.Registry != nil {
+		if report.Registry.CleanupError != "" {
+			return report.Registry.CleanupError
+		}
+		if report.Registry.RecoveryNote != "" {
+			return report.Registry.RecoveryNote
+		}
+	}
+	if report.OwnerTelemetry != nil {
+		for _, sample := range report.OwnerTelemetry.SessionTimeline {
+			if sample.Error != "" {
+				return sample.Error
+			}
+		}
+	}
+	for _, sample := range report.SessionTimeline {
+		if sample.Error != "" {
+			return sample.Error
+		}
+	}
+	return ""
+}
+
+func preflightHeader(report jobDebugReport, key string) string {
+	if report.Preflight == nil || report.Preflight.Headers == nil {
+		return ""
+	}
+	if value := report.Preflight.Headers[key]; value != "" {
+		return value
+	}
+	for name, value := range report.Preflight.Headers {
+		if strings.EqualFold(name, key) {
+			return value
+		}
+	}
+	return ""
 }
 
 func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidence) {
@@ -983,6 +1134,7 @@ func writeDebugBundle(ctx context.Context, req debugBundleRequest) error {
 				}
 			}
 			report.OwnerTelemetry = fetchJobOwnerTelemetry(ctx, storePath, report, firstNonEmpty(req.RPCToken, cfg.RPCToken), clientOrDefault(req.Client))
+			report.Diagnosis = diagnoseJobDebugReport(report)
 			if err := writePrettyJSONFile(addFile("job_debug.json"), report); err != nil {
 				return err
 			}
