@@ -241,7 +241,25 @@ whitelisted `X-Myc-*` headers, finish reason, content/reasoning lengths, JSON
 parse status, and usage counts. It intentionally does not write the bearer
 token, prompt, or raw completion content. Use that artifact, plus
 `myce debug job --preflight <preflight.json> --owner-telemetry --json`, as the
-standard consumer evidence packet for optimization handoffs.
+standard consumer evidence packet for optimization handoffs. If the consumer
+has a batch/run id, row/document id, timeout/error/cancel state, or client
+elapsed time, attach it explicitly:
+
+```bash
+myce debug job \
+  --preflight /tmp/mycelium-preflight/preflight.json \
+  --owner-telemetry \
+  --consumer-run <batch-or-request-id> \
+  --consumer-item <row-or-document-id> \
+  --consumer-status <ok|timeout|error|canceled|partial> \
+  --consumer-elapsed-ms <client-elapsed-ms> \
+  --consumer-error <sanitized-error-class> \
+  --json
+```
+
+Use `--consumer-error` for a short sanitized class such as `client_timeout`,
+`schema_validation_failed`, or `response_parse_error`; do not put bearer
+tokens, raw prompts, raw completions, or private document text in that field.
 
 ## Debugging Workflow
 
@@ -271,8 +289,9 @@ the selected job's authoritative run/session telemetry from the owner peer when
 the local config or `--rpc-token` provides peer RPC auth. It prints the route,
 owner, backend, warm/cold placement, structured-output mode, usage, terminal
 job state, registry cleanup flag, owner TTFT/load/context/tokens-per-second,
-and owner session phases. If owner telemetry fetch fails, the report keeps the
-request-time preflight evidence and prints the exact owner telemetry error.
+owner session phases, and any explicit consumer run/item/outcome flags. If
+owner telemetry fetch fails, the report keeps the request-time preflight
+evidence and prints the exact owner telemetry error.
 The `diagnosis` line is the quick PM handoff:
 
 - `owner_completed_warm` / `owner_completed_cold_load`: the assigned owner
