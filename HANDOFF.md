@@ -143,6 +143,16 @@ important continuity points are:
   `<tool_call>` block in final text instead of structured `tool_calls`.
   Treat Spark 9B as proven for forced tool calls and still unproven for reliable
   Deep Agents auto tool choice.
+- Follow-on tool preflight hardening added `myce gateway preflight --tool-name
+  <name> --tool-choice function|auto|required|none`. The command now records
+  response-side `tool_call_count`, `tool_call_names`, and `textual_tool_call`
+  in its secret-safe output and `preflight.json`, and `debug job --preflight`
+  surfaces those fields. Live Spark probes with strict tool schemas reproduced
+  the current contract: forced function choice returned one structured
+  `tool_calls` entry, while `auto` still returned final text containing a
+  literal `<tool_call>` block and `required` exhausted the tiny output cap
+  without a structured call. Use forced function choice for Verso canaries until
+  a different model/template/parser route proves reliable auto.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and

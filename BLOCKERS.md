@@ -22,7 +22,11 @@
   missing vLLM flags on Spark, but reliable auto tool selection/templating for
   this Qwen route. The warm B70 9B route remains plain-chat/schema only; the
   saved B70 27B tool-parser preset was still capacity-blocked in the last probe
-  and is not a proven tool route.
+  and is not a proven tool route. A follow-on preflight pass with strict tool
+  schemas confirmed the same boundary: forced function choice is usable for
+  Spark, `tool_choice:"auto"` records `textual_tool_call=true` with no
+  structured tool calls, and `tool_choice:"required"` hit `finish_reason=length`
+  with no structured call under the tiny canary cap.
 - 2026-06-29: Cold-load/client-timeout stale-job live proof is blocked at the
   MacBook gateway activation step, not at the Linux peers. B70 and Spark were
   updated through their existing `mycelium-real-fleet.service` user-systemd

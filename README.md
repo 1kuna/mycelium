@@ -327,6 +327,33 @@ OpenAI `tool_calls[0]` response; then repeat with `tool_choice:"auto"`. If the
 forced probe returns structured `tool_calls` but auto emits a literal
 `<tool_call>` block in final text, the remaining issue is model/template auto
 tool behavior rather than Mycelium routing, auth, or missing vLLM flags.
+`myce gateway preflight` can run that proof without printing secrets or storing
+raw completions:
+
+```bash
+myce gateway preflight \
+  --url http://<gateway-host>:<port> \
+  --model <model-alias> \
+  --project verso-tool-canary \
+  --prompt "Call the echo function with value ok. Do not answer directly." \
+  --tool-name echo \
+  --tool-choice function \
+  --out /tmp/mycelium-tool-forced
+
+myce gateway preflight \
+  --url http://<gateway-host>:<port> \
+  --model <model-alias> \
+  --project verso-tool-canary \
+  --prompt "Call the echo function with value ok. Do not answer directly." \
+  --tool-name echo \
+  --tool-choice auto \
+  --out /tmp/mycelium-tool-auto
+```
+
+The redacted `preflight.json` records `tool_call_count`, `tool_call_names`,
+`textual_tool_call`, route headers, usage, content length, reasoning length, and
+finish reason, but not the bearer token, prompt, raw content, or tool
+arguments.
 
 ### Prove cold-load cancellation cleanup after activation
 

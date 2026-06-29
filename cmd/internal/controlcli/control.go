@@ -944,6 +944,8 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	project := fs.String("project", "", "optional project id to send as X-Myc-Project")
 	prompt := fs.String("prompt", `Return {"ok":true}.`, "preflight prompt")
 	maxTokens := fs.Int("max-tokens", 16, "maximum output tokens for the preflight request")
+	toolName := fs.String("tool-name", "", "optional echo-style function name for an OpenAI tool-call canary")
+	toolChoice := fs.String("tool-choice", "", "tool choice for --tool-name: auto, required, none, or function")
 	outDir := fs.String("out", "", "optional directory for a redacted preflight evidence packet")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -959,13 +961,15 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 		return err
 	}
 	result, err := gatewayPreflightComplete(ctx, gatewayPreflightConfig{
-		URL:       *url,
-		Model:     *model,
-		Prompt:    *prompt,
-		MaxTokens: *maxTokens,
-		Project:   *project,
-		Token:     token,
-		Client:    client,
+		URL:        *url,
+		Model:      *model,
+		Prompt:     *prompt,
+		MaxTokens:  *maxTokens,
+		Project:    *project,
+		ToolName:   *toolName,
+		ToolChoice: *toolChoice,
+		Token:      token,
+		Client:     client,
 	})
 	if err != nil {
 		return err
@@ -979,16 +983,20 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	fmt.Printf("finish_reason\t%s\n", emptyDash(result.FinishReason))
 	fmt.Printf("content_length\t%d\n", len(result.Content))
 	fmt.Printf("reasoning_length\t%d\n", len(result.Reasoning))
+	fmt.Printf("tool_calls\tcount=%d\tnames=%s\n", result.ToolCallCount, emptyDash(strings.Join(result.ToolCallNames, ",")))
+	fmt.Printf("textual_tool_call\t%t\n", result.TextualToolCall)
 	fmt.Printf("json\t%t\n", result.JSONContent)
 	if result.Usage.TotalTokens != 0 || result.Usage.PromptTokens != 0 || result.Usage.CompletionTokens != 0 {
 		fmt.Printf("usage\tprompt=%d\tcompletion=%d\ttotal=%d\n", result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens)
 	}
 	if *outDir != "" {
 		path, err := writeGatewayPreflightEvidence(*outDir, tokenSource, gatewayPreflightConfig{
-			URL:       *url,
-			Model:     *model,
-			Project:   *project,
-			MaxTokens: *maxTokens,
+			URL:        *url,
+			Model:      *model,
+			Project:    *project,
+			MaxTokens:  *maxTokens,
+			ToolName:   *toolName,
+			ToolChoice: *toolChoice,
 		}, result)
 		if err != nil {
 			return err
@@ -999,23 +1007,28 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 }
 
 type gatewayPreflightConfig struct {
-	URL       string
-	Model     string
-	Prompt    string
-	MaxTokens int
-	Project   string
-	Token     string
-	Client    *http.Client
+	URL        string
+	Model      string
+	Prompt     string
+	MaxTokens  int
+	Project    string
+	ToolName   string
+	ToolChoice string
+	Token      string
+	Client     *http.Client
 }
 
 type gatewayPreflightResult struct {
-	StatusCode   int
-	Headers      http.Header
-	FinishReason string
-	Content      string
-	Reasoning    string
-	JSONContent  bool
-	Usage        api.OpenAIUsage
+	StatusCode      int
+	Headers         http.Header
+	FinishReason    string
+	Content         string
+	Reasoning       string
+	ToolCallCount   int
+	ToolCallNames   []string
+	TextualToolCall bool
+	JSONContent     bool
+	Usage           api.OpenAIUsage
 }
 
 type gatewayPreflightEvidence struct {
@@ -1028,6 +1041,9 @@ type gatewayPreflightEvidence struct {
 	FinishReason    string            `json:"finish_reason"`
 	ContentLength   int               `json:"content_length"`
 	ReasoningLength int               `json:"reasoning_length"`
+	ToolCallCount   int               `json:"tool_call_count"`
+	ToolCallNames   []string          `json:"tool_call_names,omitempty"`
+	TextualToolCall bool              `json:"textual_tool_call"`
 	JSONContent     bool              `json:"json_content"`
 	Usage           api.OpenAIUsage   `json:"usage"`
 }
@@ -1046,6 +1062,9 @@ func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflig
 		FinishReason:    result.FinishReason,
 		ContentLength:   len(result.Content),
 		ReasoningLength: len(result.Reasoning),
+		ToolCallCount:   result.ToolCallCount,
+		ToolCallNames:   result.ToolCallNames,
+		TextualToolCall: result.TextualToolCall,
 		JSONContent:     result.JSONContent,
 		Usage:           result.Usage,
 	}
@@ -1140,7 +1159,7 @@ func readGatewayTokenFile(path string) (string, error) {
 }
 
 func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (gatewayPreflightResult, error) {
-	body, err := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"model": cfg.Model,
 		"messages": []map[string]string{{
 			"role":    "user",
@@ -1148,7 +1167,42 @@ func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (
 		}},
 		"max_tokens":  cfg.MaxTokens,
 		"temperature": 0,
-		"response_format": map[string]any{
+	}
+	if cfg.ToolName != "" {
+		payload["tools"] = []map[string]any{{
+			"type":   "function",
+			"strict": true,
+			"function": map[string]any{
+				"name":        cfg.ToolName,
+				"description": "Echo a value for Mycelium tool-call preflight.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"value": map[string]string{"type": "string"},
+					},
+					"required":             []string{"value"},
+					"additionalProperties": false,
+				},
+			},
+		}}
+		switch choice := strings.TrimSpace(cfg.ToolChoice); choice {
+		case "", "auto", "required", "none":
+			if choice == "" {
+				choice = "auto"
+			}
+			payload["tool_choice"] = choice
+		case "function":
+			payload["tool_choice"] = map[string]any{
+				"type": "function",
+				"function": map[string]string{
+					"name": cfg.ToolName,
+				},
+			}
+		default:
+			return gatewayPreflightResult{}, fmt.Errorf("--tool-choice must be auto, required, none, or function")
+		}
+	} else {
+		payload["response_format"] = map[string]any{
 			"type": "json_schema",
 			"json_schema": map[string]any{
 				"name":   "mycelium_preflight",
@@ -1162,8 +1216,9 @@ func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (
 					"additionalProperties": false,
 				},
 			},
-		},
-	})
+		}
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return gatewayPreflightResult{}, err
 	}
@@ -1207,9 +1262,10 @@ func parseGatewayPreflightResponse(data []byte) (gatewayPreflightResult, error) 
 	var out struct {
 		Choices []struct {
 			Message struct {
-				Content          string `json:"content"`
-				Reasoning        string `json:"reasoning"`
-				ReasoningContent string `json:"reasoning_content"`
+				Content          string               `json:"content"`
+				Reasoning        string               `json:"reasoning"`
+				ReasoningContent string               `json:"reasoning_content"`
+				ToolCalls        []api.OpenAIToolCall `json:"tool_calls"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -1226,13 +1282,27 @@ func parseGatewayPreflightResponse(data []byte) (gatewayPreflightResult, error) 
 	if reasoning == "" {
 		reasoning = choice.Message.ReasoningContent
 	}
+	toolNames := make([]string, 0, len(choice.Message.ToolCalls))
+	for _, call := range choice.Message.ToolCalls {
+		if call.Function.Name != "" {
+			toolNames = append(toolNames, call.Function.Name)
+		}
+	}
 	return gatewayPreflightResult{
-		FinishReason: choice.FinishReason,
-		Content:      choice.Message.Content,
-		Reasoning:    reasoning,
-		JSONContent:  json.Valid([]byte(strings.TrimSpace(choice.Message.Content))),
-		Usage:        out.Usage,
+		FinishReason:    choice.FinishReason,
+		Content:         choice.Message.Content,
+		Reasoning:       reasoning,
+		ToolCallCount:   len(choice.Message.ToolCalls),
+		ToolCallNames:   toolNames,
+		TextualToolCall: looksLikeTextualToolCall(choice.Message.Content),
+		JSONContent:     json.Valid([]byte(strings.TrimSpace(choice.Message.Content))),
+		Usage:           out.Usage,
 	}, nil
+}
+
+func looksLikeTextualToolCall(content string) bool {
+	lower := strings.ToLower(content)
+	return strings.Contains(lower, "<tool_call>") || strings.Contains(lower, "</tool_call>")
 }
 
 func gatewayPreflightHeaders() []string {
