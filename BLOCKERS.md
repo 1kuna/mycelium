@@ -2,6 +2,36 @@
 
 ## Active
 
+- 2026-06-29: Cold-load/client-timeout stale-job live proof is blocked at the
+  MacBook gateway activation step, not at the Linux peers. B70 and Spark were
+  updated through their existing `mycelium-real-fleet.service` user-systemd
+  units to binaries containing the stale-job cleanup fix. B70 now reports
+  SHA256 `22adabba230d1418e13449fe9a8bcfe5b604b4fd8c2f5179c2277c9dbf9da09f`
+  on `192.168.0.153:55283`; Spark reports SHA256
+  `6e19e91f8b97115f7545f33425c93f669ea5104f8f559727d1b36e966ab1df9d`
+  on `192.168.0.16:55274`. The Mac safe activation path was hardened in
+  commit `99784cc` so the generated system LaunchDaemon runs as user `zach`
+  and keeps `/Users/zach/.mycelium` config/log/control-DB paths instead of
+  touching them as root. A named Darwin binary
+  `/Users/zach/.mycelium/bin/mycelium-99784cc` was built and ad-hoc signed
+  with SHA256
+  `3e13360898741e63a2a195d4d936f7aa3c006d5c7a6e6f9568bd4671cecec8d`.
+  The system LaunchDaemon install was not attempted because `sudo -S -v`
+  rejected the provided credential before any LaunchAgent bootout or system
+  install command ran. The existing user LaunchAgent stayed running on the
+  known-good old binary, with `service active`, `peer ready`, and
+  `seeds ready 2/2`. A post-blocker client-timeout canary against that still-old
+  gateway reproduced the stale lifecycle shape: job
+  `gateway-1782561331393747000-10-1` was left `placing` while its registry
+  record was `loading` assigned to B70. Evidence was preserved under
+  `/tmp/mycelium-stale-job-blocker-20260629T112957Z`; because the stale row was
+  created by this verification attempt, the Mac control DB was backed up to
+  `/Users/zach/.mycelium/bench/real-fleet/backups/control-corrected-lan.before-stale-job-cleanup-20260629T113100Z.db`
+  and only that job/registry record was manually terminalized to `failed` with
+  `cleanup_required=false`. Remaining unblocker: run the documented system
+  LaunchDaemon activation with valid local admin credentials, prove
+  `service status --system` and seed diagnostics, then rerun the README
+  cold-load cancellation recipe against the fixed Mac gateway.
 - 2026-06-27: MacBook LaunchAgent activation blocks rolling the committed
   registry-compaction binary live on the gateway. The current built Darwin
   binary can probe B70 and Spark when run interactively, but the same binary

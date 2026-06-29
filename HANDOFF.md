@@ -154,6 +154,25 @@ Known from repo and live evidence:
   `myce debug job --json`, and preserves a focused `myce debug bundle`. This
   prepares the live proof path only; it does not claim the deployed MacBook,
   B70, or Spark services are running the stale-job fix.
+- On 2026-06-29 the Linux peers were updated to binaries containing the
+  stale-job cleanup fix through their existing user-systemd services. B70
+  reported SHA256
+  `22adabba230d1418e13449fe9a8bcfe5b604b4fd8c2f5179c2277c9dbf9da09f` and
+  `service active`, `peer ready`, `seeds ready 1/1`; Spark reported SHA256
+  `6e19e91f8b97115f7545f33425c93f669ea5104f8f559727d1b36e966ab1df9d` and
+  `service active`, `peer ready`, `seeds ready 2/2`. The MacBook gateway was
+  not activated on the fixed binary because local `sudo` authentication failed
+  before any user LaunchAgent bootout or system LaunchDaemon install happened.
+  The existing user LaunchAgent remained on `/Users/zach/.mycelium/bin/mycelium`
+  and rechecked healthy with B70/Spark seeds ready. A named fixed Darwin binary
+  was prepared at `/Users/zach/.mycelium/bin/mycelium-99784cc`, but live Mac
+  activation still needs valid local admin credentials or Zach running the
+  documented `service install --system` command. A timeout canary against the
+  still-old Mac gateway reproduced the stale `placing` job / `loading` registry
+  bug; evidence is preserved under
+  `/tmp/mycelium-stale-job-blocker-20260629T112957Z`, and the single row created
+  by that verification attempt was manually terminalized after backing up the
+  control DB.
 
 This handoff refresh performed repo authority inspection, `make ci`, a narrow
 MacBook/B70 live canary, and Spark reachability classification. A later
@@ -201,6 +220,12 @@ and did not touch live services. It did not push.
   the deployed MacBook/B70/Spark services have this fix until they are updated
   and the README cold-load cancellation proof recipe proves terminal job cleanup
   on the live route.
+- As of 2026-06-29, B70 and Spark have binaries containing the stale-job fix,
+  but the MacBook gateway remains on the old known-good user LaunchAgent binary.
+  Therefore the active consumer route is not live-proven for the stale-job fix.
+  The next operator must activate the fixed Mac binary through the hardened
+  system LaunchDaemon path from commit `99784cc`, using valid local admin
+  credentials, before rerunning the cold-load cancellation proof.
 - Older thread dumps contain exact live-fleet endpoints, token-file locations,
   peer ports, and TTFT/TPS observations. Treat those as stale private
   operational evidence unless rechecked live; do not publish token values or
