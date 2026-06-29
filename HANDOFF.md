@@ -121,7 +121,11 @@ important continuity points are:
   and sanitized error facts with `--consumer-run`, `--consumer-item`,
   `--consumer-status`, `--consumer-elapsed-ms`, and `--consumer-error`; those
   fields are copied into `debug job --json` and `debug bundle` artifacts without
-  requiring prompts, completions, or tokens.
+  requiring prompts, completions, or tokens. Current preflight artifacts can
+  carry those same labels at request time, and `debug job --preflight` /
+  `debug bundle --preflight` inherit them automatically when no explicit
+  `--consumer-*` flags are provided. Explicit debug flags remain the override
+  path for operator correction.
 - The gateway now exposes OpenAI tool-call request diagnostics in
   `X-Myc-Tools-Requested`, `X-Myc-Tool-Choice`,
   `X-Myc-VLLM-Tool-Parser-Configured`, and

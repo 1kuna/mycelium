@@ -224,6 +224,8 @@ myce gateway preflight \
   --url http://<gateway-host>:<port> \
   --model <model-or-alias> \
   --project <consumer-canary-id> \
+  --consumer-run <batch-or-request-id> \
+  --consumer-item <row-or-document-id> \
   --config <local-mycelium-peer.json> \
   --out /tmp/mycelium-preflight
 ```
@@ -270,16 +272,22 @@ When `--out` is set, `myce gateway preflight` writes
 `preflight.json` with the gateway URL, model, project, auth source label,
 whitelisted `X-Myc-*` headers, finish reason, content/reasoning lengths, JSON
 parse status, usage availability, usage counts when available, and streaming
-completion status when `--stream` is used. It intentionally does not write the
-bearer token, prompt, or raw completion content. Use that artifact, plus
-`myce debug job --preflight <preflight.json> --owner-telemetry --json`, as the
-standard consumer evidence packet for optimization handoffs. If the consumer
-has a batch/run id, row/document id, timeout/error/cancel state, or client
-elapsed time, attach it explicitly:
+completion status when `--stream` is used. It also accepts optional
+`--consumer-run`, `--consumer-item`, `--consumer-status`,
+`--consumer-elapsed-ms`, and `--consumer-error` labels so a project thread can
+preserve the consumer batch/item/outcome join once at request time. It
+intentionally does not write the bearer token, prompt, or raw completion
+content. Use that artifact, plus `myce debug job --preflight <preflight.json>
+--owner-telemetry --json`, as the standard consumer evidence packet for
+optimization handoffs. If the preflight artifact already has consumer labels,
+`debug job` and `debug bundle` inherit them automatically; explicit
+`--consumer-*` flags override the artifact when an operator needs to correct or
+enrich the handoff:
 
 ```bash
 myce debug job \
   --preflight /tmp/mycelium-preflight/preflight.json \
+  --config <local-mycelium-peer.json> \
   --owner-telemetry \
   --consumer-run <batch-or-request-id> \
   --consumer-item <row-or-document-id> \
@@ -292,6 +300,9 @@ myce debug job \
 Use `--consumer-error` for a short sanitized class such as `client_timeout`,
 `schema_validation_failed`, or `response_parse_error`; do not put bearer
 tokens, raw prompts, raw completions, or private document text in that field.
+When `--db` is omitted, `debug job --config <peer.json>` reads that config's
+`store_path`; use `--db` only when intentionally inspecting a different control
+store.
 
 ## Debugging Workflow
 
