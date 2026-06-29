@@ -130,6 +130,19 @@ important continuity points are:
   return with route headers instead of collapsing into a headerless gateway
   502. This helps Atlas/Verso distinguish provider flag/parser gaps from
   routing, capacity, auth, or consumer-shape problems.
+- On 2026-06-29 Spark was advanced from "provider rejects auto tools" to a
+  narrow proven tool-capable route without touching the MacBook gateway or B70.
+  Spark's existing `mycelium-real-fleet.service` and `spark-qwen9b-vllm` preset
+  were updated in place to launch vLLM with `--enable-auto-tool-choice` and
+  `--tool-call-parser hermes`; timestamped backups of Spark's peer config and
+  control DB were taken first. A direct Spark Mycelium gateway canary for
+  `spark-qwen9b` with forced function `tool_choice` returned a real OpenAI
+  `tool_calls[0]` message and route headers confirming parser/auto-tool flags
+  were configured. `tool_choice:"auto"` no longer failed with vLLM's missing
+  flag error, but the same Qwen route still emitted a literal Hermes-style
+  `<tool_call>` block in final text instead of structured `tool_calls`.
+  Treat Spark 9B as proven for forced tool calls and still unproven for reliable
+  Deep Agents auto tool choice.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and

@@ -319,6 +319,15 @@ auto tool choice. If the request returns `queued: no instance available`, the
 tool-capable preset may exist but cannot currently be placed without unloading
 or changing live capacity.
 
+A route with both vLLM tool headers set is provider-configured for tools, but
+that alone does not prove the model will choose tools automatically. Isolate the
+layers with two tiny probes: first force a known function with
+`tool_choice:{"type":"function","function":{"name":"echo"}}` and require an
+OpenAI `tool_calls[0]` response; then repeat with `tool_choice:"auto"`. If the
+forced probe returns structured `tool_calls` but auto emits a literal
+`<tool_call>` block in final text, the remaining issue is model/template auto
+tool behavior rather than Mycelium routing, auth, or missing vLLM flags.
+
 ### Prove cold-load cancellation cleanup after activation
 
 Use this only after the gateway and owner peers are deliberately activated on a

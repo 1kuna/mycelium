@@ -2,20 +2,27 @@
 
 ## Active
 
-- 2026-06-29: Verso Deep Agents/OpenAI tool-calling over Mycelium is not yet
-  live-proven. A tiny tool-call probe through the MacBook gateway showed the
-  current Spark 9B vLLM route rejects `tool_choice:"auto"` with vLLM's exact
-  provider error that `"auto" tool choice requires --enable-auto-tool-choice and
-  --tool-call-parser to be set`. The warm B70 9B vLLM route accepts the request
-  but returned `finish_reason=length` with no `tool_calls`, so it is not a
-  proven tool-call route. The saved B70 27B vLLM preset declares
-  `--tool-call-parser hermes`, but the current gateway probe for
-  `b70-qwen27b` returned `queued: no instance available`, and the preset does
-  not currently declare `--enable-auto-tool-choice`. Plain strict-schema chat
-  remains proven on B70 and Spark; tool-calling Deep Agents need a deliberately
-  activated vLLM preset with both `--enable-auto-tool-choice` and a compatible
-  `--tool-call-parser`, plus a tiny Mycelium gateway canary that returns a real
-  OpenAI `tool_calls` message.
+- 2026-06-29: Verso Deep Agents/OpenAI auto tool-calling over Mycelium remains
+  partially blocked by model/template behavior, but Spark now has a proven
+  tool-capable route for forced function calls. Spark's existing
+  `mycelium-real-fleet.service` was restarted with the `spark-qwen9b-vllm`
+  vLLM launch args updated to include `--enable-auto-tool-choice` and
+  `--tool-call-parser hermes`, plus the `tools` capability in the preset.
+  A direct Spark gateway canary for `spark-qwen9b` with
+  `tool_choice:{"type":"function","function":{"name":"echo"}}` returned HTTP
+  200, `X-Myc-Node: spark`, `X-Myc-Decision: placed_on_warm_instance`,
+  `X-Myc-Tools-Requested: true`, `X-Myc-Tool-Choice: function:echo`,
+  `X-Myc-VLLM-Tool-Parser-Configured: true`,
+  `X-Myc-VLLM-Auto-Tool-Choice-Configured: true`, and a real OpenAI
+  `tool_calls[0].function.name=echo` response with empty final content.
+  However, two `tool_choice:"auto"` probes through the same activated route
+  returned HTTP 200 with no structured `tool_calls`; Qwen emitted a literal
+  Hermes-style `<tool_call>` block in final text instead. The remaining blocker
+  for Verso Deep Agents is therefore not missing Mycelium routing/auth or
+  missing vLLM flags on Spark, but reliable auto tool selection/templating for
+  this Qwen route. The warm B70 9B route remains plain-chat/schema only; the
+  saved B70 27B tool-parser preset was still capacity-blocked in the last probe
+  and is not a proven tool route.
 - 2026-06-29: Cold-load/client-timeout stale-job live proof is blocked at the
   MacBook gateway activation step, not at the Linux peers. B70 and Spark were
   updated through their existing `mycelium-real-fleet.service` user-systemd
