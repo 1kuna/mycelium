@@ -355,6 +355,25 @@ The redacted `preflight.json` records `tool_call_count`, `tool_call_names`,
 finish reason, but not the bearer token, prompt, raw content, or tool
 arguments.
 
+Current live larger-context tool route for Verso canaries:
+
+- Gateway: `http://192.168.0.16:55274`
+- Model: `spark-qwen9b-tools-4096`
+- Tool choice: forced function choice, not `auto`
+- Expected headers: `X-Myc-Node: spark`, `X-Myc-Backend: vllm`,
+  `X-Myc-Tool-Choice: function:<name>`,
+  `X-Myc-VLLM-Tool-Parser-Configured: true`, and
+  `X-Myc-VLLM-Auto-Tool-Choice-Configured: true`
+- Expected evidence: `tool_call_count > 0`, `textual_tool_call=false`, and
+  `usage.prompt_tokens` high enough for the consumer fixture.
+
+The route has a 4096-token model context. Leave headroom for the output cap and
+the tool schema/template. The live proof succeeded with
+`usage.prompt_tokens=2997`, `max_tokens=160`, and one structured `echo` tool
+call. The MacBook gateway may not route this alias until its preset registry is
+safely refreshed; use the Spark gateway directly unless a later handoff says the
+MacBook route is live.
+
 ### Prove cold-load cancellation cleanup after activation
 
 Use this only after the gateway and owner peers are deliberately activated on a

@@ -153,6 +153,21 @@ important continuity points are:
   literal `<tool_call>` block and `required` exhausted the tiny output cap
   without a structured call. Use forced function choice for Verso canaries until
   a different model/template/parser route proves reliable auto.
+- A larger-context Spark tool route was added on 2026-06-29 without touching B70
+  or the MacBook gateway. Spark's peer config and control DB were backed up,
+  then a new `spark-qwen9b-tools-4096-vllm` preset/alias
+  `spark-qwen9b-tools-4096` was added with the same Qwen3.5-9B model,
+  `--max-model-len 4096`, `--enable-auto-tool-choice`, and
+  `--tool-call-parser hermes`. Spark was restarted through its existing
+  `mycelium-real-fleet.service`; service status returned `peer ready` and
+  `seeds ready 2/2`. A secret-safe forced-tool preflight against
+  `http://192.168.0.16:55274` returned HTTP 200 on Spark `inst_1`,
+  `X-Myc-Tool-Choice: function:echo`, both vLLM tool headers true,
+  `usage.prompt_tokens=2997`, and `tool_call_count=1`. Provider 400 probes also
+  proved the new route enforces a 4096-token model ceiling. The current MacBook
+  gateway does not know this new alias until its own preset registry is safely
+  refreshed, so Verso should target Spark's Mycelium gateway directly for this
+  larger-context tool route.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and

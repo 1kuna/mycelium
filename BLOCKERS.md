@@ -26,7 +26,13 @@
   schemas confirmed the same boundary: forced function choice is usable for
   Spark, `tool_choice:"auto"` records `textual_tool_call=true` with no
   structured tool calls, and `tool_choice:"required"` hit `finish_reason=length`
-  with no structured call under the tiny canary cap.
+  with no structured call under the tiny canary cap. A larger-context forced
+  tool route now exists on Spark as `spark-qwen9b-tools-4096` via
+  `http://192.168.0.16:55274`; it proved `usage.prompt_tokens=2997` and
+  `tool_call_count=1` with forced function choice. Remaining blocker: MacBook
+  gateway routing for that new alias is not live until the Mac gateway preset
+  registry can be safely refreshed, so consumers should use Spark directly for
+  this route.
 - 2026-06-29: Cold-load/client-timeout stale-job live proof is blocked at the
   MacBook gateway activation step, not at the Linux peers. B70 and Spark were
   updated through their existing `mycelium-real-fleet.service` user-systemd
