@@ -270,9 +270,12 @@ Useful response headers:
 
 When `--out` is set, `myce gateway preflight` writes
 `preflight.json` with the gateway URL, model, project, auth source label,
-whitelisted `X-Myc-*` headers, finish reason, content/reasoning lengths, JSON
-parse status, usage availability, usage counts when available, and streaming
-completion status when `--stream` is used. It also accepts optional
+the redacted request contract (`max_tokens`, streaming mode, structured-output
+mode, tool name/choice when a tool canary is requested), any preflight
+expectation gates, whitelisted `X-Myc-*` headers, finish reason,
+content/reasoning lengths, JSON parse status, usage availability, usage counts
+when available, and streaming completion status when `--stream` is used. It
+also accepts optional
 `--consumer-run`, `--consumer-item`, `--consumer-status`,
 `--consumer-elapsed-ms`, and `--consumer-error` labels so a project thread can
 preserve the consumer batch/item/outcome join once at request time. It

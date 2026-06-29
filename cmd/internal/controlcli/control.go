@@ -1320,7 +1320,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	if err != nil {
 		return err
 	}
-	result, err := gatewayPreflightComplete(ctx, gatewayPreflightConfig{
+	cfg := gatewayPreflightConfig{
 		URL:        *url,
 		Model:      *model,
 		Prompt:     *prompt,
@@ -1331,7 +1331,15 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 		Token:      token,
 		Client:     client,
 		Stream:     *stream,
-	})
+	}
+	expectations := gatewayPreflightExpectations{
+		ExpectNode:            *expectNode,
+		RequireJSON:           *requireJSON,
+		RequireToolCall:       *requireToolCall,
+		RejectTextualToolCall: *rejectTextualToolCall,
+		MinPromptTokens:       *minPromptTokens,
+	}
+	result, err := gatewayPreflightComplete(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -1360,29 +1368,19 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	}
 	var evidencePath string
 	if *outDir != "" {
-		path, err := writeGatewayPreflightEvidence(*outDir, tokenSource, gatewayPreflightConfig{
-			URL:        *url,
-			Model:      *model,
-			Project:    *project,
-			MaxTokens:  *maxTokens,
-			ToolName:   *toolName,
-			ToolChoice: *toolChoice,
-			Stream:     *stream,
-			Consumer:   consumer,
-		}, result)
+		evidenceCfg := cfg
+		evidenceCfg.Token = ""
+		evidenceCfg.Client = nil
+		evidenceCfg.Prompt = ""
+		evidenceCfg.Consumer = consumer
+		path, err := writeGatewayPreflightEvidence(*outDir, tokenSource, evidenceCfg, result, expectations)
 		if err != nil {
 			return err
 		}
 		evidencePath = path
 		fmt.Printf("evidence\t%s\n", path)
 	}
-	if err := validateGatewayPreflightExpectations(result, gatewayPreflightExpectations{
-		ExpectNode:            *expectNode,
-		RequireJSON:           *requireJSON,
-		RequireToolCall:       *requireToolCall,
-		RejectTextualToolCall: *rejectTextualToolCall,
-		MinPromptTokens:       *minPromptTokens,
-	}); err != nil {
+	if err := validateGatewayPreflightExpectations(result, expectations); err != nil {
 		if evidencePath != "" {
 			return fmt.Errorf("%w; evidence=%s", err, evidencePath)
 		}
@@ -1460,27 +1458,79 @@ type gatewayPreflightResult struct {
 }
 
 type gatewayPreflightEvidence struct {
-	Gateway         string            `json:"gateway"`
-	Model           string            `json:"model"`
-	Project         string            `json:"project,omitempty"`
-	AuthSource      string            `json:"auth_source"`
-	StatusCode      int               `json:"status_code"`
-	Headers         map[string]string `json:"headers"`
-	Streaming       bool              `json:"streaming"`
-	StreamDone      bool              `json:"stream_done,omitempty"`
-	FinishReason    string            `json:"finish_reason"`
-	ContentLength   int               `json:"content_length"`
-	ReasoningLength int               `json:"reasoning_length"`
-	ToolCallCount   int               `json:"tool_call_count"`
-	ToolCallNames   []string          `json:"tool_call_names,omitempty"`
-	TextualToolCall bool              `json:"textual_tool_call"`
-	JSONContent     bool              `json:"json_content"`
-	UsageAvailable  bool              `json:"usage_available"`
-	Usage           api.OpenAIUsage   `json:"usage"`
-	Consumer        *consumerEvidence `json:"consumer,omitempty"`
+	Gateway         string                               `json:"gateway"`
+	Model           string                               `json:"model"`
+	Project         string                               `json:"project,omitempty"`
+	AuthSource      string                               `json:"auth_source"`
+	Request         gatewayPreflightRequestEvidence      `json:"request"`
+	Expectations    *gatewayPreflightExpectationEvidence `json:"expectations,omitempty"`
+	StatusCode      int                                  `json:"status_code"`
+	Headers         map[string]string                    `json:"headers"`
+	Streaming       bool                                 `json:"streaming"`
+	StreamDone      bool                                 `json:"stream_done,omitempty"`
+	FinishReason    string                               `json:"finish_reason"`
+	ContentLength   int                                  `json:"content_length"`
+	ReasoningLength int                                  `json:"reasoning_length"`
+	ToolCallCount   int                                  `json:"tool_call_count"`
+	ToolCallNames   []string                             `json:"tool_call_names,omitempty"`
+	TextualToolCall bool                                 `json:"textual_tool_call"`
+	JSONContent     bool                                 `json:"json_content"`
+	UsageAvailable  bool                                 `json:"usage_available"`
+	Usage           api.OpenAIUsage                      `json:"usage"`
+	Consumer        *consumerEvidence                    `json:"consumer,omitempty"`
 }
 
-func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflightConfig, result gatewayPreflightResult) (string, error) {
+type gatewayPreflightRequestEvidence struct {
+	MaxTokens        int    `json:"max_tokens"`
+	Streaming        bool   `json:"streaming"`
+	StructuredOutput string `json:"structured_output"`
+	ToolRequested    bool   `json:"tool_requested"`
+	ToolName         string `json:"tool_name,omitempty"`
+	ToolChoice       string `json:"tool_choice,omitempty"`
+}
+
+type gatewayPreflightExpectationEvidence struct {
+	ExpectNode            string `json:"expect_node,omitempty"`
+	RequireJSON           bool   `json:"require_json,omitempty"`
+	RequireToolCall       bool   `json:"require_tool_call,omitempty"`
+	RejectTextualToolCall bool   `json:"reject_textual_tool_call,omitempty"`
+	MinPromptTokens       int    `json:"min_prompt_tokens,omitempty"`
+}
+
+func gatewayPreflightRequestEvidenceFromConfig(cfg gatewayPreflightConfig) gatewayPreflightRequestEvidence {
+	toolName := strings.TrimSpace(cfg.ToolName)
+	toolChoice := strings.TrimSpace(cfg.ToolChoice)
+	if toolName != "" && toolChoice == "" {
+		toolChoice = "auto"
+	}
+	structuredOutput := "json_schema"
+	if toolName != "" {
+		structuredOutput = "none"
+	}
+	return gatewayPreflightRequestEvidence{
+		MaxTokens:        cfg.MaxTokens,
+		Streaming:        cfg.Stream,
+		StructuredOutput: structuredOutput,
+		ToolRequested:    toolName != "",
+		ToolName:         toolName,
+		ToolChoice:       toolChoice,
+	}
+}
+
+func gatewayPreflightExpectationEvidenceFromExpectations(expectations gatewayPreflightExpectations) *gatewayPreflightExpectationEvidence {
+	if expectations.ExpectNode == "" && !expectations.RequireJSON && !expectations.RequireToolCall && !expectations.RejectTextualToolCall && expectations.MinPromptTokens == 0 {
+		return nil
+	}
+	return &gatewayPreflightExpectationEvidence{
+		ExpectNode:            expectations.ExpectNode,
+		RequireJSON:           expectations.RequireJSON,
+		RequireToolCall:       expectations.RequireToolCall,
+		RejectTextualToolCall: expectations.RejectTextualToolCall,
+		MinPromptTokens:       expectations.MinPromptTokens,
+	}
+}
+
+func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflightConfig, result gatewayPreflightResult, expectations gatewayPreflightExpectations) (string, error) {
 	if err := os.MkdirAll(outDir, 0o700); err != nil {
 		return "", fmt.Errorf("create gateway preflight evidence dir: %w", err)
 	}
@@ -1489,6 +1539,8 @@ func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflig
 		Model:           cfg.Model,
 		Project:         cfg.Project,
 		AuthSource:      authSource,
+		Request:         gatewayPreflightRequestEvidenceFromConfig(cfg),
+		Expectations:    gatewayPreflightExpectationEvidenceFromExpectations(expectations),
 		StatusCode:      result.StatusCode,
 		Headers:         gatewayPreflightHeaderMap(result.Headers),
 		Streaming:       result.Streaming,
