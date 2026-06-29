@@ -32,6 +32,24 @@
   LaunchDaemon activation with valid local admin credentials, prove
   `service status --system` and seed diagnostics, then rerun the README
   cold-load cancellation recipe against the fixed Mac gateway.
+- 2026-06-29: Read-only LaunchAgent diagnostics support a binary-identity /
+  Local Network privacy hypothesis for the Mac user LaunchAgent LAN failure,
+  not a Mycelium config or listener-binding bug. The working live LaunchAgent
+  plist still runs `/Users/zach/.mycelium/bin/mycelium` from
+  `/Users/zach` with the same peer config and reports B70/Spark seeds ready.
+  The working binary is ad-hoc/linker-signed with identifier `a.out` and CDHash
+  `28e65885c95018a65a13c38b4251dd9edac7072f`; the prepared fixed binary
+  `/Users/zach/.mycelium/bin/mycelium-99784cc` is a different ad-hoc identity,
+  identifier `mycelium-99784cc-55554944e514dd7e344b3e12f6256629593404fd`
+  and CDHash `c81c1321f2fb039cf3ef1c7a2d4eee0691068f2a`. `spctl` rejects
+  both, which is expected for these ad-hoc CLI binaries. Historical logs show
+  the failed current-binary LaunchAgent attempts could bind/start but got
+  `dial tcp ... no route to host` for both corrected-LAN seeds, while the old
+  binary under the same user LaunchAgent succeeds. The remaining non-root path
+  would be a stable signed bundle/helper identity that Zach explicitly approves
+  and then tests as a maintenance-window user LaunchAgent swap. It still
+  requires mutating the live gateway to prove and cannot live-prove the
+  stale-job fix before that swap succeeds.
 - 2026-06-27: MacBook LaunchAgent activation blocks rolling the committed
   registry-compaction binary live on the gateway. The current built Darwin
   binary can probe B70 and Spark when run interactively, but the same binary

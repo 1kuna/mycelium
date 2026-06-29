@@ -173,6 +173,26 @@ Known from repo and live evidence:
   `/tmp/mycelium-stale-job-blocker-20260629T112957Z`, and the single row created
   by that verification attempt was manually terminalized after backing up the
   control DB.
+- A follow-on 2026-06-29 read-only diagnostic pass found the Mac user
+  LaunchAgent LAN failure is best explained by binary identity / Local Network
+  privacy behavior rather than Mycelium config, listener binding, or launchd
+  working-directory drift. The working live LaunchAgent still uses
+  `/Users/zach/.mycelium/bin/mycelium` with the same peer config and reaches
+  B70/Spark seeds. That old binary is ad-hoc/linker-signed as identifier
+  `a.out` with CDHash `28e65885c95018a65a13c38b4251dd9edac7072f`; the prepared
+  fixed Darwin binary `/Users/zach/.mycelium/bin/mycelium-99784cc` is a
+  different ad-hoc identity, identifier
+  `mycelium-99784cc-55554944e514dd7e344b3e12f6256629593404fd`, CDHash
+  `c81c1321f2fb039cf3ef1c7a2d4eee0691068f2a`. Historical LaunchAgent logs for
+  the current-binary attempt show the peer could start but then got
+  `no route to host` for both corrected-LAN seeds, while the old binary under
+  the same user LaunchAgent succeeds. The repo README now has a read-only
+  checklist for comparing LaunchAgent plist, signing identity, quarantine/
+  provenance xattrs, and logs. Without valid sudo/admin credentials, the only
+  remaining non-root experiment is a deliberately approved stable signed
+  bundle/helper identity plus a maintenance-window user LaunchAgent swap; that
+  still mutates the live gateway and cannot live-prove the stale-job fix until
+  the swap succeeds.
 
 This handoff refresh performed repo authority inspection, `make ci`, a narrow
 MacBook/B70 live canary, and Spark reachability classification. A later
@@ -226,6 +246,14 @@ and did not touch live services. It did not push.
   The next operator must activate the fixed Mac binary through the hardened
   system LaunchDaemon path from commit `99784cc`, using valid local admin
   credentials, before rerunning the cold-load cancellation proof.
+- The non-root Mac user LaunchAgent path is not yet a safe activation route.
+  Read-only diagnostics point to macOS binary identity / Local Network privacy
+  behavior: the old ad-hoc binary identity reaches LAN peers, while the newer
+  ad-hoc identity historically started but lost routes to both corrected-LAN
+  seeds under launchd. Do not perform another blind user LaunchAgent binary
+  swap. Use the README diagnostic checklist first, then either obtain valid
+  admin credentials for the system LaunchDaemon route or get explicit approval
+  for a stable signed bundle/helper identity maintenance test.
 - Older thread dumps contain exact live-fleet endpoints, token-file locations,
   peer ports, and TTFT/TPS observations. Treat those as stale private
   operational evidence unless rechecked live; do not publish token values or

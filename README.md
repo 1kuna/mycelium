@@ -124,6 +124,28 @@ If seed diagnostics fail after activation, restore the known-good binary and
 kick the service named by `service plan`; do not keep a Mac gateway live when
 `service status` reports unreachable seeds.
 
+Read-only checks for a Mac user LaunchAgent that loses LAN reachability after a
+binary update:
+
+```bash
+launchctl print gui/$(id -u)/com.mycelium.real-fleet
+codesign -dv --verbose=4 /Users/zach/.mycelium/bin/mycelium 2>&1
+codesign -dv --verbose=4 /path/to/new/mycelium 2>&1
+spctl -a -vv /Users/zach/.mycelium/bin/mycelium /path/to/new/mycelium
+xattr -l /Users/zach/.mycelium/bin/mycelium /path/to/new/mycelium
+log show --style compact --last 2h \
+  --predicate 'process == "mycelium" OR eventMessage CONTAINS[c] "mycelium"'
+```
+
+If the old LaunchAgent binary reaches LAN peers but the replacement reports
+`no route to host` from the same config and launchd domain, compare the
+CodeDirectory identifier and CDHash before blaming Mycelium routing. Ad-hoc
+CLI signatures change identity whenever the binary changes; macOS Local Network
+approval can therefore behave like a binary-identity gate. The clean proof path
+is a stable signed bundle/helper identity or the system LaunchDaemon plan above,
+followed by `service status` and the same seed diagnostics. Do not keep testing
+by blind-swapping the live LaunchAgent binary.
+
 Generate and inspect recommendations:
 
 ```bash
