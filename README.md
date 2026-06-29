@@ -355,7 +355,7 @@ The redacted `preflight.json` records `tool_call_count`, `tool_call_names`,
 finish reason, but not the bearer token, prompt, raw content, or tool
 arguments.
 
-### Prove cold-load cancellation cleanup after activation
+Operator-specific route and telemetry evidence is retained privately.### Prove cold-load cancellation cleanup after activation
 
 Use this only after the gateway and owner peers are deliberately activated on a
 binary that contains the cold-load cancellation cleanup fix. It is a proof
