@@ -94,6 +94,14 @@ important continuity points are:
   run/session telemetry, and remote-owner telemetry goes over authenticated
   telemetry RPC.
 - The CLI exposes telemetry inspection via `myce telemetry samples`.
+- The CLI exposes a secret-safe consumer gateway canary via
+  `myce gateway preflight`. It sends one non-streaming strict JSON-schema
+  `/v1/chat/completions` request, resolves bearer tokens from explicit flags,
+  `MYCELIUM_GATEWAY_TOKEN`, `MYCELIUM_API_KEY`, `ATLAS_MYCELIUM_API_KEY`,
+  `OPENAI_API_KEY`, a token file flag, `--config <peer.json>`, or the local
+  `~/.mycelium/peer.json` `gateway_token`, and prints route headers,
+  content/reasoning lengths, JSON parse status, and usage counts without
+  printing the token.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and

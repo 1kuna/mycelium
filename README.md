@@ -168,7 +168,10 @@ For authenticated non-loopback gateways, `myce benchmark` resolves the gateway t
 1. `--gateway-token`
 2. `--gateway-token-env`
 3. `MYCELIUM_GATEWAY_TOKEN`
-4. `~/.mycelium/peer.json` field `gateway_token`
+4. `MYCELIUM_API_KEY`
+5. `ATLAS_MYCELIUM_API_KEY`
+6. `OPENAI_API_KEY`
+7. `~/.mycelium/peer.json` field `gateway_token`
 
 ## Calling The Gateway
 
@@ -184,6 +187,36 @@ curl http://<gateway-host>:<port>/v1/chat/completions \
     "max_tokens": 32
   }'
 ```
+
+Project consumers should first run the secret-safe preflight. It sends one
+non-streaming strict JSON-schema chat request, prints route/usage evidence, and
+never prints the bearer token:
+
+```bash
+myce gateway preflight \
+  --url http://<gateway-host>:<port> \
+  --model <model-or-alias> \
+  --project <consumer-canary-id> \
+  --config <local-mycelium-peer.json>
+```
+
+Token resolution for `myce gateway preflight` is:
+
+1. `--gateway-token`
+2. `--gateway-token-env`
+3. `--gateway-token-file`
+4. `--config <peer.json>` field `gateway_token`
+5. `MYCELIUM_GATEWAY_TOKEN`
+6. `MYCELIUM_API_KEY`
+7. `ATLAS_MYCELIUM_API_KEY`
+8. `OPENAI_API_KEY`
+9. `~/.mycelium/peer.json` field `gateway_token`
+
+For an OpenAI-compatible consumer, set the base URL to the Mycelium gateway and
+put the Mycelium gateway token in the env var that consumer already reads. For
+example, Atlas can use `ATLAS_MYCELIUM_API_KEY` or `OPENAI_API_KEY`; local
+Mycelium operator commands can use `MYCELIUM_GATEWAY_TOKEN`. Do not store token
+values in repo docs or run logs.
 
 Useful response headers:
 

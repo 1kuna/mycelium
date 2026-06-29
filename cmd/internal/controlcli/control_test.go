@@ -903,6 +903,199 @@ func TestRunBenchmarkUsesGatewayTokenEnv(t *testing.T) {
 	}
 }
 
+func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing.T) {
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
+	t.Setenv("MYCELIUM_API_KEY", "")
+	t.Setenv("ATLAS_MYCELIUM_API_KEY", "atlas-secret")
+	t.Setenv("OPENAI_API_KEY", "openai-secret")
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer atlas-secret" {
+			t.Fatalf("gateway auth = %q", got)
+		}
+		if got := r.Header.Get("X-Myc-Project"); got != "atlas-canary" {
+			t.Fatalf("project = %q", got)
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		responseFormat, ok := req["response_format"].(map[string]any)
+		if !ok || responseFormat["type"] != "json_schema" {
+			t.Fatalf("response_format = %#v", req["response_format"])
+		}
+		w.Header().Set("X-Myc-Job", "job-a")
+		w.Header().Set("X-Myc-Node", "b70")
+		w.Header().Set("X-Myc-Backend", "vllm")
+		w.Header().Set("X-Myc-Decision", "placed_on_warm_instance")
+		w.Header().Set("X-Myc-Structured-Output", "json_schema")
+		w.Header().Set("X-Myc-Guided-Decoding-Requested", "true")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]string{"content": `{"ok":true}`, "reasoning_content": "checked"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]int{"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7},
+		})
+	}))
+
+	var err error
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{
+			"gateway", "preflight",
+			"--url", "http://gateway.test",
+			"--model", "qwen3.5-9b",
+			"--project", "atlas-canary",
+		}, client)
+	})
+	if err != nil {
+		t.Fatalf("gateway preflight: %v", err)
+	}
+	for _, want := range []string{
+		"gateway\thttp://gateway.test\tok",
+		"auth\tATLAS_MYCELIUM_API_KEY\tconfigured",
+		"header\tX-Myc-Node\tb70",
+		"header\tX-Myc-Structured-Output\tjson_schema",
+		"header\tX-Myc-Guided-Decoding-Requested\ttrue",
+		"finish_reason\tstop",
+		"content_length\t11",
+		"reasoning_length\t7",
+		"json\ttrue",
+		"usage\tprompt=4\tcompletion=3\ttotal=7",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("preflight output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "atlas-secret") || strings.Contains(output, "openai-secret") {
+		t.Fatalf("preflight output leaked token: %s", output)
+	}
+}
+
+func TestRunGatewayPreflightUsesTokenFileAndClassifiesMissingAuth(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "gateway.token")
+	if err := os.WriteFile(tokenFile, []byte("file-secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	sawFileToken := false
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawFileToken = r.Header.Get("Authorization") == "Bearer file-secret"
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]string{"content": `{"ok":true}`},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	if err := RunWithClient(context.Background(), []string{
+		"gateway", "preflight",
+		"--url", "http://gateway.test",
+		"--model", "tiny",
+		"--gateway-token-file", tokenFile,
+	}, client); err != nil {
+		t.Fatalf("token-file preflight: %v", err)
+	}
+	if !sawFileToken {
+		t.Fatal("gateway preflight did not use token file")
+	}
+
+	configPath := filepath.Join(t.TempDir(), "peer.json")
+	if err := os.WriteFile(configPath, []byte(`{"gateway_token":"config-secret"}`), 0o600); err != nil {
+		t.Fatalf("write peer config: %v", err)
+	}
+	sawConfigToken := false
+	configClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawConfigToken = r.Header.Get("Authorization") == "Bearer config-secret"
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]string{"content": `{"ok":true}`},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	if err := RunWithClient(context.Background(), []string{
+		"gateway", "preflight",
+		"--url", "http://gateway.test",
+		"--model", "tiny",
+		"--config", configPath,
+	}, configClient); err != nil {
+		t.Fatalf("config-token preflight: %v", err)
+	}
+	if !sawConfigToken {
+		t.Fatal("gateway preflight did not use config token")
+	}
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
+	t.Setenv("MYCELIUM_API_KEY", "")
+	t.Setenv("ATLAS_MYCELIUM_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	if err := RunWithClient(context.Background(), []string{
+		"gateway", "preflight",
+		"--url", "http://gateway.test",
+		"--model", "tiny",
+	}, client); err == nil || !strings.Contains(err.Error(), "MYCELIUM_API_KEY") || !strings.Contains(err.Error(), "OPENAI_API_KEY") {
+		t.Fatalf("missing auth err = %v", err)
+	}
+}
+
+func TestRunGatewayPreflightFailureContracts(t *testing.T) {
+	if err := RunWithClient(context.Background(), []string{"gateway"}, directHTTPClient(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))); err == nil || !strings.Contains(err.Error(), "usage: myce gateway") {
+		t.Fatalf("gateway usage err = %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{"gateway", "bogus"}, directHTTPClient(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))); err == nil || !strings.Contains(err.Error(), "usage: myce gateway") {
+		t.Fatalf("gateway bogus err = %v", err)
+	}
+	emptyTokenFile := filepath.Join(t.TempDir(), "empty.token")
+	if err := os.WriteFile(emptyTokenFile, []byte("\n"), 0o600); err != nil {
+		t.Fatalf("write empty token file: %v", err)
+	}
+	if _, _, err := resolveGatewayPreflightToken("http://gateway.test", "", "", emptyTokenFile, ""); err == nil || !strings.Contains(err.Error(), "is empty") {
+		t.Fatalf("empty token file err = %v", err)
+	}
+
+	unauthorizedClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "gateway token required", http.StatusUnauthorized)
+	}))
+	err := RunWithClient(context.Background(), []string{
+		"gateway", "preflight",
+		"--url", "http://gateway.test",
+		"--model", "tiny",
+		"--gateway-token", "secret",
+	}, unauthorizedClient)
+	if err == nil || !strings.Contains(err.Error(), "gateway token required") {
+		t.Fatalf("unauthorized preflight err = %v", err)
+	}
+
+	malformedClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{`))
+	}))
+	err = RunWithClient(context.Background(), []string{
+		"gateway", "preflight",
+		"--url", "http://gateway.test",
+		"--model", "tiny",
+		"--gateway-token", "secret",
+	}, malformedClient)
+	if err == nil || !strings.Contains(err.Error(), "decode gateway preflight response") {
+		t.Fatalf("malformed preflight err = %v", err)
+	}
+
+	noChoicesClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{}})
+	}))
+	err = RunWithClient(context.Background(), []string{
+		"gateway", "preflight",
+		"--url", "http://gateway.test",
+		"--model", "tiny",
+		"--gateway-token", "secret",
+	}, noChoicesClient)
+	if err == nil || !strings.Contains(err.Error(), "no choices") {
+		t.Fatalf("no choices preflight err = %v", err)
+	}
+}
+
 func TestRunBenchmarkFleetSimulateWritesArtifact(t *testing.T) {
 	cfg := controlFleetConfig()
 	configPath := filepath.Join(t.TempDir(), "fleet.json")
