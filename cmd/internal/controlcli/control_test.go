@@ -1421,7 +1421,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	preflightPath := writeGatewayPreflightEvidenceFixture(t, "job-a")
 	ownerClient := operatorOwnerTelemetryClient(t)
 	preflightOutput := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--owner-telemetry", "--rpc-token", "rpc-secret", "--db", dbPath}, ownerClient)
+		err = RunWithClient(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--owner-telemetry", "--rpc-token", "rpc-secret", "--consumer-run", "atlas-batch-7", "--consumer-item", "row-006", "--consumer-status", "timeout", "--consumer-elapsed-ms", "180000", "--consumer-error", "client_deadline", "--db", dbPath}, ownerClient)
 	})
 	if err != nil {
 		t.Fatalf("debug job with preflight: %v\n%s", err, preflightOutput)
@@ -1432,7 +1432,8 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"preflight-route\tnode=b70\tbackend=vllm\tinstance=inst_2\tdecision=placed_on_warm_instance",
 		"preflight-usage\tprompt=16\tcompletion=10\ttotal=26",
 		"owner-telemetry\tok\tnode=node-a\taddress=http://peer.test\tmetrics=1\tsamples=1\tttft_ms=34\tload_ms=0\ttps=12.50\tcontext=26\tphases=complete",
-		"diagnosis\towner_completed_warm\towner node-a completed warm inference; load_ms=0; ttft_ms=34; upstream_ms=512; structured=json_schema",
+		"consumer\trun=atlas-batch-7\titem=row-006\tstatus=timeout\telapsed_ms=180000\terror=client_deadline",
+		"diagnosis\towner_completed_warm\towner node-a completed warm inference; load_ms=0; ttft_ms=34; consumer_status=timeout; upstream_ms=512; structured=json_schema",
 	} {
 		if !strings.Contains(preflightOutput, want) {
 			t.Fatalf("preflight debug output missing %q:\n%s", want, preflightOutput)
@@ -1452,6 +1453,9 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	if preflightReport.Preflight == nil || preflightReport.Preflight.Headers["X-Myc-Node"] != "b70" || preflightReport.Preflight.ContentLength != 16 || preflightReport.OwnerTelemetry == nil || len(preflightReport.OwnerTelemetry.RunMetrics) != 1 || len(preflightReport.OwnerTelemetry.SessionTimeline) != 1 || preflightReport.Diagnosis == nil || preflightReport.Diagnosis.Class != "owner_completed_warm" {
 		t.Fatalf("preflight debug report = %+v", preflightReport)
 	}
+	if preflightReport.Consumer != nil {
+		t.Fatalf("unexpected consumer evidence without flags = %+v", preflightReport.Consumer)
+	}
 	if err := Run(context.Background(), []string{"debug", "job", "job-other", "--preflight", preflightPath, "--db", dbPath}); err == nil || !strings.Contains(err.Error(), `does not match requested job "job-other"`) {
 		t.Fatalf("mismatched preflight error = %v", err)
 	}
@@ -1467,6 +1471,8 @@ func TestOperatorStatusAndDebugRejectBadUsage(t *testing.T) {
 		{"debug", "job"},
 		{"debug", "job", "job-a", "job-b"},
 		{"debug", "job", "job-a", "--db"},
+		{"debug", "job", "job-a", "--consumer-elapsed-ms", "-1"},
+		{"debug", "job", "job-a", "--consumer-status", "mystery"},
 		{"debug", "bundle"},
 	} {
 		if err := Run(context.Background(), args); err == nil {
@@ -1633,7 +1639,7 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 
 	var err error
 	output := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--preflight", preflightPath, "--owner-telemetry", "--out", outDir}, client)
+		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--preflight", preflightPath, "--owner-telemetry", "--consumer-run", "verso-prod-smoke", "--consumer-item", "lab-42", "--consumer-status", "error", "--consumer-elapsed-ms", "3210", "--consumer-error", "response_parse_error", "--out", outDir}, client)
 	})
 	if err != nil {
 		t.Fatalf("debug bundle: %v\n%s", err, output)
@@ -1678,8 +1684,31 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read job debug: %v", err)
 	}
-	if strings.Contains(string(jobDebugData), "rpc-secret") || !strings.Contains(string(jobDebugData), `"owner_telemetry"`) || !strings.Contains(string(jobDebugData), `"diagnosis"`) || !strings.Contains(string(jobDebugData), `"job_id": "job-a"`) {
+	if strings.Contains(string(jobDebugData), "rpc-secret") || !strings.Contains(string(jobDebugData), `"owner_telemetry"`) || !strings.Contains(string(jobDebugData), `"diagnosis"`) || !strings.Contains(string(jobDebugData), `"job_id": "job-a"`) || !strings.Contains(string(jobDebugData), `"consumer"`) || !strings.Contains(string(jobDebugData), `"run_id": "verso-prod-smoke"`) || !strings.Contains(string(jobDebugData), `"status": "error"`) {
 		t.Fatalf("job debug artifact = %s", jobDebugData)
+	}
+}
+
+func TestConsumerEvidenceFromFlags(t *testing.T) {
+	evidence, err := consumerEvidenceFromFlags(" run ", " item ", "TIMEOUT", 42, " deadline ")
+	if err != nil {
+		t.Fatalf("consumerEvidenceFromFlags: %v", err)
+	}
+	if evidence.RunID != "run" || evidence.ItemID != "item" || evidence.Status != "timeout" || evidence.ElapsedMS != 42 || evidence.Error != "deadline" {
+		t.Fatalf("consumer evidence = %+v", evidence)
+	}
+	empty, err := consumerEvidenceFromFlags("", "", "", 0, "")
+	if err != nil {
+		t.Fatalf("empty consumer evidence: %v", err)
+	}
+	if empty != nil {
+		t.Fatalf("empty consumer evidence = %+v", empty)
+	}
+	if _, err := consumerEvidenceFromFlags("", "", "lost", 0, ""); err == nil || !strings.Contains(err.Error(), "--consumer-status") {
+		t.Fatalf("bad status err = %v", err)
+	}
+	if _, err := consumerEvidenceFromFlags("", "", "", -1, ""); err == nil || !strings.Contains(err.Error(), "--consumer-elapsed-ms") {
+		t.Fatalf("bad elapsed err = %v", err)
 	}
 }
 

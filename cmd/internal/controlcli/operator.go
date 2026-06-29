@@ -157,6 +157,11 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 	preflightPath := fs.String("preflight", "", "redacted gateway preflight evidence JSON")
 	ownerTelemetry := fs.Bool("owner-telemetry", false, "fetch selected-job run/session telemetry from the owner peer")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token override")
+	consumerRun := fs.String("consumer-run", "", "consumer batch/run id to attach to the debug report")
+	consumerItem := fs.String("consumer-item", "", "consumer item/row/document id to attach to the debug report")
+	consumerStatus := fs.String("consumer-status", "", "consumer outcome: ok, timeout, error, canceled, or partial")
+	consumerElapsedMS := fs.Int("consumer-elapsed-ms", 0, "consumer-observed elapsed milliseconds")
+	consumerError := fs.String("consumer-error", "", "sanitized consumer error class or short message")
 	jobID, flagArgs, err := splitDebugJobArgs(args)
 	if err != nil {
 		return err
@@ -183,11 +188,16 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 	if jobID == "" {
 		return fmt.Errorf("usage: myce debug job <job-id> [--db path] [--json] [--preflight path] [--owner-telemetry]")
 	}
+	consumer, err := consumerEvidenceFromFlags(*consumerRun, *consumerItem, *consumerStatus, *consumerElapsedMS, *consumerError)
+	if err != nil {
+		return err
+	}
 	report, err := buildJobDebugReport(ctx, *dbPath, jobID)
 	if err != nil {
 		return err
 	}
 	report.Preflight = preflight
+	report.Consumer = consumer
 	if *ownerTelemetry {
 		token := *rpcToken
 		if token == "" {
@@ -233,7 +243,7 @@ func debugJobFlagTakesValue(arg string) bool {
 	if strings.Contains(arg, "=") {
 		return false
 	}
-	return arg == "-config" || arg == "--config" || arg == "-db" || arg == "--db" || arg == "-preflight" || arg == "--preflight" || arg == "-rpc-token" || arg == "--rpc-token"
+	return arg == "-config" || arg == "--config" || arg == "-db" || arg == "--db" || arg == "-preflight" || arg == "--preflight" || arg == "-rpc-token" || arg == "--rpc-token" || arg == "--consumer-run" || arg == "--consumer-item" || arg == "--consumer-status" || arg == "--consumer-elapsed-ms" || arg == "--consumer-error"
 }
 
 func runDebugBundle(ctx context.Context, args []string, client *http.Client) error {
@@ -246,11 +256,20 @@ func runDebugBundle(ctx context.Context, args []string, client *http.Client) err
 	out := fs.String("out", "", "output directory")
 	url := fs.String("url", "", "peer URL override")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token override")
+	consumerRun := fs.String("consumer-run", "", "consumer batch/run id to attach to the debug report")
+	consumerItem := fs.String("consumer-item", "", "consumer item/row/document id to attach to the debug report")
+	consumerStatus := fs.String("consumer-status", "", "consumer outcome: ok, timeout, error, canceled, or partial")
+	consumerElapsedMS := fs.Int("consumer-elapsed-ms", 0, "consumer-observed elapsed milliseconds")
+	consumerError := fs.String("consumer-error", "", "sanitized consumer error class or short message")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *out == "" {
 		return fmt.Errorf("--out is required")
+	}
+	consumer, err := consumerEvidenceFromFlags(*consumerRun, *consumerItem, *consumerStatus, *consumerElapsedMS, *consumerError)
+	if err != nil {
+		return err
 	}
 	if *preflightPath != "" {
 		evidence, err := readGatewayPreflightEvidence(*preflightPath)
@@ -272,6 +291,7 @@ func runDebugBundle(ctx context.Context, args []string, client *http.Client) err
 		JobID:          *jobID,
 		PreflightPath:  *preflightPath,
 		OwnerTelemetry: *ownerTelemetry,
+		Consumer:       consumer,
 		OutDir:         *out,
 		URL:            *url,
 		RPCToken:       *rpcToken,
@@ -512,6 +532,7 @@ func buildStatusReport(ctx context.Context, req statusRequest) (string, error) {
 type jobDebugReport struct {
 	Job             domain.Job                    `json:"job"`
 	Preflight       *gatewayPreflightEvidence     `json:"preflight,omitempty"`
+	Consumer        *consumerEvidence             `json:"consumer,omitempty"`
 	OwnerTelemetry  *ownerTelemetryReport         `json:"owner_telemetry,omitempty"`
 	Diagnosis       *jobDebugDiagnosis            `json:"diagnosis,omitempty"`
 	Parent          *domain.Job                   `json:"parent,omitempty"`
@@ -615,6 +636,9 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 	if report.OwnerTelemetry != nil {
 		printOwnerTelemetrySummary(w, *report.OwnerTelemetry)
 	}
+	if report.Consumer != nil {
+		printConsumerEvidenceSummary(w, *report.Consumer)
+	}
 	if report.Diagnosis != nil {
 		fmt.Fprintf(w, "diagnosis\t%s\t%s\tnext=%s\n", report.Diagnosis.Class, report.Diagnosis.Summary, report.Diagnosis.Next)
 	}
@@ -625,6 +649,41 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 	for _, hint := range report.Hints {
 		fmt.Fprintf(w, "hint\t%s\n", hint)
 	}
+}
+
+type consumerEvidence struct {
+	RunID     string `json:"run_id,omitempty"`
+	ItemID    string `json:"item_id,omitempty"`
+	Status    string `json:"status,omitempty"`
+	ElapsedMS int    `json:"elapsed_ms,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+func consumerEvidenceFromFlags(runID, itemID, status string, elapsedMS int, errorText string) (*consumerEvidence, error) {
+	if elapsedMS < 0 {
+		return nil, fmt.Errorf("--consumer-elapsed-ms must be non-negative")
+	}
+	status = strings.ToLower(strings.TrimSpace(status))
+	switch status {
+	case "", "ok", "timeout", "error", "canceled", "partial":
+	default:
+		return nil, fmt.Errorf("--consumer-status must be one of ok, timeout, error, canceled, or partial")
+	}
+	evidence := consumerEvidence{
+		RunID:     strings.TrimSpace(runID),
+		ItemID:    strings.TrimSpace(itemID),
+		Status:    status,
+		ElapsedMS: elapsedMS,
+		Error:     strings.TrimSpace(errorText),
+	}
+	if evidence.RunID == "" && evidence.ItemID == "" && evidence.Status == "" && evidence.ElapsedMS == 0 && evidence.Error == "" {
+		return nil, nil
+	}
+	return &evidence, nil
+}
+
+func printConsumerEvidenceSummary(w io.Writer, evidence consumerEvidence) {
+	fmt.Fprintf(w, "consumer\trun=%s\titem=%s\tstatus=%s\telapsed_ms=%d\terror=%s\n", emptyDash(evidence.RunID), emptyDash(evidence.ItemID), emptyDash(evidence.Status), evidence.ElapsedMS, emptyDash(evidence.Error))
 }
 
 type ownerTelemetryReport struct {
@@ -756,6 +815,9 @@ func completedDiagnosisSummary(report jobDebugReport) string {
 		fmt.Sprintf("owner %s completed %s inference", emptyDash(owner), placement),
 		fmt.Sprintf("load_ms=%d", loadMS),
 		fmt.Sprintf("ttft_ms=%d", ttftMS),
+	}
+	if report.Consumer != nil && report.Consumer.Status != "" && report.Consumer.Status != "ok" {
+		parts = append(parts, "consumer_status="+report.Consumer.Status)
 	}
 	if upstreamMS := preflightHeader(report, "X-Myc-Upstream-Wall-Ms"); upstreamMS != "" {
 		parts = append(parts, "upstream_ms="+upstreamMS)
@@ -1065,6 +1127,7 @@ type debugBundleRequest struct {
 	JobID          string
 	PreflightPath  string
 	OwnerTelemetry bool
+	Consumer       *consumerEvidence
 	OutDir         string
 	URL            string
 	RPCToken       string
@@ -1133,6 +1196,7 @@ func writeDebugBundle(ctx context.Context, req debugBundleRequest) error {
 					manifest.Issues = append(manifest.Issues, err.Error())
 				}
 			}
+			report.Consumer = req.Consumer
 			report.OwnerTelemetry = fetchJobOwnerTelemetry(ctx, storePath, report, firstNonEmpty(req.RPCToken, cfg.RPCToken), clientOrDefault(req.Client))
 			report.Diagnosis = diagnoseJobDebugReport(report)
 			if err := writePrettyJSONFile(addFile("job_debug.json"), report); err != nil {

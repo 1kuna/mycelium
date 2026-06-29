@@ -116,7 +116,12 @@ important continuity points are:
   `diagnosis` (`owner_completed_warm`, `owner_completed_cold_load`,
   `owner_failed`, `cleanup_required`, `inflight_or_stale`,
   `owner_telemetry_unavailable`, etc.) so Atlas/Verso can separate completed
-  owner inference from downstream consumer timeout/artifact issues.
+  owner inference from downstream consumer timeout/artifact issues. Consumer
+  threads can attach explicit batch/run, row/document, outcome, elapsed-time,
+  and sanitized error facts with `--consumer-run`, `--consumer-item`,
+  `--consumer-status`, `--consumer-elapsed-ms`, and `--consumer-error`; those
+  fields are copied into `debug job --json` and `debug bundle` artifacts without
+  requiring prompts, completions, or tokens.
 - Current MVP behavior intentionally rejects or disables some future-ish paths:
   sticky/private/overlay runtime choices were disabled in the bug-debt pass,
   `X-Myc-Handling: private` is rejected rather than accepted unsafely, and
