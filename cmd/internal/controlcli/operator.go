@@ -1154,16 +1154,26 @@ func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidenc
 		if evidence.Expectations.MaxReasoningLength != nil {
 			maxReasoning = strconv.Itoa(*evidence.Expectations.MaxReasoningLength)
 		}
-		fmt.Fprintf(w, "preflight-expectations\texpect_node=%s\trequire_json=%t\trequire_tool_call=%t\treject_textual_tool_call=%t\tmin_prompt_tokens=%d\tmin_context=%d\texpect_finish=%s\tmin_content=%d\tmax_reasoning=%s\n",
+		fmt.Fprintf(w, "preflight-expectations\texpect_node=%s\trequire_json=%t\trequire_tool_call=%t\treject_textual_tool_call=%t\trequire_live_model=%t\tmin_prompt_tokens=%d\tmin_context=%d\texpect_finish=%s\tmin_content=%d\tmax_reasoning=%s\n",
 			emptyDash(evidence.Expectations.ExpectNode),
 			evidence.Expectations.RequireJSON,
 			evidence.Expectations.RequireToolCall,
 			evidence.Expectations.RejectTextualToolCall,
+			evidence.Expectations.RequireLiveModel,
 			evidence.Expectations.MinPromptTokens,
 			evidence.Expectations.MinContextCap,
 			emptyDash(evidence.Expectations.ExpectFinishReason),
 			evidence.Expectations.MinContentLength,
 			maxReasoning,
+		)
+	}
+	if evidence.LiveModel != nil && evidence.LiveModel.Checked {
+		fmt.Fprintf(w, "preflight-live-model\tstatus=%s\tavailable=%t\tmatch=%s\tmodels=%d\terror=%s\n",
+			emptyDash(evidence.LiveModel.Status),
+			evidence.LiveModel.ModelAvailable,
+			emptyDash(evidence.LiveModel.ModelMatch),
+			evidence.LiveModel.ModelCount,
+			emptyDash(evidence.LiveModel.Error),
 		)
 	}
 	if evidence.Streaming {

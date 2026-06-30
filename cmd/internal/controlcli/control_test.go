@@ -1015,6 +1015,113 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 	}
 }
 
+func TestRunGatewayPreflightRequiresLiveModelCatalog(t *testing.T) {
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "project-secret")
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			if got := r.Header.Get("Authorization"); got != "Bearer project-secret" {
+				t.Fatalf("models auth = %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]string{{"id": "strict-json-model"}},
+			})
+		case "/v1/chat/completions":
+			w.Header().Set("X-Myc-Job", "job-live")
+			w.Header().Set("X-Myc-Node", "node-json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{
+					"message":       map[string]string{"content": `{"ok":true}`},
+					"finish_reason": "stop",
+				}},
+				"usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+			})
+		default:
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+	}))
+	outDir := filepath.Join(t.TempDir(), "live-model-preflight")
+	var err error
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{
+			"gateway", "preflight",
+			"--url", "http://gateway.test",
+			"--model", "strict-json-model",
+			"--require-live-model",
+			"--out", outDir,
+		}, client)
+	})
+	if err != nil {
+		t.Fatalf("live model preflight: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "live_model\tstatus=ok\tavailable=true\tmatch=strict-json-model\tmodels=1\terror=-") {
+		t.Fatalf("live model output = %s", output)
+	}
+	data, readErr := os.ReadFile(filepath.Join(outDir, "preflight.json"))
+	if readErr != nil {
+		t.Fatalf("read live model evidence: %v", readErr)
+	}
+	if strings.Contains(string(data), "project-secret") {
+		t.Fatalf("live model evidence leaked token: %s", data)
+	}
+	var evidence gatewayPreflightEvidence
+	if err := json.Unmarshal(data, &evidence); err != nil {
+		t.Fatalf("decode live model evidence: %v", err)
+	}
+	if evidence.LiveModel == nil || evidence.LiveModel.Status != "ok" || !evidence.LiveModel.ModelAvailable || evidence.LiveModel.ModelMatch != "strict-json-model" || evidence.Expectations == nil || !evidence.Expectations.RequireLiveModel {
+		t.Fatalf("live model evidence = %+v expectations=%+v", evidence.LiveModel, evidence.Expectations)
+	}
+}
+
+func TestRunGatewayPreflightRequireLiveModelFailsBeforeChatAndWritesEvidence(t *testing.T) {
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "project-secret")
+	chatCalled := false
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]string{{"id": "other-model"}},
+			})
+		case "/v1/chat/completions":
+			chatCalled = true
+			t.Fatalf("chat request should not run when live model catalog is missing")
+		default:
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+	}))
+	outDir := filepath.Join(t.TempDir(), "missing-live-model")
+	var err error
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{
+			"gateway", "preflight",
+			"--url", "http://gateway.test",
+			"--model", "strict-json-model",
+			"--require-live-model",
+			"--out", outDir,
+		}, client)
+	})
+	if err == nil || !strings.Contains(err.Error(), "live model check failed") || !strings.Contains(err.Error(), "status=missing") || !strings.Contains(err.Error(), "preflight.json") {
+		t.Fatalf("missing live model err = %v\noutput=%s", err, output)
+	}
+	if chatCalled {
+		t.Fatal("chat endpoint was called")
+	}
+	if !strings.Contains(output, "live_model\tstatus=missing\tavailable=false\tmatch=-\tmodels=1\terror=-") {
+		t.Fatalf("missing live model output = %s", output)
+	}
+	data, readErr := os.ReadFile(filepath.Join(outDir, "preflight.json"))
+	if readErr != nil {
+		t.Fatalf("read missing live model evidence: %v", readErr)
+	}
+	var evidence gatewayPreflightEvidence
+	if err := json.Unmarshal(data, &evidence); err != nil {
+		t.Fatalf("decode missing live model evidence: %v", err)
+	}
+	if evidence.StatusCode != 0 || evidence.LiveModel == nil || evidence.LiveModel.Status != "missing" || evidence.LiveModel.ModelAvailable || evidence.LiveModel.ModelCount != 1 || evidence.LiveModel.ModelMatch != "" {
+		t.Fatalf("missing live model evidence = %+v", evidence)
+	}
+}
+
 func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "peer.json")
 	cfg := operatorPeerConfig{
@@ -1979,7 +2086,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"job\tjob-a\trunning\tmodel=tiny\tproject=project-a\towner=node-a",
 		"preflight\tstatus=200\tmodel=strict-json-model\tproject=strict-json-batch",
 		"preflight-request\tmax_tokens=32\tstream=false\tstructured=none\ttool_requested=true\ttool_name=echo\ttool_choice=auto",
-		"preflight-expectations\texpect_node=b70\trequire_json=false\trequire_tool_call=true\treject_textual_tool_call=true\tmin_prompt_tokens=16\tmin_context=0\texpect_finish=-\tmin_content=0\tmax_reasoning=-",
+		"preflight-expectations\texpect_node=b70\trequire_json=false\trequire_tool_call=true\treject_textual_tool_call=true\trequire_live_model=false\tmin_prompt_tokens=16\tmin_context=0\texpect_finish=-\tmin_content=0\tmax_reasoning=-",
 		"preflight-route\tnode=b70\tbackend=vllm\tinstance=inst_2\tdecision=placed_on_warm_instance",
 		"preflight-tools\trequested=true\tchoice=auto\tvllm_parser=true\tvllm_auto=false",
 		"preflight-tool-result\tcount=0\tnames=-\ttextual=true",
@@ -2366,9 +2473,16 @@ func TestGatewayPreflightEvidenceHelpers(t *testing.T) {
 	evidence.StreamDone = true
 	evidence.UsageAvailable = false
 	evidence.Usage = api.OpenAIUsage{}
+	evidence.LiveModel = &gatewayPreflightLiveModelEvidence{
+		Checked:        true,
+		Status:         "missing",
+		ModelAvailable: false,
+		ModelCount:     3,
+		Error:          "gateway models returned 404",
+	}
 	var summary strings.Builder
 	printPreflightEvidenceSummary(&summary, evidence)
-	if !strings.Contains(summary.String(), "preflight-stream\tdone=true\tusage_available=false") || !strings.Contains(summary.String(), "preflight-usage\tunavailable") {
+	if !strings.Contains(summary.String(), "preflight-stream\tdone=true\tusage_available=false") || !strings.Contains(summary.String(), "preflight-usage\tunavailable") || !strings.Contains(summary.String(), "preflight-live-model\tstatus=missing\tavailable=false\tmatch=-\tmodels=3\terror=gateway models returned 404") {
 		t.Fatalf("streaming preflight summary = %s", summary.String())
 	}
 }
