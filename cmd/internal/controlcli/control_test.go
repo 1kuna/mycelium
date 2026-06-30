@@ -3112,6 +3112,7 @@ func TestRunDebugSelectRanksTrainingRows(t *testing.T) {
 			FinishReason:             "stop",
 			ContentLength:            42,
 			TotalLatencyMS:           800,
+			QualitySignalSource:      "consumer_gate",
 			DeterministicQualityPass: &pass,
 			Recommendation:           "route_healthy",
 			RecommendationSeverity:   "ok",
@@ -3203,6 +3204,24 @@ func TestRunDebugSelectRanksTrainingRows(t *testing.T) {
 	if err := Run(context.Background(), []string{"debug", "select", "--training-jsonl", badPath}); err == nil || !strings.Contains(err.Error(), "schema_version") {
 		t.Fatalf("bad schema err = %v", err)
 	}
+	if err := os.WriteFile(badPath, []byte(`{"schema_version":"mycelium.debug_training.v1","evidence_kind":"mystery","route_key":"route"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write bad evidence kind JSONL: %v", err)
+	}
+	if err := Run(context.Background(), []string{"debug", "select", "--training-jsonl", badPath}); err == nil || !strings.Contains(err.Error(), "evidence_kind") {
+		t.Fatalf("bad evidence kind err = %v", err)
+	}
+	if err := os.WriteFile(badPath, []byte(`{"schema_version":"mycelium.debug_training.v1","evidence_kind":"preflight","route_key":"route","owner_telemetry_available":true}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write bad preflight telemetry JSONL: %v", err)
+	}
+	if err := Run(context.Background(), []string{"debug", "select", "--training-jsonl", badPath}); err == nil || !strings.Contains(err.Error(), "preflight-only evidence as owner telemetry") {
+		t.Fatalf("bad preflight telemetry err = %v", err)
+	}
+	if err := os.WriteFile(badPath, []byte(`{"schema_version":"mycelium.debug_training.v1","evidence_kind":"optimization","route_key":"route","deterministic_quality_pass":true}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write bad quality JSONL: %v", err)
+	}
+	if err := Run(context.Background(), []string{"debug", "select", "--training-jsonl", badPath}); err == nil || !strings.Contains(err.Error(), "deterministic quality") {
+		t.Fatalf("bad quality err = %v", err)
+	}
 	if err := Run(context.Background(), []string{"debug", "select"}); err == nil || !strings.Contains(err.Error(), "--training-jsonl") {
 		t.Fatalf("missing training err = %v", err)
 	}
@@ -3233,6 +3252,7 @@ func TestRunDebugProposePolicyBuildsApprovalReport(t *testing.T) {
 			OwnerTelemetryAvailable:  true,
 			LiveModelChecked:         true,
 			LiveModelAvailable:       true,
+			QualitySignalSource:      "consumer_gate",
 			DeterministicQualityPass: &pass,
 			Recommendation:           "route_healthy",
 			RecommendationSeverity:   "ok",
@@ -3260,6 +3280,7 @@ func TestRunDebugProposePolicyBuildsApprovalReport(t *testing.T) {
 			OwnerTelemetryAvailable:  true,
 			LiveModelChecked:         true,
 			LiveModelAvailable:       true,
+			QualitySignalSource:      "consumer_gate",
 			DeterministicQualityPass: &pass,
 			Recommendation:           "route_healthy",
 			RecommendationSeverity:   "ok",
