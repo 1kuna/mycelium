@@ -371,7 +371,8 @@ func runDebugSummary(args []string) error {
 	usageFilter := fs.String("usage", "any", "usage filter: any, available, or missing")
 	coldFilter := fs.String("cold", "any", "cold-load filter: any, cold, warm, or unknown")
 	sortBy := fs.String("sort", "input", "sort rows by input, failure, node, model, context, latency, or usage")
-	groupBy := fs.String("group-by", "", "print grouped counts by failure-layer, node, model, preset, context, route-status, startability, live-model, usage, or cold")
+	groupBy := fs.String("group-by", "", "print grouped counts by failure-layer, failure-class, node, model, preset, context, route-status, startability, live-model, usage, or cold")
+	rollupBy := fs.String("rollup-by", "", "print optimizer rollups by failure-layer, failure-class, node, model, preset, context, route-status, startability, live-model, usage, or cold")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -404,6 +405,19 @@ func runDebugSummary(args []string) error {
 	}
 	if len(rows) == 0 {
 		return fmt.Errorf("no debug summary rows matched filters")
+	}
+	if *rollupBy != "" {
+		rollups, err := rollupDebugSummaryRows(rows, *rollupBy)
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return writePrettyJSON(os.Stdout, rollups)
+		}
+		for _, rollup := range rollups {
+			printDebugSummaryRollup(os.Stdout, rollup)
+		}
+		return nil
 	}
 	if *groupBy != "" {
 		groups, err := groupDebugSummaryRows(rows, *groupBy)
@@ -494,6 +508,42 @@ type debugSummaryGroup struct {
 	By    string `json:"by"`
 	Key   string `json:"key"`
 	Count int    `json:"count"`
+}
+
+type debugSummaryRollup struct {
+	By                        string `json:"by"`
+	Key                       string `json:"key"`
+	Count                     int    `json:"count"`
+	Successes                 int    `json:"successes"`
+	Failures                  int    `json:"failures"`
+	UnknownOutcomes           int    `json:"unknown_outcomes"`
+	AvailabilityFailures      int    `json:"availability_failures"`
+	CatalogFailures           int    `json:"catalog_failures"`
+	ConsumerContractFailures  int    `json:"consumer_contract_failures"`
+	QualityFailures           int    `json:"quality_failures"`
+	ProviderFailures          int    `json:"provider_failures"`
+	UsageAvailable            int    `json:"usage_available"`
+	UsageMissing              int    `json:"usage_missing"`
+	TotalTokens               int    `json:"total_tokens"`
+	ContextAdequate           int    `json:"context_adequate"`
+	ContextUndersized         int    `json:"context_undersized"`
+	ContextUnknown            int    `json:"context_unknown"`
+	ToolRequested             int    `json:"tool_requested"`
+	TextualToolCalls          int    `json:"textual_tool_calls"`
+	JSONContent               int    `json:"json_content"`
+	ReasoningContent          int    `json:"reasoning_content"`
+	OwnerTelemetryAvailable   int    `json:"owner_telemetry_available"`
+	LiveCatalogAvailable      int    `json:"live_catalog_available"`
+	LiveCatalogMissingOrError int    `json:"live_catalog_missing_or_error"`
+	ColdLoads                 int    `json:"cold_loads"`
+	WarmLoads                 int    `json:"warm_loads"`
+	UnknownColdState          int    `json:"unknown_cold_state"`
+	LatencySamples            int    `json:"latency_samples"`
+	AverageLatencyMS          int    `json:"average_latency_ms"`
+	MaxLatencyMS              int    `json:"max_latency_ms"`
+	WarmInstances             int    `json:"warm_instances"`
+	LoadingInstances          int    `json:"loading_instances"`
+	UnfinishedJobs            int    `json:"unfinished_jobs"`
 }
 
 func (f debugSummaryFilter) validate() error {
@@ -684,6 +734,8 @@ func debugSummaryGroupKey(row debugSummaryRow, groupBy string) (string, error) {
 	switch groupBy {
 	case "failure-layer":
 		return firstNonEmpty(row.FailureLayer, "none"), nil
+	case "failure-class":
+		return firstNonEmpty(row.FailureClass, "none"), nil
 	case "node":
 		return firstNonEmpty(row.NodeID, "unknown"), nil
 	case "model":
@@ -728,6 +780,169 @@ func debugSummaryGroupKey(row debugSummaryRow, groupBy string) (string, error) {
 	default:
 		return "", fmt.Errorf("--group-by has unsupported value %q", groupBy)
 	}
+}
+
+func rollupDebugSummaryRows(rows []debugSummaryRow, rollupBy string) ([]debugSummaryRollup, error) {
+	rollups := map[string]*debugSummaryRollup{}
+	for _, row := range rows {
+		key, err := debugSummaryGroupKey(row, rollupBy)
+		if err != nil {
+			return nil, fmt.Errorf("--rollup-by has unsupported value %q", rollupBy)
+		}
+		rollup := rollups[key]
+		if rollup == nil {
+			rollup = &debugSummaryRollup{By: rollupBy, Key: key}
+			rollups[key] = rollup
+		}
+		rollupDebugSummaryRow(rollup, row)
+	}
+	out := make([]debugSummaryRollup, 0, len(rollups))
+	for _, rollup := range rollups {
+		if rollup.LatencySamples > 0 {
+			rollup.AverageLatencyMS /= rollup.LatencySamples
+		}
+		out = append(out, *rollup)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Failures != out[j].Failures {
+			return out[i].Failures > out[j].Failures
+		}
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Key < out[j].Key
+	})
+	return out, nil
+}
+
+func rollupDebugSummaryRow(rollup *debugSummaryRollup, row debugSummaryRow) {
+	rollup.Count++
+	switch debugSummaryOutcome(row) {
+	case "success":
+		rollup.Successes++
+	case "failure":
+		rollup.Failures++
+	default:
+		rollup.UnknownOutcomes++
+	}
+	switch row.FailureLayer {
+	case "availability":
+		rollup.AvailabilityFailures++
+	case "catalog":
+		rollup.CatalogFailures++
+	case "consumer_contract":
+		rollup.ConsumerContractFailures++
+	case "quality":
+		rollup.QualityFailures++
+	case "provider":
+		rollup.ProviderFailures++
+	}
+	if row.UsageAvailable {
+		rollup.UsageAvailable++
+		rollup.TotalTokens += row.UsageTotalTokens
+	} else {
+		rollup.UsageMissing++
+	}
+	switch {
+	case row.MinContextCap == 0:
+		rollup.ContextUnknown++
+	case row.ContextAdequate:
+		rollup.ContextAdequate++
+	default:
+		rollup.ContextUndersized++
+	}
+	if row.ToolRequested {
+		rollup.ToolRequested++
+	}
+	if row.TextualToolCall {
+		rollup.TextualToolCalls++
+	}
+	if row.JSONContent {
+		rollup.JSONContent++
+	}
+	if row.ReasoningLength > 0 {
+		rollup.ReasoningContent++
+	}
+	if row.OwnerTelemetryAvailable {
+		rollup.OwnerTelemetryAvailable++
+	}
+	if row.LiveModelChecked {
+		if row.LiveModelAvailable {
+			rollup.LiveCatalogAvailable++
+		} else {
+			rollup.LiveCatalogMissingOrError++
+		}
+	}
+	switch {
+	case row.ColdLoad == nil:
+		rollup.UnknownColdState++
+	case *row.ColdLoad:
+		rollup.ColdLoads++
+	default:
+		rollup.WarmLoads++
+	}
+	latency := debugSummaryLatencyMS(row)
+	if latency > 0 {
+		rollup.LatencySamples++
+		rollup.AverageLatencyMS += latency
+		if latency > rollup.MaxLatencyMS {
+			rollup.MaxLatencyMS = latency
+		}
+	}
+	rollup.WarmInstances += row.WarmInstances
+	rollup.LoadingInstances += row.LoadingInstances
+	rollup.UnfinishedJobs += row.UnfinishedJobs
+}
+
+func debugSummaryOutcome(row debugSummaryRow) string {
+	switch strings.ToLower(row.ConsumerResult) {
+	case "pass":
+		return "success"
+	case "fail":
+		return "failure"
+	}
+	if row.FailureLayer != "" && row.FailureLayer != "none" {
+		return "failure"
+	}
+	return "unknown"
+}
+
+func printDebugSummaryRollup(w io.Writer, rollup debugSummaryRollup) {
+	fmt.Fprintf(w, "rollup\tby=%s\tkey=%s\tcount=%d\tsuccess=%d\tfailure=%d\tunknown=%d\tavailability_failures=%d\tcatalog_failures=%d\tconsumer_contract_failures=%d\tquality_failures=%d\tprovider_failures=%d\tusage_available=%d\tusage_missing=%d\ttotal_tokens=%d\tcontext_adequate=%d\tcontext_undersized=%d\tcontext_unknown=%d\ttool_requested=%d\ttextual_tool_calls=%d\tjson_content=%d\treasoning_content=%d\towner_metrics=%d\tlive_catalog_available=%d\tlive_catalog_missing_or_error=%d\tcold=%d\twarm=%d\tcold_unknown=%d\tlatency_samples=%d\tavg_latency_ms=%d\tmax_latency_ms=%d\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\n",
+		rollup.By,
+		emptyDash(rollup.Key),
+		rollup.Count,
+		rollup.Successes,
+		rollup.Failures,
+		rollup.UnknownOutcomes,
+		rollup.AvailabilityFailures,
+		rollup.CatalogFailures,
+		rollup.ConsumerContractFailures,
+		rollup.QualityFailures,
+		rollup.ProviderFailures,
+		rollup.UsageAvailable,
+		rollup.UsageMissing,
+		rollup.TotalTokens,
+		rollup.ContextAdequate,
+		rollup.ContextUndersized,
+		rollup.ContextUnknown,
+		rollup.ToolRequested,
+		rollup.TextualToolCalls,
+		rollup.JSONContent,
+		rollup.ReasoningContent,
+		rollup.OwnerTelemetryAvailable,
+		rollup.LiveCatalogAvailable,
+		rollup.LiveCatalogMissingOrError,
+		rollup.ColdLoads,
+		rollup.WarmLoads,
+		rollup.UnknownColdState,
+		rollup.LatencySamples,
+		rollup.AverageLatencyMS,
+		rollup.MaxLatencyMS,
+		rollup.WarmInstances,
+		rollup.LoadingInstances,
+		rollup.UnfinishedJobs,
+	)
 }
 
 func buildDebugSummaryRows(root string) ([]debugSummaryRow, error) {
