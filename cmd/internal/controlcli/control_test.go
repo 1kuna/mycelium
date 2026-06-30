@@ -20,6 +20,7 @@ import (
 	"mycelium/internal/domain"
 	"mycelium/internal/optimizer"
 	storesqlite "mycelium/internal/store/sqlite"
+	"mycelium/internal/workload"
 	"mycelium/pkg/api"
 )
 
@@ -263,6 +264,144 @@ func TestRunListCommandsAndProjectSet(t *testing.T) {
 		if err := Run(context.Background(), args); err == nil {
 			t.Fatalf("Run(%v) expected error", args)
 		}
+	}
+}
+
+func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := filepath.Join(dir, "workload.json")
+	intent := workload.AdmissionRequest{
+		Job: domain.Job{
+			ID:                  "job-a",
+			TaskType:            "chat",
+			Model:               "model-a",
+			PresetID:            "preset-a",
+			Project:             "project-a",
+			Priority:            domain.PriorityInteractive,
+			SpeedPref:           domain.SpeedLatency,
+			ContextRequest:      8192,
+			ExpectedConcurrency: 2,
+			Preemption:          domain.PreemptSoft,
+		},
+		Payload: json.RawMessage(`{"prompt":"private text"}`),
+	}
+	data, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatalf("Marshal intent: %v", err)
+	}
+	if err := os.WriteFile(intentPath, data, 0600); err != nil {
+		t.Fatalf("WriteFile intent: %v", err)
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer rpc-secret" {
+			t.Fatalf("auth header = %q", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/workloads":
+			var req workload.AdmissionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode workload admit: %v", err)
+			}
+			if req.Job.ContextRequest != 8192 || string(req.Payload) != `{"prompt":"private text"}` {
+				t.Fatalf("admission request = %+v payload=%s", req.Job, req.Payload)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(workload.AdmissionResponse{
+				Job:           domain.Job{ID: req.Job.ID, Model: req.Job.Model, PresetID: req.Job.PresetID, Project: req.Job.Project, Status: domain.JobQueued},
+				Decision:      domain.PlacementDecision{JobID: req.Job.ID, Action: domain.ActionQueued, Preset: domain.Preset{ID: req.Job.PresetID}},
+				Queued:        true,
+				PayloadBytes:  len(req.Payload),
+				PayloadStored: true,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/workloads/job-a":
+			_ = json.NewEncoder(w).Encode(workload.StatusResponse{Job: domain.Job{
+				ID:                  "job-a",
+				Model:               "model-a",
+				PresetID:            "preset-a",
+				Project:             "project-a",
+				Priority:            domain.PriorityInteractive,
+				ContextRequest:      8192,
+				ExpectedConcurrency: 2,
+				Preemption:          domain.PreemptSoft,
+				Status:              domain.JobQueued,
+			}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	})
+	client := directHTTPClient(handler)
+	admitOut := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"jobs", "admit", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--file", intentPath}, client)
+	})
+	if err != nil {
+		t.Fatalf("jobs admit: %v", err)
+	}
+	if !strings.Contains(admitOut, "workload\tjob-a\tstatus=queued\tqueued=true") || strings.Contains(admitOut, "private text") {
+		t.Fatalf("admit output = %q", admitOut)
+	}
+	statusOut := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"jobs", "status", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a"}, client)
+	})
+	if err != nil {
+		t.Fatalf("jobs status: %v", err)
+	}
+	if !strings.Contains(statusOut, "context=8192\tconcurrency=2\tpreemption=soft") || strings.Contains(statusOut, "private text") {
+		t.Fatalf("status output = %q", statusOut)
+	}
+}
+
+func TestRunJobsAdmitAndStatusErrorBranches(t *testing.T) {
+	err := runJobsAdmit(context.Background(), nil, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--url") {
+		t.Fatalf("missing url err = %v", err)
+	}
+	err = runJobsAdmit(context.Background(), []string{"--url", "http://peer.test"}, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--file") {
+		t.Fatalf("missing file err = %v", err)
+	}
+	badJSON := filepath.Join(t.TempDir(), "bad.json")
+	if writeErr := os.WriteFile(badJSON, []byte(`{`), 0600); writeErr != nil {
+		t.Fatalf("WriteFile bad json: %v", writeErr)
+	}
+	err = runJobsAdmit(context.Background(), []string{"--url", "http://peer.test", "--file", badJSON}, http.DefaultClient)
+	if err == nil {
+		t.Fatal("bad intent json accepted")
+	}
+	errorClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no instance", http.StatusConflict)
+	}))
+	goodIntent := filepath.Join(t.TempDir(), "good.json")
+	if writeErr := os.WriteFile(goodIntent, []byte(`{"job":{"id":"job-a","model":"model-a","project":"project-a"}}`), 0600); writeErr != nil {
+		t.Fatalf("WriteFile good intent: %v", writeErr)
+	}
+	err = runJobsAdmit(context.Background(), []string{"--url", "http://peer.test", "--file", goodIntent}, errorClient)
+	if err == nil || !strings.Contains(err.Error(), "409") {
+		t.Fatalf("admit error response err = %v", err)
+	}
+	badResponseClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{`))
+	}))
+	err = runJobsAdmit(context.Background(), []string{"--url", "http://peer.test", "--file", goodIntent}, badResponseClient)
+	if err == nil {
+		t.Fatal("bad admit response accepted")
+	}
+
+	err = runJobsStatus(context.Background(), nil, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--url") {
+		t.Fatalf("status missing url err = %v", err)
+	}
+	err = runJobsStatus(context.Background(), []string{"--url", "http://peer.test"}, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--id") {
+		t.Fatalf("status missing id err = %v", err)
+	}
+	err = runJobsStatus(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a"}, errorClient)
+	if err == nil || !strings.Contains(err.Error(), "409") {
+		t.Fatalf("status error response err = %v", err)
+	}
+	err = runJobsStatus(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a"}, badResponseClient)
+	if err == nil {
+		t.Fatal("bad status response accepted")
 	}
 }
 

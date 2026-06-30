@@ -37,8 +37,9 @@ Mycelium is a peer-native, LAN-local inference control plane:
   strict JSON/structured-output passthrough, tool-call diagnostics, streaming
   and non-streaming preflight evidence.
 - Control CLI: `myce gateway preflight`, `myce gateway routes`, `myce debug job`,
-  `myce debug bundle`, `myce telemetry samples`, benchmark commands, model and
-  recommendation inspection commands.
+  `myce debug bundle`, `myce jobs admit`, `myce jobs status`,
+  `myce telemetry samples`, benchmark commands, model and recommendation
+  inspection commands.
 - Runtime proof surfaces: owner telemetry, run/session metrics, job registry,
   route headers, preflight artifacts, debug bundles, and optimization summaries.
 - Scheduler/runtime: owner-authoritative admission, resource estimation,
@@ -88,8 +89,12 @@ scheduler service supports queued work, owner-authoritative admission, and a
 periodic queue drainer. OpenAI-compatible chat requests remain synchronous:
 when the selected route cannot immediately acquire an owner, the gateway
 returns a loud no-instance error instead of accepting an asynchronous workload.
-Use the scheduler/runtime and fleet benchmark surfaces for pressure proofs
-until an explicit async workload API is promoted.
+Use the authenticated `/workloads` RPC surface, `myce jobs admit`, and fleet
+benchmark surfaces for pressure proofs that need queued admission without
+turning chat completions into a hidden blocking queue. The workload surface
+admits durable job intent and status evidence through the scheduler/runtime;
+consumer-facing result relay for queued payloads is still a separate product
+gate.
 
 ## Public Hygiene Rules
 

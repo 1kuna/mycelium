@@ -35,6 +35,7 @@ import (
 	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/internal/telemetry"
+	"mycelium/internal/workload"
 )
 
 const maxPeerRPCJSONBodyBytes = 16 << 20
@@ -364,6 +365,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
 	mountTelemetryHTTP(mux, store, cfg.RPCToken)
 	mountCatalogHTTP(mux, cfg, store, cfg.RPCToken, clock.System{})
+	mountWorkloadHTTP(mux, runtime, store, cfg.RPCToken)
 	mux.Handle("/", handler)
 	return cfg.Listen, mux, combineShutdowns(shutdowns), nil
 }
@@ -513,6 +515,14 @@ type catalogEvictResponse struct {
 	Locality domain.ModelLocality `json:"locality"`
 }
 
+type workloadRuntime interface {
+	SubmitWithPayload(ctx context.Context, job domain.Job, payload []byte, hooks ...scheduler.SubmitHooks) (scheduler.Result, error)
+}
+
+type workloadStore interface {
+	Job(ctx context.Context, id string) (domain.Job, error)
+}
+
 type catalogStageStore interface {
 	SaveJob(ctx context.Context, job domain.Job) error
 	SavePreset(ctx context.Context, preset domain.Preset) error
@@ -521,6 +531,143 @@ type catalogStageStore interface {
 	ListInstances(ctx context.Context) ([]domain.ModelInstance, error)
 	ListReservations(ctx context.Context) ([]domain.Reservation, error)
 	DeleteModelLocality(ctx context.Context, id string) error
+}
+
+func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store workloadStore, rpcToken string) {
+	mux.HandleFunc("/workloads", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req workload.AdmissionRequest
+		if err := decodePeerRPCJSON(r, &req); err != nil {
+			writePeerRPCError(w, http.StatusBadRequest, err)
+			return
+		}
+		job, err := normalizeWorkloadJob(req.Job)
+		if err != nil {
+			writePeerRPCError(w, http.StatusBadRequest, err)
+			return
+		}
+		result, err := runtime.SubmitWithPayload(r.Context(), job, []byte(req.Payload))
+		if err != nil {
+			writePeerRPCError(w, http.StatusConflict, err)
+			return
+		}
+		if latest, readErr := store.Job(r.Context(), job.ID); readErr == nil {
+			job = latest
+		}
+		resp := workload.AdmissionResponse{
+			Job:           job,
+			Decision:      result.Decision,
+			Instance:      result.Instance,
+			Lease:         result.Lease,
+			Queued:        job.Status == domain.JobQueued || result.Decision.Action == domain.ActionQueued,
+			PayloadBytes:  len(req.Payload),
+			PayloadStored: len(req.Payload) > 0,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if resp.Queued {
+			w.WriteHeader(http.StatusAccepted)
+		} else {
+			w.WriteHeader(http.StatusCreated)
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			panic(err)
+		}
+	})
+	mux.HandleFunc("/workloads/", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/workloads/")
+		if id == "" || strings.Contains(id, "/") {
+			writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("workload id is required"))
+			return
+		}
+		job, err := store.Job(r.Context(), id)
+		if err != nil {
+			writePeerRPCError(w, http.StatusNotFound, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(workload.StatusResponse{Job: job}); err != nil {
+			panic(err)
+		}
+	})
+}
+
+func normalizeWorkloadJob(job domain.Job) (domain.Job, error) {
+	if job.ID == "" {
+		return domain.Job{}, fmt.Errorf("job.id is required")
+	}
+	if job.TaskType == "" {
+		job.TaskType = "chat"
+	}
+	if job.Model == "" && job.PresetID == "" {
+		return domain.Job{}, fmt.Errorf("job.model or job.preset is required")
+	}
+	if job.Project == "" {
+		return domain.Job{}, fmt.Errorf("job.project is required")
+	}
+	if job.Priority == "" {
+		job.Priority = domain.PriorityNormal
+	}
+	if job.SpeedPref == "" {
+		job.SpeedPref = domain.SpeedThroughput
+	}
+	if job.Preemption == "" {
+		job.Preemption = domain.PreemptInherit
+	}
+	if err := validateWorkloadJobEnums(job); err != nil {
+		return domain.Job{}, err
+	}
+	job.Status = domain.JobQueued
+	return job, nil
+}
+
+func validateWorkloadJobEnums(job domain.Job) error {
+	switch job.Priority {
+	case domain.PriorityInteractive, domain.PriorityNormal, domain.PriorityBackground:
+	default:
+		return fmt.Errorf("job.priority %q is invalid", job.Priority)
+	}
+	switch job.SpeedPref {
+	case domain.SpeedThroughput, domain.SpeedLatency, domain.SpeedAuto:
+	default:
+		return fmt.Errorf("job.speed_pref %q is invalid", job.SpeedPref)
+	}
+	switch job.Preemption {
+	case domain.PreemptInherit, domain.PreemptSoft, domain.PreemptHardForInteractive, domain.PreemptHard:
+	default:
+		return fmt.Errorf("job.preemption %q is invalid", job.Preemption)
+	}
+	switch job.Handling {
+	case domain.HandlingStandard:
+	case domain.HandlingPrivate:
+		return fmt.Errorf("private workload handling is not enabled")
+	default:
+		return fmt.Errorf("job.handling %q is invalid", job.Handling)
+	}
+	if job.ContextRequest < 0 {
+		return fmt.Errorf("job.context_request must be non-negative")
+	}
+	if job.ExpectedConcurrency < 0 {
+		return fmt.Errorf("job.expected_concurrency must be non-negative")
+	}
+	if job.DeadlineMS < 0 {
+		return fmt.Errorf("job.deadline_ms must be non-negative")
+	}
+	return nil
 }
 
 func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStore, rpcToken string, clk ports.Clock) {

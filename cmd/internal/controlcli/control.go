@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +26,7 @@ import (
 	"mycelium/internal/ports"
 	projectvalidation "mycelium/internal/project"
 	storesqlite "mycelium/internal/store/sqlite"
+	"mycelium/internal/workload"
 	"mycelium/pkg/api"
 )
 
@@ -48,7 +50,7 @@ func RunWithClient(ctx context.Context, args []string, client *http.Client) erro
 	case "projects":
 		return runProjects(ctx, args[1:])
 	case "jobs":
-		return runJobs(ctx, args[1:])
+		return runJobs(ctx, args[1:], client)
 	case "telemetry":
 		return runTelemetry(ctx, args[1:])
 	case "recommendations":
@@ -816,11 +818,24 @@ func runProjects(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runJobs(ctx context.Context, args []string) error {
-	if len(args) == 0 || args[0] != "list" {
-		return fmt.Errorf("usage: myce jobs list [--db path]")
+func runJobs(ctx context.Context, args []string, client *http.Client) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: myce jobs <list|admit|status>")
 	}
-	store, err := openCLIStore(args[1:])
+	switch args[0] {
+	case "list":
+		return runJobsList(ctx, args[1:])
+	case "admit":
+		return runJobsAdmit(ctx, args[1:], client)
+	case "status":
+		return runJobsStatus(ctx, args[1:], client)
+	default:
+		return fmt.Errorf("usage: myce jobs <list|admit|status>")
+	}
+}
+
+func runJobsList(ctx context.Context, args []string) error {
+	store, err := openCLIStore(args)
 	if err != nil {
 		return err
 	}
@@ -832,6 +847,103 @@ func runJobs(ctx context.Context, args []string) error {
 	for _, job := range jobs {
 		fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\n", job.ID, job.TaskType, job.Project, job.Model, job.Status, jobProgressSummary(job))
 	}
+	return nil
+}
+
+func runJobsAdmit(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("jobs admit", flag.ContinueOnError)
+	peerURL := fs.String("url", "", "peer base URL")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
+	file := fs.String("file", "", "workload admission JSON file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *peerURL == "" {
+		return fmt.Errorf("--url is required")
+	}
+	if *file == "" {
+		return fmt.Errorf("--file is required")
+	}
+	data, err := os.ReadFile(*file)
+	if err != nil {
+		return err
+	}
+	var req workload.AdmissionRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(*peerURL, "/")+"/workloads", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if *rpcToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+*rpcToken)
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, err := readControlHTTPBody(resp.Body, "workload admission response body")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("workload admit returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	var out workload.AdmissionResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return err
+	}
+	fmt.Printf("workload\t%s\tstatus=%s\tqueued=%t\taction=%s\tnode=%s\tpreset=%s\tpayload_stored=%t\tpayload_bytes=%d\n",
+		out.Job.ID, out.Job.Status, out.Queued, out.Decision.Action, emptyDash(out.Decision.NodeID), emptyDash(out.Decision.Preset.ID), out.PayloadStored, out.PayloadBytes)
+	return nil
+}
+
+func runJobsStatus(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("jobs status", flag.ContinueOnError)
+	peerURL := fs.String("url", "", "peer base URL")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
+	id := fs.String("id", "", "workload job id")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *peerURL == "" {
+		return fmt.Errorf("--url is required")
+	}
+	if *id == "" {
+		return fmt.Errorf("--id is required")
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(*peerURL, "/")+"/workloads/"+url.PathEscape(*id), nil)
+	if err != nil {
+		return err
+	}
+	if *rpcToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+*rpcToken)
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, err := readControlHTTPBody(resp.Body, "workload status response body")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("workload status returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	var out workload.StatusResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return err
+	}
+	fmt.Printf("workload\t%s\tstatus=%s\tproject=%s\tmodel=%s\tpreset=%s\tpriority=%s\tcontext=%d\tconcurrency=%d\tpreemption=%s\n",
+		out.Job.ID, out.Job.Status, out.Job.Project, out.Job.Model, out.Job.PresetID, out.Job.Priority, out.Job.ContextRequest, out.Job.ExpectedConcurrency, out.Job.Preemption)
 	return nil
 }
 
