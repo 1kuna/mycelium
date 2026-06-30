@@ -435,6 +435,13 @@ Add expectation flags when the command is used as a consumer gate:
   declared consumer workload. Use this for thinking/tool-agent workloads so a
   route can pass transport/tool-call smoke while still failing the actual
   consumer contract.
+- `--expect-finish-reason <reason>` fails if the provider stopped for a
+  different reason, such as `length`.
+- `--min-content-length <n>` fails if the final answer channel is empty or too
+  short for the gate.
+- `--max-reasoning-length <n>` fails if reasoning output exceeds the allowed
+  boundary for the gate. Use `0` when the canary should finish entirely in final
+  content.
 
 Strict JSON route gate:
 
@@ -445,6 +452,8 @@ myce gateway preflight \
   --project strict-json-canary \
   --expect-node <expected-owner-node> \
   --require-json \
+  --expect-finish-reason stop \
+  --min-content-length 2 \
   --out /tmp/mycelium-strict-json
 ```
 
@@ -491,6 +500,7 @@ myce gateway preflight \
   --tool-name echo \
   --tool-choice function \
   --expect-node <expected-owner-node> \
+  --expect-finish-reason tool_calls \
   --require-tool-call \
   --reject-textual-tool-call \
   --min-prompt-tokens <fixture-sized-prompt-token-floor> \

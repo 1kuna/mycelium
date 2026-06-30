@@ -1331,6 +1331,9 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	rejectTextualToolCall := fs.Bool("reject-textual-tool-call", false, "fail if final content contains a textual <tool_call> block")
 	minPromptTokens := fs.Int("min-prompt-tokens", 0, "fail unless usage.prompt_tokens is at least this value")
 	minContextCap := fs.Int("min-context-cap", 0, "fail unless --context-cap is at least this value")
+	expectFinishReason := fs.String("expect-finish-reason", "", "fail unless finish_reason matches this value")
+	minContentLength := fs.Int("min-content-length", 0, "fail unless final content has at least this many bytes")
+	maxReasoningLength := fs.Int("max-reasoning-length", -1, "fail unless reasoning content has at most this many bytes")
 	stream := fs.Bool("stream", false, "send a streaming request and record stream completion/tool/usage evidence")
 	outDir := fs.String("out", "", "optional directory for a redacted preflight evidence packet")
 	consumerRun := fs.String("consumer-run", "", "consumer batch/run id to preserve in preflight evidence")
@@ -1377,6 +1380,9 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 		RejectTextualToolCall: *rejectTextualToolCall,
 		MinPromptTokens:       *minPromptTokens,
 		MinContextCap:         *minContextCap,
+		ExpectFinishReason:    *expectFinishReason,
+		MinContentLength:      *minContentLength,
+		MaxReasoningLength:    *maxReasoningLength,
 	}
 	result, err := gatewayPreflightComplete(ctx, cfg)
 	if err != nil {
@@ -1435,6 +1441,9 @@ type gatewayPreflightExpectations struct {
 	RejectTextualToolCall bool
 	MinPromptTokens       int
 	MinContextCap         int
+	ExpectFinishReason    string
+	MinContentLength      int
+	MaxReasoningLength    int
 }
 
 func validateGatewayPreflightExpectations(result gatewayPreflightResult, expectations gatewayPreflightExpectations) error {
@@ -1447,8 +1456,17 @@ func validateGatewayPreflightExpectations(result gatewayPreflightResult, expecta
 	if result.Streaming && !result.StreamDone {
 		failures = append(failures, "expected terminal streaming [DONE] event")
 	}
+	if expectations.ExpectFinishReason != "" && result.FinishReason != expectations.ExpectFinishReason {
+		failures = append(failures, fmt.Sprintf("expected finish_reason=%s got %s", expectations.ExpectFinishReason, emptyDash(result.FinishReason)))
+	}
 	if expectations.RequireJSON && !result.JSONContent {
 		failures = append(failures, "expected valid JSON final content")
+	}
+	if expectations.MinContentLength > 0 && len(result.Content) < expectations.MinContentLength {
+		failures = append(failures, fmt.Sprintf("expected content length >= %d got %d", expectations.MinContentLength, len(result.Content)))
+	}
+	if expectations.MaxReasoningLength >= 0 && len(result.Reasoning) > expectations.MaxReasoningLength {
+		failures = append(failures, fmt.Sprintf("expected reasoning length <= %d got %d", expectations.MaxReasoningLength, len(result.Reasoning)))
 	}
 	if expectations.RequireToolCall && result.ToolCallCount == 0 {
 		failures = append(failures, "expected at least one structured tool call")
@@ -1544,6 +1562,9 @@ type gatewayPreflightExpectationEvidence struct {
 	RejectTextualToolCall bool   `json:"reject_textual_tool_call,omitempty"`
 	MinPromptTokens       int    `json:"min_prompt_tokens,omitempty"`
 	MinContextCap         int    `json:"min_context_cap,omitempty"`
+	ExpectFinishReason    string `json:"expect_finish_reason,omitempty"`
+	MinContentLength      int    `json:"min_content_length,omitempty"`
+	MaxReasoningLength    *int   `json:"max_reasoning_length,omitempty"`
 }
 
 func gatewayPreflightRequestEvidenceFromConfig(cfg gatewayPreflightConfig) gatewayPreflightRequestEvidence {
@@ -1568,17 +1589,23 @@ func gatewayPreflightRequestEvidenceFromConfig(cfg gatewayPreflightConfig) gatew
 }
 
 func gatewayPreflightExpectationEvidenceFromExpectations(expectations gatewayPreflightExpectations) *gatewayPreflightExpectationEvidence {
-	if expectations.ExpectNode == "" && !expectations.RequireJSON && !expectations.RequireToolCall && !expectations.RejectTextualToolCall && expectations.MinPromptTokens == 0 && expectations.MinContextCap == 0 {
+	if expectations.ExpectNode == "" && !expectations.RequireJSON && !expectations.RequireToolCall && !expectations.RejectTextualToolCall && expectations.MinPromptTokens == 0 && expectations.MinContextCap == 0 && expectations.ExpectFinishReason == "" && expectations.MinContentLength == 0 && expectations.MaxReasoningLength < 0 {
 		return nil
 	}
-	return &gatewayPreflightExpectationEvidence{
+	out := &gatewayPreflightExpectationEvidence{
 		ExpectNode:            expectations.ExpectNode,
 		RequireJSON:           expectations.RequireJSON,
 		RequireToolCall:       expectations.RequireToolCall,
 		RejectTextualToolCall: expectations.RejectTextualToolCall,
 		MinPromptTokens:       expectations.MinPromptTokens,
 		MinContextCap:         expectations.MinContextCap,
+		ExpectFinishReason:    expectations.ExpectFinishReason,
+		MinContentLength:      expectations.MinContentLength,
 	}
+	if expectations.MaxReasoningLength >= 0 {
+		out.MaxReasoningLength = &expectations.MaxReasoningLength
+	}
+	return out
 }
 
 func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflightConfig, result gatewayPreflightResult, expectations gatewayPreflightExpectations) (string, error) {

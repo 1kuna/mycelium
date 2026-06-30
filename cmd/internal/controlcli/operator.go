@@ -794,10 +794,12 @@ type jobOptimizationEvidence struct {
 	MinContextCap           int                                  `json:"min_context_cap,omitempty"`
 	ContextAdequate         bool                                 `json:"context_adequate,omitempty"`
 	FinishReason            string                               `json:"finish_reason,omitempty"`
-	JSONContent             bool                                 `json:"json_content,omitempty"`
-	ToolCallCount           int                                  `json:"tool_call_count,omitempty"`
+	ContentLength           int                                  `json:"content_length"`
+	ReasoningLength         int                                  `json:"reasoning_length"`
+	JSONContent             bool                                 `json:"json_content"`
+	ToolCallCount           int                                  `json:"tool_call_count"`
 	ToolCallNames           []string                             `json:"tool_call_names,omitempty"`
-	TextualToolCall         bool                                 `json:"textual_tool_call,omitempty"`
+	TextualToolCall         bool                                 `json:"textual_tool_call"`
 	OwnerTelemetryAvailable bool                                 `json:"owner_telemetry_available"`
 	MetricSource            string                               `json:"metric_source,omitempty"`
 	SessionPhases           []string                             `json:"session_phases,omitempty"`
@@ -833,6 +835,8 @@ func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvi
 			out.ColdLoad = &cold
 		}
 		out.FinishReason = report.Preflight.FinishReason
+		out.ContentLength = report.Preflight.ContentLength
+		out.ReasoningLength = report.Preflight.ReasoningLength
 		out.JSONContent = report.Preflight.JSONContent
 		out.ToolCallCount = report.Preflight.ToolCallCount
 		out.ToolCallNames = report.Preflight.ToolCallNames
@@ -936,7 +940,7 @@ func failureLayerForDiagnosis(diagnosis jobDebugDiagnosis, report jobDebugReport
 }
 
 func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvidence) {
-	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tconsumer_result=%s\tquality_gate=%s\tnode=%s\tpreset=%s\tmodel=%s\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\n",
+	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tconsumer_result=%s\tquality_gate=%s\tnode=%s\tpreset=%s\tmodel=%s\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tfinish=%s\tcontent_len=%d\treasoning_len=%d\tjson=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\n",
 		emptyDash(evidence.JobID),
 		emptyDash(evidence.Project),
 		emptyDash(evidence.ConsumerStatus),
@@ -948,6 +952,10 @@ func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvide
 		evidence.ContextCap,
 		evidence.MinContextCap,
 		evidence.ContextAdequate,
+		emptyDash(evidence.FinishReason),
+		evidence.ContentLength,
+		evidence.ReasoningLength,
+		evidence.JSONContent,
 		evidence.Request.Streaming,
 		evidence.Request.ToolRequested,
 		evidence.UsagePromptTokens,
@@ -1142,12 +1150,20 @@ func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidenc
 		)
 	}
 	if evidence.Expectations != nil {
-		fmt.Fprintf(w, "preflight-expectations\texpect_node=%s\trequire_json=%t\trequire_tool_call=%t\treject_textual_tool_call=%t\tmin_prompt_tokens=%d\n",
+		maxReasoning := "-"
+		if evidence.Expectations.MaxReasoningLength != nil {
+			maxReasoning = strconv.Itoa(*evidence.Expectations.MaxReasoningLength)
+		}
+		fmt.Fprintf(w, "preflight-expectations\texpect_node=%s\trequire_json=%t\trequire_tool_call=%t\treject_textual_tool_call=%t\tmin_prompt_tokens=%d\tmin_context=%d\texpect_finish=%s\tmin_content=%d\tmax_reasoning=%s\n",
 			emptyDash(evidence.Expectations.ExpectNode),
 			evidence.Expectations.RequireJSON,
 			evidence.Expectations.RequireToolCall,
 			evidence.Expectations.RejectTextualToolCall,
 			evidence.Expectations.MinPromptTokens,
+			evidence.Expectations.MinContextCap,
+			emptyDash(evidence.Expectations.ExpectFinishReason),
+			evidence.Expectations.MinContentLength,
+			maxReasoning,
 		)
 	}
 	if evidence.Streaming {
