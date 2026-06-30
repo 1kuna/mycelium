@@ -3208,6 +3208,171 @@ func TestRunDebugSelectRanksTrainingRows(t *testing.T) {
 	}
 }
 
+func TestRunDebugProposePolicyBuildsApprovalReport(t *testing.T) {
+	pass := true
+	rows := []debugSummaryTrainingRow{
+		{
+			SchemaVersion:            "mycelium.debug_training.v1",
+			EvidenceKind:             "optimization",
+			RouteKey:                 "model=large,node=node-a,backend=vllm,preset=preset-large",
+			Model:                    "large",
+			NodeID:                   "node-a",
+			Backend:                  "vllm",
+			PresetID:                 "preset-large",
+			ContextCap:               65536,
+			MinContextCap:            32768,
+			ContextAdequate:          true,
+			ToolRequested:            true,
+			JSONContent:              true,
+			UsageAvailable:           true,
+			UsageTotalTokens:         2400,
+			StatusCode:               200,
+			FinishReason:             "stop",
+			ContentLength:            42,
+			TotalLatencyMS:           800,
+			OwnerTelemetryAvailable:  true,
+			LiveModelChecked:         true,
+			LiveModelAvailable:       true,
+			DeterministicQualityPass: &pass,
+			Recommendation:           "route_healthy",
+			RecommendationSeverity:   "ok",
+			RecommendationConfidence: "high",
+		},
+		{
+			SchemaVersion:            "mycelium.debug_training.v1",
+			EvidenceKind:             "optimization",
+			RouteKey:                 "model=large,node=node-a,backend=vllm,preset=preset-large",
+			Model:                    "large",
+			NodeID:                   "node-a",
+			Backend:                  "vllm",
+			PresetID:                 "preset-large",
+			ContextCap:               65536,
+			MinContextCap:            32768,
+			ContextAdequate:          true,
+			ToolRequested:            true,
+			JSONContent:              true,
+			UsageAvailable:           true,
+			UsageTotalTokens:         2200,
+			StatusCode:               200,
+			FinishReason:             "stop",
+			ContentLength:            40,
+			TotalLatencyMS:           700,
+			OwnerTelemetryAvailable:  true,
+			LiveModelChecked:         true,
+			LiveModelAvailable:       true,
+			DeterministicQualityPass: &pass,
+			Recommendation:           "route_healthy",
+			RecommendationSeverity:   "ok",
+			RecommendationConfidence: "high",
+		},
+		{
+			SchemaVersion:   "mycelium.debug_training.v1",
+			EvidenceKind:    "preflight",
+			RouteKey:        "model=small,node=node-b,backend=vllm,preset=preset-small",
+			Model:           "small",
+			NodeID:          "node-b",
+			Backend:         "vllm",
+			PresetID:        "preset-small",
+			ContextCap:      65536,
+			MinContextCap:   32768,
+			ContextAdequate: true,
+			ToolRequested:   true,
+			JSONContent:     true,
+			UsageAvailable:  true,
+			StatusCode:      200,
+			FinishReason:    "stop",
+			ContentLength:   24,
+			Recommendation:  "route_healthy",
+		},
+		{
+			SchemaVersion:   "mycelium.debug_training.v1",
+			EvidenceKind:    "optimization",
+			RouteKey:        "model=tool-text,node=node-c,backend=vllm,preset=preset-tool",
+			Model:           "tool-text",
+			NodeID:          "node-c",
+			Backend:         "vllm",
+			PresetID:        "preset-tool",
+			ContextCap:      65536,
+			MinContextCap:   32768,
+			ContextAdequate: true,
+			ToolRequested:   true,
+			TextualToolCall: true,
+			StatusCode:      200,
+			FinishReason:    "stop",
+			ContentLength:   80,
+			Recommendation:  "tool_call_route_unsuitable",
+		},
+	}
+	path := filepath.Join(t.TempDir(), "training.jsonl")
+	var data strings.Builder
+	for _, row := range rows {
+		encoded, err := json.Marshal(row)
+		if err != nil {
+			t.Fatalf("marshal row: %v", err)
+		}
+		data.Write(encoded)
+		data.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(data.String()), 0o600); err != nil {
+		t.Fatalf("write training JSONL: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		err := Run(context.Background(), []string{
+			"debug", "propose-policy",
+			"--training-jsonl", path,
+			"--min-context-cap", "32768",
+			"--require-tools",
+			"--require-json",
+			"--require-final-content",
+			"--require-usage",
+			"--min-successes", "2",
+			"--require-owner-telemetry",
+			"--require-live-model",
+			"--require-quality-pass",
+		})
+		if err != nil {
+			t.Fatalf("debug propose-policy: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"policy-proposal\tschema=mycelium.route_policy_proposal.v1\tmode=report_only\tproposed=1\tcandidates=0\trefused=1\tmissing_evidence=1",
+		"policy-route\taction=propose_policy_change\tdecision=selected\tkey=model=large,node=node-a,backend=vllm,preset=preset-large",
+		"evidence=owner_telemetry",
+		"policy-route\taction=collect_more_evidence\tdecision=candidate\tkey=model=small,node=node-b,backend=vllm,preset=preset-small",
+		"missing=need at least 2 successful saved rows,need owner-side run/session telemetry,need live catalog availability evidence,need deterministic consumer quality pass evidence",
+		"policy-route\taction=refuse_policy_change\tdecision=refused\tkey=model=tool-text,node=node-c,backend=vllm,preset=preset-tool",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("policy proposal output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, path) || strings.Contains(output, "Bearer") {
+		t.Fatalf("policy proposal leaked local path or token material: %s", output)
+	}
+
+	jsonOutput := captureStdout(t, func() {
+		err := Run(context.Background(), []string{"debug", "propose-policy", "--training-jsonl", path, "--json", "--min-successes", "2", "--require-owner-telemetry"})
+		if err != nil {
+			t.Fatalf("debug propose-policy json: %v", err)
+		}
+	})
+	var report debugRoutePolicyProposalReport
+	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+		t.Fatalf("decode policy proposal JSON: %v\n%s", err, jsonOutput)
+	}
+	if report.SchemaVersion != "mycelium.route_policy_proposal.v1" || report.Mode != "report_only" || report.ProposedPolicyChanges != 1 || !strings.Contains(report.ApprovalBoundary, "operator approval") {
+		t.Fatalf("policy report = %+v", report)
+	}
+	if len(report.Proposals) != 3 || report.Proposals[0].Action != "propose_policy_change" || !report.Proposals[0].ApprovalRequired || len(report.Proposals[0].RollbackNotes) == 0 {
+		t.Fatalf("policy proposals = %+v", report.Proposals)
+	}
+
+	if err := Run(context.Background(), []string{"debug", "propose-policy"}); err == nil || !strings.Contains(err.Error(), "--training-jsonl") {
+		t.Fatalf("missing training err = %v", err)
+	}
+}
+
 func TestRunDebugVerifyPreflightValidatesSavedEvidence(t *testing.T) {
 	preflightPath := writeGatewayPreflightEvidenceFixture(t, "job-a")
 
