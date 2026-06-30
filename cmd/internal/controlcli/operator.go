@@ -1783,14 +1783,27 @@ func validateDebugSummaryTrainingRow(row debugSummaryTrainingRow, line int) erro
 	if row.SchemaVersion != "mycelium.debug_training.v1" {
 		return fmt.Errorf("training JSONL line %d has unsupported schema_version %q", line, row.SchemaVersion)
 	}
+	switch row.EvidenceKind {
+	case "preflight", "optimization":
+	default:
+		return fmt.Errorf("training JSONL line %d has unsupported evidence_kind %q", line, row.EvidenceKind)
+	}
 	if strings.TrimSpace(row.RouteKey) == "" {
 		return fmt.Errorf("training JSONL line %d missing route_key", line)
 	}
-	if strings.TrimSpace(row.EvidenceKind) == "" {
-		return fmt.Errorf("training JSONL line %d missing evidence_kind", line)
-	}
 	if row.MinContextCap < 0 || row.ContextCap < 0 || row.StatusCode < 0 || row.ContentLength < 0 || row.ReasoningLength < 0 || row.UsageTotalTokens < 0 || row.TotalLatencyMS < 0 {
 		return fmt.Errorf("training JSONL line %d contains negative numeric evidence", line)
+	}
+	if row.EvidenceKind == "preflight" && row.OwnerTelemetryAvailable {
+		return fmt.Errorf("training JSONL line %d cannot mark preflight-only evidence as owner telemetry", line)
+	}
+	switch row.QualitySignalSource {
+	case "", "not_collected", "consumer_gate":
+	default:
+		return fmt.Errorf("training JSONL line %d has unsupported quality_signal_source %q", line, row.QualitySignalSource)
+	}
+	if row.DeterministicQualityPass != nil && row.QualitySignalSource != "consumer_gate" {
+		return fmt.Errorf("training JSONL line %d has deterministic quality without consumer_gate quality_signal_source", line)
 	}
 	return nil
 }
