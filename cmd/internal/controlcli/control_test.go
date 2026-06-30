@@ -2211,10 +2211,14 @@ func TestOperatorStatusAndDebugRejectBadUsage(t *testing.T) {
 		{"debug", "job", "job-a", "--consumer-elapsed-ms", "-1"},
 		{"debug", "job", "job-a", "--consumer-status", "mystery"},
 		{"debug", "bundle"},
+		{"debug", "summary"},
 	} {
 		if err := Run(context.Background(), args); err == nil {
 			t.Fatalf("Run(%v) expected error", args)
 		}
+	}
+	if err := Run(context.Background(), []string{"debug", "summary", "--dir", t.TempDir()}); err == nil || !strings.Contains(err.Error(), "no preflight.json or optimization.json artifacts") {
+		t.Fatalf("empty summary err = %v", err)
 	}
 }
 
@@ -2450,6 +2454,67 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	}
 	if !strings.Contains(string(inheritedJobDebugData), `"run_id": "strict-json-batch"`) || !strings.Contains(string(inheritedJobDebugData), `"item_id": "row-004"`) || !strings.Contains(string(inheritedJobDebugData), `"status": "ok"`) {
 		t.Fatalf("inherited job debug artifact = %s", inheritedJobDebugData)
+	}
+}
+
+func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
+	dbPath, configPath := writeOperatorDebugFixture(t)
+	root := filepath.Join(t.TempDir(), "evidence")
+	bundleDir := filepath.Join(root, "bundle-a")
+	preflightOnlyDir := filepath.Join(root, "preflight-only")
+	if err := os.MkdirAll(preflightOnlyDir, 0o700); err != nil {
+		t.Fatalf("mkdir preflight-only: %v", err)
+	}
+	preflightPath := writeGatewayPreflightEvidenceFixture(t, "job-a")
+	client := operatorSnapshotClient(t)
+	var err error
+	_ = captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--preflight", preflightPath, "--owner-telemetry", "--consumer-run", "strict-json-run", "--consumer-item", "item-001", "--consumer-status", "ok", "--consumer-result", "pass", "--consumer-quality-gate", "schema", "--out", bundleDir}, client)
+	})
+	if err != nil {
+		t.Fatalf("debug bundle for summary: %v", err)
+	}
+	preflightOnlyPath := writeGatewayPreflightOnlyLiveCatalogFailureFixture(t, "missing", "")
+	if err := copyPreflightEvidenceFile(preflightOnlyPath, filepath.Join(preflightOnlyDir, "preflight.json")); err != nil {
+		t.Fatalf("copy preflight-only evidence: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root})
+	})
+	if err != nil {
+		t.Fatalf("debug summary: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"evidence\tkind=optimization\tjob=job-a\tproject=strict-json-batch\trun=strict-json-run\titem=item-001\tstatus=ok\tresult=pass\tmodel=strict-json-model\tnode=b70\tbackend=vllm\tpreset=tiny\tcontext=0/0",
+		"tool=true\ttool_choice=auto\tfinish=stop\tcontent=16\treasoning=0\tjson=true\ttextual_tool=true\tusage_available=true\tusage=16/10/26",
+		"owner_metrics=true\tlive_model=false/-\tfailure_layer=none\tfailure_class=owner_completed_warm",
+		"evidence\tkind=preflight\tjob=-\tproject=tool-canary\trun=-\titem=-\tstatus=-\tresult=-\tmodel=tool-model-large\tnode=-\tbackend=-\tpreset=-\tcontext=32768/32768\tcontext_ok=true",
+		"live_model=false/missing\tfailure_layer=catalog\tfailure_class=live_catalog_model_missing",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("summary output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, bundleDir) || strings.Contains(output, preflightOnlyDir) || strings.Contains(output, "rpc-secret") || strings.Contains(output, "gateway-secret") {
+		t.Fatalf("summary output leaked path or secret: %s", output)
+	}
+
+	jsonOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--json"})
+	})
+	if err != nil {
+		t.Fatalf("debug summary json: %v\n%s", err, jsonOutput)
+	}
+	var rows []debugSummaryRow
+	if err := json.Unmarshal([]byte(jsonOutput), &rows); err != nil {
+		t.Fatalf("decode summary json: %v\n%s", err, jsonOutput)
+	}
+	if len(rows) != 2 || rows[0].Kind != "optimization" || rows[0].ConsumerRun != "strict-json-run" || rows[1].Kind != "preflight" || rows[1].FailureClass != "live_catalog_model_missing" {
+		t.Fatalf("summary rows = %+v", rows)
+	}
+	if strings.Contains(jsonOutput, bundleDir) || strings.Contains(jsonOutput, preflightOnlyDir) || strings.Contains(jsonOutput, "rpc-secret") || strings.Contains(jsonOutput, "gateway-secret") {
+		t.Fatalf("summary json leaked path or secret: %s", jsonOutput)
 	}
 }
 

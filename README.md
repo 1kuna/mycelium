@@ -329,6 +329,22 @@ When `--db` is omitted, `debug job --config <peer.json>` reads that config's
 `store_path`; use `--db` only when intentionally inspecting a different control
 store.
 
+To inspect many saved preflight/debug-bundle artifacts without hand-assembling
+one row at a time, run:
+
+```bash
+myce debug summary --dir <artifact-dir>
+myce debug summary --dir <artifact-dir> --json
+```
+
+The summary command reads `optimization.json` and standalone `preflight.json`
+artifacts under the directory, prefers bundle optimization summaries when both
+exist, and prints secret-safe rows for route, model, owner node, preset,
+context gate, JSON/tool/streaming mode, finish reason, content/reasoning
+lengths, usage availability, timing, owner telemetry, live-catalog agreement,
+and failure class. It does not print bearer tokens, prompts, completions, or
+artifact paths.
+
 ## Debugging Workflow
 
 When a request fails or routes strangely, start with:

@@ -145,8 +145,10 @@ func runDebug(ctx context.Context, args []string, client *http.Client) error {
 		return runDebugJob(ctx, args[1:], client)
 	case "bundle":
 		return runDebugBundle(ctx, args[1:], client)
+	case "summary":
+		return runDebugSummary(args[1:])
 	default:
-		return fmt.Errorf("usage: myce debug <job|bundle>")
+		return fmt.Errorf("usage: myce debug <job|bundle|summary>")
 	}
 }
 
@@ -349,6 +351,230 @@ func runDebugBundle(ctx context.Context, args []string, client *http.Client) err
 	}
 	fmt.Printf("debug-bundle\t%s\n", *out)
 	return nil
+}
+
+func runDebugSummary(args []string) error {
+	fs := flag.NewFlagSet("debug summary", flag.ContinueOnError)
+	dir := fs.String("dir", "", "directory containing preflight or debug bundle artifacts")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dir == "" {
+		return fmt.Errorf("--dir is required")
+	}
+	rows, err := buildDebugSummaryRows(*dir)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return writePrettyJSON(os.Stdout, rows)
+	}
+	for _, row := range rows {
+		printDebugSummaryRow(os.Stdout, row)
+	}
+	return nil
+}
+
+type debugSummaryRow struct {
+	Kind                    string `json:"kind"`
+	JobID                   string `json:"job_id,omitempty"`
+	Project                 string `json:"project,omitempty"`
+	ConsumerRun             string `json:"consumer_run,omitempty"`
+	ConsumerItem            string `json:"consumer_item,omitempty"`
+	ConsumerStatus          string `json:"consumer_status,omitempty"`
+	ConsumerResult          string `json:"consumer_result,omitempty"`
+	Model                   string `json:"model,omitempty"`
+	NodeID                  string `json:"node_id,omitempty"`
+	Backend                 string `json:"backend,omitempty"`
+	PresetID                string `json:"preset_id,omitempty"`
+	Decision                string `json:"decision,omitempty"`
+	ContextCap              int    `json:"context_cap,omitempty"`
+	MinContextCap           int    `json:"min_context_cap,omitempty"`
+	ContextAdequate         bool   `json:"context_adequate,omitempty"`
+	Streaming               bool   `json:"streaming,omitempty"`
+	StructuredOutput        string `json:"structured_output,omitempty"`
+	ToolRequested           bool   `json:"tool_requested,omitempty"`
+	ToolChoice              string `json:"tool_choice,omitempty"`
+	FinishReason            string `json:"finish_reason,omitempty"`
+	ContentLength           int    `json:"content_length"`
+	ReasoningLength         int    `json:"reasoning_length"`
+	JSONContent             bool   `json:"json_content"`
+	TextualToolCall         bool   `json:"textual_tool_call"`
+	UsageAvailable          bool   `json:"usage_available"`
+	UsagePromptTokens       int    `json:"usage_prompt_tokens,omitempty"`
+	UsageCompletionTokens   int    `json:"usage_completion_tokens,omitempty"`
+	UsageTotalTokens        int    `json:"usage_total_tokens,omitempty"`
+	ColdLoad                *bool  `json:"cold_load,omitempty"`
+	LoadWallMS              int    `json:"load_wall_ms,omitempty"`
+	TTFTMS                  int    `json:"ttft_ms,omitempty"`
+	UpstreamWallMS          int    `json:"upstream_wall_ms,omitempty"`
+	OwnerTelemetryAvailable bool   `json:"owner_telemetry_available,omitempty"`
+	MetricSource            string `json:"metric_source,omitempty"`
+	LiveModelChecked        bool   `json:"live_model_checked,omitempty"`
+	LiveModelStatus         string `json:"live_model_status,omitempty"`
+	LiveModelAvailable      bool   `json:"live_model_available,omitempty"`
+	FailureLayer            string `json:"failure_layer,omitempty"`
+	FailureClass            string `json:"failure_class,omitempty"`
+}
+
+func buildDebugSummaryRows(root string) ([]debugSummaryRow, error) {
+	var optimizationFiles []string
+	preflightFiles := map[string]string{}
+	optimizationDirs := map[string]struct{}{}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		switch entry.Name() {
+		case "optimization.json":
+			optimizationFiles = append(optimizationFiles, path)
+			optimizationDirs[filepath.Dir(path)] = struct{}{}
+		case "preflight.json":
+			preflightFiles[path] = path
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("scan debug summary dir: %w", err)
+	}
+	sort.Strings(optimizationFiles)
+	var rows []debugSummaryRow
+	for _, path := range optimizationFiles {
+		evidence, err := readJobOptimizationEvidence(path)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, debugSummaryRowFromOptimization("optimization", evidence))
+	}
+	preflightPaths := make([]string, 0, len(preflightFiles))
+	for path := range preflightFiles {
+		if _, covered := optimizationDirs[filepath.Dir(path)]; covered {
+			continue
+		}
+		preflightPaths = append(preflightPaths, path)
+	}
+	sort.Strings(preflightPaths)
+	for _, path := range preflightPaths {
+		evidence, err := readGatewayPreflightEvidence(path)
+		if err != nil {
+			return nil, err
+		}
+		report := jobDebugReport{Preflight: &evidence, Consumer: evidence.Consumer}
+		report.Diagnosis = diagnoseJobDebugReport(report)
+		report.Optimization = summarizeJobOptimizationEvidence(report)
+		rows = append(rows, debugSummaryRowFromOptimization("preflight", *report.Optimization))
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("no preflight.json or optimization.json artifacts found under %s", root)
+	}
+	return rows, nil
+}
+
+func readJobOptimizationEvidence(path string) (jobOptimizationEvidence, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return jobOptimizationEvidence{}, fmt.Errorf("read optimization evidence: %w", err)
+	}
+	var evidence jobOptimizationEvidence
+	if err := json.Unmarshal(data, &evidence); err != nil {
+		return jobOptimizationEvidence{}, fmt.Errorf("decode optimization evidence: %w", err)
+	}
+	return evidence, nil
+}
+
+func debugSummaryRowFromOptimization(kind string, evidence jobOptimizationEvidence) debugSummaryRow {
+	row := debugSummaryRow{
+		Kind:                    kind,
+		JobID:                   evidence.JobID,
+		Project:                 evidence.Project,
+		Model:                   evidence.Model,
+		NodeID:                  evidence.NodeID,
+		Backend:                 evidence.Backend,
+		PresetID:                evidence.PresetID,
+		Decision:                evidence.Decision,
+		ContextCap:              evidence.ContextCap,
+		MinContextCap:           evidence.MinContextCap,
+		ContextAdequate:         evidence.ContextAdequate,
+		Streaming:               evidence.Request.Streaming,
+		StructuredOutput:        evidence.Request.StructuredOutput,
+		ToolRequested:           evidence.Request.ToolRequested,
+		ToolChoice:              evidence.Request.ToolChoice,
+		FinishReason:            evidence.FinishReason,
+		ContentLength:           evidence.ContentLength,
+		ReasoningLength:         evidence.ReasoningLength,
+		JSONContent:             evidence.JSONContent,
+		TextualToolCall:         evidence.TextualToolCall,
+		UsageAvailable:          evidence.UsageAvailable,
+		UsagePromptTokens:       evidence.UsagePromptTokens,
+		UsageCompletionTokens:   evidence.UsageCompletionTokens,
+		UsageTotalTokens:        evidence.UsageTotalTokens,
+		ColdLoad:                evidence.ColdLoad,
+		LoadWallMS:              evidence.LoadWallMS,
+		TTFTMS:                  evidence.TTFTMS,
+		UpstreamWallMS:          evidence.UpstreamWallMS,
+		OwnerTelemetryAvailable: evidence.OwnerTelemetryAvailable,
+		MetricSource:            evidence.MetricSource,
+		LiveModelChecked:        evidence.LiveModelChecked,
+		LiveModelStatus:         evidence.LiveModelStatus,
+		LiveModelAvailable:      evidence.LiveModelAvailable,
+		FailureLayer:            evidence.FailureLayer,
+		FailureClass:            evidence.FailureClass,
+	}
+	if evidence.Consumer != nil {
+		row.ConsumerRun = evidence.Consumer.RunID
+		row.ConsumerItem = evidence.Consumer.ItemID
+	}
+	row.ConsumerStatus = evidence.ConsumerStatus
+	row.ConsumerResult = evidence.ConsumerResult
+	return row
+}
+
+func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
+	cold := "-"
+	if row.ColdLoad != nil {
+		cold = strconv.FormatBool(*row.ColdLoad)
+	}
+	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\n",
+		emptyDash(row.Kind),
+		emptyDash(row.JobID),
+		emptyDash(row.Project),
+		emptyDash(row.ConsumerRun),
+		emptyDash(row.ConsumerItem),
+		emptyDash(row.ConsumerStatus),
+		emptyDash(row.ConsumerResult),
+		emptyDash(row.Model),
+		emptyDash(row.NodeID),
+		emptyDash(row.Backend),
+		emptyDash(row.PresetID),
+		row.ContextCap,
+		row.MinContextCap,
+		row.ContextAdequate,
+		row.Streaming,
+		emptyDash(row.StructuredOutput),
+		row.ToolRequested,
+		emptyDash(row.ToolChoice),
+		emptyDash(row.FinishReason),
+		row.ContentLength,
+		row.ReasoningLength,
+		row.JSONContent,
+		row.TextualToolCall,
+		row.UsageAvailable,
+		row.UsagePromptTokens,
+		row.UsageCompletionTokens,
+		row.UsageTotalTokens,
+		cold,
+		row.LoadWallMS,
+		row.TTFTMS,
+		row.UpstreamWallMS,
+		row.OwnerTelemetryAvailable,
+		row.LiveModelAvailable,
+		emptyDash(row.LiveModelStatus),
+		emptyDash(row.FailureLayer),
+		emptyDash(row.FailureClass),
+	)
 }
 
 type doctorRequest struct {
