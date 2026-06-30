@@ -238,6 +238,10 @@ Add `--require-live-model` when preflight should fail unless the authenticated
 live gateway catalog exposes the requested model or alias before the chat
 request runs. This distinguishes a route that exists only in local config from
 one the running gateway binary can advertise through `/v1/models`.
+If that catalog check fails before a gateway job is created, the redacted
+artifact can still be inspected with `myce debug job --preflight <preflight.json>`;
+the report classifies the failure as catalog-layer evidence instead of owner
+inference evidence.
 
 Token resolution for `myce gateway preflight` is:
 

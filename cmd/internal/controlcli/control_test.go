@@ -2094,7 +2094,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"owner-telemetry\tok\tnode=node-a\taddress=http://peer.test\tmetrics=1\tsamples=1\tttft_ms=34\tload_ms=0\ttps=12.50\tcontext=26\tphases=complete",
 		"consumer\trun=strict-json-batch-7\titem=row-006\tstatus=timeout\telapsed_ms=180000\terror=client_deadline\tresult=fail\tquality_gate=strict-json-validation",
 		"diagnosis\towner_completed_warm\towner node-a completed warm inference; load_ms=0; ttft_ms=34; consumer_status=timeout; upstream_ms=512; structured=json_schema",
-		"optimization\tjob=job-a\tproject=strict-json-batch\tconsumer_status=timeout\tconsumer_result=fail\tquality_gate=strict-json-validation\tnode=b70\tpreset=tiny\tmodel=strict-json-model\tcontext_cap=0\tmin_context=0\tcontext_ok=false\tfinish=stop\tcontent_len=16\treasoning_len=0\tjson=true\tstream=false\ttool=true\tusage=16/10/26\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=quality\tfailure_class=consumer_quality_failed",
+		"optimization\tjob=job-a\tproject=strict-json-batch\tconsumer_status=timeout\tconsumer_result=fail\tquality_gate=strict-json-validation\tnode=b70\tpreset=tiny\tmodel=strict-json-model\tcontext_cap=0\tmin_context=0\tcontext_ok=false\tfinish=stop\tcontent_len=16\treasoning_len=0\tjson=true\tstream=false\ttool=true\tusage=16/10/26\tlive_model=false/-\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=quality\tfailure_class=consumer_quality_failed",
 	} {
 		if !strings.Contains(preflightOutput, want) {
 			t.Fatalf("preflight debug output missing %q:\n%s", want, preflightOutput)
@@ -2143,6 +2143,58 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	}
 	if err := Run(context.Background(), []string{"debug", "job", "job-other", "--preflight", preflightPath, "--db", dbPath}); err == nil || !strings.Contains(err.Error(), `does not match requested job "job-other"`) {
 		t.Fatalf("mismatched preflight error = %v", err)
+	}
+}
+
+func TestRunDebugJobPrintsPreflightOnlyLiveCatalogFailure(t *testing.T) {
+	preflightPath := writeGatewayPreflightOnlyLiveCatalogFailureFixture(t, "error", "gateway models returned 404: not found")
+	var err error
+	output := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--consumer-status", "error", "--consumer-error", "stale_catalog"})
+	})
+	if err != nil {
+		t.Fatalf("debug preflight-only: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"job\t-\tpreflight_only\tmodel=tool-model-large\tproject=tool-canary\towner=-",
+		"preflight\tstatus=0\tmodel=tool-model-large\tproject=tool-canary",
+		"preflight-live-model\tstatus=error\tavailable=false\tmatch=-\tmodels=0\terror=gateway models returned 404: not found",
+		"consumer\trun=-\titem=-\tstatus=error\telapsed_ms=0\terror=stale_catalog\tresult=-\tquality_gate=-",
+		"diagnosis\tgateway_catalog_unavailable\tlive gateway catalog check failed for model tool-model-large: status=error error=gateway models returned 404: not found",
+		"optimization\tjob=-\tproject=tool-canary\tconsumer_status=error\tconsumer_result=-\tquality_gate=-\tnode=-\tpreset=-\tmodel=tool-model-large\tcontext_cap=32768\tmin_context=32768\tcontext_ok=true\tfinish=-\tcontent_len=0\treasoning_len=0\tjson=false\tstream=false\ttool=true\tusage=0/0/0\tlive_model=false/error\tload_ms=0\tttft_ms=0\tupstream_ms=0\tfailure_layer=catalog\tfailure_class=gateway_catalog_unavailable",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("preflight-only output missing %q:\n%s", want, output)
+		}
+	}
+
+	jsonOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--json"})
+	})
+	if err != nil {
+		t.Fatalf("debug preflight-only json: %v\n%s", err, jsonOutput)
+	}
+	var report jobDebugReport
+	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+		t.Fatalf("decode preflight-only json: %v\n%s", err, jsonOutput)
+	}
+	if report.Optimization == nil || report.Optimization.FailureLayer != "catalog" || report.Optimization.FailureClass != "gateway_catalog_unavailable" || report.Optimization.LiveModelStatus != "error" || report.Optimization.LiveModelAvailable {
+		t.Fatalf("preflight-only optimization = %+v", report.Optimization)
+	}
+
+	missingPath := writeGatewayPreflightOnlyLiveCatalogFailureFixture(t, "missing", "")
+	missingEvidence, readErr := readGatewayPreflightEvidence(missingPath)
+	if readErr != nil {
+		t.Fatalf("read missing live catalog evidence: %v", readErr)
+	}
+	missingOptimization := summarizeJobOptimizationEvidence(jobDebugReport{Preflight: &missingEvidence})
+	if missingOptimization.FailureLayer != "catalog" || missingOptimization.FailureClass != "live_catalog_model_missing" {
+		t.Fatalf("missing live catalog optimization = %+v", missingOptimization)
+	}
+
+	err = Run(context.Background(), []string{"debug", "job", "--preflight", preflightPath, "--owner-telemetry"})
+	if err == nil || !strings.Contains(err.Error(), "--owner-telemetry requires preflight evidence with X-Myc-Job") {
+		t.Fatalf("preflight-only owner telemetry err = %v", err)
 	}
 }
 
@@ -3151,6 +3203,46 @@ func writeGatewayPreflightEvidenceFixture(t *testing.T, jobID string) string {
 	}
 	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
 		t.Fatalf("write preflight evidence: %v", err)
+	}
+	return path
+}
+
+func writeGatewayPreflightOnlyLiveCatalogFailureFixture(t *testing.T, status, errorText string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "preflight.json")
+	evidence := gatewayPreflightEvidence{
+		Gateway:    "http://gateway.test",
+		Model:      "tool-model-large",
+		Project:    "tool-canary",
+		AuthSource: "test-token-source",
+		Request: gatewayPreflightRequestEvidence{
+			MaxTokens:     256,
+			ContextCap:    32768,
+			ToolRequested: true,
+			ToolName:      "echo",
+			ToolChoice:    "function",
+		},
+		Expectations: &gatewayPreflightExpectationEvidence{
+			RequireLiveModel: true,
+			RequireToolCall:  true,
+			MinContextCap:    32768,
+		},
+		StatusCode: 0,
+		LiveModel: &gatewayPreflightLiveModelEvidence{
+			Checked:        true,
+			Gateway:        "http://gateway.test",
+			Model:          "tool-model-large",
+			Status:         status,
+			ModelAvailable: false,
+			Error:          errorText,
+		},
+	}
+	data, err := json.MarshalIndent(evidence, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal preflight-only evidence: %v", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
+		t.Fatalf("write preflight-only evidence: %v", err)
 	}
 	return path
 }
