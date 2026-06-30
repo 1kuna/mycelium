@@ -2681,10 +2681,10 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 		t.Fatalf("debug summary: %v\n%s", err, output)
 	}
 	for _, want := range []string{
-		"evidence\tkind=optimization\tjob=job-a\tproject=strict-json-batch\trun=strict-json-run\titem=item-001\tstatus=ok\tresult=pass\tmodel=strict-json-model\tnode=owner-node\tbackend=vllm\tpreset=tiny\troute_status=warm_instance_available\tstartability=ready\twarm_instances=1\tloading_instances=0\tunfinished_jobs=0\tcontext=0/0",
+		"evidence\tkind=optimization\tjob=job-a\tproject=strict-json-batch\trun=strict-json-run\titem=item-001\tstatus=ok\tresult=pass\tquality_gate=schema\tmodel=strict-json-model\tnode=owner-node\tbackend=vllm\tpreset=tiny\troute_status=warm_instance_available\tstartability=ready\twarm_instances=1\tloading_instances=0\tunfinished_jobs=0\tcontext=0/0",
 		"tool=true\ttool_choice=auto\tfinish=stop\tcontent=16\treasoning=0\tjson=true\ttextual_tool=true\tusage_available=true\tusage=16/10/26",
 		"owner_metrics=true\tlive_model=false/-\tfailure_layer=none\tfailure_class=owner_completed_warm",
-		"evidence\tkind=preflight\tjob=-\tproject=tool-canary\trun=-\titem=-\tstatus=-\tresult=-\tmodel=tool-model-large\tnode=-\tbackend=-\tpreset=-\troute_status=-\tstartability=-\twarm_instances=0\tloading_instances=0\tunfinished_jobs=0\tcontext=32768/32768\tcontext_ok=true",
+		"evidence\tkind=preflight\tjob=-\tproject=tool-canary\trun=-\titem=-\tstatus=-\tresult=-\tquality_gate=-\tmodel=tool-model-large\tnode=-\tbackend=-\tpreset=-\troute_status=-\tstartability=-\twarm_instances=0\tloading_instances=0\tunfinished_jobs=0\tcontext=32768/32768\tcontext_ok=true",
 		"live_model=false/missing\tfailure_layer=catalog\tfailure_class=live_catalog_model_missing",
 	} {
 		if !strings.Contains(output, want) {
@@ -2705,7 +2705,7 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	if err := json.Unmarshal([]byte(jsonOutput), &rows); err != nil {
 		t.Fatalf("decode summary json: %v\n%s", err, jsonOutput)
 	}
-	if len(rows) != 2 || rows[0].Kind != "optimization" || rows[0].ConsumerRun != "strict-json-run" || rows[1].Kind != "preflight" || rows[1].FailureClass != "live_catalog_model_missing" {
+	if len(rows) != 2 || rows[0].Kind != "optimization" || rows[0].ConsumerRun != "strict-json-run" || rows[0].ConsumerQualityGate != "schema" || rows[1].Kind != "preflight" || rows[1].FailureClass != "live_catalog_model_missing" {
 		t.Fatalf("summary rows = %+v", rows)
 	}
 	if rows[0].RouteStatus != "warm_instance_available" || rows[0].Startability != "ready" || rows[0].WarmInstances != 1 {
@@ -2732,6 +2732,15 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	}
 	if strings.Count(routeFilteredOutput, "evidence\t") != 1 || !strings.Contains(routeFilteredOutput, "route_status=warm_instance_available\tstartability=ready") || strings.Contains(routeFilteredOutput, "failure_class=live_catalog_model_missing") {
 		t.Fatalf("route filtered summary output = %s", routeFilteredOutput)
+	}
+	qualityFilteredOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--quality-gate", "schema"})
+	})
+	if err != nil {
+		t.Fatalf("quality filtered debug summary: %v\n%s", err, qualityFilteredOutput)
+	}
+	if strings.Count(qualityFilteredOutput, "evidence\t") != 1 || !strings.Contains(qualityFilteredOutput, "quality_gate=schema") || strings.Contains(qualityFilteredOutput, "failure_class=live_catalog_model_missing") {
+		t.Fatalf("quality filtered summary output = %s", qualityFilteredOutput)
 	}
 
 	groupedOutput := captureStdout(t, func() {
@@ -2760,6 +2769,20 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	} {
 		if !strings.Contains(routeGroupedOutput, want) {
 			t.Fatalf("route grouped summary missing %q:\n%s", want, routeGroupedOutput)
+		}
+	}
+	qualityGroupedOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--group-by", "quality-gate"})
+	})
+	if err != nil {
+		t.Fatalf("quality grouped debug summary: %v\n%s", err, qualityGroupedOutput)
+	}
+	for _, want := range []string{
+		"group\tby=quality-gate\tkey=schema\tcount=1",
+		"group\tby=quality-gate\tkey=unknown\tcount=1",
+	} {
+		if !strings.Contains(qualityGroupedOutput, want) {
+			t.Fatalf("quality grouped summary missing %q:\n%s", want, qualityGroupedOutput)
 		}
 	}
 	rollupOutput := captureStdout(t, func() {
@@ -2793,6 +2816,15 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	}
 	if len(rollups) != 2 || rollups[0].Key != "unknown" || rollups[0].CatalogFailures != 1 || rollups[1].Key != "warm_instance_available" || rollups[1].Successes != 1 || rollups[1].TotalTokens != 26 || rollups[1].AverageLatencyMS != 546 {
 		t.Fatalf("rollups = %+v", rollups)
+	}
+	qualityRollupOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--rollup-by", "quality-gate"})
+	})
+	if err != nil {
+		t.Fatalf("quality rollup debug summary: %v\n%s", err, qualityRollupOutput)
+	}
+	if !strings.Contains(qualityRollupOutput, "rollup\tby=quality-gate\tkey=schema\tcount=1\tsuccess=1") || !strings.Contains(qualityRollupOutput, "rollup\tby=quality-gate\tkey=unknown\tcount=1\tsuccess=0\tfailure=1") {
+		t.Fatalf("quality rollup output = %s", qualityRollupOutput)
 	}
 
 	sortedJSON := captureStdout(t, func() {
@@ -2830,8 +2862,8 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 	cold := true
 	warm := false
 	rows := []debugSummaryRow{
-		{Model: "model-a", NodeID: "node-a", PresetID: "preset-a", RouteStatus: "warm_instance_available", Startability: "ready", WarmInstances: 1, FailureLayer: "none", ContextCap: 65536, MinContextCap: 32768, ContextAdequate: true, LiveModelChecked: true, LiveModelAvailable: true, LiveModelStatus: "ok", UsageAvailable: true, UsageTotalTokens: 100, ColdLoad: &cold, LoadWallMS: 400, TTFTMS: 30, UpstreamWallMS: 200},
-		{Model: "model-b", NodeID: "node-b", PresetID: "preset-b", RouteStatus: "no_matching_instance", Startability: "operator_action_required", FailureLayer: "consumer_contract", ContextCap: 8192, MinContextCap: 32768, ContextAdequate: false, LiveModelChecked: true, LiveModelStatus: "missing", UsageAvailable: false, ColdLoad: &warm, UpstreamWallMS: 50},
+		{Model: "model-a", NodeID: "node-a", PresetID: "preset-a", ConsumerQualityGate: "schema", RouteStatus: "warm_instance_available", Startability: "ready", WarmInstances: 1, FailureLayer: "none", ContextCap: 65536, MinContextCap: 32768, ContextAdequate: true, LiveModelChecked: true, LiveModelAvailable: true, LiveModelStatus: "ok", UsageAvailable: true, UsageTotalTokens: 100, ColdLoad: &cold, LoadWallMS: 400, TTFTMS: 30, UpstreamWallMS: 200},
+		{Model: "model-b", NodeID: "node-b", PresetID: "preset-b", ConsumerQualityGate: "parser", RouteStatus: "no_matching_instance", Startability: "operator_action_required", FailureLayer: "consumer_contract", ContextCap: 8192, MinContextCap: 32768, ContextAdequate: false, LiveModelChecked: true, LiveModelStatus: "missing", UsageAvailable: false, ColdLoad: &warm, UpstreamWallMS: 50},
 		{Model: "model-c", FailureLayer: "catalog", LiveModelChecked: true, LiveModelStatus: "error"},
 		{Model: "model-d"},
 	}
@@ -2850,6 +2882,9 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 	}
 	if got := filterDebugSummaryRows(append([]debugSummaryRow(nil), rows...), debugSummaryFilter{RouteStatus: "no_matching_instance", Startability: "operator_action_required"}); len(got) != 1 || got[0].Model != "model-b" {
 		t.Fatalf("route availability filter = %+v", got)
+	}
+	if got := filterDebugSummaryRows(append([]debugSummaryRow(nil), rows...), debugSummaryFilter{QualityGate: "parser"}); len(got) != 1 || got[0].Model != "model-b" {
+		t.Fatalf("quality gate filter = %+v", got)
 	}
 
 	latencyRows := append([]debugSummaryRow(nil), rows...)
@@ -2872,7 +2907,7 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 		}
 	}
 
-	for _, groupBy := range []string{"failure-layer", "failure-class", "node", "model", "preset", "route-status", "startability", "context", "live-model", "usage", "cold"} {
+	for _, groupBy := range []string{"failure-layer", "failure-class", "quality-gate", "node", "model", "preset", "route-status", "startability", "context", "live-model", "usage", "cold"} {
 		groups, err := groupDebugSummaryRows(rows, groupBy)
 		if err != nil {
 			t.Fatalf("group %s: %v", groupBy, err)
