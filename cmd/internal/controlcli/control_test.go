@@ -2785,6 +2785,22 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 			t.Fatalf("quality grouped summary missing %q:\n%s", want, qualityGroupedOutput)
 		}
 	}
+	routeKey := "model=strict-json-model,node=owner-node,backend=vllm,preset=tiny"
+	routeKeyMissing := "model=tool-model-large,node=unknown,backend=unknown,preset=unknown"
+	routeContractGroupedOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--group-by", "route"})
+	})
+	if err != nil {
+		t.Fatalf("route contract grouped debug summary: %v\n%s", err, routeContractGroupedOutput)
+	}
+	for _, want := range []string{
+		"group\tby=route\tkey=" + routeKey + "\tcount=1",
+		"group\tby=route\tkey=" + routeKeyMissing + "\tcount=1",
+	} {
+		if !strings.Contains(routeContractGroupedOutput, want) {
+			t.Fatalf("route contract grouped summary missing %q:\n%s", want, routeContractGroupedOutput)
+		}
+	}
 	rollupOutput := captureStdout(t, func() {
 		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--rollup-by", "failure-layer"})
 	})
@@ -2856,6 +2872,15 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	}
 	if len(recommendations) != 2 || recommendations[0].Recommendation != "catalog_stale" || recommendations[1].Recommendation != "tool_call_route_unsuitable" || recommendations[1].QualityGate != "schema" {
 		t.Fatalf("recommendations = %+v", recommendations)
+	}
+	defaultRecommendOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--recommend"})
+	})
+	if err != nil {
+		t.Fatalf("default recommend debug summary: %v\n%s", err, defaultRecommendOutput)
+	}
+	if !strings.Contains(defaultRecommendOutput, "recommendation\tby=route\tkey="+routeKeyMissing+"\trecommendation=catalog_stale") || !strings.Contains(defaultRecommendOutput, "recommendation\tby=route\tkey="+routeKey+"\trecommendation=tool_call_route_unsuitable") {
+		t.Fatalf("default recommend output = %s", defaultRecommendOutput)
 	}
 
 	sortedJSON := captureStdout(t, func() {
@@ -2941,7 +2966,7 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 		}
 	}
 
-	for _, groupBy := range []string{"failure-layer", "failure-class", "quality-gate", "node", "model", "preset", "route-status", "startability", "context", "live-model", "usage", "cold"} {
+	for _, groupBy := range []string{"failure-layer", "failure-class", "quality-gate", "route", "node", "model", "preset", "route-status", "startability", "context", "live-model", "usage", "cold"} {
 		groups, err := groupDebugSummaryRows(rows, groupBy)
 		if err != nil {
 			t.Fatalf("group %s: %v", groupBy, err)

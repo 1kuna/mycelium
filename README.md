@@ -368,10 +368,10 @@ Use filters such as `--failure-layer catalog`, `--node <node-id>`,
 `--startability operator_action_required`, `--usage missing`, or `--cold cold`
 to narrow the rows. Use `--sort latency`, `--sort usage`, or `--sort context`
 for the common optimization views, and `--group-by failure-layer`,
-`--group-by quality-gate`, `--group-by node`, `--group-by model`,
-`--group-by route-status`, `--group-by startability`, or
+`--group-by quality-gate`, `--group-by route`, `--group-by node`,
+`--group-by model`, `--group-by route-status`, `--group-by startability`, or
 `--group-by live-model` for count summaries.
-Use `--rollup-by route-status`, `--rollup-by model`, or
+Use `--rollup-by route`, `--rollup-by route-status`, `--rollup-by model`, or
 `--rollup-by failure-class` when comparing route classes across saved runs.
 Rollups aggregate success/failure/unknown outcome counts, failure layers,
 quality gates, usage availability, total tokens, context adequacy,
@@ -379,8 +379,9 @@ tool/textual-tool shape, JSON/reasoning boundaries, live-catalog availability,
 warm/cold placement, attempt counts, queue-wait samples, latency samples, and
 route-availability instance counts. They still report only sanitized fields
 already present in preflight or debug-bundle artifacts.
-Use `--recommend --recommend-by model` for the first deterministic operator
-decision layer over saved evidence. Recommendations are mechanical classes such
+Use `--recommend` for the first deterministic operator decision layer over
+saved evidence. It defaults to the route-contract grain: model, owner node,
+backend, and preset. Recommendations are mechanical classes such
 as `route_healthy`, `insufficient_evidence`, `catalog_stale`,
 `no_instance_start_owner`, `saturated_queue`, `context_too_small`,
 `tool_call_route_unsuitable`, `final_content_route_unsuitable`,
