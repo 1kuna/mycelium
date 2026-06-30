@@ -2516,6 +2516,115 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	if strings.Contains(jsonOutput, bundleDir) || strings.Contains(jsonOutput, preflightOnlyDir) || strings.Contains(jsonOutput, "rpc-secret") || strings.Contains(jsonOutput, "gateway-secret") {
 		t.Fatalf("summary json leaked path or secret: %s", jsonOutput)
 	}
+
+	filteredOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--failure-layer", "catalog", "--live-model", "missing", "--context", "adequate", "--usage", "missing", "--cold", "unknown"})
+	})
+	if err != nil {
+		t.Fatalf("filtered debug summary: %v\n%s", err, filteredOutput)
+	}
+	if strings.Count(filteredOutput, "evidence\t") != 1 || !strings.Contains(filteredOutput, "failure_class=live_catalog_model_missing") || strings.Contains(filteredOutput, "job=job-a") {
+		t.Fatalf("filtered summary output = %s", filteredOutput)
+	}
+
+	groupedOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--group-by", "failure-layer"})
+	})
+	if err != nil {
+		t.Fatalf("grouped debug summary: %v\n%s", err, groupedOutput)
+	}
+	for _, want := range []string{
+		"group\tby=failure-layer\tkey=catalog\tcount=1",
+		"group\tby=failure-layer\tkey=none\tcount=1",
+	} {
+		if !strings.Contains(groupedOutput, want) {
+			t.Fatalf("grouped summary missing %q:\n%s", want, groupedOutput)
+		}
+	}
+
+	sortedJSON := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--sort", "context", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("sorted debug summary json: %v\n%s", err, sortedJSON)
+	}
+	var sortedRows []debugSummaryRow
+	if err := json.Unmarshal([]byte(sortedJSON), &sortedRows); err != nil {
+		t.Fatalf("decode sorted summary json: %v\n%s", err, sortedJSON)
+	}
+	if len(sortedRows) != 2 || sortedRows[0].Model != "tool-model-large" || sortedRows[0].ContextCap != 32768 {
+		t.Fatalf("sorted rows = %+v", sortedRows)
+	}
+
+	if err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--failure-layer", "provider"}); err == nil || !strings.Contains(err.Error(), "no debug summary rows matched filters") {
+		t.Fatalf("empty filtered summary err = %v", err)
+	}
+	if err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--context", "tiny"}); err == nil || !strings.Contains(err.Error(), "--context") {
+		t.Fatalf("bad context filter err = %v", err)
+	}
+	if err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--sort", "mystery"}); err == nil || !strings.Contains(err.Error(), "--sort") {
+		t.Fatalf("bad sort err = %v", err)
+	}
+	if err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--group-by", "mystery"}); err == nil || !strings.Contains(err.Error(), "--group-by") {
+		t.Fatalf("bad group err = %v", err)
+	}
+}
+
+func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
+	cold := true
+	warm := false
+	rows := []debugSummaryRow{
+		{Model: "model-a", NodeID: "node-a", PresetID: "preset-a", FailureLayer: "none", ContextCap: 65536, MinContextCap: 32768, ContextAdequate: true, LiveModelChecked: true, LiveModelAvailable: true, LiveModelStatus: "ok", UsageAvailable: true, UsageTotalTokens: 100, ColdLoad: &cold, LoadWallMS: 400, TTFTMS: 30, UpstreamWallMS: 200},
+		{Model: "model-b", NodeID: "node-b", PresetID: "preset-b", FailureLayer: "consumer_contract", ContextCap: 8192, MinContextCap: 32768, ContextAdequate: false, LiveModelChecked: true, LiveModelStatus: "missing", UsageAvailable: false, ColdLoad: &warm, UpstreamWallMS: 50},
+		{Model: "model-c", FailureLayer: "catalog", LiveModelChecked: true, LiveModelStatus: "error"},
+		{Model: "model-d"},
+	}
+
+	if got := filterDebugSummaryRows(append([]debugSummaryRow(nil), rows...), debugSummaryFilter{Context: "adequate", LiveModel: "available", Usage: "available", Cold: "cold"}); len(got) != 1 || got[0].Model != "model-a" {
+		t.Fatalf("adequate/available/cold filter = %+v", got)
+	}
+	if got := filterDebugSummaryRows(append([]debugSummaryRow(nil), rows...), debugSummaryFilter{Context: "undersized", LiveModel: "missing", Usage: "missing", Cold: "warm"}); len(got) != 1 || got[0].Model != "model-b" {
+		t.Fatalf("undersized/missing/warm filter = %+v", got)
+	}
+	if got := filterDebugSummaryRows(append([]debugSummaryRow(nil), rows...), debugSummaryFilter{Context: "unknown", LiveModel: "unchecked", Usage: "missing", Cold: "unknown"}); len(got) != 1 || got[0].Model != "model-d" {
+		t.Fatalf("unknown filter = %+v", got)
+	}
+	if got := filterDebugSummaryRows(append([]debugSummaryRow(nil), rows...), debugSummaryFilter{LiveModel: "error"}); len(got) != 1 || got[0].Model != "model-c" {
+		t.Fatalf("live error filter = %+v", got)
+	}
+
+	latencyRows := append([]debugSummaryRow(nil), rows...)
+	if err := sortDebugSummaryRows(latencyRows, "latency"); err != nil {
+		t.Fatalf("sort latency: %v", err)
+	}
+	if latencyRows[0].Model != "model-a" || debugSummaryLatencyMS(latencyRows[0]) != 630 {
+		t.Fatalf("latency sort rows = %+v", latencyRows)
+	}
+	usageRows := append([]debugSummaryRow(nil), rows...)
+	if err := sortDebugSummaryRows(usageRows, "usage"); err != nil {
+		t.Fatalf("sort usage: %v", err)
+	}
+	if usageRows[0].Model != "model-a" {
+		t.Fatalf("usage sort rows = %+v", usageRows)
+	}
+	for _, sortBy := range []string{"input", "failure", "node", "model", "context"} {
+		if err := sortDebugSummaryRows(append([]debugSummaryRow(nil), rows...), sortBy); err != nil {
+			t.Fatalf("sort %s: %v", sortBy, err)
+		}
+	}
+
+	for _, groupBy := range []string{"failure-layer", "node", "model", "preset", "context", "live-model", "usage", "cold"} {
+		groups, err := groupDebugSummaryRows(rows, groupBy)
+		if err != nil {
+			t.Fatalf("group %s: %v", groupBy, err)
+		}
+		if len(groups) == 0 || groups[0].By != groupBy {
+			t.Fatalf("group %s rows = %+v", groupBy, groups)
+		}
+	}
+	if _, err := groupDebugSummaryRows(rows, "bad"); err == nil || !strings.Contains(err.Error(), "--group-by") {
+		t.Fatalf("bad group err = %v", err)
+	}
 }
 
 func TestConsumerEvidenceFromFlags(t *testing.T) {

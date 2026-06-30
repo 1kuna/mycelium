@@ -357,15 +357,60 @@ func runDebugSummary(args []string) error {
 	fs := flag.NewFlagSet("debug summary", flag.ContinueOnError)
 	dir := fs.String("dir", "", "directory containing preflight or debug bundle artifacts")
 	jsonOut := fs.Bool("json", false, "print JSON")
+	failureLayer := fs.String("failure-layer", "", "only include rows with this failure layer")
+	failureClass := fs.String("failure-class", "", "only include rows with this failure class")
+	nodeID := fs.String("node", "", "only include rows served by this node")
+	model := fs.String("model", "", "only include rows for this model")
+	presetID := fs.String("preset", "", "only include rows for this preset")
+	contextFilter := fs.String("context", "any", "context filter: any, adequate, undersized, or unknown")
+	liveModelFilter := fs.String("live-model", "any", "live catalog filter: any, available, missing, error, or unchecked")
+	usageFilter := fs.String("usage", "any", "usage filter: any, available, or missing")
+	coldFilter := fs.String("cold", "any", "cold-load filter: any, cold, warm, or unknown")
+	sortBy := fs.String("sort", "input", "sort rows by input, failure, node, model, context, latency, or usage")
+	groupBy := fs.String("group-by", "", "print grouped counts by failure-layer, node, model, preset, context, live-model, usage, or cold")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *dir == "" {
 		return fmt.Errorf("--dir is required")
 	}
+	filter := debugSummaryFilter{
+		FailureLayer: *failureLayer,
+		FailureClass: *failureClass,
+		NodeID:       *nodeID,
+		Model:        *model,
+		PresetID:     *presetID,
+		Context:      *contextFilter,
+		LiveModel:    *liveModelFilter,
+		Usage:        *usageFilter,
+		Cold:         *coldFilter,
+	}
+	if err := filter.validate(); err != nil {
+		return err
+	}
 	rows, err := buildDebugSummaryRows(*dir)
 	if err != nil {
 		return err
+	}
+	rows = filterDebugSummaryRows(rows, filter)
+	if err := sortDebugSummaryRows(rows, *sortBy); err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("no debug summary rows matched filters")
+	}
+	if *groupBy != "" {
+		groups, err := groupDebugSummaryRows(rows, *groupBy)
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return writePrettyJSON(os.Stdout, groups)
+		}
+		for _, group := range groups {
+			fmt.Fprintf(os.Stdout, "group\tby=%s\tkey=%s\tcount=%d\n", group.By, emptyDash(group.Key), group.Count)
+		}
+		return nil
 	}
 	if *jsonOut {
 		return writePrettyJSON(os.Stdout, rows)
@@ -416,6 +461,248 @@ type debugSummaryRow struct {
 	LiveModelAvailable      bool   `json:"live_model_available,omitempty"`
 	FailureLayer            string `json:"failure_layer,omitempty"`
 	FailureClass            string `json:"failure_class,omitempty"`
+}
+
+type debugSummaryFilter struct {
+	FailureLayer string
+	FailureClass string
+	NodeID       string
+	Model        string
+	PresetID     string
+	Context      string
+	LiveModel    string
+	Usage        string
+	Cold         string
+}
+
+type debugSummaryGroup struct {
+	By    string `json:"by"`
+	Key   string `json:"key"`
+	Count int    `json:"count"`
+}
+
+func (f debugSummaryFilter) validate() error {
+	for name, value := range map[string]string{
+		"--context":    f.Context,
+		"--live-model": f.LiveModel,
+		"--usage":      f.Usage,
+		"--cold":       f.Cold,
+	} {
+		if !validDebugSummaryFilterValue(name, value) {
+			return fmt.Errorf("%s has unsupported value %q", name, value)
+		}
+	}
+	return nil
+}
+
+func validDebugSummaryFilterValue(name, value string) bool {
+	switch name {
+	case "--context":
+		return value == "any" || value == "adequate" || value == "undersized" || value == "unknown"
+	case "--live-model":
+		return value == "any" || value == "available" || value == "missing" || value == "error" || value == "unchecked"
+	case "--usage":
+		return value == "any" || value == "available" || value == "missing"
+	case "--cold":
+		return value == "any" || value == "cold" || value == "warm" || value == "unknown"
+	default:
+		return false
+	}
+}
+
+func filterDebugSummaryRows(rows []debugSummaryRow, filter debugSummaryFilter) []debugSummaryRow {
+	out := rows[:0]
+	for _, row := range rows {
+		if filter.FailureLayer != "" && row.FailureLayer != filter.FailureLayer {
+			continue
+		}
+		if filter.FailureClass != "" && row.FailureClass != filter.FailureClass {
+			continue
+		}
+		if filter.NodeID != "" && row.NodeID != filter.NodeID {
+			continue
+		}
+		if filter.Model != "" && row.Model != filter.Model {
+			continue
+		}
+		if filter.PresetID != "" && row.PresetID != filter.PresetID {
+			continue
+		}
+		if !debugSummaryContextMatches(row, filter.Context) || !debugSummaryLiveModelMatches(row, filter.LiveModel) || !debugSummaryUsageMatches(row, filter.Usage) || !debugSummaryColdMatches(row, filter.Cold) {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+func debugSummaryContextMatches(row debugSummaryRow, value string) bool {
+	switch value {
+	case "", "any":
+		return true
+	case "adequate":
+		return row.MinContextCap > 0 && row.ContextAdequate
+	case "undersized":
+		return row.MinContextCap > 0 && !row.ContextAdequate
+	case "unknown":
+		return row.MinContextCap == 0
+	default:
+		return false
+	}
+}
+
+func debugSummaryLiveModelMatches(row debugSummaryRow, value string) bool {
+	switch value {
+	case "", "any":
+		return true
+	case "available":
+		return row.LiveModelChecked && row.LiveModelAvailable
+	case "missing":
+		return row.LiveModelChecked && row.LiveModelStatus == "missing"
+	case "error":
+		return row.LiveModelChecked && row.LiveModelStatus == "error"
+	case "unchecked":
+		return !row.LiveModelChecked
+	default:
+		return false
+	}
+}
+
+func debugSummaryUsageMatches(row debugSummaryRow, value string) bool {
+	switch value {
+	case "", "any":
+		return true
+	case "available":
+		return row.UsageAvailable
+	case "missing":
+		return !row.UsageAvailable
+	default:
+		return false
+	}
+}
+
+func debugSummaryColdMatches(row debugSummaryRow, value string) bool {
+	switch value {
+	case "", "any":
+		return true
+	case "cold":
+		return row.ColdLoad != nil && *row.ColdLoad
+	case "warm":
+		return row.ColdLoad != nil && !*row.ColdLoad
+	case "unknown":
+		return row.ColdLoad == nil
+	default:
+		return false
+	}
+}
+
+func sortDebugSummaryRows(rows []debugSummaryRow, sortBy string) error {
+	switch sortBy {
+	case "", "input":
+		return nil
+	case "failure":
+		sort.SliceStable(rows, func(i, j int) bool {
+			return strings.Join([]string{rows[i].FailureLayer, rows[i].FailureClass, rows[i].Project, rows[i].Model}, "\x00") < strings.Join([]string{rows[j].FailureLayer, rows[j].FailureClass, rows[j].Project, rows[j].Model}, "\x00")
+		})
+	case "node":
+		sort.SliceStable(rows, func(i, j int) bool {
+			return strings.Join([]string{rows[i].NodeID, rows[i].Model, rows[i].Project}, "\x00") < strings.Join([]string{rows[j].NodeID, rows[j].Model, rows[j].Project}, "\x00")
+		})
+	case "model":
+		sort.SliceStable(rows, func(i, j int) bool {
+			return strings.Join([]string{rows[i].Model, rows[i].Project, rows[i].NodeID}, "\x00") < strings.Join([]string{rows[j].Model, rows[j].Project, rows[j].NodeID}, "\x00")
+		})
+	case "context":
+		sort.SliceStable(rows, func(i, j int) bool {
+			if rows[i].ContextCap != rows[j].ContextCap {
+				return rows[i].ContextCap > rows[j].ContextCap
+			}
+			return rows[i].Model < rows[j].Model
+		})
+	case "latency":
+		sort.SliceStable(rows, func(i, j int) bool {
+			return debugSummaryLatencyMS(rows[i]) > debugSummaryLatencyMS(rows[j])
+		})
+	case "usage":
+		sort.SliceStable(rows, func(i, j int) bool {
+			return rows[i].UsageTotalTokens > rows[j].UsageTotalTokens
+		})
+	default:
+		return fmt.Errorf("--sort has unsupported value %q", sortBy)
+	}
+	return nil
+}
+
+func debugSummaryLatencyMS(row debugSummaryRow) int {
+	return row.UpstreamWallMS + row.TTFTMS + row.LoadWallMS
+}
+
+func groupDebugSummaryRows(rows []debugSummaryRow, groupBy string) ([]debugSummaryGroup, error) {
+	counts := map[string]int{}
+	for _, row := range rows {
+		key, err := debugSummaryGroupKey(row, groupBy)
+		if err != nil {
+			return nil, err
+		}
+		counts[key]++
+	}
+	groups := make([]debugSummaryGroup, 0, len(counts))
+	for key, count := range counts {
+		groups = append(groups, debugSummaryGroup{By: groupBy, Key: key, Count: count})
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].Count != groups[j].Count {
+			return groups[i].Count > groups[j].Count
+		}
+		return groups[i].Key < groups[j].Key
+	})
+	return groups, nil
+}
+
+func debugSummaryGroupKey(row debugSummaryRow, groupBy string) (string, error) {
+	switch groupBy {
+	case "failure-layer":
+		return firstNonEmpty(row.FailureLayer, "none"), nil
+	case "node":
+		return firstNonEmpty(row.NodeID, "unknown"), nil
+	case "model":
+		return firstNonEmpty(row.Model, "unknown"), nil
+	case "preset":
+		return firstNonEmpty(row.PresetID, "unknown"), nil
+	case "context":
+		switch {
+		case row.MinContextCap == 0:
+			return "unknown", nil
+		case row.ContextAdequate:
+			return "adequate", nil
+		default:
+			return "undersized", nil
+		}
+	case "live-model":
+		switch {
+		case !row.LiveModelChecked:
+			return "unchecked", nil
+		case row.LiveModelAvailable:
+			return "available", nil
+		default:
+			return firstNonEmpty(row.LiveModelStatus, "unavailable"), nil
+		}
+	case "usage":
+		if row.UsageAvailable {
+			return "available", nil
+		}
+		return "missing", nil
+	case "cold":
+		if row.ColdLoad == nil {
+			return "unknown", nil
+		}
+		if *row.ColdLoad {
+			return "cold", nil
+		}
+		return "warm", nil
+	default:
+		return "", fmt.Errorf("--group-by has unsupported value %q", groupBy)
+	}
 }
 
 func buildDebugSummaryRows(root string) ([]debugSummaryRow, error) {
