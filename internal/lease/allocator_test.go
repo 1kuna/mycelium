@@ -101,6 +101,46 @@ func TestFitsDistributesExistingClaimsByTheirOwnAcceleratorSet(t *testing.T) {
 	}
 }
 
+func TestFitsDistributesMultiUnitClaimsProportionallyToVRAM(t *testing.T) {
+	node := fixtures.MakeNode(func(n *domain.Node) {
+		n.MaxUtil = 0.90
+		n.Accelerators = []domain.Accelerator{
+			{Index: 0, Vendor: "nvidia", Kind: "large", VRAMTotalMB: 300, VRAMUsedMB: 0},
+			{Index: 1, Vendor: "nvidia", Kind: "small", VRAMTotalMB: 100, VRAMUsedMB: 0},
+		}
+	})
+	allocator := NewAllocator()
+
+	if !allocator.Fits(node, []int{0, 1}, nil, fixtures.MakeClaim(360, 0)) {
+		t.Fatal("360MB should split 270/90 and fit both accelerators")
+	}
+	if allocator.Fits(node, []int{0, 1}, nil, fixtures.MakeClaim(361, 0)) {
+		t.Fatal("361MB should split 271/90 and exceed the larger accelerator")
+	}
+}
+
+func TestFitsDistributesExistingHeterogeneousClaimsByOriginalSet(t *testing.T) {
+	node := fixtures.MakeNode(func(n *domain.Node) {
+		n.MaxUtil = 0.90
+		n.Accelerators = []domain.Accelerator{
+			{Index: 0, Vendor: "nvidia", Kind: "large", VRAMTotalMB: 300, VRAMUsedMB: 0},
+			{Index: 1, Vendor: "nvidia", Kind: "small", VRAMTotalMB: 100, VRAMUsedMB: 0},
+		}
+	})
+	existing := []domain.ModelInstance{
+		fixtures.MakeInstance(fixtures.OnNode(node.ID), fixtures.WithClaim(fixtures.MakeClaim(320, 0))),
+	}
+	existing[0].AcceleratorSet = []int{0, 1}
+	allocator := NewAllocator()
+
+	if !allocator.Fits(node, []int{0}, existing, fixtures.MakeClaim(30, 0)) {
+		t.Fatal("existing 320MB should charge 240MB to accelerator 0, leaving 30MB")
+	}
+	if allocator.Fits(node, []int{0}, existing, fixtures.MakeClaim(31, 0)) {
+		t.Fatal("existing proportional share should leave only 30MB on accelerator 0")
+	}
+}
+
 func TestFitsRejectsInvalidDistributedClaims(t *testing.T) {
 	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
 	if NewAllocator(WithReservedHeadroom(node.ID, domain.Claim{WeightsMB: -1})).Fits(node, []int{0}, nil, fixtures.MakeClaim(1, 0)) {
@@ -202,25 +242,39 @@ func TestSelectedCapacityAndOverlap(t *testing.T) {
 }
 
 func TestSplitClaimBranches(t *testing.T) {
-	if _, ok := splitClaim(-1, []int{0}); ok {
+	capacityByAccelerator := map[int]int{0: 100, 1: 100, 2: 300}
+	if _, ok := splitClaim(-1, []int{0}, capacityByAccelerator); ok {
 		t.Fatal("negative split should fail")
 	}
-	if _, ok := splitClaim(1, nil); ok {
+	if _, ok := splitClaim(1, nil, capacityByAccelerator); ok {
 		t.Fatal("empty split should fail")
 	}
-	if _, ok := splitClaim(1, []int{0, 0}); ok {
+	if _, ok := splitClaim(1, []int{0, 0}, capacityByAccelerator); ok {
 		t.Fatal("duplicate split should fail")
 	}
-	shares, ok := splitClaim(3, []int{1, 0})
+	if _, ok := splitClaim(1, []int{99}, capacityByAccelerator); ok {
+		t.Fatal("missing capacity split should fail")
+	}
+	if _, ok := splitClaim(1, []int{0, 1}, map[int]int{0: maxInt, 1: 1}); ok {
+		t.Fatal("capacity sum overflow should fail")
+	}
+	if _, ok := splitClaim(2, []int{0}, map[int]int{0: maxInt}); ok {
+		t.Fatal("share product overflow should fail")
+	}
+	shares, ok := splitClaim(3, []int{1, 0}, capacityByAccelerator)
 	if !ok || shares[0] != 2 || shares[1] != 1 {
 		t.Fatalf("uneven split = %+v ok=%v", shares, ok)
 	}
-	shares, ok = splitClaim(2, []int{0, 1})
+	shares, ok = splitClaim(2, []int{0, 1}, capacityByAccelerator)
 	if !ok || shares[0] != 1 || shares[1] != 1 {
 		t.Fatalf("even split = %+v ok=%v", shares, ok)
 	}
+	shares, ok = splitClaim(4, []int{0, 2}, capacityByAccelerator)
+	if !ok || shares[0] != 1 || shares[2] != 3 {
+		t.Fatalf("proportional split = %+v ok=%v", shares, ok)
+	}
 	used := map[int]int{0: 0}
-	if !addClaimShares(used, []int{0, 1}, fixtures.MakeClaim(2, 0)) || used[0] != 1 {
+	if !addClaimShares(used, capacityByAccelerator, []int{0, 1}, fixtures.MakeClaim(2, 0)) || used[0] != 1 {
 		t.Fatalf("partial selected add = %+v", used)
 	}
 }

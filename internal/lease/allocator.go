@@ -32,6 +32,7 @@ func (a *Allocator) Fits(node domain.Node, acc []int, existing []domain.ModelIns
 
 	usedByAccelerator := map[int]int{}
 	limitByAccelerator := map[int]int{}
+	capacityByAccelerator := map[int]int{}
 	for _, unit := range units {
 		if unit.VRAMTotalMB <= 0 {
 			return false
@@ -42,20 +43,26 @@ func (a *Allocator) Fits(node domain.Node, acc []int, existing []domain.ModelIns
 		}
 		usedByAccelerator[unit.Index] = unit.VRAMUsedMB
 		limitByAccelerator[unit.Index] = usable
+		capacityByAccelerator[unit.Index] = unit.VRAMTotalMB
+	}
+	for _, unit := range node.Accelerators {
+		if _, ok := capacityByAccelerator[unit.Index]; !ok && unit.VRAMTotalMB > 0 {
+			capacityByAccelerator[unit.Index] = unit.VRAMTotalMB
+		}
 	}
 	for _, reservation := range a.headroomByNode[node.ID] {
-		if !addClaimShares(usedByAccelerator, acc, reservation) {
+		if !addClaimShares(usedByAccelerator, capacityByAccelerator, acc, reservation) {
 			return false
 		}
 	}
 	for _, inst := range existing {
 		if inst.NodeID == node.ID && overlaps(inst.AcceleratorSet, acc) {
-			if !addClaimShares(usedByAccelerator, inst.AcceleratorSet, inst.Claim) {
+			if !addClaimShares(usedByAccelerator, capacityByAccelerator, inst.AcceleratorSet, inst.Claim) {
 				return false
 			}
 		}
 	}
-	if !addClaimShares(usedByAccelerator, acc, want) {
+	if !addClaimShares(usedByAccelerator, capacityByAccelerator, acc, want) {
 		return false
 	}
 	for index, used := range usedByAccelerator {
@@ -84,8 +91,8 @@ func claimTotal(c domain.Claim) int {
 	return c.WeightsMB + c.KVReservedMB
 }
 
-func addClaimShares(used map[int]int, acc []int, claim domain.Claim) bool {
-	shares, ok := splitClaim(claimTotal(claim), acc)
+func addClaimShares(used map[int]int, capacityByAccelerator map[int]int, acc []int, claim domain.Claim) bool {
+	shares, ok := splitClaim(claimTotal(claim), acc, capacityByAccelerator)
 	if !ok {
 		return false
 	}
