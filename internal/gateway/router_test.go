@@ -201,6 +201,7 @@ func TestNormalizeOpenAIReasoningBoundaryMovesLengthFinishedQwenContent(t *testi
 		p.ModelRef = "/models/Qwen3.5-9B"
 		p.Aliases = []string{"qwen3.5-9b"}
 		p.Backend = domain.BackendVLLM
+		p.LaunchArgs = []string{"--reasoning-parser", "qwen3"}
 	})
 	req := translate.IngressRequest{Kind: translate.KindOpenAIChat, Model: "qwen3.5-9b"}
 
@@ -244,6 +245,7 @@ func TestNormalizeOpenAIReasoningBoundaryLeavesCompletedReasoningAlone(t *testin
 		p.ID = "b70-qwen35-9b-vision-vllm"
 		p.ModelRef = "/models/Qwen3.5-9B"
 		p.Backend = domain.BackendVLLM
+		p.LaunchArgs = []string{"--reasoning-parser=qwen3"}
 	})
 	req := translate.IngressRequest{Kind: translate.KindOpenAIChat, Model: "qwen3.5-9b"}
 
@@ -253,6 +255,33 @@ func TestNormalizeOpenAIReasoningBoundaryLeavesCompletedReasoningAlone(t *testin
 	}
 	if string(normalized) != string(body) {
 		t.Fatalf("completed response changed: %s", normalized)
+	}
+}
+
+func TestNormalizeOpenAIReasoningBoundaryRequiresConfiguredReasoningParser(t *testing.T) {
+	body := []byte(`{
+		"id": "chatcmpl-test",
+		"model": "qwen3.5-9b",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "reasoning text"},
+			"finish_reason": "length"
+		}]
+	}`)
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "b70-qwen35-9b-vision-vllm"
+		p.ModelRef = "/models/Qwen3.5-9B"
+		p.Aliases = []string{"qwen3.5-9b"}
+		p.Backend = domain.BackendVLLM
+	})
+	req := translate.IngressRequest{Kind: translate.KindOpenAIChat, Model: "qwen3.5-9b"}
+
+	normalized, err := normalizeOpenAIReasoningBoundary(req, preset, body)
+	if err != nil {
+		t.Fatalf("normalizeOpenAIReasoningBoundary: %v", err)
+	}
+	if string(normalized) != string(body) {
+		t.Fatalf("response changed without configured reasoning parser: %s", normalized)
 	}
 }
 

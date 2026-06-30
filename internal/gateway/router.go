@@ -420,12 +420,12 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 }
 
 func normalizeOpenAIReasoningBoundary(req translate.IngressRequest, preset domain.Preset, body []byte) ([]byte, error) {
-	if req.Kind != translate.KindOpenAIChat || req.Stream || preset.Backend != domain.BackendVLLM || !isQwenReasoningPreset(preset) {
+	if req.Kind != translate.KindOpenAIChat || req.Stream || preset.Backend != domain.BackendVLLM || !hasConfiguredReasoningParser(preset) {
 		return body, nil
 	}
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(body, &root); err != nil {
-		return nil, fmt.Errorf("normalize qwen reasoning boundary: decode response: %w", err)
+		return nil, fmt.Errorf("normalize reasoning boundary: decode response: %w", err)
 	}
 	choicesRaw, ok := root["choices"]
 	if !ok {
@@ -433,7 +433,7 @@ func normalizeOpenAIReasoningBoundary(req translate.IngressRequest, preset domai
 	}
 	var choices []map[string]json.RawMessage
 	if err := json.Unmarshal(choicesRaw, &choices); err != nil {
-		return nil, fmt.Errorf("normalize qwen reasoning boundary: decode choices: %w", err)
+		return nil, fmt.Errorf("normalize reasoning boundary: decode choices: %w", err)
 	}
 	changed := false
 	for i := range choices {
@@ -442,7 +442,7 @@ func normalizeOpenAIReasoningBoundary(req translate.IngressRequest, preset domai
 		}
 		var msg map[string]json.RawMessage
 		if err := json.Unmarshal(choices[i]["message"], &msg); err != nil {
-			return nil, fmt.Errorf("normalize qwen reasoning boundary: decode message: %w", err)
+			return nil, fmt.Errorf("normalize reasoning boundary: decode message: %w", err)
 		}
 		if !jsonNullOrMissing(msg["reasoning"]) || !jsonNullOrMissing(msg["reasoning_content"]) {
 			continue
@@ -451,25 +451,25 @@ func normalizeOpenAIReasoningBoundary(req translate.IngressRequest, preset domai
 		if raw, ok := msg["content"]; !ok || jsonNull(raw) {
 			continue
 		} else if err := json.Unmarshal(raw, &content); err != nil {
-			return nil, fmt.Errorf("normalize qwen reasoning boundary: decode content: %w", err)
+			return nil, fmt.Errorf("normalize reasoning boundary: decode content: %w", err)
 		}
 		if content == "" {
 			continue
 		}
 		reasoning, err := json.Marshal(content)
 		if err != nil {
-			return nil, fmt.Errorf("normalize qwen reasoning boundary: encode reasoning: %w", err)
+			return nil, fmt.Errorf("normalize reasoning boundary: encode reasoning: %w", err)
 		}
 		emptyContent, err := json.Marshal("")
 		if err != nil {
-			return nil, fmt.Errorf("normalize qwen reasoning boundary: encode content: %w", err)
+			return nil, fmt.Errorf("normalize reasoning boundary: encode content: %w", err)
 		}
 		msg["reasoning"] = reasoning
 		msg["reasoning_content"] = reasoning
 		msg["content"] = emptyContent
 		encoded, err := json.Marshal(msg)
 		if err != nil {
-			return nil, fmt.Errorf("normalize qwen reasoning boundary: encode message: %w", err)
+			return nil, fmt.Errorf("normalize reasoning boundary: encode message: %w", err)
 		}
 		choices[i]["message"] = encoded
 		changed = true
@@ -479,19 +479,26 @@ func normalizeOpenAIReasoningBoundary(req translate.IngressRequest, preset domai
 	}
 	encodedChoices, err := json.Marshal(choices)
 	if err != nil {
-		return nil, fmt.Errorf("normalize qwen reasoning boundary: encode choices: %w", err)
+		return nil, fmt.Errorf("normalize reasoning boundary: encode choices: %w", err)
 	}
 	root["choices"] = encodedChoices
 	normalized, err := json.Marshal(root)
 	if err != nil {
-		return nil, fmt.Errorf("normalize qwen reasoning boundary: encode response: %w", err)
+		return nil, fmt.Errorf("normalize reasoning boundary: encode response: %w", err)
 	}
 	return normalized, nil
 }
 
-func isQwenReasoningPreset(preset domain.Preset) bool {
-	haystack := strings.ToLower(preset.ID + " " + preset.ModelRef + " " + strings.Join(preset.Aliases, " "))
-	return strings.Contains(haystack, "qwen3")
+func hasConfiguredReasoningParser(preset domain.Preset) bool {
+	for i, arg := range preset.LaunchArgs {
+		if arg == "--reasoning-parser" && i+1 < len(preset.LaunchArgs) {
+			return strings.TrimSpace(preset.LaunchArgs[i+1]) != ""
+		}
+		if value, ok := strings.CutPrefix(arg, "--reasoning-parser="); ok {
+			return strings.TrimSpace(value) != ""
+		}
+	}
+	return false
 }
 
 func jsonNullOrMissing(raw json.RawMessage) bool {
