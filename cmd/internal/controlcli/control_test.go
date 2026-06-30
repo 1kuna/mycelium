@@ -1892,8 +1892,49 @@ func TestRunGatewayPreflightWritesAvailabilityFailureEvidence(t *testing.T) {
 		t.Fatalf("availability preflight evidence = %+v", evidence)
 	}
 
+	configPath := filepath.Join(t.TempDir(), "peer.json")
+	cfg := operatorPeerConfig{
+		ID:        "gateway-peer",
+		Listen:    "http://gateway.test",
+		StorePath: filepath.Join(t.TempDir(), "control.db"),
+		Projects: []domain.Project{
+			{ID: "tool-canary", DefaultModel: "tool-model-large", ContextCap: 32768},
+		},
+		Presets: []domain.Preset{
+			{
+				ID:              "tool-model-large-vllm",
+				ModelRef:        "tool-model",
+				Aliases:         []string{"tool-model-large"},
+				Backend:         domain.BackendVLLM,
+				ContextLength:   32768,
+				NodeID:          "node-tool",
+				ProviderProfile: "openai-compatible",
+			},
+		},
+	}
+	configData, marshalErr := json.Marshal(cfg)
+	if marshalErr != nil {
+		t.Fatalf("marshal route config: %v", marshalErr)
+	}
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatalf("write route config: %v", err)
+	}
+	store, openErr := storesqlite.Open(cfg.StorePath)
+	if openErr != nil {
+		t.Fatalf("open route store: %v", openErr)
+	}
+	if err := store.SaveNode(context.Background(), domain.Node{ID: "node-tool", Status: domain.NodeReady}); err != nil {
+		t.Fatalf("save route node: %v", err)
+	}
+	if err := store.SaveJob(context.Background(), domain.Job{ID: "job-queued", Model: "tool-model-large", PresetID: "tool-model-large-vllm", Status: domain.JobQueued}); err != nil {
+		t.Fatalf("save route job: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close route store: %v", err)
+	}
+
 	debugOutput := captureStdout(t, func() {
-		err = Run(context.Background(), []string{"debug", "job", "--preflight", filepath.Join(outDir, "preflight.json"), "--consumer-status", "error", "--consumer-error", "no_instance"})
+		err = Run(context.Background(), []string{"debug", "job", "--preflight", filepath.Join(outDir, "preflight.json"), "--config", configPath, "--consumer-status", "error", "--consumer-error", "no_instance"})
 	})
 	if err != nil {
 		t.Fatalf("debug availability preflight: %v\n%s", err, debugOutput)
@@ -1901,6 +1942,7 @@ func TestRunGatewayPreflightWritesAvailabilityFailureEvidence(t *testing.T) {
 	for _, want := range []string{
 		"preflight\tstatus=502\tmodel=tool-model-large\tproject=tool-canary",
 		"preflight-error\tgateway preflight returned 502: job \"job-queued\" queued: no instance available",
+		"route-availability\tmodel=tool-model-large\tproject=tool-canary\tpreset=tool-model-large-vllm\tnode=node-tool\tbackend=vllm\tprofile=openai-compatible\tcontext=32768\tproject_cap=32768\teffective_context=32768\tstatus=no_matching_instance\tstartability=operator_action_required\tnode_known=true\tnode_status=ready\twarm_instances=0\tloading_instances=0\tunfinished_jobs=1",
 		"diagnosis\troute_no_instance_available\tgateway preflight failed before owner telemetry was recoverable",
 		"optimization\tjob=-\tproject=tool-canary\tconsumer_status=error\tconsumer_result=-\tquality_gate=-\tnode=-\tpreset=-\tmodel=tool-model-large\tcontext_cap=32768\tmin_context=32768\tcontext_ok=true\tfinish=-\tcontent_len=0\treasoning_len=0\tjson=false\tstream=false\ttool=true\tusage=0/0/0\tlive_model=false/-\tload_ms=0\tttft_ms=0\tupstream_ms=0\tfailure_layer=availability\tfailure_class=route_no_instance_available",
 	} {

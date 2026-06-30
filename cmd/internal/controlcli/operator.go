@@ -213,8 +213,9 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 	}
 	if preflightOnly {
 		report := jobDebugReport{
-			Preflight: preflight,
-			Consumer:  consumer,
+			Preflight:         preflight,
+			Consumer:          consumer,
+			RouteAvailability: inspectPreflightRouteAvailability(ctx, *configPath, storePath, preflight),
 		}
 		report.Diagnosis = diagnoseJobDebugReport(report)
 		report.Optimization = summarizeJobOptimizationEvidence(report)
@@ -230,6 +231,7 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 	}
 	report.Preflight = preflight
 	report.Consumer = consumer
+	report.RouteAvailability = inspectPreflightRouteAvailability(ctx, *configPath, storePath, preflight)
 	if *ownerTelemetry {
 		token := *rpcToken
 		if token == "" {
@@ -1097,19 +1099,20 @@ func buildStatusReport(ctx context.Context, req statusRequest) (string, error) {
 }
 
 type jobDebugReport struct {
-	Job             domain.Job                    `json:"job"`
-	Preflight       *gatewayPreflightEvidence     `json:"preflight,omitempty"`
-	Consumer        *consumerEvidence             `json:"consumer,omitempty"`
-	OwnerTelemetry  *ownerTelemetryReport         `json:"owner_telemetry,omitempty"`
-	Diagnosis       *jobDebugDiagnosis            `json:"diagnosis,omitempty"`
-	Optimization    *jobOptimizationEvidence      `json:"optimization,omitempty"`
-	Parent          *domain.Job                   `json:"parent,omitempty"`
-	Children        []domain.Job                  `json:"children,omitempty"`
-	Registry        *domain.JobRecord             `json:"registry,omitempty"`
-	RunMetrics      []domain.RunMetric            `json:"run_metrics,omitempty"`
-	SessionTimeline []domain.SessionMetric        `json:"session_timeline,omitempty"`
-	Recommendations []domain.RecommendationRecord `json:"recommendations,omitempty"`
-	Hints           []string                      `json:"hints,omitempty"`
+	Job               domain.Job                    `json:"job"`
+	Preflight         *gatewayPreflightEvidence     `json:"preflight,omitempty"`
+	Consumer          *consumerEvidence             `json:"consumer,omitempty"`
+	RouteAvailability *routeAvailabilityEvidence    `json:"route_availability,omitempty"`
+	OwnerTelemetry    *ownerTelemetryReport         `json:"owner_telemetry,omitempty"`
+	Diagnosis         *jobDebugDiagnosis            `json:"diagnosis,omitempty"`
+	Optimization      *jobOptimizationEvidence      `json:"optimization,omitempty"`
+	Parent            *domain.Job                   `json:"parent,omitempty"`
+	Children          []domain.Job                  `json:"children,omitempty"`
+	Registry          *domain.JobRecord             `json:"registry,omitempty"`
+	RunMetrics        []domain.RunMetric            `json:"run_metrics,omitempty"`
+	SessionTimeline   []domain.SessionMetric        `json:"session_timeline,omitempty"`
+	Recommendations   []domain.RecommendationRecord `json:"recommendations,omitempty"`
+	Hints             []string                      `json:"hints,omitempty"`
 }
 
 func buildJobDebugReport(ctx context.Context, dbPath, jobID string) (jobDebugReport, error) {
@@ -1204,6 +1207,9 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 	}
 	if report.Preflight != nil {
 		printPreflightEvidenceSummary(w, *report.Preflight)
+	}
+	if report.RouteAvailability != nil {
+		printRouteAvailabilityEvidence(w, *report.RouteAvailability)
 	}
 	if report.OwnerTelemetry != nil {
 		printOwnerTelemetrySummary(w, *report.OwnerTelemetry)
@@ -1310,6 +1316,195 @@ type jobDebugDiagnosis struct {
 	Class   string `json:"class"`
 	Summary string `json:"summary"`
 	Next    string `json:"next"`
+}
+
+type routeAvailabilityEvidence struct {
+	Model               string `json:"model,omitempty"`
+	Project             string `json:"project,omitempty"`
+	PresetID            string `json:"preset_id,omitempty"`
+	NodeID              string `json:"node_id,omitempty"`
+	Backend             string `json:"backend,omitempty"`
+	ProviderProfile     string `json:"provider_profile,omitempty"`
+	ContextLength       int    `json:"context_length,omitempty"`
+	ProjectContextCap   int    `json:"project_context_cap,omitempty"`
+	EffectiveContextCap int    `json:"effective_context_cap,omitempty"`
+	RouteStatus         string `json:"route_status"`
+	Startability        string `json:"startability"`
+	NodeKnown           bool   `json:"node_known,omitempty"`
+	NodeStatus          string `json:"node_status,omitempty"`
+	WarmInstances       int    `json:"warm_instances"`
+	LoadingInstances    int    `json:"loading_instances"`
+	UnfinishedJobs      int    `json:"unfinished_jobs"`
+	ConfigError         string `json:"config_error,omitempty"`
+	StoreError          string `json:"store_error,omitempty"`
+	Next                string `json:"next,omitempty"`
+}
+
+func inspectPreflightRouteAvailability(ctx context.Context, configPath, dbPath string, preflight *gatewayPreflightEvidence) *routeAvailabilityEvidence {
+	if preflight == nil {
+		return nil
+	}
+	out := &routeAvailabilityEvidence{
+		Model:        preflight.Model,
+		Project:      preflight.Project,
+		RouteStatus:  "unknown",
+		Startability: "unknown",
+		Next:         "preserve the preflight artifact and inspect gateway route configuration",
+	}
+	loaded, err := loadOperatorConfig(configPath)
+	if err != nil {
+		out.RouteStatus = "config_unavailable"
+		out.Startability = "unknown"
+		out.ConfigError = err.Error()
+		out.Next = "provide the peer config used by the gateway route"
+		return out
+	}
+	cfg := loaded.Config
+	project := projectForPreflight(cfg, preflight)
+	preset, ok := findPresetForModel(cfg.Presets, preflight.Model)
+	if !ok {
+		out.RouteStatus = "preset_missing"
+		out.Startability = "not_startable"
+		out.ProjectContextCap = project.ContextCap
+		out.EffectiveContextCap = project.ContextCap
+		out.Next = "verify the requested model or alias appears in the configured route catalog"
+		return out
+	}
+	route := routeContractForPreset(cfg, project, preset)
+	out.PresetID = route.PresetID
+	out.NodeID = route.NodeID
+	out.Backend = string(route.Backend)
+	out.ProviderProfile = route.ProviderProfile
+	out.ContextLength = route.ContextLength
+	out.ProjectContextCap = route.ProjectContextCap
+	out.EffectiveContextCap = effectiveRouteContextCap(route)
+
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		out.RouteStatus = "store_unavailable"
+		out.Startability = "unknown"
+		out.StoreError = err.Error()
+		out.Next = "provide the control store for the gateway or selected owner"
+		return out
+	}
+	defer store.Close()
+
+	nodes, err := store.ListNodes(ctx)
+	if err != nil {
+		out.RouteStatus = "store_unavailable"
+		out.Startability = "unknown"
+		out.StoreError = err.Error()
+		out.Next = "inspect the control store node table"
+		return out
+	}
+	for _, node := range nodes {
+		if node.ID == preset.NodeID {
+			out.NodeKnown = true
+			out.NodeStatus = string(node.Status)
+			break
+		}
+	}
+	instances, instErr := store.ListInstances(ctx)
+	if instErr != nil {
+		out.StoreError = instErr.Error()
+	} else {
+		for _, inst := range instances {
+			if inst.PresetID != preset.ID || (preset.NodeID != "" && inst.NodeID != preset.NodeID) {
+				continue
+			}
+			if inst.State == domain.InstReady && !inst.Loading {
+				out.WarmInstances++
+			}
+			if inst.Loading || inst.State == domain.InstLoading {
+				out.LoadingInstances++
+			}
+		}
+	}
+	jobs, jobsErr := store.ListJobs(ctx)
+	if jobsErr != nil {
+		if out.StoreError == "" {
+			out.StoreError = jobsErr.Error()
+		}
+	} else {
+		for _, job := range jobs {
+			if !unfinishedJobStatus(job.Status) {
+				continue
+			}
+			if job.Model == preflight.Model || job.PresetID == preset.ID {
+				out.UnfinishedJobs++
+			}
+		}
+	}
+	out.RouteStatus, out.Startability, out.Next = classifyRouteAvailability(*out)
+	return out
+}
+
+func projectForPreflight(cfg operatorPeerConfig, preflight *gatewayPreflightEvidence) domain.Project {
+	if preflight == nil {
+		return domain.Project{}
+	}
+	for _, project := range cfg.Projects {
+		if preflight.Project != "" && project.ID == preflight.Project {
+			return project
+		}
+	}
+	return domain.Project{ID: preflight.Project, DefaultModel: preflight.Model, ContextCap: preflight.Request.ContextCap}
+}
+
+func unfinishedJobStatus(status domain.JobStatus) bool {
+	switch status {
+	case domain.JobQueued, domain.JobPlacing, domain.JobLoading, domain.JobRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+func classifyRouteAvailability(e routeAvailabilityEvidence) (string, string, string) {
+	switch {
+	case e.PresetID == "":
+		return "preset_missing", "not_startable", "verify the requested model or alias appears in the configured route catalog"
+	case e.NodeID != "" && !e.NodeKnown:
+		return "owner_node_missing", "unknown", "sync or repair the owner node registry before retrying this route"
+	case e.NodeStatus != "" && e.NodeStatus != string(domain.NodeReady):
+		return "owner_not_ready", "not_startable", "repair or re-enable the selected owner before retrying this route"
+	case e.WarmInstances > 0:
+		return "warm_instance_available", "ready", "retry a tiny preflight and preserve route headers"
+	case e.LoadingInstances > 0:
+		return "instance_loading", "pending", "wait a bounded interval, then rerun debug job and preflight"
+	case e.StoreError != "":
+		return "store_partial", "unknown", "repair the control store read path before making route-capacity claims"
+	default:
+		return "no_matching_instance", "operator_action_required", "start or repair the selected preset on the owner, then rerun gateway routes and preflight"
+	}
+}
+
+func printRouteAvailabilityEvidence(w io.Writer, evidence routeAvailabilityEvidence) {
+	fmt.Fprintf(w, "route-availability\tmodel=%s\tproject=%s\tpreset=%s\tnode=%s\tbackend=%s\tprofile=%s\tcontext=%d\tproject_cap=%d\teffective_context=%d\tstatus=%s\tstartability=%s\tnode_known=%t\tnode_status=%s\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\tnext=%s\n",
+		emptyDash(evidence.Model),
+		emptyDash(evidence.Project),
+		emptyDash(evidence.PresetID),
+		emptyDash(evidence.NodeID),
+		emptyDash(evidence.Backend),
+		emptyDash(evidence.ProviderProfile),
+		evidence.ContextLength,
+		evidence.ProjectContextCap,
+		evidence.EffectiveContextCap,
+		emptyDash(evidence.RouteStatus),
+		emptyDash(evidence.Startability),
+		evidence.NodeKnown,
+		emptyDash(evidence.NodeStatus),
+		evidence.WarmInstances,
+		evidence.LoadingInstances,
+		evidence.UnfinishedJobs,
+		emptyDash(evidence.Next),
+	)
+	if evidence.ConfigError != "" {
+		fmt.Fprintf(w, "route-availability-error\tconfig=%s\n", evidence.ConfigError)
+	}
+	if evidence.StoreError != "" {
+		fmt.Fprintf(w, "route-availability-error\tstore=%s\n", evidence.StoreError)
+	}
 }
 
 type jobOptimizationEvidence struct {
