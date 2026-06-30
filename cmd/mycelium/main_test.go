@@ -4535,8 +4535,11 @@ func TestComputeAdmissionAllocatorUsesStoreReservations(t *testing.T) {
 		t.Fatalf("computeAdmissionAllocator: %v", err)
 	}
 	node := domain.Node{ID: "node-a", MaxUtil: 1, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 700}}}
-	if allocator.Fits(node, []int{0}, nil, domain.Claim{WeightsMB: 101}) {
-		t.Fatal("store-backed reservations were not enforced")
+	if allocator.Fits(node, []int{0}, nil, domain.Claim{WeightsMB: 95}) {
+		t.Fatal("combined store-backed reservations were not enforced")
+	}
+	if !allocator.Fits(node, []int{0}, nil, domain.Claim{WeightsMB: 90}) {
+		t.Fatal("90MB should fit after combined store-backed reservations")
 	}
 	if !reflect.DeepEqual(pinned, []string{"pinned"}) {
 		t.Fatalf("pinned ids = %+v", pinned)
