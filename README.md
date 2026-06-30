@@ -254,6 +254,11 @@ still writes a redacted artifact with the status, whitelisted route headers
 when present, and a bounded gateway error string. `debug job --preflight`
 classifies common availability failures such as `queued: no instance available`
 as route availability evidence, not as a consumer prompt or validation failure.
+When a local peer config/control store is supplied, the debug report also prints
+`route-availability` with the desired preset, owner node, backend/profile,
+context cap, known warm/loading instances, unfinished jobs, and the next
+operator check. This keeps "configured route exists but cannot place" from
+turning into log archaeology.
 
 Token resolution for `myce gateway preflight` is:
 
@@ -420,8 +425,9 @@ auto tool choice. If the request returns `queued: no instance available`, the
 tool-capable preset may exist but cannot currently be placed. Preserve the
 preflight artifact and inspect `debug job --preflight` first; if it classifies
 `failure_layer=availability` / `failure_class=route_no_instance_available`,
-the next operator check is route catalog, owner instance state, queue state,
-and whether the selected preset can be started or repaired.
+the `route-availability` line is the next handoff: route catalog, owner node
+state, warm/loading instances, queue state, and whether the selected preset can
+be started or repaired.
 
 A route with both vLLM tool headers set is provider-configured for tools, but
 that alone does not prove the model will choose tools automatically. Isolate the
