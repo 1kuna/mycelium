@@ -1850,6 +1850,76 @@ func TestRunGatewayPreflightFailureContracts(t *testing.T) {
 	}
 }
 
+func TestRunGatewayPreflightWritesAvailabilityFailureEvidence(t *testing.T) {
+	outDir := filepath.Join(t.TempDir(), "availability-preflight")
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`job "job-queued" queued: no instance available`))
+	}))
+	var err error
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{
+			"gateway", "preflight",
+			"--url", "http://gateway.test",
+			"--model", "tool-model-large",
+			"--project", "tool-canary",
+			"--gateway-token", "secret",
+			"--tool-name", "echo",
+			"--tool-choice", "function",
+			"--context-cap", "32768",
+			"--min-context-cap", "32768",
+			"--out", outDir,
+		}, client)
+	})
+	if err == nil || !strings.Contains(err.Error(), "queued: no instance available") || !strings.Contains(err.Error(), "preflight.json") {
+		t.Fatalf("availability preflight err = %v\noutput=%s", err, output)
+	}
+	if !strings.Contains(output, "evidence\t"+filepath.Join(outDir, "preflight.json")) {
+		t.Fatalf("availability preflight output = %s", output)
+	}
+	data, readErr := os.ReadFile(filepath.Join(outDir, "preflight.json"))
+	if readErr != nil {
+		t.Fatalf("read availability preflight: %v", readErr)
+	}
+	if strings.Contains(string(data), "secret") {
+		t.Fatalf("availability preflight leaked token: %s", data)
+	}
+	var evidence gatewayPreflightEvidence
+	if err := json.Unmarshal(data, &evidence); err != nil {
+		t.Fatalf("decode availability preflight: %v", err)
+	}
+	if evidence.StatusCode != http.StatusBadGateway || !strings.Contains(evidence.Error, "queued: no instance available") || evidence.Request.ContextCap != 32768 || evidence.Expectations == nil || evidence.Expectations.MinContextCap != 32768 {
+		t.Fatalf("availability preflight evidence = %+v", evidence)
+	}
+
+	debugOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "job", "--preflight", filepath.Join(outDir, "preflight.json"), "--consumer-status", "error", "--consumer-error", "no_instance"})
+	})
+	if err != nil {
+		t.Fatalf("debug availability preflight: %v\n%s", err, debugOutput)
+	}
+	for _, want := range []string{
+		"preflight\tstatus=502\tmodel=tool-model-large\tproject=tool-canary",
+		"preflight-error\tgateway preflight returned 502: job \"job-queued\" queued: no instance available",
+		"diagnosis\troute_no_instance_available\tgateway preflight failed before owner telemetry was recoverable",
+		"optimization\tjob=-\tproject=tool-canary\tconsumer_status=error\tconsumer_result=-\tquality_gate=-\tnode=-\tpreset=-\tmodel=tool-model-large\tcontext_cap=32768\tmin_context=32768\tcontext_ok=true\tfinish=-\tcontent_len=0\treasoning_len=0\tjson=false\tstream=false\ttool=true\tusage=0/0/0\tlive_model=false/-\tload_ms=0\tttft_ms=0\tupstream_ms=0\tfailure_layer=availability\tfailure_class=route_no_instance_available",
+	} {
+		if !strings.Contains(debugOutput, want) {
+			t.Fatalf("availability debug output missing %q:\n%s", want, debugOutput)
+		}
+	}
+
+	summaryOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", outDir, "--failure-layer", "availability"})
+	})
+	if err != nil {
+		t.Fatalf("debug summary availability: %v\n%s", err, summaryOutput)
+	}
+	if !strings.Contains(summaryOutput, "failure_layer=availability\tfailure_class=route_no_instance_available\thttp_status=502") || !strings.Contains(summaryOutput, "gateway_error=gateway preflight returned 502: job \"job-queued\" queued: no instance available") {
+		t.Fatalf("availability summary output = %s", summaryOutput)
+	}
+}
+
 func TestRunBenchmarkFleetSimulateWritesArtifact(t *testing.T) {
 	cfg := controlFleetConfig()
 	configPath := filepath.Join(t.TempDir(), "fleet.json")
