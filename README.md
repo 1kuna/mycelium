@@ -369,6 +369,13 @@ Use filters such as `--failure-layer catalog`, `--node <node-id>`,
 `--group-by failure-layer`, `--group-by node`, `--group-by model`,
 `--group-by route-status`, `--group-by startability`, or
 `--group-by live-model` for count summaries.
+Use `--rollup-by route-status`, `--rollup-by model`, or
+`--rollup-by failure-class` when comparing route classes across saved runs.
+Rollups aggregate success/failure/unknown outcome counts, failure layers,
+usage availability, total tokens, context adequacy, tool/textual-tool shape,
+JSON/reasoning boundaries, live-catalog availability, warm/cold placement,
+latency samples, and route-availability instance counts. They still report only
+sanitized fields already present in preflight or debug-bundle artifacts.
 
 ## Debugging Workflow
 

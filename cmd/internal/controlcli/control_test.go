@@ -2762,6 +2762,38 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 			t.Fatalf("route grouped summary missing %q:\n%s", want, routeGroupedOutput)
 		}
 	}
+	rollupOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--rollup-by", "failure-layer"})
+	})
+	if err != nil {
+		t.Fatalf("rollup debug summary: %v\n%s", err, rollupOutput)
+	}
+	for _, want := range []string{
+		"rollup\tby=failure-layer\tkey=catalog\tcount=1\tsuccess=0\tfailure=1\tunknown=0",
+		"catalog_failures=1",
+		"live_catalog_available=0\tlive_catalog_missing_or_error=1",
+		"rollup\tby=failure-layer\tkey=none\tcount=1\tsuccess=1\tfailure=0\tunknown=0",
+		"usage_available=1\tusage_missing=0\ttotal_tokens=26",
+		"tool_requested=1\ttextual_tool_calls=1\tjson_content=1",
+		"latency_samples=1\tavg_latency_ms=546\tmax_latency_ms=546\twarm_instances=1",
+	} {
+		if !strings.Contains(rollupOutput, want) {
+			t.Fatalf("rollup summary missing %q:\n%s", want, rollupOutput)
+		}
+	}
+	rollupJSON := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--rollup-by", "route-status", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("rollup debug summary json: %v\n%s", err, rollupJSON)
+	}
+	var rollups []debugSummaryRollup
+	if err := json.Unmarshal([]byte(rollupJSON), &rollups); err != nil {
+		t.Fatalf("decode rollup summary json: %v\n%s", err, rollupJSON)
+	}
+	if len(rollups) != 2 || rollups[0].Key != "unknown" || rollups[0].CatalogFailures != 1 || rollups[1].Key != "warm_instance_available" || rollups[1].Successes != 1 || rollups[1].TotalTokens != 26 || rollups[1].AverageLatencyMS != 546 {
+		t.Fatalf("rollups = %+v", rollups)
+	}
 
 	sortedJSON := captureStdout(t, func() {
 		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--sort", "context", "--json"})
@@ -2788,6 +2820,9 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	}
 	if err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--group-by", "mystery"}); err == nil || !strings.Contains(err.Error(), "--group-by") {
 		t.Fatalf("bad group err = %v", err)
+	}
+	if err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--rollup-by", "mystery"}); err == nil || !strings.Contains(err.Error(), "--rollup-by") {
+		t.Fatalf("bad rollup err = %v", err)
 	}
 }
 
@@ -2837,7 +2872,7 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 		}
 	}
 
-	for _, groupBy := range []string{"failure-layer", "node", "model", "preset", "route-status", "startability", "context", "live-model", "usage", "cold"} {
+	for _, groupBy := range []string{"failure-layer", "failure-class", "node", "model", "preset", "route-status", "startability", "context", "live-model", "usage", "cold"} {
 		groups, err := groupDebugSummaryRows(rows, groupBy)
 		if err != nil {
 			t.Fatalf("group %s: %v", groupBy, err)
@@ -2848,6 +2883,23 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 	}
 	if _, err := groupDebugSummaryRows(rows, "bad"); err == nil || !strings.Contains(err.Error(), "--group-by") {
 		t.Fatalf("bad group err = %v", err)
+	}
+
+	rollups, err := rollupDebugSummaryRows(rows, "model")
+	if err != nil {
+		t.Fatalf("rollup model: %v", err)
+	}
+	if len(rollups) != 4 || rollups[0].Key != "model-b" || rollups[0].Failures != 1 || rollups[0].ConsumerContractFailures != 1 || rollups[0].UsageMissing != 1 || rollups[0].ContextUndersized != 1 || rollups[0].WarmLoads != 1 {
+		t.Fatalf("model rollups = %+v", rollups)
+	}
+	if rollups[1].Key != "model-c" || rollups[1].CatalogFailures != 1 || rollups[1].LiveCatalogMissingOrError != 1 {
+		t.Fatalf("catalog rollup = %+v", rollups)
+	}
+	if rollups[2].Key != "model-a" || rollups[2].UnknownOutcomes != 1 || rollups[2].UsageAvailable != 1 || rollups[2].TotalTokens != 100 || rollups[2].ContextAdequate != 1 || rollups[2].ToolRequested != 0 || rollups[2].ColdLoads != 1 || rollups[2].AverageLatencyMS != 630 || rollups[2].MaxLatencyMS != 630 || rollups[2].WarmInstances != 1 {
+		t.Fatalf("success-ish rollup = %+v", rollups)
+	}
+	if _, err := rollupDebugSummaryRows(rows, "bad"); err == nil || !strings.Contains(err.Error(), "--rollup-by") {
+		t.Fatalf("bad rollup err = %v", err)
 	}
 }
 
