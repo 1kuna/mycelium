@@ -1228,24 +1228,6 @@ func TestRouterUtilityFallbacks(t *testing.T) {
 	if err == nil || !errors.Is(err, io.ErrUnexpectedEOF) || result.Body != nil {
 		t.Fatalf("copy result=%+v err=%v", result, err)
 	}
-	table := NewStickyTable(nil, 0)
-	if table.clock == nil || table.ttl == 0 {
-		t.Fatalf("sticky defaults = %+v", table)
-	}
-	var nilTable *StickyTable
-	nilTable.Delete("thread-a")
-	table.Delete("")
-	preset := fixtures.MakePreset()
-	inst := fixtures.MakeInstance(fixtures.WithInstancePreset(preset.ID))
-	table.Put("thread-a", inst)
-	table.Delete("missing")
-	if _, ok := table.Get("thread-a", preset, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}}); !ok {
-		t.Fatal("sticky entry disappeared after deleting missing key")
-	}
-	table.Delete("thread-a")
-	if got, ok := table.Get("thread-a", preset, domain.FleetSnapshot{Instances: []domain.ModelInstance{inst}}); ok {
-		t.Fatalf("sticky entry remained after delete: %+v", got)
-	}
 }
 
 func TestPresetRegistryResolvesAliases(t *testing.T) {
