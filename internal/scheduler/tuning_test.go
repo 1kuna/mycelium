@@ -14,14 +14,28 @@ import (
 
 func TestTuneLaunchForPlacementAddsLlamaArgs(t *testing.T) {
 	node := tuningNode()
-	preset := fixtures.MakePreset(fixtures.WithPresetID("llama"), fixtures.WithLaunchArgs("--flash-attn"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("llama"), fixtures.WithLayerCount(36), fixtures.WithLaunchArgs("--flash-attn"))
 	decision := domain.PlacementDecision{AcceleratorSet: []int{0, 1}}
 
 	got, err := tuneLaunchForPlacement(preset, decision, node)
 	if err != nil {
 		t.Fatalf("tuneLaunchForPlacement: %v", err)
 	}
-	if strings.Join(got.LaunchArgs, " ") != "--flash-attn --n-gpu-layers 999 --tensor-split 100,200" {
+	if strings.Join(got.LaunchArgs, " ") != "--flash-attn --n-gpu-layers 36 --tensor-split 100,200" {
+		t.Fatalf("launch args = %+v", got.LaunchArgs)
+	}
+}
+
+func TestTuneLaunchForPlacementUsesFullOffloadFallbackWhenLayerCountMissing(t *testing.T) {
+	node := tuningNode()
+	preset := fixtures.MakePreset(fixtures.WithPresetID("llama"), fixtures.WithLaunchArgs("--flash-attn"))
+	decision := domain.PlacementDecision{AcceleratorSet: []int{0}}
+
+	got, err := tuneLaunchForPlacement(preset, decision, node)
+	if err != nil {
+		t.Fatalf("tuneLaunchForPlacement: %v", err)
+	}
+	if strings.Join(got.LaunchArgs, " ") != "--flash-attn --n-gpu-layers 999" {
 		t.Fatalf("launch args = %+v", got.LaunchArgs)
 	}
 }
@@ -61,7 +75,7 @@ func TestServicePassesLaunchTuningToColdLoad(t *testing.T) {
 	node := tuningNode()
 	agent := mocks.NewNodeAgent(node)
 	admission := &mocks.AdmissionController{}
-	preset := fixtures.MakePreset(fixtures.WithPresetID("llama"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("llama"), fixtures.WithLayerCount(48))
 	service := &Service{
 		Placer: fakePlacer{decision: domain.PlacementDecision{
 			JobID:          "job-a",
@@ -84,7 +98,7 @@ func TestServicePassesLaunchTuningToColdLoad(t *testing.T) {
 	if _, err := service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	if len(agent.Loaded) != 1 || strings.Join(agent.Loaded[0].Preset.LaunchArgs, " ") != "--n-gpu-layers 999 --tensor-split 100,200" {
+	if len(agent.Loaded) != 1 || strings.Join(agent.Loaded[0].Preset.LaunchArgs, " ") != "--n-gpu-layers 48 --tensor-split 100,200" {
 		t.Fatalf("loaded presets = %+v", agent.Loaded)
 	}
 	if !sameIntSet(agent.Loaded[0].AcceleratorSet, []int{0, 1}) || agent.Loaded[0].Claim != (fixtures.MakeClaim(1, 1)) {

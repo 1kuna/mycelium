@@ -1742,14 +1742,14 @@ func TestCatalogStageHTTPMaterializesPresetAndLocality(t *testing.T) {
 	if response.Locality.ID != "node-a:runtime-hf" || response.Locality.Managed || response.Locality.Reason != "runtime source adopted" {
 		t.Fatalf("runtime locality = %+v", response.Locality)
 	}
-	if response.Preset.ModelRef != model || response.Preset.ArtifactSizeMB != 10 || response.Preset.EstWeightsMB != 10 || response.Preset.KVPerTokenMB != 0.5 || response.Preset.ContextLength != 2048 {
+	if response.Preset.ModelRef != model || response.Preset.ArtifactSizeMB != 10 || response.Preset.EstWeightsMB != 10 || response.Preset.KVPerTokenMB != 0.5 || response.Preset.ContextLength != 2048 || response.Preset.LayerCount != 12 {
 		t.Fatalf("runtime preset did not adopt parsed metadata: %+v", response.Preset)
 	}
 	runtimePreset, err := store.Preset(ctx, "runtime-hf")
 	if err != nil {
 		t.Fatalf("runtime Preset: %v", err)
 	}
-	if runtimePreset.ModelRef != model || runtimePreset.ArtifactSizeMB != 10 || runtimePreset.EstWeightsMB != 10 || runtimePreset.KVPerTokenMB != 0.5 {
+	if runtimePreset.ModelRef != model || runtimePreset.ArtifactSizeMB != 10 || runtimePreset.EstWeightsMB != 10 || runtimePreset.KVPerTokenMB != 0.5 || runtimePreset.LayerCount != 12 {
 		t.Fatalf("stored runtime preset = %+v", runtimePreset)
 	}
 	rec = httptest.NewRecorder()
@@ -5290,7 +5290,7 @@ func writeMetadataParser(t *testing.T) string {
 	path := filepath.Join(t.TempDir(), "gguf-parser")
 	script := `#!/bin/sh
 cat <<'JSON'
-{"format":"gguf","weights_mb":10,"kv_per_token_mb":0.5,"context_length":2048}
+{"format":"gguf","weights_mb":10,"kv_per_token_mb":0.5,"context_length":2048,"layer_count":12}
 JSON
 `
 	if err := os.WriteFile(path, []byte(script), 0755); err != nil {

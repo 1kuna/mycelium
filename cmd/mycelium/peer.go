@@ -730,6 +730,7 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 			staged.ArtifactSizeMB = metadata.WeightsMB
 			staged.EstWeightsMB = metadata.WeightsMB
 			staged.KVPerTokenMB = metadata.KVPerTokenMB
+			staged.LayerCount = metadata.LayerCount
 			if metadata.ContextLength > 0 && staged.ContextLength == 0 {
 				staged.ContextLength = metadata.ContextLength
 			}

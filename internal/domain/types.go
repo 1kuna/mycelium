@@ -57,6 +57,7 @@ type Preset struct {
 	LaunchArgs            []string              `json:"launch_args,omitempty"`
 	ArtifactSizeMB        int                   `json:"artifact_size_mb,omitempty"`
 	ModelFormat           string                `json:"model_format,omitempty"`
+	LayerCount            int                   `json:"layer_count,omitempty"`
 	EstWeightsMB          int                   `json:"est_weights_mb"`
 	KVPerTokenMB          float64               `json:"kv_per_token_mb"`
 	NodeID                string                `json:"node_id,omitempty"`
@@ -73,6 +74,7 @@ type ModelMetadata struct {
 	WeightsMB     int     `json:"weights_mb"`
 	KVPerTokenMB  float64 `json:"kv_per_token_mb"`
 	ContextLength int     `json:"context_length"`
+	LayerCount    int     `json:"layer_count,omitempty"`
 }
 
 type Claim struct {

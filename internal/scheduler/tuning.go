@@ -8,13 +8,15 @@ import (
 	"mycelium/internal/domain"
 )
 
+const llamaCppFullOffloadLayerSentinel = "999"
+
 func tuneLaunchForPlacement(preset domain.Preset, decision domain.PlacementDecision, node domain.Node) (domain.Preset, error) {
 	if preset.Backend != domain.BackendLlamaCpp {
 		return preset, nil
 	}
 	args := append([]string(nil), preset.LaunchArgs...)
 	if len(decision.AcceleratorSet) > 0 && !hasLaunchArg(args, "--n-gpu-layers", "-ngl") {
-		args = append(args, "--n-gpu-layers", "999")
+		args = append(args, "--n-gpu-layers", llamaCppOffloadLayers(preset))
 	}
 	if len(decision.AcceleratorSet) > 1 && !hasLaunchArg(args, "--tensor-split", "-ts") {
 		split, err := tensorSplit(node, decision.AcceleratorSet)
@@ -25,6 +27,13 @@ func tuneLaunchForPlacement(preset domain.Preset, decision domain.PlacementDecis
 	}
 	preset.LaunchArgs = args
 	return preset, nil
+}
+
+func llamaCppOffloadLayers(preset domain.Preset) string {
+	if preset.LayerCount > 0 {
+		return strconv.Itoa(preset.LayerCount)
+	}
+	return llamaCppFullOffloadLayerSentinel
 }
 
 func hasLaunchArg(args []string, names ...string) bool {
