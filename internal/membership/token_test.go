@@ -107,6 +107,49 @@ func TestPersistentTokenManagerLoadsRotatesAndRevokes(t *testing.T) {
 	}
 }
 
+func TestPersistentTokenManagerKeepsMemoryOnRotateSaveFailure(t *testing.T) {
+	ctx := context.Background()
+	store := &tokenStore{}
+	manager, err := NewPersistentTokenManager(ctx, "one", store)
+	if err != nil {
+		t.Fatalf("NewPersistentTokenManager: %v", err)
+	}
+	store.saveErr = errors.New("save")
+
+	if err := manager.Rotate("two"); !errors.Is(err, store.saveErr) {
+		t.Fatalf("Rotate err = %v", err)
+	}
+	if err := manager.Validate("one"); err != nil {
+		t.Fatalf("old token lost after failed rotate: %v", err)
+	}
+	if err := manager.Validate("two"); err == nil {
+		t.Fatal("new token became active after failed rotate")
+	}
+	if hash, secret, err := manager.CurrentSecret(); err != nil || hash != tokenHash("one") || secret != "one" {
+		t.Fatalf("current after failed rotate = hash:%s secret:%q err:%v", hash, secret, err)
+	}
+}
+
+func TestPersistentTokenManagerKeepsMemoryOnRevokeSaveFailure(t *testing.T) {
+	ctx := context.Background()
+	store := &tokenStore{}
+	manager, err := NewPersistentTokenManager(ctx, "one", store)
+	if err != nil {
+		t.Fatalf("NewPersistentTokenManager: %v", err)
+	}
+	store.saveErr = errors.New("save")
+
+	if err := manager.Revoke("one"); !errors.Is(err, store.saveErr) {
+		t.Fatalf("Revoke err = %v", err)
+	}
+	if err := manager.Validate("one"); err != nil {
+		t.Fatalf("token revoked in memory after failed revoke: %v", err)
+	}
+	if hash, secret, err := manager.CurrentSecret(); err != nil || hash != tokenHash("one") || secret != "one" {
+		t.Fatalf("current after failed revoke = hash:%s secret:%q err:%v", hash, secret, err)
+	}
+}
+
 func TestPersistentTokenManagerRevokesLegacyHashOnlyActiveTokens(t *testing.T) {
 	ctx := context.Background()
 	initialHash := tokenHash("one")

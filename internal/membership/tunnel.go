@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -54,13 +55,13 @@ func (t *LANTunnel) Open(ctx context.Context, node domain.Node) (string, error) 
 		t.mu.Unlock()
 		return addr, nil
 	}
-	t.mu.Unlock()
 	factory := t.Listener
 	if factory == nil {
 		factory = netListenerFactory{}
 	}
 	listener, err := factory.Listen(ctx, "tcp", "127.0.0.1:0")
 	if err != nil {
+		t.mu.Unlock()
 		return "", err
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -73,7 +74,6 @@ func (t *LANTunnel) Open(ctx context.Context, node domain.Node) (string, error) 
 	}
 	server := &http.Server{Handler: proxy}
 	entry := &tunnelEntry{target: node.Address, listener: listener, server: server}
-	t.mu.Lock()
 	old := t.known[node.ID]
 	t.known[node.ID] = entry
 	t.mu.Unlock()
@@ -83,7 +83,7 @@ func (t *LANTunnel) Open(ctx context.Context, node domain.Node) (string, error) 
 	go func() {
 		err := server.Serve(listener)
 		if err != nil && err != http.ErrServerClosed && !errors.Is(err, net.ErrClosed) {
-			panic(err)
+			log.Printf("mycelium LAN tunnel for node %q stopped unexpectedly: %v", node.ID, err)
 		}
 	}()
 	return listener.Addr().String(), nil
