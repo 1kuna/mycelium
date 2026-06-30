@@ -372,10 +372,10 @@ func runDebugSummary(args []string) error {
 	usageFilter := fs.String("usage", "any", "usage filter: any, available, or missing")
 	coldFilter := fs.String("cold", "any", "cold-load filter: any, cold, warm, or unknown")
 	sortBy := fs.String("sort", "input", "sort rows by input, failure, node, model, context, latency, or usage")
-	groupBy := fs.String("group-by", "", "print grouped counts by failure-layer, failure-class, quality-gate, node, model, preset, context, route-status, startability, live-model, usage, or cold")
-	rollupBy := fs.String("rollup-by", "", "print optimizer rollups by failure-layer, failure-class, quality-gate, node, model, preset, context, route-status, startability, live-model, usage, or cold")
+	groupBy := fs.String("group-by", "", "print grouped counts by failure-layer, failure-class, quality-gate, route, node, model, preset, context, route-status, startability, live-model, usage, or cold")
+	rollupBy := fs.String("rollup-by", "", "print optimizer rollups by failure-layer, failure-class, quality-gate, route, node, model, preset, context, route-status, startability, live-model, usage, or cold")
 	recommend := fs.Bool("recommend", false, "print deterministic operator recommendations from summary evidence")
-	recommendBy := fs.String("recommend-by", "model", "recommendation grouping: model, node, preset, route-status, startability, failure-layer, failure-class, quality-gate, context, live-model, usage, or cold")
+	recommendBy := fs.String("recommend-by", "route", "recommendation grouping: route, model, node, preset, route-status, startability, failure-layer, failure-class, quality-gate, context, live-model, usage, or cold")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -804,6 +804,8 @@ func debugSummaryGroupKey(row debugSummaryRow, groupBy string) (string, error) {
 		return firstNonEmpty(row.FailureClass, "none"), nil
 	case "quality-gate":
 		return firstNonEmpty(row.ConsumerQualityGate, "unknown"), nil
+	case "route":
+		return debugSummaryRouteKey(row), nil
 	case "node":
 		return firstNonEmpty(row.NodeID, "unknown"), nil
 	case "model":
@@ -848,6 +850,16 @@ func debugSummaryGroupKey(row debugSummaryRow, groupBy string) (string, error) {
 	default:
 		return "", fmt.Errorf("--group-by has unsupported value %q", groupBy)
 	}
+}
+
+func debugSummaryRouteKey(row debugSummaryRow) string {
+	parts := []string{
+		"model=" + firstNonEmpty(row.Model, "unknown"),
+		"node=" + firstNonEmpty(row.NodeID, "unknown"),
+		"backend=" + firstNonEmpty(row.Backend, "unknown"),
+		"preset=" + firstNonEmpty(row.PresetID, "unknown"),
+	}
+	return strings.Join(parts, ",")
 }
 
 func rollupDebugSummaryRows(rows []debugSummaryRow, rollupBy string) ([]debugSummaryRollup, error) {
