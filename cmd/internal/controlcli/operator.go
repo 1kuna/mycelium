@@ -364,6 +364,7 @@ func runDebugSummary(args []string) error {
 	nodeID := fs.String("node", "", "only include rows served by this node")
 	model := fs.String("model", "", "only include rows for this model")
 	presetID := fs.String("preset", "", "only include rows for this preset")
+	qualityGate := fs.String("quality-gate", "", "only include rows with this consumer quality gate")
 	routeStatus := fs.String("route-status", "", "only include rows with this route availability status")
 	startability := fs.String("startability", "", "only include rows with this route startability")
 	contextFilter := fs.String("context", "any", "context filter: any, adequate, undersized, or unknown")
@@ -371,8 +372,8 @@ func runDebugSummary(args []string) error {
 	usageFilter := fs.String("usage", "any", "usage filter: any, available, or missing")
 	coldFilter := fs.String("cold", "any", "cold-load filter: any, cold, warm, or unknown")
 	sortBy := fs.String("sort", "input", "sort rows by input, failure, node, model, context, latency, or usage")
-	groupBy := fs.String("group-by", "", "print grouped counts by failure-layer, failure-class, node, model, preset, context, route-status, startability, live-model, usage, or cold")
-	rollupBy := fs.String("rollup-by", "", "print optimizer rollups by failure-layer, failure-class, node, model, preset, context, route-status, startability, live-model, usage, or cold")
+	groupBy := fs.String("group-by", "", "print grouped counts by failure-layer, failure-class, quality-gate, node, model, preset, context, route-status, startability, live-model, usage, or cold")
+	rollupBy := fs.String("rollup-by", "", "print optimizer rollups by failure-layer, failure-class, quality-gate, node, model, preset, context, route-status, startability, live-model, usage, or cold")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -385,6 +386,7 @@ func runDebugSummary(args []string) error {
 		NodeID:       *nodeID,
 		Model:        *model,
 		PresetID:     *presetID,
+		QualityGate:  *qualityGate,
 		RouteStatus:  *routeStatus,
 		Startability: *startability,
 		Context:      *contextFilter,
@@ -449,6 +451,7 @@ type debugSummaryRow struct {
 	ConsumerItem            string `json:"consumer_item,omitempty"`
 	ConsumerStatus          string `json:"consumer_status,omitempty"`
 	ConsumerResult          string `json:"consumer_result,omitempty"`
+	ConsumerQualityGate     string `json:"consumer_quality_gate,omitempty"`
 	StatusCode              int    `json:"status_code,omitempty"`
 	GatewayError            string `json:"gateway_error,omitempty"`
 	Model                   string `json:"model,omitempty"`
@@ -496,6 +499,7 @@ type debugSummaryFilter struct {
 	NodeID       string
 	Model        string
 	PresetID     string
+	QualityGate  string
 	RouteStatus  string
 	Startability string
 	Context      string
@@ -591,6 +595,9 @@ func filterDebugSummaryRows(rows []debugSummaryRow, filter debugSummaryFilter) [
 			continue
 		}
 		if filter.PresetID != "" && row.PresetID != filter.PresetID {
+			continue
+		}
+		if filter.QualityGate != "" && row.ConsumerQualityGate != filter.QualityGate {
 			continue
 		}
 		if filter.RouteStatus != "" && row.RouteStatus != filter.RouteStatus {
@@ -736,6 +743,8 @@ func debugSummaryGroupKey(row debugSummaryRow, groupBy string) (string, error) {
 		return firstNonEmpty(row.FailureLayer, "none"), nil
 	case "failure-class":
 		return firstNonEmpty(row.FailureClass, "none"), nil
+	case "quality-gate":
+		return firstNonEmpty(row.ConsumerQualityGate, "unknown"), nil
 	case "node":
 		return firstNonEmpty(row.NodeID, "unknown"), nil
 	case "model":
@@ -1063,6 +1072,7 @@ func debugSummaryRowFromOptimization(kind string, evidence jobOptimizationEviden
 	}
 	row.ConsumerStatus = evidence.ConsumerStatus
 	row.ConsumerResult = evidence.ConsumerResult
+	row.ConsumerQualityGate = evidence.ConsumerQualityGate
 	return row
 }
 
@@ -1071,7 +1081,7 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 	if row.ColdLoad != nil {
 		cold = strconv.FormatBool(*row.ColdLoad)
 	}
-	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\troute_status=%s\tstartability=%s\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\thttp_status=%d\tgateway_error=%s\n",
+	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tquality_gate=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\troute_status=%s\tstartability=%s\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\thttp_status=%d\tgateway_error=%s\n",
 		emptyDash(row.Kind),
 		emptyDash(row.JobID),
 		emptyDash(row.Project),
@@ -1079,6 +1089,7 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 		emptyDash(row.ConsumerItem),
 		emptyDash(row.ConsumerStatus),
 		emptyDash(row.ConsumerResult),
+		emptyDash(row.ConsumerQualityGate),
 		emptyDash(row.Model),
 		emptyDash(row.NodeID),
 		emptyDash(row.Backend),

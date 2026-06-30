@@ -363,19 +363,21 @@ telemetry, live-catalog agreement, and failure class. It does not print bearer
 tokens, prompts, completions, or artifact paths.
 Use filters such as `--failure-layer catalog`, `--node <node-id>`,
 `--model <model-or-alias>`, `--context undersized`, `--live-model missing`,
-`--route-status no_matching_instance`, `--startability operator_action_required`,
-`--usage missing`, or `--cold cold` to narrow the rows. Use `--sort latency`,
-`--sort usage`, or `--sort context` for the common optimization views, and
-`--group-by failure-layer`, `--group-by node`, `--group-by model`,
+`--quality-gate <sanitized-gate>`, `--route-status no_matching_instance`,
+`--startability operator_action_required`, `--usage missing`, or `--cold cold`
+to narrow the rows. Use `--sort latency`, `--sort usage`, or `--sort context`
+for the common optimization views, and `--group-by failure-layer`,
+`--group-by quality-gate`, `--group-by node`, `--group-by model`,
 `--group-by route-status`, `--group-by startability`, or
 `--group-by live-model` for count summaries.
 Use `--rollup-by route-status`, `--rollup-by model`, or
 `--rollup-by failure-class` when comparing route classes across saved runs.
 Rollups aggregate success/failure/unknown outcome counts, failure layers,
-usage availability, total tokens, context adequacy, tool/textual-tool shape,
-JSON/reasoning boundaries, live-catalog availability, warm/cold placement,
-latency samples, and route-availability instance counts. They still report only
-sanitized fields already present in preflight or debug-bundle artifacts.
+quality gates, usage availability, total tokens, context adequacy,
+tool/textual-tool shape, JSON/reasoning boundaries, live-catalog availability,
+warm/cold placement, latency samples, and route-availability instance counts.
+They still report only sanitized fields already present in preflight or
+debug-bundle artifacts.
 
 ## Debugging Workflow
 
