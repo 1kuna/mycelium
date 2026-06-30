@@ -459,6 +459,7 @@ type debugSummaryRow struct {
 	Backend                 string `json:"backend,omitempty"`
 	PresetID                string `json:"preset_id,omitempty"`
 	Decision                string `json:"decision,omitempty"`
+	Attempts                int    `json:"attempts,omitempty"`
 	RouteStatus             string `json:"route_status,omitempty"`
 	Startability            string `json:"startability,omitempty"`
 	WarmInstances           int    `json:"warm_instances,omitempty"`
@@ -481,6 +482,7 @@ type debugSummaryRow struct {
 	UsageCompletionTokens   int    `json:"usage_completion_tokens,omitempty"`
 	UsageTotalTokens        int    `json:"usage_total_tokens,omitempty"`
 	ColdLoad                *bool  `json:"cold_load,omitempty"`
+	QueueWaitMS             int    `json:"queue_wait_ms,omitempty"`
 	LoadWallMS              int    `json:"load_wall_ms,omitempty"`
 	TTFTMS                  int    `json:"ttft_ms,omitempty"`
 	UpstreamWallMS          int    `json:"upstream_wall_ms,omitempty"`
@@ -542,6 +544,12 @@ type debugSummaryRollup struct {
 	ColdLoads                 int    `json:"cold_loads"`
 	WarmLoads                 int    `json:"warm_loads"`
 	UnknownColdState          int    `json:"unknown_cold_state"`
+	AttemptSamples            int    `json:"attempt_samples"`
+	TotalAttempts             int    `json:"total_attempts"`
+	MaxAttempts               int    `json:"max_attempts"`
+	QueueWaitSamples          int    `json:"queue_wait_samples"`
+	AverageQueueWaitMS        int    `json:"average_queue_wait_ms"`
+	MaxQueueWaitMS            int    `json:"max_queue_wait_ms"`
 	LatencySamples            int    `json:"latency_samples"`
 	AverageLatencyMS          int    `json:"average_latency_ms"`
 	MaxLatencyMS              int    `json:"max_latency_ms"`
@@ -712,7 +720,7 @@ func sortDebugSummaryRows(rows []debugSummaryRow, sortBy string) error {
 }
 
 func debugSummaryLatencyMS(row debugSummaryRow) int {
-	return row.UpstreamWallMS + row.TTFTMS + row.LoadWallMS
+	return row.QueueWaitMS + row.UpstreamWallMS + row.TTFTMS + row.LoadWallMS
 }
 
 func groupDebugSummaryRows(rows []debugSummaryRow, groupBy string) ([]debugSummaryGroup, error) {
@@ -810,6 +818,9 @@ func rollupDebugSummaryRows(rows []debugSummaryRow, rollupBy string) ([]debugSum
 		if rollup.LatencySamples > 0 {
 			rollup.AverageLatencyMS /= rollup.LatencySamples
 		}
+		if rollup.QueueWaitSamples > 0 {
+			rollup.AverageQueueWaitMS /= rollup.QueueWaitSamples
+		}
 		out = append(out, *rollup)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -890,6 +901,20 @@ func rollupDebugSummaryRow(rollup *debugSummaryRollup, row debugSummaryRow) {
 	default:
 		rollup.WarmLoads++
 	}
+	if row.Attempts > 0 {
+		rollup.AttemptSamples++
+		rollup.TotalAttempts += row.Attempts
+		if row.Attempts > rollup.MaxAttempts {
+			rollup.MaxAttempts = row.Attempts
+		}
+	}
+	if row.QueueWaitMS > 0 {
+		rollup.QueueWaitSamples++
+		rollup.AverageQueueWaitMS += row.QueueWaitMS
+		if row.QueueWaitMS > rollup.MaxQueueWaitMS {
+			rollup.MaxQueueWaitMS = row.QueueWaitMS
+		}
+	}
 	latency := debugSummaryLatencyMS(row)
 	if latency > 0 {
 		rollup.LatencySamples++
@@ -917,7 +942,7 @@ func debugSummaryOutcome(row debugSummaryRow) string {
 }
 
 func printDebugSummaryRollup(w io.Writer, rollup debugSummaryRollup) {
-	fmt.Fprintf(w, "rollup\tby=%s\tkey=%s\tcount=%d\tsuccess=%d\tfailure=%d\tunknown=%d\tavailability_failures=%d\tcatalog_failures=%d\tconsumer_contract_failures=%d\tquality_failures=%d\tprovider_failures=%d\tusage_available=%d\tusage_missing=%d\ttotal_tokens=%d\tcontext_adequate=%d\tcontext_undersized=%d\tcontext_unknown=%d\ttool_requested=%d\ttextual_tool_calls=%d\tjson_content=%d\treasoning_content=%d\towner_metrics=%d\tlive_catalog_available=%d\tlive_catalog_missing_or_error=%d\tcold=%d\twarm=%d\tcold_unknown=%d\tlatency_samples=%d\tavg_latency_ms=%d\tmax_latency_ms=%d\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\n",
+	fmt.Fprintf(w, "rollup\tby=%s\tkey=%s\tcount=%d\tsuccess=%d\tfailure=%d\tunknown=%d\tavailability_failures=%d\tcatalog_failures=%d\tconsumer_contract_failures=%d\tquality_failures=%d\tprovider_failures=%d\tusage_available=%d\tusage_missing=%d\ttotal_tokens=%d\tcontext_adequate=%d\tcontext_undersized=%d\tcontext_unknown=%d\ttool_requested=%d\ttextual_tool_calls=%d\tjson_content=%d\treasoning_content=%d\towner_metrics=%d\tlive_catalog_available=%d\tlive_catalog_missing_or_error=%d\tcold=%d\twarm=%d\tcold_unknown=%d\tattempt_samples=%d\ttotal_attempts=%d\tmax_attempts=%d\tqueue_samples=%d\tavg_queue_ms=%d\tmax_queue_ms=%d\tlatency_samples=%d\tavg_latency_ms=%d\tmax_latency_ms=%d\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\n",
 		rollup.By,
 		emptyDash(rollup.Key),
 		rollup.Count,
@@ -945,6 +970,12 @@ func printDebugSummaryRollup(w io.Writer, rollup debugSummaryRollup) {
 		rollup.ColdLoads,
 		rollup.WarmLoads,
 		rollup.UnknownColdState,
+		rollup.AttemptSamples,
+		rollup.TotalAttempts,
+		rollup.MaxAttempts,
+		rollup.QueueWaitSamples,
+		rollup.AverageQueueWaitMS,
+		rollup.MaxQueueWaitMS,
 		rollup.LatencySamples,
 		rollup.AverageLatencyMS,
 		rollup.MaxLatencyMS,
@@ -1031,6 +1062,7 @@ func debugSummaryRowFromOptimization(kind string, evidence jobOptimizationEviden
 		Backend:                 evidence.Backend,
 		PresetID:                evidence.PresetID,
 		Decision:                evidence.Decision,
+		Attempts:                evidence.Attempts,
 		RouteStatus:             routeAvailabilityStatus(evidence.RouteAvailability),
 		Startability:            routeAvailabilityStartability(evidence.RouteAvailability),
 		WarmInstances:           routeAvailabilityWarmInstances(evidence.RouteAvailability),
@@ -1055,6 +1087,7 @@ func debugSummaryRowFromOptimization(kind string, evidence jobOptimizationEviden
 		UsageCompletionTokens:   evidence.UsageCompletionTokens,
 		UsageTotalTokens:        evidence.UsageTotalTokens,
 		ColdLoad:                evidence.ColdLoad,
+		QueueWaitMS:             evidence.QueueWaitMS,
 		LoadWallMS:              evidence.LoadWallMS,
 		TTFTMS:                  evidence.TTFTMS,
 		UpstreamWallMS:          evidence.UpstreamWallMS,
@@ -1081,7 +1114,7 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 	if row.ColdLoad != nil {
 		cold = strconv.FormatBool(*row.ColdLoad)
 	}
-	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tquality_gate=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\troute_status=%s\tstartability=%s\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\thttp_status=%d\tgateway_error=%s\n",
+	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tquality_gate=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\tattempts=%d\troute_status=%s\tstartability=%s\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tqueue_ms=%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\thttp_status=%d\tgateway_error=%s\n",
 		emptyDash(row.Kind),
 		emptyDash(row.JobID),
 		emptyDash(row.Project),
@@ -1094,6 +1127,7 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 		emptyDash(row.NodeID),
 		emptyDash(row.Backend),
 		emptyDash(row.PresetID),
+		row.Attempts,
 		emptyDash(row.RouteStatus),
 		emptyDash(row.Startability),
 		row.WarmInstances,
@@ -1116,6 +1150,7 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 		row.UsageCompletionTokens,
 		row.UsageTotalTokens,
 		cold,
+		row.QueueWaitMS,
 		row.LoadWallMS,
 		row.TTFTMS,
 		row.UpstreamWallMS,
