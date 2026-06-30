@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"mycelium/internal/domain"
 )
@@ -80,6 +81,61 @@ func TestLANTunnelRejectsBadInputAndClosesMissing(t *testing.T) {
 	}
 }
 
+func TestLANTunnelConcurrentOpenReusesSingleListener(t *testing.T) {
+	listener := newFakeListener("127.0.0.1:6003")
+	factory := &fakeListenerFactory{listeners: []*fakeListener{listener}, delay: 10 * time.Millisecond}
+	tunnel := NewLANTunnel()
+	tunnel.Listener = factory
+	node := domain.Node{ID: "node-a", Address: "198.51.100.2:51846"}
+
+	var wg sync.WaitGroup
+	results := make(chan string, 8)
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			addr, err := tunnel.Open(context.Background(), node)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- addr
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		t.Fatalf("Open err = %v", err)
+	}
+	for addr := range results {
+		if addr != "127.0.0.1:6003" {
+			t.Fatalf("addr = %s", addr)
+		}
+	}
+	if factory.calls != 1 {
+		t.Fatalf("listen calls = %d", factory.calls)
+	}
+	if err := tunnel.Close(context.Background(), node.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestLANTunnelServeErrorDoesNotPanic(t *testing.T) {
+	listener := &errorListener{addr: fakeAddr("127.0.0.1:6004"), err: fmt.Errorf("serve failed"), accepted: make(chan struct{})}
+	tunnel := NewLANTunnel()
+	tunnel.Listener = &singleListenerFactory{listener: listener}
+	if _, err := tunnel.Open(context.Background(), domain.Node{ID: "node-a", Address: "198.51.100.2:51846"}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	select {
+	case <-listener.accepted:
+	case <-time.After(time.Second):
+		t.Fatal("serve did not reach listener accept")
+	}
+}
+
 type errListenerFactory struct {
 	err error
 }
@@ -91,11 +147,17 @@ func (f errListenerFactory) Listen(context.Context, string, string) (net.Listene
 type fakeListenerFactory struct {
 	mu        sync.Mutex
 	listeners []*fakeListener
+	delay     time.Duration
+	calls     int
 }
 
 func (f *fakeListenerFactory) Listen(_ context.Context, _, _ string) (net.Listener, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
+	if f.delay > 0 {
+		time.Sleep(f.delay)
+	}
 	if len(f.listeners) == 0 {
 		return nil, fmt.Errorf("no fake listeners left")
 	}
@@ -143,3 +205,27 @@ type fakeAddr string
 
 func (a fakeAddr) Network() string { return "tcp" }
 func (a fakeAddr) String() string  { return string(a) }
+
+type singleListenerFactory struct {
+	listener net.Listener
+}
+
+func (f *singleListenerFactory) Listen(context.Context, string, string) (net.Listener, error) {
+	return f.listener, nil
+}
+
+type errorListener struct {
+	addr     net.Addr
+	err      error
+	accepted chan struct{}
+	once     sync.Once
+}
+
+func (l *errorListener) Accept() (net.Conn, error) {
+	l.once.Do(func() { close(l.accepted) })
+	return nil, l.err
+}
+
+func (l *errorListener) Close() error { return nil }
+
+func (l *errorListener) Addr() net.Addr { return l.addr }

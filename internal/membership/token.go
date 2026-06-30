@@ -183,20 +183,20 @@ func (m *TokenManager) Rotate(next string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	oldCurrent := m.current
+	if m.store != nil {
+		if oldCurrent != "" && oldCurrent != hash {
+			if err := m.saveRecord(context.Background(), oldCurrent, m.secrets[oldCurrent], true, false); err != nil {
+				return err
+			}
+		}
+		if err := m.saveRecord(context.Background(), hash, next, true, true); err != nil {
+			return err
+		}
+	}
 	m.current = hash
 	m.active[hash] = struct{}{}
 	delete(m.revoked, hash)
 	m.secrets[hash] = next
-	if m.store != nil {
-		if oldCurrent != "" && oldCurrent != hash {
-			if err := m.save(context.Background(), oldCurrent, true, false); err != nil {
-				return err
-			}
-		}
-		if err := m.save(context.Background(), hash, true, true); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -207,16 +207,16 @@ func (m *TokenManager) Revoke(token string) error {
 	hash := tokenHash(token)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.store != nil {
+		if err := m.saveRecord(context.Background(), hash, "", false, false); err != nil {
+			return err
+		}
+	}
 	delete(m.active, hash)
 	m.revoked[hash] = struct{}{}
 	delete(m.secrets, hash)
 	if m.current == hash {
 		m.current = ""
-	}
-	if m.store != nil {
-		if err := m.save(context.Background(), hash, false, false); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -229,6 +229,10 @@ func (m *TokenManager) save(ctx context.Context, hash string, active, current bo
 	if active {
 		secret = m.secrets[hash]
 	}
+	return m.saveRecord(ctx, hash, secret, active, current)
+}
+
+func (m *TokenManager) saveRecord(ctx context.Context, hash, secret string, active, current bool) error {
 	return m.store.SaveJoinToken(ctx, domain.JoinTokenRecord{Hash: hash, Secret: secret, Active: active, Current: current})
 }
 
