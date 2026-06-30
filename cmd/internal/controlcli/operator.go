@@ -1,6 +1,7 @@
 package controlcli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -138,7 +139,7 @@ func runStatus(ctx context.Context, args []string, client *http.Client) error {
 
 func runDebug(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce debug <job|bundle>")
+		return fmt.Errorf("usage: myce debug <job|bundle|summary|select>")
 	}
 	switch args[0] {
 	case "job":
@@ -147,8 +148,10 @@ func runDebug(ctx context.Context, args []string, client *http.Client) error {
 		return runDebugBundle(ctx, args[1:], client)
 	case "summary":
 		return runDebugSummary(args[1:])
+	case "select":
+		return runDebugSelect(args[1:])
 	default:
-		return fmt.Errorf("usage: myce debug <job|bundle|summary>")
+		return fmt.Errorf("usage: myce debug <job|bundle|summary|select>")
 	}
 }
 
@@ -476,6 +479,49 @@ func runDebugSummary(args []string) error {
 	return nil
 }
 
+func runDebugSelect(args []string) error {
+	fs := flag.NewFlagSet("debug select", flag.ContinueOnError)
+	trainingPath := fs.String("training-jsonl", "", "normalized optimizer training JSONL from debug summary")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	minContextCap := fs.Int("min-context-cap", 0, "minimum context cap required by the workload")
+	requireTools := fs.Bool("require-tools", false, "require structured tool-call proof")
+	requireJSON := fs.Bool("require-json", false, "require final JSON proof")
+	requireFinalContent := fs.Bool("require-final-content", false, "require non-empty final content proof")
+	requireUsage := fs.Bool("require-usage", false, "require token usage evidence")
+	requireStreaming := fs.Bool("require-streaming", false, "require streaming proof")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *trainingPath == "" {
+		return fmt.Errorf("--training-jsonl is required")
+	}
+	if *minContextCap < 0 {
+		return fmt.Errorf("--min-context-cap must be non-negative")
+	}
+	rows, err := readDebugSummaryTrainingJSONL(*trainingPath)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("training JSONL contains no rows")
+	}
+	selections := selectDebugTrainingRoutes(rows, debugRouteSelectionRequirements{
+		MinContextCap:       *minContextCap,
+		RequireTools:        *requireTools,
+		RequireJSON:         *requireJSON,
+		RequireFinalContent: *requireFinalContent,
+		RequireUsage:        *requireUsage,
+		RequireStreaming:    *requireStreaming,
+	})
+	if *jsonOut {
+		return writePrettyJSON(os.Stdout, selections)
+	}
+	for _, selection := range selections {
+		printDebugRouteSelection(os.Stdout, selection)
+	}
+	return nil
+}
+
 type debugSummaryRow struct {
 	Kind                    string `json:"kind"`
 	JobID                   string `json:"job_id,omitempty"`
@@ -687,6 +733,62 @@ type debugSummaryTrainingRow struct {
 	RecommendationSeverity   string `json:"recommendation_severity,omitempty"`
 	RecommendationConfidence string `json:"recommendation_confidence,omitempty"`
 	RecommendationNext       string `json:"recommendation_next,omitempty"`
+}
+
+type debugRouteSelectionRequirements struct {
+	MinContextCap       int  `json:"min_context_cap,omitempty"`
+	RequireTools        bool `json:"require_tools,omitempty"`
+	RequireJSON         bool `json:"require_json,omitempty"`
+	RequireFinalContent bool `json:"require_final_content,omitempty"`
+	RequireUsage        bool `json:"require_usage,omitempty"`
+	RequireStreaming    bool `json:"require_streaming,omitempty"`
+}
+
+type debugRouteSelection struct {
+	RouteKey                 string `json:"route_key"`
+	Model                    string `json:"model,omitempty"`
+	NodeID                   string `json:"node_id,omitempty"`
+	Backend                  string `json:"backend,omitempty"`
+	PresetID                 string `json:"preset_id,omitempty"`
+	Decision                 string `json:"decision"`
+	Reason                   string `json:"reason"`
+	Confidence               string `json:"confidence"`
+	Recommendation           string `json:"recommendation,omitempty"`
+	RecommendationSeverity   string `json:"recommendation_severity,omitempty"`
+	RecommendationNext       string `json:"recommendation_next,omitempty"`
+	Count                    int    `json:"count"`
+	Successes                int    `json:"successes"`
+	Failures                 int    `json:"failures"`
+	UnknownOutcomes          int    `json:"unknown_outcomes"`
+	ContextCap               int    `json:"context_cap,omitempty"`
+	MinContextCap            int    `json:"min_context_cap,omitempty"`
+	ContextUndersized        int    `json:"context_undersized,omitempty"`
+	ToolRequested            int    `json:"tool_requested,omitempty"`
+	TextualToolCalls         int    `json:"textual_tool_calls,omitempty"`
+	JSONContent              int    `json:"json_content,omitempty"`
+	FinalContentIssues       int    `json:"final_content_issues,omitempty"`
+	UsageAvailable           int    `json:"usage_available,omitempty"`
+	UsageMissing             int    `json:"usage_missing,omitempty"`
+	StreamingSamples         int    `json:"streaming_samples,omitempty"`
+	OwnerTelemetryAvailable  int    `json:"owner_telemetry_available,omitempty"`
+	AvailabilityFailures     int    `json:"availability_failures,omitempty"`
+	CatalogFailures          int    `json:"catalog_failures,omitempty"`
+	ProviderFailures         int    `json:"provider_failures,omitempty"`
+	QualityFailures          int    `json:"quality_failures,omitempty"`
+	AverageLatencyMS         int    `json:"average_latency_ms,omitempty"`
+	MaxLatencyMS             int    `json:"max_latency_ms,omitempty"`
+	TotalTokens              int    `json:"total_tokens,omitempty"`
+	WarmInstances            int    `json:"warm_instances,omitempty"`
+	LoadingInstances         int    `json:"loading_instances,omitempty"`
+	UnfinishedJobs           int    `json:"unfinished_jobs,omitempty"`
+	DeterministicQualityPass int    `json:"deterministic_quality_pass,omitempty"`
+	DeterministicQualityFail int    `json:"deterministic_quality_fail,omitempty"`
+}
+
+type debugRouteSelectionAggregate struct {
+	debugRouteSelection
+	latencySamples int
+	totalLatencyMS int
 }
 
 func (f debugSummaryFilter) validate() error {
@@ -1446,6 +1548,343 @@ func debugSummaryDeterministicQualityPass(row debugSummaryRow) (bool, bool) {
 	default:
 		return false, false
 	}
+}
+
+func readDebugSummaryTrainingJSONL(path string) ([]debugSummaryTrainingRow, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read training JSONL: %w", err)
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), int(maxControlHTTPBodyBytes))
+	var rows []debugSummaryTrainingRow
+	line := 0
+	for scanner.Scan() {
+		line++
+		text := strings.TrimSpace(scanner.Text())
+		if text == "" {
+			continue
+		}
+		var row debugSummaryTrainingRow
+		if err := json.Unmarshal([]byte(text), &row); err != nil {
+			return nil, fmt.Errorf("decode training JSONL line %d: %w", line, err)
+		}
+		if err := validateDebugSummaryTrainingRow(row, line); err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read training JSONL: %w", err)
+	}
+	return rows, nil
+}
+
+func validateDebugSummaryTrainingRow(row debugSummaryTrainingRow, line int) error {
+	if row.SchemaVersion != "mycelium.debug_training.v1" {
+		return fmt.Errorf("training JSONL line %d has unsupported schema_version %q", line, row.SchemaVersion)
+	}
+	if strings.TrimSpace(row.RouteKey) == "" {
+		return fmt.Errorf("training JSONL line %d missing route_key", line)
+	}
+	if strings.TrimSpace(row.EvidenceKind) == "" {
+		return fmt.Errorf("training JSONL line %d missing evidence_kind", line)
+	}
+	if row.MinContextCap < 0 || row.ContextCap < 0 || row.StatusCode < 0 || row.ContentLength < 0 || row.ReasoningLength < 0 || row.UsageTotalTokens < 0 || row.TotalLatencyMS < 0 {
+		return fmt.Errorf("training JSONL line %d contains negative numeric evidence", line)
+	}
+	return nil
+}
+
+func selectDebugTrainingRoutes(rows []debugSummaryTrainingRow, requirements debugRouteSelectionRequirements) []debugRouteSelection {
+	byRoute := map[string]*debugRouteSelectionAggregate{}
+	for _, row := range rows {
+		agg := byRoute[row.RouteKey]
+		if agg == nil {
+			agg = &debugRouteSelectionAggregate{}
+			agg.RouteKey = row.RouteKey
+			agg.Model = row.Model
+			agg.NodeID = row.NodeID
+			agg.Backend = row.Backend
+			agg.PresetID = row.PresetID
+			agg.MinContextCap = requirements.MinContextCap
+			byRoute[row.RouteKey] = agg
+		}
+		mergeDebugRouteSelectionEvidence(agg, row)
+	}
+	selections := make([]debugRouteSelection, 0, len(byRoute))
+	for _, agg := range byRoute {
+		finalizeDebugRouteSelection(agg, requirements)
+		selections = append(selections, agg.debugRouteSelection)
+	}
+	sort.Slice(selections, func(i, j int) bool {
+		leftRank := debugRouteSelectionRank(selections[i])
+		rightRank := debugRouteSelectionRank(selections[j])
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		if selections[i].Successes != selections[j].Successes {
+			return selections[i].Successes > selections[j].Successes
+		}
+		if selections[i].Failures != selections[j].Failures {
+			return selections[i].Failures < selections[j].Failures
+		}
+		if selections[i].AverageLatencyMS != selections[j].AverageLatencyMS {
+			if selections[i].AverageLatencyMS == 0 {
+				return false
+			}
+			if selections[j].AverageLatencyMS == 0 {
+				return true
+			}
+			return selections[i].AverageLatencyMS < selections[j].AverageLatencyMS
+		}
+		return selections[i].RouteKey < selections[j].RouteKey
+	})
+	selected := false
+	for i := range selections {
+		if selections[i].Decision != "candidate" {
+			continue
+		}
+		if !selected {
+			selections[i].Decision = "selected"
+			selected = true
+		} else {
+			selections[i].Decision = "candidate"
+		}
+	}
+	return selections
+}
+
+func mergeDebugRouteSelectionEvidence(agg *debugRouteSelectionAggregate, row debugSummaryTrainingRow) {
+	agg.Count++
+	if agg.Model == "" {
+		agg.Model = row.Model
+	}
+	if agg.NodeID == "" {
+		agg.NodeID = row.NodeID
+	}
+	if agg.Backend == "" {
+		agg.Backend = row.Backend
+	}
+	if agg.PresetID == "" {
+		agg.PresetID = row.PresetID
+	}
+	if agg.Recommendation == "" {
+		agg.Recommendation = row.Recommendation
+		agg.RecommendationSeverity = row.RecommendationSeverity
+		agg.RecommendationNext = row.RecommendationNext
+	}
+	switch debugTrainingRowOutcome(row) {
+	case "success":
+		agg.Successes++
+	case "failure":
+		agg.Failures++
+	default:
+		agg.UnknownOutcomes++
+	}
+	if row.ContextCap > agg.ContextCap {
+		agg.ContextCap = row.ContextCap
+	}
+	if row.MinContextCap > agg.MinContextCap {
+		agg.MinContextCap = row.MinContextCap
+	}
+	if row.MinContextCap > 0 && !row.ContextAdequate {
+		agg.ContextUndersized++
+	}
+	if row.ToolRequested {
+		agg.ToolRequested++
+	}
+	if row.TextualToolCall {
+		agg.TextualToolCalls++
+	}
+	if row.JSONContent {
+		agg.JSONContent++
+	}
+	if debugTrainingFinalContentIssue(row) {
+		agg.FinalContentIssues++
+	}
+	if row.UsageAvailable {
+		agg.UsageAvailable++
+		agg.TotalTokens += row.UsageTotalTokens
+	} else {
+		agg.UsageMissing++
+	}
+	if row.Streaming {
+		agg.StreamingSamples++
+	}
+	if row.OwnerTelemetryAvailable {
+		agg.OwnerTelemetryAvailable++
+	}
+	switch row.FailureLayer {
+	case "availability":
+		agg.AvailabilityFailures++
+	case "catalog":
+		agg.CatalogFailures++
+	case "provider":
+		agg.ProviderFailures++
+	case "quality":
+		agg.QualityFailures++
+	}
+	if row.TotalLatencyMS > 0 {
+		agg.latencySamples++
+		agg.totalLatencyMS += row.TotalLatencyMS
+		if row.TotalLatencyMS > agg.MaxLatencyMS {
+			agg.MaxLatencyMS = row.TotalLatencyMS
+		}
+	}
+	if row.WarmInstances > agg.WarmInstances {
+		agg.WarmInstances = row.WarmInstances
+	}
+	if row.LoadingInstances > agg.LoadingInstances {
+		agg.LoadingInstances = row.LoadingInstances
+	}
+	if row.UnfinishedJobs > agg.UnfinishedJobs {
+		agg.UnfinishedJobs = row.UnfinishedJobs
+	}
+	if row.DeterministicQualityPass != nil {
+		if *row.DeterministicQualityPass {
+			agg.DeterministicQualityPass++
+		} else {
+			agg.DeterministicQualityFail++
+		}
+	}
+}
+
+func finalizeDebugRouteSelection(agg *debugRouteSelectionAggregate, requirements debugRouteSelectionRequirements) {
+	if agg.latencySamples > 0 {
+		agg.AverageLatencyMS = agg.totalLatencyMS / agg.latencySamples
+	}
+	agg.Decision = "candidate"
+	agg.Reason = "route has successful evidence matching the requested constraints"
+	agg.Confidence = debugRouteSelectionConfidence(*agg)
+	switch {
+	case requirements.MinContextCap > 0 && agg.ContextCap < requirements.MinContextCap:
+		agg.Decision = "refused"
+		agg.Reason = "context cap is below the requested minimum"
+		agg.Confidence = "high"
+	case requirements.RequireTools && agg.ToolRequested == 0:
+		agg.Decision = "insufficient_evidence"
+		agg.Reason = "no saved structured tool-call proof for this route"
+		agg.Confidence = "low"
+	case agg.TextualToolCalls > 0:
+		agg.Decision = "refused"
+		agg.Reason = "saved evidence includes textual tool calls"
+		agg.Confidence = "high"
+	case requirements.RequireJSON && agg.JSONContent == 0:
+		agg.Decision = "insufficient_evidence"
+		agg.Reason = "no saved final JSON proof for this route"
+		agg.Confidence = "low"
+	case requirements.RequireFinalContent && agg.FinalContentIssues > 0:
+		agg.Decision = "refused"
+		agg.Reason = "saved evidence includes final-content boundary failures"
+		agg.Confidence = "high"
+	case requirements.RequireFinalContent && agg.Successes == 0:
+		agg.Decision = "insufficient_evidence"
+		agg.Reason = "no successful final-content proof for this route"
+		agg.Confidence = "low"
+	case requirements.RequireUsage && agg.UsageAvailable == 0:
+		agg.Decision = "insufficient_evidence"
+		agg.Reason = "no saved token usage proof for this route"
+		agg.Confidence = "low"
+	case requirements.RequireStreaming && agg.StreamingSamples == 0:
+		agg.Decision = "insufficient_evidence"
+		agg.Reason = "no saved streaming proof for this route"
+		agg.Confidence = "low"
+	case agg.CatalogFailures > 0:
+		agg.Decision = "refused"
+		agg.Reason = "saved evidence shows a catalog-layer failure"
+		agg.Confidence = "high"
+	case agg.AvailabilityFailures > 0:
+		agg.Decision = "refused"
+		agg.Reason = "saved evidence shows no usable owner instance"
+		agg.Confidence = "high"
+	case agg.ContextUndersized > 0:
+		agg.Decision = "refused"
+		agg.Reason = "saved evidence marks the context contract undersized"
+		agg.Confidence = "high"
+	case agg.FinalContentIssues > 0:
+		agg.Decision = "refused"
+		agg.Reason = "saved evidence includes final-content boundary failures"
+		agg.Confidence = "medium"
+	case agg.ProviderFailures > 0:
+		agg.Decision = "refused"
+		agg.Reason = "saved evidence includes provider failures"
+		agg.Confidence = "high"
+	case agg.QualityFailures > 0 || agg.DeterministicQualityFail > 0:
+		agg.Decision = "refused"
+		agg.Reason = "saved evidence includes deterministic quality-gate failures"
+		agg.Confidence = "high"
+	case agg.Successes == 0:
+		agg.Decision = "insufficient_evidence"
+		agg.Reason = "no successful saved evidence for this route"
+		agg.Confidence = "low"
+	}
+}
+
+func debugTrainingRowOutcome(row debugSummaryTrainingRow) string {
+	if row.FailureLayer != "" && row.FailureLayer != "none" {
+		return "failure"
+	}
+	if row.ConsumerResult == "fail" {
+		return "failure"
+	}
+	if row.StatusCode >= 400 {
+		return "failure"
+	}
+	if row.ConsumerResult == "pass" || row.StatusCode >= 200 && row.StatusCode < 300 && row.FinishReason == "stop" {
+		return "success"
+	}
+	return "unknown"
+}
+
+func debugTrainingFinalContentIssue(row debugSummaryTrainingRow) bool {
+	return row.FinishReason == "length" && row.ContentLength == 0 && row.ReasoningLength > 0
+}
+
+func debugRouteSelectionConfidence(selection debugRouteSelectionAggregate) string {
+	switch {
+	case selection.Successes >= 2 && selection.UsageAvailable > 0:
+		return "high"
+	case selection.Successes > 0:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+func debugRouteSelectionRank(selection debugRouteSelection) int {
+	switch selection.Decision {
+	case "candidate", "selected":
+		return 0
+	case "insufficient_evidence":
+		return 1
+	default:
+		return 2
+	}
+}
+
+func printDebugRouteSelection(w io.Writer, selection debugRouteSelection) {
+	fmt.Fprintf(w, "route-selection\tdecision=%s\tkey=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\trecommendation=%s\tconfidence=%s\tcount=%d\tsuccess=%d\tfailure=%d\tunknown=%d\tcontext_cap=%d\tmin_context=%d\tusage_available=%d\tavg_latency_ms=%d\treason=%s\tnext=%s\n",
+		selection.Decision,
+		emptyDash(selection.RouteKey),
+		emptyDash(selection.Model),
+		emptyDash(selection.NodeID),
+		emptyDash(selection.Backend),
+		emptyDash(selection.PresetID),
+		emptyDash(selection.Recommendation),
+		selection.Confidence,
+		selection.Count,
+		selection.Successes,
+		selection.Failures,
+		selection.UnknownOutcomes,
+		selection.ContextCap,
+		selection.MinContextCap,
+		selection.UsageAvailable,
+		selection.AverageLatencyMS,
+		emptyDash(selection.Reason),
+		emptyDash(selection.RecommendationNext),
+	)
 }
 
 func buildDebugSummaryRows(root string) ([]debugSummaryRow, error) {

@@ -3090,6 +3090,124 @@ func TestDebugSummaryRecommendationContracts(t *testing.T) {
 	}
 }
 
+func TestRunDebugSelectRanksTrainingRows(t *testing.T) {
+	pass := true
+	rows := []debugSummaryTrainingRow{
+		{
+			SchemaVersion:            "mycelium.debug_training.v1",
+			EvidenceKind:             "optimization",
+			RouteKey:                 "model=large,node=node-a,backend=vllm,preset=preset-large",
+			Model:                    "large",
+			NodeID:                   "node-a",
+			Backend:                  "vllm",
+			PresetID:                 "preset-large",
+			ContextCap:               65536,
+			MinContextCap:            32768,
+			ContextAdequate:          true,
+			ToolRequested:            true,
+			JSONContent:              true,
+			UsageAvailable:           true,
+			UsageTotalTokens:         2400,
+			StatusCode:               200,
+			FinishReason:             "stop",
+			ContentLength:            42,
+			TotalLatencyMS:           800,
+			DeterministicQualityPass: &pass,
+			Recommendation:           "route_healthy",
+			RecommendationSeverity:   "ok",
+			RecommendationNext:       "keep collecting evidence",
+		},
+		{
+			SchemaVersion:   "mycelium.debug_training.v1",
+			EvidenceKind:    "preflight",
+			RouteKey:        "model=small,node=node-b,backend=vllm,preset=preset-small",
+			Model:           "small",
+			NodeID:          "node-b",
+			Backend:         "vllm",
+			PresetID:        "preset-small",
+			ContextCap:      8192,
+			MinContextCap:   32768,
+			ContextAdequate: false,
+			Recommendation:  "context_too_small",
+		},
+		{
+			SchemaVersion:   "mycelium.debug_training.v1",
+			EvidenceKind:    "optimization",
+			RouteKey:        "model=tool-text,node=node-c,backend=vllm,preset=preset-tool",
+			Model:           "tool-text",
+			NodeID:          "node-c",
+			Backend:         "vllm",
+			PresetID:        "preset-tool",
+			ContextCap:      65536,
+			MinContextCap:   32768,
+			ContextAdequate: true,
+			ToolRequested:   true,
+			TextualToolCall: true,
+			StatusCode:      200,
+			FinishReason:    "stop",
+			ContentLength:   80,
+			Recommendation:  "tool_call_route_unsuitable",
+		},
+	}
+	path := filepath.Join(t.TempDir(), "training.jsonl")
+	var data strings.Builder
+	for _, row := range rows {
+		encoded, err := json.Marshal(row)
+		if err != nil {
+			t.Fatalf("marshal row: %v", err)
+		}
+		data.Write(encoded)
+		data.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(data.String()), 0o600); err != nil {
+		t.Fatalf("write training JSONL: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		err := Run(context.Background(), []string{"debug", "select", "--training-jsonl", path, "--min-context-cap", "32768", "--require-tools", "--require-json", "--require-final-content", "--require-usage"})
+		if err != nil {
+			t.Fatalf("debug select: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"route-selection\tdecision=selected\tkey=model=large,node=node-a,backend=vllm,preset=preset-large",
+		"recommendation=route_healthy",
+		"route-selection\tdecision=refused\tkey=model=small,node=node-b,backend=vllm,preset=preset-small",
+		"reason=context cap is below the requested minimum",
+		"route-selection\tdecision=refused\tkey=model=tool-text,node=node-c,backend=vllm,preset=preset-tool",
+		"reason=saved evidence includes textual tool calls",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("debug select output missing %q:\n%s", want, output)
+		}
+	}
+
+	jsonOutput := captureStdout(t, func() {
+		err := Run(context.Background(), []string{"debug", "select", "--training-jsonl", path, "--json", "--min-context-cap", "32768", "--require-tools"})
+		if err != nil {
+			t.Fatalf("debug select json: %v", err)
+		}
+	})
+	var selections []debugRouteSelection
+	if err := json.Unmarshal([]byte(jsonOutput), &selections); err != nil {
+		t.Fatalf("decode select JSON: %v\n%s", err, jsonOutput)
+	}
+	if len(selections) != 3 || selections[0].Decision != "selected" || selections[0].RouteKey != rows[0].RouteKey || selections[1].Decision != "refused" || selections[2].Decision != "refused" {
+		t.Fatalf("selections = %+v", selections)
+	}
+
+	badPath := filepath.Join(t.TempDir(), "bad.jsonl")
+	if err := os.WriteFile(badPath, []byte(`{"schema_version":"wrong","route_key":"route","evidence_kind":"optimization"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write bad JSONL: %v", err)
+	}
+	if err := Run(context.Background(), []string{"debug", "select", "--training-jsonl", badPath}); err == nil || !strings.Contains(err.Error(), "schema_version") {
+		t.Fatalf("bad schema err = %v", err)
+	}
+	if err := Run(context.Background(), []string{"debug", "select"}); err == nil || !strings.Contains(err.Error(), "--training-jsonl") {
+		t.Fatalf("missing training err = %v", err)
+	}
+}
+
 func TestConsumerEvidenceFromFlags(t *testing.T) {
 	evidence, err := consumerEvidenceFromFlags(" run ", " item ", "TIMEOUT", 42, " deadline ", "FAIL", " schema ")
 	if err != nil {
