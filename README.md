@@ -401,6 +401,12 @@ selection dry run over that JSONL. Add workload gates such as
 selector ranks route contracts as `selected`, `candidate`,
 `insufficient_evidence`, or `refused` with evidence counts and refusal reasons.
 It does not mutate live routes or optimizer policy.
+Use `myce debug verify-preflight --preflight <preflight.json>` to re-check a
+saved preflight artifact offline. The verifier applies the artifact's recorded
+expectation gates and can add stricter report-only gates for live-catalog proof,
+context cap, JSON content, structured tool calls, textual tool-call rejection,
+finish reason, content length, reasoning length, and prompt-token evidence. It
+prints pass/fail reasons without reading tokens, prompts, or completions.
 
 ## Debugging Workflow
 

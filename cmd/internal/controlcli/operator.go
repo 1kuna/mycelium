@@ -139,7 +139,7 @@ func runStatus(ctx context.Context, args []string, client *http.Client) error {
 
 func runDebug(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce debug <job|bundle|summary|select>")
+		return fmt.Errorf("usage: myce debug <job|bundle|summary|select|verify-preflight>")
 	}
 	switch args[0] {
 	case "job":
@@ -150,8 +150,10 @@ func runDebug(ctx context.Context, args []string, client *http.Client) error {
 		return runDebugSummary(args[1:])
 	case "select":
 		return runDebugSelect(args[1:])
+	case "verify-preflight":
+		return runDebugVerifyPreflight(args[1:])
 	default:
-		return fmt.Errorf("usage: myce debug <job|bundle|summary|select>")
+		return fmt.Errorf("usage: myce debug <job|bundle|summary|select|verify-preflight>")
 	}
 }
 
@@ -522,6 +524,67 @@ func runDebugSelect(args []string) error {
 	return nil
 }
 
+func runDebugVerifyPreflight(args []string) error {
+	fs := flag.NewFlagSet("debug verify-preflight", flag.ContinueOnError)
+	preflightPath := fs.String("preflight", "", "redacted gateway preflight evidence JSON")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	expectNode := fs.String("expect-node", "", "fail unless X-Myc-Node matches this node")
+	expectFinishReason := fs.String("expect-finish-reason", "", "fail unless finish_reason matches")
+	requireJSON := fs.Bool("require-json", false, "fail unless final content was valid JSON")
+	requireToolCall := fs.Bool("require-tool-call", false, "fail unless a structured OpenAI tool call was present")
+	rejectTextualToolCall := fs.Bool("reject-textual-tool-call", false, "fail if final content contained a textual <tool_call> block")
+	requireLiveModel := fs.Bool("require-live-model", false, "fail unless the artifact contains a successful live catalog check")
+	minPromptTokens := fs.Int("min-prompt-tokens", 0, "fail unless usage prompt_tokens meets this value")
+	minContextCap := fs.Int("min-context-cap", 0, "fail unless recorded context cap meets this value")
+	minContentLength := fs.Int("min-content-length", 0, "fail unless final content length meets this value")
+	maxReasoningLength := fs.Int("max-reasoning-length", -1, "fail unless reasoning length is at most this value")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *preflightPath == "" {
+		return fmt.Errorf("--preflight is required")
+	}
+	if *minPromptTokens < 0 || *minContextCap < 0 || *minContentLength < 0 || *maxReasoningLength < -1 {
+		return fmt.Errorf("preflight verification thresholds must be non-negative")
+	}
+	evidence, err := readGatewayPreflightEvidence(*preflightPath)
+	if err != nil {
+		return err
+	}
+	extra := gatewayPreflightExpectationEvidence{
+		ExpectNode:            strings.TrimSpace(*expectNode),
+		RequireJSON:           *requireJSON,
+		RequireToolCall:       *requireToolCall,
+		RejectTextualToolCall: *rejectTextualToolCall,
+		RequireLiveModel:      *requireLiveModel,
+		MinPromptTokens:       *minPromptTokens,
+		MinContextCap:         *minContextCap,
+		ExpectFinishReason:    strings.TrimSpace(*expectFinishReason),
+		MinContentLength:      *minContentLength,
+	}
+	if *maxReasoningLength >= 0 {
+		extra.MaxReasoningLength = maxReasoningLength
+	}
+	verification, err := verifyGatewayPreflightEvidence(evidence, extra)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		if err := writePrettyJSON(os.Stdout, verification); err != nil {
+			return err
+		}
+		if !verification.Passed {
+			return fmt.Errorf("preflight verification failed: %s", strings.Join(verification.Failures, "; "))
+		}
+		return nil
+	}
+	printGatewayPreflightVerification(os.Stdout, verification)
+	if !verification.Passed {
+		return fmt.Errorf("preflight verification failed: %s", strings.Join(verification.Failures, "; "))
+	}
+	return nil
+}
+
 type debugSummaryRow struct {
 	Kind                    string `json:"kind"`
 	JobID                   string `json:"job_id,omitempty"`
@@ -789,6 +852,34 @@ type debugRouteSelectionAggregate struct {
 	debugRouteSelection
 	latencySamples int
 	totalLatencyMS int
+}
+
+type gatewayPreflightVerification struct {
+	Result                 string                               `json:"result"`
+	Passed                 bool                                 `json:"passed"`
+	Failures               []string                             `json:"failures,omitempty"`
+	Model                  string                               `json:"model,omitempty"`
+	Project                string                               `json:"project,omitempty"`
+	JobID                  string                               `json:"job_id,omitempty"`
+	StatusCode             int                                  `json:"status_code,omitempty"`
+	Streaming              bool                                 `json:"streaming"`
+	StreamDone             bool                                 `json:"stream_done,omitempty"`
+	FinishReason           string                               `json:"finish_reason,omitempty"`
+	ContentLength          int                                  `json:"content_length"`
+	ReasoningLength        int                                  `json:"reasoning_length"`
+	JSONContent            bool                                 `json:"json_content"`
+	ToolCallCount          int                                  `json:"tool_call_count"`
+	TextualToolCall        bool                                 `json:"textual_tool_call"`
+	UsageAvailable         bool                                 `json:"usage_available"`
+	UsagePromptTokens      int                                  `json:"usage_prompt_tokens,omitempty"`
+	UsageTotalTokens       int                                  `json:"usage_total_tokens,omitempty"`
+	ContextCap             int                                  `json:"context_cap,omitempty"`
+	LiveModelChecked       bool                                 `json:"live_model_checked,omitempty"`
+	LiveModelStatus        string                               `json:"live_model_status,omitempty"`
+	LiveModelAvailable     bool                                 `json:"live_model_available,omitempty"`
+	Expectations           gatewayPreflightExpectationEvidence  `json:"expectations"`
+	RecordedExpectations   *gatewayPreflightExpectationEvidence `json:"recorded_expectations,omitempty"`
+	AdditionalExpectations *gatewayPreflightExpectationEvidence `json:"additional_expectations,omitempty"`
 }
 
 func (f debugSummaryFilter) validate() error {
@@ -1885,6 +1976,178 @@ func printDebugRouteSelection(w io.Writer, selection debugRouteSelection) {
 		emptyDash(selection.Reason),
 		emptyDash(selection.RecommendationNext),
 	)
+}
+
+func verifyGatewayPreflightEvidence(evidence gatewayPreflightEvidence, extra gatewayPreflightExpectationEvidence) (gatewayPreflightVerification, error) {
+	expectations, additional, err := mergeGatewayPreflightExpectations(evidence.Expectations, extra)
+	if err != nil {
+		return gatewayPreflightVerification{}, err
+	}
+	verification := gatewayPreflightVerification{
+		Model:                  evidence.Model,
+		Project:                evidence.Project,
+		JobID:                  evidence.Headers["X-Myc-Job"],
+		StatusCode:             evidence.StatusCode,
+		Streaming:              evidence.Streaming,
+		StreamDone:             evidence.StreamDone,
+		FinishReason:           evidence.FinishReason,
+		ContentLength:          evidence.ContentLength,
+		ReasoningLength:        evidence.ReasoningLength,
+		JSONContent:            evidence.JSONContent,
+		ToolCallCount:          evidence.ToolCallCount,
+		TextualToolCall:        evidence.TextualToolCall,
+		UsageAvailable:         evidence.UsageAvailable,
+		UsagePromptTokens:      evidence.Usage.PromptTokens,
+		UsageTotalTokens:       evidence.Usage.TotalTokens,
+		ContextCap:             evidence.Request.ContextCap,
+		Expectations:           expectations,
+		RecordedExpectations:   evidence.Expectations,
+		AdditionalExpectations: additional,
+	}
+	if evidence.LiveModel != nil {
+		verification.LiveModelChecked = evidence.LiveModel.Checked
+		verification.LiveModelStatus = evidence.LiveModel.Status
+		verification.LiveModelAvailable = evidence.LiveModel.ModelAvailable
+	}
+	verification.Failures = gatewayPreflightVerificationFailures(evidence, expectations)
+	verification.Passed = len(verification.Failures) == 0
+	if verification.Passed {
+		verification.Result = "pass"
+	} else {
+		verification.Result = "fail"
+	}
+	return verification, nil
+}
+
+func mergeGatewayPreflightExpectations(recorded *gatewayPreflightExpectationEvidence, extra gatewayPreflightExpectationEvidence) (gatewayPreflightExpectationEvidence, *gatewayPreflightExpectationEvidence, error) {
+	var merged gatewayPreflightExpectationEvidence
+	if recorded != nil {
+		merged = *recorded
+	}
+	if extra.ExpectNode != "" {
+		if merged.ExpectNode != "" && merged.ExpectNode != extra.ExpectNode {
+			return gatewayPreflightExpectationEvidence{}, nil, fmt.Errorf("--expect-node conflicts with recorded expectation")
+		}
+		merged.ExpectNode = extra.ExpectNode
+	}
+	if extra.ExpectFinishReason != "" {
+		if merged.ExpectFinishReason != "" && merged.ExpectFinishReason != extra.ExpectFinishReason {
+			return gatewayPreflightExpectationEvidence{}, nil, fmt.Errorf("--expect-finish-reason conflicts with recorded expectation")
+		}
+		merged.ExpectFinishReason = extra.ExpectFinishReason
+	}
+	merged.RequireJSON = merged.RequireJSON || extra.RequireJSON
+	merged.RequireToolCall = merged.RequireToolCall || extra.RequireToolCall
+	merged.RejectTextualToolCall = merged.RejectTextualToolCall || extra.RejectTextualToolCall
+	merged.RequireLiveModel = merged.RequireLiveModel || extra.RequireLiveModel
+	if extra.MinPromptTokens > merged.MinPromptTokens {
+		merged.MinPromptTokens = extra.MinPromptTokens
+	}
+	if extra.MinContextCap > merged.MinContextCap {
+		merged.MinContextCap = extra.MinContextCap
+	}
+	if extra.MinContentLength > merged.MinContentLength {
+		merged.MinContentLength = extra.MinContentLength
+	}
+	if extra.MaxReasoningLength != nil {
+		if merged.MaxReasoningLength == nil || *extra.MaxReasoningLength < *merged.MaxReasoningLength {
+			value := *extra.MaxReasoningLength
+			merged.MaxReasoningLength = &value
+		}
+	}
+	if isEmptyGatewayPreflightExpectation(extra) {
+		return merged, nil, nil
+	}
+	return merged, &extra, nil
+}
+
+func isEmptyGatewayPreflightExpectation(expectation gatewayPreflightExpectationEvidence) bool {
+	return expectation.ExpectNode == "" &&
+		!expectation.RequireJSON &&
+		!expectation.RequireToolCall &&
+		!expectation.RejectTextualToolCall &&
+		!expectation.RequireLiveModel &&
+		expectation.MinPromptTokens == 0 &&
+		expectation.MinContextCap == 0 &&
+		expectation.ExpectFinishReason == "" &&
+		expectation.MinContentLength == 0 &&
+		expectation.MaxReasoningLength == nil
+}
+
+func gatewayPreflightVerificationFailures(evidence gatewayPreflightEvidence, expectations gatewayPreflightExpectationEvidence) []string {
+	var failures []string
+	if evidence.StatusCode < 200 || evidence.StatusCode >= 300 {
+		failures = append(failures, fmt.Sprintf("expected HTTP 2xx got %d", evidence.StatusCode))
+	}
+	if expectations.ExpectNode != "" {
+		if got := evidence.Headers["X-Myc-Node"]; got != expectations.ExpectNode {
+			failures = append(failures, fmt.Sprintf("expected X-Myc-Node=%s got %s", expectations.ExpectNode, emptyDash(got)))
+		}
+	}
+	if evidence.Streaming && !evidence.StreamDone {
+		failures = append(failures, "expected terminal streaming [DONE] event")
+	}
+	if expectations.ExpectFinishReason != "" && evidence.FinishReason != expectations.ExpectFinishReason {
+		failures = append(failures, fmt.Sprintf("expected finish_reason=%s got %s", expectations.ExpectFinishReason, emptyDash(evidence.FinishReason)))
+	}
+	if expectations.RequireJSON && !evidence.JSONContent {
+		failures = append(failures, "expected valid JSON final content")
+	}
+	if expectations.MinContentLength > 0 && evidence.ContentLength < expectations.MinContentLength {
+		failures = append(failures, fmt.Sprintf("expected content length >= %d got %d", expectations.MinContentLength, evidence.ContentLength))
+	}
+	if expectations.MaxReasoningLength != nil && evidence.ReasoningLength > *expectations.MaxReasoningLength {
+		failures = append(failures, fmt.Sprintf("expected reasoning length <= %d got %d", *expectations.MaxReasoningLength, evidence.ReasoningLength))
+	}
+	if expectations.RequireToolCall && evidence.ToolCallCount == 0 {
+		failures = append(failures, "expected at least one structured tool call")
+	}
+	if expectations.RejectTextualToolCall && evidence.TextualToolCall {
+		failures = append(failures, "expected no textual <tool_call> block in final content")
+	}
+	if expectations.RequireLiveModel {
+		switch {
+		case evidence.LiveModel == nil:
+			failures = append(failures, "expected authenticated /v1/models live model check")
+		case evidence.LiveModel.Status != "ok":
+			failures = append(failures, fmt.Sprintf("expected live model catalog status=ok got %s", emptyDash(evidence.LiveModel.Status)))
+		case !evidence.LiveModel.ModelAvailable:
+			failures = append(failures, fmt.Sprintf("expected live model catalog to expose %s", evidence.LiveModel.Model))
+		}
+	}
+	if expectations.MinPromptTokens > 0 && !evidence.UsageAvailable {
+		failures = append(failures, fmt.Sprintf("expected prompt_tokens >= %d but usage was unavailable", expectations.MinPromptTokens))
+	} else if expectations.MinPromptTokens > 0 && evidence.Usage.PromptTokens < expectations.MinPromptTokens {
+		failures = append(failures, fmt.Sprintf("expected prompt_tokens >= %d got %d", expectations.MinPromptTokens, evidence.Usage.PromptTokens))
+	}
+	if expectations.MinContextCap > 0 && evidence.Request.ContextCap == 0 {
+		failures = append(failures, fmt.Sprintf("expected context cap >= %d but preflight request did not record context_cap", expectations.MinContextCap))
+	} else if expectations.MinContextCap > 0 && evidence.Request.ContextCap < expectations.MinContextCap {
+		failures = append(failures, fmt.Sprintf("expected context cap >= %d got %d", expectations.MinContextCap, evidence.Request.ContextCap))
+	}
+	return failures
+}
+
+func printGatewayPreflightVerification(w io.Writer, verification gatewayPreflightVerification) {
+	fmt.Fprintf(w, "preflight-verification\tresult=%s\tmodel=%s\tproject=%s\tjob=%s\tstatus=%d\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttool_calls=%d\ttextual_tool=%t\tusage_available=%t\tcontext=%d\tfailures=%d\n",
+		verification.Result,
+		emptyDash(verification.Model),
+		emptyDash(verification.Project),
+		emptyDash(verification.JobID),
+		verification.StatusCode,
+		emptyDash(verification.FinishReason),
+		verification.ContentLength,
+		verification.ReasoningLength,
+		verification.JSONContent,
+		verification.ToolCallCount,
+		verification.TextualToolCall,
+		verification.UsageAvailable,
+		verification.ContextCap,
+		len(verification.Failures),
+	)
+	for _, failure := range verification.Failures {
+		fmt.Fprintf(w, "preflight-verification-failure\t%s\n", failure)
+	}
 }
 
 func buildDebugSummaryRows(root string) ([]debugSummaryRow, error) {
