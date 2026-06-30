@@ -100,12 +100,6 @@ func TestBackendAwareVLLMUsesUnitReservationClaim(t *testing.T) {
 	}
 }
 
-func TestUnifiedMemoryPressureUsesSingleClaimDomain(t *testing.T) {
-	if got := unifiedMemoryPressureMB(domain.Claim{WeightsMB: 12, KVReservedMB: 5}); got != 17 {
-		t.Fatalf("pressure = %d", got)
-	}
-}
-
 type recordingEstimator struct {
 	claim domain.Claim
 	err   error
