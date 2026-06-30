@@ -249,6 +249,11 @@ If that catalog check fails before a gateway job is created, the redacted
 artifact can still be inspected with `myce debug job --preflight <preflight.json>`;
 the report classifies the failure as catalog-layer evidence instead of owner
 inference evidence.
+If the chat request itself returns an HTTP error and `--out` is set, preflight
+still writes a redacted artifact with the status, whitelisted route headers
+when present, and a bounded gateway error string. `debug job --preflight`
+classifies common availability failures such as `queued: no instance available`
+as route availability evidence, not as a consumer prompt or validation failure.
 
 Token resolution for `myce gateway preflight` is:
 
@@ -412,8 +417,11 @@ vLLM tool headers as required for `tool_choice:"auto"`. If a response has
 tool-call ready even if plain chat or strict JSON works. Preserve the response
 body too: vLLM usually states the exact missing launch flag when it rejects
 auto tool choice. If the request returns `queued: no instance available`, the
-tool-capable preset may exist but cannot currently be placed without unloading
-or changing live capacity.
+tool-capable preset may exist but cannot currently be placed. Preserve the
+preflight artifact and inspect `debug job --preflight` first; if it classifies
+`failure_layer=availability` / `failure_class=route_no_instance_available`,
+the next operator check is route catalog, owner instance state, queue state,
+and whether the selected preset can be started or repaired.
 
 A route with both vLLM tool headers set is provider-configured for tools, but
 that alone does not prove the model will choose tools automatically. Isolate the

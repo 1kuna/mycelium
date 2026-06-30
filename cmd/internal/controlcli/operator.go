@@ -429,6 +429,8 @@ type debugSummaryRow struct {
 	ConsumerItem            string `json:"consumer_item,omitempty"`
 	ConsumerStatus          string `json:"consumer_status,omitempty"`
 	ConsumerResult          string `json:"consumer_result,omitempty"`
+	StatusCode              int    `json:"status_code,omitempty"`
+	GatewayError            string `json:"gateway_error,omitempty"`
 	Model                   string `json:"model,omitempty"`
 	NodeID                  string `json:"node_id,omitempty"`
 	Backend                 string `json:"backend,omitempty"`
@@ -782,6 +784,8 @@ func debugSummaryRowFromOptimization(kind string, evidence jobOptimizationEviden
 		Backend:                 evidence.Backend,
 		PresetID:                evidence.PresetID,
 		Decision:                evidence.Decision,
+		StatusCode:              evidence.StatusCode,
+		GatewayError:            evidence.GatewayError,
 		ContextCap:              evidence.ContextCap,
 		MinContextCap:           evidence.MinContextCap,
 		ContextAdequate:         evidence.ContextAdequate,
@@ -824,7 +828,7 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 	if row.ColdLoad != nil {
 		cold = strconv.FormatBool(*row.ColdLoad)
 	}
-	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\n",
+	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\thttp_status=%d\tgateway_error=%s\n",
 		emptyDash(row.Kind),
 		emptyDash(row.JobID),
 		emptyDash(row.Project),
@@ -861,6 +865,8 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 		emptyDash(row.LiveModelStatus),
 		emptyDash(row.FailureLayer),
 		emptyDash(row.FailureClass),
+		row.StatusCode,
+		emptyDash(row.GatewayError),
 	)
 }
 
@@ -1345,6 +1351,8 @@ type jobOptimizationEvidence struct {
 	SessionPhases           []string                             `json:"session_phases,omitempty"`
 	FailureClass            string                               `json:"failure_class,omitempty"`
 	FailureLayer            string                               `json:"failure_layer,omitempty"`
+	StatusCode              int                                  `json:"status_code,omitempty"`
+	GatewayError            string                               `json:"gateway_error,omitempty"`
 	LiveModelChecked        bool                                 `json:"live_model_checked,omitempty"`
 	LiveModelStatus         string                               `json:"live_model_status,omitempty"`
 	LiveModelAvailable      bool                                 `json:"live_model_available,omitempty"`
@@ -1367,6 +1375,8 @@ func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvi
 		out.Gateway = report.Preflight.Gateway
 		out.Project = firstNonEmpty(report.Preflight.Project, out.Project)
 		out.Model = firstNonEmpty(report.Preflight.Model, out.Model)
+		out.StatusCode = report.Preflight.StatusCode
+		out.GatewayError = report.Preflight.Error
 		out.Request = report.Preflight.Request
 		out.Expectations = report.Preflight.Expectations
 		out.Decision = preflightHeader(report, "X-Myc-Decision")
@@ -1438,6 +1448,10 @@ func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvi
 	if out.LiveModelChecked && !out.LiveModelAvailable {
 		out.FailureLayer = "catalog"
 		out.FailureClass = liveCatalogFailureClass(out.LiveModelStatus, out.LiveModelError)
+	}
+	if report.Preflight != nil && report.Preflight.StatusCode >= 400 {
+		out.FailureLayer = preflightHTTPFailureLayer(report.Preflight.StatusCode, report.Preflight.Error)
+		out.FailureClass = preflightHTTPFailureClass(report.Preflight.StatusCode, report.Preflight.Error)
 	}
 	if out.ConsumerResult == "fail" && (out.FailureLayer == "" || out.FailureLayer == "none" || out.FailureLayer == "consumer") {
 		out.FailureClass = "consumer_quality_failed"
@@ -1538,6 +1552,14 @@ func diagnoseJobDebugReport(report jobDebugReport) *jobDebugDiagnosis {
 			Next:    "activate a gateway binary that serves the route catalog or request a model/alias that the live catalog exposes",
 		}
 	}
+	if report.Preflight != nil && report.Preflight.StatusCode >= 400 {
+		class := preflightHTTPFailureClass(report.Preflight.StatusCode, report.Preflight.Error)
+		return &jobDebugDiagnosis{
+			Class:   class,
+			Summary: fmt.Sprintf("gateway preflight failed before owner telemetry was recoverable: status=%d error=%s", report.Preflight.StatusCode, emptyDash(report.Preflight.Error)),
+			Next:    preflightHTTPFailureNext(class),
+		}
+	}
 	if report.OwnerTelemetry != nil && report.OwnerTelemetry.Error != "" {
 		return &jobDebugDiagnosis{
 			Class:   "owner_telemetry_unavailable",
@@ -1598,6 +1620,58 @@ func liveCatalogFailureClass(status, errorText string) string {
 		return "live_catalog_check_failed"
 	default:
 		return "live_catalog_check_failed"
+	}
+}
+
+func preflightHTTPFailureClass(status int, errorText string) string {
+	lower := strings.ToLower(errorText)
+	switch {
+	case strings.Contains(lower, "queued: no instance available") || strings.Contains(lower, "no instance available"):
+		return "route_no_instance_available"
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return "gateway_auth_failed"
+	case status == http.StatusNotFound:
+		return "gateway_route_not_found"
+	case status == http.StatusTooManyRequests:
+		return "gateway_capacity_limited"
+	case status >= 500:
+		return "gateway_upstream_failed"
+	case status >= 400:
+		return "gateway_request_rejected"
+	default:
+		return "gateway_request_failed"
+	}
+}
+
+func preflightHTTPFailureLayer(status int, errorText string) string {
+	switch preflightHTTPFailureClass(status, errorText) {
+	case "route_no_instance_available", "gateway_capacity_limited":
+		return "availability"
+	case "gateway_auth_failed":
+		return "auth"
+	case "gateway_route_not_found":
+		return "catalog"
+	case "gateway_upstream_failed":
+		return "provider"
+	default:
+		return "gateway"
+	}
+}
+
+func preflightHTTPFailureNext(class string) string {
+	switch class {
+	case "route_no_instance_available":
+		return "inspect route catalog, owner instances, queue state, and whether the selected preset can be started or repaired"
+	case "gateway_auth_failed":
+		return "fix the gateway token source without printing token material"
+	case "gateway_route_not_found":
+		return "verify the live gateway catalog and requested model or alias"
+	case "gateway_capacity_limited":
+		return "retry only after capacity changes or a lower-priority workload is cleared"
+	case "gateway_upstream_failed":
+		return "inspect selected-owner backend logs and preflight headers if present"
+	default:
+		return "preserve the preflight artifact and inspect gateway logs for the selected route"
 	}
 }
 
@@ -1721,6 +1795,9 @@ func preflightHeaderBool(report jobDebugReport, key string) (bool, bool) {
 func printPreflightEvidenceSummary(w io.Writer, evidence gatewayPreflightEvidence) {
 	headers := evidence.Headers
 	fmt.Fprintf(w, "preflight\tstatus=%d\tmodel=%s\tproject=%s\tfinish=%s\tcontent=%d\treasoning=%d\ttool_calls=%d\ttextual_tool=%t\tjson=%t\n", evidence.StatusCode, emptyDash(evidence.Model), emptyDash(evidence.Project), emptyDash(evidence.FinishReason), evidence.ContentLength, evidence.ReasoningLength, evidence.ToolCallCount, evidence.TextualToolCall, evidence.JSONContent)
+	if evidence.Error != "" {
+		fmt.Fprintf(w, "preflight-error\t%s\n", evidence.Error)
+	}
 	if evidence.Request.MaxTokens != 0 || evidence.Request.StructuredOutput != "" || evidence.Request.ToolRequested || evidence.Request.Streaming {
 		fmt.Fprintf(w, "preflight-request\tmax_tokens=%d\tstream=%t\tstructured=%s\ttool_requested=%t\ttool_name=%s\ttool_choice=%s\n",
 			evidence.Request.MaxTokens,

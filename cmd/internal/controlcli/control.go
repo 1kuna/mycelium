@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -1503,6 +1504,20 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	}
 	result, err := gatewayPreflightComplete(ctx, cfg)
 	if err != nil {
+		result.LiveModel = liveModel
+		var evidencePath string
+		if *outDir != "" {
+			evidenceCfg := sanitizedGatewayPreflightEvidenceConfig(cfg, consumer)
+			path, writeErr := writeGatewayPreflightEvidence(*outDir, tokenSource, evidenceCfg, result, expectations)
+			if writeErr != nil {
+				return writeErr
+			}
+			evidencePath = path
+			fmt.Printf("evidence\t%s\n", path)
+		}
+		if evidencePath != "" {
+			return fmt.Errorf("%w; evidence=%s", err, evidencePath)
+		}
 		return err
 	}
 	result.LiveModel = liveModel
@@ -1632,6 +1647,7 @@ type gatewayPreflightConfig struct {
 
 type gatewayPreflightResult struct {
 	StatusCode      int
+	Error           string
 	Headers         http.Header
 	Streaming       bool
 	StreamDone      bool
@@ -1668,6 +1684,7 @@ type gatewayPreflightEvidence struct {
 	Request         gatewayPreflightRequestEvidence      `json:"request"`
 	Expectations    *gatewayPreflightExpectationEvidence `json:"expectations,omitempty"`
 	StatusCode      int                                  `json:"status_code"`
+	Error           string                               `json:"error,omitempty"`
 	Headers         map[string]string                    `json:"headers"`
 	Streaming       bool                                 `json:"streaming"`
 	StreamDone      bool                                 `json:"stream_done,omitempty"`
@@ -1761,6 +1778,7 @@ func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflig
 		Request:         gatewayPreflightRequestEvidenceFromConfig(cfg),
 		Expectations:    gatewayPreflightExpectationEvidenceFromExpectations(expectations),
 		StatusCode:      result.StatusCode,
+		Error:           result.Error,
 		Headers:         gatewayPreflightHeaderMap(result.Headers),
 		Streaming:       result.Streaming,
 		StreamDone:      result.StreamDone,
@@ -1967,7 +1985,13 @@ func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (
 		return gatewayPreflightResult{}, err
 	}
 	if resp.StatusCode >= 400 {
-		return gatewayPreflightResult{}, fmt.Errorf("gateway preflight returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		result := gatewayPreflightResult{
+			StatusCode: resp.StatusCode,
+			Error:      sanitizeGatewayPreflightError(resp.StatusCode, data),
+			Headers:    resp.Header.Clone(),
+			ContextCap: cfg.ContextCap,
+		}
+		return result, errors.New(result.Error)
 	}
 	var parsed gatewayPreflightResult
 	if cfg.Stream {
@@ -1985,6 +2009,17 @@ func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (
 	parsed.Headers = resp.Header.Clone()
 	parsed.ContextCap = cfg.ContextCap
 	return parsed, nil
+}
+
+func sanitizeGatewayPreflightError(status int, body []byte) string {
+	text := strings.Join(strings.Fields(string(body)), " ")
+	if len(text) > 500 {
+		text = text[:500]
+	}
+	if text == "" {
+		return fmt.Sprintf("gateway preflight returned %d", status)
+	}
+	return fmt.Sprintf("gateway preflight returned %d: %s", status, text)
 }
 
 func parseGatewayPreflightResponse(data []byte) (gatewayPreflightResult, error) {
