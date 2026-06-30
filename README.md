@@ -234,6 +234,11 @@ myce gateway preflight \
   --out /tmp/mycelium-preflight
 ```
 
+Add `--require-live-model` when preflight should fail unless the authenticated
+live gateway catalog exposes the requested model or alias before the chat
+request runs. This distinguishes a route that exists only in local config from
+one the running gateway binary can advertise through `/v1/models`.
+
 Token resolution for `myce gateway preflight` is:
 
 1. `--gateway-token`
@@ -435,6 +440,9 @@ Add expectation flags when the command is used as a consumer gate:
   declared consumer workload. Use this for thinking/tool-agent workloads so a
   route can pass transport/tool-call smoke while still failing the actual
   consumer contract.
+- `--require-live-model` fails before the chat request unless authenticated
+  `/v1/models` exposes the requested model or alias, and writes that catalog
+  status into `preflight.json` when `--out` is set.
 - `--expect-finish-reason <reason>` fails if the provider stopped for a
   different reason, such as `length`.
 - `--min-content-length <n>` fails if the final answer channel is empty or too

@@ -1155,6 +1155,42 @@ func fetchGatewayLiveModels(ctx context.Context, gatewayURL, token string, clien
 	return models, nil
 }
 
+func checkGatewayPreflightLiveModel(ctx context.Context, gatewayURL, model, token, authSource string, client *http.Client) gatewayPreflightLiveModelEvidence {
+	live := gatewayPreflightLiveModelEvidence{
+		Checked:    true,
+		Gateway:    strings.TrimRight(gatewayURL, "/"),
+		Model:      model,
+		AuthSource: authSource,
+	}
+	models, err := fetchGatewayLiveModels(ctx, gatewayURL, token, client)
+	if err != nil {
+		live.Status = "error"
+		live.Error = err.Error()
+		return live
+	}
+	live.ModelCount = len(models)
+	for _, id := range models {
+		if id == model {
+			live.Status = "ok"
+			live.ModelAvailable = true
+			live.ModelMatch = id
+			return live
+		}
+	}
+	live.Status = "missing"
+	return live
+}
+
+func printGatewayPreflightLiveModel(w io.Writer, live gatewayPreflightLiveModelEvidence) {
+	fmt.Fprintf(w, "live_model\tstatus=%s\tavailable=%t\tmatch=%s\tmodels=%d\terror=%s\n",
+		emptyDash(live.Status),
+		live.ModelAvailable,
+		emptyDash(live.ModelMatch),
+		live.ModelCount,
+		emptyDash(live.Error),
+	)
+}
+
 func annotateGatewayRouteLive(route *gatewayRouteContract, preset domain.Preset, liveModels map[string]struct{}) {
 	if liveModels == nil {
 		return
@@ -1329,6 +1365,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	requireJSON := fs.Bool("require-json", false, "fail unless the final content is valid JSON")
 	requireToolCall := fs.Bool("require-tool-call", false, "fail unless the response contains at least one structured OpenAI tool call")
 	rejectTextualToolCall := fs.Bool("reject-textual-tool-call", false, "fail if final content contains a textual <tool_call> block")
+	requireLiveModel := fs.Bool("require-live-model", false, "fail unless authenticated /v1/models exposes the requested model before running the preflight")
 	minPromptTokens := fs.Int("min-prompt-tokens", 0, "fail unless usage.prompt_tokens is at least this value")
 	minContextCap := fs.Int("min-context-cap", 0, "fail unless --context-cap is at least this value")
 	expectFinishReason := fs.String("expect-finish-reason", "", "fail unless finish_reason matches this value")
@@ -1378,16 +1415,46 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 		RequireJSON:           *requireJSON,
 		RequireToolCall:       *requireToolCall,
 		RejectTextualToolCall: *rejectTextualToolCall,
+		RequireLiveModel:      *requireLiveModel,
 		MinPromptTokens:       *minPromptTokens,
 		MinContextCap:         *minContextCap,
 		ExpectFinishReason:    *expectFinishReason,
 		MinContentLength:      *minContentLength,
 		MaxReasoningLength:    *maxReasoningLength,
 	}
+	var liveModel *gatewayPreflightLiveModelEvidence
+	if *requireLiveModel {
+		live := checkGatewayPreflightLiveModel(ctx, cfg.URL, cfg.Model, cfg.Token, tokenSource, cfg.Client)
+		liveModel = &live
+		printGatewayPreflightLiveModel(os.Stdout, live)
+		if live.Status != "ok" || !live.ModelAvailable {
+			result := gatewayPreflightResult{
+				Headers:    http.Header{},
+				ContextCap: cfg.ContextCap,
+				LiveModel:  liveModel,
+			}
+			var evidencePath string
+			if *outDir != "" {
+				evidenceCfg := sanitizedGatewayPreflightEvidenceConfig(cfg, consumer)
+				path, err := writeGatewayPreflightEvidence(*outDir, tokenSource, evidenceCfg, result, expectations)
+				if err != nil {
+					return err
+				}
+				evidencePath = path
+				fmt.Printf("evidence\t%s\n", path)
+			}
+			err := fmt.Errorf("gateway preflight live model check failed: status=%s available=%t match=%s error=%s", live.Status, live.ModelAvailable, emptyDash(live.ModelMatch), emptyDash(live.Error))
+			if evidencePath != "" {
+				return fmt.Errorf("%w; evidence=%s", err, evidencePath)
+			}
+			return err
+		}
+	}
 	result, err := gatewayPreflightComplete(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	result.LiveModel = liveModel
 	fmt.Printf("gateway\t%s\tok\n", strings.TrimRight(*url, "/"))
 	fmt.Printf("auth\t%s\tconfigured\n", tokenSource)
 	fmt.Printf("status\t%d\n", result.StatusCode)
@@ -1413,11 +1480,7 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	}
 	var evidencePath string
 	if *outDir != "" {
-		evidenceCfg := cfg
-		evidenceCfg.Token = ""
-		evidenceCfg.Client = nil
-		evidenceCfg.Prompt = ""
-		evidenceCfg.Consumer = consumer
+		evidenceCfg := sanitizedGatewayPreflightEvidenceConfig(cfg, consumer)
 		path, err := writeGatewayPreflightEvidence(*outDir, tokenSource, evidenceCfg, result, expectations)
 		if err != nil {
 			return err
@@ -1439,6 +1502,7 @@ type gatewayPreflightExpectations struct {
 	RequireJSON           bool
 	RequireToolCall       bool
 	RejectTextualToolCall bool
+	RequireLiveModel      bool
 	MinPromptTokens       int
 	MinContextCap         int
 	ExpectFinishReason    string
@@ -1473,6 +1537,16 @@ func validateGatewayPreflightExpectations(result gatewayPreflightResult, expecta
 	}
 	if expectations.RejectTextualToolCall && result.TextualToolCall {
 		failures = append(failures, "expected no textual <tool_call> block in final content")
+	}
+	if expectations.RequireLiveModel {
+		switch {
+		case result.LiveModel == nil:
+			failures = append(failures, "expected authenticated /v1/models live model check")
+		case result.LiveModel.Status != "ok":
+			failures = append(failures, fmt.Sprintf("expected live model catalog status=ok got %s", emptyDash(result.LiveModel.Status)))
+		case !result.LiveModel.ModelAvailable:
+			failures = append(failures, fmt.Sprintf("expected live model catalog to expose %s", result.LiveModel.Model))
+		}
 	}
 	if expectations.MinPromptTokens > 0 && !result.UsageAvailable {
 		failures = append(failures, fmt.Sprintf("expected prompt_tokens >= %d but usage was unavailable", expectations.MinPromptTokens))
@@ -1520,6 +1594,19 @@ type gatewayPreflightResult struct {
 	UsageAvailable  bool
 	Usage           api.OpenAIUsage
 	ContextCap      int
+	LiveModel       *gatewayPreflightLiveModelEvidence
+}
+
+type gatewayPreflightLiveModelEvidence struct {
+	Checked        bool   `json:"checked"`
+	Gateway        string `json:"gateway,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Status         string `json:"status,omitempty"`
+	ModelAvailable bool   `json:"model_available,omitempty"`
+	ModelMatch     string `json:"model_match,omitempty"`
+	ModelCount     int    `json:"model_count,omitempty"`
+	AuthSource     string `json:"auth_source,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 type gatewayPreflightEvidence struct {
@@ -1542,6 +1629,7 @@ type gatewayPreflightEvidence struct {
 	JSONContent     bool                                 `json:"json_content"`
 	UsageAvailable  bool                                 `json:"usage_available"`
 	Usage           api.OpenAIUsage                      `json:"usage"`
+	LiveModel       *gatewayPreflightLiveModelEvidence   `json:"live_model,omitempty"`
 	Consumer        *consumerEvidence                    `json:"consumer,omitempty"`
 }
 
@@ -1560,6 +1648,7 @@ type gatewayPreflightExpectationEvidence struct {
 	RequireJSON           bool   `json:"require_json,omitempty"`
 	RequireToolCall       bool   `json:"require_tool_call,omitempty"`
 	RejectTextualToolCall bool   `json:"reject_textual_tool_call,omitempty"`
+	RequireLiveModel      bool   `json:"require_live_model,omitempty"`
 	MinPromptTokens       int    `json:"min_prompt_tokens,omitempty"`
 	MinContextCap         int    `json:"min_context_cap,omitempty"`
 	ExpectFinishReason    string `json:"expect_finish_reason,omitempty"`
@@ -1589,7 +1678,7 @@ func gatewayPreflightRequestEvidenceFromConfig(cfg gatewayPreflightConfig) gatew
 }
 
 func gatewayPreflightExpectationEvidenceFromExpectations(expectations gatewayPreflightExpectations) *gatewayPreflightExpectationEvidence {
-	if expectations.ExpectNode == "" && !expectations.RequireJSON && !expectations.RequireToolCall && !expectations.RejectTextualToolCall && expectations.MinPromptTokens == 0 && expectations.MinContextCap == 0 && expectations.ExpectFinishReason == "" && expectations.MinContentLength == 0 && expectations.MaxReasoningLength < 0 {
+	if expectations.ExpectNode == "" && !expectations.RequireJSON && !expectations.RequireToolCall && !expectations.RejectTextualToolCall && !expectations.RequireLiveModel && expectations.MinPromptTokens == 0 && expectations.MinContextCap == 0 && expectations.ExpectFinishReason == "" && expectations.MinContentLength == 0 && expectations.MaxReasoningLength < 0 {
 		return nil
 	}
 	out := &gatewayPreflightExpectationEvidence{
@@ -1597,6 +1686,7 @@ func gatewayPreflightExpectationEvidenceFromExpectations(expectations gatewayPre
 		RequireJSON:           expectations.RequireJSON,
 		RequireToolCall:       expectations.RequireToolCall,
 		RejectTextualToolCall: expectations.RejectTextualToolCall,
+		RequireLiveModel:      expectations.RequireLiveModel,
 		MinPromptTokens:       expectations.MinPromptTokens,
 		MinContextCap:         expectations.MinContextCap,
 		ExpectFinishReason:    expectations.ExpectFinishReason,
@@ -1632,6 +1722,7 @@ func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflig
 		JSONContent:     result.JSONContent,
 		UsageAvailable:  result.UsageAvailable,
 		Usage:           result.Usage,
+		LiveModel:       result.LiveModel,
 		Consumer:        cfg.Consumer,
 	}
 	path := filepath.Join(outDir, "preflight.json")
@@ -1643,6 +1734,14 @@ func writeGatewayPreflightEvidence(outDir, authSource string, cfg gatewayPreflig
 		return "", fmt.Errorf("write gateway preflight evidence: %w", err)
 	}
 	return path, nil
+}
+
+func sanitizedGatewayPreflightEvidenceConfig(cfg gatewayPreflightConfig, consumer *consumerEvidence) gatewayPreflightConfig {
+	cfg.Token = ""
+	cfg.Client = nil
+	cfg.Prompt = ""
+	cfg.Consumer = consumer
+	return cfg
 }
 
 func gatewayPreflightHeaderMap(headers http.Header) map[string]string {
