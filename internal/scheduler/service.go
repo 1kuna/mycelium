@@ -399,10 +399,6 @@ func (s *Service) Drain(ctx context.Context, limit int) ([]Result, error) {
 }
 
 func (s *Service) dequeueRunnable(ctx context.Context) (domain.Job, []byte, bool, error) {
-	if s.Coordinator != nil {
-		job, payload, ok := s.Queue.DequeueWithPayload()
-		return job, payload, ok, nil
-	}
 	if s.Fleet == nil || s.Placer == nil {
 		return domain.Job{}, nil, false, fmt.Errorf("scheduler service is not fully configured")
 	}

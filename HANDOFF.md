@@ -75,6 +75,22 @@ a consumer-ready route. Use `--context-cap` and `--min-context-cap` so Mycelium
 records `consumer_contract_context_too_small` when the route cannot honestly
 fit the workload.
 
+## Allocator Proof Boundary
+
+Reachability canaries prove the transport, not the allocator. A real allocator
+proof needs a workload with intent fields, concurrent pressure, queue or
+preemption decisions, owner-side admission, periodic drain/reclaim, and durable
+telemetry that shows which node owned each job.
+
+The gateway constructs jobs with project, priority, speed, context,
+concurrency, preemption, streaming, submitter, and handling intent. The
+scheduler service supports queued work, owner-authoritative admission, and a
+periodic queue drainer. OpenAI-compatible chat requests remain synchronous:
+when the selected route cannot immediately acquire an owner, the gateway
+returns a loud no-instance error instead of accepting an asynchronous workload.
+Use the scheduler/runtime and fleet benchmark surfaces for pressure proofs
+until an explicit async workload API is promoted.
+
 ## Public Hygiene Rules
 
 - Public docs may say "strict JSON consumer", "tool-calling consumer",

@@ -8,6 +8,12 @@ handoff.
 
 ## Active
 
+- 2026-06-30: Reachable peers and single-request canaries do not by themselves
+  prove live allocator behavior under pressure. The OpenAI-compatible gateway
+  currently requires synchronous ownership for chat requests and returns a loud
+  no-instance error when work would queue. Use scheduler/runtime or fleet
+  benchmark surfaces for allocator pressure proofs until an explicit async
+  workload admission API is promoted.
 - 2026-06-29: A low-context tool-call route can prove transport and provider
   parser wiring without being a valid route for reasoning-heavy tool-agent
   workloads. Public Mycelium evidence now exposes this as a consumer-contract
