@@ -3208,6 +3208,85 @@ func TestRunDebugSelectRanksTrainingRows(t *testing.T) {
 	}
 }
 
+func TestRunDebugVerifyPreflightValidatesSavedEvidence(t *testing.T) {
+	preflightPath := writeGatewayPreflightEvidenceFixture(t, "job-a")
+
+	output := captureStdout(t, func() {
+		err := Run(context.Background(), []string{"debug", "verify-preflight", "--preflight", preflightPath})
+		if err == nil || !strings.Contains(err.Error(), "structured tool call") || !strings.Contains(err.Error(), "textual <tool_call>") {
+			t.Fatalf("debug verify-preflight err = %v", err)
+		}
+	})
+	if !strings.Contains(output, "preflight-verification\tresult=fail") || !strings.Contains(output, "preflight-verification-failure\texpected at least one structured tool call") || strings.Contains(output, preflightPath) || strings.Contains(output, "Bearer") {
+		t.Fatalf("failed verifier output = %q", output)
+	}
+
+	evidence, err := readGatewayPreflightEvidence(preflightPath)
+	if err != nil {
+		t.Fatalf("read preflight evidence: %v", err)
+	}
+	evidence.TextualToolCall = false
+	evidence.ToolCallCount = 1
+	evidence.ToolCallNames = []string{"echo"}
+	evidence.Request.ContextCap = 32768
+	evidence.LiveModel = &gatewayPreflightLiveModelEvidence{
+		Checked:        true,
+		Model:          evidence.Model,
+		Status:         "ok",
+		ModelAvailable: true,
+		ModelMatch:     evidence.Model,
+	}
+	passPath := filepath.Join(t.TempDir(), "preflight-pass.json")
+	data, err := json.MarshalIndent(evidence, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal passing preflight: %v", err)
+	}
+	if err := os.WriteFile(passPath, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write passing preflight: %v", err)
+	}
+
+	output = captureStdout(t, func() {
+		err := Run(context.Background(), []string{
+			"debug", "verify-preflight",
+			"--preflight", passPath,
+			"--require-live-model",
+			"--require-json",
+			"--require-tool-call",
+			"--reject-textual-tool-call",
+			"--min-context-cap", "32768",
+			"--min-content-length", "1",
+			"--max-reasoning-length", "0",
+		})
+		if err != nil {
+			t.Fatalf("debug verify-preflight pass: %v", err)
+		}
+	})
+	if !strings.Contains(output, "preflight-verification\tresult=pass") || !strings.Contains(output, "tool_calls=1") || strings.Contains(output, passPath) || strings.Contains(output, "Bearer") {
+		t.Fatalf("passing verifier output = %q", output)
+	}
+
+	jsonOutput := captureStdout(t, func() {
+		err := Run(context.Background(), []string{"debug", "verify-preflight", "--preflight", passPath, "--json", "--min-content-length", "99"})
+		if err == nil || !strings.Contains(err.Error(), "content length") {
+			t.Fatalf("debug verify-preflight json err = %v", err)
+		}
+	})
+	var verification gatewayPreflightVerification
+	if err := json.Unmarshal([]byte(jsonOutput), &verification); err != nil {
+		t.Fatalf("decode verification JSON: %v\n%s", err, jsonOutput)
+	}
+	if verification.Passed || verification.Result != "fail" || len(verification.Failures) != 1 || !strings.Contains(verification.Failures[0], "content length") {
+		t.Fatalf("verification JSON = %+v", verification)
+	}
+
+	if err := Run(context.Background(), []string{"debug", "verify-preflight"}); err == nil || !strings.Contains(err.Error(), "--preflight") {
+		t.Fatalf("missing preflight err = %v", err)
+	}
+	if err := Run(context.Background(), []string{"debug", "verify-preflight", "--preflight", passPath, "--expect-node", "other-node"}); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("conflicting expectation err = %v", err)
+	}
+}
+
 func TestConsumerEvidenceFromFlags(t *testing.T) {
 	evidence, err := consumerEvidenceFromFlags(" run ", " item ", "TIMEOUT", 42, " deadline ", "FAIL", " schema ")
 	if err != nil {
