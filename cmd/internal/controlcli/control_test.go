@@ -1944,7 +1944,7 @@ func TestRunGatewayPreflightWritesAvailabilityFailureEvidence(t *testing.T) {
 		"preflight-error\tgateway preflight returned 502: job \"job-queued\" queued: no instance available",
 		"route-availability\tmodel=tool-model-large\tproject=tool-canary\tpreset=tool-model-large-vllm\tnode=node-tool\tbackend=vllm\tprofile=openai-compatible\tcontext=32768\tproject_cap=32768\teffective_context=32768\tstatus=no_matching_instance\tstartability=operator_action_required\tnode_known=true\tnode_status=ready\twarm_instances=0\tloading_instances=0\tunfinished_jobs=1",
 		"diagnosis\troute_no_instance_available\tgateway preflight failed before owner telemetry was recoverable",
-		"optimization\tjob=-\tproject=tool-canary\tconsumer_status=error\tconsumer_result=-\tquality_gate=-\tnode=-\tpreset=-\tmodel=tool-model-large\tcontext_cap=32768\tmin_context=32768\tcontext_ok=true\tfinish=-\tcontent_len=0\treasoning_len=0\tjson=false\tstream=false\ttool=true\tusage=0/0/0\tlive_model=false/-\tload_ms=0\tttft_ms=0\tupstream_ms=0\tfailure_layer=availability\tfailure_class=route_no_instance_available",
+		"optimization\tjob=-\tproject=tool-canary\tconsumer_status=error\tconsumer_result=-\tquality_gate=-\tnode=-\tpreset=-\tmodel=tool-model-large\tattempts=0\tqueue_ms=0\tcontext_cap=32768\tmin_context=32768\tcontext_ok=true\tfinish=-\tcontent_len=0\treasoning_len=0\tjson=false\tstream=false\ttool=true\tusage=0/0/0\tlive_model=false/-\tload_ms=0\tttft_ms=0\tupstream_ms=0\tfailure_layer=availability\tfailure_class=route_no_instance_available",
 	} {
 		if !strings.Contains(debugOutput, want) {
 			t.Fatalf("availability debug output missing %q:\n%s", want, debugOutput)
@@ -2289,7 +2289,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"owner-telemetry\tok\tnode=node-a\taddress=http://peer.test\tmetrics=1\tsamples=1\tttft_ms=34\tload_ms=0\ttps=12.50\tcontext=26\tphases=complete",
 		"consumer\trun=strict-json-batch-7\titem=row-006\tstatus=timeout\telapsed_ms=180000\terror=client_deadline\tresult=fail\tquality_gate=strict-json-validation",
 		"diagnosis\towner_completed_warm\towner node-a completed warm inference; load_ms=0; ttft_ms=34; consumer_status=timeout; upstream_ms=512; structured=json_schema",
-		"optimization\tjob=job-a\tproject=strict-json-batch\tconsumer_status=timeout\tconsumer_result=fail\tquality_gate=strict-json-validation\tnode=owner-node\tpreset=tiny\tmodel=strict-json-model\tcontext_cap=0\tmin_context=0\tcontext_ok=false\tfinish=stop\tcontent_len=16\treasoning_len=0\tjson=true\tstream=false\ttool=true\tusage=16/10/26\tlive_model=false/-\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=quality\tfailure_class=consumer_quality_failed",
+		"optimization\tjob=job-a\tproject=strict-json-batch\tconsumer_status=timeout\tconsumer_result=fail\tquality_gate=strict-json-validation\tnode=owner-node\tpreset=tiny\tmodel=strict-json-model\tattempts=1\tqueue_ms=7\tcontext_cap=0\tmin_context=0\tcontext_ok=false\tfinish=stop\tcontent_len=16\treasoning_len=0\tjson=true\tstream=false\ttool=true\tusage=16/10/26\tlive_model=false/-\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=quality\tfailure_class=consumer_quality_failed",
 	} {
 		if !strings.Contains(preflightOutput, want) {
 			t.Fatalf("preflight debug output missing %q:\n%s", want, preflightOutput)
@@ -2356,7 +2356,7 @@ func TestRunDebugJobPrintsPreflightOnlyLiveCatalogFailure(t *testing.T) {
 		"preflight-live-model\tstatus=error\tavailable=false\tmatch=-\tmodels=0\terror=gateway models returned 404: not found",
 		"consumer\trun=-\titem=-\tstatus=error\telapsed_ms=0\terror=stale_catalog\tresult=-\tquality_gate=-",
 		"diagnosis\tgateway_catalog_unavailable\tlive gateway catalog check failed for model tool-model-large: status=error error=gateway models returned 404: not found",
-		"optimization\tjob=-\tproject=tool-canary\tconsumer_status=error\tconsumer_result=-\tquality_gate=-\tnode=-\tpreset=-\tmodel=tool-model-large\tcontext_cap=32768\tmin_context=32768\tcontext_ok=true\tfinish=-\tcontent_len=0\treasoning_len=0\tjson=false\tstream=false\ttool=true\tusage=0/0/0\tlive_model=false/error\tload_ms=0\tttft_ms=0\tupstream_ms=0\tfailure_layer=catalog\tfailure_class=gateway_catalog_unavailable",
+		"optimization\tjob=-\tproject=tool-canary\tconsumer_status=error\tconsumer_result=-\tquality_gate=-\tnode=-\tpreset=-\tmodel=tool-model-large\tattempts=0\tqueue_ms=0\tcontext_cap=32768\tmin_context=32768\tcontext_ok=true\tfinish=-\tcontent_len=0\treasoning_len=0\tjson=false\tstream=false\ttool=true\tusage=0/0/0\tlive_model=false/error\tload_ms=0\tttft_ms=0\tupstream_ms=0\tfailure_layer=catalog\tfailure_class=gateway_catalog_unavailable",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("preflight-only output missing %q:\n%s", want, output)
