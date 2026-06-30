@@ -1476,7 +1476,7 @@ func TestRunGatewayPreflightExpectationsFailAfterWritingEvidence(t *testing.T) {
 		w.Header().Set("X-Myc-Tool-Choice", "auto")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{
-				"message":       map[string]string{"content": "<tool_call><function=echo></function></tool_call>"},
+				"message":       map[string]string{"content": "<tool_call><function=echo></function></tool_call>", "reasoning_content": "hidden"},
 				"finish_reason": "stop",
 			}},
 			"usage": map[string]int{"prompt_tokens": 64, "completion_tokens": 8, "total_tokens": 72},
@@ -1496,10 +1496,13 @@ func TestRunGatewayPreflightExpectationsFailAfterWritingEvidence(t *testing.T) {
 			"--reject-textual-tool-call",
 			"--min-prompt-tokens", "1000",
 			"--min-context-cap", "32768",
+			"--expect-finish-reason", "tool_calls",
+			"--min-content-length", "100",
+			"--max-reasoning-length", "0",
 			"--out", outDir,
 		}, client)
 	})
-	if err == nil || !strings.Contains(err.Error(), "expected at least one structured tool call") || !strings.Contains(err.Error(), "expected no textual <tool_call>") || !strings.Contains(err.Error(), "expected prompt_tokens >= 1000") || !strings.Contains(err.Error(), "expected context cap >= 32768 got 8192") || !strings.Contains(err.Error(), "preflight.json") {
+	if err == nil || !strings.Contains(err.Error(), "expected finish_reason=tool_calls got stop") || !strings.Contains(err.Error(), "expected content length >= 100") || !strings.Contains(err.Error(), "expected reasoning length <= 0 got 6") || !strings.Contains(err.Error(), "expected at least one structured tool call") || !strings.Contains(err.Error(), "expected no textual <tool_call>") || !strings.Contains(err.Error(), "expected prompt_tokens >= 1000") || !strings.Contains(err.Error(), "expected context cap >= 32768 got 8192") || !strings.Contains(err.Error(), "preflight.json") {
 		t.Fatalf("expectation err = %v\noutput=%s", err, output)
 	}
 	if !strings.Contains(output, "tool_calls\tcount=0") || !strings.Contains(output, "textual_tool_call\ttrue") {
@@ -1513,10 +1516,10 @@ func TestRunGatewayPreflightExpectationsFailAfterWritingEvidence(t *testing.T) {
 	if err := json.Unmarshal(data, &evidence); err != nil {
 		t.Fatalf("decode failed evidence: %v", err)
 	}
-	if evidence.ToolCallCount != 0 || !evidence.TextualToolCall || evidence.Usage.PromptTokens != 64 {
+	if evidence.ToolCallCount != 0 || !evidence.TextualToolCall || evidence.Usage.PromptTokens != 64 || evidence.ReasoningLength != 6 {
 		t.Fatalf("failed evidence = %+v", evidence)
 	}
-	if evidence.Request.ContextCap != 8192 || evidence.Request.ToolChoice != "auto" || evidence.Request.ToolName != "echo" || evidence.Expectations == nil || !evidence.Expectations.RequireToolCall || !evidence.Expectations.RejectTextualToolCall || evidence.Expectations.MinPromptTokens != 1000 || evidence.Expectations.MinContextCap != 32768 {
+	if evidence.Request.ContextCap != 8192 || evidence.Request.ToolChoice != "auto" || evidence.Request.ToolName != "echo" || evidence.Expectations == nil || !evidence.Expectations.RequireToolCall || !evidence.Expectations.RejectTextualToolCall || evidence.Expectations.MinPromptTokens != 1000 || evidence.Expectations.MinContextCap != 32768 || evidence.Expectations.ExpectFinishReason != "tool_calls" || evidence.Expectations.MinContentLength != 100 || evidence.Expectations.MaxReasoningLength == nil || *evidence.Expectations.MaxReasoningLength != 0 {
 		t.Fatalf("failed request/expectation evidence = request:%+v expectations:%+v", evidence.Request, evidence.Expectations)
 	}
 	optimization := summarizeJobOptimizationEvidence(jobDebugReport{
@@ -1524,7 +1527,7 @@ func TestRunGatewayPreflightExpectationsFailAfterWritingEvidence(t *testing.T) {
 		Preflight: &evidence,
 		Diagnosis: &jobDebugDiagnosis{Class: "owner_completed_warm"},
 	})
-	if optimization.ContextCap != 8192 || optimization.MinContextCap != 32768 || optimization.ContextAdequate || optimization.FailureLayer != "consumer_contract" || optimization.FailureClass != "consumer_contract_context_too_small" {
+	if optimization.ContextCap != 8192 || optimization.MinContextCap != 32768 || optimization.ContentLength == 0 || optimization.ReasoningLength != 6 || optimization.FinishReason != "stop" || optimization.ContextAdequate || optimization.FailureLayer != "consumer_contract" || optimization.FailureClass != "consumer_contract_context_too_small" {
 		t.Fatalf("context optimization evidence = %+v", optimization)
 	}
 }
@@ -1976,7 +1979,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"job\tjob-a\trunning\tmodel=tiny\tproject=project-a\towner=node-a",
 		"preflight\tstatus=200\tmodel=strict-json-model\tproject=strict-json-batch",
 		"preflight-request\tmax_tokens=32\tstream=false\tstructured=none\ttool_requested=true\ttool_name=echo\ttool_choice=auto",
-		"preflight-expectations\texpect_node=b70\trequire_json=false\trequire_tool_call=true\treject_textual_tool_call=true\tmin_prompt_tokens=16",
+		"preflight-expectations\texpect_node=b70\trequire_json=false\trequire_tool_call=true\treject_textual_tool_call=true\tmin_prompt_tokens=16\tmin_context=0\texpect_finish=-\tmin_content=0\tmax_reasoning=-",
 		"preflight-route\tnode=b70\tbackend=vllm\tinstance=inst_2\tdecision=placed_on_warm_instance",
 		"preflight-tools\trequested=true\tchoice=auto\tvllm_parser=true\tvllm_auto=false",
 		"preflight-tool-result\tcount=0\tnames=-\ttextual=true",
@@ -1984,7 +1987,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"owner-telemetry\tok\tnode=node-a\taddress=http://peer.test\tmetrics=1\tsamples=1\tttft_ms=34\tload_ms=0\ttps=12.50\tcontext=26\tphases=complete",
 		"consumer\trun=strict-json-batch-7\titem=row-006\tstatus=timeout\telapsed_ms=180000\terror=client_deadline\tresult=fail\tquality_gate=strict-json-validation",
 		"diagnosis\towner_completed_warm\towner node-a completed warm inference; load_ms=0; ttft_ms=34; consumer_status=timeout; upstream_ms=512; structured=json_schema",
-		"optimization\tjob=job-a\tproject=strict-json-batch\tconsumer_status=timeout\tconsumer_result=fail\tquality_gate=strict-json-validation\tnode=b70\tpreset=tiny\tmodel=strict-json-model\tcontext_cap=0\tmin_context=0\tcontext_ok=false\tstream=false\ttool=true\tusage=16/10/26\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=quality\tfailure_class=consumer_quality_failed",
+		"optimization\tjob=job-a\tproject=strict-json-batch\tconsumer_status=timeout\tconsumer_result=fail\tquality_gate=strict-json-validation\tnode=b70\tpreset=tiny\tmodel=strict-json-model\tcontext_cap=0\tmin_context=0\tcontext_ok=false\tfinish=stop\tcontent_len=16\treasoning_len=0\tjson=true\tstream=false\ttool=true\tusage=16/10/26\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=quality\tfailure_class=consumer_quality_failed",
 	} {
 		if !strings.Contains(preflightOutput, want) {
 			t.Fatalf("preflight debug output missing %q:\n%s", want, preflightOutput)
@@ -2266,7 +2269,7 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read optimization artifact: %v", err)
 	}
-	if strings.Contains(string(optimizationData), "rpc-secret") || !strings.Contains(string(optimizationData), `"project": "strict-json-batch"`) || !strings.Contains(string(optimizationData), `"consumer_status": "error"`) || !strings.Contains(string(optimizationData), `"consumer_result": "fail"`) || !strings.Contains(string(optimizationData), `"consumer_quality_gate": "response-parser"`) || !strings.Contains(string(optimizationData), `"failure_layer": "quality"`) || !strings.Contains(string(optimizationData), `"usage_total_tokens": 26`) {
+	if strings.Contains(string(optimizationData), "rpc-secret") || !strings.Contains(string(optimizationData), `"project": "strict-json-batch"`) || !strings.Contains(string(optimizationData), `"consumer_status": "error"`) || !strings.Contains(string(optimizationData), `"consumer_result": "fail"`) || !strings.Contains(string(optimizationData), `"consumer_quality_gate": "response-parser"`) || !strings.Contains(string(optimizationData), `"content_length": 16`) || !strings.Contains(string(optimizationData), `"reasoning_length": 0`) || !strings.Contains(string(optimizationData), `"json_content": true`) || !strings.Contains(string(optimizationData), `"tool_call_count": 0`) || !strings.Contains(string(optimizationData), `"textual_tool_call": true`) || !strings.Contains(string(optimizationData), `"failure_layer": "quality"`) || !strings.Contains(string(optimizationData), `"usage_total_tokens": 26`) {
 		t.Fatalf("optimization artifact = %s", optimizationData)
 	}
 
