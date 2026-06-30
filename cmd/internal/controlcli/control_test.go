@@ -2281,15 +2281,15 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 		"job\tjob-a\trunning\tmodel=tiny\tproject=project-a\towner=node-a",
 		"preflight\tstatus=200\tmodel=strict-json-model\tproject=strict-json-batch",
 		"preflight-request\tmax_tokens=32\tstream=false\tstructured=none\ttool_requested=true\ttool_name=echo\ttool_choice=auto",
-		"preflight-expectations\texpect_node=b70\trequire_json=false\trequire_tool_call=true\treject_textual_tool_call=true\trequire_live_model=false\tmin_prompt_tokens=16\tmin_context=0\texpect_finish=-\tmin_content=0\tmax_reasoning=-",
-		"preflight-route\tnode=b70\tbackend=vllm\tinstance=inst_2\tdecision=placed_on_warm_instance",
+		"preflight-expectations\texpect_node=owner-node\trequire_json=false\trequire_tool_call=true\treject_textual_tool_call=true\trequire_live_model=false\tmin_prompt_tokens=16\tmin_context=0\texpect_finish=-\tmin_content=0\tmax_reasoning=-",
+		"preflight-route\tnode=owner-node\tbackend=vllm\tinstance=inst_2\tdecision=placed_on_warm_instance",
 		"preflight-tools\trequested=true\tchoice=auto\tvllm_parser=true\tvllm_auto=false",
 		"preflight-tool-result\tcount=0\tnames=-\ttextual=true",
 		"preflight-usage\tprompt=16\tcompletion=10\ttotal=26",
 		"owner-telemetry\tok\tnode=node-a\taddress=http://peer.test\tmetrics=1\tsamples=1\tttft_ms=34\tload_ms=0\ttps=12.50\tcontext=26\tphases=complete",
 		"consumer\trun=strict-json-batch-7\titem=row-006\tstatus=timeout\telapsed_ms=180000\terror=client_deadline\tresult=fail\tquality_gate=strict-json-validation",
 		"diagnosis\towner_completed_warm\towner node-a completed warm inference; load_ms=0; ttft_ms=34; consumer_status=timeout; upstream_ms=512; structured=json_schema",
-		"optimization\tjob=job-a\tproject=strict-json-batch\tconsumer_status=timeout\tconsumer_result=fail\tquality_gate=strict-json-validation\tnode=b70\tpreset=tiny\tmodel=strict-json-model\tcontext_cap=0\tmin_context=0\tcontext_ok=false\tfinish=stop\tcontent_len=16\treasoning_len=0\tjson=true\tstream=false\ttool=true\tusage=16/10/26\tlive_model=false/-\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=quality\tfailure_class=consumer_quality_failed",
+		"optimization\tjob=job-a\tproject=strict-json-batch\tconsumer_status=timeout\tconsumer_result=fail\tquality_gate=strict-json-validation\tnode=owner-node\tpreset=tiny\tmodel=strict-json-model\tcontext_cap=0\tmin_context=0\tcontext_ok=false\tfinish=stop\tcontent_len=16\treasoning_len=0\tjson=true\tstream=false\ttool=true\tusage=16/10/26\tlive_model=false/-\tload_ms=0\tttft_ms=34\tupstream_ms=512\tfailure_layer=quality\tfailure_class=consumer_quality_failed",
 	} {
 		if !strings.Contains(preflightOutput, want) {
 			t.Fatalf("preflight debug output missing %q:\n%s", want, preflightOutput)
@@ -2306,10 +2306,10 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	if err := json.Unmarshal([]byte(preflightJSONOutput), &preflightReport); err != nil {
 		t.Fatalf("decode preflight debug json: %v\n%s", err, preflightJSONOutput)
 	}
-	if preflightReport.Preflight == nil || preflightReport.Preflight.Headers["X-Myc-Node"] != "b70" || preflightReport.Preflight.ContentLength != 16 || !preflightReport.Preflight.TextualToolCall || preflightReport.OwnerTelemetry == nil || len(preflightReport.OwnerTelemetry.RunMetrics) != 1 || len(preflightReport.OwnerTelemetry.SessionTimeline) != 1 || preflightReport.Diagnosis == nil || preflightReport.Diagnosis.Class != "owner_completed_warm" {
+	if preflightReport.Preflight == nil || preflightReport.Preflight.Headers["X-Myc-Node"] != "owner-node" || preflightReport.Preflight.ContentLength != 16 || !preflightReport.Preflight.TextualToolCall || preflightReport.OwnerTelemetry == nil || len(preflightReport.OwnerTelemetry.RunMetrics) != 1 || len(preflightReport.OwnerTelemetry.SessionTimeline) != 1 || preflightReport.Diagnosis == nil || preflightReport.Diagnosis.Class != "owner_completed_warm" {
 		t.Fatalf("preflight debug report = %+v", preflightReport)
 	}
-	if preflightReport.Optimization == nil || preflightReport.Optimization.Project != "strict-json-batch" || preflightReport.Optimization.Model != "strict-json-model" || preflightReport.Optimization.NodeID != "b70" || preflightReport.Optimization.PresetID != "tiny" || preflightReport.Optimization.Request.ToolName != "echo" || preflightReport.Optimization.UsageTotalTokens != 26 || preflightReport.Optimization.TTFTMS != 34 || preflightReport.Optimization.UpstreamWallMS != 512 || preflightReport.Optimization.FailureLayer != "none" {
+	if preflightReport.Optimization == nil || preflightReport.Optimization.Project != "strict-json-batch" || preflightReport.Optimization.Model != "strict-json-model" || preflightReport.Optimization.NodeID != "owner-node" || preflightReport.Optimization.PresetID != "tiny" || preflightReport.Optimization.Request.ToolName != "echo" || preflightReport.Optimization.UsageTotalTokens != 26 || preflightReport.Optimization.TTFTMS != 34 || preflightReport.Optimization.UpstreamWallMS != 512 || preflightReport.Optimization.FailureLayer != "none" {
 		t.Fatalf("preflight optimization report = %+v", preflightReport.Optimization)
 	}
 	if preflightReport.Consumer != nil {
@@ -2620,14 +2620,14 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read job debug: %v", err)
 	}
-	if strings.Contains(string(jobDebugData), "rpc-secret") || !strings.Contains(string(jobDebugData), `"owner_telemetry"`) || !strings.Contains(string(jobDebugData), `"diagnosis"`) || !strings.Contains(string(jobDebugData), `"job_id": "job-a"`) || !strings.Contains(string(jobDebugData), `"consumer"`) || !strings.Contains(string(jobDebugData), `"run_id": "tool-prod-smoke"`) || !strings.Contains(string(jobDebugData), `"status": "error"`) {
+	if strings.Contains(string(jobDebugData), "rpc-secret") || !strings.Contains(string(jobDebugData), `"owner_telemetry"`) || !strings.Contains(string(jobDebugData), `"diagnosis"`) || !strings.Contains(string(jobDebugData), `"route_availability"`) || !strings.Contains(string(jobDebugData), `"route_status": "warm_instance_available"`) || !strings.Contains(string(jobDebugData), `"job_id": "job-a"`) || !strings.Contains(string(jobDebugData), `"consumer"`) || !strings.Contains(string(jobDebugData), `"run_id": "tool-prod-smoke"`) || !strings.Contains(string(jobDebugData), `"status": "error"`) {
 		t.Fatalf("job debug artifact = %s", jobDebugData)
 	}
 	optimizationData, err := os.ReadFile(filepath.Join(outDir, "optimization.json"))
 	if err != nil {
 		t.Fatalf("read optimization artifact: %v", err)
 	}
-	if strings.Contains(string(optimizationData), "rpc-secret") || !strings.Contains(string(optimizationData), `"project": "strict-json-batch"`) || !strings.Contains(string(optimizationData), `"consumer_status": "error"`) || !strings.Contains(string(optimizationData), `"consumer_result": "fail"`) || !strings.Contains(string(optimizationData), `"consumer_quality_gate": "response-parser"`) || !strings.Contains(string(optimizationData), `"content_length": 16`) || !strings.Contains(string(optimizationData), `"reasoning_length": 0`) || !strings.Contains(string(optimizationData), `"json_content": true`) || !strings.Contains(string(optimizationData), `"tool_call_count": 0`) || !strings.Contains(string(optimizationData), `"textual_tool_call": true`) || !strings.Contains(string(optimizationData), `"failure_layer": "quality"`) || !strings.Contains(string(optimizationData), `"usage_total_tokens": 26`) {
+	if strings.Contains(string(optimizationData), "rpc-secret") || !strings.Contains(string(optimizationData), `"project": "strict-json-batch"`) || !strings.Contains(string(optimizationData), `"route_availability"`) || !strings.Contains(string(optimizationData), `"route_status": "warm_instance_available"`) || !strings.Contains(string(optimizationData), `"startability": "ready"`) || !strings.Contains(string(optimizationData), `"consumer_status": "error"`) || !strings.Contains(string(optimizationData), `"consumer_result": "fail"`) || !strings.Contains(string(optimizationData), `"consumer_quality_gate": "response-parser"`) || !strings.Contains(string(optimizationData), `"content_length": 16`) || !strings.Contains(string(optimizationData), `"reasoning_length": 0`) || !strings.Contains(string(optimizationData), `"json_content": true`) || !strings.Contains(string(optimizationData), `"tool_call_count": 0`) || !strings.Contains(string(optimizationData), `"textual_tool_call": true`) || !strings.Contains(string(optimizationData), `"failure_layer": "quality"`) || !strings.Contains(string(optimizationData), `"usage_total_tokens": 26`) {
 		t.Fatalf("optimization artifact = %s", optimizationData)
 	}
 
@@ -2681,10 +2681,10 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 		t.Fatalf("debug summary: %v\n%s", err, output)
 	}
 	for _, want := range []string{
-		"evidence\tkind=optimization\tjob=job-a\tproject=strict-json-batch\trun=strict-json-run\titem=item-001\tstatus=ok\tresult=pass\tmodel=strict-json-model\tnode=b70\tbackend=vllm\tpreset=tiny\tcontext=0/0",
+		"evidence\tkind=optimization\tjob=job-a\tproject=strict-json-batch\trun=strict-json-run\titem=item-001\tstatus=ok\tresult=pass\tmodel=strict-json-model\tnode=owner-node\tbackend=vllm\tpreset=tiny\troute_status=warm_instance_available\tstartability=ready\twarm_instances=1\tloading_instances=0\tunfinished_jobs=0\tcontext=0/0",
 		"tool=true\ttool_choice=auto\tfinish=stop\tcontent=16\treasoning=0\tjson=true\ttextual_tool=true\tusage_available=true\tusage=16/10/26",
 		"owner_metrics=true\tlive_model=false/-\tfailure_layer=none\tfailure_class=owner_completed_warm",
-		"evidence\tkind=preflight\tjob=-\tproject=tool-canary\trun=-\titem=-\tstatus=-\tresult=-\tmodel=tool-model-large\tnode=-\tbackend=-\tpreset=-\tcontext=32768/32768\tcontext_ok=true",
+		"evidence\tkind=preflight\tjob=-\tproject=tool-canary\trun=-\titem=-\tstatus=-\tresult=-\tmodel=tool-model-large\tnode=-\tbackend=-\tpreset=-\troute_status=-\tstartability=-\twarm_instances=0\tloading_instances=0\tunfinished_jobs=0\tcontext=32768/32768\tcontext_ok=true",
 		"live_model=false/missing\tfailure_layer=catalog\tfailure_class=live_catalog_model_missing",
 	} {
 		if !strings.Contains(output, want) {
@@ -2708,6 +2708,9 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	if len(rows) != 2 || rows[0].Kind != "optimization" || rows[0].ConsumerRun != "strict-json-run" || rows[1].Kind != "preflight" || rows[1].FailureClass != "live_catalog_model_missing" {
 		t.Fatalf("summary rows = %+v", rows)
 	}
+	if rows[0].RouteStatus != "warm_instance_available" || rows[0].Startability != "ready" || rows[0].WarmInstances != 1 {
+		t.Fatalf("summary route availability row = %+v", rows[0])
+	}
 	if strings.Contains(jsonOutput, bundleDir) || strings.Contains(jsonOutput, preflightOnlyDir) || strings.Contains(jsonOutput, "rpc-secret") || strings.Contains(jsonOutput, "gateway-secret") {
 		t.Fatalf("summary json leaked path or secret: %s", jsonOutput)
 	}
@@ -2720,6 +2723,15 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	}
 	if strings.Count(filteredOutput, "evidence\t") != 1 || !strings.Contains(filteredOutput, "failure_class=live_catalog_model_missing") || strings.Contains(filteredOutput, "job=job-a") {
 		t.Fatalf("filtered summary output = %s", filteredOutput)
+	}
+	routeFilteredOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--route-status", "warm_instance_available", "--startability", "ready"})
+	})
+	if err != nil {
+		t.Fatalf("route filtered debug summary: %v\n%s", err, routeFilteredOutput)
+	}
+	if strings.Count(routeFilteredOutput, "evidence\t") != 1 || !strings.Contains(routeFilteredOutput, "route_status=warm_instance_available\tstartability=ready") || strings.Contains(routeFilteredOutput, "failure_class=live_catalog_model_missing") {
+		t.Fatalf("route filtered summary output = %s", routeFilteredOutput)
 	}
 
 	groupedOutput := captureStdout(t, func() {
@@ -2734,6 +2746,20 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	} {
 		if !strings.Contains(groupedOutput, want) {
 			t.Fatalf("grouped summary missing %q:\n%s", want, groupedOutput)
+		}
+	}
+	routeGroupedOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--group-by", "startability"})
+	})
+	if err != nil {
+		t.Fatalf("route grouped debug summary: %v\n%s", err, routeGroupedOutput)
+	}
+	for _, want := range []string{
+		"group\tby=startability\tkey=ready\tcount=1",
+		"group\tby=startability\tkey=unknown\tcount=1",
+	} {
+		if !strings.Contains(routeGroupedOutput, want) {
+			t.Fatalf("route grouped summary missing %q:\n%s", want, routeGroupedOutput)
 		}
 	}
 
@@ -2769,8 +2795,8 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 	cold := true
 	warm := false
 	rows := []debugSummaryRow{
-		{Model: "model-a", NodeID: "node-a", PresetID: "preset-a", FailureLayer: "none", ContextCap: 65536, MinContextCap: 32768, ContextAdequate: true, LiveModelChecked: true, LiveModelAvailable: true, LiveModelStatus: "ok", UsageAvailable: true, UsageTotalTokens: 100, ColdLoad: &cold, LoadWallMS: 400, TTFTMS: 30, UpstreamWallMS: 200},
-		{Model: "model-b", NodeID: "node-b", PresetID: "preset-b", FailureLayer: "consumer_contract", ContextCap: 8192, MinContextCap: 32768, ContextAdequate: false, LiveModelChecked: true, LiveModelStatus: "missing", UsageAvailable: false, ColdLoad: &warm, UpstreamWallMS: 50},
+		{Model: "model-a", NodeID: "node-a", PresetID: "preset-a", RouteStatus: "warm_instance_available", Startability: "ready", WarmInstances: 1, FailureLayer: "none", ContextCap: 65536, MinContextCap: 32768, ContextAdequate: true, LiveModelChecked: true, LiveModelAvailable: true, LiveModelStatus: "ok", UsageAvailable: true, UsageTotalTokens: 100, ColdLoad: &cold, LoadWallMS: 400, TTFTMS: 30, UpstreamWallMS: 200},
+		{Model: "model-b", NodeID: "node-b", PresetID: "preset-b", RouteStatus: "no_matching_instance", Startability: "operator_action_required", FailureLayer: "consumer_contract", ContextCap: 8192, MinContextCap: 32768, ContextAdequate: false, LiveModelChecked: true, LiveModelStatus: "missing", UsageAvailable: false, ColdLoad: &warm, UpstreamWallMS: 50},
 		{Model: "model-c", FailureLayer: "catalog", LiveModelChecked: true, LiveModelStatus: "error"},
 		{Model: "model-d"},
 	}
@@ -2786,6 +2812,9 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 	}
 	if got := filterDebugSummaryRows(append([]debugSummaryRow(nil), rows...), debugSummaryFilter{LiveModel: "error"}); len(got) != 1 || got[0].Model != "model-c" {
 		t.Fatalf("live error filter = %+v", got)
+	}
+	if got := filterDebugSummaryRows(append([]debugSummaryRow(nil), rows...), debugSummaryFilter{RouteStatus: "no_matching_instance", Startability: "operator_action_required"}); len(got) != 1 || got[0].Model != "model-b" {
+		t.Fatalf("route availability filter = %+v", got)
 	}
 
 	latencyRows := append([]debugSummaryRow(nil), rows...)
@@ -2808,7 +2837,7 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 		}
 	}
 
-	for _, groupBy := range []string{"failure-layer", "node", "model", "preset", "context", "live-model", "usage", "cold"} {
+	for _, groupBy := range []string{"failure-layer", "node", "model", "preset", "route-status", "startability", "context", "live-model", "usage", "cold"} {
 		groups, err := groupDebugSummaryRows(rows, groupBy)
 		if err != nil {
 			t.Fatalf("group %s: %v", groupBy, err)
@@ -3430,11 +3459,24 @@ func writeOperatorDebugFixture(t *testing.T) (string, string) {
 	}); err != nil {
 		t.Fatalf("SaveNode: %v", err)
 	}
+	if err := store.SaveNode(context.Background(), domain.Node{
+		ID:           "owner-node",
+		Name:         "Owner B",
+		Address:      "http://owner.test",
+		Status:       domain.NodeReady,
+		HeartbeatAt:  now,
+		Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 24576}},
+	}); err != nil {
+		t.Fatalf("SaveNode owner: %v", err)
+	}
 	if err := store.SavePreset(context.Background(), testPreset("tiny")); err != nil {
 		t.Fatalf("SavePreset: %v", err)
 	}
 	if err := store.SaveInstance(context.Background(), domain.ModelInstance{ID: "inst-a", NodeID: "node-a", PresetID: "tiny", State: domain.InstReady}); err != nil {
 		t.Fatalf("SaveInstance: %v", err)
+	}
+	if err := store.SaveInstance(context.Background(), domain.ModelInstance{ID: "inst_2", NodeID: "owner-node", PresetID: "tiny", State: domain.InstReady}); err != nil {
+		t.Fatalf("SaveInstance owner: %v", err)
 	}
 	if err := store.SaveJob(context.Background(), domain.Job{
 		ID:       "job-a",
@@ -3507,7 +3549,9 @@ func writeOperatorDebugFixture(t *testing.T) (string, string) {
   "store_path": ` + quoteJSON(dbPath) + `,
   "compute": true,
   "rpc_token": "rpc-secret",
-  "gateway_token": "gateway-secret"
+  "gateway_token": "gateway-secret",
+  "projects": [{"id": "strict-json-batch", "default_model": "strict-json-model", "context_cap": 4096}],
+  "presets": [{"id": "tiny", "model_ref": "strict-json-model", "aliases": ["strict-json-model"], "backend": "vllm", "context_length": 4096, "node_id": "owner-node", "provider_profile": "openai-compatible"}]
 }`
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -3531,7 +3575,7 @@ func writeGatewayPreflightEvidenceFixture(t *testing.T, jobID string) string {
 			ToolChoice:       "auto",
 		},
 		Expectations: &gatewayPreflightExpectationEvidence{
-			ExpectNode:            "b70",
+			ExpectNode:            "owner-node",
 			RequireToolCall:       true,
 			RejectTextualToolCall: true,
 			MinPromptTokens:       16,
@@ -3550,7 +3594,7 @@ func writeGatewayPreflightEvidenceFixture(t *testing.T, jobID string) string {
 		},
 		Headers: map[string]string{
 			"X-Myc-Job":                              jobID,
-			"X-Myc-Node":                             "b70",
+			"X-Myc-Node":                             "owner-node",
 			"X-Myc-Instance":                         "inst_2",
 			"X-Myc-Backend":                          "vllm",
 			"X-Myc-Decision":                         "placed_on_warm_instance",

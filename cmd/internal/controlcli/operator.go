@@ -364,12 +364,14 @@ func runDebugSummary(args []string) error {
 	nodeID := fs.String("node", "", "only include rows served by this node")
 	model := fs.String("model", "", "only include rows for this model")
 	presetID := fs.String("preset", "", "only include rows for this preset")
+	routeStatus := fs.String("route-status", "", "only include rows with this route availability status")
+	startability := fs.String("startability", "", "only include rows with this route startability")
 	contextFilter := fs.String("context", "any", "context filter: any, adequate, undersized, or unknown")
 	liveModelFilter := fs.String("live-model", "any", "live catalog filter: any, available, missing, error, or unchecked")
 	usageFilter := fs.String("usage", "any", "usage filter: any, available, or missing")
 	coldFilter := fs.String("cold", "any", "cold-load filter: any, cold, warm, or unknown")
 	sortBy := fs.String("sort", "input", "sort rows by input, failure, node, model, context, latency, or usage")
-	groupBy := fs.String("group-by", "", "print grouped counts by failure-layer, node, model, preset, context, live-model, usage, or cold")
+	groupBy := fs.String("group-by", "", "print grouped counts by failure-layer, node, model, preset, context, route-status, startability, live-model, usage, or cold")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -382,6 +384,8 @@ func runDebugSummary(args []string) error {
 		NodeID:       *nodeID,
 		Model:        *model,
 		PresetID:     *presetID,
+		RouteStatus:  *routeStatus,
+		Startability: *startability,
 		Context:      *contextFilter,
 		LiveModel:    *liveModelFilter,
 		Usage:        *usageFilter,
@@ -438,6 +442,11 @@ type debugSummaryRow struct {
 	Backend                 string `json:"backend,omitempty"`
 	PresetID                string `json:"preset_id,omitempty"`
 	Decision                string `json:"decision,omitempty"`
+	RouteStatus             string `json:"route_status,omitempty"`
+	Startability            string `json:"startability,omitempty"`
+	WarmInstances           int    `json:"warm_instances,omitempty"`
+	LoadingInstances        int    `json:"loading_instances,omitempty"`
+	UnfinishedJobs          int    `json:"unfinished_jobs,omitempty"`
 	ContextCap              int    `json:"context_cap,omitempty"`
 	MinContextCap           int    `json:"min_context_cap,omitempty"`
 	ContextAdequate         bool   `json:"context_adequate,omitempty"`
@@ -473,6 +482,8 @@ type debugSummaryFilter struct {
 	NodeID       string
 	Model        string
 	PresetID     string
+	RouteStatus  string
+	Startability string
 	Context      string
 	LiveModel    string
 	Usage        string
@@ -530,6 +541,12 @@ func filterDebugSummaryRows(rows []debugSummaryRow, filter debugSummaryFilter) [
 			continue
 		}
 		if filter.PresetID != "" && row.PresetID != filter.PresetID {
+			continue
+		}
+		if filter.RouteStatus != "" && row.RouteStatus != filter.RouteStatus {
+			continue
+		}
+		if filter.Startability != "" && row.Startability != filter.Startability {
 			continue
 		}
 		if !debugSummaryContextMatches(row, filter.Context) || !debugSummaryLiveModelMatches(row, filter.LiveModel) || !debugSummaryUsageMatches(row, filter.Usage) || !debugSummaryColdMatches(row, filter.Cold) {
@@ -673,6 +690,10 @@ func debugSummaryGroupKey(row debugSummaryRow, groupBy string) (string, error) {
 		return firstNonEmpty(row.Model, "unknown"), nil
 	case "preset":
 		return firstNonEmpty(row.PresetID, "unknown"), nil
+	case "route-status":
+		return firstNonEmpty(row.RouteStatus, "unknown"), nil
+	case "startability":
+		return firstNonEmpty(row.Startability, "unknown"), nil
 	case "context":
 		switch {
 		case row.MinContextCap == 0:
@@ -786,6 +807,11 @@ func debugSummaryRowFromOptimization(kind string, evidence jobOptimizationEviden
 		Backend:                 evidence.Backend,
 		PresetID:                evidence.PresetID,
 		Decision:                evidence.Decision,
+		RouteStatus:             routeAvailabilityStatus(evidence.RouteAvailability),
+		Startability:            routeAvailabilityStartability(evidence.RouteAvailability),
+		WarmInstances:           routeAvailabilityWarmInstances(evidence.RouteAvailability),
+		LoadingInstances:        routeAvailabilityLoadingInstances(evidence.RouteAvailability),
+		UnfinishedJobs:          routeAvailabilityUnfinishedJobs(evidence.RouteAvailability),
 		StatusCode:              evidence.StatusCode,
 		GatewayError:            evidence.GatewayError,
 		ContextCap:              evidence.ContextCap,
@@ -830,7 +856,7 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 	if row.ColdLoad != nil {
 		cold = strconv.FormatBool(*row.ColdLoad)
 	}
-	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\thttp_status=%d\tgateway_error=%s\n",
+	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\troute_status=%s\tstartability=%s\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\thttp_status=%d\tgateway_error=%s\n",
 		emptyDash(row.Kind),
 		emptyDash(row.JobID),
 		emptyDash(row.Project),
@@ -842,6 +868,11 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 		emptyDash(row.NodeID),
 		emptyDash(row.Backend),
 		emptyDash(row.PresetID),
+		emptyDash(row.RouteStatus),
+		emptyDash(row.Startability),
+		row.WarmInstances,
+		row.LoadingInstances,
+		row.UnfinishedJobs,
 		row.ContextCap,
 		row.MinContextCap,
 		row.ContextAdequate,
@@ -1515,6 +1546,7 @@ type jobOptimizationEvidence struct {
 	Model                   string                               `json:"model,omitempty"`
 	Request                 gatewayPreflightRequestEvidence      `json:"request,omitempty"`
 	Expectations            *gatewayPreflightExpectationEvidence `json:"expectations,omitempty"`
+	RouteAvailability       *routeAvailabilityEvidence           `json:"route_availability,omitempty"`
 	NodeID                  string                               `json:"node_id,omitempty"`
 	Backend                 string                               `json:"backend,omitempty"`
 	InstanceID              string                               `json:"instance_id,omitempty"`
@@ -1574,6 +1606,7 @@ func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvi
 		out.GatewayError = report.Preflight.Error
 		out.Request = report.Preflight.Request
 		out.Expectations = report.Preflight.Expectations
+		out.RouteAvailability = report.RouteAvailability
 		out.Decision = preflightHeader(report, "X-Myc-Decision")
 		out.NodeID = preflightHeader(report, "X-Myc-Node")
 		out.Backend = preflightHeader(report, "X-Myc-Backend")
@@ -1736,6 +1769,41 @@ func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvide
 		emptyDash(evidence.FailureLayer),
 		emptyDash(evidence.FailureClass),
 	)
+}
+
+func routeAvailabilityStatus(evidence *routeAvailabilityEvidence) string {
+	if evidence == nil {
+		return ""
+	}
+	return evidence.RouteStatus
+}
+
+func routeAvailabilityStartability(evidence *routeAvailabilityEvidence) string {
+	if evidence == nil {
+		return ""
+	}
+	return evidence.Startability
+}
+
+func routeAvailabilityWarmInstances(evidence *routeAvailabilityEvidence) int {
+	if evidence == nil {
+		return 0
+	}
+	return evidence.WarmInstances
+}
+
+func routeAvailabilityLoadingInstances(evidence *routeAvailabilityEvidence) int {
+	if evidence == nil {
+		return 0
+	}
+	return evidence.LoadingInstances
+}
+
+func routeAvailabilityUnfinishedJobs(evidence *routeAvailabilityEvidence) int {
+	if evidence == nil {
+		return 0
+	}
+	return evidence.UnfinishedJobs
 }
 
 func diagnoseJobDebugReport(report jobDebugReport) *jobDebugDiagnosis {
@@ -2374,6 +2442,7 @@ func writeDebugBundle(ctx context.Context, req debugBundleRequest) error {
 				}
 			}
 			report.Consumer = req.Consumer
+			report.RouteAvailability = inspectPreflightRouteAvailability(ctx, req.ConfigPath, storePath, report.Preflight)
 			report.OwnerTelemetry = fetchJobOwnerTelemetry(ctx, storePath, report, firstNonEmpty(req.RPCToken, cfg.RPCToken), clientOrDefault(req.Client))
 			report.Diagnosis = diagnoseJobDebugReport(report)
 			report.Optimization = summarizeJobOptimizationEvidence(report)
