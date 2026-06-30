@@ -49,6 +49,10 @@ func WithContextLength(n int) func(*domain.Preset) {
 	return func(p *domain.Preset) { p.ContextLength = n }
 }
 
+func WithLayerCount(n int) func(*domain.Preset) {
+	return func(p *domain.Preset) { p.LayerCount = n }
+}
+
 func WithLaunchProfile(profile string) func(*domain.Preset) {
 	return func(p *domain.Preset) { p.LaunchProfile = profile }
 }

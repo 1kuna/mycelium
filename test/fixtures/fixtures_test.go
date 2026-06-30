@@ -77,8 +77,8 @@ func TestAllJobOptions(t *testing.T) {
 }
 
 func TestAllPresetAndInstanceOptions(t *testing.T) {
-	p := MakePreset(WithPresetID("preset1"), WithModelRef("model1"), WithAliases("alias1"), WithWeights(12), WithArtifactSize(13), WithKVPerToken(0.5), WithContextLength(4096), WithLaunchProfile("profile"), WithLaunchArgs("--x", "1"), WithPresetNode("node1"))
-	if p.ID != "preset1" || p.ModelRef != "model1" || strings.Join(p.Aliases, ",") != "alias1" || p.EstWeightsMB != 12 || p.KVPerTokenMB != 0.5 || p.ContextLength != 4096 || p.NodeID != "node1" {
+	p := MakePreset(WithPresetID("preset1"), WithModelRef("model1"), WithAliases("alias1"), WithWeights(12), WithArtifactSize(13), WithKVPerToken(0.5), WithContextLength(4096), WithLayerCount(40), WithLaunchProfile("profile"), WithLaunchArgs("--x", "1"), WithPresetNode("node1"))
+	if p.ID != "preset1" || p.ModelRef != "model1" || strings.Join(p.Aliases, ",") != "alias1" || p.EstWeightsMB != 12 || p.KVPerTokenMB != 0.5 || p.ContextLength != 4096 || p.LayerCount != 40 || p.NodeID != "node1" {
 		t.Fatalf("preset options = %+v", p)
 	}
 	if p.ArtifactSizeMB != 13 {

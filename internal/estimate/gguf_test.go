@@ -165,7 +165,7 @@ func TestCommandParserParsesJSONMetadata(t *testing.T) {
 	}
 	dir := t.TempDir()
 	script := filepath.Join(dir, "parser.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '{\"weights_mb\":12,\"kv_per_token_mb\":0.5,\"context_length\":2048}'\n"), 0o700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '{\"weights_mb\":12,\"kv_per_token_mb\":0.5,\"context_length\":2048,\"layer_count\":36}'\n"), 0o700); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
 	model := filepath.Join(dir, "model.gguf")
@@ -174,7 +174,7 @@ func TestCommandParserParsesJSONMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if metadata.ModelRef != model || metadata.Format != "gguf" || metadata.WeightsMB != 12 {
+	if metadata.ModelRef != model || metadata.Format != "gguf" || metadata.WeightsMB != 12 || metadata.LayerCount != 36 {
 		t.Fatalf("metadata = %+v", metadata)
 	}
 	if got := renderParserArgs([]string{"--model={model}"}, "abc"); got[0] != "--model=abc" {
