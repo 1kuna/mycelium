@@ -359,8 +359,9 @@ artifacts under the directory, prefers bundle optimization summaries when both
 exist, and prints secret-safe rows for route, model, owner node, preset,
 route availability/startability, context gate, JSON/tool/streaming mode,
 finish reason, content/reasoning lengths, usage availability, timing, owner
-telemetry, live-catalog agreement, and failure class. It does not print bearer
-tokens, prompts, completions, or artifact paths.
+telemetry, gateway attempts, queue wait, live-catalog agreement, and failure
+class. It does not print bearer tokens, prompts, completions, or artifact
+paths.
 Use filters such as `--failure-layer catalog`, `--node <node-id>`,
 `--model <model-or-alias>`, `--context undersized`, `--live-model missing`,
 `--quality-gate <sanitized-gate>`, `--route-status no_matching_instance`,
@@ -375,9 +376,9 @@ Use `--rollup-by route-status`, `--rollup-by model`, or
 Rollups aggregate success/failure/unknown outcome counts, failure layers,
 quality gates, usage availability, total tokens, context adequacy,
 tool/textual-tool shape, JSON/reasoning boundaries, live-catalog availability,
-warm/cold placement, latency samples, and route-availability instance counts.
-They still report only sanitized fields already present in preflight or
-debug-bundle artifacts.
+warm/cold placement, attempt counts, queue-wait samples, latency samples, and
+route-availability instance counts. They still report only sanitized fields
+already present in preflight or debug-bundle artifacts.
 
 ## Debugging Workflow
 

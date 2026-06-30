@@ -2681,10 +2681,10 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 		t.Fatalf("debug summary: %v\n%s", err, output)
 	}
 	for _, want := range []string{
-		"evidence\tkind=optimization\tjob=job-a\tproject=strict-json-batch\trun=strict-json-run\titem=item-001\tstatus=ok\tresult=pass\tquality_gate=schema\tmodel=strict-json-model\tnode=owner-node\tbackend=vllm\tpreset=tiny\troute_status=warm_instance_available\tstartability=ready\twarm_instances=1\tloading_instances=0\tunfinished_jobs=0\tcontext=0/0",
+		"evidence\tkind=optimization\tjob=job-a\tproject=strict-json-batch\trun=strict-json-run\titem=item-001\tstatus=ok\tresult=pass\tquality_gate=schema\tmodel=strict-json-model\tnode=owner-node\tbackend=vllm\tpreset=tiny\tattempts=1\troute_status=warm_instance_available\tstartability=ready\twarm_instances=1\tloading_instances=0\tunfinished_jobs=0\tcontext=0/0",
 		"tool=true\ttool_choice=auto\tfinish=stop\tcontent=16\treasoning=0\tjson=true\ttextual_tool=true\tusage_available=true\tusage=16/10/26",
 		"owner_metrics=true\tlive_model=false/-\tfailure_layer=none\tfailure_class=owner_completed_warm",
-		"evidence\tkind=preflight\tjob=-\tproject=tool-canary\trun=-\titem=-\tstatus=-\tresult=-\tquality_gate=-\tmodel=tool-model-large\tnode=-\tbackend=-\tpreset=-\troute_status=-\tstartability=-\twarm_instances=0\tloading_instances=0\tunfinished_jobs=0\tcontext=32768/32768\tcontext_ok=true",
+		"evidence\tkind=preflight\tjob=-\tproject=tool-canary\trun=-\titem=-\tstatus=-\tresult=-\tquality_gate=-\tmodel=tool-model-large\tnode=-\tbackend=-\tpreset=-\tattempts=0\troute_status=-\tstartability=-\twarm_instances=0\tloading_instances=0\tunfinished_jobs=0\tcontext=32768/32768\tcontext_ok=true",
 		"live_model=false/missing\tfailure_layer=catalog\tfailure_class=live_catalog_model_missing",
 	} {
 		if !strings.Contains(output, want) {
@@ -2798,7 +2798,8 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 		"rollup\tby=failure-layer\tkey=none\tcount=1\tsuccess=1\tfailure=0\tunknown=0",
 		"usage_available=1\tusage_missing=0\ttotal_tokens=26",
 		"tool_requested=1\ttextual_tool_calls=1\tjson_content=1",
-		"latency_samples=1\tavg_latency_ms=546\tmax_latency_ms=546\twarm_instances=1",
+		"attempt_samples=1\ttotal_attempts=1\tmax_attempts=1\tqueue_samples=1\tavg_queue_ms=7\tmax_queue_ms=7",
+		"latency_samples=1\tavg_latency_ms=553\tmax_latency_ms=553\twarm_instances=1",
 	} {
 		if !strings.Contains(rollupOutput, want) {
 			t.Fatalf("rollup summary missing %q:\n%s", want, rollupOutput)
@@ -2814,7 +2815,7 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	if err := json.Unmarshal([]byte(rollupJSON), &rollups); err != nil {
 		t.Fatalf("decode rollup summary json: %v\n%s", err, rollupJSON)
 	}
-	if len(rollups) != 2 || rollups[0].Key != "unknown" || rollups[0].CatalogFailures != 1 || rollups[1].Key != "warm_instance_available" || rollups[1].Successes != 1 || rollups[1].TotalTokens != 26 || rollups[1].AverageLatencyMS != 546 {
+	if len(rollups) != 2 || rollups[0].Key != "unknown" || rollups[0].CatalogFailures != 1 || rollups[1].Key != "warm_instance_available" || rollups[1].Successes != 1 || rollups[1].TotalTokens != 26 || rollups[1].AverageLatencyMS != 553 || rollups[1].AverageQueueWaitMS != 7 || rollups[1].MaxAttempts != 1 {
 		t.Fatalf("rollups = %+v", rollups)
 	}
 	qualityRollupOutput := captureStdout(t, func() {
@@ -2862,7 +2863,7 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 	cold := true
 	warm := false
 	rows := []debugSummaryRow{
-		{Model: "model-a", NodeID: "node-a", PresetID: "preset-a", ConsumerQualityGate: "schema", RouteStatus: "warm_instance_available", Startability: "ready", WarmInstances: 1, FailureLayer: "none", ContextCap: 65536, MinContextCap: 32768, ContextAdequate: true, LiveModelChecked: true, LiveModelAvailable: true, LiveModelStatus: "ok", UsageAvailable: true, UsageTotalTokens: 100, ColdLoad: &cold, LoadWallMS: 400, TTFTMS: 30, UpstreamWallMS: 200},
+		{Model: "model-a", NodeID: "node-a", PresetID: "preset-a", ConsumerQualityGate: "schema", Attempts: 2, RouteStatus: "warm_instance_available", Startability: "ready", WarmInstances: 1, FailureLayer: "none", ContextCap: 65536, MinContextCap: 32768, ContextAdequate: true, LiveModelChecked: true, LiveModelAvailable: true, LiveModelStatus: "ok", UsageAvailable: true, UsageTotalTokens: 100, ColdLoad: &cold, QueueWaitMS: 25, LoadWallMS: 400, TTFTMS: 30, UpstreamWallMS: 200},
 		{Model: "model-b", NodeID: "node-b", PresetID: "preset-b", ConsumerQualityGate: "parser", RouteStatus: "no_matching_instance", Startability: "operator_action_required", FailureLayer: "consumer_contract", ContextCap: 8192, MinContextCap: 32768, ContextAdequate: false, LiveModelChecked: true, LiveModelStatus: "missing", UsageAvailable: false, ColdLoad: &warm, UpstreamWallMS: 50},
 		{Model: "model-c", FailureLayer: "catalog", LiveModelChecked: true, LiveModelStatus: "error"},
 		{Model: "model-d"},
@@ -2891,7 +2892,7 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 	if err := sortDebugSummaryRows(latencyRows, "latency"); err != nil {
 		t.Fatalf("sort latency: %v", err)
 	}
-	if latencyRows[0].Model != "model-a" || debugSummaryLatencyMS(latencyRows[0]) != 630 {
+	if latencyRows[0].Model != "model-a" || debugSummaryLatencyMS(latencyRows[0]) != 655 {
 		t.Fatalf("latency sort rows = %+v", latencyRows)
 	}
 	usageRows := append([]debugSummaryRow(nil), rows...)
@@ -2930,7 +2931,7 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 	if rollups[1].Key != "model-c" || rollups[1].CatalogFailures != 1 || rollups[1].LiveCatalogMissingOrError != 1 {
 		t.Fatalf("catalog rollup = %+v", rollups)
 	}
-	if rollups[2].Key != "model-a" || rollups[2].UnknownOutcomes != 1 || rollups[2].UsageAvailable != 1 || rollups[2].TotalTokens != 100 || rollups[2].ContextAdequate != 1 || rollups[2].ToolRequested != 0 || rollups[2].ColdLoads != 1 || rollups[2].AverageLatencyMS != 630 || rollups[2].MaxLatencyMS != 630 || rollups[2].WarmInstances != 1 {
+	if rollups[2].Key != "model-a" || rollups[2].UnknownOutcomes != 1 || rollups[2].UsageAvailable != 1 || rollups[2].TotalTokens != 100 || rollups[2].ContextAdequate != 1 || rollups[2].ToolRequested != 0 || rollups[2].ColdLoads != 1 || rollups[2].AttemptSamples != 1 || rollups[2].TotalAttempts != 2 || rollups[2].AverageQueueWaitMS != 25 || rollups[2].MaxQueueWaitMS != 25 || rollups[2].AverageLatencyMS != 655 || rollups[2].MaxLatencyMS != 655 || rollups[2].WarmInstances != 1 {
 		t.Fatalf("success-ish rollup = %+v", rollups)
 	}
 	if _, err := rollupDebugSummaryRows(rows, "bad"); err == nil || !strings.Contains(err.Error(), "--rollup-by") {
@@ -3687,7 +3688,7 @@ func writeGatewayPreflightEvidenceFixture(t *testing.T, jobID string) string {
 			"X-Myc-Decision":                         "placed_on_warm_instance",
 			"X-Myc-Attempts":                         "1",
 			"X-Myc-Cold-Load":                        "false",
-			"X-Myc-Queue-Wait-Ms":                    "0",
+			"X-Myc-Queue-Wait-Ms":                    "7",
 			"X-Myc-Upstream-Wall-Ms":                 "512",
 			"X-Myc-Structured-Output":                "json_schema",
 			"X-Myc-Guided-Decoding-Requested":        "true",
