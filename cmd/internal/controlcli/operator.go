@@ -173,6 +173,7 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 		return err
 	}
 	var preflight *gatewayPreflightEvidence
+	preflightOnly := false
 	if *preflightPath != "" {
 		evidence, err := readGatewayPreflightEvidence(*preflightPath)
 		if err != nil {
@@ -181,15 +182,24 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 		preflight = &evidence
 		evidenceJobID := preflightEvidenceJobID(evidence)
 		if evidenceJobID == "" {
-			return fmt.Errorf("preflight evidence %s has no X-Myc-Job header", *preflightPath)
+			if jobID != "" {
+				return fmt.Errorf("preflight evidence %s has no X-Myc-Job header", *preflightPath)
+			}
+			preflightOnly = true
+		} else {
+			if jobID != "" && jobID != evidenceJobID {
+				return fmt.Errorf("preflight evidence job %q does not match requested job %q", evidenceJobID, jobID)
+			}
+			jobID = evidenceJobID
 		}
-		if jobID != "" && jobID != evidenceJobID {
-			return fmt.Errorf("preflight evidence job %q does not match requested job %q", evidenceJobID, jobID)
-		}
-		jobID = evidenceJobID
 	}
 	if jobID == "" {
-		return fmt.Errorf("usage: myce debug job <job-id> [--db path] [--json] [--preflight path] [--owner-telemetry]")
+		if !preflightOnly {
+			return fmt.Errorf("usage: myce debug job <job-id> [--db path] [--json] [--preflight path] [--owner-telemetry]")
+		}
+		if *ownerTelemetry {
+			return fmt.Errorf("--owner-telemetry requires preflight evidence with X-Myc-Job")
+		}
 	}
 	storePath := debugJobStorePath(*configPath, *dbPath)
 	consumer, err := consumerEvidenceFromFlags(*consumerRun, *consumerItem, *consumerStatus, *consumerElapsedMS, *consumerError, *consumerResult, *consumerQualityGate)
@@ -198,6 +208,19 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 	}
 	if consumer == nil && preflight != nil {
 		consumer = preflight.Consumer
+	}
+	if preflightOnly {
+		report := jobDebugReport{
+			Preflight: preflight,
+			Consumer:  consumer,
+		}
+		report.Diagnosis = diagnoseJobDebugReport(report)
+		report.Optimization = summarizeJobOptimizationEvidence(report)
+		if *jsonOut {
+			return writePrettyJSON(os.Stdout, report)
+		}
+		printJobDebugReport(os.Stdout, report)
+		return nil
 	}
 	report, err := buildJobDebugReport(ctx, storePath, jobID)
 	if err != nil {
@@ -646,7 +669,11 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 	} else if len(report.RunMetrics) > 0 && report.RunMetrics[0].NodeID != "" {
 		owner = report.RunMetrics[0].NodeID
 	}
-	fmt.Fprintf(w, "job\t%s\t%s\tmodel=%s\tproject=%s\towner=%s\n", report.Job.ID, report.Job.Status, emptyDash(report.Job.Model), emptyDash(report.Job.Project), owner)
+	if report.Job.ID != "" {
+		fmt.Fprintf(w, "job\t%s\t%s\tmodel=%s\tproject=%s\towner=%s\n", report.Job.ID, report.Job.Status, emptyDash(report.Job.Model), emptyDash(report.Job.Project), owner)
+	} else if report.Preflight != nil {
+		fmt.Fprintf(w, "job\t-\tpreflight_only\tmodel=%s\tproject=%s\towner=-\n", emptyDash(report.Preflight.Model), emptyDash(report.Preflight.Project))
+	}
 	if report.Parent != nil {
 		fmt.Fprintf(w, "parent\t%s\t%s\n", report.Parent.ID, report.Parent.Status)
 	}
@@ -805,6 +832,11 @@ type jobOptimizationEvidence struct {
 	SessionPhases           []string                             `json:"session_phases,omitempty"`
 	FailureClass            string                               `json:"failure_class,omitempty"`
 	FailureLayer            string                               `json:"failure_layer,omitempty"`
+	LiveModelChecked        bool                                 `json:"live_model_checked,omitempty"`
+	LiveModelStatus         string                               `json:"live_model_status,omitempty"`
+	LiveModelAvailable      bool                                 `json:"live_model_available,omitempty"`
+	LiveModelMatch          string                               `json:"live_model_match,omitempty"`
+	LiveModelError          string                               `json:"live_model_error,omitempty"`
 	ConsumerStatus          string                               `json:"consumer_status,omitempty"`
 	ConsumerError           string                               `json:"consumer_error,omitempty"`
 	ConsumerResult          string                               `json:"consumer_result,omitempty"`
@@ -847,6 +879,13 @@ func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvi
 		out.UsageTotalTokens = report.Preflight.Usage.TotalTokens
 		out.ContextUsed = report.Preflight.Usage.TotalTokens
 		out.ContextCap = report.Preflight.Request.ContextCap
+		if report.Preflight.LiveModel != nil {
+			out.LiveModelChecked = report.Preflight.LiveModel.Checked
+			out.LiveModelStatus = report.Preflight.LiveModel.Status
+			out.LiveModelAvailable = report.Preflight.LiveModel.ModelAvailable
+			out.LiveModelMatch = report.Preflight.LiveModel.ModelMatch
+			out.LiveModelError = report.Preflight.LiveModel.Error
+		}
 		if report.Preflight.Expectations != nil {
 			out.MinContextCap = report.Preflight.Expectations.MinContextCap
 		}
@@ -882,6 +921,10 @@ func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvi
 			out.FailureClass = "consumer_contract_context_too_small"
 			out.FailureLayer = "consumer_contract"
 		}
+	}
+	if out.LiveModelChecked && !out.LiveModelAvailable {
+		out.FailureLayer = "catalog"
+		out.FailureClass = liveCatalogFailureClass(out.LiveModelStatus, out.LiveModelError)
 	}
 	if out.ConsumerResult == "fail" && (out.FailureLayer == "" || out.FailureLayer == "none" || out.FailureLayer == "consumer") {
 		out.FailureClass = "consumer_quality_failed"
@@ -925,6 +968,8 @@ func failureLayerForDiagnosis(diagnosis jobDebugDiagnosis, report jobDebugReport
 	switch diagnosis.Class {
 	case "owner_telemetry_unavailable":
 		return "telemetry"
+	case "gateway_catalog_unavailable", "live_catalog_model_missing", "live_catalog_check_failed":
+		return "catalog"
 	case "owner_failed":
 		return "owner"
 	case "cleanup_required", "inflight_or_stale":
@@ -940,7 +985,7 @@ func failureLayerForDiagnosis(diagnosis jobDebugDiagnosis, report jobDebugReport
 }
 
 func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvidence) {
-	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tconsumer_result=%s\tquality_gate=%s\tnode=%s\tpreset=%s\tmodel=%s\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tfinish=%s\tcontent_len=%d\treasoning_len=%d\tjson=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\n",
+	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tconsumer_result=%s\tquality_gate=%s\tnode=%s\tpreset=%s\tmodel=%s\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tfinish=%s\tcontent_len=%d\treasoning_len=%d\tjson=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tlive_model=%t/%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\n",
 		emptyDash(evidence.JobID),
 		emptyDash(evidence.Project),
 		emptyDash(evidence.ConsumerStatus),
@@ -961,6 +1006,8 @@ func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvide
 		evidence.UsagePromptTokens,
 		evidence.UsageCompletionTokens,
 		evidence.UsageTotalTokens,
+		evidence.LiveModelAvailable,
+		emptyDash(evidence.LiveModelStatus),
 		evidence.LoadWallMS,
 		evidence.TTFTMS,
 		evidence.UpstreamWallMS,
@@ -970,6 +1017,14 @@ func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvide
 }
 
 func diagnoseJobDebugReport(report jobDebugReport) *jobDebugDiagnosis {
+	if report.Preflight != nil && report.Preflight.LiveModel != nil && report.Preflight.LiveModel.Checked && !report.Preflight.LiveModel.ModelAvailable {
+		class := liveCatalogFailureClass(report.Preflight.LiveModel.Status, report.Preflight.LiveModel.Error)
+		return &jobDebugDiagnosis{
+			Class:   class,
+			Summary: fmt.Sprintf("live gateway catalog check failed for model %s: status=%s error=%s", emptyDash(report.Preflight.LiveModel.Model), emptyDash(report.Preflight.LiveModel.Status), emptyDash(report.Preflight.LiveModel.Error)),
+			Next:    "activate a gateway binary that serves the route catalog or request a model/alias that the live catalog exposes",
+		}
+	}
 	if report.OwnerTelemetry != nil && report.OwnerTelemetry.Error != "" {
 		return &jobDebugDiagnosis{
 			Class:   "owner_telemetry_unavailable",
@@ -1016,6 +1071,20 @@ func diagnoseJobDebugReport(report jobDebugReport) *jobDebugDiagnosis {
 		Class:   "insufficient_evidence",
 		Summary: "job state does not identify owner completion, owner failure, or stale cleanup",
 		Next:    "preserve X-Myc-Job/preflight evidence and rerun with --owner-telemetry",
+	}
+}
+
+func liveCatalogFailureClass(status, errorText string) string {
+	switch status {
+	case "missing":
+		return "live_catalog_model_missing"
+	case "error":
+		if strings.Contains(errorText, "404") {
+			return "gateway_catalog_unavailable"
+		}
+		return "live_catalog_check_failed"
+	default:
+		return "live_catalog_check_failed"
 	}
 }
 
