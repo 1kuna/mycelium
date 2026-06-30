@@ -283,7 +283,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 			ExpectedConcurrency: 2,
 			Preemption:          domain.PreemptSoft,
 		},
-		Payload: json.RawMessage(`{"prompt":"private text"}`),
+		Payload: json.RawMessage(`{"input_bytes":123}`),
 	}
 	data, err := json.Marshal(intent)
 	if err != nil {
@@ -303,18 +303,21 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode workload admit: %v", err)
 			}
-			if req.Job.ContextRequest != 8192 || string(req.Payload) != `{"prompt":"private text"}` {
+			if req.Job.ContextRequest != 8192 || string(req.Payload) != `{"input_bytes":123}` {
 				t.Fatalf("admission request = %+v payload=%s", req.Job, req.Payload)
 			}
 			w.WriteHeader(http.StatusAccepted)
+			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionQueued, PresetID: req.Job.PresetID, PayloadBytes: len(req.Payload), PayloadStored: true, PayloadRedacted: true, ResultRedacted: true}
 			_ = json.NewEncoder(w).Encode(workload.AdmissionResponse{
-				Job:           domain.Job{ID: req.Job.ID, Model: req.Job.Model, PresetID: req.Job.PresetID, Project: req.Job.Project, Status: domain.JobQueued},
+				Job:           domain.Job{ID: req.Job.ID, Model: req.Job.Model, PresetID: req.Job.PresetID, Project: req.Job.Project, Status: domain.JobQueued, Result: result},
 				Decision:      domain.PlacementDecision{JobID: req.Job.ID, Action: domain.ActionQueued, Preset: domain.Preset{ID: req.Job.PresetID}},
+				Result:        result,
 				Queued:        true,
 				PayloadBytes:  len(req.Payload),
 				PayloadStored: true,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/workloads/job-a":
+			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultRedacted: true}
 			_ = json.NewEncoder(w).Encode(workload.StatusResponse{Job: domain.Job{
 				ID:                  "job-a",
 				Model:               "model-a",
@@ -325,7 +328,17 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 				ExpectedConcurrency: 2,
 				Preemption:          domain.PreemptSoft,
 				Status:              domain.JobQueued,
-			}})
+				Result:              result,
+			}, Result: result})
+		case r.Method == http.MethodPost && r.URL.Path == "/workloads/drain" && r.URL.Query().Get("limit") == "2":
+			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultRedacted: true}
+			_ = json.NewEncoder(w).Encode(workload.DrainResponse{Results: []workload.AdmissionResponse{{
+				Job:           domain.Job{ID: "job-a", Model: "model-a", PresetID: "preset-a", Project: "project-a", Status: domain.JobRunning, Result: result},
+				Decision:      domain.PlacementDecision{JobID: "job-a", Action: domain.ActionLoadedNew, NodeID: "node-a", Preset: domain.Preset{ID: "preset-a"}},
+				Result:        result,
+				PayloadBytes:  len(intent.Payload),
+				PayloadStored: true,
+			}}})
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -337,7 +350,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	if err != nil {
 		t.Fatalf("jobs admit: %v", err)
 	}
-	if !strings.Contains(admitOut, "workload\tjob-a\tstatus=queued\tqueued=true") || strings.Contains(admitOut, "private text") {
+	if !strings.Contains(admitOut, "workload\tjob-a\tstatus=queued\tqueued=true") || strings.Contains(admitOut, "input_bytes") {
 		t.Fatalf("admit output = %q", admitOut)
 	}
 	statusOut := captureStdout(t, func() {
@@ -346,8 +359,26 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	if err != nil {
 		t.Fatalf("jobs status: %v", err)
 	}
-	if !strings.Contains(statusOut, "context=8192\tconcurrency=2\tpreemption=soft") || strings.Contains(statusOut, "private text") {
+	if !strings.Contains(statusOut, "context=8192\tconcurrency=2\tpreemption=soft") || strings.Contains(statusOut, "input_bytes") {
 		t.Fatalf("status output = %q", statusOut)
+	}
+	drainOut := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"jobs", "drain", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--limit", "2"}, client)
+	})
+	if err != nil {
+		t.Fatalf("jobs drain: %v", err)
+	}
+	if !strings.Contains(drainOut, "drained\t1") || !strings.Contains(drainOut, "node=node-a") || strings.Contains(drainOut, "input_bytes") {
+		t.Fatalf("drain output = %q", drainOut)
+	}
+	jsonOut := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"jobs", "status", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a", "--json"}, client)
+	})
+	if err != nil {
+		t.Fatalf("jobs status json: %v", err)
+	}
+	if !strings.Contains(jsonOut, `"payload_redacted":true`) || strings.Contains(jsonOut, "input_bytes") {
+		t.Fatalf("json output = %q", jsonOut)
 	}
 }
 
@@ -402,6 +433,22 @@ func TestRunJobsAdmitAndStatusErrorBranches(t *testing.T) {
 	err = runJobsStatus(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a"}, badResponseClient)
 	if err == nil {
 		t.Fatal("bad status response accepted")
+	}
+	err = runJobsDrain(context.Background(), nil, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--url") {
+		t.Fatalf("drain missing url err = %v", err)
+	}
+	err = runJobsDrain(context.Background(), []string{"--url", "http://peer.test", "--limit", "0"}, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--limit") {
+		t.Fatalf("drain bad limit err = %v", err)
+	}
+	err = runJobsDrain(context.Background(), []string{"--url", "http://peer.test"}, errorClient)
+	if err == nil || !strings.Contains(err.Error(), "409") {
+		t.Fatalf("drain error response err = %v", err)
+	}
+	err = runJobsDrain(context.Background(), []string{"--url", "http://peer.test"}, badResponseClient)
+	if err == nil {
+		t.Fatal("bad drain response accepted")
 	}
 }
 

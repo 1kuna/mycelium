@@ -2173,7 +2173,7 @@ func TestServiceCompleteFailAndReleaseLifecycleBranches(t *testing.T) {
 	if err := service.CompleteJob(context.Background(), domain.Job{ID: job.ID, Error: "old"}, domain.Lease{}); err != nil {
 		t.Fatalf("CompleteJob: %v", err)
 	}
-	if got := store.jobs[job.ID]; got.Status != domain.JobDone || got.Error != "" {
+	if got := store.jobs[job.ID]; got.Status != domain.JobDone || got.Error != "" || got.Result == nil || !got.Result.Terminal || !got.Result.ResultRedacted {
 		t.Fatalf("complete job = %+v", got)
 	}
 	completeErr := errors.New("complete coordinator")
@@ -2293,6 +2293,15 @@ func TestServiceCompleteFailAndReleaseLifecycleBranches(t *testing.T) {
 	}
 	if strings.Join(ownerAdmission.Calls, ",") != "release:lease-a" {
 		t.Fatalf("owner calls = %+v", ownerAdmission.Calls)
+	}
+}
+
+func TestMarkJobResultTerminalFillsMissingErrorFromCause(t *testing.T) {
+	cause := errors.New("owner failed")
+	job := domain.Job{ID: "job-a"}
+	markJobResultTerminal(&job, domain.Lease{ID: "lease-a", NodeID: "node-a"}, cause)
+	if job.Error != cause.Error() || job.Result == nil || !job.Result.Terminal || job.Result.LeaseID != "lease-a" || job.Result.NodeID != "node-a" {
+		t.Fatalf("job = %+v", job)
 	}
 }
 
@@ -2468,6 +2477,35 @@ func TestServiceDrain(t *testing.T) {
 	service.Store = &runtimeStore{saveJobErr: errors.New("save"), saveJobErrAt: 1}
 	if _, err := service.Drain(context.Background(), 1); err == nil {
 		t.Fatal("expected submit error")
+	}
+}
+
+func TestServiceDrainPreservesLocalQueuedPayloadEvidence(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(40, 10).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	store := &runtimeStore{}
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}, admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+	service.Queue.EnqueueWithPayload(fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID)), []byte(`{"input_bytes":123}`))
+
+	results, err := service.Drain(context.Background(), 1)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("Drain = %+v %v", results, err)
+	}
+	job := store.jobs["job-a"]
+	if job.Status != domain.JobRunning || job.Result == nil || job.Result.PayloadBytes == 0 || !job.Result.PayloadStored || !job.Result.PayloadRedacted {
+		t.Fatalf("job result = %+v", job)
 	}
 }
 

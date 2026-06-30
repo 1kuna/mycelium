@@ -38,6 +38,7 @@ import (
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/internal/telemetry"
 	"mycelium/internal/workload"
+	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
 )
 
@@ -3949,7 +3950,7 @@ func TestWorkloadHTTPAdmitsQueuedIntentAndReportsStatus(t *testing.T) {
 	runtime := &recordingWorkloadRuntime{store: store, decision: domain.PlacementDecision{JobID: "job-a", Action: domain.ActionQueued, Preset: domain.Preset{ID: "preset-a"}}}
 	mux := http.NewServeMux()
 	mountWorkloadHTTP(mux, runtime, store, "rpc-secret")
-	body := `{"job":{"id":"job-a","task_type":"chat","model":"model-a","preset":"preset-a","project":"project-a","priority":"interactive","speed_pref":"latency","context_request":8192,"expected_concurrency":2,"preemption":"soft"},"payload":{"prompt":"private text"}}`
+	body := `{"job":{"id":"job-a","task_type":"chat","model":"model-a","preset":"preset-a","project":"project-a","priority":"interactive","speed_pref":"latency","context_request":8192,"expected_concurrency":2,"preemption":"soft"},"payload":{"input_bytes":123}}`
 	req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer rpc-secret")
 	rec := httptest.NewRecorder()
@@ -3965,10 +3966,10 @@ func TestWorkloadHTTPAdmitsQueuedIntentAndReportsStatus(t *testing.T) {
 	if !resp.Queued || resp.Job.Status != domain.JobQueued || resp.Job.ContextRequest != 8192 || resp.PayloadBytes == 0 || !resp.PayloadStored {
 		t.Fatalf("admit response = %+v", resp)
 	}
-	if strings.Contains(rec.Body.String(), "private text") {
+	if strings.Contains(rec.Body.String(), "input_bytes") {
 		t.Fatalf("admit response leaked payload: %s", rec.Body.String())
 	}
-	if string(runtime.payload) != `{"prompt":"private text"}` {
+	if string(runtime.payload) != `{"input_bytes":123}` {
 		t.Fatalf("runtime payload = %s", runtime.payload)
 	}
 
@@ -4045,6 +4046,99 @@ func TestWorkloadHTTPReturnsCreatedForImmediatePlacement(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("created status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	node.Accelerators = []domain.Accelerator{{Index: 0, Vendor: "test", Kind: "gpu", VRAMTotalMB: 1000}}
+	node.MaxUtil = 1
+	node.Status = domain.NodeReady
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("model-a"), fixtures.WithWeights(100), fixtures.WithKVPerToken(0), fixtures.WithContextLength(1024))
+	agent := mocks.NewNodeAgent(node)
+	admission := &mocks.AdmissionController{}
+	placer := &gatedWorkloadPlacer{nodeID: node.ID, preset: preset, claim: domain.Claim{WeightsMB: 100}}
+	service := &scheduler.Service{
+		Placer:  placer,
+		Fleet:   staticWorkloadFleet{node: node},
+		Nodes:   workloadNodeResolver{agents: map[string]ports.NodeAgent{node.ID: agent}, admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Owners:  workloadNodeResolver{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Queue:   scheduler.NewQueue(mocks.NewFakeClock(time.Unix(50, 0).UTC())),
+		Store:   store,
+		Clock:   mocks.NewFakeClock(time.Unix(50, 0).UTC()),
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, service, store, "rpc-secret")
+
+	admit := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(`{"job":{"id":"job-a","task_type":"chat","model":"model-a","project":"project-a","priority":"interactive","speed_pref":"throughput","preemption":"soft"},"payload":{"input_bytes":123}}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(admit, req)
+	if admit.Code != http.StatusAccepted || strings.Contains(admit.Body.String(), "input_bytes") {
+		t.Fatalf("admit status/body = %d %s", admit.Code, admit.Body.String())
+	}
+	var admitted workload.AdmissionResponse
+	if err := json.Unmarshal(admit.Body.Bytes(), &admitted); err != nil {
+		t.Fatalf("decode admit: %v", err)
+	}
+	if !admitted.Queued || admitted.Job.Status != domain.JobQueued || admitted.Result == nil || !admitted.Result.PayloadRedacted {
+		t.Fatalf("admitted = %+v", admitted)
+	}
+
+	placer.ready = true
+	drain := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/workloads/drain?limit=1", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(drain, req)
+	if drain.Code != http.StatusOK || strings.Contains(drain.Body.String(), "input_bytes") {
+		t.Fatalf("drain status/body = %d %s", drain.Code, drain.Body.String())
+	}
+	var drained workload.DrainResponse
+	if err := json.Unmarshal(drain.Body.Bytes(), &drained); err != nil {
+		t.Fatalf("decode drain: %v", err)
+	}
+	if len(drained.Results) != 1 || drained.Results[0].Job.Status != domain.JobRunning || drained.Results[0].Result == nil || drained.Results[0].Result.NodeID != node.ID || drained.Results[0].Result.LeaseID == "" {
+		t.Fatalf("drained = %+v", drained)
+	}
+	if len(agent.Loaded) != 1 || len(admission.Requests) == 0 {
+		t.Fatalf("agent loaded=%+v admission=%+v", agent.Loaded, admission.Requests)
+	}
+
+	running, err := store.Job(ctx, "job-a")
+	if err != nil {
+		t.Fatalf("running job: %v", err)
+	}
+	if err := service.FinishJob(ctx, running, domain.Lease{ID: running.Result.LeaseID, JobID: running.ID, NodeID: running.Result.NodeID}, nil); err != nil {
+		t.Fatalf("FinishJob: %v", err)
+	}
+	leases, err := store.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("ListLeases: %v", err)
+	}
+	if len(leases) != 0 {
+		t.Fatalf("leases after finish = %+v", leases)
+	}
+
+	status := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/workloads/job-a", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(status, req)
+	if status.Code != http.StatusOK || strings.Contains(status.Body.String(), "input_bytes") {
+		t.Fatalf("status code/body = %d %s", status.Code, status.Body.String())
+	}
+	var out workload.StatusResponse
+	if err := json.Unmarshal(status.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if out.Job.Status != domain.JobDone || out.Result == nil || !out.Result.Terminal || !out.Result.ResultRedacted || out.Result.PayloadBytes == 0 {
+		t.Fatalf("terminal status = %+v", out)
 	}
 }
 
@@ -4623,6 +4717,7 @@ func (r *recordingRescueRuntime) SubmitWithPayload(_ context.Context, job domain
 type recordingWorkloadRuntime struct {
 	store    *workloadMemoryStore
 	decision domain.PlacementDecision
+	drained  []scheduler.Result
 	job      domain.Job
 	payload  []byte
 	err      error
@@ -4638,9 +4733,80 @@ func (r *recordingWorkloadRuntime) SubmitWithPayload(_ context.Context, job doma
 		if r.decision.Action != "" && r.decision.Action != domain.ActionQueued {
 			job.Status = domain.JobRunning
 		}
+		job.Result = &domain.JobResult{
+			Source:          "scheduler",
+			Decision:        r.decision,
+			NodeID:          r.decision.NodeID,
+			PresetID:        r.decision.Preset.ID,
+			Action:          r.decision.Action,
+			PayloadBytes:    len(payload),
+			PayloadStored:   len(payload) > 0,
+			PayloadRedacted: len(payload) > 0,
+			ResultRedacted:  true,
+		}
 		_ = r.store.SaveJob(context.Background(), job)
 	}
 	return scheduler.Result{Decision: r.decision}, nil
+}
+
+func (r *recordingWorkloadRuntime) Drain(_ context.Context, _ int) ([]scheduler.Result, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return append([]scheduler.Result(nil), r.drained...), nil
+}
+
+type gatedWorkloadPlacer struct {
+	ready  bool
+	nodeID string
+	preset domain.Preset
+	claim  domain.Claim
+}
+
+func (p *gatedWorkloadPlacer) Place(_ context.Context, job domain.Job, _ domain.FleetSnapshot) (domain.PlacementDecision, error) {
+	decision := domain.PlacementDecision{
+		JobID:            job.ID,
+		Preset:           p.preset,
+		Claim:            p.claim,
+		SpeedPrefApplied: job.SpeedPref,
+	}
+	if !p.ready {
+		decision.Action = domain.ActionQueued
+		return decision, nil
+	}
+	decision.NodeID = p.nodeID
+	decision.AcceleratorSet = []int{0}
+	decision.Action = domain.ActionLoadedNew
+	return decision, nil
+}
+
+type staticWorkloadFleet struct {
+	node domain.Node
+}
+
+func (f staticWorkloadFleet) Snapshot(context.Context) (domain.FleetSnapshot, error) {
+	return domain.FleetSnapshot{Nodes: []domain.Node{f.node}}, nil
+}
+
+type workloadNodeResolver struct {
+	agents     map[string]ports.NodeAgent
+	admissions map[string]ports.AdmissionController
+}
+
+func (r workloadNodeResolver) NodeAgent(nodeID string) (ports.NodeAgent, error) {
+	agent := r.agents[nodeID]
+	if agent == nil {
+		return nil, domain.ErrUnreachable
+	}
+	return agent, nil
+}
+
+func (r workloadNodeResolver) AdmissionController(nodeID string) (ports.AdmissionController, error) {
+	admission := r.admissions[nodeID]
+	if admission == nil {
+		return nil, domain.ErrUnreachable
+	}
+	return admission, nil
 }
 
 type workloadMemoryStore struct {

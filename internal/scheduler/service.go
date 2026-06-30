@@ -72,17 +72,17 @@ func (s *Service) Submit(ctx context.Context, job domain.Job, hooks ...SubmitHoo
 	if s.Coordinator != nil {
 		return Result{}, fmt.Errorf("coordinated scheduler service requires SubmitWithPayload")
 	}
-	return s.submitLocal(ctx, job, hooks...)
+	return s.submitLocal(ctx, job, nil, hooks...)
 }
 
 func (s *Service) SubmitWithPayload(ctx context.Context, job domain.Job, payload []byte, hooks ...SubmitHooks) (Result, error) {
 	if s.Coordinator != nil {
 		return s.submitCoordinated(ctx, job, payload, hooks...)
 	}
-	return s.submitLocal(ctx, job, hooks...)
+	return s.submitLocal(ctx, job, payload, hooks...)
 }
 
-func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...SubmitHooks) (Result, error) {
+func (s *Service) submitLocal(ctx context.Context, job domain.Job, payload []byte, hooks ...SubmitHooks) (Result, error) {
 	if err := s.validate(); err != nil {
 		return Result{}, err
 	}
@@ -111,7 +111,8 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 			return s.rejectQueuedJob(ctx, job, "no instance available")
 		}
 		job.Status = domain.JobQueued
-		s.Queue.Enqueue(job)
+		job.Result = schedulerJobResult(decision, domain.ModelInstance{}, domain.Lease{}, len(payload))
+		s.Queue.EnqueueWithPayload(job, payload)
 		if err := s.Store.SaveJob(cleanupContext(ctx), job); err != nil {
 			return Result{Decision: decision}, err
 		}
@@ -179,6 +180,7 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, hooks ...Subm
 		}
 	}
 	job.Status = domain.JobRunning
+	job.Result = schedulerJobResult(decision, inst, lease, len(payload))
 	if err := s.Store.SaveInstance(cleanupContext(ctx), inst); err != nil {
 		if cleanupErr := s.cleanupLoadedInstance(ctx, inst, decision.InstanceID == "", releaseOwner); cleanupErr != nil {
 			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
@@ -236,6 +238,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 			return Result{Decision: decision}, err
 		}
 		job.Status = domain.JobQueued
+		job.Result = schedulerJobResult(decision, domain.ModelInstance{}, domain.Lease{}, len(payload))
 		s.Queue.EnqueueWithPayload(job, payload)
 		if err := s.Store.SaveJob(cleanupContext(ctx), job); err != nil {
 			return Result{Decision: decision}, err
@@ -250,6 +253,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 				return s.rejectCoordinatedQueuedJob(ctx, job, decision, err.Error())
 			}
 			job.Status = domain.JobQueued
+			job.Result = schedulerJobResult(decision, domain.ModelInstance{}, domain.Lease{}, len(payload))
 			s.Queue.EnqueueWithPayload(job, payload)
 			if saveErr := s.Store.SaveJob(cleanupContext(ctx), job); saveErr != nil {
 				return Result{Decision: decision}, errors.Join(err, saveErr)
@@ -267,6 +271,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 			return s.rejectCoordinatedQueuedJob(ctx, job, decision, "no instance available")
 		}
 		job.Status = domain.JobQueued
+		job.Result = schedulerJobResult(decision, domain.ModelInstance{}, ownerLease, len(payload))
 		s.Queue.EnqueueWithPayload(job, payload)
 		if err := s.Store.SaveJob(cleanupContext(ctx), job); err != nil {
 			return Result{Decision: decision}, err
@@ -340,6 +345,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		}
 	}
 	job.Status = domain.JobRunning
+	job.Result = schedulerJobResult(decision, inst, lease, len(payload))
 	if err := s.Store.SaveInstance(cleanupContext(ctx), inst); err != nil {
 		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
 			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
@@ -386,6 +392,8 @@ func (s *Service) Drain(ctx context.Context, limit int) ([]Result, error) {
 			if len(payload) == 0 {
 				return results, fmt.Errorf("queued job %q has no rescue payload for coordinated drain", job.ID)
 			}
+			result, submitErr = s.SubmitWithPayload(ctx, job, payload)
+		} else if len(payload) > 0 {
 			result, submitErr = s.SubmitWithPayload(ctx, job, payload)
 		} else {
 			result, submitErr = s.Submit(ctx, job)
@@ -467,6 +475,7 @@ func (s *Service) CompleteJob(ctx context.Context, job domain.Job, lease domain.
 	}
 	job.Status = domain.JobDone
 	job.Error = ""
+	markJobResultTerminal(&job, lease, nil)
 	if s.Coordinator != nil && lease.JobID != "" {
 		if err := s.Coordinator.Complete(ctx, lease.JobID); err != nil {
 			return err
@@ -486,6 +495,7 @@ func (s *Service) FailJob(ctx context.Context, job domain.Job, lease domain.Leas
 	if cause != nil {
 		job.Error = cause.Error()
 	}
+	markJobResultTerminal(&job, lease, cause)
 	if s.Coordinator != nil && lease.JobID != "" {
 		if err := s.Coordinator.Fail(ctx, lease.JobID, cause); err != nil {
 			return err
@@ -506,12 +516,14 @@ func (s *Service) FinishJob(ctx context.Context, job domain.Job, lease domain.Le
 		if cause == nil {
 			job.Status = domain.JobDone
 			job.Error = ""
+			markJobResultTerminal(&job, lease, nil)
 			if err := s.Coordinator.Complete(cleanupCtx, lease.JobID); err != nil {
 				return err
 			}
 		} else {
 			job.Status = domain.JobFailed
 			job.Error = cause.Error()
+			markJobResultTerminal(&job, lease, cause)
 			if err := s.Coordinator.Fail(cleanupCtx, lease.JobID, cause); err != nil {
 				return err
 			}
@@ -660,10 +672,54 @@ func rejectQueued(hooks []SubmitHooks) bool {
 	return false
 }
 
+func schedulerJobResult(decision domain.PlacementDecision, inst domain.ModelInstance, lease domain.Lease, payloadBytes int) *domain.JobResult {
+	return &domain.JobResult{
+		Source:          "scheduler",
+		Decision:        decision,
+		Instance:        inst,
+		LeaseID:         lease.ID,
+		NodeID:          nonEmpty(decision.NodeID, inst.NodeID, lease.NodeID),
+		PresetID:        nonEmpty(decision.Preset.ID, inst.PresetID),
+		Action:          decision.Action,
+		PayloadBytes:    payloadBytes,
+		PayloadStored:   payloadBytes > 0,
+		PayloadRedacted: payloadBytes > 0,
+		ResultRedacted:  true,
+	}
+}
+
+func markJobResultTerminal(job *domain.Job, lease domain.Lease, cause error) {
+	if job.Result == nil {
+		job.Result = &domain.JobResult{Source: "scheduler", ResultRedacted: true}
+	}
+	job.Result.Terminal = true
+	job.Result.ResultRedacted = true
+	if job.Result.LeaseID == "" {
+		job.Result.LeaseID = lease.ID
+	}
+	if job.Result.NodeID == "" {
+		job.Result.NodeID = lease.NodeID
+	}
+	if cause != nil && job.Error == "" {
+		job.Error = cause.Error()
+	}
+}
+
+func nonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func (s *Service) rejectQueuedJob(ctx context.Context, job domain.Job, reason string) (Result, error) {
 	err := fmt.Errorf("job %q queued: %s", job.ID, reason)
 	job.Status = domain.JobFailed
 	job.Error = err.Error()
+	job.Result = schedulerJobResult(domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued}, domain.ModelInstance{}, domain.Lease{}, 0)
+	job.Result.Terminal = true
 	if saveErr := s.Store.SaveJob(cleanupContext(ctx), job); saveErr != nil {
 		return Result{Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued}}, errors.Join(err, saveErr)
 	}
@@ -680,6 +736,8 @@ func (s *Service) rejectCoordinatedQueuedJob(ctx context.Context, job domain.Job
 	err := fmt.Errorf("job %q queued: %s", job.ID, reason)
 	job.Status = domain.JobFailed
 	job.Error = err.Error()
+	job.Result = schedulerJobResult(decision, domain.ModelInstance{}, domain.Lease{}, 0)
+	job.Result.Terminal = true
 	failErr := s.Coordinator.Fail(cleanupContext(ctx), job.ID, err)
 	saveErr := s.Store.SaveJob(cleanupContext(ctx), job)
 	return Result{Decision: decision}, errors.Join(err, failErr, saveErr)

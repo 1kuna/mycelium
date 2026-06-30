@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -820,7 +821,7 @@ func runProjects(ctx context.Context, args []string) error {
 
 func runJobs(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce jobs <list|admit|status>")
+		return fmt.Errorf("usage: myce jobs <list|admit|status|drain>")
 	}
 	switch args[0] {
 	case "list":
@@ -829,8 +830,10 @@ func runJobs(ctx context.Context, args []string, client *http.Client) error {
 		return runJobsAdmit(ctx, args[1:], client)
 	case "status":
 		return runJobsStatus(ctx, args[1:], client)
+	case "drain":
+		return runJobsDrain(ctx, args[1:], client)
 	default:
-		return fmt.Errorf("usage: myce jobs <list|admit|status>")
+		return fmt.Errorf("usage: myce jobs <list|admit|status|drain>")
 	}
 }
 
@@ -855,6 +858,7 @@ func runJobsAdmit(ctx context.Context, args []string, client *http.Client) error
 	peerURL := fs.String("url", "", "peer base URL")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
 	file := fs.String("file", "", "workload admission JSON file")
+	jsonOut := fs.Bool("json", false, "print JSON response")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -900,8 +904,10 @@ func runJobsAdmit(ctx context.Context, args []string, client *http.Client) error
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return err
 	}
-	fmt.Printf("workload\t%s\tstatus=%s\tqueued=%t\taction=%s\tnode=%s\tpreset=%s\tpayload_stored=%t\tpayload_bytes=%d\n",
-		out.Job.ID, out.Job.Status, out.Queued, out.Decision.Action, emptyDash(out.Decision.NodeID), emptyDash(out.Decision.Preset.ID), out.PayloadStored, out.PayloadBytes)
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+	printWorkloadAdmission(out)
 	return nil
 }
 
@@ -910,6 +916,7 @@ func runJobsStatus(ctx context.Context, args []string, client *http.Client) erro
 	peerURL := fs.String("url", "", "peer base URL")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
 	id := fs.String("id", "", "workload job id")
+	jsonOut := fs.Bool("json", false, "print JSON response")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -942,9 +949,94 @@ func runJobsStatus(ctx context.Context, args []string, client *http.Client) erro
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return err
 	}
-	fmt.Printf("workload\t%s\tstatus=%s\tproject=%s\tmodel=%s\tpreset=%s\tpriority=%s\tcontext=%d\tconcurrency=%d\tpreemption=%s\n",
-		out.Job.ID, out.Job.Status, out.Job.Project, out.Job.Model, out.Job.PresetID, out.Job.Priority, out.Job.ContextRequest, out.Job.ExpectedConcurrency, out.Job.Preemption)
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+	printWorkloadStatus(out)
 	return nil
+}
+
+func runJobsDrain(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("jobs drain", flag.ContinueOnError)
+	peerURL := fs.String("url", "", "peer base URL")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
+	limit := fs.Int("limit", 1, "maximum queued workloads to drain")
+	jsonOut := fs.Bool("json", false, "print JSON response")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *peerURL == "" {
+		return fmt.Errorf("--url is required")
+	}
+	if *limit <= 0 {
+		return fmt.Errorf("--limit must be positive")
+	}
+	endpoint := strings.TrimRight(*peerURL, "/") + "/workloads/drain?limit=" + url.QueryEscape(strconv.Itoa(*limit))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	if *rpcToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+*rpcToken)
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, err := readControlHTTPBody(resp.Body, "workload drain response body")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("workload drain returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	var out workload.DrainResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+	fmt.Printf("drained\t%d\n", len(out.Results))
+	for _, result := range out.Results {
+		printWorkloadAdmission(result)
+	}
+	return nil
+}
+
+func printWorkloadAdmission(out workload.AdmissionResponse) {
+	node := emptyDash(out.Decision.NodeID)
+	preset := emptyDash(out.Decision.Preset.ID)
+	if out.Result != nil {
+		node = emptyDash(out.Result.NodeID)
+		preset = emptyDash(out.Result.PresetID)
+	}
+	fmt.Printf("workload\t%s\tstatus=%s\tqueued=%t\taction=%s\tnode=%s\tpreset=%s\tpayload_stored=%t\tpayload_bytes=%d\tterminal=%t\n",
+		out.Job.ID, out.Job.Status, out.Queued, out.Decision.Action, node, preset, out.PayloadStored, out.PayloadBytes, out.Result != nil && out.Result.Terminal)
+}
+
+func printWorkloadStatus(out workload.StatusResponse) {
+	action := domain.PlacementAction("")
+	node := ""
+	preset := out.Job.PresetID
+	lease := ""
+	payloadStored := false
+	payloadBytes := 0
+	terminal := false
+	if out.Result != nil {
+		action = out.Result.Action
+		node = out.Result.NodeID
+		if out.Result.PresetID != "" {
+			preset = out.Result.PresetID
+		}
+		lease = out.Result.LeaseID
+		payloadStored = out.Result.PayloadStored
+		payloadBytes = out.Result.PayloadBytes
+		terminal = out.Result.Terminal
+	}
+	fmt.Printf("workload\t%s\tstatus=%s\tproject=%s\tmodel=%s\tpreset=%s\tpriority=%s\tcontext=%d\tconcurrency=%d\tpreemption=%s\taction=%s\tnode=%s\tlease=%s\tpayload_stored=%t\tpayload_bytes=%d\tterminal=%t\n",
+		out.Job.ID, out.Job.Status, out.Job.Project, out.Job.Model, preset, out.Job.Priority, out.Job.ContextRequest, out.Job.ExpectedConcurrency, out.Job.Preemption, action, emptyDash(node), emptyDash(lease), payloadStored, payloadBytes, terminal)
 }
 
 func runTelemetry(ctx context.Context, args []string) error {
