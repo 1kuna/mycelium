@@ -344,6 +344,12 @@ context gate, JSON/tool/streaming mode, finish reason, content/reasoning
 lengths, usage availability, timing, owner telemetry, live-catalog agreement,
 and failure class. It does not print bearer tokens, prompts, completions, or
 artifact paths.
+Use filters such as `--failure-layer catalog`, `--node <node-id>`,
+`--model <model-or-alias>`, `--context undersized`, `--live-model missing`,
+`--usage missing`, or `--cold cold` to narrow the rows. Use `--sort latency`,
+`--sort usage`, or `--sort context` for the common optimization views, and
+`--group-by failure-layer`, `--group-by node`, `--group-by model`, or
+`--group-by live-model` for count summaries.
 
 ## Debugging Workflow
 
