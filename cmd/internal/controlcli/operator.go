@@ -2001,7 +2001,7 @@ func failureLayerForDiagnosis(diagnosis jobDebugDiagnosis, report jobDebugReport
 }
 
 func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvidence) {
-	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tconsumer_result=%s\tquality_gate=%s\tnode=%s\tpreset=%s\tmodel=%s\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tfinish=%s\tcontent_len=%d\treasoning_len=%d\tjson=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tlive_model=%t/%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\n",
+	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tconsumer_result=%s\tquality_gate=%s\tnode=%s\tpreset=%s\tmodel=%s\tattempts=%d\tqueue_ms=%d\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tfinish=%s\tcontent_len=%d\treasoning_len=%d\tjson=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tlive_model=%t/%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\n",
 		emptyDash(evidence.JobID),
 		emptyDash(evidence.Project),
 		emptyDash(evidence.ConsumerStatus),
@@ -2010,6 +2010,8 @@ func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvide
 		emptyDash(evidence.NodeID),
 		emptyDash(evidence.PresetID),
 		emptyDash(evidence.Model),
+		evidence.Attempts,
+		evidence.QueueWaitMS,
 		evidence.ContextCap,
 		evidence.MinContextCap,
 		evidence.ContextAdequate,
