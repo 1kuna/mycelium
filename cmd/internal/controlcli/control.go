@@ -944,6 +944,8 @@ func runGatewayRoutes(ctx context.Context, args []string, client *http.Client) e
 	gatewayTokenEnv := fs.String("gateway-token-env", "", "environment variable containing the Mycelium gateway bearer token for --live")
 	gatewayTokenFile := fs.String("gateway-token-file", "", "file containing the Mycelium gateway bearer token for --live")
 	minContextCap := fs.Int("min-context-cap", 0, "mark routes below this context cap as undersized")
+	requireTools := fs.Bool("require-tools", false, "mark routes without vLLM tool-parser configuration as not ready")
+	requireAutoTools := fs.Bool("require-auto-tools", false, "mark routes without vLLM auto-tool-choice configuration as not ready")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -958,7 +960,11 @@ func runGatewayRoutes(ctx context.Context, args []string, client *http.Client) e
 	if err != nil {
 		return err
 	}
-	annotateGatewayRoutesContextMinimum(&report, *minContextCap)
+	annotateGatewayRoutesReadiness(&report, gatewayRouteReadinessOptions{
+		MinContextCap:    *minContextCap,
+		RequireTools:     *requireTools,
+		RequireAutoTools: *requireAutoTools,
+	})
 	if *jsonOut {
 		return writePrettyJSON(os.Stdout, report)
 	}
@@ -1003,6 +1009,8 @@ type gatewayRouteContract struct {
 	ToolParserConfigured         bool                `json:"tool_parser_configured"`
 	AutoToolChoiceConfigured     bool                `json:"auto_tool_choice_configured"`
 	RecommendedToolChoice        string              `json:"recommended_tool_choice,omitempty"`
+	ToolReadiness                string              `json:"tool_readiness,omitempty"`
+	RouteReadiness               string              `json:"route_readiness,omitempty"`
 	MinContextCap                int                 `json:"min_context_cap,omitempty"`
 	EffectiveContextCap          int                 `json:"effective_context_cap,omitempty"`
 	ContextAdequate              bool                `json:"context_adequate,omitempty"`
@@ -1010,6 +1018,12 @@ type gatewayRouteContract struct {
 	DiscoveryStatus              string              `json:"discovery_status"`
 	LiveModelAvailable           bool                `json:"live_model_available,omitempty"`
 	LiveModelMatch               string              `json:"live_model_match,omitempty"`
+}
+
+type gatewayRouteReadinessOptions struct {
+	MinContextCap    int
+	RequireTools     bool
+	RequireAutoTools bool
 }
 
 type gatewayRoutesLiveOptions struct {
@@ -1229,6 +1243,7 @@ func routeContractForPreset(cfg operatorPeerConfig, project domain.Project, pres
 		AutoToolChoiceConfigured:     launchArgConfigured(preset.LaunchArgs, "--enable-auto-tool-choice"),
 		DiscoveryStatus:              "ready_from_config",
 	}
+	contract.ToolReadiness = gatewayRouteToolReadiness(contract)
 	if contract.ToolParserConfigured {
 		if contract.AutoToolChoiceConfigured {
 			contract.RecommendedToolChoice = "forced-function-first; auto requires model/template proof"
@@ -1245,7 +1260,7 @@ func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 		fmt.Fprintf(w, "live\tgateway=%s\tstatus=%s\tmodels=%d\tauth=%s\terror=%s\n", emptyDash(report.Live.Gateway), emptyDash(report.Live.Status), report.Live.ModelCount, emptyDash(report.Live.AuthSource), emptyDash(report.Live.Error))
 	}
 	for _, route := range report.Routes {
-		fmt.Fprintf(w, "route\tproject=%s\tmodel=%s\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tproject_cap=%d\teffective_context=%d\tmin_context=%d\tcontext_issue=%s\tstatus=%s\tauth=%s\tproject_token=%t\tglobal_token=%t\tstructured=%t\tstreaming=%t\ttool_parser=%t\tauto_tool=%t\ttool_choice=%s\tlive_model=%t\tlive_match=%s\n",
+		fmt.Fprintf(w, "route\tproject=%s\tmodel=%s\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tproject_cap=%d\teffective_context=%d\tmin_context=%d\tcontext_issue=%s\treadiness=%s\ttool_readiness=%s\tstatus=%s\tauth=%s\tproject_token=%t\tglobal_token=%t\tstructured=%t\tstreaming=%t\ttool_parser=%t\tauto_tool=%t\ttool_choice=%s\tlive_model=%t\tlive_match=%s\n",
 			emptyDash(route.Project),
 			emptyDash(route.Model),
 			emptyDash(route.PresetID),
@@ -1256,6 +1271,8 @@ func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 			route.EffectiveContextCap,
 			route.MinContextCap,
 			emptyDash(route.ContextIssue),
+			emptyDash(route.RouteReadiness),
+			emptyDash(route.ToolReadiness),
 			route.DiscoveryStatus,
 			route.AuthHint,
 			route.ProjectTokenConfigured,
@@ -1271,20 +1288,54 @@ func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 	}
 }
 
-func annotateGatewayRoutesContextMinimum(report *gatewayRoutesReport, minContextCap int) {
+func annotateGatewayRoutesReadiness(report *gatewayRoutesReport, opts gatewayRouteReadinessOptions) {
 	for i := range report.Routes {
 		effective := effectiveRouteContextCap(report.Routes[i])
 		report.Routes[i].EffectiveContextCap = effective
-		if minContextCap <= 0 {
-			continue
+		report.Routes[i].ToolReadiness = gatewayRouteToolReadiness(report.Routes[i])
+		if opts.MinContextCap > 0 {
+			report.Routes[i].MinContextCap = opts.MinContextCap
+			if effective >= opts.MinContextCap {
+				report.Routes[i].ContextAdequate = true
+			} else {
+				report.Routes[i].ContextIssue = "undersized_context"
+			}
 		}
-		report.Routes[i].MinContextCap = minContextCap
-		if effective >= minContextCap {
-			report.Routes[i].ContextAdequate = true
-			continue
-		}
-		report.Routes[i].ContextIssue = "undersized_context"
+		report.Routes[i].RouteReadiness = gatewayRouteReadiness(report.Routes[i], report.Live, opts)
 	}
+}
+
+func gatewayRouteToolReadiness(route gatewayRouteContract) string {
+	switch {
+	case route.ToolParserConfigured && route.AutoToolChoiceConfigured:
+		return "auto_tool_configured"
+	case route.ToolParserConfigured:
+		return "forced_function_configured"
+	default:
+		return "not_tool_configured"
+	}
+}
+
+func gatewayRouteReadiness(route gatewayRouteContract, live gatewayRoutesLive, opts gatewayRouteReadinessOptions) string {
+	if route.DiscoveryStatus != "ready_from_config" {
+		return route.DiscoveryStatus
+	}
+	if live.Checked && (live.Status != "ok" || !route.LiveModelAvailable) {
+		return "live_catalog_missing"
+	}
+	if route.ContextIssue != "" {
+		return route.ContextIssue
+	}
+	if (opts.RequireTools || opts.RequireAutoTools) && !route.ToolParserConfigured {
+		return "tool_flags_missing"
+	}
+	if opts.RequireAutoTools && !route.AutoToolChoiceConfigured {
+		return "auto_tool_flags_missing"
+	}
+	if live.Checked && route.LiveModelAvailable {
+		return "live_ready"
+	}
+	return "config_ready"
 }
 
 func effectiveRouteContextCap(route gatewayRouteContract) int {

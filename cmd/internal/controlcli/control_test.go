@@ -1126,7 +1126,7 @@ func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "peer.json")
 	cfg := operatorPeerConfig{
 		ID:           "tool-node",
-		Listen:       "198.51.100.16:55274",
+		Listen:       "http://gateway.test",
 		GatewayToken: "global-secret",
 		GatewayProjectTokens: []operatorProjectToken{
 			{Project: "tool-project", Token: "project-secret"},
@@ -1175,10 +1175,10 @@ func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 		t.Fatalf("gateway routes: %v", runErr)
 	}
 	for _, want := range []string{
-		"gateway\thttp://198.51.100.16:55274\tbase_url=http://198.51.100.16:55274/v1\tpeer=tool-node",
-		"route\tproject=strict-json-project\tmodel=strict-json-model\tpreset=strict-json-vllm\tnode=node-json\tbackend=vllm\tcontext=4096\tproject_cap=4096\teffective_context=4096\tmin_context=0\tcontext_issue=-\tstatus=ready_from_config\tauth=global_gateway_token\tproject_token=false\tglobal_token=true\tstructured=true\tstreaming=true\ttool_parser=false\tauto_tool=false",
-		"route\tproject=tool-project\tmodel=tool-model-8192\tpreset=tool-model-8192-vllm\tnode=node-tool\tbackend=vllm\tcontext=8192\tproject_cap=8192\teffective_context=8192\tmin_context=0\tcontext_issue=-\tstatus=ready_from_config\tauth=project_token\tproject_token=true\tglobal_token=true\tstructured=true\tstreaming=true\ttool_parser=true\tauto_tool=true\ttool_choice=forced-function-first; auto requires model/template proof",
-		"route\tproject=missing-route\tmodel=does-not-exist\tpreset=-\tnode=-\tbackend=-\tcontext=0\tproject_cap=2048\teffective_context=2048\tmin_context=0\tcontext_issue=-\tstatus=preset_missing\tauth=global_gateway_token",
+		"gateway\thttp://gateway.test\tbase_url=http://gateway.test/v1\tpeer=tool-node",
+		"route\tproject=strict-json-project\tmodel=strict-json-model\tpreset=strict-json-vllm\tnode=node-json\tbackend=vllm\tcontext=4096\tproject_cap=4096\teffective_context=4096\tmin_context=0\tcontext_issue=-\treadiness=config_ready\ttool_readiness=not_tool_configured\tstatus=ready_from_config\tauth=global_gateway_token\tproject_token=false\tglobal_token=true\tstructured=true\tstreaming=true\ttool_parser=false\tauto_tool=false",
+		"route\tproject=tool-project\tmodel=tool-model-8192\tpreset=tool-model-8192-vllm\tnode=node-tool\tbackend=vllm\tcontext=8192\tproject_cap=8192\teffective_context=8192\tmin_context=0\tcontext_issue=-\treadiness=config_ready\ttool_readiness=auto_tool_configured\tstatus=ready_from_config\tauth=project_token\tproject_token=true\tglobal_token=true\tstructured=true\tstreaming=true\ttool_parser=true\tauto_tool=true\ttool_choice=forced-function-first; auto requires model/template proof",
+		"route\tproject=missing-route\tmodel=does-not-exist\tpreset=-\tnode=-\tbackend=-\tcontext=0\tproject_cap=2048\teffective_context=2048\tmin_context=0\tcontext_issue=-\treadiness=preset_missing\ttool_readiness=not_tool_configured\tstatus=preset_missing\tauth=global_gateway_token",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("gateway routes output missing %q:\n%s", want, output)
@@ -1202,11 +1202,28 @@ func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
 		t.Fatalf("decode gateway routes JSON: %v", err)
 	}
-	if report.BaseURL != "http://198.51.100.16:55274/v1" || len(report.Routes) != 3 {
+	if report.BaseURL != "http://gateway.test/v1" || len(report.Routes) != 3 {
 		t.Fatalf("gateway routes report = %+v", report)
 	}
-	if got := report.Routes[2]; got.Project != "tool-project" || !got.ProjectTokenConfigured || !got.ToolParserConfigured || !got.AutoToolChoiceConfigured || got.MinContextCap != 32768 || got.EffectiveContextCap != 8192 || got.ContextIssue != "undersized_context" || got.ContextAdequate {
+	if got := report.Routes[2]; got.Project != "tool-project" || !got.ProjectTokenConfigured || !got.ToolParserConfigured || !got.AutoToolChoiceConfigured || got.ToolReadiness != "auto_tool_configured" || got.RouteReadiness != "undersized_context" || got.MinContextCap != 32768 || got.EffectiveContextCap != 8192 || got.ContextIssue != "undersized_context" || got.ContextAdequate {
 		t.Fatalf("tool route contract = %+v", got)
+	}
+
+	toolRequiredOutput := captureStdout(t, func() {
+		jsonErr = RunWithClient(context.Background(), []string{"gateway", "routes", "--config", configPath, "--require-tools", "--json"}, nil)
+	})
+	if jsonErr != nil {
+		t.Fatalf("gateway routes tool-required json: %v", jsonErr)
+	}
+	report = gatewayRoutesReport{}
+	if err := json.Unmarshal([]byte(toolRequiredOutput), &report); err != nil {
+		t.Fatalf("decode tool-required gateway routes JSON: %v", err)
+	}
+	if got := report.Routes[1]; got.Project != "strict-json-project" || got.RouteReadiness != "tool_flags_missing" {
+		t.Fatalf("strict JSON route readiness = %+v", got)
+	}
+	if got := report.Routes[2]; got.Project != "tool-project" || got.RouteReadiness != "config_ready" {
+		t.Fatalf("tool route readiness = %+v", got)
 	}
 }
 
@@ -1257,8 +1274,10 @@ func TestRunGatewayRoutesComparesLiveModels(t *testing.T) {
 	for _, want := range []string{
 		"live\tgateway=http://gateway.test\tstatus=ok\tmodels=1",
 		"route\tproject=strict-json-project\tmodel=strict-json-model",
+		"readiness=live_ready",
 		"live_model=true\tlive_match=strict-json-model",
 		"route\tproject=tool-project\tmodel=tool-model-8192",
+		"readiness=live_catalog_missing",
 		"live_model=false\tlive_match=-",
 	} {
 		if !strings.Contains(output, want) {
@@ -1288,6 +1307,70 @@ func TestRunGatewayRoutesComparesLiveModels(t *testing.T) {
 	}
 	if !report.Routes[0].LiveModelAvailable || report.Routes[1].LiveModelAvailable {
 		t.Fatalf("live route availability = %+v", report.Routes)
+	}
+	if report.Routes[0].RouteReadiness != "live_ready" || report.Routes[1].RouteReadiness != "live_catalog_missing" {
+		t.Fatalf("live route readiness = %+v", report.Routes)
+	}
+}
+
+func TestGatewayRouteReadinessClassifiesConsumerRequirements(t *testing.T) {
+	ready := gatewayRouteContract{DiscoveryStatus: "ready_from_config"}
+	live := gatewayRoutesLive{Checked: true, Status: "ok"}
+
+	cases := []struct {
+		name  string
+		route gatewayRouteContract
+		live  gatewayRoutesLive
+		opts  gatewayRouteReadinessOptions
+		want  string
+	}{
+		{
+			name:  "missing preset",
+			route: gatewayRouteContract{DiscoveryStatus: "preset_missing"},
+			want:  "preset_missing",
+		},
+		{
+			name:  "live catalog missing",
+			route: ready,
+			live:  live,
+			want:  "live_catalog_missing",
+		},
+		{
+			name:  "undersized context",
+			route: gatewayRouteContract{DiscoveryStatus: "ready_from_config", ContextIssue: "undersized_context"},
+			opts:  gatewayRouteReadinessOptions{RequireTools: true},
+			want:  "undersized_context",
+		},
+		{
+			name:  "tool parser missing",
+			route: ready,
+			opts:  gatewayRouteReadinessOptions{RequireTools: true},
+			want:  "tool_flags_missing",
+		},
+		{
+			name:  "auto tool missing",
+			route: gatewayRouteContract{DiscoveryStatus: "ready_from_config", ToolParserConfigured: true},
+			opts:  gatewayRouteReadinessOptions{RequireAutoTools: true},
+			want:  "auto_tool_flags_missing",
+		},
+		{
+			name:  "live ready",
+			route: gatewayRouteContract{DiscoveryStatus: "ready_from_config", LiveModelAvailable: true},
+			live:  live,
+			want:  "live_ready",
+		},
+		{
+			name:  "config ready",
+			route: ready,
+			want:  "config_ready",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := gatewayRouteReadiness(tc.route, tc.live, tc.opts); got != tc.want {
+				t.Fatalf("gatewayRouteReadiness() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

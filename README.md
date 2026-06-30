@@ -199,15 +199,18 @@ myce gateway routes --config ~/.mycelium/peer.json
 myce gateway routes --config ~/.mycelium/peer.json --json
 myce gateway routes --config ~/.mycelium/peer.json --live
 myce gateway routes --config ~/.mycelium/peer.json --min-context-cap <minimum-for-this-workload>
+myce gateway routes --config ~/.mycelium/peer.json --require-tools
 ```
 
 The output joins projects to presets and reports the OpenAI base URL, model or
 alias, node, backend, context length, project context cap, auth source class,
 structured-output likelihood, streaming likelihood, and vLLM tool-parser flags.
 It only reports whether a project token or global gateway token is configured;
-it never prints token material. With `--live`, the command performs an
-authenticated read-only `GET /v1/models` against the configured gateway (or
-`--url`) and annotates each configured route with `live_model` /
+it never prints token material. It also reports `tool_readiness` and
+`readiness` so operators can distinguish a config-valid route from a route that
+is actually ready for the requested workload class. With `--live`, the command
+performs an authenticated read-only `GET /v1/models` against the configured
+gateway (or `--url`) and annotates each configured route with `live_model` /
 `live_match`. Treat plain route output as catalog/config discovery, and `--live`
 as live catalog exposure proof. A route is consumer-ready only after the
 matching `myce gateway preflight` and, for post-hoc work, `myce debug job
@@ -215,7 +218,11 @@ matching `myce gateway preflight` and, for post-hoc work, `myce debug job
 Use `--min-context-cap` to classify routes against the actual consumer workload
 before running it. For example, an 8192-token route can be valid transport/tool
 smoke and still print `context_issue=undersized_context` for a reasoning-heavy
-tool-agent workload.
+tool-agent workload. Add `--require-tools` or `--require-auto-tools` when the
+consumer needs OpenAI-compatible tool-call support; routes without the required
+vLLM tool-parser flags then report `readiness=tool_flags_missing` or
+`readiness=auto_tool_flags_missing` instead of looking interchangeable with
+plain chat routes.
 
 Gateways built from the route-discovery revision expose `GET /v1/models` with
 preset IDs and aliases only; host-local model paths and artifact refs are not
