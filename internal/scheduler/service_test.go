@@ -2509,6 +2509,54 @@ func TestServiceDrainSkipsNoFitHeadJob(t *testing.T) {
 	}
 }
 
+func TestServiceCoordinatedDrainSkipsNoFitHeadJob(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(41, 10).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	readyDecision := domain.PlacementDecision{JobID: "job-ready", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}
+	coordinator := &mocks.Coordinator{
+		Decision: readyDecision,
+		Lease:    domain.Lease{ID: "lease-owner", JobID: "job-ready", NodeID: node.ID, Claim: readyDecision.Claim},
+	}
+	service := &Service{
+		Placer: jobDecisionPlacer{decisions: map[string]domain.PlacementDecision{
+			"job-blocked": {JobID: "job-blocked", Action: domain.ActionQueued},
+			"job-ready":   readyDecision,
+		}},
+		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}, admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Owners:      staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Coordinator: coordinator,
+		JobLog:      &recordingJobLog{},
+		Queue:       NewQueue(clock),
+		Store:       &runtimeStore{},
+		Clock:       clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+	service.Queue.EnqueueWithPayload(fixtures.MakeJob(fixtures.WithJobID("job-blocked"), fixtures.WithPreset(preset.ID), fixtures.Interactive), []byte(`{"job":"blocked"}`))
+	service.Queue.EnqueueWithPayload(fixtures.MakeJob(fixtures.WithJobID("job-ready"), fixtures.WithPreset(preset.ID), fixtures.Background), []byte(`{"job":"ready"}`))
+
+	results, err := service.Drain(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(results) != 1 || results[0].Decision.JobID != "job-ready" || results[0].Lease.ID != "lease-owner" {
+		t.Fatalf("drain results = %+v", results)
+	}
+	if service.Queue.Len() != 1 {
+		t.Fatalf("queue len = %d", service.Queue.Len())
+	}
+	remaining, _, ok := service.Queue.DequeueWithPayload()
+	if !ok || remaining.ID != "job-blocked" {
+		t.Fatalf("remaining = %+v ok=%v", remaining, ok)
+	}
+	if got := strings.Join(coordinator.Calls, ","); got != "claim:job-ready,plan:job-ready,commit:job-ready,running:job-ready" {
+		t.Fatalf("coordinator calls = %s", got)
+	}
+}
+
 func TestServiceDrainFailsLoudBeforeRunnableSelection(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(41, 30).UTC())
 	queue := NewQueue(clock)
