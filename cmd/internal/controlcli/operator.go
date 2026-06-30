@@ -374,6 +374,8 @@ func runDebugSummary(args []string) error {
 	sortBy := fs.String("sort", "input", "sort rows by input, failure, node, model, context, latency, or usage")
 	groupBy := fs.String("group-by", "", "print grouped counts by failure-layer, failure-class, quality-gate, node, model, preset, context, route-status, startability, live-model, usage, or cold")
 	rollupBy := fs.String("rollup-by", "", "print optimizer rollups by failure-layer, failure-class, quality-gate, node, model, preset, context, route-status, startability, live-model, usage, or cold")
+	recommend := fs.Bool("recommend", false, "print deterministic operator recommendations from summary evidence")
+	recommendBy := fs.String("recommend-by", "model", "recommendation grouping: model, node, preset, route-status, startability, failure-layer, failure-class, quality-gate, context, live-model, usage, or cold")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -407,6 +409,19 @@ func runDebugSummary(args []string) error {
 	}
 	if len(rows) == 0 {
 		return fmt.Errorf("no debug summary rows matched filters")
+	}
+	if *recommend {
+		recommendations, err := recommendDebugSummaryRows(rows, *recommendBy)
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return writePrettyJSON(os.Stdout, recommendations)
+		}
+		for _, recommendation := range recommendations {
+			printDebugSummaryRecommendation(os.Stdout, recommendation)
+		}
+		return nil
 	}
 	if *rollupBy != "" {
 		rollups, err := rollupDebugSummaryRows(rows, *rollupBy)
@@ -556,6 +571,42 @@ type debugSummaryRollup struct {
 	WarmInstances             int    `json:"warm_instances"`
 	LoadingInstances          int    `json:"loading_instances"`
 	UnfinishedJobs            int    `json:"unfinished_jobs"`
+}
+
+type debugSummaryRecommendation struct {
+	By                       string `json:"by"`
+	Key                      string `json:"key"`
+	Recommendation           string `json:"recommendation"`
+	Severity                 string `json:"severity"`
+	Confidence               string `json:"confidence"`
+	Next                     string `json:"next"`
+	Count                    int    `json:"count"`
+	Successes                int    `json:"successes"`
+	Failures                 int    `json:"failures"`
+	UnknownOutcomes          int    `json:"unknown_outcomes"`
+	PrimaryFailureLayer      string `json:"primary_failure_layer,omitempty"`
+	PrimaryFailureClass      string `json:"primary_failure_class,omitempty"`
+	QualityGate              string `json:"quality_gate,omitempty"`
+	ContextUndersized        int    `json:"context_undersized,omitempty"`
+	ToolRequested            int    `json:"tool_requested,omitempty"`
+	TextualToolCalls         int    `json:"textual_tool_calls,omitempty"`
+	FinalContentIssues       int    `json:"final_content_issues,omitempty"`
+	UsageAvailable           int    `json:"usage_available,omitempty"`
+	UsageMissing             int    `json:"usage_missing,omitempty"`
+	AverageLatencyMS         int    `json:"average_latency_ms,omitempty"`
+	MaxLatencyMS             int    `json:"max_latency_ms,omitempty"`
+	AverageQueueWaitMS       int    `json:"average_queue_wait_ms,omitempty"`
+	MaxQueueWaitMS           int    `json:"max_queue_wait_ms,omitempty"`
+	MaxAttempts              int    `json:"max_attempts,omitempty"`
+	AvailabilityFailures     int    `json:"availability_failures,omitempty"`
+	CatalogFailures          int    `json:"catalog_failures,omitempty"`
+	ConsumerContractFailures int    `json:"consumer_contract_failures,omitempty"`
+	QualityFailures          int    `json:"quality_failures,omitempty"`
+	ProviderFailures         int    `json:"provider_failures,omitempty"`
+	LiveCatalogMissing       int    `json:"live_catalog_missing_or_error,omitempty"`
+	UnfinishedJobs           int    `json:"unfinished_jobs,omitempty"`
+	WarmInstances            int    `json:"warm_instances,omitempty"`
+	LoadingInstances         int    `json:"loading_instances,omitempty"`
 }
 
 func (f debugSummaryFilter) validate() error {
@@ -982,6 +1033,222 @@ func printDebugSummaryRollup(w io.Writer, rollup debugSummaryRollup) {
 		rollup.WarmInstances,
 		rollup.LoadingInstances,
 		rollup.UnfinishedJobs,
+	)
+}
+
+func recommendDebugSummaryRows(rows []debugSummaryRow, recommendBy string) ([]debugSummaryRecommendation, error) {
+	groups := map[string][]debugSummaryRow{}
+	for _, row := range rows {
+		key, err := debugSummaryGroupKey(row, recommendBy)
+		if err != nil {
+			return nil, fmt.Errorf("--recommend-by has unsupported value %q", recommendBy)
+		}
+		groups[key] = append(groups[key], row)
+	}
+	recommendations := make([]debugSummaryRecommendation, 0, len(groups))
+	for key, groupRows := range groups {
+		recommendation, err := recommendDebugSummaryGroup(recommendBy, key, groupRows)
+		if err != nil {
+			return nil, err
+		}
+		recommendations = append(recommendations, recommendation)
+	}
+	sort.Slice(recommendations, func(i, j int) bool {
+		if debugSummaryRecommendationRank(recommendations[i]) != debugSummaryRecommendationRank(recommendations[j]) {
+			return debugSummaryRecommendationRank(recommendations[i]) < debugSummaryRecommendationRank(recommendations[j])
+		}
+		if recommendations[i].Failures != recommendations[j].Failures {
+			return recommendations[i].Failures > recommendations[j].Failures
+		}
+		if recommendations[i].Count != recommendations[j].Count {
+			return recommendations[i].Count > recommendations[j].Count
+		}
+		return recommendations[i].Key < recommendations[j].Key
+	})
+	return recommendations, nil
+}
+
+func recommendDebugSummaryGroup(recommendBy, key string, rows []debugSummaryRow) (debugSummaryRecommendation, error) {
+	rollups, err := rollupDebugSummaryRows(rows, recommendBy)
+	if err != nil {
+		return debugSummaryRecommendation{}, err
+	}
+	if len(rollups) != 1 {
+		return debugSummaryRecommendation{}, fmt.Errorf("expected one rollup for %s=%s, got %d", recommendBy, key, len(rollups))
+	}
+	rollup := rollups[0]
+	recommendation := debugSummaryRecommendation{
+		By:                       recommendBy,
+		Key:                      key,
+		Count:                    rollup.Count,
+		Successes:                rollup.Successes,
+		Failures:                 rollup.Failures,
+		UnknownOutcomes:          rollup.UnknownOutcomes,
+		ContextUndersized:        rollup.ContextUndersized,
+		ToolRequested:            rollup.ToolRequested,
+		TextualToolCalls:         rollup.TextualToolCalls,
+		UsageAvailable:           rollup.UsageAvailable,
+		UsageMissing:             rollup.UsageMissing,
+		AverageLatencyMS:         rollup.AverageLatencyMS,
+		MaxLatencyMS:             rollup.MaxLatencyMS,
+		AverageQueueWaitMS:       rollup.AverageQueueWaitMS,
+		MaxQueueWaitMS:           rollup.MaxQueueWaitMS,
+		MaxAttempts:              rollup.MaxAttempts,
+		AvailabilityFailures:     rollup.AvailabilityFailures,
+		CatalogFailures:          rollup.CatalogFailures,
+		ConsumerContractFailures: rollup.ConsumerContractFailures,
+		QualityFailures:          rollup.QualityFailures,
+		ProviderFailures:         rollup.ProviderFailures,
+		LiveCatalogMissing:       rollup.LiveCatalogMissingOrError,
+		UnfinishedJobs:           rollup.UnfinishedJobs,
+		WarmInstances:            rollup.WarmInstances,
+		LoadingInstances:         rollup.LoadingInstances,
+		PrimaryFailureLayer:      debugSummaryPrimaryValue(rows, func(row debugSummaryRow) string { return row.FailureLayer }, "none"),
+		PrimaryFailureClass:      debugSummaryPrimaryValue(rows, func(row debugSummaryRow) string { return row.FailureClass }, "none"),
+		QualityGate:              debugSummaryPrimaryValue(rows, func(row debugSummaryRow) string { return row.ConsumerQualityGate }, ""),
+		FinalContentIssues:       debugSummaryFinalContentIssues(rows),
+	}
+	classifyDebugSummaryRecommendation(&recommendation)
+	return recommendation, nil
+}
+
+func classifyDebugSummaryRecommendation(recommendation *debugSummaryRecommendation) {
+	switch {
+	case recommendation.CatalogFailures > 0 || recommendation.LiveCatalogMissing > 0:
+		recommendation.Recommendation = "catalog_stale"
+		recommendation.Severity = "blocker"
+		recommendation.Confidence = "high"
+		recommendation.Next = "refresh or activate the live gateway catalog before routing consumers through this route"
+	case recommendation.AvailabilityFailures > 0 && (recommendation.UnfinishedJobs > 0 || recommendation.LoadingInstances > 0 || recommendation.MaxQueueWaitMS > 0):
+		recommendation.Recommendation = "saturated_queue"
+		recommendation.Severity = "blocker"
+		recommendation.Confidence = "high"
+		recommendation.Next = "inspect owner capacity, unfinished jobs, and warm/loading instances before retrying the route"
+	case recommendation.AvailabilityFailures > 0:
+		recommendation.Recommendation = "no_instance_start_owner"
+		recommendation.Severity = "blocker"
+		recommendation.Confidence = "high"
+		recommendation.Next = "start or repair a matching owner instance, then repeat preflight"
+	case recommendation.ContextUndersized > 0:
+		recommendation.Recommendation = "context_too_small"
+		recommendation.Severity = "blocker"
+		recommendation.Confidence = "high"
+		recommendation.Next = "choose or provision a route whose context cap meets the recorded minimum context requirement"
+	case recommendation.TextualToolCalls > 0:
+		recommendation.Recommendation = "tool_call_route_unsuitable"
+		recommendation.Severity = "blocker"
+		recommendation.Confidence = "high"
+		recommendation.Next = "use a route with structured tool-call support, or force a tool-call canary before consumer work"
+	case recommendation.FinalContentIssues > 0:
+		recommendation.Recommendation = "final_content_route_unsuitable"
+		recommendation.Severity = "blocker"
+		recommendation.Confidence = "medium"
+		recommendation.Next = "reduce output pressure or choose a route that completes final-channel content without length stops"
+	case recommendation.QualityFailures > 0:
+		recommendation.Recommendation = "quality_gate_failing"
+		recommendation.Severity = "warning"
+		recommendation.Confidence = "high"
+		recommendation.Next = "inspect deterministic consumer gate failures before promoting this route"
+	case recommendation.ProviderFailures > 0:
+		recommendation.Recommendation = "provider_failure"
+		recommendation.Severity = "warning"
+		recommendation.Confidence = "high"
+		recommendation.Next = "inspect provider errors and retry only after the backend path is healthy"
+	case recommendation.Successes > 0 && recommendation.Failures == 0:
+		recommendation.Recommendation = "route_healthy"
+		recommendation.Severity = "ok"
+		recommendation.Confidence = "medium"
+		recommendation.Next = "keep collecting preflight, debug bundle, and quality-gate evidence for this route"
+	default:
+		recommendation.Recommendation = "insufficient_evidence"
+		recommendation.Severity = "unknown"
+		recommendation.Confidence = "low"
+		recommendation.Next = "run a redacted preflight with consumer expectations and preserve the debug bundle"
+	}
+}
+
+func debugSummaryRecommendationRank(recommendation debugSummaryRecommendation) int {
+	switch recommendation.Severity {
+	case "blocker":
+		return 0
+	case "warning":
+		return 1
+	case "unknown":
+		return 2
+	case "ok":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func debugSummaryPrimaryValue(rows []debugSummaryRow, value func(debugSummaryRow) string, empty string) string {
+	counts := map[string]int{}
+	for _, row := range rows {
+		key := strings.TrimSpace(value(row))
+		if key == "" || key == "none" {
+			continue
+		}
+		counts[key]++
+	}
+	best := ""
+	bestCount := 0
+	for key, count := range counts {
+		if count > bestCount || (count == bestCount && key < best) {
+			best = key
+			bestCount = count
+		}
+	}
+	if best == "" {
+		return empty
+	}
+	return best
+}
+
+func debugSummaryFinalContentIssues(rows []debugSummaryRow) int {
+	count := 0
+	for _, row := range rows {
+		if strings.EqualFold(row.FinishReason, "length") || (row.ContentLength == 0 && row.ReasoningLength > 0) {
+			count++
+		}
+	}
+	return count
+}
+
+func printDebugSummaryRecommendation(w io.Writer, recommendation debugSummaryRecommendation) {
+	fmt.Fprintf(w, "recommendation\tby=%s\tkey=%s\trecommendation=%s\tseverity=%s\tconfidence=%s\tcount=%d\tsuccess=%d\tfailure=%d\tunknown=%d\tprimary_layer=%s\tprimary_class=%s\tquality_gate=%s\tcontext_undersized=%d\ttool_requested=%d\ttextual_tool_calls=%d\tfinal_content_issues=%d\tusage_available=%d\tusage_missing=%d\tavg_latency_ms=%d\tmax_latency_ms=%d\tavg_queue_ms=%d\tmax_queue_ms=%d\tmax_attempts=%d\tavailability_failures=%d\tcatalog_failures=%d\tquality_failures=%d\tprovider_failures=%d\tlive_catalog_missing_or_error=%d\tunfinished_jobs=%d\twarm_instances=%d\tloading_instances=%d\tnext=%s\n",
+		recommendation.By,
+		emptyDash(recommendation.Key),
+		recommendation.Recommendation,
+		recommendation.Severity,
+		recommendation.Confidence,
+		recommendation.Count,
+		recommendation.Successes,
+		recommendation.Failures,
+		recommendation.UnknownOutcomes,
+		emptyDash(recommendation.PrimaryFailureLayer),
+		emptyDash(recommendation.PrimaryFailureClass),
+		emptyDash(recommendation.QualityGate),
+		recommendation.ContextUndersized,
+		recommendation.ToolRequested,
+		recommendation.TextualToolCalls,
+		recommendation.FinalContentIssues,
+		recommendation.UsageAvailable,
+		recommendation.UsageMissing,
+		recommendation.AverageLatencyMS,
+		recommendation.MaxLatencyMS,
+		recommendation.AverageQueueWaitMS,
+		recommendation.MaxQueueWaitMS,
+		recommendation.MaxAttempts,
+		recommendation.AvailabilityFailures,
+		recommendation.CatalogFailures,
+		recommendation.QualityFailures,
+		recommendation.ProviderFailures,
+		recommendation.LiveCatalogMissing,
+		recommendation.UnfinishedJobs,
+		recommendation.WarmInstances,
+		recommendation.LoadingInstances,
+		recommendation.Next,
 	)
 }
 

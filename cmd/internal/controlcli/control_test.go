@@ -2827,6 +2827,36 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	if !strings.Contains(qualityRollupOutput, "rollup\tby=quality-gate\tkey=schema\tcount=1\tsuccess=1") || !strings.Contains(qualityRollupOutput, "rollup\tby=quality-gate\tkey=unknown\tcount=1\tsuccess=0\tfailure=1") {
 		t.Fatalf("quality rollup output = %s", qualityRollupOutput)
 	}
+	recommendOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--recommend", "--recommend-by", "model"})
+	})
+	if err != nil {
+		t.Fatalf("recommend debug summary: %v\n%s", err, recommendOutput)
+	}
+	for _, want := range []string{
+		"recommendation\tby=model\tkey=tool-model-large\trecommendation=catalog_stale\tseverity=blocker\tconfidence=high",
+		"primary_layer=catalog\tprimary_class=live_catalog_model_missing",
+		"recommendation\tby=model\tkey=strict-json-model\trecommendation=tool_call_route_unsuitable\tseverity=blocker\tconfidence=high",
+		"quality_gate=schema",
+		"textual_tool_calls=1",
+	} {
+		if !strings.Contains(recommendOutput, want) {
+			t.Fatalf("recommend summary missing %q:\n%s", want, recommendOutput)
+		}
+	}
+	recommendJSON := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--recommend", "--recommend-by", "model", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("recommend debug summary json: %v\n%s", err, recommendJSON)
+	}
+	var recommendations []debugSummaryRecommendation
+	if err := json.Unmarshal([]byte(recommendJSON), &recommendations); err != nil {
+		t.Fatalf("decode recommendations json: %v\n%s", err, recommendJSON)
+	}
+	if len(recommendations) != 2 || recommendations[0].Recommendation != "catalog_stale" || recommendations[1].Recommendation != "tool_call_route_unsuitable" || recommendations[1].QualityGate != "schema" {
+		t.Fatalf("recommendations = %+v", recommendations)
+	}
 
 	sortedJSON := captureStdout(t, func() {
 		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--sort", "context", "--json"})
@@ -2856,6 +2886,9 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	}
 	if err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--rollup-by", "mystery"}); err == nil || !strings.Contains(err.Error(), "--rollup-by") {
 		t.Fatalf("bad rollup err = %v", err)
+	}
+	if err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--recommend", "--recommend-by", "mystery"}); err == nil || !strings.Contains(err.Error(), "--recommend-by") {
+		t.Fatalf("bad recommend err = %v", err)
 	}
 }
 
@@ -2936,6 +2969,51 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 	}
 	if _, err := rollupDebugSummaryRows(rows, "bad"); err == nil || !strings.Contains(err.Error(), "--rollup-by") {
 		t.Fatalf("bad rollup err = %v", err)
+	}
+}
+
+func TestDebugSummaryRecommendationContracts(t *testing.T) {
+	rows := []debugSummaryRow{
+		{Model: "healthy", ConsumerResult: "pass", UsageAvailable: true, UsageTotalTokens: 40, ContextCap: 32768, MinContextCap: 8192, ContextAdequate: true, LiveModelChecked: true, LiveModelAvailable: true, UpstreamWallMS: 100},
+		{Model: "catalog", FailureLayer: "catalog", FailureClass: "live_catalog_model_missing", LiveModelChecked: true, LiveModelStatus: "missing"},
+		{Model: "saturated", FailureLayer: "availability", FailureClass: "route_no_instance_available", RouteStatus: "no_matching_instance", UnfinishedJobs: 2, LoadingInstances: 1},
+		{Model: "no-owner", FailureLayer: "availability", FailureClass: "route_no_instance_available", RouteStatus: "no_matching_instance"},
+		{Model: "small-context", FailureLayer: "consumer_contract", FailureClass: "consumer_contract_context_too_small", ContextCap: 8192, MinContextCap: 32768, ContextAdequate: false},
+		{Model: "textual-tool", ToolRequested: true, TextualToolCall: true},
+		{Model: "final-content", FinishReason: "length", ContentLength: 0, ReasoningLength: 1024},
+		{Model: "quality", ConsumerResult: "fail", ConsumerQualityGate: "schema", FailureLayer: "quality", FailureClass: "consumer_quality_failed"},
+		{Model: "provider", FailureLayer: "provider", FailureClass: "provider_timeout"},
+		{Model: "unknown"},
+	}
+	recommendations, err := recommendDebugSummaryRows(rows, "model")
+	if err != nil {
+		t.Fatalf("recommend rows: %v", err)
+	}
+	byModel := map[string]debugSummaryRecommendation{}
+	for _, recommendation := range recommendations {
+		byModel[recommendation.Key] = recommendation
+	}
+	for model, want := range map[string]string{
+		"healthy":       "route_healthy",
+		"catalog":       "catalog_stale",
+		"saturated":     "saturated_queue",
+		"no-owner":      "no_instance_start_owner",
+		"small-context": "context_too_small",
+		"textual-tool":  "tool_call_route_unsuitable",
+		"final-content": "final_content_route_unsuitable",
+		"quality":       "quality_gate_failing",
+		"provider":      "provider_failure",
+		"unknown":       "insufficient_evidence",
+	} {
+		if got := byModel[model].Recommendation; got != want {
+			t.Fatalf("recommendation for %s = %s, want %s; all=%+v", model, got, want, recommendations)
+		}
+	}
+	if byModel["quality"].QualityGate != "schema" || byModel["final-content"].FinalContentIssues != 1 || byModel["healthy"].AverageLatencyMS != 100 || byModel["saturated"].UnfinishedJobs != 2 {
+		t.Fatalf("recommendation evidence = %+v", byModel)
+	}
+	if _, err := recommendDebugSummaryRows(rows, "bad"); err == nil || !strings.Contains(err.Error(), "--recommend-by") {
+		t.Fatalf("bad recommend err = %v", err)
 	}
 }
 

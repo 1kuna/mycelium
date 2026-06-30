@@ -379,6 +379,14 @@ tool/textual-tool shape, JSON/reasoning boundaries, live-catalog availability,
 warm/cold placement, attempt counts, queue-wait samples, latency samples, and
 route-availability instance counts. They still report only sanitized fields
 already present in preflight or debug-bundle artifacts.
+Use `--recommend --recommend-by model` for the first deterministic operator
+decision layer over saved evidence. Recommendations are mechanical classes such
+as `route_healthy`, `insufficient_evidence`, `catalog_stale`,
+`no_instance_start_owner`, `saturated_queue`, `context_too_small`,
+`tool_call_route_unsuitable`, `final_content_route_unsuitable`,
+`quality_gate_failing`, and `provider_failure`. They are not semantic model
+judgments; semantic quality belongs in a sanitized consumer quality gate or a
+future reviewed scorer artifact.
 
 ## Debugging Workflow
 
