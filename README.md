@@ -388,6 +388,12 @@ as `route_healthy`, `insufficient_evidence`, `catalog_stale`,
 `quality_gate_failing`, and `provider_failure`. They are not semantic model
 judgments; semantic quality belongs in a sanitized consumer quality gate or a
 future reviewed scorer artifact.
+Use `--training-jsonl` to export one normalized optimizer row per saved
+artifact row. The JSONL schema includes route contract, request expectations,
+context, streaming/tool/JSON mode, timing, usage, failure class, quality gate,
+and the deterministic recommendation. It does not include prompts, completions,
+tokens, local paths, or semantic quality labels unless a future reviewed
+artifact supplies one explicitly.
 
 ## Debugging Workflow
 

@@ -359,6 +359,7 @@ func runDebugSummary(args []string) error {
 	fs := flag.NewFlagSet("debug summary", flag.ContinueOnError)
 	dir := fs.String("dir", "", "directory containing preflight or debug bundle artifacts")
 	jsonOut := fs.Bool("json", false, "print JSON")
+	trainingJSONL := fs.Bool("training-jsonl", false, "print normalized optimizer training rows as JSON Lines")
 	failureLayer := fs.String("failure-layer", "", "only include rows with this failure layer")
 	failureClass := fs.String("failure-class", "", "only include rows with this failure class")
 	nodeID := fs.String("node", "", "only include rows served by this node")
@@ -381,6 +382,9 @@ func runDebugSummary(args []string) error {
 	}
 	if *dir == "" {
 		return fmt.Errorf("--dir is required")
+	}
+	if *trainingJSONL && *jsonOut {
+		return fmt.Errorf("--training-jsonl cannot be combined with --json")
 	}
 	filter := debugSummaryFilter{
 		FailureLayer: *failureLayer,
@@ -409,6 +413,20 @@ func runDebugSummary(args []string) error {
 	}
 	if len(rows) == 0 {
 		return fmt.Errorf("no debug summary rows matched filters")
+	}
+	if *trainingJSONL {
+		trainingRows, err := buildDebugSummaryTrainingRows(rows)
+		if err != nil {
+			return err
+		}
+		for _, trainingRow := range trainingRows {
+			data, err := json.Marshal(trainingRow)
+			if err != nil {
+				return fmt.Errorf("encode training row: %w", err)
+			}
+			fmt.Fprintln(os.Stdout, string(data))
+		}
+		return nil
 	}
 	if *recommend {
 		recommendations, err := recommendDebugSummaryRows(rows, *recommendBy)
@@ -607,6 +625,68 @@ type debugSummaryRecommendation struct {
 	UnfinishedJobs           int    `json:"unfinished_jobs,omitempty"`
 	WarmInstances            int    `json:"warm_instances,omitempty"`
 	LoadingInstances         int    `json:"loading_instances,omitempty"`
+}
+
+type debugSummaryTrainingRow struct {
+	SchemaVersion            string `json:"schema_version"`
+	EvidenceKind             string `json:"evidence_kind"`
+	JobID                    string `json:"job_id,omitempty"`
+	Project                  string `json:"project,omitempty"`
+	ConsumerRun              string `json:"consumer_run,omitempty"`
+	ConsumerItem             string `json:"consumer_item,omitempty"`
+	RouteKey                 string `json:"route_key"`
+	Model                    string `json:"model,omitempty"`
+	NodeID                   string `json:"node_id,omitempty"`
+	Backend                  string `json:"backend,omitempty"`
+	PresetID                 string `json:"preset_id,omitempty"`
+	Decision                 string `json:"decision,omitempty"`
+	RouteStatus              string `json:"route_status,omitempty"`
+	Startability             string `json:"startability,omitempty"`
+	WarmInstances            int    `json:"warm_instances,omitempty"`
+	LoadingInstances         int    `json:"loading_instances,omitempty"`
+	UnfinishedJobs           int    `json:"unfinished_jobs,omitempty"`
+	ContextCap               int    `json:"context_cap,omitempty"`
+	MinContextCap            int    `json:"min_context_cap,omitempty"`
+	ContextAdequate          bool   `json:"context_adequate,omitempty"`
+	Streaming                bool   `json:"streaming,omitempty"`
+	StructuredOutput         string `json:"structured_output,omitempty"`
+	ToolRequested            bool   `json:"tool_requested,omitempty"`
+	ToolChoice               string `json:"tool_choice,omitempty"`
+	StatusCode               int    `json:"status_code,omitempty"`
+	FinishReason             string `json:"finish_reason,omitempty"`
+	ContentLength            int    `json:"content_length"`
+	ReasoningLength          int    `json:"reasoning_length"`
+	JSONContent              bool   `json:"json_content"`
+	TextualToolCall          bool   `json:"textual_tool_call"`
+	UsageAvailable           bool   `json:"usage_available"`
+	UsagePromptTokens        int    `json:"usage_prompt_tokens,omitempty"`
+	UsageCompletionTokens    int    `json:"usage_completion_tokens,omitempty"`
+	UsageTotalTokens         int    `json:"usage_total_tokens,omitempty"`
+	Attempts                 int    `json:"attempts,omitempty"`
+	QueueWaitMS              int    `json:"queue_wait_ms,omitempty"`
+	LoadWallMS               int    `json:"load_wall_ms,omitempty"`
+	TTFTMS                   int    `json:"ttft_ms,omitempty"`
+	UpstreamWallMS           int    `json:"upstream_wall_ms,omitempty"`
+	TotalLatencyMS           int    `json:"total_latency_ms,omitempty"`
+	ColdLoadKnown            bool   `json:"cold_load_known"`
+	ColdLoad                 bool   `json:"cold_load,omitempty"`
+	OwnerTelemetryAvailable  bool   `json:"owner_telemetry_available,omitempty"`
+	MetricSource             string `json:"metric_source,omitempty"`
+	LiveModelChecked         bool   `json:"live_model_checked,omitempty"`
+	LiveModelStatus          string `json:"live_model_status,omitempty"`
+	LiveModelAvailable       bool   `json:"live_model_available,omitempty"`
+	FailureLayer             string `json:"failure_layer,omitempty"`
+	FailureClass             string `json:"failure_class,omitempty"`
+	ConsumerStatus           string `json:"consumer_status,omitempty"`
+	ConsumerResult           string `json:"consumer_result,omitempty"`
+	ConsumerQualityGate      string `json:"consumer_quality_gate,omitempty"`
+	QualitySignalSource      string `json:"quality_signal_source"`
+	DeterministicQualityPass *bool  `json:"deterministic_quality_pass,omitempty"`
+	SemanticQualityLabel     string `json:"semantic_quality_label,omitempty"`
+	Recommendation           string `json:"recommendation,omitempty"`
+	RecommendationSeverity   string `json:"recommendation_severity,omitempty"`
+	RecommendationConfidence string `json:"recommendation_confidence,omitempty"`
+	RecommendationNext       string `json:"recommendation_next,omitempty"`
 }
 
 func (f debugSummaryFilter) validate() error {
@@ -1262,6 +1342,110 @@ func printDebugSummaryRecommendation(w io.Writer, recommendation debugSummaryRec
 		recommendation.LoadingInstances,
 		recommendation.Next,
 	)
+}
+
+func buildDebugSummaryTrainingRows(rows []debugSummaryRow) ([]debugSummaryTrainingRow, error) {
+	recommendations, err := recommendDebugSummaryRows(rows, "route")
+	if err != nil {
+		return nil, err
+	}
+	recommendationByRoute := map[string]debugSummaryRecommendation{}
+	for _, recommendation := range recommendations {
+		recommendationByRoute[recommendation.Key] = recommendation
+	}
+	out := make([]debugSummaryTrainingRow, 0, len(rows))
+	for _, row := range rows {
+		routeKey := debugSummaryRouteKey(row)
+		trainingRow := debugSummaryTrainingRowFromSummary(row, recommendationByRoute[routeKey])
+		out = append(out, trainingRow)
+	}
+	return out, nil
+}
+
+func debugSummaryTrainingRowFromSummary(row debugSummaryRow, recommendation debugSummaryRecommendation) debugSummaryTrainingRow {
+	trainingRow := debugSummaryTrainingRow{
+		SchemaVersion:            "mycelium.debug_training.v1",
+		EvidenceKind:             row.Kind,
+		JobID:                    row.JobID,
+		Project:                  row.Project,
+		ConsumerRun:              row.ConsumerRun,
+		ConsumerItem:             row.ConsumerItem,
+		RouteKey:                 debugSummaryRouteKey(row),
+		Model:                    row.Model,
+		NodeID:                   row.NodeID,
+		Backend:                  row.Backend,
+		PresetID:                 row.PresetID,
+		Decision:                 row.Decision,
+		RouteStatus:              row.RouteStatus,
+		Startability:             row.Startability,
+		WarmInstances:            row.WarmInstances,
+		LoadingInstances:         row.LoadingInstances,
+		UnfinishedJobs:           row.UnfinishedJobs,
+		ContextCap:               row.ContextCap,
+		MinContextCap:            row.MinContextCap,
+		ContextAdequate:          row.ContextAdequate,
+		Streaming:                row.Streaming,
+		StructuredOutput:         row.StructuredOutput,
+		ToolRequested:            row.ToolRequested,
+		ToolChoice:               row.ToolChoice,
+		StatusCode:               row.StatusCode,
+		FinishReason:             row.FinishReason,
+		ContentLength:            row.ContentLength,
+		ReasoningLength:          row.ReasoningLength,
+		JSONContent:              row.JSONContent,
+		TextualToolCall:          row.TextualToolCall,
+		UsageAvailable:           row.UsageAvailable,
+		UsagePromptTokens:        row.UsagePromptTokens,
+		UsageCompletionTokens:    row.UsageCompletionTokens,
+		UsageTotalTokens:         row.UsageTotalTokens,
+		Attempts:                 row.Attempts,
+		QueueWaitMS:              row.QueueWaitMS,
+		LoadWallMS:               row.LoadWallMS,
+		TTFTMS:                   row.TTFTMS,
+		UpstreamWallMS:           row.UpstreamWallMS,
+		TotalLatencyMS:           debugSummaryLatencyMS(row),
+		OwnerTelemetryAvailable:  row.OwnerTelemetryAvailable,
+		MetricSource:             row.MetricSource,
+		LiveModelChecked:         row.LiveModelChecked,
+		LiveModelStatus:          row.LiveModelStatus,
+		LiveModelAvailable:       row.LiveModelAvailable,
+		FailureLayer:             row.FailureLayer,
+		FailureClass:             row.FailureClass,
+		ConsumerStatus:           row.ConsumerStatus,
+		ConsumerResult:           row.ConsumerResult,
+		ConsumerQualityGate:      row.ConsumerQualityGate,
+		QualitySignalSource:      debugSummaryQualitySignalSource(row),
+		Recommendation:           recommendation.Recommendation,
+		RecommendationSeverity:   recommendation.Severity,
+		RecommendationConfidence: recommendation.Confidence,
+		RecommendationNext:       recommendation.Next,
+	}
+	if row.ColdLoad != nil {
+		trainingRow.ColdLoadKnown = true
+		trainingRow.ColdLoad = *row.ColdLoad
+	}
+	if pass, ok := debugSummaryDeterministicQualityPass(row); ok {
+		trainingRow.DeterministicQualityPass = &pass
+	}
+	return trainingRow
+}
+
+func debugSummaryQualitySignalSource(row debugSummaryRow) string {
+	if strings.TrimSpace(row.ConsumerQualityGate) != "" || strings.TrimSpace(row.ConsumerResult) != "" {
+		return "consumer_gate"
+	}
+	return "not_collected"
+}
+
+func debugSummaryDeterministicQualityPass(row debugSummaryRow) (bool, bool) {
+	switch strings.ToLower(row.ConsumerResult) {
+	case "pass":
+		return true, true
+	case "fail":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func buildDebugSummaryRows(root string) ([]debugSummaryRow, error) {

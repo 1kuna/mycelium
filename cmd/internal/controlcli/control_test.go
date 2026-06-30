@@ -2882,6 +2882,36 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	if !strings.Contains(defaultRecommendOutput, "recommendation\tby=route\tkey="+routeKeyMissing+"\trecommendation=catalog_stale") || !strings.Contains(defaultRecommendOutput, "recommendation\tby=route\tkey="+routeKey+"\trecommendation=tool_call_route_unsuitable") {
 		t.Fatalf("default recommend output = %s", defaultRecommendOutput)
 	}
+	trainingOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--training-jsonl"})
+	})
+	if err != nil {
+		t.Fatalf("training jsonl: %v\n%s", err, trainingOutput)
+	}
+	if strings.Contains(trainingOutput, bundleDir) || strings.Contains(trainingOutput, preflightOnlyDir) || strings.Contains(trainingOutput, "rpc-secret") || strings.Contains(trainingOutput, "gateway-secret") {
+		t.Fatalf("training jsonl leaked path or secret: %s", trainingOutput)
+	}
+	lines := strings.Split(strings.TrimSpace(trainingOutput), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("training jsonl line count = %d output=%s", len(lines), trainingOutput)
+	}
+	var trainingRows []debugSummaryTrainingRow
+	for _, line := range lines {
+		var trainingRow debugSummaryTrainingRow
+		if err := json.Unmarshal([]byte(line), &trainingRow); err != nil {
+			t.Fatalf("decode training row: %v\n%s", err, line)
+		}
+		trainingRows = append(trainingRows, trainingRow)
+	}
+	if trainingRows[0].SchemaVersion != "mycelium.debug_training.v1" || trainingRows[0].RouteKey != routeKey || trainingRows[0].Recommendation != "tool_call_route_unsuitable" || trainingRows[0].QualitySignalSource != "consumer_gate" || trainingRows[0].DeterministicQualityPass == nil || !*trainingRows[0].DeterministicQualityPass || trainingRows[0].SemanticQualityLabel != "" || trainingRows[0].TotalLatencyMS != 553 {
+		t.Fatalf("training optimization row = %+v", trainingRows[0])
+	}
+	if trainingRows[1].RouteKey != routeKeyMissing || trainingRows[1].Recommendation != "catalog_stale" || trainingRows[1].QualitySignalSource != "not_collected" || trainingRows[1].DeterministicQualityPass != nil {
+		t.Fatalf("training preflight row = %+v", trainingRows[1])
+	}
+	if err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--training-jsonl", "--json"}); err == nil || !strings.Contains(err.Error(), "--training-jsonl") {
+		t.Fatalf("training/json conflict err = %v", err)
+	}
 
 	sortedJSON := captureStdout(t, func() {
 		err = Run(context.Background(), []string{"debug", "summary", "--dir", root, "--sort", "context", "--json"})
@@ -3039,6 +3069,24 @@ func TestDebugSummaryRecommendationContracts(t *testing.T) {
 	}
 	if _, err := recommendDebugSummaryRows(rows, "bad"); err == nil || !strings.Contains(err.Error(), "--recommend-by") {
 		t.Fatalf("bad recommend err = %v", err)
+	}
+
+	trainingRows, err := buildDebugSummaryTrainingRows(rows)
+	if err != nil {
+		t.Fatalf("training rows: %v", err)
+	}
+	if len(trainingRows) != len(rows) {
+		t.Fatalf("training row count = %d want %d", len(trainingRows), len(rows))
+	}
+	trainingByModel := map[string]debugSummaryTrainingRow{}
+	for _, row := range trainingRows {
+		trainingByModel[row.Model] = row
+	}
+	if trainingByModel["quality"].QualitySignalSource != "consumer_gate" || trainingByModel["quality"].DeterministicQualityPass == nil || *trainingByModel["quality"].DeterministicQualityPass || trainingByModel["quality"].Recommendation != "quality_gate_failing" {
+		t.Fatalf("quality training row = %+v", trainingByModel["quality"])
+	}
+	if trainingByModel["unknown"].QualitySignalSource != "not_collected" || trainingByModel["unknown"].DeterministicQualityPass != nil || trainingByModel["unknown"].Recommendation != "insufficient_evidence" {
+		t.Fatalf("unknown training row = %+v", trainingByModel["unknown"])
 	}
 }
 
