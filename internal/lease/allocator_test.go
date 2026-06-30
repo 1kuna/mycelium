@@ -125,6 +125,21 @@ func TestFitsAppliesReservedHeadroom(t *testing.T) {
 	}
 }
 
+func TestFitsAccumulatesMultipleReservedHeadroomClaims(t *testing.T) {
+	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.90))
+	allocator := NewAllocator(
+		WithReservedHeadroom(node.ID, fixtures.MakeClaim(100, 0)),
+		WithReservedHeadroom(node.ID, fixtures.MakeClaim(200, 0)),
+	)
+
+	if !allocator.Fits(node, []int{0}, nil, fixtures.MakeClaim(600, 0)) {
+		t.Fatal("600MB should fit after accumulated headroom")
+	}
+	if allocator.Fits(node, []int{0}, nil, fixtures.MakeClaim(601, 0)) {
+		t.Fatal("601MB should exceed usable memory after accumulated headroom")
+	}
+}
+
 func TestCatastrophicUnitsKeepExtraMargin(t *testing.T) {
 	node := fixtures.MakeSparkNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(0.90))
 	allocator := NewAllocator()

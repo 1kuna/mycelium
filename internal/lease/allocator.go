@@ -8,13 +8,13 @@ import (
 const catastrophicMargin = 0.05
 
 type Allocator struct {
-	headroomByNode map[string]domain.Claim
+	headroomByNode map[string][]domain.Claim
 }
 
 type Option func(*Allocator)
 
 func NewAllocator(opts ...Option) *Allocator {
-	a := &Allocator{headroomByNode: map[string]domain.Claim{}}
+	a := &Allocator{headroomByNode: map[string][]domain.Claim{}}
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -43,8 +43,10 @@ func (a *Allocator) Fits(node domain.Node, acc []int, existing []domain.ModelIns
 		usedByAccelerator[unit.Index] = unit.VRAMUsedMB
 		limitByAccelerator[unit.Index] = usable
 	}
-	if !addClaimShares(usedByAccelerator, acc, a.headroomByNode[node.ID]) {
-		return false
+	for _, reservation := range a.headroomByNode[node.ID] {
+		if !addClaimShares(usedByAccelerator, acc, reservation) {
+			return false
+		}
 	}
 	for _, inst := range existing {
 		if inst.NodeID == node.ID && overlaps(inst.AcceleratorSet, acc) {
