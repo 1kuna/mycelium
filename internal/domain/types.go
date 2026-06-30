@@ -147,6 +147,7 @@ type Job struct {
 	Status              JobStatus         `json:"status"`
 	Progress            []JobProgress     `json:"progress,omitempty"`
 	Error               string            `json:"error,omitempty"`
+	Result              *JobResult        `json:"result,omitempty"`
 }
 
 type BenchmarkSpec struct {
@@ -159,6 +160,22 @@ type JobProgress struct {
 	Stage   string    `json:"stage"`
 	Message string    `json:"message"`
 	At      time.Time `json:"at"`
+}
+
+type JobResult struct {
+	Source          string            `json:"source,omitempty"`
+	Decision        PlacementDecision `json:"decision,omitempty"`
+	Instance        ModelInstance     `json:"instance,omitempty"`
+	LeaseID         string            `json:"lease_id,omitempty"`
+	NodeID          string            `json:"node_id,omitempty"`
+	PresetID        string            `json:"preset_id,omitempty"`
+	Action          PlacementAction   `json:"action,omitempty"`
+	PayloadBytes    int               `json:"payload_bytes,omitempty"`
+	PayloadStored   bool              `json:"payload_stored,omitempty"`
+	PayloadRedacted bool              `json:"payload_redacted,omitempty"`
+	ResultArtifact  string            `json:"result_artifact,omitempty"`
+	ResultRedacted  bool              `json:"result_redacted,omitempty"`
+	Terminal        bool              `json:"terminal,omitempty"`
 }
 
 type PlacementDecision struct {

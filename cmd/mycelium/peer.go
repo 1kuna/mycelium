@@ -517,6 +517,7 @@ type catalogEvictResponse struct {
 
 type workloadRuntime interface {
 	SubmitWithPayload(ctx context.Context, job domain.Job, payload []byte, hooks ...scheduler.SubmitHooks) (scheduler.Result, error)
+	Drain(ctx context.Context, limit int) ([]scheduler.Result, error)
 }
 
 type workloadStore interface {
@@ -534,6 +535,42 @@ type catalogStageStore interface {
 }
 
 func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store workloadStore, rpcToken string) {
+	mux.HandleFunc("/workloads/drain", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerRPCError(w, http.StatusUnauthorized, fmt.Errorf("unauthorized"))
+			return
+		}
+		if r.Method != http.MethodPost {
+			writePeerRPCError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+			return
+		}
+		limit := 1
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n <= 0 {
+				writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("limit must be positive"))
+				return
+			}
+			limit = n
+		}
+		results, err := runtime.Drain(r.Context(), limit)
+		if err != nil {
+			writePeerRPCError(w, http.StatusConflict, err)
+			return
+		}
+		resp := workload.DrainResponse{Results: make([]workload.AdmissionResponse, 0, len(results))}
+		for _, result := range results {
+			job := domain.Job{ID: result.Decision.JobID}
+			if latest, readErr := store.Job(r.Context(), result.Decision.JobID); readErr == nil {
+				job = latest
+			}
+			resp.Results = append(resp.Results, workloadResponse(job, result, 0))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			panic(err)
+		}
+	})
 	mux.HandleFunc("/workloads", func(w http.ResponseWriter, r *http.Request) {
 		if !peerRPCAuthorized(r, rpcToken) {
 			writePeerAuthError(w)
@@ -561,15 +598,7 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 		if latest, readErr := store.Job(r.Context(), job.ID); readErr == nil {
 			job = latest
 		}
-		resp := workload.AdmissionResponse{
-			Job:           job,
-			Decision:      result.Decision,
-			Instance:      result.Instance,
-			Lease:         result.Lease,
-			Queued:        job.Status == domain.JobQueued || result.Decision.Action == domain.ActionQueued,
-			PayloadBytes:  len(req.Payload),
-			PayloadStored: len(req.Payload) > 0,
-		}
+		resp := workloadResponse(job, result, len(req.Payload))
 		w.Header().Set("Content-Type", "application/json")
 		if resp.Queued {
 			w.WriteHeader(http.StatusAccepted)
@@ -600,10 +629,30 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(workload.StatusResponse{Job: job}); err != nil {
+		if err := json.NewEncoder(w).Encode(workload.StatusResponse{Job: job, Result: job.Result}); err != nil {
 			panic(err)
 		}
 	})
+}
+
+func workloadResponse(job domain.Job, result scheduler.Result, payloadBytes int) workload.AdmissionResponse {
+	if payloadBytes == 0 && job.Result != nil {
+		payloadBytes = job.Result.PayloadBytes
+	}
+	payloadStored := payloadBytes > 0
+	if job.Result != nil {
+		payloadStored = job.Result.PayloadStored
+	}
+	return workload.AdmissionResponse{
+		Job:           job,
+		Decision:      result.Decision,
+		Instance:      result.Instance,
+		Lease:         result.Lease,
+		Result:        job.Result,
+		Queued:        job.Status == domain.JobQueued || result.Decision.Action == domain.ActionQueued,
+		PayloadBytes:  payloadBytes,
+		PayloadStored: payloadStored,
+	}
 }
 
 func normalizeWorkloadJob(job domain.Job) (domain.Job, error) {
