@@ -139,7 +139,7 @@ func runStatus(ctx context.Context, args []string, client *http.Client) error {
 
 func runDebug(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce debug <job|bundle|summary|select|verify-preflight>")
+		return fmt.Errorf("usage: myce debug <job|bundle|summary|select|propose-policy|verify-preflight>")
 	}
 	switch args[0] {
 	case "job":
@@ -150,10 +150,12 @@ func runDebug(ctx context.Context, args []string, client *http.Client) error {
 		return runDebugSummary(args[1:])
 	case "select":
 		return runDebugSelect(args[1:])
+	case "propose-policy":
+		return runDebugProposePolicy(args[1:])
 	case "verify-preflight":
 		return runDebugVerifyPreflight(args[1:])
 	default:
-		return fmt.Errorf("usage: myce debug <job|bundle|summary|select|verify-preflight>")
+		return fmt.Errorf("usage: myce debug <job|bundle|summary|select|propose-policy|verify-preflight>")
 	}
 }
 
@@ -524,6 +526,56 @@ func runDebugSelect(args []string) error {
 	return nil
 }
 
+func runDebugProposePolicy(args []string) error {
+	fs := flag.NewFlagSet("debug propose-policy", flag.ContinueOnError)
+	trainingPath := fs.String("training-jsonl", "", "normalized optimizer training JSONL from debug summary")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	minContextCap := fs.Int("min-context-cap", 0, "minimum context cap required by the workload")
+	requireTools := fs.Bool("require-tools", false, "require structured tool-call proof")
+	requireJSON := fs.Bool("require-json", false, "require final JSON proof")
+	requireFinalContent := fs.Bool("require-final-content", false, "require non-empty final content proof")
+	requireUsage := fs.Bool("require-usage", false, "require token usage evidence")
+	requireStreaming := fs.Bool("require-streaming", false, "require streaming proof")
+	minSuccesses := fs.Int("min-successes", 2, "minimum successful saved rows before proposing a policy change")
+	requireOwnerTelemetry := fs.Bool("require-owner-telemetry", false, "require owner-side run/session telemetry before proposing a policy change")
+	requireLiveModel := fs.Bool("require-live-model", false, "require live catalog availability evidence before proposing a policy change")
+	requireQualityPass := fs.Bool("require-quality-pass", false, "require a deterministic consumer quality pass before proposing a policy change")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *trainingPath == "" {
+		return fmt.Errorf("--training-jsonl is required")
+	}
+	if *minContextCap < 0 || *minSuccesses < 0 {
+		return fmt.Errorf("policy proposal thresholds must be non-negative")
+	}
+	rows, err := readDebugSummaryTrainingJSONL(*trainingPath)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("training JSONL contains no rows")
+	}
+	report := proposeDebugRoutePolicy(rows, debugRouteSelectionRequirements{
+		MinContextCap:       *minContextCap,
+		RequireTools:        *requireTools,
+		RequireJSON:         *requireJSON,
+		RequireFinalContent: *requireFinalContent,
+		RequireUsage:        *requireUsage,
+		RequireStreaming:    *requireStreaming,
+	}, debugRoutePolicyPromotionRequirements{
+		MinSuccesses:          *minSuccesses,
+		RequireOwnerTelemetry: *requireOwnerTelemetry,
+		RequireLiveModel:      *requireLiveModel,
+		RequireQualityPass:    *requireQualityPass,
+	})
+	if *jsonOut {
+		return writePrettyJSON(os.Stdout, report)
+	}
+	printDebugRoutePolicyProposal(os.Stdout, report)
+	return nil
+}
+
 func runDebugVerifyPreflight(args []string) error {
 	fs := flag.NewFlagSet("debug verify-preflight", flag.ContinueOnError)
 	preflightPath := fs.String("preflight", "", "redacted gateway preflight evidence JSON")
@@ -805,6 +857,61 @@ type debugRouteSelectionRequirements struct {
 	RequireFinalContent bool `json:"require_final_content,omitempty"`
 	RequireUsage        bool `json:"require_usage,omitempty"`
 	RequireStreaming    bool `json:"require_streaming,omitempty"`
+}
+
+type debugRoutePolicyPromotionRequirements struct {
+	MinSuccesses          int  `json:"min_successes"`
+	RequireOwnerTelemetry bool `json:"require_owner_telemetry,omitempty"`
+	RequireLiveModel      bool `json:"require_live_model,omitempty"`
+	RequireQualityPass    bool `json:"require_quality_pass,omitempty"`
+}
+
+type debugRoutePolicyProposalReport struct {
+	SchemaVersion          string                                `json:"schema_version"`
+	Mode                   string                                `json:"mode"`
+	ApprovalBoundary       string                                `json:"approval_boundary"`
+	Requirements           debugRouteSelectionRequirements       `json:"requirements"`
+	PromotionRequirements  debugRoutePolicyPromotionRequirements `json:"promotion_requirements"`
+	ProposedPolicyChanges  int                                   `json:"proposed_policy_changes"`
+	CandidatePolicyChanges int                                   `json:"candidate_policy_changes"`
+	RefusedPolicyChanges   int                                   `json:"refused_policy_changes"`
+	MissingEvidence        int                                   `json:"missing_evidence"`
+	Proposals              []debugRoutePolicyProposal            `json:"proposals"`
+}
+
+type debugRoutePolicyProposal struct {
+	RouteKey                  string   `json:"route_key"`
+	Model                     string   `json:"model,omitempty"`
+	NodeID                    string   `json:"node_id,omitempty"`
+	Backend                   string   `json:"backend,omitempty"`
+	PresetID                  string   `json:"preset_id,omitempty"`
+	SelectorDecision          string   `json:"selector_decision"`
+	Action                    string   `json:"action"`
+	ApprovalRequired          bool     `json:"approval_required"`
+	Confidence                string   `json:"confidence"`
+	Reason                    string   `json:"reason"`
+	MissingEvidence           []string `json:"missing_evidence,omitempty"`
+	RefusalReasons            []string `json:"refusal_reasons,omitempty"`
+	ProposedChange            string   `json:"proposed_change,omitempty"`
+	RollbackNotes             []string `json:"rollback_notes,omitempty"`
+	EvidenceGrade             string   `json:"evidence_grade"`
+	Count                     int      `json:"count"`
+	Successes                 int      `json:"successes"`
+	Failures                  int      `json:"failures"`
+	UnknownOutcomes           int      `json:"unknown_outcomes"`
+	PreflightRows             int      `json:"preflight_rows,omitempty"`
+	OptimizationRows          int      `json:"optimization_rows,omitempty"`
+	OwnerTelemetryAvailable   int      `json:"owner_telemetry_available,omitempty"`
+	LiveCatalogAvailable      int      `json:"live_catalog_available,omitempty"`
+	LiveCatalogMissingOrError int      `json:"live_catalog_missing_or_error,omitempty"`
+	DeterministicQualityPass  int      `json:"deterministic_quality_pass,omitempty"`
+	DeterministicQualityFail  int      `json:"deterministic_quality_fail,omitempty"`
+	ContextCap                int      `json:"context_cap,omitempty"`
+	MinContextCap             int      `json:"min_context_cap,omitempty"`
+	UsageAvailable            int      `json:"usage_available,omitempty"`
+	UsageMissing              int      `json:"usage_missing,omitempty"`
+	AverageLatencyMS          int      `json:"average_latency_ms,omitempty"`
+	MaxLatencyMS              int      `json:"max_latency_ms,omitempty"`
 }
 
 type debugRouteSelection struct {
@@ -1941,6 +2048,216 @@ func debugRouteSelectionConfidence(selection debugRouteSelectionAggregate) strin
 		return "medium"
 	default:
 		return "low"
+	}
+}
+
+func proposeDebugRoutePolicy(rows []debugSummaryTrainingRow, requirements debugRouteSelectionRequirements, promotion debugRoutePolicyPromotionRequirements) debugRoutePolicyProposalReport {
+	selections := selectDebugTrainingRoutes(rows, requirements)
+	evidence := debugRoutePolicyEvidenceByRoute(rows)
+	report := debugRoutePolicyProposalReport{
+		SchemaVersion:         "mycelium.route_policy_proposal.v1",
+		Mode:                  "report_only",
+		ApprovalBoundary:      "operator approval is required before writing config, changing route policy, or restarting a live peer",
+		Requirements:          requirements,
+		PromotionRequirements: promotion,
+		Proposals:             make([]debugRoutePolicyProposal, 0, len(selections)),
+	}
+	for _, selection := range selections {
+		proposal := debugRoutePolicyProposalFromSelection(selection, evidence[selection.RouteKey], promotion)
+		switch proposal.Action {
+		case "propose_policy_change":
+			report.ProposedPolicyChanges++
+		case "candidate_policy_change":
+			report.CandidatePolicyChanges++
+		case "refuse_policy_change":
+			report.RefusedPolicyChanges++
+		default:
+			report.MissingEvidence++
+		}
+		report.Proposals = append(report.Proposals, proposal)
+	}
+	return report
+}
+
+type debugRoutePolicyEvidence struct {
+	preflightRows             int
+	optimizationRows          int
+	ownerTelemetryAvailable   int
+	liveCatalogAvailable      int
+	liveCatalogMissingOrError int
+	deterministicQualityPass  int
+	deterministicQualityFail  int
+}
+
+func debugRoutePolicyEvidenceByRoute(rows []debugSummaryTrainingRow) map[string]debugRoutePolicyEvidence {
+	byRoute := map[string]debugRoutePolicyEvidence{}
+	for _, row := range rows {
+		evidence := byRoute[row.RouteKey]
+		switch row.EvidenceKind {
+		case "preflight":
+			evidence.preflightRows++
+		case "optimization":
+			evidence.optimizationRows++
+		}
+		if row.OwnerTelemetryAvailable {
+			evidence.ownerTelemetryAvailable++
+		}
+		if row.LiveModelChecked {
+			if row.LiveModelAvailable {
+				evidence.liveCatalogAvailable++
+			} else {
+				evidence.liveCatalogMissingOrError++
+			}
+		}
+		if row.DeterministicQualityPass != nil {
+			if *row.DeterministicQualityPass {
+				evidence.deterministicQualityPass++
+			} else {
+				evidence.deterministicQualityFail++
+			}
+		}
+		byRoute[row.RouteKey] = evidence
+	}
+	return byRoute
+}
+
+func debugRoutePolicyProposalFromSelection(selection debugRouteSelection, evidence debugRoutePolicyEvidence, promotion debugRoutePolicyPromotionRequirements) debugRoutePolicyProposal {
+	proposal := debugRoutePolicyProposal{
+		RouteKey:                  selection.RouteKey,
+		Model:                     selection.Model,
+		NodeID:                    selection.NodeID,
+		Backend:                   selection.Backend,
+		PresetID:                  selection.PresetID,
+		SelectorDecision:          selection.Decision,
+		Confidence:                selection.Confidence,
+		Count:                     selection.Count,
+		Successes:                 selection.Successes,
+		Failures:                  selection.Failures,
+		UnknownOutcomes:           selection.UnknownOutcomes,
+		PreflightRows:             evidence.preflightRows,
+		OptimizationRows:          evidence.optimizationRows,
+		OwnerTelemetryAvailable:   evidence.ownerTelemetryAvailable,
+		LiveCatalogAvailable:      evidence.liveCatalogAvailable,
+		LiveCatalogMissingOrError: evidence.liveCatalogMissingOrError,
+		DeterministicQualityPass:  evidence.deterministicQualityPass,
+		DeterministicQualityFail:  evidence.deterministicQualityFail,
+		ContextCap:                selection.ContextCap,
+		MinContextCap:             selection.MinContextCap,
+		UsageAvailable:            selection.UsageAvailable,
+		UsageMissing:              selection.UsageMissing,
+		AverageLatencyMS:          selection.AverageLatencyMS,
+		MaxLatencyMS:              selection.MaxLatencyMS,
+		EvidenceGrade:             debugRoutePolicyEvidenceGrade(selection, evidence),
+	}
+	proposal.MissingEvidence = debugRoutePolicyMissingEvidence(selection, evidence, promotion)
+	switch selection.Decision {
+	case "selected":
+		if len(proposal.MissingEvidence) == 0 {
+			proposal.Action = "propose_policy_change"
+			proposal.ApprovalRequired = true
+			proposal.Reason = "selected route meets the explicit report-only promotion evidence bar"
+			proposal.ProposedChange = "make this route the preferred route for the matching workload contract"
+			proposal.RollbackNotes = debugRoutePolicyRollbackNotes()
+		} else {
+			proposal.Action = "collect_more_evidence"
+			proposal.Reason = "selected route still lacks required promotion evidence"
+		}
+	case "candidate":
+		if len(proposal.MissingEvidence) == 0 {
+			proposal.Action = "candidate_policy_change"
+			proposal.ApprovalRequired = true
+			proposal.Reason = "candidate route meets the evidence bar but was not the top selected route"
+			proposal.ProposedChange = "keep as an operator-approved alternate for the matching workload contract"
+			proposal.RollbackNotes = debugRoutePolicyRollbackNotes()
+		} else {
+			proposal.Action = "collect_more_evidence"
+			proposal.Reason = "candidate route lacks required promotion evidence"
+		}
+	case "refused":
+		proposal.Action = "refuse_policy_change"
+		proposal.Reason = selection.Reason
+		proposal.RefusalReasons = []string{selection.Reason}
+	default:
+		proposal.Action = "collect_more_evidence"
+		proposal.Reason = selection.Reason
+		if proposal.Reason == "" {
+			proposal.Reason = "route has insufficient selected evidence"
+		}
+	}
+	return proposal
+}
+
+func debugRoutePolicyMissingEvidence(selection debugRouteSelection, evidence debugRoutePolicyEvidence, promotion debugRoutePolicyPromotionRequirements) []string {
+	var missing []string
+	if selection.Decision == "refused" {
+		return missing
+	}
+	if promotion.MinSuccesses > 0 && selection.Successes < promotion.MinSuccesses {
+		missing = append(missing, fmt.Sprintf("need at least %d successful saved rows", promotion.MinSuccesses))
+	}
+	if promotion.RequireOwnerTelemetry && evidence.ownerTelemetryAvailable == 0 {
+		missing = append(missing, "need owner-side run/session telemetry")
+	}
+	if promotion.RequireLiveModel && evidence.liveCatalogAvailable == 0 {
+		missing = append(missing, "need live catalog availability evidence")
+	}
+	if promotion.RequireQualityPass && evidence.deterministicQualityPass == 0 {
+		missing = append(missing, "need deterministic consumer quality pass evidence")
+	}
+	return missing
+}
+
+func debugRoutePolicyEvidenceGrade(selection debugRouteSelection, evidence debugRoutePolicyEvidence) string {
+	switch {
+	case selection.Successes > 0 && evidence.ownerTelemetryAvailable > 0:
+		return "owner_telemetry"
+	case selection.Successes > 0 && evidence.optimizationRows > 0:
+		return "debug_bundle"
+	case evidence.preflightRows > 0:
+		return "preflight_only"
+	default:
+		return "insufficient"
+	}
+}
+
+func debugRoutePolicyRollbackNotes() []string {
+	return []string{
+		"record the current route config before applying an approved change",
+		"run the matching preflight gate before and after the change",
+		"revert the route config and rerun debug summary if the post-change gate fails",
+	}
+}
+
+func printDebugRoutePolicyProposal(w io.Writer, report debugRoutePolicyProposalReport) {
+	fmt.Fprintf(w, "policy-proposal\tschema=%s\tmode=%s\tproposed=%d\tcandidates=%d\trefused=%d\tmissing_evidence=%d\tapproval=%s\n",
+		report.SchemaVersion,
+		report.Mode,
+		report.ProposedPolicyChanges,
+		report.CandidatePolicyChanges,
+		report.RefusedPolicyChanges,
+		report.MissingEvidence,
+		report.ApprovalBoundary,
+	)
+	for _, proposal := range report.Proposals {
+		fmt.Fprintf(w, "policy-route\taction=%s\tdecision=%s\tkey=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\tevidence=%s\tconfidence=%s\tsuccess=%d\tfailure=%d\tunknown=%d\towner_telemetry=%d\tlive_catalog=%d\tquality_pass=%d\tmissing=%s\treason=%s\n",
+			proposal.Action,
+			proposal.SelectorDecision,
+			emptyDash(proposal.RouteKey),
+			emptyDash(proposal.Model),
+			emptyDash(proposal.NodeID),
+			emptyDash(proposal.Backend),
+			emptyDash(proposal.PresetID),
+			proposal.EvidenceGrade,
+			proposal.Confidence,
+			proposal.Successes,
+			proposal.Failures,
+			proposal.UnknownOutcomes,
+			proposal.OwnerTelemetryAvailable,
+			proposal.LiveCatalogAvailable,
+			proposal.DeterministicQualityPass,
+			emptyDash(strings.Join(proposal.MissingEvidence, ",")),
+			emptyDash(proposal.Reason),
+		)
 	}
 }
 

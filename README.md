@@ -401,6 +401,15 @@ selection dry run over that JSONL. Add workload gates such as
 selector ranks route contracts as `selected`, `candidate`,
 `insufficient_evidence`, or `refused` with evidence counts and refusal reasons.
 It does not mutate live routes or optimizer policy.
+Use `myce debug propose-policy --training-jsonl <file>` when a selected route
+needs an auditable operator approval packet before it can become policy. It
+uses the same workload gates as `debug select`, then applies explicit promotion
+gates such as `--min-successes`, `--require-owner-telemetry`,
+`--require-live-model`, and `--require-quality-pass`. The output is always
+report-only: proposed changes, candidates, refusals, missing evidence, rollback
+notes, and the human approval boundary. It never writes route config, changes
+optimizer policy, restarts peers, or treats preflight-only evidence as
+equivalent to owner-side telemetry unless the operator chooses that threshold.
 Use `myce debug verify-preflight --preflight <preflight.json>` to re-check a
 saved preflight artifact offline. The verifier applies the artifact's recorded
 expectation gates and can add stricter report-only gates for live-catalog proof,
