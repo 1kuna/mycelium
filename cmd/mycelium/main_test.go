@@ -37,6 +37,7 @@ import (
 	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/internal/telemetry"
+	"mycelium/internal/workload"
 	"mycelium/test/mocks"
 )
 
@@ -3943,6 +3944,142 @@ func TestRegistryAndTelemetryHTTPErrorBranches(t *testing.T) {
 	}
 }
 
+func TestWorkloadHTTPAdmitsQueuedIntentAndReportsStatus(t *testing.T) {
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	runtime := &recordingWorkloadRuntime{store: store, decision: domain.PlacementDecision{JobID: "job-a", Action: domain.ActionQueued, Preset: domain.Preset{ID: "preset-a"}}}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, runtime, store, "rpc-secret")
+	body := `{"job":{"id":"job-a","task_type":"chat","model":"model-a","preset":"preset-a","project":"project-a","priority":"interactive","speed_pref":"latency","context_request":8192,"expected_concurrency":2,"preemption":"soft"},"payload":{"prompt":"private text"}}`
+	req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("admit status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp workload.AdmissionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode admit response: %v", err)
+	}
+	if !resp.Queued || resp.Job.Status != domain.JobQueued || resp.Job.ContextRequest != 8192 || resp.PayloadBytes == 0 || !resp.PayloadStored {
+		t.Fatalf("admit response = %+v", resp)
+	}
+	if strings.Contains(rec.Body.String(), "private text") {
+		t.Fatalf("admit response leaked payload: %s", rec.Body.String())
+	}
+	if string(runtime.payload) != `{"prompt":"private text"}` {
+		t.Fatalf("runtime payload = %s", runtime.payload)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/workloads/job-a", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var status workload.StatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode status response: %v", err)
+	}
+	if status.Job.ID != "job-a" || status.Job.Project != "project-a" || status.Job.ExpectedConcurrency != 2 {
+		t.Fatalf("status response = %+v", status)
+	}
+}
+
+func TestWorkloadHTTPRejectsPrivateHandling(t *testing.T) {
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store}, store, "")
+	req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(`{"job":{"id":"job-a","model":"model-a","project":"project-a","handling":"private"}}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "private workload handling is not enabled") {
+		t.Fatalf("private handling response = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWorkloadHTTPErrorBranches(t *testing.T) {
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store, err: errors.New("admission boom")}, store, "rpc-secret")
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		auth   bool
+		want   int
+	}{
+		{name: "unauthorized", method: http.MethodPost, path: "/workloads", body: `{}`, want: http.StatusUnauthorized},
+		{name: "post method", method: http.MethodGet, path: "/workloads", auth: true, want: http.StatusMethodNotAllowed},
+		{name: "bad json", method: http.MethodPost, path: "/workloads", body: `{`, auth: true, want: http.StatusBadRequest},
+		{name: "bad id", method: http.MethodGet, path: "/workloads/", auth: true, want: http.StatusBadRequest},
+		{name: "missing status", method: http.MethodGet, path: "/workloads/missing", auth: true, want: http.StatusNotFound},
+		{name: "bad status method", method: http.MethodPost, path: "/workloads/job-a", auth: true, want: http.StatusMethodNotAllowed},
+		{name: "runtime error", method: http.MethodPost, path: "/workloads", body: `{"job":{"id":"job-a","model":"model-a","project":"project-a"}}`, auth: true, want: http.StatusConflict},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		if tc.auth {
+			req.Header.Set("Authorization", "Bearer rpc-secret")
+		}
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Fatalf("%s status = %d body=%s", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestWorkloadHTTPReturnsCreatedForImmediatePlacement(t *testing.T) {
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	runtime := &recordingWorkloadRuntime{
+		store:    store,
+		decision: domain.PlacementDecision{JobID: "job-a", Action: domain.ActionLoadedNew, Preset: domain.Preset{ID: "preset-a"}, NodeID: "node-a"},
+	}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, runtime, store, "")
+	req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(`{"job":{"id":"job-a","model":"model-a","project":"project-a"}}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("created status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNormalizeWorkloadJobValidationBranches(t *testing.T) {
+	base := domain.Job{ID: "job-a", Model: "model-a", Project: "project-a"}
+	normalized, err := normalizeWorkloadJob(base)
+	if err != nil {
+		t.Fatalf("normalize default: %v", err)
+	}
+	if normalized.TaskType != "chat" || normalized.Priority != domain.PriorityNormal || normalized.SpeedPref != domain.SpeedThroughput || normalized.Preemption != domain.PreemptInherit || normalized.Status != domain.JobQueued {
+		t.Fatalf("normalized defaults = %+v", normalized)
+	}
+	tests := []struct {
+		name string
+		job  domain.Job
+		want string
+	}{
+		{name: "missing id", job: domain.Job{Model: "model-a", Project: "project-a"}, want: "job.id"},
+		{name: "missing model", job: domain.Job{ID: "job-a", Project: "project-a"}, want: "job.model"},
+		{name: "missing project", job: domain.Job{ID: "job-a", Model: "model-a"}, want: "job.project"},
+		{name: "bad priority", job: withWorkloadPriority(base, "urgent"), want: "priority"},
+		{name: "bad speed", job: withWorkloadSpeed(base, "fast"), want: "speed_pref"},
+		{name: "bad preemption", job: withWorkloadPreemption(base, "borrow"), want: "preemption"},
+		{name: "bad handling", job: withWorkloadHandling(base, "secret"), want: "handling"},
+		{name: "negative context", job: withWorkloadContext(base, -1), want: "context_request"},
+		{name: "negative concurrency", job: withWorkloadConcurrency(base, -1), want: "expected_concurrency"},
+		{name: "negative deadline", job: withWorkloadDeadline(base, -1), want: "deadline_ms"},
+	}
+	for _, tc := range tests {
+		if _, err := normalizeWorkloadJob(tc.job); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s err = %v", tc.name, err)
+		}
+	}
+}
+
 func TestPeerRPCClientErrorBranches(t *testing.T) {
 	ctx := context.Background()
 	if err := doPeerRPC(ctx, nil, "", domain.Peer{ID: "peer-a"}, http.MethodGet, "/x", nil, nil); err == nil {
@@ -4481,6 +4618,84 @@ func (r *recordingRescueRuntime) SubmitWithPayload(_ context.Context, job domain
 	r.job = job
 	r.payload = append([]byte(nil), payload...)
 	return scheduler.Result{}, nil
+}
+
+type recordingWorkloadRuntime struct {
+	store    *workloadMemoryStore
+	decision domain.PlacementDecision
+	job      domain.Job
+	payload  []byte
+	err      error
+}
+
+func (r *recordingWorkloadRuntime) SubmitWithPayload(_ context.Context, job domain.Job, payload []byte, _ ...scheduler.SubmitHooks) (scheduler.Result, error) {
+	r.job = job
+	r.payload = append([]byte(nil), payload...)
+	if r.err != nil {
+		return scheduler.Result{}, r.err
+	}
+	if r.store != nil {
+		if r.decision.Action != "" && r.decision.Action != domain.ActionQueued {
+			job.Status = domain.JobRunning
+		}
+		_ = r.store.SaveJob(context.Background(), job)
+	}
+	return scheduler.Result{Decision: r.decision}, nil
+}
+
+type workloadMemoryStore struct {
+	jobs map[string]domain.Job
+}
+
+func (s *workloadMemoryStore) SaveJob(_ context.Context, job domain.Job) error {
+	if s.jobs == nil {
+		s.jobs = map[string]domain.Job{}
+	}
+	s.jobs[job.ID] = job
+	return nil
+}
+
+func (s *workloadMemoryStore) Job(_ context.Context, id string) (domain.Job, error) {
+	job, ok := s.jobs[id]
+	if !ok {
+		return domain.Job{}, fmt.Errorf("job %q not found", id)
+	}
+	return job, nil
+}
+
+func withWorkloadPriority(job domain.Job, priority domain.Priority) domain.Job {
+	job.Priority = priority
+	return job
+}
+
+func withWorkloadSpeed(job domain.Job, speed domain.SpeedPref) domain.Job {
+	job.SpeedPref = speed
+	return job
+}
+
+func withWorkloadPreemption(job domain.Job, preemption domain.Preemption) domain.Job {
+	job.Preemption = preemption
+	return job
+}
+
+func withWorkloadHandling(job domain.Job, handling domain.HandlingClass) domain.Job {
+	job.Handling = handling
+	return job
+}
+
+func withWorkloadContext(job domain.Job, contextRequest int) domain.Job {
+	job.ContextRequest = contextRequest
+	return job
+}
+
+func withWorkloadConcurrency(job domain.Job, concurrency int) domain.Job {
+	job.ExpectedConcurrency = concurrency
+	return job
+}
+
+func withWorkloadDeadline(job domain.Job, deadlineMS int) domain.Job {
+	job.DeadlineMS = deadlineMS
+	return job
 }
 
 type simpleJobLister struct {
