@@ -4306,7 +4306,10 @@ func TestWorkloadHTTPDrainsQueuedWorkAcrossOwnersAndReclaimsCapacity(t *testing.
 		}
 		return out
 	}
-	finishWorkload("job-a", "", domain.JobDone)
+	finished := finishWorkload("job-a", `{"result_artifact":"artifact://job-a"}`, domain.JobDone)
+	if finished.Result.ResultArtifact != "artifact://job-a" {
+		t.Fatalf("finished result artifact = %q", finished.Result.ResultArtifact)
+	}
 	leases, err = store.ListLeases(ctx)
 	if err != nil {
 		t.Fatalf("ListLeases after first finish: %v", err)

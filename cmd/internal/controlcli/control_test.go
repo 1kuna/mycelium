@@ -347,7 +347,10 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 			if req.Error != "" {
 				t.Fatalf("finish error = %q", req.Error)
 			}
-			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultRedacted: true, Terminal: true}
+			if req.ResultArtifact != "artifact://job-a" {
+				t.Fatalf("finish result artifact = %q", req.ResultArtifact)
+			}
+			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultArtifact: req.ResultArtifact, ResultRedacted: true, Terminal: true}
 			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: domain.Job{ID: "job-a", Model: "model-a", PresetID: "preset-a", Project: "project-a", Status: domain.JobDone, Result: result}, Result: result})
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -382,7 +385,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 		t.Fatalf("drain output = %q", drainOut)
 	}
 	finishOut := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"jobs", "finish", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a"}, client)
+		err = RunWithClient(context.Background(), []string{"jobs", "finish", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a", "--result-artifact", "artifact://job-a"}, client)
 	})
 	if err != nil {
 		t.Fatalf("jobs finish: %v", err)
