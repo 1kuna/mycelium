@@ -244,6 +244,9 @@ func (a *Admission) Offer(ctx context.Context, req domain.AdmissionRequest) (dom
 	}
 	preempting := preemptionLeaseIDs(req.Preemptions)
 	claim := incrementalClaim(req)
+	if req.InstanceID != "" && !a.warmEnvelopeAvailableLocked(req.InstanceID, req.Job) {
+		return domain.LeaseOffer{}, fmt.Errorf("%w: warm instance %q concurrency envelope is full for job %q", domain.ErrNoFit, req.InstanceID, job.ID)
+	}
 	acceleratorSet, ok := a.selectAcceleratorSetLocked(req, claim, preempting)
 	if !ok {
 		return domain.LeaseOffer{}, fmt.Errorf("%w: node %q cannot offer capacity for job %q", domain.ErrNoFit, a.node.ID, job.ID)
@@ -346,6 +349,9 @@ func (a *Admission) Commit(ctx context.Context, offerID string, fence uint64) (d
 	}
 	if err := a.validatePreemptionsLocked(offer.job, offer.preemptions); err != nil {
 		return domain.Lease{}, err
+	}
+	if offer.instanceID != "" && !a.warmEnvelopeAvailableLocked(offer.instanceID, offer.job) {
+		return domain.Lease{}, fmt.Errorf("%w: warm instance %q concurrency envelope is full for job %q", domain.ErrNoFit, offer.instanceID, offer.job.ID)
 	}
 	preempting := preemptionLeaseIDs(offer.preemptions)
 	if !a.fitsLockedExcept(offer.acceleratorSet, offer.offer.Claim, preempting) {
@@ -837,6 +843,31 @@ func incrementalClaim(req domain.AdmissionRequest) domain.Claim {
 		claim.WeightsMB = 0
 	}
 	return claim
+}
+
+func (a *Admission) warmEnvelopeAvailableLocked(instanceID string, job domain.Job) bool {
+	envelope := job.ExpectedConcurrency
+	if envelope <= 0 {
+		envelope = 1
+	}
+	occupancy := 0
+	if a.instances != nil {
+		for _, inst := range a.instances() {
+			if inst.ID == instanceID && inst.InFlight > occupancy {
+				occupancy = inst.InFlight
+			}
+		}
+	}
+	admitted := 0
+	for _, record := range a.leases {
+		if record.lease.InstanceID == instanceID && admissionLeaseState(record) != domain.AdmissionLeasePreempting {
+			admitted++
+		}
+	}
+	if admitted > occupancy {
+		occupancy = admitted
+	}
+	return occupancy < envelope
 }
 
 func (a *Admission) diskSafeLocked(preset domain.Preset, instanceID string, claim domain.Claim, jobID string) error {
