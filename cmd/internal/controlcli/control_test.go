@@ -339,6 +339,16 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 				PayloadBytes:  len(intent.Payload),
 				PayloadStored: true,
 			}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/workloads/job-a/finish":
+			var req workload.FinishRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode workload finish: %v", err)
+			}
+			if req.Error != "" {
+				t.Fatalf("finish error = %q", req.Error)
+			}
+			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultRedacted: true, Terminal: true}
+			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: domain.Job{ID: "job-a", Model: "model-a", PresetID: "preset-a", Project: "project-a", Status: domain.JobDone, Result: result}, Result: result})
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -370,6 +380,15 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	}
 	if !strings.Contains(drainOut, "drained\t1") || !strings.Contains(drainOut, "node=node-a") || strings.Contains(drainOut, "input_bytes") {
 		t.Fatalf("drain output = %q", drainOut)
+	}
+	finishOut := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"jobs", "finish", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a"}, client)
+	})
+	if err != nil {
+		t.Fatalf("jobs finish: %v", err)
+	}
+	if !strings.Contains(finishOut, "status=done") || !strings.Contains(finishOut, "terminal=true") || strings.Contains(finishOut, "input_bytes") {
+		t.Fatalf("finish output = %q", finishOut)
 	}
 	jsonOut := captureStdout(t, func() {
 		err = RunWithClient(context.Background(), []string{"jobs", "status", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a", "--json"}, client)
@@ -449,6 +468,22 @@ func TestRunJobsAdmitAndStatusErrorBranches(t *testing.T) {
 	err = runJobsDrain(context.Background(), []string{"--url", "http://peer.test"}, badResponseClient)
 	if err == nil {
 		t.Fatal("bad drain response accepted")
+	}
+	err = runJobsFinish(context.Background(), nil, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--url") {
+		t.Fatalf("finish missing url err = %v", err)
+	}
+	err = runJobsFinish(context.Background(), []string{"--url", "http://peer.test"}, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--id") {
+		t.Fatalf("finish missing id err = %v", err)
+	}
+	err = runJobsFinish(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a"}, errorClient)
+	if err == nil || !strings.Contains(err.Error(), "409") {
+		t.Fatalf("finish error response err = %v", err)
+	}
+	err = runJobsFinish(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a"}, badResponseClient)
+	if err == nil {
+		t.Fatal("bad finish response accepted")
 	}
 }
 
