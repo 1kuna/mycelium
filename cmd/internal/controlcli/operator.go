@@ -2983,6 +2983,11 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 	} else if report.Preflight != nil {
 		fmt.Fprintf(w, "job\t-\tpreflight_only\tmodel=%s\tproject=%s\towner=-\n", emptyDash(report.Preflight.Model), emptyDash(report.Preflight.Project))
 	}
+	if report.Job.Result != nil {
+		result := report.Job.Result
+		fmt.Fprintf(w, "result\tterminal=%t\tredacted=%t\tartifact=%s\tmedia_type=%s\tbytes=%d\tsha256=%s\n",
+			result.Terminal, result.ResultRedacted, emptyDash(result.ResultArtifact), emptyDash(result.ResultMediaType), result.ResultBytes, emptyDash(result.ResultSHA256))
+	}
 	if report.Parent != nil {
 		fmt.Fprintf(w, "parent\t%s\t%s\n", report.Parent.ID, report.Parent.Status)
 	}

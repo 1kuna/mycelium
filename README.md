@@ -443,6 +443,30 @@ Telemetry worth checking:
 - `session_metrics`: phase timeline samples such as placed, load-ready, upstream-start, first-byte, stream-chunk, complete, and error.
 - recommendation records: context-cap, consolidation, and engine/parameter recommendations derived from telemetry.
 
+For explicit queued workload proofs, keep `/v1/chat/completions`
+synchronous and use the workload lane:
+
+```bash
+myce jobs admit --url <peer-url> --rpc-token <token> --file <workload-intent.json>
+myce jobs drain --url <peer-url> --rpc-token <token> --limit <n>
+myce jobs finish \
+  --url <peer-url> \
+  --rpc-token <token> \
+  --id <job-id> \
+  --result-artifact <redacted-artifact-ref> \
+  --result-media-type application/json \
+  --result-bytes <byte-count> \
+  --result-sha256 <sha256>
+myce jobs status --url <peer-url> --rpc-token <token> --id <job-id> --json
+```
+
+The workload status surface records scheduler/owner/lease evidence plus a
+redacted result artifact manifest: reference, media type, byte count, and
+digest. It does not print the queued payload or raw completion. Raw async
+completion replay is a separate product gate; until then, the artifact
+manifest is the durable output boundary operators can join to debug bundles
+and optimizer evidence.
+
 For partial consumer batches, preserve one `preflight.json` or response-header
 set per failed or timed-out row. `debug job --preflight --owner-telemetry`
 stitches the request artifact to the durable job/registry surfaces and fetches

@@ -28,8 +28,11 @@ type StatusResponse struct {
 }
 
 type FinishRequest struct {
-	Error          string `json:"error,omitempty"`
-	ResultArtifact string `json:"result_artifact,omitempty"`
+	Error           string `json:"error,omitempty"`
+	ResultArtifact  string `json:"result_artifact,omitempty"`
+	ResultMediaType string `json:"result_media_type,omitempty"`
+	ResultBytes     int    `json:"result_bytes,omitempty"`
+	ResultSHA256    string `json:"result_sha256,omitempty"`
 }
 
 type FinishResponse struct {

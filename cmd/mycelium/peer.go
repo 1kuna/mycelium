@@ -650,9 +650,9 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 				writePeerRPCError(w, http.StatusConflict, err)
 				return
 			}
-			if artifact := strings.TrimSpace(req.ResultArtifact); artifact != "" {
-				job.Result.ResultArtifact = artifact
-				job.Result.ResultRedacted = true
+			if err := attachWorkloadResultArtifact(job.Result, req); err != nil {
+				writePeerRPCError(w, http.StatusBadRequest, err)
+				return
 			}
 			var cause error
 			if strings.TrimSpace(req.Error) != "" {
@@ -677,6 +677,46 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			panic(err)
 		}
 	})
+}
+
+func attachWorkloadResultArtifact(result *domain.JobResult, req workload.FinishRequest) error {
+	artifact := strings.TrimSpace(req.ResultArtifact)
+	mediaType := strings.TrimSpace(req.ResultMediaType)
+	digest := strings.ToLower(strings.TrimSpace(req.ResultSHA256))
+	if req.ResultBytes < 0 {
+		return fmt.Errorf("result_bytes must be non-negative")
+	}
+	if digest != "" && !validSHA256Hex(digest) {
+		return fmt.Errorf("result_sha256 must be 64 hexadecimal characters")
+	}
+	if mediaType != "" && strings.ContainsAny(mediaType, "\r\n\t") {
+		return fmt.Errorf("result_media_type must not contain control characters")
+	}
+	if artifact == "" && mediaType == "" && req.ResultBytes == 0 && digest == "" {
+		return nil
+	}
+	if artifact == "" {
+		return fmt.Errorf("result_artifact is required when result metadata is supplied")
+	}
+	result.ResultArtifact = artifact
+	result.ResultMediaType = mediaType
+	result.ResultBytes = req.ResultBytes
+	result.ResultSHA256 = digest
+	result.ResultRedacted = true
+	return nil
+}
+
+func validSHA256Hex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, c := range value {
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func workloadLease(job domain.Job) (domain.Lease, error) {

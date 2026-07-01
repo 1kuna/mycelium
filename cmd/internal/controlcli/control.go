@@ -1014,6 +1014,9 @@ func runJobsFinish(ctx context.Context, args []string, client *http.Client) erro
 	id := fs.String("id", "", "workload job id")
 	errorText := fs.String("error", "", "mark workload failed with this redacted error string")
 	resultArtifact := fs.String("result-artifact", "", "redacted result artifact reference to attach to the terminal workload")
+	resultMediaType := fs.String("result-media-type", "", "media type of the redacted result artifact")
+	resultBytes := fs.Int("result-bytes", 0, "byte size of the redacted result artifact")
+	resultSHA256 := fs.String("result-sha256", "", "sha256 digest of the redacted result artifact")
 	jsonOut := fs.Bool("json", false, "print JSON response")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1024,7 +1027,13 @@ func runJobsFinish(ctx context.Context, args []string, client *http.Client) erro
 	if *id == "" {
 		return fmt.Errorf("--id is required")
 	}
-	body, err := json.Marshal(workload.FinishRequest{Error: *errorText, ResultArtifact: *resultArtifact})
+	body, err := json.Marshal(workload.FinishRequest{
+		Error:           *errorText,
+		ResultArtifact:  *resultArtifact,
+		ResultMediaType: *resultMediaType,
+		ResultBytes:     *resultBytes,
+		ResultSHA256:    *resultSHA256,
+	})
 	if err != nil {
 		return err
 	}
@@ -1079,6 +1088,8 @@ func printWorkloadStatus(out workload.StatusResponse) {
 	payloadStored := false
 	payloadBytes := 0
 	terminal := false
+	resultArtifact := ""
+	resultBytes := 0
 	if out.Result != nil {
 		action = out.Result.Action
 		node = out.Result.NodeID
@@ -1089,9 +1100,11 @@ func printWorkloadStatus(out workload.StatusResponse) {
 		payloadStored = out.Result.PayloadStored
 		payloadBytes = out.Result.PayloadBytes
 		terminal = out.Result.Terminal
+		resultArtifact = out.Result.ResultArtifact
+		resultBytes = out.Result.ResultBytes
 	}
-	fmt.Printf("workload\t%s\tstatus=%s\tproject=%s\tmodel=%s\tpreset=%s\tpriority=%s\tcontext=%d\tconcurrency=%d\tpreemption=%s\taction=%s\tnode=%s\tlease=%s\tpayload_stored=%t\tpayload_bytes=%d\tterminal=%t\n",
-		out.Job.ID, out.Job.Status, out.Job.Project, out.Job.Model, preset, out.Job.Priority, out.Job.ContextRequest, out.Job.ExpectedConcurrency, out.Job.Preemption, action, emptyDash(node), emptyDash(lease), payloadStored, payloadBytes, terminal)
+	fmt.Printf("workload\t%s\tstatus=%s\tproject=%s\tmodel=%s\tpreset=%s\tpriority=%s\tcontext=%d\tconcurrency=%d\tpreemption=%s\taction=%s\tnode=%s\tlease=%s\tpayload_stored=%t\tpayload_bytes=%d\tterminal=%t\tresult_artifact=%s\tresult_bytes=%d\n",
+		out.Job.ID, out.Job.Status, out.Job.Project, out.Job.Model, preset, out.Job.Priority, out.Job.ContextRequest, out.Job.ExpectedConcurrency, out.Job.Preemption, action, emptyDash(node), emptyDash(lease), payloadStored, payloadBytes, terminal, emptyDash(resultArtifact), resultBytes)
 }
 
 func runTelemetry(ctx context.Context, args []string) error {
