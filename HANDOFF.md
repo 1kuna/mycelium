@@ -1,6 +1,6 @@
 # Mycelium Public Handoff
 
-Last updated: 2026-06-29
+Last updated: 2026-07-01
 
 This file is public repo continuity, not an operator journal. Do not record
 client/project names, private hostnames, private IP addresses, token names,
@@ -87,7 +87,10 @@ telemetry that shows which node owned each job.
 The gateway constructs jobs with project, priority, speed, context,
 concurrency, preemption, streaming, submitter, and handling intent. The
 scheduler service supports queued work, owner-authoritative admission, and a
-periodic queue drainer. OpenAI-compatible chat requests remain synchronous:
+periodic queue drainer. Owner admission enforces the warm-instance
+expected-concurrency envelope at offer and commit time, so a warm instance
+sheds instead of accepting unbounded extra work. OpenAI-compatible chat
+requests remain synchronous:
 when the selected route cannot immediately acquire an owner, the gateway
 returns a loud no-instance error instead of accepting an asynchronous workload.
 Use the authenticated `/workloads` RPC surface,
@@ -101,8 +104,10 @@ may carry a redacted result artifact reference, but Mycelium does not yet replay
 raw asynchronous inference payloads through this lane. The fast test suite
 includes a repo-local HTTP workload proof for queued admission, multi-owner
 drain, terminal success/failure, result artifact metadata, and lease reclaim.
-Raw async inference result replay for queued payloads is still a separate
-product gate.
+Registry rescue is scoped to durable async work with replayable payload
+references; foreground streams that die with their coordinator are interrupted
+work, not transparently resumed streams. Raw async inference result replay for
+queued payloads is still a separate product gate.
 
 ## Public Hygiene Rules
 
