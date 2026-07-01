@@ -93,6 +93,13 @@ func TestBackendAwareVLLMUsesUnitReservationClaim(t *testing.T) {
 	if claim != (domain.Claim{WeightsMB: 1000}) {
 		t.Fatalf("claim = %+v", claim)
 	}
+	largeContextClaim, err := NewBackendAware(nil, NewInMemory()).EstimateForUnit(context.Background(), preset, 32000, 8, node, []int{0, 1})
+	if err != nil {
+		t.Fatalf("large context EstimateForUnit: %v", err)
+	}
+	if largeContextClaim != claim || largeContextClaim.KVReservedMB != 0 {
+		t.Fatalf("vllm claim should be provider-reservation sized, got %+v after %+v", largeContextClaim, claim)
+	}
 
 	preset.LaunchArgs = []string{"serve", "{model}"}
 	if _, err := NewBackendAware(nil, NewInMemory()).EstimateForUnit(context.Background(), preset, 100, 1, node, []int{0}); err == nil || !strings.Contains(err.Error(), "gpu-memory-utilization") {

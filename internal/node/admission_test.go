@@ -335,7 +335,7 @@ func TestAdmissionWarmLeasesReserveIncrementalKVOnly(t *testing.T) {
 	)
 
 	first, err := admission.Offer(ctx, domain.AdmissionRequest{
-		Job:        fixtures.MakeJob(fixtures.WithJobID("warm-1")),
+		Job:        fixtures.MakeJob(fixtures.WithJobID("warm-1"), fixtures.WithConcurrency(2)),
 		Claim:      fixtures.MakeClaim(600, 100),
 		NodeID:     node.ID,
 		InstanceID: warm.ID,
@@ -347,7 +347,7 @@ func TestAdmissionWarmLeasesReserveIncrementalKVOnly(t *testing.T) {
 		t.Fatalf("first warm Commit: %v", err)
 	}
 	if _, err := admission.Offer(ctx, domain.AdmissionRequest{
-		Job:        fixtures.MakeJob(fixtures.WithJobID("warm-fits")),
+		Job:        fixtures.MakeJob(fixtures.WithJobID("warm-fits"), fixtures.WithConcurrency(2)),
 		Claim:      fixtures.MakeClaim(600, 300),
 		NodeID:     node.ID,
 		InstanceID: warm.ID,
@@ -361,6 +361,103 @@ func TestAdmissionWarmLeasesReserveIncrementalKVOnly(t *testing.T) {
 		InstanceID: warm.ID,
 	}); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("second warm overflow err = %v", err)
+	}
+}
+
+func TestAdmissionWarmAdmissionHonorsExpectedConcurrencyEnvelope(t *testing.T) {
+	ctx := context.Background()
+	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	warm := fixtures.MakeInstance(
+		fixtures.WithInstanceID("warm-a"),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(600, 0)),
+	)
+	admission := NewAdmission(
+		node,
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		WithAdmissionInstances(func() []domain.ModelInstance { return []domain.ModelInstance{warm} }),
+	)
+
+	warmReq := func(id string) domain.AdmissionRequest {
+		return domain.AdmissionRequest{
+			Job:        fixtures.MakeJob(fixtures.WithJobID(id), fixtures.WithConcurrency(2)),
+			Claim:      fixtures.MakeClaim(600, 0),
+			NodeID:     node.ID,
+			InstanceID: warm.ID,
+		}
+	}
+	for _, id := range []string{"warm-1", "warm-2"} {
+		offer, err := admission.Offer(ctx, warmReq(id))
+		if err != nil {
+			t.Fatalf("%s Offer: %v", id, err)
+		}
+		lease, err := admission.Commit(ctx, offer.OfferID, offer.Fence)
+		if err != nil {
+			t.Fatalf("%s Commit: %v", id, err)
+		}
+		if lease.Claim.WeightsMB != 0 || lease.Claim.KVReservedMB != 0 {
+			t.Fatalf("%s warm lease should be incremental, got %+v", id, lease.Claim)
+		}
+	}
+	if _, err := admission.Offer(ctx, warmReq("warm-3")); !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("third warm Offer err = %v", err)
+	}
+}
+
+func TestAdmissionWarmAdmissionCountsLiveInFlightEnvelope(t *testing.T) {
+	ctx := context.Background()
+	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	warm := fixtures.MakeInstance(
+		fixtures.WithInstanceID("warm-a"),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(600, 0)),
+	)
+	warm.InFlight = 2
+	admission := NewAdmission(
+		node,
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		WithAdmissionInstances(func() []domain.ModelInstance { return []domain.ModelInstance{warm} }),
+	)
+
+	if _, err := admission.Offer(ctx, domain.AdmissionRequest{
+		Job:        fixtures.MakeJob(fixtures.WithJobID("warm-full"), fixtures.WithConcurrency(2)),
+		Claim:      fixtures.MakeClaim(600, 0),
+		NodeID:     node.ID,
+		InstanceID: warm.ID,
+	}); !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("in-flight warm Offer err = %v", err)
+	}
+}
+
+func TestAdmissionWarmAdmissionRechecksEnvelopeAtCommit(t *testing.T) {
+	ctx := context.Background()
+	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	warm := fixtures.MakeInstance(
+		fixtures.WithInstanceID("warm-a"),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(600, 0)),
+	)
+	admission := NewAdmission(
+		node,
+		lease.NewAllocator(),
+		mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)),
+		WithAdmissionInstances(func() []domain.ModelInstance { return []domain.ModelInstance{warm} }),
+	)
+
+	offer, err := admission.Offer(ctx, domain.AdmissionRequest{
+		Job:        fixtures.MakeJob(fixtures.WithJobID("warm-race"), fixtures.WithConcurrency(1)),
+		Claim:      fixtures.MakeClaim(600, 0),
+		NodeID:     node.ID,
+		InstanceID: warm.ID,
+	})
+	if err != nil {
+		t.Fatalf("Offer: %v", err)
+	}
+	warm.InFlight = 1
+	if _, err := admission.Commit(ctx, offer.OfferID, offer.Fence); !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("Commit after in-flight changed err = %v", err)
 	}
 }
 

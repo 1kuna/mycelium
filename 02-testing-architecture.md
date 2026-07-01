@@ -154,10 +154,13 @@ type Job struct {
 	Model          string // logical alias OR explicit preset id
 	PresetID       string // optional pin
 	Project        string
+	Submitter      string
 	Priority       Priority
 	SpeedPref      SpeedPref
 	ContextRequest int    // optional override of project/preset cap (0 = use default)
+	ExpectedConcurrency int
 	Preemption     Preemption
+	Handling       HandlingClass
 	Streaming      bool
 	DeadlineMS     int    // 0 = none
 	ParentID       string // set on reverse-benchmark child jobs (fan-out)
@@ -220,23 +223,29 @@ type Peer struct {
 
 // LeaseOffer is an owner's conditional "I can run this" during planning.
 type LeaseOffer struct {
-	OfferID    string
-	JobID      string
-	NodeID     string
-	Claim      Claim
-	Fence      uint64 // the node's resource version this offer was made against
-	ExpiresAt  time.Time
-	Conditions string // e.g. "after evicting inst_x" | "reduced concurrency"
+	OfferID        string
+	JobID          string
+	NodeID         string
+	Claim          Claim
+	AcceleratorSet []int
+	InstanceID     string
+	ReservationID  string
+	Fence          uint64 // the node's resource version this offer was made against
+	ExpiresAt      time.Time
+	Conditions     string // e.g. "after evicting inst_x" | "reduced concurrency"
 }
 
-// JobRecord is one row of the replicated job registry (D16). Holds the request
-// payload so a dead peer's job can be re-run (rescued), not just flagged lost.
+// JobRecord is one row of the replicated job registry (D16). Foreground streams
+// use it for status/evidence. Durable async jobs may attach replayable payload
+// references; without that, rescue is classification plus deliberate caller retry.
 type JobRecord struct {
 	JobID       string
 	Coordinator string // peer id currently responsible
 	AssignedNode string
 	Status      string // queued | placing | running | done | failed | orphaned
-	Request     []byte // the submitted request, for rescue
+	Request     []byte // redacted request metadata or a durable replay reference
+	Handling    HandlingClass
+	PayloadRedacted bool
 	Fence       uint64
 	UpdatedAt   time.Time
 }
@@ -330,7 +339,7 @@ type Placer interface {
 // the owner commits in a local transaction, enforcing max_util/oom_severity, and
 // REJECTS a stale plan via a per-resource fence/version (optimistic concurrency).
 type AdmissionController interface {
-	Offer(ctx context.Context, req domain.Job, claim domain.Claim) (domain.LeaseOffer, error)
+	Offer(ctx context.Context, req domain.AdmissionRequest) (domain.LeaseOffer, error)
 	Commit(ctx context.Context, offerID string, fence uint64) (domain.Lease, error) // ErrStaleFence if version moved
 	Release(ctx context.Context, leaseID string) error
 	Preempt(ctx context.Context, leaseID, reason string) error
@@ -508,9 +517,9 @@ test/
 | `e2e/` | whole peer, mock node agents + fake clock | no | <30s | before commit |
 | `smoke/` | real engines & machines (`//go:build smoke`) | **yes** | 1-5m | manual / CI main only |
 
-Everything except `smoke/` runs on the local dev Mac with nothing powered on. `smoke/` is the only place the Spark/B70/4090/Mac engines appear, and it is gated behind the `smoke` build tag so normal `go test ./...` never touches hardware.
+Everything except `smoke/` runs on the local dev Mac with nothing powered on. `smoke/` is the only place real engines or real machines appear, and it is gated behind the `smoke` build tag so normal `go test ./...` never touches hardware.
 
-Coverage targets: 85%+ lines per module; **100% on `internal/scheduler`, `internal/lease`, and all conformance suites and fixture factories**; every error path tested; every public method tested.
+Coverage targets are enforced by `make coverage`: 85%+ total, 85%+ for included packages, and explicit 100% requirements for the packages/files listed in the Makefile. New public behavior and meaningful error paths need tests, but unreachable process-fatal branches should be documented or isolated rather than padded with fake coverage probes.
 
 ---
 
@@ -971,13 +980,7 @@ jobs:
         run: go test ./... -race -covermode=atomic -coverprofile=cover.out
       - name: coverage gate
         run: |
-          go run ./tools/covergate -profile cover.out \
-            -min 0.85 \
-            -require internal/scheduler=1.0 \
-            -require internal/lease=1.0 \
-            -require internal/peer/coordinator=1.0 \
-            -require internal/peer/recovery=1.0 \
-            -require internal/node/admission=1.0
+          make coverage
   smoke:
     if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, gpu]      # a real machine in the fleet
@@ -995,7 +998,7 @@ jobs:
 
 ## 10. Coverage targets and pitfalls
 
-Targets: 85%+ lines per module; 100% on `internal/scheduler`, `internal/lease`, the federation authority/recovery packages (`internal/node/admission`, `internal/peer/coordinator`, `internal/peer/recovery`), conformance suites, and fixture factories; every error path covered; every public method covered.
+Targets: use `make coverage` as the runnable authority. It runs package coverage through `tools/covergate`, applies the current 85% package floor, and keeps explicit 100% requirements for the core packages/files that are expected to be exhaustively covered. Every public contract should have behavior tests and important failures should be exercised; do not preserve impossible "100% of every fatal branch" language by writing hollow tests.
 
 Avoid (Go-specific reading of the standard pitfalls):
 
