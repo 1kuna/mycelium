@@ -12,11 +12,11 @@ handoff.
   prove live allocator behavior under pressure. The OpenAI-compatible gateway
   currently requires synchronous ownership for chat requests and returns a loud
   no-instance error when work would queue. The authenticated workload RPC and
-  `myce jobs admit/status/drain` now provide explicit queued admission,
-  scheduler drain, redacted payload/result metadata, and terminal evidence for
-  repo-local allocator proofs. The remaining blockers are raw async inference
-  result replay for queued payloads and a live pressure proof that shows
-  queue/preemption/reclaim under real fleet load.
+  `myce jobs admit/status/drain/finish` now provide explicit queued admission,
+  scheduler drain, scheduler release/reclaim, redacted payload/result metadata,
+  and terminal evidence for repo-local allocator proofs. The remaining blockers
+  are raw async inference result replay for queued payloads and a live pressure
+  proof that shows queue/preemption/reclaim under real fleet load.
 - 2026-06-29: A low-context tool-call route can prove transport and provider
   parser wiring without being a valid route for reasoning-heavy tool-agent
   workloads. Public Mycelium evidence now exposes this as a consumer-contract

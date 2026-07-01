@@ -255,6 +255,17 @@ func TestLaunchDynamicPreservesExplicitPort(t *testing.T) {
 	}
 }
 
+func TestLaunchDynamicFailsBeforeStartWhenAddressCannotBeReserved(t *testing.T) {
+	runner := &fakeRunner{next: newFakeProcess(112)}
+	adapter := NewAdapter(Config{ProcessRunner: runner})
+	if _, err := adapter.LaunchDynamic(context.Background(), fixtures.MakePreset(), "256.256.256.256:0"); err == nil {
+		t.Fatal("expected dynamic address reservation error")
+	}
+	if len(runner.starts) != 0 {
+		t.Fatalf("process started after address reservation failure: %+v", runner.starts)
+	}
+}
+
 func TestReserveDynamicAddrRejectsInvalidAddress(t *testing.T) {
 	if _, err := reserveDynamicAddr("not-a-host-port"); err == nil {
 		t.Fatalf("invalid dynamic address should fail")

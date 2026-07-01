@@ -821,7 +821,7 @@ func runProjects(ctx context.Context, args []string) error {
 
 func runJobs(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce jobs <list|admit|status|drain>")
+		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|finish>")
 	}
 	switch args[0] {
 	case "list":
@@ -832,8 +832,10 @@ func runJobs(ctx context.Context, args []string, client *http.Client) error {
 		return runJobsStatus(ctx, args[1:], client)
 	case "drain":
 		return runJobsDrain(ctx, args[1:], client)
+	case "finish":
+		return runJobsFinish(ctx, args[1:], client)
 	default:
-		return fmt.Errorf("usage: myce jobs <list|admit|status|drain>")
+		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|finish>")
 	}
 }
 
@@ -1002,6 +1004,58 @@ func runJobsDrain(ctx context.Context, args []string, client *http.Client) error
 	for _, result := range out.Results {
 		printWorkloadAdmission(result)
 	}
+	return nil
+}
+
+func runJobsFinish(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("jobs finish", flag.ContinueOnError)
+	peerURL := fs.String("url", "", "peer base URL")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
+	id := fs.String("id", "", "workload job id")
+	errorText := fs.String("error", "", "mark workload failed with this redacted error string")
+	jsonOut := fs.Bool("json", false, "print JSON response")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *peerURL == "" {
+		return fmt.Errorf("--url is required")
+	}
+	if *id == "" {
+		return fmt.Errorf("--id is required")
+	}
+	body, err := json.Marshal(workload.FinishRequest{Error: *errorText})
+	if err != nil {
+		return err
+	}
+	endpoint := strings.TrimRight(*peerURL, "/") + "/workloads/" + url.PathEscape(*id) + "/finish"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if *rpcToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+*rpcToken)
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, err := readControlHTTPBody(resp.Body, "workload finish response body")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("workload finish returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	var out workload.FinishResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+	printWorkloadStatus(workload.StatusResponse{Job: out.Job, Result: out.Result})
 	return nil
 }
 

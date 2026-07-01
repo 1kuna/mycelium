@@ -38,7 +38,7 @@ Mycelium is a peer-native, LAN-local inference control plane:
   and non-streaming preflight evidence.
 - Control CLI: `myce gateway preflight`, `myce gateway routes`, `myce debug job`,
   `myce debug bundle`, `myce jobs admit`, `myce jobs status`,
-  `myce jobs drain`,
+  `myce jobs drain`, `myce jobs finish`,
   `myce telemetry samples`, benchmark commands, model and recommendation
   inspection commands.
 - Runtime proof surfaces: owner telemetry, run/session metrics, job registry,
@@ -90,13 +90,14 @@ scheduler service supports queued work, owner-authoritative admission, and a
 periodic queue drainer. OpenAI-compatible chat requests remain synchronous:
 when the selected route cannot immediately acquire an owner, the gateway
 returns a loud no-instance error instead of accepting an asynchronous workload.
-Use the authenticated `/workloads` RPC surface, `myce jobs admit/status/drain`,
-and fleet benchmark surfaces for pressure proofs that need queued admission
-without turning chat completions into a hidden blocking queue. The workload
-surface admits durable job intent, carries redacted payload/result metadata,
-drains through the scheduler queue, and exposes terminal scheduler evidence
-through status/debug surfaces. Raw async inference result replay for queued
-payloads is still a separate product gate.
+Use the authenticated `/workloads` RPC surface,
+`myce jobs admit/status/drain/finish`, and fleet benchmark surfaces for
+pressure proofs that need queued admission without turning chat completions into
+a hidden blocking queue. The workload surface admits durable job intent,
+carries redacted payload/result metadata, drains through the scheduler queue,
+marks terminal state through the scheduler release path, and exposes terminal
+scheduler evidence through status/debug surfaces. Raw async inference result
+replay for queued payloads is still a separate product gate.
 
 ## Public Hygiene Rules
 

@@ -518,6 +518,7 @@ type catalogEvictResponse struct {
 type workloadRuntime interface {
 	SubmitWithPayload(ctx context.Context, job domain.Job, payload []byte, hooks ...scheduler.SubmitHooks) (scheduler.Result, error)
 	Drain(ctx context.Context, limit int) ([]scheduler.Result, error)
+	FinishJob(ctx context.Context, job domain.Job, lease domain.Lease, cause error) error
 }
 
 type workloadStore interface {
@@ -614,13 +615,17 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			writePeerAuthError(w)
 			return
 		}
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
 		id := strings.TrimPrefix(r.URL.Path, "/workloads/")
+		finish := strings.HasSuffix(id, "/finish")
+		if finish {
+			id = strings.TrimSuffix(id, "/finish")
+		}
 		if id == "" || strings.Contains(id, "/") {
 			writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("workload id is required"))
+			return
+		}
+		if !finish && r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		job, err := store.Job(r.Context(), id)
@@ -628,11 +633,64 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			writePeerRPCError(w, http.StatusNotFound, err)
 			return
 		}
+		if finish {
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			var req workload.FinishRequest
+			if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
+				if err := decodePeerRPCJSON(r, &req); err != nil {
+					writePeerRPCError(w, http.StatusBadRequest, err)
+					return
+				}
+			}
+			lease, err := workloadLease(job)
+			if err != nil {
+				writePeerRPCError(w, http.StatusConflict, err)
+				return
+			}
+			var cause error
+			if strings.TrimSpace(req.Error) != "" {
+				cause = fmt.Errorf("%s", strings.TrimSpace(req.Error))
+			}
+			if err := runtime.FinishJob(r.Context(), job, lease, cause); err != nil {
+				writePeerRPCError(w, http.StatusConflict, err)
+				return
+			}
+			latest, readErr := store.Job(r.Context(), id)
+			if readErr == nil {
+				job = latest
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(workload.FinishResponse{Job: job, Result: job.Result}); err != nil {
+				panic(err)
+			}
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(workload.StatusResponse{Job: job, Result: job.Result}); err != nil {
 			panic(err)
 		}
 	})
+}
+
+func workloadLease(job domain.Job) (domain.Lease, error) {
+	if job.Result == nil {
+		return domain.Lease{}, fmt.Errorf("workload %q has no scheduler result evidence", job.ID)
+	}
+	if job.Result.LeaseID == "" {
+		return domain.Lease{}, fmt.Errorf("workload %q has no active lease evidence", job.ID)
+	}
+	lease := domain.Lease{
+		ID:     job.Result.LeaseID,
+		JobID:  job.ID,
+		NodeID: job.Result.NodeID,
+	}
+	if job.Result.Instance.ID != "" {
+		lease.InstanceID = job.Result.Instance.ID
+	}
+	return lease, nil
 }
 
 func workloadResponse(job domain.Job, result scheduler.Result, payloadBytes int) workload.AdmissionResponse {

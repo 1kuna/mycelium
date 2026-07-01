@@ -27,6 +27,15 @@ type StatusResponse struct {
 	Result *domain.JobResult `json:"result,omitempty"`
 }
 
+type FinishRequest struct {
+	Error string `json:"error,omitempty"`
+}
+
+type FinishResponse struct {
+	Job    domain.Job        `json:"job"`
+	Result *domain.JobResult `json:"result,omitempty"`
+}
+
 type DrainResponse struct {
 	Results []AdmissionResponse `json:"results"`
 }

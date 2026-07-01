@@ -4003,6 +4003,25 @@ func TestWorkloadHTTPRejectsPrivateHandling(t *testing.T) {
 
 func TestWorkloadHTTPErrorBranches(t *testing.T) {
 	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	if err := store.SaveJob(context.Background(), domain.Job{
+		ID:     "job-a",
+		Model:  "model-a",
+		Status: domain.JobRunning,
+		Result: &domain.JobResult{
+			Source:  "scheduler",
+			NodeID:  "node-a",
+			LeaseID: "lease-a",
+		},
+	}); err != nil {
+		t.Fatalf("seed job-a: %v", err)
+	}
+	if err := store.SaveJob(context.Background(), domain.Job{
+		ID:     "job-empty",
+		Model:  "model-a",
+		Status: domain.JobQueued,
+	}); err != nil {
+		t.Fatalf("seed job-empty: %v", err)
+	}
 	mux := http.NewServeMux()
 	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store, err: errors.New("admission boom")}, store, "rpc-secret")
 	for _, tc := range []struct {
@@ -4019,6 +4038,9 @@ func TestWorkloadHTTPErrorBranches(t *testing.T) {
 		{name: "bad id", method: http.MethodGet, path: "/workloads/", auth: true, want: http.StatusBadRequest},
 		{name: "missing status", method: http.MethodGet, path: "/workloads/missing", auth: true, want: http.StatusNotFound},
 		{name: "bad status method", method: http.MethodPost, path: "/workloads/job-a", auth: true, want: http.StatusMethodNotAllowed},
+		{name: "bad finish method", method: http.MethodGet, path: "/workloads/job-a/finish", auth: true, want: http.StatusMethodNotAllowed},
+		{name: "finish without scheduler evidence", method: http.MethodPost, path: "/workloads/job-empty/finish", auth: true, want: http.StatusConflict},
+		{name: "missing finish", method: http.MethodPost, path: "/workloads/missing/finish", auth: true, want: http.StatusNotFound},
 		{name: "runtime error", method: http.MethodPost, path: "/workloads", body: `{"job":{"id":"job-a","model":"model-a","project":"project-a"}}`, auth: true, want: http.StatusConflict},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
@@ -4111,12 +4133,19 @@ func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
 		t.Fatalf("agent loaded=%+v admission=%+v", agent.Loaded, admission.Requests)
 	}
 
-	running, err := store.Job(ctx, "job-a")
-	if err != nil {
-		t.Fatalf("running job: %v", err)
+	finish := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/workloads/job-a/finish", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(finish, req)
+	if finish.Code != http.StatusOK || strings.Contains(finish.Body.String(), "input_bytes") {
+		t.Fatalf("finish status/body = %d %s", finish.Code, finish.Body.String())
 	}
-	if err := service.FinishJob(ctx, running, domain.Lease{ID: running.Result.LeaseID, JobID: running.ID, NodeID: running.Result.NodeID}, nil); err != nil {
-		t.Fatalf("FinishJob: %v", err)
+	var finished workload.FinishResponse
+	if err := json.Unmarshal(finish.Body.Bytes(), &finished); err != nil {
+		t.Fatalf("decode finish: %v", err)
+	}
+	if finished.Job.Status != domain.JobDone || finished.Result == nil || !finished.Result.Terminal {
+		t.Fatalf("finished = %+v", finished)
 	}
 	leases, err := store.ListLeases(ctx)
 	if err != nil {
@@ -4754,6 +4783,29 @@ func (r *recordingWorkloadRuntime) Drain(_ context.Context, _ int) ([]scheduler.
 		return nil, r.err
 	}
 	return append([]scheduler.Result(nil), r.drained...), nil
+}
+
+func (r *recordingWorkloadRuntime) FinishJob(_ context.Context, job domain.Job, lease domain.Lease, cause error) error {
+	if r.err != nil {
+		return r.err
+	}
+	if cause == nil {
+		job.Status = domain.JobDone
+		job.Error = ""
+	} else {
+		job.Status = domain.JobFailed
+		job.Error = cause.Error()
+	}
+	if job.Result == nil {
+		job.Result = &domain.JobResult{Source: "scheduler", ResultRedacted: true}
+	}
+	job.Result.Terminal = true
+	job.Result.LeaseID = lease.ID
+	job.Result.NodeID = lease.NodeID
+	if r.store != nil {
+		_ = r.store.SaveJob(context.Background(), job)
+	}
+	return nil
 }
 
 type gatedWorkloadPlacer struct {
