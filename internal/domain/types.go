@@ -174,6 +174,9 @@ type JobResult struct {
 	PayloadStored   bool              `json:"payload_stored,omitempty"`
 	PayloadRedacted bool              `json:"payload_redacted,omitempty"`
 	ResultArtifact  string            `json:"result_artifact,omitempty"`
+	ResultMediaType string            `json:"result_media_type,omitempty"`
+	ResultBytes     int               `json:"result_bytes,omitempty"`
+	ResultSHA256    string            `json:"result_sha256,omitempty"`
 	ResultRedacted  bool              `json:"result_redacted,omitempty"`
 	Terminal        bool              `json:"terminal,omitempty"`
 }

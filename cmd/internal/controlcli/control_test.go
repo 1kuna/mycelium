@@ -347,10 +347,10 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 			if req.Error != "" {
 				t.Fatalf("finish error = %q", req.Error)
 			}
-			if req.ResultArtifact != "artifact://job-a" {
-				t.Fatalf("finish result artifact = %q", req.ResultArtifact)
+			if req.ResultArtifact != "artifact://job-a" || req.ResultMediaType != "application/json" || req.ResultBytes != 42 || req.ResultSHA256 != strings.Repeat("a", 64) {
+				t.Fatalf("finish result manifest = %+v", req)
 			}
-			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultArtifact: req.ResultArtifact, ResultRedacted: true, Terminal: true}
+			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultArtifact: req.ResultArtifact, ResultMediaType: req.ResultMediaType, ResultBytes: req.ResultBytes, ResultSHA256: req.ResultSHA256, ResultRedacted: true, Terminal: true}
 			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: domain.Job{ID: "job-a", Model: "model-a", PresetID: "preset-a", Project: "project-a", Status: domain.JobDone, Result: result}, Result: result})
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -385,12 +385,12 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 		t.Fatalf("drain output = %q", drainOut)
 	}
 	finishOut := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"jobs", "finish", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a", "--result-artifact", "artifact://job-a"}, client)
+		err = RunWithClient(context.Background(), []string{"jobs", "finish", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a", "--result-artifact", "artifact://job-a", "--result-media-type", "application/json", "--result-bytes", "42", "--result-sha256", strings.Repeat("a", 64)}, client)
 	})
 	if err != nil {
 		t.Fatalf("jobs finish: %v", err)
 	}
-	if !strings.Contains(finishOut, "status=done") || !strings.Contains(finishOut, "terminal=true") || strings.Contains(finishOut, "input_bytes") {
+	if !strings.Contains(finishOut, "status=done") || !strings.Contains(finishOut, "terminal=true") || !strings.Contains(finishOut, "result_artifact=artifact://job-a") || !strings.Contains(finishOut, "result_bytes=42") || strings.Contains(finishOut, "input_bytes") {
 		t.Fatalf("finish output = %q", finishOut)
 	}
 	jsonOut := captureStdout(t, func() {
@@ -2694,6 +2694,14 @@ func TestOperatorDebugReportIncludesParentChildrenAndMetricOwner(t *testing.T) {
 		Status:   domain.JobFailed,
 		Error:    "health timeout while loading",
 		Progress: []domain.JobProgress{{Stage: "loading", At: now}},
+		Result: &domain.JobResult{
+			ResultArtifact:  "artifact://job-child",
+			ResultMediaType: "application/json",
+			ResultBytes:     42,
+			ResultSHA256:    strings.Repeat("a", 64),
+			ResultRedacted:  true,
+			Terminal:        true,
+		},
 	}); err != nil {
 		t.Fatalf("SaveJob child: %v", err)
 	}
@@ -2721,6 +2729,7 @@ func TestOperatorDebugReportIncludesParentChildrenAndMetricOwner(t *testing.T) {
 	})
 	for _, want := range []string{
 		"job\tjob-child\tfailed\tmodel=-\tproject=-\towner=node-metric",
+		"result\tterminal=true\tredacted=true\tartifact=artifact://job-child\tmedia_type=application/json\tbytes=42\tsha256=" + strings.Repeat("a", 64),
 		"parent\tparent\tdone",
 		"child\tgrandchild\tretry\tqueued",
 		"timeline\t2026-06-27T10:00:00Z\tprogress\tloading\t-",

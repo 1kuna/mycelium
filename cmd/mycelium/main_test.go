@@ -4306,9 +4306,13 @@ func TestWorkloadHTTPDrainsQueuedWorkAcrossOwnersAndReclaimsCapacity(t *testing.
 		}
 		return out
 	}
-	finished := finishWorkload("job-a", `{"result_artifact":"artifact://job-a"}`, domain.JobDone)
+	digest := strings.Repeat("a", 64)
+	finished := finishWorkload("job-a", fmt.Sprintf(`{"result_artifact":"artifact://job-a","result_media_type":"application/json","result_bytes":42,"result_sha256":%q}`, digest), domain.JobDone)
 	if finished.Result.ResultArtifact != "artifact://job-a" {
 		t.Fatalf("finished result artifact = %q", finished.Result.ResultArtifact)
+	}
+	if finished.Result.ResultMediaType != "application/json" || finished.Result.ResultBytes != 42 || finished.Result.ResultSHA256 != digest {
+		t.Fatalf("finished result manifest = %+v", finished.Result)
 	}
 	leases, err = store.ListLeases(ctx)
 	if err != nil {
@@ -4327,6 +4331,54 @@ func TestWorkloadHTTPDrainsQueuedWorkAcrossOwnersAndReclaimsCapacity(t *testing.
 	}
 	if len(leases) != 0 {
 		t.Fatalf("leases after failure = %+v", leases)
+	}
+}
+
+func TestWorkloadHTTPRejectsInvalidResultArtifactManifest(t *testing.T) {
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	job := domain.Job{
+		ID:     "job-a",
+		Model:  "model-a",
+		Status: domain.JobRunning,
+		Result: &domain.JobResult{
+			Source:         "scheduler",
+			Action:         domain.ActionLoadedNew,
+			NodeID:         "node-a",
+			PresetID:       "preset-a",
+			LeaseID:        "lease-a",
+			ResultRedacted: true,
+		},
+	}
+	if err := store.SaveJob(context.Background(), job); err != nil {
+		t.Fatalf("SaveJob: %v", err)
+	}
+	service := &scheduler.Service{Store: store, Queue: scheduler.NewQueue(mocks.NewFakeClock(time.Unix(70, 0).UTC()))}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, service, store, "rpc-secret")
+
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "metadata without artifact", body: `{"result_bytes":1}`, want: "result_artifact"},
+		{name: "negative bytes", body: `{"result_artifact":"artifact://job-a","result_bytes":-1}`, want: "result_bytes"},
+		{name: "bad digest", body: `{"result_artifact":"artifact://job-a","result_sha256":"nope"}`, want: "result_sha256"},
+		{name: "control character media type", body: "{\"result_artifact\":\"artifact://job-a\",\"result_media_type\":\"application/\\njson\"}", want: "result_media_type"},
+	}
+	for _, tc := range tests {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/workloads/job-a/finish", strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer rpc-secret")
+		req.Header.Set("Content-Type", "application/json")
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), tc.want) {
+			t.Fatalf("%s status/body = %d %s", tc.name, rec.Code, rec.Body.String())
+		}
 	}
 }
 

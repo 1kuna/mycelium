@@ -14,10 +14,10 @@ handoff.
   no-instance error when work would queue. The authenticated workload RPC and
   `myce jobs admit/status/drain/finish` now provide explicit queued admission,
   scheduler drain, scheduler release/reclaim, redacted payload/result metadata,
-  terminal evidence, and result artifact references for repo-local allocator
+  terminal evidence, and result artifact manifests for repo-local allocator
   proofs. The fast suite now covers queued admission, multi-owner drain,
-  terminal success/failure, result artifact metadata, and lease reclaim through
-  the public workload HTTP surface. The remaining blockers are raw async
+  terminal success/failure, result artifact manifest metadata, and lease
+  reclaim through the public workload HTTP surface. The remaining blockers are raw async
   inference result replay for queued payloads and a live pressure proof that
   shows queue/preemption/reclaim under real fleet load.
 - 2026-06-29: A low-context tool-call route can prove transport and provider

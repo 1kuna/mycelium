@@ -100,10 +100,12 @@ a hidden blocking queue. The workload surface admits durable job intent,
 carries redacted payload/result metadata, drains through the scheduler queue,
 marks terminal state through the scheduler release path, and exposes terminal
 scheduler evidence through status/debug surfaces. Terminal workload evidence
-may carry a redacted result artifact reference, but Mycelium does not yet replay
-raw asynchronous inference payloads through this lane. The fast test suite
+may carry a redacted result artifact manifest: reference, media type, byte
+count, and digest. Mycelium does not yet replay raw asynchronous inference
+payloads through this lane. The fast test suite
 includes a repo-local HTTP workload proof for queued admission, multi-owner
-drain, terminal success/failure, result artifact metadata, and lease reclaim.
+drain, terminal success/failure, result artifact manifest metadata, and lease
+reclaim.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
 work, not transparently resumed streams. Raw async inference result replay for
