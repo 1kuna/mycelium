@@ -4171,6 +4171,162 @@ func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
 	}
 }
 
+func TestWorkloadHTTPDrainsQueuedWorkAcrossOwnersAndReclaimsCapacity(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	nodeA := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	nodeA.Accelerators = []domain.Accelerator{{Index: 0, Vendor: "test", Kind: "gpu", VRAMTotalMB: 1000}}
+	nodeA.MaxUtil = 1
+	nodeA.Status = domain.NodeReady
+	nodeB := fixtures.MakeNode(fixtures.WithNodeID("node-b"))
+	nodeB.Accelerators = []domain.Accelerator{{Index: 0, Vendor: "test", Kind: "gpu", VRAMTotalMB: 1000}}
+	nodeB.MaxUtil = 1
+	nodeB.Status = domain.NodeReady
+	presetA := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("model-a"), fixtures.WithWeights(100), fixtures.WithKVPerToken(0), fixtures.WithContextLength(1024))
+	presetB := fixtures.MakePreset(fixtures.WithPresetID("preset-b"), fixtures.WithModelRef("model-b"), fixtures.WithWeights(100), fixtures.WithKVPerToken(0), fixtures.WithContextLength(1024))
+	agentA := mocks.NewNodeAgent(nodeA)
+	agentB := mocks.NewNodeAgent(nodeB)
+	admissionA := &mocks.AdmissionController{}
+	admissionB := &mocks.AdmissionController{}
+	placer := &scriptedWorkloadPlacer{routes: map[string]workloadRoute{
+		"job-a": {nodeID: nodeA.ID, preset: presetA, claim: domain.Claim{WeightsMB: 100}},
+		"job-b": {nodeID: nodeB.ID, preset: presetB, claim: domain.Claim{WeightsMB: 100}},
+	}}
+	service := &scheduler.Service{
+		Placer: placer,
+		Fleet:  staticWorkloadFleet{nodes: []domain.Node{nodeA, nodeB}},
+		Nodes: workloadNodeResolver{
+			agents: map[string]ports.NodeAgent{
+				nodeA.ID: agentA,
+				nodeB.ID: agentB,
+			},
+			admissions: map[string]ports.AdmissionController{
+				nodeA.ID: admissionA,
+				nodeB.ID: admissionB,
+			},
+		},
+		Owners: workloadNodeResolver{admissions: map[string]ports.AdmissionController{
+			nodeA.ID: admissionA,
+			nodeB.ID: admissionB,
+		}},
+		Queue: scheduler.NewQueue(mocks.NewFakeClock(time.Unix(60, 0).UTC())),
+		Store: store,
+		Clock: mocks.NewFakeClock(time.Unix(60, 0).UTC()),
+		Presets: map[string]domain.Preset{
+			presetA.ID:       presetA,
+			presetA.ModelRef: presetA,
+			presetB.ID:       presetB,
+			presetB.ModelRef: presetB,
+		},
+	}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, service, store, "rpc-secret")
+
+	admitWorkload := func(id, model string) workload.AdmissionResponse {
+		t.Helper()
+		body := fmt.Sprintf(`{"job":{"id":%q,"task_type":"chat","model":%q,"project":"project-a","priority":"normal","speed_pref":"throughput","preemption":"soft"},"payload":{"input_bytes":123}}`, id, model)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer rpc-secret")
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusAccepted || strings.Contains(rec.Body.String(), "input_bytes") {
+			t.Fatalf("admit %s status/body = %d %s", id, rec.Code, rec.Body.String())
+		}
+		var out workload.AdmissionResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode admit %s: %v", id, err)
+		}
+		if !out.Queued || out.Result == nil || !out.Result.PayloadRedacted || !out.Result.ResultRedacted {
+			t.Fatalf("admit %s = %+v", id, out)
+		}
+		return out
+	}
+	admitWorkload("job-a", "model-a")
+	admitWorkload("job-b", "model-b")
+
+	placer.ready = true
+	drain := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/workloads/drain?limit=2", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(drain, req)
+	if drain.Code != http.StatusOK || strings.Contains(drain.Body.String(), "input_bytes") {
+		t.Fatalf("drain status/body = %d %s", drain.Code, drain.Body.String())
+	}
+	var drained workload.DrainResponse
+	if err := json.Unmarshal(drain.Body.Bytes(), &drained); err != nil {
+		t.Fatalf("decode drain: %v", err)
+	}
+	if len(drained.Results) != 2 {
+		t.Fatalf("drained = %+v", drained)
+	}
+	drainedByJob := map[string]workload.AdmissionResponse{}
+	for _, result := range drained.Results {
+		drainedByJob[result.Job.ID] = result
+	}
+	if got := drainedByJob["job-a"]; got.Job.Status != domain.JobRunning || got.Result == nil || got.Result.NodeID != nodeA.ID || got.Result.LeaseID == "" {
+		t.Fatalf("drained job-a = %+v", got)
+	}
+	if got := drainedByJob["job-b"]; got.Job.Status != domain.JobRunning || got.Result == nil || got.Result.NodeID != nodeB.ID || got.Result.LeaseID == "" {
+		t.Fatalf("drained job-b = %+v", got)
+	}
+	leases, err := store.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("ListLeases after drain: %v", err)
+	}
+	if len(leases) != 2 {
+		t.Fatalf("leases after drain = %+v", leases)
+	}
+	if len(agentA.Loaded) != 1 || len(agentB.Loaded) != 1 || len(admissionA.Requests) == 0 || len(admissionB.Requests) == 0 {
+		t.Fatalf("agent/admission state a=%+v/%+v b=%+v/%+v", agentA.Loaded, admissionA.Requests, agentB.Loaded, admissionB.Requests)
+	}
+
+	finishWorkload := func(id string, errorBody string, wantStatus domain.JobStatus) workload.FinishResponse {
+		t.Helper()
+		body := strings.NewReader(errorBody)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/workloads/"+id+"/finish", body)
+		req.Header.Set("Authorization", "Bearer rpc-secret")
+		if errorBody != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "input_bytes") {
+			t.Fatalf("finish %s status/body = %d %s", id, rec.Code, rec.Body.String())
+		}
+		var out workload.FinishResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode finish %s: %v", id, err)
+		}
+		if out.Job.Status != wantStatus || out.Result == nil || !out.Result.Terminal || !out.Result.ResultRedacted {
+			t.Fatalf("finish %s = %+v", id, out)
+		}
+		return out
+	}
+	finishWorkload("job-a", "", domain.JobDone)
+	leases, err = store.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("ListLeases after first finish: %v", err)
+	}
+	if len(leases) != 1 || leases[0].JobID != "job-b" {
+		t.Fatalf("leases after first finish = %+v", leases)
+	}
+	failed := finishWorkload("job-b", `{"error":"redacted provider timeout"}`, domain.JobFailed)
+	if failed.Job.Error != "redacted provider timeout" {
+		t.Fatalf("failed job error = %q", failed.Job.Error)
+	}
+	leases, err = store.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("ListLeases after failure: %v", err)
+	}
+	if len(leases) != 0 {
+		t.Fatalf("leases after failure = %+v", leases)
+	}
+}
+
 func TestNormalizeWorkloadJobValidationBranches(t *testing.T) {
 	base := domain.Job{ID: "job-a", Model: "model-a", Project: "project-a"}
 	normalized, err := normalizeWorkloadJob(base)
@@ -4832,11 +4988,44 @@ func (p *gatedWorkloadPlacer) Place(_ context.Context, job domain.Job, _ domain.
 	return decision, nil
 }
 
+type workloadRoute struct {
+	nodeID string
+	preset domain.Preset
+	claim  domain.Claim
+}
+
+type scriptedWorkloadPlacer struct {
+	ready  bool
+	routes map[string]workloadRoute
+}
+
+func (p *scriptedWorkloadPlacer) Place(_ context.Context, job domain.Job, _ domain.FleetSnapshot) (domain.PlacementDecision, error) {
+	route := p.routes[job.ID]
+	decision := domain.PlacementDecision{
+		JobID:            job.ID,
+		Preset:           route.preset,
+		Claim:            route.claim,
+		SpeedPrefApplied: job.SpeedPref,
+	}
+	if !p.ready {
+		decision.Action = domain.ActionQueued
+		return decision, nil
+	}
+	decision.NodeID = route.nodeID
+	decision.AcceleratorSet = []int{0}
+	decision.Action = domain.ActionLoadedNew
+	return decision, nil
+}
+
 type staticWorkloadFleet struct {
-	node domain.Node
+	node  domain.Node
+	nodes []domain.Node
 }
 
 func (f staticWorkloadFleet) Snapshot(context.Context) (domain.FleetSnapshot, error) {
+	if len(f.nodes) > 0 {
+		return domain.FleetSnapshot{Nodes: append([]domain.Node(nil), f.nodes...)}, nil
+	}
 	return domain.FleetSnapshot{Nodes: []domain.Node{f.node}}, nil
 }
 
