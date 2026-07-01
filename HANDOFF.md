@@ -96,10 +96,13 @@ pressure proofs that need queued admission without turning chat completions into
 a hidden blocking queue. The workload surface admits durable job intent,
 carries redacted payload/result metadata, drains through the scheduler queue,
 marks terminal state through the scheduler release path, and exposes terminal
-scheduler evidence through status/debug surfaces. The fast test suite includes
-a repo-local HTTP workload proof for queued admission, multi-owner drain,
-terminal success/failure, and lease reclaim. Raw async inference result replay
-for queued payloads is still a separate product gate.
+scheduler evidence through status/debug surfaces. Terminal workload evidence
+may carry a redacted result artifact reference, but Mycelium does not yet replay
+raw asynchronous inference payloads through this lane. The fast test suite
+includes a repo-local HTTP workload proof for queued admission, multi-owner
+drain, terminal success/failure, result artifact metadata, and lease reclaim.
+Raw async inference result replay for queued payloads is still a separate
+product gate.
 
 ## Public Hygiene Rules
 

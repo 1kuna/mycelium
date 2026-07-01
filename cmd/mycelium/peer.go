@@ -650,6 +650,10 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 				writePeerRPCError(w, http.StatusConflict, err)
 				return
 			}
+			if artifact := strings.TrimSpace(req.ResultArtifact); artifact != "" {
+				job.Result.ResultArtifact = artifact
+				job.Result.ResultRedacted = true
+			}
 			var cause error
 			if strings.TrimSpace(req.Error) != "" {
 				cause = fmt.Errorf("%s", strings.TrimSpace(req.Error))

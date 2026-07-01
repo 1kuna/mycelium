@@ -1013,6 +1013,7 @@ func runJobsFinish(ctx context.Context, args []string, client *http.Client) erro
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
 	id := fs.String("id", "", "workload job id")
 	errorText := fs.String("error", "", "mark workload failed with this redacted error string")
+	resultArtifact := fs.String("result-artifact", "", "redacted result artifact reference to attach to the terminal workload")
 	jsonOut := fs.Bool("json", false, "print JSON response")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1023,7 +1024,7 @@ func runJobsFinish(ctx context.Context, args []string, client *http.Client) erro
 	if *id == "" {
 		return fmt.Errorf("--id is required")
 	}
-	body, err := json.Marshal(workload.FinishRequest{Error: *errorText})
+	body, err := json.Marshal(workload.FinishRequest{Error: *errorText, ResultArtifact: *resultArtifact})
 	if err != nil {
 		return err
 	}
