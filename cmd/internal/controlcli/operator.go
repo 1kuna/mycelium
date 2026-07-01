@@ -687,6 +687,10 @@ type debugSummaryRow struct {
 	LiveModelAvailable      bool   `json:"live_model_available,omitempty"`
 	FailureLayer            string `json:"failure_layer,omitempty"`
 	FailureClass            string `json:"failure_class,omitempty"`
+	ResultArtifactPresent   bool   `json:"result_artifact_present,omitempty"`
+	ResultMediaType         string `json:"result_media_type,omitempty"`
+	ResultBytes             int    `json:"result_bytes,omitempty"`
+	ResultSHA256Present     bool   `json:"result_sha256_present,omitempty"`
 }
 
 type debugSummaryFilter struct {
@@ -841,6 +845,10 @@ type debugSummaryTrainingRow struct {
 	ConsumerStatus           string `json:"consumer_status,omitempty"`
 	ConsumerResult           string `json:"consumer_result,omitempty"`
 	ConsumerQualityGate      string `json:"consumer_quality_gate,omitempty"`
+	ResultArtifactPresent    bool   `json:"result_artifact_present,omitempty"`
+	ResultMediaType          string `json:"result_media_type,omitempty"`
+	ResultBytes              int    `json:"result_bytes,omitempty"`
+	ResultSHA256Present      bool   `json:"result_sha256_present,omitempty"`
 	QualitySignalSource      string `json:"quality_signal_source"`
 	DeterministicQualityPass *bool  `json:"deterministic_quality_pass,omitempty"`
 	SemanticQualityLabel     string `json:"semantic_quality_label,omitempty"`
@@ -1714,6 +1722,10 @@ func debugSummaryTrainingRowFromSummary(row debugSummaryRow, recommendation debu
 		ConsumerStatus:           row.ConsumerStatus,
 		ConsumerResult:           row.ConsumerResult,
 		ConsumerQualityGate:      row.ConsumerQualityGate,
+		ResultArtifactPresent:    row.ResultArtifactPresent,
+		ResultMediaType:          row.ResultMediaType,
+		ResultBytes:              row.ResultBytes,
+		ResultSHA256Present:      row.ResultSHA256Present,
 		QualitySignalSource:      debugSummaryQualitySignalSource(row),
 		Recommendation:           recommendation.Recommendation,
 		RecommendationSeverity:   recommendation.Severity,
@@ -1791,7 +1803,7 @@ func validateDebugSummaryTrainingRow(row debugSummaryTrainingRow, line int) erro
 	if strings.TrimSpace(row.RouteKey) == "" {
 		return fmt.Errorf("training JSONL line %d missing route_key", line)
 	}
-	if row.MinContextCap < 0 || row.ContextCap < 0 || row.StatusCode < 0 || row.ContentLength < 0 || row.ReasoningLength < 0 || row.UsageTotalTokens < 0 || row.TotalLatencyMS < 0 {
+	if row.MinContextCap < 0 || row.ContextCap < 0 || row.StatusCode < 0 || row.ContentLength < 0 || row.ReasoningLength < 0 || row.UsageTotalTokens < 0 || row.TotalLatencyMS < 0 || row.ResultBytes < 0 {
 		return fmt.Errorf("training JSONL line %d contains negative numeric evidence", line)
 	}
 	if row.EvidenceKind == "preflight" && row.OwnerTelemetryAvailable {
@@ -2593,6 +2605,10 @@ func debugSummaryRowFromOptimization(kind string, evidence jobOptimizationEviden
 		LiveModelAvailable:      evidence.LiveModelAvailable,
 		FailureLayer:            evidence.FailureLayer,
 		FailureClass:            evidence.FailureClass,
+		ResultArtifactPresent:   evidence.ResultArtifactPresent,
+		ResultMediaType:         evidence.ResultMediaType,
+		ResultBytes:             evidence.ResultBytes,
+		ResultSHA256Present:     evidence.ResultSHA256Present,
 	}
 	if evidence.Consumer != nil {
 		row.ConsumerRun = evidence.Consumer.RunID
@@ -2609,7 +2625,7 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 	if row.ColdLoad != nil {
 		cold = strconv.FormatBool(*row.ColdLoad)
 	}
-	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tquality_gate=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\tattempts=%d\troute_status=%s\tstartability=%s\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tqueue_ms=%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\thttp_status=%d\tgateway_error=%s\n",
+	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tquality_gate=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\tattempts=%d\troute_status=%s\tstartability=%s\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tqueue_ms=%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\thttp_status=%d\tgateway_error=%s\tresult_artifact=%t\tresult_media=%s\tresult_bytes=%d\tresult_sha256=%t\n",
 		emptyDash(row.Kind),
 		emptyDash(row.JobID),
 		emptyDash(row.Project),
@@ -2656,6 +2672,10 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 		emptyDash(row.FailureClass),
 		row.StatusCode,
 		emptyDash(row.GatewayError),
+		row.ResultArtifactPresent,
+		emptyDash(row.ResultMediaType),
+		row.ResultBytes,
+		row.ResultSHA256Present,
 	)
 }
 
@@ -3341,6 +3361,10 @@ type jobOptimizationEvidence struct {
 	FailureLayer            string                               `json:"failure_layer,omitempty"`
 	StatusCode              int                                  `json:"status_code,omitempty"`
 	GatewayError            string                               `json:"gateway_error,omitempty"`
+	ResultArtifactPresent   bool                                 `json:"result_artifact_present,omitempty"`
+	ResultMediaType         string                               `json:"result_media_type,omitempty"`
+	ResultBytes             int                                  `json:"result_bytes,omitempty"`
+	ResultSHA256Present     bool                                 `json:"result_sha256_present,omitempty"`
 	LiveModelChecked        bool                                 `json:"live_model_checked,omitempty"`
 	LiveModelStatus         string                               `json:"live_model_status,omitempty"`
 	LiveModelAvailable      bool                                 `json:"live_model_available,omitempty"`
@@ -3407,6 +3431,12 @@ func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvi
 		out.ConsumerError = report.Consumer.Error
 		out.ConsumerResult = report.Consumer.Result
 		out.ConsumerQualityGate = report.Consumer.QualityGate
+	}
+	if report.Job.Result != nil {
+		out.ResultArtifactPresent = strings.TrimSpace(report.Job.Result.ResultArtifact) != ""
+		out.ResultMediaType = report.Job.Result.ResultMediaType
+		out.ResultBytes = report.Job.Result.ResultBytes
+		out.ResultSHA256Present = strings.TrimSpace(report.Job.Result.ResultSHA256) != ""
 	}
 	if metric, ok, source := primaryRunMetric(report); ok {
 		out.MetricSource = source
@@ -3501,7 +3531,7 @@ func failureLayerForDiagnosis(diagnosis jobDebugDiagnosis, report jobDebugReport
 }
 
 func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvidence) {
-	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tconsumer_result=%s\tquality_gate=%s\tnode=%s\tpreset=%s\tmodel=%s\tattempts=%d\tqueue_ms=%d\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tfinish=%s\tcontent_len=%d\treasoning_len=%d\tjson=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tlive_model=%t/%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\n",
+	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tconsumer_result=%s\tquality_gate=%s\tnode=%s\tpreset=%s\tmodel=%s\tattempts=%d\tqueue_ms=%d\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tfinish=%s\tcontent_len=%d\treasoning_len=%d\tjson=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tlive_model=%t/%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\tresult_artifact=%t\tresult_media=%s\tresult_bytes=%d\tresult_sha256=%t\n",
 		emptyDash(evidence.JobID),
 		emptyDash(evidence.Project),
 		emptyDash(evidence.ConsumerStatus),
@@ -3531,6 +3561,10 @@ func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvide
 		evidence.UpstreamWallMS,
 		emptyDash(evidence.FailureLayer),
 		emptyDash(evidence.FailureClass),
+		evidence.ResultArtifactPresent,
+		emptyDash(evidence.ResultMediaType),
+		evidence.ResultBytes,
+		evidence.ResultSHA256Present,
 	)
 }
 
