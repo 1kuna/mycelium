@@ -2739,6 +2739,10 @@ func TestOperatorDebugReportIncludesParentChildrenAndMetricOwner(t *testing.T) {
 			t.Fatalf("debug output missing %q:\n%s", want, output)
 		}
 	}
+	optimization := summarizeJobOptimizationEvidence(report)
+	if !optimization.ResultArtifactPresent || optimization.ResultMediaType != "application/json" || optimization.ResultBytes != 42 || !optimization.ResultSHA256Present {
+		t.Fatalf("optimization result manifest = %+v", optimization)
+	}
 	if _, err := buildJobDebugReport(context.Background(), dbPath, "missing"); err == nil || !strings.Contains(err.Error(), `job "missing" not found`) {
 		t.Fatalf("missing job error = %v", err)
 	}
@@ -3262,7 +3266,7 @@ func TestDebugSummaryFilterAndGroupingContracts(t *testing.T) {
 
 func TestDebugSummaryRecommendationContracts(t *testing.T) {
 	rows := []debugSummaryRow{
-		{Model: "healthy", ConsumerResult: "pass", UsageAvailable: true, UsageTotalTokens: 40, ContextCap: 32768, MinContextCap: 8192, ContextAdequate: true, LiveModelChecked: true, LiveModelAvailable: true, UpstreamWallMS: 100},
+		{Model: "healthy", ConsumerResult: "pass", UsageAvailable: true, UsageTotalTokens: 40, ContextCap: 32768, MinContextCap: 8192, ContextAdequate: true, LiveModelChecked: true, LiveModelAvailable: true, UpstreamWallMS: 100, ResultArtifactPresent: true, ResultMediaType: "application/json", ResultBytes: 42, ResultSHA256Present: true},
 		{Model: "catalog", FailureLayer: "catalog", FailureClass: "live_catalog_model_missing", LiveModelChecked: true, LiveModelStatus: "missing"},
 		{Model: "saturated", FailureLayer: "availability", FailureClass: "route_no_instance_available", RouteStatus: "no_matching_instance", UnfinishedJobs: 2, LoadingInstances: 1},
 		{Model: "no-owner", FailureLayer: "availability", FailureClass: "route_no_instance_available", RouteStatus: "no_matching_instance"},
@@ -3317,6 +3321,9 @@ func TestDebugSummaryRecommendationContracts(t *testing.T) {
 	}
 	if trainingByModel["quality"].QualitySignalSource != "consumer_gate" || trainingByModel["quality"].DeterministicQualityPass == nil || *trainingByModel["quality"].DeterministicQualityPass || trainingByModel["quality"].Recommendation != "quality_gate_failing" {
 		t.Fatalf("quality training row = %+v", trainingByModel["quality"])
+	}
+	if !trainingByModel["healthy"].ResultArtifactPresent || trainingByModel["healthy"].ResultMediaType != "application/json" || trainingByModel["healthy"].ResultBytes != 42 || !trainingByModel["healthy"].ResultSHA256Present {
+		t.Fatalf("healthy training result manifest = %+v", trainingByModel["healthy"])
 	}
 	if trainingByModel["unknown"].QualitySignalSource != "not_collected" || trainingByModel["unknown"].DeterministicQualityPass != nil || trainingByModel["unknown"].Recommendation != "insufficient_evidence" {
 		t.Fatalf("unknown training row = %+v", trainingByModel["unknown"])

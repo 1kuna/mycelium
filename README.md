@@ -391,11 +391,12 @@ future reviewed scorer artifact.
 Use `--training-jsonl` to export one normalized optimizer row per saved
 artifact row. The JSONL schema includes route contract, request expectations,
 context, streaming/tool/JSON mode, timing, usage, failure class, quality gate,
-and the deterministic recommendation. It does not include prompts, completions,
-tokens, local paths, or semantic quality labels unless a future reviewed
-artifact supplies one explicitly. Consumers of this JSONL validate evidence
-kind, owner-telemetry provenance, and deterministic quality-gate source before
-selecting or proposing routes.
+redacted result-artifact presence/type/size/digest-present flags, and the
+deterministic recommendation. It does not include prompts, completions, tokens,
+artifact references, local paths, or semantic quality labels unless a future
+reviewed artifact supplies one explicitly. Consumers of this JSONL validate
+evidence kind, owner-telemetry provenance, and deterministic quality-gate
+source before selecting or proposing routes.
 Use `myce debug select --training-jsonl <file>` to run a report-only route
 selection dry run over that JSONL. Add workload gates such as
 `--min-context-cap`, `--require-tools`, `--require-json`,
