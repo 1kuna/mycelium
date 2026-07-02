@@ -4174,6 +4174,47 @@ func TestWorkloadHTTPPersistsReconciliationTasksFromPlacement(t *testing.T) {
 	}
 }
 
+func TestWorkloadHTTPAutoDrainsSafeReconciliationTasksFromPlacement(t *testing.T) {
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	runtime := &recordingWorkloadRuntime{
+		store: store,
+		decision: domain.PlacementDecision{
+			JobID:  "job-a",
+			Action: domain.ActionQueued,
+			Preset: domain.Preset{ID: "preset-a", ModelRef: "model-a"},
+			Trace: []domain.TraceStep{{
+				Step: "filter",
+				Data: map[string]any{"dropped": map[string]string{
+					"node-a": "label.gpu.vendor",
+				}},
+			}},
+		},
+	}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, runtime, store, "rpc-secret", "peer-a", nil)
+	body := `{"job":{"id":"job-a","task_type":"chat","model":"model-a","preset":"preset-a","project":"project-a"},"payload":{"input_bytes":123}}`
+	req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("admit status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	tasks, err := store.ListReconciliationTasks(context.Background(), "job-a")
+	if err != nil {
+		t.Fatalf("ListReconciliationTasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Kind != string(reconcile.TaskRecordIncompatibility) || tasks[0].Status != domain.ReconciliationTaskDone {
+		t.Fatalf("tasks = %+v", tasks)
+	}
+	if len(store.incompat) != 1 || store.incompat[0].TaskID != tasks[0].ID || store.incompat[0].NodeID != "node-a" {
+		t.Fatalf("incompatibilities = %+v", store.incompat)
+	}
+	if strings.Contains(rec.Body.String(), "input_bytes") {
+		t.Fatalf("admission response leaked reconciliation or payload details: %s", rec.Body.String())
+	}
+}
+
 func TestPersistWorkloadReconciliationTasksDoesNotOverwriteExisting(t *testing.T) {
 	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
 	decision := domain.PlacementDecision{
@@ -4272,8 +4313,11 @@ func TestWorkloadHTTPDrainPersistsReconciliationTasksFromPlacement(t *testing.T)
 	if err != nil {
 		t.Fatalf("ListReconciliationTasks: %v", err)
 	}
-	if len(tasks) != 1 || tasks[0].Kind != string(reconcile.TaskVerifyEngineReadiness) || tasks[0].Status != domain.ReconciliationTaskAllowed || tasks[0].NodeID != "node-engine" {
+	if len(tasks) != 1 || tasks[0].Kind != string(reconcile.TaskVerifyEngineReadiness) || tasks[0].Status != domain.ReconciliationTaskFailed || tasks[0].NodeID != "node-engine" {
 		t.Fatalf("tasks = %+v", tasks)
+	}
+	if !strings.Contains(tasks[0].Error, "preset") {
+		t.Fatalf("task error = %q", tasks[0].Error)
 	}
 }
 
@@ -6240,6 +6284,12 @@ type workloadMemoryStore struct {
 	results        map[string]domain.WorkloadResultBody
 	records        []domain.JobRecord
 	reconcileTasks []domain.ReconciliationTaskRecord
+	incompat       []domain.IncompatibilityRecord
+	presets        map[string]domain.Preset
+	nodes          map[string]domain.Node
+	localityPlans  []domain.LocalityPlan
+	localities     []domain.ModelLocality
+	engineProfiles []domain.EngineProfile
 }
 
 type failingReconciliationStore struct {
@@ -6328,6 +6378,79 @@ func (s *workloadMemoryStore) ListReconciliationTasks(_ context.Context, jobID s
 		}
 	}
 	return out, nil
+}
+
+func (s *workloadMemoryStore) SaveIncompatibility(_ context.Context, rec domain.IncompatibilityRecord) error {
+	for i := range s.incompat {
+		if s.incompat[i].ID == rec.ID {
+			s.incompat[i] = rec
+			return nil
+		}
+	}
+	s.incompat = append(s.incompat, rec)
+	return nil
+}
+
+func (s *workloadMemoryStore) Preset(_ context.Context, id string) (domain.Preset, error) {
+	if preset, ok := s.presets[id]; ok {
+		return preset, nil
+	}
+	return domain.Preset{}, fmt.Errorf("preset %q not found", id)
+}
+
+func (s *workloadMemoryStore) Node(_ context.Context, id string) (domain.Node, error) {
+	if node, ok := s.nodes[id]; ok {
+		return node, nil
+	}
+	return domain.Node{}, fmt.Errorf("node %q not found", id)
+}
+
+func (s *workloadMemoryStore) SaveLocalityPlan(_ context.Context, plan domain.LocalityPlan) error {
+	for i := range s.localityPlans {
+		if s.localityPlans[i].ID == plan.ID {
+			s.localityPlans[i] = plan
+			return nil
+		}
+	}
+	s.localityPlans = append(s.localityPlans, plan)
+	return nil
+}
+
+func (s *workloadMemoryStore) SaveModelLocality(_ context.Context, locality domain.ModelLocality) error {
+	for i := range s.localities {
+		if s.localities[i].ID == locality.ID {
+			s.localities[i] = locality
+			return nil
+		}
+	}
+	s.localities = append(s.localities, locality)
+	return nil
+}
+
+func (s *workloadMemoryStore) SaveEngineProfile(_ context.Context, profile domain.EngineProfile) error {
+	for i := range s.engineProfiles {
+		if s.engineProfiles[i].ID == profile.ID {
+			s.engineProfiles[i] = profile
+			return nil
+		}
+	}
+	s.engineProfiles = append(s.engineProfiles, profile)
+	return nil
+}
+
+func (s *workloadMemoryStore) ListEngineProfiles(context.Context) ([]domain.EngineProfile, error) {
+	return append([]domain.EngineProfile(nil), s.engineProfiles...), nil
+}
+
+func (s *workloadMemoryStore) MarkEngineProfileUnready(_ context.Context, profileID, reason string) error {
+	for i := range s.engineProfiles {
+		if s.engineProfiles[i].ID == profileID {
+			s.engineProfiles[i].Ready = false
+			s.engineProfiles[i].UnreadyReason = reason
+			return nil
+		}
+	}
+	return fmt.Errorf("engine profile %q not found", profileID)
 }
 
 func withWorkloadPriority(job domain.Job, priority domain.Priority) domain.Job {

@@ -272,8 +272,12 @@ under the default standing policy or whether it still needs operator approval.
 Use `--save` to persist those tasks into the control store as `allowed` or
 `blocked` records. The workload RPC also records the same task records
 automatically when admission or queue-drain evidence includes a scheduler
-decision, so ordinary queued workloads can leave reconciliation work for the
-background drain without an operator first exporting a placement file.
+decision. When the peer's control store supports the reconciliation executor it
+also drains the safe store-local task classes immediately:
+`record_incompatibility`, `stage_model_artifact`, and
+`verify_engine_readiness`. Live-affecting work such as prewarming replicas,
+catalog refresh, and owner repair remains explicit and must not be marked done
+unless the lower-level action actually succeeds.
 `myce reconcile drain` consumes only `allowed` records,
 records `running` to terminal status transitions, and currently executes
 `record_incompatibility` by writing a durable incompatibility fact and

@@ -33,6 +33,7 @@ type DrainOptions struct {
 	Project string
 	Prewarm PrewarmExecutor
 	Catalog CatalogRefresher
+	Kinds   []TaskKind
 }
 
 type DrainReport struct {
@@ -86,6 +87,10 @@ func DrainAllowedTasks(ctx context.Context, store TaskStore, opts DrainOptions) 
 			report.Skipped++
 			continue
 		}
+		if !drainKindAllowed(TaskKind(task.Kind), opts.Kinds) {
+			report.Skipped++
+			continue
+		}
 		if opts.Limit > 0 && report.Drained >= opts.Limit {
 			report.Skipped++
 			continue
@@ -95,6 +100,18 @@ func DrainAllowedTasks(ctx context.Context, store TaskStore, opts DrainOptions) 
 		report.Results = append(report.Results, result)
 	}
 	return report, nil
+}
+
+func drainKindAllowed(kind TaskKind, allowed []TaskKind) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, candidate := range allowed {
+		if kind == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func drainTask(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, opts DrainOptions, now time.Time) DrainTaskResult {
