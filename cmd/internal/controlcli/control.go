@@ -871,6 +871,7 @@ func runJobsAdmit(ctx context.Context, args []string, client *http.Client) error
 	file := fs.String("file", "", "workload admission JSON file")
 	payloadKind := fs.String("payload-kind", "", "executable payload kind to wrap from --payload-file")
 	payloadFile := fs.String("payload-file", "", "private request body JSON file to wrap as executable payload")
+	queueOnly := fs.Bool("queue-only", false, "admit the workload to the explicit queue without immediate placement")
 	jsonOut := fs.Bool("json", false, "print JSON response")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -909,6 +910,9 @@ func runJobsAdmit(ctx context.Context, args []string, client *http.Client) error
 			return err
 		}
 		req.Payload = payload
+	}
+	if *queueOnly {
+		req.QueueOnly = true
 	}
 	body, err := json.Marshal(req)
 	if err != nil {

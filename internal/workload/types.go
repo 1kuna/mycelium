@@ -8,8 +8,9 @@ import (
 )
 
 type AdmissionRequest struct {
-	Job     domain.Job      `json:"job"`
-	Payload json.RawMessage `json:"payload,omitempty"`
+	Job       domain.Job      `json:"job"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	QueueOnly bool            `json:"queue_only,omitempty"`
 }
 
 type AdmissionResponse struct {

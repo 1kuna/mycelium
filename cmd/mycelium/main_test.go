@@ -4219,6 +4219,32 @@ func TestWorkloadHTTPReturnsCreatedForImmediatePlacement(t *testing.T) {
 	}
 }
 
+func TestWorkloadHTTPQueueOnlyDefersImmediatePlacement(t *testing.T) {
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	runtime := &recordingWorkloadRuntime{
+		store:    store,
+		decision: domain.PlacementDecision{JobID: "job-a", Action: domain.ActionLoadedNew, Preset: domain.Preset{ID: "preset-a"}, NodeID: "node-a"},
+	}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, runtime, store, "", "peer-a", nil)
+	req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(`{"queue_only":true,"job":{"id":"job-a","model":"model-a","preset":"preset-a","project":"project-a"},"payload":{"input_bytes":123}}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted || strings.Contains(rec.Body.String(), "input_bytes") {
+		t.Fatalf("queue-only status/body = %d %s", rec.Code, rec.Body.String())
+	}
+	if len(runtime.hooks) != 1 || !runtime.hooks[0].QueueOnly {
+		t.Fatalf("hooks = %+v", runtime.hooks)
+	}
+	var resp workload.AdmissionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode queue-only response: %v", err)
+	}
+	if !resp.Queued || resp.Job.Status != domain.JobQueued || resp.Decision.Action != domain.ActionQueued || resp.Execution.State != "queued_not_executed" {
+		t.Fatalf("queue-only response = %+v", resp)
+	}
+}
+
 func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
 	ctx := context.Background()
 	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
@@ -5590,6 +5616,7 @@ type recordingWorkloadRuntime struct {
 	drained  []scheduler.Result
 	job      domain.Job
 	payload  []byte
+	hooks    []scheduler.SubmitHooks
 	err      error
 }
 
@@ -5618,22 +5645,31 @@ func (s workloadStatusOnlyStore) WorkloadResultBody(context.Context, string) (do
 	return domain.WorkloadResultBody{}, fmt.Errorf("no result body")
 }
 
-func (r *recordingWorkloadRuntime) SubmitWithPayload(_ context.Context, job domain.Job, payload []byte, _ ...scheduler.SubmitHooks) (scheduler.Result, error) {
+func (r *recordingWorkloadRuntime) SubmitWithPayload(_ context.Context, job domain.Job, payload []byte, hooks ...scheduler.SubmitHooks) (scheduler.Result, error) {
 	r.job = job
 	r.payload = append([]byte(nil), payload...)
+	r.hooks = append([]scheduler.SubmitHooks(nil), hooks...)
 	if r.err != nil {
 		return scheduler.Result{}, r.err
 	}
+	queueOnly := false
+	for _, hook := range hooks {
+		queueOnly = queueOnly || hook.QueueOnly
+	}
+	decision := r.decision
+	if queueOnly {
+		decision = domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued, Preset: decision.Preset}
+	}
 	if r.store != nil {
-		if r.decision.Action != "" && r.decision.Action != domain.ActionQueued {
+		if decision.Action != "" && decision.Action != domain.ActionQueued {
 			job.Status = domain.JobRunning
 		}
 		job.Result = &domain.JobResult{
 			Source:          "scheduler",
-			Decision:        r.decision,
-			NodeID:          r.decision.NodeID,
-			PresetID:        r.decision.Preset.ID,
-			Action:          r.decision.Action,
+			Decision:        decision,
+			NodeID:          decision.NodeID,
+			PresetID:        decision.Preset.ID,
+			Action:          decision.Action,
 			PayloadBytes:    len(payload),
 			PayloadStored:   len(payload) > 0,
 			PayloadRedacted: len(payload) > 0,
@@ -5641,7 +5677,7 @@ func (r *recordingWorkloadRuntime) SubmitWithPayload(_ context.Context, job doma
 		}
 		_ = r.store.SaveJob(context.Background(), job)
 	}
-	return scheduler.Result{Decision: r.decision}, nil
+	return scheduler.Result{Decision: decision}, nil
 }
 
 func (r *recordingWorkloadRuntime) Drain(_ context.Context, _ int) ([]scheduler.Result, error) {

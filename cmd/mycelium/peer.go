@@ -633,7 +633,11 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			writePeerRPCError(w, http.StatusBadRequest, err)
 			return
 		}
-		result, err := runtime.SubmitWithPayload(r.Context(), job, []byte(req.Payload))
+		var hooks []scheduler.SubmitHooks
+		if req.QueueOnly {
+			hooks = append(hooks, scheduler.SubmitHooks{QueueOnly: true})
+		}
+		result, err := runtime.SubmitWithPayload(r.Context(), job, []byte(req.Payload), hooks...)
 		if err != nil {
 			writePeerRPCError(w, http.StatusConflict, err)
 			return
