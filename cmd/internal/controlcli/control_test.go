@@ -4142,6 +4142,78 @@ func TestRunCalibrateRunSimulatesGeneratedPlan(t *testing.T) {
 	}
 }
 
+func TestRunCalibrateStatusAndReportSummarizeSavedEvidence(t *testing.T) {
+	dbPath, configPath := writeCalibrationInventoryFixture(t)
+	planDir := filepath.Join(t.TempDir(), "calibration-plan")
+	if err := Run(context.Background(), []string{"calibrate", "plan", "--config", configPath, "--db", dbPath, "--out", planDir}); err != nil {
+		t.Fatalf("calibrate plan: %v", err)
+	}
+
+	var statusErr error
+	planOnly := captureStdout(t, func() {
+		statusErr = Run(context.Background(), []string{"calibrate", "status", "--plan", planDir})
+	})
+	if statusErr != nil {
+		t.Fatalf("calibrate status plan-only: %v", statusErr)
+	}
+	if !strings.Contains(planOnly, "readiness=plan_ready") || !strings.Contains(planOnly, "no calibration run artifact supplied") {
+		t.Fatalf("plan-only status = %s", planOnly)
+	}
+
+	runOut := filepath.Join(t.TempDir(), "calibration-run")
+	if err := Run(context.Background(), []string{"calibrate", "run", "--plan", planDir, "--simulate", "--out", runOut}); err != nil {
+		t.Fatalf("calibrate run: %v", err)
+	}
+	statusWithRun := captureStdout(t, func() {
+		statusErr = Run(context.Background(), []string{"calibrate", "status", "--plan", planDir, "--run", runOut})
+	})
+	if statusErr != nil {
+		t.Fatalf("calibrate status with run: %v", statusErr)
+	}
+	for _, want := range []string{
+		"readiness=simulation_proven",
+		"calibrate-run-status\tcalibration-",
+		"simulated=true",
+		"live calibration has not run and no optimizer defaults were applied",
+	} {
+		if !strings.Contains(statusWithRun, want) {
+			t.Fatalf("status with run missing %q:\n%s", want, statusWithRun)
+		}
+	}
+
+	reportPath := filepath.Join(t.TempDir(), "calibration-report.json")
+	reportOut := captureStdout(t, func() {
+		statusErr = Run(context.Background(), []string{"calibrate", "report", "--plan", planDir, "--run", runOut, "--out", reportPath})
+	})
+	if statusErr != nil {
+		t.Fatalf("calibrate report: %v", statusErr)
+	}
+	if !strings.Contains(reportOut, "readiness=simulation_proven") {
+		t.Fatalf("report output = %s", reportOut)
+	}
+	info, err := os.Stat(reportPath)
+	if err != nil {
+		t.Fatalf("missing report: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("report mode = %o", info.Mode().Perm())
+	}
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if strings.Contains(string(data), "rpc-secret") || strings.Contains(string(data), "gateway-secret") {
+		t.Fatalf("calibration report leaked token material: %s", data)
+	}
+	var report calibrationReportArtifact
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if report.SchemaVersion != calibrationReportSchemaVersion || report.Readiness != "simulation_proven" || report.Run == nil || report.Run.MetricRows != 0 {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
 func TestCalibratePlanFailsWithoutAllocatorPressureInventory(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "control.db")
 	store, err := storesqlite.Open(dbPath)
@@ -4182,6 +4254,12 @@ func TestCalibrateUsageErrors(t *testing.T) {
 	}
 	if err := Run(context.Background(), []string{"calibrate", "run", "--simulate"}); err == nil || !strings.Contains(err.Error(), "--plan") {
 		t.Fatalf("calibrate run missing plan err = %v", err)
+	}
+	if err := Run(context.Background(), []string{"calibrate", "status"}); err == nil || !strings.Contains(err.Error(), "--plan") {
+		t.Fatalf("calibrate status missing plan err = %v", err)
+	}
+	if err := Run(context.Background(), []string{"calibrate", "report", "--plan", t.TempDir()}); err == nil || !strings.Contains(err.Error(), "--out") {
+		t.Fatalf("calibrate report missing out err = %v", err)
 	}
 }
 

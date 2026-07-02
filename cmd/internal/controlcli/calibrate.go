@@ -71,17 +71,60 @@ type calibrationSweepPlan struct {
 	Through string   `json:"through"`
 }
 
+const calibrationReportSchemaVersion = "mycelium.calibration_report.v1"
+
+type calibrationReportArtifact struct {
+	SchemaVersion string                 `json:"schema_version"`
+	CreatedAt     time.Time              `json:"created_at"`
+	Plan          calibrationPlanSummary `json:"plan"`
+	Run           *calibrationRunSummary `json:"run,omitempty"`
+	Readiness     string                 `json:"readiness"`
+	Refusals      []string               `json:"refusals,omitempty"`
+	Next          []string               `json:"next,omitempty"`
+}
+
+type calibrationPlanSummary struct {
+	Profile       string   `json:"profile"`
+	Project       string   `json:"project"`
+	ConfigPath    string   `json:"config_path"`
+	DBPath        string   `json:"db_path"`
+	Models        int      `json:"models"`
+	Nodes         int      `json:"nodes"`
+	Sweeps        int      `json:"sweeps"`
+	PreflightPass bool     `json:"preflight_passed"`
+	Proofs        []string `json:"proofs,omitempty"`
+}
+
+type calibrationRunSummary struct {
+	RunID         string    `json:"run_id"`
+	Profile       string    `json:"profile"`
+	Simulated     bool      `json:"simulated"`
+	OutputDir     string    `json:"output_dir"`
+	StartedAt     time.Time `json:"started_at"`
+	FinishedAt    time.Time `json:"finished_at"`
+	PreflightPass bool      `json:"preflight_passed"`
+	Proofs        int       `json:"proofs"`
+	Results       int       `json:"results"`
+	Failures      int       `json:"failures"`
+	Events        int       `json:"events"`
+	MetricRows    int       `json:"metric_rows"`
+}
+
 func runCalibrate(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce calibrate <plan|run>")
+		return fmt.Errorf("usage: myce calibrate <plan|run|status|report>")
 	}
 	switch args[0] {
 	case "plan":
 		return runCalibratePlan(ctx, args[1:])
 	case "run":
 		return runCalibrateRun(ctx, args[1:], client)
+	case "status":
+		return runCalibrateStatus(args[1:])
+	case "report":
+		return runCalibrateReport(args[1:])
 	default:
-		return fmt.Errorf("usage: myce calibrate <plan|run>")
+		return fmt.Errorf("usage: myce calibrate <plan|run|status|report>")
 	}
 }
 
@@ -150,6 +193,53 @@ func runCalibrateRun(ctx context.Context, args []string, client *http.Client) er
 		return err
 	}
 	fmt.Printf("calibrate-run\t%s\tsimulated\t%s\tproofs=%d\n", result.RunID, result.OutputDir, len(result.Preflight.Proofs))
+	return nil
+}
+
+func runCalibrateStatus(args []string) error {
+	fs := flag.NewFlagSet("calibrate status", flag.ContinueOnError)
+	planDir := fs.String("plan", "", "directory created by myce calibrate plan")
+	runDir := fs.String("run", "", "directory created by myce calibrate run, or its parent")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *planDir == "" {
+		return fmt.Errorf("--plan is required")
+	}
+	report, err := buildCalibrationReport(*planDir, *runDir)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return writePrettyJSON(os.Stdout, report)
+	}
+	printCalibrationStatus(os.Stdout, report)
+	return nil
+}
+
+func runCalibrateReport(args []string) error {
+	fs := flag.NewFlagSet("calibrate report", flag.ContinueOnError)
+	planDir := fs.String("plan", "", "directory created by myce calibrate plan")
+	runDir := fs.String("run", "", "directory created by myce calibrate run, or its parent")
+	outPath := fs.String("out", "", "output JSON report path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *planDir == "" {
+		return fmt.Errorf("--plan is required")
+	}
+	if *outPath == "" {
+		return fmt.Errorf("--out is required")
+	}
+	report, err := buildCalibrationReport(*planDir, *runDir)
+	if err != nil {
+		return err
+	}
+	if err := writePrivateJSON(*outPath, report); err != nil {
+		return err
+	}
+	fmt.Printf("calibrate-report\t%s\treadiness=%s\n", *outPath, report.Readiness)
 	return nil
 }
 
@@ -501,6 +591,120 @@ func writeCalibrationPlanArtifacts(outDir string, cfg bench.FleetBenchmarkConfig
 	return writePrivateJSON(filepath.Join(outDir, "calibration-plan.json"), artifact)
 }
 
+func loadCalibrationPlanArtifact(planDir string) (calibrationPlanArtifact, error) {
+	var artifact calibrationPlanArtifact
+	data, err := os.ReadFile(filepath.Join(planDir, "calibration-plan.json"))
+	if err != nil {
+		return artifact, err
+	}
+	if err := json.Unmarshal(data, &artifact); err != nil {
+		return artifact, err
+	}
+	if artifact.SchemaVersion != calibrationPlanSchemaVersion {
+		return artifact, fmt.Errorf("unsupported calibration plan schema %q", artifact.SchemaVersion)
+	}
+	return artifact, nil
+}
+
+func loadCalibrationRunResult(path string) (bench.FleetRunResult, error) {
+	var result bench.FleetRunResult
+	if path == "" {
+		return result, nil
+	}
+	resultPath, err := resolveCalibrationRunResults(path)
+	if err != nil {
+		return result, err
+	}
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		return result, err
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func resolveCalibrationRunResults(path string) (string, error) {
+	direct := filepath.Join(path, "results.json")
+	if _, err := os.Stat(direct); err == nil {
+		return direct, nil
+	}
+	matches, err := filepath.Glob(filepath.Join(path, "calibration-*", "results.json"))
+	if err != nil {
+		return "", err
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no calibration results.json found under %s", path)
+	}
+	sort.Strings(matches)
+	return matches[len(matches)-1], nil
+}
+
+func buildCalibrationReport(planDir, runDir string) (calibrationReportArtifact, error) {
+	plan, err := loadCalibrationPlanArtifact(planDir)
+	if err != nil {
+		return calibrationReportArtifact{}, err
+	}
+	var run *calibrationRunSummary
+	var runResult bench.FleetRunResult
+	if runDir != "" {
+		runResult, err = loadCalibrationRunResult(runDir)
+		if err != nil {
+			return calibrationReportArtifact{}, err
+		}
+		summary := calibrationRunSummary{
+			RunID:         runResult.RunID,
+			Profile:       runResult.Profile,
+			Simulated:     runResult.Simulated,
+			OutputDir:     runResult.OutputDir,
+			StartedAt:     runResult.Manifest.StartedAt,
+			FinishedAt:    runResult.Manifest.FinishedAt,
+			PreflightPass: runResult.Preflight.Passed,
+			Proofs:        len(runResult.Preflight.Proofs),
+			Results:       len(runResult.Results),
+			Failures:      len(runResult.Failures),
+			Events:        len(runResult.Events),
+			MetricRows:    len(runResult.Metrics),
+		}
+		run = &summary
+	}
+	report := calibrationReportArtifact{
+		SchemaVersion: calibrationReportSchemaVersion,
+		CreatedAt:     time.Now().UTC(),
+		Plan: calibrationPlanSummary{
+			Profile:       plan.Profile,
+			Project:       plan.Project,
+			ConfigPath:    plan.ConfigPath,
+			DBPath:        plan.DBPath,
+			Models:        len(plan.Models),
+			Nodes:         len(plan.Nodes),
+			Sweeps:        len(plan.Sweeps),
+			PreflightPass: plan.Preflight.Passed,
+			Proofs:        append([]string(nil), plan.Preflight.Proofs...),
+		},
+		Run: run,
+	}
+	report.Readiness, report.Refusals, report.Next = classifyCalibrationReport(report)
+	return report, nil
+}
+
+func classifyCalibrationReport(report calibrationReportArtifact) (string, []string, []string) {
+	if !report.Plan.PreflightPass {
+		return "plan_failed", []string{"calibration plan preflight did not pass"}, []string{"fix inventory or generated benchmark config before running calibration"}
+	}
+	if report.Run == nil {
+		return "plan_ready", []string{"no calibration run artifact supplied"}, []string{"run myce calibrate run --simulate before treating the plan as proven"}
+	}
+	if !report.Run.PreflightPass || report.Run.Failures > 0 {
+		return "run_failed", []string{"calibration run artifact contains failures"}, []string{"inspect the run results.json and benchmark report"}
+	}
+	if report.Run.Simulated {
+		return "simulation_proven", []string{"live calibration has not run and no optimizer defaults were applied"}, []string{"live calibration remains an explicit operator-approved gate"}
+	}
+	return "live_evidence_present", nil, []string{"review live run safety before applying optimizer defaults"}
+}
+
 func writePrivateJSON(path string, value any) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -532,4 +736,32 @@ func printCalibrationPlan(w interface{ Write([]byte) (int, error) }, artifact ca
 		fmt.Fprintf(w, "calibrate-proof\t%s\n", proof)
 	}
 	fmt.Fprintf(w, "calibrate-next\t%s\n", strings.Join(artifact.RunCommand, " "))
+}
+
+func printCalibrationStatus(w interface{ Write([]byte) (int, error) }, report calibrationReportArtifact) {
+	fmt.Fprintf(w, "calibrate-status\treadiness=%s\tprofile=%s\tproject=%s\tmodels=%d\tnodes=%d\tsweeps=%d\tplan_preflight=%t\n",
+		report.Readiness,
+		report.Plan.Profile,
+		report.Plan.Project,
+		report.Plan.Models,
+		report.Plan.Nodes,
+		report.Plan.Sweeps,
+		report.Plan.PreflightPass,
+	)
+	if report.Run != nil {
+		fmt.Fprintf(w, "calibrate-run-status\t%s\tsimulated=%t\tpreflight=%t\tfailures=%d\tresults=%d\tmetrics=%d\n",
+			report.Run.RunID,
+			report.Run.Simulated,
+			report.Run.PreflightPass,
+			report.Run.Failures,
+			report.Run.Results,
+			report.Run.MetricRows,
+		)
+	}
+	for _, refusal := range report.Refusals {
+		fmt.Fprintf(w, "calibrate-refusal\t%s\n", refusal)
+	}
+	for _, next := range report.Next {
+		fmt.Fprintf(w, "calibrate-next\t%s\n", next)
+	}
 }
