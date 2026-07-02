@@ -6,6 +6,7 @@ const (
 	DefaultDiskMinFreeRatio = 0.25
 	LabelPeerBackend        = "mycelium.peer.backend"
 	LabelPeerBackends       = "mycelium.peer.backends"
+	LabelNodeID             = "mycelium.node.id"
 )
 
 type Accelerator struct {

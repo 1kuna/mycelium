@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,6 +25,8 @@ import (
 	"mycelium/internal/catalog"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
+	"mycelium/internal/estimate"
+	"mycelium/internal/lease"
 	"mycelium/internal/locality"
 	"mycelium/internal/modelruntime"
 	"mycelium/internal/optimizer"
@@ -153,7 +156,7 @@ func runAddModel(ctx context.Context, args []string) error {
 
 func runModels(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce models <list|stage|locality>")
+		return fmt.Errorf("usage: myce models <list|stage|locality|prewarm|scale>")
 	}
 	switch args[0] {
 	case "list":
@@ -174,9 +177,625 @@ func runModels(ctx context.Context, args []string, client *http.Client) error {
 		return runModelsStage(ctx, args[1:], client)
 	case "locality":
 		return runModelsLocality(ctx, args[1:])
+	case "prewarm", "scale":
+		return runModelsPrewarm(ctx, args[1:], client)
 	default:
-		return fmt.Errorf("usage: myce models <list|stage|locality>")
+		return fmt.Errorf("usage: myce models <list|stage|locality|prewarm|scale>")
 	}
+}
+
+type modelPrewarmResult struct {
+	JobID    string                 `json:"job_id"`
+	Model    string                 `json:"model,omitempty"`
+	PresetID string                 `json:"preset_id,omitempty"`
+	Status   domain.JobStatus       `json:"status"`
+	Action   domain.PlacementAction `json:"action,omitempty"`
+	NodeID   string                 `json:"node_id,omitempty"`
+	Instance string                 `json:"instance_id,omitempty"`
+	LeaseID  string                 `json:"lease_id,omitempty"`
+	Finished bool                   `json:"finished"`
+	Terminal bool                   `json:"terminal"`
+	Error    string                 `json:"error,omitempty"`
+}
+
+type modelPrewarmFit struct {
+	NodeID         string         `json:"node_id"`
+	Address        string         `json:"address,omitempty"`
+	Backend        domain.Backend `json:"backend,omitempty"`
+	AcceleratorSet []int          `json:"accelerator_set,omitempty"`
+	Claim          domain.Claim   `json:"claim"`
+	Status         string         `json:"status"`
+	Reason         string         `json:"reason,omitempty"`
+}
+
+type modelPrewarmReport struct {
+	Model             string               `json:"model,omitempty"`
+	PresetID          string               `json:"preset_id,omitempty"`
+	RequestedReplicas int                  `json:"requested_replicas"`
+	DesiredReplicas   int                  `json:"desired_replicas"`
+	Warmed            int                  `json:"warmed"`
+	Queued            int                  `json:"queued"`
+	UniqueInstances   int                  `json:"unique_instances"`
+	FitCandidates     []modelPrewarmFit    `json:"fit_candidates,omitempty"`
+	Results           []modelPrewarmResult `json:"results"`
+}
+
+func runModelsPrewarm(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("models prewarm", flag.ContinueOnError)
+	configPath := fs.String("config", defaultPeerConfigPath(), "peer config JSON for preset and live peer discovery")
+	peerURL := fs.String("url", "", "peer base URL")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
+	model := fs.String("model", "", "model or alias to prewarm")
+	presetID := fs.String("preset", "", "preset id to prewarm")
+	project := fs.String("project", "operator-prewarm", "project label for prewarm evidence")
+	contextCap := fs.Int("context", 0, "context request for admission evidence")
+	concurrency := fs.Int("concurrency", 1, "expected concurrency envelope")
+	var replicas optionalReplicasFlag
+	fs.Var(&replicas, "replicas", "number of distinct owner replicas to prewarm; defaults to one, or every fitting owner with --all-fitting")
+	allFitting := fs.Bool("all-fitting", false, "target every live owner that can fit the preset")
+	priority := fs.String("priority", string(domain.PriorityBackground), "priority: interactive, normal, or background")
+	jsonOut := fs.Bool("json", false, "print JSON report")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *peerURL == "" {
+		return fmt.Errorf("--url is required")
+	}
+	if *model == "" && *presetID == "" {
+		return fmt.Errorf("--model or --preset is required")
+	}
+	if replicas.set && replicas.value <= 0 {
+		return fmt.Errorf("--replicas must be positive")
+	}
+	if *concurrency <= 0 {
+		return fmt.Errorf("--concurrency must be positive")
+	}
+	parsedPriority, err := parsePriorityFlag(*priority)
+	if err != nil {
+		return err
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	loaded, err := loadOperatorConfig(*configPath)
+	if err != nil && *allFitting {
+		return err
+	}
+	requestedReplicas := 1
+	if replicas.set {
+		requestedReplicas = replicas.value
+	}
+	report := modelPrewarmReport{
+		Model:             strings.TrimSpace(*model),
+		PresetID:          strings.TrimSpace(*presetID),
+		RequestedReplicas: requestedReplicas,
+		Results:           make([]modelPrewarmResult, 0, requestedReplicas),
+	}
+	targets := []modelPrewarmFit{{Status: "untargeted_scheduler_admission"}}
+	if *allFitting {
+		preset, err := resolveOperatorPreset(loaded.Config.Presets, report.Model, report.PresetID)
+		if err != nil {
+			return err
+		}
+		if report.Model == "" {
+			report.Model = preferredPresetModel(preset)
+		}
+		if report.PresetID == "" {
+			report.PresetID = preset.ID
+		}
+		if *contextCap == 0 {
+			*contextCap = modelruntime.EffectiveContextLength(preset)
+		}
+		fleet, err := liveFleetSnapshotForPrewarm(ctx, loaded.Config, *rpcToken, client)
+		if err != nil {
+			return err
+		}
+		candidates := prewarmFitCandidates(ctx, preset, *contextCap, *concurrency, fleet)
+		report.FitCandidates = candidates
+		targets = targets[:0]
+		limit := len(candidates)
+		if replicas.set {
+			limit = replicas.value
+		}
+		for _, candidate := range candidates {
+			if candidate.Status != "fits" {
+				continue
+			}
+			targets = append(targets, candidate)
+			if len(targets) == limit {
+				break
+			}
+		}
+		report.RequestedReplicas = len(targets)
+		report.DesiredReplicas = len(targets)
+		if len(targets) == 0 {
+			if *jsonOut {
+				return json.NewEncoder(os.Stdout).Encode(report)
+			}
+			printModelPrewarmReport(report)
+			return nil
+		}
+	} else {
+		targets = make([]modelPrewarmFit, 0, requestedReplicas)
+		for i := 0; i < requestedReplicas; i++ {
+			targets = append(targets, modelPrewarmFit{Status: "untargeted_scheduler_admission"})
+		}
+		report.DesiredReplicas = requestedReplicas
+	}
+	seenInstances := map[string]struct{}{}
+	for i, target := range targets {
+		job := domain.Job{
+			ID:                  prewarmJobID(report.Model, report.PresetID, i),
+			TaskType:            "model_prewarm",
+			Model:               report.Model,
+			PresetID:            report.PresetID,
+			Project:             strings.TrimSpace(*project),
+			Priority:            parsedPriority,
+			SpeedPref:           domain.SpeedThroughput,
+			ContextRequest:      *contextCap,
+			ExpectedConcurrency: *concurrency,
+			Preemption:          domain.PreemptSoft,
+			Status:              domain.JobQueued,
+		}
+		if target.NodeID != "" {
+			job.NodeSelector = map[string]string{domain.LabelNodeID: target.NodeID}
+		}
+		admitted, err := admitPrewarmWorkload(ctx, client, *peerURL, *rpcToken, job)
+		if err != nil {
+			return err
+		}
+		result := prewarmResultFromAdmission(admitted)
+		if result.Instance != "" {
+			seenInstances[result.Instance] = struct{}{}
+		}
+		if admitted.Job.Status == domain.JobRunning {
+			finished, err := finishPrewarmWorkload(ctx, client, *peerURL, *rpcToken, admitted.Job.ID)
+			if err != nil {
+				return err
+			}
+			result = prewarmResultFromFinish(finished, result)
+		}
+		switch result.Status {
+		case domain.JobDone:
+			report.Warmed++
+		case domain.JobQueued:
+			report.Queued++
+		}
+		report.Results = append(report.Results, result)
+	}
+	report.UniqueInstances = len(seenInstances)
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(report)
+	}
+	printModelPrewarmReport(report)
+	return nil
+}
+
+func resolveOperatorPreset(presets []domain.Preset, model, presetID string) (domain.Preset, error) {
+	for _, preset := range presets {
+		if presetID != "" && preset.ID == presetID {
+			return preset, nil
+		}
+		if model == "" {
+			continue
+		}
+		if preset.ID == model || preset.ModelRef == model {
+			return preset, nil
+		}
+		for _, alias := range preset.Aliases {
+			if alias == model {
+				return preset, nil
+			}
+		}
+	}
+	if presetID != "" {
+		return domain.Preset{}, fmt.Errorf("unknown preset %q", presetID)
+	}
+	return domain.Preset{}, fmt.Errorf("unknown model %q", model)
+}
+
+func liveFleetSnapshotForPrewarm(ctx context.Context, cfg operatorPeerConfig, rpcToken string, client *http.Client) (domain.FleetSnapshot, error) {
+	urls := append([]string(nil), cfg.SeedPeers...)
+	if cfg.Compute && cfg.Listen != "" {
+		urls = append(urls, cfg.Listen)
+	}
+	if len(urls) == 0 {
+		return domain.FleetSnapshot{}, fmt.Errorf("no live peer URLs in config; supply a config with seed peers")
+	}
+	seen := map[string]struct{}{}
+	var fleet domain.FleetSnapshot
+	var errs []error
+	for _, raw := range urls {
+		base := strings.TrimRight(catalogPeerBaseURL(raw), "/")
+		if _, ok := seen[base]; ok {
+			continue
+		}
+		seen[base] = struct{}{}
+		snap, err := fetchPrewarmSnapshot(ctx, base, rpcToken, client)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("snapshot %s: %w", base, err))
+			continue
+		}
+		fleet.Nodes = append(fleet.Nodes, snap.Node)
+		fleet.Instances = append(fleet.Instances, snap.Instances...)
+	}
+	if len(fleet.Nodes) == 0 {
+		return domain.FleetSnapshot{}, errors.Join(errs...)
+	}
+	return fleet, nil
+}
+
+func fetchPrewarmSnapshot(ctx context.Context, baseURL, rpcToken string, client *http.Client) (domain.NodeSnapshot, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/snapshot", nil)
+	if err != nil {
+		return domain.NodeSnapshot{}, err
+	}
+	if rpcToken != "" {
+		req.Header.Set("Authorization", "Bearer "+rpcToken)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return domain.NodeSnapshot{}, err
+	}
+	defer resp.Body.Close()
+	body, err := readControlHTTPBody(resp.Body, "snapshot response body")
+	if err != nil {
+		return domain.NodeSnapshot{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return domain.NodeSnapshot{}, fmt.Errorf("returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var snap domain.NodeSnapshot
+	if err := json.Unmarshal(body, &snap); err != nil {
+		return domain.NodeSnapshot{}, err
+	}
+	if snap.Node.ID == "" {
+		return domain.NodeSnapshot{}, fmt.Errorf("snapshot returned empty node id")
+	}
+	return snap, nil
+}
+
+func prewarmFitCandidates(ctx context.Context, preset domain.Preset, contextLen, concurrency int, fleet domain.FleetSnapshot) []modelPrewarmFit {
+	if contextLen <= 0 {
+		contextLen = modelruntime.EffectiveContextLength(preset)
+	}
+	alloc := lease.NewAllocator()
+	estimator := estimate.NewInMemory()
+	out := make([]modelPrewarmFit, 0, len(fleet.Nodes))
+	for _, node := range fleet.Nodes {
+		fit := modelPrewarmFit{NodeID: node.ID, Address: node.Address, Backend: preset.Backend, Status: "not_fit"}
+		if node.Status != domain.NodeReady {
+			fit.Reason = string(node.Status)
+			out = append(out, fit)
+			continue
+		}
+		if reason, ok := presetNodeMismatchForPrewarm(preset, node); ok {
+			fit.Reason = reason
+			out = append(out, fit)
+			continue
+		}
+		if reason, ok := presetBackendMismatchForPrewarm(preset, node); ok {
+			fit.Reason = reason
+			out = append(out, fit)
+			continue
+		}
+		if reason, ok := presetDiskMismatchForPrewarm(preset, node, fleet); ok {
+			fit.Reason = reason
+			out = append(out, fit)
+			continue
+		}
+		sets := prewarmAcceleratorSets(node)
+		if len(sets) == 0 {
+			fit.Reason = "accelerators"
+			out = append(out, fit)
+			continue
+		}
+		for _, acc := range sets {
+			claim, err := estimator.Estimate(ctx, preset, contextLen, concurrency)
+			if err != nil {
+				fit.Reason = err.Error()
+				break
+			}
+			if !alloc.CanStackLoad(node, acc, fleet.Instances) {
+				fit.Reason = "load_in_flight"
+				continue
+			}
+			if alloc.Fits(node, acc, fleet.Instances, claim) {
+				fit.Status = "fits"
+				fit.Reason = ""
+				fit.AcceleratorSet = append([]int(nil), acc...)
+				fit.Claim = claim
+				break
+			}
+			fit.Reason = "fit"
+		}
+		out = append(out, fit)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
+	return out
+}
+
+func prewarmAcceleratorSets(node domain.Node) [][]int {
+	accs := make([]int, 0, len(node.Accelerators))
+	for _, acc := range node.Accelerators {
+		accs = append(accs, acc.Index)
+	}
+	sort.Ints(accs)
+	sets := make([][]int, 0)
+	for mask := 1; mask < 1<<len(accs); mask++ {
+		set := make([]int, 0, len(accs))
+		for i, acc := range accs {
+			if mask&(1<<i) != 0 {
+				set = append(set, acc)
+			}
+		}
+		sets = append(sets, set)
+	}
+	sort.Slice(sets, func(i, j int) bool {
+		if len(sets[i]) != len(sets[j]) {
+			return len(sets[i]) < len(sets[j])
+		}
+		for k := range sets[i] {
+			if sets[i][k] != sets[j][k] {
+				return sets[i][k] < sets[j][k]
+			}
+		}
+		return false
+	})
+	return sets
+}
+
+func presetNodeMismatchForPrewarm(preset domain.Preset, node domain.Node) (string, bool) {
+	if preset.NodeID != "" && preset.NodeID != node.ID {
+		return "preset.node_id", true
+	}
+	return "", false
+}
+
+func presetBackendMismatchForPrewarm(preset domain.Preset, node domain.Node) (string, bool) {
+	if preset.Backend == "" {
+		return "", false
+	}
+	if backends := node.Labels[domain.LabelPeerBackends]; backends != "" {
+		for _, backend := range strings.Split(backends, ",") {
+			if strings.TrimSpace(backend) == string(preset.Backend) {
+				return "", false
+			}
+		}
+		return "label." + domain.LabelPeerBackends, true
+	}
+	backend := node.Labels[domain.LabelPeerBackend]
+	if backend == "" || backend == string(preset.Backend) {
+		return "", false
+	}
+	return "label." + domain.LabelPeerBackend, true
+}
+
+func presetDiskMismatchForPrewarm(preset domain.Preset, node domain.Node, fleet domain.FleetSnapshot) (string, bool) {
+	if node.DiskTotalMB <= 0 {
+		return "disk.unknown", true
+	}
+	minFreeRatio := node.DiskMinFreeRatio
+	if minFreeRatio == 0 {
+		minFreeRatio = domain.DefaultDiskMinFreeRatio
+	}
+	if minFreeRatio <= 0 || minFreeRatio >= 1 {
+		return "disk.limit", true
+	}
+	floorMB := int(math.Ceil(float64(node.DiskTotalMB) * minFreeRatio))
+	if node.DiskFreeMB <= floorMB {
+		return "disk.free", true
+	}
+	requiredMB := preset.ArtifactSizeMB
+	if modelAlreadyPresentForPrewarm(preset, node, fleet) {
+		requiredMB = 0
+	}
+	if requiredMB == 0 {
+		requiredMB = preset.EstWeightsMB
+	}
+	if requiredMB < 0 {
+		return "disk.required", true
+	}
+	if node.DiskFreeMB-requiredMB <= floorMB {
+		return "disk.free_after_model", true
+	}
+	return "", false
+}
+
+func modelAlreadyPresentForPrewarm(preset domain.Preset, node domain.Node, fleet domain.FleetSnapshot) bool {
+	if preset.NodeID != "" && preset.NodeID == node.ID {
+		return true
+	}
+	for _, inst := range fleet.Instances {
+		if inst.NodeID == node.ID && inst.PresetID == preset.ID {
+			return true
+		}
+	}
+	return false
+}
+
+func parsePriorityFlag(raw string) (domain.Priority, error) {
+	switch domain.Priority(strings.TrimSpace(raw)) {
+	case domain.PriorityInteractive, domain.PriorityNormal, domain.PriorityBackground:
+		return domain.Priority(strings.TrimSpace(raw)), nil
+	default:
+		return "", fmt.Errorf("unknown priority %q", raw)
+	}
+}
+
+type optionalReplicasFlag struct {
+	set   bool
+	value int
+}
+
+func (f *optionalReplicasFlag) Set(raw string) error {
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return err
+	}
+	f.set = true
+	f.value = value
+	return nil
+}
+
+func (f *optionalReplicasFlag) String() string {
+	return strconv.Itoa(f.value)
+}
+
+func prewarmJobID(model, preset string, i int) string {
+	base := model
+	if base == "" {
+		base = preset
+	}
+	base = strings.Trim(strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		case r >= '0' && r <= '9':
+			return r
+		default:
+			return '-'
+		}
+	}, base), "-")
+	if base == "" {
+		base = "model"
+	}
+	return fmt.Sprintf("prewarm-%s-%d-%d", base, time.Now().UTC().UnixNano(), i+1)
+}
+
+func admitPrewarmWorkload(ctx context.Context, client *http.Client, peerURL, rpcToken string, job domain.Job) (workload.AdmissionResponse, error) {
+	body, err := json.Marshal(workload.AdmissionRequest{Job: job})
+	if err != nil {
+		return workload.AdmissionResponse{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(peerURL, "/")+"/workloads", bytes.NewReader(body))
+	if err != nil {
+		return workload.AdmissionResponse{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if rpcToken != "" {
+		req.Header.Set("Authorization", "Bearer "+rpcToken)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return workload.AdmissionResponse{}, err
+	}
+	defer resp.Body.Close()
+	respBody, err := readControlHTTPBody(resp.Body, "workload prewarm response body")
+	if err != nil {
+		return workload.AdmissionResponse{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return workload.AdmissionResponse{}, fmt.Errorf("models prewarm admit returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	var out workload.AdmissionResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return workload.AdmissionResponse{}, err
+	}
+	return out, nil
+}
+
+func finishPrewarmWorkload(ctx context.Context, client *http.Client, peerURL, rpcToken, jobID string) (workload.FinishResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(peerURL, "/")+"/workloads/"+url.PathEscape(jobID)+"/finish", nil)
+	if err != nil {
+		return workload.FinishResponse{}, err
+	}
+	if rpcToken != "" {
+		req.Header.Set("Authorization", "Bearer "+rpcToken)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return workload.FinishResponse{}, err
+	}
+	defer resp.Body.Close()
+	respBody, err := readControlHTTPBody(resp.Body, "workload prewarm finish response body")
+	if err != nil {
+		return workload.FinishResponse{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return workload.FinishResponse{}, fmt.Errorf("models prewarm finish returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	var out workload.FinishResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return workload.FinishResponse{}, err
+	}
+	return out, nil
+}
+
+func prewarmResultFromAdmission(out workload.AdmissionResponse) modelPrewarmResult {
+	result := modelPrewarmResult{
+		JobID:    out.Job.ID,
+		Model:    out.Job.Model,
+		PresetID: out.Job.PresetID,
+		Status:   out.Job.Status,
+		Action:   out.Decision.Action,
+		NodeID:   out.Decision.NodeID,
+		Instance: out.Instance.ID,
+		LeaseID:  out.Lease.ID,
+	}
+	if out.Result != nil {
+		result.PresetID = firstNonEmpty(result.PresetID, out.Result.PresetID)
+		result.NodeID = firstNonEmpty(result.NodeID, out.Result.NodeID)
+		result.Action = out.Result.Action
+		result.LeaseID = firstNonEmpty(result.LeaseID, out.Result.LeaseID)
+		if out.Result.Instance.ID != "" {
+			result.Instance = out.Result.Instance.ID
+		}
+		result.Terminal = out.Result.Terminal
+	}
+	return result
+}
+
+func prewarmResultFromFinish(out workload.FinishResponse, prior modelPrewarmResult) modelPrewarmResult {
+	result := prior
+	result.Status = out.Job.Status
+	result.Finished = true
+	if out.Result != nil {
+		result.PresetID = firstNonEmpty(result.PresetID, out.Result.PresetID)
+		result.NodeID = firstNonEmpty(result.NodeID, out.Result.NodeID)
+		result.Action = out.Result.Action
+		result.LeaseID = firstNonEmpty(result.LeaseID, out.Result.LeaseID)
+		if out.Result.Instance.ID != "" {
+			result.Instance = out.Result.Instance.ID
+		}
+		result.Terminal = out.Result.Terminal
+	}
+	return result
+}
+
+func printModelPrewarmReport(report modelPrewarmReport) {
+	fmt.Printf("models-prewarm\tmodel=%s\tpreset=%s\trequested=%d\tdesired=%d\twarmed=%d\tqueued=%d\tunique_instances=%d\n",
+		emptyDash(report.Model), emptyDash(report.PresetID), report.RequestedReplicas, report.DesiredReplicas, report.Warmed, report.Queued, report.UniqueInstances)
+	for _, fit := range report.FitCandidates {
+		fmt.Printf("fit\tnode=%s\tstatus=%s\tbackend=%s\tacc=%s\tclaim_weights_mb=%d\tclaim_kv_mb=%d\treason=%s\n",
+			emptyDash(fit.NodeID), emptyDash(fit.Status), emptyDash(string(fit.Backend)), intSliceString(fit.AcceleratorSet), fit.Claim.WeightsMB, fit.Claim.KVReservedMB, emptyDash(fit.Reason))
+	}
+	for _, result := range report.Results {
+		fmt.Printf("prewarm\t%s\tstatus=%s\taction=%s\tnode=%s\tpreset=%s\tinstance=%s\tlease=%s\tfinished=%t\tterminal=%t\n",
+			result.JobID,
+			result.Status,
+			emptyDash(string(result.Action)),
+			emptyDash(result.NodeID),
+			emptyDash(result.PresetID),
+			emptyDash(result.Instance),
+			emptyDash(result.LeaseID),
+			result.Finished,
+			result.Terminal,
+		)
+	}
+}
+
+func intSliceString(values []int) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, strconv.Itoa(value))
+	}
+	return strings.Join(parts, ",")
 }
 
 func runModelsStage(ctx context.Context, args []string, client *http.Client) error {

@@ -176,6 +176,12 @@ func (p *Placer) estimateCandidateClaim(ctx context.Context, preset domain.Prese
 
 func nodeSelectorMismatch(selector map[string]string, node domain.Node) (string, bool) {
 	for key, want := range selector {
+		if key == domain.LabelNodeID {
+			if node.ID != want {
+				return key, true
+			}
+			continue
+		}
 		if node.Labels[key] != want {
 			return "label." + key, true
 		}
