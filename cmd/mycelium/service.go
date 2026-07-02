@@ -551,19 +551,22 @@ func renderServiceUpgradePlan(plan serviceUpgradePlan) string {
 	fmt.Fprintf(&out, "target_bytes\t%d\n", plan.TargetBytes)
 	out.WriteString("commands\n")
 	statusCmd := serviceStatusCommand(spec)
+	waitCmd := serviceUpgradeWaitCommand()
 	fmt.Fprintf(&out, "  preflight_status: %s\n", statusCmd)
 	fmt.Fprintf(&out, "  backup: %s\n", servicePrivilegedCommand(spec, "cp", spec.BinaryPath, plan.BackupPath))
 	fmt.Fprintf(&out, "  replace: %s\n", servicePrivilegedCommand(spec, "install", "-m", "0755", spec.TargetPath, spec.BinaryPath))
 	fmt.Fprintf(&out, "  restart: %s\n", serviceRestartCommand(spec, plan.GOOS))
+	fmt.Fprintf(&out, "  wait: %s\n", waitCmd)
 	fmt.Fprintf(&out, "  verify: %s\n", statusCmd)
-	fmt.Fprintf(&out, "  rollback: %s && %s && %s\n",
+	fmt.Fprintf(&out, "  rollback: %s && %s && %s && %s\n",
 		servicePrivilegedCommand(spec, "install", "-m", "0755", plan.BackupPath, spec.BinaryPath),
 		serviceRestartCommand(spec, plan.GOOS),
+		waitCmd,
 		statusCmd,
 	)
 	out.WriteString("notes\n")
 	out.WriteString("  no live change was made\n")
-	out.WriteString("  run preflight_status before backup and verify after restart\n")
+	out.WriteString("  run preflight_status before backup, then wait and verify after restart\n")
 	out.WriteString("  rollback restores the backed-up stable binary and reruns service status\n")
 	return out.String()
 }
@@ -571,6 +574,7 @@ func renderServiceUpgradePlan(plan serviceUpgradePlan) string {
 func serviceUpgradePlanJSON(plan serviceUpgradePlan) serviceUpgradePlanArtifact {
 	spec := plan.Spec
 	statusCmd := serviceStatusCommand(spec)
+	waitCmd := serviceUpgradeWaitCommand()
 	return serviceUpgradePlanArtifact{
 		DryRun:        true,
 		Service:       spec.Label,
@@ -587,19 +591,25 @@ func serviceUpgradePlanJSON(plan serviceUpgradePlan) serviceUpgradePlanArtifact 
 			"backup":           servicePrivilegedCommand(spec, "cp", spec.BinaryPath, plan.BackupPath),
 			"replace":          servicePrivilegedCommand(spec, "install", "-m", "0755", spec.TargetPath, spec.BinaryPath),
 			"restart":          serviceRestartCommand(spec, plan.GOOS),
+			"wait":             waitCmd,
 			"verify":           statusCmd,
 			"rollback": strings.Join([]string{
 				servicePrivilegedCommand(spec, "install", "-m", "0755", plan.BackupPath, spec.BinaryPath),
 				serviceRestartCommand(spec, plan.GOOS),
+				waitCmd,
 				statusCmd,
 			}, " && "),
 		},
 		Notes: []string{
 			"no live change was made",
-			"run preflight_status before backup and verify after restart",
+			"run preflight_status before backup, then wait and verify after restart",
 			"rollback restores the backed-up stable binary and reruns service status",
 		},
 	}
+}
+
+func serviceUpgradeWaitCommand() string {
+	return "sleep 35"
 }
 
 func serviceStatusCommand(spec serviceSpec) string {

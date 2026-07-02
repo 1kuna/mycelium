@@ -71,12 +71,14 @@ The dry-run output is the operator packet:
 - backup command;
 - replace command;
 - restart command;
+- startup wait command;
 - post-restart status command;
 - rollback command.
 
-Run the printed status command before backup and after restart. If status or
-peer diagnostics fail after restart, run the printed rollback command and keep
-the old binary live.
+Run the printed status command before backup. After restart, run the printed
+wait command before verification so the peer has time to bind and probe seeds.
+If status or peer diagnostics fail after that wait, run the printed rollback
+command and keep the old binary live.
 
 ## macOS User LaunchAgent Diagnostics
 

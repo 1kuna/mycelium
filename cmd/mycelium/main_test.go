@@ -767,6 +767,7 @@ func TestServiceSpecAndRenderers(t *testing.T) {
 		"backup: cp ",
 		"replace: install -m 0755 ",
 		"restart: launchctl kickstart -k gui/",
+		"wait: sleep 35",
 		"verify:",
 		"rollback:",
 		"no live change was made",
@@ -843,8 +844,11 @@ func TestServiceSpecAndRenderers(t *testing.T) {
 	if err := json.Unmarshal(runOut, &upgradeJSON); err != nil {
 		t.Fatalf("decode upgrade json: %v\n%s", err, runOut)
 	}
-	if !upgradeJSON.DryRun || upgradeJSON.Service != "com.mycelium.fleetone" || upgradeJSON.Commands["replace"] == "" || upgradeJSON.Commands["rollback"] == "" || upgradeJSON.Commands["verify"] == "" {
+	if !upgradeJSON.DryRun || upgradeJSON.Service != "com.mycelium.fleetone" || upgradeJSON.Commands["replace"] == "" || upgradeJSON.Commands["rollback"] == "" || upgradeJSON.Commands["verify"] == "" || upgradeJSON.Commands["wait"] != "sleep 35" {
 		t.Fatalf("upgrade json = %+v", upgradeJSON)
+	}
+	if !strings.Contains(upgradeJSON.Commands["rollback"], "sleep 35") {
+		t.Fatalf("rollback should wait before status verification: %+v", upgradeJSON.Commands)
 	}
 	if strings.Contains(string(runOut), "join-secret") || strings.Contains(string(runOut), "rpc-secret") {
 		t.Fatalf("upgrade json leaked secret: %s", runOut)
