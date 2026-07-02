@@ -2198,6 +2198,12 @@ func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 	if got := report.Routes[1]; got.Project != "strict-json-project" || got.ModelGroupSize != 2 || strings.Join(got.ModelGroupPresets, ",") != "strict-json-vllm,strict-json-vllm-alt" {
 		t.Fatalf("strict JSON route group = %+v", got)
 	}
+	if got := report.Routes[1]; len(got.ModelGroupEnvelopes) != 2 || got.ModelGroupEnvelopes[0].PresetID != "strict-json-vllm" || got.ModelGroupEnvelopes[0].NodeID != "node-json" || got.ModelGroupEnvelopes[0].ContextLength != 4096 || got.ModelGroupEnvelopes[1].PresetID != "strict-json-vllm-alt" || got.ModelGroupEnvelopes[1].NodeID != "node-json-alt" || got.ModelGroupEnvelopes[1].ContextLength != 8192 {
+		t.Fatalf("strict JSON route envelopes = %+v", got.ModelGroupEnvelopes)
+	}
+	if !strings.Contains(output, "group_envelopes=strict-json-vllm@node-json:vllm:ctx4096,strict-json-vllm-alt@node-json-alt:vllm:ctx8192") {
+		t.Fatalf("gateway routes output missing group envelopes:\n%s", output)
+	}
 	if got := report.Routes[2]; got.Project != "tool-project" || !got.ProjectTokenConfigured || !got.ToolParserConfigured || !got.AutoToolChoiceConfigured || got.ToolReadiness != "auto_tool_configured" || got.RouteReadiness != "undersized_context" || got.MinContextCap != 32768 || got.EffectiveContextCap != 8192 || got.ContextIssue != "undersized_context" || got.ContextAdequate {
 		t.Fatalf("tool route contract = %+v", got)
 	}
@@ -2231,7 +2237,8 @@ func TestRunGatewayRoutesComparesLiveModels(t *testing.T) {
 			{ID: "tool-project", DefaultModel: "tool-model-8192"},
 		},
 		Presets: []domain.Preset{
-			{ID: "strict-json-vllm", ModelRef: "strict-json-model", Aliases: []string{"strict-json-model"}, Backend: domain.BackendVLLM, NodeID: "node-json"},
+			{ID: "strict-json-vllm", ModelRef: "strict-json-model", Aliases: []string{"strict-json-model"}, Backend: domain.BackendVLLM, ContextLength: 4096, NodeID: "node-json"},
+			{ID: "strict-json-vllm-alt", ModelRef: "strict-json-model", Aliases: []string{"strict-json-model"}, Backend: domain.BackendVLLM, ContextLength: 8192, NodeID: "node-json-alt"},
 			{ID: "tool-model-8192-vllm", ModelRef: "tool-model", Aliases: []string{"tool-model-8192"}, Backend: domain.BackendVLLM, NodeID: "node-tool"},
 		},
 	}
@@ -2269,6 +2276,7 @@ func TestRunGatewayRoutesComparesLiveModels(t *testing.T) {
 		"route\tproject=strict-json-project\tmodel=strict-json-model",
 		"readiness=live_ready",
 		"live_model=true\tlive_match=strict-json-model",
+		"group_envelopes=strict-json-vllm@node-json:vllm:ctx4096:live=strict-json-model,strict-json-vllm-alt@node-json-alt:vllm:ctx8192:live=strict-json-model",
 		"route\tproject=tool-project\tmodel=tool-model-8192",
 		"readiness=live_catalog_missing",
 		"live_model=false\tlive_match=-",
@@ -2300,6 +2308,9 @@ func TestRunGatewayRoutesComparesLiveModels(t *testing.T) {
 	}
 	if !report.Routes[0].LiveModelAvailable || report.Routes[1].LiveModelAvailable {
 		t.Fatalf("live route availability = %+v", report.Routes)
+	}
+	if got := report.Routes[0].ModelGroupEnvelopes; len(got) != 2 || !got[0].LiveModelAvailable || got[0].LiveModelMatch != "strict-json-model" || !got[1].LiveModelAvailable || got[1].LiveModelMatch != "strict-json-model" {
+		t.Fatalf("live route envelopes = %+v", got)
 	}
 	if report.Routes[0].RouteReadiness != "live_ready" || report.Routes[1].RouteReadiness != "live_catalog_missing" {
 		t.Fatalf("live route readiness = %+v", report.Routes)

@@ -227,7 +227,10 @@ structured-output likelihood, streaming likelihood, and vLLM tool-parser flags.
 It only reports whether a project token or global gateway token is configured;
 it never prints token material. It also reports `tool_readiness` and
 `readiness` so operators can distinguish a config-valid route from a route that
-is actually ready for the requested workload class. With `--live`, the command
+is actually ready for the requested workload class. For a shared model alias
+with multiple owner envelopes, `group_envelopes` reports each preset's owner,
+backend, and context cap so consumers can choose a request envelope without
+per-node route lore. With `--live`, the command
 performs an authenticated read-only `GET /v1/models` against the configured
 gateway (or `--url`) and annotates each configured route with `live_model` /
 `live_match`. Treat plain route output as catalog/config discovery, and `--live`
