@@ -26,6 +26,8 @@ type routeCertificationContract struct {
 	Model                 string `json:"model"`
 	Project               string `json:"project,omitempty"`
 	Prompt                string `json:"prompt,omitempty"`
+	ImageFile             string `json:"image_file,omitempty"`
+	StructuredOutput      string `json:"structured_output,omitempty"`
 	MaxTokens             int    `json:"max_tokens,omitempty"`
 	ContextCap            int    `json:"context_cap,omitempty"`
 	MinContextCap         int    `json:"min_context_cap,omitempty"`
@@ -256,6 +258,8 @@ func routeContractPreflightArgs(contract routeCertificationContract, gatewayURL,
 	}
 	appendStringFlag("--project", contract.Project)
 	appendStringFlag("--prompt", contract.Prompt)
+	appendStringFlag("--image-file", contract.ImageFile)
+	appendStringFlag("--structured-output", contract.StructuredOutput)
 	appendIntFlag("--max-tokens", contract.MaxTokens)
 	appendIntFlag("--context-cap", contract.ContextCap)
 	appendStringFlag("--tool-name", contract.ToolName)
