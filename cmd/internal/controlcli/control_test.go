@@ -437,6 +437,79 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	}
 }
 
+func TestRunJobsAdmitWrapsExecutablePayloadFile(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := filepath.Join(dir, "workload.json")
+	intent := workload.AdmissionRequest{
+		Job: domain.Job{
+			ID:       "job-a",
+			TaskType: "chat",
+			Model:    "model-a",
+			Project:  "project-a",
+		},
+	}
+	data, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatalf("Marshal intent: %v", err)
+	}
+	if err := os.WriteFile(intentPath, data, 0600); err != nil {
+		t.Fatalf("WriteFile intent: %v", err)
+	}
+	payloadPath := filepath.Join(dir, "body.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"model":"model-a","messages":[]}`), 0600); err != nil {
+		t.Fatalf("WriteFile payload: %v", err)
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req workload.AdmissionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode workload admit: %v", err)
+		}
+		executable, err := workload.DecodeExecutablePayload(req.Payload)
+		if err != nil {
+			t.Fatalf("DecodeExecutablePayload: %v payload=%s", err, req.Payload)
+		}
+		if executable.Kind != workload.ExecutablePayloadKindOpenAIChat || string(executable.Body) != `{"model":"model-a","messages":[]}` {
+			t.Fatalf("executable payload = %+v", executable)
+		}
+		result := &domain.JobResult{Source: "scheduler", Action: domain.ActionQueued, PresetID: "preset-a", PayloadBytes: len(req.Payload), PayloadStored: true, PayloadRedacted: true, ResultRedacted: true}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(workload.AdmissionResponse{
+			Job:           domain.Job{ID: req.Job.ID, Model: req.Job.Model, Project: req.Job.Project, Status: domain.JobQueued, Result: result},
+			Decision:      domain.PlacementDecision{JobID: req.Job.ID, Action: domain.ActionQueued, Preset: domain.Preset{ID: "preset-a"}},
+			Result:        result,
+			Queued:        true,
+			PayloadBytes:  len(req.Payload),
+			PayloadStored: true,
+			Execution:     workload.ExecutionEvidence{State: "queued_not_executed", PayloadContract: "runtime_payload_not_inspectable"},
+		})
+	})
+	client := directHTTPClient(handler)
+	out := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{
+			"jobs", "admit",
+			"--url", "http://peer.test",
+			"--file", intentPath,
+			"--payload-kind", workload.ExecutablePayloadKindOpenAIChat,
+			"--payload-file", payloadPath,
+		}, client)
+	})
+	if err != nil {
+		t.Fatalf("jobs admit: %v", err)
+	}
+	if !strings.Contains(out, "payload_contract=runtime_payload_not_inspectable") || strings.Contains(out, "messages") {
+		t.Fatalf("admit output = %q", out)
+	}
+	for _, args := range [][]string{
+		{"jobs", "admit", "--url", "http://peer.test", "--file", intentPath, "--payload-kind", workload.ExecutablePayloadKindOpenAIChat},
+		{"jobs", "admit", "--url", "http://peer.test", "--file", intentPath, "--payload-file", payloadPath},
+	} {
+		if err := RunWithClient(context.Background(), args, client); err == nil || !strings.Contains(err.Error(), "payload-kind") {
+			t.Fatalf("RunWithClient(%v) err = %v", args, err)
+		}
+	}
+}
+
 func TestRunJobsAdmitAndStatusErrorBranches(t *testing.T) {
 	err := runJobsAdmit(context.Background(), nil, http.DefaultClient)
 	if err == nil || !strings.Contains(err.Error(), "--url") {
