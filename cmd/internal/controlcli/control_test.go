@@ -4183,6 +4183,7 @@ func TestRunCalibratePlanWritesSimulationReadyBenchmarkConfig(t *testing.T) {
 		"calibrate-proof\twarm reuse observed",
 		"calibrate-proof\thard preemption/reallocation pressure observed",
 		"calibrate-next\tmyce calibrate run --plan " + outDir + " --simulate --out " + filepath.Join(outDir, "runs"),
+		"calibrate-local-proof-next\tmake smoke-workload-executor",
 		"calibrate-live-next\tmyce benchmark fleet --config " + filepath.Join(outDir, "benchmark-config.json") + " --profile conservative --out " + filepath.Join(outDir, "live-runs"),
 	} {
 		if !strings.Contains(output, want) {
@@ -4227,7 +4228,7 @@ func TestRunCalibratePlanWritesSimulationReadyBenchmarkConfig(t *testing.T) {
 	if err := json.Unmarshal(planData, &artifact); err != nil {
 		t.Fatalf("decode calibration plan: %v", err)
 	}
-	if artifact.SchemaVersion != calibrationPlanSchemaVersion || !artifact.Preflight.Passed || len(artifact.Sweeps) != 3 || !reflect.DeepEqual(artifact.LiveRunCommand, []string{"myce", "benchmark", "fleet", "--config", filepath.Join(outDir, "benchmark-config.json"), "--profile", "conservative", "--out", filepath.Join(outDir, "live-runs")}) {
+	if artifact.SchemaVersion != calibrationPlanSchemaVersion || !artifact.Preflight.Passed || len(artifact.Sweeps) != 3 || !reflect.DeepEqual(artifact.LocalProofCommand, []string{"make", "smoke-workload-executor"}) || !reflect.DeepEqual(artifact.LiveRunCommand, []string{"myce", "benchmark", "fleet", "--config", filepath.Join(outDir, "benchmark-config.json"), "--profile", "conservative", "--out", filepath.Join(outDir, "live-runs")}) {
 		t.Fatalf("calibration artifact = %+v", artifact)
 	}
 }
@@ -4296,6 +4297,7 @@ func TestRunCalibrateStatusAndReportSummarizeSavedEvidence(t *testing.T) {
 		"calibrate-run-status\tcalibration-",
 		"simulated=true",
 		"live calibration has not run and no optimizer defaults were applied",
+		"calibrate-next\tmake smoke-workload-executor",
 		"calibrate-next\tmyce benchmark fleet --config " + filepath.Join(planDir, "benchmark-config.json") + " --profile conservative --out " + filepath.Join(planDir, "live-runs"),
 	} {
 		if !strings.Contains(statusWithRun, want) {
@@ -4331,7 +4333,7 @@ func TestRunCalibrateStatusAndReportSummarizeSavedEvidence(t *testing.T) {
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("decode report: %v", err)
 	}
-	if report.SchemaVersion != calibrationReportSchemaVersion || report.Readiness != "simulation_proven" || report.Run == nil || report.Run.MetricRows != 0 || !reflect.DeepEqual(report.Plan.LiveRunCommand, []string{"myce", "benchmark", "fleet", "--config", filepath.Join(planDir, "benchmark-config.json"), "--profile", "conservative", "--out", filepath.Join(planDir, "live-runs")}) {
+	if report.SchemaVersion != calibrationReportSchemaVersion || report.Readiness != "simulation_proven" || report.Run == nil || report.Run.MetricRows != 0 || !reflect.DeepEqual(report.Plan.LocalProofCommand, []string{"make", "smoke-workload-executor"}) || !reflect.DeepEqual(report.Plan.LiveRunCommand, []string{"myce", "benchmark", "fleet", "--config", filepath.Join(planDir, "benchmark-config.json"), "--profile", "conservative", "--out", filepath.Join(planDir, "live-runs")}) {
 		t.Fatalf("report = %+v", report)
 	}
 }
