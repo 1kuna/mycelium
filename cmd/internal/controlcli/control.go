@@ -994,6 +994,7 @@ func runJobsDrain(ctx context.Context, args []string, client *http.Client) error
 	peerURL := fs.String("url", "", "peer base URL")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
 	limit := fs.Int("limit", 1, "maximum queued workloads to drain")
+	execute := fs.Bool("execute", false, "execute drained executable payloads through the provider path")
 	jsonOut := fs.Bool("json", false, "print JSON response")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1005,6 +1006,9 @@ func runJobsDrain(ctx context.Context, args []string, client *http.Client) error
 		return fmt.Errorf("--limit must be positive")
 	}
 	endpoint := strings.TrimRight(*peerURL, "/") + "/workloads/drain?limit=" + url.QueryEscape(strconv.Itoa(*limit))
+	if *execute {
+		endpoint += "&execute=true"
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return err

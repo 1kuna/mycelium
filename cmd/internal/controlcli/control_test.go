@@ -340,7 +340,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 				Status:              domain.JobQueued,
 				Result:              result,
 			}, Result: result, Execution: workload.ExecutionEvidence{State: "queued_not_executed", PayloadContract: "registry_executable_gateway_request", PayloadKind: workload.ExecutablePayloadKindOpenAIChat, PayloadExecutable: true}})
-		case r.Method == http.MethodPost && r.URL.Path == "/workloads/drain" && r.URL.Query().Get("limit") == "2":
+		case r.Method == http.MethodPost && r.URL.Path == "/workloads/drain" && r.URL.Query().Get("limit") == "2" && r.URL.Query().Get("execute") == "true":
 			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultRedacted: true}
 			_ = json.NewEncoder(w).Encode(workload.DrainResponse{Results: []workload.AdmissionResponse{{
 				Job:           domain.Job{ID: "job-a", Model: "model-a", PresetID: "preset-a", Project: "project-a", Status: domain.JobRunning, Result: result},
@@ -391,7 +391,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 		t.Fatalf("status output = %q", statusOut)
 	}
 	drainOut := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"jobs", "drain", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--limit", "2"}, client)
+		err = RunWithClient(context.Background(), []string{"jobs", "drain", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--limit", "2", "--execute"}, client)
 	})
 	if err != nil {
 		t.Fatalf("jobs drain: %v", err)

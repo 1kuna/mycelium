@@ -86,6 +86,211 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 }
 
+func TestPresetRegistryNextLargerContext(t *testing.T) {
+	small := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "small"
+		p.ModelRef = "model-a"
+		p.Backend = domain.BackendLlamaCpp
+		p.ContextLength = 1024
+	})
+	large := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "large"
+		p.ModelRef = "model-a"
+		p.Backend = domain.BackendLlamaCpp
+		p.ContextLength = 4096
+	})
+	otherBackend := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "other"
+		p.ModelRef = "model-a"
+		p.Backend = domain.BackendVLLM
+		p.ContextLength = 8192
+	})
+	registry := NewPresetRegistry(small, large, otherBackend)
+	got, ok := registry.NextLargerContext(small)
+	if !ok || got.ID != large.ID {
+		t.Fatalf("NextLargerContext = %+v, %t", got, ok)
+	}
+	if _, ok := registry.NextLargerContext(large); ok {
+		t.Fatal("largest context unexpectedly had a next larger context")
+	}
+}
+
+func TestNoInstanceAvailableRetryAfterRoundsUp(t *testing.T) {
+	err := noInstanceAvailableError{JobID: "job-a", RetryAfter: 1500 * time.Millisecond}
+	if got := err.retryAfterSeconds(); got != 2 {
+		t.Fatalf("retryAfterSeconds = %d", got)
+	}
+	if got := (noInstanceAvailableError{JobID: "job-a"}).retryAfterSeconds(); got != 1 {
+		t.Fatalf("default retryAfterSeconds = %d", got)
+	}
+}
+
+func TestRouterTerminalWrappersRespectMissingRuntime(t *testing.T) {
+	router := &Router{}
+	job := domain.Job{ID: "job-a"}
+	lease := domain.Lease{ID: "lease-a", JobID: job.ID}
+	if err := router.completeJob(context.Background(), job, lease); err != nil {
+		t.Fatalf("complete without runtime: %v", err)
+	}
+	if err := router.failJob(context.Background(), job, lease, errors.New("failed")); err != nil {
+		t.Fatalf("fail without runtime: %v", err)
+	}
+	router.Runtime = &scheduler.Service{}
+	if err := router.completeJob(context.Background(), job, lease); err == nil || !strings.Contains(err.Error(), "not fully configured") {
+		t.Fatalf("complete with unconfigured runtime err = %v", err)
+	}
+	if err := router.failJob(context.Background(), job, lease, errors.New("failed")); err == nil || !strings.Contains(err.Error(), "not fully configured") {
+		t.Fatalf("fail with unconfigured runtime err = %v", err)
+	}
+}
+
+func TestRouterExecutePlacedProviderRunsWithoutFinishingJob(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		if !strings.Contains(string(body), `"messages"`) {
+			t.Fatalf("upstream body = %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("queued")))
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	agent := mocks.NewNodeAgent(fixtures.MakeNode())
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	job := domain.Job{ID: "job-a", Model: req.Model, Project: "project-a", Status: domain.JobRunning}
+	decision := domain.PlacementDecision{JobID: job.ID, Action: domain.ActionLoadedNew, NodeID: inst.NodeID, Preset: preset}
+	lease := domain.Lease{ID: "lease-a", JobID: job.ID, NodeID: inst.NodeID, InstanceID: inst.ID}
+
+	resp, err := router.ExecutePlacedProvider(context.Background(), req, job, decision, inst, lease, 1, true, 7)
+	if err != nil {
+		t.Fatalf("ExecutePlacedProvider: %v", err)
+	}
+	if resp.Status != http.StatusOK || !strings.Contains(string(resp.Body), "queued") {
+		t.Fatalf("resp = %+v body=%s", resp, resp.Body)
+	}
+	if resp.Header.Get(HeaderDecision) != string(domain.ActionLoadedNew) || resp.Header.Get(HeaderJob) != job.ID || resp.Header.Get(HeaderColdLoad) != "true" || resp.Header.Get(HeaderLoadWallMS) != "7" {
+		t.Fatalf("headers = %+v", resp.Header)
+	}
+	if len(sink.Metrics) != 1 || sink.Metrics[0].JobID != job.ID || sink.Metrics[0].Project != "project-a" {
+		t.Fatalf("metrics = %+v", sink.Metrics)
+	}
+	if len(sink.SamplesOut) != 4 || sink.SamplesOut[0].Phase != domain.TelemetryPhasePlaced || sink.SamplesOut[1].Phase != domain.TelemetryPhaseLoadReady || sink.SamplesOut[2].Phase != domain.TelemetryPhaseUpstreamStart || sink.SamplesOut[3].Phase != domain.TelemetryPhaseComplete {
+		t.Fatalf("samples = %+v", sink.SamplesOut)
+	}
+	if strings.Join(agent.Calls, ",") != "begin:inst_test,end:inst_test" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+	req.Stream = true
+	if _, err := router.ExecutePlacedProvider(context.Background(), req, job, decision, inst, lease, 1, false, 0); err == nil || !strings.Contains(err.Error(), "streaming") {
+		t.Fatalf("streaming err = %v", err)
+	}
+}
+
+func TestRouterExecutePlacedProviderMarksUpstreamFailure(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"upstream failed"}`))
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	agent := mocks.NewNodeAgent(fixtures.MakeNode())
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	job := domain.Job{ID: "job-a", Model: req.Model, Project: "project-a", Status: domain.JobRunning}
+	decision := domain.PlacementDecision{JobID: job.ID, Action: domain.ActionWarmInstance, NodeID: inst.NodeID, InstanceID: inst.ID, Preset: preset}
+	lease := domain.Lease{ID: "lease-a", JobID: job.ID, NodeID: inst.NodeID, InstanceID: inst.ID}
+
+	resp, err := router.ExecutePlacedProvider(context.Background(), req, job, decision, inst, lease, 1, false, 0)
+	if err == nil || !strings.Contains(err.Error(), "upstream returned 500") {
+		t.Fatalf("ExecutePlacedProvider err = %v", err)
+	}
+	if resp.Status != http.StatusInternalServerError || !strings.Contains(string(resp.Body), "upstream failed") {
+		t.Fatalf("resp = %+v body=%s", resp, resp.Body)
+	}
+	if len(sink.SamplesOut) != 3 || sink.SamplesOut[2].Phase != domain.TelemetryPhaseError || !strings.Contains(sink.SamplesOut[2].Error, "upstream returned 500") {
+		t.Fatalf("samples = %+v", sink.SamplesOut)
+	}
+	if strings.Join(agent.Calls, ",") != "begin:inst_test,end:inst_test" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+}
+
+func TestRouterExecutePlacedProviderFailsWhenOwnerRejectsRequest(t *testing.T) {
+	preset := fixtures.MakePreset()
+	inst := fixtures.MakeInstance()
+	agent := mocks.NewNodeAgent(fixtures.MakeNode())
+	agent.BeginErr = errors.New("owner busy")
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	job := domain.Job{ID: "job-a", Model: req.Model, Project: "project-a", Status: domain.JobRunning}
+	decision := domain.PlacementDecision{JobID: job.ID, Action: domain.ActionWarmInstance, NodeID: inst.NodeID, InstanceID: inst.ID, Preset: preset}
+	lease := domain.Lease{ID: "lease-a", JobID: job.ID, NodeID: inst.NodeID, InstanceID: inst.ID}
+
+	if _, err := router.ExecutePlacedProvider(context.Background(), req, job, decision, inst, lease, 1, false, 0); err == nil || !strings.Contains(err.Error(), "owner busy") {
+		t.Fatalf("ExecutePlacedProvider err = %v", err)
+	}
+	if len(sink.SamplesOut) != 2 || sink.SamplesOut[1].Phase != domain.TelemetryPhaseError || !strings.Contains(sink.SamplesOut[1].Error, "owner busy") {
+		t.Fatalf("samples = %+v", sink.SamplesOut)
+	}
+	if strings.Join(agent.Calls, ",") != "begin:inst_test" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+}
+
+func TestRouterExecutePlacedProviderFailsOnTranslatedResponseLoss(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{`))
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	agent := mocks.NewNodeAgent(fixtures.MakeNode())
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
+	req, err := translate.ParseAnthropicMessages([]byte(`{"model":"qwen2.5-9b-instruct","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`))
+	if err != nil {
+		t.Fatalf("ParseAnthropicMessages: %v", err)
+	}
+	job := domain.Job{ID: "job-a", Model: req.Model, Project: "project-a", Status: domain.JobRunning}
+	decision := domain.PlacementDecision{JobID: job.ID, Action: domain.ActionWarmInstance, NodeID: inst.NodeID, InstanceID: inst.ID, Preset: preset}
+	lease := domain.Lease{ID: "lease-a", JobID: job.ID, NodeID: inst.NodeID, InstanceID: inst.ID}
+
+	if _, err := router.ExecutePlacedProvider(context.Background(), req, job, decision, inst, lease, 1, false, 0); err == nil {
+		t.Fatal("ExecutePlacedProvider accepted malformed translated response")
+	}
+	if strings.Join(agent.Calls, ",") != "begin:inst_test,end:inst_test" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+}
+
 func TestRouterPassesThroughVLLMStructuredOutputControls(t *testing.T) {
 	preset := fixtures.MakePreset(func(p *domain.Preset) {
 		p.ID = "b70-qwen35-9b-vision-vllm"
