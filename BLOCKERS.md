@@ -10,8 +10,9 @@ handoff.
 
 - 2026-06-30: Reachable peers and single-request canaries do not by themselves
   prove live allocator behavior under pressure. The OpenAI-compatible gateway
-  currently requires synchronous ownership for chat requests and returns a loud
-  no-instance error when work would queue. The authenticated workload RPC and
+  currently requires synchronous ownership for chat requests and returns
+  `503 Service Unavailable` with `Retry-After` when work would queue. The
+  authenticated workload RPC and
   `myce jobs admit/status/drain/finish` now provide explicit queued admission,
   scheduler drain, scheduler release/reclaim, redacted payload/result metadata,
   registry replayability classification, terminal evidence, and result artifact
