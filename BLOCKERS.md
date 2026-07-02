@@ -74,15 +74,10 @@ handoff.
   `consumer_contract_context_too_small`. The remaining product work is to
   expose or provision a genuinely high-context, tool-capable route when
   hardware and provider configuration allow it.
-- 2026-07-02: A large vision/OCR vLLM preset can be represented in the route
-  catalog and can reach owner admission/prewarm, but the live provider load is
-  not yet certified. The current observed failure class is: owner admission
-  creates a loading instance for the preset, no backend process becomes visible
-  before the operator cancels the proof, and the owner must be cleared through
-  the explicit workload cancel plus owner release/unload paths. Treat this as a
-  provider/runtime launch blocker, not a route-certification success. Full
-  document OCR readiness also requires a complete-document client proof or
-  explicit all-page chunking; page-limited canaries only prove transport.
+- 2026-07-02: Full-document OCR readiness still requires a complete-document
+  client proof or explicit all-page chunking. A page-limited or single-image
+  canary proves OpenAI-compatible vision transport and provider readiness, not
+  complete document coverage.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish
@@ -97,6 +92,12 @@ handoff.
 
 ## Resolved
 
+- 2026-07-02: The large vision/OCR vLLM route reached live route certification
+  for provider launch/readiness. The root cause was a private operator preset
+  pointing at a model path visible on the host but not inside the configured
+  vLLM container. After correcting the private runtime config and restarting
+  the established services, an OpenAI-compatible gateway request with image
+  content returned HTTP 200, route headers, non-empty final content, and usage.
 - 2026-06-29: The repo coverage gate is green under `make ci`.
 - 2026-06-29: Gateway preflight, debug job, debug bundle, owner telemetry, and
   optimization summaries can join secret-safe request evidence to route,

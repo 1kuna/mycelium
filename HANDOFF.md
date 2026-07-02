@@ -192,13 +192,13 @@ shows concurrent queueing or preemption under load, provider execution, result
 capture, release/reclaim, and owner telemetry across all selected routes. If a
 route-specific provider load fails, classify it as provider/runtime readiness
 rather than allocator success.
-Large vision/OCR vLLM route certification is currently catalog-visible and can
-reach owner admission/prewarm, but the live provider load can still fail before
-a backend process becomes ready. Treat that as a provider/runtime launch
-blocker, not as a certified route. Page-limited image canaries prove only the
-OpenAI-compatible vision transport; full-document OCR readiness requires either
-a client run that covers the whole document or explicit page chunking that
-covers every page.
+Large vision/OCR vLLM route certification now has a live OpenAI-compatible
+image request proof through the gateway: catalog lookup, owner admission,
+backend launch/readiness, route headers, non-empty final content, and usage all
+arrive in the redacted preflight evidence. Page-limited image canaries still
+prove only route transport and provider readiness; full-document OCR readiness
+requires either a client run that covers the whole document or explicit page
+chunking that covers every page.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
 work, not transparently resumed streams. Streaming queued provider replay

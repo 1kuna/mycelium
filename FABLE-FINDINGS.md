@@ -27,9 +27,11 @@ acting. Current repo work has resolved or narrowed several findings:
   distinct-owner prewarm intent: live peer snapshot, fit computation, canonical
   node-id targeting, and desired-versus-ready reporting. A single reused warm
   instance must not be presented as all-fitting saturation.
-- Large vision/OCR vLLM route work is still not certified. Catalog visibility
-  and owner admission are proven surfaces; provider launch/readiness and
-  complete-document client coverage remain open gates.
+- Large vision/OCR vLLM route work now has live provider launch/readiness proof
+  through the OpenAI-compatible gateway with image content, route headers,
+  non-empty final content, and usage in redacted evidence. Complete-document
+  client coverage remains a separate gate; single-image canaries prove
+  transport/readiness, not full OCR workload coverage.
 
 The remaining high-impact review lanes should be rechecked against current
 code before implementation: stream failure signaling, live process group

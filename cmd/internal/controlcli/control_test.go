@@ -1834,6 +1834,129 @@ func TestRunGatewayPreflightUsesMyceliumEnvAndPrintsTelemetry(t *testing.T) {
 	}
 }
 
+func TestRunGatewayPreflightImageFileSendsOpenAIImageContentAndRedactsEvidence(t *testing.T) {
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "gateway-secret")
+	imagePath := filepath.Join(t.TempDir(), "canary.png")
+	pngData := []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+		0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+		0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41,
+		0x54, 0x08, 0xd7, 0x63, 0xf8, 0xff, 0xff, 0x3f,
+		0x00, 0x05, 0xfe, 0x02, 0xfe, 0xdc, 0xcc, 0x59,
+		0xe7, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+		0x44, 0xae, 0x42, 0x60, 0x82,
+	}
+	if err := os.WriteFile(imagePath, pngData, 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if _, ok := raw["response_format"]; ok {
+			t.Fatalf("response_format should be omitted for structured-output none")
+		}
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content []struct {
+					Type     string `json:"type"`
+					Text     string `json:"text"`
+					ImageURL struct {
+						URL string `json:"url"`
+					} `json:"image_url"`
+				} `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(raw["messages"], &req.Messages); err != nil {
+			t.Fatalf("decode messages: %v", err)
+		}
+		if len(req.Messages) != 1 || req.Messages[0].Role != "user" || len(req.Messages[0].Content) != 2 {
+			t.Fatalf("messages = %+v", req.Messages)
+		}
+		if req.Messages[0].Content[0].Type != "text" || req.Messages[0].Content[0].Text != "Read this image." {
+			t.Fatalf("text part = %+v", req.Messages[0].Content[0])
+		}
+		if got := req.Messages[0].Content[1].Type; got != "image_url" {
+			t.Fatalf("image type = %s", got)
+		}
+		if url := req.Messages[0].Content[1].ImageURL.URL; !strings.HasPrefix(url, "data:image/png;base64,") {
+			t.Fatalf("image url = %.40q", url)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]string{"content": `{"ok":true}`},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	outDir := filepath.Join(t.TempDir(), "preflight-evidence")
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = RunWithClient(context.Background(), []string{
+			"gateway", "preflight",
+			"--url", "http://gateway.test",
+			"--model", "vision-model",
+			"--prompt", "Read this image.",
+			"--image-file", imagePath,
+			"--structured-output", "none",
+			"--out", outDir,
+		}, client)
+	})
+	if runErr != nil {
+		t.Fatalf("image preflight: %v", runErr)
+	}
+	if !strings.Contains(output, "gateway\thttp://gateway.test\tok") || strings.Contains(output, imagePath) || strings.Contains(output, "gateway-secret") {
+		t.Fatalf("image preflight output = %s", output)
+	}
+	evidenceData, err := os.ReadFile(filepath.Join(outDir, "preflight.json"))
+	if err != nil {
+		t.Fatalf("read evidence: %v", err)
+	}
+	evidenceText := string(evidenceData)
+	if strings.Contains(evidenceText, imagePath) || strings.Contains(evidenceText, "data:image") || strings.Contains(evidenceText, "Read this image") || strings.Contains(evidenceText, "gateway-secret") {
+		t.Fatalf("image preflight evidence leaked private request data: %s", evidenceText)
+	}
+	var evidence gatewayPreflightEvidence
+	if err := json.Unmarshal(evidenceData, &evidence); err != nil {
+		t.Fatalf("decode evidence: %v", err)
+	}
+	if !evidence.Request.ImageRequested || evidence.Request.ImageMediaType != "image/png" || evidence.Request.StructuredOutput != "none" {
+		t.Fatalf("image request evidence = %+v", evidence.Request)
+	}
+}
+
+func TestGatewayPreflightMessagesAndStructuredOutputValidation(t *testing.T) {
+	messages, err := gatewayPreflightMessages(gatewayPreflightConfig{Prompt: "hello"})
+	if err != nil {
+		t.Fatalf("text messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0]["content"] != "hello" {
+		t.Fatalf("text messages = %+v", messages)
+	}
+	if mode, err := validatePreflightStructuredOutput(""); err != nil || mode != "json_schema" {
+		t.Fatalf("default structured output = %q, %v", mode, err)
+	}
+	if mode, err := validatePreflightStructuredOutput("none"); err != nil || mode != "none" {
+		t.Fatalf("none structured output = %q, %v", mode, err)
+	}
+	if _, err := validatePreflightStructuredOutput("xml"); err == nil || !strings.Contains(err.Error(), "json_schema or none") {
+		t.Fatalf("invalid structured output err = %v", err)
+	}
+	if media := imageMediaTypeForPath("scan.jpeg"); media != "image/jpeg" {
+		t.Fatalf("jpeg media = %s", media)
+	}
+	if media := imageMediaTypeForBytes("scan.bin", []byte("<html></html>")); media != "text/html; charset=utf-8" {
+		t.Fatalf("detected media = %s", media)
+	}
+	if _, err := gatewayPreflightMessages(gatewayPreflightConfig{ImageFile: filepath.Join(t.TempDir(), "missing.png")}); err == nil || !strings.Contains(err.Error(), "read preflight image file") {
+		t.Fatalf("missing image err = %v", err)
+	}
+}
+
 func TestRunGatewayPreflightIgnoresAmbientOpenAIKeyUnlessExplicit(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")

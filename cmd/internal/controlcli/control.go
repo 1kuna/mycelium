@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -2547,6 +2548,8 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 	configPath := fs.String("config", "", "peer config JSON to read gateway_token from")
 	project := fs.String("project", "", "optional project id to send as X-Myc-Project")
 	prompt := fs.String("prompt", `Return {"ok":true}.`, "preflight prompt")
+	imageFile := fs.String("image-file", "", "optional image file for an OpenAI image_url content-part canary")
+	structuredOutput := fs.String("structured-output", "json_schema", "structured output mode: json_schema or none")
 	maxTokens := fs.Int("max-tokens", 16, "maximum output tokens for the preflight request")
 	contextCap := fs.Int("context-cap", 0, "known selected route context cap to preserve in evidence")
 	toolName := fs.String("tool-name", "", "optional echo-style function name for an OpenAI tool-call canary")
@@ -2588,17 +2591,21 @@ func runGatewayPreflight(ctx context.Context, args []string, client *http.Client
 		return err
 	}
 	cfg := gatewayPreflightConfig{
-		URL:        *url,
-		Model:      *model,
-		Prompt:     *prompt,
-		MaxTokens:  *maxTokens,
-		ContextCap: *contextCap,
-		Project:    *project,
-		ToolName:   *toolName,
-		ToolChoice: *toolChoice,
-		Token:      token,
-		Client:     client,
-		Stream:     *stream,
+		URL:              *url,
+		Model:            *model,
+		Prompt:           *prompt,
+		ImageFile:        *imageFile,
+		ImageRequested:   strings.TrimSpace(*imageFile) != "",
+		ImageMediaType:   imageMediaTypeForPath(*imageFile),
+		StructuredOutput: *structuredOutput,
+		MaxTokens:        *maxTokens,
+		ContextCap:       *contextCap,
+		Project:          *project,
+		ToolName:         *toolName,
+		ToolChoice:       *toolChoice,
+		Token:            token,
+		Client:           client,
+		Stream:           *stream,
 	}
 	expectations := gatewayPreflightExpectations{
 		ExpectNode:            *expectNode,
@@ -2769,18 +2776,22 @@ func validateGatewayPreflightExpectations(result gatewayPreflightResult, expecta
 }
 
 type gatewayPreflightConfig struct {
-	URL        string
-	Model      string
-	Prompt     string
-	MaxTokens  int
-	ContextCap int
-	Project    string
-	ToolName   string
-	ToolChoice string
-	Token      string
-	Client     *http.Client
-	Stream     bool
-	Consumer   *consumerEvidence
+	URL              string
+	Model            string
+	Prompt           string
+	ImageFile        string
+	ImageRequested   bool
+	ImageMediaType   string
+	StructuredOutput string
+	MaxTokens        int
+	ContextCap       int
+	Project          string
+	ToolName         string
+	ToolChoice       string
+	Token            string
+	Client           *http.Client
+	Stream           bool
+	Consumer         *consumerEvidence
 }
 
 type gatewayPreflightResult struct {
@@ -2844,6 +2855,8 @@ type gatewayPreflightRequestEvidence struct {
 	ContextCap       int    `json:"context_cap,omitempty"`
 	Streaming        bool   `json:"streaming"`
 	StructuredOutput string `json:"structured_output"`
+	ImageRequested   bool   `json:"image_requested,omitempty"`
+	ImageMediaType   string `json:"image_media_type,omitempty"`
 	ToolRequested    bool   `json:"tool_requested"`
 	ToolName         string `json:"tool_name,omitempty"`
 	ToolChoice       string `json:"tool_choice,omitempty"`
@@ -2868,7 +2881,7 @@ func gatewayPreflightRequestEvidenceFromConfig(cfg gatewayPreflightConfig) gatew
 	if toolName != "" && toolChoice == "" {
 		toolChoice = "auto"
 	}
-	structuredOutput := "json_schema"
+	structuredOutput := normalizedPreflightStructuredOutput(cfg.StructuredOutput)
 	if toolName != "" {
 		structuredOutput = "none"
 	}
@@ -2877,6 +2890,8 @@ func gatewayPreflightRequestEvidenceFromConfig(cfg gatewayPreflightConfig) gatew
 		ContextCap:       cfg.ContextCap,
 		Streaming:        cfg.Stream,
 		StructuredOutput: structuredOutput,
+		ImageRequested:   cfg.ImageRequested,
+		ImageMediaType:   cfg.ImageMediaType,
 		ToolRequested:    toolName != "",
 		ToolName:         toolName,
 		ToolChoice:       toolChoice,
@@ -2947,6 +2962,7 @@ func sanitizedGatewayPreflightEvidenceConfig(cfg gatewayPreflightConfig, consume
 	cfg.Token = ""
 	cfg.Client = nil
 	cfg.Prompt = ""
+	cfg.ImageFile = ""
 	cfg.Consumer = consumer
 	return cfg
 }
@@ -3026,12 +3042,17 @@ func readGatewayTokenFile(path string) (string, error) {
 }
 
 func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (gatewayPreflightResult, error) {
+	messages, err := gatewayPreflightMessages(cfg)
+	if err != nil {
+		return gatewayPreflightResult{}, err
+	}
+	structuredOutput, err := validatePreflightStructuredOutput(cfg.StructuredOutput)
+	if err != nil {
+		return gatewayPreflightResult{}, err
+	}
 	payload := map[string]any{
-		"model": cfg.Model,
-		"messages": []map[string]string{{
-			"role":    "user",
-			"content": cfg.Prompt,
-		}},
+		"model":       cfg.Model,
+		"messages":    messages,
 		"max_tokens":  cfg.MaxTokens,
 		"temperature": 0,
 	}
@@ -3072,7 +3093,7 @@ func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (
 		default:
 			return gatewayPreflightResult{}, fmt.Errorf("--tool-choice must be auto, required, none, or function")
 		}
-	} else {
+	} else if structuredOutput == "json_schema" {
 		payload["response_format"] = map[string]any{
 			"type": "json_schema",
 			"json_schema": map[string]any{
@@ -3142,6 +3163,70 @@ func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (
 	parsed.Headers = resp.Header.Clone()
 	parsed.ContextCap = cfg.ContextCap
 	return parsed, nil
+}
+
+func normalizedPreflightStructuredOutput(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "json_schema"
+	}
+	return value
+}
+
+func validatePreflightStructuredOutput(value string) (string, error) {
+	switch mode := normalizedPreflightStructuredOutput(value); mode {
+	case "json_schema", "none":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("--structured-output must be json_schema or none")
+	}
+}
+
+func gatewayPreflightMessages(cfg gatewayPreflightConfig) ([]map[string]any, error) {
+	imagePath := strings.TrimSpace(cfg.ImageFile)
+	if imagePath == "" {
+		return []map[string]any{{
+			"role":    "user",
+			"content": cfg.Prompt,
+		}}, nil
+	}
+	data, err := os.ReadFile(imagePath)
+	if err != nil {
+		return nil, fmt.Errorf("read preflight image file: %w", err)
+	}
+	mediaType := imageMediaTypeForBytes(imagePath, data)
+	return []map[string]any{{
+		"role": "user",
+		"content": []map[string]any{
+			{"type": "text", "text": cfg.Prompt},
+			{"type": "image_url", "image_url": map[string]string{
+				"url": "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(data),
+			}},
+		},
+	}}, nil
+}
+
+func imageMediaTypeForPath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".webp":
+		return "image/webp"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func imageMediaTypeForBytes(path string, data []byte) string {
+	if mediaType := imageMediaTypeForPath(path); mediaType != "application/octet-stream" {
+		return mediaType
+	}
+	return http.DetectContentType(data)
 }
 
 func sanitizeGatewayPreflightError(status int, body []byte) string {
