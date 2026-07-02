@@ -135,11 +135,17 @@ without exposing them through status/default debug output. `myce jobs drain
 non-streaming registry-replayable executable payloads, runs them through the
 gateway/provider execution seam after scheduler/owner admission, stores the
 provider response body as a workload result, and finishes/releases the job
-through the scheduler. The fast test suite includes a repo-local HTTP workload
-proof for queued admission, multi-owner drain, explicit provider execution,
-terminal success/failure, result artifact manifest metadata, explicit stored
-result-body replay, executable-payload contract classification, execution
-evidence, and lease reclaim.
+through the scheduler. Workload admission now persists non-private payloads as
+registry-replayable records when the local store supports the job registry, so
+the normal `myce jobs admit --payload-kind ... --payload-file ...` operator path
+feeds `myce jobs drain --execute` without hand-seeding registry state. The fast
+test suite includes a repo-local HTTP workload proof for queued admission,
+multi-owner drain, explicit provider execution, terminal success/failure,
+result artifact manifest metadata, explicit stored result-body replay,
+executable-payload contract classification, execution evidence, and lease
+reclaim. `make smoke-workload-executor` adds a local loopback operator canary
+over the real `myce` command path and a fake OpenAI-compatible provider; it does
+not start real engines or mutate live services.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
 work, not transparently resumed streams. Streaming queued provider replay

@@ -25,16 +25,20 @@ handoff.
   queued provider-output path for non-streaming registry-replayable executable
   payloads: it runs the placed workload through the gateway/provider seam,
   stores the provider response body, and finishes/releases the job through the
-  scheduler. Explicit stored result bodies can still be attached manually at
-  workload finish time and retrieved through the separate `jobs result` path
-  without printing raw output in status/debug surfaces. The fast suite now
-  covers queued admission, multi-owner drain, explicit provider execution,
-  terminal success/failure, result artifact manifest metadata, explicit stored
-  result-body replay, payload replayability evidence, executable-payload
-  contract evidence, execution evidence, and lease reclaim through the public
-  workload HTTP surface. The remaining blockers are streaming queued replay and
-  a live pressure proof that shows queue/preemption/reclaim under real fleet
-  load.
+  scheduler. Workload admission now persists non-private payloads as
+  registry-replayable records when the local store supports the job registry,
+  so the ordinary `jobs admit --payload-kind` path can feed
+  `jobs drain --execute`. Explicit stored result bodies can still be attached
+  manually at workload finish time and retrieved through the separate
+  `jobs result` path without printing raw output in status/debug surfaces. The
+  fast suite now covers queued admission, multi-owner drain, explicit provider
+  execution, terminal success/failure, result artifact manifest metadata,
+  explicit stored result-body replay, payload replayability evidence,
+  executable-payload contract evidence, execution evidence, and lease reclaim
+  through the public workload HTTP surface. `make smoke-workload-executor`
+  proves the local operator path with a loopback peer and fake provider. The
+  remaining blockers are streaming queued replay and a live pressure proof that
+  shows queue/preemption/reclaim under real fleet load.
 - 2026-06-29: A low-context tool-call route can prove transport and provider
   parser wiring without being a valid route for reasoning-heavy tool-agent
   workloads. Public Mycelium evidence now exposes this as a consumer-contract

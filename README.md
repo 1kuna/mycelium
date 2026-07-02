@@ -606,6 +606,12 @@ automatic provider-output capture path is explicit and non-streaming:
 uses the same gateway/provider request semantics, stores a redacted result
 manifest plus private result body, and finishes/releases the workload through
 the scheduler. Streaming queued replay remains a separate product gate.
+Run `make smoke-workload-executor` before live fleet pressure work when you need
+a local operator canary for this path. It uses a loopback peer, a fake
+OpenAI-compatible provider, `myce jobs admit --payload-kind`, `myce jobs drain
+--execute`, `myce jobs status`, and `myce jobs result` to prove admission,
+provider execution, private result capture, release/reclaim, and redacted CLI
+output without real engines or external hosts.
 
 When a synchronous gateway request would queue instead of immediately acquiring
 an owner, the gateway returns `503 Service Unavailable` with `Retry-After`

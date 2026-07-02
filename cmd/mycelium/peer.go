@@ -370,7 +370,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
 	mountTelemetryHTTP(mux, store, cfg.RPCToken)
 	mountCatalogHTTP(mux, cfg, store, cfg.RPCToken, clock.System{})
-	mountWorkloadHTTP(mux, runtime, store, cfg.RPCToken, router)
+	mountWorkloadHTTP(mux, runtime, store, cfg.RPCToken, cfg.ID, router)
 	mux.Handle("/", handler)
 	return cfg.Listen, mux, combineShutdowns(shutdowns), nil
 }
@@ -540,6 +540,11 @@ type workloadRegistryStore interface {
 	Snapshot(ctx context.Context) ([]domain.JobRecord, error)
 }
 
+type workloadReplayStore interface {
+	workloadRegistryStore
+	Put(ctx context.Context, rec domain.JobRecord) error
+}
+
 type catalogStageStore interface {
 	SaveJob(ctx context.Context, job domain.Job) error
 	SavePreset(ctx context.Context, preset domain.Preset) error
@@ -550,7 +555,7 @@ type catalogStageStore interface {
 	DeleteModelLocality(ctx context.Context, id string) error
 }
 
-func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store workloadStore, rpcToken string, executor workloadProviderExecutor) {
+func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store workloadStore, rpcToken string, coordinatorID string, executor workloadProviderExecutor) {
 	mux.HandleFunc("/workloads/drain", func(w http.ResponseWriter, r *http.Request) {
 		if !peerRPCAuthorized(r, rpcToken) {
 			writePeerRPCError(w, http.StatusUnauthorized, fmt.Errorf("unauthorized"))
@@ -635,6 +640,10 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 		}
 		if latest, readErr := store.Job(r.Context(), job.ID); readErr == nil {
 			job = latest
+		}
+		if err := persistWorkloadReplayPayload(r.Context(), store, coordinatorID, job, []byte(req.Payload)); err != nil {
+			writePeerRPCError(w, http.StatusConflict, err)
+			return
 		}
 		resp := workloadResponse(r.Context(), store, job, result, len(req.Payload))
 		w.Header().Set("Content-Type", "application/json")
@@ -931,6 +940,36 @@ func executableWorkloadIngressRequest(ctx context.Context, store workloadStore, 
 		}
 	}
 	return translate.IngressRequest{}, fmt.Errorf("workload payload is not registry-replayable")
+}
+
+func persistWorkloadReplayPayload(ctx context.Context, store workloadStore, coordinatorID string, job domain.Job, payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	registry, ok := store.(workloadReplayStore)
+	if !ok {
+		return nil
+	}
+	request, err := peercoord.EncodeRescuePayload(job, payload)
+	if err != nil {
+		return err
+	}
+	if coordinatorID == "" {
+		coordinatorID = "workload-rpc"
+	}
+	assignedNode := ""
+	if job.Result != nil {
+		assignedNode = job.Result.NodeID
+	}
+	return registry.Put(ctx, domain.JobRecord{
+		JobID:        job.ID,
+		Coordinator:  coordinatorID,
+		AssignedNode: assignedNode,
+		Status:       job.Status,
+		Request:      request,
+		Handling:     job.Handling,
+		UpdatedAt:    time.Now().UTC(),
+	})
 }
 
 func validSHA256Hex(value string) bool {
