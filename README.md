@@ -230,6 +230,63 @@ returned. If `myce gateway routes --live` reports an authenticated `404` for
 `/v1/models`, the running gateway binary is stale for catalog discovery even if
 chat/preflight routes still work.
 
+For repeated route classes, store the gates in a local route-contract file and
+certify the route before a consumer uses it:
+
+```json
+{
+  "schema_version": "mycelium.route_contracts.v1",
+  "evidence_root": "~/.mycelium/evidence",
+  "contracts": [
+    {
+      "name": "strict-json-general",
+      "url": "http://<gateway-host>:<port>",
+      "model": "<model-or-alias>",
+      "project": "example-project",
+      "context_cap": 32768,
+      "min_context_cap": 32768,
+      "require_json": true,
+      "require_live_model": true,
+      "expect_finish_reason": "stop",
+      "min_content_length": 1,
+      "max_reasoning_length": 0
+    },
+    {
+      "name": "tool-agent-high-context",
+      "url": "http://<gateway-host>:<port>",
+      "model": "<tool-capable-model-or-alias>",
+      "project": "example-project",
+      "context_cap": 65536,
+      "min_context_cap": 65536,
+      "tool_name": "echo",
+      "tool_choice": "function",
+      "require_tool_call": true,
+      "reject_textual_tool_call": true,
+      "require_live_model": true
+    }
+  ]
+}
+```
+
+Then run:
+
+```bash
+myce route certify strict-json-general \
+  --contracts ~/.mycelium/route-contracts.json \
+  --gateway-token-file <local-token-file>
+
+myce route status --contracts ~/.mycelium/route-contracts.json
+```
+
+`route certify` delegates to `gateway preflight` and writes the redacted
+artifact to `~/.mycelium/evidence/<contract>/<timestamp>/preflight.json` unless
+the contract or command supplies a different evidence root. `route status`
+finds the latest saved evidence for each named contract and re-runs the
+preflight verifier offline. The contract file may contain synthetic prompts for
+certification, but saved certification artifacts do not include bearer tokens,
+prompts, or raw completion content. Keep contract names and labels generic
+enough to be safe in support bundles.
+
 ```bash
 myce gateway preflight \
   --url http://<gateway-host>:<port> \

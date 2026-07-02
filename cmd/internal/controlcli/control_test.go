@@ -3716,6 +3716,300 @@ func TestRunDebugVerifyPreflightValidatesSavedEvidence(t *testing.T) {
 	}
 }
 
+func TestRunRouteStatusVerifiesLatestContractEvidence(t *testing.T) {
+	root := t.TempDir()
+	contractsPath := filepath.Join(t.TempDir(), "route-contracts.json")
+	writeRouteContractsFixture(t, contractsPath, routeContractFile{
+		SchemaVersion: routeContractSchemaVersion,
+		EvidenceRoot:  root,
+		Contracts: []routeCertificationContract{
+			{
+				Name:                  "strict-json-general",
+				Model:                 "strict-json-model",
+				Project:               "strict-json-batch",
+				ContextCap:            32768,
+				MinContextCap:         32768,
+				ExpectNode:            "owner-node",
+				RequireJSON:           true,
+				RequireLiveModel:      true,
+				ExpectFinishReason:    "stop",
+				MinContentLength:      1,
+				MaxReasoningLength:    intPtr(0),
+				ConsumerQualityGate:   "schema-valid",
+				RejectTextualToolCall: true,
+			},
+			{
+				Name:            "tool-agent-general",
+				Model:           "tool-model-large",
+				MinContextCap:   65536,
+				RequireToolCall: true,
+			},
+		},
+	})
+	evidence := routeCertifiedPreflightFixture("job-a")
+	evidenceDir := filepath.Join(root, "strict-json-general", "20260701T120000Z")
+	if err := os.MkdirAll(evidenceDir, 0700); err != nil {
+		t.Fatalf("create evidence dir: %v", err)
+	}
+	writeGatewayPreflightEvidenceValue(t, filepath.Join(evidenceDir, "preflight.json"), evidence)
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = Run(context.Background(), []string{"route", "status", "--contracts", contractsPath, "--json"})
+	})
+	if runErr == nil || !strings.Contains(runErr.Error(), "route certification incomplete") {
+		t.Fatalf("route status err = %v", runErr)
+	}
+	if strings.Contains(output, "Return") || strings.Contains(output, "Bearer") {
+		t.Fatalf("route status leaked private material: %s", output)
+	}
+	var report routeCertificationStatusReport
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		t.Fatalf("decode route status JSON: %v\n%s", err, output)
+	}
+	if len(report.Contracts) != 2 {
+		t.Fatalf("route status contracts = %+v", report.Contracts)
+	}
+	if report.Contracts[0].Name != "strict-json-general" || report.Contracts[0].Result != "certified" || report.Contracts[0].Verification == nil || !report.Contracts[0].Verification.Passed {
+		t.Fatalf("strict JSON status = %+v", report.Contracts[0])
+	}
+	if report.Contracts[1].Name != "tool-agent-general" || report.Contracts[1].Result != "missing_evidence" || !strings.Contains(report.Contracts[1].NextOperatorCheck, "myce route certify tool-agent-general") {
+		t.Fatalf("tool status = %+v", report.Contracts[1])
+	}
+
+	textOutput := captureStdout(t, func() {
+		runErr = Run(context.Background(), []string{"route", "status", "--contracts", contractsPath})
+	})
+	if runErr == nil || !strings.Contains(runErr.Error(), "route certification incomplete") {
+		t.Fatalf("route status text err = %v", runErr)
+	}
+	for _, want := range []string{
+		"route-status\tcontracts=" + contractsPath,
+		"route\tname=strict-json-general\tresult=certified",
+		"route\tname=tool-agent-general\tresult=missing_evidence",
+		"next=myce route certify tool-agent-general --contracts " + contractsPath,
+	} {
+		if !strings.Contains(textOutput, want) {
+			t.Fatalf("route status output missing %q:\n%s", want, textOutput)
+		}
+	}
+}
+
+func TestRunRouteCertifyRunsNamedPreflightIntoEvidenceHome(t *testing.T) {
+	root := t.TempDir()
+	contractsPath := filepath.Join(t.TempDir(), "route-contracts.json")
+	writeRouteContractsFixture(t, contractsPath, routeContractFile{
+		SchemaVersion: routeContractSchemaVersion,
+		Contracts: []routeCertificationContract{{
+			Name:               "strict-json-general",
+			URL:                "http://gateway.test",
+			Model:              "strict-json-model",
+			Project:            "strict-json-cert",
+			Prompt:             `Return {"ok":true}.`,
+			MaxTokens:          16,
+			ContextCap:         32768,
+			MinContextCap:      32768,
+			ExpectNode:         "owner-node",
+			RequireJSON:        true,
+			RequireLiveModel:   true,
+			ExpectFinishReason: "stop",
+			MinContentLength:   1,
+			MaxReasoningLength: intPtr(0),
+			ConsumerRun:        "certification-run",
+			ConsumerItem:       "contract",
+			ConsumerStatus:     "ok",
+			ConsumerResult:     "pass",
+		}},
+	})
+	tokenFile := filepath.Join(t.TempDir(), "gateway-token")
+	if err := os.WriteFile(tokenFile, []byte("route-secret\n"), 0600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer route-secret" {
+			t.Fatalf("auth = %q", got)
+		}
+		switch r.URL.Path {
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]string{{"id": "strict-json-model"}},
+			})
+		case "/v1/chat/completions":
+			var req map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if req["model"] != "strict-json-model" || req["stream"] == true {
+				t.Fatalf("request = %#v", req)
+			}
+			w.Header().Set("X-Myc-Job", "job-cert")
+			w.Header().Set("X-Myc-Node", "owner-node")
+			w.Header().Set("X-Myc-Backend", "vllm")
+			w.Header().Set("X-Myc-Decision", "placed_on_warm_instance")
+			w.Header().Set("X-Myc-Structured-Output", "json_schema")
+			w.Header().Set("X-Myc-Guided-Decoding-Requested", "true")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{
+					"message":       map[string]string{"content": `{"ok":true}`},
+					"finish_reason": "stop",
+				}},
+				"usage": map[string]int{"prompt_tokens": 6, "completion_tokens": 3, "total_tokens": 9},
+			})
+		default:
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+	}))
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = RunWithClient(context.Background(), []string{
+			"route", "certify",
+			"strict-json-general",
+			"--contracts", contractsPath,
+			"--evidence-root", root,
+			"--gateway-token-file", tokenFile,
+		}, client)
+	})
+	if runErr != nil {
+		t.Fatalf("route certify: %v\n%s", runErr, output)
+	}
+	if !strings.Contains(output, "route-certify\tcontract=strict-json-general") || !strings.Contains(output, "gateway\thttp://gateway.test\tok") || strings.Contains(output, "route-secret") {
+		t.Fatalf("route certify output = %s", output)
+	}
+	matches, err := filepath.Glob(filepath.Join(root, "strict-json-general", "*", "preflight.json"))
+	if err != nil {
+		t.Fatalf("glob evidence: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("evidence matches = %v", matches)
+	}
+	evidenceData, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("read evidence: %v", err)
+	}
+	if strings.Contains(string(evidenceData), "route-secret") || strings.Contains(string(evidenceData), "Return") || strings.Contains(string(evidenceData), `{"ok":true}`) {
+		t.Fatalf("route certify evidence leaked private material: %s", evidenceData)
+	}
+}
+
+func TestRunRouteStatusReportsContractEvidenceMismatch(t *testing.T) {
+	root := t.TempDir()
+	contractsPath := filepath.Join(t.TempDir(), "route-contracts.json")
+	writeRouteContractsFixture(t, contractsPath, routeContractFile{
+		SchemaVersion: routeContractSchemaVersion,
+		EvidenceRoot:  root,
+		Contracts: []routeCertificationContract{{
+			Name:            "tool-agent-high-context",
+			Model:           "tool-model-large",
+			Project:         "tool-project",
+			ContextCap:      65536,
+			MinContextCap:   65536,
+			ToolName:        "echo",
+			ToolChoice:      "function",
+			Stream:          true,
+			RequireToolCall: true,
+		}},
+	})
+	evidenceDir := filepath.Join(root, "tool-agent-high-context", "20260701T120000Z")
+	if err := os.MkdirAll(evidenceDir, 0700); err != nil {
+		t.Fatalf("create evidence dir: %v", err)
+	}
+	writeGatewayPreflightEvidenceValue(t, filepath.Join(evidenceDir, "preflight.json"), routeCertifiedPreflightFixture("job-a"))
+
+	output := captureStdout(t, func() {
+		err := Run(context.Background(), []string{"route", "status", "--contracts", contractsPath, "--json"})
+		if err == nil || !strings.Contains(err.Error(), "route certification incomplete") {
+			t.Fatalf("route status mismatch err = %v", err)
+		}
+	})
+	var report routeCertificationStatusReport
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		t.Fatalf("decode status JSON: %v\n%s", err, output)
+	}
+	if len(report.Contracts) != 1 || report.Contracts[0].Result != "failed" {
+		t.Fatalf("mismatch status = %+v", report.Contracts)
+	}
+	failures := strings.Join(report.Contracts[0].Failures, "\n")
+	for _, want := range []string{
+		"expected at least one structured tool call",
+		"expected context cap >= 65536 got 32768",
+		"expected model=tool-model-large got strict-json-model",
+		"expected project=tool-project got strict-json-batch",
+		"expected streaming=true got false",
+		"expected context_cap=65536 got 32768",
+		"expected tool_name=echo got -",
+		"expected tool_choice=function got -",
+	} {
+		if !strings.Contains(failures, want) {
+			t.Fatalf("failures missing %q:\n%s", want, failures)
+		}
+	}
+}
+
+func TestRouteContractValidationAndUsageErrors(t *testing.T) {
+	if err := Run(context.Background(), []string{"route"}); err == nil || !strings.Contains(err.Error(), "usage: myce route") {
+		t.Fatalf("route usage err = %v", err)
+	}
+	if err := Run(context.Background(), []string{"route", "bogus"}); err == nil || !strings.Contains(err.Error(), "usage: myce route") {
+		t.Fatalf("route bogus err = %v", err)
+	}
+	if err := Run(context.Background(), []string{"route", "certify", "--contracts", filepath.Join(t.TempDir(), "missing.json"), "missing"}); err == nil || !strings.Contains(err.Error(), "read route contracts") {
+		t.Fatalf("missing contracts err = %v", err)
+	}
+	badJSONPath := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(badJSONPath, []byte(`{bad json`), 0600); err != nil {
+		t.Fatalf("write bad json: %v", err)
+	}
+	if err := Run(context.Background(), []string{"route", "status", "--contracts", badJSONPath}); err == nil || !strings.Contains(err.Error(), "decode route contracts") {
+		t.Fatalf("bad json err = %v", err)
+	}
+	for name, contracts := range map[string]routeContractFile{
+		"schema": {
+			SchemaVersion: "future",
+			Contracts:     []routeCertificationContract{{Name: "strict-json-general", Model: "strict-json-model"}},
+		},
+		"duplicate": {
+			SchemaVersion: routeContractSchemaVersion,
+			Contracts: []routeCertificationContract{
+				{Name: "strict-json-general", Model: "strict-json-model"},
+				{Name: "strict-json-general", Model: "other-model"},
+			},
+		},
+		"missing-model": {
+			SchemaVersion: routeContractSchemaVersion,
+			Contracts:     []routeCertificationContract{{Name: "strict-json-general"}},
+		},
+		"negative": {
+			SchemaVersion: routeContractSchemaVersion,
+			Contracts:     []routeCertificationContract{{Name: "strict-json-general", Model: "strict-json-model", MinContextCap: -1}},
+		},
+		"negative-reasoning": {
+			SchemaVersion: routeContractSchemaVersion,
+			Contracts:     []routeCertificationContract{{Name: "strict-json-general", Model: "strict-json-model", MaxReasoningLength: intPtr(-1)}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "contracts.json")
+			writeRouteContractsFixture(t, path, contracts)
+			if _, err := loadRouteContracts(path); err == nil {
+				t.Fatalf("loadRouteContracts(%s) succeeded", name)
+			}
+		})
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if got := defaultRouteContractsPath(); got != filepath.Join(home, ".mycelium", "route-contracts.json") {
+		t.Fatalf("default route contracts path = %s", got)
+	}
+	if got := defaultRouteEvidenceRoot(); got != filepath.Join(home, ".mycelium", "evidence") {
+		t.Fatalf("default route evidence root = %s", got)
+	}
+	if got := expandHomePath("~/custom-evidence"); got != filepath.Join(home, "custom-evidence") {
+		t.Fatalf("expanded home path = %s", got)
+	}
+}
+
 func TestConsumerEvidenceFromFlags(t *testing.T) {
 	evidence, err := consumerEvidenceFromFlags(" run ", " item ", "TIMEOUT", 42, " deadline ", "FAIL", " schema ")
 	if err != nil {
@@ -4487,6 +4781,84 @@ func writeGatewayPreflightEvidenceFixture(t *testing.T, jobID string) string {
 		t.Fatalf("write preflight evidence: %v", err)
 	}
 	return path
+}
+
+func routeCertifiedPreflightFixture(jobID string) gatewayPreflightEvidence {
+	return gatewayPreflightEvidence{
+		Gateway:    "http://gateway.test",
+		Model:      "strict-json-model",
+		Project:    "strict-json-batch",
+		AuthSource: "test-token-source",
+		Request: gatewayPreflightRequestEvidence{
+			MaxTokens:        32,
+			ContextCap:       32768,
+			StructuredOutput: "json_schema",
+		},
+		Expectations: &gatewayPreflightExpectationEvidence{
+			ExpectNode:            "owner-node",
+			RequireJSON:           true,
+			RejectTextualToolCall: true,
+			RequireLiveModel:      true,
+			MinContextCap:         32768,
+			ExpectFinishReason:    "stop",
+			MinContentLength:      1,
+			MaxReasoningLength:    intPtr(0),
+		},
+		StatusCode:      http.StatusOK,
+		FinishReason:    "stop",
+		ContentLength:   11,
+		ReasoningLength: 0,
+		JSONContent:     true,
+		UsageAvailable:  true,
+		Usage: api.OpenAIUsage{
+			PromptTokens:     16,
+			CompletionTokens: 3,
+			TotalTokens:      19,
+		},
+		LiveModel: &gatewayPreflightLiveModelEvidence{
+			Checked:        true,
+			Gateway:        "http://gateway.test",
+			Model:          "strict-json-model",
+			Status:         "ok",
+			ModelAvailable: true,
+			ModelMatch:     "strict-json-model",
+			ModelCount:     1,
+		},
+		Headers: map[string]string{
+			"X-Myc-Job":                       jobID,
+			"X-Myc-Node":                      "owner-node",
+			"X-Myc-Backend":                   "vllm",
+			"X-Myc-Decision":                  "placed_on_warm_instance",
+			"X-Myc-Structured-Output":         "json_schema",
+			"X-Myc-Guided-Decoding-Requested": "true",
+		},
+	}
+}
+
+func writeRouteContractsFixture(t *testing.T, path string, contracts routeContractFile) {
+	t.Helper()
+	data, err := json.MarshalIndent(contracts, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal route contracts: %v", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
+		t.Fatalf("write route contracts: %v", err)
+	}
+}
+
+func writeGatewayPreflightEvidenceValue(t *testing.T, path string, evidence gatewayPreflightEvidence) {
+	t.Helper()
+	data, err := json.MarshalIndent(evidence, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal preflight evidence: %v", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
+		t.Fatalf("write preflight evidence: %v", err)
+	}
+}
+
+func intPtr(value int) *int {
+	return &value
 }
 
 func writeGatewayPreflightOnlyLiveCatalogFailureFixture(t *testing.T, status, errorText string) string {

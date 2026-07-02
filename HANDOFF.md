@@ -36,7 +36,8 @@ Mycelium is a peer-native, LAN-local inference control plane:
 - Gateway: OpenAI-compatible `/v1/chat/completions`, route diagnostics headers,
   strict JSON/structured-output passthrough, tool-call diagnostics, streaming
   and non-streaming preflight evidence.
-- Control CLI: `myce gateway preflight`, `myce gateway routes`, `myce debug job`,
+- Control CLI: `myce gateway preflight`, `myce gateway routes`,
+  `myce route certify`, `myce route status`, `myce debug job`,
   `myce debug bundle`, `myce jobs admit`, `myce jobs status`,
   `myce jobs drain`, `myce jobs finish`,
   `myce telemetry samples`, benchmark commands, model and recommendation
@@ -71,6 +72,11 @@ Use `myce gateway preflight --out <dir>` to write a redacted `preflight.json`.
 Use `myce debug job --preflight <preflight.json> --owner-telemetry` or
 `myce debug bundle --preflight <preflight.json> --owner-telemetry` to join
 request-time evidence to owner-side timing and durable job state.
+Use `myce route certify <contract-name>` and `myce route status` when the
+operator wants a named contract with a default evidence home instead of a
+one-off preflight command. Route contracts are generic JSON files that capture
+model/alias, context, JSON/tool/streaming, finish/content, live-catalog, and
+safe consumer-label gates; saved artifacts remain redacted preflight evidence.
 
 For thinking/tool-agent workloads, do not treat a low-context tool-call smoke as
 a consumer-ready route. Use `--context-cap` and `--min-context-cap` so Mycelium
