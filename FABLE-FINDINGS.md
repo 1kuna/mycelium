@@ -33,11 +33,12 @@ acting. Current repo work has resolved or narrowed several findings:
   client coverage remains a separate gate; single-image canaries prove
   transport/readiness, not full OCR workload coverage.
 - A second owner for the same vision/OCR model class is now provider-proven at
-  a smaller context envelope, but this remains owner certification rather than
-  fleet allocation proof. Current alias resolution is first-match, so a single
-  consumer model name does not yet express "all fitting owners" for autonomous
-  allocation. The next real product gap is a multi-owner route-class contract
-  that lets the scheduler choose among proven owners from live fit/readiness.
+  a smaller context envelope. Repo-local placement now treats same-model aliases
+  as candidate sets with per-owner envelopes instead of first-match only, and
+  selected-preset telemetry follows the owner actually chosen. This remains
+  owner certification plus repo-local allocator proof, not live fleet
+  distribution, until the deployed gateway/config carries the model group and
+  a light cross-owner proof confirms live route discovery and placement.
 
 The remaining high-impact review lanes should be rechecked against current
 code before implementation: stream failure signaling, live process group

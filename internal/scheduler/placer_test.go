@@ -179,6 +179,213 @@ func TestPlaceAutoScoresColdCandidatesInsteadOfBlindWarmMatch(t *testing.T) {
 	}
 }
 
+func TestPlaceModelGroupSelectsWarmOwnerForSharedModelAlias(t *testing.T) {
+	large := fixtures.MakePreset(
+		fixtures.WithPresetID("vision-large"),
+		fixtures.WithModelRef("vision-model"),
+		fixtures.WithAliases("vision"),
+		fixtures.WithContextLength(49152),
+		fixtures.WithPresetNode("owner-large"),
+	)
+	small := fixtures.MakePreset(
+		fixtures.WithPresetID("vision-small"),
+		fixtures.WithModelRef("vision-model"),
+		fixtures.WithAliases("vision"),
+		fixtures.WithContextLength(16384),
+		fixtures.WithPresetNode("owner-small"),
+	)
+	largeNode := fixtures.MakeNode(fixtures.WithNodeID("owner-large"), fixtures.WithVRAM(65536), fixtures.WithMaxUtil(1))
+	smallNode := fixtures.MakeNode(fixtures.WithNodeID("owner-small"), fixtures.WithVRAM(32768), fixtures.WithMaxUtil(1))
+	warmSmall := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst-small"),
+		fixtures.WithInstancePreset(small.ID),
+		fixtures.OnNode(smallNode.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(100, 0)),
+	)
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(100, 10)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)), large, small)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.WithModel("vision")), domain.FleetSnapshot{
+		Nodes:     []domain.Node{largeNode, smallNode},
+		Instances: []domain.ModelInstance{warmSmall},
+	})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.Action != domain.ActionWarmInstance || decision.NodeID != smallNode.ID || decision.Preset.ID != small.ID {
+		t.Fatalf("decision = %+v", decision)
+	}
+	assertTraceContains(t, decision.Trace, "resolve", "model group")
+}
+
+func TestPlaceModelGroupSkipsOwnerBelowRequestedContext(t *testing.T) {
+	small := fixtures.MakePreset(
+		fixtures.WithPresetID("vision-small"),
+		fixtures.WithModelRef("vision-model"),
+		fixtures.WithAliases("vision"),
+		fixtures.WithContextLength(16384),
+		fixtures.WithPresetNode("owner-small"),
+	)
+	large := fixtures.MakePreset(
+		fixtures.WithPresetID("vision-large"),
+		fixtures.WithModelRef("vision-model"),
+		fixtures.WithAliases("vision"),
+		fixtures.WithContextLength(49152),
+		fixtures.WithPresetNode("owner-large"),
+	)
+	smallNode := fixtures.MakeNode(fixtures.WithNodeID("owner-small"), fixtures.WithVRAM(32768), fixtures.WithMaxUtil(1))
+	largeNode := fixtures.MakeNode(fixtures.WithNodeID("owner-large"), fixtures.WithVRAM(65536), fixtures.WithMaxUtil(1))
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(100, 10)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)), large, small)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.WithModel("vision"), fixtures.WithContext(32768)), domain.FleetSnapshot{
+		Nodes: []domain.Node{smallNode, largeNode},
+	})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.NodeID != largeNode.ID || decision.Preset.ID != large.ID || decision.Preset.ContextLength != 32768 {
+		t.Fatalf("decision = %+v", decision)
+	}
+	rejected, _ := decision.Trace[0].Data["rejected_presets"].([]string)
+	if len(rejected) != 1 || !strings.Contains(rejected[0], "vision-small") {
+		t.Fatalf("resolve trace = %+v", decision.Trace)
+	}
+}
+
+func TestPlaceModelGroupReturnsQueuedWhenNoOwnerCanStart(t *testing.T) {
+	small := fixtures.MakePreset(
+		fixtures.WithPresetID("vision-small"),
+		fixtures.WithModelRef("vision-model"),
+		fixtures.WithAliases("vision"),
+		fixtures.WithContextLength(16384),
+	)
+	large := fixtures.MakePreset(
+		fixtures.WithPresetID("vision-large"),
+		fixtures.WithModelRef("vision-model"),
+		fixtures.WithAliases("vision"),
+		fixtures.WithContextLength(49152),
+	)
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(100, 10)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)), small, large)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.WithModel("vision")), domain.FleetSnapshot{})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.Action != domain.ActionQueued || decision.Trace[0].Result != "model group" {
+		t.Fatalf("decision = %+v", decision)
+	}
+}
+
+func TestPlaceModelGroupErrorsWhenEveryEnvelopeRejects(t *testing.T) {
+	small := fixtures.MakePreset(
+		fixtures.WithPresetID("vision-small"),
+		fixtures.WithModelRef("vision-model"),
+		fixtures.WithAliases("vision"),
+		fixtures.WithContextLength(16384),
+	)
+	large := fixtures.MakePreset(
+		fixtures.WithPresetID("vision-large"),
+		fixtures.WithModelRef("vision-model"),
+		fixtures.WithAliases("vision"),
+		fixtures.WithContextLength(49152),
+	)
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(100, 10)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)), small, large)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.WithModel("vision"), fixtures.WithContext(65536)), domain.FleetSnapshot{})
+	if err == nil || !strings.Contains(err.Error(), "no preset for model") {
+		t.Fatalf("Place err = %v decision=%+v", err, decision)
+	}
+	if decision.Trace[0].Data == nil || len(decision.Trace[0].Data["rejected"].([]string)) != 2 {
+		t.Fatalf("decision trace = %+v", decision.Trace)
+	}
+}
+
+func TestPlaceExactPresetIDInModelPinsSinglePreset(t *testing.T) {
+	small := fixtures.MakePreset(
+		fixtures.WithPresetID("vision-small"),
+		fixtures.WithModelRef("vision-model"),
+		fixtures.WithAliases("vision"),
+		fixtures.WithContextLength(16384),
+	)
+	large := fixtures.MakePreset(
+		fixtures.WithPresetID("vision-large"),
+		fixtures.WithModelRef("vision-model"),
+		fixtures.WithAliases("vision"),
+		fixtures.WithContextLength(49152),
+	)
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(100, 10)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)), small, large)
+
+	decision, err := placer.Place(context.Background(), fixtures.MakeJob(fixtures.WithModel(large.ID)), domain.FleetSnapshot{})
+	if err != nil {
+		t.Fatalf("Place: %v", err)
+	}
+	if decision.Action != domain.ActionQueued || len(decision.Trace) == 0 || decision.Trace[0].Result == "model group" {
+		t.Fatalf("decision = %+v", decision)
+	}
+}
+
+func TestPlacementCandidateDecisionOrdering(t *testing.T) {
+	fleet := domain.FleetSnapshot{Nodes: []domain.Node{
+		fixtures.MakeNode(func(n *domain.Node) {
+			n.ID = "fast"
+			n.SpeedClass.TokensPerSecRef = 100
+		}),
+		fixtures.MakeNode(func(n *domain.Node) {
+			n.ID = "slow"
+			n.SpeedClass.TokensPerSecRef = 10
+		}),
+		fixtures.MakeNode(func(n *domain.Node) {
+			n.ID = "alpha"
+			n.SpeedClass.TokensPerSecRef = 10
+		}),
+	}}
+	base := placementCandidateDecision{decision: domain.PlacementDecision{
+		Action: domain.ActionLoadedNew,
+		NodeID: "slow",
+		Preset: domain.Preset{ID: "b", ContextLength: 4096},
+	}, score: 10}
+
+	if !((placementCandidateDecision{decision: domain.PlacementDecision{Action: domain.ActionWarmInstance}, score: 0}).betterThan(base, fleet)) {
+		t.Fatal("warm instance should rank above cold load")
+	}
+	if !((placementCandidateDecision{decision: domain.PlacementDecision{Action: domain.ActionLoadedNew}, score: 20}).betterThan(base, fleet)) {
+		t.Fatal("higher score should win within the same action")
+	}
+	if !((placementCandidateDecision{decision: domain.PlacementDecision{
+		Action: domain.ActionLoadedNew,
+		NodeID: "fast",
+		Preset: domain.Preset{ID: "b", ContextLength: 4096},
+	}, score: 10}).betterThan(base, fleet)) {
+		t.Fatal("faster node should win a score tie")
+	}
+	if !((placementCandidateDecision{decision: domain.PlacementDecision{
+		Action: domain.ActionLoadedNew,
+		NodeID: "slow",
+		Preset: domain.Preset{ID: "a", ContextLength: 2048},
+	}, score: 10}).betterThan(base, fleet)) {
+		t.Fatal("smaller context should win a speed tie")
+	}
+	if !((placementCandidateDecision{decision: domain.PlacementDecision{
+		Action: domain.ActionLoadedNew,
+		NodeID: "alpha",
+		Preset: domain.Preset{ID: "b", ContextLength: 4096},
+	}, score: 10}).betterThan(base, fleet)) {
+		t.Fatal("node id should break equal ties")
+	}
+	if !((placementCandidateDecision{decision: domain.PlacementDecision{
+		Action: domain.ActionLoadedNew,
+		NodeID: "slow",
+		Preset: domain.Preset{ID: "a", ContextLength: 4096},
+	}, score: 10}).betterThan(base, fleet)) {
+		t.Fatal("preset id should break equal node/context ties")
+	}
+	if actionRank(domain.ActionHardPreempted) != 20 || actionRank(domain.ActionQueued) != 0 {
+		t.Fatalf("action ranks hard=%d queued=%d", actionRank(domain.ActionHardPreempted), actionRank(domain.ActionQueued))
+	}
+	if got := nodeSpeed("missing", fleet); got != 0 {
+		t.Fatalf("missing node speed = %f", got)
+	}
+}
+
 func TestPlaceAutoUsesWarmInstanceWhenColdPlacementCannotFit(t *testing.T) {
 	preset := fixtures.MakePreset(fixtures.WithWeights(900), fixtures.WithKVPerToken(0))
 	node := fixtures.MakeNode(fixtures.WithNodeID("spark"), fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
