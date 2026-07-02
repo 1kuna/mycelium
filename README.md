@@ -257,19 +257,20 @@ evidence as reconciliation work instead of reading trace strings by hand:
 
 ```bash
 myce reconcile placement --decision-file <placement-or-job.json>
+myce reconcile placement --decision-file <placement-or-job.json> --save --db <control.db>
+myce reconcile status --db <control.db> --job <job-id>
 myce reconcile placement --decision-file <placement-or-job.json> --json
 ```
 
 The command accepts a saved placement decision, job JSON, or wrapper containing
-a `decision`, then turns filter/drop evidence into typed, report-only tasks such
+a `decision`, then turns filter/drop evidence into typed tasks such
 as `wait_capacity`, `prewarm_replica`, `verify_engine_readiness`,
 `stage_model_artifact`, `repair_owner`, `refresh_catalog`, or
 `record_incompatibility`. Each task says whether it is an automatic candidate
 under the default standing policy or whether it still needs operator approval.
-This is the first inspectable bridge from placement drop reasons to the future
-reconciler loop: allowed automation should consume these task records to stage,
-verify, prewarm, or record incompatibility; this command itself does not mutate
-live services or route policy.
+Use `--save` to persist those tasks into the control store as `allowed` or
+`blocked` records that a future reconciler can drain. Saving tasks records
+standing-policy intent only; it does not mutate live services or route policy.
 For a stored workload or gateway job, `myce debug job <job-id> --reconcile`
 adds the same report-only plan to the normal job/debug evidence so operators do
 not have to extract the scheduler decision by hand.

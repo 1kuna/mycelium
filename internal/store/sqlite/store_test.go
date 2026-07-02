@@ -71,6 +71,21 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	lease := domain.Lease{ID: "lease-a", JobID: "job-a", InstanceID: inst.ID, NodeID: node.ID, Claim: fixtures.MakeClaim(1, 2), GrantedAt: time.Unix(1, 0).UTC()}
 	reservation := domain.Reservation{ID: "res-a", Kind: domain.ReservationHeadroom, NodeID: node.ID, Headroom: fixtures.MakeClaim(3, 4)}
 	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	reconciliationTask := domain.ReconciliationTaskRecord{
+		ID:                 "recon-a",
+		JobID:              job.ID,
+		Kind:               "verify_engine_readiness",
+		Status:             domain.ReconciliationTaskAllowed,
+		NodeID:             node.ID,
+		PresetID:           preset.ID,
+		Model:              "model-a",
+		Reason:             "label.mycelium.peer.backends",
+		AutomaticCandidate: true,
+		Next:               "verify engine profile",
+		Source:             "placement_decision",
+		CreatedAt:          time.Unix(8, 0).UTC(),
+		UpdatedAt:          time.Unix(8, 0).UTC(),
+	}
 	admissionState := domain.AdmissionState{
 		NodeID: node.ID,
 		Fence:  4,
@@ -143,6 +158,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	must(t, store.SaveReservation(ctx, reservation))
 	must(t, store.SaveJob(ctx, job))
 	must(t, store.SaveWorkloadResultBody(ctx, domain.WorkloadResultBody{JobID: job.ID, MediaType: "application/json", Body: []byte(`{"ok":true}`), StoredAt: time.Unix(7, 0).UTC()}))
+	must(t, store.SaveReconciliationTask(ctx, reconciliationTask))
 	must(t, store.SaveAdmissionState(ctx, admissionState))
 	must(t, store.Put(ctx, jobRecord))
 	must(t, store.SaveRecommendation(ctx, rec))
@@ -214,6 +230,9 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	}
 	if gotBody, err := reopened.WorkloadResultBody(ctx, job.ID); err != nil || gotBody.JobID != job.ID || string(gotBody.Body) != `{"ok":true}` || gotBody.MediaType != "application/json" || gotBody.Bytes != len(`{"ok":true}`) || gotBody.SHA256 == "" {
 		t.Fatalf("WorkloadResultBody = %+v, %v", gotBody, err)
+	}
+	if tasks, err := reopened.ListReconciliationTasks(ctx, job.ID); err != nil || len(tasks) != 1 || tasks[0].ID != reconciliationTask.ID || tasks[0].Status != domain.ReconciliationTaskAllowed {
+		t.Fatalf("ListReconciliationTasks(job) = %+v, %v", tasks, err)
 	}
 	if gotAdmission, found, err := reopened.AdmissionState(ctx, node.ID); err != nil || !found || gotAdmission.Fence != 4 {
 		t.Fatalf("AdmissionState = %+v found=%v err=%v", gotAdmission, found, err)
@@ -299,6 +318,7 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 		"admission":      store.SaveAdmissionState(ctx, domain.AdmissionState{}),
 		"reservation":    store.SaveReservation(ctx, domain.Reservation{}),
 		"job":            store.SaveJob(ctx, domain.Job{}),
+		"reconcile task": store.SaveReconciliationTask(ctx, domain.ReconciliationTaskRecord{}),
 		"recommendation": store.SaveRecommendation(ctx, domain.RecommendationRecord{}),
 		"process refs":   store.SaveProcessRefs(ctx, "", nil),
 		"process add":    store.AddProcessRef(ctx, "", domain.ProcessRef{PID: 1}),
