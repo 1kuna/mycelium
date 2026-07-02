@@ -32,6 +32,12 @@ acting. Current repo work has resolved or narrowed several findings:
   non-empty final content, and usage in redacted evidence. Complete-document
   client coverage remains a separate gate; single-image canaries prove
   transport/readiness, not full OCR workload coverage.
+- A second owner for the same vision/OCR model class is now provider-proven at
+  a smaller context envelope, but this remains owner certification rather than
+  fleet allocation proof. Current alias resolution is first-match, so a single
+  consumer model name does not yet express "all fitting owners" for autonomous
+  allocation. The next real product gap is a multi-owner route-class contract
+  that lets the scheduler choose among proven owners from live fit/readiness.
 
 The remaining high-impact review lanes should be rechecked against current
 code before implementation: stream failure signaling, live process group
