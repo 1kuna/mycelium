@@ -41,7 +41,15 @@ handoff.
   `calibrate apply-priors` imports only live benchmark metric rows and updates
   speed-class priors through the optimizer calibration path. The remaining
   blockers are streaming queued replay and a live pressure proof that shows
-  queue/preemption/reclaim under real fleet load.
+  queue/preemption/reclaim under real fleet load. The project-free live
+  benchmark now proves cold placement and warm reuse for one owner through the
+  synchronous gateway, but full pressure remains open: the synchronous gateway
+  intentionally does not trust per-request control headers on ordinary
+  deployments, and an explicit workload-lane pressure attempt can be blocked at
+  owner admission when the owner store returns persistent SQLite busy errors.
+  The next gate is to fix or operationally clear owner-store lock contention and
+  run an explicit workload-based pressure proof that captures admission,
+  preemption/drain, provider execution, result capture, and release/reclaim.
 - 2026-06-29: A low-context tool-call route can prove transport and provider
   parser wiring without being a valid route for reasoning-heavy tool-agent
   workloads. Public Mycelium evidence now exposes this as a consumer-contract

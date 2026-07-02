@@ -1,6 +1,6 @@
 # Mycelium Public Handoff
 
-Last updated: 2026-07-01
+Last updated: 2026-07-02
 
 This file is public repo continuity, not an operator journal. Do not record
 client/project names, private hostnames, private IP addresses, token names,
@@ -150,6 +150,19 @@ executable-payload contract classification, execution evidence, and lease
 reclaim. `make smoke-workload-executor` adds a local loopback operator canary
 over the real `myce` command path and a fake OpenAI-compatible provider; it does
 not start real engines or mutate live services.
+The live service-upgrade path has been exercised through the generic dry-run
+upgrade packet, binary backup/replacement, restart wait, service status,
+peer-diagnostics, and live catalog checks. Keep rollback-ready upgrade
+discipline for future activations.
+The project-free live benchmark path currently proves live cold placement and
+warm reuse for one owner through the synchronous gateway. It does not yet prove
+full allocator pressure: the current synchronous benchmark cannot safely express
+hard-preemption intent on deployments that do not trust control headers, and
+the explicit workload-lane pressure attempt is blocked when an owner store
+returns a persistent SQLite busy error during admission. Treat the next live
+gate as: fix or operationally clear owner-store lock contention, then run an
+explicit workload-based pressure proof that shows queued admission,
+preemption/drain, provider execution, result capture, and release/reclaim.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
 work, not transparently resumed streams. Streaming queued provider replay
@@ -177,5 +190,10 @@ remains a separate product gate.
 - Keep service upgrade activation behind an operator maintenance window; the
   repo-local `service upgrade --dry-run` surface prints the command plan and
   binary hashes but does not switch a live service.
+- Add a workload-based live pressure benchmark or run packet that uses the
+  explicit workload lane for hard-preemption/queue/reclaim proof instead of
+  relying on synchronous gateway control headers.
+- Investigate and fix owner-store lock contention when admission returns
+  persistent SQLite busy errors under live pressure.
 - Move any private operational evidence into ignored `ops/private/*.local.md`
   notes or an out-of-repo private handoff, not tracked docs.
