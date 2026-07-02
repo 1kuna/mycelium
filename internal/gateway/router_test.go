@@ -3308,6 +3308,28 @@ func TestParseRequestRoutesAndHeaders(t *testing.T) {
 	}
 }
 
+func TestParseRequestAcceptsContextEnvelopeWithoutTrustingControlHeaders(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set(HeaderContextCap, "16384")
+	req.Header.Set(HeaderPriority, "warp")
+	got, err := parseRequestWithControlHeaders(req, false)
+	if err != nil {
+		t.Fatalf("parse untrusted context header: %v", err)
+	}
+	if got.ContextRequest != 16384 {
+		t.Fatalf("context request = %d, want 16384", got.ContextRequest)
+	}
+	if got.Priority != "" {
+		t.Fatalf("untrusted priority parsed: %+v", got)
+	}
+
+	bad := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	bad.Header.Set(HeaderContextCap, "0")
+	if _, err := parseRequestWithControlHeaders(bad, false); err == nil || !strings.Contains(err.Error(), "Context-Cap") {
+		t.Fatalf("bad context header err = %v", err)
+	}
+}
+
 func TestParseRequestRejectsBadControlHeaders(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

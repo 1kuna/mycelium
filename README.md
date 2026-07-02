@@ -243,6 +243,12 @@ vLLM tool-parser flags then report `readiness=tool_flags_missing` or
 `readiness=auto_tool_flags_missing` instead of looking interchangeable with
 plain chat routes.
 
+Consumers may send `X-Myc-Context-Cap` with gateway requests to declare the
+context envelope actually required by a chunk or job. Mycelium treats that as a
+resource requirement for placement, not as a privileged control-plane override:
+project, priority, speed, preemption, submitter, and handling headers still
+require an explicitly trusted control path.
+
 Gateways built from the route-discovery revision expose `GET /v1/models` with
 preset IDs and aliases only; host-local model paths and artifact refs are not
 returned. If `myce gateway routes --live` reports an authenticated `404` for
