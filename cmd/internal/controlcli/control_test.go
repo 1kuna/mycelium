@@ -3946,6 +3946,40 @@ func TestRunRouteStatusReportsContractEvidenceMismatch(t *testing.T) {
 	}
 }
 
+func TestRouteStatusMarksStaleCertificationEvidence(t *testing.T) {
+	root := t.TempDir()
+	contractsPath := filepath.Join(t.TempDir(), "route-contracts.json")
+	writeRouteContractsFixture(t, contractsPath, routeContractFile{
+		SchemaVersion: routeContractSchemaVersion,
+		EvidenceRoot:  root,
+		Contracts: []routeCertificationContract{{
+			Name:          "strict-json-general",
+			Model:         "strict-json-model",
+			RetentionDays: 1,
+		}},
+	})
+	evidencePath := filepath.Join(root, "strict-json-general", "20260701T120000Z", "preflight.json")
+	if err := os.MkdirAll(filepath.Dir(evidencePath), 0700); err != nil {
+		t.Fatalf("create evidence dir: %v", err)
+	}
+	writeGatewayPreflightEvidenceValue(t, evidencePath, routeCertifiedPreflightFixture("job-a"))
+	old := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(evidencePath, old, old); err != nil {
+		t.Fatalf("age evidence: %v", err)
+	}
+
+	report, err := buildRouteCertificationStatus(contractsPath, "", old.Add(48*time.Hour))
+	if err != nil {
+		t.Fatalf("build route status: %v", err)
+	}
+	if len(report.Contracts) != 1 || report.Contracts[0].Result != "stale_evidence" || !strings.Contains(strings.Join(report.Contracts[0].Failures, "\n"), "retention_days=1") {
+		t.Fatalf("stale status = %+v", report.Contracts)
+	}
+	if err := routeCertificationStatusError(report); err == nil || !strings.Contains(err.Error(), "route certification incomplete") {
+		t.Fatalf("stale status error = %v", err)
+	}
+}
+
 func TestRouteContractValidationAndUsageErrors(t *testing.T) {
 	if err := Run(context.Background(), []string{"route"}); err == nil || !strings.Contains(err.Error(), "usage: myce route") {
 		t.Fatalf("route usage err = %v", err)

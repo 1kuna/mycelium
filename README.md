@@ -285,7 +285,8 @@ finds the latest saved evidence for each named contract and re-runs the
 preflight verifier offline. The contract file may contain synthetic prompts for
 certification, but saved certification artifacts do not include bearer tokens,
 prompts, or raw completion content. Keep contract names and labels generic
-enough to be safe in support bundles.
+enough to be safe in support bundles. Set `retention_days` when a certification
+must expire instead of remaining valid until the next manual preflight.
 
 ```bash
 myce gateway preflight \

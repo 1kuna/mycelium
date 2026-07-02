@@ -68,6 +68,7 @@ type routeCertificationStatus struct {
 	RequireJSON       bool                          `json:"require_json,omitempty"`
 	RequireToolCall   bool                          `json:"require_tool_call,omitempty"`
 	RequireLiveModel  bool                          `json:"require_live_model,omitempty"`
+	RetentionDays     int                           `json:"retention_days,omitempty"`
 	EvidencePath      string                        `json:"evidence_path,omitempty"`
 	EvidenceAgeSec    int64                         `json:"evidence_age_sec,omitempty"`
 	Failures          []string                      `json:"failures,omitempty"`
@@ -301,6 +302,7 @@ func buildRouteCertificationStatus(contractsPath, evidenceRootOverride string, n
 			RequireJSON:      contract.RequireJSON,
 			RequireToolCall:  contract.RequireToolCall,
 			RequireLiveModel: contract.RequireLiveModel,
+			RetentionDays:    contract.RetentionDays,
 		}
 		evidencePath, modTime, ok, err := latestRoutePreflightEvidence(routeEvidenceRoot(contracts, contract, evidenceRootOverride), contract.Name)
 		if err != nil {
@@ -314,6 +316,13 @@ func buildRouteCertificationStatus(contractsPath, evidenceRootOverride string, n
 		}
 		status.EvidencePath = evidencePath
 		status.EvidenceAgeSec = int64(now.Sub(modTime).Seconds())
+		if contract.RetentionDays > 0 && modTime.Before(now.AddDate(0, 0, -contract.RetentionDays)) {
+			status.Result = "stale_evidence"
+			status.Failures = []string{fmt.Sprintf("latest evidence is older than retention_days=%d", contract.RetentionDays)}
+			status.NextOperatorCheck = fmt.Sprintf("myce route certify %s --contracts %s", contract.Name, contractsPath)
+			report.Contracts = append(report.Contracts, status)
+			continue
+		}
 		evidence, err := readGatewayPreflightEvidence(evidencePath)
 		if err != nil {
 			status.Result = "invalid_evidence"
@@ -433,7 +442,7 @@ func routeContractEvidenceFailures(contract routeCertificationContract, evidence
 func printRouteCertificationStatus(w interface{ Write([]byte) (int, error) }, report routeCertificationStatusReport) {
 	fmt.Fprintf(w, "route-status\tcontracts=%s\tevidence_root=%s\n", report.ContractsPath, report.EvidenceRoot)
 	for _, contract := range report.Contracts {
-		fmt.Fprintf(w, "route\tname=%s\tresult=%s\tmodel=%s\tproject=%s\tmin_context=%d\tstream=%t\tjson=%t\ttool=%t\tlive_model=%t\tevidence=%s\tfailures=%d\tnext=%s\n",
+		fmt.Fprintf(w, "route\tname=%s\tresult=%s\tmodel=%s\tproject=%s\tmin_context=%d\tstream=%t\tjson=%t\ttool=%t\tlive_model=%t\tretention_days=%d\tevidence=%s\tfailures=%d\tnext=%s\n",
 			contract.Name,
 			contract.Result,
 			contract.Model,
@@ -443,6 +452,7 @@ func printRouteCertificationStatus(w interface{ Write([]byte) (int, error) }, re
 			contract.RequireJSON,
 			contract.RequireToolCall,
 			contract.RequireLiveModel,
+			contract.RetentionDays,
 			emptyDash(contract.EvidencePath),
 			len(contract.Failures),
 			emptyDash(contract.NextOperatorCheck),
