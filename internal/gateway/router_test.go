@@ -2613,6 +2613,12 @@ func TestServerErrorResponses(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("route error status = %d", rec.Code)
 	}
+
+	rec = httptest.NewRecorder()
+	writeGatewayRouteError(rec, fmt.Errorf("failover: %w", noInstanceAvailableError{JobID: "job-a", RetryAfter: 1500 * time.Millisecond}))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "2" || !strings.Contains(rec.Body.String(), "no instance available") {
+		t.Fatalf("no-instance status/header/body = %d %q %s", rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
+	}
 }
 
 func TestServerRequiresGatewayTokenWhenConfigured(t *testing.T) {

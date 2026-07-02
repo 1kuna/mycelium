@@ -111,7 +111,8 @@ expected-concurrency envelope at offer and commit time, so a warm instance
 sheds instead of accepting unbounded extra work. OpenAI-compatible chat
 requests remain synchronous:
 when the selected route cannot immediately acquire an owner, the gateway
-returns a loud no-instance error instead of accepting an asynchronous workload.
+returns `503 Service Unavailable` with `Retry-After` instead of accepting an
+asynchronous workload.
 Use the authenticated `/workloads` RPC surface,
 `myce jobs admit/status/drain/finish/result`, and fleet benchmark surfaces for
 pressure proofs that need queued admission without turning chat completions into

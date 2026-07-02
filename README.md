@@ -583,6 +583,12 @@ separate product gate; until then, payload replayability, explicit result-body
 storage, and the artifact manifest are the durable execution/output boundaries
 operators can join to debug bundles and optimizer evidence.
 
+When a synchronous gateway request would queue instead of immediately acquiring
+an owner, the gateway returns `503 Service Unavailable` with `Retry-After`
+rather than silently accepting hidden async work. Consumers that need queued
+admission should use the explicit workload lane above and preserve the failed
+gateway response or preflight artifact as availability evidence.
+
 For partial consumer batches, preserve one `preflight.json` or response-header
 set per failed or timed-out row. `debug job --preflight --owner-telemetry`
 stitches the request artifact to the durable job/registry surfaces and fetches

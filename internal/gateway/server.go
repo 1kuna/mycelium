@@ -3,6 +3,7 @@ package gateway
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -48,13 +49,13 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Stream {
 		if err := s.Router.Stream(r.Context(), req, w); err != nil {
-			writeGatewayError(w, http.StatusBadGateway, err.Error())
+			writeGatewayRouteError(w, err)
 		}
 		return
 	}
 	resp, err := s.Router.Route(r.Context(), req)
 	if err != nil {
-		writeGatewayError(w, http.StatusBadGateway, err.Error())
+		writeGatewayRouteError(w, err)
 		return
 	}
 	for key, values := range resp.Header {
@@ -215,6 +216,16 @@ func writeGatewayError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(`{"error":` + quoteJSON(msg) + `}`))
+}
+
+func writeGatewayRouteError(w http.ResponseWriter, err error) {
+	var noInstance noInstanceAvailableError
+	if errors.As(err, &noInstance) {
+		w.Header().Set("Retry-After", strconv.Itoa(noInstance.retryAfterSeconds()))
+		writeGatewayError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeGatewayError(w, http.StatusBadGateway, err.Error())
 }
 
 func quoteJSON(s string) string {

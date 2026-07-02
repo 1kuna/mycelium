@@ -186,6 +186,22 @@ type RouteResponse struct {
 	ColdLoad bool
 }
 
+type noInstanceAvailableError struct {
+	JobID      string
+	RetryAfter time.Duration
+}
+
+func (e noInstanceAvailableError) Error() string {
+	return fmt.Sprintf("job %q queued: no instance available", e.JobID)
+}
+
+func (e noInstanceAvailableError) retryAfterSeconds() int {
+	if e.RetryAfter <= 0 {
+		return 1
+	}
+	return int((e.RetryAfter + time.Second - 1) / time.Second)
+}
+
 type routeDiagnostics struct {
 	Project                 string
 	ColdLoad                bool
@@ -858,7 +874,7 @@ func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, payload []byt
 			return result.Decision, result.Instance, result.Lease, false, err
 		}
 		if result.Decision.Action == domain.ActionQueued {
-			return result.Decision, result.Instance, result.Lease, false, fmt.Errorf("job %q queued: no instance available", job.ID)
+			return result.Decision, result.Instance, result.Lease, false, noInstanceAvailableError{JobID: job.ID, RetryAfter: time.Second}
 		}
 		cold := result.Decision.InstanceID == ""
 		return result.Decision, result.Instance, result.Lease, cold, nil
