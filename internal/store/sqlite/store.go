@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -225,6 +227,58 @@ func (s *Store) ListJobs(ctx context.Context) ([]domain.Job, error) {
 	var jobs []domain.Job
 	err := s.listJSON(ctx, "jobs", &jobs)
 	return jobs, err
+}
+
+func (s *Store) SaveWorkloadResultBody(ctx context.Context, result domain.WorkloadResultBody) error {
+	if result.JobID == "" {
+		return fmt.Errorf("workload result job id is required")
+	}
+	if len(result.Body) == 0 {
+		return fmt.Errorf("workload result body is required")
+	}
+	sum := sha256.Sum256(result.Body)
+	digest := hex.EncodeToString(sum[:])
+	if result.SHA256 != "" && result.SHA256 != digest {
+		return fmt.Errorf("workload result sha256 does not match body")
+	}
+	result.Bytes = len(result.Body)
+	result.SHA256 = digest
+	if result.StoredAt.IsZero() {
+		result.StoredAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO workload_result_bodies (job_id, media_type, bytes, sha256, body, stored_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(job_id) DO UPDATE SET
+	media_type = excluded.media_type,
+	bytes = excluded.bytes,
+	sha256 = excluded.sha256,
+	body = excluded.body,
+	stored_at = excluded.stored_at`,
+		result.JobID, result.MediaType, result.Bytes, result.SHA256, result.Body, result.StoredAt.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) WorkloadResultBody(ctx context.Context, jobID string) (domain.WorkloadResultBody, error) {
+	if jobID == "" {
+		return domain.WorkloadResultBody{}, fmt.Errorf("workload result job id is required")
+	}
+	var result domain.WorkloadResultBody
+	var storedAt string
+	err := s.db.QueryRowContext(ctx, `SELECT job_id, media_type, bytes, sha256, body, stored_at FROM workload_result_bodies WHERE job_id = ?`, jobID).Scan(
+		&result.JobID, &result.MediaType, &result.Bytes, &result.SHA256, &result.Body, &storedAt,
+	)
+	if err != nil {
+		return domain.WorkloadResultBody{}, err
+	}
+	if storedAt != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, storedAt)
+		if err != nil {
+			return domain.WorkloadResultBody{}, err
+		}
+		result.StoredAt = parsed
+	}
+	return result, nil
 }
 
 func (s *Store) Put(ctx context.Context, rec domain.JobRecord) error {
@@ -1001,6 +1055,14 @@ CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS admission_states (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reservations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS workload_result_bodies (
+	job_id TEXT PRIMARY KEY,
+	media_type TEXT NOT NULL DEFAULT '',
+	bytes INTEGER NOT NULL,
+	sha256 TEXT NOT NULL,
+	body BLOB NOT NULL,
+	stored_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS job_records (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS recommendations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS process_refs (node_id TEXT PRIMARY KEY, data TEXT NOT NULL);

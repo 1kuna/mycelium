@@ -181,6 +181,15 @@ type JobResult struct {
 	Terminal        bool              `json:"terminal,omitempty"`
 }
 
+type WorkloadResultBody struct {
+	JobID     string    `json:"job_id"`
+	MediaType string    `json:"media_type,omitempty"`
+	Bytes     int       `json:"bytes"`
+	SHA256    string    `json:"sha256"`
+	Body      []byte    `json:"body,omitempty"`
+	StoredAt  time.Time `json:"stored_at"`
+}
+
 type PlacementDecision struct {
 	JobID            string          `json:"job_id"`
 	Preset           Preset          `json:"preset,omitempty"`

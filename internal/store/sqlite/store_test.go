@@ -126,6 +126,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	must(t, store.SaveLease(ctx, lease))
 	must(t, store.SaveReservation(ctx, reservation))
 	must(t, store.SaveJob(ctx, job))
+	must(t, store.SaveWorkloadResultBody(ctx, domain.WorkloadResultBody{JobID: job.ID, MediaType: "application/json", Body: []byte(`{"ok":true}`), StoredAt: time.Unix(7, 0).UTC()}))
 	must(t, store.SaveAdmissionState(ctx, admissionState))
 	must(t, store.Put(ctx, jobRecord))
 	must(t, store.SaveRecommendation(ctx, rec))
@@ -194,6 +195,9 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	}
 	if gotJob, err := reopened.Job(ctx, job.ID); err != nil || gotJob.ID != job.ID {
 		t.Fatalf("Job = %+v, %v", gotJob, err)
+	}
+	if gotBody, err := reopened.WorkloadResultBody(ctx, job.ID); err != nil || gotBody.JobID != job.ID || string(gotBody.Body) != `{"ok":true}` || gotBody.MediaType != "application/json" || gotBody.Bytes != len(`{"ok":true}`) || gotBody.SHA256 == "" {
+		t.Fatalf("WorkloadResultBody = %+v, %v", gotBody, err)
 	}
 	if gotAdmission, found, err := reopened.AdmissionState(ctx, node.ID); err != nil || !found || gotAdmission.Fence != 4 {
 		t.Fatalf("AdmissionState = %+v found=%v err=%v", gotAdmission, found, err)

@@ -2,6 +2,8 @@ package controlcli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +29,11 @@ import (
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
@@ -349,11 +356,15 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 			if req.Error != "" {
 				t.Fatalf("finish error = %q", req.Error)
 			}
-			if req.ResultArtifact != "artifact://job-a" || req.ResultMediaType != "application/json" || req.ResultBytes != 42 || req.ResultSHA256 != strings.Repeat("a", 64) {
+			if req.ResultArtifact != "stored://workload/job-a" || req.ResultMediaType != "application/json" || req.ResultBytes != len(`{"answer":"ok"}`) || req.ResultSHA256 != sha256Hex([]byte(`{"answer":"ok"}`)) || string(req.ResultBody) != `{"answer":"ok"}` {
 				t.Fatalf("finish result manifest = %+v", req)
 			}
 			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultArtifact: req.ResultArtifact, ResultMediaType: req.ResultMediaType, ResultBytes: req.ResultBytes, ResultSHA256: req.ResultSHA256, ResultRedacted: true, Terminal: true}
 			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: domain.Job{ID: "job-a", Model: "model-a", PresetID: "preset-a", Project: "project-a", Status: domain.JobDone, Result: result}, Result: result})
+		case r.Method == http.MethodGet && r.URL.Path == "/workloads/job-a/result":
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Myc-Result-SHA256", sha256Hex([]byte(`{"answer":"ok"}`)))
+			_, _ = w.Write([]byte(`{"answer":"ok"}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -386,14 +397,32 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	if !strings.Contains(drainOut, "drained\t1") || !strings.Contains(drainOut, "node=node-a") || strings.Contains(drainOut, "input_bytes") {
 		t.Fatalf("drain output = %q", drainOut)
 	}
+	resultFile := filepath.Join(dir, "result.json")
+	if err := os.WriteFile(resultFile, []byte(`{"answer":"ok"}`), 0600); err != nil {
+		t.Fatalf("write result file: %v", err)
+	}
 	finishOut := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"jobs", "finish", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a", "--result-artifact", "artifact://job-a", "--result-media-type", "application/json", "--result-bytes", "42", "--result-sha256", strings.Repeat("a", 64)}, client)
+		err = RunWithClient(context.Background(), []string{"jobs", "finish", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a", "--result-media-type", "application/json", "--result-file", resultFile}, client)
 	})
 	if err != nil {
 		t.Fatalf("jobs finish: %v", err)
 	}
-	if !strings.Contains(finishOut, "status=done") || !strings.Contains(finishOut, "terminal=true") || !strings.Contains(finishOut, "result_artifact=artifact://job-a") || !strings.Contains(finishOut, "result_bytes=42") || strings.Contains(finishOut, "input_bytes") {
+	if !strings.Contains(finishOut, "status=done") || !strings.Contains(finishOut, "terminal=true") || !strings.Contains(finishOut, "result_artifact=stored://workload/job-a") || !strings.Contains(finishOut, "result_bytes=15") || strings.Contains(finishOut, "input_bytes") || strings.Contains(finishOut, "answer") {
 		t.Fatalf("finish output = %q", finishOut)
+	}
+	resultOutPath := filepath.Join(dir, "retrieved.json")
+	resultOut := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"jobs", "result", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a", "--out", resultOutPath}, client)
+	})
+	if err != nil {
+		t.Fatalf("jobs result: %v", err)
+	}
+	if !strings.Contains(resultOut, "workload-result\t") || !strings.Contains(resultOut, "bytes=15") || !strings.Contains(resultOut, "sha256="+sha256Hex([]byte(`{"answer":"ok"}`))) {
+		t.Fatalf("result output = %q", resultOut)
+	}
+	retrieved, err := os.ReadFile(resultOutPath)
+	if err != nil || string(retrieved) != `{"answer":"ok"}` {
+		t.Fatalf("retrieved result = %q err=%v", retrieved, err)
 	}
 	jsonOut := captureStdout(t, func() {
 		err = RunWithClient(context.Background(), []string{"jobs", "status", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a", "--json"}, client)
@@ -489,6 +518,22 @@ func TestRunJobsAdmitAndStatusErrorBranches(t *testing.T) {
 	err = runJobsFinish(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a"}, badResponseClient)
 	if err == nil {
 		t.Fatal("bad finish response accepted")
+	}
+	err = runJobsResult(context.Background(), nil, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--url") {
+		t.Fatalf("result missing url err = %v", err)
+	}
+	err = runJobsResult(context.Background(), []string{"--url", "http://peer.test"}, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--id") {
+		t.Fatalf("result missing id err = %v", err)
+	}
+	err = runJobsResult(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a"}, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--out") {
+		t.Fatalf("result missing out err = %v", err)
+	}
+	err = runJobsResult(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a", "--out", filepath.Join(t.TempDir(), "result.json")}, errorClient)
+	if err == nil || !strings.Contains(err.Error(), "409") {
+		t.Fatalf("result error response err = %v", err)
 	}
 }
 

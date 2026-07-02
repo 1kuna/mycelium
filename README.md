@@ -551,7 +551,9 @@ myce jobs finish \
   --result-artifact <redacted-artifact-ref> \
   --result-media-type application/json \
   --result-bytes <byte-count> \
-  --result-sha256 <sha256>
+  --result-sha256 <sha256> \
+  --result-file <file>
+myce jobs result --url <peer-url> --rpc-token <token> --id <job-id> --out <file>
 myce jobs status --url <peer-url> --rpc-token <token> --id <job-id> --json
 ```
 
@@ -560,10 +562,13 @@ payload replayability classification and a redacted result artifact manifest:
 reference, media type, byte count, and digest. `payload_state` distinguishes a
 registry-replayable payload from runtime-local, redacted, missing, or unreadable
 payload evidence. The commands do not print the queued payload or raw
-completion. Raw async result replay back to callers is a separate product gate;
-until then, payload replayability and the artifact manifest are the durable
-execution/output boundaries operators can join to debug bundles and optimizer
-evidence.
+completion. When an operator or runtime finishes a workload with
+`--result-file`, Mycelium stores those result bytes in the private control store
+and `myce jobs result` retrieves them explicitly after verifying the stored
+manifest. Automatic provider-output capture for queued inference is still a
+separate product gate; until then, payload replayability, explicit result-body
+storage, and the artifact manifest are the durable execution/output boundaries
+operators can join to debug bundles and optimizer evidence.
 
 For partial consumer batches, preserve one `preflight.json` or response-header
 set per failed or timed-out row. `debug job --preflight --owner-telemetry`

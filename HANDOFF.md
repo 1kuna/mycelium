@@ -109,7 +109,7 @@ requests remain synchronous:
 when the selected route cannot immediately acquire an owner, the gateway
 returns a loud no-instance error instead of accepting an asynchronous workload.
 Use the authenticated `/workloads` RPC surface,
-`myce jobs admit/status/drain/finish`, and fleet benchmark surfaces for
+`myce jobs admit/status/drain/finish/result`, and fleet benchmark surfaces for
 pressure proofs that need queued admission without turning chat completions into
 a hidden blocking queue. The workload surface admits durable job intent,
 carries redacted payload/result metadata, classifies whether the queued payload
@@ -117,15 +117,17 @@ is registry-replayable or only runtime-local, drains through the scheduler
 queue, marks terminal state through the scheduler release path, and exposes
 terminal scheduler evidence through status/debug surfaces. Terminal workload
 evidence may carry a redacted result artifact manifest: reference, media type,
-byte count, and digest. Mycelium does not yet replay raw asynchronous inference
-results back to callers through this lane. The fast test suite
+byte count, and digest. If a workload is finished with explicit stored result
+bytes, `myce jobs result` can retrieve those bytes without exposing them through
+status/default debug output. Mycelium does not yet automatically capture and
+replay provider output for queued inference through this lane. The fast test suite
 includes a repo-local HTTP workload proof for queued admission, multi-owner
-drain, terminal success/failure, result artifact manifest metadata, and lease
-reclaim.
+drain, terminal success/failure, result artifact manifest metadata, explicit
+stored result-body replay, and lease reclaim.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
-work, not transparently resumed streams. Raw async inference result replay for
-queued payloads is still a separate product gate.
+work, not transparently resumed streams. Automatic raw async inference output
+capture for queued payloads is still a separate product gate.
 
 ## Public Hygiene Rules
 
