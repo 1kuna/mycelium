@@ -2227,7 +2227,7 @@ func TestServiceCompleteFailAndReleaseLifecycleBranches(t *testing.T) {
 	}
 
 	staleStore := &runtimeStore{leases: map[string]domain.Lease{"lease-stale": {ID: "lease-stale", JobID: "job-stale", NodeID: "node-a"}}}
-	staleOwner := &mocks.AdmissionController{}
+	staleOwner := &mocks.AdmissionController{ReleaseErr: fmt.Errorf("release unknown lease %q", "lease-stale")}
 	staleService := leaseLifecycleService(clock, staleStore)
 	staleService.Coordinator = &mocks.Coordinator{
 		CompleteErr: fmt.Errorf("job %q is not claimed by this coordinator", "job-stale"),
