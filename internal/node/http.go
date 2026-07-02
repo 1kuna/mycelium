@@ -691,6 +691,15 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, in, out any) e
 		case "stale_fence":
 			return fmt.Errorf("%w: node http %s: %s", domain.ErrStaleFence, path, e.Error)
 		}
+		switch resp.StatusCode {
+		case http.StatusTooManyRequests:
+			return fmt.Errorf("%w: node http %s: %s", domain.ErrNoFit, path, e.Error)
+		case http.StatusConflict:
+			return fmt.Errorf("%w: node http %s: %s", domain.ErrStaleFence, path, e.Error)
+		}
+		if path == "/admission/offer" && legacyAdmissionNoFit(e.Error) {
+			return fmt.Errorf("%w: node http %s: %s", domain.ErrNoFit, path, e.Error)
+		}
 		return fmt.Errorf("node http %s: %s", path, e.Error)
 	}
 	if out == nil {
@@ -726,6 +735,10 @@ func writeJSON(w http.ResponseWriter, v any, err error) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		panic(err)
 	}
+}
+
+func legacyAdmissionNoFit(msg string) bool {
+	return strings.Contains(msg, "no unit can fit") || strings.Contains(msg, "concurrency envelope is full")
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
