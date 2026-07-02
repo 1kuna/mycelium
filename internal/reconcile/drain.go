@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"mycelium/internal/domain"
+	"mycelium/internal/engine"
 )
 
 type TaskStore interface {
@@ -19,6 +20,9 @@ type TaskStore interface {
 	Node(ctx context.Context, id string) (domain.Node, error)
 	SaveLocalityPlan(ctx context.Context, plan domain.LocalityPlan) error
 	SaveModelLocality(ctx context.Context, locality domain.ModelLocality) error
+	SaveEngineProfile(ctx context.Context, profile domain.EngineProfile) error
+	ListEngineProfiles(ctx context.Context) ([]domain.EngineProfile, error)
+	MarkEngineProfileUnready(ctx context.Context, profileID, reason string) error
 }
 
 type DrainOptions struct {
@@ -95,6 +99,15 @@ func drainTask(ctx context.Context, store TaskStore, task domain.ReconciliationT
 		done := transitionTask(running, domain.ReconciliationTaskDone, "", "planned model artifact staging", now)
 		_ = store.SaveReconciliationTask(ctx, done)
 		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "plan_model_artifact_stage"}
+	case TaskVerifyEngineReadiness:
+		if err := verifyEngineReadiness(ctx, store, running); err != nil {
+			failed := transitionTask(running, domain.ReconciliationTaskFailed, err.Error(), "engine readiness verification failed", now)
+			_ = store.SaveReconciliationTask(ctx, failed)
+			return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: failed.Status, Error: err.Error()}
+		}
+		done := transitionTask(running, domain.ReconciliationTaskDone, "", "verified saved engine readiness", now)
+		_ = store.SaveReconciliationTask(ctx, done)
+		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "verify_engine_readiness"}
 	default:
 		err := fmt.Sprintf("reconciliation executor for %q is not implemented", task.Kind)
 		failed := transitionTask(running, domain.ReconciliationTaskFailed, err, "executor unavailable", now)
@@ -148,6 +161,31 @@ func planModelArtifactStage(ctx context.Context, store TaskStore, task domain.Re
 		Reason:         "planned by reconciliation task " + task.ID,
 		UpdatedAt:      now,
 	})
+}
+
+func verifyEngineReadiness(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord) error {
+	if task.NodeID == "" {
+		return fmt.Errorf("verify engine readiness task requires node id")
+	}
+	if task.PresetID == "" {
+		return fmt.Errorf("verify engine readiness task requires preset id")
+	}
+	preset, err := store.Preset(ctx, task.PresetID)
+	if err != nil {
+		return err
+	}
+	node, err := store.Node(ctx, task.NodeID)
+	if err != nil {
+		return err
+	}
+	check, err := engine.NewReadinessChecker(store, domain.EngineReadinessStrict).CheckEngineReadiness(ctx, node, preset)
+	if err != nil {
+		return err
+	}
+	if !check.Ready {
+		return fmt.Errorf("engine readiness check returned not ready: %s", check.Reason)
+	}
+	return nil
 }
 
 func transitionTask(task domain.ReconciliationTaskRecord, status domain.ReconciliationTaskStatus, errText, message string, at time.Time) domain.ReconciliationTaskRecord {

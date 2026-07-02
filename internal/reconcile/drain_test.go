@@ -124,6 +124,66 @@ func TestDrainAllowedTasksFailsStageWithoutPreset(t *testing.T) {
 	}
 }
 
+func TestDrainAllowedTasksVerifiesEngineReadiness(t *testing.T) {
+	store := &fakeTaskStore{
+		tasks: []domain.ReconciliationTaskRecord{taskRecord("allowed-engine", string(TaskVerifyEngineReadiness), domain.ReconciliationTaskAllowed)},
+		presets: map[string]domain.Preset{"preset-a": {
+			ID:       "preset-a",
+			ModelRef: "model-a",
+			Backend:  domain.BackendVLLM,
+		}},
+		nodes: map[string]domain.Node{"node-a": {ID: "node-a", OS: "linux", Arch: "amd64", Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}}},
+		profiles: []domain.EngineProfile{{
+			ID:          "engine-vllm",
+			Backend:     domain.BackendVLLM,
+			DisplayName: "vLLM",
+			Version:     "1",
+			CompatibilityKey: domain.CompatibilityKey{
+				OS:                 "linux",
+				CPUArch:            "amd64",
+				AcceleratorVendor:  "nvidia",
+				AcceleratorRuntime: "cuda",
+				EngineDistribution: "vLLM",
+				EngineVersion:      "1",
+				Backend:            domain.BackendVLLM,
+			},
+			Ready: true,
+		}},
+	}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: time.Unix(70, 0).UTC()})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Drained != 1 || report.Results[0].Status != domain.ReconciliationTaskDone || report.Results[0].Action != "verify_engine_readiness" {
+		t.Fatalf("report = %+v", report)
+	}
+	done := store.taskByID("allowed-engine")
+	if done.Status != domain.ReconciliationTaskDone || len(done.Events) != 2 {
+		t.Fatalf("done task = %+v", done)
+	}
+}
+
+func TestDrainAllowedTasksFailsEngineReadinessWithoutSavedProfile(t *testing.T) {
+	store := &fakeTaskStore{
+		tasks: []domain.ReconciliationTaskRecord{taskRecord("allowed-engine", string(TaskVerifyEngineReadiness), domain.ReconciliationTaskAllowed)},
+		presets: map[string]domain.Preset{"preset-a": {
+			ID:       "preset-a",
+			ModelRef: "model-a",
+			Backend:  domain.BackendVLLM,
+		}},
+		nodes: map[string]domain.Node{"node-a": {ID: "node-a", OS: "linux", Arch: "amd64", Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}}},
+	}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: time.Unix(80, 0).UTC()})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Results[0].Status != domain.ReconciliationTaskFailed || !strings.Contains(report.Results[0].Error, "no saved ready engine profile") {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
 func TestDrainAllowedTasksRecordsActionFailure(t *testing.T) {
 	store := &fakeTaskStore{
 		tasks:           []domain.ReconciliationTaskRecord{taskRecord("allowed-incompat", string(TaskRecordIncompatibility), domain.ReconciliationTaskAllowed)},
@@ -169,6 +229,7 @@ type fakeTaskStore struct {
 	nodes             map[string]domain.Node
 	localityPlans     []domain.LocalityPlan
 	localities        []domain.ModelLocality
+	profiles          []domain.EngineProfile
 	saveIncompatErr   error
 }
 
@@ -241,6 +302,32 @@ func (s *fakeTaskStore) SaveModelLocality(_ context.Context, locality domain.Mod
 	}
 	s.localities = append(s.localities, locality)
 	return nil
+}
+
+func (s *fakeTaskStore) ListEngineProfiles(context.Context) ([]domain.EngineProfile, error) {
+	return append([]domain.EngineProfile(nil), s.profiles...), nil
+}
+
+func (s *fakeTaskStore) SaveEngineProfile(_ context.Context, profile domain.EngineProfile) error {
+	for i := range s.profiles {
+		if s.profiles[i].ID == profile.ID {
+			s.profiles[i] = profile
+			return nil
+		}
+	}
+	s.profiles = append(s.profiles, profile)
+	return nil
+}
+
+func (s *fakeTaskStore) MarkEngineProfileUnready(_ context.Context, profileID, reason string) error {
+	for i := range s.profiles {
+		if s.profiles[i].ID == profileID {
+			s.profiles[i].Ready = false
+			s.profiles[i].UnreadyReason = reason
+			return nil
+		}
+	}
+	return errors.New("engine profile not found")
 }
 
 func (s *fakeTaskStore) taskByID(id string) domain.ReconciliationTaskRecord {

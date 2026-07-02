@@ -96,9 +96,11 @@ handoff.
   durable incompatibility fact with running/done or running/failed task history.
   It also executes `stage_model_artifact` by writing a planned locality stage
   action and planned model-locality record for the existing locality apply path;
-  it does not copy artifacts to live peers itself. The remaining gap is to add
-  real drain executors for `verify_engine_readiness`, `prewarm_replica`, and
-  `refresh_catalog`. Owner repair remains approval-gated by default.
+  it does not copy artifacts to live peers itself. `verify_engine_readiness`
+  drains through the existing strict engine readiness checker and requires a
+  saved ready compatibility-keyed engine profile. The remaining gap is to add
+  real drain executors for `prewarm_replica` and `refresh_catalog`. Owner repair
+  remains approval-gated by default.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish

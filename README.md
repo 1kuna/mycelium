@@ -275,10 +275,12 @@ records `running` to terminal status transitions, and currently executes
 `record_incompatibility` by writing a durable incompatibility fact and
 `stage_model_artifact` by writing a planned `models locality` stage action plus
 a planned model-locality record. The stage task does not copy artifacts itself;
-it feeds the existing `myce models locality apply` peer-RPC path. Other allowed
-task kinds fail loudly with `executor not implemented` until their lower-level
-engine verification, prewarm, or catalog-refresh actions are wired. Blocked
-records are left untouched.
+it feeds the existing `myce models locality apply` peer-RPC path.
+`verify_engine_readiness` runs the existing strict engine readiness checker
+against saved engine profiles and fails if a ready compatibility-keyed profile
+is missing or unready. Other allowed task kinds fail loudly with
+`executor not implemented` until their lower-level prewarm or catalog-refresh
+actions are wired. Blocked records are left untouched.
 For a stored workload or gateway job, `myce debug job <job-id> --reconcile`
 adds the same report-only plan to the normal job/debug evidence so operators do
 not have to extract the scheduler decision by hand.
