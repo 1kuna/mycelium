@@ -148,6 +148,15 @@ myce calibrate report \
   --out ~/.mycelium/calibration/report.json
 ```
 
+After an operator-approved live fleet benchmark, import live metric rows as
+optimizer speed-class priors:
+
+```bash
+myce calibrate apply-priors \
+  --plan ~/.mycelium/calibration/plan \
+  --run ~/.mycelium/calibration/live-runs
+```
+
 `calibrate plan` reads the peer config and control store inventory, emits a
 `benchmark-config.json` plus `calibration-plan.json`, and proves the generated
 plan through the existing fleet benchmark simulator. The first implementation
@@ -162,7 +171,10 @@ status` and `calibrate report` summarize saved plan/run artifacts without
 treating simulation as live calibration or applied optimizer facts. Run
 `make smoke-workload-executor` before the live fleet proof to catch local
 queued-executor wiring regressions without touching real engines. A live
-pressure proof remains an explicit operator gate. See
+pressure proof remains an explicit operator gate. `calibrate apply-priors`
+refuses simulated runs and live runs with no metric rows; it imports only live
+benchmark metric rows and updates speed-class priors through the existing
+optimizer calibration path. See
 [docs/runbooks/workload-pressure-proof.md](docs/runbooks/workload-pressure-proof.md)
 for the full proof ladder.
 
