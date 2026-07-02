@@ -261,6 +261,10 @@ func runModelsPrewarm(ctx context.Context, args []string, client *http.Client) e
 	if err != nil && *allFitting {
 		return err
 	}
+	resolvedRPCToken := strings.TrimSpace(*rpcToken)
+	if resolvedRPCToken == "" && err == nil {
+		resolvedRPCToken = strings.TrimSpace(loaded.Config.RPCToken)
+	}
 	requestedReplicas := 1
 	if replicas.set {
 		requestedReplicas = replicas.value
@@ -286,7 +290,7 @@ func runModelsPrewarm(ctx context.Context, args []string, client *http.Client) e
 		if *contextCap == 0 {
 			*contextCap = modelruntime.EffectiveContextLength(preset)
 		}
-		fleet, err := liveFleetSnapshotForPrewarm(ctx, loaded.Config, *rpcToken, client)
+		fleet, err := liveFleetSnapshotForPrewarm(ctx, loaded.Config, resolvedRPCToken, client)
 		if err != nil {
 			return err
 		}
@@ -340,7 +344,7 @@ func runModelsPrewarm(ctx context.Context, args []string, client *http.Client) e
 		if target.NodeID != "" {
 			job.NodeSelector = map[string]string{domain.LabelNodeID: target.NodeID}
 		}
-		admitted, err := admitPrewarmWorkload(ctx, client, *peerURL, *rpcToken, job)
+		admitted, err := admitPrewarmWorkload(ctx, client, *peerURL, resolvedRPCToken, job)
 		if err != nil {
 			return err
 		}
@@ -349,7 +353,7 @@ func runModelsPrewarm(ctx context.Context, args []string, client *http.Client) e
 			seenInstances[result.Instance] = struct{}{}
 		}
 		if admitted.Job.Status == domain.JobRunning {
-			finished, err := finishPrewarmWorkload(ctx, client, *peerURL, *rpcToken, admitted.Job.ID)
+			finished, err := finishPrewarmWorkload(ctx, client, *peerURL, resolvedRPCToken, admitted.Job.ID)
 			if err != nil {
 				return err
 			}
@@ -1468,7 +1472,7 @@ func runProjects(ctx context.Context, args []string) error {
 
 func runJobs(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|execute|finish|result>")
+		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|execute|finish|cancel|result>")
 	}
 	switch args[0] {
 	case "list":
@@ -1483,10 +1487,12 @@ func runJobs(ctx context.Context, args []string, client *http.Client) error {
 		return runJobsExecute(ctx, args[1:], client)
 	case "finish":
 		return runJobsFinish(ctx, args[1:], client)
+	case "cancel":
+		return runJobsCancel(ctx, args[1:], client)
 	case "result":
 		return runJobsResult(ctx, args[1:], client)
 	default:
-		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|execute|finish|result>")
+		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|execute|finish|cancel|result>")
 	}
 }
 
@@ -1808,6 +1814,57 @@ func runJobsFinish(ctx context.Context, args []string, client *http.Client) erro
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("workload finish returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	var out workload.FinishResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+	printWorkloadStatus(workload.StatusResponse{Job: out.Job, Result: out.Result, Execution: out.Execution})
+	return nil
+}
+
+func runJobsCancel(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("jobs cancel", flag.ContinueOnError)
+	peerURL := fs.String("url", "", "peer base URL")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
+	id := fs.String("id", "", "workload job id")
+	reason := fs.String("reason", "canceled by operator", "redacted cancellation reason")
+	jsonOut := fs.Bool("json", false, "print JSON response")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *peerURL == "" {
+		return fmt.Errorf("--url is required")
+	}
+	if *id == "" {
+		return fmt.Errorf("--id is required")
+	}
+	body, err := json.Marshal(workload.CancelRequest{Reason: *reason})
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(*peerURL, "/")+"/workloads/"+url.PathEscape(*id)+"/cancel", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if *rpcToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+*rpcToken)
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, err := readControlHTTPBody(resp.Body, "workload cancel response body")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("workload cancel returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 	var out workload.FinishResponse
 	if err := json.Unmarshal(respBody, &out); err != nil {
