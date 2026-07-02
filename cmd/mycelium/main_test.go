@@ -4050,7 +4050,7 @@ func TestWorkloadHTTPAdmitsQueuedIntentAndReportsStatus(t *testing.T) {
 	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
 	runtime := &recordingWorkloadRuntime{store: store, decision: domain.PlacementDecision{JobID: "job-a", Action: domain.ActionQueued, Preset: domain.Preset{ID: "preset-a"}}}
 	mux := http.NewServeMux()
-	mountWorkloadHTTP(mux, runtime, store, "rpc-secret", nil)
+	mountWorkloadHTTP(mux, runtime, store, "rpc-secret", "peer-a", nil)
 	body := `{"job":{"id":"job-a","task_type":"chat","model":"model-a","preset":"preset-a","project":"project-a","priority":"interactive","speed_pref":"latency","context_request":8192,"expected_concurrency":2,"preemption":"soft"},"payload":{"input_bytes":123}}`
 	req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer rpc-secret")
@@ -4096,7 +4096,7 @@ func TestWorkloadHTTPAdmitsQueuedIntentAndReportsStatus(t *testing.T) {
 func TestWorkloadHTTPRejectsPrivateHandling(t *testing.T) {
 	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
 	mux := http.NewServeMux()
-	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store}, store, "", nil)
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store}, store, "", "peer-a", nil)
 	req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(`{"job":{"id":"job-a","model":"model-a","project":"project-a","handling":"private"}}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -4127,7 +4127,7 @@ func TestWorkloadHTTPErrorBranches(t *testing.T) {
 		t.Fatalf("seed job-empty: %v", err)
 	}
 	mux := http.NewServeMux()
-	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store, err: errors.New("admission boom")}, store, "rpc-secret", nil)
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store, err: errors.New("admission boom")}, store, "rpc-secret", "peer-a", nil)
 	for _, tc := range []struct {
 		name   string
 		method string
@@ -4168,7 +4168,7 @@ func TestWorkloadHTTPReturnsCreatedForImmediatePlacement(t *testing.T) {
 		decision: domain.PlacementDecision{JobID: "job-a", Action: domain.ActionLoadedNew, Preset: domain.Preset{ID: "preset-a"}, NodeID: "node-a"},
 	}
 	mux := http.NewServeMux()
-	mountWorkloadHTTP(mux, runtime, store, "", nil)
+	mountWorkloadHTTP(mux, runtime, store, "", "peer-a", nil)
 	req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(`{"job":{"id":"job-a","model":"model-a","project":"project-a"}}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -4203,7 +4203,7 @@ func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
 		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
 	}
 	mux := http.NewServeMux()
-	mountWorkloadHTTP(mux, service, store, "rpc-secret", nil)
+	mountWorkloadHTTP(mux, service, store, "rpc-secret", "peer-a", nil)
 
 	admit := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(`{"job":{"id":"job-a","task_type":"chat","model":"model-a","project":"project-a","priority":"interactive","speed_pref":"throughput","preemption":"soft"},"payload":{"input_bytes":123}}`))
@@ -4216,15 +4216,8 @@ func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
 	if err := json.Unmarshal(admit.Body.Bytes(), &admitted); err != nil {
 		t.Fatalf("decode admit: %v", err)
 	}
-	if !admitted.Queued || admitted.Job.Status != domain.JobQueued || admitted.Result == nil || !admitted.Result.PayloadRedacted || admitted.Payload.State != "runtime_payload_stored" || admitted.Payload.Replayable {
+	if !admitted.Queued || admitted.Job.Status != domain.JobQueued || admitted.Result == nil || !admitted.Result.PayloadRedacted || admitted.Payload.State != "registry_payload_replayable" || !admitted.Payload.Replayable {
 		t.Fatalf("admitted = %+v", admitted)
-	}
-	payload, err := peercoord.EncodeRescuePayload(admitted.Job, []byte(`{"input_bytes":123}`))
-	if err != nil {
-		t.Fatalf("EncodeRescuePayload: %v", err)
-	}
-	if err := store.Put(ctx, domain.JobRecord{JobID: "job-a", Coordinator: "peer-a", Status: domain.JobQueued, Request: payload, UpdatedAt: time.Unix(50, 0).UTC()}); err != nil {
-		t.Fatalf("Put registry: %v", err)
 	}
 	status := httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/workloads/job-a", nil)
@@ -4358,7 +4351,7 @@ func TestWorkloadHTTPDrainExecuteCapturesProviderResult(t *testing.T) {
 		Clock:   mocks.NewFakeClock(time.Unix(50, 0).UTC()),
 	}
 	mux := http.NewServeMux()
-	mountWorkloadHTTP(mux, service, store, "rpc-secret", router)
+	mountWorkloadHTTP(mux, service, store, "rpc-secret", "peer-a", router)
 
 	payloadBody := json.RawMessage(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`)
 	payload, err := json.Marshal(workload.ExecutablePayload{Kind: workload.ExecutablePayloadKindOpenAIChat, Body: payloadBody})
@@ -4487,7 +4480,7 @@ func TestWorkloadHTTPDrainsQueuedWorkAcrossOwnersAndReclaimsCapacity(t *testing.
 		},
 	}
 	mux := http.NewServeMux()
-	mountWorkloadHTTP(mux, service, store, "rpc-secret", nil)
+	mountWorkloadHTTP(mux, service, store, "rpc-secret", "peer-a", nil)
 
 	admitWorkload := func(id, model string) workload.AdmissionResponse {
 		t.Helper()
@@ -4622,7 +4615,7 @@ func TestWorkloadHTTPStoresAndRetrievesExplicitResultBody(t *testing.T) {
 		t.Fatalf("SaveJob: %v", err)
 	}
 	mux := http.NewServeMux()
-	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store}, store, "rpc-secret", nil)
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store}, store, "rpc-secret", "peer-a", nil)
 
 	finishBody, err := json.Marshal(workload.FinishRequest{
 		ResultArtifact:  "stored://workload/job-a",
@@ -4707,7 +4700,7 @@ func TestWorkloadHTTPRejectsInvalidResultArtifactManifest(t *testing.T) {
 	}
 	service := &scheduler.Service{Store: store, Queue: scheduler.NewQueue(mocks.NewFakeClock(time.Unix(70, 0).UTC()))}
 	mux := http.NewServeMux()
-	mountWorkloadHTTP(mux, service, store, "rpc-secret", nil)
+	mountWorkloadHTTP(mux, service, store, "rpc-secret", "peer-a", nil)
 
 	tests := []struct {
 		name string
@@ -4863,6 +4856,49 @@ func TestExecutableWorkloadIngressRequestClassifiesKindsAndFailures(t *testing.T
 	unsupported := &workloadMemoryStore{jobs: map[string]domain.Job{job.ID: job}, records: []domain.JobRecord{makeRecord(t, mustJSON(t, workload.ExecutablePayload{Kind: "unknown", Body: json.RawMessage(`{}`)}))}}
 	if _, err := executableWorkloadIngressRequest(ctx, unsupported, job); err == nil || !strings.Contains(err.Error(), "unsupported executable payload kind") {
 		t.Fatalf("unsupported err = %v", err)
+	}
+}
+
+func TestPersistWorkloadReplayPayloadRecordsRegistryEvidence(t *testing.T) {
+	ctx := context.Background()
+	job := domain.Job{
+		ID:       "job-a",
+		Model:    "model-a",
+		Project:  "project-a",
+		Status:   domain.JobQueued,
+		Handling: domain.HandlingStandard,
+		Result:   &domain.JobResult{NodeID: "node-a"},
+	}
+	if err := persistWorkloadReplayPayload(ctx, &workloadMemoryStore{}, "peer-a", job, nil); err != nil {
+		t.Fatalf("empty payload: %v", err)
+	}
+	if err := persistWorkloadReplayPayload(ctx, workloadStatusOnlyStore{job: job}, "peer-a", job, []byte(`{"kind":"opaque"}`)); err != nil {
+		t.Fatalf("non-registry store: %v", err)
+	}
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{job.ID: job}}
+	if err := persistWorkloadReplayPayload(ctx, store, "peer-a", job, []byte(`{"kind":"opaque"}`)); err != nil {
+		t.Fatalf("persist replay payload: %v", err)
+	}
+	if len(store.records) != 1 {
+		t.Fatalf("records = %+v", store.records)
+	}
+	rec := store.records[0]
+	if rec.JobID != job.ID || rec.Coordinator != "peer-a" || rec.AssignedNode != "node-a" || rec.Status != domain.JobQueued || len(rec.Request) == 0 {
+		t.Fatalf("record = %+v", rec)
+	}
+	payloadJob, body, err := peercoord.DecodeRescuePayload(rec.Request)
+	if err != nil {
+		t.Fatalf("DecodeRescuePayload: %v", err)
+	}
+	if payloadJob.ID != job.ID || string(body) != `{"kind":"opaque"}` {
+		t.Fatalf("payload job=%+v body=%s", payloadJob, body)
+	}
+	anon := &workloadMemoryStore{jobs: map[string]domain.Job{job.ID: job}}
+	if err := persistWorkloadReplayPayload(ctx, anon, "", job, []byte(`{"kind":"opaque"}`)); err != nil {
+		t.Fatalf("persist anonymous coordinator payload: %v", err)
+	}
+	if len(anon.records) != 1 || anon.records[0].Coordinator != "workload-rpc" {
+		t.Fatalf("anonymous coordinator record = %+v", anon.records)
 	}
 }
 
@@ -5518,6 +5554,22 @@ func (e staticWorkloadProviderExecutor) ExecutePlacedProvider(context.Context, t
 	return e.response, e.err
 }
 
+type workloadStatusOnlyStore struct {
+	job domain.Job
+}
+
+func (s workloadStatusOnlyStore) Job(context.Context, string) (domain.Job, error) {
+	return s.job, nil
+}
+
+func (s workloadStatusOnlyStore) SaveWorkloadResultBody(context.Context, domain.WorkloadResultBody) error {
+	return nil
+}
+
+func (s workloadStatusOnlyStore) WorkloadResultBody(context.Context, string) (domain.WorkloadResultBody, error) {
+	return domain.WorkloadResultBody{}, fmt.Errorf("no result body")
+}
+
 func (r *recordingWorkloadRuntime) SubmitWithPayload(_ context.Context, job domain.Job, payload []byte, _ ...scheduler.SubmitHooks) (scheduler.Result, error) {
 	r.job = job
 	r.payload = append([]byte(nil), payload...)
@@ -5740,6 +5792,17 @@ func (s *workloadMemoryStore) WorkloadResultBody(_ context.Context, jobID string
 
 func (s *workloadMemoryStore) Snapshot(context.Context) ([]domain.JobRecord, error) {
 	return append([]domain.JobRecord(nil), s.records...), nil
+}
+
+func (s *workloadMemoryStore) Put(_ context.Context, rec domain.JobRecord) error {
+	for i, existing := range s.records {
+		if existing.JobID == rec.JobID {
+			s.records[i] = rec
+			return nil
+		}
+	}
+	s.records = append(s.records, rec)
+	return nil
 }
 
 func withWorkloadPriority(job domain.Job, priority domain.Priority) domain.Job {
