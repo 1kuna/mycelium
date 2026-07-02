@@ -88,8 +88,9 @@ plan artifact, and validates the plan with the existing deterministic fleet
 simulation. `myce calibrate run --simulate` executes that generated plan without
 starting live engines or changing route policy. `myce calibrate status` and
 `myce calibrate report` summarize saved artifacts and keep simulation distinct
-from live calibration or optimizer defaults. Live calibration remains an explicit
-later gate.
+from live calibration or optimizer defaults. The plan artifact also records the
+explicit `myce benchmark fleet` command for a later operator-approved live
+pressure proof; running it remains a live gate.
 
 For thinking/tool-agent workloads, do not treat a low-context tool-call smoke as
 a consumer-ready route. Use `--context-cap` and `--min-context-cap` so Mycelium

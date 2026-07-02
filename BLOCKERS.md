@@ -25,10 +25,10 @@ handoff.
   fast suite now covers queued admission, multi-owner drain, terminal
   success/failure, result artifact manifest metadata, explicit stored
   result-body replay, payload replayability evidence, execution evidence, and
-  lease reclaim through the public workload HTTP surface. The remaining blockers
-  are automatic
-  provider-output capture/replay for queued inference and a live pressure proof
-  that shows queue/preemption/reclaim under real fleet load.
+  lease reclaim through the public workload HTTP surface. The remaining
+  blockers are automatic provider-output capture/replay for queued inference
+  and a live pressure proof that shows queue/preemption/reclaim under real fleet
+  load.
 - 2026-06-29: A low-context tool-call route can prove transport and provider
   parser wiring without being a valid route for reasoning-heavy tool-agent
   workloads. Public Mycelium evidence now exposes this as a consumer-contract

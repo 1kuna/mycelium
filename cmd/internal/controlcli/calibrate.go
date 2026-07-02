@@ -34,6 +34,7 @@ type calibrationPlanArtifact struct {
 	Safety              []string               `json:"safety"`
 	Preflight           bench.FleetPreflight   `json:"preflight"`
 	RunCommand          []string               `json:"run_command"`
+	LiveRunCommand      []string               `json:"live_run_command,omitempty"`
 	Notes               []string               `json:"notes,omitempty"`
 }
 
@@ -84,15 +85,17 @@ type calibrationReportArtifact struct {
 }
 
 type calibrationPlanSummary struct {
-	Profile       string   `json:"profile"`
-	Project       string   `json:"project"`
-	ConfigPath    string   `json:"config_path"`
-	DBPath        string   `json:"db_path"`
-	Models        int      `json:"models"`
-	Nodes         int      `json:"nodes"`
-	Sweeps        int      `json:"sweeps"`
-	PreflightPass bool     `json:"preflight_passed"`
-	Proofs        []string `json:"proofs,omitempty"`
+	Profile        string   `json:"profile"`
+	Project        string   `json:"project"`
+	ConfigPath     string   `json:"config_path"`
+	DBPath         string   `json:"db_path"`
+	Models         int      `json:"models"`
+	Nodes          int      `json:"nodes"`
+	Sweeps         int      `json:"sweeps"`
+	PreflightPass  bool     `json:"preflight_passed"`
+	Proofs         []string `json:"proofs,omitempty"`
+	RunCommand     []string `json:"run_command,omitempty"`
+	LiveRunCommand []string `json:"live_run_command,omitempty"`
 }
 
 type calibrationRunSummary struct {
@@ -311,6 +314,12 @@ func buildCalibrationPlan(ctx context.Context, configPath, dbPath, profile, proj
 			"--plan", outDir,
 			"--simulate",
 			"--out", filepath.Join(outDir, "runs"),
+		},
+		LiveRunCommand: []string{
+			"myce", "benchmark", "fleet",
+			"--config", filepath.Join(outDir, "benchmark-config.json"),
+			"--profile", profile,
+			"--out", filepath.Join(outDir, "live-runs"),
 		},
 		Notes: []string{
 			"live calibration remains explicit; this plan does not mutate routing policy or start engines",
@@ -673,15 +682,17 @@ func buildCalibrationReport(planDir, runDir string) (calibrationReportArtifact, 
 		SchemaVersion: calibrationReportSchemaVersion,
 		CreatedAt:     time.Now().UTC(),
 		Plan: calibrationPlanSummary{
-			Profile:       plan.Profile,
-			Project:       plan.Project,
-			ConfigPath:    plan.ConfigPath,
-			DBPath:        plan.DBPath,
-			Models:        len(plan.Models),
-			Nodes:         len(plan.Nodes),
-			Sweeps:        len(plan.Sweeps),
-			PreflightPass: plan.Preflight.Passed,
-			Proofs:        append([]string(nil), plan.Preflight.Proofs...),
+			Profile:        plan.Profile,
+			Project:        plan.Project,
+			ConfigPath:     plan.ConfigPath,
+			DBPath:         plan.DBPath,
+			Models:         len(plan.Models),
+			Nodes:          len(plan.Nodes),
+			Sweeps:         len(plan.Sweeps),
+			PreflightPass:  plan.Preflight.Passed,
+			Proofs:         append([]string(nil), plan.Preflight.Proofs...),
+			RunCommand:     append([]string(nil), plan.RunCommand...),
+			LiveRunCommand: append([]string(nil), plan.LiveRunCommand...),
 		},
 		Run: run,
 	}
@@ -700,7 +711,11 @@ func classifyCalibrationReport(report calibrationReportArtifact) (string, []stri
 		return "run_failed", []string{"calibration run artifact contains failures"}, []string{"inspect the run results.json and benchmark report"}
 	}
 	if report.Run.Simulated {
-		return "simulation_proven", []string{"live calibration has not run and no optimizer defaults were applied"}, []string{"live calibration remains an explicit operator-approved gate"}
+		next := []string{"live calibration remains an explicit operator-approved gate"}
+		if len(report.Plan.LiveRunCommand) > 0 {
+			next = append(next, strings.Join(report.Plan.LiveRunCommand, " "))
+		}
+		return "simulation_proven", []string{"live calibration has not run and no optimizer defaults were applied"}, next
 	}
 	return "live_evidence_present", nil, []string{"review live run safety before applying optimizer defaults"}
 }
@@ -736,6 +751,9 @@ func printCalibrationPlan(w interface{ Write([]byte) (int, error) }, artifact ca
 		fmt.Fprintf(w, "calibrate-proof\t%s\n", proof)
 	}
 	fmt.Fprintf(w, "calibrate-next\t%s\n", strings.Join(artifact.RunCommand, " "))
+	if len(artifact.LiveRunCommand) > 0 {
+		fmt.Fprintf(w, "calibrate-live-next\t%s\n", strings.Join(artifact.LiveRunCommand, " "))
+	}
 }
 
 func printCalibrationStatus(w interface{ Write([]byte) (int, error) }, report calibrationReportArtifact) {
