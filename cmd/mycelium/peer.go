@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -39,6 +41,7 @@ import (
 )
 
 const maxPeerRPCJSONBodyBytes = 16 << 20
+const maxWorkloadResultBodyBytes = 16 << 20
 
 func runPeer(ctx context.Context, args []string) error {
 	if ctx.Err() != nil {
@@ -523,6 +526,8 @@ type workloadRuntime interface {
 
 type workloadStore interface {
 	Job(ctx context.Context, id string) (domain.Job, error)
+	SaveWorkloadResultBody(ctx context.Context, result domain.WorkloadResultBody) error
+	WorkloadResultBody(ctx context.Context, jobID string) (domain.WorkloadResultBody, error)
 }
 
 type workloadRegistryStore interface {
@@ -624,17 +629,44 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 		if finish {
 			id = strings.TrimSuffix(id, "/finish")
 		}
+		resultBody := strings.HasSuffix(id, "/result")
+		if resultBody {
+			id = strings.TrimSuffix(id, "/result")
+		}
 		if id == "" || strings.Contains(id, "/") {
 			writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("workload id is required"))
 			return
 		}
-		if !finish && r.Method != http.MethodGet {
+		if !finish && !resultBody && r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		job, err := store.Job(r.Context(), id)
 		if err != nil {
 			writePeerRPCError(w, http.StatusNotFound, err)
+			return
+		}
+		if resultBody {
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			body, err := workloadResultBody(r.Context(), store, job)
+			if err != nil {
+				writePeerRPCError(w, http.StatusNotFound, err)
+				return
+			}
+			contentType := body.MediaType
+			if contentType == "" {
+				contentType = "application/octet-stream"
+			}
+			w.Header().Set("Content-Type", contentType)
+			w.Header().Set("Content-Length", strconv.Itoa(len(body.Body)))
+			w.Header().Set("X-Myc-Job", job.ID)
+			w.Header().Set("X-Myc-Result-SHA256", body.SHA256)
+			if _, err := w.Write(body.Body); err != nil {
+				panic(err)
+			}
 			return
 		}
 		if finish {
@@ -658,6 +690,10 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 				writePeerRPCError(w, http.StatusBadRequest, err)
 				return
 			}
+			if err := validateWorkloadResultBodyRequest(req); err != nil {
+				writePeerRPCError(w, http.StatusBadRequest, err)
+				return
+			}
 			var cause error
 			if strings.TrimSpace(req.Error) != "" {
 				cause = fmt.Errorf("%s", strings.TrimSpace(req.Error))
@@ -665,6 +701,18 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			if err := runtime.FinishJob(r.Context(), job, lease, cause); err != nil {
 				writePeerRPCError(w, http.StatusConflict, err)
 				return
+			}
+			if len(req.ResultBody) > 0 {
+				if err := store.SaveWorkloadResultBody(r.Context(), domain.WorkloadResultBody{
+					JobID:     job.ID,
+					MediaType: strings.TrimSpace(req.ResultMediaType),
+					Bytes:     req.ResultBytes,
+					SHA256:    strings.ToLower(strings.TrimSpace(req.ResultSHA256)),
+					Body:      append([]byte(nil), req.ResultBody...),
+				}); err != nil {
+					writePeerRPCError(w, http.StatusConflict, err)
+					return
+				}
 			}
 			latest, readErr := store.Job(r.Context(), id)
 			if readErr == nil {
@@ -708,6 +756,48 @@ func attachWorkloadResultArtifact(result *domain.JobResult, req workload.FinishR
 	result.ResultSHA256 = digest
 	result.ResultRedacted = true
 	return nil
+}
+
+func validateWorkloadResultBodyRequest(req workload.FinishRequest) error {
+	if len(req.ResultBody) == 0 {
+		return nil
+	}
+	if len(req.ResultBody) > maxWorkloadResultBodyBytes {
+		return fmt.Errorf("result_body exceeds %d bytes", maxWorkloadResultBodyBytes)
+	}
+	if strings.TrimSpace(req.ResultArtifact) == "" {
+		return fmt.Errorf("result_artifact is required when result_body is supplied")
+	}
+	if req.ResultBytes != 0 && req.ResultBytes != len(req.ResultBody) {
+		return fmt.Errorf("result_bytes does not match result_body")
+	}
+	if digest := strings.TrimSpace(req.ResultSHA256); digest != "" {
+		sum := sha256.Sum256(req.ResultBody)
+		if strings.ToLower(digest) != hex.EncodeToString(sum[:]) {
+			return fmt.Errorf("result_sha256 does not match result_body")
+		}
+	}
+	return nil
+}
+
+func workloadResultBody(ctx context.Context, store workloadStore, job domain.Job) (domain.WorkloadResultBody, error) {
+	if job.Result == nil || !job.Result.Terminal {
+		return domain.WorkloadResultBody{}, fmt.Errorf("workload result is not terminal")
+	}
+	if job.Result.ResultArtifact == "" {
+		return domain.WorkloadResultBody{}, fmt.Errorf("workload has no result artifact")
+	}
+	body, err := store.WorkloadResultBody(ctx, job.ID)
+	if err != nil {
+		return domain.WorkloadResultBody{}, err
+	}
+	if job.Result.ResultBytes > 0 && job.Result.ResultBytes != body.Bytes {
+		return domain.WorkloadResultBody{}, fmt.Errorf("stored result body does not match result manifest bytes")
+	}
+	if job.Result.ResultSHA256 != "" && job.Result.ResultSHA256 != body.SHA256 {
+		return domain.WorkloadResultBody{}, fmt.Errorf("stored result body does not match result manifest digest")
+	}
+	return body, nil
 }
 
 func validSHA256Hex(value string) bool {

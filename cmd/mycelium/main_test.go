@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -4356,6 +4358,79 @@ func TestWorkloadHTTPDrainsQueuedWorkAcrossOwnersAndReclaimsCapacity(t *testing.
 	}
 }
 
+func TestWorkloadHTTPStoresAndRetrievesExplicitResultBody(t *testing.T) {
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	resultBody := []byte(`{"answer":"ok"}`)
+	sum := sha256.Sum256(resultBody)
+	digest := hex.EncodeToString(sum[:])
+	job := domain.Job{
+		ID:     "job-a",
+		Model:  "model-a",
+		Status: domain.JobRunning,
+		Result: &domain.JobResult{
+			Source:         "scheduler",
+			Action:         domain.ActionLoadedNew,
+			NodeID:         "node-a",
+			PresetID:       "preset-a",
+			LeaseID:        "lease-a",
+			ResultRedacted: true,
+		},
+	}
+	if err := store.SaveJob(context.Background(), job); err != nil {
+		t.Fatalf("SaveJob: %v", err)
+	}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store}, store, "rpc-secret")
+
+	finishBody, err := json.Marshal(workload.FinishRequest{
+		ResultArtifact:  "stored://workload/job-a",
+		ResultMediaType: "application/json",
+		ResultBytes:     len(resultBody),
+		ResultSHA256:    digest,
+		ResultBody:      resultBody,
+	})
+	if err != nil {
+		t.Fatalf("marshal finish: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/workloads/job-a/finish", bytes.NewReader(finishBody))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "answer") {
+		t.Fatalf("finish status/body = %d %s", rec.Code, rec.Body.String())
+	}
+	var finished workload.FinishResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &finished); err != nil {
+		t.Fatalf("decode finish: %v", err)
+	}
+	if finished.Result == nil || finished.Result.ResultArtifact != "stored://workload/job-a" || finished.Result.ResultSHA256 != digest {
+		t.Fatalf("finished = %+v", finished)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/workloads/job-a", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "answer") {
+		t.Fatalf("status leaked result body = %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/workloads/job-a/result", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != string(resultBody) {
+		t.Fatalf("result status/body = %d %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Myc-Result-SHA256"); got != digest {
+		t.Fatalf("result digest header = %q", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("result content type = %q", got)
+	}
+}
+
 func TestWorkloadHTTPRejectsInvalidResultArtifactManifest(t *testing.T) {
 	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
@@ -4390,6 +4465,8 @@ func TestWorkloadHTTPRejectsInvalidResultArtifactManifest(t *testing.T) {
 		{name: "metadata without artifact", body: `{"result_bytes":1}`, want: "result_artifact"},
 		{name: "negative bytes", body: `{"result_artifact":"artifact://job-a","result_bytes":-1}`, want: "result_bytes"},
 		{name: "bad digest", body: `{"result_artifact":"artifact://job-a","result_sha256":"nope"}`, want: "result_sha256"},
+		{name: "body bytes mismatch", body: `{"result_artifact":"stored://workload/job-a","result_body":"eyJhbnN3ZXIiOiJvayJ9","result_bytes":1}`, want: "result_bytes"},
+		{name: "body digest mismatch", body: `{"result_artifact":"stored://workload/job-a","result_body":"eyJhbnN3ZXIiOiJvayJ9","result_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, want: "result_sha256"},
 		{name: "control character media type", body: "{\"result_artifact\":\"artifact://job-a\",\"result_media_type\":\"application/\\njson\"}", want: "result_media_type"},
 	}
 	for _, tc := range tests {
@@ -5178,6 +5255,7 @@ func (r workloadNodeResolver) AdmissionController(nodeID string) (ports.Admissio
 
 type workloadMemoryStore struct {
 	jobs    map[string]domain.Job
+	results map[string]domain.WorkloadResultBody
 	records []domain.JobRecord
 }
 
@@ -5195,6 +5273,22 @@ func (s *workloadMemoryStore) Job(_ context.Context, id string) (domain.Job, err
 		return domain.Job{}, fmt.Errorf("job %q not found", id)
 	}
 	return job, nil
+}
+
+func (s *workloadMemoryStore) SaveWorkloadResultBody(_ context.Context, result domain.WorkloadResultBody) error {
+	if s.results == nil {
+		s.results = map[string]domain.WorkloadResultBody{}
+	}
+	s.results[result.JobID] = result
+	return nil
+}
+
+func (s *workloadMemoryStore) WorkloadResultBody(_ context.Context, jobID string) (domain.WorkloadResultBody, error) {
+	result, ok := s.results[jobID]
+	if !ok {
+		return domain.WorkloadResultBody{}, fmt.Errorf("result body %q not found", jobID)
+	}
+	return result, nil
 }
 
 func (s *workloadMemoryStore) Snapshot(context.Context) ([]domain.JobRecord, error) {

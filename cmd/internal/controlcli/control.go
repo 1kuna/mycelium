@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -825,7 +827,7 @@ func runProjects(ctx context.Context, args []string) error {
 
 func runJobs(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|finish>")
+		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|finish|result>")
 	}
 	switch args[0] {
 	case "list":
@@ -838,8 +840,10 @@ func runJobs(ctx context.Context, args []string, client *http.Client) error {
 		return runJobsDrain(ctx, args[1:], client)
 	case "finish":
 		return runJobsFinish(ctx, args[1:], client)
+	case "result":
+		return runJobsResult(ctx, args[1:], client)
 	default:
-		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|finish>")
+		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|finish|result>")
 	}
 }
 
@@ -1021,6 +1025,7 @@ func runJobsFinish(ctx context.Context, args []string, client *http.Client) erro
 	resultMediaType := fs.String("result-media-type", "", "media type of the redacted result artifact")
 	resultBytes := fs.Int("result-bytes", 0, "byte size of the redacted result artifact")
 	resultSHA256 := fs.String("result-sha256", "", "sha256 digest of the redacted result artifact")
+	resultFile := fs.String("result-file", "", "read and store replayable result bytes from this file")
 	jsonOut := fs.Bool("json", false, "print JSON response")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1031,12 +1036,34 @@ func runJobsFinish(ctx context.Context, args []string, client *http.Client) erro
 	if *id == "" {
 		return fmt.Errorf("--id is required")
 	}
+	var resultBody []byte
+	if *resultFile != "" {
+		var err error
+		resultBody, err = os.ReadFile(*resultFile)
+		if err != nil {
+			return err
+		}
+		if *resultBytes != 0 && *resultBytes != len(resultBody) {
+			return fmt.Errorf("--result-bytes does not match --result-file")
+		}
+		*resultBytes = len(resultBody)
+		sum := sha256.Sum256(resultBody)
+		computed := hex.EncodeToString(sum[:])
+		if *resultSHA256 != "" && strings.ToLower(strings.TrimSpace(*resultSHA256)) != computed {
+			return fmt.Errorf("--result-sha256 does not match --result-file")
+		}
+		*resultSHA256 = computed
+		if *resultArtifact == "" {
+			*resultArtifact = "stored://workload/" + *id
+		}
+	}
 	body, err := json.Marshal(workload.FinishRequest{
 		Error:           *errorText,
 		ResultArtifact:  *resultArtifact,
 		ResultMediaType: *resultMediaType,
 		ResultBytes:     *resultBytes,
 		ResultSHA256:    *resultSHA256,
+		ResultBody:      resultBody,
 	})
 	if err != nil {
 		return err
@@ -1070,6 +1097,56 @@ func runJobsFinish(ctx context.Context, args []string, client *http.Client) erro
 		return json.NewEncoder(os.Stdout).Encode(out)
 	}
 	printWorkloadStatus(workload.StatusResponse{Job: out.Job, Result: out.Result})
+	return nil
+}
+
+func runJobsResult(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("jobs result", flag.ContinueOnError)
+	peerURL := fs.String("url", "", "peer base URL")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
+	id := fs.String("id", "", "workload job id")
+	outPath := fs.String("out", "", "output file for replayable result bytes")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *peerURL == "" {
+		return fmt.Errorf("--url is required")
+	}
+	if *id == "" {
+		return fmt.Errorf("--id is required")
+	}
+	if *outPath == "" {
+		return fmt.Errorf("--out is required")
+	}
+	endpoint := strings.TrimRight(*peerURL, "/") + "/workloads/" + url.PathEscape(*id) + "/result"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	if *rpcToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+*rpcToken)
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := readControlHTTPBody(resp.Body, "workload result body")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("workload result returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if err := os.WriteFile(*outPath, body, 0600); err != nil {
+		return err
+	}
+	fmt.Printf("workload-result\t%s\tbytes=%d\tsha256=%s\tmedia_type=%s\n",
+		*outPath,
+		len(body),
+		emptyDash(resp.Header.Get("X-Myc-Result-SHA256")),
+		emptyDash(resp.Header.Get("Content-Type")),
+	)
 	return nil
 }
 
