@@ -40,8 +40,8 @@ Mycelium is a peer-native, LAN-local inference control plane:
   `myce route certify`, `myce route status`, `myce debug job`,
   `myce debug bundle`, `myce jobs admit`, `myce jobs status`,
   `myce jobs drain`, `myce jobs finish`,
-  `myce telemetry samples`, benchmark commands, model and recommendation
-  inspection commands.
+  `myce telemetry samples`, `myce calibrate plan`, `myce calibrate run`,
+  benchmark commands, model and recommendation inspection commands.
 - Runtime proof surfaces: owner telemetry, run/session metrics, job registry,
   route headers, preflight artifacts, debug bundles, and optimization summaries.
 - Scheduler/runtime: owner-authoritative admission, resource estimation,
@@ -77,6 +77,12 @@ operator wants a named contract with a default evidence home instead of a
 one-off preflight command. Route contracts are generic JSON files that capture
 model/alias, context, JSON/tool/streaming, finish/content, live-catalog, and
 safe consumer-label gates; saved artifacts remain redacted preflight evidence.
+Use `myce calibrate plan` for project-free synthetic calibration planning. It
+reads inventory, writes a secret-safe fleet benchmark config and calibration
+plan artifact, and validates the plan with the existing deterministic fleet
+simulation. `myce calibrate run --simulate` executes that generated plan without
+starting live engines or changing route policy. Live calibration remains an
+explicit later gate.
 
 For thinking/tool-agent workloads, do not treat a low-context tool-call smoke as
 a consumer-ready route. Use `--context-cap` and `--min-context-cap` so Mycelium

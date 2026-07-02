@@ -17,6 +17,7 @@ import (
 
 	"mycelium/internal/bench"
 	"mycelium/internal/catalog"
+	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/optimizer"
 	peercoord "mycelium/internal/peer"
@@ -4044,6 +4045,146 @@ func TestRouteContractValidationAndUsageErrors(t *testing.T) {
 	}
 }
 
+func TestRunCalibratePlanWritesSimulationReadyBenchmarkConfig(t *testing.T) {
+	dbPath, configPath := writeCalibrationInventoryFixture(t)
+	outDir := filepath.Join(t.TempDir(), "calibration-plan")
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = Run(context.Background(), []string{"calibrate", "plan", "--config", configPath, "--db", dbPath, "--out", outDir})
+	})
+	if runErr != nil {
+		t.Fatalf("calibrate plan: %v\n%s", runErr, output)
+	}
+	for _, want := range []string{
+		"calibrate-plan\tprofile=conservative\tproject=calibration-project",
+		"models=2\tnodes=3",
+		"calibrate-proof\tcold placement observed",
+		"calibrate-proof\twarm reuse observed",
+		"calibrate-proof\thard preemption/reallocation pressure observed",
+		"calibrate-next\tmyce calibrate run --plan " + outDir + " --simulate --out " + filepath.Join(outDir, "runs"),
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("calibrate plan output missing %q:\n%s", want, output)
+		}
+	}
+	for _, name := range []string{"benchmark-config.json", "calibration-plan.json"} {
+		info, err := os.Stat(filepath.Join(outDir, name))
+		if err != nil {
+			t.Fatalf("missing %s: %v", name, err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("%s mode = %o", name, info.Mode().Perm())
+		}
+	}
+	benchData, err := os.ReadFile(filepath.Join(outDir, "benchmark-config.json"))
+	if err != nil {
+		t.Fatalf("read benchmark config: %v", err)
+	}
+	if strings.Contains(string(benchData), "rpc-secret") || strings.Contains(string(benchData), "gateway-secret") {
+		t.Fatalf("calibration benchmark config leaked token material: %s", benchData)
+	}
+	cfg, err := bench.LoadFleetConfig(filepath.Join(outDir, "benchmark-config.json"))
+	if err != nil {
+		t.Fatalf("load generated benchmark config: %v", err)
+	}
+	if cfg.Project != "calibration-project" || len(cfg.Models) != 2 || len(cfg.Waves) != 3 || cfg.GatewayToken != "" || cfg.RPCToken != "" {
+		t.Fatalf("generated benchmark config = %+v", cfg)
+	}
+	if _, err := bench.SimulateFleet(context.Background(), cfg, bench.FleetProfileConservative, clock.System{}); err != nil {
+		t.Fatalf("generated benchmark config did not simulate: %v", err)
+	}
+
+	planData, err := os.ReadFile(filepath.Join(outDir, "calibration-plan.json"))
+	if err != nil {
+		t.Fatalf("read calibration plan: %v", err)
+	}
+	if strings.Contains(string(planData), "rpc-secret") || strings.Contains(string(planData), "gateway-secret") {
+		t.Fatalf("calibration plan leaked token material: %s", planData)
+	}
+	var artifact calibrationPlanArtifact
+	if err := json.Unmarshal(planData, &artifact); err != nil {
+		t.Fatalf("decode calibration plan: %v", err)
+	}
+	if artifact.SchemaVersion != calibrationPlanSchemaVersion || !artifact.Preflight.Passed || len(artifact.Sweeps) != 3 {
+		t.Fatalf("calibration artifact = %+v", artifact)
+	}
+}
+
+func TestRunCalibrateRunSimulatesGeneratedPlan(t *testing.T) {
+	dbPath, configPath := writeCalibrationInventoryFixture(t)
+	planDir := filepath.Join(t.TempDir(), "calibration-plan")
+	if err := Run(context.Background(), []string{"calibrate", "plan", "--config", configPath, "--db", dbPath, "--out", planDir}); err != nil {
+		t.Fatalf("calibrate plan: %v", err)
+	}
+	runOut := filepath.Join(t.TempDir(), "calibration-run")
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = Run(context.Background(), []string{"calibrate", "run", "--plan", planDir, "--simulate", "--out", runOut})
+	})
+	if runErr != nil {
+		t.Fatalf("calibrate run: %v\n%s", runErr, output)
+	}
+	if !strings.Contains(output, "calibrate-run\t") || !strings.Contains(output, "\tsimulated\t") || !strings.Contains(output, "proofs=") {
+		t.Fatalf("calibrate run output = %s", output)
+	}
+	matches, err := filepath.Glob(filepath.Join(runOut, "calibration-*", "results.json"))
+	if err != nil {
+		t.Fatalf("glob run results: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("run results matches = %v", matches)
+	}
+
+	if err := Run(context.Background(), []string{"calibrate", "run", "--plan", planDir, "--out", runOut}); err == nil || !strings.Contains(err.Error(), "--simulate") {
+		t.Fatalf("live calibrate run boundary err = %v", err)
+	}
+}
+
+func TestCalibratePlanFailsWithoutAllocatorPressureInventory(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.SaveProject(context.Background(), domain.Project{ID: "calibration-project"}); err != nil {
+		t.Fatalf("save project: %v", err)
+	}
+	if err := store.SaveNode(context.Background(), domain.Node{ID: "node-a", Status: domain.NodeReady, MaxUtil: 0.9, OOMSeverity: domain.OOMSoft, DiskTotalMB: 1000, DiskFreeMB: 900, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 24000}}}); err != nil {
+		t.Fatalf("save node: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), domain.Preset{ID: "small", ModelRef: "small", Backend: domain.BackendLlamaCpp, ContextLength: 4096, Capabilities: []domain.Capability{domain.CapabilityChat}, EstWeightsMB: 4000, KVPerTokenMB: 0.01}); err != nil {
+		t.Fatalf("save preset: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), "peer.json")
+	if err := os.WriteFile(configPath, []byte(`{"id":"gateway-peer","listen":"http://gateway.test","store_path":`+quoteJSON(dbPath)+`}`), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	err = Run(context.Background(), []string{"calibrate", "plan", "--config", configPath, "--out", t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "requires at least two ready nodes") {
+		t.Fatalf("weak calibration inventory err = %v", err)
+	}
+}
+
+func TestCalibrateUsageErrors(t *testing.T) {
+	if err := Run(context.Background(), []string{"calibrate"}); err == nil || !strings.Contains(err.Error(), "usage: myce calibrate") {
+		t.Fatalf("calibrate usage err = %v", err)
+	}
+	if err := Run(context.Background(), []string{"calibrate", "bogus"}); err == nil || !strings.Contains(err.Error(), "usage: myce calibrate") {
+		t.Fatalf("calibrate bogus err = %v", err)
+	}
+	if err := Run(context.Background(), []string{"calibrate", "plan"}); err == nil || !strings.Contains(err.Error(), "--out") {
+		t.Fatalf("calibrate plan missing out err = %v", err)
+	}
+	if err := Run(context.Background(), []string{"calibrate", "run", "--simulate"}); err == nil || !strings.Contains(err.Error(), "--plan") {
+		t.Fatalf("calibrate run missing plan err = %v", err)
+	}
+}
+
 func TestConsumerEvidenceFromFlags(t *testing.T) {
 	evidence, err := consumerEvidenceFromFlags(" run ", " item ", "TIMEOUT", 42, " deadline ", "FAIL", " schema ")
 	if err != nil {
@@ -5034,6 +5175,49 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func writeCalibrationInventoryFixture(t *testing.T) (string, string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	cfg := controlFleetConfig()
+	if err := store.SaveProject(context.Background(), domain.Project{ID: "calibration-project"}); err != nil {
+		t.Fatalf("save project: %v", err)
+	}
+	for _, node := range cfg.Simulation.Nodes {
+		node.Address = "http://" + node.ID + ".test"
+		if err := store.SaveNode(context.Background(), node); err != nil {
+			t.Fatalf("save node %s: %v", node.ID, err)
+		}
+	}
+	for _, preset := range cfg.Simulation.Presets {
+		if err := store.SavePreset(context.Background(), preset); err != nil {
+			t.Fatalf("save preset %s: %v", preset.ID, err)
+		}
+	}
+	for _, inst := range cfg.Simulation.Instances {
+		if err := store.SaveInstance(context.Background(), inst); err != nil {
+			t.Fatalf("save instance %s: %v", inst.ID, err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), "peer.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "id": "gateway-peer",
+  "listen": "http://gateway.test",
+  "store_path": `+quoteJSON(dbPath)+`,
+  "rpc_token": "rpc-secret",
+  "gateway_token": "gateway-secret"
+}`), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return dbPath, configPath
 }
 
 func controlFleetConfig() bench.FleetBenchmarkConfig {

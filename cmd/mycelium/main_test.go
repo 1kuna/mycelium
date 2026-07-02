@@ -51,7 +51,7 @@ func TestRunDispatchesKnownCommands(t *testing.T) {
 		{name: "run", args: []string{"run"}, want: "read peer config"},
 		{name: "ctl gateway preflight", args: []string{"ctl", "gateway", "preflight"}, want: "--url is required"},
 		{name: "ctl route", args: []string{"ctl", "route"}, want: "usage: myce route <certify|status>"},
-		{name: "ctl", args: []string{"ctl"}, want: "usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark|gateway|route|doctor|debug|status>"},
+		{name: "ctl", args: []string{"ctl"}, want: "usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark|calibrate|gateway|route|doctor|debug|status>"},
 		{name: "server removed", args: []string{"server"}, want: "peer-native"},
 		{name: "node removed", args: []string{"node"}, want: "peer-native"},
 		{name: "unknown", args: []string{"wat"}, want: "unknown command"},
