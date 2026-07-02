@@ -2131,16 +2131,13 @@ func runGatewayAllocate(ctx context.Context, args []string, client *http.Client)
 	requireVision := fs.Bool("require-vision", false, "require a vision-capable route envelope")
 	requireTools := fs.Bool("require-tools", false, "require a tool-call-capable route envelope")
 	outDir := fs.String("out", "", "write allocation-plan.json and runner.env artifacts into this directory")
+	verifyPlan := fs.String("verify-plan", "", "verify an existing allocation-plan.json before launching an external runner")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *desiredWorkers < 0 {
 		return fmt.Errorf("desired-workers must be >= 0")
-	}
-	loaded, err := loadOperatorConfig(*configPath)
-	if err != nil {
-		return err
 	}
 	req := gatewayAllocationRequest{
 		Model:          strings.TrimSpace(*model),
@@ -2151,6 +2148,22 @@ func runGatewayAllocate(ctx context.Context, args []string, client *http.Client)
 		RequireVision:  *requireVision,
 		RequireTools:   *requireTools,
 	}
+	var plan gatewayAllocationReport
+	if strings.TrimSpace(*verifyPlan) != "" {
+		loadedPlan, err := loadGatewayAllocationPlan(*verifyPlan)
+		if err != nil {
+			return err
+		}
+		plan = loadedPlan
+		req = plan.Request
+		if !flagVisited(fs, "config") && plan.ConfigPath != "" {
+			*configPath = plan.ConfigPath
+		}
+	}
+	loaded, err := loadOperatorConfig(*configPath)
+	if err != nil {
+		return err
+	}
 	report, err := buildGatewayAllocationReport(ctx, loaded, req, gatewayRoutesLiveOptions{
 		Enabled:   *live,
 		URL:       *url,
@@ -2160,6 +2173,16 @@ func runGatewayAllocate(ctx context.Context, args []string, client *http.Client)
 	})
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(*verifyPlan) != "" {
+		verification := verifyGatewayAllocationPlan(plan, report, time.Now().UTC())
+		report.Verification = &verification
+		if verification.Status != "valid" {
+			if *jsonOut {
+				_ = writePrettyJSON(os.Stdout, report)
+			}
+			return fmt.Errorf("allocation plan verification failed: %s", verification.Reason)
+		}
 	}
 	if *outDir != "" {
 		artifacts, err := writeGatewayAllocationArtifacts(*outDir, &report)
@@ -2237,20 +2260,23 @@ type gatewayAllocationRequest struct {
 }
 
 type gatewayAllocationReport struct {
-	ConfigPath       string                      `json:"config_path"`
-	PeerID           string                      `json:"peer_id"`
-	Gateway          string                      `json:"gateway"`
-	BaseURL          string                      `json:"base_url"`
-	Live             gatewayRoutesLive           `json:"live,omitempty"`
-	Request          gatewayAllocationRequest    `json:"request"`
-	Status           string                      `json:"status"`
-	AllocatedWorkers int                         `json:"allocated_workers"`
-	ReservationState string                      `json:"reservation_state"`
-	Backpressure     string                      `json:"backpressure"`
-	Contract         gatewayExternalToolContract `json:"contract"`
-	Routes           []gatewayAllocationRoute    `json:"routes"`
-	Refusals         []gatewayAllocationRefusal  `json:"refusals,omitempty"`
-	Artifacts        *gatewayAllocationArtifacts `json:"artifacts,omitempty"`
+	ConfigPath       string                         `json:"config_path"`
+	PeerID           string                         `json:"peer_id"`
+	Gateway          string                         `json:"gateway"`
+	BaseURL          string                         `json:"base_url"`
+	Live             gatewayRoutesLive              `json:"live,omitempty"`
+	Request          gatewayAllocationRequest       `json:"request"`
+	Status           string                         `json:"status"`
+	AllocatedWorkers int                            `json:"allocated_workers"`
+	ReservationState string                         `json:"reservation_state"`
+	Backpressure     string                         `json:"backpressure"`
+	Contract         gatewayExternalToolContract    `json:"contract"`
+	IssuedAt         time.Time                      `json:"issued_at,omitempty"`
+	ExpiresAt        time.Time                      `json:"expires_at,omitempty"`
+	Routes           []gatewayAllocationRoute       `json:"routes"`
+	Refusals         []gatewayAllocationRefusal     `json:"refusals,omitempty"`
+	Artifacts        *gatewayAllocationArtifacts    `json:"artifacts,omitempty"`
+	Verification     *gatewayAllocationVerification `json:"verification,omitempty"`
 }
 
 type gatewayExternalToolContract struct {
@@ -2291,6 +2317,18 @@ type gatewayAllocationRefusal struct {
 type gatewayAllocationArtifacts struct {
 	PlanPath string `json:"plan_path"`
 	EnvPath  string `json:"env_path"`
+}
+
+type gatewayAllocationVerification struct {
+	PlanPath               string   `json:"plan_path,omitempty"`
+	Status                 string   `json:"status"`
+	Reason                 string   `json:"reason,omitempty"`
+	Stale                  bool     `json:"stale"`
+	PlanWorkers            int      `json:"plan_workers"`
+	CurrentWorkers         int      `json:"current_workers"`
+	PlanAcceptedPresets    []string `json:"plan_accepted_presets,omitempty"`
+	CurrentAcceptedPresets []string `json:"current_accepted_presets,omitempty"`
+	MissingAcceptedPresets []string `json:"missing_accepted_presets,omitempty"`
 }
 
 type gatewayRouteReadinessOptions struct {
@@ -2380,6 +2418,7 @@ func buildGatewayRoutesReport(ctx context.Context, configPath string, live gatew
 func buildGatewayAllocationReport(ctx context.Context, loaded loadedOperatorConfig, req gatewayAllocationRequest, live gatewayRoutesLiveOptions) (gatewayAllocationReport, error) {
 	cfg := loaded.Config
 	gateway := adminBaseURL(cfg.Listen)
+	now := time.Now().UTC()
 	report := gatewayAllocationReport{
 		ConfigPath:       loaded.Path,
 		PeerID:           cfg.ID,
@@ -2388,6 +2427,7 @@ func buildGatewayAllocationReport(ctx context.Context, loaded loadedOperatorConf
 		Request:          req,
 		ReservationState: "not_reserved",
 		Backpressure:     "use allocated_workers; on 503 honor Retry-After and pause the affected worker instead of spawning replacement requests",
+		IssuedAt:         now,
 	}
 	if gateway == "" {
 		report.BaseURL = ""
@@ -2421,7 +2461,7 @@ func buildGatewayAllocationReport(ctx context.Context, loaded loadedOperatorConf
 	candidates := presetsForModel(cfg.Presets, req.Model)
 	if len(candidates) == 0 {
 		report.Status = "model_not_configured"
-		report.Contract = gatewayAllocationContract(report)
+		finalizeGatewayAllocationReport(&report)
 		return report, nil
 	}
 	sort.Slice(candidates, func(i, j int) bool {
@@ -2483,8 +2523,15 @@ func buildGatewayAllocationReport(ctx context.Context, loaded loadedOperatorConf
 	default:
 		report.Status = "allocated"
 	}
-	report.Contract = gatewayAllocationContract(report)
+	finalizeGatewayAllocationReport(&report)
 	return report, nil
+}
+
+func finalizeGatewayAllocationReport(report *gatewayAllocationReport) {
+	report.Contract = gatewayAllocationContract(*report)
+	if !report.IssuedAt.IsZero() && report.Contract.StaleAfterSeconds > 0 {
+		report.ExpiresAt = report.IssuedAt.Add(time.Duration(report.Contract.StaleAfterSeconds) * time.Second)
+	}
 }
 
 func findGatewayProject(projects []domain.Project, id string) (domain.Project, bool) {
@@ -2569,6 +2616,15 @@ func printGatewayAllocationReport(w io.Writer, report gatewayAllocationReport) {
 	if report.Artifacts != nil {
 		fmt.Fprintf(w, "artifacts\tplan=%s\tenv=%s\n", report.Artifacts.PlanPath, report.Artifacts.EnvPath)
 	}
+	if report.Verification != nil {
+		fmt.Fprintf(w, "verification\tstatus=%s\tstale=%t\tplan_workers=%d\tcurrent_workers=%d\treason=%s\n",
+			emptyDash(report.Verification.Status),
+			report.Verification.Stale,
+			report.Verification.PlanWorkers,
+			report.Verification.CurrentWorkers,
+			emptyDash(report.Verification.Reason),
+		)
+	}
 	for _, route := range report.Routes {
 		fmt.Fprintf(w, "route\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tworkers=%d\tenvelope=%d\treadiness=%s\tlive_model=%t\tlive_match=%s\n",
 			emptyDash(route.PresetID),
@@ -2610,6 +2666,97 @@ func writeGatewayAllocationArtifacts(outDir string, report *gatewayAllocationRep
 	return artifacts, nil
 }
 
+func loadGatewayAllocationPlan(path string) (gatewayAllocationReport, error) {
+	var plan gatewayAllocationReport
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return plan, fmt.Errorf("read allocation plan: %w", err)
+	}
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return plan, fmt.Errorf("parse allocation plan: %w", err)
+	}
+	if plan.Request.Model == "" {
+		return plan, fmt.Errorf("allocation plan is missing request model")
+	}
+	return plan, nil
+}
+
+func verifyGatewayAllocationPlan(plan, current gatewayAllocationReport, now time.Time) gatewayAllocationVerification {
+	verification := gatewayAllocationVerification{
+		Status:                 "valid",
+		PlanWorkers:            plan.AllocatedWorkers,
+		CurrentWorkers:         current.AllocatedWorkers,
+		PlanAcceptedPresets:    acceptedAllocationPresets(plan),
+		CurrentAcceptedPresets: acceptedAllocationPresets(current),
+	}
+	if plan.Artifacts != nil {
+		verification.PlanPath = plan.Artifacts.PlanPath
+	}
+	if plan.ExpiresAt.IsZero() {
+		verification.Status = "invalid"
+		verification.Reason = "allocation plan has no expires_at"
+		return verification
+	}
+	if !now.Before(plan.ExpiresAt) {
+		verification.Status = "stale"
+		verification.Stale = true
+		verification.Reason = "allocation plan expired; refresh before launch"
+		return verification
+	}
+	if current.AllocatedWorkers < plan.AllocatedWorkers {
+		verification.Status = "insufficient_current_allocation"
+		verification.Reason = "current allocation has fewer workers than the plan"
+		return verification
+	}
+	missing := missingStrings(verification.PlanAcceptedPresets, mapFromStrings(verification.CurrentAcceptedPresets))
+	if len(missing) > 0 {
+		verification.Status = "accepted_route_missing"
+		verification.Reason = "one or more planned route envelopes are no longer accepted"
+		verification.MissingAcceptedPresets = missing
+		return verification
+	}
+	return verification
+}
+
+func acceptedAllocationPresets(report gatewayAllocationReport) []string {
+	out := make([]string, 0, len(report.Routes))
+	for _, route := range report.Routes {
+		if route.AllocatedWorkers > 0 && route.PresetID != "" {
+			out = append(out, route.PresetID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func mapFromStrings(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		out[value] = struct{}{}
+	}
+	return out
+}
+
+func missingStrings(values []string, have map[string]struct{}) []string {
+	var out []string
+	for _, value := range values {
+		if _, ok := have[value]; !ok {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func flagVisited(fs *flag.FlagSet, name string) bool {
+	visited := false
+	fs.Visit(func(flag *flag.Flag) {
+		if flag.Name == name {
+			visited = true
+		}
+	})
+	return visited
+}
+
 func gatewayAllocationRunnerEnv(report gatewayAllocationReport) string {
 	accepted := make([]string, 0, len(report.Routes))
 	for _, route := range report.Routes {
@@ -2625,6 +2772,8 @@ func gatewayAllocationRunnerEnv(report gatewayAllocationReport) string {
 		envAssignment("MYCELIUM_CONTEXT_CAP", strconv.Itoa(report.Contract.ContextCap)),
 		envAssignment("MYCELIUM_ALLOCATION_RESERVATION_STATE", report.ReservationState),
 		envAssignment("MYCELIUM_ALLOCATION_STALE_AFTER_SECONDS", strconv.Itoa(report.Contract.StaleAfterSeconds)),
+		envAssignment("MYCELIUM_ALLOCATION_ISSUED_AT", report.IssuedAt.Format(time.RFC3339)),
+		envAssignment("MYCELIUM_ALLOCATION_EXPIRES_AT", report.ExpiresAt.Format(time.RFC3339)),
 		envAssignment("MYCELIUM_BACKPRESSURE", "honor_retry_after"),
 		envAssignment("MYCELIUM_ACCEPTED_PRESETS", strings.Join(accepted, ",")),
 		envAssignment("MYCELIUM_REFUSAL_COUNT", strconv.Itoa(len(report.Refusals))),
