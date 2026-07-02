@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -35,11 +38,24 @@ type serviceSpec struct {
 	LogDir     string
 	UnitPath   string
 	RunUser    string
+	TargetPath string
+	BackupPath string
+	DryRun     bool
 }
 
 type serviceStatus struct {
 	Manager string
 	Health  string
+}
+
+type serviceUpgradePlan struct {
+	Spec          serviceSpec
+	GOOS          string
+	BackupPath    string
+	CurrentDigest string
+	CurrentBytes  int64
+	TargetDigest  string
+	TargetBytes   int64
 }
 
 type serviceManager interface {
@@ -56,7 +72,7 @@ func runService(ctx context.Context, args []string) error {
 
 func runServiceWithManager(ctx context.Context, args []string, manager serviceManager, goos string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: mycelium service <plan|install|status|uninstall>")
+		return fmt.Errorf("usage: mycelium service <plan|install|status|uninstall|upgrade>")
 	}
 	spec, err := parseServiceSpec(args[0], args[1:], goos)
 	if err != nil {
@@ -64,6 +80,14 @@ func runServiceWithManager(ctx context.Context, args []string, manager serviceMa
 	}
 	if args[0] == "plan" {
 		fmt.Fprint(os.Stdout, renderServicePlan(spec, goos))
+		return nil
+	}
+	if args[0] == "upgrade" {
+		plan, err := buildServiceUpgradePlan(spec, goos)
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(os.Stdout, renderServiceUpgradePlan(plan))
 		return nil
 	}
 	if manager == nil {
@@ -118,6 +142,9 @@ func parseServiceSpec(command string, args []string, goos string) (serviceSpec, 
 	user := fs.Bool("user", false, "install as a user service")
 	system := fs.Bool("system", false, "install as a system service")
 	runUser := fs.String("run-user", "", "user account for a system LaunchDaemon")
+	targetPath := fs.String("target-binary", "", "candidate binary for a dry-run service upgrade plan")
+	backupPath := fs.String("backup", "", "backup path for the current service binary during upgrade")
+	dryRun := fs.Bool("dry-run", false, "print an upgrade plan without changing the host")
 	if err := fs.Parse(args); err != nil {
 		return serviceSpec{}, err
 	}
@@ -158,6 +185,9 @@ func parseServiceSpec(command string, args []string, goos string) (serviceSpec, 
 		Home:       home,
 		LogDir:     filepath.Join(home, ".mycelium", "logs"),
 		RunUser:    serviceRunUser,
+		TargetPath: strings.TrimSpace(*targetPath),
+		BackupPath: strings.TrimSpace(*backupPath),
+		DryRun:     *dryRun,
 	}
 	if spec.Name == "" {
 		return serviceSpec{}, fmt.Errorf("service name must contain a letter, digit, dot, underscore, or dash")
@@ -430,6 +460,129 @@ func renderServicePlan(spec serviceSpec, goos string) string {
 		out.WriteString("\n")
 	}
 	return out.String()
+}
+
+func buildServiceUpgradePlan(spec serviceSpec, goos string) (serviceUpgradePlan, error) {
+	if !spec.DryRun {
+		return serviceUpgradePlan{}, fmt.Errorf("service upgrade is dry-run only; pass --dry-run and follow the printed operator commands")
+	}
+	if spec.TargetPath == "" {
+		return serviceUpgradePlan{}, fmt.Errorf("--target-binary is required for service upgrade")
+	}
+	if spec.BackupPath == "" {
+		spec.BackupPath = spec.BinaryPath + ".pre-upgrade.bak"
+	}
+	currentDigest, currentBytes, err := fileSHA256(spec.BinaryPath)
+	if err != nil {
+		return serviceUpgradePlan{}, fmt.Errorf("current service binary: %w", err)
+	}
+	targetDigest, targetBytes, err := fileSHA256(spec.TargetPath)
+	if err != nil {
+		return serviceUpgradePlan{}, fmt.Errorf("target service binary: %w", err)
+	}
+	return serviceUpgradePlan{
+		Spec:          spec,
+		GOOS:          goos,
+		BackupPath:    spec.BackupPath,
+		CurrentDigest: currentDigest,
+		CurrentBytes:  currentBytes,
+		TargetDigest:  targetDigest,
+		TargetBytes:   targetBytes,
+	}, nil
+}
+
+func fileSHA256(path string) (string, int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	n, err := io.Copy(hash, file)
+	if err != nil {
+		return "", 0, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	if info.IsDir() {
+		return "", 0, fmt.Errorf("%s is a directory", path)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), n, nil
+}
+
+func renderServiceUpgradePlan(plan serviceUpgradePlan) string {
+	spec := plan.Spec
+	var out strings.Builder
+	fmt.Fprintf(&out, "upgrade_dry_run\ttrue\n")
+	fmt.Fprintf(&out, "service\t%s\n", spec.Label)
+	fmt.Fprintf(&out, "scope\t%s\n", spec.Scope)
+	fmt.Fprintf(&out, "stable_binary\t%s\n", spec.BinaryPath)
+	fmt.Fprintf(&out, "target_binary\t%s\n", spec.TargetPath)
+	fmt.Fprintf(&out, "backup\t%s\n", plan.BackupPath)
+	fmt.Fprintf(&out, "current_sha256\t%s\n", plan.CurrentDigest)
+	fmt.Fprintf(&out, "current_bytes\t%d\n", plan.CurrentBytes)
+	fmt.Fprintf(&out, "target_sha256\t%s\n", plan.TargetDigest)
+	fmt.Fprintf(&out, "target_bytes\t%d\n", plan.TargetBytes)
+	out.WriteString("commands\n")
+	statusCmd := serviceStatusCommand(spec)
+	fmt.Fprintf(&out, "  preflight_status: %s\n", statusCmd)
+	fmt.Fprintf(&out, "  backup: %s\n", servicePrivilegedCommand(spec, "cp", spec.BinaryPath, plan.BackupPath))
+	fmt.Fprintf(&out, "  replace: %s\n", servicePrivilegedCommand(spec, "install", "-m", "0755", spec.TargetPath, spec.BinaryPath))
+	fmt.Fprintf(&out, "  restart: %s\n", serviceRestartCommand(spec, plan.GOOS))
+	fmt.Fprintf(&out, "  verify: %s\n", statusCmd)
+	fmt.Fprintf(&out, "  rollback: %s && %s && %s\n",
+		servicePrivilegedCommand(spec, "install", "-m", "0755", plan.BackupPath, spec.BinaryPath),
+		serviceRestartCommand(spec, plan.GOOS),
+		statusCmd,
+	)
+	out.WriteString("notes\n")
+	out.WriteString("  no live change was made\n")
+	out.WriteString("  run preflight_status before backup and verify after restart\n")
+	out.WriteString("  rollback restores the backed-up stable binary and reruns service status\n")
+	return out.String()
+}
+
+func serviceStatusCommand(spec serviceSpec) string {
+	prefix := ""
+	if spec.Scope == serviceScopeSystem {
+		prefix = "sudo "
+	}
+	return fmt.Sprintf("%s%s service status --config %s --name %s --%s", prefix, shellQuote(spec.BinaryPath), shellQuote(spec.ConfigPath), shellQuote(spec.Name), spec.Scope)
+}
+
+func servicePrivilegedCommand(spec serviceSpec, name string, args ...string) string {
+	parts := []string{name}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	command := strings.Join(parts, " ")
+	if spec.Scope == serviceScopeSystem {
+		return "sudo " + command
+	}
+	return command
+}
+
+func serviceRestartCommand(spec serviceSpec, goos string) string {
+	switch goos {
+	case "darwin":
+		prefix := ""
+		if spec.Scope == serviceScopeSystem {
+			prefix = "sudo "
+		}
+		return fmt.Sprintf("%slaunchctl kickstart -k %s/%s", prefix, launchdDomain(spec), spec.Label)
+	case "linux":
+		systemctl := "systemctl --user"
+		prefix := ""
+		if spec.Scope == serviceScopeSystem {
+			systemctl = "systemctl"
+			prefix = "sudo "
+		}
+		return fmt.Sprintf("%s%s restart %s", prefix, systemctl, shellQuote(filepath.Base(spec.UnitPath)))
+	default:
+		return "unsupported service restart for " + goos
+	}
 }
 
 func shellQuote(value string) string {

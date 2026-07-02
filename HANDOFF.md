@@ -43,6 +43,10 @@ Mycelium is a peer-native, LAN-local inference control plane:
   `myce telemetry samples`, `myce calibrate plan`, `myce calibrate run`,
   `myce calibrate status`, `myce calibrate report`, benchmark commands, model
   and recommendation inspection commands.
+- Service operations: `mycelium service plan`, `install`, `status`,
+  `uninstall`, and dry-run-only `upgrade` for binary backup/replacement,
+  restart, verification, and rollback command evidence without mutating the
+  host.
 - Runtime proof surfaces: owner telemetry, run/session metrics, job registry,
   route headers, preflight artifacts, debug bundles, and optimization summaries.
 - Scheduler/runtime: owner-authoritative admission, resource estimation,
@@ -147,5 +151,8 @@ capture for queued payloads is still a separate product gate.
   evidence surfaces.
 - Keep the Mac service activation path documented as generic commands with
   rollback/readiness checks, not host-specific narratives.
+- Keep service upgrade activation behind an operator maintenance window; the
+  repo-local `service upgrade --dry-run` surface prints the command plan and
+  binary hashes but does not switch a live service.
 - Move any private operational evidence into ignored `ops/private/*.local.md`
   notes or an out-of-repo private handoff, not tracked docs.

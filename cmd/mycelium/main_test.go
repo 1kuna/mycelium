@@ -731,6 +731,61 @@ func TestServiceSpecAndRenderers(t *testing.T) {
 	if !strings.Contains(quotedPlan, "sudo '/tmp/my celium' service install") {
 		t.Fatalf("plan did not shell-quote binary with spaces:\n%s", quotedPlan)
 	}
+	stableBinary := filepath.Join(home, "mycelium-stable")
+	targetBinary := filepath.Join(home, "mycelium target")
+	if err := os.WriteFile(stableBinary, []byte("stable-binary"), 0755); err != nil {
+		t.Fatalf("write stable binary: %v", err)
+	}
+	if err := os.WriteFile(targetBinary, []byte("target-binary"), 0755); err != nil {
+		t.Fatalf("write target binary: %v", err)
+	}
+	upgradeSpec, err := parseServiceSpec("upgrade", []string{
+		"--config", configPath,
+		"--binary", stableBinary,
+		"--target-binary", targetBinary,
+		"--backup", filepath.Join(home, "stable.backup"),
+		"--name", "fleet one",
+		"--user",
+		"--dry-run",
+	}, "darwin")
+	if err != nil {
+		t.Fatalf("parseServiceSpec upgrade: %v", err)
+	}
+	upgradePlan, err := buildServiceUpgradePlan(upgradeSpec, "darwin")
+	if err != nil {
+		t.Fatalf("buildServiceUpgradePlan: %v", err)
+	}
+	renderedUpgrade := renderServiceUpgradePlan(upgradePlan)
+	for _, want := range []string{
+		"upgrade_dry_run\ttrue",
+		"stable_binary\t" + stableBinary,
+		"target_binary\t" + targetBinary,
+		"current_sha256\t",
+		"target_sha256\t",
+		"preflight_status:",
+		"backup: cp ",
+		"replace: install -m 0755 ",
+		"restart: launchctl kickstart -k gui/",
+		"verify:",
+		"rollback:",
+		"no live change was made",
+	} {
+		if !strings.Contains(renderedUpgrade, want) {
+			t.Fatalf("upgrade plan missing %q:\n%s", want, renderedUpgrade)
+		}
+	}
+	if strings.Contains(renderedUpgrade, "join-secret") || strings.Contains(renderedUpgrade, "rpc-secret") {
+		t.Fatalf("upgrade plan leaked secret: %s", renderedUpgrade)
+	}
+	if _, err := buildServiceUpgradePlan(serviceSpec{BinaryPath: stableBinary, TargetPath: targetBinary}, "darwin"); err == nil || !strings.Contains(err.Error(), "dry-run") {
+		t.Fatalf("non-dry-run upgrade err = %v", err)
+	}
+	if _, err := buildServiceUpgradePlan(serviceSpec{BinaryPath: stableBinary, DryRun: true}, "darwin"); err == nil || !strings.Contains(err.Error(), "--target-binary") {
+		t.Fatalf("missing target upgrade err = %v", err)
+	}
+	if _, err := buildServiceUpgradePlan(serviceSpec{BinaryPath: stableBinary, TargetPath: filepath.Join(home, "missing"), DryRun: true}, "darwin"); err == nil || !strings.Contains(err.Error(), "target service binary") {
+		t.Fatalf("missing target binary err = %v", err)
+	}
 	if _, err := parseServiceSpec("install", nil, "darwin"); err == nil || !strings.Contains(err.Error(), "--config") {
 		t.Fatalf("missing config err = %v", err)
 	}

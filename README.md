@@ -97,12 +97,25 @@ mycelium service plan \
   --system
 ```
 
+Plan a binary upgrade without changing the host:
+
+```bash
+mycelium service upgrade \
+  --config ~/.mycelium/peer.json \
+  --binary /path/to/stable/mycelium \
+  --target-binary /path/to/new/mycelium \
+  --name real-fleet \
+  --user \
+  --dry-run
+```
+
 On macOS, use `--system` when a user LaunchAgent cannot reach LAN peers because
 of Local Network permission or binary-identity behavior. The plan command is
 read-only: it prints the target unit path, generated launchd/systemd unit body,
 install/status/reload commands, and rollback command. For a live gateway, first
 keep a known-good binary backup, run `service status` against the current
-service, inspect the `--system` plan, and install during a maintenance window:
+service, inspect the `--system` plan, run `service upgrade --dry-run` against
+the candidate binary, and install during a maintenance window:
 the generated system LaunchDaemon runs as the invoking non-root user so it keeps
 the existing user-owned config, logs, and control DB.
 
