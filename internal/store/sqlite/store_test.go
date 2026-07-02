@@ -56,6 +56,13 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
 		t.Fatalf("foreign_keys = %d, %v", foreignKeys, err)
 	}
+	health, err := store.Health(ctx)
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	if health.BusyTimeoutMS != 5000 || health.JournalMode != "wal" || !health.ForeignKeys || health.MaxOpenConnection != 1 {
+		t.Fatalf("health = %+v", health)
+	}
 
 	project := domain.Project{ID: "proj", Priority: domain.PriorityInteractive, SpeedPref: domain.SpeedLatency, ContextCap: 8192, ExpectedConcurrency: 4, AutoApply: true}
 	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("/models/a.gguf"))
