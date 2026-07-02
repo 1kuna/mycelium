@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -15,7 +16,7 @@ import (
 	storesqlite "mycelium/internal/store/sqlite"
 )
 
-func runReconcile(args []string) error {
+func runReconcile(args []string, client *http.Client) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: myce reconcile <placement|status|drain>")
 	}
@@ -25,7 +26,7 @@ func runReconcile(args []string) error {
 	case "status":
 		return runReconcileStatus(args[1:])
 	case "drain":
-		return runReconcileDrain(args[1:])
+		return runReconcileDrain(args[1:], client)
 	default:
 		return fmt.Errorf("usage: myce reconcile <placement|status|drain>")
 	}
@@ -90,11 +91,14 @@ func runReconcileStatus(args []string) error {
 	return nil
 }
 
-func runReconcileDrain(args []string) error {
+func runReconcileDrain(args []string, client *http.Client) error {
 	fs := flag.NewFlagSet("reconcile drain", flag.ContinueOnError)
 	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
 	jobID := fs.String("job", "", "filter by job id")
 	limit := fs.Int("limit", 0, "maximum allowed tasks to drain; 0 means all")
+	prewarmURL := fs.String("prewarm-url", "", "peer base URL for prewarm_replica execution")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token for prewarm execution")
+	project := fs.String("project", "reconcile-prewarm", "project label for prewarm workload evidence")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -107,10 +111,19 @@ func runReconcileDrain(args []string) error {
 		return err
 	}
 	defer store.Close()
+	var prewarm reconcile.PrewarmExecutor
+	if strings.TrimSpace(*prewarmURL) != "" {
+		if client == nil {
+			client = http.DefaultClient
+		}
+		prewarm = prewarmDrainExecutor{client: client, peerURL: *prewarmURL, rpcToken: *rpcToken}
+	}
 	report, err := reconcile.DrainAllowedTasks(context.Background(), store, reconcile.DrainOptions{
-		JobID: *jobID,
-		Limit: *limit,
-		Now:   time.Now().UTC(),
+		JobID:   *jobID,
+		Limit:   *limit,
+		Now:     time.Now().UTC(),
+		Project: *project,
+		Prewarm: prewarm,
 	})
 	if err != nil {
 		return err
@@ -120,6 +133,36 @@ func runReconcileDrain(args []string) error {
 	}
 	printReconcileDrain(os.Stdout, report)
 	return nil
+}
+
+type prewarmDrainExecutor struct {
+	client   *http.Client
+	peerURL  string
+	rpcToken string
+}
+
+func (e prewarmDrainExecutor) PrewarmReplica(ctx context.Context, job domain.Job) (reconcile.PrewarmResult, error) {
+	admitted, err := admitPrewarmWorkload(ctx, e.client, e.peerURL, e.rpcToken, job)
+	if err != nil {
+		return reconcile.PrewarmResult{}, err
+	}
+	result := prewarmResultFromAdmission(admitted)
+	if admitted.Job.Status == domain.JobRunning {
+		finished, err := finishPrewarmWorkload(ctx, e.client, e.peerURL, e.rpcToken, admitted.Job.ID)
+		if err != nil {
+			return reconcile.PrewarmResult{}, err
+		}
+		result = prewarmResultFromFinish(finished, result)
+	}
+	if result.Status != domain.JobDone || !result.Terminal {
+		return reconcile.PrewarmResult{}, fmt.Errorf("prewarm did not reach terminal done state: status=%s terminal=%t", result.Status, result.Terminal)
+	}
+	return reconcile.PrewarmResult{
+		WorkloadID: result.JobID,
+		NodeID:     result.NodeID,
+		InstanceID: result.Instance,
+		LeaseID:    result.LeaseID,
+	}, nil
 }
 
 func saveReconciliationPlan(ctx context.Context, dbPath string, plan reconcile.PlacementPlan) error {
@@ -220,11 +263,15 @@ func printReconcileStatus(w io.Writer, tasks []domain.ReconciliationTaskRecord) 
 func printReconcileDrain(w io.Writer, report reconcile.DrainReport) {
 	fmt.Fprintf(w, "reconcile-drain\tdrained=%d\tskipped=%d\n", report.Drained, report.Skipped)
 	for _, result := range report.Results {
-		fmt.Fprintf(w, "task\tid=%s\tkind=%s\tstatus=%s\taction=%s\terror=%s\n",
+		fmt.Fprintf(w, "task\tid=%s\tkind=%s\tstatus=%s\taction=%s\tworkload=%s\tnode=%s\tinstance=%s\tlease=%s\terror=%s\n",
 			result.TaskID,
 			result.Kind,
 			result.Status,
 			emptyDash(result.Action),
+			emptyDash(result.WorkloadID),
+			emptyDash(result.NodeID),
+			emptyDash(result.InstanceID),
+			emptyDash(result.LeaseID),
 			emptyDash(result.Error),
 		)
 	}

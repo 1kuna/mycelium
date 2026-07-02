@@ -98,9 +98,14 @@ handoff.
   action and planned model-locality record for the existing locality apply path;
   it does not copy artifacts to live peers itself. `verify_engine_readiness`
   drains through the existing strict engine readiness checker and requires a
-  saved ready compatibility-keyed engine profile. The remaining gap is to add
-  real drain executors for `prewarm_replica` and `refresh_catalog`. Owner repair
-  remains approval-gated by default.
+  saved ready compatibility-keyed engine profile. `prewarm_replica` can now
+  drain through the existing workload admission/finish path when an explicit peer
+  endpoint and RPC credential are supplied; without that lower-level endpoint it
+  fails loudly and is not marked done. The remaining executor gap is
+  `refresh_catalog`: the reconciler has no catalog source/refresh contract to
+  call yet, so allowed refresh tasks fail with a source-contract error rather
+  than pretending catalog repair happened. Owner repair remains approval-gated
+  by default.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish
