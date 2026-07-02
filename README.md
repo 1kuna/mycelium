@@ -270,6 +270,9 @@ This is the first inspectable bridge from placement drop reasons to the future
 reconciler loop: allowed automation should consume these task records to stage,
 verify, prewarm, or record incompatibility; this command itself does not mutate
 live services or route policy.
+For a stored workload or gateway job, `myce debug job <job-id> --reconcile`
+adds the same report-only plan to the normal job/debug evidence so operators do
+not have to extract the scheduler decision by hand.
 
 Gateways built from the route-discovery revision expose `GET /v1/models` with
 preset IDs and aliases only; host-local model paths and artifact refs are not

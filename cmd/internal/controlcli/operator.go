@@ -23,6 +23,7 @@ import (
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	peercoord "mycelium/internal/peer"
+	"mycelium/internal/reconcile"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/internal/workload"
 )
@@ -168,6 +169,7 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 	jsonOut := fs.Bool("json", false, "print JSON")
 	preflightPath := fs.String("preflight", "", "redacted gateway preflight evidence JSON")
 	ownerTelemetry := fs.Bool("owner-telemetry", false, "fetch selected-job run/session telemetry from the owner peer")
+	reconcilePlacement := fs.Bool("reconcile", false, "include report-only placement reconciliation tasks when the job has a scheduler decision")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token override")
 	consumerRun := fs.String("consumer-run", "", "consumer batch/run id to attach to the debug report")
 	consumerItem := fs.String("consumer-item", "", "consumer item/row/document id to attach to the debug report")
@@ -241,6 +243,9 @@ func runDebugJob(ctx context.Context, args []string, client *http.Client) error 
 	report.Preflight = preflight
 	report.Consumer = consumer
 	report.RouteAvailability = inspectPreflightRouteAvailability(ctx, *configPath, storePath, preflight)
+	if *reconcilePlacement {
+		report.Reconciliation = reconcileJobPlacement(report.Job)
+	}
 	if *ownerTelemetry {
 		token := *rpcToken
 		if token == "" {
@@ -2959,6 +2964,7 @@ type jobDebugReport struct {
 	OwnerTelemetry    *ownerTelemetryReport         `json:"owner_telemetry,omitempty"`
 	Diagnosis         *jobDebugDiagnosis            `json:"diagnosis,omitempty"`
 	Optimization      *jobOptimizationEvidence      `json:"optimization,omitempty"`
+	Reconciliation    *reconcile.PlacementPlan      `json:"reconciliation,omitempty"`
 	Payload           workload.PayloadEvidence      `json:"payload_evidence,omitempty"`
 	Parent            *domain.Job                   `json:"parent,omitempty"`
 	Children          []domain.Job                  `json:"children,omitempty"`
@@ -3125,12 +3131,42 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 	if report.Optimization != nil {
 		printOptimizationEvidenceSummary(w, *report.Optimization)
 	}
+	if report.Reconciliation != nil {
+		printReconciliationSummary(w, *report.Reconciliation)
+	}
 	events := jobTimelineEvents(report)
 	for _, event := range events {
 		fmt.Fprintf(w, "timeline\t%s\t%s\t%s\t%s\n", formatTimeDash(event.At), event.Kind, event.Subject, event.Detail)
 	}
 	for _, hint := range report.Hints {
 		fmt.Fprintf(w, "hint\t%s\n", hint)
+	}
+}
+
+func reconcileJobPlacement(job domain.Job) *reconcile.PlacementPlan {
+	if job.Result == nil {
+		return nil
+	}
+	decision := job.Result.Decision
+	if decision.JobID == "" && decision.Action == "" && len(decision.Trace) == 0 {
+		return nil
+	}
+	plan := reconcile.PlanPlacement(decision, reconcile.DefaultStandingPolicy())
+	return &plan
+}
+
+func printReconciliationSummary(w io.Writer, plan reconcile.PlacementPlan) {
+	fmt.Fprintf(w, "reconcile\tjob=%s\tmodel=%s\tpreset=%s\taction=%s\tsummary=%s\n", emptyDash(plan.JobID), emptyDash(plan.Model), emptyDash(plan.Preset), emptyDash(string(plan.Action)), plan.Summary)
+	for _, task := range plan.Tasks {
+		fmt.Fprintf(w, "reconcile-task\tkind=%s\tnode=%s\tpreset=%s\treason=%s\tautomatic=%t\trequires_approval=%t\tnext=%s\n",
+			task.Kind,
+			emptyDash(task.NodeID),
+			emptyDash(task.PresetID),
+			emptyDash(task.Reason),
+			task.AutomaticCandidate,
+			task.RequiresApproval,
+			emptyDash(task.Next),
+		)
 	}
 }
 

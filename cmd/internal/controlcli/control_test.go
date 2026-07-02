@@ -6006,6 +6006,66 @@ func recordSustainedContextMetrics(t *testing.T, store interface {
 	}
 }
 
+func TestRunDebugJobCanIncludeReconciliationPlan(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	decision := domain.PlacementDecision{
+		JobID:  "job-reconcile",
+		Action: domain.ActionQueued,
+		Preset: domain.Preset{ID: "preset-a", ModelRef: "model-a"},
+		Trace: []domain.TraceStep{{
+			Step: "filter",
+			Data: map[string]any{"dropped": map[string]string{
+				"node-engine": "label." + domain.LabelPeerBackends,
+			}},
+		}},
+	}
+	if err := store.SaveJob(context.Background(), domain.Job{
+		ID:     "job-reconcile",
+		Model:  "model-a",
+		Status: domain.JobQueued,
+		Result: &domain.JobResult{Decision: decision},
+	}); err != nil {
+		t.Fatalf("SaveJob: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var errRun error
+	output := captureStdout(t, func() {
+		errRun = Run(context.Background(), []string{"debug", "job", "job-reconcile", "--db", dbPath, "--reconcile"})
+	})
+	if errRun != nil {
+		t.Fatalf("debug job reconcile: %v\n%s", errRun, output)
+	}
+	for _, want := range []string{
+		"reconcile\tjob=job-reconcile\tmodel=model-a\tpreset=preset-a\taction=queued",
+		"reconcile-task\tkind=verify_engine_readiness\tnode=node-engine",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("debug reconcile output missing %q:\n%s", want, output)
+		}
+	}
+
+	jsonOutput := captureStdout(t, func() {
+		errRun = Run(context.Background(), []string{"debug", "job", "job-reconcile", "--db", dbPath, "--reconcile", "--json"})
+	})
+	if errRun != nil {
+		t.Fatalf("debug job reconcile json: %v\n%s", errRun, jsonOutput)
+	}
+	var report jobDebugReport
+	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+		t.Fatalf("decode debug reconcile json: %v\n%s", err, jsonOutput)
+	}
+	if report.Reconciliation == nil || len(report.Reconciliation.Tasks) != 1 || report.Reconciliation.Tasks[0].Kind != "verify_engine_readiness" {
+		t.Fatalf("reconciliation report = %+v", report.Reconciliation)
+	}
+}
+
 func writeOperatorDebugFixture(t *testing.T) (string, string) {
 	t.Helper()
 	dir := t.TempDir()

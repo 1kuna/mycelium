@@ -128,6 +128,9 @@ stage artifact, repair owner, refresh catalog, or record incompatibility. The
 tasks are classified against a default standing policy and include an audit
 record that no live mutation occurred. This is repo-local groundwork for the
 future autonomous reconciler loop; it is not yet a live background reconciler.
+Use `myce debug job <job-id> --reconcile` when the scheduler decision is already
+stored on the job and the operator wants the plan joined to the normal debug
+report.
 Use the authenticated `/workloads` RPC surface,
 `myce jobs admit/status/drain/finish/result`, and fleet benchmark surfaces for
 pressure proofs that need queued admission without turning chat completions into
