@@ -2515,6 +2515,75 @@ func TestServiceDrainPreservesLocalQueuedPayloadEvidence(t *testing.T) {
 	}
 }
 
+func TestServiceSubmitWithPayloadQueueOnlyDefersPlacement(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(40, 20).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("model-a"))
+	service := &Service{
+		Placer:  fakePlacer{err: errors.New("placer should not run")},
+		Fleet:   staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:   staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}, admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Owners:  staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Queue:   NewQueue(clock),
+		Store:   &runtimeStore{},
+		Clock:   clock,
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithModel("model-a"), fixtures.WithPreset(preset.ID))
+	result, err := service.SubmitWithPayload(context.Background(), job, []byte(`{"job":"a"}`), SubmitHooks{QueueOnly: true})
+	if err != nil {
+		t.Fatalf("SubmitWithPayload queue-only: %v", err)
+	}
+	if result.Decision.Action != domain.ActionQueued || result.Decision.Preset.ID != preset.ID {
+		t.Fatalf("decision = %+v", result.Decision)
+	}
+	if service.Queue.Len() != 1 {
+		t.Fatalf("queue len = %d", service.Queue.Len())
+	}
+	queued, payload, ok := service.Queue.DequeueWithPayload()
+	if !ok || queued.ID != "job-a" || string(payload) != `{"job":"a"}` {
+		t.Fatalf("queued=%+v payload=%s ok=%v", queued, payload, ok)
+	}
+	stored := service.Store.(*runtimeStore).jobs["job-a"]
+	if stored.Status != domain.JobQueued || stored.Result == nil || !stored.Result.PayloadStored || !stored.Result.PayloadRedacted {
+		t.Fatalf("stored = %+v", stored)
+	}
+}
+
+func TestServiceSubmitWithPayloadQueueOnlyWritesCoordinatedLogWithoutClaim(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(40, 30).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	coordinator := &mocks.Coordinator{
+		Decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Action: domain.ActionLoadedNew},
+		Lease:    domain.Lease{ID: "lease-owner", JobID: "job-a", NodeID: node.ID},
+	}
+	jobLog := &recordingJobLog{}
+	service := &Service{
+		Placer:      fakePlacer{err: errors.New("placer should not run")},
+		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}, admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Owners:      staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Coordinator: coordinator,
+		JobLog:      jobLog,
+		Queue:       NewQueue(clock),
+		Store:       &runtimeStore{},
+		Clock:       clock,
+		Presets:     map[string]domain.Preset{preset.ID: preset},
+	}
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	result, err := service.SubmitWithPayload(context.Background(), job, []byte(`{"job":"a"}`), SubmitHooks{QueueOnly: true})
+	if err != nil {
+		t.Fatalf("SubmitWithPayload queue-only coordinated: %v", err)
+	}
+	if result.Decision.Action != domain.ActionQueued || jobLog.job.ID != "job-a" || string(jobLog.payload) != `{"job":"a"}` {
+		t.Fatalf("result=%+v jobLog=%+v payload=%s", result, jobLog.job, jobLog.payload)
+	}
+	if len(coordinator.Calls) != 0 {
+		t.Fatalf("coordinator should not be claimed or committed: calls=%+v", coordinator.Calls)
+	}
+}
+
 func TestServiceDrainSkipsNoFitHeadJob(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(41, 0).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))

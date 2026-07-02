@@ -66,6 +66,7 @@ type Result struct {
 type SubmitHooks struct {
 	BeforeColdLoad func(ctx context.Context, decision domain.PlacementDecision) error
 	RejectQueued   bool
+	QueueOnly      bool
 }
 
 func (s *Service) Submit(ctx context.Context, job domain.Job, hooks ...SubmitHooks) (Result, error) {
@@ -92,6 +93,9 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, payload []byt
 	job.Status = domain.JobPlacing
 	if err := s.Store.SaveJob(ctx, job); err != nil {
 		return Result{}, err
+	}
+	if queueOnly(hooks) {
+		return s.queueJobWithPayload(ctx, job, payload)
 	}
 
 	fleet, err := s.Fleet.Snapshot(ctx)
@@ -218,6 +222,9 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	}
 	if err := s.JobLog.PutJob(ctx, job, payload); err != nil {
 		return Result{}, err
+	}
+	if queueOnly(hooks) {
+		return s.queueJobWithPayload(ctx, job, payload)
 	}
 	if err := s.Coordinator.ClaimJob(ctx, job.ID); err != nil {
 		job.Status = domain.JobFailed
@@ -670,6 +677,45 @@ func rejectQueued(hooks []SubmitHooks) bool {
 		}
 	}
 	return false
+}
+
+func queueOnly(hooks []SubmitHooks) bool {
+	for _, hook := range hooks {
+		if hook.QueueOnly {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) queueJobWithPayload(ctx context.Context, job domain.Job, payload []byte) (Result, error) {
+	job.Status = domain.JobQueued
+	decision := domain.PlacementDecision{
+		JobID:  job.ID,
+		Preset: s.presetForQueuedJob(job),
+		Action: domain.ActionQueued,
+		Trace:  []domain.TraceStep{{Step: "queue", Result: "explicit queue-only workload admission"}},
+	}
+	job.Result = schedulerJobResult(decision, domain.ModelInstance{}, domain.Lease{}, len(payload))
+	s.Queue.EnqueueWithPayload(job, payload)
+	if err := s.Store.SaveJob(cleanupContext(ctx), job); err != nil {
+		return Result{Decision: decision}, err
+	}
+	return Result{Decision: decision}, nil
+}
+
+func (s *Service) presetForQueuedJob(job domain.Job) domain.Preset {
+	if job.PresetID != "" {
+		if preset, ok := s.Presets[job.PresetID]; ok {
+			return preset
+		}
+	}
+	if job.Model != "" {
+		if preset, ok := s.Presets[job.Model]; ok {
+			return preset
+		}
+	}
+	return domain.Preset{ID: job.PresetID, ModelRef: job.Model, ContextLength: job.ContextRequest}
 }
 
 func schedulerJobResult(decision domain.PlacementDecision, inst domain.ModelInstance, lease domain.Lease, payloadBytes int) *domain.JobResult {

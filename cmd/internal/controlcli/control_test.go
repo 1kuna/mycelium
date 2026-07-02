@@ -312,7 +312,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode workload admit: %v", err)
 			}
-			if req.Job.ContextRequest != 8192 || string(req.Payload) != `{"kind":"openai_chat","body":{"model":"model-a","messages":[]}}` {
+			if req.Job.ContextRequest != 8192 || !req.QueueOnly || string(req.Payload) != `{"kind":"openai_chat","body":{"model":"model-a","messages":[]}}` {
 				t.Fatalf("admission request = %+v payload=%s", req.Job, req.Payload)
 			}
 			w.WriteHeader(http.StatusAccepted)
@@ -373,7 +373,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	})
 	client := directHTTPClient(handler)
 	admitOut := captureStdout(t, func() {
-		err = RunWithClient(context.Background(), []string{"jobs", "admit", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--file", intentPath}, client)
+		err = RunWithClient(context.Background(), []string{"jobs", "admit", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--file", intentPath, "--queue-only"}, client)
 	})
 	if err != nil {
 		t.Fatalf("jobs admit: %v", err)
