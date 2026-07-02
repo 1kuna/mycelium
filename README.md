@@ -273,9 +273,19 @@ context cap as `X-Myc-Context-Cap`. If the synchronous gateway later returns
 `503` with `Retry-After`, pause the affected worker and honor the backpressure;
 do not spawn replacement requests above the allocation. The allocation plan has
 a short `stale_after_seconds` hint; refresh it before launch and after repeated
-backpressure. The allocation report is not a held lease or reservation.
+backpressure. Immediately before launching an external tool, verify the saved
+plan:
+
+```bash
+myce gateway allocate --verify-plan /tmp/mycelium-allocation/allocation-plan.json --live
+```
+
+Verification exits non-zero when the plan is expired, the live catalog no
+longer satisfies it, or the current allocation no longer covers the planned
+worker count. The allocation report is not a held lease or reservation.
 Consumers that need Mycelium to hold queued work should use the explicit
-workload lane.
+workload lane; a later sync gateway request cannot yet consume a workload-held
+lease.
 
 Consumers may send `X-Myc-Context-Cap` with gateway requests to declare the
 context envelope actually required by a chunk or job. Mycelium treats that as a

@@ -2851,6 +2851,9 @@ func TestRunGatewayAllocateReturnsExternalWorkerContract(t *testing.T) {
 	if report.Contract.StaleAfterSeconds != 60 || report.Contract.RefreshBehavior == "" {
 		t.Fatalf("allocation contract missing refresh guidance = %+v", report.Contract)
 	}
+	if report.IssuedAt.IsZero() || report.ExpiresAt.IsZero() || !report.ExpiresAt.After(report.IssuedAt) {
+		t.Fatalf("allocation timestamps = issued %s expires %s", report.IssuedAt, report.ExpiresAt)
+	}
 	if report.Artifacts == nil || report.Artifacts.PlanPath != filepath.Join(outDir, "allocation-plan.json") || report.Artifacts.EnvPath != filepath.Join(outDir, "runner.env") {
 		t.Fatalf("allocation artifacts = %+v", report.Artifacts)
 	}
@@ -2868,6 +2871,70 @@ func TestRunGatewayAllocateReturnsExternalWorkerContract(t *testing.T) {
 	if plan.AllocatedWorkers != 2 || plan.Contract.Workers != 2 {
 		t.Fatalf("allocation plan = %+v", plan)
 	}
+	var verifyErr error
+	verifyOutput := captureStdout(t, func() {
+		verifyErr = RunWithClient(context.Background(), []string{"gateway", "allocate", "--verify-plan", filepath.Join(outDir, "allocation-plan.json"), "--live", "--json"}, client)
+	})
+	if verifyErr != nil {
+		t.Fatalf("verify allocation plan: %v", verifyErr)
+	}
+	var verified gatewayAllocationReport
+	if err := json.Unmarshal([]byte(verifyOutput), &verified); err != nil {
+		t.Fatalf("decode verified allocation: %v", err)
+	}
+	if verified.Verification == nil || verified.Verification.Status != "valid" || verified.Verification.PlanWorkers != 2 || verified.Verification.CurrentWorkers != 2 {
+		t.Fatalf("verified allocation = %+v", verified.Verification)
+	}
+	expired := plan
+	expired.ExpiresAt = time.Now().UTC().Add(-time.Second)
+	expiredPath := filepath.Join(outDir, "expired-plan.json")
+	if err := writePrettyJSONFile(expiredPath, expired); err != nil {
+		t.Fatalf("write expired plan: %v", err)
+	}
+	verifyOutput = captureStdout(t, func() {
+		verifyErr = RunWithClient(context.Background(), []string{"gateway", "allocate", "--verify-plan", expiredPath, "--live", "--json"}, client)
+	})
+	if verifyErr == nil || !strings.Contains(verifyErr.Error(), "allocation plan verification failed") {
+		t.Fatalf("expired verify err = %v output=%s", verifyErr, verifyOutput)
+	}
+	verified = gatewayAllocationReport{}
+	if err := json.Unmarshal([]byte(verifyOutput), &verified); err != nil {
+		t.Fatalf("decode expired verification: %v", err)
+	}
+	if verified.Verification == nil || verified.Verification.Status != "stale" || !verified.Verification.Stale {
+		t.Fatalf("expired verification = %+v", verified.Verification)
+	}
+	missingLiveClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"data": []map[string]string{
+				{"id": "other-model", "object": "model", "owned_by": "mycelium"},
+			},
+		})
+	}))
+	verifyOutput = captureStdout(t, func() {
+		verifyErr = RunWithClient(context.Background(), []string{"gateway", "allocate", "--verify-plan", filepath.Join(outDir, "allocation-plan.json"), "--live", "--json"}, missingLiveClient)
+	})
+	if verifyErr == nil || !strings.Contains(verifyErr.Error(), "allocation plan verification failed") {
+		t.Fatalf("missing live verify err = %v output=%s", verifyErr, verifyOutput)
+	}
+	verified = gatewayAllocationReport{}
+	if err := json.Unmarshal([]byte(verifyOutput), &verified); err != nil {
+		t.Fatalf("decode missing-live verification: %v", err)
+	}
+	if verified.Verification == nil || verified.Verification.Status != "insufficient_current_allocation" || verified.Verification.CurrentWorkers != 0 {
+		t.Fatalf("missing-live verification = %+v", verified.Verification)
+	}
+	var textErr error
+	textOutput := captureStdout(t, func() {
+		textErr = RunWithClient(context.Background(), []string{"gateway", "allocate", "--verify-plan", filepath.Join(outDir, "allocation-plan.json"), "--live"}, client)
+	})
+	if textErr != nil {
+		t.Fatalf("verify allocation plan text: %v", textErr)
+	}
+	if !strings.Contains(textOutput, "verification\tstatus=valid\tstale=false\tplan_workers=2\tcurrent_workers=2") {
+		t.Fatalf("verify text output missing verification:\n%s", textOutput)
+	}
 	envData, err := os.ReadFile(filepath.Join(outDir, "runner.env"))
 	if err != nil {
 		t.Fatalf("read runner env: %v", err)
@@ -2881,6 +2948,7 @@ func TestRunGatewayAllocateReturnsExternalWorkerContract(t *testing.T) {
 		"MYCELIUM_CONTEXT_CAP='16384'",
 		"MYCELIUM_BACKPRESSURE='honor_retry_after'",
 		"MYCELIUM_ACCEPTED_PRESETS='vision-small,vision-large'",
+		"MYCELIUM_ALLOCATION_STALE_AFTER_SECONDS='60'",
 	} {
 		if !strings.Contains(string(envData), want) {
 			t.Fatalf("runner env missing %q:\n%s", want, envData)
