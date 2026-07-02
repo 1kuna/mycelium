@@ -339,6 +339,73 @@ func TestRunReconcileDrainExecutesAllowedTasks(t *testing.T) {
 	}
 }
 
+func TestRunReconcileDrainPlansArtifactStaging(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	preset := testPreset("tiny")
+	preset.ArtifactSizeMB = 64
+	if err := store.SavePreset(context.Background(), preset); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	if err := store.SaveNode(context.Background(), domain.Node{ID: "node-a", Status: domain.NodeReady}); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	decisionPath := filepath.Join(dir, "decision.json")
+	decision := domain.PlacementDecision{
+		JobID:  "job-stage",
+		Action: domain.ActionQueued,
+		Preset: domain.Preset{ID: preset.ID, ModelRef: preset.ModelRef},
+		Trace: []domain.TraceStep{{
+			Step: "filter",
+			Data: map[string]any{"dropped": map[string]string{"node-a": "disk.free_after_model"}},
+		}},
+	}
+	data, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatalf("marshal decision: %v", err)
+	}
+	if err := os.WriteFile(decisionPath, data, 0o600); err != nil {
+		t.Fatalf("write decision: %v", err)
+	}
+	if err := Run(context.Background(), []string{"reconcile", "placement", "--decision-file", decisionPath, "--db", dbPath, "--save"}); err != nil {
+		t.Fatalf("reconcile placement save: %v", err)
+	}
+	output := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"reconcile", "drain", "--db", dbPath, "--job", "job-stage"})
+	})
+	if err != nil {
+		t.Fatalf("reconcile drain: %v", err)
+	}
+	if !strings.Contains(output, "kind=stage_model_artifact\tstatus=done\taction=plan_model_artifact_stage") {
+		t.Fatalf("drain output = %q", output)
+	}
+
+	verify, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open verify: %v", err)
+	}
+	defer verify.Close()
+	plans, err := verify.ListLocalityPlans(context.Background())
+	if err != nil || len(plans) != 1 || len(plans[0].Actions) != 1 {
+		t.Fatalf("ListLocalityPlans = %+v, %v", plans, err)
+	}
+	if action := plans[0].Actions[0]; action.Kind != domain.LocalityActionStage || action.PresetID != preset.ID || action.NodeID != "node-a" || action.State != domain.ModelLocalityPlanned {
+		t.Fatalf("locality action = %+v", action)
+	}
+	localities, err := verify.ListModelLocalities(context.Background())
+	if err != nil || len(localities) != 1 || localities[0].PresetID != preset.ID || localities[0].NodeID != "node-a" || localities[0].State != domain.ModelLocalityPlanned {
+		t.Fatalf("ListModelLocalities = %+v, %v", localities, err)
+	}
+}
+
 func TestDecodePlacementDecisionAcceptsJobAndWrapper(t *testing.T) {
 	decision := domain.PlacementDecision{JobID: "job-a", Action: domain.ActionLoadedNew}
 	jobData, err := json.Marshal(domain.Job{ID: "job-a", Result: &domain.JobResult{Decision: decision}})
