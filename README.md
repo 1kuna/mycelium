@@ -246,6 +246,30 @@ vLLM tool-parser flags then report `readiness=tool_flags_missing` or
 `readiness=auto_tool_flags_missing` instead of looking interchangeable with
 plain chat routes.
 
+External tools that run their own worker pools should not guess worker counts
+from a project batch size. Ask Mycelium for a launch envelope first:
+
+```bash
+myce gateway allocate \
+  --config ~/.mycelium/peer.json \
+  --model <model-or-alias> \
+  --context-cap <required-context> \
+  --desired-workers <throughput-target> \
+  --live
+```
+
+`gateway allocate` reads the same route catalog, optional live `/v1/models`
+catalog, context caps, capabilities, and provider launch envelope evidence that
+the gateway uses for routing. It returns the OpenAI-compatible base URL, model,
+allocated worker count, accepted owner envelopes, refused envelopes with
+reasons, and a generic external-tool contract. For a CLI-style tool, use the
+returned worker count for its worker argument and send the returned context cap
+as `X-Myc-Context-Cap`. If the synchronous gateway later returns `503` with
+`Retry-After`, pause the affected worker and honor the backpressure; do not
+spawn replacement requests above the allocation. The allocation report is not a
+held lease or reservation. Consumers that need Mycelium to hold queued work
+should use the explicit workload lane.
+
 Consumers may send `X-Myc-Context-Cap` with gateway requests to declare the
 context envelope actually required by a chunk or job. Mycelium treats that as a
 resource requirement for placement, not as a privileged control-plane override:

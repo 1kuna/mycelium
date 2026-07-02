@@ -86,9 +86,16 @@ handoff.
   contracts. When the larger-envelope owner is saturated, synchronous gateway
   requests now return `503 Service Unavailable` with `Retry-After` and
   `X-Myc-Trace` drop reasons instead of an opaque provider/admission failure.
-  The remaining product work is to add a larger envelope on the second owner or
-  a document/page chunking contract before high-context document work can
-  automatically use both owners.
+  `myce gateway allocate` now gives external/tool consumers a Mycelium-owned
+  launch envelope: model/base URL, context cap, allocated worker count, accepted
+  owner envelopes, refused envelopes, and retry/backpressure guidance. That
+  prevents consumers from treating project batch size as worker count when a
+  warm-instance concurrency envelope is already full. The allocation report is
+  still not a held lease or reservation. The remaining product work is to add a
+  larger envelope on the second owner, add a document/page chunking contract, or
+  route these external workers through the explicit workload lane before
+  high-context document work can automatically use both owners with capacity
+  held ahead of launch.
 - 2026-07-02: Placement drop reasons can now be saved as durable
   reconciliation task records through `myce reconcile placement --save` and
   inspected with `myce reconcile status`. The workload RPC now also persists
