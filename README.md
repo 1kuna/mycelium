@@ -203,14 +203,17 @@ myce calibrate report \
 `benchmark-config.json` plus `calibration-plan.json`, and proves the generated
 plan through the existing fleet benchmark simulator. The first implementation
 is deliberately simulation-first: it records candidate cold/warm/pressure
-sweeps, ready nodes, selected presets, safety notes, the simulation run command,
-and the explicit `myce benchmark fleet` command for a later operator-approved
-live pressure proof. It does not write token values, change routing policy,
-start engines, or apply optimizer defaults. `calibrate run --simulate` executes
-that generated plan through the existing scheduler/allocator benchmark path.
-`calibrate status` and `calibrate report` summarize saved plan/run artifacts
-without treating simulation as live calibration or applied optimizer facts. A
-live pressure proof remains an explicit operator gate.
+sweeps, ready nodes, selected presets, safety notes, the local queued-executor
+smoke command, the simulation run command, and the explicit
+`myce benchmark fleet` command for a later operator-approved live pressure
+proof. It does not write token values, change routing policy, start engines, or
+apply optimizer defaults. `calibrate run --simulate` executes that generated
+plan through the existing scheduler/allocator benchmark path. `calibrate
+status` and `calibrate report` summarize saved plan/run artifacts without
+treating simulation as live calibration or applied optimizer facts. Run
+`make smoke-workload-executor` before the live fleet proof to catch local
+queued-executor wiring regressions without touching real engines. A live
+pressure proof remains an explicit operator gate.
 
 For authenticated non-loopback gateways, `myce benchmark` resolves the gateway token in this order:
 
