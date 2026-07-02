@@ -814,6 +814,41 @@ func TestServiceSpecAndRenderers(t *testing.T) {
 	if got := string(runOut); !strings.Contains(got, "upgrade_dry_run\ttrue") || !strings.Contains(got, "replace: install -m 0755") {
 		t.Fatalf("run service upgrade output = %s", got)
 	}
+	oldStdout = os.Stdout
+	readPipe, writePipe, err = os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe json: %v", err)
+	}
+	os.Stdout = writePipe
+	runErr = runServiceWithManager(context.Background(), []string{
+		"upgrade",
+		"--config", configPath,
+		"--binary", stableBinary,
+		"--target-binary", targetBinary,
+		"--name", "fleet one",
+		"--user",
+		"--dry-run",
+		"--json",
+	}, nil, "darwin")
+	_ = writePipe.Close()
+	os.Stdout = oldStdout
+	runOut, readErr = io.ReadAll(readPipe)
+	if readErr != nil {
+		t.Fatalf("read service upgrade json stdout: %v", readErr)
+	}
+	if runErr != nil {
+		t.Fatalf("runServiceWithManager upgrade json: %v", runErr)
+	}
+	var upgradeJSON serviceUpgradePlanArtifact
+	if err := json.Unmarshal(runOut, &upgradeJSON); err != nil {
+		t.Fatalf("decode upgrade json: %v\n%s", err, runOut)
+	}
+	if !upgradeJSON.DryRun || upgradeJSON.Service != "com.mycelium.fleetone" || upgradeJSON.Commands["replace"] == "" || upgradeJSON.Commands["rollback"] == "" || upgradeJSON.Commands["verify"] == "" {
+		t.Fatalf("upgrade json = %+v", upgradeJSON)
+	}
+	if strings.Contains(string(runOut), "join-secret") || strings.Contains(string(runOut), "rpc-secret") {
+		t.Fatalf("upgrade json leaked secret: %s", runOut)
+	}
 	if got := serviceRestartCommand(linuxUserSpec, "linux"); got != "systemctl --user restart mycelium-dev.service" {
 		t.Fatalf("linux user restart = %q", got)
 	}
