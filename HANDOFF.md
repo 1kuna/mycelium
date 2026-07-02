@@ -46,7 +46,7 @@ Mycelium is a peer-native, LAN-local inference control plane:
 - Service operations: `mycelium service plan`, `install`, `status`,
   `uninstall`, and dry-run-only `upgrade` for binary backup/replacement,
   restart, verification, and rollback command evidence without mutating the
-  host.
+  host. Generic operator runbooks live under `docs/runbooks/`.
 - Runtime proof surfaces: owner telemetry, run/session metrics, job registry,
   route headers, preflight artifacts, debug bundles, and optimization summaries.
 - Scheduler/runtime: owner-authoritative admission, resource estimation,
@@ -169,7 +169,8 @@ remains a separate product gate.
 - Keep improving generic route discovery, preflight, debug, and optimization
   evidence surfaces.
 - Keep the Mac service activation path documented as generic commands with
-  rollback/readiness checks, not host-specific narratives.
+  rollback/readiness checks, not host-specific narratives. The public runbook is
+  `docs/runbooks/service-upgrade.md`.
 - Keep service upgrade activation behind an operator maintenance window; the
   repo-local `service upgrade --dry-run` surface prints the command plan and
   binary hashes but does not switch a live service.

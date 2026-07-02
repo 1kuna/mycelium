@@ -55,8 +55,9 @@ handoff.
   catalog support from config alone.
 - 2026-06-29: macOS user LaunchAgent activation can be blocked by binary
   identity / Local Network permission behavior. The repo provides generic
-  service plan/install/status/rollback surfaces, but a live gateway binary swap
-  should be performed only in an operator-approved maintenance window with a
+  service plan/install/status/rollback surfaces plus
+  `docs/runbooks/service-upgrade.md`, but a live gateway binary swap should be
+  performed only in an operator-approved maintenance window with a
   rollback-ready known-good binary.
 
 ## Resolved
