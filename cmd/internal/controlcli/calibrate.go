@@ -15,6 +15,7 @@ import (
 	"mycelium/internal/bench"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
+	"mycelium/internal/optimizer"
 	storesqlite "mycelium/internal/store/sqlite"
 )
 
@@ -117,7 +118,7 @@ type calibrationRunSummary struct {
 
 func runCalibrate(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce calibrate <plan|run|status|report>")
+		return fmt.Errorf("usage: myce calibrate <plan|run|status|report|apply-priors>")
 	}
 	switch args[0] {
 	case "plan":
@@ -128,8 +129,10 @@ func runCalibrate(ctx context.Context, args []string, client *http.Client) error
 		return runCalibrateStatus(args[1:])
 	case "report":
 		return runCalibrateReport(args[1:])
+	case "apply-priors":
+		return runCalibrateApplyPriors(ctx, args[1:])
 	default:
-		return fmt.Errorf("usage: myce calibrate <plan|run|status|report>")
+		return fmt.Errorf("usage: myce calibrate <plan|run|status|report|apply-priors>")
 	}
 }
 
@@ -245,6 +248,62 @@ func runCalibrateReport(args []string) error {
 		return err
 	}
 	fmt.Printf("calibrate-report\t%s\treadiness=%s\n", *outPath, report.Readiness)
+	return nil
+}
+
+func runCalibrateApplyPriors(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("calibrate apply-priors", flag.ContinueOnError)
+	planDir := fs.String("plan", "", "directory created by myce calibrate plan")
+	runDir := fs.String("run", "", "directory created by a live myce benchmark fleet run")
+	dbPath := fs.String("db", "", "control-plane SQLite store")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *runDir == "" {
+		return fmt.Errorf("--run is required")
+	}
+	effectiveDB := strings.TrimSpace(*dbPath)
+	if effectiveDB == "" && *planDir != "" {
+		plan, err := loadCalibrationPlanArtifact(*planDir)
+		if err != nil {
+			return err
+		}
+		effectiveDB = strings.TrimSpace(plan.DBPath)
+	}
+	if effectiveDB == "" {
+		effectiveDB = defaultControlStorePath()
+	}
+	run, err := loadCalibrationRunResult(*runDir)
+	if err != nil {
+		return err
+	}
+	if run.Simulated {
+		return fmt.Errorf("refusing to apply calibration priors from simulated run %s; use a live benchmark fleet result", run.RunID)
+	}
+	if !run.Preflight.Passed || len(run.Failures) > 0 {
+		return fmt.Errorf("refusing to apply calibration priors from failed run %s", run.RunID)
+	}
+	if len(run.Metrics) == 0 {
+		return fmt.Errorf("refusing to apply calibration priors from run %s with no live metric rows", run.RunID)
+	}
+	store, err := storesqlite.Open(effectiveDB)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	for _, metric := range run.Metrics {
+		if err := store.Record(ctx, metric); err != nil {
+			return fmt.Errorf("import calibration metric %s: %w", metric.JobID, err)
+		}
+	}
+	updated, err := optimizer.CalibrateSpeedClasses(ctx, store, clock.System{})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("calibrate-priors\trun=%s\tmetrics=%d\tnodes=%d\tdb=%s\n", run.RunID, len(run.Metrics), len(updated), effectiveDB)
+	for _, node := range updated {
+		fmt.Printf("calibrate-prior-node\t%s\ttokens_per_sec=%.2f\tsource=%s\n", node.ID, node.SpeedClass.TokensPerSecRef, emptyDash(node.SpeedClass.Source))
+	}
 	return nil
 }
 
@@ -726,7 +785,10 @@ func classifyCalibrationReport(report calibrationReportArtifact) (string, []stri
 		}
 		return "simulation_proven", []string{"live calibration has not run and no optimizer defaults were applied"}, next
 	}
-	return "live_evidence_present", nil, []string{"review live run safety before applying optimizer defaults"}
+	if report.Run.MetricRows == 0 {
+		return "live_evidence_missing_metrics", []string{"live calibration run has no metric rows to import as optimizer priors"}, []string{"inspect live benchmark telemetry collection before applying priors"}
+	}
+	return "live_evidence_present", nil, []string{"run myce calibrate apply-priors after operator review to import live metric rows and update speed-class priors"}
 }
 
 func writePrivateJSON(path string, value any) error {

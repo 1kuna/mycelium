@@ -98,6 +98,21 @@ Simulation proves that the generated plan is structurally runnable through the
 scheduler/allocator benchmark path. It does not start live engines, change
 routing policy, apply optimizer defaults, or prove real hardware behavior.
 
+After an operator-approved live run, import live metrics as optimizer
+speed-class priors:
+
+```bash
+myce calibrate apply-priors \
+  --plan ~/.mycelium/calibration/plan \
+  --run ~/.mycelium/calibration/live-runs
+```
+
+`apply-priors` refuses simulated results, failed results, and live results with
+no metric rows. It persists the live benchmark run metrics into the control DB
+and updates node speed-class priors through the existing optimizer calibration
+path. It does not start engines, change route policy, or apply semantic model
+preferences.
+
 ## Live Proof Boundary
 
 Run the generated live benchmark command only when a maintenance-safe operator
@@ -121,4 +136,3 @@ Do not claim full-fleet allocator proof from single-request chat canaries.
 Streaming queued provider replay remains a separate product gate because it
 needs an interruption/replay contract for partial streams and client
 disconnects.
-

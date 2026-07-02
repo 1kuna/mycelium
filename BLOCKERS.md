@@ -37,8 +37,11 @@ handoff.
   executable-payload contract evidence, execution evidence, and lease reclaim
   through the public workload HTTP surface. `make smoke-workload-executor`
   proves the local operator path with a loopback peer and fake provider. The
-  remaining blockers are streaming queued replay and a live pressure proof that
-  shows queue/preemption/reclaim under real fleet load.
+  calibration surface now refuses to turn simulation into optimizer priors:
+  `calibrate apply-priors` imports only live benchmark metric rows and updates
+  speed-class priors through the optimizer calibration path. The remaining
+  blockers are streaming queued replay and a live pressure proof that shows
+  queue/preemption/reclaim under real fleet load.
 - 2026-06-29: A low-context tool-call route can prove transport and provider
   parser wiring without being a valid route for reasoning-heavy tool-agent
   workloads. Public Mycelium evidence now exposes this as a consumer-contract

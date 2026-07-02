@@ -4405,6 +4405,100 @@ func TestRunCalibrateStatusAndReportSummarizeSavedEvidence(t *testing.T) {
 	}
 }
 
+func TestRunCalibrateApplyPriorsImportsOnlyLiveMetrics(t *testing.T) {
+	dbPath, configPath := writeCalibrationInventoryFixture(t)
+	planDir := filepath.Join(t.TempDir(), "calibration-plan")
+	if err := Run(context.Background(), []string{"calibrate", "plan", "--config", configPath, "--db", dbPath, "--out", planDir}); err != nil {
+		t.Fatalf("calibrate plan: %v", err)
+	}
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	liveRunDir := filepath.Join(t.TempDir(), "live-run")
+	liveResult := bench.FleetRunResult{
+		RunID:     "calibration-live",
+		Profile:   bench.FleetProfileConservative,
+		OutputDir: liveRunDir,
+		Manifest:  bench.FleetManifest{RunID: "calibration-live", StartedAt: now, FinishedAt: now.Add(time.Minute)},
+		Preflight: bench.FleetPreflight{Passed: true, Proofs: []string{"live owner telemetry collected"}},
+		Results:   []bench.FleetJobResult{{JobID: "job-b70", NodeID: "b70"}},
+		Metrics: []domain.RunMetric{
+			{JobID: "job-b70-a", NodeID: "b70", PresetID: "preset-9b", Backend: domain.BackendLlamaCpp, Project: "calibration", TokensPerSec: 100, At: now},
+			{JobID: "job-b70-b", NodeID: "b70", PresetID: "preset-9b", Backend: domain.BackendLlamaCpp, Project: "calibration", TokensPerSec: 120, At: now.Add(time.Second)},
+		},
+	}
+	if err := os.MkdirAll(liveRunDir, 0o700); err != nil {
+		t.Fatalf("mkdir live run: %v", err)
+	}
+	writeJSONFixture(t, filepath.Join(liveRunDir, "results.json"), liveResult)
+
+	report, err := buildCalibrationReport(planDir, liveRunDir)
+	if err != nil {
+		t.Fatalf("live calibration report: %v", err)
+	}
+	if report.Readiness != "live_evidence_present" || report.Run == nil || report.Run.MetricRows != 2 || !strings.Contains(strings.Join(report.Next, "\n"), "apply-priors") {
+		t.Fatalf("live calibration report = %+v", report)
+	}
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = Run(context.Background(), []string{"calibrate", "apply-priors", "--plan", planDir, "--run", liveRunDir})
+	})
+	if runErr != nil {
+		t.Fatalf("apply priors: %v\n%s", runErr, output)
+	}
+	if !strings.Contains(output, "calibrate-priors\trun=calibration-live\tmetrics=2\tnodes=1") || !strings.Contains(output, "calibrate-prior-node\tb70\ttokens_per_sec=110.00\tsource=telemetry-calibrated") {
+		t.Fatalf("apply priors output = %s", output)
+	}
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store after apply: %v", err)
+	}
+	defer store.Close()
+	nodes, err := store.ListNodes(context.Background())
+	if err != nil {
+		t.Fatalf("list nodes: %v", err)
+	}
+	var b70 domain.Node
+	for _, node := range nodes {
+		if node.ID == "b70" {
+			b70 = node
+		}
+	}
+	if b70.SpeedClass.TokensPerSecRef != 110 || b70.SpeedClass.Source != "telemetry-calibrated" || b70.SpeedClass.ProbedAt.IsZero() {
+		t.Fatalf("b70 speed class = %+v", b70.SpeedClass)
+	}
+
+	simRunDir := filepath.Join(t.TempDir(), "sim-run")
+	simResult := liveResult
+	simResult.RunID = "calibration-sim"
+	simResult.Simulated = true
+	if err := os.MkdirAll(simRunDir, 0o700); err != nil {
+		t.Fatalf("mkdir sim run: %v", err)
+	}
+	writeJSONFixture(t, filepath.Join(simRunDir, "results.json"), simResult)
+	if err := Run(context.Background(), []string{"calibrate", "apply-priors", "--plan", planDir, "--run", simRunDir}); err == nil || !strings.Contains(err.Error(), "simulated") {
+		t.Fatalf("simulated apply priors err = %v", err)
+	}
+
+	noMetricRunDir := filepath.Join(t.TempDir(), "no-metric-run")
+	noMetricResult := liveResult
+	noMetricResult.RunID = "calibration-no-metrics"
+	noMetricResult.Metrics = nil
+	if err := os.MkdirAll(noMetricRunDir, 0o700); err != nil {
+		t.Fatalf("mkdir no metric run: %v", err)
+	}
+	writeJSONFixture(t, filepath.Join(noMetricRunDir, "results.json"), noMetricResult)
+	report, err = buildCalibrationReport(planDir, noMetricRunDir)
+	if err != nil {
+		t.Fatalf("no-metric report: %v", err)
+	}
+	if report.Readiness != "live_evidence_missing_metrics" {
+		t.Fatalf("no-metric readiness = %+v", report)
+	}
+	if err := Run(context.Background(), []string{"calibrate", "apply-priors", "--plan", planDir, "--run", noMetricRunDir}); err == nil || !strings.Contains(err.Error(), "no live metric rows") {
+		t.Fatalf("no metric apply priors err = %v", err)
+	}
+}
+
 func TestCalibratePlanFailsWithoutAllocatorPressureInventory(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "control.db")
 	store, err := storesqlite.Open(dbPath)
@@ -5281,12 +5375,17 @@ func routeCertifiedPreflightFixture(jobID string) gatewayPreflightEvidence {
 
 func writeRouteContractsFixture(t *testing.T, path string, contracts routeContractFile) {
 	t.Helper()
-	data, err := json.MarshalIndent(contracts, "", "  ")
+	writeJSONFixture(t, path, contracts)
+}
+
+func writeJSONFixture(t *testing.T, path string, value any) {
+	t.Helper()
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		t.Fatalf("marshal route contracts: %v", err)
+		t.Fatalf("marshal JSON fixture: %v", err)
 	}
 	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
-		t.Fatalf("write route contracts: %v", err)
+		t.Fatalf("write JSON fixture: %v", err)
 	}
 }
 

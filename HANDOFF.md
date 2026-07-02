@@ -41,8 +41,9 @@ Mycelium is a peer-native, LAN-local inference control plane:
   `myce debug bundle`, `myce jobs admit`, `myce jobs status`,
   `myce jobs drain`, `myce jobs finish`,
   `myce telemetry samples`, `myce calibrate plan`, `myce calibrate run`,
-  `myce calibrate status`, `myce calibrate report`, benchmark commands, model
-  and recommendation inspection commands.
+  `myce calibrate status`, `myce calibrate report`,
+  `myce calibrate apply-priors`, benchmark commands, model and recommendation
+  inspection commands.
 - Service operations: `mycelium service plan`, `install`, `status`,
   `uninstall`, and dry-run-only `upgrade` for binary backup/replacement,
   restart, verification, and rollback command evidence without mutating the
@@ -88,10 +89,12 @@ plan artifact, and validates the plan with the existing deterministic fleet
 simulation. `myce calibrate run --simulate` executes that generated plan without
 starting live engines or changing route policy. `myce calibrate status` and
 `myce calibrate report` summarize saved artifacts and keep simulation distinct
-from live calibration or optimizer defaults. The plan artifact also records the
-local queued-executor smoke command plus the explicit `myce benchmark fleet`
-command for a later operator-approved live pressure proof; running live fleet
-pressure remains a live gate.
+from live calibration or optimizer defaults. `myce calibrate apply-priors`
+refuses simulated artifacts and imports only live benchmark metric rows into
+speed-class priors. The plan artifact also records the local queued-executor
+smoke command plus the explicit `myce benchmark fleet` command for a later
+operator-approved live pressure proof; running live fleet pressure remains a
+live gate.
 
 For thinking/tool-agent workloads, do not treat a low-context tool-call smoke as
 a consumer-ready route. Use `--context-cap` and `--min-context-cap` so Mycelium
