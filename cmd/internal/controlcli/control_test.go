@@ -23,6 +23,7 @@ import (
 	"mycelium/internal/domain"
 	"mycelium/internal/optimizer"
 	peercoord "mycelium/internal/peer"
+	"mycelium/internal/reconcile"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/internal/workload"
 	"mycelium/pkg/api"
@@ -268,6 +269,73 @@ func TestRunReconcilePlacementReportsTasks(t *testing.T) {
 		if !strings.Contains(statusOutput, want) {
 			t.Fatalf("status output missing %q:\n%s", want, statusOutput)
 		}
+	}
+}
+
+func TestRunReconcileDrainExecutesAllowedTasks(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "control.db")
+	decisionPath := filepath.Join(dir, "decision.json")
+	decision := domain.PlacementDecision{
+		JobID:  "job-drain",
+		Action: domain.ActionQueued,
+		Preset: domain.Preset{ID: "preset-a", ModelRef: "model-a"},
+		Trace: []domain.TraceStep{{
+			Step: "filter",
+			Data: map[string]any{"dropped": map[string]string{
+				"node-incompat": "label.gpu.vendor",
+				"node-down":     string(domain.NodeUnreachable),
+			}},
+		}},
+	}
+	data, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatalf("marshal decision: %v", err)
+	}
+	if err := os.WriteFile(decisionPath, data, 0o600); err != nil {
+		t.Fatalf("write decision: %v", err)
+	}
+	if err := Run(context.Background(), []string{"reconcile", "placement", "--decision-file", decisionPath, "--db", dbPath, "--save"}); err != nil {
+		t.Fatalf("reconcile placement save: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"reconcile", "drain", "--db", dbPath, "--job", "job-drain"})
+	})
+	if err != nil {
+		t.Fatalf("reconcile drain: %v", err)
+	}
+	for _, want := range []string{
+		"reconcile-drain\tdrained=1\tskipped=1",
+		"kind=record_incompatibility\tstatus=done\taction=record_incompatibility",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("drain output missing %q:\n%s", want, output)
+		}
+	}
+
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	tasks, err := store.ListReconciliationTasks(context.Background(), "job-drain")
+	if err != nil {
+		t.Fatalf("ListReconciliationTasks: %v", err)
+	}
+	statusByKind := map[string]domain.ReconciliationTaskStatus{}
+	for _, task := range tasks {
+		statusByKind[task.Kind] = task.Status
+	}
+	if statusByKind[string(reconcile.TaskRecordIncompatibility)] != domain.ReconciliationTaskDone {
+		t.Fatalf("task statuses = %+v", tasks)
+	}
+	if statusByKind[string(reconcile.TaskRepairOwner)] != domain.ReconciliationTaskBlocked {
+		t.Fatalf("repair task was not left blocked: %+v", tasks)
+	}
+	incompatibilities, err := store.ListIncompatibilities(context.Background())
+	if err != nil || len(incompatibilities) != 1 || incompatibilities[0].JobID != "job-drain" || incompatibilities[0].Reason != "label.gpu.vendor" {
+		t.Fatalf("incompatibilities = %+v, %v", incompatibilities, err)
 	}
 }
 
