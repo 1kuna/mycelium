@@ -740,8 +740,11 @@ func TestRunModelsPrewarmUsesWorkloadAdmissionAndFinish(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode admission: %v", err)
 			}
-			if req.Job.TaskType != "model_prewarm" || req.Job.Model != "vision-model" || req.Job.Project != "operator" || req.Job.Priority != domain.PriorityBackground || req.Job.ExpectedConcurrency != 2 || req.Job.ContextRequest != 8192 {
+			if req.Job.TaskType != string(domain.CapabilityChat) || req.Job.Model != "vision-model" || req.Job.Project != "operator" || req.Job.Priority != domain.PriorityBackground || req.Job.ExpectedConcurrency != 2 || req.Job.ContextRequest != 8192 {
 				t.Fatalf("job = %+v", req.Job)
+			}
+			if !strings.Contains(string(req.Payload), `"kind":"model_prewarm"`) || !strings.Contains(string(req.Payload), `"model":"vision-model"`) {
+				t.Fatalf("payload = %s", req.Payload)
 			}
 			admittedJobID = req.Job.ID
 			decision := domain.PlacementDecision{
@@ -848,6 +851,9 @@ func TestRunModelsPrewarmAllFittingTargetsDistinctOwners(t *testing.T) {
 			nodeID := req.Job.NodeSelector[domain.LabelNodeID]
 			if nodeID != "owner-a" && nodeID != "owner-b" {
 				t.Fatalf("node selector = %+v", req.Job.NodeSelector)
+			}
+			if !strings.Contains(string(req.Payload), `"kind":"model_prewarm"`) || !strings.Contains(string(req.Payload), nodeID) {
+				t.Fatalf("payload = %s", req.Payload)
 			}
 			targeted[nodeID] = true
 			decision := domain.PlacementDecision{JobID: req.Job.ID, Action: domain.ActionLoadedNew, NodeID: nodeID, Preset: domain.Preset{ID: "vision-vllm"}, InstanceID: "inst-" + nodeID}

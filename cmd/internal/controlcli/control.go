@@ -326,7 +326,7 @@ func runModelsPrewarm(ctx context.Context, args []string, client *http.Client) e
 	for i, target := range targets {
 		job := domain.Job{
 			ID:                  prewarmJobID(report.Model, report.PresetID, i),
-			TaskType:            "model_prewarm",
+			TaskType:            string(domain.CapabilityChat),
 			Model:               report.Model,
 			PresetID:            report.PresetID,
 			Project:             strings.TrimSpace(*project),
@@ -666,7 +666,11 @@ func prewarmJobID(model, preset string, i int) string {
 }
 
 func admitPrewarmWorkload(ctx context.Context, client *http.Client, peerURL, rpcToken string, job domain.Job) (workload.AdmissionResponse, error) {
-	body, err := json.Marshal(workload.AdmissionRequest{Job: job})
+	payload, err := prewarmWorkloadPayload(job)
+	if err != nil {
+		return workload.AdmissionResponse{}, err
+	}
+	body, err := json.Marshal(workload.AdmissionRequest{Job: job, Payload: payload})
 	if err != nil {
 		return workload.AdmissionResponse{}, err
 	}
@@ -695,6 +699,23 @@ func admitPrewarmWorkload(ctx context.Context, client *http.Client, peerURL, rpc
 		return workload.AdmissionResponse{}, err
 	}
 	return out, nil
+}
+
+func prewarmWorkloadPayload(job domain.Job) (json.RawMessage, error) {
+	payload := map[string]any{
+		"kind":                 "model_prewarm",
+		"model":                job.Model,
+		"preset_id":            job.PresetID,
+		"project":              job.Project,
+		"context_request":      job.ContextRequest,
+		"expected_concurrency": job.ExpectedConcurrency,
+		"node_selector":        job.NodeSelector,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
 }
 
 func finishPrewarmWorkload(ctx context.Context, client *http.Client, peerURL, rpcToken, jobID string) (workload.FinishResponse, error) {
