@@ -8,6 +8,35 @@
 
 **Conventions:** Severity = Critical / High / Medium / Low. Category = `drift` (diverges from SSOT), `incomplete` (spec'd but partial/missing), `bug` (breaks in typical use or a realistic edge), `brittle` (works today, fragile by construction). "Logged" means a DECISIONS.md entry covers it (a logged *your-call* within hard requirements is not drift; a logged `PROPOSED SPEC CHANGE` still is, by Doc 3's own rule: "keep building to spec — don't silently diverge").
 
+## Current reconciliation addendum — 2026-07-02
+
+This file is a historical review artifact; verify against current code before
+acting. Current repo work has resolved or narrowed several findings:
+
+- The canonical local gate is no longer red under the current repo authority;
+  coverage and `make ci` were repaired in later commits.
+- Queued workload execution is no longer metadata-only for non-streaming
+  executable payloads. `myce jobs drain --execute` runs registry-replayable
+  queued provider requests through the gateway/provider seam, captures provider
+  output, and exposes replayable result evidence. Streaming replay remains a
+  separate product gate.
+- Stale queued or placing workload records now have an explicit operator
+  terminalization path: `myce jobs cancel`. `jobs finish` remains strict and
+  still requires scheduler lease evidence.
+- Generic `myce models prewarm` / `myce models scale --all-fitting` now means
+  distinct-owner prewarm intent: live peer snapshot, fit computation, canonical
+  node-id targeting, and desired-versus-ready reporting. A single reused warm
+  instance must not be presented as all-fitting saturation.
+- Large vision/OCR vLLM route work is still not certified. Catalog visibility
+  and owner admission are proven surfaces; provider launch/readiness and
+  complete-document client coverage remain open gates.
+
+The remaining high-impact review lanes should be rechecked against current
+code before implementation: stream failure signaling, live process group
+cleanup, unload drain deadlines, provider-profile-as-data, registry merge /
+rescue edge cases, starvation/requeue aging, LAN nonce pruning, and explicit
+live fleet pressure proof.
+
 ---
 
 ## 0. Gate status at HEAD — the canonical gate is RED

@@ -4241,6 +4241,39 @@ func TestWorkloadHTTPCancelTerminalizesJobWithoutLeaseEvidence(t *testing.T) {
 	}
 }
 
+func TestWorkloadHTTPCancelUsesRuntimeFinishWhenLeaseEvidenceExists(t *testing.T) {
+	result := &domain.JobResult{
+		Source:  "scheduler",
+		LeaseID: "lease-a",
+		NodeID:  "node-a",
+	}
+	job := domain.Job{
+		ID:      "job-running",
+		Model:   "model-a",
+		Project: "project-a",
+		Status:  domain.JobRunning,
+		Result:  result,
+	}
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{job.ID: job}}
+	runtime := &recordingWorkloadRuntime{store: store}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, runtime, store, "rpc-secret", "peer-a", nil)
+	req := httptest.NewRequest(http.MethodPost, "/workloads/job-running/cancel", strings.NewReader(`{"reason":"operator release"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	latest, err := store.Job(context.Background(), "job-running")
+	if err != nil {
+		t.Fatalf("latest job: %v", err)
+	}
+	if latest.Status != domain.JobFailed || latest.Error != "operator release" || latest.Result == nil || latest.Result.LeaseID != "lease-a" || !latest.Result.Terminal {
+		t.Fatalf("stored job = %+v", latest)
+	}
+}
+
 func TestWorkloadHTTPReturnsCreatedForImmediatePlacement(t *testing.T) {
 	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
 	runtime := &recordingWorkloadRuntime{
@@ -4937,6 +4970,41 @@ func TestWorkloadHTTPRejectsInvalidResultArtifactManifest(t *testing.T) {
 	}
 }
 
+func TestWorkloadResultBodyRejectsManifestMismatch(t *testing.T) {
+	ctx := context.Background()
+	store := &workloadMemoryStore{
+		jobs: map[string]domain.Job{},
+		results: map[string]domain.WorkloadResultBody{
+			"job-a": {JobID: "job-a", Bytes: 7, SHA256: strings.Repeat("a", 64)},
+		},
+	}
+	base := func() domain.Job {
+		return domain.Job{ID: "job-a", Status: domain.JobDone, Result: &domain.JobResult{Terminal: true, ResultArtifact: "stored://workload/job-a"}}
+	}
+	if _, err := workloadResultBody(ctx, store, domain.Job{ID: "not-terminal", Status: domain.JobDone, Result: &domain.JobResult{ResultArtifact: "stored://workload/job-a"}}); err == nil || !strings.Contains(err.Error(), "not terminal") {
+		t.Fatalf("not-terminal err = %v", err)
+	}
+	noArtifact := base()
+	noArtifact.Result = &domain.JobResult{Terminal: true}
+	if _, err := workloadResultBody(ctx, store, noArtifact); err == nil || !strings.Contains(err.Error(), "no result artifact") {
+		t.Fatalf("no-artifact err = %v", err)
+	}
+	bytesMismatch := base()
+	bytesMismatch.Result.ResultBytes = 8
+	if _, err := workloadResultBody(ctx, store, bytesMismatch); err == nil || !strings.Contains(err.Error(), "manifest bytes") {
+		t.Fatalf("bytes mismatch err = %v", err)
+	}
+	digestMismatch := base()
+	digestMismatch.Result = &domain.JobResult{Terminal: true, ResultArtifact: "stored://workload/job-a", ResultSHA256: strings.Repeat("b", 64)}
+	if _, err := workloadResultBody(ctx, store, digestMismatch); err == nil || !strings.Contains(err.Error(), "manifest digest") {
+		t.Fatalf("digest mismatch err = %v", err)
+	}
+	ok, err := workloadResultBody(ctx, store, base())
+	if err != nil || ok.Bytes != 7 {
+		t.Fatalf("result body = %+v err=%v", ok, err)
+	}
+}
+
 func TestWorkloadPayloadEvidenceClassifiesRegistryStates(t *testing.T) {
 	ctx := context.Background()
 	job := domain.Job{
@@ -5024,6 +5092,48 @@ func TestWorkloadExecutionEvidenceClassifiesExecutablePayloadContract(t *testing
 	got = workloadExecutionEvidence(ctx, store, job)
 	if got.PayloadContract != "registry_executable_gateway_request" || got.PayloadKind != workload.ExecutablePayloadKindOpenAIChat || !got.PayloadExecutable || got.State != "terminal_no_result" {
 		t.Fatalf("failed-before-result evidence = %+v", got)
+	}
+}
+
+func TestWorkloadSchedulerResultReconstructsLeaseAndPlacementEvidence(t *testing.T) {
+	job := domain.Job{
+		ID:     "job-a",
+		Status: domain.JobRunning,
+		Result: &domain.JobResult{
+			LeaseID:  "lease-a",
+			NodeID:   "owner-a",
+			PresetID: "preset-a",
+			Action:   domain.ActionLoadedNew,
+			Instance: domain.ModelInstance{ID: "inst-a"},
+		},
+	}
+	got, err := workloadSchedulerResult(job)
+	if err != nil {
+		t.Fatalf("scheduler result: %v", err)
+	}
+	if got.Lease.ID != "lease-a" || got.Lease.InstanceID != "inst-a" || got.Decision.JobID != "job-a" || got.Decision.NodeID != "owner-a" || got.Decision.Preset.ID != "preset-a" || got.Instance.ID != "inst-a" {
+		t.Fatalf("scheduler result = %+v", got)
+	}
+	job.Result.Decision = domain.PlacementDecision{JobID: "job-a", NodeID: "decision-owner", Preset: domain.Preset{ID: "decision-preset"}, Action: domain.ActionWarmInstance}
+	got, err = workloadSchedulerResult(job)
+	if err != nil {
+		t.Fatalf("scheduler result with decision: %v", err)
+	}
+	if got.Decision.NodeID != "decision-owner" || got.Decision.Preset.ID != "decision-preset" || got.Decision.Action != domain.ActionWarmInstance {
+		t.Fatalf("scheduler decision = %+v", got.Decision)
+	}
+	for _, tc := range []struct {
+		name string
+		job  domain.Job
+		want string
+	}{
+		{name: "not running", job: domain.Job{ID: "queued", Status: domain.JobQueued}, want: "execute requires running"},
+		{name: "missing result", job: domain.Job{ID: "missing", Status: domain.JobRunning}, want: "no scheduler result evidence"},
+		{name: "missing lease", job: domain.Job{ID: "lease", Status: domain.JobRunning, Result: &domain.JobResult{}}, want: "no active lease evidence"},
+	} {
+		if _, err := workloadSchedulerResult(tc.job); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s err = %v, want %q", tc.name, err, tc.want)
+		}
 	}
 }
 
