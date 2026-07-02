@@ -208,10 +208,15 @@ explicit page chunking that covers every page. Repo-local placement now treats
 a shared consumer model alias as a candidate set instead of first-match only:
 exact preset IDs still pin a single preset, while a model alias can consider
 multiple owner envelopes, drop undersized owners for explicit context requests,
-and report telemetry for the selected preset. Live cross-owner distribution
-still needs the deployed gateway/config to carry the same model group and a
-light activation proof before consumers can rely on one model alias to spread
-vision/OCR work across all fitting owners.
+and report telemetry for the selected preset. The deployed gateway now carries
+that model group and has a light cross-owner proof: smaller-context requests can
+route to the smaller-envelope owner through the shared consumer model, while
+larger explicit context contracts reject that owner and stay on the
+larger-envelope owner. When the larger-envelope owner is saturated, synchronous
+requests return `503 Service Unavailable` with `Retry-After` and `X-Myc-Trace`
+drop reasons. High-context document work still needs either a larger second
+owner envelope or an explicit complete-page chunking contract before it can
+automatically use both owners.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
 work, not transparently resumed streams. Streaming queued provider replay

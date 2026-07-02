@@ -78,15 +78,17 @@ handoff.
   client proof or explicit all-page chunking. A page-limited or single-image
   canary proves OpenAI-compatible vision transport and provider readiness, not
   complete document coverage.
-- 2026-07-02: Same-model multi-owner vision/OCR allocation is repo-local but
-  not live-proven. Two owners can be independently certified for the same
-  consumer model class, and the scheduler/gateway path now treats a model alias
-  as multiple preset envelopes instead of first-match only. The deployed
-  gateway/config still must carry that model group, prove route discovery, and
-  run a light cross-owner placement proof before consumers can rely on one
-  normal model name for automatic distribution. Do not present per-owner
-  certification as live cross-owner distribution until that activation proof
-  exists.
+- 2026-07-02: Same-model multi-owner vision/OCR allocation is live-proven for
+  distinct owner envelopes, but it is not yet equivalent to full automatic
+  distribution for every workload class. The deployed gateway/catalog can expose
+  one consumer model as a model group and route smaller-context requests to a
+  smaller-envelope owner while rejecting that owner for larger explicit context
+  contracts. When the larger-envelope owner is saturated, synchronous gateway
+  requests now return `503 Service Unavailable` with `Retry-After` and
+  `X-Myc-Trace` drop reasons instead of an opaque provider/admission failure.
+  The remaining product work is to add a larger envelope on the second owner or
+  a document/page chunking contract before high-context document work can
+  automatically use both owners.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish
@@ -116,6 +118,12 @@ handoff.
   returned HTTP 200 with image content, owner/backend headers, non-empty final
   content, and usage, then served a warm follow-up request from the same
   instance.
+- 2026-07-02: Same-model vision/OCR route discovery and light cross-owner
+  placement proof reached the live gateway. A shared consumer model group now
+  advertises both owner envelopes, and the gateway preserves retryable
+  no-fit/admission diagnostics across owner RPC boundaries so consumers can
+  distinguish undersized context, saturated warm-instance admission, and
+  successful smaller-envelope placement without per-owner routing hacks.
 - 2026-06-29: The repo coverage gate is green under `make ci`.
 - 2026-06-29: Gateway preflight, debug job, debug bundle, owner telemetry, and
   optimization summaries can join secret-safe request evidence to route,
