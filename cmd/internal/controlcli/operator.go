@@ -2763,6 +2763,7 @@ func buildDoctorReport(ctx context.Context, req doctorRequest) (doctorReport, er
 	} else {
 		defer store.Close()
 		add("store", "ok", storePath, "-")
+		addStoreHealthDoctorCheck(ctx, store, &report)
 		addStoreDoctorChecks(ctx, store, &report)
 	}
 	if baseURL == "" {
@@ -2775,6 +2776,34 @@ func buildDoctorReport(ctx context.Context, req doctorRequest) (doctorReport, er
 		}
 	}
 	return report, nil
+}
+
+func addStoreHealthDoctorCheck(ctx context.Context, store *storesqlite.Store, report *doctorReport) {
+	add := func(name, status, message, next string) {
+		report.Checks = append(report.Checks, doctorCheck{Name: name, Status: status, Message: message, Next: next})
+	}
+	health, err := store.Health(ctx)
+	if err != nil {
+		add("store-health", "fail", err.Error(), "inspect SQLite control store")
+		return
+	}
+	if health.MaxOpenConnection != 1 {
+		add("store-health", "fail", fmt.Sprintf("max_open_connections=%d", health.MaxOpenConnection), "restart with the standard control store")
+		return
+	}
+	if health.BusyTimeoutMS < 5000 {
+		add("store-health", "warn", fmt.Sprintf("busy_timeout_ms=%d", health.BusyTimeoutMS), "restart with current Mycelium binary")
+		return
+	}
+	if !health.ForeignKeys {
+		add("store-health", "warn", "foreign_keys=off", "restart with current Mycelium binary")
+		return
+	}
+	if health.JournalMode != "wal" && health.JournalMode != "memory" {
+		add("store-health", "warn", "journal_mode="+health.JournalMode, "restart with current Mycelium binary")
+		return
+	}
+	add("store-health", "ok", fmt.Sprintf("journal_mode=%s busy_timeout_ms=%d max_open_connections=%d", health.JournalMode, health.BusyTimeoutMS, health.MaxOpenConnection), "-")
 }
 
 func addStoreDoctorChecks(ctx context.Context, store *storesqlite.Store, report *doctorReport) {
@@ -2884,6 +2913,11 @@ func buildStatusReport(ctx context.Context, req statusRequest) (string, error) {
 	}
 	defer store.Close()
 	fmt.Fprintf(&out, "store\t%s\tok\n", storePath)
+	if health, err := store.Health(ctx); err != nil {
+		fmt.Fprintf(&out, "store-health\tfail\t%s\n", err)
+	} else {
+		fmt.Fprintf(&out, "store-health\tjournal_mode=%s\tbusy_timeout_ms=%d\tforeign_keys=%t\tmax_open_connections=%d\n", health.JournalMode, health.BusyTimeoutMS, health.ForeignKeys, health.MaxOpenConnection)
+	}
 	jobs, err := store.ListJobs(ctx)
 	if err != nil {
 		return out.String(), err

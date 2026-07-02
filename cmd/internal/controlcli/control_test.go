@@ -2618,6 +2618,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	}
 	for _, want := range []string{
 		"check\tconfig\tok",
+		"check\tstore-health\tok\tjournal_mode=wal busy_timeout_ms=5000 max_open_connections=1",
 		"check\tpeer-snapshot\tok\tnode-a instances=1",
 		"check\tpresets\tok\t1 configured",
 	} {
@@ -2634,6 +2635,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	}
 	for _, want := range []string{
 		"peer\tpeer-a\tlisten=http://peer.test\tcompute=true\tgateway_auth=true",
+		"store-health\tjournal_mode=wal\tbusy_timeout_ms=5000\tforeign_keys=true\tmax_open_connections=1",
 		"queue\tqueued=0 placing=0 loading=0 running=1 done=1 preempted=0 failed=0",
 		"snapshot\tok\tnode-a\tinstances=1",
 	} {
@@ -2860,6 +2862,7 @@ func TestOperatorStatusReportsConfigAndSnapshotFailures(t *testing.T) {
 	for _, want := range []string{
 		"config\t" + filepath.Join(dir, "missing-peer.json") + "\tfail",
 		"store\t" + dbPath + "\tok",
+		"store-health\tjournal_mode=wal\tbusy_timeout_ms=5000\tforeign_keys=true\tmax_open_connections=1",
 		"queue\tqueued=0 placing=0 loading=0 running=0 done=0 preempted=0 failed=1",
 		"snapshot\tfail\tsnapshot http://peer.test: rpc token required",
 	} {

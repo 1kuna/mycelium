@@ -30,6 +30,13 @@ type Store struct {
 	nextJobWatcher int
 }
 
+type Health struct {
+	BusyTimeoutMS     int    `json:"busy_timeout_ms"`
+	ForeignKeys       bool   `json:"foreign_keys"`
+	JournalMode       string `json:"journal_mode"`
+	MaxOpenConnection int    `json:"max_open_connections"`
+}
+
 func Open(path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("store path is required")
@@ -88,6 +95,23 @@ func openDSN(path string, fileBacked bool) string {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+func (s *Store) Health(ctx context.Context) (Health, error) {
+	var health Health
+	if err := s.db.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&health.BusyTimeoutMS); err != nil {
+		return Health{}, err
+	}
+	var foreignKeys int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		return Health{}, err
+	}
+	health.ForeignKeys = foreignKeys == 1
+	if err := s.db.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&health.JournalMode); err != nil {
+		return Health{}, err
+	}
+	health.MaxOpenConnection = s.db.Stats().MaxOpenConnections
+	return health, nil
 }
 
 func (s *Store) SaveProject(ctx context.Context, project domain.Project) error {
