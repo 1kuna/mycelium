@@ -1061,12 +1061,9 @@ func workloadExecutionEvidence(ctx context.Context, store workloadStore, job dom
 }
 
 func workloadExecutablePayloadEvidence(ctx context.Context, store workloadStore, job domain.Job) (string, string, bool) {
-	if job.Result == nil || job.Result.PayloadBytes == 0 {
-		return "no_payload", "", false
-	}
 	registry, ok := store.(workloadRegistryStore)
 	if !ok {
-		if job.Result.PayloadStored {
+		if job.Result != nil && job.Result.PayloadStored {
 			return "runtime_payload_not_inspectable", "", false
 		}
 		return "no_payload", "", false
@@ -1095,7 +1092,7 @@ func workloadExecutablePayloadEvidence(ctx context.Context, store workloadStore,
 		}
 		return "registry_executable_gateway_request", executable.Kind, true
 	}
-	if job.Result.PayloadStored {
+	if job.Result != nil && job.Result.PayloadStored {
 		return "runtime_payload_not_inspectable", "", false
 	}
 	return "no_payload", "", false

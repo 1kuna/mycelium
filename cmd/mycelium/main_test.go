@@ -4850,6 +4850,12 @@ func TestWorkloadExecutionEvidenceClassifiesExecutablePayloadContract(t *testing
 	if got.PayloadContract != "registry_executable_gateway_request" || got.PayloadKind != workload.ExecutablePayloadKindOpenAIChat || !got.PayloadExecutable {
 		t.Fatalf("execution evidence = %+v", got)
 	}
+	job.Result = nil
+	job.Status = domain.JobFailed
+	got = workloadExecutionEvidence(ctx, store, job)
+	if got.PayloadContract != "registry_executable_gateway_request" || got.PayloadKind != workload.ExecutablePayloadKindOpenAIChat || !got.PayloadExecutable || got.State != "terminal_no_result" {
+		t.Fatalf("failed-before-result evidence = %+v", got)
+	}
 }
 
 func TestExecutableWorkloadIngressRequestClassifiesKindsAndFailures(t *testing.T) {
