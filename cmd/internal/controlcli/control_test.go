@@ -728,6 +728,182 @@ func TestRunModelsStageAndLocalityReport(t *testing.T) {
 	}
 }
 
+func TestRunModelsPrewarmUsesWorkloadAdmissionAndFinish(t *testing.T) {
+	var admittedJobID string
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer rpc-secret" {
+			t.Fatalf("auth = %s", got)
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/workloads":
+			var req workload.AdmissionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode admission: %v", err)
+			}
+			if req.Job.TaskType != "model_prewarm" || req.Job.Model != "vision-model" || req.Job.Project != "operator" || req.Job.Priority != domain.PriorityBackground || req.Job.ExpectedConcurrency != 2 || req.Job.ContextRequest != 8192 {
+				t.Fatalf("job = %+v", req.Job)
+			}
+			admittedJobID = req.Job.ID
+			decision := domain.PlacementDecision{
+				JobID:      req.Job.ID,
+				Action:     domain.ActionLoadedNew,
+				NodeID:     "node-a",
+				Preset:     domain.Preset{ID: "vision-preset"},
+				InstanceID: "inst-a",
+			}
+			inst := domain.ModelInstance{ID: "inst-a", NodeID: "node-a", PresetID: "vision-preset", State: domain.InstReady}
+			lease := domain.Lease{ID: "lease-a", JobID: req.Job.ID, NodeID: "node-a", InstanceID: "inst-a"}
+			req.Job.Status = domain.JobRunning
+			req.Job.Result = &domain.JobResult{Decision: decision, Instance: inst, LeaseID: lease.ID, NodeID: "node-a", PresetID: "vision-preset", Action: decision.Action}
+			_ = json.NewEncoder(w).Encode(workload.AdmissionResponse{Job: req.Job, Decision: decision, Instance: inst, Lease: lease})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/finish"):
+			if admittedJobID == "" || r.URL.Path != "/workloads/"+admittedJobID+"/finish" {
+				t.Fatalf("finish path = %s admitted=%s", r.URL.Path, admittedJobID)
+			}
+			job := domain.Job{ID: admittedJobID, Model: "vision-model", Status: domain.JobDone}
+			result := &domain.JobResult{NodeID: "node-a", PresetID: "vision-preset", Action: domain.ActionLoadedNew, LeaseID: "lease-a", Instance: domain.ModelInstance{ID: "inst-a"}, Terminal: true}
+			job.Result = result
+			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: job, Result: result})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = RunWithClient(context.Background(), []string{
+			"models", "prewarm",
+			"--url", "http://peer.test",
+			"--rpc-token", "rpc-secret",
+			"--model", "vision-model",
+			"--project", "operator",
+			"--context", "8192",
+			"--concurrency", "2",
+		}, client)
+	})
+	if runErr != nil {
+		t.Fatalf("models prewarm: %v", runErr)
+	}
+	if !strings.Contains(output, "models-prewarm\tmodel=vision-model") || !strings.Contains(output, "warmed=1") || !strings.Contains(output, "instance=inst-a") || !strings.Contains(output, "finished=true") {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestRunModelsPrewarmAllFittingTargetsDistinctOwners(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "peer.json")
+	cfg := operatorPeerConfig{
+		ID:       "gateway",
+		Listen:   "127.0.0.1:9000",
+		RPCToken: "rpc-secret",
+		SeedPeers: []string{
+			"http://owner-a.test",
+			"http://owner-b.test",
+		},
+		Presets: []domain.Preset{{
+			ID:             "vision-vllm",
+			ModelRef:       "model/vision",
+			Aliases:        []string{"vision"},
+			Backend:        domain.BackendVLLM,
+			ContextLength:  4096,
+			Capabilities:   []domain.Capability{domain.CapabilityChat, domain.CapabilityVision},
+			EstWeightsMB:   100,
+			KVPerTokenMB:   0.01,
+			ArtifactSizeMB: 100,
+		}},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	targeted := map[string]bool{}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer rpc-secret" {
+			t.Fatalf("auth = %s", got)
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/snapshot":
+			nodeID := "owner-a"
+			if strings.Contains(r.URL.Host, "owner-b") {
+				nodeID = "owner-b"
+			}
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: domain.Node{
+				ID:           nodeID,
+				Address:      r.URL.Host,
+				Status:       domain.NodeReady,
+				DiskTotalMB:  10000,
+				DiskFreeMB:   9000,
+				MaxUtil:      0.85,
+				Labels:       map[string]string{domain.LabelPeerBackend: string(domain.BackendVLLM)},
+				Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000}},
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/workloads":
+			var req workload.AdmissionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode admission: %v", err)
+			}
+			nodeID := req.Job.NodeSelector[domain.LabelNodeID]
+			if nodeID != "owner-a" && nodeID != "owner-b" {
+				t.Fatalf("node selector = %+v", req.Job.NodeSelector)
+			}
+			targeted[nodeID] = true
+			decision := domain.PlacementDecision{JobID: req.Job.ID, Action: domain.ActionLoadedNew, NodeID: nodeID, Preset: domain.Preset{ID: "vision-vllm"}, InstanceID: "inst-" + nodeID}
+			inst := domain.ModelInstance{ID: "inst-" + nodeID, NodeID: nodeID, PresetID: "vision-vllm", State: domain.InstReady}
+			lease := domain.Lease{ID: "lease-" + nodeID, JobID: req.Job.ID, NodeID: nodeID, InstanceID: inst.ID}
+			req.Job.Status = domain.JobRunning
+			req.Job.Result = &domain.JobResult{Decision: decision, Instance: inst, LeaseID: lease.ID, NodeID: nodeID, PresetID: "vision-vllm", Action: decision.Action}
+			_ = json.NewEncoder(w).Encode(workload.AdmissionResponse{Job: req.Job, Decision: decision, Instance: inst, Lease: lease})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/finish"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/workloads/"), "/finish")
+			job := domain.Job{ID: id, Model: "vision", Status: domain.JobDone}
+			result := &domain.JobResult{Action: domain.ActionLoadedNew, Terminal: true}
+			job.Result = result
+			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: job, Result: result})
+		default:
+			t.Fatalf("unexpected request %s %s host=%s", r.Method, r.URL.Path, r.URL.Host)
+		}
+	}))
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = RunWithClient(context.Background(), []string{
+			"models", "scale",
+			"--config", configPath,
+			"--url", "http://gateway.test",
+			"--rpc-token", "rpc-secret",
+			"--model", "vision",
+			"--all-fitting",
+		}, client)
+	})
+	if runErr != nil {
+		t.Fatalf("models scale: %v", runErr)
+	}
+	if !targeted["owner-a"] || !targeted["owner-b"] {
+		t.Fatalf("targeted = %+v", targeted)
+	}
+	if !strings.Contains(output, "desired=2") || !strings.Contains(output, "fit\tnode=owner-a\tstatus=fits") || !strings.Contains(output, "fit\tnode=owner-b\tstatus=fits") {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestRunModelsPrewarmValidation(t *testing.T) {
+	if err := RunWithClient(context.Background(), []string{"models", "prewarm", "--model", "m"}, http.DefaultClient); err == nil || !strings.Contains(err.Error(), "--url") {
+		t.Fatalf("missing url err = %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{"models", "scale", "--url", "http://peer.test"}, http.DefaultClient); err == nil || !strings.Contains(err.Error(), "--model or --preset") {
+		t.Fatalf("missing model err = %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{"models", "scale", "--url", "http://peer.test", "--model", "m", "--replicas", "0"}, http.DefaultClient); err == nil || !strings.Contains(err.Error(), "--replicas") {
+		t.Fatalf("bad replicas err = %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{"models", "scale", "--url", "http://peer.test", "--model", "m", "--priority", "urgent"}, http.DefaultClient); err == nil || !strings.Contains(err.Error(), "unknown priority") {
+		t.Fatalf("bad priority err = %v", err)
+	}
+}
+
 func TestCatalogStageClientAndStageFailureBranches(t *testing.T) {
 	if got := catalogPeerBaseURL("127.0.0.1:51846"); got != "http://127.0.0.1:51846" {
 		t.Fatalf("base url = %s", got)

@@ -416,6 +416,17 @@ func TestPlaceFiltersByTaskCapabilityAndNodeSelector(t *testing.T) {
 	if dropped["node-intel"] != "label.gpu.vendor" {
 		t.Fatalf("dropped = %+v", dropped)
 	}
+
+	job = fixtures.MakeJob(func(j *domain.Job) {
+		j.NodeSelector = map[string]string{domain.LabelNodeID: "node-intel"}
+	})
+	decision, err = placer.Place(context.Background(), job, domain.FleetSnapshot{Nodes: []domain.Node{intel, nvidia}})
+	if err != nil {
+		t.Fatalf("Place node selector: %v", err)
+	}
+	if decision.NodeID != "node-intel" {
+		t.Fatalf("node selector decision = %+v", decision)
+	}
 }
 
 func TestPlaceRespectsContextCancellation(t *testing.T) {
