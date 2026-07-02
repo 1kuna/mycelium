@@ -78,6 +78,13 @@ handoff.
   client proof or explicit all-page chunking. A page-limited or single-image
   canary proves OpenAI-compatible vision transport and provider readiness, not
   complete document coverage.
+- 2026-07-02: Same-model multi-owner vision/OCR allocation is not yet
+  autonomous. Two owners can be independently certified for the same consumer
+  model class, but the current gateway/scheduler preset lookup resolves a model
+  alias to the first matching preset. That makes a single normal gateway model
+  name effectively single-owner until Mycelium grows an explicit multi-owner
+  route class or equivalent scheduler contract. Do not present per-owner
+  certification as automatic cross-owner distribution.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish
@@ -98,6 +105,15 @@ handoff.
   vLLM container. After correcting the private runtime config and restarting
   the established services, an OpenAI-compatible gateway request with image
   content returned HTTP 200, route headers, non-empty final content, and usage.
+- 2026-07-02: A second vision/OCR owner reached live provider readiness at a
+  smaller context envelope. Current primary runtime docs and live hardware
+  checks confirmed the owner has an Intel XPU-capable vLLM path. The public
+  model artifact was absent from that owner's configured vLLM cache, so it was
+  staged into the existing cache mount. A high-context launch started vLLM but
+  did not become ready in an operator-useful window; the smaller envelope
+  returned HTTP 200 with image content, owner/backend headers, non-empty final
+  content, and usage, then served a warm follow-up request from the same
+  instance.
 - 2026-06-29: The repo coverage gate is green under `make ci`.
 - 2026-06-29: Gateway preflight, debug job, debug bundle, owner telemetry, and
   optimization summaries can join secret-safe request evidence to route,

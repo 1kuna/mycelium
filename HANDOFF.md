@@ -195,10 +195,20 @@ rather than allocator success.
 Large vision/OCR vLLM route certification now has a live OpenAI-compatible
 image request proof through the gateway: catalog lookup, owner admission,
 backend launch/readiness, route headers, non-empty final content, and usage all
-arrive in the redacted preflight evidence. Page-limited image canaries still
-prove only route transport and provider readiness; full-document OCR readiness
-requires either a client run that covers the whole document or explicit page
-chunking that covers every page.
+arrive in the redacted preflight evidence. The first high-context owner remains
+the normal catalog route. A second owner has also been proven with the same
+consumer model name at a smaller context envelope after staging the public model
+artifact into that owner's existing vLLM cache and correcting its private
+runtime preset. The failed high-context attempt on that owner started the vLLM
+process but did not reach readiness in an operator-useful window; the smaller
+envelope reached both cold-load and warm-instance canaries. Page-limited image
+canaries still prove only route transport and provider readiness; full-document
+OCR readiness requires either a client run that covers the whole document or
+explicit page chunking that covers every page. Current gateway alias resolution
+is still first-match for model aliases, so multiple proven owners for the same
+consumer model name are not yet an autonomous multi-owner allocation class.
+Fixing that catalog/scheduler contract is the next step before consumers can
+rely on one model alias to spread vision/OCR work across all fitting owners.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
 work, not transparently resumed streams. Streaming queued provider replay
@@ -220,6 +230,11 @@ remains a separate product gate.
 
 - Keep improving generic route discovery, preflight, debug, and optimization
   evidence surfaces.
+- Make same-model multi-owner route classes explicit in the catalog/scheduler
+  contract instead of relying on first-match aliases. Once a model/engine class
+  is allowed by standing policy, job-time placement should inspect live owner
+  fit/readiness and allocate or rearrange capacity automatically; ordinary jobs
+  should not require a per-run operator plan.
 - Keep large-context/tool/vision route certification distinct from low-context
   or page-limited smoke tests. A smoke proves transport, not workload readiness.
 - Keep the Mac service activation path documented as generic commands with
