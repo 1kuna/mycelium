@@ -15,14 +15,18 @@ handoff.
   authenticated workload RPC and
   `myce jobs admit/status/drain/finish` now provide explicit queued admission,
   scheduler drain, scheduler release/reclaim, redacted payload/result metadata,
-  registry replayability classification, terminal evidence, and result artifact
-  manifests for repo-local allocator proofs. Explicit stored result bodies can
-  be attached at workload finish time and retrieved through the separate
+  registry replayability classification, execution-state evidence, terminal
+  evidence, and result artifact manifests for repo-local allocator proofs.
+  Workload status now says whether a job is queued, running, terminal
+  manifest-only, or terminal replayable, and explicitly reports that automatic
+  provider-output capture is not active. Explicit stored result bodies can be
+  attached at workload finish time and retrieved through the separate
   `jobs result` path without printing raw output in status/debug surfaces. The
   fast suite now covers queued admission, multi-owner drain, terminal
   success/failure, result artifact manifest metadata, explicit stored
-  result-body replay, payload replayability evidence, and lease reclaim through
-  the public workload HTTP surface. The remaining blockers are automatic
+  result-body replay, payload replayability evidence, execution evidence, and
+  lease reclaim through the public workload HTTP surface. The remaining blockers
+  are automatic
   provider-output capture/replay for queued inference and a live pressure proof
   that shows queue/preemption/reclaim under real fleet load.
 - 2026-06-29: A low-context tool-call route can prove transport and provider

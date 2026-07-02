@@ -120,15 +120,18 @@ a hidden blocking queue. The workload surface admits durable job intent,
 carries redacted payload/result metadata, classifies whether the queued payload
 is registry-replayable or only runtime-local, drains through the scheduler
 queue, marks terminal state through the scheduler release path, and exposes
-terminal scheduler evidence through status/debug surfaces. Terminal workload
-evidence may carry a redacted result artifact manifest: reference, media type,
-byte count, and digest. If a workload is finished with explicit stored result
-bytes, `myce jobs result` can retrieve those bytes without exposing them through
+terminal scheduler evidence through status/debug surfaces. Workload responses
+also expose `execution_evidence`: queued/running/terminal state,
+`provider_output_capture=false` for the current manual-finish boundary, and
+whether an explicit stored result body is replayable. Terminal workload evidence
+may carry a redacted result artifact manifest: reference, media type, byte
+count, and digest. If a workload is finished with explicit stored result bytes,
+`myce jobs result` can retrieve those bytes without exposing them through
 status/default debug output. Mycelium does not yet automatically capture and
-replay provider output for queued inference through this lane. The fast test suite
-includes a repo-local HTTP workload proof for queued admission, multi-owner
-drain, terminal success/failure, result artifact manifest metadata, explicit
-stored result-body replay, and lease reclaim.
+replay provider output for queued inference through this lane. The fast test
+suite includes a repo-local HTTP workload proof for queued admission,
+multi-owner drain, terminal success/failure, result artifact manifest metadata,
+explicit stored result-body replay, execution evidence, and lease reclaim.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
 work, not transparently resumed streams. Automatic raw async inference output
