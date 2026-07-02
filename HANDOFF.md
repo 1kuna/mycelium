@@ -157,15 +157,16 @@ discipline for future activations.
 The project-free live benchmark path currently proves live cold placement and
 warm reuse for one owner through the synchronous gateway. It does not yet prove
 full allocator pressure: the current synchronous benchmark cannot safely express
-hard-preemption intent on deployments that do not trust control headers, and
-the explicit workload-lane pressure attempt can be blocked when an owner store
-returns a persistent SQLite busy error during admission. File-backed SQLite
-control stores now open with busy timeout, foreign keys, and WAL mode through
-driver pragmas so owner admission, registry replication, telemetry, and
-workload result capture do not run on the default rollback journal. Treat the
-next live gate as: activate that store fix on the selected owner peers, verify
-the owner admission path no longer returns persistent SQLite busy, then run an
-explicit workload-based pressure proof that shows queued admission,
+hard-preemption intent on deployments that do not trust control headers.
+File-backed SQLite control stores now open with busy timeout, foreign keys, and
+WAL mode through driver pragmas so owner admission, registry replication,
+telemetry, and workload result capture do not run on the default rollback
+journal. Coordinated post-commit failures now record terminal failed registry
+evidence before releasing owner capacity, so canceled or failed loads do not
+leave registry rescue state claiming the job is still loading. Treat the next
+live gate as: activate the current workload/scheduler binary on the selected
+peers, verify owner admission still avoids persistent SQLite busy errors, then
+run an explicit workload-based pressure proof that shows queued admission,
 preemption/drain, provider execution, result capture, and release/reclaim.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
@@ -194,10 +195,9 @@ remains a separate product gate.
 - Keep service upgrade activation behind an operator maintenance window; the
   repo-local `service upgrade --dry-run` surface prints the command plan and
   binary hashes but does not switch a live service.
-- Add a workload-based live pressure benchmark or run packet that uses the
-  explicit workload lane for hard-preemption/queue/reclaim proof instead of
-  relying on synchronous gateway control headers.
-- Investigate and fix owner-store lock contention when admission returns
-  persistent SQLite busy errors under live pressure.
+- Activate the current workload/scheduler binary through the documented service
+  path, then run a workload-based live pressure benchmark or run packet that
+  uses the explicit workload lane for hard-preemption/queue/reclaim proof
+  instead of relying on synchronous gateway control headers.
 - Move any private operational evidence into ignored `ops/private/*.local.md`
   notes or an out-of-repo private handoff, not tracked docs.

@@ -305,7 +305,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	if err := s.finishPreemption(ctx, decision, fleet, preemptedLeases, preemptedVictims); err != nil {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(cleanupContext(ctx), job)
-		if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
+		if releaseErr := s.failAndReleaseCoordinatedJob(ctx, job.ID, err); releaseErr != nil {
 			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
 		}
 		return Result{Decision: decision, Lease: ownerLease}, err
@@ -314,7 +314,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		if err := runBeforeColdLoadHook(ctx, decision, hooks); err != nil {
 			job.Status = domain.JobFailed
 			_ = s.Store.SaveJob(cleanupContext(ctx), job)
-			if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
+			if releaseErr := s.failAndReleaseCoordinatedJob(ctx, job.ID, err); releaseErr != nil {
 				return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
 			}
 			return Result{Decision: decision, Lease: ownerLease}, err
@@ -324,7 +324,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	if err != nil {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(cleanupContext(ctx), job)
-		if releaseErr := s.Coordinator.Release(cleanupContext(ctx), job.ID); releaseErr != nil {
+		if releaseErr := s.failAndReleaseCoordinatedJob(ctx, job.ID, err); releaseErr != nil {
 			return Result{Decision: decision, Lease: ownerLease}, errors.Join(err, releaseErr)
 		}
 		return Result{Decision: decision, Lease: ownerLease}, err
@@ -334,9 +334,9 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		if err := s.ensureOwnerLeaseBound(ctx, ownerLease, lease); err != nil {
 			job.Status = domain.JobFailed
 			_ = s.Store.SaveJob(cleanupContext(ctx), job)
-			cleanupErr := s.Coordinator.Release(cleanupContext(ctx), job.ID)
+			cleanupErr := s.failAndReleaseCoordinatedJob(ctx, job.ID, err)
 			if decision.InstanceID == "" {
-				cleanupErr = s.cleanupCoordinatedLoad(ctx, job.ID, inst)
+				cleanupErr = s.cleanupCoordinatedLoad(ctx, job.ID, inst, err)
 			}
 			if cleanupErr != nil {
 				return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
@@ -347,25 +347,25 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	job.Status = domain.JobRunning
 	job.Result = schedulerJobResult(decision, inst, lease, len(payload))
 	if err := s.Store.SaveInstance(cleanupContext(ctx), inst); err != nil {
-		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
+		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst, err); cleanupErr != nil {
 			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
 		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
 	if err := s.Store.SaveLease(cleanupContext(ctx), lease); err != nil {
-		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
+		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst, err); cleanupErr != nil {
 			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
 		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
 	if err := s.Store.SaveJob(cleanupContext(ctx), job); err != nil {
-		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
+		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst, err); cleanupErr != nil {
 			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
 		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
 	}
 	if err := s.Coordinator.MarkRunning(ctx, job.ID); err != nil {
-		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst); cleanupErr != nil {
+		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst, err); cleanupErr != nil {
 			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
 		}
 		return Result{Decision: decision, Instance: inst, Lease: lease}, err
@@ -1125,16 +1125,24 @@ func (s *Service) ensureOwnerLeaseBound(ctx context.Context, ownerLease, lease d
 	return s.bindOwnerInstance(ctx, lease.NodeID, lease.ID, lease.InstanceID)
 }
 
-func (s *Service) cleanupCoordinatedLoad(ctx context.Context, jobID string, inst domain.ModelInstance) error {
+func (s *Service) failAndReleaseCoordinatedJob(ctx context.Context, jobID string, cause error) error {
+	cleanupCtx := cleanupContext(ctx)
+	failErr := s.Coordinator.Fail(cleanupCtx, jobID, cause)
+	releaseErr := s.Coordinator.Release(cleanupCtx, jobID)
+	return errors.Join(failErr, releaseErr)
+}
+
+func (s *Service) cleanupCoordinatedLoad(ctx context.Context, jobID string, inst domain.ModelInstance, cause error) error {
 	agent, err := s.Nodes.NodeAgent(inst.NodeID)
 	if err != nil {
 		return err
 	}
 	cleanupCtx := cleanupContext(ctx)
+	failErr := s.Coordinator.Fail(cleanupCtx, jobID, cause)
 	unloadErr := agent.Unload(cleanupCtx, inst.ID)
 	releaseErr := s.Coordinator.Release(cleanupCtx, jobID)
 	deleteErr := s.Store.DeleteInstance(cleanupCtx, inst.ID)
-	return errors.Join(unloadErr, releaseErr, deleteErr)
+	return errors.Join(failErr, unloadErr, releaseErr, deleteErr)
 }
 
 func (s *Service) resolveInstance(ctx context.Context, job domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot) (domain.ModelInstance, error) {

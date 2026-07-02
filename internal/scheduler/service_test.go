@@ -515,7 +515,8 @@ func TestServiceSubmitWithPayloadReleasesCoordinatorOnLoadFailure(t *testing.T) 
 	if !errors.Is(err, loadErr) {
 		t.Fatalf("SubmitWithPayload err = %v", err)
 	}
-	if !strings.Contains(strings.Join(coordinator.Calls, ","), "release:job-a") {
+	calls := strings.Join(coordinator.Calls, ",")
+	if !strings.Contains(calls, "fail:job-a:load failed") || !strings.Contains(calls, "release:job-a") {
 		t.Fatalf("coordinator calls = %+v", coordinator.Calls)
 	}
 }
@@ -549,7 +550,8 @@ func TestServiceSubmitWithPayloadReleasesCoordinatorWithCleanupContextOnCanceled
 	if coordinator.releaseContextErr != nil {
 		t.Fatalf("release used canceled context: %v", coordinator.releaseContextErr)
 	}
-	if !strings.Contains(strings.Join(coordinator.Calls, ","), "release:job-a") {
+	calls := strings.Join(coordinator.Calls, ",")
+	if !strings.Contains(calls, "fail:job-a:context canceled") || !strings.Contains(calls, "release:job-a") {
 		t.Fatalf("coordinator calls = %+v", coordinator.Calls)
 	}
 	if cleanupContext(nil).Err() != nil {
@@ -590,6 +592,10 @@ func TestServiceSubmitWithPayloadMarksCanceledColdLoadFailedWithCleanupContext(t
 	}
 	if coordinator.releaseContextErr != nil {
 		t.Fatalf("release used canceled context: %v", coordinator.releaseContextErr)
+	}
+	calls := strings.Join(coordinator.Calls, ",")
+	if !strings.Contains(calls, "fail:job-a:context canceled") || !strings.Contains(calls, "release:job-a") {
+		t.Fatalf("coordinator calls = %+v", coordinator.Calls)
 	}
 }
 
@@ -2014,7 +2020,7 @@ func TestServiceOwnerBindingAndCleanupErrors(t *testing.T) {
 			t.Fatalf("%s err = %v", tc.name, err)
 		}
 	}
-	if err := (&Service{Nodes: staticNodes{}, Coordinator: &mocks.Coordinator{}, Queue: NewQueue(clock)}).cleanupCoordinatedLoad(context.Background(), "job-a", inst); !errors.Is(err, domain.ErrUnreachable) {
+	if err := (&Service{Nodes: staticNodes{}, Coordinator: &mocks.Coordinator{}, Queue: NewQueue(clock)}).cleanupCoordinatedLoad(context.Background(), "job-a", inst, errors.New("load failed")); !errors.Is(err, domain.ErrUnreachable) {
 		t.Fatalf("cleanup node err = %v", err)
 	}
 }
