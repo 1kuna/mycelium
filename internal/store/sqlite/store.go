@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,12 +34,13 @@ func Open(path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("store path is required")
 	}
-	if path != ":memory:" {
+	fileBacked := path != ":memory:"
+	if fileBacked {
 		if err := ensurePrivateStorePath(path); err != nil {
 			return nil, err
 		}
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", openDSN(path, fileBacked))
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +73,17 @@ func ensurePrivateStorePath(path string) error {
 		return err
 	}
 	return file.Close()
+}
+
+func openDSN(path string, fileBacked bool) string {
+	if !fileBacked {
+		return path
+	}
+	values := url.Values{}
+	values.Add("_pragma", "busy_timeout=5000")
+	values.Add("_pragma", "foreign_keys=ON")
+	values.Add("_pragma", "journal_mode=WAL")
+	return path + "?" + values.Encode()
 }
 
 func (s *Store) Close() error {

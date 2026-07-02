@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,14 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	var busyTimeout int
 	if err := store.db.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil || busyTimeout != 5000 {
 		t.Fatalf("busy_timeout = %d, %v", busyTimeout, err)
+	}
+	var journalMode string
+	if err := store.db.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&journalMode); err != nil || journalMode != "wal" {
+		t.Fatalf("journal_mode = %q, %v", journalMode, err)
+	}
+	var foreignKeys int
+	if err := store.db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
+		t.Fatalf("foreign_keys = %d, %v", foreignKeys, err)
 	}
 
 	project := domain.Project{ID: "proj", Priority: domain.PriorityInteractive, SpeedPref: domain.SpeedLatency, ContextCap: 8192, ExpectedConcurrency: 4, AutoApply: true}
@@ -247,6 +256,18 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	}
 	must(t, reopened.DeleteProcessRefs(ctx, node.ID))
 	must(t, reopened.DeleteModelLocality(ctx, locality.ID))
+}
+
+func TestOpenDSNLeavesMemoryStoresInMemory(t *testing.T) {
+	if got := openDSN(":memory:", false); got != ":memory:" {
+		t.Fatalf("memory dsn = %q", got)
+	}
+	got := openDSN("/tmp/mycelium-test.db", true)
+	for _, want := range []string{"_pragma=busy_timeout", "_pragma=foreign_keys", "_pragma=journal_mode"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("file dsn %q missing %q", got, want)
+		}
+	}
 }
 
 func TestStoreTelemetryAndErrors(t *testing.T) {
