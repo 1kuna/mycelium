@@ -4495,6 +4495,111 @@ func TestWorkloadHTTPDrainExecuteCapturesProviderResult(t *testing.T) {
 	}
 }
 
+func TestWorkloadHTTPExecuteRunningWorkloadCapturesProviderResult(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("provider path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("model-a"), fixtures.WithWeights(100), fixtures.WithKVPerToken(0), fixtures.WithContextLength(1024))
+	preset.Backend = domain.BackendLlamaCpp
+	agent := &addressedWorkloadAgent{node: node, addr: strings.TrimPrefix(upstream.URL, "http://")}
+	admission := &mocks.AdmissionController{}
+	lease := domain.Lease{ID: "lease-a", JobID: "job-a", NodeID: node.ID, InstanceID: "inst-a"}
+	inst := domain.ModelInstance{ID: "inst-a", PresetID: preset.ID, NodeID: node.ID, State: "ready", Addr: upstream.URL}
+	job := domain.Job{
+		ID:       "job-a",
+		TaskType: "chat",
+		Model:    "model-a",
+		PresetID: preset.ID,
+		Project:  "project-a",
+		Status:   domain.JobRunning,
+		Result: &domain.JobResult{
+			Source:          "scheduler",
+			Decision:        domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Action: domain.ActionLoadedNew, Preset: preset},
+			Instance:        inst,
+			LeaseID:         lease.ID,
+			NodeID:          node.ID,
+			PresetID:        preset.ID,
+			Action:          domain.ActionLoadedNew,
+			PayloadBytes:    1,
+			PayloadStored:   true,
+			PayloadRedacted: true,
+			ResultRedacted:  true,
+		},
+	}
+	if err := store.SaveJob(ctx, job); err != nil {
+		t.Fatalf("SaveJob: %v", err)
+	}
+	if err := store.SaveLease(ctx, lease); err != nil {
+		t.Fatalf("SaveLease: %v", err)
+	}
+	payloadBody := json.RawMessage(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`)
+	payload, err := json.Marshal(workload.ExecutablePayload{Kind: workload.ExecutablePayloadKindOpenAIChat, Body: payloadBody})
+	if err != nil {
+		t.Fatalf("Marshal payload: %v", err)
+	}
+	replayable, err := peercoord.EncodeRescuePayload(job, payload)
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload: %v", err)
+	}
+	if err := store.Put(ctx, domain.JobRecord{JobID: "job-a", Coordinator: "peer-a", Status: domain.JobRunning, Request: replayable, UpdatedAt: time.Unix(50, 0).UTC()}); err != nil {
+		t.Fatalf("Put registry: %v", err)
+	}
+	service := &scheduler.Service{
+		Placer:  &gatedWorkloadPlacer{ready: true, nodeID: node.ID, preset: preset, claim: domain.Claim{WeightsMB: 100}},
+		Fleet:   staticWorkloadFleet{node: node},
+		Nodes:   workloadNodeResolver{agents: map[string]ports.NodeAgent{node.ID: agent}, admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Owners:  workloadNodeResolver{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Queue:   scheduler.NewQueue(mocks.NewFakeClock(time.Unix(50, 0).UTC())),
+		Store:   store,
+		Clock:   mocks.NewFakeClock(time.Unix(50, 0).UTC()),
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	router := &gateway.Router{
+		Fleet:   staticWorkloadFleet{node: node},
+		Nodes:   workloadNodeResolver{agents: map[string]ports.NodeAgent{node.ID: agent}},
+		Presets: gateway.NewPresetRegistry(preset),
+		Runtime: service,
+		Clock:   mocks.NewFakeClock(time.Unix(50, 0).UTC()),
+	}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, service, store, "rpc-secret", "peer-a", router)
+
+	req := httptest.NewRequest(http.MethodPost, "/workloads/job-a/execute", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "messages") || strings.Contains(rec.Body.String(), "content") {
+		t.Fatalf("execute status/body = %d %s", rec.Code, rec.Body.String())
+	}
+	var finished workload.FinishResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &finished); err != nil {
+		t.Fatalf("decode execute response: %v", err)
+	}
+	if finished.Job.Status != domain.JobDone || finished.Execution.State != "terminal_result_replayable" || !finished.Execution.AutomaticProviderOutputCapture || !finished.Execution.ResultReplayable {
+		t.Fatalf("finished = %+v", finished)
+	}
+	leases, err := store.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("ListLeases: %v", err)
+	}
+	if len(leases) != 0 {
+		t.Fatalf("leases after execute = %+v", leases)
+	}
+}
+
 func TestWorkloadHTTPDrainsQueuedWorkAcrossOwnersAndReclaimsCapacity(t *testing.T) {
 	ctx := context.Background()
 	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))

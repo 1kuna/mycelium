@@ -350,6 +350,9 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 				PayloadStored: true,
 				Execution:     workload.ExecutionEvidence{State: "running_needs_finish", PayloadContract: "registry_executable_gateway_request", PayloadKind: workload.ExecutablePayloadKindOpenAIChat, PayloadExecutable: true},
 			}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/workloads/job-a/execute":
+			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultArtifact: "stored://workload/job-a", ResultMediaType: "application/json", ResultBytes: len(`{"answer":"ok"}`), ResultSHA256: sha256Hex([]byte(`{"answer":"ok"}`)), ResultRedacted: true, Terminal: true, ProviderCapture: true}
+			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: domain.Job{ID: "job-a", Model: "model-a", PresetID: "preset-a", Project: "project-a", Status: domain.JobDone, Result: result}, Result: result, Execution: workload.ExecutionEvidence{State: "terminal_result_replayable", AutomaticProviderOutputCapture: true, ResultReplayable: true, ResultBodyStored: true, ResultArtifact: true, ResultBytes: len(`{"answer":"ok"}`), ResultSHA256: true}})
 		case r.Method == http.MethodPost && r.URL.Path == "/workloads/job-a/finish":
 			var req workload.FinishRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -398,6 +401,15 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	}
 	if !strings.Contains(drainOut, "drained\t1") || !strings.Contains(drainOut, "node=node-a") || !strings.Contains(drainOut, "payload_executable=true") || !strings.Contains(drainOut, "execution_state=running_needs_finish") || strings.Contains(drainOut, "messages") {
 		t.Fatalf("drain output = %q", drainOut)
+	}
+	executeOut := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{"jobs", "execute", "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--id", "job-a"}, client)
+	})
+	if err != nil {
+		t.Fatalf("jobs execute: %v", err)
+	}
+	if !strings.Contains(executeOut, "status=done") || !strings.Contains(executeOut, "provider_output_capture=true") || !strings.Contains(executeOut, "execution_state=terminal_result_replayable") || strings.Contains(executeOut, "messages") || strings.Contains(executeOut, "answer") {
+		t.Fatalf("execute output = %q", executeOut)
 	}
 	resultFile := filepath.Join(dir, "result.json")
 	if err := os.WriteFile(resultFile, []byte(`{"answer":"ok"}`), 0600); err != nil {
