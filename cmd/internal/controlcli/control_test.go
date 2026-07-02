@@ -19,6 +19,7 @@ import (
 	"mycelium/internal/catalog"
 	"mycelium/internal/domain"
 	"mycelium/internal/optimizer"
+	peercoord "mycelium/internal/peer"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/internal/workload"
 	"mycelium/pkg/api"
@@ -2461,6 +2462,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	}
 	for _, want := range []string{
 		"job\tjob-a\trunning\tmodel=tiny\tproject=project-a\towner=node-a",
+		"payload\tstate=registry_payload_replayable\treplayable=true\tredacted=false",
 		"registry\trunning\tcoordinator=peer-a\tassigned=node-a",
 		"timeline\t2026-06-09T12:00:02Z\tsample\terror",
 		"hint\trequest exceeded the selected model context",
@@ -2489,7 +2491,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
 		t.Fatalf("decode debug json: %v\n%s", err, jsonOutput)
 	}
-	if report.Job.ID != "job-a" || len(report.SessionTimeline) != 1 || len(report.Hints) != 1 {
+	if report.Job.ID != "job-a" || len(report.SessionTimeline) != 1 || len(report.Hints) != 1 || report.Payload.State != "registry_payload_replayable" || !report.Payload.Replayable {
 		t.Fatalf("debug report = %+v", report)
 	}
 
@@ -2503,6 +2505,7 @@ func TestRunOperatorDoctorStatusAndDebugJob(t *testing.T) {
 	}
 	for _, want := range []string{
 		"job\tjob-a\trunning\tmodel=tiny\tproject=project-a\towner=node-a",
+		"payload\tstate=registry_payload_replayable\treplayable=true\tredacted=false",
 		"preflight\tstatus=200\tmodel=strict-json-model\tproject=strict-json-batch",
 		"preflight-request\tmax_tokens=32\tstream=false\tstructured=none\ttool_requested=true\ttool_name=echo\ttool_choice=auto",
 		"preflight-expectations\texpect_node=owner-node\trequire_json=false\trequire_tool_call=true\treject_textual_tool_call=true\trequire_live_model=false\tmin_prompt_tokens=16\tmin_context=0\texpect_finish=-\tmin_content=0\tmax_reasoning=-",
@@ -3140,7 +3143,7 @@ func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 		}
 		trainingRows = append(trainingRows, trainingRow)
 	}
-	if trainingRows[0].SchemaVersion != "mycelium.debug_training.v1" || trainingRows[0].RouteKey != routeKey || trainingRows[0].Recommendation != "tool_call_route_unsuitable" || trainingRows[0].QualitySignalSource != "consumer_gate" || trainingRows[0].DeterministicQualityPass == nil || !*trainingRows[0].DeterministicQualityPass || trainingRows[0].SemanticQualityLabel != "" || trainingRows[0].TotalLatencyMS != 553 {
+	if trainingRows[0].SchemaVersion != "mycelium.debug_training.v1" || trainingRows[0].RouteKey != routeKey || trainingRows[0].Recommendation != "tool_call_route_unsuitable" || trainingRows[0].QualitySignalSource != "consumer_gate" || trainingRows[0].DeterministicQualityPass == nil || !*trainingRows[0].DeterministicQualityPass || trainingRows[0].SemanticQualityLabel != "" || trainingRows[0].TotalLatencyMS != 553 || trainingRows[0].PayloadState != "registry_payload_replayable" || !trainingRows[0].PayloadReplayable {
 		t.Fatalf("training optimization row = %+v", trainingRows[0])
 	}
 	if trainingRows[1].RouteKey != routeKeyMissing || trainingRows[1].Recommendation != "catalog_stale" || trainingRows[1].QualitySignalSource != "not_collected" || trainingRows[1].DeterministicQualityPass != nil {
@@ -4353,12 +4356,16 @@ func writeOperatorDebugFixture(t *testing.T) (string, string) {
 	if err := store.SaveJob(context.Background(), domain.Job{ID: "job-other", TaskType: "chat", Model: "tiny", Project: "project-b", Status: domain.JobDone}); err != nil {
 		t.Fatalf("SaveJob job-other: %v", err)
 	}
+	request, err := peercoord.EncodeRescuePayload(domain.Job{ID: "job-a", TaskType: "chat", Model: "tiny", Project: "project-a"}, []byte(`{"model":"tiny"}`))
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload: %v", err)
+	}
 	if err := store.Put(context.Background(), domain.JobRecord{
 		JobID:        "job-a",
 		Coordinator:  "peer-a",
 		AssignedNode: "node-a",
 		Status:       domain.JobRunning,
-		Request:      []byte(`{"model":"tiny"}`),
+		Request:      request,
 		Fence:        3,
 		UpdatedAt:    now.Add(time.Second),
 	}); err != nil {

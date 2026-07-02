@@ -97,12 +97,13 @@ Use the authenticated `/workloads` RPC surface,
 `myce jobs admit/status/drain/finish`, and fleet benchmark surfaces for
 pressure proofs that need queued admission without turning chat completions into
 a hidden blocking queue. The workload surface admits durable job intent,
-carries redacted payload/result metadata, drains through the scheduler queue,
-marks terminal state through the scheduler release path, and exposes terminal
-scheduler evidence through status/debug surfaces. Terminal workload evidence
-may carry a redacted result artifact manifest: reference, media type, byte
-count, and digest. Mycelium does not yet replay raw asynchronous inference
-payloads through this lane. The fast test suite
+carries redacted payload/result metadata, classifies whether the queued payload
+is registry-replayable or only runtime-local, drains through the scheduler
+queue, marks terminal state through the scheduler release path, and exposes
+terminal scheduler evidence through status/debug surfaces. Terminal workload
+evidence may carry a redacted result artifact manifest: reference, media type,
+byte count, and digest. Mycelium does not yet replay raw asynchronous inference
+results back to callers through this lane. The fast test suite
 includes a repo-local HTTP workload proof for queued admission, multi-owner
 drain, terminal success/failure, result artifact manifest metadata, and lease
 reclaim.

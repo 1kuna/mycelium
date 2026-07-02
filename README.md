@@ -391,10 +391,11 @@ future reviewed scorer artifact.
 Use `--training-jsonl` to export one normalized optimizer row per saved
 artifact row. The JSONL schema includes route contract, request expectations,
 context, streaming/tool/JSON mode, timing, usage, failure class, quality gate,
-redacted result-artifact presence/type/size/digest-present flags, and the
-deterministic recommendation. It does not include prompts, completions, tokens,
-artifact references, local paths, or semantic quality labels unless a future
-reviewed artifact supplies one explicitly. Consumers of this JSONL validate
+payload replayability, redacted result-artifact
+presence/type/size/digest-present flags, and the deterministic recommendation.
+It does not include prompts, completions, tokens, artifact references, local
+paths, or semantic quality labels unless a future reviewed artifact supplies
+one explicitly. Consumers of this JSONL validate
 evidence kind, owner-telemetry provenance, and deterministic quality-gate
 source before selecting or proposing routes.
 Use `myce debug select --training-jsonl <file>` to run a report-only route
@@ -461,12 +462,15 @@ myce jobs finish \
 myce jobs status --url <peer-url> --rpc-token <token> --id <job-id> --json
 ```
 
-The workload status surface records scheduler/owner/lease evidence plus a
-redacted result artifact manifest: reference, media type, byte count, and
-digest. It does not print the queued payload or raw completion. Raw async
-completion replay is a separate product gate; until then, the artifact
-manifest is the durable output boundary operators can join to debug bundles
-and optimizer evidence.
+The workload status surface records scheduler/owner/lease evidence plus
+payload replayability classification and a redacted result artifact manifest:
+reference, media type, byte count, and digest. `payload_state` distinguishes a
+registry-replayable payload from runtime-local, redacted, missing, or unreadable
+payload evidence. The commands do not print the queued payload or raw
+completion. Raw async result replay back to callers is a separate product gate;
+until then, payload replayability and the artifact manifest are the durable
+execution/output boundaries operators can join to debug bundles and optimizer
+evidence.
 
 For partial consumer batches, preserve one `preflight.json` or response-header
 set per failed or timed-out row. `debug job --preflight --owner-telemetry`

@@ -4110,8 +4110,29 @@ func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
 	if err := json.Unmarshal(admit.Body.Bytes(), &admitted); err != nil {
 		t.Fatalf("decode admit: %v", err)
 	}
-	if !admitted.Queued || admitted.Job.Status != domain.JobQueued || admitted.Result == nil || !admitted.Result.PayloadRedacted {
+	if !admitted.Queued || admitted.Job.Status != domain.JobQueued || admitted.Result == nil || !admitted.Result.PayloadRedacted || admitted.Payload.State != "runtime_payload_stored" || admitted.Payload.Replayable {
 		t.Fatalf("admitted = %+v", admitted)
+	}
+	payload, err := peercoord.EncodeRescuePayload(admitted.Job, []byte(`{"input_bytes":123}`))
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload: %v", err)
+	}
+	if err := store.Put(ctx, domain.JobRecord{JobID: "job-a", Coordinator: "peer-a", Status: domain.JobQueued, Request: payload, UpdatedAt: time.Unix(50, 0).UTC()}); err != nil {
+		t.Fatalf("Put registry: %v", err)
+	}
+	status := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/workloads/job-a", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(status, req)
+	if status.Code != http.StatusOK || strings.Contains(status.Body.String(), "input_bytes") {
+		t.Fatalf("queued status code/body = %d %s", status.Code, status.Body.String())
+	}
+	var queuedStatus workload.StatusResponse
+	if err := json.Unmarshal(status.Body.Bytes(), &queuedStatus); err != nil {
+		t.Fatalf("decode queued status: %v", err)
+	}
+	if queuedStatus.Payload.State != "registry_payload_replayable" || !queuedStatus.Payload.Replayable || queuedStatus.Payload.Bytes == 0 {
+		t.Fatalf("queued payload evidence = %+v", queuedStatus.Payload)
 	}
 
 	placer.ready = true
@@ -4155,7 +4176,7 @@ func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
 		t.Fatalf("leases after finish = %+v", leases)
 	}
 
-	status := httptest.NewRecorder()
+	status = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/workloads/job-a", nil)
 	req.Header.Set("Authorization", "Bearer rpc-secret")
 	mux.ServeHTTP(status, req)
@@ -4378,6 +4399,55 @@ func TestWorkloadHTTPRejectsInvalidResultArtifactManifest(t *testing.T) {
 		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), tc.want) {
 			t.Fatalf("%s status/body = %d %s", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestWorkloadPayloadEvidenceClassifiesRegistryStates(t *testing.T) {
+	ctx := context.Background()
+	job := domain.Job{
+		ID:     "job-a",
+		Status: domain.JobQueued,
+		Result: &domain.JobResult{
+			PayloadBytes:  17,
+			PayloadStored: true,
+		},
+	}
+	replayable, err := peercoord.EncodeRescuePayload(job, []byte(`{"model":"tiny"}`))
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload: %v", err)
+	}
+	other, err := peercoord.EncodeRescuePayload(domain.Job{ID: "other"}, []byte(`{"model":"tiny"}`))
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload other: %v", err)
+	}
+	tests := []struct {
+		name       string
+		record     *domain.JobRecord
+		wantState  string
+		replayable bool
+		redacted   bool
+		wantError  string
+	}{
+		{name: "missing record", wantState: "runtime_payload_stored"},
+		{name: "replayable", record: &domain.JobRecord{JobID: job.ID, Coordinator: "peer-a", Status: domain.JobQueued, Request: replayable}, wantState: "registry_payload_replayable", replayable: true},
+		{name: "redacted", record: &domain.JobRecord{JobID: job.ID, Coordinator: "peer-a", Status: domain.JobQueued, Handling: domain.HandlingPrivate, PayloadRedacted: true}, wantState: "registry_payload_redacted", redacted: true},
+		{name: "missing payload", record: &domain.JobRecord{JobID: job.ID, Coordinator: "peer-a", Status: domain.JobQueued}, wantState: "registry_payload_missing"},
+		{name: "unreadable", record: &domain.JobRecord{JobID: job.ID, Coordinator: "peer-a", Status: domain.JobQueued, Request: []byte(`{`)}, wantState: "registry_payload_unreadable", wantError: "unexpected"},
+		{name: "mismatch", record: &domain.JobRecord{JobID: job.ID, Coordinator: "peer-a", Status: domain.JobQueued, Request: other}, wantState: "registry_payload_mismatch", wantError: "does not match"},
+	}
+	for _, tc := range tests {
+		store := &workloadMemoryStore{jobs: map[string]domain.Job{}, records: nil}
+		if err := store.SaveJob(ctx, job); err != nil {
+			t.Fatalf("%s SaveJob: %v", tc.name, err)
+		}
+		if tc.record != nil {
+			tc.record.UpdatedAt = time.Unix(80, 0).UTC()
+			store.records = []domain.JobRecord{*tc.record}
+		}
+		got := workloadPayloadEvidence(ctx, store, job)
+		if got.State != tc.wantState || got.Replayable != tc.replayable || got.Redacted != tc.redacted || (tc.wantError != "" && !strings.Contains(got.Error, tc.wantError)) {
+			t.Fatalf("%s evidence = %+v", tc.name, got)
 		}
 	}
 }
@@ -5106,7 +5176,8 @@ func (r workloadNodeResolver) AdmissionController(nodeID string) (ports.Admissio
 }
 
 type workloadMemoryStore struct {
-	jobs map[string]domain.Job
+	jobs    map[string]domain.Job
+	records []domain.JobRecord
 }
 
 func (s *workloadMemoryStore) SaveJob(_ context.Context, job domain.Job) error {
@@ -5123,6 +5194,10 @@ func (s *workloadMemoryStore) Job(_ context.Context, id string) (domain.Job, err
 		return domain.Job{}, fmt.Errorf("job %q not found", id)
 	}
 	return job, nil
+}
+
+func (s *workloadMemoryStore) Snapshot(context.Context) ([]domain.JobRecord, error) {
+	return append([]domain.JobRecord(nil), s.records...), nil
 }
 
 func withWorkloadPriority(job domain.Job, priority domain.Priority) domain.Job {

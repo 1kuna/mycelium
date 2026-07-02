@@ -20,11 +20,21 @@ type AdmissionResponse struct {
 	Queued        bool                     `json:"queued"`
 	PayloadBytes  int                      `json:"payload_bytes,omitempty"`
 	PayloadStored bool                     `json:"payload_stored,omitempty"`
+	Payload       PayloadEvidence          `json:"payload_evidence,omitempty"`
 }
 
 type StatusResponse struct {
-	Job    domain.Job        `json:"job"`
-	Result *domain.JobResult `json:"result,omitempty"`
+	Job     domain.Job        `json:"job"`
+	Result  *domain.JobResult `json:"result,omitempty"`
+	Payload PayloadEvidence   `json:"payload_evidence,omitempty"`
+}
+
+type PayloadEvidence struct {
+	State      string `json:"state,omitempty"`
+	Replayable bool   `json:"replayable,omitempty"`
+	Redacted   bool   `json:"redacted,omitempty"`
+	Bytes      int    `json:"bytes,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 type FinishRequest struct {

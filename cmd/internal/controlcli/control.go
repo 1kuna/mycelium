@@ -1076,8 +1076,8 @@ func printWorkloadAdmission(out workload.AdmissionResponse) {
 		node = emptyDash(out.Result.NodeID)
 		preset = emptyDash(out.Result.PresetID)
 	}
-	fmt.Printf("workload\t%s\tstatus=%s\tqueued=%t\taction=%s\tnode=%s\tpreset=%s\tpayload_stored=%t\tpayload_bytes=%d\tterminal=%t\n",
-		out.Job.ID, out.Job.Status, out.Queued, out.Decision.Action, node, preset, out.PayloadStored, out.PayloadBytes, out.Result != nil && out.Result.Terminal)
+	fmt.Printf("workload\t%s\tstatus=%s\tqueued=%t\taction=%s\tnode=%s\tpreset=%s\tpayload_stored=%t\tpayload_bytes=%d\tpayload_state=%s\tpayload_replayable=%t\tterminal=%t\n",
+		out.Job.ID, out.Job.Status, out.Queued, out.Decision.Action, node, preset, out.PayloadStored, out.PayloadBytes, emptyDash(out.Payload.State), out.Payload.Replayable, out.Result != nil && out.Result.Terminal)
 }
 
 func printWorkloadStatus(out workload.StatusResponse) {
@@ -1090,6 +1090,8 @@ func printWorkloadStatus(out workload.StatusResponse) {
 	terminal := false
 	resultArtifact := ""
 	resultBytes := 0
+	payloadState := out.Payload.State
+	payloadReplayable := out.Payload.Replayable
 	if out.Result != nil {
 		action = out.Result.Action
 		node = out.Result.NodeID
@@ -1103,8 +1105,8 @@ func printWorkloadStatus(out workload.StatusResponse) {
 		resultArtifact = out.Result.ResultArtifact
 		resultBytes = out.Result.ResultBytes
 	}
-	fmt.Printf("workload\t%s\tstatus=%s\tproject=%s\tmodel=%s\tpreset=%s\tpriority=%s\tcontext=%d\tconcurrency=%d\tpreemption=%s\taction=%s\tnode=%s\tlease=%s\tpayload_stored=%t\tpayload_bytes=%d\tterminal=%t\tresult_artifact=%s\tresult_bytes=%d\n",
-		out.Job.ID, out.Job.Status, out.Job.Project, out.Job.Model, preset, out.Job.Priority, out.Job.ContextRequest, out.Job.ExpectedConcurrency, out.Job.Preemption, action, emptyDash(node), emptyDash(lease), payloadStored, payloadBytes, terminal, emptyDash(resultArtifact), resultBytes)
+	fmt.Printf("workload\t%s\tstatus=%s\tproject=%s\tmodel=%s\tpreset=%s\tpriority=%s\tcontext=%d\tconcurrency=%d\tpreemption=%s\taction=%s\tnode=%s\tlease=%s\tpayload_stored=%t\tpayload_bytes=%d\tpayload_state=%s\tpayload_replayable=%t\tterminal=%t\tresult_artifact=%s\tresult_bytes=%d\n",
+		out.Job.ID, out.Job.Status, out.Job.Project, out.Job.Model, preset, out.Job.Priority, out.Job.ContextRequest, out.Job.ExpectedConcurrency, out.Job.Preemption, action, emptyDash(node), emptyDash(lease), payloadStored, payloadBytes, emptyDash(payloadState), payloadReplayable, terminal, emptyDash(resultArtifact), resultBytes)
 }
 
 func runTelemetry(ctx context.Context, args []string) error {
