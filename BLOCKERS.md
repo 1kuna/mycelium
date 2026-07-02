@@ -91,9 +91,13 @@ handoff.
   automatically use both owners.
 - 2026-07-02: Placement drop reasons can now be saved as durable
   reconciliation task records through `myce reconcile placement --save` and
-  inspected with `myce reconcile status`; `myce reconcile drain` consumes
-  allowed tasks and currently executes `record_incompatibility` by writing a
-  durable incompatibility fact with running/done or running/failed task history.
+  inspected with `myce reconcile status`. The workload RPC now also persists
+  those same records automatically when workload admission or queue-drain
+  evidence includes a scheduler placement decision, so the autonomy loop no
+  longer depends on a manual placement-file export before background draining.
+  `myce reconcile drain` consumes allowed tasks and currently executes
+  `record_incompatibility` by writing a durable incompatibility fact with
+  running/done or running/failed task history.
   It also executes `stage_model_artifact` by writing a planned locality stage
   action and planned model-locality record for the existing locality apply path;
   it does not copy artifacts to live peers itself. `verify_engine_readiness`
