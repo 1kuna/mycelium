@@ -176,6 +176,102 @@ func TestRunTelemetrySamplesRejectsBadUsageAndTimeBounds(t *testing.T) {
 	}
 }
 
+func TestRunReconcilePlacementReportsTasks(t *testing.T) {
+	dir := t.TempDir()
+	decisionPath := filepath.Join(dir, "decision.json")
+	decision := domain.PlacementDecision{
+		JobID:  "job-reconcile",
+		Action: domain.ActionQueued,
+		Preset: domain.Preset{ID: "preset-a", ModelRef: "model-a"},
+		Trace: []domain.TraceStep{{
+			Step: "filter",
+			Data: map[string]any{"dropped": map[string]string{
+				"node-engine": "label." + domain.LabelPeerBackends,
+				"node-down":   string(domain.NodeUnreachable),
+			}},
+		}},
+	}
+	data, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatalf("marshal decision: %v", err)
+	}
+	if err := os.WriteFile(decisionPath, data, 0o600); err != nil {
+		t.Fatalf("write decision: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"reconcile", "placement", "--decision-file", decisionPath})
+	})
+	if err != nil {
+		t.Fatalf("reconcile placement: %v", err)
+	}
+	for _, want := range []string{
+		"reconcile\tjob=job-reconcile\tmodel=model-a\tpreset=preset-a\taction=queued",
+		"task\tkind=repair_owner\tnode=node-down",
+		"task\tkind=verify_engine_readiness\tnode=node-engine",
+		"requires_approval=true",
+		"audit\tkind=report_only",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("reconcile output missing %q:\n%s", want, output)
+		}
+	}
+
+	jsonOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"reconcile", "placement", "--decision-file", decisionPath, "--json", "--allow-owner-repair"})
+	})
+	if err != nil {
+		t.Fatalf("reconcile placement json: %v", err)
+	}
+	var report struct {
+		Tasks []struct {
+			Kind               string `json:"kind"`
+			NodeID             string `json:"node_id"`
+			AutomaticCandidate bool   `json:"automatic_candidate"`
+			RequiresApproval   bool   `json:"requires_approval"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+		t.Fatalf("decode reconcile json: %v\n%s", err, jsonOutput)
+	}
+	if len(report.Tasks) != 2 {
+		t.Fatalf("tasks = %+v", report.Tasks)
+	}
+	for _, task := range report.Tasks {
+		if task.NodeID == "node-down" && (!task.AutomaticCandidate || task.RequiresApproval) {
+			t.Fatalf("owner repair policy not applied: %+v", report.Tasks)
+		}
+	}
+}
+
+func TestDecodePlacementDecisionAcceptsJobAndWrapper(t *testing.T) {
+	decision := domain.PlacementDecision{JobID: "job-a", Action: domain.ActionLoadedNew}
+	jobData, err := json.Marshal(domain.Job{ID: "job-a", Result: &domain.JobResult{Decision: decision}})
+	if err != nil {
+		t.Fatalf("marshal job: %v", err)
+	}
+	got, err := decodePlacementDecision(jobData)
+	if err != nil || got.JobID != "job-a" || got.Action != domain.ActionLoadedNew {
+		t.Fatalf("decode job decision = %+v, %v", got, err)
+	}
+
+	wrapperData, err := json.Marshal(map[string]any{"result": domain.JobResult{Decision: domain.PlacementDecision{JobID: "job-b", Action: domain.ActionQueued}}})
+	if err != nil {
+		t.Fatalf("marshal wrapper: %v", err)
+	}
+	got, err = decodePlacementDecision(wrapperData)
+	if err != nil || got.JobID != "job-b" || got.Action != domain.ActionQueued {
+		t.Fatalf("decode wrapper decision = %+v, %v", got, err)
+	}
+
+	if _, err := decodePlacementDecision([]byte(`{"job_id":""}`)); err == nil || !strings.Contains(err.Error(), "placement decision") {
+		t.Fatalf("decode empty decision err = %v", err)
+	}
+	if err := Run(context.Background(), []string{"reconcile", "placement"}); err == nil || !strings.Contains(err.Error(), "--decision-file") {
+		t.Fatalf("missing decision-file err = %v", err)
+	}
+}
+
 func TestRunAddModelFailurePersistsFailedInstallJobWithoutPreset(t *testing.T) {
 	storeDir := t.TempDir()
 	dbPath := filepath.Join(t.TempDir(), "control.db")

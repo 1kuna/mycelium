@@ -43,8 +43,8 @@ Mycelium is a peer-native, LAN-local inference control plane:
   `myce jobs result`, `myce models prewarm`, `myce models scale`,
   `myce telemetry samples`, `myce calibrate plan`, `myce calibrate run`,
   `myce calibrate status`, `myce calibrate report`,
-  `myce calibrate apply-priors`, benchmark commands, model and recommendation
-  inspection commands.
+  `myce calibrate apply-priors`, `myce reconcile placement`, benchmark
+  commands, model and recommendation inspection commands.
 - Service operations: `mycelium service plan`, `install`, `status`,
   `uninstall`, and dry-run-only `upgrade` for binary backup/replacement,
   restart, verification, and rollback command evidence without mutating the
@@ -119,6 +119,15 @@ requests remain synchronous:
 when the selected route cannot immediately acquire an owner, the gateway
 returns `503 Service Unavailable` with `Retry-After` instead of accepting an
 asynchronous workload.
+Scheduler placement evidence can now be translated into report-only
+reconciliation tasks with `myce reconcile placement --decision-file <json>`.
+That surface maps drop reasons such as loading capacity, backend label
+mismatch, disk headroom, owner reachability, stale catalog, and context envelope
+incompatibility into typed tasks such as wait, prewarm, verify engine readiness,
+stage artifact, repair owner, refresh catalog, or record incompatibility. The
+tasks are classified against a default standing policy and include an audit
+record that no live mutation occurred. This is repo-local groundwork for the
+future autonomous reconciler loop; it is not yet a live background reconciler.
 Use the authenticated `/workloads` RPC surface,
 `myce jobs admit/status/drain/finish/result`, and fleet benchmark surfaces for
 pressure proofs that need queued admission without turning chat completions into

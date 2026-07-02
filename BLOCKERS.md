@@ -89,6 +89,13 @@ handoff.
   The remaining product work is to add a larger envelope on the second owner or
   a document/page chunking contract before high-context document work can
   automatically use both owners.
+- 2026-07-02: Placement drop reasons are now inspectable as typed
+  reconciliation tasks through `myce reconcile placement`, but Mycelium does
+  not yet run a live background reconciler that automatically stages artifacts,
+  verifies engines, prewarms replicas, repairs owners, or records
+  incompatibilities from those tasks. The command is report-only and
+  public-safe; the next implementation gate is to persist these tasks and let
+  standing autonomy policy decide which ones may run without operator approval.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish

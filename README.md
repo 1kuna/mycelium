@@ -252,6 +252,25 @@ resource requirement for placement, not as a privileged control-plane override:
 project, priority, speed, preemption, submitter, and handling headers still
 require an explicitly trusted control path.
 
+When a placement decision queues or rejects owners, inspect the scheduler
+evidence as reconciliation work instead of reading trace strings by hand:
+
+```bash
+myce reconcile placement --decision-file <placement-or-job.json>
+myce reconcile placement --decision-file <placement-or-job.json> --json
+```
+
+The command accepts a saved placement decision, job JSON, or wrapper containing
+a `decision`, then turns filter/drop evidence into typed, report-only tasks such
+as `wait_capacity`, `prewarm_replica`, `verify_engine_readiness`,
+`stage_model_artifact`, `repair_owner`, `refresh_catalog`, or
+`record_incompatibility`. Each task says whether it is an automatic candidate
+under the default standing policy or whether it still needs operator approval.
+This is the first inspectable bridge from placement drop reasons to the future
+reconciler loop: allowed automation should consume these task records to stage,
+verify, prewarm, or record incompatibility; this command itself does not mutate
+live services or route policy.
+
 Gateways built from the route-discovery revision expose `GET /v1/models` with
 preset IDs and aliases only; host-local model paths and artifact refs are not
 returned. If `myce gateway routes --live` reports an authenticated `404` for
