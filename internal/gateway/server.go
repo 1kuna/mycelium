@@ -112,6 +112,13 @@ func parseRequestWithControlHeaders(r *http.Request, trustControlHeaders bool) (
 	if err != nil {
 		return translate.IngressRequest{}, err
 	}
+	if raw := r.Header.Get(HeaderContextCap); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Context-Cap"}
+		}
+		req.ContextRequest = value
+	}
 	if !trustControlHeaders {
 		return req, nil
 	}
@@ -133,13 +140,6 @@ func parseRequestWithControlHeaders(r *http.Request, trustControlHeaders bool) (
 	}
 	if !validHandling(req.Handling) {
 		return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Handling"}
-	}
-	if raw := r.Header.Get(HeaderContextCap); raw != "" {
-		value, err := strconv.Atoi(raw)
-		if err != nil || value <= 0 {
-			return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Context-Cap"}
-		}
-		req.ContextRequest = value
 	}
 	return req, nil
 }
