@@ -239,7 +239,7 @@ func TestResolveGatewayTokenDiscoversDefaults(t *testing.T) {
 	}
 }
 
-func TestResolveGatewayTokenAcceptsOpenAICompatibleEnvNames(t *testing.T) {
+func TestResolveGatewayTokenUsesOnlyMyceliumDefaults(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
 	t.Setenv("MYCELIUM_API_KEY", "project-secret")
@@ -248,8 +248,11 @@ func TestResolveGatewayTokenAcceptsOpenAICompatibleEnvNames(t *testing.T) {
 		t.Fatalf("project env token = %q err=%v", got, err)
 	}
 	t.Setenv("MYCELIUM_API_KEY", "")
-	if got, err := ResolveGatewayTokenForURL("http://gateway.test", "", ""); err != nil || got != "openai-secret" {
-		t.Fatalf("openai env token = %q err=%v", got, err)
+	if got, _, err := ResolveGatewayTokenSourceForURL("http://gateway.test", "", ""); err == nil || got != "" || !strings.Contains(err.Error(), "gateway_token or token_env") {
+		t.Fatalf("ambient OPENAI_API_KEY should not be a Mycelium gateway token: token=%q err=%v", got, err)
+	}
+	if got, source, err := ResolveGatewayTokenSourceForURL("http://gateway.test", "", "OPENAI_API_KEY"); err != nil || got != "openai-secret" || source != "OPENAI_API_KEY" {
+		t.Fatalf("explicit OPENAI_API_KEY token = %q source=%q err=%v", got, source, err)
 	}
 }
 

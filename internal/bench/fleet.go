@@ -610,41 +610,45 @@ func gatewayTokenFor(cfg FleetBenchmarkConfig, gw FleetGateway) (string, error) 
 }
 
 func ResolveGatewayTokenForURL(rawURL, token, tokenEnv string) (string, error) {
+	token, _, err := ResolveGatewayTokenSourceForURL(rawURL, token, tokenEnv)
+	return token, err
+}
+
+func ResolveGatewayTokenSourceForURL(rawURL, token, tokenEnv string) (string, string, error) {
 	if token != "" {
-		return token, nil
+		return token, "explicit", nil
 	}
 	if tokenEnv != "" {
 		value := os.Getenv(tokenEnv)
 		if value == "" {
-			return "", fmt.Errorf("gateway token env %s is not set", tokenEnv)
+			return "", "", fmt.Errorf("gateway token env %s is not set", tokenEnv)
 		}
-		return value, nil
+		return value, tokenEnv, nil
 	}
 	for _, name := range DefaultGatewayTokenEnvNames() {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-			return value, nil
+			return value, name, nil
 		}
 	}
 	if value, err := defaultGatewayToken(); err != nil {
-		return "", err
+		return "", "", err
 	} else if value != "" {
-		return value, nil
+		return value, "~/.mycelium/peer.json gateway_token", nil
 	}
 	requires, err := gatewayURLRequiresToken(rawURL)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if requires {
-		return "", fmt.Errorf("gateway %s is not loopback; configure gateway_token or token_env", rawURL)
+		return "", "", fmt.Errorf("gateway %s is not loopback; configure gateway_token or token_env", rawURL)
 	}
-	return "", nil
+	return "", "none", nil
 }
 
 func DefaultGatewayTokenEnvNames() []string {
 	return []string{
 		"MYCELIUM_GATEWAY_TOKEN",
 		"MYCELIUM_API_KEY",
-		"OPENAI_API_KEY",
 	}
 }
 

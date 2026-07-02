@@ -2239,17 +2239,12 @@ func resolveGatewayPreflightToken(rawURL, token, tokenEnv, tokenFile, configPath
 		}
 		return value, configPath + " gateway_token", nil
 	}
-	for _, name := range bench.DefaultGatewayTokenEnvNames() {
-		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-			return value, name, nil
-		}
-	}
-	token, err := bench.ResolveGatewayTokenForURL(rawURL, "", "")
+	token, source, err := bench.ResolveGatewayTokenSourceForURL(rawURL, "", "")
 	if err != nil {
-		return "", "", fmt.Errorf("%w; checked env %s, --gateway-token-file, --config gateway_token, and ~/.mycelium/peer.json gateway_token", err, strings.Join(bench.DefaultGatewayTokenEnvNames(), ", "))
+		return "", "", fmt.Errorf("%w; checked env %s, --gateway-token-file, --config gateway_token, and ~/.mycelium/peer.json gateway_token; pass --gateway-token-env OPENAI_API_KEY only if that variable intentionally contains a Mycelium gateway token", err, strings.Join(bench.DefaultGatewayTokenEnvNames(), ", "))
 	}
 	if token != "" {
-		return token, "~/.mycelium/peer.json gateway_token", nil
+		return token, source, nil
 	}
 	return "", "none", nil
 }
@@ -2668,7 +2663,7 @@ func runBenchmarkFanout(ctx context.Context, args []string, client *http.Client)
 	if len(models) == 0 {
 		return fmt.Errorf("--model is required")
 	}
-	authToken, err := bench.ResolveGatewayTokenForURL(*url, *gatewayToken, *gatewayTokenEnv)
+	authToken, authSource, err := bench.ResolveGatewayTokenSourceForURL(*url, *gatewayToken, *gatewayTokenEnv)
 	if err != nil {
 		return err
 	}
@@ -2698,6 +2693,7 @@ func runBenchmarkFanout(ctx context.Context, args []string, client *http.Client)
 		Clock:  clock.System{},
 		Store:  store,
 	}
+	fmt.Printf("benchmark-auth\t%s\tconfigured=%t\n", authSource, authToken != "")
 	fmt.Printf("benchmark\t%s\tstarted\n", parent.ID)
 	results, err := runner.RunJob(ctx, parent)
 	for _, result := range results {
