@@ -827,6 +827,28 @@ func TestStopStoredProcessTreatsAlreadyExitedRefAsReaped(t *testing.T) {
 	}
 }
 
+func TestStopStoredProcessStopsLiveRefAndRemovesRegistryEntry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process signal wrapper test uses POSIX shell")
+	}
+	handle, err := execProcessRunner{}.Start(context.Background(), "/bin/sleep", []string{"10"})
+	if err != nil {
+		t.Fatalf("Start sleep: %v", err)
+	}
+	pid := handle.PID()
+	registry := &recordingRegistry{}
+	adapter := New(Config{ProcessRegistry: registry})
+	err = adapter.Stop(context.Background(), ports.Handle{PID: pid, PGID: processGroupID(pid), Kind: "process", Ref: fmt.Sprintf("%d", pid), Binary: "/bin/sleep", Args: []string{"10"}, StartedAt: time.Now().UTC()})
+	if err != nil {
+		_ = handle.Kill()
+		_ = handle.Wait()
+		t.Fatalf("Stop stored live ref: %v", err)
+	}
+	if len(registry.removed) != 1 || registry.removed[0].PID != pid {
+		t.Fatalf("removed refs = %+v", registry.removed)
+	}
+}
+
 func TestClassifyPermissionStopErrorForStaleRef(t *testing.T) {
 	if stopped, err, ok := classifyPermissionStopError(ports.Handle{PID: 99999999}, syscall.EPERM); !ok || !stopped || err != nil {
 		t.Fatalf("stale ref EPERM stopped=%t err=%v ok=%t", stopped, err, ok)
