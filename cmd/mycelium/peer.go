@@ -525,6 +525,10 @@ type workloadStore interface {
 	Job(ctx context.Context, id string) (domain.Job, error)
 }
 
+type workloadRegistryStore interface {
+	Snapshot(ctx context.Context) ([]domain.JobRecord, error)
+}
+
 type catalogStageStore interface {
 	SaveJob(ctx context.Context, job domain.Job) error
 	SavePreset(ctx context.Context, preset domain.Preset) error
@@ -565,7 +569,7 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			if latest, readErr := store.Job(r.Context(), result.Decision.JobID); readErr == nil {
 				job = latest
 			}
-			resp.Results = append(resp.Results, workloadResponse(job, result, 0))
+			resp.Results = append(resp.Results, workloadResponse(r.Context(), store, job, result, 0))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -599,7 +603,7 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 		if latest, readErr := store.Job(r.Context(), job.ID); readErr == nil {
 			job = latest
 		}
-		resp := workloadResponse(job, result, len(req.Payload))
+		resp := workloadResponse(r.Context(), store, job, result, len(req.Payload))
 		w.Header().Set("Content-Type", "application/json")
 		if resp.Queued {
 			w.WriteHeader(http.StatusAccepted)
@@ -673,7 +677,7 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(workload.StatusResponse{Job: job, Result: job.Result}); err != nil {
+		if err := json.NewEncoder(w).Encode(workload.StatusResponse{Job: job, Result: job.Result, Payload: workloadPayloadEvidence(r.Context(), store, job)}); err != nil {
 			panic(err)
 		}
 	})
@@ -737,7 +741,7 @@ func workloadLease(job domain.Job) (domain.Lease, error) {
 	return lease, nil
 }
 
-func workloadResponse(job domain.Job, result scheduler.Result, payloadBytes int) workload.AdmissionResponse {
+func workloadResponse(ctx context.Context, store workloadStore, job domain.Job, result scheduler.Result, payloadBytes int) workload.AdmissionResponse {
 	if payloadBytes == 0 && job.Result != nil {
 		payloadBytes = job.Result.PayloadBytes
 	}
@@ -754,7 +758,62 @@ func workloadResponse(job domain.Job, result scheduler.Result, payloadBytes int)
 		Queued:        job.Status == domain.JobQueued || result.Decision.Action == domain.ActionQueued,
 		PayloadBytes:  payloadBytes,
 		PayloadStored: payloadStored,
+		Payload:       workloadPayloadEvidence(ctx, store, job),
 	}
+}
+
+func workloadPayloadEvidence(ctx context.Context, store workloadStore, job domain.Job) workload.PayloadEvidence {
+	bytes := 0
+	if job.Result != nil {
+		bytes = job.Result.PayloadBytes
+	}
+	base := workload.PayloadEvidence{Bytes: bytes}
+	registry, ok := store.(workloadRegistryStore)
+	if !ok {
+		if job.Result != nil && job.Result.PayloadStored {
+			base.State = "runtime_payload_stored"
+		}
+		return base
+	}
+	records, err := registry.Snapshot(ctx)
+	if err != nil {
+		base.State = "registry_unavailable"
+		base.Error = err.Error()
+		return base
+	}
+	for _, rec := range records {
+		if rec.JobID != job.ID {
+			continue
+		}
+		if rec.PayloadRedacted || rec.Handling == domain.HandlingPrivate {
+			base.State = "registry_payload_redacted"
+			base.Redacted = true
+			return base
+		}
+		if len(rec.Request) == 0 {
+			base.State = "registry_payload_missing"
+			return base
+		}
+		payloadJob, payload, err := peercoord.DecodeRescuePayload(rec.Request)
+		if err != nil {
+			base.State = "registry_payload_unreadable"
+			base.Error = err.Error()
+			return base
+		}
+		if payloadJob.ID != job.ID {
+			base.State = "registry_payload_mismatch"
+			base.Error = fmt.Sprintf("payload job %q does not match %q", payloadJob.ID, job.ID)
+			return base
+		}
+		base.State = "registry_payload_replayable"
+		base.Replayable = true
+		base.Bytes = len(payload)
+		return base
+	}
+	if job.Result != nil && job.Result.PayloadStored {
+		base.State = "runtime_payload_stored"
+	}
+	return base
 }
 
 func normalizeWorkloadJob(job domain.Job) (domain.Job, error) {

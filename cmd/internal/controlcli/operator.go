@@ -22,7 +22,9 @@ import (
 
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
+	peercoord "mycelium/internal/peer"
 	storesqlite "mycelium/internal/store/sqlite"
+	"mycelium/internal/workload"
 )
 
 const operatorRecentLimit = 200
@@ -687,6 +689,8 @@ type debugSummaryRow struct {
 	LiveModelAvailable      bool   `json:"live_model_available,omitempty"`
 	FailureLayer            string `json:"failure_layer,omitempty"`
 	FailureClass            string `json:"failure_class,omitempty"`
+	PayloadState            string `json:"payload_state,omitempty"`
+	PayloadReplayable       bool   `json:"payload_replayable,omitempty"`
 	ResultArtifactPresent   bool   `json:"result_artifact_present,omitempty"`
 	ResultMediaType         string `json:"result_media_type,omitempty"`
 	ResultBytes             int    `json:"result_bytes,omitempty"`
@@ -845,6 +849,8 @@ type debugSummaryTrainingRow struct {
 	ConsumerStatus           string `json:"consumer_status,omitempty"`
 	ConsumerResult           string `json:"consumer_result,omitempty"`
 	ConsumerQualityGate      string `json:"consumer_quality_gate,omitempty"`
+	PayloadState             string `json:"payload_state,omitempty"`
+	PayloadReplayable        bool   `json:"payload_replayable,omitempty"`
 	ResultArtifactPresent    bool   `json:"result_artifact_present,omitempty"`
 	ResultMediaType          string `json:"result_media_type,omitempty"`
 	ResultBytes              int    `json:"result_bytes,omitempty"`
@@ -1722,6 +1728,8 @@ func debugSummaryTrainingRowFromSummary(row debugSummaryRow, recommendation debu
 		ConsumerStatus:           row.ConsumerStatus,
 		ConsumerResult:           row.ConsumerResult,
 		ConsumerQualityGate:      row.ConsumerQualityGate,
+		PayloadState:             row.PayloadState,
+		PayloadReplayable:        row.PayloadReplayable,
 		ResultArtifactPresent:    row.ResultArtifactPresent,
 		ResultMediaType:          row.ResultMediaType,
 		ResultBytes:              row.ResultBytes,
@@ -2605,6 +2613,8 @@ func debugSummaryRowFromOptimization(kind string, evidence jobOptimizationEviden
 		LiveModelAvailable:      evidence.LiveModelAvailable,
 		FailureLayer:            evidence.FailureLayer,
 		FailureClass:            evidence.FailureClass,
+		PayloadState:            evidence.PayloadState,
+		PayloadReplayable:       evidence.PayloadReplayable,
 		ResultArtifactPresent:   evidence.ResultArtifactPresent,
 		ResultMediaType:         evidence.ResultMediaType,
 		ResultBytes:             evidence.ResultBytes,
@@ -2625,7 +2635,7 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 	if row.ColdLoad != nil {
 		cold = strconv.FormatBool(*row.ColdLoad)
 	}
-	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tquality_gate=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\tattempts=%d\troute_status=%s\tstartability=%s\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tqueue_ms=%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\thttp_status=%d\tgateway_error=%s\tresult_artifact=%t\tresult_media=%s\tresult_bytes=%d\tresult_sha256=%t\n",
+	fmt.Fprintf(w, "evidence\tkind=%s\tjob=%s\tproject=%s\trun=%s\titem=%s\tstatus=%s\tresult=%s\tquality_gate=%s\tmodel=%s\tnode=%s\tbackend=%s\tpreset=%s\tattempts=%d\troute_status=%s\tstartability=%s\twarm_instances=%d\tloading_instances=%d\tunfinished_jobs=%d\tcontext=%d/%d\tcontext_ok=%t\tstream=%t\tstructured=%s\ttool=%t\ttool_choice=%s\tfinish=%s\tcontent=%d\treasoning=%d\tjson=%t\ttextual_tool=%t\tusage_available=%t\tusage=%d/%d/%d\tcold=%s\tqueue_ms=%d\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\towner_metrics=%t\tlive_model=%t/%s\tfailure_layer=%s\tfailure_class=%s\thttp_status=%d\tgateway_error=%s\tpayload_state=%s\tpayload_replayable=%t\tresult_artifact=%t\tresult_media=%s\tresult_bytes=%d\tresult_sha256=%t\n",
 		emptyDash(row.Kind),
 		emptyDash(row.JobID),
 		emptyDash(row.Project),
@@ -2672,6 +2682,8 @@ func printDebugSummaryRow(w io.Writer, row debugSummaryRow) {
 		emptyDash(row.FailureClass),
 		row.StatusCode,
 		emptyDash(row.GatewayError),
+		emptyDash(row.PayloadState),
+		row.PayloadReplayable,
 		row.ResultArtifactPresent,
 		emptyDash(row.ResultMediaType),
 		row.ResultBytes,
@@ -2913,6 +2925,7 @@ type jobDebugReport struct {
 	OwnerTelemetry    *ownerTelemetryReport         `json:"owner_telemetry,omitempty"`
 	Diagnosis         *jobDebugDiagnosis            `json:"diagnosis,omitempty"`
 	Optimization      *jobOptimizationEvidence      `json:"optimization,omitempty"`
+	Payload           workload.PayloadEvidence      `json:"payload_evidence,omitempty"`
 	Parent            *domain.Job                   `json:"parent,omitempty"`
 	Children          []domain.Job                  `json:"children,omitempty"`
 	Registry          *domain.JobRecord             `json:"registry,omitempty"`
@@ -2988,7 +3001,46 @@ func buildJobDebugReport(ctx context.Context, dbPath, jobID string) (jobDebugRep
 		}
 	}
 	report.Hints = jobDebugHints(report)
+	report.Payload = operatorPayloadEvidence(job, report.Registry)
 	return report, nil
+}
+
+func operatorPayloadEvidence(job domain.Job, rec *domain.JobRecord) workload.PayloadEvidence {
+	bytes := 0
+	if job.Result != nil {
+		bytes = job.Result.PayloadBytes
+	}
+	evidence := workload.PayloadEvidence{Bytes: bytes}
+	if rec == nil {
+		if job.Result != nil && job.Result.PayloadStored {
+			evidence.State = "runtime_payload_stored"
+		}
+		return evidence
+	}
+	if rec.PayloadRedacted || rec.Handling == domain.HandlingPrivate {
+		evidence.State = "registry_payload_redacted"
+		evidence.Redacted = true
+		return evidence
+	}
+	if len(rec.Request) == 0 {
+		evidence.State = "registry_payload_missing"
+		return evidence
+	}
+	payloadJob, payload, err := peercoord.DecodeRescuePayload(rec.Request)
+	if err != nil {
+		evidence.State = "registry_payload_unreadable"
+		evidence.Error = err.Error()
+		return evidence
+	}
+	if payloadJob.ID != job.ID {
+		evidence.State = "registry_payload_mismatch"
+		evidence.Error = fmt.Sprintf("payload job %q does not match %q", payloadJob.ID, job.ID)
+		return evidence
+	}
+	evidence.State = "registry_payload_replayable"
+	evidence.Replayable = true
+	evidence.Bytes = len(payload)
+	return evidence
 }
 
 func printJobDebugReport(w io.Writer, report jobDebugReport) {
@@ -3007,6 +3059,10 @@ func printJobDebugReport(w io.Writer, report jobDebugReport) {
 		result := report.Job.Result
 		fmt.Fprintf(w, "result\tterminal=%t\tredacted=%t\tartifact=%s\tmedia_type=%s\tbytes=%d\tsha256=%s\n",
 			result.Terminal, result.ResultRedacted, emptyDash(result.ResultArtifact), emptyDash(result.ResultMediaType), result.ResultBytes, emptyDash(result.ResultSHA256))
+	}
+	if report.Payload.State != "" {
+		fmt.Fprintf(w, "payload\tstate=%s\treplayable=%t\tredacted=%t\tbytes=%d\terror=%s\n",
+			report.Payload.State, report.Payload.Replayable, report.Payload.Redacted, report.Payload.Bytes, emptyDash(report.Payload.Error))
 	}
 	if report.Parent != nil {
 		fmt.Fprintf(w, "parent\t%s\t%s\n", report.Parent.ID, report.Parent.Status)
@@ -3361,6 +3417,8 @@ type jobOptimizationEvidence struct {
 	FailureLayer            string                               `json:"failure_layer,omitempty"`
 	StatusCode              int                                  `json:"status_code,omitempty"`
 	GatewayError            string                               `json:"gateway_error,omitempty"`
+	PayloadState            string                               `json:"payload_state,omitempty"`
+	PayloadReplayable       bool                                 `json:"payload_replayable,omitempty"`
 	ResultArtifactPresent   bool                                 `json:"result_artifact_present,omitempty"`
 	ResultMediaType         string                               `json:"result_media_type,omitempty"`
 	ResultBytes             int                                  `json:"result_bytes,omitempty"`
@@ -3432,6 +3490,8 @@ func summarizeJobOptimizationEvidence(report jobDebugReport) *jobOptimizationEvi
 		out.ConsumerResult = report.Consumer.Result
 		out.ConsumerQualityGate = report.Consumer.QualityGate
 	}
+	out.PayloadState = report.Payload.State
+	out.PayloadReplayable = report.Payload.Replayable
 	if report.Job.Result != nil {
 		out.ResultArtifactPresent = strings.TrimSpace(report.Job.Result.ResultArtifact) != ""
 		out.ResultMediaType = report.Job.Result.ResultMediaType
@@ -3531,7 +3591,7 @@ func failureLayerForDiagnosis(diagnosis jobDebugDiagnosis, report jobDebugReport
 }
 
 func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvidence) {
-	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tconsumer_result=%s\tquality_gate=%s\tnode=%s\tpreset=%s\tmodel=%s\tattempts=%d\tqueue_ms=%d\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tfinish=%s\tcontent_len=%d\treasoning_len=%d\tjson=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tlive_model=%t/%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\tresult_artifact=%t\tresult_media=%s\tresult_bytes=%d\tresult_sha256=%t\n",
+	fmt.Fprintf(w, "optimization\tjob=%s\tproject=%s\tconsumer_status=%s\tconsumer_result=%s\tquality_gate=%s\tnode=%s\tpreset=%s\tmodel=%s\tattempts=%d\tqueue_ms=%d\tcontext_cap=%d\tmin_context=%d\tcontext_ok=%t\tfinish=%s\tcontent_len=%d\treasoning_len=%d\tjson=%t\tstream=%t\ttool=%t\tusage=%d/%d/%d\tlive_model=%t/%s\tload_ms=%d\tttft_ms=%d\tupstream_ms=%d\tfailure_layer=%s\tfailure_class=%s\tpayload_state=%s\tpayload_replayable=%t\tresult_artifact=%t\tresult_media=%s\tresult_bytes=%d\tresult_sha256=%t\n",
 		emptyDash(evidence.JobID),
 		emptyDash(evidence.Project),
 		emptyDash(evidence.ConsumerStatus),
@@ -3561,6 +3621,8 @@ func printOptimizationEvidenceSummary(w io.Writer, evidence jobOptimizationEvide
 		evidence.UpstreamWallMS,
 		emptyDash(evidence.FailureLayer),
 		emptyDash(evidence.FailureClass),
+		emptyDash(evidence.PayloadState),
+		evidence.PayloadReplayable,
 		evidence.ResultArtifactPresent,
 		emptyDash(evidence.ResultMediaType),
 		evidence.ResultBytes,
