@@ -575,10 +575,13 @@ The workload status surface records scheduler/owner/lease evidence plus
 payload replayability classification, execution-state evidence, and a redacted
 result artifact manifest: reference, media type, byte count, and digest.
 `payload_state` distinguishes a registry-replayable payload from runtime-local,
-redacted, missing, or unreadable payload evidence. `execution_state` distinguishes
-queued, running, manifest-only terminal, and replayable terminal work;
-`provider_output_capture=false` is intentional until automatic provider-output
-capture exists. The commands do not print the queued payload or raw completion.
+redacted, missing, or unreadable payload evidence. `payload_contract`,
+`payload_kind`, and `payload_executable` distinguish opaque evidence payloads
+from explicit gateway-request envelopes such as `openai_chat`. `execution_state`
+distinguishes queued, running, manifest-only terminal, and replayable terminal
+work; `provider_output_capture=false` is intentional until automatic
+provider-output capture exists. The commands do not print the queued payload or
+raw completion.
 When an operator or runtime finishes a workload with `--result-file`, Mycelium
 stores those result bytes in the private control store and `myce jobs result`
 retrieves them explicitly after verifying the stored manifest. Automatic

@@ -855,6 +855,7 @@ func workloadResponse(ctx context.Context, store workloadStore, job domain.Job, 
 
 func workloadExecutionEvidence(ctx context.Context, store workloadStore, job domain.Job) workload.ExecutionEvidence {
 	out := workload.ExecutionEvidence{AutomaticProviderOutputCapture: false}
+	out.PayloadContract, out.PayloadKind, out.PayloadExecutable = workloadExecutablePayloadEvidence(ctx, store, job)
 	if job.Result != nil {
 		out.ResultArtifact = job.Result.ResultArtifact != ""
 		out.ResultBytes = job.Result.ResultBytes
@@ -884,6 +885,47 @@ func workloadExecutionEvidence(ctx context.Context, store workloadStore, job dom
 		out.State = "job_status_" + string(job.Status)
 	}
 	return out
+}
+
+func workloadExecutablePayloadEvidence(ctx context.Context, store workloadStore, job domain.Job) (string, string, bool) {
+	if job.Result == nil || job.Result.PayloadBytes == 0 {
+		return "no_payload", "", false
+	}
+	registry, ok := store.(workloadRegistryStore)
+	if !ok {
+		if job.Result.PayloadStored {
+			return "runtime_payload_not_inspectable", "", false
+		}
+		return "no_payload", "", false
+	}
+	records, err := registry.Snapshot(ctx)
+	if err != nil {
+		return "registry_payload_unavailable", "", false
+	}
+	for _, rec := range records {
+		if rec.JobID != job.ID {
+			continue
+		}
+		if rec.PayloadRedacted || rec.Handling == domain.HandlingPrivate {
+			return "registry_payload_redacted", "", false
+		}
+		if len(rec.Request) == 0 {
+			return "registry_payload_missing", "", false
+		}
+		payloadJob, payload, err := peercoord.DecodeRescuePayload(rec.Request)
+		if err != nil || payloadJob.ID != job.ID {
+			return "registry_payload_unreadable", "", false
+		}
+		executable, err := workload.DecodeExecutablePayload(payload)
+		if err != nil {
+			return "registry_payload_not_executable", "", false
+		}
+		return "registry_executable_gateway_request", executable.Kind, true
+	}
+	if job.Result.PayloadStored {
+		return "runtime_payload_not_inspectable", "", false
+	}
+	return "no_payload", "", false
 }
 
 func workloadPayloadEvidence(ctx context.Context, store workloadStore, job domain.Job) workload.PayloadEvidence {

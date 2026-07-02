@@ -292,7 +292,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 			ExpectedConcurrency: 2,
 			Preemption:          domain.PreemptSoft,
 		},
-		Payload: json.RawMessage(`{"input_bytes":123}`),
+		Payload: json.RawMessage(`{"kind":"openai_chat","body":{"model":"model-a","messages":[]}}`),
 	}
 	data, err := json.Marshal(intent)
 	if err != nil {
@@ -312,7 +312,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode workload admit: %v", err)
 			}
-			if req.Job.ContextRequest != 8192 || string(req.Payload) != `{"input_bytes":123}` {
+			if req.Job.ContextRequest != 8192 || string(req.Payload) != `{"kind":"openai_chat","body":{"model":"model-a","messages":[]}}` {
 				t.Fatalf("admission request = %+v payload=%s", req.Job, req.Payload)
 			}
 			w.WriteHeader(http.StatusAccepted)
@@ -324,7 +324,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 				Queued:        true,
 				PayloadBytes:  len(req.Payload),
 				PayloadStored: true,
-				Execution:     workload.ExecutionEvidence{State: "queued_not_executed"},
+				Execution:     workload.ExecutionEvidence{State: "queued_not_executed", PayloadContract: "runtime_payload_not_inspectable"},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/workloads/job-a":
 			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultRedacted: true}
@@ -339,7 +339,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 				Preemption:          domain.PreemptSoft,
 				Status:              domain.JobQueued,
 				Result:              result,
-			}, Result: result, Execution: workload.ExecutionEvidence{State: "queued_not_executed"}})
+			}, Result: result, Execution: workload.ExecutionEvidence{State: "queued_not_executed", PayloadContract: "registry_executable_gateway_request", PayloadKind: workload.ExecutablePayloadKindOpenAIChat, PayloadExecutable: true}})
 		case r.Method == http.MethodPost && r.URL.Path == "/workloads/drain" && r.URL.Query().Get("limit") == "2":
 			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultRedacted: true}
 			_ = json.NewEncoder(w).Encode(workload.DrainResponse{Results: []workload.AdmissionResponse{{
@@ -348,7 +348,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 				Result:        result,
 				PayloadBytes:  len(intent.Payload),
 				PayloadStored: true,
-				Execution:     workload.ExecutionEvidence{State: "running_needs_finish"},
+				Execution:     workload.ExecutionEvidence{State: "running_needs_finish", PayloadContract: "registry_executable_gateway_request", PayloadKind: workload.ExecutablePayloadKindOpenAIChat, PayloadExecutable: true},
 			}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/workloads/job-a/finish":
 			var req workload.FinishRequest
@@ -378,7 +378,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	if err != nil {
 		t.Fatalf("jobs admit: %v", err)
 	}
-	if !strings.Contains(admitOut, "workload\tjob-a\tstatus=queued\tqueued=true") || !strings.Contains(admitOut, "execution_state=queued_not_executed") || !strings.Contains(admitOut, "provider_output_capture=false") || strings.Contains(admitOut, "input_bytes") {
+	if !strings.Contains(admitOut, "workload\tjob-a\tstatus=queued\tqueued=true") || !strings.Contains(admitOut, "payload_contract=runtime_payload_not_inspectable") || !strings.Contains(admitOut, "execution_state=queued_not_executed") || !strings.Contains(admitOut, "provider_output_capture=false") || strings.Contains(admitOut, "messages") {
 		t.Fatalf("admit output = %q", admitOut)
 	}
 	statusOut := captureStdout(t, func() {
@@ -387,7 +387,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	if err != nil {
 		t.Fatalf("jobs status: %v", err)
 	}
-	if !strings.Contains(statusOut, "context=8192\tconcurrency=2\tpreemption=soft") || !strings.Contains(statusOut, "execution_state=queued_not_executed") || !strings.Contains(statusOut, "result_replayable=false") || strings.Contains(statusOut, "input_bytes") {
+	if !strings.Contains(statusOut, "context=8192\tconcurrency=2\tpreemption=soft") || !strings.Contains(statusOut, "payload_contract=registry_executable_gateway_request") || !strings.Contains(statusOut, "payload_kind=openai_chat") || !strings.Contains(statusOut, "payload_executable=true") || !strings.Contains(statusOut, "execution_state=queued_not_executed") || !strings.Contains(statusOut, "result_replayable=false") || strings.Contains(statusOut, "messages") {
 		t.Fatalf("status output = %q", statusOut)
 	}
 	drainOut := captureStdout(t, func() {
@@ -396,7 +396,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	if err != nil {
 		t.Fatalf("jobs drain: %v", err)
 	}
-	if !strings.Contains(drainOut, "drained\t1") || !strings.Contains(drainOut, "node=node-a") || !strings.Contains(drainOut, "execution_state=running_needs_finish") || strings.Contains(drainOut, "input_bytes") {
+	if !strings.Contains(drainOut, "drained\t1") || !strings.Contains(drainOut, "node=node-a") || !strings.Contains(drainOut, "payload_executable=true") || !strings.Contains(drainOut, "execution_state=running_needs_finish") || strings.Contains(drainOut, "messages") {
 		t.Fatalf("drain output = %q", drainOut)
 	}
 	resultFile := filepath.Join(dir, "result.json")
@@ -409,7 +409,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	if err != nil {
 		t.Fatalf("jobs finish: %v", err)
 	}
-	if !strings.Contains(finishOut, "status=done") || !strings.Contains(finishOut, "terminal=true") || !strings.Contains(finishOut, "execution_state=terminal_result_replayable") || !strings.Contains(finishOut, "result_replayable=true") || !strings.Contains(finishOut, "result_artifact=stored://workload/job-a") || !strings.Contains(finishOut, "result_bytes=15") || strings.Contains(finishOut, "input_bytes") || strings.Contains(finishOut, "answer") {
+	if !strings.Contains(finishOut, "status=done") || !strings.Contains(finishOut, "terminal=true") || !strings.Contains(finishOut, "execution_state=terminal_result_replayable") || !strings.Contains(finishOut, "result_replayable=true") || !strings.Contains(finishOut, "result_artifact=stored://workload/job-a") || !strings.Contains(finishOut, "result_bytes=15") || strings.Contains(finishOut, "messages") || strings.Contains(finishOut, "answer") {
 		t.Fatalf("finish output = %q", finishOut)
 	}
 	resultOutPath := filepath.Join(dir, "retrieved.json")
