@@ -221,8 +221,12 @@ For authenticated non-loopback gateways, `myce benchmark` resolves the gateway t
 2. `--gateway-token-env`
 3. `MYCELIUM_GATEWAY_TOKEN`
 4. `MYCELIUM_API_KEY`
-5. `OPENAI_API_KEY`
-6. `~/.mycelium/peer.json` field `gateway_token`
+5. `~/.mycelium/peer.json` field `gateway_token`
+
+`OPENAI_API_KEY` is not used as a Mycelium gateway bearer token by default. If
+an OpenAI-compatible consumer environment intentionally stores a Mycelium
+gateway token in that variable, pass `--gateway-token-env OPENAI_API_KEY` so
+the auth source is explicit in command output.
 
 ## Calling The Gateway
 
@@ -378,8 +382,11 @@ Token resolution for `myce gateway preflight` is:
 4. `--config <peer.json>` field `gateway_token`
 5. `MYCELIUM_GATEWAY_TOKEN`
 6. `MYCELIUM_API_KEY`
-7. `OPENAI_API_KEY`
-8. `~/.mycelium/peer.json` field `gateway_token`
+7. `~/.mycelium/peer.json` field `gateway_token`
+
+`OPENAI_API_KEY` is intentionally not part of the default Mycelium gateway
+token chain. Use `--gateway-token-env OPENAI_API_KEY` only when that environment
+variable deliberately contains a Mycelium gateway token, not a provider API key.
 
 For an OpenAI-compatible consumer, set the base URL to the Mycelium gateway and
 put the Mycelium gateway token in an env var or local token file that the

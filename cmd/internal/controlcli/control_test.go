@@ -1226,16 +1226,23 @@ func TestRunBenchmarkUsesGatewayTokenEnv(t *testing.T) {
 		}
 		writeBenchmarkOpenAIStream(w, []string{"env ok"}, api.OpenAIUsage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3})
 	}))
-	if err := RunWithClient(context.Background(), []string{
-		"benchmark", "run",
-		"--db", filepath.Join(t.TempDir(), "control.db"),
-		"--url", "http://gateway.test",
-		"--gateway-token-env", "MYCELIUM_TEST_GATEWAY_TOKEN",
-		"--prompt", "Say hi",
-		"--out", filepath.Join(t.TempDir(), "bench"),
-		"--model", "tiny",
-	}, client); err != nil {
+	var err error
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{
+			"benchmark", "run",
+			"--db", filepath.Join(t.TempDir(), "control.db"),
+			"--url", "http://gateway.test",
+			"--gateway-token-env", "MYCELIUM_TEST_GATEWAY_TOKEN",
+			"--prompt", "Say hi",
+			"--out", filepath.Join(t.TempDir(), "bench"),
+			"--model", "tiny",
+		}, client)
+	})
+	if err != nil {
 		t.Fatalf("benchmark env token: %v", err)
+	}
+	if !strings.Contains(output, "benchmark-auth\tMYCELIUM_TEST_GATEWAY_TOKEN\tconfigured=true") || strings.Contains(output, "env-secret") {
+		t.Fatalf("benchmark auth output = %q", output)
 	}
 	if err := RunWithClient(context.Background(), []string{
 		"benchmark", "run",
@@ -1250,7 +1257,28 @@ func TestRunBenchmarkUsesGatewayTokenEnv(t *testing.T) {
 	}
 }
 
-func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing.T) {
+func TestRunBenchmarkIgnoresAmbientOpenAIKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
+	t.Setenv("MYCELIUM_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "openai-secret")
+	client := directHTTPClient(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("benchmark should not call gateway with ambient OPENAI_API_KEY")
+	}))
+	err := RunWithClient(context.Background(), []string{
+		"benchmark", "run",
+		"--db", filepath.Join(t.TempDir(), "control.db"),
+		"--url", "http://gateway.test",
+		"--prompt", "Say hi",
+		"--out", filepath.Join(t.TempDir(), "bench"),
+		"--model", "tiny",
+	}, client)
+	if err == nil || !strings.Contains(err.Error(), "gateway_token or token_env") {
+		t.Fatalf("ambient OPENAI_API_KEY benchmark err = %v", err)
+	}
+}
+
+func TestRunGatewayPreflightUsesMyceliumEnvAndPrintsTelemetry(t *testing.T) {
 	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
 	t.Setenv("MYCELIUM_API_KEY", "project-secret")
 	t.Setenv("OPENAI_API_KEY", "openai-secret")
@@ -1358,6 +1386,45 @@ func TestRunGatewayPreflightUsesOpenAICompatibleEnvAndPrintsTelemetry(t *testing
 	}
 	if evidence.Consumer == nil || evidence.Consumer.RunID != "strict-json-run-001" || evidence.Consumer.ItemID != "row-004" || evidence.Consumer.Status != "ok" || evidence.Consumer.ElapsedMS != 1200 || evidence.Consumer.Result != "pass" || evidence.Consumer.QualityGate != "strict-json-validation" {
 		t.Fatalf("preflight consumer evidence = %+v", evidence.Consumer)
+	}
+}
+
+func TestRunGatewayPreflightIgnoresAmbientOpenAIKeyUnlessExplicit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
+	t.Setenv("MYCELIUM_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "openai-secret")
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer openai-secret" {
+			t.Fatalf("gateway auth = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]string{"content": `{"ok":true}`},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	if err := RunWithClient(context.Background(), []string{
+		"gateway", "preflight",
+		"--url", "http://gateway.test",
+		"--model", "tiny",
+	}, client); err == nil || !strings.Contains(err.Error(), "OPENAI_API_KEY") || !strings.Contains(err.Error(), "--gateway-token-env OPENAI_API_KEY") {
+		t.Fatalf("ambient OPENAI_API_KEY err = %v", err)
+	}
+	output := captureStdout(t, func() {
+		err := RunWithClient(context.Background(), []string{
+			"gateway", "preflight",
+			"--url", "http://gateway.test",
+			"--model", "tiny",
+			"--gateway-token-env", "OPENAI_API_KEY",
+		}, client)
+		if err != nil {
+			t.Fatalf("explicit OPENAI_API_KEY preflight: %v", err)
+		}
+	})
+	if !strings.Contains(output, "auth\tOPENAI_API_KEY\tconfigured") || strings.Contains(output, "openai-secret") {
+		t.Fatalf("explicit token source output = %q", output)
 	}
 }
 
@@ -2136,7 +2203,7 @@ func TestRunGatewayPreflightUsesTokenFileAndClassifiesMissingAuth(t *testing.T) 
 		"gateway", "preflight",
 		"--url", "http://gateway.test",
 		"--model", "tiny",
-	}, client); err == nil || !strings.Contains(err.Error(), "MYCELIUM_API_KEY") || !strings.Contains(err.Error(), "OPENAI_API_KEY") {
+	}, client); err == nil || !strings.Contains(err.Error(), "MYCELIUM_API_KEY") || !strings.Contains(err.Error(), "--gateway-token-env OPENAI_API_KEY") {
 		t.Fatalf("missing auth err = %v", err)
 	}
 }
