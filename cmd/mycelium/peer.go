@@ -670,6 +670,10 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 		if finish {
 			id = strings.TrimSuffix(id, "/finish")
 		}
+		execute := strings.HasSuffix(id, "/execute")
+		if execute {
+			id = strings.TrimSuffix(id, "/execute")
+		}
 		resultBody := strings.HasSuffix(id, "/result")
 		if resultBody {
 			id = strings.TrimSuffix(id, "/result")
@@ -678,7 +682,7 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("workload id is required"))
 			return
 		}
-		if !finish && !resultBody && r.Method != http.MethodGet {
+		if !finish && !execute && !resultBody && r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -706,6 +710,34 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			w.Header().Set("X-Myc-Job", job.ID)
 			w.Header().Set("X-Myc-Result-SHA256", body.SHA256)
 			if _, err := w.Write(body.Body); err != nil {
+				panic(err)
+			}
+			return
+		}
+		if execute {
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			if executor == nil {
+				writePeerRPCError(w, http.StatusConflict, fmt.Errorf("queued workload provider execution is not configured"))
+				return
+			}
+			result, err := workloadSchedulerResult(job)
+			if err != nil {
+				writePeerRPCError(w, http.StatusConflict, err)
+				return
+			}
+			if err := executeDrainedWorkload(r.Context(), executor, runtime, store, job, result); err != nil {
+				writePeerRPCError(w, http.StatusConflict, err)
+				return
+			}
+			latest, readErr := store.Job(r.Context(), id)
+			if readErr == nil {
+				job = latest
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(workload.FinishResponse{Job: job, Result: job.Result, Execution: workloadExecutionEvidence(r.Context(), store, job)}); err != nil {
 				panic(err)
 			}
 			return
@@ -1005,6 +1037,37 @@ func workloadLease(job domain.Job) (domain.Lease, error) {
 		lease.InstanceID = job.Result.Instance.ID
 	}
 	return lease, nil
+}
+
+func workloadSchedulerResult(job domain.Job) (scheduler.Result, error) {
+	if job.Status != domain.JobRunning {
+		return scheduler.Result{}, fmt.Errorf("workload %q is %s; execute requires running workload", job.ID, job.Status)
+	}
+	if job.Result == nil {
+		return scheduler.Result{}, fmt.Errorf("workload %q has no scheduler result evidence", job.ID)
+	}
+	lease, err := workloadLease(job)
+	if err != nil {
+		return scheduler.Result{}, err
+	}
+	decision := job.Result.Decision
+	if decision.JobID == "" {
+		decision = domain.PlacementDecision{
+			JobID:  job.ID,
+			Preset: domain.Preset{ID: job.Result.PresetID},
+			NodeID: job.Result.NodeID,
+			Action: job.Result.Action,
+		}
+	}
+	inst := job.Result.Instance
+	if inst.ID == "" {
+		inst = domain.ModelInstance{
+			ID:       lease.InstanceID,
+			PresetID: job.Result.PresetID,
+			NodeID:   job.Result.NodeID,
+		}
+	}
+	return scheduler.Result{Decision: decision, Instance: inst, Lease: lease}, nil
 }
 
 func workloadResponse(ctx context.Context, store workloadStore, job domain.Job, result scheduler.Result, payloadBytes int) workload.AdmissionResponse {

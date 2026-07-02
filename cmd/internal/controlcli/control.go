@@ -828,7 +828,7 @@ func runProjects(ctx context.Context, args []string) error {
 
 func runJobs(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|finish|result>")
+		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|execute|finish|result>")
 	}
 	switch args[0] {
 	case "list":
@@ -839,12 +839,14 @@ func runJobs(ctx context.Context, args []string, client *http.Client) error {
 		return runJobsStatus(ctx, args[1:], client)
 	case "drain":
 		return runJobsDrain(ctx, args[1:], client)
+	case "execute":
+		return runJobsExecute(ctx, args[1:], client)
 	case "finish":
 		return runJobsFinish(ctx, args[1:], client)
 	case "result":
 		return runJobsResult(ctx, args[1:], client)
 	default:
-		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|finish|result>")
+		return fmt.Errorf("usage: myce jobs <list|admit|status|drain|execute|finish|result>")
 	}
 }
 
@@ -1044,6 +1046,52 @@ func runJobsDrain(ctx context.Context, args []string, client *http.Client) error
 	for _, result := range out.Results {
 		printWorkloadAdmission(result)
 	}
+	return nil
+}
+
+func runJobsExecute(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("jobs execute", flag.ContinueOnError)
+	peerURL := fs.String("url", "", "peer base URL")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
+	id := fs.String("id", "", "running workload job id")
+	jsonOut := fs.Bool("json", false, "print JSON response")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *peerURL == "" {
+		return fmt.Errorf("--url is required")
+	}
+	if *id == "" {
+		return fmt.Errorf("--id is required")
+	}
+	endpoint := strings.TrimRight(*peerURL, "/") + "/workloads/" + url.PathEscape(*id) + "/execute"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	if *rpcToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+*rpcToken)
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, err := readControlHTTPBody(resp.Body, "workload execute response body")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("workload execute returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	var out workload.FinishResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+	printWorkloadStatus(workload.StatusResponse{Job: out.Job, Result: out.Result, Execution: out.Execution})
 	return nil
 }
 
