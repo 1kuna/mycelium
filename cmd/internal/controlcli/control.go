@@ -25,6 +25,7 @@ import (
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
 	"mycelium/internal/locality"
+	"mycelium/internal/modelruntime"
 	"mycelium/internal/optimizer"
 	"mycelium/internal/ports"
 	projectvalidation "mycelium/internal/project"
@@ -1620,7 +1621,7 @@ func routeContractForPreset(cfg operatorPeerConfig, project domain.Project, pres
 		NodeID:                       preset.NodeID,
 		Backend:                      preset.Backend,
 		ProviderProfile:              preset.ProviderProfile,
-		ContextLength:                preset.ContextLength,
+		ContextLength:                modelruntime.EffectiveContextLength(preset),
 		ProjectContextCap:            project.ContextCap,
 		Capabilities:                 append([]domain.Capability(nil), preset.Capabilities...),
 		ProjectTokenConfigured:       project.ID != "" && projectTokenConfigured(cfg, project.ID),

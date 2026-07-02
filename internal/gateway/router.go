@@ -19,6 +19,7 @@ import (
 	"mycelium/internal/domain"
 	"mycelium/internal/gateway/profiles"
 	"mycelium/internal/gateway/translate"
+	"mycelium/internal/modelruntime"
 	"mycelium/internal/optimizer"
 	"mycelium/internal/ports"
 	"mycelium/internal/scheduler"
@@ -478,7 +479,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 					if err != nil {
 						return RouteResponse{}, err
 					}
-					req.ContextRequest = next.ContextLength
+					req.ContextRequest = modelruntime.EffectiveContextLength(next)
 					preset = next
 					continue
 				}
@@ -874,7 +875,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 					if err != nil {
 						return err
 					}
-					req.ContextRequest = next.ContextLength
+					req.ContextRequest = modelruntime.EffectiveContextLength(next)
 					preset = next
 					continue
 				}
@@ -1082,6 +1083,11 @@ func (r *Router) jobFromIngress(req translate.IngressRequest, attempt int) domai
 	contextRequest := req.ContextRequest
 	if contextRequest == 0 {
 		contextRequest = projectDefaults.ContextCap
+	}
+	if contextRequest == 0 {
+		if preset, err := r.Presets.Resolve(req.Model); err == nil {
+			contextRequest = modelruntime.EffectiveContextLength(preset)
+		}
 	}
 	expectedConcurrency := projectDefaults.ExpectedConcurrency
 	if expectedConcurrency == 0 {

@@ -15,6 +15,7 @@ import (
 	"mycelium/internal/bench"
 	"mycelium/internal/clock"
 	"mycelium/internal/domain"
+	"mycelium/internal/modelruntime"
 	"mycelium/internal/optimizer"
 	storesqlite "mycelium/internal/store/sqlite"
 )
@@ -404,15 +405,22 @@ func calibrationBenchmarkConfig(cfg operatorPeerConfig, nodes []domain.Node, pre
 	if len(readyNodes) < 2 && profile == bench.FleetProfileConservative {
 		return bench.FleetBenchmarkConfig{}, fmt.Errorf("conservative calibration requires at least two ready nodes for remote/multi-node proof")
 	}
-	eligible := calibrationEligiblePresets(presets)
+	readyNodeIDs := map[string]struct{}{}
+	for _, node := range readyNodes {
+		readyNodeIDs[node.ID] = struct{}{}
+	}
+	eligible := calibrationEligiblePresets(presets, readyNodeIDs)
 	if len(eligible) < 2 && profile == bench.FleetProfileConservative {
 		return bench.FleetBenchmarkConfig{}, fmt.Errorf("conservative calibration requires at least two eligible chat presets for warm and pressure proof")
 	}
 	if maxModels > len(eligible) {
 		maxModels = len(eligible)
 	}
-	selected := calibrationSelectPresets(eligible, maxModels)
+	resetBenchmarkInstances := profile == bench.FleetProfileConservative
+	selected := calibrationSelectPresets(eligible, maxModels, instances, resetBenchmarkInstances)
 	simulationPresets := calibrationSimulationPresets(selected, eligible, instances)
+	simulationNodes := calibrationSimulationNodes(readyNodes, simulationPresets)
+	simulationInstances := calibrationSimulationInstances(instances, selected, resetBenchmarkInstances)
 	if project == "" {
 		project = "calibration"
 	}
@@ -424,7 +432,7 @@ func calibrationBenchmarkConfig(cfg operatorPeerConfig, nodes []domain.Node, pre
 			PresetID:            preset.ID,
 			PromptID:            "short",
 			MaxTokens:           32,
-			ContextRequest:      preset.ContextLength,
+			ContextRequest:      modelruntime.EffectiveContextLength(preset),
 			ExpectedConcurrency: 1,
 			Priority:            domain.PriorityBackground,
 			SpeedPref:           domain.SpeedThroughput,
@@ -458,13 +466,14 @@ func calibrationBenchmarkConfig(cfg operatorPeerConfig, nodes []domain.Node, pre
 		Models:  models,
 		Waves:   waves,
 		Simulation: bench.FleetSimulationConfig{
-			Nodes:     readyNodes,
+			Nodes:     simulationNodes,
 			Presets:   simulationPresets,
-			Instances: append([]domain.ModelInstance(nil), instances...),
+			Instances: simulationInstances,
 		},
 		Safety: bench.FleetBenchmarkSafety{
-			MinDiskFreeRatio:      domain.DefaultDiskMinFreeRatio,
-			MaxSparkGPUMemoryUtil: 0.85,
+			MinDiskFreeRatio:        domain.DefaultDiskMinFreeRatio,
+			MaxSparkGPUMemoryUtil:   0.85,
+			ResetBenchmarkInstances: resetBenchmarkInstances,
 		},
 		Metadata: map[string]string{
 			"generated_by": "myce calibrate plan",
@@ -489,6 +498,7 @@ func calibrationSimulationPresets(selected, eligible []domain.Preset, instances 
 	}
 	out := make([]domain.Preset, 0, len(outByID))
 	for _, preset := range outByID {
+		preset.NodeID = ""
 		out = append(out, preset)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -527,7 +537,7 @@ func calibrationReadyNodes(nodes []domain.Node) []domain.Node {
 	return ready
 }
 
-func calibrationEligiblePresets(presets []domain.Preset) []domain.Preset {
+func calibrationEligiblePresets(presets []domain.Preset, readyNodeIDs map[string]struct{}) []domain.Preset {
 	out := append([]domain.Preset(nil), presets...)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].EstWeightsMB == out[j].EstWeightsMB {
@@ -540,6 +550,11 @@ func calibrationEligiblePresets(presets []domain.Preset) []domain.Preset {
 		if preset.ID == "" || preset.Backend == "" || preset.ContextLength <= 0 || preset.EstWeightsMB <= 0 || preset.KVPerTokenMB < 0 {
 			continue
 		}
+		if preset.NodeID != "" {
+			if _, ok := readyNodeIDs[preset.NodeID]; !ok {
+				continue
+			}
+		}
 		if len(preset.Capabilities) > 0 && !containsCapability(preset.Capabilities, domain.CapabilityChat) {
 			continue
 		}
@@ -548,11 +563,17 @@ func calibrationEligiblePresets(presets []domain.Preset) []domain.Preset {
 	return eligible
 }
 
-func calibrationSelectPresets(presets []domain.Preset, maxModels int) []domain.Preset {
+func calibrationSelectPresets(presets []domain.Preset, maxModels int, instances []domain.ModelInstance, preferWarm bool) []domain.Preset {
 	if len(presets) <= maxModels {
 		return append([]domain.Preset(nil), presets...)
 	}
-	selected := []domain.Preset{presets[0]}
+	warmPresetIDs := map[string]struct{}{}
+	for _, inst := range instances {
+		if inst.State == domain.InstReady && inst.PresetID != "" {
+			warmPresetIDs[inst.PresetID] = struct{}{}
+		}
+	}
+	selected := []domain.Preset{calibrationFirstProofPreset(presets, warmPresetIDs, preferWarm)}
 	if maxModels > 1 {
 		selected = append(selected, presets[len(presets)-1])
 	}
@@ -566,6 +587,65 @@ func calibrationSelectPresets(presets []domain.Preset, maxModels int) []domain.P
 		return selected[i].EstWeightsMB < selected[j].EstWeightsMB
 	})
 	return selected
+}
+
+func calibrationFirstProofPreset(presets []domain.Preset, warmPresetIDs map[string]struct{}, preferWarm bool) domain.Preset {
+	if preferWarm {
+		for _, preset := range presets {
+			if _, warm := warmPresetIDs[preset.ID]; warm {
+				return preset
+			}
+		}
+	}
+	for _, preset := range presets {
+		if _, warm := warmPresetIDs[preset.ID]; !warm {
+			return preset
+		}
+	}
+	return presets[0]
+}
+
+func calibrationSimulationInstances(instances []domain.ModelInstance, selected []domain.Preset, resetBenchmarkInstances bool) []domain.ModelInstance {
+	if !resetBenchmarkInstances {
+		return append([]domain.ModelInstance(nil), instances...)
+	}
+	selectedIDs := map[string]struct{}{}
+	for _, preset := range selected {
+		selectedIDs[preset.ID] = struct{}{}
+	}
+	out := make([]domain.ModelInstance, 0, len(instances))
+	for _, inst := range instances {
+		if _, reset := selectedIDs[inst.PresetID]; reset {
+			continue
+		}
+		out = append(out, inst)
+	}
+	return out
+}
+
+func calibrationSimulationNodes(readyNodes []domain.Node, presets []domain.Preset) []domain.Node {
+	out := append([]domain.Node(nil), readyNodes...)
+	if len(presets) == 0 {
+		return out
+	}
+	for _, node := range out {
+		if node.DiskTotalMB > 0 && node.DiskMinFreeRatio > 0 && node.DiskFreeMB <= int(float64(node.DiskTotalMB)*node.DiskMinFreeRatio) {
+			return out
+		}
+	}
+	out = append(out, domain.Node{
+		ID:               "simulation-disk-headroom-guard",
+		Name:             "simulation-disk-headroom-guard",
+		MaxUtil:          0.90,
+		DiskTotalMB:      1000,
+		DiskFreeMB:       int(1000 * domain.DefaultDiskMinFreeRatio),
+		DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio,
+		OOMSeverity:      domain.OOMSoft,
+		Status:           domain.NodeReady,
+		Accelerators:     []domain.Accelerator{{Index: 0, VRAMTotalMB: 1_000_000}},
+		SpeedClass:       domain.SpeedClass{TokensPerSecRef: 1_000_000, Source: "simulation-disk-headroom-guard"},
+	})
+	return out
 }
 
 func containsCapability(values []domain.Capability, want domain.Capability) bool {
@@ -625,7 +705,7 @@ func calibrationModelPlans(models []bench.FleetModel, presets []domain.Preset) [
 			RequestModel:        model.RequestModel,
 			PresetID:            model.PresetID,
 			Backend:             preset.Backend,
-			ContextLength:       preset.ContextLength,
+			ContextLength:       modelruntime.EffectiveContextLength(preset),
 			ContextRequest:      model.ContextRequest,
 			ExpectedConcurrency: model.ExpectedConcurrency,
 			Priority:            model.Priority,

@@ -4331,6 +4331,98 @@ func TestRunCalibrateRunSimulatesGeneratedPlan(t *testing.T) {
 	}
 }
 
+func TestCalibrationPlanFiltersUnavailablePinnedPresetsAndResetsWarmForColdProof(t *testing.T) {
+	cfg := operatorPeerConfig{ID: "gateway-peer", Listen: "http://gateway.test"}
+	nodes := []domain.Node{
+		{
+			ID:               "b70",
+			Address:          "http://b70.test",
+			Status:           domain.NodeReady,
+			MaxUtil:          0.85,
+			DiskTotalMB:      1_000_000,
+			DiskFreeMB:       800_000,
+			DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio,
+			OOMSeverity:      domain.OOMSoft,
+			Accelerators:     []domain.Accelerator{{Index: 0, VRAMTotalMB: 32_000}},
+			SpeedClass:       domain.SpeedClass{TokensPerSecRef: 75},
+		},
+		{
+			ID:               "spark",
+			Address:          "http://spark.test",
+			Status:           domain.NodeReady,
+			MaxUtil:          0.85,
+			DiskTotalMB:      4_000_000,
+			DiskFreeMB:       3_000_000,
+			DiskMinFreeRatio: domain.DefaultDiskMinFreeRatio,
+			OOMSeverity:      domain.OOMCatastrophic,
+			Accelerators:     []domain.Accelerator{{Index: 0, VRAMTotalMB: 124_000}},
+			SpeedClass:       domain.SpeedClass{TokensPerSecRef: 150},
+		},
+	}
+	presets := []domain.Preset{
+		{ID: "unavailable-small", NodeID: "offline-node", Backend: domain.BackendLlamaCpp, ContextLength: 512, Capabilities: []domain.Capability{domain.CapabilityChat}, EstWeightsMB: 64, ArtifactSizeMB: 64, KVPerTokenMB: 0.01},
+		{ID: "warm-small", NodeID: "b70", Backend: domain.BackendVLLM, LaunchArgs: []string{"--gpu-memory-utilization", "0.75"}, ContextLength: 2048, Capabilities: []domain.Capability{domain.CapabilityChat}, EstWeightsMB: 18_000, ArtifactSizeMB: 18_000, KVPerTokenMB: 0.02},
+		{ID: "cold-small", NodeID: "b70", Backend: domain.BackendVLLM, LaunchArgs: []string{"--gpu-memory-utilization", "0.75"}, ContextLength: 4096, Capabilities: []domain.Capability{domain.CapabilityChat}, EstWeightsMB: 19_000, ArtifactSizeMB: 19_000, KVPerTokenMB: 0.02},
+		{ID: "large-pressure", NodeID: "spark", Backend: domain.BackendVLLM, LaunchArgs: []string{"--gpu-memory-utilization", "0.70"}, ContextLength: 8192, Capabilities: []domain.Capability{domain.CapabilityChat}, EstWeightsMB: 86_000, ArtifactSizeMB: 75_000, KVPerTokenMB: 0.02},
+	}
+	instances := []domain.ModelInstance{{
+		ID:             "warm-inst",
+		PresetID:       "warm-small",
+		NodeID:         "b70",
+		AcceleratorSet: []int{0},
+		Claim:          domain.Claim{WeightsMB: 56_000},
+		State:          domain.InstReady,
+		Priority:       domain.PriorityNormal,
+	}, {
+		ID:             "spark-background",
+		PresetID:       "cold-small",
+		NodeID:         "spark",
+		AcceleratorSet: []int{0},
+		Claim:          domain.Claim{WeightsMB: 56_000},
+		State:          domain.InstReady,
+		Priority:       domain.PriorityBackground,
+	}}
+
+	benchCfg, err := calibrationBenchmarkConfig(cfg, nodes, presets, instances, bench.FleetProfileConservative, "calibration-project", 2)
+	if err != nil {
+		t.Fatalf("calibrationBenchmarkConfig: %v", err)
+	}
+	if len(benchCfg.Models) != 2 || benchCfg.Models[0].PresetID != "warm-small" || benchCfg.Models[1].PresetID != "large-pressure" {
+		t.Fatalf("selected models = %+v", benchCfg.Models)
+	}
+	if !benchCfg.Safety.ResetBenchmarkInstances {
+		t.Fatalf("conservative calibration should reset selected benchmark instances")
+	}
+	for _, model := range benchCfg.Models {
+		if model.PresetID == "unavailable-small" {
+			t.Fatalf("unavailable pinned preset selected: %+v", benchCfg.Models)
+		}
+	}
+	var hasDiskGuard bool
+	for _, node := range benchCfg.Simulation.Nodes {
+		if node.ID == "simulation-disk-headroom-guard" {
+			hasDiskGuard = true
+		}
+	}
+	if !hasDiskGuard {
+		t.Fatalf("simulation nodes missing disk-headroom guard: %+v", benchCfg.Simulation.Nodes)
+	}
+	for _, inst := range benchCfg.Simulation.Instances {
+		if inst.PresetID == "warm-small" {
+			t.Fatalf("simulation retained resettable benchmark instance: %+v", benchCfg.Simulation.Instances)
+		}
+	}
+	preflight, err := bench.SimulateFleet(context.Background(), benchCfg, bench.FleetProfileConservative, clock.System{})
+	if err != nil {
+		t.Fatalf("generated live-like calibration config did not simulate: %v", err)
+	}
+	for _, want := range []string{"cold placement", "warm reuse", "disk-headroom"} {
+		if !proofsContain(preflight.Proofs, want) {
+			t.Fatalf("proofs missing %q: %+v", want, preflight.Proofs)
+		}
+	}
+}
+
 func TestRunCalibrateStatusAndReportSummarizeSavedEvidence(t *testing.T) {
 	dbPath, configPath := writeCalibrationInventoryFixture(t)
 	planDir := filepath.Join(t.TempDir(), "calibration-plan")
@@ -5539,6 +5631,15 @@ func quoteJSON(value string) string {
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func proofsContain(values []string, want string) bool {
+	for _, value := range values {
+		if strings.Contains(value, want) {
 			return true
 		}
 	}

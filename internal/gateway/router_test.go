@@ -1808,6 +1808,31 @@ func TestRouterMergesProjectDefaultsIntoJobIntent(t *testing.T) {
 	}
 }
 
+func TestRouterDefaultsJobContextToEffectivePresetContext(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "spark-large"
+		p.Backend = domain.BackendVLLM
+		p.ContextLength = 49152
+		p.LaunchArgs = []string{"--max-model-len", "8192"}
+	})
+	router := &Router{Presets: NewPresetRegistry(preset)}
+	req := translate.IngressRequest{
+		Model: "spark-large",
+		Kind:  translate.KindOpenAIChat,
+	}
+
+	job := router.jobFromIngress(req, 1)
+	if job.ContextRequest != 8192 {
+		t.Fatalf("context request = %d, want 8192", job.ContextRequest)
+	}
+
+	req.ContextRequest = 4096
+	job = router.jobFromIngress(req, 2)
+	if job.ContextRequest != 4096 {
+		t.Fatalf("explicit context request = %d, want 4096", job.ContextRequest)
+	}
+}
+
 func TestRouterColdStreamPrependsLoadingState(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
