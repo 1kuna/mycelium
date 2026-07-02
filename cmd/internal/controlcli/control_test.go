@@ -2824,9 +2824,10 @@ func TestRunGatewayAllocateReturnsExternalWorkerContract(t *testing.T) {
 		t.Fatalf("gateway allocate leaked token material: %s", output)
 	}
 
+	outDir := filepath.Join(t.TempDir(), "allocation")
 	var jsonErr error
 	jsonOutput := captureStdout(t, func() {
-		jsonErr = RunWithClient(context.Background(), []string{"gateway", "allocate", "--config", configPath, "--model", "vision-model", "--context-cap", "16384", "--desired-workers", "4", "--require-vision", "--live", "--json"}, client)
+		jsonErr = RunWithClient(context.Background(), []string{"gateway", "allocate", "--config", configPath, "--model", "vision-model", "--context-cap", "16384", "--desired-workers", "4", "--require-vision", "--live", "--out", outDir, "--json"}, client)
 	})
 	if jsonErr != nil {
 		t.Fatalf("gateway allocate json: %v", jsonErr)
@@ -2846,6 +2847,47 @@ func TestRunGatewayAllocateReturnsExternalWorkerContract(t *testing.T) {
 	}
 	if report.Contract.ReservationDisclaimer == "" || report.Backpressure == "" {
 		t.Fatalf("allocation contract missing safety guidance = %+v", report.Contract)
+	}
+	if report.Contract.StaleAfterSeconds != 60 || report.Contract.RefreshBehavior == "" {
+		t.Fatalf("allocation contract missing refresh guidance = %+v", report.Contract)
+	}
+	if report.Artifacts == nil || report.Artifacts.PlanPath != filepath.Join(outDir, "allocation-plan.json") || report.Artifacts.EnvPath != filepath.Join(outDir, "runner.env") {
+		t.Fatalf("allocation artifacts = %+v", report.Artifacts)
+	}
+	planData, err := os.ReadFile(filepath.Join(outDir, "allocation-plan.json"))
+	if err != nil {
+		t.Fatalf("read allocation plan: %v", err)
+	}
+	if strings.Contains(string(planData), "global-secret") {
+		t.Fatalf("allocation plan leaked token material: %s", planData)
+	}
+	var plan gatewayAllocationReport
+	if err := json.Unmarshal(planData, &plan); err != nil {
+		t.Fatalf("decode allocation plan: %v", err)
+	}
+	if plan.AllocatedWorkers != 2 || plan.Contract.Workers != 2 {
+		t.Fatalf("allocation plan = %+v", plan)
+	}
+	envData, err := os.ReadFile(filepath.Join(outDir, "runner.env"))
+	if err != nil {
+		t.Fatalf("read runner env: %v", err)
+	}
+	for _, want := range []string{
+		"MYCELIUM_OPENAI_BASE_URL='http://gateway.test/v1'",
+		"MYCELIUM_MODEL='vision-model'",
+		"MYCELIUM_WORKER_ARGUMENT='--max-workers'",
+		"MYCELIUM_ALLOCATED_WORKERS='2'",
+		"MYCELIUM_CONTEXT_HEADER='X-Myc-Context-Cap'",
+		"MYCELIUM_CONTEXT_CAP='16384'",
+		"MYCELIUM_BACKPRESSURE='honor_retry_after'",
+		"MYCELIUM_ACCEPTED_PRESETS='vision-small,vision-large'",
+	} {
+		if !strings.Contains(string(envData), want) {
+			t.Fatalf("runner env missing %q:\n%s", want, envData)
+		}
+	}
+	if strings.Contains(string(envData), "global-secret") {
+		t.Fatalf("runner env leaked token material: %s", envData)
 	}
 }
 

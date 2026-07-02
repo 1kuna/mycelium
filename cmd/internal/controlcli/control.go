@@ -2130,6 +2130,7 @@ func runGatewayAllocate(ctx context.Context, args []string, client *http.Client)
 	gatewayTokenFile := fs.String("gateway-token-file", "", "file containing the Mycelium gateway bearer token for --live")
 	requireVision := fs.Bool("require-vision", false, "require a vision-capable route envelope")
 	requireTools := fs.Bool("require-tools", false, "require a tool-call-capable route envelope")
+	outDir := fs.String("out", "", "write allocation-plan.json and runner.env artifacts into this directory")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -2159,6 +2160,13 @@ func runGatewayAllocate(ctx context.Context, args []string, client *http.Client)
 	})
 	if err != nil {
 		return err
+	}
+	if *outDir != "" {
+		artifacts, err := writeGatewayAllocationArtifacts(*outDir, &report)
+		if err != nil {
+			return err
+		}
+		report.Artifacts = &artifacts
 	}
 	if *jsonOut {
 		return writePrettyJSON(os.Stdout, report)
@@ -2242,6 +2250,7 @@ type gatewayAllocationReport struct {
 	Contract         gatewayExternalToolContract `json:"contract"`
 	Routes           []gatewayAllocationRoute    `json:"routes"`
 	Refusals         []gatewayAllocationRefusal  `json:"refusals,omitempty"`
+	Artifacts        *gatewayAllocationArtifacts `json:"artifacts,omitempty"`
 }
 
 type gatewayExternalToolContract struct {
@@ -2254,6 +2263,8 @@ type gatewayExternalToolContract struct {
 	RetryAfterBehavior    string `json:"retry_after_behavior"`
 	ResultEvidence        string `json:"result_evidence"`
 	ReservationDisclaimer string `json:"reservation_disclaimer"`
+	StaleAfterSeconds     int    `json:"stale_after_seconds"`
+	RefreshBehavior       string `json:"refresh_behavior"`
 }
 
 type gatewayAllocationRoute struct {
@@ -2275,6 +2286,11 @@ type gatewayAllocationRefusal struct {
 	NodeID   string         `json:"node_id,omitempty"`
 	Backend  domain.Backend `json:"backend,omitempty"`
 	Reason   string         `json:"reason"`
+}
+
+type gatewayAllocationArtifacts struct {
+	PlanPath string `json:"plan_path"`
+	EnvPath  string `json:"env_path"`
 }
 
 type gatewayRouteReadinessOptions struct {
@@ -2494,6 +2510,8 @@ func gatewayAllocationContract(report gatewayAllocationReport) gatewayExternalTo
 		RetryAfterBehavior:    "honor Retry-After; do not increase worker count or immediately retry saturated envelopes",
 		ResultEvidence:        "preserve X-Myc-* route headers and debug/preflight artifacts for post-hoc evidence",
 		ReservationDisclaimer: "allocation is derived from route envelopes and live catalog; it is not a held lease or reservation",
+		StaleAfterSeconds:     60,
+		RefreshBehavior:       "refresh the allocation before launch and after repeated Retry-After responses or elapsed stale_after_seconds",
 	}
 }
 
@@ -2548,6 +2566,9 @@ func printGatewayAllocationReport(w io.Writer, report gatewayAllocationReport) {
 		report.Contract.ContextCap,
 		report.Contract.RetryAfterBehavior,
 	)
+	if report.Artifacts != nil {
+		fmt.Fprintf(w, "artifacts\tplan=%s\tenv=%s\n", report.Artifacts.PlanPath, report.Artifacts.EnvPath)
+	}
 	for _, route := range report.Routes {
 		fmt.Fprintf(w, "route\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tworkers=%d\tenvelope=%d\treadiness=%s\tlive_model=%t\tlive_match=%s\n",
 			emptyDash(route.PresetID),
@@ -2569,6 +2590,54 @@ func printGatewayAllocationReport(w io.Writer, report gatewayAllocationReport) {
 			emptyDash(refusal.Reason),
 		)
 	}
+}
+
+func writeGatewayAllocationArtifacts(outDir string, report *gatewayAllocationReport) (gatewayAllocationArtifacts, error) {
+	if err := os.MkdirAll(outDir, 0o700); err != nil {
+		return gatewayAllocationArtifacts{}, fmt.Errorf("create allocation artifact dir: %w", err)
+	}
+	artifacts := gatewayAllocationArtifacts{
+		PlanPath: filepath.Join(outDir, "allocation-plan.json"),
+		EnvPath:  filepath.Join(outDir, "runner.env"),
+	}
+	report.Artifacts = &artifacts
+	if err := writePrettyJSONFile(artifacts.PlanPath, report); err != nil {
+		return gatewayAllocationArtifacts{}, fmt.Errorf("write allocation plan: %w", err)
+	}
+	if err := os.WriteFile(artifacts.EnvPath, []byte(gatewayAllocationRunnerEnv(*report)), 0o600); err != nil {
+		return gatewayAllocationArtifacts{}, fmt.Errorf("write allocation runner env: %w", err)
+	}
+	return artifacts, nil
+}
+
+func gatewayAllocationRunnerEnv(report gatewayAllocationReport) string {
+	accepted := make([]string, 0, len(report.Routes))
+	for _, route := range report.Routes {
+		accepted = append(accepted, route.PresetID)
+	}
+	lines := []string{
+		envAssignment("MYCELIUM_ALLOCATION_STATUS", report.Status),
+		envAssignment("MYCELIUM_OPENAI_BASE_URL", report.Contract.BaseURL),
+		envAssignment("MYCELIUM_MODEL", report.Contract.Model),
+		envAssignment("MYCELIUM_WORKER_ARGUMENT", report.Contract.WorkerArgument),
+		envAssignment("MYCELIUM_ALLOCATED_WORKERS", strconv.Itoa(report.Contract.Workers)),
+		envAssignment("MYCELIUM_CONTEXT_HEADER", report.Contract.ContextHeader),
+		envAssignment("MYCELIUM_CONTEXT_CAP", strconv.Itoa(report.Contract.ContextCap)),
+		envAssignment("MYCELIUM_ALLOCATION_RESERVATION_STATE", report.ReservationState),
+		envAssignment("MYCELIUM_ALLOCATION_STALE_AFTER_SECONDS", strconv.Itoa(report.Contract.StaleAfterSeconds)),
+		envAssignment("MYCELIUM_BACKPRESSURE", "honor_retry_after"),
+		envAssignment("MYCELIUM_ACCEPTED_PRESETS", strings.Join(accepted, ",")),
+		envAssignment("MYCELIUM_REFUSAL_COUNT", strconv.Itoa(len(report.Refusals))),
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func envAssignment(key, value string) string {
+	return key + "=" + shellSingleQuote(value)
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func fetchGatewayRoutesLiveCatalog(ctx context.Context, configPath, configGateway string, opts gatewayRoutesLiveOptions) (gatewayRoutesLive, map[string]struct{}) {

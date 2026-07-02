@@ -90,12 +90,14 @@ handoff.
   launch envelope: model/base URL, context cap, allocated worker count, accepted
   owner envelopes, refused envelopes, and retry/backpressure guidance. That
   prevents consumers from treating project batch size as worker count when a
-  warm-instance concurrency envelope is already full. The allocation report is
-  still not a held lease or reservation. The remaining product work is to add a
-  larger envelope on the second owner, add a document/page chunking contract, or
-  route these external workers through the explicit workload lane before
-  high-context document work can automatically use both owners with capacity
-  held ahead of launch.
+  warm-instance concurrency envelope is already full. The command can also
+  write a secret-free allocation plan and runner env file so external tools can
+  consume the decision mechanically. The allocation report is still not a held
+  lease or reservation. The remaining product work is to add a larger envelope
+  on the second owner, add a document/page chunking contract, or route these
+  external workers through the explicit workload lane before high-context
+  document work can automatically use both owners with capacity held ahead of
+  launch.
 - 2026-07-02: Placement drop reasons can now be saved as durable
   reconciliation task records through `myce reconcile placement --save` and
   inspected with `myce reconcile status`. The workload RPC now also persists
