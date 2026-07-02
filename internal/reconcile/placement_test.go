@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"testing"
+	"time"
 
 	"mycelium/internal/domain"
 )
@@ -124,6 +125,49 @@ func TestPlanPlacementCoversDropReasonTaxonomy(t *testing.T) {
 		}
 		if (kind == TaskPrewarmReplica || kind == TaskStageModelArtifact) && !task.RequiresApproval {
 			t.Fatalf("policy did not mark %s as approval-required: %+v", node, task)
+		}
+	}
+}
+
+func TestRecordsFromPlanPreservesPolicyStatus(t *testing.T) {
+	decision := domain.PlacementDecision{
+		JobID:  "job-records",
+		Action: domain.ActionQueued,
+		Preset: domain.Preset{ID: "preset-a", ModelRef: "model-a"},
+		Trace: []domain.TraceStep{{
+			Step: "filter",
+			Data: map[string]any{"dropped": map[string]string{
+				"node-engine": "label." + domain.LabelPeerBackends,
+				"node-down":   string(domain.NodeUnreachable),
+			}},
+		}},
+	}
+	now := time.Unix(10, 0).UTC()
+
+	records := RecordsFromPlan(PlanPlacement(decision, DefaultStandingPolicy()), now)
+	if len(records) != 2 {
+		t.Fatalf("records = %+v", records)
+	}
+	ids := map[string]bool{}
+	for _, rec := range records {
+		if rec.ID == "" || ids[rec.ID] {
+			t.Fatalf("record ids are not stable/unique: %+v", records)
+		}
+		ids[rec.ID] = true
+		if rec.JobID != "job-records" || rec.Source != "placement_decision" || !rec.CreatedAt.Equal(now) || !rec.UpdatedAt.Equal(now) {
+			t.Fatalf("record metadata = %+v", rec)
+		}
+		switch rec.NodeID {
+		case "node-engine":
+			if rec.Status != domain.ReconciliationTaskAllowed || rec.Blocker != "" {
+				t.Fatalf("engine record = %+v", rec)
+			}
+		case "node-down":
+			if rec.Status != domain.ReconciliationTaskBlocked || rec.Blocker != "operator_approval_required" {
+				t.Fatalf("repair record = %+v", rec)
+			}
+		default:
+			t.Fatalf("unexpected record = %+v", rec)
 		}
 	}
 }

@@ -192,6 +192,35 @@ type WorkloadResultBody struct {
 	StoredAt  time.Time `json:"stored_at"`
 }
 
+type ReconciliationTaskStatus string
+
+const (
+	ReconciliationTaskAllowed ReconciliationTaskStatus = "allowed"
+	ReconciliationTaskBlocked ReconciliationTaskStatus = "blocked"
+	ReconciliationTaskRunning ReconciliationTaskStatus = "running"
+	ReconciliationTaskDone    ReconciliationTaskStatus = "done"
+	ReconciliationTaskFailed  ReconciliationTaskStatus = "failed"
+)
+
+type ReconciliationTaskRecord struct {
+	ID                 string                   `json:"id"`
+	JobID              string                   `json:"job_id,omitempty"`
+	Kind               string                   `json:"kind"`
+	Status             ReconciliationTaskStatus `json:"status"`
+	NodeID             string                   `json:"node_id,omitempty"`
+	PresetID           string                   `json:"preset_id,omitempty"`
+	Model              string                   `json:"model,omitempty"`
+	Reason             string                   `json:"reason"`
+	AutomaticCandidate bool                     `json:"automatic_candidate"`
+	RequiresApproval   bool                     `json:"requires_approval"`
+	Next               string                   `json:"next"`
+	Blocker            string                   `json:"blocker,omitempty"`
+	Source             string                   `json:"source"`
+	CreatedAt          time.Time                `json:"created_at"`
+	UpdatedAt          time.Time                `json:"updated_at"`
+	Error              string                   `json:"error,omitempty"`
+}
+
 type PlacementDecision struct {
 	JobID            string          `json:"job_id"`
 	Preset           Preset          `json:"preset,omitempty"`

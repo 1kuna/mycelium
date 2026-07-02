@@ -242,6 +242,33 @@ func TestRunReconcilePlacementReportsTasks(t *testing.T) {
 			t.Fatalf("owner repair policy not applied: %+v", report.Tasks)
 		}
 	}
+
+	dbPath := filepath.Join(dir, "control.db")
+	saveOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"reconcile", "placement", "--decision-file", decisionPath, "--db", dbPath, "--save"})
+	})
+	if err != nil {
+		t.Fatalf("reconcile placement save: %v", err)
+	}
+	if !strings.Contains(saveOutput, "task\tkind=repair_owner") {
+		t.Fatalf("save output = %q", saveOutput)
+	}
+	statusOutput := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"reconcile", "status", "--db", dbPath, "--job", "job-reconcile"})
+	})
+	if err != nil {
+		t.Fatalf("reconcile status: %v", err)
+	}
+	for _, want := range []string{
+		"reconcile-status\ttasks=2",
+		"status=blocked\tkind=repair_owner",
+		"status=allowed\tkind=verify_engine_readiness",
+		"blocker=operator_approval_required",
+	} {
+		if !strings.Contains(statusOutput, want) {
+			t.Fatalf("status output missing %q:\n%s", want, statusOutput)
+		}
+	}
 }
 
 func TestDecodePlacementDecisionAcceptsJobAndWrapper(t *testing.T) {

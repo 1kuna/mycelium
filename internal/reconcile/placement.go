@@ -1,9 +1,12 @@
 package reconcile
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"mycelium/internal/domain"
 )
@@ -129,6 +132,48 @@ func PlanPlacement(decision domain.PlacementDecision, policy StandingPolicy) Pla
 		Message: "placement reconciliation tasks are proposed from scheduler evidence and do not mutate live routing or services",
 	}}
 	return plan
+}
+
+func RecordsFromPlan(plan PlacementPlan, now time.Time) []domain.ReconciliationTaskRecord {
+	out := make([]domain.ReconciliationTaskRecord, 0, len(plan.Tasks))
+	for _, task := range plan.Tasks {
+		status := domain.ReconciliationTaskAllowed
+		blocker := ""
+		if task.RequiresApproval {
+			status = domain.ReconciliationTaskBlocked
+			blocker = "operator_approval_required"
+		}
+		out = append(out, domain.ReconciliationTaskRecord{
+			ID:                 taskRecordID(plan, task),
+			JobID:              plan.JobID,
+			Kind:               string(task.Kind),
+			Status:             status,
+			NodeID:             task.NodeID,
+			PresetID:           task.PresetID,
+			Model:              task.Model,
+			Reason:             task.Reason,
+			AutomaticCandidate: task.AutomaticCandidate,
+			RequiresApproval:   task.RequiresApproval,
+			Next:               task.Next,
+			Blocker:            blocker,
+			Source:             "placement_decision",
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		})
+	}
+	return out
+}
+
+func taskRecordID(plan PlacementPlan, task Task) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		plan.JobID,
+		string(task.Kind),
+		task.NodeID,
+		task.PresetID,
+		task.Model,
+		task.Reason,
+	}, "\x00")))
+	return "recon-" + hex.EncodeToString(sum[:8])
 }
 
 func taskForReason(nodeID, reason string) Task {

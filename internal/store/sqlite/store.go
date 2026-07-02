@@ -318,6 +318,55 @@ func (s *Store) WorkloadResultBody(ctx context.Context, jobID string) (domain.Wo
 	return result, nil
 }
 
+func (s *Store) SaveReconciliationTask(ctx context.Context, task domain.ReconciliationTaskRecord) error {
+	if task.ID == "" {
+		return fmt.Errorf("reconciliation task id is required")
+	}
+	if task.Kind == "" {
+		return fmt.Errorf("reconciliation task kind is required")
+	}
+	if task.Status == "" {
+		return fmt.Errorf("reconciliation task status is required")
+	}
+	if task.Source == "" {
+		return fmt.Errorf("reconciliation task source is required")
+	}
+	if task.CreatedAt.IsZero() {
+		return fmt.Errorf("reconciliation task created_at is required")
+	}
+	if task.UpdatedAt.IsZero() {
+		return fmt.Errorf("reconciliation task updated_at is required")
+	}
+	return s.upsertJSON(ctx, "reconciliation_tasks", task.ID, task)
+}
+
+func (s *Store) ListReconciliationTasks(ctx context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error) {
+	var tasks []domain.ReconciliationTaskRecord
+	if jobID == "" {
+		err := s.listJSON(ctx, "reconciliation_tasks", &tasks)
+		return tasks, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT data FROM reconciliation_tasks ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var task domain.ReconciliationTaskRecord
+		if err := json.Unmarshal([]byte(raw), &task); err != nil {
+			return nil, err
+		}
+		if task.JobID == jobID {
+			tasks = append(tasks, task)
+		}
+	}
+	return tasks, rows.Err()
+}
+
 func (s *Store) Put(ctx context.Context, rec domain.JobRecord) error {
 	if err := validateJobRecord(rec); err != nil {
 		return err
@@ -1101,6 +1150,7 @@ CREATE TABLE IF NOT EXISTS workload_result_bodies (
 	stored_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS job_records (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reconciliation_tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS recommendations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS process_refs (node_id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS join_tokens (id TEXT PRIMARY KEY, data TEXT NOT NULL);
