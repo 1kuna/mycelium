@@ -469,6 +469,22 @@ func TestHTTPServerRejectsBadRequests(t *testing.T) {
 	if _, err := admissionClient.Offer(context.Background(), admissionReq(fixtures.MakeJob(), fixtures.MakeClaim(1, 1))); !errors.Is(err, domain.ErrNoFit) {
 		t.Fatalf("offer no-fit err = %v", err)
 	}
+	legacyNoFitServer := newDirectHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"legacy no fit"}`))
+	}))
+	if _, err := legacyNoFitServer.nodeClient().Offer(context.Background(), admissionReq(fixtures.MakeJob(), fixtures.MakeClaim(1, 1))); !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("legacy offer no-fit err = %v", err)
+	}
+	legacyWrappedNoFitServer := newDirectHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"warm instance \"inst_1\" concurrency envelope is full"}`))
+	}))
+	if _, err := legacyWrappedNoFitServer.nodeClient().Offer(context.Background(), admissionReq(fixtures.MakeJob(), fixtures.MakeClaim(1, 1))); !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("legacy wrapped offer no-fit err = %v", err)
+	}
 	resp, err = admissionServer.post("/admission/commit", "application/json", strings.NewReader("{"))
 	if err != nil {
 		t.Fatalf("bad commit post: %v", err)

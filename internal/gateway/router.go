@@ -358,9 +358,17 @@ func (r *Router) ExecutePlacedProvider(ctx context.Context, req translate.Ingres
 type noInstanceAvailableError struct {
 	JobID      string
 	RetryAfter time.Duration
+	Reason     string
+	Decision   domain.PlacementDecision
+	Instance   domain.ModelInstance
+	Profile    profiles.Profile
+	Attempts   int
 }
 
 func (e noInstanceAvailableError) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("job %q queued: %s", e.JobID, e.Reason)
+	}
 	return fmt.Sprintf("job %q queued: no instance available", e.JobID)
 }
 
@@ -427,6 +435,28 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		loadStart := clk.Now()
 		decision, inst, lease, cold, err := r.placeAndLoad(ctx, job, req.Body, preset, fleet, nil)
 		if err != nil {
+			lastErr = err
+			if decision.InstanceID != "" && attempt < tries {
+				fleet = withoutInstance(fleet, decision.InstanceID)
+				continue
+			}
+			var noInstance noInstanceAvailableError
+			if errors.As(err, &noInstance) {
+				noInstance.Profile = profile
+				noInstance.Attempts = attempt
+				return RouteResponse{}, noInstance
+			}
+			if placementNoFitError(err) {
+				return RouteResponse{}, noInstanceAvailableError{
+					JobID:      job.ID,
+					RetryAfter: time.Second,
+					Reason:     err.Error(),
+					Decision:   decision,
+					Instance:   inst,
+					Profile:    profile,
+					Attempts:   attempt,
+				}
+			}
 			return RouteResponse{}, err
 		}
 		placedPreset, placedProfile, err := r.selectedPresetProfile(preset, profile, decision)
@@ -612,6 +642,14 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		}, nil
 	}
 	return RouteResponse{}, fmt.Errorf("gateway failover exhausted: %w", lastErr)
+}
+
+func placementNoFitError(err error) bool {
+	if errors.Is(err, domain.ErrNoFit) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no unit can fit") || strings.Contains(msg, "concurrency envelope is full")
 }
 
 func normalizeOpenAIReasoningBoundary(req translate.IngressRequest, preset domain.Preset, body []byte) ([]byte, error) {
@@ -1064,10 +1102,13 @@ func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, payload []byt
 		}
 		result, err := r.Runtime.SubmitWithPayload(ctx, job, payload, hooks...)
 		if err != nil {
+			if result.Decision.Action == domain.ActionQueued {
+				return result.Decision, result.Instance, result.Lease, false, noInstanceAvailableError{JobID: job.ID, RetryAfter: time.Second, Decision: result.Decision, Instance: result.Instance}
+			}
 			return result.Decision, result.Instance, result.Lease, false, err
 		}
 		if result.Decision.Action == domain.ActionQueued {
-			return result.Decision, result.Instance, result.Lease, false, noInstanceAvailableError{JobID: job.ID, RetryAfter: time.Second}
+			return result.Decision, result.Instance, result.Lease, false, noInstanceAvailableError{JobID: job.ID, RetryAfter: time.Second, Decision: result.Decision, Instance: result.Instance}
 		}
 		cold := result.Decision.InstanceID == ""
 		return result.Decision, result.Instance, result.Lease, cold, nil

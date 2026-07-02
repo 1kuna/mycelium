@@ -3144,9 +3144,21 @@ func TestServerErrorResponses(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	writeGatewayRouteError(rec, fmt.Errorf("failover: %w", noInstanceAvailableError{JobID: "job-a", RetryAfter: 1500 * time.Millisecond}))
+	writeGatewayRouteError(rec, fmt.Errorf("failover: %w", noInstanceAvailableError{
+		JobID:      "job-a",
+		RetryAfter: 1500 * time.Millisecond,
+		Decision: domain.PlacementDecision{
+			JobID:  "job-a",
+			Action: domain.ActionQueued,
+			Trace:  []domain.TraceStep{{Step: "resolve", Result: "model group"}},
+		},
+		Attempts: 2,
+	}))
 	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "2" || !strings.Contains(rec.Body.String(), "no instance available") {
 		t.Fatalf("no-instance status/header/body = %d %q %s", rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
+	}
+	if rec.Header().Get(HeaderDecision) != string(domain.ActionQueued) || rec.Header().Get(HeaderAttempts) != "2" || !strings.Contains(rec.Header().Get(HeaderTrace), "model group") {
+		t.Fatalf("no-instance diagnostics = %+v", rec.Header())
 	}
 }
 
@@ -3165,6 +3177,18 @@ func TestServerRequiresGatewayTokenWhenConfigured(t *testing.T) {
 	server.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("authorized request did not reach router: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPlacementNoFitErrorRecognizesLegacyOwnerAdmissionText(t *testing.T) {
+	if !placementNoFitError(fmt.Errorf("node http /admission/offer: no unit can fit this preset under its constraints")) {
+		t.Fatal("legacy no-fit text was not classified")
+	}
+	if !placementNoFitError(fmt.Errorf("node http /admission/offer: warm instance \"inst_1\" concurrency envelope is full")) {
+		t.Fatal("legacy envelope text was not classified")
+	}
+	if placementNoFitError(fmt.Errorf("upstream returned 500: model crashed")) {
+		t.Fatal("provider failure classified as no-fit")
 	}
 }
 

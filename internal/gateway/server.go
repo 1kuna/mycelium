@@ -222,6 +222,7 @@ func writeGatewayRouteError(w http.ResponseWriter, err error) {
 	var noInstance noInstanceAvailableError
 	if errors.As(err, &noInstance) {
 		w.Header().Set("Retry-After", strconv.Itoa(noInstance.retryAfterSeconds()))
+		writeDecisionHeaders(w.Header(), noInstance.Decision, noInstance.Instance, noInstance.Profile, noInstance.Attempts)
 		writeGatewayError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
