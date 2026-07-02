@@ -94,7 +94,12 @@ handoff.
   inspected with `myce reconcile status`. The workload RPC now also persists
   those same records automatically when workload admission or queue-drain
   evidence includes a scheduler placement decision, so the autonomy loop no
-  longer depends on a manual placement-file export before background draining.
+  longer depends on a manual placement-file export before background work. Peers
+  with a reconciliation-capable control store immediately drain the safe
+  store-local task classes from workload placement evidence:
+  `record_incompatibility`, `stage_model_artifact`, and
+  `verify_engine_readiness`. Live-affecting tasks stay explicit rather than
+  being silently marked done.
   `myce reconcile drain` consumes allowed tasks and currently executes
   `record_incompatibility` by writing a durable incompatibility fact with
   running/done or running/failed task history.

@@ -605,7 +605,7 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			if latest, readErr := store.Job(r.Context(), result.Decision.JobID); readErr == nil {
 				job = latest
 			}
-			if err := persistWorkloadReconciliationTasks(r.Context(), store, job, result); err != nil {
+			if err := persistAndDrainWorkloadReconciliationTasks(r.Context(), store, job, result); err != nil {
 				writePeerRPCError(w, http.StatusConflict, err)
 				return
 			}
@@ -660,7 +660,7 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			writePeerRPCError(w, http.StatusConflict, err)
 			return
 		}
-		if err := persistWorkloadReconciliationTasks(r.Context(), store, job, result); err != nil {
+		if err := persistAndDrainWorkloadReconciliationTasks(r.Context(), store, job, result); err != nil {
 			writePeerRPCError(w, http.StatusConflict, err)
 			return
 		}
@@ -844,6 +844,25 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			panic(err)
 		}
 	})
+}
+
+func persistAndDrainWorkloadReconciliationTasks(ctx context.Context, store workloadStore, job domain.Job, result scheduler.Result) error {
+	if err := persistWorkloadReconciliationTasks(ctx, store, job, result); err != nil {
+		return err
+	}
+	taskStore, ok := store.(reconcile.TaskStore)
+	if !ok {
+		return nil
+	}
+	_, err := reconcile.DrainAllowedTasks(ctx, taskStore, reconcile.DrainOptions{
+		JobID: job.ID,
+		Kinds: []reconcile.TaskKind{
+			reconcile.TaskRecordIncompatibility,
+			reconcile.TaskStageModelArtifact,
+			reconcile.TaskVerifyEngineReadiness,
+		},
+	})
+	return err
 }
 
 func persistWorkloadReconciliationTasks(ctx context.Context, store workloadStore, job domain.Job, result scheduler.Result) error {

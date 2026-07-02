@@ -71,6 +71,30 @@ func TestDrainAllowedTasksFailsUnsupportedAllowedTaskLoudly(t *testing.T) {
 	}
 }
 
+func TestDrainAllowedTasksFiltersKindsWithoutMutatingSkippedTasks(t *testing.T) {
+	store := &fakeTaskStore{tasks: []domain.ReconciliationTaskRecord{
+		taskRecord("allowed-incompat", string(TaskRecordIncompatibility), domain.ReconciliationTaskAllowed),
+		taskRecord("allowed-prewarm", string(TaskPrewarmReplica), domain.ReconciliationTaskAllowed),
+	}}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{
+		Now:   time.Unix(25, 0).UTC(),
+		Kinds: []TaskKind{TaskRecordIncompatibility},
+	})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Drained != 1 || report.Skipped != 1 || len(report.Results) != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+	if report.Results[0].Kind != string(TaskRecordIncompatibility) || report.Results[0].Status != domain.ReconciliationTaskDone {
+		t.Fatalf("result = %+v", report.Results[0])
+	}
+	if prewarm := store.taskByID("allowed-prewarm"); prewarm.Status != domain.ReconciliationTaskAllowed || len(prewarm.Events) != 0 {
+		t.Fatalf("filtered prewarm task mutated: %+v", prewarm)
+	}
+}
+
 func TestDrainAllowedTasksRefreshesCatalogThroughConfiguredSource(t *testing.T) {
 	refresher := &fakeCatalogRefresher{}
 	store := &fakeTaskStore{tasks: []domain.ReconciliationTaskRecord{
