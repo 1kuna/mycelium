@@ -50,6 +50,19 @@ mycelium service upgrade \
   --dry-run
 ```
 
+Use `--json` when another tool should validate or archive the upgrade packet:
+
+```bash
+mycelium service upgrade \
+  --config ~/.mycelium/peer.json \
+  --binary /path/to/stable/mycelium \
+  --target-binary /path/to/new/mycelium \
+  --name real-fleet \
+  --user \
+  --dry-run \
+  --json
+```
+
 The dry-run output is the operator packet:
 
 - current and target binary digests;
@@ -94,4 +107,3 @@ A live upgrade is proven only when all of these are true after restart:
 - the gateway route/catalog proof expected for that deployment succeeds;
 - rollback remains available until the new binary has survived the intended
   observation window.
-

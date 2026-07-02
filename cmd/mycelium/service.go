@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"flag"
 	"fmt"
@@ -41,6 +42,7 @@ type serviceSpec struct {
 	TargetPath string
 	BackupPath string
 	DryRun     bool
+	JSON       bool
 }
 
 type serviceStatus struct {
@@ -56,6 +58,21 @@ type serviceUpgradePlan struct {
 	CurrentBytes  int64
 	TargetDigest  string
 	TargetBytes   int64
+}
+
+type serviceUpgradePlanArtifact struct {
+	DryRun        bool              `json:"dry_run"`
+	Service       string            `json:"service"`
+	Scope         serviceScope      `json:"scope"`
+	StableBinary  string            `json:"stable_binary"`
+	TargetBinary  string            `json:"target_binary"`
+	Backup        string            `json:"backup"`
+	CurrentSHA256 string            `json:"current_sha256"`
+	CurrentBytes  int64             `json:"current_bytes"`
+	TargetSHA256  string            `json:"target_sha256"`
+	TargetBytes   int64             `json:"target_bytes"`
+	Commands      map[string]string `json:"commands"`
+	Notes         []string          `json:"notes"`
 }
 
 type serviceManager interface {
@@ -86,6 +103,11 @@ func runServiceWithManager(ctx context.Context, args []string, manager serviceMa
 		plan, err := buildServiceUpgradePlan(spec, goos)
 		if err != nil {
 			return err
+		}
+		if spec.JSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(serviceUpgradePlanJSON(plan))
 		}
 		fmt.Fprint(os.Stdout, renderServiceUpgradePlan(plan))
 		return nil
@@ -145,6 +167,7 @@ func parseServiceSpec(command string, args []string, goos string) (serviceSpec, 
 	targetPath := fs.String("target-binary", "", "candidate binary for a dry-run service upgrade plan")
 	backupPath := fs.String("backup", "", "backup path for the current service binary during upgrade")
 	dryRun := fs.Bool("dry-run", false, "print an upgrade plan without changing the host")
+	jsonOut := fs.Bool("json", false, "print JSON output for commands that support it")
 	if err := fs.Parse(args); err != nil {
 		return serviceSpec{}, err
 	}
@@ -188,6 +211,7 @@ func parseServiceSpec(command string, args []string, goos string) (serviceSpec, 
 		TargetPath: strings.TrimSpace(*targetPath),
 		BackupPath: strings.TrimSpace(*backupPath),
 		DryRun:     *dryRun,
+		JSON:       *jsonOut,
 	}
 	if spec.Name == "" {
 		return serviceSpec{}, fmt.Errorf("service name must contain a letter, digit, dot, underscore, or dash")
@@ -542,6 +566,40 @@ func renderServiceUpgradePlan(plan serviceUpgradePlan) string {
 	out.WriteString("  run preflight_status before backup and verify after restart\n")
 	out.WriteString("  rollback restores the backed-up stable binary and reruns service status\n")
 	return out.String()
+}
+
+func serviceUpgradePlanJSON(plan serviceUpgradePlan) serviceUpgradePlanArtifact {
+	spec := plan.Spec
+	statusCmd := serviceStatusCommand(spec)
+	return serviceUpgradePlanArtifact{
+		DryRun:        true,
+		Service:       spec.Label,
+		Scope:         spec.Scope,
+		StableBinary:  spec.BinaryPath,
+		TargetBinary:  spec.TargetPath,
+		Backup:        plan.BackupPath,
+		CurrentSHA256: plan.CurrentDigest,
+		CurrentBytes:  plan.CurrentBytes,
+		TargetSHA256:  plan.TargetDigest,
+		TargetBytes:   plan.TargetBytes,
+		Commands: map[string]string{
+			"preflight_status": statusCmd,
+			"backup":           servicePrivilegedCommand(spec, "cp", spec.BinaryPath, plan.BackupPath),
+			"replace":          servicePrivilegedCommand(spec, "install", "-m", "0755", spec.TargetPath, spec.BinaryPath),
+			"restart":          serviceRestartCommand(spec, plan.GOOS),
+			"verify":           statusCmd,
+			"rollback": strings.Join([]string{
+				servicePrivilegedCommand(spec, "install", "-m", "0755", plan.BackupPath, spec.BinaryPath),
+				serviceRestartCommand(spec, plan.GOOS),
+				statusCmd,
+			}, " && "),
+		},
+		Notes: []string{
+			"no live change was made",
+			"run preflight_status before backup and verify after restart",
+			"rollback restores the backed-up stable binary and reruns service status",
+		},
+	}
 }
 
 func serviceStatusCommand(spec serviceSpec) string {
