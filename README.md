@@ -163,6 +163,30 @@ myce benchmark run \
   --out /tmp/mycelium-bench
 ```
 
+Generate a secret-safe synthetic calibration plan from inventory before running
+live fleet calibration:
+
+```bash
+myce calibrate plan \
+  --config ~/.mycelium/peer.json \
+  --out ~/.mycelium/calibration/plan
+
+myce calibrate run \
+  --plan ~/.mycelium/calibration/plan \
+  --simulate \
+  --out ~/.mycelium/calibration/runs
+```
+
+`calibrate plan` reads the peer config and control store inventory, emits a
+`benchmark-config.json` plus `calibration-plan.json`, and proves the generated
+plan through the existing fleet benchmark simulator. The first implementation
+is deliberately simulation-first: it records candidate cold/warm/pressure
+sweeps, ready nodes, selected presets, safety notes, and the next run command,
+but it does not write token values, change routing policy, start engines, or
+apply optimizer defaults. `calibrate run --simulate` executes that generated
+plan through the existing scheduler/allocator benchmark path. A live calibration
+run remains an explicit product gate.
+
 For authenticated non-loopback gateways, `myce benchmark` resolves the gateway token in this order:
 
 1. `--gateway-token`
