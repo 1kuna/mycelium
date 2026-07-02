@@ -786,6 +786,48 @@ func TestServiceSpecAndRenderers(t *testing.T) {
 	if _, err := buildServiceUpgradePlan(serviceSpec{BinaryPath: stableBinary, TargetPath: filepath.Join(home, "missing"), DryRun: true}, "darwin"); err == nil || !strings.Contains(err.Error(), "target service binary") {
 		t.Fatalf("missing target binary err = %v", err)
 	}
+	oldStdout := os.Stdout
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	os.Stdout = writePipe
+	runErr := runServiceWithManager(context.Background(), []string{
+		"upgrade",
+		"--config", configPath,
+		"--binary", stableBinary,
+		"--target-binary", targetBinary,
+		"--name", "fleet one",
+		"--user",
+		"--dry-run",
+	}, nil, "darwin")
+	_ = writePipe.Close()
+	os.Stdout = oldStdout
+	runOut, readErr := io.ReadAll(readPipe)
+	if readErr != nil {
+		t.Fatalf("read service upgrade stdout: %v", readErr)
+	}
+	if runErr != nil {
+		t.Fatalf("runServiceWithManager upgrade: %v", runErr)
+	}
+	if got := string(runOut); !strings.Contains(got, "upgrade_dry_run\ttrue") || !strings.Contains(got, "replace: install -m 0755") {
+		t.Fatalf("run service upgrade output = %s", got)
+	}
+	if got := serviceRestartCommand(linuxUserSpec, "linux"); got != "systemctl --user restart mycelium-dev.service" {
+		t.Fatalf("linux user restart = %q", got)
+	}
+	if got := serviceRestartCommand(linuxSystemSpec, "linux"); got != "sudo systemctl restart mycelium-prod.service" {
+		t.Fatalf("linux system restart = %q", got)
+	}
+	if got := serviceRestartCommand(linuxSystemSpec, "windows"); !strings.Contains(got, "unsupported service restart") {
+		t.Fatalf("unsupported restart = %q", got)
+	}
+	if got := serviceStatusCommand(darwinSystemSpec); !strings.HasPrefix(got, "sudo ") || !strings.Contains(got, " service status ") {
+		t.Fatalf("system status command = %q", got)
+	}
+	if got := servicePrivilegedCommand(darwinSystemSpec, "cp", "/from path", "/to path"); got != "sudo cp '/from path' '/to path'" {
+		t.Fatalf("system privileged command = %q", got)
+	}
 	if _, err := parseServiceSpec("install", nil, "darwin"); err == nil || !strings.Contains(err.Error(), "--config") {
 		t.Fatalf("missing config err = %v", err)
 	}
