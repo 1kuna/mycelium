@@ -2066,15 +2066,17 @@ func runBenchmark(ctx context.Context, args []string, client *http.Client) error
 
 func runGateway(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce gateway <preflight|routes>")
+		return fmt.Errorf("usage: myce gateway <preflight|routes|allocate>")
 	}
 	switch args[0] {
 	case "preflight":
 		return runGatewayPreflight(ctx, args[1:], client)
 	case "routes":
 		return runGatewayRoutes(ctx, args[1:], client)
+	case "allocate":
+		return runGatewayAllocate(ctx, args[1:], client)
 	default:
-		return fmt.Errorf("usage: myce gateway <preflight|routes>")
+		return fmt.Errorf("usage: myce gateway <preflight|routes|allocate>")
 	}
 }
 
@@ -2111,6 +2113,57 @@ func runGatewayRoutes(ctx context.Context, args []string, client *http.Client) e
 		return writePrettyJSON(os.Stdout, report)
 	}
 	printGatewayRoutesReport(os.Stdout, report)
+	return nil
+}
+
+func runGatewayAllocate(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("gateway allocate", flag.ContinueOnError)
+	configPath := fs.String("config", defaultPeerConfigPath(), "peer config JSON")
+	model := fs.String("model", "", "consumer model or preset id")
+	project := fs.String("project", "", "project id whose default model/context/concurrency should seed the contract")
+	contextCap := fs.Int("context-cap", 0, "requested context envelope for the workload")
+	desiredWorkers := fs.Int("desired-workers", 0, "desired external worker count before Mycelium allocation; defaults to project expected_concurrency or 1")
+	priority := fs.String("priority", string(domain.PriorityInteractive), "workload priority label for evidence")
+	live := fs.Bool("live", false, "fetch the live gateway /v1/models catalog and require live-visible routes")
+	url := fs.String("url", "", "live gateway URL override for --live")
+	gatewayTokenEnv := fs.String("gateway-token-env", "", "environment variable containing the Mycelium gateway bearer token for --live")
+	gatewayTokenFile := fs.String("gateway-token-file", "", "file containing the Mycelium gateway bearer token for --live")
+	requireVision := fs.Bool("require-vision", false, "require a vision-capable route envelope")
+	requireTools := fs.Bool("require-tools", false, "require a tool-call-capable route envelope")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *desiredWorkers < 0 {
+		return fmt.Errorf("desired-workers must be >= 0")
+	}
+	loaded, err := loadOperatorConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	req := gatewayAllocationRequest{
+		Model:          strings.TrimSpace(*model),
+		Project:        strings.TrimSpace(*project),
+		ContextCap:     *contextCap,
+		DesiredWorkers: *desiredWorkers,
+		Priority:       domain.Priority(strings.TrimSpace(*priority)),
+		RequireVision:  *requireVision,
+		RequireTools:   *requireTools,
+	}
+	report, err := buildGatewayAllocationReport(ctx, loaded, req, gatewayRoutesLiveOptions{
+		Enabled:   *live,
+		URL:       *url,
+		TokenEnv:  *gatewayTokenEnv,
+		TokenFile: *gatewayTokenFile,
+		Client:    client,
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return writePrettyJSON(os.Stdout, report)
+	}
+	printGatewayAllocationReport(os.Stdout, report)
 	return nil
 }
 
@@ -2163,6 +2216,65 @@ type gatewayRouteContract struct {
 	ModelGroupSize               int                    `json:"model_group_size,omitempty"`
 	ModelGroupPresets            []string               `json:"model_group_presets,omitempty"`
 	ModelGroupEnvelopes          []gatewayRouteEnvelope `json:"model_group_envelopes,omitempty"`
+}
+
+type gatewayAllocationRequest struct {
+	Model          string          `json:"model"`
+	Project        string          `json:"project,omitempty"`
+	ContextCap     int             `json:"context_cap,omitempty"`
+	DesiredWorkers int             `json:"desired_workers"`
+	Priority       domain.Priority `json:"priority"`
+	RequireVision  bool            `json:"require_vision,omitempty"`
+	RequireTools   bool            `json:"require_tools,omitempty"`
+}
+
+type gatewayAllocationReport struct {
+	ConfigPath       string                      `json:"config_path"`
+	PeerID           string                      `json:"peer_id"`
+	Gateway          string                      `json:"gateway"`
+	BaseURL          string                      `json:"base_url"`
+	Live             gatewayRoutesLive           `json:"live,omitempty"`
+	Request          gatewayAllocationRequest    `json:"request"`
+	Status           string                      `json:"status"`
+	AllocatedWorkers int                         `json:"allocated_workers"`
+	ReservationState string                      `json:"reservation_state"`
+	Backpressure     string                      `json:"backpressure"`
+	Contract         gatewayExternalToolContract `json:"contract"`
+	Routes           []gatewayAllocationRoute    `json:"routes"`
+	Refusals         []gatewayAllocationRefusal  `json:"refusals,omitempty"`
+}
+
+type gatewayExternalToolContract struct {
+	BaseURL               string `json:"base_url"`
+	Model                 string `json:"model"`
+	WorkerArgument        string `json:"worker_argument"`
+	Workers               int    `json:"workers"`
+	ContextHeader         string `json:"context_header"`
+	ContextCap            int    `json:"context_cap,omitempty"`
+	RetryAfterBehavior    string `json:"retry_after_behavior"`
+	ResultEvidence        string `json:"result_evidence"`
+	ReservationDisclaimer string `json:"reservation_disclaimer"`
+}
+
+type gatewayAllocationRoute struct {
+	Model               string              `json:"model"`
+	PresetID            string              `json:"preset_id"`
+	NodeID              string              `json:"node_id,omitempty"`
+	Backend             domain.Backend      `json:"backend,omitempty"`
+	ContextLength       int                 `json:"context_length,omitempty"`
+	Capabilities        []domain.Capability `json:"capabilities,omitempty"`
+	LiveModelAvailable  bool                `json:"live_model_available,omitempty"`
+	LiveModelMatch      string              `json:"live_model_match,omitempty"`
+	ConcurrencyEnvelope int                 `json:"concurrency_envelope"`
+	AllocatedWorkers    int                 `json:"allocated_workers"`
+	Readiness           string              `json:"readiness"`
+}
+
+type gatewayAllocationRefusal struct {
+	PresetID string         `json:"preset_id"`
+	NodeID   string         `json:"node_id,omitempty"`
+	Backend  domain.Backend `json:"backend,omitempty"`
+	Reason   string         `json:"reason"`
 }
 
 type gatewayRouteReadinessOptions struct {
@@ -2247,6 +2359,216 @@ func buildGatewayRoutesReport(ctx context.Context, configPath string, live gatew
 		report.Routes = append(report.Routes, route)
 	}
 	return report, nil
+}
+
+func buildGatewayAllocationReport(ctx context.Context, loaded loadedOperatorConfig, req gatewayAllocationRequest, live gatewayRoutesLiveOptions) (gatewayAllocationReport, error) {
+	cfg := loaded.Config
+	gateway := adminBaseURL(cfg.Listen)
+	report := gatewayAllocationReport{
+		ConfigPath:       loaded.Path,
+		PeerID:           cfg.ID,
+		Gateway:          gateway,
+		BaseURL:          strings.TrimRight(gateway, "/") + "/v1",
+		Request:          req,
+		ReservationState: "not_reserved",
+		Backpressure:     "use allocated_workers; on 503 honor Retry-After and pause the affected worker instead of spawning replacement requests",
+	}
+	if gateway == "" {
+		report.BaseURL = ""
+	}
+	project, hasProject := findGatewayProject(cfg.Projects, req.Project)
+	if req.Project != "" && !hasProject {
+		return report, fmt.Errorf("project %q not found in peer config", req.Project)
+	}
+	if req.Model == "" && hasProject {
+		req.Model = project.DefaultModel
+	}
+	if req.Model == "" {
+		return report, fmt.Errorf("model is required unless --project has a default model")
+	}
+	if req.ContextCap <= 0 && hasProject {
+		req.ContextCap = project.ContextCap
+	}
+	if req.DesiredWorkers <= 0 && hasProject && project.ExpectedConcurrency > 0 {
+		req.DesiredWorkers = project.ExpectedConcurrency
+	}
+	if req.DesiredWorkers <= 0 {
+		req.DesiredWorkers = 1
+	}
+	report.Request = req
+	var liveModels map[string]struct{}
+	if live.Enabled {
+		liveReport, models := fetchGatewayRoutesLiveCatalog(ctx, loaded.Path, gateway, live)
+		report.Live = liveReport
+		liveModels = models
+	}
+	candidates := presetsForModel(cfg.Presets, req.Model)
+	if len(candidates) == 0 {
+		report.Status = "model_not_configured"
+		report.Contract = gatewayAllocationContract(report)
+		return report, nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		left := modelruntime.EffectiveContextLength(candidates[i])
+		right := modelruntime.EffectiveContextLength(candidates[j])
+		if left != right {
+			return left < right
+		}
+		return candidates[i].ID < candidates[j].ID
+	})
+	remaining := req.DesiredWorkers
+	for _, preset := range candidates {
+		route := gatewayAllocationRoute{
+			Model:               req.Model,
+			PresetID:            preset.ID,
+			NodeID:              preset.NodeID,
+			Backend:             preset.Backend,
+			ContextLength:       modelruntime.EffectiveContextLength(preset),
+			Capabilities:        append([]domain.Capability(nil), preset.Capabilities...),
+			ConcurrencyEnvelope: presetConcurrencyEnvelope(preset),
+			Readiness:           "config_ready",
+		}
+		if liveModels != nil {
+			route.LiveModelAvailable, route.LiveModelMatch = gatewayRouteLiveModelForPreset(req.Model, preset, liveModels)
+			if report.Live.Status != "ok" || !route.LiveModelAvailable {
+				report.Refusals = append(report.Refusals, gatewayAllocationRefusal{PresetID: preset.ID, NodeID: preset.NodeID, Backend: preset.Backend, Reason: "live_catalog_missing"})
+				continue
+			}
+			route.Readiness = "live_ready"
+		}
+		if req.ContextCap > 0 && route.ContextLength < req.ContextCap {
+			report.Refusals = append(report.Refusals, gatewayAllocationRefusal{PresetID: preset.ID, NodeID: preset.NodeID, Backend: preset.Backend, Reason: fmt.Sprintf("context_cap_%d_below_requested_%d", route.ContextLength, req.ContextCap)})
+			continue
+		}
+		if req.RequireVision && !containsCapability(preset.Capabilities, domain.CapabilityVision) {
+			report.Refusals = append(report.Refusals, gatewayAllocationRefusal{PresetID: preset.ID, NodeID: preset.NodeID, Backend: preset.Backend, Reason: "vision_capability_missing"})
+			continue
+		}
+		if req.RequireTools && !launchArgConfigured(preset.LaunchArgs, "--tool-call-parser") {
+			report.Refusals = append(report.Refusals, gatewayAllocationRefusal{PresetID: preset.ID, NodeID: preset.NodeID, Backend: preset.Backend, Reason: "tool_parser_missing"})
+			continue
+		}
+		if route.ConcurrencyEnvelope <= 0 {
+			report.Refusals = append(report.Refusals, gatewayAllocationRefusal{PresetID: preset.ID, NodeID: preset.NodeID, Backend: preset.Backend, Reason: "concurrency_envelope_unavailable"})
+			continue
+		}
+		if remaining > 0 {
+			route.AllocatedWorkers = minInt(route.ConcurrencyEnvelope, remaining)
+			remaining -= route.AllocatedWorkers
+		}
+		report.AllocatedWorkers += route.AllocatedWorkers
+		report.Routes = append(report.Routes, route)
+	}
+	switch {
+	case report.AllocatedWorkers == 0:
+		report.Status = "no_eligible_route"
+	case report.AllocatedWorkers < req.DesiredWorkers:
+		report.Status = "partial_allocation"
+	default:
+		report.Status = "allocated"
+	}
+	report.Contract = gatewayAllocationContract(report)
+	return report, nil
+}
+
+func findGatewayProject(projects []domain.Project, id string) (domain.Project, bool) {
+	if id == "" {
+		return domain.Project{}, false
+	}
+	for _, project := range projects {
+		if project.ID == id {
+			return project, true
+		}
+	}
+	return domain.Project{}, false
+}
+
+func gatewayAllocationContract(report gatewayAllocationReport) gatewayExternalToolContract {
+	return gatewayExternalToolContract{
+		BaseURL:               report.BaseURL,
+		Model:                 report.Request.Model,
+		WorkerArgument:        "--max-workers",
+		Workers:               report.AllocatedWorkers,
+		ContextHeader:         "X-Myc-Context-Cap",
+		ContextCap:            report.Request.ContextCap,
+		RetryAfterBehavior:    "honor Retry-After; do not increase worker count or immediately retry saturated envelopes",
+		ResultEvidence:        "preserve X-Myc-* route headers and debug/preflight artifacts for post-hoc evidence",
+		ReservationDisclaimer: "allocation is derived from route envelopes and live catalog; it is not a held lease or reservation",
+	}
+}
+
+func presetConcurrencyEnvelope(preset domain.Preset) int {
+	if maxSeqs := launchArgIntValue(preset.LaunchArgs, "--max-num-seqs"); maxSeqs > 0 {
+		return maxSeqs
+	}
+	return 1
+}
+
+func launchArgIntValue(args []string, key string) int {
+	for i, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if arg == key && i+1 < len(args) {
+			value, _ := strconv.Atoi(strings.TrimSpace(args[i+1]))
+			return value
+		}
+		if strings.HasPrefix(arg, key+"=") {
+			value, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(arg, key+"=")))
+			return value
+		}
+	}
+	return 0
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func printGatewayAllocationReport(w io.Writer, report gatewayAllocationReport) {
+	fmt.Fprintf(w, "allocation\tstatus=%s\tmodel=%s\tworkers=%d\tdesired=%d\tcontext_cap=%d\tbase_url=%s\treservation=%s\n",
+		emptyDash(report.Status),
+		emptyDash(report.Request.Model),
+		report.AllocatedWorkers,
+		report.Request.DesiredWorkers,
+		report.Request.ContextCap,
+		emptyDash(report.BaseURL),
+		emptyDash(report.ReservationState),
+	)
+	if report.Live.Checked {
+		fmt.Fprintf(w, "live\tgateway=%s\tstatus=%s\tmodels=%d\tauth=%s\terror=%s\n", emptyDash(report.Live.Gateway), emptyDash(report.Live.Status), report.Live.ModelCount, emptyDash(report.Live.AuthSource), emptyDash(report.Live.Error))
+	}
+	fmt.Fprintf(w, "contract\tbase_url=%s\tmodel=%s\t%s=%d\t%s=%d\tbackpressure=%s\n",
+		emptyDash(report.Contract.BaseURL),
+		emptyDash(report.Contract.Model),
+		report.Contract.WorkerArgument,
+		report.Contract.Workers,
+		report.Contract.ContextHeader,
+		report.Contract.ContextCap,
+		report.Contract.RetryAfterBehavior,
+	)
+	for _, route := range report.Routes {
+		fmt.Fprintf(w, "route\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tworkers=%d\tenvelope=%d\treadiness=%s\tlive_model=%t\tlive_match=%s\n",
+			emptyDash(route.PresetID),
+			emptyDash(route.NodeID),
+			emptyDash(string(route.Backend)),
+			route.ContextLength,
+			route.AllocatedWorkers,
+			route.ConcurrencyEnvelope,
+			emptyDash(route.Readiness),
+			route.LiveModelAvailable,
+			emptyDash(route.LiveModelMatch),
+		)
+	}
+	for _, refusal := range report.Refusals {
+		fmt.Fprintf(w, "refusal\tpreset=%s\tnode=%s\tbackend=%s\treason=%s\n",
+			emptyDash(refusal.PresetID),
+			emptyDash(refusal.NodeID),
+			emptyDash(string(refusal.Backend)),
+			emptyDash(refusal.Reason),
+		)
+	}
 }
 
 func fetchGatewayRoutesLiveCatalog(ctx context.Context, configPath, configGateway string, opts gatewayRoutesLiveOptions) (gatewayRoutesLive, map[string]struct{}) {

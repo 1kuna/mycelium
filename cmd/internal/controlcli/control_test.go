@@ -2752,6 +2752,159 @@ func TestRunGatewayRoutesComparesLiveModels(t *testing.T) {
 	}
 }
 
+func TestRunGatewayAllocateReturnsExternalWorkerContract(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "peer.json")
+	cfg := operatorPeerConfig{
+		ID:           "gateway-peer",
+		Listen:       "http://gateway.test",
+		GatewayToken: "global-secret",
+		Projects: []domain.Project{
+			{ID: "vision-work", DefaultModel: "vision-model", ContextCap: 49152, ExpectedConcurrency: 4},
+		},
+		Presets: []domain.Preset{
+			{
+				ID:            "vision-small",
+				ModelRef:      "vision-model",
+				Aliases:       []string{"vision-model"},
+				Backend:       domain.BackendVLLM,
+				ContextLength: 16384,
+				Capabilities:  []domain.Capability{domain.CapabilityChat, domain.CapabilityVision},
+				NodeID:        "small-node",
+				LaunchArgs:    []string{"--max-model-len", "16384", "--max-num-seqs", "1"},
+			},
+			{
+				ID:            "vision-large",
+				ModelRef:      "vision-model",
+				Aliases:       []string{"vision-model"},
+				Backend:       domain.BackendVLLM,
+				ContextLength: 49152,
+				Capabilities:  []domain.Capability{domain.CapabilityChat, domain.CapabilityVision},
+				NodeID:        "large-node",
+				LaunchArgs:    []string{"--max-model-len=49152", "--max-num-seqs=1"},
+			},
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal peer config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write peer config: %v", err)
+	}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer global-secret" {
+			t.Fatalf("auth = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"data": []map[string]string{
+				{"id": "vision-model", "object": "model", "owned_by": "mycelium"},
+			},
+		})
+	}))
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = RunWithClient(context.Background(), []string{"gateway", "allocate", "--config", configPath, "--project", "vision-work", "--desired-workers", "4", "--require-vision", "--live"}, client)
+	})
+	if runErr != nil {
+		t.Fatalf("gateway allocate: %v", runErr)
+	}
+	for _, want := range []string{
+		"allocation\tstatus=partial_allocation\tmodel=vision-model\tworkers=1\tdesired=4\tcontext_cap=49152",
+		"contract\tbase_url=http://gateway.test/v1\tmodel=vision-model\t--max-workers=1\tX-Myc-Context-Cap=49152",
+		"route\tpreset=vision-large\tnode=large-node\tbackend=vllm\tcontext=49152\tworkers=1\tenvelope=1\treadiness=live_ready\tlive_model=true\tlive_match=vision-model",
+		"refusal\tpreset=vision-small\tnode=small-node\tbackend=vllm\treason=context_cap_16384_below_requested_49152",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("gateway allocate output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "global-secret") {
+		t.Fatalf("gateway allocate leaked token material: %s", output)
+	}
+
+	var jsonErr error
+	jsonOutput := captureStdout(t, func() {
+		jsonErr = RunWithClient(context.Background(), []string{"gateway", "allocate", "--config", configPath, "--model", "vision-model", "--context-cap", "16384", "--desired-workers", "4", "--require-vision", "--live", "--json"}, client)
+	})
+	if jsonErr != nil {
+		t.Fatalf("gateway allocate json: %v", jsonErr)
+	}
+	if strings.Contains(jsonOutput, "global-secret") {
+		t.Fatalf("gateway allocate JSON leaked token material: %s", jsonOutput)
+	}
+	var report gatewayAllocationReport
+	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+		t.Fatalf("decode gateway allocation JSON: %v", err)
+	}
+	if report.Status != "partial_allocation" || report.AllocatedWorkers != 2 || len(report.Routes) != 2 || report.Contract.Workers != 2 || report.Contract.WorkerArgument != "--max-workers" {
+		t.Fatalf("gateway allocation report = %+v", report)
+	}
+	if report.Routes[0].PresetID != "vision-small" || report.Routes[1].PresetID != "vision-large" {
+		t.Fatalf("allocation route order = %+v", report.Routes)
+	}
+	if report.Contract.ReservationDisclaimer == "" || report.Backpressure == "" {
+		t.Fatalf("allocation contract missing safety guidance = %+v", report.Contract)
+	}
+}
+
+func TestGatewayAllocateClassifiesUnavailableContracts(t *testing.T) {
+	loaded := loadedOperatorConfig{
+		Path: "peer.json",
+		Config: operatorPeerConfig{
+			ID:     "gateway-peer",
+			Listen: "http://gateway.test",
+			Projects: []domain.Project{
+				{ID: "project-a", DefaultModel: "tool-model", ContextCap: 2048, ExpectedConcurrency: 3},
+			},
+			Presets: []domain.Preset{
+				{
+					ID:            "plain-chat",
+					ModelRef:      "tool-model",
+					Aliases:       []string{"tool-model"},
+					Backend:       domain.BackendVLLM,
+					ContextLength: 4096,
+					Capabilities:  []domain.Capability{domain.CapabilityChat},
+					NodeID:        "node-a",
+					LaunchArgs:    []string{"--max-num-seqs=2"},
+				},
+			},
+		},
+	}
+
+	report, err := buildGatewayAllocationReport(context.Background(), loaded, gatewayAllocationRequest{Project: "project-a", RequireTools: true}, gatewayRoutesLiveOptions{})
+	if err != nil {
+		t.Fatalf("allocation report: %v", err)
+	}
+	if report.Status != "no_eligible_route" || report.Request.DesiredWorkers != 3 || report.Contract.Workers != 0 {
+		t.Fatalf("tool-required allocation = %+v", report)
+	}
+	if len(report.Refusals) != 1 || report.Refusals[0].Reason != "tool_parser_missing" {
+		t.Fatalf("tool-required refusals = %+v", report.Refusals)
+	}
+
+	report, err = buildGatewayAllocationReport(context.Background(), loaded, gatewayAllocationRequest{Model: "missing", DesiredWorkers: 2}, gatewayRoutesLiveOptions{})
+	if err != nil {
+		t.Fatalf("missing model report: %v", err)
+	}
+	if report.Status != "model_not_configured" || report.Contract.Model != "missing" {
+		t.Fatalf("missing model allocation = %+v", report)
+	}
+
+	_, err = buildGatewayAllocationReport(context.Background(), loaded, gatewayAllocationRequest{Project: "missing"}, gatewayRoutesLiveOptions{})
+	if err == nil || !strings.Contains(err.Error(), "project \"missing\" not found") {
+		t.Fatalf("missing project error = %v", err)
+	}
+
+	if got := presetConcurrencyEnvelope(domain.Preset{LaunchArgs: []string{"--max-num-seqs", "4"}}); got != 4 {
+		t.Fatalf("space-separated max seqs = %d", got)
+	}
+	if got := presetConcurrencyEnvelope(domain.Preset{}); got != 1 {
+		t.Fatalf("default max seqs = %d", got)
+	}
+}
+
 func TestGatewayRouteReadinessClassifiesConsumerRequirements(t *testing.T) {
 	ready := gatewayRouteContract{DiscoveryStatus: "ready_from_config"}
 	live := gatewayRoutesLive{Checked: true, Status: "ok"}
