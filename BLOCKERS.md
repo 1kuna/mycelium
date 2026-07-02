@@ -47,9 +47,12 @@ handoff.
   intentionally does not trust per-request control headers on ordinary
   deployments, and an explicit workload-lane pressure attempt can be blocked at
   owner admission when the owner store returns persistent SQLite busy errors.
-  The next gate is to fix or operationally clear owner-store lock contention and
-  run an explicit workload-based pressure proof that captures admission,
-  preemption/drain, provider execution, result capture, and release/reclaim.
+  File-backed SQLite control stores now open with explicit busy timeout,
+  foreign keys, and WAL mode through driver pragmas. The next gate is to
+  activate that store fix on the selected live owner peers, prove owner
+  admission no longer returns persistent SQLite busy, and run an explicit
+  workload-based pressure proof that captures admission, preemption/drain,
+  provider execution, result capture, and release/reclaim.
 - 2026-06-29: A low-context tool-call route can prove transport and provider
   parser wiring without being a valid route for reasoning-heavy tool-agent
   workloads. Public Mycelium evidence now exposes this as a consumer-contract

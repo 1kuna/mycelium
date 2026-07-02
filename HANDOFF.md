@@ -158,9 +158,13 @@ The project-free live benchmark path currently proves live cold placement and
 warm reuse for one owner through the synchronous gateway. It does not yet prove
 full allocator pressure: the current synchronous benchmark cannot safely express
 hard-preemption intent on deployments that do not trust control headers, and
-the explicit workload-lane pressure attempt is blocked when an owner store
-returns a persistent SQLite busy error during admission. Treat the next live
-gate as: fix or operationally clear owner-store lock contention, then run an
+the explicit workload-lane pressure attempt can be blocked when an owner store
+returns a persistent SQLite busy error during admission. File-backed SQLite
+control stores now open with busy timeout, foreign keys, and WAL mode through
+driver pragmas so owner admission, registry replication, telemetry, and
+workload result capture do not run on the default rollback journal. Treat the
+next live gate as: activate that store fix on the selected owner peers, verify
+the owner admission path no longer returns persistent SQLite busy, then run an
 explicit workload-based pressure proof that shows queued admission,
 preemption/drain, provider execution, result capture, and release/reclaim.
 Registry rescue is scoped to durable async work with replayable payload
