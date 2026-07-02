@@ -51,6 +51,10 @@ go test -tags smoke ./test/smoke/... -timeout 20m   # smoke: REAL engines/machin
 - **When stuck, ship the gate-passing 80%** and leave a `// TODO(phase-N): …`. Note what you deferred at the top of the commit/PR. A gate-passing partial beats a blocked whole.
 - **Parallel-OK** work is marked in Doc 3; within a phase, independent modules can proceed concurrently once the phase's contracts exist.
 - Where Doc 3 says *Your call*, the approach is yours within the stated hard requirements. The hard requirements are not yours to relax.
+- Do not create or maintain a root `HANDOFF.md` unless the project owner
+  explicitly asks for one. Durable project truth belongs in the SSOT docs,
+  `DECISIONS.md`, `BLOCKERS.md`, `CODEX-FINDINGS.md`, topic runbooks, tests,
+  or PM/project coordination surfaces, not a catch-all repo ledger.
 
 ## Autonomous operation (running under `/goal`)
 
