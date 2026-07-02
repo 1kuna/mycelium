@@ -2602,6 +2602,33 @@ func TestServiceSubmitWithPayloadQueueOnlyWritesCoordinatedLogWithoutClaim(t *te
 	}
 }
 
+func TestServiceSubmitWithPayloadQueueOnlyErrorAndPresetBranches(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(40, 40).UTC())
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("model-a"))
+	service := &Service{
+		Placer:  fakePlacer{},
+		Fleet:   staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode(fixtures.WithNodeID("node-a"))}}},
+		Nodes:   staticNodes{agents: map[string]*mocks.NodeAgent{}, admissions: map[string]ports.AdmissionController{}},
+		Queue:   NewQueue(clock),
+		Store:   &runtimeStore{saveJobErr: errors.New("save queued"), saveJobErrAt: 2},
+		Clock:   clock,
+		Presets: map[string]domain.Preset{preset.ModelRef: preset},
+	}
+	_, err := service.SubmitWithPayload(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithModel(preset.ModelRef)), []byte(`{}`), SubmitHooks{QueueOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "save queued") {
+		t.Fatalf("queue-only save err = %v", err)
+	}
+	if got := service.presetForQueuedJob(fixtures.MakeJob(fixtures.WithJobID("job-b"), fixtures.WithModel(preset.ModelRef))); got.ID != preset.ID {
+		t.Fatalf("model preset branch = %+v", got)
+	}
+	if got := service.presetForQueuedJob(domain.Job{ID: "job-c", Model: "model-c", ContextRequest: 123}); got.ModelRef != "model-c" || got.ContextLength != 123 {
+		t.Fatalf("fallback preset branch = %+v", got)
+	}
+	if releaseErrMeansAlreadyReleased(nil) || releaseErrMeansAlreadyReleased(errors.New("still active")) {
+		t.Fatal("releaseErrMeansAlreadyReleased accepted non-release errors")
+	}
+}
+
 func TestServiceDrainSkipsNoFitHeadJob(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(41, 0).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
