@@ -35,6 +35,7 @@ import (
 	peercoord "mycelium/internal/peer"
 	"mycelium/internal/ports"
 	projectvalidation "mycelium/internal/project"
+	"mycelium/internal/reconcile"
 	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/internal/telemetry"
@@ -537,6 +538,11 @@ type workloadStore interface {
 	WorkloadResultBody(ctx context.Context, jobID string) (domain.WorkloadResultBody, error)
 }
 
+type workloadReconciliationStore interface {
+	ListReconciliationTasks(ctx context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error)
+	SaveReconciliationTask(ctx context.Context, task domain.ReconciliationTaskRecord) error
+}
+
 type workloadRegistryStore interface {
 	Snapshot(ctx context.Context) ([]domain.JobRecord, error)
 }
@@ -599,6 +605,10 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			if latest, readErr := store.Job(r.Context(), result.Decision.JobID); readErr == nil {
 				job = latest
 			}
+			if err := persistWorkloadReconciliationTasks(r.Context(), store, job, result); err != nil {
+				writePeerRPCError(w, http.StatusConflict, err)
+				return
+			}
 			if execute {
 				if err := executeDrainedWorkload(r.Context(), executor, runtime, store, job, result); err != nil {
 					writePeerRPCError(w, http.StatusConflict, err)
@@ -647,6 +657,10 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			job = latest
 		}
 		if err := persistWorkloadReplayPayload(r.Context(), store, coordinatorID, job, []byte(req.Payload)); err != nil {
+			writePeerRPCError(w, http.StatusConflict, err)
+			return
+		}
+		if err := persistWorkloadReconciliationTasks(r.Context(), store, job, result); err != nil {
 			writePeerRPCError(w, http.StatusConflict, err)
 			return
 		}
@@ -830,6 +844,48 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			panic(err)
 		}
 	})
+}
+
+func persistWorkloadReconciliationTasks(ctx context.Context, store workloadStore, job domain.Job, result scheduler.Result) error {
+	reconStore, ok := store.(workloadReconciliationStore)
+	if !ok {
+		return nil
+	}
+	decision := result.Decision
+	if decision.JobID == "" {
+		decision.JobID = job.ID
+	}
+	if decision.JobID == "" || (decision.Action == "" && len(decision.Trace) == 0) {
+		return nil
+	}
+	if decision.Preset.ID == "" && job.PresetID != "" {
+		decision.Preset.ID = job.PresetID
+	}
+	if decision.Preset.ModelRef == "" {
+		decision.Preset.ModelRef = job.Model
+	}
+	plan := reconcile.PlanPlacement(decision, reconcile.DefaultStandingPolicy())
+	records := reconcile.RecordsFromPlan(plan, time.Now().UTC())
+	if len(records) == 0 {
+		return nil
+	}
+	existing, err := reconStore.ListReconciliationTasks(ctx, decision.JobID)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(existing))
+	for _, task := range existing {
+		seen[task.ID] = struct{}{}
+	}
+	for _, task := range records {
+		if _, ok := seen[task.ID]; ok {
+			continue
+		}
+		if err := reconStore.SaveReconciliationTask(ctx, task); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func cancelWorkloadJob(ctx context.Context, runtime workloadRuntime, store workloadStore, job domain.Job, req workload.CancelRequest) (domain.Job, error) {

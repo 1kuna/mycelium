@@ -270,7 +270,11 @@ as `wait_capacity`, `prewarm_replica`, `verify_engine_readiness`,
 `record_incompatibility`. Each task says whether it is an automatic candidate
 under the default standing policy or whether it still needs operator approval.
 Use `--save` to persist those tasks into the control store as `allowed` or
-`blocked` records. `myce reconcile drain` consumes only `allowed` records,
+`blocked` records. The workload RPC also records the same task records
+automatically when admission or queue-drain evidence includes a scheduler
+decision, so ordinary queued workloads can leave reconciliation work for the
+background drain without an operator first exporting a placement file.
+`myce reconcile drain` consumes only `allowed` records,
 records `running` to terminal status transitions, and currently executes
 `record_incompatibility` by writing a durable incompatibility fact and
 `stage_model_artifact` by writing a planned `models locality` stage action plus

@@ -38,6 +38,7 @@ import (
 	"mycelium/internal/optimizer"
 	peercoord "mycelium/internal/peer"
 	"mycelium/internal/ports"
+	"mycelium/internal/reconcile"
 	"mycelium/internal/scheduler"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/internal/telemetry"
@@ -4135,6 +4136,147 @@ func TestWorkloadHTTPAdmitsQueuedIntentAndReportsStatus(t *testing.T) {
 	}
 }
 
+func TestWorkloadHTTPPersistsReconciliationTasksFromPlacement(t *testing.T) {
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	runtime := &recordingWorkloadRuntime{
+		store: store,
+		decision: domain.PlacementDecision{
+			JobID:  "job-a",
+			Action: domain.ActionQueued,
+			Preset: domain.Preset{ID: "preset-a", ModelRef: "model-a"},
+			Trace: []domain.TraceStep{{
+				Step: "filter",
+				Data: map[string]any{"dropped": map[string]string{
+					"node-a": "fit",
+				}},
+			}},
+		},
+	}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, runtime, store, "rpc-secret", "peer-a", nil)
+	body := `{"job":{"id":"job-a","task_type":"chat","model":"model-a","preset":"preset-a","project":"project-a"},"payload":{"input_bytes":123}}`
+	req := httptest.NewRequest(http.MethodPost, "/workloads", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("admit status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	tasks, err := store.ListReconciliationTasks(context.Background(), "job-a")
+	if err != nil {
+		t.Fatalf("ListReconciliationTasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Kind != string(reconcile.TaskPrewarmReplica) || tasks[0].Status != domain.ReconciliationTaskAllowed || tasks[0].NodeID != "node-a" {
+		t.Fatalf("tasks = %+v", tasks)
+	}
+	if strings.Contains(rec.Body.String(), "reconcile") || strings.Contains(rec.Body.String(), "input_bytes") {
+		t.Fatalf("admission response leaked internal task or payload details: %s", rec.Body.String())
+	}
+}
+
+func TestPersistWorkloadReconciliationTasksDoesNotOverwriteExisting(t *testing.T) {
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	decision := domain.PlacementDecision{
+		JobID:  "job-a",
+		Action: domain.ActionQueued,
+		Preset: domain.Preset{ID: "preset-a", ModelRef: "model-a"},
+		Trace: []domain.TraceStep{{
+			Step: "filter",
+			Data: map[string]any{"dropped": map[string]string{
+				"node-a": "fit",
+			}},
+		}},
+	}
+	plan := reconcile.PlanPlacement(decision, reconcile.DefaultStandingPolicy())
+	records := reconcile.RecordsFromPlan(plan, time.Unix(1, 0).UTC())
+	if len(records) != 1 {
+		t.Fatalf("records = %+v", records)
+	}
+	existing := records[0]
+	existing.Status = domain.ReconciliationTaskDone
+	existing.Events = append(existing.Events, domain.ReconciliationTaskEvent{Status: domain.ReconciliationTaskDone, Message: "already drained", At: time.Unix(2, 0).UTC()})
+	if err := store.SaveReconciliationTask(context.Background(), existing); err != nil {
+		t.Fatalf("SaveReconciliationTask: %v", err)
+	}
+
+	err := persistWorkloadReconciliationTasks(context.Background(), store, domain.Job{ID: "job-a", Model: "model-a", PresetID: "preset-a"}, scheduler.Result{Decision: decision})
+	if err != nil {
+		t.Fatalf("persistWorkloadReconciliationTasks: %v", err)
+	}
+	tasks, err := store.ListReconciliationTasks(context.Background(), "job-a")
+	if err != nil {
+		t.Fatalf("ListReconciliationTasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Status != domain.ReconciliationTaskDone || len(tasks[0].Events) != len(existing.Events) {
+		t.Fatalf("existing task was overwritten: %+v", tasks)
+	}
+}
+
+func TestPersistWorkloadReconciliationTasksFailureBranches(t *testing.T) {
+	decision := domain.PlacementDecision{
+		JobID:  "job-a",
+		Action: domain.ActionQueued,
+		Preset: domain.Preset{ID: "preset-a", ModelRef: "model-a"},
+		Trace: []domain.TraceStep{{
+			Step: "filter",
+			Data: map[string]any{"dropped": map[string]string{
+				"node-a": "fit",
+			}},
+		}},
+	}
+	job := domain.Job{ID: "job-a", Model: "model-a", PresetID: "preset-a"}
+	result := scheduler.Result{Decision: decision}
+	if err := persistWorkloadReconciliationTasks(context.Background(), workloadStatusOnlyStore{job: job}, job, result); err != nil {
+		t.Fatalf("unsupported store err = %v", err)
+	}
+	listErr := errors.New("list unavailable")
+	if err := persistWorkloadReconciliationTasks(context.Background(), failingReconciliationStore{workloadMemoryStore: &workloadMemoryStore{jobs: map[string]domain.Job{}}, listErr: listErr}, job, result); !errors.Is(err, listErr) {
+		t.Fatalf("list err = %v", err)
+	}
+	saveErr := errors.New("save unavailable")
+	if err := persistWorkloadReconciliationTasks(context.Background(), failingReconciliationStore{workloadMemoryStore: &workloadMemoryStore{jobs: map[string]domain.Job{}}, saveErr: saveErr}, job, result); !errors.Is(err, saveErr) {
+		t.Fatalf("save err = %v", err)
+	}
+}
+
+func TestWorkloadHTTPDrainPersistsReconciliationTasksFromPlacement(t *testing.T) {
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{
+		"job-drain": {ID: "job-drain", Model: "model-a", PresetID: "preset-a", Project: "project-a", Status: domain.JobQueued},
+	}}
+	runtime := &recordingWorkloadRuntime{
+		store: store,
+		drained: []scheduler.Result{{
+			Decision: domain.PlacementDecision{
+				JobID:  "job-drain",
+				Action: domain.ActionQueued,
+				Preset: domain.Preset{ID: "preset-a", ModelRef: "model-a"},
+				Trace: []domain.TraceStep{{
+					Step: "filter",
+					Data: map[string]any{"dropped": map[string]string{
+						"node-engine": "label." + domain.LabelPeerBackends,
+					}},
+				}},
+			},
+		}},
+	}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, runtime, store, "rpc-secret", "peer-a", nil)
+	req := httptest.NewRequest(http.MethodPost, "/workloads/drain", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("drain status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	tasks, err := store.ListReconciliationTasks(context.Background(), "job-drain")
+	if err != nil {
+		t.Fatalf("ListReconciliationTasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Kind != string(reconcile.TaskVerifyEngineReadiness) || tasks[0].Status != domain.ReconciliationTaskAllowed || tasks[0].NodeID != "node-engine" {
+		t.Fatalf("tasks = %+v", tasks)
+	}
+}
+
 func TestWorkloadHTTPRejectsPrivateHandling(t *testing.T) {
 	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
 	mux := http.NewServeMux()
@@ -6094,9 +6236,30 @@ func (a *addressedWorkloadAgent) EndRequest(context.Context, string) error {
 }
 
 type workloadMemoryStore struct {
-	jobs    map[string]domain.Job
-	results map[string]domain.WorkloadResultBody
-	records []domain.JobRecord
+	jobs           map[string]domain.Job
+	results        map[string]domain.WorkloadResultBody
+	records        []domain.JobRecord
+	reconcileTasks []domain.ReconciliationTaskRecord
+}
+
+type failingReconciliationStore struct {
+	*workloadMemoryStore
+	listErr error
+	saveErr error
+}
+
+func (s failingReconciliationStore) ListReconciliationTasks(ctx context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	return s.workloadMemoryStore.ListReconciliationTasks(ctx, jobID)
+}
+
+func (s failingReconciliationStore) SaveReconciliationTask(ctx context.Context, task domain.ReconciliationTaskRecord) error {
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	return s.workloadMemoryStore.SaveReconciliationTask(ctx, task)
 }
 
 func (s *workloadMemoryStore) SaveJob(_ context.Context, job domain.Job) error {
@@ -6144,6 +6307,27 @@ func (s *workloadMemoryStore) Put(_ context.Context, rec domain.JobRecord) error
 	}
 	s.records = append(s.records, rec)
 	return nil
+}
+
+func (s *workloadMemoryStore) SaveReconciliationTask(_ context.Context, task domain.ReconciliationTaskRecord) error {
+	for i := range s.reconcileTasks {
+		if s.reconcileTasks[i].ID == task.ID {
+			s.reconcileTasks[i] = task
+			return nil
+		}
+	}
+	s.reconcileTasks = append(s.reconcileTasks, task)
+	return nil
+}
+
+func (s *workloadMemoryStore) ListReconciliationTasks(_ context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error) {
+	var out []domain.ReconciliationTaskRecord
+	for _, task := range s.reconcileTasks {
+		if jobID == "" || task.JobID == jobID {
+			out = append(out, task)
+		}
+	}
+	return out, nil
 }
 
 func withWorkloadPriority(job domain.Job, priority domain.Priority) domain.Job {
