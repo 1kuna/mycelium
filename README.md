@@ -175,6 +175,15 @@ myce calibrate run \
   --plan ~/.mycelium/calibration/plan \
   --simulate \
   --out ~/.mycelium/calibration/runs
+
+myce calibrate status \
+  --plan ~/.mycelium/calibration/plan \
+  --run ~/.mycelium/calibration/runs
+
+myce calibrate report \
+  --plan ~/.mycelium/calibration/plan \
+  --run ~/.mycelium/calibration/runs \
+  --out ~/.mycelium/calibration/report.json
 ```
 
 `calibrate plan` reads the peer config and control store inventory, emits a
@@ -184,8 +193,10 @@ is deliberately simulation-first: it records candidate cold/warm/pressure
 sweeps, ready nodes, selected presets, safety notes, and the next run command,
 but it does not write token values, change routing policy, start engines, or
 apply optimizer defaults. `calibrate run --simulate` executes that generated
-plan through the existing scheduler/allocator benchmark path. A live calibration
-run remains an explicit product gate.
+plan through the existing scheduler/allocator benchmark path. `calibrate status`
+and `calibrate report` summarize saved plan/run artifacts without treating
+simulation as live calibration or applied optimizer facts. A live calibration run
+remains an explicit product gate.
 
 For authenticated non-loopback gateways, `myce benchmark` resolves the gateway token in this order:
 
