@@ -39,7 +39,8 @@ Mycelium is a peer-native, LAN-local inference control plane:
 - Control CLI: `myce gateway preflight`, `myce gateway routes`,
   `myce route certify`, `myce route status`, `myce debug job`,
   `myce debug bundle`, `myce jobs admit`, `myce jobs status`,
-  `myce jobs drain`, `myce jobs finish`,
+  `myce jobs drain`, `myce jobs finish`, `myce jobs cancel`,
+  `myce jobs result`, `myce models prewarm`, `myce models scale`,
   `myce telemetry samples`, `myce calibrate plan`, `myce calibrate run`,
   `myce calibrate status`, `myce calibrate report`,
   `myce calibrate apply-priors`, benchmark commands, model and recommendation
@@ -131,6 +132,11 @@ status/debug surfaces. Workload responses also expose `execution_evidence`:
 queued/running/terminal state, `payload_contract`, `payload_kind`,
 `payload_executable`, whether provider output was captured automatically, and
 whether an explicit stored result body is replayable.
+`myce jobs cancel` is the explicit operator path for stale queued or placing
+workload records that have no active lease evidence but would otherwise remain
+eligible for future drains. It writes redacted terminal failure evidence without
+weakening `jobs finish`, which still requires scheduler lease evidence for
+normal completion/release.
 Terminal workload evidence may carry a redacted result artifact manifest:
 reference, media type, byte count, and digest. If a workload is finished with
 explicit stored result bytes, `myce jobs result` can retrieve those bytes
@@ -150,6 +156,13 @@ executable-payload contract classification, execution evidence, and lease
 reclaim. `make smoke-workload-executor` adds a local loopback operator canary
 over the real `myce` command path and a fake OpenAI-compatible provider; it does
 not start real engines or mutate live services.
+`myce models prewarm` / `myce models scale` submit explicit prewarm workloads.
+With `--all-fitting`, the command snapshots live peers with the configured RPC
+token, computes every distinct fitting owner for the requested preset or model,
+targets each owner through the canonical node-id selector, and reports desired
+versus actually warmed or queued replicas with fit evidence. This is intended
+for generic route prewarming; it must not be treated as "all fitting" if only a
+single warm instance is reused.
 The live service-upgrade path has been exercised through the generic dry-run
 upgrade packet, binary backup/replacement, restart wait, service status,
 peer-diagnostics, and live catalog checks. Keep rollback-ready upgrade
@@ -179,6 +192,13 @@ shows concurrent queueing or preemption under load, provider execution, result
 capture, release/reclaim, and owner telemetry across all selected routes. If a
 route-specific provider load fails, classify it as provider/runtime readiness
 rather than allocator success.
+Large vision/OCR vLLM route certification is currently catalog-visible and can
+reach owner admission/prewarm, but the live provider load can still fail before
+a backend process becomes ready. Treat that as a provider/runtime launch
+blocker, not as a certified route. Page-limited image canaries prove only the
+OpenAI-compatible vision transport; full-document OCR readiness requires either
+a client run that covers the whole document or explicit page chunking that
+covers every page.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
 work, not transparently resumed streams. Streaming queued provider replay
@@ -200,6 +220,8 @@ remains a separate product gate.
 
 - Keep improving generic route discovery, preflight, debug, and optimization
   evidence surfaces.
+- Keep large-context/tool/vision route certification distinct from low-context
+  or page-limited smoke tests. A smoke proves transport, not workload readiness.
 - Keep the Mac service activation path documented as generic commands with
   rollback/readiness checks, not host-specific narratives. The public runbook is
   `docs/runbooks/service-upgrade.md`.

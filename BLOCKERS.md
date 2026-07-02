@@ -74,6 +74,15 @@ handoff.
   `consumer_contract_context_too_small`. The remaining product work is to
   expose or provision a genuinely high-context, tool-capable route when
   hardware and provider configuration allow it.
+- 2026-07-02: A large vision/OCR vLLM preset can be represented in the route
+  catalog and can reach owner admission/prewarm, but the live provider load is
+  not yet certified. The current observed failure class is: owner admission
+  creates a loading instance for the preset, no backend process becomes visible
+  before the operator cancels the proof, and the owner must be cleared through
+  the explicit workload cancel plus owner release/unload paths. Treat this as a
+  provider/runtime launch blocker, not a route-certification success. Full
+  document OCR readiness also requires a complete-document client proof or
+  explicit all-page chunking; page-limited canaries only prove transport.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish

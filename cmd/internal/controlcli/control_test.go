@@ -962,6 +962,189 @@ func TestRunModelsPrewarmValidation(t *testing.T) {
 	}
 }
 
+func TestPrewarmFitCandidatesClassifiesOwnerReadiness(t *testing.T) {
+	preset := domain.Preset{
+		ID:             "vision-vllm",
+		ModelRef:       "model/vision",
+		Backend:        domain.BackendVLLM,
+		ContextLength:  4096,
+		ArtifactSizeMB: 100,
+		EstWeightsMB:   100,
+		KVPerTokenMB:   0.01,
+	}
+	ready := domain.Node{
+		ID:           "ready",
+		Address:      "http://ready.test",
+		Status:       domain.NodeReady,
+		MaxUtil:      0.9,
+		DiskTotalMB:  10000,
+		DiskFreeMB:   9000,
+		Labels:       map[string]string{domain.LabelPeerBackends: "vllm,llamacpp"},
+		Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000}},
+	}
+	down := ready
+	down.ID = "down"
+	down.Status = domain.NodeUnreachable
+	wrongBackend := ready
+	wrongBackend.ID = "wrong-backend"
+	wrongBackend.Labels = map[string]string{domain.LabelPeerBackend: string(domain.BackendLlamaCpp)}
+	lowDisk := ready
+	lowDisk.ID = "low-disk"
+	lowDisk.DiskFreeMB = 2600
+	loading := ready
+	loading.ID = "loading"
+	loading.OOMSeverity = domain.OOMCatastrophic
+	fleet := domain.FleetSnapshot{
+		Nodes: []domain.Node{wrongBackend, ready, down, lowDisk, loading},
+		Instances: []domain.ModelInstance{{
+			ID:             "inst-loading",
+			NodeID:         "loading",
+			PresetID:       "other",
+			AcceleratorSet: []int{0},
+			State:          domain.InstLoading,
+			Loading:        true,
+		}},
+	}
+	got := prewarmFitCandidates(context.Background(), preset, 4096, 1, fleet)
+	byNode := map[string]modelPrewarmFit{}
+	for _, fit := range got {
+		byNode[fit.NodeID] = fit
+	}
+	if byNode["ready"].Status != "fits" || len(byNode["ready"].AcceleratorSet) != 1 || byNode["ready"].Claim.WeightsMB == 0 {
+		t.Fatalf("ready fit = %+v", byNode["ready"])
+	}
+	for node, reason := range map[string]string{
+		"down":          string(domain.NodeUnreachable),
+		"wrong-backend": "label." + domain.LabelPeerBackend,
+		"low-disk":      "disk.free_after_model",
+		"loading":       "load_in_flight",
+	} {
+		if byNode[node].Status != "not_fit" || byNode[node].Reason != reason {
+			t.Fatalf("%s fit = %+v want reason %s", node, byNode[node], reason)
+		}
+	}
+}
+
+func TestPrewarmFitCandidatesHonorsPinnedPresetNode(t *testing.T) {
+	preset := domain.Preset{
+		ID:             "vision-vllm",
+		Backend:        domain.BackendVLLM,
+		NodeID:         "owner-a",
+		ArtifactSizeMB: 100,
+		EstWeightsMB:   100,
+		KVPerTokenMB:   0.01,
+	}
+	node := func(id string) domain.Node {
+		return domain.Node{
+			ID:           id,
+			Status:       domain.NodeReady,
+			MaxUtil:      0.9,
+			DiskTotalMB:  10000,
+			DiskFreeMB:   9000,
+			Labels:       map[string]string{domain.LabelPeerBackends: "vllm"},
+			Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 1000}},
+		}
+	}
+	got := prewarmFitCandidates(context.Background(), preset, 2048, 1, domain.FleetSnapshot{Nodes: []domain.Node{node("owner-b"), node("owner-a")}})
+	byNode := map[string]modelPrewarmFit{}
+	for _, fit := range got {
+		byNode[fit.NodeID] = fit
+	}
+	if byNode["owner-a"].Status != "fits" {
+		t.Fatalf("owner-a fit = %+v", byNode["owner-a"])
+	}
+	if byNode["owner-b"].Reason != "preset.node_id" {
+		t.Fatalf("owner-b fit = %+v", byNode["owner-b"])
+	}
+}
+
+func TestPrewarmAcceleratorSetsEnumeratesDeterministically(t *testing.T) {
+	got := prewarmAcceleratorSets(domain.Node{Accelerators: []domain.Accelerator{{Index: 2}, {Index: 0}, {Index: 1}}})
+	want := [][]int{{0}, {1}, {2}, {0, 1}, {0, 2}, {1, 2}, {0, 1, 2}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("accelerator sets = %+v, want %+v", got, want)
+	}
+	if got := prewarmAcceleratorSets(domain.Node{}); len(got) != 0 {
+		t.Fatalf("empty accelerator sets = %+v", got)
+	}
+}
+
+func TestPresetDiskMismatchForPrewarmUsesExistingModelEvidence(t *testing.T) {
+	preset := domain.Preset{ID: "vision-vllm", ArtifactSizeMB: 600}
+	node := domain.Node{ID: "owner-a", DiskTotalMB: 1000, DiskFreeMB: 650}
+	if reason, mismatch := presetDiskMismatchForPrewarm(preset, node, domain.FleetSnapshot{}); !mismatch || reason != "disk.free_after_model" {
+		t.Fatalf("new model mismatch = %q %t", reason, mismatch)
+	}
+	fleet := domain.FleetSnapshot{Instances: []domain.ModelInstance{{NodeID: node.ID, PresetID: preset.ID}}}
+	if reason, mismatch := presetDiskMismatchForPrewarm(preset, node, fleet); mismatch {
+		t.Fatalf("existing model mismatch = %q", reason)
+	}
+	pinned := preset
+	pinned.NodeID = node.ID
+	if reason, mismatch := presetDiskMismatchForPrewarm(pinned, node, domain.FleetSnapshot{}); mismatch {
+		t.Fatalf("pinned model mismatch = %q", reason)
+	}
+}
+
+func TestFetchPrewarmSnapshotClassifiesBadPeerResponses(t *testing.T) {
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Host {
+		case "bad-status.test":
+			http.Error(w, "offline", http.StatusServiceUnavailable)
+		case "bad-json.test":
+			_, _ = w.Write([]byte("{"))
+		case "empty-node.test":
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{})
+		case "ready.test":
+			if got := r.Header.Get("Authorization"); got != "Bearer rpc-secret" {
+				t.Fatalf("auth = %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: domain.Node{ID: "owner-a", Status: domain.NodeReady}})
+		default:
+			t.Fatalf("unexpected host %s", r.URL.Host)
+		}
+	}))
+	for _, tc := range []struct {
+		url  string
+		want string
+	}{
+		{"http://bad-status.test", "returned 503"},
+		{"http://bad-json.test", "unexpected end"},
+		{"http://empty-node.test", "empty node id"},
+	} {
+		if _, err := fetchPrewarmSnapshot(context.Background(), tc.url, "rpc-secret", client); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("fetch %s err = %v, want %q", tc.url, err, tc.want)
+		}
+	}
+	snap, err := fetchPrewarmSnapshot(context.Background(), "http://ready.test", "rpc-secret", client)
+	if err != nil || snap.Node.ID != "owner-a" {
+		t.Fatalf("ready snapshot = %+v err=%v", snap, err)
+	}
+}
+
+func TestPrewarmResultFromAdmissionUsesSchedulerEvidence(t *testing.T) {
+	out := workload.AdmissionResponse{
+		Job: domain.Job{ID: "job-a", Model: "model-a", PresetID: "preset-a", Status: domain.JobRunning},
+		Result: &domain.JobResult{
+			Action:   domain.ActionWarmInstance,
+			NodeID:   "owner-a",
+			PresetID: "preset-a",
+			Instance: domain.ModelInstance{ID: "inst-a"},
+		},
+		Decision: domain.PlacementDecision{Action: domain.ActionLoadedNew, NodeID: "decision-owner", Preset: domain.Preset{ID: "decision-preset"}, InstanceID: "decision-inst"},
+		Instance: domain.ModelInstance{ID: "response-inst"},
+	}
+	got := prewarmResultFromAdmission(out)
+	if got.Action != domain.ActionWarmInstance || got.NodeID != "decision-owner" || got.PresetID != "preset-a" || got.Instance != "inst-a" {
+		t.Fatalf("result from job evidence = %+v", got)
+	}
+	out.Result = nil
+	got = prewarmResultFromAdmission(out)
+	if got.Action != domain.ActionLoadedNew || got.NodeID != "decision-owner" || got.PresetID != "preset-a" || got.Instance != "response-inst" {
+		t.Fatalf("result from response evidence = %+v", got)
+	}
+}
+
 func TestCatalogStageClientAndStageFailureBranches(t *testing.T) {
 	if got := catalogPeerBaseURL("127.0.0.1:51846"); got != "http://127.0.0.1:51846" {
 		t.Fatalf("base url = %s", got)
@@ -2046,6 +2229,93 @@ func TestGatewayRouteReadinessClassifiesConsumerRequirements(t *testing.T) {
 				t.Fatalf("gatewayRouteReadiness() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFetchGatewayLiveModelsDedupesAndClassifiesErrors(t *testing.T) {
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Host {
+		case "ready.test":
+			if got := r.Header.Get("Authorization"); got != "Bearer gateway-secret" {
+				t.Fatalf("auth = %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]string{
+					{"id": "model-a"},
+					{"id": ""},
+					{"id": "model-a"},
+					{"id": "model-b"},
+				},
+			})
+		case "bad-status.test":
+			http.Error(w, "catalog unavailable", http.StatusNotFound)
+		case "bad-json.test":
+			_, _ = w.Write([]byte("{"))
+		default:
+			t.Fatalf("unexpected host %s", r.URL.Host)
+		}
+	}))
+	models, err := fetchGatewayLiveModels(context.Background(), "http://ready.test", "gateway-secret", client)
+	if err != nil {
+		t.Fatalf("fetch models: %v", err)
+	}
+	if !reflect.DeepEqual(models, []string{"model-a", "model-b"}) {
+		t.Fatalf("models = %+v", models)
+	}
+	for _, tc := range []struct {
+		url  string
+		want string
+	}{
+		{"http://bad-status.test", "returned 404"},
+		{"http://bad-json.test", "decode gateway models response"},
+	} {
+		if _, err := fetchGatewayLiveModels(context.Background(), tc.url, "", client); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("fetch %s err=%v want %q", tc.url, err, tc.want)
+		}
+	}
+}
+
+func TestFetchGatewayRoutesLiveCatalogReportsStatusBranches(t *testing.T) {
+	dir := t.TempDir()
+	configWithToken := filepath.Join(dir, "with-token.json")
+	if err := os.WriteFile(configWithToken, []byte(`{"gateway_token":"gateway-secret"}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	configWithoutToken := filepath.Join(dir, "without-token.json")
+	if err := os.WriteFile(configWithoutToken, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Host == "error.test" {
+			http.Error(w, "models missing", http.StatusNotFound)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer gateway-secret" {
+			t.Fatalf("auth = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]string{{"id": "model-b"}, {"id": "model-a"}},
+		})
+	}))
+
+	live, models := fetchGatewayRoutesLiveCatalog(context.Background(), configWithToken, "http://ready.test", gatewayRoutesLiveOptions{Enabled: true, Client: client})
+	if live.Status != "ok" || live.ModelCount != 2 || live.AuthSource != configWithToken+" gateway_token" {
+		t.Fatalf("live catalog = %+v", live)
+	}
+	if _, ok := models["model-a"]; !ok {
+		t.Fatalf("models = %+v", models)
+	}
+	live, _ = fetchGatewayRoutesLiveCatalog(context.Background(), "", "", gatewayRoutesLiveOptions{Enabled: true, Client: client})
+	if live.Status != "unavailable" || !strings.Contains(live.Error, "no gateway") {
+		t.Fatalf("unavailable live catalog = %+v", live)
+	}
+	live, _ = fetchGatewayRoutesLiveCatalog(context.Background(), configWithoutToken, "http://ready.test", gatewayRoutesLiveOptions{Enabled: true, Client: client})
+	if live.Status != "auth_error" || !strings.Contains(live.Error, "no gateway_token") {
+		t.Fatalf("auth-error live catalog = %+v", live)
+	}
+	live, _ = fetchGatewayRoutesLiveCatalog(context.Background(), configWithToken, "http://error.test", gatewayRoutesLiveOptions{Enabled: true, Client: client})
+	if live.Status != "error" || !strings.Contains(live.Error, "returned 404") {
+		t.Fatalf("error live catalog = %+v", live)
 	}
 }
 
