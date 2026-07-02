@@ -52,7 +52,7 @@ func TestDrainAllowedTasksExecutesIncompatibilityAndSkipsBlocked(t *testing.T) {
 
 func TestDrainAllowedTasksFailsUnsupportedAllowedTaskLoudly(t *testing.T) {
 	store := &fakeTaskStore{tasks: []domain.ReconciliationTaskRecord{
-		taskRecord("allowed-stage", string(TaskStageModelArtifact), domain.ReconciliationTaskAllowed),
+		taskRecord("allowed-refresh", string(TaskRefreshCatalog), domain.ReconciliationTaskAllowed),
 	}}
 
 	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: time.Unix(30, 0).UTC()})
@@ -65,9 +65,62 @@ func TestDrainAllowedTasksFailsUnsupportedAllowedTaskLoudly(t *testing.T) {
 	if !strings.Contains(report.Results[0].Error, "not implemented") {
 		t.Fatalf("error = %q", report.Results[0].Error)
 	}
-	failed := store.taskByID("allowed-stage")
+	failed := store.taskByID("allowed-refresh")
 	if failed.Status != domain.ReconciliationTaskFailed || !strings.Contains(failed.Error, "not implemented") {
 		t.Fatalf("failed task = %+v", failed)
+	}
+}
+
+func TestDrainAllowedTasksPlansArtifactStaging(t *testing.T) {
+	store := &fakeTaskStore{
+		tasks:   []domain.ReconciliationTaskRecord{taskRecord("allowed-stage", string(TaskStageModelArtifact), domain.ReconciliationTaskAllowed)},
+		presets: map[string]domain.Preset{"preset-a": {ID: "preset-a", ModelRef: "model-a", ArtifactSizeMB: 123}},
+		nodes:   map[string]domain.Node{"node-a": {ID: "node-a"}},
+	}
+	now := time.Unix(50, 0).UTC()
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: now})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Drained != 1 || report.Results[0].Status != domain.ReconciliationTaskDone || report.Results[0].Action != "plan_model_artifact_stage" {
+		t.Fatalf("report = %+v", report)
+	}
+	done := store.taskByID("allowed-stage")
+	if done.Status != domain.ReconciliationTaskDone || len(done.Events) != 2 {
+		t.Fatalf("done task = %+v", done)
+	}
+	if len(store.localityPlans) != 1 {
+		t.Fatalf("locality plans = %+v", store.localityPlans)
+	}
+	plan := store.localityPlans[0]
+	if plan.ID != "reconcile-allowed-stage" || len(plan.Actions) != 1 {
+		t.Fatalf("plan = %+v", plan)
+	}
+	action := plan.Actions[0]
+	if action.Kind != domain.LocalityActionStage || action.PresetID != "preset-a" || action.NodeID != "node-a" || action.State != domain.ModelLocalityPlanned || action.ArtifactSizeMB != 123 {
+		t.Fatalf("action = %+v", action)
+	}
+	if len(store.localities) != 1 || store.localities[0].ID != "node-a:preset-a" || store.localities[0].State != domain.ModelLocalityPlanned || !store.localities[0].Managed {
+		t.Fatalf("localities = %+v", store.localities)
+	}
+}
+
+func TestDrainAllowedTasksFailsStageWithoutPreset(t *testing.T) {
+	store := &fakeTaskStore{
+		tasks: []domain.ReconciliationTaskRecord{taskRecord("allowed-stage", string(TaskStageModelArtifact), domain.ReconciliationTaskAllowed)},
+		nodes: map[string]domain.Node{"node-a": {ID: "node-a"}},
+	}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: time.Unix(60, 0).UTC()})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Results[0].Status != domain.ReconciliationTaskFailed || !strings.Contains(report.Results[0].Error, "preset") {
+		t.Fatalf("report = %+v", report)
+	}
+	if len(store.localityPlans) != 0 || len(store.localities) != 0 {
+		t.Fatalf("stage side effects on failure: plans=%+v localities=%+v", store.localityPlans, store.localities)
 	}
 }
 
@@ -112,6 +165,10 @@ func taskRecord(id, kind string, status domain.ReconciliationTaskStatus) domain.
 type fakeTaskStore struct {
 	tasks             []domain.ReconciliationTaskRecord
 	incompatibilities []domain.IncompatibilityRecord
+	presets           map[string]domain.Preset
+	nodes             map[string]domain.Node
+	localityPlans     []domain.LocalityPlan
+	localities        []domain.ModelLocality
 	saveIncompatErr   error
 }
 
@@ -147,6 +204,42 @@ func (s *fakeTaskStore) SaveIncompatibility(_ context.Context, rec domain.Incomp
 		}
 	}
 	s.incompatibilities = append(s.incompatibilities, rec)
+	return nil
+}
+
+func (s *fakeTaskStore) Preset(_ context.Context, id string) (domain.Preset, error) {
+	if preset, ok := s.presets[id]; ok {
+		return preset, nil
+	}
+	return domain.Preset{}, errors.New("preset not found")
+}
+
+func (s *fakeTaskStore) Node(_ context.Context, id string) (domain.Node, error) {
+	if node, ok := s.nodes[id]; ok {
+		return node, nil
+	}
+	return domain.Node{}, errors.New("node not found")
+}
+
+func (s *fakeTaskStore) SaveLocalityPlan(_ context.Context, plan domain.LocalityPlan) error {
+	for i := range s.localityPlans {
+		if s.localityPlans[i].ID == plan.ID {
+			s.localityPlans[i] = plan
+			return nil
+		}
+	}
+	s.localityPlans = append(s.localityPlans, plan)
+	return nil
+}
+
+func (s *fakeTaskStore) SaveModelLocality(_ context.Context, locality domain.ModelLocality) error {
+	for i := range s.localities {
+		if s.localities[i].ID == locality.ID {
+			s.localities[i] = locality
+			return nil
+		}
+	}
+	s.localities = append(s.localities, locality)
 	return nil
 }
 
