@@ -4240,6 +4240,9 @@ func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
 	if queuedStatus.Execution.State != "queued_not_executed" || queuedStatus.Execution.AutomaticProviderOutputCapture || queuedStatus.Execution.ResultReplayable {
 		t.Fatalf("queued execution evidence = %+v", queuedStatus.Execution)
 	}
+	if queuedStatus.Execution.PayloadContract != "registry_payload_not_executable" || queuedStatus.Execution.PayloadExecutable || queuedStatus.Execution.PayloadKind != "" {
+		t.Fatalf("queued payload execution contract = %+v", queuedStatus.Execution)
+	}
 
 	placer.ready = true
 	drain := httptest.NewRecorder()
@@ -4649,6 +4652,41 @@ func TestWorkloadPayloadEvidenceClassifiesRegistryStates(t *testing.T) {
 		if got.State != tc.wantState || got.Replayable != tc.replayable || got.Redacted != tc.redacted || (tc.wantError != "" && !strings.Contains(got.Error, tc.wantError)) {
 			t.Fatalf("%s evidence = %+v", tc.name, got)
 		}
+	}
+}
+
+func TestWorkloadExecutionEvidenceClassifiesExecutablePayloadContract(t *testing.T) {
+	ctx := context.Background()
+	job := domain.Job{
+		ID:     "job-a",
+		Status: domain.JobQueued,
+		Result: &domain.JobResult{
+			PayloadBytes:  91,
+			PayloadStored: true,
+		},
+	}
+	body := json.RawMessage(`{"model":"model-a","messages":[]}`)
+	payload, err := json.Marshal(workload.ExecutablePayload{Kind: workload.ExecutablePayloadKindOpenAIChat, Body: body})
+	if err != nil {
+		t.Fatalf("Marshal executable payload: %v", err)
+	}
+	replayable, err := peercoord.EncodeRescuePayload(job, payload)
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload: %v", err)
+	}
+	store := &workloadMemoryStore{
+		jobs: map[string]domain.Job{job.ID: job},
+		records: []domain.JobRecord{{
+			JobID:       job.ID,
+			Coordinator: "peer-a",
+			Status:      domain.JobQueued,
+			Request:     replayable,
+			UpdatedAt:   time.Unix(90, 0).UTC(),
+		}},
+	}
+	got := workloadExecutionEvidence(ctx, store, job)
+	if got.PayloadContract != "registry_executable_gateway_request" || got.PayloadKind != workload.ExecutablePayloadKindOpenAIChat || !got.PayloadExecutable {
+		t.Fatalf("execution evidence = %+v", got)
 	}
 }
 

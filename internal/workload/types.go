@@ -2,6 +2,7 @@ package workload
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"mycelium/internal/domain"
 )
@@ -42,12 +43,49 @@ type PayloadEvidence struct {
 type ExecutionEvidence struct {
 	State                          string `json:"state,omitempty"`
 	AutomaticProviderOutputCapture bool   `json:"automatic_provider_output_capture"`
+	PayloadContract                string `json:"payload_contract,omitempty"`
+	PayloadKind                    string `json:"payload_kind,omitempty"`
+	PayloadExecutable              bool   `json:"payload_executable,omitempty"`
 	ResultReplayable               bool   `json:"result_replayable,omitempty"`
 	ResultBodyStored               bool   `json:"result_body_stored,omitempty"`
 	ResultArtifact                 bool   `json:"result_artifact,omitempty"`
 	ResultBytes                    int    `json:"result_bytes,omitempty"`
 	ResultSHA256                   bool   `json:"result_sha256,omitempty"`
 	Error                          string `json:"error,omitempty"`
+}
+
+const (
+	ExecutablePayloadKindOpenAIChat        = "openai_chat"
+	ExecutablePayloadKindOpenAICompletion  = "openai_completion"
+	ExecutablePayloadKindAnthropicMessages = "anthropic_messages"
+)
+
+type ExecutablePayload struct {
+	Kind string          `json:"kind"`
+	Body json.RawMessage `json:"body"`
+}
+
+func DecodeExecutablePayload(payload []byte) (ExecutablePayload, error) {
+	var out ExecutablePayload
+	if len(payload) == 0 {
+		return out, fmt.Errorf("payload is empty")
+	}
+	if err := json.Unmarshal(payload, &out); err != nil {
+		return out, err
+	}
+	switch out.Kind {
+	case ExecutablePayloadKindOpenAIChat, ExecutablePayloadKindOpenAICompletion, ExecutablePayloadKindAnthropicMessages:
+	default:
+		return out, fmt.Errorf("unsupported executable payload kind %q", out.Kind)
+	}
+	if len(out.Body) == 0 {
+		return out, fmt.Errorf("executable payload body is required")
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(out.Body, &body); err != nil {
+		return out, fmt.Errorf("executable payload body must be a JSON object: %w", err)
+	}
+	return out, nil
 }
 
 type FinishRequest struct {
