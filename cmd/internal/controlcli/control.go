@@ -2158,6 +2158,8 @@ type gatewayRouteContract struct {
 	DiscoveryStatus              string              `json:"discovery_status"`
 	LiveModelAvailable           bool                `json:"live_model_available,omitempty"`
 	LiveModelMatch               string              `json:"live_model_match,omitempty"`
+	ModelGroupSize               int                 `json:"model_group_size,omitempty"`
+	ModelGroupPresets            []string            `json:"model_group_presets,omitempty"`
 }
 
 type gatewayRouteReadinessOptions struct {
@@ -2203,6 +2205,7 @@ func buildGatewayRoutesReport(ctx context.Context, configPath string, live gatew
 	if len(projects) == 0 {
 		for _, preset := range presets {
 			route := routeContractForPreset(cfg, domain.Project{}, preset)
+			annotateGatewayRouteModelGroup(&route, presets)
 			annotateGatewayRouteLive(&route, preset, liveModels)
 			report.Routes = append(report.Routes, route)
 		}
@@ -2225,6 +2228,7 @@ func buildGatewayRoutesReport(ctx context.Context, configPath string, live gatew
 		}
 		if preset, ok := findPresetForModel(presets, project.DefaultModel); ok {
 			route = routeContractForPreset(cfg, project, preset)
+			annotateGatewayRouteModelGroup(&route, presets)
 			annotateGatewayRouteLive(&route, preset, liveModels)
 		}
 		report.Routes = append(report.Routes, route)
@@ -2359,6 +2363,41 @@ func annotateGatewayRouteLive(route *gatewayRouteContract, preset domain.Preset,
 	route.LiveModelAvailable = false
 }
 
+func annotateGatewayRouteModelGroup(route *gatewayRouteContract, presets []domain.Preset) {
+	group := presetsForModel(presets, route.Model)
+	if len(group) <= 1 {
+		return
+	}
+	route.ModelGroupSize = len(group)
+	route.ModelGroupPresets = group
+}
+
+func presetsForModel(presets []domain.Preset, model string) []string {
+	var ids []string
+	for _, preset := range presets {
+		if presetMatchesModel(preset, model) {
+			ids = append(ids, preset.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func presetMatchesModel(preset domain.Preset, model string) bool {
+	if model == "" {
+		return false
+	}
+	if preset.ID == model || preset.ModelRef == model {
+		return true
+	}
+	for _, alias := range preset.Aliases {
+		if alias == model {
+			return true
+		}
+	}
+	return false
+}
+
 func routeContractForPreset(cfg operatorPeerConfig, project domain.Project, preset domain.Preset) gatewayRouteContract {
 	model := project.DefaultModel
 	if model == "" {
@@ -2400,7 +2439,7 @@ func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 		fmt.Fprintf(w, "live\tgateway=%s\tstatus=%s\tmodels=%d\tauth=%s\terror=%s\n", emptyDash(report.Live.Gateway), emptyDash(report.Live.Status), report.Live.ModelCount, emptyDash(report.Live.AuthSource), emptyDash(report.Live.Error))
 	}
 	for _, route := range report.Routes {
-		fmt.Fprintf(w, "route\tproject=%s\tmodel=%s\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tproject_cap=%d\teffective_context=%d\tmin_context=%d\tcontext_issue=%s\treadiness=%s\ttool_readiness=%s\tstatus=%s\tauth=%s\tproject_token=%t\tglobal_token=%t\tstructured=%t\tstreaming=%t\ttool_parser=%t\tauto_tool=%t\ttool_choice=%s\tlive_model=%t\tlive_match=%s\n",
+		fmt.Fprintf(w, "route\tproject=%s\tmodel=%s\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tproject_cap=%d\teffective_context=%d\tmin_context=%d\tcontext_issue=%s\treadiness=%s\ttool_readiness=%s\tstatus=%s\tauth=%s\tproject_token=%t\tglobal_token=%t\tstructured=%t\tstreaming=%t\ttool_parser=%t\tauto_tool=%t\ttool_choice=%s\tlive_model=%t\tlive_match=%s\tgroup_size=%d\tgroup_presets=%s\n",
 			emptyDash(route.Project),
 			emptyDash(route.Model),
 			emptyDash(route.PresetID),
@@ -2424,6 +2463,8 @@ func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 			emptyDash(route.RecommendedToolChoice),
 			route.LiveModelAvailable,
 			emptyDash(route.LiveModelMatch),
+			route.ModelGroupSize,
+			emptyDash(strings.Join(route.ModelGroupPresets, ",")),
 		)
 	}
 }
@@ -2488,13 +2529,8 @@ func effectiveRouteContextCap(route gatewayRouteContract) int {
 
 func findPresetForModel(presets []domain.Preset, model string) (domain.Preset, bool) {
 	for _, preset := range presets {
-		if preset.ID == model || preset.ModelRef == model {
+		if presetMatchesModel(preset, model) {
 			return preset, true
-		}
-		for _, alias := range preset.Aliases {
-			if alias == model {
-				return preset, true
-			}
 		}
 	}
 	return domain.Preset{}, false

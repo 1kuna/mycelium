@@ -2128,6 +2128,15 @@ func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 				NodeID:        "node-json",
 			},
 			{
+				ID:            "strict-json-vllm-alt",
+				ModelRef:      "strict-json-model",
+				Aliases:       []string{"strict-json-model"},
+				Backend:       domain.BackendVLLM,
+				ContextLength: 8192,
+				Capabilities:  []domain.Capability{domain.CapabilityChat},
+				NodeID:        "node-json-alt",
+			},
+			{
 				ID:              "tool-model-8192-vllm",
 				ModelRef:        "tool-model",
 				Aliases:         []string{"tool-model-8192"},
@@ -2185,6 +2194,9 @@ func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 	}
 	if report.BaseURL != "http://gateway.test/v1" || len(report.Routes) != 3 {
 		t.Fatalf("gateway routes report = %+v", report)
+	}
+	if got := report.Routes[1]; got.Project != "strict-json-project" || got.ModelGroupSize != 2 || strings.Join(got.ModelGroupPresets, ",") != "strict-json-vllm,strict-json-vllm-alt" {
+		t.Fatalf("strict JSON route group = %+v", got)
 	}
 	if got := report.Routes[2]; got.Project != "tool-project" || !got.ProjectTokenConfigured || !got.ToolParserConfigured || !got.AutoToolChoiceConfigured || got.ToolReadiness != "auto_tool_configured" || got.RouteReadiness != "undersized_context" || got.MinContextCap != 32768 || got.EffectiveContextCap != 8192 || got.ContextIssue != "undersized_context" || got.ContextAdequate {
 		t.Fatalf("tool route contract = %+v", got)

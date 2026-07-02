@@ -49,14 +49,16 @@ type FailureReporter interface {
 type PresetRegistry struct {
 	byModel map[string]domain.Preset
 	byID    map[string]domain.Preset
+	models  map[string][]domain.Preset
 	all     []domain.Preset
 }
 
 func NewPresetRegistry(presets ...domain.Preset) PresetRegistry {
-	r := PresetRegistry{byModel: map[string]domain.Preset{}, byID: map[string]domain.Preset{}, all: append([]domain.Preset(nil), presets...)}
+	r := PresetRegistry{byModel: map[string]domain.Preset{}, byID: map[string]domain.Preset{}, models: map[string][]domain.Preset{}, all: append([]domain.Preset(nil), presets...)}
 	for _, preset := range presets {
 		r.byID[preset.ID] = preset
 		indexPresetModels(r.byModel, preset)
+		indexPresetModelGroups(r.models, preset)
 	}
 	return r
 }
@@ -69,6 +71,13 @@ func (r PresetRegistry) Resolve(model string) (domain.Preset, error) {
 		return preset, nil
 	}
 	return domain.Preset{}, fmt.Errorf("unknown model %q", model)
+}
+
+func (r PresetRegistry) ResolveAll(model string) []domain.Preset {
+	if preset, ok := r.byID[model]; ok {
+		return []domain.Preset{preset}
+	}
+	return append([]domain.Preset(nil), r.models[model]...)
 }
 
 func (r PresetRegistry) PublicModelIDs() []string {
@@ -113,6 +122,15 @@ func indexPresetModels(index map[string]domain.Preset, preset domain.Preset) {
 		if _, exists := index[model]; !exists {
 			index[model] = preset
 		}
+	}
+}
+
+func indexPresetModelGroups(index map[string][]domain.Preset, preset domain.Preset) {
+	for _, model := range append([]string{preset.ModelRef}, preset.Aliases...) {
+		if model == "" {
+			continue
+		}
+		index[model] = append(index[model], preset)
 	}
 }
 
@@ -207,6 +225,10 @@ func (r *Router) ExecutePlacedProvider(ctx context.Context, req translate.Ingres
 		return RouteResponse{}, err
 	}
 	profile, err := r.profileFor(preset)
+	if err != nil {
+		return RouteResponse{}, err
+	}
+	preset, profile, err = r.selectedPresetProfile(preset, profile, decision)
 	if err != nil {
 		return RouteResponse{}, err
 	}
@@ -393,6 +415,9 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		if err != nil {
 			return RouteResponse{}, err
 		}
+		if err := r.validateModelGroupProfile(req.Model, profile); err != nil {
+			return RouteResponse{}, err
+		}
 		route, err := translate.BuildUpstream(req, profile)
 		if err != nil {
 			return RouteResponse{}, err
@@ -404,11 +429,18 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		if err != nil {
 			return RouteResponse{}, err
 		}
+		placedPreset, placedProfile, err := r.selectedPresetProfile(preset, profile, decision)
+		if err != nil {
+			if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
+				return RouteResponse{}, errors.Join(err, failErr)
+			}
+			return RouteResponse{}, err
+		}
 		loadMS := 0
 		if cold {
 			loadMS = durationMS(loadStart, clk.Now())
 		}
-		if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhasePlaced, func(sample *domain.SessionMetric) {
+		if err := recorder.emit(ctx, job, placedPreset, inst, domain.TelemetryPhasePlaced, func(sample *domain.SessionMetric) {
 			sample.BytesIn = len(req.Body)
 			sample.LoadWallClockMS = loadMS
 		}); err != nil {
@@ -418,7 +450,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			return RouteResponse{}, err
 		}
 		if cold {
-			if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhaseLoadReady, func(sample *domain.SessionMetric) {
+			if err := recorder.emit(ctx, job, placedPreset, inst, domain.TelemetryPhaseLoadReady, func(sample *domain.SessionMetric) {
 				sample.BytesIn = len(req.Body)
 				sample.LoadWallClockMS = loadMS
 			}); err != nil {
@@ -430,7 +462,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		}
 		endRequest, err := r.beginInstanceRequest(ctx, inst)
 		if err != nil {
-			if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, err); failErr != nil {
+			if failErr := r.failPlacedJob(ctx, recorder, job, placedPreset, inst, lease, err); failErr != nil {
 				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			lastErr = err
@@ -441,12 +473,12 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			continue
 		}
 		upstreamStart := clk.Now()
-		if err := recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseUpstreamStart, upstreamStart, func(sample *domain.SessionMetric) {
+		if err := recorder.emitAt(ctx, job, placedPreset, inst, domain.TelemetryPhaseUpstreamStart, upstreamStart, func(sample *domain.SessionMetric) {
 			sample.BytesIn = len(route.Body)
 			sample.LoadWallClockMS = loadMS
 		}); err != nil {
 			endRequest()
-			if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+			if failErr := r.failPlacedJob(ctx, nil, job, placedPreset, inst, lease, err); failErr != nil {
 				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			return RouteResponse{}, err
@@ -455,7 +487,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		upstreamEnd := clk.Now()
 		endRequest()
 		if err != nil {
-			if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, err); failErr != nil {
+			if failErr := r.failPlacedJob(ctx, recorder, job, placedPreset, inst, lease, err); failErr != nil {
 				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			lastErr = err
@@ -468,13 +500,13 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		if resp.Status >= 400 {
 			bodyText := strings.TrimSpace(string(resp.Body))
 			statusErr := fmt.Errorf("upstream returned %d: %s", resp.Status, bodyText)
-			if optimizer.IsContextOverflow(preset.Backend, fmt.Errorf("%s", bodyText)) {
-				next, ok := r.reactiveRequeuePreset(job, preset, statusErr)
+			if optimizer.IsContextOverflow(placedPreset.Backend, fmt.Errorf("%s", bodyText)) {
+				next, ok := r.reactiveRequeuePreset(job, placedPreset, statusErr)
 				if ok {
-					if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, statusErr); failErr != nil {
+					if failErr := r.failPlacedJob(ctx, recorder, job, placedPreset, inst, lease, statusErr); failErr != nil {
 						return RouteResponse{}, errors.Join(statusErr, failErr)
 					}
-					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", preset.ID, next.ID)
+					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", placedPreset.ID, next.ID)
 					req, err = translate.WithModel(req, next.ID)
 					if err != nil {
 						return RouteResponse{}, err
@@ -485,7 +517,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 				}
 			}
 			if resp.Status >= 500 {
-				if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, statusErr); failErr != nil {
+				if failErr := r.failPlacedJob(ctx, recorder, job, placedPreset, inst, lease, statusErr); failErr != nil {
 					return RouteResponse{}, errors.Join(statusErr, failErr)
 				}
 				lastErr = statusErr
@@ -495,15 +527,15 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 				fleet = withoutInstance(fleet, inst.ID)
 				continue
 			}
-			if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, statusErr); failErr != nil {
+			if failErr := r.failPlacedJob(ctx, recorder, job, placedPreset, inst, lease, statusErr); failErr != nil {
 				return RouteResponse{}, errors.Join(statusErr, failErr)
 			}
 			headers := cloneHeader(resp.Header)
 			if headers.Get("Content-Type") == "" {
 				headers.Set("Content-Type", "application/json")
 			}
-			writeRouteDiagnostics(headers, routeDiagnosticsFor(req, preset, profile, cold, loadMS, 0, durationMS(upstreamStart, upstreamEnd)))
-			writeDecisionHeaders(headers, decision, inst, profile, attempt)
+			writeRouteDiagnostics(headers, routeDiagnosticsFor(req, placedPreset, placedProfile, cold, loadMS, 0, durationMS(upstreamStart, upstreamEnd)))
+			writeDecisionHeaders(headers, decision, inst, placedProfile, attempt)
 			body := resp.Body
 			if len(body) == 0 {
 				body = []byte(fmt.Sprintf(`{"error":%q}`, statusErr.Error()))
@@ -515,40 +547,40 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 				Decision: decision,
 				Instance: inst,
 				Lease:    lease,
-				Profile:  profile,
+				Profile:  placedProfile,
 				Attempts: attempt,
 				ColdLoad: cold,
 			}, nil
 		}
 		body, contentType, err := translate.TranslateResponse(req, route, resp.Body)
 		if err != nil {
-			if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+			if failErr := r.failPlacedJob(ctx, nil, job, placedPreset, inst, lease, err); failErr != nil {
 				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			return RouteResponse{}, err
 		}
-		body, err = normalizeOpenAIReasoningBoundary(req, preset, body)
+		body, err = normalizeOpenAIReasoningBoundary(req, placedPreset, body)
 		if err != nil {
-			if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+			if failErr := r.failPlacedJob(ctx, nil, job, placedPreset, inst, lease, err); failErr != nil {
 				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			return RouteResponse{}, err
 		}
-		metric, err := r.recordMetric(ctx, job, preset, inst, body, metricTiming{
+		metric, err := r.recordMetric(ctx, job, placedPreset, inst, body, metricTiming{
 			Start:           upstreamStart,
 			FirstByte:       upstreamEnd,
 			End:             upstreamEnd,
 			LoadWallClockMS: loadMS,
 		})
 		if err != nil {
-			if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+			if failErr := r.failPlacedJob(ctx, nil, job, placedPreset, inst, lease, err); failErr != nil {
 				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			return RouteResponse{}, err
 		}
 		promptTokens, completionTokens := usageFromBody(body)
 		if err := recorder.emitMetric(ctx, metric, domain.TelemetryPhaseComplete, len(route.Body), len(body), promptTokens, completionTokens); err != nil {
-			if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+			if failErr := r.failPlacedJob(ctx, nil, job, placedPreset, inst, lease, err); failErr != nil {
 				return RouteResponse{}, errors.Join(err, failErr)
 			}
 			return RouteResponse{}, err
@@ -560,8 +592,8 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		if contentType != "" {
 			headers.Set("Content-Type", contentType)
 		}
-		writeRouteDiagnostics(headers, routeDiagnosticsFor(req, preset, profile, cold, loadMS, 0, durationMS(upstreamStart, upstreamEnd)))
-		writeDecisionHeaders(headers, decision, inst, profile, attempt)
+		writeRouteDiagnostics(headers, routeDiagnosticsFor(req, placedPreset, placedProfile, cold, loadMS, 0, durationMS(upstreamStart, upstreamEnd)))
+		writeDecisionHeaders(headers, decision, inst, placedProfile, attempt)
 		if cold && req.Stream {
 			headers.Set("Content-Type", "text/event-stream")
 			headers.Set("X-Accel-Buffering", "no")
@@ -574,7 +606,7 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			Decision: decision,
 			Instance: inst,
 			Lease:    lease,
-			Profile:  profile,
+			Profile:  placedProfile,
 			Attempts: attempt,
 			ColdLoad: cold,
 		}, nil
@@ -710,6 +742,9 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		if err != nil {
 			return err
 		}
+		if err := r.validateModelGroupProfile(req.Model, profile); err != nil {
+			return err
+		}
 		route, err := translate.BuildUpstream(req, profile)
 		if err != nil {
 			return err
@@ -748,6 +783,17 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			}
 			return err
 		}
+		placedPreset, placedProfile, err := r.selectedPresetProfile(preset, profile, decision)
+		if err != nil {
+			if releaseErr := r.releaseAndFail(ctx, job, lease, err); releaseErr != nil {
+				err = releaseErr
+			}
+			if started {
+				writeStreamError(w, err)
+				return nil
+			}
+			return err
+		}
 		if started && cold {
 			if _, err := w.Write(readyEvent(decision, inst)); err != nil {
 				_ = r.releaseAndFail(ctx, job, lease, err)
@@ -759,7 +805,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		if cold {
 			loadMS = durationMS(loadStart, clk.Now())
 		}
-		if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhasePlaced, func(sample *domain.SessionMetric) {
+		if err := recorder.emit(ctx, job, placedPreset, inst, domain.TelemetryPhasePlaced, func(sample *domain.SessionMetric) {
 			sample.BytesIn = len(req.Body)
 			sample.LoadWallClockMS = loadMS
 		}); err != nil {
@@ -773,7 +819,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			return err
 		}
 		if cold {
-			if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhaseLoadReady, func(sample *domain.SessionMetric) {
+			if err := recorder.emit(ctx, job, placedPreset, inst, domain.TelemetryPhaseLoadReady, func(sample *domain.SessionMetric) {
 				sample.BytesIn = len(req.Body)
 				sample.LoadWallClockMS = loadMS
 			}); err != nil {
@@ -789,7 +835,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		}
 		endRequest, err := r.beginInstanceRequest(ctx, inst)
 		if err != nil {
-			if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
+			if sampleErr := recorder.emitError(ctx, job, placedPreset, inst, err); sampleErr != nil {
 				err = sampleErr
 			}
 			if releaseErr := r.releaseAndFail(ctx, job, lease, err); releaseErr != nil {
@@ -807,7 +853,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			continue
 		}
 		upstreamStart := clk.Now()
-		if err := recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseUpstreamStart, upstreamStart, func(sample *domain.SessionMetric) {
+		if err := recorder.emitAt(ctx, job, placedPreset, inst, domain.TelemetryPhaseUpstreamStart, upstreamStart, func(sample *domain.SessionMetric) {
 			sample.BytesIn = len(route.Body)
 			sample.LoadWallClockMS = loadMS
 		}); err != nil {
@@ -831,7 +877,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 				}
 				return releaseErr
 			}
-			if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
+			if sampleErr := recorder.emitError(ctx, job, placedPreset, inst, err); sampleErr != nil {
 				if started {
 					writeStreamError(w, sampleErr)
 					return nil
@@ -861,16 +907,16 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			} else {
 				err = fmt.Errorf("upstream returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 			}
-			if optimizer.IsContextOverflow(preset.Backend, err) {
-				next, ok := r.reactiveRequeuePreset(job, preset, err)
+			if optimizer.IsContextOverflow(placedPreset.Backend, err) {
+				next, ok := r.reactiveRequeuePreset(job, placedPreset, err)
 				if ok && !providerStarted {
-					if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
+					if sampleErr := recorder.emitError(ctx, job, placedPreset, inst, err); sampleErr != nil {
 						return sampleErr
 					}
 					if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
 						return failErr
 					}
-					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", preset.ID, next.ID)
+					lastErr = fmt.Errorf("context overflow on %s; retrying with %s", placedPreset.ID, next.ID)
 					req, err = translate.WithModel(req, next.ID)
 					if err != nil {
 						return err
@@ -881,7 +927,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 				}
 			}
 			if resp.StatusCode >= 500 {
-				if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
+				if sampleErr := recorder.emitError(ctx, job, placedPreset, inst, err); sampleErr != nil {
 					if started {
 						writeStreamError(w, sampleErr)
 						return nil
@@ -909,7 +955,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 				fleet = withoutInstance(fleet, inst.ID)
 				continue
 			}
-			if sampleErr := recorder.emitError(ctx, job, preset, inst, err); sampleErr != nil {
+			if sampleErr := recorder.emitError(ctx, job, placedPreset, inst, err); sampleErr != nil {
 				if started {
 					writeStreamError(w, sampleErr)
 					return nil
@@ -936,8 +982,8 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 			}
 			headers.Set("X-Accel-Buffering", "no")
 			writeResponseHeaders(w.Header(), headers)
-			writeRouteDiagnostics(w.Header(), routeDiagnosticsFor(req, preset, profile, cold, loadMS, 0, -1))
-			writeDecisionHeaders(w.Header(), decision, inst, profile, attempt)
+			writeRouteDiagnostics(w.Header(), routeDiagnosticsFor(req, placedPreset, placedProfile, cold, loadMS, 0, -1))
+			writeDecisionHeaders(w.Header(), decision, inst, placedProfile, attempt)
 			w.WriteHeader(resp.StatusCode)
 			started = true
 			providerStarted = true
@@ -950,7 +996,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		copied, copyErr := copyAndFlush(w, resp.Body, clk, verifySSE, func(copied copyResult) error {
 			if !firstByteSampled && !copied.FirstByte.IsZero() {
 				firstByteSampled = true
-				if err := recorder.emitAt(streamTelemetryCtx, job, preset, inst, domain.TelemetryPhaseFirstByte, copied.FirstByte, func(sample *domain.SessionMetric) {
+				if err := recorder.emitAt(streamTelemetryCtx, job, placedPreset, inst, domain.TelemetryPhaseFirstByte, copied.FirstByte, func(sample *domain.SessionMetric) {
 					sample.BytesIn = len(route.Body)
 					sample.BytesOut = copied.Bytes
 					sample.LoadWallClockMS = loadMS
@@ -959,7 +1005,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 					return err
 				}
 			}
-			return recorder.emitAt(streamTelemetryCtx, job, preset, inst, domain.TelemetryPhaseStreamChunk, copied.End, func(sample *domain.SessionMetric) {
+			return recorder.emitAt(streamTelemetryCtx, job, placedPreset, inst, domain.TelemetryPhaseStreamChunk, copied.End, func(sample *domain.SessionMetric) {
 				sample.BytesIn = len(route.Body)
 				sample.BytesOut = copied.Bytes
 				sample.LoadWallClockMS = loadMS
@@ -969,7 +1015,7 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 		_ = resp.Body.Close()
 		endRequest()
 		if copyErr != nil {
-			r.failPlacedStream(ctx, recorder, job, preset, inst, lease, w, copyErr, providerStarted)
+			r.failPlacedStream(ctx, recorder, job, placedPreset, inst, lease, w, copyErr, providerStarted)
 			return nil
 		}
 		if verifySSE && !copied.SSETerminal {
@@ -977,23 +1023,23 @@ func (r *Router) Stream(ctx context.Context, req translate.IngressRequest, w htt
 				kind: streamFailureUpstreamRead,
 				err:  fmt.Errorf("upstream SSE stream ended without a terminal event"),
 			}
-			r.failPlacedStream(ctx, recorder, job, preset, inst, lease, w, err, providerStarted)
+			r.failPlacedStream(ctx, recorder, job, placedPreset, inst, lease, w, err, providerStarted)
 			return nil
 		}
 		finishCtx := cleanupContext(ctx)
-		metric, err := r.recordMetric(finishCtx, job, preset, inst, copied.Body, metricTiming{
+		metric, err := r.recordMetric(finishCtx, job, placedPreset, inst, copied.Body, metricTiming{
 			Start:           upstreamStart,
 			FirstByte:       copied.FirstByte,
 			End:             copied.End,
 			LoadWallClockMS: loadMS,
 		})
 		if err != nil {
-			r.failPlacedStream(ctx, recorder, job, preset, inst, lease, w, streamCopyError{kind: streamFailureTelemetry, err: err}, providerStarted)
+			r.failPlacedStream(ctx, recorder, job, placedPreset, inst, lease, w, streamCopyError{kind: streamFailureTelemetry, err: err}, providerStarted)
 			return nil
 		}
 		promptTokens, completionTokens := usageFromBody(copied.Body)
 		if err := recorder.emitMetric(finishCtx, metric, domain.TelemetryPhaseComplete, len(route.Body), copied.Bytes, promptTokens, completionTokens); err != nil {
-			r.failPlacedStream(ctx, recorder, job, preset, inst, lease, w, streamCopyError{kind: streamFailureTelemetry, err: err}, providerStarted)
+			r.failPlacedStream(ctx, recorder, job, placedPreset, inst, lease, w, streamCopyError{kind: streamFailureTelemetry, err: err}, providerStarted)
 			return nil
 		}
 		if err := r.finishJob(finishCtx, job, lease, nil); err != nil {
@@ -1085,7 +1131,9 @@ func (r *Router) jobFromIngress(req translate.IngressRequest, attempt int) domai
 		contextRequest = projectDefaults.ContextCap
 	}
 	if contextRequest == 0 {
-		if preset, err := r.Presets.Resolve(req.Model); err == nil {
+		if group := r.Presets.ResolveAll(req.Model); len(group) > 1 {
+			contextRequest = 0
+		} else if preset, err := r.Presets.Resolve(req.Model); err == nil {
 			contextRequest = modelruntime.EffectiveContextLength(preset)
 		}
 	}
@@ -1145,6 +1193,46 @@ func (r *Router) profileFor(preset domain.Preset) (profiles.Profile, error) {
 		return registry.ByID(preset.ProviderProfile)
 	}
 	return registry.ForBackend(preset.Backend)
+}
+
+func (r *Router) validateModelGroupProfile(model string, base profiles.Profile) error {
+	for _, preset := range r.Presets.ResolveAll(model) {
+		profile, err := r.profileFor(preset)
+		if err != nil {
+			return err
+		}
+		if !profilesWireCompatible(base, profile) {
+			return fmt.Errorf("model %q maps to incompatible provider profiles %q and %q", model, base.ID, profile.ID)
+		}
+	}
+	return nil
+}
+
+func (r *Router) selectedPresetProfile(initial domain.Preset, initialProfile profiles.Profile, decision domain.PlacementDecision) (domain.Preset, profiles.Profile, error) {
+	selected := initial
+	if decision.Preset.ID != "" {
+		selected = decision.Preset
+	}
+	if selected.ID == initial.ID {
+		return selected, initialProfile, nil
+	}
+	profile, err := r.profileFor(selected)
+	if err != nil {
+		return domain.Preset{}, profiles.Profile{}, err
+	}
+	if !profilesWireCompatible(initialProfile, profile) {
+		return domain.Preset{}, profiles.Profile{}, fmt.Errorf("selected preset %q provider profile %q is incompatible with initial profile %q", selected.ID, profile.ID, initialProfile.ID)
+	}
+	return selected, profile, nil
+}
+
+func profilesWireCompatible(left, right profiles.Profile) bool {
+	return left.Format == right.Format &&
+		left.ChatPath == right.ChatPath &&
+		left.CompletionPath == right.CompletionPath &&
+		left.AnthropicPath == right.AnthropicPath &&
+		left.SupportsChat == right.SupportsChat &&
+		left.SupportsStream == right.SupportsStream
 }
 
 func (r *Router) beginInstanceRequest(ctx context.Context, inst domain.ModelInstance) (func(), error) {

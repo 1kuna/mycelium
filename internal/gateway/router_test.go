@@ -86,6 +86,61 @@ func TestRouterPassesThroughOpenAIAndWritesHeaders(t *testing.T) {
 	}
 }
 
+func TestRouterSharedModelUsesSelectedPresetForTelemetry(t *testing.T) {
+	large := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-large"
+		p.ModelRef = "vision-model"
+		p.Aliases = []string{"vision"}
+		p.Backend = domain.BackendVLLM
+		p.ContextLength = 49152
+		p.NodeID = "owner-large"
+	})
+	small := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-small"
+		p.ModelRef = "vision-model"
+		p.Aliases = []string{"vision"}
+		p.Backend = domain.BackendVLLM
+		p.ContextLength = 16384
+		p.NodeID = "owner-small"
+	})
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("small owner")))
+	}))
+	inst := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst-small"),
+		fixtures.WithInstancePreset(small.ID),
+		fixtures.OnNode("owner-small"),
+	)
+	inst.Addr = upstream
+	largeNode := fixtures.MakeNode(fixtures.WithNodeID("owner-large"), fixtures.WithVRAM(65536), fixtures.WithMaxUtil(1))
+	smallNode := fixtures.MakeNode(fixtures.WithNodeID("owner-small"), fixtures.WithVRAM(32768), fixtures.WithMaxUtil(1))
+	router := newTestRouter(large, domain.FleetSnapshot{
+		Nodes:     []domain.Node{largeNode, smallNode},
+		Instances: []domain.ModelInstance{inst},
+	}, staticResolver{agents: map[string]ports.NodeAgent{"owner-small": mocks.NewNodeAgent(smallNode)}}, small)
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"vision","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Decision.Preset.ID != small.ID || resp.Header.Get(HeaderNode) != "owner-small" || resp.Header.Get(HeaderBackend) != string(domain.BackendVLLM) {
+		t.Fatalf("response decision=%+v headers=%+v", resp.Decision, resp.Header)
+	}
+	if len(sink.Metrics) != 1 || sink.Metrics[0].PresetID != small.ID || sink.Metrics[0].NodeID != "owner-small" || sink.Metrics[0].Backend != domain.BackendVLLM {
+		t.Fatalf("metrics = %+v", sink.Metrics)
+	}
+}
+
 func TestPresetRegistryNextLargerContext(t *testing.T) {
 	small := fixtures.MakePreset(func(p *domain.Preset) {
 		p.ID = "small"
@@ -112,6 +167,32 @@ func TestPresetRegistryNextLargerContext(t *testing.T) {
 	}
 	if _, ok := registry.NextLargerContext(large); ok {
 		t.Fatal("largest context unexpectedly had a next larger context")
+	}
+}
+
+func TestPresetRegistryResolveAllGroupsAliasesButPinsExactPresetIDs(t *testing.T) {
+	small := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-small"
+		p.ModelRef = "vision-model"
+		p.Aliases = []string{"vision"}
+	})
+	large := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-large"
+		p.ModelRef = "vision-model"
+		p.Aliases = []string{"vision"}
+	})
+	registry := NewPresetRegistry(small, large)
+
+	group := registry.ResolveAll("vision")
+	if len(group) != 2 || group[0].ID != small.ID || group[1].ID != large.ID {
+		t.Fatalf("alias group = %+v", group)
+	}
+	pinned := registry.ResolveAll("vision-large")
+	if len(pinned) != 1 || pinned[0].ID != large.ID {
+		t.Fatalf("exact preset = %+v", pinned)
+	}
+	if got := registry.ResolveAll("missing"); len(got) != 0 {
+		t.Fatalf("missing group = %+v", got)
 	}
 }
 
@@ -197,6 +278,62 @@ func TestRouterExecutePlacedProviderRunsWithoutFinishingJob(t *testing.T) {
 	req.Stream = true
 	if _, err := router.ExecutePlacedProvider(context.Background(), req, job, decision, inst, lease, 1, false, 0); err == nil || !strings.Contains(err.Error(), "streaming") {
 		t.Fatalf("streaming err = %v", err)
+	}
+}
+
+func TestRouterExecutePlacedProviderUsesSelectedPresetForSharedModel(t *testing.T) {
+	large := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-large"
+		p.ModelRef = "vision-model"
+		p.Aliases = []string{"vision"}
+		p.Backend = domain.BackendVLLM
+		p.ContextLength = 49152
+		p.NodeID = "owner-large"
+	})
+	small := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-small"
+		p.ModelRef = "vision-model"
+		p.Aliases = []string{"vision"}
+		p.Backend = domain.BackendVLLM
+		p.ContextLength = 16384
+		p.NodeID = "owner-small"
+	})
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("queued small")))
+	}))
+	inst := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst-small"),
+		fixtures.WithInstancePreset(small.ID),
+		fixtures.OnNode("owner-small"),
+	)
+	inst.Addr = upstream
+	node := fixtures.MakeNode(fixtures.WithNodeID("owner-small"))
+	agent := mocks.NewNodeAgent(node)
+	router := newTestRouter(large, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}}, small)
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"vision","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	job := domain.Job{ID: "job-a", Model: req.Model, Project: "project-a", Status: domain.JobRunning}
+	decision := domain.PlacementDecision{JobID: job.ID, Action: domain.ActionWarmInstance, NodeID: inst.NodeID, InstanceID: inst.ID, Preset: small}
+	lease := domain.Lease{ID: "lease-a", JobID: job.ID, NodeID: inst.NodeID, InstanceID: inst.ID}
+
+	resp, err := router.ExecutePlacedProvider(context.Background(), req, job, decision, inst, lease, 1, false, 0)
+	if err != nil {
+		t.Fatalf("ExecutePlacedProvider: %v", err)
+	}
+	if resp.Decision.Preset.ID != small.ID || !strings.Contains(string(resp.Body), "queued small") {
+		t.Fatalf("resp = %+v body=%s headers=%+v", resp, resp.Body, resp.Header)
+	}
+	if len(sink.Metrics) != 1 || sink.Metrics[0].PresetID != small.ID || sink.Metrics[0].NodeID != "owner-small" {
+		t.Fatalf("metrics = %+v", sink.Metrics)
 	}
 }
 
@@ -564,6 +701,31 @@ func TestRouterRejectsUnknownPresetProviderProfile(t *testing.T) {
 	}
 	_, err = router.Route(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), `unknown provider profile "missing"`) {
+		t.Fatalf("Route err = %v", err)
+	}
+}
+
+func TestRouterRejectsModelGroupWithIncompatibleProviderProfiles(t *testing.T) {
+	openai := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-openai"
+		p.ModelRef = "vision-model"
+		p.Aliases = []string{"vision"}
+		p.Backend = domain.BackendVLLM
+	})
+	openvino := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-openvino"
+		p.ModelRef = "vision-model"
+		p.Aliases = []string{"vision"}
+		p.Backend = domain.BackendOpenVINO
+	})
+	router := newTestRouter(openai, domain.FleetSnapshot{}, staticResolver{}, openvino)
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"vision","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	_, err = router.Route(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), `maps to incompatible provider profiles`) {
 		t.Fatalf("Route err = %v", err)
 	}
 }
@@ -1435,6 +1597,45 @@ func TestRouterUtilityFallbacks(t *testing.T) {
 	}
 }
 
+func TestRouteDiagnosticsClassifiesToolModesAndVLLMToolConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "invalid", body: `{`, want: "none"},
+		{name: "none", body: `{"model":"m"}`, want: "none"},
+		{name: "tools default auto", body: `{"tools":[{"type":"function","function":{"name":"lookup"}}]}`, want: "auto_default"},
+		{name: "string", body: `{"tool_choice":"required"}`, want: "required"},
+		{name: "empty string", body: `{"tool_choice":" "}`, want: "none"},
+		{name: "function object", body: `{"tool_choice":{"type":"function","function":{"name":"lookup"}}}`, want: "function:lookup"},
+		{name: "typed object", body: `{"tool_choice":{"type":"required"}}`, want: "required"},
+		{name: "custom object", body: `{"tool_choice":{"unexpected":true}}`, want: "custom"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := toolChoiceMode(translate.IngressRequest{Body: []byte(tc.body)})
+			if got != tc.want {
+				t.Fatalf("toolChoiceMode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.Backend = domain.BackendVLLM
+		p.LaunchArgs = []string{"--tool-call-parser", "hermes", "--enable-auto-tool-choice"}
+	})
+	parser, auto := vllmToolConfig(preset)
+	if !parser || !auto {
+		t.Fatalf("vllmToolConfig parser=%t auto=%t", parser, auto)
+	}
+	preset.LaunchArgs = []string{"--tool-call-parser=qwen3"}
+	parser, auto = vllmToolConfig(preset)
+	if !parser || auto {
+		t.Fatalf("vllmToolConfig equals parser=%t auto=%t", parser, auto)
+	}
+}
+
 func TestPresetRegistryResolvesAliases(t *testing.T) {
 	preset := fixtures.MakePreset(
 		fixtures.WithPresetID("preset-a"),
@@ -1833,6 +2034,43 @@ func TestRouterDefaultsJobContextToEffectivePresetContext(t *testing.T) {
 	}
 }
 
+func TestRouterLeavesModelGroupContextForScheduler(t *testing.T) {
+	large := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-large"
+		p.ModelRef = "vision-model"
+		p.Aliases = []string{"vision"}
+		p.Backend = domain.BackendVLLM
+		p.ContextLength = 49152
+		p.LaunchArgs = []string{"--max-model-len", "49152"}
+	})
+	small := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-small"
+		p.ModelRef = "vision-model"
+		p.Aliases = []string{"vision"}
+		p.Backend = domain.BackendVLLM
+		p.ContextLength = 16384
+		p.LaunchArgs = []string{"--max-model-len", "16384"}
+	})
+	router := &Router{Presets: NewPresetRegistry(large, small)}
+
+	job := router.jobFromIngress(translate.IngressRequest{
+		Model: "vision",
+		Kind:  translate.KindOpenAIChat,
+	}, 1)
+	if job.ContextRequest != 0 {
+		t.Fatalf("context request = %d, want scheduler default", job.ContextRequest)
+	}
+
+	job = router.jobFromIngress(translate.IngressRequest{
+		Model:          "vision",
+		Kind:           translate.KindOpenAIChat,
+		ContextRequest: 32768,
+	}, 2)
+	if job.ContextRequest != 32768 {
+		t.Fatalf("explicit context request = %d, want 32768", job.ContextRequest)
+	}
+}
+
 func TestRouterColdStreamPrependsLoadingState(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1922,6 +2160,67 @@ func TestRouterStreamColdLoadWritesLoadingReadyAndChunks(t *testing.T) {
 	last := sink.SamplesOut[len(sink.SamplesOut)-1]
 	if last.SessionID == "" || last.BytesOut == 0 || last.InstanceID != inst.ID || last.NodeID != node.ID {
 		t.Fatalf("complete sample = %+v", last)
+	}
+}
+
+func TestRouterStreamUsesSelectedPresetForSharedModel(t *testing.T) {
+	large := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-large"
+		p.ModelRef = "vision-model"
+		p.Aliases = []string{"vision"}
+		p.Backend = domain.BackendVLLM
+		p.ContextLength = 49152
+		p.NodeID = "owner-large"
+	})
+	small := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-small"
+		p.ModelRef = "vision-model"
+		p.Aliases = []string{"vision"}
+		p.Backend = domain.BackendVLLM
+		p.ContextLength = 16384
+		p.NodeID = "owner-small"
+	})
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	inst := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst-small"),
+		fixtures.WithInstancePreset(small.ID),
+		fixtures.OnNode("owner-small"),
+	)
+	inst.Addr = upstream
+	largeNode := fixtures.MakeNode(fixtures.WithNodeID("owner-large"), fixtures.WithVRAM(65536), fixtures.WithMaxUtil(1))
+	smallNode := fixtures.MakeNode(fixtures.WithNodeID("owner-small"), fixtures.WithVRAM(32768), fixtures.WithMaxUtil(1))
+	router := newTestRouter(large, domain.FleetSnapshot{
+		Nodes:     []domain.Node{largeNode, smallNode},
+		Instances: []domain.ModelInstance{inst},
+	}, staticResolver{agents: map[string]ports.NodeAgent{"owner-small": mocks.NewNodeAgent(smallNode)}}, small)
+	sink := &mocks.TelemetrySink{}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"vision","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	if err := router.Stream(context.Background(), req, rec); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"content":"ok"`) {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get(HeaderNode) != "owner-small" || rec.Header().Get(HeaderBackend) != string(domain.BackendVLLM) {
+		t.Fatalf("headers = %+v", rec.Header())
+	}
+	last := sink.SamplesOut[len(sink.SamplesOut)-1]
+	if last.PresetID != small.ID || last.NodeID != "owner-small" {
+		t.Fatalf("stream telemetry = %+v", sink.SamplesOut)
 	}
 }
 

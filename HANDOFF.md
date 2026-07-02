@@ -204,11 +204,14 @@ process but did not reach readiness in an operator-useful window; the smaller
 envelope reached both cold-load and warm-instance canaries. Page-limited image
 canaries still prove only route transport and provider readiness; full-document
 OCR readiness requires either a client run that covers the whole document or
-explicit page chunking that covers every page. Current gateway alias resolution
-is still first-match for model aliases, so multiple proven owners for the same
-consumer model name are not yet an autonomous multi-owner allocation class.
-Fixing that catalog/scheduler contract is the next step before consumers can
-rely on one model alias to spread vision/OCR work across all fitting owners.
+explicit page chunking that covers every page. Repo-local placement now treats
+a shared consumer model alias as a candidate set instead of first-match only:
+exact preset IDs still pin a single preset, while a model alias can consider
+multiple owner envelopes, drop undersized owners for explicit context requests,
+and report telemetry for the selected preset. Live cross-owner distribution
+still needs the deployed gateway/config to carry the same model group and a
+light activation proof before consumers can rely on one model alias to spread
+vision/OCR work across all fitting owners.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
 work, not transparently resumed streams. Streaming queued provider replay
@@ -230,11 +233,11 @@ remains a separate product gate.
 
 - Keep improving generic route discovery, preflight, debug, and optimization
   evidence surfaces.
-- Make same-model multi-owner route classes explicit in the catalog/scheduler
-  contract instead of relying on first-match aliases. Once a model/engine class
-  is allowed by standing policy, job-time placement should inspect live owner
-  fit/readiness and allocate or rearrange capacity automatically; ordinary jobs
-  should not require a per-run operator plan.
+- Extend same-model multi-owner route classes from repo-local placement into
+  live route discovery, certification, and pressure proof. Once a model/engine
+  class is allowed by standing policy, job-time placement should inspect live
+  owner fit/readiness and allocate or rearrange capacity automatically;
+  ordinary jobs should not require a per-run operator plan.
 - Keep large-context/tool/vision route certification distinct from low-context
   or page-limited smoke tests. A smoke proves transport, not workload readiness.
 - Keep the Mac service activation path documented as generic commands with

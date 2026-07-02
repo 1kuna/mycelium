@@ -78,13 +78,15 @@ handoff.
   client proof or explicit all-page chunking. A page-limited or single-image
   canary proves OpenAI-compatible vision transport and provider readiness, not
   complete document coverage.
-- 2026-07-02: Same-model multi-owner vision/OCR allocation is not yet
-  autonomous. Two owners can be independently certified for the same consumer
-  model class, but the current gateway/scheduler preset lookup resolves a model
-  alias to the first matching preset. That makes a single normal gateway model
-  name effectively single-owner until Mycelium grows an explicit multi-owner
-  route class or equivalent scheduler contract. Do not present per-owner
-  certification as automatic cross-owner distribution.
+- 2026-07-02: Same-model multi-owner vision/OCR allocation is repo-local but
+  not live-proven. Two owners can be independently certified for the same
+  consumer model class, and the scheduler/gateway path now treats a model alias
+  as multiple preset envelopes instead of first-match only. The deployed
+  gateway/config still must carry that model group, prove route discovery, and
+  run a light cross-owner placement proof before consumers can rely on one
+  normal model name for automatic distribution. Do not present per-owner
+  certification as live cross-owner distribution until that activation proof
+  exists.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish
