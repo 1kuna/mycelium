@@ -532,6 +532,7 @@ type workloadProviderExecutor interface {
 
 type workloadStore interface {
 	Job(ctx context.Context, id string) (domain.Job, error)
+	SaveJob(ctx context.Context, job domain.Job) error
 	SaveWorkloadResultBody(ctx context.Context, result domain.WorkloadResultBody) error
 	WorkloadResultBody(ctx context.Context, jobID string) (domain.WorkloadResultBody, error)
 }
@@ -670,6 +671,10 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 		if finish {
 			id = strings.TrimSuffix(id, "/finish")
 		}
+		cancelWorkload := strings.HasSuffix(id, "/cancel")
+		if cancelWorkload {
+			id = strings.TrimSuffix(id, "/cancel")
+		}
 		execute := strings.HasSuffix(id, "/execute")
 		if execute {
 			id = strings.TrimSuffix(id, "/execute")
@@ -682,7 +687,7 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("workload id is required"))
 			return
 		}
-		if !finish && !execute && !resultBody && r.Method != http.MethodGet {
+		if !finish && !cancelWorkload && !execute && !resultBody && r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -797,11 +802,62 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			}
 			return
 		}
+		if cancelWorkload {
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			var req workload.CancelRequest
+			if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
+				if err := decodePeerRPCJSON(r, &req); err != nil {
+					writePeerRPCError(w, http.StatusBadRequest, err)
+					return
+				}
+			}
+			job, err = cancelWorkloadJob(r.Context(), runtime, store, job, req)
+			if err != nil {
+				writePeerRPCError(w, http.StatusConflict, err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(workload.FinishResponse{Job: job, Result: job.Result, Execution: workloadExecutionEvidence(r.Context(), store, job)}); err != nil {
+				panic(err)
+			}
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(workload.StatusResponse{Job: job, Result: job.Result, Payload: workloadPayloadEvidence(r.Context(), store, job), Execution: workloadExecutionEvidence(r.Context(), store, job)}); err != nil {
 			panic(err)
 		}
 	})
+}
+
+func cancelWorkloadJob(ctx context.Context, runtime workloadRuntime, store workloadStore, job domain.Job, req workload.CancelRequest) (domain.Job, error) {
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		reason = "canceled by operator"
+	}
+	if lease, err := workloadLease(job); err == nil {
+		if err := runtime.FinishJob(ctx, job, lease, fmt.Errorf("%s", reason)); err != nil {
+			return domain.Job{}, err
+		}
+		if latest, readErr := store.Job(ctx, job.ID); readErr == nil {
+			return latest, nil
+		}
+		return job, nil
+	}
+	job.Status = domain.JobFailed
+	job.Error = reason
+	if job.Result == nil {
+		job.Result = &domain.JobResult{}
+	}
+	job.Result.Source = "operator_cancel"
+	job.Result.ResultRedacted = true
+	job.Result.Terminal = true
+	if err := store.SaveJob(ctx, job); err != nil {
+		return domain.Job{}, err
+	}
+	return job, nil
 }
 
 func attachWorkloadResultArtifact(result *domain.JobResult, req workload.FinishRequest) error {

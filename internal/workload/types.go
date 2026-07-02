@@ -98,6 +98,10 @@ type FinishRequest struct {
 	ResultBody      []byte `json:"result_body,omitempty"`
 }
 
+type CancelRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
 type FinishResponse struct {
 	Job       domain.Job        `json:"job"`
 	Result    *domain.JobResult `json:"result,omitempty"`

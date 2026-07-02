@@ -622,6 +622,22 @@ func TestRunJobsAdmitAndStatusErrorBranches(t *testing.T) {
 	if err == nil {
 		t.Fatal("bad finish response accepted")
 	}
+	err = runJobsCancel(context.Background(), nil, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--url") {
+		t.Fatalf("cancel missing url err = %v", err)
+	}
+	err = runJobsCancel(context.Background(), []string{"--url", "http://peer.test"}, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--id") {
+		t.Fatalf("cancel missing id err = %v", err)
+	}
+	err = runJobsCancel(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a"}, errorClient)
+	if err == nil || !strings.Contains(err.Error(), "409") {
+		t.Fatalf("cancel error response err = %v", err)
+	}
+	err = runJobsCancel(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a"}, badResponseClient)
+	if err == nil {
+		t.Fatal("bad cancel response accepted")
+	}
 	err = runJobsResult(context.Background(), nil, http.DefaultClient)
 	if err == nil || !strings.Contains(err.Error(), "--url") {
 		t.Fatalf("result missing url err = %v", err)
@@ -637,6 +653,43 @@ func TestRunJobsAdmitAndStatusErrorBranches(t *testing.T) {
 	err = runJobsResult(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a", "--out", filepath.Join(t.TempDir(), "result.json")}, errorClient)
 	if err == nil || !strings.Contains(err.Error(), "409") {
 		t.Fatalf("result error response err = %v", err)
+	}
+}
+
+func TestRunJobsCancelPostsRedactedReason(t *testing.T) {
+	var gotPath, gotAuth, gotReason string
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		var req workload.CancelRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode cancel: %v", err)
+		}
+		gotReason = req.Reason
+		result := &domain.JobResult{Source: "operator_cancel", Terminal: true, ResultRedacted: true}
+		_ = json.NewEncoder(w).Encode(workload.FinishResponse{
+			Job:       domain.Job{ID: "job-a", Model: "model-a", Status: domain.JobFailed, Error: req.Reason, Result: result},
+			Result:    result,
+			Execution: workload.ExecutionEvidence{State: "terminal_manifest_only", ResultArtifact: true},
+		})
+	}))
+	var err error
+	output := captureStdout(t, func() {
+		err = runJobsCancel(context.Background(), []string{
+			"--url", "http://peer.test",
+			"--rpc-token", "rpc-secret",
+			"--id", "job-a",
+			"--reason", "stale cleanup",
+		}, client)
+	})
+	if err != nil {
+		t.Fatalf("jobs cancel: %v", err)
+	}
+	if gotPath != "/workloads/job-a/cancel" || gotAuth != "Bearer rpc-secret" || gotReason != "stale cleanup" {
+		t.Fatalf("request path=%s auth=%s reason=%s", gotPath, gotAuth, gotReason)
+	}
+	if !strings.Contains(output, "workload\tjob-a\tstatus=failed") || !strings.Contains(output, "terminal=true") || strings.Contains(output, "messages") {
+		t.Fatalf("output = %q", output)
 	}
 }
 
@@ -879,7 +932,6 @@ func TestRunModelsPrewarmAllFittingTargetsDistinctOwners(t *testing.T) {
 			"models", "scale",
 			"--config", configPath,
 			"--url", "http://gateway.test",
-			"--rpc-token", "rpc-secret",
 			"--model", "vision",
 			"--all-fitting",
 		}, client)

@@ -4187,6 +4187,7 @@ func TestWorkloadHTTPErrorBranches(t *testing.T) {
 		{name: "bad finish method", method: http.MethodGet, path: "/workloads/job-a/finish", auth: true, want: http.StatusMethodNotAllowed},
 		{name: "finish without scheduler evidence", method: http.MethodPost, path: "/workloads/job-empty/finish", auth: true, want: http.StatusConflict},
 		{name: "missing finish", method: http.MethodPost, path: "/workloads/missing/finish", auth: true, want: http.StatusNotFound},
+		{name: "bad cancel method", method: http.MethodGet, path: "/workloads/job-empty/cancel", auth: true, want: http.StatusMethodNotAllowed},
 		{name: "bad execute method", method: http.MethodGet, path: "/workloads/job-a/execute", auth: true, want: http.StatusMethodNotAllowed},
 		{name: "execute without provider executor", method: http.MethodPost, path: "/workloads/job-a/execute", auth: true, want: http.StatusConflict},
 		{name: "bad drain execute flag", method: http.MethodPost, path: "/workloads/drain?execute=maybe", auth: true, want: http.StatusBadRequest},
@@ -4202,6 +4203,41 @@ func TestWorkloadHTTPErrorBranches(t *testing.T) {
 		if rec.Code != tc.want {
 			t.Fatalf("%s status = %d body=%s", tc.name, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestWorkloadHTTPCancelTerminalizesJobWithoutLeaseEvidence(t *testing.T) {
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	if err := store.SaveJob(context.Background(), domain.Job{
+		ID:      "job-queued",
+		Model:   "model-a",
+		Project: "project-a",
+		Status:  domain.JobQueued,
+	}); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store}, store, "rpc-secret", "peer-a", nil)
+	req := httptest.NewRequest(http.MethodPost, "/workloads/job-queued/cancel", strings.NewReader(`{"reason":"stale operator cleanup"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out workload.FinishResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode cancel response: %v", err)
+	}
+	if out.Job.Status != domain.JobFailed || out.Job.Error != "stale operator cleanup" || out.Result == nil || out.Result.Source != "operator_cancel" || !out.Result.Terminal {
+		t.Fatalf("cancel response = %+v", out)
+	}
+	latest, err := store.Job(context.Background(), "job-queued")
+	if err != nil {
+		t.Fatalf("latest job: %v", err)
+	}
+	if latest.Status != domain.JobFailed || latest.Result == nil || latest.Result.Source != "operator_cancel" {
+		t.Fatalf("stored job = %+v", latest)
 	}
 }
 
@@ -5742,6 +5778,10 @@ type workloadStatusOnlyStore struct {
 
 func (s workloadStatusOnlyStore) Job(context.Context, string) (domain.Job, error) {
 	return s.job, nil
+}
+
+func (s workloadStatusOnlyStore) SaveJob(context.Context, domain.Job) error {
+	return nil
 }
 
 func (s workloadStatusOnlyStore) SaveWorkloadResultBody(context.Context, domain.WorkloadResultBody) error {
