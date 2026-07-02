@@ -406,6 +406,74 @@ func TestRunReconcileDrainPlansArtifactStaging(t *testing.T) {
 	}
 }
 
+func TestRunReconcileDrainVerifiesEngineReadiness(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	preset := testPreset("tiny")
+	preset.Backend = domain.BackendVLLM
+	if err := store.SavePreset(context.Background(), preset); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	if err := store.SaveNode(context.Background(), domain.Node{ID: "node-a", Status: domain.NodeReady, OS: "linux", Arch: "amd64", Accelerators: []domain.Accelerator{{Vendor: "nvidia"}}}); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+	if err := store.SaveEngineProfile(context.Background(), domain.EngineProfile{
+		ID:          "engine-vllm",
+		Backend:     domain.BackendVLLM,
+		DisplayName: "vLLM",
+		Version:     "1",
+		CompatibilityKey: domain.CompatibilityKey{
+			OS:                 "linux",
+			CPUArch:            "amd64",
+			AcceleratorVendor:  "nvidia",
+			AcceleratorRuntime: "cuda",
+			EngineDistribution: "vLLM",
+			EngineVersion:      "1",
+			Backend:            domain.BackendVLLM,
+		},
+		Ready: true,
+	}); err != nil {
+		t.Fatalf("SaveEngineProfile: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	decisionPath := filepath.Join(dir, "decision.json")
+	decision := domain.PlacementDecision{
+		JobID:  "job-engine",
+		Action: domain.ActionQueued,
+		Preset: domain.Preset{ID: preset.ID, ModelRef: preset.ModelRef},
+		Trace: []domain.TraceStep{{
+			Step: "filter",
+			Data: map[string]any{"dropped": map[string]string{"node-a": "label." + domain.LabelPeerBackends}},
+		}},
+	}
+	data, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatalf("marshal decision: %v", err)
+	}
+	if err := os.WriteFile(decisionPath, data, 0o600); err != nil {
+		t.Fatalf("write decision: %v", err)
+	}
+	if err := Run(context.Background(), []string{"reconcile", "placement", "--decision-file", decisionPath, "--db", dbPath, "--save"}); err != nil {
+		t.Fatalf("reconcile placement save: %v", err)
+	}
+	output := captureStdout(t, func() {
+		err = Run(context.Background(), []string{"reconcile", "drain", "--db", dbPath, "--job", "job-engine"})
+	})
+	if err != nil {
+		t.Fatalf("reconcile drain: %v", err)
+	}
+	if !strings.Contains(output, "kind=verify_engine_readiness\tstatus=done\taction=verify_engine_readiness") {
+		t.Fatalf("drain output = %q", output)
+	}
+}
+
 func TestDecodePlacementDecisionAcceptsJobAndWrapper(t *testing.T) {
 	decision := domain.PlacementDecision{JobID: "job-a", Action: domain.ActionLoadedNew}
 	jobData, err := json.Marshal(domain.Job{ID: "job-a", Result: &domain.JobResult{Decision: decision}})
