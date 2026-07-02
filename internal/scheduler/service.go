@@ -561,7 +561,9 @@ func (s *Service) releaseOwnerLease(ctx context.Context, lease domain.Lease) err
 		return err
 	}
 	if err := owner.Release(ctx, lease.ID); err != nil {
-		return err
+		if !releaseErrMeansAlreadyReleased(err) {
+			return err
+		}
 	}
 	return s.Store.DeleteLease(ctx, lease.ID)
 }
@@ -572,6 +574,14 @@ func releaseErrAllowsOwnerFallback(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "not claimed by this coordinator") || strings.Contains(msg, "has no committed lease")
+}
+
+func releaseErrMeansAlreadyReleased(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "unknown lease")
 }
 
 func (s *Service) ExpireLeases(ctx context.Context) (int, error) {
