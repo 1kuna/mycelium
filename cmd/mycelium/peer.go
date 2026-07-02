@@ -719,13 +719,13 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 				job = latest
 			}
 			w.Header().Set("Content-Type", "application/json")
-			if err := json.NewEncoder(w).Encode(workload.FinishResponse{Job: job, Result: job.Result}); err != nil {
+			if err := json.NewEncoder(w).Encode(workload.FinishResponse{Job: job, Result: job.Result, Execution: workloadExecutionEvidence(r.Context(), store, job)}); err != nil {
 				panic(err)
 			}
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(workload.StatusResponse{Job: job, Result: job.Result, Payload: workloadPayloadEvidence(r.Context(), store, job)}); err != nil {
+		if err := json.NewEncoder(w).Encode(workload.StatusResponse{Job: job, Result: job.Result, Payload: workloadPayloadEvidence(r.Context(), store, job), Execution: workloadExecutionEvidence(r.Context(), store, job)}); err != nil {
 			panic(err)
 		}
 	})
@@ -849,7 +849,41 @@ func workloadResponse(ctx context.Context, store workloadStore, job domain.Job, 
 		PayloadBytes:  payloadBytes,
 		PayloadStored: payloadStored,
 		Payload:       workloadPayloadEvidence(ctx, store, job),
+		Execution:     workloadExecutionEvidence(ctx, store, job),
 	}
+}
+
+func workloadExecutionEvidence(ctx context.Context, store workloadStore, job domain.Job) workload.ExecutionEvidence {
+	out := workload.ExecutionEvidence{AutomaticProviderOutputCapture: false}
+	if job.Result != nil {
+		out.ResultArtifact = job.Result.ResultArtifact != ""
+		out.ResultBytes = job.Result.ResultBytes
+		out.ResultSHA256 = job.Result.ResultSHA256 != ""
+	}
+	switch job.Status {
+	case domain.JobQueued:
+		out.State = "queued_not_executed"
+	case domain.JobRunning:
+		out.State = "running_needs_finish"
+	case domain.JobDone, domain.JobFailed:
+		out.State = "terminal_no_result"
+		if job.Result != nil && job.Result.ResultArtifact != "" {
+			out.State = "terminal_result_manifest_only"
+			body, err := workloadResultBody(ctx, store, job)
+			if err == nil {
+				out.State = "terminal_result_replayable"
+				out.ResultReplayable = true
+				out.ResultBodyStored = true
+				out.ResultBytes = body.Bytes
+				out.ResultSHA256 = body.SHA256 != ""
+			} else {
+				out.Error = "result_body_unavailable"
+			}
+		}
+	default:
+		out.State = "job_status_" + string(job.Status)
+	}
+	return out
 }
 
 func workloadPayloadEvidence(ctx context.Context, store workloadStore, job domain.Job) workload.PayloadEvidence {

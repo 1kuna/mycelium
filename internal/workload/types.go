@@ -21,12 +21,14 @@ type AdmissionResponse struct {
 	PayloadBytes  int                      `json:"payload_bytes,omitempty"`
 	PayloadStored bool                     `json:"payload_stored,omitempty"`
 	Payload       PayloadEvidence          `json:"payload_evidence,omitempty"`
+	Execution     ExecutionEvidence        `json:"execution_evidence,omitempty"`
 }
 
 type StatusResponse struct {
-	Job     domain.Job        `json:"job"`
-	Result  *domain.JobResult `json:"result,omitempty"`
-	Payload PayloadEvidence   `json:"payload_evidence,omitempty"`
+	Job       domain.Job        `json:"job"`
+	Result    *domain.JobResult `json:"result,omitempty"`
+	Payload   PayloadEvidence   `json:"payload_evidence,omitempty"`
+	Execution ExecutionEvidence `json:"execution_evidence,omitempty"`
 }
 
 type PayloadEvidence struct {
@@ -35,6 +37,17 @@ type PayloadEvidence struct {
 	Redacted   bool   `json:"redacted,omitempty"`
 	Bytes      int    `json:"bytes,omitempty"`
 	Error      string `json:"error,omitempty"`
+}
+
+type ExecutionEvidence struct {
+	State                          string `json:"state,omitempty"`
+	AutomaticProviderOutputCapture bool   `json:"automatic_provider_output_capture"`
+	ResultReplayable               bool   `json:"result_replayable,omitempty"`
+	ResultBodyStored               bool   `json:"result_body_stored,omitempty"`
+	ResultArtifact                 bool   `json:"result_artifact,omitempty"`
+	ResultBytes                    int    `json:"result_bytes,omitempty"`
+	ResultSHA256                   bool   `json:"result_sha256,omitempty"`
+	Error                          string `json:"error,omitempty"`
 }
 
 type FinishRequest struct {
@@ -47,8 +60,9 @@ type FinishRequest struct {
 }
 
 type FinishResponse struct {
-	Job    domain.Job        `json:"job"`
-	Result *domain.JobResult `json:"result,omitempty"`
+	Job       domain.Job        `json:"job"`
+	Result    *domain.JobResult `json:"result,omitempty"`
+	Execution ExecutionEvidence `json:"execution_evidence,omitempty"`
 }
 
 type DrainResponse struct {

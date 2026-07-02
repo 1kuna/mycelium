@@ -4066,6 +4066,9 @@ func TestWorkloadHTTPAdmitsQueuedIntentAndReportsStatus(t *testing.T) {
 	if !resp.Queued || resp.Job.Status != domain.JobQueued || resp.Job.ContextRequest != 8192 || resp.PayloadBytes == 0 || !resp.PayloadStored {
 		t.Fatalf("admit response = %+v", resp)
 	}
+	if resp.Execution.State != "queued_not_executed" || resp.Execution.AutomaticProviderOutputCapture || resp.Execution.ResultReplayable {
+		t.Fatalf("admit execution evidence = %+v", resp.Execution)
+	}
 	if strings.Contains(rec.Body.String(), "input_bytes") {
 		t.Fatalf("admit response leaked payload: %s", rec.Body.String())
 	}
@@ -4234,6 +4237,9 @@ func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
 	if queuedStatus.Payload.State != "registry_payload_replayable" || !queuedStatus.Payload.Replayable || queuedStatus.Payload.Bytes == 0 {
 		t.Fatalf("queued payload evidence = %+v", queuedStatus.Payload)
 	}
+	if queuedStatus.Execution.State != "queued_not_executed" || queuedStatus.Execution.AutomaticProviderOutputCapture || queuedStatus.Execution.ResultReplayable {
+		t.Fatalf("queued execution evidence = %+v", queuedStatus.Execution)
+	}
 
 	placer.ready = true
 	drain := httptest.NewRecorder()
@@ -4249,6 +4255,9 @@ func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
 	}
 	if len(drained.Results) != 1 || drained.Results[0].Job.Status != domain.JobRunning || drained.Results[0].Result == nil || drained.Results[0].Result.NodeID != node.ID || drained.Results[0].Result.LeaseID == "" {
 		t.Fatalf("drained = %+v", drained)
+	}
+	if drained.Results[0].Execution.State != "running_needs_finish" || drained.Results[0].Execution.AutomaticProviderOutputCapture || drained.Results[0].Execution.ResultReplayable {
+		t.Fatalf("drained execution evidence = %+v", drained.Results[0].Execution)
 	}
 	if len(agent.Loaded) != 1 || len(admission.Requests) == 0 {
 		t.Fatalf("agent loaded=%+v admission=%+v", agent.Loaded, admission.Requests)
@@ -4289,6 +4298,9 @@ func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
 	}
 	if out.Job.Status != domain.JobDone || out.Result == nil || !out.Result.Terminal || !out.Result.ResultRedacted || out.Result.PayloadBytes == 0 {
 		t.Fatalf("terminal status = %+v", out)
+	}
+	if out.Execution.State != "terminal_no_result" || out.Execution.AutomaticProviderOutputCapture || out.Execution.ResultReplayable {
+		t.Fatalf("terminal execution evidence = %+v", out.Execution)
 	}
 }
 
@@ -4435,6 +4447,9 @@ func TestWorkloadHTTPDrainsQueuedWorkAcrossOwnersAndReclaimsCapacity(t *testing.
 	if finished.Result.ResultMediaType != "application/json" || finished.Result.ResultBytes != 42 || finished.Result.ResultSHA256 != digest {
 		t.Fatalf("finished result manifest = %+v", finished.Result)
 	}
+	if finished.Execution.State != "terminal_result_manifest_only" || finished.Execution.AutomaticProviderOutputCapture || finished.Execution.ResultReplayable || !finished.Execution.ResultArtifact || finished.Execution.ResultBytes != 42 || finished.Execution.Error == "" {
+		t.Fatalf("finished execution evidence = %+v", finished.Execution)
+	}
 	leases, err = store.ListLeases(ctx)
 	if err != nil {
 		t.Fatalf("ListLeases after first finish: %v", err)
@@ -4504,6 +4519,9 @@ func TestWorkloadHTTPStoresAndRetrievesExplicitResultBody(t *testing.T) {
 	if finished.Result == nil || finished.Result.ResultArtifact != "stored://workload/job-a" || finished.Result.ResultSHA256 != digest {
 		t.Fatalf("finished = %+v", finished)
 	}
+	if finished.Execution.State != "terminal_result_replayable" || finished.Execution.AutomaticProviderOutputCapture || !finished.Execution.ResultReplayable || !finished.Execution.ResultBodyStored {
+		t.Fatalf("finished execution evidence = %+v", finished.Execution)
+	}
 
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/workloads/job-a", nil)
@@ -4511,6 +4529,13 @@ func TestWorkloadHTTPStoresAndRetrievesExplicitResultBody(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "answer") {
 		t.Fatalf("status leaked result body = %d %s", rec.Code, rec.Body.String())
+	}
+	var status workload.StatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if status.Execution.State != "terminal_result_replayable" || status.Execution.AutomaticProviderOutputCapture || !status.Execution.ResultReplayable || !status.Execution.ResultBodyStored {
+		t.Fatalf("status execution evidence = %+v", status.Execution)
 	}
 
 	rec = httptest.NewRecorder()

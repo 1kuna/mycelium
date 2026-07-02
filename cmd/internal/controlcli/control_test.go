@@ -324,6 +324,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 				Queued:        true,
 				PayloadBytes:  len(req.Payload),
 				PayloadStored: true,
+				Execution:     workload.ExecutionEvidence{State: "queued_not_executed"},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/workloads/job-a":
 			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultRedacted: true}
@@ -338,7 +339,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 				Preemption:          domain.PreemptSoft,
 				Status:              domain.JobQueued,
 				Result:              result,
-			}, Result: result})
+			}, Result: result, Execution: workload.ExecutionEvidence{State: "queued_not_executed"}})
 		case r.Method == http.MethodPost && r.URL.Path == "/workloads/drain" && r.URL.Query().Get("limit") == "2":
 			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultRedacted: true}
 			_ = json.NewEncoder(w).Encode(workload.DrainResponse{Results: []workload.AdmissionResponse{{
@@ -347,6 +348,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 				Result:        result,
 				PayloadBytes:  len(intent.Payload),
 				PayloadStored: true,
+				Execution:     workload.ExecutionEvidence{State: "running_needs_finish"},
 			}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/workloads/job-a/finish":
 			var req workload.FinishRequest
@@ -360,7 +362,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 				t.Fatalf("finish result manifest = %+v", req)
 			}
 			result := &domain.JobResult{Source: "scheduler", Action: domain.ActionLoadedNew, NodeID: "node-a", PresetID: "preset-a", LeaseID: "lease-a", PayloadBytes: len(intent.Payload), PayloadStored: true, PayloadRedacted: true, ResultArtifact: req.ResultArtifact, ResultMediaType: req.ResultMediaType, ResultBytes: req.ResultBytes, ResultSHA256: req.ResultSHA256, ResultRedacted: true, Terminal: true}
-			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: domain.Job{ID: "job-a", Model: "model-a", PresetID: "preset-a", Project: "project-a", Status: domain.JobDone, Result: result}, Result: result})
+			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: domain.Job{ID: "job-a", Model: "model-a", PresetID: "preset-a", Project: "project-a", Status: domain.JobDone, Result: result}, Result: result, Execution: workload.ExecutionEvidence{State: "terminal_result_replayable", ResultReplayable: true, ResultBodyStored: true, ResultArtifact: true, ResultBytes: len(`{"answer":"ok"}`), ResultSHA256: true}})
 		case r.Method == http.MethodGet && r.URL.Path == "/workloads/job-a/result":
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Myc-Result-SHA256", sha256Hex([]byte(`{"answer":"ok"}`)))
@@ -376,7 +378,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	if err != nil {
 		t.Fatalf("jobs admit: %v", err)
 	}
-	if !strings.Contains(admitOut, "workload\tjob-a\tstatus=queued\tqueued=true") || strings.Contains(admitOut, "input_bytes") {
+	if !strings.Contains(admitOut, "workload\tjob-a\tstatus=queued\tqueued=true") || !strings.Contains(admitOut, "execution_state=queued_not_executed") || !strings.Contains(admitOut, "provider_output_capture=false") || strings.Contains(admitOut, "input_bytes") {
 		t.Fatalf("admit output = %q", admitOut)
 	}
 	statusOut := captureStdout(t, func() {
@@ -385,7 +387,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	if err != nil {
 		t.Fatalf("jobs status: %v", err)
 	}
-	if !strings.Contains(statusOut, "context=8192\tconcurrency=2\tpreemption=soft") || strings.Contains(statusOut, "input_bytes") {
+	if !strings.Contains(statusOut, "context=8192\tconcurrency=2\tpreemption=soft") || !strings.Contains(statusOut, "execution_state=queued_not_executed") || !strings.Contains(statusOut, "result_replayable=false") || strings.Contains(statusOut, "input_bytes") {
 		t.Fatalf("status output = %q", statusOut)
 	}
 	drainOut := captureStdout(t, func() {
@@ -394,7 +396,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	if err != nil {
 		t.Fatalf("jobs drain: %v", err)
 	}
-	if !strings.Contains(drainOut, "drained\t1") || !strings.Contains(drainOut, "node=node-a") || strings.Contains(drainOut, "input_bytes") {
+	if !strings.Contains(drainOut, "drained\t1") || !strings.Contains(drainOut, "node=node-a") || !strings.Contains(drainOut, "execution_state=running_needs_finish") || strings.Contains(drainOut, "input_bytes") {
 		t.Fatalf("drain output = %q", drainOut)
 	}
 	resultFile := filepath.Join(dir, "result.json")
@@ -407,7 +409,7 @@ func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T)
 	if err != nil {
 		t.Fatalf("jobs finish: %v", err)
 	}
-	if !strings.Contains(finishOut, "status=done") || !strings.Contains(finishOut, "terminal=true") || !strings.Contains(finishOut, "result_artifact=stored://workload/job-a") || !strings.Contains(finishOut, "result_bytes=15") || strings.Contains(finishOut, "input_bytes") || strings.Contains(finishOut, "answer") {
+	if !strings.Contains(finishOut, "status=done") || !strings.Contains(finishOut, "terminal=true") || !strings.Contains(finishOut, "execution_state=terminal_result_replayable") || !strings.Contains(finishOut, "result_replayable=true") || !strings.Contains(finishOut, "result_artifact=stored://workload/job-a") || !strings.Contains(finishOut, "result_bytes=15") || strings.Contains(finishOut, "input_bytes") || strings.Contains(finishOut, "answer") {
 		t.Fatalf("finish output = %q", finishOut)
 	}
 	resultOutPath := filepath.Join(dir, "retrieved.json")

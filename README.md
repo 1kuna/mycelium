@@ -571,17 +571,20 @@ myce jobs status --url <peer-url> --rpc-token <token> --id <job-id> --json
 ```
 
 The workload status surface records scheduler/owner/lease evidence plus
-payload replayability classification and a redacted result artifact manifest:
-reference, media type, byte count, and digest. `payload_state` distinguishes a
-registry-replayable payload from runtime-local, redacted, missing, or unreadable
-payload evidence. The commands do not print the queued payload or raw
-completion. When an operator or runtime finishes a workload with
-`--result-file`, Mycelium stores those result bytes in the private control store
-and `myce jobs result` retrieves them explicitly after verifying the stored
-manifest. Automatic provider-output capture for queued inference is still a
-separate product gate; until then, payload replayability, explicit result-body
-storage, and the artifact manifest are the durable execution/output boundaries
-operators can join to debug bundles and optimizer evidence.
+payload replayability classification, execution-state evidence, and a redacted
+result artifact manifest: reference, media type, byte count, and digest.
+`payload_state` distinguishes a registry-replayable payload from runtime-local,
+redacted, missing, or unreadable payload evidence. `execution_state` distinguishes
+queued, running, manifest-only terminal, and replayable terminal work;
+`provider_output_capture=false` is intentional until automatic provider-output
+capture exists. The commands do not print the queued payload or raw completion.
+When an operator or runtime finishes a workload with `--result-file`, Mycelium
+stores those result bytes in the private control store and `myce jobs result`
+retrieves them explicitly after verifying the stored manifest. Automatic
+provider-output capture for queued inference is still a separate product gate;
+until then, payload replayability, explicit result-body storage, and the artifact
+manifest are the durable execution/output boundaries operators can join to debug
+bundles and optimizer evidence.
 
 When a synchronous gateway request would queue instead of immediately acquiring
 an owner, the gateway returns `503 Service Unavailable` with `Retry-After`
