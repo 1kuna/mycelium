@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -43,6 +44,8 @@ import (
 	"mycelium/internal/workload"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestRunDispatchesKnownCommands(t *testing.T) {
@@ -6534,13 +6537,7 @@ func TestRunPeerServesUntilContextCanceled(t *testing.T) {
 		done <- runPeer(ctx, []string{"--config", configPath})
 	}()
 	waitForCondition(t, func() bool {
-		store, err := storesqlite.Open(dbPath)
-		if err != nil {
-			return false
-		}
-		defer store.Close()
-		_, err = store.Node(context.Background(), "peer-a")
-		return err == nil
+		return rawNodeExists(t, dbPath, "peer-a")
 	})
 	cancel()
 	stopped := false
@@ -6561,6 +6558,17 @@ func TestRunPeerServesUntilContextCanceled(t *testing.T) {
 	if !stopped {
 		t.Fatal("runPeer did not stop after context cancellation")
 	}
+}
+
+func rawNodeExists(t *testing.T, dbPath, nodeID string) bool {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout%3d5000")
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	var raw string
+	return db.QueryRowContext(context.Background(), `SELECT data FROM nodes WHERE id = ?`, nodeID).Scan(&raw) == nil
 }
 
 func TestBuildPeerGatewayWithLocalCompute(t *testing.T) {
