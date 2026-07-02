@@ -525,14 +525,18 @@ func (s *Service) FinishJob(ctx context.Context, job domain.Job, lease domain.Le
 			job.Error = ""
 			markJobResultTerminal(&job, lease, nil)
 			if err := s.Coordinator.Complete(cleanupCtx, lease.JobID); err != nil {
-				return err
+				if !releaseErrAllowsOwnerFallback(err) {
+					return err
+				}
 			}
 		} else {
 			job.Status = domain.JobFailed
 			job.Error = cause.Error()
 			markJobResultTerminal(&job, lease, cause)
 			if err := s.Coordinator.Fail(cleanupCtx, lease.JobID, cause); err != nil {
-				return err
+				if !releaseErrAllowsOwnerFallback(err) {
+					return err
+				}
 			}
 		}
 		saveErr := s.Store.SaveJob(cleanupCtx, job)

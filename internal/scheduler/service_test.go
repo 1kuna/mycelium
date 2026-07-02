@@ -2226,6 +2226,24 @@ func TestServiceCompleteFailAndReleaseLifecycleBranches(t *testing.T) {
 		t.Fatalf("finish leases=%+v coordinator=%+v", finishStore.leases, finishCoordinator.Calls)
 	}
 
+	staleStore := &runtimeStore{leases: map[string]domain.Lease{"lease-stale": {ID: "lease-stale", JobID: "job-stale", NodeID: "node-a"}}}
+	staleOwner := &mocks.AdmissionController{}
+	staleService := leaseLifecycleService(clock, staleStore)
+	staleService.Coordinator = &mocks.Coordinator{
+		CompleteErr: fmt.Errorf("job %q is not claimed by this coordinator", "job-stale"),
+		ReleaseErr:  fmt.Errorf("job %q is not claimed by this coordinator", "job-stale"),
+	}
+	staleService.Owners = staticNodes{admissions: map[string]ports.AdmissionController{"node-a": staleOwner}}
+	if err := staleService.FinishJob(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-stale")), domain.Lease{ID: "lease-stale", JobID: "job-stale", NodeID: "node-a"}, nil); err != nil {
+		t.Fatalf("FinishJob stale claim: %v", err)
+	}
+	if got := staleStore.jobs["job-stale"]; got.Status != domain.JobDone || got.Result == nil || !got.Result.Terminal {
+		t.Fatalf("stale finished job = %+v", got)
+	}
+	if _, ok := staleStore.leases["lease-stale"]; ok || strings.Join(staleOwner.Calls, ",") != "release:lease-stale" {
+		t.Fatalf("stale finish leases=%+v owner calls=%+v", staleStore.leases, staleOwner.Calls)
+	}
+
 	finishStore = &runtimeStore{leases: map[string]domain.Lease{"lease-fail": {ID: "lease-fail", JobID: "job-fail"}}}
 	finishCoordinator = &mocks.Coordinator{}
 	finishService = leaseLifecycleService(clock, finishStore)
