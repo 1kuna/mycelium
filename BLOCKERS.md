@@ -91,11 +91,12 @@ handoff.
   automatically use both owners.
 - 2026-07-02: Placement drop reasons can now be saved as durable
   reconciliation task records through `myce reconcile placement --save` and
-  inspected with `myce reconcile status`. Standing policy marks each task
-  `allowed` or `blocked`, but Mycelium does not yet run a live background
-  reconciler that drains allowed tasks to stage artifacts, verify engines,
-  prewarm replicas, refresh catalogs, or record incompatibilities. Owner repair
-  remains approval-gated by default.
+  inspected with `myce reconcile status`; `myce reconcile drain` consumes
+  allowed tasks and currently executes `record_incompatibility` by writing a
+  durable incompatibility fact with running/done or running/failed task history.
+  The remaining gap is to add real drain executors for `stage_model_artifact`,
+  `verify_engine_readiness`, `prewarm_replica`, and `refresh_catalog`. Owner
+  repair remains approval-gated by default.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish

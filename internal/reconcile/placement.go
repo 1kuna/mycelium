@@ -159,6 +159,11 @@ func RecordsFromPlan(plan PlacementPlan, now time.Time) []domain.ReconciliationT
 			Source:             "placement_decision",
 			CreatedAt:          now,
 			UpdatedAt:          now,
+			Events: []domain.ReconciliationTaskEvent{{
+				Status:  status,
+				Message: "created from placement decision",
+				At:      now,
+			}},
 		})
 	}
 	return out

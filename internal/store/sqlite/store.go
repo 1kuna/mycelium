@@ -367,6 +367,28 @@ func (s *Store) ListReconciliationTasks(ctx context.Context, jobID string) ([]do
 	return tasks, rows.Err()
 }
 
+func (s *Store) SaveIncompatibility(ctx context.Context, rec domain.IncompatibilityRecord) error {
+	if rec.ID == "" {
+		return fmt.Errorf("incompatibility id is required")
+	}
+	if rec.Reason == "" {
+		return fmt.Errorf("incompatibility reason is required")
+	}
+	if rec.Source == "" {
+		return fmt.Errorf("incompatibility source is required")
+	}
+	if rec.CreatedAt.IsZero() {
+		return fmt.Errorf("incompatibility created_at is required")
+	}
+	return s.upsertJSON(ctx, "incompatibilities", rec.ID, rec)
+}
+
+func (s *Store) ListIncompatibilities(ctx context.Context) ([]domain.IncompatibilityRecord, error) {
+	var recs []domain.IncompatibilityRecord
+	err := s.listJSON(ctx, "incompatibilities", &recs)
+	return recs, err
+}
+
 func (s *Store) Put(ctx context.Context, rec domain.JobRecord) error {
 	if err := validateJobRecord(rec); err != nil {
 		return err
@@ -1151,6 +1173,7 @@ CREATE TABLE IF NOT EXISTS workload_result_bodies (
 );
 CREATE TABLE IF NOT EXISTS job_records (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reconciliation_tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS incompatibilities (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS recommendations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS process_refs (node_id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS join_tokens (id TEXT PRIMARY KEY, data TEXT NOT NULL);

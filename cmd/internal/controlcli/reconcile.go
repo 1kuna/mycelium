@@ -17,15 +17,17 @@ import (
 
 func runReconcile(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce reconcile <placement|status>")
+		return fmt.Errorf("usage: myce reconcile <placement|status|drain>")
 	}
 	switch args[0] {
 	case "placement":
 		return runReconcilePlacement(args[1:])
 	case "status":
 		return runReconcileStatus(args[1:])
+	case "drain":
+		return runReconcileDrain(args[1:])
 	default:
-		return fmt.Errorf("usage: myce reconcile <placement|status>")
+		return fmt.Errorf("usage: myce reconcile <placement|status|drain>")
 	}
 }
 
@@ -85,6 +87,38 @@ func runReconcileStatus(args []string) error {
 		return writePrettyJSON(os.Stdout, tasks)
 	}
 	printReconcileStatus(os.Stdout, tasks)
+	return nil
+}
+
+func runReconcileDrain(args []string) error {
+	fs := flag.NewFlagSet("reconcile drain", flag.ContinueOnError)
+	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+	jobID := fs.String("job", "", "filter by job id")
+	limit := fs.Int("limit", 0, "maximum allowed tasks to drain; 0 means all")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: myce reconcile drain [--db path] [--job id] [--limit n] [--json]")
+	}
+	store, err := storesqlite.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	report, err := reconcile.DrainAllowedTasks(context.Background(), store, reconcile.DrainOptions{
+		JobID: *jobID,
+		Limit: *limit,
+		Now:   time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return writePrettyJSON(os.Stdout, report)
+	}
+	printReconcileDrain(os.Stdout, report)
 	return nil
 }
 
@@ -179,6 +213,19 @@ func printReconcileStatus(w io.Writer, tasks []domain.ReconciliationTaskRecord) 
 			task.RequiresApproval,
 			emptyDash(task.Blocker),
 			emptyDash(task.Next),
+		)
+	}
+}
+
+func printReconcileDrain(w io.Writer, report reconcile.DrainReport) {
+	fmt.Fprintf(w, "reconcile-drain\tdrained=%d\tskipped=%d\n", report.Drained, report.Skipped)
+	for _, result := range report.Results {
+		fmt.Fprintf(w, "task\tid=%s\tkind=%s\tstatus=%s\taction=%s\terror=%s\n",
+			result.TaskID,
+			result.Kind,
+			result.Status,
+			emptyDash(result.Action),
+			emptyDash(result.Error),
 		)
 	}
 }

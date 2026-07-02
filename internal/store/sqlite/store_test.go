@@ -86,6 +86,17 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 		CreatedAt:          time.Unix(8, 0).UTC(),
 		UpdatedAt:          time.Unix(8, 0).UTC(),
 	}
+	incompatibility := domain.IncompatibilityRecord{
+		ID:        "incompat-a",
+		TaskID:    reconciliationTask.ID,
+		JobID:     job.ID,
+		NodeID:    node.ID,
+		PresetID:  preset.ID,
+		Model:     "model-a",
+		Reason:    "context cap",
+		Source:    "reconciliation_task",
+		CreatedAt: time.Unix(9, 0).UTC(),
+	}
 	admissionState := domain.AdmissionState{
 		NodeID: node.ID,
 		Fence:  4,
@@ -159,6 +170,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	must(t, store.SaveJob(ctx, job))
 	must(t, store.SaveWorkloadResultBody(ctx, domain.WorkloadResultBody{JobID: job.ID, MediaType: "application/json", Body: []byte(`{"ok":true}`), StoredAt: time.Unix(7, 0).UTC()}))
 	must(t, store.SaveReconciliationTask(ctx, reconciliationTask))
+	must(t, store.SaveIncompatibility(ctx, incompatibility))
 	must(t, store.SaveAdmissionState(ctx, admissionState))
 	must(t, store.Put(ctx, jobRecord))
 	must(t, store.SaveRecommendation(ctx, rec))
@@ -233,6 +245,9 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	}
 	if tasks, err := reopened.ListReconciliationTasks(ctx, job.ID); err != nil || len(tasks) != 1 || tasks[0].ID != reconciliationTask.ID || tasks[0].Status != domain.ReconciliationTaskAllowed {
 		t.Fatalf("ListReconciliationTasks(job) = %+v, %v", tasks, err)
+	}
+	if recs, err := reopened.ListIncompatibilities(ctx); err != nil || len(recs) != 1 || recs[0].ID != incompatibility.ID || recs[0].TaskID != reconciliationTask.ID {
+		t.Fatalf("ListIncompatibilities = %+v, %v", recs, err)
 	}
 	if gotAdmission, found, err := reopened.AdmissionState(ctx, node.ID); err != nil || !found || gotAdmission.Fence != 4 {
 		t.Fatalf("AdmissionState = %+v found=%v err=%v", gotAdmission, found, err)
@@ -311,23 +326,24 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 		t.Fatal("SaveProject should reject invalid project values")
 	}
 	for name, err := range map[string]error{
-		"preset":         store.SavePreset(ctx, domain.Preset{}),
-		"node":           store.SaveNode(ctx, domain.Node{}),
-		"instance":       store.SaveInstance(ctx, domain.ModelInstance{}),
-		"lease":          store.SaveLease(ctx, domain.Lease{}),
-		"admission":      store.SaveAdmissionState(ctx, domain.AdmissionState{}),
-		"reservation":    store.SaveReservation(ctx, domain.Reservation{}),
-		"job":            store.SaveJob(ctx, domain.Job{}),
-		"reconcile task": store.SaveReconciliationTask(ctx, domain.ReconciliationTaskRecord{}),
-		"recommendation": store.SaveRecommendation(ctx, domain.RecommendationRecord{}),
-		"process refs":   store.SaveProcessRefs(ctx, "", nil),
-		"process add":    store.AddProcessRef(ctx, "", domain.ProcessRef{PID: 1}),
-		"process remove": store.RemoveProcessRef(ctx, "", domain.ProcessRef{PID: 1}),
-		"join token":     store.SaveJoinToken(ctx, domain.JoinTokenRecord{}),
-		"locality":       store.SaveModelLocality(ctx, domain.ModelLocality{}),
-		"locality plan":  store.SaveLocalityPlan(ctx, domain.LocalityPlan{}),
-		"engine profile": store.SaveEngineProfile(ctx, domain.EngineProfile{}),
-		"bootstrap plan": store.SaveBootstrapPlan(ctx, domain.BootstrapPlan{}),
+		"preset":          store.SavePreset(ctx, domain.Preset{}),
+		"node":            store.SaveNode(ctx, domain.Node{}),
+		"instance":        store.SaveInstance(ctx, domain.ModelInstance{}),
+		"lease":           store.SaveLease(ctx, domain.Lease{}),
+		"admission":       store.SaveAdmissionState(ctx, domain.AdmissionState{}),
+		"reservation":     store.SaveReservation(ctx, domain.Reservation{}),
+		"job":             store.SaveJob(ctx, domain.Job{}),
+		"reconcile task":  store.SaveReconciliationTask(ctx, domain.ReconciliationTaskRecord{}),
+		"incompatibility": store.SaveIncompatibility(ctx, domain.IncompatibilityRecord{}),
+		"recommendation":  store.SaveRecommendation(ctx, domain.RecommendationRecord{}),
+		"process refs":    store.SaveProcessRefs(ctx, "", nil),
+		"process add":     store.AddProcessRef(ctx, "", domain.ProcessRef{PID: 1}),
+		"process remove":  store.RemoveProcessRef(ctx, "", domain.ProcessRef{PID: 1}),
+		"join token":      store.SaveJoinToken(ctx, domain.JoinTokenRecord{}),
+		"locality":        store.SaveModelLocality(ctx, domain.ModelLocality{}),
+		"locality plan":   store.SaveLocalityPlan(ctx, domain.LocalityPlan{}),
+		"engine profile":  store.SaveEngineProfile(ctx, domain.EngineProfile{}),
+		"bootstrap plan":  store.SaveBootstrapPlan(ctx, domain.BootstrapPlan{}),
 	} {
 		if err == nil {
 			t.Fatalf("%s save expected id error", name)

@@ -202,23 +202,42 @@ const (
 	ReconciliationTaskFailed  ReconciliationTaskStatus = "failed"
 )
 
+type ReconciliationTaskEvent struct {
+	Status  ReconciliationTaskStatus `json:"status"`
+	Message string                   `json:"message,omitempty"`
+	At      time.Time                `json:"at"`
+}
+
 type ReconciliationTaskRecord struct {
-	ID                 string                   `json:"id"`
-	JobID              string                   `json:"job_id,omitempty"`
-	Kind               string                   `json:"kind"`
-	Status             ReconciliationTaskStatus `json:"status"`
-	NodeID             string                   `json:"node_id,omitempty"`
-	PresetID           string                   `json:"preset_id,omitempty"`
-	Model              string                   `json:"model,omitempty"`
-	Reason             string                   `json:"reason"`
-	AutomaticCandidate bool                     `json:"automatic_candidate"`
-	RequiresApproval   bool                     `json:"requires_approval"`
-	Next               string                   `json:"next"`
-	Blocker            string                   `json:"blocker,omitempty"`
-	Source             string                   `json:"source"`
-	CreatedAt          time.Time                `json:"created_at"`
-	UpdatedAt          time.Time                `json:"updated_at"`
-	Error              string                   `json:"error,omitempty"`
+	ID                 string                    `json:"id"`
+	JobID              string                    `json:"job_id,omitempty"`
+	Kind               string                    `json:"kind"`
+	Status             ReconciliationTaskStatus  `json:"status"`
+	NodeID             string                    `json:"node_id,omitempty"`
+	PresetID           string                    `json:"preset_id,omitempty"`
+	Model              string                    `json:"model,omitempty"`
+	Reason             string                    `json:"reason"`
+	AutomaticCandidate bool                      `json:"automatic_candidate"`
+	RequiresApproval   bool                      `json:"requires_approval"`
+	Next               string                    `json:"next"`
+	Blocker            string                    `json:"blocker,omitempty"`
+	Source             string                    `json:"source"`
+	CreatedAt          time.Time                 `json:"created_at"`
+	UpdatedAt          time.Time                 `json:"updated_at"`
+	Error              string                    `json:"error,omitempty"`
+	Events             []ReconciliationTaskEvent `json:"events,omitempty"`
+}
+
+type IncompatibilityRecord struct {
+	ID        string    `json:"id"`
+	TaskID    string    `json:"task_id,omitempty"`
+	JobID     string    `json:"job_id,omitempty"`
+	NodeID    string    `json:"node_id,omitempty"`
+	PresetID  string    `json:"preset_id,omitempty"`
+	Model     string    `json:"model,omitempty"`
+	Reason    string    `json:"reason"`
+	Source    string    `json:"source"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type PlacementDecision struct {
