@@ -571,6 +571,19 @@ myce jobs result --url <peer-url> --rpc-token <token> --id <job-id> --out <file>
 myce jobs status --url <peer-url> --rpc-token <token> --id <job-id> --json
 ```
 
+When the workload is meant to carry an executable gateway request later, keep
+the public-safe workload intent JSON separate from the private request body and
+let the CLI wrap the payload envelope:
+
+```bash
+myce jobs admit \
+  --url <peer-url> \
+  --rpc-token <token> \
+  --file <workload-intent-without-payload.json> \
+  --payload-kind openai_chat \
+  --payload-file <private-request-body.json>
+```
+
 The workload status surface records scheduler/owner/lease evidence plus
 payload replayability classification, execution-state evidence, and a redacted
 result artifact manifest: reference, media type, byte count, and digest.

@@ -868,6 +868,8 @@ func runJobsAdmit(ctx context.Context, args []string, client *http.Client) error
 	peerURL := fs.String("url", "", "peer base URL")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
 	file := fs.String("file", "", "workload admission JSON file")
+	payloadKind := fs.String("payload-kind", "", "executable payload kind to wrap from --payload-file")
+	payloadFile := fs.String("payload-file", "", "private request body JSON file to wrap as executable payload")
 	jsonOut := fs.Bool("json", false, "print JSON response")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -885,6 +887,27 @@ func runJobsAdmit(ctx context.Context, args []string, client *http.Client) error
 	var req workload.AdmissionRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		return err
+	}
+	if *payloadKind != "" || *payloadFile != "" {
+		if *payloadKind == "" || *payloadFile == "" {
+			return fmt.Errorf("--payload-kind and --payload-file must be supplied together")
+		}
+		if len(req.Payload) > 0 {
+			return fmt.Errorf("--payload-file cannot be combined with payload in --file")
+		}
+		payloadBody, err := os.ReadFile(*payloadFile)
+		if err != nil {
+			return err
+		}
+		executable := workload.ExecutablePayload{Kind: *payloadKind, Body: json.RawMessage(payloadBody)}
+		payload, err := json.Marshal(executable)
+		if err != nil {
+			return err
+		}
+		if _, err := workload.DecodeExecutablePayload(payload); err != nil {
+			return err
+		}
+		req.Payload = payload
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
