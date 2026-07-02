@@ -35,25 +35,36 @@ handoff.
   execution, terminal success/failure, result artifact manifest metadata,
   explicit stored result-body replay, payload replayability evidence,
   executable-payload contract evidence, execution evidence, and lease reclaim
-  through the public workload HTTP surface. `make smoke-workload-executor`
-  proves the local operator path with a loopback peer and fake provider. The
+  through the public workload HTTP surface. Workload admission can now be
+  explicitly queued without immediate placement, and already-running queued
+  workloads can be executed through the same provider/result-capture path when
+  the periodic drainer has placed them first. Finish/release now handles stale
+  coordinator claims and owner leases that were already released, so operator
+  cleanup can terminalize restart-straddling workload records without manual
+  store edits. `make smoke-workload-executor` proves the local operator path
+  with a loopback peer and fake provider. The
   calibration surface now refuses to turn simulation into optimizer priors:
   `calibrate apply-priors` imports only live benchmark metric rows and updates
   speed-class priors through the optimizer calibration path. The remaining
   blockers are streaming queued replay and a live pressure proof that shows
   queue/preemption/reclaim under real fleet load. The project-free live
   benchmark now proves cold placement and warm reuse for one owner through the
-  synchronous gateway, but full pressure remains open: the synchronous gateway
-  intentionally does not trust per-request control headers on ordinary
-  deployments. File-backed SQLite control stores now open with explicit busy
+  synchronous gateway. The explicit workload lane has also been live-proven for
+  queued admission, owner placement, provider execution, result capture/replay,
+  terminal finish, and lease release on two owner/backend classes. Full
+  pressure remains open: the synchronous gateway intentionally does not trust
+  per-request control headers on ordinary deployments, and the workload proof
+  has not yet shown concurrent preemption or saturation behavior under a clean
+  fleet window. File-backed SQLite control stores now open with explicit busy
   timeout, foreign keys, and WAL mode through driver pragmas. Coordinated
   post-commit failures now record terminal failed registry evidence before
   releasing owner capacity, keeping the registry/rescue view consistent with
-  workload status after canceled or failed loads. The next gate is to activate
-  the current workload/scheduler binary on the selected live owner peers,
-  re-verify owner admission remains free of persistent SQLite busy errors, and
-  run an explicit workload-based pressure proof that captures admission,
-  preemption/drain, provider execution, result capture, and release/reclaim.
+  workload status after canceled or failed loads. A provider-specific route can
+  still fail during backend load; treat that as route/provider readiness, not
+  allocator success. The next gate is a clean-window explicit workload pressure
+  proof that captures admission, queue/preemption/drain, provider execution,
+  result capture, release/reclaim, and owner telemetry across the selected
+  routes.
 - 2026-06-29: A low-context tool-call route can prove transport and provider
   parser wiring without being a valid route for reasoning-heavy tool-agent
   workloads. Public Mycelium evidence now exposes this as a consumer-contract

@@ -4187,6 +4187,8 @@ func TestWorkloadHTTPErrorBranches(t *testing.T) {
 		{name: "bad finish method", method: http.MethodGet, path: "/workloads/job-a/finish", auth: true, want: http.StatusMethodNotAllowed},
 		{name: "finish without scheduler evidence", method: http.MethodPost, path: "/workloads/job-empty/finish", auth: true, want: http.StatusConflict},
 		{name: "missing finish", method: http.MethodPost, path: "/workloads/missing/finish", auth: true, want: http.StatusNotFound},
+		{name: "bad execute method", method: http.MethodGet, path: "/workloads/job-a/execute", auth: true, want: http.StatusMethodNotAllowed},
+		{name: "execute without provider executor", method: http.MethodPost, path: "/workloads/job-a/execute", auth: true, want: http.StatusConflict},
 		{name: "bad drain execute flag", method: http.MethodPost, path: "/workloads/drain?execute=maybe", auth: true, want: http.StatusBadRequest},
 		{name: "execute without provider executor", method: http.MethodPost, path: "/workloads/drain?execute=true", auth: true, want: http.StatusConflict},
 		{name: "runtime error", method: http.MethodPost, path: "/workloads", body: `{"job":{"id":"job-a","model":"model-a","project":"project-a"}}`, auth: true, want: http.StatusConflict},

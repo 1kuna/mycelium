@@ -155,19 +155,30 @@ upgrade packet, binary backup/replacement, restart wait, service status,
 peer-diagnostics, and live catalog checks. Keep rollback-ready upgrade
 discipline for future activations.
 The project-free live benchmark path currently proves live cold placement and
-warm reuse for one owner through the synchronous gateway. It does not yet prove
-full allocator pressure: the current synchronous benchmark cannot safely express
-hard-preemption intent on deployments that do not trust control headers.
+warm reuse for one owner through the synchronous gateway. The explicit workload
+lane has also been live-proven for queued admission, owner placement, provider
+execution, result capture/replay, terminal finish, and lease release on two
+owner/backend classes. It does not yet prove full allocator pressure:
+the current synchronous benchmark cannot safely express hard-preemption intent
+on deployments that do not trust control headers, and the workload proof has
+not yet shown concurrent preemption or saturation behavior under a clean fleet
+window.
 File-backed SQLite control stores now open with busy timeout, foreign keys, and
 WAL mode through driver pragmas so owner admission, registry replication,
 telemetry, and workload result capture do not run on the default rollback
 journal. Coordinated post-commit failures now record terminal failed registry
 evidence before releasing owner capacity, so canceled or failed loads do not
-leave registry rescue state claiming the job is still loading. Treat the next
-live gate as: activate the current workload/scheduler binary on the selected
-peers, verify owner admission still avoids persistent SQLite busy errors, then
-run an explicit workload-based pressure proof that shows queued admission,
-preemption/drain, provider execution, result capture, and release/reclaim.
+leave registry rescue state claiming the job is still loading. Workload
+admission supports explicit queue-only admission, and running queued workloads
+can be executed later through the same provider/result-capture path when a
+periodic drainer has already placed them. Finish/release now tolerates stale
+coordinator claims and already-released owner leases, so operator cleanup can
+terminalize jobs after a service restart without manual store edits.
+Treat the next live gate as: run a clean-window workload pressure proof that
+shows concurrent queueing or preemption under load, provider execution, result
+capture, release/reclaim, and owner telemetry across all selected routes. If a
+route-specific provider load fails, classify it as provider/runtime readiness
+rather than allocator success.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
 work, not transparently resumed streams. Streaming queued provider replay

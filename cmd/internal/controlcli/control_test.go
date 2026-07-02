@@ -590,6 +590,22 @@ func TestRunJobsAdmitAndStatusErrorBranches(t *testing.T) {
 	if err == nil {
 		t.Fatal("bad drain response accepted")
 	}
+	err = runJobsExecute(context.Background(), nil, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--url") {
+		t.Fatalf("execute missing url err = %v", err)
+	}
+	err = runJobsExecute(context.Background(), []string{"--url", "http://peer.test"}, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "--id") {
+		t.Fatalf("execute missing id err = %v", err)
+	}
+	err = runJobsExecute(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a"}, errorClient)
+	if err == nil || !strings.Contains(err.Error(), "409") {
+		t.Fatalf("execute error response err = %v", err)
+	}
+	err = runJobsExecute(context.Background(), []string{"--url", "http://peer.test", "--id", "job-a"}, badResponseClient)
+	if err == nil {
+		t.Fatal("bad execute response accepted")
+	}
 	err = runJobsFinish(context.Background(), nil, http.DefaultClient)
 	if err == nil || !strings.Contains(err.Error(), "--url") {
 		t.Fatalf("finish missing url err = %v", err)
