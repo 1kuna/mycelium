@@ -2132,34 +2132,35 @@ type gatewayRoutesLive struct {
 }
 
 type gatewayRouteContract struct {
-	Project                      string              `json:"project"`
-	Model                        string              `json:"model"`
-	PresetID                     string              `json:"preset_id,omitempty"`
-	NodeID                       string              `json:"node_id,omitempty"`
-	Backend                      domain.Backend      `json:"backend,omitempty"`
-	ProviderProfile              string              `json:"provider_profile,omitempty"`
-	ContextLength                int                 `json:"context_length,omitempty"`
-	ProjectContextCap            int                 `json:"project_context_cap,omitempty"`
-	Capabilities                 []domain.Capability `json:"capabilities,omitempty"`
-	ProjectTokenConfigured       bool                `json:"project_token_configured"`
-	GlobalGatewayTokenConfigured bool                `json:"global_gateway_token_configured"`
-	AuthHint                     string              `json:"auth_hint"`
-	StructuredOutputLikely       bool                `json:"structured_output_likely"`
-	StreamingLikely              bool                `json:"streaming_likely"`
-	ToolParserConfigured         bool                `json:"tool_parser_configured"`
-	AutoToolChoiceConfigured     bool                `json:"auto_tool_choice_configured"`
-	RecommendedToolChoice        string              `json:"recommended_tool_choice,omitempty"`
-	ToolReadiness                string              `json:"tool_readiness,omitempty"`
-	RouteReadiness               string              `json:"route_readiness,omitempty"`
-	MinContextCap                int                 `json:"min_context_cap,omitempty"`
-	EffectiveContextCap          int                 `json:"effective_context_cap,omitempty"`
-	ContextAdequate              bool                `json:"context_adequate,omitempty"`
-	ContextIssue                 string              `json:"context_issue,omitempty"`
-	DiscoveryStatus              string              `json:"discovery_status"`
-	LiveModelAvailable           bool                `json:"live_model_available,omitempty"`
-	LiveModelMatch               string              `json:"live_model_match,omitempty"`
-	ModelGroupSize               int                 `json:"model_group_size,omitempty"`
-	ModelGroupPresets            []string            `json:"model_group_presets,omitempty"`
+	Project                      string                 `json:"project"`
+	Model                        string                 `json:"model"`
+	PresetID                     string                 `json:"preset_id,omitempty"`
+	NodeID                       string                 `json:"node_id,omitempty"`
+	Backend                      domain.Backend         `json:"backend,omitempty"`
+	ProviderProfile              string                 `json:"provider_profile,omitempty"`
+	ContextLength                int                    `json:"context_length,omitempty"`
+	ProjectContextCap            int                    `json:"project_context_cap,omitempty"`
+	Capabilities                 []domain.Capability    `json:"capabilities,omitempty"`
+	ProjectTokenConfigured       bool                   `json:"project_token_configured"`
+	GlobalGatewayTokenConfigured bool                   `json:"global_gateway_token_configured"`
+	AuthHint                     string                 `json:"auth_hint"`
+	StructuredOutputLikely       bool                   `json:"structured_output_likely"`
+	StreamingLikely              bool                   `json:"streaming_likely"`
+	ToolParserConfigured         bool                   `json:"tool_parser_configured"`
+	AutoToolChoiceConfigured     bool                   `json:"auto_tool_choice_configured"`
+	RecommendedToolChoice        string                 `json:"recommended_tool_choice,omitempty"`
+	ToolReadiness                string                 `json:"tool_readiness,omitempty"`
+	RouteReadiness               string                 `json:"route_readiness,omitempty"`
+	MinContextCap                int                    `json:"min_context_cap,omitempty"`
+	EffectiveContextCap          int                    `json:"effective_context_cap,omitempty"`
+	ContextAdequate              bool                   `json:"context_adequate,omitempty"`
+	ContextIssue                 string                 `json:"context_issue,omitempty"`
+	DiscoveryStatus              string                 `json:"discovery_status"`
+	LiveModelAvailable           bool                   `json:"live_model_available,omitempty"`
+	LiveModelMatch               string                 `json:"live_model_match,omitempty"`
+	ModelGroupSize               int                    `json:"model_group_size,omitempty"`
+	ModelGroupPresets            []string               `json:"model_group_presets,omitempty"`
+	ModelGroupEnvelopes          []gatewayRouteEnvelope `json:"model_group_envelopes,omitempty"`
 }
 
 type gatewayRouteReadinessOptions struct {
@@ -2174,6 +2175,16 @@ type gatewayRoutesLiveOptions struct {
 	TokenEnv  string
 	TokenFile string
 	Client    *http.Client
+}
+
+type gatewayRouteEnvelope struct {
+	PresetID           string              `json:"preset_id"`
+	NodeID             string              `json:"node_id,omitempty"`
+	Backend            domain.Backend      `json:"backend,omitempty"`
+	ContextLength      int                 `json:"context_length,omitempty"`
+	Capabilities       []domain.Capability `json:"capabilities,omitempty"`
+	LiveModelAvailable bool                `json:"live_model_available,omitempty"`
+	LiveModelMatch     string              `json:"live_model_match,omitempty"`
 }
 
 func buildGatewayRoutesReport(ctx context.Context, configPath string, live gatewayRoutesLiveOptions) (gatewayRoutesReport, error) {
@@ -2205,7 +2216,7 @@ func buildGatewayRoutesReport(ctx context.Context, configPath string, live gatew
 	if len(projects) == 0 {
 		for _, preset := range presets {
 			route := routeContractForPreset(cfg, domain.Project{}, preset)
-			annotateGatewayRouteModelGroup(&route, presets)
+			annotateGatewayRouteModelGroup(&route, presets, liveModels)
 			annotateGatewayRouteLive(&route, preset, liveModels)
 			report.Routes = append(report.Routes, route)
 		}
@@ -2228,7 +2239,7 @@ func buildGatewayRoutesReport(ctx context.Context, configPath string, live gatew
 		}
 		if preset, ok := findPresetForModel(presets, project.DefaultModel); ok {
 			route = routeContractForPreset(cfg, project, preset)
-			annotateGatewayRouteModelGroup(&route, presets)
+			annotateGatewayRouteModelGroup(&route, presets, liveModels)
 			annotateGatewayRouteLive(&route, preset, liveModels)
 		}
 		report.Routes = append(report.Routes, route)
@@ -2353,34 +2364,52 @@ func annotateGatewayRouteLive(route *gatewayRouteContract, preset domain.Preset,
 	if liveModels == nil {
 		return
 	}
-	for _, id := range append([]string{route.Model, preset.ID}, preset.Aliases...) {
-		if _, ok := liveModels[id]; ok {
-			route.LiveModelAvailable = true
-			route.LiveModelMatch = id
-			return
-		}
-	}
-	route.LiveModelAvailable = false
+	available, match := gatewayRouteLiveModelForPreset(route.Model, preset, liveModels)
+	route.LiveModelAvailable = available
+	route.LiveModelMatch = match
 }
 
-func annotateGatewayRouteModelGroup(route *gatewayRouteContract, presets []domain.Preset) {
+func gatewayRouteLiveModelForPreset(model string, preset domain.Preset, liveModels map[string]struct{}) (bool, string) {
+	for _, id := range append([]string{model, preset.ID}, preset.Aliases...) {
+		if _, ok := liveModels[id]; ok {
+			return true, id
+		}
+	}
+	return false, ""
+}
+
+func annotateGatewayRouteModelGroup(route *gatewayRouteContract, presets []domain.Preset, liveModels map[string]struct{}) {
 	group := presetsForModel(presets, route.Model)
 	if len(group) <= 1 {
 		return
 	}
 	route.ModelGroupSize = len(group)
-	route.ModelGroupPresets = group
+	route.ModelGroupPresets = make([]string, 0, len(group))
+	for _, preset := range group {
+		route.ModelGroupPresets = append(route.ModelGroupPresets, preset.ID)
+		env := gatewayRouteEnvelope{
+			PresetID:      preset.ID,
+			NodeID:        preset.NodeID,
+			Backend:       preset.Backend,
+			ContextLength: modelruntime.EffectiveContextLength(preset),
+			Capabilities:  append([]domain.Capability(nil), preset.Capabilities...),
+		}
+		if liveModels != nil {
+			env.LiveModelAvailable, env.LiveModelMatch = gatewayRouteLiveModelForPreset(route.Model, preset, liveModels)
+		}
+		route.ModelGroupEnvelopes = append(route.ModelGroupEnvelopes, env)
+	}
 }
 
-func presetsForModel(presets []domain.Preset, model string) []string {
-	var ids []string
+func presetsForModel(presets []domain.Preset, model string) []domain.Preset {
+	var group []domain.Preset
 	for _, preset := range presets {
 		if presetMatchesModel(preset, model) {
-			ids = append(ids, preset.ID)
+			group = append(group, preset)
 		}
 	}
-	sort.Strings(ids)
-	return ids
+	sort.Slice(group, func(i, j int) bool { return group[i].ID < group[j].ID })
+	return group
 }
 
 func presetMatchesModel(preset domain.Preset, model string) bool {
@@ -2439,7 +2468,7 @@ func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 		fmt.Fprintf(w, "live\tgateway=%s\tstatus=%s\tmodels=%d\tauth=%s\terror=%s\n", emptyDash(report.Live.Gateway), emptyDash(report.Live.Status), report.Live.ModelCount, emptyDash(report.Live.AuthSource), emptyDash(report.Live.Error))
 	}
 	for _, route := range report.Routes {
-		fmt.Fprintf(w, "route\tproject=%s\tmodel=%s\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tproject_cap=%d\teffective_context=%d\tmin_context=%d\tcontext_issue=%s\treadiness=%s\ttool_readiness=%s\tstatus=%s\tauth=%s\tproject_token=%t\tglobal_token=%t\tstructured=%t\tstreaming=%t\ttool_parser=%t\tauto_tool=%t\ttool_choice=%s\tlive_model=%t\tlive_match=%s\tgroup_size=%d\tgroup_presets=%s\n",
+		fmt.Fprintf(w, "route\tproject=%s\tmodel=%s\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tproject_cap=%d\teffective_context=%d\tmin_context=%d\tcontext_issue=%s\treadiness=%s\ttool_readiness=%s\tstatus=%s\tauth=%s\tproject_token=%t\tglobal_token=%t\tstructured=%t\tstreaming=%t\ttool_parser=%t\tauto_tool=%t\ttool_choice=%s\tlive_model=%t\tlive_match=%s\tgroup_size=%d\tgroup_presets=%s\tgroup_envelopes=%s\n",
 			emptyDash(route.Project),
 			emptyDash(route.Model),
 			emptyDash(route.PresetID),
@@ -2465,8 +2494,26 @@ func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 			emptyDash(route.LiveModelMatch),
 			route.ModelGroupSize,
 			emptyDash(strings.Join(route.ModelGroupPresets, ",")),
+			emptyDash(formatGatewayRouteEnvelopes(route.ModelGroupEnvelopes)),
 		)
 	}
+}
+
+func formatGatewayRouteEnvelopes(envelopes []gatewayRouteEnvelope) string {
+	if len(envelopes) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(envelopes))
+	for _, env := range envelopes {
+		part := fmt.Sprintf("%s@%s:%s:ctx%d", env.PresetID, emptyDash(env.NodeID), emptyDash(string(env.Backend)), env.ContextLength)
+		if env.LiveModelMatch != "" {
+			part += ":live=" + env.LiveModelMatch
+		} else if env.LiveModelAvailable {
+			part += ":live=true"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, ",")
 }
 
 func annotateGatewayRoutesReadiness(report *gatewayRoutesReport, opts gatewayRouteReadinessOptions) {
