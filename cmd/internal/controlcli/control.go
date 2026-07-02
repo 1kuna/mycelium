@@ -72,7 +72,7 @@ func RunWithClient(ctx context.Context, args []string, client *http.Client) erro
 	case "route":
 		return runRoute(ctx, args[1:], client)
 	case "reconcile":
-		return runReconcile(args[1:])
+		return runReconcile(args[1:], client)
 	case "doctor":
 		return runDoctor(ctx, args[1:], client)
 	case "debug":

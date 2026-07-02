@@ -278,9 +278,20 @@ a planned model-locality record. The stage task does not copy artifacts itself;
 it feeds the existing `myce models locality apply` peer-RPC path.
 `verify_engine_readiness` runs the existing strict engine readiness checker
 against saved engine profiles and fails if a ready compatibility-keyed profile
-is missing or unready. Other allowed task kinds fail loudly with
-`executor not implemented` until their lower-level prewarm or catalog-refresh
-actions are wired. Blocked records are left untouched.
+is missing or unready. `prewarm_replica` can execute through the existing
+workload admission/finish path when `reconcile drain` is given an explicit peer
+endpoint:
+
+```bash
+myce reconcile drain --db <control.db> --job <job-id> \
+  --prewarm-url <peer-url> --rpc-token <rpc-token>
+```
+
+The prewarm task is marked done only when the lower-level workload reaches a
+terminal done result; queued, failed, or unavailable admission leaves the
+reconciliation task failed with the owner/admission reason. `refresh_catalog`
+currently fails loudly because there is no registered catalog source/refresh
+contract for the reconciler to call. Blocked records are left untouched.
 For a stored workload or gateway job, `myce debug job <job-id> --reconcile`
 adds the same report-only plan to the normal job/debug evidence so operators do
 not have to extract the scheduler decision by hand.

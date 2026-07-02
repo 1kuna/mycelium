@@ -10,6 +10,7 @@ import (
 
 	"mycelium/internal/domain"
 	"mycelium/internal/engine"
+	"mycelium/internal/modelruntime"
 )
 
 type TaskStore interface {
@@ -26,9 +27,12 @@ type TaskStore interface {
 }
 
 type DrainOptions struct {
-	JobID string
-	Limit int
-	Now   time.Time
+	JobID   string
+	Limit   int
+	Now     time.Time
+	Project string
+	Prewarm PrewarmExecutor
+	Catalog CatalogRefresher
 }
 
 type DrainReport struct {
@@ -38,11 +42,30 @@ type DrainReport struct {
 }
 
 type DrainTaskResult struct {
-	TaskID string                          `json:"task_id"`
-	Kind   string                          `json:"kind"`
-	Status domain.ReconciliationTaskStatus `json:"status"`
-	Action string                          `json:"action,omitempty"`
-	Error  string                          `json:"error,omitempty"`
+	TaskID     string                          `json:"task_id"`
+	Kind       string                          `json:"kind"`
+	Status     domain.ReconciliationTaskStatus `json:"status"`
+	Action     string                          `json:"action,omitempty"`
+	WorkloadID string                          `json:"workload_id,omitempty"`
+	NodeID     string                          `json:"node_id,omitempty"`
+	InstanceID string                          `json:"instance_id,omitempty"`
+	LeaseID    string                          `json:"lease_id,omitempty"`
+	Error      string                          `json:"error,omitempty"`
+}
+
+type PrewarmExecutor interface {
+	PrewarmReplica(ctx context.Context, job domain.Job) (PrewarmResult, error)
+}
+
+type PrewarmResult struct {
+	WorkloadID string `json:"workload_id,omitempty"`
+	NodeID     string `json:"node_id,omitempty"`
+	InstanceID string `json:"instance_id,omitempty"`
+	LeaseID    string `json:"lease_id,omitempty"`
+}
+
+type CatalogRefresher interface {
+	RefreshCatalog(ctx context.Context, task domain.ReconciliationTaskRecord) error
 }
 
 func DrainAllowedTasks(ctx context.Context, store TaskStore, opts DrainOptions) (DrainReport, error) {
@@ -67,14 +90,14 @@ func DrainAllowedTasks(ctx context.Context, store TaskStore, opts DrainOptions) 
 			report.Skipped++
 			continue
 		}
-		result := drainTask(ctx, store, task, now)
+		result := drainTask(ctx, store, task, opts, now)
 		report.Drained++
 		report.Results = append(report.Results, result)
 	}
 	return report, nil
 }
 
-func drainTask(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, now time.Time) DrainTaskResult {
+func drainTask(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, opts DrainOptions, now time.Time) DrainTaskResult {
 	running := transitionTask(task, domain.ReconciliationTaskRunning, "", "executor started", now)
 	if err := store.SaveReconciliationTask(ctx, running); err != nil {
 		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: task.Status, Error: err.Error()}
@@ -108,12 +131,76 @@ func drainTask(ctx context.Context, store TaskStore, task domain.ReconciliationT
 		done := transitionTask(running, domain.ReconciliationTaskDone, "", "verified saved engine readiness", now)
 		_ = store.SaveReconciliationTask(ctx, done)
 		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "verify_engine_readiness"}
+	case TaskPrewarmReplica:
+		result, err := prewarmReplica(ctx, store, running, opts)
+		if err != nil {
+			failed := transitionTask(running, domain.ReconciliationTaskFailed, err.Error(), "prewarm replica failed", now)
+			_ = store.SaveReconciliationTask(ctx, failed)
+			return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: failed.Status, Error: err.Error()}
+		}
+		done := transitionTask(running, domain.ReconciliationTaskDone, "", "prewarmed replica through workload admission", now)
+		_ = store.SaveReconciliationTask(ctx, done)
+		return DrainTaskResult{
+			TaskID:     task.ID,
+			Kind:       task.Kind,
+			Status:     done.Status,
+			Action:     "prewarm_replica",
+			WorkloadID: result.WorkloadID,
+			NodeID:     result.NodeID,
+			InstanceID: result.InstanceID,
+			LeaseID:    result.LeaseID,
+		}
+	case TaskRefreshCatalog:
+		if opts.Catalog == nil {
+			err := "catalog refresh executor is not configured; no catalog source contract is registered"
+			failed := transitionTask(running, domain.ReconciliationTaskFailed, err, "catalog refresh executor unavailable", now)
+			_ = store.SaveReconciliationTask(ctx, failed)
+			return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: failed.Status, Error: err}
+		}
+		if err := opts.Catalog.RefreshCatalog(ctx, running); err != nil {
+			failed := transitionTask(running, domain.ReconciliationTaskFailed, err.Error(), "catalog refresh failed", now)
+			_ = store.SaveReconciliationTask(ctx, failed)
+			return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: failed.Status, Error: err.Error()}
+		}
+		done := transitionTask(running, domain.ReconciliationTaskDone, "", "refreshed catalog from configured source", now)
+		_ = store.SaveReconciliationTask(ctx, done)
+		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "refresh_catalog"}
 	default:
 		err := fmt.Sprintf("reconciliation executor for %q is not implemented", task.Kind)
 		failed := transitionTask(running, domain.ReconciliationTaskFailed, err, "executor unavailable", now)
 		_ = store.SaveReconciliationTask(ctx, failed)
 		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: failed.Status, Error: err}
 	}
+}
+
+func prewarmReplica(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, opts DrainOptions) (PrewarmResult, error) {
+	if opts.Prewarm == nil {
+		return PrewarmResult{}, fmt.Errorf("prewarm executor is not configured; provide an explicit workload admission endpoint")
+	}
+	if task.PresetID == "" {
+		return PrewarmResult{}, fmt.Errorf("prewarm replica task requires preset id")
+	}
+	preset, err := store.Preset(ctx, task.PresetID)
+	if err != nil {
+		return PrewarmResult{}, err
+	}
+	job := domain.Job{
+		ID:                  "reconcile-prewarm-" + task.ID,
+		TaskType:            string(domain.CapabilityChat),
+		Model:               firstNonEmpty(task.Model, firstAlias(preset.Aliases), preset.ModelRef, preset.ID),
+		PresetID:            preset.ID,
+		Project:             firstNonEmpty(opts.Project, "reconcile-prewarm"),
+		Priority:            domain.PriorityBackground,
+		SpeedPref:           domain.SpeedThroughput,
+		ContextRequest:      modelruntime.EffectiveContextLength(preset),
+		ExpectedConcurrency: 1,
+		Preemption:          domain.PreemptSoft,
+		Status:              domain.JobQueued,
+	}
+	if task.NodeID != "" {
+		job.NodeSelector = map[string]string{domain.LabelNodeID: task.NodeID}
+	}
+	return opts.Prewarm.PrewarmReplica(ctx, job)
 }
 
 func planModelArtifactStage(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, now time.Time) error {

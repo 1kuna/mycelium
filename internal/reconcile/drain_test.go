@@ -62,11 +62,55 @@ func TestDrainAllowedTasksFailsUnsupportedAllowedTaskLoudly(t *testing.T) {
 	if report.Drained != 1 || len(report.Results) != 1 || report.Results[0].Status != domain.ReconciliationTaskFailed {
 		t.Fatalf("report = %+v", report)
 	}
-	if !strings.Contains(report.Results[0].Error, "not implemented") {
+	if !strings.Contains(report.Results[0].Error, "catalog refresh executor is not configured") {
 		t.Fatalf("error = %q", report.Results[0].Error)
 	}
 	failed := store.taskByID("allowed-refresh")
-	if failed.Status != domain.ReconciliationTaskFailed || !strings.Contains(failed.Error, "not implemented") {
+	if failed.Status != domain.ReconciliationTaskFailed || !strings.Contains(failed.Error, "catalog source contract") {
+		t.Fatalf("failed task = %+v", failed)
+	}
+}
+
+func TestDrainAllowedTasksRefreshesCatalogThroughConfiguredSource(t *testing.T) {
+	refresher := &fakeCatalogRefresher{}
+	store := &fakeTaskStore{tasks: []domain.ReconciliationTaskRecord{
+		taskRecord("allowed-refresh", string(TaskRefreshCatalog), domain.ReconciliationTaskAllowed),
+	}}
+	now := time.Unix(35, 0).UTC()
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: now, Catalog: refresher})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Drained != 1 || report.Results[0].Status != domain.ReconciliationTaskDone || report.Results[0].Action != "refresh_catalog" {
+		t.Fatalf("report = %+v", report)
+	}
+	if len(refresher.tasks) != 1 || refresher.tasks[0].ID != "allowed-refresh" || refresher.tasks[0].Status != domain.ReconciliationTaskRunning {
+		t.Fatalf("refresher tasks = %+v", refresher.tasks)
+	}
+	done := store.taskByID("allowed-refresh")
+	if done.Status != domain.ReconciliationTaskDone || len(done.Events) != 2 {
+		t.Fatalf("done task = %+v", done)
+	}
+}
+
+func TestDrainAllowedTasksFailsCatalogRefreshActionFailure(t *testing.T) {
+	store := &fakeTaskStore{tasks: []domain.ReconciliationTaskRecord{
+		taskRecord("allowed-refresh", string(TaskRefreshCatalog), domain.ReconciliationTaskAllowed),
+	}}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{
+		Now:     time.Unix(36, 0).UTC(),
+		Catalog: &fakeCatalogRefresher{err: errors.New("catalog source unavailable")},
+	})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Results[0].Status != domain.ReconciliationTaskFailed || report.Results[0].Error != "catalog source unavailable" {
+		t.Fatalf("report = %+v", report)
+	}
+	failed := store.taskByID("allowed-refresh")
+	if failed.Status != domain.ReconciliationTaskFailed || failed.Error != "catalog source unavailable" {
 		t.Fatalf("failed task = %+v", failed)
 	}
 }
@@ -184,6 +228,93 @@ func TestDrainAllowedTasksFailsEngineReadinessWithoutSavedProfile(t *testing.T) 
 	}
 }
 
+func TestDrainAllowedTasksExecutesPrewarmReplicaThroughExecutor(t *testing.T) {
+	prewarm := &fakePrewarmExecutor{result: PrewarmResult{
+		WorkloadID: "reconcile-prewarm-allowed-prewarm",
+		NodeID:     "node-a",
+		InstanceID: "inst-a",
+		LeaseID:    "lease-a",
+	}}
+	store := &fakeTaskStore{
+		tasks: []domain.ReconciliationTaskRecord{taskRecord("allowed-prewarm", string(TaskPrewarmReplica), domain.ReconciliationTaskAllowed)},
+		presets: map[string]domain.Preset{"preset-a": {
+			ID:            "preset-a",
+			ModelRef:      "model-ref",
+			Aliases:       []string{"model-alias"},
+			ContextLength: 4096,
+		}},
+	}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{
+		Now:     time.Unix(90, 0).UTC(),
+		Project: "operator-reconcile",
+		Prewarm: prewarm,
+	})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Drained != 1 || report.Results[0].Status != domain.ReconciliationTaskDone || report.Results[0].Action != "prewarm_replica" {
+		t.Fatalf("report = %+v", report)
+	}
+	if report.Results[0].WorkloadID != "reconcile-prewarm-allowed-prewarm" || report.Results[0].InstanceID != "inst-a" || report.Results[0].LeaseID != "lease-a" {
+		t.Fatalf("result evidence = %+v", report.Results[0])
+	}
+	if len(prewarm.jobs) != 1 {
+		t.Fatalf("prewarm jobs = %+v", prewarm.jobs)
+	}
+	job := prewarm.jobs[0]
+	if job.ID != "reconcile-prewarm-allowed-prewarm" || job.Model != "model-a" || job.PresetID != "preset-a" || job.Project != "operator-reconcile" || job.ContextRequest != 4096 || job.ExpectedConcurrency != 1 {
+		t.Fatalf("prewarm job = %+v", job)
+	}
+	if got := job.NodeSelector[domain.LabelNodeID]; got != "node-a" {
+		t.Fatalf("node selector = %+v", job.NodeSelector)
+	}
+	done := store.taskByID("allowed-prewarm")
+	if done.Status != domain.ReconciliationTaskDone || len(done.Events) != 2 {
+		t.Fatalf("done task = %+v", done)
+	}
+}
+
+func TestDrainAllowedTasksFailsPrewarmWithoutExecutor(t *testing.T) {
+	store := &fakeTaskStore{
+		tasks:   []domain.ReconciliationTaskRecord{taskRecord("allowed-prewarm", string(TaskPrewarmReplica), domain.ReconciliationTaskAllowed)},
+		presets: map[string]domain.Preset{"preset-a": {ID: "preset-a", ModelRef: "model-ref"}},
+	}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: time.Unix(100, 0).UTC()})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Results[0].Status != domain.ReconciliationTaskFailed || !strings.Contains(report.Results[0].Error, "prewarm executor is not configured") {
+		t.Fatalf("report = %+v", report)
+	}
+	failed := store.taskByID("allowed-prewarm")
+	if failed.Status != domain.ReconciliationTaskFailed || !strings.Contains(failed.Error, "workload admission endpoint") {
+		t.Fatalf("failed task = %+v", failed)
+	}
+}
+
+func TestDrainAllowedTasksFailsPrewarmActionFailure(t *testing.T) {
+	store := &fakeTaskStore{
+		tasks:   []domain.ReconciliationTaskRecord{taskRecord("allowed-prewarm", string(TaskPrewarmReplica), domain.ReconciliationTaskAllowed)},
+		presets: map[string]domain.Preset{"preset-a": {ID: "preset-a", ModelRef: "model-ref"}},
+	}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{
+		Now:     time.Unix(110, 0).UTC(),
+		Prewarm: &fakePrewarmExecutor{err: errors.New("owner admission rejected")},
+	})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Results[0].Status != domain.ReconciliationTaskFailed || report.Results[0].Error != "owner admission rejected" {
+		t.Fatalf("report = %+v", report)
+	}
+	if failed := store.taskByID("allowed-prewarm"); failed.Status != domain.ReconciliationTaskFailed || failed.Error != "owner admission rejected" {
+		t.Fatalf("failed task = %+v", failed)
+	}
+}
+
 func TestDrainAllowedTasksRecordsActionFailure(t *testing.T) {
 	store := &fakeTaskStore{
 		tasks:           []domain.ReconciliationTaskRecord{taskRecord("allowed-incompat", string(TaskRecordIncompatibility), domain.ReconciliationTaskAllowed)},
@@ -201,6 +332,30 @@ func TestDrainAllowedTasksRecordsActionFailure(t *testing.T) {
 	if failed.Status != domain.ReconciliationTaskFailed || failed.Error != "store unavailable" {
 		t.Fatalf("failed task = %+v", failed)
 	}
+}
+
+type fakePrewarmExecutor struct {
+	jobs   []domain.Job
+	result PrewarmResult
+	err    error
+}
+
+func (e *fakePrewarmExecutor) PrewarmReplica(_ context.Context, job domain.Job) (PrewarmResult, error) {
+	e.jobs = append(e.jobs, job)
+	if e.err != nil {
+		return PrewarmResult{}, e.err
+	}
+	return e.result, nil
+}
+
+type fakeCatalogRefresher struct {
+	tasks []domain.ReconciliationTaskRecord
+	err   error
+}
+
+func (r *fakeCatalogRefresher) RefreshCatalog(_ context.Context, task domain.ReconciliationTaskRecord) error {
+	r.tasks = append(r.tasks, task)
+	return r.err
 }
 
 func taskRecord(id, kind string, status domain.ReconciliationTaskStatus) domain.ReconciliationTaskRecord {

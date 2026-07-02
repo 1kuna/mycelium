@@ -474,6 +474,115 @@ func TestRunReconcileDrainVerifiesEngineReadiness(t *testing.T) {
 	}
 }
 
+func TestRunReconcileDrainExecutesPrewarmThroughWorkloadEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	preset := testPreset("vision")
+	preset.ContextLength = 8192
+	if err := store.SavePreset(context.Background(), preset); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	task := domain.ReconciliationTaskRecord{
+		ID:                 "recon-prewarm",
+		JobID:              "job-prewarm",
+		Kind:               string(reconcile.TaskPrewarmReplica),
+		Status:             domain.ReconciliationTaskAllowed,
+		NodeID:             "node-a",
+		PresetID:           preset.ID,
+		Model:              "vision-model",
+		Reason:             "fit",
+		AutomaticCandidate: true,
+		Next:               "prewarm",
+		Source:             "test",
+		CreatedAt:          time.Unix(1, 0).UTC(),
+		UpdatedAt:          time.Unix(1, 0).UTC(),
+	}
+	if err := store.SaveReconciliationTask(context.Background(), task); err != nil {
+		t.Fatalf("SaveReconciliationTask: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var admittedJobID string
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer rpc-secret" {
+			t.Fatalf("auth = %q", got)
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/workloads":
+			var req workload.AdmissionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode admission: %v", err)
+			}
+			if req.Job.ID != "reconcile-prewarm-recon-prewarm" || req.Job.Model != "vision-model" || req.Job.PresetID != preset.ID || req.Job.Project != "reconcile-test" || req.Job.ContextRequest != 8192 {
+				t.Fatalf("job = %+v", req.Job)
+			}
+			if got := req.Job.NodeSelector[domain.LabelNodeID]; got != "node-a" {
+				t.Fatalf("node selector = %+v", req.Job.NodeSelector)
+			}
+			if !strings.Contains(string(req.Payload), `"kind":"model_prewarm"`) || !strings.Contains(string(req.Payload), `"node-a"`) {
+				t.Fatalf("payload = %s", req.Payload)
+			}
+			admittedJobID = req.Job.ID
+			req.Job.Status = domain.JobRunning
+			decision := domain.PlacementDecision{JobID: req.Job.ID, Action: domain.ActionLoadedNew, NodeID: "node-a", Preset: domain.Preset{ID: preset.ID}, InstanceID: "inst-a"}
+			inst := domain.ModelInstance{ID: "inst-a", NodeID: "node-a", PresetID: preset.ID, State: domain.InstReady}
+			lease := domain.Lease{ID: "lease-a", JobID: req.Job.ID, NodeID: "node-a", InstanceID: "inst-a"}
+			_ = json.NewEncoder(w).Encode(workload.AdmissionResponse{Job: req.Job, Decision: decision, Instance: inst, Lease: lease})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/finish"):
+			if admittedJobID == "" || r.URL.Path != "/workloads/"+admittedJobID+"/finish" {
+				t.Fatalf("finish path = %s admitted=%s", r.URL.Path, admittedJobID)
+			}
+			job := domain.Job{ID: admittedJobID, Model: "vision-model", PresetID: preset.ID, Status: domain.JobDone}
+			result := &domain.JobResult{NodeID: "node-a", PresetID: preset.ID, Action: domain.ActionLoadedNew, LeaseID: "lease-a", Instance: domain.ModelInstance{ID: "inst-a"}, Terminal: true}
+			job.Result = result
+			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: job, Result: result})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = RunWithClient(context.Background(), []string{
+			"reconcile", "drain",
+			"--db", dbPath,
+			"--job", "job-prewarm",
+			"--prewarm-url", "http://peer.test",
+			"--rpc-token", "rpc-secret",
+			"--project", "reconcile-test",
+		}, client)
+	})
+	if runErr != nil {
+		t.Fatalf("reconcile drain prewarm: %v\n%s", runErr, output)
+	}
+	for _, want := range []string{
+		"kind=prewarm_replica\tstatus=done\taction=prewarm_replica",
+		"workload=reconcile-prewarm-recon-prewarm",
+		"node=node-a",
+		"instance=inst-a",
+		"lease=lease-a",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("drain output missing %q:\n%s", want, output)
+		}
+	}
+	verify, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open verify: %v", err)
+	}
+	defer verify.Close()
+	tasks, err := verify.ListReconciliationTasks(context.Background(), "job-prewarm")
+	if err != nil || len(tasks) != 1 || tasks[0].Status != domain.ReconciliationTaskDone {
+		t.Fatalf("tasks = %+v, %v", tasks, err)
+	}
+}
+
 func TestDecodePlacementDecisionAcceptsJobAndWrapper(t *testing.T) {
 	decision := domain.PlacementDecision{JobID: "job-a", Action: domain.ActionLoadedNew}
 	jobData, err := json.Marshal(domain.Job{ID: "job-a", Result: &domain.JobResult{Decision: decision}})
