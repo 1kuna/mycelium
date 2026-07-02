@@ -90,11 +90,6 @@ Plan a durable service install without changing the host:
 
 ```bash
 mycelium service plan --config ~/.mycelium/peer.json --name real-fleet --user
-mycelium service plan \
-  --config ~/.mycelium/peer.json \
-  --binary /path/to/mycelium \
-  --name real-fleet \
-  --system
 ```
 
 Plan a binary upgrade without changing the host:
@@ -109,55 +104,9 @@ mycelium service upgrade \
   --dry-run
 ```
 
-On macOS, use `--system` when a user LaunchAgent cannot reach LAN peers because
-of Local Network permission or binary-identity behavior. The plan command is
-read-only: it prints the target unit path, generated launchd/systemd unit body,
-install/status/reload commands, and rollback command. For a live gateway, first
-keep a known-good binary backup, run `service status` against the current
-service, inspect the `--system` plan, run `service upgrade --dry-run` against
-the candidate binary, and install during a maintenance window:
-the generated system LaunchDaemon runs as the invoking non-root user so it keeps
-the existing user-owned config, logs, and control DB.
-
-```bash
-sudo /path/to/mycelium service install \
-  --config ~/.mycelium/peer.json \
-  --binary /path/to/mycelium \
-  --name real-fleet \
-  --system
-
-sudo /path/to/mycelium service status \
-  --config ~/.mycelium/peer.json \
-  --binary /path/to/mycelium \
-  --name real-fleet \
-  --system
-```
-
-If seed diagnostics fail after activation, restore the known-good binary and
-kick the service named by `service plan`; do not keep a Mac gateway live when
-`service status` reports unreachable seeds.
-
-Read-only checks for a Mac user LaunchAgent that loses LAN reachability after a
-binary update:
-
-```bash
-launchctl print gui/$(id -u)/com.mycelium.real-fleet
-codesign -dv --verbose=4 ~/.mycelium/bin/mycelium 2>&1
-codesign -dv --verbose=4 /path/to/new/mycelium 2>&1
-spctl -a -vv ~/.mycelium/bin/mycelium /path/to/new/mycelium
-xattr -l ~/.mycelium/bin/mycelium /path/to/new/mycelium
-log show --style compact --last 2h \
-  --predicate 'process == "mycelium" OR eventMessage CONTAINS[c] "mycelium"'
-```
-
-If the old LaunchAgent binary reaches LAN peers but the replacement reports
-`no route to host` from the same config and launchd domain, compare the
-CodeDirectory identifier and CDHash before blaming Mycelium routing. Ad-hoc
-CLI signatures change identity whenever the binary changes; macOS Local Network
-approval can therefore behave like a binary-identity gate. The clean proof path
-is a stable signed bundle/helper identity or the system LaunchDaemon plan above,
-followed by `service status` and the same seed diagnostics. Do not keep testing
-by blind-swapping the live LaunchAgent binary.
+See [docs/runbooks/service-upgrade.md](docs/runbooks/service-upgrade.md) for
+the full maintenance-window checklist, read-only macOS diagnostics, and
+rollback proof path.
 
 Generate and inspect recommendations:
 
@@ -213,7 +162,9 @@ status` and `calibrate report` summarize saved plan/run artifacts without
 treating simulation as live calibration or applied optimizer facts. Run
 `make smoke-workload-executor` before the live fleet proof to catch local
 queued-executor wiring regressions without touching real engines. A live
-pressure proof remains an explicit operator gate.
+pressure proof remains an explicit operator gate. See
+[docs/runbooks/workload-pressure-proof.md](docs/runbooks/workload-pressure-proof.md)
+for the full proof ladder.
 
 For authenticated non-loopback gateways, `myce benchmark` resolves the gateway token in this order:
 
