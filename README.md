@@ -558,6 +558,7 @@ synchronous and use the workload lane:
 ```bash
 myce jobs admit --url <peer-url> --rpc-token <token> --file <workload-intent.json>
 myce jobs drain --url <peer-url> --rpc-token <token> --limit <n>
+myce jobs drain --url <peer-url> --rpc-token <token> --limit <n> --execute
 myce jobs finish \
   --url <peer-url> \
   --rpc-token <token> \
@@ -592,16 +593,19 @@ redacted, missing, or unreadable payload evidence. `payload_contract`,
 `payload_kind`, and `payload_executable` distinguish opaque evidence payloads
 from explicit gateway-request envelopes such as `openai_chat`. `execution_state`
 distinguishes queued, running, manifest-only terminal, and replayable terminal
-work; `provider_output_capture=false` is intentional until automatic
-provider-output capture exists. The commands do not print the queued payload or
-raw completion.
+work. `provider_output_capture=true` means `jobs drain --execute` ran a
+non-streaming executable payload through the gateway/provider path and stored
+the provider response body as the workload result. `provider_output_capture=false`
+means the workload is still at the manual-finish boundary. The commands do not
+print the queued payload or raw completion.
 When an operator or runtime finishes a workload with `--result-file`, Mycelium
 stores those result bytes in the private control store and `myce jobs result`
-retrieves them explicitly after verifying the stored manifest. Automatic
-provider-output capture for queued inference is still a separate product gate;
-until then, payload replayability, explicit result-body storage, and the artifact
-manifest are the durable execution/output boundaries operators can join to debug
-bundles and optimizer evidence.
+retrieves them explicitly after verifying the stored manifest. The first
+automatic provider-output capture path is explicit and non-streaming:
+`myce jobs drain --execute` requires a registry-replayable executable payload,
+uses the same gateway/provider request semantics, stores a redacted result
+manifest plus private result body, and finishes/releases the workload through
+the scheduler. Streaming queued replay remains a separate product gate.
 
 When a synchronous gateway request would queue instead of immediately acquiring
 an owner, the gateway returns `503 Service Unavailable` with `Retry-After`

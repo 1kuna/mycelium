@@ -28,6 +28,7 @@ import (
 	"mycelium/internal/domain"
 	"mycelium/internal/estimate"
 	"mycelium/internal/gateway"
+	"mycelium/internal/gateway/translate"
 	"mycelium/internal/lease"
 	"mycelium/internal/membership"
 	"mycelium/internal/optimizer"
@@ -343,22 +344,23 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		Interval: time.Duration(cfg.OptimizerEvalMS) * time.Millisecond,
 	})
 	authRequired := gatewayAuthConfigured(cfg) || peerListenRequiresAuth(cfg.Listen)
+	router := &gateway.Router{
+		Placer:              placer,
+		Fleet:               fleet,
+		Nodes:               nodes,
+		Presets:             gateway.NewPresetRegistry(presets...),
+		Runtime:             runtime,
+		Telemetry:           store,
+		TelemetryPeers:      peerDirectory,
+		TelemetryPeerClient: telemetryHTTPClient{AuthToken: cfg.RPCToken},
+		SelfNodeID:          privateLocalNodeID(cfg),
+		Reporter:            gateway.InstanceFailureReporter{Store: store, Nodes: nodes},
+		Clock:               clock.System{},
+		Projects:            projectMap(projects),
+		DefaultProject:      cfg.DefaultProject,
+	}
 	handler := gateway.Server{
-		Router: &gateway.Router{
-			Placer:              placer,
-			Fleet:               fleet,
-			Nodes:               nodes,
-			Presets:             gateway.NewPresetRegistry(presets...),
-			Runtime:             runtime,
-			Telemetry:           store,
-			TelemetryPeers:      peerDirectory,
-			TelemetryPeerClient: telemetryHTTPClient{AuthToken: cfg.RPCToken},
-			SelfNodeID:          privateLocalNodeID(cfg),
-			Reporter:            gateway.InstanceFailureReporter{Store: store, Nodes: nodes},
-			Clock:               clock.System{},
-			Projects:            projectMap(projects),
-			DefaultProject:      cfg.DefaultProject,
-		},
+		Router:              router,
 		RequireAuth:         authRequired,
 		AuthToken:           cfg.GatewayToken,
 		AuthTokenProjects:   gatewayProjectTokenMap(cfg.GatewayProjectTokens),
@@ -368,7 +370,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
 	mountTelemetryHTTP(mux, store, cfg.RPCToken)
 	mountCatalogHTTP(mux, cfg, store, cfg.RPCToken, clock.System{})
-	mountWorkloadHTTP(mux, runtime, store, cfg.RPCToken)
+	mountWorkloadHTTP(mux, runtime, store, cfg.RPCToken, router)
 	mux.Handle("/", handler)
 	return cfg.Listen, mux, combineShutdowns(shutdowns), nil
 }
@@ -524,6 +526,10 @@ type workloadRuntime interface {
 	FinishJob(ctx context.Context, job domain.Job, lease domain.Lease, cause error) error
 }
 
+type workloadProviderExecutor interface {
+	ExecutePlacedProvider(ctx context.Context, req translate.IngressRequest, job domain.Job, decision domain.PlacementDecision, inst domain.ModelInstance, lease domain.Lease, attempt int, cold bool, loadMS int) (gateway.RouteResponse, error)
+}
+
 type workloadStore interface {
 	Job(ctx context.Context, id string) (domain.Job, error)
 	SaveWorkloadResultBody(ctx context.Context, result domain.WorkloadResultBody) error
@@ -544,7 +550,7 @@ type catalogStageStore interface {
 	DeleteModelLocality(ctx context.Context, id string) error
 }
 
-func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store workloadStore, rpcToken string) {
+func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store workloadStore, rpcToken string, executor workloadProviderExecutor) {
 	mux.HandleFunc("/workloads/drain", func(w http.ResponseWriter, r *http.Request) {
 		if !peerRPCAuthorized(r, rpcToken) {
 			writePeerRPCError(w, http.StatusUnauthorized, fmt.Errorf("unauthorized"))
@@ -563,6 +569,19 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			}
 			limit = n
 		}
+		execute := false
+		if raw := r.URL.Query().Get("execute"); raw != "" {
+			v, err := strconv.ParseBool(raw)
+			if err != nil {
+				writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("execute must be true or false"))
+				return
+			}
+			execute = v
+		}
+		if execute && executor == nil {
+			writePeerRPCError(w, http.StatusConflict, fmt.Errorf("queued workload provider execution is not configured"))
+			return
+		}
 		results, err := runtime.Drain(r.Context(), limit)
 		if err != nil {
 			writePeerRPCError(w, http.StatusConflict, err)
@@ -573,6 +592,15 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 			job := domain.Job{ID: result.Decision.JobID}
 			if latest, readErr := store.Job(r.Context(), result.Decision.JobID); readErr == nil {
 				job = latest
+			}
+			if execute {
+				if err := executeDrainedWorkload(r.Context(), executor, runtime, store, job, result); err != nil {
+					writePeerRPCError(w, http.StatusConflict, err)
+					return
+				}
+				if latest, readErr := store.Job(r.Context(), result.Decision.JobID); readErr == nil {
+					job = latest
+				}
 			}
 			resp.Results = append(resp.Results, workloadResponse(r.Context(), store, job, result, 0))
 		}
@@ -800,6 +828,111 @@ func workloadResultBody(ctx context.Context, store workloadStore, job domain.Job
 	return body, nil
 }
 
+func executeDrainedWorkload(ctx context.Context, executor workloadProviderExecutor, runtime workloadRuntime, store workloadStore, job domain.Job, result scheduler.Result) error {
+	req, err := executableWorkloadIngressRequest(ctx, store, job)
+	if err != nil {
+		return err
+	}
+	req.Project = job.Project
+	req.Priority = job.Priority
+	req.SpeedPref = job.SpeedPref
+	req.ContextRequest = job.ContextRequest
+	req.Preemption = job.Preemption
+	req.Handling = job.Handling
+	req.Submitter = job.Submitter
+	if job.Model != "" {
+		req, err = translate.WithModel(req, job.Model)
+		if err != nil {
+			return err
+		}
+	}
+	if req.Stream {
+		return fmt.Errorf("queued workload provider execution does not support streaming payloads")
+	}
+	cold := result.Decision.InstanceID == ""
+	resp, err := executor.ExecutePlacedProvider(ctx, req, job, result.Decision, result.Instance, result.Lease, 1, cold, 0)
+	if err != nil {
+		return err
+	}
+	if resp.Status >= 400 {
+		return fmt.Errorf("queued workload provider execution returned %d", resp.Status)
+	}
+	if job.Result == nil {
+		return fmt.Errorf("workload %q has no scheduler result evidence", job.ID)
+	}
+	mediaType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	if mediaType == "" {
+		mediaType = "application/json"
+	}
+	sum := sha256.Sum256(resp.Body)
+	digest := hex.EncodeToString(sum[:])
+	finish := workload.FinishRequest{
+		ResultArtifact:  "stored://workload/" + job.ID,
+		ResultMediaType: mediaType,
+		ResultBytes:     len(resp.Body),
+		ResultSHA256:    digest,
+		ResultBody:      append([]byte(nil), resp.Body...),
+	}
+	if err := attachWorkloadResultArtifact(job.Result, finish); err != nil {
+		return err
+	}
+	job.Result.ProviderCapture = true
+	if err := validateWorkloadResultBodyRequest(finish); err != nil {
+		return err
+	}
+	if err := runtime.FinishJob(ctx, job, result.Lease, nil); err != nil {
+		return err
+	}
+	return store.SaveWorkloadResultBody(ctx, domain.WorkloadResultBody{
+		JobID:     job.ID,
+		MediaType: mediaType,
+		Bytes:     len(resp.Body),
+		SHA256:    digest,
+		Body:      append([]byte(nil), resp.Body...),
+	})
+}
+
+func executableWorkloadIngressRequest(ctx context.Context, store workloadStore, job domain.Job) (translate.IngressRequest, error) {
+	registry, ok := store.(workloadRegistryStore)
+	if !ok {
+		return translate.IngressRequest{}, fmt.Errorf("workload payload registry is not available")
+	}
+	records, err := registry.Snapshot(ctx)
+	if err != nil {
+		return translate.IngressRequest{}, err
+	}
+	for _, rec := range records {
+		if rec.JobID != job.ID {
+			continue
+		}
+		if rec.PayloadRedacted || rec.Handling == domain.HandlingPrivate {
+			return translate.IngressRequest{}, fmt.Errorf("workload payload is redacted")
+		}
+		payloadJob, payload, err := peercoord.DecodeRescuePayload(rec.Request)
+		if err != nil {
+			return translate.IngressRequest{}, err
+		}
+		if payloadJob.ID != job.ID {
+			return translate.IngressRequest{}, fmt.Errorf("payload job %q does not match %q", payloadJob.ID, job.ID)
+		}
+		executable, err := workload.DecodeExecutablePayload(payload)
+		if err != nil {
+			return translate.IngressRequest{}, err
+		}
+		switch executable.Kind {
+		case workload.ExecutablePayloadKindOpenAIChat:
+			return translate.ParseOpenAIChat(executable.Body)
+		case workload.ExecutablePayloadKindOpenAICompletion:
+			return translate.ParseOpenAICompletion(executable.Body)
+		case workload.ExecutablePayloadKindAnthropicMessages:
+			return translate.ParseAnthropicMessages(executable.Body)
+		default:
+			return translate.IngressRequest{}, fmt.Errorf("unsupported executable payload kind %q", executable.Kind)
+		}
+	}
+	return translate.IngressRequest{}, fmt.Errorf("workload payload is not registry-replayable")
+}
+
 func validSHA256Hex(value string) bool {
 	if len(value) != 64 {
 		return false
@@ -857,6 +990,7 @@ func workloadExecutionEvidence(ctx context.Context, store workloadStore, job dom
 	out := workload.ExecutionEvidence{AutomaticProviderOutputCapture: false}
 	out.PayloadContract, out.PayloadKind, out.PayloadExecutable = workloadExecutablePayloadEvidence(ctx, store, job)
 	if job.Result != nil {
+		out.AutomaticProviderOutputCapture = job.Result.ProviderCapture
 		out.ResultArtifact = job.Result.ResultArtifact != ""
 		out.ResultBytes = job.Result.ResultBytes
 		out.ResultSHA256 = job.Result.ResultSHA256 != ""

@@ -125,22 +125,25 @@ It drains through the scheduler queue, marks terminal state through the
 scheduler release path, and exposes terminal scheduler evidence through
 status/debug surfaces. Workload responses also expose `execution_evidence`:
 queued/running/terminal state, `payload_contract`, `payload_kind`,
-`payload_executable`, `provider_output_capture=false` for the current
-manual-finish boundary, and whether an explicit stored result body is replayable.
+`payload_executable`, whether provider output was captured automatically, and
+whether an explicit stored result body is replayable.
 Terminal workload evidence may carry a redacted result artifact manifest:
 reference, media type, byte count, and digest. If a workload is finished with
 explicit stored result bytes, `myce jobs result` can retrieve those bytes
-without exposing them through status/default debug output. Mycelium does not yet
-automatically execute queued provider payloads or capture/replay provider output
-for queued inference through this lane. The fast test suite includes a
-repo-local HTTP workload proof for queued admission, multi-owner drain,
+without exposing them through status/default debug output. `myce jobs drain
+--execute` is the first automatic queued provider-output path: it accepts only
+non-streaming registry-replayable executable payloads, runs them through the
+gateway/provider execution seam after scheduler/owner admission, stores the
+provider response body as a workload result, and finishes/releases the job
+through the scheduler. The fast test suite includes a repo-local HTTP workload
+proof for queued admission, multi-owner drain, explicit provider execution,
 terminal success/failure, result artifact manifest metadata, explicit stored
 result-body replay, executable-payload contract classification, execution
 evidence, and lease reclaim.
 Registry rescue is scoped to durable async work with replayable payload
 references; foreground streams that die with their coordinator are interrupted
-work, not transparently resumed streams. Automatic raw async inference output
-capture for queued payloads is still a separate product gate.
+work, not transparently resumed streams. Streaming queued provider replay
+remains a separate product gate.
 
 ## Public Hygiene Rules
 

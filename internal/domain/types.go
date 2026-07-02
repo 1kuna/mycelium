@@ -178,6 +178,7 @@ type JobResult struct {
 	ResultBytes     int               `json:"result_bytes,omitempty"`
 	ResultSHA256    string            `json:"result_sha256,omitempty"`
 	ResultRedacted  bool              `json:"result_redacted,omitempty"`
+	ProviderCapture bool              `json:"provider_capture,omitempty"`
 	Terminal        bool              `json:"terminal,omitempty"`
 }
 

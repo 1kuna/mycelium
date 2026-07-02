@@ -20,17 +20,21 @@ handoff.
   artifact manifests for repo-local allocator proofs.
   Workload status now says whether a job is queued, running, terminal
   manifest-only, or terminal replayable, whether the stored payload is an
-  executable gateway-request envelope, and that automatic provider-output
-  capture is not active. Explicit stored result bodies can be attached at
+  executable gateway-request envelope, and whether provider output was captured
+  automatically. `myce jobs drain --execute` now provides the first automatic
+  queued provider-output path for non-streaming registry-replayable executable
+  payloads: it runs the placed workload through the gateway/provider seam,
+  stores the provider response body, and finishes/releases the job through the
+  scheduler. Explicit stored result bodies can still be attached manually at
   workload finish time and retrieved through the separate `jobs result` path
   without printing raw output in status/debug surfaces. The fast suite now
-  covers queued admission, multi-owner drain, terminal success/failure, result
-  artifact manifest metadata, explicit stored result-body replay, payload
-  replayability evidence, executable-payload contract evidence, execution
-  evidence, and lease reclaim through the public workload HTTP surface. The
-  remaining blockers are automatic queued provider execution/output capture and
-  replay for queued inference, plus a live pressure proof that shows
-  queue/preemption/reclaim under real fleet load.
+  covers queued admission, multi-owner drain, explicit provider execution,
+  terminal success/failure, result artifact manifest metadata, explicit stored
+  result-body replay, payload replayability evidence, executable-payload
+  contract evidence, execution evidence, and lease reclaim through the public
+  workload HTTP surface. The remaining blockers are streaming queued replay and
+  a live pressure proof that shows queue/preemption/reclaim under real fleet
+  load.
 - 2026-06-29: A low-context tool-call route can prove transport and provider
   parser wiring without being a valid route for reasoning-heavy tool-agent
   workloads. Public Mycelium evidence now exposes this as a consumer-contract

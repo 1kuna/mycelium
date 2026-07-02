@@ -186,6 +186,152 @@ type RouteResponse struct {
 	ColdLoad bool
 }
 
+// ExecutePlacedProvider runs a non-streaming request on an already placed
+// instance. On success the caller owns terminal job completion/release so it can
+// attach workload-specific result metadata first. On execution failure this
+// method marks the placed job failed and releases its lease.
+func (r *Router) ExecutePlacedProvider(ctx context.Context, req translate.IngressRequest, job domain.Job, decision domain.PlacementDecision, inst domain.ModelInstance, lease domain.Lease, attempt int, cold bool, loadMS int) (RouteResponse, error) {
+	if req.Stream {
+		return RouteResponse{}, fmt.Errorf("placed provider execution does not support streaming requests")
+	}
+	req, err := r.applyRequestDefaults(req)
+	if err != nil {
+		return RouteResponse{}, err
+	}
+	if err := r.validatePrivateRequest(req); err != nil {
+		return RouteResponse{}, err
+	}
+	preset, err := r.Presets.Resolve(req.Model)
+	if err != nil {
+		return RouteResponse{}, err
+	}
+	profile, err := r.profileFor(preset)
+	if err != nil {
+		return RouteResponse{}, err
+	}
+	route, err := translate.BuildUpstream(req, profile)
+	if err != nil {
+		return RouteResponse{}, err
+	}
+	recorder := r.newSessionRecorder()
+	if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhasePlaced, func(sample *domain.SessionMetric) {
+		sample.BytesIn = len(req.Body)
+		sample.LoadWallClockMS = loadMS
+	}); err != nil {
+		if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
+			return RouteResponse{}, failErr
+		}
+		return RouteResponse{}, err
+	}
+	if cold {
+		if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhaseLoadReady, func(sample *domain.SessionMetric) {
+			sample.BytesIn = len(req.Body)
+			sample.LoadWallClockMS = loadMS
+		}); err != nil {
+			if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
+				return RouteResponse{}, failErr
+			}
+			return RouteResponse{}, err
+		}
+	}
+	endRequest, err := r.beginInstanceRequest(ctx, inst)
+	if err != nil {
+		if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, err); failErr != nil {
+			return RouteResponse{}, errors.Join(err, failErr)
+		}
+		if reportErr := r.reportFailure(cleanupContext(ctx), inst.ID, err); reportErr != nil {
+			return RouteResponse{}, reportErr
+		}
+		return RouteResponse{}, err
+	}
+	clk := r.clock()
+	upstreamStart := clk.Now()
+	if err := recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseUpstreamStart, upstreamStart, func(sample *domain.SessionMetric) {
+		sample.BytesIn = len(route.Body)
+		sample.LoadWallClockMS = loadMS
+	}); err != nil {
+		endRequest()
+		if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+			return RouteResponse{}, errors.Join(err, failErr)
+		}
+		return RouteResponse{}, err
+	}
+	resp, err := r.callUpstream(ctx, inst, route)
+	upstreamEnd := clk.Now()
+	endRequest()
+	if err != nil {
+		if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, err); failErr != nil {
+			return RouteResponse{}, errors.Join(err, failErr)
+		}
+		if reportErr := r.reportFailure(cleanupContext(ctx), inst.ID, err); reportErr != nil {
+			return RouteResponse{}, reportErr
+		}
+		return RouteResponse{}, err
+	}
+	headers := cloneHeader(resp.Header)
+	if resp.Status >= 400 {
+		bodyText := strings.TrimSpace(string(resp.Body))
+		statusErr := fmt.Errorf("upstream returned %d: %s", resp.Status, bodyText)
+		if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, statusErr); failErr != nil {
+			return RouteResponse{}, errors.Join(statusErr, failErr)
+		}
+		if resp.Status >= 500 {
+			if reportErr := r.reportFailure(cleanupContext(ctx), inst.ID, statusErr); reportErr != nil {
+				return RouteResponse{}, reportErr
+			}
+		}
+		if headers.Get("Content-Type") == "" {
+			headers.Set("Content-Type", "application/json")
+		}
+		writeRouteDiagnostics(headers, routeDiagnosticsFor(req, preset, profile, cold, loadMS, 0, durationMS(upstreamStart, upstreamEnd)))
+		writeDecisionHeaders(headers, decision, inst, profile, attempt)
+		body := resp.Body
+		if len(body) == 0 {
+			body = []byte(fmt.Sprintf(`{"error":%q}`, statusErr.Error()))
+		}
+		return RouteResponse{Status: resp.Status, Header: headers, Body: body, Decision: decision, Instance: inst, Lease: lease, Profile: profile, Attempts: attempt, ColdLoad: cold}, statusErr
+	}
+	body, contentType, err := translate.TranslateResponse(req, route, resp.Body)
+	if err != nil {
+		if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+			return RouteResponse{}, errors.Join(err, failErr)
+		}
+		return RouteResponse{}, err
+	}
+	body, err = normalizeOpenAIReasoningBoundary(req, preset, body)
+	if err != nil {
+		if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+			return RouteResponse{}, errors.Join(err, failErr)
+		}
+		return RouteResponse{}, err
+	}
+	metric, err := r.recordMetric(ctx, job, preset, inst, body, metricTiming{
+		Start:           upstreamStart,
+		FirstByte:       upstreamEnd,
+		End:             upstreamEnd,
+		LoadWallClockMS: loadMS,
+	})
+	if err != nil {
+		if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+			return RouteResponse{}, errors.Join(err, failErr)
+		}
+		return RouteResponse{}, err
+	}
+	promptTokens, completionTokens := usageFromBody(body)
+	if err := recorder.emitMetric(ctx, metric, domain.TelemetryPhaseComplete, len(route.Body), len(body), promptTokens, completionTokens); err != nil {
+		if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+			return RouteResponse{}, errors.Join(err, failErr)
+		}
+		return RouteResponse{}, err
+	}
+	if contentType != "" {
+		headers.Set("Content-Type", contentType)
+	}
+	writeRouteDiagnostics(headers, routeDiagnosticsFor(req, preset, profile, cold, loadMS, 0, durationMS(upstreamStart, upstreamEnd)))
+	writeDecisionHeaders(headers, decision, inst, profile, attempt)
+	return RouteResponse{Status: resp.Status, Header: headers, Body: body, Decision: decision, Instance: inst, Lease: lease, Profile: profile, Attempts: attempt, ColdLoad: cold}, nil
+}
+
 type noInstanceAvailableError struct {
 	JobID      string
 	RetryAfter time.Duration
