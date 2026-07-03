@@ -22,6 +22,7 @@ import (
 	"mycelium/internal/modelruntime"
 	"mycelium/internal/optimizer"
 	"mycelium/internal/ports"
+	"mycelium/internal/reconcile"
 	"mycelium/internal/scheduler"
 	"mycelium/pkg/api"
 )
@@ -356,13 +357,14 @@ func (r *Router) ExecutePlacedProvider(ctx context.Context, req translate.Ingres
 }
 
 type noInstanceAvailableError struct {
-	JobID      string
-	RetryAfter time.Duration
-	Reason     string
-	Decision   domain.PlacementDecision
-	Instance   domain.ModelInstance
-	Profile    profiles.Profile
-	Attempts   int
+	JobID          string
+	RetryAfter     time.Duration
+	Reason         string
+	Decision       domain.PlacementDecision
+	Instance       domain.ModelInstance
+	Profile        profiles.Profile
+	Attempts       int
+	DemandRecorded bool
 }
 
 func (e noInstanceAvailableError) Error() string {
@@ -377,6 +379,21 @@ func (e noInstanceAvailableError) retryAfterSeconds() int {
 		return 1
 	}
 	return int((e.RetryAfter + time.Second - 1) / time.Second)
+}
+
+func (r *Router) recordNoInstanceDemand(ctx context.Context, miss noInstanceAvailableError) error {
+	if miss.DemandRecorded {
+		return nil
+	}
+	if r.Runtime == nil || r.Runtime.Store == nil {
+		return nil
+	}
+	store, ok := r.Runtime.Store.(reconcile.DemandStore)
+	if !ok {
+		return nil
+	}
+	reason := firstString(miss.Reason, "gateway_no_instance")
+	return reconcile.RecordDemand(ctx, store, miss.Decision, reason, r.clock().Now())
 }
 
 type leasedRouteError struct {
@@ -463,10 +480,13 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			if errors.As(err, &noInstance) {
 				noInstance.Profile = profile
 				noInstance.Attempts = attempt
+				if demandErr := r.recordNoInstanceDemand(ctx, noInstance); demandErr != nil {
+					return RouteResponse{}, errors.Join(noInstance, demandErr)
+				}
 				return RouteResponse{}, noInstance
 			}
 			if placementNoFitError(err) {
-				return RouteResponse{}, noInstanceAvailableError{
+				noInstance := noInstanceAvailableError{
 					JobID:      job.ID,
 					RetryAfter: time.Second,
 					Reason:     err.Error(),
@@ -475,6 +495,10 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 					Profile:    profile,
 					Attempts:   attempt,
 				}
+				if demandErr := r.recordNoInstanceDemand(ctx, noInstance); demandErr != nil {
+					return RouteResponse{}, errors.Join(noInstance, demandErr)
+				}
+				return RouteResponse{}, noInstance
 			}
 			return RouteResponse{}, err
 		}
@@ -1317,12 +1341,12 @@ func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, payload []byt
 		result, err := r.Runtime.SubmitWithPayload(ctx, job, payload, hooks...)
 		if err != nil {
 			if result.Decision.Action == domain.ActionQueued {
-				return result.Decision, result.Instance, result.Lease, false, noInstanceAvailableError{JobID: job.ID, RetryAfter: time.Second, Decision: result.Decision, Instance: result.Instance}
+				return result.Decision, result.Instance, result.Lease, false, noInstanceAvailableError{JobID: job.ID, RetryAfter: time.Second, Decision: result.Decision, Instance: result.Instance, DemandRecorded: true}
 			}
 			return result.Decision, result.Instance, result.Lease, false, err
 		}
 		if result.Decision.Action == domain.ActionQueued {
-			return result.Decision, result.Instance, result.Lease, false, noInstanceAvailableError{JobID: job.ID, RetryAfter: time.Second, Decision: result.Decision, Instance: result.Instance}
+			return result.Decision, result.Instance, result.Lease, false, noInstanceAvailableError{JobID: job.ID, RetryAfter: time.Second, Decision: result.Decision, Instance: result.Instance, DemandRecorded: true}
 		}
 		cold := result.Decision.InstanceID == ""
 		return result.Decision, result.Instance, result.Lease, cold, nil

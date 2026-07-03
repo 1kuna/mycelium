@@ -3092,6 +3092,94 @@ func TestRouterRouteEarlyErrors(t *testing.T) {
 	}
 }
 
+func TestRouterNoInstanceDemandRecordedOnceThroughRuntime(t *testing.T) {
+	preset := fixtures.MakePreset()
+	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
+	store := &gatewayRuntimeStore{}
+	router.Runtime = &scheduler.Service{
+		Placer:  router.Placer,
+		Fleet:   router.Fleet,
+		Nodes:   router.Nodes,
+		Queue:   scheduler.NewQueue(router.Clock),
+		Store:   store,
+		Clock:   router.Clock,
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+
+	_, err = router.Route(context.Background(), req)
+	var noInstance noInstanceAvailableError
+	if !errors.As(err, &noInstance) {
+		t.Fatalf("Route err = %v", err)
+	}
+	if len(store.tasks) != 1 {
+		t.Fatalf("tasks = %+v", store.tasks)
+	}
+	for _, task := range store.tasks {
+		if task.Source != "demand_signal" || task.Hits != 1 || task.PresetID != preset.ID {
+			t.Fatalf("task = %+v", task)
+		}
+	}
+}
+
+func TestRouterClientErrorsDoNotEmitDemand(t *testing.T) {
+	preset := fixtures.MakePreset()
+	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
+	store := &gatewayRuntimeStore{}
+	router.Runtime = &scheduler.Service{
+		Placer:  router.Placer,
+		Fleet:   router.Fleet,
+		Nodes:   router.Nodes,
+		Queue:   scheduler.NewQueue(router.Clock),
+		Store:   store,
+		Clock:   router.Clock,
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	req := translate.IngressRequest{Kind: translate.KindOpenAIChat, Model: "missing"}
+
+	if _, err := router.Route(context.Background(), req); err == nil || !strings.Contains(err.Error(), "unknown model") {
+		t.Fatalf("Route err = %v", err)
+	}
+	if len(store.tasks) != 0 {
+		t.Fatalf("client error emitted demand: %+v", store.tasks)
+	}
+}
+
+func TestRouterRecordNoInstanceDemandBoundaries(t *testing.T) {
+	preset := fixtures.MakePreset()
+	decision := domain.PlacementDecision{JobID: "job-a", Action: domain.ActionQueued, Preset: preset}
+	miss := noInstanceAvailableError{JobID: "job-a", Decision: decision}
+	if err := (&Router{}).recordNoInstanceDemand(context.Background(), miss); err != nil {
+		t.Fatalf("nil runtime demand: %v", err)
+	}
+	if err := (&Router{Runtime: &scheduler.Service{}}).recordNoInstanceDemand(context.Background(), miss); err != nil {
+		t.Fatalf("nil runtime store demand: %v", err)
+	}
+	noDemandStore := &Router{
+		Runtime: &scheduler.Service{Store: gatewayRuntimeStoreWithoutDemand{}},
+	}
+	if err := noDemandStore.recordNoInstanceDemand(context.Background(), miss); err != nil {
+		t.Fatalf("runtime store without demand: %v", err)
+	}
+	store := &gatewayRuntimeStore{}
+	router := &Router{Runtime: &scheduler.Service{Store: store}, Clock: mocks.NewFakeClock(time.Unix(30, 0).UTC())}
+	if err := router.recordNoInstanceDemand(context.Background(), noInstanceAvailableError{JobID: "job-a", Decision: decision, DemandRecorded: true}); err != nil {
+		t.Fatalf("already recorded demand: %v", err)
+	}
+	if len(store.tasks) != 0 {
+		t.Fatalf("already-recorded miss wrote tasks: %+v", store.tasks)
+	}
+	if err := router.recordNoInstanceDemand(context.Background(), miss); err != nil {
+		t.Fatalf("record demand: %v", err)
+	}
+	if len(store.tasks) != 1 {
+		t.Fatalf("tasks = %+v", store.tasks)
+	}
+}
+
 func TestRouterUsesRuntimeServiceForColdLoad(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4189,9 +4277,25 @@ type gatewayRuntimeStore struct {
 	deletedLeases  []string
 	leases         []domain.Lease
 	jobs           []domain.Job
+	tasks          map[string]domain.ReconciliationTaskRecord
 	deleteLeaseErr error
 	listLeasesErr  error
 }
+
+type gatewayRuntimeStoreWithoutDemand struct{}
+
+func (gatewayRuntimeStoreWithoutDemand) SaveJob(context.Context, domain.Job) error { return nil }
+func (gatewayRuntimeStoreWithoutDemand) SaveLease(context.Context, domain.Lease) error {
+	return nil
+}
+func (gatewayRuntimeStoreWithoutDemand) ListLeases(context.Context) ([]domain.Lease, error) {
+	return nil, nil
+}
+func (gatewayRuntimeStoreWithoutDemand) DeleteLease(context.Context, string) error { return nil }
+func (gatewayRuntimeStoreWithoutDemand) SaveInstance(context.Context, domain.ModelInstance) error {
+	return nil
+}
+func (gatewayRuntimeStoreWithoutDemand) DeleteInstance(context.Context, string) error { return nil }
 
 func (s *gatewayRuntimeStore) SaveJob(_ context.Context, job domain.Job) error {
 	s.jobs = append(s.jobs, job)
@@ -4238,6 +4342,24 @@ func (s *gatewayRuntimeStore) SaveInstance(context.Context, domain.ModelInstance
 }
 
 func (s *gatewayRuntimeStore) DeleteInstance(context.Context, string) error {
+	return nil
+}
+
+func (s *gatewayRuntimeStore) ListReconciliationTasks(_ context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error) {
+	tasks := make([]domain.ReconciliationTaskRecord, 0, len(s.tasks))
+	for _, task := range s.tasks {
+		if jobID == "" || task.JobID == jobID {
+			tasks = append(tasks, task)
+		}
+	}
+	return tasks, nil
+}
+
+func (s *gatewayRuntimeStore) SaveReconciliationTask(_ context.Context, task domain.ReconciliationTaskRecord) error {
+	if s.tasks == nil {
+		s.tasks = map[string]domain.ReconciliationTaskRecord{}
+	}
+	s.tasks[task.ID] = task
 	return nil
 }
 

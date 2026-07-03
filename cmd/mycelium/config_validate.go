@@ -33,6 +33,9 @@ func validatePeerConfig(cfg PeerConfig) error {
 	if len(cfg.SubmitterPolicy) > 0 {
 		return fmt.Errorf("submitter_policy is disabled until authenticated submitter policy is implemented")
 	}
+	if err := validateAutonomyPolicy(cfg.Autonomy); err != nil {
+		return err
+	}
 	if cfg.QueueDrainMS <= 0 {
 		return fmt.Errorf("queue_drain_ms must be positive")
 	}
@@ -118,6 +121,28 @@ func validatePeerConfig(cfg PeerConfig) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func validateAutonomyPolicy(policy domain.AutonomyPolicy) error {
+	if policy.MaxReplicasPerModelPerNode < 0 {
+		return fmt.Errorf("autonomy.max_replicas_per_model_per_node must be non-negative")
+	}
+	if policy.MaxReplicasPerModel < 0 {
+		return fmt.Errorf("autonomy.max_replicas_per_model must be non-negative")
+	}
+	if policy.ScaleCooldownMS < 0 {
+		return fmt.Errorf("autonomy.scale_cooldown_ms must be non-negative")
+	}
+	if policy.IdleTTLMS < 0 {
+		return fmt.Errorf("autonomy.idle_ttl_ms must be non-negative")
+	}
+	if policy.MaxWaitDefaultMS < 0 {
+		return fmt.Errorf("autonomy.max_wait_default_ms must be non-negative")
+	}
+	if policy.AutoScale && policy.ScaleCooldownMS < 1000 {
+		return fmt.Errorf("autonomy.scale_cooldown_ms must be at least 1000 when auto_scale is true")
 	}
 	return nil
 }

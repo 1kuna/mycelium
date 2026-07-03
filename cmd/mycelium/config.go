@@ -38,6 +38,7 @@ type PeerConfig struct {
 	Reservations         []domain.Reservation           `json:"reservations"`
 	PrivateStorageKey    string                         `json:"private_storage_key,omitempty"`
 	SubmitterPolicy      map[string]SubmitterPolicyRule `json:"submitter_policy,omitempty"`
+	Autonomy             domain.AutonomyPolicy          `json:"autonomy,omitempty"`
 	DefaultProject       string                         `json:"default_project"`
 	QueueDrainMS         int                            `json:"queue_drain_ms"`
 	QueueDrainLimit      int                            `json:"queue_drain_limit"`
