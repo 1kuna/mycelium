@@ -4434,6 +4434,68 @@ func TestRouterRouteHoldsWorkloadLeaseForReuse(t *testing.T) {
 	}
 }
 
+func TestRouterHeldLeaseClientCancelDoesNotFailWorker(t *testing.T) {
+	preset := fixtures.MakePreset()
+	inst := fixtures.MakeInstance()
+	inst.Addr = "http://upstream.test"
+	node := fixtures.MakeNode(fixtures.WithNodeID(inst.NodeID))
+	agent := mocks.NewNodeAgent(node)
+	router := newTestRouter(preset, domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{inst},
+	}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
+	router.Client = &http.Client{Transport: gatewayRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})}
+	store := &gatewayRuntimeStore{}
+	lease := domain.Lease{ID: "lease-held", JobID: "workload-held", NodeID: inst.NodeID, InstanceID: inst.ID}
+	job := domain.Job{
+		ID:      "workload-held",
+		Model:   preset.ModelRef,
+		Project: "project-a",
+		Status:  domain.JobRunning,
+		Result: &domain.JobResult{
+			Decision: domain.PlacementDecision{JobID: "workload-held", Action: domain.ActionWarmInstance, NodeID: inst.NodeID, InstanceID: inst.ID, Preset: preset},
+			Instance: inst,
+			LeaseID:  lease.ID,
+			NodeID:   inst.NodeID,
+			PresetID: preset.ID,
+		},
+	}
+	store.jobs = []domain.Job{job}
+	store.leases = []domain.Lease{lease}
+	router.Runtime = &scheduler.Service{Placer: router.Placer, Fleet: router.Fleet, Nodes: router.Nodes, Store: store, Queue: scheduler.NewQueue(router.Clock), Clock: router.Clock}
+
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.Project = "project-a"
+	req.WorkloadID = job.ID
+	req.LeaseID = lease.ID
+	req.HoldLease = true
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = router.Route(ctx, req)
+	var statusErr interface {
+		StatusCode() int
+	}
+	if !errors.As(err, &statusErr) || statusErr.StatusCode() != statusClientClosedRequest {
+		t.Fatalf("Route err = %v", err)
+	}
+	if !store.sawJobStatus(domain.JobRunning) {
+		t.Fatalf("held workload should remain running after client cancel: jobs=%+v", store.jobs)
+	}
+	if len(store.deletedLeases) != 0 {
+		t.Fatalf("held lease must not be deleted after client cancel: %+v", store.deletedLeases)
+	}
+	if strings.Join(agent.Calls, ",") != "begin:inst_test,end:inst_test" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+}
+
 func TestParseRequestParsesLeaseHoldHeader(t *testing.T) {
 	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
 
