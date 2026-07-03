@@ -26,6 +26,8 @@ import (
 	"mycelium/pkg/api"
 )
 
+const statusClientClosedRequest = 499
+
 type FleetSource interface {
 	Snapshot(ctx context.Context) (domain.FleetSnapshot, error)
 }
@@ -283,6 +285,9 @@ func (r *Router) ExecutePlacedProvider(ctx context.Context, req translate.Ingres
 	upstreamEnd := clk.Now()
 	endRequest()
 	if err != nil {
+		if req.HoldLease && requestContextCanceled(ctx, err) {
+			return RouteResponse{}, leasedRouteError{status: statusClientClosedRequest, msg: "held workload request was canceled by the client before the provider response completed"}
+		}
 		if failErr := r.failPlacedJob(ctx, recorder, job, preset, inst, lease, err); failErr != nil {
 			return RouteResponse{}, errors.Join(err, failErr)
 		}
@@ -1779,6 +1784,10 @@ func writeTelemetryWarning(headers http.Header, err error) {
 		return
 	}
 	headers.Set(HeaderTelemetryWarning, "completion_telemetry_failed")
+}
+
+func requestContextCanceled(ctx context.Context, err error) bool {
+	return ctx != nil && ctx.Err() != nil && errors.Is(err, context.Canceled)
 }
 
 func (r *Router) reactiveRequeuePreset(job domain.Job, preset domain.Preset, cause error) (domain.Preset, bool) {
