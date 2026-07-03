@@ -4032,7 +4032,7 @@ func TestPeerAddressAuthAndRPCErrorHelpers(t *testing.T) {
 
 func TestRegistryAndTelemetryHTTPErrorBranches(t *testing.T) {
 	ctx := context.Background()
-	registry := &mocks.JobRegistry{Err: errors.New("registry boom")}
+	registry := failingRescueSnapshotRegistry{err: errors.New("registry boom")}
 	mux := http.NewServeMux()
 	mountRegistryHTTP(mux, registry, "rpc-secret")
 	rec := httptest.NewRecorder()
@@ -5406,7 +5406,7 @@ func TestWorkloadPayloadEvidenceClassifiesRegistryStates(t *testing.T) {
 	}
 }
 
-func TestWorkloadJobRecordUsesDirectLookupAndSnapshotFallback(t *testing.T) {
+func TestWorkloadJobRecordUsesPointLookup(t *testing.T) {
 	ctx := context.Background()
 	rec := domain.JobRecord{
 		JobID:       "job-a",
@@ -5420,7 +5420,7 @@ func TestWorkloadJobRecordUsesDirectLookupAndSnapshotFallback(t *testing.T) {
 	if err != nil || !found || got.JobID != "job-a" {
 		t.Fatalf("direct JobRecord = %+v found=%v err=%v", got, found, err)
 	}
-	fallback := snapshotOnlyWorkloadRegistry{records: []domain.JobRecord{rec}}
+	fallback := &pointOnlyWorkloadRegistry{records: []domain.JobRecord{rec}}
 	got, found, err = workloadJobRecord(ctx, workloadStatusOnlyStore{}, fallback, "job-a")
 	if err != nil || !found || got.JobID != "job-a" {
 		t.Fatalf("fallback JobRecord = %+v found=%v err=%v", got, found, err)
@@ -6568,12 +6568,17 @@ func (s *blockingSnapshotWorkloadStore) Snapshot(ctx context.Context) ([]domain.
 	return nil, ctx.Err()
 }
 
-type snapshotOnlyWorkloadRegistry struct {
+type pointOnlyWorkloadRegistry struct {
 	records []domain.JobRecord
 }
 
-func (s snapshotOnlyWorkloadRegistry) Snapshot(context.Context) ([]domain.JobRecord, error) {
-	return append([]domain.JobRecord(nil), s.records...), nil
+func (s *pointOnlyWorkloadRegistry) JobRecord(_ context.Context, id string) (domain.JobRecord, bool, error) {
+	for _, rec := range s.records {
+		if rec.JobID == id {
+			return rec, true, nil
+		}
+	}
+	return domain.JobRecord{}, false, nil
 }
 
 type sqliteWorkloadStatusStoreNoSnapshot struct {
@@ -6582,6 +6587,26 @@ type sqliteWorkloadStatusStoreNoSnapshot struct {
 
 func (s sqliteWorkloadStatusStoreNoSnapshot) Snapshot(context.Context) ([]domain.JobRecord, error) {
 	return nil, errors.New("unexpected full registry snapshot")
+}
+
+type failingRescueSnapshotRegistry struct {
+	err error
+}
+
+func (r failingRescueSnapshotRegistry) Put(context.Context, domain.JobRecord) error {
+	return r.err
+}
+
+func (r failingRescueSnapshotRegistry) Watch(context.Context, string) (<-chan domain.JobRecord, error) {
+	return nil, r.err
+}
+
+func (r failingRescueSnapshotRegistry) Snapshot(context.Context) ([]domain.JobRecord, error) {
+	return nil, r.err
+}
+
+func (r failingRescueSnapshotRegistry) RescueSnapshot(context.Context) ([]domain.JobRecord, error) {
+	return nil, r.err
 }
 
 func (s *workloadMemoryStore) SaveReconciliationTask(_ context.Context, task domain.ReconciliationTaskRecord) error {

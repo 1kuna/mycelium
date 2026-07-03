@@ -65,6 +65,69 @@ func TestRescueJobLogUsesLocalThenRegistry(t *testing.T) {
 	}
 }
 
+func TestRescueJobLogUsesRegistryPointLookup(t *testing.T) {
+	ctx := context.Background()
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	encoded, err := EncodeRescuePayload(job, []byte(`{"ok":true}`))
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload: %v", err)
+	}
+	registry := pointLookupOnlyRegistry{
+		records: map[string]domain.JobRecord{
+			job.ID: {
+				JobID:       job.ID,
+				Coordinator: "peer-a",
+				Status:      domain.JobQueued,
+				Request:     encoded,
+				UpdatedAt:   time.Unix(1, 0).UTC(),
+			},
+		},
+		snapshotErr: errors.New("full snapshot should not be used"),
+	}
+	log := NewRescueJobLog(nil, &registry, nil)
+
+	got, payload, err := log.Job(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("Job: %v", err)
+	}
+	if got.ID != job.ID || string(payload) != `{"ok":true}` {
+		t.Fatalf("Job = %+v payload=%s", got, payload)
+	}
+	if registry.snapshotCalls != 0 {
+		t.Fatalf("full snapshot was used %d times", registry.snapshotCalls)
+	}
+}
+
+type pointLookupOnlyRegistry struct {
+	records       map[string]domain.JobRecord
+	err           error
+	snapshotErr   error
+	snapshotCalls int
+}
+
+func (r *pointLookupOnlyRegistry) Put(context.Context, domain.JobRecord) error {
+	return nil
+}
+
+func (r *pointLookupOnlyRegistry) Watch(context.Context, string) (<-chan domain.JobRecord, error) {
+	ch := make(chan domain.JobRecord)
+	close(ch)
+	return ch, nil
+}
+
+func (r *pointLookupOnlyRegistry) Snapshot(context.Context) ([]domain.JobRecord, error) {
+	r.snapshotCalls++
+	return nil, r.snapshotErr
+}
+
+func (r *pointLookupOnlyRegistry) JobRecord(_ context.Context, id string) (domain.JobRecord, bool, error) {
+	if r.err != nil {
+		return domain.JobRecord{}, false, r.err
+	}
+	rec, ok := r.records[id]
+	return rec, ok, nil
+}
+
 func TestRescueJobLogEncryptsPrivateRegistryFallback(t *testing.T) {
 	ctx := context.Background()
 	key := []byte("0123456789abcdef0123456789abcdef")
@@ -152,7 +215,9 @@ func TestRescueJobLogErrors(t *testing.T) {
 		{name: "canceled read", log: NewRescueJobLog(NewJobLog(), nil, nil), ctx: canceled, id: "job-a", want: "canceled"},
 		{name: "local miss no registry", log: NewRescueJobLog(NewJobLog(), nil, nil), ctx: ctx, id: "missing", want: "local job log"},
 		{name: "no source", log: NewRescueJobLog(nil, nil, nil), ctx: ctx, id: "missing", want: "not configured"},
-		{name: "snapshot", log: NewRescueJobLog(NewJobLog(), failingJobRegistry{err: snapshotErr}, nil), ctx: ctx, id: "job-a", want: "snapshot"},
+		{name: "no point lookup", log: NewRescueJobLog(nil, failingJobRegistry{err: snapshotErr}, nil), ctx: ctx, id: "job-a", want: "point lookup"},
+		{name: "no point lookup preserves local miss", log: NewRescueJobLog(NewJobLog(), failingJobRegistry{err: snapshotErr}, nil), ctx: ctx, id: "job-a", want: "local job log"},
+		{name: "point lookup error", log: NewRescueJobLog(nil, &pointLookupOnlyRegistry{err: snapshotErr}, nil), ctx: ctx, id: "job-a", want: "snapshot"},
 		{name: "mismatch", log: NewRescueJobLog(NewJobLog(), registry, nil), ctx: ctx, id: job.ID, want: "does not match"},
 		{name: "redacted", log: NewRescueJobLog(NewJobLog(), redacted, nil), ctx: ctx, id: "redacted", want: "redacted"},
 		{name: "unrelated registry preserves local miss", log: NewRescueJobLog(NewJobLog(), unrelated, nil), ctx: ctx, id: "missing", want: "local job log"},

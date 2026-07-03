@@ -18,6 +18,10 @@ type RegistryClient interface {
 	Push(ctx context.Context, peer domain.Peer, records []domain.JobRecord) error
 }
 
+type RescueSnapshotter interface {
+	RescueSnapshot(ctx context.Context) ([]domain.JobRecord, error)
+}
+
 type RegistryReplicator struct {
 	Local  ports.JobRegistry
 	Peers  RegistryPeerSource
@@ -59,11 +63,11 @@ func (r RegistryReplicator) SyncOnce(ctx context.Context) error {
 				return err
 			}
 		}
-		local, err := r.Local.Snapshot(ctx)
+		local, err := RescueRecords(ctx, r.Local)
 		if err != nil {
 			return err
 		}
-		if err := r.Client.Push(ctx, peer, redactPrivatePayloads(RescueSnapshot(local))); err != nil {
+		if err := r.Client.Push(ctx, peer, redactPrivatePayloads(local)); err != nil {
 			syncErr = errors.Join(syncErr, fmt.Errorf("push registry to peer %q: %w", peer.ID, err))
 		}
 	}
@@ -106,6 +110,13 @@ func (r RegistryReplicator) validate() error {
 		return fmt.Errorf("registry replicator is not fully configured")
 	}
 	return nil
+}
+
+func RescueRecords(ctx context.Context, registry ports.JobRegistry) ([]domain.JobRecord, error) {
+	if rescue, ok := registry.(RescueSnapshotter); ok {
+		return rescue.RescueSnapshot(ctx)
+	}
+	return nil, fmt.Errorf("job registry does not support rescue snapshot")
 }
 
 func redactPrivatePayloads(records []domain.JobRecord) []domain.JobRecord {

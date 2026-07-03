@@ -170,10 +170,33 @@ func TestCoordinatorCleanupEvidenceHelpers(t *testing.T) {
 	if got := withCleanupEvidence(cause, evidence); !errors.Is(got, cause) || !errors.Is(got, evidence) {
 		t.Fatalf("withCleanupEvidence joined = %v", got)
 	}
-	snapshotErr := errors.New("snapshot")
-	coordinator := &Coordinator{registry: &failingRegistry{err: snapshotErr}}
-	if err := coordinator.recordCleanupFailure(context.Background(), "job-a", domain.Lease{NodeID: "node-a"}, cause); !errors.Is(err, snapshotErr) {
-		t.Fatalf("recordCleanupFailure snapshot err = %v", err)
+	coordinator := &Coordinator{registry: &failingRegistry{err: errors.New("snapshot")}}
+	if err := coordinator.recordCleanupFailure(context.Background(), "job-a", domain.Lease{NodeID: "node-a"}, cause); err == nil || !strings.Contains(err.Error(), "point lookup") {
+		t.Fatalf("recordCleanupFailure point lookup err = %v", err)
+	}
+	pointErr := errors.New("point")
+	coordinator = &Coordinator{registry: pointErrorRegistry{err: pointErr}}
+	if err := coordinator.recordCleanupFailure(context.Background(), "job-a", domain.Lease{NodeID: "node-a"}, cause); !errors.Is(err, pointErr) {
+		t.Fatalf("recordCleanupFailure point err = %v", err)
+	}
+	job := fixtures.MakeJob(fixtures.WithJobID("missing-registry"))
+	registry := NewJobRegistry()
+	coordinator = NewCoordinator(
+		fixtures.MakePeer(fixtures.WithPeerID("peer-a")),
+		jobSource{jobs: map[string]domain.Job{job.ID: job}, payloads: map[string][]byte{job.ID: []byte(`{"job":"a"}`)}},
+		registry,
+		nil,
+		staticPeerFleet{},
+		ownerResolver{},
+		mocks.NewFakeClock(time.Unix(10, 0).UTC()),
+	)
+	coordinator.claimed[job.ID] = claimedJob{job: job, payload: []byte(`{"job":"a"}`)}
+	if err := coordinator.recordCleanupFailure(context.Background(), job.ID, domain.Lease{NodeID: "node-a"}, cause); err != nil {
+		t.Fatalf("recordCleanupFailure missing existing record: %v", err)
+	}
+	snap, err := registry.Snapshot(context.Background())
+	if err != nil || len(snap) != 1 || snap[0].Status != domain.JobFailed || !snap[0].CleanupRequired {
+		t.Fatalf("cleanup record = %+v err=%v", snap, err)
 	}
 }
 
@@ -1040,6 +1063,32 @@ func (r *failingRegistry) Watch(context.Context, string) (<-chan domain.JobRecor
 
 func (r *failingRegistry) Snapshot(context.Context) ([]domain.JobRecord, error) {
 	return nil, r.err
+}
+
+func (r *failingRegistry) RescueSnapshot(context.Context) ([]domain.JobRecord, error) {
+	return nil, r.err
+}
+
+type pointErrorRegistry struct {
+	err error
+}
+
+func (r pointErrorRegistry) Put(context.Context, domain.JobRecord) error {
+	return nil
+}
+
+func (r pointErrorRegistry) Watch(context.Context, string) (<-chan domain.JobRecord, error) {
+	ch := make(chan domain.JobRecord)
+	close(ch)
+	return ch, nil
+}
+
+func (r pointErrorRegistry) Snapshot(context.Context) ([]domain.JobRecord, error) {
+	return nil, r.err
+}
+
+func (r pointErrorRegistry) JobRecord(context.Context, string) (domain.JobRecord, bool, error) {
+	return domain.JobRecord{}, false, r.err
 }
 
 var errFlakyRegistry = errors.New("flaky registry")

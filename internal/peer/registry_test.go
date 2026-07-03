@@ -105,6 +105,34 @@ func TestJobRegistryPutSnapshotAndLWW(t *testing.T) {
 	if string(again[1].Request) != "done" {
 		t.Fatalf("snapshot mutated registry request: %q", again[1].Request)
 	}
+	got, found, err := registry.JobRecord(ctx, "job-b")
+	if err != nil || !found || got.JobID != "job-b" || string(got.Request) != "done" {
+		t.Fatalf("JobRecord = %+v found=%v err=%v", got, found, err)
+	}
+	got.Request[0] = '!'
+	got, found, err = registry.JobRecord(ctx, "job-b")
+	if err != nil || !found || string(got.Request) != "done" {
+		t.Fatalf("JobRecord clone = %+v found=%v err=%v", got, found, err)
+	}
+	_, found, err = registry.JobRecord(ctx, "missing")
+	if err != nil || found {
+		t.Fatalf("missing JobRecord found=%v err=%v", found, err)
+	}
+	if _, _, err := registry.JobRecord(ctx, ""); err == nil {
+		t.Fatal("empty JobRecord id accepted")
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, _, err := registry.JobRecord(canceled, "job-b"); err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled JobRecord err = %v", err)
+	}
+	rescue, err := registry.RescueSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RescueSnapshot: %v", err)
+	}
+	if len(rescue) != 2 || rescue[0].JobID != "job-a" || rescue[1].JobID != "job-c" {
+		t.Fatalf("rescue snapshot = %+v", rescue)
+	}
 }
 
 func TestJobRegistryValidationAndContext(t *testing.T) {

@@ -544,7 +544,7 @@ type workloadReconciliationStore interface {
 }
 
 type workloadRegistryStore interface {
-	Snapshot(ctx context.Context) ([]domain.JobRecord, error)
+	JobRecord(ctx context.Context, id string) (domain.JobRecord, bool, error)
 }
 
 type workloadJobRecordStore interface {
@@ -552,7 +552,6 @@ type workloadJobRecordStore interface {
 }
 
 type workloadReplayStore interface {
-	workloadRegistryStore
 	Put(ctx context.Context, rec domain.JobRecord) error
 }
 
@@ -1349,16 +1348,7 @@ func workloadJobRecord(ctx context.Context, store workloadStore, registry worklo
 	if byID, ok := store.(workloadJobRecordStore); ok {
 		return byID.JobRecord(ctx, jobID)
 	}
-	records, err := registry.Snapshot(ctx)
-	if err != nil {
-		return domain.JobRecord{}, false, err
-	}
-	for _, rec := range records {
-		if rec.JobID == jobID {
-			return rec, true, nil
-		}
-	}
-	return domain.JobRecord{}, false, nil
+	return registry.JobRecord(ctx, jobID)
 }
 
 func normalizeWorkloadJob(job domain.Job) (domain.Job, error) {
@@ -1866,7 +1856,7 @@ func mountRegistryHTTP(mux *http.ServeMux, registry ports.JobRegistry, rpcToken 
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		records, err := registry.Snapshot(r.Context())
+		records, err := peercoord.RescueRecords(r.Context(), registry)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -1874,7 +1864,7 @@ func mountRegistryHTTP(mux *http.ServeMux, registry ports.JobRegistry, rpcToken 
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(peercoord.RescueSnapshot(records)); err != nil {
+		if err := json.NewEncoder(w).Encode(records); err != nil {
 			log.Printf("mycelium registry snapshot write failed: %v", err)
 		}
 	})
@@ -2917,8 +2907,8 @@ type jobLister interface {
 	ListJobs(ctx context.Context) ([]domain.Job, error)
 }
 
-type jobRegistrySnapshotter interface {
-	Snapshot(ctx context.Context) ([]domain.JobRecord, error)
+type jobRegistryRecordReader interface {
+	JobRecord(ctx context.Context, id string) (domain.JobRecord, bool, error)
 }
 
 func restoreQueuedJobs(ctx context.Context, store jobLister, queue *scheduler.Queue) error {
@@ -2927,13 +2917,16 @@ func restoreQueuedJobs(ctx context.Context, store jobLister, queue *scheduler.Qu
 		return err
 	}
 	payloads := map[string][]byte{}
-	if registry, ok := store.(jobRegistrySnapshotter); ok {
-		records, err := registry.Snapshot(ctx)
-		if err != nil {
-			return err
-		}
-		for _, rec := range records {
-			if rec.Status != domain.JobQueued || len(rec.Request) == 0 || rec.Handling == domain.HandlingPrivate || rec.PayloadRedacted {
+	if registry, ok := store.(jobRegistryRecordReader); ok {
+		for _, job := range jobs {
+			if job.Status != domain.JobQueued {
+				continue
+			}
+			rec, found, err := registry.JobRecord(ctx, job.ID)
+			if err != nil {
+				return err
+			}
+			if !found || rec.Status != domain.JobQueued || len(rec.Request) == 0 || rec.Handling == domain.HandlingPrivate || rec.PayloadRedacted {
 				continue
 			}
 			_, payload, err := peercoord.DecodeRescuePayload(rec.Request)

@@ -504,27 +504,29 @@ func withCleanupEvidence(err, evidenceErr error) error {
 }
 
 func (c *Coordinator) recordCleanupFailure(ctx context.Context, jobID string, lease domain.Lease, cause error) error {
-	records, err := c.registry.Snapshot(ctx)
-	if err != nil {
-		return fmt.Errorf("record terminal cleanup evidence for job %q: %w", jobID, err)
-	}
 	status := domain.JobFailed
 	assignedNode := lease.NodeID
 	fence := c.statusFence(jobID)
 	note := fmt.Sprintf("terminal cleanup failed: %v", cause)
-	for _, rec := range records {
-		if rec.JobID != jobID {
-			continue
+	if byID, ok := c.registry.(interface {
+		JobRecord(ctx context.Context, id string) (domain.JobRecord, bool, error)
+	}); ok {
+		rec, found, err := byID.JobRecord(ctx, jobID)
+		if err != nil {
+			return fmt.Errorf("record terminal cleanup evidence for job %q: %w", jobID, err)
 		}
-		status = rec.Status
-		if rec.AssignedNode != "" {
-			assignedNode = rec.AssignedNode
+		if found {
+			status = rec.Status
+			if rec.AssignedNode != "" {
+				assignedNode = rec.AssignedNode
+			}
+			if rec.Fence > fence {
+				fence = rec.Fence
+			}
+			note = appendRecoveryNote(rec.RecoveryNote, note)
 		}
-		if rec.Fence > fence {
-			fence = rec.Fence
-		}
-		note = appendRecoveryNote(rec.RecoveryNote, note)
-		break
+	} else {
+		return fmt.Errorf("record terminal cleanup evidence for job %q: registry does not support point lookup", jobID)
 	}
 	fence++
 	return c.recordWithDetails(ctx, jobID, status, assignedNode, fence, note, true, cause.Error())

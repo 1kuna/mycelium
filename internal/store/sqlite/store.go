@@ -462,6 +462,17 @@ func (s *Store) Snapshot(ctx context.Context) ([]domain.JobRecord, error) {
 	return s.jobRecordsAfter(ctx, time.Time{})
 }
 
+func (s *Store) RescueSnapshot(ctx context.Context) ([]domain.JobRecord, error) {
+	return s.jobRecordsWhere(ctx, `
+SELECT data FROM job_records
+WHERE json_extract(data, '$.cleanup_required') = 1
+   OR json_extract(data, '$.status') NOT IN (?, ?)
+ORDER BY json_extract(data, '$.updated_at'), id`,
+		string(domain.JobDone),
+		string(domain.JobFailed),
+	)
+}
+
 func (s *Store) JobRecord(ctx context.Context, id string) (domain.JobRecord, bool, error) {
 	if id == "" {
 		return domain.JobRecord{}, false, fmt.Errorf("job record id is required")
@@ -1102,6 +1113,27 @@ func (s *Store) jobRecordsAfter(ctx context.Context, cursor time.Time) ([]domain
 	return out, nil
 }
 
+func (s *Store) jobRecordsWhere(ctx context.Context, query string, args ...any) ([]domain.JobRecord, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []domain.JobRecord
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var rec domain.JobRecord
+		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+			return nil, err
+		}
+		records = append(records, cloneJobRecord(rec))
+	}
+	return records, rows.Err()
+}
+
 func validateJobRecord(rec domain.JobRecord) error {
 	if rec.JobID == "" {
 		return fmt.Errorf("job record id is required")
@@ -1204,6 +1236,9 @@ CREATE TABLE IF NOT EXISTS model_localities (id TEXT PRIMARY KEY, data TEXT NOT 
 CREATE TABLE IF NOT EXISTS locality_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS engine_profiles (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bootstrap_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_job_records_status ON job_records(json_extract(data, '$.status'));
+CREATE INDEX IF NOT EXISTS idx_job_records_cleanup ON job_records(json_extract(data, '$.cleanup_required'));
+CREATE INDEX IF NOT EXISTS idx_job_records_updated ON job_records(json_extract(data, '$.updated_at'));
 
 CREATE TABLE IF NOT EXISTS run_metrics (
 	job_id TEXT PRIMARY KEY,

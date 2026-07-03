@@ -641,3 +641,7 @@ func (r partitionPutFailRegistry) Watch(context.Context, string) (<-chan domain.
 func (r partitionPutFailRegistry) Snapshot(context.Context) ([]domain.JobRecord, error) {
 	return append([]domain.JobRecord(nil), r.records...), nil
 }
+
+func (r partitionPutFailRegistry) RescueSnapshot(context.Context) ([]domain.JobRecord, error) {
+	return RescueSnapshot(r.records), nil
+}

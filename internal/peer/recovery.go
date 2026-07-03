@@ -41,7 +41,7 @@ func (r Recovery) RecoverPeer(ctx context.Context, deadPeerID string) (int, erro
 	var records []domain.JobRecord
 	if err := r.step("recovery/snapshot", map[string]any{"dead_peer": deadPeerID}, func() error {
 		var err error
-		records, err = r.Registry.Snapshot(ctx)
+		records, err = RescueRecords(ctx, r.Registry)
 		return err
 	}); err != nil {
 		return 0, err

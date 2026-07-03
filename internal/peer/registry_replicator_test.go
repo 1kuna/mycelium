@@ -76,6 +76,36 @@ func TestRegistryReplicatorSyncPushesOnlyRescueSnapshot(t *testing.T) {
 	if len(localRecords) != 3 {
 		t.Fatalf("local registry was compacted: %+v", localRecords)
 	}
+	filtered := RescueSnapshot([]domain.JobRecord{running, done, cleanup})
+	if len(filtered) != 2 || filtered[0].JobID != "running" || filtered[1].JobID != "cleanup" {
+		t.Fatalf("RescueSnapshot = %+v", filtered)
+	}
+	filtered[0].Request[0] = '!'
+	if string(running.Request) == string(filtered[0].Request) {
+		t.Fatal("RescueSnapshot did not clone request payload")
+	}
+}
+
+func TestRegistryReplicatorUsesFilteredLocalRescueSnapshot(t *testing.T) {
+	ctx := context.Background()
+	local := &rescueOnlyRegistry{
+		records: []domain.JobRecord{registryRecord("running", "peer-a", domain.JobRunning, time.Unix(10, 0).UTC())},
+		err:     errors.New("full snapshot should not be used"),
+	}
+	client := &recordingRegistryClient{}
+	discovery := &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-b"}}}
+	replicator := RegistryReplicator{Local: local, Peers: discovery, Client: client, SelfID: "peer-a"}
+
+	if err := replicator.SyncOnce(ctx); err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+	pushed := client.pushes["peer-b"]
+	if len(pushed) != 1 || len(pushed[0]) != 1 || pushed[0][0].JobID != "running" {
+		t.Fatalf("pushes = %+v", pushed)
+	}
+	if local.snapshotCalls != 0 {
+		t.Fatalf("full snapshot was used %d times", local.snapshotCalls)
+	}
 }
 
 func TestRegistryReplicatorPushRecordSkipsSelf(t *testing.T) {
@@ -220,7 +250,7 @@ func TestRegistryReplicatorErrors(t *testing.T) {
 		Client: &recordingRegistryClient{snapshots: map[string][]domain.JobRecord{"peer-b": {rec}}},
 		SelfID: "peer-a",
 	}
-	if err := snapshotErr.SyncOnce(ctx); !errors.Is(err, boom) {
+	if err := snapshotErr.SyncOnce(ctx); err == nil || !strings.Contains(err.Error(), "rescue snapshot") {
 		t.Fatalf("snapshot SyncOnce err = %v", err)
 	}
 }
@@ -274,4 +304,30 @@ func (r *snapshotOnlyFailingRegistry) Watch(context.Context, string) (<-chan dom
 
 func (r *snapshotOnlyFailingRegistry) Snapshot(context.Context) ([]domain.JobRecord, error) {
 	return nil, r.err
+}
+
+type rescueOnlyRegistry struct {
+	records       []domain.JobRecord
+	err           error
+	snapshotCalls int
+}
+
+func (r *rescueOnlyRegistry) Put(_ context.Context, rec domain.JobRecord) error {
+	r.records = append(r.records, rec)
+	return nil
+}
+
+func (r *rescueOnlyRegistry) Watch(context.Context, string) (<-chan domain.JobRecord, error) {
+	ch := make(chan domain.JobRecord)
+	close(ch)
+	return ch, nil
+}
+
+func (r *rescueOnlyRegistry) Snapshot(context.Context) ([]domain.JobRecord, error) {
+	r.snapshotCalls++
+	return nil, r.err
+}
+
+func (r *rescueOnlyRegistry) RescueSnapshot(context.Context) ([]domain.JobRecord, error) {
+	return RescueSnapshot(r.records), nil
 }
