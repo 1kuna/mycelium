@@ -513,3 +513,23 @@ func TestPoolStatusAndDownTolerateNeverAdmittedWorkers(t *testing.T) {
 		t.Fatalf("down should classify missing workload: %+v", state.Workers[0])
 	}
 }
+
+func TestPoolUpProjectOverride(t *testing.T) {
+	server := &poolPeerServer{}
+	ts := httptest.NewServer(server.handler(t))
+	defer ts.Close()
+	dir := t.TempDir()
+	planPath := writePoolPlanFile(t, dir, smallPoolPlan())
+	statePath := filepath.Join(dir, "pool.json")
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "up", "--plan", planPath, "--url", ts.URL, "--state", statePath,
+		"--name", "ocr", "--project", "atlas", "--run-id", "runp",
+	}, ts.Client()); err != nil {
+		t.Fatalf("pool up with project override: %v", err)
+	}
+	for _, admit := range server.admits {
+		if admit.Job.Project != "atlas" {
+			t.Fatalf("worker project = %q, want atlas", admit.Job.Project)
+		}
+	}
+}
