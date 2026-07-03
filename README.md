@@ -740,8 +740,11 @@ BEFORE the first admission and rewrites the file after each worker, so a
 killed or interrupted run always leaves cleanup-capable state for `pool down`.
 Cold loads legitimately take minutes; `pool up` prints one progress line per
 worker and bounds each admission with `--admit-timeout` (default 15m) so a
-stuck admission fails loudly as `admit_error` instead of hanging. Workers whose
-admission never reached the daemon are classified `not_admitted` by
+stuck admission fails loudly as `admit_error` instead of hanging. If admission
+returns queued while a cold load continues in the daemon, `pool up` refreshes
+that worker until it becomes a held running lease or the admit timeout expires;
+a successful `pool up` never means "queued-only, no usable lease." Workers
+whose admission never reached the daemon are classified `not_admitted` by
 `pool status`/`pool down` instead of failing cleanup. `pool down` finishes or cancels every worker to release the
 reservations.
 

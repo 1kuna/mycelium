@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"mycelium/internal/domain"
 	"mycelium/internal/pool"
@@ -76,13 +77,14 @@ func TestPoolPlanFailsWithoutMatchingPreset(t *testing.T) {
 }
 
 type poolPeerServer struct {
-	mu       sync.Mutex
-	admits   []workload.AdmissionRequest
-	finishes []string
-	cancels  []string
-	statuses []string
-	authSeen []string
-	queueAll bool
+	mu         sync.Mutex
+	admits     []workload.AdmissionRequest
+	finishes   []string
+	cancels    []string
+	statuses   []string
+	authSeen   []string
+	queueAll   bool
+	stayQueued bool
 }
 
 func (s *poolPeerServer) handler(t *testing.T) http.Handler {
@@ -132,6 +134,11 @@ func (s *poolPeerServer) handler(t *testing.T) http.Handler {
 			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: job, Result: &domain.JobResult{Terminal: true}})
 		default:
 			s.statuses = append(s.statuses, id)
+			if s.stayQueued {
+				job := domain.Job{ID: id, Status: domain.JobQueued}
+				_ = json.NewEncoder(w).Encode(workload.StatusResponse{Job: job})
+				return
+			}
 			job := domain.Job{ID: id, Status: domain.JobRunning}
 			result := &domain.JobResult{LeaseID: "lease-" + id, Instance: domain.ModelInstance{ID: "inst-" + id}, NodeID: "node_4090a"}
 			_ = json.NewEncoder(w).Encode(workload.StatusResponse{Job: job, Result: result})
@@ -218,8 +225,46 @@ func TestPoolUpHoldsWorkersAndWritesState(t *testing.T) {
 	}
 }
 
-func TestPoolUpReportsWhenNothingHeld(t *testing.T) {
+func TestPoolUpWaitsForQueuedColdLoadToBecomeHeld(t *testing.T) {
+	oldPoll := poolStatusPollInterval
+	poolStatusPollInterval = time.Millisecond
+	defer func() { poolStatusPollInterval = oldPoll }()
 	server := &poolPeerServer{queueAll: true}
+	ts := httptest.NewServer(server.handler(t))
+	defer ts.Close()
+	dir := t.TempDir()
+	planPath := writePoolPlanFile(t, dir, pool.Plan{
+		Model:           "chandra",
+		Concurrency:     1,
+		TotalAdditional: 1,
+		Nodes:           []pool.NodePlan{{NodeID: "node_spark", PresetID: "preset_test", ContextLength: 49152, Additional: 1}},
+	})
+	statePath := filepath.Join(dir, "pool.json")
+
+	err := RunWithClient(context.Background(), []string{
+		"pool", "up", "--plan", planPath, "--url", ts.URL, "--state", statePath,
+		"--run-id", "runcold", "--admit-timeout", "1s",
+	}, ts.Client())
+	if err != nil {
+		t.Fatalf("pool up should wait for held lease: %v", err)
+	}
+	if len(server.statuses) == 0 {
+		t.Fatalf("pool up did not refresh queued worker status")
+	}
+	state, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if len(state.Workers) != 1 || !poolWorkerHeld(state.Workers[0]) || state.Workers[0].Queued {
+		t.Fatalf("queued worker was not refreshed to held lease: %+v", state.Workers)
+	}
+}
+
+func TestPoolUpReportsWhenNothingHeld(t *testing.T) {
+	oldPoll := poolStatusPollInterval
+	poolStatusPollInterval = time.Millisecond
+	defer func() { poolStatusPollInterval = oldPoll }()
+	server := &poolPeerServer{queueAll: true, stayQueued: true}
 	ts := httptest.NewServer(server.handler(t))
 	defer ts.Close()
 	dir := t.TempDir()
@@ -227,7 +272,7 @@ func TestPoolUpReportsWhenNothingHeld(t *testing.T) {
 	statePath := filepath.Join(dir, "pool.json")
 
 	err := RunWithClient(context.Background(), []string{
-		"pool", "up", "--plan", planPath, "--url", ts.URL, "--state", statePath, "--run-id", "runq",
+		"pool", "up", "--plan", planPath, "--url", ts.URL, "--state", statePath, "--run-id", "runq", "--admit-timeout", "10ms",
 	}, ts.Client())
 	if err == nil || !strings.Contains(err.Error(), "held no workers") {
 		t.Fatalf("expected held-no-workers error, got %v", err)
@@ -237,7 +282,7 @@ func TestPoolUpReportsWhenNothingHeld(t *testing.T) {
 		t.Fatalf("state must still be written: %v", err)
 	}
 	for _, worker := range state.Workers {
-		if !worker.Queued {
+		if !worker.Queued || worker.Error == "" {
 			t.Fatalf("worker should be queued: %+v", worker)
 		}
 	}

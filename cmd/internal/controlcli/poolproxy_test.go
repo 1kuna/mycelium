@@ -60,8 +60,8 @@ func (g *proxyGateway) handler() http.Handler {
 
 func heldTestWorkers() []poolWorker {
 	return []poolWorker{
-		{WorkloadID: "w1", LeaseID: "l1", NodeID: "node_a", Status: string(domain.JobRunning)},
-		{WorkloadID: "w2", LeaseID: "l2", NodeID: "node_b", Status: string(domain.JobRunning)},
+		{WorkloadID: "w1", LeaseID: "l1", InstanceID: "inst-w1", NodeID: "node_a", Status: string(domain.JobRunning)},
+		{WorkloadID: "w2", LeaseID: "l2", InstanceID: "inst-w2", NodeID: "node_b", Status: string(domain.JobRunning)},
 	}
 }
 

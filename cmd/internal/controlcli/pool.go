@@ -29,6 +29,8 @@ import (
 // status refreshes worker state; down finishes/cancels every worker so the
 // reservations are released.
 
+var poolStatusPollInterval = 2 * time.Second
+
 func runPool(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: myce pool <plan|up|status|proxy|down>")
@@ -226,17 +228,18 @@ func runPoolUp(ctx context.Context, args []string, client *http.Client) error {
 			admitCtx, cancel = context.WithTimeout(ctx, *admitTimeout)
 		}
 		admitted, err := admitPrewarmWorkload(admitCtx, client, *peerURL, *rpcToken, jobs[i])
-		cancel()
 		if err != nil {
 			worker.Status = "admit_error"
 			worker.Error = err.Error()
 		} else {
-			worker.Status = string(admitted.Job.Status)
-			worker.Queued = admitted.Queued
-			worker.InstanceID = admitted.Instance.ID
-			worker.LeaseID = admitted.Lease.ID
-			worker.Error = ""
+			applyPoolAdmission(worker, admitted)
+			if !poolWorkerHeld(*worker) && !poolWorkerTerminal(worker.Status) {
+				if waitErr := waitPoolWorkerHeld(admitCtx, client, *peerURL, *rpcToken, worker); waitErr != nil {
+					worker.Error = waitErr.Error()
+				}
+			}
 		}
+		cancel()
 		// Flush after every worker so state on disk always matches reality.
 		if err := writePrettyJSONFile(*statePath, state); err != nil {
 			return err
@@ -294,22 +297,7 @@ func runPoolStatus(ctx context.Context, args []string, client *http.Client) erro
 			worker.Error = err.Error()
 			continue
 		}
-		worker.Status = string(status.Job.Status)
-		worker.Error = status.Job.Error
-		if status.Job.Status == domain.JobRunning {
-			worker.Queued = false
-		}
-		if status.Result != nil {
-			if status.Result.Instance.ID != "" {
-				worker.InstanceID = status.Result.Instance.ID
-			}
-			if status.Result.LeaseID != "" {
-				worker.LeaseID = status.Result.LeaseID
-			}
-			if status.Result.NodeID != "" {
-				worker.NodeID = status.Result.NodeID
-			}
-		}
+		applyPoolStatus(worker, status)
 	}
 	if err := writePrettyJSONFile(*statePath, state); err != nil {
 		return err
@@ -479,8 +467,73 @@ func cancelPoolWorkload(ctx context.Context, client *http.Client, peerURL, rpcTo
 
 var errPoolWorkloadNotFound = errors.New("workload not found on peer")
 
+func applyPoolAdmission(worker *poolWorker, admitted workload.AdmissionResponse) {
+	worker.Status = string(admitted.Job.Status)
+	worker.Queued = admitted.Queued
+	worker.InstanceID = admitted.Instance.ID
+	worker.LeaseID = admitted.Lease.ID
+	if admitted.Result != nil {
+		applyPoolResult(worker, admitted.Result)
+	}
+	worker.Error = admitted.Job.Error
+}
+
+func applyPoolStatus(worker *poolWorker, status workload.StatusResponse) {
+	worker.Status = string(status.Job.Status)
+	worker.Error = status.Job.Error
+	worker.Queued = status.Job.Status == domain.JobQueued
+	if status.Result != nil {
+		applyPoolResult(worker, status.Result)
+	}
+}
+
+func applyPoolResult(worker *poolWorker, result *domain.JobResult) {
+	if result.Instance.ID != "" {
+		worker.InstanceID = result.Instance.ID
+	}
+	if result.LeaseID != "" {
+		worker.LeaseID = result.LeaseID
+	}
+	if result.NodeID != "" {
+		worker.NodeID = result.NodeID
+	}
+}
+
+func waitPoolWorkerHeld(ctx context.Context, client *http.Client, peerURL, rpcToken string, worker *poolWorker) error {
+	if poolWorkerHeld(*worker) {
+		return nil
+	}
+	ticker := time.NewTicker(poolStatusPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("worker %s did not become held before admit timeout: %w", worker.WorkloadID, ctx.Err())
+		case <-ticker.C:
+			status, err := fetchPoolWorkload(ctx, client, peerURL, rpcToken, worker.WorkloadID)
+			if err != nil {
+				return fmt.Errorf("refresh worker %s while waiting for held lease: %w", worker.WorkloadID, err)
+			}
+			applyPoolStatus(worker, status)
+			if poolWorkerHeld(*worker) {
+				return nil
+			}
+			if poolWorkerTerminal(worker.Status) {
+				if worker.Error != "" {
+					return fmt.Errorf("worker %s became %s before held lease: %s", worker.WorkloadID, worker.Status, worker.Error)
+				}
+				return fmt.Errorf("worker %s became %s before held lease", worker.WorkloadID, worker.Status)
+			}
+		}
+	}
+}
+
 func poolWorkerTerminal(status string) bool {
 	return status == string(domain.JobDone) || status == string(domain.JobFailed) || status == "not_admitted"
+}
+
+func poolWorkerHeld(worker poolWorker) bool {
+	return worker.Status == string(domain.JobRunning) && worker.LeaseID != "" && worker.InstanceID != ""
 }
 
 func countPoolWorkers(state poolState) (held, failed int) {
@@ -488,7 +541,7 @@ func countPoolWorkers(state poolState) (held, failed int) {
 		switch {
 		case worker.Error != "":
 			failed++
-		case worker.Status == string(domain.JobRunning) && worker.LeaseID != "":
+		case poolWorkerHeld(worker):
 			held++
 		}
 	}

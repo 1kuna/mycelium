@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"mycelium/internal/domain"
 	"mycelium/internal/gateway"
 )
 
@@ -86,7 +85,7 @@ func servePoolProxy(ctx context.Context, ln net.Listener, handler http.Handler) 
 func heldPoolWorkers(state poolState) []poolWorker {
 	var held []poolWorker
 	for _, worker := range state.Workers {
-		if worker.WorkloadID != "" && worker.LeaseID != "" && worker.Status == string(domain.JobRunning) {
+		if worker.WorkloadID != "" && poolWorkerHeld(worker) {
 			held = append(held, worker)
 		}
 	}
