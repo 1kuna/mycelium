@@ -547,6 +547,10 @@ type workloadRegistryStore interface {
 	Snapshot(ctx context.Context) ([]domain.JobRecord, error)
 }
 
+type workloadJobRecordStore interface {
+	JobRecord(ctx context.Context, id string) (domain.JobRecord, bool, error)
+}
+
 type workloadReplayStore interface {
 	workloadRegistryStore
 	Put(ctx context.Context, rec domain.JobRecord) error
@@ -1073,40 +1077,37 @@ func executableWorkloadIngressRequest(ctx context.Context, store workloadStore, 
 	if !ok {
 		return translate.IngressRequest{}, fmt.Errorf("workload payload registry is not available")
 	}
-	records, err := registry.Snapshot(ctx)
+	rec, found, err := workloadJobRecord(ctx, store, registry, job.ID)
 	if err != nil {
 		return translate.IngressRequest{}, err
 	}
-	for _, rec := range records {
-		if rec.JobID != job.ID {
-			continue
-		}
-		if rec.PayloadRedacted || rec.Handling == domain.HandlingPrivate {
-			return translate.IngressRequest{}, fmt.Errorf("workload payload is redacted")
-		}
-		payloadJob, payload, err := peercoord.DecodeRescuePayload(rec.Request)
-		if err != nil {
-			return translate.IngressRequest{}, err
-		}
-		if payloadJob.ID != job.ID {
-			return translate.IngressRequest{}, fmt.Errorf("payload job %q does not match %q", payloadJob.ID, job.ID)
-		}
-		executable, err := workload.DecodeExecutablePayload(payload)
-		if err != nil {
-			return translate.IngressRequest{}, err
-		}
-		switch executable.Kind {
-		case workload.ExecutablePayloadKindOpenAIChat:
-			return translate.ParseOpenAIChat(executable.Body)
-		case workload.ExecutablePayloadKindOpenAICompletion:
-			return translate.ParseOpenAICompletion(executable.Body)
-		case workload.ExecutablePayloadKindAnthropicMessages:
-			return translate.ParseAnthropicMessages(executable.Body)
-		default:
-			return translate.IngressRequest{}, fmt.Errorf("unsupported executable payload kind %q", executable.Kind)
-		}
+	if !found {
+		return translate.IngressRequest{}, fmt.Errorf("workload payload is not registry-replayable")
 	}
-	return translate.IngressRequest{}, fmt.Errorf("workload payload is not registry-replayable")
+	if rec.PayloadRedacted || rec.Handling == domain.HandlingPrivate {
+		return translate.IngressRequest{}, fmt.Errorf("workload payload is redacted")
+	}
+	payloadJob, payload, err := peercoord.DecodeRescuePayload(rec.Request)
+	if err != nil {
+		return translate.IngressRequest{}, err
+	}
+	if payloadJob.ID != job.ID {
+		return translate.IngressRequest{}, fmt.Errorf("payload job %q does not match %q", payloadJob.ID, job.ID)
+	}
+	executable, err := workload.DecodeExecutablePayload(payload)
+	if err != nil {
+		return translate.IngressRequest{}, err
+	}
+	switch executable.Kind {
+	case workload.ExecutablePayloadKindOpenAIChat:
+		return translate.ParseOpenAIChat(executable.Body)
+	case workload.ExecutablePayloadKindOpenAICompletion:
+		return translate.ParseOpenAICompletion(executable.Body)
+	case workload.ExecutablePayloadKindAnthropicMessages:
+		return translate.ParseAnthropicMessages(executable.Body)
+	default:
+		return translate.IngressRequest{}, fmt.Errorf("unsupported executable payload kind %q", executable.Kind)
+	}
 }
 
 func persistWorkloadReplayPayload(ctx context.Context, store workloadStore, coordinatorID string, job domain.Job, payload []byte) error {
@@ -1266,34 +1267,31 @@ func workloadExecutablePayloadEvidence(ctx context.Context, store workloadStore,
 		}
 		return "no_payload", "", false
 	}
-	records, err := registry.Snapshot(ctx)
+	rec, found, err := workloadJobRecord(ctx, store, registry, job.ID)
 	if err != nil {
 		return "registry_payload_unavailable", "", false
 	}
-	for _, rec := range records {
-		if rec.JobID != job.ID {
-			continue
+	if !found {
+		if job.Result != nil && job.Result.PayloadStored {
+			return "runtime_payload_not_inspectable", "", false
 		}
-		if rec.PayloadRedacted || rec.Handling == domain.HandlingPrivate {
-			return "registry_payload_redacted", "", false
-		}
-		if len(rec.Request) == 0 {
-			return "registry_payload_missing", "", false
-		}
-		payloadJob, payload, err := peercoord.DecodeRescuePayload(rec.Request)
-		if err != nil || payloadJob.ID != job.ID {
-			return "registry_payload_unreadable", "", false
-		}
-		executable, err := workload.DecodeExecutablePayload(payload)
-		if err != nil {
-			return "registry_payload_not_executable", "", false
-		}
-		return "registry_executable_gateway_request", executable.Kind, true
+		return "no_payload", "", false
 	}
-	if job.Result != nil && job.Result.PayloadStored {
-		return "runtime_payload_not_inspectable", "", false
+	if rec.PayloadRedacted || rec.Handling == domain.HandlingPrivate {
+		return "registry_payload_redacted", "", false
 	}
-	return "no_payload", "", false
+	if len(rec.Request) == 0 {
+		return "registry_payload_missing", "", false
+	}
+	payloadJob, payload, err := peercoord.DecodeRescuePayload(rec.Request)
+	if err != nil || payloadJob.ID != job.ID {
+		return "registry_payload_unreadable", "", false
+	}
+	executable, err := workload.DecodeExecutablePayload(payload)
+	if err != nil {
+		return "registry_payload_not_executable", "", false
+	}
+	return "registry_executable_gateway_request", executable.Kind, true
 }
 
 func workloadPayloadEvidence(ctx context.Context, store workloadStore, job domain.Job) workload.PayloadEvidence {
@@ -1309,45 +1307,58 @@ func workloadPayloadEvidence(ctx context.Context, store workloadStore, job domai
 		}
 		return base
 	}
-	records, err := registry.Snapshot(ctx)
+	rec, found, err := workloadJobRecord(ctx, store, registry, job.ID)
 	if err != nil {
 		base.State = "registry_unavailable"
 		base.Error = err.Error()
 		return base
 	}
-	for _, rec := range records {
-		if rec.JobID != job.ID {
-			continue
+	if !found {
+		if job.Result != nil && job.Result.PayloadStored {
+			base.State = "runtime_payload_stored"
 		}
-		if rec.PayloadRedacted || rec.Handling == domain.HandlingPrivate {
-			base.State = "registry_payload_redacted"
-			base.Redacted = true
-			return base
-		}
-		if len(rec.Request) == 0 {
-			base.State = "registry_payload_missing"
-			return base
-		}
-		payloadJob, payload, err := peercoord.DecodeRescuePayload(rec.Request)
-		if err != nil {
-			base.State = "registry_payload_unreadable"
-			base.Error = err.Error()
-			return base
-		}
-		if payloadJob.ID != job.ID {
-			base.State = "registry_payload_mismatch"
-			base.Error = fmt.Sprintf("payload job %q does not match %q", payloadJob.ID, job.ID)
-			return base
-		}
-		base.State = "registry_payload_replayable"
-		base.Replayable = true
-		base.Bytes = len(payload)
 		return base
 	}
-	if job.Result != nil && job.Result.PayloadStored {
-		base.State = "runtime_payload_stored"
+	if rec.PayloadRedacted || rec.Handling == domain.HandlingPrivate {
+		base.State = "registry_payload_redacted"
+		base.Redacted = true
+		return base
 	}
+	if len(rec.Request) == 0 {
+		base.State = "registry_payload_missing"
+		return base
+	}
+	payloadJob, payload, err := peercoord.DecodeRescuePayload(rec.Request)
+	if err != nil {
+		base.State = "registry_payload_unreadable"
+		base.Error = err.Error()
+		return base
+	}
+	if payloadJob.ID != job.ID {
+		base.State = "registry_payload_mismatch"
+		base.Error = fmt.Sprintf("payload job %q does not match %q", payloadJob.ID, job.ID)
+		return base
+	}
+	base.State = "registry_payload_replayable"
+	base.Replayable = true
+	base.Bytes = len(payload)
 	return base
+}
+
+func workloadJobRecord(ctx context.Context, store workloadStore, registry workloadRegistryStore, jobID string) (domain.JobRecord, bool, error) {
+	if byID, ok := store.(workloadJobRecordStore); ok {
+		return byID.JobRecord(ctx, jobID)
+	}
+	records, err := registry.Snapshot(ctx)
+	if err != nil {
+		return domain.JobRecord{}, false, err
+	}
+	for _, rec := range records {
+		if rec.JobID == jobID {
+			return rec, true, nil
+		}
+	}
+	return domain.JobRecord{}, false, nil
 }
 
 func normalizeWorkloadJob(job domain.Job) (domain.Job, error) {
