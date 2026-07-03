@@ -113,6 +113,35 @@ func (r *JobRegistry) Snapshot(context.Context) ([]domain.JobRecord, error) {
 	return recordsAfter(r.records, time.Time{}), nil
 }
 
+func (r *JobRegistry) RescueSnapshot(context.Context) ([]domain.JobRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]domain.JobRecord, 0, len(r.records))
+	for _, rec := range recordsAfter(r.records, time.Time{}) {
+		if terminalRecordStatus(rec.Status) && !rec.CleanupRequired {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out, nil
+}
+
+func (r *JobRegistry) JobRecord(ctx context.Context, id string) (domain.JobRecord, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.JobRecord{}, false, err
+	}
+	if id == "" {
+		return domain.JobRecord{}, false, fmt.Errorf("job record id is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.records[id]
+	if !ok {
+		return domain.JobRecord{}, false, nil
+	}
+	return cloneRecord(rec), true, nil
+}
+
 func validateRecord(rec domain.JobRecord) error {
 	if rec.JobID == "" {
 		return fmt.Errorf("job record id is required")

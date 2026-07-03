@@ -47,20 +47,25 @@ func (l *RescueJobLog) Job(ctx context.Context, jobID string) (domain.Job, []byt
 		}
 		return domain.Job{}, nil, fmt.Errorf("job registry is not configured")
 	}
-	records, err := l.registry.Snapshot(ctx)
-	if err != nil {
-		return domain.Job{}, nil, err
-	}
-	for _, rec := range records {
-		if rec.JobID != jobID {
-			continue
+	if byID, ok := l.registry.(interface {
+		JobRecord(ctx context.Context, id string) (domain.JobRecord, bool, error)
+	}); ok {
+		rec, found, err := byID.JobRecord(ctx, jobID)
+		if err != nil {
+			return domain.Job{}, nil, err
 		}
-		return l.decodeRecord(rec)
+		if found {
+			return l.decodeRecord(rec)
+		}
+		if localErr != nil {
+			return domain.Job{}, nil, localErr
+		}
+		return domain.Job{}, nil, fmt.Errorf("job %q is not in the job registry", jobID)
 	}
 	if localErr != nil {
 		return domain.Job{}, nil, localErr
 	}
-	return domain.Job{}, nil, fmt.Errorf("job %q is not in the job registry", jobID)
+	return domain.Job{}, nil, fmt.Errorf("job registry does not support point lookup")
 }
 
 func (l *RescueJobLog) decodeRecord(rec domain.JobRecord) (domain.Job, []byte, error) {

@@ -659,6 +659,43 @@ func TestStoreJobRegistryStats(t *testing.T) {
 	}
 }
 
+func TestStoreRescueSnapshotFiltersInSQL(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	running := fixtures.MakeJobRecord(fixtures.WithRecordJobID("running"))
+	running.Status = domain.JobRunning
+	running.UpdatedAt = time.Unix(10, 0).UTC()
+	done := fixtures.MakeJobRecord(fixtures.WithRecordJobID("done"))
+	done.Status = domain.JobDone
+	done.UpdatedAt = time.Unix(11, 0).UTC()
+	failed := fixtures.MakeJobRecord(fixtures.WithRecordJobID("failed"))
+	failed.Status = domain.JobFailed
+	failed.UpdatedAt = time.Unix(12, 0).UTC()
+	cleanup := fixtures.MakeJobRecord(fixtures.WithRecordJobID("cleanup"))
+	cleanup.Status = domain.JobDone
+	cleanup.CleanupRequired = true
+	cleanup.UpdatedAt = time.Unix(13, 0).UTC()
+	for _, rec := range []domain.JobRecord{running, done, failed, cleanup} {
+		must(t, store.Put(ctx, rec))
+	}
+	got, err := store.RescueSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RescueSnapshot: %v", err)
+	}
+	if len(got) != 2 || got[0].JobID != "running" || got[1].JobID != "cleanup" {
+		t.Fatalf("rescue snapshot = %+v", got)
+	}
+	got[0].Request[0] = '!'
+	again, err := store.RescueSnapshot(ctx)
+	if err != nil || string(again[0].Request) != string(running.Request) {
+		t.Fatalf("rescue snapshot clone = %+v err=%v", again, err)
+	}
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
