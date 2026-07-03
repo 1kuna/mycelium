@@ -160,7 +160,8 @@ func runPoolUp(ctx context.Context, args []string, client *http.Client) error {
 	planPath := fs.String("plan", "", "pool plan JSON from `myce pool plan --out`")
 	peerURL := fs.String("url", "", "peer base URL")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
-	name := fs.String("name", "pool", "pool name used in worker job ids and the project label")
+	name := fs.String("name", "pool", "pool name used in worker job ids and the default project label")
+	project := fs.String("project", "", "project label for pool workers; must match the consumer's project-scoped gateway token; defaults to pool-<name>")
 	runID := fs.String("run-id", "", "explicit run id for worker job ids; defaults to a UTC timestamp")
 	statePath := fs.String("state", "", "write pool worker state JSON to this file")
 	admitTimeout := fs.Duration("admit-timeout", 15*time.Minute, "per-worker admission timeout; cold loads legitimately take minutes; 0 disables")
@@ -179,6 +180,10 @@ func runPoolUp(ctx context.Context, args []string, client *http.Client) error {
 	if run == "" {
 		run = time.Now().UTC().Format("20060102t150405z")
 	}
+	workerProject := strings.TrimSpace(*project)
+	if workerProject == "" {
+		workerProject = "pool-" + *name
+	}
 	state := poolState{Name: *name, Model: plan.Model, CreatedAt: time.Now().UTC()}
 	var jobs []domain.Job
 	for _, node := range plan.Nodes {
@@ -188,7 +193,7 @@ func runPoolUp(ctx context.Context, args []string, client *http.Client) error {
 				TaskType:            string(domain.CapabilityChat),
 				Model:               plan.Model,
 				PresetID:            node.PresetID,
-				Project:             "pool-" + *name,
+				Project:             workerProject,
 				Priority:            domain.PriorityBackground,
 				SpeedPref:           domain.SpeedThroughput,
 				ContextRequest:      node.ContextLength,
