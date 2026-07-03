@@ -4174,6 +4174,78 @@ func TestWorkloadHTTPPersistsReconciliationTasksFromPlacement(t *testing.T) {
 	}
 }
 
+func TestWorkloadHTTPStatusUsesPerJobRegistryEvidenceWithoutSnapshotBlocking(t *testing.T) {
+	job := domain.Job{
+		ID:                  "job-a",
+		TaskType:            "chat",
+		Model:               "model-a",
+		PresetID:            "preset-a",
+		Project:             "project-a",
+		Priority:            domain.PriorityInteractive,
+		SpeedPref:           domain.SpeedLatency,
+		ContextRequest:      512,
+		ExpectedConcurrency: 1,
+		Preemption:          domain.PreemptSoft,
+		Status:              domain.JobRunning,
+		Result: &domain.JobResult{
+			Source:         "scheduler",
+			Action:         domain.ActionWarmInstance,
+			NodeID:         "node-a",
+			PresetID:       "preset-a",
+			LeaseID:        "lease-a",
+			PayloadStored:  true,
+			ResultRedacted: true,
+		},
+	}
+	payload := mustJSON(t, workload.ExecutablePayload{
+		Kind: workload.ExecutablePayloadKindOpenAIChat,
+		Body: json.RawMessage(`{"model":"model-a","messages":[]}`),
+	})
+	replayable, err := peercoord.EncodeRescuePayload(job, payload)
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload: %v", err)
+	}
+	store := &blockingSnapshotWorkloadStore{workloadMemoryStore: &workloadMemoryStore{
+		jobs: map[string]domain.Job{job.ID: job},
+		records: []domain.JobRecord{{
+			JobID:       job.ID,
+			Coordinator: "peer-a",
+			Status:      domain.JobRunning,
+			Request:     replayable,
+			UpdatedAt:   time.Unix(50, 0).UTC(),
+		}},
+	}}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{}, store, "rpc-secret", "peer-a", nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/workloads/job-a", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		mux.ServeHTTP(rec, req)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("workload status hung on registry snapshot")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var status workload.StatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode status response: %v", err)
+	}
+	if status.Payload.State != "registry_payload_replayable" || !status.Payload.Replayable {
+		t.Fatalf("payload evidence = %+v", status.Payload)
+	}
+	if status.Execution.PayloadContract != "registry_executable_gateway_request" || status.Execution.PayloadKind != workload.ExecutablePayloadKindOpenAIChat || !status.Execution.PayloadExecutable {
+		t.Fatalf("execution evidence = %+v", status.Execution)
+	}
+}
+
 func TestWorkloadHTTPAutoDrainsSafeReconciliationTasksFromPlacement(t *testing.T) {
 	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
 	runtime := &recordingWorkloadRuntime{
@@ -5237,6 +5309,31 @@ func TestWorkloadPayloadEvidenceClassifiesRegistryStates(t *testing.T) {
 		if got.State != tc.wantState || got.Replayable != tc.replayable || got.Redacted != tc.redacted || (tc.wantError != "" && !strings.Contains(got.Error, tc.wantError)) {
 			t.Fatalf("%s evidence = %+v", tc.name, got)
 		}
+	}
+}
+
+func TestWorkloadJobRecordUsesDirectLookupAndSnapshotFallback(t *testing.T) {
+	ctx := context.Background()
+	rec := domain.JobRecord{
+		JobID:       "job-a",
+		Coordinator: "peer-a",
+		Status:      domain.JobQueued,
+		Request:     []byte(`{}`),
+		UpdatedAt:   time.Unix(1, 0).UTC(),
+	}
+	directStore := &workloadMemoryStore{records: []domain.JobRecord{rec}}
+	got, found, err := workloadJobRecord(ctx, directStore, directStore, "job-a")
+	if err != nil || !found || got.JobID != "job-a" {
+		t.Fatalf("direct JobRecord = %+v found=%v err=%v", got, found, err)
+	}
+	fallback := snapshotOnlyWorkloadRegistry{records: []domain.JobRecord{rec}}
+	got, found, err = workloadJobRecord(ctx, workloadStatusOnlyStore{}, fallback, "job-a")
+	if err != nil || !found || got.JobID != "job-a" {
+		t.Fatalf("fallback JobRecord = %+v found=%v err=%v", got, found, err)
+	}
+	_, found, err = workloadJobRecord(ctx, workloadStatusOnlyStore{}, fallback, "missing")
+	if err != nil || found {
+		t.Fatalf("missing JobRecord found=%v err=%v", found, err)
 	}
 }
 
@@ -6348,6 +6445,15 @@ func (s *workloadMemoryStore) Snapshot(context.Context) ([]domain.JobRecord, err
 	return append([]domain.JobRecord(nil), s.records...), nil
 }
 
+func (s *workloadMemoryStore) JobRecord(_ context.Context, id string) (domain.JobRecord, bool, error) {
+	for _, rec := range s.records {
+		if rec.JobID == id {
+			return rec, true, nil
+		}
+	}
+	return domain.JobRecord{}, false, nil
+}
+
 func (s *workloadMemoryStore) Put(_ context.Context, rec domain.JobRecord) error {
 	for i, existing := range s.records {
 		if existing.JobID == rec.JobID {
@@ -6357,6 +6463,23 @@ func (s *workloadMemoryStore) Put(_ context.Context, rec domain.JobRecord) error
 	}
 	s.records = append(s.records, rec)
 	return nil
+}
+
+type blockingSnapshotWorkloadStore struct {
+	*workloadMemoryStore
+}
+
+func (s *blockingSnapshotWorkloadStore) Snapshot(ctx context.Context) ([]domain.JobRecord, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+type snapshotOnlyWorkloadRegistry struct {
+	records []domain.JobRecord
+}
+
+func (s snapshotOnlyWorkloadRegistry) Snapshot(context.Context) ([]domain.JobRecord, error) {
+	return append([]domain.JobRecord(nil), s.records...), nil
 }
 
 func (s *workloadMemoryStore) SaveReconciliationTask(_ context.Context, task domain.ReconciliationTaskRecord) error {

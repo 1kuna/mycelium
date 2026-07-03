@@ -457,6 +457,13 @@ func (s *Store) Snapshot(ctx context.Context) ([]domain.JobRecord, error) {
 	return s.jobRecordsAfter(ctx, time.Time{})
 }
 
+func (s *Store) JobRecord(ctx context.Context, id string) (domain.JobRecord, bool, error) {
+	if id == "" {
+		return domain.JobRecord{}, false, fmt.Errorf("job record id is required")
+	}
+	return s.jobRecord(ctx, id)
+}
+
 func (s *Store) SaveRecommendation(ctx context.Context, rec domain.RecommendationRecord) error {
 	if rec.ID == "" {
 		return fmt.Errorf("recommendation id is required")
