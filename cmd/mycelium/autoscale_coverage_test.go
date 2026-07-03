@@ -36,15 +36,15 @@ func (s *signalingAutoScaleStore) ListReconciliationTasks(ctx context.Context, j
 func TestStartAutoScalerGuardsAndTicks(t *testing.T) {
 	clk := mocks.NewFakeClock(time.Unix(500, 0).UTC())
 	// Guard branches: disabled policy and nil dependencies return immediately.
-	startAutoScaler(context.Background(), &scheduler.Service{}, newAutoScaleTestStore(), &autoScaleTestFleet{}, estimate.NewInMemory(), lease.NewAllocator(), domain.AutonomyPolicy{}, clk, 0, nil, "")
-	startAutoScaler(context.Background(), nil, nil, nil, nil, nil, domain.AutonomyPolicy{AutoScale: true}, clk, 0, nil, "")
+	startAutoScaler(context.Background(), &scheduler.Service{}, newAutoScaleTestStore(), &autoScaleTestFleet{}, estimate.NewInMemory(), lease.NewAllocator(), domain.AutonomyPolicy{}, clk, 0, nil, "", "")
+	startAutoScaler(context.Background(), nil, nil, nil, nil, nil, domain.AutonomyPolicy{AutoScale: true}, clk, 0, nil, "", "")
 
 	// Enabled: the loop must fire a tick after the default interval (interval
 	// <= 0 exercises the default fallback) and stop when the context ends.
 	store := &signalingAutoScaleStore{autoScaleTestStore: newAutoScaleTestStore(), listCalled: make(chan struct{}, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	startAutoScaler(ctx, &scheduler.Service{}, store, &autoScaleTestFleet{}, estimate.NewInMemory(), lease.NewAllocator(), domain.AutonomyPolicy{AutoScale: true}, clk, 0, nil, "")
+	startAutoScaler(ctx, &scheduler.Service{}, store, &autoScaleTestFleet{}, estimate.NewInMemory(), lease.NewAllocator(), domain.AutonomyPolicy{AutoScale: true}, clk, 0, nil, "", "")
 	deadline := time.After(5 * time.Second)
 	for fired := false; !fired; {
 		clk.Advance(defaultAutoScaleInterval)

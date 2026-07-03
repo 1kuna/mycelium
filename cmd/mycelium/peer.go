@@ -334,7 +334,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		startPeerHeartbeatWithClient(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, joinTokens, clock.System{}, controlClient)
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
-	startAutoScaler(ctx, runtime, store, fleet, estimator, allocator, cfg.Autonomy, clock.System{}, defaultAutoScaleInterval, presetMap(presets), cfg.DefaultProject)
+	startAutoScaler(ctx, runtime, store, fleet, estimator, allocator, cfg.Autonomy, clock.System{}, defaultAutoScaleInterval, presetMap(presets), cfg.DefaultProject, cfg.RPCToken)
 	startIdleReaper(ctx, store, fleet, nodes, cfg.Autonomy, clock.System{}, defaultIdleReaperInterval)
 	optimizerNodeID := cfg.ID
 	if cfg.Compute {

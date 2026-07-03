@@ -154,7 +154,7 @@ func TestStartAutoScalerDisabledDoesNothingDespiteDemand(t *testing.T) {
 	fleet := &autoScaleTestFleet{snapshot: domain.FleetSnapshot{Nodes: []domain.Node{autoscaleNode("node-a", 1000)}}}
 	store := newAutoScaleTestStore(demandTask("demand-a", "vision-model", preset.ID, "node-a"))
 
-	startAutoScaler(ctx, &scheduler.Service{}, store, fleet, &mocks.ResourceEstimator{Claim: fixtures.MakeClaim(100, 0)}, &mocks.Allocator{FitsVal: true, CanStackLoadVal: true}, domain.AutonomyPolicy{AutoScale: false}, clk, time.Second, presetMap([]domain.Preset{preset}), "default")
+	startAutoScaler(ctx, &scheduler.Service{}, store, fleet, &mocks.ResourceEstimator{Claim: fixtures.MakeClaim(100, 0)}, &mocks.Allocator{FitsVal: true, CanStackLoadVal: true}, domain.AutonomyPolicy{AutoScale: false}, clk, time.Second, presetMap([]domain.Preset{preset}), "default", "")
 	clk.Advance(time.Second)
 	if clk.TimerCount() != 0 {
 		t.Fatalf("disabled autoscaler created timers: %d", clk.TimerCount())
@@ -224,6 +224,182 @@ func TestAutoScalerRefusesMissingPresetAndReachedCap(t *testing.T) {
 	if store.tasks["demand-missing"].Blocker != "autoscale_no_preset" {
 		t.Fatalf("missing task = %+v", store.tasks["demand-missing"])
 	}
+}
+
+func TestAutoScalerAutoStageStagesThenGrowsOnLaterTick(t *testing.T) {
+	ctx := context.Background()
+	clk := mocks.NewFakeClock(time.Unix(600, 0).UTC())
+	preset := fixtures.MakePreset(
+		fixtures.WithPresetID("preset-a"),
+		fixtures.WithModelRef("vision-model"),
+		fixtures.WithAliases("vision-model"),
+		fixtures.WithWeights(100),
+		fixtures.WithKVPerToken(0),
+		fixtures.WithContextLength(1024),
+		fixtures.WithPresetNode("node-a"),
+	)
+	fleet := &autoScaleTestFleet{snapshot: domain.FleetSnapshot{Nodes: []domain.Node{
+		autoscaleNode("node-a", 1000),
+		autoscaleNode("node-b", 1000),
+	}}}
+	stageTask := demandTask("stage-node-b", "vision-model", preset.ID, "node-b")
+	stageTask.Kind = "stage_model_artifact"
+	stageTask.Reason = "model artifact not local"
+	store := newAutoScaleTestStore(stageTask)
+	manualStage := demandTask("manual-stage", "vision-model", preset.ID, "node-b")
+	manualStage.Kind = "stage_model_artifact"
+	manualStage.Source = "placement_decision"
+	store.tasks[manualStage.ID] = manualStage
+	store.presets[preset.ID] = preset
+	nodeB := autoscaleNode("node-b", 1000)
+	nodeB.Address = "http://node-b.test"
+	store.nodes["node-b"] = nodeB
+	runtime := &autoScaleTestRuntime{store: store, fleet: fleet}
+	stager := &autoScaleTestStager{store: store, now: clk.Now}
+	scaler := testAutoScaler(store, runtime, fleet, clk, preset, domain.AutonomyPolicy{
+		AutoScale:                  true,
+		AutoStage:                  true,
+		MaxReplicasPerModelPerNode: 1,
+		MaxReplicasPerModel:        1,
+		ScaleCooldownMS:            1000,
+	})
+	scaler.Stager = stager
+
+	first, err := scaler.Tick(ctx)
+	if err != nil {
+		t.Fatalf("first Tick: %v", err)
+	}
+	if first.Staged != 1 || first.Scaled != 0 || len(runtime.submits) != 0 {
+		t.Fatalf("first report=%+v submits=%d", first, len(runtime.submits))
+	}
+	if len(stager.calls) != 1 || stager.calls[0].peer.ID != "node-b" {
+		t.Fatalf("stage calls = %+v", stager.calls)
+	}
+	if task := store.tasks["stage-node-b"]; task.Status != domain.ReconciliationTaskAllowed || !strings.Contains(task.Events[len(task.Events)-1].Message, "demand remains eligible") {
+		t.Fatalf("stage task after first tick = %+v", task)
+	}
+	if task := store.tasks["manual-stage"]; task.Status != domain.ReconciliationTaskAllowed || len(task.Events) != 0 {
+		t.Fatalf("non-demand stage task was mutated: %+v", task)
+	}
+	if got := scaler.Presets[preset.ID].NodeID; got != "node-b" {
+		t.Fatalf("autoscale preset locality = %q, want node-b", got)
+	}
+	if len(store.jobs) != 1 || store.jobs["catalog-stage-node-b-preset-a"].TaskType != "catalog_stage" || store.jobs["catalog-stage-node-b-preset-a"].Status != domain.JobDone {
+		t.Fatalf("durable jobs = %+v", store.jobs)
+	}
+
+	second, err := scaler.Tick(ctx)
+	if err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
+	if second.Staged != 0 || second.Scaled != 1 || len(runtime.submits) != 1 {
+		t.Fatalf("second report=%+v submits=%d", second, len(runtime.submits))
+	}
+	if got := runtime.submits[0].NodeSelector[domain.LabelNodeID]; got != "node-b" {
+		t.Fatalf("autoscale submit node = %q, want node-b", got)
+	}
+	if task := store.tasks["stage-node-b"]; task.Status != domain.ReconciliationTaskDone {
+		t.Fatalf("stage demand should close after growth: %+v", task)
+	}
+}
+
+func TestAutoScalerAutoStageOffLeavesStageDemandPlanned(t *testing.T) {
+	ctx := context.Background()
+	clk := mocks.NewFakeClock(time.Unix(620, 0).UTC())
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("vision-model"), fixtures.WithPresetNode("node-a"))
+	fleet := &autoScaleTestFleet{snapshot: domain.FleetSnapshot{Nodes: []domain.Node{autoscaleNode("node-b", 1000)}}}
+	stageTask := demandTask("stage-node-b", "vision-model", preset.ID, "node-b")
+	stageTask.Kind = "stage_model_artifact"
+	stageTask.Reason = "model artifact not local"
+	store := newAutoScaleTestStore(stageTask)
+	runtime := &autoScaleTestRuntime{store: store, fleet: fleet}
+	scaler := testAutoScaler(store, runtime, fleet, clk, preset, domain.AutonomyPolicy{
+		AutoScale:                  true,
+		AutoStage:                  false,
+		MaxReplicasPerModelPerNode: 1,
+		MaxReplicasPerModel:        1,
+		ScaleCooldownMS:            1000,
+	})
+
+	report, err := scaler.Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if report.DemandTasks != 1 || report.Staged != 0 || report.Scaled != 0 || len(runtime.submits) != 0 {
+		t.Fatalf("report=%+v submits=%d", report, len(runtime.submits))
+	}
+	if task := store.tasks["stage-node-b"]; task.Status != domain.ReconciliationTaskAllowed || task.Error != "" || len(task.Events) != 0 {
+		t.Fatalf("auto_stage off mutated planned task: %+v", task)
+	}
+}
+
+func TestAutoScalerAutoStageDiskFloorAndTransferFailuresAreLoud(t *testing.T) {
+	ctx := context.Background()
+	clk := mocks.NewFakeClock(time.Unix(640, 0).UTC())
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("vision-model"), fixtures.WithPresetNode("node-a"))
+
+	t.Run("disk floor", func(t *testing.T) {
+		fleet := &autoScaleTestFleet{snapshot: domain.FleetSnapshot{Nodes: []domain.Node{autoscaleNode("node-b", 1000)}}}
+		task := demandTask("disk-stage", "vision-model", preset.ID, "node-b")
+		task.Kind = "stage_model_artifact"
+		task.Reason = "disk.free_after_model"
+		store := newAutoScaleTestStore(task)
+		store.presets[preset.ID] = preset
+		nodeB := autoscaleNode("node-b", 1000)
+		nodeB.Address = "http://node-b.test"
+		store.nodes["node-b"] = nodeB
+		stager := &autoScaleTestStager{store: store, now: clk.Now}
+		scaler := testAutoScaler(store, &autoScaleTestRuntime{store: store, fleet: fleet}, fleet, clk, preset, domain.AutonomyPolicy{
+			AutoScale:                  true,
+			AutoStage:                  true,
+			MaxReplicasPerModelPerNode: 1,
+			MaxReplicasPerModel:        1,
+			ScaleCooldownMS:            1000,
+		})
+		scaler.Stager = stager
+
+		report, err := scaler.Tick(ctx)
+		if err != nil {
+			t.Fatalf("Tick: %v", err)
+		}
+		if report.Failed != 1 || len(stager.calls) != 0 {
+			t.Fatalf("report=%+v stage calls=%+v", report, stager.calls)
+		}
+		if got := store.tasks["disk-stage"]; got.Status != domain.ReconciliationTaskFailed || !strings.Contains(got.Error, "disk.free_after_model") {
+			t.Fatalf("disk task = %+v", got)
+		}
+	})
+
+	t.Run("transfer failure", func(t *testing.T) {
+		fleet := &autoScaleTestFleet{snapshot: domain.FleetSnapshot{Nodes: []domain.Node{autoscaleNode("node-b", 1000)}}}
+		task := demandTask("failed-stage", "vision-model", preset.ID, "node-b")
+		task.Kind = "stage_model_artifact"
+		task.Reason = "model artifact not local"
+		store := newAutoScaleTestStore(task)
+		store.presets[preset.ID] = preset
+		nodeB := autoscaleNode("node-b", 1000)
+		nodeB.Address = "http://node-b.test"
+		store.nodes["node-b"] = nodeB
+		scaler := testAutoScaler(store, &autoScaleTestRuntime{store: store, fleet: fleet}, fleet, clk, preset, domain.AutonomyPolicy{
+			AutoScale:                  true,
+			AutoStage:                  true,
+			MaxReplicasPerModelPerNode: 1,
+			MaxReplicasPerModel:        1,
+			ScaleCooldownMS:            1000,
+		})
+		scaler.Stager = &autoScaleTestStager{store: store, now: clk.Now, err: errors.New("mock transfer failed")}
+
+		report, err := scaler.Tick(ctx)
+		if err != nil {
+			t.Fatalf("Tick: %v", err)
+		}
+		if report.Failed != 1 {
+			t.Fatalf("report=%+v", report)
+		}
+		if got := store.tasks["failed-stage"]; got.Status != domain.ReconciliationTaskFailed || got.Error != "mock transfer failed" {
+			t.Fatalf("failed task = %+v", got)
+		}
+	})
 }
 
 func testAutoScaler(store *autoScaleTestStore, runtime *autoScaleTestRuntime, fleet *autoScaleTestFleet, clk *mocks.FakeClock, preset domain.Preset, policy domain.AutonomyPolicy) *autoScaler {
@@ -305,13 +481,26 @@ func cloneFleetSnapshot(in domain.FleetSnapshot) domain.FleetSnapshot {
 }
 
 type autoScaleTestStore struct {
-	mu        sync.Mutex
-	tasks     map[string]domain.ReconciliationTaskRecord
-	instances map[string]domain.ModelInstance
+	mu         sync.Mutex
+	tasks      map[string]domain.ReconciliationTaskRecord
+	instances  map[string]domain.ModelInstance
+	presets    map[string]domain.Preset
+	nodes      map[string]domain.Node
+	plans      map[string]domain.LocalityPlan
+	localities map[string]domain.ModelLocality
+	jobs       map[string]domain.Job
 }
 
 func newAutoScaleTestStore(tasks ...domain.ReconciliationTaskRecord) *autoScaleTestStore {
-	store := &autoScaleTestStore{tasks: map[string]domain.ReconciliationTaskRecord{}, instances: map[string]domain.ModelInstance{}}
+	store := &autoScaleTestStore{
+		tasks:      map[string]domain.ReconciliationTaskRecord{},
+		instances:  map[string]domain.ModelInstance{},
+		presets:    map[string]domain.Preset{},
+		nodes:      map[string]domain.Node{},
+		plans:      map[string]domain.LocalityPlan{},
+		localities: map[string]domain.ModelLocality{},
+		jobs:       map[string]domain.Job{},
+	}
 	for _, task := range tasks {
 		store.tasks[task.ID] = task
 	}
@@ -361,6 +550,110 @@ func (s *autoScaleTestStore) DeleteInstance(_ context.Context, id string) error 
 	defer s.mu.Unlock()
 	delete(s.instances, id)
 	return nil
+}
+
+func (s *autoScaleTestStore) Preset(_ context.Context, id string) (domain.Preset, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	preset, ok := s.presets[id]
+	if !ok {
+		return domain.Preset{}, errors.New("preset not found")
+	}
+	return preset, nil
+}
+
+func (s *autoScaleTestStore) Node(_ context.Context, id string) (domain.Node, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	node, ok := s.nodes[id]
+	if !ok {
+		return domain.Node{}, errors.New("node not found")
+	}
+	return node, nil
+}
+
+func (s *autoScaleTestStore) SaveIncompatibility(context.Context, domain.IncompatibilityRecord) error {
+	return nil
+}
+
+func (s *autoScaleTestStore) SaveLocalityPlan(_ context.Context, plan domain.LocalityPlan) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.plans[plan.ID] = plan
+	return nil
+}
+
+func (s *autoScaleTestStore) SaveModelLocality(_ context.Context, locality domain.ModelLocality) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.localities[locality.ID] = locality
+	return nil
+}
+
+func (s *autoScaleTestStore) SaveEngineProfile(context.Context, domain.EngineProfile) error {
+	return nil
+}
+
+func (s *autoScaleTestStore) ListEngineProfiles(context.Context) ([]domain.EngineProfile, error) {
+	return nil, nil
+}
+
+func (s *autoScaleTestStore) MarkEngineProfileUnready(context.Context, string, string) error {
+	return nil
+}
+
+func (s *autoScaleTestStore) SaveJob(_ context.Context, job domain.Job) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.jobs[job.ID] = job
+	return nil
+}
+
+type autoScaleTestStager struct {
+	store *autoScaleTestStore
+	now   func() time.Time
+	err   error
+	calls []autoScaleTestStageCall
+}
+
+type autoScaleTestStageCall struct {
+	peer   domain.Peer
+	preset domain.Preset
+}
+
+func (s *autoScaleTestStager) StageModel(ctx context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error) {
+	s.calls = append(s.calls, autoScaleTestStageCall{peer: peer, preset: preset})
+	if s.err != nil {
+		return domain.ModelLocality{}, s.err
+	}
+	now := s.now()
+	job := domain.Job{
+		ID:       "catalog-stage-" + peer.ID + "-" + preset.ID,
+		TaskType: "catalog_stage",
+		Model:    preset.ModelRef,
+		PresetID: preset.ID,
+		Status:   domain.JobDone,
+		Progress: []domain.JobProgress{{
+			Stage:   "ready",
+			Message: "preset is materialized",
+			At:      now,
+		}},
+	}
+	if err := s.store.SaveJob(ctx, job); err != nil {
+		return domain.ModelLocality{}, err
+	}
+	return domain.ModelLocality{
+		ID:             peer.ID + ":" + preset.ID,
+		PresetID:       preset.ID,
+		NodeID:         peer.ID,
+		State:          domain.ModelLocalityReady,
+		ModelRef:       preset.ModelRef,
+		Source:         preset.ModelRef,
+		ArtifactSizeMB: preset.ArtifactSizeMB,
+		Managed:        true,
+		Reason:         "catalog stage committed",
+		UpdatedAt:      now,
+	}, nil
 }
 
 type autoScaleTestRuntime struct {

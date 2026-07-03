@@ -27,13 +27,16 @@ type TaskStore interface {
 }
 
 type DrainOptions struct {
-	JobID   string
-	Limit   int
-	Now     time.Time
-	Project string
-	Prewarm PrewarmExecutor
-	Catalog CatalogRefresher
-	Kinds   []TaskKind
+	JobID                   string
+	Limit                   int
+	Now                     time.Time
+	Project                 string
+	Prewarm                 PrewarmExecutor
+	Catalog                 CatalogRefresher
+	ArtifactStager          ArtifactStager
+	KeepStageDemandEligible bool
+	TaskIDs                 []string
+	Kinds                   []TaskKind
 }
 
 type DrainReport struct {
@@ -49,6 +52,7 @@ type DrainTaskResult struct {
 	Action     string                          `json:"action,omitempty"`
 	WorkloadID string                          `json:"workload_id,omitempty"`
 	NodeID     string                          `json:"node_id,omitempty"`
+	PresetID   string                          `json:"preset_id,omitempty"`
 	InstanceID string                          `json:"instance_id,omitempty"`
 	LeaseID    string                          `json:"lease_id,omitempty"`
 	Error      string                          `json:"error,omitempty"`
@@ -69,6 +73,10 @@ type CatalogRefresher interface {
 	RefreshCatalog(ctx context.Context, task domain.ReconciliationTaskRecord) error
 }
 
+type ArtifactStager interface {
+	StageModel(ctx context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error)
+}
+
 func DrainAllowedTasks(ctx context.Context, store TaskStore, opts DrainOptions) (DrainReport, error) {
 	if store == nil {
 		return DrainReport{}, fmt.Errorf("reconciliation task store is required")
@@ -87,6 +95,10 @@ func DrainAllowedTasks(ctx context.Context, store TaskStore, opts DrainOptions) 
 			report.Skipped++
 			continue
 		}
+		if !drainTaskIDAllowed(task.ID, opts.TaskIDs) {
+			report.Skipped++
+			continue
+		}
 		if !drainKindAllowed(TaskKind(task.Kind), opts.Kinds) {
 			report.Skipped++
 			continue
@@ -100,6 +112,18 @@ func DrainAllowedTasks(ctx context.Context, store TaskStore, opts DrainOptions) 
 		report.Results = append(report.Results, result)
 	}
 	return report, nil
+}
+
+func drainTaskIDAllowed(id string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, candidate := range allowed {
+		if id == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func drainKindAllowed(kind TaskKind, allowed []TaskKind) bool {
@@ -131,14 +155,32 @@ func drainTask(ctx context.Context, store TaskStore, task domain.ReconciliationT
 		_ = store.SaveReconciliationTask(ctx, done)
 		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "record_incompatibility"}
 	case TaskStageModelArtifact:
-		if err := planModelArtifactStage(ctx, store, running, now); err != nil {
-			failed := transitionTask(running, domain.ReconciliationTaskFailed, err.Error(), "failed to plan model artifact staging", now)
+		action := "plan_model_artifact_stage"
+		var err error
+		if opts.ArtifactStager != nil {
+			action = "stage_model_artifact"
+			err = executeModelArtifactStage(ctx, store, opts.ArtifactStager, running, now)
+		} else {
+			err = planModelArtifactStage(ctx, store, running, now)
+		}
+		if err != nil {
+			failed := transitionTask(running, domain.ReconciliationTaskFailed, err.Error(), "failed to "+strings.ReplaceAll(action, "_", " "), now)
 			_ = store.SaveReconciliationTask(ctx, failed)
-			return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: failed.Status, Error: err.Error()}
+			return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: failed.Status, NodeID: task.NodeID, PresetID: task.PresetID, Error: err.Error()}
+		}
+		if opts.KeepStageDemandEligible {
+			eligible := transitionTask(running, domain.ReconciliationTaskAllowed, "", "staged model artifact; demand remains eligible for autoscale", now)
+			eligible.Kind = string(TaskPrewarmReplica)
+			eligible.Next = "retry autoscale after staged artifact is visible"
+			_ = store.SaveReconciliationTask(ctx, eligible)
+			return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: eligible.Status, Action: action, NodeID: task.NodeID, PresetID: task.PresetID}
 		}
 		done := transitionTask(running, domain.ReconciliationTaskDone, "", "planned model artifact staging", now)
+		if opts.ArtifactStager != nil {
+			done = transitionTask(running, domain.ReconciliationTaskDone, "", "staged model artifact", now)
+		}
 		_ = store.SaveReconciliationTask(ctx, done)
-		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "plan_model_artifact_stage"}
+		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: action, NodeID: task.NodeID, PresetID: task.PresetID}
 	case TaskVerifyEngineReadiness:
 		if err := verifyEngineReadiness(ctx, store, running); err != nil {
 			failed := transitionTask(running, domain.ReconciliationTaskFailed, err.Error(), "engine readiness verification failed", now)
@@ -221,19 +263,101 @@ func prewarmReplica(ctx context.Context, store TaskStore, task domain.Reconcilia
 }
 
 func planModelArtifactStage(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, now time.Time) error {
+	preset, node, action, plan, err := modelArtifactStagePlan(ctx, store, task, now)
+	if err != nil {
+		return err
+	}
+	if err := store.SaveLocalityPlan(ctx, plan); err != nil {
+		return err
+	}
+	return store.SaveModelLocality(ctx, domain.ModelLocality{
+		ID:             modelLocalityID(node.ID, preset.ID),
+		PresetID:       preset.ID,
+		NodeID:         node.ID,
+		State:          domain.ModelLocalityPlanned,
+		ModelRef:       preset.ModelRef,
+		Source:         action.Source,
+		ArtifactSizeMB: preset.ArtifactSizeMB,
+		Managed:        true,
+		Reason:         "planned by reconciliation task " + task.ID,
+		UpdatedAt:      now,
+	})
+}
+
+func executeModelArtifactStage(ctx context.Context, store TaskStore, stager ArtifactStager, task domain.ReconciliationTaskRecord, now time.Time) error {
+	if isDiskFloorRefusal(task.Reason) {
+		return fmt.Errorf("staging refused by placement disk floor evidence: %s", task.Reason)
+	}
+	preset, node, action, plan, err := modelArtifactStagePlan(ctx, store, task, now)
+	if err != nil {
+		return err
+	}
+	if node.Address == "" {
+		return fmt.Errorf("node %q has no reachable address for catalog staging", node.ID)
+	}
+	action.State = domain.ModelLocalityStaging
+	plan.Actions[0] = action
+	if err := store.SaveLocalityPlan(ctx, plan); err != nil {
+		return err
+	}
+	locality, err := stager.StageModel(ctx, domain.Peer{ID: node.ID, Addresses: []string{node.Address}, Compute: true}, preset)
+	if err != nil {
+		action.State = domain.ModelLocalityFailed
+		action.Error = err.Error()
+		plan.Actions[0] = action
+		_ = store.SaveLocalityPlan(ctx, plan)
+		_ = store.SaveModelLocality(ctx, domain.ModelLocality{
+			ID:             modelLocalityID(node.ID, preset.ID),
+			PresetID:       preset.ID,
+			NodeID:         node.ID,
+			State:          domain.ModelLocalityFailed,
+			ModelRef:       preset.ModelRef,
+			Source:         action.Source,
+			ArtifactSizeMB: preset.ArtifactSizeMB,
+			Managed:        true,
+			Reason:         err.Error(),
+			UpdatedAt:      now,
+		})
+		return err
+	}
+	if locality.ID == "" {
+		locality.ID = modelLocalityID(node.ID, preset.ID)
+	}
+	if locality.PresetID == "" {
+		locality.PresetID = preset.ID
+	}
+	if locality.NodeID == "" {
+		locality.NodeID = node.ID
+	}
+	if locality.State == "" {
+		locality.State = domain.ModelLocalityReady
+	}
+	if locality.UpdatedAt.IsZero() {
+		locality.UpdatedAt = now
+	}
+	if err := store.SaveModelLocality(ctx, locality); err != nil {
+		return err
+	}
+	action.State = locality.State
+	action.Error = ""
+	plan.Actions[0] = action
+	return store.SaveLocalityPlan(ctx, plan)
+}
+
+func modelArtifactStagePlan(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, now time.Time) (domain.Preset, domain.Node, domain.LocalityAction, domain.LocalityPlan, error) {
 	if task.NodeID == "" {
-		return fmt.Errorf("stage model artifact task requires node id")
+		return domain.Preset{}, domain.Node{}, domain.LocalityAction{}, domain.LocalityPlan{}, fmt.Errorf("stage model artifact task requires node id")
 	}
 	if task.PresetID == "" {
-		return fmt.Errorf("stage model artifact task requires preset id")
+		return domain.Preset{}, domain.Node{}, domain.LocalityAction{}, domain.LocalityPlan{}, fmt.Errorf("stage model artifact task requires preset id")
 	}
 	preset, err := store.Preset(ctx, task.PresetID)
 	if err != nil {
-		return err
+		return domain.Preset{}, domain.Node{}, domain.LocalityAction{}, domain.LocalityPlan{}, err
 	}
 	node, err := store.Node(ctx, task.NodeID)
 	if err != nil {
-		return err
+		return domain.Preset{}, domain.Node{}, domain.LocalityAction{}, domain.LocalityPlan{}, err
 	}
 	action := domain.LocalityAction{
 		ID:             localityActionID(task),
@@ -250,21 +374,11 @@ func planModelArtifactStage(ctx context.Context, store TaskStore, task domain.Re
 		CreatedAt: now,
 		Actions:   []domain.LocalityAction{action},
 	}
-	if err := store.SaveLocalityPlan(ctx, plan); err != nil {
-		return err
-	}
-	return store.SaveModelLocality(ctx, domain.ModelLocality{
-		ID:             modelLocalityID(node.ID, preset.ID),
-		PresetID:       preset.ID,
-		NodeID:         node.ID,
-		State:          domain.ModelLocalityPlanned,
-		ModelRef:       preset.ModelRef,
-		Source:         preset.ModelRef,
-		ArtifactSizeMB: preset.ArtifactSizeMB,
-		Managed:        true,
-		Reason:         "planned by reconciliation task " + task.ID,
-		UpdatedAt:      now,
-	})
+	return preset, node, action, plan, nil
+}
+
+func isDiskFloorRefusal(reason string) bool {
+	return reason == "disk.free" || reason == "disk.free_after_model" || strings.HasPrefix(reason, "disk.")
 }
 
 func verifyEngineReadiness(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord) error {

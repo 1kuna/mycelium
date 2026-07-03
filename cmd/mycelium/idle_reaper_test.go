@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -210,9 +214,16 @@ func (f *autoScaleTestFleet) hasInstance(id string) bool {
 }
 
 type idleReapTestNodes struct {
+	mu      sync.Mutex
 	fleet   *autoScaleTestFleet
 	agents  map[string]*idleReapTestAgent
 	unloads []string
+}
+
+func (n *idleReapTestNodes) unloadCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.unloads)
 }
 
 func (n *idleReapTestNodes) NodeAgent(nodeID string) (ports.NodeAgent, error) {
@@ -225,6 +236,8 @@ func (n *idleReapTestNodes) NodeAgent(nodeID string) (ports.NodeAgent, error) {
 }
 
 func (n *idleReapTestNodes) unloaded(id string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	for _, unload := range n.unloads {
 		if unload == id {
 			return true
@@ -257,7 +270,9 @@ func (a *idleReapTestAgent) Load(context.Context, domain.LoadRequest) (domain.Mo
 }
 
 func (a *idleReapTestAgent) Unload(_ context.Context, instanceID string) error {
+	a.nodes.mu.Lock()
 	a.nodes.unloads = append(a.nodes.unloads, instanceID)
+	a.nodes.mu.Unlock()
 	a.fleet.removeInstance(instanceID)
 	return nil
 }
@@ -291,5 +306,77 @@ func TestIdleReaperReportShape(t *testing.T) {
 	}
 	if !reflect.DeepEqual(report, idleReapReport{Scanned: 2, Reaped: 2}) {
 		t.Fatalf("report = %+v", report)
+	}
+}
+
+func TestStartIdleReaperGuardsAndTicks(t *testing.T) {
+	clk := mocks.NewFakeClock(time.Unix(300, 0).UTC())
+	// Nil-dependency guards return without starting a loop.
+	startIdleReaper(context.Background(), nil, nil, nil, domain.AutonomyPolicy{IdleTTLMS: 1000}, clk, 0)
+	if clk.TimerCount() != 0 {
+		t.Fatalf("guarded reaper armed a timer")
+	}
+
+	// Enabled: interval <= 0 falls back to the default and the loop ticks,
+	// reaping an idle autoscale instance, then stops with the context.
+	created := clk.Now().Add(-time.Hour)
+	store, fleet, nodes := idleReapHarness(idleReapInstance("inst-auto", "node-a", created, created))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startIdleReaper(ctx, store, fleet, nodes, domain.AutonomyPolicy{IdleTTLMS: 1000, ScaleCooldownMS: 500}, clk, 0)
+	deadline := time.After(5 * time.Second)
+	for {
+		clk.Advance(defaultIdleReaperInterval)
+		if nodes.unloadCount() > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("idle reaper loop never reaped")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	cancel()
+}
+
+func TestPeerCatalogStageClientStageModel(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-stage"))
+
+	// No reachable address fails loudly.
+	if _, err := (peerCatalogStageClient{}).StageModel(context.Background(), domain.Peer{ID: "p"}, preset); err == nil {
+		t.Fatalf("expected no-address error")
+	}
+
+	// Success path returns the staged locality and sends auth.
+	var gotAuth string
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if r.URL.Path != "/catalog/stage" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"locality": domain.ModelLocality{ID: "loc-1", PresetID: preset.ID, NodeID: "node-a"}})
+	}))
+	defer ok.Close()
+	client := peerCatalogStageClient{Client: ok.Client(), AuthToken: "rpc-secret"}
+	locality, err := client.StageModel(context.Background(), domain.Peer{ID: "p", Addresses: []string{ok.URL}}, preset)
+	if err != nil || locality.ID != "loc-1" {
+		t.Fatalf("stage = %+v %v", locality, err)
+	}
+	if gotAuth != "Bearer rpc-secret" {
+		t.Fatalf("auth = %q", gotAuth)
+	}
+
+	// Non-2xx, undecodable, and empty-locality responses fail loudly.
+	for name, handler := range map[string]http.HandlerFunc{
+		"refused": func(w http.ResponseWriter, r *http.Request) { http.Error(w, "disk floor", http.StatusConflict) },
+		"garbage": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("{")) },
+		"empty":   func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"locality":{}}`)) },
+	} {
+		server := httptest.NewServer(handler)
+		if _, err := (peerCatalogStageClient{Client: server.Client()}).StageModel(context.Background(), domain.Peer{ID: name, Addresses: []string{server.URL}}, preset); err == nil {
+			t.Fatalf("%s response should error", name)
+		}
+		server.Close()
 	}
 }
