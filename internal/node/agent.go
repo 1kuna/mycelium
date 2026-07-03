@@ -244,6 +244,8 @@ func (a *Agent) BeginRequest(ctx context.Context, instanceID string) error {
 		state = a.inflightStateLocked(instanceID)
 	}
 	state.count++
+	inst.LastActivityAt = a.clock.Now()
+	a.instances[instanceID] = inst
 	return nil
 }
 
@@ -255,6 +257,10 @@ func (a *Agent) EndRequest(_ context.Context, instanceID string) error {
 		return fmt.Errorf("instance %q has no in-flight request", instanceID)
 	}
 	state.count--
+	if inst, ok := a.instances[instanceID]; ok {
+		inst.LastActivityAt = a.clock.Now()
+		a.instances[instanceID] = inst
+	}
 	a.closeDrainedIfReadyLocked(state)
 	return nil
 }
@@ -325,6 +331,7 @@ func (a *Agent) beginLoad(req domain.LoadRequest, check domain.EngineReadinessCh
 		return nil, "", false, fmt.Errorf("allocator is not configured")
 	}
 
+	now := a.clock.Now()
 	inst := domain.ModelInstance{
 		ID:             a.nextInstanceID(),
 		PresetID:       req.Preset.ID,
@@ -333,6 +340,9 @@ func (a *Agent) beginLoad(req domain.LoadRequest, check domain.EngineReadinessCh
 		Claim:          req.Claim,
 		ReservationID:  req.ReservationID,
 		Priority:       req.Priority,
+		Origin:         req.Origin,
+		CreatedAt:      now,
+		LastActivityAt: now,
 		State:          domain.InstLoading,
 		Loading:        true,
 	}

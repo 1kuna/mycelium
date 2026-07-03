@@ -82,6 +82,15 @@ func TestSelectWarmInstanceChoosesLeastBusyThenID(t *testing.T) {
 	}
 }
 
+func TestInstanceOriginHookSelection(t *testing.T) {
+	if got := instanceOrigin(nil); got != "" {
+		t.Fatalf("empty origin = %q", got)
+	}
+	if got := instanceOrigin([]SubmitHooks{{}, {InstanceOrigin: domain.InstanceOriginAutoscale}}); got != domain.InstanceOriginAutoscale {
+		t.Fatalf("origin = %q", got)
+	}
+}
+
 func TestFilterCandidatesDropsStatusLoadAndFit(t *testing.T) {
 	claim := fixtures.MakeClaim(1, 1)
 	down := fixtures.MakeNode(fixtures.WithNodeID("down"), fixtures.Maintenance)

@@ -68,6 +68,7 @@ type SubmitHooks struct {
 	BeforeColdLoad func(ctx context.Context, decision domain.PlacementDecision) error
 	RejectQueued   bool
 	QueueOnly      bool
+	InstanceOrigin string
 }
 
 func (s *Service) Submit(ctx context.Context, job domain.Job, hooks ...SubmitHooks) (Result, error) {
@@ -170,7 +171,7 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, payload []byt
 			return Result{Decision: decision}, err
 		}
 	}
-	inst, err := s.resolveInstance(ctx, job, decision, fleet)
+	inst, err := s.resolveInstance(ctx, job, decision, fleet, instanceOrigin(hooks))
 	if err != nil {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(cleanupContext(ctx), job)
@@ -343,7 +344,7 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 			return Result{Decision: decision, Lease: ownerLease}, err
 		}
 	}
-	inst, err := s.resolveInstance(ctx, job, decision, fleet)
+	inst, err := s.resolveInstance(ctx, job, decision, fleet, instanceOrigin(hooks))
 	if err != nil {
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(cleanupContext(ctx), job)
@@ -724,6 +725,22 @@ func queueOnly(hooks []SubmitHooks) bool {
 		}
 	}
 	return false
+}
+
+func instanceOrigin(hooks []SubmitHooks) string {
+	for _, hook := range hooks {
+		if hook.InstanceOrigin != "" {
+			return hook.InstanceOrigin
+		}
+	}
+	return ""
+}
+
+func firstOrigin(origins []string) string {
+	if len(origins) == 0 {
+		return ""
+	}
+	return origins[0]
 }
 
 func (s *Service) queueJobWithPayload(ctx context.Context, job domain.Job, payload []byte) (Result, error) {
@@ -1229,7 +1246,7 @@ func (s *Service) cleanupCoordinatedLoad(ctx context.Context, jobID string, inst
 	return errors.Join(failErr, unloadErr, releaseErr, deleteErr)
 }
 
-func (s *Service) resolveInstance(ctx context.Context, job domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot) (domain.ModelInstance, error) {
+func (s *Service) resolveInstance(ctx context.Context, job domain.Job, decision domain.PlacementDecision, fleet domain.FleetSnapshot, origins ...string) (domain.ModelInstance, error) {
 	if decision.InstanceID != "" {
 		inst, ok := instanceByNodeAndID(fleet.Instances, decision.NodeID, decision.InstanceID)
 		if !ok {
@@ -1266,6 +1283,7 @@ func (s *Service) resolveInstance(ctx context.Context, job domain.Job, decision 
 		Claim:          decision.Claim,
 		AcceleratorSet: append([]int(nil), decision.AcceleratorSet...),
 		Priority:       job.Priority,
+		Origin:         firstOrigin(origins),
 	})
 	if err != nil {
 		return domain.ModelInstance{}, err

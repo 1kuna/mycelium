@@ -299,7 +299,7 @@ func (s *autoScaler) launchReplica(ctx context.Context, group autoScaleDemandGro
 		Preemption:          domain.PreemptSoft,
 		Status:              domain.JobQueued,
 	}
-	result, err := s.Runtime.SubmitWithPayload(ctx, job, nil)
+	result, err := s.Runtime.SubmitWithPayload(ctx, job, nil, scheduler.SubmitHooks{InstanceOrigin: domain.InstanceOriginAutoscale})
 	if err != nil {
 		return autoScaleLaunchResult{}, err
 	}
@@ -309,7 +309,14 @@ func (s *autoScaler) launchReplica(ctx context.Context, group autoScaleDemandGro
 	if result.Lease.ID == "" {
 		return autoScaleLaunchResult{}, fmt.Errorf("autoscale prewarm job %q returned no lease to release", job.ID)
 	}
+	now := s.Clock.Now()
 	result.Instance.Origin = domain.InstanceOriginAutoscale
+	if result.Instance.CreatedAt.IsZero() {
+		result.Instance.CreatedAt = now
+	}
+	if result.Instance.LastActivityAt.IsZero() {
+		result.Instance.LastActivityAt = result.Instance.CreatedAt
+	}
 	if err := s.Store.SaveInstance(ctx, result.Instance); err != nil {
 		return autoScaleLaunchResult{}, err
 	}
