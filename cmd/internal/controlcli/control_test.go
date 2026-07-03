@@ -2137,6 +2137,38 @@ func TestRunBenchmarkUsesGatewayTokenEnv(t *testing.T) {
 	}
 }
 
+func TestRunBenchmarkUsesGatewayTokenFile(t *testing.T) {
+	dir := t.TempDir()
+	tokenFile := filepath.Join(dir, "gateway-token")
+	if err := os.WriteFile(tokenFile, []byte("file-secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer file-secret" {
+			t.Fatalf("gateway auth = %q", got)
+		}
+		writeBenchmarkOpenAIStream(w, []string{"file ok"}, api.OpenAIUsage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3})
+	}))
+	var err error
+	output := captureStdout(t, func() {
+		err = RunWithClient(context.Background(), []string{
+			"benchmark", "run",
+			"--db", filepath.Join(dir, "control.db"),
+			"--url", "http://gateway.test",
+			"--gateway-token-file", tokenFile,
+			"--prompt", "Say hi",
+			"--out", filepath.Join(dir, "bench"),
+			"--model", "tiny",
+		}, client)
+	})
+	if err != nil {
+		t.Fatalf("benchmark file token: %v", err)
+	}
+	if !strings.Contains(output, "benchmark-auth\t"+tokenFile+"\tconfigured=true") || strings.Contains(output, "file-secret") {
+		t.Fatalf("benchmark auth output = %q", output)
+	}
+}
+
 func TestRunBenchmarkIgnoresAmbientOpenAIKey(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
@@ -2153,7 +2185,7 @@ func TestRunBenchmarkIgnoresAmbientOpenAIKey(t *testing.T) {
 		"--out", filepath.Join(t.TempDir(), "bench"),
 		"--model", "tiny",
 	}, client)
-	if err == nil || !strings.Contains(err.Error(), "gateway_token or token_env") {
+	if err == nil || !strings.Contains(err.Error(), "MYCELIUM_GATEWAY_TOKEN") {
 		t.Fatalf("ambient OPENAI_API_KEY benchmark err = %v", err)
 	}
 }

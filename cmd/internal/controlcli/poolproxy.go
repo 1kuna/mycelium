@@ -10,10 +10,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync/atomic"
 
+	"mycelium/internal/bench"
 	"mycelium/internal/gateway"
 )
 
@@ -49,7 +49,7 @@ func runPoolProxy(ctx context.Context, args []string, client *http.Client) error
 	if err != nil || target.Scheme == "" || target.Host == "" {
 		return fmt.Errorf("invalid gateway url %q", *gatewayURL)
 	}
-	bearer, err := resolvePoolProxyToken(*token, *tokenEnv, *tokenFile)
+	bearer, err := resolvePoolProxyToken(*gatewayURL, *token, *tokenEnv, *tokenFile)
 	if err != nil {
 		return err
 	}
@@ -92,29 +92,14 @@ func heldPoolWorkers(state poolState) []poolWorker {
 	return held
 }
 
-func resolvePoolProxyToken(token, tokenEnv, tokenFile string) (string, error) {
-	if token != "" {
-		return token, nil
-	}
-	if tokenEnv != "" {
-		value := strings.TrimSpace(os.Getenv(tokenEnv))
-		if value == "" {
-			return "", fmt.Errorf("gateway token environment variable %q is empty", tokenEnv)
-		}
-		return value, nil
-	}
-	if tokenFile != "" {
-		data, err := os.ReadFile(tokenFile)
-		if err != nil {
-			return "", fmt.Errorf("read gateway token file: %w", err)
-		}
-		value := strings.TrimSpace(string(data))
-		if value == "" {
-			return "", fmt.Errorf("gateway token file %q is empty", tokenFile)
-		}
-		return value, nil
-	}
-	return "", nil
+func resolvePoolProxyToken(rawURL, token, tokenEnv, tokenFile string) (string, error) {
+	value, _, err := bench.ResolveGatewayTokenSource(bench.GatewayTokenOptions{
+		RawURL:    rawURL,
+		Token:     token,
+		TokenEnv:  tokenEnv,
+		TokenFile: tokenFile,
+	})
+	return value, err
 }
 
 type poolProxyHandler struct {

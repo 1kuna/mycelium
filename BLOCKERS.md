@@ -52,19 +52,21 @@ handoff.
   synchronous gateway. The explicit workload lane has also been live-proven for
   queued admission, owner placement, provider execution, result capture/replay,
   terminal finish, and lease release on two owner/backend classes. Full
-  pressure remains open: the synchronous gateway intentionally does not trust
-  per-request control headers on ordinary deployments, and the workload proof
-  has not yet shown concurrent preemption or saturation behavior under a clean
-  fleet window. File-backed SQLite control stores now open with explicit busy
+  pressure remains open, but it now has a concrete product gate:
+  `make smoke-vision` runs the autonomous OpenAI-compatible fleet smoke with
+  concurrent plain chat requests, a bounded wait header, response-header proof
+  of multiple owners/instances, and optional idle-reap verification. File-backed
+  SQLite control stores now open with explicit busy
   timeout, foreign keys, and WAL mode through driver pragmas. Coordinated
   post-commit failures now record terminal failed registry evidence before
   releasing owner capacity, keeping the registry/rescue view consistent with
   workload status after canceled or failed loads. A provider-specific route can
   still fail during backend load; treat that as route/provider readiness, not
-  allocator success. The next gate is a clean-window explicit workload pressure
-  proof that captures admission, queue/preemption/drain, provider execution,
-  result capture, release/reclaim, and owner telemetry across the selected
-  routes.
+  allocator success. The remaining live gate is a clean-window `make
+  smoke-vision` run on a fleet with the target model registered on at least two
+  compute nodes, nothing warm at start, configured gateway auth, and enough
+  idle time afterward to prove optional auto-reap if the operator enables that
+  assertion.
 - 2026-06-29: A low-context tool-call route can prove transport and provider
   parser wiring without being a valid route for reasoning-heavy tool-agent
   workloads. Public Mycelium evidence now exposes this as a consumer-contract
