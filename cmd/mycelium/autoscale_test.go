@@ -285,6 +285,18 @@ func (f *autoScaleTestFleet) addInstance(inst domain.ModelInstance) {
 	f.snapshot.Instances = append(f.snapshot.Instances, inst)
 }
 
+func (f *autoScaleTestFleet) removeInstance(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := f.snapshot.Instances[:0]
+	for _, inst := range f.snapshot.Instances {
+		if inst.ID != id {
+			out = append(out, inst)
+		}
+	}
+	f.snapshot.Instances = out
+}
+
 func cloneFleetSnapshot(in domain.FleetSnapshot) domain.FleetSnapshot {
 	return domain.FleetSnapshot{
 		Nodes:     append([]domain.Node(nil), in.Nodes...),
@@ -334,6 +346,23 @@ func (s *autoScaleTestStore) SaveInstance(_ context.Context, inst domain.ModelIn
 	return nil
 }
 
+func (s *autoScaleTestStore) ListInstances(context.Context) ([]domain.ModelInstance, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]domain.ModelInstance, 0, len(s.instances))
+	for _, inst := range s.instances {
+		out = append(out, inst)
+	}
+	return out, nil
+}
+
+func (s *autoScaleTestStore) DeleteInstance(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.instances, id)
+	return nil
+}
+
 type autoScaleTestRuntime struct {
 	store           *autoScaleTestStore
 	fleet           *autoScaleTestFleet
@@ -346,7 +375,7 @@ type autoScaleTestRuntime struct {
 	nextInstance    int
 }
 
-func (r *autoScaleTestRuntime) SubmitWithPayload(_ context.Context, job domain.Job, _ []byte, _ ...scheduler.SubmitHooks) (scheduler.Result, error) {
+func (r *autoScaleTestRuntime) SubmitWithPayload(_ context.Context, job domain.Job, _ []byte, hooks ...scheduler.SubmitHooks) (scheduler.Result, error) {
 	nodeID := job.NodeSelector[domain.LabelNodeID]
 	r.submits = append(r.submits, job)
 	if r.activeByNode == nil {
@@ -371,6 +400,7 @@ func (r *autoScaleTestRuntime) SubmitWithPayload(_ context.Context, job domain.J
 		Claim:          fixtures.MakeClaim(100, 0),
 		State:          domain.InstReady,
 		Priority:       job.Priority,
+		Origin:         autoScaleTestOrigin(hooks),
 	}
 	r.fleet.addInstance(inst)
 	lease := domain.Lease{ID: "lease-" + inst.ID, JobID: job.ID, InstanceID: inst.ID, NodeID: nodeID, AcceleratorSet: inst.AcceleratorSet, Claim: inst.Claim, Priority: job.Priority}
@@ -379,6 +409,15 @@ func (r *autoScaleTestRuntime) SubmitWithPayload(_ context.Context, job domain.J
 		Instance: inst,
 		Lease:    lease,
 	}, nil
+}
+
+func autoScaleTestOrigin(hooks []scheduler.SubmitHooks) string {
+	for _, hook := range hooks {
+		if hook.InstanceOrigin != "" {
+			return hook.InstanceOrigin
+		}
+	}
+	return ""
 }
 
 func (r *autoScaleTestRuntime) FinishJob(_ context.Context, job domain.Job, _ domain.Lease, _ error) error {

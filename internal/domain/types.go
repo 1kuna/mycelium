@@ -107,6 +107,7 @@ type LoadRequest struct {
 	AcceleratorSet []int    `json:"accelerator_set"`
 	ReservationID  string   `json:"reservation_id,omitempty"`
 	Priority       Priority `json:"priority,omitempty"`
+	Origin         string   `json:"origin,omitempty"`
 }
 
 type ModelInstance struct {
@@ -123,6 +124,8 @@ type ModelInstance struct {
 	Priority              Priority              `json:"priority"`
 	Loading               bool                  `json:"loading"`
 	Origin                string                `json:"origin,omitempty"`
+	CreatedAt             time.Time             `json:"created_at,omitempty"`
+	LastActivityAt        time.Time             `json:"last_activity_at,omitempty"`
 	EngineProfileID       string                `json:"engine_profile_id,omitempty"`
 	EngineReadiness       EngineReadinessStatus `json:"engine_readiness,omitempty"`
 	EngineReadinessReason string                `json:"engine_readiness_reason,omitempty"`

@@ -335,6 +335,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
 	startAutoScaler(ctx, runtime, store, fleet, estimator, allocator, cfg.Autonomy, clock.System{}, defaultAutoScaleInterval, presetMap(presets), cfg.DefaultProject)
+	startIdleReaper(ctx, store, fleet, nodes, cfg.Autonomy, clock.System{}, defaultIdleReaperInterval)
 	optimizerNodeID := cfg.ID
 	if cfg.Compute {
 		optimizerNodeID = privateLocalNodeID(cfg)

@@ -480,6 +480,45 @@ func TestSnapshotReportsInFlightRequests(t *testing.T) {
 	}
 }
 
+func TestLoadAndRequestBracketStampActivity(t *testing.T) {
+	start := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	clk := mocks.NewFakeClock(start)
+	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), clk, WithAllocator(lease.NewAllocator()))
+	req := loadReq(fixtures.MakePreset())
+	req.Origin = domain.InstanceOriginAutoscale
+	inst, err := agent.Load(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if inst.Origin != domain.InstanceOriginAutoscale || !inst.CreatedAt.Equal(start) || !inst.LastActivityAt.Equal(start) {
+		t.Fatalf("loaded instance timestamps/provenance = %+v", inst)
+	}
+
+	clk.Advance(time.Second)
+	if err := agent.BeginRequest(context.Background(), inst.ID); err != nil {
+		t.Fatalf("BeginRequest: %v", err)
+	}
+	snap, err := agent.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot after begin: %v", err)
+	}
+	if got := snap.Instances[0].LastActivityAt; !got.Equal(start.Add(time.Second)) || snap.Instances[0].InFlight != 1 {
+		t.Fatalf("begin activity snapshot = %+v", snap.Instances[0])
+	}
+
+	clk.Advance(2 * time.Second)
+	if err := agent.EndRequest(context.Background(), inst.ID); err != nil {
+		t.Fatalf("EndRequest: %v", err)
+	}
+	snap, err = agent.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot after end: %v", err)
+	}
+	if got := snap.Instances[0].LastActivityAt; !got.Equal(start.Add(3*time.Second)) || snap.Instances[0].InFlight != 0 {
+		t.Fatalf("end activity snapshot = %+v", snap.Instances[0])
+	}
+}
+
 func TestBeginRequestRejectsMissingUnreadyAndCanceled(t *testing.T) {
 	agent := NewAgent(fixtures.MakeNode(), mocks.NewBackendAdapter(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
 	if err := agent.BeginRequest(context.Background(), "missing"); err == nil {
