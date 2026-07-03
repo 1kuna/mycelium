@@ -379,6 +379,22 @@ func (e noInstanceAvailableError) retryAfterSeconds() int {
 	return int((e.RetryAfter + time.Second - 1) / time.Second)
 }
 
+type leasedRouteError struct {
+	status int
+	msg    string
+}
+
+func (e leasedRouteError) Error() string {
+	return e.msg
+}
+
+func (e leasedRouteError) StatusCode() int {
+	if e.status == 0 {
+		return http.StatusBadRequest
+	}
+	return e.status
+}
+
 type routeDiagnostics struct {
 	Project                 string
 	ColdLoad                bool
@@ -403,6 +419,9 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	}
 	if err := r.validatePrivateRequest(req); err != nil {
 		return RouteResponse{}, err
+	}
+	if req.WorkloadID != "" || req.LeaseID != "" {
+		return r.routeWithWorkloadLease(ctx, req)
 	}
 	preset, err := r.Presets.Resolve(req.Model)
 	if err != nil {
@@ -642,6 +661,192 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 		}, nil
 	}
 	return RouteResponse{}, fmt.Errorf("gateway failover exhausted: %w", lastErr)
+}
+
+func (r *Router) routeWithWorkloadLease(ctx context.Context, req translate.IngressRequest) (RouteResponse, error) {
+	job, decision, inst, lease, err := r.resolveWorkloadLease(ctx, req)
+	if err != nil {
+		return RouteResponse{}, err
+	}
+	resp, err := r.ExecutePlacedProvider(ctx, req, job, decision, inst, lease, 1, false, 0)
+	if err != nil {
+		if resp.Status != 0 {
+			return resp, nil
+		}
+		return RouteResponse{}, err
+	}
+	if err := r.finishJob(ctx, job, lease, nil); err != nil {
+		return RouteResponse{}, err
+	}
+	return resp, nil
+}
+
+func (r *Router) resolveWorkloadLease(ctx context.Context, req translate.IngressRequest) (domain.Job, domain.PlacementDecision, domain.ModelInstance, domain.Lease, error) {
+	if req.WorkloadID == "" || req.LeaseID == "" {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusBadRequest, msg: "both X-Myc-Workload and X-Myc-Lease are required for leased gateway execution"}
+	}
+	if req.Stream {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusBadRequest, msg: "leased gateway execution does not support streaming requests"}
+	}
+	if r.Runtime == nil || r.Runtime.Store == nil {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusConflict, msg: "workload lease validation requires a configured runtime store"}
+	}
+	reader, ok := r.Runtime.Store.(scheduler.JobReader)
+	if !ok {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusConflict, msg: "runtime store cannot read workload jobs for lease validation"}
+	}
+	job, err := reader.Job(ctx, req.WorkloadID)
+	if err != nil {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusNotFound, msg: fmt.Sprintf("workload %q was not found", req.WorkloadID)}
+	}
+	if job.Status != domain.JobRunning {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusConflict, msg: fmt.Sprintf("workload %q is %q, not running", job.ID, job.Status)}
+	}
+	if job.Result == nil || job.Result.LeaseID == "" {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusConflict, msg: fmt.Sprintf("workload %q has no active lease evidence", job.ID)}
+	}
+	if job.Result.Terminal {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusConflict, msg: fmt.Sprintf("workload %q is already terminal", job.ID)}
+	}
+	if job.Result.LeaseID != req.LeaseID {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusConflict, msg: fmt.Sprintf("workload %q lease mismatch", job.ID)}
+	}
+	if expected := r.projectForRequest(req); expected != "" && job.Project != "" && job.Project != expected {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusForbidden, msg: fmt.Sprintf("workload %q belongs to a different project", job.ID)}
+	}
+	if !r.requestCanUseWorkloadPreset(req.Model, job) {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusConflict, msg: fmt.Sprintf("workload %q is not reserved for model %q", job.ID, req.Model)}
+	}
+	if req.ContextRequest > 0 && job.ContextRequest > 0 && req.ContextRequest > job.ContextRequest {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusConflict, msg: fmt.Sprintf("workload %q context envelope %d is smaller than request %d", job.ID, job.ContextRequest, req.ContextRequest)}
+	}
+	lease, err := r.activeWorkloadLease(ctx, job)
+	if err != nil {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, err
+	}
+	inst, err := r.workloadInstance(ctx, job, lease)
+	if err != nil {
+		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, err
+	}
+	decision := job.Result.Decision
+	if decision.JobID == "" {
+		decision.JobID = job.ID
+	}
+	if decision.Action == "" {
+		decision.Action = nonEmptyAction(job.Result.Action, domain.ActionWarmInstance)
+	}
+	if decision.NodeID == "" {
+		decision.NodeID = firstString(job.Result.NodeID, inst.NodeID, lease.NodeID)
+	}
+	if decision.InstanceID == "" {
+		decision.InstanceID = firstString(inst.ID, lease.InstanceID)
+	}
+	if decision.Preset.ID == "" {
+		presetID := firstString(job.Result.PresetID, job.PresetID, inst.PresetID)
+		if presetID != "" {
+			if preset, err := r.Presets.Resolve(presetID); err == nil {
+				decision.Preset = preset
+			}
+		}
+	}
+	decision.Trace = append(decision.Trace, domain.TraceStep{Step: "workload-lease", Result: "using reserved workload lease"})
+	return job, decision, inst, lease, nil
+}
+
+func (r *Router) activeWorkloadLease(ctx context.Context, job domain.Job) (domain.Lease, error) {
+	leases, err := r.Runtime.Store.ListLeases(ctx)
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	for _, lease := range leases {
+		if lease.ID != job.Result.LeaseID {
+			continue
+		}
+		if lease.JobID != "" && lease.JobID != job.ID {
+			return domain.Lease{}, leasedRouteError{status: http.StatusConflict, msg: fmt.Sprintf("lease %q belongs to a different workload", lease.ID)}
+		}
+		if !lease.ExpiresAt.IsZero() && !lease.ExpiresAt.After(r.clock().Now()) {
+			return domain.Lease{}, leasedRouteError{status: http.StatusGone, msg: fmt.Sprintf("workload %q lease %q is expired", job.ID, lease.ID)}
+		}
+		return lease, nil
+	}
+	return domain.Lease{}, leasedRouteError{status: http.StatusConflict, msg: fmt.Sprintf("workload %q lease %q is not active", job.ID, job.Result.LeaseID)}
+}
+
+func (r *Router) workloadInstance(ctx context.Context, job domain.Job, lease domain.Lease) (domain.ModelInstance, error) {
+	inst := job.Result.Instance
+	if inst.ID == "" {
+		inst.ID = lease.InstanceID
+	}
+	if inst.NodeID == "" {
+		inst.NodeID = firstString(job.Result.NodeID, lease.NodeID)
+	}
+	if inst.PresetID == "" {
+		inst.PresetID = firstString(job.Result.PresetID, job.PresetID)
+	}
+	if inst.ID != "" && inst.Addr != "" && inst.NodeID != "" {
+		return inst, nil
+	}
+	fleet, err := r.Fleet.Snapshot(ctx)
+	if err != nil {
+		return domain.ModelInstance{}, err
+	}
+	for _, candidate := range fleet.Instances {
+		if candidate.ID == inst.ID && (inst.NodeID == "" || candidate.NodeID == inst.NodeID) {
+			return candidate, nil
+		}
+	}
+	return domain.ModelInstance{}, leasedRouteError{status: http.StatusConflict, msg: fmt.Sprintf("workload %q reserved instance %q is not visible", job.ID, inst.ID)}
+}
+
+func (r *Router) requestCanUseWorkloadPreset(model string, job domain.Job) bool {
+	if model == "" {
+		return false
+	}
+	if model == job.Model || model == job.PresetID {
+		return true
+	}
+	presetID := ""
+	if job.Result != nil {
+		presetID = firstString(job.Result.PresetID, job.Result.Instance.PresetID, job.Result.Decision.Preset.ID)
+	}
+	if presetID == "" {
+		presetID = job.PresetID
+	}
+	if model == presetID {
+		return true
+	}
+	for _, preset := range r.Presets.ResolveAll(model) {
+		if preset.ID == presetID {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Router) projectForRequest(req translate.IngressRequest) string {
+	if req.Project != "" {
+		return req.Project
+	}
+	return r.DefaultProject
+}
+
+func nonEmptyAction(values ...domain.PlacementAction) domain.PlacementAction {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func placementNoFitError(err error) bool {

@@ -119,6 +119,8 @@ func parseRequestWithControlHeaders(r *http.Request, trustControlHeaders bool) (
 		}
 		req.ContextRequest = value
 	}
+	req.WorkloadID = r.Header.Get(HeaderWorkload)
+	req.LeaseID = r.Header.Get(HeaderLease)
 	if !trustControlHeaders {
 		return req, nil
 	}
@@ -219,6 +221,13 @@ func writeGatewayError(w http.ResponseWriter, status int, msg string) {
 }
 
 func writeGatewayRouteError(w http.ResponseWriter, err error) {
+	var statusErr interface {
+		StatusCode() int
+	}
+	if errors.As(err, &statusErr) {
+		writeGatewayError(w, statusErr.StatusCode(), err.Error())
+		return
+	}
 	var noInstance noInstanceAvailableError
 	if errors.As(err, &noInstance) {
 		w.Header().Set("Retry-After", strconv.Itoa(noInstance.retryAfterSeconds()))
