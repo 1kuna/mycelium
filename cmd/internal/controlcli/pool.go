@@ -142,6 +142,7 @@ func poolPresetMatches(preset domain.Preset, model string) bool {
 type poolState struct {
 	Name      string       `json:"name"`
 	Model     string       `json:"model"`
+	Project   string       `json:"project,omitempty"`
 	CreatedAt time.Time    `json:"created_at"`
 	Workers   []poolWorker `json:"workers"`
 }
@@ -186,7 +187,7 @@ func runPoolUp(ctx context.Context, args []string, client *http.Client) error {
 	if workerProject == "" {
 		workerProject = "pool-" + *name
 	}
-	state := poolState{Name: *name, Model: plan.Model, CreatedAt: time.Now().UTC()}
+	state := poolState{Name: *name, Model: plan.Model, Project: workerProject, CreatedAt: time.Now().UTC()}
 	var jobs []domain.Job
 	for _, node := range plan.Nodes {
 		for i := 0; i < node.Additional; i++ {
@@ -569,8 +570,12 @@ func printPoolPlan(plan pool.Plan) {
 
 func printPoolState(label string, state poolState) {
 	held, failed := countPoolWorkers(state)
-	fmt.Printf("%s\tname=%s\tmodel=%s\tworkers=%d\theld=%d\tfailed=%d\n",
-		label, state.Name, state.Model, len(state.Workers), held, failed)
+	project := ""
+	if state.Project != "" {
+		project = "\tproject=" + state.Project
+	}
+	fmt.Printf("%s\tname=%s\tmodel=%s%s\tworkers=%d\theld=%d\tfailed=%d\n",
+		label, state.Name, state.Model, project, len(state.Workers), held, failed)
 	for _, worker := range state.Workers {
 		line := fmt.Sprintf("worker\t%s\tnode=%s\tstatus=%s", worker.WorkloadID, worker.NodeID, worker.Status)
 		if worker.LeaseID != "" {

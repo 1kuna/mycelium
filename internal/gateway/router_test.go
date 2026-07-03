@@ -3515,6 +3515,26 @@ func TestServerListsPublicModels(t *testing.T) {
 	}
 }
 
+func TestServerModelsEchoesAuthenticatedProject(t *testing.T) {
+	router := &Router{Presets: NewPresetRegistry(fixtures.MakePreset())}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer project-token")
+
+	Server{
+		Router:            router,
+		RequireAuth:       true,
+		AuthTokenProjects: map[string]string{"project-token": "project-a"},
+	}.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get(HeaderProject) != "project-a" {
+		t.Fatalf("project header = %q", rec.Header().Get(HeaderProject))
+	}
+}
+
 func TestServerErrorResponses(t *testing.T) {
 	rec := httptest.NewRecorder()
 	Server{}.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`)))

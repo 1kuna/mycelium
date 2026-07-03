@@ -53,6 +53,9 @@ func runPoolProxy(ctx context.Context, args []string, client *http.Client) error
 	if err != nil {
 		return err
 	}
+	if err := preflightPoolProxyGateway(ctx, client, target, bearer, state.Project); err != nil {
+		return err
+	}
 	handler := newPoolProxyHandler(workers, target, bearer, client)
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
@@ -62,6 +65,58 @@ func runPoolProxy(ctx context.Context, args []string, client *http.Client) error
 		ln.Addr(), ln.Addr(), len(workers), state.Model)
 	fmt.Printf("pool proxy\tpoint the consumer's OpenAI-compatible base URL at http://%s/v1; requests ride held leases and never enter normal admission\n", ln.Addr())
 	return servePoolProxy(ctx, ln, handler)
+}
+
+func preflightPoolProxyGateway(ctx context.Context, client *http.Client, target *url.URL, bearer, project string) error {
+	bearer = strings.TrimSpace(bearer)
+	if bearer == "" {
+		return fmt.Errorf("pool proxy requires a gateway token; pass --gateway-token, --gateway-token-env, or --gateway-token-file")
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, poolProxyModelsURL(target), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("pool proxy gateway token preflight failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, readErr := readControlHTTPBody(resp.Body, "pool proxy gateway preflight body")
+	if readErr != nil {
+		return readErr
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("pool proxy gateway token preflight returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return nil
+	}
+	reported := strings.TrimSpace(resp.Header.Get(gateway.HeaderProject))
+	if reported == "" {
+		return fmt.Errorf("pool proxy gateway token preflight did not report %s; cannot verify token project %q", gateway.HeaderProject, project)
+	}
+	if reported != project {
+		return fmt.Errorf("pool proxy gateway token project mismatch: pool project %q, gateway reported %q", project, reported)
+	}
+	return nil
+}
+
+func poolProxyModelsURL(target *url.URL) string {
+	out := *target
+	path := strings.TrimRight(out.Path, "/")
+	if path == "" {
+		out.Path = "/v1/models"
+	} else if path == "/v1" || strings.HasSuffix(path, "/v1") {
+		out.Path = path + "/models"
+	} else {
+		out.Path = path + "/v1/models"
+	}
+	return out.String()
 }
 
 func servePoolProxy(ctx context.Context, ln net.Listener, handler http.Handler) error {
