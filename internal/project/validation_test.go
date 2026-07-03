@@ -22,6 +22,7 @@ func TestValidateProject(t *testing.T) {
 		{name: "speed", project: domain.Project{ID: "project-a", SpeedPref: "fast"}, want: "speed_pref"},
 		{name: "preemption", project: domain.Project{ID: "project-a", Preemption: "always"}, want: "preemption"},
 		{name: "context", project: domain.Project{ID: "project-a", ContextCap: -1}, want: "context_cap"},
+		{name: "max wait", project: domain.Project{ID: "project-a", MaxWaitMS: -1}, want: "max_wait_ms"},
 		{name: "concurrency", project: domain.Project{ID: "project-a", ExpectedConcurrency: -1}, want: "expected_concurrency"},
 		{name: "latency", project: domain.Project{ID: "project-a", LatencyTargetMS: -1}, want: "latency_target_ms"},
 	} {

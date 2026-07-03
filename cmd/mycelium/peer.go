@@ -360,6 +360,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		Clock:               clock.System{},
 		Projects:            projectMap(projects),
 		DefaultProject:      cfg.DefaultProject,
+		MaxWaitDefaultMS:    cfg.Autonomy.MaxWaitDefaultMS,
 	}
 	handler := gateway.Server{
 		Router:              router,

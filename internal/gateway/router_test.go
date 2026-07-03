@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -3125,6 +3127,202 @@ func TestRouterNoInstanceDemandRecordedOnceThroughRuntime(t *testing.T) {
 	}
 }
 
+func TestRouterBoundedWaitSucceedsWhenReplicaWarms(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("waited")))
+	}))
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
+	inst.Addr = upstream
+	fleet := &mutableFleet{}
+	admission := &mocks.AdmissionController{}
+	resolver := staticResolver{
+		agents:     map[string]ports.NodeAgent{node.ID: mocks.NewNodeAgent(node)},
+		admissions: map[string]ports.AdmissionController{node.ID: admission},
+	}
+	router := newTestRouter(preset, domain.FleetSnapshot{}, resolver)
+	router.Fleet = fleet
+	router.Nodes = resolver
+	store := &gatewayRuntimeStore{}
+	router.Runtime = &scheduler.Service{
+		Placer:  router.Placer,
+		Fleet:   fleet,
+		Nodes:   resolver,
+		Owners:  resolver,
+		Queue:   scheduler.NewQueue(router.Clock),
+		Store:   store,
+		Clock:   router.Clock,
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	req := mustChatReq(t, `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`)
+	req.MaxWaitMS = 1500
+	req.HasMaxWait = true
+
+	done := make(chan routeResult, 1)
+	go func() {
+		resp, err := router.Route(context.Background(), req)
+		done <- routeResult{resp: resp, err: err}
+	}()
+	clk := router.Clock.(*mocks.FakeClock)
+	waitForFakeTimers(t, clk, 1)
+	if len(store.tasks) != 1 {
+		t.Fatalf("demand tasks before warm = %+v", store.tasks)
+	}
+
+	fleet.Set(domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}})
+	clk.Advance(500 * time.Millisecond)
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("Route: %v", result.err)
+	}
+	waitMS, err := strconv.Atoi(result.resp.Header.Get(HeaderQueueWaitMS))
+	if err != nil || waitMS <= 0 {
+		t.Fatalf("queue wait header = %q err=%v", result.resp.Header.Get(HeaderQueueWaitMS), err)
+	}
+	if !strings.Contains(string(result.resp.Body), "waited") || result.resp.Instance.ID != inst.ID {
+		t.Fatalf("resp=%+v body=%s", result.resp, result.resp.Body)
+	}
+	if len(store.tasks) != 1 {
+		t.Fatalf("demand tasks after wait = %+v", store.tasks)
+	}
+	if len(admission.Requests) != 1 || admission.Requests[0].InstanceID != inst.ID {
+		t.Fatalf("admission requests = %+v", admission.Requests)
+	}
+}
+
+func TestRouterBoundedWaitDeadlineReturnsNoInstance(t *testing.T) {
+	preset := fixtures.MakePreset()
+	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
+	req := mustChatReq(t, `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`)
+	req.MaxWaitMS = 600
+	req.HasMaxWait = true
+
+	done := make(chan routeResult, 1)
+	go func() {
+		resp, err := router.Route(context.Background(), req)
+		done <- routeResult{resp: resp, err: err}
+	}()
+	clk := router.Clock.(*mocks.FakeClock)
+	waitForFakeTimers(t, clk, 1)
+	clk.Advance(500 * time.Millisecond)
+	waitForFakeTimers(t, clk, 2)
+	clk.Advance(100 * time.Millisecond)
+	result := <-done
+	var noInstance noInstanceAvailableError
+	if !errors.As(result.err, &noInstance) {
+		t.Fatalf("Route err = %v", result.err)
+	}
+	if noInstance.retryAfterSeconds() != 1 {
+		t.Fatalf("retry after = %d", noInstance.retryAfterSeconds())
+	}
+}
+
+func TestRouterNoWaitNoDefaultsReturnsImmediateNoInstance(t *testing.T) {
+	preset := fixtures.MakePreset()
+	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
+	rec := httptest.NewRecorder()
+	Server{Router: router}.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`)))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "1" || !strings.Contains(rec.Body.String(), "no instance available") {
+		t.Fatalf("status/header/body = %d %q %s", rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
+	}
+	if got := router.Clock.(*mocks.FakeClock).TimerCount(); got != 0 {
+		t.Fatalf("fake timers = %d", got)
+	}
+}
+
+func TestRouterBoundedWaitStopsOnClientCancel(t *testing.T) {
+	preset := fixtures.MakePreset()
+	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
+	req := mustChatReq(t, `{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`)
+	req.MaxWaitMS = 5000
+	req.HasMaxWait = true
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := router.Route(ctx, req)
+		done <- err
+	}()
+	waitForFakeTimers(t, router.Clock.(*mocks.FakeClock), 1)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Route err = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Route did not stop after context cancellation")
+	}
+}
+
+func TestRouterMaxWaitDefaultResolutionOrder(t *testing.T) {
+	router := &Router{
+		Projects: map[string]domain.Project{
+			"project-a": {ID: "project-a", MaxWaitMS: 1200},
+			"project-b": {ID: "project-b"},
+		},
+		DefaultProject:   "project-a",
+		MaxWaitDefaultMS: 3000,
+	}
+	if got := router.effectiveMaxWaitMS(translate.IngressRequest{}); got != 1200 {
+		t.Fatalf("default project wait = %d", got)
+	}
+	if got := router.effectiveMaxWaitMS(translate.IngressRequest{Project: "project-b"}); got != 3000 {
+		t.Fatalf("peer fallback wait = %d", got)
+	}
+	if got := router.effectiveMaxWaitMS(translate.IngressRequest{Project: "project-a", HasMaxWait: true, MaxWaitMS: 25}); got != 25 {
+		t.Fatalf("header wait = %d", got)
+	}
+	if got := router.effectiveMaxWaitMS(translate.IngressRequest{Project: "project-a", HasMaxWait: true, MaxWaitMS: 0}); got != 0 {
+		t.Fatalf("header zero wait = %d", got)
+	}
+}
+
+func TestRouterConcurrentWaitersDoNotBlockOtherRequests(t *testing.T) {
+	cold := fixtures.MakePreset(fixtures.WithPresetID("cold"), fixtures.WithModelRef("cold-model"), fixtures.WithPresetNode("missing-node"))
+	warm := fixtures.MakePreset(fixtures.WithPresetID("warm"), fixtures.WithModelRef("warm-model"))
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("warm")))
+	}))
+	node := fixtures.MakeNode()
+	inst := fixtures.MakeInstance(fixtures.WithInstancePreset(warm.ID), fixtures.OnNode(node.ID))
+	inst.Addr = upstream
+	router := newTestRouter(cold, domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{node.ID: mocks.NewNodeAgent(node)}}, warm)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errs := make(chan error, 50)
+	for i := 0; i < 50; i++ {
+		go func() {
+			req := mustChatReq(t, `{"model":"cold-model","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`)
+			req.MaxWaitMS = 10000
+			req.HasMaxWait = true
+			_, err := router.Route(ctx, req)
+			errs <- err
+		}()
+	}
+	waitForFakeTimers(t, router.Clock.(*mocks.FakeClock), 50)
+
+	warmReq := mustChatReq(t, `{"model":"warm-model","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`)
+	resp, err := router.Route(context.Background(), warmReq)
+	if err != nil {
+		t.Fatalf("warm Route while waiters blocked: %v", err)
+	}
+	if !strings.Contains(string(resp.Body), "warm") || resp.Instance.ID != inst.ID {
+		t.Fatalf("warm resp = %+v body=%s", resp, resp.Body)
+	}
+
+	cancel()
+	for i := 0; i < 50; i++ {
+		if err := <-errs; !errors.Is(err, context.Canceled) {
+			t.Fatalf("waiter err = %v", err)
+		}
+	}
+}
+
 func TestRouterClientErrorsDoNotEmitDemand(t *testing.T) {
 	preset := fixtures.MakePreset()
 	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
@@ -3774,13 +3972,14 @@ func TestParseRequestRoutesAndHeaders(t *testing.T) {
 	req.Header.Set(HeaderSpeedPref, string(domain.SpeedAuto))
 	req.Header.Set(HeaderPreemption, string(domain.PreemptHard))
 	req.Header.Set(HeaderContextCap, "1234")
+	req.Header.Set(HeaderMaxWait, "2500")
 	req.Header.Set(HeaderConversation, "thread-a")
 	req.Header.Set(HeaderSubmitter, "submitter-a")
 	got, err := parseRequest(req)
 	if err != nil {
 		t.Fatalf("parse chat: %v", err)
 	}
-	if got.Project != "project-a" || got.Priority != domain.PriorityBackground || got.SpeedPref != domain.SpeedAuto || got.Preemption != domain.PreemptHard || got.ContextRequest != 1234 || got.ConversationKey != "thread-a" || got.Handling != "" || got.Submitter != "submitter-a" {
+	if got.Project != "project-a" || got.Priority != domain.PriorityBackground || got.SpeedPref != domain.SpeedAuto || got.Preemption != domain.PreemptHard || got.ContextRequest != 1234 || !got.HasMaxWait || got.MaxWaitMS != 2500 || got.ConversationKey != "thread-a" || got.Handling != "" || got.Submitter != "submitter-a" {
 		t.Fatalf("parsed headers = %+v", got)
 	}
 
@@ -3801,6 +4000,7 @@ func TestParseRequestRoutesAndHeaders(t *testing.T) {
 func TestParseRequestAcceptsContextEnvelopeWithoutTrustingControlHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set(HeaderContextCap, "16384")
+	req.Header.Set(HeaderMaxWait, "0")
 	req.Header.Set(HeaderPriority, "warp")
 	req.Header.Set(HeaderWorkload, "workload-a")
 	req.Header.Set(HeaderLease, "lease-a")
@@ -3810,6 +4010,9 @@ func TestParseRequestAcceptsContextEnvelopeWithoutTrustingControlHeaders(t *test
 	}
 	if got.ContextRequest != 16384 {
 		t.Fatalf("context request = %d, want 16384", got.ContextRequest)
+	}
+	if !got.HasMaxWait || got.MaxWaitMS != 0 {
+		t.Fatalf("max wait = has %v value %d", got.HasMaxWait, got.MaxWaitMS)
 	}
 	if got.WorkloadID != "workload-a" || got.LeaseID != "lease-a" {
 		t.Fatalf("lease headers = %q %q", got.WorkloadID, got.LeaseID)
@@ -3836,6 +4039,8 @@ func TestParseRequestRejectsBadControlHeaders(t *testing.T) {
 		{name: "preemption", header: HeaderPreemption, value: "break-glass", want: "Preemption"},
 		{name: "handling", header: HeaderHandling, value: "secret", want: "Handling"},
 		{name: "context", header: HeaderContextCap, value: "0", want: "Context-Cap"},
+		{name: "max wait text", header: HeaderMaxWait, value: "soon", want: "Max-Wait"},
+		{name: "max wait negative", header: HeaderMaxWait, value: "-1", want: "Max-Wait"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
@@ -4053,6 +4258,57 @@ func (s staticFleet) Snapshot(context.Context) (domain.FleetSnapshot, error) {
 		return domain.FleetSnapshot{}, s.err
 	}
 	return s.fleet, nil
+}
+
+type mutableFleet struct {
+	mu    sync.Mutex
+	fleet domain.FleetSnapshot
+	err   error
+}
+
+func (m *mutableFleet) Snapshot(context.Context) (domain.FleetSnapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return domain.FleetSnapshot{}, m.err
+	}
+	return m.fleet, nil
+}
+
+func (m *mutableFleet) Set(fleet domain.FleetSnapshot) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fleet = fleet
+}
+
+type routeResult struct {
+	resp RouteResponse
+	err  error
+}
+
+func mustChatReq(t *testing.T, body string) translate.IngressRequest {
+	t.Helper()
+	req, err := translate.ParseOpenAIChat([]byte(body))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	return req
+}
+
+func waitForFakeTimers(t *testing.T, clk *mocks.FakeClock, want int) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if clk.TimerCount() >= want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("fake timer count = %d, want at least %d", clk.TimerCount(), want)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
 }
 
 type staticResolver struct {

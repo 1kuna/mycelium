@@ -185,6 +185,7 @@ type Router struct {
 	Clock               ports.Clock
 	Projects            map[string]domain.Project
 	DefaultProject      string
+	MaxWaitDefaultMS    int
 	MaxTries            int
 
 	allowDirectPlacement bool
@@ -427,6 +428,61 @@ type routeDiagnostics struct {
 }
 
 func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (RouteResponse, error) {
+	waitMS := r.effectiveMaxWaitMS(req)
+	if waitMS <= 0 {
+		return r.routeOnce(ctx, req, true)
+	}
+	return r.routeWithBoundedWait(ctx, req, time.Duration(waitMS)*time.Millisecond)
+}
+
+func (r *Router) routeWithBoundedWait(ctx context.Context, req translate.IngressRequest, maxWait time.Duration) (RouteResponse, error) {
+	clk := r.clock()
+	start := clk.Now()
+	deadline := start.Add(maxWait)
+	backoff := 500 * time.Millisecond
+	recordDemand := true
+	for {
+		resp, err := r.routeOnce(ctx, req, recordDemand)
+		if err == nil {
+			queueWaitMS := durationMS(start, clk.Now())
+			if queueWaitMS > 0 {
+				if resp.Header == nil {
+					resp.Header = http.Header{}
+				}
+				resp.Header.Set(HeaderQueueWaitMS, strconv.Itoa(queueWaitMS))
+			}
+			return resp, nil
+		}
+		var noInstance noInstanceAvailableError
+		if !errors.As(err, &noInstance) {
+			return resp, err
+		}
+		recordDemand = false
+		now := clk.Now()
+		if !now.Before(deadline) {
+			return RouteResponse{}, noInstance
+		}
+		delay := backoff
+		if remaining := deadline.Sub(now); delay > remaining {
+			delay = remaining
+		}
+		timer := clk.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return RouteResponse{}, ctx.Err()
+		case <-timer.C():
+		}
+		if backoff < 5*time.Second {
+			backoff *= 2
+			if backoff > 5*time.Second {
+				backoff = 5 * time.Second
+			}
+		}
+	}
+}
+
+func (r *Router) routeOnce(ctx context.Context, req translate.IngressRequest, recordDemand bool) (RouteResponse, error) {
 	if r.Placer == nil || r.Fleet == nil || r.Nodes == nil {
 		return RouteResponse{}, fmt.Errorf("gateway router is not configured")
 	}
@@ -480,8 +536,10 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			if errors.As(err, &noInstance) {
 				noInstance.Profile = profile
 				noInstance.Attempts = attempt
-				if demandErr := r.recordNoInstanceDemand(ctx, noInstance); demandErr != nil {
-					return RouteResponse{}, errors.Join(noInstance, demandErr)
+				if recordDemand {
+					if demandErr := r.recordNoInstanceDemand(ctx, noInstance); demandErr != nil {
+						return RouteResponse{}, errors.Join(noInstance, demandErr)
+					}
 				}
 				return RouteResponse{}, noInstance
 			}
@@ -495,8 +553,10 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 					Profile:    profile,
 					Attempts:   attempt,
 				}
-				if demandErr := r.recordNoInstanceDemand(ctx, noInstance); demandErr != nil {
-					return RouteResponse{}, errors.Join(noInstance, demandErr)
+				if recordDemand {
+					if demandErr := r.recordNoInstanceDemand(ctx, noInstance); demandErr != nil {
+						return RouteResponse{}, errors.Join(noInstance, demandErr)
+					}
 				}
 				return RouteResponse{}, noInstance
 			}
@@ -862,6 +922,19 @@ func (r *Router) projectForRequest(req translate.IngressRequest) string {
 		return req.Project
 	}
 	return r.DefaultProject
+}
+
+func (r *Router) effectiveMaxWaitMS(req translate.IngressRequest) int {
+	if req.HasMaxWait {
+		return req.MaxWaitMS
+	}
+	project := r.projectForRequest(req)
+	if project != "" {
+		if defaults, ok := r.Projects[project]; ok && defaults.MaxWaitMS > 0 {
+			return defaults.MaxWaitMS
+		}
+	}
+	return r.MaxWaitDefaultMS
 }
 
 func nonEmptyAction(values ...domain.PlacementAction) domain.PlacementAction {
@@ -1357,6 +1430,9 @@ func (r *Router) placeAndLoad(ctx context.Context, job domain.Job, payload []byt
 	decision, err := r.Placer.Place(ctx, job, fleet)
 	if err != nil {
 		return domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, false, err
+	}
+	if decision.Action == domain.ActionQueued {
+		return decision, domain.ModelInstance{}, domain.Lease{}, false, noInstanceAvailableError{JobID: job.ID, RetryAfter: time.Second, Decision: decision}
 	}
 	if decision.InstanceID == "" && decision.Action != domain.ActionQueued && beforeCold != nil {
 		if err := beforeCold(ctx, decision); err != nil {

@@ -22,6 +22,9 @@ func Validate(project domain.Project) error {
 	if project.ContextCap < 0 {
 		return fmt.Errorf("project %q context_cap must be non-negative", project.ID)
 	}
+	if project.MaxWaitMS < 0 {
+		return fmt.Errorf("project %q max_wait_ms must be non-negative", project.ID)
+	}
 	if project.ExpectedConcurrency < 0 {
 		return fmt.Errorf("project %q expected_concurrency must be non-negative", project.ID)
 	}

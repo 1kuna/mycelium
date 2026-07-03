@@ -419,6 +419,7 @@ type Project struct {
 	Priority            Priority   `json:"priority"`
 	SpeedPref           SpeedPref  `json:"speed_pref"`
 	ContextCap          int        `json:"context_cap"`
+	MaxWaitMS           int        `json:"max_wait_ms,omitempty"`
 	ExpectedConcurrency int        `json:"expected_concurrency,omitempty"`
 	LatencyTargetMS     int        `json:"latency_target_ms,omitempty"`
 	Preemption          Preemption `json:"preemption"`
