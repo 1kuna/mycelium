@@ -713,6 +713,33 @@ rather than silently accepting hidden async work. Consumers that need queued
 admission should use the explicit workload lane above and preserve the failed
 gateway response or preflight artifact as availability evidence.
 
+To spread one model across every machine that can safely hold it (for external
+OpenAI-compatible batch consumers such as OCR CLIs), plan and launch a replica
+worker pool:
+
+```bash
+myce pool plan --model <model-or-alias> \
+  --context <per-replica-context> --concurrency <per-replica-envelope> \
+  --max-per-node <n> --out /tmp/pool-plan.json
+myce pool up --plan /tmp/pool-plan.json --url <peer-url> --rpc-token <token> \
+  --name <pool-name> --state /tmp/pool-state.json
+myce pool status --state /tmp/pool-state.json --url <peer-url> --rpc-token <token>
+myce pool down --state /tmp/pool-state.json --url <peer-url> --rpc-token <token>
+```
+
+`pool plan` mirrors the scheduler's hard compatibility rules and the
+allocator's safe-fit math (`max_util`, oom-severity margins, existing
+occupancy) to compute the maximum additional replicas per node. Refused nodes
+report the exact setup gap: model artifact not staged, no compatible backend
+runtime, preset context cap below the requested workload context, or
+insufficient safe capacity. `pool up` launches the planned replicas through
+normal workload admission and holds the owner leases so the capacity stays
+reserved; catastrophic-OOM nodes flag `serial_cold_loads` and are launched one
+at a time. `pool down` finishes or cancels every worker to release the
+reservations. External consumers then point their OpenAI-compatible base URL at
+any peer's gateway; requests batch across the warm pool and shed to re-planning
+when a replica's admission envelope is full.
+
 For partial consumer batches, preserve one `preflight.json` or response-header
 set per failed or timed-out row. `debug job --preflight --owner-telemetry`
 stitches the request artifact to the durable job/registry surfaces and fetches

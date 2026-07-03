@@ -46,7 +46,7 @@ func Run(ctx context.Context, args []string) error {
 
 func RunWithClient(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark|calibrate|gateway|route|reconcile|doctor|debug|status>")
+		return fmt.Errorf("usage: myce <add-model|models|nodes|projects|jobs|telemetry|recommendations|benchmark|calibrate|gateway|route|reconcile|pool|doctor|debug|status>")
 	}
 	switch args[0] {
 	case "add-model":
@@ -73,6 +73,8 @@ func RunWithClient(ctx context.Context, args []string, client *http.Client) erro
 		return runRoute(ctx, args[1:], client)
 	case "reconcile":
 		return runReconcile(args[1:], client)
+	case "pool":
+		return runPool(ctx, args[1:], client)
 	case "doctor":
 		return runDoctor(ctx, args[1:], client)
 	case "debug":
