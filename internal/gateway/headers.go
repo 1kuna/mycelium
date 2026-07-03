@@ -39,6 +39,7 @@ const (
 	HeaderToolChoice              = "X-Myc-Tool-Choice"
 	HeaderVLLMToolParser          = "X-Myc-VLLM-Tool-Parser-Configured"
 	HeaderVLLMAutoToolChoice      = "X-Myc-VLLM-Auto-Tool-Choice-Configured"
+	HeaderTelemetryWarning        = "X-Myc-Telemetry-Warning"
 )
 
 func writeDecisionHeaders(h http.Header, decision domain.PlacementDecision, inst domain.ModelInstance, profile profiles.Profile, attempts int) {

@@ -1410,7 +1410,7 @@ func TestRouterFailsJobWhenTranslatedResponseIsLossy(t *testing.T) {
 	}
 }
 
-func TestRouterReturnsMetricWriteErrorsAfterUpstreamSuccess(t *testing.T) {
+func TestRouterWarnsOnMetricWriteErrorsAfterUpstreamSuccess(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1428,16 +1428,25 @@ func TestRouterReturnsMetricWriteErrorsAfterUpstreamSuccess(t *testing.T) {
 		t.Fatalf("ParseOpenAIChat: %v", err)
 	}
 
-	_, err = router.Route(context.Background(), req)
-	if !errors.Is(err, metricErr) {
-		t.Fatalf("Route err = %v", err)
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route returned telemetry error after upstream success: %v", err)
+	}
+	if resp.Status != http.StatusOK || !strings.Contains(string(resp.Body), "metric-fails") {
+		t.Fatalf("response = %d %s", resp.Status, string(resp.Body))
+	}
+	if got := resp.Header.Get(HeaderTelemetryWarning); got != "completion_telemetry_failed" {
+		t.Fatalf("telemetry warning = %q", got)
 	}
 	if len(sink.SamplesOut) != 2 || len(sink.Metrics) != 0 {
 		t.Fatalf("telemetry after metric failure: samples=%+v metrics=%+v", sink.SamplesOut, sink.Metrics)
 	}
+	if !errors.Is(metricErr, sink.Err) {
+		t.Fatalf("test setup lost metric error")
+	}
 }
 
-func TestRouterReturnsCompleteSampleErrorsAfterMetricSuccess(t *testing.T) {
+func TestRouterWarnsOnCompleteSampleErrorsAfterMetricSuccess(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1455,12 +1464,21 @@ func TestRouterReturnsCompleteSampleErrorsAfterMetricSuccess(t *testing.T) {
 		t.Fatalf("ParseOpenAIChat: %v", err)
 	}
 
-	_, err = router.Route(context.Background(), req)
-	if !errors.Is(err, sampleErr) {
-		t.Fatalf("Route err = %v", err)
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route returned completion sample error after upstream success: %v", err)
+	}
+	if resp.Status != http.StatusOK || !strings.Contains(string(resp.Body), "sample-fails") {
+		t.Fatalf("response = %d %s", resp.Status, string(resp.Body))
+	}
+	if got := resp.Header.Get(HeaderTelemetryWarning); got != "completion_telemetry_failed" {
+		t.Fatalf("telemetry warning = %q", got)
 	}
 	if len(sink.metrics) != 1 || len(sink.samples) != 3 {
 		t.Fatalf("telemetry after complete sample failure: samples=%+v metrics=%+v", sink.samples, sink.metrics)
+	}
+	if !errors.Is(sampleErr, sink.err) {
+		t.Fatalf("test setup lost sample error")
 	}
 }
 
@@ -4347,6 +4365,10 @@ func TestRouterRouteHoldsWorkloadLeaseForReuse(t *testing.T) {
 		Nodes:     []domain.Node{node},
 		Instances: []domain.ModelInstance{inst},
 	}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
+	metricErr := errors.New("owner telemetry metrics timed out")
+	sink := &mocks.TelemetrySink{Err: metricErr}
+	router.Telemetry = sink
+	router.SelfNodeID = inst.NodeID
 	store := &gatewayRuntimeStore{}
 	lease := domain.Lease{ID: "lease-held", JobID: "workload-held", NodeID: inst.NodeID, InstanceID: inst.ID}
 	job := domain.Job{
@@ -4391,6 +4413,9 @@ func TestRouterRouteHoldsWorkloadLeaseForReuse(t *testing.T) {
 		if resp.Header.Get(HeaderLeaseHold) != "true" {
 			t.Fatalf("attempt %d missing %s response header", attempt, HeaderLeaseHold)
 		}
+		if got := resp.Header.Get(HeaderTelemetryWarning); got != "completion_telemetry_failed" {
+			t.Fatalf("attempt %d telemetry warning = %q", attempt, got)
+		}
 	}
 	if served != 2 {
 		t.Fatalf("upstream served %d, want 2", served)
@@ -4400,6 +4425,9 @@ func TestRouterRouteHoldsWorkloadLeaseForReuse(t *testing.T) {
 	}
 	if len(store.deletedLeases) != 0 {
 		t.Fatalf("held lease must not be deleted: %+v", store.deletedLeases)
+	}
+	if len(sink.Metrics) != 0 {
+		t.Fatalf("metric writes should have failed: %+v", sink.Metrics)
 	}
 	if strings.Join(agent.Calls, ",") != "begin:inst_test,end:inst_test,begin:inst_test,end:inst_test" {
 		t.Fatalf("agent calls = %+v", agent.Calls)
