@@ -209,23 +209,27 @@ type ReconciliationTaskEvent struct {
 }
 
 type ReconciliationTaskRecord struct {
-	ID                 string                    `json:"id"`
-	JobID              string                    `json:"job_id,omitempty"`
-	Kind               string                    `json:"kind"`
-	Status             ReconciliationTaskStatus  `json:"status"`
-	NodeID             string                    `json:"node_id,omitempty"`
-	PresetID           string                    `json:"preset_id,omitempty"`
-	Model              string                    `json:"model,omitempty"`
-	Reason             string                    `json:"reason"`
-	AutomaticCandidate bool                      `json:"automatic_candidate"`
-	RequiresApproval   bool                      `json:"requires_approval"`
-	Next               string                    `json:"next"`
-	Blocker            string                    `json:"blocker,omitempty"`
-	Source             string                    `json:"source"`
-	CreatedAt          time.Time                 `json:"created_at"`
-	UpdatedAt          time.Time                 `json:"updated_at"`
-	Error              string                    `json:"error,omitempty"`
-	Events             []ReconciliationTaskEvent `json:"events,omitempty"`
+	ID                  string                    `json:"id"`
+	JobID               string                    `json:"job_id,omitempty"`
+	Kind                string                    `json:"kind"`
+	Status              ReconciliationTaskStatus  `json:"status"`
+	NodeID              string                    `json:"node_id,omitempty"`
+	PresetID            string                    `json:"preset_id,omitempty"`
+	Model               string                    `json:"model,omitempty"`
+	ContextLength       int                       `json:"context_length,omitempty"`
+	ExpectedConcurrency int                       `json:"expected_concurrency,omitempty"`
+	Reason              string                    `json:"reason"`
+	AutomaticCandidate  bool                      `json:"automatic_candidate"`
+	RequiresApproval    bool                      `json:"requires_approval"`
+	Next                string                    `json:"next"`
+	Blocker             string                    `json:"blocker,omitempty"`
+	Source              string                    `json:"source"`
+	CreatedAt           time.Time                 `json:"created_at"`
+	UpdatedAt           time.Time                 `json:"updated_at"`
+	LastSeen            time.Time                 `json:"last_seen,omitempty"`
+	Hits                int                       `json:"hits,omitempty"`
+	Error               string                    `json:"error,omitempty"`
+	Events              []ReconciliationTaskEvent `json:"events,omitempty"`
 }
 
 type IncompatibilityRecord struct {

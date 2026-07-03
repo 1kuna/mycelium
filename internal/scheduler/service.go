@@ -9,6 +9,7 @@ import (
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
+	"mycelium/internal/reconcile"
 )
 
 type FleetSource interface {
@@ -111,6 +112,9 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, payload []byt
 		return Result{Decision: decision}, err
 	}
 	if decision.Action == domain.ActionQueued {
+		if err := s.recordDemand(ctx, decision, "queued"); err != nil {
+			return Result{Decision: decision}, err
+		}
 		if rejectQueued(hooks) {
 			return s.rejectQueuedJob(ctx, job, "no instance available")
 		}
@@ -131,6 +135,9 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, payload []byt
 	}
 	ownerLease, owner, err := s.commitOwnerAdmission(ctx, job, decision, preemptedLeases)
 	if err != nil {
+		if errors.Is(err, domain.ErrNoFit) {
+			err = errors.Join(err, s.recordDemand(ctx, decision, err.Error()))
+		}
 		job.Status = domain.JobFailed
 		_ = s.Store.SaveJob(cleanupContext(ctx), job)
 		return Result{Decision: decision}, err
@@ -238,6 +245,9 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 		return Result{Decision: decision}, err
 	}
 	if decision.Action == domain.ActionQueued {
+		if err := s.recordDemand(ctx, decision, "queued"); err != nil {
+			return Result{Decision: decision}, err
+		}
 		if rejectQueued(hooks) {
 			return s.rejectCoordinatedQueuedJob(ctx, job, decision, "no instance available")
 		}
@@ -256,6 +266,9 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	outcome, err := s.Coordinator.Commit(ctx, decision)
 	if err != nil {
 		if coordinatedQueueErr(err) {
+			if demandErr := s.recordDemand(ctx, decision, err.Error()); demandErr != nil {
+				err = errors.Join(err, demandErr)
+			}
 			if rejectQueued(hooks) {
 				return s.rejectCoordinatedQueuedJob(ctx, job, decision, err.Error())
 			}
@@ -274,6 +287,9 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	decision = outcome.Decision
 	ownerLease := outcome.Lease
 	if decision.Action == domain.ActionQueued {
+		if err := s.recordDemand(ctx, decision, "queued"); err != nil {
+			return Result{Decision: decision, Lease: ownerLease}, err
+		}
 		if rejectQueued(hooks) {
 			return s.rejectCoordinatedQueuedJob(ctx, job, decision, "no instance available")
 		}
@@ -611,6 +627,14 @@ func (s *Service) validate() error {
 		return fmt.Errorf("scheduler service is not fully configured")
 	}
 	return nil
+}
+
+func (s *Service) recordDemand(ctx context.Context, decision domain.PlacementDecision, reason string) error {
+	store, ok := s.Store.(reconcile.DemandStore)
+	if !ok {
+		return nil
+	}
+	return reconcile.RecordDemand(ctx, store, decision, reason, s.Clock.Now())
 }
 
 func (s *Service) commitOwnerAdmission(ctx context.Context, job domain.Job, decision domain.PlacementDecision, preemptedLeaseArgs ...map[string]domain.Lease) (domain.Lease, ports.AdmissionController, error) {

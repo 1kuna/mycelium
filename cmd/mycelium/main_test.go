@@ -224,6 +224,9 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	if peerCfg.QueueDrainMS != 1000 || peerCfg.QueueDrainLimit != 1 || peerCfg.OptimizerEvalMS != 60000 || peerCfg.RegistrySyncMS != 1000 || peerCfg.DiscoveryScanMS != 250 || peerCfg.DiscoveryAdvertiseMS != 5000 {
 		t.Fatalf("peer drain defaults = %+v", peerCfg)
 	}
+	if peerCfg.Autonomy != (domain.AutonomyPolicy{}) {
+		t.Fatalf("autonomy should default off/zero: %+v", peerCfg.Autonomy)
+	}
 	if peerCfg.ComputeConfig.ID != "peer_local" || peerCfg.ComputeConfig.BackendListen != "127.0.0.1:51848" || peerCfg.ComputeConfig.DiskMinFreeRatio != domain.DefaultDiskMinFreeRatio || peerCfg.ComputeConfig.LoadTimeoutMS != 300000 {
 		t.Fatalf("compute defaults = %+v", peerCfg.ComputeConfig)
 	}
@@ -266,6 +269,41 @@ func TestLoadConfigsAndDefaultHome(t *testing.T) {
 	}
 	if _, err := loadPeerConfig(badPath); err == nil {
 		t.Fatal("expected bad peer config error")
+	}
+}
+
+func TestValidateAutonomyPolicy(t *testing.T) {
+	base := applyPeerConfigDefaults(PeerConfig{})
+	checks := []struct {
+		name   string
+		policy domain.AutonomyPolicy
+		want   string
+	}{
+		{name: "default off", policy: domain.AutonomyPolicy{}},
+		{name: "auto scale valid", policy: domain.AutonomyPolicy{AutoScale: true, MaxReplicasPerModelPerNode: 4, MaxReplicasPerModel: 8, ScaleCooldownMS: 1000, IdleTTLMS: 1, MaxWaitDefaultMS: 1}},
+		{name: "auto stage only valid", policy: domain.AutonomyPolicy{AutoStage: true}},
+		{name: "negative per node", policy: domain.AutonomyPolicy{MaxReplicasPerModelPerNode: -1}, want: "max_replicas_per_model_per_node"},
+		{name: "negative total", policy: domain.AutonomyPolicy{MaxReplicasPerModel: -1}, want: "max_replicas_per_model"},
+		{name: "negative cooldown", policy: domain.AutonomyPolicy{ScaleCooldownMS: -1}, want: "scale_cooldown_ms"},
+		{name: "negative idle ttl", policy: domain.AutonomyPolicy{IdleTTLMS: -1}, want: "idle_ttl_ms"},
+		{name: "negative max wait", policy: domain.AutonomyPolicy{MaxWaitDefaultMS: -1}, want: "max_wait_default_ms"},
+		{name: "auto scale cooldown too low", policy: domain.AutonomyPolicy{AutoScale: true, ScaleCooldownMS: 999}, want: "at least 1000"},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			cfg := base
+			cfg.Autonomy = check.policy
+			err := validatePeerConfig(cfg)
+			if check.want == "" {
+				if err != nil {
+					t.Fatalf("validatePeerConfig: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), check.want) {
+				t.Fatalf("validatePeerConfig err = %v, want %q", err, check.want)
+			}
+		})
 	}
 }
 

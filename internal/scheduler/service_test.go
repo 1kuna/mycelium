@@ -38,6 +38,147 @@ func TestServiceQueuesNoFitJobs(t *testing.T) {
 	}
 }
 
+func TestServiceRecordsDemandForQueuedPlacement(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(11, 0).UTC())
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	decision := domain.PlacementDecision{
+		JobID:  "job-a",
+		Action: domain.ActionQueued,
+		Preset: preset,
+		Trace: []domain.TraceStep{{
+			Step: "filter",
+			Data: map[string]any{"dropped": map[string]string{
+				"node-a": "fit",
+				"node-b": "load_in_flight",
+			}},
+		}},
+	}
+	store := &runtimeStore{}
+	service := &Service{
+		Placer: fakePlacer{decision: decision},
+		Fleet:  staticFleet{},
+		Nodes:  staticNodes{},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+	}
+
+	if _, err := service.Submit(context.Background(), fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if len(store.tasks) != 2 {
+		t.Fatalf("tasks = %+v", store.tasks)
+	}
+	for _, task := range store.tasks {
+		if task.JobID != "" || task.Source != "demand_signal" || task.PresetID != preset.ID || task.Hits != 1 || !task.LastSeen.Equal(clock.Now()) {
+			t.Fatalf("task = %+v", task)
+		}
+	}
+}
+
+func TestServiceDemandRecordingFailurePaths(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(11, 5).UTC())
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	queued := domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued, Preset: preset}
+	placed := domain.PlacementDecision{JobID: job.ID, Action: domain.ActionLoadedNew, NodeID: "node-a", Preset: preset, Claim: fixtures.MakeClaim(1, 1)}
+	demandErr := errors.New("save demand")
+
+	checks := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "local queued demand save failure",
+			run: func() error {
+				service := &Service{
+					Placer: fakePlacer{decision: queued},
+					Fleet:  staticFleet{},
+					Nodes:  staticNodes{},
+					Queue:  NewQueue(clock),
+					Store:  &runtimeStore{saveTaskErr: demandErr},
+					Clock:  clock,
+				}
+				_, err := service.Submit(context.Background(), job)
+				return err
+			},
+		},
+		{
+			name: "coordinated plan queued demand save failure",
+			run: func() error {
+				service := &Service{
+					Placer:      fakePlacer{},
+					Fleet:       staticFleet{},
+					Nodes:       staticNodes{},
+					Coordinator: &mocks.Coordinator{Decision: queued},
+					JobLog:      &recordingJobLog{},
+					Queue:       NewQueue(clock),
+					Store:       &runtimeStore{saveTaskErr: demandErr},
+					Clock:       clock,
+				}
+				_, err := service.SubmitWithPayload(context.Background(), job, []byte(`{"job":"a"}`))
+				return err
+			},
+		},
+		{
+			name: "coordinated commit nofit joins demand failure",
+			run: func() error {
+				service := &Service{
+					Placer:      fakePlacer{},
+					Fleet:       staticFleet{},
+					Nodes:       staticNodes{},
+					Coordinator: &mocks.Coordinator{Decision: placed, CommitErr: domain.ErrNoFit},
+					JobLog:      &recordingJobLog{},
+					Queue:       NewQueue(clock),
+					Store:       &runtimeStore{saveTaskErr: demandErr},
+					Clock:       clock,
+				}
+				_, err := service.SubmitWithPayload(context.Background(), job, []byte(`{"job":"a"}`))
+				if !errors.Is(err, domain.ErrNoFit) {
+					t.Fatalf("commit nofit err = %v", err)
+				}
+				return err
+			},
+		},
+		{
+			name: "coordinated commit queued demand save failure",
+			run: func() error {
+				service := &Service{
+					Placer:      fakePlacer{},
+					Fleet:       staticFleet{},
+					Nodes:       staticNodes{},
+					Coordinator: &mocks.Coordinator{Decision: placed, Outcome: domain.CommitOutcome{Decision: queued}},
+					JobLog:      &recordingJobLog{},
+					Queue:       NewQueue(clock),
+					Store:       &runtimeStore{saveTaskErr: demandErr},
+					Clock:       clock,
+				}
+				_, err := service.SubmitWithPayload(context.Background(), job, []byte(`{"job":"a"}`))
+				return err
+			},
+		},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			if err := check.run(); !errors.Is(err, demandErr) {
+				t.Fatalf("err = %v, want %v", err, demandErr)
+			}
+		})
+	}
+
+	service := &Service{
+		Placer: fakePlacer{decision: queued},
+		Fleet:  staticFleet{},
+		Nodes:  staticNodes{},
+		Queue:  NewQueue(clock),
+		Store:  storeWithoutJobReader{},
+		Clock:  clock,
+	}
+	if _, err := service.Submit(context.Background(), job); err != nil {
+		t.Fatalf("non-demand store Submit: %v", err)
+	}
+}
+
 func TestServiceRejectsQueuedJobWhenHookRequiresSynchronousOwnership(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(1, 1).UTC())
 	store := &runtimeStore{}
@@ -921,6 +1062,45 @@ func TestServiceSubmitWithPayloadQueuesReplanableCommitErrorWithPayload(t *testi
 	}
 	if _, err := failingService.SubmitWithPayload(context.Background(), job, []byte(`{"job":"a"}`)); !errors.Is(err, domain.ErrNoFit) || !errors.Is(err, saveErr) {
 		t.Fatalf("SubmitWithPayload joined err = %v", err)
+	}
+}
+
+func TestServiceRecordsDemandForOwnerNoFit(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(11, 10).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	decision := domain.PlacementDecision{
+		JobID:  job.ID,
+		Action: domain.ActionLoadedNew,
+		NodeID: node.ID,
+		Preset: preset,
+		Claim:  fixtures.MakeClaim(1, 1),
+	}
+	store := &runtimeStore{}
+	service := &Service{
+		Placer: fakePlacer{decision: decision},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{OfferErr: domain.ErrNoFit}}},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+
+	if _, err := service.Submit(context.Background(), job); !errors.Is(err, domain.ErrNoFit) {
+		t.Fatalf("Submit err = %v", err)
+	}
+	if len(store.tasks) != 1 {
+		t.Fatalf("tasks = %+v", store.tasks)
+	}
+	for _, task := range store.tasks {
+		if task.Kind != "prewarm_replica" || task.NodeID != node.ID || task.PresetID != preset.ID || task.Hits != 1 {
+			t.Fatalf("task = %+v", task)
+		}
 	}
 }
 
@@ -3271,6 +3451,7 @@ type runtimeStore struct {
 	jobs            map[string]domain.Job
 	leases          map[string]domain.Lease
 	instances       map[string]domain.ModelInstance
+	tasks           map[string]domain.ReconciliationTaskRecord
 	saveJobErr      error
 	saveJobErrAt    int
 	saveJobCalls    int
@@ -3279,6 +3460,8 @@ type runtimeStore struct {
 	deleteLeaseErr  error
 	saveInstanceErr error
 	deleteErr       error
+	listTasksErr    error
+	saveTaskErr     error
 }
 
 type storeWithoutJobReader struct {
@@ -3414,5 +3597,29 @@ func (s *runtimeStore) DeleteInstance(_ context.Context, id string) error {
 		return s.deleteErr
 	}
 	delete(s.instances, id)
+	return nil
+}
+
+func (s *runtimeStore) ListReconciliationTasks(_ context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error) {
+	if s.listTasksErr != nil {
+		return nil, s.listTasksErr
+	}
+	tasks := make([]domain.ReconciliationTaskRecord, 0, len(s.tasks))
+	for _, task := range s.tasks {
+		if jobID == "" || task.JobID == jobID {
+			tasks = append(tasks, task)
+		}
+	}
+	return tasks, nil
+}
+
+func (s *runtimeStore) SaveReconciliationTask(_ context.Context, task domain.ReconciliationTaskRecord) error {
+	if s.saveTaskErr != nil {
+		return s.saveTaskErr
+	}
+	if s.tasks == nil {
+		s.tasks = map[string]domain.ReconciliationTaskRecord{}
+	}
+	s.tasks[task.ID] = task
 	return nil
 }
