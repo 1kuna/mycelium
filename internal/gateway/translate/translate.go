@@ -28,6 +28,8 @@ type IngressRequest struct {
 	Priority        domain.Priority
 	SpeedPref       domain.SpeedPref
 	ContextRequest  int
+	MaxWaitMS       int
+	HasMaxWait      bool
 	Preemption      domain.Preemption
 	ConversationKey string
 	Handling        domain.HandlingClass

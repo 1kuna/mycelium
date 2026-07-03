@@ -21,6 +21,7 @@ const (
 	HeaderPriority     = "X-Myc-Priority"
 	HeaderSpeedPref    = "X-Myc-Speed-Pref"
 	HeaderContextCap   = "X-Myc-Context-Cap"
+	HeaderMaxWait      = "X-Myc-Max-Wait-Ms"
 	HeaderPreemption   = "X-Myc-Preemption"
 	HeaderConversation = "X-Myc-Conversation"
 	HeaderHandling     = "X-Myc-Handling"

@@ -119,6 +119,14 @@ func parseRequestWithControlHeaders(r *http.Request, trustControlHeaders bool) (
 		}
 		req.ContextRequest = value
 	}
+	if raw := r.Header.Get(HeaderMaxWait); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Max-Wait-Ms"}
+		}
+		req.MaxWaitMS = value
+		req.HasMaxWait = true
+	}
 	req.WorkloadID = r.Header.Get(HeaderWorkload)
 	req.LeaseID = r.Header.Get(HeaderLease)
 	if raw := r.Header.Get(HeaderLeaseHold); raw != "" {
