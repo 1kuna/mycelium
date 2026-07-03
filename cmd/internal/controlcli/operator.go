@@ -2860,20 +2860,14 @@ func addStoreDoctorChecks(ctx context.Context, store *storesqlite.Store, report 
 		}
 		add("jobs", status, formatJobCounts(counts), "myce jobs list")
 	}
-	records, err := store.Snapshot(ctx)
+	registryStats, err := store.JobRegistryStats(ctx)
 	if err != nil {
 		add("registry", "fail", err.Error(), "inspect job registry")
 	} else {
-		cleanup := 0
-		for _, rec := range records {
-			if rec.CleanupRequired {
-				cleanup++
-			}
-		}
-		if cleanup > 0 {
-			add("registry", "warn", fmt.Sprintf("%d records, %d need cleanup", len(records), cleanup), "myce debug bundle --out /tmp/mycelium-debug")
+		if registryStats.CleanupRequired > 0 {
+			add("registry", "warn", fmt.Sprintf("%d records, %d need cleanup", registryStats.Total, registryStats.CleanupRequired), "myce debug bundle --out /tmp/mycelium-debug")
 		} else {
-			add("registry", "ok", fmt.Sprintf("%d records", len(records)), "-")
+			add("registry", "ok", fmt.Sprintf("%d records", registryStats.Total), "-")
 		}
 	}
 	if _, err := store.Metrics(ctx, ""); err != nil {
@@ -3002,16 +2996,11 @@ func buildJobDebugReport(ctx context.Context, dbPath, jobID string) (jobDebugRep
 			report.Children = append(report.Children, candidate)
 		}
 	}
-	records, err := store.Snapshot(ctx)
-	if err != nil {
+	if rec, found, err := store.JobRecord(ctx, job.ID); err != nil {
 		return jobDebugReport{}, err
-	}
-	for _, rec := range records {
-		if rec.JobID == job.ID {
-			recCopy := rec
-			report.Registry = &recCopy
-			break
-		}
+	} else if found {
+		recCopy := rec
+		report.Registry = &recCopy
 	}
 	metrics, err := store.Metrics(ctx, "")
 	if err != nil {
@@ -4414,15 +4403,24 @@ func writeStoreBundleFiles(ctx context.Context, store *storesqlite.Store, jobID 
 	if err := writePrettyJSONFile(addFile("jobs.json"), jobs); err != nil {
 		return err
 	}
-	records, err := store.Snapshot(ctx)
-	if err != nil {
-		return err
-	}
 	if jobID != "" {
-		records = filterRecords(records, func(rec domain.JobRecord) bool { return rec.JobID == jobID })
-	}
-	if err := writePrettyJSONFile(addFile("registry.json"), records); err != nil {
-		return err
+		var records []domain.JobRecord
+		if rec, found, err := store.JobRecord(ctx, jobID); err != nil {
+			return err
+		} else if found {
+			records = append(records, rec)
+		}
+		if err := writePrettyJSONFile(addFile("registry.json"), records); err != nil {
+			return err
+		}
+	} else {
+		records, err := store.Snapshot(ctx)
+		if err != nil {
+			return err
+		}
+		if err := writePrettyJSONFile(addFile("registry.json"), records); err != nil {
+			return err
+		}
 	}
 	metrics, err := store.Metrics(ctx, "")
 	if err != nil {
@@ -4662,16 +4660,6 @@ func secretKey(key string) bool {
 }
 
 func filterJobs(values []domain.Job, keep func(domain.Job) bool) []domain.Job {
-	out := values[:0]
-	for _, value := range values {
-		if keep(value) {
-			out = append(out, value)
-		}
-	}
-	return out
-}
-
-func filterRecords(values []domain.JobRecord, keep func(domain.JobRecord) bool) []domain.JobRecord {
 	out := values[:0]
 	for _, value := range values {
 		if keep(value) {

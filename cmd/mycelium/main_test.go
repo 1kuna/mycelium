@@ -4246,6 +4246,100 @@ func TestWorkloadHTTPStatusUsesPerJobRegistryEvidenceWithoutSnapshotBlocking(t *
 	}
 }
 
+func TestWorkloadHTTPStatusUsesSQLitePointLookupWithLargeRegistry(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := storesqlite.Open(filepath.Join(dir, "control.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	job := domain.Job{
+		ID:             "target-job",
+		TaskType:       "chat",
+		Model:          "model-a",
+		Project:        "project-a",
+		Priority:       domain.PriorityInteractive,
+		SpeedPref:      domain.SpeedThroughput,
+		ContextRequest: 512,
+		Preemption:     domain.PreemptSoft,
+		Status:         domain.JobRunning,
+		Result: &domain.JobResult{
+			Source:         "scheduler",
+			Action:         domain.ActionWarmInstance,
+			NodeID:         "node-a",
+			PresetID:       "preset-a",
+			LeaseID:        "lease-a",
+			PayloadStored:  true,
+			ResultRedacted: true,
+		},
+	}
+	if err := store.SaveJob(ctx, job); err != nil {
+		t.Fatalf("SaveJob: %v", err)
+	}
+	payload := mustJSON(t, workload.ExecutablePayload{
+		Kind: workload.ExecutablePayloadKindOpenAIChat,
+		Body: json.RawMessage(`{"model":"model-a","messages":[]}`),
+	})
+	replayable, err := peercoord.EncodeRescuePayload(job, payload)
+	if err != nil {
+		t.Fatalf("EncodeRescuePayload: %v", err)
+	}
+	if err := store.Put(ctx, domain.JobRecord{
+		JobID:       job.ID,
+		Coordinator: "peer-a",
+		Status:      domain.JobRunning,
+		Request:     replayable,
+		UpdatedAt:   time.Unix(1000, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("Put target record: %v", err)
+	}
+	fatPayload := bytes.Repeat([]byte("x"), 32*1024)
+	for i := 0; i < 250; i++ {
+		rec := domain.JobRecord{
+			JobID:       fmt.Sprintf("noise-%03d", i),
+			Coordinator: "peer-a",
+			Status:      domain.JobDone,
+			Request:     append([]byte(nil), fatPayload...),
+			UpdatedAt:   time.Unix(int64(i+1), 0).UTC(),
+		}
+		if err := store.Put(ctx, rec); err != nil {
+			t.Fatalf("Put noise record %d: %v", i, err)
+		}
+	}
+
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{}, sqliteWorkloadStatusStoreNoSnapshot{Store: store}, "rpc-secret", "peer-a", nil)
+	req := httptest.NewRequest(http.MethodGet, "/workloads/target-job", nil)
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		defer close(done)
+		mux.ServeHTTP(rec, req)
+	}()
+	select {
+	case <-done:
+	case <-time.After(750 * time.Millisecond):
+		t.Fatal("workload status did not complete within point-lookup budget")
+	}
+	if elapsed := time.Since(start); elapsed > 750*time.Millisecond {
+		t.Fatalf("workload status took %s", elapsed)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var status workload.StatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode status response: %v", err)
+	}
+	if status.Payload.State != "registry_payload_replayable" || !status.Payload.Replayable || status.Execution.PayloadContract != "registry_executable_gateway_request" {
+		t.Fatalf("status evidence = payload:%+v execution:%+v", status.Payload, status.Execution)
+	}
+}
+
 func TestWorkloadHTTPAutoDrainsSafeReconciliationTasksFromPlacement(t *testing.T) {
 	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
 	runtime := &recordingWorkloadRuntime{
@@ -6480,6 +6574,14 @@ type snapshotOnlyWorkloadRegistry struct {
 
 func (s snapshotOnlyWorkloadRegistry) Snapshot(context.Context) ([]domain.JobRecord, error) {
 	return append([]domain.JobRecord(nil), s.records...), nil
+}
+
+type sqliteWorkloadStatusStoreNoSnapshot struct {
+	*storesqlite.Store
+}
+
+func (s sqliteWorkloadStatusStoreNoSnapshot) Snapshot(context.Context) ([]domain.JobRecord, error) {
+	return nil, errors.New("unexpected full registry snapshot")
 }
 
 func (s *workloadMemoryStore) SaveReconciliationTask(_ context.Context, task domain.ReconciliationTaskRecord) error {

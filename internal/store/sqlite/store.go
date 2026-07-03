@@ -37,6 +37,11 @@ type Health struct {
 	MaxOpenConnection int    `json:"max_open_connections"`
 }
 
+type JobRegistryStats struct {
+	Total           int `json:"total"`
+	CleanupRequired int `json:"cleanup_required"`
+}
+
 func Open(path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("store path is required")
@@ -462,6 +467,17 @@ func (s *Store) JobRecord(ctx context.Context, id string) (domain.JobRecord, boo
 		return domain.JobRecord{}, false, fmt.Errorf("job record id is required")
 	}
 	return s.jobRecord(ctx, id)
+}
+
+func (s *Store) JobRegistryStats(ctx context.Context) (JobRegistryStats, error) {
+	var stats JobRegistryStats
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_records`).Scan(&stats.Total); err != nil {
+		return JobRegistryStats{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_records WHERE json_extract(data, '$.cleanup_required') = 1`).Scan(&stats.CleanupRequired); err != nil {
+		return JobRegistryStats{}, err
+	}
+	return stats, nil
 }
 
 func (s *Store) SaveRecommendation(ctx context.Context, rec domain.RecommendationRecord) error {

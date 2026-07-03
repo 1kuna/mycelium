@@ -564,6 +564,22 @@ func TestStoreJobRegistryLWWAndWatch(t *testing.T) {
 	if err != nil || string(again[0].Request) != "done" {
 		t.Fatalf("snapshot clone = %+v %v", again, err)
 	}
+	gotRecord, found, err := store.JobRecord(ctx, "job-a")
+	if err != nil || !found || string(gotRecord.Request) != "done" {
+		t.Fatalf("JobRecord = %+v found=%v err=%v", gotRecord, found, err)
+	}
+	gotRecord.Request[0] = '?'
+	gotRecord, found, err = store.JobRecord(ctx, "job-a")
+	if err != nil || !found || string(gotRecord.Request) != "done" {
+		t.Fatalf("JobRecord clone = %+v found=%v err=%v", gotRecord, found, err)
+	}
+	_, found, err = store.JobRecord(ctx, "missing")
+	if err != nil || found {
+		t.Fatalf("missing JobRecord found=%v err=%v", found, err)
+	}
+	if _, _, err := store.JobRecord(ctx, ""); err == nil {
+		t.Fatal("empty JobRecord id accepted")
+	}
 
 	watchCtx, cancel := context.WithCancel(ctx)
 	watch, err := store.Watch(watchCtx, first.UpdatedAt.Format(time.RFC3339Nano))
@@ -618,6 +634,28 @@ func TestStoreJobRegistryDropsStalledWatchersAfterSaving(t *testing.T) {
 	}
 	if got := snap[len(snap)-1].JobID; got != overflow.JobID {
 		t.Fatalf("saved records = %+v", snap)
+	}
+}
+
+func TestStoreJobRegistryStats(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	for i := 0; i < 3; i++ {
+		rec := fixtures.MakeJobRecord(fixtures.WithRecordJobID(fmt.Sprintf("job-%d", i)))
+		rec.UpdatedAt = time.Unix(int64(i+1), 0).UTC()
+		rec.CleanupRequired = i == 1
+		must(t, store.Put(ctx, rec))
+	}
+	stats, err := store.JobRegistryStats(ctx)
+	if err != nil {
+		t.Fatalf("JobRegistryStats: %v", err)
+	}
+	if stats.Total != 3 || stats.CleanupRequired != 1 {
+		t.Fatalf("stats = %+v", stats)
 	}
 }
 

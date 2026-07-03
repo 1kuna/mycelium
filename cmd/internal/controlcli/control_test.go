@@ -4459,6 +4459,55 @@ func TestRunDebugBundleWritesRedactedArtifacts(t *testing.T) {
 	}
 }
 
+func TestRunOperatorRegistryStatsAndFocusedBundleAvoidFullPayloadExport(t *testing.T) {
+	dbPath, configPath := writeOperatorDebugFixture(t)
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	fat := domain.JobRecord{
+		JobID:           "cleanup-fat",
+		Coordinator:     "peer-a",
+		Status:          domain.JobFailed,
+		Request:         []byte(strings.Repeat("x", 32*1024)),
+		CleanupRequired: true,
+		UpdatedAt:       time.Date(2026, 6, 9, 12, 0, 3, 0, time.UTC),
+	}
+	if err := store.Put(context.Background(), fat); err != nil {
+		t.Fatalf("Put fat registry record: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	client := operatorSnapshotClient(t)
+	var errRun error
+	doctorOutput := captureStdout(t, func() {
+		errRun = RunWithClient(context.Background(), []string{"doctor", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret"}, client)
+	})
+	if errRun != nil {
+		t.Fatalf("doctor: %v\n%s", errRun, doctorOutput)
+	}
+	if !strings.Contains(doctorOutput, "check\tregistry\twarn\t2 records, 1 need cleanup") {
+		t.Fatalf("doctor registry stats output = %s", doctorOutput)
+	}
+
+	outDir := filepath.Join(t.TempDir(), "bundle")
+	output := captureStdout(t, func() {
+		errRun = RunWithClient(context.Background(), []string{"debug", "bundle", "--config", configPath, "--db", dbPath, "--url", "http://peer.test", "--rpc-token", "rpc-secret", "--job", "job-a", "--out", outDir}, client)
+	})
+	if errRun != nil {
+		t.Fatalf("debug bundle: %v\n%s", errRun, output)
+	}
+	registryData, err := os.ReadFile(filepath.Join(outDir, "registry.json"))
+	if err != nil {
+		t.Fatalf("read registry: %v", err)
+	}
+	if !strings.Contains(string(registryData), "job-a") || strings.Contains(string(registryData), "cleanup-fat") || strings.Contains(string(registryData), strings.Repeat("x", 128)) {
+		t.Fatalf("focused registry artifact = %s", registryData)
+	}
+}
+
 func TestRunDebugSummaryJoinsBundleAndPreflightArtifacts(t *testing.T) {
 	dbPath, configPath := writeOperatorDebugFixture(t)
 	root := filepath.Join(t.TempDir(), "evidence")
