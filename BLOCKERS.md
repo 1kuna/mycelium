@@ -95,13 +95,17 @@ handoff.
   consume the decision mechanically, and `--verify-plan` fails before launch if
   the plan is stale or the current live allocation no longer satisfies the saved
   worker count. The allocation report is still not itself a held lease or
-  reservation. When an external runner needs held capacity, it can admit a
-  workload first, then send a non-streaming gateway request with
-  `X-Myc-Workload` and `X-Myc-Lease`; the gateway validates the running
+  reservation. When an external runner needs held capacity, `myce pool plan`,
+  `myce pool up`, and `myce pool proxy` provide the generic bridge: pool
+  planning selects fitting owner envelopes, pool up admits workload workers and
+  now waits for queued cold-load workers to become held running leases before a
+  successful return, and the local proxy injects the lease headers for
+  header-unaware OpenAI-compatible tools. The gateway validates the running
   workload, active lease, project/model/context envelope, visible instance, and
-  then routes through the reserved owner before finishing/releasing the lease.
-  The remaining product work is to make multi-worker/batch lease acquisition
-  less manual, add a larger envelope on the second owner where feasible, add a
+  then routes through the reserved owner while `X-Myc-Lease-Hold` keeps the
+  pool lease reusable until `pool down` releases it. The remaining product work
+  is to make multi-worker/batch pool sizing adaptive across more workload
+  shapes, add a larger envelope on the second owner where feasible, add a
   document/page chunking contract, and cover streaming leased execution if a
   consumer needs it.
 - 2026-07-02: Placement drop reasons can now be saved as durable
