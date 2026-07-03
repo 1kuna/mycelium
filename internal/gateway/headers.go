@@ -27,6 +27,7 @@ const (
 	HeaderSubmitter    = "X-Myc-Submitter"
 	HeaderWorkload     = "X-Myc-Workload"
 	HeaderLease        = "X-Myc-Lease"
+	HeaderLeaseHold    = "X-Myc-Lease-Hold"
 
 	HeaderColdLoad                = "X-Myc-Cold-Load"
 	HeaderLoadWallMS              = "X-Myc-Load-Wall-Ms"

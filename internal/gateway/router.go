@@ -675,6 +675,15 @@ func (r *Router) routeWithWorkloadLease(ctx context.Context, req translate.Ingre
 		}
 		return RouteResponse{}, err
 	}
+	if req.HoldLease {
+		// The caller (e.g. `myce pool proxy`) owns the workload lifecycle:
+		// keep the worker running so the reserved lease serves more requests.
+		if resp.Header == nil {
+			resp.Header = http.Header{}
+		}
+		resp.Header.Set(HeaderLeaseHold, "true")
+		return resp, nil
+	}
 	if err := r.finishJob(ctx, job, lease, nil); err != nil {
 		return RouteResponse{}, err
 	}

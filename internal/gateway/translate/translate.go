@@ -34,11 +34,14 @@ type IngressRequest struct {
 	Submitter       string
 	WorkloadID      string
 	LeaseID         string
-	Body            []byte
-	OpenAI          api.OpenAIChatRequest
-	Complete        api.OpenAICompletionRequest
-	Claude          api.AnthropicMessagesRequest
-	typedErr        error
+	// HoldLease keeps the presented workload lease running after this request
+	// instead of finishing it, so a held pool worker can serve many requests.
+	HoldLease bool
+	Body      []byte
+	OpenAI    api.OpenAIChatRequest
+	Complete  api.OpenAICompletionRequest
+	Claude    api.AnthropicMessagesRequest
+	typedErr  error
 }
 
 type UpstreamRequest struct {
