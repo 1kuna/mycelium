@@ -431,3 +431,85 @@ func TestPoolStatusAndDownJSONAndServerErrors(t *testing.T) {
 		t.Fatalf("down should join release errors, got %v", err)
 	}
 }
+
+func TestPoolUpTimeoutLeavesCleanupCapableState(t *testing.T) {
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate a long cold load: block until the test releases handlers.
+		// (A handler that has not read the request body cannot observe the
+		// client disconnect, so waiting on r.Context() would deadlock Close.)
+		<-release
+	}))
+	defer slow.Close()
+	defer close(release) // runs before slow.Close, unblocking handlers first
+	dir := t.TempDir()
+	planPath := writePoolPlanFile(t, dir, smallPoolPlan())
+	statePath := filepath.Join(dir, "pool.json")
+
+	err := RunWithClient(context.Background(), []string{
+		"pool", "up", "--plan", planPath, "--url", slow.URL, "--state", statePath,
+		"--run-id", "runt", "--admit-timeout", "50ms",
+	}, slow.Client())
+	if err == nil || !strings.Contains(err.Error(), "held no workers") {
+		t.Fatalf("expected held-no-workers error, got %v", err)
+	}
+	state, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("state must exist after timeouts: %v", err)
+	}
+	if len(state.Workers) != 3 {
+		t.Fatalf("state workers = %d, want all 3 pre-registered", len(state.Workers))
+	}
+	for _, worker := range state.Workers {
+		if worker.Status != "admit_error" || !strings.Contains(worker.Error, "context deadline exceeded") {
+			t.Fatalf("timed-out worker = %+v", worker)
+		}
+		if worker.WorkloadID == "" {
+			t.Fatalf("worker must keep its pre-assigned workload id for cleanup")
+		}
+	}
+}
+
+func TestPoolStatusAndDownTolerateNeverAdmittedWorkers(t *testing.T) {
+	notFound := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "job not found", http.StatusNotFound)
+	}))
+	defer notFound.Close()
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "pool.json")
+	seed := poolState{Name: "ocr", Model: "chandra", Workers: []poolWorker{
+		{WorkloadID: "w1", NodeID: "node_spark", Status: "pending"},
+	}}
+	if err := writePrettyJSONFile(statePath, seed); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "status", "--state", statePath, "--url", notFound.URL,
+	}, notFound.Client()); err != nil {
+		t.Fatalf("pool status: %v", err)
+	}
+	state, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if state.Workers[0].Status != "not_admitted" || state.Workers[0].Error != "" {
+		t.Fatalf("status should classify missing workload: %+v", state.Workers[0])
+	}
+
+	if err := writePrettyJSONFile(statePath, seed); err != nil {
+		t.Fatalf("reseed state: %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "down", "--state", statePath, "--url", notFound.URL,
+	}, notFound.Client()); err != nil {
+		t.Fatalf("pool down must tolerate never-admitted workers: %v", err)
+	}
+	state, err = loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("load state after down: %v", err)
+	}
+	if state.Workers[0].Status != "not_admitted" || state.Workers[0].Error != "" {
+		t.Fatalf("down should classify missing workload: %+v", state.Workers[0])
+	}
+}

@@ -161,12 +161,13 @@ func runPoolUp(ctx context.Context, args []string, client *http.Client) error {
 	name := fs.String("name", "pool", "pool name used in worker job ids and the project label")
 	runID := fs.String("run-id", "", "explicit run id for worker job ids; defaults to a UTC timestamp")
 	statePath := fs.String("state", "", "write pool worker state JSON to this file")
+	admitTimeout := fs.Duration("admit-timeout", 15*time.Minute, "per-worker admission timeout; cold loads legitimately take minutes; 0 disables")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || *planPath == "" || *peerURL == "" || *statePath == "" {
-		return fmt.Errorf("usage: myce pool up --plan plan.json --url <peer-url> --state pool.json [--rpc-token token] [--name pool] [--json]")
+		return fmt.Errorf("usage: myce pool up --plan plan.json --url <peer-url> --state pool.json [--rpc-token token] [--name pool] [--admit-timeout 15m] [--json]")
 	}
 	plan, err := loadPoolPlan(*planPath)
 	if err != nil {
@@ -177,9 +178,9 @@ func runPoolUp(ctx context.Context, args []string, client *http.Client) error {
 		run = time.Now().UTC().Format("20060102t150405z")
 	}
 	state := poolState{Name: *name, Model: plan.Model, CreatedAt: time.Now().UTC()}
+	var jobs []domain.Job
 	for _, node := range plan.Nodes {
 		for i := 0; i < node.Additional; i++ {
-			worker := poolWorker{NodeID: node.NodeID, PresetID: node.PresetID}
 			job := domain.Job{
 				ID:                  fmt.Sprintf("%s-%s-%s-%d", *name, run, node.NodeID, i+1),
 				TaskType:            string(domain.CapabilityChat),
@@ -194,24 +195,45 @@ func runPoolUp(ctx context.Context, args []string, client *http.Client) error {
 				NodeSelector:        map[string]string{domain.LabelNodeID: node.NodeID},
 				Status:              domain.JobQueued,
 			}
-			admitted, err := admitPrewarmWorkload(ctx, client, *peerURL, *rpcToken, job)
-			if err != nil {
-				worker.WorkloadID = job.ID
-				worker.Status = "admit_error"
-				worker.Error = err.Error()
-				state.Workers = append(state.Workers, worker)
-				continue
-			}
-			worker.WorkloadID = admitted.Job.ID
+			jobs = append(jobs, job)
+			state.Workers = append(state.Workers, poolWorker{
+				WorkloadID: job.ID,
+				NodeID:     node.NodeID,
+				PresetID:   node.PresetID,
+				Status:     "pending",
+			})
+		}
+	}
+	// Persist every planned worker BEFORE the first admission so a killed or
+	// timed-out run always leaves cleanup-capable state for `pool down`.
+	if err := writePrettyJSONFile(*statePath, state); err != nil {
+		return err
+	}
+	for i := range jobs {
+		worker := &state.Workers[i]
+		fmt.Printf("pool up\tlaunching %s on %s (a cold load can take minutes; admit timeout %s)\n",
+			worker.WorkloadID, worker.NodeID, admitTimeoutLabel(*admitTimeout))
+		admitCtx := ctx
+		cancel := func() {}
+		if *admitTimeout > 0 {
+			admitCtx, cancel = context.WithTimeout(ctx, *admitTimeout)
+		}
+		admitted, err := admitPrewarmWorkload(admitCtx, client, *peerURL, *rpcToken, jobs[i])
+		cancel()
+		if err != nil {
+			worker.Status = "admit_error"
+			worker.Error = err.Error()
+		} else {
 			worker.Status = string(admitted.Job.Status)
 			worker.Queued = admitted.Queued
 			worker.InstanceID = admitted.Instance.ID
 			worker.LeaseID = admitted.Lease.ID
-			state.Workers = append(state.Workers, worker)
+			worker.Error = ""
 		}
-	}
-	if err := writePrettyJSONFile(*statePath, state); err != nil {
-		return err
+		// Flush after every worker so state on disk always matches reality.
+		if err := writePrettyJSONFile(*statePath, state); err != nil {
+			return err
+		}
 	}
 	if *jsonOut {
 		if err := writePrettyJSON(os.Stdout, state); err != nil {
@@ -220,11 +242,18 @@ func runPoolUp(ctx context.Context, args []string, client *http.Client) error {
 	} else {
 		printPoolState("pool up", state)
 	}
-	held, failed := countPoolWorkers(state)
+	held, _ := countPoolWorkers(state)
 	if held == 0 && len(state.Workers) > 0 {
-		return fmt.Errorf("pool up held no workers: %d admissions failed or queued; see %s", failed+len(state.Workers)-held-failed, *statePath)
+		return fmt.Errorf("pool up held no workers (%d attempted); inspect and release with `myce pool down --state %s`", len(state.Workers), *statePath)
 	}
 	return nil
+}
+
+func admitTimeoutLabel(timeout time.Duration) string {
+	if timeout <= 0 {
+		return "disabled"
+	}
+	return timeout.String()
 }
 
 func runPoolStatus(ctx context.Context, args []string, client *http.Client) error {
@@ -249,6 +278,11 @@ func runPoolStatus(ctx context.Context, args []string, client *http.Client) erro
 			continue
 		}
 		status, err := fetchPoolWorkload(ctx, client, *peerURL, *rpcToken, worker.WorkloadID)
+		if errors.Is(err, errPoolWorkloadNotFound) {
+			worker.Status = "not_admitted"
+			worker.Error = ""
+			continue
+		}
 		if err != nil {
 			worker.Error = err.Error()
 			continue
@@ -312,6 +346,13 @@ func runPoolDown(ctx context.Context, args []string, client *http.Client) error 
 			release = err
 		} else {
 			canceled, err := cancelPoolWorkload(ctx, client, *peerURL, *rpcToken, worker.WorkloadID, *reason)
+			if errors.Is(err, errPoolWorkloadNotFound) {
+				// The admit never reached the daemon (killed or timed-out
+				// run); there is nothing to release for this worker.
+				worker.Status = "not_admitted"
+				worker.Error = ""
+				continue
+			}
 			if err == nil {
 				worker.Status = string(canceled.Job.Status)
 			}
@@ -381,6 +422,9 @@ func fetchPoolWorkload(ctx context.Context, client *http.Client, peerURL, rpcTok
 	if err != nil {
 		return workload.StatusResponse{}, err
 	}
+	if resp.StatusCode == http.StatusNotFound {
+		return workload.StatusResponse{}, fmt.Errorf("%w: %s", errPoolWorkloadNotFound, strings.TrimSpace(string(body)))
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return workload.StatusResponse{}, fmt.Errorf("pool workload status returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -413,6 +457,9 @@ func cancelPoolWorkload(ctx context.Context, client *http.Client, peerURL, rpcTo
 	if err != nil {
 		return workload.FinishResponse{}, err
 	}
+	if resp.StatusCode == http.StatusNotFound {
+		return workload.FinishResponse{}, fmt.Errorf("%w: %s", errPoolWorkloadNotFound, strings.TrimSpace(string(respBody)))
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return workload.FinishResponse{}, fmt.Errorf("pool workload cancel returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
@@ -423,8 +470,10 @@ func cancelPoolWorkload(ctx context.Context, client *http.Client, peerURL, rpcTo
 	return out, nil
 }
 
+var errPoolWorkloadNotFound = errors.New("workload not found on peer")
+
 func poolWorkerTerminal(status string) bool {
-	return status == string(domain.JobDone) || status == string(domain.JobFailed)
+	return status == string(domain.JobDone) || status == string(domain.JobFailed) || status == "not_admitted"
 }
 
 func countPoolWorkers(state poolState) (held, failed int) {
