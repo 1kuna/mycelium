@@ -1,4 +1,4 @@
-.PHONY: fmt build vet test coverage smoke smoke-local smoke-fleet smoke-mlx smoke-vllm smoke-b70 smoke-spark-vllm smoke-operability-local smoke-workload-executor smoke-join-mac-mini smoke-locality-fleet smoke-benchmark-fleet ci
+.PHONY: fmt build vet test coverage smoke smoke-local smoke-fleet smoke-mlx smoke-vllm smoke-b70 smoke-spark-vllm smoke-operability-local smoke-workload-executor smoke-join-mac-mini smoke-locality-fleet smoke-benchmark-fleet smoke-vision ci
 
 SMOKE_JSON ?= smoke.out
 BENCH_OUT ?= benchmark-out
@@ -64,5 +64,9 @@ smoke-locality-fleet:
 smoke-benchmark-fleet:
 	MYCELIUM_BENCHMARK_OUT="$(BENCH_OUT)" go test -count=1 -tags smoke ./test/smoke/... -run TestFleetBenchmarkConservativeSmoke -timeout 2h -json > $(SMOKE_JSON)
 	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestFleetBenchmarkConservativeSmoke
+
+smoke-vision:
+	go test -count=1 -tags smoke ./test/smoke/... -run TestVisionAutonomousFleetSmoke -timeout 2h -json > $(SMOKE_JSON)
+	go run ./tools/smokegate -json $(SMOKE_JSON) -require TestVisionAutonomousFleetSmoke
 
 ci: fmt build vet test coverage

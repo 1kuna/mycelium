@@ -181,15 +181,15 @@ func TestPoolProxyStripsCallerLeaseHeadersAndKeepsOthers(t *testing.T) {
 }
 
 func TestResolvePoolProxyToken(t *testing.T) {
-	if tok, err := resolvePoolProxyToken("direct", "", ""); err != nil || tok != "direct" {
+	if tok, err := resolvePoolProxyToken("http://gateway.test", "direct", "", ""); err != nil || tok != "direct" {
 		t.Fatalf("direct token: %q %v", tok, err)
 	}
 	t.Setenv("POOL_PROXY_TOKEN", " from-env ")
-	if tok, err := resolvePoolProxyToken("", "POOL_PROXY_TOKEN", ""); err != nil || tok != "from-env" {
+	if tok, err := resolvePoolProxyToken("http://gateway.test", "", "POOL_PROXY_TOKEN", ""); err != nil || tok != "from-env" {
 		t.Fatalf("env token: %q %v", tok, err)
 	}
 	t.Setenv("POOL_PROXY_TOKEN", "")
-	if _, err := resolvePoolProxyToken("", "POOL_PROXY_TOKEN", ""); err == nil {
+	if _, err := resolvePoolProxyToken("http://gateway.test", "", "POOL_PROXY_TOKEN", ""); err == nil {
 		t.Fatalf("empty env must fail")
 	}
 	dir := t.TempDir()
@@ -197,14 +197,17 @@ func TestResolvePoolProxyToken(t *testing.T) {
 	if err := os.WriteFile(file, []byte("from-file\n"), 0o600); err != nil {
 		t.Fatalf("write token file: %v", err)
 	}
-	if tok, err := resolvePoolProxyToken("", "", file); err != nil || tok != "from-file" {
+	if tok, err := resolvePoolProxyToken("http://gateway.test", "", "", file); err != nil || tok != "from-file" {
 		t.Fatalf("file token: %q %v", tok, err)
 	}
-	if _, err := resolvePoolProxyToken("", "", filepath.Join(dir, "missing")); err == nil {
+	if _, err := resolvePoolProxyToken("http://gateway.test", "", "", filepath.Join(dir, "missing")); err == nil {
 		t.Fatalf("missing file must fail")
 	}
-	if tok, err := resolvePoolProxyToken("", "", ""); err != nil || tok != "" {
-		t.Fatalf("no token config: %q %v", tok, err)
+	if tok, err := resolvePoolProxyToken("http://127.0.0.1:8080", "", "", ""); err != nil || tok != "" {
+		t.Fatalf("loopback no token config: %q %v", tok, err)
+	}
+	if _, err := resolvePoolProxyToken("http://gateway.test", "", "", ""); err == nil || !strings.Contains(err.Error(), "MYCELIUM_GATEWAY_TOKEN") {
+		t.Fatalf("non-loopback no token err = %v", err)
 	}
 }
 

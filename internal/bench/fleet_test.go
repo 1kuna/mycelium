@@ -239,6 +239,52 @@ func TestResolveGatewayTokenDiscoversDefaults(t *testing.T) {
 	}
 }
 
+func TestResolveGatewayTokenOrder(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "env-secret")
+	t.Setenv("MYCELIUM_API_KEY", "api-secret")
+	configDir := filepath.Join(home, ".mycelium")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	configPath := filepath.Join(configDir, "peer.json")
+	if err := os.WriteFile(configPath, []byte(`{"gateway_token":"config-secret"}`), 0o600); err != nil {
+		t.Fatalf("write peer config: %v", err)
+	}
+	tokenFile := filepath.Join(t.TempDir(), "gateway-token")
+	if err := os.WriteFile(tokenFile, []byte("file-secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	cases := []struct {
+		name string
+		opts GatewayTokenOptions
+		want string
+		src  string
+	}{
+		{"flag", GatewayTokenOptions{RawURL: "http://gateway.test", Token: "flag-secret", TokenEnv: "MYCELIUM_GATEWAY_TOKEN", TokenFile: tokenFile, ConfigPath: configPath}, "flag-secret", "--gateway-token"},
+		{"env-name flag", GatewayTokenOptions{RawURL: "http://gateway.test", TokenEnv: "MYCELIUM_GATEWAY_TOKEN", TokenFile: tokenFile, ConfigPath: configPath}, "env-secret", "MYCELIUM_GATEWAY_TOKEN"},
+		{"file flag", GatewayTokenOptions{RawURL: "http://gateway.test", TokenFile: tokenFile, ConfigPath: configPath}, "file-secret", tokenFile},
+		{"mycelium env", GatewayTokenOptions{RawURL: "http://gateway.test", ConfigPath: configPath}, "env-secret", "MYCELIUM_GATEWAY_TOKEN"},
+	}
+	for _, tc := range cases {
+		got, source, err := ResolveGatewayTokenSource(tc.opts)
+		if err != nil || got != tc.want || source != tc.src {
+			t.Fatalf("%s token=%q source=%q err=%v", tc.name, got, source, err)
+		}
+	}
+	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
+	got, source, err := ResolveGatewayTokenSource(GatewayTokenOptions{RawURL: "http://gateway.test", ConfigPath: configPath})
+	if err != nil || got != "api-secret" || source != "MYCELIUM_API_KEY" {
+		t.Fatalf("api env token=%q source=%q err=%v", got, source, err)
+	}
+	t.Setenv("MYCELIUM_API_KEY", "")
+	got, source, err = ResolveGatewayTokenSource(GatewayTokenOptions{RawURL: "http://gateway.test", ConfigPath: configPath})
+	if err != nil || got != "config-secret" || source != configPath+" gateway_token" {
+		t.Fatalf("config token=%q source=%q err=%v", got, source, err)
+	}
+}
+
 func TestResolveGatewayTokenUsesOnlyMyceliumDefaults(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("MYCELIUM_GATEWAY_TOKEN", "")
@@ -248,7 +294,7 @@ func TestResolveGatewayTokenUsesOnlyMyceliumDefaults(t *testing.T) {
 		t.Fatalf("project env token = %q err=%v", got, err)
 	}
 	t.Setenv("MYCELIUM_API_KEY", "")
-	if got, _, err := ResolveGatewayTokenSourceForURL("http://gateway.test", "", ""); err == nil || got != "" || !strings.Contains(err.Error(), "gateway_token or token_env") {
+	if got, _, err := ResolveGatewayTokenSourceForURL("http://gateway.test", "", ""); err == nil || got != "" || !strings.Contains(err.Error(), "MYCELIUM_GATEWAY_TOKEN") {
 		t.Fatalf("ambient OPENAI_API_KEY should not be a Mycelium gateway token: token=%q err=%v", got, err)
 	}
 	if got, source, err := ResolveGatewayTokenSourceForURL("http://gateway.test", "", "OPENAI_API_KEY"); err != nil || got != "openai-secret" || source != "OPENAI_API_KEY" {

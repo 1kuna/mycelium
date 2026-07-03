@@ -3605,67 +3605,20 @@ func gatewayPreflightHeaderMap(headers http.Header) map[string]string {
 }
 
 func resolveGatewayPreflightToken(rawURL, token, tokenEnv, tokenFile, configPath string) (string, string, error) {
-	if token != "" {
-		return token, "--gateway-token", nil
-	}
-	if tokenEnv != "" {
-		value := strings.TrimSpace(os.Getenv(tokenEnv))
-		if value == "" {
-			return "", "", fmt.Errorf("gateway token env %s is not set", tokenEnv)
-		}
-		return value, tokenEnv, nil
-	}
-	if tokenFile != "" {
-		value, err := readGatewayTokenFile(tokenFile)
-		if err != nil {
-			return "", "", err
-		}
-		return value, tokenFile, nil
-	}
-	if configPath != "" {
-		value, err := gatewayTokenFromConfig(configPath)
-		if err != nil {
-			return "", "", err
-		}
-		if value == "" {
-			return "", "", fmt.Errorf("peer config %s has no gateway_token", configPath)
-		}
-		return value, configPath + " gateway_token", nil
-	}
-	token, source, err := bench.ResolveGatewayTokenSourceForURL(rawURL, "", "")
+	token, source, err := bench.ResolveGatewayTokenSource(bench.GatewayTokenOptions{
+		RawURL:     rawURL,
+		Token:      token,
+		TokenEnv:   tokenEnv,
+		TokenFile:  tokenFile,
+		ConfigPath: configPath,
+	})
 	if err != nil {
-		return "", "", fmt.Errorf("%w; checked env %s, --gateway-token-file, --config gateway_token, and ~/.mycelium/peer.json gateway_token; pass --gateway-token-env OPENAI_API_KEY only if that variable intentionally contains a Mycelium gateway token", err, strings.Join(bench.DefaultGatewayTokenEnvNames(), ", "))
+		return "", "", err
 	}
 	if token != "" {
 		return token, source, nil
 	}
 	return "", "none", nil
-}
-
-func gatewayTokenFromConfig(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read peer config %s: %w", path, err)
-	}
-	var cfg struct {
-		GatewayToken string `json:"gateway_token"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return "", fmt.Errorf("parse peer config %s: %w", path, err)
-	}
-	return strings.TrimSpace(cfg.GatewayToken), nil
-}
-
-func readGatewayTokenFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read gateway token file %s: %w", path, err)
-	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", fmt.Errorf("gateway token file %s is empty", path)
-	}
-	return token, nil
 }
 
 func gatewayPreflightComplete(ctx context.Context, cfg gatewayPreflightConfig) (gatewayPreflightResult, error) {
@@ -4103,6 +4056,7 @@ func runBenchmarkFanout(ctx context.Context, args []string, client *http.Client)
 	url := fs.String("url", "", "Mycelium gateway URL")
 	gatewayToken := fs.String("gateway-token", "", "Mycelium gateway bearer token")
 	gatewayTokenEnv := fs.String("gateway-token-env", "", "environment variable containing the Mycelium gateway bearer token")
+	gatewayTokenFile := fs.String("gateway-token-file", "", "file containing the Mycelium gateway bearer token")
 	prompt := fs.String("prompt", "", "benchmark prompt")
 	maxTokens := fs.Int("max-tokens", 0, "maximum output tokens for each gateway request")
 	out := fs.String("out", "", "output directory")
@@ -4125,7 +4079,7 @@ func runBenchmarkFanout(ctx context.Context, args []string, client *http.Client)
 	if len(models) == 0 {
 		return fmt.Errorf("--model is required")
 	}
-	authToken, authSource, err := bench.ResolveGatewayTokenSourceForURL(*url, *gatewayToken, *gatewayTokenEnv)
+	authToken, authSource, err := bench.ResolveGatewayTokenSourceForURL(*url, *gatewayToken, *gatewayTokenEnv, *gatewayTokenFile)
 	if err != nil {
 		return err
 	}
