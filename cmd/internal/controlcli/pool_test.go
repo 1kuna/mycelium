@@ -1,0 +1,433 @@
+package controlcli
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"mycelium/internal/domain"
+	"mycelium/internal/pool"
+	storesqlite "mycelium/internal/store/sqlite"
+	"mycelium/internal/workload"
+	"mycelium/test/fixtures"
+)
+
+func seedPoolStore(t *testing.T) string {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.SaveNode(ctx, fixtures.Make4090Node()); err != nil {
+		t.Fatalf("save node: %v", err)
+	}
+	if err := store.SaveNode(ctx, fixtures.MakeSparkNode()); err != nil {
+		t.Fatalf("save spark: %v", err)
+	}
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.Aliases = []string{"chandra"}
+	})
+	if err := store.SavePreset(ctx, preset); err != nil {
+		t.Fatalf("save preset: %v", err)
+	}
+	return dbPath
+}
+
+func TestPoolPlanWritesPlanFromControlStore(t *testing.T) {
+	dbPath := seedPoolStore(t)
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+	err := RunWithClient(context.Background(), []string{
+		"pool", "plan", "--model", "chandra", "--db", dbPath,
+		"--max-per-node", "2", "--out", planPath,
+	}, http.DefaultClient)
+	if err != nil {
+		t.Fatalf("pool plan: %v", err)
+	}
+	data, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read plan: %v", err)
+	}
+	var plan pool.Plan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		t.Fatalf("decode plan: %v", err)
+	}
+	if plan.Model != "chandra" || plan.TotalAdditional != 4 || len(plan.Nodes) != 2 {
+		t.Fatalf("plan = %+v", plan)
+	}
+}
+
+func TestPoolPlanFailsWithoutMatchingPreset(t *testing.T) {
+	dbPath := seedPoolStore(t)
+	err := RunWithClient(context.Background(), []string{
+		"pool", "plan", "--model", "unknown-model", "--db", dbPath,
+	}, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "no presets match") {
+		t.Fatalf("expected preset resolution error, got %v", err)
+	}
+}
+
+type poolPeerServer struct {
+	mu       sync.Mutex
+	admits   []workload.AdmissionRequest
+	finishes []string
+	cancels  []string
+	statuses []string
+	authSeen []string
+	queueAll bool
+}
+
+func (s *poolPeerServer) handler(t *testing.T) http.Handler {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/workloads", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.authSeen = append(s.authSeen, r.Header.Get("Authorization"))
+		var req workload.AdmissionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode admit: %v", err)
+		}
+		s.admits = append(s.admits, req)
+		job := req.Job
+		resp := workload.AdmissionResponse{Job: job}
+		if s.queueAll {
+			job.Status = domain.JobQueued
+			resp.Job = job
+			resp.Queued = true
+			w.WriteHeader(http.StatusAccepted)
+		} else {
+			job.Status = domain.JobRunning
+			resp.Job = job
+			resp.Lease = domain.Lease{ID: "lease-" + job.ID}
+			resp.Instance = domain.ModelInstance{ID: "inst-" + job.ID, NodeID: job.NodeSelector[domain.LabelNodeID]}
+			w.WriteHeader(http.StatusCreated)
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("encode admit response: %v", err)
+		}
+	})
+	mux.HandleFunc("/workloads/", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		id := strings.TrimPrefix(r.URL.Path, "/workloads/")
+		switch {
+		case strings.HasSuffix(id, "/finish"):
+			id = strings.TrimSuffix(id, "/finish")
+			s.finishes = append(s.finishes, id)
+			job := domain.Job{ID: id, Status: domain.JobDone}
+			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: job, Result: &domain.JobResult{Terminal: true}})
+		case strings.HasSuffix(id, "/cancel"):
+			id = strings.TrimSuffix(id, "/cancel")
+			s.cancels = append(s.cancels, id)
+			job := domain.Job{ID: id, Status: domain.JobFailed}
+			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: job, Result: &domain.JobResult{Terminal: true}})
+		default:
+			s.statuses = append(s.statuses, id)
+			job := domain.Job{ID: id, Status: domain.JobRunning}
+			result := &domain.JobResult{LeaseID: "lease-" + id, Instance: domain.ModelInstance{ID: "inst-" + id}, NodeID: "node_4090a"}
+			_ = json.NewEncoder(w).Encode(workload.StatusResponse{Job: job, Result: result})
+		}
+	})
+	return mux
+}
+
+func writePoolPlanFile(t *testing.T, dir string, plan pool.Plan) string {
+	t.Helper()
+	path := filepath.Join(dir, "plan.json")
+	data, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal plan: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write plan: %v", err)
+	}
+	return path
+}
+
+func smallPoolPlan() pool.Plan {
+	return pool.Plan{
+		Model:           "chandra",
+		Concurrency:     2,
+		TotalAdditional: 3,
+		Nodes: []pool.NodePlan{
+			{NodeID: "node_4090a", PresetID: "preset_test", ContextLength: 8000, Additional: 2},
+			{NodeID: "node_spark", PresetID: "preset_test", ContextLength: 8000, Additional: 1, SerialColdLoads: true},
+			{NodeID: "node_b70", Refusal: "no compatible backend runtime"},
+		},
+	}
+}
+
+func TestPoolUpHoldsWorkersAndWritesState(t *testing.T) {
+	server := &poolPeerServer{}
+	ts := httptest.NewServer(server.handler(t))
+	defer ts.Close()
+	dir := t.TempDir()
+	planPath := writePoolPlanFile(t, dir, smallPoolPlan())
+	statePath := filepath.Join(dir, "pool.json")
+
+	err := RunWithClient(context.Background(), []string{
+		"pool", "up", "--plan", planPath, "--url", ts.URL, "--state", statePath,
+		"--rpc-token", "secret", "--name", "ocr", "--run-id", "runx",
+	}, ts.Client())
+	if err != nil {
+		t.Fatalf("pool up: %v", err)
+	}
+
+	if len(server.admits) != 3 {
+		t.Fatalf("admits = %d, want 3", len(server.admits))
+	}
+	if len(server.finishes) != 0 {
+		t.Fatalf("pool up must hold leases, saw finishes %v", server.finishes)
+	}
+	for _, auth := range server.authSeen {
+		if auth != "Bearer secret" {
+			t.Fatalf("auth header = %q", auth)
+		}
+	}
+	first := server.admits[0].Job
+	if first.NodeSelector[domain.LabelNodeID] != "node_4090a" {
+		t.Fatalf("first admit selector = %v", first.NodeSelector)
+	}
+	if first.Priority != domain.PriorityBackground || first.ExpectedConcurrency != 2 || first.Project != "pool-ocr" {
+		t.Fatalf("first admit job = %+v", first)
+	}
+	if first.ID != "ocr-runx-node_4090a-1" {
+		t.Fatalf("first worker id = %q", first.ID)
+	}
+
+	state, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if len(state.Workers) != 3 {
+		t.Fatalf("state workers = %d", len(state.Workers))
+	}
+	for _, worker := range state.Workers {
+		if worker.LeaseID == "" || worker.Status != string(domain.JobRunning) {
+			t.Fatalf("worker not held: %+v", worker)
+		}
+	}
+}
+
+func TestPoolUpReportsWhenNothingHeld(t *testing.T) {
+	server := &poolPeerServer{queueAll: true}
+	ts := httptest.NewServer(server.handler(t))
+	defer ts.Close()
+	dir := t.TempDir()
+	planPath := writePoolPlanFile(t, dir, smallPoolPlan())
+	statePath := filepath.Join(dir, "pool.json")
+
+	err := RunWithClient(context.Background(), []string{
+		"pool", "up", "--plan", planPath, "--url", ts.URL, "--state", statePath, "--run-id", "runq",
+	}, ts.Client())
+	if err == nil || !strings.Contains(err.Error(), "held no workers") {
+		t.Fatalf("expected held-no-workers error, got %v", err)
+	}
+	state, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("state must still be written: %v", err)
+	}
+	for _, worker := range state.Workers {
+		if !worker.Queued {
+			t.Fatalf("worker should be queued: %+v", worker)
+		}
+	}
+}
+
+func TestPoolStatusAndDownLifecycle(t *testing.T) {
+	server := &poolPeerServer{}
+	ts := httptest.NewServer(server.handler(t))
+	defer ts.Close()
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "pool.json")
+	initial := poolState{Name: "ocr", Model: "chandra", Workers: []poolWorker{
+		{WorkloadID: "w1", NodeID: "node_4090a", LeaseID: "lease-w1", Status: string(domain.JobRunning)},
+		{WorkloadID: "w2", NodeID: "node_spark", Status: string(domain.JobQueued), Queued: true},
+		{WorkloadID: "w3", NodeID: "node_spark", Status: string(domain.JobDone)},
+	}}
+	if err := writePrettyJSONFile(statePath, initial); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "status", "--state", statePath, "--url", ts.URL,
+	}, ts.Client()); err != nil {
+		t.Fatalf("pool status: %v", err)
+	}
+	if len(server.statuses) != 3 {
+		t.Fatalf("status fetches = %v", server.statuses)
+	}
+	refreshed, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("load refreshed state: %v", err)
+	}
+	if refreshed.Workers[1].Status != string(domain.JobRunning) || refreshed.Workers[1].LeaseID != "lease-w2" {
+		t.Fatalf("status refresh did not update worker: %+v", refreshed.Workers[1])
+	}
+
+	// Reset to the seeded mix so down exercises finish, cancel, and skip.
+	if err := writePrettyJSONFile(statePath, initial); err != nil {
+		t.Fatalf("reseed state: %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "down", "--state", statePath, "--url", ts.URL,
+	}, ts.Client()); err != nil {
+		t.Fatalf("pool down: %v", err)
+	}
+	if len(server.finishes) != 1 || server.finishes[0] != "w1" {
+		t.Fatalf("finishes = %v", server.finishes)
+	}
+	if len(server.cancels) != 1 || server.cancels[0] != "w2" {
+		t.Fatalf("cancels = %v", server.cancels)
+	}
+	final, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("load final state: %v", err)
+	}
+	if final.Workers[0].Status != string(domain.JobDone) {
+		t.Fatalf("finished worker status = %q", final.Workers[0].Status)
+	}
+	if final.Workers[1].Status != string(domain.JobFailed) {
+		t.Fatalf("canceled worker status = %q", final.Workers[1].Status)
+	}
+}
+
+func TestPoolUsageErrors(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.json")
+	cases := [][]string{
+		{"pool"},
+		{"pool", "bogus"},
+		{"pool", "plan"},
+		{"pool", "up"},
+		{"pool", "up", "--plan", missing, "--url", "http://x", "--state", filepath.Join(dir, "s.json")},
+		{"pool", "status"},
+		{"pool", "status", "--state", missing, "--url", "http://x"},
+		{"pool", "down"},
+		{"pool", "down", "--state", missing, "--url", "http://x"},
+	}
+	for _, args := range cases {
+		if err := RunWithClient(context.Background(), args, http.DefaultClient); err == nil {
+			t.Fatalf("expected error for %v", args)
+		}
+	}
+}
+
+func TestPoolJSONOutputsAndErrorBranches(t *testing.T) {
+	dbPath := seedPoolStore(t)
+	dir := t.TempDir()
+
+	// plan --json prints and matches by preset id and model ref too.
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "plan", "--model", "preset_test", "--db", dbPath, "--json",
+	}, http.DefaultClient); err != nil {
+		t.Fatalf("pool plan --json: %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "plan", "--model", "qwen2.5-9b-instruct", "--db", dbPath,
+	}, http.DefaultClient); err != nil {
+		t.Fatalf("pool plan by model ref: %v", err)
+	}
+	// plan with an unreadable store path fails loudly.
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "plan", "--model", "chandra", "--db", filepath.Join(dir, "missing-dir", "x.db"),
+	}, http.DefaultClient); err == nil {
+		t.Fatalf("expected store open error")
+	}
+
+	// Bad plan/state payloads fail with decode errors.
+	badJSON := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(badJSON, []byte("{"), 0o644); err != nil {
+		t.Fatalf("write bad json: %v", err)
+	}
+	if _, err := loadPoolPlan(badJSON); err == nil || !strings.Contains(err.Error(), "decode pool plan") {
+		t.Fatalf("bad plan error = %v", err)
+	}
+	if _, err := loadPoolState(badJSON); err == nil || !strings.Contains(err.Error(), "decode pool state") {
+		t.Fatalf("bad state error = %v", err)
+	}
+	empty := filepath.Join(dir, "empty.json")
+	if err := os.WriteFile(empty, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write empty plan: %v", err)
+	}
+	if _, err := loadPoolPlan(empty); err == nil || !strings.Contains(err.Error(), "no model") {
+		t.Fatalf("empty plan error = %v", err)
+	}
+}
+
+func TestPoolUpJSONAndAdmitFailures(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+	dir := t.TempDir()
+	planPath := writePoolPlanFile(t, dir, smallPoolPlan())
+	statePath := filepath.Join(dir, "pool.json")
+	err := RunWithClient(context.Background(), []string{
+		"pool", "up", "--plan", planPath, "--url", failing.URL, "--state", statePath, "--run-id", "runf", "--json",
+	}, failing.Client())
+	if err == nil || !strings.Contains(err.Error(), "held no workers") {
+		t.Fatalf("expected admit failures, got %v", err)
+	}
+	state, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	for _, worker := range state.Workers {
+		if worker.Status != "admit_error" || worker.Error == "" {
+			t.Fatalf("worker should record admit error: %+v", worker)
+		}
+	}
+}
+
+func TestPoolStatusAndDownJSONAndServerErrors(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "pool.json")
+	seed := poolState{Name: "ocr", Model: "chandra", Workers: []poolWorker{
+		{WorkloadID: "w1", NodeID: "node_4090a", LeaseID: "lease-w1", Status: string(domain.JobRunning)},
+		{WorkloadID: "w2", NodeID: "node_spark", Status: string(domain.JobQueued), Queued: true},
+	}}
+	if err := writePrettyJSONFile(statePath, seed); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	// status --json against a failing peer records per-worker errors but succeeds.
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "status", "--state", statePath, "--url", failing.URL, "--json",
+	}, failing.Client()); err != nil {
+		t.Fatalf("pool status with failing peer: %v", err)
+	}
+	state, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	for _, worker := range state.Workers {
+		if worker.Error == "" {
+			t.Fatalf("status should record fetch error: %+v", worker)
+		}
+	}
+
+	// down --json against a failing peer returns joined release errors.
+	if err := writePrettyJSONFile(statePath, seed); err != nil {
+		t.Fatalf("reseed state: %v", err)
+	}
+	err = RunWithClient(context.Background(), []string{
+		"pool", "down", "--state", statePath, "--url", failing.URL, "--json",
+	}, failing.Client())
+	if err == nil || !strings.Contains(err.Error(), "w1") || !strings.Contains(err.Error(), "w2") {
+		t.Fatalf("down should join release errors, got %v", err)
+	}
+}
