@@ -334,21 +334,16 @@ func (r *Router) ExecutePlacedProvider(ctx context.Context, req translate.Ingres
 		End:             upstreamEnd,
 		LoadWallClockMS: loadMS,
 	})
-	if err != nil {
-		if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
-			return RouteResponse{}, errors.Join(err, failErr)
-		}
-		return RouteResponse{}, err
-	}
-	promptTokens, completionTokens := usageFromBody(body)
-	if err := recorder.emitMetric(ctx, metric, domain.TelemetryPhaseComplete, len(route.Body), len(body), promptTokens, completionTokens); err != nil {
-		if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
-			return RouteResponse{}, errors.Join(err, failErr)
-		}
-		return RouteResponse{}, err
-	}
 	if contentType != "" {
 		headers.Set("Content-Type", contentType)
+	}
+	if err != nil {
+		writeTelemetryWarning(headers, err)
+	} else {
+		promptTokens, completionTokens := usageFromBody(body)
+		if err := recorder.emitMetric(ctx, metric, domain.TelemetryPhaseComplete, len(route.Body), len(body), promptTokens, completionTokens); err != nil {
+			writeTelemetryWarning(headers, err)
+		}
 	}
 	writeRouteDiagnostics(headers, routeDiagnosticsFor(req, preset, profile, cold, loadMS, 0, durationMS(upstreamStart, upstreamEnd)))
 	writeDecisionHeaders(headers, decision, inst, profile, attempt)
@@ -621,25 +616,20 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			End:             upstreamEnd,
 			LoadWallClockMS: loadMS,
 		})
-		if err != nil {
-			if failErr := r.failPlacedJob(ctx, nil, job, placedPreset, inst, lease, err); failErr != nil {
-				return RouteResponse{}, errors.Join(err, failErr)
-			}
-			return RouteResponse{}, err
-		}
-		promptTokens, completionTokens := usageFromBody(body)
-		if err := recorder.emitMetric(ctx, metric, domain.TelemetryPhaseComplete, len(route.Body), len(body), promptTokens, completionTokens); err != nil {
-			if failErr := r.failPlacedJob(ctx, nil, job, placedPreset, inst, lease, err); failErr != nil {
-				return RouteResponse{}, errors.Join(err, failErr)
-			}
-			return RouteResponse{}, err
-		}
 		if err := r.finishJob(ctx, job, lease, nil); err != nil {
 			return RouteResponse{}, err
 		}
 		headers := cloneHeader(resp.Header)
 		if contentType != "" {
 			headers.Set("Content-Type", contentType)
+		}
+		if err != nil {
+			writeTelemetryWarning(headers, err)
+		} else {
+			promptTokens, completionTokens := usageFromBody(body)
+			if err := recorder.emitMetric(ctx, metric, domain.TelemetryPhaseComplete, len(route.Body), len(body), promptTokens, completionTokens); err != nil {
+				writeTelemetryWarning(headers, err)
+			}
 		}
 		writeRouteDiagnostics(headers, routeDiagnosticsFor(req, placedPreset, placedProfile, cold, loadMS, 0, durationMS(upstreamStart, upstreamEnd)))
 		writeDecisionHeaders(headers, decision, inst, placedProfile, attempt)
@@ -1774,14 +1764,21 @@ func (r *Router) recordMetric(ctx context.Context, job domain.Job, preset domain
 	if r.MemorySampler != nil {
 		peak, err := r.MemorySampler.PeakMemoryMB(ctx, inst.NodeID, inst.ID)
 		if err != nil {
-			return domain.RunMetric{}, err
+			return metric, err
 		}
 		metric.PeakVRAMMB = peak
 	}
 	if err := r.recordMetricValue(ctx, metric); err != nil {
-		return domain.RunMetric{}, err
+		return metric, err
 	}
 	return metric, nil
+}
+
+func writeTelemetryWarning(headers http.Header, err error) {
+	if headers == nil || err == nil {
+		return
+	}
+	headers.Set(HeaderTelemetryWarning, "completion_telemetry_failed")
 }
 
 func (r *Router) reactiveRequeuePreset(job domain.Job, preset domain.Preset, cause error) (domain.Preset, bool) {
