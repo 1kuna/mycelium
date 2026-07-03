@@ -191,7 +191,7 @@ func backendMismatch(preset domain.Preset, node domain.Node) string {
 // simulateReplicas adds hypothetical replicas one at a time against the real
 // allocator until the node cannot safely hold another.
 func simulateReplicas(alloc Allocator, node domain.Node, preset domain.Preset, claim domain.Claim, instances []domain.ModelInstance, cap int) (int, string, string) {
-	simulated := append([]domain.ModelInstance(nil), instances...)
+	simulated := capacityActiveInstances(instances)
 	count := 0
 	for cap <= 0 || count < cap {
 		accSet, ok := firstFittingAcceleratorSet(alloc, node, simulated, claim)
@@ -213,6 +213,17 @@ func simulateReplicas(alloc Allocator, node domain.Node, preset domain.Preset, c
 			"no accelerator set fits another replica under max_util and the oom-severity margin; free capacity or lower the context/concurrency envelope"
 	}
 	return count, "", ""
+}
+
+func capacityActiveInstances(instances []domain.ModelInstance) []domain.ModelInstance {
+	active := make([]domain.ModelInstance, 0, len(instances))
+	for _, inst := range instances {
+		if inst.State == domain.InstError {
+			continue
+		}
+		active = append(active, inst)
+	}
+	return active
 }
 
 // firstFittingAcceleratorSet walks accelerator subsets smallest-first so
