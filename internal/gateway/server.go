@@ -121,6 +121,16 @@ func parseRequestWithControlHeaders(r *http.Request, trustControlHeaders bool) (
 	}
 	req.WorkloadID = r.Header.Get(HeaderWorkload)
 	req.LeaseID = r.Header.Get(HeaderLease)
+	if raw := r.Header.Get(HeaderLeaseHold); raw != "" {
+		hold, err := strconv.ParseBool(raw)
+		if err != nil {
+			return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "invalid X-Myc-Lease-Hold"}
+		}
+		if hold && (req.WorkloadID == "" || req.LeaseID == "") {
+			return translate.IngressRequest{}, &routeError{status: http.StatusBadRequest, msg: "X-Myc-Lease-Hold requires X-Myc-Workload and X-Myc-Lease"}
+		}
+		req.HoldLease = hold
+	}
 	if !trustControlHeaders {
 		return req, nil
 	}

@@ -4310,3 +4310,114 @@ func openAIChatBody(text string) string {
 func openAICompletionBody(text string) string {
 	return `{"id":"cmpl-test","model":"qwen2.5-9b-instruct","choices":[{"index":0,"text":"` + text + `","finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`
 }
+
+func TestRouterRouteHoldsWorkloadLeaseForReuse(t *testing.T) {
+	preset := fixtures.MakePreset()
+	served := 0
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("held route ok")))
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	node := fixtures.MakeNode(fixtures.WithNodeID(inst.NodeID))
+	agent := mocks.NewNodeAgent(node)
+	router := newTestRouter(preset, domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{inst},
+	}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
+	store := &gatewayRuntimeStore{}
+	lease := domain.Lease{ID: "lease-held", JobID: "workload-held", NodeID: inst.NodeID, InstanceID: inst.ID}
+	job := domain.Job{
+		ID:      "workload-held",
+		Model:   preset.ModelRef,
+		Project: "project-a",
+		Status:  domain.JobRunning,
+		Result: &domain.JobResult{
+			Decision: domain.PlacementDecision{JobID: "workload-held", Action: domain.ActionWarmInstance, NodeID: inst.NodeID, InstanceID: inst.ID, Preset: preset},
+			Instance: inst,
+			LeaseID:  lease.ID,
+			NodeID:   inst.NodeID,
+			PresetID: preset.ID,
+		},
+	}
+	store.jobs = []domain.Job{job}
+	store.leases = []domain.Lease{lease}
+	router.Runtime = &scheduler.Service{Placer: router.Placer, Fleet: router.Fleet, Nodes: router.Nodes, Store: store, Queue: scheduler.NewQueue(router.Clock), Clock: router.Clock}
+
+	makeReq := func() translate.IngressRequest {
+		req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+		if err != nil {
+			t.Fatalf("ParseOpenAIChat: %v", err)
+		}
+		req.Project = "project-a"
+		req.WorkloadID = job.ID
+		req.LeaseID = lease.ID
+		req.HoldLease = true
+		return req
+	}
+
+	// Two consecutive requests must both ride the held lease: the workload
+	// stays running and the lease is never deleted.
+	for attempt := 1; attempt <= 2; attempt++ {
+		resp, err := router.Route(context.Background(), makeReq())
+		if err != nil {
+			t.Fatalf("Route attempt %d with held lease: %v", attempt, err)
+		}
+		if resp.Status != http.StatusOK || !strings.Contains(string(resp.Body), "held route ok") {
+			t.Fatalf("attempt %d resp = %+v body=%s", attempt, resp, resp.Body)
+		}
+		if resp.Header.Get(HeaderLeaseHold) != "true" {
+			t.Fatalf("attempt %d missing %s response header", attempt, HeaderLeaseHold)
+		}
+	}
+	if served != 2 {
+		t.Fatalf("upstream served %d, want 2", served)
+	}
+	if store.sawJobStatus(domain.JobDone) {
+		t.Fatalf("held workload must not be finished: jobs=%+v", store.jobs)
+	}
+	if len(store.deletedLeases) != 0 {
+		t.Fatalf("held lease must not be deleted: %+v", store.deletedLeases)
+	}
+	if strings.Join(agent.Calls, ",") != "begin:inst_test,end:inst_test,begin:inst_test,end:inst_test" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+}
+
+func TestParseRequestParsesLeaseHoldHeader(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+
+	held := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	held.Header.Set(HeaderWorkload, "workload-a")
+	held.Header.Set(HeaderLease, "lease-a")
+	held.Header.Set(HeaderLeaseHold, "true")
+	got, err := parseRequestWithControlHeaders(held, false)
+	if err != nil || !got.HoldLease {
+		t.Fatalf("hold parse = %+v %v", got, err)
+	}
+
+	explicitOff := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	explicitOff.Header.Set(HeaderWorkload, "workload-a")
+	explicitOff.Header.Set(HeaderLease, "lease-a")
+	explicitOff.Header.Set(HeaderLeaseHold, "false")
+	got, err = parseRequestWithControlHeaders(explicitOff, false)
+	if err != nil || got.HoldLease {
+		t.Fatalf("explicit false parse = %+v %v", got, err)
+	}
+
+	invalid := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	invalid.Header.Set(HeaderWorkload, "workload-a")
+	invalid.Header.Set(HeaderLease, "lease-a")
+	invalid.Header.Set(HeaderLeaseHold, "maybe")
+	if _, err := parseRequestWithControlHeaders(invalid, false); err == nil || !strings.Contains(err.Error(), "Lease-Hold") {
+		t.Fatalf("invalid hold err = %v", err)
+	}
+
+	missingLease := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	missingLease.Header.Set(HeaderLeaseHold, "true")
+	if _, err := parseRequestWithControlHeaders(missingLease, false); err == nil || !strings.Contains(err.Error(), "requires X-Myc-Workload") {
+		t.Fatalf("hold without lease err = %v", err)
+	}
+}

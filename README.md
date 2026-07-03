@@ -743,9 +743,29 @@ worker and bounds each admission with `--admit-timeout` (default 15m) so a
 stuck admission fails loudly as `admit_error` instead of hanging. Workers whose
 admission never reached the daemon are classified `not_admitted` by
 `pool status`/`pool down` instead of failing cleanup. `pool down` finishes or cancels every worker to release the
-reservations. External consumers then point their OpenAI-compatible base URL at
-any peer's gateway; requests batch across the warm pool and shed to re-planning
-when a replica's admission envelope is full.
+reservations.
+
+A held worker's lease reserves its instance's admission envelope, so normal
+gateway admission will refuse that capacity (`concurrency envelope is full`) —
+held capacity is consumed through the leased path, not normal admission.
+Header-aware clients send `X-Myc-Workload`, `X-Myc-Lease`, and
+`X-Myc-Lease-Hold: true`; with the hold header the gateway serves the request
+on the reserved lease and keeps the workload running for reuse instead of
+finishing it (the header-less leased call remains single-shot and
+auto-releases). For header-unaware OpenAI-compatible consumers (an OCR CLI,
+any tool with only a base-URL setting), run the bridge:
+
+```bash
+myce pool proxy --state /tmp/pool-state.json --url <gateway-url> \
+  --gateway-token-env MYCELIUM_GATEWAY_TOKEN --listen 127.0.0.1:8600
+```
+
+Point the consumer's base URL at `http://127.0.0.1:8600/v1`. The proxy rotates
+requests across held workers, injects the lease headers, overrides any
+caller-supplied Mycelium headers, and fails over to the next held worker when
+a lease is refused. Leased gateway execution is non-streaming; batch consumers
+should disable streaming. Release everything with `myce pool down` when the
+run finishes.
 
 For partial consumer batches, preserve one `preflight.json` or response-header
 set per failed or timed-out row. `debug job --preflight --owner-telemetry`

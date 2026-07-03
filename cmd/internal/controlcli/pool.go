@@ -31,7 +31,7 @@ import (
 
 func runPool(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce pool <plan|up|status|down>")
+		return fmt.Errorf("usage: myce pool <plan|up|status|proxy|down>")
 	}
 	if client == nil {
 		client = http.DefaultClient
@@ -43,10 +43,12 @@ func runPool(ctx context.Context, args []string, client *http.Client) error {
 		return runPoolUp(ctx, args[1:], client)
 	case "status":
 		return runPoolStatus(ctx, args[1:], client)
+	case "proxy":
+		return runPoolProxy(ctx, args[1:], client)
 	case "down":
 		return runPoolDown(ctx, args[1:], client)
 	default:
-		return fmt.Errorf("usage: myce pool <plan|up|status|down>")
+		return fmt.Errorf("usage: myce pool <plan|up|status|proxy|down>")
 	}
 }
 
