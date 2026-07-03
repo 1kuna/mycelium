@@ -32,6 +32,8 @@ type IngressRequest struct {
 	ConversationKey string
 	Handling        domain.HandlingClass
 	Submitter       string
+	WorkloadID      string
+	LeaseID         string
 	Body            []byte
 	OpenAI          api.OpenAIChatRequest
 	Complete        api.OpenAICompletionRequest

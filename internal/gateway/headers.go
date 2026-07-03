@@ -25,6 +25,8 @@ const (
 	HeaderConversation = "X-Myc-Conversation"
 	HeaderHandling     = "X-Myc-Handling"
 	HeaderSubmitter    = "X-Myc-Submitter"
+	HeaderWorkload     = "X-Myc-Workload"
+	HeaderLease        = "X-Myc-Lease"
 
 	HeaderColdLoad                = "X-Myc-Cold-Load"
 	HeaderLoadWallMS              = "X-Myc-Load-Wall-Ms"

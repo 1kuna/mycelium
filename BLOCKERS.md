@@ -94,14 +94,16 @@ handoff.
   write a secret-free allocation plan and runner env file so external tools can
   consume the decision mechanically, and `--verify-plan` fails before launch if
   the plan is stale or the current live allocation no longer satisfies the saved
-  worker count. The allocation report is still not a held lease or reservation:
-  the workload lane can hold owner leases, but ordinary synchronous gateway
-  requests cannot yet consume one of those leases. The remaining product work is
-  to add a gateway lease-use protocol for external runners, add a larger
-  envelope on the second owner, add a document/page chunking contract, or route
-  these external workers through the explicit workload lane before high-context
-  document work can automatically use both owners with capacity held ahead of
-  launch.
+  worker count. The allocation report is still not itself a held lease or
+  reservation. When an external runner needs held capacity, it can admit a
+  workload first, then send a non-streaming gateway request with
+  `X-Myc-Workload` and `X-Myc-Lease`; the gateway validates the running
+  workload, active lease, project/model/context envelope, visible instance, and
+  then routes through the reserved owner before finishing/releasing the lease.
+  The remaining product work is to make multi-worker/batch lease acquisition
+  less manual, add a larger envelope on the second owner where feasible, add a
+  document/page chunking contract, and cover streaming leased execution if a
+  consumer needs it.
 - 2026-07-02: Placement drop reasons can now be saved as durable
   reconciliation task records through `myce reconcile placement --save` and
   inspected with `myce reconcile status`. The workload RPC now also persists

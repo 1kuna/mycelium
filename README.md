@@ -283,9 +283,23 @@ myce gateway allocate --verify-plan /tmp/mycelium-allocation/allocation-plan.jso
 Verification exits non-zero when the plan is expired, the live catalog no
 longer satisfies it, or the current allocation no longer covers the planned
 worker count. The allocation report is not a held lease or reservation.
-Consumers that need Mycelium to hold queued work should use the explicit
-workload lane; a later sync gateway request cannot yet consume a workload-held
-lease.
+Consumers that need Mycelium to hold capacity should use the explicit workload
+lane. After a workload is admitted and running with an active lease, a
+non-streaming OpenAI-compatible gateway request can present the held capacity
+with:
+
+```text
+X-Myc-Workload: <workload-id>
+X-Myc-Lease: <lease-id>
+```
+
+The gateway validates that the workload is still running, the lease is still
+active, the project/model/context envelope matches, and the reserved instance
+is visible. A valid request routes through the reserved owner/envelope and
+finishes/releases the workload lease when the provider response completes.
+Stale, mismatched, expired, released, or terminal workload leases fail loudly
+instead of falling back to best-effort placement. Streaming leased gateway
+execution remains a separate product gate.
 
 Consumers may send `X-Myc-Context-Cap` with gateway requests to declare the
 context envelope actually required by a chunk or job. Mycelium treats that as a
@@ -680,7 +694,12 @@ automatic provider-output capture path is explicit and non-streaming:
 `myce jobs drain --execute` requires a registry-replayable executable payload,
 uses the same gateway/provider request semantics, stores a redacted result
 manifest plus private result body, and finishes/releases the workload through
-the scheduler. Streaming queued replay remains a separate product gate.
+the scheduler. A separate non-streaming leased gateway request can consume a
+running workload lease by sending `X-Myc-Workload` and `X-Myc-Lease`; this is
+for external runners that already have a workload-held reservation and need the
+ordinary OpenAI-compatible gateway path to use that reserved owner. Streaming
+queued replay and streaming leased gateway execution remain separate product
+gates.
 Run `make smoke-workload-executor` before live fleet pressure work when you need
 a local operator canary for this path. It uses a loopback peer, a fake
 OpenAI-compatible provider, `myce jobs admit --payload-kind`, `myce jobs drain

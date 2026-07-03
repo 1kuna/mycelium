@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -426,6 +427,407 @@ func TestRouterExecutePlacedProviderFailsOnTranslatedResponseLoss(t *testing.T) 
 	if strings.Join(agent.Calls, ",") != "begin:inst_test,end:inst_test" {
 		t.Fatalf("agent calls = %+v", agent.Calls)
 	}
+}
+
+func TestRouterRouteUsesPresentedWorkloadLease(t *testing.T) {
+	preset := fixtures.MakePreset()
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("leased route ok")))
+	}))
+	inst := fixtures.MakeInstance()
+	inst.Addr = upstream
+	node := fixtures.MakeNode(fixtures.WithNodeID(inst.NodeID))
+	agent := mocks.NewNodeAgent(node)
+	router := newTestRouter(preset, domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{inst},
+	}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
+	store := &gatewayRuntimeStore{}
+	lease := domain.Lease{ID: "lease-workload", JobID: "workload-a", NodeID: inst.NodeID, InstanceID: inst.ID}
+	job := domain.Job{
+		ID:             "workload-a",
+		Model:          preset.ModelRef,
+		Project:        "project-a",
+		ContextRequest: 2048,
+		Status:         domain.JobRunning,
+		Result: &domain.JobResult{
+			Decision: domain.PlacementDecision{JobID: "workload-a", Action: domain.ActionWarmInstance, NodeID: inst.NodeID, InstanceID: inst.ID, Preset: preset},
+			Instance: inst,
+			LeaseID:  lease.ID,
+			NodeID:   inst.NodeID,
+			PresetID: preset.ID,
+		},
+	}
+	store.jobs = []domain.Job{job}
+	store.leases = []domain.Lease{lease}
+	router.Runtime = &scheduler.Service{Placer: router.Placer, Fleet: router.Fleet, Nodes: router.Nodes, Store: store, Queue: scheduler.NewQueue(router.Clock), Clock: router.Clock}
+
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.Project = "project-a"
+	req.ContextRequest = 1024
+	req.WorkloadID = job.ID
+	req.LeaseID = lease.ID
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route with workload lease: %v", err)
+	}
+	if resp.Status != http.StatusOK || !strings.Contains(string(resp.Body), "leased route ok") {
+		t.Fatalf("resp = %+v body=%s", resp, resp.Body)
+	}
+	if resp.Header.Get(HeaderJob) != job.ID || resp.Header.Get(HeaderNode) != inst.NodeID {
+		t.Fatalf("headers = %+v", resp.Header)
+	}
+	if !store.sawJobStatus(domain.JobDone) || len(store.deletedLeases) != 1 || store.deletedLeases[0] != lease.ID {
+		t.Fatalf("jobs=%+v deleted=%+v", store.jobs, store.deletedLeases)
+	}
+	if strings.Join(agent.Calls, ",") != "begin:inst_test,end:inst_test" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+}
+
+func TestRouterRouteRejectsInvalidPresentedWorkloadLease(t *testing.T) {
+	preset := fixtures.MakePreset()
+	inst := fixtures.MakeInstance()
+	lease := domain.Lease{ID: "lease-workload", JobID: "workload-a", NodeID: inst.NodeID, InstanceID: inst.ID}
+	baseJob := domain.Job{
+		ID:             "workload-a",
+		Model:          preset.ModelRef,
+		Project:        "project-a",
+		ContextRequest: 2048,
+		Status:         domain.JobRunning,
+		Result: &domain.JobResult{
+			Decision: domain.PlacementDecision{JobID: "workload-a", Action: domain.ActionWarmInstance, NodeID: inst.NodeID, InstanceID: inst.ID, Preset: preset},
+			Instance: inst,
+			LeaseID:  lease.ID,
+			NodeID:   inst.NodeID,
+			PresetID: preset.ID,
+		},
+	}
+	for _, tc := range []struct {
+		name   string
+		job    domain.Job
+		leases []domain.Lease
+		req    func(translate.IngressRequest) translate.IngressRequest
+		status int
+		want   string
+	}{
+		{
+			name:   "project mismatch",
+			job:    baseJob,
+			leases: []domain.Lease{lease},
+			req: func(req translate.IngressRequest) translate.IngressRequest {
+				req.Project = "project-b"
+				return req
+			},
+			status: http.StatusForbidden,
+			want:   "different project",
+		},
+		{
+			name:   "context mismatch",
+			job:    baseJob,
+			leases: []domain.Lease{lease},
+			req: func(req translate.IngressRequest) translate.IngressRequest {
+				req.Project = "project-a"
+				req.ContextRequest = 4096
+				return req
+			},
+			status: http.StatusConflict,
+			want:   "context envelope",
+		},
+		{
+			name:   "released lease",
+			job:    baseJob,
+			leases: nil,
+			req: func(req translate.IngressRequest) translate.IngressRequest {
+				req.Project = "project-a"
+				return req
+			},
+			status: http.StatusConflict,
+			want:   "not active",
+		},
+		{
+			name: "expired lease",
+			job:  baseJob,
+			leases: []domain.Lease{{
+				ID:         lease.ID,
+				JobID:      lease.JobID,
+				NodeID:     lease.NodeID,
+				InstanceID: lease.InstanceID,
+				ExpiresAt:  routerTestNow().Add(-time.Second),
+			}},
+			req: func(req translate.IngressRequest) translate.IngressRequest {
+				req.Project = "project-a"
+				return req
+			},
+			status: http.StatusGone,
+			want:   "expired",
+		},
+		{
+			name: "terminal job",
+			job: func() domain.Job {
+				job := baseJob
+				job.Result = cloneJobResult(baseJob.Result)
+				job.Result.Terminal = true
+				return job
+			}(),
+			leases: []domain.Lease{lease},
+			req: func(req translate.IngressRequest) translate.IngressRequest {
+				req.Project = "project-a"
+				return req
+			},
+			status: http.StatusConflict,
+			want:   "already terminal",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+			store := &gatewayRuntimeStore{jobs: []domain.Job{tc.job}, leases: tc.leases}
+			router.Runtime = &scheduler.Service{Placer: router.Placer, Fleet: router.Fleet, Nodes: router.Nodes, Store: store, Queue: scheduler.NewQueue(router.Clock), Clock: router.Clock}
+			req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+			if err != nil {
+				t.Fatalf("ParseOpenAIChat: %v", err)
+			}
+			req.WorkloadID = tc.job.ID
+			req.LeaseID = lease.ID
+			req.ContextRequest = 1024
+			req = tc.req(req)
+			_, err = router.Route(context.Background(), req)
+			var statusErr interface{ StatusCode() int }
+			if err == nil || !errors.As(err, &statusErr) || statusErr.StatusCode() != tc.status || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v status=%v", err, statusErr)
+			}
+		})
+	}
+}
+
+func TestRouterResolveWorkloadLeaseValidationEdges(t *testing.T) {
+	preset := fixtures.MakePreset()
+	inst := fixtures.MakeInstance()
+	lease := domain.Lease{ID: "lease-workload", JobID: "workload-a", NodeID: inst.NodeID, InstanceID: inst.ID}
+	baseJob := domain.Job{
+		ID:             "workload-a",
+		Model:          preset.ModelRef,
+		Project:        "project-a",
+		ContextRequest: 2048,
+		Status:         domain.JobRunning,
+		Result: &domain.JobResult{
+			Decision: domain.PlacementDecision{JobID: "workload-a", Action: domain.ActionWarmInstance, NodeID: inst.NodeID, InstanceID: inst.ID, Preset: preset},
+			LeaseID:  lease.ID,
+			NodeID:   inst.NodeID,
+			PresetID: preset.ID,
+		},
+	}
+	baseReq, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	baseReq.Project = "project-a"
+	baseReq.WorkloadID = baseJob.ID
+	baseReq.LeaseID = lease.ID
+	baseReq.ContextRequest = 1024
+
+	for _, tc := range []struct {
+		name     string
+		mutate   func(*Router, *gatewayRuntimeStore, *domain.Job, *translate.IngressRequest)
+		want     string
+		status   int
+		wantInst bool
+	}{
+		{
+			name: "missing lease id",
+			mutate: func(_ *Router, _ *gatewayRuntimeStore, _ *domain.Job, req *translate.IngressRequest) {
+				req.LeaseID = ""
+			},
+			want:   "both X-Myc-Workload",
+			status: http.StatusBadRequest,
+		},
+		{
+			name: "streaming unsupported",
+			mutate: func(_ *Router, _ *gatewayRuntimeStore, _ *domain.Job, req *translate.IngressRequest) {
+				req.Stream = true
+			},
+			want:   "does not support streaming",
+			status: http.StatusBadRequest,
+		},
+		{
+			name: "missing runtime",
+			mutate: func(router *Router, _ *gatewayRuntimeStore, _ *domain.Job, _ *translate.IngressRequest) {
+				router.Runtime = nil
+			},
+			want:   "requires a configured runtime store",
+			status: http.StatusConflict,
+		},
+		{
+			name: "missing job",
+			mutate: func(_ *Router, store *gatewayRuntimeStore, job *domain.Job, _ *translate.IngressRequest) {
+				job.ID = ""
+				store.jobs = nil
+			},
+			want:   "was not found",
+			status: http.StatusNotFound,
+		},
+		{
+			name: "job not running",
+			mutate: func(_ *Router, _ *gatewayRuntimeStore, job *domain.Job, _ *translate.IngressRequest) {
+				job.Status = domain.JobQueued
+			},
+			want:   "not running",
+			status: http.StatusConflict,
+		},
+		{
+			name: "no result",
+			mutate: func(_ *Router, _ *gatewayRuntimeStore, job *domain.Job, _ *translate.IngressRequest) {
+				job.Result = nil
+			},
+			want:   "no active lease",
+			status: http.StatusConflict,
+		},
+		{
+			name: "model mismatch",
+			mutate: func(_ *Router, _ *gatewayRuntimeStore, _ *domain.Job, req *translate.IngressRequest) {
+				req.Model = "other-model"
+			},
+			want:   "not reserved for model",
+			status: http.StatusConflict,
+		},
+		{
+			name: "store lease read failure",
+			mutate: func(_ *Router, store *gatewayRuntimeStore, _ *domain.Job, _ *translate.IngressRequest) {
+				store.listLeasesErr = errors.New("list failed")
+			},
+			want: "list failed",
+		},
+		{
+			name: "lease belongs to different job",
+			mutate: func(_ *Router, store *gatewayRuntimeStore, _ *domain.Job, _ *translate.IngressRequest) {
+				store.leases = []domain.Lease{{ID: lease.ID, JobID: "other-job"}}
+			},
+			want:   "different workload",
+			status: http.StatusConflict,
+		},
+		{
+			name: "instance not visible",
+			mutate: func(router *Router, _ *gatewayRuntimeStore, _ *domain.Job, _ *translate.IngressRequest) {
+				router.Fleet = staticFleet{fleet: domain.FleetSnapshot{}}
+			},
+			want:   "not visible",
+			status: http.StatusConflict,
+		},
+		{
+			name: "fleet lookup fills instance",
+			mutate: func(_ *Router, _ *gatewayRuntimeStore, _ *domain.Job, _ *translate.IngressRequest) {
+			},
+			wantInst: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode()}, Instances: []domain.ModelInstance{inst}}, staticResolver{})
+			store := &gatewayRuntimeStore{leases: []domain.Lease{lease}}
+			router.Runtime = &scheduler.Service{Placer: router.Placer, Fleet: router.Fleet, Nodes: router.Nodes, Store: store, Queue: scheduler.NewQueue(router.Clock), Clock: router.Clock}
+			job := baseJob
+			if baseJob.Result != nil {
+				job.Result = cloneJobResult(baseJob.Result)
+			}
+			req := baseReq
+			if tc.mutate != nil {
+				tc.mutate(router, store, &job, &req)
+			}
+			if job.ID != "" {
+				store.jobs = []domain.Job{job}
+			}
+			_, _, gotInst, _, err := router.resolveWorkloadLease(context.Background(), req)
+			if tc.wantInst {
+				if err != nil || gotInst.ID != inst.ID {
+					t.Fatalf("inst=%+v err=%v", gotInst, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			if tc.status != 0 {
+				var statusErr interface{ StatusCode() int }
+				if !errors.As(err, &statusErr) || statusErr.StatusCode() != tc.status {
+					t.Fatalf("status err = %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestRouterWorkloadLeaseHelperBranches(t *testing.T) {
+	preset := fixtures.MakePreset()
+	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
+	job := domain.Job{
+		ID:       "workload-a",
+		Model:    "alias-model",
+		PresetID: preset.ID,
+		Result: &domain.JobResult{
+			PresetID: preset.ID,
+		},
+	}
+	if !router.requestCanUseWorkloadPreset("alias-model", job) {
+		t.Fatal("job model should match request model")
+	}
+	if !router.requestCanUseWorkloadPreset(preset.ID, job) {
+		t.Fatal("preset id should match request model")
+	}
+	job.Model = "other"
+	preset.Aliases = []string{"shared-alias"}
+	router.Presets = NewPresetRegistry(preset)
+	if !router.requestCanUseWorkloadPreset("shared-alias", job) {
+		t.Fatal("shared alias should match reserved preset id")
+	}
+	if router.requestCanUseWorkloadPreset("", job) {
+		t.Fatal("empty model matched")
+	}
+	if got := nonEmptyAction("", domain.ActionWarmInstance); got != domain.ActionWarmInstance {
+		t.Fatalf("nonEmptyAction = %q", got)
+	}
+	if got := nonEmptyAction(""); got != "" {
+		t.Fatalf("empty nonEmptyAction = %q", got)
+	}
+	if got := firstString("", "value"); got != "value" {
+		t.Fatalf("firstString = %q", got)
+	}
+	if got := firstString(""); got != "" {
+		t.Fatalf("empty firstString = %q", got)
+	}
+	if got := router.projectForRequest(translate.IngressRequest{Project: "explicit"}); got != "explicit" {
+		t.Fatalf("explicit project = %q", got)
+	}
+	router.DefaultProject = "default"
+	if got := router.projectForRequest(translate.IngressRequest{}); got != "default" {
+		t.Fatalf("default project = %q", got)
+	}
+}
+
+func TestWriteGatewayRouteErrorPreservesLeasedStatus(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeGatewayRouteError(rec, leasedRouteError{status: http.StatusGone, msg: "lease expired"})
+	if rec.Code != http.StatusGone || !strings.Contains(rec.Body.String(), "lease expired") {
+		t.Fatalf("status/body = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func cloneJobResult(result *domain.JobResult) *domain.JobResult {
+	if result == nil {
+		return nil
+	}
+	clone := *result
+	return &clone
+}
+
+func routerTestNow() time.Time {
+	return time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
 }
 
 func TestRouterPassesThroughVLLMStructuredOutputControls(t *testing.T) {
@@ -3312,12 +3714,17 @@ func TestParseRequestAcceptsContextEnvelopeWithoutTrustingControlHeaders(t *test
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set(HeaderContextCap, "16384")
 	req.Header.Set(HeaderPriority, "warp")
+	req.Header.Set(HeaderWorkload, "workload-a")
+	req.Header.Set(HeaderLease, "lease-a")
 	got, err := parseRequestWithControlHeaders(req, false)
 	if err != nil {
 		t.Fatalf("parse untrusted context header: %v", err)
 	}
 	if got.ContextRequest != 16384 {
 		t.Fatalf("context request = %d, want 16384", got.ContextRequest)
+	}
+	if got.WorkloadID != "workload-a" || got.LeaseID != "lease-a" {
+		t.Fatalf("lease headers = %q %q", got.WorkloadID, got.LeaseID)
 	}
 	if got.Priority != "" {
 		t.Fatalf("untrusted priority parsed: %+v", got)
@@ -3783,11 +4190,21 @@ type gatewayRuntimeStore struct {
 	leases         []domain.Lease
 	jobs           []domain.Job
 	deleteLeaseErr error
+	listLeasesErr  error
 }
 
 func (s *gatewayRuntimeStore) SaveJob(_ context.Context, job domain.Job) error {
 	s.jobs = append(s.jobs, job)
 	return nil
+}
+
+func (s *gatewayRuntimeStore) Job(_ context.Context, id string) (domain.Job, error) {
+	for i := len(s.jobs) - 1; i >= 0; i-- {
+		if s.jobs[i].ID == id {
+			return s.jobs[i], nil
+		}
+	}
+	return domain.Job{}, sql.ErrNoRows
 }
 
 func (s *gatewayRuntimeStore) SaveLease(_ context.Context, lease domain.Lease) error {
@@ -3796,6 +4213,9 @@ func (s *gatewayRuntimeStore) SaveLease(_ context.Context, lease domain.Lease) e
 }
 
 func (s *gatewayRuntimeStore) ListLeases(context.Context) ([]domain.Lease, error) {
+	if s.listLeasesErr != nil {
+		return nil, s.listLeasesErr
+	}
 	return append([]domain.Lease(nil), s.leases...), nil
 }
 
