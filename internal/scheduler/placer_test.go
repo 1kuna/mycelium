@@ -664,3 +664,59 @@ func assertTraceContains(t *testing.T, trace []domain.TraceStep, step string, te
 	}
 	t.Fatalf("trace missing %s containing %q: %+v", step, text, trace)
 }
+
+func TestPlaceForceNewInstanceSkipsWarmReuseAndCoResides(t *testing.T) {
+	preset := fixtures.MakePreset()
+	warm := fixtures.MakeInstance(fixtures.WithInstanceID("inst_warm"), fixtures.WithInstancePreset(preset.ID))
+	fleet := domain.FleetSnapshot{
+		Nodes:     []domain.Node{fixtures.MakeNode()},
+		Instances: []domain.ModelInstance{warm},
+	}
+	placer := NewPlacer(&mocks.ResourceEstimator{Claim: fixtures.MakeClaim(1, 1)}, lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	// Throughput + ForceNewInstance: the warm short-circuit is skipped and a
+	// NEW replica cold-loads on the SAME occupied node (normal filtering, not
+	// latency/dedicated), which is what autoscale prewarm relies on.
+	job := fixtures.MakeJob(func(j *domain.Job) { j.ForceNewInstance = true })
+	decision, err := placer.Place(context.Background(), job, fleet)
+	if err != nil {
+		t.Fatalf("Place force-new: %v", err)
+	}
+	if decision.Action != domain.ActionLoadedNew || decision.NodeID != fleet.Nodes[0].ID {
+		t.Fatalf("force-new decision = %+v, want loaded_new on occupied node", decision)
+	}
+	if decision.InstanceID == "inst_warm" {
+		t.Fatalf("force-new must not reuse the warm instance: %+v", decision)
+	}
+}
+
+func TestPlaceForceNewInstanceSkipsAutoWarmFallback(t *testing.T) {
+	// One node whose remaining capacity fits only the existing warm instance:
+	// auto would normally fall back to warm reuse after cold no-fit, but the
+	// force-new intent must skip that fallback and queue instead.
+	preset := fixtures.MakePreset(fixtures.WithWeights(900), fixtures.WithKVPerToken(0))
+	node := fixtures.MakeNode(fixtures.WithVRAM(1000), fixtures.WithMaxUtil(1))
+	warm := fixtures.MakeInstance(
+		fixtures.WithInstanceID("inst_warm"),
+		fixtures.WithInstancePreset(preset.ID),
+		fixtures.OnNode(node.ID),
+		fixtures.WithClaim(fixtures.MakeClaim(900, 0)),
+	)
+	fleet := domain.FleetSnapshot{Nodes: []domain.Node{node}, Instances: []domain.ModelInstance{warm}}
+	placer := NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)
+
+	auto := fixtures.MakeJob(func(j *domain.Job) {
+		j.SpeedPref = domain.SpeedAuto
+		j.ForceNewInstance = true
+	})
+	decision, err := placer.Place(context.Background(), auto, fleet)
+	if err != nil {
+		t.Fatalf("Place auto force-new: %v", err)
+	}
+	if decision.Action == domain.ActionWarmInstance {
+		t.Fatalf("auto force-new fell back to warm reuse: %+v", decision)
+	}
+	if decision.Action != domain.ActionQueued {
+		t.Fatalf("auto force-new should queue when nothing new fits: %+v", decision)
+	}
+}
