@@ -735,7 +735,14 @@ runtime, preset context cap below the requested workload context, or
 insufficient safe capacity. `pool up` launches the planned replicas through
 normal workload admission and holds the owner leases so the capacity stays
 reserved; catastrophic-OOM nodes flag `serial_cold_loads` and are launched one
-at a time. `pool down` finishes or cancels every worker to release the
+at a time. It writes every planned worker into the state file as `pending`
+BEFORE the first admission and rewrites the file after each worker, so a
+killed or interrupted run always leaves cleanup-capable state for `pool down`.
+Cold loads legitimately take minutes; `pool up` prints one progress line per
+worker and bounds each admission with `--admit-timeout` (default 15m) so a
+stuck admission fails loudly as `admit_error` instead of hanging. Workers whose
+admission never reached the daemon are classified `not_admitted` by
+`pool status`/`pool down` instead of failing cleanup. `pool down` finishes or cancels every worker to release the
 reservations. External consumers then point their OpenAI-compatible base URL at
 any peer's gateway; requests batch across the warm pool and shed to re-planning
 when a replica's admission envelope is full.
