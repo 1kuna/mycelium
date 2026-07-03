@@ -208,7 +208,7 @@ func (p *Placer) placePresetScored(ctx context.Context, job domain.Job, preset d
 		trace[0].Result = fmt.Sprintf("weights=%dMB kv=%dMB @ctx%d x%d", claim.WeightsMB, claim.KVReservedMB, contextLen, concurrency)
 	}
 
-	if effectiveSpeed(job.SpeedPref) == domain.SpeedThroughput {
+	if effectiveSpeed(job.SpeedPref) == domain.SpeedThroughput && !job.ForceNewInstance {
 		if warm, ok, err := p.selectWarmInstance(ctx, job, preset, contextLen, concurrency, fleet); err != nil {
 			return domain.PlacementDecision{JobID: job.ID, SpeedPrefApplied: job.SpeedPref, Trace: append(trace, domain.TraceStep{
 				Step:   "estimate",
@@ -247,7 +247,7 @@ func (p *Placer) placePresetScored(ctx context.Context, job domain.Job, preset d
 		}, winner.score, nil
 	}
 
-	if effectiveSpeed(job.SpeedPref) == domain.SpeedAuto {
+	if effectiveSpeed(job.SpeedPref) == domain.SpeedAuto && !job.ForceNewInstance {
 		if warm, ok, err := p.selectWarmInstance(ctx, job, preset, contextLen, concurrency, fleet); err != nil {
 			return domain.PlacementDecision{JobID: job.ID, SpeedPrefApplied: job.SpeedPref, Trace: append(trace, domain.TraceStep{
 				Step:   "estimate",

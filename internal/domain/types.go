@@ -122,6 +122,7 @@ type ModelInstance struct {
 	InFlight              int                   `json:"in_flight"`
 	Priority              Priority              `json:"priority"`
 	Loading               bool                  `json:"loading"`
+	Origin                string                `json:"origin,omitempty"`
 	EngineProfileID       string                `json:"engine_profile_id,omitempty"`
 	EngineReadiness       EngineReadinessStatus `json:"engine_readiness,omitempty"`
 	EngineReadinessReason string                `json:"engine_readiness_reason,omitempty"`
@@ -139,16 +140,20 @@ type Job struct {
 	SpeedPref           SpeedPref         `json:"speed_pref"`
 	ContextRequest      int               `json:"context_request,omitempty"`
 	ExpectedConcurrency int               `json:"expected_concurrency,omitempty"`
-	Preemption          Preemption        `json:"preemption"`
-	Handling            HandlingClass     `json:"handling,omitempty"`
-	Streaming           bool              `json:"streaming"`
-	DeadlineMS          int               `json:"deadline_ms,omitempty"`
-	ParentID            string            `json:"parent_id,omitempty"`
-	Benchmark           *BenchmarkSpec    `json:"benchmark,omitempty"`
-	Status              JobStatus         `json:"status"`
-	Progress            []JobProgress     `json:"progress,omitempty"`
-	Error               string            `json:"error,omitempty"`
-	Result              *JobResult        `json:"result,omitempty"`
+	// ForceNewInstance skips warm-instance reuse during placement so the job
+	// provably loads a new replica (autoscale prewarm); candidate filtering
+	// stays normal, so the new replica may co-reside on an occupied unit.
+	ForceNewInstance bool           `json:"force_new_instance,omitempty"`
+	Preemption       Preemption     `json:"preemption"`
+	Handling         HandlingClass  `json:"handling,omitempty"`
+	Streaming        bool           `json:"streaming"`
+	DeadlineMS       int            `json:"deadline_ms,omitempty"`
+	ParentID         string         `json:"parent_id,omitempty"`
+	Benchmark        *BenchmarkSpec `json:"benchmark,omitempty"`
+	Status           JobStatus      `json:"status"`
+	Progress         []JobProgress  `json:"progress,omitempty"`
+	Error            string         `json:"error,omitempty"`
+	Result           *JobResult     `json:"result,omitempty"`
 }
 
 type BenchmarkSpec struct {

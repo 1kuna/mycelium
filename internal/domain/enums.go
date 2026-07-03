@@ -101,6 +101,8 @@ const (
 	InstError    InstanceState = "error"
 )
 
+const InstanceOriginAutoscale = "autoscale"
+
 type EngineReadinessMode string
 
 const (
