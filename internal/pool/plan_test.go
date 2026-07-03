@@ -183,6 +183,32 @@ func TestBuildPlanCountsExistingReplicasAndReducedFit(t *testing.T) {
 	}
 }
 
+func TestBuildPlanIgnoresErrorInstancesForCapacity(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision"
+		p.Aliases = []string{"vision"}
+		p.NodeID = "node_spark"
+		p.ContextLength = 49152
+		p.EstWeightsMB = 1000
+		p.KVPerTokenMB = 0
+	})
+	fleet := domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeSparkNode()}}
+	staleClaim := domain.Claim{WeightsMB: 56000}
+	fleet.Instances = []domain.ModelInstance{
+		{ID: "inst_error_a", PresetID: preset.ID, NodeID: "node_spark", AcceleratorSet: []int{0}, Claim: staleClaim, State: domain.InstError},
+		{ID: "inst_error_b", PresetID: preset.ID, NodeID: "node_spark", AcceleratorSet: []int{0}, Claim: staleClaim, State: domain.InstError},
+	}
+
+	plan := buildTestPlan(t, []domain.Preset{preset}, fleet, Options{ContextLength: 49152, MaxTotal: 1})
+	spark := nodePlan(t, plan, "node_spark")
+	if spark.Existing != 0 {
+		t.Fatalf("error instances counted as existing replicas: %+v", spark)
+	}
+	if spark.Additional != 1 {
+		t.Fatalf("error instances consumed capacity: %+v", spark)
+	}
+}
+
 func TestBuildPlanUsesContextAndConcurrencyOverrides(t *testing.T) {
 	_, fleet := planFixtures()
 	// The preset must actually support the requested context (see the
