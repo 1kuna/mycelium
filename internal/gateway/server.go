@@ -31,7 +31,7 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
-		s.writeModels(w)
+		s.writeModels(w, auth.project)
 		return
 	}
 	trustControlHeaders := s.TrustControlHeaders
@@ -70,7 +70,7 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(resp.Body)
 }
 
-func (s Server) writeModels(w http.ResponseWriter) {
+func (s Server) writeModels(w http.ResponseWriter, project string) {
 	type model struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`
@@ -86,6 +86,9 @@ func (s Server) writeModels(w http.ResponseWriter) {
 		out.Data = append(out.Data, model{ID: id, Object: "model", OwnedBy: "mycelium"})
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if project != "" {
+		w.Header().Set(HeaderProject, project)
+	}
 	_ = json.NewEncoder(w).Encode(out)
 }
 

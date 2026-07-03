@@ -208,6 +208,104 @@ func TestResolvePoolProxyToken(t *testing.T) {
 	}
 }
 
+func TestPreflightPoolProxyGatewayAuth(t *testing.T) {
+	cases := []struct {
+		name            string
+		bearer          string
+		poolProject     string
+		status          int
+		reportedProject string
+		wantErr         string
+	}{
+		{
+			name:        "missing token",
+			poolProject: "project-a",
+			status:      http.StatusOK,
+			wantErr:     "requires a gateway token",
+		},
+		{
+			name:        "invalid token",
+			bearer:      "bad-token",
+			poolProject: "project-a",
+			status:      http.StatusUnauthorized,
+			wantErr:     "returned 401",
+		},
+		{
+			name:        "missing project echo",
+			bearer:      "valid-token",
+			poolProject: "project-a",
+			status:      http.StatusOK,
+			wantErr:     "did not report X-Myc-Project",
+		},
+		{
+			name:            "project mismatch",
+			bearer:          "valid-token",
+			poolProject:     "project-a",
+			status:          http.StatusOK,
+			reportedProject: "project-b",
+			wantErr:         "project mismatch",
+		},
+		{
+			name:            "valid project token",
+			bearer:          "valid-token",
+			poolProject:     "project-a",
+			status:          http.StatusOK,
+			reportedProject: "project-a",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/models" {
+					t.Fatalf("path = %s", r.URL.Path)
+				}
+				if tc.bearer != "" && r.Header.Get("Authorization") != "Bearer "+tc.bearer {
+					t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+				}
+				if tc.reportedProject != "" {
+					w.Header().Set(gateway.HeaderProject, tc.reportedProject)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+			}))
+			defer srv.Close()
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("parse target: %v", err)
+			}
+			err = preflightPoolProxyGateway(context.Background(), srv.Client(), target, tc.bearer, tc.poolProject)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("preflight returned %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("preflight error = %v want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestPoolProxyModelsURL(t *testing.T) {
+	cases := map[string]string{
+		"http://gateway":             "http://gateway/v1/models",
+		"http://gateway/":            "http://gateway/v1/models",
+		"http://gateway/v1":          "http://gateway/v1/models",
+		"http://gateway/custom/v1":   "http://gateway/custom/v1/models",
+		"http://gateway/custom/base": "http://gateway/custom/base/v1/models",
+	}
+	for raw, want := range cases {
+		target, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		if got := poolProxyModelsURL(target); got != want {
+			t.Fatalf("models url for %s = %s want %s", raw, got, want)
+		}
+	}
+}
+
 func TestRunPoolProxyValidation(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "pool.json")
@@ -228,6 +326,17 @@ func TestRunPoolProxyValidation(t *testing.T) {
 		if err := RunWithClient(context.Background(), args, http.DefaultClient); err == nil {
 			t.Fatalf("expected error for %v", args)
 		}
+	}
+
+	heldPath := filepath.Join(dir, "held.json")
+	held := poolState{Name: "ocr", Model: "chandra", Project: "project-a", Workers: []poolWorker{
+		{WorkloadID: "w1", NodeID: "node_a", Status: string(domain.JobRunning), InstanceID: "inst-1", LeaseID: "lease-1"},
+	}}
+	if err := writePrettyJSONFile(heldPath, held); err != nil {
+		t.Fatalf("seed held state: %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{"pool", "proxy", "--state", heldPath, "--url", "http://x"}, http.DefaultClient); err == nil || !strings.Contains(err.Error(), "requires a gateway token") {
+		t.Fatalf("missing token error = %v", err)
 	}
 }
 

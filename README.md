@@ -766,9 +766,13 @@ myce pool proxy --state /tmp/pool-state.json --url <gateway-url> \
 Point the consumer's base URL at `http://127.0.0.1:8600/v1`. The proxy rotates
 requests across held workers, injects the lease headers, overrides any
 caller-supplied Mycelium headers, and fails over to the next held worker when
-a lease is refused. Leased gateway execution is non-streaming; batch consumers
-should disable streaming. Release everything with `myce pool down` when the
-run finishes.
+a lease is refused. Before it prints a usable base URL, the proxy verifies its
+gateway token with an authenticated `GET /v1/models` against the target
+gateway; project-scoped pool state must match the gateway's authenticated
+`X-Myc-Project` echo. Use a token that is valid for the target gateway, not a
+peer-local token from another config. Leased gateway execution is
+non-streaming; batch consumers should disable streaming. Release everything
+with `myce pool down` when the run finishes.
 
 For partial consumer batches, preserve one `preflight.json` or response-header
 set per failed or timed-out row. `debug job --preflight --owner-telemetry`

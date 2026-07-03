@@ -100,11 +100,13 @@ handoff.
   planning selects fitting owner envelopes, pool up admits workload workers and
   now waits for queued cold-load workers to become held running leases before a
   successful return, and the local proxy injects the lease headers for
-  header-unaware OpenAI-compatible tools. The gateway validates the running
-  workload, active lease, project/model/context envelope, visible instance, and
-  then routes through the reserved owner while `X-Myc-Lease-Hold` keeps the
-  pool lease reusable until `pool down` releases it. The remaining product work
-  is to make multi-worker/batch pool sizing adaptive across more workload
+  header-unaware OpenAI-compatible tools. The proxy validates its gateway token
+  with the target gateway before serving and refuses project-scoped pool state
+  when the gateway does not echo the same project. The gateway validates the
+  running workload, active lease, project/model/context envelope, visible
+  instance, and then routes through the reserved owner while
+  `X-Myc-Lease-Hold` keeps the pool lease reusable until `pool down` releases
+  it. The remaining product work is to make multi-worker/batch pool sizing adaptive across more workload
   shapes, add a larger envelope on the second owner where feasible, add a
   document/page chunking contract, and cover streaming leased execution if a
   consumer needs it.
