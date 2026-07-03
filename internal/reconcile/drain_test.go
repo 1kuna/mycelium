@@ -174,6 +174,103 @@ func TestDrainAllowedTasksPlansArtifactStaging(t *testing.T) {
 	}
 }
 
+func TestDrainAllowedTasksExecutesArtifactStagingThroughStager(t *testing.T) {
+	stager := &fakeArtifactStager{locality: domain.ModelLocality{
+		ID:             "node-a:preset-a",
+		PresetID:       "preset-a",
+		NodeID:         "node-a",
+		State:          domain.ModelLocalityReady,
+		ModelRef:       "/catalog/models/model-a.gguf",
+		Source:         "model-a",
+		ArtifactSizeMB: 123,
+		Managed:        true,
+	}}
+	store := &fakeTaskStore{
+		tasks:   []domain.ReconciliationTaskRecord{taskRecord("allowed-stage", string(TaskStageModelArtifact), domain.ReconciliationTaskAllowed)},
+		presets: map[string]domain.Preset{"preset-a": {ID: "preset-a", ModelRef: "model-a", ArtifactSizeMB: 123}},
+		nodes:   map[string]domain.Node{"node-a": {ID: "node-a", Address: "http://node-a.test"}},
+	}
+	now := time.Unix(55, 0).UTC()
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{
+		Now:                     now,
+		ArtifactStager:          stager,
+		KeepStageDemandEligible: true,
+	})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Drained != 1 || report.Results[0].Status != domain.ReconciliationTaskAllowed || report.Results[0].Action != "stage_model_artifact" {
+		t.Fatalf("report = %+v", report)
+	}
+	if len(stager.calls) != 1 || stager.calls[0].peer.ID != "node-a" || stager.calls[0].preset.ID != "preset-a" {
+		t.Fatalf("stager calls = %+v", stager.calls)
+	}
+	eligible := store.taskByID("allowed-stage")
+	if eligible.Status != domain.ReconciliationTaskAllowed || len(eligible.Events) != 2 || !strings.Contains(eligible.Events[1].Message, "demand remains eligible") {
+		t.Fatalf("eligible task = %+v", eligible)
+	}
+	if len(store.localityPlans) != 1 || store.localityPlans[0].Actions[0].State != domain.ModelLocalityReady {
+		t.Fatalf("locality plans = %+v", store.localityPlans)
+	}
+	if len(store.localities) != 1 || store.localities[0].State != domain.ModelLocalityReady {
+		t.Fatalf("localities = %+v", store.localities)
+	}
+}
+
+func TestDrainAllowedTasksRefusesStageOnDiskFloorEvidence(t *testing.T) {
+	stager := &fakeArtifactStager{}
+	task := taskRecord("disk-stage", string(TaskStageModelArtifact), domain.ReconciliationTaskAllowed)
+	task.Reason = "disk.free_after_model"
+	store := &fakeTaskStore{
+		tasks:   []domain.ReconciliationTaskRecord{task},
+		presets: map[string]domain.Preset{"preset-a": {ID: "preset-a", ModelRef: "model-a", ArtifactSizeMB: 123}},
+		nodes:   map[string]domain.Node{"node-a": {ID: "node-a", Address: "http://node-a.test"}},
+	}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{
+		Now:            time.Unix(56, 0).UTC(),
+		ArtifactStager: stager,
+	})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Results[0].Status != domain.ReconciliationTaskFailed || !strings.Contains(report.Results[0].Error, "disk floor") {
+		t.Fatalf("report = %+v", report)
+	}
+	if len(stager.calls) != 0 {
+		t.Fatalf("disk-floor refusal called stager: %+v", stager.calls)
+	}
+	if failed := store.taskByID("disk-stage"); failed.Status != domain.ReconciliationTaskFailed || !strings.Contains(failed.Error, "disk.free_after_model") {
+		t.Fatalf("failed task = %+v", failed)
+	}
+}
+
+func TestDrainAllowedTasksFailsArtifactStageActionFailure(t *testing.T) {
+	store := &fakeTaskStore{
+		tasks:   []domain.ReconciliationTaskRecord{taskRecord("allowed-stage", string(TaskStageModelArtifact), domain.ReconciliationTaskAllowed)},
+		presets: map[string]domain.Preset{"preset-a": {ID: "preset-a", ModelRef: "model-a", ArtifactSizeMB: 123}},
+		nodes:   map[string]domain.Node{"node-a": {ID: "node-a", Address: "http://node-a.test"}},
+	}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{
+		Now:            time.Unix(57, 0).UTC(),
+		ArtifactStager: &fakeArtifactStager{err: errors.New("transfer failed")},
+	})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Results[0].Status != domain.ReconciliationTaskFailed || report.Results[0].Error != "transfer failed" {
+		t.Fatalf("report = %+v", report)
+	}
+	if len(store.localityPlans) != 1 || store.localityPlans[0].Actions[0].State != domain.ModelLocalityFailed {
+		t.Fatalf("failed plan = %+v", store.localityPlans)
+	}
+	if len(store.localities) != 1 || store.localities[0].State != domain.ModelLocalityFailed || store.localities[0].Reason != "transfer failed" {
+		t.Fatalf("failed locality = %+v", store.localities)
+	}
+}
+
 func TestDrainAllowedTasksFailsStageWithoutPreset(t *testing.T) {
 	store := &fakeTaskStore{
 		tasks: []domain.ReconciliationTaskRecord{taskRecord("allowed-stage", string(TaskStageModelArtifact), domain.ReconciliationTaskAllowed)},
@@ -380,6 +477,25 @@ type fakeCatalogRefresher struct {
 func (r *fakeCatalogRefresher) RefreshCatalog(_ context.Context, task domain.ReconciliationTaskRecord) error {
 	r.tasks = append(r.tasks, task)
 	return r.err
+}
+
+type fakeArtifactStager struct {
+	calls    []fakeArtifactStageCall
+	locality domain.ModelLocality
+	err      error
+}
+
+type fakeArtifactStageCall struct {
+	peer   domain.Peer
+	preset domain.Preset
+}
+
+func (s *fakeArtifactStager) StageModel(_ context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error) {
+	s.calls = append(s.calls, fakeArtifactStageCall{peer: peer, preset: preset})
+	if s.err != nil {
+		return domain.ModelLocality{}, s.err
+	}
+	return s.locality, nil
 }
 
 func taskRecord(id, kind string, status domain.ReconciliationTaskStatus) domain.ReconciliationTaskRecord {

@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +18,7 @@ import (
 	"mycelium/internal/modelruntime"
 	"mycelium/internal/pool"
 	"mycelium/internal/ports"
+	"mycelium/internal/reconcile"
 	"mycelium/internal/scheduler"
 )
 
@@ -40,6 +45,7 @@ type autoScaler struct {
 	Policy    domain.AutonomyPolicy
 	Presets   map[string]domain.Preset
 	Project   string
+	Stager    reconcile.ArtifactStager
 
 	failures map[autoScaleKey]autoScaleFailure
 }
@@ -64,13 +70,14 @@ type autoScaleDemandGroup struct {
 
 type autoScaleReport struct {
 	DemandTasks int
+	Staged      int
 	Planned     int
 	Scaled      int
 	Refused     int
 	Failed      int
 }
 
-func startAutoScaler(ctx context.Context, runtime *scheduler.Service, store autoScaleStore, fleet scheduler.FleetSource, estimator ports.ResourceEstimator, alloc pool.Allocator, policy domain.AutonomyPolicy, clk ports.Clock, interval time.Duration, presets map[string]domain.Preset, project string) {
+func startAutoScaler(ctx context.Context, runtime *scheduler.Service, store autoScaleStore, fleet scheduler.FleetSource, estimator ports.ResourceEstimator, alloc pool.Allocator, policy domain.AutonomyPolicy, clk ports.Clock, interval time.Duration, presets map[string]domain.Preset, project string, rpcToken string) {
 	if !policy.AutoScale || runtime == nil || store == nil || fleet == nil || estimator == nil || alloc == nil || clk == nil {
 		return
 	}
@@ -87,6 +94,7 @@ func startAutoScaler(ctx context.Context, runtime *scheduler.Service, store auto
 		Policy:    policy,
 		Presets:   presets,
 		Project:   firstNonEmpty(project, "autoscale"),
+		Stager:    peerCatalogStageClient{AuthToken: rpcToken},
 		failures:  map[autoScaleKey]autoScaleFailure{},
 	}
 	go func() {
@@ -121,6 +129,22 @@ func (s *autoScaler) Tick(ctx context.Context) (autoScaleReport, error) {
 	if len(open) == 0 {
 		return report, nil
 	}
+	if s.Policy.AutoStage {
+		staged, failed, err := s.stageArtifactDemand(ctx, open)
+		report.Staged += staged
+		report.Failed += failed
+		if err != nil {
+			return report, err
+		}
+		if staged > 0 || failed > 0 {
+			return report, nil
+		}
+	} else {
+		open = withoutStageArtifactDemand(open)
+		if len(open) == 0 {
+			return report, nil
+		}
+	}
 	groups := s.groupDemand(open)
 	fleet, err := s.Fleet.Snapshot(ctx)
 	if err != nil {
@@ -137,6 +161,83 @@ func (s *autoScaler) Tick(ctx context.Context) (autoScaleReport, error) {
 		}
 	}
 	return report, nil
+}
+
+func (s *autoScaler) stageArtifactDemand(ctx context.Context, tasks []domain.ReconciliationTaskRecord) (int, int, error) {
+	stageTasks := stageArtifactDemand(tasks)
+	if len(stageTasks) == 0 {
+		return 0, 0, nil
+	}
+	if s.Stager == nil {
+		return 0, len(stageTasks), s.closeTasks(ctx, stageTasks, domain.ReconciliationTaskFailed, "autoscale auto_stage requires a catalog artifact stager", "autoscale artifact staging failed: stager unavailable", "autoscale_stage_unavailable")
+	}
+	taskStore, ok := s.Store.(reconcile.TaskStore)
+	if !ok {
+		return 0, len(stageTasks), s.closeTasks(ctx, stageTasks, domain.ReconciliationTaskFailed, "autoscale auto_stage requires a reconciliation task store", "autoscale artifact staging failed: task store unavailable", "autoscale_stage_unavailable")
+	}
+	report, err := reconcile.DrainAllowedTasks(ctx, taskStore, reconcile.DrainOptions{
+		Now:                     s.Clock.Now(),
+		ArtifactStager:          s.Stager,
+		KeepStageDemandEligible: true,
+		TaskIDs:                 taskIDs(stageTasks),
+		Kinds:                   []reconcile.TaskKind{reconcile.TaskStageModelArtifact},
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	staged := 0
+	failed := 0
+	for _, result := range report.Results {
+		switch result.Status {
+		case domain.ReconciliationTaskAllowed:
+			staged++
+			s.markPresetStaged(result.PresetID, result.NodeID)
+		case domain.ReconciliationTaskFailed:
+			failed++
+		}
+	}
+	return staged, failed, nil
+}
+
+func taskIDs(tasks []domain.ReconciliationTaskRecord) []string {
+	out := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		out = append(out, task.ID)
+	}
+	return out
+}
+
+func stageArtifactDemand(tasks []domain.ReconciliationTaskRecord) []domain.ReconciliationTaskRecord {
+	var out []domain.ReconciliationTaskRecord
+	for _, task := range tasks {
+		if reconcile.TaskKind(task.Kind) == reconcile.TaskStageModelArtifact {
+			out = append(out, task)
+		}
+	}
+	return out
+}
+
+func withoutStageArtifactDemand(tasks []domain.ReconciliationTaskRecord) []domain.ReconciliationTaskRecord {
+	out := tasks[:0]
+	for _, task := range tasks {
+		if reconcile.TaskKind(task.Kind) == reconcile.TaskStageModelArtifact {
+			continue
+		}
+		out = append(out, task)
+	}
+	return out
+}
+
+func (s *autoScaler) markPresetStaged(presetID, nodeID string) {
+	if presetID == "" || nodeID == "" {
+		return
+	}
+	preset, ok := s.Presets[presetID]
+	if !ok {
+		return
+	}
+	preset.NodeID = nodeID
+	s.Presets[presetID] = preset
 }
 
 func openAutoScaleDemand(tasks []domain.ReconciliationTaskRecord) []domain.ReconciliationTaskRecord {
@@ -535,6 +636,55 @@ func joinedRefusals(refusals map[string]string) string {
 		parts = append(parts, nodeID+": "+refusals[nodeID])
 	}
 	return strings.Join(parts, "; ")
+}
+
+type peerCatalogStageClient struct {
+	AuthToken string
+	Client    *http.Client
+}
+
+func (c peerCatalogStageClient) StageModel(ctx context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error) {
+	if len(peer.Addresses) == 0 {
+		return domain.ModelLocality{}, fmt.Errorf("peer %q has no reachable address", peer.ID)
+	}
+	body, err := json.Marshal(map[string]any{"preset": preset})
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(peer.Addresses[0], "/")+"/catalog/stage", bytes.NewReader(body))
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	client := c.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return domain.ModelLocality{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return domain.ModelLocality{}, fmt.Errorf("catalog stage %s: %s", peer.ID, strings.TrimSpace(string(data)))
+	}
+	var out struct {
+		Locality domain.ModelLocality `json:"locality"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return domain.ModelLocality{}, err
+	}
+	if out.Locality.ID == "" {
+		return domain.ModelLocality{}, fmt.Errorf("catalog stage %s returned no locality", peer.ID)
+	}
+	return out.Locality, nil
 }
 
 func firstAlias(aliases []string) string {
