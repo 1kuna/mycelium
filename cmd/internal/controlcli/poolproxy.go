@@ -111,6 +111,7 @@ func runPoolServe(ctx context.Context, args []string, client *http.Client) error
 	project := fs.String("project", "", "project label for pool workers; must match the consumer's project-scoped gateway token")
 	runID := fs.String("run-id", "", "explicit run id for worker job ids; defaults to a UTC timestamp")
 	admitTimeout := fs.Duration("admit-timeout", 15*time.Minute, "per-worker admission timeout; cold loads legitimately take minutes; 0 disables")
+	duration := fs.Duration("duration", 0, "optional serve window; 0 runs until interrupted")
 	listen := fs.String("listen", "127.0.0.1:0", "local address the proxy listens on")
 	token := fs.String("gateway-token", "", "gateway bearer token to attach to forwarded requests")
 	tokenEnv := fs.String("gateway-token-env", "", "environment variable holding the gateway bearer token")
@@ -199,11 +200,6 @@ func runPoolServe(ctx context.Context, args []string, client *http.Client) error
 	if err := runPoolUp(ctx, upArgs, client); err != nil {
 		return err
 	}
-	defer func() {
-		downCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		_ = runPoolDown(downCtx, []string{"--state", state, "--url", *peerURL, "--rpc-token", resolvedRPC, "--reason", "pool serve stopped"}, client)
-	}()
 	proxyArgs := []string{"--state", state, "--url", *peerURL, "--rpc-token", resolvedRPC, "--listen", *listen}
 	if *token != "" {
 		proxyArgs = append(proxyArgs, "--gateway-token", *token)
@@ -214,7 +210,20 @@ func runPoolServe(ctx context.Context, args []string, client *http.Client) error
 	if *tokenFile != "" {
 		proxyArgs = append(proxyArgs, "--gateway-token-file", *tokenFile)
 	}
-	return runPoolProxy(ctx, proxyArgs, client)
+	serveCtx := ctx
+	serveCancel := func() {}
+	if *duration > 0 {
+		serveCtx, serveCancel = context.WithTimeout(ctx, *duration)
+	}
+	proxyErr := runPoolProxy(serveCtx, proxyArgs, client)
+	serveCancel()
+	downCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	downErr := runPoolDown(downCtx, []string{"--state", state, "--url", *peerURL, "--rpc-token", resolvedRPC, "--reason", "pool serve stopped"}, client)
+	if proxyErr != nil {
+		return proxyErr
+	}
+	return downErr
 }
 
 func preflightPoolProxyGateway(ctx context.Context, client *http.Client, target *url.URL, bearer, project string) error {
