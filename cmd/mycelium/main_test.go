@@ -1267,6 +1267,9 @@ func TestServiceUtilityErrorBranches(t *testing.T) {
 	if _, err := servicePeerBaseURL("bad"); err == nil {
 		t.Fatal("bad service base URL accepted")
 	}
+	if _, _, err := fileSHA256(home); err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("directory digest err = %v", err)
+	}
 	spec.UnitPath = filepath.Join(home, "unit.plist")
 	if err := writeServiceFile(spec.UnitPath, spec.LogDir, "unit"); err != nil {
 		t.Fatalf("writeServiceFile: %v", err)

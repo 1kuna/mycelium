@@ -107,6 +107,7 @@ func TestReconcileDoesNotCreatePrewarmWhenServiceAlreadyHasRunningLease(t *testi
 		jobs: []domain.Job{{
 			ID:       "held-a",
 			ParentID: "svc-a",
+			PresetID: "preset-a",
 			Status:   domain.JobRunning,
 			Result:   &domain.JobResult{LeaseID: "lease-a"},
 		}},
@@ -122,6 +123,92 @@ func TestReconcileDoesNotCreatePrewarmWhenServiceAlreadyHasRunningLease(t *testi
 	}
 	if report.Created != 0 || len(store.tasks) != 0 {
 		t.Fatalf("report=%+v tasks=%+v", report, store.tasks)
+	}
+}
+
+func TestReconcileCreatesOnlyForMissingPresetReplicas(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(32, 0).UTC()
+	service := domain.ModelService{
+		ID:                 "svc-a",
+		Model:              "vision-model",
+		MinReplicas:        2,
+		MaxReplicas:        2,
+		CandidatePresetIDs: []string{"preset-b70", "preset-spark"},
+		Status:             domain.ModelServiceActive,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	failedB70Task := prewarmTaskForService(service, "preset-b70", now.Add(-time.Minute))
+	failedB70Task.Status = domain.ReconciliationTaskFailed
+	store := &fakeStore{
+		services: []domain.ModelService{service},
+		tasks:    []domain.ReconciliationTaskRecord{failedB70Task},
+		jobs: []domain.Job{{
+			ID:       "held-b70",
+			ParentID: "svc-a",
+			PresetID: "preset-b70",
+			Status:   domain.JobRunning,
+			Result:   &domain.JobResult{LeaseID: "lease-b70"},
+		}},
+		leases: []domain.Lease{{
+			ID:        "lease-b70",
+			JobID:     "held-b70",
+			ExpiresAt: now.Add(time.Minute),
+		}},
+	}
+
+	report, err := Reconcile(ctx, store, ReconcileOptions{Now: now})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if report.Created != 1 || len(store.tasks) != 2 {
+		t.Fatalf("report=%+v tasks=%+v", report, store.tasks)
+	}
+	created := store.tasks[1]
+	if created.PresetID != "preset-spark" || created.Status != domain.ReconciliationTaskAllowed {
+		t.Fatalf("created task = %+v", created)
+	}
+	if store.tasks[0].PresetID != "preset-b70" || store.tasks[0].Status != domain.ReconciliationTaskFailed {
+		t.Fatalf("b70 task should not be replaced: %+v", store.tasks[0])
+	}
+}
+
+func TestReconcileSkipsPresetWithInFlightServiceJob(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(34, 0).UTC()
+	service := domain.ModelService{
+		ID:                 "svc-a",
+		Model:              "vision-model",
+		MinReplicas:        1,
+		MaxReplicas:        1,
+		CandidatePresetIDs: []string{"preset-spark"},
+		Status:             domain.ModelServiceActive,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	failedTask := prewarmTaskForService(service, "preset-spark", now.Add(-time.Minute))
+	failedTask.Status = domain.ReconciliationTaskFailed
+	store := &fakeStore{
+		services: []domain.ModelService{service},
+		tasks:    []domain.ReconciliationTaskRecord{failedTask},
+		jobs: []domain.Job{{
+			ID:       "placing-spark",
+			ParentID: "svc-a",
+			PresetID: "preset-spark",
+			Status:   domain.JobPlacing,
+		}},
+	}
+
+	report, err := Reconcile(ctx, store, ReconcileOptions{Now: now})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if report.Created != 0 || len(store.tasks) != 1 {
+		t.Fatalf("report=%+v tasks=%+v", report, store.tasks)
+	}
+	if store.tasks[0].Status != domain.ReconciliationTaskFailed {
+		t.Fatalf("in-flight child should not replace terminal task: %+v", store.tasks[0])
 	}
 }
 
