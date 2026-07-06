@@ -2533,6 +2533,59 @@ func TestServiceDrainPreservesLocalQueuedPayloadEvidence(t *testing.T) {
 	}
 }
 
+func TestServiceDrainSkipsJobCanceledAfterQueueing(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(40, 15).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	store := &runtimeStore{}
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	if err := store.SaveJob(context.Background(), domain.Job{ID: job.ID, PresetID: preset.ID, Status: domain.JobFailed, Error: "canceled"}); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}, admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+	service.Queue.EnqueueWithPayload(job, []byte(`{"input_bytes":123}`))
+
+	results, err := service.Drain(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("canceled job was placed: %+v", results)
+	}
+	if len(store.leases) != 0 {
+		t.Fatalf("canceled job received leases: %+v", store.leases)
+	}
+	stored := store.jobs[job.ID]
+	if stored.Status != domain.JobFailed || stored.Error != "canceled" {
+		t.Fatalf("stored job = %+v", stored)
+	}
+}
+
+func TestRefreshRunnableDrainJobCompatibilityBranches(t *testing.T) {
+	service := &Service{Store: storeWithoutJobReader{}}
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
+	got, runnable := service.refreshRunnableDrainJob(context.Background(), job)
+	if !runnable || got.ID != job.ID {
+		t.Fatalf("without reader = %+v runnable=%v", got, runnable)
+	}
+	service.Store = &runtimeStore{}
+	got, runnable = service.refreshRunnableDrainJob(context.Background(), job)
+	if !runnable || got.ID != job.ID {
+		t.Fatalf("missing durable job = %+v runnable=%v", got, runnable)
+	}
+}
+
 func TestServiceSubmitWithPayloadQueueOnlyDefersPlacement(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(40, 20).UTC())
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))

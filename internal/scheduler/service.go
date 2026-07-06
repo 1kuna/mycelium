@@ -393,6 +393,11 @@ func (s *Service) Drain(ctx context.Context, limit int) ([]Result, error) {
 		if !ok {
 			return results, nil
 		}
+		latest, runnable := s.refreshRunnableDrainJob(ctx, job)
+		if !runnable {
+			continue
+		}
+		job = latest
 		var result Result
 		var submitErr error
 		if s.Coordinator != nil {
@@ -411,6 +416,21 @@ func (s *Service) Drain(ctx context.Context, limit int) ([]Result, error) {
 		results = append(results, result)
 	}
 	return results, nil
+}
+
+func (s *Service) refreshRunnableDrainJob(ctx context.Context, job domain.Job) (domain.Job, bool) {
+	reader, ok := s.Store.(JobReader)
+	if !ok || job.ID == "" {
+		return job, true
+	}
+	latest, err := reader.Job(ctx, job.ID)
+	if err != nil {
+		return job, true
+	}
+	if latest.Status != domain.JobQueued {
+		return latest, false
+	}
+	return latest, true
 }
 
 func (s *Service) dequeueRunnable(ctx context.Context) (domain.Job, []byte, bool, error) {
