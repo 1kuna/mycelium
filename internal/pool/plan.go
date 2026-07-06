@@ -119,6 +119,27 @@ func BuildPlan(ctx context.Context, estimator ports.ResourceEstimator, alloc All
 			return Plan{}, fmt.Errorf("estimate claim for preset %q on node %q: %w", preset.ID, node.ID, err)
 		}
 		nodePlan.ClaimPerReplica = claim
+		if warm := warmWorkerHeadroom(node.ID, preset.ID, fleet.Instances, concurrency); warm > 0 {
+			if opts.MaxPerNode > 0 && warm > opts.MaxPerNode {
+				warm = opts.MaxPerNode
+			}
+			if opts.MaxTotal > 0 && warm > remainingTotal {
+				warm = remainingTotal
+			}
+			nodePlan.Additional = warm
+			if opts.MaxTotal > 0 {
+				remainingTotal -= warm
+			}
+			plan.TotalAdditional += warm
+			plan.Nodes = append(plan.Nodes, nodePlan)
+			continue
+		}
+		if hasActivePresetInstance(node.ID, preset.ID, fleet.Instances) {
+			nodePlan.Refusal = "warm instance concurrency envelope is full"
+			nodePlan.SetupGap = "release held work, wait for in-flight requests to finish, or launch a distinct replica through an owner path that supports another warm instance"
+			plan.Nodes = append(plan.Nodes, nodePlan)
+			continue
+		}
 		cap := opts.MaxPerNode
 		if opts.MaxTotal > 0 && (cap <= 0 || remainingTotal < cap) {
 			cap = remainingTotal
@@ -224,6 +245,41 @@ func capacityActiveInstances(instances []domain.ModelInstance) []domain.ModelIns
 		active = append(active, inst)
 	}
 	return active
+}
+
+func warmWorkerHeadroom(nodeID, presetID string, instances []domain.ModelInstance, envelope int) int {
+	if envelope <= 0 {
+		envelope = 1
+	}
+	headroom := 0
+	for _, inst := range instances {
+		if inst.NodeID != nodeID || inst.PresetID != presetID {
+			continue
+		}
+		if inst.State == domain.InstLoading || inst.State == domain.InstStopping {
+			return 0
+		}
+		if inst.State != domain.InstReady {
+			continue
+		}
+		available := envelope - inst.InFlight
+		if available > 0 {
+			headroom += available
+		}
+	}
+	return headroom
+}
+
+func hasActivePresetInstance(nodeID, presetID string, instances []domain.ModelInstance) bool {
+	for _, inst := range instances {
+		if inst.NodeID != nodeID || inst.PresetID != presetID {
+			continue
+		}
+		if inst.State == domain.InstReady || inst.State == domain.InstLoading {
+			return true
+		}
+	}
+	return false
 }
 
 // firstFittingAcceleratorSet walks accelerator subsets smallest-first so
