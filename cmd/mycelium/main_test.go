@@ -6627,10 +6627,19 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 	if err := queueStore.SaveLease(context.Background(), domain.Lease{ID: "expired", ExpiresAt: time.Unix(-1, 0).UTC()}); err != nil {
 		t.Fatalf("SaveLease: %v", err)
 	}
+	if err := queueStore.SaveJob(context.Background(), domain.Job{ID: "terminal-owner-job", Status: domain.JobFailed}); err != nil {
+		t.Fatalf("SaveJob terminal: %v", err)
+	}
+	if err := queueStore.SaveInstance(context.Background(), domain.ModelInstance{ID: "inst-owner", NodeID: "node-owner"}); err != nil {
+		t.Fatalf("SaveInstance owner: %v", err)
+	}
+	ownerLease := domain.Lease{ID: "lease-owner-stale", JobID: "terminal-owner-job", NodeID: "node-owner", InstanceID: "inst-owner"}
+	ownerAdmission := &mocks.AdmissionController{LeaseForInstVal: ownerLease, LeaseForInstFound: true}
 	runtime := &scheduler.Service{
 		Placer: scheduler.NewPlacer(estimate.NewInMemory(), lease.NewAllocator(), clk),
 		Fleet:  gateway.NodeDirectory{Agents: map[string]ports.NodeAgent{}},
 		Nodes:  gateway.NodeDirectory{Agents: map[string]ports.NodeAgent{}},
+		Owners: workloadNodeResolver{admissions: map[string]ports.AdmissionController{"node-owner": ownerAdmission}},
 		Queue:  scheduler.NewQueue(clk),
 		Store:  queueStore,
 		Clock:  clk,
@@ -6639,7 +6648,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		leases, err := queueStore.ListLeases(context.Background())
-		return err == nil && len(leases) == 0
+		return err == nil && len(leases) == 0 && strings.Contains(strings.Join(ownerAdmission.Calls, ","), "release:"+ownerLease.ID)
 	})
 
 	reconcileStore := &workloadMemoryStore{

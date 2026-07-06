@@ -36,6 +36,10 @@ type JobReader interface {
 	Job(ctx context.Context, id string) (domain.Job, error)
 }
 
+type InstanceReader interface {
+	ListInstances(ctx context.Context) ([]domain.ModelInstance, error)
+}
+
 type JobLog interface {
 	PutJob(ctx context.Context, job domain.Job, payload []byte) error
 }
@@ -657,6 +661,61 @@ func (s *Service) ExpireLeases(ctx context.Context) (int, error) {
 		expired++
 	}
 	return expired, nil
+}
+
+func (s *Service) ReconcileTerminalOwnerLeases(ctx context.Context) (int, error) {
+	if err := s.validate(); err != nil {
+		return 0, err
+	}
+	if s.Owners == nil {
+		return 0, nil
+	}
+	instanceReader, ok := s.Store.(InstanceReader)
+	if !ok {
+		return 0, nil
+	}
+	jobReader, ok := s.Store.(JobReader)
+	if !ok {
+		return 0, nil
+	}
+	instances, err := instanceReader.ListInstances(ctx)
+	if err != nil {
+		return 0, err
+	}
+	released := 0
+	for _, inst := range instances {
+		if inst.ID == "" || inst.NodeID == "" {
+			continue
+		}
+		owner, err := s.Owners.AdmissionController(inst.NodeID)
+		if err != nil {
+			return released, err
+		}
+		inspector, ok := owner.(ports.LeaseInspector)
+		if !ok {
+			continue
+		}
+		lease, found, err := inspector.LeaseForInstance(ctx, inst.ID)
+		if err != nil {
+			return released, err
+		}
+		if !found || lease.ID == "" || lease.JobID == "" {
+			continue
+		}
+		job, err := jobReader.Job(ctx, lease.JobID)
+		if err != nil || !terminalSchedulerJobStatus(job.Status) {
+			continue
+		}
+		if err := s.releaseOwnerLease(ctx, lease); err != nil {
+			return released, err
+		}
+		released++
+	}
+	return released, nil
+}
+
+func terminalSchedulerJobStatus(status domain.JobStatus) bool {
+	return status == domain.JobDone || status == domain.JobFailed || status == domain.JobPreempted
 }
 
 func (s *Service) validate() error {
