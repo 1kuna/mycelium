@@ -77,14 +77,15 @@ func TestPoolPlanFailsWithoutMatchingPreset(t *testing.T) {
 }
 
 type poolPeerServer struct {
-	mu         sync.Mutex
-	admits     []workload.AdmissionRequest
-	finishes   []string
-	cancels    []string
-	statuses   []string
-	authSeen   []string
-	queueAll   bool
-	stayQueued bool
+	mu          sync.Mutex
+	admits      []workload.AdmissionRequest
+	finishes    []string
+	cancels     []string
+	statuses    []string
+	authSeen    []string
+	queueAll    bool
+	stayQueued  bool
+	rejectAfter int
 }
 
 func (s *poolPeerServer) handler(t *testing.T) http.Handler {
@@ -100,6 +101,10 @@ func (s *poolPeerServer) handler(t *testing.T) http.Handler {
 		}
 		s.admits = append(s.admits, req)
 		job := req.Job
+		if s.rejectAfter > 0 && len(s.admits) > s.rejectAfter {
+			http.Error(w, `{"error":"warm instance concurrency envelope is full"}`, http.StatusConflict)
+			return
+		}
 		resp := workload.AdmissionResponse{Job: job}
 		if s.queueAll {
 			job.Status = domain.JobQueued
@@ -285,6 +290,35 @@ func TestPoolUpReportsWhenNothingHeld(t *testing.T) {
 		if !worker.Queued || worker.Error == "" {
 			t.Fatalf("worker should be queued: %+v", worker)
 		}
+	}
+}
+
+func TestPoolUpReportsPartialHeldPool(t *testing.T) {
+	server := &poolPeerServer{rejectAfter: 1}
+	ts := httptest.NewServer(server.handler(t))
+	defer ts.Close()
+	dir := t.TempDir()
+	planPath := writePoolPlanFile(t, dir, pool.Plan{
+		Model:           "chandra",
+		Concurrency:     1,
+		TotalAdditional: 2,
+		Nodes:           []pool.NodePlan{{NodeID: "node_spark", PresetID: "preset_test", ContextLength: 49152, Additional: 2}},
+	})
+	statePath := filepath.Join(dir, "pool.json")
+
+	err := RunWithClient(context.Background(), []string{
+		"pool", "up", "--plan", planPath, "--url", ts.URL, "--state", statePath,
+		"--run-id", "runpartial", "--admit-timeout", "1s",
+	}, ts.Client())
+	if err == nil || !strings.Contains(err.Error(), "held 1/2 workers") {
+		t.Fatalf("expected partial-held error, got %v", err)
+	}
+	state, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("state must still be written: %v", err)
+	}
+	if len(state.Workers) != 2 || !poolWorkerHeld(state.Workers[0]) || state.Workers[1].Status != "admit_error" || !strings.Contains(state.Workers[1].Error, "warm instance concurrency envelope is full") {
+		t.Fatalf("partial state = %+v", state.Workers)
 	}
 }
 
