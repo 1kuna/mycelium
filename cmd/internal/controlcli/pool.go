@@ -64,6 +64,9 @@ func runPoolPlan(ctx context.Context, args []string) error {
 	maxPerNode := fs.Int("max-per-node", 0, "cap additional replicas per node; 0 means no cap")
 	maxTotal := fs.Int("max-total", 0, "cap additional replicas across the fleet; 0 means no cap")
 	outPath := fs.String("out", "", "write the plan JSON to this file")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token for live snapshot refresh")
+	var peerURLs repeatedString
+	fs.Var(&peerURLs, "peer-url", "compute peer URL to snapshot before planning; may be repeated")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -88,6 +91,12 @@ func runPoolPlan(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(peerURLs) > 0 {
+		nodes, instances, err = overlayPoolSnapshots(ctx, http.DefaultClient, nodes, instances, peerURLs, *rpcToken)
+		if err != nil {
+			return err
+		}
+	}
 	plan, err := pool.BuildPlan(ctx, estimate.NewBackendAware(estimate.NewInMemory(), estimate.NewInMemory()), lease.NewAllocator(), *model, presets, domain.FleetSnapshot{Nodes: nodes, Instances: instances}, pool.Options{
 		ContextLength: *contextLen,
 		Concurrency:   *concurrency,
@@ -107,6 +116,53 @@ func runPoolPlan(ctx context.Context, args []string) error {
 	}
 	printPoolPlan(plan)
 	return nil
+}
+
+func overlayPoolSnapshots(ctx context.Context, client *http.Client, nodes []domain.Node, instances []domain.ModelInstance, peerURLs []string, rpcToken string) ([]domain.Node, []domain.ModelInstance, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	nodeByID := make(map[string]domain.Node, len(nodes))
+	order := make([]string, 0, len(nodes)+len(peerURLs))
+	for _, node := range nodes {
+		if node.ID == "" {
+			continue
+		}
+		if _, ok := nodeByID[node.ID]; !ok {
+			order = append(order, node.ID)
+		}
+		nodeByID[node.ID] = node
+	}
+	liveInstancesByNode := map[string][]domain.ModelInstance{}
+	for _, peerURL := range peerURLs {
+		snap, err := fetchNodeSnapshot(ctx, client, peerURL, rpcToken)
+		if err != nil {
+			return nil, nil, err
+		}
+		if snap.Node.ID == "" {
+			return nil, nil, fmt.Errorf("snapshot %s returned empty node id", peerURL)
+		}
+		if _, ok := nodeByID[snap.Node.ID]; !ok {
+			order = append(order, snap.Node.ID)
+		}
+		nodeByID[snap.Node.ID] = snap.Node
+		liveInstancesByNode[snap.Node.ID] = append([]domain.ModelInstance(nil), snap.Instances...)
+	}
+	mergedNodes := make([]domain.Node, 0, len(order))
+	for _, id := range order {
+		mergedNodes = append(mergedNodes, nodeByID[id])
+	}
+	mergedInstances := make([]domain.ModelInstance, 0, len(instances))
+	for _, inst := range instances {
+		if _, replaced := liveInstancesByNode[inst.NodeID]; replaced {
+			continue
+		}
+		mergedInstances = append(mergedInstances, inst)
+	}
+	for _, id := range order {
+		mergedInstances = append(mergedInstances, liveInstancesByNode[id]...)
+	}
+	return mergedNodes, mergedInstances, nil
 }
 
 func resolvePoolPresets(ctx context.Context, store *storesqlite.Store, model string) ([]domain.Preset, error) {
