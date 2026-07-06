@@ -114,7 +114,7 @@ func BuildPlan(ctx context.Context, estimator ports.ResourceEstimator, alloc All
 			plan.Nodes = append(plan.Nodes, nodePlan)
 			continue
 		}
-		claim, err := estimator.Estimate(ctx, preset, contextLen, concurrency)
+		claim, err := representativeClaim(ctx, estimator, preset, contextLen, concurrency, node)
 		if err != nil {
 			return Plan{}, fmt.Errorf("estimate claim for preset %q on node %q: %w", preset.ID, node.ID, err)
 		}
@@ -144,7 +144,13 @@ func BuildPlan(ctx context.Context, estimator ports.ResourceEstimator, alloc All
 		if opts.MaxTotal > 0 && (cap <= 0 || remainingTotal < cap) {
 			cap = remainingTotal
 		}
-		additional, refusal, gap := simulateReplicas(alloc, node, preset, claim, fleet.Instances, cap)
+		additional, claim, refusal, gap, err := simulateReplicas(ctx, estimator, alloc, node, preset, contextLen, concurrency, fleet.Instances, cap)
+		if err != nil {
+			return Plan{}, fmt.Errorf("estimate claim for preset %q on node %q: %w", preset.ID, node.ID, err)
+		}
+		if claim != (domain.Claim{}) {
+			nodePlan.ClaimPerReplica = claim
+		}
 		nodePlan.Additional = additional
 		if additional == 0 && refusal != "" {
 			nodePlan.Refusal, nodePlan.SetupGap = refusal, gap
@@ -211,13 +217,20 @@ func backendMismatch(preset domain.Preset, node domain.Node) string {
 
 // simulateReplicas adds hypothetical replicas one at a time against the real
 // allocator until the node cannot safely hold another.
-func simulateReplicas(alloc Allocator, node domain.Node, preset domain.Preset, claim domain.Claim, instances []domain.ModelInstance, cap int) (int, string, string) {
+func simulateReplicas(ctx context.Context, estimator ports.ResourceEstimator, alloc Allocator, node domain.Node, preset domain.Preset, contextLen, concurrency int, instances []domain.ModelInstance, cap int) (int, domain.Claim, string, string, error) {
 	simulated := capacityActiveInstances(instances)
 	count := 0
+	var firstClaim domain.Claim
 	for cap <= 0 || count < cap {
-		accSet, ok := firstFittingAcceleratorSet(alloc, node, simulated, claim)
+		accSet, claim, ok, err := firstFittingAcceleratorSet(ctx, estimator, alloc, node, preset, contextLen, concurrency, simulated)
+		if err != nil {
+			return 0, domain.Claim{}, "", "", err
+		}
 		if !ok {
 			break
+		}
+		if count == 0 {
+			firstClaim = claim
 		}
 		simulated = append(simulated, domain.ModelInstance{
 			ID:             fmt.Sprintf("pool-sim-%s-%d", node.ID, count),
@@ -230,10 +243,10 @@ func simulateReplicas(alloc Allocator, node domain.Node, preset domain.Preset, c
 		count++
 	}
 	if count == 0 {
-		return 0, "insufficient safe capacity",
-			"no accelerator set fits another replica under max_util and the oom-severity margin; free capacity or lower the context/concurrency envelope"
+		return 0, firstClaim, "insufficient safe capacity",
+			"no accelerator set fits another replica under max_util and the oom-severity margin; free capacity or lower the context/concurrency envelope", nil
 	}
-	return count, "", ""
+	return count, firstClaim, "", "", nil
 }
 
 func capacityActiveInstances(instances []domain.ModelInstance) []domain.ModelInstance {
@@ -284,13 +297,32 @@ func hasActivePresetInstance(nodeID, presetID string, instances []domain.ModelIn
 
 // firstFittingAcceleratorSet walks accelerator subsets smallest-first so
 // replicas pack one unit at a time before spanning multiple accelerators.
-func firstFittingAcceleratorSet(alloc Allocator, node domain.Node, existing []domain.ModelInstance, claim domain.Claim) ([]int, bool) {
+func representativeClaim(ctx context.Context, estimator ports.ResourceEstimator, preset domain.Preset, contextLen, concurrency int, node domain.Node) (domain.Claim, error) {
+	sets := acceleratorSets(node)
+	if len(sets) == 0 {
+		return estimator.Estimate(ctx, preset, contextLen, concurrency)
+	}
+	return estimateForAcceleratorSet(ctx, estimator, preset, contextLen, concurrency, node, sets[0])
+}
+
+func estimateForAcceleratorSet(ctx context.Context, estimator ports.ResourceEstimator, preset domain.Preset, contextLen, concurrency int, node domain.Node, accSet []int) (domain.Claim, error) {
+	if unitEstimator, ok := estimator.(ports.UnitResourceEstimator); ok {
+		return unitEstimator.EstimateForUnit(ctx, preset, contextLen, concurrency, node, accSet)
+	}
+	return estimator.Estimate(ctx, preset, contextLen, concurrency)
+}
+
+func firstFittingAcceleratorSet(ctx context.Context, estimator ports.ResourceEstimator, alloc Allocator, node domain.Node, preset domain.Preset, contextLen, concurrency int, existing []domain.ModelInstance) ([]int, domain.Claim, bool, error) {
 	for _, accSet := range acceleratorSets(node) {
+		claim, err := estimateForAcceleratorSet(ctx, estimator, preset, contextLen, concurrency, node, accSet)
+		if err != nil {
+			return nil, domain.Claim{}, false, err
+		}
 		if alloc.Fits(node, accSet, existing, claim) {
-			return accSet, true
+			return accSet, claim, true, nil
 		}
 	}
-	return nil, false
+	return nil, domain.Claim{}, false, nil
 }
 
 func acceleratorSets(node domain.Node) [][]int {
