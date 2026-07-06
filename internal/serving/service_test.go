@@ -83,6 +83,9 @@ func TestReconcileCreatesPrewarmTasksForMissingServiceReplicas(t *testing.T) {
 		if task.JobID != "svc-a" || task.Kind != string(reconcile.TaskPrewarmReplica) || task.Status != domain.ReconciliationTaskAllowed || task.Source != "model_service" {
 			t.Fatalf("task = %+v", task)
 		}
+		if task.ContextRequest != 49152 || task.ExpectedConcurrency != 0 {
+			t.Fatalf("task = %+v", task)
+		}
 	}
 }
 
