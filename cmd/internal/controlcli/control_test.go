@@ -744,6 +744,99 @@ func TestRunListCommandsAndProjectSet(t *testing.T) {
 	}
 }
 
+func TestRunModelsServiceEnsureSelectsMatchingPresetEnvelopes(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	small := testPresetWithContext("node-a-model", 4096)
+	small.Aliases = []string{"shared-model"}
+	largeA := testPresetWithContext("node-b-model", 49152)
+	largeA.Aliases = []string{"shared-model"}
+	largeB := testPresetWithContext("node-c-model", 49152)
+	largeB.Aliases = []string{"shared-model"}
+	unrelated := testPresetWithContext("other-model", 65536)
+	for _, preset := range []domain.Preset{largeB, unrelated, small, largeA} {
+		if err := store.SavePreset(context.Background(), preset); err != nil {
+			t.Fatalf("SavePreset(%s): %v", preset.ID, err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = Run(context.Background(), []string{
+			"models", "service", "ensure",
+			"--db", dbPath,
+			"--model", "shared-model",
+			"--project", "project-a",
+			"--context", "49152",
+			"--min", "2",
+			"--max", "2",
+			"--concurrency", "1",
+			"--reason", "test ensure",
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("models service ensure: %v", runErr)
+	}
+	if !strings.Contains(output, "model-service\tid=") || !strings.Contains(output, "candidates=node-b-model,node-c-model") {
+		t.Fatalf("ensure output = %s", output)
+	}
+	verify, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open verify: %v", err)
+	}
+	defer verify.Close()
+	services, err := verify.ListModelServices(context.Background())
+	if err != nil {
+		t.Fatalf("ListModelServices: %v", err)
+	}
+	if len(services) != 1 {
+		t.Fatalf("services = %+v", services)
+	}
+	service := services[0]
+	if service.Model != "shared-model" || service.Project != "project-a" || service.ContextRequest != 49152 || service.MinReplicas != 2 || service.MaxReplicas != 2 {
+		t.Fatalf("service = %+v", service)
+	}
+	if got := strings.Join(service.CandidatePresetIDs, ","); got != "node-b-model,node-c-model" {
+		t.Fatalf("candidate presets = %s", got)
+	}
+	var jsonErr error
+	jsonOutput := captureStdout(t, func() {
+		jsonErr = Run(context.Background(), []string{
+			"models", "service", "ensure",
+			"--db", dbPath,
+			"--model", "shared-model",
+			"--project", "project-b",
+			"--context", "49152",
+			"--preset", "node-c-model",
+			"--preset", "node-b-model",
+			"--preset", "node-c-model",
+			"--preemption", "hard_for_interactive",
+			"--json",
+		})
+	})
+	if jsonErr != nil {
+		t.Fatalf("models service ensure json: %v", jsonErr)
+	}
+	var ensured domain.ModelService
+	if err := json.Unmarshal([]byte(jsonOutput), &ensured); err != nil {
+		t.Fatalf("decode ensure json: %v", err)
+	}
+	if got := strings.Join(ensured.CandidatePresetIDs, ","); got != "node-b-model,node-c-model" || ensured.Preemption != domain.PreemptHardForInteractive {
+		t.Fatalf("ensured service = %+v", ensured)
+	}
+	if err := Run(context.Background(), []string{"models", "service", "ensure", "--db", dbPath, "--model", "shared-model", "--context", "999999"}); err == nil || !strings.Contains(err.Error(), "no candidate presets") {
+		t.Fatalf("oversized ensure err = %v", err)
+	}
+	if err := Run(context.Background(), []string{"models", "service", "ensure", "--db", dbPath, "--model", "shared-model", "--preemption", "maybe"}); err == nil || !strings.Contains(err.Error(), "unknown preemption") {
+		t.Fatalf("invalid preemption err = %v", err)
+	}
+}
+
 func TestRunJobsAdmitAndStatusUseWorkloadRPCWithoutPrintingPayload(t *testing.T) {
 	dir := t.TempDir()
 	intentPath := filepath.Join(dir, "workload.json")
@@ -2671,6 +2764,9 @@ func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 	}
 	if !strings.Contains(output, "group_envelopes=strict-json-vllm@node-json:vllm:ctx4096,strict-json-vllm-alt@node-json-alt:vllm:ctx8192") {
 		t.Fatalf("gateway routes output missing group envelopes:\n%s", output)
+	}
+	if !strings.Contains(output, "route-envelope\tproject=strict-json-project\tmodel=strict-json-model\tpreset=strict-json-vllm-alt\tnode=node-json-alt\tbackend=vllm\tcontext=8192\tcapabilities=chat") {
+		t.Fatalf("gateway routes output missing per-envelope route row:\n%s", output)
 	}
 	if got := report.Routes[2]; got.Project != "tool-project" || !got.ProjectTokenConfigured || !got.ToolParserConfigured || !got.AutoToolChoiceConfigured || got.ToolReadiness != "auto_tool_configured" || got.RouteReadiness != "undersized_context" || got.MinContextCap != 32768 || got.EffectiveContextCap != 8192 || got.ContextIssue != "undersized_context" || got.ContextAdequate {
 		t.Fatalf("tool route contract = %+v", got)

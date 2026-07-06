@@ -33,6 +33,7 @@ import (
 	"mycelium/internal/optimizer"
 	"mycelium/internal/ports"
 	projectvalidation "mycelium/internal/project"
+	"mycelium/internal/serving"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/internal/workload"
 	"mycelium/pkg/api"
@@ -193,9 +194,11 @@ func runModels(ctx context.Context, args []string, client *http.Client) error {
 
 func runModelsService(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce models service <list|pause>")
+		return fmt.Errorf("usage: myce models service <ensure|list|pause>")
 	}
 	switch args[0] {
+	case "ensure":
+		return runModelsServiceEnsure(ctx, args[1:])
 	case "list":
 		fs := flag.NewFlagSet("models service list", flag.ContinueOnError)
 		dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
@@ -259,7 +262,142 @@ func runModelsService(ctx context.Context, args []string) error {
 		fmt.Printf("model-service\tid=%s\tstatus=%s\n", service.ID, service.Status)
 		return nil
 	default:
-		return fmt.Errorf("usage: myce models service <list|pause>")
+		return fmt.Errorf("usage: myce models service <ensure|list|pause>")
+	}
+}
+
+func runModelsServiceEnsure(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("models service ensure", flag.ContinueOnError)
+	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+	model := fs.String("model", "", "model alias or preset id to serve")
+	project := fs.String("project", "", "project label for held supply")
+	contextRequest := fs.Int("context", 0, "context envelope for the service")
+	concurrency := fs.Int("concurrency", 1, "expected concurrent requests per worker")
+	minReplicas := fs.Int("min", 1, "minimum held replicas")
+	maxReplicas := fs.Int("max", 0, "maximum held replicas; defaults to --min")
+	priority := fs.String("priority", string(domain.PriorityBackground), "priority: interactive, normal, or background")
+	preemption := fs.String("preemption", string(domain.PreemptSoft), "preemption mode: soft, hard_for_interactive, or hard")
+	reason := fs.String("reason", "operator ensured model service", "redacted service event reason")
+	var presetIDs repeatedString
+	fs.Var(&presetIDs, "preset", "candidate preset id; repeat to pin the eligible owner set")
+	jsonOut := fs.Bool("json", false, "print JSON response")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*model) == "" {
+		return fmt.Errorf("usage: myce models service ensure --model <model> [--db path]")
+	}
+	if *contextRequest < 0 {
+		return fmt.Errorf("--context must be >= 0")
+	}
+	if *concurrency <= 0 {
+		return fmt.Errorf("--concurrency must be positive")
+	}
+	if *minReplicas <= 0 {
+		return fmt.Errorf("--min must be positive")
+	}
+	if *maxReplicas < 0 {
+		return fmt.Errorf("--max must be >= 0")
+	}
+	parsedPriority, err := parsePriorityFlag(*priority)
+	if err != nil {
+		return err
+	}
+	parsedPreemption, err := parsePreemptionFlag(*preemption)
+	if err != nil {
+		return err
+	}
+	store, err := storesqlite.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	candidates := uniqueStringList([]string(presetIDs))
+	if len(candidates) == 0 {
+		candidates, err = serviceCandidatePresetIDs(ctx, store, strings.TrimSpace(*model), *contextRequest)
+		if err != nil {
+			return err
+		}
+	}
+	if len(candidates) == 0 {
+		return fmt.Errorf("no candidate presets found for model %q and context %d", strings.TrimSpace(*model), *contextRequest)
+	}
+	service, err := serving.EnsureDemand(ctx, store, serving.Demand{
+		Model:               strings.TrimSpace(*model),
+		Project:             strings.TrimSpace(*project),
+		ContextRequest:      *contextRequest,
+		ExpectedConcurrency: *concurrency,
+		MinReplicas:         *minReplicas,
+		MaxReplicas:         *maxReplicas,
+		Priority:            parsedPriority,
+		Preemption:          parsedPreemption,
+		CandidatePresetIDs:  candidates,
+		Reason:              strings.TrimSpace(*reason),
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(service)
+	}
+	fmt.Printf("model-service\tid=%s\tmodel=%s\tproject=%s\tcontext=%d\tstatus=%s\tmin=%d\tmax=%d\tcandidates=%s\n",
+		service.ID,
+		emptyDash(service.Model),
+		emptyDash(service.Project),
+		service.ContextRequest,
+		service.Status,
+		service.MinReplicas,
+		service.MaxReplicas,
+		emptyDash(strings.Join(service.CandidatePresetIDs, ",")),
+	)
+	return nil
+}
+
+func uniqueStringList(values []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func serviceCandidatePresetIDs(ctx context.Context, store interface {
+	ListPresets(context.Context) ([]domain.Preset, error)
+}, model string, contextRequest int) ([]string, error) {
+	presets, err := store.ListPresets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []string
+	for _, preset := range presets {
+		if !presetMatchesModel(preset, model) {
+			continue
+		}
+		if contextRequest > 0 && modelruntime.EffectiveContextLength(preset) < contextRequest {
+			continue
+		}
+		candidates = append(candidates, preset.ID)
+	}
+	sort.Strings(candidates)
+	return candidates, nil
+}
+
+func parsePreemptionFlag(raw string) (domain.Preemption, error) {
+	switch domain.Preemption(strings.TrimSpace(raw)) {
+	case domain.PreemptSoft, domain.PreemptHardForInteractive, domain.PreemptHard:
+		return domain.Preemption(strings.TrimSpace(raw)), nil
+	default:
+		return "", fmt.Errorf("unknown preemption %q", raw)
 	}
 }
 
@@ -3114,6 +3252,19 @@ func printGatewayRoutesReport(w io.Writer, report gatewayRoutesReport) {
 			emptyDash(strings.Join(route.ModelGroupPresets, ",")),
 			emptyDash(formatGatewayRouteEnvelopes(route.ModelGroupEnvelopes)),
 		)
+		for _, env := range route.ModelGroupEnvelopes {
+			fmt.Fprintf(w, "route-envelope\tproject=%s\tmodel=%s\tpreset=%s\tnode=%s\tbackend=%s\tcontext=%d\tcapabilities=%s\tlive_model=%t\tlive_match=%s\n",
+				emptyDash(route.Project),
+				emptyDash(route.Model),
+				emptyDash(env.PresetID),
+				emptyDash(env.NodeID),
+				emptyDash(string(env.Backend)),
+				env.ContextLength,
+				emptyDash(formatCapabilities(env.Capabilities)),
+				env.LiveModelAvailable,
+				emptyDash(env.LiveModelMatch),
+			)
+		}
 	}
 }
 
@@ -3131,6 +3282,18 @@ func formatGatewayRouteEnvelopes(envelopes []gatewayRouteEnvelope) string {
 		}
 		parts = append(parts, part)
 	}
+	return strings.Join(parts, ",")
+}
+
+func formatCapabilities(capabilities []domain.Capability) string {
+	if len(capabilities) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(capabilities))
+	for _, capability := range capabilities {
+		parts = append(parts, string(capability))
+	}
+	sort.Strings(parts)
 	return strings.Join(parts, ",")
 }
 
