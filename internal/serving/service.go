@@ -19,6 +19,7 @@ type Store interface {
 	ListReconciliationTasks(ctx context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error)
 	SaveReconciliationTask(ctx context.Context, task domain.ReconciliationTaskRecord) error
 	ListJobs(ctx context.Context) ([]domain.Job, error)
+	ListLeases(ctx context.Context) ([]domain.Lease, error)
 }
 
 type Demand struct {
@@ -147,13 +148,17 @@ func Reconcile(ctx context.Context, store Store, opts ReconcileOptions) (Reconci
 	if err != nil {
 		return ReconcileReport{}, err
 	}
+	leases, err := store.ListLeases(ctx)
+	if err != nil {
+		return ReconcileReport{}, err
+	}
 	report := ReconcileReport{Services: len(services)}
 	for _, service := range services {
 		if service.Status != domain.ModelServiceActive {
 			report.Skipped++
 			continue
 		}
-		have := runningServiceJobs(service.ID, jobs)
+		have := runningServiceJobs(service.ID, jobs, leases, now)
 		want := service.MinReplicas - have
 		if want <= 0 {
 			report.Skipped++
@@ -233,12 +238,30 @@ func serviceTaskID(serviceID, presetID string) string {
 	return "service-prewarm-" + hex.EncodeToString(sum[:8])
 }
 
-func runningServiceJobs(serviceID string, jobs []domain.Job) int {
+func runningServiceJobs(serviceID string, jobs []domain.Job, leases []domain.Lease, now time.Time) int {
+	activeLeases := map[string]domain.Lease{}
+	for _, lease := range leases {
+		if lease.ID == "" {
+			continue
+		}
+		if !lease.ExpiresAt.IsZero() && !lease.ExpiresAt.After(now) {
+			continue
+		}
+		activeLeases[lease.ID] = lease
+	}
 	count := 0
 	for _, job := range jobs {
-		if job.ParentID == serviceID && job.Status == domain.JobRunning && job.Result != nil && !job.Result.Terminal && job.Result.LeaseID != "" {
-			count++
+		if job.ParentID != serviceID || job.Status != domain.JobRunning || job.Result == nil || job.Result.Terminal || job.Result.LeaseID == "" {
+			continue
 		}
+		lease, ok := activeLeases[job.Result.LeaseID]
+		if !ok {
+			continue
+		}
+		if lease.JobID != "" && lease.JobID != job.ID {
+			continue
+		}
+		count++
 	}
 	return count
 }
