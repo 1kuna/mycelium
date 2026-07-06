@@ -183,6 +183,13 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, payload []byt
 			return Result{Decision: decision, Instance: inst, Lease: lease}, err
 		}
 	}
+	if latest, changed := s.jobChangedDuringPlacement(ctx, job); changed {
+		err := fmt.Errorf("job %q is %q, not placing", job.ID, latest.Status)
+		if cleanupErr := s.cleanupLoadedInstance(ctx, inst, decision.InstanceID == "", releaseOwner); cleanupErr != nil {
+			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
+		}
+		return Result{Decision: decision, Instance: inst, Lease: lease}, err
+	}
 	job.Status = domain.JobRunning
 	job.Result = schedulerJobResult(decision, inst, lease, len(payload))
 	if err := s.Store.SaveInstance(cleanupContext(ctx), inst); err != nil {
@@ -351,6 +358,13 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 			return Result{Decision: decision, Instance: inst, Lease: lease}, err
 		}
 	}
+	if latest, changed := s.jobChangedDuringPlacement(ctx, job); changed {
+		err := fmt.Errorf("job %q is %q, not placing", job.ID, latest.Status)
+		if cleanupErr := s.cleanupCoordinatedLoad(ctx, job.ID, inst, err); cleanupErr != nil {
+			return Result{Decision: decision, Instance: inst, Lease: lease}, errors.Join(err, cleanupErr)
+		}
+		return Result{Decision: decision, Instance: inst, Lease: lease}, err
+	}
 	job.Status = domain.JobRunning
 	job.Result = schedulerJobResult(decision, inst, lease, len(payload))
 	if err := s.Store.SaveInstance(cleanupContext(ctx), inst); err != nil {
@@ -431,6 +445,21 @@ func (s *Service) refreshRunnableDrainJob(ctx context.Context, job domain.Job) (
 		return latest, false
 	}
 	return latest, true
+}
+
+func (s *Service) jobChangedDuringPlacement(ctx context.Context, job domain.Job) (domain.Job, bool) {
+	reader, ok := s.Store.(JobReader)
+	if !ok || job.ID == "" {
+		return job, false
+	}
+	latest, err := reader.Job(ctx, job.ID)
+	if err != nil {
+		return job, false
+	}
+	if latest.Status != domain.JobPlacing {
+		return latest, true
+	}
+	return latest, false
 }
 
 func (s *Service) dequeueRunnable(ctx context.Context) (domain.Job, []byte, bool, error) {

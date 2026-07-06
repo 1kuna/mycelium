@@ -2572,6 +2572,144 @@ func TestServiceDrainSkipsJobCanceledAfterQueueing(t *testing.T) {
 	}
 }
 
+func TestSubmitAbortsWhenJobCanceledDuringPlacement(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(40, 18).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	store := &runtimeStore{}
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}, admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	_, err := service.Submit(context.Background(), job, SubmitHooks{BeforeColdLoad: func(ctx context.Context, decision domain.PlacementDecision) error {
+		canceled := job
+		canceled.Status = domain.JobFailed
+		canceled.Error = "operator canceled"
+		return store.SaveJob(ctx, canceled)
+	}})
+	if err == nil || !strings.Contains(err.Error(), `job "job-a" is "failed", not placing`) {
+		t.Fatalf("Submit err = %v", err)
+	}
+	if len(store.leases) != 0 {
+		t.Fatalf("canceled placement saved leases: %+v", store.leases)
+	}
+	stored := store.jobs[job.ID]
+	if stored.Status != domain.JobFailed || stored.Error != "operator canceled" {
+		t.Fatalf("stored job = %+v", stored)
+	}
+}
+
+func TestSubmitAbortDuringPlacementSurfacesCleanupError(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(40, 185).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	store := &runtimeStore{}
+	cleanupErr := errors.New("release failed")
+	admission := &mocks.AdmissionController{ReleaseErr: cleanupErr}
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}, admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	_, err := service.Submit(context.Background(), job, SubmitHooks{BeforeColdLoad: func(ctx context.Context, decision domain.PlacementDecision) error {
+		canceled := job
+		canceled.Status = domain.JobFailed
+		return store.SaveJob(ctx, canceled)
+	}})
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("Submit cleanup err = %v", err)
+	}
+}
+
+func TestCoordinatedSubmitAbortsWhenJobCanceledDuringPlacement(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(40, 19).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	store := &runtimeStore{}
+	decision := domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Preset: preset, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}
+	coordinator := &mocks.Coordinator{Decision: decision, Lease: domain.Lease{ID: "lease-owner", JobID: "job-a", NodeID: node.ID, Claim: decision.Claim}}
+	service := &Service{
+		Placer:      fakePlacer{decision: decision},
+		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}, admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Owners:      staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Coordinator: coordinator,
+		JobLog:      &recordingJobLog{},
+		Queue:       NewQueue(clock),
+		Store:       store,
+		Clock:       clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	_, err := service.SubmitWithPayload(context.Background(), job, []byte(`{"input_bytes":123}`), SubmitHooks{BeforeColdLoad: func(ctx context.Context, decision domain.PlacementDecision) error {
+		canceled := job
+		canceled.Status = domain.JobFailed
+		canceled.Error = "operator canceled"
+		return store.SaveJob(ctx, canceled)
+	}})
+	if err == nil || !strings.Contains(err.Error(), `job "job-a" is "failed", not placing`) {
+		t.Fatalf("SubmitWithPayload err = %v", err)
+	}
+	if len(store.leases) != 0 {
+		t.Fatalf("canceled coordinated placement saved leases: %+v", store.leases)
+	}
+	if got := strings.Join(coordinator.Calls, ","); !strings.Contains(got, "release:job-a") {
+		t.Fatalf("coordinator calls = %s", got)
+	}
+}
+
+func TestCoordinatedSubmitAbortDuringPlacementSurfacesCleanupError(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(40, 195).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	store := &runtimeStore{}
+	cleanupErr := errors.New("coordinator release failed")
+	decision := domain.PlacementDecision{JobID: "job-a", NodeID: node.ID, Preset: preset, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}
+	coordinator := &mocks.Coordinator{Decision: decision, Lease: domain.Lease{ID: "lease-owner", JobID: "job-a", NodeID: node.ID, Claim: decision.Claim}, ReleaseErr: cleanupErr}
+	service := &Service{
+		Placer:      fakePlacer{decision: decision},
+		Fleet:       staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:       staticNodes{agents: map[string]*mocks.NodeAgent{node.ID: mocks.NewNodeAgent(node)}, admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Owners:      staticNodes{admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}}},
+		Coordinator: coordinator,
+		JobLog:      &recordingJobLog{},
+		Queue:       NewQueue(clock),
+		Store:       store,
+		Clock:       clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+	job := fixtures.MakeJob(fixtures.WithJobID("job-a"), fixtures.WithPreset(preset.ID))
+	_, err := service.SubmitWithPayload(context.Background(), job, []byte(`{"input_bytes":123}`), SubmitHooks{BeforeColdLoad: func(ctx context.Context, decision domain.PlacementDecision) error {
+		canceled := job
+		canceled.Status = domain.JobFailed
+		return store.SaveJob(ctx, canceled)
+	}})
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("SubmitWithPayload cleanup err = %v", err)
+	}
+}
+
 func TestRefreshRunnableDrainJobCompatibilityBranches(t *testing.T) {
 	service := &Service{Store: storeWithoutJobReader{}}
 	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
@@ -2583,6 +2721,21 @@ func TestRefreshRunnableDrainJobCompatibilityBranches(t *testing.T) {
 	got, runnable = service.refreshRunnableDrainJob(context.Background(), job)
 	if !runnable || got.ID != job.ID {
 		t.Fatalf("missing durable job = %+v runnable=%v", got, runnable)
+	}
+	if changedJob, changed := service.jobChangedDuringPlacement(context.Background(), job); changed || changedJob.ID != job.ID {
+		t.Fatalf("missing placement job changed = %+v changed=%v", changedJob, changed)
+	}
+	placing := job
+	placing.Status = domain.JobPlacing
+	if err := service.Store.(*runtimeStore).SaveJob(context.Background(), placing); err != nil {
+		t.Fatalf("save placing: %v", err)
+	}
+	if changedJob, changed := service.jobChangedDuringPlacement(context.Background(), job); changed || changedJob.Status != domain.JobPlacing {
+		t.Fatalf("placing changed = %+v changed=%v", changedJob, changed)
+	}
+	service.Store = storeWithoutJobReader{}
+	if changedJob, changed := service.jobChangedDuringPlacement(context.Background(), job); changed || changedJob.ID != job.ID {
+		t.Fatalf("without reader placement changed = %+v changed=%v", changedJob, changed)
 	}
 }
 
