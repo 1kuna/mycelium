@@ -75,6 +75,70 @@ type CatalogRefresher interface {
 	RefreshCatalog(ctx context.Context, task domain.ReconciliationTaskRecord) error
 }
 
+type CatalogPresetStore interface {
+	SavePreset(ctx context.Context, preset domain.Preset) error
+}
+
+type ConfigCatalogRefresher struct {
+	Store   CatalogPresetStore
+	Presets []domain.Preset
+}
+
+func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.ReconciliationTaskRecord) error {
+	if r.Store == nil {
+		return fmt.Errorf("catalog refresh requires a preset store")
+	}
+	matches := catalogRefreshMatches(r.Presets, task)
+	if len(matches) == 0 {
+		target := firstNonEmpty(task.PresetID, task.Model)
+		if target == "" {
+			return fmt.Errorf("configured catalog has no presets to refresh")
+		}
+		return fmt.Errorf("configured catalog has no preset matching %q", target)
+	}
+	for _, preset := range matches {
+		if preset.ID == "" {
+			return fmt.Errorf("configured catalog contains a preset without an id")
+		}
+		if err := r.Store.SavePreset(ctx, preset); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func catalogRefreshMatches(presets []domain.Preset, task domain.ReconciliationTaskRecord) []domain.Preset {
+	if task.PresetID == "" && task.Model == "" {
+		return append([]domain.Preset(nil), presets...)
+	}
+	out := make([]domain.Preset, 0, len(presets))
+	for _, preset := range presets {
+		if task.PresetID != "" && preset.ID != task.PresetID {
+			continue
+		}
+		if task.Model != "" && !presetMatchesModel(preset, task.Model) {
+			continue
+		}
+		out = append(out, preset)
+	}
+	return out
+}
+
+func presetMatchesModel(preset domain.Preset, model string) bool {
+	if model == "" {
+		return true
+	}
+	if preset.ID == model || preset.ModelRef == model {
+		return true
+	}
+	for _, alias := range preset.Aliases {
+		if alias == model {
+			return true
+		}
+	}
+	return false
+}
+
 func DrainAllowedTasks(ctx context.Context, store TaskStore, opts DrainOptions) (DrainReport, error) {
 	if store == nil {
 		return DrainReport{}, fmt.Errorf("reconciliation task store is required")

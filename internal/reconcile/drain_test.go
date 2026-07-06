@@ -213,6 +213,33 @@ func TestDrainAllowedTasksRefreshesCatalogThroughConfiguredSource(t *testing.T) 
 	}
 }
 
+func TestConfigCatalogRefresherStoresMatchingPreset(t *testing.T) {
+	store := &fakePresetStore{}
+	preset := domain.Preset{ID: "preset-a", ModelRef: "model-a", Aliases: []string{"shared-model"}, ContextLength: 4096}
+	refresher := ConfigCatalogRefresher{Store: store, Presets: []domain.Preset{
+		preset,
+		{ID: "other", ModelRef: "other-model"},
+	}}
+
+	if err := refresher.RefreshCatalog(context.Background(), domain.ReconciliationTaskRecord{Model: "shared-model"}); err != nil {
+		t.Fatalf("RefreshCatalog: %v", err)
+	}
+	if len(store.presets) != 1 || store.presets[0].ID != preset.ID {
+		t.Fatalf("stored presets = %+v", store.presets)
+	}
+}
+
+func TestConfigCatalogRefresherFailsWhenSourceCannotSatisfyTask(t *testing.T) {
+	refresher := ConfigCatalogRefresher{
+		Store:   &fakePresetStore{},
+		Presets: []domain.Preset{{ID: "preset-a", ModelRef: "model-a"}},
+	}
+	err := refresher.RefreshCatalog(context.Background(), domain.ReconciliationTaskRecord{PresetID: "missing"})
+	if err == nil || !strings.Contains(err.Error(), `no preset matching "missing"`) {
+		t.Fatalf("RefreshCatalog err = %v", err)
+	}
+}
+
 func TestDrainAllowedTasksFailsCatalogRefreshActionFailure(t *testing.T) {
 	store := &fakeTaskStore{tasks: []domain.ReconciliationTaskRecord{
 		taskRecord("allowed-refresh", string(TaskRefreshCatalog), domain.ReconciliationTaskAllowed),
@@ -478,6 +505,15 @@ type fakeCatalogRefresher struct {
 func (r *fakeCatalogRefresher) RefreshCatalog(_ context.Context, task domain.ReconciliationTaskRecord) error {
 	r.tasks = append(r.tasks, task)
 	return r.err
+}
+
+type fakePresetStore struct {
+	presets []domain.Preset
+}
+
+func (s *fakePresetStore) SavePreset(_ context.Context, preset domain.Preset) error {
+	s.presets = append(s.presets, preset)
+	return nil
 }
 
 func taskRecord(id, kind string, status domain.ReconciliationTaskStatus) domain.ReconciliationTaskRecord {

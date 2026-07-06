@@ -339,6 +339,71 @@ func TestRunReconcileDrainExecutesAllowedTasks(t *testing.T) {
 	}
 }
 
+func TestRunReconcileDrainRefreshesCatalogFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "control.db")
+	configPath := filepath.Join(dir, "peer.json")
+	preset := testPreset("vision-vllm")
+	preset.ModelRef = "model/vision"
+	preset.Aliases = []string{"vision"}
+	cfg := operatorPeerConfig{Presets: []domain.Preset{preset}}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	task := domain.ReconciliationTaskRecord{
+		ID:                 "recon-refresh",
+		JobID:              "job-refresh",
+		Kind:               string(reconcile.TaskRefreshCatalog),
+		Status:             domain.ReconciliationTaskAllowed,
+		PresetID:           preset.ID,
+		Model:              "vision",
+		Reason:             "unknown model",
+		AutomaticCandidate: true,
+		Next:               "refresh catalog",
+		Source:             "test",
+		CreatedAt:          time.Unix(1, 0).UTC(),
+		UpdatedAt:          time.Unix(1, 0).UTC(),
+	}
+	if err := store.SaveReconciliationTask(context.Background(), task); err != nil {
+		t.Fatalf("SaveReconciliationTask: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = Run(context.Background(), []string{"reconcile", "drain", "--db", dbPath, "--config", configPath, "--job", "job-refresh"})
+	})
+	if runErr != nil {
+		t.Fatalf("reconcile drain: %v\n%s", runErr, output)
+	}
+	if !strings.Contains(output, "kind=refresh_catalog\tstatus=done\taction=refresh_catalog") {
+		t.Fatalf("drain output = %q", output)
+	}
+	verify, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open verify: %v", err)
+	}
+	defer verify.Close()
+	got, err := verify.Preset(context.Background(), preset.ID)
+	if err != nil || got.ID != preset.ID || strings.Join(got.Aliases, ",") != "vision" {
+		t.Fatalf("refreshed preset = %+v, %v", got, err)
+	}
+	tasks, err := verify.ListReconciliationTasks(context.Background(), "job-refresh")
+	if err != nil || len(tasks) != 1 || tasks[0].Status != domain.ReconciliationTaskDone {
+		t.Fatalf("tasks = %+v, %v", tasks, err)
+	}
+}
+
 func TestRunReconcileDrainPlansArtifactStaging(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "control.db")

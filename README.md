@@ -328,11 +328,12 @@ Use `--save` to persist those tasks into the control store as `allowed` or
 `blocked` records. The workload RPC also records the same task records
 automatically when admission or queue-drain evidence includes a scheduler
 decision. When the peer's control store supports the reconciliation executor it
-also drains the safe store-local task classes immediately:
-`record_incompatibility`, `stage_model_artifact`, and
-`verify_engine_readiness`. Live-affecting work such as prewarming replicas,
-catalog refresh, and owner repair remains explicit and must not be marked done
-unless the lower-level action actually succeeds.
+also drains the safe task classes with registered executors immediately:
+`record_incompatibility`, `stage_model_artifact`, `verify_engine_readiness`,
+and `refresh_catalog` when a configured preset catalog source is available.
+Live-affecting work such as prewarming replicas and owner repair remains
+explicit and must not be marked done unless the lower-level action actually
+succeeds.
 `myce reconcile drain` consumes only `allowed` records,
 records `running` to terminal status transitions, and currently executes
 `record_incompatibility` by writing a durable incompatibility fact and
@@ -353,8 +354,11 @@ myce reconcile drain --db <control.db> --job <job-id> \
 The prewarm task is marked done only when the lower-level workload reaches a
 terminal done result; queued, failed, or unavailable admission leaves the
 reconciliation task failed with the owner/admission reason. `refresh_catalog`
-currently fails loudly because there is no registered catalog source/refresh
-contract for the reconciler to call. Blocked records are left untouched.
+refreshes matching presets from a configured peer catalog into the control
+store when `myce reconcile drain --config <peer.json>` or the daemon has that
+configured source; if the source is missing or does not contain the requested
+preset/model, the task fails loudly. It does not download models, copy
+artifacts, or mutate remote peer configs. Blocked records are left untouched.
 For a stored workload or gateway job, `myce debug job <job-id> --reconcile`
 adds the same report-only plan to the normal job/debug evidence so operators do
 not have to extract the scheduler decision by hand.
