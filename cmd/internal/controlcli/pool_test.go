@@ -380,6 +380,45 @@ func TestPoolStatusAndDownLifecycle(t *testing.T) {
 	}
 }
 
+func TestPoolDownRefreshesAmbiguousWorkerBeforeRelease(t *testing.T) {
+	server := &poolPeerServer{}
+	ts := httptest.NewServer(server.handler(t))
+	defer ts.Close()
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "pool.json")
+	initial := poolState{Name: "ocr", Model: "chandra", Workers: []poolWorker{
+		{WorkloadID: "w-stale", NodeID: "node_spark", Status: "admit_error", Error: "warm instance concurrency envelope is full"},
+	}}
+	if err := writePrettyJSONFile(statePath, initial); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "down", "--state", statePath, "--url", ts.URL,
+	}, ts.Client()); err != nil {
+		t.Fatalf("pool down: %v", err)
+	}
+	if len(server.statuses) != 1 || server.statuses[0] != "w-stale" {
+		t.Fatalf("statuses = %v", server.statuses)
+	}
+	if len(server.finishes) != 1 || server.finishes[0] != "w-stale" {
+		t.Fatalf("finishes = %v", server.finishes)
+	}
+	if len(server.cancels) != 0 {
+		t.Fatalf("cancels = %v", server.cancels)
+	}
+	final, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("load final state: %v", err)
+	}
+	if final.Workers[0].Status != string(domain.JobDone) || final.Workers[0].Error != "" {
+		t.Fatalf("final worker = %+v", final.Workers[0])
+	}
+	if final.Workers[0].LeaseID != "lease-w-stale" || final.Workers[0].InstanceID != "inst-w-stale" {
+		t.Fatalf("release evidence was not preserved: %+v", final.Workers[0])
+	}
+}
+
 func TestPoolUsageErrors(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "missing.json")
