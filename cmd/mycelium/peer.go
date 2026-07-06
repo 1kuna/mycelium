@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -299,7 +300,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		return "", nil, nil, err
 	}
 	jobLog := peercoord.NewRescueJobLog(peercoord.NewJobLog(), store, privateKey)
-	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: "dev"}
+	self := domain.Peer{ID: cfg.ID, Addresses: []string{cfg.Listen}, Compute: cfg.Compute, LastSeen: clock.System{}.Now(), Version: buildVersion()}
 	controlClient := peerControlHTTPClient()
 	var coordinatorOpts []peercoord.CoordinatorOption
 	if len(privateKey) > 0 {
@@ -521,6 +522,38 @@ type catalogEvictRequest struct {
 
 type catalogEvictResponse struct {
 	Locality domain.ModelLocality `json:"locality"`
+}
+
+func buildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "dev"
+	}
+	version := strings.TrimSpace(info.Main.Version)
+	if version == "" || version == "(devel)" {
+		version = "dev"
+	}
+	revision := ""
+	modified := ""
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			if len(setting.Value) >= 12 {
+				revision = setting.Value[:12]
+			} else {
+				revision = setting.Value
+			}
+		case "vcs.modified":
+			modified = setting.Value
+		}
+	}
+	if revision != "" {
+		version += "+" + revision
+	}
+	if modified == "true" {
+		version += ".dirty"
+	}
+	return version
 }
 
 type workloadRuntime interface {
