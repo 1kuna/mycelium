@@ -19,6 +19,7 @@ import (
 	"mycelium/internal/gateway/translate"
 	"mycelium/internal/lease"
 	"mycelium/internal/ports"
+	"mycelium/internal/reconcile"
 	"mycelium/internal/scheduler"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
@@ -3627,8 +3628,56 @@ func TestPlacementNoFitErrorRecognizesLegacyOwnerAdmissionText(t *testing.T) {
 	if !placementNoFitError(fmt.Errorf("node http /admission/offer: warm instance \"inst_1\" concurrency envelope is full")) {
 		t.Fatal("legacy envelope text was not classified")
 	}
+	if !placementNoFitError(fmt.Errorf("no preset for model \"chandra\" can satisfy job: small:preset \"small\" context cap 16384 is below requested context 49152")) {
+		t.Fatal("model-group context refusal was not classified")
+	}
 	if placementNoFitError(fmt.Errorf("upstream returned 500: model crashed")) {
 		t.Fatal("provider failure classified as no-fit")
+	}
+}
+
+func TestRouterContextRefusalCreatesReconciliationDemand(t *testing.T) {
+	small := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "small"
+		p.ModelRef = "model-small"
+		p.Aliases = []string{"chandra"}
+		p.ContextLength = 1024
+	})
+	large := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "large"
+		p.ModelRef = "model-large"
+		p.Aliases = []string{"chandra"}
+		p.ContextLength = 2048
+	})
+	store := &gatewayRuntimeStore{}
+	router := newTestRouter(small, domain.FleetSnapshot{}, staticResolver{}, large)
+	router.Runtime = &scheduler.Service{
+		Placer:  router.Placer,
+		Fleet:   router.Fleet,
+		Nodes:   staticResolver{},
+		Owners:  staticResolver{},
+		Queue:   scheduler.NewQueue(router.Clock),
+		Store:   store,
+		Clock:   router.Clock,
+		Presets: map[string]domain.Preset{small.ID: small, small.ModelRef: small, large.ID: large, large.ModelRef: large},
+	}
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"chandra","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.ContextRequest = 4096
+	_, err = router.Route(context.Background(), req)
+	var noInstance noInstanceAvailableError
+	if !errors.As(err, &noInstance) {
+		t.Fatalf("Route error = %v, want no instance", err)
+	}
+	if len(store.reconcileTasks) != 2 {
+		t.Fatalf("reconciliation tasks = %+v", store.reconcileTasks)
+	}
+	for _, task := range store.reconcileTasks {
+		if task.Kind != string(reconcile.TaskRecordIncompatibility) || task.Status != domain.ReconciliationTaskAllowed || !strings.Contains(task.Reason, "context cap") {
+			t.Fatalf("task = %+v", task)
+		}
 	}
 }
 
