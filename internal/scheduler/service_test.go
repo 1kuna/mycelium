@@ -3066,6 +3066,136 @@ func TestServiceReleaseJobFallsBackToOwnerLeaseAfterCoordinatorRestart(t *testin
 	}
 }
 
+func TestServiceReconcileTerminalOwnerLeasesReleasesOwnerOnlyLease(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
+	lease := domain.Lease{ID: "lease-spark-44", JobID: "gateway-terminal", NodeID: "spark", InstanceID: "inst-spark"}
+	store := &runtimeStore{
+		jobs: map[string]domain.Job{
+			lease.JobID: {ID: lease.JobID, Status: domain.JobFailed},
+		},
+		instances: map[string]domain.ModelInstance{
+			"":               {ID: "", NodeID: lease.NodeID},
+			lease.InstanceID: {ID: lease.InstanceID, NodeID: lease.NodeID},
+		},
+	}
+	admission := &mocks.AdmissionController{LeaseForInstVal: lease, LeaseForInstFound: true}
+	service := leaseLifecycleService(clock, store)
+	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{lease.NodeID: admission}}
+
+	released, err := service.ReconcileTerminalOwnerLeases(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileTerminalOwnerLeases: %v", err)
+	}
+	if released != 1 {
+		t.Fatalf("released = %d", released)
+	}
+	if got := strings.Join(admission.Calls, ","); got != "lease-for-instance:inst-spark,release:"+lease.ID {
+		t.Fatalf("admission calls = %s", got)
+	}
+}
+
+func TestServiceReconcileTerminalOwnerLeasesKeepsRunningAndUnknownJobs(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
+	tests := map[string]struct {
+		jobID string
+		jobs  map[string]domain.Job
+	}{
+		"running": {
+			jobID: "gateway-running",
+			jobs:  map[string]domain.Job{"gateway-running": {ID: "gateway-running", Status: domain.JobRunning}},
+		},
+		"unknown": {
+			jobID: "gateway-unknown",
+			jobs:  map[string]domain.Job{},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			lease := domain.Lease{ID: "lease-spark-45", JobID: tc.jobID, NodeID: "spark", InstanceID: "inst-spark"}
+			store := &runtimeStore{
+				jobs: tc.jobs,
+				instances: map[string]domain.ModelInstance{
+					lease.InstanceID: {ID: lease.InstanceID, NodeID: lease.NodeID},
+				},
+			}
+			admission := &mocks.AdmissionController{LeaseForInstVal: lease, LeaseForInstFound: true}
+			service := leaseLifecycleService(clock, store)
+			service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{lease.NodeID: admission}}
+
+			released, err := service.ReconcileTerminalOwnerLeases(context.Background())
+			if err != nil {
+				t.Fatalf("ReconcileTerminalOwnerLeases: %v", err)
+			}
+			if released != 0 {
+				t.Fatalf("released = %d", released)
+			}
+			if got := strings.Join(admission.Calls, ","); got != "lease-for-instance:inst-spark" {
+				t.Fatalf("admission calls = %s", got)
+			}
+		})
+	}
+}
+
+func TestServiceReconcileTerminalOwnerLeasesEdges(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
+	if _, err := (&Service{}).ReconcileTerminalOwnerLeases(context.Background()); err == nil || !strings.Contains(err.Error(), "not fully configured") {
+		t.Fatalf("validate err = %v", err)
+	}
+	baseStore := &runtimeStore{
+		jobs: map[string]domain.Job{"job-terminal": {ID: "job-terminal", Status: domain.JobDone}},
+		instances: map[string]domain.ModelInstance{
+			"inst-a": {ID: "inst-a", NodeID: "node-a"},
+		},
+	}
+	service := leaseLifecycleService(clock, baseStore)
+	if released, err := service.ReconcileTerminalOwnerLeases(context.Background()); err != nil || released != 0 {
+		t.Fatalf("nil owners = %d %v", released, err)
+	}
+	service = leaseLifecycleService(clock, storeWithoutJobReader{lease: domain.Lease{ID: "lease-a"}})
+	service.Owners = staticNodes{}
+	if released, err := service.ReconcileTerminalOwnerLeases(context.Background()); err != nil || released != 0 {
+		t.Fatalf("no instance reader = %d %v", released, err)
+	}
+	service = leaseLifecycleService(clock, instanceOnlyStore{instances: []domain.ModelInstance{{ID: "inst-a", NodeID: "node-a"}}})
+	service.Owners = staticNodes{}
+	if released, err := service.ReconcileTerminalOwnerLeases(context.Background()); err != nil || released != 0 {
+		t.Fatalf("no job reader = %d %v", released, err)
+	}
+	instanceErr := errors.New("list instances")
+	service = leaseLifecycleService(clock, &runtimeStoreWithListInstancesErr{runtimeStore: *baseStore, err: instanceErr})
+	service.Owners = staticNodes{}
+	if _, err := service.ReconcileTerminalOwnerLeases(context.Background()); !errors.Is(err, instanceErr) {
+		t.Fatalf("list instances err = %v", err)
+	}
+	service = leaseLifecycleService(clock, baseStore)
+	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{}}
+	if _, err := service.ReconcileTerminalOwnerLeases(context.Background()); !errors.Is(err, domain.ErrUnreachable) {
+		t.Fatalf("owner resolver err = %v", err)
+	}
+	service = leaseLifecycleService(clock, baseStore)
+	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{"node-a": admissionOnly{}}}
+	if released, err := service.ReconcileTerminalOwnerLeases(context.Background()); err != nil || released != 0 {
+		t.Fatalf("non-inspectable owner = %d %v", released, err)
+	}
+	inspectErr := errors.New("inspect")
+	service = leaseLifecycleService(clock, baseStore)
+	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{"node-a": inspectableAdmission{lease: domain.Lease{ID: "lease-a", JobID: "job-terminal", InstanceID: "inst-a", NodeID: "node-a"}, found: true, err: inspectErr}}}
+	if _, err := service.ReconcileTerminalOwnerLeases(context.Background()); !errors.Is(err, inspectErr) {
+		t.Fatalf("lease inspect err = %v", err)
+	}
+	service = leaseLifecycleService(clock, baseStore)
+	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{"node-a": inspectableAdmission{}}}
+	if released, err := service.ReconcileTerminalOwnerLeases(context.Background()); err != nil || released != 0 {
+		t.Fatalf("missing owner lease = %d %v", released, err)
+	}
+	releaseErr := errors.New("release")
+	service = leaseLifecycleService(clock, baseStore)
+	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{"node-a": inspectableAdmission{lease: domain.Lease{ID: "lease-a", JobID: "job-terminal", InstanceID: "inst-a", NodeID: "node-a"}, found: true, releaseErr: releaseErr}}}
+	if _, err := service.ReconcileTerminalOwnerLeases(context.Background()); !errors.Is(err, releaseErr) {
+		t.Fatalf("release err = %v", err)
+	}
+}
+
 func TestServiceLeaseLifecycleErrors(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
 	if err := (&Service{}).Release(context.Background(), "lease-a"); err == nil || !strings.Contains(err.Error(), "not fully configured") {
@@ -3353,7 +3483,7 @@ func newReplacementHarness() replacementHarness {
 	}
 }
 
-func leaseLifecycleService(clock *mocks.FakeClock, store *runtimeStore) *Service {
+func leaseLifecycleService(clock *mocks.FakeClock, store RuntimeStore) *Service {
 	return &Service{
 		Placer: fakePlacer{},
 		Fleet:  staticFleet{},
@@ -3531,9 +3661,10 @@ func (admissionOnly) Preempt(context.Context, string, string) error {
 
 type inspectableAdmission struct {
 	admissionOnly
-	lease domain.Lease
-	found bool
-	err   error
+	lease      domain.Lease
+	found      bool
+	err        error
+	releaseErr error
 }
 
 func (a inspectableAdmission) LeaseForJob(context.Context, string) (domain.Lease, bool, error) {
@@ -3542,6 +3673,10 @@ func (a inspectableAdmission) LeaseForJob(context.Context, string) (domain.Lease
 
 func (a inspectableAdmission) LeaseForInstance(context.Context, string) (domain.Lease, bool, error) {
 	return a.lease, a.found, a.err
+}
+
+func (a inspectableAdmission) Release(context.Context, string) error {
+	return a.releaseErr
 }
 
 type emptyCommitAdmission struct {
@@ -3568,6 +3703,24 @@ type runtimeStore struct {
 	deleteLeaseErr  error
 	saveInstanceErr error
 	deleteErr       error
+}
+
+type instanceOnlyStore struct {
+	storeWithoutJobReader
+	instances []domain.ModelInstance
+}
+
+func (s instanceOnlyStore) ListInstances(context.Context) ([]domain.ModelInstance, error) {
+	return append([]domain.ModelInstance(nil), s.instances...), nil
+}
+
+type runtimeStoreWithListInstancesErr struct {
+	runtimeStore
+	err error
+}
+
+func (s *runtimeStoreWithListInstancesErr) ListInstances(context.Context) ([]domain.ModelInstance, error) {
+	return nil, s.err
 }
 
 type storeWithoutJobReader struct {
@@ -3696,6 +3849,14 @@ func (s *runtimeStore) SaveInstance(_ context.Context, inst domain.ModelInstance
 	}
 	s.instances[inst.ID] = inst
 	return nil
+}
+
+func (s *runtimeStore) ListInstances(context.Context) ([]domain.ModelInstance, error) {
+	instances := make([]domain.ModelInstance, 0, len(s.instances))
+	for _, inst := range s.instances {
+		instances = append(instances, inst)
+	}
+	return instances, nil
 }
 
 func (s *runtimeStore) DeleteInstance(_ context.Context, id string) error {

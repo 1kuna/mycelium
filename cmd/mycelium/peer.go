@@ -3211,6 +3211,9 @@ func startQueueDrainer(ctx context.Context, runtime *scheduler.Service, clk port
 			if _, err := runtime.ExpireLeases(ctx); err != nil {
 				log.Printf("mycelium queue lease expiry failed: %v", err)
 			}
+			if _, err := runtime.ReconcileTerminalOwnerLeases(ctx); err != nil {
+				log.Printf("mycelium owner lease reconcile failed: %v", err)
+			}
 			if _, err := runtime.Drain(ctx, limit); err != nil {
 				log.Printf("mycelium queue drain failed: %v", err)
 			}
