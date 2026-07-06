@@ -362,7 +362,7 @@ func TestPoolStatusAndDownLifecycle(t *testing.T) {
 	}, ts.Client()); err != nil {
 		t.Fatalf("pool down: %v", err)
 	}
-	if len(server.finishes) != 1 || server.finishes[0] != "w1" {
+	if len(server.finishes) != 2 || server.finishes[0] != "w1" || server.finishes[1] != "w2" {
 		t.Fatalf("finishes = %v", server.finishes)
 	}
 	if len(server.cancels) != 1 || server.cancels[0] != "w2" {
@@ -375,8 +375,8 @@ func TestPoolStatusAndDownLifecycle(t *testing.T) {
 	if final.Workers[0].Status != string(domain.JobDone) {
 		t.Fatalf("finished worker status = %q", final.Workers[0].Status)
 	}
-	if final.Workers[1].Status != string(domain.JobFailed) {
-		t.Fatalf("canceled worker status = %q", final.Workers[1].Status)
+	if final.Workers[1].Status != string(domain.JobDone) {
+		t.Fatalf("raced worker status = %q", final.Workers[1].Status)
 	}
 }
 
@@ -416,6 +416,71 @@ func TestPoolDownRefreshesAmbiguousWorkerBeforeRelease(t *testing.T) {
 	}
 	if final.Workers[0].LeaseID != "lease-w-stale" || final.Workers[0].InstanceID != "inst-w-stale" {
 		t.Fatalf("release evidence was not preserved: %+v", final.Workers[0])
+	}
+}
+
+func TestPoolDownReleasesWorkerThatBecomesHeldAfterCancel(t *testing.T) {
+	oldPoll := poolStatusPollInterval
+	oldVerify := poolDownVerifyTimeout
+	poolStatusPollInterval = time.Millisecond
+	poolDownVerifyTimeout = 50 * time.Millisecond
+	defer func() {
+		poolStatusPollInterval = oldPoll
+		poolDownVerifyTimeout = oldVerify
+	}()
+	var mu sync.Mutex
+	var cancels, finishes, statuses int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.URL.Path == "/workloads/w-race/cancel":
+			cancels++
+			_ = json.NewEncoder(w).Encode(workload.FinishResponse{Job: domain.Job{ID: "w-race", Status: domain.JobFailed}})
+		case r.URL.Path == "/workloads/w-race/finish":
+			finishes++
+			_ = json.NewEncoder(w).Encode(workload.FinishResponse{
+				Job:    domain.Job{ID: "w-race", Status: domain.JobDone},
+				Result: &domain.JobResult{LeaseID: "lease-race", Instance: domain.ModelInstance{ID: "inst-race"}, NodeID: "node_spark", Terminal: true},
+			})
+		case r.URL.Path == "/workloads/w-race":
+			statuses++
+			if statuses == 1 {
+				_ = json.NewEncoder(w).Encode(workload.StatusResponse{Job: domain.Job{ID: "w-race", Status: domain.JobFailed}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(workload.StatusResponse{
+				Job:    domain.Job{ID: "w-race", Status: domain.JobRunning},
+				Result: &domain.JobResult{LeaseID: "lease-race", Instance: domain.ModelInstance{ID: "inst-race"}, NodeID: "node_spark"},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "pool.json")
+	initial := poolState{Name: "ocr", Model: "chandra", Workers: []poolWorker{
+		{WorkloadID: "w-race", NodeID: "node_spark", Status: string(domain.JobQueued), Queued: true},
+	}}
+	if err := writePrettyJSONFile(statePath, initial); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "down", "--state", statePath, "--url", ts.URL,
+	}, ts.Client()); err != nil {
+		t.Fatalf("pool down: %v", err)
+	}
+	if cancels != 1 || finishes != 1 || statuses < 2 {
+		t.Fatalf("cancels=%d finishes=%d statuses=%d", cancels, finishes, statuses)
+	}
+	final, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("load final state: %v", err)
+	}
+	if final.Workers[0].Status != string(domain.JobDone) || final.Workers[0].LeaseID != "lease-race" || final.Workers[0].InstanceID != "inst-race" {
+		t.Fatalf("final worker = %+v", final.Workers[0])
 	}
 }
 

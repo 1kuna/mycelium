@@ -30,6 +30,7 @@ import (
 // reservations are released.
 
 var poolStatusPollInterval = 2 * time.Second
+var poolDownVerifyTimeout = 10 * time.Second
 
 func runPool(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
@@ -377,6 +378,7 @@ func runPoolDown(ctx context.Context, args []string, client *http.Client) error 
 				if canceled.Result != nil {
 					applyPoolResult(worker, canceled.Result)
 				}
+				err = verifyPoolWorkerReleasedAfterCancel(ctx, client, *peerURL, *rpcToken, worker)
 			}
 			release = err
 		}
@@ -398,6 +400,55 @@ func runPoolDown(ctx context.Context, args []string, client *http.Client) error 
 		printPoolState("pool down", state)
 	}
 	return errors.Join(downErrs...)
+}
+
+func verifyPoolWorkerReleasedAfterCancel(ctx context.Context, client *http.Client, peerURL, rpcToken string, worker *poolWorker) error {
+	if worker.WorkloadID == "" {
+		return nil
+	}
+	verifyCtx, cancel := context.WithTimeout(ctx, poolDownVerifyTimeout)
+	defer cancel()
+	ticker := time.NewTicker(poolStatusPollInterval)
+	defer ticker.Stop()
+	stableTerminal := false
+	for {
+		select {
+		case <-verifyCtx.Done():
+			return nil
+		case <-ticker.C:
+			status, err := fetchPoolWorkload(verifyCtx, client, peerURL, rpcToken, worker.WorkloadID)
+			if errors.Is(err, errPoolWorkloadNotFound) {
+				worker.Status = "not_admitted"
+				worker.Error = ""
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("verify canceled worker release: %w", err)
+			}
+			applyPoolStatus(worker, status)
+			if poolWorkerHeld(*worker) {
+				finished, err := finishPrewarmWorkload(verifyCtx, client, peerURL, rpcToken, worker.WorkloadID)
+				if err != nil {
+					return fmt.Errorf("release raced held worker: %w", err)
+				}
+				worker.Status = string(finished.Job.Status)
+				worker.Queued = false
+				if finished.Result != nil {
+					applyPoolResult(worker, finished.Result)
+				}
+				worker.Error = finished.Job.Error
+				return nil
+			}
+			if poolWorkerTerminal(worker.Status) {
+				if stableTerminal {
+					return nil
+				}
+				stableTerminal = true
+				continue
+			}
+			stableTerminal = false
+		}
+	}
 }
 
 func shouldRefreshPoolWorkerBeforeDown(worker poolWorker) bool {
