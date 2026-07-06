@@ -270,6 +270,7 @@ func TestDrainAllowedTasksExecutesPrewarmReplicaThroughExecutor(t *testing.T) {
 	}
 	store.tasks[0].ContextRequest = 8192
 	store.tasks[0].ExpectedConcurrency = 3
+	store.tasks[0].Project = "service-project"
 
 	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{
 		Now:     time.Unix(90, 0).UTC(),
@@ -289,7 +290,7 @@ func TestDrainAllowedTasksExecutesPrewarmReplicaThroughExecutor(t *testing.T) {
 		t.Fatalf("prewarm jobs = %+v", prewarm.jobs)
 	}
 	job := prewarm.jobs[0]
-	if job.ID != "reconcile-prewarm-allowed-prewarm" || job.Model != "model-a" || job.PresetID != "preset-a" || job.Project != "operator-reconcile" || job.ContextRequest != 8192 || job.ExpectedConcurrency != 3 {
+	if job.ID != "reconcile-prewarm-allowed-prewarm" || job.Model != "model-a" || job.PresetID != "preset-a" || job.Project != "service-project" || job.ContextRequest != 8192 || job.ExpectedConcurrency != 3 {
 		t.Fatalf("prewarm job = %+v", job)
 	}
 	if got := job.NodeSelector[domain.LabelNodeID]; got != "node-a" {

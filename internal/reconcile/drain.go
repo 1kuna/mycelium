@@ -206,7 +206,7 @@ func prewarmReplica(ctx context.Context, store TaskStore, task domain.Reconcilia
 		TaskType:            string(domain.CapabilityChat),
 		Model:               firstNonEmpty(task.Model, firstAlias(preset.Aliases), preset.ModelRef, preset.ID),
 		PresetID:            preset.ID,
-		Project:             firstNonEmpty(opts.Project, "reconcile-prewarm"),
+		Project:             firstNonEmpty(task.Project, opts.Project, "reconcile-prewarm"),
 		Priority:            domain.PriorityBackground,
 		SpeedPref:           domain.SpeedThroughput,
 		ContextRequest:      firstPositive(task.ContextRequest, modelruntime.EffectiveContextLength(preset)),

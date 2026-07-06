@@ -64,6 +64,7 @@ func TestReconcileCreatesPrewarmTasksForMissingServiceReplicas(t *testing.T) {
 	store := &fakeStore{services: []domain.ModelService{{
 		ID:                 "svc-a",
 		Model:              "vision-model",
+		Project:            "project-a",
 		ContextRequest:     49152,
 		MinReplicas:        2,
 		MaxReplicas:        2,
@@ -83,7 +84,7 @@ func TestReconcileCreatesPrewarmTasksForMissingServiceReplicas(t *testing.T) {
 		if task.JobID != "svc-a" || task.Kind != string(reconcile.TaskPrewarmReplica) || task.Status != domain.ReconciliationTaskAllowed || task.Source != "model_service" {
 			t.Fatalf("task = %+v", task)
 		}
-		if task.ContextRequest != 49152 || task.ExpectedConcurrency != 0 {
+		if task.Project != "project-a" || task.ContextRequest != 49152 || task.ExpectedConcurrency != 0 {
 			t.Fatalf("task = %+v", task)
 		}
 	}
