@@ -5737,7 +5737,7 @@ func TestWorkloadExecutionEvidenceReportsActiveLeaseState(t *testing.T) {
 		},
 		{
 			name:      "store cannot list leases",
-			store:     &workloadMemoryStore{},
+			store:     workloadStatusOnlyStore{job: activeJob},
 			job:       activeJob,
 			wantError: "lease_store_unavailable",
 		},
@@ -6850,6 +6850,7 @@ type workloadMemoryStore struct {
 	reconcileTasks []domain.ReconciliationTaskRecord
 	incompat       []domain.IncompatibilityRecord
 	modelServices  []domain.ModelService
+	leases         []domain.Lease
 	presets        map[string]domain.Preset
 	nodes          map[string]domain.Node
 	localityPlans  []domain.LocalityPlan
@@ -6904,6 +6905,10 @@ func (s *workloadMemoryStore) ListJobs(context.Context) ([]domain.Job, error) {
 		jobs = append(jobs, job)
 	}
 	return jobs, nil
+}
+
+func (s *workloadMemoryStore) ListLeases(context.Context) ([]domain.Lease, error) {
+	return append([]domain.Lease(nil), s.leases...), nil
 }
 
 func (s *workloadMemoryStore) Job(_ context.Context, id string) (domain.Job, error) {

@@ -109,6 +109,11 @@ func TestReconcileDoesNotCreatePrewarmWhenServiceAlreadyHasRunningLease(t *testi
 			Status:   domain.JobRunning,
 			Result:   &domain.JobResult{LeaseID: "lease-a"},
 		}},
+		leases: []domain.Lease{{
+			ID:        "lease-a",
+			JobID:     "held-a",
+			ExpiresAt: now.Add(time.Minute),
+		}},
 	}
 	report, err := Reconcile(ctx, store, ReconcileOptions{Now: now})
 	if err != nil {
@@ -116,6 +121,54 @@ func TestReconcileDoesNotCreatePrewarmWhenServiceAlreadyHasRunningLease(t *testi
 	}
 	if report.Created != 0 || len(store.tasks) != 0 {
 		t.Fatalf("report=%+v tasks=%+v", report, store.tasks)
+	}
+}
+
+func TestReconcileReplacesServiceJobWithoutActiveLease(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(35, 0).UTC()
+	tests := map[string][]domain.Lease{
+		"missing": {},
+		"expired": {{
+			ID:        "lease-a",
+			JobID:     "held-a",
+			ExpiresAt: now.Add(-time.Second),
+		}},
+		"wrong job": {{
+			ID:        "lease-a",
+			JobID:     "other-job",
+			ExpiresAt: now.Add(time.Minute),
+		}},
+	}
+	for name, leases := range tests {
+		t.Run(name, func(t *testing.T) {
+			store := &fakeStore{
+				services: []domain.ModelService{{
+					ID:                 "svc-a",
+					Model:              "vision-model",
+					MinReplicas:        1,
+					MaxReplicas:        1,
+					CandidatePresetIDs: []string{"preset-a"},
+					Status:             domain.ModelServiceActive,
+					CreatedAt:          now,
+					UpdatedAt:          now,
+				}},
+				jobs: []domain.Job{{
+					ID:       "held-a",
+					ParentID: "svc-a",
+					Status:   domain.JobRunning,
+					Result:   &domain.JobResult{LeaseID: "lease-a"},
+				}},
+				leases: leases,
+			}
+			report, err := Reconcile(ctx, store, ReconcileOptions{Now: now})
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if report.Created != 1 || len(store.tasks) != 1 || store.tasks[0].Kind != string(reconcile.TaskPrewarmReplica) {
+				t.Fatalf("report=%+v tasks=%+v", report, store.tasks)
+			}
+		})
 	}
 }
 
@@ -186,6 +239,9 @@ func TestReconcileSurfacesStoreErrors(t *testing.T) {
 	if _, err := Reconcile(context.Background(), &fakeStore{services: []domain.ModelService{{ID: "svc", Model: "m", MinReplicas: 1, Status: domain.ModelServiceActive}}, listJobsErr: want}, ReconcileOptions{}); !errors.Is(err, want) {
 		t.Fatalf("list jobs err = %v", err)
 	}
+	if _, err := Reconcile(context.Background(), &fakeStore{services: []domain.ModelService{{ID: "svc", Model: "m", MinReplicas: 1, Status: domain.ModelServiceActive}}, listLeasesErr: want}, ReconcileOptions{}); !errors.Is(err, want) {
+		t.Fatalf("list leases err = %v", err)
+	}
 	if _, err := Reconcile(context.Background(), &fakeStore{services: []domain.ModelService{{ID: "svc", Model: "m", MinReplicas: 1, Status: domain.ModelServiceActive, CandidatePresetIDs: []string{"p"}}}, listTasksErr: want}, ReconcileOptions{}); !errors.Is(err, want) {
 		t.Fatalf("list tasks err = %v", err)
 	}
@@ -198,11 +254,13 @@ type fakeStore struct {
 	services        []domain.ModelService
 	tasks           []domain.ReconciliationTaskRecord
 	jobs            []domain.Job
+	leases          []domain.Lease
 	listServicesErr error
 	saveServiceErr  error
 	listTasksErr    error
 	saveTaskErr     error
 	listJobsErr     error
+	listLeasesErr   error
 }
 
 func (s *fakeStore) ListModelServices(context.Context) ([]domain.ModelService, error) {
@@ -258,4 +316,11 @@ func (s *fakeStore) ListJobs(context.Context) ([]domain.Job, error) {
 		return nil, s.listJobsErr
 	}
 	return append([]domain.Job(nil), s.jobs...), nil
+}
+
+func (s *fakeStore) ListLeases(context.Context) ([]domain.Lease, error) {
+	if s.listLeasesErr != nil {
+		return nil, s.listLeasesErr
+	}
+	return append([]domain.Lease(nil), s.leases...), nil
 }
