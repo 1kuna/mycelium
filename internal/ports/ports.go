@@ -41,6 +41,10 @@ type DynamicBackendAdapter interface {
 	LaunchDynamic(ctx context.Context, p domain.Preset, addr string) (Handle, error)
 }
 
+type BackendHandleVerifier interface {
+	VerifyHandle(ctx context.Context, h Handle) error
+}
+
 type Handle struct {
 	PID       int
 	PGID      int

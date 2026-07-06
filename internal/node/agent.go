@@ -100,7 +100,9 @@ func WithLoadTimeout(timeout time.Duration) Option {
 	}
 }
 
-func (a *Agent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
+func (a *Agent) Snapshot(ctx context.Context) (domain.NodeSnapshot, error) {
+	a.reconcileBackendLiveness(ctx)
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -121,6 +123,8 @@ func (a *Agent) Snapshot(context.Context) (domain.NodeSnapshot, error) {
 }
 
 func (a *Agent) Instances() []domain.ModelInstance {
+	a.reconcileBackendLiveness(context.Background())
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.instanceListLocked()
@@ -227,6 +231,9 @@ func (a *Agent) BeginRequest(ctx context.Context, instanceID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := a.verifyInstanceLive(ctx, instanceID); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	inst, ok := a.instances[instanceID]
@@ -245,6 +252,75 @@ func (a *Agent) BeginRequest(ctx context.Context, instanceID string) error {
 	}
 	state.count++
 	return nil
+}
+
+func (a *Agent) verifyInstanceLive(ctx context.Context, instanceID string) error {
+	verifier, ok := a.backend.(ports.BackendHandleVerifier)
+	if !ok {
+		return nil
+	}
+	a.mu.Lock()
+	inst, instOK := a.instances[instanceID]
+	handle, handleOK := a.handles[instanceID]
+	a.mu.Unlock()
+	if !instOK {
+		return fmt.Errorf("instance %q is not ready", instanceID)
+	}
+	if inst.State != domain.InstReady {
+		return nil
+	}
+	if !handleOK {
+		a.markInstanceError(instanceID)
+		return fmt.Errorf("instance %q has no backend handle", instanceID)
+	}
+	if err := verifier.VerifyHandle(ctx, handle); err != nil {
+		a.markInstanceError(instanceID)
+		return fmt.Errorf("instance %q backend is not live: %w", instanceID, err)
+	}
+	return nil
+}
+
+func (a *Agent) reconcileBackendLiveness(ctx context.Context) {
+	verifier, ok := a.backend.(ports.BackendHandleVerifier)
+	if !ok {
+		return
+	}
+	a.mu.Lock()
+	checks := make(map[string]ports.Handle, len(a.handles))
+	for id, inst := range a.instances {
+		if inst.State != domain.InstReady {
+			continue
+		}
+		if handle, ok := a.handles[id]; ok {
+			checks[id] = handle
+			continue
+		}
+		inst.State = domain.InstError
+		inst.Loading = false
+		a.instances[id] = inst
+	}
+	a.mu.Unlock()
+
+	for id, handle := range checks {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		if err := verifier.VerifyHandle(ctx, handle); err != nil {
+			a.markInstanceError(id)
+		}
+	}
+}
+
+func (a *Agent) markInstanceError(instanceID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	inst, ok := a.instances[instanceID]
+	if !ok {
+		return
+	}
+	inst.State = domain.InstError
+	inst.Loading = false
+	a.instances[instanceID] = inst
 }
 
 func (a *Agent) EndRequest(_ context.Context, instanceID string) error {

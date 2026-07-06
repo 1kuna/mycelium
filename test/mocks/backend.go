@@ -2,6 +2,7 @@ package mocks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -23,6 +24,7 @@ type BackendAdapter struct {
 	ReadyAfter int
 	readyCalls int
 	Calls      []BackendCall
+	DeadPIDs   map[int]error
 }
 
 func NewBackendAdapter() *BackendAdapter {
@@ -72,6 +74,23 @@ func (m *BackendAdapter) WaitReady(ctx context.Context, addr string) error {
 	return nil
 }
 
+func (m *BackendAdapter) VerifyHandle(ctx context.Context, h ports.Handle) error {
+	m.Calls = append(m.Calls, BackendCall{Op: "verify", Addr: h.Addr})
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if m.DeadPIDs == nil {
+		return nil
+	}
+	if err, ok := m.DeadPIDs[h.PID]; ok {
+		if err == nil {
+			err = errors.New("backend process exited")
+		}
+		return err
+	}
+	return nil
+}
+
 func (m *BackendAdapter) Stop(_ context.Context, h ports.Handle) error {
 	m.Calls = append(m.Calls, BackendCall{Op: "stop", Addr: h.Addr})
 	return m.StopErr
@@ -79,3 +98,4 @@ func (m *BackendAdapter) Stop(_ context.Context, h ports.Handle) error {
 
 var _ ports.BackendAdapter = (*BackendAdapter)(nil)
 var _ ports.DynamicBackendAdapter = (*BackendAdapter)(nil)
+var _ ports.BackendHandleVerifier = (*BackendAdapter)(nil)

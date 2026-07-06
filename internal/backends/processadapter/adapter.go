@@ -193,6 +193,13 @@ func (a *Adapter) WaitReady(ctx context.Context, addr string) error {
 	}
 }
 
+func (a *Adapter) VerifyHandle(ctx context.Context, handle ports.Handle) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return verifyProcessIdentity(handle)
+}
+
 func (a *Adapter) Stop(ctx context.Context, handle ports.Handle) error {
 	if handle.PID == 0 {
 		return nil
@@ -543,3 +550,4 @@ func processExited(process *os.Process) (bool, error) {
 
 var _ ports.BackendAdapter = (*Adapter)(nil)
 var _ ports.DynamicBackendAdapter = (*Adapter)(nil)
+var _ ports.BackendHandleVerifier = (*Adapter)(nil)
