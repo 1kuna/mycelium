@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -85,6 +86,70 @@ func TestMainExitCodeReportsErrorsAndSuccess(t *testing.T) {
 	stderr.Reset()
 	if code := mainExitCode(ctx, nil, &stderr); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("success exit code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRunPeerStartsHealthEndpointAndShutsDown(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve loopback port: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close reserved port: %v", err)
+	}
+	root := t.TempDir()
+	configPath := writePeerConfig(t, PeerConfig{
+		ID:             "peer-test",
+		Listen:         addr,
+		JoinToken:      "join-secret",
+		RPCToken:       "rpc-secret",
+		GatewayToken:   "gateway-secret",
+		StorePath:      filepath.Join(root, "control.db"),
+		CatalogDir:     filepath.Join(root, "catalog"),
+		QueueDrainMS:   60000,
+		RegistrySyncMS: 60000,
+		Compute:        false,
+		ComputeConfig:  ComputeConfig{ID: "peer-test"},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runPeer(ctx, []string{"--config", configPath})
+	}()
+	client := &http.Client{Timeout: 100 * time.Millisecond}
+	healthURL := "http://" + addr + "/peer/health"
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case err := <-done:
+			t.Fatalf("runPeer exited before health: %v", err)
+		case <-deadline:
+			t.Fatal("peer health did not become ready")
+		default:
+		}
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, healthURL, nil)
+		if err != nil {
+			t.Fatalf("health request: %v", err)
+		}
+		req.Header.Set("X-Myc-Join-Token", "join-secret")
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runPeer returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runPeer did not shut down")
 	}
 }
 
