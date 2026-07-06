@@ -275,7 +275,11 @@ func warmWorkerHeadroom(nodeID, presetID string, instances []domain.ModelInstanc
 		if inst.State != domain.InstReady {
 			continue
 		}
-		available := envelope - inst.InFlight
+		occupancy := inst.InFlight
+		if inst.LeaseID != "" && occupancy < 1 {
+			occupancy = 1
+		}
+		available := envelope - occupancy
 		if available > 0 {
 			headroom += available
 		}
