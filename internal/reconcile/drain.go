@@ -209,8 +209,8 @@ func prewarmReplica(ctx context.Context, store TaskStore, task domain.Reconcilia
 		Project:             firstNonEmpty(opts.Project, "reconcile-prewarm"),
 		Priority:            domain.PriorityBackground,
 		SpeedPref:           domain.SpeedThroughput,
-		ContextRequest:      modelruntime.EffectiveContextLength(preset),
-		ExpectedConcurrency: 1,
+		ContextRequest:      firstPositive(task.ContextRequest, modelruntime.EffectiveContextLength(preset)),
+		ExpectedConcurrency: firstPositive(task.ExpectedConcurrency, 1),
 		Preemption:          domain.PreemptSoft,
 		Status:              domain.JobQueued,
 		ParentID:            task.JobID,
@@ -333,4 +333,13 @@ func incompatibilityID(task domain.ReconciliationTaskRecord) string {
 		task.Reason,
 	}, "\x00")))
 	return "incompat-" + hex.EncodeToString(sum[:8])
+}
+
+func firstPositive(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
