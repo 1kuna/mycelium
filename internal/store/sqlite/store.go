@@ -137,6 +137,43 @@ func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
 	return projects, err
 }
 
+func (s *Store) SaveModelService(ctx context.Context, service domain.ModelService) error {
+	if service.ID == "" {
+		return fmt.Errorf("model service id is required")
+	}
+	if service.Model == "" {
+		return fmt.Errorf("model service model is required")
+	}
+	if service.Status == "" {
+		return fmt.Errorf("model service status is required")
+	}
+	if service.MinReplicas < 0 || service.MaxReplicas < 0 {
+		return fmt.Errorf("model service replicas must be non-negative")
+	}
+	if service.MaxReplicas > 0 && service.MinReplicas > service.MaxReplicas {
+		return fmt.Errorf("model service min_replicas exceeds max_replicas")
+	}
+	if service.CreatedAt.IsZero() {
+		return fmt.Errorf("model service created_at is required")
+	}
+	if service.UpdatedAt.IsZero() {
+		return fmt.Errorf("model service updated_at is required")
+	}
+	return s.upsertJSON(ctx, "model_services", service.ID, service)
+}
+
+func (s *Store) ModelService(ctx context.Context, id string) (domain.ModelService, error) {
+	var service domain.ModelService
+	err := s.getJSON(ctx, "model_services", id, &service)
+	return service, err
+}
+
+func (s *Store) ListModelServices(ctx context.Context) ([]domain.ModelService, error) {
+	var services []domain.ModelService
+	err := s.listJSON(ctx, "model_services", &services)
+	return services, err
+}
+
 func (s *Store) SavePreset(ctx context.Context, preset domain.Preset) error {
 	if preset.ID == "" {
 		return fmt.Errorf("preset id is required")
@@ -1225,6 +1262,7 @@ PRAGMA busy_timeout = 5000;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS model_services (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS presets (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS instances (id TEXT PRIMARY KEY, data TEXT NOT NULL);

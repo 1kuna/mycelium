@@ -609,6 +609,70 @@ func TestRouterRouteRejectsInvalidPresentedWorkloadLease(t *testing.T) {
 	}
 }
 
+func TestRouterUsesModelServiceHeldLeaseForHeaderlessRequest(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "preset-service"
+		p.ModelRef = "model-service"
+		p.Aliases = []string{"served-model"}
+	})
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("served route ok")))
+	}))
+	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst-service"), fixtures.WithInstancePreset(preset.ID))
+	inst.Addr = upstream
+	lease := domain.Lease{ID: "lease-service", JobID: "svc-job", NodeID: inst.NodeID, InstanceID: inst.ID}
+	service := domain.ModelService{
+		ID:             "service-a",
+		Model:          "served-model",
+		Project:        "project-a",
+		ContextRequest: 4096,
+		MinReplicas:    1,
+		MaxReplicas:    1,
+		Status:         domain.ModelServiceActive,
+	}
+	job := domain.Job{
+		ID:             "svc-job",
+		ParentID:       service.ID,
+		Model:          service.Model,
+		PresetID:       preset.ID,
+		Project:        service.Project,
+		ContextRequest: service.ContextRequest,
+		Status:         domain.JobRunning,
+		Result: &domain.JobResult{
+			Decision: domain.PlacementDecision{JobID: "svc-job", Action: domain.ActionWarmInstance, NodeID: inst.NodeID, InstanceID: inst.ID, Preset: preset},
+			Instance: inst,
+			LeaseID:  lease.ID,
+			NodeID:   inst.NodeID,
+			PresetID: preset.ID,
+		},
+	}
+	agent := mocks.NewNodeAgent(fixtures.MakeNode(fixtures.WithNodeID(inst.NodeID)))
+	router := newTestRouter(preset, domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeNode(fixtures.WithNodeID(inst.NodeID))}, Instances: []domain.ModelInstance{inst}}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
+	store := &gatewayRuntimeStore{services: []domain.ModelService{service}, jobs: []domain.Job{job}, leases: []domain.Lease{lease}}
+	router.Runtime = &scheduler.Service{Placer: router.Placer, Fleet: router.Fleet, Nodes: router.Nodes, Store: store, Queue: scheduler.NewQueue(router.Clock), Clock: router.Clock}
+
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"served-model","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.Project = "project-a"
+	req.ContextRequest = 1024
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if resp.Status != http.StatusOK || !strings.Contains(string(resp.Body), "served route ok") {
+		t.Fatalf("resp=%+v body=%s", resp, resp.Body)
+	}
+	if resp.Header.Get("X-Myc-Model-Service") != service.ID || resp.Header.Get(HeaderLeaseHold) != "true" || resp.Header.Get(HeaderJob) != job.ID {
+		t.Fatalf("headers = %+v", resp.Header)
+	}
+	if len(store.deletedLeases) != 0 || !store.sawJobStatus(domain.JobRunning) {
+		t.Fatalf("managed service request should keep held lease running: jobs=%+v deleted=%+v", store.jobs, store.deletedLeases)
+	}
+}
+
 func TestRouterResolveWorkloadLeaseValidationEdges(t *testing.T) {
 	preset := fixtures.MakePreset()
 	inst := fixtures.MakeInstance()
@@ -3674,6 +3738,9 @@ func TestRouterContextRefusalCreatesReconciliationDemand(t *testing.T) {
 	if len(store.reconcileTasks) != 2 {
 		t.Fatalf("reconciliation tasks = %+v", store.reconcileTasks)
 	}
+	if len(store.services) != 1 || store.services[0].Model != "chandra" || store.services[0].ContextRequest != 4096 || len(store.services[0].CandidatePresetIDs) != 2 {
+		t.Fatalf("model services = %+v", store.services)
+	}
 	for _, task := range store.reconcileTasks {
 		if task.Kind != string(reconcile.TaskRecordIncompatibility) || task.Status != domain.ReconciliationTaskAllowed || !strings.Contains(task.Reason, "context cap") {
 			t.Fatalf("task = %+v", task)
@@ -3731,6 +3798,9 @@ func TestRouterNoInstanceCreatesReconciliationDemand(t *testing.T) {
 	if !found {
 		t.Fatalf("reconciliation tasks = %+v", store.reconcileTasks)
 	}
+	if len(store.services) != 1 || store.services[0].Model != "chandra" || store.services[0].DemandCount != 1 {
+		t.Fatalf("model services = %+v", store.services)
+	}
 
 	before := len(store.reconcileTasks)
 	_, err = router.Route(context.Background(), req)
@@ -3739,6 +3809,9 @@ func TestRouterNoInstanceCreatesReconciliationDemand(t *testing.T) {
 	}
 	if len(store.reconcileTasks) != before+1 {
 		t.Fatalf("independent gateway jobs should create independent demand records, before=%d after=%d tasks=%+v", before, len(store.reconcileTasks), store.reconcileTasks)
+	}
+	if len(store.services) != 1 || store.services[0].DemandCount != 2 {
+		t.Fatalf("second demand should bump service instead of creating ceremony: %+v", store.services)
 	}
 }
 
@@ -4379,6 +4452,7 @@ type gatewayRuntimeStore struct {
 	deletedLeases  []string
 	leases         []domain.Lease
 	jobs           []domain.Job
+	services       []domain.ModelService
 	reconcileTasks []domain.ReconciliationTaskRecord
 	deleteLeaseErr error
 	listLeasesErr  error
@@ -4396,6 +4470,10 @@ func (s *gatewayRuntimeStore) Job(_ context.Context, id string) (domain.Job, err
 		}
 	}
 	return domain.Job{}, sql.ErrNoRows
+}
+
+func (s *gatewayRuntimeStore) ListJobs(context.Context) ([]domain.Job, error) {
+	return append([]domain.Job(nil), s.jobs...), nil
 }
 
 func (s *gatewayRuntimeStore) SaveLease(_ context.Context, lease domain.Lease) error {
@@ -4421,6 +4499,21 @@ func (s *gatewayRuntimeStore) DeleteLease(_ context.Context, id string) error {
 			break
 		}
 	}
+	return nil
+}
+
+func (s *gatewayRuntimeStore) ListModelServices(_ context.Context) ([]domain.ModelService, error) {
+	return append([]domain.ModelService(nil), s.services...), nil
+}
+
+func (s *gatewayRuntimeStore) SaveModelService(_ context.Context, service domain.ModelService) error {
+	for i := range s.services {
+		if s.services[i].ID == service.ID {
+			s.services[i] = service
+			return nil
+		}
+	}
+	s.services = append(s.services, service)
 	return nil
 }
 
