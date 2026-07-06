@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunDelegatesToControlCLI(t *testing.T) {
@@ -15,6 +16,23 @@ func TestRunDelegatesToControlCLI(t *testing.T) {
 	}
 	if err := run(nil, []string{"models", "list", "--db", filepath.Join(t.TempDir(), "control.db")}); err != nil {
 		t.Fatalf("nil context run: %v", err)
+	}
+}
+
+func TestSignalContextCancels(t *testing.T) {
+	ctx, stop := signalContext(nil)
+	stop()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatalf("signal context did not cancel")
+	}
+}
+
+func TestRunMainUsesSignalAwareExecution(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := runMain([]string{"bogus"}, &stderr); code != 1 || !strings.Contains(stderr.String(), "unknown myce command") {
+		t.Fatalf("runMain code=%d stderr=%q", code, stderr.String())
 	}
 }
 
