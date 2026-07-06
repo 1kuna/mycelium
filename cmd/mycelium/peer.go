@@ -3228,6 +3228,15 @@ func (e schedulerPrewarmExecutor) PrewarmReplica(ctx context.Context, job domain
 	}
 	result, err := e.runtime.SubmitWithPayload(ctx, job, []byte(`{"kind":"reconcile_prewarm"}`))
 	if err != nil {
+		job.Status = domain.JobFailed
+		job.Error = err.Error()
+		if job.Result == nil {
+			job.Result = &domain.JobResult{Source: "scheduler", ResultRedacted: true}
+		}
+		job.Result.Terminal = true
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = e.runtime.Store.SaveJob(cleanupCtx, job)
 		return reconcile.PrewarmResult{}, err
 	}
 	return reconcile.PrewarmResult{
