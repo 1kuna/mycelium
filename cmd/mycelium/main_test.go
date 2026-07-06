@@ -1480,7 +1480,7 @@ func TestBuildPeerGatewayWithJoinToken(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &peer); err != nil {
 		t.Fatalf("decode peer health: %v", err)
 	}
-	if peer.ID == "" || len(peer.Addresses) != 1 || peer.Addresses[0] != "127.0.0.1:0" {
+	if peer.ID == "" || len(peer.Addresses) != 1 || peer.Addresses[0] != "127.0.0.1:0" || peer.Version == "" {
 		t.Fatalf("peer health = %+v", peer)
 	}
 	rec = httptest.NewRecorder()
