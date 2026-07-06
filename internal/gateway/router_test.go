@@ -3632,6 +3632,109 @@ func TestPlacementNoFitErrorRecognizesLegacyOwnerAdmissionText(t *testing.T) {
 	}
 }
 
+func TestRouterNoInstanceCreatesReconciliationDemand(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ModelRef = "chandra"
+		p.Aliases = []string{"chandra"}
+		p.ContextLength = 49152
+	})
+	node := fixtures.MakeNode(func(n *domain.Node) {
+		n.ID = "node-small"
+		n.Accelerators = []domain.Accelerator{{Index: 0, VRAMTotalMB: 1}}
+	})
+	store := &gatewayRuntimeStore{}
+	resolver := staticResolver{
+		agents:     map[string]ports.NodeAgent{node.ID: loadNode{node: node, inst: fixtures.MakeInstance(fixtures.OnNode(node.ID))}},
+		admissions: map[string]ports.AdmissionController{node.ID: &mocks.AdmissionController{}},
+	}
+	fleet := staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}}
+	router := newTestRouter(preset, fleet.fleet, resolver)
+	router.Fleet = fleet
+	router.Nodes = resolver
+	router.Runtime = &scheduler.Service{
+		Placer:  router.Placer,
+		Fleet:   fleet,
+		Nodes:   resolver,
+		Owners:  resolver,
+		Queue:   scheduler.NewQueue(router.Clock),
+		Store:   store,
+		Clock:   router.Clock,
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"chandra","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	_, err = router.Route(context.Background(), req)
+	var noInstance noInstanceAvailableError
+	if !errors.As(err, &noInstance) {
+		t.Fatalf("Route error = %v, want no instance", err)
+	}
+	if len(store.reconcileTasks) == 0 {
+		t.Fatalf("expected gateway demand to create reconciliation tasks")
+	}
+	var found bool
+	for _, task := range store.reconcileTasks {
+		if task.Kind == "wait_capacity" && task.JobID == noInstance.JobID && task.Status == domain.ReconciliationTaskAllowed && task.Model == "chandra" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("reconciliation tasks = %+v", store.reconcileTasks)
+	}
+
+	before := len(store.reconcileTasks)
+	_, err = router.Route(context.Background(), req)
+	if !errors.As(err, &noInstance) {
+		t.Fatalf("second Route error = %v, want no instance", err)
+	}
+	if len(store.reconcileTasks) != before+1 {
+		t.Fatalf("independent gateway jobs should create independent demand records, before=%d after=%d tasks=%+v", before, len(store.reconcileTasks), store.reconcileTasks)
+	}
+}
+
+func TestGatewayReconciliationDemandBumpsExistingNonTerminalTask(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ModelRef = "model-a"
+		p.Aliases = []string{"model-a"}
+	})
+	store := &gatewayRuntimeStore{}
+	router := &Router{
+		Runtime: &scheduler.Service{Store: store},
+		Clock:   mocks.NewFakeClock(time.Unix(100, 0).UTC()),
+	}
+	job := domain.Job{ID: "job-a", Model: "model-a"}
+	decision := domain.PlacementDecision{
+		JobID:  job.ID,
+		Preset: preset,
+		Action: domain.ActionQueued,
+		Trace: []domain.TraceStep{{
+			Step:   "filter",
+			Result: "all candidates dropped",
+			Data:   map[string]any{"dropped": map[string]string{"node-a": "fit"}},
+		}},
+	}
+	if err := router.persistGatewayReconciliationDemand(context.Background(), job, decision, preset); err != nil {
+		t.Fatalf("persist demand: %v", err)
+	}
+	if len(store.reconcileTasks) != 1 {
+		t.Fatalf("tasks = %+v", store.reconcileTasks)
+	}
+	if err := router.persistGatewayReconciliationDemand(context.Background(), job, decision, preset); err != nil {
+		t.Fatalf("bump demand: %v", err)
+	}
+	if len(store.reconcileTasks) != 1 || len(store.reconcileTasks[0].Events) != 2 || store.reconcileTasks[0].Events[1].Message != "observed again from gateway demand" {
+		t.Fatalf("bumped tasks = %+v", store.reconcileTasks)
+	}
+	store.reconcileTasks[0].Status = domain.ReconciliationTaskDone
+	if err := router.persistGatewayReconciliationDemand(context.Background(), job, decision, preset); err != nil {
+		t.Fatalf("terminal demand: %v", err)
+	}
+	if len(store.reconcileTasks[0].Events) != 2 {
+		t.Fatalf("terminal task should not be bumped: %+v", store.reconcileTasks[0])
+	}
+}
+
 func TestServerScopesProjectByGatewayTokenWithoutTrustingControlHeaders(t *testing.T) {
 	preset := fixtures.MakePreset()
 	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4227,6 +4330,7 @@ type gatewayRuntimeStore struct {
 	deletedLeases  []string
 	leases         []domain.Lease
 	jobs           []domain.Job
+	reconcileTasks []domain.ReconciliationTaskRecord
 	deleteLeaseErr error
 	listLeasesErr  error
 }
@@ -4276,6 +4380,27 @@ func (s *gatewayRuntimeStore) SaveInstance(context.Context, domain.ModelInstance
 }
 
 func (s *gatewayRuntimeStore) DeleteInstance(context.Context, string) error {
+	return nil
+}
+
+func (s *gatewayRuntimeStore) ListReconciliationTasks(_ context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error) {
+	var out []domain.ReconciliationTaskRecord
+	for _, task := range s.reconcileTasks {
+		if jobID == "" || task.JobID == jobID {
+			out = append(out, task)
+		}
+	}
+	return out, nil
+}
+
+func (s *gatewayRuntimeStore) SaveReconciliationTask(_ context.Context, task domain.ReconciliationTaskRecord) error {
+	for i := range s.reconcileTasks {
+		if s.reconcileTasks[i].ID == task.ID {
+			s.reconcileTasks[i] = task
+			return nil
+		}
+	}
+	s.reconcileTasks = append(s.reconcileTasks, task)
 	return nil
 }
 

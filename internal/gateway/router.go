@@ -22,6 +22,7 @@ import (
 	"mycelium/internal/modelruntime"
 	"mycelium/internal/optimizer"
 	"mycelium/internal/ports"
+	"mycelium/internal/reconcile"
 	"mycelium/internal/scheduler"
 	"mycelium/pkg/api"
 )
@@ -46,6 +47,11 @@ type InstanceMemorySampler interface {
 
 type FailureReporter interface {
 	ReportInstanceFailure(ctx context.Context, instanceID string, err error) error
+}
+
+type reconciliationTaskStore interface {
+	ListReconciliationTasks(ctx context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error)
+	SaveReconciliationTask(ctx context.Context, task domain.ReconciliationTaskRecord) error
 }
 
 type PresetRegistry struct {
@@ -463,10 +469,13 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 			if errors.As(err, &noInstance) {
 				noInstance.Profile = profile
 				noInstance.Attempts = attempt
+				if persistErr := r.persistGatewayReconciliationDemand(ctx, job, noInstance.Decision, preset); persistErr != nil {
+					return RouteResponse{}, errors.Join(noInstance, persistErr)
+				}
 				return RouteResponse{}, noInstance
 			}
 			if placementNoFitError(err) {
-				return RouteResponse{}, noInstanceAvailableError{
+				noInstance := noInstanceAvailableError{
 					JobID:      job.ID,
 					RetryAfter: time.Second,
 					Reason:     err.Error(),
@@ -475,6 +484,10 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 					Profile:    profile,
 					Attempts:   attempt,
 				}
+				if persistErr := r.persistGatewayReconciliationDemand(ctx, job, decision, preset); persistErr != nil {
+					return RouteResponse{}, errors.Join(noInstance, persistErr)
+				}
+				return RouteResponse{}, noInstance
 			}
 			return RouteResponse{}, err
 		}
@@ -833,6 +846,70 @@ func (r *Router) projectForRequest(req translate.IngressRequest) string {
 		return req.Project
 	}
 	return r.DefaultProject
+}
+
+func (r *Router) persistGatewayReconciliationDemand(ctx context.Context, job domain.Job, decision domain.PlacementDecision, preset domain.Preset) error {
+	if r.Runtime == nil || r.Runtime.Store == nil {
+		return nil
+	}
+	store, ok := r.Runtime.Store.(reconciliationTaskStore)
+	if !ok {
+		return nil
+	}
+	if decision.JobID == "" {
+		decision.JobID = job.ID
+	}
+	if decision.JobID == "" || (decision.Action == "" && len(decision.Trace) == 0) {
+		return nil
+	}
+	if decision.Preset.ID == "" {
+		decision.Preset = preset
+	} else {
+		if decision.Preset.ModelRef == "" {
+			decision.Preset.ModelRef = firstString(preset.ModelRef, job.Model)
+		}
+		if len(decision.Preset.Aliases) == 0 {
+			decision.Preset.Aliases = append([]string(nil), preset.Aliases...)
+		}
+	}
+	plan := reconcile.PlanPlacement(decision, reconcile.DefaultStandingPolicy())
+	records := reconcile.RecordsFromPlan(plan, r.clock().Now().UTC())
+	if len(records) == 0 {
+		return nil
+	}
+	existing, err := store.ListReconciliationTasks(ctx, decision.JobID)
+	if err != nil {
+		return fmt.Errorf("persist gateway reconciliation demand: %w", err)
+	}
+	byID := make(map[string]domain.ReconciliationTaskRecord, len(existing))
+	for _, task := range existing {
+		byID[task.ID] = task
+	}
+	for _, task := range records {
+		if current, ok := byID[task.ID]; ok {
+			if reconciliationTaskTerminal(current.Status) || current.Status == domain.ReconciliationTaskRunning {
+				continue
+			}
+			current.UpdatedAt = task.UpdatedAt
+			current.Events = append(current.Events, domain.ReconciliationTaskEvent{
+				Status:  current.Status,
+				Message: "observed again from gateway demand",
+				At:      task.UpdatedAt,
+			})
+			if err := store.SaveReconciliationTask(ctx, current); err != nil {
+				return fmt.Errorf("bump gateway reconciliation demand: %w", err)
+			}
+			continue
+		}
+		if err := store.SaveReconciliationTask(ctx, task); err != nil {
+			return fmt.Errorf("save gateway reconciliation demand: %w", err)
+		}
+	}
+	return nil
+}
+
+func reconciliationTaskTerminal(status domain.ReconciliationTaskStatus) bool {
+	return status == domain.ReconciliationTaskDone || status == domain.ReconciliationTaskFailed
 }
 
 func nonEmptyAction(values ...domain.PlacementAction) domain.PlacementAction {
