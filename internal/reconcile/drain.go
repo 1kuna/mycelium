@@ -3,7 +3,9 @@ package reconcile
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -24,6 +26,10 @@ type TaskStore interface {
 	SaveEngineProfile(ctx context.Context, profile domain.EngineProfile) error
 	ListEngineProfiles(ctx context.Context) ([]domain.EngineProfile, error)
 	MarkEngineProfileUnready(ctx context.Context, profileID, reason string) error
+}
+
+type taskJobReader interface {
+	Job(ctx context.Context, id string) (domain.Job, error)
 }
 
 type DrainOptions struct {
@@ -87,11 +93,18 @@ func DrainAllowedTasks(ctx context.Context, store TaskStore, opts DrainOptions) 
 			report.Skipped++
 			continue
 		}
-		if !drainKindAllowed(TaskKind(task.Kind), opts.Kinds) {
+		if opts.Limit > 0 && report.Drained >= opts.Limit {
 			report.Skipped++
 			continue
 		}
-		if opts.Limit > 0 && report.Drained >= opts.Limit {
+		if result, closed, err := closeTaskForTerminalSourceJob(ctx, store, task, now); err != nil {
+			return report, err
+		} else if closed {
+			report.Drained++
+			report.Results = append(report.Results, result)
+			continue
+		}
+		if !drainKindAllowed(TaskKind(task.Kind), opts.Kinds) {
 			report.Skipped++
 			continue
 		}
@@ -112,6 +125,35 @@ func drainKindAllowed(kind TaskKind, allowed []TaskKind) bool {
 		}
 	}
 	return false
+}
+
+func closeTaskForTerminalSourceJob(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, now time.Time) (DrainTaskResult, bool, error) {
+	if task.JobID == "" || task.Source != "placement_decision" {
+		return DrainTaskResult{}, false, nil
+	}
+	reader, ok := store.(taskJobReader)
+	if !ok {
+		return DrainTaskResult{}, false, nil
+	}
+	job, err := reader.Job(ctx, task.JobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DrainTaskResult{}, false, nil
+	}
+	if err != nil {
+		return DrainTaskResult{}, false, err
+	}
+	if !terminalReconciliationSourceStatus(job.Status) {
+		return DrainTaskResult{}, false, nil
+	}
+	done := transitionTask(task, domain.ReconciliationTaskDone, "", "source job is terminal; reconciliation task no longer applies", now)
+	if err := store.SaveReconciliationTask(ctx, done); err != nil {
+		return DrainTaskResult{}, false, err
+	}
+	return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "source_job_terminal"}, true, nil
+}
+
+func terminalReconciliationSourceStatus(status domain.JobStatus) bool {
+	return status == domain.JobDone || status == domain.JobFailed || status == domain.JobPreempted
 }
 
 func drainTask(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, opts DrainOptions, now time.Time) DrainTaskResult {

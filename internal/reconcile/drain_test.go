@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -92,6 +93,100 @@ func TestDrainAllowedTasksFiltersKindsWithoutMutatingSkippedTasks(t *testing.T) 
 	}
 	if prewarm := store.taskByID("allowed-prewarm"); prewarm.Status != domain.ReconciliationTaskAllowed || len(prewarm.Events) != 0 {
 		t.Fatalf("filtered prewarm task mutated: %+v", prewarm)
+	}
+}
+
+func TestDrainAllowedTasksClosesAllowedTaskForTerminalSourceJob(t *testing.T) {
+	store := &fakeTaskStore{
+		tasks: []domain.ReconciliationTaskRecord{
+			taskRecord("allowed-wait", string(TaskWaitCapacity), domain.ReconciliationTaskAllowed),
+			taskRecord("allowed-prewarm", string(TaskPrewarmReplica), domain.ReconciliationTaskAllowed),
+		},
+		jobs: map[string]domain.Job{
+			"job-a": {ID: "job-a", Status: domain.JobFailed},
+		},
+	}
+	now := time.Unix(26, 0).UTC()
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{
+		Now:   now,
+		Limit: 1,
+		Kinds: []TaskKind{TaskRecordIncompatibility},
+	})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Drained != 1 || report.Skipped != 1 || len(report.Results) != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+	if report.Results[0].Action != "source_job_terminal" || report.Results[0].Kind != string(TaskWaitCapacity) {
+		t.Fatalf("result = %+v", report.Results[0])
+	}
+	if done := store.taskByID("allowed-wait"); done.Status != domain.ReconciliationTaskDone || len(done.Events) != 1 || done.Events[0].Message == "" {
+		t.Fatalf("done task = %+v", done)
+	}
+	if prewarm := store.taskByID("allowed-prewarm"); prewarm.Status != domain.ReconciliationTaskAllowed {
+		t.Fatalf("limited task was mutated: %+v", prewarm)
+	}
+}
+
+func TestDrainAllowedTasksLeavesAllowedTaskWhenSourceJobIsActiveOrMissing(t *testing.T) {
+	for name, jobs := range map[string]map[string]domain.Job{
+		"running": {"job-a": {ID: "job-a", Status: domain.JobRunning}},
+		"missing": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := &fakeTaskStore{
+				tasks: []domain.ReconciliationTaskRecord{taskRecord("allowed-wait", string(TaskWaitCapacity), domain.ReconciliationTaskAllowed)},
+				jobs:  jobs,
+			}
+			report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{
+				Now:   time.Unix(27, 0).UTC(),
+				Kinds: []TaskKind{TaskRecordIncompatibility},
+			})
+			if err != nil {
+				t.Fatalf("DrainAllowedTasks: %v", err)
+			}
+			if report.Drained != 0 || report.Skipped != 1 {
+				t.Fatalf("report = %+v", report)
+			}
+			if task := store.taskByID("allowed-wait"); task.Status != domain.ReconciliationTaskAllowed || len(task.Events) != 0 {
+				t.Fatalf("task mutated = %+v", task)
+			}
+		})
+	}
+}
+
+func TestDrainAllowedTasksDoesNotTreatModelServiceIDAsSourceJob(t *testing.T) {
+	task := taskRecord("service-wait", string(TaskWaitCapacity), domain.ReconciliationTaskAllowed)
+	task.Source = "model_service"
+	task.JobID = "service-a"
+	store := &fakeTaskStore{
+		tasks:  []domain.ReconciliationTaskRecord{task},
+		jobErr: errors.New("job lookup should not run"),
+	}
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{
+		Now:   time.Unix(27, 30).UTC(),
+		Kinds: []TaskKind{TaskRecordIncompatibility},
+	})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Drained != 0 || report.Skipped != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+	if got := store.taskByID("service-wait"); got.Status != domain.ReconciliationTaskAllowed || len(got.Events) != 0 {
+		t.Fatalf("task mutated = %+v", got)
+	}
+}
+
+func TestDrainAllowedTasksReturnsSourceJobLookupErrors(t *testing.T) {
+	store := &fakeTaskStore{
+		tasks:  []domain.ReconciliationTaskRecord{taskRecord("allowed-wait", string(TaskWaitCapacity), domain.ReconciliationTaskAllowed)},
+		jobErr: errors.New("job store unavailable"),
+	}
+	if _, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: time.Unix(28, 0).UTC()}); !errors.Is(err, store.jobErr) {
+		t.Fatalf("job lookup err = %v", err)
 	}
 }
 
@@ -412,6 +507,8 @@ type fakeTaskStore struct {
 	localityPlans     []domain.LocalityPlan
 	localities        []domain.ModelLocality
 	profiles          []domain.EngineProfile
+	jobs              map[string]domain.Job
+	jobErr            error
 	saveIncompatErr   error
 }
 
@@ -434,6 +531,17 @@ func (s *fakeTaskStore) SaveReconciliationTask(_ context.Context, task domain.Re
 	}
 	s.tasks = append(s.tasks, task)
 	return nil
+}
+
+func (s *fakeTaskStore) Job(_ context.Context, id string) (domain.Job, error) {
+	if s.jobErr != nil {
+		return domain.Job{}, s.jobErr
+	}
+	job, ok := s.jobs[id]
+	if !ok {
+		return domain.Job{}, sql.ErrNoRows
+	}
+	return job, nil
 }
 
 func (s *fakeTaskStore) SaveIncompatibility(_ context.Context, rec domain.IncompatibilityRecord) error {
