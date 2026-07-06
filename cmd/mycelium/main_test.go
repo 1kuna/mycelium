@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -4985,6 +4986,56 @@ func TestWorkloadHTTPDrainsQueuedWorkAndReportsTerminalEvidence(t *testing.T) {
 	}
 }
 
+func TestSchedulerPrewarmExecutorUsesWorkloadAdmission(t *testing.T) {
+	if _, err := (schedulerPrewarmExecutor{}).PrewarmReplica(context.Background(), domain.Job{ID: "job-a"}); err == nil || !strings.Contains(err.Error(), "scheduler runtime") {
+		t.Fatalf("nil runtime err = %v", err)
+	}
+	ctx := context.Background()
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	node.Accelerators = []domain.Accelerator{{Index: 0, Vendor: "test", Kind: "gpu", VRAMTotalMB: 1000}}
+	node.MaxUtil = 1
+	node.Status = domain.NodeReady
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("model-a"), fixtures.WithWeights(100), fixtures.WithKVPerToken(0), fixtures.WithContextLength(1024))
+	admission := &mocks.AdmissionController{}
+	placer := &gatedWorkloadPlacer{ready: true, nodeID: node.ID, preset: preset, claim: domain.Claim{WeightsMB: 100}}
+	runtime := &scheduler.Service{
+		Placer:  placer,
+		Fleet:   staticWorkloadFleet{node: node},
+		Nodes:   workloadNodeResolver{agents: map[string]ports.NodeAgent{node.ID: mocks.NewNodeAgent(node)}, admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Owners:  workloadNodeResolver{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Queue:   scheduler.NewQueue(mocks.NewFakeClock(time.Unix(50, 0).UTC())),
+		Store:   store,
+		Clock:   mocks.NewFakeClock(time.Unix(50, 0).UTC()),
+		Presets: map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	result, err := (schedulerPrewarmExecutor{runtime: runtime}).PrewarmReplica(ctx, domain.Job{
+		ID:         "prewarm-job",
+		TaskType:   string(domain.CapabilityChat),
+		Model:      preset.ModelRef,
+		PresetID:   preset.ID,
+		Project:    "project-a",
+		Priority:   domain.PriorityBackground,
+		SpeedPref:  domain.SpeedThroughput,
+		Preemption: domain.PreemptSoft,
+		Status:     domain.JobQueued,
+	})
+	if err != nil {
+		t.Fatalf("PrewarmReplica: %v", err)
+	}
+	if result.WorkloadID != "prewarm-job" || result.NodeID != node.ID || result.InstanceID == "" || result.LeaseID == "" {
+		t.Fatalf("prewarm result = %+v", result)
+	}
+	job, err := store.Job(ctx, "prewarm-job")
+	if err != nil || job.Status != domain.JobRunning || job.Result == nil || !job.Result.PayloadStored || !job.Result.PayloadRedacted {
+		t.Fatalf("stored prewarm job = %+v err=%v", job, err)
+	}
+}
+
 func TestWorkloadHTTPDrainExecuteCapturesProviderResult(t *testing.T) {
 	ctx := context.Background()
 	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
@@ -6352,6 +6403,46 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		return err == nil && len(leases) == 0
 	})
 
+	reconcileStore := &workloadMemoryStore{
+		jobs:    map[string]domain.Job{},
+		presets: map[string]domain.Preset{"preset-a": testPreset("preset-a")},
+	}
+	reconcileStore.reconcileTasks = []domain.ReconciliationTaskRecord{{
+		ID:                 "recon-prewarm",
+		Kind:               string(reconcile.TaskPrewarmReplica),
+		Status:             domain.ReconciliationTaskAllowed,
+		PresetID:           "preset-a",
+		Model:              "model-a",
+		Reason:             "fit",
+		AutomaticCandidate: true,
+		CreatedAt:          time.Unix(1, 0).UTC(),
+		UpdatedAt:          time.Unix(1, 0).UTC(),
+	}, {
+		ID:                 "recon-wait",
+		Kind:               string(reconcile.TaskWaitCapacity),
+		Status:             domain.ReconciliationTaskAllowed,
+		PresetID:           "preset-a",
+		Model:              "model-a",
+		Reason:             "queued",
+		AutomaticCandidate: true,
+		CreatedAt:          time.Unix(1, 0).UTC(),
+		UpdatedAt:          time.Unix(1, 0).UTC(),
+	}}
+	prewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-recon-prewarm", NodeID: "node-a", InstanceID: "inst-a", LeaseID: "lease-a"}}
+	startReconciliationDrainer(ctx, reconcileStore, prewarm, clk, time.Second, 2, "project-a")
+	waitForCondition(t, func() bool {
+		clk.Advance(time.Second)
+		tasks, err := reconcileStore.ListReconciliationTasks(context.Background(), "")
+		if err != nil || len(tasks) != 2 || prewarm.callCount() != 1 {
+			return false
+		}
+		byID := map[string]domain.ReconciliationTaskRecord{}
+		for _, task := range tasks {
+			byID[task.ID] = task
+		}
+		return byID["recon-prewarm"].Status == domain.ReconciliationTaskDone && byID["recon-wait"].Status == domain.ReconciliationTaskAllowed
+	})
+
 	optimizerStore, err := storesqlite.Open(filepath.Join(t.TempDir(), "optimizer.sqlite"))
 	if err != nil {
 		t.Fatalf("Open optimizer: %v", err)
@@ -6730,6 +6821,7 @@ func (a *addressedWorkloadAgent) EndRequest(context.Context, string) error {
 }
 
 type workloadMemoryStore struct {
+	mu             sync.Mutex
 	jobs           map[string]domain.Job
 	results        map[string]domain.WorkloadResultBody
 	records        []domain.JobRecord
@@ -6882,6 +6974,8 @@ func (r failingRescueSnapshotRegistry) RescueSnapshot(context.Context) ([]domain
 }
 
 func (s *workloadMemoryStore) SaveReconciliationTask(_ context.Context, task domain.ReconciliationTaskRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for i := range s.reconcileTasks {
 		if s.reconcileTasks[i].ID == task.ID {
 			s.reconcileTasks[i] = task
@@ -6893,6 +6987,8 @@ func (s *workloadMemoryStore) SaveReconciliationTask(_ context.Context, task dom
 }
 
 func (s *workloadMemoryStore) ListReconciliationTasks(_ context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var out []domain.ReconciliationTaskRecord
 	for _, task := range s.reconcileTasks {
 		if jobID == "" || task.JobID == jobID {
@@ -7020,6 +7116,31 @@ func (l simpleJobLister) ListJobs(context.Context) ([]domain.Job, error) {
 		return nil, l.err
 	}
 	return append([]domain.Job(nil), l.jobs...), nil
+}
+
+type recordingPrewarmExecutor struct {
+	mu     sync.Mutex
+	called int
+	jobs   []domain.Job
+	result reconcile.PrewarmResult
+	err    error
+}
+
+func (e *recordingPrewarmExecutor) PrewarmReplica(_ context.Context, job domain.Job) (reconcile.PrewarmResult, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.called++
+	e.jobs = append(e.jobs, job)
+	if e.err != nil {
+		return reconcile.PrewarmResult{}, e.err
+	}
+	return e.result, nil
+}
+
+func (e *recordingPrewarmExecutor) callCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.called
 }
 
 func TestAllocatorFromReservationsReservesHeadroomAndPinnedPresets(t *testing.T) {
