@@ -328,6 +328,25 @@ func (s *poolPeerServer) handler(t *testing.T) http.Handler {
 		w.Header().Set(gateway.HeaderProject, "pool-ocr")
 		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
 	})
+	mux.HandleFunc("/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer rpc-secret" {
+			t.Fatalf("auth = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{
+			Node: domain.Node{
+				ID:          "node_4090a",
+				Name:        "node_4090a",
+				Status:      domain.NodeReady,
+				MaxUtil:     0.86,
+				OOMSeverity: domain.OOMSoft,
+				Labels:      map[string]string{domain.LabelPeerBackends: string(domain.BackendVLLM)},
+				Accelerators: []domain.Accelerator{{
+					Index:       0,
+					VRAMTotalMB: 32000,
+				}},
+			},
+		})
+	})
 	mux.HandleFunc("/admission/lease-by-instance", func(w http.ResponseWriter, r *http.Request) {
 		instanceID := r.URL.Query().Get("instance_id")
 		if strings.TrimSpace(instanceID) == "" {
@@ -496,6 +515,90 @@ func TestPoolServeOwnsLifecycleAndReleasesOnStop(t *testing.T) {
 			}
 			if len(server.finishes) != 1 || server.finishes[0] != state.Workers[0].WorkloadID {
 				t.Fatalf("pool serve did not release held worker: finishes=%v worker=%+v", server.finishes, state.Workers[0])
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPoolServePlansFromLiveConfigAndOwnsLifecycle(t *testing.T) {
+	server := &poolPeerServer{}
+	ts := httptest.NewServer(server.handler(t))
+	defer ts.Close()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	store.Close()
+	configPath := filepath.Join(dir, "peer.json")
+	cfg := operatorPeerConfig{
+		ID:        "gateway",
+		StorePath: dbPath,
+		RPCToken:  "rpc-secret",
+		SeedPeers: []string{ts.URL},
+		Presets: []domain.Preset{{
+			ID:            "preset_test",
+			ModelRef:      "chandra",
+			Aliases:       []string{"chandra"},
+			Backend:       domain.BackendVLLM,
+			ContextLength: 8000,
+			Capabilities:  []domain.Capability{domain.CapabilityChat, domain.CapabilityVision},
+			NodeID:        "node_4090a",
+			LaunchArgs:    []string{"--gpu-memory-utilization", "0.50"},
+		}},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	statePath := filepath.Join(dir, "serve-state.json")
+	t.Setenv("MYC_TEST_RPC_TOKEN", "rpc-secret")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWithClient(ctx, []string{
+			"pool", "serve",
+			"--config", configPath,
+			"--live",
+			"--model", "chandra",
+			"--context", "8000",
+			"--max-total", "1",
+			"--max-per-node", "1",
+			"--url", ts.URL,
+			"--rpc-token-env", "MYC_TEST_RPC_TOKEN",
+			"--gateway-token", "gateway-secret",
+			"--project", "pool-ocr",
+			"--state", statePath,
+			"--name", "ocr",
+			"--listen", "127.0.0.1:0",
+		}, ts.Client())
+	}()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case err := <-done:
+			t.Fatalf("pool serve exited before cancellation: %v", err)
+		case <-deadline:
+			t.Fatalf("timed out waiting for pool serve to hold a worker")
+		default:
+		}
+		state, err := loadPoolState(statePath)
+		if err == nil && len(state.Workers) == 1 && poolWorkerHeld(state.Workers[0]) {
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatalf("pool serve returned %v", err)
+			}
+			if len(server.finishes) != 1 || server.finishes[0] != state.Workers[0].WorkloadID {
+				t.Fatalf("pool serve did not release held worker: finishes=%v worker=%+v", server.finishes, state.Workers[0])
+			}
+			if len(server.admits) != 1 || server.admits[0].Job.Model != "chandra" || server.admits[0].Job.ContextRequest != 8000 {
+				t.Fatalf("admitted jobs = %+v", server.admits)
 			}
 			return
 		}

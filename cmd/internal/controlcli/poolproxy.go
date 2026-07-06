@@ -93,9 +93,19 @@ func runPoolProxy(ctx context.Context, args []string, client *http.Client) error
 
 func runPoolServe(ctx context.Context, args []string, client *http.Client) error {
 	fs := flag.NewFlagSet("pool serve", flag.ContinueOnError)
-	planPath := fs.String("plan", "", "pool plan JSON from `myce pool plan --out`")
+	planPath := fs.String("plan", "", "optional pool plan JSON from `myce pool plan --out`; if omitted, --model plans from live/config state")
+	model := fs.String("model", "", "model alias, model ref, or preset id to serve")
+	configPath := fs.String("config", "", "peer config JSON; adds configured presets and supplies live peer defaults")
+	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+	contextLen := fs.Int("context", 0, "context length per replica; 0 uses each preset's context")
+	concurrency := fs.Int("concurrency", 0, "expected concurrency envelope per replica; 0 means 1")
+	maxPerNode := fs.Int("max-per-node", 0, "cap additional replicas per node; 0 means no cap")
+	maxTotal := fs.Int("max-total", 0, "cap additional replicas across the fleet; 0 means no cap")
+	live := fs.Bool("live", false, "refresh node and instance state from peers in --config before planning")
 	peerURL := fs.String("url", "", "peer/gateway base URL")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token used for admission, validation, and release")
+	rpcTokenEnv := fs.String("rpc-token-env", "", "environment variable holding the peer RPC bearer token")
+	rpcTokenFile := fs.String("rpc-token-file", "", "file holding the peer RPC bearer token")
 	statePath := fs.String("state", "", "optional debug state JSON path; defaults to a temporary file")
 	name := fs.String("name", "pool", "pool name used in worker job ids and the default project label")
 	project := fs.String("project", "", "project label for pool workers; must match the consumer's project-scoped gateway token")
@@ -108,10 +118,23 @@ func runPoolServe(ctx context.Context, args []string, client *http.Client) error
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 0 || *planPath == "" || *peerURL == "" || *rpcToken == "" {
-		return fmt.Errorf("usage: myce pool serve --plan plan.json --url <peer-url> --rpc-token <token> [--listen 127.0.0.1:0] [--gateway-token ... | --gateway-token-env NAME | --gateway-token-file path]")
+	if fs.NArg() != 0 || *peerURL == "" {
+		return fmt.Errorf("usage: myce pool serve (--model <model> --config peer.json --live | --plan plan.json) --url <peer-url> --rpc-token <token> [--listen 127.0.0.1:0] [--gateway-token ... | --gateway-token-env NAME | --gateway-token-file path]")
+	}
+	resolvedRPC, err := resolvePoolProxyToken(*rpcToken, *rpcTokenEnv, *rpcTokenFile)
+	if err != nil {
+		return fmt.Errorf("resolve pool serve RPC token: %w", err)
+	}
+	if strings.TrimSpace(resolvedRPC) == "" {
+		return fmt.Errorf("pool serve requires an RPC token; pass --rpc-token, --rpc-token-env, or --rpc-token-file")
 	}
 	state := strings.TrimSpace(*statePath)
+	var cleanup []string
+	defer func() {
+		for _, path := range cleanup {
+			_ = os.Remove(path)
+		}
+	}()
 	if state == "" {
 		tmp, err := os.CreateTemp("", "myce-pool-serve-*.json")
 		if err != nil {
@@ -121,9 +144,52 @@ func runPoolServe(ctx context.Context, args []string, client *http.Client) error
 		if err := tmp.Close(); err != nil {
 			return err
 		}
-		defer os.Remove(state)
+		cleanup = append(cleanup, state)
 	}
-	upArgs := []string{"--plan", *planPath, "--url", *peerURL, "--rpc-token", *rpcToken, "--state", state, "--name", *name, "--admit-timeout", admitTimeout.String()}
+	planned := strings.TrimSpace(*planPath)
+	if planned == "" {
+		if strings.TrimSpace(*model) == "" {
+			return fmt.Errorf("pool serve requires --model when --plan is omitted")
+		}
+		tmp, err := os.CreateTemp("", "myce-pool-serve-plan-*.json")
+		if err != nil {
+			return err
+		}
+		planned = tmp.Name()
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		cleanup = append(cleanup, planned)
+		planArgs := []string{"--model", *model, "--out", planned}
+		if poolFlagProvided(fs, "db") {
+			planArgs = append(planArgs, "--db", *dbPath)
+		}
+		if strings.TrimSpace(*configPath) != "" {
+			planArgs = append(planArgs, "--config", *configPath)
+		}
+		if *live {
+			planArgs = append(planArgs, "--live")
+		}
+		if *contextLen > 0 {
+			planArgs = append(planArgs, "--context", fmt.Sprint(*contextLen))
+		}
+		if *concurrency > 0 {
+			planArgs = append(planArgs, "--concurrency", fmt.Sprint(*concurrency))
+		}
+		if *maxPerNode > 0 {
+			planArgs = append(planArgs, "--max-per-node", fmt.Sprint(*maxPerNode))
+		}
+		if *maxTotal > 0 {
+			planArgs = append(planArgs, "--max-total", fmt.Sprint(*maxTotal))
+		}
+		if resolvedRPC != "" {
+			planArgs = append(planArgs, "--rpc-token", resolvedRPC)
+		}
+		if err := runPoolPlan(ctx, planArgs); err != nil {
+			return fmt.Errorf("pool serve plan: %w", err)
+		}
+	}
+	upArgs := []string{"--plan", planned, "--url", *peerURL, "--rpc-token", resolvedRPC, "--state", state, "--name", *name, "--admit-timeout", admitTimeout.String()}
 	if *project != "" {
 		upArgs = append(upArgs, "--project", *project)
 	}
@@ -136,9 +202,9 @@ func runPoolServe(ctx context.Context, args []string, client *http.Client) error
 	defer func() {
 		downCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		_ = runPoolDown(downCtx, []string{"--state", state, "--url", *peerURL, "--rpc-token", *rpcToken, "--reason", "pool serve stopped"}, client)
+		_ = runPoolDown(downCtx, []string{"--state", state, "--url", *peerURL, "--rpc-token", resolvedRPC, "--reason", "pool serve stopped"}, client)
 	}()
-	proxyArgs := []string{"--state", state, "--url", *peerURL, "--rpc-token", *rpcToken, "--listen", *listen}
+	proxyArgs := []string{"--state", state, "--url", *peerURL, "--rpc-token", resolvedRPC, "--listen", *listen}
 	if *token != "" {
 		proxyArgs = append(proxyArgs, "--gateway-token", *token)
 	}
