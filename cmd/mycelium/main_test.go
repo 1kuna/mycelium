@@ -4560,6 +4560,13 @@ func TestWorkloadHTTPErrorBranches(t *testing.T) {
 
 func TestWorkloadHTTPCancelTerminalizesJobWithoutLeaseEvidence(t *testing.T) {
 	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	store.records = []domain.JobRecord{{
+		JobID:       "job-queued",
+		Coordinator: "peer-a",
+		Status:      domain.JobQueued,
+		Request:     []byte(`{"job":{"id":"job-queued"}}`),
+		UpdatedAt:   time.Unix(10, 0).UTC(),
+	}}
 	if err := store.SaveJob(context.Background(), domain.Job{
 		ID:      "job-queued",
 		Model:   "model-a",
@@ -4591,6 +4598,13 @@ func TestWorkloadHTTPCancelTerminalizesJobWithoutLeaseEvidence(t *testing.T) {
 	if latest.Status != domain.JobFailed || latest.Result == nil || latest.Result.Source != "operator_cancel" {
 		t.Fatalf("stored job = %+v", latest)
 	}
+	registry, found, err := store.JobRecord(context.Background(), "job-queued")
+	if err != nil || !found {
+		t.Fatalf("registry record found=%v err=%v", found, err)
+	}
+	if registry.Status != domain.JobFailed || registry.CleanupRequired || !strings.Contains(registry.RecoveryNote, "operator canceled workload") {
+		t.Fatalf("registry record = %+v", registry)
+	}
 }
 
 func TestWorkloadHTTPCancelUsesRuntimeFinishWhenLeaseEvidenceExists(t *testing.T) {
@@ -4607,6 +4621,14 @@ func TestWorkloadHTTPCancelUsesRuntimeFinishWhenLeaseEvidenceExists(t *testing.T
 		Result:  result,
 	}
 	store := &workloadMemoryStore{jobs: map[string]domain.Job{job.ID: job}}
+	store.records = []domain.JobRecord{{
+		JobID:        "job-running",
+		Coordinator:  "peer-a",
+		AssignedNode: "node-a",
+		Status:       domain.JobRunning,
+		Request:      []byte(`{"job":{"id":"job-running"}}`),
+		UpdatedAt:    time.Unix(10, 0).UTC(),
+	}}
 	runtime := &recordingWorkloadRuntime{store: store}
 	mux := http.NewServeMux()
 	mountWorkloadHTTP(mux, runtime, store, "rpc-secret", "peer-a", nil)
@@ -4623,6 +4645,135 @@ func TestWorkloadHTTPCancelUsesRuntimeFinishWhenLeaseEvidenceExists(t *testing.T
 	}
 	if latest.Status != domain.JobFailed || latest.Error != "operator release" || latest.Result == nil || latest.Result.LeaseID != "lease-a" || !latest.Result.Terminal {
 		t.Fatalf("stored job = %+v", latest)
+	}
+	registry, found, err := store.JobRecord(context.Background(), "job-running")
+	if err != nil || !found {
+		t.Fatalf("registry record found=%v err=%v", found, err)
+	}
+	if registry.Status != domain.JobFailed || registry.CleanupRequired || !strings.Contains(registry.RecoveryNote, "operator canceled workload") {
+		t.Fatalf("registry record = %+v", registry)
+	}
+}
+
+func TestWorkloadHTTPCancelTerminalizesRegistryOnlyRecord(t *testing.T) {
+	job := domain.Job{
+		ID:      "registry-only",
+		Model:   "model-a",
+		Project: "project-a",
+		Status:  domain.JobQueued,
+	}
+	payload, err := peercoord.EncodeRescuePayload(job, []byte(`{"kind":"openai_chat","body":{}}`))
+	if err != nil {
+		t.Fatalf("encode payload: %v", err)
+	}
+	store := &workloadMemoryStore{}
+	store.records = []domain.JobRecord{{
+		JobID:       job.ID,
+		Coordinator: "peer-a",
+		Status:      domain.JobQueued,
+		Request:     payload,
+		UpdatedAt:   time.Unix(10, 0).UTC(),
+	}}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store}, store, "rpc-secret", "peer-a", nil)
+	req := httptest.NewRequest(http.MethodPost, "/workloads/registry-only/cancel", strings.NewReader(`{"reason":"orphan cleanup"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	latest, err := store.Job(context.Background(), "registry-only")
+	if err != nil {
+		t.Fatalf("latest job: %v", err)
+	}
+	if latest.Status != domain.JobFailed || latest.Result == nil || latest.Result.Source != "operator_cancel_registry_only" {
+		t.Fatalf("stored job = %+v", latest)
+	}
+	registry, found, err := store.JobRecord(context.Background(), "registry-only")
+	if err != nil || !found {
+		t.Fatalf("registry record found=%v err=%v", found, err)
+	}
+	if registry.Status != domain.JobFailed || !strings.Contains(registry.RecoveryNote, "orphan cleanup") {
+		t.Fatalf("registry record = %+v", registry)
+	}
+}
+
+func TestWorkloadHTTPCancelRegistryOnlyRecordWithUnreadablePayload(t *testing.T) {
+	store := &workloadMemoryStore{}
+	store.records = []domain.JobRecord{{
+		JobID:       "registry-only",
+		Coordinator: "peer-a",
+		Status:      domain.JobQueued,
+		Request:     []byte(`not a rescue payload`),
+		UpdatedAt:   time.Unix(10, 0).UTC(),
+	}}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store}, store, "rpc-secret", "peer-a", nil)
+	req := httptest.NewRequest(http.MethodPost, "/workloads/registry-only/cancel", strings.NewReader(`{"reason":"orphan cleanup"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	latest, err := store.Job(context.Background(), "registry-only")
+	if err != nil {
+		t.Fatalf("latest job: %v", err)
+	}
+	if latest.Status != domain.JobFailed || latest.ID != "registry-only" || latest.Result == nil || latest.Result.Source != "operator_cancel_registry_only" {
+		t.Fatalf("stored job = %+v", latest)
+	}
+}
+
+func TestWorkloadHTTPCancelMissingWorkloadAndRegistryReturnsNotFound(t *testing.T) {
+	store := &workloadMemoryStore{}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store}, store, "rpc-secret", "peer-a", nil)
+	req := httptest.NewRequest(http.MethodPost, "/workloads/missing/cancel", strings.NewReader(`{"reason":"orphan cleanup"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cancel status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWorkloadCancelRegistryHelpersHandleMissingRegistry(t *testing.T) {
+	ctx := context.Background()
+	store := workloadStatusOnlyStore{}
+	if err := recordWorkloadCancelRegistry(ctx, store, "job-a", "cleanup"); err != nil {
+		t.Fatalf("record without registry support: %v", err)
+	}
+	if _, err := cancelRegistryOnlyWorkload(ctx, store, "job-a", workload.CancelRequest{Reason: "cleanup"}); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("cancel without registry err = %v", err)
+	}
+
+	mem := &workloadMemoryStore{}
+	if _, err := cancelRegistryOnlyWorkload(ctx, mem, "missing", workload.CancelRequest{Reason: "cleanup"}); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("cancel missing registry err = %v", err)
+	}
+}
+
+func TestRecordWorkloadCancelRegistryAppendsRecoveryNote(t *testing.T) {
+	ctx := context.Background()
+	store := &workloadMemoryStore{records: []domain.JobRecord{{
+		JobID:        "job-a",
+		Coordinator:  "peer-a",
+		Status:       domain.JobRunning,
+		Request:      []byte(`{"job":{"id":"job-a"}}`),
+		RecoveryNote: "existing",
+		UpdatedAt:    time.Unix(10, 0).UTC(),
+	}}}
+	if err := recordWorkloadCancelRegistry(ctx, store, "job-a", "cleanup"); err != nil {
+		t.Fatalf("record registry cancel: %v", err)
+	}
+	rec, found, err := store.JobRecord(ctx, "job-a")
+	if err != nil || !found {
+		t.Fatalf("registry record found=%v err=%v", found, err)
+	}
+	if rec.Status != domain.JobFailed || rec.RecoveryNote != "existing; operator canceled workload: cleanup" {
+		t.Fatalf("registry record = %+v", rec)
 	}
 }
 
