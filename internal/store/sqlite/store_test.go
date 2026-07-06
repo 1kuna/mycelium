@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -693,6 +694,131 @@ func TestStoreRescueSnapshotFiltersInSQL(t *testing.T) {
 	again, err := store.RescueSnapshot(ctx)
 	if err != nil || string(again[0].Request) != string(running.Request) {
 		t.Fatalf("rescue snapshot clone = %+v err=%v", again, err)
+	}
+}
+
+func TestStoreRescueSnapshotIgnoresFatTerminalHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	for i := 0; i < 50; i++ {
+		rec := fixtures.MakeJobRecord(fixtures.WithRecordJobID(fmt.Sprintf("terminal-%02d", i)))
+		rec.Status = domain.JobDone
+		rec.Request = []byte(strings.Repeat("x", 128*1024))
+		rec.UpdatedAt = time.Unix(int64(i+1), 0).UTC()
+		must(t, store.Put(ctx, rec))
+	}
+	running := fixtures.MakeJobRecord(fixtures.WithRecordJobID("running"))
+	running.Status = domain.JobRunning
+	running.UpdatedAt = time.Unix(100, 0).UTC()
+	must(t, store.Put(ctx, running))
+
+	if _, err := store.db.ExecContext(ctx, `UPDATE job_records SET data = ? WHERE status = ?`, `{not-json`, string(domain.JobDone)); err != nil {
+		t.Fatalf("poison terminal history: %v", err)
+	}
+	got, err := store.RescueSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RescueSnapshot: %v", err)
+	}
+	if len(got) != 1 || got[0].JobID != "running" {
+		t.Fatalf("rescue snapshot = %+v", got)
+	}
+}
+
+func TestStoreJobRecordsAfterUsesCursorInSQL(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	old := fixtures.MakeJobRecord(fixtures.WithRecordJobID("old"))
+	old.Status = domain.JobDone
+	old.Request = []byte(strings.Repeat("x", 128*1024))
+	old.UpdatedAt = time.Unix(10, 0).UTC()
+	must(t, store.Put(ctx, old))
+	newer := fixtures.MakeJobRecord(fixtures.WithRecordJobID("new"))
+	newer.Status = domain.JobRunning
+	newer.UpdatedAt = time.Unix(20, 0).UTC()
+	must(t, store.Put(ctx, newer))
+	if _, err := store.db.ExecContext(ctx, `UPDATE job_records SET data = ? WHERE id = ?`, `{not-json`, old.JobID); err != nil {
+		t.Fatalf("poison old history: %v", err)
+	}
+
+	got, err := store.jobRecordsAfter(ctx, time.Unix(15, 0).UTC())
+	if err != nil {
+		t.Fatalf("jobRecordsAfter: %v", err)
+	}
+	if len(got) != 1 || got[0].JobID != "new" {
+		t.Fatalf("jobRecordsAfter = %+v", got)
+	}
+}
+
+func TestStoreMigratesJobRecordScalarColumns(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "control.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `CREATE TABLE job_records (id TEXT PRIMARY KEY, data TEXT NOT NULL)`); err != nil {
+		t.Fatalf("create old job_records: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `
+CREATE INDEX idx_job_records_status ON job_records(json_extract(data, '$.status'));
+CREATE INDEX idx_job_records_cleanup ON job_records(json_extract(data, '$.cleanup_required'));
+CREATE INDEX idx_job_records_updated ON job_records(json_extract(data, '$.updated_at'));`); err != nil {
+		t.Fatalf("create old job record indexes: %v", err)
+	}
+	rec := fixtures.MakeJobRecord(fixtures.WithRecordJobID("running"))
+	rec.Status = domain.JobRunning
+	rec.UpdatedAt = time.Unix(42, 0).UTC()
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO job_records (id, data) VALUES (?, ?)`, rec.JobID, string(data)); err != nil {
+		t.Fatalf("insert old record: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw sqlite: %v", err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open migrated store: %v", err)
+	}
+	defer store.Close()
+	var status, updated string
+	var cleanupRequired int
+	if err := store.db.QueryRowContext(ctx, `SELECT status, cleanup_required, updated_at FROM job_records WHERE id = ?`, rec.JobID).Scan(&status, &cleanupRequired, &updated); err != nil {
+		t.Fatalf("query migrated columns: %v", err)
+	}
+	if status != string(domain.JobRunning) || cleanupRequired != 0 || updated != rec.UpdatedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("migrated columns = status=%q cleanup=%d updated=%q", status, cleanupRequired, updated)
+	}
+	var scalarIndexes int
+	if err := store.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM sqlite_master
+WHERE type = 'index'
+  AND name IN ('idx_job_records_status_scalar', 'idx_job_records_cleanup_scalar', 'idx_job_records_updated_scalar', 'idx_job_records_rescue_scalar')`).Scan(&scalarIndexes); err != nil {
+		t.Fatalf("query scalar indexes: %v", err)
+	}
+	if scalarIndexes != 4 {
+		t.Fatalf("scalar index count = %d", scalarIndexes)
+	}
+	var expressionIndexes int
+	if err := store.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM sqlite_master
+WHERE type = 'index'
+  AND name IN ('idx_job_records_status', 'idx_job_records_cleanup', 'idx_job_records_updated')`).Scan(&expressionIndexes); err != nil {
+		t.Fatalf("query expression indexes: %v", err)
+	}
+	if expressionIndexes != 0 {
+		t.Fatalf("legacy expression index count = %d", expressionIndexes)
 	}
 }
 
