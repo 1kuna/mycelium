@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"mycelium/internal/domain"
+	"mycelium/internal/gateway"
 	"mycelium/internal/pool"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/internal/workload"
@@ -323,6 +324,26 @@ type poolPeerServer struct {
 func (s *poolPeerServer) handler(t *testing.T) http.Handler {
 	t.Helper()
 	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(gateway.HeaderProject, "pool-ocr")
+		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+	})
+	mux.HandleFunc("/admission/lease-by-instance", func(w http.ResponseWriter, r *http.Request) {
+		instanceID := r.URL.Query().Get("instance_id")
+		if strings.TrimSpace(instanceID) == "" {
+			http.Error(w, "missing instance_id", http.StatusBadRequest)
+			return
+		}
+		jobID := strings.TrimPrefix(instanceID, "inst-")
+		if jobID == instanceID {
+			_ = json.NewEncoder(w).Encode(poolAdmissionLeaseResponse{})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(poolAdmissionLeaseResponse{
+			Found: true,
+			Lease: domain.Lease{ID: "lease-" + jobID, JobID: jobID, InstanceID: instanceID},
+		})
+	})
 	mux.HandleFunc("/workloads", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -382,6 +403,103 @@ func (s *poolPeerServer) handler(t *testing.T) http.Handler {
 		}
 	})
 	return mux
+}
+
+func TestPoolStatusDoesNotReportRunningForInactiveLease(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/workloads/w-stale", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(workload.StatusResponse{
+			Job: domain.Job{ID: "w-stale", Status: domain.JobRunning},
+			Result: &domain.JobResult{
+				LeaseID:  "lease-stale",
+				Instance: domain.ModelInstance{ID: "inst-stale"},
+				NodeID:   "node_spark",
+			},
+		})
+	})
+	mux.HandleFunc("/admission/lease-by-instance", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(poolAdmissionLeaseResponse{})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "pool.json")
+	if err := writePrettyJSONFile(statePath, poolState{Name: "ocr", Model: "chandra", Workers: []poolWorker{
+		{WorkloadID: "w-stale", NodeID: "node_spark", Status: string(domain.JobRunning), InstanceID: "inst-stale", LeaseID: "lease-stale"},
+	}}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "status", "--state", statePath, "--url", ts.URL,
+	}, ts.Client()); err != nil {
+		t.Fatalf("pool status: %v", err)
+	}
+	state, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if state.Workers[0].Status != "lease_inactive" || !strings.Contains(state.Workers[0].Error, "no active admission lease") {
+		t.Fatalf("stale worker should be lease_inactive, got %+v", state.Workers[0])
+	}
+	if poolWorkerHeld(state.Workers[0]) {
+		t.Fatalf("stale worker must not count as held")
+	}
+}
+
+func TestPoolServeOwnsLifecycleAndReleasesOnStop(t *testing.T) {
+	server := &poolPeerServer{}
+	ts := httptest.NewServer(server.handler(t))
+	defer ts.Close()
+	dir := t.TempDir()
+	planPath := writePoolPlanFile(t, dir, pool.Plan{
+		Model:       "chandra",
+		Concurrency: 1,
+		Nodes: []pool.NodePlan{{
+			NodeID:          "node_4090a",
+			PresetID:        "preset_test",
+			ContextLength:   8000,
+			Additional:      1,
+			ClaimPerReplica: domain.Claim{WeightsMB: 5600},
+		}},
+		TotalAdditional: 1,
+	})
+	statePath := filepath.Join(dir, "serve-state.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWithClient(ctx, []string{
+			"pool", "serve",
+			"--plan", planPath,
+			"--url", ts.URL,
+			"--rpc-token", "rpc-secret",
+			"--gateway-token", "gateway-secret",
+			"--state", statePath,
+			"--name", "ocr",
+			"--listen", "127.0.0.1:0",
+		}, ts.Client())
+	}()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case err := <-done:
+			t.Fatalf("pool serve exited before cancellation: %v", err)
+		case <-deadline:
+			t.Fatalf("timed out waiting for pool serve to hold a worker")
+		default:
+		}
+		state, err := loadPoolState(statePath)
+		if err == nil && len(state.Workers) == 1 && poolWorkerHeld(state.Workers[0]) {
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatalf("pool serve returned %v", err)
+			}
+			if len(server.finishes) != 1 || server.finishes[0] != state.Workers[0].WorkloadID {
+				t.Fatalf("pool serve did not release held worker: finishes=%v worker=%+v", server.finishes, state.Workers[0])
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func writePoolPlanFile(t *testing.T, dir string, plan pool.Plan) string {

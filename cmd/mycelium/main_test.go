@@ -3915,6 +3915,46 @@ func TestMountNodeHTTPIncludesAdmissionRuntimeRoutes(t *testing.T) {
 	}
 }
 
+func TestWorkloadLeaseAndSchedulerResultValidation(t *testing.T) {
+	if _, err := workloadLease(domain.Job{ID: "missing-result"}); err == nil || !strings.Contains(err.Error(), "no scheduler result evidence") {
+		t.Fatalf("missing result error = %v", err)
+	}
+	if _, err := workloadLease(domain.Job{ID: "missing-lease", Result: &domain.JobResult{}}); err == nil || !strings.Contains(err.Error(), "no active lease evidence") {
+		t.Fatalf("missing lease error = %v", err)
+	}
+	job := domain.Job{
+		ID:     "job-a",
+		Status: domain.JobRunning,
+		Result: &domain.JobResult{
+			LeaseID: "lease-a",
+			NodeID:  "node-a",
+			Instance: domain.ModelInstance{
+				ID:       "inst-a",
+				NodeID:   "node-a",
+				PresetID: "preset-a",
+			},
+		},
+	}
+	lease, err := workloadLease(job)
+	if err != nil {
+		t.Fatalf("workload lease: %v", err)
+	}
+	if lease.ID != "lease-a" || lease.JobID != "job-a" || lease.InstanceID != "inst-a" || lease.NodeID != "node-a" {
+		t.Fatalf("lease = %+v", lease)
+	}
+	result, err := workloadSchedulerResult(job)
+	if err != nil {
+		t.Fatalf("scheduler result: %v", err)
+	}
+	if result.Lease.ID != lease.ID || result.Instance.ID != "inst-a" {
+		t.Fatalf("scheduler result = %+v", result)
+	}
+	job.Status = domain.JobQueued
+	if _, err := workloadSchedulerResult(job); err == nil || !strings.Contains(err.Error(), "job-a") || !strings.Contains(err.Error(), "queued") {
+		t.Fatalf("queued scheduler result error = %v", err)
+	}
+}
+
 func TestCombinedFleetAndNodesDelegateAcrossSources(t *testing.T) {
 	ctx := context.Background()
 	leftAdmission := &mocks.AdmissionController{}

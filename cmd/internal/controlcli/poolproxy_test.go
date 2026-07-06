@@ -2,6 +2,7 @@ package controlcli
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 	"mycelium/internal/domain"
 	"mycelium/internal/gateway"
+	"mycelium/internal/workload"
 )
 
 type proxyGateway struct {
@@ -306,6 +308,25 @@ func TestPoolProxyModelsURL(t *testing.T) {
 	}
 }
 
+func TestPoolProxyPeerURLStripsV1Suffix(t *testing.T) {
+	cases := map[string]string{
+		"http://gateway":             "http://gateway",
+		"http://gateway/":            "http://gateway",
+		"http://gateway/v1":          "http://gateway",
+		"http://gateway/custom/v1":   "http://gateway/custom",
+		"http://gateway/custom/base": "http://gateway/custom/base",
+	}
+	for raw, want := range cases {
+		target, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		if got := poolProxyPeerURL(target); got != want {
+			t.Fatalf("peer url for %s = %s want %s", raw, got, want)
+		}
+	}
+}
+
 func TestRunPoolProxyValidation(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "pool.json")
@@ -335,8 +356,165 @@ func TestRunPoolProxyValidation(t *testing.T) {
 	if err := writePrettyJSONFile(heldPath, held); err != nil {
 		t.Fatalf("seed held state: %v", err)
 	}
-	if err := RunWithClient(context.Background(), []string{"pool", "proxy", "--state", heldPath, "--url", "http://x"}, http.DefaultClient); err == nil || !strings.Contains(err.Error(), "requires a gateway token") {
-		t.Fatalf("missing token error = %v", err)
+	if err := RunWithClient(context.Background(), []string{"pool", "proxy", "--state", heldPath, "--url", "http://x"}, http.DefaultClient); err == nil || !strings.Contains(err.Error(), "requires an RPC token") {
+		t.Fatalf("missing rpc token error = %v", err)
+	}
+	if err := RunWithClient(context.Background(), []string{"pool", "proxy", "--state", heldPath, "--url", "http://x", "--gateway-token", "gw"}, http.DefaultClient); err == nil || !strings.Contains(err.Error(), "requires an RPC token") {
+		t.Fatalf("missing rpc token error = %v", err)
+	}
+}
+
+func TestPoolProxyDropsWorkersThatFailLiveLeaseValidation(t *testing.T) {
+	g := &proxyGateway{}
+	backend := httptest.NewServer(g.handler())
+	defer backend.Close()
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend url: %v", err)
+	}
+	workers := []poolWorker{
+		{WorkloadID: "stale", LeaseID: "lease-stale", InstanceID: "inst-stale", NodeID: "node_a", Status: string(domain.JobRunning)},
+		{WorkloadID: "fresh", LeaseID: "lease-fresh", InstanceID: "inst-fresh", NodeID: "node_b", Status: string(domain.JobRunning)},
+	}
+	handler := newPoolProxyHandler(workers, target, "gw-secret", backend.Client())
+	handler.validator = func(ctx context.Context, worker *poolWorker) error {
+		if worker.WorkloadID == "stale" {
+			markPoolWorkerLeaseInactive(worker, "instance has no active admission lease")
+		}
+		return nil
+	}
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	resp, err := http.Post(proxy.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"chandra"}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"workload":"fresh"`) {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	if len(g.requests) != 1 || g.requests[0].workload != "fresh" {
+		t.Fatalf("proxy forwarded stale worker: %+v", g.requests)
+	}
+
+	handler.validator = func(ctx context.Context, worker *poolWorker) error {
+		markPoolWorkerLeaseInactive(worker, "lease inactive")
+		return nil
+	}
+	resp, err = http.Post(proxy.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"chandra"}`))
+	if err != nil {
+		t.Fatalf("post after stale: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "no gateway-usable held workers") {
+		t.Fatalf("all stale status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestRefreshPoolProxyWorkersRequiresGatewayUsableLease(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/workloads/fresh", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(workload.StatusResponse{
+			Job: domain.Job{ID: "fresh", Status: domain.JobRunning},
+			Result: &domain.JobResult{
+				LeaseID:  "lease-fresh",
+				Instance: domain.ModelInstance{ID: "inst-fresh"},
+				NodeID:   "node_b",
+			},
+		})
+	})
+	mux.HandleFunc("/workloads/stale", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(workload.StatusResponse{
+			Job: domain.Job{ID: "stale", Status: domain.JobRunning},
+			Result: &domain.JobResult{
+				LeaseID:  "lease-stale",
+				Instance: domain.ModelInstance{ID: "inst-stale"},
+				NodeID:   "node_a",
+			},
+		})
+	})
+	mux.HandleFunc("/admission/lease-by-instance", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("instance_id") == "inst-fresh" {
+			_ = json.NewEncoder(w).Encode(poolAdmissionLeaseResponse{
+				Found: true,
+				Lease: domain.Lease{ID: "lease-fresh", JobID: "fresh", InstanceID: "inst-fresh"},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(poolAdmissionLeaseResponse{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	workers, err := refreshPoolProxyWorkers(context.Background(), srv.Client(), srv.URL, "rpc", []poolWorker{
+		{WorkloadID: "stale", LeaseID: "lease-stale", InstanceID: "inst-stale", NodeID: "node_a", Status: string(domain.JobRunning)},
+		{WorkloadID: "fresh", LeaseID: "lease-fresh", InstanceID: "inst-fresh", NodeID: "node_b", Status: string(domain.JobRunning)},
+	})
+	if err != nil {
+		t.Fatalf("refresh workers: %v", err)
+	}
+	if len(workers) != 1 || workers[0].WorkloadID != "fresh" {
+		t.Fatalf("workers = %+v", workers)
+	}
+	if _, err := refreshPoolProxyWorkers(context.Background(), srv.Client(), srv.URL, "rpc", []poolWorker{
+		{WorkloadID: "stale", LeaseID: "lease-stale", InstanceID: "inst-stale", NodeID: "node_a", Status: string(domain.JobRunning)},
+	}); err == nil || !strings.Contains(err.Error(), "no gateway-usable held workers") {
+		t.Fatalf("expected no-usable-workers error, got %v", err)
+	}
+}
+
+func TestRunPoolProxyRefusesInactiveHeldLeaseBeforeServing(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(gateway.HeaderProject, "project-a")
+		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+	})
+	mux.HandleFunc("/workloads/w-stale", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(workload.StatusResponse{
+			Job: domain.Job{ID: "w-stale", Status: domain.JobRunning},
+			Result: &domain.JobResult{
+				LeaseID:  "lease-stale",
+				Instance: domain.ModelInstance{ID: "inst-stale"},
+				NodeID:   "node_a",
+			},
+		})
+	})
+	mux.HandleFunc("/admission/lease-by-instance", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(poolAdmissionLeaseResponse{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "pool.json")
+	if err := writePrettyJSONFile(statePath, poolState{Name: "ocr", Model: "chandra", Project: "project-a", Workers: []poolWorker{
+		{WorkloadID: "w-stale", LeaseID: "lease-stale", InstanceID: "inst-stale", NodeID: "node_a", Status: string(domain.JobRunning)},
+	}}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	err := RunWithClient(context.Background(), []string{
+		"pool", "proxy",
+		"--state", statePath,
+		"--url", srv.URL,
+		"--rpc-token", "rpc-secret",
+		"--gateway-token", "gateway-secret",
+	}, srv.Client())
+	if err == nil || !strings.Contains(err.Error(), "no gateway-usable held workers") {
+		t.Fatalf("expected stale lease refusal, got %v", err)
+	}
+}
+
+func TestMergePoolProxyWorkerValidationKeepsOriginalOrdering(t *testing.T) {
+	merged := mergePoolProxyWorkerValidation([]poolWorker{
+		{WorkloadID: "stale", Status: string(domain.JobRunning), LeaseID: "old"},
+		{WorkloadID: "fresh", Status: string(domain.JobRunning), LeaseID: "old"},
+	}, []poolWorker{
+		{WorkloadID: "fresh", Status: string(domain.JobRunning), LeaseID: "new", InstanceID: "inst-new"},
+	})
+	if len(merged) != 2 || merged[0].LeaseID != "old" || merged[1].LeaseID != "new" || merged[1].InstanceID != "inst-new" {
+		t.Fatalf("merged = %+v", merged)
 	}
 }
 
