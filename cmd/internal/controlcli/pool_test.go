@@ -66,6 +66,50 @@ func TestPoolPlanWritesPlanFromControlStore(t *testing.T) {
 	}
 }
 
+func TestOverlayPoolSnapshotsReplacesStaleStoreInstances(t *testing.T) {
+	stale := domain.ModelInstance{
+		ID:       "stale-b70",
+		NodeID:   "b70",
+		PresetID: "old-qwen",
+		State:    domain.InstReady,
+		Claim:    domain.Claim{WeightsMB: 26000},
+	}
+	other := domain.ModelInstance{
+		ID:       "warm-spark",
+		NodeID:   "spark",
+		PresetID: "spark-chandra",
+		State:    domain.InstReady,
+		Claim:    domain.Claim{WeightsMB: 56000},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/snapshot" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer rpc-secret" {
+			t.Fatalf("auth = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{
+			Node:      domain.Node{ID: "b70", Status: domain.NodeReady, MaxUtil: 0.86, Accelerators: []domain.Accelerator{{Index: 0, VRAMTotalMB: 31023}}},
+			Instances: nil,
+		})
+	}))
+	defer server.Close()
+
+	nodes, instances, err := overlayPoolSnapshots(context.Background(), server.Client(),
+		[]domain.Node{{ID: "b70", Status: domain.NodeReady}, {ID: "spark", Status: domain.NodeReady}},
+		[]domain.ModelInstance{stale, other},
+		[]string{server.URL}, "rpc-secret")
+	if err != nil {
+		t.Fatalf("overlay snapshots: %v", err)
+	}
+	if len(nodes) != 2 || nodes[0].ID != "b70" || nodes[0].MaxUtil != 0.86 {
+		t.Fatalf("nodes = %+v", nodes)
+	}
+	if len(instances) != 1 || instances[0].ID != other.ID {
+		t.Fatalf("instances = %+v", instances)
+	}
+}
+
 func TestPoolPlanFailsWithoutMatchingPreset(t *testing.T) {
 	dbPath := seedPoolStore(t)
 	err := RunWithClient(context.Background(), []string{
