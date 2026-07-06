@@ -74,6 +74,22 @@ func TestPlanPlacementClassifiesContextAndCatalogGaps(t *testing.T) {
 		t.Fatalf("task = %+v", task)
 	}
 
+	groupRejected := PlanPlacement(domain.PlacementDecision{
+		JobID:  "job-group-context",
+		Action: domain.ActionQueued,
+		Preset: domain.Preset{ID: "small", Aliases: []string{"shared-model"}},
+		Trace: []domain.TraceStep{{
+			Step:   "resolve",
+			Result: `no preset for model "shared-model" can satisfy job`,
+			Data: map[string]any{"rejected": []string{
+				`small:preset "small" context cap 16384 is below requested context 49152`,
+			}},
+		}},
+	}, DefaultStandingPolicy())
+	if len(groupRejected.Tasks) != 1 || groupRejected.Tasks[0].Kind != TaskRecordIncompatibility {
+		t.Fatalf("model group context tasks = %+v", groupRejected.Tasks)
+	}
+
 	missing := PlanPlacement(domain.PlacementDecision{
 		JobID: "job-missing",
 		Trace: []domain.TraceStep{{

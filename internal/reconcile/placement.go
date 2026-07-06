@@ -92,10 +92,11 @@ func PlanPlacement(decision domain.PlacementDecision, policy StandingPolicy) Pla
 	for _, step := range decision.Trace {
 		switch step.Step {
 		case "resolve":
-			for _, reason := range rejectedPresetReasons(step) {
+			rejected := rejectedPresetReasons(step)
+			for _, reason := range rejected {
 				add(taskForReason("", reason))
 			}
-			if strings.Contains(step.Result, "unknown model") || strings.Contains(step.Result, "no preset") {
+			if strings.Contains(step.Result, "unknown model") || (strings.Contains(step.Result, "no preset") && len(rejected) == 0) {
 				add(Task{Kind: TaskRefreshCatalog, Reason: step.Result, Next: "refresh or add the requested model route before admitting workload"})
 			}
 		case "filter":
@@ -250,6 +251,9 @@ func droppedNodes(step domain.TraceStep) map[string]string {
 
 func rejectedPresetReasons(step domain.TraceStep) []string {
 	raw, ok := step.Data["rejected_presets"]
+	if !ok {
+		raw, ok = step.Data["rejected"]
+	}
 	if !ok || raw == nil {
 		return nil
 	}

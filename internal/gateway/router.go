@@ -935,7 +935,9 @@ func placementNoFitError(err error) bool {
 		return true
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "no unit can fit") || strings.Contains(msg, "concurrency envelope is full")
+	return strings.Contains(msg, "no unit can fit") ||
+		strings.Contains(msg, "concurrency envelope is full") ||
+		strings.Contains(msg, "context cap")
 }
 
 func normalizeOpenAIReasoningBoundary(req translate.IngressRequest, preset domain.Preset, body []byte) ([]byte, error) {
