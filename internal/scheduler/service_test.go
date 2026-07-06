@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -631,6 +632,75 @@ func TestServiceSubmitMarksCanceledLocalColdLoadFailedWithCleanupContext(t *test
 	if strings.Join(admission.Calls, ",") != "offer:job-a,commit:offer_job-a:1,release:lease_offer_job-a" {
 		t.Fatalf("admission calls = %+v", admission.Calls)
 	}
+}
+
+func TestServiceJobDeadlineCancelsColdLoadAndReleasesOwnerLease(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 7, 6, 20, 0, 0, 0, time.UTC))
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"))
+	store := &runtimeStore{}
+	agent := &deadlineLoadAgent{NodeAgent: *mocks.NewNodeAgent(node), entered: make(chan struct{})}
+	admission := &mocks.AdmissionController{}
+	service := &Service{
+		Placer: fakePlacer{decision: domain.PlacementDecision{JobID: "job-deadline", NodeID: node.ID, Claim: fixtures.MakeClaim(1, 1), Action: domain.ActionLoadedNew}},
+		Fleet:  staticFleet{fleet: domain.FleetSnapshot{Nodes: []domain.Node{node}}},
+		Nodes:  staticPortNodes{agents: map[string]ports.NodeAgent{node.ID: agent}},
+		Owners: staticNodes{admissions: map[string]ports.AdmissionController{node.ID: admission}},
+		Queue:  NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+		Presets: map[string]domain.Preset{
+			preset.ID: preset,
+		},
+	}
+	job := fixtures.MakeJob(fixtures.WithJobID("job-deadline"), fixtures.WithPreset(preset.ID))
+	job.DeadlineMS = 25
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Submit(context.Background(), job)
+		done <- err
+	}()
+	<-agent.entered
+	clock.Advance(25 * time.Millisecond)
+
+	err := <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Submit err = %v", err)
+	}
+	if got := store.jobs["job-deadline"]; got.Status != domain.JobFailed {
+		t.Fatalf("job after deadline = %+v", got)
+	}
+	if strings.Join(admission.Calls, ",") != "offer:job-deadline,commit:offer_job-deadline:1,release:lease_offer_job-deadline" {
+		t.Fatalf("admission calls = %+v", admission.Calls)
+	}
+}
+
+func TestServiceJobDeadlineContextBranches(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Date(2026, 7, 6, 20, 1, 0, 0, time.UTC))
+	service := &Service{Clock: clock}
+	parent, cancelParent := context.WithCancel(context.Background())
+	noDeadline, cancel := service.withJobDeadline(parent, fixtures.MakeJob())
+	cancel()
+	if noDeadline != parent {
+		t.Fatal("job without deadline should reuse parent context")
+	}
+
+	parentWithDeadline, cancelParentWithDeadline := context.WithCancel(context.Background())
+	job := fixtures.MakeJob()
+	job.DeadlineMS = 100
+	ctx, cancelDeadline := service.withJobDeadline(parentWithDeadline, job)
+	cancelParentWithDeadline()
+	defer cancelDeadline()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parent cancellation did not cancel deadline context")
+	}
+	if err := ctx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("deadline context err = %v", err)
+	}
+	cancelParent()
 }
 
 func TestServiceSubmitWithPayloadCoordinatorErrorPaths(t *testing.T) {
@@ -3386,6 +3456,19 @@ func (a *cancelingLoadAgent) Load(ctx context.Context, req domain.LoadRequest) (
 	if a.cancel != nil {
 		a.cancel()
 	}
+	return domain.ModelInstance{}, ctx.Err()
+}
+
+type deadlineLoadAgent struct {
+	mocks.NodeAgent
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (a *deadlineLoadAgent) Load(ctx context.Context, req domain.LoadRequest) (domain.ModelInstance, error) {
+	a.Calls = append(a.Calls, "load:"+req.Preset.ID)
+	a.once.Do(func() { close(a.entered) })
+	<-ctx.Done()
 	return domain.ModelInstance{}, ctx.Err()
 }
 

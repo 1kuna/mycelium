@@ -87,6 +87,8 @@ func (s *Service) submitLocal(ctx context.Context, job domain.Job, payload []byt
 	if err := s.validate(); err != nil {
 		return Result{}, err
 	}
+	ctx, cancel := s.withJobDeadline(ctx, job)
+	defer cancel()
 	if job.ID == "" {
 		return Result{}, fmt.Errorf("job id is required")
 	}
@@ -217,6 +219,8 @@ func (s *Service) submitCoordinated(ctx context.Context, job domain.Job, payload
 	if err := s.validate(); err != nil {
 		return Result{}, err
 	}
+	ctx, cancel := s.withJobDeadline(ctx, job)
+	defer cancel()
 	if s.JobLog == nil {
 		return Result{}, fmt.Errorf("coordinated scheduler service is missing a job log")
 	}
@@ -660,6 +664,23 @@ func (s *Service) validate() error {
 		return fmt.Errorf("scheduler service is not fully configured")
 	}
 	return nil
+}
+
+func (s *Service) withJobDeadline(parent context.Context, job domain.Job) (context.Context, context.CancelFunc) {
+	if job.DeadlineMS <= 0 {
+		return parent, func() {}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	timer := s.Clock.NewTimer(time.Duration(job.DeadlineMS) * time.Millisecond)
+	go func() {
+		defer timer.Stop()
+		select {
+		case <-timer.C():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 func (s *Service) commitOwnerAdmission(ctx context.Context, job domain.Job, decision domain.PlacementDecision, preemptedLeaseArgs ...map[string]domain.Lease) (domain.Lease, ports.AdmissionController, error) {
