@@ -665,24 +665,12 @@ func refreshPoolWorkerGatewayUsability(ctx context.Context, client *http.Client,
 		}
 		return nil
 	}
-	lease, found, err := fetchPoolAdmissionLeaseByInstance(ctx, client, peerURL, rpcToken, worker.InstanceID)
-	if err != nil {
-		return fmt.Errorf("validate active lease for worker %s: %w", worker.WorkloadID, err)
-	}
-	if !found {
-		markPoolWorkerLeaseInactive(worker, fmt.Sprintf("instance %q has no active admission lease", worker.InstanceID))
-		return nil
-	}
-	if lease.ID != worker.LeaseID {
-		markPoolWorkerLeaseInactive(worker, fmt.Sprintf("instance %q active lease is %q, expected %q", worker.InstanceID, lease.ID, worker.LeaseID))
-		return nil
-	}
-	if lease.JobID != "" && lease.JobID != worker.WorkloadID {
-		markPoolWorkerLeaseInactive(worker, fmt.Sprintf("active lease %q belongs to workload %q", lease.ID, lease.JobID))
-		return nil
-	}
-	if lease.InstanceID != "" && lease.InstanceID != worker.InstanceID {
-		markPoolWorkerLeaseInactive(worker, fmt.Sprintf("active lease %q points at instance %q, expected %q", lease.ID, lease.InstanceID, worker.InstanceID))
+	if !status.Execution.LeaseActive {
+		reason := status.Execution.LeaseError
+		if reason == "" {
+			reason = "lease liveness evidence is unavailable"
+		}
+		markPoolWorkerLeaseInactive(worker, reason)
 		return nil
 	}
 	worker.Error = ""

@@ -538,6 +538,10 @@ type workloadStore interface {
 	WorkloadResultBody(ctx context.Context, jobID string) (domain.WorkloadResultBody, error)
 }
 
+type workloadLeaseStore interface {
+	ListLeases(ctx context.Context) ([]domain.Lease, error)
+}
+
 type workloadReconciliationStore interface {
 	ListReconciliationTasks(ctx context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error)
 	SaveReconciliationTask(ctx context.Context, task domain.ReconciliationTaskRecord) error
@@ -1334,6 +1338,7 @@ func workloadExecutionEvidence(ctx context.Context, store workloadStore, job dom
 		out.State = "queued_not_executed"
 	case domain.JobRunning:
 		out.State = "running_needs_finish"
+		out.LeaseActive, out.LeaseError = workloadActiveLeaseEvidence(ctx, store, job)
 	case domain.JobDone, domain.JobFailed:
 		out.State = "terminal_no_result"
 		if job.Result != nil && job.Result.ResultArtifact != "" {
@@ -1353,6 +1358,33 @@ func workloadExecutionEvidence(ctx context.Context, store workloadStore, job dom
 		out.State = "job_status_" + string(job.Status)
 	}
 	return out
+}
+
+func workloadActiveLeaseEvidence(ctx context.Context, store workloadStore, job domain.Job) (bool, string) {
+	if job.Result == nil || job.Result.LeaseID == "" {
+		return false, "missing_lease_evidence"
+	}
+	leaseStore, ok := store.(workloadLeaseStore)
+	if !ok {
+		return false, "lease_store_unavailable"
+	}
+	leases, err := leaseStore.ListLeases(ctx)
+	if err != nil {
+		return false, "lease_lookup_failed"
+	}
+	for _, lease := range leases {
+		if lease.ID != job.Result.LeaseID {
+			continue
+		}
+		if lease.JobID != "" && lease.JobID != job.ID {
+			return false, "lease_workload_mismatch"
+		}
+		if !lease.ExpiresAt.IsZero() && !lease.ExpiresAt.After(time.Now().UTC()) {
+			return false, "lease_expired"
+		}
+		return true, ""
+	}
+	return false, "lease_not_active"
 }
 
 func workloadExecutablePayloadEvidence(ctx context.Context, store workloadStore, job domain.Job) (string, string, bool) {

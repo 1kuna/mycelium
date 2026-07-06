@@ -424,6 +424,7 @@ func TestRefreshPoolProxyWorkersRequiresGatewayUsableLease(t *testing.T) {
 				Instance: domain.ModelInstance{ID: "inst-fresh"},
 				NodeID:   "node_b",
 			},
+			Execution: workload.ExecutionEvidence{LeaseActive: true},
 		})
 	})
 	mux.HandleFunc("/workloads/stale", func(w http.ResponseWriter, r *http.Request) {
@@ -434,6 +435,7 @@ func TestRefreshPoolProxyWorkersRequiresGatewayUsableLease(t *testing.T) {
 				Instance: domain.ModelInstance{ID: "inst-stale"},
 				NodeID:   "node_a",
 			},
+			Execution: workload.ExecutionEvidence{LeaseError: "lease_not_active"},
 		})
 	})
 	mux.HandleFunc("/admission/lease-by-instance", func(w http.ResponseWriter, r *http.Request) {
@@ -480,6 +482,7 @@ func TestRunPoolProxyRefusesInactiveHeldLeaseBeforeServing(t *testing.T) {
 				Instance: domain.ModelInstance{ID: "inst-stale"},
 				NodeID:   "node_a",
 			},
+			Execution: workload.ExecutionEvidence{LeaseError: "lease_not_active"},
 		})
 	})
 	mux.HandleFunc("/admission/lease-by-instance", func(w http.ResponseWriter, r *http.Request) {

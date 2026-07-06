@@ -47,6 +47,8 @@ type ExecutionEvidence struct {
 	PayloadContract                string `json:"payload_contract,omitempty"`
 	PayloadKind                    string `json:"payload_kind,omitempty"`
 	PayloadExecutable              bool   `json:"payload_executable,omitempty"`
+	LeaseActive                    bool   `json:"lease_active,omitempty"`
+	LeaseError                     string `json:"lease_error,omitempty"`
 	ResultReplayable               bool   `json:"result_replayable,omitempty"`
 	ResultBodyStored               bool   `json:"result_body_stored,omitempty"`
 	ResultArtifact                 bool   `json:"result_artifact,omitempty"`
