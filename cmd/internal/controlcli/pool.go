@@ -253,9 +253,12 @@ func runPoolUp(ctx context.Context, args []string, client *http.Client) error {
 	} else {
 		printPoolState("pool up", state)
 	}
-	held, _ := countPoolWorkers(state)
-	if held == 0 && len(state.Workers) > 0 {
-		return fmt.Errorf("pool up held no workers (%d attempted); inspect and release with `myce pool down --state %s`", len(state.Workers), *statePath)
+	held, failed := countPoolWorkers(state)
+	if len(state.Workers) > 0 && held != len(state.Workers) {
+		if held == 0 {
+			return fmt.Errorf("pool up held no workers (%d attempted); inspect and release with `myce pool down --state %s`", len(state.Workers), *statePath)
+		}
+		return fmt.Errorf("pool up held %d/%d workers (%d failed or not held); inspect and release with `myce pool down --state %s`", held, len(state.Workers), failed, *statePath)
 	}
 	return nil
 }
