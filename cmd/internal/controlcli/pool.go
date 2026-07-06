@@ -336,11 +336,31 @@ func runPoolDown(ctx context.Context, args []string, client *http.Client) error 
 		if worker.WorkloadID == "" || poolWorkerTerminal(worker.Status) {
 			continue
 		}
+		if shouldRefreshPoolWorkerBeforeDown(*worker) {
+			status, err := fetchPoolWorkload(ctx, client, *peerURL, *rpcToken, worker.WorkloadID)
+			if errors.Is(err, errPoolWorkloadNotFound) {
+				worker.Status = "not_admitted"
+				worker.Error = ""
+				continue
+			}
+			if err != nil {
+				worker.Error = err.Error()
+				downErrs = append(downErrs, fmt.Errorf("worker %s: %w", worker.WorkloadID, err))
+				continue
+			}
+			applyPoolStatus(worker, status)
+			if poolWorkerTerminal(worker.Status) {
+				continue
+			}
+		}
 		var release error
 		if worker.LeaseID != "" && !worker.Queued {
 			finished, err := finishPrewarmWorkload(ctx, client, *peerURL, *rpcToken, worker.WorkloadID)
 			if err == nil {
 				worker.Status = string(finished.Job.Status)
+				if finished.Result != nil {
+					applyPoolResult(worker, finished.Result)
+				}
 			}
 			release = err
 		} else {
@@ -354,6 +374,9 @@ func runPoolDown(ctx context.Context, args []string, client *http.Client) error 
 			}
 			if err == nil {
 				worker.Status = string(canceled.Job.Status)
+				if canceled.Result != nil {
+					applyPoolResult(worker, canceled.Result)
+				}
 			}
 			release = err
 		}
@@ -375,6 +398,13 @@ func runPoolDown(ctx context.Context, args []string, client *http.Client) error 
 		printPoolState("pool down", state)
 	}
 	return errors.Join(downErrs...)
+}
+
+func shouldRefreshPoolWorkerBeforeDown(worker poolWorker) bool {
+	if worker.Queued || poolWorkerHeld(worker) || poolWorkerTerminal(worker.Status) {
+		return false
+	}
+	return worker.WorkloadID != "" && (worker.LeaseID == "" || worker.InstanceID == "" || worker.Status == "admit_error")
 }
 
 func loadPoolPlan(path string) (pool.Plan, error) {
