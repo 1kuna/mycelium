@@ -6443,6 +6443,28 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		return byID["recon-prewarm"].Status == domain.ReconciliationTaskDone && byID["recon-wait"].Status == domain.ReconciliationTaskAllowed
 	})
 
+	serviceStore := &workloadMemoryStore{
+		jobs:    map[string]domain.Job{},
+		presets: map[string]domain.Preset{"preset-service": testPreset("preset-service")},
+		modelServices: []domain.ModelService{{
+			ID:                 "service-a",
+			Model:              "model-a",
+			MinReplicas:        1,
+			MaxReplicas:        1,
+			CandidatePresetIDs: []string{"preset-service"},
+			Status:             domain.ModelServiceActive,
+			CreatedAt:          time.Unix(1, 0).UTC(),
+			UpdatedAt:          time.Unix(1, 0).UTC(),
+		}},
+	}
+	servicePrewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-service", NodeID: "node-a", InstanceID: "inst-service", LeaseID: "lease-service"}}
+	startReconciliationDrainer(ctx, serviceStore, servicePrewarm, clk, time.Second, 2, "project-a")
+	waitForCondition(t, func() bool {
+		clk.Advance(time.Second)
+		tasks, err := serviceStore.ListReconciliationTasks(context.Background(), "service-a")
+		return err == nil && len(tasks) == 1 && tasks[0].Kind == string(reconcile.TaskPrewarmReplica) && tasks[0].Status == domain.ReconciliationTaskDone && servicePrewarm.callCount() == 1
+	})
+
 	optimizerStore, err := storesqlite.Open(filepath.Join(t.TempDir(), "optimizer.sqlite"))
 	if err != nil {
 		t.Fatalf("Open optimizer: %v", err)
@@ -6827,6 +6849,7 @@ type workloadMemoryStore struct {
 	records        []domain.JobRecord
 	reconcileTasks []domain.ReconciliationTaskRecord
 	incompat       []domain.IncompatibilityRecord
+	modelServices  []domain.ModelService
 	presets        map[string]domain.Preset
 	nodes          map[string]domain.Node
 	localityPlans  []domain.LocalityPlan
@@ -6873,6 +6896,14 @@ func (s *workloadMemoryStore) SaveJob(_ context.Context, job domain.Job) error {
 	}
 	s.jobs[job.ID] = job
 	return nil
+}
+
+func (s *workloadMemoryStore) ListJobs(context.Context) ([]domain.Job, error) {
+	var jobs []domain.Job
+	for _, job := range s.jobs {
+		jobs = append(jobs, job)
+	}
+	return jobs, nil
 }
 
 func (s *workloadMemoryStore) Job(_ context.Context, id string) (domain.Job, error) {
@@ -6983,6 +7014,21 @@ func (s *workloadMemoryStore) SaveReconciliationTask(_ context.Context, task dom
 		}
 	}
 	s.reconcileTasks = append(s.reconcileTasks, task)
+	return nil
+}
+
+func (s *workloadMemoryStore) ListModelServices(context.Context) ([]domain.ModelService, error) {
+	return append([]domain.ModelService(nil), s.modelServices...), nil
+}
+
+func (s *workloadMemoryStore) SaveModelService(_ context.Context, service domain.ModelService) error {
+	for i := range s.modelServices {
+		if s.modelServices[i].ID == service.ID {
+			s.modelServices[i] = service
+			return nil
+		}
+	}
+	s.modelServices = append(s.modelServices, service)
 	return nil
 }
 
