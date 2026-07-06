@@ -216,6 +216,7 @@ func prewarmTaskForService(service domain.ModelService, presetID string, now tim
 		Status:              domain.ReconciliationTaskAllowed,
 		PresetID:            task.PresetID,
 		Model:               task.Model,
+		Project:             service.Project,
 		ContextRequest:      service.ContextRequest,
 		ExpectedConcurrency: service.ExpectedConcurrency,
 		Reason:              task.Reason,
