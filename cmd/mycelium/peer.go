@@ -951,6 +951,9 @@ func cancelWorkloadJob(ctx context.Context, runtime workloadRuntime, store workl
 		if err := recordWorkloadCancelRegistry(ctx, store, job.ID, reason); err != nil {
 			return domain.Job{}, err
 		}
+		if err := recordCanceledReconciliationTask(ctx, store, job, reason); err != nil {
+			return domain.Job{}, err
+		}
 		if latest, readErr := store.Job(ctx, job.ID); readErr == nil {
 			return latest, nil
 		}
@@ -970,7 +973,47 @@ func cancelWorkloadJob(ctx context.Context, runtime workloadRuntime, store workl
 	if err := recordWorkloadCancelRegistry(ctx, store, job.ID, reason); err != nil {
 		return domain.Job{}, err
 	}
+	if err := recordCanceledReconciliationTask(ctx, store, job, reason); err != nil {
+		return domain.Job{}, err
+	}
 	return job, nil
+}
+
+func recordCanceledReconciliationTask(ctx context.Context, store workloadStore, job domain.Job, reason string) error {
+	taskID := strings.TrimPrefix(job.ID, "reconcile-prewarm-")
+	if taskID == job.ID || taskID == "" {
+		return nil
+	}
+	taskStore, ok := store.(interface {
+		ListReconciliationTasks(context.Context, string) ([]domain.ReconciliationTaskRecord, error)
+		SaveReconciliationTask(context.Context, domain.ReconciliationTaskRecord) error
+	})
+	if !ok {
+		return nil
+	}
+	tasks, err := taskStore.ListReconciliationTasks(ctx, "")
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, task := range tasks {
+		if task.ID != taskID {
+			continue
+		}
+		if task.Status == domain.ReconciliationTaskDone || task.Status == domain.ReconciliationTaskFailed {
+			return nil
+		}
+		task.Status = domain.ReconciliationTaskFailed
+		task.Error = reason
+		task.UpdatedAt = now
+		task.Events = append(task.Events, domain.ReconciliationTaskEvent{
+			Status:  task.Status,
+			Message: "prewarm workload canceled",
+			At:      now,
+		})
+		return taskStore.SaveReconciliationTask(ctx, task)
+	}
+	return nil
 }
 
 func recordWorkloadCancelRegistry(ctx context.Context, store workloadStore, jobID, reason string) error {
