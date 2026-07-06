@@ -37,6 +37,7 @@ import (
 	projectvalidation "mycelium/internal/project"
 	"mycelium/internal/reconcile"
 	"mycelium/internal/scheduler"
+	"mycelium/internal/serving"
 	storesqlite "mycelium/internal/store/sqlite"
 	"mycelium/internal/telemetry"
 	"mycelium/internal/workload"
@@ -3133,6 +3134,11 @@ func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, 
 				timer.Stop()
 				return
 			case <-timer.C():
+			}
+			if servingStore, ok := store.(serving.Store); ok {
+				if _, err := serving.Reconcile(ctx, servingStore, serving.ReconcileOptions{Limit: limit}); err != nil {
+					log.Printf("mycelium model service reconcile failed: %v", err)
+				}
 			}
 			if _, err := reconcile.DrainAllowedTasks(ctx, store, reconcile.DrainOptions{
 				Limit:   limit,

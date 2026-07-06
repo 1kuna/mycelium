@@ -24,6 +24,7 @@ import (
 	"mycelium/internal/ports"
 	"mycelium/internal/reconcile"
 	"mycelium/internal/scheduler"
+	"mycelium/internal/serving"
 	"mycelium/pkg/api"
 )
 
@@ -52,6 +53,13 @@ type FailureReporter interface {
 type reconciliationTaskStore interface {
 	ListReconciliationTasks(ctx context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error)
 	SaveReconciliationTask(ctx context.Context, task domain.ReconciliationTaskRecord) error
+}
+
+type modelServiceStore interface {
+	ListModelServices(ctx context.Context) ([]domain.ModelService, error)
+	SaveModelService(ctx context.Context, service domain.ModelService) error
+	ListJobs(ctx context.Context) ([]domain.Job, error)
+	ListLeases(ctx context.Context) ([]domain.Lease, error)
 }
 
 type PresetRegistry struct {
@@ -429,6 +437,9 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	if req.WorkloadID != "" || req.LeaseID != "" {
 		return r.routeWithWorkloadLease(ctx, req)
 	}
+	if resp, ok, err := r.routeWithModelService(ctx, req); ok || err != nil {
+		return resp, err
+	}
 	preset, err := r.Presets.Resolve(req.Model)
 	if err != nil {
 		return RouteResponse{}, err
@@ -698,6 +709,69 @@ func (r *Router) routeWithWorkloadLease(ctx context.Context, req translate.Ingre
 	return resp, nil
 }
 
+func (r *Router) routeWithModelService(ctx context.Context, req translate.IngressRequest) (RouteResponse, bool, error) {
+	if r.Runtime == nil || r.Runtime.Store == nil {
+		return RouteResponse{}, false, nil
+	}
+	store, ok := r.Runtime.Store.(modelServiceStore)
+	if !ok {
+		return RouteResponse{}, false, nil
+	}
+	services, err := store.ListModelServices(ctx)
+	if err != nil {
+		return RouteResponse{}, false, err
+	}
+	jobs, err := store.ListJobs(ctx)
+	if err != nil {
+		return RouteResponse{}, false, err
+	}
+	project := r.projectForRequest(req)
+	for _, service := range services {
+		if !modelServiceMatchesRequest(service, req, project) {
+			continue
+		}
+		for _, job := range jobs {
+			if job.ParentID != service.ID || job.Status != domain.JobRunning || job.Result == nil || job.Result.LeaseID == "" || job.Result.Terminal {
+				continue
+			}
+			leased := req
+			leased.WorkloadID = job.ID
+			leased.LeaseID = job.Result.LeaseID
+			leased.HoldLease = true
+			resp, err := r.routeWithWorkloadLease(ctx, leased)
+			if err != nil {
+				var statusErr interface{ StatusCode() int }
+				if errors.As(err, &statusErr) && statusErr.StatusCode() >= http.StatusConflict && statusErr.StatusCode() < http.StatusInternalServerError {
+					continue
+				}
+				return RouteResponse{}, true, err
+			}
+			if resp.Header == nil {
+				resp.Header = http.Header{}
+			}
+			resp.Header.Set("X-Myc-Model-Service", service.ID)
+			return resp, true, nil
+		}
+	}
+	return RouteResponse{}, false, nil
+}
+
+func modelServiceMatchesRequest(service domain.ModelService, req translate.IngressRequest, project string) bool {
+	if service.Status != domain.ModelServiceActive {
+		return false
+	}
+	if service.Project != "" && project != "" && service.Project != project {
+		return false
+	}
+	if service.Model != req.Model {
+		return false
+	}
+	if req.ContextRequest > 0 && service.ContextRequest > 0 && req.ContextRequest > service.ContextRequest {
+		return false
+	}
+	return true
+}
+
 func (r *Router) resolveWorkloadLease(ctx context.Context, req translate.IngressRequest) (domain.Job, domain.PlacementDecision, domain.ModelInstance, domain.Lease, error) {
 	if req.WorkloadID == "" || req.LeaseID == "" {
 		return domain.Job{}, domain.PlacementDecision{}, domain.ModelInstance{}, domain.Lease{}, leasedRouteError{status: http.StatusBadRequest, msg: "both X-Myc-Workload and X-Myc-Lease are required for leased gateway execution"}
@@ -852,6 +926,24 @@ func (r *Router) persistGatewayReconciliationDemand(ctx context.Context, job dom
 	if r.Runtime == nil || r.Runtime.Store == nil {
 		return nil
 	}
+	if store, ok := r.Runtime.Store.(serving.Store); ok {
+		if _, err := serving.EnsureDemand(ctx, store, serving.Demand{
+			Model:               job.Model,
+			Project:             job.Project,
+			ContextRequest:      job.ContextRequest,
+			ExpectedConcurrency: job.ExpectedConcurrency,
+			MinReplicas:         1,
+			MaxReplicas:         maxGatewayInt(1, job.ExpectedConcurrency),
+			Priority:            job.Priority,
+			Preemption:          job.Preemption,
+			CandidatePresetIDs:  candidatePresetIDs(r.Presets.ResolveAll(job.Model), preset),
+			LastDemandJobID:     job.ID,
+			Reason:              firstString(string(decision.Action), placementReason(decision), "gateway demand"),
+			Now:                 r.clock().Now().UTC(),
+		}); err != nil {
+			return fmt.Errorf("persist model service demand: %w", err)
+		}
+	}
 	store, ok := r.Runtime.Store.(reconciliationTaskStore)
 	if !ok {
 		return nil
@@ -906,6 +998,35 @@ func (r *Router) persistGatewayReconciliationDemand(ctx context.Context, job dom
 		}
 	}
 	return nil
+}
+
+func candidatePresetIDs(candidates []domain.Preset, fallback domain.Preset) []string {
+	var ids []string
+	for _, preset := range candidates {
+		if preset.ID != "" {
+			ids = append(ids, preset.ID)
+		}
+	}
+	if len(ids) == 0 && fallback.ID != "" {
+		ids = append(ids, fallback.ID)
+	}
+	return ids
+}
+
+func placementReason(decision domain.PlacementDecision) string {
+	for _, step := range decision.Trace {
+		if step.Result != "" {
+			return step.Result
+		}
+	}
+	return ""
+}
+
+func maxGatewayInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func reconciliationTaskTerminal(status domain.ReconciliationTaskStatus) bool {

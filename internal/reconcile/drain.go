@@ -213,6 +213,7 @@ func prewarmReplica(ctx context.Context, store TaskStore, task domain.Reconcilia
 		ExpectedConcurrency: 1,
 		Preemption:          domain.PreemptSoft,
 		Status:              domain.JobQueued,
+		ParentID:            task.JobID,
 	}
 	if task.NodeID != "" {
 		job.NodeSelector = map[string]string{domain.LabelNodeID: task.NodeID}

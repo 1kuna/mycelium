@@ -66,6 +66,24 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	}
 
 	project := domain.Project{ID: "proj", Priority: domain.PriorityInteractive, SpeedPref: domain.SpeedLatency, ContextCap: 8192, ExpectedConcurrency: 4, AutoApply: true}
+	modelService := domain.ModelService{
+		ID:                  "service-a",
+		Model:               "model-a",
+		Project:             project.ID,
+		ContextRequest:      4096,
+		ExpectedConcurrency: 2,
+		MinReplicas:         1,
+		MaxReplicas:         2,
+		Priority:            domain.PriorityNormal,
+		Preemption:          domain.PreemptSoft,
+		CandidatePresetIDs:  []string{"preset-a"},
+		Status:              domain.ModelServiceActive,
+		DemandCount:         1,
+		LastDemandJobID:     "job-a",
+		LastReason:          "capacity demand",
+		CreatedAt:           time.Unix(10, 0).UTC(),
+		UpdatedAt:           time.Unix(10, 0).UTC(),
+	}
 	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("/models/a.gguf"))
 	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
 	inst := fixtures.MakeInstance(fixtures.WithInstanceID("inst-a"), fixtures.WithInstancePreset(preset.ID), fixtures.OnNode(node.ID))
@@ -163,6 +181,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	}
 
 	must(t, store.SaveProject(ctx, project))
+	must(t, store.SaveModelService(ctx, modelService))
 	must(t, store.SavePreset(ctx, preset))
 	must(t, store.SaveNode(ctx, node))
 	must(t, store.SaveInstance(ctx, inst))
@@ -195,6 +214,9 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	if err != nil || gotProject.ID != project.ID || gotProject.ExpectedConcurrency != 4 || !gotProject.AutoApply {
 		t.Fatalf("Project = %+v, %v", gotProject, err)
 	}
+	if gotService, err := reopened.ModelService(ctx, modelService.ID); err != nil || gotService.Model != modelService.Model || gotService.MinReplicas != 1 || gotService.MaxReplicas != 2 || gotService.Status != domain.ModelServiceActive {
+		t.Fatalf("ModelService = %+v, %v", gotService, err)
+	}
 	if gotPreset, err := reopened.Preset(ctx, preset.ID); err != nil || gotPreset.ModelRef != preset.ModelRef {
 		t.Fatalf("Preset = %+v, %v", gotPreset, err)
 	}
@@ -225,6 +247,9 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 
 	if projects, err := reopened.ListProjects(ctx); err != nil || len(projects) != 1 {
 		t.Fatalf("ListProjects len = %d, %v", len(projects), err)
+	}
+	if services, err := reopened.ListModelServices(ctx); err != nil || len(services) != 1 || services[0].ID != modelService.ID {
+		t.Fatalf("ListModelServices = %+v, %v", services, err)
 	}
 	if presets, err := reopened.ListPresets(ctx); err != nil || len(presets) != 1 {
 		t.Fatalf("ListPresets len = %d, %v", len(presets), err)
@@ -312,6 +337,43 @@ func TestOpenDSNLeavesMemoryStoresInMemory(t *testing.T) {
 	}
 }
 
+func TestSaveModelServiceValidation(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	valid := domain.ModelService{
+		ID:          "service-a",
+		Model:       "model-a",
+		MinReplicas: 1,
+		MaxReplicas: 1,
+		Status:      domain.ModelServiceActive,
+		CreatedAt:   time.Unix(1, 0).UTC(),
+		UpdatedAt:   time.Unix(1, 0).UTC(),
+	}
+	for name, mutate := range map[string]func(*domain.ModelService){
+		"id":           func(s *domain.ModelService) { s.ID = "" },
+		"model":        func(s *domain.ModelService) { s.Model = "" },
+		"status":       func(s *domain.ModelService) { s.Status = "" },
+		"negative min": func(s *domain.ModelService) { s.MinReplicas = -1 },
+		"negative max": func(s *domain.ModelService) { s.MaxReplicas = -1 },
+		"min over max": func(s *domain.ModelService) { s.MinReplicas = 2 },
+		"created":      func(s *domain.ModelService) { s.CreatedAt = time.Time{} },
+		"updated":      func(s *domain.ModelService) { s.UpdatedAt = time.Time{} },
+	} {
+		service := valid
+		mutate(&service)
+		if err := store.SaveModelService(ctx, service); err == nil {
+			t.Fatalf("%s: expected validation error", name)
+		}
+	}
+	if err := store.SaveModelService(ctx, valid); err != nil {
+		t.Fatalf("valid model service: %v", err)
+	}
+}
+
 func TestStoreTelemetryAndErrors(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(":memory:")
@@ -328,6 +390,7 @@ func TestStoreTelemetryAndErrors(t *testing.T) {
 	}
 	for name, err := range map[string]error{
 		"preset":          store.SavePreset(ctx, domain.Preset{}),
+		"model service":   store.SaveModelService(ctx, domain.ModelService{}),
 		"node":            store.SaveNode(ctx, domain.Node{}),
 		"instance":        store.SaveInstance(ctx, domain.ModelInstance{}),
 		"lease":           store.SaveLease(ctx, domain.Lease{}),

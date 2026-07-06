@@ -418,6 +418,44 @@ type Project struct {
 	ReservedNodeID      string     `json:"reserved_node_id,omitempty"`
 }
 
+type ModelServiceStatus string
+
+const (
+	ModelServiceActive  ModelServiceStatus = "active"
+	ModelServiceBlocked ModelServiceStatus = "blocked"
+	ModelServicePaused  ModelServiceStatus = "paused"
+)
+
+type ModelServiceEvent struct {
+	Status  ModelServiceStatus `json:"status"`
+	Message string             `json:"message,omitempty"`
+	At      time.Time          `json:"at"`
+}
+
+// ModelService is the desired serving state for a model alias under a project.
+// It is the daemon-owned supply intent behind normal gateway traffic; unlike a
+// local pool state file, it is stored in the control plane and reconciled by
+// Mycelium.
+type ModelService struct {
+	ID                  string              `json:"id"`
+	Model               string              `json:"model"`
+	Project             string              `json:"project,omitempty"`
+	ContextRequest      int                 `json:"context_request,omitempty"`
+	ExpectedConcurrency int                 `json:"expected_concurrency,omitempty"`
+	MinReplicas         int                 `json:"min_replicas"`
+	MaxReplicas         int                 `json:"max_replicas"`
+	Priority            Priority            `json:"priority,omitempty"`
+	Preemption          Preemption          `json:"preemption,omitempty"`
+	CandidatePresetIDs  []string            `json:"candidate_preset_ids,omitempty"`
+	Status              ModelServiceStatus  `json:"status"`
+	DemandCount         int                 `json:"demand_count"`
+	LastDemandJobID     string              `json:"last_demand_job_id,omitempty"`
+	LastReason          string              `json:"last_reason,omitempty"`
+	CreatedAt           time.Time           `json:"created_at"`
+	UpdatedAt           time.Time           `json:"updated_at"`
+	Events              []ModelServiceEvent `json:"events,omitempty"`
+}
+
 type RecommendationRecord struct {
 	ID                  string             `json:"id"`
 	SlotID              string             `json:"slot_id,omitempty"`
