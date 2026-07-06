@@ -4801,6 +4801,97 @@ func TestWorkloadHTTPCancelUsesRuntimeFinishWhenLeaseEvidenceExists(t *testing.T
 	}
 }
 
+func TestWorkloadHTTPCancelUsesStoredLeaseWhenJobLostLeaseEvidence(t *testing.T) {
+	job := domain.Job{
+		ID:      "job-running",
+		Model:   "model-a",
+		Project: "project-a",
+		Status:  domain.JobRunning,
+	}
+	store := &workloadMemoryStore{
+		jobs:   map[string]domain.Job{job.ID: job},
+		leases: []domain.Lease{{ID: "lease-a", JobID: job.ID, NodeID: "node-a"}, {ID: "lease-b", JobID: job.ID, NodeID: "node-a"}},
+	}
+	store.records = []domain.JobRecord{{
+		JobID:        job.ID,
+		Coordinator:  "peer-a",
+		AssignedNode: "node-a",
+		Status:       domain.JobRunning,
+		Request:      []byte(`{"job":{"id":"job-running"}}`),
+		UpdatedAt:    time.Unix(10, 0).UTC(),
+	}}
+	runtime := &recordingWorkloadRuntime{store: store}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, runtime, store, "rpc-secret", "peer-a", nil)
+	req := httptest.NewRequest(http.MethodPost, "/workloads/job-running/cancel", strings.NewReader(`{"reason":"operator release"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := runtime.finishedLeases; len(got) != 2 || got[0] != "lease-a" || got[1] != "lease-b" {
+		t.Fatalf("finished leases = %+v", got)
+	}
+	latest, err := store.Job(context.Background(), "job-running")
+	if err != nil {
+		t.Fatalf("latest job: %v", err)
+	}
+	if latest.Status != domain.JobFailed || latest.Result == nil || latest.Result.LeaseID != "lease-b" || !latest.Result.Terminal {
+		t.Fatalf("stored job = %+v", latest)
+	}
+	registry, found, err := store.JobRecord(context.Background(), "job-running")
+	if err != nil || !found {
+		t.Fatalf("registry record found=%v err=%v", found, err)
+	}
+	if registry.Status != domain.JobFailed || !strings.Contains(registry.RecoveryNote, "operator canceled workload") {
+		t.Fatalf("registry record = %+v", registry)
+	}
+}
+
+func TestWorkloadHTTPCancelStoredLeaseReleaseFailureIsLoud(t *testing.T) {
+	job := domain.Job{ID: "job-running", Model: "model-a", Status: domain.JobRunning}
+	store := &workloadMemoryStore{
+		jobs:   map[string]domain.Job{job.ID: job},
+		leases: []domain.Lease{{ID: "lease-a", JobID: job.ID, NodeID: "node-a"}},
+	}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store, err: errors.New("owner release failed")}, store, "rpc-secret", "peer-a", nil)
+	req := httptest.NewRequest(http.MethodPost, "/workloads/job-running/cancel", strings.NewReader(`{"reason":"operator release"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "owner release failed") {
+		t.Fatalf("cancel status/body = %d %s", rec.Code, rec.Body.String())
+	}
+	latest, err := store.Job(context.Background(), "job-running")
+	if err != nil {
+		t.Fatalf("latest job: %v", err)
+	}
+	if latest.Status != domain.JobRunning {
+		t.Fatalf("failed release should not terminalize job: %+v", latest)
+	}
+}
+
+func TestStoredWorkloadLeasesBranches(t *testing.T) {
+	ctx := context.Background()
+	if leases, err := storedWorkloadLeases(ctx, &workloadMemoryStore{}, ""); err != nil || len(leases) != 0 {
+		t.Fatalf("empty job leases=%+v err=%v", leases, err)
+	}
+	if leases, err := storedWorkloadLeases(ctx, workloadStatusOnlyStore{}, "job-a"); err != nil || len(leases) != 0 {
+		t.Fatalf("no lease store leases=%+v err=%v", leases, err)
+	}
+	listErr := errors.New("list leases")
+	if _, err := storedWorkloadLeases(ctx, workloadLeaseEvidenceStore{workloadMemoryStore: &workloadMemoryStore{}, err: listErr}, "job-a"); !errors.Is(err, listErr) {
+		t.Fatalf("list err = %v", err)
+	}
+	store := &workloadMemoryStore{leases: []domain.Lease{{ID: "lease-a", JobID: "job-a"}, {ID: "lease-b", JobID: "job-b"}}}
+	leases, err := storedWorkloadLeases(ctx, store, "job-a")
+	if err != nil || len(leases) != 1 || leases[0].ID != "lease-a" {
+		t.Fatalf("filtered leases=%+v err=%v", leases, err)
+	}
+}
+
 func TestWorkloadHTTPCancelTerminalizesRegistryOnlyRecord(t *testing.T) {
 	job := domain.Job{
 		ID:      "registry-only",
@@ -6718,13 +6809,14 @@ func (r *recordingRescueRuntime) SubmitWithPayload(_ context.Context, job domain
 }
 
 type recordingWorkloadRuntime struct {
-	store    *workloadMemoryStore
-	decision domain.PlacementDecision
-	drained  []scheduler.Result
-	job      domain.Job
-	payload  []byte
-	hooks    []scheduler.SubmitHooks
-	err      error
+	store          *workloadMemoryStore
+	decision       domain.PlacementDecision
+	drained        []scheduler.Result
+	job            domain.Job
+	payload        []byte
+	hooks          []scheduler.SubmitHooks
+	finishedLeases []string
+	err            error
 }
 
 type staticWorkloadProviderExecutor struct {
@@ -6802,6 +6894,7 @@ func (r *recordingWorkloadRuntime) FinishJob(_ context.Context, job domain.Job, 
 	if r.err != nil {
 		return r.err
 	}
+	r.finishedLeases = append(r.finishedLeases, lease.ID)
 	if cause == nil {
 		job.Status = domain.JobDone
 		job.Error = ""
