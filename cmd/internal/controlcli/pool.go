@@ -88,7 +88,7 @@ func runPoolPlan(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	plan, err := pool.BuildPlan(ctx, estimate.NewInMemory(), lease.NewAllocator(), *model, presets, domain.FleetSnapshot{Nodes: nodes, Instances: instances}, pool.Options{
+	plan, err := pool.BuildPlan(ctx, estimate.NewBackendAware(estimate.NewInMemory(), estimate.NewInMemory()), lease.NewAllocator(), *model, presets, domain.FleetSnapshot{Nodes: nodes, Instances: instances}, pool.Options{
 		ContextLength: *contextLen,
 		Concurrency:   *concurrency,
 		MaxPerNode:    *maxPerNode,

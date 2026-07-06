@@ -35,6 +35,15 @@ func buildTestPlan(t *testing.T, presets []domain.Preset, fleet domain.FleetSnap
 	return plan
 }
 
+func buildBackendAwareTestPlan(t *testing.T, presets []domain.Preset, fleet domain.FleetSnapshot, opts Options) Plan {
+	t.Helper()
+	plan, err := BuildPlan(context.Background(), estimate.NewBackendAware(nil, estimate.NewInMemory()), lease.NewAllocator(), "vision", presets, fleet, opts)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	return plan
+}
+
 func nodePlan(t *testing.T, plan Plan, nodeID string) NodePlan {
 	t.Helper()
 	for _, node := range plan.Nodes {
@@ -246,6 +255,35 @@ func TestBuildPlanUsesWarmInstanceHeadroomInsteadOfSpeculativeReplicas(t *testin
 	fullSpark := nodePlan(t, full, "node_spark")
 	if fullSpark.Additional != 0 || fullSpark.Refusal != "warm instance concurrency envelope is full" {
 		t.Fatalf("full warm envelope plan = %+v", fullSpark)
+	}
+}
+
+func TestBuildPlanUsesVLLMUnitReservationForColdReplicas(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision-vllm"
+		p.Aliases = []string{"vision"}
+		p.Backend = domain.BackendVLLM
+		p.NodeID = "node_spark"
+		p.ContextLength = 49152
+		p.EstWeightsMB = 1000
+		p.KVPerTokenMB = 0
+		p.LaunchArgs = []string{"--gpu-memory-utilization", "0.45"}
+	})
+	fleet := domain.FleetSnapshot{Nodes: []domain.Node{fixtures.MakeSparkNode(func(n *domain.Node) {
+		n.Accelerators[0].VRAMTotalMB = 124610
+		n.Accelerators[0].VRAMUsedMB = 3285
+	})}}
+
+	plan := buildBackendAwareTestPlan(t, []domain.Preset{preset}, fleet, Options{ContextLength: 49152, MaxTotal: 3, MaxPerNode: 2})
+	spark := nodePlan(t, plan, "node_spark")
+	if spark.Additional != 1 {
+		t.Fatalf("vLLM reservation additional = %d, want 1: %+v", spark.Additional, spark)
+	}
+	if spark.ClaimPerReplica.WeightsMB != 56075 {
+		t.Fatalf("vLLM reservation claim = %+v, want weights 56075", spark.ClaimPerReplica)
+	}
+	if plan.TotalAdditional != 1 {
+		t.Fatalf("total additional = %d, want 1", plan.TotalAdditional)
 	}
 }
 
