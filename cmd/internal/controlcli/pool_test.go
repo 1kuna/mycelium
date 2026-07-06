@@ -606,6 +606,49 @@ func TestPoolServePlansFromLiveConfigAndOwnsLifecycle(t *testing.T) {
 	}
 }
 
+func TestPoolServeDurationReleasesHeldWorkers(t *testing.T) {
+	server := &poolPeerServer{}
+	ts := httptest.NewServer(server.handler(t))
+	defer ts.Close()
+	dir := t.TempDir()
+	planPath := writePoolPlanFile(t, dir, pool.Plan{
+		Model:       "chandra",
+		Concurrency: 1,
+		Nodes: []pool.NodePlan{{
+			NodeID:          "node_4090a",
+			PresetID:        "preset_test",
+			ContextLength:   8000,
+			Additional:      1,
+			ClaimPerReplica: domain.Claim{WeightsMB: 5600},
+		}},
+		TotalAdditional: 1,
+	})
+	statePath := filepath.Join(dir, "serve-state.json")
+	if err := RunWithClient(context.Background(), []string{
+		"pool", "serve",
+		"--plan", planPath,
+		"--url", ts.URL,
+		"--rpc-token", "rpc-secret",
+		"--gateway-token", "gateway-secret",
+		"--state", statePath,
+		"--name", "ocr",
+		"--listen", "127.0.0.1:0",
+		"--duration", "25ms",
+	}, ts.Client()); err != nil {
+		t.Fatalf("pool serve: %v", err)
+	}
+	state, err := loadPoolState(statePath)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if len(state.Workers) != 1 || state.Workers[0].Status != string(domain.JobDone) {
+		t.Fatalf("worker was not released after duration: %+v", state.Workers)
+	}
+	if len(server.finishes) != 1 || server.finishes[0] != state.Workers[0].WorkloadID {
+		t.Fatalf("pool serve did not release held worker: finishes=%v worker=%+v", server.finishes, state.Workers[0])
+	}
+}
+
 func writePoolPlanFile(t *testing.T, dir string, plan pool.Plan) string {
 	t.Helper()
 	path := filepath.Join(dir, "plan.json")
