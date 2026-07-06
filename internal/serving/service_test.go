@@ -90,6 +90,78 @@ func TestReconcileCreatesPrewarmTasksForMissingServiceReplicas(t *testing.T) {
 	}
 }
 
+func TestReconcileRefreshesServiceCandidatesFromCatalog(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(22, 0).UTC()
+	store := &fakeStore{
+		services: []domain.ModelService{{
+			ID:             "svc-a",
+			Model:          "vision",
+			Project:        "project-a",
+			ContextRequest: 8192,
+			MinReplicas:    1,
+			MaxReplicas:    1,
+			Status:         domain.ModelServiceActive,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}},
+		presets: []domain.Preset{
+			{ID: "small", ModelRef: "model-small", Aliases: []string{"vision"}, ContextLength: 4096},
+			{ID: "large", ModelRef: "model-large", Aliases: []string{"vision"}, ContextLength: 8192},
+		},
+	}
+
+	report, err := Reconcile(ctx, store, ReconcileOptions{Now: now})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if report.Created != 1 || len(store.tasks) != 1 || store.tasks[0].Kind != string(reconcile.TaskPrewarmReplica) || store.tasks[0].PresetID != "large" {
+		t.Fatalf("report=%+v tasks=%+v", report, store.tasks)
+	}
+	if got := store.services[0].CandidatePresetIDs; len(got) != 1 || got[0] != "large" {
+		t.Fatalf("service candidates = %+v", store.services[0])
+	}
+	if len(store.services[0].Events) == 0 || store.services[0].Events[len(store.services[0].Events)-1].Message != "candidate presets refreshed from catalog" {
+		t.Fatalf("service events = %+v", store.services[0].Events)
+	}
+}
+
+func TestReconcileCreatesCatalogRefreshTaskWhenServiceHasNoCandidates(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(24, 0).UTC()
+	store := &fakeStore{services: []domain.ModelService{{
+		ID:             "svc-a",
+		Model:          "missing-model",
+		Project:        "project-a",
+		ContextRequest: 8192,
+		MinReplicas:    1,
+		MaxReplicas:    1,
+		Status:         domain.ModelServiceActive,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}}}
+
+	report, err := Reconcile(ctx, store, ReconcileOptions{Now: now})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if report.Created != 1 || len(store.tasks) != 1 {
+		t.Fatalf("report=%+v tasks=%+v", report, store.tasks)
+	}
+	task := store.tasks[0]
+	if task.Kind != string(reconcile.TaskRefreshCatalog) || task.Source != "model_service" || task.JobID != "svc-a" || task.Model != "missing-model" || task.Status != domain.ReconciliationTaskAllowed {
+		t.Fatalf("refresh task = %+v", task)
+	}
+
+	report, err = Reconcile(ctx, store, ReconcileOptions{Now: now.Add(time.Second)})
+	if err != nil {
+		t.Fatalf("Reconcile again: %v", err)
+	}
+	if report.Created != 0 || len(store.tasks) != 1 {
+		t.Fatalf("existing refresh task should not be duplicated: report=%+v tasks=%+v", report, store.tasks)
+	}
+}
+
 func TestReconcileDoesNotCreatePrewarmWhenServiceAlreadyHasRunningLease(t *testing.T) {
 	ctx := context.Background()
 	now := time.Unix(30, 0).UTC()
@@ -343,6 +415,7 @@ type fakeStore struct {
 	tasks           []domain.ReconciliationTaskRecord
 	jobs            []domain.Job
 	leases          []domain.Lease
+	presets         []domain.Preset
 	listServicesErr error
 	saveServiceErr  error
 	listTasksErr    error
@@ -370,6 +443,10 @@ func (s *fakeStore) SaveModelService(_ context.Context, service domain.ModelServ
 	}
 	s.services = append(s.services, service)
 	return nil
+}
+
+func (s *fakeStore) ListPresets(context.Context) ([]domain.Preset, error) {
+	return append([]domain.Preset(nil), s.presets...), nil
 }
 
 func (s *fakeStore) ListReconciliationTasks(_ context.Context, jobID string) ([]domain.ReconciliationTaskRecord, error) {

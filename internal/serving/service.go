@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mycelium/internal/domain"
+	"mycelium/internal/modelruntime"
 	"mycelium/internal/reconcile"
 )
 
@@ -47,6 +48,10 @@ type ReconcileReport struct {
 	Created  int      `json:"created"`
 	Skipped  int      `json:"skipped"`
 	Tasks    []string `json:"tasks,omitempty"`
+}
+
+type presetLister interface {
+	ListPresets(ctx context.Context) ([]domain.Preset, error)
 }
 
 func EnsureDemand(ctx context.Context, store Store, demand Demand) (domain.ModelService, error) {
@@ -158,6 +163,10 @@ func Reconcile(ctx context.Context, store Store, opts ReconcileOptions) (Reconci
 			report.Skipped++
 			continue
 		}
+		service, err = refreshServiceCandidates(ctx, store, service, now)
+		if err != nil {
+			return report, err
+		}
 		heldPresets := runningServicePresets(service.ID, jobs, leases, now)
 		inflightPresets := inFlightServicePresets(service.ID, jobs)
 		have := len(heldPresets)
@@ -201,10 +210,69 @@ func Reconcile(ctx context.Context, store Store, opts ReconcileOptions) (Reconci
 			remaining--
 		}
 		if remaining > 0 && len(service.CandidatePresetIDs) == 0 {
-			report.Skipped++
+			task := catalogRefreshTaskForService(service, now)
+			existing, err := store.ListReconciliationTasks(ctx, service.ID)
+			if err != nil {
+				return report, err
+			}
+			if hasNonTerminalTask(existing, task.ID) {
+				report.Skipped++
+				continue
+			}
+			if err := store.SaveReconciliationTask(ctx, task); err != nil {
+				return report, err
+			}
+			report.Created++
+			report.Tasks = append(report.Tasks, task.ID)
 		}
 	}
 	return report, nil
+}
+
+func refreshServiceCandidates(ctx context.Context, store Store, service domain.ModelService, now time.Time) (domain.ModelService, error) {
+	if len(service.CandidatePresetIDs) > 0 {
+		return service, nil
+	}
+	lister, ok := store.(presetLister)
+	if !ok {
+		return service, nil
+	}
+	presets, err := lister.ListPresets(ctx)
+	if err != nil {
+		return domain.ModelService{}, err
+	}
+	var candidates []string
+	for _, preset := range presets {
+		if !presetMatchesService(preset, service) {
+			continue
+		}
+		candidates = append(candidates, preset.ID)
+	}
+	candidates = uniqueStrings(candidates)
+	if len(candidates) == 0 {
+		return service, nil
+	}
+	service.CandidatePresetIDs = candidates
+	service.UpdatedAt = now
+	service.Events = append(service.Events, domain.ModelServiceEvent{
+		Status:  service.Status,
+		Message: "candidate presets refreshed from catalog",
+		At:      now,
+	})
+	if err := store.SaveModelService(ctx, service); err != nil {
+		return domain.ModelService{}, err
+	}
+	return service, nil
+}
+
+func presetMatchesService(preset domain.Preset, service domain.ModelService) bool {
+	if preset.ID == "" || !presetMatchesModel(preset, service.Model) {
+		return false
+	}
+	if service.ContextRequest > 0 && modelruntime.EffectiveContextLength(preset) < service.ContextRequest {
+		return false
+	}
+	return true
 }
 
 func prewarmTaskForService(service domain.ModelService, presetID string, now time.Time) domain.ReconciliationTaskRecord {
@@ -244,6 +312,47 @@ func prewarmTaskForService(service domain.ModelService, presetID string, now tim
 func serviceTaskID(serviceID, presetID string) string {
 	sum := sha256.Sum256([]byte(serviceID + "\x00" + presetID))
 	return "service-prewarm-" + hex.EncodeToString(sum[:8])
+}
+
+func catalogRefreshTaskForService(service domain.ModelService, now time.Time) domain.ReconciliationTaskRecord {
+	sum := sha256.Sum256([]byte(service.ID + "\x00refresh_catalog\x00" + service.Model))
+	return domain.ReconciliationTaskRecord{
+		ID:                  "service-refresh-" + hex.EncodeToString(sum[:8]),
+		JobID:               service.ID,
+		Kind:                string(reconcile.TaskRefreshCatalog),
+		Status:              domain.ReconciliationTaskAllowed,
+		Model:               service.Model,
+		Project:             service.Project,
+		ContextRequest:      service.ContextRequest,
+		ExpectedConcurrency: service.ExpectedConcurrency,
+		Reason:              "model service has no candidate presets",
+		AutomaticCandidate:  true,
+		RequiresApproval:    false,
+		Next:                "refresh the configured catalog so model service candidates can be resolved",
+		Source:              "model_service",
+		CreatedAt:           now,
+		UpdatedAt:           now,
+		Events: []domain.ReconciliationTaskEvent{{
+			Status:  domain.ReconciliationTaskAllowed,
+			Message: "created from model service desired state",
+			At:      now,
+		}},
+	}
+}
+
+func presetMatchesModel(preset domain.Preset, model string) bool {
+	if model == "" {
+		return true
+	}
+	if preset.ID == model || preset.ModelRef == model {
+		return true
+	}
+	for _, alias := range preset.Aliases {
+		if alias == model {
+			return true
+		}
+	}
+	return false
 }
 
 func runningServicePresets(serviceID string, jobs []domain.Job, leases []domain.Lease, now time.Time) map[string]bool {
