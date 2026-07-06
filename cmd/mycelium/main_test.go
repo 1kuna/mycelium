@@ -5663,6 +5663,74 @@ func TestWorkloadExecutionEvidenceClassifiesExecutablePayloadContract(t *testing
 	}
 }
 
+func TestWorkloadExecutionEvidenceReportsActiveLeaseState(t *testing.T) {
+	ctx := context.Background()
+	activeJob := domain.Job{
+		ID:     "job-a",
+		Status: domain.JobRunning,
+		Result: &domain.JobResult{LeaseID: "lease-a"},
+	}
+	future := time.Now().UTC().Add(time.Hour)
+	tests := []struct {
+		name       string
+		store      workloadStore
+		job        domain.Job
+		wantActive bool
+		wantError  string
+	}{
+		{
+			name:      "missing lease evidence",
+			store:     &workloadMemoryStore{},
+			job:       domain.Job{ID: "job-a", Status: domain.JobRunning},
+			wantError: "missing_lease_evidence",
+		},
+		{
+			name:      "store cannot list leases",
+			store:     &workloadMemoryStore{},
+			job:       activeJob,
+			wantError: "lease_store_unavailable",
+		},
+		{
+			name:      "lookup error",
+			store:     workloadLeaseEvidenceStore{workloadMemoryStore: &workloadMemoryStore{}, err: errors.New("boom")},
+			job:       activeJob,
+			wantError: "lease_lookup_failed",
+		},
+		{
+			name:      "lease absent",
+			store:     workloadLeaseEvidenceStore{workloadMemoryStore: &workloadMemoryStore{}},
+			job:       activeJob,
+			wantError: "lease_not_active",
+		},
+		{
+			name:      "lease belongs to another workload",
+			store:     workloadLeaseEvidenceStore{workloadMemoryStore: &workloadMemoryStore{}, leases: []domain.Lease{{ID: "lease-a", JobID: "other-job", ExpiresAt: future}}},
+			job:       activeJob,
+			wantError: "lease_workload_mismatch",
+		},
+		{
+			name:      "lease expired",
+			store:     workloadLeaseEvidenceStore{workloadMemoryStore: &workloadMemoryStore{}, leases: []domain.Lease{{ID: "lease-a", JobID: "job-a", ExpiresAt: time.Unix(1, 0).UTC()}}},
+			job:       activeJob,
+			wantError: "lease_expired",
+		},
+		{
+			name:       "lease active",
+			store:      workloadLeaseEvidenceStore{workloadMemoryStore: &workloadMemoryStore{}, leases: []domain.Lease{{ID: "lease-a", JobID: "job-a", ExpiresAt: future}}},
+			job:        activeJob,
+			wantActive: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := workloadExecutionEvidence(ctx, tt.store, tt.job)
+			if got.State != "running_needs_finish" || got.LeaseActive != tt.wantActive || got.LeaseError != tt.wantError {
+				t.Fatalf("execution evidence = %+v, want active=%v error=%q", got, tt.wantActive, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestWorkloadSchedulerResultReconstructsLeaseAndPlacementEvidence(t *testing.T) {
 	job := domain.Job{
 		ID:     "job-a",
@@ -6672,6 +6740,19 @@ type workloadMemoryStore struct {
 	localityPlans  []domain.LocalityPlan
 	localities     []domain.ModelLocality
 	engineProfiles []domain.EngineProfile
+}
+
+type workloadLeaseEvidenceStore struct {
+	*workloadMemoryStore
+	leases []domain.Lease
+	err    error
+}
+
+func (s workloadLeaseEvidenceStore) ListLeases(context.Context) ([]domain.Lease, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return append([]domain.Lease(nil), s.leases...), nil
 }
 
 type failingReconciliationStore struct {

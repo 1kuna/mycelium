@@ -399,7 +399,7 @@ func (s *poolPeerServer) handler(t *testing.T) http.Handler {
 			}
 			job := domain.Job{ID: id, Status: domain.JobRunning}
 			result := &domain.JobResult{LeaseID: "lease-" + id, Instance: domain.ModelInstance{ID: "inst-" + id}, NodeID: "node_4090a"}
-			_ = json.NewEncoder(w).Encode(workload.StatusResponse{Job: job, Result: result})
+			_ = json.NewEncoder(w).Encode(workload.StatusResponse{Job: job, Result: result, Execution: workload.ExecutionEvidence{LeaseActive: true}})
 		}
 	})
 	return mux
@@ -415,6 +415,7 @@ func TestPoolStatusDoesNotReportRunningForInactiveLease(t *testing.T) {
 				Instance: domain.ModelInstance{ID: "inst-stale"},
 				NodeID:   "node_spark",
 			},
+			Execution: workload.ExecutionEvidence{LeaseError: "lease_not_active"},
 		})
 	})
 	mux.HandleFunc("/admission/lease-by-instance", func(w http.ResponseWriter, r *http.Request) {
@@ -438,7 +439,7 @@ func TestPoolStatusDoesNotReportRunningForInactiveLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}
-	if state.Workers[0].Status != "lease_inactive" || !strings.Contains(state.Workers[0].Error, "no active admission lease") {
+	if state.Workers[0].Status != "lease_inactive" || state.Workers[0].Error != "lease_not_active" {
 		t.Fatalf("stale worker should be lease_inactive, got %+v", state.Workers[0])
 	}
 	if poolWorkerHeld(state.Workers[0]) {
