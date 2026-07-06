@@ -219,6 +219,48 @@ func TestLoadReusesReadyInstance(t *testing.T) {
 	}
 }
 
+func TestSnapshotMarksDeadBackendInstanceError(t *testing.T) {
+	backend := mocks.NewBackendAdapter()
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
+
+	inst, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	backend.DeadPIDs = map[int]error{4242: errors.New("backend exited")}
+
+	snap, err := agent.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Instances) != 1 || snap.Instances[0].ID != inst.ID || snap.Instances[0].State != domain.InstError {
+		t.Fatalf("snapshot did not mark dead backend error: %+v", snap.Instances)
+	}
+}
+
+func TestBeginRequestRejectsDeadBackendInstance(t *testing.T) {
+	backend := mocks.NewBackendAdapter()
+	agent := NewAgent(fixtures.MakeNode(), backend, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), WithAllocator(lease.NewAllocator()))
+
+	inst, err := agent.Load(context.Background(), loadReq(fixtures.MakePreset()))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	backend.DeadPIDs = map[int]error{4242: errors.New("backend exited")}
+
+	err = agent.BeginRequest(context.Background(), inst.ID)
+	if err == nil || !strings.Contains(err.Error(), "backend is not live") {
+		t.Fatalf("BeginRequest err = %v", err)
+	}
+	snap, snapErr := agent.Snapshot(context.Background())
+	if snapErr != nil {
+		t.Fatalf("Snapshot: %v", snapErr)
+	}
+	if len(snap.Instances) != 1 || snap.Instances[0].State != domain.InstError {
+		t.Fatalf("dead backend remained ready: %+v", snap.Instances)
+	}
+}
+
 func TestLoadUsesAcceleratorSetAsRuntimeUnit(t *testing.T) {
 	backend := mocks.NewBackendAdapter()
 	node := fixtures.MakeNode()
