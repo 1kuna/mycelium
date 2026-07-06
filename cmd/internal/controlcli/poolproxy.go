@@ -12,7 +12,9 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"mycelium/internal/gateway"
 )
@@ -28,6 +30,9 @@ func runPoolProxy(ctx context.Context, args []string, client *http.Client) error
 	statePath := fs.String("state", "", "pool state JSON from `myce pool up --state`")
 	gatewayURL := fs.String("url", "", "gateway base URL the proxy forwards to")
 	listen := fs.String("listen", "127.0.0.1:0", "local address the proxy listens on")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token used to validate held leases")
+	rpcTokenEnv := fs.String("rpc-token-env", "", "environment variable holding the peer RPC bearer token")
+	rpcTokenFile := fs.String("rpc-token-file", "", "file holding the peer RPC bearer token")
 	token := fs.String("gateway-token", "", "gateway bearer token to attach to forwarded requests")
 	tokenEnv := fs.String("gateway-token-env", "", "environment variable holding the gateway bearer token")
 	tokenFile := fs.String("gateway-token-file", "", "file holding the gateway bearer token")
@@ -35,7 +40,7 @@ func runPoolProxy(ctx context.Context, args []string, client *http.Client) error
 		return err
 	}
 	if fs.NArg() != 0 || *statePath == "" || *gatewayURL == "" {
-		return fmt.Errorf("usage: myce pool proxy --state pool.json --url <gateway-url> [--listen 127.0.0.1:0] [--gateway-token ... | --gateway-token-env NAME | --gateway-token-file path]")
+		return fmt.Errorf("usage: myce pool proxy --state pool.json --url <gateway-url> --rpc-token <token> [--listen 127.0.0.1:0] [--gateway-token ... | --gateway-token-env NAME | --gateway-token-file path]")
 	}
 	state, err := loadPoolState(*statePath)
 	if err != nil {
@@ -53,10 +58,29 @@ func runPoolProxy(ctx context.Context, args []string, client *http.Client) error
 	if err != nil {
 		return err
 	}
+	resolvedRPC, err := resolvePoolProxyToken(*rpcToken, *rpcTokenEnv, *rpcTokenFile)
+	if err != nil {
+		return fmt.Errorf("resolve pool proxy RPC token: %w", err)
+	}
+	if strings.TrimSpace(resolvedRPC) == "" {
+		return fmt.Errorf("pool proxy requires an RPC token to validate held leases; pass --rpc-token, --rpc-token-env, or --rpc-token-file")
+	}
 	if err := preflightPoolProxyGateway(ctx, client, target, bearer, state.Project); err != nil {
 		return err
 	}
+	peerURL := poolProxyPeerURL(target)
+	workers, err = refreshPoolProxyWorkers(ctx, client, peerURL, resolvedRPC, workers)
+	if err != nil {
+		return err
+	}
+	state.Workers = mergePoolProxyWorkerValidation(state.Workers, workers)
+	if err := writePrettyJSONFile(*statePath, state); err != nil {
+		return err
+	}
 	handler := newPoolProxyHandler(workers, target, bearer, client)
+	handler.validator = func(ctx context.Context, worker *poolWorker) error {
+		return refreshPoolWorkerGatewayUsability(ctx, client, peerURL, resolvedRPC, worker)
+	}
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
 		return err
@@ -65,6 +89,66 @@ func runPoolProxy(ctx context.Context, args []string, client *http.Client) error
 		ln.Addr(), ln.Addr(), len(workers), state.Model)
 	fmt.Printf("pool proxy\tpoint the consumer's OpenAI-compatible base URL at http://%s/v1; requests ride held leases and never enter normal admission\n", ln.Addr())
 	return servePoolProxy(ctx, ln, handler)
+}
+
+func runPoolServe(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("pool serve", flag.ContinueOnError)
+	planPath := fs.String("plan", "", "pool plan JSON from `myce pool plan --out`")
+	peerURL := fs.String("url", "", "peer/gateway base URL")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token used for admission, validation, and release")
+	statePath := fs.String("state", "", "optional debug state JSON path; defaults to a temporary file")
+	name := fs.String("name", "pool", "pool name used in worker job ids and the default project label")
+	project := fs.String("project", "", "project label for pool workers; must match the consumer's project-scoped gateway token")
+	runID := fs.String("run-id", "", "explicit run id for worker job ids; defaults to a UTC timestamp")
+	admitTimeout := fs.Duration("admit-timeout", 15*time.Minute, "per-worker admission timeout; cold loads legitimately take minutes; 0 disables")
+	listen := fs.String("listen", "127.0.0.1:0", "local address the proxy listens on")
+	token := fs.String("gateway-token", "", "gateway bearer token to attach to forwarded requests")
+	tokenEnv := fs.String("gateway-token-env", "", "environment variable holding the gateway bearer token")
+	tokenFile := fs.String("gateway-token-file", "", "file holding the gateway bearer token")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *planPath == "" || *peerURL == "" || *rpcToken == "" {
+		return fmt.Errorf("usage: myce pool serve --plan plan.json --url <peer-url> --rpc-token <token> [--listen 127.0.0.1:0] [--gateway-token ... | --gateway-token-env NAME | --gateway-token-file path]")
+	}
+	state := strings.TrimSpace(*statePath)
+	if state == "" {
+		tmp, err := os.CreateTemp("", "myce-pool-serve-*.json")
+		if err != nil {
+			return err
+		}
+		state = tmp.Name()
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		defer os.Remove(state)
+	}
+	upArgs := []string{"--plan", *planPath, "--url", *peerURL, "--rpc-token", *rpcToken, "--state", state, "--name", *name, "--admit-timeout", admitTimeout.String()}
+	if *project != "" {
+		upArgs = append(upArgs, "--project", *project)
+	}
+	if *runID != "" {
+		upArgs = append(upArgs, "--run-id", *runID)
+	}
+	if err := runPoolUp(ctx, upArgs, client); err != nil {
+		return err
+	}
+	defer func() {
+		downCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_ = runPoolDown(downCtx, []string{"--state", state, "--url", *peerURL, "--rpc-token", *rpcToken, "--reason", "pool serve stopped"}, client)
+	}()
+	proxyArgs := []string{"--state", state, "--url", *peerURL, "--rpc-token", *rpcToken, "--listen", *listen}
+	if *token != "" {
+		proxyArgs = append(proxyArgs, "--gateway-token", *token)
+	}
+	if *tokenEnv != "" {
+		proxyArgs = append(proxyArgs, "--gateway-token-env", *tokenEnv)
+	}
+	if *tokenFile != "" {
+		proxyArgs = append(proxyArgs, "--gateway-token-file", *tokenFile)
+	}
+	return runPoolProxy(ctx, proxyArgs, client)
 }
 
 func preflightPoolProxyGateway(ctx context.Context, client *http.Client, target *url.URL, bearer, project string) error {
@@ -173,11 +257,13 @@ func resolvePoolProxyToken(token, tokenEnv, tokenFile string) (string, error) {
 }
 
 type poolProxyHandler struct {
-	workers []poolWorker
-	target  *url.URL
-	bearer  string
-	client  *http.Client
-	next    atomic.Uint64
+	mu        sync.Mutex
+	workers   []poolWorker
+	target    *url.URL
+	bearer    string
+	client    *http.Client
+	validator func(context.Context, *poolWorker) error
+	next      atomic.Uint64
 }
 
 func newPoolProxyHandler(workers []poolWorker, target *url.URL, bearer string, client *http.Client) *poolProxyHandler {
@@ -193,10 +279,20 @@ func (h *poolProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("pool proxy: read request body: %v", err), http.StatusBadGateway)
 		return
 	}
+	workers := h.snapshotWorkers()
+	if len(workers) == 0 {
+		http.Error(w, "pool proxy: no gateway-usable held workers available", http.StatusServiceUnavailable)
+		return
+	}
 	start := h.next.Add(1) - 1
 	var lastResp *pooledResponse
-	for attempt := 0; attempt < len(h.workers); attempt++ {
-		worker := h.workers[(start+uint64(attempt))%uint64(len(h.workers))]
+	var lastValidation string
+	for attempt := 0; attempt < len(workers); attempt++ {
+		worker := workers[(start+uint64(attempt))%uint64(len(workers))]
+		if err := h.validateLiveWorker(r.Context(), worker); err != nil {
+			lastValidation = err.Error()
+			continue
+		}
 		resp, err := h.forward(r, worker, body)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("pool proxy: forward to gateway: %v", err), http.StatusBadGateway)
@@ -215,13 +311,117 @@ func (h *poolProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		lastResp.write(w)
 		return
 	}
-	http.Error(w, "pool proxy: no held workers available", http.StatusBadGateway)
+	if lastValidation != "" {
+		http.Error(w, "pool proxy: no gateway-usable held workers available: "+lastValidation, http.StatusServiceUnavailable)
+		return
+	}
+	http.Error(w, "pool proxy: no gateway-usable held workers available", http.StatusServiceUnavailable)
+}
+
+func (h *poolProxyHandler) snapshotWorkers() []poolWorker {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]poolWorker(nil), h.workers...)
+}
+
+func (h *poolProxyHandler) validateLiveWorker(ctx context.Context, worker poolWorker) error {
+	if h.validator == nil {
+		return nil
+	}
+	refreshed := worker
+	if err := h.validator(ctx, &refreshed); err != nil {
+		return err
+	}
+	if !poolWorkerHeld(refreshed) {
+		h.removeWorker(worker.WorkloadID)
+		if refreshed.Error != "" {
+			return fmt.Errorf("worker %s is not gateway-usable: %s", worker.WorkloadID, refreshed.Error)
+		}
+		return fmt.Errorf("worker %s is not gateway-usable: status %s", worker.WorkloadID, refreshed.Status)
+	}
+	h.replaceWorker(refreshed)
+	return nil
+}
+
+func (h *poolProxyHandler) removeWorker(workloadID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var kept []poolWorker
+	for _, worker := range h.workers {
+		if worker.WorkloadID != workloadID {
+			kept = append(kept, worker)
+		}
+	}
+	h.workers = kept
+}
+
+func (h *poolProxyHandler) replaceWorker(updated poolWorker) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.workers {
+		if h.workers[i].WorkloadID == updated.WorkloadID {
+			h.workers[i] = updated
+			return
+		}
+	}
+	h.workers = append(h.workers, updated)
 }
 
 type pooledResponse struct {
 	status int
 	header http.Header
 	body   []byte
+}
+
+func refreshPoolProxyWorkers(ctx context.Context, client *http.Client, peerURL, rpcToken string, workers []poolWorker) ([]poolWorker, error) {
+	var usable []poolWorker
+	var reasons []string
+	for _, worker := range workers {
+		refreshed := worker
+		if err := refreshPoolWorkerGatewayUsability(ctx, client, peerURL, rpcToken, &refreshed); err != nil {
+			reasons = append(reasons, fmt.Sprintf("%s: %v", worker.WorkloadID, err))
+			continue
+		}
+		if poolWorkerHeld(refreshed) {
+			usable = append(usable, refreshed)
+			continue
+		}
+		if refreshed.Error != "" {
+			reasons = append(reasons, fmt.Sprintf("%s: %s", worker.WorkloadID, refreshed.Error))
+		} else {
+			reasons = append(reasons, fmt.Sprintf("%s: status %s", worker.WorkloadID, refreshed.Status))
+		}
+	}
+	if len(usable) == 0 {
+		if len(reasons) == 0 {
+			return nil, fmt.Errorf("pool has no gateway-usable held workers")
+		}
+		return nil, fmt.Errorf("pool has no gateway-usable held workers: %s", strings.Join(reasons, "; "))
+	}
+	return usable, nil
+}
+
+func mergePoolProxyWorkerValidation(existing, usable []poolWorker) []poolWorker {
+	byID := map[string]poolWorker{}
+	for _, worker := range usable {
+		byID[worker.WorkloadID] = worker
+	}
+	out := append([]poolWorker(nil), existing...)
+	for i := range out {
+		if refreshed, ok := byID[out[i].WorkloadID]; ok {
+			out[i] = refreshed
+		}
+	}
+	return out
+}
+
+func poolProxyPeerURL(target *url.URL) string {
+	out := *target
+	path := strings.TrimRight(out.Path, "/")
+	if path == "/v1" || strings.HasSuffix(path, "/v1") {
+		out.Path = strings.TrimSuffix(path, "/v1")
+	}
+	return strings.TrimRight(out.String(), "/")
 }
 
 func (p *pooledResponse) write(w http.ResponseWriter) {

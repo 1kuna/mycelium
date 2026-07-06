@@ -20,21 +20,22 @@ import (
 	"mycelium/internal/workload"
 )
 
-// myce pool <plan|up|status|down> — replica worker pools for one model.
+// myce pool <plan|up|status|proxy|serve|down> — replica worker pools for one model.
 //
 // plan computes the maximum safe replicas per node from the control store's
 // fleet facts using the same allocator math owner admission enforces.
 // up launches the planned replicas through /workloads admission and HOLDS the
 // leases so the capacity stays reserved (unlike prewarm, which releases).
-// status refreshes worker state; down finishes/cancels every worker so the
-// reservations are released.
+// status refreshes worker state against the same live lease table used by the
+// gateway. serve owns the up/proxy/down lifecycle in one process. down
+// finishes/cancels every worker so the reservations are released.
 
 var poolStatusPollInterval = 2 * time.Second
 var poolDownVerifyTimeout = 10 * time.Second
 
 func runPool(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce pool <plan|up|status|proxy|down>")
+		return fmt.Errorf("usage: myce pool <plan|up|status|proxy|serve|down>")
 	}
 	if client == nil {
 		client = http.DefaultClient
@@ -48,10 +49,12 @@ func runPool(ctx context.Context, args []string, client *http.Client) error {
 		return runPoolStatus(ctx, args[1:], client)
 	case "proxy":
 		return runPoolProxy(ctx, args[1:], client)
+	case "serve":
+		return runPoolServe(ctx, args[1:], client)
 	case "down":
 		return runPoolDown(ctx, args[1:], client)
 	default:
-		return fmt.Errorf("usage: myce pool <plan|up|status|proxy|down>")
+		return fmt.Errorf("usage: myce pool <plan|up|status|proxy|serve|down>")
 	}
 }
 
@@ -483,17 +486,10 @@ func runPoolStatus(ctx context.Context, args []string, client *http.Client) erro
 		if worker.WorkloadID == "" {
 			continue
 		}
-		status, err := fetchPoolWorkload(ctx, client, *peerURL, *rpcToken, worker.WorkloadID)
-		if errors.Is(err, errPoolWorkloadNotFound) {
-			worker.Status = "not_admitted"
-			worker.Error = ""
-			continue
-		}
-		if err != nil {
+		if err := refreshPoolWorkerGatewayUsability(ctx, client, *peerURL, *rpcToken, worker); err != nil {
 			worker.Error = err.Error()
 			continue
 		}
-		applyPoolStatus(worker, status)
 	}
 	if err := writePrettyJSONFile(*statePath, state); err != nil {
 		return err
@@ -546,7 +542,7 @@ func runPoolDown(ctx context.Context, args []string, client *http.Client) error 
 			}
 		}
 		var release error
-		if worker.LeaseID != "" && !worker.Queued {
+		if poolWorkerHeld(*worker) {
 			finished, err := finishPrewarmWorkload(ctx, client, *peerURL, *rpcToken, worker.WorkloadID)
 			if err == nil {
 				worker.Status = string(finished.Job.Status)
@@ -647,6 +643,56 @@ func shouldRefreshPoolWorkerBeforeDown(worker poolWorker) bool {
 		return false
 	}
 	return worker.WorkloadID != "" && (worker.LeaseID == "" || worker.InstanceID == "" || worker.Status == "admit_error")
+}
+
+func refreshPoolWorkerGatewayUsability(ctx context.Context, client *http.Client, peerURL, rpcToken string, worker *poolWorker) error {
+	if worker.WorkloadID == "" {
+		return nil
+	}
+	status, err := fetchPoolWorkload(ctx, client, peerURL, rpcToken, worker.WorkloadID)
+	if errors.Is(err, errPoolWorkloadNotFound) {
+		worker.Status = "not_admitted"
+		worker.Error = ""
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	applyPoolStatus(worker, status)
+	if !poolWorkerHeld(*worker) {
+		if worker.Status == string(domain.JobRunning) {
+			markPoolWorkerLeaseInactive(worker, "running workload has no held lease evidence")
+		}
+		return nil
+	}
+	lease, found, err := fetchPoolAdmissionLeaseByInstance(ctx, client, peerURL, rpcToken, worker.InstanceID)
+	if err != nil {
+		return fmt.Errorf("validate active lease for worker %s: %w", worker.WorkloadID, err)
+	}
+	if !found {
+		markPoolWorkerLeaseInactive(worker, fmt.Sprintf("instance %q has no active admission lease", worker.InstanceID))
+		return nil
+	}
+	if lease.ID != worker.LeaseID {
+		markPoolWorkerLeaseInactive(worker, fmt.Sprintf("instance %q active lease is %q, expected %q", worker.InstanceID, lease.ID, worker.LeaseID))
+		return nil
+	}
+	if lease.JobID != "" && lease.JobID != worker.WorkloadID {
+		markPoolWorkerLeaseInactive(worker, fmt.Sprintf("active lease %q belongs to workload %q", lease.ID, lease.JobID))
+		return nil
+	}
+	if lease.InstanceID != "" && lease.InstanceID != worker.InstanceID {
+		markPoolWorkerLeaseInactive(worker, fmt.Sprintf("active lease %q points at instance %q, expected %q", lease.ID, lease.InstanceID, worker.InstanceID))
+		return nil
+	}
+	worker.Error = ""
+	return nil
+}
+
+func markPoolWorkerLeaseInactive(worker *poolWorker, reason string) {
+	worker.Status = "lease_inactive"
+	worker.Queued = false
+	worker.Error = reason
 }
 
 func loadPoolPlan(path string) (pool.Plan, error) {
