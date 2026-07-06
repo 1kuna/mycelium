@@ -94,6 +94,7 @@ func runReconcileStatus(args []string) error {
 func runReconcileDrain(args []string, client *http.Client) error {
 	fs := flag.NewFlagSet("reconcile drain", flag.ContinueOnError)
 	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+	configPath := fs.String("config", "", "peer config JSON; enables refresh_catalog from configured presets")
 	jobID := fs.String("job", "", "filter by job id")
 	limit := fs.Int("limit", 0, "maximum allowed tasks to drain; 0 means all")
 	prewarmURL := fs.String("prewarm-url", "", "peer base URL for prewarm_replica execution")
@@ -118,12 +119,21 @@ func runReconcileDrain(args []string, client *http.Client) error {
 		}
 		prewarm = prewarmDrainExecutor{client: client, peerURL: *prewarmURL, rpcToken: *rpcToken}
 	}
+	var catalog reconcile.CatalogRefresher
+	if strings.TrimSpace(*configPath) != "" {
+		loaded, err := loadOperatorConfig(*configPath)
+		if err != nil {
+			return err
+		}
+		catalog = reconcile.ConfigCatalogRefresher{Store: store, Presets: loaded.Config.Presets}
+	}
 	report, err := reconcile.DrainAllowedTasks(context.Background(), store, reconcile.DrainOptions{
 		JobID:   *jobID,
 		Limit:   *limit,
 		Now:     time.Now().UTC(),
 		Project: *project,
 		Prewarm: prewarm,
+		Catalog: catalog,
 	})
 	if err != nil {
 		return err

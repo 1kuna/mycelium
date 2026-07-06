@@ -6666,6 +6666,16 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		CreatedAt:          time.Unix(1, 0).UTC(),
 		UpdatedAt:          time.Unix(1, 0).UTC(),
 	}, {
+		ID:                 "recon-refresh",
+		Kind:               string(reconcile.TaskRefreshCatalog),
+		Status:             domain.ReconciliationTaskAllowed,
+		PresetID:           "refreshed",
+		Model:              "refreshed",
+		Reason:             "unknown model",
+		AutomaticCandidate: true,
+		CreatedAt:          time.Unix(1, 0).UTC(),
+		UpdatedAt:          time.Unix(1, 0).UTC(),
+	}, {
 		ID:                 "recon-wait",
 		Kind:               string(reconcile.TaskWaitCapacity),
 		Status:             domain.ReconciliationTaskAllowed,
@@ -6677,18 +6687,22 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		UpdatedAt:          time.Unix(1, 0).UTC(),
 	}}
 	prewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-recon-prewarm", NodeID: "node-a", InstanceID: "inst-a", LeaseID: "lease-a"}}
-	startReconciliationDrainer(ctx, reconcileStore, prewarm, clk, time.Second, 2, "project-a")
+	startReconciliationDrainer(ctx, reconcileStore, prewarm, reconcile.ConfigCatalogRefresher{Store: reconcileStore, Presets: []domain.Preset{testPreset("refreshed")}}, clk, time.Second, 3, "project-a")
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := reconcileStore.ListReconciliationTasks(context.Background(), "")
-		if err != nil || len(tasks) != 2 || prewarm.callCount() != 1 {
+		if err != nil || len(tasks) != 3 || prewarm.callCount() != 1 {
 			return false
 		}
 		byID := map[string]domain.ReconciliationTaskRecord{}
 		for _, task := range tasks {
 			byID[task.ID] = task
 		}
-		return byID["recon-prewarm"].Status == domain.ReconciliationTaskDone && byID["recon-wait"].Status == domain.ReconciliationTaskAllowed
+		_, presetErr := reconcileStore.Preset(context.Background(), "refreshed")
+		return byID["recon-prewarm"].Status == domain.ReconciliationTaskDone &&
+			byID["recon-refresh"].Status == domain.ReconciliationTaskDone &&
+			byID["recon-wait"].Status == domain.ReconciliationTaskAllowed &&
+			presetErr == nil
 	})
 
 	serviceStore := &workloadMemoryStore{
@@ -6706,7 +6720,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		}},
 	}
 	servicePrewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-service", NodeID: "node-a", InstanceID: "inst-service", LeaseID: "lease-service"}}
-	startReconciliationDrainer(ctx, serviceStore, servicePrewarm, clk, time.Second, 2, "project-a")
+	startReconciliationDrainer(ctx, serviceStore, servicePrewarm, nil, clk, time.Second, 2, "project-a")
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := serviceStore.ListReconciliationTasks(context.Background(), "service-a")
@@ -7311,10 +7325,22 @@ func (s *workloadMemoryStore) SaveIncompatibility(_ context.Context, rec domain.
 }
 
 func (s *workloadMemoryStore) Preset(_ context.Context, id string) (domain.Preset, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if preset, ok := s.presets[id]; ok {
 		return preset, nil
 	}
 	return domain.Preset{}, fmt.Errorf("preset %q not found", id)
+}
+
+func (s *workloadMemoryStore) SavePreset(_ context.Context, preset domain.Preset) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.presets == nil {
+		s.presets = map[string]domain.Preset{}
+	}
+	s.presets[preset.ID] = preset
+	return nil
 }
 
 func (s *workloadMemoryStore) Node(_ context.Context, id string) (domain.Node, error) {

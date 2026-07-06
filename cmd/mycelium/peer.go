@@ -336,7 +336,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		startPeerHeartbeatWithClient(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, joinTokens, clock.System{}, controlClient)
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
-	startReconciliationDrainer(ctx, store, schedulerPrewarmExecutor{runtime: runtime}, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject)
+	startReconciliationDrainer(ctx, store, schedulerPrewarmExecutor{runtime: runtime}, reconcile.ConfigCatalogRefresher{Store: store, Presets: cfg.Presets}, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject)
 	optimizerNodeID := cfg.ID
 	if cfg.Compute {
 		optimizerNodeID = privateLocalNodeID(cfg)
@@ -3250,7 +3250,7 @@ func (e schedulerPrewarmExecutor) PrewarmReplica(ctx context.Context, job domain
 	}, nil
 }
 
-func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, prewarm reconcile.PrewarmExecutor, clk ports.Clock, interval time.Duration, limit int, project string) {
+func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, prewarm reconcile.PrewarmExecutor, catalog reconcile.CatalogRefresher, clk ports.Clock, interval time.Duration, limit int, project string) {
 	if store == nil || clk == nil || interval <= 0 || limit <= 0 {
 		return
 	}
@@ -3272,11 +3272,13 @@ func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, 
 				Limit:   limit,
 				Project: project,
 				Prewarm: prewarm,
+				Catalog: catalog,
 				Kinds: []reconcile.TaskKind{
 					reconcile.TaskRecordIncompatibility,
 					reconcile.TaskStageModelArtifact,
 					reconcile.TaskVerifyEngineReadiness,
 					reconcile.TaskPrewarmReplica,
+					reconcile.TaskRefreshCatalog,
 				},
 			}); err != nil {
 				log.Printf("mycelium reconciliation drain failed: %v", err)
