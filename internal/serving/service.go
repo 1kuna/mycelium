@@ -158,7 +158,9 @@ func Reconcile(ctx context.Context, store Store, opts ReconcileOptions) (Reconci
 			report.Skipped++
 			continue
 		}
-		have := runningServiceJobs(service.ID, jobs, leases, now)
+		heldPresets := runningServicePresets(service.ID, jobs, leases, now)
+		inflightPresets := inFlightServicePresets(service.ID, jobs)
+		have := len(heldPresets)
 		want := service.MinReplicas - have
 		if want <= 0 {
 			report.Skipped++
@@ -177,6 +179,10 @@ func Reconcile(ctx context.Context, store Store, opts ReconcileOptions) (Reconci
 				report.Skipped++
 				break
 			}
+			if heldPresets[presetID] || inflightPresets[presetID] {
+				report.Skipped++
+				continue
+			}
 			task := prewarmTaskForService(service, presetID, now)
 			existing, err := store.ListReconciliationTasks(ctx, service.ID)
 			if err != nil {
@@ -191,6 +197,7 @@ func Reconcile(ctx context.Context, store Store, opts ReconcileOptions) (Reconci
 			}
 			report.Created++
 			report.Tasks = append(report.Tasks, task.ID)
+			inflightPresets[presetID] = true
 			remaining--
 		}
 		if remaining > 0 && len(service.CandidatePresetIDs) == 0 {
@@ -239,7 +246,7 @@ func serviceTaskID(serviceID, presetID string) string {
 	return "service-prewarm-" + hex.EncodeToString(sum[:8])
 }
 
-func runningServiceJobs(serviceID string, jobs []domain.Job, leases []domain.Lease, now time.Time) int {
+func runningServicePresets(serviceID string, jobs []domain.Job, leases []domain.Lease, now time.Time) map[string]bool {
 	activeLeases := map[string]domain.Lease{}
 	for _, lease := range leases {
 		if lease.ID == "" {
@@ -250,7 +257,7 @@ func runningServiceJobs(serviceID string, jobs []domain.Job, leases []domain.Lea
 		}
 		activeLeases[lease.ID] = lease
 	}
-	count := 0
+	held := map[string]bool{}
 	for _, job := range jobs {
 		if job.ParentID != serviceID || job.Status != domain.JobRunning || job.Result == nil || job.Result.Terminal || job.Result.LeaseID == "" {
 			continue
@@ -262,9 +269,26 @@ func runningServiceJobs(serviceID string, jobs []domain.Job, leases []domain.Lea
 		if lease.JobID != "" && lease.JobID != job.ID {
 			continue
 		}
-		count++
+		if job.PresetID != "" {
+			held[job.PresetID] = true
+		}
 	}
-	return count
+	return held
+}
+
+func inFlightServicePresets(serviceID string, jobs []domain.Job) map[string]bool {
+	inFlight := map[string]bool{}
+	for _, job := range jobs {
+		if job.ParentID != serviceID || job.PresetID == "" || jobStatusTerminal(job.Status) {
+			continue
+		}
+		inFlight[job.PresetID] = true
+	}
+	return inFlight
+}
+
+func jobStatusTerminal(status domain.JobStatus) bool {
+	return status == domain.JobDone || status == domain.JobFailed || status == domain.JobPreempted
 }
 
 func hasNonTerminalTask(tasks []domain.ReconciliationTaskRecord, id string) bool {
