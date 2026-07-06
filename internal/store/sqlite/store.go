@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -408,7 +407,7 @@ func (s *Store) Put(ctx context.Context, rec domain.JobRecord) error {
 	if ok && !newerJobRecord(rec, existing) {
 		return nil
 	}
-	if err := s.upsertJSON(ctx, "job_records", rec.JobID, rec); err != nil {
+	if err := s.upsertJobRecord(ctx, rec); err != nil {
 		return err
 	}
 	for id, ch := range s.jobWatchers {
@@ -465,12 +464,9 @@ func (s *Store) Snapshot(ctx context.Context) ([]domain.JobRecord, error) {
 func (s *Store) RescueSnapshot(ctx context.Context) ([]domain.JobRecord, error) {
 	return s.jobRecordsWhere(ctx, `
 SELECT data FROM job_records
-WHERE json_extract(data, '$.cleanup_required') = 1
-   OR json_extract(data, '$.status') NOT IN (?, ?)
-ORDER BY json_extract(data, '$.updated_at'), id`,
-		string(domain.JobDone),
-		string(domain.JobFailed),
-	)
+WHERE cleanup_required = 1
+   OR status NOT IN ('done', 'failed')
+ORDER BY updated_at, id`)
 }
 
 func (s *Store) JobRecord(ctx context.Context, id string) (domain.JobRecord, bool, error) {
@@ -485,7 +481,7 @@ func (s *Store) JobRegistryStats(ctx context.Context) (JobRegistryStats, error) 
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_records`).Scan(&stats.Total); err != nil {
 		return JobRegistryStats{}, err
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_records WHERE json_extract(data, '$.cleanup_required') = 1`).Scan(&stats.CleanupRequired); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_records WHERE cleanup_required = 1`).Scan(&stats.CleanupRequired); err != nil {
 		return JobRegistryStats{}, err
 	}
 	return stats, nil
@@ -1032,6 +1028,32 @@ ON CONFLICT(id) DO UPDATE SET data = excluded.data`, table), id, string(data))
 	return err
 }
 
+func (s *Store) upsertJobRecord(ctx context.Context, rec domain.JobRecord) error {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	cleanupRequired := 0
+	if rec.CleanupRequired {
+		cleanupRequired = 1
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO job_records (id, data, status, cleanup_required, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	data = excluded.data,
+	status = excluded.status,
+	cleanup_required = excluded.cleanup_required,
+	updated_at = excluded.updated_at`,
+		rec.JobID,
+		string(data),
+		string(rec.Status),
+		cleanupRequired,
+		rec.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	return err
+}
+
 func (s *Store) getJSON(ctx context.Context, table, id string, out any) error {
 	if id == "" {
 		return fmt.Errorf("%s id is required", table)
@@ -1094,23 +1116,15 @@ func (s *Store) jobRecord(ctx context.Context, id string) (domain.JobRecord, boo
 }
 
 func (s *Store) jobRecordsAfter(ctx context.Context, cursor time.Time) ([]domain.JobRecord, error) {
-	var records []domain.JobRecord
-	if err := s.listJSON(ctx, "job_records", &records); err != nil {
-		return nil, err
+	if cursor.IsZero() {
+		return s.jobRecordsWhere(ctx, `SELECT data FROM job_records ORDER BY updated_at, id`)
 	}
-	out := records[:0]
-	for _, rec := range records {
-		if cursor.IsZero() || rec.UpdatedAt.After(cursor) {
-			out = append(out, cloneJobRecord(rec))
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
-			return out[i].JobID < out[j].JobID
-		}
-		return out[i].UpdatedAt.Before(out[j].UpdatedAt)
-	})
-	return out, nil
+	return s.jobRecordsWhere(ctx, `
+SELECT data FROM job_records
+WHERE updated_at > ?
+ORDER BY updated_at, id`,
+		cursor.UTC().Format(time.RFC3339Nano),
+	)
 }
 
 func (s *Store) jobRecordsWhere(ctx context.Context, query string, args ...any) ([]domain.JobRecord, error) {
@@ -1226,7 +1240,13 @@ CREATE TABLE IF NOT EXISTS workload_result_bodies (
 	body BLOB NOT NULL,
 	stored_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS job_records (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS job_records (
+	id TEXT PRIMARY KEY,
+	data TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT '',
+	cleanup_required INTEGER NOT NULL DEFAULT 0,
+	updated_at TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS reconciliation_tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS incompatibilities (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS recommendations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -1236,9 +1256,6 @@ CREATE TABLE IF NOT EXISTS model_localities (id TEXT PRIMARY KEY, data TEXT NOT 
 CREATE TABLE IF NOT EXISTS locality_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS engine_profiles (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bootstrap_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_job_records_status ON job_records(json_extract(data, '$.status'));
-CREATE INDEX IF NOT EXISTS idx_job_records_cleanup ON job_records(json_extract(data, '$.cleanup_required'));
-CREATE INDEX IF NOT EXISTS idx_job_records_updated ON job_records(json_extract(data, '$.updated_at'));
 
 CREATE TABLE IF NOT EXISTS run_metrics (
 	job_id TEXT PRIMARY KEY,
@@ -1294,7 +1311,42 @@ CREATE INDEX IF NOT EXISTS idx_session_metrics_node_at ON session_metrics(node_i
 	if err := ensureColumn(ctx, s.db, "session_metrics", "bytes_in", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	return ensureColumn(ctx, s.db, "session_metrics", "bytes_out", "INTEGER NOT NULL DEFAULT 0")
+	if err := ensureColumn(ctx, s.db, "session_metrics", "bytes_out", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "job_records", "status", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "job_records", "cleanup_required", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "job_records", "updated_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := backfillJobRecordColumns(ctx, s.db); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+DROP INDEX IF EXISTS idx_job_records_status;
+DROP INDEX IF EXISTS idx_job_records_cleanup;
+DROP INDEX IF EXISTS idx_job_records_updated;
+CREATE INDEX IF NOT EXISTS idx_job_records_status_scalar ON job_records(status);
+CREATE INDEX IF NOT EXISTS idx_job_records_cleanup_scalar ON job_records(cleanup_required);
+CREATE INDEX IF NOT EXISTS idx_job_records_updated_scalar ON job_records(updated_at, id);
+CREATE INDEX IF NOT EXISTS idx_job_records_rescue_scalar ON job_records(updated_at, id)
+	WHERE cleanup_required = 1 OR status NOT IN ('done', 'failed');`)
+	return err
+}
+
+func backfillJobRecordColumns(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `
+UPDATE job_records
+SET
+	status = COALESCE(json_extract(data, '$.status'), ''),
+	cleanup_required = COALESCE(json_extract(data, '$.cleanup_required'), 0),
+	updated_at = COALESCE(json_extract(data, '$.updated_at'), '')
+WHERE status = '' OR updated_at = ''`)
+	return err
 }
 
 func ensureColumn(ctx context.Context, db *sql.DB, table, column, spec string) error {
