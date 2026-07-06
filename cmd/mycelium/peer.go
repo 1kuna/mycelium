@@ -710,6 +710,29 @@ func mountWorkloadHTTP(mux *http.ServeMux, runtime workloadRuntime, store worklo
 		}
 		job, err := store.Job(r.Context(), id)
 		if err != nil {
+			if cancelWorkload {
+				if r.Method != http.MethodPost {
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
+				var req workload.CancelRequest
+				if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
+					if err := decodePeerRPCJSON(r, &req); err != nil {
+						writePeerRPCError(w, http.StatusBadRequest, err)
+						return
+					}
+				}
+				job, err := cancelRegistryOnlyWorkload(r.Context(), store, id, req)
+				if err != nil {
+					writePeerRPCError(w, http.StatusNotFound, err)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(workload.FinishResponse{Job: job, Result: job.Result, Execution: workloadExecutionEvidence(r.Context(), store, job)}); err != nil {
+					panic(err)
+				}
+				return
+			}
 			writePeerRPCError(w, http.StatusNotFound, err)
 			return
 		}
@@ -919,6 +942,9 @@ func cancelWorkloadJob(ctx context.Context, runtime workloadRuntime, store workl
 		if err := runtime.FinishJob(ctx, job, lease, fmt.Errorf("%s", reason)); err != nil {
 			return domain.Job{}, err
 		}
+		if err := recordWorkloadCancelRegistry(ctx, store, job.ID, reason); err != nil {
+			return domain.Job{}, err
+		}
 		if latest, readErr := store.Job(ctx, job.ID); readErr == nil {
 			return latest, nil
 		}
@@ -935,7 +961,78 @@ func cancelWorkloadJob(ctx context.Context, runtime workloadRuntime, store workl
 	if err := store.SaveJob(ctx, job); err != nil {
 		return domain.Job{}, err
 	}
+	if err := recordWorkloadCancelRegistry(ctx, store, job.ID, reason); err != nil {
+		return domain.Job{}, err
+	}
 	return job, nil
+}
+
+func recordWorkloadCancelRegistry(ctx context.Context, store workloadStore, jobID, reason string) error {
+	registry, ok := store.(interface {
+		JobRecord(context.Context, string) (domain.JobRecord, bool, error)
+		Put(context.Context, domain.JobRecord) error
+	})
+	if !ok {
+		return nil
+	}
+	rec, found, err := registry.JobRecord(ctx, jobID)
+	if err != nil || !found {
+		return err
+	}
+	rec.Status = domain.JobFailed
+	rec.CleanupRequired = false
+	rec.CleanupError = ""
+	rec.RecoveryNote = appendWorkloadRecoveryNote(rec.RecoveryNote, "operator canceled workload: "+reason)
+	rec.Fence++
+	rec.UpdatedAt = time.Now().UTC()
+	return registry.Put(ctx, rec)
+}
+
+func cancelRegistryOnlyWorkload(ctx context.Context, store workloadStore, jobID string, req workload.CancelRequest) (domain.Job, error) {
+	registry, ok := store.(interface {
+		JobRecord(context.Context, string) (domain.JobRecord, bool, error)
+		Put(context.Context, domain.JobRecord) error
+	})
+	if !ok {
+		return domain.Job{}, fmt.Errorf("workload %q not found", jobID)
+	}
+	rec, found, err := registry.JobRecord(ctx, jobID)
+	if err != nil {
+		return domain.Job{}, err
+	}
+	if !found {
+		return domain.Job{}, fmt.Errorf("workload %q not found", jobID)
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		reason = "canceled by operator"
+	}
+	job := domain.Job{ID: jobID}
+	if payloadJob, _, err := peercoord.DecodeRescuePayload(rec.Request); err == nil && payloadJob.ID == jobID {
+		job = payloadJob
+	}
+	job.Status = domain.JobFailed
+	job.Error = reason
+	if job.Result == nil {
+		job.Result = &domain.JobResult{}
+	}
+	job.Result.Source = "operator_cancel_registry_only"
+	job.Result.ResultRedacted = true
+	job.Result.Terminal = true
+	if err := store.SaveJob(ctx, job); err != nil {
+		return domain.Job{}, err
+	}
+	if err := recordWorkloadCancelRegistry(ctx, store, jobID, reason); err != nil {
+		return domain.Job{}, err
+	}
+	return job, nil
+}
+
+func appendWorkloadRecoveryNote(existing, next string) string {
+	if strings.TrimSpace(existing) == "" {
+		return next
+	}
+	return existing + "; " + next
 }
 
 func attachWorkloadResultArtifact(result *domain.JobResult, req workload.FinishRequest) error {
