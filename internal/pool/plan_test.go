@@ -174,8 +174,7 @@ func TestBuildPlanCountsExistingReplicasAndReducedFit(t *testing.T) {
 	if gpu.Existing != 2 {
 		t.Fatalf("existing replicas = %d, want 2 (ready+loading of matching preset)", gpu.Existing)
 	}
-	// 3 instances occupy 21120MB of the 22118MB budget: nothing more fits.
-	if gpu.Additional != 0 || gpu.Refusal != "insufficient safe capacity" {
+	if gpu.Additional != 0 || gpu.Refusal != "warm instance concurrency envelope is full" {
 		t.Fatalf("full node plan = %+v", gpu)
 	}
 	if plan.TotalExisting != 2 {
@@ -206,6 +205,47 @@ func TestBuildPlanIgnoresErrorInstancesForCapacity(t *testing.T) {
 	}
 	if spark.Additional != 1 {
 		t.Fatalf("error instances consumed capacity: %+v", spark)
+	}
+}
+
+func TestBuildPlanUsesWarmInstanceHeadroomInsteadOfSpeculativeReplicas(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "vision"
+		p.Aliases = []string{"vision"}
+		p.NodeID = "node_spark"
+		p.ContextLength = 49152
+		p.EstWeightsMB = 1000
+		p.KVPerTokenMB = 0
+	})
+	fleet := domain.FleetSnapshot{
+		Nodes: []domain.Node{fixtures.MakeSparkNode()},
+		Instances: []domain.ModelInstance{{
+			ID:             "inst_ready",
+			PresetID:       preset.ID,
+			NodeID:         "node_spark",
+			AcceleratorSet: []int{0},
+			Claim:          domain.Claim{WeightsMB: 56000},
+			State:          domain.InstReady,
+		}},
+	}
+
+	plan := buildTestPlan(t, []domain.Preset{preset}, fleet, Options{ContextLength: 49152, MaxTotal: 3, MaxPerNode: 2})
+	spark := nodePlan(t, plan, "node_spark")
+	if spark.Existing != 1 {
+		t.Fatalf("existing = %d, want warm instance counted", spark.Existing)
+	}
+	if spark.Additional != 1 {
+		t.Fatalf("warm headroom additional = %d, want 1: %+v", spark.Additional, spark)
+	}
+	if plan.TotalAdditional != 1 {
+		t.Fatalf("total additional = %d, want 1", plan.TotalAdditional)
+	}
+
+	fleet.Instances[0].InFlight = 1
+	full := buildTestPlan(t, []domain.Preset{preset}, fleet, Options{ContextLength: 49152, MaxTotal: 3, MaxPerNode: 2})
+	fullSpark := nodePlan(t, full, "node_spark")
+	if fullSpark.Additional != 0 || fullSpark.Refusal != "warm instance concurrency envelope is full" {
+		t.Fatalf("full warm envelope plan = %+v", fullSpark)
 	}
 }
 
