@@ -5232,6 +5232,49 @@ func TestSchedulerPrewarmExecutorUsesWorkloadAdmission(t *testing.T) {
 	}
 }
 
+func TestSchedulerPrewarmExecutorTerminalizesJobOnSubmitFailure(t *testing.T) {
+	ctx := context.Background()
+	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	preset := fixtures.MakePreset(fixtures.WithPresetID("preset-a"), fixtures.WithModelRef("model-a"), fixtures.WithWeights(100), fixtures.WithKVPerToken(0), fixtures.WithContextLength(1024))
+	runtime := &scheduler.Service{
+		Placer:      &gatedWorkloadPlacer{ready: true, nodeID: node.ID, preset: preset},
+		Fleet:       staticWorkloadFleet{node: node},
+		Nodes:       workloadNodeResolver{agents: map[string]ports.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Coordinator: &mocks.Coordinator{Err: errors.New("owner admission refused")},
+		JobLog:      peercoord.NewJobLog(),
+		Queue:       scheduler.NewQueue(mocks.NewFakeClock(time.Unix(51, 0).UTC())),
+		Store:       store,
+		Clock:       mocks.NewFakeClock(time.Unix(51, 0).UTC()),
+		Presets:     map[string]domain.Preset{preset.ID: preset, preset.ModelRef: preset},
+	}
+	_, err = (schedulerPrewarmExecutor{runtime: runtime}).PrewarmReplica(ctx, domain.Job{
+		ID:         "prewarm-job",
+		TaskType:   string(domain.CapabilityChat),
+		Model:      preset.ModelRef,
+		PresetID:   preset.ID,
+		Project:    "project-a",
+		Priority:   domain.PriorityBackground,
+		SpeedPref:  domain.SpeedThroughput,
+		Preemption: domain.PreemptSoft,
+		Status:     domain.JobQueued,
+	})
+	if err == nil || !strings.Contains(err.Error(), "owner admission refused") {
+		t.Fatalf("PrewarmReplica err = %v", err)
+	}
+	job, err := store.Job(ctx, "prewarm-job")
+	if err != nil {
+		t.Fatalf("stored job: %v", err)
+	}
+	if job.Status != domain.JobFailed || job.Result == nil || !job.Result.Terminal || !strings.Contains(job.Error, "owner admission refused") {
+		t.Fatalf("stored prewarm job = %+v", job)
+	}
+}
+
 func TestWorkloadHTTPDrainExecuteCapturesProviderResult(t *testing.T) {
 	ctx := context.Background()
 	store, err := storesqlite.Open(filepath.Join(t.TempDir(), "control.db"))
