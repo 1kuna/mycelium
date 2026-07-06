@@ -4648,6 +4648,43 @@ func TestWorkloadHTTPCancelTerminalizesJobWithoutLeaseEvidence(t *testing.T) {
 	}
 }
 
+func TestWorkloadHTTPCancelFailsPrewarmReconciliationTask(t *testing.T) {
+	store := &workloadMemoryStore{jobs: map[string]domain.Job{}}
+	store.reconcileTasks = []domain.ReconciliationTaskRecord{{
+		ID:        "task-a",
+		JobID:     "service-a",
+		Kind:      string(reconcile.TaskPrewarmReplica),
+		Status:    domain.ReconciliationTaskRunning,
+		CreatedAt: time.Unix(10, 0).UTC(),
+		UpdatedAt: time.Unix(10, 0).UTC(),
+	}}
+	if err := store.SaveJob(context.Background(), domain.Job{
+		ID:       "reconcile-prewarm-task-a",
+		Model:    "model-a",
+		Project:  "project-a",
+		ParentID: "service-a",
+		Status:   domain.JobQueued,
+	}); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	mux := http.NewServeMux()
+	mountWorkloadHTTP(mux, &recordingWorkloadRuntime{store: store}, store, "rpc-secret", "peer-a", nil)
+	req := httptest.NewRequest(http.MethodPost, "/workloads/reconcile-prewarm-task-a/cancel", strings.NewReader(`{"reason":"stale prewarm cleanup"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	tasks, err := store.ListReconciliationTasks(context.Background(), "service-a")
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("tasks = %+v err=%v", tasks, err)
+	}
+	if tasks[0].Status != domain.ReconciliationTaskFailed || tasks[0].Error != "stale prewarm cleanup" {
+		t.Fatalf("task = %+v", tasks[0])
+	}
+}
+
 func TestWorkloadHTTPCancelUsesRuntimeFinishWhenLeaseEvidenceExists(t *testing.T) {
 	result := &domain.JobResult{
 		Source:  "scheduler",
