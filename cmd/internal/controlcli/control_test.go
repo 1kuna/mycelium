@@ -655,12 +655,28 @@ func TestRunListCommandsAndProjectSet(t *testing.T) {
 	if err := store.SaveRecommendation(context.Background(), domain.RecommendationRecord{ID: "rec-a", ProjectID: "project-a", Type: "context", RecommendedValue: 4096, CreatedAt: time.Unix(1, 0).UTC()}); err != nil {
 		t.Fatalf("SaveRecommendation: %v", err)
 	}
+	if err := store.SaveModelService(context.Background(), domain.ModelService{
+		ID:             "service-a",
+		Model:          "model-a",
+		Project:        "project-a",
+		ContextRequest: 8192,
+		MinReplicas:    1,
+		MaxReplicas:    1,
+		Status:         domain.ModelServiceActive,
+		DemandCount:    1,
+		CreatedAt:      time.Unix(1, 0).UTC(),
+		UpdatedAt:      time.Unix(1, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("SaveModelService: %v", err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
 	commands := [][]string{
 		{"models", "list", "--db", dbPath},
+		{"models", "service", "list", "--db", dbPath},
+		{"models", "service", "pause", "--db", dbPath, "--id", "service-a", "--reason", "test pause"},
 		{"nodes", "list", "--db", dbPath},
 		{"jobs", "list", "--db", dbPath},
 		{"recommendations", "list", "--db", dbPath, "--project", "project-a"},
@@ -686,6 +702,20 @@ func TestRunListCommandsAndProjectSet(t *testing.T) {
 	if project.LatencyTargetMS != 250 || project.ExpectedConcurrency != 3 {
 		t.Fatalf("project = %+v", project)
 	}
+	verifyStore, err = storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open verify service: %v", err)
+	}
+	service, err := verifyStore.ModelService(context.Background(), "service-a")
+	if err != nil {
+		t.Fatalf("ModelService: %v", err)
+	}
+	if err := verifyStore.Close(); err != nil {
+		t.Fatalf("Close verify service: %v", err)
+	}
+	if service.Status != domain.ModelServicePaused || len(service.Events) == 0 || service.Events[len(service.Events)-1].Message != "test pause" {
+		t.Fatalf("service = %+v", service)
+	}
 	if err := Run(context.Background(), []string{"projects", "set", "--db", dbPath, "--id", "project-bad", "--priority", "urgent"}); err == nil || !strings.Contains(err.Error(), "priority") {
 		t.Fatalf("invalid project priority err = %v", err)
 	}
@@ -694,6 +724,9 @@ func TestRunListCommandsAndProjectSet(t *testing.T) {
 		nil,
 		{"unknown"},
 		{"models", "bad"},
+		{"models", "service"},
+		{"models", "service", "bad"},
+		{"models", "service", "pause", "--db", dbPath},
 		{"nodes", "bad"},
 		{"projects", "bad"},
 		{"projects", "set", "--db", dbPath},

@@ -161,7 +161,7 @@ func runAddModel(ctx context.Context, args []string) error {
 
 func runModels(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce models <list|stage|locality|prewarm|scale>")
+		return fmt.Errorf("usage: myce models <list|service|stage|locality|prewarm|scale>")
 	}
 	switch args[0] {
 	case "list":
@@ -178,6 +178,8 @@ func runModels(ctx context.Context, args []string, client *http.Client) error {
 			fmt.Printf("%s\t%s\t%s\t%d\n", preset.ID, preset.ModelRef, preset.Backend, preset.ContextLength)
 		}
 		return nil
+	case "service":
+		return runModelsService(ctx, args[1:])
 	case "stage":
 		return runModelsStage(ctx, args[1:], client)
 	case "locality":
@@ -185,7 +187,79 @@ func runModels(ctx context.Context, args []string, client *http.Client) error {
 	case "prewarm", "scale":
 		return runModelsPrewarm(ctx, args[1:], client)
 	default:
-		return fmt.Errorf("usage: myce models <list|stage|locality|prewarm|scale>")
+		return fmt.Errorf("usage: myce models <list|service|stage|locality|prewarm|scale>")
+	}
+}
+
+func runModelsService(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: myce models service <list|pause>")
+	}
+	switch args[0] {
+	case "list":
+		fs := flag.NewFlagSet("models service list", flag.ContinueOnError)
+		dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+		jsonOut := fs.Bool("json", false, "print JSON response")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		store, err := storesqlite.Open(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		services, err := store.ListModelServices(ctx)
+		if err != nil {
+			return err
+		}
+		sort.Slice(services, func(i, j int) bool { return services[i].ID < services[j].ID })
+		if *jsonOut {
+			return json.NewEncoder(os.Stdout).Encode(services)
+		}
+		for _, service := range services {
+			fmt.Printf("model-service\tid=%s\tmodel=%s\tproject=%s\tcontext=%d\tstatus=%s\tdemand=%d\tmin=%d\tmax=%d\n",
+				service.ID, emptyDash(service.Model), emptyDash(service.Project), service.ContextRequest, service.Status, service.DemandCount, service.MinReplicas, service.MaxReplicas)
+		}
+		return nil
+	case "pause":
+		fs := flag.NewFlagSet("models service pause", flag.ContinueOnError)
+		dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
+		id := fs.String("id", "", "model service id")
+		reason := fs.String("reason", "paused by operator", "redacted pause reason")
+		jsonOut := fs.Bool("json", false, "print JSON response")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*id) == "" {
+			return fmt.Errorf("usage: myce models service pause --id <service-id> [--db path]")
+		}
+		store, err := storesqlite.Open(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		service, err := store.ModelService(ctx, *id)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		service.Status = domain.ModelServicePaused
+		service.UpdatedAt = now
+		service.Events = append(service.Events, domain.ModelServiceEvent{
+			Status:  service.Status,
+			Message: strings.TrimSpace(*reason),
+			At:      now,
+		})
+		if err := store.SaveModelService(ctx, service); err != nil {
+			return err
+		}
+		if *jsonOut {
+			return json.NewEncoder(os.Stdout).Encode(service)
+		}
+		fmt.Printf("model-service\tid=%s\tstatus=%s\n", service.ID, service.Status)
+		return nil
+	default:
+		return fmt.Errorf("usage: myce models service <list|pause>")
 	}
 }
 
