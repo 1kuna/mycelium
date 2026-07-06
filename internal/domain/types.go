@@ -120,6 +120,7 @@ type ModelInstance struct {
 	State                 InstanceState         `json:"state"`
 	Addr                  string                `json:"addr"`
 	InFlight              int                   `json:"in_flight"`
+	LeaseID               string                `json:"lease_id,omitempty"`
 	Priority              Priority              `json:"priority"`
 	Loading               bool                  `json:"loading"`
 	EngineProfileID       string                `json:"engine_profile_id,omitempty"`

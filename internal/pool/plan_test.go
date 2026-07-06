@@ -217,7 +217,7 @@ func TestBuildPlanIgnoresErrorInstancesForCapacity(t *testing.T) {
 	}
 }
 
-func TestBuildPlanUsesWarmInstanceHeadroomInsteadOfSpeculativeReplicas(t *testing.T) {
+func TestBuildPlanUsesLeaseAwareWarmHeadroom(t *testing.T) {
 	preset := fixtures.MakePreset(func(p *domain.Preset) {
 		p.ID = "vision"
 		p.Aliases = []string{"vision"}
@@ -255,6 +255,14 @@ func TestBuildPlanUsesWarmInstanceHeadroomInsteadOfSpeculativeReplicas(t *testin
 	fullSpark := nodePlan(t, full, "node_spark")
 	if fullSpark.Additional != 0 || fullSpark.Refusal != "warm instance concurrency envelope is full" {
 		t.Fatalf("full warm envelope plan = %+v", fullSpark)
+	}
+
+	fleet.Instances[0].InFlight = 0
+	fleet.Instances[0].LeaseID = "lease-active"
+	leased := buildTestPlan(t, []domain.Preset{preset}, fleet, Options{ContextLength: 49152, MaxTotal: 3, MaxPerNode: 2})
+	leasedSpark := nodePlan(t, leased, "node_spark")
+	if leasedSpark.Additional != 0 || leasedSpark.Refusal != "warm instance concurrency envelope is full" {
+		t.Fatalf("leased warm envelope plan = %+v", leasedSpark)
 	}
 }
 

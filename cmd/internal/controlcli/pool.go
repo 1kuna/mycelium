@@ -58,6 +58,7 @@ func runPool(ctx context.Context, args []string, client *http.Client) error {
 func runPoolPlan(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("pool plan", flag.ContinueOnError)
 	model := fs.String("model", "", "model alias, model ref, or preset id")
+	configPath := fs.String("config", "", "peer config JSON; adds configured presets and supplies live peer defaults")
 	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
 	contextLen := fs.Int("context", 0, "context length per replica; 0 uses each preset's context")
 	concurrency := fs.Int("concurrency", 0, "expected concurrency envelope per replica; 0 means 1")
@@ -65,6 +66,7 @@ func runPoolPlan(ctx context.Context, args []string) error {
 	maxTotal := fs.Int("max-total", 0, "cap additional replicas across the fleet; 0 means no cap")
 	outPath := fs.String("out", "", "write the plan JSON to this file")
 	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token for live snapshot refresh")
+	live := fs.Bool("live", false, "refresh node and instance state from the peers in --config before planning")
 	var peerURLs repeatedString
 	fs.Var(&peerURLs, "peer-url", "compute peer URL to snapshot before planning; may be repeated")
 	jsonOut := fs.Bool("json", false, "print JSON")
@@ -72,14 +74,28 @@ func runPoolPlan(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 || strings.TrimSpace(*model) == "" {
-		return fmt.Errorf("usage: myce pool plan --model <model> [--db path] [--context n] [--concurrency n] [--max-per-node n] [--max-total n] [--out plan.json] [--json]")
+		return fmt.Errorf("usage: myce pool plan --model <model> [--config peer.json] [--live] [--db path] [--context n] [--concurrency n] [--max-per-node n] [--max-total n] [--out plan.json] [--json]")
+	}
+	var cfg operatorPeerConfig
+	if strings.TrimSpace(*configPath) != "" {
+		loaded, err := loadOperatorConfig(*configPath)
+		if err != nil {
+			return err
+		}
+		cfg = loaded.Config
+		if !poolFlagProvided(fs, "db") && cfg.StorePath != "" {
+			*dbPath = cfg.StorePath
+		}
+		if strings.TrimSpace(*rpcToken) == "" {
+			*rpcToken = cfg.RPCToken
+		}
 	}
 	store, err := storesqlite.Open(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	presets, err := resolvePoolPresets(ctx, store, *model)
+	presets, err := resolvePoolPresets(ctx, store, *model, cfg.Presets)
 	if err != nil {
 		return err
 	}
@@ -91,8 +107,16 @@ func runPoolPlan(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(peerURLs) > 0 {
-		nodes, instances, err = overlayPoolSnapshots(ctx, http.DefaultClient, nodes, instances, peerURLs, *rpcToken)
+	snapshotURLs := append([]string(nil), peerURLs...)
+	if *live {
+		cfgURLs := poolSnapshotURLsFromConfig(cfg)
+		if len(cfgURLs) == 0 && len(snapshotURLs) == 0 {
+			return fmt.Errorf("pool plan --live requires --config with seed peers or explicit --peer-url values")
+		}
+		snapshotURLs = append(snapshotURLs, cfgURLs...)
+	}
+	if len(snapshotURLs) > 0 {
+		nodes, instances, err = overlayPoolSnapshots(ctx, http.DefaultClient, nodes, instances, snapshotURLs, *rpcToken)
 		if err != nil {
 			return err
 		}
@@ -116,6 +140,39 @@ func runPoolPlan(ctx context.Context, args []string) error {
 	}
 	printPoolPlan(plan)
 	return nil
+}
+
+func poolFlagProvided(fs *flag.FlagSet, name string) bool {
+	provided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			provided = true
+		}
+	})
+	return provided
+}
+
+func poolSnapshotURLsFromConfig(cfg operatorPeerConfig) []string {
+	seen := map[string]struct{}{}
+	var urls []string
+	add := func(raw string) {
+		base := strings.TrimRight(catalogPeerBaseURL(raw), "/")
+		if base == "" {
+			return
+		}
+		if _, ok := seen[base]; ok {
+			return
+		}
+		seen[base] = struct{}{}
+		urls = append(urls, base)
+	}
+	for _, seed := range cfg.SeedPeers {
+		add(seed)
+	}
+	if cfg.Compute {
+		add(cfg.Listen)
+	}
+	return urls
 }
 
 func overlayPoolSnapshots(ctx context.Context, client *http.Client, nodes []domain.Node, instances []domain.ModelInstance, peerURLs []string, rpcToken string) ([]domain.Node, []domain.ModelInstance, error) {
@@ -142,6 +199,9 @@ func overlayPoolSnapshots(ctx context.Context, client *http.Client, nodes []doma
 		if snap.Node.ID == "" {
 			return nil, nil, fmt.Errorf("snapshot %s returned empty node id", peerURL)
 		}
+		if err := annotatePoolSnapshotLeases(ctx, client, strings.TrimRight(peerURL, "/"), rpcToken, &snap); err != nil {
+			return nil, nil, err
+		}
 		if _, ok := nodeByID[snap.Node.ID]; !ok {
 			order = append(order, snap.Node.ID)
 		}
@@ -165,11 +225,62 @@ func overlayPoolSnapshots(ctx context.Context, client *http.Client, nodes []doma
 	return mergedNodes, mergedInstances, nil
 }
 
-func resolvePoolPresets(ctx context.Context, store *storesqlite.Store, model string) ([]domain.Preset, error) {
-	all, err := store.ListPresets(ctx)
+type poolAdmissionLeaseResponse struct {
+	Found bool         `json:"found"`
+	Lease domain.Lease `json:"lease,omitempty"`
+}
+
+func annotatePoolSnapshotLeases(ctx context.Context, client *http.Client, peerURL, rpcToken string, snap *domain.NodeSnapshot) error {
+	for i := range snap.Instances {
+		if snap.Instances[i].ID == "" {
+			continue
+		}
+		lease, found, err := fetchPoolAdmissionLeaseByInstance(ctx, client, peerURL, rpcToken, snap.Instances[i].ID)
+		if err != nil {
+			return fmt.Errorf("snapshot %s admission lease for instance %q: %w", peerURL, snap.Instances[i].ID, err)
+		}
+		if !found {
+			continue
+		}
+		snap.Instances[i].LeaseID = lease.ID
+		snap.Instances[i].ReservationID = lease.ReservationID
+	}
+	return nil
+}
+
+func fetchPoolAdmissionLeaseByInstance(ctx context.Context, client *http.Client, peerURL, rpcToken, instanceID string) (domain.Lease, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(peerURL, "/")+"/admission/lease-by-instance?instance_id="+url.QueryEscape(instanceID), nil)
+	if err != nil {
+		return domain.Lease{}, false, err
+	}
+	if rpcToken != "" {
+		req.Header.Set("Authorization", "Bearer "+rpcToken)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return domain.Lease{}, false, err
+	}
+	defer resp.Body.Close()
+	body, err := readControlHTTPBody(resp.Body, "admission lease response body")
+	if err != nil {
+		return domain.Lease{}, false, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return domain.Lease{}, false, fmt.Errorf("returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out poolAdmissionLeaseResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return domain.Lease{}, false, fmt.Errorf("decode admission lease response: %w", err)
+	}
+	return out.Lease, out.Found, nil
+}
+
+func resolvePoolPresets(ctx context.Context, store *storesqlite.Store, model string, configured []domain.Preset) ([]domain.Preset, error) {
+	stored, err := store.ListPresets(ctx)
 	if err != nil {
 		return nil, err
 	}
+	all := mergePoolPresets(stored, configured)
 	var matched []domain.Preset
 	for _, preset := range all {
 		if poolPresetMatches(preset, model) {
@@ -177,9 +288,33 @@ func resolvePoolPresets(ctx context.Context, store *storesqlite.Store, model str
 		}
 	}
 	if len(matched) == 0 {
-		return nil, fmt.Errorf("no presets match model %q; register the preset or check `myce models list`", model)
+		return nil, fmt.Errorf("no presets match model %q; register the preset in the store or pass --config with the live route catalog", model)
 	}
 	return matched, nil
+}
+
+func mergePoolPresets(stored, configured []domain.Preset) []domain.Preset {
+	byID := map[string]int{}
+	out := make([]domain.Preset, 0, len(stored)+len(configured))
+	for _, preset := range stored {
+		if preset.ID == "" {
+			continue
+		}
+		byID[preset.ID] = len(out)
+		out = append(out, preset)
+	}
+	for _, preset := range configured {
+		if preset.ID == "" {
+			continue
+		}
+		if idx, ok := byID[preset.ID]; ok {
+			out[idx] = preset
+			continue
+		}
+		byID[preset.ID] = len(out)
+		out = append(out, preset)
+	}
+	return out
 }
 
 func poolPresetMatches(preset domain.Preset, model string) bool {

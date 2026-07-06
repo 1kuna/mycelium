@@ -82,6 +82,10 @@ func TestOverlayPoolSnapshotsReplacesStaleStoreInstances(t *testing.T) {
 		Claim:    domain.Claim{WeightsMB: 56000},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/admission/lease-by-instance" {
+			_ = json.NewEncoder(w).Encode(poolAdmissionLeaseResponse{})
+			return
+		}
 		if r.URL.Path != "/snapshot" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
@@ -107,6 +111,190 @@ func TestOverlayPoolSnapshotsReplacesStaleStoreInstances(t *testing.T) {
 	}
 	if len(instances) != 1 || instances[0].ID != other.ID {
 		t.Fatalf("instances = %+v", instances)
+	}
+}
+
+func TestOverlayPoolSnapshotsAnnotatesAdmissionLeases(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer rpc-secret" {
+			t.Fatalf("auth = %q", got)
+		}
+		switch r.URL.Path {
+		case "/snapshot":
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{
+				Node: domain.Node{ID: "spark", Status: domain.NodeReady},
+				Instances: []domain.ModelInstance{{
+					ID:       "inst_2",
+					NodeID:   "spark",
+					PresetID: "spark-chandra",
+					State:    domain.InstReady,
+				}},
+			})
+		case "/admission/lease-by-instance":
+			if got := r.URL.Query().Get("instance_id"); got != "inst_2" {
+				t.Fatalf("instance_id = %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(poolAdmissionLeaseResponse{
+				Found: true,
+				Lease: domain.Lease{ID: "lease-spark-437", InstanceID: "inst_2", ReservationID: "reservation-a"},
+			})
+		default:
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	_, instances, err := overlayPoolSnapshots(context.Background(), server.Client(),
+		nil, nil, []string{server.URL}, "rpc-secret")
+	if err != nil {
+		t.Fatalf("overlay snapshots: %v", err)
+	}
+	if len(instances) != 1 || instances[0].LeaseID != "lease-spark-437" || instances[0].ReservationID != "reservation-a" {
+		t.Fatalf("instances = %+v", instances)
+	}
+}
+
+func TestPoolConfigHelpers(t *testing.T) {
+	urls := poolSnapshotURLsFromConfig(operatorPeerConfig{
+		Compute:   true,
+		Listen:    "127.0.0.1:9000",
+		SeedPeers: []string{"peer-a:9001", "http://peer-a:9001", "https://peer-b:9002"},
+	})
+	if strings.Join(urls, ",") != "http://peer-a:9001,https://peer-b:9002,http://127.0.0.1:9000" {
+		t.Fatalf("urls = %v", urls)
+	}
+
+	merged := mergePoolPresets(
+		[]domain.Preset{{ID: "same", ContextLength: 1024}, {ID: "store-only", ContextLength: 2048}, {ContextLength: 999}},
+		[]domain.Preset{{ID: "same", ContextLength: 49152}, {ID: "config-only", ContextLength: 8192}},
+	)
+	byID := map[string]domain.Preset{}
+	for _, preset := range merged {
+		byID[preset.ID] = preset
+	}
+	if len(merged) != 3 || byID["same"].ContextLength != 49152 || byID["store-only"].ContextLength != 2048 || byID["config-only"].ContextLength != 8192 {
+		t.Fatalf("merged = %+v", merged)
+	}
+}
+
+func TestPoolPlanUsesConfigPresetsAndLiveSnapshots(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	store.Close()
+
+	snapshotServer := func(node domain.Node) *httptest.Server {
+		t.Helper()
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/admission/lease-by-instance" {
+				_ = json.NewEncoder(w).Encode(poolAdmissionLeaseResponse{})
+				return
+			}
+			if r.URL.Path != "/snapshot" {
+				t.Fatalf("path = %s", r.URL.Path)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer rpc-secret" {
+				t.Fatalf("auth = %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(domain.NodeSnapshot{Node: node})
+		}))
+	}
+	b70 := snapshotServer(domain.Node{
+		ID:          "b70",
+		Name:        "b70",
+		Status:      domain.NodeReady,
+		MaxUtil:     0.86,
+		OOMSeverity: domain.OOMSoft,
+		Labels:      map[string]string{domain.LabelPeerBackends: string(domain.BackendVLLM)},
+		Accelerators: []domain.Accelerator{{
+			Index:       0,
+			VRAMTotalMB: 32000,
+		}},
+	})
+	defer b70.Close()
+	spark := snapshotServer(domain.Node{
+		ID:          "spark",
+		Name:        "spark",
+		Status:      domain.NodeReady,
+		MaxUtil:     0.85,
+		OOMSeverity: domain.OOMSoft,
+		Labels:      map[string]string{domain.LabelPeerBackends: string(domain.BackendVLLM)},
+		Accelerators: []domain.Accelerator{{
+			Index:       0,
+			VRAMTotalMB: 120000,
+		}},
+	})
+	defer spark.Close()
+
+	configPath := filepath.Join(t.TempDir(), "peer.json")
+	cfg := operatorPeerConfig{
+		ID:        "gateway",
+		StorePath: dbPath,
+		RPCToken:  "rpc-secret",
+		SeedPeers: []string{b70.URL, spark.URL},
+		Presets: []domain.Preset{
+			{
+				ID:            "b70-chandra-ocr2-vllm",
+				ModelRef:      "chandra",
+				Aliases:       []string{"chandra"},
+				Backend:       domain.BackendVLLM,
+				ContextLength: 49152,
+				Capabilities:  []domain.Capability{domain.CapabilityChat, domain.CapabilityVision},
+				NodeID:        "b70",
+				LaunchArgs:    []string{"--gpu-memory-utilization", "0.50"},
+			},
+			{
+				ID:            "spark-chandra-ocr2-vllm",
+				ModelRef:      "chandra",
+				Aliases:       []string{"chandra"},
+				Backend:       domain.BackendVLLM,
+				ContextLength: 49152,
+				Capabilities:  []domain.Capability{domain.CapabilityChat, domain.CapabilityVision},
+				NodeID:        "spark",
+				LaunchArgs:    []string{"--gpu-memory-utilization", "0.50"},
+			},
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+	err = RunWithClient(context.Background(), []string{
+		"pool", "plan",
+		"--config", configPath,
+		"--live",
+		"--model", "chandra",
+		"--context", "49152",
+		"--max-total", "2",
+		"--max-per-node", "1",
+		"--out", planPath,
+	}, http.DefaultClient)
+	if err != nil {
+		t.Fatalf("pool plan: %v", err)
+	}
+	planData, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read plan: %v", err)
+	}
+	var plan pool.Plan
+	if err := json.Unmarshal(planData, &plan); err != nil {
+		t.Fatalf("decode plan: %v", err)
+	}
+	byNode := map[string]pool.NodePlan{}
+	for _, node := range plan.Nodes {
+		byNode[node.NodeID] = node
+	}
+	if byNode["b70"].PresetID != "b70-chandra-ocr2-vllm" || byNode["b70"].Additional != 1 || byNode["b70"].ContextLength != 49152 {
+		t.Fatalf("b70 plan = %+v", byNode["b70"])
+	}
+	if byNode["spark"].PresetID != "spark-chandra-ocr2-vllm" || byNode["spark"].Additional != 1 || byNode["spark"].ContextLength != 49152 {
+		t.Fatalf("spark plan = %+v", byNode["spark"])
 	}
 }
 
