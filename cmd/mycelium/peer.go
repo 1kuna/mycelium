@@ -334,6 +334,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		startPeerHeartbeatWithClient(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, joinTokens, clock.System{}, controlClient)
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
+	startReconciliationDrainer(ctx, store, schedulerPrewarmExecutor{runtime: runtime}, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject)
 	optimizerNodeID := cfg.ID
 	if cfg.Compute {
 		optimizerNodeID = privateLocalNodeID(cfg)
@@ -3095,6 +3096,56 @@ func startQueueDrainer(ctx context.Context, runtime *scheduler.Service, clk port
 			}
 			if _, err := runtime.Drain(ctx, limit); err != nil {
 				log.Printf("mycelium queue drain failed: %v", err)
+			}
+		}
+	}()
+}
+
+type schedulerPrewarmExecutor struct {
+	runtime *scheduler.Service
+}
+
+func (e schedulerPrewarmExecutor) PrewarmReplica(ctx context.Context, job domain.Job) (reconcile.PrewarmResult, error) {
+	if e.runtime == nil {
+		return reconcile.PrewarmResult{}, fmt.Errorf("scheduler runtime is required")
+	}
+	result, err := e.runtime.SubmitWithPayload(ctx, job, []byte(`{"kind":"reconcile_prewarm"}`))
+	if err != nil {
+		return reconcile.PrewarmResult{}, err
+	}
+	return reconcile.PrewarmResult{
+		WorkloadID: job.ID,
+		NodeID:     result.Lease.NodeID,
+		InstanceID: result.Instance.ID,
+		LeaseID:    result.Lease.ID,
+	}, nil
+}
+
+func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, prewarm reconcile.PrewarmExecutor, clk ports.Clock, interval time.Duration, limit int, project string) {
+	if store == nil || clk == nil || interval <= 0 || limit <= 0 {
+		return
+	}
+	go func() {
+		for {
+			timer := clk.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C():
+			}
+			if _, err := reconcile.DrainAllowedTasks(ctx, store, reconcile.DrainOptions{
+				Limit:   limit,
+				Project: project,
+				Prewarm: prewarm,
+				Kinds: []reconcile.TaskKind{
+					reconcile.TaskRecordIncompatibility,
+					reconcile.TaskStageModelArtifact,
+					reconcile.TaskVerifyEngineReadiness,
+					reconcile.TaskPrewarmReplica,
+				},
+			}); err != nil {
+				log.Printf("mycelium reconciliation drain failed: %v", err)
 			}
 		}
 	}()
