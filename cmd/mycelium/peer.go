@@ -992,6 +992,25 @@ func cancelWorkloadJob(ctx context.Context, runtime workloadRuntime, store workl
 		}
 		return job, nil
 	}
+	if leases, err := storedWorkloadLeases(ctx, store, job.ID); err != nil {
+		return domain.Job{}, err
+	} else if len(leases) > 0 {
+		for _, lease := range leases {
+			if err := runtime.FinishJob(ctx, job, lease, fmt.Errorf("%s", reason)); err != nil {
+				return domain.Job{}, err
+			}
+		}
+		if err := recordWorkloadCancelRegistry(ctx, store, job.ID, reason); err != nil {
+			return domain.Job{}, err
+		}
+		if err := recordCanceledReconciliationTask(ctx, store, job, reason); err != nil {
+			return domain.Job{}, err
+		}
+		if latest, readErr := store.Job(ctx, job.ID); readErr == nil {
+			return latest, nil
+		}
+		return job, nil
+	}
 	job.Status = domain.JobFailed
 	job.Error = reason
 	if job.Result == nil {
@@ -1010,6 +1029,27 @@ func cancelWorkloadJob(ctx context.Context, runtime workloadRuntime, store workl
 		return domain.Job{}, err
 	}
 	return job, nil
+}
+
+func storedWorkloadLeases(ctx context.Context, store workloadStore, jobID string) ([]domain.Lease, error) {
+	if jobID == "" {
+		return nil, nil
+	}
+	leaseStore, ok := store.(workloadLeaseStore)
+	if !ok {
+		return nil, nil
+	}
+	leases, err := leaseStore.ListLeases(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []domain.Lease
+	for _, lease := range leases {
+		if lease.JobID == jobID {
+			out = append(out, lease)
+		}
+	}
+	return out, nil
 }
 
 func recordCanceledReconciliationTask(ctx context.Context, store workloadStore, job domain.Job, reason string) error {
