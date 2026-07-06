@@ -253,24 +253,33 @@ func (r *Router) ExecutePlacedProvider(ctx context.Context, req translate.Ingres
 		return RouteResponse{}, err
 	}
 	recorder := r.newSessionRecorder()
+	var telemetryWarning error
 	if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhasePlaced, func(sample *domain.SessionMetric) {
 		sample.BytesIn = len(req.Body)
 		sample.LoadWallClockMS = loadMS
 	}); err != nil {
-		if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
-			return RouteResponse{}, failErr
-		}
-		return RouteResponse{}, err
-	}
-	if cold {
-		if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhaseLoadReady, func(sample *domain.SessionMetric) {
-			sample.BytesIn = len(req.Body)
-			sample.LoadWallClockMS = loadMS
-		}); err != nil {
+		if req.HoldLease {
+			telemetryWarning = err
+		} else {
 			if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
 				return RouteResponse{}, failErr
 			}
 			return RouteResponse{}, err
+		}
+	}
+	if cold && telemetryWarning == nil {
+		if err := recorder.emit(ctx, job, preset, inst, domain.TelemetryPhaseLoadReady, func(sample *domain.SessionMetric) {
+			sample.BytesIn = len(req.Body)
+			sample.LoadWallClockMS = loadMS
+		}); err != nil {
+			if req.HoldLease {
+				telemetryWarning = err
+			} else {
+				if failErr := r.releaseAndFail(ctx, job, lease, err); failErr != nil {
+					return RouteResponse{}, failErr
+				}
+				return RouteResponse{}, err
+			}
 		}
 	}
 	endRequest, err := r.beginInstanceRequest(ctx, inst)
@@ -285,15 +294,21 @@ func (r *Router) ExecutePlacedProvider(ctx context.Context, req translate.Ingres
 	}
 	clk := r.clock()
 	upstreamStart := clk.Now()
-	if err := recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseUpstreamStart, upstreamStart, func(sample *domain.SessionMetric) {
-		sample.BytesIn = len(route.Body)
-		sample.LoadWallClockMS = loadMS
-	}); err != nil {
-		endRequest()
-		if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
-			return RouteResponse{}, errors.Join(err, failErr)
+	if telemetryWarning == nil {
+		if err := recorder.emitAt(ctx, job, preset, inst, domain.TelemetryPhaseUpstreamStart, upstreamStart, func(sample *domain.SessionMetric) {
+			sample.BytesIn = len(route.Body)
+			sample.LoadWallClockMS = loadMS
+		}); err != nil {
+			if req.HoldLease {
+				telemetryWarning = err
+			} else {
+				endRequest()
+				if failErr := r.failPlacedJob(ctx, nil, job, preset, inst, lease, err); failErr != nil {
+					return RouteResponse{}, errors.Join(err, failErr)
+				}
+				return RouteResponse{}, err
+			}
 		}
-		return RouteResponse{}, err
 	}
 	resp, err := r.callUpstream(ctx, inst, route)
 	upstreamEnd := clk.Now()
@@ -311,6 +326,9 @@ func (r *Router) ExecutePlacedProvider(ctx context.Context, req translate.Ingres
 		return RouteResponse{}, err
 	}
 	headers := cloneHeader(resp.Header)
+	if telemetryWarning != nil {
+		writeTelemetryWarning(headers, telemetryWarning)
+	}
 	if resp.Status >= 400 {
 		bodyText := strings.TrimSpace(string(resp.Body))
 		statusErr := fmt.Errorf("upstream returned %d: %s", resp.Status, bodyText)

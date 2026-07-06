@@ -4701,6 +4701,78 @@ func TestRouterRouteHoldsWorkloadLeaseForReuse(t *testing.T) {
 	}
 }
 
+func TestRouterHeldLeaseWarnsOnRemoteSetupTelemetryFailure(t *testing.T) {
+	preset := fixtures.MakePreset()
+	served := 0
+	upstream := directUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openAIChatBody("held route ok")))
+	}))
+	inst := fixtures.MakeInstance(fixtures.OnNode("remote-node"))
+	inst.Addr = upstream
+	node := fixtures.MakeNode(fixtures.WithNodeID(inst.NodeID))
+	agent := mocks.NewNodeAgent(node)
+	router := newTestRouter(preset, domain.FleetSnapshot{
+		Nodes:     []domain.Node{node},
+		Instances: []domain.ModelInstance{inst},
+	}, staticResolver{agents: map[string]ports.NodeAgent{inst.NodeID: agent}})
+	router.Telemetry = &mocks.TelemetrySink{}
+	router.SelfNodeID = "local-node"
+	router.TelemetryPeers = peerMap{"remote-node": {ID: "peer-remote", Addresses: []string{"127.0.0.1:62000"}, Compute: true}}
+	router.TelemetryPeerClient = &mocks.TelemetryPeerClient{PushSamplesErr: errors.New("remote samples timeout")}
+	store := &gatewayRuntimeStore{}
+	lease := domain.Lease{ID: "lease-held", JobID: "workload-held", NodeID: inst.NodeID, InstanceID: inst.ID}
+	job := domain.Job{
+		ID:      "workload-held",
+		Model:   preset.ModelRef,
+		Project: "project-a",
+		Status:  domain.JobRunning,
+		Result: &domain.JobResult{
+			Decision: domain.PlacementDecision{JobID: "workload-held", Action: domain.ActionWarmInstance, NodeID: inst.NodeID, InstanceID: inst.ID, Preset: preset},
+			Instance: inst,
+			LeaseID:  lease.ID,
+			NodeID:   inst.NodeID,
+			PresetID: preset.ID,
+		},
+	}
+	store.jobs = []domain.Job{job}
+	store.leases = []domain.Lease{lease}
+	router.Runtime = &scheduler.Service{Placer: router.Placer, Fleet: router.Fleet, Nodes: router.Nodes, Store: store, Queue: scheduler.NewQueue(router.Clock), Clock: router.Clock}
+
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"qwen2.5-9b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.Project = "project-a"
+	req.WorkloadID = job.ID
+	req.LeaseID = lease.ID
+	req.HoldLease = true
+
+	resp, err := router.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route with held lease: %v", err)
+	}
+	if resp.Status != http.StatusOK || !strings.Contains(string(resp.Body), "held route ok") {
+		t.Fatalf("resp = %+v body=%s", resp, resp.Body)
+	}
+	if got := resp.Header.Get(HeaderTelemetryWarning); got != "completion_telemetry_failed" {
+		t.Fatalf("telemetry warning = %q", got)
+	}
+	if served != 1 {
+		t.Fatalf("upstream served %d, want 1", served)
+	}
+	if store.sawJobStatus(domain.JobDone) || store.sawJobStatus(domain.JobFailed) {
+		t.Fatalf("held workload must remain running after telemetry failure: jobs=%+v", store.jobs)
+	}
+	if len(store.deletedLeases) != 0 {
+		t.Fatalf("held lease must not be deleted: %+v", store.deletedLeases)
+	}
+	if strings.Join(agent.Calls, ",") != "begin:inst_test,end:inst_test" {
+		t.Fatalf("agent calls = %+v", agent.Calls)
+	}
+}
+
 func TestRouterHeldLeaseClientCancelDoesNotFailWorker(t *testing.T) {
 	preset := fixtures.MakePreset()
 	inst := fixtures.MakeInstance()
