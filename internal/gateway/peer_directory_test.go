@@ -94,7 +94,7 @@ func TestPeerDirectoryErrors(t *testing.T) {
 	}
 
 	directory := &PeerDirectory{}
-	if _, err := directory.NodeAgent("missing"); err == nil || !strings.Contains(err.Error(), "not registered") {
+	if _, err := directory.NodeAgent("missing"); err == nil || !strings.Contains(err.Error(), "not registered") || !errors.Is(err, domain.ErrUnreachable) {
 		t.Fatalf("missing NodeAgent err = %v", err)
 	}
 	plain := mocks.NewNodeAgent(node)

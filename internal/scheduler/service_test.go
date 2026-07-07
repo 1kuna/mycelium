@@ -3094,6 +3094,34 @@ func TestServiceReconcileTerminalOwnerLeasesReleasesOwnerOnlyLease(t *testing.T)
 	}
 }
 
+func TestServiceReconcileTerminalOwnerLeasesSkipsUnreachableOwners(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
+	lease := domain.Lease{ID: "lease-spark-44", JobID: "gateway-terminal", NodeID: "spark", InstanceID: "inst-spark"}
+	store := &runtimeStore{
+		jobs: map[string]domain.Job{
+			lease.JobID: {ID: lease.JobID, Status: domain.JobFailed},
+		},
+		instances: map[string]domain.ModelInstance{
+			"inst-stale":     {ID: "inst-stale", NodeID: "stale-owner"},
+			lease.InstanceID: {ID: lease.InstanceID, NodeID: lease.NodeID},
+		},
+	}
+	admission := &mocks.AdmissionController{LeaseForInstVal: lease, LeaseForInstFound: true}
+	service := leaseLifecycleService(clock, store)
+	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{lease.NodeID: admission}}
+
+	released, err := service.ReconcileTerminalOwnerLeases(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileTerminalOwnerLeases: %v", err)
+	}
+	if released != 1 {
+		t.Fatalf("released = %d", released)
+	}
+	if got := strings.Join(admission.Calls, ","); got != "lease-for-instance:inst-spark,release:"+lease.ID {
+		t.Fatalf("admission calls = %s", got)
+	}
+}
+
 func TestServiceReconcileTerminalOwnerLeasesKeepsRunningAndUnknownJobs(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
 	tests := map[string]struct {
@@ -3169,7 +3197,13 @@ func TestServiceReconcileTerminalOwnerLeasesEdges(t *testing.T) {
 	}
 	service = leaseLifecycleService(clock, baseStore)
 	service.Owners = staticNodes{admissions: map[string]ports.AdmissionController{}}
-	if _, err := service.ReconcileTerminalOwnerLeases(context.Background()); !errors.Is(err, domain.ErrUnreachable) {
+	if released, err := service.ReconcileTerminalOwnerLeases(context.Background()); err != nil || released != 0 {
+		t.Fatalf("unreachable owner = %d %v", released, err)
+	}
+	ownerErr := errors.New("owner resolver")
+	service = leaseLifecycleService(clock, baseStore)
+	service.Owners = errAdmissionResolver{err: ownerErr}
+	if _, err := service.ReconcileTerminalOwnerLeases(context.Background()); !errors.Is(err, ownerErr) {
 		t.Fatalf("owner resolver err = %v", err)
 	}
 	service = leaseLifecycleService(clock, baseStore)
@@ -3563,6 +3597,14 @@ func (n staticNodes) AdmissionController(nodeID string) (ports.AdmissionControll
 		return nil, domain.ErrUnreachable
 	}
 	return admission, nil
+}
+
+type errAdmissionResolver struct {
+	err error
+}
+
+func (r errAdmissionResolver) AdmissionController(string) (ports.AdmissionController, error) {
+	return nil, r.err
 }
 
 type staticPortNodes struct {

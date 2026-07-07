@@ -28,7 +28,7 @@ func (d NodeDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, erro
 func (d NodeDirectory) NodeAgent(nodeID string) (ports.NodeAgent, error) {
 	agent, ok := d.Agents[nodeID]
 	if !ok {
-		return nil, fmt.Errorf("node agent %q is not registered", nodeID)
+		return nil, fmt.Errorf("%w: node agent %q is not registered", domain.ErrUnreachable, nodeID)
 	}
 	return agent, nil
 }
