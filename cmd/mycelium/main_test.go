@@ -3892,6 +3892,31 @@ func TestRegistryRPCRejectsOversizedJSONBody(t *testing.T) {
 	}
 }
 
+func TestRegistryRPCRejectsFatRecordPushBeforeDecode(t *testing.T) {
+	oldLimit := registryRecordsMaxBodyBytes
+	registryRecordsMaxBodyBytes = 96
+	t.Cleanup(func() { registryRecordsMaxBodyBytes = oldLimit })
+
+	mux := http.NewServeMux()
+	store := peerTestRegistry(t)
+	mountRegistryHTTP(mux, store, "rpc-secret")
+	body := fmt.Sprintf(`[{"job_id":"job-fat","coordinator":"peer-a","status":"running","request":%q,"updated_at":"2026-07-06T00:00:00Z"}]`, strings.Repeat("x", 256))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/registry/records", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), "request body too large") {
+		t.Fatalf("fat registry records status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	snap, err := store.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap) != 0 {
+		t.Fatalf("oversized push mutated registry: %+v", snap)
+	}
+}
+
 func TestTelemetryRPCRequiresAuthAndMergesMetricsAndRecommendations(t *testing.T) {
 	ctx := context.Background()
 	store, err := storesqlite.Open(":memory:")
