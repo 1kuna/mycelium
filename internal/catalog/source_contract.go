@@ -51,6 +51,9 @@ func (i Installer) MaterializeSourcePreset(ctx context.Context, req SourcePreset
 	if req.Contract.KVPerTokenMB <= 0 {
 		return InstallResult{}, fmt.Errorf("source preset requires kv_per_token_mb resource contract")
 	}
+	if strings.TrimSpace(req.Contract.EngineProfile) == "" {
+		return InstallResult{}, fmt.Errorf("source preset requires engine_profile readiness contract")
+	}
 	if err := ensureStore(i.StoreDir); err != nil {
 		return InstallResult{}, err
 	}
@@ -95,12 +98,8 @@ func (i Installer) MaterializeSourcePreset(ctx context.Context, req SourcePreset
 		GeneratedBy:           "catalog-source",
 		GeneratedFrom:         req.Source,
 		EngineProfileID:       strings.TrimSpace(req.Contract.EngineProfile),
-		EngineReadiness:       domain.EngineReadinessCompatibilityKeyIncomplete,
-		EngineReadinessReason: "source contract materialized; engine readiness still requires compatibility proof",
-	}
-	if preset.EngineProfileID != "" {
-		preset.EngineReadiness = domain.EngineReadinessReadyProfile
-		preset.EngineReadinessReason = "source contract references saved engine profile"
+		EngineReadiness:       domain.EngineReadinessReadyProfile,
+		EngineReadinessReason: "source contract references saved engine profile",
 	}
 	prov := Provenance{
 		PresetID:         id,

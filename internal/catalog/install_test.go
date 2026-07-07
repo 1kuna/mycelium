@@ -171,12 +171,13 @@ func TestMaterializeSourcePresetFailsUnsafeSourceContracts(t *testing.T) {
 		ID:            "vision",
 		Backend:       domain.BackendVLLM,
 		ContextLength: 8192,
-		Contract:      &domain.ModelSourceContract{SizeMB: 100, KVPerTokenMB: 0.1},
+		Contract:      &domain.ModelSourceContract{SizeMB: 100, KVPerTokenMB: 0.1, EngineProfile: "engine-vllm"},
 	}
 	for name, req := range map[string]SourcePresetRequest{
 		"missing contract":        {Source: valid.Source, Backend: valid.Backend, ContextLength: valid.ContextLength},
 		"missing size":            {Source: valid.Source, Backend: valid.Backend, ContextLength: valid.ContextLength, Contract: &domain.ModelSourceContract{KVPerTokenMB: 0.1}},
 		"missing kv":              {Source: valid.Source, Backend: valid.Backend, ContextLength: valid.ContextLength, Contract: &domain.ModelSourceContract{SizeMB: 100}},
+		"missing engine profile":  {Source: valid.Source, Backend: valid.Backend, ContextLength: valid.ContextLength, Contract: &domain.ModelSourceContract{SizeMB: 100, KVPerTokenMB: 0.1}},
 		"file-scoped hf source":   {Source: "hf://owner/repo/model.gguf", Backend: valid.Backend, ContextLength: valid.ContextLength, Contract: valid.Contract},
 		"unsupported backend":     {Source: valid.Source, Backend: domain.BackendOpenVINO, ContextLength: valid.ContextLength, Contract: valid.Contract},
 		"missing context length":  {Source: valid.Source, Backend: valid.Backend, Contract: valid.Contract},
