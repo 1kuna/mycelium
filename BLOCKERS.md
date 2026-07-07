@@ -157,11 +157,10 @@ handoff.
   `/v1/models`, and diagnostics still timed out under the real-fleet service
   while seed/registry probes to unreachable peers were active. The candidate
   run no longer emitted the old terminal-owner reconciliation spam, so the
-  remaining blocker is live gateway HTTP responsiveness under peer
+  confirmed blocker was live gateway HTTP responsiveness under peer
   reachability/sync failure, not the owner-reconcile classification fixed by
-  `dd2af71`. The rollback restored the previous service binary. Next work
-  should debug the gateway handler/sync interaction or macOS service identity
-  boundary before another activation attempt.
+  `dd2af71`. The rollback restored the previous service binary. This class is
+  resolved by the bounded peer-control wait fix recorded below.
 - 2026-06-29: macOS user LaunchAgent activation can be blocked by binary
   identity / Local Network permission behavior. The repo provides generic
   service plan/install/status/rollback surfaces plus
@@ -171,6 +170,12 @@ handoff.
 
 ## Resolved
 
+- 2026-07-07: `f91cc5c` bounds peer-control HTTP waits, peer diagnostics,
+  remote owner snapshot fanout, and registry replication calls so degraded or
+  unreachable peers cannot hold the gateway HTTP surface indefinitely. The fix
+  was activated through the rollback-safe service path and proved with
+  authenticated health, model catalog, diagnostics, route discovery, low idle
+  CPU, and bounded restart-time peer-reachability noise.
 - 2026-07-02: The large vision/OCR vLLM route reached live route certification
   for provider launch/readiness. The root cause was a private operator preset
   pointing at a model path visible on the host but not inside the configured
