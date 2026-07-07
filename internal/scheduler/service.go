@@ -41,6 +41,16 @@ type InstanceReader interface {
 	ListInstances(ctx context.Context) ([]domain.ModelInstance, error)
 }
 
+type InstanceReclaimResult struct {
+	InstanceID string `json:"instance_id"`
+	NodeID     string `json:"node_id"`
+	PresetID   string `json:"preset_id,omitempty"`
+	LeaseID    string `json:"lease_id,omitempty"`
+	Unloaded   bool   `json:"unloaded"`
+	Released   bool   `json:"released"`
+	Deleted    bool   `json:"deleted"`
+}
+
 type JobLog interface {
 	PutJob(ctx context.Context, job domain.Job, payload []byte) error
 }
@@ -744,6 +754,79 @@ func (s *Service) ReconcileTerminalOwnerLeases(ctx context.Context) (int, error)
 		released++
 	}
 	return released, nil
+}
+
+func (s *Service) ReclaimInstance(ctx context.Context, instanceID string) (InstanceReclaimResult, error) {
+	if err := s.validate(); err != nil {
+		return InstanceReclaimResult{}, err
+	}
+	if instanceID == "" {
+		return InstanceReclaimResult{}, fmt.Errorf("instance id is required")
+	}
+	instanceReader, ok := s.Store.(InstanceReader)
+	if !ok {
+		return InstanceReclaimResult{}, fmt.Errorf("runtime store does not expose instance inspection")
+	}
+	instances, err := instanceReader.ListInstances(ctx)
+	if err != nil {
+		return InstanceReclaimResult{}, err
+	}
+	var inst domain.ModelInstance
+	for _, candidate := range instances {
+		if candidate.ID == instanceID {
+			inst = candidate
+			break
+		}
+	}
+	if inst.ID == "" {
+		return InstanceReclaimResult{}, fmt.Errorf("instance %q is not tracked", instanceID)
+	}
+	if inst.NodeID == "" {
+		return InstanceReclaimResult{}, fmt.Errorf("instance %q has no owner node", instanceID)
+	}
+	result := InstanceReclaimResult{
+		InstanceID: inst.ID,
+		NodeID:     inst.NodeID,
+		PresetID:   inst.PresetID,
+	}
+	agent, err := s.Nodes.NodeAgent(inst.NodeID)
+	if err != nil {
+		return result, err
+	}
+	var lease domain.Lease
+	if s.Owners != nil {
+		owner, err := s.Owners.AdmissionController(inst.NodeID)
+		if err != nil {
+			return result, err
+		}
+		inspector, ok := owner.(ports.LeaseInspector)
+		if !ok {
+			return result, fmt.Errorf("owner admission for node %q does not expose lease inspection", inst.NodeID)
+		}
+		foundLease, found, err := inspector.LeaseForInstance(ctx, inst.ID)
+		if err != nil {
+			return result, err
+		}
+		if found {
+			lease = foundLease
+			result.LeaseID = lease.ID
+		}
+	}
+	if err := agent.Unload(ctx, inst.ID); err != nil {
+		return result, err
+	}
+	result.Unloaded = true
+	if lease.ID != "" {
+		if err := s.releaseOwnerLease(ctx, lease); err != nil {
+			return result, err
+		}
+		result.Released = true
+	}
+	if err := s.Store.DeleteInstance(ctx, inst.ID); err != nil {
+		return result, err
+	}
+	result.Deleted = true
+	return result, nil
 }
 
 func terminalSchedulerJobStatus(status domain.JobStatus) bool {

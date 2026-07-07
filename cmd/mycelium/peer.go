@@ -399,6 +399,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	mountRegistryHTTP(mux, store, cfg.RPCToken)
 	mountTelemetryHTTP(mux, store, cfg.RPCToken)
 	mountCatalogHTTP(mux, cfg, store, cfg.RPCToken, clock.System{})
+	mountInstanceReclaimHTTP(mux, runtime, cfg.RPCToken)
 	mountWorkloadHTTP(mux, runtime, store, cfg.RPCToken, cfg.ID, router)
 	mux.Handle("/", handler)
 	return cfg.Listen, mux, combineShutdowns(shutdowns), nil
@@ -569,6 +570,14 @@ type catalogEvictRequest struct {
 
 type catalogEvictResponse struct {
 	Locality domain.ModelLocality `json:"locality"`
+}
+
+type instanceReclaimRequest struct {
+	InstanceID string `json:"instance_id"`
+}
+
+type instanceReclaimResponse struct {
+	Result scheduler.InstanceReclaimResult `json:"result"`
 }
 
 func buildVersion() string {
@@ -1916,6 +1925,39 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 		locality.UpdatedAt = clk.Now().UTC()
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(catalogEvictResponse{Locality: locality}); err != nil {
+			panic(err)
+		}
+	})
+}
+
+func mountInstanceReclaimHTTP(mux *http.ServeMux, runtime interface {
+	ReclaimInstance(context.Context, string) (scheduler.InstanceReclaimResult, error)
+}, rpcToken string) {
+	mux.HandleFunc("/instances/reclaim", func(w http.ResponseWriter, r *http.Request) {
+		if !peerRPCAuthorized(r, rpcToken) {
+			writePeerAuthError(w)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req instanceReclaimRequest
+		if err := decodePeerRPCJSON(r, &req); err != nil {
+			writePeerRPCError(w, http.StatusBadRequest, err)
+			return
+		}
+		if strings.TrimSpace(req.InstanceID) == "" {
+			writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("instance_id is required"))
+			return
+		}
+		result, err := runtime.ReclaimInstance(r.Context(), strings.TrimSpace(req.InstanceID))
+		if err != nil {
+			writePeerRPCError(w, http.StatusConflict, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(instanceReclaimResponse{Result: result}); err != nil {
 			panic(err)
 		}
 	})

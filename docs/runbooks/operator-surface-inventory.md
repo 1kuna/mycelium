@@ -28,7 +28,7 @@ operator tools. They should not be the ordinary path for consumers.
 | `myce gateway allocate` | Non-reserving launch-envelope report for external tools. | Demote to debug/proof once gateway-native service capacity owns placement and worker counts. |
 | `myce route certify/status` | Route contract proof ladder. | Keep as certification/debug. Certified route classes feed policy, not per-job operator choice. |
 | `myce models service ensure/list/pause` | Desired-state serving control. | Keep as the product-facing model-service control plane until gateway demand fully owns creation. |
-| `myce models prewarm/scale` | Manual supply creation. | Collapse into daemon/reconciler prewarm and replica reconciliation. Keep only as debug/emergency. |
+| `myce models prewarm/scale/unload` | Manual supply creation or reclaim. | Collapse into daemon/reconciler prewarm, replica reconciliation, and capacity cleanup. Keep only as debug/emergency. |
 | `myce models stage/locality` | Manual artifact/locality work. | Collapse into model ingestion and staging tasks under standing policy. Keep approval-gated apply paths. |
 | `myce add-model` | Manual model source ingestion. | Replace as normal path with source-aware model demand. Keep as explicit import/debug. |
 | `myce reconcile placement/status/drain` | Manual reconciliation proposal and executor. | Daemon owns automatic draining for allowed tasks. Keep status/debug and emergency drain only. |
@@ -69,3 +69,7 @@ operator tools. They should not be the ordinary path for consumers.
   use the gateway-native service path.
 - Route and debug summaries should explain why supply is unavailable, but the
   reconciler should own the repair attempt whenever the action is safe.
+- Warm backend reclaim now has an explicit `models unload` escape hatch that
+  unloads one tracked instance and reconciles its owner lease. It is for
+  emergency/debug cleanup and proof runs; ordinary consumers should continue
+  through gateway-native service capacity and daemon-owned cleanup.

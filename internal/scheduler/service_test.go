@@ -3230,6 +3230,209 @@ func TestServiceReconcileTerminalOwnerLeasesEdges(t *testing.T) {
 	}
 }
 
+func TestServiceReclaimInstanceUnloadsReleasesAndDeletes(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
+	inst := domain.ModelInstance{ID: "inst-b70", NodeID: "b70", PresetID: "tiny", State: domain.InstReady}
+	lease := domain.Lease{ID: "lease-b70", JobID: "job-b70", NodeID: inst.NodeID, InstanceID: inst.ID}
+	store := &runtimeStore{
+		instances: map[string]domain.ModelInstance{inst.ID: inst},
+		leases:    map[string]domain.Lease{lease.ID: lease},
+	}
+	agent := mocks.NewNodeAgent(domain.Node{ID: inst.NodeID})
+	agent.Instances = []domain.ModelInstance{inst}
+	admission := &mocks.AdmissionController{LeaseForInstVal: lease, LeaseForInstFound: true}
+	service := leaseLifecycleService(clock, store)
+	nodes := staticNodes{
+		agents:     map[string]*mocks.NodeAgent{inst.NodeID: agent},
+		admissions: map[string]ports.AdmissionController{inst.NodeID: admission},
+	}
+	service.Nodes = nodes
+	service.Owners = nodes
+
+	result, err := service.ReclaimInstance(context.Background(), inst.ID)
+	if err != nil {
+		t.Fatalf("ReclaimInstance: %v", err)
+	}
+	if result.InstanceID != inst.ID || result.NodeID != inst.NodeID || result.PresetID != inst.PresetID || result.LeaseID != lease.ID || !result.Unloaded || !result.Released || !result.Deleted {
+		t.Fatalf("result = %+v", result)
+	}
+	if _, ok := store.instances[inst.ID]; ok {
+		t.Fatalf("instance still stored: %+v", store.instances)
+	}
+	if _, ok := store.leases[lease.ID]; ok {
+		t.Fatalf("lease still stored: %+v", store.leases)
+	}
+	if got := strings.Join(agent.Calls, ","); got != "unload:"+inst.ID {
+		t.Fatalf("agent calls = %s", got)
+	}
+	if got := strings.Join(admission.Calls, ","); got != "lease-for-instance:"+inst.ID+",release:"+lease.ID {
+		t.Fatalf("admission calls = %s", got)
+	}
+}
+
+func TestServiceReclaimInstanceFailsBeforeUnloadWithoutInspectableOwner(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
+	inst := domain.ModelInstance{ID: "inst-a", NodeID: "node-a", PresetID: "tiny", State: domain.InstReady}
+	store := &runtimeStore{instances: map[string]domain.ModelInstance{inst.ID: inst}}
+	agent := mocks.NewNodeAgent(domain.Node{ID: inst.NodeID})
+	agent.Instances = []domain.ModelInstance{inst}
+	service := leaseLifecycleService(clock, store)
+	nodes := staticNodes{
+		agents:     map[string]*mocks.NodeAgent{inst.NodeID: agent},
+		admissions: map[string]ports.AdmissionController{inst.NodeID: admissionOnly{}},
+	}
+	service.Nodes = nodes
+	service.Owners = nodes
+
+	_, err := service.ReclaimInstance(context.Background(), inst.ID)
+	if err == nil || !strings.Contains(err.Error(), "does not expose lease inspection") {
+		t.Fatalf("ReclaimInstance err = %v", err)
+	}
+	if len(agent.Calls) != 0 {
+		t.Fatalf("agent was mutated before lease inspection: %v", agent.Calls)
+	}
+	if _, ok := store.instances[inst.ID]; !ok {
+		t.Fatalf("instance was deleted on failed reclaim")
+	}
+}
+
+func TestServiceReclaimInstanceEdges(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
+	if _, err := (&Service{}).ReclaimInstance(context.Background(), "inst-a"); err == nil || !strings.Contains(err.Error(), "not fully configured") {
+		t.Fatalf("validate err = %v", err)
+	}
+	if _, err := leaseLifecycleService(clock, &runtimeStore{}).ReclaimInstance(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "instance id") {
+		t.Fatalf("empty id err = %v", err)
+	}
+	if _, err := leaseLifecycleService(clock, storeWithoutJobReader{}).ReclaimInstance(context.Background(), "inst-a"); err == nil || !strings.Contains(err.Error(), "instance inspection") {
+		t.Fatalf("store inspection err = %v", err)
+	}
+	if _, err := leaseLifecycleService(clock, &runtimeStore{}).ReclaimInstance(context.Background(), "missing"); err == nil || !strings.Contains(err.Error(), "not tracked") {
+		t.Fatalf("missing instance err = %v", err)
+	}
+	inst := domain.ModelInstance{ID: "inst-a", NodeID: "node-a", PresetID: "tiny"}
+	store := &runtimeStore{instances: map[string]domain.ModelInstance{inst.ID: inst}}
+	service := leaseLifecycleService(clock, store)
+	service.Nodes = staticNodes{}
+	if _, err := service.ReclaimInstance(context.Background(), inst.ID); !errors.Is(err, domain.ErrUnreachable) {
+		t.Fatalf("node resolver err = %v", err)
+	}
+}
+
+func TestServiceReclaimInstanceFailureBranches(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
+	baseInstance := domain.ModelInstance{ID: "inst-a", NodeID: "node-a", PresetID: "tiny"}
+	baseLease := domain.Lease{ID: "lease-a", JobID: "job-a", NodeID: baseInstance.NodeID, InstanceID: baseInstance.ID}
+	for _, tc := range []struct {
+		name    string
+		service func() *Service
+		want    string
+	}{
+		{
+			name: "list instances",
+			service: func() *Service {
+				return leaseLifecycleService(clock, &runtimeStoreWithListInstancesErr{err: errors.New("list instances")})
+			},
+			want: "list instances",
+		},
+		{
+			name: "missing node id",
+			service: func() *Service {
+				store := &runtimeStore{instances: map[string]domain.ModelInstance{baseInstance.ID: {ID: baseInstance.ID}}}
+				return leaseLifecycleService(clock, store)
+			},
+			want: "has no owner node",
+		},
+		{
+			name: "owner resolver",
+			service: func() *Service {
+				store := &runtimeStore{instances: map[string]domain.ModelInstance{baseInstance.ID: baseInstance}}
+				agent := mocks.NewNodeAgent(domain.Node{ID: baseInstance.NodeID})
+				service := leaseLifecycleService(clock, store)
+				service.Nodes = staticNodes{agents: map[string]*mocks.NodeAgent{baseInstance.NodeID: agent}}
+				service.Owners = staticNodes{}
+				return service
+			},
+			want: domain.ErrUnreachable.Error(),
+		},
+		{
+			name: "lease lookup",
+			service: func() *Service {
+				store := &runtimeStore{instances: map[string]domain.ModelInstance{baseInstance.ID: baseInstance}}
+				agent := mocks.NewNodeAgent(domain.Node{ID: baseInstance.NodeID})
+				admission := &mocks.AdmissionController{LeaseForInstErr: errors.New("lease lookup")}
+				service := leaseLifecycleService(clock, store)
+				nodes := staticNodes{agents: map[string]*mocks.NodeAgent{baseInstance.NodeID: agent}, admissions: map[string]ports.AdmissionController{baseInstance.NodeID: admission}}
+				service.Nodes = nodes
+				service.Owners = nodes
+				return service
+			},
+			want: "lease lookup",
+		},
+		{
+			name: "unload",
+			service: func() *Service {
+				store := &runtimeStore{instances: map[string]domain.ModelInstance{baseInstance.ID: baseInstance}}
+				agent := mocks.NewNodeAgent(domain.Node{ID: baseInstance.NodeID})
+				agent.UnloadErr = errors.New("unload")
+				service := leaseLifecycleService(clock, store)
+				nodes := staticNodes{agents: map[string]*mocks.NodeAgent{baseInstance.NodeID: agent}, admissions: map[string]ports.AdmissionController{baseInstance.NodeID: &mocks.AdmissionController{}}}
+				service.Nodes = nodes
+				service.Owners = nodes
+				return service
+			},
+			want: "unload",
+		},
+		{
+			name: "release",
+			service: func() *Service {
+				store := &runtimeStore{instances: map[string]domain.ModelInstance{baseInstance.ID: baseInstance}, leases: map[string]domain.Lease{baseLease.ID: baseLease}}
+				agent := mocks.NewNodeAgent(domain.Node{ID: baseInstance.NodeID})
+				admission := &mocks.AdmissionController{LeaseForInstVal: baseLease, LeaseForInstFound: true, ReleaseErr: errors.New("release")}
+				service := leaseLifecycleService(clock, store)
+				nodes := staticNodes{agents: map[string]*mocks.NodeAgent{baseInstance.NodeID: agent}, admissions: map[string]ports.AdmissionController{baseInstance.NodeID: admission}}
+				service.Nodes = nodes
+				service.Owners = nodes
+				return service
+			},
+			want: "release",
+		},
+		{
+			name: "delete instance",
+			service: func() *Service {
+				store := &runtimeStore{instances: map[string]domain.ModelInstance{baseInstance.ID: baseInstance}, deleteErr: errors.New("delete instance")}
+				agent := mocks.NewNodeAgent(domain.Node{ID: baseInstance.NodeID})
+				service := leaseLifecycleService(clock, store)
+				nodes := staticNodes{agents: map[string]*mocks.NodeAgent{baseInstance.NodeID: agent}, admissions: map[string]ports.AdmissionController{baseInstance.NodeID: &mocks.AdmissionController{}}}
+				service.Nodes = nodes
+				service.Owners = nodes
+				return service
+			},
+			want: "delete instance",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.service().ReclaimInstance(context.Background(), baseInstance.ID)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ReclaimInstance err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+	store := &runtimeStore{instances: map[string]domain.ModelInstance{baseInstance.ID: baseInstance}}
+	agent := mocks.NewNodeAgent(domain.Node{ID: baseInstance.NodeID})
+	service := leaseLifecycleService(clock, store)
+	nodes := staticNodes{agents: map[string]*mocks.NodeAgent{baseInstance.NodeID: agent}, admissions: map[string]ports.AdmissionController{baseInstance.NodeID: &mocks.AdmissionController{}}}
+	service.Nodes = nodes
+	service.Owners = nodes
+	result, err := service.ReclaimInstance(context.Background(), baseInstance.ID)
+	if err != nil {
+		t.Fatalf("no lease reclaim: %v", err)
+	}
+	if !result.Unloaded || result.Released || !result.Deleted || result.LeaseID != "" {
+		t.Fatalf("no lease result = %+v", result)
+	}
+}
+
 func TestServiceLeaseLifecycleErrors(t *testing.T) {
 	clock := mocks.NewFakeClock(time.Unix(100, 0).UTC())
 	if err := (&Service{}).Release(context.Background(), "lease-a"); err == nil || !strings.Contains(err.Error(), "not fully configured") {

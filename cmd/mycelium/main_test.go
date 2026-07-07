@@ -4064,6 +4064,88 @@ func TestMountNodeHTTPIncludesAdmissionRuntimeRoutes(t *testing.T) {
 	}
 }
 
+func TestMountInstanceReclaimHTTP(t *testing.T) {
+	mux := http.NewServeMux()
+	runtime := &recordingInstanceReclaimRuntime{
+		result: scheduler.InstanceReclaimResult{
+			InstanceID: "inst-b70",
+			NodeID:     "b70",
+			PresetID:   "tiny",
+			LeaseID:    "lease-b70",
+			Unloaded:   true,
+			Released:   true,
+			Deleted:    true,
+		},
+	}
+	mountInstanceReclaimHTTP(mux, runtime, "rpc-secret")
+	req := httptest.NewRequest(http.MethodPost, "/instances/reclaim", strings.NewReader(`{"instance_id":"inst-b70"}`))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reclaim status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	if runtime.instanceID != "inst-b70" {
+		t.Fatalf("runtime instance = %q", runtime.instanceID)
+	}
+	var response instanceReclaimResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !response.Result.Unloaded || !response.Result.Released || !response.Result.Deleted || response.Result.LeaseID != "lease-b70" {
+		t.Fatalf("response = %+v", response)
+	}
+}
+
+func TestMountInstanceReclaimHTTPErrors(t *testing.T) {
+	mux := http.NewServeMux()
+	runtime := &recordingInstanceReclaimRuntime{err: errors.New("still in use")}
+	mountInstanceReclaimHTTP(mux, runtime, "rpc-secret")
+	for name, req := range map[string]*http.Request{
+		"unauthorized": httptest.NewRequest(http.MethodPost, "/instances/reclaim", strings.NewReader(`{"instance_id":"inst"}`)),
+		"method": func() *http.Request {
+			r := httptest.NewRequest(http.MethodGet, "/instances/reclaim", nil)
+			r.Header.Set("Authorization", "Bearer rpc-secret")
+			return r
+		}(),
+		"bad-json": func() *http.Request {
+			r := httptest.NewRequest(http.MethodPost, "/instances/reclaim", strings.NewReader(`{`))
+			r.Header.Set("Authorization", "Bearer rpc-secret")
+			return r
+		}(),
+		"missing-id": func() *http.Request {
+			r := httptest.NewRequest(http.MethodPost, "/instances/reclaim", strings.NewReader(`{}`))
+			r.Header.Set("Authorization", "Bearer rpc-secret")
+			return r
+		}(),
+		"runtime": func() *http.Request {
+			r := httptest.NewRequest(http.MethodPost, "/instances/reclaim", strings.NewReader(`{"instance_id":"inst"}`))
+			r.Header.Set("Authorization", "Bearer rpc-secret")
+			return r
+		}(),
+	} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code < 400 {
+			t.Fatalf("%s status/body = %d %q", name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+type recordingInstanceReclaimRuntime struct {
+	instanceID string
+	result     scheduler.InstanceReclaimResult
+	err        error
+}
+
+func (r *recordingInstanceReclaimRuntime) ReclaimInstance(_ context.Context, instanceID string) (scheduler.InstanceReclaimResult, error) {
+	r.instanceID = instanceID
+	if r.err != nil {
+		return scheduler.InstanceReclaimResult{}, r.err
+	}
+	return r.result, nil
+}
+
 func TestWorkloadLeaseAndSchedulerResultValidation(t *testing.T) {
 	if _, err := workloadLease(domain.Job{ID: "missing-result"}); err == nil || !strings.Contains(err.Error(), "no scheduler result evidence") {
 		t.Fatalf("missing result error = %v", err)
