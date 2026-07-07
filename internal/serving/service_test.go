@@ -185,6 +185,40 @@ func TestReconcileClearsStaleServiceCandidatesOutsideContextEnvelope(t *testing.
 	}
 }
 
+func TestReconcileFiltersServiceCandidatesByRequestedBackend(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(23, 30).UTC()
+	store := &fakeStore{
+		services: []domain.ModelService{{
+			ID:                 "svc-a",
+			Model:              "vision",
+			Backend:            domain.BackendVLLM,
+			ContextRequest:     4096,
+			MinReplicas:        1,
+			MaxReplicas:        1,
+			CandidatePresetIDs: []string{"llama"},
+			Status:             domain.ModelServiceActive,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}},
+		presets: []domain.Preset{
+			{ID: "llama", ModelRef: "model-llama", Aliases: []string{"vision"}, Backend: domain.BackendLlamaCpp, ContextLength: 8192},
+			{ID: "vllm", ModelRef: "model-vllm", Aliases: []string{"vision"}, Backend: domain.BackendVLLM, ContextLength: 8192},
+		},
+	}
+
+	report, err := Reconcile(ctx, store, ReconcileOptions{Now: now})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if report.Created != 1 || len(store.tasks) != 1 || store.tasks[0].PresetID != "vllm" {
+		t.Fatalf("report=%+v tasks=%+v", report, store.tasks)
+	}
+	if got := store.services[0].CandidatePresetIDs; len(got) != 1 || got[0] != "vllm" {
+		t.Fatalf("service candidates = %+v", store.services[0])
+	}
+}
+
 func TestReconcileCreatesCatalogRefreshTaskWhenServiceHasNoCandidates(t *testing.T) {
 	ctx := context.Background()
 	now := time.Unix(24, 0).UTC()

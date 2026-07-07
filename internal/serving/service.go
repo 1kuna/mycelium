@@ -315,6 +315,9 @@ func presetMatchesService(preset domain.Preset, service domain.ModelService) boo
 	if preset.ID == "" || !presetMatchesModel(preset, service.Model) {
 		return false
 	}
+	if service.Backend != "" && preset.Backend != service.Backend {
+		return false
+	}
 	if service.ContextRequest > 0 && modelruntime.EffectiveContextLength(preset) < service.ContextRequest {
 		return false
 	}
