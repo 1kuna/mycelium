@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"mycelium/internal/domain"
 	nodeagent "mycelium/internal/node"
@@ -167,6 +168,33 @@ func TestPeerDirectoryMarksUnreachablePeers(t *testing.T) {
 	}
 	if _, err := directory.NodeAgent("peer-a"); err == nil {
 		t.Fatal("unreachable peer registered an agent")
+	}
+}
+
+func TestPeerDirectoryBoundsStuckPeerSnapshot(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan string, 1)
+	directory := &PeerDirectory{
+		Discovery:       &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-a", Addresses: []string{"127.0.0.1:1"}, Compute: true}}},
+		SnapshotTimeout: 20 * time.Millisecond,
+		Factory: func(string) ports.NodeAgent {
+			return blockingSnapshotAgent{node: fixtures.MakeNode(fixtures.WithNodeID("node-a")), entered: entered, release: release}
+		},
+	}
+
+	start := time.Now()
+	fleet, err := directory.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("stuck peer snapshot was not bounded: %s", elapsed)
+	}
+	if len(fleet.Nodes) != 1 || fleet.Nodes[0].ID != "peer-a" || fleet.Nodes[0].Status != domain.NodeUnreachable {
+		t.Fatalf("fleet = %+v", fleet)
+	}
+	if _, err := directory.NodeAgent("node-a"); err == nil {
+		t.Fatal("stuck peer registered a usable agent")
 	}
 }
 

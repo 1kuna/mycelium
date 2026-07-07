@@ -6471,6 +6471,38 @@ func TestPeerControlHTTPClientBypassesAmbientProxy(t *testing.T) {
 	if transport.ResponseHeaderTimeout <= 0 {
 		t.Fatal("peer control RPC must bound response header waits")
 	}
+	if client.Timeout <= 0 {
+		t.Fatal("peer control RPC must bound whole request waits")
+	}
+}
+
+func TestPeerControlHTTPClientBoundsBodyStalls(t *testing.T) {
+	oldTimeout := peerControlTimeout
+	peerControlTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { peerControlTimeout = oldTimeout })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	start := time.Now()
+	resp, err := peerControlHTTPClient().Get(server.URL)
+	if err == nil {
+		defer resp.Body.Close()
+		_, err = io.ReadAll(resp.Body)
+	}
+	if err == nil {
+		t.Fatal("body stall completed without timeout")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("body stall was not bounded: %s", elapsed)
+	}
 }
 
 func TestPeerBackgroundHelpersUseFakeClockAndPersistEffects(t *testing.T) {
@@ -6615,6 +6647,34 @@ func TestPeerDiagnosticsChecksSeedsInsidePeerProcess(t *testing.T) {
 	report = buildPeerDiagnostics(context.Background(), domain.Peer{ID: "self"}, []string{"http://seed-revoked.test"}, "secret", manager, seedClient)
 	if report.Ready || len(report.Seeds) != 1 || !strings.Contains(report.Seeds[0].Error, "revoked") {
 		t.Fatalf("revoked diagnostics = %+v", report)
+	}
+}
+
+func TestPeerDiagnosticsBoundsDegradedSeedsTogether(t *testing.T) {
+	oldTimeout := peerControlTimeout
+	peerControlTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { peerControlTimeout = oldTimeout })
+	manager, err := membership.NewTokenManager("secret")
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	seedClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+		http.Error(w, r.Context().Err().Error(), http.StatusGatewayTimeout)
+	}))
+
+	start := time.Now()
+	report := buildPeerDiagnostics(context.Background(), domain.Peer{ID: "self"}, []string{"http://seed-a.test", "http://seed-b.test"}, "secret", manager, seedClient)
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("diagnostics checked degraded seeds serially or unboundedly: %s", elapsed)
+	}
+	if report.Ready || len(report.Seeds) != 2 {
+		t.Fatalf("diagnostics report = %+v", report)
+	}
+	for _, seed := range report.Seeds {
+		if seed.Ready || seed.Error == "" {
+			t.Fatalf("seed did not fail loudly: %+v", seed)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"mycelium/internal/domain"
 	"mycelium/internal/ports"
@@ -23,10 +24,11 @@ type RescueSnapshotter interface {
 }
 
 type RegistryReplicator struct {
-	Local  ports.JobRegistry
-	Peers  RegistryPeerSource
-	Client RegistryClient
-	SelfID string
+	Local   ports.JobRegistry
+	Peers   RegistryPeerSource
+	Client  RegistryClient
+	SelfID  string
+	Timeout time.Duration
 }
 
 func RescueSnapshot(records []domain.JobRecord) []domain.JobRecord {
@@ -53,7 +55,9 @@ func (r RegistryReplicator) SyncOnce(ctx context.Context) error {
 		if peer.ID == r.SelfID {
 			continue
 		}
-		records, err := r.Client.Snapshot(ctx, peer)
+		peerCtx, cancel := r.peerContext(ctx)
+		records, err := r.Client.Snapshot(peerCtx, peer)
+		cancel()
 		if err != nil {
 			syncErr = errors.Join(syncErr, fmt.Errorf("pull registry from peer %q: %w", peer.ID, err))
 			continue
@@ -67,7 +71,10 @@ func (r RegistryReplicator) SyncOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := r.Client.Push(ctx, peer, redactPrivatePayloads(local)); err != nil {
+		peerCtx, cancel = r.peerContext(ctx)
+		err = r.Client.Push(peerCtx, peer, redactPrivatePayloads(local))
+		cancel()
+		if err != nil {
 			syncErr = errors.Join(syncErr, fmt.Errorf("push registry to peer %q: %w", peer.ID, err))
 		}
 	}
@@ -93,7 +100,10 @@ func (r RegistryReplicator) PushRecord(ctx context.Context, rec domain.JobRecord
 			continue
 		}
 		attempted++
-		if err := r.Client.Push(ctx, peer, []domain.JobRecord{redactPrivatePayload(rec)}); err != nil {
+		peerCtx, cancel := r.peerContext(ctx)
+		err := r.Client.Push(peerCtx, peer, []domain.JobRecord{redactPrivatePayload(rec)})
+		cancel()
+		if err != nil {
 			pushErr = errors.Join(pushErr, fmt.Errorf("push registry record to peer %q: %w", peer.ID, err))
 			continue
 		}
@@ -113,6 +123,13 @@ func (r RegistryReplicator) validate() error {
 		return fmt.Errorf("registry replicator is not fully configured")
 	}
 	return nil
+}
+
+func (r RegistryReplicator) peerContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.Timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, r.Timeout)
 }
 
 func RescueRecords(ctx context.Context, registry ports.JobRegistry) ([]domain.JobRecord, error) {

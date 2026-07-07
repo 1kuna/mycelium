@@ -23,13 +23,14 @@ type PeerNodeStore interface {
 }
 
 type PeerDirectory struct {
-	Discovery ports.PeerDiscovery
-	Factory   PeerAgentFactory
-	Tunnel    ports.Tunnel
-	Store     PeerNodeStore
-	SelfID    string
-	AuthToken string
-	Client    *http.Client
+	Discovery       ports.PeerDiscovery
+	Factory         PeerAgentFactory
+	Tunnel          ports.Tunnel
+	Store           PeerNodeStore
+	SelfID          string
+	AuthToken       string
+	Client          *http.Client
+	SnapshotTimeout time.Duration
 
 	mu          sync.Mutex
 	agents      map[string]ports.NodeAgent
@@ -86,7 +87,9 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 	for _, candidate := range candidates {
 		candidate := candidate
 		go func() {
-			snap, err := candidate.agent.Snapshot(ctx)
+			snapCtx, cancel := context.WithTimeout(ctx, d.snapshotTimeout())
+			defer cancel()
+			snap, err := candidate.agent.Snapshot(snapCtx)
 			results <- snapshotResult{peer: candidate.peer, telemetryPeer: candidate.telemetryPeer, agent: candidate.agent, snap: snap, err: err}
 		}()
 	}
@@ -125,6 +128,13 @@ func (d *PeerDirectory) Snapshot(ctx context.Context) (domain.FleetSnapshot, err
 	d.peersByNode = peersByNode
 	d.mu.Unlock()
 	return fleet, nil
+}
+
+func (d *PeerDirectory) snapshotTimeout() time.Duration {
+	if d.SnapshotTimeout > 0 {
+		return d.SnapshotTimeout
+	}
+	return 5 * time.Second
 }
 
 func (d *PeerDirectory) NodeAgent(nodeID string) (ports.NodeAgent, error) {
