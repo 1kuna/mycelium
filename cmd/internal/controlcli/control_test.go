@@ -894,8 +894,34 @@ func TestRunModelsServiceEnsureSelectsMatchingPresetEnvelopes(t *testing.T) {
 	if got := strings.Join(ensured.CandidatePresetIDs, ","); got != "node-b-model,node-c-model" || ensured.Preemption != domain.PreemptHardForInteractive {
 		t.Fatalf("ensured service = %+v", ensured)
 	}
-	if err := Run(context.Background(), []string{"models", "service", "ensure", "--db", dbPath, "--model", "shared-model", "--context", "999999"}); err == nil || !strings.Contains(err.Error(), "no candidate presets") {
-		t.Fatalf("oversized ensure err = %v", err)
+	var staleCatalogErr error
+	staleCatalogOutput := captureStdout(t, func() {
+		staleCatalogErr = Run(context.Background(), []string{"models", "service", "ensure", "--db", dbPath, "--model", "shared-model", "--context", "999999"})
+	})
+	if staleCatalogErr != nil {
+		t.Fatalf("stale-catalog ensure err = %v", staleCatalogErr)
+	}
+	if !strings.Contains(staleCatalogOutput, "candidates=-") {
+		t.Fatalf("stale-catalog ensure output = %s", staleCatalogOutput)
+	}
+	verifyStale, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open stale verify: %v", err)
+	}
+	defer verifyStale.Close()
+	staleServices, err := verifyStale.ListModelServices(context.Background())
+	if err != nil {
+		t.Fatalf("ListModelServices stale: %v", err)
+	}
+	var staleService domain.ModelService
+	for _, service := range staleServices {
+		if service.ContextRequest == 999999 {
+			staleService = service
+			break
+		}
+	}
+	if staleService.ID == "" || len(staleService.CandidatePresetIDs) != 0 {
+		t.Fatalf("stale catalog service = %+v", staleService)
 	}
 	if err := Run(context.Background(), []string{"models", "service", "ensure", "--db", dbPath, "--model", "shared-model", "--preemption", "maybe"}); err == nil || !strings.Contains(err.Error(), "unknown preemption") {
 		t.Fatalf("invalid preemption err = %v", err)

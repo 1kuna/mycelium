@@ -359,10 +359,11 @@ store when `myce reconcile drain --config <peer.json>` or the daemon has that
 configured source; if the source is missing or does not contain the requested
 preset/model, the task fails loudly. It does not download models, copy
 artifacts, or mutate remote peer configs. Model-service reconciliation uses
-that same catalog source: a service with no candidate presets first refreshes
-matching candidates from the control-store catalog, then creates an allowed
-`refresh_catalog` task if the local catalog still cannot satisfy the service
-model/context demand. Blocked records are left untouched.
+that same catalog source: `myce models service ensure` records desired demand
+even when the local catalog is stale, a service with no candidate presets first
+refreshes matching candidates from the control-store catalog, then creates an
+allowed `refresh_catalog` task if the local catalog still cannot satisfy the
+service model/context demand. Blocked records are left untouched.
 For a stored workload or gateway job, `myce debug job <job-id> --reconcile`
 adds the same report-only plan to the normal job/debug evidence so operators do
 not have to extract the scheduler decision by hand.
