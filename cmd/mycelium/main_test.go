@@ -6353,9 +6353,11 @@ func TestSeedPeerProbeRemembersReachablePeer(t *testing.T) {
 	}
 }
 
-func TestSeedRefreshingDiscoveryProbesSeedsBeforePeers(t *testing.T) {
+func TestSeedRefreshingDiscoveryReturnsCachedPeersWithoutProbeStorm(t *testing.T) {
 	seed := domain.Peer{ID: "seed-peer", Addresses: []string{"127.0.0.1:0"}, Compute: true}
+	probes := 0
 	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probes++
 		if r.Header.Get("X-Myc-Join-Token") != "secret" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -6374,6 +6376,10 @@ func TestSeedRefreshingDiscoveryProbesSeedsBeforePeers(t *testing.T) {
 		joinTokens: manager,
 		client:     client,
 	}
+	probeSeedPeersWithClient(context.Background(), cache, discovery.seeds, discovery.joinToken, discovery.joinTokens, discovery.client)
+	if probes != 1 {
+		t.Fatalf("seed probe count after explicit probe = %d", probes)
+	}
 
 	peers, err := discovery.Peers(context.Background())
 	if err != nil {
@@ -6381,6 +6387,9 @@ func TestSeedRefreshingDiscoveryProbesSeedsBeforePeers(t *testing.T) {
 	}
 	if len(peers) != 1 || peers[0].ID != seed.ID || peers[0].Addresses[0] != "seed-refresh.test" {
 		t.Fatalf("seed refreshed peers = %+v", peers)
+	}
+	if probes != 1 {
+		t.Fatalf("Peers should use cached seed state without probing again, probes=%d", probes)
 	}
 	if err := discovery.Advertise(context.Background(), domain.Peer{ID: "self"}); err != nil {
 		t.Fatalf("Advertise: %v", err)
