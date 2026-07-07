@@ -353,7 +353,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
 	stageExecutor := peerCatalogStageExecutor{authToken: cfg.RPCToken, client: controlClient}
-	startReconciliationDrainer(ctx, store, schedulerPrewarmExecutor{runtime: runtime}, reconcile.ConfigCatalogRefresher{Store: store, Presets: cfg.Presets, StoreDir: cfg.CatalogDir}, stageExecutor, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject)
+	startReconciliationDrainer(ctx, store, schedulerPrewarmExecutor{runtime: runtime}, schedulerCapacityRepairExecutor{runtime: runtime}, reconcile.ConfigCatalogRefresher{Store: store, Presets: cfg.Presets, StoreDir: cfg.CatalogDir}, stageExecutor, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject)
 	optimizerNodeID := cfg.ID
 	if cfg.Compute {
 		optimizerNodeID = privateLocalNodeID(cfg)
@@ -3313,7 +3313,32 @@ func (e peerCatalogStageExecutor) StageModel(ctx context.Context, peer domain.Pe
 
 var _ ports.PeerCatalogStager = peerCatalogStageExecutor{}
 
-func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, prewarm reconcile.PrewarmExecutor, catalog reconcile.CatalogRefresher, stage ports.PeerCatalogStager, clk ports.Clock, interval time.Duration, limit int, project string) {
+type schedulerCapacityRepairExecutor struct {
+	runtime schedulerQueueDrainer
+}
+
+type schedulerQueueDrainer interface {
+	Drain(ctx context.Context, limit int) ([]scheduler.Result, error)
+}
+
+func (e schedulerCapacityRepairExecutor) RepairCapacity(ctx context.Context, limit int) (reconcile.CapacityRepairResult, error) {
+	if e.runtime == nil {
+		return reconcile.CapacityRepairResult{}, fmt.Errorf("scheduler runtime is required")
+	}
+	results, err := e.runtime.Drain(ctx, limit)
+	if err != nil {
+		return reconcile.CapacityRepairResult{}, err
+	}
+	out := reconcile.CapacityRepairResult{Drained: len(results)}
+	for _, result := range results {
+		if result.Decision.JobID != "" {
+			out.WorkloadIDs = append(out.WorkloadIDs, result.Decision.JobID)
+		}
+	}
+	return out, nil
+}
+
+func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, prewarm reconcile.PrewarmExecutor, capacity reconcile.CapacityRepairExecutor, catalog reconcile.CatalogRefresher, stage ports.PeerCatalogStager, clk ports.Clock, interval time.Duration, limit int, project string) {
 	if store == nil || clk == nil || interval <= 0 || limit <= 0 {
 		return
 	}
@@ -3332,12 +3357,14 @@ func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, 
 				}
 			}
 			if _, err := reconcile.DrainAllowedTasks(ctx, store, reconcile.DrainOptions{
-				Limit:   limit,
-				Project: project,
-				Prewarm: prewarm,
-				Catalog: catalog,
-				Stage:   stage,
+				Limit:    limit,
+				Project:  project,
+				Prewarm:  prewarm,
+				Capacity: capacity,
+				Catalog:  catalog,
+				Stage:    stage,
 				Kinds: []reconcile.TaskKind{
+					reconcile.TaskWaitCapacity,
 					reconcile.TaskRecordIncompatibility,
 					reconcile.TaskStageModelArtifact,
 					reconcile.TaskVerifyEngineReadiness,

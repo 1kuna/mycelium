@@ -584,6 +584,63 @@ func TestDrainAllowedTasksVerifiesEngineReadiness(t *testing.T) {
 	}
 }
 
+func TestDrainAllowedTasksRepairsWaitCapacityThroughQueueDrain(t *testing.T) {
+	capacity := &fakeCapacityExecutor{result: CapacityRepairResult{Drained: 1, WorkloadIDs: []string{"job-moved"}}}
+	store := &fakeTaskStore{tasks: []domain.ReconciliationTaskRecord{
+		taskRecord("allowed-wait", string(TaskWaitCapacity), domain.ReconciliationTaskAllowed),
+	}}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: time.Unix(85, 0).UTC(), Capacity: capacity, Limit: 2})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if capacity.limit != 2 {
+		t.Fatalf("capacity repair limit = %d, want 2", capacity.limit)
+	}
+	if report.Drained != 1 || report.Results[0].Status != domain.ReconciliationTaskDone || report.Results[0].Action != "wait_capacity" || report.Results[0].WorkloadID != "job-moved" {
+		t.Fatalf("report = %+v", report)
+	}
+	if done := store.taskByID("allowed-wait"); done.Status != domain.ReconciliationTaskDone || done.Blocker != "" {
+		t.Fatalf("done task = %+v", done)
+	}
+}
+
+func TestDrainAllowedTasksBlocksWaitCapacityWhenQueueStillCannotRun(t *testing.T) {
+	capacity := &fakeCapacityExecutor{result: CapacityRepairResult{}}
+	store := &fakeTaskStore{tasks: []domain.ReconciliationTaskRecord{
+		taskRecord("allowed-wait", string(TaskWaitCapacity), domain.ReconciliationTaskAllowed),
+	}}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: time.Unix(86, 0).UTC(), Capacity: capacity})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Drained != 1 || report.Results[0].Status != domain.ReconciliationTaskBlocked || report.Results[0].Action != "wait_capacity" || report.Results[0].Error != "capacity_unavailable" {
+		t.Fatalf("report = %+v", report)
+	}
+	blocked := store.taskByID("allowed-wait")
+	if blocked.Status != domain.ReconciliationTaskBlocked || blocked.Blocker != "capacity_unavailable" || blocked.Error != "" {
+		t.Fatalf("blocked task = %+v", blocked)
+	}
+}
+
+func TestDrainAllowedTasksFailsWaitCapacityWithoutExecutor(t *testing.T) {
+	store := &fakeTaskStore{tasks: []domain.ReconciliationTaskRecord{
+		taskRecord("allowed-wait", string(TaskWaitCapacity), domain.ReconciliationTaskAllowed),
+	}}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: time.Unix(87, 0).UTC()})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Drained != 1 || report.Results[0].Status != domain.ReconciliationTaskFailed || !strings.Contains(report.Results[0].Error, "capacity repair executor is not configured") {
+		t.Fatalf("report = %+v", report)
+	}
+	if failed := store.taskByID("allowed-wait"); failed.Status != domain.ReconciliationTaskFailed || !strings.Contains(failed.Error, "capacity repair executor") {
+		t.Fatalf("failed task = %+v", failed)
+	}
+}
+
 func TestDrainAllowedTasksFailsEngineReadinessWithoutSavedProfile(t *testing.T) {
 	store := &fakeTaskStore{
 		tasks: []domain.ReconciliationTaskRecord{taskRecord("allowed-engine", string(TaskVerifyEngineReadiness), domain.ReconciliationTaskAllowed)},
@@ -723,6 +780,20 @@ func (e *fakePrewarmExecutor) PrewarmReplica(_ context.Context, job domain.Job) 
 	e.jobs = append(e.jobs, job)
 	if e.err != nil {
 		return PrewarmResult{}, e.err
+	}
+	return e.result, nil
+}
+
+type fakeCapacityExecutor struct {
+	limit  int
+	result CapacityRepairResult
+	err    error
+}
+
+func (e *fakeCapacityExecutor) RepairCapacity(_ context.Context, limit int) (CapacityRepairResult, error) {
+	e.limit = limit
+	if e.err != nil {
+		return CapacityRepairResult{}, e.err
 	}
 	return e.result, nil
 }

@@ -142,10 +142,11 @@ handoff.
   appears in the fleet snapshot and fits the requested preset. In this state the
   gateway correctly records demand and returns typed `503` availability evidence
   instead of hiding the failure, and cleanup leaves no held leases or
-  nonterminal synthetic jobs. The remaining product gap is the executable
-  `wait_capacity`/capacity-repair class: allowed capacity-wait tasks still fail
-  loudly as unimplemented rather than rearranging supply or replacing an
-  unreachable/mismatched owner automatically.
+  nonterminal synthetic jobs. The first capacity-repair executor now drains the
+  existing explicit workload queue from daemon reconciliation and blocks with
+  `capacity_unavailable` when no queued work can be admitted; remaining
+  materialization gaps are automatic remote catalog mutation, cross-peer
+  artifact movement, owner repair, and engine install/apply.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish
