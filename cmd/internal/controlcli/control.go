@@ -2797,6 +2797,7 @@ func buildGatewayRoutesReport(ctx context.Context, configPath string, live gatew
 		}
 		return report, nil
 	}
+	projectPresetIDs := map[string]struct{}{}
 	for _, project := range projects {
 		route := gatewayRouteContract{
 			Project:                      project.ID,
@@ -2816,7 +2817,17 @@ func buildGatewayRoutesReport(ctx context.Context, configPath string, live gatew
 			route = routeContractForPreset(cfg, project, preset)
 			annotateGatewayRouteModelGroup(&route, presets, liveModels)
 			annotateGatewayRouteLive(&route, preset, liveModels)
+			projectPresetIDs[preset.ID] = struct{}{}
 		}
+		report.Routes = append(report.Routes, route)
+	}
+	for _, preset := range presets {
+		if _, ok := projectPresetIDs[preset.ID]; ok {
+			continue
+		}
+		route := routeContractForPreset(cfg, domain.Project{}, preset)
+		annotateGatewayRouteModelGroup(&route, presets, liveModels)
+		annotateGatewayRouteLive(&route, preset, liveModels)
 		report.Routes = append(report.Routes, route)
 	}
 	return report, nil
