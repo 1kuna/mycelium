@@ -36,15 +36,16 @@ type taskJobReader interface {
 }
 
 type DrainOptions struct {
-	JobID    string
-	Limit    int
-	Now      time.Time
-	Project  string
-	Prewarm  PrewarmExecutor
-	Capacity CapacityRepairExecutor
-	Catalog  CatalogRefresher
-	Stage    ports.PeerCatalogStager
-	Kinds    []TaskKind
+	JobID         string
+	Limit         int
+	Now           time.Time
+	Project       string
+	Prewarm       PrewarmExecutor
+	Capacity      CapacityRepairExecutor
+	Catalog       CatalogRefresher
+	Stage         ports.PeerCatalogStager
+	Kinds         []TaskKind
+	ActionTimeout time.Duration
 }
 
 type DrainReport struct {
@@ -102,10 +103,11 @@ type EngineProfileLister interface {
 }
 
 type ConfigCatalogRefresher struct {
-	Store     CatalogPresetStore
-	Registrar CatalogPresetRegistrar
-	Presets   []domain.Preset
-	StoreDir  string
+	Store       CatalogPresetStore
+	Registrar   CatalogPresetRegistrar
+	Presets     []domain.Preset
+	StoreDir    string
+	LocalNodeID string
 }
 
 func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.ReconciliationTaskRecord) error {
@@ -132,7 +134,7 @@ func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.
 			if err != nil {
 				return err
 			}
-			return r.savePreset(ctx, result.Preset)
+			return r.savePreset(ctx, r.localSourcePreset(result.Preset))
 		}
 		result, err := catalog.NewInstaller(r.StoreDir).Install(ctx, catalog.InstallRequest{
 			Source:        strings.TrimSpace(task.ModelSource),
@@ -144,7 +146,7 @@ func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.
 		if err != nil {
 			return err
 		}
-		return r.savePreset(ctx, result.Preset)
+		return r.savePreset(ctx, r.localSourcePreset(result.Preset))
 	}
 	matches := catalogRefreshMatches(r.Presets, task)
 	if len(matches) == 0 {
@@ -163,6 +165,13 @@ func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.
 		}
 	}
 	return nil
+}
+
+func (r ConfigCatalogRefresher) localSourcePreset(preset domain.Preset) domain.Preset {
+	if r.LocalNodeID != "" && preset.NodeID == "" {
+		preset.NodeID = r.LocalNodeID
+	}
+	return preset
 }
 
 func (r ConfigCatalogRefresher) savePreset(ctx context.Context, preset domain.Preset) error {
@@ -284,6 +293,17 @@ func DrainAllowedTasks(ctx context.Context, store TaskStore, opts DrainOptions) 
 	}
 	report := DrainReport{}
 	for _, task := range tasks {
+		if task.Status == domain.ReconciliationTaskRunning {
+			result, recovered, err := failStaleRunningTask(ctx, store, task, opts.ActionTimeout, now)
+			if err != nil {
+				return report, err
+			}
+			if recovered {
+				report.Drained++
+				report.Results = append(report.Results, result)
+				continue
+			}
+		}
 		if task.Status != domain.ReconciliationTaskAllowed {
 			report.Skipped++
 			continue
@@ -303,11 +323,68 @@ func DrainAllowedTasks(ctx context.Context, store TaskStore, opts DrainOptions) 
 			report.Skipped++
 			continue
 		}
-		result := drainTask(ctx, store, task, opts, now)
+		taskCtx := ctx
+		cancel := func() {}
+		if opts.ActionTimeout > 0 {
+			taskCtx, cancel = context.WithTimeout(ctx, opts.ActionTimeout)
+		}
+		result := drainTask(taskCtx, store, task, opts, now)
+		cancel()
 		report.Drained++
 		report.Results = append(report.Results, result)
 	}
 	return report, nil
+}
+
+type taskJobWriter interface {
+	SaveJob(ctx context.Context, job domain.Job) error
+}
+
+func failStaleRunningTask(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, timeout time.Duration, now time.Time) (DrainTaskResult, bool, error) {
+	if timeout <= 0 || task.UpdatedAt.IsZero() || now.Sub(task.UpdatedAt) <= timeout {
+		return DrainTaskResult{}, false, nil
+	}
+	msg := fmt.Sprintf("reconciliation task exceeded action timeout %s", timeout)
+	failed := transitionTask(task, domain.ReconciliationTaskFailed, msg, msg, now)
+	if err := store.SaveReconciliationTask(ctx, failed); err != nil {
+		return DrainTaskResult{}, false, err
+	}
+	if TaskKind(task.Kind) == TaskPrewarmReplica {
+		if err := failPrewarmWorkload(ctx, store, task, msg); err != nil {
+			return DrainTaskResult{}, false, err
+		}
+	}
+	return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: failed.Status, Error: msg}, true, nil
+}
+
+func failPrewarmWorkload(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, cause string) error {
+	reader, canRead := store.(taskJobReader)
+	writer, canWrite := store.(taskJobWriter)
+	if !canRead || !canWrite {
+		return nil
+	}
+	jobID := "reconcile-prewarm-" + task.ID
+	job, err := reader.Job(ctx, jobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if jobStatusTerminal(job.Status) {
+		return nil
+	}
+	job.Status = domain.JobFailed
+	job.Error = cause
+	if job.Result == nil {
+		job.Result = &domain.JobResult{Source: "reconcile", ResultRedacted: true}
+	}
+	job.Result.Terminal = true
+	return writer.SaveJob(ctx, job)
+}
+
+func jobStatusTerminal(status domain.JobStatus) bool {
+	return status == domain.JobDone || status == domain.JobFailed || status == domain.JobPreempted
 }
 
 func drainKindAllowed(kind TaskKind, allowed []TaskKind) bool {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -196,6 +197,33 @@ func TestPresetRegistryResolveAllGroupsAliasesButPinsExactPresetIDs(t *testing.T
 	}
 	if got := registry.ResolveAll("missing"); len(got) != 0 {
 		t.Fatalf("missing group = %+v", got)
+	}
+}
+
+func TestPresetRegistryRegisterPresetMakesRefreshedModelRoutable(t *testing.T) {
+	registry := NewPresetRegistry()
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "tiny-refreshed"
+		p.ModelRef = "/models/tiny.gguf"
+		p.Aliases = []string{"tiny"}
+		p.ContextLength = 512
+	})
+
+	registry.RegisterPreset(preset)
+
+	resolved, err := registry.Resolve("tiny")
+	if err != nil {
+		t.Fatalf("Resolve tiny: %v", err)
+	}
+	if resolved.ID != preset.ID {
+		t.Fatalf("resolved = %+v", resolved)
+	}
+	group := registry.ResolveAll("tiny")
+	if len(group) != 1 || group[0].ID != preset.ID {
+		t.Fatalf("group = %+v", group)
+	}
+	if ids := registry.PublicModelIDs(); !slices.Contains(ids, "tiny") {
+		t.Fatalf("public ids = %+v", ids)
 	}
 }
 
