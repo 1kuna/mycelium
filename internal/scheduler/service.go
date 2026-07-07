@@ -689,6 +689,9 @@ func (s *Service) ReconcileTerminalOwnerLeases(ctx context.Context) (int, error)
 		}
 		owner, err := s.Owners.AdmissionController(inst.NodeID)
 		if err != nil {
+			if errors.Is(err, domain.ErrUnreachable) {
+				continue
+			}
 			return released, err
 		}
 		inspector, ok := owner.(ports.LeaseInspector)

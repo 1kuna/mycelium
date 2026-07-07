@@ -8176,10 +8176,11 @@ func TestRunPeerServesUntilContextCanceled(t *testing.T) {
 		StorePath: dbPath,
 		Compute:   true,
 		ComputeConfig: ComputeConfig{
-			ID:            "peer-a",
-			Name:          "Peer A",
-			BackendListen: "127.0.0.1:51848",
-			LlamaServer:   "/bin/echo",
+			ID:               "peer-a",
+			Name:             "Peer A",
+			BackendListen:    "127.0.0.1:51848",
+			LlamaServer:      "/bin/echo",
+			DiskMinFreeRatio: 0.01,
 		},
 		Presets: []domain.Preset{testPreset("tiny")},
 	})
@@ -8230,10 +8231,11 @@ func TestBuildPeerGatewayWithLocalCompute(t *testing.T) {
 		StorePath: dbPath,
 		Compute:   true,
 		ComputeConfig: ComputeConfig{
-			ID:            "peer-a",
-			Name:          "Peer A",
-			BackendListen: "127.0.0.1:51848",
-			LlamaServer:   "/bin/echo",
+			ID:               "peer-a",
+			Name:             "Peer A",
+			BackendListen:    "127.0.0.1:51848",
+			LlamaServer:      "/bin/echo",
+			DiskMinFreeRatio: 0.01,
 		},
 		Presets: []domain.Preset{testPreset("tiny")},
 	})

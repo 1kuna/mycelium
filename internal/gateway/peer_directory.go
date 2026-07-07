@@ -132,7 +132,7 @@ func (d *PeerDirectory) NodeAgent(nodeID string) (ports.NodeAgent, error) {
 	defer d.mu.Unlock()
 	agent, ok := d.agents[nodeID]
 	if !ok {
-		return nil, fmt.Errorf("peer node agent %q is not registered", nodeID)
+		return nil, fmt.Errorf("%w: peer node agent %q is not registered", domain.ErrUnreachable, nodeID)
 	}
 	return agent, nil
 }

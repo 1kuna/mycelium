@@ -4126,8 +4126,8 @@ func TestNodeDirectoryCombinesSnapshots(t *testing.T) {
 	if _, err := directory.NodeAgent(node.ID); err != nil {
 		t.Fatalf("NodeAgent: %v", err)
 	}
-	if _, err := directory.NodeAgent("missing"); err == nil {
-		t.Fatal("missing node agent succeeded")
+	if _, err := directory.NodeAgent("missing"); !errors.Is(err, domain.ErrUnreachable) {
+		t.Fatalf("missing node agent err = %v", err)
 	}
 	if _, err := directory.AdmissionController(node.ID); err == nil {
 		t.Fatal("plain node agent exposed admission")
