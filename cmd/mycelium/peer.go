@@ -47,6 +47,9 @@ import (
 const maxPeerRPCJSONBodyBytes = 16 << 20
 const maxWorkloadResultBodyBytes = 16 << 20
 
+var peerControlTimeout = 5 * time.Second
+var peerServerWriteTimeout = 30 * time.Minute
+
 func runPeer(ctx context.Context, args []string) error {
 	if ctx.Err() != nil {
 		return nil
@@ -58,7 +61,13 @@ func runPeer(ctx context.Context, args []string) error {
 		}
 		return err
 	}
-	server := &http.Server{Addr: addr, Handler: handler, IdleTimeout: 5 * time.Second, ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		IdleTimeout:       5 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      peerServerWriteTimeout,
+	}
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
@@ -234,7 +243,14 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		lanTunnel := membership.NewLANTunnel()
 		lanTunnel.AuthToken = cfg.RPCToken
 		tunnel = lanTunnel
-		peerDirectory = &gateway.PeerDirectory{Discovery: discovery, Tunnel: tunnel, Store: store, SelfID: cfg.ID, AuthToken: cfg.RPCToken}
+		peerDirectory = &gateway.PeerDirectory{
+			Discovery:       discovery,
+			Tunnel:          tunnel,
+			Store:           store,
+			SelfID:          cfg.ID,
+			AuthToken:       cfg.RPCToken,
+			SnapshotTimeout: peerControlTimeout,
+		}
 		fleet = peerDirectory
 		nodes = peerDirectory
 		mountAdminHTTP(mux, &cfg, resolvedConfigPath, joinTokens, store, cfg.RPCToken)
@@ -476,19 +492,37 @@ func buildPeerDiagnostics(ctx context.Context, self domain.Peer, seeds []string,
 		}
 		return report
 	}
-	for _, seed := range seeds {
-		check := peerSeedDiagnostic{Address: seed}
-		peer, err := fetchPeerHealthWithClient(ctx, seed, token, client)
-		if err != nil {
-			check.Error = err.Error()
-			report.Ready = false
-		} else {
-			check.Ready = true
-			check.PeerID = peer.ID
-			check.Compute = peer.Compute
-		}
-		report.Seeds = append(report.Seeds, check)
+	diagCtx, cancel := context.WithTimeout(ctx, peerControlTimeout)
+	defer cancel()
+	type seedResult struct {
+		index int
+		check peerSeedDiagnostic
 	}
+	results := make(chan seedResult, len(seeds))
+	for i, seed := range seeds {
+		i, seed := i, seed
+		go func() {
+			check := peerSeedDiagnostic{Address: seed}
+			peer, err := fetchPeerHealthWithClient(diagCtx, seed, token, client)
+			if err != nil {
+				check.Error = err.Error()
+			} else {
+				check.Ready = true
+				check.PeerID = peer.ID
+				check.Compute = peer.Compute
+			}
+			results <- seedResult{index: i, check: check}
+		}()
+	}
+	checks := make([]peerSeedDiagnostic, len(seeds))
+	for range seeds {
+		result := <-results
+		checks[result.index] = result.check
+		if !result.check.Ready {
+			report.Ready = false
+		}
+	}
+	report.Seeds = checks
 	return report
 }
 
@@ -2958,6 +2992,8 @@ func doPeerRPC(ctx context.Context, client *http.Client, authToken string, peer 
 	if len(peer.Addresses) == 0 {
 		return fmt.Errorf("peer %q has no reachable address", peer.ID)
 	}
+	ctx, cancel := context.WithTimeout(ctx, peerControlTimeout)
+	defer cancel()
 	transientClient := false
 	if client == nil {
 		client = peerControlHTTPClient()
@@ -3000,7 +3036,7 @@ func doPeerRPC(ctx context.Context, client *http.Client, authToken string, peer 
 }
 
 func peerControlHTTPClient() *http.Client {
-	return &http.Client{Transport: &http.Transport{
+	return &http.Client{Timeout: peerControlTimeout, Transport: &http.Transport{
 		Proxy:             nil,
 		DisableKeepAlives: true,
 		DialContext: (&net.Dialer{
@@ -3021,10 +3057,11 @@ func startRegistryReplicationWithClient(ctx context.Context, registry ports.JobR
 		return
 	}
 	replicator := peercoord.RegistryReplicator{
-		Local:  registry,
-		Peers:  discovery,
-		Client: registryHTTPClient{AuthToken: rpcToken, Client: client},
-		SelfID: selfID,
+		Local:   registry,
+		Peers:   discovery,
+		Client:  registryHTTPClient{AuthToken: rpcToken, Client: client},
+		SelfID:  selfID,
+		Timeout: peerControlTimeout,
 	}
 	pushWatch, err := registry.Watch(ctx, "")
 	if err != nil {

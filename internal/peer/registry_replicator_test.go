@@ -214,6 +214,27 @@ func TestRegistryReplicatorReportsPeerFailuresAfterProgress(t *testing.T) {
 	}
 }
 
+func TestRegistryReplicatorBoundsStuckPeer(t *testing.T) {
+	ctx := context.Background()
+	discovery := &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-b"}}}
+	replicator := RegistryReplicator{
+		Local:   NewJobRegistry(),
+		Peers:   discovery,
+		Client:  blockingRegistryClient{},
+		SelfID:  "peer-a",
+		Timeout: 20 * time.Millisecond,
+	}
+
+	start := time.Now()
+	err := replicator.SyncOnce(ctx)
+	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("SyncOnce err = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("registry sync was not bounded: %s", elapsed)
+	}
+}
+
 func TestRegistryReplicatorPushRecordRequiresOneSuccessfulRescueCopy(t *testing.T) {
 	ctx := context.Background()
 	client := &recordingRegistryClient{
@@ -295,6 +316,18 @@ type recordingRegistryClient struct {
 	snapshotErr map[string]error
 	pushErr     map[string]error
 	pushes      map[string][][]domain.JobRecord
+}
+
+type blockingRegistryClient struct{}
+
+func (blockingRegistryClient) Snapshot(ctx context.Context, _ domain.Peer) ([]domain.JobRecord, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (blockingRegistryClient) Push(ctx context.Context, _ domain.Peer, _ []domain.JobRecord) error {
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 func (c *recordingRegistryClient) Snapshot(_ context.Context, peer domain.Peer) ([]domain.JobRecord, error) {
