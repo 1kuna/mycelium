@@ -152,6 +152,16 @@ handoff.
   If the old deployed gateway cannot return a stable preflight after a safe
   restart, activation needs an explicit operator decision to use the prepared
   rollback packet despite the failed old-binary baseline.
+- 2026-07-07: An explicitly approved rollback-packet activation of `dd2af71`
+  installed and started the candidate binary, but post-restart `/peer/health`,
+  `/v1/models`, and diagnostics still timed out under the real-fleet service
+  while seed/registry probes to unreachable peers were active. The candidate
+  run no longer emitted the old terminal-owner reconciliation spam, so the
+  remaining blocker is live gateway HTTP responsiveness under peer
+  reachability/sync failure, not the owner-reconcile classification fixed by
+  `dd2af71`. The rollback restored the previous service binary. Next work
+  should debug the gateway handler/sync interaction or macOS service identity
+  boundary before another activation attempt.
 - 2026-06-29: macOS user LaunchAgent activation can be blocked by binary
   identity / Local Network permission behavior. The repo provides generic
   service plan/install/status/rollback surfaces plus
