@@ -246,6 +246,8 @@ func (i Installer) install(ctx context.Context, req InstallRequest, onProgress P
 		ArtifactSizeMB: estimateWeightsMB(draft.Size),
 		EstWeightsMB:   estimateWeightsMB(draft.Size),
 		KVPerTokenMB:   0.01,
+		GeneratedBy:    "catalog-source",
+		GeneratedFrom:  req.Source,
 	}
 	prov := Provenance{
 		PresetID:         id,
