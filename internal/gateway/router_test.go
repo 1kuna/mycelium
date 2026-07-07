@@ -3826,7 +3826,7 @@ func TestRouterContextRefusalCreatesReconciliationDemand(t *testing.T) {
 	if len(store.reconcileTasks) != 2 {
 		t.Fatalf("reconciliation tasks = %+v", store.reconcileTasks)
 	}
-	if len(store.services) != 1 || store.services[0].Model != "chandra" || store.services[0].ContextRequest != 4096 || len(store.services[0].CandidatePresetIDs) != 2 {
+	if len(store.services) != 1 || store.services[0].Model != "chandra" || store.services[0].ContextRequest != 4096 || len(store.services[0].CandidatePresetIDs) != 0 {
 		t.Fatalf("model services = %+v", store.services)
 	}
 	for _, task := range store.reconcileTasks {
