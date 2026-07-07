@@ -147,6 +147,16 @@ handoff.
   `capacity_unavailable` when no queued work can be admitted; remaining
   materialization gaps are automatic remote catalog mutation, cross-peer
   artifact movement, owner repair, and engine install/apply.
+- 2026-07-07: A staged remote GGUF preset can now be adopted into the live
+  catalog and route discovery shows it as a full route row, but serving that
+  route remains blocked until the target peer has a saved ready engine profile
+  for the llama.cpp compatibility key. The current live proof records a strict
+  engine-readiness failure for that key; route discovery now reports generated
+  presets with missing engine evidence as `engine_readiness_missing` instead of
+  `live_ready`, so operators do not mistake catalog adoption for launch
+  readiness. The next implementation gate is the Doc 04 engine install/verify
+  apply path for this compatibility class, followed by a tiny completion proof
+  and supported instance reclaim.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish
