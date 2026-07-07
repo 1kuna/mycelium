@@ -78,6 +78,9 @@ func (r RegistryReplicator) PushRecord(ctx context.Context, rec domain.JobRecord
 	if err := r.validate(); err != nil {
 		return err
 	}
+	if terminalRecordStatus(rec.Status) && !rec.CleanupRequired {
+		return nil
+	}
 	peers, err := r.Peers.Peers(ctx)
 	if err != nil {
 		return err
