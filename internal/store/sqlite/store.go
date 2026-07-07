@@ -292,7 +292,7 @@ func (s *Store) SaveJob(ctx context.Context, job domain.Job) error {
 	if job.ID == "" {
 		return fmt.Errorf("job id is required")
 	}
-	return s.upsertJSON(ctx, "jobs", job.ID, job)
+	return s.upsertJob(ctx, job)
 }
 
 func (s *Store) Job(ctx context.Context, id string) (domain.Job, error) {
@@ -305,6 +305,32 @@ func (s *Store) ListJobs(ctx context.Context) ([]domain.Job, error) {
 	var jobs []domain.Job
 	err := s.listJSON(ctx, "jobs", &jobs)
 	return jobs, err
+}
+
+func (s *Store) ListModelServiceJobs(ctx context.Context) ([]domain.Job, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT data FROM jobs
+WHERE parent_id != ''
+  AND status NOT IN ('done', 'failed', 'preempted')
+ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []domain.Job
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var job domain.Job
+		if err := json.Unmarshal([]byte(raw), &job); err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
 }
 
 func (s *Store) SaveWorkloadResultBody(ctx context.Context, result domain.WorkloadResultBody) error {
@@ -1065,6 +1091,40 @@ ON CONFLICT(id) DO UPDATE SET data = excluded.data`, table), id, string(data))
 	return err
 }
 
+func (s *Store) upsertJob(ctx context.Context, job domain.Job) error {
+	data, err := json.Marshal(job)
+	if err != nil {
+		return err
+	}
+	resultTerminal := 0
+	resultLeaseID := ""
+	if job.Result != nil {
+		if job.Result.Terminal {
+			resultTerminal = 1
+		}
+		resultLeaseID = job.Result.LeaseID
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO jobs (id, data, parent_id, status, preset_id, result_lease_id, result_terminal)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	data = excluded.data,
+	parent_id = excluded.parent_id,
+	status = excluded.status,
+	preset_id = excluded.preset_id,
+	result_lease_id = excluded.result_lease_id,
+	result_terminal = excluded.result_terminal`,
+		job.ID,
+		string(data),
+		job.ParentID,
+		string(job.Status),
+		job.PresetID,
+		resultLeaseID,
+		resultTerminal,
+	)
+	return err
+}
+
 func (s *Store) upsertJobRecord(ctx context.Context, rec domain.JobRecord) error {
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -1269,7 +1329,15 @@ CREATE TABLE IF NOT EXISTS instances (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS admission_states (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reservations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS jobs (
+	id TEXT PRIMARY KEY,
+	data TEXT NOT NULL,
+	parent_id TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT '',
+	preset_id TEXT NOT NULL DEFAULT '',
+	result_lease_id TEXT NOT NULL DEFAULT '',
+	result_terminal INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS workload_result_bodies (
 	job_id TEXT PRIMARY KEY,
 	media_type TEXT NOT NULL DEFAULT '',
@@ -1352,6 +1420,24 @@ CREATE INDEX IF NOT EXISTS idx_session_metrics_node_at ON session_metrics(node_i
 	if err := ensureColumn(ctx, s.db, "session_metrics", "bytes_out", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := ensureColumn(ctx, s.db, "jobs", "parent_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "jobs", "status", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "jobs", "preset_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "jobs", "result_lease_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "jobs", "result_terminal", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := backfillJobColumns(ctx, s.db); err != nil {
+		return err
+	}
 	if err := ensureColumn(ctx, s.db, "job_records", "status", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -1371,8 +1457,23 @@ DROP INDEX IF EXISTS idx_job_records_updated;
 CREATE INDEX IF NOT EXISTS idx_job_records_status_scalar ON job_records(status);
 CREATE INDEX IF NOT EXISTS idx_job_records_cleanup_scalar ON job_records(cleanup_required);
 CREATE INDEX IF NOT EXISTS idx_job_records_updated_scalar ON job_records(updated_at, id);
+CREATE INDEX IF NOT EXISTS idx_jobs_service_scalar ON jobs(parent_id, status, id)
+	WHERE parent_id != '' AND status NOT IN ('done', 'failed', 'preempted');
 CREATE INDEX IF NOT EXISTS idx_job_records_rescue_scalar ON job_records(updated_at, id)
 	WHERE cleanup_required = 1 OR status NOT IN ('done', 'failed');`)
+	return err
+}
+
+func backfillJobColumns(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `
+UPDATE jobs
+SET
+	parent_id = COALESCE(json_extract(data, '$.parent_id'), ''),
+	status = COALESCE(json_extract(data, '$.status'), ''),
+	preset_id = COALESCE(json_extract(data, '$.preset_id'), ''),
+	result_lease_id = COALESCE(json_extract(data, '$.result.lease_id'), ''),
+	result_terminal = COALESCE(json_extract(data, '$.result.terminal'), 0)
+WHERE parent_id = '' OR status = ''`)
 	return err
 }
 
