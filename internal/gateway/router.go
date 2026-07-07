@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -745,24 +746,33 @@ func (r *Router) routeWithModelService(ctx context.Context, req translate.Ingres
 	if err != nil {
 		return RouteResponse{}, false, err
 	}
+	sort.SliceStable(services, func(i, j int) bool {
+		return services[i].ContextRequest < services[j].ContextRequest
+	})
 	jobs, err := store.ListJobs(ctx)
 	if err != nil {
 		return RouteResponse{}, false, err
 	}
 	project := r.projectForRequest(req)
 	var matchedService domain.ModelService
+	var attemptedService domain.ModelService
 	matched := false
+	heldServiceAttempted := false
 	var lastLeaseErr error
 	for _, service := range services {
 		if !modelServiceMatchesRequest(service, req, project) {
 			continue
 		}
-		matchedService = service
-		matched = true
+		if modelServiceMatchesDemand(service, req) {
+			matchedService = service
+			matched = true
+		}
 		for _, job := range jobs {
 			if job.ParentID != service.ID || job.Status != domain.JobRunning || job.Result == nil || job.Result.LeaseID == "" || job.Result.Terminal {
 				continue
 			}
+			heldServiceAttempted = true
+			attemptedService = service
 			leased := req
 			leased.WorkloadID = job.ID
 			leased.LeaseID = job.Result.LeaseID
@@ -783,18 +793,24 @@ func (r *Router) routeWithModelService(ctx context.Context, req translate.Ingres
 			return resp, true, nil
 		}
 	}
-	if matched {
+	if matched || heldServiceAttempted {
+		traceService := matchedService
+		if traceService.ID == "" {
+			traceService = attemptedService
+		}
 		job := r.jobFromIngress(req, 1)
 		if project != "" {
 			job.Project = project
 		}
-		job.ContextRequest = maxGatewayInt(job.ContextRequest, matchedService.ContextRequest)
+		if matched {
+			job.ContextRequest = maxGatewayInt(job.ContextRequest, matchedService.ContextRequest)
+		}
 		decision := domain.PlacementDecision{
 			JobID:  job.ID,
 			Action: domain.ActionQueued,
 			Trace: []domain.TraceStep{{
 				Step:   "model-service",
-				Result: fmt.Sprintf("service %s has no gateway-usable held capacity", matchedService.ID),
+				Result: fmt.Sprintf("service %s has no gateway-usable held capacity", traceService.ID),
 			}},
 		}
 		reason := "model service has no gateway-usable held capacity"
@@ -829,6 +845,10 @@ func modelServiceMatchesRequest(service domain.ModelService, req translate.Ingre
 		return false
 	}
 	return true
+}
+
+func modelServiceMatchesDemand(service domain.ModelService, req translate.IngressRequest) bool {
+	return service.ContextRequest == req.ContextRequest
 }
 
 func (r *Router) resolveWorkloadLease(ctx context.Context, req translate.IngressRequest) (domain.Job, domain.PlacementDecision, domain.ModelInstance, domain.Lease, error) {

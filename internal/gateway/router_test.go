@@ -698,7 +698,7 @@ func TestRouterModelServiceWithoutUsableCapacityReturnsRetryableDemand(t *testin
 		t.Fatalf("ParseOpenAIChat: %v", err)
 	}
 	req.Project = "project-a"
-	req.ContextRequest = 1024
+	req.ContextRequest = 4096
 	_, err = router.Route(context.Background(), req)
 	var noInstance noInstanceAvailableError
 	if err == nil || !errors.As(err, &noInstance) || !strings.Contains(err.Error(), "model service has no gateway-usable held capacity") {
@@ -709,6 +709,41 @@ func TestRouterModelServiceWithoutUsableCapacityReturnsRetryableDemand(t *testin
 	}
 	if len(store.services) != 1 || store.services[0].DemandCount != 1 || store.services[0].LastDemandJobID == "" || store.services[0].LastReason != string(domain.ActionQueued) {
 		t.Fatalf("service demand was not bumped: %+v", store.services)
+	}
+}
+
+func TestRouterEmptyHigherContextModelServiceDoesNotInterceptSmallerRequest(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "preset-small"
+		p.ModelRef = "model-small"
+		p.Aliases = []string{"served-model"}
+		p.ContextLength = 512
+	})
+	service := domain.ModelService{
+		ID:             serving.ServiceID("project-a", "served-model", 49152),
+		Model:          "served-model",
+		Project:        "project-a",
+		ContextRequest: 49152,
+		MinReplicas:    1,
+		MaxReplicas:    1,
+		Status:         domain.ModelServiceActive,
+	}
+	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
+	store := &gatewayRuntimeStore{services: []domain.ModelService{service}}
+	router.Runtime = &scheduler.Service{Placer: router.Placer, Fleet: router.Fleet, Nodes: router.Nodes, Store: store, Queue: scheduler.NewQueue(router.Clock), Clock: router.Clock}
+
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"served-model","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.Project = "project-a"
+	req.ContextRequest = 512
+	_, ok, err := router.routeWithModelService(context.Background(), req)
+	if err != nil || ok {
+		t.Fatalf("routeWithModelService ok=%v err=%v, want normal gateway placement to handle smaller request", ok, err)
+	}
+	if len(store.services) != 1 || store.services[0].DemandCount != 0 {
+		t.Fatalf("higher-context empty service should not be bumped for smaller request: %+v", store.services)
 	}
 }
 
@@ -750,7 +785,7 @@ func TestRouterModelServiceStaleHeldLeaseDoesNotFallbackToNormalAdmission(t *tes
 		t.Fatalf("ParseOpenAIChat: %v", err)
 	}
 	req.Project = "project-a"
-	req.ContextRequest = 1024
+	req.ContextRequest = 4096
 	_, err = router.Route(context.Background(), req)
 	var noInstance noInstanceAvailableError
 	if err == nil || !errors.As(err, &noInstance) || !strings.Contains(err.Error(), "lease \"missing-lease\" is not active") {
