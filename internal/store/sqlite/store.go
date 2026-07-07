@@ -309,10 +309,10 @@ func (s *Store) ListJobs(ctx context.Context) ([]domain.Job, error) {
 
 func (s *Store) ListModelServiceJobs(ctx context.Context) ([]domain.Job, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT data FROM jobs
+SELECT data FROM jobs INDEXED BY idx_jobs_service_scalar
 WHERE parent_id != ''
   AND status NOT IN ('done', 'failed', 'preempted')
-ORDER BY id`)
+ORDER BY parent_id, status, id`)
 	if err != nil {
 		return nil, err
 	}

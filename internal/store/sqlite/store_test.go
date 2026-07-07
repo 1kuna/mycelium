@@ -764,6 +764,46 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 	}
 }
 
+func TestStoreListModelServiceJobsUsesServiceIndexPlan(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	rows, err := store.db.QueryContext(ctx, `
+EXPLAIN QUERY PLAN
+SELECT data FROM jobs INDEXED BY idx_jobs_service_scalar
+WHERE parent_id != ''
+  AND status NOT IN ('done', 'failed', 'preempted')
+ORDER BY parent_id, status, id`)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer rows.Close()
+
+	var details []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+	plan := strings.Join(details, "\n")
+	if !strings.Contains(plan, "idx_jobs_service_scalar") {
+		t.Fatalf("service job query plan does not use service index:\n%s", plan)
+	}
+	if strings.Contains(plan, "sqlite_autoindex_jobs_1") {
+		t.Fatalf("service job query plan scans primary job index:\n%s", plan)
+	}
+}
+
 func TestStoreListModelServiceJobsReflectsJobUpdates(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(":memory:")
