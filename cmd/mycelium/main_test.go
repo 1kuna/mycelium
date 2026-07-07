@@ -6801,7 +6801,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 
 	serviceStore := &workloadMemoryStore{
 		jobs:    map[string]domain.Job{},
-		presets: map[string]domain.Preset{"preset-service": testPreset("preset-service")},
+		presets: map[string]domain.Preset{"preset-service": testPresetWithAlias("preset-service", "model-a")},
 		modelServices: []domain.ModelService{{
 			ID:                 "service-a",
 			Model:              "model-a",
@@ -9252,6 +9252,12 @@ func testPreset(id string) domain.Preset {
 		EstWeightsMB:  1,
 		KVPerTokenMB:  0.01,
 	}
+}
+
+func testPresetWithAlias(id, alias string) domain.Preset {
+	preset := testPreset(id)
+	preset.Aliases = []string{alias}
+	return preset
 }
 
 func testPresetWithContext(id string, contextLen int) domain.Preset {
