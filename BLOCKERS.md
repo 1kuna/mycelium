@@ -86,30 +86,17 @@ handoff.
   contracts. When the larger-envelope owner is saturated, synchronous gateway
   requests now return `503 Service Unavailable` with `Retry-After` and
   `X-Myc-Trace` drop reasons instead of an opaque provider/admission failure.
-  `myce gateway allocate` now gives external/tool consumers a Mycelium-owned
-  launch envelope: model/base URL, context cap, allocated worker count, accepted
-  owner envelopes, refused envelopes, and retry/backpressure guidance. That
-  prevents consumers from treating project batch size as worker count when a
-  warm-instance concurrency envelope is already full. The command can also
-  write a secret-free allocation plan and runner env file so external tools can
-  consume the decision mechanically, and `--verify-plan` fails before launch if
-  the plan is stale or the current live allocation no longer satisfies the saved
-  worker count. The allocation report is still not itself a held lease or
-  reservation. When an external runner needs held capacity, `myce pool plan`,
-  `myce pool up`, and `myce pool proxy` provide the generic bridge: pool
-  planning selects fitting owner envelopes, pool up admits workload workers and
-  now waits for queued cold-load workers to become held running leases before a
-  successful return, and the local proxy injects the lease headers for
-  header-unaware OpenAI-compatible tools. The proxy validates its gateway token
-  with the target gateway before serving and refuses project-scoped pool state
-  when the gateway does not echo the same project. The gateway validates the
-  running workload, active lease, project/model/context envelope, visible
-  instance, and then routes through the reserved owner while
-  `X-Myc-Lease-Hold` keeps the pool lease reusable until `pool down` releases
-  it. The remaining product work is to make multi-worker/batch pool sizing adaptive across more workload
-  shapes, add a larger envelope on the second owner where feasible, add a
-  document/page chunking contract, and cover streaming leased execution if a
-  consumer needs it.
+  The native product path is now `ModelService` demand plus service-held
+  capacity through the normal gateway. `myce gateway allocate`, `pool plan`,
+  `pool up`, and `pool proxy` remain debug/proof escape hatches for fitting,
+  held-lease, and cleanup behavior; they are not the ordinary sustained
+  consumer contract. Once a matching `ModelService` exists, a request that
+  finds no gateway-usable held capacity bumps desired supply and returns
+  retryable `503` evidence instead of silently falling back to best-effort
+  placement. Remaining product work is to prove this gateway-native service
+  loop under clean live B70/Spark pressure, finish streaming leased execution
+  only if a consumer needs it, and keep replacing transitional pool/proxy
+  ceremony with daemon-owned supply and reconciliation.
 - 2026-07-02: Placement drop reasons can now be saved as durable
   reconciliation task records through `myce reconcile placement --save` and
   inspected with `myce reconcile status`. The workload RPC now also persists
