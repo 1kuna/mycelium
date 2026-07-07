@@ -128,6 +128,31 @@ func TestRegistryReplicatorPushRecordSkipsSelf(t *testing.T) {
 	}
 }
 
+func TestRegistryReplicatorPushRecordSkipsTerminalHistory(t *testing.T) {
+	ctx := context.Background()
+	client := &recordingRegistryClient{}
+	discovery := &mocks.PeerDiscovery{PeersVal: []domain.Peer{{ID: "peer-b"}}}
+	replicator := RegistryReplicator{Local: NewJobRegistry(), Peers: discovery, Client: client, SelfID: "peer-a"}
+	done := registryRecord("done", "peer-a", domain.JobDone, time.Unix(12, 0).UTC())
+	done.Request = []byte(strings.Repeat("fat-terminal-payload", 1024))
+
+	if err := replicator.PushRecord(ctx, done); err != nil {
+		t.Fatalf("PushRecord terminal history: %v", err)
+	}
+	if len(client.pushes) != 0 {
+		t.Fatalf("terminal history should not be pushed: %+v", client.pushes)
+	}
+
+	cleanup := registryRecord("cleanup", "peer-a", domain.JobDone, time.Unix(13, 0).UTC())
+	cleanup.CleanupRequired = true
+	if err := replicator.PushRecord(ctx, cleanup); err != nil {
+		t.Fatalf("PushRecord cleanup terminal: %v", err)
+	}
+	if pushed := client.pushes["peer-b"]; len(pushed) != 1 || pushed[0][0].JobID != "cleanup" {
+		t.Fatalf("cleanup push = %+v", client.pushes)
+	}
+}
+
 func TestRegistryReplicatorRedactsPrivatePayloads(t *testing.T) {
 	ctx := context.Background()
 	local := NewJobRegistry()
