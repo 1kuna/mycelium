@@ -3903,6 +3903,46 @@ func TestRouterNoInstanceCreatesReconciliationDemand(t *testing.T) {
 	}
 }
 
+func TestRouterMissingCatalogModelCreatesServiceDemand(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "other-preset"
+		p.ModelRef = "other-model"
+		p.Aliases = []string{"other-model"}
+	})
+	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
+	store := &gatewayRuntimeStore{}
+	router.Runtime = &scheduler.Service{Placer: router.Placer, Fleet: router.Fleet, Nodes: router.Nodes, Store: store, Queue: scheduler.NewQueue(router.Clock), Clock: router.Clock}
+
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"new-model","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.Project = "project-a"
+	req.ContextRequest = 2048
+	_, err = router.Route(context.Background(), req)
+	var noInstance noInstanceAvailableError
+	if err == nil || !errors.As(err, &noInstance) || !strings.Contains(err.Error(), "model is not ready in the local catalog") {
+		t.Fatalf("err = %v", err)
+	}
+	if noInstance.Decision.Action != domain.ActionQueued || noInstance.retryAfterSeconds() != 1 {
+		t.Fatalf("noInstance = %+v", noInstance)
+	}
+	if len(store.services) != 1 {
+		t.Fatalf("services = %+v", store.services)
+	}
+	service := store.services[0]
+	if service.ID != serving.ServiceID("project-a", "new-model", 2048) || service.Model != "new-model" || service.Project != "project-a" || service.ContextRequest != 2048 || service.Status != domain.ModelServiceActive || service.DemandCount != 1 || service.LastDemandJobID == "" {
+		t.Fatalf("service demand = %+v", service)
+	}
+	report, err := serving.Reconcile(context.Background(), store, serving.ReconcileOptions{Now: router.Clock.Now(), Limit: 1})
+	if err != nil {
+		t.Fatalf("serving reconcile: %v", err)
+	}
+	if report.Created != 1 || len(store.reconcileTasks) != 1 || store.reconcileTasks[0].Kind != string(reconcile.TaskRefreshCatalog) || store.reconcileTasks[0].JobID != service.ID {
+		t.Fatalf("catalog refresh work was not created: report=%+v tasks=%+v", report, store.reconcileTasks)
+	}
+}
+
 func TestGatewayReconciliationDemandBumpsExistingNonTerminalTask(t *testing.T) {
 	preset := fixtures.MakePreset(func(p *domain.Preset) {
 		p.ModelRef = "model-a"

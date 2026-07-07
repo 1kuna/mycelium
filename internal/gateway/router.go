@@ -460,6 +460,12 @@ func (r *Router) Route(ctx context.Context, req translate.IngressRequest) (Route
 	}
 	preset, err := r.Presets.Resolve(req.Model)
 	if err != nil {
+		if noInstance, ok, demandErr := r.persistMissingCatalogDemand(ctx, req, err); ok || demandErr != nil {
+			if demandErr != nil {
+				return RouteResponse{}, errors.Join(err, demandErr)
+			}
+			return RouteResponse{}, noInstance
+		}
 		return RouteResponse{}, err
 	}
 	fleet, err := r.Fleet.Snapshot(ctx)
@@ -1051,6 +1057,48 @@ func (r *Router) persistGatewayReconciliationDemand(ctx context.Context, job dom
 		}
 	}
 	return nil
+}
+
+func (r *Router) persistMissingCatalogDemand(ctx context.Context, req translate.IngressRequest, cause error) (noInstanceAvailableError, bool, error) {
+	if r.Runtime == nil || r.Runtime.Store == nil {
+		return noInstanceAvailableError{}, false, nil
+	}
+	store, ok := r.Runtime.Store.(serving.Store)
+	if !ok {
+		return noInstanceAvailableError{}, false, nil
+	}
+	job := r.jobFromIngress(req, 1)
+	reason := "model is not ready in the local catalog"
+	decision := domain.PlacementDecision{
+		JobID:  job.ID,
+		Action: domain.ActionQueued,
+		Trace: []domain.TraceStep{{
+			Step:   "model-service",
+			Result: reason,
+		}},
+	}
+	if _, err := serving.EnsureDemand(ctx, store, serving.Demand{
+		Model:               job.Model,
+		Project:             job.Project,
+		ContextRequest:      job.ContextRequest,
+		ExpectedConcurrency: job.ExpectedConcurrency,
+		MinReplicas:         1,
+		MaxReplicas:         maxGatewayInt(1, job.ExpectedConcurrency),
+		Priority:            job.Priority,
+		Preemption:          job.Preemption,
+		LastDemandJobID:     job.ID,
+		Reason:              reason,
+		Now:                 r.clock().Now().UTC(),
+	}); err != nil {
+		return noInstanceAvailableError{}, true, fmt.Errorf("persist model service demand: %w", err)
+	}
+	return noInstanceAvailableError{
+		JobID:      job.ID,
+		RetryAfter: time.Second,
+		Reason:     fmt.Sprintf("%s: %v", reason, cause),
+		Decision:   decision,
+		Attempts:   1,
+	}, true, nil
 }
 
 func candidatePresetIDs(candidates []domain.Preset, fallback domain.Preset) []string {
