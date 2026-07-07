@@ -2619,7 +2619,6 @@ func (d seedRefreshingDiscovery) Peers(ctx context.Context) ([]domain.Peer, erro
 	if d.cache == nil {
 		return nil, fmt.Errorf("seed refreshing discovery is not configured")
 	}
-	probeSeedPeersWithClient(ctx, d.cache, d.seeds, d.joinToken, d.joinTokens, d.client)
 	return d.cache.Peers(ctx)
 }
 
