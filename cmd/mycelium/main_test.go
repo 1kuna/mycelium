@@ -6727,6 +6727,38 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		return err == nil && len(tasks) == 1 && tasks[0].Kind == string(reconcile.TaskPrewarmReplica) && tasks[0].Status == domain.ReconciliationTaskDone && servicePrewarm.callCount() == 1
 	})
 
+	serviceCatalogStore := &workloadMemoryStore{
+		jobs:    map[string]domain.Job{},
+		presets: map[string]domain.Preset{},
+		modelServices: []domain.ModelService{{
+			ID:          "service-needs-catalog",
+			Model:       "catalog-service",
+			MinReplicas: 1,
+			MaxReplicas: 1,
+			Status:      domain.ModelServiceActive,
+			CreatedAt:   time.Unix(1, 0).UTC(),
+			UpdatedAt:   time.Unix(1, 0).UTC(),
+		}},
+	}
+	serviceCatalogPrewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-catalog-service", NodeID: "node-a", InstanceID: "inst-catalog-service", LeaseID: "lease-catalog-service"}}
+	startReconciliationDrainer(ctx, serviceCatalogStore, serviceCatalogPrewarm, reconcile.ConfigCatalogRefresher{Store: serviceCatalogStore, Presets: []domain.Preset{testPreset("catalog-service")}}, clk, time.Second, 2, "project-a")
+	waitForCondition(t, func() bool {
+		clk.Advance(time.Second)
+		tasks, err := serviceCatalogStore.ListReconciliationTasks(context.Background(), "service-needs-catalog")
+		if err != nil || len(tasks) != 2 || serviceCatalogPrewarm.callCount() != 1 {
+			return false
+		}
+		byKind := map[string]domain.ReconciliationTaskRecord{}
+		for _, task := range tasks {
+			byKind[task.Kind] = task
+		}
+		services, err := serviceCatalogStore.ListModelServices(context.Background())
+		return err == nil &&
+			byKind[string(reconcile.TaskRefreshCatalog)].Status == domain.ReconciliationTaskDone &&
+			byKind[string(reconcile.TaskPrewarmReplica)].Status == domain.ReconciliationTaskDone &&
+			len(services) == 1 && len(services[0].CandidatePresetIDs) == 1 && services[0].CandidatePresetIDs[0] == "catalog-service"
+	})
+
 	optimizerStore, err := storesqlite.Open(filepath.Join(t.TempDir(), "optimizer.sqlite"))
 	if err != nil {
 		t.Fatalf("Open optimizer: %v", err)
@@ -7341,6 +7373,16 @@ func (s *workloadMemoryStore) SavePreset(_ context.Context, preset domain.Preset
 	}
 	s.presets[preset.ID] = preset
 	return nil
+}
+
+func (s *workloadMemoryStore) ListPresets(context.Context) ([]domain.Preset, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	presets := make([]domain.Preset, 0, len(s.presets))
+	for _, preset := range s.presets {
+		presets = append(presets, preset)
+	}
+	return presets, nil
 }
 
 func (s *workloadMemoryStore) Node(_ context.Context, id string) (domain.Node, error) {
