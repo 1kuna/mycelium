@@ -352,7 +352,8 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		startPeerHeartbeatWithClient(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, joinTokens, clock.System{}, controlClient)
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
-	startReconciliationDrainer(ctx, store, schedulerPrewarmExecutor{runtime: runtime}, reconcile.ConfigCatalogRefresher{Store: store, Presets: cfg.Presets, StoreDir: cfg.CatalogDir}, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject)
+	stageExecutor := peerCatalogStageExecutor{authToken: cfg.RPCToken, client: controlClient}
+	startReconciliationDrainer(ctx, store, schedulerPrewarmExecutor{runtime: runtime}, reconcile.ConfigCatalogRefresher{Store: store, Presets: cfg.Presets, StoreDir: cfg.CatalogDir}, stageExecutor, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject)
 	optimizerNodeID := cfg.ID
 	if cfg.Compute {
 		optimizerNodeID = privateLocalNodeID(cfg)
@@ -959,7 +960,6 @@ func persistAndDrainWorkloadReconciliationTasks(ctx context.Context, store workl
 		JobID: job.ID,
 		Kinds: []reconcile.TaskKind{
 			reconcile.TaskRecordIncompatibility,
-			reconcile.TaskStageModelArtifact,
 			reconcile.TaskVerifyEngineReadiness,
 		},
 	})
@@ -3293,7 +3293,27 @@ func (e schedulerPrewarmExecutor) PrewarmReplica(ctx context.Context, job domain
 	}, nil
 }
 
-func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, prewarm reconcile.PrewarmExecutor, catalog reconcile.CatalogRefresher, clk ports.Clock, interval time.Duration, limit int, project string) {
+type peerCatalogStageExecutor struct {
+	authToken string
+	client    *http.Client
+}
+
+func (e peerCatalogStageExecutor) StageModel(ctx context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error) {
+	var out struct {
+		Locality domain.ModelLocality `json:"locality"`
+	}
+	if err := doPeerRPC(ctx, e.client, e.authToken, peer, http.MethodPost, "/catalog/stage", map[string]any{"preset": preset}, &out); err != nil {
+		return domain.ModelLocality{}, err
+	}
+	if out.Locality.ID == "" {
+		return domain.ModelLocality{}, fmt.Errorf("catalog stage %s returned no locality", peer.ID)
+	}
+	return out.Locality, nil
+}
+
+var _ ports.PeerCatalogStager = peerCatalogStageExecutor{}
+
+func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, prewarm reconcile.PrewarmExecutor, catalog reconcile.CatalogRefresher, stage ports.PeerCatalogStager, clk ports.Clock, interval time.Duration, limit int, project string) {
 	if store == nil || clk == nil || interval <= 0 || limit <= 0 {
 		return
 	}
@@ -3316,6 +3336,7 @@ func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, 
 				Project: project,
 				Prewarm: prewarm,
 				Catalog: catalog,
+				Stage:   stage,
 				Kinds: []reconcile.TaskKind{
 					reconcile.TaskRecordIncompatibility,
 					reconcile.TaskStageModelArtifact,

@@ -404,7 +404,7 @@ func TestRunReconcileDrainRefreshesCatalogFromConfig(t *testing.T) {
 	}
 }
 
-func TestRunReconcileDrainPlansArtifactStaging(t *testing.T) {
+func TestRunReconcileDrainFailsArtifactStagingWithoutExecutor(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "control.db")
 	store, err := storesqlite.Open(dbPath)
@@ -449,7 +449,7 @@ func TestRunReconcileDrainPlansArtifactStaging(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile drain: %v", err)
 	}
-	if !strings.Contains(output, "kind=stage_model_artifact\tstatus=done\taction=plan_model_artifact_stage") {
+	if !strings.Contains(output, "kind=stage_model_artifact\tstatus=failed") || !strings.Contains(output, "stage model artifact executor is not configured") {
 		t.Fatalf("drain output = %q", output)
 	}
 
@@ -468,6 +468,10 @@ func TestRunReconcileDrainPlansArtifactStaging(t *testing.T) {
 	localities, err := verify.ListModelLocalities(context.Background())
 	if err != nil || len(localities) != 1 || localities[0].PresetID != preset.ID || localities[0].NodeID != "node-a" || localities[0].State != domain.ModelLocalityPlanned {
 		t.Fatalf("ListModelLocalities = %+v, %v", localities, err)
+	}
+	tasks, err := verify.ListReconciliationTasks(context.Background(), "job-stage")
+	if err != nil || len(tasks) != 1 || tasks[0].Status != domain.ReconciliationTaskFailed {
+		t.Fatalf("ListReconciliationTasks = %+v, %v", tasks, err)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"mycelium/internal/domain"
 	"mycelium/internal/engine"
 	"mycelium/internal/modelruntime"
+	"mycelium/internal/ports"
 )
 
 type TaskStore interface {
@@ -40,6 +41,7 @@ type DrainOptions struct {
 	Project string
 	Prewarm PrewarmExecutor
 	Catalog CatalogRefresher
+	Stage   ports.PeerCatalogStager
 	Kinds   []TaskKind
 }
 
@@ -269,14 +271,14 @@ func drainTask(ctx context.Context, store TaskStore, task domain.ReconciliationT
 		_ = store.SaveReconciliationTask(ctx, done)
 		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "record_incompatibility"}
 	case TaskStageModelArtifact:
-		if err := planModelArtifactStage(ctx, store, running, now); err != nil {
-			failed := transitionTask(running, domain.ReconciliationTaskFailed, err.Error(), "failed to plan model artifact staging", now)
+		if err := stageModelArtifact(ctx, store, running, opts.Stage, now); err != nil {
+			failed := transitionTask(running, domain.ReconciliationTaskFailed, err.Error(), "failed to stage model artifact", now)
 			_ = store.SaveReconciliationTask(ctx, failed)
 			return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: failed.Status, Error: err.Error()}
 		}
-		done := transitionTask(running, domain.ReconciliationTaskDone, "", "planned model artifact staging", now)
+		done := transitionTask(running, domain.ReconciliationTaskDone, "", "staged model artifact through peer catalog", now)
 		_ = store.SaveReconciliationTask(ctx, done)
-		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "plan_model_artifact_stage"}
+		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "stage_model_artifact"}
 	case TaskVerifyEngineReadiness:
 		if err := verifyEngineReadiness(ctx, store, running); err != nil {
 			failed := transitionTask(running, domain.ReconciliationTaskFailed, err.Error(), "engine readiness verification failed", now)
@@ -359,7 +361,7 @@ func prewarmReplica(ctx context.Context, store TaskStore, task domain.Reconcilia
 	return opts.Prewarm.PrewarmReplica(ctx, job)
 }
 
-func planModelArtifactStage(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, now time.Time) error {
+func stageModelArtifact(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, stager ports.PeerCatalogStager, now time.Time) error {
 	if task.NodeID == "" {
 		return fmt.Errorf("stage model artifact task requires node id")
 	}
@@ -392,7 +394,7 @@ func planModelArtifactStage(ctx context.Context, store TaskStore, task domain.Re
 	if err := store.SaveLocalityPlan(ctx, plan); err != nil {
 		return err
 	}
-	return store.SaveModelLocality(ctx, domain.ModelLocality{
+	locality := domain.ModelLocality{
 		ID:             modelLocalityID(node.ID, preset.ID),
 		PresetID:       preset.ID,
 		NodeID:         node.ID,
@@ -403,7 +405,55 @@ func planModelArtifactStage(ctx context.Context, store TaskStore, task domain.Re
 		Managed:        true,
 		Reason:         "planned by reconciliation task " + task.ID,
 		UpdatedAt:      now,
-	})
+	}
+	if err := store.SaveModelLocality(ctx, locality); err != nil {
+		return err
+	}
+	if stager == nil {
+		return fmt.Errorf("stage model artifact executor is not configured; locality plan recorded")
+	}
+	if node.Address == "" {
+		return fmt.Errorf("node %q has no reachable address for model artifact staging", node.ID)
+	}
+	action.State = domain.ModelLocalityStaging
+	plan.Actions[0] = action
+	if err := store.SaveLocalityPlan(ctx, plan); err != nil {
+		return err
+	}
+	locality.State = domain.ModelLocalityStaging
+	locality.Reason = "staging by reconciliation task " + task.ID
+	locality.UpdatedAt = now
+	if err := store.SaveModelLocality(ctx, locality); err != nil {
+		return err
+	}
+	staged, err := stager.StageModel(ctx, domain.Peer{ID: node.ID, Addresses: []string{node.Address}, Compute: true}, preset)
+	if err != nil {
+		action.State = domain.ModelLocalityFailed
+		action.Error = err.Error()
+		plan.Actions[0] = action
+		_ = store.SaveLocalityPlan(ctx, plan)
+		locality.State = domain.ModelLocalityFailed
+		locality.Reason = err.Error()
+		locality.UpdatedAt = now
+		_ = store.SaveModelLocality(ctx, locality)
+		return err
+	}
+	if staged.State != domain.ModelLocalityReady {
+		return fmt.Errorf("catalog stage returned locality state %q", staged.State)
+	}
+	if staged.PresetID != preset.ID {
+		return fmt.Errorf("catalog stage returned preset %q, expected %q", staged.PresetID, preset.ID)
+	}
+	if staged.NodeID != node.ID {
+		return fmt.Errorf("catalog stage returned node %q, expected %q", staged.NodeID, node.ID)
+	}
+	if err := store.SaveModelLocality(ctx, staged); err != nil {
+		return err
+	}
+	action.State = staged.State
+	action.Error = ""
+	plan.Actions[0] = action
+	return store.SaveLocalityPlan(ctx, plan)
 }
 
 func verifyEngineReadiness(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord) error {

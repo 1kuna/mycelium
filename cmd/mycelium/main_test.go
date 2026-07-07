@@ -6781,7 +6781,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		UpdatedAt:          time.Unix(1, 0).UTC(),
 	}}
 	prewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-recon-prewarm", NodeID: "node-a", InstanceID: "inst-a", LeaseID: "lease-a"}}
-	startReconciliationDrainer(ctx, reconcileStore, prewarm, reconcile.ConfigCatalogRefresher{Store: reconcileStore, Presets: []domain.Preset{testPreset("refreshed")}}, clk, time.Second, 3, "project-a")
+	startReconciliationDrainer(ctx, reconcileStore, prewarm, reconcile.ConfigCatalogRefresher{Store: reconcileStore, Presets: []domain.Preset{testPreset("refreshed")}}, nil, clk, time.Second, 3, "project-a")
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := reconcileStore.ListReconciliationTasks(context.Background(), "")
@@ -6799,6 +6799,42 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 			presetErr == nil
 	})
 
+	stageStore := &workloadMemoryStore{
+		jobs:    map[string]domain.Job{},
+		presets: map[string]domain.Preset{"stage-preset": testPreset("stage-preset")},
+		nodes:   map[string]domain.Node{"node-stage": {ID: "node-stage", Address: "http://node-stage.test", Status: domain.NodeReady}},
+	}
+	stageStore.reconcileTasks = []domain.ReconciliationTaskRecord{{
+		ID:                 "recon-stage",
+		Kind:               string(reconcile.TaskStageModelArtifact),
+		Status:             domain.ReconciliationTaskAllowed,
+		PresetID:           "stage-preset",
+		NodeID:             "node-stage",
+		Model:              "stage-model",
+		Reason:             "artifact missing",
+		AutomaticCandidate: true,
+		CreatedAt:          time.Unix(1, 0).UTC(),
+		UpdatedAt:          time.Unix(1, 0).UTC(),
+	}}
+	stage := &recordingStageExecutor{locality: domain.ModelLocality{
+		ID:             "node-stage:stage-preset",
+		PresetID:       "stage-preset",
+		NodeID:         "node-stage",
+		State:          domain.ModelLocalityReady,
+		ModelRef:       "stage-model",
+		ArtifactSizeMB: 10,
+		Managed:        true,
+		Reason:         "catalog stage committed",
+		UpdatedAt:      time.Unix(1, 0).UTC(),
+	}}
+	startReconciliationDrainer(ctx, stageStore, nil, nil, stage, clk, time.Second, 1, "project-a")
+	waitForCondition(t, func() bool {
+		clk.Advance(time.Second)
+		tasks, err := stageStore.ListReconciliationTasks(context.Background(), "")
+		return err == nil && len(tasks) == 1 && tasks[0].Status == domain.ReconciliationTaskDone && stage.callCount() == 1 &&
+			len(stageStore.localities) == 1 && stageStore.localities[0].State == domain.ModelLocalityReady
+	})
+
 	serviceStore := &workloadMemoryStore{
 		jobs:    map[string]domain.Job{},
 		presets: map[string]domain.Preset{"preset-service": testPresetWithAlias("preset-service", "model-a")},
@@ -6814,7 +6850,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		}},
 	}
 	servicePrewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-service", NodeID: "node-a", InstanceID: "inst-service", LeaseID: "lease-service"}}
-	startReconciliationDrainer(ctx, serviceStore, servicePrewarm, nil, clk, time.Second, 2, "project-a")
+	startReconciliationDrainer(ctx, serviceStore, servicePrewarm, nil, nil, clk, time.Second, 2, "project-a")
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := serviceStore.ListReconciliationTasks(context.Background(), "service-a")
@@ -6835,7 +6871,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		}},
 	}
 	serviceCatalogPrewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-catalog-service", NodeID: "node-a", InstanceID: "inst-catalog-service", LeaseID: "lease-catalog-service"}}
-	startReconciliationDrainer(ctx, serviceCatalogStore, serviceCatalogPrewarm, reconcile.ConfigCatalogRefresher{Store: serviceCatalogStore, Presets: []domain.Preset{testPreset("catalog-service")}}, clk, time.Second, 2, "project-a")
+	startReconciliationDrainer(ctx, serviceCatalogStore, serviceCatalogPrewarm, reconcile.ConfigCatalogRefresher{Store: serviceCatalogStore, Presets: []domain.Preset{testPreset("catalog-service")}}, nil, clk, time.Second, 2, "project-a")
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := serviceCatalogStore.ListReconciliationTasks(context.Background(), "service-needs-catalog")
@@ -7601,6 +7637,33 @@ func (e *recordingPrewarmExecutor) PrewarmReplica(_ context.Context, job domain.
 }
 
 func (e *recordingPrewarmExecutor) callCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.called
+}
+
+type recordingStageExecutor struct {
+	mu       sync.Mutex
+	called   int
+	peers    []domain.Peer
+	presets  []domain.Preset
+	locality domain.ModelLocality
+	err      error
+}
+
+func (e *recordingStageExecutor) StageModel(_ context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.called++
+	e.peers = append(e.peers, peer)
+	e.presets = append(e.presets, preset)
+	if e.err != nil {
+		return domain.ModelLocality{}, e.err
+	}
+	return e.locality, nil
+}
+
+func (e *recordingStageExecutor) callCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.called
