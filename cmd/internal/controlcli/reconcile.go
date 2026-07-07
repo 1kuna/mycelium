@@ -125,7 +125,7 @@ func runReconcileDrain(args []string, client *http.Client) error {
 		if err != nil {
 			return err
 		}
-		catalog = reconcile.ConfigCatalogRefresher{Store: store, Presets: loaded.Config.Presets}
+		catalog = reconcile.ConfigCatalogRefresher{Store: store, Presets: loaded.Config.Presets, StoreDir: loaded.Config.CatalogDir}
 	}
 	report, err := reconcile.DrainAllowedTasks(context.Background(), store, reconcile.DrainOptions{
 		JobID:   *jobID,

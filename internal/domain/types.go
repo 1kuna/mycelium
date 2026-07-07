@@ -217,6 +217,8 @@ type ReconciliationTaskRecord struct {
 	NodeID              string                    `json:"node_id,omitempty"`
 	PresetID            string                    `json:"preset_id,omitempty"`
 	Model               string                    `json:"model,omitempty"`
+	ModelSource         string                    `json:"model_source,omitempty"`
+	Backend             Backend                   `json:"backend,omitempty"`
 	Project             string                    `json:"project,omitempty"`
 	ContextRequest      int                       `json:"context_request,omitempty"`
 	ExpectedConcurrency int                       `json:"expected_concurrency,omitempty"`
@@ -442,6 +444,8 @@ type ModelServiceEvent struct {
 type ModelService struct {
 	ID                  string              `json:"id"`
 	Model               string              `json:"model"`
+	ModelSource         string              `json:"model_source,omitempty"`
+	Backend             Backend             `json:"backend,omitempty"`
 	Project             string              `json:"project,omitempty"`
 	ContextRequest      int                 `json:"context_request,omitempty"`
 	ExpectedConcurrency int                 `json:"expected_concurrency,omitempty"`

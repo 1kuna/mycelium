@@ -25,6 +25,8 @@ type Store interface {
 
 type Demand struct {
 	Model               string
+	ModelSource         string
+	Backend             domain.Backend
 	Project             string
 	ContextRequest      int
 	ExpectedConcurrency int
@@ -92,6 +94,12 @@ func EnsureDemand(ctx context.Context, store Store, demand Demand) (domain.Model
 		service.DemandCount++
 		service.LastDemandJobID = demand.LastDemandJobID
 		service.LastReason = demand.Reason
+		if strings.TrimSpace(demand.ModelSource) != "" {
+			service.ModelSource = strings.TrimSpace(demand.ModelSource)
+		}
+		if demand.Backend != "" {
+			service.Backend = demand.Backend
+		}
 		service.UpdatedAt = now
 		service.MinReplicas = maxInt(service.MinReplicas, demand.MinReplicas)
 		service.MaxReplicas = maxInt(service.MaxReplicas, demand.MaxReplicas)
@@ -106,6 +114,8 @@ func EnsureDemand(ctx context.Context, store Store, demand Demand) (domain.Model
 	service := domain.ModelService{
 		ID:                  id,
 		Model:               demand.Model,
+		ModelSource:         strings.TrimSpace(demand.ModelSource),
+		Backend:             demand.Backend,
 		Project:             demand.Project,
 		ContextRequest:      demand.ContextRequest,
 		ExpectedConcurrency: demand.ExpectedConcurrency,
@@ -302,6 +312,8 @@ func prewarmTaskForService(service domain.ModelService, presetID string, now tim
 		Status:              domain.ReconciliationTaskAllowed,
 		PresetID:            task.PresetID,
 		Model:               task.Model,
+		ModelSource:         service.ModelSource,
+		Backend:             service.Backend,
 		Project:             service.Project,
 		ContextRequest:      service.ContextRequest,
 		ExpectedConcurrency: service.ExpectedConcurrency,
@@ -326,20 +338,28 @@ func serviceTaskID(serviceID, presetID string) string {
 }
 
 func catalogRefreshTaskForService(service domain.ModelService, now time.Time) domain.ReconciliationTaskRecord {
-	sum := sha256.Sum256([]byte(service.ID + "\x00refresh_catalog\x00" + service.Model))
+	sum := sha256.Sum256([]byte(service.ID + "\x00refresh_catalog\x00" + service.Model + "\x00" + service.ModelSource))
+	reason := "model service has no candidate presets"
+	next := "refresh the configured catalog so model service candidates can be resolved"
+	if strings.TrimSpace(service.ModelSource) != "" {
+		reason = "model service source has no candidate presets"
+		next = "materialize the model source into the configured catalog, then resolve service candidates"
+	}
 	return domain.ReconciliationTaskRecord{
 		ID:                  "service-refresh-" + hex.EncodeToString(sum[:8]),
 		JobID:               service.ID,
 		Kind:                string(reconcile.TaskRefreshCatalog),
 		Status:              domain.ReconciliationTaskAllowed,
 		Model:               service.Model,
+		ModelSource:         service.ModelSource,
+		Backend:             service.Backend,
 		Project:             service.Project,
 		ContextRequest:      service.ContextRequest,
 		ExpectedConcurrency: service.ExpectedConcurrency,
-		Reason:              "model service has no candidate presets",
+		Reason:              reason,
 		AutomaticCandidate:  true,
 		RequiresApproval:    false,
-		Next:                "refresh the configured catalog so model service candidates can be resolved",
+		Next:                next,
 		Source:              "model_service",
 		CreatedAt:           now,
 		UpdatedAt:           now,

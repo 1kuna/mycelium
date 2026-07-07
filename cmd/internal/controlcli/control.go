@@ -270,6 +270,8 @@ func runModelsServiceEnsure(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("models service ensure", flag.ContinueOnError)
 	dbPath := fs.String("db", defaultControlStorePath(), "control-plane SQLite store")
 	model := fs.String("model", "", "model alias or preset id to serve")
+	source := fs.String("source", "", "model source URI/path to materialize when catalog candidates are missing")
+	backend := fs.String("backend", "", "preferred backend for source materialization")
 	project := fs.String("project", "", "project label for held supply")
 	contextRequest := fs.Int("context", 0, "context envelope for the service")
 	concurrency := fs.Int("concurrency", 1, "expected concurrent requests per worker")
@@ -307,6 +309,10 @@ func runModelsServiceEnsure(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	parsedBackend, err := parseOptionalBackendFlag(*backend)
+	if err != nil {
+		return err
+	}
 	store, err := storesqlite.Open(*dbPath)
 	if err != nil {
 		return err
@@ -321,6 +327,8 @@ func runModelsServiceEnsure(ctx context.Context, args []string) error {
 	}
 	service, err := serving.EnsureDemand(ctx, store, serving.Demand{
 		Model:               strings.TrimSpace(*model),
+		ModelSource:         strings.TrimSpace(*source),
+		Backend:             parsedBackend,
 		Project:             strings.TrimSpace(*project),
 		ContextRequest:      *contextRequest,
 		ExpectedConcurrency: *concurrency,
@@ -395,6 +403,19 @@ func parsePreemptionFlag(raw string) (domain.Preemption, error) {
 		return domain.Preemption(strings.TrimSpace(raw)), nil
 	default:
 		return "", fmt.Errorf("unknown preemption %q", raw)
+	}
+}
+
+func parseOptionalBackendFlag(raw string) (domain.Backend, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	switch domain.Backend(raw) {
+	case domain.BackendLlamaCpp, domain.BackendVLLM, domain.BackendMLX, domain.BackendOpenVINO, domain.BackendSGLang, domain.BackendCustom:
+		return domain.Backend(raw), nil
+	default:
+		return "", fmt.Errorf("unknown backend %q", raw)
 	}
 }
 
@@ -2556,6 +2577,8 @@ type gatewayRoutesLiveOptions struct {
 	Client    *http.Client
 }
 
+const gatewayRoutesLiveCatalogAttempts = 3
+
 type gatewayRouteEnvelope struct {
 	PresetID           string              `json:"preset_id"`
 	NodeID             string              `json:"node_id,omitempty"`
@@ -3016,7 +3039,7 @@ func fetchGatewayRoutesLiveCatalog(ctx context.Context, configPath, configGatewa
 		return live, nil
 	}
 	live.AuthSource = source
-	models, err := fetchGatewayLiveModels(ctx, gatewayURL, token, opts.Client)
+	models, err := fetchGatewayLiveModelsWithAttempts(ctx, gatewayURL, token, opts.Client, gatewayRoutesLiveCatalogAttempts)
 	if err != nil {
 		live.Status = "error"
 		live.Error = err.Error()
@@ -3031,6 +3054,24 @@ func fetchGatewayRoutesLiveCatalog(ctx context.Context, configPath, configGatewa
 		modelSet[model] = struct{}{}
 	}
 	return live, modelSet
+}
+
+func fetchGatewayLiveModelsWithAttempts(ctx context.Context, gatewayURL, token string, client *http.Client, attempts int) ([]string, error) {
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		models, err := fetchGatewayLiveModels(ctx, gatewayURL, token, client)
+		if err == nil {
+			return models, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+	return nil, fmt.Errorf("gateway models unavailable after %d attempts: %w", attempts, lastErr)
 }
 
 func fetchGatewayLiveModels(ctx context.Context, gatewayURL, token string, client *http.Client) ([]string, error) {

@@ -336,7 +336,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		startPeerHeartbeatWithClient(ctx, self, discovery, nodes, runtime, store, cfg.JoinToken, joinTokens, clock.System{}, controlClient)
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
-	startReconciliationDrainer(ctx, store, schedulerPrewarmExecutor{runtime: runtime}, reconcile.ConfigCatalogRefresher{Store: store, Presets: cfg.Presets}, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject)
+	startReconciliationDrainer(ctx, store, schedulerPrewarmExecutor{runtime: runtime}, reconcile.ConfigCatalogRefresher{Store: store, Presets: cfg.Presets, StoreDir: cfg.CatalogDir}, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject)
 	optimizerNodeID := cfg.ID
 	if cfg.Compute {
 		optimizerNodeID = privateLocalNodeID(cfg)

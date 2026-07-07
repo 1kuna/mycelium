@@ -3,6 +3,7 @@ package serving
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,8 @@ func TestEnsureDemandCreatesAndBumpsModelService(t *testing.T) {
 
 	bumped, err := EnsureDemand(ctx, store, Demand{
 		Model:               "vision-model",
+		ModelSource:         "hf://owner/repo/new.gguf",
+		Backend:             domain.BackendVLLM,
 		Project:             "project-a",
 		ContextRequest:      49152,
 		ExpectedConcurrency: 3,
@@ -52,6 +55,9 @@ func TestEnsureDemandCreatesAndBumpsModelService(t *testing.T) {
 	}
 	if bumped.ID != service.ID || bumped.DemandCount != 2 || bumped.ExpectedConcurrency != 3 || bumped.MaxReplicas != 3 || bumped.LastDemandJobID != "job-b" {
 		t.Fatalf("bumped service = %+v", bumped)
+	}
+	if bumped.ModelSource != "hf://owner/repo/new.gguf" || bumped.Backend != domain.BackendVLLM {
+		t.Fatalf("bumped source/backend = %+v", bumped)
 	}
 	if got := bumped.CandidatePresetIDs; len(got) != 3 || got[2] != "preset-c" {
 		t.Fatalf("bumped candidate presets = %+v", got)
@@ -340,12 +346,15 @@ func TestEnsureDemandValidationAndDefaults(t *testing.T) {
 		t.Fatal("missing model should fail")
 	}
 	store := &fakeStore{}
-	service, err := EnsureDemand(context.Background(), store, Demand{Model: "m", Now: time.Unix(1, 0).UTC()})
+	service, err := EnsureDemand(context.Background(), store, Demand{Model: "m", ModelSource: "hf://owner/repo/model.gguf", Backend: domain.BackendLlamaCpp, Now: time.Unix(1, 0).UTC()})
 	if err != nil {
 		t.Fatalf("EnsureDemand defaults: %v", err)
 	}
 	if service.MinReplicas != 1 || service.MaxReplicas != 1 || service.ExpectedConcurrency != 1 || service.Priority != domain.PriorityBackground || service.Preemption != domain.PreemptSoft {
 		t.Fatalf("defaults = %+v", service)
+	}
+	if service.ModelSource != "hf://owner/repo/model.gguf" || service.Backend != domain.BackendLlamaCpp {
+		t.Fatalf("source/backend = %+v", service)
 	}
 }
 
@@ -385,6 +394,34 @@ func TestReconcileSkipsExistingNonTerminalTaskAndPausedServices(t *testing.T) {
 	}
 	if report.Created != 1 || len(store.tasks) != 1 || store.tasks[0].Status != domain.ReconciliationTaskAllowed {
 		t.Fatalf("report=%+v tasks=%+v", report, store.tasks)
+	}
+}
+
+func TestReconcileCreatesSourceAwareCatalogRefreshTask(t *testing.T) {
+	now := time.Unix(50, 0).UTC()
+	store := &fakeStore{services: []domain.ModelService{{
+		ID:             "svc-source",
+		Model:          "vision",
+		ModelSource:    "hf://owner/repo/model.gguf",
+		Backend:        domain.BackendVLLM,
+		ContextRequest: 8192,
+		MinReplicas:    1,
+		MaxReplicas:    1,
+		Status:         domain.ModelServiceActive,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}}}
+
+	report, err := Reconcile(context.Background(), store, ReconcileOptions{Now: now})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if report.Created != 1 || len(store.tasks) != 1 {
+		t.Fatalf("report=%+v tasks=%+v", report, store.tasks)
+	}
+	task := store.tasks[0]
+	if task.Kind != string(reconcile.TaskRefreshCatalog) || task.ModelSource != "hf://owner/repo/model.gguf" || task.Backend != domain.BackendVLLM || !strings.Contains(task.Next, "materialize") {
+		t.Fatalf("source-aware task = %+v", task)
 	}
 }
 

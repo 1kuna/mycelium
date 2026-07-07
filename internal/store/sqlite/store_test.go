@@ -69,6 +69,8 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	modelService := domain.ModelService{
 		ID:                  "service-a",
 		Model:               "model-a",
+		ModelSource:         "hf://owner/repo/model.gguf",
+		Backend:             domain.BackendVLLM,
 		Project:             project.ID,
 		ContextRequest:      4096,
 		ExpectedConcurrency: 2,
@@ -98,6 +100,8 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 		NodeID:             node.ID,
 		PresetID:           preset.ID,
 		Model:              "model-a",
+		ModelSource:        "hf://owner/repo/model.gguf",
+		Backend:            domain.BackendVLLM,
 		Reason:             "label.mycelium.peer.backends",
 		AutomaticCandidate: true,
 		Next:               "verify engine profile",
@@ -214,7 +218,7 @@ func TestStorePersistsControlPlaneState(t *testing.T) {
 	if err != nil || gotProject.ID != project.ID || gotProject.ExpectedConcurrency != 4 || !gotProject.AutoApply {
 		t.Fatalf("Project = %+v, %v", gotProject, err)
 	}
-	if gotService, err := reopened.ModelService(ctx, modelService.ID); err != nil || gotService.Model != modelService.Model || gotService.MinReplicas != 1 || gotService.MaxReplicas != 2 || gotService.Status != domain.ModelServiceActive {
+	if gotService, err := reopened.ModelService(ctx, modelService.ID); err != nil || gotService.Model != modelService.Model || gotService.ModelSource != modelService.ModelSource || gotService.Backend != domain.BackendVLLM || gotService.MinReplicas != 1 || gotService.MaxReplicas != 2 || gotService.Status != domain.ModelServiceActive {
 		t.Fatalf("ModelService = %+v, %v", gotService, err)
 	}
 	if gotPreset, err := reopened.Preset(ctx, preset.ID); err != nil || gotPreset.ModelRef != preset.ModelRef {
