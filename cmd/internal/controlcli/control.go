@@ -162,7 +162,7 @@ func runAddModel(ctx context.Context, args []string) error {
 
 func runModels(ctx context.Context, args []string, client *http.Client) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: myce models <list|service|stage|locality|prewarm|scale>")
+		return fmt.Errorf("usage: myce models <list|service|stage|locality|unload|prewarm|scale>")
 	}
 	switch args[0] {
 	case "list":
@@ -185,10 +185,12 @@ func runModels(ctx context.Context, args []string, client *http.Client) error {
 		return runModelsStage(ctx, args[1:], client)
 	case "locality":
 		return runModelsLocality(ctx, args[1:])
+	case "unload":
+		return runModelsUnload(ctx, args[1:], client)
 	case "prewarm", "scale":
 		return runModelsPrewarm(ctx, args[1:], client)
 	default:
-		return fmt.Errorf("usage: myce models <list|service|stage|locality|prewarm|scale>")
+		return fmt.Errorf("usage: myce models <list|service|stage|locality|unload|prewarm|scale>")
 	}
 }
 
@@ -478,6 +480,82 @@ type modelPrewarmResult struct {
 	Finished bool                   `json:"finished"`
 	Terminal bool                   `json:"terminal"`
 	Error    string                 `json:"error,omitempty"`
+}
+
+type modelUnloadResult struct {
+	InstanceID string `json:"instance_id"`
+	NodeID     string `json:"node_id"`
+	PresetID   string `json:"preset_id,omitempty"`
+	LeaseID    string `json:"lease_id,omitempty"`
+	Unloaded   bool   `json:"unloaded"`
+	Released   bool   `json:"released"`
+	Deleted    bool   `json:"deleted"`
+}
+
+func runModelsUnload(ctx context.Context, args []string, client *http.Client) error {
+	fs := flag.NewFlagSet("models unload", flag.ContinueOnError)
+	peerURL := fs.String("url", "", "peer base URL")
+	rpcToken := fs.String("rpc-token", "", "peer RPC bearer token")
+	instanceID := fs.String("instance", "", "warm backend instance id to unload and reconcile")
+	jsonOut := fs.Bool("json", false, "print JSON response")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*peerURL) == "" {
+		return fmt.Errorf("--url is required")
+	}
+	if strings.TrimSpace(*instanceID) == "" {
+		return fmt.Errorf("--instance is required")
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	body, err := json.Marshal(map[string]string{"instance_id": strings.TrimSpace(*instanceID)})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(catalogPeerBaseURL(*peerURL), "/")+"/instances/reclaim", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(*rpcToken) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(*rpcToken))
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, err := readControlHTTPBody(resp.Body, "instance reclaim response body")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("models unload returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	var parsed struct {
+		Result modelUnloadResult `json:"result"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	if parsed.Result.InstanceID == "" {
+		return fmt.Errorf("models unload returned no instance evidence")
+	}
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(parsed.Result)
+	}
+	fmt.Printf("models-unload\tinstance=%s\tnode=%s\tpreset=%s\tlease=%s\tunloaded=%t\treleased=%t\tdeleted=%t\n",
+		parsed.Result.InstanceID,
+		emptyDash(parsed.Result.NodeID),
+		emptyDash(parsed.Result.PresetID),
+		emptyDash(parsed.Result.LeaseID),
+		parsed.Result.Unloaded,
+		parsed.Result.Released,
+		parsed.Result.Deleted,
+	)
+	return nil
 }
 
 type modelPrewarmFit struct {
@@ -2703,7 +2781,10 @@ func buildGatewayRoutesReport(ctx context.Context, configPath string, live gatew
 		report.Live = liveReport
 		liveModels = models
 	}
-	presets := cfg.Presets
+	presets, err := gatewayRoutePresets(ctx, loaded)
+	if err != nil {
+		return gatewayRoutesReport{}, err
+	}
 	sort.Slice(presets, func(i, j int) bool { return presets[i].ID < presets[j].ID })
 	projects := cfg.Projects
 	sort.Slice(projects, func(i, j int) bool { return projects[i].ID < projects[j].ID })
@@ -2739,6 +2820,43 @@ func buildGatewayRoutesReport(ctx context.Context, configPath string, live gatew
 		report.Routes = append(report.Routes, route)
 	}
 	return report, nil
+}
+
+func gatewayRoutePresets(ctx context.Context, loaded loadedOperatorConfig) ([]domain.Preset, error) {
+	merged := map[string]domain.Preset{}
+	for _, preset := range loaded.Config.Presets {
+		if preset.ID == "" {
+			continue
+		}
+		merged[preset.ID] = preset
+	}
+	storePath := strings.TrimSpace(loaded.Config.StorePath)
+	if storePath != "" {
+		if _, err := os.Stat(storePath); err == nil {
+			store, err := storesqlite.Open(storePath)
+			if err != nil {
+				return nil, err
+			}
+			defer store.Close()
+			presets, err := store.ListPresets(ctx)
+			if err != nil {
+				return nil, err
+			}
+			for _, preset := range presets {
+				if preset.ID == "" {
+					continue
+				}
+				merged[preset.ID] = preset
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
+	out := make([]domain.Preset, 0, len(merged))
+	for _, preset := range merged {
+		out = append(out, preset)
+	}
+	return out, nil
 }
 
 func buildGatewayAllocationReport(ctx context.Context, loaded loadedOperatorConfig, req gatewayAllocationRequest, live gatewayRoutesLiveOptions) (gatewayAllocationReport, error) {

@@ -2236,6 +2236,115 @@ func TestRunModelsLocalityApplyRecordsFailures(t *testing.T) {
 	}
 }
 
+func TestRunModelsUnloadCallsReclaimEndpoint(t *testing.T) {
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/instances/reclaim" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer rpc-secret" {
+			t.Fatalf("auth = %q", got)
+		}
+		var req map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req["instance_id"] != "inst-b70" {
+			t.Fatalf("request = %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"result": modelUnloadResult{
+				InstanceID: "inst-b70",
+				NodeID:     "b70",
+				PresetID:   "tiny-b70",
+				LeaseID:    "lease-b70",
+				Unloaded:   true,
+				Released:   true,
+				Deleted:    true,
+			},
+		})
+	}))
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = runModelsUnload(context.Background(), []string{"--url", "http://peer.test", "--rpc-token", "rpc-secret", "--instance", "inst-b70"}, client)
+	})
+	if runErr != nil {
+		t.Fatalf("models unload: %v", runErr)
+	}
+	if !strings.Contains(output, "models-unload\tinstance=inst-b70\tnode=b70\tpreset=tiny-b70\tlease=lease-b70\tunloaded=true\treleased=true\tdeleted=true") {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestRunModelsUnloadJSONOutput(t *testing.T) {
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"result": modelUnloadResult{
+				InstanceID: "inst-json",
+				NodeID:     "b70",
+				Unloaded:   true,
+				Deleted:    true,
+			},
+		})
+	}))
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = runModelsUnload(context.Background(), []string{"--url", "http://peer.test", "--instance", "inst-json", "--json"}, client)
+	})
+	if runErr != nil {
+		t.Fatalf("models unload json: %v", runErr)
+	}
+	var got modelUnloadResult
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("decode json output %q: %v", output, err)
+	}
+	if got.InstanceID != "inst-json" || got.NodeID != "b70" || !got.Unloaded || !got.Deleted {
+		t.Fatalf("json output = %+v", got)
+	}
+}
+
+func TestRunModelsUnloadFailureBranches(t *testing.T) {
+	if err := runModelsUnload(context.Background(), nil, nil); err == nil || !strings.Contains(err.Error(), "--url") {
+		t.Fatalf("missing url err = %v", err)
+	}
+	if err := runModelsUnload(context.Background(), []string{"--url", "http://peer.test"}, nil); err == nil || !strings.Contains(err.Error(), "--instance") {
+		t.Fatalf("missing instance err = %v", err)
+	}
+	errorClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"busy"}`))
+	}))
+	if err := runModelsUnload(context.Background(), []string{"--url", "http://peer.test", "--instance", "inst-a"}, errorClient); err == nil || !strings.Contains(err.Error(), "busy") {
+		t.Fatalf("status err = %v", err)
+	}
+	missingEvidenceClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": modelUnloadResult{}})
+	}))
+	if err := runModelsUnload(context.Background(), []string{"--url", "http://peer.test", "--instance", "inst-a"}, missingEvidenceClient); err == nil || !strings.Contains(err.Error(), "no instance evidence") {
+		t.Fatalf("missing evidence err = %v", err)
+	}
+	badJSONClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`not-json`))
+	}))
+	if err := runModelsUnload(context.Background(), []string{"--url", "http://peer.test", "--instance", "inst-a"}, badJSONClient); err == nil {
+		t.Fatalf("bad json response did not fail")
+	}
+	transportErrClient := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return nil, errors.New("dial failed")
+	})}
+	if err := runModelsUnload(context.Background(), []string{"--url", "http://peer.test", "--instance", "inst-a"}, transportErrClient); err == nil || !strings.Contains(err.Error(), "dial failed") {
+		t.Fatalf("transport err = %v", err)
+	}
+	if err := runModelsUnload(context.Background(), []string{"--url", "://bad-url", "--instance", "inst-a"}, nil); err == nil {
+		t.Fatalf("bad url did not fail")
+	}
+	if err := runModels(context.Background(), nil, nil); err == nil || !strings.Contains(err.Error(), "usage:") {
+		t.Fatalf("models usage err = %v", err)
+	}
+	if err := runModels(context.Background(), []string{"unknown"}, nil); err == nil || !strings.Contains(err.Error(), "usage:") {
+		t.Fatalf("models unknown err = %v", err)
+	}
+}
+
 func TestCatalogEvictClientFailureBranches(t *testing.T) {
 	action := domain.LocalityAction{PresetID: "tiny", NodeID: "node-a"}
 	if _, err := (catalogStageHTTPClient{}).EvictModel(context.Background(), domain.Peer{ID: "empty"}, action); err == nil {
@@ -3042,6 +3151,77 @@ func TestRunGatewayRoutesComparesLiveModels(t *testing.T) {
 	}
 	if report.Routes[0].RouteReadiness != "live_ready" || report.Routes[1].RouteReadiness != "live_catalog_missing" {
 		t.Fatalf("live route readiness = %+v", report.Routes)
+	}
+}
+
+func TestGatewayRoutesIncludesStoreAdoptedPresets(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), domain.Preset{
+		ID:            "proof-b70",
+		ModelRef:      "proof-model",
+		Aliases:       []string{"proof-model"},
+		Backend:       domain.BackendLlamaCpp,
+		ContextLength: 2048,
+		NodeID:        "b70",
+	}); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	configPath := filepath.Join(dir, "peer.json")
+	cfg := operatorPeerConfig{
+		ID:        "macbook",
+		Listen:    "http://gateway.test",
+		StorePath: dbPath,
+		Projects:  []domain.Project{{ID: "proof-project", DefaultModel: "proof-model", ContextCap: 2048}},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = RunWithClient(context.Background(), []string{"gateway", "routes", "--config", configPath}, nil)
+	})
+	if runErr != nil {
+		t.Fatalf("gateway routes: %v", runErr)
+	}
+	if !strings.Contains(output, "route\tproject=proof-project\tmodel=proof-model\tpreset=proof-b70\tnode=b70\tbackend=llamacpp") {
+		t.Fatalf("gateway routes did not include store-adopted preset:\n%s", output)
+	}
+}
+
+func TestGatewayRoutePresetsHandlesMissingAndBadStores(t *testing.T) {
+	ctx := context.Background()
+	cfg := operatorPeerConfig{
+		Presets: []domain.Preset{{ID: "config-preset", ModelRef: "tiny", Backend: domain.BackendLlamaCpp}},
+	}
+	presets, err := gatewayRoutePresets(ctx, loadedOperatorConfig{Config: func() operatorPeerConfig {
+		cfg.StorePath = filepath.Join(t.TempDir(), "missing.db")
+		return cfg
+	}()})
+	if err != nil {
+		t.Fatalf("missing store err = %v", err)
+	}
+	if len(presets) != 1 || presets[0].ID != "config-preset" {
+		t.Fatalf("missing store presets = %+v", presets)
+	}
+	_, err = gatewayRoutePresets(ctx, loadedOperatorConfig{Config: func() operatorPeerConfig {
+		cfg.StorePath = t.TempDir()
+		return cfg
+	}()})
+	if err == nil {
+		t.Fatalf("directory store path did not fail")
 	}
 }
 
