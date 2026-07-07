@@ -6782,7 +6782,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 	}}
 	prewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-recon-prewarm", NodeID: "node-a", InstanceID: "inst-a", LeaseID: "lease-a"}}
 	capacity := &recordingCapacityRepairExecutor{}
-	startReconciliationDrainer(ctx, reconcileStore, prewarm, capacity, reconcile.ConfigCatalogRefresher{Store: reconcileStore, Presets: []domain.Preset{testPreset("refreshed")}}, nil, clk, time.Second, 3, "project-a")
+	startReconciliationDrainer(ctx, reconcileStore, prewarm, capacity, reconcile.ConfigCatalogRefresher{Store: reconcileStore, Presets: []domain.Preset{testPreset("refreshed")}}, nil, clk, time.Second, 3, "project-a", 0)
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := reconcileStore.ListReconciliationTasks(context.Background(), "")
@@ -6830,7 +6830,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		Reason:         "catalog stage committed",
 		UpdatedAt:      time.Unix(1, 0).UTC(),
 	}}
-	startReconciliationDrainer(ctx, stageStore, nil, nil, nil, stage, clk, time.Second, 1, "project-a")
+	startReconciliationDrainer(ctx, stageStore, nil, nil, nil, stage, clk, time.Second, 1, "project-a", 0)
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := stageStore.ListReconciliationTasks(context.Background(), "")
@@ -6853,7 +6853,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		}},
 	}
 	servicePrewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-service", NodeID: "node-a", InstanceID: "inst-service", LeaseID: "lease-service"}}
-	startReconciliationDrainer(ctx, serviceStore, servicePrewarm, nil, nil, nil, clk, time.Second, 2, "project-a")
+	startReconciliationDrainer(ctx, serviceStore, servicePrewarm, nil, nil, nil, clk, time.Second, 2, "project-a", 0)
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := serviceStore.ListReconciliationTasks(context.Background(), "service-a")
@@ -6874,7 +6874,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		}},
 	}
 	serviceCatalogPrewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-catalog-service", NodeID: "node-a", InstanceID: "inst-catalog-service", LeaseID: "lease-catalog-service"}}
-	startReconciliationDrainer(ctx, serviceCatalogStore, serviceCatalogPrewarm, nil, reconcile.ConfigCatalogRefresher{Store: serviceCatalogStore, Presets: []domain.Preset{testPreset("catalog-service")}}, nil, clk, time.Second, 2, "project-a")
+	startReconciliationDrainer(ctx, serviceCatalogStore, serviceCatalogPrewarm, nil, reconcile.ConfigCatalogRefresher{Store: serviceCatalogStore, Presets: []domain.Preset{testPreset("catalog-service")}}, nil, clk, time.Second, 2, "project-a", 0)
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := serviceCatalogStore.ListReconciliationTasks(context.Background(), "service-needs-catalog")
@@ -6945,6 +6945,34 @@ func TestSchedulerCapacityRepairExecutorRequiresRuntime(t *testing.T) {
 	_, err := schedulerCapacityRepairExecutor{}.RepairCapacity(context.Background(), 1)
 	if err == nil || !strings.Contains(err.Error(), "scheduler runtime is required") {
 		t.Fatalf("RepairCapacity err = %v", err)
+	}
+}
+
+func TestRuntimePresetRegistrarUpdatesSchedulerAndGateway(t *testing.T) {
+	scheduler := &recordingPresetRegistrar{}
+	registry := gateway.NewPresetRegistry(domain.Preset{
+		ID:            "old",
+		ModelRef:      "old-model",
+		Aliases:       []string{"old-model"},
+		ContextLength: 1024,
+	})
+	registrar := runtimePresetRegistrar{runtime: scheduler, gateway: &registry}
+
+	preset := domain.Preset{
+		ID:            "fresh",
+		ModelRef:      "fresh-model",
+		Aliases:       []string{"fresh-model"},
+		ContextLength: 2048,
+	}
+	if err := registrar.RegisterPreset(preset); err != nil {
+		t.Fatalf("RegisterPreset: %v", err)
+	}
+	if len(scheduler.presets) != 1 || scheduler.presets[0].ID != preset.ID {
+		t.Fatalf("scheduler presets = %+v", scheduler.presets)
+	}
+	resolved, err := registry.Resolve("fresh-model")
+	if err != nil || resolved.ID != preset.ID {
+		t.Fatalf("gateway did not resolve fresh preset: err=%v preset=%+v", err, resolved)
 	}
 }
 
@@ -7709,6 +7737,14 @@ func (d *recordingSchedulerQueueDrainer) Drain(_ context.Context, limit int) ([]
 		return nil, d.err
 	}
 	return d.results, nil
+}
+
+type recordingPresetRegistrar struct {
+	presets []domain.Preset
+}
+
+func (r *recordingPresetRegistrar) RegisterPreset(preset domain.Preset) {
+	r.presets = append(r.presets, preset)
 }
 
 type recordingStageExecutor struct {

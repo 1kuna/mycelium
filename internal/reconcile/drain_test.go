@@ -241,7 +241,8 @@ func TestConfigCatalogRefresherMaterializesModelSource(t *testing.T) {
 	if err := os.WriteFile(model, []byte("weights"), 0o600); err != nil {
 		t.Fatalf("write model: %v", err)
 	}
-	refresher := ConfigCatalogRefresher{Store: store, StoreDir: t.TempDir()}
+	registrar := &fakePresetRegistrar{}
+	refresher := ConfigCatalogRefresher{Store: store, Registrar: registrar, StoreDir: t.TempDir(), LocalNodeID: "macbook"}
 	task := domain.ReconciliationTaskRecord{
 		Model:          "tiny-model",
 		ModelSource:    model,
@@ -256,14 +257,17 @@ func TestConfigCatalogRefresherMaterializesModelSource(t *testing.T) {
 		t.Fatalf("presets = %+v", store.presets)
 	}
 	got := store.presets[0]
-	if got.ModelRef == model || got.Backend != domain.BackendLlamaCpp || got.ContextLength != 4096 || !containsString(got.Aliases, "tiny-model") {
+	if got.ModelRef == model || got.Backend != domain.BackendLlamaCpp || got.ContextLength != 4096 || got.NodeID != "macbook" || !containsString(got.Aliases, "tiny-model") {
 		t.Fatalf("materialized preset = %+v", got)
+	}
+	if len(registrar.presets) != 1 || registrar.presets[0].NodeID != "macbook" {
+		t.Fatalf("registered presets = %+v", registrar.presets)
 	}
 }
 
 func TestConfigCatalogRefresherMaterializesBackendManagedHFSourceContract(t *testing.T) {
 	store := &fakePresetStore{}
-	refresher := ConfigCatalogRefresher{Store: store, StoreDir: t.TempDir()}
+	refresher := ConfigCatalogRefresher{Store: store, StoreDir: t.TempDir(), LocalNodeID: "spark"}
 	task := domain.ReconciliationTaskRecord{
 		PresetID:       "vision-vllm",
 		Model:          "vision",
@@ -287,7 +291,7 @@ func TestConfigCatalogRefresherMaterializesBackendManagedHFSourceContract(t *tes
 		t.Fatalf("presets = %+v", store.presets)
 	}
 	got := store.presets[0]
-	if got.ID != "vision-vllm" || got.ModelRef != "owner/repo" || got.Backend != domain.BackendVLLM || got.ContextLength != 49152 {
+	if got.ID != "vision-vllm" || got.ModelRef != "owner/repo" || got.Backend != domain.BackendVLLM || got.ContextLength != 49152 || got.NodeID != "spark" {
 		t.Fatalf("materialized preset = %+v", got)
 	}
 	if got.EstWeightsMB != 24000 || got.KVPerTokenMB != 0.25 || got.EngineProfileID != "engine-vllm" || got.EngineReadiness != domain.EngineReadinessReadyProfile {
@@ -715,6 +719,44 @@ func TestDrainAllowedTasksExecutesPrewarmReplicaThroughExecutor(t *testing.T) {
 	}
 }
 
+func TestDrainAllowedTasksFailsStaleRunningPrewarmAndWorkload(t *testing.T) {
+	task := taskRecord("allowed-prewarm", string(TaskPrewarmReplica), domain.ReconciliationTaskRunning)
+	task.Source = "model_service"
+	task.JobID = "service-a"
+	task.UpdatedAt = time.Unix(90, 0).UTC()
+	jobID := "reconcile-prewarm-" + task.ID
+	store := &fakeTaskStore{
+		tasks: []domain.ReconciliationTaskRecord{task},
+		jobs: map[string]domain.Job{
+			jobID: {
+				ID:       jobID,
+				ParentID: "service-a",
+				PresetID: "preset-a",
+				Status:   domain.JobPlacing,
+			},
+		},
+	}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{
+		Now:           time.Unix(110, 0).UTC(),
+		ActionTimeout: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Drained != 1 || report.Results[0].Status != domain.ReconciliationTaskFailed || !strings.Contains(report.Results[0].Error, "action timeout") {
+		t.Fatalf("report = %+v", report)
+	}
+	failedTask := store.taskByID("allowed-prewarm")
+	if failedTask.Status != domain.ReconciliationTaskFailed || len(failedTask.Events) != 1 || failedTask.Events[0].Status != domain.ReconciliationTaskFailed {
+		t.Fatalf("failed task = %+v", failedTask)
+	}
+	failedJob := store.jobs[jobID]
+	if failedJob.Status != domain.JobFailed || failedJob.Result == nil || !failedJob.Result.Terminal || !strings.Contains(failedJob.Error, "action timeout") {
+		t.Fatalf("failed job = %+v", failedJob)
+	}
+}
+
 func TestDrainAllowedTasksFailsPrewarmWithoutExecutor(t *testing.T) {
 	store := &fakeTaskStore{
 		tasks:   []domain.ReconciliationTaskRecord{taskRecord("allowed-prewarm", string(TaskPrewarmReplica), domain.ReconciliationTaskAllowed)},
@@ -943,6 +985,14 @@ func (s *fakeTaskStore) Job(_ context.Context, id string) (domain.Job, error) {
 		return domain.Job{}, sql.ErrNoRows
 	}
 	return job, nil
+}
+
+func (s *fakeTaskStore) SaveJob(_ context.Context, job domain.Job) error {
+	if s.jobs == nil {
+		s.jobs = map[string]domain.Job{}
+	}
+	s.jobs[job.ID] = job
+	return nil
 }
 
 func (s *fakeTaskStore) SaveIncompatibility(_ context.Context, rec domain.IncompatibilityRecord) error {

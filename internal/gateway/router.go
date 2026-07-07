@@ -64,6 +64,7 @@ type modelServiceStore interface {
 }
 
 type PresetRegistry struct {
+	mu      *sync.RWMutex
 	byModel map[string]domain.Preset
 	byID    map[string]domain.Preset
 	models  map[string][]domain.Preset
@@ -71,16 +72,18 @@ type PresetRegistry struct {
 }
 
 func NewPresetRegistry(presets ...domain.Preset) PresetRegistry {
-	r := PresetRegistry{byModel: map[string]domain.Preset{}, byID: map[string]domain.Preset{}, models: map[string][]domain.Preset{}, all: append([]domain.Preset(nil), presets...)}
+	r := PresetRegistry{mu: &sync.RWMutex{}, byModel: map[string]domain.Preset{}, byID: map[string]domain.Preset{}, models: map[string][]domain.Preset{}}
 	for _, preset := range presets {
-		r.byID[preset.ID] = preset
-		indexPresetModels(r.byModel, preset)
-		indexPresetModelGroups(r.models, preset)
+		r.registerLocked(preset)
 	}
 	return r
 }
 
 func (r PresetRegistry) Resolve(model string) (domain.Preset, error) {
+	if r.mu != nil {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+	}
 	if preset, ok := r.byID[model]; ok {
 		return preset, nil
 	}
@@ -91,6 +94,10 @@ func (r PresetRegistry) Resolve(model string) (domain.Preset, error) {
 }
 
 func (r PresetRegistry) ResolveAll(model string) []domain.Preset {
+	if r.mu != nil {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+	}
 	if preset, ok := r.byID[model]; ok {
 		return []domain.Preset{preset}
 	}
@@ -98,6 +105,10 @@ func (r PresetRegistry) ResolveAll(model string) []domain.Preset {
 }
 
 func (r PresetRegistry) PublicModelIDs() []string {
+	if r.mu != nil {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+	}
 	seen := map[string]struct{}{}
 	var ids []string
 	for _, preset := range r.all {
@@ -110,6 +121,41 @@ func (r PresetRegistry) PublicModelIDs() []string {
 		}
 	}
 	return ids
+}
+
+func (r *PresetRegistry) RegisterPreset(preset domain.Preset) {
+	if r == nil || preset.ID == "" {
+		return
+	}
+	if r.mu == nil {
+		r.mu = &sync.RWMutex{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.registerLocked(preset)
+}
+
+func (r *PresetRegistry) registerLocked(preset domain.Preset) {
+	for i, existing := range r.all {
+		if existing.ID == preset.ID {
+			r.all[i] = preset
+			r.rebuildLocked()
+			return
+		}
+	}
+	r.all = append(r.all, preset)
+	r.rebuildLocked()
+}
+
+func (r *PresetRegistry) rebuildLocked() {
+	r.byModel = map[string]domain.Preset{}
+	r.byID = map[string]domain.Preset{}
+	r.models = map[string][]domain.Preset{}
+	for _, preset := range r.all {
+		r.byID[preset.ID] = preset
+		indexPresetModels(r.byModel, preset)
+		indexPresetModelGroups(r.models, preset)
+	}
 }
 
 func addPublicModelID(ids *[]string, seen map[string]struct{}, id string) {
@@ -156,6 +202,10 @@ func (r PresetRegistry) NextLargerContext(current domain.Preset) (domain.Preset,
 }
 
 func (r PresetRegistry) SmallestContextAtLeast(current domain.Preset, minContext int) (domain.Preset, bool) {
+	if r.mu != nil {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+	}
 	var best domain.Preset
 	for _, preset := range r.all {
 		if preset.ID == current.ID || preset.Backend != current.Backend || preset.ModelRef != current.ModelRef || preset.ContextLength <= current.ContextLength || preset.ContextLength < minContext {
@@ -169,6 +219,10 @@ func (r PresetRegistry) SmallestContextAtLeast(current domain.Preset, minContext
 }
 
 func (r PresetRegistry) ContextLengths() []int {
+	if r.mu != nil {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+	}
 	seen := map[int]struct{}{}
 	var contexts []int
 	for _, preset := range r.all {
