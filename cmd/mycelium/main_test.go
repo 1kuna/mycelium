@@ -6976,6 +6976,37 @@ func TestRuntimePresetRegistrarUpdatesSchedulerAndGateway(t *testing.T) {
 	}
 }
 
+func TestSchedulerPrewarmExecutorRejectsQueuedOutcome(t *testing.T) {
+	clock := mocks.NewFakeClock(time.Unix(10, 0).UTC())
+	node := fixtures.MakeNode(fixtures.WithNodeID("node-a"))
+	job := fixtures.MakeJob(fixtures.WithJobID("prewarm-a"), fixtures.WithPreset("preset-a"))
+	store := &prewarmRuntimeStore{}
+	runtime := &scheduler.Service{
+		Placer: &gatedWorkloadPlacer{ready: true, nodeID: node.ID},
+		Fleet:  staticWorkloadFleet{node: node},
+		Nodes:  workloadNodeResolver{agents: map[string]ports.NodeAgent{node.ID: mocks.NewNodeAgent(node)}},
+		Coordinator: &mocks.Coordinator{
+			Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionLoadedNew},
+			Outcome: domain.CommitOutcome{
+				Decision: domain.PlacementDecision{JobID: job.ID, Action: domain.ActionQueued},
+				Lease:    domain.Lease{ID: "queued-owner-lease", JobID: job.ID},
+			},
+		},
+		JobLog: peercoord.NewJobLog(),
+		Queue:  scheduler.NewQueue(clock),
+		Store:  store,
+		Clock:  clock,
+	}
+
+	_, err := schedulerPrewarmExecutor{runtime: runtime}.PrewarmReplica(context.Background(), job)
+	if err == nil || !strings.Contains(err.Error(), "prewarm did not acquire held capacity") {
+		t.Fatalf("PrewarmReplica err = %v", err)
+	}
+	if got := store.jobs[job.ID].Status; got != domain.JobQueued {
+		t.Fatalf("job status = %s", got)
+	}
+}
+
 func serverURL(r *http.Request) string {
 	return "http://" + r.Host
 }
@@ -7745,6 +7776,54 @@ type recordingPresetRegistrar struct {
 
 func (r *recordingPresetRegistrar) RegisterPreset(preset domain.Preset) {
 	r.presets = append(r.presets, preset)
+}
+
+type prewarmRuntimeStore struct {
+	jobs      map[string]domain.Job
+	leases    map[string]domain.Lease
+	instances map[string]domain.ModelInstance
+}
+
+func (s *prewarmRuntimeStore) SaveJob(_ context.Context, job domain.Job) error {
+	if s.jobs == nil {
+		s.jobs = map[string]domain.Job{}
+	}
+	s.jobs[job.ID] = job
+	return nil
+}
+
+func (s *prewarmRuntimeStore) SaveLease(_ context.Context, lease domain.Lease) error {
+	if s.leases == nil {
+		s.leases = map[string]domain.Lease{}
+	}
+	s.leases[lease.ID] = lease
+	return nil
+}
+
+func (s *prewarmRuntimeStore) ListLeases(context.Context) ([]domain.Lease, error) {
+	var leases []domain.Lease
+	for _, lease := range s.leases {
+		leases = append(leases, lease)
+	}
+	return leases, nil
+}
+
+func (s *prewarmRuntimeStore) DeleteLease(_ context.Context, id string) error {
+	delete(s.leases, id)
+	return nil
+}
+
+func (s *prewarmRuntimeStore) SaveInstance(_ context.Context, inst domain.ModelInstance) error {
+	if s.instances == nil {
+		s.instances = map[string]domain.ModelInstance{}
+	}
+	s.instances[inst.ID] = inst
+	return nil
+}
+
+func (s *prewarmRuntimeStore) DeleteInstance(_ context.Context, id string) error {
+	delete(s.instances, id)
+	return nil
 }
 
 type recordingStageExecutor struct {

@@ -3292,6 +3292,9 @@ func (e schedulerPrewarmExecutor) PrewarmReplica(ctx context.Context, job domain
 		_ = e.runtime.Store.SaveJob(cleanupCtx, job)
 		return reconcile.PrewarmResult{}, err
 	}
+	if result.Decision.Action == domain.ActionQueued || result.Instance.ID == "" || result.Lease.ID == "" {
+		return reconcile.PrewarmResult{}, fmt.Errorf("prewarm did not acquire held capacity: action=%s instance=%q lease=%q", result.Decision.Action, result.Instance.ID, result.Lease.ID)
+	}
 	return reconcile.PrewarmResult{
 		WorkloadID: job.ID,
 		NodeID:     result.Lease.NodeID,
