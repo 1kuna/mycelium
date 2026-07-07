@@ -256,6 +256,9 @@ work, and the request receives a typed `503 Service Unavailable` with
 consumer to invent worker counts. Once held service capacity exists, normal
 headerless requests for that model route through it and response headers include
 `X-Myc-Model-Service`.
+Source-backed service demand can also carry fit-safe source facts; the
+reconciler resolves a unique saved ready engine profile automatically when the
+control store has one, and fails loudly when readiness is missing or ambiguous.
 
 External tools that still run their own worker pools can use
 `gateway allocate` as a debug/proof envelope, not as a reservation:

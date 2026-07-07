@@ -13,6 +13,7 @@ import (
 	"mycelium/internal/catalog"
 	"mycelium/internal/domain"
 	"mycelium/internal/engine"
+	"mycelium/internal/enginecatalog"
 	"mycelium/internal/modelruntime"
 	"mycelium/internal/ports"
 )
@@ -82,6 +83,10 @@ type CatalogPresetStore interface {
 	SavePreset(ctx context.Context, preset domain.Preset) error
 }
 
+type EngineProfileLister interface {
+	ListEngineProfiles(ctx context.Context) ([]domain.EngineProfile, error)
+}
+
 type ConfigCatalogRefresher struct {
 	Store    CatalogPresetStore
 	Presets  []domain.Preset
@@ -97,13 +102,17 @@ func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.
 			return fmt.Errorf("catalog source materialization requires a catalog store dir")
 		}
 		if task.Backend != "" && task.Backend != domain.BackendLlamaCpp {
+			contract, err := r.sourceContract(ctx, task)
+			if err != nil {
+				return err
+			}
 			result, err := catalog.NewInstaller(r.StoreDir).MaterializeSourcePreset(ctx, catalog.SourcePresetRequest{
 				Source:        strings.TrimSpace(task.ModelSource),
 				ID:            task.PresetID,
 				Model:         task.Model,
 				Backend:       task.Backend,
 				ContextLength: task.ContextRequest,
-				Contract:      task.ModelSourceContract,
+				Contract:      contract,
 			})
 			if err != nil {
 				return err
@@ -139,6 +148,67 @@ func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.
 		}
 	}
 	return nil
+}
+
+func (r ConfigCatalogRefresher) sourceContract(ctx context.Context, task domain.ReconciliationTaskRecord) (*domain.ModelSourceContract, error) {
+	if task.ModelSourceContract == nil {
+		return nil, fmt.Errorf("source preset requires resource contract")
+	}
+	contract := *task.ModelSourceContract
+	if strings.TrimSpace(contract.EngineProfile) != "" {
+		return &contract, nil
+	}
+	profile, err := r.resolveReadyEngineProfile(ctx, task.Backend, contract.Format)
+	if err != nil {
+		return nil, err
+	}
+	contract.EngineProfile = profile.ID
+	return &contract, nil
+}
+
+func (r ConfigCatalogRefresher) resolveReadyEngineProfile(ctx context.Context, backend domain.Backend, format string) (domain.EngineProfile, error) {
+	lister, ok := r.Store.(EngineProfileLister)
+	if !ok {
+		return domain.EngineProfile{}, fmt.Errorf("source preset requires engine_profile readiness contract; catalog store cannot list engine profiles")
+	}
+	profiles, err := lister.ListEngineProfiles(ctx)
+	if err != nil {
+		return domain.EngineProfile{}, err
+	}
+	format = strings.TrimSpace(format)
+	if format == "" {
+		format = catalog.FormatHFTransformers
+	}
+	var matches []domain.EngineProfile
+	for _, profile := range profiles {
+		if !profile.Ready || profile.Backend != backend || strings.TrimSpace(profile.ID) == "" {
+			continue
+		}
+		if !engineProfileSupportsFormat(profile, format) {
+			continue
+		}
+		matches = append(matches, profile)
+	}
+	switch len(matches) {
+	case 0:
+		return domain.EngineProfile{}, fmt.Errorf("no saved ready engine profile for backend %s and source format %s", backend, format)
+	case 1:
+		return matches[0], nil
+	default:
+		return domain.EngineProfile{}, fmt.Errorf("multiple saved ready engine profiles match backend %s and source format %s; source contract must name engine_profile", backend, format)
+	}
+}
+
+func engineProfileSupportsFormat(profile domain.EngineProfile, format string) bool {
+	if len(profile.SupportedModels) == 0 {
+		return true
+	}
+	for _, supported := range profile.SupportedModels {
+		if enginecatalog.FormatsCompatible(supported, format) {
+			return true
+		}
+	}
+	return false
 }
 
 func catalogRefreshMatches(presets []domain.Preset, task domain.ReconciliationTaskRecord) []domain.Preset {

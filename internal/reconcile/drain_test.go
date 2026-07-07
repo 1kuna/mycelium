@@ -294,6 +294,36 @@ func TestConfigCatalogRefresherMaterializesBackendManagedHFSourceContract(t *tes
 	}
 }
 
+func TestConfigCatalogRefresherResolvesSourceEngineProfile(t *testing.T) {
+	store := &fakePresetStore{profiles: []domain.EngineProfile{{
+		ID:              "engine-vllm",
+		Backend:         domain.BackendVLLM,
+		Ready:           true,
+		SupportedModels: []string{"hf-transformers"},
+	}}}
+	refresher := ConfigCatalogRefresher{Store: store, StoreDir: t.TempDir()}
+	task := domain.ReconciliationTaskRecord{
+		PresetID:       "vision-vllm",
+		Model:          "vision",
+		ModelSource:    "hf://owner/repo",
+		ContextRequest: 49152,
+		Backend:        domain.BackendVLLM,
+		ModelSourceContract: &domain.ModelSourceContract{
+			Format:       "hf-transformers",
+			SizeMB:       24000,
+			KVPerTokenMB: 0.25,
+			Quant:        "bf16",
+		},
+	}
+
+	if err := refresher.RefreshCatalog(context.Background(), task); err != nil {
+		t.Fatalf("RefreshCatalog source contract: %v", err)
+	}
+	if len(store.presets) != 1 || store.presets[0].EngineProfileID != "engine-vllm" {
+		t.Fatalf("presets = %+v", store.presets)
+	}
+}
+
 func TestConfigCatalogRefresherRequiresStoreDirForModelSource(t *testing.T) {
 	refresher := ConfigCatalogRefresher{Store: &fakePresetStore{}}
 	err := refresher.RefreshCatalog(context.Background(), domain.ReconciliationTaskRecord{Model: "tiny", ModelSource: "tiny.gguf"})
@@ -306,6 +336,85 @@ func TestConfigCatalogRefresherRequiresEngineSourceContractForNonLlamaBackend(t 
 	refresher := ConfigCatalogRefresher{Store: &fakePresetStore{}, StoreDir: t.TempDir()}
 	err := refresher.RefreshCatalog(context.Background(), domain.ReconciliationTaskRecord{Model: "vision", ModelSource: "hf://owner/repo", Backend: domain.BackendVLLM, ContextRequest: 49152})
 	if err == nil || !strings.Contains(err.Error(), "resource contract") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestConfigCatalogRefresherRequiresEngineProfileListerForSourceResolution(t *testing.T) {
+	refresher := ConfigCatalogRefresher{Store: catalogOnlyStore{}, StoreDir: t.TempDir()}
+	err := refresher.RefreshCatalog(context.Background(), domain.ReconciliationTaskRecord{
+		Model:          "vision",
+		ModelSource:    "hf://owner/repo",
+		Backend:        domain.BackendVLLM,
+		ContextRequest: 49152,
+		ModelSourceContract: &domain.ModelSourceContract{
+			Format:       "hf-transformers",
+			SizeMB:       24000,
+			KVPerTokenMB: 0.25,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "catalog store cannot list engine profiles") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestConfigCatalogRefresherRejectsMissingReadySourceEngineProfile(t *testing.T) {
+	store := &fakePresetStore{profiles: []domain.EngineProfile{{
+		ID:              "engine-vllm-unready",
+		Backend:         domain.BackendVLLM,
+		Ready:           false,
+		SupportedModels: []string{"hf-transformers"},
+	}, {
+		ID:              "engine-vllm-gguf",
+		Backend:         domain.BackendVLLM,
+		Ready:           true,
+		SupportedModels: []string{"gguf"},
+	}, {
+		ID:              "engine-mlx",
+		Backend:         domain.BackendMLX,
+		Ready:           true,
+		SupportedModels: []string{"hf-transformers"},
+	}}}
+	refresher := ConfigCatalogRefresher{Store: store, StoreDir: t.TempDir()}
+	err := refresher.RefreshCatalog(context.Background(), domain.ReconciliationTaskRecord{
+		Model:          "vision",
+		ModelSource:    "hf://owner/repo",
+		Backend:        domain.BackendVLLM,
+		ContextRequest: 49152,
+		ModelSourceContract: &domain.ModelSourceContract{
+			Format:       "hf-transformers",
+			SizeMB:       24000,
+			KVPerTokenMB: 0.25,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no saved ready engine profile") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestConfigCatalogRefresherRejectsAmbiguousSourceEngineProfiles(t *testing.T) {
+	store := &fakePresetStore{profiles: []domain.EngineProfile{{
+		ID:      "engine-a",
+		Backend: domain.BackendVLLM,
+		Ready:   true,
+	}, {
+		ID:      "engine-b",
+		Backend: domain.BackendVLLM,
+		Ready:   true,
+	}}}
+	refresher := ConfigCatalogRefresher{Store: store, StoreDir: t.TempDir()}
+	err := refresher.RefreshCatalog(context.Background(), domain.ReconciliationTaskRecord{
+		Model:          "vision",
+		ModelSource:    "hf://owner/repo",
+		Backend:        domain.BackendVLLM,
+		ContextRequest: 49152,
+		ModelSourceContract: &domain.ModelSourceContract{
+			Format:       "hf-transformers",
+			SizeMB:       24000,
+			KVPerTokenMB: 0.25,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "multiple saved ready engine profiles") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -647,11 +756,22 @@ func (r *fakeCatalogRefresher) RefreshCatalog(_ context.Context, task domain.Rec
 }
 
 type fakePresetStore struct {
-	presets []domain.Preset
+	presets  []domain.Preset
+	profiles []domain.EngineProfile
 }
 
 func (s *fakePresetStore) SavePreset(_ context.Context, preset domain.Preset) error {
 	s.presets = append(s.presets, preset)
+	return nil
+}
+
+func (s *fakePresetStore) ListEngineProfiles(context.Context) ([]domain.EngineProfile, error) {
+	return append([]domain.EngineProfile(nil), s.profiles...), nil
+}
+
+type catalogOnlyStore struct{}
+
+func (catalogOnlyStore) SavePreset(context.Context, domain.Preset) error {
 	return nil
 }
 

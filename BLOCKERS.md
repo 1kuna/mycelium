@@ -128,10 +128,11 @@ handoff.
   daemon creates source-aware catalog work; the catalog refresher can
   materialize source artifacts through the existing local catalog installer for
   the backend class that installer can honestly synthesize, then persist the
-  resulting preset into the control store. Engine-specific source contracts for
-  vLLM/OpenVINO/SGLang/custom routes remain a product boundary: those backends
-  need a configured preset/profile or a real engine-specific source contract, so
-  source materialization fails loudly instead of fabricating launch readiness.
+  resulting preset into the control store. Backend-managed source contracts can
+  resolve a unique saved ready engine profile automatically from control-store
+  readiness facts. Missing or ambiguous ready profiles, and backend classes
+  without a real source contract, still fail loudly instead of fabricating launch
+  readiness.
   Remote catalog mutation, cross-peer artifact movement, and owner repair remain
   separate explicit actions; owner repair remains approval-gated by default.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
