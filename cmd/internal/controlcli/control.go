@@ -1142,14 +1142,19 @@ func runModelsStage(ctx context.Context, args []string, client *http.Client) err
 		return fmt.Errorf("node %q has no reachable address", node.ID)
 	}
 	peer := domain.Peer{ID: node.ID, Addresses: []string{address}, Compute: true}
-	locality, err := catalogStageHTTPClient{AuthToken: *rpcToken, Client: client}.StageModel(ctx, peer, preset)
+	staged, err := catalogStageHTTPClient{AuthToken: *rpcToken, Client: client}.StageModel(ctx, peer, preset)
 	if err != nil {
 		return err
 	}
-	if err := store.SaveModelLocality(ctx, locality); err != nil {
+	if staged.Preset.ID != "" {
+		if err := store.SavePreset(ctx, staged.Preset); err != nil {
+			return err
+		}
+	}
+	if err := store.SaveModelLocality(ctx, staged.Locality); err != nil {
 		return err
 	}
-	fmt.Printf("stage\t%s\t%s\t%s\t%s\n", locality.PresetID, locality.NodeID, locality.State, locality.ModelRef)
+	fmt.Printf("stage\t%s\t%s\t%s\t%s\n", staged.Locality.PresetID, staged.Locality.NodeID, staged.Locality.State, staged.Locality.ModelRef)
 	return nil
 }
 
@@ -1247,13 +1252,19 @@ func runModelsLocalityApply(ctx context.Context, args []string, client catalogSt
 			if err != nil {
 				return recordLocalityActionError(ctx, store, &plan, action, err)
 			}
-			localityRecord, err := client.StageModel(ctx, peer, preset)
+			staged, err := client.StageModel(ctx, peer, preset)
 			if err != nil {
 				return recordLocalityActionError(ctx, store, &plan, action, err)
 			}
-			if err := store.SaveModelLocality(ctx, localityRecord); err != nil {
+			if staged.Preset.ID != "" {
+				if err := store.SavePreset(ctx, staged.Preset); err != nil {
+					return recordLocalityActionError(ctx, store, &plan, action, err)
+				}
+			}
+			if err := store.SaveModelLocality(ctx, staged.Locality); err != nil {
 				return recordLocalityActionError(ctx, store, &plan, action, err)
 			}
+			action.PresetID = staged.Locality.PresetID
 			action.State = domain.ModelLocalityReady
 			action.Error = ""
 			fmt.Printf("locality-apply\tstage\t%s\t%s\tready\n", action.PresetID, action.NodeID)
@@ -1361,17 +1372,17 @@ type catalogStageHTTPClient struct {
 	Client    *http.Client
 }
 
-func (c catalogStageHTTPClient) StageModel(ctx context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error) {
+func (c catalogStageHTTPClient) StageModel(ctx context.Context, peer domain.Peer, preset domain.Preset) (ports.CatalogStageResult, error) {
 	if len(peer.Addresses) == 0 {
-		return domain.ModelLocality{}, fmt.Errorf("peer %q has no reachable address", peer.ID)
+		return ports.CatalogStageResult{}, fmt.Errorf("peer %q has no reachable address", peer.ID)
 	}
-	body, err := json.Marshal(map[string]any{"preset": preset})
+	body, err := catalogStageRequestBody(preset)
 	if err != nil {
-		return domain.ModelLocality{}, err
+		return ports.CatalogStageResult{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(catalogPeerBaseURL(peer.Addresses[0]), "/")+"/catalog/stage", bytes.NewReader(body))
 	if err != nil {
-		return domain.ModelLocality{}, err
+		return ports.CatalogStageResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.AuthToken != "" {
@@ -1383,26 +1394,60 @@ func (c catalogStageHTTPClient) StageModel(ctx context.Context, peer domain.Peer
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return domain.ModelLocality{}, err
+		return ports.CatalogStageResult{}, err
 	}
 	defer resp.Body.Close()
 	data, err := readControlHTTPBody(resp.Body, "catalog stage response body")
 	if err != nil {
-		return domain.ModelLocality{}, err
+		return ports.CatalogStageResult{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return domain.ModelLocality{}, fmt.Errorf("catalog stage %s: %s", peer.ID, strings.TrimSpace(string(data)))
+		return ports.CatalogStageResult{}, fmt.Errorf("catalog stage %s: %s", peer.ID, strings.TrimSpace(string(data)))
 	}
 	var out struct {
+		Preset   domain.Preset        `json:"preset"`
 		Locality domain.ModelLocality `json:"locality"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
-		return domain.ModelLocality{}, err
+		return ports.CatalogStageResult{}, err
 	}
 	if out.Locality.ID == "" {
-		return domain.ModelLocality{}, fmt.Errorf("catalog stage %s returned no locality", peer.ID)
+		return ports.CatalogStageResult{}, fmt.Errorf("catalog stage %s returned no locality", peer.ID)
 	}
-	return out.Locality, nil
+	if out.Preset.ID == "" {
+		return ports.CatalogStageResult{}, fmt.Errorf("catalog stage %s returned no preset", peer.ID)
+	}
+	return ports.CatalogStageResult{Preset: out.Preset, Locality: out.Locality}, nil
+}
+
+func catalogStageRequestBody(preset domain.Preset) ([]byte, error) {
+	req := map[string]any{"preset": preset}
+	if artifact, name, ok, err := catalogStageArtifact(preset.ModelRef); err != nil {
+		return nil, err
+	} else if ok {
+		req["artifact_bytes"] = artifact
+		req["artifact_name"] = name
+	}
+	return json.Marshal(req)
+}
+
+func catalogStageArtifact(source string) ([]byte, string, bool, error) {
+	if source == "" || strings.HasPrefix(source, "hf://") || strings.HasPrefix(source, "oci://") {
+		return nil, "", false, nil
+	}
+	path := strings.TrimPrefix(source, "file://")
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return nil, "", false, nil
+	}
+	if info.Size() > maxControlHTTPBodyBytes/2 {
+		return nil, "", false, fmt.Errorf("local artifact %q is %d bytes; peer JSON staging is limited to %d bytes, use a reachable source URI or streaming staging", filepath.Base(path), info.Size(), maxControlHTTPBodyBytes/2)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", false, err
+	}
+	return data, filepath.Base(path), true, nil
 }
 
 func (c catalogStageHTTPClient) EvictModel(ctx context.Context, peer domain.Peer, action domain.LocalityAction) (domain.ModelLocality, error) {

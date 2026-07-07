@@ -61,6 +61,9 @@ operator tools. They should not be the ordinary path for consumers.
   blocks with `capacity_unavailable` when no queued work can move. Model staging
   uses the peer catalog-stage RPC rather than requiring a normal operator to run
   `models locality apply`; that command remains a debug/emergency escape hatch.
+  Small local artifacts can be uploaded through that RPC and adopted as
+  target-local presets, while larger artifacts still need a reachable source URI
+  or the future streaming transfer path.
 - Pool/proxy and allocation-plan commands should stay out of consumer runbooks
   except as temporary compatibility tools for external clients that cannot yet
   use the gateway-native service path.

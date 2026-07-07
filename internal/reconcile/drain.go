@@ -23,9 +23,11 @@ type TaskStore interface {
 	SaveReconciliationTask(ctx context.Context, task domain.ReconciliationTaskRecord) error
 	SaveIncompatibility(ctx context.Context, rec domain.IncompatibilityRecord) error
 	Preset(ctx context.Context, id string) (domain.Preset, error)
+	SavePreset(ctx context.Context, preset domain.Preset) error
 	Node(ctx context.Context, id string) (domain.Node, error)
 	SaveLocalityPlan(ctx context.Context, plan domain.LocalityPlan) error
 	SaveModelLocality(ctx context.Context, locality domain.ModelLocality) error
+	DeleteModelLocality(ctx context.Context, id string) error
 	SaveEngineProfile(ctx context.Context, profile domain.EngineProfile) error
 	ListEngineProfiles(ctx context.Context) ([]domain.EngineProfile, error)
 	MarkEngineProfileUnready(ctx context.Context, profileID, reason string) error
@@ -44,6 +46,7 @@ type DrainOptions struct {
 	Capacity      CapacityRepairExecutor
 	Catalog       CatalogRefresher
 	Stage         ports.PeerCatalogStager
+	Registrar     CatalogPresetRegistrar
 	Kinds         []TaskKind
 	ActionTimeout time.Duration
 }
@@ -449,7 +452,7 @@ func drainTask(ctx context.Context, store TaskStore, task domain.ReconciliationT
 		_ = store.SaveReconciliationTask(ctx, done)
 		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "record_incompatibility"}
 	case TaskStageModelArtifact:
-		if err := stageModelArtifact(ctx, store, running, opts.Stage, now); err != nil {
+		if err := stageModelArtifact(ctx, store, running, opts.Stage, opts.Registrar, now); err != nil {
 			failed := transitionTask(running, domain.ReconciliationTaskFailed, err.Error(), "failed to stage model artifact", now)
 			_ = store.SaveReconciliationTask(ctx, failed)
 			return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: failed.Status, Error: err.Error()}
@@ -569,7 +572,7 @@ func prewarmReplica(ctx context.Context, store TaskStore, task domain.Reconcilia
 	return opts.Prewarm.PrewarmReplica(ctx, job)
 }
 
-func stageModelArtifact(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, stager ports.PeerCatalogStager, now time.Time) error {
+func stageModelArtifact(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, stager ports.PeerCatalogStager, registrar CatalogPresetRegistrar, now time.Time) error {
 	if task.NodeID == "" {
 		return fmt.Errorf("stage model artifact task requires node id")
 	}
@@ -646,19 +649,36 @@ func stageModelArtifact(ctx context.Context, store TaskStore, task domain.Reconc
 		_ = store.SaveModelLocality(ctx, locality)
 		return err
 	}
-	if staged.State != domain.ModelLocalityReady {
-		return fmt.Errorf("catalog stage returned locality state %q", staged.State)
+	if staged.Locality.State != domain.ModelLocalityReady {
+		return fmt.Errorf("catalog stage returned locality state %q", staged.Locality.State)
 	}
-	if staged.PresetID != preset.ID {
-		return fmt.Errorf("catalog stage returned preset %q, expected %q", staged.PresetID, preset.ID)
+	if staged.Preset.ID == "" {
+		return fmt.Errorf("catalog stage returned no preset")
 	}
-	if staged.NodeID != node.ID {
-		return fmt.Errorf("catalog stage returned node %q, expected %q", staged.NodeID, node.ID)
+	if staged.Locality.PresetID != staged.Preset.ID {
+		return fmt.Errorf("catalog stage returned locality preset %q, expected %q", staged.Locality.PresetID, staged.Preset.ID)
 	}
-	if err := store.SaveModelLocality(ctx, staged); err != nil {
+	if staged.Locality.NodeID != node.ID {
+		return fmt.Errorf("catalog stage returned node %q, expected %q", staged.Locality.NodeID, node.ID)
+	}
+	if err := store.SavePreset(ctx, staged.Preset); err != nil {
 		return err
 	}
-	action.State = staged.State
+	if registrar != nil {
+		if err := registrar.RegisterPreset(staged.Preset); err != nil {
+			return err
+		}
+	}
+	if err := store.SaveModelLocality(ctx, staged.Locality); err != nil {
+		return err
+	}
+	if locality.ID != staged.Locality.ID {
+		if err := store.DeleteModelLocality(ctx, locality.ID); err != nil {
+			return err
+		}
+	}
+	action.PresetID = staged.Preset.ID
+	action.State = staged.Locality.State
 	action.Error = ""
 	plan.Actions[0] = action
 	return store.SaveLocalityPlan(ctx, plan)

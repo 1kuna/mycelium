@@ -380,13 +380,14 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 		Projects:            projectMap(projects),
 		DefaultProject:      cfg.DefaultProject,
 	}
+	registrar := runtimePresetRegistrar{runtime: runtime, gateway: &router.Presets}
 	startReconciliationDrainer(ctx, store, schedulerPrewarmExecutor{runtime: runtime}, schedulerCapacityRepairExecutor{runtime: runtime}, reconcile.ConfigCatalogRefresher{
 		Store:       store,
-		Registrar:   runtimePresetRegistrar{runtime: runtime, gateway: &router.Presets},
+		Registrar:   registrar,
 		Presets:     cfg.Presets,
 		StoreDir:    cfg.CatalogDir,
 		LocalNodeID: privateLocalNodeID(cfg),
-	}, stageExecutor, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject, time.Duration(cfg.ComputeConfig.LoadTimeoutMS)*time.Millisecond)
+	}, stageExecutor, registrar, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject, time.Duration(cfg.ComputeConfig.LoadTimeoutMS)*time.Millisecond)
 	handler := gateway.Server{
 		Router:              router,
 		RequireAuth:         authRequired,
@@ -549,8 +550,10 @@ type adminTokenRequest struct {
 var registryRecordsMaxBodyBytes int64 = 64 << 20
 
 type catalogStageRequest struct {
-	Preset domain.Preset `json:"preset"`
-	Source string        `json:"source,omitempty"`
+	Preset        domain.Preset `json:"preset"`
+	Source        string        `json:"source,omitempty"`
+	ArtifactBytes []byte        `json:"artifact_bytes,omitempty"`
+	ArtifactName  string        `json:"artifact_name,omitempty"`
 }
 
 type catalogStageResponse struct {
@@ -1732,25 +1735,40 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 			writePeerRPCError(w, http.StatusBadRequest, fmt.Errorf("preset %q has no source model ref", req.Preset.ID))
 			return
 		}
+		installSource := source
+		var cleanupUpload func()
+		if len(req.ArtifactBytes) > 0 {
+			uploaded, cleanup, err := writeCatalogStageUpload(cfg.CatalogDir, req.Preset.ID, req.ArtifactName, req.ArtifactBytes)
+			if err != nil {
+				writePeerRPCError(w, http.StatusBadRequest, err)
+				return
+			}
+			installSource = uploaded
+			cleanupUpload = cleanup
+			defer cleanupUpload()
+		}
 		nodeID := cfg.ID
 		if cfg.ComputeConfig.ID != "" {
 			nodeID = cfg.ComputeConfig.ID
 		}
-		if req.Preset.NodeID != "" && req.Preset.NodeID != nodeID {
+		if req.Preset.NodeID != "" && req.Preset.NodeID != nodeID && len(req.ArtifactBytes) == 0 {
 			writePeerRPCError(w, http.StatusConflict, fmt.Errorf("preset %q is declared local to node %q, not %q", req.Preset.ID, req.Preset.NodeID, nodeID))
 			return
 		}
-		jobID, err := catalog.InstallJobID(catalog.InstallRequest{Source: source, ID: req.Preset.ID})
+		targetPreset := req.Preset
+		targetPreset.ID = stagePresetID(req.Preset, nodeID)
+		targetPreset.NodeID = nodeID
+		jobID, err := catalog.InstallJobID(catalog.InstallRequest{Source: installSource, ID: targetPreset.ID})
 		if err != nil {
 			writePeerRPCError(w, http.StatusBadRequest, err)
 			return
 		}
-		job := domain.Job{ID: jobID, TaskType: "catalog_stage", Model: source, PresetID: req.Preset.ID, Status: domain.JobQueued}
+		job := domain.Job{ID: jobID, TaskType: "catalog_stage", Model: source, PresetID: targetPreset.ID, Status: domain.JobQueued}
 		if err := store.SaveJob(r.Context(), job); err != nil {
 			writePeerRPCError(w, http.StatusInternalServerError, err)
 			return
 		}
-		adoptSource, metadata, adopt, err := verifyRuntimeSourceAdoption(r.Context(), cfg, req.Preset, source, nodeID)
+		adoptSource, metadata, adopt, err := verifyRuntimeSourceAdoption(r.Context(), cfg, req.Preset, installSource, nodeID)
 		if err != nil {
 			job.Status = domain.JobFailed
 			job.Error = err.Error()
@@ -1759,7 +1777,7 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 			return
 		}
 		if adopt {
-			staged := req.Preset
+			staged := targetPreset
 			staged.NodeID = nodeID
 			staged.ModelRef = adoptSource
 			staged.ArtifactSizeMB = metadata.WeightsMB
@@ -1802,12 +1820,12 @@ func mountCatalogHTTP(mux *http.ServeMux, cfg PeerConfig, store catalogStageStor
 			return
 		}
 		result, err := catalog.NewInstaller(cfg.CatalogDir).InstallWithProgress(r.Context(), catalog.InstallRequest{
-			Source:        source,
-			ID:            req.Preset.ID,
-			Model:         firstPresetModelAlias(req.Preset),
-			ContextLength: req.Preset.ContextLength,
-			Quant:         req.Preset.Quant,
-			Backend:       req.Preset.Backend,
+			Source:        installSource,
+			ID:            targetPreset.ID,
+			Model:         firstPresetModelAlias(targetPreset),
+			ContextLength: targetPreset.ContextLength,
+			Quant:         targetPreset.Quant,
+			Backend:       targetPreset.Backend,
 		}, func(event catalog.ProgressEvent, _ catalog.InstallState) error {
 			job.Status = domain.JobRunning
 			job.Progress = append(job.Progress, domain.JobProgress{Stage: event.Stage, Message: event.Message, At: event.At})
@@ -1911,6 +1929,52 @@ func firstPresetModelAlias(preset domain.Preset) string {
 		return preset.ID
 	}
 	return preset.ModelRef
+}
+
+func stagePresetID(preset domain.Preset, nodeID string) string {
+	if preset.NodeID == "" || preset.NodeID == nodeID {
+		return preset.ID
+	}
+	return preset.ID + "-" + nodeID
+}
+
+func writeCatalogStageUpload(storeDir, presetID, name string, data []byte) (string, func(), error) {
+	if len(data) == 0 {
+		return "", nil, fmt.Errorf("artifact upload is empty")
+	}
+	if storeDir == "" {
+		return "", nil, fmt.Errorf("catalog store dir is required for artifact upload")
+	}
+	ext := filepath.Ext(name)
+	if ext == "" {
+		ext = filepath.Ext(presetID)
+	}
+	if ext == "" {
+		ext = ".bin"
+	}
+	if strings.Contains(ext, string(os.PathSeparator)) {
+		return "", nil, fmt.Errorf("artifact extension %q is invalid", ext)
+	}
+	dir := filepath.Join(storeDir, "incoming")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", nil, err
+	}
+	file, err := os.CreateTemp(dir, presetID+"-*"+ext)
+	if err != nil {
+		return "", nil, err
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return path, cleanup, nil
 }
 
 func shouldAdoptRuntimeSource(preset domain.Preset, source, nodeID string) bool {
@@ -3308,20 +3372,50 @@ type peerCatalogStageExecutor struct {
 	client    *http.Client
 }
 
-func (e peerCatalogStageExecutor) StageModel(ctx context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error) {
+func (e peerCatalogStageExecutor) StageModel(ctx context.Context, peer domain.Peer, preset domain.Preset) (ports.CatalogStageResult, error) {
 	var out struct {
+		Preset   domain.Preset        `json:"preset"`
 		Locality domain.ModelLocality `json:"locality"`
 	}
-	if err := doPeerRPC(ctx, e.client, e.authToken, peer, http.MethodPost, "/catalog/stage", map[string]any{"preset": preset}, &out); err != nil {
-		return domain.ModelLocality{}, err
+	body := map[string]any{"preset": preset}
+	if artifact, name, ok, err := catalogStageArtifactForPeer(preset.ModelRef); err != nil {
+		return ports.CatalogStageResult{}, err
+	} else if ok {
+		body["artifact_bytes"] = artifact
+		body["artifact_name"] = name
+	}
+	if err := doPeerRPC(ctx, e.client, e.authToken, peer, http.MethodPost, "/catalog/stage", body, &out); err != nil {
+		return ports.CatalogStageResult{}, err
 	}
 	if out.Locality.ID == "" {
-		return domain.ModelLocality{}, fmt.Errorf("catalog stage %s returned no locality", peer.ID)
+		return ports.CatalogStageResult{}, fmt.Errorf("catalog stage %s returned no locality", peer.ID)
 	}
-	return out.Locality, nil
+	if out.Preset.ID == "" {
+		return ports.CatalogStageResult{}, fmt.Errorf("catalog stage %s returned no preset", peer.ID)
+	}
+	return ports.CatalogStageResult{Preset: out.Preset, Locality: out.Locality}, nil
 }
 
 var _ ports.PeerCatalogStager = peerCatalogStageExecutor{}
+
+func catalogStageArtifactForPeer(source string) ([]byte, string, bool, error) {
+	if source == "" || strings.HasPrefix(source, "hf://") || strings.HasPrefix(source, "oci://") {
+		return nil, "", false, nil
+	}
+	path := strings.TrimPrefix(source, "file://")
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return nil, "", false, nil
+	}
+	if info.Size() > maxPeerRPCJSONBodyBytes/2 {
+		return nil, "", false, fmt.Errorf("local artifact %q is %d bytes; peer JSON staging is limited to %d bytes, use a reachable source URI or streaming staging", filepath.Base(path), info.Size(), maxPeerRPCJSONBodyBytes/2)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", false, err
+	}
+	return data, filepath.Base(path), true, nil
+}
 
 type schedulerCapacityRepairExecutor struct {
 	runtime schedulerQueueDrainer
@@ -3364,7 +3458,7 @@ func (r runtimePresetRegistrar) RegisterPreset(preset domain.Preset) error {
 	return nil
 }
 
-func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, prewarm reconcile.PrewarmExecutor, capacity reconcile.CapacityRepairExecutor, catalog reconcile.CatalogRefresher, stage ports.PeerCatalogStager, clk ports.Clock, interval time.Duration, limit int, project string, actionTimeout time.Duration) {
+func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, prewarm reconcile.PrewarmExecutor, capacity reconcile.CapacityRepairExecutor, catalog reconcile.CatalogRefresher, stage ports.PeerCatalogStager, registrar reconcile.CatalogPresetRegistrar, clk ports.Clock, interval time.Duration, limit int, project string, actionTimeout time.Duration) {
 	if store == nil || clk == nil || interval <= 0 || limit <= 0 {
 		return
 	}
@@ -3389,6 +3483,7 @@ func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, 
 				Capacity:      capacity,
 				Catalog:       catalog,
 				Stage:         stage,
+				Registrar:     registrar,
 				ActionTimeout: actionTimeout,
 				Kinds: []reconcile.TaskKind{
 					reconcile.TaskWaitCapacity,

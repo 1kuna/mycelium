@@ -1966,6 +1966,61 @@ func TestCatalogStageHTTPMaterializesPresetAndLocality(t *testing.T) {
 	if runtimePreset.ModelRef != model || runtimePreset.ArtifactSizeMB != 10 || runtimePreset.EstWeightsMB != 10 || runtimePreset.KVPerTokenMB != 0.5 || runtimePreset.LayerCount != 12 {
 		t.Fatalf("stored runtime preset = %+v", runtimePreset)
 	}
+
+	remoteBody, err := json.Marshal(catalogStageRequest{
+		Preset: domain.Preset{
+			ID:             "mac-proof",
+			ModelRef:       "/other/peer/mac-proof.gguf",
+			Aliases:        []string{"shared-proof"},
+			Backend:        domain.BackendLlamaCpp,
+			ContextLength:  512,
+			Quant:          "Q4",
+			Capabilities:   []domain.Capability{domain.CapabilityChat},
+			ArtifactSizeMB: 1,
+			NodeID:         "macbook",
+		},
+		Source:        "/other/peer/mac-proof.gguf",
+		ArtifactName:  "mac-proof.gguf",
+		ArtifactBytes: []byte("remote-bytes"),
+	})
+	if err != nil {
+		t.Fatalf("marshal remote request: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/catalog/stage", bytes.NewReader(remoteBody))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remote stage status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode remote response: %v", err)
+	}
+	if response.Preset.ID != "mac-proof-node-a" || response.Preset.NodeID != "node-a" || response.Locality.PresetID != response.Preset.ID || response.Locality.NodeID != "node-a" {
+		t.Fatalf("remote stage response = preset %+v locality %+v", response.Preset, response.Locality)
+	}
+	if _, err := os.Stat(response.Preset.ModelRef); err != nil {
+		t.Fatalf("remote staged model stat: %v", err)
+	}
+	if strings.Contains(response.Preset.ModelRef, "incoming") {
+		t.Fatalf("remote stage kept transient upload path: %s", response.Preset.ModelRef)
+	}
+	remoteModelRef := response.Preset.ModelRef
+	rec = httptest.NewRecorder()
+	evictRemoteBody, err := json.Marshal(catalogEvictRequest{PresetID: response.Preset.ID, NodeID: "node-a"})
+	if err != nil {
+		t.Fatalf("marshal remote evict: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/catalog/evict", bytes.NewReader(evictRemoteBody))
+	req.Header.Set("Authorization", "Bearer rpc-secret")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remote evict status/body = %d %q", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(remoteModelRef); !os.IsNotExist(err) {
+		t.Fatalf("remote evicted model stat err = %v", err)
+	}
+
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/catalog/stage", strings.NewReader(`{"preset":{"id":"missing-runtime","model_ref":"repo/model","node_id":"node-a"}}`))
 	req.Header.Set("Authorization", "Bearer rpc-secret")
@@ -6303,6 +6358,71 @@ func TestPeerRPCClientErrorBranches(t *testing.T) {
 	}
 }
 
+func TestPeerCatalogStageExecutorUploadsLocalArtifact(t *testing.T) {
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "proof.gguf")
+	if err := os.WriteFile(artifactPath, []byte("proof-weights"), 0o600); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	preset := domain.Preset{
+		ID:            "proof",
+		ModelRef:      artifactPath,
+		Backend:       domain.BackendLlamaCpp,
+		ContextLength: 512,
+	}
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/catalog/stage" || r.Header.Get("Authorization") != "Bearer rpc-secret" {
+			t.Fatalf("request path=%s auth=%s", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		var req struct {
+			Preset        domain.Preset `json:"preset"`
+			ArtifactBytes []byte        `json:"artifact_bytes"`
+			ArtifactName  string        `json:"artifact_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Preset.ID != "proof" || string(req.ArtifactBytes) != "proof-weights" || req.ArtifactName != "proof.gguf" {
+			t.Fatalf("stage request = %+v bytes=%q", req, string(req.ArtifactBytes))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"preset": domain.Preset{ID: "proof-b70", ModelRef: "/catalog/proof.gguf", NodeID: "b70"},
+			"locality": domain.ModelLocality{
+				ID:       "b70:proof-b70",
+				PresetID: "proof-b70",
+				NodeID:   "b70",
+				State:    domain.ModelLocalityReady,
+				ModelRef: "/catalog/proof.gguf",
+			},
+		})
+	}))
+	staged, err := (peerCatalogStageExecutor{authToken: "rpc-secret", client: client}).StageModel(context.Background(), domain.Peer{ID: "b70", Addresses: []string{"http://b70.test"}}, preset)
+	if err != nil {
+		t.Fatalf("StageModel: %v", err)
+	}
+	if staged.Preset.ID != "proof-b70" || staged.Locality.PresetID != staged.Preset.ID {
+		t.Fatalf("stage result = %+v", staged)
+	}
+	largePath := filepath.Join(dir, "large.gguf")
+	file, err := os.Create(largePath)
+	if err != nil {
+		t.Fatalf("create large artifact: %v", err)
+	}
+	if err := file.Truncate(maxPeerRPCJSONBodyBytes/2 + 1); err != nil {
+		_ = file.Close()
+		t.Fatalf("truncate large artifact: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close large artifact: %v", err)
+	}
+	largePreset := preset
+	largePreset.ID = "large"
+	largePreset.ModelRef = largePath
+	if _, err := (peerCatalogStageExecutor{authToken: "rpc-secret", client: client}).StageModel(context.Background(), domain.Peer{ID: "b70", Addresses: []string{"http://b70.test"}}, largePreset); err == nil || !strings.Contains(err.Error(), "peer JSON staging is limited") {
+		t.Fatalf("large artifact error = %v", err)
+	}
+}
+
 func TestRescueRecoveredJobDecodesPayloadAndSubmits(t *testing.T) {
 	job := domain.Job{ID: "job-a", Model: "tiny", Priority: domain.PriorityInteractive}
 	payload, err := peercoord.EncodeRescuePayload(job, []byte(`{"model":"tiny"}`))
@@ -6782,7 +6902,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 	}}
 	prewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-recon-prewarm", NodeID: "node-a", InstanceID: "inst-a", LeaseID: "lease-a"}}
 	capacity := &recordingCapacityRepairExecutor{}
-	startReconciliationDrainer(ctx, reconcileStore, prewarm, capacity, reconcile.ConfigCatalogRefresher{Store: reconcileStore, Presets: []domain.Preset{testPreset("refreshed")}}, nil, clk, time.Second, 3, "project-a", 0)
+	startReconciliationDrainer(ctx, reconcileStore, prewarm, capacity, reconcile.ConfigCatalogRefresher{Store: reconcileStore, Presets: []domain.Preset{testPreset("refreshed")}}, nil, nil, clk, time.Second, 3, "project-a", 0)
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := reconcileStore.ListReconciliationTasks(context.Background(), "")
@@ -6830,12 +6950,14 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		Reason:         "catalog stage committed",
 		UpdatedAt:      time.Unix(1, 0).UTC(),
 	}}
-	startReconciliationDrainer(ctx, stageStore, nil, nil, nil, stage, clk, time.Second, 1, "project-a", 0)
+	stageRegistrar := &recordingCatalogPresetRegistrar{}
+	startReconciliationDrainer(ctx, stageStore, nil, nil, nil, stage, stageRegistrar, clk, time.Second, 1, "project-a", 0)
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := stageStore.ListReconciliationTasks(context.Background(), "")
 		return err == nil && len(tasks) == 1 && tasks[0].Status == domain.ReconciliationTaskDone && stage.callCount() == 1 &&
-			len(stageStore.localities) == 1 && stageStore.localities[0].State == domain.ModelLocalityReady
+			len(stageStore.localities) == 1 && stageStore.localities[0].State == domain.ModelLocalityReady &&
+			len(stageRegistrar.presets) == 1 && stageRegistrar.presets[0].ID == "stage-preset"
 	})
 
 	serviceStore := &workloadMemoryStore{
@@ -6853,7 +6975,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		}},
 	}
 	servicePrewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-service", NodeID: "node-a", InstanceID: "inst-service", LeaseID: "lease-service"}}
-	startReconciliationDrainer(ctx, serviceStore, servicePrewarm, nil, nil, nil, clk, time.Second, 2, "project-a", 0)
+	startReconciliationDrainer(ctx, serviceStore, servicePrewarm, nil, nil, nil, nil, clk, time.Second, 2, "project-a", 0)
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := serviceStore.ListReconciliationTasks(context.Background(), "service-a")
@@ -6874,7 +6996,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		}},
 	}
 	serviceCatalogPrewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-catalog-service", NodeID: "node-a", InstanceID: "inst-catalog-service", LeaseID: "lease-catalog-service"}}
-	startReconciliationDrainer(ctx, serviceCatalogStore, serviceCatalogPrewarm, nil, reconcile.ConfigCatalogRefresher{Store: serviceCatalogStore, Presets: []domain.Preset{testPreset("catalog-service")}}, nil, clk, time.Second, 2, "project-a", 0)
+	startReconciliationDrainer(ctx, serviceCatalogStore, serviceCatalogPrewarm, nil, reconcile.ConfigCatalogRefresher{Store: serviceCatalogStore, Presets: []domain.Preset{testPreset("catalog-service")}}, nil, nil, clk, time.Second, 2, "project-a", 0)
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := serviceCatalogStore.ListReconciliationTasks(context.Background(), "service-needs-catalog")
@@ -7633,6 +7755,16 @@ func (s *workloadMemoryStore) SaveModelLocality(_ context.Context, locality doma
 	return nil
 }
 
+func (s *workloadMemoryStore) DeleteModelLocality(_ context.Context, id string) error {
+	for i := range s.localities {
+		if s.localities[i].ID == id {
+			s.localities = append(s.localities[:i], s.localities[i+1:]...)
+			return nil
+		}
+	}
+	return nil
+}
+
 func (s *workloadMemoryStore) SaveEngineProfile(_ context.Context, profile domain.EngineProfile) error {
 	for i := range s.engineProfiles {
 		if s.engineProfiles[i].ID == profile.ID {
@@ -7778,6 +7910,15 @@ func (r *recordingPresetRegistrar) RegisterPreset(preset domain.Preset) {
 	r.presets = append(r.presets, preset)
 }
 
+type recordingCatalogPresetRegistrar struct {
+	presets []domain.Preset
+}
+
+func (r *recordingCatalogPresetRegistrar) RegisterPreset(preset domain.Preset) error {
+	r.presets = append(r.presets, preset)
+	return nil
+}
+
 type prewarmRuntimeStore struct {
 	jobs      map[string]domain.Job
 	leases    map[string]domain.Lease
@@ -7835,16 +7976,19 @@ type recordingStageExecutor struct {
 	err      error
 }
 
-func (e *recordingStageExecutor) StageModel(_ context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error) {
+func (e *recordingStageExecutor) StageModel(_ context.Context, peer domain.Peer, preset domain.Preset) (ports.CatalogStageResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.called++
 	e.peers = append(e.peers, peer)
 	e.presets = append(e.presets, preset)
 	if e.err != nil {
-		return domain.ModelLocality{}, e.err
+		return ports.CatalogStageResult{}, e.err
 	}
-	return e.locality, nil
+	if e.locality.PresetID == "" {
+		e.locality.PresetID = preset.ID
+	}
+	return ports.CatalogStageResult{Preset: preset, Locality: e.locality}, nil
 }
 
 func (e *recordingStageExecutor) callCount() int {

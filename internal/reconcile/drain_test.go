@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"mycelium/internal/domain"
+	"mycelium/internal/ports"
 )
 
 func TestDrainAllowedTasksExecutesIncompatibilityAndSkipsBlocked(t *testing.T) {
@@ -495,9 +496,9 @@ func TestDrainAllowedTasksStagesArtifactThroughExecutor(t *testing.T) {
 		presets: map[string]domain.Preset{"preset-a": {ID: "preset-a", ModelRef: "model-a", ArtifactSizeMB: 123}},
 		nodes:   map[string]domain.Node{"node-a": {ID: "node-a", Address: "http://node-a.test"}},
 	}
-	stager := &fakeStageExecutor{locality: domain.ModelLocality{
-		ID:             "node-a:preset-a",
-		PresetID:       "preset-a",
+	stager := &fakeStageExecutor{stagePreset: domain.Preset{ID: "preset-a-node-a", ModelRef: "model-a", ArtifactSizeMB: 123, NodeID: "node-a"}, locality: domain.ModelLocality{
+		ID:             "node-a:preset-a-node-a",
+		PresetID:       "preset-a-node-a",
 		NodeID:         "node-a",
 		State:          domain.ModelLocalityReady,
 		ModelRef:       "model-a",
@@ -506,9 +507,10 @@ func TestDrainAllowedTasksStagesArtifactThroughExecutor(t *testing.T) {
 		Reason:         "catalog stage committed",
 		UpdatedAt:      time.Unix(51, 0).UTC(),
 	}}
+	registrar := &fakePresetRegistrar{}
 	now := time.Unix(50, 0).UTC()
 
-	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: now, Stage: stager})
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: now, Stage: stager, Registrar: registrar})
 	if err != nil {
 		t.Fatalf("DrainAllowedTasks: %v", err)
 	}
@@ -530,11 +532,17 @@ func TestDrainAllowedTasksStagesArtifactThroughExecutor(t *testing.T) {
 		t.Fatalf("plan = %+v", plan)
 	}
 	action := plan.Actions[0]
-	if action.Kind != domain.LocalityActionStage || action.PresetID != "preset-a" || action.NodeID != "node-a" || action.State != domain.ModelLocalityReady || action.ArtifactSizeMB != 123 {
+	if action.Kind != domain.LocalityActionStage || action.PresetID != "preset-a-node-a" || action.NodeID != "node-a" || action.State != domain.ModelLocalityReady || action.ArtifactSizeMB != 123 {
 		t.Fatalf("action = %+v", action)
 	}
-	if len(store.localities) != 1 || store.localities[0].ID != "node-a:preset-a" || store.localities[0].State != domain.ModelLocalityReady || !store.localities[0].Managed {
+	if len(store.localities) != 1 || store.localities[0].ID != "node-a:preset-a-node-a" || store.localities[0].State != domain.ModelLocalityReady || !store.localities[0].Managed {
 		t.Fatalf("localities = %+v", store.localities)
+	}
+	if got := store.presets["preset-a-node-a"]; got.ID != "preset-a-node-a" || got.NodeID != "node-a" {
+		t.Fatalf("staged preset not saved: %+v", got)
+	}
+	if len(registrar.presets) != 1 || registrar.presets[0].ID != "preset-a-node-a" || registrar.presets[0].NodeID != "node-a" {
+		t.Fatalf("registered presets = %+v", registrar.presets)
 	}
 }
 
@@ -875,21 +883,26 @@ func (e *fakeCapacityExecutor) RepairCapacity(_ context.Context, limit int) (Cap
 }
 
 type fakeStageExecutor struct {
-	calls    int
-	peer     domain.Peer
-	preset   domain.Preset
-	locality domain.ModelLocality
-	err      error
+	calls       int
+	peer        domain.Peer
+	preset      domain.Preset
+	stagePreset domain.Preset
+	locality    domain.ModelLocality
+	err         error
 }
 
-func (e *fakeStageExecutor) StageModel(_ context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error) {
+func (e *fakeStageExecutor) StageModel(_ context.Context, peer domain.Peer, preset domain.Preset) (ports.CatalogStageResult, error) {
 	e.calls++
 	e.peer = peer
 	e.preset = preset
 	if e.err != nil {
-		return domain.ModelLocality{}, e.err
+		return ports.CatalogStageResult{}, e.err
 	}
-	return e.locality, nil
+	stagePreset := e.stagePreset
+	if stagePreset.ID == "" {
+		stagePreset = preset
+	}
+	return ports.CatalogStageResult{Preset: stagePreset, Locality: e.locality}, nil
 }
 
 type fakeCatalogRefresher struct {
@@ -1046,6 +1059,14 @@ func (s *fakeTaskStore) Preset(_ context.Context, id string) (domain.Preset, err
 	return domain.Preset{}, errors.New("preset not found")
 }
 
+func (s *fakeTaskStore) SavePreset(_ context.Context, preset domain.Preset) error {
+	if s.presets == nil {
+		s.presets = map[string]domain.Preset{}
+	}
+	s.presets[preset.ID] = preset
+	return nil
+}
+
 func (s *fakeTaskStore) Node(_ context.Context, id string) (domain.Node, error) {
 	if node, ok := s.nodes[id]; ok {
 		return node, nil
@@ -1072,6 +1093,16 @@ func (s *fakeTaskStore) SaveModelLocality(_ context.Context, locality domain.Mod
 		}
 	}
 	s.localities = append(s.localities, locality)
+	return nil
+}
+
+func (s *fakeTaskStore) DeleteModelLocality(_ context.Context, id string) error {
+	for i := range s.localities {
+		if s.localities[i].ID == id {
+			s.localities = append(s.localities[:i], s.localities[i+1:]...)
+			return nil
+		}
+	}
 	return nil
 }
 
