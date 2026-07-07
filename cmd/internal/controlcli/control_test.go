@@ -3218,6 +3218,7 @@ func TestGatewayRoutesIncludesCatalogOnlyStorePresets(t *testing.T) {
 		Backend:       domain.BackendLlamaCpp,
 		ContextLength: 1024,
 		NodeID:        "b70",
+		GeneratedBy:   "catalog-source",
 	}); err != nil {
 		t.Fatalf("SavePreset: %v", err)
 	}
@@ -3256,6 +3257,9 @@ func TestGatewayRoutesIncludesCatalogOnlyStorePresets(t *testing.T) {
 	}
 	if !strings.Contains(output, "route\tproject=-\tmodel=adopted-model\tpreset=adopted-b70\tnode=b70\tbackend=llamacpp") {
 		t.Fatalf("gateway routes did not include catalog-only adopted preset:\n%s", output)
+	}
+	if !strings.Contains(output, "readiness=engine_readiness_missing") || !strings.Contains(output, "generated_by=catalog-source") {
+		t.Fatalf("gateway routes did not expose generated preset readiness boundary:\n%s", output)
 	}
 	if got := strings.Count(output, "preset=configured"); got != 1 {
 		t.Fatalf("configured project preset duplicated %d times:\n%s", got, output)
