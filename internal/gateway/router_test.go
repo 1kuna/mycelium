@@ -21,6 +21,7 @@ import (
 	"mycelium/internal/ports"
 	"mycelium/internal/reconcile"
 	"mycelium/internal/scheduler"
+	"mycelium/internal/serving"
 	"mycelium/test/fixtures"
 	"mycelium/test/mocks"
 )
@@ -623,7 +624,7 @@ func TestRouterUsesModelServiceHeldLeaseForHeaderlessRequest(t *testing.T) {
 	inst.Addr = upstream
 	lease := domain.Lease{ID: "lease-service", JobID: "svc-job", NodeID: inst.NodeID, InstanceID: inst.ID}
 	service := domain.ModelService{
-		ID:             "service-a",
+		ID:             serving.ServiceID("project-a", "served-model", 4096),
 		Model:          "served-model",
 		Project:        "project-a",
 		ContextRequest: 4096,
@@ -670,6 +671,93 @@ func TestRouterUsesModelServiceHeldLeaseForHeaderlessRequest(t *testing.T) {
 	}
 	if len(store.deletedLeases) != 0 || !store.sawJobStatus(domain.JobRunning) {
 		t.Fatalf("managed service request should keep held lease running: jobs=%+v deleted=%+v", store.jobs, store.deletedLeases)
+	}
+}
+
+func TestRouterModelServiceWithoutUsableCapacityReturnsRetryableDemand(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "preset-service"
+		p.ModelRef = "model-service"
+		p.Aliases = []string{"served-model"}
+	})
+	service := domain.ModelService{
+		ID:             serving.ServiceID("project-a", "served-model", 4096),
+		Model:          "served-model",
+		Project:        "project-a",
+		ContextRequest: 4096,
+		MinReplicas:    1,
+		MaxReplicas:    1,
+		Status:         domain.ModelServiceActive,
+	}
+	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
+	store := &gatewayRuntimeStore{services: []domain.ModelService{service}}
+	router.Runtime = &scheduler.Service{Placer: router.Placer, Fleet: router.Fleet, Nodes: router.Nodes, Store: store, Queue: scheduler.NewQueue(router.Clock), Clock: router.Clock}
+
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"served-model","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.Project = "project-a"
+	req.ContextRequest = 1024
+	_, err = router.Route(context.Background(), req)
+	var noInstance noInstanceAvailableError
+	if err == nil || !errors.As(err, &noInstance) || !strings.Contains(err.Error(), "model service has no gateway-usable held capacity") {
+		t.Fatalf("err = %v", err)
+	}
+	if noInstance.retryAfterSeconds() != 1 || noInstance.Decision.Action != domain.ActionQueued {
+		t.Fatalf("noInstance = %+v", noInstance)
+	}
+	if len(store.services) != 1 || store.services[0].DemandCount != 1 || store.services[0].LastDemandJobID == "" || store.services[0].LastReason != string(domain.ActionQueued) {
+		t.Fatalf("service demand was not bumped: %+v", store.services)
+	}
+}
+
+func TestRouterModelServiceStaleHeldLeaseDoesNotFallbackToNormalAdmission(t *testing.T) {
+	preset := fixtures.MakePreset(func(p *domain.Preset) {
+		p.ID = "preset-service"
+		p.ModelRef = "model-service"
+		p.Aliases = []string{"served-model"}
+	})
+	service := domain.ModelService{
+		ID:             serving.ServiceID("project-a", "served-model", 4096),
+		Model:          "served-model",
+		Project:        "project-a",
+		ContextRequest: 4096,
+		MinReplicas:    1,
+		MaxReplicas:    1,
+		Status:         domain.ModelServiceActive,
+	}
+	job := domain.Job{
+		ID:             "svc-job",
+		ParentID:       service.ID,
+		Model:          service.Model,
+		PresetID:       preset.ID,
+		Project:        service.Project,
+		ContextRequest: service.ContextRequest,
+		Status:         domain.JobRunning,
+		Result: &domain.JobResult{
+			LeaseID:  "missing-lease",
+			NodeID:   "node-a",
+			PresetID: preset.ID,
+		},
+	}
+	router := newTestRouter(preset, domain.FleetSnapshot{}, staticResolver{})
+	store := &gatewayRuntimeStore{services: []domain.ModelService{service}, jobs: []domain.Job{job}}
+	router.Runtime = &scheduler.Service{Placer: router.Placer, Fleet: router.Fleet, Nodes: router.Nodes, Store: store, Queue: scheduler.NewQueue(router.Clock), Clock: router.Clock}
+
+	req, err := translate.ParseOpenAIChat([]byte(`{"model":"served-model","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("ParseOpenAIChat: %v", err)
+	}
+	req.Project = "project-a"
+	req.ContextRequest = 1024
+	_, err = router.Route(context.Background(), req)
+	var noInstance noInstanceAvailableError
+	if err == nil || !errors.As(err, &noInstance) || !strings.Contains(err.Error(), "lease \"missing-lease\" is not active") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(store.services) != 1 || store.services[0].DemandCount != 1 || store.services[0].LastDemandJobID == "" {
+		t.Fatalf("service demand was not bumped: %+v", store.services)
 	}
 }
 

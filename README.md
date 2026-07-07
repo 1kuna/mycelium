@@ -246,8 +246,19 @@ vLLM tool-parser flags then report `readiness=tool_flags_missing` or
 `readiness=auto_tool_flags_missing` instead of looking interchangeable with
 plain chat routes.
 
-External tools that run their own worker pools should not guess worker counts
-from a project batch size. Ask Mycelium for a launch envelope first:
+The ordinary consumer path is gateway-native. Send an OpenAI-compatible request
+to the Mycelium gateway with the model alias, project token, and any real
+resource envelope such as `X-Myc-Context-Cap`. If matching service-held
+capacity is not currently usable, the gateway records or bumps desired
+`ModelService` demand, the daemon/reconciler creates allowed catalog/prewarm
+work, and the request receives a typed `503 Service Unavailable` with
+`Retry-After` instead of silently falling back to stale capacity or requiring a
+consumer to invent worker counts. Once held service capacity exists, normal
+headerless requests for that model route through it and response headers include
+`X-Myc-Model-Service`.
+
+External tools that still run their own worker pools can use
+`gateway allocate` as a debug/proof envelope, not as a reservation:
 
 ```bash
 myce gateway allocate \
@@ -267,14 +278,14 @@ reasons, and a generic external-tool contract. With `--out`, it also writes a
 secret-free `allocation-plan.json` plus a shell-sourceable `runner.env` with
 `MYCELIUM_OPENAI_BASE_URL`, `MYCELIUM_MODEL`,
 `MYCELIUM_ALLOCATED_WORKERS`, `MYCELIUM_CONTEXT_HEADER`, and
-`MYCELIUM_CONTEXT_CAP`. For a CLI-style tool, source the generated env file,
-use the returned worker count for its worker argument, and send the returned
-context cap as `X-Myc-Context-Cap`. If the synchronous gateway later returns
-`503` with `Retry-After`, pause the affected worker and honor the backpressure;
-do not spawn replacement requests above the allocation. The allocation plan has
-a short `stale_after_seconds` hint; refresh it before launch and after repeated
-backpressure. Immediately before launching an external tool, verify the saved
-plan:
+`MYCELIUM_CONTEXT_CAP`. For a controlled CLI-style proof, source the generated
+env file, use the returned worker count for its worker argument, and send the
+returned context cap as `X-Myc-Context-Cap`. If the synchronous gateway later
+returns `503` with `Retry-After`, pause the affected worker and honor the
+backpressure; do not spawn replacement requests above the allocation. The
+allocation plan has a short `stale_after_seconds` hint; refresh it before
+launch and after repeated backpressure. Immediately before launching an
+external tool, verify the saved plan:
 
 ```bash
 myce gateway allocate --verify-plan /tmp/mycelium-allocation/allocation-plan.json --live
@@ -282,9 +293,10 @@ myce gateway allocate --verify-plan /tmp/mycelium-allocation/allocation-plan.jso
 
 Verification exits non-zero when the plan is expired, the live catalog no
 longer satisfies it, or the current allocation no longer covers the planned
-worker count. The allocation report is not a held lease or reservation.
-Consumers that need Mycelium to hold capacity should use the explicit workload
-lane. After a workload is admitted and running with an active lease, a
+worker count. The allocation report is not a held lease or reservation and is
+not the product path for sustained consumers. Consumers that need Mycelium to
+hold capacity directly should use the explicit workload lane. After a workload
+is admitted and running with an active lease, a
 non-streaming OpenAI-compatible gateway request can present the held capacity
 with:
 
@@ -722,9 +734,11 @@ rather than silently accepting hidden async work. Consumers that need queued
 admission should use the explicit workload lane above and preserve the failed
 gateway response or preflight artifact as availability evidence.
 
-To spread one model across every machine that can safely hold it (for external
-OpenAI-compatible batch consumers such as OCR CLIs), plan and launch a replica
-worker pool:
+The older pool commands remain as transitional proof and emergency cleanup
+tools while gateway-native `ModelService` supply replaces consumer-managed
+worker pools. Use them to debug fit math, held leases, and cleanup behavior;
+do not make new sustained consumer integrations depend on a static pool-state
+file:
 
 ```bash
 myce pool plan --model <model-or-alias> \
@@ -759,7 +773,7 @@ reservations.
 
 A held worker's lease reserves its instance's admission envelope, so normal
 gateway admission will refuse that capacity (`concurrency envelope is full`) —
-held capacity is consumed through the leased path, not normal admission.
+pool-held capacity is consumed through the leased path, not normal admission.
 Header-aware clients send `X-Myc-Workload`, `X-Myc-Lease`, and
 `X-Myc-Lease-Hold: true`; with the hold header the gateway serves the request
 on the reserved lease and keeps the workload running for reuse instead of
@@ -772,16 +786,16 @@ myce pool proxy --state /tmp/pool-state.json --url <gateway-url> \
   --gateway-token-env MYCELIUM_GATEWAY_TOKEN --listen 127.0.0.1:8600
 ```
 
-Point the consumer's base URL at `http://127.0.0.1:8600/v1`. The proxy rotates
-requests across held workers, injects the lease headers, overrides any
+Point a test consumer's base URL at `http://127.0.0.1:8600/v1`. The proxy
+rotates requests across held workers, injects the lease headers, overrides any
 caller-supplied Mycelium headers, and fails over to the next held worker when
 a lease is refused. Before it prints a usable base URL, the proxy verifies its
 gateway token with an authenticated `GET /v1/models` against the target
 gateway; project-scoped pool state must match the gateway's authenticated
 `X-Myc-Project` echo. Use a token that is valid for the target gateway, not a
 peer-local token from another config. Leased gateway execution is
-non-streaming; batch consumers should disable streaming. Release everything
-with `myce pool down` when the run finishes.
+non-streaming; batch proof consumers should disable streaming. Release
+everything with `myce pool down` when the run finishes.
 
 For partial consumer batches, preserve one `preflight.json` or response-header
 set per failed or timed-out row. `debug job --preflight --owner-telemetry`

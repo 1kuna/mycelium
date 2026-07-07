@@ -744,10 +744,15 @@ func (r *Router) routeWithModelService(ctx context.Context, req translate.Ingres
 		return RouteResponse{}, false, err
 	}
 	project := r.projectForRequest(req)
+	var matchedService domain.ModelService
+	matched := false
+	var lastLeaseErr error
 	for _, service := range services {
 		if !modelServiceMatchesRequest(service, req, project) {
 			continue
 		}
+		matchedService = service
+		matched = true
 		for _, job := range jobs {
 			if job.ParentID != service.ID || job.Status != domain.JobRunning || job.Result == nil || job.Result.LeaseID == "" || job.Result.Terminal {
 				continue
@@ -760,6 +765,7 @@ func (r *Router) routeWithModelService(ctx context.Context, req translate.Ingres
 			if err != nil {
 				var statusErr interface{ StatusCode() int }
 				if errors.As(err, &statusErr) && statusErr.StatusCode() >= http.StatusConflict && statusErr.StatusCode() < http.StatusInternalServerError {
+					lastLeaseErr = err
 					continue
 				}
 				return RouteResponse{}, true, err
@@ -769,6 +775,35 @@ func (r *Router) routeWithModelService(ctx context.Context, req translate.Ingres
 			}
 			resp.Header.Set("X-Myc-Model-Service", service.ID)
 			return resp, true, nil
+		}
+	}
+	if matched {
+		job := r.jobFromIngress(req, 1)
+		if project != "" {
+			job.Project = project
+		}
+		job.ContextRequest = maxGatewayInt(job.ContextRequest, matchedService.ContextRequest)
+		decision := domain.PlacementDecision{
+			JobID:  job.ID,
+			Action: domain.ActionQueued,
+			Trace: []domain.TraceStep{{
+				Step:   "model-service",
+				Result: fmt.Sprintf("service %s has no gateway-usable held capacity", matchedService.ID),
+			}},
+		}
+		reason := "model service has no gateway-usable held capacity"
+		if lastLeaseErr != nil {
+			reason = reason + ": " + lastLeaseErr.Error()
+		}
+		if err := r.persistGatewayReconciliationDemand(ctx, job, decision, domain.Preset{}); err != nil {
+			return RouteResponse{}, true, err
+		}
+		return RouteResponse{}, true, noInstanceAvailableError{
+			JobID:      job.ID,
+			RetryAfter: time.Second,
+			Reason:     reason,
+			Decision:   decision,
+			Attempts:   1,
 		}
 	}
 	return RouteResponse{}, false, nil
