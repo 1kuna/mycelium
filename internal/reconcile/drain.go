@@ -36,14 +36,15 @@ type taskJobReader interface {
 }
 
 type DrainOptions struct {
-	JobID   string
-	Limit   int
-	Now     time.Time
-	Project string
-	Prewarm PrewarmExecutor
-	Catalog CatalogRefresher
-	Stage   ports.PeerCatalogStager
-	Kinds   []TaskKind
+	JobID    string
+	Limit    int
+	Now      time.Time
+	Project  string
+	Prewarm  PrewarmExecutor
+	Capacity CapacityRepairExecutor
+	Catalog  CatalogRefresher
+	Stage    ports.PeerCatalogStager
+	Kinds    []TaskKind
 }
 
 type DrainReport struct {
@@ -73,6 +74,15 @@ type PrewarmResult struct {
 	NodeID     string `json:"node_id,omitempty"`
 	InstanceID string `json:"instance_id,omitempty"`
 	LeaseID    string `json:"lease_id,omitempty"`
+}
+
+type CapacityRepairExecutor interface {
+	RepairCapacity(ctx context.Context, limit int) (CapacityRepairResult, error)
+}
+
+type CapacityRepairResult struct {
+	Drained     int      `json:"drained"`
+	WorkloadIDs []string `json:"workload_ids,omitempty"`
 }
 
 type CatalogRefresher interface {
@@ -358,6 +368,26 @@ func drainTask(ctx context.Context, store TaskStore, task domain.ReconciliationT
 		done := transitionTask(running, domain.ReconciliationTaskDone, "", "verified saved engine readiness", now)
 		_ = store.SaveReconciliationTask(ctx, done)
 		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "verify_engine_readiness"}
+	case TaskWaitCapacity:
+		result, err := repairCapacity(ctx, opts.Capacity, opts.Limit)
+		if err != nil {
+			failed := transitionTask(running, domain.ReconciliationTaskFailed, err.Error(), "capacity repair failed", now)
+			_ = store.SaveReconciliationTask(ctx, failed)
+			return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: failed.Status, Error: err.Error()}
+		}
+		if result.Drained == 0 {
+			blocked := transitionTask(running, domain.ReconciliationTaskBlocked, "", "capacity repair found no runnable queued work", now)
+			blocked.Blocker = "capacity_unavailable"
+			_ = store.SaveReconciliationTask(ctx, blocked)
+			return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: blocked.Status, Action: "wait_capacity", Error: blocked.Blocker}
+		}
+		done := transitionTask(running, domain.ReconciliationTaskDone, "", "drained queued work after capacity became available", now)
+		_ = store.SaveReconciliationTask(ctx, done)
+		out := DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: done.Status, Action: "wait_capacity"}
+		if len(result.WorkloadIDs) == 1 {
+			out.WorkloadID = result.WorkloadIDs[0]
+		}
+		return out
 	case TaskPrewarmReplica:
 		result, err := prewarmReplica(ctx, store, running, opts)
 		if err != nil {
@@ -398,6 +428,16 @@ func drainTask(ctx context.Context, store TaskStore, task domain.ReconciliationT
 		_ = store.SaveReconciliationTask(ctx, failed)
 		return DrainTaskResult{TaskID: task.ID, Kind: task.Kind, Status: failed.Status, Error: err}
 	}
+}
+
+func repairCapacity(ctx context.Context, executor CapacityRepairExecutor, limit int) (CapacityRepairResult, error) {
+	if executor == nil {
+		return CapacityRepairResult{}, fmt.Errorf("capacity repair executor is not configured; provide an explicit workload queue drain path")
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	return executor.RepairCapacity(ctx, limit)
 }
 
 func prewarmReplica(ctx context.Context, store TaskStore, task domain.ReconciliationTaskRecord, opts DrainOptions) (PrewarmResult, error) {

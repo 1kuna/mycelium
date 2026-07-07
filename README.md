@@ -344,8 +344,9 @@ Use `--save` to persist those tasks into the control store as `allowed` or
 automatically when admission or queue-drain evidence includes a scheduler
 decision. When the peer's control store supports the reconciliation executor it
 also drains the safe task classes with registered executors immediately:
-`record_incompatibility`, `stage_model_artifact`, `verify_engine_readiness`,
-and `refresh_catalog` when the matching lower-level executor is registered.
+`record_incompatibility`, `wait_capacity`, `stage_model_artifact`,
+`verify_engine_readiness`, and `refresh_catalog` when the matching lower-level
+executor is registered.
 Live-affecting work such as prewarming replicas and owner repair remains
 explicit and must not be marked done unless the lower-level action actually
 succeeds.
@@ -358,9 +359,13 @@ staging executor is registered, the task records the locality plan and fails
 loudly instead of claiming the artifact moved.
 `verify_engine_readiness` runs the existing strict engine readiness checker
 against saved engine profiles and fails if a ready compatibility-keyed profile
-is missing or unready. `prewarm_replica` can execute through the existing
-workload admission/finish path when `reconcile drain` is given an explicit peer
-endpoint:
+is missing or unready. Daemon `wait_capacity` repair calls the existing
+explicit workload queue drain path; it is marked done only when queued work
+actually moves, and it is marked blocked with `capacity_unavailable` when no
+runnable queued work can be admitted. Manual drains without that capacity
+executor fail loudly instead of pretending capacity changed. `prewarm_replica`
+can execute through the existing workload admission/finish path when
+`reconcile drain` is given an explicit peer endpoint:
 
 ```bash
 myce reconcile drain --db <control.db> --job <job-id> \

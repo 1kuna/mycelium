@@ -6781,7 +6781,8 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		UpdatedAt:          time.Unix(1, 0).UTC(),
 	}}
 	prewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-recon-prewarm", NodeID: "node-a", InstanceID: "inst-a", LeaseID: "lease-a"}}
-	startReconciliationDrainer(ctx, reconcileStore, prewarm, reconcile.ConfigCatalogRefresher{Store: reconcileStore, Presets: []domain.Preset{testPreset("refreshed")}}, nil, clk, time.Second, 3, "project-a")
+	capacity := &recordingCapacityRepairExecutor{}
+	startReconciliationDrainer(ctx, reconcileStore, prewarm, capacity, reconcile.ConfigCatalogRefresher{Store: reconcileStore, Presets: []domain.Preset{testPreset("refreshed")}}, nil, clk, time.Second, 3, "project-a")
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := reconcileStore.ListReconciliationTasks(context.Background(), "")
@@ -6795,7 +6796,9 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		_, presetErr := reconcileStore.Preset(context.Background(), "refreshed")
 		return byID["recon-prewarm"].Status == domain.ReconciliationTaskDone &&
 			byID["recon-refresh"].Status == domain.ReconciliationTaskDone &&
-			byID["recon-wait"].Status == domain.ReconciliationTaskAllowed &&
+			byID["recon-wait"].Status == domain.ReconciliationTaskBlocked &&
+			byID["recon-wait"].Blocker == "capacity_unavailable" &&
+			capacity.callCount() == 1 &&
 			presetErr == nil
 	})
 
@@ -6827,7 +6830,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		Reason:         "catalog stage committed",
 		UpdatedAt:      time.Unix(1, 0).UTC(),
 	}}
-	startReconciliationDrainer(ctx, stageStore, nil, nil, stage, clk, time.Second, 1, "project-a")
+	startReconciliationDrainer(ctx, stageStore, nil, nil, nil, stage, clk, time.Second, 1, "project-a")
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := stageStore.ListReconciliationTasks(context.Background(), "")
@@ -6850,7 +6853,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		}},
 	}
 	servicePrewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-service", NodeID: "node-a", InstanceID: "inst-service", LeaseID: "lease-service"}}
-	startReconciliationDrainer(ctx, serviceStore, servicePrewarm, nil, nil, clk, time.Second, 2, "project-a")
+	startReconciliationDrainer(ctx, serviceStore, servicePrewarm, nil, nil, nil, clk, time.Second, 2, "project-a")
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := serviceStore.ListReconciliationTasks(context.Background(), "service-a")
@@ -6871,7 +6874,7 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		}},
 	}
 	serviceCatalogPrewarm := &recordingPrewarmExecutor{result: reconcile.PrewarmResult{WorkloadID: "reconcile-prewarm-catalog-service", NodeID: "node-a", InstanceID: "inst-catalog-service", LeaseID: "lease-catalog-service"}}
-	startReconciliationDrainer(ctx, serviceCatalogStore, serviceCatalogPrewarm, reconcile.ConfigCatalogRefresher{Store: serviceCatalogStore, Presets: []domain.Preset{testPreset("catalog-service")}}, nil, clk, time.Second, 2, "project-a")
+	startReconciliationDrainer(ctx, serviceCatalogStore, serviceCatalogPrewarm, nil, reconcile.ConfigCatalogRefresher{Store: serviceCatalogStore, Presets: []domain.Preset{testPreset("catalog-service")}}, nil, clk, time.Second, 2, "project-a")
 	waitForCondition(t, func() bool {
 		clk.Advance(time.Second)
 		tasks, err := serviceCatalogStore.ListReconciliationTasks(context.Background(), "service-needs-catalog")
@@ -6916,6 +6919,33 @@ func TestStartRegistryHeartbeatQueueAndOptimizerLoops(t *testing.T) {
 		return err == nil && len(recs) == 1
 	})
 	cancel()
+}
+
+func TestSchedulerCapacityRepairExecutorDrainsQueue(t *testing.T) {
+	drainer := &recordingSchedulerQueueDrainer{
+		results: []scheduler.Result{
+			{Decision: domain.PlacementDecision{JobID: "job-a"}},
+			{Decision: domain.PlacementDecision{JobID: "job-b"}},
+		},
+	}
+
+	result, err := schedulerCapacityRepairExecutor{runtime: drainer}.RepairCapacity(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("RepairCapacity: %v", err)
+	}
+	if drainer.limit != 2 {
+		t.Fatalf("Drain limit = %d, want 2", drainer.limit)
+	}
+	if result.Drained != 2 || !reflect.DeepEqual(result.WorkloadIDs, []string{"job-a", "job-b"}) {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestSchedulerCapacityRepairExecutorRequiresRuntime(t *testing.T) {
+	_, err := schedulerCapacityRepairExecutor{}.RepairCapacity(context.Background(), 1)
+	if err == nil || !strings.Contains(err.Error(), "scheduler runtime is required") {
+		t.Fatalf("RepairCapacity err = %v", err)
+	}
 }
 
 func serverURL(r *http.Request) string {
@@ -7640,6 +7670,45 @@ func (e *recordingPrewarmExecutor) callCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.called
+}
+
+type recordingCapacityRepairExecutor struct {
+	mu     sync.Mutex
+	called int
+	limits []int
+	result reconcile.CapacityRepairResult
+	err    error
+}
+
+func (e *recordingCapacityRepairExecutor) RepairCapacity(_ context.Context, limit int) (reconcile.CapacityRepairResult, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.called++
+	e.limits = append(e.limits, limit)
+	if e.err != nil {
+		return reconcile.CapacityRepairResult{}, e.err
+	}
+	return e.result, nil
+}
+
+func (e *recordingCapacityRepairExecutor) callCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.called
+}
+
+type recordingSchedulerQueueDrainer struct {
+	limit   int
+	results []scheduler.Result
+	err     error
+}
+
+func (d *recordingSchedulerQueueDrainer) Drain(_ context.Context, limit int) ([]scheduler.Result, error) {
+	d.limit = limit
+	if d.err != nil {
+		return nil, d.err
+	}
+	return d.results, nil
 }
 
 type recordingStageExecutor struct {

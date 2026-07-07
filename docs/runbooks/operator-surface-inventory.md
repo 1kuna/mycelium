@@ -55,8 +55,10 @@ operator tools. They should not be the ordinary path for consumers.
   fails loudly. This absorbs the common `add-model` import step into the
   daemon-owned demand-to-catalog path; `add-model` remains an explicit
   debug/import escape hatch.
-- Catalog refresh, model staging, engine readiness, and prewarm tasks are now
-  daemon-executed when their lower-level executors are registered. Model staging
+- Catalog refresh, capacity repair, model staging, engine readiness, and
+  prewarm tasks are now daemon-executed when their lower-level executors are
+  registered. `wait_capacity` uses the explicit workload queue drain path and
+  blocks with `capacity_unavailable` when no queued work can move. Model staging
   uses the peer catalog-stage RPC rather than requiring a normal operator to run
   `models locality apply`; that command remains a debug/emergency escape hatch.
 - Pool/proxy and allocation-plan commands should stay out of consumer runbooks
