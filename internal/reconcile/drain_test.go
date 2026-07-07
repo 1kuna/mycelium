@@ -342,20 +342,34 @@ func TestDrainAllowedTasksFailsCatalogRefreshActionFailure(t *testing.T) {
 	}
 }
 
-func TestDrainAllowedTasksPlansArtifactStaging(t *testing.T) {
+func TestDrainAllowedTasksStagesArtifactThroughExecutor(t *testing.T) {
 	store := &fakeTaskStore{
 		tasks:   []domain.ReconciliationTaskRecord{taskRecord("allowed-stage", string(TaskStageModelArtifact), domain.ReconciliationTaskAllowed)},
 		presets: map[string]domain.Preset{"preset-a": {ID: "preset-a", ModelRef: "model-a", ArtifactSizeMB: 123}},
-		nodes:   map[string]domain.Node{"node-a": {ID: "node-a"}},
+		nodes:   map[string]domain.Node{"node-a": {ID: "node-a", Address: "http://node-a.test"}},
 	}
+	stager := &fakeStageExecutor{locality: domain.ModelLocality{
+		ID:             "node-a:preset-a",
+		PresetID:       "preset-a",
+		NodeID:         "node-a",
+		State:          domain.ModelLocalityReady,
+		ModelRef:       "model-a",
+		ArtifactSizeMB: 123,
+		Managed:        true,
+		Reason:         "catalog stage committed",
+		UpdatedAt:      time.Unix(51, 0).UTC(),
+	}}
 	now := time.Unix(50, 0).UTC()
 
-	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: now})
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: now, Stage: stager})
 	if err != nil {
 		t.Fatalf("DrainAllowedTasks: %v", err)
 	}
-	if report.Drained != 1 || report.Results[0].Status != domain.ReconciliationTaskDone || report.Results[0].Action != "plan_model_artifact_stage" {
+	if report.Drained != 1 || report.Results[0].Status != domain.ReconciliationTaskDone || report.Results[0].Action != "stage_model_artifact" {
 		t.Fatalf("report = %+v", report)
+	}
+	if stager.calls != 1 || stager.peer.ID != "node-a" || stager.preset.ID != "preset-a" {
+		t.Fatalf("stager call count=%d peer=%+v preset=%+v", stager.calls, stager.peer, stager.preset)
 	}
 	done := store.taskByID("allowed-stage")
 	if done.Status != domain.ReconciliationTaskDone || len(done.Events) != 2 {
@@ -369,10 +383,36 @@ func TestDrainAllowedTasksPlansArtifactStaging(t *testing.T) {
 		t.Fatalf("plan = %+v", plan)
 	}
 	action := plan.Actions[0]
-	if action.Kind != domain.LocalityActionStage || action.PresetID != "preset-a" || action.NodeID != "node-a" || action.State != domain.ModelLocalityPlanned || action.ArtifactSizeMB != 123 {
+	if action.Kind != domain.LocalityActionStage || action.PresetID != "preset-a" || action.NodeID != "node-a" || action.State != domain.ModelLocalityReady || action.ArtifactSizeMB != 123 {
 		t.Fatalf("action = %+v", action)
 	}
-	if len(store.localities) != 1 || store.localities[0].ID != "node-a:preset-a" || store.localities[0].State != domain.ModelLocalityPlanned || !store.localities[0].Managed {
+	if len(store.localities) != 1 || store.localities[0].ID != "node-a:preset-a" || store.localities[0].State != domain.ModelLocalityReady || !store.localities[0].Managed {
+		t.Fatalf("localities = %+v", store.localities)
+	}
+}
+
+func TestDrainAllowedTasksFailsStageWithoutExecutorAfterRecordingPlan(t *testing.T) {
+	store := &fakeTaskStore{
+		tasks:   []domain.ReconciliationTaskRecord{taskRecord("allowed-stage", string(TaskStageModelArtifact), domain.ReconciliationTaskAllowed)},
+		presets: map[string]domain.Preset{"preset-a": {ID: "preset-a", ModelRef: "model-a", ArtifactSizeMB: 123}},
+		nodes:   map[string]domain.Node{"node-a": {ID: "node-a", Address: "http://node-a.test"}},
+	}
+
+	report, err := DrainAllowedTasks(context.Background(), store, DrainOptions{Now: time.Unix(55, 0).UTC()})
+	if err != nil {
+		t.Fatalf("DrainAllowedTasks: %v", err)
+	}
+	if report.Results[0].Status != domain.ReconciliationTaskFailed || !strings.Contains(report.Results[0].Error, "stage model artifact executor is not configured") {
+		t.Fatalf("report = %+v", report)
+	}
+	failed := store.taskByID("allowed-stage")
+	if failed.Status != domain.ReconciliationTaskFailed {
+		t.Fatalf("failed task = %+v", failed)
+	}
+	if len(store.localityPlans) != 1 || store.localityPlans[0].Actions[0].State != domain.ModelLocalityPlanned {
+		t.Fatalf("locality plan = %+v", store.localityPlans)
+	}
+	if len(store.localities) != 1 || store.localities[0].State != domain.ModelLocalityPlanned {
 		t.Fatalf("localities = %+v", store.localities)
 	}
 }
@@ -576,6 +616,24 @@ func (e *fakePrewarmExecutor) PrewarmReplica(_ context.Context, job domain.Job) 
 		return PrewarmResult{}, e.err
 	}
 	return e.result, nil
+}
+
+type fakeStageExecutor struct {
+	calls    int
+	peer     domain.Peer
+	preset   domain.Preset
+	locality domain.ModelLocality
+	err      error
+}
+
+func (e *fakeStageExecutor) StageModel(_ context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error) {
+	e.calls++
+	e.peer = peer
+	e.preset = preset
+	if e.err != nil {
+		return domain.ModelLocality{}, e.err
+	}
+	return e.locality, nil
 }
 
 type fakeCatalogRefresher struct {

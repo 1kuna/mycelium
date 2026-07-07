@@ -53,9 +53,10 @@ operator tools. They should not be the ordinary path for consumers.
   absorbs the common `add-model` import step into the daemon-owned
   demand-to-catalog path; `add-model` remains an explicit debug/import escape
   hatch.
-- Catalog refresh, model staging, engine readiness, and prewarm tasks should be
-  daemon-executed when policy allows, with audit evidence and loud blockers
-  when live mutation or credentials are required.
+- Catalog refresh, model staging, engine readiness, and prewarm tasks are now
+  daemon-executed when their lower-level executors are registered. Model staging
+  uses the peer catalog-stage RPC rather than requiring a normal operator to run
+  `models locality apply`; that command remains a debug/emergency escape hatch.
 - Pool/proxy and allocation-plan commands should stay out of consumer runbooks
   except as temporary compatibility tools for external clients that cannot yet
   use the gateway-native service path.

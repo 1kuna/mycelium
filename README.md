@@ -342,16 +342,17 @@ automatically when admission or queue-drain evidence includes a scheduler
 decision. When the peer's control store supports the reconciliation executor it
 also drains the safe task classes with registered executors immediately:
 `record_incompatibility`, `stage_model_artifact`, `verify_engine_readiness`,
-and `refresh_catalog` when a configured preset catalog source is available.
+and `refresh_catalog` when the matching lower-level executor is registered.
 Live-affecting work such as prewarming replicas and owner repair remains
 explicit and must not be marked done unless the lower-level action actually
 succeeds.
 `myce reconcile drain` consumes only `allowed` records,
 records `running` to terminal status transitions, and currently executes
-`record_incompatibility` by writing a durable incompatibility fact and
-`stage_model_artifact` by writing a planned `models locality` stage action plus
-a planned model-locality record. The stage task does not copy artifacts itself;
-it feeds the existing `myce models locality apply` peer-RPC path.
+`record_incompatibility` by writing a durable incompatibility fact.
+The daemon executes `stage_model_artifact` through the same authenticated
+peer catalog-stage RPC used by the explicit locality apply command; if no
+staging executor is registered, the task records the locality plan and fails
+loudly instead of claiming the artifact moved.
 `verify_engine_readiness` runs the existing strict engine readiness checker
 against saved engine profiles and fails if a ready compatibility-keyed profile
 is missing or unready. `prewarm_replica` can execute through the existing

@@ -105,17 +105,19 @@ handoff.
   longer depends on a manual placement-file export before background work. Peers
   with a reconciliation-capable control store immediately drain the safe
   store-local task classes from workload placement evidence:
-  `record_incompatibility`, `stage_model_artifact`, and
-  `verify_engine_readiness`. Live-affecting tasks stay explicit rather than
-  being silently marked done.
+  `record_incompatibility` and `verify_engine_readiness`. Stage tasks are left
+  for the daemon reconciler so it can use the registered peer catalog-stage
+  executor instead of mutating artifacts from a request path. Live-affecting
+  tasks stay explicit rather than being silently marked done.
   `myce reconcile drain` consumes allowed tasks and currently executes
   `record_incompatibility` by writing a durable incompatibility fact with
   running/done or running/failed task history.
-  It also executes `stage_model_artifact` by writing a planned locality stage
-  action and planned model-locality record for the existing locality apply path;
-  it does not copy artifacts to live peers itself. `verify_engine_readiness`
-  drains through the existing strict engine readiness checker and requires a
-  saved ready compatibility-keyed engine profile. `prewarm_replica` can now
+  The daemon executes `stage_model_artifact` through the existing authenticated
+  peer catalog-stage RPC after writing locality-plan audit evidence; without a
+  registered staging executor the task fails loudly and is not marked done.
+  `verify_engine_readiness` drains through the existing strict engine readiness
+  checker and requires a saved ready compatibility-keyed engine profile.
+  `prewarm_replica` can now
   drain through the existing workload admission/finish path when an explicit peer
   endpoint and RPC credential are supplied; without that lower-level endpoint it
   fails loudly and is not marked done. `refresh_catalog` now has a configured
