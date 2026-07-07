@@ -41,9 +41,11 @@ operator tools. They should not be the ordinary path for consumers.
 
 ## Next Subtractions
 
-- Gateway demand should create or bump `ModelService` desired state directly
-  when policy allows it, instead of requiring `models service ensure` before a
-  normal request can trigger supply.
+- Gateway demand now creates or bumps `ModelService` desired state directly
+  when a normal request finds matching service capacity unavailable or the
+  requested model is not ready in the local live catalog. `models service
+  ensure` remains an explicit control/debug surface, not a required pre-step
+  for these demand paths.
 - Catalog refresh, model staging, engine readiness, and prewarm tasks should be
   daemon-executed when policy allows, with audit evidence and loud blockers
   when live mutation or credentials are required.
