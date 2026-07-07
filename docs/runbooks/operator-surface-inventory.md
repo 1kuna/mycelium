@@ -46,6 +46,13 @@ operator tools. They should not be the ordinary path for consumers.
   requested model is not ready in the local live catalog. `models service
   ensure` remains an explicit control/debug surface, not a required pre-step
   for these demand paths.
+- Source-aware `ModelService` demand can now carry a fit-safe model-source
+  contract. The reconciler can materialize a backend-managed HuggingFace
+  source into catalog truth when the source includes resource facts such as
+  context, size, KV cost, capabilities, backend, and engine profile. This
+  absorbs the common `add-model` import step into the daemon-owned
+  demand-to-catalog path; `add-model` remains an explicit debug/import escape
+  hatch.
 - Catalog refresh, model staging, engine readiness, and prewarm tasks should be
   daemon-executed when policy allows, with audit evidence and loud blockers
   when live mutation or credentials are required.

@@ -95,7 +95,18 @@ func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.
 			return fmt.Errorf("catalog source materialization requires a catalog store dir")
 		}
 		if task.Backend != "" && task.Backend != domain.BackendLlamaCpp {
-			return fmt.Errorf("catalog source materialization for backend %s requires a configured preset or engine-specific source contract", task.Backend)
+			result, err := catalog.NewInstaller(r.StoreDir).MaterializeSourcePreset(ctx, catalog.SourcePresetRequest{
+				Source:        strings.TrimSpace(task.ModelSource),
+				ID:            task.PresetID,
+				Model:         task.Model,
+				Backend:       task.Backend,
+				ContextLength: task.ContextRequest,
+				Contract:      task.ModelSourceContract,
+			})
+			if err != nil {
+				return err
+			}
+			return r.Store.SavePreset(ctx, result.Preset)
 		}
 		result, err := catalog.NewInstaller(r.StoreDir).Install(ctx, catalog.InstallRequest{
 			Source:        strings.TrimSpace(task.ModelSource),

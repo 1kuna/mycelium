@@ -257,6 +257,43 @@ func TestConfigCatalogRefresherMaterializesModelSource(t *testing.T) {
 	}
 }
 
+func TestConfigCatalogRefresherMaterializesBackendManagedHFSourceContract(t *testing.T) {
+	store := &fakePresetStore{}
+	refresher := ConfigCatalogRefresher{Store: store, StoreDir: t.TempDir()}
+	task := domain.ReconciliationTaskRecord{
+		PresetID:       "vision-vllm",
+		Model:          "vision",
+		ModelSource:    "hf://owner/repo",
+		ContextRequest: 49152,
+		Backend:        domain.BackendVLLM,
+		ModelSourceContract: &domain.ModelSourceContract{
+			Format:        "hf-transformers",
+			SizeMB:        24000,
+			KVPerTokenMB:  0.25,
+			Quant:         "bf16",
+			Capabilities:  []domain.Capability{domain.CapabilityChat, domain.CapabilityVision},
+			EngineProfile: "engine-vllm",
+		},
+	}
+
+	if err := refresher.RefreshCatalog(context.Background(), task); err != nil {
+		t.Fatalf("RefreshCatalog source contract: %v", err)
+	}
+	if len(store.presets) != 1 {
+		t.Fatalf("presets = %+v", store.presets)
+	}
+	got := store.presets[0]
+	if got.ID != "vision-vllm" || got.ModelRef != "owner/repo" || got.Backend != domain.BackendVLLM || got.ContextLength != 49152 {
+		t.Fatalf("materialized preset = %+v", got)
+	}
+	if got.EstWeightsMB != 24000 || got.KVPerTokenMB != 0.25 || got.EngineProfileID != "engine-vllm" || got.EngineReadiness != domain.EngineReadinessReadyProfile {
+		t.Fatalf("resource/readiness contract = %+v", got)
+	}
+	if !containsCapability(got.Capabilities, domain.CapabilityVision) || !containsString(got.Aliases, "vision") {
+		t.Fatalf("capabilities/aliases = %+v", got)
+	}
+}
+
 func TestConfigCatalogRefresherRequiresStoreDirForModelSource(t *testing.T) {
 	refresher := ConfigCatalogRefresher{Store: &fakePresetStore{}}
 	err := refresher.RefreshCatalog(context.Background(), domain.ReconciliationTaskRecord{Model: "tiny", ModelSource: "tiny.gguf"})
@@ -267,8 +304,8 @@ func TestConfigCatalogRefresherRequiresStoreDirForModelSource(t *testing.T) {
 
 func TestConfigCatalogRefresherRequiresEngineSourceContractForNonLlamaBackend(t *testing.T) {
 	refresher := ConfigCatalogRefresher{Store: &fakePresetStore{}, StoreDir: t.TempDir()}
-	err := refresher.RefreshCatalog(context.Background(), domain.ReconciliationTaskRecord{Model: "vision", ModelSource: "hf://owner/repo/model", Backend: domain.BackendVLLM})
-	if err == nil || !strings.Contains(err.Error(), "backend vllm requires a configured preset or engine-specific source contract") {
+	err := refresher.RefreshCatalog(context.Background(), domain.ReconciliationTaskRecord{Model: "vision", ModelSource: "hf://owner/repo", Backend: domain.BackendVLLM, ContextRequest: 49152})
+	if err == nil || !strings.Contains(err.Error(), "resource contract") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -580,6 +617,15 @@ func taskRecord(id, kind string, status domain.ReconciliationTaskStatus) domain.
 }
 
 func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCapability(values []domain.Capability, want domain.Capability) bool {
 	for _, value := range values {
 		if value == want {
 			return true

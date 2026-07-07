@@ -218,6 +218,7 @@ type ReconciliationTaskRecord struct {
 	PresetID            string                    `json:"preset_id,omitempty"`
 	Model               string                    `json:"model,omitempty"`
 	ModelSource         string                    `json:"model_source,omitempty"`
+	ModelSourceContract *ModelSourceContract      `json:"model_source_contract,omitempty"`
 	Backend             Backend                   `json:"backend,omitempty"`
 	Project             string                    `json:"project,omitempty"`
 	ContextRequest      int                       `json:"context_request,omitempty"`
@@ -442,25 +443,35 @@ type ModelServiceEvent struct {
 // local pool state file, it is stored in the control plane and reconciled by
 // Mycelium.
 type ModelService struct {
-	ID                  string              `json:"id"`
-	Model               string              `json:"model"`
-	ModelSource         string              `json:"model_source,omitempty"`
-	Backend             Backend             `json:"backend,omitempty"`
-	Project             string              `json:"project,omitempty"`
-	ContextRequest      int                 `json:"context_request,omitempty"`
-	ExpectedConcurrency int                 `json:"expected_concurrency,omitempty"`
-	MinReplicas         int                 `json:"min_replicas"`
-	MaxReplicas         int                 `json:"max_replicas"`
-	Priority            Priority            `json:"priority,omitempty"`
-	Preemption          Preemption          `json:"preemption,omitempty"`
-	CandidatePresetIDs  []string            `json:"candidate_preset_ids,omitempty"`
-	Status              ModelServiceStatus  `json:"status"`
-	DemandCount         int                 `json:"demand_count"`
-	LastDemandJobID     string              `json:"last_demand_job_id,omitempty"`
-	LastReason          string              `json:"last_reason,omitempty"`
-	CreatedAt           time.Time           `json:"created_at"`
-	UpdatedAt           time.Time           `json:"updated_at"`
-	Events              []ModelServiceEvent `json:"events,omitempty"`
+	ID                  string               `json:"id"`
+	Model               string               `json:"model"`
+	ModelSource         string               `json:"model_source,omitempty"`
+	ModelSourceContract *ModelSourceContract `json:"model_source_contract,omitempty"`
+	Backend             Backend              `json:"backend,omitempty"`
+	Project             string               `json:"project,omitempty"`
+	ContextRequest      int                  `json:"context_request,omitempty"`
+	ExpectedConcurrency int                  `json:"expected_concurrency,omitempty"`
+	MinReplicas         int                  `json:"min_replicas"`
+	MaxReplicas         int                  `json:"max_replicas"`
+	Priority            Priority             `json:"priority,omitempty"`
+	Preemption          Preemption           `json:"preemption,omitempty"`
+	CandidatePresetIDs  []string             `json:"candidate_preset_ids,omitempty"`
+	Status              ModelServiceStatus   `json:"status"`
+	DemandCount         int                  `json:"demand_count"`
+	LastDemandJobID     string               `json:"last_demand_job_id,omitempty"`
+	LastReason          string               `json:"last_reason,omitempty"`
+	CreatedAt           time.Time            `json:"created_at"`
+	UpdatedAt           time.Time            `json:"updated_at"`
+	Events              []ModelServiceEvent  `json:"events,omitempty"`
+}
+
+type ModelSourceContract struct {
+	Format        string       `json:"format,omitempty"`
+	SizeMB        int          `json:"size_mb,omitempty"`
+	KVPerTokenMB  float64      `json:"kv_per_token_mb,omitempty"`
+	Quant         string       `json:"quant,omitempty"`
+	Capabilities  []Capability `json:"capabilities,omitempty"`
+	EngineProfile string       `json:"engine_profile,omitempty"`
 }
 
 type RecommendationRecord struct {
