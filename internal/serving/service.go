@@ -54,6 +54,10 @@ type presetLister interface {
 	ListPresets(ctx context.Context) ([]domain.Preset, error)
 }
 
+type serviceJobLister interface {
+	ListModelServiceJobs(ctx context.Context) ([]domain.Job, error)
+}
+
 func EnsureDemand(ctx context.Context, store Store, demand Demand) (domain.ModelService, error) {
 	if store == nil {
 		return domain.ModelService{}, fmt.Errorf("model service store is required")
@@ -149,7 +153,7 @@ func Reconcile(ctx context.Context, store Store, opts ReconcileOptions) (Reconci
 	if err != nil {
 		return ReconcileReport{}, err
 	}
-	jobs, err := store.ListJobs(ctx)
+	jobs, err := serviceJobs(ctx, store)
 	if err != nil {
 		return ReconcileReport{}, err
 	}
@@ -227,6 +231,13 @@ func Reconcile(ctx context.Context, store Store, opts ReconcileOptions) (Reconci
 		}
 	}
 	return report, nil
+}
+
+func serviceJobs(ctx context.Context, store Store) ([]domain.Job, error) {
+	if lister, ok := store.(serviceJobLister); ok {
+		return lister.ListModelServiceJobs(ctx)
+	}
+	return store.ListJobs(ctx)
 }
 
 func refreshServiceCandidates(ctx context.Context, store Store, service domain.ModelService, now time.Time) (domain.ModelService, error) {

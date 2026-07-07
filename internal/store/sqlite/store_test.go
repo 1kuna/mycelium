@@ -723,6 +723,77 @@ func TestStoreJobRegistryStats(t *testing.T) {
 	}
 }
 
+func TestStoreListModelServiceJobsUsesScalarFilter(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	terminal := fixtures.MakeJob(fixtures.WithJobID("terminal"), fixtures.WithPreset("preset-a"))
+	terminal.ParentID = "service-a"
+	terminal.Status = domain.JobDone
+	must(t, store.SaveJob(ctx, terminal))
+	held := fixtures.MakeJob(fixtures.WithJobID("held"), fixtures.WithPreset("preset-b"))
+	held.ParentID = "service-a"
+	held.Status = domain.JobRunning
+	held.Result = &domain.JobResult{LeaseID: "lease-held"}
+	must(t, store.SaveJob(ctx, held))
+
+	if _, err := store.db.ExecContext(ctx, `
+INSERT INTO jobs (id, data, parent_id, status, preset_id, result_lease_id, result_terminal)
+VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"fat-non-service",
+		"{not-json"+strings.Repeat("x", 128*1024),
+		"",
+		string(domain.JobRunning),
+		"preset-fat",
+		"",
+		0,
+	); err != nil {
+		t.Fatalf("insert fat non-service job: %v", err)
+	}
+
+	jobs, err := store.ListModelServiceJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListModelServiceJobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != held.ID || jobs[0].Result == nil || jobs[0].Result.LeaseID != "lease-held" {
+		t.Fatalf("service jobs = %+v", jobs)
+	}
+}
+
+func TestStoreListModelServiceJobsReflectsJobUpdates(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	job := fixtures.MakeJob(fixtures.WithJobID("held"), fixtures.WithPreset("preset-a"))
+	job.ParentID = "service-a"
+	job.Status = domain.JobRunning
+	job.Result = &domain.JobResult{LeaseID: "lease-a"}
+	must(t, store.SaveJob(ctx, job))
+	jobs, err := store.ListModelServiceJobs(ctx)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("ListModelServiceJobs running = %+v %v", jobs, err)
+	}
+
+	job.Status = domain.JobDone
+	job.Result.Terminal = true
+	must(t, store.SaveJob(ctx, job))
+	jobs, err = store.ListModelServiceJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListModelServiceJobs terminal: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("terminal service job still listed: %+v", jobs)
+	}
+}
+
 func TestStoreRescueSnapshotFiltersInSQL(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(":memory:")
