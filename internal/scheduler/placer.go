@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"mycelium/internal/domain"
 	"mycelium/internal/modelruntime"
@@ -12,6 +13,7 @@ import (
 )
 
 type Placer struct {
+	mu        sync.RWMutex
 	estimator ports.ResourceEstimator
 	allocator ports.Allocator
 	clock     ports.Clock
@@ -28,18 +30,44 @@ func NewPlacer(estimator ports.ResourceEstimator, allocator ports.Allocator, clo
 		byModel:   map[string][]domain.Preset{},
 	}
 	for _, preset := range presets {
-		p.presets[preset.ID] = preset
-		for _, model := range append([]string{preset.ModelRef}, preset.Aliases...) {
-			if model == "" {
-				continue
-			}
-			p.byModel[model] = append(p.byModel[model], preset)
-			if _, exists := p.presets[model]; !exists {
-				p.presets[model] = preset
-			}
-		}
+		p.registerPresetLocked(preset)
 	}
 	return p
+}
+
+func (p *Placer) RegisterPreset(preset domain.Preset) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.registerPresetLocked(preset)
+}
+
+func (p *Placer) registerPresetLocked(preset domain.Preset) {
+	if preset.ID == "" {
+		return
+	}
+	p.presets[preset.ID] = preset
+	for _, model := range append([]string{preset.ModelRef}, preset.Aliases...) {
+		if model == "" {
+			continue
+		}
+		p.byModel[model] = replacePresetByID(p.byModel[model], preset)
+		if _, exists := p.presets[model]; !exists {
+			p.presets[model] = preset
+		}
+	}
+}
+
+func replacePresetByID(presets []domain.Preset, preset domain.Preset) []domain.Preset {
+	for i := range presets {
+		if presets[i].ID == preset.ID {
+			presets[i] = preset
+			return presets
+		}
+	}
+	return append(presets, preset)
 }
 
 func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSnapshot) (domain.PlacementDecision, error) {
@@ -47,6 +75,8 @@ func (p *Placer) Place(ctx context.Context, job domain.Job, fleet domain.FleetSn
 		return domain.PlacementDecision{}, err
 	}
 
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	presets, err := p.resolvePresetCandidates(job)
 	if err != nil {
 		return domain.PlacementDecision{JobID: job.ID, SpeedPrefApplied: job.SpeedPref, Trace: []domain.TraceStep{{

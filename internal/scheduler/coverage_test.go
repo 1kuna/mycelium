@@ -37,6 +37,53 @@ func TestResolvePresetBranches(t *testing.T) {
 	}
 }
 
+func TestServiceRegisterPresetUpdatesServiceAndPlacerIndexes(t *testing.T) {
+	preset := fixtures.MakePreset(fixtures.WithPresetID("source-preset"), fixtures.WithModelRef("source-ref"), fixtures.WithAliases("source-alias"))
+	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
+	service := &Service{Placer: placer}
+
+	service.RegisterPreset(preset)
+
+	got, err := service.resolvePreset(fixtures.MakeJob(fixtures.WithModel("source-alias")))
+	if err != nil || got.ID != preset.ID {
+		t.Fatalf("service resolve = %+v %v", got, err)
+	}
+	candidates, err := placer.resolvePresetCandidates(fixtures.MakeJob(fixtures.WithModel("source-alias")))
+	if err != nil || len(candidates) != 1 || candidates[0].ID != preset.ID {
+		t.Fatalf("placer candidates = %+v %v", candidates, err)
+	}
+
+	updated := preset
+	updated.ContextLength = 8192
+	service.RegisterPreset(updated)
+	candidates, err = placer.resolvePresetCandidates(fixtures.MakeJob(fixtures.WithModel("source-alias")))
+	if err != nil || len(candidates) != 1 || candidates[0].ContextLength != 8192 {
+		t.Fatalf("updated placer candidates = %+v %v", candidates, err)
+	}
+}
+
+func TestRegisterPresetIgnoresNilAndEmptyInputs(t *testing.T) {
+	var nilPlacer *Placer
+	nilPlacer.RegisterPreset(domain.Preset{})
+	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)))
+	placer.RegisterPreset(domain.Preset{})
+	if _, err := placer.resolvePreset(domain.Job{ID: "missing"}); err == nil {
+		t.Fatal("empty preset should not register")
+	}
+
+	var nilService *Service
+	nilService.RegisterPreset(fixtures.MakePreset())
+	service := &Service{}
+	service.RegisterPreset(domain.Preset{})
+	if _, err := service.resolvePreset(domain.Job{ID: "missing"}); err == nil {
+		t.Fatal("empty service preset should not register")
+	}
+	service.RegisterPreset(domain.Preset{ID: "id-only"})
+	if got, err := service.resolvePreset(fixtures.MakeJob(fixtures.WithPreset("id-only"))); err != nil || got.ID != "id-only" {
+		t.Fatalf("id-only service preset = %+v %v", got, err)
+	}
+}
+
 func TestSelectWarmInstanceChoosesLeastBusyThenID(t *testing.T) {
 	preset := fixtures.MakePreset()
 	placer := NewPlacer(&mocks.ResourceEstimator{}, &mocks.Allocator{FitsVal: true, CanStackLoadVal: true}, mocks.NewFakeClock(time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)), preset)

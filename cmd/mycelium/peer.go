@@ -353,7 +353,7 @@ func buildPeerGateway(ctx context.Context, args []string) (string, http.Handler,
 	}
 	startQueueDrainer(ctx, runtime, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit)
 	stageExecutor := peerCatalogStageExecutor{authToken: cfg.RPCToken, client: controlClient}
-	startReconciliationDrainer(ctx, store, schedulerPrewarmExecutor{runtime: runtime}, schedulerCapacityRepairExecutor{runtime: runtime}, reconcile.ConfigCatalogRefresher{Store: store, Presets: cfg.Presets, StoreDir: cfg.CatalogDir}, stageExecutor, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject)
+	startReconciliationDrainer(ctx, store, schedulerPrewarmExecutor{runtime: runtime}, schedulerCapacityRepairExecutor{runtime: runtime}, reconcile.ConfigCatalogRefresher{Store: store, Registrar: schedulerPresetRegistrar{runtime: runtime}, Presets: cfg.Presets, StoreDir: cfg.CatalogDir}, stageExecutor, clock.System{}, time.Duration(cfg.QueueDrainMS)*time.Millisecond, cfg.QueueDrainLimit, cfg.DefaultProject)
 	optimizerNodeID := cfg.ID
 	if cfg.Compute {
 		optimizerNodeID = privateLocalNodeID(cfg)
@@ -3336,6 +3336,18 @@ func (e schedulerCapacityRepairExecutor) RepairCapacity(ctx context.Context, lim
 		}
 	}
 	return out, nil
+}
+
+type schedulerPresetRegistrar struct {
+	runtime interface{ RegisterPreset(domain.Preset) }
+}
+
+func (r schedulerPresetRegistrar) RegisterPreset(preset domain.Preset) error {
+	if r.runtime == nil {
+		return fmt.Errorf("scheduler runtime is required")
+	}
+	r.runtime.RegisterPreset(preset)
+	return nil
 }
 
 func startReconciliationDrainer(ctx context.Context, store reconcile.TaskStore, prewarm reconcile.PrewarmExecutor, capacity reconcile.CapacityRepairExecutor, catalog reconcile.CatalogRefresher, stage ports.PeerCatalogStager, clk ports.Clock, interval time.Duration, limit int, project string) {
