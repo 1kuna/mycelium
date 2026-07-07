@@ -62,6 +62,23 @@ func TestEnsureDemandCreatesAndBumpsModelService(t *testing.T) {
 	if got := bumped.CandidatePresetIDs; len(got) != 3 || got[2] != "preset-c" {
 		t.Fatalf("bumped candidate presets = %+v", got)
 	}
+
+	replaced, err := EnsureDemand(ctx, store, Demand{
+		Model:              "vision-model",
+		Project:            "project-a",
+		ContextRequest:     49152,
+		CandidatePresetIDs: []string{"preset-d"},
+		ReplaceCandidates:  true,
+		LastDemandJobID:    "job-c",
+		Reason:             "fresh gateway context demand",
+		Now:                now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("EnsureDemand replace: %v", err)
+	}
+	if got := replaced.CandidatePresetIDs; len(got) != 1 || got[0] != "preset-d" {
+		t.Fatalf("replaced candidate presets = %+v", got)
+	}
 }
 
 func TestReconcileCreatesPrewarmTasksForMissingServiceReplicas(t *testing.T) {
@@ -128,6 +145,42 @@ func TestReconcileRefreshesServiceCandidatesFromCatalog(t *testing.T) {
 		t.Fatalf("service candidates = %+v", store.services[0])
 	}
 	if len(store.services[0].Events) == 0 || store.services[0].Events[len(store.services[0].Events)-1].Message != "candidate presets refreshed from catalog" {
+		t.Fatalf("service events = %+v", store.services[0].Events)
+	}
+}
+
+func TestReconcileClearsStaleServiceCandidatesOutsideContextEnvelope(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(23, 0).UTC()
+	store := &fakeStore{
+		services: []domain.ModelService{{
+			ID:                 "svc-a",
+			Model:              "vision",
+			Project:            "project-a",
+			ContextRequest:     8192,
+			MinReplicas:        1,
+			MaxReplicas:        1,
+			CandidatePresetIDs: []string{"small"},
+			Status:             domain.ModelServiceActive,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}},
+		presets: []domain.Preset{
+			{ID: "small", ModelRef: "model-small", Aliases: []string{"vision"}, ContextLength: 4096},
+		},
+	}
+
+	report, err := Reconcile(ctx, store, ReconcileOptions{Now: now})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if report.Created != 1 || len(store.tasks) != 1 || store.tasks[0].Kind != string(reconcile.TaskRefreshCatalog) {
+		t.Fatalf("report=%+v tasks=%+v", report, store.tasks)
+	}
+	if got := store.services[0].CandidatePresetIDs; len(got) != 0 {
+		t.Fatalf("stale candidates were not cleared: %+v", store.services[0])
+	}
+	if len(store.services[0].Events) == 0 || !strings.Contains(store.services[0].Events[len(store.services[0].Events)-1].Message, "cleared") {
 		t.Fatalf("service events = %+v", store.services[0].Events)
 	}
 }

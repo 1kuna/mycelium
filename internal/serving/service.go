@@ -35,6 +35,7 @@ type Demand struct {
 	Priority            domain.Priority
 	Preemption          domain.Preemption
 	CandidatePresetIDs  []string
+	ReplaceCandidates   bool
 	LastDemandJobID     string
 	Reason              string
 	Now                 time.Time
@@ -104,7 +105,11 @@ func EnsureDemand(ctx context.Context, store Store, demand Demand) (domain.Model
 		service.MinReplicas = maxInt(service.MinReplicas, demand.MinReplicas)
 		service.MaxReplicas = maxInt(service.MaxReplicas, demand.MaxReplicas)
 		service.ExpectedConcurrency = maxInt(service.ExpectedConcurrency, demand.ExpectedConcurrency)
-		service.CandidatePresetIDs = mergeStrings(service.CandidatePresetIDs, demand.CandidatePresetIDs)
+		if demand.ReplaceCandidates {
+			service.CandidatePresetIDs = uniqueStrings(demand.CandidatePresetIDs)
+		} else {
+			service.CandidatePresetIDs = mergeStrings(service.CandidatePresetIDs, demand.CandidatePresetIDs)
+		}
 		service.Events = append(service.Events, domain.ModelServiceEvent{Status: service.Status, Message: "demand observed: " + demand.Reason, At: now})
 		if err := store.SaveModelService(ctx, service); err != nil {
 			return domain.ModelService{}, err
@@ -251,9 +256,6 @@ func serviceJobs(ctx context.Context, store Store) ([]domain.Job, error) {
 }
 
 func refreshServiceCandidates(ctx context.Context, store Store, service domain.ModelService, now time.Time) (domain.ModelService, error) {
-	if len(service.CandidatePresetIDs) > 0 {
-		return service, nil
-	}
 	lister, ok := store.(presetLister)
 	if !ok {
 		return service, nil
@@ -261,6 +263,9 @@ func refreshServiceCandidates(ctx context.Context, store Store, service domain.M
 	presets, err := lister.ListPresets(ctx)
 	if err != nil {
 		return domain.ModelService{}, err
+	}
+	if len(presets) == 0 && len(service.CandidatePresetIDs) > 0 {
+		return service, nil
 	}
 	var candidates []string
 	for _, preset := range presets {
@@ -271,6 +276,21 @@ func refreshServiceCandidates(ctx context.Context, store Store, service domain.M
 	}
 	candidates = uniqueStrings(candidates)
 	if len(candidates) == 0 {
+		if len(service.CandidatePresetIDs) > 0 {
+			service.CandidatePresetIDs = nil
+			service.UpdatedAt = now
+			service.Events = append(service.Events, domain.ModelServiceEvent{
+				Status:  service.Status,
+				Message: "candidate presets cleared because none match the catalog/context envelope",
+				At:      now,
+			})
+			if err := store.SaveModelService(ctx, service); err != nil {
+				return domain.ModelService{}, err
+			}
+		}
+		return service, nil
+	}
+	if equalStringSlices(service.CandidatePresetIDs, candidates) {
 		return service, nil
 	}
 	service.CandidatePresetIDs = candidates
@@ -461,6 +481,18 @@ func uniqueStrings(values []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func equalStringSlices(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func maxInt(a, b int) int {
