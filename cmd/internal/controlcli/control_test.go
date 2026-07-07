@@ -1395,6 +1395,7 @@ func TestRunModelsStageAndLocalityReport(t *testing.T) {
 			t.Fatalf("request preset = %+v", req.Preset)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
+			"preset": preset,
 			"locality": domain.ModelLocality{
 				ID:             "node-a:tiny",
 				PresetID:       "tiny",
@@ -1850,6 +1851,60 @@ func TestCatalogStageClientAndStageFailureBranches(t *testing.T) {
 	if _, err := (catalogStageHTTPClient{Client: dialErrorClient}).StageModel(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{"http://peer.test"}}, testPreset("tiny")); err == nil || !strings.Contains(err.Error(), "dial failed") {
 		t.Fatalf("transport error = %v", err)
 	}
+	artifactDir := t.TempDir()
+	artifactPath := filepath.Join(artifactDir, "tiny-local.gguf")
+	if err := os.WriteFile(artifactPath, []byte("local-weights"), 0o600); err != nil {
+		t.Fatalf("write local artifact: %v", err)
+	}
+	localPreset := testPreset("local-artifact")
+	localPreset.ModelRef = artifactPath
+	localClient := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Preset        domain.Preset `json:"preset"`
+			ArtifactBytes []byte        `json:"artifact_bytes"`
+			ArtifactName  string        `json:"artifact_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode local stage request: %v", err)
+		}
+		if req.Preset.ID != localPreset.ID || string(req.ArtifactBytes) != "local-weights" || req.ArtifactName != "tiny-local.gguf" {
+			t.Fatalf("local stage request = %+v bytes=%q", req, string(req.ArtifactBytes))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"preset": domain.Preset{ID: "local-artifact-node-a", ModelRef: "/catalog/local-artifact.gguf", NodeID: "node-a"},
+			"locality": domain.ModelLocality{
+				ID:       "node-a:local-artifact-node-a",
+				PresetID: "local-artifact-node-a",
+				NodeID:   "node-a",
+				State:    domain.ModelLocalityReady,
+				ModelRef: "/catalog/local-artifact.gguf",
+			},
+		})
+	}))
+	staged, err := (catalogStageHTTPClient{Client: localClient}).StageModel(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{"http://peer.test"}}, localPreset)
+	if err != nil {
+		t.Fatalf("local artifact stage: %v", err)
+	}
+	if staged.Preset.ID != "local-artifact-node-a" || staged.Locality.PresetID != staged.Preset.ID {
+		t.Fatalf("local artifact result = %+v", staged)
+	}
+	largeArtifact := filepath.Join(artifactDir, "large.gguf")
+	file, err := os.Create(largeArtifact)
+	if err != nil {
+		t.Fatalf("create large artifact: %v", err)
+	}
+	if err := file.Truncate(maxControlHTTPBodyBytes/2 + 1); err != nil {
+		_ = file.Close()
+		t.Fatalf("truncate large artifact: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close large artifact: %v", err)
+	}
+	largePreset := testPreset("large-artifact")
+	largePreset.ModelRef = largeArtifact
+	if _, err := (catalogStageHTTPClient{Client: localClient}).StageModel(context.Background(), domain.Peer{ID: "peer-a", Addresses: []string{"http://peer.test"}}, largePreset); err == nil || !strings.Contains(err.Error(), "peer JSON staging is limited") {
+		t.Fatalf("large artifact error = %v", err)
+	}
 
 	dbPath := filepath.Join(t.TempDir(), "control.db")
 	store, err := storesqlite.Open(dbPath)
@@ -1918,6 +1973,7 @@ func TestRunModelsLocalityPlanAndApply(t *testing.T) {
 			t.Fatalf("auth = %s", r.Header.Get("Authorization"))
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
+			"preset": preset,
 			"locality": domain.ModelLocality{
 				ID:             "node-a:tiny",
 				PresetID:       "tiny",

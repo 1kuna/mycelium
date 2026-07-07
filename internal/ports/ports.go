@@ -140,8 +140,13 @@ type LocalityPlanStore interface {
 	ListLocalityPlans(ctx context.Context) ([]domain.LocalityPlan, error)
 }
 
+type CatalogStageResult struct {
+	Preset   domain.Preset
+	Locality domain.ModelLocality
+}
+
 type PeerCatalogStager interface {
-	StageModel(ctx context.Context, peer domain.Peer, preset domain.Preset) (domain.ModelLocality, error)
+	StageModel(ctx context.Context, peer domain.Peer, preset domain.Preset) (CatalogStageResult, error)
 }
 
 type TelemetryStore interface {
