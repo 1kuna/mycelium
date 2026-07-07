@@ -3026,7 +3026,7 @@ func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
 		t.Fatalf("decode gateway routes JSON: %v", err)
 	}
-	if report.BaseURL != "http://gateway.test/v1" || len(report.Routes) != 3 {
+	if report.BaseURL != "http://gateway.test/v1" || len(report.Routes) != 4 {
 		t.Fatalf("gateway routes report = %+v", report)
 	}
 	if got := report.Routes[1]; got.Project != "strict-json-project" || got.ModelGroupSize != 2 || strings.Join(got.ModelGroupPresets, ",") != "strict-json-vllm,strict-json-vllm-alt" {
@@ -3043,6 +3043,9 @@ func TestRunGatewayRoutesPrintsSecretSafeConsumerContracts(t *testing.T) {
 	}
 	if got := report.Routes[2]; got.Project != "tool-project" || !got.ProjectTokenConfigured || !got.ToolParserConfigured || !got.AutoToolChoiceConfigured || got.ToolReadiness != "auto_tool_configured" || got.RouteReadiness != "undersized_context" || got.MinContextCap != 32768 || got.EffectiveContextCap != 8192 || got.ContextIssue != "undersized_context" || got.ContextAdequate {
 		t.Fatalf("tool route contract = %+v", got)
+	}
+	if got := report.Routes[3]; got.Project != "" || got.PresetID != "strict-json-vllm-alt" || got.Model != "strict-json-model" || got.NodeID != "node-json-alt" {
+		t.Fatalf("catalog-only route contract = %+v", got)
 	}
 
 	toolRequiredOutput := captureStdout(t, func() {
@@ -3198,6 +3201,64 @@ func TestGatewayRoutesIncludesStoreAdoptedPresets(t *testing.T) {
 	}
 	if !strings.Contains(output, "route\tproject=proof-project\tmodel=proof-model\tpreset=proof-b70\tnode=b70\tbackend=llamacpp") {
 		t.Fatalf("gateway routes did not include store-adopted preset:\n%s", output)
+	}
+}
+
+func TestGatewayRoutesIncludesCatalogOnlyStorePresets(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "control.db")
+	store, err := storesqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.SavePreset(context.Background(), domain.Preset{
+		ID:            "adopted-b70",
+		ModelRef:      "adopted-model.gguf",
+		Aliases:       []string{"adopted-model"},
+		Backend:       domain.BackendLlamaCpp,
+		ContextLength: 1024,
+		NodeID:        "b70",
+	}); err != nil {
+		t.Fatalf("SavePreset: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	configPath := filepath.Join(dir, "peer.json")
+	cfg := operatorPeerConfig{
+		ID:        "macbook",
+		Listen:    "http://gateway.test",
+		StorePath: dbPath,
+		Presets: []domain.Preset{{
+			ID:            "configured",
+			ModelRef:      "configured-model",
+			Aliases:       []string{"configured-model"},
+			Backend:       domain.BackendLlamaCpp,
+			ContextLength: 512,
+			NodeID:        "macbook",
+		}},
+		Projects: []domain.Project{{ID: "configured-project", DefaultModel: "configured-model"}},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = RunWithClient(context.Background(), []string{"gateway", "routes", "--config", configPath}, nil)
+	})
+	if runErr != nil {
+		t.Fatalf("gateway routes: %v", runErr)
+	}
+	if !strings.Contains(output, "route\tproject=-\tmodel=adopted-model\tpreset=adopted-b70\tnode=b70\tbackend=llamacpp") {
+		t.Fatalf("gateway routes did not include catalog-only adopted preset:\n%s", output)
+	}
+	if got := strings.Count(output, "preset=configured"); got != 1 {
+		t.Fatalf("configured project preset duplicated %d times:\n%s", got, output)
 	}
 }
 
