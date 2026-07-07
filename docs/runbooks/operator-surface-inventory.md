@@ -49,10 +49,12 @@ operator tools. They should not be the ordinary path for consumers.
 - Source-aware `ModelService` demand can now carry a fit-safe model-source
   contract. The reconciler can materialize a backend-managed HuggingFace
   source into catalog truth when the source includes resource facts such as
-  context, size, KV cost, capabilities, backend, and engine profile. This
-  absorbs the common `add-model` import step into the daemon-owned
-  demand-to-catalog path; `add-model` remains an explicit debug/import escape
-  hatch.
+  context, size, KV cost, capabilities, and backend. When exactly one saved
+  ready engine profile matches that backend and source format, the reconciler
+  resolves the profile automatically; ambiguous or missing readiness still
+  fails loudly. This absorbs the common `add-model` import step into the
+  daemon-owned demand-to-catalog path; `add-model` remains an explicit
+  debug/import escape hatch.
 - Catalog refresh, model staging, engine readiness, and prewarm tasks are now
   daemon-executed when their lower-level executors are registered. Model staging
   uses the peer catalog-stage RPC rather than requiring a normal operator to run

@@ -276,7 +276,7 @@ func runModelsServiceEnsure(ctx context.Context, args []string) error {
 	sourceSizeMB := fs.Int("source-size-mb", 0, "model source size in MB for fit-safe source materialization")
 	sourceKVPerToken := fs.Float64("source-kv-per-token-mb", 0, "KV cache MB per token for fit-safe source materialization")
 	sourceQuant := fs.String("source-quant", "", "source quantization label")
-	sourceEngineProfile := fs.String("source-engine-profile", "", "ready engine profile id for the source contract")
+	sourceEngineProfile := fs.String("source-engine-profile", "", "ready engine profile id for the source contract; optional when one saved ready profile matches")
 	project := fs.String("project", "", "project label for held supply")
 	contextRequest := fs.Int("context", 0, "context envelope for the service")
 	concurrency := fs.Int("concurrency", 1, "expected concurrent requests per worker")
