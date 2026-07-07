@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"mycelium/internal/domain"
@@ -49,6 +50,7 @@ type JobPayloadReader interface {
 }
 
 type Service struct {
+	presetsMu   sync.RWMutex
 	Placer      ports.Placer
 	Fleet       FleetSource
 	Nodes       NodeResolver
@@ -59,6 +61,33 @@ type Service struct {
 	Store       RuntimeStore
 	Clock       ports.Clock
 	Presets     map[string]domain.Preset
+}
+
+func (s *Service) RegisterPreset(preset domain.Preset) {
+	if s == nil || preset.ID == "" {
+		return
+	}
+	s.presetsMu.Lock()
+	if s.Presets == nil {
+		s.Presets = map[string]domain.Preset{}
+	}
+	registerServicePreset(s.Presets, preset)
+	s.presetsMu.Unlock()
+	if registrar, ok := s.Placer.(interface{ RegisterPreset(domain.Preset) }); ok {
+		registrar.RegisterPreset(preset)
+	}
+}
+
+func registerServicePreset(index map[string]domain.Preset, preset domain.Preset) {
+	index[preset.ID] = preset
+	for _, model := range append([]string{preset.ModelRef}, preset.Aliases...) {
+		if model == "" {
+			continue
+		}
+		if _, exists := index[model]; !exists {
+			index[model] = preset
+		}
+	}
 }
 
 type Result struct {
@@ -851,6 +880,8 @@ func (s *Service) queueJobWithPayload(ctx context.Context, job domain.Job, paylo
 }
 
 func (s *Service) presetForQueuedJob(job domain.Job) domain.Preset {
+	s.presetsMu.RLock()
+	defer s.presetsMu.RUnlock()
 	if job.PresetID != "" {
 		if preset, ok := s.Presets[job.PresetID]; ok {
 			return preset
@@ -1030,7 +1061,9 @@ func (s *Service) replacePreemptedInstance(ctx context.Context, lease domain.Lea
 	if !ok {
 		return fmt.Errorf("replacement node %q is missing from fleet snapshot", replacement.NodeID)
 	}
+	s.presetsMu.RLock()
 	preset, ok := s.Presets[victim.PresetID]
+	s.presetsMu.RUnlock()
 	if !ok {
 		return fmt.Errorf("unknown replacement preset %q", victim.PresetID)
 	}
@@ -1385,6 +1418,8 @@ func (s *Service) resolveInstance(ctx context.Context, job domain.Job, decision 
 }
 
 func (s *Service) resolvePreset(job domain.Job) (domain.Preset, error) {
+	s.presetsMu.RLock()
+	defer s.presetsMu.RUnlock()
 	if job.PresetID != "" {
 		if preset, ok := s.Presets[job.PresetID]; ok {
 			return preset, nil

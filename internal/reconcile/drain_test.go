@@ -217,8 +217,9 @@ func TestDrainAllowedTasksRefreshesCatalogThroughConfiguredSource(t *testing.T) 
 
 func TestConfigCatalogRefresherStoresMatchingPreset(t *testing.T) {
 	store := &fakePresetStore{}
+	registrar := &fakePresetRegistrar{}
 	preset := domain.Preset{ID: "preset-a", ModelRef: "model-a", Aliases: []string{"shared-model"}, ContextLength: 4096}
-	refresher := ConfigCatalogRefresher{Store: store, Presets: []domain.Preset{
+	refresher := ConfigCatalogRefresher{Store: store, Registrar: registrar, Presets: []domain.Preset{
 		preset,
 		{ID: "other", ModelRef: "other-model"},
 	}}
@@ -228,6 +229,9 @@ func TestConfigCatalogRefresherStoresMatchingPreset(t *testing.T) {
 	}
 	if len(store.presets) != 1 || store.presets[0].ID != preset.ID {
 		t.Fatalf("stored presets = %+v", store.presets)
+	}
+	if len(registrar.presets) != 1 || registrar.presets[0].ID != preset.ID {
+		t.Fatalf("registered presets = %+v", registrar.presets)
 	}
 }
 
@@ -838,6 +842,19 @@ func (s *fakePresetStore) SavePreset(_ context.Context, preset domain.Preset) er
 
 func (s *fakePresetStore) ListEngineProfiles(context.Context) ([]domain.EngineProfile, error) {
 	return append([]domain.EngineProfile(nil), s.profiles...), nil
+}
+
+type fakePresetRegistrar struct {
+	presets []domain.Preset
+	err     error
+}
+
+func (r *fakePresetRegistrar) RegisterPreset(preset domain.Preset) error {
+	if r.err != nil {
+		return r.err
+	}
+	r.presets = append(r.presets, preset)
+	return nil
 }
 
 type catalogOnlyStore struct{}

@@ -93,14 +93,19 @@ type CatalogPresetStore interface {
 	SavePreset(ctx context.Context, preset domain.Preset) error
 }
 
+type CatalogPresetRegistrar interface {
+	RegisterPreset(preset domain.Preset) error
+}
+
 type EngineProfileLister interface {
 	ListEngineProfiles(ctx context.Context) ([]domain.EngineProfile, error)
 }
 
 type ConfigCatalogRefresher struct {
-	Store    CatalogPresetStore
-	Presets  []domain.Preset
-	StoreDir string
+	Store     CatalogPresetStore
+	Registrar CatalogPresetRegistrar
+	Presets   []domain.Preset
+	StoreDir  string
 }
 
 func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.ReconciliationTaskRecord) error {
@@ -127,7 +132,7 @@ func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.
 			if err != nil {
 				return err
 			}
-			return r.Store.SavePreset(ctx, result.Preset)
+			return r.savePreset(ctx, result.Preset)
 		}
 		result, err := catalog.NewInstaller(r.StoreDir).Install(ctx, catalog.InstallRequest{
 			Source:        strings.TrimSpace(task.ModelSource),
@@ -139,7 +144,7 @@ func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.
 		if err != nil {
 			return err
 		}
-		return r.Store.SavePreset(ctx, result.Preset)
+		return r.savePreset(ctx, result.Preset)
 	}
 	matches := catalogRefreshMatches(r.Presets, task)
 	if len(matches) == 0 {
@@ -153,7 +158,19 @@ func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.
 		if preset.ID == "" {
 			return fmt.Errorf("configured catalog contains a preset without an id")
 		}
-		if err := r.Store.SavePreset(ctx, preset); err != nil {
+		if err := r.savePreset(ctx, preset); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r ConfigCatalogRefresher) savePreset(ctx context.Context, preset domain.Preset) error {
+	if err := r.Store.SavePreset(ctx, preset); err != nil {
+		return err
+	}
+	if r.Registrar != nil {
+		if err := r.Registrar.RegisterPreset(preset); err != nil {
 			return err
 		}
 	}
