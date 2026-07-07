@@ -265,6 +265,36 @@ func TestConfigCatalogRefresherMaterializesModelSource(t *testing.T) {
 	}
 }
 
+func TestConfigCatalogRefresherAddsAliasWhenSourceIsAlreadyInstalled(t *testing.T) {
+	store := &fakePresetStore{}
+	model := filepath.Join(t.TempDir(), "tiny.gguf")
+	if err := os.WriteFile(model, []byte("weights"), 0o600); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	refresher := ConfigCatalogRefresher{Store: store, StoreDir: t.TempDir(), LocalNodeID: "macbook"}
+	first := domain.ReconciliationTaskRecord{
+		Model:          "first-model",
+		ModelSource:    model,
+		ContextRequest: 512,
+		Backend:        domain.BackendLlamaCpp,
+	}
+	if err := refresher.RefreshCatalog(context.Background(), first); err != nil {
+		t.Fatalf("RefreshCatalog first: %v", err)
+	}
+	second := first
+	second.Model = "second-model"
+	if err := refresher.RefreshCatalog(context.Background(), second); err != nil {
+		t.Fatalf("RefreshCatalog second: %v", err)
+	}
+	if len(store.presets) != 2 {
+		t.Fatalf("preset writes = %+v", store.presets)
+	}
+	got := store.presets[1]
+	if !containsString(got.Aliases, "first-model") || !containsString(got.Aliases, "second-model") || got.NodeID != "macbook" {
+		t.Fatalf("reused source preset = %+v", got)
+	}
+}
+
 func TestConfigCatalogRefresherMaterializesBackendManagedHFSourceContract(t *testing.T) {
 	store := &fakePresetStore{}
 	refresher := ConfigCatalogRefresher{Store: store, StoreDir: t.TempDir(), LocalNodeID: "spark"}

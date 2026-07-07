@@ -134,7 +134,7 @@ func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.
 			if err != nil {
 				return err
 			}
-			return r.savePreset(ctx, r.localSourcePreset(result.Preset))
+			return r.savePreset(ctx, r.localSourcePreset(result.Preset, task.Model))
 		}
 		result, err := catalog.NewInstaller(r.StoreDir).Install(ctx, catalog.InstallRequest{
 			Source:        strings.TrimSpace(task.ModelSource),
@@ -146,7 +146,7 @@ func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.
 		if err != nil {
 			return err
 		}
-		return r.savePreset(ctx, r.localSourcePreset(result.Preset))
+		return r.savePreset(ctx, r.localSourcePreset(result.Preset, task.Model))
 	}
 	matches := catalogRefreshMatches(r.Presets, task)
 	if len(matches) == 0 {
@@ -167,9 +167,13 @@ func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.
 	return nil
 }
 
-func (r ConfigCatalogRefresher) localSourcePreset(preset domain.Preset) domain.Preset {
+func (r ConfigCatalogRefresher) localSourcePreset(preset domain.Preset, model string) domain.Preset {
 	if r.LocalNodeID != "" && preset.NodeID == "" {
 		preset.NodeID = r.LocalNodeID
+	}
+	model = strings.TrimSpace(model)
+	if model != "" && !presetMatchesModel(preset, model) {
+		preset.Aliases = append(preset.Aliases, model)
 	}
 	return preset
 }
