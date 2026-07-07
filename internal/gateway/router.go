@@ -995,7 +995,7 @@ func (r *Router) persistGatewayReconciliationDemand(ctx context.Context, job dom
 			MaxReplicas:         maxGatewayInt(1, job.ExpectedConcurrency),
 			Priority:            job.Priority,
 			Preemption:          job.Preemption,
-			CandidatePresetIDs:  candidatePresetIDs(r.Presets.ResolveAll(job.Model), preset),
+			CandidatePresetIDs:  candidatePresetIDs(r.Presets.ResolveAll(job.Model), preset, job.ContextRequest),
 			LastDemandJobID:     job.ID,
 			Reason:              firstString(string(decision.Action), placementReason(decision), "gateway demand"),
 			Now:                 r.clock().Now().UTC(),
@@ -1101,17 +1101,21 @@ func (r *Router) persistMissingCatalogDemand(ctx context.Context, req translate.
 	}, true, nil
 }
 
-func candidatePresetIDs(candidates []domain.Preset, fallback domain.Preset) []string {
+func candidatePresetIDs(candidates []domain.Preset, fallback domain.Preset, contextRequest int) []string {
 	var ids []string
 	for _, preset := range candidates {
-		if preset.ID != "" {
+		if preset.ID != "" && presetSatisfiesContext(preset, contextRequest) {
 			ids = append(ids, preset.ID)
 		}
 	}
-	if len(ids) == 0 && fallback.ID != "" {
+	if len(ids) == 0 && fallback.ID != "" && presetSatisfiesContext(fallback, contextRequest) {
 		ids = append(ids, fallback.ID)
 	}
 	return ids
+}
+
+func presetSatisfiesContext(preset domain.Preset, contextRequest int) bool {
+	return contextRequest <= 0 || modelruntime.EffectiveContextLength(preset) >= contextRequest
 }
 
 func placementReason(decision domain.PlacementDecision) string {
