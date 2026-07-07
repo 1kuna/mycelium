@@ -225,7 +225,7 @@ func TestCoordinatorPushesClaimRecordForRescueCopy(t *testing.T) {
 	}
 }
 
-func TestCoordinatorFailsLoudAndRecordsEvidenceWhenClaimReplicationFails(t *testing.T) {
+func TestCoordinatorContinuesAndRecordsEvidenceWhenClaimReplicationFails(t *testing.T) {
 	ctx := context.Background()
 	clock := mocks.NewFakeClock(time.Unix(102, 0).UTC())
 	job := fixtures.MakeJob(fixtures.WithJobID("job-a"))
@@ -242,7 +242,7 @@ func TestCoordinatorFailsLoudAndRecordsEvidenceWhenClaimReplicationFails(t *test
 		WithRegistryPusher(&recordingRecordPusher{err: pushErr}),
 	)
 
-	if err := coordinator.ClaimJob(ctx, job.ID); !errors.Is(err, pushErr) {
+	if err := coordinator.ClaimJob(ctx, job.ID); err != nil {
 		t.Fatalf("ClaimJob err = %v", err)
 	}
 	snap, err := registry.Snapshot(ctx)

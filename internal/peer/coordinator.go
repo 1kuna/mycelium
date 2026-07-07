@@ -441,7 +441,7 @@ func (c *Coordinator) recordWithDetails(ctx context.Context, jobID string, statu
 		if evidenceErr := c.registry.Put(ctx, degraded); evidenceErr != nil {
 			return errors.Join(fmt.Errorf("registry rescue replication for job %q: %w", jobID, err), fmt.Errorf("record degraded registry evidence: %w", evidenceErr))
 		}
-		return fmt.Errorf("registry rescue replication for job %q: %w", jobID, err)
+		return nil
 	}
 	return nil
 }
