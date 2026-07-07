@@ -137,6 +137,14 @@ handoff.
   documented service path. Use `myce gateway routes --live` to distinguish
   configured routes from the live `/v1/models` catalog. Do not claim live
   catalog support from config alone.
+- 2026-07-07: A live binary refresh must not skip the service-upgrade
+  preflight. A gateway whose current `/peer/health` or `/v1/models` endpoints
+  intermittently time out under peer-sync or owner-reconcile noise is not a safe
+  activation baseline. The supported path is to preserve the generated upgrade
+  packet, resolve or safely restart the unhealthy deployed gateway in an
+  operator-approved window, then rerun `service status` and `gateway routes
+  --live` before replacing the binary. Do not force a binary swap from a failed
+  preflight.
 - 2026-06-29: macOS user LaunchAgent activation can be blocked by binary
   identity / Local Network permission behavior. The repo provides generic
   service plan/install/status/rollback surfaces plus
