@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"mycelium/internal/catalog"
 	"mycelium/internal/domain"
 	"mycelium/internal/engine"
 	"mycelium/internal/modelruntime"
@@ -80,13 +81,33 @@ type CatalogPresetStore interface {
 }
 
 type ConfigCatalogRefresher struct {
-	Store   CatalogPresetStore
-	Presets []domain.Preset
+	Store    CatalogPresetStore
+	Presets  []domain.Preset
+	StoreDir string
 }
 
 func (r ConfigCatalogRefresher) RefreshCatalog(ctx context.Context, task domain.ReconciliationTaskRecord) error {
 	if r.Store == nil {
 		return fmt.Errorf("catalog refresh requires a preset store")
+	}
+	if strings.TrimSpace(task.ModelSource) != "" {
+		if strings.TrimSpace(r.StoreDir) == "" {
+			return fmt.Errorf("catalog source materialization requires a catalog store dir")
+		}
+		if task.Backend != "" && task.Backend != domain.BackendLlamaCpp {
+			return fmt.Errorf("catalog source materialization for backend %s requires a configured preset or engine-specific source contract", task.Backend)
+		}
+		result, err := catalog.NewInstaller(r.StoreDir).Install(ctx, catalog.InstallRequest{
+			Source:        strings.TrimSpace(task.ModelSource),
+			ID:            task.PresetID,
+			Model:         task.Model,
+			ContextLength: task.ContextRequest,
+			Backend:       task.Backend,
+		})
+		if err != nil {
+			return err
+		}
+		return r.Store.SavePreset(ctx, result.Preset)
 	}
 	matches := catalogRefreshMatches(r.Presets, task)
 	if len(matches) == 0 {

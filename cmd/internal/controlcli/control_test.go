@@ -837,6 +837,8 @@ func TestRunModelsServiceEnsureSelectsMatchingPresetEnvelopes(t *testing.T) {
 			"--db", dbPath,
 			"--model", "shared-model",
 			"--project", "project-a",
+			"--source", "hf://owner/repo/model.gguf",
+			"--backend", "vllm",
 			"--context", "49152",
 			"--min", "2",
 			"--max", "2",
@@ -863,7 +865,7 @@ func TestRunModelsServiceEnsureSelectsMatchingPresetEnvelopes(t *testing.T) {
 		t.Fatalf("services = %+v", services)
 	}
 	service := services[0]
-	if service.Model != "shared-model" || service.Project != "project-a" || service.ContextRequest != 49152 || service.MinReplicas != 2 || service.MaxReplicas != 2 {
+	if service.Model != "shared-model" || service.ModelSource != "hf://owner/repo/model.gguf" || service.Backend != domain.BackendVLLM || service.Project != "project-a" || service.ContextRequest != 49152 || service.MinReplicas != 2 || service.MaxReplicas != 2 {
 		t.Fatalf("service = %+v", service)
 	}
 	if got := strings.Join(service.CandidatePresetIDs, ","); got != "node-b-model,node-c-model" {
@@ -925,6 +927,9 @@ func TestRunModelsServiceEnsureSelectsMatchingPresetEnvelopes(t *testing.T) {
 	}
 	if err := Run(context.Background(), []string{"models", "service", "ensure", "--db", dbPath, "--model", "shared-model", "--preemption", "maybe"}); err == nil || !strings.Contains(err.Error(), "unknown preemption") {
 		t.Fatalf("invalid preemption err = %v", err)
+	}
+	if err := Run(context.Background(), []string{"models", "service", "ensure", "--db", dbPath, "--model", "shared-model", "--backend", "maybe"}); err == nil || !strings.Contains(err.Error(), "unknown backend") {
+		t.Fatalf("invalid backend err = %v", err)
 	}
 }
 
@@ -3380,6 +3385,54 @@ func TestFetchGatewayRoutesLiveCatalogReportsStatusBranches(t *testing.T) {
 	live, _ = fetchGatewayRoutesLiveCatalog(context.Background(), configWithToken, "http://error.test", gatewayRoutesLiveOptions{Enabled: true, Client: client})
 	if live.Status != "error" || !strings.Contains(live.Error, "returned 404") {
 		t.Fatalf("error live catalog = %+v", live)
+	}
+}
+
+func TestFetchGatewayRoutesLiveCatalogRetriesTransientModelsFailure(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "peer.json")
+	if err := os.WriteFile(configPath, []byte(`{"gateway_token":"gateway-secret"}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	attempts := 0
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			http.Error(w, "catalog warming", http.StatusServiceUnavailable)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer gateway-secret" {
+			t.Fatalf("auth = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]string{{"id": "model-a"}},
+		})
+	}))
+
+	live, models := fetchGatewayRoutesLiveCatalog(context.Background(), configPath, "http://ready.test", gatewayRoutesLiveOptions{Enabled: true, Client: client})
+	if live.Status != "ok" || live.ModelCount != 1 || attempts != 2 {
+		t.Fatalf("live catalog=%+v attempts=%d", live, attempts)
+	}
+	if _, ok := models["model-a"]; !ok {
+		t.Fatalf("models = %+v", models)
+	}
+}
+
+func TestFetchGatewayRoutesLiveCatalogReportsPersistentModelsFailure(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "peer.json")
+	if err := os.WriteFile(configPath, []byte(`{"gateway_token":"gateway-secret"}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	attempts := 0
+	client := directHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		http.Error(w, "catalog missing", http.StatusNotFound)
+	}))
+
+	live, _ := fetchGatewayRoutesLiveCatalog(context.Background(), configPath, "http://missing.test", gatewayRoutesLiveOptions{Enabled: true, Client: client})
+	if live.Status != "error" || attempts != gatewayRoutesLiveCatalogAttempts || !strings.Contains(live.Error, "gateway models unavailable after 3 attempts") || !strings.Contains(live.Error, "returned 404") {
+		t.Fatalf("live catalog=%+v attempts=%d", live, attempts)
 	}
 }
 

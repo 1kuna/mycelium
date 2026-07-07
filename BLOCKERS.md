@@ -121,10 +121,17 @@ handoff.
   fails loudly and is not marked done. `refresh_catalog` now has a configured
   preset-catalog source contract: daemon reconciliation and
   `myce reconcile drain --config <peer.json>` can refresh matching configured
-  presets into the control store, while missing sources or missing preset/model
-  matches still fail loudly. Remote catalog mutation, model download, artifact
-  movement, and owner repair remain separate explicit actions; owner repair
-  remains approval-gated by default.
+  presets into the control store. Model-service desired state can also carry a
+  model source and backend. When a source is present and no preset matches, the
+  daemon creates source-aware catalog work; the catalog refresher can
+  materialize source artifacts through the existing local catalog installer for
+  the backend class that installer can honestly synthesize, then persist the
+  resulting preset into the control store. Engine-specific source contracts for
+  vLLM/OpenVINO/SGLang/custom routes remain a product boundary: those backends
+  need a configured preset/profile or a real engine-specific source contract, so
+  source materialization fails loudly instead of fabricating launch readiness.
+  Remote catalog mutation, cross-peer artifact movement, and owner repair remain
+  separate explicit actions; owner repair remains approval-gated by default.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish

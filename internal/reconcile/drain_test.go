@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -226,6 +228,48 @@ func TestConfigCatalogRefresherStoresMatchingPreset(t *testing.T) {
 	}
 	if len(store.presets) != 1 || store.presets[0].ID != preset.ID {
 		t.Fatalf("stored presets = %+v", store.presets)
+	}
+}
+
+func TestConfigCatalogRefresherMaterializesModelSource(t *testing.T) {
+	store := &fakePresetStore{}
+	model := filepath.Join(t.TempDir(), "tiny.gguf")
+	if err := os.WriteFile(model, []byte("weights"), 0o600); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	refresher := ConfigCatalogRefresher{Store: store, StoreDir: t.TempDir()}
+	task := domain.ReconciliationTaskRecord{
+		Model:          "tiny-model",
+		ModelSource:    model,
+		ContextRequest: 4096,
+		Backend:        domain.BackendLlamaCpp,
+	}
+
+	if err := refresher.RefreshCatalog(context.Background(), task); err != nil {
+		t.Fatalf("RefreshCatalog source: %v", err)
+	}
+	if len(store.presets) != 1 {
+		t.Fatalf("presets = %+v", store.presets)
+	}
+	got := store.presets[0]
+	if got.ModelRef == model || got.Backend != domain.BackendLlamaCpp || got.ContextLength != 4096 || !containsString(got.Aliases, "tiny-model") {
+		t.Fatalf("materialized preset = %+v", got)
+	}
+}
+
+func TestConfigCatalogRefresherRequiresStoreDirForModelSource(t *testing.T) {
+	refresher := ConfigCatalogRefresher{Store: &fakePresetStore{}}
+	err := refresher.RefreshCatalog(context.Background(), domain.ReconciliationTaskRecord{Model: "tiny", ModelSource: "tiny.gguf"})
+	if err == nil || !strings.Contains(err.Error(), "catalog store dir") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestConfigCatalogRefresherRequiresEngineSourceContractForNonLlamaBackend(t *testing.T) {
+	refresher := ConfigCatalogRefresher{Store: &fakePresetStore{}, StoreDir: t.TempDir()}
+	err := refresher.RefreshCatalog(context.Background(), domain.ReconciliationTaskRecord{Model: "vision", ModelSource: "hf://owner/repo/model", Backend: domain.BackendVLLM})
+	if err == nil || !strings.Contains(err.Error(), "backend vllm requires a configured preset or engine-specific source contract") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -533,6 +577,15 @@ func taskRecord(id, kind string, status domain.ReconciliationTaskStatus) domain.
 		CreatedAt:          time.Unix(1, 0).UTC(),
 		UpdatedAt:          time.Unix(1, 0).UTC(),
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 type fakeTaskStore struct {
