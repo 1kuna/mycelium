@@ -145,6 +145,13 @@ handoff.
   operator-approved window, then rerun `service status` and `gateway routes
   --live` before replacing the binary. Do not force a binary swap from a failed
   preflight.
+- 2026-07-07: Repo commit `dd2af71` fixes one confirmed cause of the Mac
+  gateway preflight failure class by treating missing remote owner agents as
+  unreachable during terminal lease reconciliation. The deployed gateway must
+  still be refreshed through the service-upgrade path before this fix is live.
+  If the old deployed gateway cannot return a stable preflight after a safe
+  restart, activation needs an explicit operator decision to use the prepared
+  rollback packet despite the failed old-binary baseline.
 - 2026-06-29: macOS user LaunchAgent activation can be blocked by binary
   identity / Local Network permission behavior. The repo provides generic
   service plan/install/status/rollback surfaces plus
