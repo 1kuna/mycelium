@@ -135,6 +135,17 @@ handoff.
   readiness.
   Remote catalog mutation, cross-peer artifact movement, and owner repair remain
   separate explicit actions; owner repair remains approval-gated by default.
+- 2026-07-07: Live source/service materialization can now create demand,
+  refresh/source catalog work, stage artifacts through the peer catalog-stage
+  executor, and resolve unique saved ready engine profiles, but the current live
+  end-to-end small completion proof is blocked when no reachable owner both
+  appears in the fleet snapshot and fits the requested preset. In this state the
+  gateway correctly records demand and returns typed `503` availability evidence
+  instead of hiding the failure, and cleanup leaves no held leases or
+  nonterminal synthetic jobs. The remaining product gap is the executable
+  `wait_capacity`/capacity-repair class: allowed capacity-wait tasks still fail
+  loudly as unimplemented rather than rearranging supply or replacing an
+  unreachable/mismatched owner automatically.
 - 2026-06-29: Some deployed gateways may lag the current catalog-discovery and
   route-header code until the operator activates a new binary through the
   documented service path. Use `myce gateway routes --live` to distinguish
