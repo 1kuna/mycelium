@@ -409,6 +409,26 @@ func TestEnsureDemandValidationAndDefaults(t *testing.T) {
 	if service.ModelSource != "hf://owner/repo/model.gguf" || service.Backend != domain.BackendLlamaCpp {
 		t.Fatalf("source/backend = %+v", service)
 	}
+	contractStore := &fakeStore{}
+	contractService, err := EnsureDemand(context.Background(), contractStore, Demand{
+		Model:       "vision",
+		ModelSource: "hf://owner/repo",
+		ModelSourceContract: &domain.ModelSourceContract{
+			Format:       "hf-transformers",
+			SizeMB:       1024,
+			KVPerTokenMB: 0.25,
+			Capabilities: []domain.Capability{domain.CapabilityChat,
+				domain.CapabilityVision},
+		},
+		Backend: domain.BackendVLLM,
+		Now:     time.Unix(2, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("EnsureDemand source contract: %v", err)
+	}
+	if contractService.ModelSourceContract.SizeMB != 1024 || len(contractService.ModelSourceContract.Capabilities) != 2 {
+		t.Fatalf("source contract = %+v", contractService)
+	}
 }
 
 func TestReconcileSkipsExistingNonTerminalTaskAndPausedServices(t *testing.T) {
@@ -453,9 +473,14 @@ func TestReconcileSkipsExistingNonTerminalTaskAndPausedServices(t *testing.T) {
 func TestReconcileCreatesSourceAwareCatalogRefreshTask(t *testing.T) {
 	now := time.Unix(50, 0).UTC()
 	store := &fakeStore{services: []domain.ModelService{{
-		ID:             "svc-source",
-		Model:          "vision",
-		ModelSource:    "hf://owner/repo/model.gguf",
+		ID:          "svc-source",
+		Model:       "vision",
+		ModelSource: "hf://owner/repo/model.gguf",
+		ModelSourceContract: &domain.ModelSourceContract{
+			Format:       "hf-transformers",
+			SizeMB:       2048,
+			KVPerTokenMB: 0.25,
+		},
 		Backend:        domain.BackendVLLM,
 		ContextRequest: 8192,
 		MinReplicas:    1,
@@ -473,7 +498,7 @@ func TestReconcileCreatesSourceAwareCatalogRefreshTask(t *testing.T) {
 		t.Fatalf("report=%+v tasks=%+v", report, store.tasks)
 	}
 	task := store.tasks[0]
-	if task.Kind != string(reconcile.TaskRefreshCatalog) || task.ModelSource != "hf://owner/repo/model.gguf" || task.Backend != domain.BackendVLLM || !strings.Contains(task.Next, "materialize") {
+	if task.Kind != string(reconcile.TaskRefreshCatalog) || task.ModelSource != "hf://owner/repo/model.gguf" || task.ModelSourceContract.SizeMB != 2048 || task.Backend != domain.BackendVLLM || !strings.Contains(task.Next, "materialize") {
 		t.Fatalf("source-aware task = %+v", task)
 	}
 }

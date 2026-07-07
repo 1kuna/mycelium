@@ -108,6 +108,95 @@ func TestInstallWithProgressReportsDurableState(t *testing.T) {
 	}
 }
 
+func TestMaterializeSourcePresetRecordsBackendManagedContract(t *testing.T) {
+	store := t.TempDir()
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	installer := NewInstaller(store)
+	installer.Now = func() time.Time { return now }
+
+	result, err := installer.MaterializeSourcePreset(context.Background(), SourcePresetRequest{
+		Source:        "hf://owner/repo",
+		ID:            "vision-vllm",
+		Model:         "vision-model",
+		Backend:       domain.BackendVLLM,
+		ContextLength: 49152,
+		Contract: &domain.ModelSourceContract{
+			Format:        "hf-transformers",
+			SizeMB:        24000,
+			KVPerTokenMB:  0.25,
+			Quant:         "bf16",
+			Capabilities:  []domain.Capability{domain.CapabilityChat, domain.CapabilityVision},
+			EngineProfile: "engine-vllm",
+		},
+	})
+	if err != nil {
+		t.Fatalf("MaterializeSourcePreset: %v", err)
+	}
+	if result.Preset.ID != "vision-vllm" || result.Preset.ModelRef != "owner/repo" || result.Preset.Backend != domain.BackendVLLM || result.Preset.ContextLength != 49152 {
+		t.Fatalf("preset = %+v", result.Preset)
+	}
+	if result.Preset.EstWeightsMB != 24000 || result.Preset.KVPerTokenMB != 0.25 || result.Preset.EngineReadiness != domain.EngineReadinessReadyProfile {
+		t.Fatalf("resource/readiness = %+v", result.Preset)
+	}
+	if strings.Join(capabilityStrings(result.Preset.Capabilities), ",") != "chat,vision" || strings.Join(result.Preset.Aliases, ",") != "vision-model" {
+		t.Fatalf("caps/aliases = %+v", result.Preset)
+	}
+	stored, err := ReadPreset(store, "vision-vllm")
+	if err != nil {
+		t.Fatalf("ReadPreset: %v", err)
+	}
+	if stored.ModelRef != result.Preset.ModelRef || stored.GeneratedBy != "catalog-source" || stored.GeneratedFrom != "hf://owner/repo" {
+		t.Fatalf("stored preset = %+v", stored)
+	}
+	prov, err := ReadProvenance(store, "vision-vllm")
+	if err != nil {
+		t.Fatalf("ReadProvenance: %v", err)
+	}
+	if prov.Importer != "vllm-source-contract" || prov.MaterializedPath != "owner/repo" || !prov.InstalledAt.Equal(now) {
+		t.Fatalf("provenance = %+v", prov)
+	}
+	state, err := readInstallState(store, "install-vision-vllm")
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if state.Status != "ready" || len(state.Progress) != 1 || state.Progress[0].Message == "" {
+		t.Fatalf("state = %+v", state)
+	}
+}
+
+func TestMaterializeSourcePresetFailsUnsafeSourceContracts(t *testing.T) {
+	installer := NewInstaller(t.TempDir())
+	valid := SourcePresetRequest{
+		Source:        "hf://owner/repo",
+		ID:            "vision",
+		Backend:       domain.BackendVLLM,
+		ContextLength: 8192,
+		Contract:      &domain.ModelSourceContract{SizeMB: 100, KVPerTokenMB: 0.1},
+	}
+	for name, req := range map[string]SourcePresetRequest{
+		"missing contract":        {Source: valid.Source, Backend: valid.Backend, ContextLength: valid.ContextLength},
+		"missing size":            {Source: valid.Source, Backend: valid.Backend, ContextLength: valid.ContextLength, Contract: &domain.ModelSourceContract{KVPerTokenMB: 0.1}},
+		"missing kv":              {Source: valid.Source, Backend: valid.Backend, ContextLength: valid.ContextLength, Contract: &domain.ModelSourceContract{SizeMB: 100}},
+		"file-scoped hf source":   {Source: "hf://owner/repo/model.gguf", Backend: valid.Backend, ContextLength: valid.ContextLength, Contract: valid.Contract},
+		"unsupported backend":     {Source: valid.Source, Backend: domain.BackendOpenVINO, ContextLength: valid.ContextLength, Contract: valid.Contract},
+		"missing context length":  {Source: valid.Source, Backend: valid.Backend, Contract: valid.Contract},
+		"missing backend":         {Source: valid.Source, ContextLength: valid.ContextLength, Contract: valid.Contract},
+		"missing source":          {Backend: valid.Backend, ContextLength: valid.ContextLength, Contract: valid.Contract},
+		"missing catalog store":   {Source: valid.Source, Backend: valid.Backend, ContextLength: valid.ContextLength, Contract: valid.Contract},
+		"unsafe generated preset": {Source: valid.Source, ID: "../bad", Backend: valid.Backend, ContextLength: valid.ContextLength, Contract: valid.Contract},
+	} {
+		t.Run(name, func(t *testing.T) {
+			target := installer
+			if name == "missing catalog store" {
+				target = NewInstaller("")
+			}
+			if _, err := target.MaterializeSourcePreset(context.Background(), req); err == nil {
+				t.Fatal("unsafe source contract succeeded")
+			}
+		})
+	}
+}
+
 func TestInstallResumesStagedJobWithoutRegisteringEarly(t *testing.T) {
 	store := t.TempDir()
 	req := InstallRequest{Source: filepath.Join(t.TempDir(), "missing.gguf"), ID: "tiny"}
@@ -370,4 +459,12 @@ func hasInstallTrace(steps []trace.Step, op string) bool {
 		}
 	}
 	return false
+}
+
+func capabilityStrings(caps []domain.Capability) []string {
+	out := make([]string, 0, len(caps))
+	for _, cap := range caps {
+		out = append(out, string(cap))
+	}
+	return out
 }

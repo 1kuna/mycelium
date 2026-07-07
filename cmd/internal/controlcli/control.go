@@ -272,6 +272,11 @@ func runModelsServiceEnsure(ctx context.Context, args []string) error {
 	model := fs.String("model", "", "model alias or preset id to serve")
 	source := fs.String("source", "", "model source URI/path to materialize when catalog candidates are missing")
 	backend := fs.String("backend", "", "preferred backend for source materialization")
+	sourceFormat := fs.String("source-format", "", "model source format for source materialization")
+	sourceSizeMB := fs.Int("source-size-mb", 0, "model source size in MB for fit-safe source materialization")
+	sourceKVPerToken := fs.Float64("source-kv-per-token-mb", 0, "KV cache MB per token for fit-safe source materialization")
+	sourceQuant := fs.String("source-quant", "", "source quantization label")
+	sourceEngineProfile := fs.String("source-engine-profile", "", "ready engine profile id for the source contract")
 	project := fs.String("project", "", "project label for held supply")
 	contextRequest := fs.Int("context", 0, "context envelope for the service")
 	concurrency := fs.Int("concurrency", 1, "expected concurrent requests per worker")
@@ -282,6 +287,8 @@ func runModelsServiceEnsure(ctx context.Context, args []string) error {
 	reason := fs.String("reason", "operator ensured model service", "redacted service event reason")
 	var presetIDs repeatedString
 	fs.Var(&presetIDs, "preset", "candidate preset id; repeat to pin the eligible owner set")
+	var sourceCapabilities repeatedString
+	fs.Var(&sourceCapabilities, "source-capability", "source capability such as chat or vision; repeatable")
 	jsonOut := fs.Bool("json", false, "print JSON response")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -301,6 +308,12 @@ func runModelsServiceEnsure(ctx context.Context, args []string) error {
 	if *maxReplicas < 0 {
 		return fmt.Errorf("--max must be >= 0")
 	}
+	if *sourceSizeMB < 0 {
+		return fmt.Errorf("--source-size-mb must be >= 0")
+	}
+	if *sourceKVPerToken < 0 {
+		return fmt.Errorf("--source-kv-per-token-mb must be >= 0")
+	}
 	parsedPriority, err := parsePriorityFlag(*priority)
 	if err != nil {
 		return err
@@ -313,6 +326,11 @@ func runModelsServiceEnsure(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	parsedSourceCapabilities, err := parseCapabilities([]string(sourceCapabilities))
+	if err != nil {
+		return err
+	}
+	sourceContract := modelSourceContract(*sourceFormat, *sourceSizeMB, *sourceKVPerToken, *sourceQuant, *sourceEngineProfile, parsedSourceCapabilities)
 	store, err := storesqlite.Open(*dbPath)
 	if err != nil {
 		return err
@@ -328,6 +346,7 @@ func runModelsServiceEnsure(ctx context.Context, args []string) error {
 	service, err := serving.EnsureDemand(ctx, store, serving.Demand{
 		Model:               strings.TrimSpace(*model),
 		ModelSource:         strings.TrimSpace(*source),
+		ModelSourceContract: sourceContract,
 		Backend:             parsedBackend,
 		Project:             strings.TrimSpace(*project),
 		ContextRequest:      *contextRequest,
@@ -356,6 +375,34 @@ func runModelsServiceEnsure(ctx context.Context, args []string) error {
 		emptyDash(strings.Join(service.CandidatePresetIDs, ",")),
 	)
 	return nil
+}
+
+func modelSourceContract(format string, sizeMB int, kvPerTokenMB float64, quant, engineProfile string, capabilities []domain.Capability) *domain.ModelSourceContract {
+	contract := domain.ModelSourceContract{
+		Format:        strings.TrimSpace(format),
+		SizeMB:        sizeMB,
+		KVPerTokenMB:  kvPerTokenMB,
+		Quant:         strings.TrimSpace(quant),
+		Capabilities:  capabilities,
+		EngineProfile: strings.TrimSpace(engineProfile),
+	}
+	if contract.Format == "" && contract.SizeMB == 0 && contract.KVPerTokenMB == 0 && contract.Quant == "" && contract.EngineProfile == "" && len(contract.Capabilities) == 0 {
+		return nil
+	}
+	return &contract
+}
+
+func parseCapabilities(values []string) ([]domain.Capability, error) {
+	var out []domain.Capability
+	for _, value := range uniqueStringList(values) {
+		switch cap := domain.Capability(value); cap {
+		case domain.CapabilityChat, domain.CapabilityCompletion, domain.CapabilityEmbedding, domain.CapabilityVision, domain.CapabilityImage, domain.CapabilityASR, domain.CapabilityDiarization, domain.CapabilityRerank, domain.CapabilityTTS:
+			out = append(out, cap)
+		default:
+			return nil, fmt.Errorf("unknown capability %q", value)
+		}
+	}
+	return out, nil
 }
 
 func uniqueStringList(values []string) []string {

@@ -839,6 +839,11 @@ func TestRunModelsServiceEnsureSelectsMatchingPresetEnvelopes(t *testing.T) {
 			"--project", "project-a",
 			"--source", "hf://owner/repo/model.gguf",
 			"--backend", "vllm",
+			"--source-format", "hf-transformers",
+			"--source-size-mb", "2048",
+			"--source-kv-per-token-mb", "0.25",
+			"--source-capability", "chat",
+			"--source-capability", "vision",
 			"--context", "49152",
 			"--min", "2",
 			"--max", "2",
@@ -867,6 +872,9 @@ func TestRunModelsServiceEnsureSelectsMatchingPresetEnvelopes(t *testing.T) {
 	service := services[0]
 	if service.Model != "shared-model" || service.ModelSource != "hf://owner/repo/model.gguf" || service.Backend != domain.BackendVLLM || service.Project != "project-a" || service.ContextRequest != 49152 || service.MinReplicas != 2 || service.MaxReplicas != 2 {
 		t.Fatalf("service = %+v", service)
+	}
+	if service.ModelSourceContract == nil || service.ModelSourceContract.Format != "hf-transformers" || service.ModelSourceContract.SizeMB != 2048 || service.ModelSourceContract.KVPerTokenMB != 0.25 || len(service.ModelSourceContract.Capabilities) != 2 {
+		t.Fatalf("source contract = %+v", service.ModelSourceContract)
 	}
 	if got := strings.Join(service.CandidatePresetIDs, ","); got != "node-b-model,node-c-model" {
 		t.Fatalf("candidate presets = %s", got)

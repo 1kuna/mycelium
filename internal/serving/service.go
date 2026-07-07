@@ -26,6 +26,7 @@ type Store interface {
 type Demand struct {
 	Model               string
 	ModelSource         string
+	ModelSourceContract *domain.ModelSourceContract
 	Backend             domain.Backend
 	Project             string
 	ContextRequest      int
@@ -98,6 +99,9 @@ func EnsureDemand(ctx context.Context, store Store, demand Demand) (domain.Model
 		if strings.TrimSpace(demand.ModelSource) != "" {
 			service.ModelSource = strings.TrimSpace(demand.ModelSource)
 		}
+		if modelSourceContractPresent(demand.ModelSourceContract) {
+			service.ModelSourceContract = cloneModelSourceContract(demand.ModelSourceContract)
+		}
 		if demand.Backend != "" {
 			service.Backend = demand.Backend
 		}
@@ -120,6 +124,7 @@ func EnsureDemand(ctx context.Context, store Store, demand Demand) (domain.Model
 		ID:                  id,
 		Model:               demand.Model,
 		ModelSource:         strings.TrimSpace(demand.ModelSource),
+		ModelSourceContract: cloneModelSourceContract(demand.ModelSourceContract),
 		Backend:             demand.Backend,
 		Project:             demand.Project,
 		ContextRequest:      demand.ContextRequest,
@@ -372,6 +377,7 @@ func catalogRefreshTaskForService(service domain.ModelService, now time.Time) do
 		Status:              domain.ReconciliationTaskAllowed,
 		Model:               service.Model,
 		ModelSource:         service.ModelSource,
+		ModelSourceContract: service.ModelSourceContract,
 		Backend:             service.Backend,
 		Project:             service.Project,
 		ContextRequest:      service.ContextRequest,
@@ -389,6 +395,24 @@ func catalogRefreshTaskForService(service domain.ModelService, now time.Time) do
 			At:      now,
 		}},
 	}
+}
+
+func modelSourceContractPresent(contract *domain.ModelSourceContract) bool {
+	return contract != nil && (contract.Format != "" ||
+		contract.SizeMB != 0 ||
+		contract.KVPerTokenMB != 0 ||
+		contract.Quant != "" ||
+		contract.EngineProfile != "" ||
+		len(contract.Capabilities) != 0)
+}
+
+func cloneModelSourceContract(contract *domain.ModelSourceContract) *domain.ModelSourceContract {
+	if contract == nil {
+		return nil
+	}
+	out := *contract
+	out.Capabilities = append([]domain.Capability(nil), contract.Capabilities...)
+	return &out
 }
 
 func presetMatchesModel(preset domain.Preset, model string) bool {
