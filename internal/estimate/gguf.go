@@ -61,6 +61,9 @@ func (e *GGUFEstimator) Estimate(ctx context.Context, p domain.Preset, contextLe
 }
 
 func (e *GGUFEstimator) metadata(ctx context.Context, p domain.Preset) (domain.ModelMetadata, error) {
+	if p.GeneratedBy == "catalog-source" && p.EstWeightsMB > 0 {
+		return domain.ModelMetadata{WeightsMB: p.EstWeightsMB, KVPerTokenMB: p.KVPerTokenMB}, nil
+	}
 	if p.NodeID != "" {
 		agent, ok := e.agents[p.NodeID]
 		if !ok && e.resolver != nil {

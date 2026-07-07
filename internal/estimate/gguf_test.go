@@ -113,6 +113,28 @@ func TestGGUFEstimatorUsesParserForLocalFile(t *testing.T) {
 	}
 }
 
+func TestGGUFEstimatorUsesExplicitPresetFactsBeforeParser(t *testing.T) {
+	model := filepath.Join(t.TempDir(), "model.gguf")
+	if err := os.WriteFile(model, []byte("not really gguf"), 0o600); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	parser := &staticParser{metadata: domain.ModelMetadata{WeightsMB: 5000, KVPerTokenMB: 2}}
+	estimator := NewGGUF(parser, nil)
+	preset := fixtures.MakePreset(fixtures.WithModelRef(model), fixtures.WithWeights(12), fixtures.WithKVPerToken(0.5))
+	preset.GeneratedBy = "catalog-source"
+
+	claim, err := estimator.Estimate(context.Background(), preset, 1000, 1)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	if claim != (domain.Claim{WeightsMB: 12, KVReservedMB: 500}) {
+		t.Fatalf("claim = %+v", claim)
+	}
+	if parser.modelRef != "" {
+		t.Fatalf("parser should not be called, got %s", parser.modelRef)
+	}
+}
+
 func TestGGUFEstimatorFailsLoudOnMissingInputs(t *testing.T) {
 	estimator := NewGGUF(nil, nil)
 	_, err := estimator.Estimate(context.Background(), fixtures.MakePreset(fixtures.WithModelRef("remote.gguf")), 1000, 1)
