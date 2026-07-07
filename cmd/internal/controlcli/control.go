@@ -319,9 +319,6 @@ func runModelsServiceEnsure(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	if len(candidates) == 0 {
-		return fmt.Errorf("no candidate presets found for model %q and context %d", strings.TrimSpace(*model), *contextRequest)
-	}
 	service, err := serving.EnsureDemand(ctx, store, serving.Demand{
 		Model:               strings.TrimSpace(*model),
 		Project:             strings.TrimSpace(*project),
