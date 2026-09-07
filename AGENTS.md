@@ -2,20 +2,26 @@
 
 You are building **Mycelium**, a hardware-aware inference control plane (a single Go binary that conducts existing inference engines across a fleet of heterogeneous machines). This file is the operating manual for any agent working in this repo. Read it before writing code.
 
-## Read these first, in order
+## Repo and document map
 
-1. `01-project-spec.md` — *what* this is: the resource/lease/scheduler/optimizer model (§3), the data shapes (§3.8), the repo layout (§5), and the **13 locked design decisions with their rejected alternatives (§6)**.
-2. `02-testing-architecture.md` — *how to verify*: the Go interface contracts, the hand-written mocks, fixture factories, `FakeClock`, the conformance-suite pattern, and the CI tiers.
-3. `03-development-guide.md` — *what order*: the gated phase plan. **Work one phase at a time. Do not start phase N+1 until phase N's gate passes.**
+- `cmd/` — peer and control CLI entrypoints; `internal/domain/` — data types; `internal/ports/` — dependency contracts; other `internal/` packages — implementations.
+- `test/` — mocks, fixtures, conformance, integration, e2e, and hardware smoke tests.
+- `01-project-spec.md` — behavior (§3), data shapes (§3.8), layout (§5), and locked decisions (§6). Read the sections governing the change.
+- `02-testing-architecture.md` — interface contracts, mocks, `FakeClock`, conformance suites, and CI tiers. Consult when changing an interface or choosing verification.
+- `03-development-guide.md` — phase dependencies and exact acceptance gates. Read the current phase and its prerequisites; gates must pass before advancing.
+- `skills/` — area-specific guidance for backend adapters, KV estimation, and the scheduler model.
+- `DECISIONS.md` / `BLOCKERS.md` — relevant decisions and unresolved dependencies; consult entries affecting the task.
 
-Also read the skill files in `skills/` when touching their areas (`backend-adapters.md`, `kv-estimation.md`, `scheduler-model.md`).
+Read by task and follow relevant dependencies; a small change does not require the entire document stack. The workflow below reflects Zach's approved instruction policy and supersedes older blanket reading/testing cadence and partial-completion language in the guides. Product requirements, locked decisions, coverage bars, and phase gates remain binding.
 
 ## Build & test
+
+During iteration, format touched Go files and run affected package tests (with `-race` for concurrency changes). Broaden checks for shared contracts or cross-package changes; use the complete commands below for integration candidates and the exact guide gate at each phase boundary. Do not reformat unrelated files.
 
 ```bash
 go build ./...                                   # must be clean
 go vet ./...                                     # must be clean
-gofmt -l .                                       # must print nothing (run `gofmt -w .` to fix)
+gofmt -l .                                       # inspect output; format only files in scope
 go test ./... -race                              # fast tiers: unit + contract + integration + e2e — NO hardware
 go test ./... -covermode=atomic -coverprofile=all.out && go tool cover -func=all.out | grep total
 go test -tags smoke ./test/smoke/... -timeout 20m   # smoke: REAL engines/machines — run only at phase boundaries
@@ -45,43 +51,21 @@ go test -tags smoke ./test/smoke/... -timeout 20m   # smoke: REAL engines/machin
 - "**fleet**" (lowercase) is the common noun for the set of machines — Mycelium is the network across the fleet. It is not a second product name; don't rename it.
 - Navigate by path: code lives under `internal/<module>` mirroring Doc 1 §5. Domain types in `internal/domain` (no logic, std-lib only); interfaces in `internal/ports`.
 
-## Workflow
+## Workflow and authority
 
-- **One phase at a time**, gate-green before moving on. The gate is the literal commands in Doc 3, not a judgment call.
-- **When stuck, ship the gate-passing 80%** and leave a `// TODO(phase-N): …`. Note what you deferred at the top of the commit/PR. A gate-passing partial beats a blocked whole.
-- **Parallel-OK** work is marked in Doc 3; within a phase, independent modules can proceed concurrently once the phase's contracts exist.
-- Where Doc 3 says *Your call*, the approach is yours within the stated hard requirements. The hard requirements are not yours to relax.
-- Do not create or maintain a root `HANDOFF.md` unless the project owner
-  explicitly asks for one. Durable project truth belongs in the SSOT docs,
-  `DECISIONS.md`, `BLOCKERS.md`, `CODEX-FINDINGS.md`, topic runbooks, tests,
-  or PM/project coordination surfaces, not a catch-all repo ledger.
+- Work one phase at a time. Use the exact gate and behavioral checks in `03-development-guide.md`; do not advance until it passes. Its parallel-safe work can proceed independently once the required contracts exist.
+- Decide routine implementation details within the contract. Record choices that affect future work in `DECISIONS.md`; ask only about consequential unresolved product, architecture, security, or cost decisions.
+- Commit verified checkpoints and continue toward the complete requested outcome. A passing gate is not permission to omit requested work or relax acceptance criteria.
+- For blocked work, leave a relevant `// TODO(blocked):` and a `BLOCKERS.md` entry stating what, why, and what would unblock it. Continue independent authorized work. Stop only when done or all remaining work requires an external dependency or human decision; report the latter as blocked, not complete.
+- Fix failures caused by the change before building dependent work on it. Record unrelated failures and their verification impact; never hide or weaken a gate.
+- `01-project-spec.md`, `02-testing-architecture.md`, and `03-development-guide.md` are read-only contracts. Record a `PROPOSED SPEC CHANGE` in `DECISIONS.md` rather than editing them or silently diverging. Locked decisions in Doc 1 §6 and contracts in Doc 2 §2 govern over reference repos or intuition. Only the reading/testing cadence and checkpoint policy explicitly updated above supersede older workflow wording.
+- Do not create or maintain a root `HANDOFF.md` unless Zach asks. Durable truth belongs in the SSOT docs, `DECISIONS.md`, `BLOCKERS.md`, `CODEX-FINDINGS.md`, topic runbooks, tests, or PM/project coordination surfaces.
 
-## Autonomous operation (running under `/goal`)
+## Hardware reality
 
-This repo is built to be implemented by a long-running autonomous agent (Codex `/goal` or Claude Code `/goal`) with no human in the loop until a real wall is hit. The phase gates and conformance suites are the self-proof; the rules below keep you from drifting and tell you exactly when to stop.
-
-**Decision protocol — three tiers:**
-
-1. **Decide and log.** Anything Doc 3 marks *Your call*, plus every ordinary implementation choice, is yours. Make the best choice within the stated hard requirements, then record it in `DECISIONS.md` (one line: the choice + why). Don't stop to ask — decide and log.
-2. **Defer and log.** If a piece is genuinely blocked, or needs an opinion you can't responsibly make alone (a real product judgment, a security/cost tradeoff with no clear answer, a spec point too ambiguous to resolve), set it aside: leave a `// TODO(blocked):` at the site, add an entry to `BLOCKERS.md` (what's blocked, why, what would unblock it), and keep working on everything that isn't blocked. Never stall the whole run on one stuck item.
-3. **Terminal stop.** Stop the goal only when *all remaining* work falls into one of: (a) it requires hardware you don't have (see below), or (b) it requires a human decision recorded in `BLOCKERS.md` that you cannot proceed past. Then write a final `BLOCKERS.md` summary and stop. **Reaching this state with everything else green is success, not failure** — that is the intended end condition, not an error.
-
-**Self-proof loop (this is how you don't drift):**
-
-- After every unit of work, run the fast gates: `go build ./... && go vet ./... && go test ./... -race`. A red gate means fix it before continuing — never build on a red base.
-- At a phase boundary, run that phase's full gate from Doc 3, including its named behavioral checks. **Do not advance to phase N+1 until phase N's gate is green.** The gate is the literal commands, not your judgment that it "looks done."
-- The gates and conformance suites exist precisely so you can prove your own work and a reviewer can re-prove it. Trust them over your intuition.
-
-**Drift prevention — the spec is read-only:**
-
-- Treat `01-project-spec.md`, `02-testing-architecture.md`, and `03-development-guide.md` as the immutable contract. **Do not edit them.** If you believe the spec is wrong or incomplete, do NOT silently diverge in code and do NOT rewrite the spec to match a shortcut — add a `PROPOSED SPEC CHANGE` entry to `DECISIONS.md` (what, why, the change you'd make) and keep building to the spec as written until a human ratifies it.
-- The locked decisions in Doc 1 §6 and the contracts in Doc 2 §2 win over anything in the reference repos or your own instinct.
-
-**Hardware reality (what you can and cannot test yourself):**
-
-- The primary dev machine can run small GGUF models via llama.cpp Metal, so it is itself a real single node. **All of Phase 0 (mocks, zero hardware) and the single-node parts of Phase 1's smoke gate — real load → ready-gate → serve → graceful-stop → telemetry metric → reactive requeue on a small model — you can and should do yourself when the required local model/env values are present.**
-- A **second real peer** may be available for multi-node testing, but only if its address is in your environment/config. Anything needing a second node — the multi-node fleet smoke in Phase 1, the join smoke in Phase 4 — is a **defer-and-log** item (note "needs second peer address" in `BLOCKERS.md`) unless that address is provided.
-- Specialty hardware (large NVIDIA/Intel/Apple accelerator hosts, vLLM/CUDA paths, `catastrophic`-OOM behavior, large models) is **not** assumed to be available. Build those paths to the spec and cover them with mocks + conformance suites in the fast tiers; their real-hardware smoke checks are terminal-stop / human-run items — do not grind on them.
+- Phase 0 is entirely hardware-free. The dev Mac can run small GGUF models through llama.cpp Metal: with the required model/environment present, validate Phase 1's single-node load → ready → serve → graceful-stop → telemetry → reactive-requeue smoke path.
+- A second peer is available only when its address is supplied in environment/config. Otherwise record the multi-node Phase 1 and Phase 4 smoke gates as needing a second peer address.
+- Do not assume specialty NVIDIA/Intel/Apple accelerator hosts, vLLM/CUDA, catastrophic-OOM behavior, or large models are available. Implement their contracts with mocks and conformance tests; report unavailable real-hardware checks as blocked rather than grinding or fabricating results.
 
 ## Implementation gotchas (learned from the reference repos — watch for these)
 
@@ -96,7 +80,3 @@ This repo is built to be implemented by a long-running autonomous agent (Codex `
 - **Join token is membership, not auth.** Possessing the token lets a peer join; it does not authorize backend operations. Make the token rotatable/revocable.
 - **Owner commits; coordinator proposes (optimistic concurrency).** A coordinator never writes a remote node's lease state. It calls the owner's `AdmissionController.Commit` with the fence from the owner's offer; a stale fence returns `ErrStaleFence` and the coordinator re-plans. The owner's local transaction is the only serialization point — that is what prevents two coordinators double-booking one accelerator. Never add a global lock or a shared mutable queue to "fix" a race the owner already resolves.
 - **Registry is for visibility + rescue, not authority.** The job registry is eventually-consistent and may be briefly stale; always re-check the live owner before rescuing a job a dead peer was running (it may have finished). Never treat the registry as the source of truth for what's running — the owner is.
-
-## Where the authority lives
-
-The docs are the source of truth for *intent*; existing reference-repo code is information, not authority. When in doubt, the locked decisions in Doc 1 §6 and the contracts in Doc 2 §2 win. If you believe a decision is wrong, record it as a `PROPOSED SPEC CHANGE` in `DECISIONS.md` and keep building to spec — never silently diverge.
