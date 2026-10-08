@@ -17,3 +17,4 @@ artifacts/
 PRIVATE_OPS.md
 *.local.md
 ops/private/
+.reports/
