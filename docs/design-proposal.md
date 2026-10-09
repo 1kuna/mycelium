@@ -161,12 +161,12 @@ Each worker has a local `--model-cache` directory (default under its state
 folder) and `--model-cache-bytes` limit (default 100 GiB). First use checks local
 free space and cache capacity, moves least-recently-used unloaded copies to
 Trash, writes a `.partial` file, verifies size and SHA-256, syncs, and renames.
-Loaded/loading/draining models are protected from cache eviction. Restart moves
-interrupted copies to Trash. With `--model-root`, Trash lives under the NAS root;
+Loaded/loading/draining models are protected from cache eviction. Restart retains
+interrupted copies and resumes from their byte offset after rehashing the prefix. With `--model-root`, Trash lives under the NAS root;
 cross-filesystem eviction saves and verifies a recovery copy before finishing
 the move. Without a model root, user Trash is used; it may not release local
 blocks, in which case the load refuses clearly. Never empty Trash automatically.
-Worker check-ins report cached model names, available cache bytes (the lesser of
+Worker check-ins report verified cached model names, available cache bytes (the lesser of
 filesystem free bytes and remaining cache allowance), and errors. Status exposes
 those reports. Copy and verification time are part of model load time. Large
 models always load from local disk. `direct_nas: true` is an explicit per-model
@@ -183,3 +183,19 @@ implements reservations now. Windows are start-inclusive/end-exclusive and must
 not cross midnight. Initial pin warmup and unavailable hardware remain visible;
 a ready pin serves calls without a model load wait. A pin cannot promise
 availability while its machine or NAS is down.
+
+### Pre-copying (Zach, 2026-10-09)
+
+`myce model sync MODEL --to machine|platform|all` persists a request to copy NAS
+masters before use; `--cancel` pauses that target request without discarding
+partial bytes. Pins warm/protect every possible landing worker's disk cache,
+including before a scheduled window. Idle workers pre-copy queued and recently
+used models, most-needed first. Real jobs, engine loads and model calls pause
+background copies. One copy per worker is the default, configurable with
+`--model-copy-parallel`. Cache limits include partials and full active copy
+reservations; background eviction never displaces pinned, loaded, active or
+more-used models. Final size and SHA-256 verification precede atomic publication.
+Status reports progress, errors and measured achieved copy speed. Placement
+estimates remaining NAS bytes divided by that worker's measured speed (40 MB/s
+until measured), prefers verified cached models, and keeps engine startup time
+separate from this transfer estimate. Everything remains laptop-testable.

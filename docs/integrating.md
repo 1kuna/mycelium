@@ -453,8 +453,8 @@ Check cache reports and load refusal messages in `myce status`.
 For interactive production, use `myce model pin MODEL --project atlas --machine
 spark` or `--platform cuda`. Wait for a ready assigned model before directing
 latency-sensitive traffic to it. A pin reserves memory, so other work may wait.
-Optional weekday/time windows are active reservations; warmup at a window's
-start can take time. Unpin when this guarantee is no longer needed.
+Optional weekday/time windows are active reservations; cache pre-copy occurs
+before the window, but engine warmup at its start can still take time. Unpin when this guarantee is no longer needed.
 
 **Experiments should be resumable and checkpoint frequently.** Production now
 stops lower-priority non-resumable work immediately and restarts it later without
@@ -462,3 +462,28 @@ spending a loss retry. Resumable work has 10 seconds by default to save and exit
 deadline preemption retains 2 minutes. Workers receive authenticated immediate
 stop notifications. Read `start_latency_seconds` to measure production queue
 clearance, and measure model load separately when a pin is not ready.
+
+### Pre-copy API and latency planning
+
+Before production traffic, run `myce model sync MODEL --to MACHINE|PLATFORM|all`.
+The authenticated HTTP equivalent is `POST /api/models/sync` with
+`{"model":"MODEL","to":"TARGET"}`. Add `"cancel":true` to pause/suppress that
+request; resend with false to resume. This copies NAS masters only, never fetches
+from the internet or installs software. Queue restarts retain requests; worker
+restarts retain and verify partial prefixes. Always wait for `cached_models` and
+`copy_reports[].state == "ready"` before assuming a cache is warm. A cancelled
+request may already have completed; it does not evict a verified cache entry.
+
+`GET /api/status` exposes `sync_requests`, `copy_reports` (bytes, total, state,
+error, achieved bytes_per_second), `copy_bytes_per_second`, and
+`model_copy_seconds` on each machine. A zero measured speed means no measurement
+yet; cold estimates use 40 MB/s. Cached/loaded models have zero NAS transfer cost;
+engine load and inference time remain separate. The queue prefers an idle fitting
+worker with a warm cache or a lower estimated transfer cost, preserving priority
+and explicit platform preferences. Pin standby caches are protected even when
+their time window is inactive. Model-use history lives in SQLite; idle pre-copy
+uses queued demand and recent use, with no external scheduling service.
+
+Batch `needs.model` remains metadata for placement and pre-copy. A plain command
+must use the configured local model file itself; Mycelium does not rewrite its
+arguments or install a runtime. Do not treat pre-copy as environment readiness.

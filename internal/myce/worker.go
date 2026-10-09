@@ -20,6 +20,7 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	CopyParallel                int
 	CacheRoot, ModelRoot        string
 	CacheLimit                  int64
 	ModelConfig                 ModelConfig
@@ -421,6 +422,7 @@ func (w Worker) Run(stop context.Context) error {
 			if rt.cache != nil {
 				var ce error
 				m.CachedModels, m.CacheFreeBytes, ce = rt.cache.Report(w.ModelConfig.Models)
+				m.CopyReports, m.CopyBytesPerSecond = rt.copyTelemetry()
 				if ce != nil {
 					m.CacheError = ce.Error()
 				}
@@ -457,6 +459,16 @@ func (w Worker) Run(stop context.Context) error {
 			var reply Reply
 			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil, Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
 			if err == nil {
+				busy := reply.Job != nil || s.state.Job != nil || leaving || recovering
+				for _, slot := range reply.ModelPlan {
+					if slot.State == "loading" || slot.InFlight > 0 {
+						busy = true
+					}
+				}
+				rt.syncCopies(reply.CopyPlan, reply.CacheUsage, reply.CachePins, busy)
+				// syncCopies cancels immediately; do not block heartbeats behind an
+				// outstanding filesystem syscall on an unavailable NAS. Loads share
+				// the cache admission gate and wait for the reservation to release.
 				rt.sync(reply.ModelPlan)
 				fresh = false
 				if s.state.Fresh {

@@ -28,11 +28,13 @@ const StopGrace = 2 * time.Minute
 var ErrStale = errors.New("stale execution: stop this copy")
 
 type state struct {
-	Pins       []ModelPin            `json:"pins,omitempty"`
-	ModelSlots map[string]*ModelSlot `json:"model_slots,omitempty"`
-	Jobs       map[string]*Job       `json:"jobs"`
-	Machines   map[string]*Machine   `json:"machines"`
-	Front      int64                 `json:"front"`
+	SyncRequests []SyncRequest         `json:"sync_requests,omitempty"`
+	ModelUses    map[string]ModelUse   `json:"model_uses,omitempty"`
+	Pins         []ModelPin            `json:"pins,omitempty"`
+	ModelSlots   map[string]*ModelSlot `json:"model_slots,omitempty"`
+	Jobs         map[string]*Job       `json:"jobs"`
+	Machines     map[string]*Machine   `json:"machines"`
+	Front        int64                 `json:"front"`
 }
 type Queue struct {
 	productionGrace time.Duration
@@ -292,10 +294,12 @@ func (q *Queue) maintain() {
 					} else {
 						for i := range j.Copies {
 							if j.Copies[i].Attempt == j.Attempt {
-								j.Copies[i].Recoverable = true
+								j.Copies[i].Recoverable = j.State == "running"
 							}
 						}
-						j.Losses++
+						if j.State == "running" {
+							j.Losses++
+						}
 						q.retry(j, fmt.Sprintf("machine quiet for %s", q.machineLossTimeout(m.ID)))
 					}
 				}
@@ -386,7 +390,14 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		if old != nil && old.Session != m.Session && c.Fresh {
 			for _, j := range q.s.Jobs {
 				if j.Machine == m.ID && j.Session == old.Session && (j.State == "running" || j.State == "stopping") {
-					j.Losses++
+					if j.Reason == "cancel requested" {
+						j.State = "cancelled"
+						j.StopAt = nil
+						continue
+					}
+					if j.State == "running" {
+						j.Losses++
+					}
 					q.retry(j, "worker restarted after cleaning old processes")
 				}
 			}
@@ -406,7 +417,10 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		q.reconcileModels(&m, c.ModelReports)
 		m.FreeMemoryGB = max(0, m.FreeMemoryGB-q.modelReservation(&m, c.ModelReports))
 		q.maintain()
-		defer func() { reply.ModelPlan = q.modelPlan(m.ID) }()
+		defer func() {
+			reply.ModelPlan = q.modelPlan(m.ID)
+			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
+		}()
 		reply.Leave = m.Leaving
 		if m.Leaving {
 			for _, j := range q.s.Jobs {
@@ -508,6 +522,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 				}
 			}
+			if j != nil && q.betterPlacement(j, &m) {
+				j = nil
+			}
 			if j != nil {
 				j.State = "running"
 				j.StartedAt = nil
@@ -573,6 +590,7 @@ func (q *Queue) Complete(r Result) error {
 			j.Losses++
 			q.retry(j, "worker restarted after cleaning old processes")
 		} else if r.Success {
+			q.recordModelUse(j.Spec.Needs.Model)
 			j.State = "succeeded"
 		} else {
 			j.State = "failed"
@@ -620,7 +638,7 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 	var out Snapshot
 	err := q.update(func() error {
 		q.maintain()
-		out = Snapshot{Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+		out = Snapshot{SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 		for _, s := range q.s.ModelSlots {
 			copy := *s
 			if s.State == "ready" && s.InFlight == 0 {
@@ -657,6 +675,12 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 		}
 		for _, m := range q.s.Machines {
 			copy := cloneMachine(m)
+			copy.ModelCopySeconds = map[string]float64{}
+			for _, model := range q.models.Models {
+				if contains(model.Platforms, m.GPU) {
+					copy.ModelCopySeconds[model.Name] = q.loadSeconds(model.Name, m)
+				}
+			}
 			out.Machines = append(out.Machines, &copy)
 		}
 		sort.Slice(out.Jobs, func(i, k int) bool { return out.Jobs[i].ID < out.Jobs[k].ID })

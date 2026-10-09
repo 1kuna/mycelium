@@ -4,6 +4,7 @@ import (
 	"mycelium/internal/myce"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,5 +38,37 @@ func TestModelPinCLI(t *testing.T) {
 	}
 	if e := run([]string{"model", "fetch", "../outside", "--model-root", dir}); e == nil {
 		t.Fatal("fetch traversal accepted")
+	}
+}
+
+func TestModelSyncCLI(t *testing.T) {
+	dir := t.TempDir()
+	q, e := myce.Open(filepath.Join(dir, "q.db"), dir, myce.RealClock{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer q.Close()
+	cfg := myce.ModelConfig{Idle: time.Minute, Wait: time.Minute, Models: []myce.Model{{Name: "m", Path: "m", Engine: "fake", SizeBytes: 4, SHA256: strings.Repeat("a", 64), MemoryGB: 1, Platforms: []string{"fake"}}}}
+	if e = q.ConfigureModels(cfg); e != nil {
+		t.Fatal(e)
+	}
+	server := httptest.NewServer(myce.API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	t.Setenv("MYCE_TOKEN", "test")
+	for _, cancel := range []bool{false, true, false} {
+		args := []string{"model", "sync", "m", "--to", "all", "--queue", server.URL}
+		if cancel {
+			args = append(args, "--cancel")
+		}
+		if e := run(args); e != nil {
+			t.Fatal(e)
+		}
+		snap, e := q.Snapshot()
+		if e != nil || len(snap.SyncRequests) != 1 || snap.SyncRequests[0].Cancel != cancel {
+			t.Fatal(snap.SyncRequests, e)
+		}
+	}
+	if e := run([]string{"model", "sync", "m", "--queue", server.URL}); e == nil {
+		t.Fatal("missing target accepted")
 	}
 }

@@ -89,7 +89,7 @@ func TestCacheDiskFullAndProtected(t *testing.T) {
 		t.Fatal("protected model missing")
 	}
 }
-func TestCacheInterruptedCopyCleanupChecksumAndDirect(t *testing.T) {
+func TestCacheInterruptedCopyRetainedChecksumAndDirect(t *testing.T) {
 	c, model := cacheFixture(t)
 	m := model("m", "data")
 	partial := filepath.Join(c.Root, cacheKey(m)+".partial")
@@ -99,16 +99,18 @@ func TestCacheInterruptedCopyCleanupChecksumAndDirect(t *testing.T) {
 	if e := c.init(); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := os.Stat(partial); !os.IsNotExist(e) {
-		t.Fatal("partial survived restart")
+	if st, e := os.Stat(partial); e != nil || st.Size() != 2 {
+		t.Fatal("resumable prefix lost", e)
 	}
 	m.SHA256 = strings.Repeat("0", 64)
 	if _, e := c.Prepare(context.Background(), m); e == nil {
 		t.Fatal("bad checksum accepted")
 	}
 	entries, _ := os.ReadDir(c.Root)
-	if len(entries) != 0 {
-		t.Fatal("bad copy published")
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".model") {
+			t.Fatal("bad copy published")
+		}
 	}
 	m = model("m", "data")
 	m.DirectNAS = true

@@ -226,6 +226,11 @@ type workerModel struct {
 	drainRequested bool
 }
 type modelRuntime struct {
+	lastSavedSpeed      float64
+	copies              map[string]*workerCopy
+	copyParallel        int
+	cachePins           map[string]bool
+	cacheUsage          map[string]int
 	cache               *ModelCache
 	mu                  sync.Mutex
 	models              map[string]*workerModel
@@ -253,7 +258,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if e != nil {
 		return nil, e
 	}
-	rt := &modelRuntime{models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
+	rt := &modelRuntime{copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
 	root := w.CacheRoot
 	if root == "" {
 		root = filepath.Join(dir, "model-cache")
@@ -263,19 +268,18 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 		limit = 100 * 1024 * 1024 * 1024
 	}
 	rt.cache = &ModelCache{Root: root, NASRoot: w.ModelRoot, Limit: limit, Clock: w.Clock}
-	rt.cache.Protected = func(key string) bool {
-		rt.mu.Lock()
-		defer rt.mu.Unlock()
-		for _, m := range rt.models {
-			if cacheKey(m.model) == key && m.state != "unloaded" && m.state != "failed" {
-				return true
-			}
-		}
-		return false
-	}
+	rt.cache.Parallel = max(1, w.CopyParallel)
+	rt.cache.Protected = rt.cacheProtected
+	rt.cache.Usage = rt.cachePopularity
 	if e = rt.cache.init(); e != nil {
 		ln.Close()
 		return nil, e
+	}
+	rt.cache.ValidateInventory(w.ModelConfig.Models)
+	if data, e := os.ReadFile(filepath.Join(dir, "copy-speed.json")); e == nil {
+		if e := decodeWorkerJSON(data, &rt.cache.speed); e != nil {
+			log.Printf("restore model copy speed: %v", e)
+		}
 	}
 	rt.memorySource = w.MemorySource
 	rt.memoryMeasured = w.MemoryMeasured
@@ -458,6 +462,7 @@ func (rt *modelRuntime) unload(m *workerModel) {
 	}()
 }
 func (rt *modelRuntime) close() error {
+	rt.pauseCopies()
 	rt.mu.Lock()
 	rt.closing = true
 	for _, m := range rt.models {
@@ -517,6 +522,11 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.inflight++
+	// A routed call can arrive before the next queue check-in. Pause any idle
+	// copy immediately when the worker receives actual inference work.
+	for _, copy := range rt.copies {
+		copy.cancel()
+	}
 	rt.mu.Unlock()
 	defer func() {
 		rt.mu.Lock()
