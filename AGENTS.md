@@ -9,7 +9,8 @@
   `time.Now` or `time.Sleep` directly in queue or scheduling logic.
 - Fake-clock unit tests cover scheduling, leave, loss, and retry decisions.
 - `myce dev` uses the real API and command runner with fake GPU inventory.
-- Checkpoints use `MYCE_CHECKPOINT_DIR`; fleet machines need the same NAS mount.
+- Checkpoints use `MYCE_CHECKPOINT_DIR`; assignments are NAS-relative and each
+  worker configures its own local NAS root with `--checkpoint-root`.
 - Treat worker results as attempt-specific; reject stale executions.
 - Never expose or commit the fleet token. Jobs must not inherit `MYCE_TOKEN`.
 

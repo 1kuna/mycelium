@@ -1,19 +1,16 @@
 [Unit]
-Description=Mycelium batch queue
-After=network-online.target remote-fs.target
-Wants=network-online.target
+Description=Mycelium v2 CPU queue
+After=network-online.target
 
 [Service]
 Type=simple
-User=myce
-WorkingDirectory=/var/lib/myce
-EnvironmentFile=/etc/myce/queue.env
-ExecStart=/usr/local/bin/myce queue --listen 0.0.0.0:7331 --db /var/lib/myce/queue.db --checkpoints /mnt/nas/myce --restart-grace 3m
+WorkingDirectory=%h/.local/share/myce
+EnvironmentFile=%h/.config/myce/queue.env
+ExecStart=%h/.local/bin/myce queue --listen REPLACE_QUEUE_IP:7331 --db %h/.local/share/myce/queue.db --checkpoints REPLACE_CHECKPOINT_ROOT --restart-grace 3m --production-loss-timeout 5s --deadline-loss-timeout 20s --experiment-loss-timeout 60s
 Restart=on-failure
 RestartSec=5
-StateDirectory=myce
 UMask=0077
 TimeoutStopSec=150
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

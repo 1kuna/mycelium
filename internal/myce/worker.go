@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -25,6 +27,10 @@ type Worker struct {
 	Interval                    time.Duration
 	Clock                       Clock
 	StateDir                    string
+	CheckpointRoot              string
+	MemorySource                MemorySource
+	MemoryMeasured              bool
+	batchMemory                 *atomic.Uint64
 }
 type workerFinish struct {
 	result Result
@@ -58,9 +64,17 @@ func (p *process) stop(now time.Time, grace time.Duration, kill bool) {
 	}
 }
 
+var errWorkerMemory = errors.New("free GPU memory unavailable or insufficient")
+
 var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
+	if w.MemorySource != nil {
+		free, e := w.MemorySource(context.Background())
+		if e != nil || !validMemoryValue(free) || free < j.Spec.Needs.MemoryGB {
+			return nil, fmt.Errorf("%w: need %.1f GB, available %.1f GB: %v", errWorkerMemory, j.Spec.Needs.MemoryGB, free, e)
+		}
+	}
 	checkpoint, err := prepareCheckpoint(j)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errWorkerCheckpoint, err)
@@ -131,6 +145,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	// Record intent before creating even the gated process. It cannot execute
 	// the command until its group identity has been durably recorded.
 	s.state.Job = &j
+	if w.batchMemory != nil {
+		w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
+	}
 	s.state.Identity = identity
 	s.state.Log = logName
 	s.state.Offset = 0
@@ -231,7 +248,7 @@ func (w Worker) Run(stop context.Context) error {
 	if w.Clock == nil {
 		w.Clock = RealClock{}
 	}
-	if w.Machine.ID == "" || !validGPU(w.Machine.GPU) || w.Machine.FreeMemoryGB <= 0 {
+	if w.Machine.ID == "" || !validGPU(w.Machine.GPU) || (w.MemorySource == nil && (!validMemoryValue(w.Machine.FreeMemoryGB) || w.Machine.FreeMemoryGB <= 0)) {
 		return errors.New("worker requires a name, GPU platform and positive free-memory budget")
 	}
 	s, err := w.openStore()
@@ -239,6 +256,13 @@ func (w Worker) Run(stop context.Context) error {
 		return err
 	}
 	defer s.close()
+	if w.CheckpointRoot != "" {
+		root, e := filepath.Abs(w.CheckpointRoot)
+		if e != nil {
+			return e
+		}
+		s.state.CheckpointRoot = root
+	}
 	if err = s.cleanupOrphan(w.Clock); err != nil {
 		return err
 	}
@@ -283,6 +307,13 @@ func (w Worker) Run(stop context.Context) error {
 	if err = validateModels(w.ModelConfig); err != nil {
 		return err
 	}
+	if w.MemorySource == nil {
+		w.MemorySource, _ = NewMemorySource("fake", w.Machine.FreeMemoryGB, 0)
+	}
+	w.batchMemory = &atomic.Uint64{}
+	if s.state.Job != nil {
+		w.batchMemory.Store(math.Float64bits(s.state.Job.Spec.Needs.MemoryGB))
+	}
 	rt, err := startModels(w, s.dir)
 	if err != nil {
 		return err
@@ -292,6 +323,27 @@ func (w Worker) Run(stop context.Context) error {
 			log.Printf("model engine cleanup: %v", e)
 		}
 	}()
+	rawMemory := w.MemorySource
+	// Native reports already include loaded allocations. Configured budgets need
+	// our own resident-model reservations deducted immediately before a start.
+	w.MemorySource = func(ctx context.Context) (float64, error) {
+		free, e := rawMemory(ctx)
+		reports, used := rt.report()
+		if w.MemoryMeasured {
+			used = 0
+			for _, report := range reports {
+				if report.State == "loading" {
+					for _, model := range w.ModelConfig.Models {
+						if model.Name == report.Name {
+							used += model.MemoryGB
+						}
+					}
+				}
+			}
+		}
+		free = max(0, free-used)
+		return free, e
+	}
 	ctx := context.Background()
 	ticker := time.NewTicker(min(w.Interval, 100*time.Millisecond))
 	defer ticker.Stop()
@@ -313,6 +365,11 @@ func (w Worker) Run(stop context.Context) error {
 	}()
 	for {
 		now := w.Clock.Now()
+		batch := 0.0
+		if s.state.Job != nil {
+			batch = s.state.Job.Spec.Needs.MemoryGB
+		}
+		w.batchMemory.Store(math.Float64bits(batch))
 		select {
 		case <-stopCh:
 			leaving = true
@@ -352,10 +409,21 @@ func (w Worker) Run(stop context.Context) error {
 			reports, _ := rt.report()
 			m.Leaving = leaving
 			m.FreeMemoryGB = base
+			if w.MemorySource != nil {
+				free, e := rawMemory(ctx)
+				if e != nil || !validMemoryValue(free) {
+					log.Printf("worker %s GPU memory probe failed: %v", m.ID, e)
+					free = 0
+				}
+				m.FreeMemoryGB = free
+				m.MemoryMeasured = w.MemoryMeasured
+			}
 			m.CheckpointUnavailable = workerCheckpointAvailable(s.state.CheckpointRoot) != nil
 			var running *Execution
 			if s.state.Job != nil {
-				m.FreeMemoryGB = max(0, base-s.state.Job.Spec.Needs.MemoryGB)
+				if !w.MemoryMeasured {
+					m.FreeMemoryGB = max(0, m.FreeMemoryGB-s.state.Job.Spec.Needs.MemoryGB)
+				}
 				progress, _ := checkpointProgress(attemptCheckpoint(*s.state.Job))
 				running = &Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt, Progress: progress}
 			}
@@ -370,7 +438,7 @@ func (w Worker) Run(stop context.Context) error {
 						return e
 					}
 				}
-				if reply.CheckpointRoot != "" && reply.CheckpointRoot != s.state.CheckpointRoot {
+				if w.CheckpointRoot == "" && reply.CheckpointRoot != "" && reply.CheckpointRoot != s.state.CheckpointRoot {
 					s.state.CheckpointRoot = reply.CheckpointRoot
 					if e := s.save(); e != nil {
 						return e
@@ -386,7 +454,7 @@ func (w Worker) Run(stop context.Context) error {
 					} else if workerCheckpointAvailable(s.state.CheckpointRoot) == nil {
 						p, err = w.start(s, *s.state.Job)
 						if err != nil {
-							if errors.Is(err, errWorkerCheckpoint) {
+							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) {
 								log.Printf("retry pending start: %v", err)
 							} else {
 								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error()}
@@ -450,13 +518,26 @@ func (w Worker) Run(stop context.Context) error {
 						return errors.New("queue assigned a job while an execution is still pending")
 					}
 					j := *reply.Job
+					if !filepath.IsAbs(j.Checkpoint) {
+						rel := filepath.Clean(j.Checkpoint)
+						if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+							return errors.New("invalid relative checkpoint path")
+						}
+						j.Checkpoint = filepath.Join(s.state.CheckpointRoot, rel)
+					}
 					if leaving || recovering {
 						r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: "worker leaving before command started"}
 						s.state.Job = &j
+						if w.batchMemory != nil {
+							w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
+						}
 						s.state.Result = &r
 						err = s.save()
 					} else {
 						s.state.Job = &j
+						if w.batchMemory != nil {
+							w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
+						}
 						if s.state.CheckpointRoot == "" {
 							s.state.CheckpointRoot = filepath.Dir(j.Checkpoint)
 						}
@@ -468,9 +549,12 @@ func (w Worker) Run(stop context.Context) error {
 						} else {
 							p, err = w.start(s, j)
 						}
-						if err != nil && !errors.Is(err, errWorkerCheckpoint) {
+						if err != nil && !(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory)) {
 							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error()}
 							s.state.Job = &j
+							if w.batchMemory != nil {
+								w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
+							}
 							s.state.Result = &r
 							s.state.PID = 0
 							err = s.save()

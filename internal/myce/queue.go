@@ -20,6 +20,8 @@ import (
 )
 
 const LossAfter = 60 * time.Second
+const ProductionLossAfter = 5 * time.Second
+const DeadlineLossAfter = 20 * time.Second
 const RestartGrace = 3 * time.Minute
 const StopGrace = 2 * time.Minute
 
@@ -42,6 +44,7 @@ type Queue struct {
 	restartUntil time.Time
 	unreported   map[string]bool
 	networkQuiet bool
+	lossTimeouts [3]time.Duration
 	s            state
 }
 
@@ -80,7 +83,7 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	q := &Queue{lock: lock, db: db, clock: clock, root: abs, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq);`); err != nil {
 		db.Close()
 		return nil, err
@@ -125,6 +128,37 @@ func (q *Queue) SetRestartGrace(d time.Duration) {
 		q.restartUntil = q.clock.Now().Add(d)
 	}
 }
+
+// SetLossTimeouts sets the quiet-worker thresholds by workload priority.
+func (q *Queue) SetLossTimeouts(production, deadline, experiment time.Duration) error {
+	if production <= 0 || deadline <= 0 || experiment <= 0 {
+		return errors.New("loss timeouts must be positive")
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.lossTimeouts = [3]time.Duration{production, deadline, experiment}
+	return nil
+}
+func (q *Queue) machineLossTimeout(id string) time.Duration {
+	priority := 2
+	for _, j := range q.s.Jobs {
+		if j.Machine == id && (j.State == "running" || j.State == "stopping") {
+			priority = min(priority, rank(j.Spec.Priority))
+		}
+	}
+	for _, c := range q.calls {
+		if c.Machine == id && c.Error == "" {
+			priority = min(priority, rank(c.Priority))
+		}
+	}
+	for _, slot := range q.s.ModelSlots {
+		if slot.Machine == id && (slot.State == "loading" || slot.InFlight > 0) {
+			priority = min(priority, rank(slot.Priority))
+		}
+	}
+	return q.lossTimeouts[priority]
+}
+
 func checkpointAvailable(root string) bool {
 	info, err := os.Stat(root)
 	if err != nil || !info.IsDir() {
@@ -228,17 +262,17 @@ func (q *Queue) maintain() {
 	for _, m := range q.s.Machines {
 		if !m.Gone && !m.Leaving {
 			active++
-			if now.Sub(m.LastSeen) < LossAfter {
+			if now.Sub(m.LastSeen) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
 				healthy++
 			}
 		}
 	}
-	q.networkQuiet = active > 0 && healthy == 0
+	q.networkQuiet = active > 0 && (healthy == 0 || healthy*2 < active)
 	for _, m := range q.s.Machines {
 		unreported := q.unreported[m.ID]
 		grace := unreported && now.Before(q.restartUntil)
 		restartExpired := unreported && !grace
-		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(m.LastSeen) >= LossAfter)) {
+		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(m.LastSeen) >= q.machineLossTimeout(m.ID))) {
 			m.Gone = true
 			delete(q.unreported, m.ID)
 			m.Models = nil
@@ -254,7 +288,7 @@ func (q *Queue) maintain() {
 							}
 						}
 						j.Losses++
-						q.retry(j, "machine lost for 60 seconds")
+						q.retry(j, fmt.Sprintf("machine quiet for %s", q.machineLossTimeout(m.ID)))
 					}
 				}
 			}
@@ -347,7 +381,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			}
 		}
 		// After fleet silence, give the other workers a full reconnect window.
-		if q.networkQuiet {
+		if q.networkQuiet && old != nil && !old.Gone {
 			for _, other := range q.s.Machines {
 				if !other.Gone {
 					other.LastSeen = q.clock.Now()
@@ -359,7 +393,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		m.LastSeen = q.clock.Now()
 		q.s.Machines[m.ID] = &m
 		q.reconcileModels(&m, c.ModelReports)
-		m.FreeMemoryGB = max(0, m.FreeMemoryGB-q.modelMemory(m.ID))
+		m.FreeMemoryGB = max(0, m.FreeMemoryGB-q.modelReservation(&m, c.ModelReports))
 		q.maintain()
 		defer func() { reply.ModelPlan = q.modelPlan(m.ID) }()
 		reply.Leave = m.Leaving
@@ -437,8 +471,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			j := pick(q.s.Jobs, &m)
 			if j != nil {
 				for _, c := range q.calls {
-					model, ok := q.model(c.Model)
-					if c.Machine == "" && c.Error == "" && ok && c.Exclude != m.ID && contains(model.Platforms, m.GPU) && model.MemoryGB <= m.FreeMemoryGB+q.modelMemory(m.ID) && before(callJob(c), j, &m) {
+					if c.Machine == "" && c.Error == "" && q.callCanUse(&m, c) && before(callJob(c), j, &m) {
 						j = nil
 						break
 					}
@@ -482,6 +515,13 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		q.maintain()
 		return nil
 	})
+	if reply.Job != nil {
+		relative, e := filepath.Rel(q.root, reply.Job.Checkpoint)
+		if e != nil {
+			return Reply{}, e
+		}
+		reply.Job.Checkpoint = relative
+	}
 	return reply, err
 }
 func validGPU(s string) bool { return s == "cuda" || s == "xpu" || s == "metal" || s == "fake" }
@@ -576,7 +616,7 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 			return slotKey(out.LoadedModels[i].Machine, out.LoadedModels[i].Model) < slotKey(out.LoadedModels[j].Machine, out.LoadedModels[j].Model)
 		})
 		if q.networkQuiet {
-			out.Warning = "all workers quiet: waiting for the network to return"
+			out.Warning = "most workers quiet: waiting for the network to return"
 		}
 		if q.clock.Now().Before(q.restartUntil) && len(q.unreported) > 0 {
 			out.Warning = "queue restarted: waiting for workers to report"

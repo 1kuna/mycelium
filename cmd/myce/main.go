@@ -41,13 +41,19 @@ func run(args []string) error {
 	token := f.String("token", env("MYCE_TOKEN", ""), "shared fleet token (prefer MYCE_TOKEN)")
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce.db", "SQLite database file")
-	checkpoint := f.String("checkpoints", "./checkpoints", "shared checkpoint root; use the same NAS mount path on all fleet machines")
+	checkpoint := f.String("checkpoints", "./checkpoints", "queue NAS checkpoint root")
+	workerCheckpoint := f.String("checkpoint-root", env("MYCE_CHECKPOINT_ROOT", ""), "worker-local NAS root (may differ from queue mount path)")
+	heartbeat := f.Duration("heartbeat", time.Second, "worker check-in interval")
+	reserve := f.Float64("reserve-memory-gb", 0, "GPU memory to keep outside Mycelium")
+	productionLoss := f.Duration("production-loss-timeout", myce.ProductionLossAfter, "quiet timeout for production work")
+	deadlineLoss := f.Duration("deadline-loss-timeout", myce.DeadlineLossAfter, "quiet timeout for deadline work")
+	experimentLoss := f.Duration("experiment-loss-timeout", myce.LossAfter, "quiet timeout for experiment work")
 	restartGrace := f.Duration("restart-grace", myce.RestartGrace, "worker recovery grace after queue restart")
 	stateDir := f.String("state-dir", "", "durable local worker spool directory")
 	hostname, _ := os.Hostname()
 	name := f.String("name", hostname, "unique machine name")
 	gpu := f.String("gpu", "", "GPU type: cuda, xpu, metal, or fake")
-	memory := f.Float64("memory-gb", 0, "free GPU memory budget lent to this worker")
+	memory := f.Float64("memory-gb", 0, "fake/configured xpu or metal GPU memory budget (CUDA is measured live)")
 	environments := f.String("environments", "", "comma-separated ready environment names or lock-file paths")
 	models := f.String("models", "", "comma-separated already loaded model names")
 	modelFile := f.String("model-config", "", "model YAML config shared by queue and workers")
@@ -111,6 +117,9 @@ func run(args []string) error {
 			return err
 		}
 		q.SetRestartGrace(*restartGrace)
+		if err = q.SetLossTimeouts(*productionLoss, *deadlineLoss, *experimentLoss); err != nil {
+			return err
+		}
 		listener, err := net.Listen("tcp", *address)
 		if err != nil {
 			return err
@@ -129,7 +138,14 @@ func run(args []string) error {
 		defer cancel()
 		return errors.Join(err, server.Shutdown(shutdown))
 	case "join":
-		w := myce.Worker{ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		source, err := myce.NewMemorySource(*gpu, *memory, *reserve)
+		if err != nil {
+			return err
+		}
+		if *heartbeat <= 0 {
+			return errors.New("heartbeat must be positive")
+		}
+		w := myce.Worker{MemorySource: source, MemoryMeasured: *gpu == "cuda", CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":

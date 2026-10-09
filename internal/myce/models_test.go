@@ -453,3 +453,189 @@ func TestModelLostWorkerRetriesInFlightCall(t *testing.T) {
 		t.Fatal("lost inventory remained")
 	}
 }
+
+func TestModelPriorityTracksRemainingCalls(t *testing.T) {
+	q, _, m := modelFixture(t)
+	high := addModelCall(t, q, "production")
+	reportModel(t, q, m, "ready")
+	low := addModelCall(t, q, "experiment")
+	if err := q.finishCall(high.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := q.s.ModelSlots[slotKey(m.ID, "test")]
+	if s.Priority != low.Priority || s.InFlight != 1 {
+		t.Fatalf("finished production call still protects experiments: %+v", s)
+	}
+	submit(t, q, spec("deadline"))
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if s.State != "draining" {
+		t.Fatal("deadline batch cannot reclaim experiment model")
+	}
+}
+
+func TestIdleModelCanBeReclaimedAfterProductionCall(t *testing.T) {
+	q, _, m := modelFixture(t)
+	c := addModelCall(t, q, "production")
+	reportModel(t, q, m, "ready")
+	if err := q.finishCall(c.ID); err != nil {
+		t.Fatal(err)
+	}
+	submit(t, q, spec("production"))
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if q.s.ModelSlots[slotKey(m.ID, "test")].State != "draining" {
+		t.Fatal("idle model retains production priority and blocks production batch")
+	}
+}
+
+func TestModelCallNotBlockedByBatchThatCannotReclaimMemory(t *testing.T) {
+	q, _, m := modelFixture(t)
+	addModelCall(t, q, "production")
+	reportModel(t, q, m, "ready")
+	submit(t, q, spec("deadline"))
+	c := addModelCall(t, q, "experiment")
+	if c.Machine != m.ID {
+		t.Fatal("batch which cannot reclaim production model blocks calls to that model")
+	}
+}
+
+func TestModelReservationMeasuredMemory(t *testing.T) {
+	q, _, m := modelFixture(t)
+	for _, state := range []string{"loading", "ready", "draining", "unloading", "unload_failed"} {
+		q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, State: state}
+		for _, measured := range []bool{false, true} {
+			m.MemoryMeasured = measured
+			want := 8.0
+			if measured && state != "loading" {
+				want = 0
+			}
+			if got := q.modelReservation(&m, []ModelReport{{Name: "test", State: state}}); got != want {
+				t.Fatalf("%s measured=%v: got %v want %v", state, measured, got, want)
+			}
+		}
+	}
+	m.MemoryMeasured = true
+	q.s.ModelSlots[slotKey(m.ID, "test")].State = "loading"
+	if q.modelReservation(&m, nil) != 8 {
+		t.Fatal("unreported loading memory not reserved")
+	}
+	if q.modelReservation(&m, []ModelReport{{Name: "test", State: "ready"}}) != 0 {
+		t.Fatal("readiness counted both measured usage and reservation")
+	}
+}
+
+func TestCallCanUseDoesNotBlockBatchForImpossibleCall(t *testing.T) {
+	q, _, m := modelFixture(t)
+	q.models.Models[0].MemoryGB = 16
+	c := &ModelCall{Model: "test", Priority: "production"}
+	if q.callCanUse(q.s.Machines[m.ID], c) {
+		t.Fatal("impossible model can block fitting batch")
+	}
+	q.models.Models[0].MemoryGB = 8
+	if !q.callCanUse(q.s.Machines[m.ID], c) {
+		t.Fatal("fitting model cannot precede batch")
+	}
+}
+
+func TestEmptyStreamingResponsePreservesStatus(t *testing.T) {
+	q, _, m := modelFixture(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer upstream.Close()
+	m.ModelURL = upstream.URL
+	check(t, q, m, nil)
+	q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, State: "ready", Priority: "experiment", LastUsed: q.clock.Now()}
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test","stream":true}`))
+	req.Header.Set("Authorization", "Bearer test")
+	req.Header.Set("X-Myce-Project", "test")
+	req.Header.Set("X-Myce-Priority", "production")
+	w := httptest.NewRecorder()
+	API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || w.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("empty upstream error changed: %d %+v", w.Code, w.Header())
+	}
+}
+
+func TestFailedUnloadIsNotCountedAsReclaimable(t *testing.T) {
+	q, _, m := modelFixture(t)
+	c := addModelCall(t, q, "experiment")
+	reportModel(t, q, m, "ready")
+	if err := q.finishCall(c.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := q.s.ModelSlots[slotKey(m.ID, "test")]
+	s.State, s.Error = "unload_failed", "process survived"
+	submit(t, q, spec("production"))
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if s.State != "unload_failed" {
+		t.Fatalf("scheduler hides failed unload: %+v", s)
+	}
+}
+
+func TestCancelledModelCallDoesNotLoadRetryWorker(t *testing.T) {
+	q, _, m := modelFixture(t)
+	started := make(chan struct{})
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer first.Close()
+	m.ModelURL = first.URL
+	check(t, q, m, nil)
+	other := machine("two", "fake")
+	other.ModelURL = "http://127.0.0.1:1235"
+	other.ModelConfigHash = modelConfigHash(q.models)
+	check(t, q, other, nil)
+	q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, State: "ready", Priority: "experiment", LastUsed: q.clock.Now()}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test"}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer test")
+	req.Header.Set("X-Myce-Project", "test")
+	req.Header.Set("X-Myce-Priority", "production")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		API{Queue: q, Token: "test"}.Handler().ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("call did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled request did not return")
+	}
+	if q.s.ModelSlots[slotKey(other.ID, "test")] != nil {
+		t.Fatal("client cancellation starts unnecessary model on retry worker")
+	}
+	if len(q.calls) != 0 || q.s.ModelSlots[slotKey(m.ID, "test")].InFlight != 0 {
+		t.Fatal("cancelled admission leaked")
+	}
+}
+
+func TestRetryReleasesOldModelPriorityAndResetsIdle(t *testing.T) {
+	q, clock, m := modelFixture(t)
+	c := addModelCall(t, q, "production")
+	reportModel(t, q, m, "ready")
+	addModelCall(t, q, "experiment")
+	clock.Advance(time.Minute)
+	if err := q.retryCall(c.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := q.s.ModelSlots[slotKey(m.ID, "test")]
+	if s.Priority != "experiment" || s.InFlight != 1 || !s.LastUsed.Equal(clock.Now()) {
+		t.Fatalf("old attempt retained reservation priority/idle: %+v", s)
+	}
+}

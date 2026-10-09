@@ -1,0 +1,311 @@
+# Operating Mycelium v2
+
+One CPU queue, one SQLite database, plain-command GPU workers. These instructions
+are local installation recipes, not a fleet deployment. Do not stop or replace
+Atlas, Verso, GPU guards/controllers, or legacy Mycelium. Discovery on 2026-10-08
+found an active B70 `mycelium-real-fleet.service`; preserve its binary, state,
+service and port. Spark's Atlas GPU ownership also requires an agreed handoff.
+
+## Paths and prerequisites
+
+| Item | v2 path/name |
+|---|---|
+| Binary | `~/.local/bin/myce` |
+| Database, spools, local logs | `~/.local/share/myce` |
+| Private config | `~/.config/myce` |
+| Linux user units | `myce-queue.service`, `myce-worker.service` |
+| Mac launchd labels | `local.myce.queue`, `local.myce.worker` |
+| Shared progress | NAS root supplied with queue `--checkpoints` and worker `--checkpoint-root` |
+
+These are distinct from v1's `mycelium` paths and services. Before installation,
+inspect existing destination paths and stop if their ownership is unclear.
+Use Go 1.25.6+ to build for the target OS/architecture. Plain job commands,
+Python runtimes, environments and GPU-enabled llama-server must already be
+installed on eligible workers. There is no environment/model downloader.
+
+Mount the NAS before creating the root. Verify the actual share identity, write
+permissions, and a write/read/rename across participating machines. Configure
+the mount to fail closed so an unmounted share cannot become a writable local
+substitute. Mycelium probes access, not remote-server identity. Linux might use
+`/mnt/nas/mycelium/checkpoints`; Mac might use
+`/Volumes/NAS/mycelium/checkpoints`. These may differ: both must refer to the
+**same shared directory**. Assignment paths are relative on the wire, resolved
+against the worker root; the queue retains its own absolute paths. Never put
+SQLite or the worker spool on the NAS.
+
+## Install binary and private configuration (Linux or Mac)
+
+Run on the intended machine, from the checkout. This block stops at an existing
+binary; upgrades use the separate procedure below.
+
+```sh
+set -eu
+umask 077
+test ! -e "$HOME/.local/bin/myce"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/myce" "$HOME/.config/myce"
+go build -trimpath -o "$HOME/.local/bin/myce" ./cmd/myce
+chmod 700 "$HOME/.local/bin/myce" "$HOME/.local/share/myce" "$HOME/.config/myce"
+```
+
+Create `~/.config/myce/queue.env` privately with `MYCE_TOKEN=<fleet token>`;
+worker.env contains the same token plus `MYCE_QUEUE=http://<queue LAN IP>:7331`.
+Use a secret manager/editor, mode 0600; never put the token in shell history,
+argv, the repo, model catalogs, logs or NAS. Do not enable shell tracing. Source
+only your trusted file for foreground CLI commands:
+
+```sh
+set -a
+. "$HOME/.config/myce/worker.env"
+set +a
+"$HOME/.local/bin/myce" status
+```
+
+Queue binds loopback by default; explicitly select its trusted LAN address for
+fleet use. Recheck port 7331 availability first. The HTML page is read-only but
+unauthenticated; API/model routes use bearer auth. No TLS, public exposure,
+proxy, or firewall changes are part of these recipes.
+
+## Inventory and foreground start/stop
+
+CUDA queries live `nvidia-smi` free GPU memory and subtracts
+`--reserve-memory-gb`. A positive `--memory-gb` optionally caps that reading before reserve and does not replace the query. Unsupported or
+unavailable readings must fail visibly, not substitute host RAM or a guessed
+budget. Spark's unified-memory inventory may not supply a supported free-memory
+reading: verify before admitting work. XPU/Metal/fake use the explicit configured
+`--memory-gb` budget minus reserve. Account for other workloads in that budget.
+Own batch/model reservations are deducted without double subtraction. This is
+memory admission, not permission to bypass an existing GPU owner or guard.
+
+```sh
+# Queue terminal: MYCE_TOKEN is already exported privately.
+"$HOME/.local/bin/myce" queue --listen 127.0.0.1:7331 \
+  --db "$HOME/.local/share/myce/queue.db" \
+  --checkpoints /Volumes/NAS/mycelium/checkpoints \
+  --production-loss-timeout 5s --deadline-loss-timeout 20s \
+  --experiment-loss-timeout 60s --restart-grace 3m
+# Mac worker terminal; example budget only, choose a safe measured/configured value.
+"$HOME/.local/bin/myce" join --name mac-worker --gpu metal \
+  --memory-gb 16 --reserve-memory-gb 4 --heartbeat 1s \
+  --checkpoint-root /Volumes/NAS/mycelium/checkpoints \
+  --state-dir "$HOME/.local/share/myce/worker"
+```
+
+For CUDA use `--gpu cuda --reserve-memory-gb VALUE`; for XPU use
+`--gpu xpu --memory-gb VALUE --reserve-memory-gb VALUE`. Configure unique stable
+names. The queue heartbeat-loss defaults are 5s production, 20s deadline, 60s
+experiment; worker heartbeat defaults to 1s. Startup recovery remains 3m and
+stop grace 2m. Avoid heartbeat intervals near or above the shortest loss timeout.
+
+Ctrl-C/SIGTERM tells a worker to leave: no new work, resumable jobs save/exit,
+non-resumable jobs finish. `myce leave --name mac-worker` asks wait/stop if needed;
+`--now` signals everything but still permits checkpoint grace. Keep the local
+spool across restarts. Queue Ctrl-C stops the API without deleting durable jobs.
+Workers continue through temporary queue/network loss and replay logs/results.
+
+## Render service files
+
+This local renderer makes a private file from the checked-in template. Edit the
+configuration assignments for the target host, select the role and OS, and run
+from the checkout. For CUDA, budget `"0"` means no optional cap; XPU/Metal/fake
+need a positive configured budget. For Mac workers select GPU `"metal"`.
+No service is started by rendering. The Mac token prompt is hidden; Linux reads
+the private EnvironmentFile at service startup instead.
+
+```sh
+python3 - <<'PYRENDER'
+import getpass, os, pathlib, plistlib
+role = "worker"                  # queue or worker
+system = "mac"                   # mac or linux
+queue_ip = "127.0.0.1"           # use the queue LAN address for fleet use
+root = "/Volumes/NAS/mycelium/checkpoints"  # host's mount of the shared root
+worker_name, gpu = "mac-worker", "metal"
+budget, reserve = "16", "4"       # examples: choose a conservative allowance
+home = str(pathlib.Path.home())
+replacements = {"REPLACE_HOME": home, "REPLACE_QUEUE_IP": queue_ip,
+    "REPLACE_CHECKPOINT_ROOT": root, "REPLACE_WORKER_NAME": worker_name,
+    "REPLACE_GPU": gpu, "REPLACE_BUDGET_GB": budget, "REPLACE_RESERVE_GB": reserve}
+output = pathlib.Path(home) / ".config/myce/rendered"
+output.mkdir(parents=True, exist_ok=True, mode=0o700)
+if system == "mac":
+    name = f"local.myce.{role}.plist"
+    config = plistlib.loads((pathlib.Path("deploy") / name).read_bytes())
+    config["EnvironmentVariables"]["MYCE_TOKEN"] = getpass.getpass("Fleet token: ")
+    if not config["EnvironmentVariables"]["MYCE_TOKEN"]:
+        raise SystemExit("token required")
+    for i, value in enumerate(config["ProgramArguments"]):
+        for old, new in replacements.items(): value = value.replace(old, new)
+        config["ProgramArguments"][i] = value
+    for key in ("WorkingDirectory", "StandardOutPath", "StandardErrorPath"):
+        config[key] = config[key].replace("REPLACE_HOME", home)
+    config["EnvironmentVariables"]["MYCE_QUEUE"] = f"http://{queue_ip}:7331"
+    data = plistlib.dumps(config)
+elif system == "linux":
+    name = f"myce-{role}.service"
+    text = (pathlib.Path("deploy") / name).read_text()
+    for old, new in replacements.items(): text = text.replace(old, new)
+    if "REPLACE_" in text: raise SystemExit("unresolved service field")
+    data = text.encode()
+else: raise SystemExit("system must be mac or linux")
+path = output / name
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "wb") as stream: stream.write(data)
+print(path)  # path only; never print credentials
+PYRENDER
+```
+
+For both roles run the renderer once per role. Installed Mac worker templates
+use Metal; Linux supports the configured GPU selection. Replace the
+`/path/to/rendered` prefix in the following installation commands with
+`$HOME/.config/myce/rendered` (the destination printed above).
+
+## Linux user services
+
+Render private copies of the templates by replacing every `REPLACE_*` value.
+The units use `%h` for the user's home directory. Install only the role needed;
+a queue-only host must not receive an enabled worker.
+
+```sh
+mkdir -p "$HOME/.config/systemd/user"
+# First edit deploy templates into private files outside this checkout.
+install -m 600 "$HOME/.config/myce/rendered/myce-queue.service" "$HOME/.config/systemd/user/myce-queue.service"
+# Worker host instead:
+# install -m 600 "$HOME/.config/myce/rendered/myce-worker.service" "$HOME/.config/systemd/user/myce-worker.service"
+systemd-analyze --user verify "$HOME/.config/systemd/user/myce-queue.service"
+systemctl --user daemon-reload
+systemctl --user enable --now myce-queue.service
+systemctl --user is-active myce-queue.service
+journalctl --user -u myce-queue.service -n 30 --no-pager
+```
+
+For workers substitute `myce-worker.service` in the verification/start commands.
+User services run at login; to run before login, an administrator must explicitly
+configure `loginctl enable-linger USER`. Do not change existing linger settings
+incidentally. Stop/start only the chosen v2 role:
+
+```sh
+systemctl --user stop myce-worker.service
+systemctl --user start myce-worker.service
+# For permanent deactivation:
+systemctl --user disable --now myce-worker.service
+```
+
+Worker stop can wait for a non-resumable command indefinitely. Decide whether to
+finish or call `leave --now` before stop. Do not lower timeout to force a kill.
+Services use restart-on-failure; an API leave alone is not durable deactivation.
+For B70 lending, Verso must own the start/stop decision after its own admission
+checks; this document does not install a controller or bypass existing scheduling.
+
+## macOS launchd
+
+Render templates in `deploy/` into private copies with every `REPLACE_*` value
+resolved, including an absolute home, IP, root, worker name, budget/reserve and
+private token. launchd does not expand `$HOME` or `~` in these fields. The worker
+source and label are `local.myce.worker.plist` and `local.myce.worker`.
+
+```sh
+mkdir -p "$HOME/Library/LaunchAgents"
+install -m 600 "$HOME/.config/myce/rendered/local.myce.worker.plist" "$HOME/Library/LaunchAgents/local.myce.worker.plist"
+plutil -lint "$HOME/Library/LaunchAgents/local.myce.worker.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.myce.worker.plist"
+launchctl print "gui/$(id -u)/local.myce.worker"
+tail -n 30 "$HOME/.local/share/myce/worker.log"
+```
+
+For queue installation use `local.myce.queue.plist` and `local.myce.queue`.
+LaunchAgents start at login. Boot before login requires an administrator-owned
+LaunchDaemon under `/Library/LaunchDaemons`, explicit `UserName`, absolute paths
+and `launchctl bootstrap system`; that consequential machine change is separate.
+Stop via bootout so launchd cannot restart a deliberately leaving worker:
+
+```sh
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.myce.worker.plist"
+# Start it again:
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.myce.worker.plist"
+```
+
+The worker plist has an unlimited exit timeout for non-resumable completion;
+choose finish or explicit `leave --now` before stopping. Check status and the
+process exit, not just launchctl's command return.
+
+## Upgrade
+
+Build and check the new binary first, then drain/stop only v2 services using the
+platform's commands above. Stop workers before replacing their binary; wait for
+owned processes to exit. For a queue upgrade leave workers running only when
+prepared for interrupted model HTTP requests and the recovery grace. Never run
+two queue processes against one database or two workers against one spool.
+
+With queue stopped, make a private recoverable snapshot of the entire local
+state, including SQLite sidecars if present. Preserve NAS checkpoints in place.
+Example on either OS:
+
+```sh
+set -eu
+umask 077
+go build -trimpath -o "$HOME/.local/bin/myce.next" ./cmd/myce
+upgrade_dir="$HOME/.local/share/myce-upgrade-$(date +%Y%m%dT%H%M%S)"
+test ! -e "$upgrade_dir"
+mkdir -m 700 "$upgrade_dir"
+cp -p "$HOME/.local/bin/myce" "$upgrade_dir/myce.previous"
+cp -Rp "$HOME/.local/share/myce" "$upgrade_dir/state"
+test -x "$upgrade_dir/myce.previous"
+test -d "$upgrade_dir/state"
+mv "$HOME/.local/bin/myce.next" "$HOME/.local/bin/myce"
+```
+
+Restart the selected role, inspect service logs and `myce status`, and verify a
+small agreed job completes. A binary start is not migration acceptance. On
+failure stop again and retain evidence; restore the previous binary and its
+matching state only after checking compatibility. Never overwrite current state
+with an older snapshot while new jobs or results exist. No schema rollback or
+production cutover is implied by this recipe.
+
+## Uninstall without deleting data
+
+Drain work and stop/disable v2 services (Linux) or bootout v2 agents (Mac).
+Do not remove shared NAS checkpoints or touch v1. Use Trash, never permanent
+removal. macOS provides `/usr/bin/trash`; Linux requires an available
+`trash-put` from trash-cli. If unavailable, stop after deactivation and retain
+files until a recoverable Trash tool is available.
+
+```sh
+# Linux, after services are inactive:
+command -v trash-put
+trash-put "$HOME/.local/bin/myce" "$HOME/.config/myce" "$HOME/.local/share/myce"
+# Trash each installed v2 unit, then reload the user manager.
+trash-put "$HOME/.config/systemd/user/myce-worker.service"
+systemctl --user daemon-reload
+trash-list
+# Restore uses trash-restore; inspect its recorded original paths before selection.
+```
+
+```sh
+# Mac, after agents are booted out and processes have exited:
+/usr/bin/trash "$HOME/.local/bin/myce" "$HOME/.config/myce" "$HOME/.local/share/myce"
+/usr/bin/trash "$HOME/Library/LaunchAgents/local.myce.worker.plist"
+# Finder > Trash: verify each item is present and Put Back is available.
+```
+
+Trash only actually installed units/plists; queue hosts use their queue file.
+Before moving state, verify a private backup can be read and its binary restored
+using the upgrade snapshot procedure. Afterward verify recovery records/items
+and original paths; do not empty Trash. Deactivation alone does not reclaim disk
+space, and this is not destruction of job history or checkpoints.
+
+## Monitoring and failures
+
+Use `myce status`, `myce logs ID --follow`, the HTML page, and service logs.
+Monitor SQLite disk/WAL space, worker spools (acknowledged logs/results remain),
+checkpoint space, model errors, and NAS availability. Archive retained spools
+only while their worker is stopped and after checking recovery requirements.
+Missing NAS prevents new starts; running jobs must retry saves themselves.
+Directory access cannot prove a real mount. Strict-majority silence preserves
+assignments; a single lost worker may restart work elsewhere. Disconnected
+copies may overlap until reconciliation. Atomic checkpoints and retry-safe
+outputs are required, not exactly-once external side effects.
+
+Model calls are not durable HTTP requests across queue restart. Started streams
+cannot safely replay. An unloaded/draining model reserves memory until unload
+acknowledges. For full request/catalog contracts and field defaults see
+[reference](job-reference.md), [integration recipes](integrating.md), and the
+[model](guide-model-calls.md) / [checkpoint](guide-resumable-jobs.md) guides.

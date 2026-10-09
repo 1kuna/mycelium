@@ -1,20 +1,18 @@
 [Unit]
-Description=Mycelium plain-command worker
-After=network-online.target remote-fs.target
-Wants=network-online.target
+Description=Mycelium v2 plain-command worker
+After=network-online.target
 
 [Service]
 Type=simple
-User=myce
-EnvironmentFile=/etc/myce/worker.env
-ExecStart=/usr/local/bin/myce join --state-dir /var/lib/myce-worker --name linux-worker --gpu cuda --memory-gb 24
+WorkingDirectory=%h/.local/share/myce
+EnvironmentFile=%h/.config/myce/worker.env
+ExecStart=%h/.local/bin/myce join --state-dir %h/.local/share/myce/worker --name REPLACE_WORKER_NAME --gpu REPLACE_GPU --memory-gb REPLACE_BUDGET_GB --reserve-memory-gb REPLACE_RESERVE_GB --heartbeat 1s --checkpoint-root REPLACE_CHECKPOINT_ROOT
 Restart=on-failure
 RestartSec=5
-StateDirectory=myce-worker
 UMask=0077
-# Signal the worker first so resumable children can save; allow ordinary jobs to finish.
+# Signal worker first; resumable children save, non-resumable children finish.
 KillMode=mixed
 TimeoutStopSec=infinity
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
