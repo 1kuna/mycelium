@@ -18,7 +18,7 @@ import (
 	"syscall"
 )
 
-// ModelCache serializes copies and eviction so concurrent loads cannot overspend.
+// ModelCache reserves complete copy sizes under one admission lock.
 type ModelCache struct {
 	mu            sync.Mutex
 	Root, NASRoot string
@@ -26,6 +26,15 @@ type ModelCache struct {
 	Clock         Clock
 	Free          func(string) (int64, error)
 	Protected     func(string) bool
+	Usage         func(string) int
+	Parallel      int
+	active        map[string]chan struct{}
+	reservations  map[string]int64
+	verified      sync.Map
+	progress      sync.Map
+	speed         float64
+	speedMu       sync.Mutex
+	beforeChunk   func() // deterministic interruption hook for tests
 }
 
 func diskFree(path string) (int64, error) {
@@ -46,16 +55,9 @@ func (c *ModelCache) init() error {
 	if err := os.MkdirAll(c.Root, 0700); err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(c.Root)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".partial") {
-			if err = c.discard(filepath.Join(c.Root, e.Name())); err != nil {
-				return err
-			}
-		}
+	// Partial files carry the immutable model hash in their names and survive restart.
+	if c.active == nil {
+		c.active = map[string]chan struct{}{}
 	}
 	return nil
 }
@@ -63,6 +65,12 @@ func (c *ModelCache) init() error {
 // Move evictions to NAS Trash when a NAS root is configured. This preserves
 // recoverability while releasing local blocks on a separate filesystem.
 func (c *ModelCache) discard(path string) error {
+	return c.discardContext(context.Background(), path)
+}
+func (c *ModelCache) discardContext(ctx context.Context, path string) error {
+	if e := ctx.Err(); e != nil {
+		return e
+	}
 	home, e := os.UserHomeDir()
 	if e != nil {
 		return e
@@ -91,7 +99,7 @@ func (c *ModelCache) discard(path string) error {
 		return e
 	}
 	hash := sha256.New()
-	n, e := io.Copy(io.MultiWriter(out, hash), in)
+	n, e := io.Copy(io.MultiWriter(out, hash), contextReader{ctx, in})
 	if e == nil {
 		e = out.Sync()
 	}
@@ -99,11 +107,11 @@ func (c *ModelCache) discard(path string) error {
 	if e != nil {
 		return e
 	}
-	if e = verifyModel(dest, Model{Name: "evicted cache copy", SizeBytes: n, SHA256: hex.EncodeToString(hash.Sum(nil))}); e != nil {
+	if e = verifyModelContext(ctx, dest, Model{Name: "evicted cache copy", SizeBytes: n, SHA256: hex.EncodeToString(hash.Sum(nil))}); e != nil {
 		return e
 	}
 	// mv performs a recoverable cross-filesystem move; keep the verified backup.
-	return exec.Command("mv", path, dest+"-original").Run()
+	return exec.CommandContext(ctx, "mv", path, dest+"-original").Run()
 }
 func cacheKey(m Model) string {
 	h := sha256.Sum256([]byte(m.Name))
@@ -123,13 +131,28 @@ func (c *ModelCache) source(m Model) (string, error) {
 	return filepath.Join(c.NASRoot, p), nil
 }
 func verifyModel(path string, m Model) error {
+	return verifyModelContext(context.Background(), path, m)
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if e := r.ctx.Err(); e != nil {
+		return 0, e
+	}
+	return r.reader.Read(p)
+}
+func verifyModelContext(ctx context.Context, path string, m Model) error {
 	f, e := os.Open(path)
 	if e != nil {
 		return e
 	}
 	defer f.Close()
 	h := sha256.New()
-	n, e := io.Copy(h, f)
+	n, e := io.Copy(h, contextReader{ctx, f})
 	if e != nil {
 		return e
 	}
@@ -138,141 +161,311 @@ func verifyModel(path string, m Model) error {
 	}
 	return nil
 }
+
+// Prepare is foreground work; Precopy adds popularity-aware eviction.
 func (c *ModelCache) Prepare(ctx context.Context, m Model) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return c.prepare(ctx, m, false, 0)
+}
+func (c *ModelCache) Precopy(ctx context.Context, m Model, score int) (string, error) {
+	return c.prepare(ctx, m, true, score)
+}
+func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, score int) (string, error) {
+	key := cacheKey(m)
+	// Admission, reservations, and eviction share one short lock. File I/O does
+	// not hold it, so independent copies can run with an explicit parallel limit.
+	for {
+		c.mu.Lock()
+		if c.active == nil {
+			c.active = map[string]chan struct{}{}
+		}
+		parallel := max(1, c.Parallel)
+		wait := c.active[key]
+		if wait == nil && len(c.active) >= parallel {
+			for _, ch := range c.active {
+				wait = ch
+				break
+			}
+		}
+		if wait == nil {
+			break
+		}
+		c.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-wait:
+		}
+	}
+	if e := ctx.Err(); e != nil {
+		c.mu.Unlock()
+		return "", e
+	}
+	done := make(chan struct{})
+	c.active[key] = done
+	if c.reservations == nil {
+		c.reservations = map[string]int64{}
+	}
+	c.reservations[key] = m.SizeBytes
+	defer func() { c.mu.Lock(); delete(c.active, key); delete(c.reservations, key); close(done); c.mu.Unlock() }()
 	source, e := c.source(m)
 	if e != nil {
+		c.mu.Unlock()
 		return "", e
 	}
 	if m.DirectNAS {
-		return source, verifyModel(source, m)
+		c.mu.Unlock()
+		return source, verifyModelContext(ctx, source, m)
 	}
-	if m.SizeBytes > c.Limit {
-		return "", fmt.Errorf("model %s exceeds cache size limit: need %d bytes, limit %d", m.Name, m.SizeBytes, c.Limit)
+	if m.SizeBytes <= 0 || m.SizeBytes > c.Limit {
+		c.mu.Unlock()
+		return "", fmt.Errorf("model %s exceeds cache size limit or has no verified size", m.Name)
 	}
-	dest := filepath.Join(c.Root, cacheKey(m))
-	if verifyModel(dest, m) == nil {
+	dest := filepath.Join(c.Root, key)
+	// Verify outside the admission lock. Only this key's owner can publish it.
+	c.mu.Unlock()
+	if verifyModelContext(ctx, dest, m) == nil {
+		c.verified.Store(key, true)
 		now := c.Clock.Now()
-		e = os.Chtimes(dest, now, now)
-		return dest, e
+		return dest, os.Chtimes(dest, now, now)
 	}
+	if e := ctx.Err(); e != nil {
+		return "", e
+	}
+	c.mu.Lock()
 	if _, e = os.Stat(dest); e == nil {
+		if c.Protected != nil && c.Protected(key) {
+			c.mu.Unlock()
+			return "", errors.New("corrupt protected cache copy")
+		}
+		c.verified.Delete(key)
 		if e = c.discard(dest); e != nil {
+			c.mu.Unlock()
 			return "", e
 		}
 	}
+	temp := dest + ".partial"
+	offset := int64(0)
+	if st, err := os.Stat(temp); err == nil {
+		offset = st.Size()
+	}
+	if offset > m.SizeBytes {
+		if e = c.discard(temp); e != nil {
+			c.mu.Unlock()
+			return "", e
+		}
+		offset = 0
+	}
 	type entry struct {
-		path string
-		size int64
-		used int64
+		path, key  string
+		size, used int64
 	}
 	entries, e := os.ReadDir(c.Root)
 	if e != nil {
+		c.mu.Unlock()
 		return "", e
 	}
-	var used int64
+	var used, reserved int64
 	var victims []entry
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".model") {
+	for _, ent := range entries {
+		if !strings.HasSuffix(ent.Name(), ".model") && !strings.HasSuffix(ent.Name(), ".partial") {
 			continue
 		}
-		st, err := entry.Info()
+		st, err := ent.Info()
 		if err != nil {
+			c.mu.Unlock()
 			return "", err
 		}
+		k := strings.TrimSuffix(ent.Name(), ".partial")
+		if k != key && c.active[k] != nil {
+			continue
+		}
 		used += st.Size()
-		if c.Protected == nil || !c.Protected(entry.Name()) {
-			victims = append(victims, struct {
-				path string
-				size int64
-				used int64
-			}{filepath.Join(c.Root, entry.Name()), st.Size(), st.ModTime().UnixNano()})
+		if k == key || c.active[k] != nil || c.Protected != nil && c.Protected(k) {
+			continue
+		}
+		if background && c.Usage != nil && c.Usage(k) > score {
+			continue
+		}
+		victims = append(victims, entry{filepath.Join(c.Root, ent.Name()), k, st.Size(), st.ModTime().UnixNano()})
+	}
+	// Reserve other active models in full. Disk admission is deliberately
+	// conservative so in-flight writes cannot race the filesystem free snapshot.
+	for k, size := range c.reservations {
+		if k != key {
+			reserved += size
 		}
 	}
+	free, e := c.Free(c.Root)
+	if e != nil {
+		c.mu.Unlock()
+		return "", e
+	}
+	need := m.SizeBytes - offset
 	sort.Slice(victims, func(i, j int) bool {
 		if victims[i].used == victims[j].used {
 			return victims[i].path < victims[j].path
 		}
 		return victims[i].used < victims[j].used
 	})
-	free, e := c.Free(c.Root)
-	if e != nil {
-		return "", e
+	reclaim := int64(0)
+	for _, v := range victims {
+		reclaim += v.size
+	}
+	if used+reserved+need-reclaim > c.Limit {
+		c.mu.Unlock()
+		return "", errors.New("insufficient local model cache space (protected or more-used copies)")
 	}
 	for _, v := range victims {
-		if used+m.SizeBytes <= c.Limit && free >= m.SizeBytes {
+		if used+reserved+need <= c.Limit && free-reserved >= need {
 			break
 		}
-		if e = c.discard(v.path); e != nil {
+		if e = ctx.Err(); e != nil {
+			c.mu.Unlock()
 			return "", e
 		}
+		// Protection may have changed since the candidate scan.
+		if c.Protected != nil && c.Protected(v.key) {
+			continue
+		}
+		if background && c.Usage != nil && c.Usage(v.key) > score {
+			continue
+		}
+		if e = c.discardContext(ctx, v.path); e != nil {
+			c.mu.Unlock()
+			return "", e
+		}
+		c.verified.Delete(v.key)
+		c.progress.Delete(v.key)
 		used -= v.size
 		free, e = c.Free(c.Root)
 		if e != nil {
+			c.mu.Unlock()
 			return "", e
 		}
 	}
-	if used+m.SizeBytes > c.Limit || free < m.SizeBytes {
-		return "", fmt.Errorf("insufficient local model cache space for %s: need %d bytes, disk free %d, cache free %d", m.Name, m.SizeBytes, free, max(0, c.Limit-used))
+	if used+reserved+need > c.Limit || free-reserved < need {
+		c.mu.Unlock()
+		return "", errors.New("insufficient local model cache space")
 	}
+	r := CopyReport{Model: m.Name, State: "copying", Bytes: offset, Total: m.SizeBytes}
+	c.progress.Store(key, r)
+	c.mu.Unlock()
+	started := c.Clock.Now()
+	copied := int64(0)
+	defer func() {
+		elapsed := c.Clock.Now().Sub(started).Seconds()
+		c.speedMu.Lock()
+		if copied > 0 && elapsed > 0 {
+			c.speed = float64(copied) / elapsed
+			r.BytesPerSecond = c.speed
+			c.progress.Store(key, r)
+		}
+		c.speedMu.Unlock()
+	}()
 	in, e := os.Open(source)
 	if e != nil {
+		r.State = "paused"
+		r.Error = e.Error()
+		c.progress.Store(key, r)
 		return "", e
 	}
 	defer in.Close()
-	temp := dest + ".partial"
-	out, e := os.OpenFile(temp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	out, e := os.OpenFile(temp, os.O_CREATE|os.O_RDWR, 0600)
 	if e != nil {
+		r.State = "failed"
+		r.Error = e.Error()
+		c.progress.Store(key, r)
 		return "", e
 	}
 	h := sha256.New()
+	// Rehash durable prefix after restart; only a full final hash permits publication.
+	_, e = io.CopyN(h, contextReader{ctx, out}, offset)
+	if e == nil {
+		_, e = in.Seek(offset, io.SeekStart)
+	}
 	buf := make([]byte, 1024*1024)
-	var n int64
-	for {
+	n := offset
+	oversize := false
+	for e == nil {
+		if c.beforeChunk != nil {
+			c.beforeChunk()
+		}
 		if e = ctx.Err(); e != nil {
 			break
 		}
-		var count int
-		count, e = in.Read(buf)
+		count, readErr := in.Read(buf[:min(int64(len(buf)), m.SizeBytes-n+1)])
 		if count > 0 {
-			var written int
-			written, e = io.MultiWriter(out, h).Write(buf[:count])
-			n += int64(written)
-			if n > m.SizeBytes {
+			if n+int64(count) > m.SizeBytes {
+				oversize = true
 				e = errors.New("NAS model exceeds declared size")
+				break
+			}
+			written, writeErr := io.MultiWriter(out, h).Write(buf[:count])
+			n += int64(written)
+			copied += int64(written)
+			r.Bytes = n
+			c.progress.Store(key, r)
+			if writeErr != nil {
+				e = writeErr
+				break
 			}
 		}
-		if e != nil {
+		if readErr != nil {
+			e = readErr
 			break
 		}
 	}
 	if e == io.EOF {
 		e = nil
 	}
-	if e == nil && (n != m.SizeBytes || hex.EncodeToString(h.Sum(nil)) != strings.ToLower(m.SHA256)) {
+	mismatch := e == nil && (n != m.SizeBytes || hex.EncodeToString(h.Sum(nil)) != strings.ToLower(m.SHA256))
+	if mismatch {
 		e = errors.New("NAS model size or SHA-256 mismatch")
 	}
-	if e == nil {
-		e = out.Sync()
-	}
-	e = errors.Join(e, out.Close())
+	e = errors.Join(e, out.Sync(), out.Close())
 	if e != nil {
-		cleanup := c.discard(temp)
-		return "", errors.Join(e, cleanup)
+		r.State = "paused"
+		r.Error = e.Error()
+		if mismatch || oversize {
+			r.State = "failed"
+			e = errors.Join(e, c.discard(temp))
+			r.Bytes = 0
+		}
+		c.progress.Store(key, r)
+		return "", e
 	}
 	if e = os.Rename(temp, dest); e != nil {
 		return "", e
 	}
-	now := c.Clock.Now()
-	if e = os.Chtimes(dest, now, now); e != nil {
+	// Sync the directory so atomic publication survives a power failure.
+	dir, e := os.Open(c.Root)
+	if e == nil {
+		e = errors.Join(dir.Sync(), dir.Close())
+	}
+	if e != nil {
 		return "", e
 	}
-	return dest, nil
+	c.verified.Store(key, true)
+	r.State = "ready"
+	r.Error = ""
+	c.progress.Store(key, r)
+	now := c.Clock.Now()
+	return dest, os.Chtimes(dest, now, now)
 }
 
-// Inventory never waits behind a large copy: heartbeats must stay live during
-// loading. Atomic publication and ENOENT tolerance provide a safe snapshot.
+// Inventory only trusts copies verified in this worker session. Startup validation
+// happens before joining; it cannot block heartbeats behind a large NAS copy.
+func (c *ModelCache) ValidateInventory(models []Model) {
+	for _, m := range models {
+		if st, e := os.Stat(filepath.Join(c.Root, cacheKey(m)+".partial")); e == nil {
+			c.progress.Store(cacheKey(m), CopyReport{Model: m.Name, State: "paused", Bytes: st.Size(), Total: m.SizeBytes})
+		}
+		if verifyModel(filepath.Join(c.Root, cacheKey(m)), m) == nil {
+			c.verified.Store(cacheKey(m), true)
+			c.progress.Store(cacheKey(m), CopyReport{Model: m.Name, State: "ready", Bytes: m.SizeBytes, Total: m.SizeBytes})
+		}
+	}
+}
 func (c *ModelCache) Report(models []Model) ([]string, int64, error) {
 	entries, e := os.ReadDir(c.Root)
 	if e != nil {
@@ -280,11 +473,11 @@ func (c *ModelCache) Report(models []Model) ([]string, int64, error) {
 	}
 	var used int64
 	var names []string
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".model") {
+	for _, ent := range entries {
+		if !strings.HasSuffix(ent.Name(), ".model") && !strings.HasSuffix(ent.Name(), ".partial") {
 			continue
 		}
-		st, err := entry.Info()
+		st, err := ent.Info()
 		if os.IsNotExist(err) {
 			continue
 		}
@@ -292,8 +485,11 @@ func (c *ModelCache) Report(models []Model) ([]string, int64, error) {
 			return nil, 0, err
 		}
 		used += st.Size()
+		if _, ok := c.verified.Load(ent.Name()); !ok {
+			continue
+		}
 		for _, m := range models {
-			if entry.Name() == cacheKey(m) && st.Size() == m.SizeBytes {
+			if ent.Name() == cacheKey(m) && st.Size() == m.SizeBytes {
 				names = append(names, m.Name)
 			}
 		}
@@ -301,6 +497,15 @@ func (c *ModelCache) Report(models []Model) ([]string, int64, error) {
 	free, e := c.Free(c.Root)
 	sort.Strings(names)
 	return names, min(free, max(0, c.Limit-used)), e
+}
+func (c *ModelCache) CopyReports() ([]CopyReport, float64) {
+	out := []CopyReport{}
+	c.progress.Range(func(_, v any) bool { out = append(out, v.(CopyReport)); return true })
+	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
+	c.speedMu.Lock()
+	speed := c.speed
+	c.speedMu.Unlock()
+	return out, speed
 }
 
 // FetchModel is the only network download path. Loading never invokes it.
@@ -352,4 +557,14 @@ func FetchModel(ctx context.Context, raw, dest string, size int64, sum string) e
 	}
 	c := ModelCache{NASRoot: filepath.Dir(dest)}
 	return c.discard(temp)
+}
+
+func (c *ModelCache) noteCopyError(m Model, err error) {
+	key := cacheKey(m)
+	r := CopyReport{Model: m.Name, State: "failed", Total: m.SizeBytes}
+	if v, ok := c.progress.Load(key); ok {
+		r = v.(CopyReport)
+	}
+	r.Error = err.Error()
+	c.progress.Store(key, r)
 }

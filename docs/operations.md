@@ -424,7 +424,8 @@ physical disk blocks. Disk checks fail closed if space is still insufficient.
 
 Status shows cached models, free cache bytes, and copy/disk errors. Cache
 inventory does not block heartbeats while a large copy is in progress. Corrupt or
-partial copies are never published. Restart clears `.partial` copies into Trash.
+partial copies are never published. Restart retains `.partial` bytes and rehashes
+the prefix before resuming; only a full size/SHA-256 check publishes the copy.
 Loading, ready, and draining models cannot be evicted from the local cache.
 `direct_nas: true` is reserved for an operator-approved small model.
 
@@ -443,3 +444,43 @@ immediately and restart later without a loss retry. Deadline victims still get
 2m and must be resumable. Strongly prefer resumable experiments with frequent
 atomic checkpoints. Status reports production start acknowledgement latency, using queue time to avoid clock skew;
 for batch commands without model loads it measures queue clearance directly.
+
+## Pre-copy models before production
+
+Use `myce model sync MODEL --to MACHINE`, `--to cuda|metal|xpu`, or `--to all`.
+Machine names must have joined once; platform/all requests also apply to future
+workers. Requests persist in the queue SQLite file. Status lists the requests,
+per-worker bytes copied/total, paused/failed/ready state and errors, measured
+bytes per second, and estimated NAS copy seconds per model. `myce model sync
+MODEL --to TARGET --cancel` stops that request and suppresses idle copies for the
+same target/model; partial bytes remain resumable. Repeat without `--cancel` to
+resume. Cancellation cannot override a pin's required copy.
+
+Pins pre-copy to every compatible landing worker, including before a scheduled
+window; only the assigned worker reserves GPU memory and loads the engine.
+An idle worker also copies models needed by compatible queued jobs or recent
+use. Recent-use counts expire after 24 hours without use. Most-needed models go
+first, with pins first. A batch or model load/call cancels background copying;
+copy loops check cancellation between bounded chunks and during prefix hashing
+and recoverable eviction. An already outstanding NAS filesystem syscall still
+obeys the OS mount timeout, but it does not block worker heartbeats. No new
+background work starts while real work is assigned.
+
+`myce join --model-copy-parallel 1` is the default: one NAS copy per worker.
+Increase only after measurement; NAS bandwidth is shared. Each copy reserves
+its full size before admission. Partial bytes count toward `--model-cache-bytes`;
+pre-copy eviction protects pins, loaded/loading/draining engines, active batch
+models and active copies, and never replaces a more-used model with a less-used
+one. Refusal is visible in status. Evictions remain recoverable in Trash.
+
+Before a future authorized production test, measure free local disk and leave
+headroom for the OS, checkpoints and other applications. About 100 GB free on
+B70 does not safely support a 100 GiB active cache; choose a smaller allowance
+from live inventory. Spark's larger disk still needs an explicit limit. Queue
+placement uses verified cache affinity and remaining bytes / measured achieved
+copy speed; until measured it uses an explicit conservative 40 MB/s prior.
+This estimates NAS transfer, not engine startup or inference. Speeds are saved
+in worker state and refreshed by actual copies, including resumed transfers.
+Measure a cold copy independently on each worker, then pre-copy every production
+model and confirm verified `ready` cache reports before sending traffic. A pin
+must additionally report its loaded engine ready.

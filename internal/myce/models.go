@@ -280,9 +280,13 @@ func (q *Queue) maintainModels() {
 			machines = append(machines, m)
 		}
 		sort.Slice(machines, func(i, j int) bool {
-			a, b := contains(machines[i].CachedModels, c.Model), contains(machines[j].CachedModels, c.Model)
+			a, b := q.loadSeconds(c.Model, machines[i]), q.loadSeconds(c.Model, machines[j])
 			if a != b {
-				return a
+				return a < b
+			}
+			ac, bc := contains(machines[i].CachedModels, c.Model), contains(machines[j].CachedModels, c.Model)
+			if ac != bc {
+				return ac
 			}
 			return machines[i].ID < machines[j].ID
 		})
@@ -531,6 +535,9 @@ func (q *Queue) finishCall(id string) error {
 				s.LastUsed = q.clock.Now()
 			}
 			delete(q.calls, id)
+			if c.Machine != "" && c.Error == "" {
+				q.recordModelUse(c.Model)
+			}
 			q.refreshModelPriority(c)
 		}
 		q.maintain()

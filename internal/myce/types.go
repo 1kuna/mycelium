@@ -169,23 +169,26 @@ type Job struct {
 	Checkpoint          string     `json:"checkpoint"`
 }
 type Machine struct {
-	CachedModels          []string  `json:"cached_models,omitempty"`
-	CacheFreeBytes        int64     `json:"cache_free_bytes"`
-	CacheError            string    `json:"cache_error,omitempty"`
-	MemoryError           string    `json:"memory_error,omitempty"`
-	MemoryMeasured        bool      `json:"memory_measured,omitempty"`
-	ModelConfigHash       string    `json:"model_config_hash,omitempty"`
-	ModelURL              string    `json:"model_url,omitempty"`
-	CheckpointUnavailable bool      `json:"checkpoint_unavailable"`
-	ID                    string    `json:"id"`
-	Session               string    `json:"session"`
-	GPU                   string    `json:"gpu"`
-	FreeMemoryGB          float64   `json:"free_memory_gb"`
-	Models                []string  `json:"models,omitempty"`
-	Environments          []string  `json:"environments,omitempty"`
-	LastSeen              time.Time `json:"last_seen"`
-	Leaving               bool      `json:"leaving"`
-	Gone                  bool      `json:"gone"`
+	ModelCopySeconds      map[string]float64 `json:"model_copy_seconds,omitempty"`
+	CopyReports           []CopyReport       `json:"copy_reports,omitempty"`
+	CopyBytesPerSecond    float64            `json:"copy_bytes_per_second,omitempty"`
+	CachedModels          []string           `json:"cached_models,omitempty"`
+	CacheFreeBytes        int64              `json:"cache_free_bytes"`
+	CacheError            string             `json:"cache_error,omitempty"`
+	MemoryError           string             `json:"memory_error,omitempty"`
+	MemoryMeasured        bool               `json:"memory_measured,omitempty"`
+	ModelConfigHash       string             `json:"model_config_hash,omitempty"`
+	ModelURL              string             `json:"model_url,omitempty"`
+	CheckpointUnavailable bool               `json:"checkpoint_unavailable"`
+	ID                    string             `json:"id"`
+	Session               string             `json:"session"`
+	GPU                   string             `json:"gpu"`
+	FreeMemoryGB          float64            `json:"free_memory_gb"`
+	Models                []string           `json:"models,omitempty"`
+	Environments          []string           `json:"environments,omitempty"`
+	LastSeen              time.Time          `json:"last_seen"`
+	Leaving               bool               `json:"leaving"`
+	Gone                  bool               `json:"gone"`
 }
 type Execution struct {
 	Progress int64  `json:"progress,omitempty"`
@@ -201,6 +204,9 @@ type Checkin struct {
 	Running         *Execution    `json:"running,omitempty"`
 }
 type Reply struct {
+	CopyPlan       []CopyTask  `json:"copy_plan,omitempty"`
+	CacheUsage     []CopyTask  `json:"cache_usage,omitempty"`
+	CachePins      []string    `json:"cache_pins,omitempty"`
 	ModelPlan      []ModelSlot `json:"model_plan,omitempty"`
 	Hold           bool        `json:"hold"`
 	CheckpointRoot string      `json:"checkpoint_root"`
@@ -224,11 +230,12 @@ type LogChunk struct {
 	Text   string `json:"text"`
 }
 type Snapshot struct {
-	Pins         []ModelPin  `json:"pins"`
-	LoadedModels []ModelSlot `json:"loaded_models"`
-	Warning      string      `json:"warning,omitempty"`
-	Jobs         []*Job      `json:"jobs"`
-	Machines     []*Machine  `json:"machines"`
+	SyncRequests []SyncRequest `json:"sync_requests"`
+	Pins         []ModelPin    `json:"pins"`
+	LoadedModels []ModelSlot   `json:"loaded_models"`
+	Warning      string        `json:"warning,omitempty"`
+	Jobs         []*Job        `json:"jobs"`
+	Machines     []*Machine    `json:"machines"`
 }
 
 func terminal(s string) bool { return s == "succeeded" || s == "failed" || s == "cancelled" }

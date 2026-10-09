@@ -253,7 +253,17 @@ Restore by reversing these moves only for a separately approved test.
 2. Add relative `path`, `size_bytes`, and `sha256` to the shared catalog. Start
    each worker with its mount's `--model-root`, local `--model-cache`, and
    bounded `--model-cache-bytes`. Confirm the cache is on local disk, not NAS.
-3. Submit a model call. Verify local temporary copy, verified atomic publication,
+3. Before any latency-sensitive call, measure actual cold copy speed on each
+   eligible machine: `myce model sync MODEL --to MACHINE`, then `myce status`.
+   Record model size, achieved bytes/s, elapsed duration, cache allowance and
+   free disk. Use one copy at a time (`--model-copy-parallel 1`); repeat on the
+   other machine separately to avoid measuring NAS contention. B70/Spark
+   historical reads of about 74/42 MB/s are context, not current acceptance.
+   Select a cache allowance below actual free disk, with operating headroom
+   (B70 historically has only about 100 GB free). Pre-copy all production models
+   to every eligible target; wait for verified ready cache reports. Pin models
+   and confirm standby caches on every landing machine, even before windows.
+   Submit a model call. Verify local temporary copy, verified atomic publication,
    and llama-server's local file path. Confirm no internet fetch during loading.
    Record copy-plus-load duration separately from inference.
 4. Check cached-model/free-byte reports. With unloaded disposable cache entries,
@@ -261,7 +271,13 @@ Restore by reversing these moves only for a separately approved test.
    confirm a loaded/pinned model survives. Test actual local filesystem pressure
    and visible refusal when neither eviction nor available space can fit it.
 5. Leave a disposable `.partial` in a stopped worker's cache and restart it.
-   Confirm cleanup into Trash and that partial bytes never reach the engine.
+   Confirm byte-offset resume, full final checksum and that partial bytes never
+   reach the engine. Interrupt a sync with cancellation, NAS/network loss and
+   worker restart; confirm preserved bytes and visible paused/error status.
+   Submit real work during a copy and verify the copy pauses, then resumes when
+   idle. Fill a bounded disposable cache and prove pinned/loaded/more-used
+   copies survive. Compare two workers with measured speeds and warm/cold
+   caches; confirm placement favors the lower estimated load cost.
    Test bad size/checksum and NAS unavailability, expecting visible failures.
 6. Pin production by machine, then by platform, and inspect assigned ready state.
    Submit memory-hungry competing work: pinned memory must remain reserved.

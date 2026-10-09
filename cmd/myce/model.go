@@ -13,11 +13,13 @@ import (
 
 func modelCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce model fetch|pin|unpin [flags]")
+		return errors.New("usage: myce model fetch|sync|pin|unpin [flags]")
 	}
 	f := flag.NewFlagSet("model "+args[0], flag.ContinueOnError)
 	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue URL")
 	token := f.String("token", env("MYCE_TOKEN", ""), "fleet token (prefer MYCE_TOKEN)")
+	to := f.String("to", "", "sync to machine, platform, or all")
+	cancel := f.Bool("cancel", false, "cancel pre-copy request; keep resumable partial bytes")
 	project := f.String("project", "", "project owning pin")
 	machine := f.String("machine", "", "pin to machine")
 	platform := f.String("platform", "", "pin to one machine on platform")
@@ -48,6 +50,9 @@ func modelCommand(args []string) error {
 	}
 	if *token == "" {
 		return errors.New("set MYCE_TOKEN")
+	}
+	if args[0] == "sync" {
+		return (myce.Client{URL: *queue, Token: *token}).Call(context.Background(), "POST", "/api/models/sync", myce.SyncRequest{Model: f.Arg(0), To: *to, Cancel: *cancel}, nil)
 	}
 	p := myce.ModelPin{Project: *project, Model: f.Arg(0), Machine: *machine, Platform: *platform, Start: *start, End: *end, Timezone: *timezone}
 	if *weekdays != "" {

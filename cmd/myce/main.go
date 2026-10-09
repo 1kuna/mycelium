@@ -48,6 +48,7 @@ func run(args []string) error {
 	workerCheckpoint := f.String("checkpoint-root", env("MYCE_CHECKPOINT_ROOT", ""), "worker-local NAS root (may differ from queue mount path)")
 	cacheRoot := f.String("model-cache", "", "worker local model cache directory")
 	modelRoot := f.String("model-root", "", "worker NAS model root for relative model paths")
+	copyParallel := f.Int("model-copy-parallel", 1, "maximum concurrent NAS copies per worker")
 	cacheLimit := f.Int64("model-cache-bytes", 100*1024*1024*1024, "maximum active cache bytes")
 	productionGrace := f.Duration("production-stop-grace", 10*time.Second, "production checkpoint grace")
 	heartbeat := f.Duration("heartbeat", time.Second, "worker check-in interval")
@@ -156,7 +157,10 @@ func run(args []string) error {
 		if *heartbeat <= 0 {
 			return errors.New("heartbeat must be positive")
 		}
-		w := myce.Worker{CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		if *copyParallel < 1 {
+			return errors.New("model-copy-parallel must be positive")
+		}
+		w := myce.Worker{CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
@@ -264,8 +268,15 @@ func printStatus(s myce.Snapshot) {
 		if m.MemoryError != "" {
 			state += "; memory unavailable: " + m.MemoryError
 		}
+		for _, r := range m.CopyReports {
+			fmt.Printf("copy %s/%s: %s %d/%d bytes %s\n", m.ID, r.Model, r.State, r.Bytes, r.Total, r.Error)
+		}
+		fmt.Printf("copy speed %s: %.0f bytes/s; estimated NAS copy seconds %v\n", m.ID, m.CopyBytesPerSecond, m.ModelCopySeconds)
 		fmt.Printf("cache %s: %v, %d bytes free %s\n", m.ID, m.CachedModels, m.CacheFreeBytes, m.CacheError)
 		fmt.Printf("machine %s: %s, %.1f GB free, %s\n", m.ID, m.GPU, m.FreeMemoryGB, state)
+	}
+	for _, r := range s.SyncRequests {
+		fmt.Printf("sync %s to %s cancelled=%t\n", r.Model, r.To, r.Cancel)
 	}
 	for _, p := range s.Pins {
 		fmt.Printf("pin %s/%s: machine=%s platform=%s assigned=%s window=%s-%s %s\n", p.Project, p.Model, p.Machine, p.Platform, p.Assigned, p.Start, p.End, p.Timezone)

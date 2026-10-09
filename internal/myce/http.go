@@ -47,13 +47,20 @@ td:before{content:attr(data-label);font-weight:600}.reason{max-width:none}}
 {{range .Machines}}<tr><td data-label="Machine">{{.ID}}</td><td data-label="GPU">{{.GPU}}</td>
 <td data-label="Free GB">{{.FreeMemoryGB}}{{if .MemoryError}}; memory unavailable: {{.MemoryError}}{{end}}</td>
 <td data-label="State">{{if .Gone}}gone{{else if .Leaving}}leaving{{else}}joined{{end}}</td>
-<td data-label="Ready envs">{{range .Environments}}{{.}} {{end}}<br>Cached: {{range .CachedModels}}{{.}} {{else}}none{{end}}<br>Cache free: {{.CacheFreeBytes}} bytes{{if .CacheError}}<br>Cache error: {{.CacheError}}{{end}}</td></tr>
+<td data-label="Ready envs">{{range .Environments}}{{.}} {{end}}<br>Cached: {{range .CachedModels}}{{.}} {{else}}none{{end}}<br>Cache free: {{.CacheFreeBytes}} bytes<br>Copy speed: {{printf "%.0f" .CopyBytesPerSecond}} bytes/s{{range $model,$seconds:=.ModelCopySeconds}}<br>Estimated NAS copy {{$model}}: {{printf "%.1f" $seconds}}s{{end}}{{range .CopyReports}}<br>Copy {{.Model}}: {{.State}} {{.Bytes}}/{{.Total}} bytes {{.Error}}{{end}}{{if .CacheError}}<br>Cache error: {{.CacheError}}{{end}}</td></tr>
 {{else}}<tr><td colspan="5">No machines joined.</td></tr>{{end}}
-</table></div><h2>Models</h2><table><tr><th>Model</th><th>Machine</th><th>State</th><th>Idle seconds</th><th>Calls in flight</th><th>Error</th></tr>{{range .LoadedModels}}<tr><td data-label="Model">{{.Model}}</td><td data-label="Machine">{{.Machine}}</td><td data-label="State">{{.State}}</td><td data-label="Idle seconds">{{printf "%.1f" .IdleSeconds}}</td><td data-label="Calls">{{.InFlight}}</td><td data-label="Error">{{.Error}}</td></tr>{{else}}<tr><td colspan="6">No models loaded.</td></tr>{{end}}</table><h2>Production pins</h2><div class="tables"><table><tr><th>Project / model</th><th>Target</th><th>Assigned</th><th>Window</th></tr>{{range .Pins}}<tr><td data-label="Project">{{.Project}} / {{.Model}}</td><td data-label="Target">{{.Machine}}{{.Platform}}</td><td data-label="Assigned">{{if .Assigned}}{{.Assigned}}{{else}}waiting / outside window{{end}}</td><td data-label="Window">{{if .Start}}{{.Start}}–{{.End}} {{.Timezone}}; weekdays {{.Weekdays}}{{else}}always{{end}}</td></tr>{{else}}<tr><td colspan="4">No production pins.</td></tr>{{end}}</table></div></body></html>`))
+</table></div><h2>Models</h2><table><tr><th>Model</th><th>Machine</th><th>State</th><th>Idle seconds</th><th>Calls in flight</th><th>Error</th></tr>{{range .LoadedModels}}<tr><td data-label="Model">{{.Model}}</td><td data-label="Machine">{{.Machine}}</td><td data-label="State">{{.State}}</td><td data-label="Idle seconds">{{printf "%.1f" .IdleSeconds}}</td><td data-label="Calls">{{.InFlight}}</td><td data-label="Error">{{.Error}}</td></tr>{{else}}<tr><td colspan="6">No models loaded.</td></tr>{{end}}</table><h2>Production pins</h2><div class="tables"><table><tr><th>Project / model</th><th>Target</th><th>Assigned</th><th>Window</th></tr>{{range .Pins}}<tr><td data-label="Project">{{.Project}} / {{.Model}}</td><td data-label="Target">{{.Machine}}{{.Platform}}</td><td data-label="Assigned">{{if .Assigned}}{{.Assigned}}{{else}}waiting / outside window{{end}}</td><td data-label="Window">{{if .Start}}{{.Start}}–{{.End}} {{.Timezone}}; weekdays {{.Weekdays}}{{else}}always{{end}}</td></tr>{{else}}<tr><td colspan="4">No production pins.</td></tr>{{end}}</table></div><h2>Requested copies</h2>{{range .SyncRequests}}<p>{{.Model}} to {{.To}}{{if .Cancel}}: cancelled{{end}}</p>{{else}}<p>No explicit sync requests.</p>{{end}}</body></html>`))
 
 func (a API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/workers/{id}/events", a.workerEvent)
+	mux.HandleFunc("POST /api/models/sync", func(w http.ResponseWriter, r *http.Request) {
+		var s SyncRequest
+		if !decode(w, r, &s) {
+			return
+		}
+		respond(w, map[string]bool{"ok": true}, a.Queue.SyncModel(s))
+	})
 	mux.HandleFunc("POST /api/models/pin", func(w http.ResponseWriter, r *http.Request) {
 		var p ModelPin
 		if !decode(w, r, &p) {
