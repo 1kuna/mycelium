@@ -26,11 +26,14 @@ const StopGrace = 2 * time.Minute
 var ErrStale = errors.New("stale execution: stop this copy")
 
 type state struct {
-	Jobs     map[string]*Job     `json:"jobs"`
-	Machines map[string]*Machine `json:"machines"`
-	Front    int64               `json:"front"`
+	ModelSlots map[string]*ModelSlot `json:"model_slots,omitempty"`
+	Jobs       map[string]*Job       `json:"jobs"`
+	Machines   map[string]*Machine   `json:"machines"`
+	Front      int64                 `json:"front"`
 }
 type Queue struct {
+	models       ModelConfig
+	calls        map[string]*ModelCall
 	lock         *os.File
 	mu           sync.Mutex
 	db           *sql.DB
@@ -106,6 +109,10 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 			}
 		}
 	}
+	if err = q.ConfigureModels(ModelConfig{Idle: 10 * time.Minute, Wait: 5 * time.Minute}); err != nil {
+		db.Close()
+		return nil, err
+	}
 	success = true
 	return q, nil
 }
@@ -149,6 +156,11 @@ func (q *Queue) update(fn func() error) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	old, _ := json.Marshal(q.s)
+	oldCalls := map[string]*ModelCall{}
+	for id, c := range q.calls {
+		copy := *c
+		oldCalls[id] = &copy
+	}
 	oldUnreported := map[string]bool{}
 	for id, v := range q.unreported {
 		oldUnreported[id] = v
@@ -163,6 +175,7 @@ func (q *Queue) update(fn func() error) error {
 		}
 	}
 	if err != nil {
+		q.calls = oldCalls
 		q.unreported = oldUnreported
 		q.networkQuiet = oldQuiet
 		q.s = state{}
@@ -261,6 +274,7 @@ func (q *Queue) maintain() {
 			j.Reason = "give-up time reached"
 		}
 	}
+	q.maintainModels()
 	if q.networkQuiet || now.Before(q.restartUntil) || !checkpointAvailable(q.root) {
 		return
 	}
@@ -314,6 +328,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		if m.ID == "" || m.Session == "" || !validGPU(m.GPU) || m.FreeMemoryGB < 0 || math.IsNaN(m.FreeMemoryGB) || math.IsInf(m.FreeMemoryGB, 0) {
 			return errors.New("invalid machine report")
 		}
+		if m.ModelURL != "" && len(q.models.Models) > 0 && m.ModelConfigHash != modelConfigHash(q.models) {
+			return errors.New("worker model config does not match queue")
+		}
 		old := q.s.Machines[m.ID]
 		if old != nil && old.Session != m.Session && !old.Gone && !(c.Fresh && c.PreviousSession == old.Session) {
 			return errors.New("machine name already joined; leave the other worker first")
@@ -341,7 +358,10 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		m.Gone = false
 		m.LastSeen = q.clock.Now()
 		q.s.Machines[m.ID] = &m
+		q.reconcileModels(&m, c.ModelReports)
+		m.FreeMemoryGB = max(0, m.FreeMemoryGB-q.modelMemory(m.ID))
 		q.maintain()
+		defer func() { reply.ModelPlan = q.modelPlan(m.ID) }()
 		reply.Leave = m.Leaving
 		if m.Leaving {
 			for _, j := range q.s.Jobs {
@@ -415,6 +435,15 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 		if !m.Leaving && !m.CheckpointUnavailable && checkpointAvailable(q.root) {
 			j := pick(q.s.Jobs, &m)
+			if j != nil {
+				for _, c := range q.calls {
+					model, ok := q.model(c.Model)
+					if c.Machine == "" && c.Error == "" && ok && c.Exclude != m.ID && contains(model.Platforms, m.GPU) && model.MemoryGB <= m.FreeMemoryGB+q.modelMemory(m.ID) && before(callJob(c), j, &m) {
+						j = nil
+						break
+					}
+				}
+			}
 			if j != nil && len(j.Spec.Needs.Platform.Preferred) > 0 && !contains(j.Spec.Needs.Platform.Preferred, m.GPU) {
 				for _, other := range q.s.Machines {
 					if !contains(j.Spec.Needs.Platform.Preferred, other.GPU) || !fits(j, other, other.FreeMemoryGB) || affinity(j, other) < affinity(j, &m) {
@@ -446,7 +475,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				reply.Job = &out
 			}
 		}
-		if m.Leaving && reply.Job == nil {
+		if m.Leaving && reply.Job == nil && len(q.modelPlan(m.ID)) == 0 {
 			m.Gone = true
 			m.Models = nil
 		}
@@ -535,7 +564,17 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 	var out Snapshot
 	err := q.update(func() error {
 		q.maintain()
-		out = Snapshot{Jobs: []*Job{}, Machines: []*Machine{}}
+		out = Snapshot{Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+		for _, s := range q.s.ModelSlots {
+			copy := *s
+			if s.State == "ready" && s.InFlight == 0 {
+				copy.IdleSeconds = max(0, q.clock.Now().Sub(s.LastUsed).Seconds())
+			}
+			out.LoadedModels = append(out.LoadedModels, copy)
+		}
+		sort.Slice(out.LoadedModels, func(i, j int) bool {
+			return slotKey(out.LoadedModels[i].Machine, out.LoadedModels[i].Model) < slotKey(out.LoadedModels[j].Machine, out.LoadedModels[j].Model)
+		})
 		if q.networkQuiet {
 			out.Warning = "all workers quiet: waiting for the network to return"
 		}

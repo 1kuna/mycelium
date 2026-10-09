@@ -1,8 +1,7 @@
 # Mycelium
 
-One shared queue for GPU batch jobs. One Go binary, one SQLite database, plain
-commands, and an HTML status page. Everything in step 1 runs on a laptop with
-fake GPUs. The approved spec is [the v2 design](docs/design-proposal.md).
+One shared queue for GPU batch jobs and OpenAI-format model calls. One Go binary, one SQLite database, plain
+commands, and an HTML status page. Everything runs on a laptop with fake GPUs and an explicit fake model engine. The approved spec is [the v2 design](docs/design-proposal.md).
 The previous architecture remains archived at `v1-final`; v2 starts fresh.
 
 ## Five-minute quick start
@@ -49,7 +48,35 @@ go vet ./...
 ```
 
 The end-to-end test launches the actual `myce dev` executable, checkpoints an
-experiment, preempts it for production, and verifies checkpoint recovery.
+experiment, preempts it for production, and verifies checkpoint recovery. A second executable test loads an unloaded model
+through an OpenAI call, waits for idle unload, then verifies that a second call
+loads it again.
+
+## Calling a model
+
+Dev offers a fake `dev-model`; its first call loads it on demand:
+
+```sh
+curl http://127.0.0.1:7331/v1/chat/completions \
+  -H "Authorization: Bearer dev-token" -H "Content-Type: application/json" \
+  -H "X-Myce-Project: demo" -H "X-Myce-Priority: production" \
+  -d '{"model":"dev-model","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:7331/v1", api_key="dev-token",
+                default_headers={"X-Myce-Project": "demo", "X-Myce-Priority": "production"},
+                timeout=600, max_retries=0)
+print(client.chat.completions.create(
+    model="dev-model", messages=[{"role": "user", "content": "Hello"}]
+).choices[0].message.content)
+```
+
+Chat streaming, text completions, and embeddings use the same headers. Models
+unload after ten idle minutes or drain for higher-priority work. See the
+[model-call guide](docs/guide-model-calls.md) and [catalog example](examples/models.yaml)
+for llama.cpp configuration, shared memory scheduling, and recovery behavior.
 
 ## Commands
 
@@ -73,7 +100,7 @@ on the mounted NAS before running `queue`; a missing root blocks new jobs.
 Use `join --state-dir /durable/local/worker` to choose the worker spool location
 (default: a per-queue, per-machine directory in your user cache). Keep it
 across worker restarts. Examples for boot services are in [deploy/](deploy/README.md). The HTML page is
-read-only and LAN-visible; all `/api/` routes require the token. This is a
+read-only and LAN-visible; all `/api/` and `/v1/` routes require the token. This is a
 trusted local-network service; commands run with the worker user's permissions.
 
 For step 1, a worker explicitly declares `--gpu cuda|xpu|metal|fake` and the
@@ -82,8 +109,9 @@ memory is subtracted from that budget on check-in. Lend only memory that other
 workloads won't consume; automatic hardware detection and setup are later work.
 Each worker runs one command at a time. Use Ctrl-C or `leave` when reclaiming its
 GPU. `--environments torch-cuda,mlx` reports installed, ready environments;
-`--models qwen3-32b` reports externally loaded models for scheduling affinity.
-These flags do not install environments or load models.
+`--models qwen3-32b` remains a batch affinity hint for externally managed models;
+it does not make them callable. Use `--model-config` for queue-managed model
+loading. These flags do not install environments.
 
 ## Job format
 
@@ -155,6 +183,5 @@ retry outages with exponential backoff capped at 30 seconds, using an injected
 clock. No new commands start while disconnected. The SQLite file keeps job states, fleet inventory, and logs across
 queue restarts. Never run two queue services against the same database.
 
-Model calls, model loading, automatic environment setup, quotas, and redundant
-queue services are deferred. No v1 peer networking, leases, or replicated state
+Automatic environment setup, vLLM, quotas, and redundant queue services are deferred. No v1 peer networking, leases, or replicated state
 is used.

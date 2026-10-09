@@ -1,0 +1,11 @@
+# Use the same file on queue and workers. Paths must exist on every eligible worker.
+idle_timeout: 10m
+max_wait: 5m
+models:
+  - name: chat
+    engine: llama.cpp
+    path: /shared/models/chat.gguf
+    memory_gb: 24
+    platforms: [cuda, metal, xpu]
+    # Set context, sampling and template options for this exact model explicitly.
+    args: [--ctx-size, "32768"]

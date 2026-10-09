@@ -2,8 +2,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -231,4 +234,97 @@ func readLogs(t *testing.T, ctx context.Context, c myce.Client, id string) strin
 		b.WriteString(l.Text)
 	}
 	return b.String()
+}
+
+func TestDevModelEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "myce")
+	if out, e := exec.Command("go", "build", "-race", "-o", binary, ".").CombinedOutput(); e != nil {
+		t.Fatalf("build: %v %s", e, out)
+	}
+	cmd := exec.Command(binary, "dev", "--listen", "127.0.0.1:0", "--db", filepath.Join(dir, "db"), "--checkpoints", filepath.Join(dir, "checkpoints"), "--workers", "1", "--model-idle", "1s")
+	cmd.Env = append(os.Environ(), "MYCE_TOKEN=model-test-token")
+	stdout, e := cmd.StdoutPipe()
+	if e != nil {
+		t.Fatal(e)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if e = cmd.Start(); e != nil {
+		t.Fatal(e)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(os.Interrupt)
+		select {
+		case e := <-done:
+			if e != nil {
+				t.Errorf("dev: %v %s", e, stderr.String())
+			}
+		case <-time.After(10 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+			t.Error("dev shutdown timeout")
+		}
+	})
+	lines := make(chan string, 1)
+	go func() { s := bufio.NewScanner(stdout); s.Scan(); lines <- s.Text() }()
+	var url string
+	select {
+	case line := <-lines:
+		parts := strings.Fields(line)
+		if len(parts) < 3 {
+			t.Fatalf("startup %q", line)
+		}
+		url = parts[2]
+	case <-time.After(10 * time.Second):
+		t.Fatal("dev startup timeout")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	c := myce.Client{URL: url, Token: "model-test-token"}
+	call := func() {
+		req, _ := http.NewRequestWithContext(ctx, "POST", url+"/v1/chat/completions", strings.NewReader(`{"model":"dev-model","messages":[{"role":"user","content":"hello"}]}`))
+		req.Header.Set("Authorization", "Bearer model-test-token")
+		req.Header.Set("X-Myce-Project", "test")
+		req.Header.Set("X-Myce-Priority", "production")
+		res, e := http.DefaultClient.Do(req)
+		if e != nil {
+			t.Fatal(e)
+		}
+		data, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != 200 || !strings.Contains(string(data), "fake answer") {
+			t.Fatalf("call: %d %s", res.StatusCode, data)
+		}
+	}
+	var s myce.Snapshot
+	if e = c.Call(ctx, "GET", "/api/status", nil, &s); e != nil {
+		t.Fatal(e)
+	}
+	if len(s.LoadedModels) != 0 {
+		t.Fatal("model was already loaded")
+	}
+	call()
+	if e = c.Call(ctx, "GET", "/api/status", nil, &s); e != nil {
+		t.Fatal(e)
+	}
+	if len(s.LoadedModels) != 1 || s.LoadedModels[0].State != "ready" {
+		t.Fatalf("not loaded: %+v", s.LoadedModels)
+	}
+	wait(t, ctx, func() bool {
+		if e = c.Call(ctx, "GET", "/api/status", nil, &s); e != nil {
+			t.Fatal(e)
+		}
+		return len(s.LoadedModels) == 0
+	})
+	call()
+	if e = c.Call(ctx, "GET", "/api/status", nil, &s); e != nil {
+		t.Fatal(e)
+	}
+	if len(s.LoadedModels) != 1 || s.LoadedModels[0].State != "ready" {
+		t.Fatal("second call did not reload model")
+	}
+	t.Log("real myce dev: unloaded model loaded on first OpenAI call, answered, unloaded after idle, and loaded again for second call")
 }
