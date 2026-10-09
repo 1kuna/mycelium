@@ -101,7 +101,7 @@ func TestWorkerOfflineLargeOutputIsDurable(t *testing.T) {
 	var finish workerFinish
 	select {
 	case finish = <-p.done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		p.stop(w.Clock.Now(), 0, true)
 		t.Fatal("offline output blocked the command")
 	}
@@ -214,7 +214,7 @@ func TestWorkerOrphanCleanupVerifiesIdentity(t *testing.T) {
 	}
 	select {
 	case <-p.done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("orphan group was not killed")
 	}
 }
@@ -290,7 +290,7 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(4 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("worker did not replay saved completion")
 	}
 	mu.Lock()
@@ -440,7 +440,21 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 	if err := helper.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { helper.Process.Kill(); helper.Wait() }()
+	defer func() {
+		_ = helper.Process.Kill()
+		_ = helper.Wait()
+		// A readiness assertion can fail after the helper has spawned its
+		// command. Clean only its recorded, identity-verified owned group.
+		store, err := (Worker{StateDir: stateDir}).openStore()
+		if err != nil {
+			t.Error("open crash-helper cleanup state:", err)
+			return
+		}
+		defer store.close()
+		if err := store.cleanupOrphan(RealClock{}); err != nil {
+			t.Error("crash-helper orphan cleanup:", err)
+		}
+	}()
 	await(t, func() bool {
 		ls, _ := q.Logs(j.ID, 0)
 		for _, l := range ls {
@@ -480,7 +494,46 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(4 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("restarted worker failed to leave")
+	}
+}
+
+func TestSignalExitedGroupPermissionRace(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		signalErr  error
+		members    []int
+		inspectErr error
+		wantErr    error
+	}{
+		{name: "success"},
+		{name: "already gone", signalErr: syscall.ESRCH},
+		{name: "exiting group permission race", signalErr: syscall.EPERM},
+		{name: "live group permission refused", signalErr: syscall.EPERM, members: []int{42}, wantErr: syscall.EPERM},
+		{name: "inventory failure refuses cleanup", signalErr: syscall.EPERM, inspectErr: errors.New("inventory unavailable"), wantErr: syscall.EPERM},
+		{name: "other signal error", signalErr: syscall.EINVAL, wantErr: syscall.EINVAL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inspected := false
+			err := signalWorkerGroupUsing(42, syscall.SIGKILL, func(group int, signal syscall.Signal) error {
+				if group != -42 || signal != syscall.SIGKILL {
+					t.Fatal("wrong group/signal", group, signal)
+				}
+				return tc.signalErr
+			}, func(group int) ([]int, error) {
+				inspected = true
+				if group != 42 {
+					t.Fatal("wrong inventory group", group)
+				}
+				return tc.members, tc.inspectErr
+			})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatal("signal result", err, "want", tc.wantErr)
+			}
+			if inspected != errors.Is(tc.signalErr, syscall.EPERM) {
+				t.Fatal("unexpected inventory decision")
+			}
+		})
 	}
 }

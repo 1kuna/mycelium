@@ -231,10 +231,7 @@ func (l *LlamaEngine) Unload() error {
 		case <-grace.Done():
 		}
 	}
-	e := syscall.Kill(-l.cmd.Process.Pid, syscall.SIGKILL)
-	if e == syscall.ESRCH {
-		e = nil
-	}
+	e := signalWorkerGroup(l.cmd.Process.Pid, syscall.SIGKILL)
 	if l.done != nil {
 		<-l.done
 		l.done = nil
@@ -276,6 +273,12 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 			return err
 		}
 		if err := cmd.Start(); err != nil {
+			// The shared stop grace may expire while persisting the helper's
+			// recovery record, before Start. That is normal escalation: no
+			// helper started, and Unload must still stop the server group.
+			if grace.Err() != nil && errors.Is(err, grace.Err()) {
+				return nil
+			}
 			return err
 		}
 		if err := saveWorkerJSON(l.Dir, name+".json", workerState{Identity: identity, PID: cmd.Process.Pid}); err != nil {
@@ -284,14 +287,16 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 			return err
 		}
 		_, gateErr := writer.Write([]byte("start\n"))
+		// A helper killed at the grace deadline can close its gate first.
+		// Still inspect its group below; a broken pipe alone is expected.
+		if grace.Err() != nil && errors.Is(gateErr, syscall.EPIPE) {
+			gateErr = nil
+		}
 		if gateErr != nil {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
 		_ = cmd.Wait()
-		killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if killErr == syscall.ESRCH {
-			killErr = nil
-		}
+		killErr := signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL)
 		if err := errors.Join(gateErr, killErr, waitWorkerGroup(cmd.Process.Pid, l.Clock)); err != nil {
 			return err
 		}

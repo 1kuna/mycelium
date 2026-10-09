@@ -133,14 +133,17 @@ func TestImmediateStopNotification(t *testing.T) {
 		if e.ID != r.ID || e.Attempt != r.Attempt || e.GraceSeconds != 10 {
 			t.Fatal(e)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("stop waited for heartbeat")
 	}
 }
 
 // StartDev is the implementation behind myce dev: real HTTP and subprocesses,
 // fake GPU only. The experiment ignores TERM to exercise the full 10s grace.
-func TestDevProductionStartsUnder15Seconds(t *testing.T) {
+func TestDevProductionStartsUnder15SecondsRealTime(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real-time production start measurement (HTTP, subprocesses, 10s grace)")
+	}
 	dir := t.TempDir()
 	d, e := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(dir, "queue.db"), Checkpoints: filepath.Join(dir, "nas"), Token: "test", Workers: 1, MemoryGB: 8, Interval: time.Second})
 	if e != nil {
@@ -154,7 +157,7 @@ func TestDevProductionStartsUnder15Seconds(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	until := time.Now().Add(35 * time.Second)
+	until := time.Now().Add(testWaitTimeout)
 	for {
 		ls, e := d.Queue.Logs(j.ID, 0)
 		if e != nil {
@@ -168,11 +171,11 @@ func TestDevProductionStartsUnder15Seconds(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	submitted := time.Now()
 	p, e := d.Queue.Submit(spec("production"))
 	if e != nil {
 		t.Fatal(e)
 	}
+	until = time.Now().Add(testWaitTimeout)
 	for {
 		snap, e := d.Queue.Snapshot()
 		if e != nil {
@@ -187,16 +190,19 @@ func TestDevProductionStartsUnder15Seconds(t *testing.T) {
 				if len(logs) == 0 {
 					continue
 				}
-				elapsed := time.Since(submitted)
-				t.Logf("production submitted-to-start %.3fs (no model load)", elapsed.Seconds())
+				elapsed := got.StartedAt.Sub(got.Queued)
+				t.Logf("queue-measured production submitted-to-start %.3fs (no model load)", elapsed.Seconds())
+				if got.StartLatencySeconds != elapsed.Seconds() {
+					t.Fatal("recorded start latency disagrees with queue timestamps", got)
+				}
 				if elapsed >= 15*time.Second {
 					t.Fatal("production latency exceeds target")
 				}
 				return
 			}
 		}
-		if time.Since(submitted) > 15*time.Second {
-			t.Fatal("production never started within 15s")
+		if time.Now().After(until) {
+			t.Fatalf("production start/logs not observed within %s; snapshot=%+v", testWaitTimeout, snap)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -289,4 +295,42 @@ func TestProductionShorteningPreservesCancellation(t *testing.T) {
 	c.Advance(10 * time.Second)
 	check(t, q, m, r)
 	requireState(t, q, j.ID, "cancelled")
+}
+
+// Logic-level target: OS scheduling and log delivery cannot affect the queue's
+// own measurement. The real-time counterpart above is skipped only with -short.
+func TestProductionStartLatencyFakeClock(t *testing.T) {
+	q, c := fixture(t)
+	submit(t, q, spec("experiment"))
+	m := machine("one", "fake")
+	run := check(t, q, m, nil).Job
+	prod := submit(t, q, spec("production"))
+	if reply := check(t, q, m, run); !reply.Stop || reply.GraceSeconds != 10 {
+		t.Fatal("production grace", reply)
+	}
+	c.Advance(9 * time.Second)
+	if check(t, q, m, run).Kill {
+		t.Fatal("killed before production grace")
+	}
+	c.Advance(time.Second)
+	if !check(t, q, m, run).Kill {
+		t.Fatal("did not kill at production grace")
+	}
+	assigned := check(t, q, m, nil).Job
+	if assigned == nil || assigned.ID != prod.ID {
+		t.Fatal("production not assigned first", assigned)
+	}
+	c.Advance(time.Second) // command startup, after assignment
+	if err := q.Started(result(assigned, true)); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, prod.ID)
+	if got.StartedAt == nil || got.StartLatencySeconds != 11 || got.StartLatencySeconds != got.StartedAt.Sub(got.Queued).Seconds() || got.StartLatencySeconds >= 15 {
+		t.Fatalf("incorrect queue-measured production latency: %+v", got)
+	}
+	c.Advance(time.Hour) // slow observer must not change the measured start
+	got = job(t, q, prod.ID)
+	if got.StartLatencySeconds != 11 {
+		t.Fatal("observation changed start measurement", got)
+	}
 }

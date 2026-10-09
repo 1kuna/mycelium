@@ -255,7 +255,7 @@ func TestMeasureProbeIncludesTransientLoadPeak(t *testing.T) {
 			}
 		}}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	r, err := Measure(ctx, o)
 	if err != nil || r.Peak.DeviceGB != 8 || r.Models[0].Delta.DeviceGB != 7 {

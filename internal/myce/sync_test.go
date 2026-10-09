@@ -392,7 +392,7 @@ func TestSyncUsesRealAPIAndWorker(t *testing.T) {
 	done := make(chan error, 1)
 	w := Worker{Client: client, Machine: machine("sync-worker", "fake"), Clock: RealClock{}, Interval: 20 * time.Millisecond, StateDir: filepath.Join(dir, "worker"), ModelRoot: nas, CacheLimit: 1024, ModelConfig: cfg}
 	go func() { done <- w.Run(ctx) }()
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(testWaitTimeout)
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -444,7 +444,7 @@ func TestParallelCopiesActuallyRunTogether(t *testing.T) {
 	for range 2 {
 		select {
 		case <-entered:
-		case <-time.After(time.Second):
+		case <-time.After(testWaitTimeout):
 			close(release)
 			t.Fatal("parallel limit still serialized copies")
 		}
