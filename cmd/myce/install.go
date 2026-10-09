@@ -21,6 +21,9 @@ func setupCommand(args []string) error {
 }
 func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) error {
 	var e error
+	if len(args) == 0 || (args[0] != "install" && args[0] != "uninstall" && args[0] != "doctor") {
+		return errors.New("usage: myce install|uninstall|doctor")
+	}
 	action := args[0]
 	role := "worker"
 	flags := args[1:]
@@ -83,7 +86,7 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 			}
 		}
 		failed := false
-		for _, check := range myce.Doctor(ctx, c, myce.LocalDoctorProbe(token)) {
+		for _, check := range myce.Doctor(ctx, c, myce.LocalDoctorProbeWithMachine(token, probe)) {
 			state := "OK"
 			if !check.OK {
 				state = "FAIL"
@@ -118,6 +121,15 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 		return e
 	}
 	c.Listen = *listen
+	// Services start in a different working directory from the install command.
+	for _, path := range []*string{models, environments} {
+		if *path != "" {
+			*path, e = filepath.Abs(*path)
+			if e != nil {
+				return e
+			}
+		}
+	}
 	c.ModelCatalog = *models
 	c.EnvironmentCatalog = *environments
 	if *environments != "" {
@@ -128,7 +140,7 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	}
 	fmt.Printf("%s %s/%s: platform=%s memory=%s reserve=%.0f GiB\nQueue: %s\nNAS: %s\nCheckpoint root: %s\nModel cache: %s (%d bytes)\nEnvironment cache: %s (%d bytes)\nConfig: %s\nBoot service: %s\n", role, d.OS, d.Arch, d.Platform, d.MemoryMode, d.ReserveGB, c.Queue, c.NAS, c.Checkpoints, c.ModelCache, c.ModelCacheBytes, c.EnvironmentCache, c.EnvironmentCacheBytes, c.Config, c.Service)
 	if d.OS == "linux" {
-		fmt.Println("Starts at login; for boot without login, an administrator must enable user lingering.")
+		fmt.Printf("Starts at login; for boot without login and after logout, an administrator must run loginctl enable-linger %d. Run myce doctor to check lingering.\n", os.Getuid())
 	}
 	fmt.Printf("Command: myce %s\n", strings.Join(c.Args(), " "))
 	if *dry {

@@ -415,3 +415,26 @@ func TestEnvironmentPlacementBuildAndAssignmentUseSameOrdering(t *testing.T) {
 		t.Fatal("both-ready worker did not receive job", got)
 	}
 }
+
+func TestBuildOnlyLauncherRelocation(t *testing.T) {
+	r, e := snapshotEnvironment(EnvironmentRecipe{Build: []string{"test-build"}}, "fake")
+	if e != nil {
+		t.Fatal(e)
+	}
+	c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Run: func(_ context.Context, _ []string, dir string, _ []string, _ io.Writer) error {
+		// A local build can emit a launcher whose interpreter lives in its own bin.
+		if e := os.Symlink("/bin/sh", filepath.Join(dir, "bin", "interpreter")); e != nil {
+			return e
+		}
+		return os.WriteFile(filepath.Join(dir, "bin", "tool"), []byte("#!"+filepath.Join(dir, "bin", "interpreter")+"\necho relocated\n"), 0700)
+	}}
+	root, release, e := c.Acquire(context.Background(), r)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer release()
+	b, e := exec.Command(filepath.Join(root, "bin", "tool")).Output()
+	if e != nil || string(b) != "relocated\n" {
+		t.Fatalf("published launcher broken: %q %v", b, e)
+	}
+}

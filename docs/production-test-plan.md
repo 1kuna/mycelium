@@ -7,7 +7,9 @@ No fleet command here was executed during the local pre-production review.
 
 The old v1 service was already removed from B70 on **2026-10-09**. Do not
 reinstall it. Preserve unrelated legacy data, Verso, Atlas, guards and controllers.
-B70 is CPU queue only at `192.0.2.153:7331`; never start a B70 worker. Spark
+B70 is CPU queue only at `192.0.2.153:7331`; never start a B70 worker
+in this first Spark acceptance test. The separately authorized weekend
+measurement below is a local maintenance experiment, not queue cutover. Spark
 is the only worker in this first test. Queue restart is allowed within this test;
 B70 host reboot requires a separate Verso maintenance window. A Spark host reboot
 requires its owner's maintenance window and local console access.
@@ -48,6 +50,13 @@ Record the commit and corresponding hashes. On each host, check that v2 binary,
 config/state and service destinations are absent, ports 7331 (B70) and 7332
 (Spark) are free, and `loginctl show-user user -p Linger --value` is `yes`.
 Existing/ambiguous destinations stop this fresh-install checklist.
+
+Linux systemd **user** services require lingering to start before login and to
+survive logout. `myce doctor` checks `loginctl show-user UID --property=Linger
+--value` and fails unless it says `yes`. If disabled, stop this gate; an
+administrator must explicitly run `loginctl enable-linger user`, then repeat
+that check and doctor. Doctor never enables it or elevates. `enable --now`
+alone does not prove boot-time availability. macOS launch agents start at login.
 
 ## 2. Prepare private files and prove NAS identity
 
@@ -322,3 +331,107 @@ contract, faults and undo results without tokens or private document text.
 Laptop checks (`go test ./... -race`, including both `TestPreDeploy*` scenarios,
 and the full Python suite with zero skips) support software acceptance only;
 this checklist's unexecuted fleet gates still determine hardware readiness.
+
+## B70 GPU0 weekend joint residency measurement
+
+This is a separate, opt-in maintenance test. It does not authorize a B70 worker
+cutover or change the first-machine checklist. Arrange a Verso maintenance
+window with its owner. Stop new production submissions through its existing
+owner-controlled procedure; let actual jobs finish, stop the existing audio /
+naming / experiment GPU0 owner through its documented procedure, and verify no
+other process owns GPU0. Never improvise controller commands or borrow GPU1.
+Preserve the exact original service/controller settings for restoration.
+
+1. Prepare a private, reviewed catalog named `verso-models.yaml` with these
+   distinct entries: `verso-asr`, `verso-diarization`, `verso-alignment`,
+   `verso-short-turn`, and `verso-naming`. Use exact deployed weights and server
+   wrappers; the audio wrappers are application integration work, not supplied
+   by Mycelium. No fake servers or changed runtime/math may pass this test.
+   Include all qualified assist/companion weights in the short-turn entry or
+   separate listed models. If accuracy mode is in scope, add its three recognizers
+   and fusion to a separate attempt. Missing catalog/wrapper/model identity is a
+   failed prerequisite. Use approved NAS manifests, explicit XPU recipes from
+   `environments.yaml`, `device: '0'`, loopback readiness and measured/reviewed
+   conservative declared memory budgets. Preserve naming context/template/sampler.
+2. Check current official model cards, generation config and qualified runtime
+   settings for each. Record model revision/file hashes, Python/torch/XPU and
+   llama.cpp build, reasoning/template, context/output limit, sampler and parser
+   settings. Existing environments and runtime tools must already be available;
+   arrange missing prerequisites separately. Do not run installs to bypass a gate.
+3. Confirm `xpu-smi discovery` maps device **0** to the intended physical GPU0.
+   Check `xpu-smi stats -d 0 --json`: `device_id` must be 0 and `device_level`
+   must include a finite current `XPUM_STATS_MEMORY_USED` value (MiB). Mycelium
+   refuses unavailable/unsupported counters; configured memory is not a reading.
+   Verify each framework respects `ONEAPI_DEVICE_SELECTOR=level_zero:0` and
+   `ZE_AFFINITY_MASK=0`. Record native inventory and total card capacity. Choose
+   a device usage budget below that capacity with explicit safety headroom;
+   `memory_gb` is GiB despite its name. Native host accounting is
+   `MemTotal - MemAvailable`, which includes other workloads/reclaimable cache.
+4. Run locally on B70, with any `b70-gpu0` Mycelium join stopped. If such a worker
+   was previously joined, use its graceful leave/reconciliation first; use the
+   exact `--worker`, `--queue` and `--state-dir` it used. An active join, unfinished
+   spool or live saved engine refuses measurement even with `--force`. Do not
+   change spool paths to evade this protection. Never stop the CPU queue.
+5. Prepare `verso-warmup.json`, a JSON object keyed by every listed model. Each
+   value is `{ "method": "POST", "path": "/QUALIFIED_ENDPOINT", "body":
+   {"QUALIFIED_INPUT": "NAS_REFERENCE_OR_INPUT"}, "headers": {"Content-Type":
+   ["application/json"]} }`. Replace these placeholders with representative
+   qualified audio lengths, batches, naming context and concurrency inputs.
+   Each warmup executes once while earlier models remain loaded. Test concurrent
+   peak workloads separately: sequential warmup is not concurrent acceptance.
+
+In the approved local B70 shell, set the following to reviewed **existing** paths
+and the explicit budget from step 3 (do not copy these placeholder strings):
+
+```sh
+# MYCE_TOKEN comes from private credentials, never tracing or command arguments.
+# These task-specific variables do not replace HOME or other system variables.
+myce_measure_catalog=/VERIFIED/NAS/mycelium/verso-models.yaml
+myce_measure_envs=/VERIFIED/NAS/mycelium/environments.yaml
+myce_measure_models=/VERIFIED/NAS/mycelium/models
+myce_measure_spool=/EXACT/LOCAL/b70-gpu0-spool
+myce_measure_budget=REVIEWED_DEVICE_USAGE_BUDGET_GIB
+myce_measure_report=/NEW/LOCAL/REPORT/DIRECTORY/verso-joint-attempt-1
+myce measure --queue "$MYCE_QUEUE" --worker b70-gpu0 \
+  --state-dir "$myce_measure_spool" --platform xpu --device 0 \
+  --memory-gb "$myce_measure_budget" \
+  --model-config "$myce_measure_catalog" --environment-config "$myce_measure_envs" \
+  --model-root "$myce_measure_models" \
+  --models verso-asr,verso-diarization,verso-alignment,verso-short-turn,verso-naming \
+  --warmup /REVIEWED/LOCAL/verso-warmup.json \
+  --report-prefix "$myce_measure_report" --output plain
+```
+
+Default cache locations match join's `model-cache` and `environment-cache` under
+its spool. Supply its explicit cache paths when different. Cache eviction is
+blocked during measurement; pre-copy enough space first. Model loads are bounded
+by five minutes and any shorter `ready_timeout`; use a qualified timeout in the
+catalog. The command records one simultaneous resident set and unloads all
+attempted engines in reverse order even if load/warmup/probe fails. It keeps the
+exclusive spool lock through cleanup. Optional stop commands cannot avoid KILL
+escalation. Verify native process/device release afterwards before restoring the
+original Verso owner through its documented procedure.
+
+Without `--force`, queue unavailability, outstanding production batches,
+production pins for that worker/platform, or active calls/production slots there
+refuse the test. `--force` bypasses only that queue safety check; use it solely
+when the approved maintenance procedure has stopped all competing production.
+It neither stops production for you nor bypasses the spool lock/recovery checks.
+
+The command writes `PREFIX.json` and `PREFIX.txt`, refuses overwriting them, and
+prints the selected stdout format. Reports contain native absolute device/host
+peaks, baseline, incremental per-model deltas, combined delta, engine readiness
+load seconds, catalog hash, sample interval, physical device binding and fit result. Preparation time is
+excluded from load seconds. Peaks are sampled at 100 ms; shorter spikes can be
+missed. Incremental attribution is order-dependent and system-level, not a
+per-process allocator measurement. Run distinct report prefixes with audio-first
+and naming-first order, then representative concurrent workload tests with the
+existing native guard. A cold-readiness-only run cannot qualify audio activations.
+
+Acceptance requires every exact model loaded, representative warmups successful,
+`fits_device_budget: true`, sufficient host headroom, clean native release and
+successful restoration of original production ownership. A false/partial report,
+unsupported memory counter or failed cleanup fails the gate. Preserve all attempt
+reports. Do not pin production or promise immediate starts based on disk bytes
+or a single sample. If mandatory audio+naming cannot fit GPU0, stop migration and
+make a capacity/product decision; no hidden GPU1 move, smaller context or fallback.

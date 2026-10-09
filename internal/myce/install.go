@@ -29,11 +29,10 @@ type Detection struct {
 type MachineProbe struct {
 	OS, Arch string
 	Command  func(context.Context, string, ...string) ([]byte, error)
-	ReadFile func(string) ([]byte, error)
 }
 
 func LocalMachineProbe() MachineProbe {
-	return MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, ReadFile: os.ReadFile, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
+	return MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		return exec.CommandContext(ctx, n, args...).Output()
 	}}
 }
@@ -233,6 +232,9 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 	if token == "" {
 		return errors.New("set MYCE_TOKEN before installing")
 	}
+	if command == nil {
+		return errors.New("service runner unavailable")
+	}
 	for _, p := range []string{c.Config, c.Binary, c.Credentials, c.Service} {
 		if _, e := os.Lstat(p); e == nil {
 			return fmt.Errorf("refusing to overwrite %s; uninstall the existing role first", p)
@@ -260,9 +262,6 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 	}
 	if e = os.WriteFile(c.Service, []byte(c.ServiceText()), 0600); e != nil {
 		return e
-	}
-	if command == nil {
-		return errors.New("service runner unavailable; files written, service not enabled")
 	}
 	if c.Detection.OS == "linux" {
 		if _, e = command(ctx, "systemctl", "--user", "daemon-reload"); e != nil {
@@ -333,8 +332,15 @@ type DoctorProbe struct {
 }
 
 func LocalDoctorProbe(token string) DoctorProbe {
-	return DoctorProbe{Machine: LocalMachineProbe(), NAS: func(ctx context.Context, path string) error {
-		b, e := exec.CommandContext(ctx, "mount").Output()
+	return LocalDoctorProbeWithMachine(token, LocalMachineProbe())
+}
+
+func LocalDoctorProbeWithMachine(token string, machine MachineProbe) DoctorProbe {
+	return DoctorProbe{Machine: machine, NAS: func(ctx context.Context, path string) error {
+		if machine.Command == nil {
+			return errors.New("command probe missing")
+		}
+		b, e := machine.Command(ctx, "mount")
 		if e != nil {
 			return e
 		}
@@ -344,9 +350,9 @@ func LocalDoctorProbe(token string) DoctorProbe {
 			if !ok {
 				continue
 			}
-			mount, _, ok := strings.Cut(rest, " (")
+			mount, _, ok := strings.Cut(rest, " type ")
 			if !ok {
-				mount, _, ok = strings.Cut(rest, " type ")
+				mount, _, ok = strings.Cut(rest, " (")
 			}
 			if ok && (path == mount || strings.HasPrefix(path, mount+string(filepath.Separator))) && (strings.Contains(line, "nfs") || strings.Contains(line, "smbfs") || strings.Contains(line, "cifs")) {
 				mounted = true
@@ -414,6 +420,26 @@ func Doctor(ctx context.Context, c ServiceConfig, p DoctorProbe) []DoctorCheck {
 	} else {
 		b, e := p.Machine.Command(ctx, "uv", "--version")
 		add("uv present", e, strings.TrimSpace(string(b)))
+	}
+	if c.Detection.OS == "linux" {
+		var e error
+		detail := "enabled; user service starts at boot and survives logout"
+		if p.Machine.Command == nil {
+			e = errors.New("command probe missing")
+		} else {
+			uid := strconv.Itoa(os.Getuid())
+			b, err := p.Machine.Command(ctx, "loginctl", "show-user", uid, "--property=Linger", "--value")
+			switch {
+			case err != nil:
+				e = fmt.Errorf("cannot inspect user lingering: %w", err)
+			case strings.TrimSpace(string(b)) == "yes":
+			case strings.TrimSpace(string(b)) == "no":
+				e = fmt.Errorf("disabled; starts only at login and may stop at logout; an administrator must run loginctl enable-linger %s for boot without login", uid)
+			default:
+				e = fmt.Errorf("cannot inspect user lingering: unexpected loginctl result %q", strings.TrimSpace(string(b)))
+			}
+		}
+		add("Linux user lingering", e, detail)
 	}
 	if p.Disk == nil {
 		add("disk space", errors.New("disk probe missing"), "")

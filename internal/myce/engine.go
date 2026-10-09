@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,7 +59,25 @@ func (f *FakeEngine) Call(_ context.Context, path string, data []byte) (*http.Re
 
 // LlamaEngine starts an installed llama-server, with an explicit inference contract
 // in Model.Args. It never downloads models or changes the model's generation settings.
+type RequestEngine interface {
+	Request(context.Context, string, string, http.Header, []byte) (*http.Response, error)
+}
+
+// ServerEngine shares process supervision with the llama.cpp preset.
+type ServerEngine = LlamaEngine
+
+func NewModelEngine(m Model, dir string, clock Clock) Engine {
+	if m.Engine == "fake" {
+		return &FakeEngine{}
+	}
+	return &ServerEngine{Dir: dir, Clock: clock}
+}
+
 type LlamaEngine struct {
+	stopCommand []string
+	stopTimeout time.Duration
+	env         []string
+
 	Dir      string
 	Clock    Clock
 	cmd      *exec.Cmd
@@ -79,25 +98,48 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 			}
 		}
 	}
+	if contains(m.Platforms, "cuda") {
+		selector := m.DeviceEnv["CUDA_VISIBLE_DEVICES"]
+		selector = strings.ReplaceAll(selector, "{device}", m.Device)
+		if selector != "" {
+			uuid, err := ResolveCUDADevice(ctx, selector)
+			if err != nil {
+				return err
+			}
+			env := map[string]string{}
+			for k, v := range m.DeviceEnv {
+				env[k] = v
+			}
+			m.DeviceEnv = env
+			m.DeviceEnv["CUDA_VISIBLE_DEVICES"] = uuid
+		}
+	}
 	listener, e := net.Listen("tcp", "127.0.0.1:0")
 	if e != nil {
 		return e
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 	listener.Close()
-	args := []string{"--model", m.Path, "--alias", m.Name, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--n-gpu-layers", "99"}
-	args = append(args, m.Args...)
+	argv, health, stop, env, err := serverCommand(m, port)
+	if err != nil {
+		return err
+	}
+	l.stopCommand, l.stopTimeout, l.env = stop, m.StopTimeout, env
+	if l.stopTimeout == 0 {
+		l.stopTimeout = 10 * time.Second
+	}
+	if m.ReadyTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, m.ReadyTimeout)
+		defer cancel()
+	}
 	l.identity = ID()
 	name := "engine-" + l.identity
-	shell := []string{"-c", `read gate || exit 125; exec "$@"`, "myce-supervisor-" + l.identity, "llama-server"}
-	shell = append(shell, args...)
+	shell := []string{"-c", `read gate || exit 125; exec "$@"`, "myce-supervisor-" + l.identity}
+	shell = append(shell, argv...)
 	l.cmd = exec.Command("sh", shell...)
 	l.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	for _, v := range os.Environ() {
-		if !strings.HasPrefix(v, "MYCE_TOKEN=") {
-			l.cmd.Env = append(l.cmd.Env, v)
-		}
-	}
+	l.cmd.Env = env
 	l.cmd.Env = append(l.cmd.Env, "MYCE_PROCESS_ID="+l.identity)
 	l.log, e = os.OpenFile(filepath.Join(l.Dir, name+".log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if e != nil {
@@ -136,11 +178,11 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	defer tick.Stop()
 	hc := &http.Client{Timeout: time.Second}
 	for {
-		req, _ := http.NewRequestWithContext(ctx, "GET", l.url+"/health", nil)
+		req, _ := http.NewRequestWithContext(ctx, "GET", health, nil)
 		res, err := hc.Do(req)
 		if err == nil {
 			res.Body.Close()
-			if res.StatusCode == 200 {
+			if res.StatusCode >= 200 && res.StatusCode < 300 {
 				return nil
 			}
 		}
@@ -151,22 +193,38 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		case e := <-l.done:
 			l.done = nil
 			_ = l.Unload()
-			return fmt.Errorf("llama-server exited during load: %v; see %s.log", e, name)
+			return fmt.Errorf("server exited during load: %v; see %s.log", e, name)
 		case <-tick.C:
 		}
 	}
 }
 func (l *LlamaEngine) Call(ctx context.Context, path string, data []byte) (*http.Response, error) {
-	req, e := http.NewRequestWithContext(ctx, "POST", l.url+path, bytes.NewReader(data))
+	return l.Request(ctx, "POST", path, http.Header{"Content-Type": []string{"application/json"}}, data)
+}
+func (l *LlamaEngine) Request(ctx context.Context, method, path string, headers http.Header, data []byte) (*http.Response, error) {
+	req, e := http.NewRequestWithContext(ctx, method, l.url+path, bytes.NewReader(data))
 	if e != nil {
 		return nil, e
 	}
-	req.Header.Set("Content-Type", "application/json")
-	return http.DefaultClient.Do(req)
+	req.Header = proxyHeaders(headers)
+	return modelHTTPClient.Do(req)
 }
+
 func (l *LlamaEngine) Unload() error {
 	if l.cmd == nil || l.cmd.Process == nil {
 		return nil
+	}
+	// Give the optional control command and process group one bounded grace period.
+	grace, cancel := context.WithTimeout(context.Background(), l.stopTimeout)
+	defer cancel()
+	stopErr := l.runStopCommand(grace)
+	_ = syscall.Kill(-l.cmd.Process.Pid, syscall.SIGTERM)
+	if l.done != nil {
+		select {
+		case <-l.done:
+			l.done = nil
+		case <-grace.Done():
+		}
 	}
 	e := syscall.Kill(-l.cmd.Process.Pid, syscall.SIGKILL)
 	if e == syscall.ESRCH {
@@ -176,7 +234,7 @@ func (l *LlamaEngine) Unload() error {
 		<-l.done
 		l.done = nil
 	}
-	e = errors.Join(e, waitWorkerGroup(l.cmd.Process.Pid, l.Clock))
+	e = errors.Join(e, stopErr, waitWorkerGroup(l.cmd.Process.Pid, l.Clock))
 	if l.log != nil {
 		e = errors.Join(e, l.log.Close())
 		l.log = nil
@@ -190,6 +248,55 @@ func (l *LlamaEngine) Unload() error {
 	}
 	return e
 }
+func (l *LlamaEngine) runStopCommand(grace context.Context) error {
+	if len(l.stopCommand) > 0 {
+		identity := ID()
+		name := "engine-stop-" + identity
+		argv := append([]string{"-c", `read gate || exit 125; exec "$@"`, "myce-supervisor-" + identity}, l.stopCommand...)
+		cmd := exec.CommandContext(grace, "sh", argv...)
+		cmd.Env = append(append([]string{}, l.env...), "MYCE_PROCESS_ID="+identity)
+		reader, writer, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			return pipeErr
+		}
+		defer reader.Close()
+		defer writer.Close()
+		cmd.Stdin = reader
+		cmd.Stdout = l.log
+		cmd.Stderr = l.log
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+		cmd.WaitDelay = time.Second
+		if err := saveWorkerJSON(l.Dir, name+".json", workerState{Identity: identity}); err != nil {
+			return err
+		}
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		if err := saveWorkerJSON(l.Dir, name+".json", workerState{Identity: identity, PID: cmd.Process.Pid}); err != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+			return err
+		}
+		_, gateErr := writer.Write([]byte("start\n"))
+		if gateErr != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		_ = cmd.Wait()
+		killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if killErr == syscall.ESRCH {
+			killErr = nil
+		}
+		if err := errors.Join(gateErr, killErr, waitWorkerGroup(cmd.Process.Pid, l.Clock)); err != nil {
+			return err
+		}
+		if err := saveWorkerJSON(l.Dir, name+".json", workerState{Identity: identity}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func cleanupEngines(dir string, clock Clock) error {
 	files, e := filepath.Glob(filepath.Join(dir, "engine-*.json"))
 	if e != nil {
@@ -217,34 +324,39 @@ func cleanupEngines(dir string, clock Clock) error {
 }
 
 type workerModel struct {
-	model          Model
-	engine         Engine
-	state, err     string
-	inflight       int
-	queueFlight    int
-	cancel         context.CancelFunc
-	drainRequested bool
+	model              Model
+	engine             Engine
+	state, err         string
+	inflight           int
+	queueFlight        int
+	recipe             *EnvironmentRecipe
+	releaseEnvironment func()
+	cancel             context.CancelFunc
+	drainRequested     bool
 }
 type modelRuntime struct {
-	lastSavedSpeed      float64
-	copies              map[string]*workerCopy
-	copyParallel        int
-	cachePins           map[string]bool
-	cacheUsage          map[string]int
-	cache               *ModelCache
-	mu                  sync.Mutex
-	models              map[string]*workerModel
-	config              ModelConfig
-	session, token, dir string
-	clock               Clock
-	server              *http.Server
-	wg                  sync.WaitGroup
-	url                 string
-	closing             bool
-	engineFactory       func(Model) Engine
-	memorySource        MemorySource
-	memoryMeasured      bool
-	batchMemory         *atomic.Uint64
+	lastSavedSpeed        float64
+	copies                map[string]*workerCopy
+	copyParallel          int
+	cachePins             map[string]bool
+	cacheUsage            map[string]int
+	cache                 *ModelCache
+	mu                    sync.Mutex
+	models                map[string]*workerModel
+	config                ModelConfig
+	session, token, dir   string
+	clock                 Clock
+	server                *http.Server
+	wg                    sync.WaitGroup
+	url                   string
+	closing               bool
+	engineFactory         func(Model) Engine
+	memorySource          MemorySource
+	memoryMeasured        bool
+	batchMemory           *atomic.Uint64
+	environmentCache      *EnvironmentCache
+	environmentSourceRoot string
+	device, platform      string
 }
 
 func startModels(w Worker, dir string) (*modelRuntime, error) {
@@ -284,6 +396,9 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 			log.Printf("restore model copy speed: %v", e)
 		}
 	}
+	rt.device, rt.platform = w.Machine.Device, w.Machine.GPU
+	rt.environmentCache = w.environmentCache
+	rt.environmentSourceRoot = w.EnvironmentSourceRoot
 	rt.memorySource = w.MemorySource
 	rt.memoryMeasured = w.MemoryMeasured
 	rt.batchMemory = w.batchMemory
@@ -362,10 +477,10 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		} else if model.Engine == "fake" {
 			engine = &FakeEngine{}
 		} else {
-			engine = &LlamaEngine{Dir: rt.dir, Clock: rt.clock}
+			engine = NewModelEngine(model, rt.dir, rt.clock)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), rt.config.Wait)
-		m := &workerModel{model: model, engine: engine, state: "loading", cancel: cancel}
+		m := &workerModel{model: model, engine: engine, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
 		rt.models[s.Model] = m
 		rt.wg.Add(1)
 		go func() {
@@ -386,7 +501,21 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	}
 	model := m.model
 	var e error
-	if model.Engine == "llama.cpp" || model.SizeBytes > 0 {
+	if rt.device != "" {
+		model, e = WithModelDevice(model, rt.platform, rt.device)
+	}
+	if e == nil && model.Environment != "" {
+		if m.recipe == nil {
+			e = errors.New("model environment recipe unavailable")
+		} else {
+			recipe := *m.recipe
+			if recipe.BinaryRelative != "" && rt.environmentSourceRoot != "" {
+				recipe.Binary = filepath.Join(rt.environmentSourceRoot, recipe.BinaryRelative)
+			}
+			model, m.releaseEnvironment, e = PrepareModelEnvironment(ctx, model, recipe.Platform, EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{model.Environment: {recipe.Platform: recipe}}}, rt.environmentCache)
+		}
+	}
+	if e == nil && (model.Engine == "llama.cpp" || model.SizeBytes > 0) {
 		model.Path, e = rt.cache.Prepare(ctx, model)
 	}
 	if e == nil {
@@ -405,6 +534,10 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		m.state = "unload_failed"
 		m.err = errors.Join(e, fmt.Errorf("unload: %w", cleanupErr)).Error()
 	} else if e != nil {
+		if m.releaseEnvironment != nil {
+			m.releaseEnvironment()
+			m.releaseEnvironment = nil
+		}
 		m.state = "failed"
 		m.err = e.Error()
 	} else {
@@ -462,6 +595,10 @@ func (rt *modelRuntime) unload(m *workerModel) {
 			m.state = "unload_failed"
 			m.err = "unload: " + e.Error()
 		} else {
+			if m.releaseEnvironment != nil {
+				m.releaseEnvironment()
+				m.releaseEnvironment = nil
+			}
 			m.state = "unloaded"
 		}
 	}()
@@ -503,11 +640,13 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 401, "invalid worker session or token")
 		return
 	}
-	if r.Method != "POST" || !contains([]string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"}, r.URL.Path) {
+	generic := strings.HasPrefix(r.URL.Path, "/models/")
+	endpoint := r.URL.RequestURI()
+	if !generic && (r.Method != "POST" || !contains([]string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"}, r.URL.Path)) {
 		modelError(w, 404, "unknown model endpoint")
 		return
 	}
-	data, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	data, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))
 	if e != nil {
 		modelError(w, 400, e.Error())
 		return
@@ -515,7 +654,22 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Model string `json:"model"`
 	}
-	if json.Unmarshal(data, &req) != nil {
+	if generic {
+		parts := strings.SplitN(strings.TrimPrefix(r.URL.EscapedPath(), "/models/"), "/", 2)
+		if len(parts) != 2 {
+			modelError(w, 400, "expected model and path")
+			return
+		}
+		req.Model, e = url.PathUnescape(parts[0])
+		if e != nil {
+			modelError(w, 400, e.Error())
+			return
+		}
+		endpoint = "/" + parts[1]
+		if r.URL.RawQuery != "" {
+			endpoint += "?" + r.URL.RawQuery
+		}
+	} else if json.Unmarshal(data, &req) != nil {
 		modelError(w, 400, "invalid JSON")
 		return
 	}
@@ -541,13 +695,18 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 			rt.unload(m)
 		}
 	}()
-	res, e := m.engine.Call(r.Context(), r.URL.Path, data)
+	var res *http.Response
+	if engine, ok := m.engine.(CallRequestEngine); ok {
+		res, e = engine.CallRequest(r.Context(), r.Method, endpoint, data, proxyHeaders(r.Header))
+	} else {
+		res, e = m.engine.Call(r.Context(), endpoint, data)
+	}
 	if e != nil {
 		modelError(w, 503, e.Error())
 		return
 	}
 	defer res.Body.Close()
-	w.Header().Set("Content-Type", res.Header.Get("Content-Type"))
+	copyProxyHeaders(w.Header(), res.Header)
 	w.WriteHeader(res.StatusCode)
 	buf := make([]byte, 16384)
 	for {

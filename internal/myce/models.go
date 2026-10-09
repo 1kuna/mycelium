@@ -12,13 +12,37 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
 	"time"
 )
 
+type ModelFile struct {
+	Path      string `yaml:"path" json:"path"`
+	SizeBytes int64  `yaml:"size_bytes" json:"size_bytes"`
+	SHA256    string `yaml:"sha256" json:"sha256"`
+}
+type VLLMPreset struct {
+	ServedName           string  `yaml:"served_name" json:"served_name"`
+	MaxContext           int     `yaml:"max_context" json:"max_context"`
+	KVCacheDType         string  `yaml:"kv_cache_dtype" json:"kv_cache_dtype"`
+	GPUMemoryUtilization float64 `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
+}
 type Model struct {
+	Files           []ModelFile       `yaml:"files,omitempty" json:"files,omitempty"`
+	Environment     string            `yaml:"environment,omitempty" json:"environment,omitempty"`
+	StartCommand    []string          `yaml:"start_command,omitempty" json:"start_command,omitempty"`
+	HealthURL       string            `yaml:"health_url,omitempty" json:"health_url,omitempty"`
+	ReadyTimeout    time.Duration     `yaml:"ready_timeout,omitempty" json:"ready_timeout,omitempty"`
+	StopCommand     []string          `yaml:"stop_command,omitempty" json:"stop_command,omitempty"`
+	StopTimeout     time.Duration     `yaml:"stop_timeout,omitempty" json:"stop_timeout,omitempty"`
+	Device          string            `yaml:"device,omitempty" json:"device,omitempty"`
+	DeviceEnv       map[string]string `yaml:"device_env,omitempty" json:"device_env,omitempty"`
+	VLLM            *VLLMPreset       `yaml:"vllm,omitempty" json:"vllm,omitempty"`
+	EnvironmentPath string            `yaml:"-" json:"-"`
+
 	SizeBytes int64    `yaml:"size_bytes,omitempty" json:"size_bytes,omitempty"`
 	SHA256    string   `yaml:"sha256,omitempty" json:"sha256,omitempty"`
 	DirectNAS bool     `yaml:"direct_nas,omitempty" json:"direct_nas,omitempty"`
@@ -74,16 +98,30 @@ func validateModels(c ModelConfig) error {
 			}
 		}
 		seen[m.Name] = true
-		if m.Engine != "llama.cpp" && m.Engine != "fake" {
+		if m.Engine != "llama.cpp" && m.Engine != "fake" && m.Engine != "server" && m.Engine != "vllm" {
 			return fmt.Errorf("unsupported engine %q", m.Engine)
 		}
-		for _, arg := range m.Args {
-			if strings.HasPrefix(arg, "--hf-") || strings.HasPrefix(arg, "--model-url") || strings.HasPrefix(arg, "--mmproj-url") {
-				return errors.New("remote model args are forbidden; use myce model fetch")
+		if err := validateServer(m); err != nil {
+			return err
+		}
+		if len(m.Files) > 0 {
+			size, hash, err := ModelFilesIdentity(m.Files)
+			if err != nil {
+				return err
 			}
-			for _, reserved := range []string{"--host", "--port", "--model", "--alias", "-m", "--model-url", "-mu", "--hf-repo", "-hf", "--hf-file", "-hff", "--hf-token", "-hft", "--mmproj-url"} {
-				if arg == reserved || strings.HasPrefix(arg, reserved+"=") {
-					return fmt.Errorf("model args must not override %s", reserved)
+			if size != m.SizeBytes || hash != m.SHA256 {
+				return fmt.Errorf("model %s bundle size/hash does not match manifest", m.Name)
+			}
+		}
+		if m.Engine == "llama.cpp" || m.Engine == "fake" {
+			for _, arg := range m.Args {
+				if strings.HasPrefix(arg, "--hf-") || strings.HasPrefix(arg, "--model-url") || strings.HasPrefix(arg, "--mmproj-url") {
+					return errors.New("remote model args are forbidden; use myce model fetch")
+				}
+				for _, reserved := range []string{"--host", "--port", "--model", "--alias", "-m", "--model-url", "-mu", "--hf-repo", "-hf", "--hf-file", "-hff", "--hf-token", "-hft", "--mmproj-url"} {
+					if arg == reserved || strings.HasPrefix(arg, reserved+"=") {
+						return fmt.Errorf("model args must not override %s", reserved)
+					}
 				}
 			}
 		}
@@ -97,15 +135,16 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
-	Model       string    `json:"model"`
-	Machine     string    `json:"machine"`
-	Session     string    `json:"session"`
-	State       string    `json:"state"`
-	Priority    string    `json:"priority"`
-	LastUsed    time.Time `json:"last_used"`
-	InFlight    int       `json:"calls_in_flight"`
-	Error       string    `json:"error,omitempty"`
-	IdleSeconds float64   `json:"idle_seconds"`
+	EnvironmentRecipe *EnvironmentRecipe `json:"environment_recipe,omitempty"`
+	Model             string             `json:"model"`
+	Machine           string             `json:"machine"`
+	Session           string             `json:"session"`
+	State             string             `json:"state"`
+	Priority          string             `json:"priority"`
+	LastUsed          time.Time          `json:"last_used"`
+	InFlight          int                `json:"calls_in_flight"`
+	Error             string             `json:"error,omitempty"`
+	IdleSeconds       float64            `json:"idle_seconds"`
 }
 type ModelReport struct {
 	Name  string `json:"name"`
@@ -136,6 +175,19 @@ func (q *Queue) ConfigureModels(c ModelConfig) error {
 			}
 			if !found {
 				return fmt.Errorf("catalog removes pinned model %s; unpin first", p.Model)
+			}
+		}
+	}
+	for _, m := range c.Models {
+		if m.Environment != "" {
+			recipes, ok := q.environments.Environments[m.Environment]
+			if !ok {
+				return fmt.Errorf("model %s: unknown environment %s", m.Name, m.Environment)
+			}
+			for _, p := range m.Platforms {
+				if _, ok := recipes[p]; !ok {
+					return fmt.Errorf("model %s: environment lacks %s recipe", m.Name, p)
+				}
 			}
 		}
 	}
@@ -291,7 +343,7 @@ func (q *Queue) maintainModels() {
 			return machines[i].ID < machines[j].ID
 		})
 		for _, m := range machines {
-			if m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !contains(model.Platforms, m.GPU) || q.unreported[m.ID] {
+			if m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] {
 				continue
 			}
 			s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
@@ -313,7 +365,7 @@ func (q *Queue) maintainModels() {
 		eligible := []*Machine{}
 		loading := false
 		for _, m := range machines {
-			if m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !contains(model.Platforms, m.GPU) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
+			if m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
 				continue
 			}
 			if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
@@ -440,7 +492,7 @@ func callJob(c *ModelCall) *Job {
 // behind requests that cannot reclaim higher-priority work.
 func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 	model, ok := q.model(c.Model)
-	if !ok || c.Machine != "" || c.Error != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !contains(model.Platforms, m.GPU) || q.unreported[m.ID] {
+	if !ok || c.Machine != "" || c.Error != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] {
 		return false
 	}
 	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "ready" {
@@ -508,7 +560,13 @@ func (q *Queue) modelPlan(machine string) []ModelSlot {
 	out := []ModelSlot{}
 	for _, s := range q.s.ModelSlots {
 		if s.Machine == machine {
-			out = append(out, *s)
+			slot := *s
+			model, _ := q.model(s.Model)
+			if model.Environment != "" {
+				recipe := q.environments.Environments[model.Environment][q.s.Machines[machine].GPU]
+				slot.EnvironmentRecipe = &recipe
+			}
+			out = append(out, slot)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
@@ -565,7 +623,7 @@ func modelError(w http.ResponseWriter, status int, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": message, "type": "mycelium_error"}})
 }
 func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
-	data, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	data, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))
 	if e != nil {
 		modelError(w, 400, e.Error())
 		return
@@ -574,7 +632,25 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		Model  string `json:"model"`
 		Stream bool   `json:"stream"`
 	}
-	if e = json.Unmarshal(data, &body); e != nil {
+	generic := strings.HasPrefix(r.URL.Path, "/models/")
+	endpoint := r.URL.RequestURI()
+	if generic {
+		parts := strings.SplitN(strings.TrimPrefix(r.URL.EscapedPath(), "/models/"), "/", 2)
+		if len(parts) != 2 || parts[0] == "" {
+			modelError(w, 400, "expected /models/NAME/PATH")
+			return
+		}
+		body.Model, e = url.PathUnescape(parts[0])
+		if e != nil {
+			modelError(w, 400, e.Error())
+			return
+		}
+		body.Stream = true
+		endpoint = "/" + parts[1]
+		if r.URL.RawQuery != "" {
+			endpoint += "?" + r.URL.RawQuery
+		}
+	} else if e = json.Unmarshal(data, &body); e != nil {
 		modelError(w, 400, "invalid OpenAI JSON request")
 		return
 	}
@@ -591,7 +667,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		}
 		c.Deadline = &d
 	}
-	if body.Stream && r.URL.Path != "/v1/chat/completions" {
+	if !generic && body.Stream && r.URL.Path != "/v1/chat/completions" {
 		modelError(w, 400, "streaming is supported for chat only")
 		return
 	}
@@ -666,22 +742,23 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}()
-			req, e := http.NewRequestWithContext(proxyCtx, "POST", target+r.URL.Path, bytes.NewReader(data))
+			req, e := http.NewRequestWithContext(proxyCtx, r.Method, target+"/models/"+url.PathEscape(body.Model)+endpoint, bytes.NewReader(data))
 			if e != nil {
 				cancel()
 				<-done
 				modelError(w, 503, e.Error())
 				return
 			}
+			req.Header = proxyHeaders(r.Header)
 			req.Header.Set("Authorization", "Bearer "+a.Token)
 			req.Header.Set("X-Myce-Session", call.Session)
-			req.Header.Set("Content-Type", "application/json")
-			res, e := http.DefaultClient.Do(req)
-			if e == nil && res.StatusCode < 500 {
+
+			res, e := modelHTTPClient.Do(req)
+			if e == nil && (generic || res.StatusCode < 500) {
 				if !body.Stream {
 					response, readErr := io.ReadAll(res.Body)
 					if readErr == nil {
-						w.Header().Set("Content-Type", res.Header.Get("Content-Type"))
+						copyProxyHeaders(w.Header(), res.Header)
 						w.WriteHeader(res.StatusCode)
 						_, _ = w.Write(response)
 						res.Body.Close()
@@ -697,7 +774,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 						n, readErr := res.Body.Read(buf)
 						if n > 0 {
 							if !started {
-								w.Header().Set("Content-Type", res.Header.Get("Content-Type"))
+								copyProxyHeaders(w.Header(), res.Header)
 								w.WriteHeader(res.StatusCode)
 								started = true
 							}
@@ -712,15 +789,21 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 						if readErr != nil {
-							if readErr != io.EOF && started {
+							if readErr != io.EOF && started && !generic {
 								_, _ = fmt.Fprint(w, "\ndata: {\"error\":{\"message\":\"worker lost after streaming response started; unsafe to retry\"}}\n\n")
 								if f, ok := w.(http.Flusher); ok {
 									f.Flush()
 								}
 							}
+							if generic && started && readErr != io.EOF {
+								res.Body.Close()
+								cancel()
+								<-done
+								panic(http.ErrAbortHandler)
+							}
 							if started || readErr == io.EOF {
 								if !started {
-									w.Header().Set("Content-Type", res.Header.Get("Content-Type"))
+									copyProxyHeaders(w.Header(), res.Header)
 									w.WriteHeader(res.StatusCode)
 								}
 								res.Body.Close()
