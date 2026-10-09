@@ -16,7 +16,7 @@ when shell expansion is needed.
 | `name` | Required, nonempty | Human-readable job name; not a deduplication key |
 | `project` | Required, nonempty | Project label |
 | `priority` | Required | `production`, `deadline`, or `experiment`, in that order |
-| `deadline` | Required for `deadline`; otherwise absent | RFC3339 time; ordering hint, not an execution timeout |
+| `deadline` | Required for `deadline`; optional otherwise | RFC3339 time; ordering hint, not an execution timeout |
 | `run.command` | Required, nonempty argv | Executable and arguments; resolved from its environment, then worker PATH |
 | `run.workdir` | Absent: worker's working directory | Existing working directory; use an absolute shared or consistently installed path |
 | `run.env` | Empty map | String environment overrides, merged with worker environment |
@@ -45,12 +45,13 @@ worker user's permissions, not a sandbox.
 Jobs that fit memory, platform, environment and allow-list are ordered by
 priority, combined environment/model readiness, earliest deadline, then waiting age.
 Within a priority tier, both ready beat either ready, which beats cold setup.
-At equal combined readiness a loaded model beats a cached one. Placement
+At equal combined readiness a loaded model beats a cached one. Competing
+experiment projects first share by weighted recent usage. Placement
 includes estimated environment build and model-copy time.
 Production/deadline may stop lower-priority work when no idle worker
 fits. SIGTERM is sent to the process group, with a two-minute checkpoint grace
-before SIGKILL for deadlines. Production gives resumable work 10 seconds by
-default and stops non-resumable work immediately, requeueing it to start over
+before SIGKILL for deadlines, which only preempt resumable work. Production
+gives resumable work 10 seconds by default and stops non-resumable work immediately, requeueing it to start over
 without increasing its infrastructure-loss retry count. Production grace is
 configurable with `--production-stop-grace`. Make experiments resumable and
 save checkpoints frequently.
@@ -87,6 +88,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --deadline-loss-timeout` | `20s` | Deadline loss detection |
 | `queue --experiment-loss-timeout` | `60s` | Experiment loss detection |
 | `join --name` | Hostname | Unique stable worker name |
+| `join --device` | Empty | One physical card per worker; CUDA resolves to a stable UUID for inventory/execution; select explicitly on multi-GPU hosts |
 | `join --gpu` | Required | `cuda`, `xpu`, `metal`, or `fake` |
 | `join --memory-gb` | `0` | Positive budget required for fixed/XPU; fake permits zero; live CUDA/Metal optional positive cap before reserve |
 | `join --memory-mode` | `auto` | `auto`: CUDA marker detection, Metal unified; `unified`: OS probe; `dedicated`: numeric CUDA; `fixed`: explicit positive budget without probes |
@@ -131,14 +133,15 @@ deadline priority, `X-Myce-Deadline` in RFC3339. Body limit is 64 MiB; `model`
 must name a catalog entry. Remaining OpenAI JSON is passed unchanged.
 
 Catalog fields: `idle_timeout` defaults to `10m`; `max_wait` to `5m`; `models`
-defaults to empty. Each entry requires unique `name`, `engine` (`llama.cpp` or
-explicit test-only `fake`), NAS master `path`, positive `memory_gb`, and nonempty
+defaults to empty. Each entry requires unique `name`, `engine` (`llama.cpp`,
+`server`, `vllm`, or explicit test-only `fake`), NAS master `path`, positive `memory_gb`, and nonempty
 `platforms`. Real models also require positive `size_bytes` and a 64-digit
 hex `sha256`. `direct_nas` defaults false; enable only for small models.
-Optional `args` defaults empty. Adapter-owned host/port/model/alias
+Optional `args` defaults empty. For llama.cpp, adapter-owned host/port/model/alias
 flags cannot be overridden; default GPU layers is 99. Embedding models need
-appropriate engine embedding args. Catalog hashes must match between queue and
-workers. Model reservations include loading and draining until unload succeeds.
+appropriate engine embedding args. Server/vLLM fields and multi-file manifests
+are described in [general servers](guide-servers.md). Catalog hashes must match
+between queue and workers. Model reservations include loading and draining until unload succeeds.
 See [model guide](guide-model-calls.md) for transport retries, stream failures,
 engine setup, and the required model-card/inference-contract verification.
 
@@ -205,11 +208,14 @@ Linux systemd user service or macOS launchd agent. `myce install queue --nas DIR
 --listen ADDRESS [--dry-run]` creates the queue service. No dry run writes files
 or invokes service managers. Use `--environment-config FILE` and `--model-config
 FILE` for shared catalogs. `--root DIR` changes the local installation root.
+Installer defaults are `~/.local/share/mycelium/ROLE` (binary/config/state) and
+macOS `local.mycelium.ROLE` labels; these differ from the manual deploy templates.
 GPU/memory overrides are explicit (`--gpu`, `--memory-mode`, `--memory-gb`,
 `--reserve-memory-gb`); no unknown GPU or memory is silently accepted.
 
 `myce doctor [--config FILE]` checks GPU visibility, a writable NFS/SMB NAS mount,
-authenticated queue access, uv, and at least 1 GiB local free disk space.
+authenticated queue access, uv, Linux user lingering, and at least 1 GiB local
+free disk space. Linux doctor fails if lingering is disabled.
 `myce uninstall [--config FILE] [--dry-run]` stops/disables the boot service and
 moves its files, credentials and local state to recoverable Trash. It leaves NAS
 data intact. See [operations](operations.md) for boot/login requirements.

@@ -121,7 +121,7 @@ files, symlinks, path traversal and colliding names fail. Bundle roots must use
 canonical paths without symlink components (macOS use `/private/var`, not `/var`).
 `direct_nas` verifies the complete listed bundle before bypassing the local cache.
 
-The NAS is still the master; no runtime download or quantization conversion is
-part of load. `model sync`, pins and cache telemetry work for bundles. Preserve
+The NAS is still the master; no model-weight download or quantization conversion
+is part of load. Declared software environments may build on demand. `model sync`, pins and cache telemetry work for bundles. Preserve
 model directories/configuration with recorded immutable identities; laptop
 process tests do not certify real speech, OCR, vLLM or face model quality.
