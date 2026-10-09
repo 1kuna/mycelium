@@ -1,0 +1,84 @@
+package myce
+
+import (
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+)
+
+func fits(j *Job, m *Machine, memory float64) bool {
+	return !m.Gone && !m.Leaving && memory >= j.Spec.Needs.MemoryGB && (len(j.Spec.AllowedMachines) == 0 || slices.Contains(j.Spec.AllowedMachines, m.ID)) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && (j.Spec.Environment.Key() == "" || slices.Contains(m.Environments, j.Spec.Environment.Key()))
+}
+func affinity(j *Job, m *Machine) int {
+	n := 0
+	if j.Spec.Needs.Model != "" && slices.Contains(m.Models, j.Spec.Needs.Model) {
+		n++
+	}
+	if j.Spec.Environment.Key() != "" && slices.Contains(m.Environments, j.Spec.Environment.Key()) {
+		n++
+	}
+	return n
+}
+func before(a, b *Job, m *Machine) bool {
+	if rank(a.Spec.Priority) != rank(b.Spec.Priority) {
+		return rank(a.Spec.Priority) < rank(b.Spec.Priority)
+	}
+	if affinity(a, m) != affinity(b, m) {
+		return affinity(a, m) > affinity(b, m)
+	}
+	if a.Spec.Deadline != nil && b.Spec.Deadline == nil {
+		return true
+	}
+	if a.Spec.Deadline == nil && b.Spec.Deadline != nil {
+		return false
+	}
+	if a.Spec.Deadline != nil && !a.Spec.Deadline.Equal(*b.Spec.Deadline) {
+		return a.Spec.Deadline.Before(*b.Spec.Deadline)
+	}
+	if a.Front != b.Front {
+		return a.Front > b.Front
+	}
+	if !a.Queued.Equal(b.Queued) {
+		return a.Queued.Before(b.Queued)
+	}
+	return a.ID < b.ID
+}
+func pick(jobs map[string]*Job, m *Machine) *Job {
+	var best *Job
+	for _, j := range jobs {
+		if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && (best == nil || before(j, best, m)) {
+			best = j
+		}
+	}
+	return best
+}
+func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) string {
+	for _, m := range machines {
+		memory := m.FreeMemoryGB
+		for _, r := range jobs {
+			if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") {
+				memory += r.Spec.Needs.MemoryGB
+			}
+		}
+		if fits(j, m, memory) {
+			if memory == m.FreeMemoryGB {
+				return "waiting for a worker to pull this job"
+			}
+			return "waiting for a busy machine to make room"
+		}
+	}
+	needs := []string{}
+	if len(j.Spec.Needs.Platform.Required) > 0 {
+		needs = append(needs, "needs "+strings.Join(j.Spec.Needs.Platform.Required, " or "))
+	}
+	if len(j.Spec.AllowedMachines) > 0 {
+		needs = append(needs, "allowed machines: "+strings.Join(j.Spec.AllowedMachines, ", "))
+	}
+	if j.Spec.Environment.Key() != "" {
+		needs = append(needs, "environment not ready: "+j.Spec.Environment.Key())
+	}
+	needs = append(needs, fmt.Sprintf("%.1f GB free GPU memory", j.Spec.Needs.MemoryGB))
+	return "no machine in the fleet can run this right now (" + strings.Join(needs, "; ") + ")"
+}
+func expired(t *time.Time, now time.Time) bool { return t != nil && !now.Before(*t) }

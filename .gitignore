@@ -18,3 +18,9 @@ PRIVATE_OPS.md
 *.local.md
 ops/private/
 .reports/
+
+# v2 local queue and quick-start files
+/myce.db*
+/checkpoints/
+/job.yaml
+/resume.py
