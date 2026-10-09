@@ -1,0 +1,199 @@
+package myce
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"slices"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Clock keeps queue decisions deterministic. Only RealClock reads wall time.
+type Clock interface{ Now() time.Time }
+type RealClock struct{}
+
+func (RealClock) Now() time.Time { return time.Now() }
+
+// Platform accepts the design's shorthand [cuda], or {required: [cuda]},
+// {preferred: [metal]}, or {any: true}.
+type Platform struct {
+	Required  []string `json:"required,omitempty" yaml:"required,omitempty"`
+	Preferred []string `json:"preferred,omitempty" yaml:"preferred,omitempty"`
+	Any       bool     `json:"any,omitempty" yaml:"any,omitempty"`
+}
+
+func (p *Platform) UnmarshalYAML(n *yaml.Node) error {
+	*p = Platform{}
+	if n.Kind == yaml.SequenceNode {
+		return n.Decode(&p.Required)
+	}
+	if n.Kind == yaml.ScalarNode && n.Value == "any" {
+		p.Any = true
+		return nil
+	}
+	type plain Platform
+	if n.Kind != yaml.MappingNode {
+		return errors.New("platform must be a list, any, or a required/preferred/any mapping")
+	}
+	for i := 0; i < len(n.Content); i += 2 {
+		if !slices.Contains([]string{"required", "preferred", "any"}, n.Content[i].Value) {
+			return fmt.Errorf("unknown platform field %q", n.Content[i].Value)
+		}
+	}
+	return n.Decode((*plain)(p))
+}
+
+type Environment struct {
+	Name     string `json:"name,omitempty" yaml:"name,omitempty"`
+	LockFile string `json:"lock_file,omitempty" yaml:"lock_file,omitempty"`
+}
+
+func (e *Environment) UnmarshalYAML(n *yaml.Node) error {
+	*e = Environment{}
+	if n.Kind == yaml.ScalarNode {
+		return n.Decode(&e.Name)
+	}
+	type plain Environment
+	for i := 0; i < len(n.Content); i += 2 {
+		if !slices.Contains([]string{"name", "lock_file"}, n.Content[i].Value) {
+			return fmt.Errorf("unknown environment field %q", n.Content[i].Value)
+		}
+	}
+	return n.Decode((*plain)(e))
+}
+func (e Environment) Key() string {
+	if e.Name != "" {
+		return e.Name
+	}
+	return e.LockFile
+}
+
+type Spec struct {
+	Name     string     `json:"name" yaml:"name"`
+	Project  string     `json:"project" yaml:"project"`
+	Priority string     `json:"priority" yaml:"priority"`
+	Deadline *time.Time `json:"deadline,omitempty" yaml:"deadline,omitempty"`
+	Run      struct {
+		Command []string          `json:"command" yaml:"command"`
+		Workdir string            `json:"workdir,omitempty" yaml:"workdir,omitempty"`
+		Env     map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	} `json:"run" yaml:"run"`
+	Needs struct {
+		MemoryGB float64  `json:"memory_gb" yaml:"memory_gb"`
+		Platform Platform `json:"platform" yaml:"platform"`
+		Model    string   `json:"model,omitempty" yaml:"model,omitempty"`
+	} `json:"needs" yaml:"needs"`
+	Environment     Environment `json:"environment,omitempty" yaml:"environment,omitempty"`
+	AllowedMachines []string    `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
+	GiveUpAt        *time.Time  `json:"give_up_at,omitempty" yaml:"give_up_at,omitempty"`
+	ExpectedMinutes float64     `json:"expected_minutes,omitempty" yaml:"expected_minutes,omitempty"`
+	Resumable       bool        `json:"resumable" yaml:"resumable"`
+}
+
+func (s Spec) Validate() error {
+	if s.Name == "" || s.Project == "" || len(s.Run.Command) == 0 || s.Run.Command[0] == "" {
+		return errors.New("name, project and run.command are required")
+	}
+	if rank(s.Priority) == 3 {
+		return errors.New("priority must be production, deadline or experiment")
+	}
+	if s.Priority == "deadline" && s.Deadline == nil {
+		return errors.New("deadline priority requires a deadline")
+	}
+	if s.Needs.MemoryGB <= 0 || math.IsInf(s.Needs.MemoryGB, 0) || math.IsNaN(s.Needs.MemoryGB) {
+		return errors.New("needs.memory_gb must be positive: CPU-only work stays outside Mycelium")
+	}
+	p := s.Needs.Platform
+	modes := 0
+	if len(p.Required) > 0 {
+		modes++
+	}
+	if len(p.Preferred) > 0 {
+		modes++
+	}
+	if p.Any {
+		modes++
+	}
+	if modes != 1 {
+		return errors.New("needs.platform must specify exactly one of required, preferred or any")
+	}
+	for _, v := range append(slices.Clone(p.Required), p.Preferred...) {
+		if !slices.Contains([]string{"cuda", "xpu", "metal", "fake"}, v) {
+			return fmt.Errorf("unknown GPU platform %q", v)
+		}
+	}
+	if s.Environment.Name != "" && s.Environment.LockFile != "" {
+		return errors.New("environment must name an environment or a lock_file, not both")
+	}
+	return nil
+}
+func rank(p string) int {
+	switch p {
+	case "production":
+		return 0
+	case "deadline":
+		return 1
+	case "experiment":
+		return 2
+	}
+	return 3
+}
+
+type Job struct {
+	ID         string     `json:"id"`
+	Spec       Spec       `json:"spec"`
+	State      string     `json:"state"`
+	Attempt    int        `json:"attempt"`
+	Machine    string     `json:"machine,omitempty"`
+	Session    string     `json:"session,omitempty"`
+	Queued     time.Time  `json:"queued"`
+	Front      int64      `json:"front"`
+	StopAt     *time.Time `json:"stop_at,omitempty"`
+	Reason     string     `json:"reason,omitempty"`
+	Checkpoint string     `json:"checkpoint"`
+}
+type Machine struct {
+	ID           string    `json:"id"`
+	Session      string    `json:"session"`
+	GPU          string    `json:"gpu"`
+	FreeMemoryGB float64   `json:"free_memory_gb"`
+	Models       []string  `json:"models,omitempty"`
+	Environments []string  `json:"environments,omitempty"`
+	LastSeen     time.Time `json:"last_seen"`
+	Leaving      bool      `json:"leaving"`
+	Gone         bool      `json:"gone"`
+}
+type Execution struct {
+	ID      string `json:"id"`
+	Attempt int    `json:"attempt"`
+}
+type Checkin struct {
+	Machine Machine    `json:"machine"`
+	Running *Execution `json:"running,omitempty"`
+}
+type Reply struct {
+	Job          *Job    `json:"job,omitempty"`
+	Stop         bool    `json:"stop"`
+	Kill         bool    `json:"kill"`
+	Leave        bool    `json:"leave"`
+	GraceSeconds float64 `json:"grace_seconds"`
+}
+type Result struct {
+	Machine string `json:"machine"`
+	Session string `json:"session"`
+	Execution
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+type LogChunk struct {
+	Result
+	Text string `json:"text"`
+}
+type Snapshot struct {
+	Jobs     []*Job     `json:"jobs"`
+	Machines []*Machine `json:"machines"`
+}
+
+func terminal(s string) bool { return s == "succeeded" || s == "failed" || s == "cancelled" }

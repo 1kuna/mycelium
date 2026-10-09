@@ -1,0 +1,254 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"gopkg.in/yaml.v3"
+	"mycelium/internal/myce"
+)
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		log.Print(err)
+		os.Exit(1)
+	}
+}
+func env(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
+func run(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: myce queue|join|leave|submit|status|logs|cancel|dev")
+	}
+	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	url := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
+	token := f.String("token", env("MYCE_TOKEN", ""), "shared fleet token (prefer MYCE_TOKEN)")
+	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
+	db := f.String("db", "myce.db", "SQLite database file")
+	checkpoint := f.String("checkpoints", "./checkpoints", "shared checkpoint root; use the same NAS mount path on all fleet machines")
+	hostname, _ := os.Hostname()
+	name := f.String("name", hostname, "unique machine name")
+	gpu := f.String("gpu", "", "GPU type: cuda, xpu, metal, or fake")
+	memory := f.Float64("memory-gb", 0, "free GPU memory budget lent to this worker")
+	environments := f.String("environments", "", "comma-separated ready environment names or lock-file paths")
+	models := f.String("models", "", "comma-separated already loaded model names")
+	workers := f.Int("workers", 2, "fake workers in dev mode")
+	now := f.Bool("now", false, "stop every job on leave")
+	follow := f.Bool("follow", false, "follow logs until the job is terminal")
+	// Accept conventional 'logs ID --follow' and 'leave --now'.
+	flags := args[1:]
+	if (args[0] == "logs" || args[0] == "submit" || args[0] == "cancel") && len(flags) > 0 && !strings.HasPrefix(flags[0], "-") {
+		flags = append(append([]string{}, flags[1:]...), flags[0])
+	}
+	if err := f.Parse(flags); err != nil {
+		return err
+	}
+	if args[0] == "dev" && *token == "" {
+		*token = "dev-token"
+	}
+	if *token == "" {
+		return errors.New("set MYCE_TOKEN to the shared fleet token (dev defaults to dev-token)")
+	}
+	client := myce.Client{URL: *url, Token: *token}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	switch args[0] {
+	case "dev":
+		if *memory == 0 {
+			*memory = 64
+		}
+		d, err := myce.StartDev(myce.DevConfig{Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Mycelium dev: %s · %d fake workers · token dev-token unless overridden\n", d.URL, *workers)
+		select {
+		case <-ctx.Done():
+			return d.Close()
+		case err := <-d.Errors():
+			return errors.Join(err, d.Close())
+		}
+	case "queue":
+		q, err := myce.Open(*db, *checkpoint, myce.RealClock{})
+		if err != nil {
+			return err
+		}
+		defer q.Close()
+		listener, err := net.Listen("tcp", *address)
+		if err != nil {
+			return err
+		}
+		server := &http.Server{Handler: myce.API{Queue: q, Token: *token}.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		errs := make(chan error, 2)
+		go func() { errs <- server.Serve(listener) }()
+		go func() { errs <- q.Run(ctx) }()
+		fmt.Printf("Mycelium queue: http://%s\n", listener.Addr())
+		select {
+		case <-ctx.Done():
+		case err = <-errs:
+		}
+		stop()
+		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return errors.Join(err, server.Shutdown(shutdown))
+	case "join":
+		w := myce.Worker{Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		fmt.Printf("Joining as %s\n", w)
+		return w.Run(ctx)
+	case "submit":
+		if f.NArg() != 1 {
+			return errors.New("usage: myce submit job.yaml")
+		}
+		file, err := os.Open(f.Arg(0))
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		d := yaml.NewDecoder(io.LimitReader(file, 1<<20))
+		d.KnownFields(true)
+		var s myce.Spec
+		if err := d.Decode(&s); err != nil {
+			return err
+		}
+		var extra any
+		if d.Decode(&extra) != io.EOF {
+			return errors.New("expected one YAML job")
+		}
+		var j myce.Job
+		if err := client.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
+			return err
+		}
+		fmt.Println(j.ID)
+		return nil
+	case "status":
+		s, err := status(ctx, client)
+		if err != nil {
+			return err
+		}
+		printStatus(s)
+		return nil
+	case "cancel":
+		if f.NArg() != 1 {
+			return errors.New("usage: myce cancel <id>")
+		}
+		return client.Call(ctx, "POST", "/api/jobs/"+f.Arg(0)+"/cancel", nil, nil)
+	case "leave":
+		s, err := status(ctx, client)
+		if err != nil {
+			return err
+		}
+		nonresumable := false
+		for _, j := range s.Jobs {
+			if j.Machine == *name && j.State == "running" && !j.Spec.Resumable {
+				nonresumable = true
+			}
+		}
+		if !*now && nonresumable { // Mark leaving before asking, so no new work is assigned.
+			if err := client.Call(ctx, "POST", "/api/workers/"+*name+"/leave", map[string]bool{"now": false}, nil); err != nil {
+				return err
+			}
+			fmt.Print("A non-resumable job is running. Wait for it to finish, or stop and restart it? [wait/stop]: ")
+			answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
+			if err != nil {
+				return fmt.Errorf("machine is leaving and waiting for its job; use --now to stop it: %w", err)
+			}
+			answer = strings.TrimSpace(answer)
+			switch answer {
+			case "stop":
+				*now = true
+			case "wait", "":
+			default:
+				return errors.New("expected wait or stop; machine remains leaving and waiting")
+			}
+		}
+		return client.Call(ctx, "POST", "/api/workers/"+*name+"/leave", map[string]bool{"now": *now}, nil)
+	case "logs":
+		if f.NArg() != 1 {
+			return errors.New("usage: myce logs <id> [--follow]")
+		}
+		return logs(ctx, client, f.Arg(0), *follow)
+	default:
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+func split(v string) []string {
+	out := []string{}
+	for _, v := range strings.Split(v, ",") {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
+	var s myce.Snapshot
+	err := c.Call(ctx, "GET", "/api/status", nil, &s)
+	return s, err
+}
+func printStatus(s myce.Snapshot) {
+	for _, m := range s.Machines {
+		state := "joined"
+		if m.Gone {
+			state = "gone"
+		} else if m.Leaving {
+			state = "leaving"
+		}
+		fmt.Printf("machine %s: %s, %.1f GB free, %s\n", m.ID, m.GPU, m.FreeMemoryGB, state)
+	}
+	for _, j := range s.Jobs {
+		fmt.Printf("%s %s [%s] %s attempt=%d machine=%s %s\n", j.ID, j.Spec.Name, j.Spec.Priority, j.State, j.Attempt, j.Machine, j.Reason)
+	}
+	if len(s.Jobs) == 0 {
+		fmt.Println("No jobs yet.")
+	}
+}
+func logs(ctx context.Context, c myce.Client, id string, follow bool) error {
+	var after int64
+	for {
+		var chunks []myce.Log
+		if err := c.Call(ctx, "GET", fmt.Sprintf("/api/jobs/%s/logs?after=%d", id, after), nil, &chunks); err != nil {
+			return err
+		}
+		for _, l := range chunks {
+			fmt.Print(l.Text)
+			after = l.Seq
+		}
+		if len(chunks) == 256 {
+			continue
+		}
+		if !follow {
+			return nil
+		}
+		s, err := status(ctx, c)
+		if err != nil {
+			return err
+		}
+		for _, j := range s.Jobs {
+			if j.ID == id && (j.State == "succeeded" || j.State == "failed" || j.State == "cancelled") { // Drain logs once more after observing completion.
+				follow = false
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+}
