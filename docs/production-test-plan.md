@@ -47,14 +47,22 @@ sandbox. No B70 worker is installed or enabled.
 Mac: first verify admission and inventory. This is a hard gate:
 
 ```sh
-ssh spark 'set -eu; command -v llama-server; nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits'
+ssh spark 'set -eu; command -v llama-server; nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits; cat /proc/meminfo'
 ```
 
-Success: installed GPU build and exactly one finite nonnegative numeric MiB
-reading, with enough measured headroom for the approved catalog. Discovery
-reported unsupported GB10 unified-memory telemetry: **if still unsupported,
-stop here**. A budget cap cannot override it. Do not advertise 128 GB or fake
-inventory. No production model call is possible until this is resolved.
+Success: installed GPU build, exactly one CUDA device, and either a finite
+nonnegative numeric MiB reading or a supported unified-memory marker (`N/A`,
+`[N/A]`, `Not Supported`, `[Not Supported]`). Spark's GB10 markers select
+`MemAvailable` (kB) from `/proc/meminfo`; verify it is present and valid and that
+headroom **after the configured cap and reserve** fits the reviewed catalog.
+Use `--reserve-memory-gb 16` as an initial Spark reserve and increase it for
+Atlas growth/pressure; do not advertise total 128 GB RAM. The
+[Spark example](../deploy/myce-spark-worker.service) uses auto detection; use
+`--memory-mode unified` to override detection. Missing sources are a hard gate:
+status must show zero usable memory and a diagnostic, and no work may start.
+An explicitly configured `--memory-mode fixed --memory-gb VALUE` is an operator
+budget exception, requiring independently enforced headroom; a cap alone never
+bypasses errors. Memory accounting does not resolve Atlas ownership/admission.
 
 After admission, install the privately rendered worker unit (Mac):
 
@@ -74,7 +82,9 @@ MYCE="$HOME/.local/bin/myce"
 ```
 
 Success: exactly one worker `spark-v2-test`, CUDA, positive usable memory, no NAS
-warning. Queue limits do not apply to worker children; do not copy the discovery
+warning or memory-source diagnostic. Observe available memory again under existing
+Atlas usage; it must reflect allocations outside Mycelium and the reserve.
+Queue limits do not apply to worker children; do not copy the discovery
 report's 256 MiB smoke-only unit into a model-serving install.
 
 ## 3. Confirm NAS writes in both directions

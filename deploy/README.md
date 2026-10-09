@@ -21,6 +21,9 @@ The Linux queue template uses `PrivateDevices=yes` to hide GPUs, one Go CPU,
 and initial limits of 25% CPU and 512 MiB RAM. Verify user-manager support and
 GPU hiding before accepting the B70 queue; stop on unsupported sandboxing.
 B70 is queue-only at `192.168.0.153:7331`; never enable a worker there.
-CUDA inventory currently requires exactly one GPU. Unsupported Spark unified
-memory readings are a blocker, even with a positive budget cap; do not use a
-fake GPU or a guessed host-RAM fallback. See [the production test plan](../docs/production-test-plan.md).
+CUDA inventory requires exactly one GPU. Spark unsupported memory fields select
+Linux `MemAvailable` automatically; missing/invalid OS telemetry blocks work.
+[myce-spark-worker.service](myce-spark-worker.service) is the Spark example with
+`--memory-mode auto --reserve-memory-gb 16`. Its zero cap uses the live reading;
+choose a positive cap if the admitted workload needs a stricter allowance.
+See [the production test plan](../docs/production-test-plan.md).

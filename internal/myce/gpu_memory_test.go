@@ -50,7 +50,7 @@ func TestMemorySourceCUDABudgetCap(t *testing.T) {
 }
 
 func TestMemorySourceCUDARejectsBadOutput(t *testing.T) {
-	for _, output := range []string{"", " \n", "N/A\n", "[Not Supported]", "1 MiB", "-1", "NaN", "Inf", "-Inf", "1e309", "1024\n\n2048", "1024\nwrong", "1024,2048", "8192\n4096"} {
+	for _, output := range []string{"", " \n", "[N/A", "N/A]", "1 MiB", "-1", "NaN", "Inf", "-Inf", "1e309", "1024\n\n2048", "1024\nwrong", "1024,2048", "8192\n4096"} {
 		t.Run(output, func(t *testing.T) {
 			source, err := newMemorySourceWithCommand("cuda", 16, 0, func(context.Context, string, ...string) ([]byte, error) {
 				return []byte(output), nil
@@ -85,7 +85,7 @@ func TestMemorySourceCUDACommandFailure(t *testing.T) {
 }
 
 func TestMemorySourceConfiguredBudget(t *testing.T) {
-	for _, platform := range []string{"fake", "xpu", "metal"} {
+	for _, platform := range []string{"fake", "xpu"} {
 		t.Run(platform, func(t *testing.T) {
 			source, err := newMemorySourceWithCommand(platform, 12.5, 2.25, func(context.Context, string, ...string) ([]byte, error) {
 				t.Fatal("configured memory must not run a command")
@@ -99,7 +99,7 @@ func TestMemorySourceConfiguredBudget(t *testing.T) {
 			}
 		})
 	}
-	for _, platform := range []string{"fake", "xpu", "metal"} {
+	for _, platform := range []string{"fake", "xpu"} {
 		source, err := NewMemorySource(platform, 2, 2)
 		if err != nil {
 			t.Fatal(err)
@@ -131,7 +131,7 @@ func TestMemorySourceInvalidConfiguration(t *testing.T) {
 			t.Fatalf("%s accepted reserve larger than budget", platform)
 		}
 	}
-	for _, platform := range []string{"xpu", "metal"} {
+	for _, platform := range []string{"xpu"} {
 		if _, err := NewMemorySource(platform, 0, 0); err == nil {
 			t.Fatalf("%s accepted missing explicit positive budget", platform)
 		}

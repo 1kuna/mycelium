@@ -80,8 +80,9 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --experiment-loss-timeout` | `60s` | Experiment loss detection |
 | `join --name` | Hostname | Unique stable worker name |
 | `join --gpu` | Required | `cuda`, `xpu`, `metal`, or `fake` |
-| `join --memory-gb` | `0` | Positive configured budget required for XPU/Metal; fake permits zero to simulate no room; CUDA optional positive cap on live free memory before reserve |
-| `join --reserve-memory-gb` | `0` | Memory withheld from live CUDA free inventory or configured XPU/Metal/fake budget |
+| `join --memory-gb` | `0` | Positive budget required for fixed/XPU; fake permits zero; live CUDA/Metal optional positive cap before reserve |
+| `join --memory-mode` | `auto` | `auto`: CUDA marker detection, Metal unified; `unified`: OS probe; `dedicated`: numeric CUDA; `fixed`: explicit positive budget without probes |
+| `join --reserve-memory-gb` | `0` | GiB withheld from live dedicated/unified memory or fixed budget; suggested Spark reserve: 16 |
 | `join --heartbeat` | `1s` | Worker check-in interval |
 | `join --checkpoint-root` | `MYCE_CHECKPOINT_ROOT`, otherwise queue-provided root | Local mount of the same shared NAS root; may differ from queue path |
 | `join --state-dir` | Per-queue/per-machine user cache directory | Durable local spool; explicitly set for services |

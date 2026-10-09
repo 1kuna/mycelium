@@ -247,7 +247,7 @@ func (q *Queue) maintainModels() {
 		}
 		sort.Slice(machines, func(i, j int) bool { return machines[i].ID < machines[j].ID })
 		for _, m := range machines {
-			if m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !contains(model.Platforms, m.GPU) || q.unreported[m.ID] {
+			if m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !contains(model.Platforms, m.GPU) || q.unreported[m.ID] {
 				continue
 			}
 			s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
@@ -269,7 +269,7 @@ func (q *Queue) maintainModels() {
 		eligible := []*Machine{}
 		loading := false
 		for _, m := range machines {
-			if m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !contains(model.Platforms, m.GPU) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
+			if m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !contains(model.Platforms, m.GPU) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
 				continue
 			}
 			if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
@@ -396,7 +396,7 @@ func callJob(c *ModelCall) *Job {
 // behind requests that cannot reclaim higher-priority work.
 func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 	model, ok := q.model(c.Model)
-	if !ok || c.Machine != "" || c.Error != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !contains(model.Platforms, m.GPU) || q.unreported[m.ID] {
+	if !ok || c.Machine != "" || c.Error != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !contains(model.Platforms, m.GPU) || q.unreported[m.ID] {
 		return false
 	}
 	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "ready" {

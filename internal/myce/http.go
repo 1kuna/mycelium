@@ -45,7 +45,7 @@ td:before{content:attr(data-label);font-weight:600}.reason{max-width:none}}
 </table></div><h2>Fleet</h2><div class="tables"><table>
 <tr><th>Machine</th><th>GPU</th><th>Free GB</th><th>State</th><th>Ready environments</th></tr>
 {{range .Machines}}<tr><td data-label="Machine">{{.ID}}</td><td data-label="GPU">{{.GPU}}</td>
-<td data-label="Free GB">{{.FreeMemoryGB}}</td>
+<td data-label="Free GB">{{.FreeMemoryGB}}{{if .MemoryError}}; memory unavailable: {{.MemoryError}}{{end}}</td>
 <td data-label="State">{{if .Gone}}gone{{else if .Leaving}}leaving{{else}}joined{{end}}</td>
 <td data-label="Ready envs">{{range .Environments}}{{.}} {{end}}</td></tr>
 {{else}}<tr><td colspan="5">No machines joined.</td></tr>{{end}}
