@@ -407,3 +407,39 @@ sed -e 's/REPLACE_QUEUE_IP/192.168.0.153/g' \
 ```
 
 Return to the production test checklist; this preparation starts no service.
+
+## Model master folder, worker cache, and production reservations
+
+Create a NAS `models` folder and mount it on each eligible worker. Keep the
+catalog paths relative to that folder, with trusted `size_bytes` and `sha256`
+for every real model. Download only by an explicit `myce model fetch` command;
+see [model setup](guide-model-calls.md). No download or install occurs at load.
+Run workers with `--model-root` set to their mount, `--model-cache` on local disk,
+and an explicit `--model-cache-bytes` allowance. Ensure the worker can write the
+NAS folder's `.Trash/myce-model-cache` for recoverable evictions; cross-filesystem
+moves keep a verified recovery copy before releasing local blocks. This can
+consume NAS space, so manage recovery retention manually; never automatically
+empty Trash. Without `--model-root`, evictions use user Trash and may not release
+physical disk blocks. Disk checks fail closed if space is still insufficient.
+
+Status shows cached models, free cache bytes, and copy/disk errors. Cache
+inventory does not block heartbeats while a large copy is in progress. Corrupt or
+partial copies are never published. Restart clears `.partial` copies into Trash.
+Loading, ready, and draining models cannot be evicted from the local cache.
+`direct_nas: true` is reserved for an operator-approved small model.
+
+Pin with `myce model pin MODEL --project atlas --machine spark` or `--platform
+cuda`; inspect status for assigned worker and ready state. Pins persist across
+queue restarts and protect GPU memory even against production batch work. Optional
+weekday/time-zone windows activate reservations. Unpin with `myce model unpin
+MODEL --project atlas`. A worker leaving still drains its models; availability
+cannot survive loss of the only eligible worker.
+
+Production is considered first at check-in and on submission; a long-poll control
+connection delivers stop requests immediately. Keep check-ins enabled for
+inventory and loss detection; notifications do not replace heartbeats. Resumable
+victims get `--production-stop-grace` (10s default); non-resumable victims stop
+immediately and restart later without a loss retry. Deadline victims still get
+2m and must be resumable. Strongly prefer resumable experiments with frequent
+atomic checkpoints. Status reports production start acknowledgement latency, using queue time to avoid clock skew;
+for batch commands without model loads it measures queue clearance directly.

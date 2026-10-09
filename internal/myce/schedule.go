@@ -13,6 +13,9 @@ func fits(j *Job, m *Machine, memory float64) bool {
 func affinity(j *Job, m *Machine) int {
 	n := 0
 	if j.Spec.Needs.Model != "" && slices.Contains(m.Models, j.Spec.Needs.Model) {
+		n += 2
+	}
+	if j.Spec.Needs.Model != "" && !slices.Contains(m.Models, j.Spec.Needs.Model) && slices.Contains(m.CachedModels, j.Spec.Needs.Model) {
 		n++
 	}
 	if j.Spec.Environment.Key() != "" && slices.Contains(m.Environments, j.Spec.Environment.Key()) {

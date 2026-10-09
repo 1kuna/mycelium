@@ -28,24 +28,27 @@ const StopGrace = 2 * time.Minute
 var ErrStale = errors.New("stale execution: stop this copy")
 
 type state struct {
+	Pins       []ModelPin            `json:"pins,omitempty"`
 	ModelSlots map[string]*ModelSlot `json:"model_slots,omitempty"`
 	Jobs       map[string]*Job       `json:"jobs"`
 	Machines   map[string]*Machine   `json:"machines"`
 	Front      int64                 `json:"front"`
 }
 type Queue struct {
-	models       ModelConfig
-	calls        map[string]*ModelCall
-	lock         *os.File
-	mu           sync.Mutex
-	db           *sql.DB
-	clock        Clock
-	root         string
-	restartUntil time.Time
-	unreported   map[string]bool
-	networkQuiet bool
-	lossTimeouts [3]time.Duration
-	s            state
+	productionGrace time.Duration
+	wake            chan struct{}
+	models          ModelConfig
+	calls           map[string]*ModelCall
+	lock            *os.File
+	mu              sync.Mutex
+	db              *sql.DB
+	clock           Clock
+	root            string
+	restartUntil    time.Time
+	unreported      map[string]bool
+	networkQuiet    bool
+	lossTimeouts    [3]time.Duration
+	s               state
 }
 
 func ID() string {
@@ -83,7 +86,7 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	q := &Queue{lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{productionGrace: 10 * time.Second, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq);`); err != nil {
 		db.Close()
 		return nil, err
@@ -208,6 +211,10 @@ func (q *Queue) update(fn func() error) error {
 			_, err = q.db.Exec("INSERT INTO queue(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", data)
 		}
 	}
+	if err == nil && q.wake != nil {
+		close(q.wake)
+		q.wake = make(chan struct{})
+	}
 	if err != nil {
 		q.calls = oldCalls
 		q.unreported = oldUnreported
@@ -228,6 +235,7 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 		copy := cloneJob(j)
 		j = &copy
 		q.s.Jobs[id] = j
+		q.maintain()
 		out = cloneJob(j)
 		return nil
 	})
@@ -331,6 +339,9 @@ func (q *Queue) maintain() {
 			}
 			for _, r := range q.s.Jobs {
 				if r.Machine == m.ID && r.State == "stopping" && fits(j, m, m.FreeMemoryGB+r.Spec.Needs.MemoryGB) {
+					if j.Spec.Priority == "production" && rank(r.Spec.Priority) > 0 {
+						q.stopFor(r, "production", "job")
+					}
 					room = true
 				}
 			}
@@ -345,12 +356,12 @@ func (q *Queue) maintain() {
 		var victim *Job
 		for _, r := range q.s.Jobs {
 			m := q.s.Machines[r.Machine]
-			if m != nil && r.State == "running" && r.Spec.Resumable && rank(r.Spec.Priority) > rank(j.Spec.Priority) && fits(j, m, m.FreeMemoryGB+r.Spec.Needs.MemoryGB) && (victim == nil || rank(r.Spec.Priority) > rank(victim.Spec.Priority) || rank(r.Spec.Priority) == rank(victim.Spec.Priority) && r.ID < victim.ID) {
+			if m != nil && r.State == "running" && (r.Spec.Resumable || j.Spec.Priority == "production") && rank(r.Spec.Priority) > rank(j.Spec.Priority) && fits(j, m, m.FreeMemoryGB+r.Spec.Needs.MemoryGB) && (victim == nil || rank(r.Spec.Priority) > rank(victim.Spec.Priority) || rank(r.Spec.Priority) == rank(victim.Spec.Priority) && r.ID < victim.ID) {
 				victim = r
 			}
 		}
 		if victim != nil {
-			q.stop(victim, "making room for "+j.Spec.Priority+" job")
+			q.stopFor(victim, j.Spec.Priority, "job")
 		}
 	}
 }
@@ -439,6 +450,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				reply.Kill = true
 				return nil
 			}
+			if c.Started && j.StartedAt == nil {
+				q.markStarted(j)
+			}
 			j.Progress = max(j.Progress, c.Running.Progress)
 			if j.State == "stopping" {
 				reply.Stop = true
@@ -496,6 +510,8 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			}
 			if j != nil {
 				j.State = "running"
+				j.StartedAt = nil
+				j.StartLatencySeconds = 0
 				m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
 				j.Starts = max(j.Starts, j.Attempt) + 1
 				j.Attempt = j.Starts
@@ -604,7 +620,7 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 	var out Snapshot
 	err := q.update(func() error {
 		q.maintain()
-		out = Snapshot{Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+		out = Snapshot{Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 		for _, s := range q.s.ModelSlots {
 			copy := *s
 			if s.State == "ready" && s.InFlight == 0 {
@@ -738,3 +754,22 @@ func cloneMachine(m *Machine) Machine {
 
 // Both reconciliation and command startup use the same checkpoint rules.
 func completeProgress(root string) int64 { progress, _ := checkpointProgress(root); return progress }
+
+// Startup acknowledgements use queue time, avoiding cross-machine clock skew.
+func (q *Queue) markStarted(j *Job) {
+	if j.StartedAt == nil {
+		now := q.clock.Now()
+		j.StartedAt = &now
+		j.StartLatencySeconds = now.Sub(j.Queued).Seconds()
+	}
+}
+func (q *Queue) Started(r Result) error {
+	return q.update(func() error {
+		j, e := q.current(r)
+		if e != nil {
+			return e
+		}
+		q.markStarted(j)
+		return nil
+	})
+}

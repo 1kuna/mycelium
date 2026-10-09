@@ -150,23 +150,28 @@ type Copy struct {
 }
 
 type Job struct {
-	Copies     []Copy     `json:"copies,omitempty"`
-	Starts     int        `json:"starts"`
-	Losses     int        `json:"losses"`
-	Progress   int64      `json:"progress"`
-	ID         string     `json:"id"`
-	Spec       Spec       `json:"spec"`
-	State      string     `json:"state"`
-	Attempt    int        `json:"attempt"`
-	Machine    string     `json:"machine,omitempty"`
-	Session    string     `json:"session,omitempty"`
-	Queued     time.Time  `json:"queued"`
-	Front      int64      `json:"front"`
-	StopAt     *time.Time `json:"stop_at,omitempty"`
-	Reason     string     `json:"reason,omitempty"`
-	Checkpoint string     `json:"checkpoint"`
+	Copies              []Copy     `json:"copies,omitempty"`
+	StartedAt           *time.Time `json:"started_at,omitempty"`
+	StartLatencySeconds float64    `json:"start_latency_seconds"`
+	Starts              int        `json:"starts"`
+	Losses              int        `json:"losses"`
+	Progress            int64      `json:"progress"`
+	ID                  string     `json:"id"`
+	Spec                Spec       `json:"spec"`
+	State               string     `json:"state"`
+	Attempt             int        `json:"attempt"`
+	Machine             string     `json:"machine,omitempty"`
+	Session             string     `json:"session,omitempty"`
+	Queued              time.Time  `json:"queued"`
+	Front               int64      `json:"front"`
+	StopAt              *time.Time `json:"stop_at,omitempty"`
+	Reason              string     `json:"reason,omitempty"`
+	Checkpoint          string     `json:"checkpoint"`
 }
 type Machine struct {
+	CachedModels          []string  `json:"cached_models,omitempty"`
+	CacheFreeBytes        int64     `json:"cache_free_bytes"`
+	CacheError            string    `json:"cache_error,omitempty"`
 	MemoryError           string    `json:"memory_error,omitempty"`
 	MemoryMeasured        bool      `json:"memory_measured,omitempty"`
 	ModelConfigHash       string    `json:"model_config_hash,omitempty"`
@@ -188,6 +193,7 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
+	Started         bool          `json:"started,omitempty"`
 	ModelReports    []ModelReport `json:"model_reports,omitempty"`
 	PreviousSession string        `json:"previous_session,omitempty"`
 	Fresh           bool          `json:"fresh,omitempty"`
@@ -218,6 +224,7 @@ type LogChunk struct {
 	Text   string `json:"text"`
 }
 type Snapshot struct {
+	Pins         []ModelPin  `json:"pins"`
 	LoadedModels []ModelSlot `json:"loaded_models"`
 	Warning      string      `json:"warning,omitempty"`
 	Jobs         []*Job      `json:"jobs"`

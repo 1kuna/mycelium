@@ -127,15 +127,15 @@ func TestModelCallPreemptsResumableBatch(t *testing.T) {
 		t.Fatal("model not loaded before retried lower priority batch")
 	}
 }
-func TestModelCallDoesNotStopNonresumableBatch(t *testing.T) {
+func TestModelCallStopsNonresumableBatch(t *testing.T) {
 	q, _, m := modelFixture(t)
 	s := spec("experiment")
 	s.Resumable = false
 	j := submit(t, q, s)
 	check(t, q, m, nil)
 	addModelCall(t, q, "production")
-	if q.s.Jobs[j.ID].State != "running" || len(q.s.ModelSlots) != 0 {
-		t.Fatal("nonresumable batch was preempted")
+	if q.s.Jobs[j.ID].State != "stopping" || len(q.s.ModelSlots) != 0 {
+		t.Fatal("nonresumable batch was not preempted")
 	}
 }
 func TestModelLossAndFreshSession(t *testing.T) {

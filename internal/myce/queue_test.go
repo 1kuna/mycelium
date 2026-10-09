@@ -202,7 +202,7 @@ func TestMakingRoom(t *testing.T) {
 	for _, tc := range []struct {
 		name, waiting   string
 		resumable, stop bool
-	}{{"production stops experiment", "production", true, true}, {"deadline stops experiment", "deadline", true, true}, {"nonresumable never stopped", "production", false, false}, {"experiment cannot stop peer", "experiment", true, false}} {
+	}{{"production stops experiment", "production", true, true}, {"deadline stops experiment", "deadline", true, true}, {"production stops nonresumable", "production", false, true}, {"deadline preserves nonresumable", "deadline", false, false}, {"experiment cannot stop peer", "experiment", true, false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, _ := fixture(t)
 			s := spec("experiment")
@@ -215,7 +215,14 @@ func TestMakingRoom(t *testing.T) {
 			if reply.Stop != tc.stop {
 				t.Fatalf("stop=%v want=%v", reply.Stop, tc.stop)
 			}
-			if tc.stop && reply.GraceSeconds != 120 {
+			grace := 120.0
+			if tc.waiting == "production" {
+				grace = 10
+				if !tc.resumable {
+					grace = 0
+				}
+			}
+			if tc.stop && reply.GraceSeconds != grace {
 				t.Fatalf("grace=%v", reply.GraceSeconds)
 			}
 		})
@@ -289,17 +296,17 @@ func TestGraceAndFrontOfLine(t *testing.T) {
 		t.Fatal("missing stop")
 	}
 	// Keep checking in so this tests grace, not sudden loss.
-	c.Advance(40 * time.Second)
+	c.Advance(3 * time.Second)
 	check(t, q, m, r)
-	c.Advance(40 * time.Second)
+	c.Advance(3 * time.Second)
 	check(t, q, m, r)
-	c.Advance(39 * time.Second)
+	c.Advance(3 * time.Second)
 	if check(t, q, m, r).Kill {
 		t.Fatal("killed before grace")
 	}
 	c.Advance(time.Second)
 	if reply := check(t, q, m, r); !reply.Kill {
-		t.Fatal("must kill stale copy at 2 minutes")
+		t.Fatal("must kill stale copy at 10 seconds")
 	}
 	requireState(t, q, r.ID, "queued")
 	production := check(t, q, m, nil).Job

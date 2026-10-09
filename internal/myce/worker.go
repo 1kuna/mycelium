@@ -20,6 +20,8 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	CacheRoot, ModelRoot        string
+	CacheLimit                  int64
 	ModelConfig                 ModelConfig
 	ModelListen, ModelAdvertise string
 	Client                      Client
@@ -55,6 +57,10 @@ func (p *process) stop(now time.Time, grace time.Duration, kill bool) {
 			p.killed = true
 		}
 		return
+	}
+	deadline := now.Add(grace)
+	if p.stopAt != nil && deadline.Before(*p.stopAt) {
+		p.stopAt = &deadline
 	}
 	if !p.stopped {
 		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGTERM)
@@ -353,6 +359,10 @@ func (w Worker) Run(stop context.Context) error {
 	stopCh := stop.Done()
 	base := w.Machine.FreeMemoryGB
 	fresh := !recovering && s.state.Fresh
+	eventCtx, eventCancel := context.WithCancel(context.Background())
+	defer eventCancel()
+	events := make(chan WorkerEvent, 1)
+	go w.watchStops(eventCtx, events)
 	var retry workerRetry
 	defer func() {
 		if p != nil {
@@ -385,6 +395,7 @@ func (w Worker) Run(stop context.Context) error {
 			}
 			select {
 			case f := <-p.done:
+				retry = workerRetry{}
 				p = nil
 				if f.err != nil {
 					return fmt.Errorf("persist command result: %w", f.err)
@@ -407,6 +418,18 @@ func (w Worker) Run(stop context.Context) error {
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
 			reports, _ := rt.report()
+			if rt.cache != nil {
+				var ce error
+				m.CachedModels, m.CacheFreeBytes, ce = rt.cache.Report(w.ModelConfig.Models)
+				if ce != nil {
+					m.CacheError = ce.Error()
+				}
+			}
+			for _, r := range reports {
+				if r.State == "failed" {
+					m.CacheError = r.Error
+				}
+			}
 			m.Leaving = leaving
 			m.FreeMemoryGB = base
 			if w.MemorySource != nil {
@@ -432,7 +455,7 @@ func (w Worker) Run(stop context.Context) error {
 				running = &Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt, Progress: progress}
 			}
 			var reply Reply
-			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
+			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil, Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
 			if err == nil {
 				rt.sync(reply.ModelPlan)
 				fresh = false
@@ -506,6 +529,10 @@ func (w Worker) Run(stop context.Context) error {
 							s.state.Session = ID()
 							s.state.Fresh = true
 							w.Machine.Session = s.state.Session
+							eventCancel()
+							sessionCtx, sessionCancel := context.WithCancel(context.Background())
+							defer sessionCancel()
+							go w.watchStops(sessionCtx, events)
 							fresh = true
 						}
 						if e := s.save(); e != nil {
@@ -552,6 +579,14 @@ func (w Worker) Run(stop context.Context) error {
 							err = nil
 						} else {
 							p, err = w.start(s, j)
+							if err == nil && p != nil {
+								startedCtx, startedCancel := context.WithTimeout(ctx, 2*time.Second)
+								startedErr := w.Client.Call(startedCtx, "POST", "/api/workers/started", Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, nil)
+								startedCancel()
+								if startedErr != nil {
+									log.Printf("worker startup acknowledgement: %v", startedErr)
+								}
+							}
 						}
 						if err != nil && !(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory)) {
 							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error()}
@@ -577,7 +612,11 @@ func (w Worker) Run(stop context.Context) error {
 				log.Printf("worker %s reconnecting: %v", m.ID, err)
 				retry.failed(w.Clock.Now(), w.Interval)
 			} else {
-				retry.succeeded(w.Clock.Now(), w.Interval)
+				nextInterval := w.Interval
+				if running != nil && s.state.Job == nil {
+					nextInterval = time.Millisecond
+				}
+				retry.succeeded(w.Clock.Now(), nextInterval)
 			}
 		}
 		select {
@@ -586,6 +625,11 @@ func (w Worker) Run(stop context.Context) error {
 			stopCh = nil
 			if p != nil && p.job.Spec.Resumable {
 				p.stop(w.Clock.Now(), StopGrace, false)
+			}
+		case event := <-events:
+			if p != nil && p.job.ID == event.ID && p.job.Attempt == event.Attempt {
+				p.stop(w.Clock.Now(), time.Duration(event.GraceSeconds*float64(time.Second)), event.Kill)
+				retry = workerRetry{}
 			}
 		case <-ticker.C:
 		}

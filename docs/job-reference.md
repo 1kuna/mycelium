@@ -43,9 +43,13 @@ worker user's permissions, not a sandbox.
 
 Jobs that fit memory, platform, environment and allow-list are ordered by
 priority, model/environment readiness, earliest deadline, then waiting age.
-Production/deadline may pause lower-priority resumable work when no idle worker
+Production/deadline may stop lower-priority work when no idle worker
 fits. SIGTERM is sent to the process group, with a two-minute checkpoint grace
-before SIGKILL. Non-resumable work is never preempted to make room.
+before SIGKILL for deadlines. Production gives resumable work 10 seconds by
+default and stops non-resumable work immediately, requeueing it to start over
+without increasing its infrastructure-loss retry count. Production grace is
+configurable with `--production-stop-grace`. Make experiments resumable and
+save checkpoints frequently.
 
 States are `queued`, `running`, `stopping`, `succeeded`, `failed`, and `cancelled`. Status
 includes a reason for waiting or failure. A command's own nonzero exit fails
@@ -120,8 +124,10 @@ must name a catalog entry. Remaining OpenAI JSON is passed unchanged.
 
 Catalog fields: `idle_timeout` defaults to `10m`; `max_wait` to `5m`; `models`
 defaults to empty. Each entry requires unique `name`, `engine` (`llama.cpp` or
-explicit test-only `fake`), local `path`, positive `memory_gb`, and nonempty
-`platforms`. Optional `args` defaults empty. Adapter-owned host/port/model/alias
+explicit test-only `fake`), NAS master `path`, positive `memory_gb`, and nonempty
+`platforms`. Real models also require positive `size_bytes` and a 64-digit
+hex `sha256`. `direct_nas` defaults false; enable only for small models.
+Optional `args` defaults empty. Adapter-owned host/port/model/alias
 flags cannot be overridden; default GPU layers is 99. Embedding models need
 appropriate engine embedding args. Catalog hashes must match between queue and
 workers. Model reservations include loading and draining until unload succeeds.
@@ -148,3 +154,25 @@ a deadline. `Checkpoint(directory=None)` defaults to `MYCE_CHECKPOINT_DIR`;
 loads the newest complete JSON. `StopSignal` handles cooperative SIGTERM/SIGINT
 on the main thread; callers explicitly save and exit. See the
 [client guide](../clients/python/README.md) and [examples](integrating.md).
+
+## Model cache and pins
+
+| Option / command | Meaning |
+|---|---|
+| `join --model-root DIR` | This worker's NAS master-model folder; relative catalog paths resolve here; evictions go to its `.Trash` |
+| `join --model-cache DIR` | Local disk cache; defaults to `STATE_DIR/model-cache` |
+| `join --model-cache-bytes N` | Active cache allowance in bytes; default 107374182400 (100 GiB) |
+| `queue --production-stop-grace 10s` | Resumable experiment/deadline save allowance when production needs room |
+| `model fetch FILE --model-root DIR --url URL --size-bytes N --sha256 HASH` | Explicitly download one Hugging Face master; refuse overwrite |
+| `model pin MODEL --project P --machine M` | Hold a production model on M |
+| `model pin MODEL --project P --platform cuda` | Hold one copy on an eligible CUDA worker |
+| `model unpin MODEL --project P` | Release that project's pin |
+
+Pins optionally accept `--start HH:MM --end HH:MM --weekdays 1,2,3,4,5
+--timezone America/New_York`. Weekdays use 0=Sunday through 6=Saturday. Times
+use a named IANA zone (default UTC), cannot cross midnight, and exclude the end.
+Wait for status to show the assigned slot ready before treating a pin as warm.
+Status JSON includes `pins`, worker `cached_models`, `cache_free_bytes`,
+`cache_error`, and each job's `started_at` and `start_latency_seconds`.
+Latency is submission to the worker startup acknowledgement, using queue time; the real dev timing check also observes
+command start. Infrastructure losses remain separate from execution attempts.

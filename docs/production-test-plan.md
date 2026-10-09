@@ -242,3 +242,37 @@ Success: only v2 is disabled, its ports are closed, private binary/config/state/
 units are recoverable. Leave NAS checkpoints/probes and recovery bundles intact.
 No deletion, token printing, old-service changes, mount changes, or guard changes.
 Restore by reversing these moves only for a separately approved test.
+
+## NAS model setup and cache acceptance (run only with fleet authorization)
+
+1. Create/mount a NAS master-model folder. Choose the exact approved GGUF and
+   obtain trusted SHA-256/byte count. Explicitly run `myce model fetch FILE
+   --model-root NAS_MODELS --url HF_HTTPS_FILE_URL --size-bytes N --sha256 HASH`.
+   Confirm a second fetch refuses to overwrite the master. Record the catalog
+   and inference contract without tokens.
+2. Add relative `path`, `size_bytes`, and `sha256` to the shared catalog. Start
+   each worker with its mount's `--model-root`, local `--model-cache`, and
+   bounded `--model-cache-bytes`. Confirm the cache is on local disk, not NAS.
+3. Submit a model call. Verify local temporary copy, verified atomic publication,
+   and llama-server's local file path. Confirm no internet fetch during loading.
+   Record copy-plus-load duration separately from inference.
+4. Check cached-model/free-byte reports. With unloaded disposable cache entries,
+   reduce the allowance to provoke LRU eviction. Verify recovery in NAS Trash;
+   confirm a loaded/pinned model survives. Test actual local filesystem pressure
+   and visible refusal when neither eviction nor available space can fit it.
+5. Leave a disposable `.partial` in a stopped worker's cache and restart it.
+   Confirm cleanup into Trash and that partial bytes never reach the engine.
+   Test bad size/checksum and NAS unavailability, expecting visible failures.
+6. Pin production by machine, then by platform, and inspect assigned ready state.
+   Submit memory-hungry competing work: pinned memory must remain reserved.
+   Exercise weekday/time-zone start/end boundaries and unpin. Confirm SQLite
+   persistence after a queue restart and warmup after a worker restart.
+7. Run resumable and non-resumable lower-priority experiments. Submit production
+   while busy and measure submission-to-process-start, targeting <15s excluding
+   model load. The resumable case has 10s default grace; the non-resumable case
+   stops immediately and requeues without a loss retry. Check stale-result
+   rejection. Repeat with deadline work: 2m grace and no non-resumable victim.
+
+Laptop regression: `go test ./... -race` includes fake-clock cache/pin/preemption
+checks and `TestDevProductionStartsUnder15Seconds`, using real API/commands with
+fake GPU inventory. These checks authorize no real-machine action.

@@ -132,7 +132,9 @@ max_wait: 5m
 models:
   - name: atlas-embedding
     engine: llama.cpp
-    path: /mnt/nas/models/REPLACE_APPROVED_EMBEDDING_MODEL.gguf
+    path: REPLACE_APPROVED_EMBEDDING_MODEL.gguf
+    size_bytes: REPLACE_WITH_EXACT_BYTES
+    sha256: REPLACE_WITH_APPROVED_SHA256
     memory_gb: 8
     platforms: [cuda, metal, xpu]
     args: [--embedding, --ctx-size, "8192"]
@@ -435,3 +437,28 @@ corrupt complete JSON fail visibly; temporary NAS errors can be retried as above
 `StopSignal` sets `requested` on SIGTERM/SIGINT and restores handlers on exit;
 use it on the main thread and save outside the signal handler. Neither helper
 makes arbitrary outputs retry-safe. See [Python client](../clients/python/README.md).
+
+## NAS model masters and instant production
+
+Provision a writable NAS model folder once and use immutable GGUF masters.
+Download an approved Hugging Face file explicitly with `myce model fetch`,
+supplying its exact size and trusted SHA-256; normal model calls never download.
+Queue and workers share the same catalog; each worker supplies its own mount
+with `--model-root /local/mount/models` and local disk with
+`--model-cache /local/disk/myce-models --model-cache-bytes 107374182400`.
+See [model guide](guide-model-calls.md) for the full commands. Size and checksum
+are checked before local publication; copies and verification count as load time.
+Check cache reports and load refusal messages in `myce status`.
+
+For interactive production, use `myce model pin MODEL --project atlas --machine
+spark` or `--platform cuda`. Wait for a ready assigned model before directing
+latency-sensitive traffic to it. A pin reserves memory, so other work may wait.
+Optional weekday/time windows are active reservations; warmup at a window's
+start can take time. Unpin when this guarantee is no longer needed.
+
+**Experiments should be resumable and checkpoint frequently.** Production now
+stops lower-priority non-resumable work immediately and restarts it later without
+spending a loss retry. Resumable work has 10 seconds by default to save and exit;
+deadline preemption retains 2 minutes. Workers receive authenticated immediate
+stop notifications. Read `start_latency_seconds` to measure production queue
+clearance, and measure model load separately when a pin is not ready.
