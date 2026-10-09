@@ -241,6 +241,7 @@ type modelRuntime struct {
 	wg                  sync.WaitGroup
 	url                 string
 	closing             bool
+	engineFactory       func(Model) Engine
 	memorySource        MemorySource
 	memoryMeasured      bool
 	batchMemory         *atomic.Uint64
@@ -268,6 +269,8 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 		limit = 100 * 1024 * 1024 * 1024
 	}
 	rt.cache = &ModelCache{Root: root, NASRoot: w.ModelRoot, Limit: limit, Clock: w.Clock}
+	rt.engineFactory = w.modelEngine
+	rt.cache.beforeChunk = w.beforeModelCopy
 	rt.cache.Parallel = max(1, w.CopyParallel)
 	rt.cache.Protected = rt.cacheProtected
 	rt.cache.Usage = rt.cachePopularity
@@ -354,7 +357,9 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			continue
 		}
 		var engine Engine
-		if model.Engine == "fake" {
+		if rt.engineFactory != nil {
+			engine = rt.engineFactory(model)
+		} else if model.Engine == "fake" {
 			engine = &FakeEngine{}
 		} else {
 			engine = &LlamaEngine{Dir: rt.dir, Clock: rt.clock}

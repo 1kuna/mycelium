@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -232,5 +233,69 @@ func TestCacheInventoryDoesNotBlockHeartbeatDuringCopy(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("inventory blocked behind copy lock; worker heartbeat would stop")
+	}
+}
+
+func TestCacheReuseEnforcesLoweredLimit(t *testing.T) {
+	c, model := cacheFixture(t)
+	a, b := model("a", "aaaa"), model("b", "bbbb")
+	for _, m := range []Model{a, b} {
+		if _, err := c.Prepare(context.Background(), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.Limit = 4 // operator restarts with a smaller allowance
+	c.Protected = func(key string) bool { return key == cacheKey(b) }
+	if _, err := c.Prepare(context.Background(), a); err == nil {
+		t.Fatal("cached load ignored over-limit protected data")
+	}
+	c.Protected = nil
+	if _, err := c.Prepare(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(c.Root, cacheKey(b))); !os.IsNotExist(err) {
+		t.Fatal("cached load did not enforce smaller allowance", err)
+	}
+}
+
+func TestCacheReportIncludesUnwrittenReservations(t *testing.T) {
+	c, model := cacheFixture(t)
+	m := model("m", "12345678")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	c.beforeChunk = func(context.Context) { once.Do(func() { close(entered); <-release }) }
+	done := make(chan error, 1)
+	go func() { _, err := c.Prepare(context.Background(), m); done <- err }()
+	<-entered
+	names, free, err := c.Report([]Model{m})
+	close(release)
+	if copyErr := <-done; copyErr != nil {
+		t.Fatal(copyErr)
+	}
+	if err != nil || len(names) != 0 || free != 0 {
+		t.Fatalf("unwritten copy advertised free space: %v %d %v", names, free, err)
+	}
+}
+
+func TestCorruptProtectedCopyStopsAdvertisingVerifiedCache(t *testing.T) {
+	c, model := cacheFixture(t)
+	m := model("m", "good")
+	path, err := c.Prepare(context.Background(), m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Protected = func(string) bool { return true }
+	if err := os.WriteFile(path, []byte("evil"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Prepare(context.Background(), m); err == nil {
+		t.Fatal("corrupt protected copy accepted")
+	}
+	if names, _, err := c.Report([]Model{m}); err != nil || len(names) != 0 {
+		t.Fatal("corrupt copy still advertised verified", names, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "evil" {
+		t.Fatal("protected file was evicted", err)
 	}
 }

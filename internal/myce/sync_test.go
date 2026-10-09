@@ -158,7 +158,7 @@ func TestCacheResumeSpeedAndVerifiedPublication(t *testing.T) {
 	m := model("big", strings.Repeat("x", 3*1024*1024))
 	ctx, cancel := context.WithCancel(context.Background())
 	chunks := 0
-	c.beforeChunk = func() {
+	c.beforeChunk = func(context.Context) {
 		chunks++
 		c.Clock.(*fakeClock).Advance(time.Second)
 		if chunks == 2 {
@@ -179,7 +179,7 @@ func TestCacheResumeSpeedAndVerifiedPublication(t *testing.T) {
 	if e := restarted.init(); e != nil {
 		t.Fatal(e)
 	}
-	restarted.beforeChunk = func() { c.Clock.(*fakeClock).Advance(time.Second) }
+	restarted.beforeChunk = func(context.Context) { c.Clock.(*fakeClock).Advance(time.Second) }
 	path, e := restarted.Precopy(context.Background(), m, 1)
 	if e != nil {
 		t.Fatal(e)
@@ -249,7 +249,7 @@ func TestConcurrentCopiesReserveFullCacheAndDiskBytes(t *testing.T) {
 			a, b := model("a", "aaaaaaaa"), model("b", "bbbbbbbb")
 			entered, release := make(chan struct{}), make(chan struct{})
 			var once sync.Once
-			c.beforeChunk = func() { once.Do(func() { close(entered); <-release }) }
+			c.beforeChunk = func(context.Context) { once.Do(func() { close(entered); <-release }) }
 			done := make(chan error, 1)
 			go func() { _, e := c.Prepare(context.Background(), a); done <- e }()
 			<-entered
@@ -272,7 +272,7 @@ func TestWorkerPausesCopyBeforeRealWork(t *testing.T) {
 			m := model("m", strings.Repeat("x", 3*1024*1024))
 			entered, release := make(chan struct{}), make(chan struct{})
 			chunks := 0
-			c.beforeChunk = func() {
+			c.beforeChunk = func(context.Context) {
 				chunks++
 				if chunks == 2 {
 					close(entered)
@@ -431,7 +431,7 @@ func TestParallelCopiesActuallyRunTogether(t *testing.T) {
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
 	var calls atomic.Int32
-	c.beforeChunk = func() {
+	c.beforeChunk = func(context.Context) {
 		if calls.Add(1) <= 2 {
 			entered <- struct{}{}
 			<-release
@@ -500,5 +500,26 @@ func TestRecentModelUseAndActiveBatchProtection(t *testing.T) {
 	c.Advance(25 * time.Hour)
 	if len(check(t, q, m, nil).CopyPlan) != 0 {
 		t.Fatal("old use never expired")
+	}
+}
+
+func TestBatchPlacementPrefersLoadedOverCached(t *testing.T) {
+	q, _, cached := syncFixture(t)
+	cached.CachedModels = []string{"a"}
+	loaded := cached
+	loaded.ID, loaded.Session = "loaded", "loaded-session"
+	loaded.Models = []string{"a"}
+	check(t, q, cached, nil)
+	// An external loaded-model hint is valid for batch work; no engine is required.
+	loaded.ModelURL = ""
+	check(t, q, loaded, nil)
+	s := spec("production")
+	s.Needs.Model = "a"
+	j := submit(t, q, s)
+	if check(t, q, cached, nil).Job != nil {
+		t.Fatal("cached worker took work from loaded worker")
+	}
+	if got := check(t, q, loaded, nil).Job; got == nil || got.ID != j.ID {
+		t.Fatal("loaded worker did not receive work", got)
 	}
 }

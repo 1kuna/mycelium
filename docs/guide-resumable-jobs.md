@@ -9,7 +9,8 @@ periodically too: a machine that loses power cannot save on demand.
 Each attempt receives `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR`.
 Each worker sets `--checkpoint-root` to its own local mount of the same NAS
 checkpoint directory: for example `/home/kuna/nas-dev/mycelium/checkpoints` on
-Linux and `/Volumes/dev/mycelium/checkpoints` on Macs. Queue `--checkpoints`
+Spark, `/mnt/verso-nas/mycelium/checkpoints` on B70 when that is its mount,
+and `/Volumes/dev/mycelium/checkpoints` on Macs. Queue `--checkpoints`
 uses the queue's local path. Jobs carry relative checkpoint paths; the worker
 resolves them before setting `MYCE_CHECKPOINT_DIR`. Create the root on the
 mounted NAS before starting the queue. Dev creates a local root.
@@ -62,8 +63,9 @@ while True:  # keep retrying the final save until NAS access returns
 print(f"saved {n}; attempt {os.environ['MYCE_ATTEMPT']}", flush=True)
 ```
 
-A stop still has a two-minute grace; if the NAS stays down longer, the next
-attempt resumes the previous complete save. Planned pauses do not exhaust
+Production preemption has a 10-second default grace; deadline preemption and
+planned leave have two minutes. If the NAS stays down beyond that allowance,
+the next attempt resumes the previous complete save. Planned pauses do not exhaust
 retries. Non-resumable jobs fail loudly after three infrastructure interruptions;
 a command's own failure fails immediately.
 

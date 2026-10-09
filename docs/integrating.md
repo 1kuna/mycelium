@@ -347,8 +347,10 @@ id=$("$HOME/.local/bin/myce" submit job.yaml)
 
 Mount the same shared NAS root on queue and workers; local mount paths may differ. Start
 queue with the configured 5s/20s/60s priority loss timeouts, and workers with a
-1s heartbeat and explicit checkpoint root. CUDA uses live free GPU inventory minus a reservation; XPU/Metal/fake use an
-explicit configured budget minus reserve. CUDA can cap live free memory with a positive `--memory-gb` before subtracting
+1s heartbeat and explicit checkpoint root. CUDA uses live dedicated memory or
+unified Linux `MemAvailable`; Metal uses live macOS free + inactive memory.
+XPU/fake use configured budgets. All subtract the configured reserve. Live CUDA
+and Metal can cap free memory with a positive `--memory-gb` before subtracting
 reserve; the cap never replaces the live probe. Follow
 [operations](operations.md) for local service installation and lending/reclaiming
 GPUs. This document performs no fleet launch or production cutover.

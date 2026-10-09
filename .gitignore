@@ -26,3 +26,6 @@ ops/private/
 /resume.py
 
 /workers/
+
+/.venv-prod-ready*/
+clients/python/src/*.egg-info/

@@ -164,6 +164,8 @@ on the main thread; callers explicitly save and exit. See the
 | `join --model-cache-bytes N` | Active cache allowance in bytes; default 107374182400 (100 GiB) |
 | `queue --production-stop-grace 10s` | Resumable experiment/deadline save allowance when production needs room |
 | `model fetch FILE --model-root DIR --url URL --size-bytes N --sha256 HASH` | Explicitly download one Hugging Face master; refuse overwrite |
+| `join --model-copy-parallel N` | Concurrent background copies; default 1 |
+| `model sync MODEL --to M\|cuda\|metal\|xpu\|all` | Persist a pre-copy request; `--cancel` pauses it and preserves partial bytes |
 | `model pin MODEL --project P --machine M` | Hold a production model on M |
 | `model pin MODEL --project P --platform cuda` | Hold one copy on an eligible CUDA worker |
 | `model unpin MODEL --project P` | Release that project's pin |
@@ -176,3 +178,13 @@ Status JSON includes `pins`, worker `cached_models`, `cache_free_bytes`,
 `cache_error`, and each job's `started_at` and `start_latency_seconds`.
 Latency is submission to the worker startup acknowledgement, using queue time; the real dev timing check also observes
 command start. Infrastructure losses remain separate from execution attempts.
+
+Model sync also accepts `POST /api/models/sync` with `{"model":"MODEL","to":"TARGET","cancel":false}`.
+A cancelled target suppresses idle copies; a pin still requires its copy.
+Status includes `sync_requests`, worker `copy_reports` (state, bytes, total,
+error and measured bytes/s), `copy_bytes_per_second`, and `model_copy_seconds`.
+Available cache bytes include unwritten copy reservations and are bounded by
+both filesystem free space and cache allowance. Loaded affinity precedes cached
+affinity; otherwise placement uses remaining NAS bytes / measured speed, with
+40 MB/s until measured. This estimates transfer, not engine startup. `needs.model`
+is still batch metadata: commands must use a local model path themselves.

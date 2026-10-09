@@ -72,6 +72,14 @@ func (rt *modelRuntime) syncCopies(plan, usage []CopyTask, pins []string, busy b
 	}
 	rt.mu.Unlock()
 }
+func (rt *modelRuntime) cancelCopies() {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for _, c := range rt.copies {
+		c.cancel()
+	}
+}
+
 func (rt *modelRuntime) pauseCopies() {
 	rt.mu.Lock()
 	done := []chan struct{}{}

@@ -96,6 +96,9 @@ handler. See `docs/guide-resumable-jobs.md` for NAS and retry requirements.
 ## Tests (no GPU)
 
 ```sh
+# From the repository root; use an installed Python 3.10+ (macOS may ship 3.9).
+python3.13 -m venv .venv-prod-ready-py313
+. .venv-prod-ready-py313/bin/activate
 python -m pip install -e './clients/python[yaml,openai]'
 python -m unittest discover -s clients/python/tests -v
 ```
@@ -104,5 +107,7 @@ Tests build the local Go CLI into a temporary directory and launch `myce dev`
 on an ephemeral loopback port with one fake GPU worker and real command runner.
 They cover submission, wait/failure/timeout, authentication, paged log cursors,
 cancellation, YAML, SDK embeddings/chat/streaming, atomic checkpoint failure,
-signals, and production preemption/resumption. Optional-extra tests skip when
-those extras are absent. No fleet access is required.
+signals, and production preemption/resumption. The full acceptance run requires
+both extras and must end with zero skips.
+A base-only client installation can still skip the optional integration tests;
+it is not the full acceptance run. No fleet access is required.
