@@ -33,7 +33,7 @@ th{display:none}tr{margin-bottom:1rem;border:1px solid #ccd5cd;border-radius:6px
 td{display:grid;grid-template-columns:6rem minmax(0,1fr);gap:.5rem;border-bottom:0}
 td:before{content:attr(data-label);font-weight:600}.reason{max-width:none}}
 </style></head><body>
-<h1>Mycelium queue</h1><p>Batch jobs · refreshes every 5 seconds</p>
+<h1>Mycelium queue</h1><p>Batch jobs and model calls · refreshes every 5 seconds</p>
 {{if .Warning}}<p role="status">{{.Warning}}</p>{{end}}<h2>Jobs</h2><div class="tables"><table>
 <tr><th>Job / ID</th><th>Priority</th><th>State</th><th>Machine</th><th>Attempt</th><th>Why</th></tr>
 {{range .Jobs}}<tr>
@@ -49,10 +49,13 @@ td:before{content:attr(data-label);font-weight:600}.reason{max-width:none}}
 <td data-label="State">{{if .Gone}}gone{{else if .Leaving}}leaving{{else}}joined{{end}}</td>
 <td data-label="Ready envs">{{range .Environments}}{{.}} {{end}}</td></tr>
 {{else}}<tr><td colspan="5">No machines joined.</td></tr>{{end}}
-</table></div></body></html>`))
+</table></div><h2>Models</h2><table><tr><th>Model</th><th>Machine</th><th>State</th><th>Idle seconds</th><th>Calls in flight</th><th>Error</th></tr>{{range .LoadedModels}}<tr><td data-label="Model">{{.Model}}</td><td data-label="Machine">{{.Machine}}</td><td data-label="State">{{.State}}</td><td data-label="Idle seconds">{{printf "%.1f" .IdleSeconds}}</td><td data-label="Calls">{{.InFlight}}</td><td data-label="Error">{{.Error}}</td></tr>{{else}}<tr><td colspan="6">No models loaded.</td></tr>{{end}}</table></body></html>`))
 
 func (a API) Handler() http.Handler {
 	mux := http.NewServeMux()
+	for _, path := range []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"} {
+		mux.HandleFunc("POST "+path, a.modelCall)
+	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		s, err := a.Queue.Snapshot()
 		if err != nil {
@@ -120,7 +123,7 @@ func (a API) Handler() http.Handler {
 		respond(w, map[string]bool{"ok": true}, a.Queue.Leave(r.PathValue("id"), c.Now))
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") && (a.Token == "" || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")), []byte(a.Token)) != 1) {
+		if (strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/")) && (a.Token == "" || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")), []byte(a.Token)) != 1) {
 			http.Error(w, "invalid fleet token", 401)
 			return
 		}

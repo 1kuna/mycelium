@@ -13,6 +13,7 @@ import (
 )
 
 type DevConfig struct {
+	ModelConfig                           ModelConfig
 	Address, Database, Checkpoints, Token string
 	GPU                                   string
 	Environments, Models                  []string
@@ -51,6 +52,25 @@ func StartDev(c DevConfig) (*Dev, error) {
 	if err != nil {
 		return nil, err
 	}
+	if c.ModelConfig.Idle <= 0 {
+		c.ModelConfig.Idle = 10 * time.Minute
+	}
+	if c.ModelConfig.Wait <= 0 {
+		c.ModelConfig.Wait = 5 * time.Minute
+	}
+	if len(c.ModelConfig.Models) == 0 {
+		c.ModelConfig.Models = []Model{{Name: "dev-model", Engine: "fake", Path: "fake", MemoryGB: 1, Platforms: []string{c.GPU}}}
+	}
+	for _, m := range c.ModelConfig.Models {
+		if m.Engine != "fake" {
+			q.Close()
+			return nil, errors.New("dev requires fake model engines")
+		}
+	}
+	if err = q.ConfigureModels(c.ModelConfig); err != nil {
+		q.Close()
+		return nil, err
+	}
 	listener, err := net.Listen("tcp", c.Address)
 	if err != nil {
 		q.Close()
@@ -76,7 +96,7 @@ func StartDev(c DevConfig) (*Dev, error) {
 		}
 	}()
 	for i := 0; i < c.Workers; i++ {
-		w := Worker{StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
+		w := Worker{ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
 		d.workerWG.Add(1)
 		go func() {
 			defer d.workerWG.Done()

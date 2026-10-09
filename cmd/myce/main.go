@@ -50,6 +50,11 @@ func run(args []string) error {
 	memory := f.Float64("memory-gb", 0, "free GPU memory budget lent to this worker")
 	environments := f.String("environments", "", "comma-separated ready environment names or lock-file paths")
 	models := f.String("models", "", "comma-separated already loaded model names")
+	modelFile := f.String("model-config", "", "model YAML config shared by queue and workers")
+	modelIdle := f.Duration("model-idle", 0, "override model idle timeout")
+	modelWait := f.Duration("model-wait", 0, "override maximum model wait")
+	modelListen := f.String("model-listen", "127.0.0.1:0", "worker model proxy listen address")
+	modelAdvertise := f.String("model-advertise", "", "worker model proxy URL reachable by queue")
 	workers := f.Int("workers", 2, "fake workers in dev mode")
 	now := f.Bool("now", false, "stop every job on leave")
 	follow := f.Bool("follow", false, "follow logs until the job is terminal")
@@ -70,12 +75,22 @@ func run(args []string) error {
 	client := myce.Client{URL: *url, Token: *token}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	mc, err := myce.ReadModels(*modelFile)
+	if err != nil {
+		return err
+	}
+	if *modelIdle > 0 {
+		mc.Idle = *modelIdle
+	}
+	if *modelWait > 0 {
+		mc.Wait = *modelWait
+	}
 	switch args[0] {
 	case "dev":
 		if *memory == 0 {
 			*memory = 64
 		}
-		d, err := myce.StartDev(myce.DevConfig{Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -92,6 +107,9 @@ func run(args []string) error {
 			return err
 		}
 		defer q.Close()
+		if err = q.ConfigureModels(mc); err != nil {
+			return err
+		}
 		q.SetRestartGrace(*restartGrace)
 		listener, err := net.Listen("tcp", *address)
 		if err != nil {
@@ -111,7 +129,7 @@ func run(args []string) error {
 		defer cancel()
 		return errors.Join(err, server.Shutdown(shutdown))
 	case "join":
-		w := myce.Worker{StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
@@ -217,6 +235,9 @@ func printStatus(s myce.Snapshot) {
 			state = "leaving"
 		}
 		fmt.Printf("machine %s: %s, %.1f GB free, %s\n", m.ID, m.GPU, m.FreeMemoryGB, state)
+	}
+	for _, m := range s.LoadedModels {
+		fmt.Printf("model %s on %s: %s, idle %.1fs, calls in flight %d %s\n", m.Model, m.Machine, m.State, m.IdleSeconds, m.InFlight, m.Error)
 	}
 	for _, j := range s.Jobs {
 		fmt.Printf("%s %s [%s] %s attempt=%d machine=%s %s\n", j.ID, j.Spec.Name, j.Spec.Priority, j.State, j.Attempt, j.Machine, j.Reason)

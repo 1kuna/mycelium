@@ -18,11 +18,13 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
-	Client   Client
-	Machine  Machine
-	Interval time.Duration
-	Clock    Clock
-	StateDir string
+	ModelConfig                 ModelConfig
+	ModelListen, ModelAdvertise string
+	Client                      Client
+	Machine                     Machine
+	Interval                    time.Duration
+	Clock                       Clock
+	StateDir                    string
 }
 type workerFinish struct {
 	result Result
@@ -272,6 +274,24 @@ func (w Worker) Run(stop context.Context) error {
 	if err = s.save(); err != nil {
 		return err
 	}
+	if w.ModelConfig.Idle <= 0 {
+		w.ModelConfig.Idle = 10 * time.Minute
+	}
+	if w.ModelConfig.Wait <= 0 {
+		w.ModelConfig.Wait = 5 * time.Minute
+	}
+	if err = validateModels(w.ModelConfig); err != nil {
+		return err
+	}
+	rt, err := startModels(w, s.dir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if e := rt.close(); e != nil {
+			log.Printf("model engine cleanup: %v", e)
+		}
+	}()
 	ctx := context.Background()
 	ticker := time.NewTicker(min(w.Interval, 100*time.Millisecond))
 	defer ticker.Stop()
@@ -321,7 +341,15 @@ func (w Worker) Run(stop context.Context) error {
 			}
 		}
 		if retry.ready(now) {
+			rt.mu.Lock()
+			rt.session = w.Machine.Session
+			rt.mu.Unlock()
 			m := w.Machine
+			if !recovering {
+				m.ModelURL = rt.url
+			}
+			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
+			reports, _ := rt.report()
 			m.Leaving = leaving
 			m.FreeMemoryGB = base
 			m.CheckpointUnavailable = workerCheckpointAvailable(s.state.CheckpointRoot) != nil
@@ -332,8 +360,9 @@ func (w Worker) Run(stop context.Context) error {
 				running = &Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt, Progress: progress}
 			}
 			var reply Reply
-			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession}, &reply)
+			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
 			if err == nil {
+				rt.sync(reply.ModelPlan)
 				fresh = false
 				if s.state.Fresh {
 					s.state.Fresh = false
@@ -448,7 +477,7 @@ func (w Worker) Run(stop context.Context) error {
 						}
 					}
 				}
-				if err == nil && leaving && s.state.Job == nil && !recovering {
+				if err == nil && leaving && s.state.Job == nil && !recovering && len(reply.ModelPlan) == 0 {
 					return nil
 				}
 			}

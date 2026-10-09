@@ -167,6 +167,8 @@ type Job struct {
 	Checkpoint string     `json:"checkpoint"`
 }
 type Machine struct {
+ ModelConfigHash string `json:"model_config_hash,omitempty"`
+	ModelURL              string    `json:"model_url,omitempty"`
 	CheckpointUnavailable bool      `json:"checkpoint_unavailable"`
 	ID                    string    `json:"id"`
 	Session               string    `json:"session"`
@@ -184,19 +186,21 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
-	PreviousSession string     `json:"previous_session,omitempty"`
-	Fresh           bool       `json:"fresh,omitempty"`
-	Machine         Machine    `json:"machine"`
-	Running         *Execution `json:"running,omitempty"`
+	ModelReports    []ModelReport `json:"model_reports,omitempty"`
+	PreviousSession string        `json:"previous_session,omitempty"`
+	Fresh           bool          `json:"fresh,omitempty"`
+	Machine         Machine       `json:"machine"`
+	Running         *Execution    `json:"running,omitempty"`
 }
 type Reply struct {
-	Hold           bool    `json:"hold"`
-	CheckpointRoot string  `json:"checkpoint_root"`
-	Job            *Job    `json:"job,omitempty"`
-	Stop           bool    `json:"stop"`
-	Kill           bool    `json:"kill"`
-	Leave          bool    `json:"leave"`
-	GraceSeconds   float64 `json:"grace_seconds"`
+	ModelPlan      []ModelSlot `json:"model_plan,omitempty"`
+	Hold           bool        `json:"hold"`
+	CheckpointRoot string      `json:"checkpoint_root"`
+	Job            *Job        `json:"job,omitempty"`
+	Stop           bool        `json:"stop"`
+	Kill           bool        `json:"kill"`
+	Leave          bool        `json:"leave"`
+	GraceSeconds   float64     `json:"grace_seconds"`
 }
 type Result struct {
 	Machine string `json:"machine"`
@@ -212,9 +216,10 @@ type LogChunk struct {
 	Text   string `json:"text"`
 }
 type Snapshot struct {
-	Warning  string     `json:"warning,omitempty"`
-	Jobs     []*Job     `json:"jobs"`
-	Machines []*Machine `json:"machines"`
+	LoadedModels []ModelSlot `json:"loaded_models"`
+	Warning      string      `json:"warning,omitempty"`
+	Jobs         []*Job      `json:"jobs"`
+	Machines     []*Machine  `json:"machines"`
 }
 
 func terminal(s string) bool { return s == "succeeded" || s == "failed" || s == "cancelled" }
