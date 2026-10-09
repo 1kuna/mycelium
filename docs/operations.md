@@ -422,3 +422,79 @@ in worker state and refreshed by actual copies, including resumed transfers.
 Measure a cold copy independently on each worker, then pre-copy every production
 model and confirm verified `ready` cache reports before sending traffic. A pin
 must additionally report its loaded engine ready.
+
+## Add a Mac mini or the 4090 PC in 2 minutes
+
+Prerequisites: the matching `myce` binary, mounted NAS with an existing
+`mycelium/checkpoints` directory, uv on PATH, and an existing queue address and
+fleet token. A Windows 4090 PC uses its Linux installation/WSL environment with
+CUDA visible to `nvidia-smi`; native Windows services are not supported.
+Set `MYCE_TOKEN` privately in the shell; avoid putting it in a command argument.
+
+On a Mac mini (adjust the mount name):
+
+```sh
+export MYCE_QUEUE=http://QUEUE_LAN_ADDRESS:7331
+myce install worker --nas /Volumes/NAS --dry-run
+myce install worker --nas /Volumes/NAS
+myce doctor
+```
+
+On the Linux 4090 PC:
+
+```sh
+export MYCE_QUEUE=http://QUEUE_LAN_ADDRESS:7331
+myce install worker --nas /mnt/nas --dry-run
+myce install worker --nas /mnt/nas
+myce doctor
+```
+
+Pass `--environment-config NAS/mycelium/environments/catalog.yaml` and
+`--model-config NAS/models/catalog.yaml` when using those catalogs (substitute
+absolute mounted paths). The setup summary shows OS/architecture, GPU platform,
+memory mode/reserve, checkpoint root, cache locations/limits, config and service.
+Apple Silicon uses unified memory with 4 GiB reserve, ordinary CUDA uses
+nvidia-smi with 2 GiB reserve, and Spark GB10 uses unified memory with 16 GiB
+reserve. Integrated Intel XPU uses OS memory with 8 GiB reserve. For discrete
+Intel GPUs, setup uses the device memory reported by verbose sycl-ls; if that
+cannot be measured, supply an explicit fixed device budget. Unknown GPU or
+memory detection fails clearly. OS CPU architecture is detected, not emulated.
+
+Default local setup is `~/.local/share/mycelium/worker`. The service uses a
+private 0600 credentials file and preserves the installer shell's executable
+PATH, so launchd can find uv installed in a user directory. Edit `config.json`
+for operational settings; keep `credentials.json` private. A worker starts with
+an empty environment cache and builds waiting-job software on demand.
+
+Linux systemd *user* services start at login. Boot before login additionally
+requires an administrator to enable lingering for that user (`loginctl
+enable-linger USER`); the installer deliberately does not obtain privileges.
+A macOS launchd agent starts when its user logs in, not before login. First
+software/model preparation can take longer than machine registration.
+
+To install the queue instead, provide a LAN bind address explicitly:
+
+```sh
+myce install queue --nas /mnt/nas --listen 0.0.0.0:7331 --dry-run
+myce install queue --nas /mnt/nas --listen 0.0.0.0:7331
+myce doctor --config ~/.local/share/mycelium/queue/config.json
+```
+
+Queue setup defaults to loopback binding. Point clients/workers at its reachable
+LAN address. Mount the NAS before starting the service; setup never creates a
+fake local replacement for an unavailable mount. Doctor checks the mount and
+write access (its generated probe is retained in NAS `.Trash`), queue
+reachability/authentication, GPU visibility for workers, uv, and free disk space.
+A healthy doctor is a prerequisite check, not a real-hardware workload proof.
+
+`myce uninstall --dry-run` previews removal of the worker setup. `myce uninstall`
+stops/disables its service, then moves service, private credentials, binary,
+spools and caches to recoverable local `.Trash` beneath the installation root.
+Use `--config .../queue/config.json` for queue removal. Nothing on the NAS is
+removed. Review recovery contents privately; never commit credentials or empty
+Trash automatically. An existing installation is never overwritten silently.
+
+See [environments](environments.md) for catalog authoring, lock files, build
+logs, cache limits, and interrupted-build recovery. Laptop tests use fake GPU
+probe output, temporary home directories and injected service runners; they
+never install actual boot services.

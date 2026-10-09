@@ -206,20 +206,33 @@ func (q *Queue) recordModelUse(name string) {
 	use.At = q.clock.Now()
 	q.s.ModelUses[name] = use
 }
+
+// placementBetter applies the same rule to foreground placement and build plans.
+func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
+	aa, bb := affinity(j, a), affinity(j, b)
+	if aa != bb {
+		return aa > bb
+	}
+	if len(j.Spec.Needs.Platform.Preferred) > 0 {
+		ap, bp := contains(j.Spec.Needs.Platform.Preferred, a.GPU), contains(j.Spec.Needs.Platform.Preferred, b.GPU)
+		if ap != bp {
+			return ap
+		}
+	}
+	if modelLoaded(j, a) != modelLoaded(j, b) {
+		return modelLoaded(j, a)
+	}
+	return q.loadSeconds(j.Spec.Needs.Model, a)+environmentSeconds(j, a) < q.loadSeconds(j.Spec.Needs.Model, b)+environmentSeconds(j, b)
+}
 func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
-	if j.Spec.Needs.Model == "" {
+	if j.Spec.Needs.Model == "" && j.Spec.Environment.Key() == "" {
 		return false
 	}
 	for _, other := range q.s.Machines {
 		if other.ID == m.ID || !q.workerIdle(other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
-		// Preserve explicit platform preferences and loaded/cache affinity before NAS cost.
-		if len(j.Spec.Needs.Platform.Preferred) > 0 && contains(j.Spec.Needs.Platform.Preferred, m.GPU) && !contains(j.Spec.Needs.Platform.Preferred, other.GPU) {
-			continue
-		}
-		a, b := affinity(j, other), affinity(j, m)
-		if a > b || a == b && q.loadSeconds(j.Spec.Needs.Model, other) < q.loadSeconds(j.Spec.Needs.Model, m) {
+		if q.placementBetter(j, other, m) {
 			return true
 		}
 	}

@@ -36,6 +36,12 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: myce queue|join|leave|submit|status|logs|cancel|dev")
 	}
+	if args[0] == "install" || args[0] == "uninstall" || args[0] == "doctor" {
+		return setupCommand(args)
+	}
+	if args[0] == "service" {
+		return serviceCommand(args[1:])
+	}
 	if args[0] == "model" {
 		return modelCommand(args[1:])
 	}
@@ -65,6 +71,10 @@ func run(args []string) error {
 	memory := f.Float64("memory-gb", 0, "memory cap in GiB (required for fixed/XPU/fake budgets)")
 	environments := f.String("environments", "", "comma-separated ready environment names or lock-file paths")
 	models := f.String("models", "", "comma-separated already loaded model names")
+	environmentFile := f.String("environment-config", "", "shared NAS environment catalog")
+	environmentSourceRoot := f.String("environment-root", "", "worker-local NAS environment catalog directory")
+	environmentRoot := f.String("environment-cache", "", "local environment cache directory")
+	environmentLimit := f.Int64("environment-cache-bytes", 20*1024*1024*1024, "active environment cache limit")
 	modelFile := f.String("model-config", "", "model YAML config shared by queue and workers")
 	modelIdle := f.Duration("model-idle", 0, "override model idle timeout")
 	modelWait := f.Duration("model-wait", 0, "override maximum model wait")
@@ -100,12 +110,16 @@ func run(args []string) error {
 	if *modelWait > 0 {
 		mc.Wait = *modelWait
 	}
+	ec, err := myce.ReadEnvironments(*environmentFile)
+	if err != nil {
+		return err
+	}
 	switch args[0] {
 	case "dev":
 		if *memory == 0 {
 			*memory = 64
 		}
-		d, err := myce.StartDev(myce.DevConfig{ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -122,6 +136,9 @@ func run(args []string) error {
 			return err
 		}
 		defer q.Close()
+		if err = q.ConfigureEnvironments(ec); err != nil {
+			return err
+		}
 		if err = q.ConfigureModels(mc); err != nil {
 			return err
 		}
@@ -160,7 +177,7 @@ func run(args []string) error {
 		if *copyParallel < 1 {
 			return errors.New("model-copy-parallel must be positive")
 		}
-		w := myce.Worker{CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
@@ -267,6 +284,10 @@ func printStatus(s myce.Snapshot) {
 		}
 		if m.MemoryError != "" {
 			state += "; memory unavailable: " + m.MemoryError
+		}
+		fmt.Printf("environments %s: ready=%v build seconds=%v\n", m.ID, m.Environments, m.EnvironmentBuildSeconds)
+		for _, r := range m.EnvironmentReports {
+			fmt.Printf("environment %s/%s: %s %s\n", m.ID, r.Key, r.State, r.Error)
 		}
 		for _, r := range m.CopyReports {
 			fmt.Printf("copy %s/%s: %s %d/%d bytes %s\n", m.ID, r.Model, r.State, r.Bytes, r.Total, r.Error)

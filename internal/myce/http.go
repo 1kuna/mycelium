@@ -135,6 +135,13 @@ func (a API) Handler() http.Handler {
 		}
 		respond(w, map[string]bool{"ok": true}, a.Queue.Complete(c))
 	})
+	mux.HandleFunc("POST /api/workers/environment-log", func(w http.ResponseWriter, r *http.Request) {
+		var c EnvironmentLog
+		if !decode(w, r, &c) {
+			return
+		}
+		respond(w, map[string]bool{"ok": true}, a.Queue.AppendEnvironmentLog(c))
+	})
 	mux.HandleFunc("POST /api/workers/log", func(w http.ResponseWriter, r *http.Request) {
 		var c LogChunk
 		if !decode(w, r, &c) {

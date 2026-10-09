@@ -37,6 +37,7 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	environments    EnvironmentCatalog
 	productionGrace time.Duration
 	wake            chan struct{}
 	models          ModelConfig
@@ -89,7 +90,7 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 	}
 	db.SetMaxOpenConns(1)
 	q := &Queue{productionGrace: 10 * time.Second, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
-	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq);`); err != nil {
+	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq);`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -232,8 +233,12 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 	}
 	var out Job
 	err := q.update(func() error {
+		recipes, e := q.resolveEnvironment(s.Environment)
+		if e != nil {
+			return e
+		}
 		id := ID()
-		j := &Job{ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j := &Job{EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		copy := cloneJob(j)
 		j = &copy
 		q.s.Jobs[id] = j
@@ -415,9 +420,13 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		m.LastSeen = q.clock.Now()
 		q.s.Machines[m.ID] = &m
 		q.reconcileModels(&m, c.ModelReports)
+		if e := q.reconcileEnvironments(&m); e != nil {
+			return e
+		}
 		m.FreeMemoryGB = max(0, m.FreeMemoryGB-q.modelReservation(&m, c.ModelReports))
 		q.maintain()
 		defer func() {
+			reply.EnvironmentPlan = q.environmentPlan(&m)
 			reply.ModelPlan = q.modelPlan(m.ID)
 			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
 		}()
@@ -751,7 +760,19 @@ func (q *Queue) Logs(id string, after int64) ([]Log, error) {
 		}
 		out = append(out, l)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if text := q.s.Jobs[id].EnvironmentFailureLog; text != "" && len(out) < 256 {
+		var seq int64
+		if err := q.db.QueryRow("SELECT COALESCE(MAX(seq),0)+1 FROM logs WHERE job=?", id).Scan(&seq); err != nil {
+			return nil, err
+		}
+		if seq > after {
+			out = append(out, Log{Seq: seq, Text: text})
+		}
+	}
+	return out, nil
 }
 
 func contains(v []string, s string) bool {
