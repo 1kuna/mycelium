@@ -69,6 +69,16 @@ type LlamaEngine struct {
 }
 
 func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
+	for _, v := range os.Environ() {
+		if strings.HasPrefix(v, "LLAMA_ARG_HF_") {
+			return errors.New("remote llama-server model environment is forbidden; use myce model fetch")
+		}
+		for _, key := range []string{"LLAMA_ARG_HF_REPO=", "LLAMA_ARG_HF_FILE=", "LLAMA_ARG_MODEL_URL=", "LLAMA_ARG_MMPROJ_URL="} {
+			if strings.HasPrefix(v, key) && strings.TrimPrefix(v, key) != "" {
+				return errors.New("remote llama-server model environment is forbidden; use myce model fetch")
+			}
+		}
+	}
 	listener, e := net.Listen("tcp", "127.0.0.1:0")
 	if e != nil {
 		return e
@@ -216,6 +226,7 @@ type workerModel struct {
 	drainRequested bool
 }
 type modelRuntime struct {
+	cache               *ModelCache
 	mu                  sync.Mutex
 	models              map[string]*workerModel
 	config              ModelConfig
@@ -243,6 +254,29 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 		return nil, e
 	}
 	rt := &modelRuntime{models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
+	root := w.CacheRoot
+	if root == "" {
+		root = filepath.Join(dir, "model-cache")
+	}
+	limit := w.CacheLimit
+	if limit == 0 {
+		limit = 100 * 1024 * 1024 * 1024
+	}
+	rt.cache = &ModelCache{Root: root, NASRoot: w.ModelRoot, Limit: limit, Clock: w.Clock}
+	rt.cache.Protected = func(key string) bool {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		for _, m := range rt.models {
+			if cacheKey(m.model) == key && m.state != "unloaded" && m.state != "failed" {
+				return true
+			}
+		}
+		return false
+	}
+	if e = rt.cache.init(); e != nil {
+		ln.Close()
+		return nil, e
+	}
 	rt.memorySource = w.MemorySource
 	rt.memoryMeasured = w.MemoryMeasured
 	rt.batchMemory = w.batchMemory
@@ -341,7 +375,14 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		rt.mu.Unlock()
 		return
 	}
-	e := m.engine.Load(ctx, m.model)
+	model := m.model
+	var e error
+	if model.Engine == "llama.cpp" || model.SizeBytes > 0 {
+		model.Path, e = rt.cache.Prepare(ctx, model)
+	}
+	if e == nil {
+		e = m.engine.Load(ctx, model)
+	}
 	m.cancel()
 	// A failed load may have started a process. Keep its memory reserved unless
 	// cleanup actually succeeds, even when the engine's own load cleanup failed.

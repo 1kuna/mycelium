@@ -1,7 +1,8 @@
 # Resumable jobs
 
 Set `resumable: true` only when the command can safely restart. Mycelium sends
-SIGTERM to the command's process group, allows two minutes to save and exit,
+SIGTERM to the command's process group, allows 10 seconds for production preemption (configurable), or two minutes for
+deadline preemption and planned leave, to save and exit,
 then sends SIGKILL if necessary. Do not daemonize or leave that group. Save
 periodically too: a machine that loses power cannot save on demand.
 

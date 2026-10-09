@@ -167,9 +167,21 @@ func TestDevCheckpointEndToEnd(t *testing.T) {
 	production.Run.Command = []string{"sh", "-c", "printf 'production finished\\n'"}
 	production.Run.Env = nil
 	var prod myce.Job
+	submitted := time.Now()
 	if err := c.Call(ctx, "POST", "/api/jobs", production, &prod); err != nil {
 		t.Fatal(err)
 	}
+	wait(t, ctx, func() bool {
+		if strings.Contains(readLogs(t, ctx, c, prod.ID), "production finished") {
+			return true
+		}
+		if time.Since(submitted) >= 15*time.Second {
+			t.Fatal("real myce dev production startup exceeded 15 seconds")
+		}
+		return false
+	})
+	t.Logf("real myce dev production submission-to-observed-command %.3fs (no model load)", time.Since(submitted).Seconds())
+
 	wait(t, ctx, func() bool {
 		var snap myce.Snapshot
 		if err := c.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {

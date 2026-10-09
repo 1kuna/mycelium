@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,9 @@ import (
 )
 
 type Model struct {
+	SizeBytes int64    `yaml:"size_bytes,omitempty" json:"size_bytes,omitempty"`
+	SHA256    string   `yaml:"sha256,omitempty" json:"sha256,omitempty"`
+	DirectNAS bool     `yaml:"direct_nas,omitempty" json:"direct_nas,omitempty"`
 	Name      string   `yaml:"name" json:"name"`
 	Engine    string   `yaml:"engine" json:"engine"`
 	Path      string   `yaml:"path" json:"path"`
@@ -61,12 +65,23 @@ func validateModels(c ModelConfig) error {
 		if m.Name == "" || seen[m.Name] || m.Path == "" || m.MemoryGB <= 0 || math.IsNaN(m.MemoryGB) || math.IsInf(m.MemoryGB, 0) || len(m.Platforms) == 0 {
 			return errors.New("models require unique names, path, positive memory and platforms")
 		}
+		if m.Engine != "fake" && (m.SizeBytes <= 0 || len(m.SHA256) != 64) {
+			return fmt.Errorf("model %s requires size_bytes and sha256", m.Name)
+		}
+		if m.SHA256 != "" {
+			if _, err := hex.DecodeString(m.SHA256); err != nil || len(m.SHA256) != 64 {
+				return errors.New("invalid model sha256")
+			}
+		}
 		seen[m.Name] = true
 		if m.Engine != "llama.cpp" && m.Engine != "fake" {
 			return fmt.Errorf("unsupported engine %q", m.Engine)
 		}
 		for _, arg := range m.Args {
-			for _, reserved := range []string{"--host", "--port", "--model", "--alias", "-m"} {
+			if strings.HasPrefix(arg, "--hf-") || strings.HasPrefix(arg, "--model-url") || strings.HasPrefix(arg, "--mmproj-url") {
+				return errors.New("remote model args are forbidden; use myce model fetch")
+			}
+			for _, reserved := range []string{"--host", "--port", "--model", "--alias", "-m", "--model-url", "-mu", "--hf-repo", "-hf", "--hf-file", "-hff", "--hf-token", "-hft", "--mmproj-url"} {
 				if arg == reserved || strings.HasPrefix(arg, reserved+"=") {
 					return fmt.Errorf("model args must not override %s", reserved)
 				}
@@ -111,6 +126,19 @@ func (q *Queue) ConfigureModels(c ModelConfig) error {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.calls != nil {
+		for _, p := range q.s.Pins {
+			found := false
+			for _, m := range c.Models {
+				if m.Name == p.Model {
+					found = true
+				}
+			}
+			if !found {
+				return fmt.Errorf("catalog removes pinned model %s; unpin first", p.Model)
+			}
+		}
+	}
 	q.models = c
 	q.calls = map[string]*ModelCall{}
 	if q.s.ModelSlots == nil {
@@ -183,7 +211,12 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 							c.Error = "model load failed: " + r.Error
 						}
 					}
-					delete(q.s.ModelSlots, key)
+					if q.slotPinned(s) {
+						s.State = "failed"
+						s.Error = r.Error
+					} else {
+						delete(q.s.ModelSlots, key)
+					}
 				} else if r.State == "unload_failed" {
 					s.State = "unload_failed"
 					s.Error = r.Error
@@ -214,13 +247,14 @@ func (q *Queue) maintainModels() {
 		q.s.ModelSlots = map[string]*ModelSlot{}
 	}
 	now := q.clock.Now()
+	q.maintainPins()
 	for k, s := range q.s.ModelSlots {
 		m := q.s.Machines[s.Machine]
 		if m == nil || m.Gone || m.Session != s.Session {
 			delete(q.s.ModelSlots, k)
 			continue
 		}
-		if m.Leaving || s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle {
+		if m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle {
 			s.State = "draining"
 		}
 	}
@@ -245,7 +279,13 @@ func (q *Queue) maintainModels() {
 		for _, m := range q.s.Machines {
 			machines = append(machines, m)
 		}
-		sort.Slice(machines, func(i, j int) bool { return machines[i].ID < machines[j].ID })
+		sort.Slice(machines, func(i, j int) bool {
+			a, b := contains(machines[i].CachedModels, c.Model), contains(machines[j].CachedModels, c.Model)
+			if a != b {
+				return a
+			}
+			return machines[i].ID < machines[j].ID
+		})
 		for _, m := range machines {
 			if m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !contains(model.Platforms, m.GPU) || q.unreported[m.ID] {
 				continue
@@ -302,14 +342,14 @@ func (q *Queue) maintainModels() {
 		for _, m := range eligible {
 			possible := m.FreeMemoryGB
 			for _, s := range q.s.ModelSlots {
-				if s.Machine == m.ID && s.State != "unload_failed" && rank(s.Priority) > rank(c.Priority) {
+				if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > rank(c.Priority) {
 					mm, _ := q.model(s.Model)
 					possible += mm.MemoryGB
 				}
 			}
 			var victim *Job
 			for _, j := range q.s.Jobs {
-				if j.Machine == m.ID && j.State == "running" && j.Spec.Resumable && !m.CheckpointUnavailable && checkpointAvailable(q.root) && rank(j.Spec.Priority) > rank(c.Priority) {
+				if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && (j.Spec.Resumable || c.Priority == "production") && !m.CheckpointUnavailable && checkpointAvailable(q.root) && rank(j.Spec.Priority) > rank(c.Priority) {
 					victim = j
 					possible += j.Spec.Needs.MemoryGB
 				}
@@ -319,7 +359,7 @@ func (q *Queue) maintainModels() {
 			}
 			q.makeModelRoom(m, model.MemoryGB, c.Priority)
 			if victim != nil && m.FreeMemoryGB+q.modelMemory(m.ID) < model.MemoryGB {
-				q.stop(victim, "making room for "+c.Priority+" model call")
+				q.stopFor(victim, c.Priority, "model call")
 			}
 			// Prefer draining models alone; if that cannot suffice, save the batch.
 			reclaimable := m.FreeMemoryGB
@@ -330,7 +370,7 @@ func (q *Queue) maintainModels() {
 				}
 			}
 			if reclaimable < model.MemoryGB && victim != nil {
-				q.stop(victim, "making room for "+c.Priority+" model call")
+				q.stopFor(victim, c.Priority, "model call")
 			}
 			break
 		}
@@ -372,7 +412,7 @@ func (q *Queue) maintainModels() {
 		for _, m := range machines {
 			possible := m.FreeMemoryGB
 			for _, s := range q.s.ModelSlots {
-				if s.Machine == m.ID && s.State != "unload_failed" && rank(s.Priority) > rank(j.Spec.Priority) {
+				if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > rank(j.Spec.Priority) {
 					mm, _ := q.model(s.Model)
 					possible += mm.MemoryGB
 				}
@@ -410,13 +450,13 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 		if s.Model == c.Model && s.State == "loading" {
 			return true
 		}
-		if s.InFlight == 0 && rank(s.Priority) > rank(c.Priority) {
+		if !q.slotPinned(s) && s.InFlight == 0 && rank(s.Priority) > rank(c.Priority) {
 			resident, _ := q.model(s.Model)
 			possible += resident.MemoryGB
 		}
 	}
 	for _, j := range q.s.Jobs {
-		if j.Machine == m.ID && j.State == "running" && j.Spec.Resumable && !m.CheckpointUnavailable && checkpointAvailable(q.root) && rank(j.Spec.Priority) > rank(c.Priority) {
+		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && (j.Spec.Resumable || c.Priority == "production") && !m.CheckpointUnavailable && checkpointAvailable(q.root) && rank(j.Spec.Priority) > rank(c.Priority) {
 			possible += j.Spec.Needs.MemoryGB
 		}
 	}
@@ -426,7 +466,7 @@ func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
 	for _, j := range q.s.Jobs {
 		memory := m.FreeMemoryGB
 		for _, s := range q.s.ModelSlots {
-			if s.Machine == m.ID && s.State != "unload_failed" && rank(s.Priority) > rank(j.Spec.Priority) {
+			if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > rank(j.Spec.Priority) {
 				model, _ := q.model(s.Model)
 				memory += model.MemoryGB
 			}
@@ -440,7 +480,7 @@ func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
 func (q *Queue) makeModelRoom(m *Machine, need float64, priority string) {
 	slots := []*ModelSlot{}
 	for _, s := range q.s.ModelSlots {
-		if s.Machine == m.ID && s.State != "unload_failed" && rank(s.Priority) > rank(priority) {
+		if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > rank(priority) {
 			slots = append(slots, s)
 		}
 	}

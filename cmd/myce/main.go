@@ -36,6 +36,9 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: myce queue|join|leave|submit|status|logs|cancel|dev")
 	}
+	if args[0] == "model" {
+		return modelCommand(args[1:])
+	}
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	url := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
 	token := f.String("token", env("MYCE_TOKEN", ""), "shared fleet token (prefer MYCE_TOKEN)")
@@ -43,6 +46,10 @@ func run(args []string) error {
 	db := f.String("db", "myce.db", "SQLite database file")
 	checkpoint := f.String("checkpoints", "./checkpoints", "queue NAS checkpoint root")
 	workerCheckpoint := f.String("checkpoint-root", env("MYCE_CHECKPOINT_ROOT", ""), "worker-local NAS root (may differ from queue mount path)")
+	cacheRoot := f.String("model-cache", "", "worker local model cache directory")
+	modelRoot := f.String("model-root", "", "worker NAS model root for relative model paths")
+	cacheLimit := f.Int64("model-cache-bytes", 100*1024*1024*1024, "maximum active cache bytes")
+	productionGrace := f.Duration("production-stop-grace", 10*time.Second, "production checkpoint grace")
 	heartbeat := f.Duration("heartbeat", time.Second, "worker check-in interval")
 	memoryMode := f.String("memory-mode", "auto", "memory source: auto, unified, dedicated, or fixed")
 	reserve := f.Float64("reserve-memory-gb", 0, "GPU memory to keep outside Mycelium")
@@ -118,6 +125,9 @@ func run(args []string) error {
 			return err
 		}
 		q.SetRestartGrace(*restartGrace)
+		if err = q.SetProductionGrace(*productionGrace); err != nil {
+			return err
+		}
 		if err = q.SetLossTimeouts(*productionLoss, *deadlineLoss, *experimentLoss); err != nil {
 			return err
 		}
@@ -146,7 +156,7 @@ func run(args []string) error {
 		if *heartbeat <= 0 {
 			return errors.New("heartbeat must be positive")
 		}
-		w := myce.Worker{MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
@@ -254,12 +264,19 @@ func printStatus(s myce.Snapshot) {
 		if m.MemoryError != "" {
 			state += "; memory unavailable: " + m.MemoryError
 		}
+		fmt.Printf("cache %s: %v, %d bytes free %s\n", m.ID, m.CachedModels, m.CacheFreeBytes, m.CacheError)
 		fmt.Printf("machine %s: %s, %.1f GB free, %s\n", m.ID, m.GPU, m.FreeMemoryGB, state)
+	}
+	for _, p := range s.Pins {
+		fmt.Printf("pin %s/%s: machine=%s platform=%s assigned=%s window=%s-%s %s\n", p.Project, p.Model, p.Machine, p.Platform, p.Assigned, p.Start, p.End, p.Timezone)
 	}
 	for _, m := range s.LoadedModels {
 		fmt.Printf("model %s on %s: %s, idle %.1fs, calls in flight %d %s\n", m.Model, m.Machine, m.State, m.IdleSeconds, m.InFlight, m.Error)
 	}
 	for _, j := range s.Jobs {
+		if j.StartedAt != nil && j.Spec.Priority == "production" {
+			fmt.Printf("production start latency %s: %.3fs\n", j.ID, j.StartLatencySeconds)
+		}
 		fmt.Printf("%s %s [%s] %s attempt=%d machine=%s %s\n", j.ID, j.Spec.Name, j.Spec.Priority, j.State, j.Attempt, j.Machine, j.Reason)
 	}
 	if len(s.Jobs) == 0 {

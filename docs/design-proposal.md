@@ -48,11 +48,24 @@ The queue gives every job a few environment variables: its job id, a checkpoint 
 When a worker asks for work, the queue picks, from the jobs that fit this machine's free memory and GPU type:
 
 1. the highest priority first: production, then deadline, then experiment;
-2. within the same priority, a job whose model is already loaded on this machine (this avoids slow model loads);
+2. within the same priority, a model already loaded, then cached locally, then needing a NAS copy;
 3. then the earliest deadline;
 4. then the job that has waited longest.
 
-**Making room.** If a production or deadline job is waiting and no machine has room, the queue may stop a lower-priority job that is marked `resumable`. That job gets a stop signal and a grace period (default 2 minutes) to save and exit, then goes back to the front of its priority line. A job that is not resumable is never stopped to make room; it finishes first.
+**Making room.** Production is checked first on every check-in and immediately
+on submission. When no idle fitting machine has room, stop lower-priority work
+right away through an authenticated long-poll notification, without waiting for
+its next check-in. Resumable work receives SIGTERM and 10 seconds by default to
+save; the queue's `--production-stop-grace` configures that duration. Deadline
+work still allows 2 minutes and only stops resumable lower-priority jobs.
+Production also stops non-resumable lower-priority work immediately. Stopped
+jobs return to the front of their priority line without consuming an
+infrastructure retry; non-resumable jobs start over with a new execution attempt.
+**Make experiments resumable and save checkpoints often**: production may arrive
+at any moment, and a power cut offers no grace at all. Status reports production
+submission-to-start acknowledgement latency; the laptop dev test exercises the actual process
+start under 15 seconds, excluding model load time.
+
 
 **Machines leaving.** Workers pull jobs, so a job is never tied to a machine until it starts. That means there is no list of waiting jobs per machine to clean up. Leaving works like this:
 
@@ -110,7 +123,7 @@ This is not in the first version, but the job format is designed now so it won't
 - **GPU preference.** A job either requires a platform (`cuda`, `xpu`, `metal`/MLX), or states a preferred one, or doesn't care. If it doesn't care, it goes to any machine that can run it.
 - **Environments.** A job names the software it needs, either a named environment (like `torch-cuda` or `mlx`) or a lock file. Workers report which environments they already have ready. The queue prefers a machine whose environment is ready, the same way it prefers a machine with the model already loaded. If none has it ready, a machine that *can* build it does so first.
 - **Automatic setup.** One install command on a new machine detects its GPU and operating system, installs the worker, and sets up the matching environments.
-- **Reserving models at set times.** If a person ever needs instant answers, a production model could stay loaded during set hours. Today the callers are background systems, so waiting for a model to load is fine.
+- **Model reservations are implemented now:** project-owned pins can hold a model continuously or within explicit weekday/time-zone windows. See Models below.
 
 The first version already has the hooks for this: the `platform` and `environment` fields exist from day one, and the scheduling rules treat "environment ready" like "model loaded".
 
@@ -128,8 +141,45 @@ The first version already has the hooks for this: the `platform` and `environmen
 1. **GPU work only.** CPU-only work stays outside the queue.
 2. **No app holds a GPU continuously; that is the point.** Every app is reworked so its GPU use becomes jobs. That takes two kinds of job:
    - **Batch jobs:** a command that runs and finishes (indexing, training, transcription runs). Described above.
-   - **Model calls:** a single request to a model, such as an embedding for one search or one chat completion. Apps send these to the queue in the standard OpenAI request format, with a priority. The queue sends the call to a machine that already has that model loaded. If no machine has it loaded, the queue has a worker load it, and the first call waits for the load. A loaded model that hasn't been used for a while (default 10 minutes), or whose memory a more important job needs, is unloaded. So a model stays loaded only while it's actually being used.
+   - **Model calls:** a single request to a model, such as an embedding for one search or one chat completion. Apps send these to the queue in the standard OpenAI request format, with a priority. The queue sends the call to a machine that already has that model loaded. If no machine has it loaded, the queue has a worker load it, and the first call waits for the load. An unpinned loaded model that hasn't been used for a while (default 10 minutes), or whose memory a more important job needs, is unloaded. So a model stays loaded only while it's actually being used.
    Atlas search, for example, stops holding a GPU. Each query becomes a model call, and when nobody is searching, the GPU is free for other work.
 3. **Checkpoints and shared files live on the NAS**, so jobs can resume on any machine.
 4. **One local network.** No Tailscale or internet exposure needed.
 5. **Plain commands, not containers.** Containers would add isolation, and would bundle each job's software so it runs the same on every machine. Plain commands mean each machine needs the job's software installed, but they are much simpler and work on the Macs, where GPU containers don't. Containers can be added later for the Linux machines if setting up software becomes a pain.
+
+## Models: NAS masters, local cache, and production pins (maintainer, 2026-10-09)
+
+The NAS holds the master copy of every model file. `myce model fetch` explicitly
+downloads an approved Hugging Face HTTPS file into a NAS folder, verifying its
+expected byte count and SHA-256. Loading never fetches from the internet.
+The catalog `path` names the NAS master: preferably relative to each worker's
+`--model-root`, or an absolute NAS mount path when all workers share that path.
+Real models require `size_bytes` and `sha256`. Keep immutable masters and update
+the catalog when changing weights.
+
+Each worker has a local `--model-cache` directory (default under its state
+folder) and `--model-cache-bytes` limit (default 100 GiB). First use checks local
+free space and cache capacity, moves least-recently-used unloaded copies to
+Trash, writes a `.partial` file, verifies size and SHA-256, syncs, and renames.
+Loaded/loading/draining models are protected from cache eviction. Restart moves
+interrupted copies to Trash. With `--model-root`, Trash lives under the NAS root;
+cross-filesystem eviction saves and verifies a recovery copy before finishing
+the move. Without a model root, user Trash is used; it may not release local
+blocks, in which case the load refuses clearly. Never empty Trash automatically.
+Worker check-ins report cached model names, available cache bytes (the lesser of
+filesystem free bytes and remaining cache allowance), and errors. Status exposes
+those reports. Copy and verification time are part of model load time. Large
+models always load from local disk. `direct_nas: true` is an explicit per-model
+exception intended for small models; verify it before reading the NAS master.
+
+`myce model pin MODEL --project PROJECT --machine MACHINE` holds a production
+model on one worker. `--platform cuda|metal|xpu` instead chooses one eligible
+worker of that platform, retaining the assignment while healthy. Pins are stored
+in SQLite and shown in status. They reserve the model's GPU memory and prevent
+idle unloading, priority reclamation, and disk-cache eviction while loaded.
+`myce model unpin MODEL --project PROJECT` releases protection. Optional
+`--weekdays 1,2,3,4,5 --start 08:00 --end 20:00 --timezone America/New_York`
+implements reservations now. Windows are start-inclusive/end-exclusive and must
+not cross midnight. Initial pin warmup and unavailable hardware remain visible;
+a ready pin serves calls without a model load wait. A pin cannot promise
+availability while its machine or NAS is down.

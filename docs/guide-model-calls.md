@@ -88,14 +88,19 @@ max_wait: 5m
 models:
   - name: chat
     engine: llama.cpp
-    path: /shared/models/chat.gguf
+    path: chat.gguf
+    size_bytes: REPLACE_WITH_EXACT_BYTES
+    sha256: REPLACE_WITH_APPROVED_SHA256
     memory_gb: 24
     platforms: [cuda, metal, xpu]
     args: [--ctx-size, "32768"]
 ```
 
-Names are unique. `path` is a local GGUF file on every eligible worker; there is
-no download or installation step. `memory_gb` is the operator's total GPU memory
+Names are unique. `path` names a NAS master GGUF, relative to `--model-root`
+or an absolute mount path. Supply trusted exact `size_bytes` and `sha256` in
+place of the placeholders above. Workers verify and cache it locally before
+loading; `direct_nas: true` explicitly permits a small model to bypass the cache.
+Loading has no download or installation step. `memory_gb` is the operator's total GPU memory
 budget for weights, KV cache, and concurrent engine slots. `platforms` limits
 placement. `args` supplies model-specific llama-server options, including
 context/template/sampling flags and `--embedding` for embedding models. The
@@ -118,7 +123,8 @@ by the queue and advertise that exact URL:
 myce queue --model-config models.yaml --listen 192.0.2.10:7331 \
   --checkpoints /shared/checkpoints
 myce join --queue http://192.0.2.10:7331 --name gpu-worker --gpu cuda \
-  --memory-gb 48 --model-config models.yaml \
+  --memory-gb 48 --model-config models.yaml --model-root /shared/models \
+  --model-cache /local/disk/myce-models --model-cache-bytes 107374182400 \
   --model-listen 192.0.2.20:7332 --model-advertise http://192.0.2.20:7332
 ```
 
@@ -158,7 +164,10 @@ already admitted calls may finish. The worker unloads only when both the queue's
 admitted calls and its local in-flight calls reach zero. Memory is released only
 after the worker reports successful unload. Failed unload retains its reservation
 and appears in status. Lower-priority resumable batches may save and pause for
-calls, following the batch stop-grace rule; non-resumable batches finish first.
+calls, following the batch stop-grace rule: production grants 10 seconds and
+also stops non-resumable lower-priority batches immediately; deadlines grant
+2 minutes and preserve non-resumable work. Pinned models never idle-unload
+or surrender their memory to other work.
 
 `max_wait` defaults to five minutes and bounds queue/load waiting (including a
 retry's placement). It is not an inference execution limit. Clients should use
@@ -193,3 +202,23 @@ no peer registry, leases, containers, or continuously reserved app GPUs.
 `myce status`, `/api/status` (`loaded_models`), and the status page show each
 model's worker, loading/ready/draining state, idle seconds, calls in flight, and
 unload errors. In-flight calls show zero idle seconds.
+
+## Explicit master download and pins
+
+```sh
+myce model fetch chat.gguf --model-root /shared/models \
+  --url https://huggingface.co/OWNER/REPO/resolve/REVISION/chat.gguf \
+  --size-bytes EXACT_BYTES --sha256 APPROVED_HASH
+myce model pin chat --project atlas --machine spark
+# Or choose one eligible machine on a platform, optionally during work hours:
+myce model pin chat --project atlas --platform cuda \
+  --weekdays 1,2,3,4,5 --start 08:00 --end 20:00 --timezone America/New_York
+myce status
+myce model unpin chat --project atlas
+```
+
+Use one pin command per project/model; unpin before changing its target. Wait
+for assigned ready state before expecting calls without load wait. Copy time
+counts as load time; the queue prefers ready, then locally cached, then cold
+placements. Cache eviction protects loaded models and preserves removed files in
+Trash. See [operations](operations.md) for physical disk space and recovery.
