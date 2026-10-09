@@ -47,7 +47,8 @@ needs:
 resumable: false
 YAML
 id=$(./myce submit job.yaml)
-./myce logs "$id" --follow
+./myce wait "$id"
+./myce logs "$id"
 ./myce status
 ```
 
@@ -103,12 +104,18 @@ for llama.cpp configuration, shared memory scheduling, and recovery behavior.
 
 ## Commands
 
+For long jobs, start one detached `myce wait` and end the agent turn; read logs
+after it exits. Wait exits `0` for all success, `1` for failed/cancelled jobs,
+`2` for usage/auth/API errors, `3` for timeout, and `4` for interruption.
+It retries queue/network outages. See [agent waiting](docs/START-HERE.md#waiting-for-long-jobs-agents).
+
 ```sh
 myce queue --listen 127.0.0.1:7331 --db myce.db --checkpoints /shared/checkpoints
 myce join --name laptop --gpu fake --memory-gb 16 --reserve-memory-gb 2 --heartbeat 1s
 myce leave --name laptop              # asks wait/stop for non-resumable jobs
 myce leave --name laptop --now         # signals every job; keeps checkpoint grace
 myce submit job.yaml
+myce wait <id> [<id>...] --timeout 2h # wait only; timeout does not cancel
 myce status
 myce logs <id> --follow
 myce cancel <id>

@@ -58,7 +58,8 @@ expected_minutes: 90
 resumable: false
 YAML
 atlas_id=$("$MYCE" submit /tmp/atlas-batch.yaml)
-"$MYCE" logs "$atlas_id" --follow
+"$MYCE" wait "$atlas_id"
+"$MYCE" logs "$atlas_id"
 "$MYCE" status
 ```
 
@@ -263,8 +264,9 @@ needs:
 resumable: false
 YAML
 production_id=$("$MYCE" submit /tmp/verso-production.yaml)
-"$MYCE" logs "$production_id" --follow
-"$MYCE" logs "$experiment_id" --follow
+"$MYCE" wait "$production_id" "$experiment_id" # one detached wait for both
+"$MYCE" logs "$production_id"
+"$MYCE" logs "$experiment_id"
 "$MYCE" status
 ```
 
@@ -336,11 +338,15 @@ idempotent or attempt-isolated; the checkpoint folder alone does not isolate
 deadline` and add `deadline: 2026-10-09T18:00:00Z`. To stop waiting after a chosen
 time add `give_up_at: 2026-10-10T18:00:00Z`; neither field terminates running work.
 
+For long jobs, run the wait below detached as described in
+[the agent workflow](START-HERE.md#waiting-for-long-jobs-agents).
+
 After writing the selected job to `job.yaml`, the deployment submission flow is:
 
 ```sh
 id=$("$HOME/.local/bin/myce" submit job.yaml)
-"$HOME/.local/bin/myce" logs "$id" --follow
+"$HOME/.local/bin/myce" wait "$id"
+"$HOME/.local/bin/myce" logs "$id"
 "$HOME/.local/bin/myce" status
 # If cancellation is desired:
 # "$HOME/.local/bin/myce" cancel "$id"
@@ -358,8 +364,11 @@ reserve; the cap never replaces the live probe. Follow
 [operations](operations.md) for local service installation and lending/reclaiming
 GPUs. This document performs no fleet launch or production cutover.
 
-A submission is not completion. Retain the ID, follow logs, and inspect the
-terminal state (`logs --follow` itself does not assert success). Command failure
+A submission is not completion. Retain the ID and run one detached `myce wait
+ID` (or `myce wait ID && <next step>`), then end the agent turn. Read logs/status
+once it exits; do not keep an agent checking status. See [waiting for long jobs](START-HERE.md#waiting-for-long-jobs-agents)
+for exit codes and saving the outcome. `--timeout DURATION` never cancels a job.
+`logs --follow` itself does not assert success. Command failure
 fails immediately; infrastructure loss may restart it. Queue restart interrupts
 active HTTP model requests, so callers must decide whether to resubmit. Do not
 blindly retry external writes. See [checkpoint guide](guide-resumable-jobs.md)

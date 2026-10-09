@@ -79,21 +79,46 @@ id=$(/tmp/myce-starthere submit job.yaml)
 /tmp/myce-starthere status --full
 /tmp/myce-starthere logs "$id"
 /tmp/myce-starthere cancel "$id"
-/tmp/myce-starthere logs "$id" --follow
+(/tmp/myce-starthere wait "$id" > wait.log 2>&1; echo "$?" > wait.exit) &
+```
+
+End your turn. Once the shell reports that background command has exited, read:
+
+```sh
+cat wait.log wait.exit
+/tmp/myce-starthere logs "$id"
 /tmp/myce-starthere status --full
 ```
 
-Status may first show `queued`; repeat status/logs until you see `running` if
-you want to inspect execution before cancelling. The final state should be
-`cancelled`. Logs include the job and attempt (one execution of that job) and its
-checkpoint folder. If you cancel before it starts, there may be no command logs.
+Status may first show `queued`. The background wait ends when cancellation
+finishes; its exit code is `1` for this cancelled job. Read the saved exit code
+and logs after it exits. The final state should be `cancelled`. Logs include the
+job and attempt (one execution of that job) and its checkpoint folder. If you
+cancel before it starts, there may be no command logs.
 The HTML status page is also at the queue address. It is read-only.
 
 Ctrl-C in terminal A stops dev. Its database, checkpoints, and worker state
 remain in the demo directory; dev can reuse them. Move the demo directory to
 Trash when finished. Never run two dev processes against the same database.
 For parser help, run `/tmp/myce-starthere dev --help` (and replace `dev` with
-`submit`, `status`, `logs`, or `cancel`). Help prints usage and exits nonzero.
+`submit`, `status`, `logs`, `wait`, or `cancel`). Wait help exits zero;
+the other commands' help prints usage and exits nonzero.
+
+## Waiting for long jobs (agents)
+
+Submit the job and record its full ID. Start **ONE** cheap background command,
+`myce wait "$id"` (or `myce wait "$id" && <next step>`), then end your turn.
+Use the host's detached-task facility, or `nohup` with redirected output if the
+shell will close. Do not keep an AI agent alive checking status. Only after the
+wait exits, read `myce logs "$id"` / status and the wait's exit code once.
+The try-out above saves that code in `wait.exit`; use separate files per wait.
+
+`myce wait ID [ID...]` waits for every listed job, prints one final-state line
+per job, and reconnects after queue/network outages. Exit codes: `0` all
+succeeded; `1` any failed/cancelled; `2` usage/auth/API error (including an unknown
+ID); `3` timeout; `4` interrupted. Optional `--timeout 2h` bounds only the wait
+and **does not cancel jobs**. A timeout or error is not job completion: retain
+the IDs and arrange another single background wait if work is still running.
 
 ## 4. Integration checklist
 
@@ -128,7 +153,8 @@ For parser help, run `/tmp/myce-starthere dev --help` (and replace `dev` with
    resumable work. See [the reference](job-reference.md#scheduling-and-results).
 
 5. **Choose the command line (CLI) or Python at the CPU caller.** The CLI serves
-   manual trials and shell callers; `submit` prints the job ID. Retain that ID.
+   manual trials and shell callers; `submit` prints the job ID. Retain that ID
+   and use `myce wait` as described above.
    For Python 3.10+, install the client from the Mycelium checkout into the
    project's own virtual environment (an isolated Python/package directory):
 
@@ -155,7 +181,7 @@ For parser help, run `/tmp/myce-starthere dev --help` (and replace `dev` with
    `Path` means a YAML file; a string means YAML text. Read logs with
    `client.logs(job["id"], follow=True)` and cancel with `client.cancel(job["id"])`.
    A wait timeout does not cancel a job. CLI log following also does not assert
-   success: inspect status afterward. See [client details](../clients/python/README.md).
+   success: use `myce wait` to report the outcome. See [client details](../clients/python/README.md).
    For OpenAI calls use `Client.openai` as shown in [the integration examples](integrating.md#python-project-client).
    For other HTTP APIs follow [general servers](guide-servers.md#http-passthrough).
    A batch's `needs.model` is a placement/copy hint; it does not start a server.

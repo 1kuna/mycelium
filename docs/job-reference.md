@@ -76,7 +76,7 @@ All commands accept `--queue` (`MYCE_QUEUE`, otherwise
 Prefer the environment over a token argument visible in process listings.
 Dev alone defaults to `dev-token`. Use `myce <command> --help` for the live parser.
 Flags belong before the positional argument except that `logs ID --follow`,
-`submit FILE`, and `cancel ID` also work.
+`submit FILE`, `cancel ID`, and `wait ID [ID...] --timeout DURATION` also work.
 
 | Command / flag | Default | Purpose |
 |---|---|---|
@@ -109,6 +109,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `join --model-advertise` | Local proxy URL | Explicit URL reachable by queue for LAN workers |
 | `leave --name` | Hostname | Stop assigning work; ask wait/stop for non-resumable jobs |
 | `leave --now` | `false` | Signal all jobs, still allowing checkpoint grace |
+| `wait ID [ID...] --timeout DURATION` | Unlimited | Wait for every final state; timeout never cancels jobs |
 | `logs ID --follow` | `false` | Follow until terminal and drain final logs |
 | `dev --workers` | `2` | Fake workers, real command runner |
 | `dev --memory-gb` | `64` | Per-worker fake budget |
@@ -116,8 +117,17 @@ Flags belong before the positional argument except that `logs ID --follow`,
 
 `dev` also accepts listen/db/checkpoints, environments, models, and model catalog
 settings. Its root is local and created automatically. Custom dev catalogs must
-use the fake engine. `status`, `submit`, `logs`, `cancel`, and `leave` use the API;
+use the fake engine. `status`, `submit`, `logs`, `wait`, `cancel`, and `leave` use the API;
 `leave` does not disable a service's automatic restart policy.
+
+`wait` prints each full ID, final state (`succeeded`, `failed`, `cancelled`),
+and reason once. It polls every three seconds and backs off to ten seconds
+through network errors, queue restarts, HTTP 408/429 and server errors. Use full
+submitted IDs; unknown IDs and other HTTP client errors fail immediately.
+Exit codes: `0` all succeeded (also help), `1` any failed/cancelled, `2`
+usage/auth/API error, `3` timeout, `4` interrupted. `--timeout` must be positive;
+omit it to wait indefinitely. Timeout/interruption leaves the jobs running.
+Run one wait detached for long jobs; see [the agent workflow](START-HERE.md#waiting-for-long-jobs-agents).
 
 ## HTTP and models
 
@@ -153,8 +163,8 @@ and requires `MYCE_TOKEN` unless passed explicitly. Time values are seconds.
 `submit` accepts a mapping or YAML/path with the optional YAML extra;
 `submit_yaml` explicitly parses YAML. `status`, `list`, `get`, and `cancel` use
 the same authenticated API. `wait(timeout=None)` waits indefinitely by default
-and returns failed/cancelled states too. `logs(follow=False, after=0)` yields
-log chunks; retain `seq` to resume. Errors propagate as `APIError` or transport
+and returns failed/cancelled states too. A wait timeout does not cancel the job.
+`logs(follow=False, after=0)` yields log chunks; retain `seq` to resume. Errors propagate as `APIError` or transport
 errors, and client timeouts do not cancel jobs.
 
 `Client.openai(project=..., priority="experiment", deadline=None)` needs the

@@ -4,6 +4,12 @@ Run these steps in order under explicit fleet authorization; stop at the first
 failed gate. This document is the detailed Mycelium acceptance sequence. The
 [weekend checklist](weekend-runbook.md) orders it with the project migrations. Other guides
 explain contracts and general operations, not additional acceptance sequences.
+Run long builds, model copies, measurement runs and jobs detached. Record job
+IDs and start ONE background `myce wait ID [ID...]`; otherwise use one cheap
+background wait on a finished marker that records the exit code. A copy's ready
+marker must represent verified cache readiness, not submission of a sync request.
+End the agent turn, then read logs/status/evidence only after the wait exits;
+never leave an AI agent checking progress. See [the waiting workflow](START-HERE.md#waiting-for-long-jobs-agents).
 No fleet command here was executed during the local pre-production review.
 
 The old v1 service was already removed from B70 on **2026-10-09**. Do not
@@ -173,8 +179,8 @@ B70:
 "$MYCE" status
 ```
 
-Wait for `cached_models` to include `production-smoke` and its copy report to be
-`ready`. Record exact bytes, wall duration, achieved bytes/s, filesystem free
+Use one background wait on a verified-ready marker, then confirm `cached_models`
+includes `production-smoke` and its copy report is `ready`. Record exact bytes, wall duration, achieved bytes/s, filesystem free
 space and remaining cache allowance. This real measured cold copy replaces the
 40 MB/s initial estimate; do not substitute historical B70/Spark speeds. Confirm
 local `.partial` becomes a full local cache file only after size/SHA verification.
@@ -235,7 +241,8 @@ allowed_machines: [spark-v2-test]
 resumable: false
 YAML
 batch_id=$("$MYCE" submit ~/.local/share/myce/batch.yaml)
-"$MYCE" logs "$batch_id" --follow
+"$MYCE" wait "$batch_id" # run detached; read logs after it exits
+"$MYCE" logs "$batch_id"
 "$MYCE" status
 ```
 
@@ -247,7 +254,8 @@ alone is not success.
 ## 8. Test copy cancellation, network loss and priority arrival
 
 Using the disposable `copy-smoke` catalog model that fits beside the pin, run
-`myce model sync copy-smoke --to spark-v2-test` and wait for nonzero partial bytes.
+`myce model sync copy-smoke --to spark-v2-test` and use one background wait for
+a nonzero-partial-bytes marker before the fault step.
 Keep both models in the initial queue/worker catalog; do not edit it mid-test. During the
 copy submit the batch from step 7. Acceptance: production starts promptly
 (target <15s excluding model load), copy pauses, partial bytes remain, pin stays
@@ -306,7 +314,8 @@ one retained winner and stale-result rejection, not exactly-once external side e
 
 ## 10. Undo only v2, retaining all recovery evidence
 
-Cancel unfinished test job IDs and wait for stop acknowledgement, then B70:
+Cancel unfinished test job IDs and use one background `myce wait ID [ID...]`
+for final cancellation/stop acknowledgement (exit `1` is expected), then B70:
 
 ```sh
 "$MYCE" model unpin production-smoke --project v2-founder-test
@@ -402,6 +411,9 @@ myce measure --queue "$MYCE_QUEUE" --worker b70-gpu0 \
   --warmup /REVIEWED/LOCAL/verso-warmup.json \
   --report-prefix "$myce_measure_report" --output plain
 ```
+
+Run the measurement detached with a saved exit code and finished marker; use
+one background wait on that marker before inspecting reports/cleanup.
 
 Default cache locations match join's `model-cache` and `environment-cache` under
 its spool. Supply its explicit cache paths when different. Cache eviction is
