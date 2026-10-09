@@ -62,7 +62,7 @@ func (q *Queue) cachePins(m *Machine) []string {
 	out := []string{}
 	for _, p := range q.s.Pins {
 		model, ok := q.model(p.Model)
-		if ok && contains(model.Platforms, m.GPU) && (p.Machine == "" || p.Machine == m.ID) && (p.Platform == "" || p.Platform == m.GPU) && !contains(out, p.Model) {
+		if ok && modelFitsMachine(model, m) && (p.Machine == "" || p.Machine == m.ID) && (p.Platform == "" || p.Platform == m.GPU) && !contains(out, p.Model) {
 			out = append(out, p.Model)
 		}
 	}
@@ -139,7 +139,7 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 	if !busy {
 		for name := range wanted {
 			model, ok := q.model(name)
-			if ok && !cancelled[name] && model.SizeBytes > 0 && !model.DirectNAS && contains(model.Platforms, m.GPU) && !contains(m.CachedModels, name) {
+			if ok && !cancelled[name] && model.SizeBytes > 0 && !model.DirectNAS && modelFitsMachine(model, m) && !contains(m.CachedModels, name) {
 				plan = append(plan, CopyTask{name, scores[name]})
 			}
 		}

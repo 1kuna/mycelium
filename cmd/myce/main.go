@@ -42,6 +42,11 @@ func run(args []string) error {
 	if args[0] == "service" {
 		return serviceCommand(args[1:])
 	}
+	if args[0] == "measure" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runMeasure(ctx, args[1:], os.Stdout, os.Stderr)
+	}
 	if args[0] == "model" {
 		return modelCommand(args[1:])
 	}
@@ -67,6 +72,7 @@ func run(args []string) error {
 	stateDir := f.String("state-dir", "", "durable local worker spool directory")
 	hostname, _ := os.Hostname()
 	name := f.String("name", hostname, "unique machine name")
+	device := f.String("device", "", "physical GPU selector (one device per worker)")
 	gpu := f.String("gpu", "", "GPU type: cuda, xpu, metal, or fake")
 	memory := f.Float64("memory-gb", 0, "memory cap in GiB (required for fixed/XPU/fake budgets)")
 	environments := f.String("environments", "", "comma-separated ready environment names or lock-file paths")
@@ -167,7 +173,14 @@ func run(args []string) error {
 		defer cancel()
 		return errors.Join(err, server.Shutdown(shutdown))
 	case "join":
-		source, err := myce.NewMemorySourceWithMode(*gpu, *memory, *reserve, *memoryMode)
+		binding := *device
+		if *gpu == "cuda" && *device != "" {
+			binding, err = myce.ResolveCUDADevice(ctx, *device)
+			if err != nil {
+				return err
+			}
+		}
+		source, err := myce.NewDeviceMemorySource(*gpu, binding, *memory, *reserve, *memoryMode)
 		if err != nil {
 			return err
 		}
@@ -177,7 +190,7 @@ func run(args []string) error {
 		if *copyParallel < 1 {
 			return errors.New("model-copy-parallel must be positive")
 		}
-		w := myce.Worker{EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":

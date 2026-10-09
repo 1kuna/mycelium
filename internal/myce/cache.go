@@ -89,6 +89,14 @@ func (c *ModelCache) discardContext(ctx context.Context, path string) error {
 		return e
 	}
 	// Save and verify a recovery copy before asking mv to finish the Trash move.
+	if st, err := os.Lstat(path); err != nil {
+		return err
+	} else if st.IsDir() {
+		if err = c.recoverModelDirectory(ctx, path, dest); err != nil {
+			return err
+		}
+		return exec.CommandContext(ctx, "mv", path, dest+"-original").Run()
+	}
 	in, e := os.Open(path)
 	if e != nil {
 		return e
@@ -146,6 +154,9 @@ func (r contextReader) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
 }
 func verifyModelContext(ctx context.Context, path string, m Model) error {
+	if len(m.Files) > 0 {
+		return verifyModelFiles(ctx, path, m)
+	}
 	f, e := os.Open(path)
 	if e != nil {
 		return e
@@ -170,6 +181,14 @@ func (c *ModelCache) Precopy(ctx context.Context, m Model, score int) (string, e
 	return c.prepare(ctx, m, true, score)
 }
 func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, score int) (string, error) {
+	if len(m.Files) > 0 {
+		if e := validateModelFiles(m); e != nil {
+			return "", e
+		}
+		if e := noModelSymlinks(c.Root, false); e != nil {
+			return "", e
+		}
+	}
 	key := cacheKey(m)
 	// Admission, reservations, and eviction share one short lock. File I/O does
 	// not hold it, so independent copies can run with an explicit parallel limit.
@@ -227,7 +246,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		return "", e
 	}
 	c.mu.Lock()
-	if _, e = os.Stat(dest); e == nil && !cached {
+	if _, e = os.Lstat(dest); e == nil && !cached {
 		c.verified.Delete(key)
 		if c.Protected != nil && c.Protected(key) {
 			c.mu.Unlock()
@@ -240,8 +259,12 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	}
 	temp := dest + ".partial"
 	offset := int64(0)
-	if st, err := os.Stat(temp); err == nil {
-		offset = st.Size()
+	if _, err := os.Lstat(temp); err == nil {
+		offset, e = cacheEntrySize(temp)
+		if e != nil {
+			c.mu.Unlock()
+			return "", e
+		}
 	}
 	if offset > m.SizeBytes {
 		if e = c.discardContext(ctx, temp); e != nil {
@@ -274,14 +297,19 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		if k != key && c.active[k] != nil {
 			continue
 		}
-		used += st.Size()
+		entrySize, err := cacheEntrySize(filepath.Join(c.Root, ent.Name()))
+		if err != nil {
+			c.mu.Unlock()
+			return "", err
+		}
+		used += entrySize
 		if k == key || c.active[k] != nil || c.Protected != nil && c.Protected(k) {
 			continue
 		}
 		if background && c.Usage != nil && c.Usage(k) > score {
 			continue
 		}
-		victims = append(victims, entry{filepath.Join(c.Root, ent.Name()), k, st.Size(), st.ModTime().UnixNano()})
+		victims = append(victims, entry{filepath.Join(c.Root, ent.Name()), k, entrySize, st.ModTime().UnixNano()})
 	}
 	// Reserve other active models in full. Disk admission is deliberately
 	// conservative so in-flight writes cannot race the filesystem free snapshot.
@@ -367,6 +395,39 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		}
 		c.speedMu.Unlock()
 	}()
+	if len(m.Files) > 0 {
+		e = c.copyModelFiles(ctx, source, temp, m, &r, &copied)
+		if e != nil {
+			r.State = "paused"
+			r.Error = e.Error()
+			if errors.Is(e, errInvalidBundleCopy) {
+				r.State = "failed"
+				discardErr := c.discard(temp)
+				e = errors.Join(e, discardErr)
+				if discardErr == nil {
+					r.Bytes = 0
+				}
+			}
+			c.progress.Store(key, r)
+			return "", e
+		}
+		if e = os.Rename(temp, dest); e != nil {
+			return "", e
+		}
+		dir, err := os.Open(c.Root)
+		if err != nil {
+			return "", err
+		}
+		if e = errors.Join(dir.Sync(), dir.Close()); e != nil {
+			return "", e
+		}
+		c.verified.Store(key, true)
+		r.State = "ready"
+		r.Error = ""
+		c.progress.Store(key, r)
+		now := c.Clock.Now()
+		return dest, os.Chtimes(dest, now, now)
+	}
 	in, e := os.Open(source)
 	if e != nil {
 		r.State = "paused"
@@ -462,8 +523,9 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 // happens before joining; it cannot block heartbeats behind a large NAS copy.
 func (c *ModelCache) ValidateInventory(models []Model) {
 	for _, m := range models {
-		if st, e := os.Stat(filepath.Join(c.Root, cacheKey(m)+".partial")); e == nil {
-			c.progress.Store(cacheKey(m), CopyReport{Model: m.Name, State: "paused", Bytes: st.Size(), Total: m.SizeBytes})
+		c.verified.Delete(cacheKey(m))
+		if size, e := cacheEntrySize(filepath.Join(c.Root, cacheKey(m)+".partial")); e == nil {
+			c.progress.Store(cacheKey(m), CopyReport{Model: m.Name, State: "paused", Bytes: size, Total: m.SizeBytes})
 		}
 		if verifyModel(filepath.Join(c.Root, cacheKey(m)), m) == nil {
 			c.verified.Store(cacheKey(m), true)
@@ -483,20 +545,20 @@ func (c *ModelCache) Report(models []Model) ([]string, int64, error) {
 		if !strings.HasSuffix(ent.Name(), ".model") && !strings.HasSuffix(ent.Name(), ".partial") {
 			continue
 		}
-		st, err := ent.Info()
+		size, err := cacheEntrySize(filepath.Join(c.Root, ent.Name()))
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
 			return nil, 0, err
 		}
-		used += st.Size()
-		bytesByKey[strings.TrimSuffix(ent.Name(), ".partial")] += st.Size()
+		used += size
+		bytesByKey[strings.TrimSuffix(ent.Name(), ".partial")] += size
 		if _, ok := c.verified.Load(ent.Name()); !ok {
 			continue
 		}
 		for _, m := range models {
-			if ent.Name() == cacheKey(m) && st.Size() == m.SizeBytes {
+			if ent.Name() == cacheKey(m) && size == m.SizeBytes {
 				names = append(names, m.Name)
 			}
 		}
@@ -582,3 +644,6 @@ func (c *ModelCache) noteCopyError(m Model, err error) {
 	r.Error = err.Error()
 	c.progress.Store(key, r)
 }
+
+// Initialize prepares a standalone cache, as used by local measurement.
+func (c *ModelCache) Initialize() error { return c.init() }

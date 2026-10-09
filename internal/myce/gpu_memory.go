@@ -200,3 +200,38 @@ func parseCUDAFreeMemory(output []byte) (float64, error) {
 	}
 	return mib / 1024, nil
 }
+
+// NewDeviceMemorySource binds dedicated CUDA probes to the worker's device.
+// XPU admission remains an explicit fixed budget until a live driver query is qualified.
+func NewDeviceMemorySource(platform, device string, budget, reserve float64, mode string) (MemorySource, error) {
+	return newMemorySource(platform, budget, reserve, mode, runtime.GOOS, os.ReadFile, func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "nvidia-smi" && device != "" {
+			args = append(args, "--id="+device)
+		}
+		return exec.CommandContext(ctx, name, args...).Output()
+	})
+}
+
+// ResolveCUDADevice maps the operator's physical selector to the stable UUID
+// used by both CUDA_VISIBLE_DEVICES and NVIDIA-SMI, regardless of CUDA ordering.
+func ResolveCUDADevice(ctx context.Context, selector string) (string, error) {
+	return resolveCUDADevice(ctx, selector, func(c context.Context, name string, args ...string) ([]byte, error) {
+		return exec.CommandContext(c, name, args...).Output()
+	})
+}
+func resolveCUDADevice(ctx context.Context, selector string, command func(context.Context, string, ...string) ([]byte, error)) (string, error) {
+	if selector == "" || strings.ContainsAny(selector, ",\r\n") {
+		return "", errors.New("one CUDA device selector required")
+	}
+	c, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	b, e := command(c, "nvidia-smi", "--id="+selector, "--query-gpu=uuid", "--format=csv,noheader")
+	if e != nil {
+		return "", fmt.Errorf("resolve physical CUDA UUID: %w", e)
+	}
+	uuid := strings.TrimSpace(string(b))
+	if !strings.HasPrefix(uuid, "GPU-") || strings.ContainsAny(uuid, " \t\r\n,") {
+		return "", errors.New("CUDA selector did not resolve to exactly one GPU UUID")
+	}
+	return uuid, nil
+}

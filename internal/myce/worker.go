@@ -21,6 +21,7 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	DeviceBinding         string
 	EnvironmentSourceRoot string
 	EnvironmentRoot       string
 	EnvironmentLimit      int64
@@ -162,6 +163,18 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		env["PATH"] = filepath.Join(environmentPath, "venv", "bin") + string(os.PathListSeparator) + filepath.Join(environmentPath, "bin") + string(os.PathListSeparator) + env["PATH"]
 		env["VIRTUAL_ENV"] = filepath.Join(environmentPath, "venv")
 		env["MYCE_ENVIRONMENT_DIR"] = environmentPath
+	}
+	if w.Machine.Device != "" {
+		bound, e := WithModelDevice(Model{}, w.Machine.GPU, w.Machine.Device)
+		if e != nil {
+			return nil, e
+		}
+		for k, v := range bound.DeviceEnv {
+			env[k] = v
+		}
+		if w.Machine.GPU == "cuda" && w.DeviceBinding != "" {
+			env["CUDA_VISIBLE_DEVICES"] = w.DeviceBinding
+		}
 	}
 	env["MYCE_PROCESS_ID"] = identity
 	env["MYCE_JOB_ID"] = j.ID

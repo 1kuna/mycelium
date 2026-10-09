@@ -114,7 +114,7 @@ func (q *Queue) maintainPins() {
 		model, _ := q.model(p.Model)
 		candidates := []*Machine{}
 		for _, m := range q.s.Machines {
-			if !m.Gone && !m.Leaving && m.MemoryError == "" && m.ModelURL != "" && !q.unreported[m.ID] && contains(model.Platforms, m.GPU) && (p.Machine == "" || p.Machine == m.ID) && (p.Platform == "" || p.Platform == m.GPU) {
+			if !m.Gone && !m.Leaving && m.MemoryError == "" && m.ModelURL != "" && !q.unreported[m.ID] && modelFitsMachine(model, m) && (p.Machine == "" || p.Machine == m.ID) && (p.Platform == "" || p.Platform == m.GPU) {
 				candidates = append(candidates, m)
 			}
 		}

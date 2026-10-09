@@ -210,5 +210,9 @@ retry outages with exponential backoff capped at 30 seconds, using an injected
 clock. No new commands start while disconnected. The SQLite file keeps job states, fleet inventory, and logs across
 queue restarts. Never run two queue services against the same database.
 
-Automatic environment setup, vLLM, quotas, and redundant queue services are deferred. No v1 peer networking, leases, or replicated state
-is used.
+General HTTP servers and llama.cpp/vLLM presets share the model lifecycle; see
+[server calls](docs/guide-servers.md). Named software recipes build in the local
+environment cache. `myce measure` checks joint residency locally and writes JSON
+and plain reports; see the [B70 maintenance checklist](docs/production-test-plan.md#b70-gpu0-weekend-joint-residency-measurement).
+Quotas and redundant queue services remain deferred. No v1 peer networking,
+leases, or replicated state is used.

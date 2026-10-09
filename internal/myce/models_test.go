@@ -16,7 +16,7 @@ import (
 func modelFixture(t *testing.T) (*Queue, *fakeClock, Machine) {
 	t.Helper()
 	q, clock := fixture(t)
-	if err := q.ConfigureModels(ModelConfig{Idle: 10 * time.Minute, Wait: time.Minute, Models: []Model{{Name: "test", Engine: "fake", Path: "fake", MemoryGB: 8, Platforms: []string{"fake"}}}}); err != nil {
+	if err := q.ConfigureModels(ModelConfig{Idle: 10 * time.Minute, Wait: time.Minute, Models: []Model{{Name: "test", Engine: "server", StartCommand: []string{"unused-test-server"}, HealthURL: "http://127.0.0.1:{port}/health", SizeBytes: 1, SHA256: strings.Repeat("0", 64), Path: "fake", MemoryGB: 8, Platforms: []string{"fake"}}}}); err != nil {
 		t.Fatal(err)
 	}
 	m := machine("one", "fake")

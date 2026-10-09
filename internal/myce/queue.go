@@ -686,7 +686,7 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 			copy := cloneMachine(m)
 			copy.ModelCopySeconds = map[string]float64{}
 			for _, model := range q.models.Models {
-				if contains(model.Platforms, m.GPU) {
+				if modelFitsMachine(model, m) {
 					copy.ModelCopySeconds[model.Name] = q.loadSeconds(model.Name, m)
 				}
 			}

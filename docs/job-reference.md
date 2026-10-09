@@ -127,7 +127,7 @@ The read-only HTML status page is LAN-visible without authentication.
 Model calls support `POST /v1/embeddings`, `/v1/completions`, and
 `/v1/chat/completions` (including chat SSE streaming). Required headers are
 `Authorization: Bearer TOKEN`, `X-Myce-Project`, `X-Myce-Priority`, and, for
-deadline priority, `X-Myce-Deadline` in RFC3339. Body limit is 1 MiB; `model`
+deadline priority, `X-Myce-Deadline` in RFC3339. Body limit is 64 MiB; `model`
 must name a catalog entry. Remaining OpenAI JSON is passed unchanged.
 
 Catalog fields: `idle_timeout` defaults to `10m`; `max_wait` to `5m`; `models`
@@ -213,3 +213,26 @@ authenticated queue access, uv, and at least 1 GiB local free disk space.
 `myce uninstall [--config FILE] [--dry-run]` stops/disables the boot service and
 moves its files, credentials and local state to recoverable Trash. It leaves NAS
 data intact. See [operations](operations.md) for boot/login requirements.
+
+## General model servers and joint measurement
+
+Catalog `engine: server` owns a foreground HTTP process with `start_command`,
+`health_url`, `ready_timeout`, optional `stop_command`, `stop_timeout`, named
+`environment`, `memory_gb`, and `device`/`device_env`. `engine: vllm` is a preset
+with served name, context, KV dtype, utilization and extra parser arguments.
+Single-file masters or immutable `files` manifests use the same cache and pins.
+See [general server contract](guide-servers.md) for full fields and examples.
+
+Call `/models/NAME/PATH` with any method, body and end-to-end headers, plus the
+usual fleet token, project and priority. Responses stream; request bodies have
+an explicit 64 MiB limit. Batch `needs.model` remains a scheduling hint, not a
+request to launch a server. Queued commands never inherit the fleet token.
+
+`join --device ID` isolates commands/engines to one card and binds CUDA memory
+probes. XPU fixed admission cannot detect other owners. Before enabling warm
+production pins, run `myce measure` locally in an approved maintenance window
+with the exact worker identity/spool, explicit platform/device/budget and model
+list. It holds all models together, optionally warms them, writes JSON and text,
+and unloads them. Missing native counters fail visibly. See the separate
+[B70 weekend measurement](production-test-plan.md#b70-gpu0-weekend-joint-residency-measurement)
+checklist; this is not the first-machine Spark acceptance test.

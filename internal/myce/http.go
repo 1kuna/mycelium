@@ -53,6 +53,7 @@ td:before{content:attr(data-label);font-weight:600}.reason{max-width:none}}
 
 func (a API) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/models/{name}/{path...}", a.modelCall)
 	mux.HandleFunc("GET /api/workers/{id}/events", a.workerEvent)
 	mux.HandleFunc("POST /api/models/sync", func(w http.ResponseWriter, r *http.Request) {
 		var s SyncRequest
@@ -159,7 +160,7 @@ func (a API) Handler() http.Handler {
 		respond(w, map[string]bool{"ok": true}, a.Queue.Leave(r.PathValue("id"), c.Now))
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/")) && (a.Token == "" || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")), []byte(a.Token)) != 1) {
+		if (strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/") || strings.HasPrefix(r.URL.Path, "/models/")) && (a.Token == "" || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")), []byte(a.Token)) != 1) {
 			http.Error(w, "invalid fleet token", 401)
 			return
 		}

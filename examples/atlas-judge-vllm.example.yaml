@@ -1,0 +1,25 @@
+# EXAMPLE ONLY: not deployable until immutable files and real joint memory are measured.
+# From migration-prep-2026-10-09.md, a historical contract, not current qualification.
+idle_timeout: 10m
+max_wait: 15m
+models:
+  - name: atlas-ornith35-fp8-production
+    engine: vllm
+    environment: atlas-vllm-py313-cu130
+    path: Ornith-1.0-35B-FP8
+    size_bytes: REPLACE_WITH_MANIFEST_TOTAL
+    sha256: REPLACE_WITH_MANIFEST_IDENTITY
+    files: [] # Insert every required local config, tokenizer and weight shard with bytes/hash.
+    memory_gb: REPLACE_WITH_MEASURED_TOTAL_GIB
+    platforms: [cuda]
+    device: '0'
+    device_env:
+      CUDA_VISIBLE_DEVICES: '{device}'
+    ready_timeout: 15m
+    stop_timeout: 30s
+    vllm:
+      served_name: atlas-ornith35-fp8-production
+      max_context: 262144
+      kv_cache_dtype: fp8
+      gpu_memory_utilization: 0.65
+    args: [--reasoning-parser, qwen3, --enable-auto-tool-choice, --tool-call-parser, qwen3_coder]

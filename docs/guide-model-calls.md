@@ -1,4 +1,6 @@
-# Calling models
+# Calling OpenAI models
+
+General speech, OCR, face and other HTTP APIs use [general servers](guide-servers.md).
 
 Apps send one OpenAI request at a time to the queue. They never own a GPU or
 manage a model process. The queue loads a configured model on an eligible
@@ -46,7 +48,7 @@ All calls require the fleet token and these headers:
 Priority metadata stays out of the OpenAI body. The body must name a model in
 the catalog. The engine validates its remaining OpenAI fields; Mycelium does
 not rewrite sampling settings, prompts, tools, or model responses. Request
-bodies are limited to 1 MiB. Errors have an OpenAI-style `error.message`.
+bodies are limited to 64 MiB. Errors have an OpenAI-style `error.message`.
 
 ```python
 from openai import OpenAI
@@ -134,7 +136,7 @@ is LAN-visible. Model configuration hashes must match between queue and workers,
 so a mismatched catalog fails visibly rather than loading another model silently.
 `--model-idle` and `--model-wait` override YAML timeouts. These timeouts are not
 part of the model identity hash. Queue and worker wait values should agree.
-vLLM is deferred; unsupported engine names fail configuration validation.
+General `server` engines and the `vllm` preset are described in the [server guide](guide-servers.md).
 
 ## Scheduling, draining, and recovery
 

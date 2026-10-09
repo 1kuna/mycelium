@@ -668,7 +668,7 @@ func relocateEnvironment(from, to string) error {
 		if e != nil {
 			return e
 		}
-		if !strings.HasPrefix(rel, "venv"+string(filepath.Separator)+"bin"+string(filepath.Separator)) && rel != "venv/pyvenv.cfg" {
+		if !strings.HasPrefix(rel, "venv"+string(filepath.Separator)+"bin"+string(filepath.Separator)) && !strings.HasPrefix(rel, "bin"+string(filepath.Separator)) && rel != "venv/pyvenv.cfg" {
 			return nil
 		}
 		st, e := d.Info()

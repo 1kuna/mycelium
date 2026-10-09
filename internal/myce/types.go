@@ -184,6 +184,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	Device                  string              `json:"device,omitempty"`
 	EnvironmentBuilder      bool                `json:"environment_builder,omitempty"`
 	EnvironmentReports      []EnvironmentReport `json:"environment_reports,omitempty"`
 	EnvironmentBuildSeconds map[string]float64  `json:"environment_build_seconds,omitempty"`
