@@ -8,17 +8,17 @@ import (
 )
 
 func fits(j *Job, m *Machine, memory float64) bool {
-	return m.MemoryError == "" && !m.Gone && !m.Leaving && !m.CheckpointUnavailable && memory >= j.Spec.Needs.MemoryGB && (len(j.Spec.AllowedMachines) == 0 || slices.Contains(j.Spec.AllowedMachines, m.ID)) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && (j.Spec.Environment.Key() == "" || slices.Contains(m.Environments, j.Spec.Environment.Key()))
+	return m.MemoryError == "" && !m.Gone && !m.Leaving && !m.CheckpointUnavailable && memory >= j.Spec.Needs.MemoryGB && (len(j.Spec.AllowedMachines) == 0 || slices.Contains(j.Spec.AllowedMachines, m.ID)) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && environmentCanRun(j, m)
 }
 func affinity(j *Job, m *Machine) int {
 	n := 0
 	if j.Spec.Needs.Model != "" && slices.Contains(m.Models, j.Spec.Needs.Model) {
-		n += 2
+		n++
 	}
 	if j.Spec.Needs.Model != "" && !slices.Contains(m.Models, j.Spec.Needs.Model) && slices.Contains(m.CachedModels, j.Spec.Needs.Model) {
 		n++
 	}
-	if j.Spec.Environment.Key() != "" && slices.Contains(m.Environments, j.Spec.Environment.Key()) {
+	if j.Spec.Environment.Key() != "" && environmentReady(j, m) {
 		n++
 	}
 	return n
@@ -29,6 +29,9 @@ func before(a, b *Job, m *Machine) bool {
 	}
 	if affinity(a, m) != affinity(b, m) {
 		return affinity(a, m) > affinity(b, m)
+	}
+	if modelLoaded(a, m) != modelLoaded(b, m) {
+		return modelLoaded(a, m)
 	}
 	if a.Spec.Deadline != nil && b.Spec.Deadline == nil {
 		return true
@@ -54,6 +57,9 @@ func pick(jobs map[string]*Job, m *Machine) *Job {
 			best = j
 		}
 	}
+	if best != nil && !environmentReady(best, m) {
+		return nil
+	}
 	return best
 }
 func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) string {
@@ -66,6 +72,9 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 		}
 		if fits(j, m, memory) {
 			if memory == m.FreeMemoryGB {
+				if !environmentReady(j, m) {
+					return "building environment: " + j.Spec.Environment.Key()
+				}
 				return "waiting for a worker to pull this job"
 			}
 			return "waiting for a busy machine to make room"
@@ -79,9 +88,22 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 		needs = append(needs, "allowed machines: "+strings.Join(j.Spec.AllowedMachines, ", "))
 	}
 	if j.Spec.Environment.Key() != "" {
-		needs = append(needs, "environment not ready: "+j.Spec.Environment.Key())
+		if len(j.EnvironmentRecipes) == 0 {
+			needs = append(needs, "environment not ready: "+j.Spec.Environment.Key())
+		} else {
+			platforms := []string{}
+			for p := range j.EnvironmentRecipes {
+				platforms = append(platforms, p)
+			}
+			slices.Sort(platforms)
+			needs = append(needs, "needs "+j.Spec.Environment.Key()+"; no eligible "+strings.Join(platforms, " or ")+" machine online")
+		}
 	}
 	needs = append(needs, fmt.Sprintf("%.1f GB free GPU memory", j.Spec.Needs.MemoryGB))
 	return "no machine in the fleet can run this right now (" + strings.Join(needs, "; ") + ")"
 }
 func expired(t *time.Time, now time.Time) bool { return t != nil && !now.Before(*t) }
+
+func modelLoaded(j *Job, m *Machine) bool {
+	return j.Spec.Needs.Model != "" && slices.Contains(m.Models, j.Spec.Needs.Model)
+}

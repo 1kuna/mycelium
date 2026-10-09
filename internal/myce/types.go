@@ -46,8 +46,10 @@ func (p *Platform) UnmarshalYAML(n *yaml.Node) error {
 }
 
 type Environment struct {
-	Name     string `json:"name,omitempty" yaml:"name,omitempty"`
-	LockFile string `json:"lock_file,omitempty" yaml:"lock_file,omitempty"`
+	Name      string   `json:"name,omitempty" yaml:"name,omitempty"`
+	LockFile  string   `json:"lock_file,omitempty" yaml:"lock_file,omitempty"`
+	Python    string   `json:"python,omitempty" yaml:"python,omitempty"`
+	Platforms []string `json:"platforms,omitempty" yaml:"platforms,omitempty"`
 }
 
 func (e *Environment) UnmarshalYAML(n *yaml.Node) error {
@@ -57,7 +59,7 @@ func (e *Environment) UnmarshalYAML(n *yaml.Node) error {
 	}
 	type plain Environment
 	for i := 0; i < len(n.Content); i += 2 {
-		if !slices.Contains([]string{"name", "lock_file"}, n.Content[i].Value) {
+		if !slices.Contains([]string{"name", "lock_file", "python", "platforms"}, n.Content[i].Value) {
 			return fmt.Errorf("unknown environment field %q", n.Content[i].Value)
 		}
 	}
@@ -127,6 +129,17 @@ func (s Spec) Validate() error {
 	if s.Environment.Name != "" && s.Environment.LockFile != "" {
 		return errors.New("environment must name an environment or a lock_file, not both")
 	}
+	if s.Environment.LockFile == "" && (s.Environment.Python != "" || len(s.Environment.Platforms) > 0) {
+		return errors.New("python and platforms belong to a lock_file environment")
+	}
+	if s.Environment.LockFile != "" && s.Environment.Python == "" {
+		return errors.New("lock_file environment requires python version")
+	}
+	for _, p := range s.Environment.Platforms {
+		if !validGPU(p) {
+			return fmt.Errorf("invalid environment platform %s", p)
+		}
+	}
 	return nil
 }
 func rank(p string) int {
@@ -150,45 +163,50 @@ type Copy struct {
 }
 
 type Job struct {
-	Copies              []Copy     `json:"copies,omitempty"`
-	StartedAt           *time.Time `json:"started_at,omitempty"`
-	StartLatencySeconds float64    `json:"start_latency_seconds"`
-	Starts              int        `json:"starts"`
-	Losses              int        `json:"losses"`
-	Progress            int64      `json:"progress"`
-	ID                  string     `json:"id"`
-	Spec                Spec       `json:"spec"`
-	State               string     `json:"state"`
-	Attempt             int        `json:"attempt"`
-	Machine             string     `json:"machine,omitempty"`
-	Session             string     `json:"session,omitempty"`
-	Queued              time.Time  `json:"queued"`
-	Front               int64      `json:"front"`
-	StopAt              *time.Time `json:"stop_at,omitempty"`
-	Reason              string     `json:"reason,omitempty"`
-	Checkpoint          string     `json:"checkpoint"`
+	EnvironmentFailureLog string                       `json:"environment_failure_log,omitempty"`
+	EnvironmentRecipes    map[string]EnvironmentRecipe `json:"environment_recipes,omitempty"`
+	Copies                []Copy                       `json:"copies,omitempty"`
+	StartedAt             *time.Time                   `json:"started_at,omitempty"`
+	StartLatencySeconds   float64                      `json:"start_latency_seconds"`
+	Starts                int                          `json:"starts"`
+	Losses                int                          `json:"losses"`
+	Progress              int64                        `json:"progress"`
+	ID                    string                       `json:"id"`
+	Spec                  Spec                         `json:"spec"`
+	State                 string                       `json:"state"`
+	Attempt               int                          `json:"attempt"`
+	Machine               string                       `json:"machine,omitempty"`
+	Session               string                       `json:"session,omitempty"`
+	Queued                time.Time                    `json:"queued"`
+	Front                 int64                        `json:"front"`
+	StopAt                *time.Time                   `json:"stop_at,omitempty"`
+	Reason                string                       `json:"reason,omitempty"`
+	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
-	ModelCopySeconds      map[string]float64 `json:"model_copy_seconds,omitempty"`
-	CopyReports           []CopyReport       `json:"copy_reports,omitempty"`
-	CopyBytesPerSecond    float64            `json:"copy_bytes_per_second,omitempty"`
-	CachedModels          []string           `json:"cached_models,omitempty"`
-	CacheFreeBytes        int64              `json:"cache_free_bytes"`
-	CacheError            string             `json:"cache_error,omitempty"`
-	MemoryError           string             `json:"memory_error,omitempty"`
-	MemoryMeasured        bool               `json:"memory_measured,omitempty"`
-	ModelConfigHash       string             `json:"model_config_hash,omitempty"`
-	ModelURL              string             `json:"model_url,omitempty"`
-	CheckpointUnavailable bool               `json:"checkpoint_unavailable"`
-	ID                    string             `json:"id"`
-	Session               string             `json:"session"`
-	GPU                   string             `json:"gpu"`
-	FreeMemoryGB          float64            `json:"free_memory_gb"`
-	Models                []string           `json:"models,omitempty"`
-	Environments          []string           `json:"environments,omitempty"`
-	LastSeen              time.Time          `json:"last_seen"`
-	Leaving               bool               `json:"leaving"`
-	Gone                  bool               `json:"gone"`
+	EnvironmentBuilder      bool                `json:"environment_builder,omitempty"`
+	EnvironmentReports      []EnvironmentReport `json:"environment_reports,omitempty"`
+	EnvironmentBuildSeconds map[string]float64  `json:"environment_build_seconds,omitempty"`
+	ModelCopySeconds        map[string]float64  `json:"model_copy_seconds,omitempty"`
+	CopyReports             []CopyReport        `json:"copy_reports,omitempty"`
+	CopyBytesPerSecond      float64             `json:"copy_bytes_per_second,omitempty"`
+	CachedModels            []string            `json:"cached_models,omitempty"`
+	CacheFreeBytes          int64               `json:"cache_free_bytes"`
+	CacheError              string              `json:"cache_error,omitempty"`
+	MemoryError             string              `json:"memory_error,omitempty"`
+	MemoryMeasured          bool                `json:"memory_measured,omitempty"`
+	ModelConfigHash         string              `json:"model_config_hash,omitempty"`
+	ModelURL                string              `json:"model_url,omitempty"`
+	CheckpointUnavailable   bool                `json:"checkpoint_unavailable"`
+	ID                      string              `json:"id"`
+	Session                 string              `json:"session"`
+	GPU                     string              `json:"gpu"`
+	FreeMemoryGB            float64             `json:"free_memory_gb"`
+	Models                  []string            `json:"models,omitempty"`
+	Environments            []string            `json:"environments,omitempty"`
+	LastSeen                time.Time           `json:"last_seen"`
+	Leaving                 bool                `json:"leaving"`
+	Gone                    bool                `json:"gone"`
 }
 type Execution struct {
 	Progress int64  `json:"progress,omitempty"`
@@ -204,17 +222,18 @@ type Checkin struct {
 	Running         *Execution    `json:"running,omitempty"`
 }
 type Reply struct {
-	CopyPlan       []CopyTask  `json:"copy_plan,omitempty"`
-	CacheUsage     []CopyTask  `json:"cache_usage,omitempty"`
-	CachePins      []string    `json:"cache_pins,omitempty"`
-	ModelPlan      []ModelSlot `json:"model_plan,omitempty"`
-	Hold           bool        `json:"hold"`
-	CheckpointRoot string      `json:"checkpoint_root"`
-	Job            *Job        `json:"job,omitempty"`
-	Stop           bool        `json:"stop"`
-	Kill           bool        `json:"kill"`
-	Leave          bool        `json:"leave"`
-	GraceSeconds   float64     `json:"grace_seconds"`
+	EnvironmentPlan []EnvironmentRecipe `json:"environment_plan,omitempty"`
+	CopyPlan        []CopyTask          `json:"copy_plan,omitempty"`
+	CacheUsage      []CopyTask          `json:"cache_usage,omitempty"`
+	CachePins       []string            `json:"cache_pins,omitempty"`
+	ModelPlan       []ModelSlot         `json:"model_plan,omitempty"`
+	Hold            bool                `json:"hold"`
+	CheckpointRoot  string              `json:"checkpoint_root"`
+	Job             *Job                `json:"job,omitempty"`
+	Stop            bool                `json:"stop"`
+	Kill            bool                `json:"kill"`
+	Leave           bool                `json:"leave"`
+	GraceSeconds    float64             `json:"grace_seconds"`
 }
 type Result struct {
 	Machine string `json:"machine"`

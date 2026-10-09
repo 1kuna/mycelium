@@ -894,3 +894,86 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 	}
 	t.Log("queue restart mid-copy, worker partition mid-copy, production during pre-copy; pin loaded once; verified local engine paths; one job completed once; bad master never loaded")
 }
+
+// Environment restart fault extends the acceptance suite with real binary
+// builder process groups, HTTP, SQLite, worker cache and command execution.
+func TestPreDeployEnvironmentBuildRestart(t *testing.T) {
+	base := t.TempDir()
+	nas := filepath.Join(base, "nas")
+	if e := os.Mkdir(nas, 0700); e != nil {
+		t.Fatal(e)
+	}
+	q, e := Open(filepath.Join(base, "queue.db"), nas, RealClock{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer q.Close()
+	started, gate := filepath.Join(base, "building"), filepath.Join(base, "finish-build")
+	build := `set -eu; echo half > "$1/interrupted-input"; touch "$2"; while [ ! -f "$3" ]; do sleep 0.01; done; printf '#!/bin/sh\necho FINISHED-environment\n' > "$1/bin/env-task"; chmod +x "$1/bin/env-task"`
+	r, e := snapshotEnvironment(EnvironmentRecipe{Build: []string{"sh", "-c", build, "build", "{root}", started, gate}}, "fake")
+	if e != nil {
+		t.Fatal(e)
+	}
+	q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"restart-env": {"fake": r}}})
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	s := spec("experiment")
+	s.Environment.Name = "restart-env"
+	s.Run.Command = []string{"env-task"}
+	j, e := q.Submit(s)
+	if e != nil {
+		t.Fatal(e)
+	}
+	state := filepath.Join(base, "worker")
+	w := Worker{StateDir: state, Clock: RealClock{}, Interval: 5 * time.Millisecond, Client: Client{URL: server.URL, Token: "test"}, Machine: Machine{ID: "restart-worker", GPU: "fake", FreeMemoryGB: 64}}
+	run := func() (context.CancelFunc, chan error) {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- w.Run(ctx) }()
+		return cancel, done
+	}
+	wait := func(label string, condition func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for !condition() {
+			if time.Now().After(deadline) {
+				t.Fatal(label + " timed out")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	cancel, done := run()
+	wait("builder starts", func() bool { _, e := os.Stat(started); return e == nil })
+	cancel()
+	if e = <-done; e != nil {
+		t.Fatal(e)
+	}
+	partial := filepath.Join(state, "environment-cache", r.Key+".partial")
+	if _, e = os.Stat(filepath.Join(partial, "interrupted-input")); e != nil {
+		t.Fatal("lost interrupted build evidence", e)
+	}
+	if job(t, q, j.ID).State != "queued" {
+		t.Fatal("interrupted build consumed execution")
+	}
+	if e = os.WriteFile(gate, nil, 0600); e != nil {
+		t.Fatal(e)
+	}
+	cancel, done = run()
+	defer func() {
+		cancel()
+		if e := <-done; e != nil {
+			t.Error(e)
+		}
+	}()
+	wait("rebuilt job finishes", func() bool { return job(t, q, j.ID).State == "succeeded" })
+	trash, _ := os.ReadDir(filepath.Join(state, "environment-cache", ".Trash"))
+	if len(trash) == 0 {
+		t.Fatal("worker restart did not preserve interrupted build")
+	}
+	if logs, e := q.Logs(j.ID, 0); e != nil || !strings.Contains(fmt.Sprint(logs), "FINISHED-environment") {
+		t.Fatal(logs, e)
+	}
+	if j := job(t, q, j.ID); j.Attempt != 1 || j.Losses != 0 {
+		t.Fatal("build restart counted as an execution loss", j)
+	}
+}

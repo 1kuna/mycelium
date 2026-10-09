@@ -489,3 +489,25 @@ uses queued demand and recent use, with no external scheduling service.
 Batch `needs.model` remains metadata for placement and pre-copy. A plain command
 must use the configured local model file itself; Mycelium does not rewrite its
 arguments or install a runtime. Do not treat pre-copy as environment readiness.
+
+## Requesting software, independently of platform preference
+
+A batch job may use `environment: torch-cuda` from the shared NAS catalog, or:
+
+```yaml
+environment:
+  lock_file: /queue/nas/my-project/requirements.txt
+  python: '3.12'
+  platforms: [cuda, xpu]
+needs:
+  memory_gb: 8
+  platform: {preferred: [cuda]}
+```
+
+The queue reads and snapshots the lock at submission. Workers install it with
+uv into their local cache, prepend the environment's executables to PATH, and
+run the ordinary command. Platform preference never bypasses environment
+compatibility. The Python client passes these same mappings through `submit`.
+Do not submit the caller's laptop-only lock path to a remote queue; the path must
+be readable by the queue. Waiting/build failures and logs use the ordinary job
+status and `logs` methods. See [environment recipes](environments.md).

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -20,6 +21,11 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	EnvironmentSourceRoot string
+	EnvironmentRoot       string
+	EnvironmentLimit      int64
+	environmentCache      *EnvironmentCache
+	environmentRun        func(context.Context, []string, string, []string, io.Writer) error
 	// Test seams for deterministic filesystem faults and audited fake engines.
 	beforeModelCopy             func(context.Context)
 	modelEngine                 func(Model) Engine
@@ -89,6 +95,26 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errWorkerCheckpoint, err)
 	}
+	var environmentPath string
+	var release func()
+	environmentStarted := false
+	defer func() {
+		if !environmentStarted && release != nil {
+			release()
+		}
+	}()
+	if r, ok := j.EnvironmentRecipes[w.Machine.GPU]; ok {
+		if r.BinaryRelative != "" && w.EnvironmentSourceRoot != "" {
+			r.Binary = filepath.Join(w.EnvironmentSourceRoot, r.BinaryRelative)
+		}
+		if w.environmentCache == nil {
+			return nil, errors.New("environment builder unavailable")
+		}
+		environmentPath, release, err = w.environmentCache.Acquire(context.Background(), r)
+		if err != nil {
+			return nil, err
+		}
+	}
 	// Resolve before the supervisor so a nonexistent command remains a clear
 	// start failure, rather than an unexplained shell exit status.
 	command := j.Spec.Run.Command[0]
@@ -96,6 +122,15 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		command, err = filepath.Abs(filepath.Join(j.Spec.Run.Workdir, command))
 		if err != nil {
 			return nil, err
+		}
+	}
+	if environmentPath != "" && !strings.Contains(command, "/") {
+		for _, bin := range []string{filepath.Join(environmentPath, "venv", "bin"), filepath.Join(environmentPath, "bin")} {
+			candidate := filepath.Join(bin, command)
+			if st, e := os.Stat(candidate); e == nil && st.Mode()&0111 != 0 {
+				command = candidate
+				break
+			}
 		}
 	}
 	command, err = exec.LookPath(command)
@@ -122,6 +157,11 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	}
 	for k, v := range j.Spec.Run.Env {
 		env[k] = v
+	}
+	if environmentPath != "" {
+		env["PATH"] = filepath.Join(environmentPath, "venv", "bin") + string(os.PathListSeparator) + filepath.Join(environmentPath, "bin") + string(os.PathListSeparator) + env["PATH"]
+		env["VIRTUAL_ENV"] = filepath.Join(environmentPath, "venv")
+		env["MYCE_ENVIRONMENT_DIR"] = environmentPath
 	}
 	env["MYCE_PROCESS_ID"] = identity
 	env["MYCE_JOB_ID"] = j.ID
@@ -184,7 +224,11 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	result := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	environmentStarted = true
 	go func() {
+		if release != nil {
+			defer release()
+		}
 		waitErr := cmd.Wait()
 		// Descendants must not outlive the command or append to delivered output.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -266,6 +310,21 @@ func (w Worker) Run(stop context.Context) error {
 		return err
 	}
 	defer s.close()
+	if w.EnvironmentRoot == "" {
+		w.EnvironmentRoot = filepath.Join(s.dir, "environment-cache")
+	}
+	if w.EnvironmentLimit == 0 {
+		w.EnvironmentLimit = 20 * 1024 * 1024 * 1024
+	}
+	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
+	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
+		return err
+	}
+	environments := &environmentRuntime{dir: s.dir, cache: w.environmentCache, reports: map[string]EnvironmentReport{}}
+	if err = environments.restore(); err != nil {
+		return err
+	}
+	defer environments.stop()
 	if w.CheckpointRoot != "" {
 		root, e := filepath.Abs(w.CheckpointRoot)
 		if e != nil {
@@ -417,6 +476,14 @@ func (w Worker) Run(stop context.Context) error {
 			rt.session = w.Machine.Session
 			rt.mu.Unlock()
 			m := w.Machine
+			m.EnvironmentBuilder = true
+			if e := environments.upload(ctx, w.Client, m); e != nil && !stale(e) {
+				log.Printf("environment log upload: %v", e)
+			}
+			ready, envReports, envTimes := environments.report()
+			m.Environments = append(slices.Clone(w.Machine.Environments), ready...)
+			m.EnvironmentReports = envReports
+			m.EnvironmentBuildSeconds = envTimes
 			if !recovering {
 				m.ModelURL = rt.url
 			}
@@ -468,6 +535,13 @@ func (w Worker) Run(stop context.Context) error {
 						busy = true
 					}
 				}
+				for i := range reply.EnvironmentPlan {
+					r := &reply.EnvironmentPlan[i]
+					if r.BinaryRelative != "" && w.EnvironmentSourceRoot != "" {
+						r.Binary = filepath.Join(w.EnvironmentSourceRoot, r.BinaryRelative)
+					}
+				}
+				environments.sync(reply.EnvironmentPlan, busy)
 				rt.syncCopies(reply.CopyPlan, reply.CacheUsage, reply.CachePins, busy)
 				// syncCopies cancels immediately; do not block heartbeats behind an
 				// outstanding filesystem syscall on an unavailable NAS. Loads share
@@ -622,6 +696,7 @@ func (w Worker) Run(stop context.Context) error {
 			if err != nil {
 				// Pause background I/O while disconnected: new priority decisions
 				// cannot reach this worker. Preserve pins and durable copy bytes.
+				environments.sync(nil, true)
 				rt.cancelCopies()
 				var he *HTTPError
 				if errors.As(err, &he) && (he.Status == 400 || he.Status == 401) {

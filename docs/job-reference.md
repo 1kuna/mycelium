@@ -17,21 +17,22 @@ when shell expansion is needed.
 | `project` | Required, nonempty | Project label |
 | `priority` | Required | `production`, `deadline`, or `experiment`, in that order |
 | `deadline` | Required for `deadline`; otherwise absent | RFC3339 time; ordering hint, not an execution timeout |
-| `run.command` | Required, nonempty argv | Executable and arguments; installed on every eligible worker |
+| `run.command` | Required, nonempty argv | Executable and arguments; resolved from its environment, then worker PATH |
 | `run.workdir` | Absent: worker's working directory | Existing working directory; use an absolute shared or consistently installed path |
 | `run.env` | Empty map | String environment overrides, merged with worker environment |
 | `needs.memory_gb` | Required, finite and positive | GPU memory reservation in GB, including model/runtime overhead |
 | `needs.platform` | Required | `[cuda]` shorthand, `{required: [cuda, xpu]}`, `{preferred: [metal]}`, or `any` / `{any: true}`; exactly one mode |
 | `needs.model` | Absent | Batch affinity hint; does not load a model |
-| `environment` | Absent | Ready environment name, `{name: torch-cuda}`, or `{lock_file: /shared/project/requirements.lock}`; never both name and lock file |
+| `environment` | Absent | Catalog name, `{name: torch-cuda}`, or `{lock_file: /shared/project/requirements.txt, python: "3.12", platforms: [cuda]}`; never both name and lock file |
 | `allowed_machines` | Empty: any eligible worker | Machine-name allow-list |
 | `give_up_at` | Absent: wait indefinitely | RFC3339 expiry while queued; not a running-job timeout |
 | `expected_minutes` | `0` | Rough planning hint, never enforced |
 | `resumable` | `false` | Set true only for a command implementing the checkpoint/stop contract |
 
 Platforms are `cuda`, `xpu`, `metal`, and `fake` (laptop tests). A preference
-permits other platforms, so the command itself must support them. An environment
-is matched against worker `--environments` exactly. Mycelium does not install it.
+permits other platforms, so the command itself must support them. An environment restricts eligibility to its supported platforms. Workers build
+immutable recipes on demand and report ready content hashes. See
+[environments](environments.md) for catalog and project-lock contracts.
 
 Attempts get `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR`. The last
 points to an attempt-specific folder beneath the stable job folder on the NAS.
@@ -42,7 +43,10 @@ worker user's permissions, not a sandbox.
 ## Scheduling and results
 
 Jobs that fit memory, platform, environment and allow-list are ordered by
-priority, model/environment readiness, earliest deadline, then waiting age.
+priority, combined environment/model readiness, earliest deadline, then waiting age.
+Within a priority tier, both ready beat either ready, which beats cold setup.
+At equal combined readiness a loaded model beats a cached one. Placement
+includes estimated environment build and model-copy time.
 Production/deadline may stop lower-priority work when no idle worker
 fits. SIGTERM is sent to the process group, with a two-minute checkpoint grace
 before SIGKILL for deadlines. Production gives resumable work 10 seconds by
@@ -90,7 +94,11 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `join --heartbeat` | `1s` | Worker check-in interval |
 | `join --checkpoint-root` | `MYCE_CHECKPOINT_ROOT`, otherwise queue-provided root | Local mount of the same shared NAS root; may differ from queue path |
 | `join --state-dir` | Per-queue/per-machine user cache directory | Durable local spool; explicitly set for services |
-| `join --environments` | Empty | Comma-separated ready names or lock paths |
+| `join --environments` | Empty | Legacy preinstalled labels without a catalog |
+| `queue/dev --environment-config` | Empty | NAS environment catalog; recipes resolved at submission |
+| `join --environment-root` | Empty | Worker-local catalog directory for relative NAS binaries |
+| `join --environment-cache` | `STATE_DIR/environment-cache` | Local software cache |
+| `join --environment-cache-bytes` | `21474836480` | 20 GiB active published cache limit; in-use entries protected |
 | `join --models` | Empty | Comma-separated externally loaded batch affinity hints |
 | `queue/join --model-config` | Empty catalog | Same model YAML on queue and workers |
 | `queue/join --model-idle` | Catalog value (`10m`) | Override idle unload time |
@@ -188,3 +196,20 @@ both filesystem free space and cache allowance. Loaded affinity precedes cached
 affinity; otherwise placement uses remaining NAS bytes / measured speed, with
 40 MB/s until measured. This estimates transfer, not engine startup. `needs.model`
 is still batch metadata: commands must use a local model path themselves.
+
+## Machine setup
+
+`myce install worker --nas DIR --queue URL [--dry-run]` detects OS, CPU and
+GPU, writes private configuration/credentials, copies this binary, and enables a
+Linux systemd user service or macOS launchd agent. `myce install queue --nas DIR
+--listen ADDRESS [--dry-run]` creates the queue service. No dry run writes files
+or invokes service managers. Use `--environment-config FILE` and `--model-config
+FILE` for shared catalogs. `--root DIR` changes the local installation root.
+GPU/memory overrides are explicit (`--gpu`, `--memory-mode`, `--memory-gb`,
+`--reserve-memory-gb`); no unknown GPU or memory is silently accepted.
+
+`myce doctor [--config FILE]` checks GPU visibility, a writable NFS/SMB NAS mount,
+authenticated queue access, uv, and at least 1 GiB local free disk space.
+`myce uninstall [--config FILE] [--dry-run]` stops/disables the boot service and
+moves its files, credentials and local state to recoverable Trash. It leaves NAS
+data intact. See [operations](operations.md) for boot/login requirements.

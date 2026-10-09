@@ -13,6 +13,7 @@ import (
 )
 
 type DevConfig struct {
+	EnvironmentConfig                     EnvironmentCatalog
 	ModelConfig                           ModelConfig
 	Address, Database, Checkpoints, Token string
 	GPU                                   string
@@ -66,6 +67,10 @@ func StartDev(c DevConfig) (*Dev, error) {
 			q.Close()
 			return nil, errors.New("dev requires fake model engines")
 		}
+	}
+	if err = q.ConfigureEnvironments(c.EnvironmentConfig); err != nil {
+		q.Close()
+		return nil, err
 	}
 	if err = q.ConfigureModels(c.ModelConfig); err != nil {
 		q.Close()
