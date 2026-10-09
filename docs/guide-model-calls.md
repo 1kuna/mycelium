@@ -102,7 +102,8 @@ Names are unique. `path` names a NAS master GGUF, relative to `--model-root`
 or an absolute mount path. Supply trusted exact `size_bytes` and `sha256` in
 place of the placeholders above. Workers verify and cache it locally before
 loading; `direct_nas: true` explicitly permits a small model to bypass the cache.
-Loading has no download or installation step. `memory_gb` is the operator's total GPU memory
+Loading never downloads model weights; a declared software environment may
+build on demand. `memory_gb` is the operator's total GPU memory
 budget for weights, KV cache, and concurrent engine slots. `platforms` limits
 placement. `args` supplies model-specific llama-server options, including
 context/template/sampling flags and `--embedding` for embedding models. The
@@ -110,9 +111,9 @@ adapter owns `--host`, `--port`, `--model`, and `--alias`; args cannot override
 those. It supplies `--n-gpu-layers 99` by default. Supply the intended GPU-layer
 count in args when the model needs another value.
 
-Install an appropriate GPU-enabled `llama-server` build yourself: CUDA, Metal,
-or Intel SYCL for `xpu`. Before running a real model, verify its official model
-card, recommended generation settings, effective context/output limits,
+Provide an appropriate GPU-enabled `llama-server` build on PATH or through a
+declared environment recipe: CUDA, Metal, or Intel SYCL for `xpu`. Before running
+a real model, verify its official model card, recommended generation settings, effective context/output limits,
 reasoning mode, and chat template; record those with any evaluation. The
 adapter does not guess generation settings or download a different model.
 No real GPU/model validation is implied by laptop tests.
@@ -140,8 +141,9 @@ General `server` engines and the `vllm` preset are described in the [server guid
 
 ## Scheduling, draining, and recovery
 
-Calls share batch priority, loaded-model affinity, earliest deadline, and
-waiting-age ordering. An already loaded eligible model is preferred. Otherwise
+Calls share batch priority, combined environment/model readiness, earliest
+deadline, and waiting-age ordering; competing experiment projects first share
+by weighted recent usage. An already loaded eligible model is preferred. Otherwise
 all fitting free workers are considered before making room. CUDA workers report
 live dedicated GPU memory from `nvidia-smi`, or Linux `MemAvailable` when
 CUDA memory fields are unsupported (`[N/A]` on Spark). Metal uses macOS

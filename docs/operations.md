@@ -17,11 +17,14 @@ Spark's Atlas GPU ownership still requires an agreed handoff.
 | Mac launchd labels | `local.myce.queue`, `local.myce.worker` |
 | Shared progress | NAS root supplied with queue `--checkpoints` and worker `--checkpoint-root` |
 
-These are distinct from v1's `mycelium` paths and services. Before installation,
+These manual-template paths are distinct from v1's `mycelium` paths and services.
+`myce install` instead defaults to `~/.local/share/mycelium/ROLE` and macOS
+`local.mycelium.ROLE` labels; inspect their ownership separately. Before installation,
 inspect existing destination paths and stop if their ownership is unclear.
-Use Go 1.25.6+ to build for the target OS/architecture. Plain job commands,
-Python runtimes, environments and GPU-enabled llama-server must already be
-installed on eligible workers. There is no automatic environment installation or model download at load;
+Use Go 1.25.6+ to build for the target OS/architecture. Project source/workdirs
+and build tools must already be available on eligible workers. Workers build declared environment recipes on
+demand (Python recipes need uv); GPU-enabled llama-server can be provided on
+PATH or by a recipe. Model weights never download at load;
 `myce model fetch` is the explicit master-download command.
 
 Mount the NAS before creating the root. Verify the actual share identity, write
@@ -68,8 +71,12 @@ proxy, or firewall changes are part of these recipes.
 
 ## Inventory and foreground start/stop
 
-CUDA queries `nvidia-smi` before each start/load and check-in. Exactly one
-GPU is supported. Numeric readings use dedicated GPU memory; `N/A`, `[N/A]`,
+CUDA queries `nvidia-smi` before each start/load and check-in. `join --device ID`
+selects one card per worker and resolves CUDA selectors to stable UUIDs for both
+inventory and execution. Multi-GPU hosts can run separately named workers for
+separately selected cards. Without a selector, live dedicated/auto inventory
+rejects multiple CUDA devices rather than summing memory. Numeric readings use
+dedicated GPU memory; `N/A`, `[N/A]`,
 `Not Supported`, and `[Not Supported]` automatically select unified memory.
 Metal always uses unified memory. Linux reads `MemAvailable` from `/proc/meminfo`;
 macOS runs `vm_stat` without cgo and uses free + inactive pages with the reported
@@ -332,8 +339,10 @@ acknowledges. For full request/catalog contracts and field defaults see
 The Linux queue template uses `PrivateDevices=yes` to hide GPUs, one Go CPU,
 and initial limits of 25% CPU and 512 MiB RAM. Verify user-manager support and
 GPU hiding before accepting the B70 queue; stop on unsupported sandboxing.
-B70 is queue-only at `192.0.2.153:7331`; never enable a worker there.
-CUDA inventory requires exactly one GPU. Spark unsupported memory fields select
+B70 is queue-only at `192.0.2.153:7331` for the first Spark acceptance test;
+never enable a B70 worker as part of that test. CUDA dedicated/auto inventory
+requires one selected device (or one device in unselected output). Spark
+unsupported memory fields select
 Linux `MemAvailable`; missing/invalid OS telemetry blocks work. Reserve 16 GiB
 initially and verify actual headroom under Atlas load before admission. See
 [the production test plan](production-test-plan.md).
@@ -351,7 +360,8 @@ installation recipes. No fleet operations were performed during the local review
 Create a NAS `models` folder and mount it on each eligible worker. Keep the
 catalog paths relative to that folder, with trusted `size_bytes` and `sha256`
 for every real model. Download only by an explicit `myce model fetch` command;
-see [model setup](guide-model-calls.md). No download or install occurs at load.
+see [model setup](guide-model-calls.md). Model weights never download at load;
+a declared software environment may build on demand.
 Run workers with `--model-root` set to their mount, `--model-cache` on local disk,
 and an explicit `--model-cache-bytes` allowance. Ensure the worker can write the
 NAS folder's `.Trash/myce-model-cache` for recoverable evictions; cross-filesystem
@@ -460,7 +470,12 @@ Intel GPUs, setup uses the device memory reported by verbose sycl-ls; if that
 cannot be measured, supply an explicit fixed device budget. Unknown GPU or
 memory detection fails clearly. OS CPU architecture is detected, not emulated.
 
-Default local setup is `~/.local/share/mycelium/worker`. The service uses a
+Default local setup is `~/.local/share/mycelium/worker`, with its own binary,
+config, credentials and state. Linux uses `myce-worker.service`; macOS uses
+`local.mycelium.worker.plist` / `local.mycelium.worker`, unlike the manual template.
+Automatic CUDA setup requires exactly one GPU; the installer has no `--device`
+flag. Use foreground `join` or manual templates for separately selected cards.
+The service uses a
 private 0600 credentials file and preserves the installer shell's executable
 PATH, so launchd can find uv installed in a user directory. Edit `config.json`
 for operational settings; keep `credentials.json` private. A worker starts with
@@ -484,7 +499,8 @@ Queue setup defaults to loopback binding. Point clients/workers at its reachable
 LAN address. Mount the NAS before starting the service; setup never creates a
 fake local replacement for an unavailable mount. Doctor checks the mount and
 write access (its generated probe is retained in NAS `.Trash`), queue
-reachability/authentication, GPU visibility for workers, uv, and free disk space.
+reachability/authentication, GPU visibility for workers, uv, free disk space,
+and Linux user lingering (doctor fails unless it is enabled).
 A healthy doctor is a prerequisite check, not a real-hardware workload proof.
 
 `myce uninstall --dry-run` previews removal of the worker setup. `myce uninstall`

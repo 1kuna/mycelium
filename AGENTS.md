@@ -4,7 +4,7 @@
 - Keep every feature easy to use and testable on a laptop with no GPU.
 - One binary, one SQLite queue, plain-command workers. No peer network,
   leases, replicated registry, or restored v1 architecture.
-- Batch commands are step 1. Model serving and environment installation wait.
+- Batch commands, model calls/servers, and environments are implemented; keep them laptop-testable.
 - Queue and scheduling decisions use an injected `Clock`. Never call
   `time.Now` or `time.Sleep` directly in queue or scheduling logic.
 - Fake-clock unit tests cover scheduling, leave, loss, and retry decisions.

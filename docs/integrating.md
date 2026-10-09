@@ -145,8 +145,9 @@ models:
 These numbers are examples, not a verified inference contract. Read the current
 official model card and generation configuration before deployment, verify the
 served identity/template/context/output/sampler/tool settings, and record them.
-Install a suitable GPU-enabled llama-server yourself; no model/environment
-auto-install occurs. Use the [model guide](guide-model-calls.md) for LAN proxy
+Provide a suitable GPU-enabled llama-server on worker PATH or through a declared
+environment recipe, which workers build on demand. Model weights never download
+at load. Use the [model guide](guide-model-calls.md) for LAN proxy
 configuration. An unsupported platform must fail visibly, not use a CPU fallback.
 
 ### Verso production model calls
@@ -490,7 +491,8 @@ uses queued demand and recent use, with no external scheduling service.
 
 Batch `needs.model` remains metadata for placement and pre-copy. A plain command
 must use the configured local model file itself; Mycelium does not rewrite its
-arguments or install a runtime. Do not treat pre-copy as environment readiness.
+arguments. A declared environment recipe can install its runtime; pre-copy only
+prepares weights. Do not treat pre-copy as environment readiness.
 
 ## Requesting software, independently of platform preference
 

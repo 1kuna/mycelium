@@ -5,8 +5,11 @@ Start with [the agent starting guide](docs/START-HERE.md) when integrating anoth
 One shared queue for GPU batch jobs and OpenAI-format model calls. One Go binary, one SQLite database, plain
 commands, and an HTML status page. Everything runs on a laptop with fake GPUs and an explicit fake model engine. The approved spec is [the v2 design](docs/design-proposal.md).
 The previous architecture remains archived at `v1-final`; v2 starts fresh.
-Install v2 as `~/.local/bin/myce`, with local data at `~/.local/share/myce`
-and distinct `myce` services. The old v1 service was removed from B70 on
+The manual deployment templates install v2 as `~/.local/bin/myce`, with local
+data at `~/.local/share/myce` and distinct `myce` services. `myce install` uses
+`~/.local/share/mycelium/ROLE` and macOS `local.mycelium.ROLE` labels instead;
+inspect existing paths and service ownership before using it. The old v1 service
+was removed from B70 on
 2026-10-09; do not reinstall it. Other legacy data remains outside v2 scope.
 Use [the ordered founder test checklist](docs/production-test-plan.md) for the first fleet test.
 
@@ -132,13 +135,17 @@ are unsupported; Metal uses macOS `vm_stat` free + inactive memory. XPU/fake
 use configured budgets, and `--memory-mode fixed` explicitly selects a budget.
 Live readings and fixed budgets are reduced by reserve; a cap applies before reserve. Own batch/model
 reservations are accounted for without double subtraction. Unsupported inventory
-fails visibly. CUDA currently requires exactly one GPU; multi-GPU inventory
-fails rather than summing memory a single command may not be able to use. Admission does not replace Atlas/Verso ownership controls.
+fails visibly. Use `join --device ID` to select one physical GPU per worker;
+CUDA resolves it to a stable UUID for inventory and command/server execution.
+On multi-GPU machines, use unique worker names and one selected card per worker.
+Without a selector, live CUDA dedicated/auto inventory rejects multiple devices
+rather than summing their memory. Admission does not replace Atlas/Verso ownership controls.
 Each worker runs one command at a time. Use Ctrl-C or `leave` when reclaiming its
 GPU. `--environments torch-cuda,mlx` reports installed, ready environments;
 `--models qwen3-32b` remains a batch affinity hint for externally managed models;
 it does not make them callable. Use `--model-config` for queue-managed model
-loading. These flags do not install environments.
+loading. `--environments` only reports preinstalled labels; catalog/lock-file
+recipes build on demand in the worker cache.
 
 ## Job format
 
@@ -155,7 +162,7 @@ needs:
   memory_gb: 40                    # positive GPU memory; CPU-only jobs stay outside
   platform: {required: [cuda]}     # [cuda] shorthand also works
   model: qwen3-32b                 # optional affinity hint
-environment: torch-cuda            # optional ready environment name
+environment: torch-cuda            # optional catalog or preinstalled environment name
 allowed_machines: [spark, pc4090]   # optional allow-list
 give_up_at: 2026-10-10T18:00:00Z   # optional expiry for queued jobs
 expected_minutes: 90               # planning hint, never a timeout
@@ -165,16 +172,20 @@ resumable: true
 Platform supports `{required: [cuda, xpu]}`, `{preferred: [metal]}`, or `any`
 (also `{any: true}`). Preferred platforms are used when a suitable preferred
 machine is idle, without preventing another platform from working when needed.
-Environment also accepts `{lock_file: /shared/project/requirements.lock}`; the
-worker reports that exact path in `--environments` when ready. Since environment
-setup is deferred, a job waits with a clear reason if no worker reports it ready.
+Environment also accepts `{lock_file: /shared/project/requirements.txt, python: "3.12"}`.
+The queue snapshots the recipe; eligible workers build it on demand and report
+ready content hashes. Without a catalog, `--environments` remains a preinstalled-label
+compatibility mode. See [environments](docs/environments.md).
 
 Scheduling uses priority, then model/environment readiness, earliest deadline,
-then longest waiting. Production and deadline jobs may stop lower-priority
-resumable jobs only when no idle machine fits. Stops allow two minutes to save;
-paused jobs return to the front of their priority line. Non-resumable jobs are
-never preempted to make room. Give-up times apply while waiting, not as a run
-limit. Loss timeouts depend on priority: production 5s, deadline 20s, experiment 60s
+then longest waiting; competing experiment projects first share by weighted recent
+usage. Production and deadline jobs may stop lower-priority work when no idle
+machine fits. Production gives resumable work 10 seconds to save by default
+(`queue --production-stop-grace`) and stops non-resumable commands immediately.
+Deadline work stops only resumable commands and gives two minutes. Paused jobs
+return to the front of their priority line; non-resumable commands restart from
+scratch without consuming an infrastructure-loss retry. Give-up times apply
+while waiting, not as a run limit. Loss timeouts depend on priority: production 5s, deadline 20s, experiment 60s
 (`queue --production-loss-timeout`, `--deadline-loss-timeout`,
 `--experiment-loss-timeout`). Workers default to `join --heartbeat 1s`.
 Individual loss is inferred while other workers remain reachable. When a strict majority of workers goes quiet, jobs stay assigned until the
@@ -216,7 +227,8 @@ General HTTP servers and llama.cpp/vLLM presets share the model lifecycle; see
 [server calls](docs/guide-servers.md). Named software recipes build in the local
 environment cache. `myce measure` checks joint residency locally and writes JSON
 and plain reports; see the [B70 maintenance checklist](docs/production-test-plan.md#b70-gpu0-weekend-joint-residency-measurement).
-Quotas and redundant queue services remain deferred. No v1 peer networking,
+Quotas beyond experiment concurrency/memory-share caps and redundant queue
+services remain deferred. No v1 peer networking,
 leases, or replicated state is used.
 
 Project weights, experiment caps, usage history, and the status dashboard are
