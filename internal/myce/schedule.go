@@ -8,7 +8,7 @@ import (
 )
 
 func fits(j *Job, m *Machine, memory float64) bool {
-	return !m.Gone && !m.Leaving && memory >= j.Spec.Needs.MemoryGB && (len(j.Spec.AllowedMachines) == 0 || slices.Contains(j.Spec.AllowedMachines, m.ID)) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && (j.Spec.Environment.Key() == "" || slices.Contains(m.Environments, j.Spec.Environment.Key()))
+	return !m.Gone && !m.Leaving && !m.CheckpointUnavailable && memory >= j.Spec.Needs.MemoryGB && (len(j.Spec.AllowedMachines) == 0 || slices.Contains(j.Spec.AllowedMachines, m.ID)) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && (j.Spec.Environment.Key() == "" || slices.Contains(m.Environments, j.Spec.Environment.Key()))
 }
 func affinity(j *Job, m *Machine) int {
 	n := 0

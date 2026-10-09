@@ -1,0 +1,19 @@
+[Unit]
+Description=Mycelium batch queue
+After=network-online.target remote-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=myce
+WorkingDirectory=/var/lib/myce
+EnvironmentFile=/etc/myce/queue.env
+ExecStart=/usr/local/bin/myce queue --listen 0.0.0.0:7331 --db /var/lib/myce/queue.db --checkpoints /mnt/nas/myce --restart-grace 3m
+Restart=on-failure
+RestartSec=5
+StateDirectory=myce
+UMask=0077
+TimeoutStopSec=150
+
+[Install]
+WantedBy=multi-user.target

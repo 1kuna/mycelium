@@ -362,10 +362,13 @@ func TestSuddenLossAndLateReturn(t *testing.T) {
 			c.Advance(59 * time.Second)
 			requireState(t, q, old.ID, "running")
 			c.Advance(time.Second)
+			check(t, q, observer(), nil)
 			requireState(t, q, old.ID, "queued")
 			snap, _ := q.Snapshot()
-			if !snap.Machines[0].Gone || len(snap.Machines[0].Models) != 0 {
-				t.Fatal("lost inventory not cleared")
+			for _, lost := range snap.Machines {
+				if lost.ID == a.ID && (!lost.Gone || len(lost.Models) != 0) {
+					t.Fatal("lost inventory not cleared")
+				}
 			}
 			next := check(t, q, machine("two", "fake"), nil).Job
 			if next.Attempt != 2 || next.Checkpoint != old.Checkpoint {
@@ -393,7 +396,9 @@ func stringBool(v bool) string {
 }
 func TestThreeAttempts(t *testing.T) {
 	q, c := fixture(t)
-	j := submit(t, q, spec("experiment"))
+	s := spec("experiment")
+	s.Resumable = false
+	j := submit(t, q, s)
 	m := machine("one", "fake")
 	for i := 1; i <= 3; i++ {
 		r := check(t, q, m, nil).Job
@@ -401,6 +406,7 @@ func TestThreeAttempts(t *testing.T) {
 			t.Fatalf("attempt %d: %+v", i, r)
 		}
 		c.Advance(LossAfter)
+		check(t, q, observer(), nil)
 		if err := q.Tick(); err != nil {
 			t.Fatal(err)
 		}
@@ -549,18 +555,15 @@ func TestPinnedMachineLeavesAndLateReturnBeforeReassignment(t *testing.T) {
 		m := machine("one", "fake")
 		old := check(t, q, m, nil).Job
 		c.Advance(LossAfter)
+		check(t, q, observer(), nil)
 		if err := q.Tick(); err != nil {
 			t.Fatal(err)
 		}
 		reply := check(t, q, m, old)
-		if !reply.Stop || !reply.Kill {
-			t.Fatal("stale copy not stopped")
+		if reply.Stop {
+			t.Fatal("live copy before reassignment should continue")
 		}
-		requireState(t, q, j.ID, "queued")
-		next := check(t, q, m, nil).Job
-		if next == nil || next.Attempt != 2 {
-			t.Fatal("return did not restart after stale copy stopped")
-		}
+		requireState(t, q, j.ID, "running")
 	})
 	t.Run("cancel remains cancelled after loss", func(t *testing.T) {
 		q, c := fixture(t)
@@ -571,6 +574,7 @@ func TestPinnedMachineLeavesAndLateReturnBeforeReassignment(t *testing.T) {
 			t.Fatal(err)
 		}
 		c.Advance(LossAfter)
+		check(t, q, observer(), nil)
 		requireState(t, q, j.ID, "cancelled")
 		if !check(t, q, m, old).Kill {
 			t.Fatal("cancelled stale copy not stopped")
@@ -580,3 +584,5 @@ func TestPinnedMachineLeavesAndLateReturnBeforeReassignment(t *testing.T) {
 		}
 	})
 }
+
+func observer() Machine { m := machine("observer", "metal"); m.FreeMemoryGB = 1; return m }

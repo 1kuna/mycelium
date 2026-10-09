@@ -197,7 +197,7 @@ func TestDevCheckpointEndToEnd(t *testing.T) {
 	if !strings.Contains(readLogs(t, ctx, c, prod.ID), "production finished") {
 		t.Fatal("production did not run")
 	}
-	data, err := os.ReadFile(filepath.Join(experiment.Checkpoint, "progress"))
+	data, err := os.ReadFile(filepath.Join(experiment.Checkpoint, "attempt-2", "progress"))
 	if err != nil {
 		t.Fatal(err)
 	}

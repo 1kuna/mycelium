@@ -8,15 +8,19 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 const LossAfter = 60 * time.Second
+const RestartGrace = 3 * time.Minute
 const StopGrace = 2 * time.Minute
 
 var ErrStale = errors.New("stale execution: stop this copy")
@@ -27,11 +31,15 @@ type state struct {
 	Front    int64               `json:"front"`
 }
 type Queue struct {
-	mu    sync.Mutex
-	db    *sql.DB
-	clock Clock
-	root  string
-	s     state
+	lock         *os.File
+	mu           sync.Mutex
+	db           *sql.DB
+	clock        Clock
+	root         string
+	restartUntil time.Time
+	unreported   map[string]bool
+	networkQuiet bool
+	s            state
 }
 
 func ID() string {
@@ -49,13 +57,28 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 	if err != nil {
 		return nil, err
 	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
+		return nil, fmt.Errorf("queue database already in use: %w", err)
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+			_ = lock.Close()
+		}
+	}()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	q := &Queue{db: db, clock: clock, root: abs, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
-	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq);`); err != nil {
+	q := &Queue{lock: lock, db: db, clock: clock, root: abs, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq);`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -68,15 +91,69 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 		db.Close()
 		return nil, err
 	}
+	q.unreported = map[string]bool{}
+	if len(data) > 0 {
+		q.restartUntil = clock.Now().Add(RestartGrace)
+		for _, j := range q.s.Jobs {
+			if j.Attempt > 0 && len(j.Copies) == 0 && j.Machine != "" {
+				j.Starts = j.Attempt
+				j.Copies = append(j.Copies, Copy{Machine: j.Machine, Session: j.Session, Attempt: j.Attempt})
+			}
+		}
+		for id, m := range q.s.Machines {
+			if !m.Gone {
+				q.unreported[id] = true
+			}
+		}
+	}
+	success = true
 	return q, nil
 }
-func (q *Queue) Close() error { return q.db.Close() }
+
+// SetRestartGrace configures the recovery window from this queue's startup.
+func (q *Queue) SetRestartGrace(d time.Duration) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.unreported) > 0 {
+		q.restartUntil = q.clock.Now().Add(d)
+	}
+}
+func checkpointAvailable(root string) bool {
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	f, err := os.CreateTemp(root, ".myce-probe-")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	err = f.Sync()
+	closeErr := f.Close()
+	removeErr := os.Remove(name)
+	return err == nil && closeErr == nil && removeErr == nil
+}
+func (q *Queue) Close() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	err := q.db.Close()
+	if q.lock != nil {
+		err = errors.Join(err, syscall.Flock(int(q.lock.Fd()), syscall.LOCK_UN), q.lock.Close())
+		q.lock = nil
+	}
+	return err
+}
 
 // Every mutation is atomic and durable; failed writes restore the previous state.
 func (q *Queue) update(fn func() error) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	old, _ := json.Marshal(q.s)
+	oldUnreported := map[string]bool{}
+	for id, v := range q.unreported {
+		oldUnreported[id] = v
+	}
+	oldQuiet := q.networkQuiet
 	err := fn()
 	if err == nil {
 		var data []byte
@@ -86,6 +163,9 @@ func (q *Queue) update(fn func() error) error {
 		}
 	}
 	if err != nil {
+		q.unreported = oldUnreported
+		q.networkQuiet = oldQuiet
+		q.s = state{}
 		_ = json.Unmarshal(old, &q.s)
 	}
 	return err
@@ -98,8 +178,10 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 	err := q.update(func() error {
 		id := ID()
 		j := &Job{ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		copy := cloneJob(j)
+		j = &copy
 		q.s.Jobs[id] = j
-		out = *j
+		out = cloneJob(j)
 		return nil
 	})
 	return &out, err
@@ -109,7 +191,7 @@ func (q *Queue) retry(j *Job, why string) {
 	j.Session = ""
 	j.StopAt = nil
 	j.Reason = why
-	if j.Attempt >= 3 {
+	if !j.Spec.Resumable && j.Losses >= 3 {
 		j.State = "failed"
 		j.Reason = "failed after 3 attempts: " + why
 		return
@@ -129,9 +211,23 @@ func (q *Queue) stop(j *Job, why string) {
 }
 func (q *Queue) maintain() {
 	now := q.clock.Now()
+	active, healthy := 0, 0
 	for _, m := range q.s.Machines {
-		if !m.Gone && now.Sub(m.LastSeen) >= LossAfter {
+		if !m.Gone && !m.Leaving {
+			active++
+			if now.Sub(m.LastSeen) < LossAfter {
+				healthy++
+			}
+		}
+	}
+	q.networkQuiet = active > 0 && healthy == 0
+	for _, m := range q.s.Machines {
+		unreported := q.unreported[m.ID]
+		grace := unreported && now.Before(q.restartUntil)
+		restartExpired := unreported && !grace
+		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(m.LastSeen) >= LossAfter)) {
 			m.Gone = true
+			delete(q.unreported, m.ID)
 			m.Models = nil
 			for _, j := range q.s.Jobs {
 				if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
@@ -139,6 +235,12 @@ func (q *Queue) maintain() {
 						j.State = "cancelled"
 						j.StopAt = nil
 					} else {
+						for i := range j.Copies {
+							if j.Copies[i].Attempt == j.Attempt {
+								j.Copies[i].Recoverable = true
+							}
+						}
+						j.Losses++
 						q.retry(j, "machine lost for 60 seconds")
 					}
 				}
@@ -146,7 +248,7 @@ func (q *Queue) maintain() {
 		}
 	}
 	for _, j := range q.s.Jobs {
-		if j.State == "stopping" && expired(j.StopAt, now) {
+		if !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && expired(j.StopAt, now) {
 			if j.Reason == "cancel requested" {
 				j.State = "cancelled"
 				j.StopAt = nil
@@ -158,6 +260,9 @@ func (q *Queue) maintain() {
 			j.State = "failed"
 			j.Reason = "give-up time reached"
 		}
+	}
+	if q.networkQuiet || now.Before(q.restartUntil) || !checkpointAvailable(q.root) {
+		return
 	}
 	// Only preempt if no idle fitting machine has room for the waiting job.
 	waiting := []*Job{}
@@ -203,23 +308,40 @@ func (q *Queue) maintain() {
 }
 func (q *Queue) Tick() error { return q.update(func() error { q.maintain(); return nil }) }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
-	var reply Reply
+	reply := Reply{CheckpointRoot: q.root}
 	err := q.update(func() error {
-		q.maintain()
-		m := c.Machine
+		m := cloneMachine(&c.Machine)
 		if m.ID == "" || m.Session == "" || !validGPU(m.GPU) || m.FreeMemoryGB < 0 || math.IsNaN(m.FreeMemoryGB) || math.IsInf(m.FreeMemoryGB, 0) {
 			return errors.New("invalid machine report")
 		}
 		old := q.s.Machines[m.ID]
-		if old != nil && old.Session != m.Session && !old.Gone {
+		if old != nil && old.Session != m.Session && !old.Gone && !(c.Fresh && c.PreviousSession == old.Session) {
 			return errors.New("machine name already joined; leave the other worker first")
 		}
 		if old != nil && old.Session == m.Session {
 			m.Leaving = old.Leaving || m.Leaving
 		}
+		if old != nil && old.Session != m.Session && c.Fresh {
+			for _, j := range q.s.Jobs {
+				if j.Machine == m.ID && j.Session == old.Session && (j.State == "running" || j.State == "stopping") {
+					j.Losses++
+					q.retry(j, "worker restarted after cleaning old processes")
+				}
+			}
+		}
+		// After fleet silence, give the other workers a full reconnect window.
+		if q.networkQuiet {
+			for _, other := range q.s.Machines {
+				if !other.Gone {
+					other.LastSeen = q.clock.Now()
+				}
+			}
+		}
+		delete(q.unreported, m.ID)
 		m.Gone = false
 		m.LastSeen = q.clock.Now()
 		q.s.Machines[m.ID] = &m
+		q.maintain()
 		reply.Leave = m.Leaving
 		if m.Leaving {
 			for _, j := range q.s.Jobs {
@@ -230,11 +352,40 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 		if c.Running != nil {
 			j := q.s.Jobs[c.Running.ID]
+			if j != nil && !terminal(j.State) && j.Reason != "cancel requested" && (j.State == "queued" || j.Attempt != c.Running.Attempt || j.Machine != m.ID || j.Session != m.Session) {
+				for _, copy := range j.Copies {
+					if copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !checkpointAvailable(q.root)) {
+						reply.Hold = true
+						return nil
+					}
+					if copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && c.Running.Progress > max(j.Progress, completeProgress(filepath.Join(j.Checkpoint, "attempt-"+strconv.Itoa(j.Attempt)))))) {
+						for i := range j.Copies {
+							j.Copies[i].Recoverable = false
+						}
+						j.Attempt = copy.Attempt
+						j.Machine = m.ID
+						j.Session = m.Session
+						j.State = "running"
+						j.StopAt = nil
+						j.Reason = ""
+						j.Progress = c.Running.Progress
+						break
+					}
+				}
+			}
 			if j == nil || j.Attempt != c.Running.Attempt || j.Machine != m.ID || j.Session != m.Session || terminal(j.State) || j.State == "queued" {
+				if j != nil {
+					for i := range j.Copies {
+						if j.Copies[i].Attempt == c.Running.Attempt {
+							j.Copies[i].Recoverable = false
+						}
+					}
+				}
 				reply.Stop = true
 				reply.Kill = true
 				return nil
 			}
+			j.Progress = max(j.Progress, c.Running.Progress)
 			if j.State == "stopping" {
 				reply.Stop = true
 				reply.Kill = expired(j.StopAt, q.clock.Now())
@@ -254,12 +405,15 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 					break
 				}
-				out := *j
+				if m.CheckpointUnavailable || !checkpointAvailable(q.root) {
+					return nil
+				}
+				out := cloneJob(j)
 				reply.Job = &out
 				return nil
 			}
 		}
-		if !m.Leaving {
+		if !m.Leaving && !m.CheckpointUnavailable && checkpointAvailable(q.root) {
 			j := pick(q.s.Jobs, &m)
 			if j != nil && len(j.Spec.Needs.Platform.Preferred) > 0 && !contains(j.Spec.Needs.Platform.Preferred, m.GPU) {
 				for _, other := range q.s.Machines {
@@ -281,11 +435,14 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			if j != nil {
 				j.State = "running"
 				m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
-				j.Attempt++
+				j.Starts = max(j.Starts, j.Attempt) + 1
+				j.Attempt = j.Starts
+				j.Progress = 0
+				j.Copies = append(j.Copies, Copy{Machine: m.ID, Session: m.Session, Attempt: j.Attempt})
 				j.Machine = m.ID
 				j.Session = m.Session
 				j.Reason = ""
-				out := *j
+				out := cloneJob(j)
 				reply.Job = &out
 			}
 		}
@@ -308,10 +465,17 @@ func (q *Queue) current(r Result) (*Job, error) {
 }
 func (q *Queue) Complete(r Result) error {
 	return q.update(func() error {
-		q.maintain()
+		// A retransmitted acknowledgement must not turn a completed job into stale work.
+		if j := q.s.Jobs[r.ID]; j != nil && terminal(j.State) && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+			return nil
+		}
 		j, err := q.current(r)
 		if err != nil {
 			return err
+		}
+		if m := q.s.Machines[r.Machine]; m != nil {
+			m.LastSeen = q.clock.Now()
+			delete(q.unreported, m.ID)
 		}
 		if j.State == "stopping" {
 			if j.Reason == "cancel requested" {
@@ -320,6 +484,9 @@ func (q *Queue) Complete(r Result) error {
 			} else {
 				q.retry(j, j.Reason)
 			}
+		} else if r.Interrupted {
+			j.Losses++
+			q.retry(j, "worker restarted after cleaning old processes")
 		} else if r.Success {
 			j.State = "succeeded"
 		} else {
@@ -369,15 +536,32 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 	err := q.update(func() error {
 		q.maintain()
 		out = Snapshot{Jobs: []*Job{}, Machines: []*Machine{}}
+		if q.networkQuiet {
+			out.Warning = "all workers quiet: waiting for the network to return"
+		}
+		if q.clock.Now().Before(q.restartUntil) && len(q.unreported) > 0 {
+			out.Warning = "queue restarted: waiting for workers to report"
+		}
+		if !checkpointAvailable(q.root) {
+			out.Warning = "NAS checkpoint root is unreachable; jobs will not start"
+		}
+		for _, m := range q.s.Machines {
+			if !m.Gone && m.CheckpointUnavailable {
+				out.Warning = "NAS checkpoint root is unreachable on worker " + m.ID
+			}
+		}
 		for _, j := range q.s.Jobs {
 			if j.State == "queued" {
 				j.Reason = waitingReason(j, q.s.Machines, q.s.Jobs)
+				if !checkpointAvailable(q.root) {
+					j.Reason = "NAS checkpoint root is unreachable"
+				}
 			}
-			copy := *j
+			copy := cloneJob(j)
 			out.Jobs = append(out.Jobs, &copy)
 		}
 		for _, m := range q.s.Machines {
-			copy := *m
+			copy := cloneMachine(m)
 			out.Machines = append(out.Machines, &copy)
 		}
 		sort.Slice(out.Jobs, func(i, k int) bool { return out.Jobs[i].ID < out.Jobs[k].ID })
@@ -392,8 +576,35 @@ func (q *Queue) AppendLog(l LogChunk) error {
 	if _, err := q.current(l.Result); err != nil {
 		return err
 	}
-	_, err := q.db.Exec("INSERT INTO logs(job,attempt,text) VALUES(?,?,?)", l.ID, l.Attempt, l.Text)
-	return err
+	tx, err := q.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if l.Offset > 0 {
+		res, err := tx.Exec("INSERT OR IGNORE INTO log_offsets(job,attempt,offset) VALUES(?,?,?)", l.ID, l.Attempt, l.Offset)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return tx.Commit()
+		}
+	}
+	if _, err = tx.Exec("INSERT INTO logs(job,attempt,text) VALUES(?,?,?)", l.ID, l.Attempt, l.Text); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	if m := q.s.Machines[l.Machine]; m != nil && m.Session == l.Session {
+		m.LastSeen = q.clock.Now()
+		delete(q.unreported, m.ID)
+	}
+	return nil
 }
 
 type Log struct {
@@ -432,3 +643,19 @@ func contains(v []string, s string) bool {
 	}
 	return false
 }
+
+func cloneJob(j *Job) Job {
+	data, _ := json.Marshal(j)
+	var out Job
+	_ = json.Unmarshal(data, &out)
+	return out
+}
+func cloneMachine(m *Machine) Machine {
+	data, _ := json.Marshal(m)
+	var out Machine
+	_ = json.Unmarshal(data, &out)
+	return out
+}
+
+// Both reconciliation and command startup use the same checkpoint rules.
+func completeProgress(root string) int64 { progress, _ := checkpointProgress(root); return progress }

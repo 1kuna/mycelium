@@ -141,7 +141,19 @@ func rank(p string) int {
 	return 3
 }
 
+type Copy struct {
+	Recoverable bool   `json:"recoverable"`
+	Machine     string `json:"machine"`
+	Session     string `json:"session"`
+	Attempt     int    `json:"attempt"`
+	Progress    int64  `json:"progress"`
+}
+
 type Job struct {
+	Copies     []Copy     `json:"copies,omitempty"`
+	Starts     int        `json:"starts"`
+	Losses     int        `json:"losses"`
+	Progress   int64      `json:"progress"`
 	ID         string     `json:"id"`
 	Spec       Spec       `json:"spec"`
 	State      string     `json:"state"`
@@ -155,43 +167,52 @@ type Job struct {
 	Checkpoint string     `json:"checkpoint"`
 }
 type Machine struct {
-	ID           string    `json:"id"`
-	Session      string    `json:"session"`
-	GPU          string    `json:"gpu"`
-	FreeMemoryGB float64   `json:"free_memory_gb"`
-	Models       []string  `json:"models,omitempty"`
-	Environments []string  `json:"environments,omitempty"`
-	LastSeen     time.Time `json:"last_seen"`
-	Leaving      bool      `json:"leaving"`
-	Gone         bool      `json:"gone"`
+	CheckpointUnavailable bool      `json:"checkpoint_unavailable"`
+	ID                    string    `json:"id"`
+	Session               string    `json:"session"`
+	GPU                   string    `json:"gpu"`
+	FreeMemoryGB          float64   `json:"free_memory_gb"`
+	Models                []string  `json:"models,omitempty"`
+	Environments          []string  `json:"environments,omitempty"`
+	LastSeen              time.Time `json:"last_seen"`
+	Leaving               bool      `json:"leaving"`
+	Gone                  bool      `json:"gone"`
 }
 type Execution struct {
-	ID      string `json:"id"`
-	Attempt int    `json:"attempt"`
+	Progress int64  `json:"progress,omitempty"`
+	ID       string `json:"id"`
+	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
-	Machine Machine    `json:"machine"`
-	Running *Execution `json:"running,omitempty"`
+	PreviousSession string     `json:"previous_session,omitempty"`
+	Fresh           bool       `json:"fresh,omitempty"`
+	Machine         Machine    `json:"machine"`
+	Running         *Execution `json:"running,omitempty"`
 }
 type Reply struct {
-	Job          *Job    `json:"job,omitempty"`
-	Stop         bool    `json:"stop"`
-	Kill         bool    `json:"kill"`
-	Leave        bool    `json:"leave"`
-	GraceSeconds float64 `json:"grace_seconds"`
+	Hold           bool    `json:"hold"`
+	CheckpointRoot string  `json:"checkpoint_root"`
+	Job            *Job    `json:"job,omitempty"`
+	Stop           bool    `json:"stop"`
+	Kill           bool    `json:"kill"`
+	Leave          bool    `json:"leave"`
+	GraceSeconds   float64 `json:"grace_seconds"`
 }
 type Result struct {
 	Machine string `json:"machine"`
 	Session string `json:"session"`
 	Execution
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
+	Interrupted bool   `json:"interrupted,omitempty"`
+	Success     bool   `json:"success"`
+	Error       string `json:"error,omitempty"`
 }
 type LogChunk struct {
 	Result
-	Text string `json:"text"`
+	Offset int64  `json:"offset,omitempty"`
+	Text   string `json:"text"`
 }
 type Snapshot struct {
+	Warning  string     `json:"warning,omitempty"`
 	Jobs     []*Job     `json:"jobs"`
 	Machines []*Machine `json:"machines"`
 }

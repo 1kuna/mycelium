@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -42,6 +44,9 @@ func StartDev(c DevConfig) (*Dev, error) {
 	if c.Workers < 1 || c.MemoryGB <= 0 || c.Token == "" {
 		return nil, errors.New("dev requires workers, positive memory, and a token")
 	}
+	if err := os.MkdirAll(c.Checkpoints, 0700); err != nil {
+		return nil, err
+	}
 	q, err := Open(c.Database, c.Checkpoints, RealClock{})
 	if err != nil {
 		return nil, err
@@ -71,7 +76,7 @@ func StartDev(c DevConfig) (*Dev, error) {
 		}
 	}()
 	for i := 0; i < c.Workers; i++ {
-		w := Worker{Client: d.client, Machine: Machine{ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
+		w := Worker{StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
 		d.workerWG.Add(1)
 		go func() {
 			defer d.workerWG.Done()

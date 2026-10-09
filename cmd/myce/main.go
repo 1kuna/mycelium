@@ -42,6 +42,8 @@ func run(args []string) error {
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce.db", "SQLite database file")
 	checkpoint := f.String("checkpoints", "./checkpoints", "shared checkpoint root; use the same NAS mount path on all fleet machines")
+	restartGrace := f.Duration("restart-grace", myce.RestartGrace, "worker recovery grace after queue restart")
+	stateDir := f.String("state-dir", "", "durable local worker spool directory")
 	hostname, _ := os.Hostname()
 	name := f.String("name", hostname, "unique machine name")
 	gpu := f.String("gpu", "", "GPU type: cuda, xpu, metal, or fake")
@@ -90,6 +92,7 @@ func run(args []string) error {
 			return err
 		}
 		defer q.Close()
+		q.SetRestartGrace(*restartGrace)
 		listener, err := net.Listen("tcp", *address)
 		if err != nil {
 			return err
@@ -108,7 +111,7 @@ func run(args []string) error {
 		defer cancel()
 		return errors.Join(err, server.Shutdown(shutdown))
 	case "join":
-		w := myce.Worker{Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
@@ -203,6 +206,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot) {
+	if s.Warning != "" {
+		fmt.Println(s.Warning)
+	}
 	for _, m := range s.Machines {
 		state := "joined"
 		if m.Gone {
