@@ -110,7 +110,6 @@ The same actions are available as plain HTTP calls, so projects can submit from 
 
 - Splitting one model across machines. It's not needed, because the largest load fits on the Spark.
 - Automatic memory estimation. The job states what it needs.
-- Fairness quotas between projects.
 - A backup copy of the queue service.
 
 Each of these can be added later if real use shows a need.
@@ -199,3 +198,20 @@ Status reports progress, errors and measured achieved copy speed. Placement
 estimates remaining NAS bytes divided by that worker's measured speed (40 MB/s
 until measured), prefers verified cached models, and keeps engine startup time
 separate from this transfer estimate. Everything remains laptop-testable.
+
+## Fair sharing, usage history, and status (Zach, 2026-10-09)
+
+Experiments share GPU time between competing runnable projects by configurable
+weight (equal by default), using recent usage with a 24-hour decaying half-life.
+Select the greatest fair-share deficit before existing affinity/wait tie-breaks.
+A sole project can use everything. Production and deadline order is unchanged.
+Optional experiment concurrency and GPU memory-share caps are project-specific.
+Status explains fairness and cap decisions in plain words.
+
+The same SQLite queue keeps minute-level device/project/job/model allocation
+samples for seven days, then hourly totals through 90 days. Busy allocation,
+idle time, memory, pins, preemptions and production start latency distinguish
+active pool use from reservations and unknown downtime. `myce usage` reports
+these totals. A self-contained responsive status page shows the fleet, queue,
+seven-day SVG charts and problems. See [the guide](guide-fairness-usage.md) for
+configuration, accounting definitions and known measurement limits.

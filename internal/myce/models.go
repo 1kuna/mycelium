@@ -315,12 +315,15 @@ func (q *Queue) maintainModels() {
 	}
 	pending := []*ModelCall{}
 	for _, c := range q.calls {
-		if c.Machine == "" && c.Error == "" {
+		if c.Machine == "" && c.Error == "" && q.capReason(callJob(c)) == "" {
 			pending = append(pending, c)
 		}
 	}
-	sort.Slice(pending, func(i, j int) bool { return before(callJob(pending[i]), callJob(pending[j]), &Machine{}) })
+	sort.Slice(pending, func(i, j int) bool { return q.fairBefore(callJob(pending[i]), callJob(pending[j]), &Machine{}) })
 	for _, c := range pending {
+		if q.capReason(callJob(c)) != "" {
+			continue
+		}
 		model, ok := q.model(c.Model)
 		if !ok {
 			c.Error = "unknown model"
@@ -343,7 +346,7 @@ func (q *Queue) maintainModels() {
 			return machines[i].ID < machines[j].ID
 		})
 		for _, m := range machines {
-			if m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] {
+			if q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] {
 				continue
 			}
 			s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
@@ -365,7 +368,7 @@ func (q *Queue) maintainModels() {
 		eligible := []*Machine{}
 		loading := false
 		for _, m := range machines {
-			if m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
+			if q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
 				continue
 			}
 			if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
@@ -482,7 +485,7 @@ func (q *Queue) maintainModels() {
 
 }
 func callJob(c *ModelCall) *Job {
-	j := &Job{ID: c.ID, Queued: c.Queued, Spec: Spec{Priority: c.Priority, Deadline: c.Deadline}}
+	j := &Job{ID: c.ID, Queued: c.Queued, Spec: Spec{Project: c.Project, Priority: c.Priority, Deadline: c.Deadline}}
 	j.Spec.Needs.Model = c.Model
 	return j
 }
@@ -492,7 +495,7 @@ func callJob(c *ModelCall) *Job {
 // behind requests that cannot reclaim higher-priority work.
 func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 	model, ok := q.model(c.Model)
-	if !ok || c.Machine != "" || c.Error != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] {
+	if !ok || c.Machine != "" || c.Error != "" || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] {
 		return false
 	}
 	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "ready" {
@@ -527,7 +530,7 @@ func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
 				memory += model.MemoryGB
 			}
 		}
-		if j.State == "queued" && fits(j, m, memory) && before(j, callJob(c), m) {
+		if j.State == "queued" && q.capReason(j) == "" && fits(j, m, memory) && q.fairBefore(j, callJob(c), m) {
 			return true
 		}
 	}
@@ -623,11 +626,23 @@ func modelError(w http.ResponseWriter, status int, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": message, "type": "mycelium_error"}})
 }
 func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
-	data, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))
-	if e != nil {
-		modelError(w, 400, e.Error())
+	c := &ModelCall{Project: r.Header.Get("X-Myce-Project"), Priority: r.Header.Get("X-Myce-Priority")}
+	if c.Project == "" || rank(c.Priority) == 3 {
+		modelError(w, 400, "X-Myce-Project and X-Myce-Priority are required")
 		return
 	}
+	if c.Priority == "deadline" {
+		d, err := time.Parse(time.RFC3339, r.Header.Get("X-Myce-Deadline"))
+		if err != nil {
+			modelError(w, 400, "deadline priority requires X-Myce-Deadline (RFC3339)")
+			return
+		}
+		c.Deadline = &d
+	}
+	var data []byte
+	var spool *os.File
+	var bodySize int64
+	var e error
 	var body struct {
 		Model  string `json:"model"`
 		Stream bool   `json:"stream"`
@@ -650,23 +665,32 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "" {
 			endpoint += "?" + r.URL.RawQuery
 		}
-	} else if e = json.Unmarshal(data, &body); e != nil {
-		modelError(w, 400, "invalid OpenAI JSON request")
-		return
-	}
-	c := &ModelCall{Model: body.Model, Project: r.Header.Get("X-Myce-Project"), Priority: r.Header.Get("X-Myce-Priority")}
-	if c.Project == "" || rank(c.Priority) == 3 {
-		modelError(w, 400, "X-Myce-Project and X-Myce-Priority are required")
-		return
-	}
-	if c.Priority == "deadline" {
-		d, e := time.Parse(time.RFC3339, r.Header.Get("X-Myce-Deadline"))
+		spool, bodySize, e = spoolModelRequest(r.Context(), r.Body, maxGenericRequestBytes)
 		if e != nil {
-			modelError(w, 400, "deadline priority requires X-Myce-Deadline (RFC3339)")
+			status := 400
+			if errors.Is(e, errModelRequestTooLarge) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			modelError(w, status, e.Error())
 			return
 		}
-		c.Deadline = &d
+		spoolName := spool.Name()
+		defer func() {
+			_ = spool.Close()
+			_ = os.Remove(spoolName)
+		}()
+	} else {
+		data, e = io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))
+		if e != nil {
+			modelError(w, 400, e.Error())
+			return
+		}
+		if e = json.Unmarshal(data, &body); e != nil {
+			modelError(w, 400, "invalid OpenAI JSON request")
+			return
+		}
 	}
+	c.Model = body.Model
 	if !generic && body.Stream && r.URL.Path != "/v1/chat/completions" {
 		modelError(w, 400, "streaming is supported for chat only")
 		return
@@ -742,7 +766,23 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}()
-			req, e := http.NewRequestWithContext(proxyCtx, r.Method, target+"/models/"+url.PathEscape(body.Model)+endpoint, bytes.NewReader(data))
+			var requestBody io.Reader = bytes.NewReader(data)
+			if generic {
+				if _, e = spool.Seek(0, io.SeekStart); e != nil {
+					cancel()
+					<-done
+					modelError(w, 503, e.Error())
+					return
+				}
+				// LimitReader intentionally exposes only io.Reader, so the HTTP
+				// transport cannot close the replayable spool after attempt one.
+				requestBody = io.LimitReader(spool, bodySize)
+			}
+			proxyPath := endpoint
+			if generic {
+				proxyPath = "/models/" + url.PathEscape(body.Model) + endpoint
+			}
+			req, e := http.NewRequestWithContext(proxyCtx, r.Method, target+proxyPath, requestBody)
 			if e != nil {
 				cancel()
 				<-done
@@ -752,6 +792,9 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			req.Header = proxyHeaders(r.Header)
 			req.Header.Set("Authorization", "Bearer "+a.Token)
 			req.Header.Set("X-Myce-Session", call.Session)
+			if generic {
+				req.ContentLength = bodySize
+			}
 
 			res, e := modelHTTPClient.Do(req)
 			if e == nil && (generic || res.StatusCode < 500) {

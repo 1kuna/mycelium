@@ -57,12 +57,6 @@ func (f *FakeEngine) Call(_ context.Context, path string, data []byte) (*http.Re
 	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{content}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 }
 
-// LlamaEngine starts an installed llama-server, with an explicit inference contract
-// in Model.Args. It never downloads models or changes the model's generation settings.
-type RequestEngine interface {
-	Request(context.Context, string, string, http.Header, []byte) (*http.Response, error)
-}
-
 // ServerEngine shares process supervision with the llama.cpp preset.
 type ServerEngine = LlamaEngine
 
@@ -176,14 +170,24 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	l.url = "http://127.0.0.1:" + strconv.Itoa(port)
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
-	hc := &http.Client{Timeout: time.Second}
+	hc := &http.Client{
+		Timeout:       time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	for {
 		req, _ := http.NewRequestWithContext(ctx, "GET", health, nil)
 		res, err := hc.Do(req)
 		if err == nil {
 			res.Body.Close()
 			if res.StatusCode >= 200 && res.StatusCode < 300 {
-				return nil
+				select {
+				case e := <-l.done:
+					l.done = nil
+					_ = l.Unload()
+					return fmt.Errorf("server exited as health became ready: %v; see %s.log", e, name)
+				default:
+					return nil
+				}
 			}
 		}
 		select {
@@ -199,14 +203,15 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	}
 }
 func (l *LlamaEngine) Call(ctx context.Context, path string, data []byte) (*http.Response, error) {
-	return l.Request(ctx, "POST", path, http.Header{"Content-Type": []string{"application/json"}}, data)
+	return l.Request(ctx, "POST", path, http.Header{"Content-Type": []string{"application/json"}}, bytes.NewReader(data), int64(len(data)))
 }
-func (l *LlamaEngine) Request(ctx context.Context, method, path string, headers http.Header, data []byte) (*http.Response, error) {
-	req, e := http.NewRequestWithContext(ctx, method, l.url+path, bytes.NewReader(data))
+func (l *LlamaEngine) Request(ctx context.Context, method, path string, headers http.Header, body io.Reader, contentLength int64) (*http.Response, error) {
+	req, e := http.NewRequestWithContext(ctx, method, l.url+path, body)
 	if e != nil {
 		return nil, e
 	}
 	req.Header = proxyHeaders(headers)
+	req.ContentLength = contentLength
 	return modelHTTPClient.Do(req)
 }
 
@@ -646,14 +651,11 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 404, "unknown model endpoint")
 		return
 	}
-	data, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))
-	if e != nil {
-		modelError(w, 400, e.Error())
-		return
-	}
 	var req struct {
 		Model string `json:"model"`
 	}
+	var data []byte
+	var e error
 	if generic {
 		parts := strings.SplitN(strings.TrimPrefix(r.URL.EscapedPath(), "/models/"), "/", 2)
 		if len(parts) != 2 {
@@ -669,7 +671,14 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "" {
 			endpoint += "?" + r.URL.RawQuery
 		}
-	} else if json.Unmarshal(data, &req) != nil {
+	} else {
+		data, e = io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))
+		if e != nil {
+			modelError(w, 400, e.Error())
+			return
+		}
+	}
+	if !generic && json.Unmarshal(data, &req) != nil {
 		modelError(w, 400, "invalid JSON")
 		return
 	}
@@ -696,7 +705,14 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	var res *http.Response
-	if engine, ok := m.engine.(CallRequestEngine); ok {
+	if generic {
+		engine, ok := m.engine.(StreamRequestEngine)
+		if !ok {
+			modelError(w, 503, "engine does not support streaming request bodies")
+			return
+		}
+		res, e = engine.StreamRequest(r.Context(), r.Method, endpoint, r.Body, r.ContentLength, proxyHeaders(r.Header))
+	} else if engine, ok := m.engine.(CallRequestEngine); ok {
 		res, e = engine.CallRequest(r.Context(), r.Method, endpoint, data, proxyHeaders(r.Header))
 	} else {
 		res, e = m.engine.Call(r.Context(), endpoint, data)

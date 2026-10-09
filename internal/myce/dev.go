@@ -13,6 +13,7 @@ import (
 )
 
 type DevConfig struct {
+	ProjectPolicies                       map[string]ProjectPolicy
 	EnvironmentConfig                     EnvironmentCatalog
 	ModelConfig                           ModelConfig
 	Address, Database, Checkpoints, Token string
@@ -71,6 +72,12 @@ func StartDev(c DevConfig) (*Dev, error) {
 	if err = q.ConfigureEnvironments(c.EnvironmentConfig); err != nil {
 		q.Close()
 		return nil, err
+	}
+	if c.ProjectPolicies != nil {
+		if err = q.ConfigureProjects(c.ProjectPolicies); err != nil {
+			q.Close()
+			return nil, err
+		}
 	}
 	if err = q.ConfigureModels(c.ModelConfig); err != nil {
 		q.Close()

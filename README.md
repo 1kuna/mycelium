@@ -216,3 +216,6 @@ environment cache. `myce measure` checks joint residency locally and writes JSON
 and plain reports; see the [B70 maintenance checklist](docs/production-test-plan.md#b70-gpu0-weekend-joint-residency-measurement).
 Quotas and redundant queue services remain deferred. No v1 peer networking,
 leases, or replicated state is used.
+
+Project weights, experiment caps, usage history, and the status dashboard are
+described in [Sharing GPUs and measuring the pool](docs/guide-fairness-usage.md).

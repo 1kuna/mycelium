@@ -1,0 +1,189 @@
+package myce
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"os"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// ProjectPolicy limits only experiments. Zero caps mean unlimited.
+type ProjectPolicy struct {
+	Weight                   float64 `json:"weight" yaml:"weight"`
+	MaxConcurrentExperiments int     `json:"max_concurrent_experiments" yaml:"max_concurrent_experiments"`
+	MaxMemoryShare           float64 `json:"max_memory_share" yaml:"max_memory_share"`
+}
+type FairUsage struct {
+	Seconds float64   `json:"seconds"`
+	At      time.Time `json:"at"`
+}
+
+const FairHalfLife = 24 * time.Hour
+
+func decayed(u FairUsage, now time.Time) float64 {
+	return u.Seconds * math.Exp2(-max(0, now.Sub(u.At).Hours())/FairHalfLife.Hours())
+}
+func (q *Queue) weight(project string) float64 {
+	if p := q.s.Policies[project]; p.Weight > 0 {
+		return p.Weight
+	}
+	return 1
+}
+func (q *Queue) fairBefore(a, b *Job, m *Machine) bool {
+	// Production and deadlines retain their established order.
+	if a.Spec.Priority == "experiment" && b.Spec.Priority == "experiment" && a.Spec.Project != b.Spec.Project {
+		x := q.fairScore(a, m)
+		y := q.fairScore(b, m)
+		if math.Abs(x-y) > 1e-6 {
+			return x < y
+		}
+	}
+	return before(a, b, m)
+}
+func ReadProjectPolicies(path string) (map[string]ProjectPolicy, error) {
+	if path == "" {
+		return nil, nil
+	}
+	f, e := os.Open(path)
+	if e != nil {
+		return nil, e
+	}
+	defer f.Close()
+	var p map[string]ProjectPolicy
+	d := yaml.NewDecoder(f)
+	d.KnownFields(true)
+	e = d.Decode(&p)
+	if e == nil {
+		var extra any
+		if d.Decode(&extra) != io.EOF {
+			e = errors.New("expected one project policy document")
+		}
+	}
+	return p, e
+}
+func (q *Queue) ConfigureProjects(p map[string]ProjectPolicy) error {
+	for name, v := range p {
+		if name == "" || !validMemoryValue(v.Weight) || v.Weight <= 0 || v.MaxConcurrentExperiments < 0 || !validMemoryValue(v.MaxMemoryShare) || v.MaxMemoryShare > 1 {
+			return errors.New("project requires positive finite weight, nonnegative experiment cap, and memory share in [0,1]")
+		}
+	}
+	return q.update(func() error {
+		copy := map[string]ProjectPolicy{}
+		for k, v := range p {
+			copy[k] = v
+		}
+		q.s.Policies = copy
+		return nil
+	})
+}
+func (q *Queue) capReason(j *Job) string { return q.capReasonFor(j, nil) }
+func (q *Queue) capReasonFor(j *Job, target *Machine) string {
+	if j.Spec.Priority != "experiment" {
+		return ""
+	}
+	p := q.s.Policies[j.Spec.Project]
+	need := j.Spec.Needs.MemoryGB
+	if j.Spec.Needs.Model != "" && need == 0 {
+		model, _ := q.model(j.Spec.Needs.Model)
+		need = model.MemoryGB
+	}
+	count := 0
+	used, total := 0.0, 0.0
+	for _, m := range q.s.Machines {
+		if !m.Gone && !m.Leaving {
+			total += m.TotalMemoryGB
+		}
+	}
+	for _, r := range q.s.Jobs {
+		if r.Spec.Project == j.Spec.Project && r.Spec.Priority == "experiment" && (r.State == "running" || r.State == "stopping") {
+			count++
+			used += r.Spec.Needs.MemoryGB
+		}
+	}
+	// Model calls consume their model reservation once per project/machine/model.
+	seen := map[string]bool{}
+	for _, c := range q.calls {
+		if c.Project == j.Spec.Project && c.Priority == "experiment" && c.Machine != "" && c.Error == "" {
+			count++
+			if j.Spec.Needs.MemoryGB == 0 && j.Spec.Needs.Model == c.Model && (target == nil || target.ID == c.Machine) {
+				need = 0
+			}
+			key := slotKey(c.Machine, c.Model)
+			if !seen[key] {
+				model, _ := q.model(c.Model)
+				used += model.MemoryGB
+				seen[key] = true
+			}
+		}
+	}
+	if p.MaxConcurrentExperiments > 0 && count >= p.MaxConcurrentExperiments {
+		return fmt.Sprintf("%s has reached its concurrent experiment cap (%d)", j.Spec.Project, p.MaxConcurrentExperiments)
+	}
+	if p.MaxMemoryShare > 0 && (total <= 0 || used+need > total*p.MaxMemoryShare+1e-9) {
+		return fmt.Sprintf("%s has reached its GPU memory share cap (%.0f%%)", j.Spec.Project, p.MaxMemoryShare*100)
+	}
+	return ""
+}
+func (q *Queue) pick(m *Machine) *Job {
+	var best *Job
+	for _, j := range q.s.Jobs {
+		if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" && (best == nil || q.fairBefore(j, best, m)) {
+			best = j
+		}
+	}
+	if best != nil && !environmentReady(best, m) {
+		return nil
+	}
+	return best
+}
+func (q *Queue) waitReason(j *Job) string {
+	if reason := q.capReason(j); reason != "" {
+		return reason
+	}
+	for _, m := range q.s.Machines {
+		if !fits(j, m, m.FreeMemoryGB) {
+			continue
+		}
+		winner := q.pick(m)
+		if winner == nil || winner.ID == j.ID {
+			continue
+		}
+		if rank(winner.Spec.Priority) < rank(j.Spec.Priority) {
+			return winner.Spec.Priority + " work goes first"
+		}
+		if j.Spec.Priority == "experiment" && winner.Spec.Project != j.Spec.Project && q.fairScore(winner, m) < q.fairScore(j, m)-1e-6 {
+			return fmt.Sprintf("%s is ahead of its fair share; %s goes first", j.Spec.Project, winner.Spec.Project)
+		}
+	}
+	return waitingReason(j, q.s.Machines, q.s.Jobs)
+}
+
+// Deficit uses only competing runnable projects. An absent project reserves no
+// capacity; an otherwise idle device is always available to its sole project.
+func (q *Queue) fairScore(j *Job, m *Machine) float64 {
+	projects := map[string]bool{j.Spec.Project: true}
+	for _, r := range q.s.Jobs {
+		if r.State == "queued" && r.Spec.Priority == "experiment" && q.capReason(r) == "" && (m.ID == "" || fits(r, m, m.FreeMemoryGB)) {
+			projects[r.Spec.Project] = true
+		}
+	}
+	for _, c := range q.calls {
+		if c.Machine == "" && c.Error == "" && c.Priority == "experiment" && q.capReason(callJob(c)) == "" && (m.ID == "" || q.callCanUse(m, c)) {
+			projects[c.Project] = true
+		}
+	}
+	total, weights := 0.0, 0.0
+	largest := 1.0
+	for p := range projects {
+		largest = max(largest, q.weight(p))
+	}
+	for p := range projects {
+		total += decayed(q.s.FairUsage[p], q.clock.Now())
+		weights += q.weight(p) / largest
+	}
+	return decayed(q.s.FairUsage[j.Spec.Project], q.clock.Now()) - total*(q.weight(j.Spec.Project)/largest)/weights
+}

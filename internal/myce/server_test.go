@@ -37,6 +37,9 @@ func TestGeneralServerChild(t *testing.T) {
 			if mode == "timeout" {
 				w.WriteHeader(503)
 			}
+			if mode == "redirect" {
+				http.Redirect(w, r, "/ready-somewhere-else", http.StatusFound)
+			}
 			return
 		}
 		w.Header().Set("X-Engine-Header", "preserved")
@@ -65,21 +68,21 @@ func serverTestModel(t *testing.T, mode string) Model {
 	if err := os.WriteFile(launcher, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	return Model{Name: "general", Engine: "server", Path: "unused", MemoryGB: 1, Platforms: []string{"fake"}, StartCommand: []string{launcher, "{port}"}, HealthURL: "http://127.0.0.1:{port}/health", ReadyTimeout: 2 * time.Second, StopTimeout: 50 * time.Millisecond, Device: "2", DeviceEnv: map[string]string{"CUDA_VISIBLE_DEVICES": "{device}"}}
+	return Model{Name: "general", Engine: "server", Path: "unused", MemoryGB: 1, Platforms: []string{"fake"}, StartCommand: []string{launcher, "{port}"}, HealthURL: "http://127.0.0.1:{port}/health", ReadyTimeout: 4 * time.Second, StopTimeout: 50 * time.Millisecond, Device: "2", DeviceEnv: map[string]string{"CUDA_VISIBLE_DEVICES": "{device}"}}
 }
 func TestGeneralServerLifecycle(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "secret")
-	for _, mode := range []string{"ready", "timeout", "crash", "ignore"} {
+	for _, mode := range []string{"ready", "timeout", "redirect", "crash", "ignore"} {
 		t.Run(mode, func(t *testing.T) {
 			m := serverTestModel(t, mode)
-			if mode == "timeout" {
+			if mode == "timeout" || mode == "redirect" {
 				m.ReadyTimeout = 160 * time.Millisecond
 			}
 			e := NewModelEngine(m, t.TempDir(), RealClock{})
 			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 			defer cancel()
 			err := e.Load(ctx, m)
-			if mode == "crash" || mode == "timeout" {
+			if mode == "crash" || mode == "timeout" || mode == "redirect" {
 				if err == nil {
 					t.Fatal("load unexpectedly ready")
 				}
