@@ -6,6 +6,8 @@ Read this first when working in another repository. Follow the links for your ch
 Mycelium is one Go program, `myce`, that shares GPUs across projects.
 A queue service stores jobs in one local SQLite database and chooses their order.
 A worker is a process on a GPU machine that runs commands and reports results.
+`myce join` auto-detects its GPU like `myce install worker`; `--gpu` and
+`--device` provide explicit overrides. `myce dev` keeps fake GPU inventory.
 A job is either a command that finishes or one request to a queue-managed model.
 **GPU work runs as queue jobs; the project never holds a GPU between jobs.**
 

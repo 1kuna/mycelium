@@ -20,7 +20,7 @@ One shared queue of GPU jobs for every project: Verso, Atlas, experiments, and f
 - **Permanent machines:** the DGX Spark (GPU work only). The B70's GPUs are lent by Verso: Verso starts the worker when it is idle and stops it when it needs the GPUs back. Verso keeps full control of the B70.
 - **Machines that come and go:** the Mac minis, the MacBooks and the 4090 PC. Running `myce join` adds a machine; stopping the worker removes it.
 - All machines are on one local network. Workers find the queue at a fixed address on the B70, and a join token keeps strangers out.
-- Single Go binary, as in v1. There is no peer network, no leader election and no replicated state. If the queue service restarts, workers wait and reconnect; nothing is lost because the queue writes everything to its database file.
+- Single Go binary, as in v1. There is no peer network, no leader election and no replicated state. If the queue service restarts, queued and running batch jobs survive in its database file, and workers wait and reconnect. Model calls that were in flight are not replayed and fail; callers must retry them.
 
 ## A job
 
@@ -70,16 +70,16 @@ start under 15 seconds, excluding model load time.
 **Machines leaving.** Workers pull jobs, so a job is never tied to a machine until it starts. That means there is no list of waiting jobs per machine to clean up. Leaving works like this:
 
 - **Planned leave** (`myce leave`, or Ctrl-C on the worker). The machine stops taking new jobs at once. Resumable jobs get the stop signal, save to the NAS, and go back to the front of their line. For jobs that can't be resumed, `myce leave` asks whether to wait for them to finish or to stop them now and put them back in the queue. `myce leave --now` skips the question and stops everything.
-- **Sudden loss** (unplugged, asleep, network drop): after 60 seconds without a check-in, the queue marks the machine gone. Its running jobs go back in the queue. Resumable jobs continue from their last checkpoint. Others start over, up to 3 attempts, then fail loudly. Model calls that were in flight are retried on another machine, and models loaded there are marked as gone.
-- **Late return.** If a lost machine comes back while its old job is still running, the queue tells it to stop that copy, so one job never runs twice.
+- **Sudden loss** (unplugged, asleep, network drop): without a check-in, the queue marks the machine gone after 5 seconds for production work, 20 seconds for deadline work, or 60 seconds for experiments (defaults based on the machine's active job priority). Its running jobs go back in the queue. Resumable jobs continue from their last checkpoint. Others start over. A job fails loudly after three counted infrastructure losses; planned stops to make room for production or deadline work, or because a machine is leaving, do not count. Model calls that were in flight are retried on another machine, and models loaded there are marked as gone.
+- **Late return.** A network split can briefly leave the same job running on two machines. When contact returns, the queue keeps the resumable copy with the newest complete checkpoint, or the current attempt when there is no newer checkpoint, and tells the other copy to stop. Jobs must make output writes safe to repeat.
 - **Jobs no remaining machine can run.** These are jobs pinned to the machine that left, or jobs that need a GPU type no current machine has (for example, Apple-only work when every Mac is away). They stay in the queue, and `myce status` says plainly why each one is waiting: "no machine in the fleet can run this right now (needs metal)". A job can set a give-up time, after which it is marked failed instead of waiting forever.
 
 **Power and network loss are normal, not rare.** They happen regularly at Zach's house, so every part must survive them without anyone stepping in.
 
 - **The queue machine (B70) loses power.** The database is written safely (every change is fully saved to disk before it's confirmed), so a power cut never corrupts it or loses a submitted job. The queue starts automatically when the machine boots. After a restart it does *not* immediately declare every job lost. It waits a few minutes for workers to reconnect and report what they're still running or have finished, and only then puts back in line the jobs nobody reported.
-- **A worker machine loses power.** This is handled as a sudden loss: its jobs go back in line after 60 seconds. On the always-on machines, the worker starts automatically at boot. On startup it cleans up any job processes left over from before the power cut, and then reports in fresh.
-- **A worker loses network but keeps power.** It keeps running its current jobs, saves their logs and results locally, and keeps trying to reconnect. It does not start new jobs. When it reconnects it sends everything it saved. If the queue already gave a job to another machine, the rule that one job never runs twice decides which copy continues: whichever copy has made more progress (its latest checkpoint) keeps running, and the other stops.
-- **The whole house network drops, or the queue machine loses network.** If every worker goes quiet at once, the problem is almost certainly the network, not every machine at the same time. So the queue does not put everything back in line. It waits until machines reconnect, or until it can confirm specific machines are really gone.
+- **A worker machine loses power.** This is handled as a sudden loss: its jobs go back in line after the priority-based timeout above (5, 20, or 60 seconds). On the always-on machines, the worker starts automatically at boot. On startup it cleans up any job processes left over from before the power cut, and then reports in fresh.
+- **A worker loses network but keeps power.** It keeps running its current jobs, saves their logs and results locally, and keeps trying to reconnect. It does not start new jobs. When it reconnects it sends everything it saved. If the queue already gave a job to another machine, the queue reconciles the overlapping copies: the resumable copy with the newest complete checkpoint keeps running, otherwise the current attempt does, and the other stops. Output writes must be safe to repeat.
+- **The whole house network drops, or the queue machine loses network.** If a strict majority of workers (including all of them) go quiet at once, the problem is almost certainly the network, not every machine at the same time. So the queue does not put everything back in line. It waits until machines reconnect, or until it can confirm specific machines are really gone.
 - **The NAS is unreachable.** Jobs whose checkpoint folder can't be reached are not started. Running jobs keep going and retry their saves. `myce status` says plainly that the NAS is down.
 - **Saved progress is never half-written.** The resumable-jobs guide requires writing each checkpoint to a temporary file and then renaming it, so a power cut mid-save leaves the previous checkpoint intact. When resuming, a job uses its newest complete checkpoint.
 - **Tests:** each of these cases has a test using fake time and pretend machines: queue restart, worker restart, worker cut off from the network, the whole network dropping, and the NAS going away.
@@ -99,6 +99,14 @@ myce leave [--now]          # take it out of the fleet
 
 The same actions are available as plain HTTP calls, so projects can submit from code. The status page shows the same information as `myce status`.
 
+These GPU-work and setup features are implemented now:
+
+- **Any GPU work, not just batch jobs and OpenAI model calls.** GPU commands run as batch jobs; general HTTP model servers keep their existing interfaces and are loaded and unloaded by the queue.
+- **GPU preference.** A job either requires a platform (`cuda`, `xpu`, `metal`/MLX), or states a preferred one, or doesn't care. If it doesn't care, it goes to any machine that can run it.
+- **Environments.** A job names the software it needs, either a named environment (like `torch-cuda` or `mlx`) or a lock file. Workers report which environments they already have ready. The queue prefers a machine whose environment is ready, the same way it prefers a machine with the model already loaded. If none has it ready, a machine that *can* build it does so first.
+- **Automatic setup.** `myce install worker` detects the GPU and operating system and installs the worker and its boot service; `myce install queue` sets up the queue service. Matching software recipes build on demand, rather than all being installed up front. Bare `myce join` uses the same GPU detection for a foreground worker; explicit GPU and device flags override it.
+- **Model reservations are implemented now:** project-owned pins can hold a model continuously or within explicit weekday/time-zone windows. See Models below.
+
 ## Testing
 
 - `myce dev` runs the queue and fake workers in one process on a laptop. Fake workers pretend to have any GPU and run jobs as ordinary processes.
@@ -116,15 +124,7 @@ Each of these can be added later if real use shows a need.
 
 ## Later: any GPU work, on the best machine (the hard part)
 
-This is not in the first version, but the job format is designed now so it won't have to change later.
-
-- **Any GPU work, not just batch jobs and model calls.** Anything that needs a GPU can be a job.
-- **GPU preference.** A job either requires a platform (`cuda`, `xpu`, `metal`/MLX), or states a preferred one, or doesn't care. If it doesn't care, it goes to any machine that can run it.
-- **Environments.** A job names the software it needs, either a named environment (like `torch-cuda` or `mlx`) or a lock file. Workers report which environments they already have ready. The queue prefers a machine whose environment is ready, the same way it prefers a machine with the model already loaded. If none has it ready, a machine that *can* build it does so first.
-- **Automatic setup.** One install command on a new machine detects its GPU and operating system, installs the worker, and sets up the matching environments.
-- **Model reservations are implemented now:** project-owned pins can hold a model continuously or within explicit weekday/time-zone windows. See Models below.
-
-The first version already has the hooks for this: the `platform` and `environment` fields exist from day one, and the scheduling rules treat "environment ready" like "model loaded".
+Automatic detection of dependencies for an arbitrary project is not built yet. Jobs must name their software recipe or lock file.
 
 ## Order of work
 

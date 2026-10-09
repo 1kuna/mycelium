@@ -37,6 +37,12 @@ func LocalMachineProbe() MachineProbe {
 	}}
 }
 func (p MachineProbe) Detect(ctx context.Context) (Detection, error) {
+	return p.DetectDevice(ctx, "")
+}
+
+// DetectDevice shares setup detection while allowing foreground workers to
+// inspect a selected CUDA card instead of requiring a single-card host.
+func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detection, error) {
 	d := Detection{OS: p.OS, Arch: p.Arch, MemoryMode: "auto"}
 	if p.OS != "linux" && p.OS != "darwin" {
 		return d, fmt.Errorf("unsupported OS %s", p.OS)
@@ -58,7 +64,11 @@ func (p MachineProbe) Detect(ctx context.Context) (Detection, error) {
 		d.ReserveGB = 4
 		return d, nil
 	}
-	b, e := p.Command(ctx, "nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits")
+	args := []string{"--query-gpu=name,memory.total", "--format=csv,noheader,nounits"}
+	if device != "" {
+		args = append(args, "--id="+device)
+	}
+	b, e := p.Command(ctx, "nvidia-smi", args...)
 	if e == nil && strings.TrimSpace(string(b)) != "" {
 		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
 		if len(lines) != 1 {

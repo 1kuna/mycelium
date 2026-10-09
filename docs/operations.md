@@ -116,7 +116,9 @@ subtraction. This is memory admission, not permission to bypass a GPU owner or g
   --state-dir "$HOME/.local/share/myce/worker"
 ```
 
-For CUDA use `--gpu cuda --reserve-memory-gb VALUE`; for XPU use
+`myce join` without `--gpu` uses installer GPU detection and its memory/reserve defaults; explicit device and memory flags override them. Use `--gpu` to bypass detection.
+
+For explicit CUDA use `--gpu cuda --reserve-memory-gb VALUE`; for XPU use
 `--gpu xpu --memory-gb VALUE --reserve-memory-gb VALUE`. Configure unique stable
 names. The queue heartbeat-loss defaults are 5s production, 20s deadline, 60s
 experiment; worker heartbeat defaults to 1s. Startup recovery remains 3m. Production preemption gives resumable work 10s
