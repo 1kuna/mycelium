@@ -91,6 +91,7 @@ func run(args []string) error {
 	modelAdvertise := f.String("model-advertise", "", "worker model proxy URL reachable by queue")
 	workers := f.Int("workers", 2, "fake workers in dev mode")
 	now := f.Bool("now", false, "stop every job on leave")
+	full := f.Bool("full", false, "show full job IDs in status")
 	follow := f.Bool("follow", false, "follow logs until the job is terminal")
 	// Accept conventional 'logs ID --follow' and 'leave --now'.
 	flags := args[1:]
@@ -252,7 +253,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		printStatus(s)
+		printStatus(s, *full)
 		return nil
 	case "cancel":
 		if f.NArg() != 1 {
@@ -313,7 +314,7 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	err := c.Call(ctx, "GET", "/api/status", nil, &s)
 	return s, err
 }
-func printStatus(s myce.Snapshot) {
+func printStatus(s myce.Snapshot, full bool) {
 	if s.Warning != "" {
 		fmt.Println(s.Warning)
 	}
@@ -348,10 +349,14 @@ func printStatus(s myce.Snapshot) {
 		fmt.Printf("model %s on %s: %s, idle %.1fs, calls in flight %d %s\n", m.Model, m.Machine, m.State, m.IdleSeconds, m.InFlight, m.Error)
 	}
 	for _, j := range s.Jobs {
-		if j.StartedAt != nil && j.Spec.Priority == "production" {
-			fmt.Printf("production start latency %s: %.3fs\n", j.ID, j.StartLatencySeconds)
+		id := myce.ShortID(j.ID)
+		if full {
+			id = j.ID
 		}
-		fmt.Printf("%s %s [%s] %s attempt=%d machine=%s %s\n", j.ID, j.Spec.Name, j.Spec.Priority, j.State, j.Attempt, j.Machine, j.Reason)
+		if j.StartedAt != nil && j.Spec.Priority == "production" {
+			fmt.Printf("production start latency %s: %.3fs\n", id, j.StartLatencySeconds)
+		}
+		fmt.Printf("%s %s [%s] %s machine=%s %s %s\n", id, j.Spec.Name, j.Spec.Priority, myce.JobState(j), j.Machine, j.Reason, myce.JobAge(j, s.Now))
 	}
 	if len(s.Jobs) == 0 {
 		fmt.Println("No jobs yet.")

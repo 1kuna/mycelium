@@ -6,7 +6,82 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 )
+
+// statusBefore consumes the scheduler projection, never recreates its policy.
+func statusBefore(a, b *Job) bool {
+	if rank(a.Spec.Priority) != rank(b.Spec.Priority) {
+		return rank(a.Spec.Priority) < rank(b.Spec.Priority)
+	}
+	active := func(j *Job) int {
+		if j.State == "running" || j.State == "stopping" {
+			return 0
+		}
+		if j.State == "queued" {
+			return 1
+		}
+		return 2
+	}
+	if active(a) != active(b) {
+		return active(a) < active(b)
+	}
+	if a.QueueOrder != b.QueueOrder {
+		if a.QueueOrder == 0 {
+			return false
+		}
+		if b.QueueOrder == 0 {
+			return true
+		}
+		return a.QueueOrder < b.QueueOrder
+	}
+	if !a.Queued.Equal(b.Queued) {
+		return a.Queued.Before(b.Queued)
+	}
+	return a.ID < b.ID
+}
+func ShortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+func JobState(j *Job) string {
+	state := displayState(j.State)
+	if j.Attempt > 0 {
+		state += fmt.Sprintf(" · attempt %d", j.Attempt)
+	}
+	return state
+}
+func JobAge(j *Job, now time.Time) string {
+	start := j.StartedAt
+	if start == nil {
+		start = j.AssignedAt
+	}
+	if j.State == "queued" {
+		since := j.WaitingSince
+		if since.IsZero() {
+			since = j.Queued
+		}
+		if since.IsZero() {
+			return ""
+		}
+		return "waited " + elapsed(since, now)
+	}
+	if start == nil {
+		return ""
+	}
+	if j.FinishedAt != nil {
+		return "duration " + elapsed(*start, *j.FinishedAt)
+	}
+	if j.State == "running" || j.State == "stopping" {
+		return "running for " + elapsed(*start, now)
+	}
+	return ""
+}
+func elapsed(start, end time.Time) string {
+	return (max(0, end.Sub(start)) / time.Second * time.Second).String()
+}
 
 func activeJobs(jobs []*Job, priority string) []*Job {
 	out := make([]*Job, 0, len(jobs))
@@ -15,6 +90,7 @@ func activeJobs(jobs []*Job, priority string) []*Job {
 			out = append(out, job)
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool { return statusBefore(out[i], out[j]) })
 	return out
 }
 
@@ -136,6 +212,9 @@ func stringsList(values ...string) []string { return values }
 
 var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
 	"activeJobs":         activeJobs,
+	"shortID":            ShortID,
+	"jobState":           JobState,
+	"jobAge":             JobAge,
 	"bytes":              bytesLabel,
 	"checkpointWarnings": checkpointWarnings,
 	"copyPercent":        copyPercent,
@@ -193,7 +272,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
         </div>
         {{if .MemoryError}}<div class="alert bad">Memory unavailable: {{.MemoryError}}</div>{{end}}
 		{{if .CacheError}}<div class="alert bad">Model cache unavailable: {{.CacheError}}</div>{{end}}
-        <div class="detail"><div class="label">Current</div><div class="value">{{range $jobs}}<div><strong>{{.Spec.Name}}</strong> · {{displayState .State}} · {{.Progress}}</div>{{else}}<span class="empty-inline">Idle</span>{{end}}</div></div>
+        <div class="detail"><div class="label">Current</div><div class="value">{{range $jobs}}<div><strong>{{.Spec.Name}}</strong> · {{jobState .}}{{if .Progress}} · progress {{.Progress}}{{end}}{{with jobAge . $.Now}} · {{.}}{{end}}</div>{{else}}<span class="empty-inline">Idle</span>{{end}}</div></div>
 		<div class="detail"><div class="label">Loaded</div><div class="value chips">{{range $models}}<span class="chip">{{.Model}} · {{displayState .State}} · {{.InFlight}} calls{{if .Error}} · {{.Error}}{{end}}</span>{{else}}<span class="empty-inline">None</span>{{end}}</div></div>
         <div class="detail"><div class="label">Pinned</div><div class="value chips">{{range $pins}}<span class="chip">{{.}}</span>{{else}}<span class="empty-inline">None</span>{{end}}</div></div>
         <div class="detail"><div class="label">Cached</div><div class="value chips">{{range .CachedModels}}<span class="chip">{{.}}</span>{{else}}<span class="empty-inline">None</span>{{end}}</div></div>
@@ -211,11 +290,11 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
     <div class="queue">
     {{range $priority := (list "production" "deadline" "experiment")}}{{$jobs := activeJobs $.Jobs $priority}}
       <div class="card priority"><div class="priority-head"><h3>{{$priority}}</h3><span class="count">{{len $jobs}} active</span></div>
-      {{range $jobs}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><code>{{.ID}}</code></div><div class="state">{{displayState .State}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason {{if .Reason}}important{{end}}">{{if .Reason}}{{.Reason}}{{else if eq .State "running"}}Running now{{else}}Waiting for a compatible machine{{end}}</div></div>
+      {{range $jobs}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason {{if .Reason}}important{{end}}">{{if .Reason}}{{.Reason}}{{else if eq .State "running"}}Running now{{else}}Waiting for a compatible machine{{end}}</div></div>
       {{else}}<div class="job"><span class="muted">No {{$priority}} work.</span></div>{{end}}</div>
     {{end}}
 	{{$finished := recentFinishedJobs .Jobs}}{{if $finished}}<div class="card priority"><div class="priority-head"><h3>Recent outcomes</h3><span class="count">{{len $finished}} shown</span></div>
-	  {{range $finished}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><code>{{.ID}}</code></div><div class="state">{{displayState .State}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason">{{if .Reason}}{{.Reason}}{{else}}No additional details{{end}}</div></div>{{end}}
+	  {{range $finished}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason">{{.Reason}}</div></div>{{end}}
 	</div>{{end}}
     </div>
   </section>

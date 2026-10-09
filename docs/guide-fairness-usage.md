@@ -81,3 +81,14 @@ chart appears after an observed interval. No historical data is invented.
 All fairness, accounting, retention, and explanation tests use an injected clock
 and fake inventory on a laptop. `myce dev` uses the real queue, HTTP API, and
 command runner, with fake GPUs.
+
+Within each priority, status lists running work first and then waiting commands
+in the dispatch scheduler's current order. Busy-machine explanations combine
+capacity and ordering (including fair share). This is a projection of current
+inventory and usage, not a reservation: arrivals, usage, availability and which
+worker frees first can change it. Non-runnable/capped jobs follow runnable jobs
+with their blocking reason; model calls join the same order when their model route is eligible.
+Job IDs show eight characters; hover for the full ID or use `myce status --full`.
+Attempts start at 1; jobs not yet assigned show no attempt. Running/waiting ages
+use the queue clock. A resumed job shows time since its latest return to the queue.
+Finished durations appear when start and finish are known.
