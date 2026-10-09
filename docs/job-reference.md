@@ -88,11 +88,11 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --deadline-loss-timeout` | `20s` | Deadline loss detection |
 | `queue --experiment-loss-timeout` | `60s` | Experiment loss detection |
 | `join --name` | Hostname | Unique stable worker name |
-| `join --device` | Empty | One physical card per worker; CUDA resolves to a stable UUID for inventory/execution; select explicitly on multi-GPU hosts |
-| `join --gpu` | Required | `cuda`, `xpu`, `metal`, or `fake` |
-| `join --memory-gb` | `0` | Positive budget required for fixed/XPU; fake permits zero; live CUDA/Metal optional positive cap before reserve |
-| `join --memory-mode` | `auto` | `auto`: CUDA marker detection, Metal unified; `unified`: OS probe; `dedicated`: numeric CUDA; `fixed`: explicit positive budget without probes |
-| `join --reserve-memory-gb` | `0` | GiB withheld from live dedicated/unified memory or fixed budget; suggested Spark reserve: 16 |
+| `join --device` | Sole detected CUDA card / platform default | One physical card per worker; CUDA resolves to a stable UUID for inventory/execution; select explicitly on multi-GPU hosts |
+| `join --gpu` | Auto-detected | Override with `cuda`, `xpu`, `metal`, or `fake`; same detection as `install worker` |
+| `join --memory-gb` | Detected budget; `0` with explicit `--gpu` | Positive budget required for fixed/XPU; fake permits zero; live CUDA/Metal optional positive cap before reserve |
+| `join --memory-mode` | Detected mode; `auto` with explicit `--gpu` | `auto`: CUDA marker detection, Metal unified; `unified`: OS probe; `dedicated`: numeric CUDA; `fixed`: explicit positive budget without probes |
+| `join --reserve-memory-gb` | Detected reserve; `0` with explicit `--gpu` | GiB withheld from live dedicated/unified memory or fixed budget; suggested Spark reserve: 16 |
 | `join --heartbeat` | `1s` | Worker check-in interval |
 | `join --checkpoint-root` | `MYCE_CHECKPOINT_ROOT`, otherwise queue-provided root | Local mount of the same shared NAS root; may differ from queue path |
 | `join --state-dir` | Per-queue/per-machine user cache directory | Durable local spool; explicitly set for services |

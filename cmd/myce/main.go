@@ -33,6 +33,9 @@ func env(k, d string) string {
 	return d
 }
 func run(args []string) error {
+	return runWithProbe(args, myce.LocalMachineProbe())
+}
+func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) == 0 {
 		return errors.New("usage: myce queue|join|leave|submit|status|logs|cancel|dev")
 	}
@@ -75,8 +78,8 @@ func run(args []string) error {
 	stateDir := f.String("state-dir", "", "durable local worker spool directory")
 	hostname, _ := os.Hostname()
 	name := f.String("name", hostname, "unique machine name")
-	device := f.String("device", "", "physical GPU selector (one device per worker)")
-	gpu := f.String("gpu", "", "GPU type: cuda, xpu, metal, or fake")
+	device := f.String("device", "", "physical GPU selector override (one device per worker)")
+	gpu := f.String("gpu", "", "GPU override: cuda, xpu, metal, or fake (join auto-detects when omitted)")
 	memory := f.Float64("memory-gb", 0, "memory cap in GiB (required for fixed/XPU/fake budgets)")
 	environments := f.String("environments", "", "comma-separated ready environment names or lock-file paths")
 	models := f.String("models", "", "comma-separated already loaded model names")
@@ -190,6 +193,14 @@ func run(args []string) error {
 		defer cancel()
 		return errors.Join(err, server.Shutdown(shutdown))
 	case "join":
+		options := joinGPUOptions{*gpu, *device, *memoryMode, *memory, *reserve}
+		explicit := map[string]bool{}
+		f.Visit(func(v *flag.Flag) { explicit[v.Name] = true })
+		options, err = detectJoinGPU(ctx, probe, options, explicit)
+		if err != nil {
+			return err
+		}
+		*gpu, *device, *memoryMode, *memory, *reserve = options.platform, options.device, options.mode, options.memory, options.reserve
 		binding := *device
 		if *gpu == "cuda" && *device != "" {
 			binding, err = myce.ResolveCUDADevice(ctx, *device)
