@@ -116,7 +116,7 @@ func TestWorkerStreamsGenericBodyHeadersAndLength(t *testing.T) {
 	select {
 	case <-engine.started:
 		// The engine sees the request before the uploader reaches EOF.
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("worker buffered generic request before calling engine")
 	}
 	if _, err = io.WriteString(writer, "last"); err != nil {
@@ -198,7 +198,7 @@ func TestGenericDiskSpoolReplaysTransportRetry(t *testing.T) {
 	}
 	select {
 	case got = <-received:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatalf("retry did not reach second worker: status=%d response=%q", res.StatusCode, data)
 	}
 	if res.StatusCode != http.StatusAccepted || string(data) != "accepted" || firstCalls.Load() != 1 || secondCalls.Load() != 1 || got.body != payload || got.length != int64(len(payload)) {

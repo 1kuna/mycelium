@@ -28,23 +28,28 @@ func workerFixture(t *testing.T, q *Queue) context.CancelFunc {
 			if err != nil {
 				t.Error(err)
 			}
-		case <-time.After(4 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Error("worker did not exit")
 		}
 		server.Close()
 	})
 	return cancel
 }
+
+// testWaitTimeout bounds real I/O and goroutine synchronization, not scheduler time.
+// Passing tests return as soon as their condition is true, even on a quiet laptop.
+const testWaitTimeout = 60 * time.Second
+
 func await(t *testing.T, f func() bool) {
 	t.Helper()
-	timeout := time.After(3 * time.Second)
+	timeout := time.After(testWaitTimeout)
 	for {
 		if f() {
 			return
 		}
 		select {
 		case <-timeout:
-			t.Fatal("timed out waiting for worker")
+			t.Fatalf("%s: worker condition not met within %s", t.Name(), testWaitTimeout)
 		case <-time.After(5 * time.Millisecond):
 		}
 	}

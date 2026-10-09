@@ -149,6 +149,30 @@ func workerGroupMembers(group int) ([]int, error) {
 	}
 	return members, nil
 }
+
+// macOS can return EPERM for a group whose last process is exiting. Treat
+// that as disappearance only after a successful inventory proves no live
+// members remain; permission errors for surviving processes stay fail-closed.
+func signalWorkerGroup(group int, signal syscall.Signal) error {
+	return signalWorkerGroupUsing(group, signal, syscall.Kill, workerGroupMembers)
+}
+func signalWorkerGroupUsing(group int, signal syscall.Signal, kill func(int, syscall.Signal) error, inventory func(int) ([]int, error)) error {
+	err := kill(-group, signal)
+	if err == nil || errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	if errors.Is(err, syscall.EPERM) {
+		members, inspectErr := inventory(group)
+		if inspectErr != nil {
+			return errors.Join(err, inspectErr)
+		}
+		if len(members) == 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("signal process group %d: %w", group, err)
+}
+
 func waitWorkerGroup(group int, clock Clock) error {
 	deadline := clock.Now().Add(5 * time.Second)
 	wake := time.NewTicker(5 * time.Millisecond)

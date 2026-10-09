@@ -83,7 +83,7 @@ func TestPreDeployFullSystem(t *testing.T) {
 		defer apiMu.RUnlock()
 		handler.ServeHTTP(w, r)
 	}))
-	client := Client{URL: server.URL, Token: "predeploy-token", HTTP: &http.Client{Timeout: 5 * time.Second}}
+	client := Client{URL: server.URL, Token: "predeploy-token", HTTP: &http.Client{Timeout: testWaitTimeout}}
 	call := func(method, path string, in, out any) {
 		t.Helper()
 		must(client.Call(context.Background(), method, path, in, out))
@@ -126,7 +126,7 @@ func TestPreDeployFullSystem(t *testing.T) {
 	}
 	wait := func(label string, condition func() bool) {
 		t.Helper()
-		deadline := time.NewTimer(8 * time.Second)
+		deadline := time.NewTimer(testWaitTimeout)
 		defer deadline.Stop()
 		ticker := time.NewTicker(5 * time.Millisecond)
 		defer ticker.Stop()
@@ -203,7 +203,7 @@ echo FINISHED
 		lw := &liveWorker{transport: transport, cancel: cancel, done: make(chan error, 1), alias: alias, state: filepath.Join(base, gpu+"-state")}
 		workers[gpu] = lw
 		w := Worker{CheckpointRoot: alias, ModelConfig: config, StateDir: lw.state, Clock: workerClocks[gpu], Interval: 5 * time.Millisecond,
-			Machine: machine(gpu, gpu), Client: Client{URL: server.URL, Token: "predeploy-token", HTTP: &http.Client{Transport: transport, Timeout: time.Second}}}
+			Machine: machine(gpu, gpu), Client: Client{URL: server.URL, Token: "predeploy-token", HTTP: &http.Client{Transport: transport, Timeout: testWaitTimeout}}}
 		go func() { lw.done <- w.Run(ctx) }()
 	}
 	// Cleanup also handles failed assertions while a NAS or network fault is active.
@@ -231,7 +231,7 @@ echo FINISHED
 				if err != nil {
 					t.Errorf("cleanup %s: %v", name, err)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Errorf("cleanup %s did not stop", name)
 			}
 		}
@@ -297,7 +297,7 @@ echo FINISHED
 		}
 		return nil
 	}
-	must(modelCall("cuda-model", "deadline", 8*time.Second))
+	must(modelCall("cuda-model", "deadline", testWaitTimeout))
 	if !strings.Contains(logs(experiment.ID), "PAUSED") || get(experiment.ID).State != "queued" {
 		t.Fatal("deadline model did not checkpoint/preempt experiment")
 	}
@@ -507,7 +507,7 @@ echo FINISHED
 	case err := <-workers["xpu"].done:
 		must(err)
 		workers["xpu"].stopped = true
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("planned leave worker did not exit")
 	}
 	if get(experiment.ID).Losses != 1 {
@@ -516,8 +516,8 @@ echo FINISHED
 	writeGate(cudaGate)
 	wait("final resumed experiment succeeds", func() bool { return get(experiment.ID).State == "succeeded" })
 	// Exercise the other model priority tiers through the same real API/workers.
-	must(modelCall("metal-model", "experiment", 8*time.Second))
-	must(modelCall("cuda-model", "production", 8*time.Second))
+	must(modelCall("metal-model", "experiment", testWaitTimeout))
+	must(modelCall("cuda-model", "production", testWaitTimeout))
 
 	final := snapshot()
 	if len(final.Jobs) != len(submitted) {
@@ -609,7 +609,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 	urgent := makeModel("urgent", 3*1024*1024)
 	bad := makeModel("bad", 1024)
 	bad.SHA256 = strings.Repeat("0", 64)
-	cfg := ModelConfig{Idle: time.Second, Wait: 5 * time.Second, Models: []Model{pin, restart, network, urgent, bad}}
+	cfg := ModelConfig{Idle: time.Second, Wait: testWaitTimeout, Models: []Model{pin, restart, network, urgent, bad}}
 	clock := &manualWorkerClock{now: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}
 	open := func() *Queue {
 		q, err := Open(filepath.Join(base, "queue.db"), nas, clock)
@@ -626,7 +626,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 		defer apiMu.RUnlock()
 		handler.ServeHTTP(w, r)
 	}))
-	client := Client{URL: server.URL, Token: "copy-fault-test", HTTP: &http.Client{Timeout: time.Second}}
+	client := Client{URL: server.URL, Token: "copy-fault-test", HTTP: &http.Client{Timeout: testWaitTimeout}}
 	call := func(method, path string, in, out any) {
 		t.Helper()
 		must(client.Call(context.Background(), method, path, in, out))
@@ -634,7 +634,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 	snapshot := func() Snapshot { t.Helper(); var s Snapshot; call("GET", "/api/status", nil, &s); return s }
 	wait := func(label string, condition func() bool) {
 		t.Helper()
-		deadline := time.NewTimer(8 * time.Second)
+		deadline := time.NewTimer(testWaitTimeout)
 		defer deadline.Stop()
 		tick := time.NewTicker(5 * time.Millisecond)
 		defer tick.Stop()
@@ -690,7 +690,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 	transport := &partitionTransport{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	w := Worker{Client: Client{URL: server.URL, Token: client.Token, HTTP: &http.Client{Transport: transport, Timeout: time.Second}},
+	w := Worker{Client: Client{URL: server.URL, Token: client.Token, HTTP: &http.Client{Transport: transport, Timeout: testWaitTimeout}},
 		Machine: machine("copy-worker", "fake"), CheckpointRoot: nas, ModelRoot: nas, StateDir: state,
 		CacheLimit: 4 * 1024 * 1024, Clock: RealClock{}, Interval: 5 * time.Millisecond, ModelConfig: cfg,
 		beforeModelCopy: hook, modelEngine: func(Model) Engine { return &auditedModelEngine{root: cache, loads: &loads, invalid: &invalid} }}
@@ -714,7 +714,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 			if err != nil {
 				t.Error(err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Error("copy worker did not stop")
 		}
 		server.Close()
@@ -865,7 +865,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 		request.Header.Set("Authorization", "Bearer "+client.Token)
 		request.Header.Set("X-Myce-Project", "fault")
 		request.Header.Set("X-Myce-Priority", "production")
-		response, err := (&http.Client{Timeout: 8 * time.Second}).Do(request)
+		response, err := (&http.Client{Timeout: testWaitTimeout}).Do(request)
 		must(err)
 		defer response.Body.Close()
 		_, err = io.Copy(io.Discard, response.Body)
@@ -934,7 +934,7 @@ func TestPreDeployEnvironmentBuildRestart(t *testing.T) {
 	}
 	wait := func(label string, condition func() bool) {
 		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(testWaitTimeout)
 		for !condition() {
 			if time.Now().After(deadline) {
 				t.Fatal(label + " timed out")

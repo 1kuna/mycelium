@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -32,6 +33,8 @@ func TestGeneralServerChild(t *testing.T) {
 		signal.Ignore(syscall.SIGTERM)
 	}
 	port := os.Args[len(os.Args)-1]
+	streamRelease := make(chan struct{})
+	var releaseOnce sync.Once
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
 			if mode == "timeout" {
@@ -44,10 +47,18 @@ func TestGeneralServerChild(t *testing.T) {
 		}
 		w.Header().Set("X-Engine-Header", "preserved")
 		w.Header().Set("Content-Type", "application/octet-stream")
+		if r.URL.Path == "/release-stream" {
+			releaseOnce.Do(func() { close(streamRelease) })
+			return
+		}
 		if r.URL.Path == "/stream" {
 			fmt.Fprint(w, "first\n")
 			w.(http.Flusher).Flush()
-			time.Sleep(120 * time.Millisecond)
+			select {
+			case <-streamRelease:
+			case <-r.Context().Done():
+				return
+			}
 			fmt.Fprint(w, "last\n")
 			return
 		}
@@ -68,7 +79,7 @@ func serverTestModel(t *testing.T, mode string) Model {
 	if err := os.WriteFile(launcher, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	return Model{Name: "general", Engine: "server", Path: "unused", MemoryGB: 1, Platforms: []string{"fake"}, StartCommand: []string{launcher, "{port}"}, HealthURL: "http://127.0.0.1:{port}/health", ReadyTimeout: 4 * time.Second, StopTimeout: 50 * time.Millisecond, Device: "2", DeviceEnv: map[string]string{"CUDA_VISIBLE_DEVICES": "{device}"}}
+	return Model{Name: "general", Engine: "server", Path: "unused", MemoryGB: 1, Platforms: []string{"fake"}, StartCommand: []string{launcher, "{port}"}, HealthURL: "http://127.0.0.1:{port}/health", ReadyTimeout: testWaitTimeout, StopTimeout: 50 * time.Millisecond, Device: "2", DeviceEnv: map[string]string{"CUDA_VISIBLE_DEVICES": "{device}"}}
 }
 func TestGeneralServerLifecycle(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "secret")
@@ -79,7 +90,7 @@ func TestGeneralServerLifecycle(t *testing.T) {
 				m.ReadyTimeout = 160 * time.Millisecond
 			}
 			e := NewModelEngine(m, t.TempDir(), RealClock{})
-			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 			defer cancel()
 			err := e.Load(ctx, m)
 			if mode == "crash" || mode == "timeout" || mode == "redirect" {
@@ -103,13 +114,7 @@ func TestGeneralServerLifecycle(t *testing.T) {
 			if string(b) != "PATCH|/speech?x=1|value|2||audio" {
 				t.Fatalf("passthrough changed: %s", b)
 			}
-			start := time.Now()
-			if err = e.Unload(); err != nil {
-				t.Fatal(err)
-			}
-			if time.Since(start) > 3*time.Second {
-				t.Fatal("stop escalation unbounded")
-			}
+			unloadServer(t, e)
 		})
 	}
 }
@@ -117,7 +122,7 @@ func TestGeneralServerQueuePassthroughAndStreaming(t *testing.T) {
 	q, _, machine := modelFixture(t)
 	model := serverTestModel(t, "ready")
 	engine := NewModelEngine(model, t.TempDir(), RealClock{})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	if e := engine.Load(ctx, model); e != nil {
 		t.Fatal(e)
@@ -151,9 +156,22 @@ func TestGeneralServerQueuePassthroughAndStreaming(t *testing.T) {
 			if _, err = io.ReadFull(res.Body, b); err != nil || string(b) != "first\n" {
 				t.Fatal("first stream chunk", string(b), err)
 			}
+			// Release the remainder only after observing the first chunk: proves
+			// forwarding without depending on a short wall-clock sleep.
+			release, err := engine.(CallRequestEngine).CallRequest(ctx, "POST", "/release-stream", nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			release.Body.Close()
 		}
-		b, _ := io.ReadAll(res.Body)
+		b, readErr := io.ReadAll(res.Body)
 		res.Body.Close()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if path == "/stream" && string(b) != "last\n" {
+			t.Fatal("last stream chunk", string(b))
+		}
 		if path != "/stream" && string(b) != "PATCH|"+path+"|value|2||audio" {
 			t.Fatal(string(b))
 		}
@@ -202,10 +220,10 @@ func TestStopCommandDescendantsAreCleaned(t *testing.T) {
 	m := serverTestModel(t, "ready")
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "helper-group")
-	m.StopTimeout = 2 * time.Second
+	m.StopTimeout = testWaitTimeout
 	m.StopCommand = []string{"sh", "-c", "echo $$ > '" + marker + "'; sleep 60 &"}
 	e := NewModelEngine(m, dir, RealClock{})
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	if err := e.Load(ctx, m); err != nil {
 		t.Fatal(err)
@@ -260,14 +278,14 @@ func TestGeneralServerUsesCatalogEnvironment(t *testing.T) {
 	m.SizeBytes = int64(len(data))
 	m.SHA256 = fmt.Sprintf("%x", sha256.Sum256(data))
 	cache := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}}
-	w := Worker{Machine: Machine{Session: "session", GPU: "fake"}, Client: Client{Token: "token"}, ModelConfig: ModelConfig{Models: []Model{m}, Wait: 3 * time.Second}, Clock: RealClock{}, environmentCache: cache, MemorySource: func(context.Context) (float64, error) { return 10, nil }}
+	w := Worker{Machine: Machine{Session: "session", GPU: "fake"}, Client: Client{Token: "token"}, ModelConfig: ModelConfig{Models: []Model{m}, Wait: testWaitTimeout}, Clock: RealClock{}, environmentCache: cache, MemorySource: func(context.Context) (float64, error) { return 10, nil }}
 	rt, err := startModels(w, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rt.close()
 	rt.sync([]ModelSlot{{Model: m.Name, Session: "session", State: "loading", EnvironmentRecipe: &recipe}})
-	deadline := time.Now().Add(4 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		reports, _ := rt.report()
 		if len(reports) > 0 {
@@ -299,19 +317,13 @@ func TestStopCommandTimeoutEscalates(t *testing.T) {
 	m.StopTimeout = 150 * time.Millisecond
 	dir := t.TempDir()
 	e := NewModelEngine(m, dir, RealClock{})
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	if err := e.Load(ctx, m); err != nil {
 		t.Fatal(err)
 	}
 	defer e.Unload()
-	start := time.Now()
-	if err := e.Unload(); err != nil {
-		t.Fatal(err)
-	}
-	if time.Since(start) > 3*time.Second {
-		t.Fatal("stop helper escaped grace")
-	}
+	unloadServer(t, e)
 	records, err := filepath.Glob(filepath.Join(dir, "engine-*.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -325,5 +337,42 @@ func TestStopCommandTimeoutEscalates(t *testing.T) {
 		if err = decodeWorkerJSON(data, &st); err != nil || st.PID != 0 {
 			t.Fatal("cleanup retained live group record", st, err)
 		}
+	}
+}
+
+// The stop grace is a product setting; observing exit includes OS scheduling and
+// process inventory. A deadline prevents hangs without timing the observer.
+func unloadServer(t *testing.T, e Engine) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- e.Unload() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(testWaitTimeout):
+		t.Fatalf("server process group did not stop within %s", testWaitTimeout)
+	}
+}
+
+func TestStopCommandExpiredGraceStillCleansServer(t *testing.T) {
+	m := serverTestModel(t, "ignore")
+	m.StopCommand = []string{"sh", "-c", "sleep 60"}
+	engine := NewModelEngine(m, t.TempDir(), RealClock{}).(*LlamaEngine)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+	defer cancel()
+	if err := engine.Load(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Unload()
+	group := engine.cmd.Process.Pid
+	// Deterministically expire grace before the stop helper can launch. This is
+	// the same path slow fsync/startup took in the loaded-Mac repetition.
+	engine.stopTimeout = time.Nanosecond
+	unloadServer(t, engine)
+	members, err := workerGroupMembers(group)
+	if err != nil || len(members) != 0 || engine.cmd != nil {
+		t.Fatal("expired grace left server alive", members, err)
 	}
 }

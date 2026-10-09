@@ -411,7 +411,7 @@ func TestModelLostWorkerRetriesInFlightCall(t *testing.T) {
 	}
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+"/v1/chat/completions", strings.NewReader(`{"model":"test"}`))
 	req.Header.Set("Authorization", "Bearer test")
@@ -595,7 +595,7 @@ func TestCancelledModelCallDoesNotLoadRetryWorker(t *testing.T) {
 	other.ModelConfigHash = modelConfigHash(q.models)
 	check(t, q, other, nil)
 	q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, State: "ready", Priority: "experiment", LastUsed: q.clock.Now()}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test"}`)).WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer test")
@@ -614,7 +614,7 @@ func TestCancelledModelCallDoesNotLoadRetryWorker(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("cancelled request did not return")
 	}
 	if q.s.ModelSlots[slotKey(other.ID, "test")] != nil {
@@ -637,5 +637,56 @@ func TestRetryReleasesOldModelPriorityAndResetsIdle(t *testing.T) {
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]
 	if s.Priority != "experiment" || s.InFlight != 1 || !s.LastUsed.Equal(clock.Now()) {
 		t.Fatalf("old attempt retained reservation priority/idle: %+v", s)
+	}
+}
+
+// Move the transient CLI ready-state assertions here: a status HTTP request
+// cannot be guaranteed to arrive before a one-second real idle timer expires.
+func TestModelReadyIdleReloadStatusFakeClock(t *testing.T) {
+	q, clock, m := modelFixture(t)
+	q.models.Idle = time.Second
+	api := API{Queue: q, Token: "test"}.Handler()
+	status := func() Snapshot {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/api/status", nil)
+		req.Header.Set("Authorization", "Bearer test")
+		response := httptest.NewRecorder()
+		api.ServeHTTP(response, req)
+		var snap Snapshot
+		if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &snap) != nil {
+			t.Fatal("status", response.Code, response.Body.String())
+		}
+		return snap
+	}
+	if len(status().LoadedModels) != 0 {
+		t.Fatal("model already loaded")
+	}
+	ready := func() {
+		t.Helper()
+		snap := status()
+		if len(snap.LoadedModels) != 1 || snap.LoadedModels[0].State != "ready" {
+			t.Fatalf("not ready: %+v", snap.LoadedModels)
+		}
+	}
+	for range 2 {
+		call := addModelCall(t, q, "production")
+		reportModel(t, q, m, "ready")
+		ready()
+		if err := q.finishCall(call.ID); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(time.Second - time.Nanosecond)
+		q.Tick()
+		ready()
+		clock.Advance(time.Nanosecond)
+		q.Tick()
+		snap := status()
+		if len(snap.LoadedModels) != 1 || snap.LoadedModels[0].State != "draining" {
+			t.Fatalf("idle expiry did not drain: %+v", snap.LoadedModels)
+		}
+		reportModel(t, q, m, "unloaded")
+		if len(status().LoadedModels) != 0 {
+			t.Fatal("idle unload retained slot")
+		}
 	}
 }

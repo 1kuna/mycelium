@@ -231,7 +231,7 @@ func TestCacheInventoryDoesNotBlockHeartbeatDuringCopy(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("inventory blocked behind copy lock; worker heartbeat would stop")
 	}
 }

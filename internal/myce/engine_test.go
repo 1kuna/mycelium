@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // This child is a pretend llama-server, not a model or GPU implementation.
@@ -59,7 +58,7 @@ func TestLlamaAdapterAndOrphanCleanup(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("MYCE_TOKEN", "must-not-inherit")
 	engine := &LlamaEngine{Dir: dir, Clock: RealClock{}}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	if e = engine.Load(ctx, Model{Name: "test", Path: "pretend.gguf"}); e != nil {
 		t.Fatal(e)

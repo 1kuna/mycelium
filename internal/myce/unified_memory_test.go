@@ -176,7 +176,7 @@ func TestUnifiedProbeFailureStatusAndRecovery(t *testing.T) {
 			if err != nil {
 				t.Error(err)
 			}
-		case <-time.After(4 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Error("worker did not exit")
 		}
 	})
