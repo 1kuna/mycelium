@@ -1,3 +1,5 @@
+Start with [the agent starting guide](START-HERE.md) when integrating another project.
+
 # Integrating Atlas and Verso
 
 Projects submit bounded GPU work and let go of the GPU afterward. Keep Atlas's
