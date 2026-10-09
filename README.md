@@ -17,7 +17,7 @@ are needed for this quick start.
 
 ```sh
 go build -o myce ./cmd/myce
-./myce dev --workers 2
+./myce dev --workers 2 --token dev-token
 ```
 
 Leave that terminal open. Dev starts the queue at `http://127.0.0.1:7331` and
@@ -26,6 +26,7 @@ Use `dev --gpu cuda --environments torch-cuda` to simulate a CUDA machine with
 a ready environment, still without hardware. In another terminal in this directory:
 
 ```sh
+export MYCE_QUEUE=http://127.0.0.1:7331
 export MYCE_TOKEN=dev-token
 cat > job.yaml <<'YAML'
 name: hello-fleet
@@ -67,6 +68,15 @@ curl http://127.0.0.1:7331/v1/chat/completions \
   -H "Authorization: Bearer dev-token" -H "Content-Type: application/json" \
   -H "X-Myce-Project: demo" -H "X-Myce-Priority: production" \
   -d '{"model":"dev-model","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+For Python calls, use a fresh Python 3.10+ environment in this checkout
+(`python3.13` below; Apple's `python3` may be 3.9):
+
+```sh
+python3.13 -m venv /tmp/myce-adopter-venv
+. /tmp/myce-adopter-venv/bin/activate
+python -m pip install './clients/python[yaml,openai]'
 ```
 
 ```python
@@ -115,7 +125,8 @@ CUDA workers query live `nvidia-smi` free GPU memory minus
 `--reserve-memory-gb`; a positive `--memory-gb` optionally caps that reading before reserve and never replaces the query. XPU, Metal, and
 fake workers use an explicit `--memory-gb` budget minus reserve. Own batch/model
 reservations are accounted for without double subtraction. Unsupported inventory
-fails visibly. Admission does not replace Atlas/Verso ownership controls.
+fails visibly. CUDA currently requires exactly one GPU; multi-GPU inventory
+fails rather than summing memory a single command may not be able to use. Admission does not replace Atlas/Verso ownership controls.
 Each worker runs one command at a time. Use Ctrl-C or `leave` when reclaiming its
 GPU. `--environments torch-cuda,mlx` reports installed, ready environments;
 `--models qwen3-32b` remains a batch affinity hint for externally managed models;

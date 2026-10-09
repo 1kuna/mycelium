@@ -12,10 +12,21 @@ From this checkout, start the real queue/runner with simulated GPU inventory:
 
 ```sh
 go build -o /tmp/myce-step3 ./cmd/myce
-/tmp/myce-step3 dev --workers 1 --memory-gb 8 --model-idle 5s
+/tmp/myce-step3 dev --workers 1 --memory-gb 8 --model-idle 5s --token dev-token
 ```
 
-Keep it open. In another terminal:
+Keep it open. In another terminal **in this checkout**, create a fresh Python
+3.10+ environment first. On Macs, `python3` may still be Apple's unsupported
+3.9; use an installed `python3.13` (or another 3.10+ interpreter). No system
+Python packages are changed:
+
+```sh
+python3.13 -m venv /tmp/myce-adopter-venv
+. /tmp/myce-adopter-venv/bin/activate
+python -m pip install './clients/python[yaml,openai]'
+```
+
+Then set the local connection:
 
 ```sh
 export MYCE_QUEUE=http://127.0.0.1:7331
@@ -181,6 +192,7 @@ import os, pathlib, signal, time
 root = pathlib.Path(os.environ["MYCE_CHECKPOINT_DIR"])
 p = root / "progress"
 n = int(p.read_text()) if p.exists() else 0
+print(f"resumed unit {n}; attempt {os.environ['MYCE_ATTEMPT']}", flush=True)
 stopping = False
 def stop(*_):
     global stopping
@@ -197,7 +209,9 @@ def save():
 while n < 100 and not stopping:
     time.sleep(0.2)  # demonstration only: replace with one real GPU unit
     n += 1
-    try: save()
+    try:
+        save()
+        print(f"checkpoint unit {n}", flush=True)
     except OSError as e: print(f"save will retry: {e}", flush=True)
 while True:
     try: save(); break
@@ -219,8 +233,19 @@ expected_minutes: 1
 resumable: true
 YAML
 experiment_id=$("$MYCE" submit /tmp/verso-experiment.yaml)
-# Let the experiment start and checkpoint before submitting production.
-sleep 2
+# Wait for evidence of a complete checkpoint, rather than guessing startup time.
+export experiment_id
+python - <<'PYREADY'
+import os, time
+from mycelium import Client
+client = Client()
+for _ in range(300):
+    if any("checkpoint unit" in c["text"] for c in client.logs(os.environ["experiment_id"])):
+        break
+    time.sleep(0.1)
+else:
+    raise SystemExit("experiment did not checkpoint; inspect myce status")
+PYREADY
 cat > /tmp/verso-production.yaml <<'YAML'
 name: verso-production-demo
 project: verso
@@ -337,11 +362,11 @@ fields, defaults, and endpoint contracts.
 ## Python project client
 
 The distribution is `mycelium-client`; the import package is `mycelium`.
-Install from this checkout into the project's own environment (no published
+Requires Python 3.10+. Install from this checkout into the project's own environment (no published
 PyPI release is assumed):
 
 ```sh
-python3 -m pip install './clients/python[yaml,openai]'
+python -m pip install './clients/python[yaml,openai]'
 ```
 
 A CPU orchestrator can submit a batch, read logs, inspect completion, or cancel:
