@@ -249,7 +249,7 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 			return e
 		}
 		id := ID()
-		j := &Job{EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j := &Job{EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		copy := cloneJob(j)
 		j = &copy
 		q.s.Jobs[id] = j
@@ -269,6 +269,7 @@ func (q *Queue) retry(j *Job, why string) {
 		j.Reason = "failed after 3 attempts: " + why
 		return
 	}
+	j.WaitingSince = q.clock.Now()
 	q.s.Front++
 	j.Front = q.s.Front
 	j.State = "queued"
@@ -554,6 +555,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			if j != nil {
 				j.State = "running"
 				j.StartedAt = nil
+				now := q.clock.Now()
+				j.AssignedAt = &now
+				j.FinishedAt = nil
 				j.StartLatencySeconds = 0
 				m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
 				j.Starts = max(j.Starts, j.Attempt) + 1
@@ -622,6 +626,10 @@ func (q *Queue) Complete(r Result) error {
 			j.State = "failed"
 			j.Reason = "command failed: " + r.Error
 		}
+		if terminal(j.State) {
+			now := q.clock.Now()
+			j.FinishedAt = &now
+		}
 		q.maintain()
 		return nil
 	})
@@ -689,14 +697,17 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 				out.Warning = "NAS checkpoint root is unreachable on worker " + m.ID
 			}
 		}
+		out.Now = q.clock.Now()
+		order, reasons := q.queueProjection()
 		for _, j := range q.s.Jobs {
 			if j.State == "queued" {
-				j.Reason = q.waitReason(j)
+				j.Reason = reasons[j.ID]
 				if !checkpointAvailable(q.root) {
 					j.Reason = "NAS checkpoint root is unreachable"
 				}
 			}
 			copy := cloneJob(j)
+			copy.QueueOrder = order[j.ID]
 			out.Jobs = append(out.Jobs, &copy)
 		}
 		for _, c := range q.calls {
@@ -705,6 +716,10 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 			call.Machine = c.Machine
 			call.State = "queued"
 			call.Reason = "waiting for model " + c.Model + " on an eligible worker"
+			call.QueueOrder = order[c.ID]
+			if reason := reasons[c.ID]; reason != "" {
+				call.Reason = reason
+			}
 			if reason := q.capReason(call); reason != "" {
 				call.Reason = reason
 			}
@@ -736,7 +751,7 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 			}
 			out.Machines = append(out.Machines, &copy)
 		}
-		sort.Slice(out.Jobs, func(i, k int) bool { return out.Jobs[i].ID < out.Jobs[k].ID })
+		sort.SliceStable(out.Jobs, func(i, k int) bool { return statusBefore(out.Jobs[i], out.Jobs[k]) })
 		sort.Slice(out.Machines, func(i, k int) bool { return out.Machines[i].ID < out.Machines[k].ID })
 		return nil
 	})

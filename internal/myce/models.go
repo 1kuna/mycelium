@@ -152,6 +152,8 @@ type ModelReport struct {
 	Error string `json:"error,omitempty"`
 }
 type ModelCall struct {
+	WaitingSince                     time.Time
+	StartedAt                        *time.Time
 	ID, Model, Project, Priority     string
 	Deadline                         *time.Time
 	Queued                           time.Time
@@ -352,6 +354,7 @@ func (q *Queue) maintainModels() {
 			s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
 			if s != nil && s.State == "ready" && !q.batchBeforeCall(c, m) {
 				c.Machine = m.ID
+				c.StartedAt = &now
 				c.Session = m.Session
 				if s.InFlight == 0 || rank(c.Priority) < rank(s.Priority) {
 					s.Priority = c.Priority
@@ -485,7 +488,7 @@ func (q *Queue) maintainModels() {
 
 }
 func callJob(c *ModelCall) *Job {
-	j := &Job{ID: c.ID, Queued: c.Queued, Spec: Spec{Project: c.Project, Priority: c.Priority, Deadline: c.Deadline}}
+	j := &Job{ID: c.ID, Queued: c.Queued, WaitingSince: c.WaitingSince, StartedAt: c.StartedAt, Spec: Spec{Project: c.Project, Priority: c.Priority, Deadline: c.Deadline}}
 	j.Spec.Needs.Model = c.Model
 	return j
 }
@@ -900,6 +903,8 @@ func (q *Queue) retryCall(id string) error {
 		}
 		live.Exclude = live.Machine
 		live.Machine = ""
+		live.StartedAt = nil
+		live.WaitingSince = q.clock.Now()
 		live.Session = ""
 		q.refreshModelPriority(&previous)
 		q.maintain()

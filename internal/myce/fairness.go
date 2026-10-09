@@ -6,6 +6,8 @@ import (
 	"io"
 	"math"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -128,36 +130,121 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 	}
 	return ""
 }
-func (q *Queue) pick(m *Machine) *Job {
+
+// candidate is shared by dispatch and the status projection. Exclusions only
+// remove jobs already listed in the projection; they never change dispatch.
+func (q *Queue) candidate(m *Machine, excluded map[string]bool) *Job {
 	var best *Job
 	for _, j := range q.s.Jobs {
-		if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" && (best == nil || q.fairBefore(j, best, m)) {
+		if !excluded[j.ID] && j.State == "queued" && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" && (best == nil || q.fairBefore(j, best, m)) {
 			best = j
 		}
 	}
+	return best
+}
+func (q *Queue) pick(m *Machine) *Job {
+	best := q.candidate(m, nil)
 	if best != nil && !environmentReady(best, m) {
 		return nil
 	}
 	return best
 }
+
+// projectionCandidate also includes model calls that dispatch permits on this
+// device; a waiting call must not disappear from a command's next-in-line reason.
+func (q *Queue) projectionCandidate(m *Machine, excluded map[string]bool) *Job {
+	best := q.candidate(m, excluded)
+	for _, c := range q.calls {
+		if excluded[c.ID] || !q.callCanUse(m, c) {
+			continue
+		}
+		j := callJob(c)
+		j.State = "queued"
+		j.Spec.Name = "model call: " + c.Model
+		if best == nil || q.fairBefore(j, best, m) {
+			best = j
+		}
+	}
+	return best
+}
+
+// queueProjection uses the dispatch comparator on each eligible machine with
+// current batch reservations released. Order is conditional on current inventory
+// and usage: future arrivals, usage and which worker frees first can change it.
+func (q *Queue) queueProjection() (map[string]int, map[string]string) {
+	order, reasons := map[string]int{}, map[string]string{}
+	machines := make([]*Machine, 0, len(q.s.Machines))
+	for _, m := range q.s.Machines {
+		copy := *m // Projection changes only this scalar memory value; inventory stays read-only.
+		for _, r := range q.s.Jobs {
+			if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") {
+				copy.FreeMemoryGB += r.Spec.Needs.MemoryGB
+			}
+		}
+		machines = append(machines, &copy)
+	}
+	slices.SortFunc(machines, func(a, b *Machine) int { return strings.Compare(a.ID, b.ID) })
+	for _, j := range q.s.Jobs {
+		if j.State != "queued" {
+			continue
+		}
+		reasons[j.ID] = q.waitReason(j)
+	}
+	excluded := map[string]bool{}
+	for n := 1; ; n++ {
+		var best *Job
+		var target *Machine
+		for _, m := range machines {
+			winner := q.projectionCandidate(m, excluded)
+			if winner != nil && (best == nil || q.fairBefore(winner, best, m)) {
+				best, target = winner, m
+			}
+		}
+		if best == nil {
+			break
+		}
+		order[best.ID] = n
+		excluded[best.ID] = true
+		// Explain the first competing job, not a separate UI ordering heuristic.
+		winner := q.projectionCandidate(target, nil)
+		base := "waiting for a worker to pull this job"
+		live := q.s.Machines[target.ID]
+		busy := false
+		for _, r := range q.s.Jobs {
+			if r.Machine == live.ID && (r.State == "running" || r.State == "stopping") {
+				busy = true
+			}
+		}
+		if call := q.calls[best.ID]; call != nil {
+			busy = !q.callCanUse(live, call)
+		}
+		if busy || !fits(best, live, live.FreeMemoryGB) {
+			base = "waiting for a free machine"
+		}
+		if !environmentReady(best, target) {
+			if busy {
+				base += "; environment not ready: " + best.Spec.Environment.Key()
+			} else {
+				base = "building environment: " + best.Spec.Environment.Key()
+			}
+		}
+		if winner.ID == best.ID {
+			reasons[best.ID] = base + "; next in line"
+			continue
+		}
+		ahead := winner.Spec.Name + " goes first"
+		if rank(winner.Spec.Priority) < rank(best.Spec.Priority) {
+			ahead = winner.Spec.Priority + " work goes first"
+		} else if best.Spec.Priority == "experiment" && winner.Spec.Project != best.Spec.Project && q.fairScore(winner, target) < q.fairScore(best, target)-1e-6 {
+			ahead = fmt.Sprintf("%s goes first (%s is ahead of its fair share)", winner.Spec.Project, best.Spec.Project)
+		}
+		reasons[best.ID] = base + "; " + ahead
+	}
+	return order, reasons
+}
 func (q *Queue) waitReason(j *Job) string {
 	if reason := q.capReason(j); reason != "" {
 		return reason
-	}
-	for _, m := range q.s.Machines {
-		if !fits(j, m, m.FreeMemoryGB) {
-			continue
-		}
-		winner := q.pick(m)
-		if winner == nil || winner.ID == j.ID {
-			continue
-		}
-		if rank(winner.Spec.Priority) < rank(j.Spec.Priority) {
-			return winner.Spec.Priority + " work goes first"
-		}
-		if j.Spec.Priority == "experiment" && winner.Spec.Project != j.Spec.Project && q.fairScore(winner, m) < q.fairScore(j, m)-1e-6 {
-			return fmt.Sprintf("%s is ahead of its fair share; %s goes first", j.Spec.Project, winner.Spec.Project)
-		}
 	}
 	return waitingReason(j, q.s.Machines, q.s.Jobs)
 }

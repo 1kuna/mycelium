@@ -28,7 +28,7 @@ func TestFairSharingUsesClockAndExplains(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, j := range s.Jobs {
-		if j.ID == a.ID && !strings.Contains(j.Reason, "verso is ahead of its fair share; atlas goes first") {
+		if j.ID == a.ID && !strings.Contains(j.Reason, "atlas goes first (verso is ahead of its fair share)") {
 			t.Fatal(j.Reason)
 		}
 	}
@@ -193,5 +193,74 @@ func TestProjectPolicyValidation(t *testing.T) {
 	}
 	if _, e = ReadProjectPolicies(path); e == nil {
 		t.Fatal("multiple configs silently accepted")
+	}
+}
+
+func TestBusyStatusUsesDispatchOrderAndCombinedReasons(t *testing.T) {
+	q, c := fixture(t)
+	m := machine("one", "fake")
+	prod := submit(t, q, spec("production"))
+	running := check(t, q, m, nil).Job
+	if running == nil || running.ID != prod.ID {
+		t.Fatal("production not running")
+	}
+	a := submit(t, q, projectSpec("verso"))
+	c.Advance(time.Second)
+	b := submit(t, q, projectSpec("atlas"))
+	c.Advance(time.Second)
+	d := submit(t, q, projectSpec("atlas"))
+	q.s.FairUsage = map[string]FairUsage{"verso": {Seconds: 100, At: c.Now()}}
+	s, e := q.Snapshot()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(s.Jobs) != 4 || s.Jobs[0].ID != prod.ID || s.Jobs[1].ID != b.ID || s.Jobs[2].ID != d.ID || s.Jobs[3].ID != a.ID {
+		t.Fatalf("order: %+v", s.Jobs)
+	}
+	if s.Jobs[1].Reason != "waiting for a free machine; next in line" {
+		t.Fatal(s.Jobs[1].Reason)
+	}
+	if s.Jobs[3].Reason != "waiting for a free machine; atlas goes first (verso is ahead of its fair share)" {
+		t.Fatal(s.Jobs[3].Reason)
+	}
+	c.Advance(75 * time.Second)
+	if e = q.Complete(Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: prod.ID, Attempt: running.Attempt}, Success: true}); e != nil {
+		t.Fatal(e)
+	}
+	got := check(t, q, m, nil).Job
+	if got == nil || got.ID != b.ID {
+		t.Fatalf("status winner differs from dispatch: %+v", got)
+	}
+}
+
+func TestProjectionUsesAffinityDeadlineAndDoesNotMutateJobs(t *testing.T) {
+	q, c := fixture(t)
+	a := submit(t, q, projectSpec("atlas"))
+	c.Advance(time.Second)
+	s := projectSpec("atlas")
+	s.Needs.Model = "cached"
+	b := submit(t, q, s)
+	m := machine("one", "fake")
+	m.CachedModels = []string{"cached"}
+	q.s.Machines[m.ID] = &m
+	order, _ := q.queueProjection()
+	if order[b.ID] != 1 || order[a.ID] != 2 || q.s.Jobs[b.ID].State != "queued" || q.pick(&m).ID != b.ID {
+		t.Fatal(order)
+	}
+}
+
+func TestProjectionIncludesEligibleModelCalls(t *testing.T) {
+	q, c, m := modelFixture(t)
+	q.s.Machines[m.ID] = &m
+	q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, State: "ready", Priority: "production"}
+	batch := submit(t, q, projectSpec("verso"))
+	call := &ModelCall{ID: "call", Model: "test", Project: "atlas", Priority: "production", Queued: c.Now()}
+	q.calls[call.ID] = call
+	order, reasons := q.queueProjection()
+	if order[call.ID] != 1 || order[batch.ID] != 2 || !strings.Contains(reasons[batch.ID], "production work goes first") {
+		t.Fatal(order, reasons)
+	}
+	if q.s.Jobs[batch.ID].State != "queued" || call.Machine != "" {
+		t.Fatal("projection assigned work")
 	}
 }

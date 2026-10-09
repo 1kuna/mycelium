@@ -163,6 +163,10 @@ type Copy struct {
 }
 
 type Job struct {
+	WaitingSince          time.Time                    `json:"waiting_since,omitempty"`
+	AssignedAt            *time.Time                   `json:"assigned_at,omitempty"`
+	FinishedAt            *time.Time                   `json:"finished_at,omitempty"`
+	QueueOrder            int                          `json:"queue_order,omitempty"`
 	EnvironmentFailureLog string                       `json:"environment_failure_log,omitempty"`
 	EnvironmentRecipes    map[string]EnvironmentRecipe `json:"environment_recipes,omitempty"`
 	Copies                []Copy                       `json:"copies,omitempty"`
@@ -253,6 +257,7 @@ type LogChunk struct {
 	Text   string `json:"text"`
 }
 type Snapshot struct {
+	Now          time.Time     `json:"now"`
 	Usage        UsageReport   `json:"usage"`
 	SyncRequests []SyncRequest `json:"sync_requests"`
 	Pins         []ModelPin    `json:"pins"`

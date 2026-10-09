@@ -1,7 +1,8 @@
 # First real-machine test: ordered founder checklist
 
 Run these steps in order under explicit fleet authorization; stop at the first
-failed gate. This document is the single ordered checklist. The other guides
+failed gate. This document is the detailed Mycelium acceptance sequence. The
+[weekend checklist](weekend-runbook.md) orders it with the project migrations. Other guides
 explain contracts and general operations, not additional acceptance sequences.
 No fleet command here was executed during the local pre-production review.
 
