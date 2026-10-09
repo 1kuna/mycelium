@@ -134,15 +134,21 @@ vLLM is deferred; unsupported engine names fail configuration validation.
 
 Calls share batch priority, loaded-model affinity, earliest deadline, and
 waiting-age ordering. An already loaded eligible model is preferred. Otherwise
-all fitting free workers are considered before making room. Loading, ready,
-and draining models reserve their declared memory; running batches also reserve
-their memory. Workers report their lent budget minus batch usage, and the queue
-subtracts model reservations once. Other workloads must stay outside that lent
-budget. Each worker still runs at most one batch, alongside models that fit.
+all fitting free workers are considered before making room. CUDA workers report
+live free GPU memory from `nvidia-smi`, optionally capped with `--memory-gb`,
+then reduced by `--reserve-memory-gb`. Resident models and running commands are
+already reflected in that reading; only not-yet-reflected loading reservations
+are subtracted by the queue. XPU/Metal/fake use an explicit configured budget
+minus reserve and account for our batch/model reservations once. XPU/Metal
+cannot observe changing external allocations with this configured source: choose
+and maintain a conservative allowance. Workers recheck before every command or
+model load. Each worker runs at most one batch, alongside models that fit.
 
 Idle time starts after load readiness or the most recent call finishes.
 `idle_timeout` defaults to ten minutes. A higher-priority batch or call can drain
-lower-priority models to reclaim memory. Draining stops new queue admissions;
+lower-priority models to reclaim memory. Protection follows the highest priority
+of currently admitted calls, not historical use; an idle model is reclaimable
+as experiment priority. Draining stops new queue admissions;
 already admitted calls may finish. The worker unloads only when both the queue's
 admitted calls and its local in-flight calls reach zero. Memory is released only
 after the worker reports successful unload. Failed unload retains its reservation
@@ -155,14 +161,16 @@ a timeout that includes loading and inference. The load process itself has the
 worker's configured maximum wait. A failed load returns a clear error and a
 later request can try loading again.
 
-When a worker is marked lost by the existing 60-second recovery rule, its model
-slots disappear. A transport failure or worker loss retries a call once on a
+Quiet-worker timeouts follow the highest-priority active workload (including
+model loading/calls): production 5s, deadline 20s, experiment 60s, configurable
+on the queue. Worker check-ins default to 1s. When a worker is marked lost, its
+model slots disappear. A transport failure or worker loss retries a call once on a
 different worker. Complete responses are buffered, so a partial non-streaming
 response can be retried before returning any bytes. A chat stream can retry
 before its first bytes; after it starts, a stream error event explains that
 retry is unsafe. Callers must discard failed streams and decide whether a new
 request is appropriate. If no alternative worker fits, the remaining wait
-expires with a clear error. A fleet-wide network outage retains assignments
+expires with a clear error. A strict-majority network outage retains assignments
 rather than pretending every machine died.
 
 Worker startup locks its spool, checks saved engine process identities, and

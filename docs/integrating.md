@@ -1,0 +1,412 @@
+# Integrating Atlas and Verso
+
+Projects submit bounded GPU work and let go of the GPU afterward. Keep Atlas's
+SharePoint watcher and CPU preparation outside Mycelium. Verso controls when
+its B70 GPUs are lent; no background worker should compete with its existing
+production workload. These are integration recipes, not evidence that either
+project has migrated or that fleet hardware has been tested.
+
+## Copy-paste laptop walkthrough
+
+From this checkout, start the real queue/runner with simulated GPU inventory:
+
+```sh
+go build -o /tmp/myce-step3 ./cmd/myce
+/tmp/myce-step3 dev --workers 1 --memory-gb 8 --model-idle 5s
+```
+
+Keep it open. In another terminal:
+
+```sh
+export MYCE_QUEUE=http://127.0.0.1:7331
+export MYCE_TOKEN=dev-token
+MYCE=/tmp/myce-step3
+```
+
+### Atlas batch
+
+This executable demonstration uses a shell instead of Atlas's GPU indexing
+command. It tests submission/logging; it does not produce an index. For real
+use, replace the argv and workdir with the project's existing GPU batch entry
+point, declare its measured memory/platform/environment, and install its runtime
+on every eligible worker. Do not invent a new Atlas command interface here.
+
+```sh
+cat > /tmp/atlas-batch.yaml <<'YAML'
+name: atlas-index-batch-7
+project: atlas
+priority: experiment
+run:
+  command: [sh, -c, 'echo "Atlas batch 7: job=$MYCE_JOB_ID attempt=$MYCE_ATTEMPT"; echo "Replace this demonstration with the real GPU index command"']
+needs:
+  memory_gb: 8
+  platform: any
+expected_minutes: 90
+resumable: false
+YAML
+atlas_id=$("$MYCE" submit /tmp/atlas-batch.yaml)
+"$MYCE" logs "$atlas_id" --follow
+"$MYCE" status
+```
+
+A deployment job can use this shape after configuring the real command:
+
+```yaml
+name: atlas-index-batch-7
+project: atlas
+priority: experiment
+run:
+  command: [/srv/atlas/.venv/bin/python, /srv/atlas/REPLACE_GPU_BATCH_ENTRYPOINT.py, --batch, "7"]
+  workdir: /srv/atlas
+  env: {PYTHONUNBUFFERED: "1"}
+needs:
+  memory_gb: 40
+  platform: [cuda]
+  model: atlas-embedding
+environment: atlas-cuda
+allowed_machines: [spark, pc4090]
+expected_minutes: 90
+resumable: false
+```
+
+The `REPLACE` path is deliberately not claimed to exist. `needs.model` provides
+an affinity hint, not an embedding API. A batch that runs its own GPU code
+reserves the memory itself. Avoid nesting queue calls from a running batch that
+already holds the memory needed by those calls. Call the embedding API from the
+CPU orchestrator instead when using queue-managed inference.
+
+### Atlas embeddings
+
+The following request is complete and works against dev's explicit fake model:
+
+```sh
+curl --fail-with-body "$MYCE_QUEUE/v1/embeddings" \
+  -H "Authorization: Bearer $MYCE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Myce-Project: atlas' -H 'X-Myce-Priority: production' \
+  -d '{"model":"dev-model","input":["First document chunk","Second document chunk"]}'
+```
+
+Or install the OpenAI client in your project's existing environment and use:
+
+```python
+import os
+from openai import OpenAI
+client = OpenAI(
+    base_url=os.environ["MYCE_QUEUE"].rstrip("/") + "/v1",
+    api_key=os.environ["MYCE_TOKEN"],
+    default_headers={"X-Myce-Project": "atlas", "X-Myce-Priority": "production"},
+    timeout=600, max_retries=0,
+)
+result = client.embeddings.create(
+    model=os.environ.get("ATLAS_EMBEDDING_MODEL", "dev-model"),
+    input=["First document chunk", "Second document chunk"],
+)
+vectors = [item.embedding for item in sorted(result.data, key=lambda item: item.index)]
+print(vectors)
+```
+
+Real Atlas callers set `ATLAS_EMBEDDING_MODEL` to their approved catalog name.
+Keep the exact embedding model, dimensions, normalization, and preprocessing
+consistent with the existing index. Changing the model requires an explicit
+index migration, not just a different name. The caller holds the fleet token;
+worker commands do not inherit it.
+
+Queue and eligible workers share a catalog like this, with the actual approved
+model path, budget and model-specific arguments substituted:
+
+```yaml
+idle_timeout: 10m
+max_wait: 5m
+models:
+  - name: atlas-embedding
+    engine: llama.cpp
+    path: /mnt/nas/models/REPLACE_APPROVED_EMBEDDING_MODEL.gguf
+    memory_gb: 8
+    platforms: [cuda, metal, xpu]
+    args: [--embedding, --ctx-size, "8192"]
+```
+
+These numbers are examples, not a verified inference contract. Read the current
+official model card and generation configuration before deployment, verify the
+served identity/template/context/output/sampler/tool settings, and record them.
+Install a suitable GPU-enabled llama-server yourself; no model/environment
+auto-install occurs. Use the [model guide](guide-model-calls.md) for LAN proxy
+configuration. An unsupported platform must fail visibly, not use a CPU fallback.
+
+### Verso production model calls
+
+For a Verso inference stage already exposed through a supported OpenAI endpoint,
+move the call into the CPU orchestrator and route it at production priority:
+
+```python
+import os
+from mycelium import Client
+with Client().openai(project="verso", priority="production", timeout=600) as sdk:
+    result = sdk.chat.completions.create(
+        model=os.environ.get("VERSO_INFERENCE_MODEL", "dev-model"),
+        messages=[{"role": "user", "content": "Summarize this transcript: The witness confirmed the date."}],
+    )
+    print(result.choices[0].message.content)
+```
+
+This complete call works against dev. On the fleet, set `VERSO_INFERENCE_MODEL`
+to the existing approved model and preserve its preprocessing and generation
+contract. Unsupported speech/diarization interfaces stay plain-command batch
+jobs; this chat example does not replace that pipeline. Do not keep a local
+model server alive in Verso: the queue loads on demand, protects active calls,
+and unloads idle models. A failed stream or queue restart must be handled as a
+failed request; accept a complete answer before publishing its derived output.
+
+### Verso production and resumable work
+
+Create this complete checkpointing demonstration. The `sleep` is a simulated
+GPU unit, explicitly labeled; replace one unit with real bounded Verso GPU work
+and make its outputs idempotent before production use.
+
+```sh
+# Wait for the earlier embedding model to idle-unload before occupying all memory.
+python3 - <<'PYWAIT'
+import json, os, time, urllib.request
+for _ in range(300):
+    req = urllib.request.Request(os.environ["MYCE_QUEUE"] + "/api/status",
+        headers={"Authorization": "Bearer " + os.environ["MYCE_TOKEN"]})
+    status = json.load(urllib.request.urlopen(req, timeout=5))
+    if not status["loaded_models"]: break
+    time.sleep(0.1)
+else: raise SystemExit("model did not unload; inspect myce status")
+PYWAIT
+cat > /tmp/verso-resumable.py <<'PY'
+import os, pathlib, signal, time
+root = pathlib.Path(os.environ["MYCE_CHECKPOINT_DIR"])
+p = root / "progress"
+n = int(p.read_text()) if p.exists() else 0
+stopping = False
+def stop(*_):
+    global stopping
+    stopping = True
+signal.signal(signal.SIGTERM, stop)
+def save():
+    tmp = root / "progress.tmp"
+    with tmp.open("w") as f:
+        f.write(str(n)); f.flush(); os.fsync(f.fileno())
+    tmp.replace(p)
+    fd = os.open(root, os.O_RDONLY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+while n < 100 and not stopping:
+    time.sleep(0.2)  # demonstration only: replace with one real GPU unit
+    n += 1
+    try: save()
+    except OSError as e: print(f"save will retry: {e}", flush=True)
+while True:
+    try: save(); break
+    except OSError as e:
+        print(f"final save will retry: {e}", flush=True); time.sleep(1)
+print(f"saved unit {n}; attempt {os.environ['MYCE_ATTEMPT']}", flush=True)
+PY
+cat > /tmp/verso-experiment.yaml <<'YAML'
+name: verso-resumable-demo
+project: verso
+priority: experiment
+run:
+  command: [python3, /tmp/verso-resumable.py]
+  env: {PYTHONUNBUFFERED: "1"}
+needs:
+  memory_gb: 8
+  platform: any
+expected_minutes: 1
+resumable: true
+YAML
+experiment_id=$("$MYCE" submit /tmp/verso-experiment.yaml)
+# Let the experiment start and checkpoint before submitting production.
+sleep 2
+cat > /tmp/verso-production.yaml <<'YAML'
+name: verso-production-demo
+project: verso
+priority: production
+run:
+  command: [sh, -c, 'echo "Verso production started"; sleep 1; echo "Verso production finished"']
+needs:
+  memory_gb: 8
+  platform: any
+resumable: false
+YAML
+production_id=$("$MYCE" submit /tmp/verso-production.yaml)
+"$MYCE" logs "$production_id" --follow
+"$MYCE" logs "$experiment_id" --follow
+"$MYCE" status
+```
+
+Production should pause the lower-priority resumable experiment, finish, and
+allow the experiment to restart from its copied checkpoint. Check the logs for
+multiple attempts and continued progress. On the fleet, use absolute paths
+installed on every eligible worker, or use an allow-list. `/tmp` is only for
+this local walkthrough.
+
+For real Verso production, replace the shell argv with the approved GPU
+transcription/diarization command and measured reservation. Use `resumable: false`
+until that command supports atomic checkpoints, SIGTERM save/exit, and safe
+output replay; setting a flag alone cannot make it resumable. A resumable
+production job uses the same checkpoint contract as the demonstration, and
+retains `priority: production` so loss detection uses the production timeout.
+
+## Project-shaped deployment jobs
+
+Use these complete YAML shapes after substituting the project's approved entry
+point and measuring its memory. The paths, models, budgets and machine names
+below are configuration examples, not discovered production command interfaces.
+All eligible workers need the same installed runtime/workdir and shared inputs.
+
+```yaml
+name: verso-transcription-production
+project: verso
+priority: production
+run:
+  command: [/srv/verso/.venv/bin/python, /srv/verso/REPLACE_GPU_TRANSCRIPTION_ENTRYPOINT.py, --input, /mnt/nas/verso/jobs/input.wav, --output, /mnt/nas/verso/jobs/output.json]
+  workdir: /srv/verso
+  env: {PYTHONUNBUFFERED: "1"}
+needs:
+  memory_gb: 12
+  platform: [xpu]
+  model: verso-transcription
+environment: verso-xpu
+allowed_machines: [b70-lent]
+expected_minutes: 20
+resumable: false
+```
+
+This worker must be started only when Verso lends the GPUs. For CUDA/Metal
+placement, first verify that the project command and exact model math support
+that platform; do not simply change the platform field to `any`.
+
+```yaml
+name: verso-resumable-evaluation
+project: verso
+priority: experiment
+run:
+  command: [/srv/verso/.venv/bin/python, /srv/verso/REPLACE_CHECKPOINT_AWARE_GPU_ENTRYPOINT.py, --input, /mnt/nas/verso/eval/manifest.json, --output, /mnt/nas/verso/eval/results]
+  workdir: /srv/verso
+  env: {PYTHONUNBUFFERED: "1"}
+needs:
+  memory_gb: 12
+  platform: [xpu]
+  model: verso-transcription
+environment: verso-xpu
+allowed_machines: [b70-lent]
+expected_minutes: 90
+resumable: true
+```
+
+The second entry point must read `MYCE_CHECKPOINT_DIR`, handle SIGTERM, save
+atomically, and resume exactly as demonstrated. Shared output writes must be
+idempotent or attempt-isolated; the checkpoint folder alone does not isolate
+`--output`. To make the checkpoint-aware job production, change priority to
+`production`; the same contract applies. For a deadline job set `priority:
+deadline` and add `deadline: 2026-10-09T18:00:00Z`. To stop waiting after a chosen
+time add `give_up_at: 2026-10-10T18:00:00Z`; neither field terminates running work.
+
+After writing the selected job to `job.yaml`, the deployment submission flow is:
+
+```sh
+id=$("$HOME/.local/bin/myce" submit job.yaml)
+"$HOME/.local/bin/myce" logs "$id" --follow
+"$HOME/.local/bin/myce" status
+# If cancellation is desired:
+# "$HOME/.local/bin/myce" cancel "$id"
+```
+
+## Production handoff
+
+Mount the same shared NAS root on queue and workers; local mount paths may differ. Start
+queue with the configured 5s/20s/60s priority loss timeouts, and workers with a
+1s heartbeat and explicit checkpoint root. CUDA uses live free GPU inventory minus a reservation; XPU/Metal/fake use an
+explicit configured budget minus reserve. CUDA can cap live free memory with a positive `--memory-gb` before subtracting
+reserve; the cap never replaces the live probe. Follow
+[operations](operations.md) for local service installation and lending/reclaiming
+GPUs. This document performs no fleet launch or production cutover.
+
+A submission is not completion. Retain the ID, follow logs, and inspect the
+terminal state (`logs --follow` itself does not assert success). Command failure
+fails immediately; infrastructure loss may restart it. Queue restart interrupts
+active HTTP model requests, so callers must decide whether to resubmit. Do not
+blindly retry external writes. See [checkpoint guide](guide-resumable-jobs.md)
+for atomic save/reconciliation details and [reference](job-reference.md) for all
+fields, defaults, and endpoint contracts.
+
+## Python project client
+
+The distribution is `mycelium-client`; the import package is `mycelium`.
+Install from this checkout into the project's own environment (no published
+PyPI release is assumed):
+
+```sh
+python3 -m pip install './clients/python[yaml,openai]'
+```
+
+A CPU orchestrator can submit a batch, read logs, inspect completion, or cancel:
+
+```python
+from pathlib import Path
+from mycelium import Client
+client = Client()  # MYCE_QUEUE and MYCE_TOKEN
+job = client.submit(Path("job.yaml"))
+for chunk in client.logs(job["id"], follow=True):
+    print(chunk["text"], end="", flush=True)
+finished = client.wait(job["id"], timeout=600)
+if finished["state"] != "succeeded":
+    raise RuntimeError(f"job {job['id']} ended {finished['state']}: {finished.get('reason', '')}")
+print(client.get(job["id"]))
+print(client.list())
+# client.cancel(job["id"])  # an explicit cancellation decision
+```
+
+For Atlas's embedding path, the helper sets OpenAI routing headers, a 600-second
+timeout and no SDK retries; override the timeout to match loading plus inference:
+
+```python
+from mycelium import Client
+with Client().openai(project="atlas", priority="production", timeout=600) as sdk:
+    result = sdk.embeddings.create(model="dev-model", input=["Find documents about GPU scheduling"])
+    print(result.data[0].embedding)
+```
+
+Use the approved real catalog name outside dev. `Client.openai` also accepts
+`priority="deadline", deadline="2026-10-09T18:00:00Z"`. Client network/auth errors
+propagate; `wait` returns every terminal state including failure and raises
+`TimeoutError` at its own wait deadline. That deadline does not cancel the job.
+The batch worker does not inherit the fleet token, so keep queue submission and
+model-call orchestration in the CPU caller.
+
+For a checkpoint-aware Verso command, these helpers replace the manual save and
+signal machinery. This complete miniature command still uses a simulated work
+unit; replace it with the approved bounded GPU unit before production use:
+
+```python
+import time
+from mycelium import Checkpoint, StopSignal
+checkpoint = Checkpoint()  # MYCE_CHECKPOINT_DIR, current attempt with prior saves
+n = checkpoint.load(default={"next_unit": 0})["next_unit"]
+with StopSignal() as stop:
+    while n < 100 and not stop.requested:
+        time.sleep(0.2)  # demonstration only
+        n += 1
+        try:
+            checkpoint.save({"next_unit": n})
+        except OSError as exc:
+            print(f"save will retry: {exc}", flush=True)
+    while True:
+        try:
+            checkpoint.save({"next_unit": n})
+            break
+        except OSError as exc:
+            print(f"final save will retry: {exc}", flush=True)
+            time.sleep(1)
+```
+
+`Checkpoint.save` writes atomic JSON through fsync/rename/directory fsync;
+`load` chooses the newest complete JSON and ignores `.tmp`. I/O errors and
+corrupt complete JSON fail visibly; temporary NAS errors can be retried as above.
+`StopSignal` sets `requested` on SIGTERM/SIGINT and restores handlers on exit;
+use it on the main thread and save outside the signal handler. Neither helper
+makes arbitrary outputs retry-safe. See [Python client](../clients/python/README.md).

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>MYCE_QUEUE</key>
+		<string>http://REPLACE_QUEUE_IP:7331</string>
+		<key>MYCE_TOKEN</key>
+		<string>REPLACE_PRIVATE_TOKEN</string>
+	</dict>
+	<key>ExitTimeOut</key>
+	<integer>0</integer>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>Label</key>
+	<string>local.myce.worker</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>REPLACE_HOME/.local/bin/myce</string>
+		<string>join</string>
+		<string>--name</string>
+		<string>REPLACE_WORKER_NAME</string>
+		<string>--gpu</string>
+		<string>metal</string>
+		<string>--memory-gb</string>
+		<string>REPLACE_BUDGET_GB</string>
+		<string>--reserve-memory-gb</string>
+		<string>REPLACE_RESERVE_GB</string>
+		<string>--heartbeat</string>
+		<string>1s</string>
+		<string>--checkpoint-root</string>
+		<string>REPLACE_CHECKPOINT_ROOT</string>
+		<string>--state-dir</string>
+		<string>REPLACE_HOME/.local/share/myce/worker</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>REPLACE_HOME/.local/share/myce/worker.log</string>
+	<key>StandardOutPath</key>
+	<string>REPLACE_HOME/.local/share/myce/worker.log</string>
+	<key>Umask</key>
+	<integer>63</integer>
+	<key>WorkingDirectory</key>
+	<string>REPLACE_HOME/.local/share/myce</string>
+</dict>
+</plist>

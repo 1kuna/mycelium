@@ -6,8 +6,12 @@ then sends SIGKILL if necessary. Do not daemonize or leave that group. Save
 periodically too: a machine that loses power cannot save on demand.
 
 Each attempt receives `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR`.
-Mount the NAS at the **same absolute path on every fleet machine**. Create the
-root on the mounted NAS before starting the queue. Dev creates a local root.
+Each worker sets `--checkpoint-root` to its own local mount of the same NAS
+checkpoint directory: for example `/home/kuna/nas-dev/mycelium/checkpoints` on
+Linux and `/Volumes/dev/mycelium/checkpoints` on Macs. Queue `--checkpoints`
+uses the queue's local path. Jobs carry relative checkpoint paths; the worker
+resolves them before setting `MYCE_CHECKPOINT_DIR`. Create the root on the
+mounted NAS before starting the queue. Dev creates a local root.
 The stable job folder holds `attempt-1`, `attempt-2`, etc.; the environment points
 to the current attempt's folder. Before starting, the worker copies checkpoints
 from the attempt with the newest complete save, preserving file timestamps.

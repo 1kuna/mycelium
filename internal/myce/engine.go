@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -172,6 +174,10 @@ func (l *LlamaEngine) Unload() error {
 	if e == nil {
 		e = saveWorkerJSON(l.Dir, "engine-"+l.identity+".json", workerState{Identity: l.identity})
 	}
+	if e == nil {
+		l.cmd = nil
+		l.url = ""
+	}
 	return e
 }
 func cleanupEngines(dir string, clock Clock) error {
@@ -201,12 +207,13 @@ func cleanupEngines(dir string, clock Clock) error {
 }
 
 type workerModel struct {
-	model       Model
-	engine      Engine
-	state, err  string
-	inflight    int
-	queueFlight int
-	cancel      context.CancelFunc
+	model          Model
+	engine         Engine
+	state, err     string
+	inflight       int
+	queueFlight    int
+	cancel         context.CancelFunc
+	drainRequested bool
 }
 type modelRuntime struct {
 	mu                  sync.Mutex
@@ -218,6 +225,9 @@ type modelRuntime struct {
 	wg                  sync.WaitGroup
 	url                 string
 	closing             bool
+	memorySource        MemorySource
+	memoryMeasured      bool
+	batchMemory         *atomic.Uint64
 }
 
 func startModels(w Worker, dir string) (*modelRuntime, error) {
@@ -233,6 +243,9 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 		return nil, e
 	}
 	rt := &modelRuntime{models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
+	rt.memorySource = w.MemorySource
+	rt.memoryMeasured = w.MemoryMeasured
+	rt.batchMemory = w.batchMemory
 	if w.ModelAdvertise != "" {
 		rt.url = w.ModelAdvertise
 	}
@@ -273,6 +286,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			m.state = "unloaded"
 		}
 		if !ok || s.State == "draining" {
+			m.drainRequested = true
 			if m.state == "loading" {
 				m.cancel()
 			}
@@ -313,22 +327,78 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		rt.wg.Add(1)
 		go func() {
 			defer rt.wg.Done()
-			e := engine.Load(ctx, model)
-			cancel()
-			rt.mu.Lock()
-			defer rt.mu.Unlock()
-			if e != nil {
-				m.state = "failed"
-				m.err = e.Error()
-			} else {
-				m.state = "ready"
-				if rt.closing {
-					m.state = "draining"
-					rt.unload(m)
-				}
-			}
+			rt.load(ctx, m)
 		}()
 	}
+}
+
+func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
+	if e := rt.checkLoadMemory(ctx, m); e != nil {
+		m.cancel()
+		rt.mu.Lock()
+		m.state = "failed"
+		m.err = e.Error()
+		rt.mu.Unlock()
+		return
+	}
+	e := m.engine.Load(ctx, m.model)
+	m.cancel()
+	// A failed load may have started a process. Keep its memory reserved unless
+	// cleanup actually succeeds, even when the engine's own load cleanup failed.
+	var cleanupErr error
+	if e != nil {
+		cleanupErr = m.engine.Unload()
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if cleanupErr != nil {
+		m.state = "unload_failed"
+		m.err = errors.Join(e, fmt.Errorf("unload: %w", cleanupErr)).Error()
+	} else if e != nil {
+		m.state = "failed"
+		m.err = e.Error()
+	} else {
+		m.state = "ready"
+		// Cancellation can race with successful readiness. Remember the drain
+		// request instead of exposing that engine as ready until another heartbeat.
+		if rt.closing || m.drainRequested {
+			m.state = "draining"
+			if m.inflight == 0 && (m.queueFlight == 0 || rt.closing) {
+				rt.unload(m)
+			}
+		}
+	}
+}
+
+func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {
+	if rt.memorySource == nil {
+		return errors.New("model load requires a free-memory source")
+	}
+	// The source may inspect worker/runtime state. Never invoke it under rt.mu.
+	free, e := rt.memorySource(ctx)
+	if e != nil {
+		return fmt.Errorf("model free-memory check: %w", e)
+	}
+	if math.IsNaN(free) || math.IsInf(free, 0) || free < 0 {
+		return errors.New("model free-memory source returned invalid memory")
+	}
+	if !rt.memoryMeasured && rt.batchMemory != nil {
+		free -= math.Float64frombits(rt.batchMemory.Load())
+	}
+	rt.mu.Lock()
+	for _, other := range rt.models {
+		if other == loading || other.state == "unloaded" || other.state == "failed" {
+			continue
+		}
+		if !rt.memoryMeasured || other.state == "loading" {
+			free -= other.model.MemoryGB
+		}
+	}
+	rt.mu.Unlock()
+	if free < loading.model.MemoryGB {
+		return fmt.Errorf("insufficient free GPU memory for model %s: need %.1f GB, available %.1f GB", loading.model.Name, loading.model.MemoryGB, max(0, free))
+	}
+	return nil
 }
 func (rt *modelRuntime) unload(m *workerModel) {
 	m.state = "unloading"
@@ -365,6 +435,13 @@ func (rt *modelRuntime) close() error {
 	defer cancel()
 	e := rt.server.Shutdown(ctx)
 	rt.wg.Wait()
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for name, m := range rt.models {
+		if m.state == "unload_failed" {
+			e = errors.Join(e, fmt.Errorf("model %s: %s", name, m.err))
+		}
+	}
 	return e
 }
 func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {

@@ -3,6 +3,12 @@
 One shared queue for GPU batch jobs and OpenAI-format model calls. One Go binary, one SQLite database, plain
 commands, and an HTML status page. Everything runs on a laptop with fake GPUs and an explicit fake model engine. The approved spec is [the v2 design](docs/design-proposal.md).
 The previous architecture remains archived at `v1-final`; v2 starts fresh.
+Install v2 as `~/.local/bin/myce`, with local data at `~/.local/share/myce`
+and distinct `myce` services, leaving any v1 installation untouched.
+
+Read [Atlas/Verso integration examples](docs/integrating.md), the
+[complete job/CLI reference](docs/job-reference.md), and
+[Linux/Mac operations](docs/operations.md).
 
 ## Five-minute quick start
 
@@ -82,7 +88,7 @@ for llama.cpp configuration, shared memory scheduling, and recovery behavior.
 
 ```sh
 myce queue --listen 127.0.0.1:7331 --db myce.db --checkpoints /shared/checkpoints
-myce join --name laptop --gpu fake --memory-gb 16
+myce join --name laptop --gpu fake --memory-gb 16 --reserve-memory-gb 2 --heartbeat 1s
 myce leave --name laptop              # asks wait/stop for non-resumable jobs
 myce leave --name laptop --now         # signals every job; keeps checkpoint grace
 myce submit job.yaml
@@ -95,7 +101,9 @@ myce dev --workers 1 --memory-gb 8
 Use `MYCE_QUEUE` (or `--queue`) for the queue's address. Use `MYCE_TOKEN` for
 the shared token on the queue, worker, and CLI. Only dev supplies a default
 token. For a fleet, configure your own token, bind the queue to its LAN address,
-and use the same NAS checkpoint mount path on every machine. Create the root
+and mount the same shared NAS checkpoint root on every machine. Queue
+`--checkpoints` and worker `--checkpoint-root` can use different local mount
+paths; jobs carry relative checkpoint paths on the wire. Create the root
 on the mounted NAS before running `queue`; a missing root blocks new jobs.
 Use `join --state-dir /durable/local/worker` to choose the worker spool location
 (default: a per-queue, per-machine directory in your user cache). Keep it
@@ -103,10 +111,11 @@ across worker restarts. Examples for boot services are in [deploy/](deploy/READM
 read-only and LAN-visible; all `/api/` and `/v1/` routes require the token. This is a
 trusted local-network service; commands run with the worker user's permissions.
 
-For step 1, a worker explicitly declares `--gpu cuda|xpu|metal|fake` and the
-free GPU memory budget it lends with `--memory-gb`. Each running job's stated
-memory is subtracted from that budget on check-in. Lend only memory that other
-workloads won't consume; automatic hardware detection and setup are later work.
+CUDA workers query live `nvidia-smi` free GPU memory minus
+`--reserve-memory-gb`; a positive `--memory-gb` optionally caps that reading before reserve and never replaces the query. XPU, Metal, and
+fake workers use an explicit `--memory-gb` budget minus reserve. Own batch/model
+reservations are accounted for without double subtraction. Unsupported inventory
+fails visibly. Admission does not replace Atlas/Verso ownership controls.
 Each worker runs one command at a time. Use Ctrl-C or `leave` when reclaiming its
 GPU. `--environments torch-cuda,mlx` reports installed, ready environments;
 `--models qwen3-32b` remains a batch affinity hint for externally managed models;
@@ -147,8 +156,10 @@ then longest waiting. Production and deadline jobs may stop lower-priority
 resumable jobs only when no idle machine fits. Stops allow two minutes to save;
 paused jobs return to the front of their priority line. Non-resumable jobs are
 never preempted to make room. Give-up times apply while waiting, not as a run
-limit. A machine is lost after 60 seconds without a check-in while other workers
-remain reachable. When every worker goes quiet, jobs stay assigned until the
+limit. Loss timeouts depend on priority: production 5s, deadline 20s, experiment 60s
+(`queue --production-loss-timeout`, `--deadline-loss-timeout`,
+`--experiment-loss-timeout`). Workers default to `join --heartbeat 1s`.
+Individual loss is inferred while other workers remain reachable. When a strict majority of workers goes quiet, jobs stay assigned until the
 network returns. Queue restarts allow `--restart-grace 3m` for workers to report.
 Non-resumable jobs fail after three infrastructure interruptions; resumable jobs
 and planned pauses continue from checkpoints. Returning copies reconcile by

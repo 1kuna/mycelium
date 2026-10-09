@@ -140,6 +140,29 @@ func (q *Queue) modelMemory(machine string) float64 {
 	}
 	return n
 }
+
+// Native free memory already reflects resident and unloading engines. Until a
+// load is reported resident, reserve its declared budget conservatively. For
+// configured budgets none of the model usage is included in the report.
+func (q *Queue) modelReservation(m *Machine, reports []ModelReport) float64 {
+	if !m.MemoryMeasured {
+		return q.modelMemory(m.ID)
+	}
+	resident := map[string]bool{}
+	for _, r := range reports {
+		if contains([]string{"ready", "draining", "unloading", "unload_failed"}, r.State) {
+			resident[r.Name] = true
+		}
+	}
+	reservation := 0.0
+	for _, s := range q.s.ModelSlots {
+		if s.Machine == m.ID && !resident[s.Model] {
+			model, _ := q.model(s.Model)
+			reservation += model.MemoryGB
+		}
+	}
+	return reservation
+}
 func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 	if m.ModelURL == "" {
 		return
@@ -279,7 +302,7 @@ func (q *Queue) maintainModels() {
 		for _, m := range eligible {
 			possible := m.FreeMemoryGB
 			for _, s := range q.s.ModelSlots {
-				if s.Machine == m.ID && rank(s.Priority) > rank(c.Priority) {
+				if s.Machine == m.ID && s.State != "unload_failed" && rank(s.Priority) > rank(c.Priority) {
 					mm, _ := q.model(s.Model)
 					possible += mm.MemoryGB
 				}
@@ -349,7 +372,7 @@ func (q *Queue) maintainModels() {
 		for _, m := range machines {
 			possible := m.FreeMemoryGB
 			for _, s := range q.s.ModelSlots {
-				if s.Machine == m.ID && rank(s.Priority) > rank(j.Spec.Priority) {
+				if s.Machine == m.ID && s.State != "unload_failed" && rank(s.Priority) > rank(j.Spec.Priority) {
 					mm, _ := q.model(s.Model)
 					possible += mm.MemoryGB
 				}
@@ -367,9 +390,48 @@ func callJob(c *ModelCall) *Job {
 	j.Spec.Needs.Model = c.Model
 	return j
 }
+
+// A pending request may precede a batch only on a worker where it can actually
+// run or make room. Counting every resident model incorrectly blocks batches
+// behind requests that cannot reclaim higher-priority work.
+func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
+	model, ok := q.model(c.Model)
+	if !ok || c.Machine != "" || c.Error != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !contains(model.Platforms, m.GPU) || q.unreported[m.ID] {
+		return false
+	}
+	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "ready" {
+		return true
+	}
+	possible := m.FreeMemoryGB
+	for _, s := range q.s.ModelSlots {
+		if s.Machine != m.ID || s.State == "unload_failed" {
+			continue
+		}
+		if s.Model == c.Model && s.State == "loading" {
+			return true
+		}
+		if s.InFlight == 0 && rank(s.Priority) > rank(c.Priority) {
+			resident, _ := q.model(s.Model)
+			possible += resident.MemoryGB
+		}
+	}
+	for _, j := range q.s.Jobs {
+		if j.Machine == m.ID && j.State == "running" && j.Spec.Resumable && !m.CheckpointUnavailable && checkpointAvailable(q.root) && rank(j.Spec.Priority) > rank(c.Priority) {
+			possible += j.Spec.Needs.MemoryGB
+		}
+	}
+	return possible >= model.MemoryGB
+}
 func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
 	for _, j := range q.s.Jobs {
-		if j.State == "queued" && fits(j, m, m.FreeMemoryGB+q.modelMemory(m.ID)) && before(j, callJob(c), m) {
+		memory := m.FreeMemoryGB
+		for _, s := range q.s.ModelSlots {
+			if s.Machine == m.ID && s.State != "unload_failed" && rank(s.Priority) > rank(j.Spec.Priority) {
+				model, _ := q.model(s.Model)
+				memory += model.MemoryGB
+			}
+		}
+		if j.State == "queued" && fits(j, m, memory) && before(j, callJob(c), m) {
 			return true
 		}
 	}
@@ -378,7 +440,7 @@ func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
 func (q *Queue) makeModelRoom(m *Machine, need float64, priority string) {
 	slots := []*ModelSlot{}
 	for _, s := range q.s.ModelSlots {
-		if s.Machine == m.ID && rank(s.Priority) > rank(priority) {
+		if s.Machine == m.ID && s.State != "unload_failed" && rank(s.Priority) > rank(priority) {
 			slots = append(slots, s)
 		}
 	}
@@ -429,10 +491,26 @@ func (q *Queue) finishCall(id string) error {
 				s.LastUsed = q.clock.Now()
 			}
 			delete(q.calls, id)
+			q.refreshModelPriority(c)
 		}
 		q.maintain()
 		return nil
 	})
+}
+
+// Only current use protects a model from reclamation. A completed high-priority
+// request must not protect remaining experiments (or an entirely idle model).
+func (q *Queue) refreshModelPriority(c *ModelCall) {
+	s := q.s.ModelSlots[slotKey(c.Machine, c.Model)]
+	if s == nil || s.Session != c.Session {
+		return
+	}
+	s.Priority = "experiment"
+	for _, live := range q.calls {
+		if live.Machine == c.Machine && live.Session == c.Session && live.Model == c.Model && rank(live.Priority) < rank(s.Priority) {
+			s.Priority = live.Priority
+		}
+	}
 }
 func modelError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -479,6 +557,9 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 	defer tick.Stop()
 	attempt := 0
 	for {
+		if r.Context().Err() != nil {
+			return
+		}
 		var call ModelCall
 		var target string
 		var timedOut bool
@@ -591,6 +672,10 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 								}
 							}
 							if started || readErr == io.EOF {
+								if !started {
+									w.Header().Set("Content-Type", res.Header.Get("Content-Type"))
+									w.WriteHeader(res.StatusCode)
+								}
 								res.Body.Close()
 								cancel()
 								<-done
@@ -607,6 +692,9 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			}
 			cancel()
 			<-done
+			if r.Context().Err() != nil {
+				return
+			}
 			if attempt >= 1 {
 				modelError(w, 503, "model call failed after one retry on another worker")
 				return
@@ -629,12 +717,18 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 func (q *Queue) retryCall(id string) error {
 	return q.update(func() error {
 		live := q.calls[id]
+		if live == nil {
+			return errors.New("model call no longer active")
+		}
+		previous := *live
 		if s := q.s.ModelSlots[slotKey(live.Machine, live.Model)]; s != nil && s.Session == live.Session {
 			s.InFlight = max(0, s.InFlight-1)
+			s.LastUsed = q.clock.Now()
 		}
 		live.Exclude = live.Machine
 		live.Machine = ""
 		live.Session = ""
+		q.refreshModelPriority(&previous)
 		q.maintain()
 		return nil
 	})
