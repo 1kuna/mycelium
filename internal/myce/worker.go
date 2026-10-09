@@ -414,6 +414,10 @@ func (w Worker) Run(stop context.Context) error {
 				if e != nil || !validMemoryValue(free) {
 					log.Printf("worker %s GPU memory probe failed: %v", m.ID, e)
 					free = 0
+					m.MemoryError = fmt.Sprintf("%v", e)
+					if e == nil {
+						m.MemoryError = "probe returned invalid memory"
+					}
 				}
 				m.FreeMemoryGB = free
 				m.MemoryMeasured = w.MemoryMeasured

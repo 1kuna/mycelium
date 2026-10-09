@@ -67,14 +67,32 @@ proxy, or firewall changes are part of these recipes.
 
 ## Inventory and foreground start/stop
 
-CUDA queries live `nvidia-smi` free GPU memory and subtracts
-`--reserve-memory-gb`. A positive `--memory-gb` optionally caps that reading before reserve and does not replace the query. Unsupported or
-unavailable readings must fail visibly, not substitute host RAM or a guessed
-budget. Spark's unified-memory inventory may not supply a supported free-memory
-reading: verify before admitting work. XPU/Metal/fake use the explicit configured
-`--memory-gb` budget minus reserve. Account for other workloads in that budget.
-Own batch/model reservations are deducted without double subtraction. This is
-memory admission, not permission to bypass an existing GPU owner or guard.
+CUDA queries `nvidia-smi` before each start/load and check-in. Exactly one
+GPU is supported. Numeric readings use dedicated GPU memory; `N/A`, `[N/A]`,
+`Not Supported`, and `[Not Supported]` automatically select unified memory.
+Metal always uses unified memory. Linux reads `MemAvailable` from `/proc/meminfo`;
+macOS runs `vm_stat` without cgo and uses free + inactive pages with the reported
+page size, excluding active, wired and compressed pages. This is a conservative
+reclaimable-memory estimate, not a GPU allocation guarantee.
+
+`--reserve-memory-gb` subtracts an OS/other-program reserve from each live
+reading, clamped at zero. An optional positive `--memory-gb` caps the reading
+**before** reserve. Values are GiB. For Spark, start with a **16 GiB reserve**;
+raise it for Atlas growth, other programs and measured pressure. Existing Atlas
+resident memory is already excluded from `MemAvailable`; the reserve provides
+additional headroom, not a substitute for measuring Atlas usage or owner admission.
+See [Spark worker example](../deploy/myce-spark-worker.service).
+
+`--memory-mode auto` is the default; `unified` explicitly selects OS accounting,
+`dedicated` requires numeric CUDA telemetry (invalid for Metal), and `fixed`
+requires a positive operator-selected `--memory-gb` budget. Fixed mode never
+probes live memory and cannot observe external allocations: choose it only with
+an independently enforced conservative allowance. XPU/fake keep configured
+budgets by default; XPU can explicitly select `unified` where applicable.
+A failed live source reports zero and its reason in `myce status` and the status
+page, refuses new work, and retries on subsequent checks. A cap alone never
+hides a failed probe. Own batch/model reservations are deducted without double
+subtraction. This is memory admission, not permission to bypass a GPU owner or guard.
 
 ```sh
 # Queue terminal: MYCE_TOKEN is already exported privately.
@@ -314,9 +332,10 @@ The Linux queue template uses `PrivateDevices=yes` to hide GPUs, one Go CPU,
 and initial limits of 25% CPU and 512 MiB RAM. Verify user-manager support and
 GPU hiding before accepting the B70 queue; stop on unsupported sandboxing.
 B70 is queue-only at `192.0.2.153:7331`; never enable a worker there.
-CUDA inventory currently requires exactly one GPU. Unsupported Spark unified
-memory readings are a blocker, even with a positive budget cap; do not use a
-fake GPU or a guessed host-RAM fallback. See [the production test plan](production-test-plan.md).
+CUDA inventory requires exactly one GPU. Spark unsupported memory fields select
+Linux `MemAvailable`; missing/invalid OS telemetry blocks work. Reserve 16 GiB
+initially and verify actual headroom under Atlas load before admission. See
+[the production test plan](production-test-plan.md).
 
 ## Private founder test preparation
 
@@ -372,7 +391,9 @@ ssh b70 'set -eu; test -w /mnt/nas; mkdir -p /mnt/nas/mycelium/checkpoints; chmo
 ```
 
 After admission, use a conservative *reading cap* from the approved test budget
-and reserve; enter them in GiB (not total machine RAM). Mac zsh:
+and reserve; enter them in GiB (not total machine RAM). A cap of 0 means no
+additional cap on the live reading; 16 GiB is the suggested initial Spark
+reserve. The generated worker uses automatic unified-memory detection. Mac zsh:
 
 ```sh
 read 'MYCE_TEST_CAP?Approved free-memory cap (GiB): '

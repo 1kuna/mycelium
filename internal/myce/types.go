@@ -167,6 +167,7 @@ type Job struct {
 	Checkpoint string     `json:"checkpoint"`
 }
 type Machine struct {
+	MemoryError           string    `json:"memory_error,omitempty"`
 	MemoryMeasured        bool      `json:"memory_measured,omitempty"`
 	ModelConfigHash       string    `json:"model_config_hash,omitempty"`
 	ModelURL              string    `json:"model_url,omitempty"`

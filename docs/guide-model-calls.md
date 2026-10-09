@@ -135,13 +135,18 @@ vLLM is deferred; unsupported engine names fail configuration validation.
 Calls share batch priority, loaded-model affinity, earliest deadline, and
 waiting-age ordering. An already loaded eligible model is preferred. Otherwise
 all fitting free workers are considered before making room. CUDA workers report
-live free GPU memory from `nvidia-smi`, optionally capped with `--memory-gb`,
-then reduced by `--reserve-memory-gb`. Resident models and running commands are
+live dedicated GPU memory from `nvidia-smi`, or Linux `MemAvailable` when
+CUDA memory fields are unsupported (`[N/A]` on Spark). Metal uses macOS
+`vm_stat` free + inactive pages. Both are optionally capped with `--memory-gb`,
+then reduced by `--reserve-memory-gb` (start with 16 GiB on Spark). Resident models and
+running commands are
 already reflected in that reading; only not-yet-reflected loading reservations
-are subtracted by the queue. XPU/Metal/fake use an explicit configured budget
-minus reserve and account for our batch/model reservations once. XPU/Metal
-cannot observe changing external allocations with this configured source: choose
-and maintain a conservative allowance. Workers recheck before every command or
+are subtracted by the queue. XPU/fake and explicit `--memory-mode fixed` use
+a configured budget minus reserve and account for our batch/model reservations
+once. Fixed budgets cannot observe external allocations: choose and maintain a
+conservative allowance. Live probe failures block new work and appear in status;
+see [memory modes and sources](operations.md#inventory-and-foreground-startstop).
+Workers recheck before every command or
 model load. Each worker runs at most one batch, alongside models that fit.
 
 Idle time starts after load readiness or the most recent call finishes.
