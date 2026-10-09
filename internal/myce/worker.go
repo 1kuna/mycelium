@@ -20,6 +20,9 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	// Test seams for deterministic filesystem faults and audited fake engines.
+	beforeModelCopy             func(context.Context)
+	modelEngine                 func(Model) Engine
 	CopyParallel                int
 	CacheRoot, ModelRoot        string
 	CacheLimit                  int64
@@ -617,6 +620,9 @@ func (w Worker) Run(stop context.Context) error {
 				}
 			}
 			if err != nil {
+				// Pause background I/O while disconnected: new priority decisions
+				// cannot reach this worker. Preserve pins and durable copy bytes.
+				rt.cancelCopies()
 				var he *HTTPError
 				if errors.As(err, &he) && (he.Status == 400 || he.Status == 401) {
 					return err

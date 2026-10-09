@@ -214,11 +214,12 @@ func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
 		if other.ID == m.ID || !q.workerIdle(other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
-		// Preserve explicit platform preferences, then compare NAS load cost.
+		// Preserve explicit platform preferences and loaded/cache affinity before NAS cost.
 		if len(j.Spec.Needs.Platform.Preferred) > 0 && contains(j.Spec.Needs.Platform.Preferred, m.GPU) && !contains(j.Spec.Needs.Platform.Preferred, other.GPU) {
 			continue
 		}
-		if q.loadSeconds(j.Spec.Needs.Model, other) < q.loadSeconds(j.Spec.Needs.Model, m) {
+		a, b := affinity(j, other), affinity(j, m)
+		if a > b || a == b && q.loadSeconds(j.Spec.Needs.Model, other) < q.loadSeconds(j.Spec.Needs.Model, m) {
 			return true
 		}
 	}

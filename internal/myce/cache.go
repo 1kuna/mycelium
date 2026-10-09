@@ -29,12 +29,12 @@ type ModelCache struct {
 	Usage         func(string) int
 	Parallel      int
 	active        map[string]chan struct{}
-	reservations  map[string]int64
+	reservations  sync.Map
 	verified      sync.Map
 	progress      sync.Map
 	speed         float64
 	speedMu       sync.Mutex
-	beforeChunk   func() // deterministic interruption hook for tests
+	beforeChunk   func(context.Context) // deterministic interruption hook for tests
 }
 
 func diskFree(path string) (int64, error) {
@@ -202,11 +202,10 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	}
 	done := make(chan struct{})
 	c.active[key] = done
-	if c.reservations == nil {
-		c.reservations = map[string]int64{}
+	if !m.DirectNAS {
+		c.reservations.Store(key, m.SizeBytes)
 	}
-	c.reservations[key] = m.SizeBytes
-	defer func() { c.mu.Lock(); delete(c.active, key); delete(c.reservations, key); close(done); c.mu.Unlock() }()
+	defer func() { c.mu.Lock(); delete(c.active, key); c.reservations.Delete(key); close(done); c.mu.Unlock() }()
 	source, e := c.source(m)
 	if e != nil {
 		c.mu.Unlock()
@@ -223,22 +222,18 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	dest := filepath.Join(c.Root, key)
 	// Verify outside the admission lock. Only this key's owner can publish it.
 	c.mu.Unlock()
-	if verifyModelContext(ctx, dest, m) == nil {
-		c.verified.Store(key, true)
-		now := c.Clock.Now()
-		return dest, os.Chtimes(dest, now, now)
-	}
+	cached := verifyModelContext(ctx, dest, m) == nil
 	if e := ctx.Err(); e != nil {
 		return "", e
 	}
 	c.mu.Lock()
-	if _, e = os.Stat(dest); e == nil {
+	if _, e = os.Stat(dest); e == nil && !cached {
+		c.verified.Delete(key)
 		if c.Protected != nil && c.Protected(key) {
 			c.mu.Unlock()
 			return "", errors.New("corrupt protected cache copy")
 		}
-		c.verified.Delete(key)
-		if e = c.discard(dest); e != nil {
+		if e = c.discardContext(ctx, dest); e != nil {
 			c.mu.Unlock()
 			return "", e
 		}
@@ -249,7 +244,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		offset = st.Size()
 	}
 	if offset > m.SizeBytes {
-		if e = c.discard(temp); e != nil {
+		if e = c.discardContext(ctx, temp); e != nil {
 			c.mu.Unlock()
 			return "", e
 		}
@@ -290,17 +285,21 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	}
 	// Reserve other active models in full. Disk admission is deliberately
 	// conservative so in-flight writes cannot race the filesystem free snapshot.
-	for k, size := range c.reservations {
-		if k != key {
-			reserved += size
+	c.reservations.Range(func(k, size any) bool {
+		if k.(string) != key {
+			reserved += size.(int64)
 		}
-	}
+		return true
+	})
 	free, e := c.Free(c.Root)
 	if e != nil {
 		c.mu.Unlock()
 		return "", e
 	}
 	need := m.SizeBytes - offset
+	if cached {
+		need = 0
+	}
 	sort.Slice(victims, func(i, j int) bool {
 		if victims[i].used == victims[j].used {
 			return victims[i].path < victims[j].path
@@ -347,6 +346,12 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		c.mu.Unlock()
 		return "", errors.New("insufficient local model cache space")
 	}
+	if cached {
+		c.mu.Unlock()
+		c.verified.Store(key, true)
+		now := c.Clock.Now()
+		return dest, os.Chtimes(dest, now, now)
+	}
 	r := CopyReport{Model: m.Name, State: "copying", Bytes: offset, Total: m.SizeBytes}
 	c.progress.Store(key, r)
 	c.mu.Unlock()
@@ -388,7 +393,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	oversize := false
 	for e == nil {
 		if c.beforeChunk != nil {
-			c.beforeChunk()
+			c.beforeChunk(ctx)
 		}
 		if e = ctx.Err(); e != nil {
 			break
@@ -472,6 +477,7 @@ func (c *ModelCache) Report(models []Model) ([]string, int64, error) {
 		return nil, 0, e
 	}
 	var used int64
+	bytesByKey := map[string]int64{}
 	var names []string
 	for _, ent := range entries {
 		if !strings.HasSuffix(ent.Name(), ".model") && !strings.HasSuffix(ent.Name(), ".partial") {
@@ -485,6 +491,7 @@ func (c *ModelCache) Report(models []Model) ([]string, int64, error) {
 			return nil, 0, err
 		}
 		used += st.Size()
+		bytesByKey[strings.TrimSuffix(ent.Name(), ".partial")] += st.Size()
 		if _, ok := c.verified.Load(ent.Name()); !ok {
 			continue
 		}
@@ -495,8 +502,15 @@ func (c *ModelCache) Report(models []Model) ([]string, int64, error) {
 		}
 	}
 	free, e := c.Free(c.Root)
+	// Do not take the admission lock: eviction may be waiting on the NAS.
+	// Reserve the unwritten suffix as well as bytes already on disk.
+	var pending int64
+	c.reservations.Range(func(key, size any) bool {
+		pending += max(0, size.(int64)-bytesByKey[key.(string)])
+		return true
+	})
 	sort.Strings(names)
-	return names, min(free, max(0, c.Limit-used)), e
+	return names, max(0, min(free-pending, c.Limit-used-pending)), e
 }
 func (c *ModelCache) CopyReports() ([]CopyReport, float64) {
 	out := []CopyReport{}

@@ -2,9 +2,9 @@
 
 One CPU queue, one SQLite database, plain-command GPU workers. These instructions
 are local installation recipes, not a fleet deployment. Do not stop or replace
-Atlas, Verso, GPU guards/controllers, or legacy Mycelium. Discovery on 2026-10-08
-found an active B70 `mycelium-real-fleet.service`; preserve its binary, state,
-service and port. Spark's Atlas GPU ownership also requires an agreed handoff.
+Atlas, Verso, or GPU guards/controllers. The old B70 v1 service was already
+removed on 2026-10-09; do not reinstall it. Other legacy data is outside v2 scope.
+Spark's Atlas GPU ownership still requires an agreed handoff.
 
 ## Paths and prerequisites
 
@@ -21,13 +21,14 @@ These are distinct from v1's `mycelium` paths and services. Before installation,
 inspect existing destination paths and stop if their ownership is unclear.
 Use Go 1.25.6+ to build for the target OS/architecture. Plain job commands,
 Python runtimes, environments and GPU-enabled llama-server must already be
-installed on eligible workers. There is no environment/model downloader.
+installed on eligible workers. There is no automatic environment installation or model download at load;
+`myce model fetch` is the explicit master-download command.
 
 Mount the NAS before creating the root. Verify the actual share identity, write
 permissions, and a write/read/rename across participating machines. Configure
 the mount to fail closed so an unmounted share cannot become a writable local
-substitute. Mycelium probes access, not remote-server identity. Linux might use
-`/mnt/nas/mycelium/checkpoints`; Mac might use
+substitute. Mycelium probes access, not remote-server identity. Spark uses `/mnt/nas/mycelium/checkpoints`; B70 may use
+`/mnt/nas/mycelium/checkpoints` or `/mnt/nas/mycelium/checkpoints`; Mac might use
 `/Volumes/NAS/mycelium/checkpoints`. These may differ: both must refer to the
 **same shared directory**. Assignment paths are relative on the wire, resolved
 against the worker root; the queue retains its own absolute paths. Never put
@@ -111,8 +112,8 @@ subtraction. This is memory admission, not permission to bypass a GPU owner or g
 For CUDA use `--gpu cuda --reserve-memory-gb VALUE`; for XPU use
 `--gpu xpu --memory-gb VALUE --reserve-memory-gb VALUE`. Configure unique stable
 names. The queue heartbeat-loss defaults are 5s production, 20s deadline, 60s
-experiment; worker heartbeat defaults to 1s. Startup recovery remains 3m and
-stop grace 2m. Avoid heartbeat intervals near or above the shortest loss timeout.
+experiment; worker heartbeat defaults to 1s. Startup recovery remains 3m. Production preemption gives resumable work 10s
+by default; deadline preemption and planned leave give 2m. Avoid heartbeat intervals near or above the shortest loss timeout.
 
 Ctrl-C/SIGTERM tells a worker to leave: no new work, resumable jobs save/exit,
 non-resumable jobs finish. `myce leave --name mac-worker` asks wait/stop if needed;
@@ -124,7 +125,7 @@ Workers continue through temporary queue/network loss and replay logs/results.
 
 This local renderer makes a private file from the checked-in template. Edit the
 configuration assignments for the target host, select the role and OS, and run
-from the checkout. For CUDA, budget `"0"` means no optional cap; XPU/Metal/fake
+from the checkout. For live CUDA/Metal, budget `"0"` means no optional cap; XPU/fixed
 need a positive configured budget. For Mac workers select GPU `"metal"`.
 No service is started by rendering. The Mac token prompt is hidden; Linux reads
 the private EnvironmentFile at service startup instead.
@@ -339,74 +340,11 @@ initially and verify actual headroom under Atlas load before admission. See
 
 ## Private founder test preparation
 
-Commands below are for a future authorized test, not executed during review.
-Run only after the [test-plan prerequisites](production-test-plan.md) are met.
-No host service is started by this preparation. Use fail-fast shells; retain
-partial installations for inspection on failure. The reviewed catalog is an
-operator-owned prerequisite, not the example catalog.
-
-Mac, from this checkout, `set -eu`; use SSH aliases `b70` and `spark` as user:
-
-```sh
-mkdir -p /tmp/myce-production-build
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/myce-production-build/myce-amd64 ./cmd/myce
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/myce-production-build/myce-arm64 ./cmd/myce
-test -s ops/private/myce-models.yaml
-for host in b70 spark; do
-  ssh "$host" 'set -eu; test ! -e ~/.local/bin/myce; test ! -e ~/.config/myce; test ! -e ~/.local/share/myce; test ! -e ~/.config/systemd/user/myce-queue.service; test ! -e ~/.config/systemd/user/myce-worker.service; test "$(loginctl show-user user -p Linger --value)" = yes; findmnt -T /mnt/nas -o SOURCE,TARGET,FSTYPE'
-done
-ssh b70 'test -z "$(ss -ltnH "sport = :7331")"'
-```
-
-Success: absent v2 destinations, existing linger, free 7331, both mounts show
-CIFS `//storage.example/share`. Stop otherwise; never create a local NAS substitute.
-
-```sh
-for host in b70 spark; do
-  ssh "$host" 'set -eu; umask 077; mkdir -p ~/.local/bin ~/.config/systemd/user; mkdir -m 700 ~/.config/myce ~/.local/share/myce'
-done
-scp /tmp/myce-production-build/myce-amd64 b70:/home/user/.local/bin/myce
-scp /tmp/myce-production-build/myce-arm64 spark:/home/user/.local/bin/myce
-for host in b70 spark; do
-  scp ops/private/myce-models.yaml "$host":/home/user/.config/myce/models.yaml
-  ssh "$host" 'chmod 700 ~/.local/bin/myce; chmod 600 ~/.config/myce/models.yaml; sha256sum ~/.local/bin/myce'
-done
-shasum -a 256 /tmp/myce-production-build/myce-*
-```
-
-Success: corresponding binary hashes match. Privately generate/send one token
-from Mac zsh, without tracing, printing it, or writing it in the checkout:
-
-```sh
-MYCE_TEST_TOKEN=$(openssl rand -hex 32)
-printf 'MYCE_TOKEN=%s\nMYCE_QUEUE=http://192.0.2.153:7331\n' "$MYCE_TEST_TOKEN" | ssh b70 'umask 077; cat > ~/.config/myce/queue.env'
-printf 'MYCE_TOKEN=%s\nMYCE_QUEUE=http://192.0.2.153:7331\n' "$MYCE_TEST_TOKEN" | ssh spark 'umask 077; cat > ~/.config/myce/worker.env'
-unset MYCE_TEST_TOKEN
-sed -e 's/REPLACE_QUEUE_IP/192.0.2.153/g' \
-    -e 's|REPLACE_CHECKPOINT_ROOT|/mnt/nas/mycelium/checkpoints|g' \
-    -e 's| --restart-grace| --model-config %h/.config/myce/models.yaml --restart-grace|' \
-    deploy/myce-queue.service > /tmp/myce-production-build/myce-queue.service
-scp /tmp/myce-production-build/myce-queue.service b70:/home/user/.config/systemd/user/myce-queue.service
-ssh b70 'set -eu; test -w /mnt/nas; mkdir -p /mnt/nas/mycelium/checkpoints; chmod 600 ~/.config/systemd/user/myce-queue.service'
-```
-
-After admission, use a conservative *reading cap* from the approved test budget
-and reserve; enter them in GiB (not total machine RAM). A cap of 0 means no
-additional cap on the live reading; 16 GiB is the suggested initial Spark
-reserve. The generated worker uses automatic unified-memory detection. Mac zsh:
-
-```sh
-read 'MYCE_TEST_CAP?Approved free-memory cap (GiB): '
-read 'MYCE_TEST_RESERVE?Approved reserve (GiB): '
-sed -e 's/REPLACE_QUEUE_IP/192.0.2.153/g' \
-    -e 's/REPLACE_WORKER_NAME/spark-v2-test/g' -e 's/REPLACE_GPU/cuda/g' \
-    -e "s/REPLACE_BUDGET_GB/$MYCE_TEST_CAP/g" -e "s/REPLACE_RESERVE_GB/$MYCE_TEST_RESERVE/g" \
-    -e 's|REPLACE_CHECKPOINT_ROOT|/mnt/nas/mycelium/checkpoints|g' \
-    -e 's| --heartbeat| --model-config %h/.config/myce/models.yaml --model-listen 192.0.2.16:7332 --model-advertise http://192.0.2.16:7332 --heartbeat|' \
-    deploy/myce-worker.service > /tmp/myce-production-build/myce-worker.service
-```
-
-Return to the production test checklist; this preparation starts no service.
+[The production test plan](production-test-plan.md) is the single ordered founder
+checklist, including cross-builds, private configuration, CPU-only B70 queue,
+Spark unified-memory worker, NAS verification, measured pre-copy, calls, batch,
+faults and undo. Follow it instead of assembling a sequence from these general
+installation recipes. No fleet operations were performed during the local review.
 
 ## Model master folder, worker cache, and production reservations
 
@@ -460,7 +398,7 @@ Pins pre-copy to every compatible landing worker, including before a scheduled
 window; only the assigned worker reserves GPU memory and loads the engine.
 An idle worker also copies models needed by compatible queued jobs or recent
 use. Recent-use counts expire after 24 hours without use. Most-needed models go
-first, with pins first. A batch or model load/call cancels background copying;
+first, with pins first. A batch, model load/call, or queue disconnection cancels background copying;
 copy loops check cancellation between bounded chunks and during prefix hashing
 and recoverable eviction. An already outstanding NAS filesystem syscall still
 obeys the OS mount timeout, but it does not block worker heartbeats. No new

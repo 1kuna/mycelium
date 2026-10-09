@@ -222,3 +222,22 @@ for assigned ready state before expecting calls without load wait. Copy time
 counts as load time; the queue prefers ready, then locally cached, then cold
 placements. Cache eviction protects loaded models and preserves removed files in
 Trash. See [operations](operations.md) for physical disk space and recovery.
+
+
+Before the first real call, pre-copy the immutable master:
+
+```sh
+myce model sync chat --to gpu-worker
+myce status  # wait for verified cached_models and copy_reports state=ready
+myce model pin chat --project atlas --machine gpu-worker
+myce status  # additionally wait for the loaded slot to be ready
+```
+
+`sync --cancel` preserves partial bytes, and queue/worker restarts retain requests
+and resumable prefixes respectively. The worker rehashes the prefix and verifies
+the complete file before the engine can load it. Pins protect every compatible
+landing cache, even outside a reservation window. Real work and queue disconnection
+pause background copies without blocking worker check-ins; an outstanding NAS
+syscall remains subject to the mount's timeout. Copy speed in status measures NAS
+transfer; a cached model still needs engine startup. Follow the single ordered
+[first-machine checklist](production-test-plan.md) for hardware acceptance.

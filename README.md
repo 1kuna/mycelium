@@ -4,7 +4,9 @@ One shared queue for GPU batch jobs and OpenAI-format model calls. One Go binary
 commands, and an HTML status page. Everything runs on a laptop with fake GPUs and an explicit fake model engine. The approved spec is [the v2 design](docs/design-proposal.md).
 The previous architecture remains archived at `v1-final`; v2 starts fresh.
 Install v2 as `~/.local/bin/myce`, with local data at `~/.local/share/myce`
-and distinct `myce` services, leaving any v1 installation untouched.
+and distinct `myce` services. The old v1 service was removed from B70 on
+2026-10-09; do not reinstall it. Other legacy data remains outside v2 scope.
+Use [the ordered founder test checklist](docs/production-test-plan.md) for the first fleet test.
 
 Read [Atlas/Verso integration examples](docs/integrating.md), the
 [complete job/CLI reference](docs/job-reference.md), and
@@ -122,8 +124,11 @@ read-only and LAN-visible; all `/api/` and `/v1/` routes require the token. This
 trusted local-network service; commands run with the worker user's permissions.
 
 CUDA workers query live `nvidia-smi` free GPU memory minus
-`--reserve-memory-gb`; a positive `--memory-gb` optionally caps that reading before reserve and never replaces the query. XPU, Metal, and
-fake workers use an explicit `--memory-gb` budget minus reserve. Own batch/model
+`--reserve-memory-gb`; a positive `--memory-gb` optionally caps that reading before reserve and never replaces the query. Spark CUDA uses Linux
+`MemAvailable` when dedicated memory fields
+are unsupported; Metal uses macOS `vm_stat` free + inactive memory. XPU/fake
+use configured budgets, and `--memory-mode fixed` explicitly selects a budget.
+Live readings and fixed budgets are reduced by reserve; a cap applies before reserve. Own batch/model
 reservations are accounted for without double subtraction. Unsupported inventory
 fails visibly. CUDA currently requires exactly one GPU; multi-GPU inventory
 fails rather than summing memory a single command may not be able to use. Admission does not replace Atlas/Verso ownership controls.
