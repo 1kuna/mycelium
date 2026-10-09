@@ -1,3 +1,5 @@
+Start with [the agent starting guide](docs/START-HERE.md) when integrating another project.
+
 # Mycelium
 
 One shared queue for GPU batch jobs and OpenAI-format model calls. One Go binary, one SQLite database, plain
