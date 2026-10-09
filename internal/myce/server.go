@@ -1,9 +1,11 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -11,6 +13,35 @@ import (
 	"strconv"
 	"strings"
 )
+
+const maxGenericRequestBytes int64 = 8 << 30
+
+var errModelRequestTooLarge = errors.New("generic model request exceeds 8 GiB disk-spool limit")
+
+// spoolModelRequest makes a bounded, seekable copy so the queue can replay one
+// transport failure without retaining large media in memory.
+func spoolModelRequest(ctx context.Context, body io.Reader, limit int64) (*os.File, int64, error) {
+	f, err := os.CreateTemp("", "myce-model-request-*")
+	if err != nil {
+		return nil, 0, err
+	}
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+	}
+	n, err := io.Copy(f, io.LimitReader(contextReader{ctx: ctx, reader: body}, limit+1))
+	if err == nil && n > limit {
+		err = errModelRequestTooLarge
+	}
+	if err == nil {
+		_, err = f.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		cleanup()
+		return nil, 0, err
+	}
+	return f, n, nil
+}
 
 // PrepareModelEnvironment holds the cache use lock for the complete server life.
 func PrepareModelEnvironment(ctx context.Context, m Model, platform string, catalog EnvironmentCatalog, cache *EnvironmentCache) (Model, func(), error) {
@@ -104,6 +135,12 @@ func serverCommand(m Model, port int) ([]string, string, []string, []string, err
 			env[k] = v
 		}
 	}
+	if m.Device != "" {
+		// Explicit per-process bindings override inherited selectors for every backend.
+		delete(env, "CUDA_VISIBLE_DEVICES")
+		delete(env, "ONEAPI_DEVICE_SELECTOR")
+		delete(env, "ZE_AFFINITY_MASK")
+	}
 	if m.EnvironmentPath != "" {
 		env["PATH"] = filepath.Join(m.EnvironmentPath, "venv", "bin") + string(os.PathListSeparator) + filepath.Join(m.EnvironmentPath, "bin") + string(os.PathListSeparator) + env["PATH"]
 		env["VIRTUAL_ENV"] = filepath.Join(m.EnvironmentPath, "venv")
@@ -160,11 +197,22 @@ func copyProxyHeaders(dst, src http.Header) {
 	}
 }
 func (l *LlamaEngine) CallRequest(ctx context.Context, method, path string, body []byte, headers http.Header) (*http.Response, error) {
-	return l.Request(ctx, method, path, headers, body)
+	return l.Request(ctx, method, path, headers, bytes.NewReader(body), int64(len(body)))
 }
 
 type CallRequestEngine interface {
 	CallRequest(context.Context, string, string, []byte, http.Header) (*http.Response, error)
+}
+
+// StreamRequestEngine accepts request bodies without first materializing them in
+// worker memory. contentLength is preserved when known so media servers that do
+// not accept chunked uploads see the original request contract.
+type StreamRequestEngine interface {
+	StreamRequest(context.Context, string, string, io.Reader, int64, http.Header) (*http.Response, error)
+}
+
+func (l *LlamaEngine) StreamRequest(ctx context.Context, method, path string, body io.Reader, contentLength int64, headers http.Header) (*http.Response, error) {
+	return l.Request(ctx, method, path, headers, body, contentLength)
 }
 
 func modelFitsMachine(model Model, m *Machine) bool {
@@ -185,6 +233,12 @@ func WithModelDevice(m Model, platform, device string) (Model, error) {
 		env[k] = v
 	}
 	m.DeviceEnv = env
+	// Never carry a selector for another accelerator family into this process.
+	// A mixed CUDA/XPU host must not expose an unselected physical device merely
+	// because the catalog contained a stale or irrelevant selector.
+	delete(env, "CUDA_VISIBLE_DEVICES")
+	delete(env, "ONEAPI_DEVICE_SELECTOR")
+	delete(env, "ZE_AFFINITY_MASK")
 	switch platform {
 	case "cuda":
 		env["CUDA_VISIBLE_DEVICES"] = device

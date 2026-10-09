@@ -65,9 +65,13 @@ curl "$MYCE_QUEUE/models/speech/transcribe?language=en" \
 headers. Response status, headers and bytes pass through with immediate flushing;
 there is no JSON, audio, SSE or multipart interpretation. Fleet authorization,
 Myce routing headers and hop-by-hop headers are consumed, never sent to the
-engine. Request bodies are buffered up to **64 MiB** for placement/retry; larger
-payloads fail explicitly. Request-body streaming and WebSockets are unsupported.
-Use a qualified local/NAS-reference API for larger media; do not silently resize.
+engine. Generic request bodies use a bounded **8 GiB local disk spool** at the
+queue for placement/retry; larger payloads fail explicitly. The worker streams
+the body to the engine, preserving content length. The spool is removed on every
+normal/error return; concurrent uploads each need their own disk space. OpenAI
+JSON routes keep the 64 MiB in-memory limit. WebSockets remain unsupported.
+The queue waits for the upload before placement; it does not stream uploads
+through the queue while retaining an unbounded replay buffer.
 Responses stream without buffering. A generic stream that loses its worker after
 bytes start aborts its connection; no JSON/SSE error is inserted into binary data.
 Before response bytes start, worker transport failure may retry once on another

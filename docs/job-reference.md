@@ -225,7 +225,8 @@ See [general server contract](guide-servers.md) for full fields and examples.
 
 Call `/models/NAME/PATH` with any method, body and end-to-end headers, plus the
 usual fleet token, project and priority. Responses stream; request bodies have
-an explicit 64 MiB limit. Batch `needs.model` remains a scheduling hint, not a
+an explicit 8 GiB generic disk-spool limit (OpenAI JSON retains 64 MiB).
+The worker streams generic uploads to the engine. Batch `needs.model` remains a scheduling hint, not a
 request to launch a server. Queued commands never inherit the fleet token.
 
 `join --device ID` isolates commands/engines to one card and binds CUDA memory

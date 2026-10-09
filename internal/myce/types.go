@@ -184,6 +184,9 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	MemoryUsedGB            float64             `json:"memory_used_gb"`
+	TotalMemoryGB           float64             `json:"total_memory_gb"`
+	ReservedMemoryGB        float64             `json:"reserved_memory_gb"`
 	Device                  string              `json:"device,omitempty"`
 	EnvironmentBuilder      bool                `json:"environment_builder,omitempty"`
 	EnvironmentReports      []EnvironmentReport `json:"environment_reports,omitempty"`
@@ -250,6 +253,7 @@ type LogChunk struct {
 	Text   string `json:"text"`
 }
 type Snapshot struct {
+	Usage        UsageReport   `json:"usage"`
 	SyncRequests []SyncRequest `json:"sync_requests"`
 	Pins         []ModelPin    `json:"pins"`
 	LoadedModels []ModelSlot   `json:"loaded_models"`

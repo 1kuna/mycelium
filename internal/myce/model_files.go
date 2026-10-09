@@ -356,14 +356,14 @@ func (c *ModelCache) recoverModelDirectory(ctx context.Context, src, dst string)
 		if e != nil {
 			return e
 		}
-		defer in.Close()
 		out, e := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if e != nil {
+			_ = in.Close()
 			return e
 		}
 		hash := sha256.New()
-		n, e := io.Copy(io.MultiWriter(out, hash), contextReader{ctx, in})
-		e = errors.Join(e, out.Sync(), out.Close())
+		n, copyErr := io.Copy(io.MultiWriter(out, hash), contextReader{ctx, in})
+		e = errors.Join(copyErr, in.Close(), out.Sync(), out.Close())
 		if e != nil {
 			return e
 		}

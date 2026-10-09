@@ -51,6 +51,9 @@ func run(args []string) error {
 		return modelCommand(args[1:])
 	}
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	since := f.String("since", "7d", "usage lookback, up to 90d")
+	by := f.String("by", "project", "usage grouping: project or machine")
+	projectConfig := f.String("project-config", "", "project weights and experiment caps YAML")
 	url := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
 	token := f.String("token", env("MYCE_TOKEN", ""), "shared fleet token (prefer MYCE_TOKEN)")
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
@@ -125,7 +128,11 @@ func run(args []string) error {
 		if *memory == 0 {
 			*memory = 64
 		}
-		d, err := myce.StartDev(myce.DevConfig{EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
+		policies, e := myce.ReadProjectPolicies(*projectConfig)
+		if e != nil {
+			return e
+		}
+		d, err := myce.StartDev(myce.DevConfig{ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -147,6 +154,15 @@ func run(args []string) error {
 		}
 		if err = q.ConfigureModels(mc); err != nil {
 			return err
+		}
+		if *projectConfig != "" {
+			policies, e := myce.ReadProjectPolicies(*projectConfig)
+			if e != nil {
+				return e
+			}
+			if e = q.ConfigureProjects(policies); e != nil {
+				return e
+			}
 		}
 		q.SetRestartGrace(*restartGrace)
 		if err = q.SetProductionGrace(*productionGrace); err != nil {
@@ -218,6 +234,19 @@ func run(args []string) error {
 		}
 		fmt.Println(j.ID)
 		return nil
+	case "usage":
+		duration, e := usageDuration(*since)
+		if e != nil {
+			return e
+		}
+		if *by != "project" && *by != "machine" {
+			return errors.New("by must be project or machine")
+		}
+		var report myce.UsageReport
+		if e = client.Call(ctx, "GET", "/api/usage?since="+duration.String(), nil, &report); e != nil {
+			return e
+		}
+		return printUsage(os.Stdout, report, *by)
 	case "status":
 		s, err := status(ctx, client)
 		if err != nil {

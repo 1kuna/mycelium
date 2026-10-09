@@ -28,6 +28,13 @@ const StopGrace = 2 * time.Minute
 var ErrStale = errors.New("stale execution: stop this copy")
 
 type state struct {
+	UsageMaintenance time.Time                `json:"usage_maintenance,omitempty"`
+	ProductionStarts []ProductionStart        `json:"production_starts,omitempty"`
+	Policies         map[string]ProjectPolicy `json:"project_policies,omitempty"`
+	FairUsage        map[string]FairUsage     `json:"fair_usage,omitempty"`
+	UsageAt          time.Time                `json:"usage_at,omitempty"`
+	Preemptions      []Preemption             `json:"preemptions,omitempty"`
+
 	SyncRequests []SyncRequest         `json:"sync_requests,omitempty"`
 	ModelUses    map[string]ModelUse   `json:"model_uses,omitempty"`
 	Pins         []ModelPin            `json:"pins,omitempty"`
@@ -37,21 +44,23 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
-	environments    EnvironmentCatalog
-	productionGrace time.Duration
-	wake            chan struct{}
-	models          ModelConfig
-	calls           map[string]*ModelCall
-	lock            *os.File
-	mu              sync.Mutex
-	db              *sql.DB
-	clock           Clock
-	root            string
-	restartUntil    time.Time
-	unreported      map[string]bool
-	networkQuiet    bool
-	lossTimeouts    [3]time.Duration
-	s               state
+	environments     EnvironmentCatalog
+	productionGrace  time.Duration
+	wake             chan struct{}
+	models           ModelConfig
+	calls            map[string]*ModelCall
+	lock             *os.File
+	mu               sync.Mutex
+	db               *sql.DB
+	clock            Clock
+	root             string
+	restartUntil     time.Time
+	unreported       map[string]bool
+	networkQuiet     bool
+	lossTimeouts     [3]time.Duration
+	usageWrites      []usageSample
+	usageMaintenance bool
+	s                state
 }
 
 func ID() string {
@@ -90,7 +99,7 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 	}
 	db.SetMaxOpenConns(1)
 	q := &Queue{productionGrace: 10 * time.Second, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
-	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq);`); err != nil {
+	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -206,12 +215,14 @@ func (q *Queue) update(fn func() error) error {
 		oldUnreported[id] = v
 	}
 	oldQuiet := q.networkQuiet
+	q.usageWrites = nil
+	q.accountUsage(q.clock.Now())
 	err := fn()
 	if err == nil {
 		var data []byte
 		data, err = json.Marshal(q.s)
 		if err == nil {
-			_, err = q.db.Exec("INSERT INTO queue(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", data)
+			err = q.persistUsage(data)
 		}
 	}
 	if err == nil && q.wake != nil {
@@ -379,13 +390,19 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	reply := Reply{CheckpointRoot: q.root}
 	err := q.update(func() error {
 		m := cloneMachine(&c.Machine)
-		if m.ID == "" || m.Session == "" || !validGPU(m.GPU) || m.FreeMemoryGB < 0 || math.IsNaN(m.FreeMemoryGB) || math.IsInf(m.FreeMemoryGB, 0) {
+		if m.ID == "" || m.Session == "" || !validGPU(m.GPU) || !validMemoryValue(m.TotalMemoryGB) || m.FreeMemoryGB < 0 || math.IsNaN(m.FreeMemoryGB) || math.IsInf(m.FreeMemoryGB, 0) {
 			return errors.New("invalid machine report")
 		}
 		if m.ModelURL != "" && len(q.models.Models) > 0 && m.ModelConfigHash != modelConfigHash(q.models) {
 			return errors.New("worker model config does not match queue")
 		}
 		old := q.s.Machines[m.ID]
+		if m.TotalMemoryGB == 0 {
+			m.TotalMemoryGB = m.FreeMemoryGB
+			if old != nil {
+				m.TotalMemoryGB = max(m.TotalMemoryGB, old.TotalMemoryGB)
+			}
+		}
 		if old != nil && old.Session != m.Session && !old.Gone && !(c.Fresh && c.PreviousSession == old.Session) {
 			return errors.New("machine name already joined; leave the other worker first")
 		}
@@ -505,10 +522,10 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			}
 		}
 		if !m.Leaving && !m.CheckpointUnavailable && checkpointAvailable(q.root) {
-			j := pick(q.s.Jobs, &m)
+			j := q.pick(&m)
 			if j != nil {
 				for _, c := range q.calls {
-					if c.Machine == "" && c.Error == "" && q.callCanUse(&m, c) && before(callJob(c), j, &m) {
+					if c.Machine == "" && c.Error == "" && q.callCanUse(&m, c) && q.fairBefore(callJob(c), j, &m) {
 						j = nil
 						break
 					}
@@ -674,7 +691,7 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 		}
 		for _, j := range q.s.Jobs {
 			if j.State == "queued" {
-				j.Reason = waitingReason(j, q.s.Machines, q.s.Jobs)
+				j.Reason = q.waitReason(j)
 				if !checkpointAvailable(q.root) {
 					j.Reason = "NAS checkpoint root is unreachable"
 				}
@@ -682,8 +699,35 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 			copy := cloneJob(j)
 			out.Jobs = append(out.Jobs, &copy)
 		}
+		for _, c := range q.calls {
+			call := callJob(c)
+			call.Spec.Name = "model call: " + c.Model
+			call.Machine = c.Machine
+			call.State = "queued"
+			call.Reason = "waiting for model " + c.Model + " on an eligible worker"
+			if reason := q.capReason(call); reason != "" {
+				call.Reason = reason
+			}
+			if c.Machine != "" {
+				call.State = "running"
+				call.Reason = "model call in flight"
+			}
+			if c.Error != "" {
+				call.State = "failed"
+				call.Reason = c.Error
+			}
+			out.Jobs = append(out.Jobs, call)
+		}
 		for _, m := range q.s.Machines {
 			copy := cloneMachine(m)
+			copy.ReservedMemoryGB = 0
+			copy.MemoryUsedGB = max(0, copy.TotalMemoryGB-copy.FreeMemoryGB)
+			for _, slot := range q.s.ModelSlots {
+				if slot.Machine == m.ID && q.slotPinned(slot) {
+					model, _ := q.model(slot.Model)
+					copy.ReservedMemoryGB += model.MemoryGB
+				}
+			}
 			copy.ModelCopySeconds = map[string]float64{}
 			for _, model := range q.models.Models {
 				if modelFitsMachine(model, m) {
@@ -696,6 +740,11 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 		sort.Slice(out.Machines, func(i, k int) bool { return out.Machines[i].ID < out.Machines[k].ID })
 		return nil
 	})
+	if err == nil {
+		q.mu.Lock()
+		out.Usage, err = q.usageLocked(q.clock.Now().Add(-7 * 24 * time.Hour))
+		q.mu.Unlock()
+	}
 	return out, err
 }
 func (q *Queue) AppendLog(l LogChunk) error {
@@ -806,6 +855,9 @@ func (q *Queue) markStarted(j *Job) {
 		now := q.clock.Now()
 		j.StartedAt = &now
 		j.StartLatencySeconds = now.Sub(j.Queued).Seconds()
+		if j.Spec.Priority == "production" {
+			q.s.ProductionStarts = append(q.s.ProductionStarts, ProductionStart{At: now, Job: j.ID, Seconds: j.StartLatencySeconds})
+		}
 	}
 }
 func (q *Queue) Started(r Result) error {

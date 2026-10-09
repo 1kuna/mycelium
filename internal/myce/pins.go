@@ -164,6 +164,9 @@ func (q *Queue) SetProductionGrace(d time.Duration) error {
 	return nil
 }
 func (q *Queue) stopFor(j *Job, priority, kind string) {
+	if j.State == "running" {
+		q.s.Preemptions = append(q.s.Preemptions, Preemption{At: q.clock.Now(), Job: j.ID, Project: j.Spec.Project, For: priority})
+	}
 	q.stop(j, "making room for "+priority+" "+kind)
 	if j.State == "stopping" && priority == "production" {
 		grace := q.productionGrace

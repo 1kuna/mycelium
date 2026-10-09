@@ -517,6 +517,7 @@ func (w Worker) Run(stop context.Context) error {
 			}
 			m.Leaving = leaving
 			m.FreeMemoryGB = base
+			m.TotalMemoryGB = base
 			if w.MemorySource != nil {
 				free, e := rawMemory(ctx)
 				if e != nil || !validMemoryValue(free) {
