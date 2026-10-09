@@ -61,6 +61,16 @@ When a worker asks for work, the queue picks, from the jobs that fit this machin
 - **Late return.** If a lost machine comes back while its old job is still running, the queue tells it to stop that copy, so one job never runs twice.
 - **Jobs no remaining machine can run.** These are jobs pinned to the machine that left, or jobs that need a GPU type no current machine has (for example, Apple-only work when every Mac is away). They stay in the queue, and `myce status` says plainly why each one is waiting: "no machine in the fleet can run this right now (needs metal)". A job can set a give-up time, after which it is marked failed instead of waiting forever.
 
+**Power and network loss are normal, not rare.** They happen regularly at Zach's house, so every part must survive them without anyone stepping in.
+
+- **The queue machine (B70) loses power.** The database is written safely (every change is fully saved to disk before it's confirmed), so a power cut never corrupts it or loses a submitted job. The queue starts automatically when the machine boots. After a restart it does *not* immediately declare every job lost. It waits a few minutes for workers to reconnect and report what they're still running or have finished, and only then puts back in line the jobs nobody reported.
+- **A worker machine loses power.** This is handled as a sudden loss: its jobs go back in line after 60 seconds. On the always-on machines, the worker starts automatically at boot. On startup it cleans up any job processes left over from before the power cut, and then reports in fresh.
+- **A worker loses network but keeps power.** It keeps running its current jobs, saves their logs and results locally, and keeps trying to reconnect. It does not start new jobs. When it reconnects it sends everything it saved. If the queue already gave a job to another machine, the rule that one job never runs twice decides which copy continues: whichever copy has made more progress (its latest checkpoint) keeps running, and the other stops.
+- **The whole house network drops, or the queue machine loses network.** If every worker goes quiet at once, the problem is almost certainly the network, not every machine at the same time. So the queue does not put everything back in line. It waits until machines reconnect, or until it can confirm specific machines are really gone.
+- **The NAS is unreachable.** Jobs whose checkpoint folder can't be reached are not started. Running jobs keep going and retry their saves. `myce status` says plainly that the NAS is down.
+- **Saved progress is never half-written.** The resumable-jobs guide requires writing each checkpoint to a temporary file and then renaming it, so a power cut mid-save leaves the previous checkpoint intact. When resuming, a job uses its newest complete checkpoint.
+- **Tests:** each of these cases has a test using fake time and pretend machines: queue restart, worker restart, worker cut off from the network, the whole network dropping, and the NAS going away.
+
 **Data stays local.** Every machine in the fleet is on-premises, so job data never leaves our machines. A job can also list the specific machines it is allowed to run on.
 
 ## Using it
