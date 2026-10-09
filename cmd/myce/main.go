@@ -23,7 +23,7 @@ import (
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		log.Print(err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
 }
 func env(k, d string) string {
@@ -37,13 +37,18 @@ func run(args []string) error {
 }
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce queue|join|leave|submit|status|logs|cancel|dev")
+		return errors.New("usage: myce queue|join|leave|submit|status|logs|wait|cancel|dev")
 	}
 	if args[0] == "install" || args[0] == "uninstall" || args[0] == "doctor" {
 		return setupCommand(args)
 	}
 	if args[0] == "service" {
 		return serviceCommand(args[1:])
+	}
+	if args[0] == "wait" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return waitCommand(ctx, args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "measure" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

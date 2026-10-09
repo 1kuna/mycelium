@@ -3,6 +3,11 @@
 Use this checklist in order; linked runbooks supply the commands and detailed
 acceptance tests. Stop at a failed gate. Estimates are planning allowances, not
 measured promises; large copies/builds and source recovery can exceed a weekend.
+Run long copies, downloads, builds, measurements and jobs detached. For queued
+jobs, record IDs and start ONE background `myce wait ID [ID...]`; for other work,
+start one cheap background wait on its finished marker (including the saved
+exit code). End the agent turn and inspect evidence only when that wait exits;
+do not keep an agent checking status. See [the waiting workflow](START-HERE.md#waiting-for-long-jobs-agents).
 Nothing here authorizes fleet changes. Keep evidence and old releases recoverable.
 
 ## maintainer must decide or provide first
@@ -50,8 +55,8 @@ reviewed revisions before weekend execution.
    contract; Atlas source gap for deployed-loop qualification (see below).
    **Rollback:** retain NAS masters and old catalogs/envs; keep switches false.
 3. **Pre-copy — 30 minutes–4 hours, driven by bytes and measured NAS speed.** Use
-   [model sync](guide-model-calls.md) to the intended Spark/B70 cache, then follow
-   each project's sync checks. Only join under approved ownership; copying is not
+   [model sync](guide-model-calls.md) to the intended Spark/B70 cache, then use one
+   background wait for a verified-ready marker before each project's sync checks. Only join under approved ownership; copying is not
    permission to load or pin production. Pre-copy the exact measurement cache if
    a joined worker must leave. **Go:** complete verified local copies, enough cache
    space for every simultaneous model, no copy errors/partials counted as ready.
