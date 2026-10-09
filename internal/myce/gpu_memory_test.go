@@ -7,25 +7,26 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMemorySourceCUDA(t *testing.T) {
 	ctx := context.WithValue(context.Background(), struct{}{}, "command context")
 	calls := 0
 	source, err := newMemorySourceWithCommand("cuda", 0, 1, func(got context.Context, name string, args ...string) ([]byte, error) {
-		if got != ctx || name != "nvidia-smi" || !reflect.DeepEqual(args, []string{"--query-gpu=memory.free", "--format=csv,noheader,nounits"}) {
+		if got.Value(struct{}{}) != ctx.Value(struct{}{}) || name != "nvidia-smi" || !reflect.DeepEqual(args, []string{"--query-gpu=memory.free", "--format=csv,noheader,nounits"}) {
 			t.Fatalf("unexpected command: context=%v name=%q args=%v", got, name, args)
 		}
 		calls++
 		if calls == 1 {
-			return []byte(" 8192\r\n4096\r\n"), nil
+			return []byte(" 8192\r\n"), nil
 		}
 		return []byte("512\n"), nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []float64{11, 0} {
+	for _, want := range []float64{7, 0} {
 		got, err := source(ctx)
 		if err != nil || got != want {
 			t.Fatalf("memory = %v, %v; want %v", got, err, want)
@@ -49,7 +50,7 @@ func TestMemorySourceCUDABudgetCap(t *testing.T) {
 }
 
 func TestMemorySourceCUDARejectsBadOutput(t *testing.T) {
-	for _, output := range []string{"", " \n", "N/A\n", "[Not Supported]", "1 MiB", "-1", "NaN", "Inf", "-Inf", "1e309", "1024\n\n2048", "1024\nwrong", "1024,2048"} {
+	for _, output := range []string{"", " \n", "N/A\n", "[Not Supported]", "1 MiB", "-1", "NaN", "Inf", "-Inf", "1e309", "1024\n\n2048", "1024\nwrong", "1024,2048", "8192\n4096"} {
 		t.Run(output, func(t *testing.T) {
 			source, err := newMemorySourceWithCommand("cuda", 16, 0, func(context.Context, string, ...string) ([]byte, error) {
 				return []byte(output), nil
@@ -66,7 +67,7 @@ func TestMemorySourceCUDARejectsBadOutput(t *testing.T) {
 		t.Fatalf("zero free memory is valid: %v", err)
 	}
 	if _, err := parseCUDAFreeMemory([]byte(strings.Repeat("1.7976931348623157e308\n", 2048))); err == nil {
-		t.Fatal("accepted an overflowing GPU free-memory sum")
+		t.Fatal("accepted unsupported multi-GPU inventory")
 	}
 }
 
@@ -157,5 +158,26 @@ func TestMemorySourceCanceledContext(t *testing.T) {
 		if _, err := source(ctx); !errors.Is(err, context.Canceled) {
 			t.Fatalf("%s cancellation = %v", platform, err)
 		}
+	}
+}
+
+// A wedged driver command must not indefinitely stop worker heartbeats or leave.
+func TestMemorySourceCUDABoundsHungProbe(t *testing.T) {
+	source, err := newMemorySourceWithCommand("cuda", 0, 0, func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("GPU probe has no deadline")
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, err := source(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("hung probe: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Fatalf("probe blocked for %s", elapsed)
 	}
 }

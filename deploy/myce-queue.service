@@ -5,6 +5,13 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/share/myce
+Environment=GOMAXPROCS=1
+PrivateDevices=yes
+NoNewPrivileges=yes
+Nice=10
+CPUQuota=25%
+MemoryMax=512M
+TasksMax=64
 EnvironmentFile=%h/.config/myce/queue.env
 ExecStart=%h/.local/bin/myce queue --listen REPLACE_QUEUE_IP:7331 --db %h/.local/share/myce/queue.db --checkpoints REPLACE_CHECKPOINT_ROOT --restart-grace 3m --production-loss-timeout 5s --deadline-loss-timeout 20s --experiment-loss-timeout 60s
 Restart=on-failure

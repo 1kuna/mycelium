@@ -309,3 +309,80 @@ cannot safely replay. An unloaded/draining model reserves memory until unload
 acknowledges. For full request/catalog contracts and field defaults see
 [reference](job-reference.md), [integration recipes](integrating.md), and the
 [model](guide-model-calls.md) / [checkpoint](guide-resumable-jobs.md) guides.
+
+The Linux queue template uses `PrivateDevices=yes` to hide GPUs, one Go CPU,
+and initial limits of 25% CPU and 512 MiB RAM. Verify user-manager support and
+GPU hiding before accepting the B70 queue; stop on unsupported sandboxing.
+B70 is queue-only at `192.0.2.153:7331`; never enable a worker there.
+CUDA inventory currently requires exactly one GPU. Unsupported Spark unified
+memory readings are a blocker, even with a positive budget cap; do not use a
+fake GPU or a guessed host-RAM fallback. See [the production test plan](production-test-plan.md).
+
+## Private founder test preparation
+
+Commands below are for a future authorized test, not executed during review.
+Run only after the [test-plan prerequisites](production-test-plan.md) are met.
+No host service is started by this preparation. Use fail-fast shells; retain
+partial installations for inspection on failure. The reviewed catalog is an
+operator-owned prerequisite, not the example catalog.
+
+Mac, from this checkout, `set -eu`; use SSH aliases `b70` and `spark` as user:
+
+```sh
+mkdir -p /tmp/myce-production-build
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/myce-production-build/myce-amd64 ./cmd/myce
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/myce-production-build/myce-arm64 ./cmd/myce
+test -s ops/private/myce-models.yaml
+for host in b70 spark; do
+  ssh "$host" 'set -eu; test ! -e ~/.local/bin/myce; test ! -e ~/.config/myce; test ! -e ~/.local/share/myce; test ! -e ~/.config/systemd/user/myce-queue.service; test ! -e ~/.config/systemd/user/myce-worker.service; test "$(loginctl show-user user -p Linger --value)" = yes; findmnt -T /mnt/nas -o SOURCE,TARGET,FSTYPE'
+done
+ssh b70 'test -z "$(ss -ltnH "sport = :7331")"'
+```
+
+Success: absent v2 destinations, existing linger, free 7331, both mounts show
+CIFS `//storage.example/share`. Stop otherwise; never create a local NAS substitute.
+
+```sh
+for host in b70 spark; do
+  ssh "$host" 'set -eu; umask 077; mkdir -p ~/.local/bin ~/.config/systemd/user; mkdir -m 700 ~/.config/myce ~/.local/share/myce'
+done
+scp /tmp/myce-production-build/myce-amd64 b70:/home/user/.local/bin/myce
+scp /tmp/myce-production-build/myce-arm64 spark:/home/user/.local/bin/myce
+for host in b70 spark; do
+  scp ops/private/myce-models.yaml "$host":/home/user/.config/myce/models.yaml
+  ssh "$host" 'chmod 700 ~/.local/bin/myce; chmod 600 ~/.config/myce/models.yaml; sha256sum ~/.local/bin/myce'
+done
+shasum -a 256 /tmp/myce-production-build/myce-*
+```
+
+Success: corresponding binary hashes match. Privately generate/send one token
+from Mac zsh, without tracing, printing it, or writing it in the checkout:
+
+```sh
+MYCE_TEST_TOKEN=$(openssl rand -hex 32)
+printf 'MYCE_TOKEN=%s\nMYCE_QUEUE=http://192.0.2.153:7331\n' "$MYCE_TEST_TOKEN" | ssh b70 'umask 077; cat > ~/.config/myce/queue.env'
+printf 'MYCE_TOKEN=%s\nMYCE_QUEUE=http://192.0.2.153:7331\n' "$MYCE_TEST_TOKEN" | ssh spark 'umask 077; cat > ~/.config/myce/worker.env'
+unset MYCE_TEST_TOKEN
+sed -e 's/REPLACE_QUEUE_IP/192.0.2.153/g' \
+    -e 's|REPLACE_CHECKPOINT_ROOT|/mnt/nas/mycelium/checkpoints|g' \
+    -e 's| --restart-grace| --model-config %h/.config/myce/models.yaml --restart-grace|' \
+    deploy/myce-queue.service > /tmp/myce-production-build/myce-queue.service
+scp /tmp/myce-production-build/myce-queue.service b70:/home/user/.config/systemd/user/myce-queue.service
+ssh b70 'set -eu; test -w /mnt/nas; mkdir -p /mnt/nas/mycelium/checkpoints; chmod 600 ~/.config/systemd/user/myce-queue.service'
+```
+
+After admission, use a conservative *reading cap* from the approved test budget
+and reserve; enter them in GiB (not total machine RAM). Mac zsh:
+
+```sh
+read 'MYCE_TEST_CAP?Approved free-memory cap (GiB): '
+read 'MYCE_TEST_RESERVE?Approved reserve (GiB): '
+sed -e 's/REPLACE_QUEUE_IP/192.0.2.153/g' \
+    -e 's/REPLACE_WORKER_NAME/spark-v2-test/g' -e 's/REPLACE_GPU/cuda/g' \
+    -e "s/REPLACE_BUDGET_GB/$MYCE_TEST_CAP/g" -e "s/REPLACE_RESERVE_GB/$MYCE_TEST_RESERVE/g" \
+    -e 's|REPLACE_CHECKPOINT_ROOT|/mnt/nas/mycelium/checkpoints|g' \
+    -e 's| --heartbeat| --model-config %h/.config/myce/models.yaml --model-listen 192.0.2.16:7332 --model-advertise http://192.0.2.16:7332 --heartbeat|' \
+    deploy/myce-worker.service > /tmp/myce-production-build/myce-worker.service
+```
+
+Return to the production test checklist; this preparation starts no service.

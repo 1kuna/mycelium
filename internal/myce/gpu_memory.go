@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // MemorySource reports available GPU memory in GiB. Sources must return a finite,
@@ -15,7 +16,7 @@ import (
 type MemorySource func(context.Context) (float64, error)
 
 // NewMemorySource creates a memory source for cuda, xpu, metal, or fake.
-// CUDA queries nvidia-smi on every call, sums device free memory, optionally caps
+// CUDA queries nvidia-smi on every call, requires one device, optionally caps
 // it at a positive budget, then subtracts reserve (clamped at zero).
 // XPU and Metal use an explicitly configured positive --memory-gb budget minus
 // --reserve-memory-gb. This is an operator-selected conservative allowance, not
@@ -56,7 +57,9 @@ func newMemorySourceWithCommand(platform string, budget, reserve float64, comman
 		}
 		available := budget
 		if platform == "cuda" {
-			out, err := command(ctx, "nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits")
+			probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			out, err := command(probeCtx, "nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits")
 			if err != nil {
 				return 0, fmt.Errorf("query CUDA free memory with nvidia-smi: %w", err)
 			}
@@ -81,17 +84,14 @@ func parseCUDAFreeMemory(output []byte) (float64, error) {
 	if data == "" {
 		return 0, fmt.Errorf("nvidia-smi returned no GPU free-memory data")
 	}
-	var total float64
-	for i, line := range strings.Split(data, "\n") {
-		mib, err := strconv.ParseFloat(strings.TrimSpace(line), 64)
-		if err != nil || !validMemoryValue(mib) {
-			return 0, fmt.Errorf("nvidia-smi returned invalid GPU free memory on row %d", i+1)
-		}
-		// nvidia-smi memory values are MiB, despite its unqualified unit name.
-		total += mib / 1024
-		if !validMemoryValue(total) {
-			return 0, fmt.Errorf("nvidia-smi GPU free-memory sum is not finite")
-		}
+	// A plain command has no device-selection contract, and v2 does not split
+	// models across GPUs. Summing devices would admit work that fits none of them.
+	if strings.Contains(data, "\n") {
+		return 0, fmt.Errorf("CUDA inventory requires exactly one GPU; multi-GPU device selection is unsupported")
 	}
-	return total, nil
+	mib, err := strconv.ParseFloat(data, 64)
+	if err != nil || !validMemoryValue(mib) {
+		return 0, fmt.Errorf("nvidia-smi returned invalid GPU free memory")
+	}
+	return mib / 1024, nil
 }
