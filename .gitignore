@@ -24,3 +24,5 @@ ops/private/
 /checkpoints/
 /job.yaml
 /resume.py
+
+/workers/

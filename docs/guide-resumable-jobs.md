@@ -2,45 +2,77 @@
 
 Set `resumable: true` only when the command can safely restart. Mycelium sends
 SIGTERM to the command's process group, allows two minutes to save and exit,
-then sends SIGKILL if necessary. The command must stay in that process group;
-do not daemonize it. Save progress periodically as well: a lost machine cannot
-save on demand.
+then sends SIGKILL if necessary. Do not daemonize or leave that group. Save
+periodically too: a machine that loses power cannot save on demand.
 
-Each attempt receives:
+Each attempt receives `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR`.
+Mount the NAS at the **same absolute path on every fleet machine**. Create the
+root on the mounted NAS before starting the queue. Dev creates a local root.
+The stable job folder holds `attempt-1`, `attempt-2`, etc.; the environment points
+to the current attempt's folder. Before starting, the worker copies checkpoints
+from the attempt with the newest complete save, preserving file timestamps.
+Temporary files ending in `.tmp` never count as complete and are never copied.
+This isolates disconnected copies so they cannot overwrite each other's saves.
+Old step-1 checkpoint files directly in the job folder are also preserved when
+resuming. Checkpoints remain after completion or failure.
 
-- `MYCE_JOB_ID`: the stable job ID.
-- `MYCE_ATTEMPT`: the attempt number, starting at 1.
-- `MYCE_CHECKPOINT_DIR`: a stable folder for this job under the queue's
-  `--checkpoints` root. The worker creates it before starting the command.
+**Every save must be atomic:** write to a temporary file in the same directory,
+flush and fsync it, rename it into place, then fsync the directory. Use one
+self-contained checkpoint file, or a single atomic manifest referencing immutable
+files, so readers never combine pieces from different saves. The newest complete
+save is determined by the NAS file modification time. Preserve those timestamps
+when moving existing checkpoints; do not artificially touch files or assign future
+timestamps. If the job keeps numbered checkpoints, resume from the newest complete
+one and ignore `.tmp` files. A job must also make its output writes safe to retry.
 
-Mount the shared NAS at the **same absolute path on every fleet machine**.
-In `myce dev`, a local folder provides the same checkpoint contract.
-Checkpoints belong to the job and are preserved after completion or failure.
-Use atomic replacements so an interrupted write leaves the previous checkpoint
-usable. A real job should also make its output writes safe to retry.
-
-Here is a complete small Python command (`resume.py`, 11 lines):
+This complete Python command atomically replaces one checkpoint and retries NAS
+failures while continuing to run:
 
 ```python
 import os, pathlib, signal, time
-p = pathlib.Path(os.environ["MYCE_CHECKPOINT_DIR"]) / "progress"
+root = pathlib.Path(os.environ["MYCE_CHECKPOINT_DIR"])
+p = root / "progress"
 n = int(p.read_text()) if p.exists() else 0
 stopping = False
 def stop(*_):
-    global stopping; stopping = True
+    global stopping
+    stopping = True
 signal.signal(signal.SIGTERM, stop)
+def save():
+    tmp = p.with_suffix(".tmp")
+    with tmp.open("w") as f:
+        f.write(str(n)); f.flush(); os.fsync(f.fileno())
+    tmp.replace(p)
+    fd = os.open(root, os.O_RDONLY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
 while n < 100 and not stopping:
-    time.sleep(0.1); n += 1  # replace with one unit of useful work
-    tmp = p.with_suffix(".tmp"); tmp.write_text(str(n)); tmp.replace(p)
+    time.sleep(0.1); n += 1  # replace with useful work
+    try: save()
+    except OSError as e: print(f"checkpoint save will retry: {e}", flush=True)
+while True:  # keep retrying the final save until NAS access returns
+    try: save(); break
+    except OSError as e:
+        print(f"checkpoint save will retry: {e}", flush=True); time.sleep(1)
 print(f"saved {n}; attempt {os.environ['MYCE_ATTEMPT']}", flush=True)
 ```
 
-A planned stop puts the job at the front of its priority line. On its next
-attempt this script reads the same file and continues. A command failure is
-reported as failed; infrastructure loss or requested restart retries up to
-three total attempts. After the third interrupted attempt the queue fails
-loudly rather than looping forever.
+A stop still has a two-minute grace; if the NAS stays down longer, the next
+attempt resumes the previous complete save. Planned pauses do not exhaust
+retries. Non-resumable jobs fail loudly after three infrastructure interruptions;
+a command's own failure fails immediately.
 
-For a quick preemption demonstration, start `myce dev --workers 1`, submit this
-script as an experiment, then submit a production command requiring the same
-worker memory. Follow the experiment's logs to see its second attempt.
+Workers keep commands running through network loss. Logs and results are spooled
+on local disk, then delivered after reconnect. Acknowledged per-execution `.log` and
+`.result.json` files remain in the local spool for inspection; monitor disk usage
+and archive them according to your retention needs. The worker does not start another
+command while disconnected. A restarted worker kills its recorded old process
+group before checking in fresh. If two copies meet after a partition, the queue
+keeps the one with the newest complete checkpoint and stops the other. If the NAS is unavailable,
+conflict reconciliation and uploads wait until checkpoints can be compared. No system
+can send a stop through a disconnected network: copies can overlap until they
+reconnect. Commands must not rely on exactly-once external side effects.
+
+For a laptop demonstration, use `myce dev --workers 1`, submit the script as an
+experiment, then submit production requiring the same memory. Follow the logs to
+see stop/save and resumption. See `deploy/README.md` for optional boot services.

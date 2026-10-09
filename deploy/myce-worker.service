@@ -1,0 +1,20 @@
+[Unit]
+Description=Mycelium plain-command worker
+After=network-online.target remote-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=myce
+EnvironmentFile=/etc/myce/worker.env
+ExecStart=/usr/local/bin/myce join --state-dir /var/lib/myce-worker --name linux-worker --gpu cuda --memory-gb 24
+Restart=on-failure
+RestartSec=5
+StateDirectory=myce-worker
+UMask=0077
+# Signal the worker first so resumable children can save; allow ordinary jobs to finish.
+KillMode=mixed
+TimeoutStopSec=infinity
+
+[Install]
+WantedBy=multi-user.target

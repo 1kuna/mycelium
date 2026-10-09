@@ -34,7 +34,7 @@ td{display:grid;grid-template-columns:6rem minmax(0,1fr);gap:.5rem;border-bottom
 td:before{content:attr(data-label);font-weight:600}.reason{max-width:none}}
 </style></head><body>
 <h1>Mycelium queue</h1><p>Batch jobs · refreshes every 5 seconds</p>
-<h2>Jobs</h2><div class="tables"><table>
+{{if .Warning}}<p role="status">{{.Warning}}</p>{{end}}<h2>Jobs</h2><div class="tables"><table>
 <tr><th>Job / ID</th><th>Priority</th><th>State</th><th>Machine</th><th>Attempt</th><th>Why</th></tr>
 {{range .Jobs}}<tr>
 <td data-label="Job"><div>{{.Spec.Name}}<br><code>{{.ID}}</code></div></td>

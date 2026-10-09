@@ -40,7 +40,8 @@ id=$(./myce submit job.yaml)
 
 Stop dev with Ctrl-C. It plans a leave for each worker, stops resumable jobs,
 and waits for non-resumable commands to finish. The queue database (`myce.db`)
-and checkpoint folders (`checkpoints/`) persist for the next run.
+and checkpoint folders (`checkpoints/`) persist for the next run. Local worker
+spools persist beside the database under `workers/`.
 
 ```sh
 go test ./... -race
@@ -67,7 +68,11 @@ myce dev --workers 1 --memory-gb 8
 Use `MYCE_QUEUE` (or `--queue`) for the queue's address. Use `MYCE_TOKEN` for
 the shared token on the queue, worker, and CLI. Only dev supplies a default
 token. For a fleet, configure your own token, bind the queue to its LAN address,
-and use the same NAS checkpoint mount path on every machine. The HTML page is
+and use the same NAS checkpoint mount path on every machine. Create the root
+on the mounted NAS before running `queue`; a missing root blocks new jobs.
+Use `join --state-dir /durable/local/worker` to choose the worker spool location
+(default: a per-queue, per-machine directory in your user cache). Keep it
+across worker restarts. Examples for boot services are in [deploy/](deploy/README.md). The HTML page is
 read-only and LAN-visible; all `/api/` routes require the token. This is a
 trusted local-network service; commands run with the worker user's permissions.
 
@@ -114,9 +119,14 @@ then longest waiting. Production and deadline jobs may stop lower-priority
 resumable jobs only when no idle machine fits. Stops allow two minutes to save;
 paused jobs return to the front of their priority line. Non-resumable jobs are
 never preempted to make room. Give-up times apply while waiting, not as a run
-limit. A machine is lost after 60 seconds without a check-in. Restart/loss retries
-are capped at three total attempts, with stale attempts told to stop and their
-logs/results rejected. Command exit failure is shown immediately.
+limit. A machine is lost after 60 seconds without a check-in while other workers
+remain reachable. When every worker goes quiet, jobs stay assigned until the
+network returns. Queue restarts allow `--restart-grace 3m` for workers to report.
+Non-resumable jobs fail after three infrastructure interruptions; resumable jobs
+and planned pauses continue from checkpoints. Returning copies reconcile by
+newest complete checkpoint, with the loser told to stop and its results rejected.
+Command exit failure is shown immediately. NAS access failures block new starts
+and appear plainly in status; running jobs must retry their checkpoint saves.
 
 See [the checkpoint guide](docs/guide-resumable-jobs.md) for a Python example.
 
@@ -129,17 +139,20 @@ and environment expanded to `{ "name": "torch-cuda" }` or `{ "lock_file": "..." 
 | Method | Path | Body / result |
 |---|---|---|
 | POST | `/api/jobs` | Job specification → job (including `id`) |
-| GET | `/api/status` | `{jobs: [...], machines: [...]}` |
+| GET | `/api/status` | `{jobs: [...], machines: [...], warning: "..."}` |
 | POST | `/api/jobs/<id>/cancel` | No body required |
 | GET | `/api/jobs/<id>/logs?after=0` | Up to 256 `{seq, attempt, text}` chunks; pass last seq to continue |
-| POST | `/api/workers/checkin` | `{machine: {id, session, gpu, free_memory_gb, models, environments}, running: {id, attempt}}` → assignment / stop / leave |
-| POST | `/api/workers/log` | `{machine, session, id, attempt, text}` |
-| POST | `/api/workers/complete` | `{machine, session, id, attempt, success, error}` |
+| POST | `/api/workers/checkin` | `{machine: {id, session, gpu, free_memory_gb, models, environments, checkpoint_unavailable}, running: {id, attempt, progress}, fresh, previous_session}` → assignment / stop / leave |
+| POST | `/api/workers/log` | `{machine, session, id, attempt, text, offset}` |
+| POST | `/api/workers/complete` | `{machine, session, id, attempt, success, error, interrupted}` |
 | POST | `/api/workers/<name>/leave` | `{now: false}` (wait for non-resumable), or `{now: true}` |
 
 Every join uses a new random session ID. Worker check-ins default to once a
-second; logs are uploaded as stdout/stderr arrive. Workers keep retrying during
-queue outages. The SQLite file keeps job states, fleet inventory, and logs across
+second; logs and results go to durable local disk and replay after reconnect.
+Log offsets deduplicate lost acknowledgements. Fresh sessions may replace a live
+name only with the recorded previous session, after orphan cleanup. Workers
+retry outages with exponential backoff capped at 30 seconds, using an injected
+clock. No new commands start while disconnected. The SQLite file keeps job states, fleet inventory, and logs across
 queue restarts. Never run two queue services against the same database.
 
 Model calls, model loading, automatic environment setup, quotas, and redundant
