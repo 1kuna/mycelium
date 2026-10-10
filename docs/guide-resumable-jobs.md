@@ -66,7 +66,7 @@ print(f"saved {n}; attempt {os.environ['MYCE_ATTEMPT']}", flush=True)
 Production preemption has a 10-second default grace; deadline preemption and
 planned leave have two minutes. If the NAS stays down beyond that allowance,
 the next attempt resumes the previous complete save. Planned pauses do not exhaust
-retries. Non-resumable jobs fail loudly after three infrastructure interruptions;
+retries. All jobs fail loudly after three counted infrastructure losses;
 a command's own failure fails immediately.
 
 Workers keep commands running through network loss. Logs and results are spooled

@@ -690,3 +690,115 @@ func TestModelReadyIdleReloadStatusFakeClock(t *testing.T) {
 		}
 	}
 }
+
+func TestCombinedBatchModelReclamation(t *testing.T) {
+	q, _, m := modelFixture(t)
+	m.FreeMemoryGB = 16
+	check(t, q, m, nil)
+	call := addModelCall(t, q, "experiment")
+	reportModel(t, q, m, "ready")
+	if err := q.finishCall(call.ID); err != nil {
+		t.Fatal(err)
+	}
+	submit(t, q, spec("experiment"))
+	r := check(t, q, m, nil).Job
+	if r == nil {
+		t.Fatal("no experiment")
+	}
+	p := spec("production")
+	p.Needs.MemoryGB = 16
+	submit(t, q, p)
+	slot := q.s.ModelSlots[slotKey(m.ID, "test")]
+	got := q.s.Jobs[r.ID]
+	if slot.State != "draining" || got.State != "stopping" {
+		t.Fatalf("production needs 16GB: free=%.0f model=%s/8GB batch=%s/8GB", q.s.Machines[m.ID].FreeMemoryGB, slot.State, got.State)
+	}
+}
+
+func TestCombinedReclamationProtectsPinsAndDeadlineWork(t *testing.T) {
+	for _, tc := range []struct {
+		name, priority               string
+		pin, active, resumable, stop bool
+	}{
+		{"active-pin", "production", true, true, true, false},
+		{"inactive-pin", "production", true, false, true, true},
+		{"nonresumable-production", "production", false, false, false, true},
+		{"nonresumable-deadline", "deadline", false, false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, _, m := modelFixture(t)
+			m.FreeMemoryGB = 16
+			check(t, q, m, nil)
+			call := addModelCall(t, q, "experiment")
+			reportModel(t, q, m, "ready")
+			if err := q.finishCall(call.ID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.pin {
+				pin := ModelPin{Project: "test", Model: "test", Machine: m.ID}
+				if !tc.active {
+					pin.Start, pin.End, pin.Timezone = "13:00", "14:00", "UTC"
+				}
+				if err := q.Pin(pin); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s := spec("experiment")
+			s.Resumable = tc.resumable
+			submit(t, q, s)
+			r := check(t, q, m, nil).Job
+			if r == nil {
+				t.Fatal("no experiment")
+			}
+			p := spec(tc.priority)
+			p.Needs.MemoryGB = 16
+			submit(t, q, p)
+			slot := q.s.ModelSlots[slotKey(m.ID, "test")]
+			if (slot.State == "draining") != tc.stop || (q.s.Jobs[r.ID].State == "stopping") != tc.stop {
+				t.Fatalf("model=%s batch=%s, want stop=%v", slot.State, q.s.Jobs[r.ID].State, tc.stop)
+			}
+		})
+	}
+}
+
+func TestBatchReclamationStopsLeastWork(t *testing.T) {
+	for _, need := range []float64{8, 16} {
+		t.Run(fmt.Sprint(need), func(t *testing.T) {
+			q, _, m := modelFixture(t)
+			config := q.models
+			config.Models = []Model{{Name: "large", Engine: "fake", Path: "fake", MemoryGB: 16, Platforms: []string{"fake"}}, {Name: "idle", Engine: "fake", Path: "fake", MemoryGB: 8, Platforms: []string{"fake"}}}
+			if err := q.ConfigureModels(config); err != nil {
+				t.Fatal(err)
+			}
+			m.ModelConfigHash = modelConfigHash(config)
+			m.FreeMemoryGB = 24
+			check(t, q, m, nil)
+			for _, name := range []string{"large", "idle"} {
+				c := &ModelCall{Model: name, Project: "test", Priority: "experiment"}
+				if err := q.addCall(c); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "large", State: "ready"}, {Name: "idle", State: "ready"}}}); err != nil {
+					t.Fatal(err)
+				}
+				if name == "idle" {
+					if err := q.finishCall(c.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			p := spec("production")
+			p.Needs.MemoryGB = need
+			submit(t, q, p)
+			want := "idle"
+			if need == 16 {
+				want = "large"
+			}
+			for _, name := range []string{"large", "idle"} {
+				if (q.s.ModelSlots[slotKey(m.ID, name)].State == "draining") != (name == want) {
+					t.Fatalf("need %.0f: wrong release for %s", need, name)
+				}
+			}
+		})
+	}
+}

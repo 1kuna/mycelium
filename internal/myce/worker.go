@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	control               *processControl
 	DeviceBinding         string
 	EnvironmentSourceRoot string
 	EnvironmentRoot       string
@@ -50,6 +52,7 @@ type workerFinish struct {
 	err    error
 }
 type process struct {
+	mu      sync.Mutex
 	job     Job
 	cmd     *exec.Cmd
 	done    chan workerFinish
@@ -59,6 +62,18 @@ type process struct {
 }
 
 func (p *process) stop(now time.Time, grace time.Duration, kill bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stopLocked(now, grace, kill)
+}
+func (p *process) enforceGrace(now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopAt != nil && !now.Before(*p.stopAt) {
+		p.stopLocked(now, 0, true)
+	}
+}
+func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	if p.cmd == nil {
 		return
 	}
@@ -233,6 +248,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		return nil, err
 	}
 	p := &process{job: j, cmd: cmd, done: make(chan workerFinish, 1)}
+	if w.control != nil {
+		w.control.set(p)
+	}
 	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
@@ -439,6 +457,13 @@ func (w Worker) Run(stop context.Context) error {
 	defer eventCancel()
 	events := make(chan WorkerEvent, 1)
 	go w.watchStops(eventCtx, events)
+	w.control = &processControl{clock: w.Clock, wake: make(chan struct{}, 1)}
+	controlDone := make(chan struct{})
+	go func() {
+		defer close(controlDone)
+		w.control.run(eventCtx, stop, events)
+	}()
+	defer func() { eventCancel(); <-controlDone }()
 	var retry workerRetry
 	defer func() {
 		if p != nil {
@@ -466,12 +491,11 @@ func (w Worker) Run(stop context.Context) error {
 		default:
 		}
 		if p != nil {
-			if p.stopAt != nil && !now.Before(*p.stopAt) {
-				p.stop(now, 0, true)
-			}
+			p.enforceGrace(now)
 			select {
 			case f := <-p.done:
 				retry = workerRetry{}
+				w.control.set(nil)
 				p = nil
 				if f.err != nil {
 					return fmt.Errorf("persist command result: %w", f.err)
@@ -733,11 +757,8 @@ func (w Worker) Run(stop context.Context) error {
 			if p != nil && p.job.Spec.Resumable {
 				p.stop(w.Clock.Now(), StopGrace, false)
 			}
-		case event := <-events:
-			if p != nil && p.job.ID == event.ID && p.job.Attempt == event.Attempt {
-				p.stop(w.Clock.Now(), time.Duration(event.GraceSeconds*float64(time.Second)), event.Kill)
-				retry = workerRetry{}
-			}
+		case <-w.control.wake:
+			retry = workerRetry{}
 		case <-ticker.C:
 		}
 	}
