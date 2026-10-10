@@ -419,7 +419,7 @@ func TestThreeAttempts(t *testing.T) {
 		}
 	}
 	requireState(t, q, j.ID, "failed")
-	if !strings.Contains(job(t, q, j.ID).Reason, "3 attempts") {
+	if !strings.Contains(job(t, q, j.ID).Reason, "3 infrastructure losses") {
 		t.Fatal("missing plain failure reason")
 	}
 	if check(t, q, m, nil).Job != nil {
@@ -593,3 +593,64 @@ func TestPinnedMachineLeavesAndLateReturnBeforeReassignment(t *testing.T) {
 }
 
 func observer() Machine { m := machine("observer", "metal"); m.FreeMemoryGB = 1; return m }
+
+func TestResumableThreeInfrastructureLosses(t *testing.T) {
+	q, c := fixture(t)
+	j := submit(t, q, spec("experiment"))
+	m := machine("one", "fake")
+	for i := 0; i < 3; i++ {
+		if check(t, q, m, nil).Job == nil {
+			t.Fatal("no assignment")
+		}
+		c.Advance(LossAfter)
+		check(t, q, observer(), nil)
+	}
+	got := job(t, q, j.ID)
+	if got.Losses != 3 || got.State != "failed" {
+		t.Fatalf("after %d counted losses: state=%s, want failed", got.Losses, got.State)
+	}
+	if check(t, q, m, nil).Job != nil {
+		t.Fatal("failed job received a fourth execution")
+	}
+}
+
+func TestRestartProductionPreemptionAfterReport(t *testing.T) {
+	dir := t.TempDir()
+	root := t.TempDir()
+	c := &fakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
+	path := filepath.Join(dir, "q.db")
+	q, err := Open(path, root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submit(t, q, spec("experiment"))
+	m := machine("one", "fake")
+	r := check(t, q, m, nil).Job
+	// An unreported worker must retain its recovery protection.
+	other := machine("two", "fake")
+	otherJob := submit(t, q, spec("experiment"))
+	otherRun := check(t, q, other, nil).Job
+	if otherRun == nil || otherRun.ID != otherJob.ID {
+		t.Fatal("no second assignment")
+	}
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	q, err = Open(path, root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	check(t, q, m, r)
+	p := spec("production")
+	p.AllowedMachines = []string{m.ID}
+	submit(t, q, p)
+	if !check(t, q, m, r).Stop {
+		t.Fatalf("reconnected worker still running experiment for %s", q.restartUntil.Sub(c.Now()))
+	}
+	p.AllowedMachines = []string{other.ID}
+	submit(t, q, p)
+	if got := job(t, q, otherRun.ID); got.State != "running" || got.Losses != 0 {
+		t.Fatalf("unreported worker lost restart protection: %+v", got)
+	}
+}

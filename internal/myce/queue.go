@@ -264,9 +264,9 @@ func (q *Queue) retry(j *Job, why string) {
 	j.Session = ""
 	j.StopAt = nil
 	j.Reason = why
-	if !j.Spec.Resumable && j.Losses >= 3 {
+	if j.Losses >= 3 {
 		j.State = "failed"
-		j.Reason = "failed after 3 attempts: " + why
+		j.Reason = "failed after 3 infrastructure losses: " + why
 		return
 	}
 	j.WaitingSince = q.clock.Now()
@@ -338,53 +338,6 @@ func (q *Queue) maintain() {
 		}
 	}
 	q.maintainModels()
-	if q.networkQuiet || now.Before(q.restartUntil) || !checkpointAvailable(q.root) {
-		return
-	}
-	// Only preempt if no idle fitting machine has room for the waiting job.
-	waiting := []*Job{}
-	for _, j := range q.s.Jobs {
-		if j.State == "queued" && rank(j.Spec.Priority) < 2 {
-			waiting = append(waiting, j)
-		}
-	}
-	sort.Slice(waiting, func(i, k int) bool { return before(waiting[i], waiting[k], &Machine{}) })
-	for _, j := range waiting {
-		room := false
-		for _, m := range q.s.Machines {
-			busy := false
-			for _, r := range q.s.Jobs {
-				if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") {
-					busy = true
-				}
-			}
-			for _, r := range q.s.Jobs {
-				if r.Machine == m.ID && r.State == "stopping" && fits(j, m, m.FreeMemoryGB+r.Spec.Needs.MemoryGB) {
-					if j.Spec.Priority == "production" && rank(r.Spec.Priority) > 0 {
-						q.stopFor(r, "production", "job")
-					}
-					room = true
-				}
-			}
-			if room || (!busy && fits(j, m, m.FreeMemoryGB)) {
-				room = true
-				break
-			}
-		}
-		if room {
-			continue
-		}
-		var victim *Job
-		for _, r := range q.s.Jobs {
-			m := q.s.Machines[r.Machine]
-			if m != nil && r.State == "running" && (r.Spec.Resumable || j.Spec.Priority == "production") && rank(r.Spec.Priority) > rank(j.Spec.Priority) && fits(j, m, m.FreeMemoryGB+r.Spec.Needs.MemoryGB) && (victim == nil || rank(r.Spec.Priority) > rank(victim.Spec.Priority) || rank(r.Spec.Priority) == rank(victim.Spec.Priority) && r.ID < victim.ID) {
-				victim = r
-			}
-		}
-		if victim != nil {
-			q.stopFor(victim, j.Spec.Priority, "job")
-		}
-	}
 }
 func (q *Queue) Tick() error { return q.update(func() error { q.maintain(); return nil }) }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {

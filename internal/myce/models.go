@@ -450,42 +450,8 @@ func (q *Queue) maintainModels() {
 	}
 	sort.Slice(waiting, func(i, j int) bool { return before(waiting[i], waiting[j], &Machine{}) })
 	for _, j := range waiting {
-		room := false
-		for _, m := range q.s.Machines {
-			busy := false
-			for _, r := range q.s.Jobs {
-				if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") {
-					busy = true
-				}
-			}
-			if !busy && fits(j, m, m.FreeMemoryGB) {
-				room = true
-				break
-			}
-		}
-		if room {
-			continue
-		}
-		machines := []*Machine{}
-		for _, m := range q.s.Machines {
-			machines = append(machines, m)
-		}
-		sort.Slice(machines, func(i, j int) bool { return machines[i].ID < machines[j].ID })
-		for _, m := range machines {
-			possible := m.FreeMemoryGB
-			for _, s := range q.s.ModelSlots {
-				if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > rank(j.Spec.Priority) {
-					mm, _ := q.model(s.Model)
-					possible += mm.MemoryGB
-				}
-			}
-			if m.FreeMemoryGB < j.Spec.Needs.MemoryGB && fits(j, m, possible) {
-				q.makeModelRoom(m, j.Spec.Needs.MemoryGB, j.Spec.Priority)
-				break
-			}
-		}
+		q.makeBatchRoom(j)
 	}
-
 }
 func callJob(c *ModelCall) *Job {
 	j := &Job{ID: c.ID, Queued: c.Queued, WaitingSince: c.WaitingSince, StartedAt: c.StartedAt, Spec: Spec{Project: c.Project, Priority: c.Priority, Deadline: c.Deadline}}
@@ -531,6 +497,11 @@ func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
 			if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > rank(j.Spec.Priority) {
 				model, _ := q.model(s.Model)
 				memory += model.MemoryGB
+			}
+		}
+		for _, r := range q.s.Jobs {
+			if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") && (r.Spec.Resumable || j.Spec.Priority == "production") && rank(r.Spec.Priority) > rank(j.Spec.Priority) {
+				memory += r.Spec.Needs.MemoryGB
 			}
 		}
 		if j.State == "queued" && q.capReason(j) == "" && fits(j, m, memory) && q.fairBefore(j, callJob(c), m) {
@@ -917,4 +888,123 @@ func modelConfigHash(c ModelConfig) string {
 	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
 	data, _ := json.Marshal(models)
 	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+// Batch workers run one command at a time. Plan its release together with
+// resident models, rather than requiring either allocation alone to suffice.
+func (q *Queue) makeBatchRoom(j *Job) {
+	type plan struct {
+		machine string
+		batch   *Job
+		slots   []*ModelSlot
+		stops   int
+		cost    int
+	}
+	var best *plan
+	for _, m := range q.s.Machines {
+		if q.unreported[m.ID] {
+			continue
+		}
+		p := &plan{machine: m.ID}
+		room := m.FreeMemoryGB
+		blocked := false
+		for _, r := range q.s.Jobs {
+			if r.Machine != m.ID || (r.State != "running" && r.State != "stopping") {
+				continue
+			}
+			if r.State == "running" && (rank(r.Spec.Priority) <= rank(j.Spec.Priority) || (!r.Spec.Resumable && j.Spec.Priority != "production")) {
+				blocked = true
+				break
+			}
+			p.batch = r
+			room += r.Spec.Needs.MemoryGB
+			if r.State == "running" {
+				p.stops++
+				if !r.Spec.Resumable {
+					p.cost++
+				}
+			}
+		}
+		if blocked {
+			continue
+		}
+		slots := []*ModelSlot{}
+		for _, s := range q.s.ModelSlots {
+			if s.Machine != m.ID || q.slotPinned(s) || s.State == "unload_failed" || s.State == "failed" || rank(s.Priority) <= rank(j.Spec.Priority) {
+				continue
+			}
+			model, _ := q.model(s.Model)
+			if s.State == "draining" {
+				room += model.MemoryGB
+			} else {
+				slots = append(slots, s)
+			}
+		}
+		// Largest allocations first establish the minimum number of releases.
+		sort.Slice(slots, func(a, b int) bool {
+			ma, _ := q.model(slots[a].Model)
+			mb, _ := q.model(slots[b].Model)
+			if ma.MemoryGB != mb.MemoryGB {
+				return ma.MemoryGB > mb.MemoryGB
+			}
+			return slots[a].Model < slots[b].Model
+		})
+		possible, count := room, 0
+		for _, s := range slots {
+			if possible >= j.Spec.Needs.MemoryGB {
+				break
+			}
+			model, _ := q.model(s.Model)
+			possible += model.MemoryGB
+			count++
+		}
+		if !fits(j, m, possible) {
+			continue
+		}
+		// Within that count prefer idle models, only when the remaining largest
+		// allocations can still cover the deficit. Preference cannot block work.
+		for count > 0 {
+			chosen := 0
+			for i, s := range slots {
+				if s.InFlight != 0 {
+					continue
+				}
+				model, _ := q.model(s.Model)
+				capacity, n := room+model.MemoryGB, 0
+				for k, other := range slots {
+					if k != i && n < count-1 {
+						model, _ := q.model(other.Model)
+						capacity += model.MemoryGB
+						n++
+					}
+				}
+				if capacity >= j.Spec.Needs.MemoryGB {
+					chosen = i
+					break
+				}
+			}
+			s := slots[chosen]
+			model, _ := q.model(s.Model)
+			room += model.MemoryGB
+			p.slots = append(p.slots, s)
+			p.stops++
+			if s.InFlight > 0 {
+				p.cost++
+			}
+			slots = append(slots[:chosen], slots[chosen+1:]...)
+			count--
+		}
+		if best == nil || p.stops < best.stops || p.stops == best.stops && (p.cost < best.cost || p.cost == best.cost && p.machine < best.machine) {
+			best = p
+		}
+	}
+	if best == nil {
+		return
+	}
+	if best.batch != nil && rank(best.batch.Spec.Priority) > rank(j.Spec.Priority) {
+		q.stopFor(best.batch, j.Spec.Priority, "job")
+	}
+	for _, s := range best.slots {
+		s.State = "draining"
+	}
 }
