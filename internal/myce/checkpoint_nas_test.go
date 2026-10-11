@@ -296,3 +296,27 @@ func TestWorkerForceStopsBlockedSaveAtGrace(t *testing.T) {
 		t.Fatal("force-stop waits on checkpoint save")
 	}
 }
+
+func TestLegacyCachedTimestampCannotOverrideGeneration(t *testing.T) {
+	q, clock := fixture(t)
+	submit(t, q, spec("experiment"))
+	m := machine("old", "fake")
+	old := check(t, q, m, nil).Job
+	clock.Advance(LossAfter)
+	check(t, q, observer(), nil)
+	n := machine("current", "fake")
+	current := check(t, q, n, nil).Job
+	dir := filepath.Join(q.root, current.Checkpoint, fmt.Sprintf("attempt-%d", current.Attempt))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "checkpoint.json"), []byte(`{"myce_checkpoint":{"generation":2},"value":2}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A queue restored from the old protocol may contain a machine-clock mtime.
+	q.s.Jobs[current.ID].Progress = clock.Now().UnixNano()
+	reply, err := q.Checkin(Checkin{Machine: m, Running: &Execution{ID: old.ID, Attempt: old.Attempt, Progress: 9}})
+	if err != nil || reply.Kill || reply.Hold || job(t, q, old.ID).Machine != m.ID {
+		t.Fatalf("cached timestamp overruled generation: %+v %v", reply, err)
+	}
+}

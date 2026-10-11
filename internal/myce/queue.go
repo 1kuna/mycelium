@@ -492,7 +492,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 						reply.Hold = true
 						return nil
 					}
-					if copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && c.Running.Progress > max(j.Progress, durableProgress))) {
+					if copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && c.Running.Progress > max(0, durableProgress))) {
 						for i := range j.Copies {
 							j.Copies[i].Recoverable = false
 						}
@@ -522,7 +522,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			if c.Started && j.StartedAt == nil {
 				q.markStarted(j)
 			}
-			j.Progress = max(j.Progress, c.Running.Progress)
+			j.Progress = c.Running.Progress
 			if j.State == "stopping" {
 				reply.Stop = true
 				reply.Kill = expired(j.StopAt, q.clock.Now())
