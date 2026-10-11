@@ -19,7 +19,7 @@ assert os.environ.get('ONEAPI_DEVICE_SELECTOR') == 'level_zero:0'
 assert os.environ.get('ZE_AFFINITY_MASK') == '0'
 assert 0 < a.host_mib <= 4096 and 0 < a.gpu_mib <= 1024
 start = int(Path('/proc/self/stat').read_bytes().rsplit(b')', 1)[1].split()[19])
-a.receipt.write_text(json.dumps(dict(pid=os.getpid(), start_ticks=start)))
+a.receipt.write_text(json.dumps(dict(pid=os.getpid(), start_ticks=start,port=a.port)))
 import torch
 assert torch.xpu.is_available() and torch.xpu.device_count() == 1
 host = bytearray(a.host_mib * 1024**2)

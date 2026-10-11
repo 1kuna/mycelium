@@ -72,6 +72,7 @@ class Run:
         self.device_peak = 0
         self.device_current = 0
         self.device_at = 0
+        self.ports = []
 
     def result(self, name, state, **evidence):
         self.results.append(dict(scenario=name, result=state, **evidence))
@@ -158,7 +159,7 @@ class Run:
                 self.total_peak['cgroup_bytes'] = max(self.total_peak['cgroup_bytes'], charged)
                 if active:
                     emit(active,'memory',valid=True,available_gib=available,minimum_available_gib=18)
-                    try: observe(self.url, active)
+                    try: observe(self.url, active, timeout=.25)
                     except OSError: emit(active,'outage')
                 gpu = self.device_current
                 if self.device_at and time.monotonic()-self.device_at>3:
@@ -235,6 +236,7 @@ class Run:
         self.checker = Checker(bound, True, (PCI,))
         self.active = None
         with socket.socket() as s: s.bind(('127.0.0.1',0)); self.port=s.getsockname()[1]
+        self.ports.append(self.port);atomic(ROOT/'ports.json',self.ports)
         self.url = f'http://127.0.0.1:{self.port}'
         self.workerurl=self.url
         self.start_queue(); self.start_worker()
@@ -346,6 +348,7 @@ class Run:
                 except OSError:self.send_error(503)
         self.proxy=ThreadingHTTPServer(('127.0.0.1',0),Handler)
         threading.Thread(target=self.proxy.serve_forever,daemon=True).start()
+        self.ports.append(self.proxy.server_port);atomic(ROOT/'ports.json',self.ports)
         self.workerurl='http://127.0.0.1:'+str(self.proxy.server_port)
         self.halt('worker');self.start_worker()
 
