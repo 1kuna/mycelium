@@ -27,8 +27,10 @@ type HostState struct {
 // Release obligations survive requeue/loss; only an execution acknowledgement or
 // a fresh worker's completed cleanup can settle them.
 type HostRelease struct {
-	CleanupFailed               bool   `json:"cleanup_failed,omitempty"`
-	Device                      string `json:"device,omitempty"`
+	HostChargeGB                float64 `json:"host_charge_gb,omitempty"`
+	Docker                      bool    `json:"docker,omitempty"`
+	CleanupFailed               bool    `json:"cleanup_failed,omitempty"`
+	Device                      string  `json:"device,omitempty"`
 	MemoryGB, HostMemoryGB      float64
 	Preparation                 bool `json:"preparation,omitempty"`
 	Host, Job, Machine, Session string
@@ -101,18 +103,21 @@ func releaseKey(r HostRelease) string {
 	return fmt.Sprintf("%s/%s/%s/%d", r.Job, r.Machine, r.Session, r.Attempt)
 }
 func (q *Queue) retainRelease(j *Job) {
+	if j.ReleaseConfirmed {
+		return
+	}
 	m := q.s.Machines[j.Machine]
 	if m == nil {
 		return
 	}
 	policy := q.s.Hosts[hostID(m)]
-	if policy == nil || !policy.Policy.ProductionHold {
+	if !j.Spec.Run.Docker && (policy == nil || !policy.Policy.ProductionHold) {
 		return
 	}
 	if q.s.HostReleases == nil {
 		q.s.HostReleases = map[string]HostRelease{}
 	}
-	r := HostRelease{Device: m.Device, MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB, Host: hostID(m), Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt}
+	r := HostRelease{HostChargeGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), Docker: j.Spec.Run.Docker, Device: m.Device, MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB, Host: hostID(m), Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt}
 	if j.StopAt != nil {
 		r.Until = *j.StopAt
 	}
@@ -127,7 +132,7 @@ func (q *Queue) settleRelease(r Result) bool {
 }
 func (q *Queue) reconcileHostReleases(c Checkin) {
 	for key, r := range q.s.HostReleases {
-		if r.Machine != c.Machine.ID {
+		if r.Docker || r.Machine != c.Machine.ID {
 			continue
 		}
 		fresh := c.Fresh && c.PreviousSession == r.Session
@@ -143,7 +148,7 @@ func (q *Queue) reconcileHostReleases(c Checkin) {
 
 // Placement policy is shared by batch, model, preparation and projections.
 func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
-	if !q.projectAllows(j.Spec.Project, m.ID) {
+	if q.dockerBlocker(hostID(m)) != "" || !q.projectAllows(j.Spec.Project, m.ID) {
 		return false
 	}
 	if j.ProductionHost != "" && j.ProductionHost != hostID(m) {
@@ -218,6 +223,13 @@ func (q *Queue) holdReason(host string) string {
 	return host + ": production hold"
 }
 func (q *Queue) holdWaitReason(j *Job) string {
+	for _, m := range q.s.Machines {
+		if q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
+			if b := q.dockerBlocker(hostID(m)); b != "" {
+				return b
+			}
+		}
+	}
 	if j.ProductionHost != "" && q.held(j.ProductionHost) {
 		return q.holdReason(j.ProductionHost)
 	}
@@ -258,7 +270,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 	var best *Machine
 	bestStops := int(^uint(0) >> 1)
 	for _, m := range machines {
-		if q.unreported[m.ID] || !q.projectAllows(j.Spec.Project, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
+		if q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.projectAllows(j.Spec.Project, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 			continue
 		}
 		model, _ := q.model(j.Spec.Needs.Model)
@@ -321,6 +333,11 @@ func (q *Queue) maintainHolds() {
 	}
 	sort.Slice(jobs, func(a, b int) bool { return before(jobs[a], jobs[b], &Machine{}) })
 	for _, j := range jobs {
+		if j.State == "queued" && j.ProductionHost != "" && q.dockerBlocker(j.ProductionHost) != "" {
+			if target := q.productionTarget(j, nil); target != "" {
+				j.ProductionHost = target
+			}
+		}
 		if j.ProductionHost == "" {
 			if m := q.s.Machines[j.Machine]; m != nil {
 				if h := q.s.Hosts[hostID(m)]; h != nil && h.Policy.ProductionHold {
@@ -478,4 +495,20 @@ func (q *Queue) backgroundPreparing(m *Machine) bool {
 		}
 	}
 	return false
+}
+
+// Lost/stopping Docker executions fence the physical host, even without host policy.
+func (q *Queue) dockerBlocker(host string) string {
+	for _, r := range q.s.HostReleases {
+		if !r.Docker || r.Host != host {
+			continue
+		}
+		j := q.s.Jobs[r.Job]
+		m := q.s.Machines[r.Machine]
+		if j != nil && j.Attempt == r.Attempt && j.Session == r.Session && j.Machine == r.Machine && j.State == "running" && m != nil && !m.Gone && !q.unreported[m.ID] && m.DockerCleanup == "" && !r.CleanupFailed {
+			continue
+		}
+		return host + ": Docker cleanup unconfirmed; waiting for attempt " + r.Job + fmt.Sprintf("/%d", r.Attempt)
+	}
+	return ""
 }

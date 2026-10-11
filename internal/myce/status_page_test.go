@@ -14,6 +14,7 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 	job.Spec.Priority = "experiment"
 	machine := &Machine{
 		ID:               "spark",
+		DockerCleanup:    "cleanup unconfirmed: start",
 		GPU:              "cuda",
 		Device:           "0",
 		MemoryUsedGB:     21.5,
@@ -48,7 +49,7 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 	html := rendered.String()
 	for _, want := range []string{
 		"Mycelium", "spark", "cuda", "21.5", "38.5", "qwen", "torch-cuda",
-		"2 calls", "load warning", "cache read failed",
+		"2 calls", "load warning", "cache read failed", "Docker cleanup unconfirmed: start",
 		"index backlog", "atlas is ahead of its fair share; verso goes first",
 		`<svg class="chart"`, `data-project="atlas"`, `setInterval(refresh, 5000)`,
 	} {

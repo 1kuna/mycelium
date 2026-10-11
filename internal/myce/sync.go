@@ -125,7 +125,7 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 	}
 	sort.Slice(usage, func(i, j int) bool { return usage[i].Model < usage[j].Model })
 	plan := []CopyTask{}
-	busy := q.held(hostID(m)) || m.Gone || m.Leaving || q.unreported[m.ID]
+	busy := q.dockerBlocker(hostID(m)) != "" || q.held(hostID(m)) || m.Gone || m.Leaving || q.unreported[m.ID]
 	for _, j := range q.s.Jobs {
 		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {
 			busy = true

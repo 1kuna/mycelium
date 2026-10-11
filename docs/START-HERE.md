@@ -294,3 +294,5 @@ Zach decides when to enable it after the required hardware and ownership gates.
 - [Sharing and usage](guide-fairness-usage.md): read for project weights, experiment limits, and usage reports.
 - [Examples](../examples/): use as configuration starting points; replace and qualify placeholders.
 - [Deployment templates](../deploy/README.md): read only when preparing authorized service installation.
+
+Docker batch jobs must opt into [managed containment](job-reference.md#managed-docker-batch-commands); [unconfirmed cleanup](operations.md#docker-cleanup-custody) retains the physical host's reservation.

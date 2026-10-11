@@ -22,6 +22,7 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	dockerCallTimeout     time.Duration
 	checkpointPrepare     func(Job) (string, error) // Filesystem fault seam.
 	control               *processControl
 	DeviceBinding         string
@@ -55,6 +56,8 @@ type workerFinish struct {
 	err    error
 }
 type process struct {
+	machine string
+	docker  *dockerAttempt
 	mu      sync.Mutex
 	job     Job
 	cmd     *exec.Cmd
@@ -77,6 +80,10 @@ func (p *process) enforceGrace(now time.Time) {
 	}
 }
 func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
+	if p.docker != nil {
+		p.docker.stop(now, grace, kill)
+		return
+	}
 	if p.cmd == nil {
 		return
 	}
@@ -158,6 +165,11 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+	if j.Spec.Run.Docker {
+		p, e := w.startDocker(s, j, checkpoint, release)
+		environmentStarted = e == nil
+		return p, e
 	}
 	// Resolve before the supervisor so a nonexistent command remains a clear
 	// start failure, rather than an unexplained shell exit status.
@@ -404,8 +416,19 @@ func (w Worker) Run(stop context.Context) error {
 	if err = s.cleanupOrphan(w.Clock); err != nil {
 		return err
 	}
-	recovering := false
-	if s.state.Job != nil && s.state.Identity != "" {
+	var recoveringProcess *process
+	if s.state.Job != nil && s.state.Job.Spec.Run.Docker && s.state.Identity != "" {
+		recoveringProcess, err = w.restoreDocker(s)
+		if err != nil {
+			return err
+		}
+	}
+	if recoveringProcess != nil {
+		s.state.Result = nil
+		defer recoveringProcess.docker.close()
+	}
+	recovering := recoveringProcess != nil
+	if s.state.Job != nil && s.state.Identity != "" && recoveringProcess == nil {
 		var r Result
 		data, e := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".result.json"))
 		if e == nil {
@@ -417,12 +440,12 @@ func (w Worker) Run(stop context.Context) error {
 			return e
 		}
 	}
-	if s.state.Job != nil && s.state.Result == nil {
+	if s.state.Job != nil && s.state.Result == nil && recoveringProcess == nil {
 		r := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Interrupted: true, Error: "worker restarted; previous process group cleaned up"}
 		s.state.Result = &r
 		s.state.PID = 0
 	}
-	if s.state.Job != nil && s.state.Result != nil {
+	if s.state.Job != nil && (s.state.Result != nil || recoveringProcess != nil) {
 		recovering = true
 		w.Machine.Session = s.state.Session
 	} else {
@@ -498,7 +521,7 @@ func (w Worker) Run(stop context.Context) error {
 	ctx := context.Background()
 	ticker := time.NewTicker(min(w.Interval, 100*time.Millisecond))
 	defer ticker.Stop()
-	var p *process
+	p := recoveringProcess
 	leaving := stop.Err() != nil
 	leaveSent := false
 	stopCh := stop.Done()
@@ -519,6 +542,10 @@ func (w Worker) Run(stop context.Context) error {
 	defer func() {
 		if p != nil {
 			p.stop(w.Clock.Now(), 0, true)
+			if p.docker != nil {
+				p.docker.close()
+				return
+			}
 			finished := <-p.done
 			if finished.err != nil {
 				log.Printf("persist result: %v", finished.err)
@@ -564,6 +591,12 @@ func (w Worker) Run(stop context.Context) error {
 			rt.session = w.Machine.Session
 			rt.mu.Unlock()
 			m := w.Machine
+			if p != nil && p.docker != nil {
+				status := p.docker.status()
+				if status != "running" {
+					m.DockerCleanup = status
+				}
+			}
 			m.EnvironmentBuilder = true
 			if e := environments.upload(ctx, w.Client, m); e != nil && !stale(e) {
 				log.Printf("environment log upload: %v", e)
@@ -633,8 +666,15 @@ func (w Worker) Run(stop context.Context) error {
 				running = &Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt, Progress: progress}
 			}
 			var reply Reply
-			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil, Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
+			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running"), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
 			if err == nil {
+				if s.state.Job != nil && s.state.Job.Spec.Run.Docker && s.state.Result != nil {
+					ack := *s.state.Result
+					ack.ReleaseOnly = true
+					if ackErr := w.Client.Call(ctx, "POST", "/api/workers/complete", ack, nil); ackErr != nil && !stale(ackErr) {
+						log.Printf("Docker release acknowledgement: %v", ackErr)
+					}
+				}
 				busy := reply.Job != nil || s.state.Job != nil || leaving || recovering
 				for _, slot := range reply.ModelPlan {
 					if slot.State == "loading" || slot.InFlight > 0 {
@@ -704,7 +744,7 @@ func (w Worker) Run(stop context.Context) error {
 					// A killed losing copy must never upload its result over the winner.
 					if !(reply.Stop && reply.Kill) {
 						err = w.replay(ctx, s)
-					} else if s.state.Result != nil {
+					} else if s.state.Result != nil && !s.state.Job.Spec.Run.Docker {
 						err = &HTTPError{Status: 409}
 					}
 					if err == nil && s.state.Result != nil {
@@ -775,7 +815,7 @@ func (w Worker) Run(stop context.Context) error {
 							err = nil
 						} else {
 							p, err = w.start(s, j)
-							if err == nil && p != nil {
+							if err == nil && p != nil && p.docker == nil {
 								startedCtx, startedCancel := context.WithTimeout(ctx, 2*time.Second)
 								startedErr := w.Client.Call(startedCtx, "POST", "/api/workers/started", Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, nil)
 								startedCancel()
