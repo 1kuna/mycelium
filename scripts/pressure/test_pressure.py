@@ -25,6 +25,41 @@ def beginning(c: Checker, resumed: int = 0, attempt: int = 1) -> None:
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_vanished_fd_rescans_even_when_fdinfo_lingers(self):
+        import errno
+        from unittest.mock import patch
+        for code in (errno.ENOENT, errno.ESRCH):
+            with self.subTest(errno=code), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); p = root / '1115'
+                (p / 'fd').mkdir(parents=True); (p / 'fdinfo').mkdir()
+                (p / 'stat').write_text('1115 (test) ' + ' '.join(['S','1','1115'] + ['0']*16 + ['42']))
+                (p / 'fdinfo/11').write_text('pos: 0\n')
+                scan = os.scandir
+                with patch('pressure.os.scandir', wraps=scan) as rescans, patch('pressure.os.readlink', side_effect=OSError(code, 'closed')):
+                    self.assertEqual(drm_owners(['0000:07:00.0'], root), {'0000:07:00.0': []})
+                    self.assertIn(p / 'fd', [call.args[0] for call in rescans.call_args_list])
+
+    def test_process_vanishing_mid_scan_is_confirmed_by_rescan(self):
+        import errno
+        from unittest.mock import patch
+        for code in (errno.ENOENT, errno.ESRCH):
+            with self.subTest(errno=code), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); p = root / '1115'; p.mkdir()
+                with patch.object(Path, 'iterdir', side_effect=[iter([p]), iter([])]) as rescans, patch.object(Path, 'read_bytes', side_effect=OSError(code, 'exited')):
+                    self.assertEqual(drm_owners(['0000:07:00.0'], root), {'0000:07:00.0': []})
+                    self.assertEqual(rescans.call_count, 2)
+
+    def test_live_process_and_denied_rescans_fail_closed(self):
+        import errno
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); p = root / '1115'; p.mkdir()
+            for code in (errno.ENOENT, errno.ESRCH, errno.EACCES):
+                with self.subTest(errno=code), patch.object(Path, 'read_bytes', side_effect=OSError(code, 'unreadable')):
+                    with self.assertRaises(OSError):drm_owners(['0000:07:00.0'], root)
+            with patch.object(Path, 'iterdir', side_effect=[iter([p]), PermissionError(errno.EACCES, 'denied')]), patch.object(Path, 'read_bytes', side_effect=FileNotFoundError(errno.ENOENT, 'exited')):
+                with self.assertRaises(PermissionError):drm_owners(['0000:07:00.0'], root)
+
     @unittest.skipUnless(Path('/proc/self/fdinfo').is_dir(), 'Linux procfs required')
     def test_drm_collector_does_not_race_its_own_directory_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -319,8 +354,8 @@ class CommandTests(unittest.TestCase):
 class NativeRunnerTests(unittest.TestCase):
     def test_attempt_roots_use_the_same_fresh_suffix(self):
         import stage_ab
-        self.assertTrue(stage_ab.ROOT.name.endswith('r2e-20261011'))
-        self.assertTrue(stage_ab.NAS.name.endswith('r2e-20261011'))
+        self.assertTrue(stage_ab.ROOT.name.endswith('r3-20261011'))
+        self.assertTrue(stage_ab.NAS.name.endswith('r3-20261011'))
 
     def test_allowlists_refresh_after_inventory(self):
         import pressure

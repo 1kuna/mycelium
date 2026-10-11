@@ -173,3 +173,10 @@ contract independent of backend; allocations are16MiB. The detached Mac
 transport supplies loopback SSH forwarding and cleans up its exact worker,
 ports and install. Cross-host monotonic receipts retain original clocks and
 RTT uncertainty. Full-Spark uses a38GiB cap and38GiB reserve, reporting zero.
+
+Round3 uses fresh r3 paths and starts at A3; completed r2e A1/A2 and the two
+fixed-defect probes are retained, not repeated. ENOENT/ESRCH descriptor races
+rescan the process fd directory; vanished processes rescan proc. Permission
+failures, unresolved live identities and unknown GPU holders still fail closed.
+Spark active capacity is40GiB minus38GiB reserve (2GiB), enough for the
+portable job’s1GiB device plus0.1GiB host request; full stays38 minus38.
