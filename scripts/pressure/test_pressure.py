@@ -293,6 +293,11 @@ class CommandTests(unittest.TestCase):
 
 
 class NativeRunnerTests(unittest.TestCase):
+    def test_measurement_observers_requires_live_owned_parent(self):
+        import stage_ab
+        run=object.__new__(stage_ab.Run);run.procs={}
+        self.assertEqual(run.measurement_observers(),[])
+
     def test_first_native_failure_stops_before_the_matrix(self):
         import stage_ab
         from unittest.mock import patch

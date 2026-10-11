@@ -155,3 +155,10 @@ the 0.5-second physical/status/headroom observer. Only the exact operator-launch
 passive counter PID/start/executable/cgroup is exempted via `observers`; all its
 DRM clients remain in the inventory. This is distinct from the pinned display
 baseline. Unknown or reused counter identities still fail closed.
+
+Rerun2 source is Mycelium06fbe0b. Its generation-aware Python client is
+used from the frozen source tree; six skew and missing-NAS probes now run as
+normal pass/fail checks. Whole-machine production hold is excluded. During
+measurement, direct xpu-smi stats children of the exact live myce-measure
+process may observe the card; PID/start, executable, arguments and cgroup
+are checked. Their holder evidence remains recorded.

@@ -136,9 +136,28 @@ class Run:
                     ids.append(identity)
         return ids
 
+    def measurement_observers(self):
+        parent=self.procs.get('measure')
+        if parent is None or parent.poll() is not None:return []
+        expected=process(parent.pid)
+        executable=os.path.realpath(shutil.which('xpu-smi'))
+        observers=[]
+        for path in Path('/proc').iterdir():
+            if not path.name.isdigit():continue
+            try:
+                identity=process(int(path.name))
+                fields=(path/'stat').read_bytes().rsplit(b')',1)[1].split()
+                command=(path/'cmdline').read_bytes().split(b'\0')
+                if (int(fields[1])==parent.pid and identity['exe']==executable
+                        and identity['cgroup']==self.cgroup
+                        and command[1:5]==[b'stats',b'-d',b'0',b'--json']
+                        and process(parent.pid)==expected):observers.append(identity)
+            except (OSError,ValueError):continue
+        return observers
+
     def physical(self, events=None):
         evidence = {}
-        owners = drm_owners([PCI], baseline=self.baseline, allowed=self.owned(), observers=self.passive, evidence=evidence)
+        owners = drm_owners([PCI], baseline=self.baseline, allowed=self.owned(), observers=self.passive+self.measurement_observers(), evidence=evidence)
         if len(owners[PCI]) > 1: raise RuntimeError('physical_double_owner')
         if events: emit(events, 'physical', valid=True, owners=owners)
         return evidence
