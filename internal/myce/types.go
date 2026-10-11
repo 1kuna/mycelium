@@ -113,6 +113,11 @@ func (s Spec) Validate() error {
 		return errors.New("needs.host_memory_gb must be finite and nonnegative")
 	}
 	if s.Run.Docker {
+		for name := range s.Run.Env {
+			if dockerDeviceEnvironment(name) {
+				return fmt.Errorf("Docker run.env cannot override worker device selector %s", name)
+			}
+		}
 		if _, err := dockerRunArgs(s.Run.Command); err != nil {
 			return err
 		}

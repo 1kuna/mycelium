@@ -612,9 +612,35 @@ and rejects restart policies. Until that witness, a future delayed start is
 still possible. If no definite disposition or positive acceptance evidence
 arrives, retry cleanup indefinitely and preserve exclusion; do not clear state
 or treat a daemon restart, worker reboot, elapsed grace or empty scan as proof.
-There is no automatic operator override for such uncertainty. Escalate for a
-qualified daemon fence/recovery and reviewed reconciliation rather than editing
-custody records to claim release.
+After two minutes of unresolved custody, the queue durably marks that exact
+attempt escalated, emits `event=docker_cleanup_escalated` in its log, and shows
+**operator action required (myce resolve-docker)** in `myce status` and the status
+page. The injected Clock measures from the first unresolved observation; retries
+and queue restart do not renew it. The reservation stays held. This bounds silent
+waiting, not physical recovery: Verso has only the B70, so alternate placement is
+not a recovery plan for its production jobs.
+
+Operator recovery is explicit and offline:
+
+1. Stop the affected worker/service and prevent automatic restart. Keep its spool.
+2. Independently fence all accepted/delayed Docker operations on the saved daemon
+   endpoint, and verify the exact attempt's execution, GPU use and RAM are gone.
+   Empty scans, worker exit and elapsed time alone do not prove this. Do not stop
+   unrelated or legacy Verso containers. If a qualified fence cannot be established,
+   keep the hold and escalate host maintenance.
+3. Read the opaque identity from that worker's `state.json` and matching
+   `<identity>.docker.json`. Run
+   `myce resolve-docker --state-dir /absolute/worker/spool --attempt-id ID --confirm-gone`.
+   This takes the exclusive worker lock, refuses a different attempt, and durably
+   records operator-confirmed forced release. It makes no Docker or network calls.
+4. Restart the same worker with the same spool/queue/name. It sends the existing
+   exact job/machine/session/attempt release acknowledgement before log replay.
+   Confirm the queue hold clears in status. The command alone does not clear the
+   queue; keep the old spool until that acknowledgement is accepted.
+
+`--confirm-gone` is an operator assertion of external proof, not an automatic
+check or permission to release uncertain memory. A crash after the custody write
+is recoverable; restart reads the durable disposition without killing containers.
 
 Queue obligations survive stop expiry, machine loss, queue restart and fresh
 worker sessions, even on hosts without production-hold policy. Unconfirmed

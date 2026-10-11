@@ -62,8 +62,8 @@ func dockerRunArgs(command []string) ([]string, error) {
 			}
 			if flag == "--env" || flag == "-e" {
 				name, _, _ := strings.Cut(value, "=")
-				if strings.HasPrefix(name, "MYCE_") || !strings.Contains(value, "=") {
-					return nil, errors.New("Docker env must use explicit values and cannot override MYCE_ identity or credentials")
+				if strings.HasPrefix(name, "MYCE_") || dockerDeviceEnvironment(name) || !strings.Contains(value, "=") {
+					return nil, errors.New("Docker env must use explicit values and cannot override worker identity, credentials or device selectors")
 				}
 			}
 		default:
@@ -91,17 +91,18 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
-	Identity  string     `json:"identity"`
-	Endpoint  string     `json:"endpoint"`
-	Container string     `json:"container,omitempty"`
-	Operation string     `json:"operation,omitempty"`
-	Pending   bool       `json:"pending,omitempty"`
-	Stopped   bool       `json:"stopped,omitempty"`
-	Forced    bool       `json:"forced,omitempty"`
-	StopAt    *time.Time `json:"stop_at,omitempty"`
-	Released  bool       `json:"released,omitempty"`
-	Error     string     `json:"error,omitempty"`
-	ExitCode  int        `json:"exit_code"`
+	Identity          string     `json:"identity"`
+	Endpoint          string     `json:"endpoint"`
+	Container         string     `json:"container,omitempty"`
+	Operation         string     `json:"operation,omitempty"`
+	Pending           bool       `json:"pending,omitempty"`
+	Stopped           bool       `json:"stopped,omitempty"`
+	Forced            bool       `json:"forced,omitempty"`
+	StopAt            *time.Time `json:"stop_at,omitempty"`
+	OperatorConfirmed bool       `json:"operator_confirmed,omitempty"`
+	Released          bool       `json:"released,omitempty"`
+	Error             string     `json:"error,omitempty"`
+	ExitCode          int        `json:"exit_code"`
 }
 type dockerAttempt struct {
 	dirty       bool
@@ -221,7 +222,7 @@ type dockerInspection struct {
 
 // Every object is inspected before signaling: names and cidfiles are not ownership proof.
 func (d *dockerAttempt) containers() ([]dockerInspection, error) {
-	out, err := d.call("ps", "--all", "--quiet", "--filter", "label=myce.attempt="+d.state.Identity)
+	out, err := d.call("ps", "--all", "--quiet", "--no-trunc", "--filter", "label=myce.attempt="+d.state.Identity)
 	if err != nil {
 		return nil, err
 	}
@@ -550,4 +551,42 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	p := &process{job: *s.state.Job, machine: w.Machine.ID, done: make(chan workerFinish, 1), docker: d}
 	go d.run(p, *s.state.Job, s.state.Session, output, nil, func() error { return errors.New("worker restarted; Docker cleanup required") })
 	return p, nil
+}
+
+// ConfirmDockerGone records an operator's external fence/release proof while the
+// worker is offline. It never asks an unresponsive daemon to prove its own fence.
+func ConfirmDockerGone(dir, identity string, confirmed bool) error {
+	if dir == "" || identity == "" || filepath.Base(identity) != identity || !confirmed {
+		return errors.New("resolve-docker requires --state-dir, --attempt-id and --confirm-gone after fencing delayed starts and verifying release")
+	}
+	s, err := (Worker{StateDir: dir}).openStore()
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	if s.state.Identity != identity || s.state.Job == nil || !s.state.Job.Spec.Run.Docker {
+		return errors.New("Docker attempt does not match current worker custody")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, identity+".docker.json"))
+	if err != nil {
+		return err
+	}
+	var state dockerExecution
+	if err = json.Unmarshal(data, &state); err != nil {
+		return err
+	}
+	if state.Identity != identity || state.Endpoint == "" {
+		return errors.New("invalid Docker custody record")
+	}
+	state.Released = true
+	state.Pending = false
+	state.Stopped = true
+	state.Forced = true
+	state.OperatorConfirmed = true
+	state.Error = "operator confirmed execution gone and delayed starts fenced"
+	return saveWorkerJSON(dir, identity+".docker.json", state)
+}
+
+func dockerDeviceEnvironment(name string) bool {
+	return slices.Contains([]string{"CUDA_VISIBLE_DEVICES", "ONEAPI_DEVICE_SELECTOR", "ZE_AFFINITY_MASK"}, name)
 }

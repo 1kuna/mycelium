@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"reflect"
 	"sort"
@@ -27,10 +28,12 @@ type HostState struct {
 // Release obligations survive requeue/loss; only an execution acknowledgement or
 // a fresh worker's completed cleanup can settle them.
 type HostRelease struct {
-	HostChargeGB                float64 `json:"host_charge_gb,omitempty"`
-	Docker                      bool    `json:"docker,omitempty"`
-	CleanupFailed               bool    `json:"cleanup_failed,omitempty"`
-	Device                      string  `json:"device,omitempty"`
+	CleanupSince                *time.Time `json:"cleanup_since,omitempty"`
+	EscalatedAt                 *time.Time `json:"escalated_at,omitempty"`
+	HostChargeGB                float64    `json:"host_charge_gb,omitempty"`
+	Docker                      bool       `json:"docker,omitempty"`
+	CleanupFailed               bool       `json:"cleanup_failed,omitempty"`
+	Device                      string     `json:"device,omitempty"`
 	MemoryGB, HostMemoryGB      float64
 	Preparation                 bool `json:"preparation,omitempty"`
 	Host, Job, Machine, Session string
@@ -121,7 +124,10 @@ func (q *Queue) retainRelease(j *Job) {
 	if j.StopAt != nil {
 		r.Until = *j.StopAt
 	}
-	r.CleanupFailed = q.s.HostReleases[releaseKey(r)].CleanupFailed
+	old := q.s.HostReleases[releaseKey(r)]
+	r.CleanupFailed = old.CleanupFailed
+	r.CleanupSince = old.CleanupSince
+	r.EscalatedAt = old.EscalatedAt
 	q.s.HostReleases[releaseKey(r)] = r
 }
 func (q *Queue) settleRelease(r Result) bool {
@@ -499,16 +505,43 @@ func (q *Queue) backgroundPreparing(m *Machine) bool {
 
 // Lost/stopping Docker executions fence the physical host, even without host policy.
 func (q *Queue) dockerBlocker(host string) string {
+	waiting := ""
 	for _, r := range q.s.HostReleases {
 		if !r.Docker || r.Host != host {
 			continue
 		}
-		j := q.s.Jobs[r.Job]
-		m := q.s.Machines[r.Machine]
-		if j != nil && j.Attempt == r.Attempt && j.Session == r.Session && j.Machine == r.Machine && j.State == "running" && m != nil && !m.Gone && !q.unreported[m.ID] && m.DockerCleanup == "" && !r.CleanupFailed {
+		if q.dockerReleaseLive(r) {
 			continue
 		}
-		return host + ": Docker cleanup unconfirmed; waiting for attempt " + r.Job + fmt.Sprintf("/%d", r.Attempt)
+		reason := host + ": Docker cleanup unconfirmed; waiting for attempt " + r.Job + fmt.Sprintf("/%d", r.Attempt)
+		if r.EscalatedAt != nil {
+			return reason + "; operator action required (myce resolve-docker)"
+		}
+		waiting = reason
 	}
-	return ""
+	return waiting
+}
+
+// Escalation bounds silent waiting, never custody or physical memory ownership.
+func (q *Queue) escalateDockerCleanup() {
+	now := q.clock.Now()
+	for key, r := range q.s.HostReleases {
+		if !r.Docker || q.dockerReleaseLive(r) {
+			continue
+		}
+		if r.CleanupSince == nil {
+			r.CleanupSince = &now
+		}
+		if r.EscalatedAt == nil && !now.Before(r.CleanupSince.Add(2*time.Minute)) {
+			r.EscalatedAt = &now
+			log.Printf("event=docker_cleanup_escalated host=%q job=%q attempt=%d machine=%q session=%q operator_action_required=true", r.Host, r.Job, r.Attempt, r.Machine, r.Session)
+		}
+		q.s.HostReleases[key] = r
+	}
+}
+
+func (q *Queue) dockerReleaseLive(r HostRelease) bool {
+	j := q.s.Jobs[r.Job]
+	m := q.s.Machines[r.Machine]
+	return j != nil && j.Attempt == r.Attempt && j.Session == r.Session && j.Machine == r.Machine && j.State == "running" && m != nil && !m.Gone && !q.unreported[m.ID] && m.DockerCleanup == "" && !r.CleanupFailed
 }
