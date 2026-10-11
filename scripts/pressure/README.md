@@ -43,6 +43,10 @@ code or inputs. Explicit worker `--device 1` must map to physical GPU1; Mycelium
 sets `ONEAPI_DEVICE_SELECTOR=level_zero:1` and `ZE_AFFINITY_MASK=1`. The job
 requires those values and exactly one visible GPU, then uses logical `xpu:0`.
 Native topology/selector verification is still required before allocation.
+With the r2 kernel fence exposing only GPU1 nodes, the native library enumerates
+that physical card as index0. Use the qualified `--card 1 --selector 0` pairing
+and worker/measure `--device 0` **only inside that fence**; fdinfo must still
+prove PCI07:00.0. The full-host index1 examples do not apply inside the fence.
 CUDA also requires exactly one visible device; its physical identity must be
 verified by the operator. No CPU fallback is permitted.
 
@@ -138,3 +142,10 @@ the first violation and does not kill, restart or otherwise repair any service.
 The existing `scripts/soak/soak.py` remains unchanged and provides CPU-only random
 fault orchestration. Native Docker/NAS/reboot injection and the two-card/idle
 policy tests remain in the orchestrator-approved pressure plan, not in smoke.
+
+The detached `stage_ab.py` runner is pinned to the r2 paths/unit and GPU1-only
+kernel policy. It writes per-scenario ledgers/results and terminal markers, uses
+18-GiB observed host headroom plus 8-GiB cgroup cap, and refuses unknown users.
+`finalize_stage_ab.py` is its ExecStopPost cleanup, including recoverable Trash.
+CPU-only overlay tests and receipt-triggered GPU faults are reported separately;
+polling receipt boundaries do not qualify every internal gate/fsync crash point.
