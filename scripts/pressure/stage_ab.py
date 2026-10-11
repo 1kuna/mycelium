@@ -50,7 +50,7 @@ class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r5.service'
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r5b.service'
         self.baseline = json.loads((ROOT / 'display-baseline.json').read_text())
         self.diagnostics = DiagnosticReaders(json.loads((ROOT/'diagnostic-executables.json').read_text()),
                                              ROOT/'diagnostics.jsonl')
@@ -485,7 +485,7 @@ class Run:
             self.result('B-forced-reboots','EXCLUDED',executed=False,reason='not approved')
             self.physical()
             pause_path=QUEUE/'PAUSED'
-            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r5',nonce=os.urandom(16).hex()))+'\n').encode()
+            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r5b',nonce=os.urandom(16).hex()))+'\n').encode()
             with pause_path.open('xb') as f:f.write(self.pause);f.flush();os.fsync(f.fileno())
             (ROOT/'owned-pause').write_bytes(self.pause)
             time.sleep(1)

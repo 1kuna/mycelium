@@ -191,3 +191,8 @@ logged in diagnostics.jsonl. Missing VRAM/GTT measurements, changed hashes,
 other commands, excess memory and lifetime expiry fail closed. No daemon is
 qualified. Internal counter and measure readers use the same gate. Final
 cleanup waits for observed diagnostics to exit before claiming release.
+
+The first r5 preflight stopped before allocation because DRM engine total-cycle
+counters were parsed as memory. They are now explicitly excluded, with the
+recorded driver field in a regression. The corrected attempt uses fresh r5b
+roots; r5 evidence is preserved and its operational installs moved to Trash.

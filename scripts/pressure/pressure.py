@@ -344,7 +344,7 @@ def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str,
                         raise ValueError("DRM descriptor lacks numeric client identity")
                     resident, allocated = {}, {}
                     for key, value in metrics.items():
-                        if key.startswith(("drm-resident-", "drm-total-", "drm-memory-")):
+                        if key.startswith(("drm-resident-", "drm-total-", "drm-memory-")) and not key.startswith("drm-total-cycles-"):
                             memory = resident if key.startswith("drm-resident-") else allocated
                             parts = value.split()
                             if len(parts) == 1 and parts[0] == "0":
