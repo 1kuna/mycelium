@@ -51,9 +51,13 @@ type workerState struct {
 	Log             string  `json:"log,omitempty"`
 }
 type workerStore struct {
-	dir   string
-	lock  *os.File
-	state workerState
+	checkpointUnavailable bool
+	nasProbe              checkpointIO[bool]
+	nasProgress           checkpointIO[int64]
+	nasPrepare            checkpointIO[string]
+	dir                   string
+	lock                  *os.File
+	state                 workerState
 }
 
 func (w Worker) openStore() (*workerStore, error) {
@@ -226,10 +230,13 @@ func attemptCheckpoint(j Job) string {
 	return filepath.Join(j.Checkpoint, fmt.Sprintf("attempt-%d", j.Attempt))
 }
 func checkpointProgress(dir string) (int64, error) {
-	var latest int64
+	latest := int64(-1)
 	err := filepath.WalkDir(dir, func(path string, e os.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if path != dir && e.IsDir() && strings.HasPrefix(e.Name(), "attempt-") {
+			return filepath.SkipDir
 		}
 		if strings.HasSuffix(e.Name(), ".tmp") {
 			if e.IsDir() {
@@ -245,7 +252,23 @@ func checkpointProgress(dir string) (int64, error) {
 			return err
 		}
 		if info.Mode().IsRegular() {
-			latest = max(latest, info.ModTime().UnixNano())
+			latest = max(latest, 0) // Unsequenced legacy saves rank below every generation.
+			if strings.HasSuffix(e.Name(), ".json") {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				var save map[string]json.RawMessage
+				if json.Unmarshal(data, &save) == nil && save["myce_checkpoint"] != nil {
+					var metadata struct {
+						Generation int64 `json:"generation"`
+					}
+					if err := json.Unmarshal(save["myce_checkpoint"], &metadata); err != nil || metadata.Generation <= 0 {
+						return fmt.Errorf("invalid checkpoint generation: %s", path)
+					}
+					latest = max(latest, metadata.Generation)
+				}
+			}
 		}
 		return nil
 	})
@@ -263,7 +286,11 @@ func prepareCheckpoint(j Job) (string, error) {
 		return "", err
 	}
 	source := j.Checkpoint
-	var newest int64
+	newest, err := checkpointProgress(j.Checkpoint)
+	if err != nil {
+		return "", err
+	}
+	newestAttempt := 0
 	for _, e := range entries {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), "attempt-") {
 			continue
@@ -277,8 +304,9 @@ func prepareCheckpoint(j Job) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if progress > newest {
+		if progress >= 0 && (progress > newest || (progress == newest && n > newestAttempt)) {
 			newest = progress
+			newestAttempt = n
 			source = dir
 		}
 	}
@@ -336,9 +364,6 @@ func prepareCheckpoint(j Job) (string, error) {
 				err = ce
 			}
 			if err != nil {
-				return err
-			}
-			if err = os.Chtimes(target+".tmp", info.ModTime(), info.ModTime()); err != nil {
 				return err
 			}
 			if err = os.Rename(target+".tmp", target); err != nil {

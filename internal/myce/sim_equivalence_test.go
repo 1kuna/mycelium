@@ -32,7 +32,7 @@ func TestSimSchedulingScanEquivalence(t *testing.T) {
 	rng := rand.New(rand.NewSource(7))
 	clock := &simClock{time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)}
 	for trial := 0; trial < 300; trial++ {
-		q := &Queue{clock: clock, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}, Policies: map[string]ProjectPolicy{}, FairUsage: map[string]FairUsage{}, ModelSlots: map[string]*ModelSlot{}}}
+		q := &Queue{simulation: true, clock: clock, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}, Policies: map[string]ProjectPolicy{}, FairUsage: map[string]FairUsage{}, ModelSlots: map[string]*ModelSlot{}}}
 		m := &Machine{ID: "worker", GPU: "fake", FreeMemoryGB: 8, TotalMemoryGB: 16}
 		q.s.Machines[m.ID] = m
 		for p := 0; p < 3; p++ {
