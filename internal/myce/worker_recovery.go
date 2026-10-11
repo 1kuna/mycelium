@@ -260,13 +260,14 @@ func checkpointProgress(dir string) (int64, error) {
 				}
 				var save map[string]json.RawMessage
 				if json.Unmarshal(data, &save) == nil && save["myce_checkpoint"] != nil {
-					var metadata struct {
-						Generation int64 `json:"generation"`
+					var metadata map[string]json.RawMessage
+					if json.Unmarshal(save["myce_checkpoint"], &metadata) == nil && metadata["generation"] != nil {
+						var generation int64
+						if err := json.Unmarshal(metadata["generation"], &generation); err != nil || generation <= 0 {
+							return fmt.Errorf("invalid checkpoint generation: %s", path)
+						}
+						latest = max(latest, generation)
 					}
-					if err := json.Unmarshal(save["myce_checkpoint"], &metadata); err != nil || metadata.Generation <= 0 {
-						return fmt.Errorf("invalid checkpoint generation: %s", path)
-					}
-					latest = max(latest, metadata.Generation)
 				}
 			}
 		}

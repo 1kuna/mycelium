@@ -79,6 +79,12 @@ class CheckpointTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 checkpoint.load()
 
+    def test_legacy_metadata_name_without_sequence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value = {"myce_checkpoint": {"description": "legacy"}, "step": 9}
+            Path(folder, "checkpoint.json").write_text(json.dumps(value))
+            self.assertEqual(Checkpoint(folder).load(), value)
+
     def test_environment_and_signals(self):
         with tempfile.TemporaryDirectory() as folder:
             with patch.dict(os.environ, {"MYCE_CHECKPOINT_DIR": folder}):

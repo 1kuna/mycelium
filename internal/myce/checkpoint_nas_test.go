@@ -320,3 +320,22 @@ func TestLegacyCachedTimestampCannotOverrideGeneration(t *testing.T) {
 		t.Fatalf("cached timestamp overruled generation: %+v %v", reply, err)
 	}
 }
+
+func TestLegacyMetadataWithoutGenerationLoads(t *testing.T) {
+	j := recoveryJob(t, []string{"true"})
+	if err := os.MkdirAll(j.Checkpoint, 0700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"myce_checkpoint":{"description":"legacy"},"step":9}`)
+	if err := os.WriteFile(filepath.Join(j.Checkpoint, "checkpoint.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	dest, err := prepareCheckpoint(j)
+	if err != nil {
+		t.Fatalf("unsequenced legacy checkpoint rejected: %v", err)
+	}
+	loaded, err := os.ReadFile(filepath.Join(dest, "checkpoint.json"))
+	if err != nil || string(loaded) != string(data) {
+		t.Fatalf("legacy bytes changed: %v", err)
+	}
+}
