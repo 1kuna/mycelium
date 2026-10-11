@@ -25,6 +25,61 @@ def beginning(c: Checker, resumed: int = 0, attempt: int = 1) -> None:
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_round4_diagnostic_reader_identity_memory_and_lifetime(self):
+        from unittest.mock import patch
+        import hashlib
+        import pressure
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);exe=root/'xpu-smi';exe.write_bytes(b'qualified diagnostic binary')
+            pid=root/'1670427';pid.mkdir();(pid/'exe').symlink_to(exe)
+            fields=['S','1670164','1670427']+['0']*16+['3571851']
+            (pid/'stat').write_text('1670427 (xpu-smi) '+' '.join(fields))
+            (root/'uptime').write_text('35718.7 0')
+            holder=dict(boot='test-boot',pid=1670427,start=3571851,ppid=1670164,
+                exe=str(exe),cgroup='0::/user.slice/user-1000.slice/session-1136.scope',stats_readonly=True,
+                clients=[dict(pci='0000:07:00.0',device='/dev/dri/renderD129',client=28670,
+                    resident_bytes={'drm-resident-system':65536,'drm-resident-gtt':40960,
+                        'drm-resident-vram0':2846720,'drm-resident-stolen':0})])
+            events=root/'diagnostics.jsonl'
+            readers=pressure.DiagnosticReaders({str(exe):hashlib.sha256(exe.read_bytes()).hexdigest()},events,root)
+            def scan(h):
+                with patch('pressure.drm_inventory',return_value=h):
+                    return pressure.drm_owners(['0000:07:00.0'],allowed=[],diagnostics=readers)
+            self.assertEqual(scan([holder]),{'0000:07:00.0':[]})
+            self.assertEqual(json.loads(events.read_text().splitlines()[0])['action'],'observed')
+            for change in (dict(exe='/untrusted/xpu-smi'),dict(stats_readonly=False),
+                    dict(clients=[{**holder['clients'][0],'resident_bytes':{'drm-resident-vram0':4*1024**2+1,'drm-resident-gtt':0}}]),
+                    dict(clients=[{**holder['clients'][0],'allocated_bytes':{'drm-total-vram0':8*1024**2}}]),
+                    dict(clients=[{**holder['clients'][0],'resident_bytes':{}}])):
+                with self.subTest(change=change),self.assertRaisesRegex(ValueError,'UNKNOWN'):
+                    scan([{**holder,**change}])
+            exe.write_bytes(b'tampered binary')
+            with self.assertRaisesRegex(ValueError,'UNKNOWN'):scan([holder])
+            exe.write_bytes(b'qualified diagnostic binary')
+            # A live diagnostic remains accountable even after closing its DRM descriptor.
+            (root/'uptime').write_text('35749 0')
+            with self.assertRaisesRegex(ValueError,'UNKNOWN'):scan([])
+            (pid/'stat').unlink();(pid/'exe').unlink();pid.rmdir()
+            self.assertEqual(scan([]),{'0000:07:00.0':[]})
+            self.assertEqual(json.loads(events.read_text().splitlines()[-1])['action'],'exited')
+
+    def test_diagnostic_inventory_parses_short_json_and_allocated_memory(self):
+        import pressure
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);pid=root/'17';(pid/'fd').mkdir(parents=True);(pid/'fdinfo').mkdir()
+            (pid/'stat').write_text('17 (xpu-smi) '+' '.join(['S','1','17']+['0']*16+['42']))
+            (pid/'exe').symlink_to('/usr/bin/xpu-smi');(pid/'cgroup').write_text('0::/session.scope')
+            (pid/'fd/1').symlink_to('/dev/dri/renderD129')
+            (pid/'fdinfo/1').write_text('drm-pdev: 0000:07:00.0\ndrm-client-id: 28670\n'
+                'drm-resident-vram0: 2780 KiB\ndrm-resident-gtt: 40 KiB\ndrm-total-vram0: 8 MiB\n')
+            for flag in (b'-j',b'--json'):
+                (pid/'cmdline').write_bytes(b'/usr/bin/xpu-smi\0stats\0-d\0'+b'0\0'+flag+b'\0')
+                h=pressure.drm_inventory(['0000:07:00.0'],root)[0]
+                self.assertTrue(h['stats_readonly'])
+                self.assertEqual(h['clients'][0]['allocated_bytes']['drm-total-vram0'],8*1024**2)
+            (pid/'cmdline').write_bytes(b'/usr/bin/xpu-smi\0config\0-d\0'+b'0\0-j\0')
+            self.assertFalse(pressure.drm_inventory(['0000:07:00.0'],root)[0]['stats_readonly'])
+
     def test_vanished_fd_rescans_even_when_fdinfo_lingers(self):
         import errno
         from unittest.mock import patch
@@ -357,8 +412,8 @@ class CommandTests(unittest.TestCase):
 class NativeRunnerTests(unittest.TestCase):
     def test_attempt_roots_use_the_same_fresh_suffix(self):
         import stage_ab
-        self.assertTrue(stage_ab.ROOT.name.endswith('r3-20261011'))
-        self.assertTrue(stage_ab.NAS.name.endswith('r3-20261011'))
+        self.assertTrue(stage_ab.ROOT.name.endswith('r5-20261011'))
+        self.assertTrue(stage_ab.NAS.name.endswith('r5-20261011'))
 
     def test_allowlists_refresh_after_inventory(self):
         import pressure

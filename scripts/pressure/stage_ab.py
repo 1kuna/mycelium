@@ -17,12 +17,12 @@ from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
 
-from pressure import (Checker, api, clock_domain, digest, drm_identity, drm_inventory,
+from pressure import (Checker, DiagnosticReaders, api, clock_domain, digest, drm_identity, drm_inventory,
                       drm_owners, emit, observe, replay, spec, submit)
 
 PCI = '0000:07:00.0'
-ROOT = Path('/home/kuna/myce-test-stage-ab-r3-20261011')
-NAS = Path('/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r3-20261011')
+ROOT = Path('/home/kuna/myce-test-stage-ab-r5-20261011')
+NAS = Path('/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r5-20261011')
 XPU = '/home/kuna/verso-labs/runtimes/experiment-xpu-venv/bin/python'
 QUEUE = Path('/home/kuna/exp42-queue')
 BASE = Path(__file__).parent
@@ -50,8 +50,10 @@ class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r3.service'
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r5.service'
         self.baseline = json.loads((ROOT / 'display-baseline.json').read_text())
+        self.diagnostics = DiagnosticReaders(json.loads((ROOT/'diagnostic-executables.json').read_text()),
+                                             ROOT/'diagnostics.jsonl')
         self.env = {k:v for k,v in os.environ.items() if not k.startswith('MYCE_')}
         self.env['MYCE_TOKEN'] = os.urandom(32).hex()
         os.environ['MYCE_TOKEN'] = self.env['MYCE_TOKEN']
@@ -155,7 +157,7 @@ class Run:
         with self.inventory_lock:
             try:
                 owners = drm_owners([PCI], baseline=self.baseline, allowed=self.owned,
-                    observers=lambda holders:self.passive+self.measurement_observers(holders), evidence=evidence)
+                    diagnostics=self.diagnostics, evidence=evidence)
             except Exception:
                 atomic(ROOT/"ownership-failure.json",evidence);raise
         if len(owners[PCI]) > 1: raise RuntimeError('physical_double_owner')
@@ -436,7 +438,14 @@ class Run:
                 except OSError:pass
             time.sleep(.3)
         final_evidence={}
-        try:drm_owners([PCI],baseline=self.baseline,allowed=[],evidence=final_evidence);physical='released'
+        try:
+            end=time.monotonic()+30
+            while True:
+                drm_owners([PCI],baseline=self.baseline,allowed=[],diagnostics=self.diagnostics,evidence=final_evidence)
+                if not self.diagnostics.pending:break
+                if time.monotonic()>=end:raise RuntimeError('diagnostic exit unconfirmed')
+                time.sleep(.5)
+            physical='released'
         except Exception as e:physical='HOLD:'+type(e).__name__
         if self.pause:
             p=QUEUE/'PAUSED'
@@ -476,7 +485,7 @@ class Run:
             self.result('B-forced-reboots','EXCLUDED',executed=False,reason='not approved')
             self.physical()
             pause_path=QUEUE/'PAUSED'
-            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r3',nonce=os.urandom(16).hex()))+'\n').encode()
+            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r5',nonce=os.urandom(16).hex()))+'\n').encode()
             with pause_path.open('xb') as f:f.write(self.pause);f.flush();os.fsync(f.fileno())
             (ROOT/'owned-pause').write_bytes(self.pause)
             time.sleep(1)

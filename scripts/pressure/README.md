@@ -180,3 +180,14 @@ rescan the process fd directory; vanished processes rescan proc. Permission
 failures, unresolved live identities and unknown GPU holders still fail closed.
 Spark active capacity is40GiB minus38GiB reserve (2GiB), enough for the
 portable job’s1GiB device plus0.1GiB host request; full stays38 minus38.
+
+Round5 uses fresh r5 roots and the remaining A3 onward scenarios. The explicit
+`diagnostic-executables.json` maps qualified executable paths to SHA256 hashes.
+Only stats invocations (`stats -d <index> -j/--json`) of the pinned xpu-smi
+binary are eligible: all DRM resident/allocated memory types count toward a
+4 MiB cap, and the process must exit within 30 seconds of its actual start.
+Tracking continues after descriptor closure; each observed/exit/rejection is
+logged in diagnostics.jsonl. Missing VRAM/GTT measurements, changed hashes,
+other commands, excess memory and lifetime expiry fail closed. No daemon is
+qualified. Internal counter and measure readers use the same gate. Final
+cleanup waits for observed diagnostics to exit before claiming release.
