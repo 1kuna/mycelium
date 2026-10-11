@@ -21,8 +21,8 @@ from pressure import (Checker, api, clock_domain, digest, drm_identity, drm_inve
                       drm_owners, emit, observe, replay, spec, submit)
 
 PCI = '0000:07:00.0'
-ROOT = Path('/home/kuna/myce-test-stage-ab-r2b-20261011')
-NAS = Path('/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r2-20261011')
+ROOT = Path('/home/kuna/myce-test-stage-ab-r2c-20261011')
+NAS = Path('/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r2c-20261011')
 XPU = '/home/kuna/verso-labs/runtimes/experiment-xpu-venv/bin/python'
 QUEUE = Path('/home/kuna/exp42-queue')
 BASE = Path(__file__).parent
@@ -50,7 +50,7 @@ class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r2b.service'
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r2c.service'
         self.baseline = json.loads((ROOT / 'display-baseline.json').read_text())
         self.env = {k:v for k,v in os.environ.items() if not k.startswith('MYCE_')}
         self.env['MYCE_TOKEN'] = os.urandom(32).hex()
@@ -483,7 +483,7 @@ class Run:
             self.result('B-forced-reboots','EXCLUDED',executed=False,reason='not approved')
             self.physical()
             pause_path=QUEUE/'PAUSED'
-            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r2b',nonce=os.urandom(16).hex()))+'\n').encode()
+            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r2c',nonce=os.urandom(16).hex()))+'\n').encode()
             with pause_path.open('xb') as f:f.write(self.pause);f.flush();os.fsync(f.fileno())
             (ROOT/'owned-pause').write_bytes(self.pause)
             time.sleep(1)
