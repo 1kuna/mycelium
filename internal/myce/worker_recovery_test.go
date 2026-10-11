@@ -156,7 +156,7 @@ func TestWorkerAttemptCheckpointIsolation(t *testing.T) {
 		t.Fatal("copied incomplete checkpoint")
 	}
 	progress, err := checkpointProgress(dest)
-	if err != nil || progress != newer.UnixNano() {
+	if err != nil || progress != 0 {
 		t.Fatalf("progress %d: %v", progress, err)
 	}
 	if err = os.WriteFile(filepath.Join(dest, "nested", "saved"), []byte("attempt 3"), 0600); err != nil {
@@ -488,6 +488,16 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 	if err != nil || len(members) != 0 {
 		t.Fatalf("new command assigned before old group stopped: %v %v", members, err)
 	}
+	// Assignment precedes startup; wait for this fixture's TERM handler.
+	await(t, func() bool {
+		logs, _ := q.Logs(j.ID, 0)
+		for _, line := range logs {
+			if line.Attempt == 2 && strings.Contains(line.Text, "ready") {
+				return true
+			}
+		}
+		return false
+	})
 	cancel()
 	select {
 	case err = <-done:

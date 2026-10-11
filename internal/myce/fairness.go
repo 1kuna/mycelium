@@ -141,7 +141,7 @@ func (q *Queue) candidate(m *Machine, excluded map[string]bool) *Job {
 	// project's best ordinary candidate instead of rescanning for every queued job.
 	byProject := map[string]*Job{}
 	for _, j := range q.s.Jobs {
-		if !excluded[j.ID] && j.State == "queued" && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" {
+		if !excluded[j.ID] && j.State == "queued" && q.checkpointReady(j, m) && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" {
 			old := byProject[j.Spec.Project]
 			if old == nil || before(j, old, m) {
 				byProject[j.Spec.Project] = j

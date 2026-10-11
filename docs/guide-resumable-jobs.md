@@ -16,7 +16,7 @@ resolves them before setting `MYCE_CHECKPOINT_DIR`. Create the root on the
 mounted NAS before starting the queue. Dev creates a local root.
 The stable job folder holds `attempt-1`, `attempt-2`, etc.; the environment points
 to the current attempt's folder. Before starting, the worker copies checkpoints
-from the attempt with the newest complete save, preserving file timestamps.
+from the attempt with the highest durable checkpoint generation.
 Temporary files ending in `.tmp` never count as complete and are never copied.
 This isolates disconnected copies so they cannot overwrite each other's saves.
 Old step-1 checkpoint files directly in the job folder are also preserved when
@@ -26,32 +26,52 @@ resuming. Checkpoints remain after completion or failure.
 flush and fsync it, rename it into place, then fsync the directory. Use one
 self-contained checkpoint file, or a single atomic manifest referencing immutable
 files, so readers never combine pieces from different saves. The newest complete
-save is determined by the NAS file modification time. Preserve those timestamps
-when moving existing checkpoints; do not artificially touch files or assign future
-timestamps. If the job keeps numbered checkpoints, resume from the newest complete
-one and ignore `.tmp` files. A job must also make its output writes safe to retry.
+save is determined by a positive monotonic `generation` recorded inside the
+atomic JSON save, never by file times or wall clocks:
+
+```json
+{"myce_checkpoint": {"generation": 9}, "value": {"step": 42}}
+```
+
+Increment the highest retained generation on every save, including after resume.
+The Python `Checkpoint` helper does this automatically and returns only `value`
+when loading. Keep a single writer per attempt. For non-JSON payloads, atomically
+publish one JSON manifest with the same `myce_checkpoint` metadata referencing
+immutable payload files; publish the manifest only after its payload is durable.
+Temporary `.tmp` files never count. Unsequenced legacy saves still load at
+generation zero: Python chooses the lexicographically greatest JSON filename on
+a tie; worker resume chooses the greatest numeric prior attempt (direct job-folder
+saves lose a tie). Reconciliation retains the current execution on a tie. These
+are deterministic compatibility rules, not estimates of legacy progress.
+Invalid generation metadata fails visibly instead of using timestamps. A job must also make its output writes safe to retry.
 
 This complete Python command atomically replaces one checkpoint and retries NAS
 failures while continuing to run:
 
 ```python
-import os, pathlib, signal, time
+import json, os, pathlib, signal, time
 root = pathlib.Path(os.environ["MYCE_CHECKPOINT_DIR"])
-p = root / "progress"
-n = int(p.read_text()) if p.exists() else 0
+p = root / "checkpoint.json"
+old = json.loads(p.read_text()) if p.exists() else 0
+n = old["value"] if isinstance(old, dict) else old  # legacy scalar JSON
+sequence = old["myce_checkpoint"]["generation"] if isinstance(old, dict) else 0
 stopping = False
 def stop(*_):
     global stopping
     stopping = True
 signal.signal(signal.SIGTERM, stop)
 def save():
+    global sequence
+    generation = sequence + 1
     tmp = p.with_suffix(".tmp")
     with tmp.open("w") as f:
-        f.write(str(n)); f.flush(); os.fsync(f.fileno())
+        json.dump({"myce_checkpoint": {"generation": generation}, "value": n}, f)
+        f.flush(); os.fsync(f.fileno())
     tmp.replace(p)
     fd = os.open(root, os.O_RDONLY)
     try: os.fsync(fd)
     finally: os.close(fd)
+    sequence = generation
 while n < 100 and not stopping:
     time.sleep(0.1); n += 1  # replace with useful work
     try: save()
@@ -63,9 +83,21 @@ while True:  # keep retrying the final save until NAS access returns
 print(f"saved {n}; attempt {os.environ['MYCE_ATTEMPT']}", flush=True)
 ```
 
+Non-resumable production (`priority: production`, `resumable: false`) starts
+without NAS checkpoint access and receives a local scratch checkpoint directory
+under the worker state directory. Declare `resumable: true` when production needs
+NAS checkpoints. Experiments and resumable production still wait for NAS recovery.
+Checkpoint probes, progress reads, and resume preparation have a 25 ms I/O wait
+budget; the queue performs them outside its lock. A blocked filesystem syscall
+may continue in the background, with at most one outstanding call per operation;
+commands never start from an incomplete preparation. Status reports the NAS as
+unreachable while a probe fails or exceeds its budget.
+
 Production preemption has a 10-second default grace; deadline preemption and
 planned leave have two minutes. If the NAS stays down beyond that allowance,
-the next attempt resumes the previous complete save. Planned pauses do not exhaust
+the worker force-stops the displaced process group, reports it interrupted, and
+production proceeds after physical release is reported. The next experiment
+attempt resumes the previous complete save. Planned pauses do not exhaust
 retries. All jobs fail loudly after three counted infrastructure losses;
 a command's own failure fails immediately.
 

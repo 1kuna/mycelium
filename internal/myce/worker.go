@@ -22,6 +22,7 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	checkpointPrepare     func(Job) (string, error) // Filesystem fault seam.
 	control               *processControl
 	DeviceBinding         string
 	EnvironmentSourceRoot string
@@ -119,9 +120,24 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			return nil, fmt.Errorf("%w: need %.1f GB, available %.1f GB: %v", errWorkerMemory, j.Spec.Needs.MemoryGB, free, e)
 		}
 	}
-	checkpoint, err := prepareCheckpoint(j)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errWorkerCheckpoint, err)
+	prepare := prepareCheckpoint
+	if w.checkpointPrepare != nil {
+		prepare = w.checkpointPrepare
+	}
+	var checkpoint string
+	var err error
+	if needsCheckpoint(&j) {
+		checkpoint, err = s.nasPrepare.run(attemptCheckpoint(j), func() (string, error) { return prepare(j) })
+		s.checkpointUnavailable = err != nil
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errWorkerCheckpoint, err)
+		}
+	} else {
+		s.checkpointUnavailable = false
+		checkpoint = filepath.Join(s.dir, "checkpoints", j.ID, fmt.Sprintf("attempt-%d", j.Attempt))
+		if err = os.MkdirAll(checkpoint, 0700); err != nil {
+			return nil, err
+		}
 	}
 	var environmentPath string
 	var release func()
@@ -288,6 +304,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		} else if closeErr != nil {
 			result.Error = closeErr.Error()
 		}
+		p.mu.Lock()
+		result.Interrupted = p.stopped || p.killed
+		p.mu.Unlock()
 		// Persist independently of the reconnect loop, which may be in a network
 		// request when the command finishes. Restart replays this exact session.
 		saveErr := saveWorkerJSON(s.dir, identity+".result.json", result)
@@ -586,13 +605,24 @@ func (w Worker) Run(stop context.Context) error {
 				m.HostAvailableMemoryGB = 0
 				m.HostMemoryError = fmt.Sprintf("host RAM probe failed: %v", hostErr)
 			}
-			m.CheckpointUnavailable = workerCheckpointAvailable(s.state.CheckpointRoot) != nil
+			root := s.state.CheckpointRoot
+			available, _ := s.nasProbe.run(root, func() (bool, error) { err := workerCheckpointAvailable(root); return err == nil, err })
+			m.CheckpointUnavailable = !available || s.checkpointUnavailable
 			var running *Execution
 			if s.state.Job != nil {
 				if !w.MemoryMeasured {
 					m.FreeMemoryGB = max(0, m.FreeMemoryGB-s.state.Job.Spec.Needs.MemoryGB)
 				}
-				progress, _ := checkpointProgress(attemptCheckpoint(*s.state.Job))
+				var progress int64
+				if needsCheckpoint(s.state.Job) && available {
+					path := attemptCheckpoint(*s.state.Job)
+					var progressErr error
+					progress, progressErr = s.nasProgress.run(path, func() (int64, error) { return checkpointProgress(path) })
+					if progressErr != nil && !errors.Is(progressErr, os.ErrNotExist) {
+						m.CheckpointUnavailable = true
+						log.Printf("NAS checkpoint progress unavailable: %v", progressErr)
+					}
+				}
 				running = &Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt, Progress: progress}
 			}
 			var reply Reply
@@ -636,7 +666,7 @@ func (w Worker) Run(stop context.Context) error {
 						if e := s.save(); e != nil {
 							return e
 						}
-					} else if workerCheckpointAvailable(s.state.CheckpointRoot) == nil {
+					} else if !needsCheckpoint(s.state.Job) || available {
 						p, err = w.start(s, *s.state.Job)
 						if err != nil {
 							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) {
@@ -733,7 +763,7 @@ func (w Worker) Run(stop context.Context) error {
 						if e := s.save(); e != nil {
 							return e
 						}
-						if workerCheckpointAvailable(s.state.CheckpointRoot) != nil {
+						if needsCheckpoint(&j) && !available {
 							err = nil
 						} else {
 							p, err = w.start(s, j)

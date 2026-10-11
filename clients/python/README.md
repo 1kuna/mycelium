@@ -80,11 +80,12 @@ with StopSignal() as stop:
     checkpoint.save(step)  # final save before exit
 ```
 
-The helper uses the worker's current attempt directory. Workers copy the newest
+The helper uses the worker's current attempt directory. Workers copy the highest-generation
 previous attempt's saves there. `save(value, name="checkpoint.json")` writes one
 JSON value to a unique same-directory `.tmp`, flushes and fsyncs it, atomically
 replaces the target, then fsyncs the directory. `load(default=None)` selects the
-newest complete `.json` by filesystem modification time, ignoring temporary
+highest-generation complete `.json` (legacy files rank at zero; ties use the
+lexicographically greatest filename), ignoring temporary
 files. Do not mix unrelated JSON files into this directory. Invalid complete
 JSON fails loudly. I/O failures propagate: log and retry failed NAS saves in
 your command; do not claim progress was saved. Failed temp files remain for
@@ -111,3 +112,10 @@ signals, and production preemption/resumption. The full acceptance run requires
 both extras and must end with zero skips.
 A base-only client installation can still skip the optional integration tests;
 it is not the full acceptance run. No fleet access is required.
+
+Saves contain `{"myce_checkpoint": {"generation": N}, "value": ...}`; `load()`
+returns the original value. Each save increments the highest generation retained
+in the attempt directory, including after worker resume or helper restart. Use one
+writer per attempt; file mtimes and machine clocks do not affect resume ordering.
+Existing unwrapped JSON checkpoints still load. See `docs/guide-resumable-jobs.md`
+for worker selection and non-JSON atomic-manifest rules.
