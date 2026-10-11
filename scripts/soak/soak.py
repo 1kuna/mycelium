@@ -57,7 +57,7 @@ def job(a):
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     while n < a.steps and not stop.wait(2):
         n += 1
-        if a.resumable: atomic(cp, dict(step=n, attempt=attempt, saved=time.time()))
+        if a.resumable: atomic(cp, dict(step=n, attempt=attempt, saved=time.time(), myce_checkpoint=dict(generation=n)))
     rec.update(end=time.time(), step=n, stopped=stop.is_set())
     atomic(out, rec)
     print(json.dumps({k: v for k, v in rec.items() if k != 'environment_hashes'}), flush=True)

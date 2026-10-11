@@ -2,6 +2,7 @@ package myce
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,6 +23,16 @@ func fixture(t *testing.T) (*Queue, *fakeClock) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { q.Close() })
+	// Scheduling tests model NAS availability without timing the shared disk's fsync.
+	await(t, func() bool {
+		_, err := q.nasProbe.run(q.root, func() (bool, error) { return true, nil })
+		return err == nil
+	})
+	q.checkpointProbe = func() bool {
+		info, err := os.Stat(q.root)
+		return err == nil && info.IsDir()
+	}
+	q.nasAvailable = q.checkpointProbe()
 	return q, c
 }
 func spec(priority string) Spec {

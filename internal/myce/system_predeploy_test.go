@@ -164,10 +164,14 @@ func TestPreDeployFullSystem(t *testing.T) {
 [ -z "${MYCE_TOKEN:-}" ] || exit 90
 [ ! -e "$MYCE_CHECKPOINT_DIR/unfinished.tmp" ] || exit 91
 n=0
-if [ -f "$MYCE_CHECKPOINT_DIR/progress" ]; then n=$(cat "$MYCE_CHECKPOINT_DIR/progress"); fi
+sequence=0
+if [ -f "$MYCE_CHECKPOINT_DIR/progress.json" ]; then
+ n=$(sed 's/.*"value":\([0-9]*\).*/\1/' "$MYCE_CHECKPOINT_DIR/progress.json")
+ sequence=$(sed 's/.*"generation":\([0-9]*\).*/\1/' "$MYCE_CHECKPOINT_DIR/progress.json")
+fi
 printf 'START attempt=%s resume=%s root=%s\n' "$MYCE_ATTEMPT" "$n" "$MYCE_CHECKPOINT_DIR"
 n=$((n+1))
-save() { while ! (printf '%s\n' "$n" > "$MYCE_CHECKPOINT_DIR/progress.tmp" && mv "$MYCE_CHECKPOINT_DIR/progress.tmp" "$MYCE_CHECKPOINT_DIR/progress") 2>/dev/null; do sleep 0.01; done; }
+save() { generation=$((sequence+1)); while ! (printf '{"myce_checkpoint":{"generation":%s},"value":%s}\n' "$generation" "$n" > "$MYCE_CHECKPOINT_DIR/progress.tmp" && mv "$MYCE_CHECKPOINT_DIR/progress.tmp" "$MYCE_CHECKPOINT_DIR/progress.json") 2>/dev/null; do sleep 0.01; done; sequence=$generation; }
 save
 printf 'partial' > "$MYCE_CHECKPOINT_DIR/unfinished.tmp"
 trap 'save; echo PAUSED; exit 0' TERM
@@ -471,12 +475,12 @@ echo FINISHED
 	})
 	migrated := get(experiment.ID)
 	wait("new owner has a newer complete checkpoint", func() bool {
-		oldPath := filepath.Join(nas, old.ID, fmt.Sprintf("attempt-%d", old.Attempt), "progress")
-		newPath := filepath.Join(nas, old.ID, fmt.Sprintf("attempt-%d", migrated.Attempt), "progress")
-		oldInfo, oldErr := os.Stat(oldPath)
-		newInfo, newErr := os.Stat(newPath)
+		oldPath := filepath.Join(nas, old.ID, fmt.Sprintf("attempt-%d", old.Attempt), "progress.json")
+		newPath := filepath.Join(nas, old.ID, fmt.Sprintf("attempt-%d", migrated.Attempt), "progress.json")
+		oldGeneration, oldErr := checkpointProgress(filepath.Dir(oldPath))
+		newGeneration, newErr := checkpointProgress(filepath.Dir(newPath))
 		data, err := os.ReadFile(newPath)
-		return oldErr == nil && newErr == nil && err == nil && strings.TrimSpace(string(data)) == "4" && newInfo.ModTime().After(oldInfo.ModTime())
+		return oldErr == nil && newErr == nil && err == nil && strings.Contains(string(data), `"value":4`) && newGeneration > oldGeneration
 	})
 	if migrated.Losses != 1 {
 		t.Fatalf("single isolation counted %d losses", migrated.Losses)
@@ -552,9 +556,9 @@ echo FINISHED
 	// Every resumed attempt sees a complete predecessor checkpoint, never .tmp.
 	for attempt := 2; attempt <= winner.Attempt; attempt++ {
 		dir := filepath.Join(nas, winner.ID, fmt.Sprintf("attempt-%d", attempt))
-		data, err := os.ReadFile(filepath.Join(dir, "progress"))
+		data, err := os.ReadFile(filepath.Join(dir, "progress.json"))
 		must(err)
-		if strings.TrimSpace(string(data)) != fmt.Sprint(attempt) {
+		if !strings.Contains(string(data), fmt.Sprintf(`"value":%d}`, attempt)) {
 			t.Fatalf("attempt %d checkpoint=%q", attempt, data)
 		}
 	}

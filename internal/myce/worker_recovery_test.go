@@ -156,7 +156,7 @@ func TestWorkerAttemptCheckpointIsolation(t *testing.T) {
 		t.Fatal("copied incomplete checkpoint")
 	}
 	progress, err := checkpointProgress(dest)
-	if err != nil || progress != newer.UnixNano() {
+	if err != nil || progress != 0 {
 		t.Fatalf("progress %d: %v", progress, err)
 	}
 	if err = os.WriteFile(filepath.Join(dest, "nested", "saved"), []byte("attempt 3"), 0600); err != nil {
@@ -491,8 +491,8 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 	// Assignment precedes payload startup; wait for its TERM handler before leaving.
 	await(t, func() bool {
 		logs, _ := q.Logs(j.ID, 0)
-		for _, l := range logs {
-			if strings.Contains(l.Text, "ready-2") {
+		for _, line := range logs {
+			if line.Attempt == 2 && strings.Contains(line.Text, "ready-2") {
 				return true
 			}
 		}

@@ -69,7 +69,7 @@ func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string) ([]
 	var slots []*ModelSlot
 	for _, j := range q.s.Jobs {
 		owner := q.s.Machines[j.Machine]
-		if owner == nil || owner.Gone || hostID(owner) != hostID(m) || rank(j.Spec.Priority) <= rank(priority) || (!j.Spec.Resumable && priority != "production") || owner.CheckpointUnavailable || !q.checkpointsAvailable() {
+		if owner == nil || owner.Gone || hostID(owner) != hostID(m) || rank(j.Spec.Priority) <= rank(priority) || (!j.Spec.Resumable && priority != "production") || (priority != "production" && (owner.CheckpointUnavailable || !q.checkpointsAvailable())) {
 			continue
 		}
 		if j.State == "running" || j.State == "stopping" {
@@ -143,7 +143,7 @@ func (q *Queue) reclaimableGPUMemory(m *Machine, priority string) float64 {
 		}
 	}
 	for _, j := range q.s.Jobs {
-		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && rank(j.Spec.Priority) > rank(priority) && (j.Spec.Resumable || priority == "production") && !m.CheckpointUnavailable && q.checkpointsAvailable() {
+		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && rank(j.Spec.Priority) > rank(priority) && (j.Spec.Resumable || priority == "production") && (priority == "production" || (!m.CheckpointUnavailable && q.checkpointsAvailable())) {
 			room += j.Spec.Needs.MemoryGB
 		}
 	}

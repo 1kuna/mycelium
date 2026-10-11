@@ -55,6 +55,36 @@ class CheckpointTests(unittest.TestCase):
             with self.assertRaises(json.JSONDecodeError):
                 checkpoint.load()
 
+    def test_generation_survives_skew_and_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            checkpoint = Checkpoint(folder)
+            old = checkpoint.save({"step": 2}, "z-old.json")
+            new = Checkpoint(folder).save({"step": 9}, "a-new.json")
+            os.utime(old, ns=(999999999999999999, 999999999999999999))
+            os.utime(new, ns=(1, 1))
+            self.assertEqual(Checkpoint(folder).load(), {"step": 9})
+            self.assertEqual(json.loads(new.read_text())["myce_checkpoint"]["generation"], 2)
+
+    def test_legacy_tie_and_invalid_generation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "a.json").write_text('{"step": 9}')
+            Path(folder, "z.json").write_text('{"step": 2}')
+            os.utime(Path(folder, "a.json"), ns=(999999999999999999, 999999999999999999))
+            self.assertEqual(Checkpoint(folder).load(), {"step": 2})
+            checkpoint = Checkpoint(folder)
+            path = checkpoint.save({"step": 10}, "a.json")
+            self.assertEqual(json.loads(path.read_text())["myce_checkpoint"]["generation"], 1)
+            self.assertEqual(checkpoint.load(), {"step": 10})
+            path.write_text('{"myce_checkpoint":{"generation":-1},"value":0}')
+            with self.assertRaises(ValueError):
+                checkpoint.load()
+
+    def test_legacy_metadata_name_without_sequence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value = {"myce_checkpoint": {"description": "legacy"}, "step": 9}
+            Path(folder, "checkpoint.json").write_text(json.dumps(value))
+            self.assertEqual(Checkpoint(folder).load(), value)
+
     def test_environment_and_signals(self):
         with tempfile.TemporaryDirectory() as folder:
             with patch.dict(os.environ, {"MYCE_CHECKPOINT_DIR": folder}):

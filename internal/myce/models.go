@@ -462,7 +462,7 @@ func (q *Queue) maintainModels() {
 			}
 			var victim *Job
 			for _, j := range q.s.Jobs {
-				if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && (j.Spec.Resumable || c.Priority == "production") && !m.CheckpointUnavailable && q.checkpointsAvailable() && rank(j.Spec.Priority) > rank(c.Priority) {
+				if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && (j.Spec.Resumable || c.Priority == "production") && (c.Priority == "production" || (!m.CheckpointUnavailable && q.checkpointsAvailable())) && rank(j.Spec.Priority) > rank(c.Priority) {
 					victim = j
 					possible += j.Spec.Needs.MemoryGB
 				}
@@ -491,9 +491,6 @@ func (q *Queue) maintainModels() {
 
 	}
 
-	if !q.checkpointsAvailable() {
-		return
-	}
 	waiting := []*Job{}
 	for _, j := range q.s.Jobs {
 		if j.State == "queued" {
@@ -504,7 +501,7 @@ func (q *Queue) maintainModels() {
 	// Each worker runs one batch command; a release can cover only one waiting job.
 	planned := map[string]bool{}
 	for _, j := range waiting {
-		if j.Spec.Priority == "experiment" {
+		if j.Spec.Priority == "experiment" || !q.checkpointReady(j, &Machine{}) {
 			continue
 		} // Nothing has a lower priority to reclaim.
 		if machine := q.makeBatchRoom(j, planned); machine != "" {
@@ -543,7 +540,7 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 		}
 	}
 	for _, j := range q.s.Jobs {
-		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && (j.Spec.Resumable || c.Priority == "production") && !m.CheckpointUnavailable && q.checkpointsAvailable() && rank(j.Spec.Priority) > rank(c.Priority) {
+		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && (j.Spec.Resumable || c.Priority == "production") && (c.Priority == "production" || (!m.CheckpointUnavailable && q.checkpointsAvailable())) && rank(j.Spec.Priority) > rank(c.Priority) {
 			possible += j.Spec.Needs.MemoryGB
 		}
 	}

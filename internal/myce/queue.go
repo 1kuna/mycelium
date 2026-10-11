@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -55,7 +54,11 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	nasProbe     checkpointIO[bool]
+	nasProgress  checkpointIO[int64]
+	nasAvailable bool
 	// simulation bypasses durable storage only; all scheduling/accounting paths remain shared.
+	checkpointProbe  func() bool // Filesystem fault seam.
 	simulation       bool
 	simID            int64
 	uploadSpool      uploadSpool
@@ -190,8 +193,9 @@ func (q *Queue) machineLossTimeout(id string) time.Duration {
 }
 
 // Simulated workers have an always-available pretend NAS; production still probes it.
-func (q *Queue) checkpointsAvailable() bool {
-	return q.simulation || checkpointAvailable(q.root)
+func (q *Queue) checkpointsAvailable() bool { return q.simulation || q.nasAvailable }
+func (q *Queue) checkpointReady(j *Job, m *Machine) bool {
+	return !needsCheckpoint(j) || (!m.CheckpointUnavailable && q.checkpointsAvailable())
 }
 func checkpointAvailable(root string) bool {
 	info, err := os.Stat(root)
@@ -221,7 +225,17 @@ func (q *Queue) Close() error {
 
 // Every mutation is atomic and durable; failed writes restore the previous state.
 func (q *Queue) update(fn func() error) error {
+	available := true
+	if !q.simulation {
+		available, _ = q.nasProbe.run(q.root, func() (bool, error) {
+			if q.checkpointProbe != nil {
+				return q.checkpointProbe(), nil
+			}
+			return checkpointAvailable(q.root), nil
+		})
+	}
 	q.mu.Lock()
+	q.nasAvailable = available
 	defer q.mu.Unlock()
 	if q.simulation {
 		q.usageWrites = nil
@@ -393,8 +407,30 @@ func (q *Queue) maintain() {
 func (q *Queue) Tick() error { return q.update(func() error { q.maintain(); return nil }) }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	reply := Reply{CheckpointRoot: q.root}
+	var durableProgress int64
+	var progressErr error
+	var progressPath string
+	if c.Running != nil {
+		q.mu.Lock()
+		if j := q.s.Jobs[c.Running.ID]; j != nil && j.Spec.Resumable && j.Attempt != c.Running.Attempt {
+			progressPath = attemptCheckpoint(*j)
+		}
+		q.mu.Unlock()
+		if progressPath != "" {
+			durableProgress, progressErr = q.nasProgress.run(progressPath, func() (int64, error) {
+				progress, err := checkpointProgress(progressPath)
+				if errors.Is(err, os.ErrNotExist) {
+					return 0, nil
+				}
+				return progress, err
+			})
+		}
+	}
 	err := q.update(func() error {
 		m := cloneMachine(&c.Machine)
+		if progressErr != nil {
+			m.CheckpointUnavailable = true
+		}
 		if !validMemoryValue(m.HostAvailableMemoryGB) {
 			return errors.New("invalid host memory report")
 		}
@@ -490,11 +526,11 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			j := q.s.Jobs[c.Running.ID]
 			if j != nil && !terminal(j.State) && j.Reason != "cancel requested" && (j.State == "queued" || j.Attempt != c.Running.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 				for _, copy := range j.Copies {
-					if copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable()) {
+					if q.placementAllowed(j, &m) && copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progressErr != nil || (progressPath != "" && progressPath != attemptCheckpoint(*j))) {
 						reply.Hold = true
 						return nil
 					}
-					if q.placementAllowed(j, &m) && copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && c.Running.Progress > max(j.Progress, completeProgress(filepath.Join(j.Checkpoint, "attempt-"+strconv.Itoa(j.Attempt)))))) {
+					if q.placementAllowed(j, &m) && copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && c.Running.Progress > max(0, durableProgress))) {
 						for i := range j.Copies {
 							j.Copies[i].Recoverable = false
 						}
@@ -524,7 +560,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			if c.Started && j.StartedAt == nil {
 				q.markStarted(j)
 			}
-			j.Progress = max(j.Progress, c.Running.Progress)
+			j.Progress = c.Running.Progress
 			if j.State == "stopping" {
 				reply.Stop = true
 				reply.Kill = expired(j.StopAt, q.clock.Now())
@@ -544,7 +580,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 					break
 				}
-				if m.CheckpointUnavailable || !q.checkpointsAvailable() {
+				if !q.checkpointReady(j, &m) {
 					return nil
 				}
 				out := cloneJob(j)
@@ -552,7 +588,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				return nil
 			}
 		}
-		if !m.Leaving && !m.CheckpointUnavailable && q.checkpointsAvailable() {
+		if !m.Leaving {
 			j := q.pick(&m)
 			if j != nil {
 				for _, c := range q.calls {
@@ -755,7 +791,7 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 			out.Warning = "queue restarted: waiting for workers to report"
 		}
 		if !q.checkpointsAvailable() {
-			out.Warning = "NAS checkpoint root is unreachable; jobs will not start"
+			out.Warning = "NAS checkpoint root is unreachable; checkpoint-dependent jobs will not start"
 		}
 		for _, m := range q.s.Machines {
 			if !m.Gone && m.CheckpointUnavailable {
@@ -773,7 +809,7 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 		for _, j := range q.s.Jobs {
 			if j.State == "queued" {
 				j.Reason = reasons[j.ID]
-				if !q.checkpointsAvailable() {
+				if needsCheckpoint(j) && !q.checkpointsAvailable() {
 					j.Reason = "NAS checkpoint root is unreachable"
 				}
 			}
@@ -953,9 +989,6 @@ func cloneMachine(m *Machine) Machine {
 	_ = json.Unmarshal(data, &out)
 	return out
 }
-
-// Both reconciliation and command startup use the same checkpoint rules.
-func completeProgress(root string) int64 { progress, _ := checkpointProgress(root); return progress }
 
 // Startup acknowledgements use queue time, avoiding cross-machine clock skew.
 func (q *Queue) markStarted(j *Job) {

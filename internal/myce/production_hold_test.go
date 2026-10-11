@@ -1,9 +1,11 @@
 package myce
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -748,5 +750,185 @@ func TestProductionHoldReportsModelUnloadFailure(t *testing.T) {
 	}
 	if got := check(t, q, b, nil).Job; got != nil {
 		t.Fatal("failed cleanup granted production")
+	}
+}
+
+func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testing.T) {
+	q, clock, a, b, spark := holdFleet(t, true)
+	x := submit(t, q, spec("experiment"))
+	x = check(t, q, a, nil).Job
+	blocked := filepath.Join(t.TempDir(), "nas-save")
+	if err := syscall.Mkfifo(blocked, 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("experiment")
+	s.Run.Env = map[string]string{"SAVE_BLOCK": blocked}
+	s.Run.Command = []string{"sh", "-c", `trap 'echo saving; cat "$SAVE_BLOCK"; exit 0' TERM; echo ready; while :; do sleep 0.01; done`}
+	y := submit(t, q, s)
+	y = check(t, q, b, nil).Job
+	if x == nil || y == nil {
+		t.Fatal("both host experiments must start")
+	}
+	w := recoveryWorker(t)
+	w.Machine = b
+	workerClock := &workerFakeClock{now: clock.Now()}
+	w.Clock = workerClock
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	store.state.Session = b.Session
+	payload := cloneJob(y)
+	payload.Checkpoint = filepath.Join(q.root, y.Checkpoint)
+	process, err := w.start(store, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.stop(workerClock.Now(), 0, true)
+	logged := func(text string) bool {
+		data, _ := os.ReadFile(filepath.Join(store.dir, store.state.Log))
+		return strings.Contains(string(data), text)
+	}
+	await(t, func() bool { return logged("ready") })
+	durable := []byte(`{"myce_checkpoint":{"generation":7},"value":"unit-7"}`)
+	if err := os.WriteFile(filepath.Join(attemptCheckpoint(payload), "checkpoint.json"), durable, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attemptCheckpoint(payload), "checkpoint.json.tmp"), []byte(`{"myce_checkpoint":{"generation":99}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Queue and worker NAS admission fail while the payload's save blocks on a FIFO.
+	q.checkpointProbe = func() bool { return false }
+	a.CheckpointUnavailable, b.CheckpointUnavailable = true, true
+	prodSpec := spec("production")
+	prodSpec.Resumable = false
+	prodSpec.AllowedMachines = []string{a.ID}
+	prod := submit(t, q, prodSpec)
+	rx, ry := check(t, q, a, x), check(t, q, b, y)
+	if !rx.Stop || !ry.Stop || ry.Kill || ry.GraceSeconds != 10 {
+		t.Fatalf("whole-host stop: %+v %+v", rx, ry)
+	}
+	process.stop(workerClock.Now(), time.Duration(ry.GraceSeconds)*time.Second, ry.Kill)
+	await(t, func() bool { return logged("saving") })
+	finish(t, q, x, false)
+	if check(t, q, a, nil).Job != nil {
+		t.Fatal("production started before blocked sibling released")
+	}
+	clock.Advance(9 * time.Second)
+	workerClock.Advance(9 * time.Second)
+	process.enforceGrace(workerClock.Now())
+	select {
+	case <-process.done:
+		t.Fatal("blocked save stopped before grace")
+	default:
+	}
+	if got := check(t, q, a, nil).Job; got != nil {
+		t.Fatal("production started before grace")
+	}
+	clock.Advance(time.Second)
+	workerClock.Advance(time.Second)
+	process.enforceGrace(workerClock.Now())
+	select {
+	case receipt := <-process.done:
+		if receipt.err != nil || !receipt.result.Forced || !receipt.result.Interrupted || receipt.result.ReleasePending {
+			t.Fatalf("force-stop did not release process group: %+v", receipt)
+		}
+		if err := q.Complete(receipt.result); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("force-stop waits for NAS save")
+	}
+	run := check(t, q, a, nil).Job
+	if run == nil || run.ID != prod.ID {
+		t.Fatalf("production blocked after grace and release: %+v", run)
+	}
+	productionWorker := recoveryWorker(t)
+	productionWorker.Machine = a
+	productionWorker.checkpointPrepare = func(Job) (string, error) {
+		t.Error("production touched NAS preparation")
+		return "", errors.New("NAS unavailable")
+	}
+	productionStore, err := productionWorker.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productionStore.close()
+	productionProcess, err := productionWorker.start(productionStore, *run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt := <-productionProcess.done; receipt.err != nil || !receipt.result.Success {
+		t.Fatalf("NAS-independent production failed: %+v", receipt)
+	}
+	if check(t, q, spark, nil).Job != nil {
+		t.Fatal("experiment resumed before NAS recovered")
+	}
+	q.checkpointProbe = func() bool { return true }
+	resumed := check(t, q, spark, nil).Job
+	if resumed == nil || resumed.ID != y.ID || resumed.Attempt != 2 || resumed.Losses != 0 || resumed.ProductionHost != "" {
+		t.Fatalf("displaced experiment did not migrate: %+v", resumed)
+	}
+	resumePayload := cloneJob(resumed)
+	resumePayload.Checkpoint = filepath.Join(q.root, resumed.Checkpoint)
+	dest, err := prepareCheckpoint(resumePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved, err := os.ReadFile(filepath.Join(dest, "checkpoint.json")); err != nil || string(saved) != string(durable) {
+		t.Fatalf("last durable generation lost: %s %v", saved, err)
+	}
+	if generation, err := checkpointProgress(dest); err != nil || generation != 7 {
+		t.Fatalf("incomplete save superseded durable generation: %d %v", generation, err)
+	}
+	resumeWorker := recoveryWorker(t)
+	resumeWorker.Machine = spark
+	resumeStore, err := resumeWorker.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumeStore.close()
+	resumePayload.Spec.Run.Env = map[string]string{"EXPECTED_CHECKPOINT": string(durable)}
+	resumePayload.Spec.Run.Command = []string{"sh", "-c", `test "$MYCE_MACHINE" = spark && test "$MYCE_ATTEMPT" = 2 && test "$(cat "$MYCE_CHECKPOINT_DIR/checkpoint.json")" = "$EXPECTED_CHECKPOINT"`}
+	resumeProcess, err := resumeWorker.start(resumeStore, resumePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt := <-resumeProcess.done; receipt.err != nil || !receipt.result.Success {
+		t.Fatalf("migrated command did not consume its durable checkpoint: %+v", receipt)
+	}
+	if check(t, q, b, nil).Job != nil || !q.held("b70") {
+		t.Fatal("NAS recovery reopened the production-held host")
+	}
+}
+
+func TestProductionHoldKillsLateCopyDuringNASLoss(t *testing.T) {
+	q, clock, a, b, spark := holdFleet(t, true)
+	x := submit(t, q, spec("experiment"))
+	x = check(t, q, b, nil).Job
+	a.FreeMemoryGB = 0
+	for i := 0; i < 61; i++ {
+		clock.Advance(time.Second)
+		check(t, q, a, nil)
+		check(t, q, spark, nil)
+	}
+	current := check(t, q, spark, nil).Job
+	if current == nil || current.ID != x.ID || current.Attempt != 2 {
+		t.Fatalf("missing replacement attempt: %+v", current)
+	}
+	a.FreeMemoryGB = 8
+	p := spec("production")
+	p.Resumable = false
+	p.AllowedMachines = []string{a.ID}
+	submit(t, q, p)
+	q.checkpointProbe = func() bool { return false }
+	b.CheckpointUnavailable = true
+	reply := check(t, q, b, x)
+	if !reply.Kill || reply.Hold {
+		t.Fatalf("NAS reconciliation retained a late copy on the held host: %+v", reply)
+	}
+	if got := job(t, q, x.ID); got.Attempt != 2 || got.Machine != spark.ID {
+		t.Fatalf("late copy replaced the current attempt: %+v", got)
 	}
 }
