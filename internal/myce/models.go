@@ -463,11 +463,15 @@ func (q *Queue) maintainModels() {
 		}
 	}
 	sort.Slice(waiting, func(i, j int) bool { return before(waiting[i], waiting[j], &Machine{}) })
+	// Each worker runs one batch command; a release can cover only one waiting job.
+	planned := map[string]bool{}
 	for _, j := range waiting {
 		if j.Spec.Priority == "experiment" {
 			continue
 		} // Nothing has a lower priority to reclaim.
-		q.makeBatchRoom(j)
+		if machine := q.makeBatchRoom(j, planned); machine != "" {
+			planned[machine] = true
+		}
 	}
 }
 func callJob(c *ModelCall) *Job {
@@ -941,7 +945,7 @@ func modelConfigHash(c ModelConfig) string {
 
 // Batch workers run one command at a time. Plan its release together with
 // resident models, rather than requiring either allocation alone to suffice.
-func (q *Queue) makeBatchRoom(j *Job) {
+func (q *Queue) makeBatchRoom(j *Job, planned map[string]bool) string {
 	type plan struct {
 		machine string
 		batch   *Job
@@ -951,11 +955,14 @@ func (q *Queue) makeBatchRoom(j *Job) {
 	}
 	var best *plan
 	for _, m := range q.s.Machines {
-		if q.unreported[m.ID] {
+		if q.unreported[m.ID] || planned[m.ID] {
 			continue
 		}
 		p := &plan{machine: m.ID}
 		room := m.FreeMemoryGB
+		if release, ok := q.s.BatchReleases[m.ID]; ok && release.Session == m.Session && q.clock.Now().Before(release.Until) {
+			room += release.MemoryGB
+		}
 		blocked := false
 		for _, r := range q.s.Jobs {
 			if r.Machine != m.ID || (r.State != "running" && r.State != "stopping") {
@@ -1071,7 +1078,7 @@ func (q *Queue) makeBatchRoom(j *Job) {
 		}
 	}
 	if best == nil {
-		return
+		return ""
 	}
 	q.reclaimHost(q.s.Machines[best.machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority, "job")
 	if best.batch != nil && rank(best.batch.Spec.Priority) > rank(j.Spec.Priority) {
@@ -1080,4 +1087,5 @@ func (q *Queue) makeBatchRoom(j *Job) {
 	for _, s := range best.slots {
 		s.State = "draining"
 	}
+	return best.machine
 }

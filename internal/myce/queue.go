@@ -27,7 +27,16 @@ const StopGrace = 2 * time.Minute
 
 var ErrStale = errors.New("stale execution: stop this copy")
 
+// A stop acknowledgement can precede the worker's free-memory report. This
+// credit is only for release planning, never for assigning work.
+type batchRelease struct {
+	Session  string    `json:"session"`
+	MemoryGB float64   `json:"memory_gb"`
+	Until    time.Time `json:"until"`
+}
+
 type state struct {
+	BatchReleases    map[string]batchRelease  `json:"batch_releases,omitempty"`
 	UsageMaintenance time.Time                `json:"usage_maintenance,omitempty"`
 	ProductionStarts []ProductionStart        `json:"production_starts,omitempty"`
 	Policies         map[string]ProjectPolicy `json:"project_policies,omitempty"`
@@ -304,6 +313,11 @@ func (q *Queue) stop(j *Job, why string) {
 }
 func (q *Queue) maintain() {
 	now := q.clock.Now()
+	for machine, release := range q.s.BatchReleases {
+		if !now.Before(release.Until) {
+			delete(q.s.BatchReleases, machine)
+		}
+	}
 	active, healthy := 0, 0
 	for _, m := range q.s.Machines {
 		if !m.Gone && !m.Leaving {
@@ -414,6 +428,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		m.Gone = false
 		m.LastSeen = q.clock.Now()
 		q.s.Machines[m.ID] = &m
+		delete(q.s.BatchReleases, m.ID) // This report supersedes acknowledgement credit.
 		q.reconcileModels(&m, c.ModelReports)
 		if e := q.reconcileEnvironments(&m); e != nil {
 			return e
@@ -588,6 +603,12 @@ func (q *Queue) Complete(r Result) error {
 			delete(q.unreported, m.ID)
 		}
 		if j.State == "stopping" {
+			if j.StopAt != nil && q.clock.Now().Before(*j.StopAt) {
+				if q.s.BatchReleases == nil {
+					q.s.BatchReleases = map[string]batchRelease{}
+				}
+				q.s.BatchReleases[j.Machine] = batchRelease{Session: j.Session, MemoryGB: j.Spec.Needs.MemoryGB, Until: *j.StopAt}
+			}
 			if j.Reason == "cancel requested" {
 				j.State = "cancelled"
 				j.StopAt = nil

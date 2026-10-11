@@ -42,7 +42,7 @@ func TestSimProductionPreemption(t *testing.T) {
 	prod := simTestStream("prod", "production", 10, 5, 1)
 	r := runSimTest(t, simTestFleet(2), simTestWork(exp, prod), 120)
 	nearSim(t, r.Production.Max, 1)
-	if r.Preemptions != 2 || r.Completed != 3 || r.LostSeconds != 0 {
+	if r.Preemptions != 1 || r.Completed != 3 || r.LostSeconds != 0 {
 		t.Fatalf("%+v", r)
 	}
 	nearSim(t, r.Projects["exp"].GPUHours, 200.0/3600)

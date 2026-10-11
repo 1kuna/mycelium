@@ -334,3 +334,117 @@ func TestProductionStartLatencyFakeClock(t *testing.T) {
 		t.Fatal("observation changed start measurement", got)
 	}
 }
+
+// Completion arrives before the worker's next memory report.
+func TestProductionPreemptionAcknowledgementDoesNotStopSecondCard(t *testing.T) {
+	q, c := fixture(t)
+	a, b := machine("a", "fake"), machine("b", "fake")
+	submit(t, q, spec("experiment"))
+	first := check(t, q, a, nil).Job
+	submit(t, q, spec("experiment"))
+	second := check(t, q, b, nil).Job
+	prod := submit(t, q, spec("production"))
+	if !check(t, q, a, first).Stop || check(t, q, b, second).Stop {
+		t.Fatal("one production job must stop exactly one experiment")
+	}
+	c.Advance(time.Second)
+	finish(t, q, first, false)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if check(t, q, b, second).Stop {
+		t.Fatal("acknowledged release must count while its memory report is pending")
+	}
+	assigned := check(t, q, a, nil).Job
+	if assigned == nil || assigned.ID != prod.ID {
+		t.Fatal("production must start on the first free report", assigned)
+	}
+	if err := q.Started(result(assigned, true)); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, prod.ID); got.StartLatencySeconds != 1 {
+		t.Fatal("production was delayed", got.StartLatencySeconds)
+	}
+	requireState(t, q, second.ID, "running")
+}
+
+func TestProductionPreemptionTwoJobsStopTwoCards(t *testing.T) {
+	q, _ := fixture(t)
+	a, b := machine("a", "fake"), machine("b", "fake")
+	submit(t, q, spec("experiment"))
+	first := check(t, q, a, nil).Job
+	submit(t, q, spec("experiment"))
+	second := check(t, q, b, nil).Job
+	p1 := submit(t, q, spec("production"))
+	p2 := submit(t, q, spec("production"))
+	if !check(t, q, a, first).Stop || !check(t, q, b, second).Stop {
+		t.Fatal("two production jobs need two experiment releases")
+	}
+	finish(t, q, first, false)
+	finish(t, q, second, false)
+	one, two := check(t, q, a, nil).Job, check(t, q, b, nil).Job
+	if one == nil || two == nil || one.ID == two.ID ||
+		(one.ID != p1.ID && one.ID != p2.ID) || (two.ID != p1.ID && two.ID != p2.ID) {
+		t.Fatal("both production jobs must start on free reports", one, two)
+	}
+}
+
+func TestProductionPreemptionReleaseGrace(t *testing.T) {
+	for _, acknowledged := range []bool{false, true} {
+		name := "stop never completes"
+		if acknowledged {
+			name = "completion without free memory report"
+		}
+		t.Run(name, func(t *testing.T) {
+			q, c := fixture(t)
+			a, b := machine("a", "fake"), machine("b", "fake")
+			submit(t, q, spec("experiment"))
+			first := check(t, q, a, nil).Job
+			submit(t, q, spec("experiment"))
+			second := check(t, q, b, nil).Job
+			submit(t, q, spec("production"))
+			if !check(t, q, a, first).Stop {
+				t.Fatal("first card must stop")
+			}
+			if acknowledged {
+				c.Advance(time.Second)
+				finish(t, q, first, false)
+				c.Advance(8 * time.Second)
+			} else {
+				c.Advance(9 * time.Second)
+				if check(t, q, a, first).Kill {
+					t.Fatal("killed before grace")
+				}
+			}
+			if check(t, q, b, second).Stop {
+				t.Fatal("second card stopped before release grace")
+			}
+			c.Advance(time.Second)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if !check(t, q, b, second).Stop {
+				t.Fatal("second card must stop when first release grace expires")
+			}
+		})
+	}
+}
+
+func TestProductionPreemptionFullReportSupersedesReleaseCredit(t *testing.T) {
+	q, c := fixture(t)
+	a, b := machine("a", "fake"), machine("b", "fake")
+	submit(t, q, spec("experiment"))
+	first := check(t, q, a, nil).Job
+	submit(t, q, spec("experiment"))
+	second := check(t, q, b, nil).Job
+	submit(t, q, spec("production"))
+	c.Advance(time.Second)
+	finish(t, q, first, false)
+	a.FreeMemoryGB = 0 // The command exited, but the memory remains unavailable.
+	if check(t, q, a, nil).Job != nil {
+		t.Fatal("release credit cannot admit work")
+	}
+	if !check(t, q, b, second).Stop {
+		t.Fatal("full memory report must allow another victim")
+	}
+}

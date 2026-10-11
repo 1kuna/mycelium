@@ -104,3 +104,10 @@ They do not add placement or fairness rules; regression tests compare decisions
 against the original scans. Fake-clock tests cover preemption, graceful leave,
 sudden loss/checkpoints, exact weighted allocation, fitting-idle accounting,
 model loading/reuse, impossible work, deadlines, batching and determinism.
+
+Production release planning counts commands already being stopped. After stop
+completion, it retains release credit until the next worker memory report or
+the original stop grace expires.
+Each waiting batch needs a separate card; release credit never admits a command
+before a free-memory report. The one-production/two-experiment fixture therefore
+interrupts exactly one experiment and starts production after its one-second save.
