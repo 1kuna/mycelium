@@ -13,17 +13,17 @@ from urllib.parse import quote
 root=Path('/home/user/synthetic-run')
 sys.path.insert(0,str(root/'source/scripts/pressure'))
 from pressure import DiagnosticReaders, drm_owners
-receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r5b.service')
+receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r6.service')
 try:
     baseline=json.loads((root/'display-baseline.json').read_text())
     evidence={}
     readers=DiagnosticReaders(json.loads((root/'diagnostic-executables.json').read_text()),root/'diagnostics.jsonl')
-    end=time.monotonic()+30
+    end=time.monotonic()+60
     while True:
         owners=drm_owners(['0000:07:00.0'],baseline=baseline,allowed=[],diagnostics=readers,evidence=evidence)
         if not readers.pending:break
         if time.monotonic()>=end:raise RuntimeError('diagnostic exit unconfirmed')
-        time.sleep(.5)
+        time.sleep(2)
     receipt.update(owners=owners,display=evidence['baseline_clients'],physical='released')
 except Exception as e:
     receipt.update(physical='HOLD',error=type(e).__name__)
@@ -47,7 +47,7 @@ remaining=[]
 for proc in Path('/proc').iterdir():
     if not proc.name.isdigit() or int(proc.name)==os.getpid():continue
     try:
-        if (proc/'cgroup').read_text().strip()=='0::/system.slice/myce-test-stage-ab-r5b.service':remaining.append(int(proc.name))
+        if (proc/'cgroup').read_text().strip()=='0::/system.slice/myce-test-stage-ab-r6.service':remaining.append(int(proc.name))
     except OSError:pass
 receipt['remaining_pids']=remaining
 ports=json.loads((root/'ports.json').read_text()) if (root/'ports.json').exists() else []

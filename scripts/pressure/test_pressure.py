@@ -25,6 +25,38 @@ def beginning(c: Checker, resumed: int = 0, attempt: int = 1) -> None:
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_foreign_reader_pause_continues_only_after_exit_and_memory_release(self):
+        import pressure
+        with tempfile.TemporaryDirectory() as tmp:
+            gate=pressure.ForeignReaderPause(Path(tmp)/'events')
+            self.assertTrue(gate.update(True, False, 10))
+            self.assertTrue(gate.update(False, False, 12))
+            self.assertTrue(gate.update(False, False, 70))
+            self.assertFalse(gate.update(False, True, 70))
+            self.assertEqual(gate.interruptions, 1)
+            rows=[json.loads(v) for v in (Path(tmp)/'events').read_text().splitlines()]
+            self.assertEqual([v['action'] for v in rows], ['paused','continued'])
+            self.assertEqual(rows[-1]['status'], 'interrupted-by-foreign-reader, continued')
+
+    def test_foreign_reader_pause_holds_after_sixty_seconds(self):
+        import pressure
+        for pending,released in ((True,False),(False,False)):
+            with self.subTest(pending=pending),tempfile.TemporaryDirectory() as tmp:
+                gate=pressure.ForeignReaderPause(Path(tmp)/'events')
+                gate.update(True, False, 0)
+                self.assertTrue(gate.update(pending,released,60))
+                with self.assertRaisesRegex(ValueError,'60 seconds'):
+                    gate.update(pending,released,60.01)
+
+    def test_all_readonly_diagnostics_and_no_mutating_or_file_commands(self):
+        import pressure
+        for args in ([b'stats',b'-d',b'0',b'-j'], [b'discovery'],
+                     [b'discovery',b'-j'], [b'dump',b'-d',b'1',b'-m',b'0,18',b'-n',b'5']):
+            with self.subTest(args=args):self.assertTrue(pressure.diagnostic_readonly(args))
+        for args in ([b'config',b'-d',b'1'],[b'dump',b'--file',b'anything'],
+                     [b'stats',b'--reset'],[b'discovery',b'-d',b'bad']):
+            with self.subTest(args=args):self.assertFalse(pressure.diagnostic_readonly(args))
+
     def test_round4_diagnostic_reader_identity_memory_and_lifetime(self):
         from unittest.mock import patch
         import hashlib
@@ -45,11 +77,13 @@ class EvidenceTests(unittest.TestCase):
             def scan(h):
                 with patch('pressure.drm_inventory',return_value=h):
                     return pressure.drm_owners(['0000:07:00.0'],allowed=[],diagnostics=readers)
+            # The real round-5 allocated-system footprint is valid under calibration.
+            holder['clients'][0]['allocated_bytes']={'drm-total-system':192937984}
             self.assertEqual(scan([holder]),{'0000:07:00.0':[]})
             self.assertEqual(json.loads(events.read_text().splitlines()[0])['action'],'observed')
             for change in (dict(exe='/untrusted/xpu-smi'),dict(stats_readonly=False),
-                    dict(clients=[{**holder['clients'][0],'resident_bytes':{'drm-resident-vram0':4*1024**2+1,'drm-resident-gtt':0}}]),
-                    dict(clients=[{**holder['clients'][0],'allocated_bytes':{'drm-total-vram0':8*1024**2}}]),
+                    dict(clients=[{**holder['clients'][0],'resident_bytes':{'drm-resident-vram0':readers.limits['max_memory_bytes']+1,'drm-resident-gtt':0}}]),
+                    dict(clients=[{**holder['clients'][0],'allocated_bytes':{'drm-total-vram0':readers.limits['max_memory_bytes']+1}}]),
                     dict(clients=[{**holder['clients'][0],'resident_bytes':{}}])):
                 with self.subTest(change=change),self.assertRaisesRegex(ValueError,'UNKNOWN'):
                     scan([{**holder,**change}])
@@ -57,7 +91,7 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'UNKNOWN'):scan([holder])
             exe.write_bytes(b'qualified diagnostic binary')
             # A live diagnostic remains accountable even after closing its DRM descriptor.
-            (root/'uptime').write_text('35749 0')
+            (root/'uptime').write_text('35780 0')
             with self.assertRaisesRegex(ValueError,'UNKNOWN'):scan([])
             (pid/'stat').unlink();(pid/'exe').unlink();pid.rmdir()
             self.assertEqual(scan([]),{'0000:07:00.0':[]})
@@ -413,8 +447,8 @@ class CommandTests(unittest.TestCase):
 class NativeRunnerTests(unittest.TestCase):
     def test_attempt_roots_use_the_same_fresh_suffix(self):
         import stage_ab
-        self.assertTrue(stage_ab.ROOT.name.endswith('r5b-20261011'))
-        self.assertTrue(stage_ab.NAS.name.endswith('r5b-20261011'))
+        self.assertTrue(stage_ab.ROOT.name.endswith('r6-20261011'))
+        self.assertTrue(stage_ab.NAS.name.endswith('r6-20261011'))
 
     def test_allowlists_refresh_after_inventory(self):
         import pressure
@@ -434,7 +468,7 @@ class NativeRunnerTests(unittest.TestCase):
     def test_first_native_failure_stops_before_the_matrix(self):
         import stage_ab
         from unittest.mock import patch
-        run=object.__new__(stage_ab.Run);run.a=None;run.url='unused';run.safety=None
+        run=object.__new__(stage_ab.Run);run.a=None;run.url='unused';run.safety=None;run.physical=lambda:None;run.gate=lambda:None
         run.finished=lambda *_:{'j':{'state':'failed'}};run.event=lambda *_:None
         with patch.object(stage_ab,'submit',return_value='j') as submission:
             with self.assertRaisesRegex(RuntimeError,'native_runtime_qualification_failed'):run.production_only()
@@ -455,7 +489,7 @@ class NativeRunnerTests(unittest.TestCase):
             ledger=Path(tmp)/'events.jsonl'
             ledger.write_text(json.dumps(dict(kind='start',pid=17,start_ticks=42))+'\n')
             run=object.__new__(stage_ab.Run)
-            run.receipts=[ledger];run.cgroup='0::/test.service'
+            run.receipts=[ledger];run.cgroup='0::/test.service';run.worker_cgroup=None
             identity=dict(pid=17,start=42,exe=os.path.realpath(stage_ab.XPU),cgroup=run.cgroup,boot='b')
             with patch.object(stage_ab,'process',return_value=identity):self.assertEqual(run.owned(),[identity])
             with patch.object(stage_ab,'process',return_value=dict(identity,start=43)):self.assertEqual(run.owned(),[])
