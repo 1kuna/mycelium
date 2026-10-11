@@ -59,6 +59,9 @@ def start(request):
     code='''from pathlib import Path
 import json,sys,subprocess,os
 r=json.load(sys.stdin);assert Path('/home/kuna/nas-dev').is_mount();root=Path("'''+ROOT+'''")
+cg=subprocess.check_output(['systemctl','--user','show','verso-loan-233-next-queue.service','-p','ControlGroup','--value'],text=True).strip()
+assert cg and int((Path('/sys/fs/cgroup')/cg.lstrip('/')/'memory.current').read_text()) < 14*1024**3
+assert int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))) >= 40*1024**2
 phase=root/'phases'/r['phase'];phase.mkdir(parents=True,exist_ok=True)
 env=phase/'worker.env';env.touch(mode=0o600);os.chmod(env,0o600);env.write_text('MYCE_TOKEN='+r['token']+'\\n')
 budget='38' if r['mode']=='full' else '40'
