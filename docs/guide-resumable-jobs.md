@@ -17,7 +17,12 @@ mounted NAS before starting the queue. Dev creates a local root.
 The stable job folder holds `attempt-1`, `attempt-2`, etc.; the environment points
 to the current attempt's folder. Before starting, the worker copies checkpoints
 from the attempt with the highest durable checkpoint generation.
-Temporary files ending in `.tmp` never count as complete and are never copied.
+Temporary files and directories ending in `.tmp` never count as complete and are never copied.
+Workers stage a complete attempt copy in an ignored temporary directory, then
+rename it into place, so a failed copy cannot publish a manifest without its payloads.
+Failed staging directories remain available for inspection; retries preserve an
+already prepared attempt's saves. If a writer publishes a new generation during
+copying, preparation retries rather than combining its manifest with an older payload list.
 This isolates disconnected copies so they cannot overwrite each other's saves.
 Old step-1 checkpoint files directly in the job folder are also preserved when
 resuming. Checkpoints remain after completion or failure.
