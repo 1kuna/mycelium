@@ -293,6 +293,15 @@ class CommandTests(unittest.TestCase):
 
 
 class NativeRunnerTests(unittest.TestCase):
+    def test_first_native_failure_stops_before_the_matrix(self):
+        import stage_ab
+        from unittest.mock import patch
+        run=object.__new__(stage_ab.Run);run.a=None;run.url='unused';run.safety=None
+        run.finished=lambda *_:{'j':{'state':'failed'}};run.event=lambda *_:None
+        with patch.object(stage_ab,'submit',return_value='j') as submission:
+            with self.assertRaisesRegex(RuntimeError,'native_runtime_qualification_failed'):run.production_only()
+            self.assertEqual(submission.call_count,1)
+
     def test_queue_observer_honors_bounded_timeout(self):
         import pressure
         from unittest.mock import patch
