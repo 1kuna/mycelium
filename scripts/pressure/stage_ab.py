@@ -9,6 +9,7 @@ import random
 import signal
 import socket
 import sqlite3
+import shutil
 import subprocess
 import threading
 import time
@@ -66,6 +67,9 @@ class Run:
         self.output = ROOT / 'results.json'
         signal.signal(signal.SIGTERM, lambda *_: self.stop.set())
         self.observer = threading.Thread(target=self.monitor, daemon=True)
+        self.counter = threading.Thread(target=self.counters, daemon=True)
+        self.passive = []
+        self.device_peak = 0
 
     def result(self, name, state, **evidence):
         self.results.append(dict(scenario=name, result=state, **evidence))
@@ -125,7 +129,7 @@ class Run:
 
     def physical(self, events=None):
         evidence = {}
-        owners = drm_owners([PCI], baseline=self.baseline, allowed=self.owned(), evidence=evidence)
+        owners = drm_owners([PCI], baseline=self.baseline, allowed=self.owned(), observers=self.passive, evidence=evidence)
         if len(owners[PCI]) > 1: raise RuntimeError('physical_double_owner')
         if events: emit(events, 'physical', valid=True, owners=owners)
         return evidence
@@ -148,13 +152,7 @@ class Run:
                     emit(active,'memory',valid=True,available_gib=available,minimum_available_gib=18)
                     try: observe(self.url, active)
                     except OSError: emit(active,'outage')
-                # xpu-smi may be slower than nominal sampling; raw timings remain in evidence.
-                stats = json.loads(subprocess.check_output(['xpu-smi','stats','-d','0','--json'], timeout=3))
-                assert stats['device_id'] == 0
-                metrics = {v['metrics_type']:v.get('value') for v in stats['device_level']}
-                gpu = float(metrics['XPUM_STATS_MEMORY_USED'])/1024
-                if gpu > 4: raise RuntimeError('device usage above 4 GiB test envelope')
-                self.total_peak['device_gib'] = max(self.total_peak['device_gib'],gpu)
+                gpu = self.device_peak
                 with (ROOT / 'samples.jsonl').open('a') as f:
                     f.write(json.dumps(dict(at=time.monotonic(),available_gib=available,
                         host_used_gib=(mem['MemTotal:']-mem['MemAvailable:'])/1024**2,
@@ -163,6 +161,31 @@ class Run:
                 self.safety = type(e).__name__ + ':' + str(e)
                 self.save(); return
             self.stop.wait(max(0,.5-(time.monotonic()-began)))
+
+    def counters(self):
+        # CLI probes take about one second. Keep physical/status/headroom at 0.5s independently.
+        executable=os.path.realpath(shutil.which('xpu-smi'))
+        while not self.stop.is_set():
+            try:
+                p=subprocess.Popen([executable,'stats','-d','0','--json'],stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,env={k:v for k,v in self.env.items() if not k.startswith('MYCE_')})
+                identity=process(p.pid);identity['exe']=executable
+                self.passive=[identity]
+                try:
+                    output,_=p.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    p.kill();p.communicate();raise
+                finally:self.passive=[]
+                if p.returncode:raise RuntimeError('native counter exit '+str(p.returncode))
+                stats=json.loads(output);assert stats['device_id']==0
+                metrics={v['metrics_type']:v.get('value') for v in stats['device_level']}
+                gpu=float(metrics['XPUM_STATS_MEMORY_USED'])/1024
+                if gpu>4:raise RuntimeError('device usage above 4 GiB test envelope')
+                self.device_peak=max(self.device_peak,gpu)
+                self.total_peak['device_gib']=self.device_peak
+            except Exception as e:
+                self.safety=type(e).__name__+':'+str(e);self.save();return
+            self.stop.wait(.05)
 
     def wait(self, condition, seconds=180):
         end = time.monotonic()+seconds
@@ -359,7 +382,9 @@ class Run:
         self.release_owned();self.start_worker()
 
     def cleanup(self):
-        self.active=None;self.stop.set();self.observer.join(timeout=5) if self.observer.ident is not None else None
+        self.active=None;self.stop.set()
+        for thread in (self.observer,self.counter):
+            if thread.ident is not None:thread.join(timeout=5)
         self.block.clear()
         if self.proxy:self.proxy.shutdown();self.proxy.server_close()
         for key in list(self.procs):self.halt(key)
@@ -424,7 +449,7 @@ class Run:
                 try:s=json.loads((d/'status').read_text())
                 except (ValueError,OSError):continue
                 assert not (s.get('state') in ('running','stopping','preempting') and s.get('assigned_xpu')==1)
-            self.observer.start()
+            self.counter.start();self.observer.start()
             self.scenario('A1-30-production',lambda:self.production_only())
             for seed in range(20):self.scenario(f'A2-swap-{seed:02}',lambda seed=seed:self.swap(seed))
             self.scenario('A3-direct-queue-60s',self.direct)

@@ -149,3 +149,9 @@ kernel policy. It writes per-scenario ledgers/results and terminal markers, uses
 `finalize_stage_ab.py` is its ExecStopPost cleanup, including recoverable Trash.
 CPU-only overlay tests and receipt-triggered GPU faults are reported separately;
 polling receipt boundaries do not qualify every internal gate/fsync crash point.
+
+The native counter CLI takes about 1 second and therefore runs separately from
+the 0.5-second physical/status/headroom observer. Only the exact operator-launched
+passive counter PID/start/executable/cgroup is exempted via `observers`; all its
+DRM clients remain in the inventory. This is distinct from the pinned display
+baseline. Unknown or reused counter identities still fail closed.

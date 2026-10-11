@@ -32,6 +32,22 @@ class EvidenceTests(unittest.TestCase):
             (root / str(os.getpid())).symlink_to(Path('/proc') / str(os.getpid()))
             self.assertEqual(drm_owners(['0000:07:00.0'], root), {'0000:07:00.0': []})
 
+    @unittest.skipUnless(Path('/proc/self/stat').exists(), 'Linux procfs required')
+    def test_confirmed_closed_descriptor_does_not_become_unknown_owner(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);pid=root/str(os.getpid());pid.mkdir();(pid/'fdinfo').mkdir();(pid/'fd').mkdir()
+            (pid/'stat').write_bytes(Path('/proc/self/stat').read_bytes())
+            entry=SimpleNamespace(name='99999',path=str(pid/'fdinfo/99999'))
+            class Scan:
+                def __enter__(self):return [entry]
+                def __exit__(self,*_):pass
+            with patch('pressure.os.scandir',return_value=Scan()):
+                self.assertEqual(drm_owners(['0000:07:00.0'],root), {'0000:07:00.0':[]})
+            with patch('pressure.os.scandir',return_value=Scan()), patch('pressure.os.readlink',side_effect=PermissionError(13,'denied')):
+                with self.assertRaises(PermissionError):drm_owners(['0000:07:00.0'],root)
+
     def test_drm_numeric_identity_and_multiple_processes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, pci = Path(tmp), "0000:07:00.0"
@@ -77,6 +93,11 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(len(evidence["holders"]), 3)
             self.assertEqual(len(evidence["baseline_clients"]), 1)
             self.assertEqual(evidence["baseline_clients"][0]["resident_bytes"]["drm-resident-vram0"], 5352 * 1024)
+            processes = [{k:h[k] for k in ("boot", "pid", "start", "exe", "cgroup")}
+                         for h in drm_inventory([pci], root)]
+            self.assertEqual(drm_owners([pci],root,allowed=[],observers=processes), {pci: []})
+            with self.assertRaisesRegex(ValueError,"UNKNOWN"):
+                drm_owners([pci],root,allowed=[],observers=[dict(h,start=h["start"]+1) for h in processes])
             (root / "2458/fd/9").symlink_to("/dev/dri/card1")
             (root / "2458/fdinfo/9").write_text(f"drm-pdev: {pci}\ndrm-client-id: 43\n")
             with self.assertRaisesRegex(ValueError, "UNKNOWN"):
