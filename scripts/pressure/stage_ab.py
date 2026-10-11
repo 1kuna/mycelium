@@ -50,7 +50,7 @@ class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r2d.service'
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r2e.service'
         self.baseline = json.loads((ROOT / 'display-baseline.json').read_text())
         self.env = {k:v for k,v in os.environ.items() if not k.startswith('MYCE_')}
         self.env['MYCE_TOKEN'] = os.urandom(32).hex()
@@ -137,23 +137,17 @@ class Run:
                     ids.append(identity)
         return ids
 
-    def measurement_observers(self):
+    def measurement_observers(self,holders=()):
         parent=self.procs.get('measure')
         if parent is None or parent.poll() is not None:return []
         expected=process(parent.pid)
         executable=os.path.realpath(shutil.which('xpu-smi'))
         observers=[]
-        for path in Path('/proc').iterdir():
-            if not path.name.isdigit():continue
-            try:
-                identity=process(int(path.name))
-                fields=(path/'stat').read_bytes().rsplit(b')',1)[1].split()
-                command=(path/'cmdline').read_bytes().split(b'\0')
-                if (int(fields[1])==parent.pid and identity['exe']==executable
-                        and identity['cgroup']==self.cgroup
-                        and command[1:5]==[b'stats',b'-d',b'0',b'--json']
-                        and process(parent.pid)==expected):observers.append(identity)
-            except (OSError,ValueError):continue
+        for holder in holders:
+            if (holder.get('ppid')==parent.pid and holder['exe']==executable
+                    and holder['cgroup']==self.cgroup and holder.get('stats_readonly')
+                    and process(parent.pid)==expected):
+                observers.append({k:holder[k] for k in ('boot','pid','start','exe','cgroup')})
         return observers
 
     def physical(self, events=None):
@@ -161,7 +155,7 @@ class Run:
         with self.inventory_lock:
             try:
                 owners = drm_owners([PCI], baseline=self.baseline, allowed=self.owned,
-                    observers=lambda:self.passive+self.measurement_observers(), evidence=evidence)
+                    observers=lambda holders:self.passive+self.measurement_observers(holders), evidence=evidence)
             except Exception:
                 atomic(ROOT/"ownership-failure.json",evidence);raise
         if len(owners[PCI]) > 1: raise RuntimeError('physical_double_owner')
@@ -483,7 +477,7 @@ class Run:
             self.result('B-forced-reboots','EXCLUDED',executed=False,reason='not approved')
             self.physical()
             pause_path=QUEUE/'PAUSED'
-            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r2d',nonce=os.urandom(16).hex()))+'\n').encode()
+            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r2e',nonce=os.urandom(16).hex()))+'\n').encode()
             with pause_path.open('xb') as f:f.write(self.pause);f.flush();os.fsync(f.fileno())
             (ROOT/'owned-pause').write_bytes(self.pause)
             time.sleep(1)

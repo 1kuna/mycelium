@@ -344,10 +344,10 @@ def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str,
                             parts = value.split()
                             if len(parts) == 1 and parts[0] == "0":
                                 resident[key] = 0
-                            elif len(parts) == 2 and parts[1] == "KiB":
-                                resident[key] = int(parts[0]) * 1024
+                            elif len(parts) == 2 and parts[0].isdigit() and parts[1] in {"B", "bytes", "KiB", "MiB", "GiB"}:
+                                resident[key] = int(parts[0]) * {"B":1,"bytes":1,"KiB":1024,"MiB":1024**2,"GiB":1024**3}[parts[1]]
                             else:
-                                raise ValueError("unsupported DRM memory units")
+                                raise ValueError("unsupported DRM memory units: " + key + "=" + repr(value))
                     key = (pci, target, int(client))
                     old = clients.get(key, {}).get("resident_bytes", {})
                     clients[key] = dict(pci=pci, device=target, client=int(client),
@@ -358,8 +358,12 @@ def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str,
             after_fields = after[after.rfind(b")") + 2:].split()
             if (int(after_fields[2]), int(after_fields[19])) != (group, start):
                 raise ValueError("process identity changed during DRM sample")
+            executable=os.readlink(pid/'exe')
+            stats_readonly=(os.path.basename(executable)=='xpu-smi' and
+                (pid/'cmdline').read_bytes().split(b'\0')[1:5]==[b'stats',b'-d',b'0',b'--json'])
             holders.append(dict(boot=clock_domain(), pid=int(pid.name), start=start,
-                                exe=os.readlink(pid / "exe"), cgroup=(pid / "cgroup").read_text().strip(),
+                                ppid=int(after_fields[1]),stats_readonly=stats_readonly,
+                                exe=executable, cgroup=(pid / "cgroup").read_text().strip(),
                                 clients=sorted(clients.values(), key=lambda c: (c["pci"], c["device"], c["client"]))))
         except OSError as error:
             if error.errno in (errno.ENOENT, errno.ESRCH) and not pid.exists():
@@ -381,7 +385,7 @@ def drm_owners(pcis: list[str], proc: Path = Path("/proc"), *,
     """Pinned display baseline is separate from allocation owners; unknowns fail closed."""
     holders = drm_inventory(pcis, proc)
     allowed = allowed() if callable(allowed) else allowed
-    observers = observers() if callable(observers) else observers
+    observers = observers(holders) if callable(observers) else observers
     if evidence is not None:evidence["holders"] = holders
     owners: dict[str, set[str]] = {p: set() for p in pcis}
     seen_baseline = []

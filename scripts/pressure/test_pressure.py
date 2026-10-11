@@ -305,8 +305,8 @@ class CommandTests(unittest.TestCase):
 class NativeRunnerTests(unittest.TestCase):
     def test_attempt_roots_use_the_same_fresh_suffix(self):
         import stage_ab
-        self.assertTrue(stage_ab.ROOT.name.endswith('r2d-20261011'))
-        self.assertTrue(stage_ab.NAS.name.endswith('r2d-20261011'))
+        self.assertTrue(stage_ab.ROOT.name.endswith('r2e-20261011'))
+        self.assertTrue(stage_ab.NAS.name.endswith('r2e-20261011'))
 
     def test_allowlists_refresh_after_inventory(self):
         import pressure
