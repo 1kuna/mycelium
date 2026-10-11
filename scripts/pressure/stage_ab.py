@@ -17,12 +17,12 @@ from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
 
-from pressure import (Checker, DiagnosticReaders, api, clock_domain, digest, drm_identity, drm_inventory,
+from pressure import (Checker, DiagnosticReaders, ForeignReaderPause, api, clock_domain, digest, drm_identity, drm_inventory,
                       drm_owners, emit, observe, replay, spec, submit)
 
 PCI = '0000:07:00.0'
-ROOT = Path('/home/kuna/myce-test-stage-ab-r5b-20261011')
-NAS = Path('/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r5b-20261011')
+ROOT = Path('/home/kuna/myce-test-stage-ab-r6-20261011')
+NAS = Path('/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r6-20261011')
 XPU = '/home/kuna/verso-labs/runtimes/experiment-xpu-venv/bin/python'
 QUEUE = Path('/home/kuna/exp42-queue')
 BASE = Path(__file__).parent
@@ -50,7 +50,7 @@ class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r5b.service'
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r6.service'
         self.baseline = json.loads((ROOT / 'display-baseline.json').read_text())
         self.diagnostics = DiagnosticReaders(json.loads((ROOT/'diagnostic-executables.json').read_text()),
                                              ROOT/'diagnostics.jsonl')
@@ -67,6 +67,13 @@ class Run:
         self.ack_armed = False
         self.total_peak = dict(device_gib=0, host_used_gib=0, cgroup_bytes=0)
         self.output = ROOT / 'results.json'
+        self.foreign=ForeignReaderPause(ROOT/'diagnostics.jsonl')
+        self.foreign_paused=threading.Event()
+        self.foreign_exited_at=None
+        self.next_scan=0
+        self.last_physical={}
+        self.interruptions_at_begin=0
+        self.worker_cgroup=None
         signal.signal(signal.SIGTERM, lambda *_: self.stop.set())
         self.observer = threading.Thread(target=self.monitor, daemon=True)
         self.counter = threading.Thread(target=self.counters, daemon=True)
@@ -78,6 +85,8 @@ class Run:
         self.ports = []
 
     def result(self, name, state, **evidence):
+        if self.foreign.interruptions>self.interruptions_at_begin:
+            evidence['interruption']='interrupted-by-foreign-reader, continued'
         self.results.append(dict(scenario=name, result=state, **evidence))
         self.save()
 
@@ -112,8 +121,21 @@ class Run:
             p.kill(); p.wait(timeout=5)
 
     def gate(self):
+        while self.foreign_paused.is_set():
+            if self.safety or self.stop.is_set():break
+            self.stop.wait(.1)
         if self.safety: raise RuntimeError('physical/memory safety hold: ' + self.safety)
         if self.stop.is_set(): raise RuntimeError('owned runner stop requested')
+
+    def submit(self, priority, units):
+        self.physical()
+        self.gate()
+        return submit(self.a,self.url,priority,units)
+
+    def submit_spec(self, request):
+        self.physical()
+        self.gate()
+        return api(self.url,'POST','/api/jobs',request)
 
     def owned(self):
         ids = []
@@ -134,7 +156,7 @@ class Run:
             for e in data:
                 try: identity = process(e['pid'])
                 except (OSError, KeyError): continue
-                if (identity['start'] == e.get('start_ticks') and identity['cgroup'] == self.cgroup
+                if (identity['start'] == e.get('start_ticks') and identity['cgroup'] in (self.cgroup,self.worker_cgroup)
                         and identity['exe'] == os.path.realpath(XPU)):
                     ids.append(identity)
         return ids
@@ -153,15 +175,38 @@ class Run:
         return observers
 
     def physical(self, events=None):
-        evidence = {}
         with self.inventory_lock:
+            now=time.monotonic()
+            if self.foreign_paused.is_set() and now<self.next_scan:return self.last_physical
+            evidence={}
             try:
-                owners = drm_owners([PCI], baseline=self.baseline, allowed=self.owned,
-                    diagnostics=self.diagnostics, evidence=evidence)
+                owners=drm_owners([PCI],baseline=self.baseline,allowed=self.owned,
+                    diagnostics=self.diagnostics,evidence=evidence)
+                pending=any(r['cgroup'] not in (self.cgroup,self.worker_cgroup)
+                            for r in self.diagnostics.pending.values())
+                if pending:self.foreign_exited_at=None
+                elif self.foreign.since is not None and self.foreign_exited_at is None:
+                    self.foreign_exited_at=now
+                # Corroborate vanished processes/DRM with a fresh independent driver counter.
+                allowed=self.owned();vram={}
+                for holder in evidence['holders']:
+                    identity={k:holder[k] for k in ('boot','pid','start','exe','cgroup')}
+                    if identity not in allowed:continue
+                    for client in holder['clients']:
+                        key=(client['pci'],client['client'])
+                        vram[key]=max(vram.get(key,0),sum(v for k,v in client['resident_bytes'].items()
+                                                     if k.startswith('drm-resident-vram')))
+                freed=(self.foreign_exited_at is not None and self.device_at>self.foreign_exited_at
+                       and self.device_current <= (48.140625+1)/1024+sum(vram.values())/1024**3)
+                paused=self.foreign.update(pending,freed,now)
+                if paused:self.foreign_paused.set();self.next_scan=now+2
+                else:self.foreign_paused.clear();self.next_scan=0
+                evidence['foreign_reader_paused']=paused
+                self.last_physical=evidence
             except Exception:
-                atomic(ROOT/"ownership-failure.json",evidence);raise
-        if len(owners[PCI]) > 1: raise RuntimeError('physical_double_owner')
-        if events: emit(events, 'physical', valid=True, owners=owners)
+                atomic(ROOT/'ownership-failure.json',evidence);raise
+        if len(owners[PCI])>1:raise RuntimeError('physical_double_owner')
+        if events:emit(events,'physical',valid=True,owners=owners)
         return evidence
 
     def monitor(self):
@@ -246,12 +291,14 @@ class Run:
             '--name','b70-pressure-gpu1','--host-id','b70-pressure-host',
             '--gpu','xpu','--device','0','--memory-mode','fixed','--memory-gb','4',
             '--reserve-host-memory-gb','18','--heartbeat','250ms',
-            '--state-dir',str(self.phase/'worker'),'--checkpoint-root',str(self.cp)]
+            '--state-dir',str(self.phase/'worker'),'--checkpoint-root',str(self.cp),
+            '--host-state-dir',str(ROOT/'host-state')]
         self.spawn('worker',self.wargs)
         self.wait(lambda: (api(self.url).get('machines') or []),10)
 
     def begin(self,name,bound=30,hold=False):
         self.gate()
+        self.interruptions_at_begin=self.foreign.interruptions
         self.phase = ROOT/'phases'/name; self.phase.mkdir()
         os.chown(self.phase,1000,1000)
         self.cp = NAS/name; self.nas_directory(self.cp)
@@ -323,13 +370,13 @@ class Run:
     def swap(self,seed,action=None):
         self.a.units=400 if action in ('refuse','worker-before-kill','worker-after-kill') else 40
         self.a.refuse_stop=action in ('refuse','worker-before-kill','worker-after-kill')
-        experiment=submit(self.a,self.url,'experiment',self.a.units)
+        experiment=self.submit('experiment',self.a.units)
         self.wait(lambda:self.event(experiment,'commit'))
         time.sleep(random.Random(seed).uniform(0,.19))
         if action=='queue-compute': self.halt('queue',True);self.start_queue()
         if action=='worker-compute': self.halt('worker',True);self.start_worker()
         if action=='partition': self.block.set()
-        production=submit(self.a,self.url,'production',1)
+        production=self.submit('production',1)
         if action=='queue-stopping':
             self.wait(lambda:any(j['id']==experiment and j['state']=='stopping' for j in api(self.url)['jobs']))
             self.halt('queue',True);self.start_queue()
@@ -389,11 +436,11 @@ class Run:
         self.wait(lambda:p.poll() is not None,100)
         assert p.returncode==0
         direct=self.event('direct','finish')
-        j=submit(self.a,self.url,'experiment',300);self.finished([j],100)
+        j=self.submit('experiment',300);self.finished([j],100)
         queued=self.event(j,'finish')
         ratio=(queued['kernels']/queued['compute_seconds'])/(direct['kernels']/direct['compute_seconds'])
-        self.results.append(dict(scenario='A3-throughput',result='PASS' if ratio>=.95 else 'FAIL',
-                                 ratio=ratio,direct=direct,queued=queued))
+        self.result('A3-throughput','PASS' if ratio>=.95 else 'FAIL',
+                    ratio=ratio,direct=direct,queued=queued)
 
     def measure(self,host):
         self.active=None
@@ -439,12 +486,12 @@ class Run:
             time.sleep(.3)
         final_evidence={}
         try:
-            end=time.monotonic()+30
+            end=time.monotonic()+60
             while True:
                 drm_owners([PCI],baseline=self.baseline,allowed=[],diagnostics=self.diagnostics,evidence=final_evidence)
                 if not self.diagnostics.pending:break
                 if time.monotonic()>=end:raise RuntimeError('diagnostic exit unconfirmed')
-                time.sleep(.5)
+                time.sleep(2)
             physical='released'
         except Exception as e:physical='HOLD:'+type(e).__name__
         if self.pause:
@@ -485,7 +532,7 @@ class Run:
             self.result('B-forced-reboots','EXCLUDED',executed=False,reason='not approved')
             self.physical()
             pause_path=QUEUE/'PAUSED'
-            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r5b',nonce=os.urandom(16).hex()))+'\n').encode()
+            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r6',nonce=os.urandom(16).hex()))+'\n').encode()
             with pause_path.open('xb') as f:f.write(self.pause);f.flush();os.fsync(f.fileno())
             (ROOT/'owned-pause').write_bytes(self.pause)
             time.sleep(1)
@@ -583,7 +630,7 @@ class Run:
         request['needs']['platform']={'preferred':['xpu','cuda']}
         request['needs']['memory_gb']=1;request['needs']['host_memory_gb']=.1
         request['allowed_machines']=['b70-pressure-gpu1','spark-pressure']
-        at=time.monotonic();job=api(self.url,'POST','/api/jobs',request)
+        at=time.monotonic();job=self.submit_spec(request)
         emit(self.events,'submit',at=at,job=job['id'],priority='experiment',units=40)
         return job['id']
 
@@ -593,12 +640,12 @@ class Run:
             try:
                 self.begin(name,hold=True)
                 self.a.memory_gib=1
-                experiment=self.portable() if mode else submit(self.a,self.url,'experiment',40)
+                experiment=self.portable() if mode else self.submit('experiment',40)
                 self.wait(lambda:self.event(experiment,'commit'))
                 if mode:
                     self.spark_request(mode);spark_started=True
                     self.wait(lambda:any(m['id']=='spark-pressure' for m in api(self.url)['machines']),20)
-                production=submit(self.a,self.url,'production',1)
+                production=self.submit('production',1)
                 self.wait(lambda:any(j['id']==production and j['state']=='succeeded' for j in api(self.url)['jobs']),45)
                 idle=self.event(production,'finish')['at']
                 status=api(self.url)
@@ -643,31 +690,31 @@ class Run:
     def boundary(self,boundary):
         if boundary=='completion-ack':
             self.proxy_start();self.ack_armed=True
-            experiment=submit(self.a,self.url,'experiment',10)
+            experiment=self.submit('experiment',10)
             self.wait(lambda:any(e['kind']=='fault' and e.get('boundary')=='completion-ack' for e in self.rows()))
         else:
             configured=spec(self.a,'experiment',40)
             command=configured['run']['command']
             configured['run']['command']=[XPU,str(BASE/'fault_job.py'),boundary,str(self.events)]+command[2:]
-            at=time.monotonic();job=api(self.url,'POST','/api/jobs',configured);experiment=job['id']
+            at=time.monotonic();job=self.submit_spec(configured);experiment=job['id']
             emit(self.events,'submit',at=at,job=experiment,priority='experiment',units=40)
             self.wait(lambda:any(e['kind']=='fault' and e.get('boundary')==boundary for e in self.rows()))
-        production=submit(self.a,self.url,'production',1)
+        production=self.submit('production',1)
         self.finished([experiment,production])
 
     def production_only(self):
         for index in range(30):
-            j=submit(self.a,self.url,'production',1);states=self.finished([j],45)
+            j=self.submit('production',1);states=self.finished([j],45)
             if index==0 and (states[j]['state']!='succeeded' or not self.event(j,'allocated')):
                 self.safety='native_runtime_qualification_failed'
                 raise RuntimeError(self.safety)
-        j=submit(self.a,self.url,'experiment',10);self.finished([j])
+        j=self.submit('experiment',10);self.finished([j])
 
     def backlog(self):
         self.a.units=80
-        experiment=submit(self.a,self.url,'experiment',80)
+        experiment=self.submit('experiment',80)
         self.wait(lambda:self.event(experiment,'commit'))
-        ids=[submit(self.a,self.url,'production',1) for _ in range(20)]
+        ids=[self.submit('production',1) for _ in range(20)]
         self.finished([experiment]+ids,180)
         starts=[self.event(j,'start')['at']-self.event(j,'submit')['at'] for j in ids]
         assert starts[0]<=30 and max(starts)<=68
@@ -675,7 +722,7 @@ class Run:
 
     def overcap(self):
         self.a.memory_gib=4.01
-        j=submit(self.a,self.url,'production',1)
+        j=self.submit('production',1)
         time.sleep(3)
         assert not self.event(j,'start')
         api(self.url,'POST',f'/api/jobs/{j}/cancel')
@@ -684,7 +731,7 @@ class Run:
     def wrong_allowlist(self):
         request=spec(self.a,'production',1)
         request['allowed_machines']=['not-an-approved-worker']
-        at=time.monotonic();job=api(self.url,'POST','/api/jobs',request);j=job['id']
+        at=time.monotonic();job=self.submit_spec(request);j=job['id']
         emit(self.events,'submit',at=at,job=j,priority='production',units=1)
         time.sleep(3)
         assert not self.event(j,'start')
@@ -700,7 +747,7 @@ class Run:
         env.pop('MYCE_TOKEN')
         p=self.spawn('wrong',cmd,env);self.wait(lambda:p.poll() is not None,10)
         assert p.returncode!=0 and not self.event('wrong-selector','allocated')
-        j=submit(self.a,self.url,'production',1);self.finished([j])
+        j=self.submit('production',1);self.finished([j])
 
 
 if __name__=='__main__':Run().run()

@@ -367,8 +367,7 @@ def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str,
                 raise ValueError("process identity changed during DRM sample")
             executable=os.readlink(pid/'exe')
             arguments=(pid/'cmdline').read_bytes().split(b'\0') if os.path.basename(executable)=='xpu-smi' else []
-            stats_readonly=(len(arguments)==6 and arguments[-1]==b'' and arguments[1]==b'stats'
-                and arguments[2]==b'-d' and arguments[3].isdigit() and arguments[4] in (b'--json',b'-j'))
+            stats_readonly=diagnostic_readonly(arguments[1:-1]) if arguments else False
             holders.append(dict(boot=clock_domain(), pid=int(pid.name), start=start,
                                 ppid=int(after_fields[1]),stats_readonly=stats_readonly,
                                 exe=executable, cgroup=(pid / "cgroup").read_text().strip(),
@@ -386,11 +385,66 @@ def drm_identity(holder: dict[str, Any]) -> dict[str, Any]:
             "clients": [{k: c[k] for k in ("pci", "device", "client")} for c in holder["clients"]]}
 
 
+def diagnostic_readonly(arguments):
+    if not arguments or arguments[0] not in (b'stats', b'discovery', b'dump'):return False
+    flags = {b'-d', b'--device'}
+    if arguments[0] == b'dump':flags |= {b'-m', b'--metrics', b'-t', b'--tile', b'-i', b'-n'}
+    seen=set();index=1
+    while index<len(arguments):
+        flag=arguments[index]
+        if flag in seen:return False
+        seen.add(flag);index+=1
+        if flag in (b'-j', b'--json'):continue
+        if flag not in flags or index==len(arguments):return False
+        value=arguments[index];index+=1
+        if flag in (b'-d',b'--device') and re.fullmatch(rb'(?:-1|[0-9]+(?:,[0-9]+)*|(?:[0-9a-f]{4}:)?[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])',value):continue
+        if flag not in (b'-d',b'--device') and re.fullmatch(rb'[0-9]+(?:,[0-9]+)*',value):continue
+        return False
+    return True
+
+
+def diagnostic_memory(holder):
+    memory={}
+    for client in holder['clients']:
+        measured={}
+        for field in ('resident_bytes','allocated_bytes'):
+            for name,value in client.get(field,{}).items():
+                kind=name.split('-',2)[2];measured[kind]=max(value,measured.get(kind,0))
+        if 'gtt' not in measured or not any(k.startswith('vram') for k in measured):
+            raise ValueError('UNKNOWN GPU user: diagnostic memory unavailable')
+        key=(client['pci'],client['client'])
+        memory[key]=max(sum(measured.values()),memory.get(key,0))
+    return sum(memory.values())
+
+
+class ForeignReaderPause:
+    """A foreign read pauses submissions until both process and memory are released."""
+    def __init__(self, events):
+        self.events=events;self.since=None;self.interruptions=0
+
+    def update(self, pending, released, now):
+        if pending and self.since is None:
+            self.since=now
+            emit(self.events,'diagnostic-pause',action='paused')
+        if self.since is None:return False
+        if now-self.since>60:
+            raise ValueError('UNKNOWN GPU user: foreign reader or memory persisted over 60 seconds')
+        if not pending and released:
+            emit(self.events,'diagnostic-pause',action='continued',seconds=now-self.since,
+                 status='interrupted-by-foreign-reader, continued')
+            self.since=None;self.interruptions+=1
+            return False
+        return True
+
+
 class DiagnosticReaders:
-    """Hash-pinned stats readers get a small memory and whole-process lifetime limit."""
-    def __init__(self, executables, events, proc=Path('/proc')):
+    """Hash-pinned read-only diagnostics use measured memory and a 60-second limit."""
+    def __init__(self, executables, events, proc=Path('/proc'), limits=None):
         self.executables, self.events, self.proc = executables, events, proc
         self.pending = {}
+        self.limits=limits or json.loads((Path(__file__).parent/'diagnostic-limits.json').read_text())
+        if self.limits['max_seconds'] != 60 or self.limits['max_memory_bytes'] <= 0:
+            raise ValueError('invalid diagnostic calibration')
 
     def __call__(self, holders):
         now = float((self.proc / 'uptime').read_text().split()[0])
@@ -406,24 +460,14 @@ class DiagnosticReaders:
             if raw is None or int(raw.rsplit(b')', 1)[1].split()[19]) != receipt['start']:
                 emit(self.events, 'diagnostic', action='exited', **receipt)
                 self.pending.pop(key)
-            elif now - receipt['start'] / ticks >= 30:
+            elif now - receipt['start'] / ticks > self.limits['max_seconds']:
                 emit(self.events, 'diagnostic', action='rejected', reason='lifetime', **receipt)
                 raise ValueError('UNKNOWN GPU user: diagnostic lifetime exceeded')
         for holder in holders:
             if holder['exe'] not in self.executables:continue
             identity = {k:holder[k] for k in ('boot','pid','start','exe','cgroup')}
             key = digest(identity)
-            memory = {}
-            for client in holder['clients']:
-                measured = {}
-                for field in ('resident_bytes','allocated_bytes'):
-                    for name, value in client.get(field, {}).items():
-                        kind = name.split('-', 2)[2]
-                        measured[kind] = max(value, measured.get(kind, 0))
-                if 'gtt' not in measured or not any(k.startswith('vram') for k in measured):
-                    raise ValueError('UNKNOWN GPU user: diagnostic memory unavailable')
-                client_key = (client['pci'], client['client'])
-                memory[client_key] = max(sum(measured.values()), memory.get(client_key, 0))
+            memory_bytes=diagnostic_memory(holder)
             pid = self.proc / str(holder['pid'])
             sha = hashlib.sha256()
             try:
@@ -444,10 +488,10 @@ class DiagnosticReaders:
                     executable != holder['exe'] or
                     int(raw.rsplit(b')', 1)[1].split()[19]) != holder['start']):reason='identity'
             elif not holder.get('stats_readonly'):reason='command'
-            elif sum(memory.values()) > 4*1024**2:reason='memory'
-            elif not 0 <= age < 30:reason='lifetime'
+            elif memory_bytes > self.limits['max_memory_bytes']:reason='memory'
+            elif not 0 <= age <= self.limits['max_seconds']:reason='lifetime'
             receipt = dict(**{k:v for k,v in identity.items() if k!='boot'}, holder_boot=identity['boot'],
-                           sha256=sha.hexdigest(), memory_bytes=sum(memory.values()))
+                           sha256=sha.hexdigest(), memory_bytes=memory_bytes)
             if reason:
                 emit(self.events, 'diagnostic', action='rejected', reason=reason, **receipt)
                 raise ValueError('UNKNOWN GPU user: diagnostic '+reason)
