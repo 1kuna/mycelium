@@ -8,8 +8,8 @@ import socket
 import subprocess
 import time
 
-ROOT='/home/kuna/myce-test-stage-ab-r2c-20261011'
-UNIT='myce-test-stage-ab-r2c-spark.service'
+ROOT='/home/kuna/myce-test-stage-ab-r2d-20261011'
+UNIT='myce-test-stage-ab-r2d-spark.service'
 UUID='GPU-90c3e7f2-22d3-5055-5f80-3ce0250c2830'
 procs=[]
 ports=[]
@@ -62,7 +62,7 @@ r=json.load(sys.stdin);assert Path('/home/kuna/nas-dev').is_mount();root=Path("'
 phase=root/'phases'/r['phase'];phase.mkdir(parents=True,exist_ok=True)
 env=phase/'worker.env';env.touch(mode=0o600);os.chmod(env,0o600);env.write_text('MYCE_TOKEN='+r['token']+'\\n')
 budget='38' if r['mode']=='full' else '39'
-args=['systemd-run','--user','--unit='''+UNIT+'''','--collect','--property=MemoryMax=2G','--property=MemorySwapMax=0','--property=CPUQuota=200%','--property=TimeoutStopSec=20s','--property=RuntimeMaxSec=20min','--property=EnvironmentFile='+str(env),str(root/'myce'),'join','--queue','http://127.0.0.1:'+str(r['sparkport']),'--name','spark-pressure','--host-id','spark-pressure-host','--gpu','cuda','--device','''+UUID+'''','--memory-mode','unified','--memory-gb',budget,'--reserve-memory-gb','38','--reserve-host-memory-gb','38','--heartbeat','250ms','--state-dir',str(phase/'worker'),'--checkpoint-root','/home/kuna/nas-dev/Verso/experiments/exp-238-mycelium-stage-ab-r2c-20261011/'+r['phase']]
+args=['systemd-run','--user','--unit='''+UNIT+'''','--collect','--property=MemoryMax=2G','--property=MemorySwapMax=0','--property=CPUQuota=200%','--property=TimeoutStopSec=20s','--property=RuntimeMaxSec=20min','--property=EnvironmentFile='+str(env),str(root/'myce'),'join','--queue','http://127.0.0.1:'+str(r['sparkport']),'--name','spark-pressure','--host-id','spark-pressure-host','--gpu','cuda','--device','''+UUID+'''','--memory-mode','unified','--memory-gb',budget,'--reserve-memory-gb','38','--reserve-host-memory-gb','38','--heartbeat','250ms','--state-dir',str(phase/'worker'),'--checkpoint-root','/home/kuna/nas-dev/Verso/experiments/exp-238-mycelium-stage-ab-r2d-20261011/'+r['phase']]
 result=subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 if result.returncode:raise SystemExit(result.returncode)
 print(json.dumps({'started':True,'reservation_gib':38,'atlas_reserve_gib':24,'verso_reserve_gib':14,'budget_gib':int(budget)}))
@@ -99,16 +99,16 @@ for port in ports:
  with socket.socket() as s:
   s.settimeout(.2)
   if s.connect_ex(('127.0.0.1',port))==0:occupied.append(port)
-unit=subprocess.run(['systemctl','--user','is-active','myce-test-stage-ab-r2c-spark.service'],capture_output=True,text=True).stdout.strip()
+unit=subprocess.run(['systemctl','--user','is-active','myce-test-stage-ab-r2d-spark.service'],capture_output=True,text=True).stdout.strip()
 remaining=[]
 for p in Path('/proc').iterdir():
  if not p.name.isdigit():continue
  try:
-  if (p/'cgroup').read_text().strip().endswith('/myce-test-stage-ab-r2c-spark.service'):remaining.append(int(p.name))
+  if (p/'cgroup').read_text().strip().endswith('/myce-test-stage-ab-r2d-spark.service'):remaining.append(int(p.name))
  except OSError:pass
-root=Path('/home/kuna/myce-test-stage-ab-r2c-20261011');trash=Path('/home/kuna/.local/share/Trash')
+root=Path('/home/kuna/myce-test-stage-ab-r2d-20261011');trash=Path('/home/kuna/.local/share/Trash')
 for sub in ('files','info'):(trash/sub).mkdir(parents=True,exist_ok=True)
-dest=trash/'files'/('myce-test-stage-ab-r2c-spark-'+str(time.time_ns()))
+dest=trash/'files'/('myce-test-stage-ab-r2d-spark-'+str(time.time_ns()))
 info=trash/'info'/(dest.name+'.trashinfo')
 if root.exists():
  info.write_text('[Trash Info]\\nPath='+quote(str(root))+'\\nDeletionDate='+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')+'\\n');root.rename(dest)

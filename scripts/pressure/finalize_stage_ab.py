@@ -10,10 +10,10 @@ import sys
 import time
 from urllib.parse import quote
 
-root=Path('/home/kuna/myce-test-stage-ab-r2c-20261011')
+root=Path('/home/kuna/myce-test-stage-ab-r2d-20261011')
 sys.path.insert(0,str(root/'source/scripts/pressure'))
 from pressure import drm_owners
-receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r2c.service')
+receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r2d.service')
 try:
     baseline=json.loads((root/'display-baseline.json').read_text())
     evidence={}
@@ -41,7 +41,7 @@ remaining=[]
 for proc in Path('/proc').iterdir():
     if not proc.name.isdigit() or int(proc.name)==os.getpid():continue
     try:
-        if (proc/'cgroup').read_text().strip()=='0::/system.slice/myce-test-stage-ab-r2c.service':remaining.append(int(proc.name))
+        if (proc/'cgroup').read_text().strip()=='0::/system.slice/myce-test-stage-ab-r2d.service':remaining.append(int(proc.name))
     except OSError:pass
 receipt['remaining_pids']=remaining
 ports=json.loads((root/'ports.json').read_text()) if (root/'ports.json').exists() else []
