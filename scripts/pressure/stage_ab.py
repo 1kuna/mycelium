@@ -149,8 +149,8 @@ class Run:
                     try: observe(self.url, active)
                     except OSError: emit(active,'outage')
                 # xpu-smi may be slower than nominal sampling; raw timings remain in evidence.
-                stats = json.loads(subprocess.check_output(['xpu-smi','stats','-d','1','--json'], timeout=3))
-                assert stats['device_id'] == 1
+                stats = json.loads(subprocess.check_output(['xpu-smi','stats','-d','0','--json'], timeout=3))
+                assert stats['device_id'] == 0
                 metrics = {v['metrics_type']:v.get('value') for v in stats['device_level']}
                 gpu = float(metrics['XPUM_STATS_MEMORY_USED'])/1024
                 if gpu > 4: raise RuntimeError('device usage above 4 GiB test envelope')
@@ -185,7 +185,7 @@ class Run:
     def start_worker(self):
         self.wargs = [str(ROOT/'myce'),'join','--queue',self.workerurl,
             '--name','b70-pressure-gpu1','--host-id','b70-pressure-host',
-            '--gpu','xpu','--device','1','--memory-mode','fixed','--memory-gb','4',
+            '--gpu','xpu','--device','0','--memory-mode','fixed','--memory-gb','4',
             '--reserve-host-memory-gb','18','--heartbeat','250ms',
             '--state-dir',str(self.phase/'worker'),'--checkpoint-root',str(self.cp)]
         self.spawn('worker',self.wargs)
@@ -206,7 +206,7 @@ class Run:
         self.start_queue(); self.start_worker()
         self.physical(self.events)
         self.active = self.events
-        self.a = SimpleNamespace(events=self.events, backend='xpu',card='1',machine='b70-pressure-gpu1',
+        self.a = SimpleNamespace(events=self.events, backend='xpu',card='1',selector='0',machine='b70-pressure-gpu1',
             python=XPU,units=40,unit_seconds=.2,host_mib=64,gpu_mib=64,memory_gib=4,
             host_reservation_gib=6,refuse_stop=False)
 
@@ -319,7 +319,7 @@ class Run:
         self.a.units=300
         cp=self.cp/'direct';cp.mkdir();os.chown(cp,1000,1000)
         env={**self.env,'MYCE_JOB_ID':'direct','MYCE_ATTEMPT':'1','MYCE_CHECKPOINT_DIR':str(cp),
-             'ONEAPI_DEVICE_SELECTOR':'level_zero:1','ZE_AFFINITY_MASK':'1'}
+             'ONEAPI_DEVICE_SELECTOR':'level_zero:0','ZE_AFFINITY_MASK':'0'}
         env.pop('MYCE_TOKEN')
         cmd=spec(self.a,'experiment',300)['run']['command']
         p=self.spawn('direct',cmd,env)
@@ -340,7 +340,7 @@ class Run:
         config=self.phase/f'measure-{host}.yaml'
         config.write_text(json.dumps(dict(models=[dict(name='synthetic',engine='server',path=str(manifest),
             size_bytes=manifest.stat().st_size,sha256=__import__('hashlib').sha256(manifest.read_bytes()).hexdigest(),
-            platforms=['xpu'],memory_gb=4,host_memory_gb=6,device='1',
+            platforms=['xpu'],memory_gb=4,host_memory_gb=6,device='0',
             device_env=dict(ONEAPI_DEVICE_SELECTOR='level_zero:{device}',ZE_AFFINITY_MASK='{device}'),
             start_command=[XPU,str(BASE/'measure_allocator.py'),'--port','{port}',
                            '--receipt',str(receipt),'--host-mib',str(host),'--gpu-mib','1024'],
@@ -349,7 +349,7 @@ class Run:
         for p in (config,warm):os.chown(p,1000,1000)
         prefix=self.phase/f'measure-{host}'
         args=[str(ROOT/'myce'),'measure','--queue',self.url,'--model-config',str(config),
-            '--models','synthetic','--worker','b70-pressure-gpu1','--device','1','--platform','xpu',
+            '--models','synthetic','--worker','b70-pressure-gpu1','--device','0','--platform','xpu',
             '--memory-gb','4','--state-dir',str(self.phase/'worker'),'--warmup',str(warm),
             '--report-prefix',str(prefix),'--load-timeout','40s']
         p=self.spawn('measure',args);self.wait(lambda:p.poll() is not None,70)
@@ -432,6 +432,7 @@ class Run:
             for host in (512,1024,2048,4096):self.measure(host)
             self.halt('worker');self.halt('queue');self.active=None
             self.scenario('A4-over-declaration',self.overcap)
+            self.scenario('A4-wrong-allowlist',self.wrong_allowlist)
             # Wrong selectors are rejected by the workload before any XPU runtime allocation.
             self.scenario('A4-wrong-selector',self.wrong_selector)
             for boundary in ('startup','save','completion-ack'):
@@ -514,6 +515,15 @@ class Run:
         assert not self.event(j,'start')
         api(self.url,'POST',f'/api/jobs/{j}/cancel')
         self.finished([j])
+
+    def wrong_allowlist(self):
+        request=spec(self.a,'production',1)
+        request['allowed_machines']=['not-an-approved-worker']
+        at=time.monotonic();job=api(self.url,'POST','/api/jobs',request);j=job['id']
+        emit(self.events,'submit',at=at,job=j,priority='production',units=1)
+        time.sleep(3)
+        assert not self.event(j,'start')
+        api(self.url,'POST',f'/api/jobs/{j}/cancel');self.finished([j])
 
     def wrong_selector(self):
         # A deliberately incompatible selector pair fails before importing torch.

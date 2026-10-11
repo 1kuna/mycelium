@@ -80,9 +80,10 @@ def workload(a: argparse.Namespace) -> int:
         for offset in range(0, len(host), 4096):
             host[offset] = 1
         torch = None
+        selector = a.selector if a.selector is not None else a.card
         if a.backend != "cpu":
-            if a.backend == "xpu" and (os.environ.get("ONEAPI_DEVICE_SELECTOR") != "level_zero:" + a.card
-                                       or os.environ.get("ZE_AFFINITY_MASK") != a.card):
+            if a.backend == "xpu" and (os.environ.get("ONEAPI_DEVICE_SELECTOR") != "level_zero:" + selector
+                                       or os.environ.get("ZE_AFFINITY_MASK") != selector):
                 raise RuntimeError("XPU worker selector does not match approved physical card")
             import torch
             backend = getattr(torch, a.backend)
@@ -388,6 +389,8 @@ def spec(a: argparse.Namespace, priority: str, units: int) -> dict[str, Any]:
     command = [a.python, str(Path(__file__).resolve()), "job", "--events", str(a.events.resolve()),
                "--card", a.card, "--backend", a.backend, "--units", str(units),
                "--unit-seconds", str(a.unit_seconds), "--host-mib", str(a.host_mib), "--gpu-mib", str(a.gpu_mib)]
+    if getattr(a,"selector",None) is not None:
+        command.extend(["--selector",a.selector])
     if priority == "experiment":
         command.append("--resumable")
     if a.refuse_stop:
@@ -463,6 +466,7 @@ def main() -> int:
     p.add_argument("--events", type=Path, required=True)
     p.add_argument("--backend", choices=["cpu", "xpu", "cuda"], default="cpu")
     p.add_argument("--card", default="fake-0")
+    p.add_argument("--selector", help="explicit runtime index from qualified PCI/device-fence mapping")
     p.add_argument("--machine", default="fake-1")
     p.add_argument("--python", default=sys.executable)
     p.add_argument("--units", type=int, default=30)
