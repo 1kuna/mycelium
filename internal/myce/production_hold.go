@@ -143,7 +143,7 @@ func (q *Queue) reconcileHostReleases(c Checkin) {
 
 // Placement policy is shared by batch, model, preparation and projections.
 func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
-	if !q.projectAllows(j.Spec.Project, m.ID) {
+	if m.Disabled != "" || q.s.DisabledHosts[hostID(m)] != "" || !q.projectAllows(j.Spec.Project, m.ID) {
 		return false
 	}
 	if j.ProductionHost != "" && j.ProductionHost != hostID(m) {

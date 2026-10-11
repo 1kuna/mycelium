@@ -38,17 +38,20 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
-	Session         string  `json:"session"`
-	PreviousSession string  `json:"previous_session,omitempty"`
-	Fresh           bool    `json:"fresh"`
-	Job             *Job    `json:"job,omitempty"`
-	Result          *Result `json:"result,omitempty"`
-	PID             int     `json:"pid,omitempty"`
-	Identity        string  `json:"identity,omitempty"`
-	Offset          int64   `json:"offset"`
-	Pending         int     `json:"pending,omitempty"`
-	CheckpointRoot  string  `json:"checkpoint_root,omitempty"`
-	Log             string  `json:"log,omitempty"`
+	Groups          map[int]map[int]string `json:"-"`
+	LaunchPending   bool                   `json:"launch_pending,omitempty"`
+	Birth           string                 `json:"birth,omitempty"`
+	Session         string                 `json:"session"`
+	PreviousSession string                 `json:"previous_session,omitempty"`
+	Fresh           bool                   `json:"fresh"`
+	Job             *Job                   `json:"job,omitempty"`
+	Result          *Result                `json:"result,omitempty"`
+	PID             int                    `json:"pid,omitempty"`
+	Identity        string                 `json:"identity,omitempty"`
+	Offset          int64                  `json:"offset"`
+	Pending         int                    `json:"pending,omitempty"`
+	CheckpointRoot  string                 `json:"checkpoint_root,omitempty"`
+	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
 	checkpointUnavailable bool
@@ -132,7 +135,7 @@ func saveWorkerJSON(dir, name string, v any) error {
 // Inspect both the leader and surviving descendants. The per-execution
 // marker prevents PID/PGID reuse from targeting an unrelated process group.
 func workerGroupMembers(group int) ([]int, error) {
-	out, err := exec.Command("ps", "-ax", "-o", "pid=,pgid=,stat=").Output()
+	out, err := hostPS("-ax", "-o", "pid=,pgid=,stat=")
 	if err != nil {
 		return nil, fmt.Errorf("inspect process groups: %w", err)
 	}
