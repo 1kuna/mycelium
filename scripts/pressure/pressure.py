@@ -342,20 +342,23 @@ def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str,
                     client = metrics.get("drm-client-id", "")
                     if not client.isdigit():
                         raise ValueError("DRM descriptor lacks numeric client identity")
-                    resident = {}
+                    resident, allocated = {}, {}
                     for key, value in metrics.items():
-                        if key.startswith("drm-resident-"):
+                        if key.startswith(("drm-resident-", "drm-total-", "drm-memory-")):
+                            memory = resident if key.startswith("drm-resident-") else allocated
                             parts = value.split()
                             if len(parts) == 1 and parts[0] == "0":
-                                resident[key] = 0
+                                memory[key] = 0
                             elif len(parts) == 2 and parts[0].isdigit() and parts[1] in {"B", "bytes", "KiB", "MiB", "GiB"}:
-                                resident[key] = int(parts[0]) * {"B":1,"bytes":1,"KiB":1024,"MiB":1024**2,"GiB":1024**3}[parts[1]]
+                                memory[key] = int(parts[0]) * {"B":1,"bytes":1,"KiB":1024,"MiB":1024**2,"GiB":1024**3}[parts[1]]
                             else:
                                 raise ValueError("unsupported DRM memory units: " + key + "=" + repr(value))
                     key = (pci, target, int(client))
                     old = clients.get(key, {}).get("resident_bytes", {})
+                    old_allocated = clients.get(key, {}).get("allocated_bytes", {})
                     clients[key] = dict(pci=pci, device=target, client=int(client),
-                                        resident_bytes={k: max(v, old.get(k, 0)) for k, v in resident.items()})
+                                        resident_bytes={k: max(v, old.get(k, 0)) for k, v in resident.items()},
+                                        allocated_bytes={k: max(v, old_allocated.get(k, 0)) for k, v in allocated.items()})
             if not clients:
                 continue
             after = (pid / "stat").read_bytes()
@@ -363,8 +366,9 @@ def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str,
             if (int(after_fields[2]), int(after_fields[19])) != (group, start):
                 raise ValueError("process identity changed during DRM sample")
             executable=os.readlink(pid/'exe')
-            stats_readonly=(os.path.basename(executable)=='xpu-smi' and
-                (pid/'cmdline').read_bytes().split(b'\0')[1:5]==[b'stats',b'-d',b'0',b'--json'])
+            arguments=(pid/'cmdline').read_bytes().split(b'\0') if os.path.basename(executable)=='xpu-smi' else []
+            stats_readonly=(len(arguments)==6 and arguments[-1]==b'' and arguments[1]==b'stats'
+                and arguments[2]==b'-d' and arguments[3].isdigit() and arguments[4] in (b'--json',b'-j'))
             holders.append(dict(boot=clock_domain(), pid=int(pid.name), start=start,
                                 ppid=int(after_fields[1]),stats_readonly=stats_readonly,
                                 exe=executable, cgroup=(pid / "cgroup").read_text().strip(),
@@ -382,16 +386,90 @@ def drm_identity(holder: dict[str, Any]) -> dict[str, Any]:
             "clients": [{k: c[k] for k in ("pci", "device", "client")} for c in holder["clients"]]}
 
 
+class DiagnosticReaders:
+    """Hash-pinned stats readers get a small memory and whole-process lifetime limit."""
+    def __init__(self, executables, events, proc=Path('/proc')):
+        self.executables, self.events, self.proc = executables, events, proc
+        self.pending = {}
+
+    def __call__(self, holders):
+        now = float((self.proc / 'uptime').read_text().split()[0])
+        ticks = os.sysconf('SC_CLK_TCK')
+        accepted = []
+        for key, receipt in list(self.pending.items()):
+            pid = self.proc / str(receipt['pid'])
+            try:
+                raw = (pid / 'stat').read_bytes()
+            except OSError as error:
+                if error.errno not in (errno.ENOENT, errno.ESRCH) or pid.exists():raise
+                raw = None
+            if raw is None or int(raw.rsplit(b')', 1)[1].split()[19]) != receipt['start']:
+                emit(self.events, 'diagnostic', action='exited', **receipt)
+                self.pending.pop(key)
+            elif now - receipt['start'] / ticks >= 30:
+                emit(self.events, 'diagnostic', action='rejected', reason='lifetime', **receipt)
+                raise ValueError('UNKNOWN GPU user: diagnostic lifetime exceeded')
+        for holder in holders:
+            if holder['exe'] not in self.executables:continue
+            identity = {k:holder[k] for k in ('boot','pid','start','exe','cgroup')}
+            key = digest(identity)
+            memory = {}
+            for client in holder['clients']:
+                measured = {}
+                for field in ('resident_bytes','allocated_bytes'):
+                    for name, value in client.get(field, {}).items():
+                        kind = name.split('-', 2)[2]
+                        measured[kind] = max(value, measured.get(kind, 0))
+                if 'gtt' not in measured or not any(k.startswith('vram') for k in measured):
+                    raise ValueError('UNKNOWN GPU user: diagnostic memory unavailable')
+                client_key = (client['pci'], client['client'])
+                memory[client_key] = max(sum(measured.values()), memory.get(client_key, 0))
+            pid = self.proc / str(holder['pid'])
+            sha = hashlib.sha256()
+            try:
+                with (pid / 'exe').open('rb') as stream:
+                    for block in iter(lambda:stream.read(1024*1024), b''):sha.update(block)
+                raw = (pid / 'stat').read_bytes()
+                executable = os.readlink(pid/'exe')
+            except OSError as error:
+                if error.errno in (errno.ENOENT, errno.ESRCH) and not pid.exists():
+                    emit(self.events, 'diagnostic', action='vanished-before-qualification',
+                         pid=holder['pid'], start=holder['start'], exe=holder['exe'])
+                    accepted.append(identity)
+                    continue
+                raise
+            age = now - holder['start'] / ticks
+            reason = None
+            if (sha.hexdigest() != self.executables[holder['exe']] or
+                    executable != holder['exe'] or
+                    int(raw.rsplit(b')', 1)[1].split()[19]) != holder['start']):reason='identity'
+            elif not holder.get('stats_readonly'):reason='command'
+            elif sum(memory.values()) > 4*1024**2:reason='memory'
+            elif not 0 <= age < 30:reason='lifetime'
+            receipt = dict(**{k:v for k,v in identity.items() if k!='boot'}, holder_boot=identity['boot'],
+                           sha256=sha.hexdigest(), memory_bytes=sum(memory.values()))
+            if reason:
+                emit(self.events, 'diagnostic', action='rejected', reason=reason, **receipt)
+                raise ValueError('UNKNOWN GPU user: diagnostic '+reason)
+            if key not in self.pending:
+                self.pending[key] = receipt
+                emit(self.events, 'diagnostic', action='observed', **receipt)
+            accepted.append(identity)
+        return accepted
+
+
 def drm_owners(pcis: list[str], proc: Path = Path("/proc"), *,
                baseline: list[dict[str, Any]] | None = None,
                allowed: list[dict[str, Any]] | None = None,
                observers: list[dict[str, Any]] = (),
+               diagnostics=None,
                evidence: dict[str, Any] | None = None) -> dict[str, list[str]]:
     """Pinned display baseline is separate from allocation owners; unknowns fail closed."""
     holders = drm_inventory(pcis, proc)
     allowed = allowed() if callable(allowed) else allowed
     observers = observers(holders) if callable(observers) else observers
     if evidence is not None:evidence["holders"] = holders
+    if diagnostics is not None:observers = [*observers, *diagnostics(holders)]
     owners: dict[str, set[str]] = {p: set() for p in pcis}
     seen_baseline = []
     shared = {}
