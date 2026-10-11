@@ -338,13 +338,18 @@ func (q *Queue) maintain() {
 			j.Reason = "give-up time reached"
 		}
 	}
+	q.refreshHostMemory()
 	q.maintainModels()
+	q.refreshHostMemory()
 }
 func (q *Queue) Tick() error { return q.update(func() error { q.maintain(); return nil }) }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	reply := Reply{CheckpointRoot: q.root}
 	err := q.update(func() error {
 		m := cloneMachine(&c.Machine)
+		if !validMemoryValue(m.HostAvailableMemoryGB) {
+			return errors.New("invalid host memory report")
+		}
 		if m.ID == "" || m.Session == "" || !validGPU(m.GPU) || !validMemoryValue(m.TotalMemoryGB) || m.FreeMemoryGB < 0 || math.IsNaN(m.FreeMemoryGB) || math.IsInf(m.FreeMemoryGB, 0) {
 			return errors.New("invalid machine report")
 		}
@@ -521,6 +526,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				j.Machine = m.ID
 				j.Session = m.Session
 				j.Reason = ""
+				q.refreshHostMemory()
 				out := cloneJob(j)
 				reply.Job = &out
 			}
@@ -667,6 +673,9 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 		for _, c := range q.calls {
 			call := callJob(c)
 			call.Spec.Name = "model call: " + c.Model
+			model, _ := q.model(c.Model)
+			call.Spec.Needs.MemoryGB = model.MemoryGB
+			call.Spec.Needs.HostMemoryGB = model.HostMemoryGB
 			call.Machine = c.Machine
 			call.State = "queued"
 			call.Reason = "waiting for model " + c.Model + " on an eligible worker"
@@ -676,6 +685,22 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 			}
 			if reason := q.capReason(call); reason != "" {
 				call.Reason = reason
+			}
+			if c.Machine == "" && model.HostMemoryGB > 0 {
+				eligible, room := false, false
+				for _, m := range q.s.Machines {
+					if m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) {
+						continue
+					}
+					eligible = true
+					slot := q.s.ModelSlots[slotKey(m.ID, c.Model)]
+					if slot != nil && (slot.State == "ready" || slot.State == "loading") || hostFits(m, model.MemoryGB, model.HostMemoryGB) {
+						room = true
+					}
+				}
+				if eligible && !room {
+					call.Reason = fmt.Sprintf("waiting for RAM: model %s needs %.1f GiB host memory (or telemetry unavailable)", c.Model, model.HostMemoryGB)
+				}
 			}
 			if c.Machine != "" {
 				call.State = "running"

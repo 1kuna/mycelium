@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -279,5 +281,116 @@ func TestMeasureFailedUnloadKeepsEnvironmentLease(t *testing.T) {
 	r, err := Measure(context.Background(), o)
 	if err == nil || released || r.Fits || r.Error == "" {
 		t.Fatalf("unsafe failed cleanup lease: released=%t report=%+v err=%v", released, r, err)
+	}
+}
+
+func TestMeasureOverlappingWarmups(t *testing.T) {
+	o := measureTestOptions(t)
+	o.WarmupParallel = 2
+	o.Models = append(o.Models, Model{Name: "three", Platforms: []string{"cuda"}})
+	o.SampleInterval = time.Millisecond
+	var active atomic.Int32
+	sampled := make(chan struct{})
+	var once sync.Once
+	o.ReadMemory = func(context.Context) (MemoryReading, error) {
+		n := active.Load()
+		if n == 2 {
+			once.Do(func() { close(sampled) })
+		}
+		return MemoryReading{float64(n * 4), float64(n * 5)}, nil
+	}
+	o.Warmup = map[string]MeasureWarmup{"one": {Path: "/infer"}, "two": {Path: "/infer"}, "three": {Path: "/infer"}}
+	var engines []*measurementEngine
+	o.NewEngine = func(Model, string, Clock) Engine {
+		e := &measurementEngine{load: func(context.Context, Model) error { return nil }, call: func(c context.Context, _ string, _ []byte) (*http.Response, error) {
+			active.Add(1)
+			defer active.Add(-1)
+			select {
+			case <-sampled:
+				return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
+			case <-c.Done():
+				return nil, c.Err()
+			}
+		}}
+		engines = append(engines, e)
+		return e
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+	defer cancel()
+	r, err := Measure(ctx, o)
+	if err != nil || r.Peak.DeviceGB != 8 || r.Peak.HostGB != 10 || r.WarmupParallel != 2 {
+		t.Fatalf("%+v %v", r, err)
+	}
+	for _, e := range engines {
+		if !e.unloaded {
+			t.Fatal("cleanup")
+		}
+	}
+}
+func TestMeasureLoadTimeoutOption(t *testing.T) {
+	o := measureTestOptions(t)
+	o.LoadTimeout = time.Millisecond
+	o.Models = o.Models[:1]
+	e := &measurementEngine{load: func(c context.Context, _ Model) error { <-c.Done(); return c.Err() }}
+	o.NewEngine = func(Model, string, Clock) Engine { return e }
+	_, err := Measure(context.Background(), o)
+	if !errors.Is(err, context.DeadlineExceeded) || !e.unloaded {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestMeasureWarmupFailureCancelsPeers(t *testing.T) {
+	o := measureTestOptions(t)
+	o.WarmupParallel = 2
+	o.Warmup = map[string]MeasureWarmup{"one": {Path: "/infer"}, "two": {Path: "/infer"}}
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	var engines []*measurementEngine
+	o.NewEngine = func(m Model, _ string, _ Clock) Engine {
+		e := &measurementEngine{load: func(context.Context, Model) error { return nil }, call: func(c context.Context, _ string, _ []byte) (*http.Response, error) {
+			if m.Name == "one" {
+				close(started)
+				<-c.Done()
+				close(cancelled)
+				return nil, c.Err()
+			}
+			<-started
+			return nil, errors.New("warm failure")
+		}}
+		engines = append(engines, e)
+		return e
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+	defer cancel()
+	r, err := Measure(ctx, o)
+	if err == nil || r.Fits {
+		t.Fatalf("%+v %v", r, err)
+	}
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("peer not cancelled before return")
+	}
+	for _, e := range engines {
+		if !e.unloaded {
+			t.Fatal("engine not cleaned up")
+		}
+	}
+}
+func TestMeasureSeparatesWarmupTime(t *testing.T) {
+	o := measureTestOptions(t)
+	o.Models = o.Models[:1]
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	o.Worker.Clock = clock
+	o.Warmup = map[string]MeasureWarmup{"one": {Path: "/infer"}}
+	o.NewEngine = func(Model, string, Clock) Engine {
+		return &measurementEngine{load: func(context.Context, Model) error { clock.Advance(5 * time.Second); return nil }, call: func(context.Context, string, []byte) (*http.Response, error) {
+			clock.Advance(2 * time.Second)
+			return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
+		}}
+	}
+	r, err := Measure(context.Background(), o)
+	if err != nil || r.Models[0].LoadSeconds != 5 || r.Models[0].WarmupSeconds != 2 || r.WarmupSeconds != 2 {
+		t.Fatalf("%+v %v", r, err)
 	}
 }

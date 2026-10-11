@@ -17,6 +17,7 @@ models:
     size_bytes: EXACT_BYTES
     sha256: APPROVED_HASH
     memory_gb: MEASURED_WEIGHTS_PLUS_ACTIVATIONS_AND_RUNTIME_GIB
+    host_memory_gb: MEASURED_ADDITIONAL_CPU_SIDE_RAM_GIB
     platforms: [xpu]
     device: '0'
     device_env:
@@ -50,6 +51,10 @@ CUDA selectors resolve to a stable GPU UUID used by both server execution and
 `nvidia-smi --id` inventory; numeric CUDA ordering cannot change the measured card. XPU admission remains
 an explicit conservative fixed allowance, not a live external-allocation guard.
 Catalog `device` restricts placement to workers advertising that selector.
+Every card worker on one machine shares `--host-id` (default OS hostname).
+Optional catalog `host_memory_gb` and batch `needs.host_memory_gb` reserve RAM
+from that shared host allowance, rather than independently per card. See
+[host admission](operations.md#host-ram-admission) for the unified-memory rule.
 No second worker/controller may own that card. A selector is framework isolation,
 not an OS security boundary; qualify it with the real runtime before cutover.
 

@@ -77,6 +77,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	productionGrace := f.Duration("production-stop-grace", 10*time.Second, "production checkpoint grace")
 	heartbeat := f.Duration("heartbeat", time.Second, "worker check-in interval")
 	memoryMode := f.String("memory-mode", "auto", "memory source: auto, unified, dedicated, or fixed")
+	hostReserve := f.Float64("reserve-host-memory-gb", 4, "host RAM reserve in GiB (unified uses the larger GPU/host reserve once)")
 	reserve := f.Float64("reserve-memory-gb", 0, "GPU memory to keep outside Mycelium")
 	productionLoss := f.Duration("production-loss-timeout", myce.ProductionLossAfter, "quiet timeout for production work")
 	deadlineLoss := f.Duration("deadline-loss-timeout", myce.DeadlineLossAfter, "quiet timeout for deadline work")
@@ -85,6 +86,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	stateDir := f.String("state-dir", "", "durable local worker spool directory")
 	hostname, _ := os.Hostname()
 	name := f.String("name", hostname, "unique machine name")
+	hostID := f.String("host-id", hostname, "physical host identity shared by every per-card worker")
 	device := f.String("device", "", "physical GPU selector override (one device per worker)")
 	gpu := f.String("gpu", "", "GPU override: cuda, xpu, metal, or fake (join auto-detects when omitted)")
 	memory := f.Float64("memory-gb", 0, "memory cap in GiB (required for fixed/XPU/fake budgets)")
@@ -228,7 +230,19 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *copyParallel < 1 {
 			return errors.New("model-copy-parallel must be positive")
 		}
-		w := myce.Worker{DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		unified, err := myce.DetectUnifiedMemory(ctx, *gpu, binding, *memoryMode)
+		if err != nil {
+			return err
+		}
+		ramReserve := *hostReserve
+		if unified {
+			ramReserve = max(ramReserve, *reserve)
+		}
+		hostSource, err := myce.NewHostMemorySource(ramReserve)
+		if err != nil {
+			return err
+		}
+		w := myce.Worker{HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
@@ -345,6 +359,12 @@ func printStatus(s myce.Snapshot, full bool) {
 			state = "gone"
 		} else if m.Leaving {
 			state = "leaving"
+		}
+		if m.HostMemoryError != "" {
+			state += "; host RAM unavailable: " + m.HostMemoryError
+		}
+		if m.HostMemoryMeasured {
+			state += fmt.Sprintf("; host %s RAM %.1f GiB available for admission", m.HostID, m.FreeHostMemoryGB)
 		}
 		if m.MemoryError != "" {
 			state += "; memory unavailable: " + m.MemoryError

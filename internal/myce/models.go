@@ -32,6 +32,7 @@ type VLLMPreset struct {
 	GPUMemoryUtilization float64 `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
 }
 type Model struct {
+	HostMemoryGB    float64           `yaml:"host_memory_gb,omitempty" json:"host_memory_gb,omitempty"`
 	MaxInFlight     int               `yaml:"max_in_flight,omitempty" json:"max_in_flight,omitempty"`
 	Files           []ModelFile       `yaml:"files,omitempty" json:"files,omitempty"`
 	Environment     string            `yaml:"environment,omitempty" json:"environment,omitempty"`
@@ -88,6 +89,9 @@ func validateModels(c ModelConfig) error {
 	}
 	seen := map[string]bool{}
 	for _, m := range c.Models {
+		if !validMemoryValue(m.HostMemoryGB) {
+			return errors.New("host_memory_gb must be finite and nonnegative")
+		}
 		if m.MaxInFlight < 0 {
 			return errors.New("max_in_flight must be nonnegative (zero means unlimited)")
 		}
@@ -396,9 +400,10 @@ func (q *Queue) maintainModels() {
 		allocated := false
 		// Check all free workers before draining a model or stopping any batch.
 		for _, m := range eligible {
-			if m.FreeMemoryGB >= model.MemoryGB {
+			if m.FreeMemoryGB >= model.MemoryGB && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
 				q.s.ModelSlots[slotKey(m.ID, c.Model)] = &ModelSlot{Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", Priority: c.Priority, LastUsed: now}
 				m.FreeMemoryGB -= model.MemoryGB
+				q.refreshHostMemory()
 				allocated = true
 				break
 			}
@@ -407,6 +412,9 @@ func (q *Queue) maintainModels() {
 			continue
 		}
 		for _, m := range eligible {
+			if _, _, ok := q.hostReleases(m, model.MemoryGB, model.HostMemoryGB, c.Priority); !ok {
+				continue
+			}
 			possible := m.FreeMemoryGB
 			for _, s := range q.s.ModelSlots {
 				if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > rank(c.Priority) {
@@ -424,6 +432,7 @@ func (q *Queue) maintainModels() {
 			if possible < model.MemoryGB {
 				continue
 			}
+			q.reclaimHost(m, model.MemoryGB, model.HostMemoryGB, c.Priority, "model call")
 			q.makeModelRoom(m, model.MemoryGB, c.Priority)
 			if victim != nil && m.FreeMemoryGB+q.modelMemory(m.ID) < model.MemoryGB {
 				q.stopFor(victim, c.Priority, "model call")
@@ -493,7 +502,8 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 			possible += j.Spec.Needs.MemoryGB
 		}
 	}
-	return possible >= model.MemoryGB
+	_, _, hostOK := q.hostReleases(m, model.MemoryGB, model.HostMemoryGB, c.Priority)
+	return possible >= model.MemoryGB && hostOK
 }
 func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
 	for _, j := range q.s.Jobs {
@@ -966,7 +976,8 @@ func (q *Queue) makeBatchRoom(j *Job) {
 			possible += model.MemoryGB
 			count++
 		}
-		if !fits(j, m, possible) {
+		hostJobs, hostSlots, hostOK := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority)
+		if !hostOK || !fitsWithoutHostMemory(j, m, possible) {
 			continue
 		}
 		// Within that count prefer idle models, only when the remaining largest
@@ -1002,6 +1013,28 @@ func (q *Queue) makeBatchRoom(j *Job) {
 			slots = append(slots[:chosen], slots[chosen+1:]...)
 			count--
 		}
+		for _, victim := range hostJobs {
+			if victim != p.batch && victim.State == "running" {
+				p.stops++
+				if !victim.Spec.Resumable {
+					p.cost++
+				}
+			}
+		}
+		for _, victim := range hostSlots {
+			found := false
+			for _, s := range p.slots {
+				if s == victim {
+					found = true
+				}
+			}
+			if !found && victim.State != "draining" {
+				p.stops++
+				if victim.InFlight > 0 {
+					p.cost++
+				}
+			}
+		}
 		if best == nil || p.stops < best.stops || p.stops == best.stops && (p.cost < best.cost || p.cost == best.cost && p.machine < best.machine) {
 			best = p
 		}
@@ -1009,6 +1042,7 @@ func (q *Queue) makeBatchRoom(j *Job) {
 	if best == nil {
 		return
 	}
+	q.reclaimHost(q.s.Machines[best.machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority, "job")
 	if best.batch != nil && rank(best.batch.Spec.Priority) > rank(j.Spec.Priority) {
 		q.stopFor(best.batch, j.Spec.Priority, "job")
 	}

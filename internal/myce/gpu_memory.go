@@ -235,3 +235,49 @@ func resolveCUDADevice(ctx context.Context, selector string, command func(contex
 	}
 	return uuid, nil
 }
+
+// NewHostMemorySource reports live reclaimable RAM after the operator reserve.
+func NewHostMemorySource(reserve float64) (MemorySource, error) {
+	return newHostMemorySource(reserve, runtime.GOOS, os.ReadFile, func(c context.Context, name string, args ...string) ([]byte, error) {
+		return exec.CommandContext(c, name, args...).Output()
+	})
+}
+func newHostMemorySource(reserve float64, goos string, readFile func(string) ([]byte, error), command func(context.Context, string, ...string) ([]byte, error)) (MemorySource, error) {
+	if !validMemoryValue(reserve) {
+		return nil, errors.New("host memory reserve must be finite and nonnegative")
+	}
+	return func(ctx context.Context) (float64, error) {
+		c, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		n, err := hostAvailableMemory(c, goos, readFile, command)
+		if err != nil {
+			return 0, err
+		}
+		return max(0, n-reserve), nil
+	}, nil
+}
+
+// DetectUnifiedMemory uses the same unsupported-CUDA marker as admission.
+func DetectUnifiedMemory(ctx context.Context, platform, device, mode string) (bool, error) {
+	if platform == "metal" || mode == "unified" {
+		return true, nil
+	}
+	if platform != "cuda" || mode != "auto" {
+		return false, nil
+	}
+	c, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	args := []string{"--query-gpu=memory.free", "--format=csv,noheader,nounits"}
+	if device != "" {
+		args = append(args, "--id="+device)
+	}
+	out, err := exec.CommandContext(c, "nvidia-smi", args...).Output()
+	if err != nil {
+		return false, fmt.Errorf("detect unified CUDA memory: %w", err)
+	}
+	_, err = parseCUDAFreeMemory(out)
+	if errors.Is(err, errUnifiedMemory) {
+		return true, nil
+	}
+	return false, err
+}

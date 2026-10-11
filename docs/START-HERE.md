@@ -187,7 +187,7 @@ the IDs and arrange another single background wait if work is still running.
    A batch's `needs.model` is a placement/copy hint; it does not start a server.
 
 6. **Make execution possible on every eligible worker.** Choose measured
-   `needs.memory_gb`, supported `needs.platform`, and any `allowed_machines`.
+   `needs.memory_gb` and optional additional `needs.host_memory_gb`, supported `needs.platform`, and any `allowed_machines`.
    `platform: any` is for genuinely portable commands, including laptop fakes;
    it does not convert CUDA software to Metal or XPU. Use an argument array in
    `run.command`, not an implicit shell. Set an existing absolute `run.workdir`.

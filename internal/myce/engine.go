@@ -361,6 +361,8 @@ type modelRuntime struct {
 	url                   string
 	closing               bool
 	engineFactory         func(Model) Engine
+	hostMemorySource      MemorySource
+	unifiedMemory         bool
 	memorySource          MemorySource
 	memoryMeasured        bool
 	batchMemory           *atomic.Uint64
@@ -409,6 +411,8 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	rt.device, rt.platform = w.Machine.Device, w.Machine.GPU
 	rt.environmentCache = w.environmentCache
 	rt.environmentSourceRoot = w.EnvironmentSourceRoot
+	rt.hostMemorySource = w.HostMemorySource
+	rt.unifiedMemory = w.Machine.UnifiedMemory
 	rt.memorySource = w.MemorySource
 	rt.memoryMeasured = w.MemoryMeasured
 	rt.batchMemory = w.batchMemory
@@ -564,6 +568,19 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 }
 
 func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {
+	if loading.model.HostMemoryGB > 0 {
+		if rt.hostMemorySource == nil {
+			return errors.New("model load requires host RAM source")
+		}
+		free, e := rt.hostMemorySource(ctx)
+		need := loading.model.HostMemoryGB
+		if rt.unifiedMemory {
+			need += loading.model.MemoryGB
+		}
+		if e != nil || !validMemoryValue(free) || free < need {
+			return fmt.Errorf("insufficient host RAM for model %s: need %.1f GiB, available %.1f GiB: %v", loading.model.Name, need, free, e)
+		}
+	}
 	if rt.memorySource == nil {
 		return errors.New("model load requires a free-memory source")
 	}
