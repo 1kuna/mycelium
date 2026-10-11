@@ -241,6 +241,7 @@ class Run:
         self.qargs = [str(ROOT/'myce'),'queue','--listen',f'127.0.0.1:{self.port}',
             '--db',str(self.phase/'queue.db'),'--checkpoints',str(self.cp),
             '--production-stop-grace','10s','--restart-grace','5s']
+        if (self.phase/'hosts.json').exists():self.qargs+=['--host-config',str(self.phase/'hosts.json')]
         self.spawn('queue', self.qargs)
         self.wait(lambda: api(self.url),10)
 
@@ -253,7 +254,7 @@ class Run:
         self.spawn('worker',self.wargs)
         self.wait(lambda: (api(self.url).get('machines') or []),10)
 
-    def begin(self,name,bound=30):
+    def begin(self,name,bound=30,hold=False):
         self.gate()
         self.phase = ROOT/'phases'/name; self.phase.mkdir()
         os.chown(self.phase,1000,1000)
@@ -266,6 +267,7 @@ class Run:
         self.ports.append(self.port);atomic(ROOT/'ports.json',self.ports)
         self.url = f'http://127.0.0.1:{self.port}'
         self.workerurl=self.url
+        if hold:(self.phase/'hosts.json').write_text(json.dumps(dict(hosts={'b70-pressure-host':dict(production_hold=True,production_idle='180s')})))
         self.start_queue(); self.start_worker()
         self.physical(self.events)
         os.chown(self.events,1000,1000)
@@ -478,7 +480,6 @@ class Run:
             assert json.loads((d/'meta.json').read_text())['enabled'] is False
             assert json.loads((d/'status').read_text())['state']=='failed'
             self.fixed_defect_probes()
-            self.result('B-whole-machine-hold','PENDING',executed=False,reason='approved de2365b follow-on; separate detached runner')
             self.result('B-forced-reboots','EXCLUDED',executed=False,reason='not approved')
             self.physical()
             pause_path=QUEUE/'PAUSED'
@@ -518,13 +519,14 @@ class Run:
                     self.scenario(name,work)
                     if self.proxy:self.proxy.shutdown();self.proxy.server_close();self.proxy=None
             self.scenario('B-20-job-backlog',self.backlog,68)
-            self.result('B-Docker-settlement','HOLD',executed=False,
+            self.result('B-Docker-settlement','EXPECTED FAIL',executed=False,
                 reason='reviewed adapter/isolated daemon absent; raw command does not settle accepted daemon starts')
             self.result('B-NAS-native-hung-IO-boundaries','HOLD',executed=False,
                 reason='missing-root probes are covered; actual hung-filesystem injection is not qualified')
             self.result('B-exact-start-save-ack-fsync-hooks','HOLD',executed=False,
                 reason='native crash triggers use receipt boundaries; internal gate/fsync cut points qualified only by test binary, not a GPU job')
 
+            self.followons()
             marker='DONE' if all(r['result'] in ('PASS','EXPECTED FAIL','EXCLUDED') for r in self.results) else 'FAILED'
         except Exception as e:
             error=dict(type=type(e).__name__,detail=str(e));self.result('runner','HOLD' if self.safety else 'FAIL',error=error)
@@ -557,6 +559,84 @@ class Run:
         self.result('B-native-CPU-state-and-control-matrix','PASS' if p.returncode==0 else 'FAIL',
             log=str(log),scope='real B70 filesystem/process/API tests; fake clocks and CPU commands, no GPU allocation',
             invariants='test assertions; no GPU job ledger for this CPU-only subset')
+
+    def spark_request(self,mode):
+        request=dict(mode=mode,phase=self.phase.name,port=self.port,boot=clock_domain(),
+            request_id=os.urandom(16).hex(),token=self.env['MYCE_TOKEN'])
+        path=ROOT/'spark-request.json'
+        temporary=path.with_suffix('.tmp')
+        fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+        with os.fdopen(fd,'w') as stream:json.dump(request,stream);stream.flush();os.fsync(stream.fileno())
+        temporary.replace(path)
+        def reply():
+            path=ROOT/'spark-response.json'
+            if not path.exists():return None
+            value=json.loads(path.read_text())
+            if value.get('mode')==mode and value.get('phase')==self.phase.name:return value
+        response=self.wait(reply,45)
+        assert response['ok'], 'Spark transport/worker failed: '+response.get('error','unknown')
+        return response
+
+    def portable(self):
+        request=spec(self.a,'experiment',40)
+        request['run']['command']=['/usr/bin/python3',str(BASE/'migration_job.py'),str(self.events),'40']
+        request['needs']['platform']={'preferred':['xpu','cuda']}
+        request['needs']['memory_gb']=1;request['needs']['host_memory_gb']=.1
+        request['allowed_machines']=['b70-pressure-gpu1','spark-pressure']
+        at=time.monotonic();job=api(self.url,'POST','/api/jobs',request)
+        emit(self.events,'submit',at=at,job=job['id'],priority='experiment',units=40)
+        return job['id']
+
+    def followons(self):
+        for mode,name in ((None,'B-whole-host-hold'),('active','C-migrate-to-Spark'),('full','C-Spark-full-return-B70')):
+            spark_started=False
+            try:
+                self.begin(name,hold=True)
+                self.a.memory_gib=1
+                experiment=self.portable() if mode else submit(self.a,self.url,'experiment',40)
+                self.wait(lambda:self.event(experiment,'commit'))
+                if mode:
+                    self.spark_request(mode);spark_started=True
+                    self.wait(lambda:any(m['id']=='spark-pressure' for m in api(self.url)['machines']),20)
+                production=submit(self.a,self.url,'production',1)
+                self.wait(lambda:any(j['id']==production and j['state']=='succeeded' for j in api(self.url)['jobs']),45)
+                idle=self.event(production,'finish')['at']
+                status=api(self.url)
+                holds=status.get('host_holds') or []
+                assert any('production idle' in text or 'production hold' in text for text in holds)
+                waiting=None
+                if mode=='full':
+                    waiting=next(j for j in status['jobs'] if j['id']==experiment)
+                    assert waiting['state']=='queued' and waiting.get('reason'), 'no visible capacity/hold explanation'
+                self.finished([experiment,production],300)
+                if spark_started:
+                    mapping=self.spark_request('stop');spark_started=False
+                    sparkrows=json.loads((self.phase/'spark-events.json').read_text())
+                else:sparkrows=[];mapping={}
+                resumed=[r for r in self.rows()+sparkrows if r['kind']=='start' and r.get('job')==experiment and r['attempt']>1]
+                assert len(resumed)==1 and resumed[0]['resumed']>0
+                if mode=='active':
+                    assert resumed[0]['machine']=='spark-pressure' and resumed[0]['platform']=='cuda'
+                else:
+                    assert resumed[0]['at']-idle>=180, 'B70 reopened before 180 idle seconds'
+                self.active=None
+                observe(self.url,self.events);self.physical(self.events)
+                # Receipt clocks are mapped with recorded RTT uncertainty; use only final status after all output arrives.
+                rows=self.rows();final_status=next(r for r in reversed(rows) if r['kind']=='status')
+                checker=Checker(30,True,(PCI,))
+                for row in sorted([r for r in rows if r['kind']!='status']+sparkrows,key=lambda r:r['at']):checker.feed(row)
+                checker.feed(final_status);checked=checker.finish()
+                self.result(name,'PASS' if not checked['violations'] else 'FAIL',checker=checked,
+                    host_holds=holds,waiting=waiting,placement=resumed,clock_mapping=mapping,
+                    reopen_seconds=resumed[0]['at']-idle if mode!='active' else None)
+                self.halt('worker');self.halt('queue');self.release_owned()
+            except Exception as error:
+                self.result(name,'HOLD' if self.safety else 'FAIL',error=type(error).__name__,detail=str(error))
+                if spark_started:
+                    try:self.spark_request('stop')
+                    except Exception:pass
+                self.active=None;self.halt('worker');self.halt('queue');self.release_owned()
+                if self.safety:raise
 
     def boundary(self,boundary):
         if boundary=='completion-ack':
