@@ -80,6 +80,20 @@ class EvidenceTests(unittest.TestCase):
             with patch('pressure.os.readlink',side_effect=[FileNotFoundError(2,'closed'),'/dev/null']):
                 self.assertEqual(drm_owners(['0000:07:00.0'],root),{'0000:07:00.0':[]})
 
+    def test_memory_units_are_explicit_and_unknown_units_refuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);p=root/'17';(p/'fd').mkdir(parents=True);(p/'fdinfo').mkdir()
+            fields=['S','1','17']+['0']*16+['42']
+            (p/'stat').write_text('17 (test) '+' '.join(fields));(p/'exe').symlink_to('/test')
+            (p/'cgroup').write_text('0::/test');(p/'fd/1').symlink_to('/dev/dri/card1')
+            info=p/'fdinfo/1'
+            for unit,multiplier in [('B',1),('bytes',1),('KiB',1024),('MiB',1024**2),('GiB',1024**3)]:
+                info.write_text('drm-pdev: 0000:07:00.0\ndrm-client-id: 1\ndrm-resident-vram0: 2 '+unit+'\n')
+                self.assertEqual(drm_inventory(['0000:07:00.0'],root)[0]['clients'][0]['resident_bytes']['drm-resident-vram0'],2*multiplier)
+            info.write_text('drm-pdev: 0000:07:00.0\ndrm-client-id: 1\ndrm-resident-vram0: 2 mystery\n')
+            with self.assertRaisesRegex(ValueError,'unsupported DRM memory units'):
+                drm_inventory(['0000:07:00.0'],root)
+
     def test_real_b70_shared_display_shape_and_unknown_holder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, pci = Path(tmp), "0000:07:00.0"
