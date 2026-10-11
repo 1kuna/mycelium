@@ -25,6 +25,13 @@ def beginning(c: Checker, resumed: int = 0, attempt: int = 1) -> None:
 
 
 class EvidenceTests(unittest.TestCase):
+    @unittest.skipUnless(Path('/proc/self/fdinfo').is_dir(), 'Linux procfs required')
+    def test_drm_collector_does_not_race_its_own_directory_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / str(os.getpid())).symlink_to(Path('/proc') / str(os.getpid()))
+            self.assertEqual(drm_owners(['0000:07:00.0'], root), {'0000:07:00.0': []})
+
     def test_drm_numeric_identity_and_multiple_groups(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, pci = Path(tmp), "0000:07:00.0"
