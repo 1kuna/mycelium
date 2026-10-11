@@ -70,6 +70,16 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises((IndexError, ValueError)):
                 drm_owners([pci], root)
 
+    def test_reused_non_gpu_descriptor_is_read_again(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);p=root/'1115';(p/'fd').mkdir(parents=True);(p/'fdinfo').mkdir()
+            fields=['S','1','1115']+['0']*16+['42']
+            (p/'stat').write_text('1115 (polkitd) '+' '.join(fields))
+            (p/'fd/11').symlink_to('/dev/null');(p/'fdinfo/11').write_text('pos: 0\n')
+            with patch('pressure.os.readlink',side_effect=[FileNotFoundError(2,'closed'),'/dev/null']):
+                self.assertEqual(drm_owners(['0000:07:00.0'],root),{'0000:07:00.0':[]})
+
     def test_real_b70_shared_display_shape_and_unknown_holder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, pci = Path(tmp), "0000:07:00.0"
@@ -295,8 +305,8 @@ class CommandTests(unittest.TestCase):
 class NativeRunnerTests(unittest.TestCase):
     def test_attempt_roots_use_the_same_fresh_suffix(self):
         import stage_ab
-        self.assertTrue(stage_ab.ROOT.name.endswith('r2c-20261011'))
-        self.assertTrue(stage_ab.NAS.name.endswith('r2c-20261011'))
+        self.assertTrue(stage_ab.ROOT.name.endswith('r2d-20261011'))
+        self.assertTrue(stage_ab.NAS.name.endswith('r2d-20261011'))
 
     def test_allowlists_refresh_after_inventory(self):
         import pressure

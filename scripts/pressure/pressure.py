@@ -305,16 +305,26 @@ def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str,
             with os.scandir(pid / "fdinfo") as descriptors:
                 for info in descriptors:
                     descriptor = pid / "fd" / info.name
-                    try:
-                        target = os.readlink(descriptor)
-                        if not target.startswith("/dev/dri/") or nodes is not None and target not in nodes:
-                            continue
-                        with open(info.path, "rb") as stream:
-                            raw = stream.read(65537)
-                    except FileNotFoundError:
-                        if not os.path.lexists(descriptor) and not Path(info.path).exists():
-                            continue  # This descriptor closed; other holders and permission errors still qualify.
-                        raise
+                    raw = None
+                    for retry in range(3):
+                        try:
+                            target = os.readlink(descriptor)
+                            if not target.startswith("/dev/dri/") or nodes is not None and target not in nodes:
+                                break
+                            with open(info.path, "rb") as stream:
+                                raw = stream.read(65537)
+                            if os.readlink(descriptor) != target:
+                                raw = None
+                                if retry == 2:raise ValueError("DRM descriptor repeatedly reused")
+                                continue
+                            break
+                        except FileNotFoundError:
+                            raw = None
+                            if not os.path.lexists(descriptor) and not Path(info.path).exists():
+                                break  # Confirmed closed; permission errors and unresolved reuse still fail.
+                            if retry == 2:raise
+                    if raw is None:
+                        continue
                     if len(raw) > 65536:
                         raise ValueError("oversized fdinfo")
                     metrics = {line.split(b":", 1)[0].decode("ascii"):
