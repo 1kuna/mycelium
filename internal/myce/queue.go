@@ -405,6 +405,15 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			return errors.New("worker model config does not match queue")
 		}
 		old := q.s.Machines[m.ID]
+		if old != nil && old.Session != m.Session && !(c.Fresh && c.PreviousSession == old.Session) {
+			if h := q.s.Hosts[hostID(old)]; h != nil && h.Policy.ProductionHold {
+				for _, slot := range q.s.ModelSlots {
+					if slot.Machine == m.ID && slot.Session == old.Session {
+						return errors.New("previous model execution release unknown; prior-session cleanup required")
+					}
+				}
+			}
+		}
 		if c.Running == nil && old != nil && old.Session == m.Session {
 			for _, j := range q.s.Jobs {
 				if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && q.held(hostID(old)) {

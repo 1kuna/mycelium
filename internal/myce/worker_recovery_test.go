@@ -430,7 +430,7 @@ func TestWorkerRecoveryCrashHelper(t *testing.T) {
 func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 	q, _ := fixture(t)
 	s := spec("experiment")
-	s.Run.Command = []string{"sh", "-c", `trap 'exit 0' TERM; echo ready; while :; do sleep 0.05; done`}
+	s.Run.Command = []string{"sh", "-c", `trap 'exit 0' TERM; echo ready-$MYCE_ATTEMPT; while :; do sleep 0.05; done`}
 	j := submit(t, q, s)
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
@@ -458,7 +458,7 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 	await(t, func() bool {
 		ls, _ := q.Logs(j.ID, 0)
 		for _, l := range ls {
-			if strings.Contains(l.Text, "ready") {
+			if strings.Contains(l.Text, "ready-1") {
 				return true
 			}
 		}
@@ -488,6 +488,16 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 	if err != nil || len(members) != 0 {
 		t.Fatalf("new command assigned before old group stopped: %v %v", members, err)
 	}
+	// Assignment precedes payload startup; wait for its TERM handler before leaving.
+	await(t, func() bool {
+		logs, _ := q.Logs(j.ID, 0)
+		for _, l := range logs {
+			if strings.Contains(l.Text, "ready-2") {
+				return true
+			}
+		}
+		return false
+	})
 	cancel()
 	select {
 	case err = <-done:
