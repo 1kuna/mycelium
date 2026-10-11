@@ -139,6 +139,7 @@ type HostProcesses struct {
 	Pause  func(time.Duration)
 }
 type HostControl struct {
+	Prepare   func() error // Local discovery runs only after the durable disable flag.
 	Dir       string
 	Clock     Clock
 	Processes HostProcesses
@@ -279,6 +280,11 @@ func (h HostControl) Disable(ctx context.Context, reason string, grace time.Dura
 	if err := archiveHostFile(h.Dir, "disable-receipt.json"); err != nil {
 		return r, err
 	}
+	if h.Prepare != nil {
+		if err := h.Prepare(); err != nil {
+			return r, err
+		}
+	}
 	workers, err := h.workers()
 	if err != nil {
 		return r, err
@@ -343,6 +349,31 @@ func (h HostControl) Disable(ctx context.Context, reason string, grace time.Dura
 		}
 		if e != nil || live {
 			r.Unconfirmed = append(r.Unconfirmed, "worker "+w.Name+" exit not confirmed")
+		}
+	}
+	// A legacy or in-process worker has no signalable supervisor identity.
+	// Its spool lock must be released before cleanup can be certified.
+	spoolDeadline := h.Clock.Now().Add(5 * time.Second)
+	for _, w := range workers {
+		f, e := os.OpenFile(filepath.Join(w.State, "worker.lock"), os.O_RDWR, 0)
+		if errors.Is(e, os.ErrNotExist) {
+			continue
+		}
+		if e == nil {
+			for {
+				e = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+				if e == nil || !h.Clock.Now().Before(spoolDeadline) {
+					break
+				}
+				h.Processes.Pause(10 * time.Millisecond)
+			}
+			if e == nil {
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			}
+			_ = f.Close()
+		}
+		if e != nil {
+			r.Unconfirmed = append(r.Unconfirmed, "worker "+w.Name+" spool still in use or unreadable: "+e.Error())
 		}
 	}
 	r.QueueErrors = <-notifications
@@ -423,22 +454,11 @@ func (h HostControl) stopOwned(records []workerState, grace time.Duration) (int,
 	live := []workerState{}
 	seen := map[string]bool{}
 	var errs []error
-	var activeGroups map[int]bool
-	if h.Processes.native {
-		var err error
-		activeGroups, err = liveHostGroups()
-		if err != nil {
-			return 0, err
-		}
-	}
 	for _, st := range records {
 		if seen[st.Identity] {
 			continue
 		}
 		seen[st.Identity] = true
-		if h.Processes.native && st.PID > 0 && !activeGroups[st.PID] {
-			continue
-		}
 		if h.Processes.native {
 			groups, err := ownedRecordGroups(st)
 			if err != nil {
@@ -461,7 +481,9 @@ func (h HostControl) stopOwned(records []workerState, grace time.Duration) (int,
 						errs = append(errs, e)
 					}
 				}
-				st.Groups[g] = births
+				if len(births) > 0 {
+					st.Groups[g] = births
+				}
 			}
 		}
 		owned, err := h.Processes.Owned(st)
@@ -557,7 +579,7 @@ func (h HostControl) Enable(ctx context.Context) error {
 			return err
 		}
 	}
-	if err = h.ReconcileEnable(ctx); err != nil {
+	if err = h.reconcileEnable(ctx); err != nil {
 		log.Print("enabled locally; queue unavailable; worker will reconcile on rejoin")
 	}
 	return syncWorkerDir(h.Dir)
@@ -568,7 +590,19 @@ func (h HostControl) ReconcileEnable(ctx context.Context) error {
 	if err := h.defaults(); err != nil {
 		return err
 	}
-	unlock, err := hostOperationLock(h.Dir, "reconcile.lock", true)
+	unlock, err := hostOperationLock(h.Dir, "control.lock", false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return h.reconcileEnable(ctx)
+}
+
+func (h HostControl) reconcileEnable(ctx context.Context) error {
+	if reason, err := HostDisabled(h.Dir); err != nil || reason != "" {
+		return errors.Join(err, errHostDisabled)
+	}
+	unlock, err := hostOperationLock(h.Dir, "reconcile.lock", false)
 	if err != nil {
 		return err
 	}
@@ -673,14 +707,20 @@ func ownedHostProcess(st workerState) (bool, error) {
 	return len(groups) > 0, err
 }
 func signalHostProcess(st workerState, sig syscall.Signal) error {
+	return signalHostProcessUsing(st, sig, signalWorkerGroup)
+}
+func signalHostProcessUsing(st workerState, sig syscall.Signal, signalGroup func(int, syscall.Signal) error) error {
 	if st.Groups != nil {
-		owned, err := ownedHostProcess(st)
-		if err != nil || !owned {
-			return err
-		}
 		var errs []error
-		for group := range st.Groups {
-			errs = append(errs, signalWorkerGroup(group, sig))
+		for group, births := range st.Groups {
+			owned, err := ownedHostProcess(workerState{Groups: map[int]map[int]string{group: births}})
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if owned {
+				errs = append(errs, signalGroup(group, sig))
+			}
 		}
 		return errors.Join(errs...)
 	}
@@ -702,7 +742,7 @@ func signalHostProcess(st workerState, sig syscall.Signal) error {
 	}
 	var errs []error
 	for _, g := range groups {
-		errs = append(errs, signalWorkerGroup(g, sig))
+		errs = append(errs, signalGroup(g, sig))
 	}
 	return errors.Join(errs...)
 }
@@ -717,33 +757,23 @@ func ownedRecordGroups(st workerState) ([]int, error) {
 		return nil, nil
 	}
 	// Durable intent covers a supervisor killed between Start and recording PID.
-	out, err := hostPS("-ax", "-o", "pid=,pgid=,stat=")
+	out, err := hostPS("axeww", "-o", "pid=,pgid=,stat=,command=")
 	if err != nil {
 		return nil, err
 	}
 	groups := map[int]bool{}
 	for _, line := range strings.Split(string(out), "\n") {
 		f := strings.Fields(line)
-		if len(f) != 3 || strings.HasPrefix(f[2], "Z") {
+		if len(f) < 4 || strings.HasPrefix(f[2], "Z") {
 			continue
 		}
-		pid, e1 := strconv.Atoi(f[0])
+		_, e1 := strconv.Atoi(f[0])
 		group, e2 := strconv.Atoi(f[1])
 		if e1 != nil || e2 != nil {
 			return nil, errors.New("invalid process inventory")
 		}
-		if st.PID > 0 && group != st.PID {
-			continue
-		}
-		b, e := hostPS("eww", "-p", strconv.Itoa(pid), "-o", "command=")
-		if e != nil {
-			var exit *exec.ExitError
-			if errors.As(e, &exit) && exit.ExitCode() == 1 {
-				continue
-			}
-			return nil, e
-		}
-		for _, field := range strings.Fields(string(b)) {
+		// Descendants may call setsid/setpgid; the inherited marker still owns them.
+		for _, field := range f[3:] {
 			if field == "myce-supervisor-"+st.Identity || field == "MYCE_PROCESS_ID="+st.Identity {
 				groups[group] = true
 			}
@@ -773,7 +803,9 @@ func hostDisableGrace(dir string) time.Duration {
 func hostPS(args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "ps", args...).Output()
+	cmd := exec.CommandContext(ctx, "ps", args...)
+	cmd.WaitDelay = 100 * time.Millisecond
+	return cmd.Output()
 }
 
 func hostOperationLock(dir, name string, wait bool) (func(), error) {
@@ -803,24 +835,4 @@ func archiveHostFile(dir, name string) error {
 		return err
 	}
 	return os.Rename(path, filepath.Join(trash, ID()+"-"+name))
-}
-
-func liveHostGroups() (map[int]bool, error) {
-	b, err := hostPS("-ax", "-o", "pgid=,stat=")
-	if err != nil {
-		return nil, err
-	}
-	out := map[int]bool{}
-	for _, line := range strings.Split(string(b), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 || strings.HasPrefix(fields[1], "Z") {
-			continue
-		}
-		group, e := strconv.Atoi(fields[0])
-		if e != nil {
-			return nil, e
-		}
-		out[group] = true
-	}
-	return out, nil
 }

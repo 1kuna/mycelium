@@ -688,6 +688,10 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 401, "invalid worker session or token")
 		return
 	}
+	if reason, err := HostDisabled(rt.hostStateDir); err != nil || reason != "" {
+		modelError(w, 503, "host disabled or local admission unavailable")
+		return
+	}
 	generic := strings.HasPrefix(r.URL.Path, "/models/")
 	endpoint := r.URL.RequestURI()
 	if !generic && (r.Method != "POST" || !contains([]string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"}, r.URL.Path)) {
@@ -725,10 +729,16 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 400, "invalid JSON")
 		return
 	}
+	unlock, err := hostLaunchGate(rt.hostStateDir)
+	if err != nil {
+		modelError(w, 503, "host disabled or local admission unavailable")
+		return
+	}
 	rt.mu.Lock()
 	m := rt.models[req.Model]
 	if m == nil || (m.state != "ready" && !(m.state == "draining" && m.queueFlight > 0)) {
 		rt.mu.Unlock()
+		unlock()
 		modelError(w, 503, "model is not ready")
 		return
 	}
@@ -739,6 +749,7 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		copy.cancel()
 	}
 	rt.mu.Unlock()
+	unlock()
 	defer func() {
 		rt.mu.Lock()
 		defer rt.mu.Unlock()
