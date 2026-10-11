@@ -1,0 +1,222 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"mycelium/internal/myce"
+)
+
+func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
+	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	dir := f.String("host-state-dir", "", "shared local host control directory (default ~/.local/share/myce)")
+	config := f.String("config", "", "installed worker config (auto-detected by default)")
+	state := f.String("state-dir", "", "worker spool to adopt from before this upgrade")
+	hostname, _ := os.Hostname()
+	host := f.String("host-id", hostname, "physical host identity (for adopted worker state)")
+	name := f.String("name", hostname, "worker name (for adopted worker state)")
+	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
+	reason := f.String("reason", "disabled by operator", "operator reason")
+	grace := f.Duration("grace", 10*time.Second, "checkpoint grace, from 0 to 1m")
+	timeout := f.Duration("timeout", 0, "overall disable deadline (default grace + 20s)")
+	now := f.Bool("now", false, "kill owned work immediately")
+	if err := f.Parse(args[1:]); err != nil {
+		return err
+	}
+	if f.NArg() != 0 {
+		return errors.New("unexpected host-control arguments")
+	}
+	if *now {
+		*grace = 0
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if *dir == "" {
+		*dir, err = myce.HostStateDirectory()
+		if err != nil {
+			return err
+		}
+	}
+	token := env("MYCE_TOKEN", "")
+	var c myce.ServiceConfig
+	service := ""
+	prepare := func() error {
+		if *config == "" {
+			candidate := filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")
+			if _, e := os.Stat(candidate); e == nil {
+				*config = candidate
+			} else if !errors.Is(e, os.ErrNotExist) {
+				return e
+			}
+		}
+		if *config != "" {
+			c, err = myce.ReadServiceConfig(*config)
+			if err != nil {
+				return err
+			}
+			if c.Role != "worker" {
+				return errors.New("host control requires a worker config")
+			}
+			if token == "" {
+				token, _ = myce.ReadServiceToken(c)
+			}
+			*state, *name, *queue = c.State, c.Name, c.Queue
+		}
+		if *state == "" {
+			candidate := filepath.Join(home, ".local", "share", "myce", "worker")
+			if _, e := os.Stat(filepath.Join(candidate, "state.json")); e == nil {
+				*state = candidate
+			}
+		}
+		// Upgrade adoption is local-only and records no token. New workers register automatically.
+		if *state != "" {
+			if err = myce.AdoptHostWorker(*dir, myce.HostWorker{State: *state, Host: *host, Name: *name, Queue: *queue, Environments: c.EnvironmentCache}); err != nil {
+				return err
+			}
+		}
+		service = c.Service
+		if service == "" {
+			if probe.OS == "linux" {
+				service = filepath.Join(home, ".config", "systemd", "user", "myce-worker.service")
+			} else {
+				service = filepath.Join(home, "Library", "LaunchAgents", "local.myce.worker.plist")
+			}
+			if _, e := os.Stat(service); errors.Is(e, os.ErrNotExist) {
+				service = ""
+			} else if e != nil {
+				return e
+			}
+		}
+		return nil
+	}
+	ctx := context.Background()
+	if *timeout < 0 {
+		return errors.New("timeout must be positive")
+	}
+	h := myce.HostControl{Timeout: *timeout, Dir: *dir, Prepare: prepare, Notify: func(ctx context.Context, w myce.HostWorker, enable, cleared bool, reason string) error {
+		return myce.NotifyHost(myce.Client{Token: token})(ctx, w, enable, cleared, reason)
+	}}
+	if args[0] == "disable" {
+		h.ResolveService = func() myce.HostService {
+			if probe.OS == "linux" && service != "" {
+				return &myce.SystemdHostService{Unit: filepath.Base(service), Command: probe.Command}
+			}
+			return nil
+		}
+		h.StopSecondary = func(ctx context.Context) error {
+			if probe.OS != "linux" {
+				return hostService(ctx, probe, service, false)
+			}
+			return nil
+		}
+		r, cleanupErr := h.Disable(ctx, *reason, *grace)
+
+		if r.BestEffort {
+			fmt.Fprintln(out, "Not running under the systemd service; ownership is best-effort.")
+		}
+		if r.Confirmed {
+			fmt.Fprintln(out, "Native process cleanup confirmed by empty systemd worker cgroup; Docker confirmation requires the containment branch.")
+		}
+		if len(r.QueueErrors) > 0 {
+			fmt.Fprintln(out, "Queue notification unconfirmed; local flag is in place. A completed cleanup receipt will reconcile at enable/rejoin.")
+		}
+		err = cleanupErr
+		confirmation := "none"
+		if err != nil {
+			confirmation = err.Error()
+		}
+		fmt.Fprintf(out, "Disabled: stopped %d owned process groups; unconfirmed: %s. Flag: %s.\n", r.Stopped, confirmation, filepath.Join(*dir, "DISABLED"))
+		return err
+	}
+	if err = prepare(); err != nil {
+		return err
+	}
+	if err = h.Enable(ctx); err != nil {
+		return err
+	}
+	if err = hostService(ctx, probe, service, true); err != nil {
+		fmt.Fprintf(out, "Enabled locally. Start worker: %s\n", hostServiceCommand(probe.OS, service, true))
+		return err
+	}
+	if service == "" {
+		commands, e := myce.HostResumeCommands(*dir)
+		if e != nil {
+			return e
+		}
+		if len(commands) == 0 {
+			fmt.Fprintln(out, "Enabled locally. Start worker: myce join (with the original worker options).")
+		}
+		for _, cmd := range commands {
+			fmt.Fprintln(out, "Enabled locally. Start worker:", shellCommand(cmd))
+		}
+	} else {
+		fmt.Fprintln(out, "Enabled: worker service start requested; verify myce status shows joined.")
+	}
+	return nil
+}
+
+func hostService(ctx context.Context, p myce.MachineProbe, path string, start bool) error {
+	if path == "" {
+		return nil
+	}
+	if p.Command == nil {
+		return errors.New("service runner unavailable")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var err error
+	if p.OS == "linux" {
+		action := "stop"
+		if start {
+			action = "start"
+		}
+		_, err = p.Command(ctx, "systemctl", "--user", "--no-block", action, filepath.Base(path))
+	} else {
+		action := "bootout"
+		if start {
+			action = "bootstrap"
+		}
+		_, err = p.Command(ctx, "launchctl", action, "gui/"+strconv.Itoa(os.Getuid()), path)
+	}
+	if err != nil {
+		return fmt.Errorf("worker service %s: %w", path, err)
+	}
+	return nil
+}
+func hostServiceCommand(system, path string, start bool) string {
+	if system == "linux" {
+		return shellCommand([]string{"systemctl", "--user", "start", filepath.Base(path)})
+	}
+	return shellCommand([]string{"launchctl", "bootstrap", "gui/" + strconv.Itoa(os.Getuid()), path})
+}
+func shellCommand(args []string) string {
+	var out []string
+	for _, s := range args {
+		out = append(out, "'"+strings.ReplaceAll(s, "'", "'\\''")+"'")
+	}
+	return strings.Join(out, " ")
+}
+func safeJoinCommand(args []string) []string {
+	out := []string{"myce"}
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--token" || args[i] == "-token" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(args[i], "--token=") || strings.HasPrefix(args[i], "-token=") {
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return out
+}

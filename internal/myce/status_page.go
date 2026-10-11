@@ -264,7 +264,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
     {{range .Machines}}{{$machine := .}}{{$jobs := machineJobs $.Jobs .ID}}{{$models := machineModels $.LoadedModels .ID}}{{$pins := machinePins $.Pins .ID}}
       <article class="card machine">
         <div class="card-head"><div class="identity"><h3>{{.ID}}</h3><div class="platform">{{if .GPU}}{{.GPU}}{{else}}platform unknown{{end}}{{if .Device}} · {{.Device}}{{end}}</div></div>
-          {{if .Gone}}<span class="badge offline">Offline</span>{{else if .Leaving}}<span class="badge leaving">Leaving</span>{{else}}<span class="badge">Online</span>{{end}}
+          {{if .Disabled}}<span class="badge offline">Disabled by operator: {{.Disabled}}</span>{{else if .Gone}}<span class="badge offline">Offline</span>{{else if .Leaving}}<span class="badge leaving">Leaving</span>{{else}}<span class="badge">Online</span>{{end}}
         </div>
         <div class="metrics" aria-label="GPU memory">
           <div class="metric"><span class="label">Used</span><strong>{{printf "%.1f" .MemoryUsedGB}} GB</strong></div>

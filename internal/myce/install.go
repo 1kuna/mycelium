@@ -226,7 +226,13 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection) (Servic
 func unitQuote(v string) string { v = strings.ReplaceAll(v, "%", "%%"); return strconv.Quote(v) }
 func (c ServiceConfig) ServiceText() string {
 	if c.Detection.OS == "linux" {
-		return "[Unit]\nDescription=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\nExecStart=" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + "\nRestart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
+		condition := ""
+		stopSettings := ""
+		if c.Role == "worker" {
+			condition = "ConditionPathExists=!%h/.local/share/myce/DISABLED\n"
+			stopSettings = "KillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
+		}
+		return "[Unit]\n" + condition + "Description=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\nExecStart=" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + "\n" + stopSettings + "Restart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
 	}
 	vals := []string{c.Binary, "service", "--config", c.Config}
 	args := ""
@@ -244,6 +250,31 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 	}
 	if command == nil {
 		return errors.New("service runner unavailable")
+	}
+	if c.Role == "worker" && c.Detection.OS == "linux" {
+		if _, e := os.Lstat(c.Config); e == nil {
+			existing, e := ReadServiceConfig(c.Config)
+			if e != nil {
+				return e
+			}
+			if existing.Role != "worker" || existing.Detection.OS != "linux" || existing.Config != c.Config || existing.Service != c.Service {
+				return errors.New("existing worker configuration does not match upgrade")
+			}
+			st, e := os.Lstat(c.Service)
+			if e != nil {
+				return e
+			}
+			if !st.Mode().IsRegular() {
+				return errors.New("worker unit must be a regular file")
+			}
+			if e = saveServiceText(existing); e != nil {
+				return e
+			}
+			_, e = command(ctx, "systemctl", "--user", "daemon-reload")
+			return e
+		} else if !errors.Is(e, os.ErrNotExist) {
+			return e
+		}
 	}
 	for _, p := range []string{c.Config, c.Binary, c.Credentials, c.Service} {
 		if _, e := os.Lstat(p); e == nil {
@@ -502,4 +533,32 @@ func (c ServiceConfig) Args() []string {
 }
 func SetupTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, 15*time.Second)
+}
+
+func saveServiceText(c ServiceConfig) error {
+	f, e := os.CreateTemp(filepath.Dir(c.Service), ".myce-unit-")
+	if e != nil {
+		return e
+	}
+	if e = f.Chmod(0600); e != nil {
+		f.Close()
+		return e
+	}
+	_, e = f.WriteString(c.ServiceText())
+	e = errors.Join(e, f.Sync(), f.Close())
+	if e != nil {
+		return e
+	}
+	trash := filepath.Join(filepath.Dir(c.Service), ".Trash")
+	if e = os.MkdirAll(trash, 0700); e != nil {
+		return e
+	}
+	backup := filepath.Join(trash, ID()+"-"+filepath.Base(c.Service))
+	if e = os.Rename(c.Service, backup); e != nil {
+		return e
+	}
+	if e = os.Rename(f.Name(), c.Service); e != nil {
+		return errors.Join(e, os.Rename(backup, c.Service))
+	}
+	return syncWorkerDir(filepath.Dir(c.Service))
 }

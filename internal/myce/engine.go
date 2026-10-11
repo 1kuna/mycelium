@@ -68,9 +68,10 @@ func NewModelEngine(m Model, dir string, clock Clock) Engine {
 }
 
 type LlamaEngine struct {
-	stopCommand []string
-	stopTimeout time.Duration
-	env         []string
+	HostStateDir string
+	stopCommand  []string
+	stopTimeout  time.Duration
+	env          []string
 
 	Dir      string
 	Clock    Clock
@@ -127,6 +128,15 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		ctx, cancel = context.WithTimeout(ctx, m.ReadyTimeout)
 		defer cancel()
 	}
+	unlock, gateErr := hostLaunchGate(l.HostStateDir)
+	if gateErr != nil {
+		return gateErr
+	}
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
 	l.identity = ID()
 	name := "engine-" + l.identity
 	shell := []string{"-c", `read gate || exit 125; exec "$@"`, "myce-supervisor-" + l.identity}
@@ -149,7 +159,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	defer reader.Close()
 	defer writer.Close()
 	l.cmd.Stdin = reader
-	if e = saveWorkerJSON(l.Dir, name+".json", workerState{Identity: l.identity}); e != nil {
+	if e = saveWorkerJSON(l.Dir, name+".json", workerState{Identity: l.identity, LaunchPending: true}); e != nil {
 		l.log.Close()
 		return e
 	}
@@ -167,6 +177,8 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		_ = l.Unload()
 		return e
 	}
+	unlock()
+	unlock = nil
 	l.url = "http://127.0.0.1:" + strconv.Itoa(port)
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
@@ -251,6 +263,9 @@ func (l *LlamaEngine) Unload() error {
 	return e
 }
 func (l *LlamaEngine) runStopCommand(grace context.Context) error {
+	if reason, _ := HostDisabled(l.HostStateDir); reason != "" {
+		return nil
+	}
 	if len(l.stopCommand) > 0 {
 		identity := ID()
 		name := "engine-stop-" + identity
@@ -345,6 +360,7 @@ type workerModel struct {
 	drainRequested     bool
 }
 type modelRuntime struct {
+	hostStateDir          string
 	lastSavedSpeed        float64
 	copies                map[string]*workerCopy
 	copyParallel          int
@@ -384,7 +400,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if e != nil {
 		return nil, e
 	}
-	rt := &modelRuntime{copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
+	rt := &modelRuntime{hostStateDir: w.HostStateDir, copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
 	root := w.CacheRoot
 	if root == "" {
 		root = filepath.Join(dir, "model-cache")
@@ -494,6 +510,9 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			engine = &FakeEngine{}
 		} else {
 			engine = NewModelEngine(model, rt.dir, rt.clock)
+			if owned, ok := engine.(*LlamaEngine); ok {
+				owned.HostStateDir = rt.hostStateDir
+			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), rt.config.Wait)
 		m := &workerModel{model: model, engine: engine, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
@@ -669,6 +688,10 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 401, "invalid worker session or token")
 		return
 	}
+	if reason, err := HostDisabled(rt.hostStateDir); err != nil || reason != "" {
+		modelError(w, 503, "host disabled or local admission unavailable")
+		return
+	}
 	generic := strings.HasPrefix(r.URL.Path, "/models/")
 	endpoint := r.URL.RequestURI()
 	if !generic && (r.Method != "POST" || !contains([]string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"}, r.URL.Path)) {
@@ -706,10 +729,16 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 400, "invalid JSON")
 		return
 	}
+	unlock, err := hostLaunchGate(rt.hostStateDir)
+	if err != nil {
+		modelError(w, 503, "host disabled or local admission unavailable")
+		return
+	}
 	rt.mu.Lock()
 	m := rt.models[req.Model]
 	if m == nil || (m.state != "ready" && !(m.state == "draining" && m.queueFlight > 0)) {
 		rt.mu.Unlock()
+		unlock()
 		modelError(w, 503, "model is not ready")
 		return
 	}
@@ -720,6 +749,7 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		copy.cancel()
 	}
 	rt.mu.Unlock()
+	unlock()
 	defer func() {
 		rt.mu.Lock()
 		defer rt.mu.Unlock()

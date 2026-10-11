@@ -1,4 +1,5 @@
 [Unit]
+ConditionPathExists=!%h/.local/share/myce/DISABLED
 Description=Mycelium v2 plain-command worker
 After=network-online.target
 
@@ -10,9 +11,10 @@ ExecStart=%h/.local/bin/myce join --state-dir %h/.local/share/myce/worker --name
 Restart=on-failure
 RestartSec=5
 UMask=0077
-# Signal worker first; resumable children save, non-resumable children finish.
-KillMode=mixed
-TimeoutStopSec=infinity
+# Stop every native descendant, including detached sessions.
+KillMode=control-group
+SendSIGKILL=yes
+TimeoutStopSec=10s
 
 [Install]
 WantedBy=default.target

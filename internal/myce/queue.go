@@ -36,15 +36,17 @@ type batchRelease struct {
 }
 
 type state struct {
-	Hosts            map[string]*HostState    `json:"hosts,omitempty"`
-	HostReleases     map[string]HostRelease   `json:"host_releases,omitempty"`
-	BatchReleases    map[string]batchRelease  `json:"batch_releases,omitempty"`
-	UsageMaintenance time.Time                `json:"usage_maintenance,omitempty"`
-	ProductionStarts []ProductionStart        `json:"production_starts,omitempty"`
-	Policies         map[string]ProjectPolicy `json:"project_policies,omitempty"`
-	FairUsage        map[string]FairUsage     `json:"fair_usage,omitempty"`
-	UsageAt          time.Time                `json:"usage_at,omitempty"`
-	Preemptions      []Preemption             `json:"preemptions,omitempty"`
+	HostControls     map[string]HostControlGeneration `json:"host_controls,omitempty"`
+	DisabledHosts    map[string]string                `json:"disabled_hosts,omitempty"`
+	Hosts            map[string]*HostState            `json:"hosts,omitempty"`
+	HostReleases     map[string]HostRelease           `json:"host_releases,omitempty"`
+	BatchReleases    map[string]batchRelease          `json:"batch_releases,omitempty"`
+	UsageMaintenance time.Time                        `json:"usage_maintenance,omitempty"`
+	ProductionStarts []ProductionStart                `json:"production_starts,omitempty"`
+	Policies         map[string]ProjectPolicy         `json:"project_policies,omitempty"`
+	FairUsage        map[string]FairUsage             `json:"fair_usage,omitempty"`
+	UsageAt          time.Time                        `json:"usage_at,omitempty"`
+	Preemptions      []Preemption                     `json:"preemptions,omitempty"`
 
 	SyncRequests []SyncRequest         `json:"sync_requests,omitempty"`
 	ModelUses    map[string]ModelUse   `json:"model_uses,omitempty"`
@@ -349,7 +351,7 @@ func (q *Queue) maintain() {
 	}
 	active, healthy := 0, 0
 	for _, m := range q.s.Machines {
-		if !m.Gone && !m.Leaving {
+		if !m.Gone && !m.Leaving && m.Disabled == "" {
 			active++
 			if now.Sub(m.LastSeen) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
 				healthy++
@@ -361,7 +363,7 @@ func (q *Queue) maintain() {
 		unreported := q.unreported[m.ID]
 		grace := unreported && now.Before(q.restartUntil)
 		restartExpired := unreported && !grace
-		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(m.LastSeen) >= q.machineLossTimeout(m.ID))) {
+		if m.Disabled == "" && !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(m.LastSeen) >= q.machineLossTimeout(m.ID))) {
 			m.Gone = true
 			delete(q.unreported, m.ID)
 			m.Models = nil
@@ -378,6 +380,7 @@ func (q *Queue) maintain() {
 						}
 						if j.State == "running" {
 							j.Losses++
+							q.chargeLoss(j)
 						}
 						q.retry(j, fmt.Sprintf("machine quiet for %s", q.machineLossTimeout(m.ID)))
 					}
@@ -386,7 +389,7 @@ func (q *Queue) maintain() {
 		}
 	}
 	for _, j := range q.s.Jobs {
-		if !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !j.Spec.Run.Docker && expired(j.StopAt, now) {
+		if j.Reason != "disabled by operator" && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !j.Spec.Run.Docker && expired(j.StopAt, now) {
 			if j.Reason == "cancel requested" {
 				j.State = "cancelled"
 				j.StopAt = nil
@@ -430,6 +433,10 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	}
 	err := q.update(func() error {
 		m := cloneMachine(&c.Machine)
+		m.Disabled = q.s.DisabledHosts[hostID(&m)]
+		if old := q.s.Machines[m.ID]; old != nil && old.Disabled != "" {
+			m.Disabled = old.Disabled
+		}
 		if progressErr != nil {
 			m.CheckpointUnavailable = true
 		}
@@ -464,6 +471,15 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				}
 			}
 		}
+		if m.Disabled != "" {
+			m.Leaving = true
+			m.LastSeen = q.clock.Now()
+			q.s.Machines[m.ID] = &m
+			reply.Leave = true
+			reply.Stop = c.Running != nil && old != nil && old.Gone
+			reply.Kill = reply.Stop
+			return nil
+		}
 		q.reconcileHostReleases(c)
 		if m.TotalMemoryGB == 0 {
 			m.TotalMemoryGB = m.FreeMemoryGB
@@ -487,6 +503,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 					if j.State == "running" {
 						j.Losses++
+						q.chargeLoss(j)
 					}
 					q.retry(j, "worker restarted after cleaning old processes")
 				}
@@ -627,6 +644,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			if j != nil {
 				j.State = "running"
 				j.ReleaseConfirmed = false
+				j.RequeuedByOperator = false
 				j.StartedAt = nil
 				now := q.clock.Now()
 				j.AssignedAt = &now
@@ -744,6 +762,7 @@ func (q *Queue) Complete(r Result) error {
 			}
 		} else if r.Interrupted {
 			j.Losses++
+			q.chargeLoss(j)
 			q.retry(j, "worker restarted after cleaning old processes")
 		} else if r.Success {
 			q.recordModelUse(j.Spec.Needs.Model)
@@ -839,6 +858,9 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 		for _, j := range q.s.Jobs {
 			if j.State == "queued" {
 				j.Reason = reasons[j.ID]
+				if j.RequeuedByOperator {
+					j.Reason = "requeued: disabled by operator; " + j.Reason
+				}
 				if needsCheckpoint(j) && !q.checkpointsAvailable() {
 					j.Reason = "NAS checkpoint root is unreachable"
 				}

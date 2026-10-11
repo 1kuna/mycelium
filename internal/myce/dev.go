@@ -13,6 +13,7 @@ import (
 )
 
 type DevConfig struct {
+	HostStateDir                          string
 	HostPolicies                          map[string]HostPolicy
 	HostID                                string
 	ProjectPolicies                       map[string]ProjectPolicy
@@ -116,12 +117,30 @@ func StartDev(c DevConfig) (*Dev, error) {
 		}
 	}()
 	for i := 0; i < c.Workers; i++ {
-		w := Worker{ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
+		w := Worker{HostStateDir: c.HostStateDir, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
 		d.workerWG.Add(1)
 		go func() {
 			defer d.workerWG.Done()
-			if err := w.Run(ctx); err != nil {
-				d.errors <- err
+			for ctx.Err() == nil {
+				if err := w.Run(ctx); err != nil {
+					d.errors <- err
+					return
+				}
+				for ctx.Err() == nil {
+					reason, err := HostDisabled(w.HostStateDir)
+					if err != nil {
+						d.errors <- err
+						return
+					}
+					if reason == "" {
+						break
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(50 * time.Millisecond):
+					}
+				}
 			}
 		}()
 	}
