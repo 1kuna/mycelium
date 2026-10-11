@@ -7,7 +7,8 @@ Mycelium is one Go program, `myce`, that shares GPUs across projects.
 A queue service stores jobs in one local SQLite database and chooses their order.
 A worker is a process on a GPU machine that runs commands and reports results.
 `myce join` auto-detects its GPU like `myce install worker`; `--gpu` and
-`--device` provide explicit overrides. `myce dev` keeps fake GPU inventory.
+`--device` provide explicit overrides; see [worker setup](operations.md#inventory-and-foreground-startstop).
+`myce dev` keeps fake GPU inventory.
 A job is either a command that finishes or one request to a queue-managed model.
 **GPU work runs as queue jobs; the project never holds a GPU between jobs.**
 
@@ -119,6 +120,7 @@ succeeded; `1` any failed/cancelled; `2` usage/auth/API error (including an unkn
 ID); `3` timeout; `4` interrupted. Optional `--timeout 2h` bounds only the wait
 and **does not cancel jobs**. A timeout or error is not job completion: retain
 the IDs and arrange another single background wait if work is still running.
+See [wait flags and results](job-reference.md#cli-flags-and-defaults).
 
 ## 4. Integration checklist
 
@@ -188,6 +190,8 @@ the IDs and arrange another single background wait if work is still running.
 
 6. **Make execution possible on every eligible worker.** Choose measured
    `needs.memory_gb` and optional additional `needs.host_memory_gb`, supported `needs.platform`, and any `allowed_machines`.
+   `host_memory_gb` reserves regular RAM shared by the host; unified memory also
+   charges GPU allocations. See [RAM admission](operations.md#host-ram-admission).
    `platform: any` is for genuinely portable commands, including laptop fakes;
    it does not convert CUDA software to Metal or XPU. Use an argument array in
    `run.command`, not an implicit shell. Set an existing absolute `run.workdir`.
@@ -202,6 +206,11 @@ the IDs and arrange another single background wait if work is still running.
    worker-local caches using [the model guide](guide-model-calls.md).
    Plain commands must receive/use their own configured model file path;
    `needs.model` does not rewrite command arguments or supply a model-path variable.
+   Model uploads share a 16 GiB queue storage budget (`--upload-spool-bytes`);
+   a full budget returns HTTP 507. See [upload limits](job-reference.md#cli-flags-and-defaults).
+   Before qualifying several resident models, `myce measure --warmup WARMUPS.json
+   --warmup-parallel N` overlaps warm-ups after serial loads when N > 1; see
+   [joint measurement](operations.md#general-model-servers-and-joint-measurement).
 
 7. **Implement checkpoints before claiming resumption.** A checkpoint is saved
    progress from which the command can restart. Use `MYCE_CHECKPOINT_DIR`, set
@@ -216,7 +225,10 @@ the IDs and arrange another single background wait if work is still running.
    Set `resumable: true` only after stop/restart tests prove continued progress;
    otherwise leave it false. Cancelling ends the job; it is not a resume test.
 
-8. **Test through the real local queue.** Start dev as above, then run the
+8. **Test through the real local queue.** First check planned demand with
+   `myce sim --fleet FLEET.yaml --workload WORKLOAD.yaml --days 7 --seed 1 --json /tmp/myce-plan.json`;
+   see [the simulator and its limits](simulator.md). It does not qualify hardware.
+   Start dev as above, then run the
    project's integration tests with the switch off and on. Off must need no
    queue. On must submit/call, verify complete results, report failure, and
    cancel where appropriate. Assert the token is absent in executed commands.

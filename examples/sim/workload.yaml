@@ -1,4 +1,4 @@
-# Synthetic demand, not a trace of customer recordings. Every arrival rate,
+# Aggregate-demand proxy, not a production trace replay. Every arrival rate,
 # count, duration, deadline, weight, checkpoint interval, and platform portability
 # below is a GUESS unless explicitly attributed. Durations vary +/-20% by seed.
 # GUESS: all compatible workers have model files pre-staged and unlimited
@@ -27,12 +27,18 @@ models:
   - {name: ornith35-fp8, size_bytes: 37711000000, memory_gb: 76, host_memory_gb: 8, load_seconds: 90, platforms: [cuda]}
   # Theia model identity from report. GUESS: all sizes/memory/load numbers.
   - {name: parakeet-mlx, size_bytes: 1200000000, memory_gb: 4, host_memory_gb: 2, load_seconds: 8, platforms: [metal]}
-# All numbers below are GUESSES. Production stages arrive together as a burst;
-# not a dependency graph or an assertion of qualified cross-platform equivalence.
+# Production evidence: .reports/verso-trace-and-start-here-2026-10-11.md.
+# MEASURED: 585 retained arrivals / 167 calendar days; successful whole-pipeline
+# median 257.4763 s. This includes initialization and non-GPU work.
+# The real consumer processes one recording at a time: diarization -> ASR
+# (including optional refinement) -> naming, with irregular multi-recording bursts.
+# LIMIT: sim has no dependencies, serial consumer, trace arrivals or duration CDF.
+# Below is only a smoothed aggregate-demand sensitivity check, NOT that pattern.
+# GUESS: uniform spacing, count 1, first hour 9, +/-20% duration jitter, and
+# whole-pipeline 24 GiB GPU / 6 GiB host reservation; no extra model load timer.
+# Other streams remain GUESSES. No cross-platform equivalence is qualified.
 streams:
-  - {name: recordings-asr, project: verso, priority: production, model: cohere-transcribe, platforms: [xpu], memory_gb: 8, host_memory_gb: 6, duration_seconds: 120, every_hours: 6, start_hour: 9, count: 2}
-  - {name: recordings-diarization, project: verso, priority: production, model: pyannote31, platforms: [xpu], memory_gb: 4, host_memory_gb: 2, duration_seconds: 90, every_hours: 6, start_hour: 9, count: 2}
-  - {name: recordings-naming, project: verso, priority: production, model: qwen38-27b-q4, platforms: [xpu], memory_gb: 24, host_memory_gb: 4, duration_seconds: 60, every_hours: 6, start_hour: 9, count: 2}
+  - {name: recordings-pipeline-proxy, project: verso, priority: production, platforms: [xpu], memory_gb: 24, host_memory_gb: 6, duration_seconds: 257.4763, every_hours: 6.85128205, start_hour: 9, count: 1}
   - {name: verso-experiments, project: verso, priority: experiment, model: qwen38-27b-q4, platforms: [xpu, cuda, metal], memory_gb: 24, host_memory_gb: 4, duration_seconds: 3600, checkpoint_seconds: 180, every_hours: 1, start_hour: 0, count: 4}
   - {name: atlas-ocr, project: atlas, priority: experiment, model: glm-ocr, platforms: [cuda], memory_gb: 8, host_memory_gb: 4, duration_seconds: 900, checkpoint_seconds: 120, every_hours: 1, start_hour: 0, count: 4}
   - {name: atlas-judge, project: atlas, priority: experiment, model: ornith35-fp8, call: true, duration_seconds: 120, every_hours: 2, start_hour: 0.5, count: 4}
