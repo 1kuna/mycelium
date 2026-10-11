@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // runMeasure runs only on the selected worker; it never dispatches remote work.
@@ -31,10 +32,15 @@ func runMeasure(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	prefix := f.String("report-prefix", "", "write PREFIX.json and PREFIX.txt (default unique myce-measure ID)")
 	output := f.String("output", "plain", "plain or json report to stdout")
 	warmup := f.String("warmup", "", "JSON file mapping model name to method/path/body/headers")
+	parallel := f.Int("warmup-parallel", 1, "maximum concurrent warm-ups (greater than one warms after all models load)")
+	loadTimeout := f.Duration("load-timeout", 5*time.Minute, "per-model measurement load timeout")
 	force := f.Bool("force", false, "bypass production refusal during approved maintenance; never bypass spool lock")
 	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue URL (must match join)")
 	if e := f.Parse(args); e != nil {
 		return e
+	}
+	if *parallel <= 0 || *loadTimeout <= 0 {
+		return errors.New("--warmup-parallel and --load-timeout must be positive")
 	}
 	if f.NArg() != 0 || *config == "" || *models == "" || *worker == "" || *device == "" || *platform == "" || *budget <= 0 {
 		return errors.New("measure requires --model-config --models --worker --device --platform --memory-gb; run locally with join stopped and its exact --queue/--state-dir")
@@ -113,7 +119,7 @@ func runMeasure(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return err
 	}
 	defer tf.Close()
-	report, e := myce.Measure(ctx, myce.MeasureOptions{Worker: w, Models: selected, Platform: *platform, Device: *device, BudgetGB: *budget, Force: *force, Warmup: warms,
+	report, e := myce.Measure(ctx, myce.MeasureOptions{WarmupParallel: *parallel, LoadTimeout: *loadTimeout, Worker: w, Models: selected, Platform: *platform, Device: *device, BudgetGB: *budget, Force: *force, Warmup: warms,
 		Prepare: func(c context.Context, m myce.Model, dir string) (myce.Model, func(), error) {
 			if mc == nil {
 				// Match join's cache defaults without creating another worker identity.
@@ -149,8 +155,9 @@ func runMeasure(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	e = errors.Join(e, encoder.Encode(report))
 	fmt.Fprintf(&plain, "Worker %s device %s/%s; budget %.3f GiB; fits: %t\nBaseline used: device %.3f GiB, host %.3f GiB\nCombined absolute peak: device %.3f GiB, host %.3f GiB\nCombined peak delta from baseline: device %.3f GiB, host %.3f GiB\n", report.Worker, report.Platform, report.Device, report.BudgetGB, report.Fits, report.Baseline.DeviceGB, report.Baseline.HostGB, report.Peak.DeviceGB, report.Peak.HostGB, report.Delta.DeviceGB, report.Delta.HostGB)
 	for _, m := range report.Models {
-		fmt.Fprintf(&plain, "%s: load %.3fs; incremental peak delta device %.3f GiB, host %.3f GiB; absolute peak device %.3f GiB, host %.3f GiB\n", m.Model, m.LoadSeconds, m.Delta.DeviceGB, m.Delta.HostGB, m.Peak.DeviceGB, m.Peak.HostGB)
+		fmt.Fprintf(&plain, "%s: load %.3fs; warm-up %.3fs; incremental peak delta device %.3f GiB, host %.3f GiB; absolute peak device %.3f GiB, host %.3f GiB\n", m.Model, m.LoadSeconds, m.WarmupSeconds, m.Delta.DeviceGB, m.Delta.HostGB, m.Peak.DeviceGB, m.Peak.HostGB)
 	}
+	fmt.Fprintf(&plain, "Warm-up phase %.3fs; parallel limit %d; per-model load timeout %.3fs. Concurrent warm-up peaks are joint measurements, not per-model attribution.\n", report.WarmupSeconds, report.WarmupParallel, report.LoadTimeoutSeconds)
 	fmt.Fprintf(&plain, "Peaks sampled nominally every %d ms; native probes can be slower and brief spikes may be missed. Incremental measurements depend on load order. Device/host usage includes other processes. Load time excludes cache/environment preparation.\n", report.SampleIntervalMS)
 	if e != nil {
 		fmt.Fprintf(&plain, "Measurement failed: %v\n", e)

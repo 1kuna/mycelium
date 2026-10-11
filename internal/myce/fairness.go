@@ -246,6 +246,12 @@ func (q *Queue) waitReason(j *Job) string {
 	if reason := q.capReason(j); reason != "" {
 		return reason
 	}
+	if model, ok := q.model(j.Spec.Needs.Model); ok && j.Spec.Needs.MemoryGB == 0 {
+		copy := cloneJob(j)
+		copy.Spec.Needs.MemoryGB = model.MemoryGB
+		copy.Spec.Needs.HostMemoryGB = model.HostMemoryGB
+		j = &copy
+	}
 	return waitingReason(j, q.s.Machines, q.s.Jobs)
 }
 

@@ -21,6 +21,7 @@ when shell expansion is needed.
 | `run.workdir` | Absent: worker's working directory | Existing working directory; use an absolute shared or consistently installed path |
 | `run.env` | Empty map | String environment overrides, merged with worker environment |
 | `needs.memory_gb` | Required, finite and positive | GPU memory reservation in GB, including model/runtime overhead |
+| `needs.host_memory_gb` | Absent / `0`: GPU-only admission | Finite nonnegative additional host RAM in GiB, including CPU-side model/runtime/activation peaks; shared across workers on one host |
 | `needs.platform` | Required | `[cuda]` shorthand, `{required: [cuda, xpu]}`, `{preferred: [metal]}`, or `any` / `{any: true}`; exactly one mode |
 | `needs.model` | Absent | Batch affinity hint; does not load a model |
 | `environment` | Absent | Catalog name, `{name: torch-cuda}`, or `{lock_file: /shared/project/requirements.txt, python: "3.12", platforms: [cuda]}`; never both name and lock file |
@@ -90,6 +91,8 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --deadline-loss-timeout` | `20s` | Deadline loss detection |
 | `queue --experiment-loss-timeout` | `60s` | Experiment loss detection |
 | `join --name` | Hostname | Unique stable worker name |
+| `join --host-id` | OS hostname | Physical host identity; every per-card worker on the same machine must use the same stable value |
+| `join --reserve-host-memory-gb` | `4` | RAM withheld from observed available memory; configure OS/other-workload headroom; unified uses the larger host/GPU reserve once |
 | `join --device` | Sole detected CUDA card / platform default | One physical card per worker; CUDA resolves to a stable UUID for inventory/execution; select explicitly on multi-GPU hosts |
 | `join --gpu` | Auto-detected | Override with `cuda`, `xpu`, `metal`, or `fake`; same detection as `install worker` |
 | `join --memory-gb` | Detected budget; `0` with explicit `--gpu` | Positive budget required for fixed/XPU; fake permits zero; live CUDA/Metal optional positive cap before reserve |
@@ -146,7 +149,7 @@ must name a catalog entry. Remaining OpenAI JSON is passed unchanged.
 
 Catalog fields: `idle_timeout` defaults to `10m`; `max_wait` to `5m`; `models`
 defaults to empty. Each entry requires unique `name`, `engine` (`llama.cpp`,
-`server`, `vllm`, or explicit test-only `fake`), NAS master `path`, positive `memory_gb`, and nonempty
+`server`, `vllm`, or explicit test-only `fake`), NAS master `path`, positive `memory_gb`, optional finite nonnegative `host_memory_gb` (additional CPU-side RAM in GiB), and nonempty
 `platforms`. Real models also require positive `size_bytes` and a 64-digit
 hex `sha256`. `direct_nas` defaults false; enable only for small models.
 Optional `max_in_flight` defaults to `0` (unlimited), otherwise a positive
@@ -257,3 +260,12 @@ list. It holds all models together, optionally warms them, writes JSON and text,
 and unloads them. Missing native counters fail visibly. See the separate
 [B70 weekend measurement](production-test-plan.md#b70-gpu0-weekend-joint-residency-measurement)
 checklist; this is not the first-machine Spark acceptance test.
+
+`measure --warmup-parallel N` defaults to `1` (warm each model after loading it).
+With `N > 1`, load all selected models first, then run at most N warm-up
+requests concurrently. `--load-timeout DURATION` defaults to `5m` per model;
+both flags require positive values. Each model reports `load_seconds` and
+`warmup_seconds`; the report also includes the warm-up phase's wall time,
+parallel limit, load timeout, and combined absolute device/host peaks. Concurrent
+warm-up peaks are joint observations, not attributed per-model deltas. Failure
+cancels all warm-ups, waits for them to exit, and unloads every attempted engine.

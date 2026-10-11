@@ -83,9 +83,10 @@ type Spec struct {
 		Env     map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
 	} `json:"run" yaml:"run"`
 	Needs struct {
-		MemoryGB float64  `json:"memory_gb" yaml:"memory_gb"`
-		Platform Platform `json:"platform" yaml:"platform"`
-		Model    string   `json:"model,omitempty" yaml:"model,omitempty"`
+		MemoryGB     float64  `json:"memory_gb" yaml:"memory_gb"`
+		HostMemoryGB float64  `json:"host_memory_gb,omitempty" yaml:"host_memory_gb,omitempty"`
+		Platform     Platform `json:"platform" yaml:"platform"`
+		Model        string   `json:"model,omitempty" yaml:"model,omitempty"`
 	} `json:"needs" yaml:"needs"`
 	Environment     Environment `json:"environment,omitempty" yaml:"environment,omitempty"`
 	AllowedMachines []string    `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
@@ -106,6 +107,9 @@ func (s Spec) Validate() error {
 	}
 	if s.Needs.MemoryGB <= 0 || math.IsInf(s.Needs.MemoryGB, 0) || math.IsNaN(s.Needs.MemoryGB) {
 		return errors.New("needs.memory_gb must be positive: CPU-only work stays outside Mycelium")
+	}
+	if !validMemoryValue(s.Needs.HostMemoryGB) {
+		return errors.New("needs.host_memory_gb must be finite and nonnegative")
 	}
 	p := s.Needs.Platform
 	modes := 0
@@ -188,6 +192,12 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	HostID                  string              `json:"host_id,omitempty"`
+	HostAvailableMemoryGB   float64             `json:"host_available_memory_gb"`
+	FreeHostMemoryGB        float64             `json:"free_host_memory_gb"`
+	HostMemoryMeasured      bool                `json:"host_memory_measured,omitempty"`
+	HostMemoryError         string              `json:"host_memory_error,omitempty"`
+	UnifiedMemory           bool                `json:"unified_memory,omitempty"`
 	MemoryUsedGB            float64             `json:"memory_used_gb"`
 	TotalMemoryGB           float64             `json:"total_memory_gb"`
 	ReservedMemoryGB        float64             `json:"reserved_memory_gb"`

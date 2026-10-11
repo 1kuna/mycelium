@@ -139,11 +139,18 @@ func (q *Queue) maintainPins() {
 				p.Assigned = m.ID
 				break
 			}
-			if m.FreeMemoryGB >= model.MemoryGB {
+			if m.FreeMemoryGB >= model.MemoryGB && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
 				q.s.ModelSlots[key] = &ModelSlot{Model: p.Model, Machine: m.ID, Session: m.Session, State: "loading", Priority: "production", LastUsed: now}
 				m.FreeMemoryGB -= model.MemoryGB
+				q.refreshHostMemory()
 				p.Assigned = m.ID
 				break
+			}
+			if q.reclaimableGPUMemory(m, "production") < model.MemoryGB {
+				continue
+			}
+			if !q.reclaimHost(m, model.MemoryGB, model.HostMemoryGB, "production", "pin") {
+				continue
 			}
 			q.makeModelRoom(m, model.MemoryGB, "production")
 			for _, j := range q.s.Jobs {

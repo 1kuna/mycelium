@@ -29,28 +29,34 @@ type MeasureWarmup struct {
 	Headers http.Header     `json:"headers,omitempty"`
 }
 type ModelMeasurement struct {
-	Model       string        `json:"model"`
-	LoadSeconds float64       `json:"load_seconds"`
-	Before      MemoryReading `json:"before"`
-	Peak        MemoryReading `json:"absolute_peak"`
-	Delta       MemoryReading `json:"incremental_peak_delta"`
+	Model         string        `json:"model"`
+	WarmupSeconds float64       `json:"warmup_seconds"`
+	LoadSeconds   float64       `json:"load_seconds"`
+	Before        MemoryReading `json:"before"`
+	Peak          MemoryReading `json:"absolute_peak"`
+	Delta         MemoryReading `json:"incremental_peak_delta"`
 }
 type Measurement struct {
-	DeviceBinding    string             `json:"device_binding,omitempty"`
-	Error            string             `json:"error,omitempty"`
-	SampleIntervalMS int64              `json:"sample_interval_ms"`
-	CatalogHash      string             `json:"catalog_hash"`
-	Worker           string             `json:"worker"`
-	Platform         string             `json:"platform"`
-	Device           string             `json:"device"`
-	BudgetGB         float64            `json:"device_budget_gb"`
-	Baseline         MemoryReading      `json:"baseline"`
-	Peak             MemoryReading      `json:"combined_absolute_peak"`
-	Delta            MemoryReading      `json:"combined_peak_delta_from_baseline"`
-	Fits             bool               `json:"fits_device_budget"`
-	Models           []ModelMeasurement `json:"models"`
+	WarmupParallel     int                `json:"warmup_parallel"`
+	WarmupSeconds      float64            `json:"warmup_seconds"`
+	LoadTimeoutSeconds float64            `json:"load_timeout_seconds"`
+	DeviceBinding      string             `json:"device_binding,omitempty"`
+	Error              string             `json:"error,omitempty"`
+	SampleIntervalMS   int64              `json:"sample_interval_ms"`
+	CatalogHash        string             `json:"catalog_hash"`
+	Worker             string             `json:"worker"`
+	Platform           string             `json:"platform"`
+	Device             string             `json:"device"`
+	BudgetGB           float64            `json:"device_budget_gb"`
+	Baseline           MemoryReading      `json:"baseline"`
+	Peak               MemoryReading      `json:"combined_absolute_peak"`
+	Delta              MemoryReading      `json:"combined_peak_delta_from_baseline"`
+	Fits               bool               `json:"fits_device_budget"`
+	Models             []ModelMeasurement `json:"models"`
 }
 type MeasureOptions struct {
+	WarmupParallel   int
+	LoadTimeout      time.Duration
 	Worker           Worker
 	Models           []Model
 	Platform, Device string
@@ -76,6 +82,15 @@ func measurePeak(a, b MemoryReading) MemoryReading {
 func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err error) {
 	if len(o.Models) == 0 || o.Worker.Machine.ID == "" || o.Device == "" || !validMemoryValue(o.BudgetGB) || o.BudgetGB <= 0 {
 		return report, errors.New("measure requires models, worker, device and positive finite device budget")
+	}
+	if o.LoadTimeout < 0 || o.WarmupParallel < 0 {
+		return report, errors.New("load timeout and warmup parallelism must be positive")
+	}
+	if o.LoadTimeout == 0 {
+		o.LoadTimeout = 5 * time.Minute
+	}
+	if o.WarmupParallel == 0 {
+		o.WarmupParallel = 1
 	}
 	if o.Worker.Clock == nil {
 		o.Worker.Clock = RealClock{}
@@ -156,7 +171,7 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 			}
 		}
 	}
-	report = Measurement{DeviceBinding: binding, SampleIntervalMS: o.SampleInterval.Milliseconds(), CatalogHash: modelConfigHash(ModelConfig{Models: o.Models}), Worker: o.Worker.Machine.ID, Platform: o.Platform, Device: o.Device, BudgetGB: o.BudgetGB}
+	report = Measurement{WarmupParallel: o.WarmupParallel, LoadTimeoutSeconds: o.LoadTimeout.Seconds(), DeviceBinding: binding, SampleIntervalMS: o.SampleInterval.Milliseconds(), CatalogHash: modelConfigHash(ModelConfig{Models: o.Models}), Worker: o.Worker.Machine.ID, Platform: o.Platform, Device: o.Device, BudgetGB: o.BudgetGB}
 	read := func(c context.Context) (MemoryReading, error) {
 		r, e := o.ReadMemory(c)
 		if e == nil && (!validMemoryValue(r.DeviceGB) || !validMemoryValue(r.HostGB)) {
@@ -236,14 +251,17 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 		}
 		start := o.Worker.Clock.Now()
 		e = sampleMeasureOperation(ctx, o.SampleInterval, sample, func(c context.Context) error {
-			loadCtx, cancel := context.WithTimeout(c, 5*time.Minute)
+			loadCtx, cancel := context.WithTimeout(c, o.LoadTimeout)
 			defer cancel()
 			return engine.Load(loadCtx, m)
 		})
 		stage.LoadSeconds = o.Worker.Clock.Now().Sub(start).Seconds()
-		if e == nil {
+		if e == nil && o.WarmupParallel == 1 {
 			if w, ok := o.Warmup[m.Name]; ok {
+				warmStart := o.Worker.Clock.Now()
 				e = sampleMeasureOperation(ctx, o.SampleInterval, sample, func(c context.Context) error { return measureWarmup(c, engine, w) })
+				stage.WarmupSeconds = o.Worker.Clock.Now().Sub(warmStart).Seconds()
+				report.WarmupSeconds += stage.WarmupSeconds
 			}
 		}
 		stage.Delta = measureDelta(stage.Peak, stage.Before)
@@ -252,7 +270,69 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 			return report, fmt.Errorf("measure %s: %w", m.Name, e)
 		}
 	}
+	if o.WarmupParallel > 1 {
+		start := o.Worker.Clock.Now()
+		sample := func(c context.Context) error {
+			r, e := read(c)
+			if e == nil {
+				report.Peak = measurePeak(report.Peak, r)
+			}
+			return e
+		}
+		e := sampleMeasureOperation(ctx, o.SampleInterval, sample, func(c context.Context) error {
+			return concurrentMeasureWarmups(c, o, engines, report.Models)
+		})
+		report.WarmupSeconds = o.Worker.Clock.Now().Sub(start).Seconds()
+		if e != nil {
+			return report, fmt.Errorf("concurrent warmups: %w", e)
+		}
+	}
 	return report, nil
+}
+
+// All goroutines join before engines unload; any error cancels every request.
+func concurrentMeasureWarmups(ctx context.Context, o MeasureOptions, engines []Engine, stages []ModelMeasurement) error {
+	c, cancel := context.WithCancel(ctx)
+	defer cancel()
+	tasks := make(chan int)
+	n := min(o.WarmupParallel, len(engines))
+	results := make(chan error, n)
+	for range n {
+		go func() {
+			var err error
+			for i := range tasks {
+				if c.Err() != nil {
+					break
+				}
+				start := o.Worker.Clock.Now()
+				e := measureWarmup(c, engines[i], o.Warmup[stages[i].Model])
+				stages[i].WarmupSeconds = o.Worker.Clock.Now().Sub(start).Seconds()
+				if e != nil {
+					err = fmt.Errorf("%s: %w", stages[i].Model, e)
+					cancel()
+					break
+				}
+			}
+			results <- err
+		}()
+	}
+send:
+	for i := range engines {
+		if _, ok := o.Warmup[stages[i].Model]; !ok {
+			continue
+		}
+		select {
+		case tasks <- i:
+		case <-c.Done():
+			break send
+		}
+	}
+	close(tasks)
+	var err error
+	for range n {
+		err = errors.Join(err, <-results)
+	}
+	return errors.Join(err, ctx.Err())
 }
 
 func sampleMeasureOperation(ctx context.Context, interval time.Duration, sample func(context.Context) error, op func(context.Context) error) error {

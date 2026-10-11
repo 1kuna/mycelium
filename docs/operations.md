@@ -540,3 +540,48 @@ list. It holds all models together, optionally warms them, writes JSON and text,
 and unloads them. Missing native counters fail visibly. See the separate
 [B70 weekend measurement](production-test-plan.md#b70-gpu0-weekend-joint-residency-measurement)
 checklist; this is not the first-machine Spark acceptance test.
+
+## Host RAM admission
+
+Declare batch `needs.host_memory_gb` or catalog `host_memory_gb` in GiB for
+additional CPU-side memory, including the measured load and overlapping
+activation peak. NeMo's historical 9.58 GiB peak suggests a roughly 10 GiB
+request, but qualify the actual wrapper and workload. Unset/zero retains
+GPU-only admission. Host requests require valid live RAM telemetry.
+
+All per-card workers on one physical machine must share a stable `join
+--host-id` (default hostname); use unique host IDs across different machines.
+Linux uses `MemAvailable`; macOS uses free plus inactive pages from `vm_stat`.
+`--reserve-host-memory-gb` (default 4 GiB) withholds OS/other-workload headroom.
+The queue uses the lowest current allowance reported by workers on that host
+and subtracts all outstanding declared allocations, including loading models
+and stopping/draining work. This is intentionally conservative: resident memory
+already reduces the live OS allowance, and its declared reservation is retained
+to cover growth rather than guessing process usage. A slower/stale sibling
+report can temporarily reduce admission until its next check-in. This is
+admission, not an OS memory limit; external allocations can still race it.
+Workers repeat live refusal immediately before batch/model starts.
+
+On dedicated GPUs the host pool charges only `host_memory_gb`. On unified
+Metal/Spark/integrated machines, GPU and CPU allocations share one host pool:
+charge `memory_gb + host_memory_gb` once per allocation, not two independent
+RAM budgets. `host_memory_gb` means additional CPU-side memory, never the
+combined GPU-plus-CPU footprint. Existing GPU-only allocations also reserve
+their GPU portion against that pool when placing a RAM-requesting neighbor.
+GPU admission remains a cap; passing both checks does not charge a second
+GPU allocation. The OS reserve is the larger GPU/host reserve, applied once
+to the shared allowance. Auto CUDA detects unsupported NVIDIA memory fields;
+explicit `--memory-mode unified` and Metal always use this rule.
+
+Production can stop lower-priority commands or drain unpinned models on another
+card of the same host when that releases RAM; GPU reclaim remains card-local.
+Pinned models and failed unloads remain protected. Reservations follow the
+existing attempt, loss and restart reconciliation rules. Status shows host RAM
+headroom/probe errors and a plain RAM waiting reason.
+
+For several warm audio models, use `measure --warmup WARMUPS.json
+--warmup-parallel N` with representative requests, stopped local join and the
+exact worker spool. Loads stay serial; N bounds requests after all models load.
+`--load-timeout 10m` can qualify slow startup (default 5m). Reports separate
+load and warm-up seconds and record the combined sampled peak. Brief spikes
+can be missed; real CUDA/XPU qualification remains necessary.

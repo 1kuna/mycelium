@@ -43,6 +43,8 @@ type Worker struct {
 	Clock                       Clock
 	StateDir                    string
 	CheckpointRoot              string
+	HostMemorySource            MemorySource
+	HostMemoryReserveGB         float64
 	MemorySource                MemorySource
 	MemoryMeasured              bool
 	batchMemory                 *atomic.Uint64
@@ -96,11 +98,21 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	}
 }
 
-var errWorkerMemory = errors.New("free GPU memory unavailable or insufficient")
+var errWorkerMemory = errors.New("free memory unavailable or insufficient")
 
 var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
+	if j.Spec.Needs.HostMemoryGB > 0 {
+		if w.HostMemorySource == nil {
+			return nil, fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
+		}
+		free, e := w.HostMemorySource(context.Background())
+		need := hostNeed(&w.Machine, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+		if e != nil || !validMemoryValue(free) || free < need {
+			return nil, fmt.Errorf("%w: host RAM need %.1f GiB, available %.1f GiB: %v", errWorkerMemory, need, free, e)
+		}
+	}
 	if w.MemorySource != nil {
 		free, e := w.MemorySource(context.Background())
 		if e != nil || !validMemoryValue(free) || free < j.Spec.Needs.MemoryGB {
@@ -410,6 +422,19 @@ func (w Worker) Run(stop context.Context) error {
 	if w.MemorySource == nil {
 		w.MemorySource, _ = NewMemorySource("fake", w.Machine.FreeMemoryGB, 0)
 	}
+	if w.Machine.HostID == "" {
+		w.Machine.HostID, _ = os.Hostname()
+		if w.Machine.HostID == "" {
+			return errors.New("worker requires physical host identity")
+		}
+	}
+	if w.HostMemorySource == nil {
+		w.HostMemorySource, err = NewHostMemorySource(w.HostMemoryReserveGB)
+		if err != nil {
+			return err
+		}
+	}
+	w.Machine.HostMemoryMeasured = true
 	w.batchMemory = &atomic.Uint64{}
 	if s.state.Job != nil {
 		w.batchMemory.Store(math.Float64bits(s.state.Job.Spec.Needs.MemoryGB))
@@ -554,6 +579,12 @@ func (w Worker) Run(stop context.Context) error {
 				}
 				m.FreeMemoryGB = free
 				m.MemoryMeasured = w.MemoryMeasured
+			}
+			hostFree, hostErr := w.HostMemorySource(ctx)
+			m.HostAvailableMemoryGB = hostFree
+			if hostErr != nil || !validMemoryValue(hostFree) {
+				m.HostAvailableMemoryGB = 0
+				m.HostMemoryError = fmt.Sprintf("host RAM probe failed: %v", hostErr)
 			}
 			m.CheckpointUnavailable = workerCheckpointAvailable(s.state.CheckpointRoot) != nil
 			var running *Execution

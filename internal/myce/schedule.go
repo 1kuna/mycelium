@@ -8,6 +8,9 @@ import (
 )
 
 func fits(j *Job, m *Machine, memory float64) bool {
+	return hostFits(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) && fitsWithoutHostMemory(j, m, memory)
+}
+func fitsWithoutHostMemory(j *Job, m *Machine, memory float64) bool {
 	return m.MemoryError == "" && !m.Gone && !m.Leaving && !m.CheckpointUnavailable && memory >= j.Spec.Needs.MemoryGB && (len(j.Spec.AllowedMachines) == 0 || slices.Contains(j.Spec.AllowedMachines, m.ID)) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && environmentCanRun(j, m)
 }
 func affinity(j *Job, m *Machine) int {
@@ -81,6 +84,9 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 		}
 	}
 	needs := []string{}
+	if j.Spec.Needs.HostMemoryGB > 0 {
+		needs = append(needs, fmt.Sprintf("waiting for RAM: %.1f GiB host memory (or telemetry unavailable)", j.Spec.Needs.HostMemoryGB))
+	}
 	if len(j.Spec.Needs.Platform.Required) > 0 {
 		needs = append(needs, "needs "+strings.Join(j.Spec.Needs.Platform.Required, " or "))
 	}
