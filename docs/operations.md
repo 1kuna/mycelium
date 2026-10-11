@@ -130,6 +130,63 @@ non-resumable jobs finish. `myce leave --name mac-worker` asks wait/stop if need
 spool across restarts. Queue Ctrl-C stops the API without deleting durable jobs.
 Workers continue through temporary queue/network loss and replay logs/results.
 
+## Take a machine out of Mycelium
+
+Run as the OS user that runs the worker, on that machine:
+
+```sh
+myce disable --reason "Verso rollback drill"
+myce enable
+```
+
+`disable` immediately persists `~/.local/share/myce/DISABLED` (private JSON:
+operator UID, UTC time, reason, grace seconds). All workers run by that user,
+including per-card workers and installed workers with custom spools, share this
+flag and register their spool locations there. It survives reboot. `join` and
+installed worker services exit successfully while the flag exists, before GPU
+or queue checks; systemd's restart-on-failure and launchd's unsuccessful-exit
+restart therefore do not loop. Linux worker units also have a flag condition.
+Run the same commands separately for workers run by another OS user.
+
+The command stops recorded worker supervisors first, then signals their owned
+command, model-server and environment-build process groups. Jobs get up to
+10 seconds to checkpoint; `--grace 3s` changes that grace (maximum 1 minute),
+and `--now` kills immediately. It then kills surviving groups and verifies exit,
+allowing up to 5 seconds for group disappearance and worker exit. Local process
+inspection and service commands are bounded and failures are reported. No
+queue or NAS operation gates local shutdown. Queue notifications run alongside
+shutdown with a shared 500 ms timeout per phase. A reachable queue fences every
+card on the host and requeues displaced jobs only after cleanup confirmation,
+without charging a retry; placement restrictions still apply. An unreachable
+queue learns from the saved cleanup receipt at the next disable or enable/rejoin,
+including refunding a loss it recorded during the outage. Model HTTP requests
+interrupted by shutdown return an error and must be retried by their caller.
+
+`disable` stops the detected v2 worker service. `enable` preserves the flag and
+receipt in local `.Trash`, starts that service, or prints the saved foreground
+join command. Use `--config /absolute/path/config.json` for a custom installer
+root. Manual-template services and the default installer configuration are
+recognized automatically. `MYCE_HOST_STATE_DIR` / `--host-state-dir` selects an
+isolated control directory for laptop drills; every worker and control command
+in that drill must use the same directory.
+
+Verify the final `Disabled: ... unconfirmed: none` line and exit status 0, then
+`myce status` or the status page: the host says **disabled by operator**, and
+its waiting jobs say **requeued**. Queue unavailability is a separate warning;
+local confirmation still succeeds. Any unconfirmed cleanup returns nonzero and
+keeps the flag. Rerun `disable`; `enable` refuses to clear an unconfirmed disable.
+After enabling, verify a fresh joined worker and an agreed small job.
+
+Ownership comes from durable attempt/engine/build records and exact execution
+identities, plus OS process birth identity for supervisors. Names alone never
+authorize a signal. These commands never stop Verso's legacy controller, other
+users' work, unrelated containers or unrelated GPU processes. Container cleanup
+is a separate confirmation hook for the Docker containment change; this version
+confirms plain-command processes only. Upgrade the worker binary and restart
+it once before relying on this switch, so it registers its supervisor and spool.
+For an old spool use `--state-dir DIR --name NAME --host-id HOST` to adopt its
+owned-process records; an unregistered old worker must already be stopped.
+
 ## Render service files
 
 This local renderer makes a private file from the checked-in template. Edit the
@@ -220,6 +277,7 @@ systemctl --user disable --now myce-worker.service
 Worker stop can wait for a non-resumable command indefinitely. Decide whether to
 finish or call `leave --now` before stop. Do not lower timeout to force a kill.
 Services use restart-on-failure; an API leave alone is not durable deactivation.
+Use `myce disable` above for bounded, persistent host removal.
 For B70 lending, Verso must own the start/stop decision after its own admission
 checks; this document does not install a controller or bypass existing scheduling.
 
