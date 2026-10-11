@@ -10,7 +10,7 @@ import tempfile
 import time
 import unittest
 
-from pressure import Checker, digest, drm_owners, emit, replay, validate_save
+from pressure import Checker, digest, drm_identity, drm_inventory, drm_owners, emit, replay, validate_save
 
 
 def event(kind: str, at: float = 0, **fields: object) -> dict:
@@ -32,7 +32,7 @@ class EvidenceTests(unittest.TestCase):
             (root / str(os.getpid())).symlink_to(Path('/proc') / str(os.getpid()))
             self.assertEqual(drm_owners(['0000:07:00.0'], root), {'0000:07:00.0': []})
 
-    def test_drm_numeric_identity_and_multiple_groups(self) -> None:
+    def test_drm_numeric_identity_and_multiple_processes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, pci = Path(tmp), "0000:07:00.0"
             def process(pid: int, group: int, start: int) -> None:
@@ -42,15 +42,49 @@ class EvidenceTests(unittest.TestCase):
                 (path / "fd/9").symlink_to("/dev/dri/renderD129")
                 fields = ["S", "1", str(group)] + ["0"] * 16 + [str(start)]
                 (path / "stat").write_bytes(str(pid).encode() + b" (spaced ) non-utf8 \xff) " + " ".join(fields).encode())
-                (path / "fdinfo/9").write_text("drm-pdev:\t" + pci + "\n")
+                (path / "exe").symlink_to("/usr/bin/test-runtime")
+                (path / "cgroup").write_text("0::/test.scope")
+                (path / "fdinfo/9").write_text("drm-pdev:\t" + pci + "\ndrm-client-id: 88\n")
             process(100, 100, 10)
             process(101, 100, 11)
-            self.assertEqual(len(drm_owners([pci], root)[pci]), 1)
-            process(200, 200, 20)
             self.assertEqual(len(drm_owners([pci], root)[pci]), 2)
+            process(200, 200, 20)
+            self.assertEqual(len(drm_owners([pci], root)[pci]), 3)
             (root / "100/stat").write_text("malformed")
             with self.assertRaises((IndexError, ValueError)):
                 drm_owners([pci], root)
+
+    def test_real_b70_shared_display_shape_and_unknown_holder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, pci = Path(tmp), "0000:07:00.0"
+            for pid, start, exe, cgroup, copies in (
+                (1, 14, "/usr/lib/systemd/systemd", "0::/init.scope", 1),
+                (1138, 848, "/usr/lib/systemd/systemd-logind", "0::/system.slice/systemd-logind.service", 1),
+                (2458, 1013, "/usr/bin/gnome-shell", "0::/user.slice/user-1000.slice/user@1000.service/session.slice/org.gnome.Shell@wayland.service", 5)):
+                p = root / str(pid)
+                (p / "fd").mkdir(parents=True); (p / "fdinfo").mkdir()
+                fields = ["S", "1", str(pid)] + ["0"] * 16 + [str(start)]
+                (p / "stat").write_text(f"{pid} (display) " + " ".join(fields))
+                (p / "exe").symlink_to(exe); (p / "cgroup").write_text(cgroup)
+                for fd in range(copies):
+                    (p / "fd" / str(fd)).symlink_to("/dev/dri/card1")
+                    (p / "fdinfo" / str(fd)).write_text(
+                        f"drm-driver: xe\ndrm-pdev: {pci}\ndrm-client-id: 42\n"
+                        "drm-resident-vram0: 5352 KiB\ndrm-resident-gtt: 20 KiB\n")
+            baseline = [drm_identity(h) for h in drm_inventory([pci], root)]
+            evidence = {}
+            self.assertEqual(drm_owners([pci], root, baseline=baseline, allowed=[], evidence=evidence), {pci: []})
+            self.assertEqual(len(evidence["holders"]), 3)
+            self.assertEqual(len(evidence["baseline_clients"]), 1)
+            self.assertEqual(evidence["baseline_clients"][0]["resident_bytes"]["drm-resident-vram0"], 5352 * 1024)
+            (root / "2458/fd/9").symlink_to("/dev/dri/card1")
+            (root / "2458/fdinfo/9").write_text(f"drm-pdev: {pci}\ndrm-client-id: 43\n")
+            with self.assertRaisesRegex(ValueError, "UNKNOWN"):
+                drm_owners([pci], root, baseline=baseline, allowed=[])
+            (root / "2458/fd/9").unlink(); (root / "2458/fdinfo/9").unlink()
+            (root / "1138/cgroup").write_text("0::/unexpected.scope")
+            with self.assertRaisesRegex(ValueError, "UNKNOWN"):
+                drm_owners([pci], root, baseline=baseline, allowed=[])
 
     def test_complete_resume(self) -> None:
         c = Checker(30)
