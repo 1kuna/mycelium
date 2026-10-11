@@ -534,8 +534,11 @@ class Run:
         self.finished([experiment,production])
 
     def production_only(self):
-        for _ in range(30):
-            j=submit(self.a,self.url,'production',1);self.finished([j],45)
+        for index in range(30):
+            j=submit(self.a,self.url,'production',1);states=self.finished([j],45)
+            if index==0 and (states[j]['state']!='succeeded' or not self.event(j,'allocated')):
+                self.safety='native_runtime_qualification_failed'
+                raise RuntimeError(self.safety)
         j=submit(self.a,self.url,'experiment',10);self.finished([j])
 
     def backlog(self):
