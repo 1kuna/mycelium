@@ -171,6 +171,16 @@ func serviceCommand(args []string) error {
 	if e != nil {
 		return e
 	}
+	if c.Role == "worker" {
+		reason, err := myce.HostDisabled("")
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			fmt.Println("Worker disabled by operator:", reason)
+			return nil
+		}
+	}
 	token, e := myce.ReadServiceToken(c)
 	if e != nil {
 		return e

@@ -226,7 +226,11 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection) (Servic
 func unitQuote(v string) string { v = strings.ReplaceAll(v, "%", "%%"); return strconv.Quote(v) }
 func (c ServiceConfig) ServiceText() string {
 	if c.Detection.OS == "linux" {
-		return "[Unit]\nDescription=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\nExecStart=" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + "\nRestart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
+		condition := ""
+		if c.Role == "worker" {
+			condition = "ConditionPathExists=!%h/.local/share/myce/DISABLED\n"
+		}
+		return "[Unit]\n" + condition + "Description=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\nExecStart=" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + "\nRestart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
 	}
 	vals := []string{c.Binary, "service", "--config", c.Config}
 	args := ""

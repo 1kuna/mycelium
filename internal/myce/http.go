@@ -126,6 +126,20 @@ func (a API) Handler() http.Handler {
 		}
 		respond(w, map[string]bool{"ok": true}, a.Queue.AppendLog(c))
 	})
+	mux.HandleFunc("POST /api/hosts/{id}/disable", func(w http.ResponseWriter, r *http.Request) {
+		var c struct {
+			Reason     string   `json:"reason"`
+			Cleared    bool     `json:"cleared"`
+			Executions []Result `json:"executions,omitempty"`
+		}
+		if !decode(w, r, &c) {
+			return
+		}
+		respond(w, map[string]bool{"ok": true}, a.Queue.DisableHostExecutions(r.PathValue("id"), c.Reason, c.Cleared, c.Executions))
+	})
+	mux.HandleFunc("POST /api/hosts/{id}/enable", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, map[string]bool{"ok": true}, a.Queue.EnableHost(r.PathValue("id")))
+	})
 	mux.HandleFunc("POST /api/workers/{id}/leave", func(w http.ResponseWriter, r *http.Request) {
 		var c struct {
 			Now bool `json:"now"`

@@ -1,6 +1,7 @@
 # Spark GB10 unified memory: live MemAvailable minus 16 GiB headroom.
 # Replace checkpoint root; confirm Atlas owner admission before installation.
 [Unit]
+ConditionPathExists=!%h/.local/share/myce/DISABLED
 Description=Mycelium v2 plain-command worker
 After=network-online.target
 
