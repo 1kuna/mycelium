@@ -98,6 +98,11 @@ models:
     args: [--ctx-size, "32768"]
 ```
 
+`max_in_flight` is an optional nonnegative per-loaded-copy request limit.
+Omitted or `0` retains unlimited concurrency; `1` serializes a server. Calls
+wait in the existing priority/deadline order when all copies are full, and
+completion, cancellation or worker loss frees capacity.
+
 Names are unique. `path` names a NAS master GGUF, relative to `--model-root`
 or an absolute mount path. Supply trusted exact `size_bytes` and `sha256` in
 place of the placeholders above. Workers verify and cache it locally before

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"gopkg.in/yaml.v3"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
@@ -31,6 +32,7 @@ type VLLMPreset struct {
 	GPUMemoryUtilization float64 `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
 }
 type Model struct {
+	MaxInFlight     int               `yaml:"max_in_flight,omitempty" json:"max_in_flight,omitempty"`
 	Files           []ModelFile       `yaml:"files,omitempty" json:"files,omitempty"`
 	Environment     string            `yaml:"environment,omitempty" json:"environment,omitempty"`
 	StartCommand    []string          `yaml:"start_command,omitempty" json:"start_command,omitempty"`
@@ -86,6 +88,9 @@ func validateModels(c ModelConfig) error {
 	}
 	seen := map[string]bool{}
 	for _, m := range c.Models {
+		if m.MaxInFlight < 0 {
+			return errors.New("max_in_flight must be nonnegative (zero means unlimited)")
+		}
 		if m.Name == "" || seen[m.Name] || m.Path == "" || m.MemoryGB <= 0 || math.IsNaN(m.MemoryGB) || math.IsInf(m.MemoryGB, 0) || len(m.Platforms) == 0 {
 			return errors.New("models require unique names, path, positive memory and platforms")
 		}
@@ -352,7 +357,7 @@ func (q *Queue) maintainModels() {
 				continue
 			}
 			s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
-			if s != nil && s.State == "ready" && !q.batchBeforeCall(c, m) {
+			if s != nil && s.State == "ready" && (model.MaxInFlight == 0 || s.InFlight < model.MaxInFlight) && !q.batchBeforeCall(c, m) {
 				c.Machine = m.ID
 				c.StartedAt = &now
 				c.Session = m.Session
@@ -468,7 +473,7 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 		return false
 	}
 	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "ready" {
-		return true
+		return model.MaxInFlight == 0 || s.InFlight < model.MaxInFlight
 	}
 	possible := m.FreeMemoryGB
 	for _, s := range q.s.ModelSlots {
@@ -614,7 +619,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		c.Deadline = &d
 	}
 	var data []byte
-	var spool *os.File
+	var spool *spooledModelRequest
 	var bodySize int64
 	var e error
 	var body struct {
@@ -639,19 +644,22 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "" {
 			endpoint += "?" + r.URL.RawQuery
 		}
-		spool, bodySize, e = spoolModelRequest(r.Context(), r.Body, maxGenericRequestBytes)
+		spool, bodySize, e = a.Queue.uploadSpool.request(r.Context(), r.Body, maxGenericRequestBytes, r.ContentLength)
 		if e != nil {
 			status := 400
 			if errors.Is(e, errModelRequestTooLarge) {
 				status = http.StatusRequestEntityTooLarge
 			}
-			modelError(w, status, e.Error())
+			if errors.Is(e, errUploadSpoolFull) {
+				status = http.StatusInsufficientStorage
+			}
+			http.Error(w, e.Error(), status)
 			return
 		}
-		spoolName := spool.Name()
 		defer func() {
-			_ = spool.Close()
-			_ = os.Remove(spoolName)
+			if err := spool.Close(); err != nil {
+				log.Printf("model upload spool cleanup: %v", err)
+			}
 		}()
 	} else {
 		data, e = io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))

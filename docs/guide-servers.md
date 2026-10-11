@@ -11,6 +11,7 @@ These are plain commands with worker-user permissions, not a sandbox.
 models:
   - name: speech
     engine: server
+    max_in_flight: 1
     environment: speech-xpu
     path: speech-weights.bin
     size_bytes: EXACT_BYTES
@@ -52,6 +53,12 @@ Catalog `device` restricts placement to workers advertising that selector.
 No second worker/controller may own that card. A selector is framework isolation,
 not an OS security boundary; qualify it with the real runtime before cutover.
 
+`max_in_flight` optionally limits simultaneous calls per loaded copy (set it to
+`1` for serial speech servers). Omitted or `0` means unlimited; negative values
+are rejected. Full copies leave calls queued in the existing priority/deadline
+order; another free loaded copy may serve them. Completion, cancellation and
+worker loss release capacity. Use the same catalog on queue and workers.
+
 ## HTTP passthrough
 
 ```sh
@@ -68,7 +75,15 @@ Myce routing headers and hop-by-hop headers are consumed, never sent to the
 engine. Generic request bodies use a bounded **8 GiB local disk spool** at the
 queue for placement/retry; larger payloads fail explicitly. The worker streams
 the body to the engine, preserving content length. The spool is removed on every
-normal/error return; concurrent uploads each need their own disk space. OpenAI
+normal/error return. `queue --upload-spool-bytes` sets a shared positive byte
+budget (default **16 GiB**, enough for two maximum-size uploads); lower it on
+small disks. `--upload-spool-dir` selects the directory, otherwise the OS temp
+directory is used. Known lengths reserve before reading; chunked uploads reserve
+before each disk write. Bytes stay charged while waiting, running and retrying.
+A full budget returns plain HTTP **507** explaining the limit; an over-8-GiB
+request returns **413**. Failed/aborted uploads remove their files and release
+their bytes. The budget is for this queue process, not other disk users; leave
+space for SQLite and other workloads. OpenAI
 JSON routes keep the 64 MiB in-memory limit. WebSockets remain unsupported.
 The queue waits for the upload before placement; it does not stream uploads
 through the queue while retaining an unbounded replay buffer.
