@@ -262,15 +262,15 @@ def replay(path: Path, checker: Checker, offset: int = 0) -> int:
         return stream.tell()
 
 
-def api(url: str, method: str = "GET", path: str = "/api/status", data: Any = None, timeout: float = 5) -> Any:
+def api(url: str, method: str = "GET", path: str = "/api/status", data: Any = None, timeout: float = 2) -> Any:
     req = urllib.request.Request(url + path, method=method,
         data=None if data is None else json.dumps(data).encode(),
         headers={"Authorization": "Bearer " + os.environ["MYCE_TOKEN"], "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=2) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.load(response)
 
 
-def observe(url: str, events: Path, timeout: float = 5) -> None:
+def observe(url: str, events: Path, timeout: float = 2) -> None:
     status = api(url, timeout=timeout)
     # Never copy command arguments, input paths, logs, names, or secrets into evidence.
     emit(events, "status", jobs=[{k: j[k] for k in ("id", "state", "attempt", "machine") if k in j}
