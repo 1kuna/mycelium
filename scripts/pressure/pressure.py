@@ -272,11 +272,11 @@ def observe(url: str, events: Path) -> None:
                                  for j in status.get("jobs") or []])
 
 
-def drm_owners(pcis: list[str], proc: Path = Path("/proc")) -> dict[str, list[str]]:
-    """Conservative Linux DRM inventory; unreadable identity never proves absence."""
+def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str, Any]]:
+    """One receipt per process, with unique device/client pairs and measured memory."""
     if not pcis or any(not re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]", p) for p in pcis):
         raise ValueError("explicit lowercase PCI identities required")
-    owners: dict[str, set[str]] = {p: set() for p in pcis}
+    holders = []
     for pid in proc.iterdir():
         if not pid.name.isdigit():
             continue
@@ -284,7 +284,7 @@ def drm_owners(pcis: list[str], proc: Path = Path("/proc")) -> dict[str, list[st
             before = (pid / "stat").read_bytes()
             fields = before[before.rfind(b")") + 2:].split()
             group, start = int(fields[2]), int(fields[19])
-            matched: set[str] = set()
+            clients = {}
             # Keep the collector's own directory descriptor alive during inspection.
             with os.scandir(pid / "fdinfo") as descriptors:
                 for info in descriptors:
@@ -295,32 +295,81 @@ def drm_owners(pcis: list[str], proc: Path = Path("/proc")) -> dict[str, list[st
                         raw = stream.read(65537)
                     if len(raw) > 65536:
                         raise ValueError("oversized fdinfo")
-                    identified = False
-                    for line in raw.splitlines():
-                        if line.startswith(b"drm-pdev:"):
-                            identified = True
-                            pci = line.split(b":", 1)[1].strip().decode("ascii")
-                            if pci in owners:
-                                matched.add(pci)
-                    if not identified:
+                    metrics = {line.split(b":", 1)[0].decode("ascii"):
+                               line.split(b":", 1)[1].strip().decode("ascii")
+                               for line in raw.splitlines() if line.startswith(b"drm-")}
+                    pci = metrics.get("drm-pdev")
+                    if pci is None:
                         raise ValueError("DRM descriptor lacks PCI identity")
-            if not matched:
+                    if pci not in pcis:
+                        continue
+                    client = metrics.get("drm-client-id", "")
+                    if not client.isdigit():
+                        raise ValueError("DRM descriptor lacks numeric client identity")
+                    resident = {}
+                    for key, value in metrics.items():
+                        if key.startswith("drm-resident-"):
+                            parts = value.split()
+                            if len(parts) == 1 and parts[0] == "0":
+                                resident[key] = 0
+                            elif len(parts) == 2 and parts[1] == "KiB":
+                                resident[key] = int(parts[0]) * 1024
+                            else:
+                                raise ValueError("unsupported DRM memory units")
+                    key = (pci, target, int(client))
+                    old = clients.get(key, {}).get("resident_bytes", {})
+                    clients[key] = dict(pci=pci, device=target, client=int(client),
+                                        resident_bytes={k: max(v, old.get(k, 0)) for k, v in resident.items()})
+            if not clients:
                 continue
-            leader = proc / str(group) / "stat"
-            leader_raw = leader.read_bytes()
-            leader_fields = leader_raw[leader_raw.rfind(b")") + 2:].split()
-            leader_start = int(leader_fields[19])
             after = (pid / "stat").read_bytes()
             after_fields = after[after.rfind(b")") + 2:].split()
             if (int(after_fields[2]), int(after_fields[19])) != (group, start):
                 raise ValueError("process identity changed during DRM sample")
-            owner = digest([clock_domain(), group, leader_start])[:24]
-            for pci in matched:
-                owners[pci].add(owner)
+            holders.append(dict(boot=clock_domain(), pid=int(pid.name), start=start,
+                                exe=os.readlink(pid / "exe"), cgroup=(pid / "cgroup").read_text().strip(),
+                                clients=sorted(clients.values(), key=lambda c: (c["pci"], c["device"], c["client"]))))
         except OSError as error:
             if error.errno in (errno.ENOENT, errno.ESRCH) and not pid.exists():
                 continue
             raise
+    return sorted(holders, key=lambda h: h["pid"])
+
+
+def drm_identity(holder: dict[str, Any]) -> dict[str, Any]:
+    return {**{k: holder[k] for k in ("boot", "pid", "start", "exe", "cgroup")},
+            "clients": [{k: c[k] for k in ("pci", "device", "client")} for c in holder["clients"]]}
+
+
+def drm_owners(pcis: list[str], proc: Path = Path("/proc"), *,
+               baseline: list[dict[str, Any]] | None = None,
+               allowed: list[dict[str, Any]] | None = None,
+               evidence: dict[str, Any] | None = None) -> dict[str, list[str]]:
+    """Pinned display baseline is separate from allocation owners; unknowns fail closed."""
+    holders = drm_inventory(pcis, proc)
+    owners: dict[str, set[str]] = {p: set() for p in pcis}
+    seen_baseline = []
+    shared = {}
+    for holder in holders:
+        identity = drm_identity(holder)
+        if baseline is not None and identity in baseline:
+            seen_baseline.append(identity)
+            for c in holder["clients"]:
+                key = (c["pci"], c["client"])
+                old = shared.get(key, {})
+                shared[key] = {k: max(v, old.get(k, 0)) for k, v in c["resident_bytes"].items()}
+            continue
+        process = {k: holder[k] for k in ("boot", "pid", "start", "exe", "cgroup")}
+        if allowed is not None and process not in allowed:
+            raise ValueError("UNKNOWN GPU user: " + digest(identity)[:24])
+        token = digest([holder["boot"], holder["pid"], holder["start"]])[:24]
+        for c in holder["clients"]:
+            owners[c["pci"]].add(token)
+    if baseline is not None and len(seen_baseline) != len(baseline):
+        raise ValueError("display baseline identity changed or disappeared")
+    if evidence is not None:
+        evidence.update(holders=holders, baseline_clients=[dict(pci=p, client=c, resident_bytes=m)
+                        for (p, c), m in sorted(shared.items())])
     return {pci: sorted(tokens) for pci, tokens in owners.items()}
 
 

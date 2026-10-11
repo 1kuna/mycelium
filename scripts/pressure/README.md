@@ -46,11 +46,15 @@ Native topology/selector verification is still required before allocation.
 CUDA also requires exactly one visible device; its physical identity must be
 verified by the operator. No CPU fallback is permitted.
 
-The Oct 11 B70 preflight found shared display DRM descriptors in PID1, logind
-and GNOME. This collector counts process groups, so their shared client trips
-`physical_double_owner` before any test allocation. Preserve that hold until a
-qualified collector accounts for shared display clients and independent driver
-memory; do not filter their owner tokens to make the checker pass.
+The collector de-duplicates descriptors per PID/start identity. `drm_inventory`
+records executable, cgroup and unique node/client identities without argv/env.
+An operator-pinned `drm_owners(..., baseline=..., allowed=...)` excludes only exact
+pre-existing display identities from allocation counts and reports their measured
+resident memory, de-duplicated by shared DRM client. Unknown processes, changed
+clients, missing baseline identities and unreadable evidence fail closed. Pin the
+baseline only after read-only qualification; never learn it during a workload.
+The standalone `physical` mode remains conservative and includes all holders;
+native orchestration must provide pinned baseline and current approved processes.
 
 GPU jobs touch a uint8 payload plus three 1024-square float32 matrices and run
 matrix multiplication with synchronization throughout each unit. Host bytearray
