@@ -293,6 +293,14 @@ class CommandTests(unittest.TestCase):
 
 
 class NativeRunnerTests(unittest.TestCase):
+    def test_queue_observer_honors_bounded_timeout(self):
+        import pressure
+        from unittest.mock import patch
+        with patch.dict(os.environ,MYCE_TOKEN='synthetic'), patch.object(pressure.urllib.request,'urlopen') as opened:
+            opened.return_value.__enter__.return_value.read.return_value=b'{}'
+            self.assertEqual(pressure.api('http://127.0.0.1:1',timeout=.25),{})
+            self.assertEqual(opened.call_args.kwargs['timeout'],.25)
+
     def test_native_process_allowlist_requires_recorded_start_and_cgroup(self):
         import stage_ab
         from unittest.mock import patch
