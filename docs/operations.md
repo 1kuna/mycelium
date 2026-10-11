@@ -584,3 +584,50 @@ exact worker spool. Loads stay serial; N bounds requests after all models load.
 `--load-timeout 10m` can qualify slow startup (default 5m). Reports separate
 load and warm-up seconds and record the combined sampled peak. Brief spikes
 can be missed; real CUDA/XPU qualification remains necessary.
+
+## Docker cleanup custody
+
+For opt-in `run.docker` batches, the local `<identity>.docker.json` record is
+fsynced before create/start and before forced KILL. It retains the unique
+attempt identity, exact container ID when known, daemon endpoint, pending
+operation, stop deadline and forced/released disposition. Preserve the worker
+spool during upgrades/restarts; an empty replacement spool is not release proof.
+
+The worker reports creating/start pending, running, stopping, released or
+**cleanup unconfirmed**. Stop sends container TERM, then KILL at the original
+injected-clock grace boundary. Every matching container is inspected for the
+exact ownership label before signaling. A final successful scan must prove
+all are nonrunning (or absent). Stopped objects remain as recoverable evidence.
+Each lifecycle Docker call has a 2-second I/O timeout; retries run independently
+of heartbeat/control, checkpoint walks and queue log upload. Grace is never
+renewed by a Docker retry. Restart reconciles the saved daemon and containers
+before fresh readiness, including when the old CLI/process group has vanished.
+
+An empty scan does not settle a timed-out create/start. A definite daemon
+refusal can settle without execution. A lost start response can settle only
+after positive inspection witnesses the exact created container running,
+followed by confirmed cleanup: the adapter sends one start, never retries it,
+and rejects restart policies. Until that witness, a future delayed start is
+still possible. If no definite disposition or positive acceptance evidence
+arrives, retry cleanup indefinitely and preserve exclusion; do not clear state
+or treat a daemon restart, worker reboot, elapsed grace or empty scan as proof.
+There is no automatic operator override for such uncertainty. Escalate for a
+qualified daemon fence/recovery and reviewed reconciliation rather than editing
+custody records to claim release.
+
+Queue obligations survive stop expiry, machine loss, queue restart and fresh
+worker sessions, even on hosts without production-hold policy. Unconfirmed
+Docker custody blocks new batch/model/preparation allocations on the implicated
+physical host, retains declared host RAM, and appears in CLI/HTML/JSON status.
+Production may use other eligible hosts; it cannot borrow memory from that
+obligation. An attempt-specific release acknowledgement precedes log upload;
+stale acknowledgements cannot settle a different attempt. Job retry/terminal
+state after worker loss is separate from the old host's physical custody.
+
+The default suite uses a fake CLI plus daemon state outside the CLI's process
+group; no Docker daemon or GPU is needed. The optional
+`TestDockerRealCheckpointResume` is disabled unless `MYCE_REAL_DOCKER_TEST=1`
+and `MYCE_REAL_DOCKER_IMAGE` names an already-local digest-pinned shell image.
+It never pulls an image and retains uniquely labelled stopped test containers.
+Do not enable it on a shared Mac or fleet without current authorization.
+Native device/driver release and aggregate memory limits remain separate gates.

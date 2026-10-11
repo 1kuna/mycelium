@@ -230,3 +230,14 @@ active pool use from reservations and unknown downtime. `myce usage` reports
 these totals. A self-contained responsive status page shows the fleet, queue,
 seven-day SVG charts and problems. See [the guide](guide-fairness-usage.md) for
 configuration, accounting definitions and known measurement limits.
+
+## Docker command containment (maintainer, 2026-10-11)
+
+The authorized Verso gap-3 extension adds opt-in `run.docker` for a supported,
+direct Docker batch command. One worker-owned create/start request, immutable
+attempt labels and durable cleanup custody keep daemon-owned containers within
+the existing worker/SQLite accounting contract. Unconfirmed release retains
+the physical host's exclusion across loss/restart. Plain commands remain the
+default; no container scheduler, peer network or extra service is introduced.
+The exact supported subset and limits are in [job reference](job-reference.md#managed-docker-batch-commands)
+and [operations](operations.md#docker-cleanup-custody).

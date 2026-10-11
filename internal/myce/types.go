@@ -78,6 +78,7 @@ type Spec struct {
 	Priority string     `json:"priority" yaml:"priority"`
 	Deadline *time.Time `json:"deadline,omitempty" yaml:"deadline,omitempty"`
 	Run      struct {
+		Docker  bool              `json:"docker,omitempty" yaml:"docker,omitempty"`
 		Command []string          `json:"command" yaml:"command"`
 		Workdir string            `json:"workdir,omitempty" yaml:"workdir,omitempty"`
 		Env     map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
@@ -110,6 +111,11 @@ func (s Spec) Validate() error {
 	}
 	if !validMemoryValue(s.Needs.HostMemoryGB) {
 		return errors.New("needs.host_memory_gb must be finite and nonnegative")
+	}
+	if s.Run.Docker {
+		if _, err := dockerRunArgs(s.Run.Command); err != nil {
+			return err
+		}
 	}
 	p := s.Needs.Platform
 	modes := 0
@@ -167,6 +173,7 @@ type Copy struct {
 }
 
 type Job struct {
+	ReleaseConfirmed      bool                         `json:"release_confirmed,omitempty"`
 	LastStopOutcome       string                       `json:"last_stop_outcome,omitempty"`
 	ProductionHost        string                       `json:"production_host,omitempty"`
 	WaitingSince          time.Time                    `json:"waiting_since,omitempty"`
@@ -194,6 +201,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	DockerCleanup           string              `json:"docker_cleanup,omitempty"`
 	HostID                  string              `json:"host_id,omitempty"`
 	HostAvailableMemoryGB   float64             `json:"host_available_memory_gb"`
 	FreeHostMemoryGB        float64             `json:"free_host_memory_gb"`
@@ -256,6 +264,7 @@ type Reply struct {
 	GraceSeconds    float64             `json:"grace_seconds"`
 }
 type Result struct {
+	ReleaseOnly    bool   `json:"release_only,omitempty"`
 	Forced         bool   `json:"forced,omitempty"`
 	ReleasePending bool   `json:"release_pending,omitempty"`
 	Machine        string `json:"machine"`

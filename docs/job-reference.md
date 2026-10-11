@@ -397,3 +397,60 @@ Two B70 experiments run for 600 seconds each; a 60-second production command
 arrives at second 60. Both experiments are displaced, one continues on Spark,
 and the other returns after cooldown. Speeds, admission budgets and checkpoint
 behavior are synthetic; this is not a native throughput/latency qualification.
+
+## Managed Docker batch commands
+
+`run.docker: true` (default `false`) opts a **direct** `docker run` or
+`docker container run` argument array into worker-owned containment. The worker
+converts it to `docker create --pull=never` followed by `docker start`, injects
+`--init`, a private name, `--label myce.attempt=<opaque attempt ID>`,
+`--label myce.worker=<worker ID>`, and a private spool `--cidfile`. Use an
+already-local immutable `IMAGE@sha256:<64 hex digits>`; no image is pulled.
+Do not put labels/name/cidfile in the submitted command: the worker owns them.
+
+```yaml
+name: docker-experiment
+project: verso
+priority: experiment
+run:
+  docker: true
+  command: [docker, run, --device, /dev/dri/renderD128, "IMAGE@sha256:REPLACE_WITH_64_HEX_DIGITS", python, /app/experiment.py]
+needs:
+  memory_gb: 8
+  host_memory_gb: 6
+  platform: [xpu]
+resumable: true
+```
+
+The example's image is a substitution marker, not a runnable image. Supported
+options before the image are `--init`, explicit `--env`/`-e KEY=value`,
+`--volume`/`-v`, `--device`, `--gpus`, `--entrypoint`, `--workdir`/`-w`, and
+`--user`/`-u`. All other options are rejected before contacting Docker, including
+detach, auto-remove, restart policies, privileged mode, label/name/cidfile
+changes, daemon/context selection and Docker socket mounts. Image arguments
+are passed unchanged. The payload must forward TERM and implement the ordinary
+checkpoint contract; `--init` is not a checkpoint implementation.
+
+The container receives `MYCE_ATTEMPT_ID` (opaque, unique across attempts),
+`MYCE_DOCKER_LABEL` (`myce.attempt=<ID>`), `MYCE_JOB_ID`, `MYCE_ATTEMPT`,
+placement environment and selected-device environment. `MYCE_CHECKPOINT_DIR`
+is `/myce/checkpoint`, bind-mounted from the worker's prepared attempt directory.
+`run.env` ordinary entries are also explicit container env; `MYCE_TOKEN` is
+removed from the Docker client and never forwarded. MYCE identity overrides
+in Docker `--env` are rejected. GPU device mappings and image/library behavior
+still need native qualification; this adapter is not a device or RAM sandbox.
+
+The worker pins the daemon endpoint from its own `DOCKER_HOST` (default
+`unix:///var/run/docker.sock`) in its custody record; `DOCKER_CONTEXT` is
+unsupported. Configure each worker for its intended daemon. Workers retain
+stopped containers, cidfiles and spool records as evidence. Docker output is
+collected into the ordinary job log after the container settles.
+
+For an existing **unmanaged** wrapper (`run.docker: false`), a cooperative
+container launch would be `docker run --label "$MYCE_DOCKER_LABEL" ...`, but
+that wrapper must supply a unique label itself. Mycelium cannot prove custody
+for hidden shell/nested Docker calls or infer their labels from a process tree.
+Use managed direct argv for production handover. A managed job cannot forget
+its label; inspection mismatches remain visibly unconfirmed and no unrelated
+container is signaled. Docker-backed catalog model servers are not covered by
+this batch adapter; keep them out of a containment-qualified handover.

@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"syscall"
@@ -385,7 +386,7 @@ func (q *Queue) maintain() {
 		}
 	}
 	for _, j := range q.s.Jobs {
-		if !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && expired(j.StopAt, now) {
+		if !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !j.Spec.Run.Docker && expired(j.StopAt, now) {
 			if j.Reason == "cancel requested" {
 				j.State = "cancelled"
 				j.StopAt = nil
@@ -452,7 +453,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 		if c.Running == nil && old != nil && old.Session == m.Session {
 			for _, j := range q.s.Jobs {
-				if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && q.held(hostID(old)) {
+				if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !j.Spec.Run.Docker && q.held(hostID(old)) {
 					if j.Reason == "cancel requested" {
 						j.State = "cancelled"
 						j.StopAt = nil
@@ -538,6 +539,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 						j.Machine = m.ID
 						j.Session = m.Session
 						j.State = "running"
+						j.ReleaseConfirmed = false
 						j.StopAt = nil
 						j.Reason = ""
 						j.Progress = c.Running.Progress
@@ -572,6 +574,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		for _, j := range q.s.Jobs {
 			if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
 				if j.State == "stopping" {
+					if j.Spec.Run.Docker && !j.ReleaseConfirmed {
+						return nil
+					}
 					if j.Reason == "cancel requested" {
 						j.State = "cancelled"
 						j.StopAt = nil
@@ -620,6 +625,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			}
 			if j != nil {
 				j.State = "running"
+				j.ReleaseConfirmed = false
 				j.StartedAt = nil
 				now := q.clock.Now()
 				j.AssignedAt = &now
@@ -664,6 +670,20 @@ func (q *Queue) current(r Result) (*Job, error) {
 }
 func (q *Queue) Complete(r Result) error {
 	return q.update(func() error {
+		if r.ReleaseOnly {
+			if r.ReleasePending {
+				return errors.New("release-only acknowledgement cannot be pending")
+			}
+			q.settleRelease(r)
+			if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+				j.ReleaseConfirmed = true
+				if r.Forced {
+					j.LastStopOutcome = "forced"
+				}
+			}
+			q.maintain()
+			return nil
+		}
 		settled := false
 		pendingTracked := false
 		if !r.ReleasePending {
@@ -685,6 +705,10 @@ func (q *Queue) Complete(r Result) error {
 			if r.ReleasePending {
 				j.LastStopOutcome += "; release pending"
 			}
+		}
+		if r.ReleasePending && pendingTracked && q.s.HostReleases[releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})].Docker {
+			q.maintain()
+			return nil
 		}
 		if settled || pendingTracked {
 			if _, err := q.current(r); err != nil {
@@ -801,6 +825,11 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 		for host := range q.s.Hosts {
 			if q.held(host) {
 				out.HostHolds = append(out.HostHolds, q.holdReason(host))
+			}
+		}
+		for host := range q.s.Machines {
+			if b := q.dockerBlocker(hostID(q.s.Machines[host])); b != "" && !slices.Contains(out.HostHolds, b) {
+				out.HostHolds = append(out.HostHolds, b)
 			}
 		}
 		sort.Strings(out.HostHolds)

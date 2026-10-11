@@ -38,9 +38,19 @@ func (q *Queue) refreshHostMemory() {
 		reserved := 0.0
 		for _, j := range q.s.Jobs {
 			owner := q.s.Machines[j.Machine]
-			if owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
+			if !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
 				reserved += hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 			}
+		}
+		for _, r := range q.s.HostReleases {
+			if !r.Docker || r.Host != hostID(m) {
+				continue
+			}
+			j := q.s.Jobs[r.Job]
+			if j != nil && j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt && (j.State == "running" || j.State == "stopping") {
+				continue
+			}
+			reserved += r.HostChargeGB
 		}
 		for _, s := range q.s.ModelSlots {
 			owner := q.s.Machines[s.Machine]
