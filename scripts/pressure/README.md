@@ -162,3 +162,14 @@ normal pass/fail checks. Whole-machine production hold is excluded. During
 measurement, direct xpu-smi stats children of the exact live myce-measure
 process may observe the card; PID/start, executable, arguments and cgroup
 are checked. Their holder evidence remains recorded.
+
+The de2365b retry uses the r2b folder/unit. Counter registration and the
+physical scan share a lock; process allow-lists are resolved after collecting
+holders. Ownership failures retain sanitized process/device evidence.
+Approved follow-ons use host-config production_hold=true, production_idle=180s,
+one B70 GPU1 worker only, and a Spark worker with unified38GiB reserve (24GiB
+Atlas plus14GiB existing Verso loan). Portable checkpoints have an invariant
+contract independent of backend; allocations are16MiB. The detached Mac
+transport supplies loopback SSH forwarding and cleans up its exact worker,
+ports and install. Cross-host monotonic receipts retain original clocks and
+RTT uncertainty. Full-Spark uses a38GiB cap and38GiB reserve, reporting zero.

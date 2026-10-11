@@ -58,7 +58,7 @@ def start(request):
     ports.append(sparkport)
     code='''from pathlib import Path
 import json,sys,subprocess,os
-r=json.load(sys.stdin);root=Path("'''+ROOT+'''")
+r=json.load(sys.stdin);assert Path('/home/kuna/nas-dev').is_mount();root=Path("'''+ROOT+'''")
 phase=root/'phases'/r['phase'];phase.mkdir(parents=True,exist_ok=True)
 env=phase/'worker.env';env.touch(mode=0o600);os.chmod(env,0o600);env.write_text('MYCE_TOKEN='+r['token']+'\\n')
 budget='38' if r['mode']=='full' else '39'
@@ -117,7 +117,7 @@ print(json.dumps(dict(unit_state=unit,remaining_pids=remaining,occupied_test_por
 ''',ports)
 
 if __name__=='__main__':
-    before=loan();last=None;error=None
+    before=loan();assert before['ActiveState']=='active';last=None;error=None
     try:
         until=time.monotonic()+2*3600
         while time.monotonic()<until:
