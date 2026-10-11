@@ -9,6 +9,7 @@ A worker is a process on a GPU machine that runs commands and reports results.
 `myce join` auto-detects its GPU like `myce install worker`; `--gpu` and
 `--device` provide explicit overrides; see [worker setup](operations.md#inventory-and-foreground-startstop).
 `myce dev` keeps fake GPU inventory.
+Attempts and model servers get `MYCE_PLATFORM`, `MYCE_DEVICES`, and `MYCE_MACHINE`; see [placement and host holds](job-reference.md#attempt-placement-environment).
 A job is either a command that finishes or one request to a queue-managed model.
 **GPU work runs as queue jobs; the project never holds a GPU between jobs.**
 
@@ -37,6 +38,11 @@ Production priority is not a promise of zero wait. Missing capacity, software,
 model files, or model startup can still delay it. A pin is a queue-owned model
 reservation that prevents unloading. For latency-sensitive model calls, agree on
 pins with maintainer and wait for ready status before directing traffic to them.
+
+For whole-machine takeover and a default 180-second idle cooldown, opt into
+`queue --host-config` for the shared physical `host_id`; pins remain protected.
+Project `allowed_machines` in `--project-config` restricts commands and model calls.
+See [the exact policy and recovery contract](job-reference.md#physical-host-production-hold).
 
 ## 3. Ten-minute try-out: laptop, no GPU
 

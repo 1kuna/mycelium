@@ -369,6 +369,7 @@ type modelRuntime struct {
 	environmentCache      *EnvironmentCache
 	environmentSourceRoot string
 	device, platform      string
+	machine               string
 }
 
 func startModels(w Worker, dir string) (*modelRuntime, error) {
@@ -409,6 +410,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 		}
 	}
 	rt.device, rt.platform = w.Machine.Device, w.Machine.GPU
+	rt.machine = w.Machine.ID
 	rt.environmentCache = w.environmentCache
 	rt.environmentSourceRoot = w.EnvironmentSourceRoot
 	rt.hostMemorySource = w.HostMemorySource
@@ -435,7 +437,7 @@ func (rt *modelRuntime) report() ([]ModelReport, float64) {
 	out := []ModelReport{}
 	memory := 0.0
 	for name, m := range rt.models {
-		out = append(out, ModelReport{Name: name, State: m.state, Error: m.err})
+		out = append(out, ModelReport{Name: name, State: m.state, Error: m.err, InFlight: m.inflight, CallsMeasured: true})
 		if m.state != "unloaded" && m.state != "failed" {
 			memory += m.model.MemoryGB
 		}
@@ -513,7 +515,7 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		rt.mu.Unlock()
 		return
 	}
-	model := m.model
+	model := withPlacementEnvironment(m.model, Machine{ID: rt.machine, GPU: rt.platform, Device: rt.device})
 	var e error
 	if rt.device != "" {
 		model, e = WithModelDevice(model, rt.platform, rt.device)

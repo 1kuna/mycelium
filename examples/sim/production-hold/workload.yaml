@@ -1,0 +1,10 @@
+# Both experiments start on B70 at t=0; production arrives at t=60s.
+# Spark has space for one plain-command worker: one displaced experiment
+# resumes there immediately, the other can return after B70's cooldown.
+duration_jitter: 0
+projects:
+  verso: {weight: 1, allowed_machines: [b70-0, b70-1]}
+  study: {weight: 1}
+streams:
+  - {name: experiment, project: study, priority: experiment, platforms: [xpu, cuda], memory_gb: 8, host_memory_gb: 2, duration_seconds: 600, checkpoint_seconds: 1, every_hours: 24, start_hour: 0, count: 2}
+  - {name: production, project: verso, priority: production, platforms: [xpu], memory_gb: 1, host_memory_gb: 2, duration_seconds: 60, every_hours: 24, start_hour: 0.016666666666666666, count: 1}

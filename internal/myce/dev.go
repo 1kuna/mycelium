@@ -13,6 +13,8 @@ import (
 )
 
 type DevConfig struct {
+	HostPolicies                          map[string]HostPolicy
+	HostID                                string
 	ProjectPolicies                       map[string]ProjectPolicy
 	EnvironmentConfig                     EnvironmentCatalog
 	ModelConfig                           ModelConfig
@@ -73,6 +75,12 @@ func StartDev(c DevConfig) (*Dev, error) {
 		q.Close()
 		return nil, err
 	}
+	if c.HostPolicies != nil {
+		if err = q.ConfigureHosts(c.HostPolicies); err != nil {
+			q.Close()
+			return nil, err
+		}
+	}
 	if c.ProjectPolicies != nil {
 		if err = q.ConfigureProjects(c.ProjectPolicies); err != nil {
 			q.Close()
@@ -108,7 +116,7 @@ func StartDev(c DevConfig) (*Dev, error) {
 		}
 	}()
 	for i := 0; i < c.Workers; i++ {
-		w := Worker{ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
+		w := Worker{ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
 		d.workerWG.Add(1)
 		go func() {
 			defer d.workerWG.Done()

@@ -36,6 +36,8 @@ type batchRelease struct {
 }
 
 type state struct {
+	Hosts            map[string]*HostState    `json:"hosts,omitempty"`
+	HostReleases     map[string]HostRelease   `json:"host_releases,omitempty"`
 	BatchReleases    map[string]batchRelease  `json:"batch_releases,omitempty"`
 	UsageMaintenance time.Time                `json:"usage_maintenance,omitempty"`
 	ProductionStarts []ProductionStart        `json:"production_starts,omitempty"`
@@ -266,6 +268,9 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 	}
 	var out Job
 	err := q.update(func() error {
+		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
+			return e
+		}
 		recipes, e := q.resolveEnvironment(s.Environment)
 		if e != nil {
 			return e
@@ -278,6 +283,9 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 			id = ID()
 		}
 		j := &Job{EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		if e := q.validateProjectCapacity(j); e != nil {
+			return e
+		}
 		copy := cloneJob(j)
 		j = &copy
 		q.s.Jobs[id] = j
@@ -313,6 +321,12 @@ func (q *Queue) stop(j *Job, why string) {
 }
 func (q *Queue) maintain() {
 	now := q.clock.Now()
+	for _, j := range q.s.Jobs {
+		if j.State == "running" || j.State == "stopping" {
+			q.retainRelease(j)
+		}
+	}
+	q.maintainHolds()
 	for machine, release := range q.s.BatchReleases {
 		if !now.Before(release.Until) {
 			delete(q.s.BatchReleases, machine)
@@ -370,9 +384,11 @@ func (q *Queue) maintain() {
 			j.Reason = "give-up time reached"
 		}
 	}
+	q.maintainHolds()
 	q.refreshHostMemory()
 	q.maintainModels()
 	q.refreshHostMemory()
+	q.maintainHolds()
 }
 func (q *Queue) Tick() error { return q.update(func() error { q.maintain(); return nil }) }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
@@ -389,6 +405,19 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			return errors.New("worker model config does not match queue")
 		}
 		old := q.s.Machines[m.ID]
+		if c.Running == nil && old != nil && old.Session == m.Session {
+			for _, j := range q.s.Jobs {
+				if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && q.held(hostID(old)) {
+					if j.Reason == "cancel requested" {
+						j.State = "cancelled"
+						j.StopAt = nil
+					} else {
+						q.retry(j, j.Reason)
+					}
+				}
+			}
+		}
+		q.reconcileHostReleases(c)
 		if m.TotalMemoryGB == 0 {
 			m.TotalMemoryGB = m.FreeMemoryGB
 			if old != nil {
@@ -456,7 +485,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 						reply.Hold = true
 						return nil
 					}
-					if copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && c.Running.Progress > max(j.Progress, completeProgress(filepath.Join(j.Checkpoint, "attempt-"+strconv.Itoa(j.Attempt)))))) {
+					if q.placementAllowed(j, &m) && copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && c.Running.Progress > max(j.Progress, completeProgress(filepath.Join(j.Checkpoint, "attempt-"+strconv.Itoa(j.Attempt)))))) {
 						for i := range j.Copies {
 							j.Copies[i].Recoverable = false
 						}
@@ -526,7 +555,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			}
 			if j != nil && len(j.Spec.Needs.Platform.Preferred) > 0 && !contains(j.Spec.Needs.Platform.Preferred, m.GPU) {
 				for _, other := range q.s.Machines {
-					if !contains(j.Spec.Needs.Platform.Preferred, other.GPU) || !fits(j, other, other.FreeMemoryGB) || affinity(j, other) < affinity(j, &m) {
+					if !contains(j.Spec.Needs.Platform.Preferred, other.GPU) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) || affinity(j, other) < affinity(j, &m) {
 						continue
 					}
 					busy := false
@@ -590,6 +619,34 @@ func (q *Queue) current(r Result) (*Job, error) {
 }
 func (q *Queue) Complete(r Result) error {
 	return q.update(func() error {
+		settled := false
+		pendingTracked := false
+		if !r.ReleasePending {
+			settled = q.settleRelease(r)
+		}
+		if r.ReleasePending {
+			if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+				q.retainRelease(j)
+			}
+			key := releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})
+			if hold, ok := q.s.HostReleases[key]; ok {
+				pendingTracked = true
+				hold.CleanupFailed = true
+				q.s.HostReleases[key] = hold
+			}
+		}
+		if j := q.s.Jobs[r.ID]; j != nil && r.Forced && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+			j.LastStopOutcome = "forced"
+			if r.ReleasePending {
+				j.LastStopOutcome += "; release pending"
+			}
+		}
+		if settled || pendingTracked {
+			if _, err := q.current(r); err != nil {
+				q.maintain()
+				return nil
+			}
+		}
 		// A retransmitted acknowledgement must not turn a completed job into stale work.
 		if j := q.s.Jobs[r.ID]; j != nil && terminal(j.State) && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 			return nil
@@ -696,6 +753,12 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 				out.Warning = "NAS checkpoint root is unreachable on worker " + m.ID
 			}
 		}
+		for host := range q.s.Hosts {
+			if q.held(host) {
+				out.HostHolds = append(out.HostHolds, q.holdReason(host))
+			}
+		}
+		sort.Strings(out.HostHolds)
 		out.Now = q.clock.Now()
 		order, reasons := q.queueProjection()
 		for _, j := range q.s.Jobs {
@@ -723,6 +786,9 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 				call.Reason = reason
 			}
 			if reason := q.capReason(call); reason != "" {
+				call.Reason = reason
+			}
+			if reason := q.holdWaitReason(call); reason != "" {
 				call.Reason = reason
 			}
 			if c.Machine == "" && model.HostMemoryGB > 0 {

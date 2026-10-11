@@ -125,7 +125,7 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 	}
 	sort.Slice(usage, func(i, j int) bool { return usage[i].Model < usage[j].Model })
 	plan := []CopyTask{}
-	busy := m.Gone || m.Leaving || q.unreported[m.ID]
+	busy := q.held(hostID(m)) || m.Gone || m.Leaving || q.unreported[m.ID]
 	for _, j := range q.s.Jobs {
 		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {
 			busy = true
@@ -229,7 +229,7 @@ func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
 		return false
 	}
 	for _, other := range q.s.Machines {
-		if other.ID == m.ID || !q.workerIdle(other) || !fits(j, other, other.FreeMemoryGB) {
+		if other.ID == m.ID || !q.workerIdle(other) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
 		if q.placementBetter(j, other, m) {

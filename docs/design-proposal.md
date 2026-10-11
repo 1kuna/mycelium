@@ -67,6 +67,21 @@ submission-to-start acknowledgement latency; the laptop dev test exercises the a
 start under 15 seconds, excluding model load time.
 
 
+**Optional physical-host hold (approved extension, 2026-10-11).** A queue host
+policy may opt into whole-machine production takeover, default off. Production
+selects one eligible physical host; all lower-priority work on that host stops
+safely, regardless of how much room the production request needs. Stopped
+experiments rejoin the shared queue and resume on any compatible machine, with
+no infrastructure retry charged for preemption. Production admission waits for
+all lower-priority cleanup acknowledgements. Unknown cleanup survives loss and
+restart; an elapsed stop grace never proves release. After the final production
+demand and cleanup settle, an idle cooldown (default 180 seconds, configurable
+per host) excludes lower-priority admissions. New production resets that idle
+interval; pins remain protected. This covers submitted GPU work, not CPU
+publication. Project machine allow-lists apply at every priority and to model
+calls; commands and servers receive their current placement in worker-owned
+environment variables. See [the configuration and exact semantics](job-reference.md#physical-host-production-hold).
+
 **Machines leaving.** Workers pull jobs, so a job is never tied to a machine until it starts. That means there is no list of waiting jobs per machine to clean up. Leaving works like this:
 
 - **Planned leave** (`myce leave`, or Ctrl-C on the worker). The machine stops taking new jobs at once. Resumable jobs get the stop signal, save to the NAS, and go back to the front of their line. For jobs that can't be resumed, `myce leave` asks whether to wait for them to finish or to stop them now and put them back in the queue. `myce leave --now` skips the question and stops everything.

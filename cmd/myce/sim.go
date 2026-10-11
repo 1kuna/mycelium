@@ -14,6 +14,7 @@ import (
 
 func simCommand(args []string, out io.Writer) error {
 	f := flag.NewFlagSet("sim", flag.ContinueOnError)
+	hostConfig := f.String("host-config", "", "physical-host production hold policy YAML (overrides fleet hosts)")
 	fleet := f.String("fleet", "examples/sim/fleet.yaml", "fleet YAML")
 	workload := f.String("workload", "examples/sim/workload.yaml", "workload YAML")
 	days := f.Float64("days", 7, "simulated days (maximum 90)")
@@ -33,6 +34,13 @@ func simCommand(args []string, out io.Writer) error {
 	var workConfig myce.SimWorkload
 	if e := myce.ReadSimYAML(*fleet, &fleetConfig); e != nil {
 		return e
+	}
+	if *hostConfig != "" {
+		hosts, e := myce.ReadHostPolicies(*hostConfig)
+		if e != nil {
+			return e
+		}
+		fleetConfig.Hosts = hosts
 	}
 	if e := myce.ReadSimYAML(*workload, &workConfig); e != nil {
 		return e
