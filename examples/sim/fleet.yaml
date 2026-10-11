@@ -1,0 +1,40 @@
+# Monday=0; all memory values are GiB of admission budget, after reserves.
+# A worker is one GPU, so B70 is two workers sharing one host RAM budget.
+# .reports/fleet-discovery-2026-10-08.md: two B70 cards; GPU0 physical
+# memory 32656 MiB (31.891 GiB). GPU1 memory was not separately queried.
+# GUESS: same physical capacity for GPU1; usable VRAM remains unmeasured.
+# GUESS: 30 GiB usable per B70 card, 24 GiB shared RAM after OS reserve; report observed 31 GiB total / 26 available.
+# GUESS: all relative speeds and availability windows; no fleet measurements.
+machines:
+  - {name: b70-0, host: b70, platform: xpu, memory_gb: 30, host_memory_gb: 24, speed: 1}
+  - {name: b70-1, host: b70, platform: xpu, memory_gb: 30, host_memory_gb: 24, speed: 1}
+  # User-specified Spark ~121 GiB, 16 GiB reserve -> 105 GiB unified budget.
+  - {name: spark, host: spark, platform: cuda, memory_gb: 105, host_memory_gb: 105, unified: true, speed: 1.3}
+  # Nominal RTX4090 24 GiB; GUESS: 22 usable, 48 host budget, nightly lending.
+  - name: pc4090
+    host: pc4090
+    platform: cuda
+    memory_gb: 22
+    host_memory_gb: 48
+    speed: 1.8
+    windows: [{days: [0,1,2,3,4,5,6], start_hour: 0, end_hour: 8}, {days: [0,1,2,3,4,5,6], start_hour: 18, end_hour: 24}]
+  # GUESS: 32 GiB mini with 8 GiB reserve, always lent; speed 0.55.
+  - {name: mini32, host: mini32, platform: metal, memory_gb: 24, host_memory_gb: 24, unified: true, speed: 0.55}
+  # GUESS: 24 GiB mini with 6 GiB reserve, weekday working hours.
+  - name: mini24
+    host: mini24
+    platform: metal
+    memory_gb: 18
+    host_memory_gb: 18
+    unified: true
+    speed: 0.45
+    windows: [{days: [0,1,2,3,4], start_hour: 9, end_hour: 18}]
+  # GUESS: 48 GiB MacBook with 8 GiB reserve, weekday evenings, speed 0.7.
+  - name: macbook
+    host: macbook
+    platform: metal
+    memory_gb: 40
+    host_memory_gb: 40
+    unified: true
+    speed: 0.7
+    windows: [{days: [0,1,2,3,4], start_hour: 19, end_hour: 23}]

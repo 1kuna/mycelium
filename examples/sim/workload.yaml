@@ -1,0 +1,43 @@
+# Synthetic demand, not a trace of customer recordings. Every arrival rate,
+# count, duration, deadline, weight, checkpoint interval, and platform portability
+# below is a GUESS unless explicitly attributed. Durations vary +/-20% by seed.
+# GUESS: all compatible workers have model files pre-staged and unlimited
+# simulated disk cache; no NAS copying or environment setup cost is modeled.
+# Model identities and sizes: .reports/non-llm-models-2026-10-11.md and
+# .reports/verso-b70-investigation-2026-10-09.md. File sizes are not GPU budgets.
+projects:
+  verso: {weight: 3} # GUESS
+  atlas: {weight: 2} # GUESS
+  theia: {weight: 1} # GUESS: secondary synthetic Metal batch project
+models:
+  # Observed Cohere cache ~4.1345 GB; observed median XPU load 3.63 s.
+  # GUESS: 8 GiB GPU, 6 GiB host, rounded bundle size; platform XPU from report.
+  - {name: cohere-transcribe, size_bytes: 4134500000, memory_gb: 8, host_memory_gb: 6, load_seconds: 3.63, platforms: [xpu]}
+  # Observed pyannote median XPU load 1.44 s. Bundle size unknown: omit (0).
+  # GUESS: 4 GiB GPU, 2 GiB host.
+  - {name: pyannote31, memory_gb: 4, host_memory_gb: 2, load_seconds: 1.44, platforms: [xpu]}
+  # Observed exact naming GGUF bytes and median cold startup 44.62 s.
+  # GUESS: 24 GiB GPU incl KV, 4 GiB host; Metal/CUDA batch portability unqualified.
+  - {name: qwen38-27b-q4, size_bytes: 18973870432, memory_gb: 24, host_memory_gb: 4, load_seconds: 44.62, platforms: [xpu, cuda, metal]}
+  # Observed GLM-OCR directory 2.657 GB. GUESS: rounded size, 8 GiB GPU,
+  # 4 GiB host, 25 s startup (not measured), CUDA only.
+  - {name: glm-ocr, size_bytes: 2657000000, memory_gb: 8, host_memory_gb: 4, load_seconds: 25, platforms: [cuda]}
+  # Observed Ornith FP8 directory 37.711 GB and 35.75 GiB KV config.
+  # GUESS: rounded bundle size, 76 GiB GPU total, 8 GiB host, 90 s startup.
+  - {name: ornith35-fp8, size_bytes: 37711000000, memory_gb: 76, host_memory_gb: 8, load_seconds: 90, platforms: [cuda]}
+  # Theia model identity from report. GUESS: all sizes/memory/load numbers.
+  - {name: parakeet-mlx, size_bytes: 1200000000, memory_gb: 4, host_memory_gb: 2, load_seconds: 8, platforms: [metal]}
+# All numbers below are GUESSES. Production stages arrive together as a burst;
+# not a dependency graph or an assertion of qualified cross-platform equivalence.
+streams:
+  - {name: recordings-asr, project: verso, priority: production, model: cohere-transcribe, platforms: [xpu], memory_gb: 8, host_memory_gb: 6, duration_seconds: 120, every_hours: 6, start_hour: 9, count: 2}
+  - {name: recordings-diarization, project: verso, priority: production, model: pyannote31, platforms: [xpu], memory_gb: 4, host_memory_gb: 2, duration_seconds: 90, every_hours: 6, start_hour: 9, count: 2}
+  - {name: recordings-naming, project: verso, priority: production, model: qwen38-27b-q4, platforms: [xpu], memory_gb: 24, host_memory_gb: 4, duration_seconds: 60, every_hours: 6, start_hour: 9, count: 2}
+  - {name: verso-experiments, project: verso, priority: experiment, model: qwen38-27b-q4, platforms: [xpu, cuda, metal], memory_gb: 24, host_memory_gb: 4, duration_seconds: 3600, checkpoint_seconds: 180, every_hours: 1, start_hour: 0, count: 4}
+  - {name: atlas-ocr, project: atlas, priority: experiment, model: glm-ocr, platforms: [cuda], memory_gb: 8, host_memory_gb: 4, duration_seconds: 900, checkpoint_seconds: 120, every_hours: 1, start_hour: 0, count: 4}
+  - {name: atlas-judge, project: atlas, priority: experiment, model: ornith35-fp8, call: true, duration_seconds: 120, every_hours: 2, start_hour: 0.5, count: 4}
+  - {name: atlas-deadline, project: atlas, priority: deadline, model: glm-ocr, platforms: [cuda], memory_gb: 8, host_memory_gb: 4, duration_seconds: 1800, checkpoint_seconds: 120, every_hours: 24, start_hour: 14, count: 1, deadline_seconds: 2400}
+  - {name: theia-files, project: theia, priority: experiment, model: parakeet-mlx, platforms: [metal], memory_gb: 4, host_memory_gb: 2, duration_seconds: 900, checkpoint_seconds: 120, every_hours: 1, start_hour: 0, count: 2}
+  # Built-in what-if: identical 12-file work, one serial job vs 12 queue jobs.
+  # GUESS: CUDA/XPU port of transcription batch and 5 min/file runtime.
+  - {name: transcription-batch, project: verso, priority: experiment, model: cohere-transcribe, platforms: [xpu, cuda], memory_gb: 8, host_memory_gb: 6, duration_seconds: 300, checkpoint_seconds: 180, every_hours: 24, start_hour: 8, count: 1, batch_files: 12}

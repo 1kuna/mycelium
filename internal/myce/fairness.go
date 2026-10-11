@@ -88,6 +88,9 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 		return ""
 	}
 	p := q.s.Policies[j.Spec.Project]
+	if p.MaxConcurrentExperiments == 0 && p.MaxMemoryShare == 0 {
+		return ""
+	}
 	need := j.Spec.Needs.MemoryGB
 	if j.Spec.Needs.Model != "" && need == 0 {
 		model, _ := q.model(j.Spec.Needs.Model)
@@ -134,12 +137,30 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 // candidate is shared by dispatch and the status projection. Exclusions only
 // remove jobs already listed in the projection; they never change dispatch.
 func (q *Queue) candidate(m *Machine, excluded map[string]bool) *Job {
-	var best *Job
+	// Fair score is constant within a project on this worker. Compare each
+	// project's best ordinary candidate instead of rescanning for every queued job.
+	byProject := map[string]*Job{}
 	for _, j := range q.s.Jobs {
-		if !excluded[j.ID] && j.State == "queued" && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" && (best == nil || q.fairBefore(j, best, m)) {
+		if !excluded[j.ID] && j.State == "queued" && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" {
+			old := byProject[j.Spec.Project]
+			if old == nil || before(j, old, m) {
+				byProject[j.Spec.Project] = j
+			}
+		}
+	}
+	projects := make([]string, 0, len(byProject))
+	for p := range byProject {
+		projects = append(projects, p)
+	}
+	slices.Sort(projects)
+	var best *Job
+	for _, p := range projects {
+		j := byProject[p]
+		if best == nil || q.fairBefore(j, best, m) {
 			best = j
 		}
 	}
+
 	return best
 }
 func (q *Queue) pick(m *Machine) *Job {
