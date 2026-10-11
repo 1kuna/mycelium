@@ -7,10 +7,14 @@ import (
 )
 
 func processBirth(pid int) (string, error) {
-	p, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	processes, err := unix.SysctlKinfoProcSlice("kern.proc.pid", pid)
 	if err != nil {
 		return "", err
 	}
+	if len(processes) == 0 {
+		return "", os.ErrNotExist
+	}
+	p := processes[0]
 	if p.Proc.P_pid != int32(pid) || p.Proc.P_stat == 5 {
 		return "", os.ErrNotExist
 	}

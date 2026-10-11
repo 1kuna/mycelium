@@ -48,54 +48,60 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 	}
 	token := env("MYCE_TOKEN", "")
 	var c myce.ServiceConfig
-	if *config == "" {
-		candidate := filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")
-		if _, e := os.Stat(candidate); e == nil {
-			*config = candidate
-		} else if !errors.Is(e, os.ErrNotExist) {
-			return e
+	service := ""
+	prepare := func() error {
+		if *config == "" {
+			candidate := filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")
+			if _, e := os.Stat(candidate); e == nil {
+				*config = candidate
+			} else if !errors.Is(e, os.ErrNotExist) {
+				return e
+			}
 		}
-	}
-	if *config != "" {
-		c, err = myce.ReadServiceConfig(*config)
-		if err != nil {
-			return err
+		if *config != "" {
+			c, err = myce.ReadServiceConfig(*config)
+			if err != nil {
+				return err
+			}
+			if c.Role != "worker" {
+				return errors.New("host control requires a worker config")
+			}
+			if token == "" {
+				token, _ = myce.ReadServiceToken(c)
+			}
+			*state, *name, *queue = c.State, c.Name, c.Queue
 		}
-		if c.Role != "worker" {
-			return errors.New("host control requires a worker config")
+		if *state == "" {
+			candidate := filepath.Join(home, ".local", "share", "myce", "worker")
+			if _, e := os.Stat(filepath.Join(candidate, "state.json")); e == nil {
+				*state = candidate
+			}
 		}
-		if token == "" {
-			token, _ = myce.ReadServiceToken(c)
+		// Upgrade adoption is local-only and records no token. New workers register automatically.
+		if *state != "" {
+			if err = myce.AdoptHostWorker(*dir, myce.HostWorker{State: *state, Host: *host, Name: *name, Queue: *queue, Environments: c.EnvironmentCache}); err != nil {
+				return err
+			}
 		}
-		*state, *name, *queue = c.State, c.Name, c.Queue
-	}
-	if *state == "" {
-		candidate := filepath.Join(home, ".local", "share", "myce", "worker")
-		if _, e := os.Stat(filepath.Join(candidate, "state.json")); e == nil {
-			*state = candidate
+		service = c.Service
+		if service == "" {
+			if probe.OS == "linux" {
+				service = filepath.Join(home, ".config", "systemd", "user", "myce-worker.service")
+			} else {
+				service = filepath.Join(home, "Library", "LaunchAgents", "local.myce.worker.plist")
+			}
+			if _, e := os.Stat(service); errors.Is(e, os.ErrNotExist) {
+				service = ""
+			} else if e != nil {
+				return e
+			}
 		}
-	}
-	h := myce.HostControl{Dir: *dir, Notify: myce.NotifyHost(myce.Client{Token: token})}
-	// Upgrade adoption is local-only and records no token. New workers register automatically.
-	if *state != "" {
-		if err = myce.AdoptHostWorker(*dir, myce.HostWorker{State: *state, Host: *host, Name: *name, Queue: *queue, Environments: c.EnvironmentCache}); err != nil {
-			return err
-		}
+		return nil
 	}
 	ctx := context.Background()
-	service := c.Service
-	if service == "" {
-		if probe.OS == "linux" {
-			service = filepath.Join(home, ".config", "systemd", "user", "myce-worker.service")
-		} else {
-			service = filepath.Join(home, "Library", "LaunchAgents", "local.myce.worker.plist")
-		}
-		if _, e := os.Stat(service); errors.Is(e, os.ErrNotExist) {
-			service = ""
-		} else if e != nil {
-			return e
-		}
-	}
+	h := myce.HostControl{Dir: *dir, Prepare: prepare, Notify: func(ctx context.Context, w myce.HostWorker, enable, cleared bool, reason string) error {
+		return myce.NotifyHost(myce.Client{Token: token})(ctx, w, enable, cleared, reason)
+	}}
 	if args[0] == "disable" {
 		r, cleanupErr := h.Disable(ctx, *reason, *grace)
 		serviceErr := hostService(ctx, probe, service, false)
@@ -108,6 +114,9 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 			confirmation = err.Error()
 		}
 		fmt.Fprintf(out, "Disabled: stopped %d owned process groups; unconfirmed: %s. Flag: %s.\n", r.Stopped, confirmation, filepath.Join(*dir, "DISABLED"))
+		return err
+	}
+	if err = prepare(); err != nil {
 		return err
 	}
 	if err = h.Enable(ctx); err != nil {

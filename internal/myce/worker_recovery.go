@@ -135,7 +135,7 @@ func saveWorkerJSON(dir, name string, v any) error {
 // Inspect both the leader and surviving descendants. The per-execution
 // marker prevents PID/PGID reuse from targeting an unrelated process group.
 func workerGroupMembers(group int) ([]int, error) {
-	out, err := exec.Command("ps", "-ax", "-o", "pid=,pgid=,stat=").Output()
+	out, err := hostPS("-ax", "-o", "pid=,pgid=,stat=")
 	if err != nil {
 		return nil, fmt.Errorf("inspect process groups: %w", err)
 	}

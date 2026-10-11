@@ -152,7 +152,8 @@ The command stops recorded worker supervisors first, then signals their owned
 command, model-server and environment-build process groups. Jobs get up to
 10 seconds to checkpoint; `--grace 3s` changes that grace (maximum 1 minute),
 and `--now` kills immediately. It then kills surviving groups and verifies exit,
-allowing up to 5 seconds for group disappearance and worker exit. Local process
+allowing up to 5 seconds for group disappearance, worker exit, and release of
+registered worker spool locks. Local process
 inspection and service commands are bounded and failures are reported. No
 queue or NAS operation gates local shutdown. Queue notifications run alongside
 shutdown with a shared 500 ms timeout per phase. A reachable queue fences every
@@ -178,14 +179,23 @@ keeps the flag. Rerun `disable`; `enable` refuses to clear an unconfirmed disabl
 After enabling, verify a fresh joined worker and an agreed small job.
 
 Ownership comes from durable attempt/engine/build records and exact execution
-identities, plus OS process birth identity for supervisors. Names alone never
-authorize a signal. These commands never stop Verso's legacy controller, other
+identities, plus OS process birth identity for supervisors. Marked descendants are included even when they change process groups. Each
+group is checked independently before signaling; vanished groups are skipped.
+Names alone never authorize a signal. These commands never stop Verso's legacy controller, other
 users' work, unrelated containers or unrelated GPU processes. Container cleanup
 is a separate confirmation hook for the Docker containment change; this version
 confirms plain-command processes only. Upgrade the worker binary and restart
 it once before relying on this switch, so it registers its supervisor and spool.
 For an old spool use `--state-dir DIR --name NAME --host-id HOST` to adopt its
-owned-process records; an unregistered old worker must already be stopped.
+owned-process records; a locked registered spool makes cleanup unconfirmed,
+and an unregistered old worker must already be stopped. A stale enable receipt
+cannot reconcile while the local disable flag exists; concurrent controls fail
+without waiting on the control lock. The flag is persisted before installer
+configuration discovery, so a broken config does not bypass local admission
+fencing. The model proxy also refuses routed calls when disabled and rechecks
+admission after reading the request body. This is not a fixed wall-clock deadline under stalled filesystem I/O,
+and processes that remove their execution marker and escape their recorded
+group cannot be discovered by this mechanism. Qualify containment separately.
 
 ## Render service files
 
