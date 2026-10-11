@@ -102,8 +102,22 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 	if b, _ := os.ReadFile(c.Config); strings.Contains(string(b), token) {
 		t.Fatal("token in public config")
 	}
-	if e = Install(context.Background(), c, executable, token, runner); e == nil {
-		t.Fatal("overwrote existing installation")
+	if e = os.WriteFile(c.Service, []byte("[Service]\nKillMode=mixed\nTimeoutStopSec=infinity\n"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e = Install(context.Background(), c, executable, "changed-token", runner); e != nil {
+		t.Fatal(e)
+	}
+	if got, e := ReadServiceToken(c); e != nil || got != token {
+		t.Fatal("upgrade changed credentials", e)
+	}
+	text, e := os.ReadFile(c.Service)
+	if e != nil || !strings.Contains(string(text), "KillMode=control-group") {
+		t.Fatal("unit not upgraded", e)
+	}
+	old, e := os.ReadDir(filepath.Join(filepath.Dir(c.Service), ".Trash"))
+	if e != nil || len(old) != 1 {
+		t.Fatal("old unit not recoverable", e)
 	}
 	if e = Uninstall(context.Background(), c, false, runner); e != nil {
 		t.Fatal(e)

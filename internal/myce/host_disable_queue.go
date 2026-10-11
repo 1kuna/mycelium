@@ -18,6 +18,9 @@ func (q *Queue) DisableHost(host, reason string, cleared bool) error {
 	return q.DisableHostExecutions(host, reason, cleared, nil)
 }
 func (q *Queue) DisableHostExecutions(host, reason string, cleared bool, executions []Result) error {
+	return q.DisableHostGeneration(host, reason, cleared, executions, 0)
+}
+func (q *Queue) DisableHostGeneration(host, reason string, cleared bool, executions []Result, generation uint64) error {
 	if host == "" {
 		return errors.New("host identity required")
 	}
@@ -25,6 +28,18 @@ func (q *Queue) DisableHostExecutions(host, reason string, cleared bool, executi
 		reason = "disabled by operator"
 	}
 	return q.update(func() error {
+		if q.s.HostControls == nil {
+			q.s.HostControls = map[string]HostControlGeneration{}
+		}
+		old := q.s.HostControls[host]
+		if generation < old.Generation || (generation > 0 && generation == old.Generation && old.Enabled) {
+			return errors.New("stale host disable generation")
+		}
+		if generation > 0 && generation == old.Generation && (old.Cleared || !cleared) {
+			return nil
+		}
+		q.s.HostControls[host] = HostControlGeneration{Generation: generation, Cleared: cleared}
+
 		if q.s.DisabledHosts == nil {
 			q.s.DisabledHosts = map[string]string{}
 		}
@@ -106,11 +121,31 @@ func (q *Queue) DisableHostExecutions(host, reason string, cleared bool, executi
 		return nil
 	})
 }
-func (q *Queue) EnableHost(host string) error {
+
+type HostControlGeneration struct {
+	Generation uint64 `json:"generation"`
+	Enabled    bool   `json:"enabled"`
+	Cleared    bool   `json:"cleared"`
+}
+
+func (q *Queue) EnableHost(host string) error { return q.EnableHostGeneration(host, 0) }
+func (q *Queue) EnableHostGeneration(host string, generation uint64) error {
 	if host == "" {
 		return errors.New("host identity required")
 	}
 	return q.update(func() error {
+		if q.s.HostControls == nil {
+			q.s.HostControls = map[string]HostControlGeneration{}
+		}
+		old := q.s.HostControls[host]
+		if generation < old.Generation || (generation > 0 && generation == old.Generation && !old.Enabled) {
+			return errors.New("stale host enable generation")
+		}
+		if generation > 0 && !old.Enabled && !old.Cleared {
+			return errors.New("disable cleanup must be acknowledged before enable")
+		}
+		q.s.HostControls[host] = HostControlGeneration{Generation: generation, Enabled: true}
+
 		delete(q.s.DisabledHosts, host)
 		for _, m := range q.s.Machines {
 			if hostID(m) == host {

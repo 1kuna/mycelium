@@ -65,6 +65,7 @@ func TestDisableRefusesActiveLegacySpool(t *testing.T) {
 
 func TestReconcileEnableCannotClearFreshDisable(t *testing.T) {
 	root := t.TempDir()
+	saveWorkerJSON(root, "worker-test.json", HostWorker{State: t.TempDir(), Host: "test"})
 	if err := saveWorkerJSON(root, "enable-pending.json", struct {
 		Workers []HostWorker `json:"workers"`
 	}{[]HostWorker{{Host: "test"}}}); err != nil {
@@ -158,6 +159,7 @@ func TestHostSignalSkipsVanishedGroupsIndependently(t *testing.T) {
 
 func TestDisableFencesLaunchRaceAndRepeatedControls(t *testing.T) {
 	root := t.TempDir()
+	saveWorkerJSON(root, "worker-test.json", HostWorker{State: t.TempDir(), Host: "test"})
 	unlock, err := hostOperationLock(root, "launch.lock", false)
 	if err != nil {
 		t.Fatal(err)

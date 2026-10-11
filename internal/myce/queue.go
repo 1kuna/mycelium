@@ -35,16 +35,17 @@ type batchRelease struct {
 }
 
 type state struct {
-	DisabledHosts    map[string]string        `json:"disabled_hosts,omitempty"`
-	Hosts            map[string]*HostState    `json:"hosts,omitempty"`
-	HostReleases     map[string]HostRelease   `json:"host_releases,omitempty"`
-	BatchReleases    map[string]batchRelease  `json:"batch_releases,omitempty"`
-	UsageMaintenance time.Time                `json:"usage_maintenance,omitempty"`
-	ProductionStarts []ProductionStart        `json:"production_starts,omitempty"`
-	Policies         map[string]ProjectPolicy `json:"project_policies,omitempty"`
-	FairUsage        map[string]FairUsage     `json:"fair_usage,omitempty"`
-	UsageAt          time.Time                `json:"usage_at,omitempty"`
-	Preemptions      []Preemption             `json:"preemptions,omitempty"`
+	HostControls     map[string]HostControlGeneration `json:"host_controls,omitempty"`
+	DisabledHosts    map[string]string                `json:"disabled_hosts,omitempty"`
+	Hosts            map[string]*HostState            `json:"hosts,omitempty"`
+	HostReleases     map[string]HostRelease           `json:"host_releases,omitempty"`
+	BatchReleases    map[string]batchRelease          `json:"batch_releases,omitempty"`
+	UsageMaintenance time.Time                        `json:"usage_maintenance,omitempty"`
+	ProductionStarts []ProductionStart                `json:"production_starts,omitempty"`
+	Policies         map[string]ProjectPolicy         `json:"project_policies,omitempty"`
+	FairUsage        map[string]FairUsage             `json:"fair_usage,omitempty"`
+	UsageAt          time.Time                        `json:"usage_at,omitempty"`
+	Preemptions      []Preemption                     `json:"preemptions,omitempty"`
 
 	SyncRequests []SyncRequest         `json:"sync_requests,omitempty"`
 	ModelUses    map[string]ModelUse   `json:"model_uses,omitempty"`

@@ -31,6 +31,9 @@ func TestHostCommandsOfflineAndServiceRestart(t *testing.T) {
 			var calls []string
 			probe := myce.MachineProbe{OS: system, Command: func(_ context.Context, n string, args ...string) ([]byte, error) {
 				calls = append(calls, n+" "+strings.Join(args, " "))
+				if system == "linux" && len(args) > 1 && args[1] == "show" {
+					return []byte("LoadState=loaded\nActiveState=inactive\nControlGroup=\nKillMode=control-group\nSendSIGKILL=yes\n"), nil
+				}
 				return nil, nil
 			}}
 			var out bytes.Buffer
@@ -47,13 +50,17 @@ func TestHostCommandsOfflineAndServiceRestart(t *testing.T) {
 			if err = serviceCommand([]string{"--config", c.Config}); err != nil {
 				t.Fatal(err)
 			}
-			if len(calls) != 1 || strings.Contains(calls[0], "queue") {
+			expected := 1
+			if system == "linux" {
+				expected = 3
+			}
+			if len(calls) != expected || strings.Contains(calls[0], "queue") {
 				t.Fatalf("wrong service scope: %v", calls)
 			}
 			if err = hostCommand([]string{"enable"}, probe, &out); err != nil {
 				t.Fatal(err)
 			}
-			if len(calls) != 2 {
+			if len(calls) != expected+1 {
 				t.Fatalf("no service restart: %v", calls)
 			}
 			if reason, err := myce.HostDisabled(""); err != nil || reason != "" {
