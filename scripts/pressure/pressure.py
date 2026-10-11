@@ -285,23 +285,25 @@ def drm_owners(pcis: list[str], proc: Path = Path("/proc")) -> dict[str, list[st
             fields = before[before.rfind(b")") + 2:].split()
             group, start = int(fields[2]), int(fields[19])
             matched: set[str] = set()
-            for info in (pid / "fdinfo").iterdir():
-                target = os.readlink(pid / "fd" / info.name)
-                if not target.startswith("/dev/dri/"):
-                    continue
-                with info.open("rb") as stream:
-                    raw = stream.read(65537)
-                if len(raw) > 65536:
-                    raise ValueError("oversized fdinfo")
-                identified = False
-                for line in raw.splitlines():
-                    if line.startswith(b"drm-pdev:"):
-                        identified = True
-                        pci = line.split(b":", 1)[1].strip().decode("ascii")
-                        if pci in owners:
-                            matched.add(pci)
-                if not identified:
-                    raise ValueError("DRM descriptor lacks PCI identity")
+            # Keep the collector's own directory descriptor alive during inspection.
+            with os.scandir(pid / "fdinfo") as descriptors:
+                for info in descriptors:
+                    target = os.readlink(pid / "fd" / info.name)
+                    if not target.startswith("/dev/dri/"):
+                        continue
+                    with open(info.path, "rb") as stream:
+                        raw = stream.read(65537)
+                    if len(raw) > 65536:
+                        raise ValueError("oversized fdinfo")
+                    identified = False
+                    for line in raw.splitlines():
+                        if line.startswith(b"drm-pdev:"):
+                            identified = True
+                            pci = line.split(b":", 1)[1].strip().decode("ascii")
+                            if pci in owners:
+                                matched.add(pci)
+                    if not identified:
+                        raise ValueError("DRM descriptor lacks PCI identity")
             if not matched:
                 continue
             leader = proc / str(group) / "stat"

@@ -46,6 +46,12 @@ Native topology/selector verification is still required before allocation.
 CUDA also requires exactly one visible device; its physical identity must be
 verified by the operator. No CPU fallback is permitted.
 
+The Oct 11 B70 preflight found shared display DRM descriptors in PID1, logind
+and GNOME. This collector counts process groups, so their shared client trips
+`physical_double_owner` before any test allocation. Preserve that hold until a
+qualified collector accounts for shared display clients and independent driver
+memory; do not filter their owner tokens to make the checker pass.
+
 GPU jobs touch a uint8 payload plus three 1024-square float32 matrices and run
 matrix multiplication with synchronization throughout each unit. Host bytearray
 pages are touched. Explicit payload sizes exclude interpreter, allocator,
