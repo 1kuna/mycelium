@@ -140,7 +140,7 @@ myce enable
 ```
 
 `disable` immediately persists `~/.local/share/myce/DISABLED` (private JSON:
-operator UID, UTC time, reason, grace seconds). All workers run by that user,
+operator UID, UTC time, reason, grace seconds, generation). All workers run by that user,
 including per-card workers and installed workers with custom spools, share this
 flag and register their spool locations there. It survives reboot. `join` and
 installed worker services exit successfully while the flag exists, before GPU
@@ -148,54 +148,83 @@ or queue checks; systemd's restart-on-failure and launchd's unsuccessful-exit
 restart therefore do not loop. Linux worker units also have a flag condition.
 Run the same commands separately for workers run by another OS user.
 
-The command stops recorded worker supervisors first, then signals their owned
-command, model-server and environment-build process groups. Jobs get up to
-10 seconds to checkpoint; `--grace 3s` changes that grace (maximum 1 minute),
-and `--now` kills immediately. It then kills surviving groups and verifies exit,
-allowing up to 5 seconds for group disappearance, worker exit, and release of
-registered worker spool locks. Local process
-inspection and service commands are bounded and failures are reported. No
-queue or NAS operation gates local shutdown. Queue notifications run alongside
-shutdown with a shared 500 ms timeout per phase. A reachable queue fences every
-card on the host and requeues displaced jobs only after cleanup confirmation,
-without charging a retry; placement restrictions still apply. An unreachable
-queue learns from the saved cleanup receipt at the next disable or enable/rejoin,
-including refunding a loss it recorded during the outage. Model HTTP requests
-interrupted by shutdown return an error and must be retried by their caller.
+On Linux under the systemd user worker service, ownership is the worker unit's
+cgroup. Disable stops that whole cgroup, including jobs, model servers, build
+processes, and descendants that change sessions/groups or daemonize. Units use
+`KillMode=control-group`, `SendSIGKILL=yes`, and `TimeoutStopSec=10s` by default.
+`--grace 3s` sets the unit's runtime stop timeout to 3 seconds (maximum 1 minute).
+`--now` sends SIGKILL to all members through systemd, then stops the unit.
+Confirmation requires the retained cgroup's `cgroup.procs` to be empty and
+`cgroup.events` to say `populated 0` (which includes nested cgroups), plus an
+inactive/failed unit. A cgroup removed by systemd counts as empty only when the
+stopped unit no longer reports a cgroup. A stop request alone is not confirmation.
+Invalid units, unreadable cgroups, a changed cgroup, or remaining processes fail
+closed. No PID/PGID records authorize signaling in this path. This controls only
+`myce-worker.service` or `myce-spark-worker.service` for this OS user; it does not
+stop Verso's legacy controller or unrelated services/processes.
 
-`disable` stops the detected v2 worker service. `enable` preserves the flag and
-receipt in local `.Trash`, starts that service, or prints the saved foreground
-join command. Use `--config /absolute/path/config.json` for a custom installer
-root. Manual-template services and the default installer configuration are
-recognized automatically. `MYCE_HOST_STATE_DIR` / `--host-state-dir` selects an
-isolated control directory for laptop drills; every worker and control command
-in that drill must use the same directory.
+Re-running `myce install worker` on an existing Linux installation upgrades its
+unit settings and reloads systemd, preserving its saved configuration, token,
+spools and installed binary; the previous unit is kept in local `.Trash`.
+Upgrade the installed binary separately if it predates this switch. Manual
+unit users must install the updated template and reload their user manager.
+The flag condition and the worker's successful exit while disabled prevent
+restart loops, including after reboot.
 
-Verify the final `Disabled: ... unconfirmed: none` line and exit status 0, then
-`myce status` or the status page: the host says **disabled by operator**, and
-its waiting jobs say **requeued**. Queue unavailability is a separate warning;
-local confirmation still succeeds. Any unconfirmed cleanup returns nonzero and
-keeps the flag. Rerun `disable`; `enable` refuses to clear an unconfirmed disable.
-After enabling, verify a fresh joined worker and an agreed small job.
+On macOS/launchd or foreground `myce join`, recorded supervisors and
+attempt/engine/build groups receive the existing bounded cleanup. This path
+prints **not running under the systemd service; ownership is best-effort**.
+Exact markers and process birth identities reduce stale-record mistakes, but
+inspection followed by signaling cannot prove ownership atomically or discover
+children that remove their markers. Successful secondary cleanup is best-effort,
+never cgroup certification. An empty registry returns nonzero and cannot produce
+a cleanup receipt. Use `--state-dir DIR --name NAME --host-id HOST` to adopt a
+known old spool; registered spool locks must be released before a receipt.
+Other users and unregistered workers remain outside this secondary scope.
 
-Ownership comes from durable attempt/engine/build records and exact execution
-identities, plus OS process birth identity for supervisors. Marked descendants are included even when they change process groups. Each
-group is checked independently before signaling; vanished groups are skipped.
-Names alone never authorize a signal. These commands never stop Verso's legacy controller, other
-users' work, unrelated containers or unrelated GPU processes. Container cleanup
-is a separate confirmation hook for the Docker containment change; this version
-confirms plain-command processes only. Upgrade the worker binary and restart
-it once before relying on this switch, so it registers its supervisor and spool.
-For an old spool use `--state-dir DIR --name NAME --host-id HOST` to adopt its
-owned-process records; a locked registered spool makes cleanup unconfirmed,
-and an unregistered old worker must already be stopped. A stale enable receipt
-cannot reconcile while the local disable flag exists; concurrent controls fail
-without waiting on the control lock. The flag is persisted before installer
-configuration discovery, so a broken config does not bypass local admission
-fencing. The model proxy also refuses routed calls when disabled and rechecks
-admission after reading the request body. This is not a fixed wall-clock deadline under stalled filesystem I/O,
-and processes that remove their execution marker and escape their recorded
-group cannot be discovered by this mechanism. Qualify containment separately.
+`--timeout 30s` sets one overall wall-clock deadline for disable; its default is
+chosen grace plus 20 seconds. At that deadline the command stops waiting,
+returns nonzero with unconfirmed work, and retains the flag. Cancellation fences
+new signals and acknowledgement of unfinished cleanup; no cleanup receipt is issued for
+unconfirmed work. A blocked kernel filesystem operation cannot be interrupted
+by Go: flag durability is claimed only after write/fsync succeeds, and any
+in-progress operation remains under the control lock until it returns. No NAS
+operation gates disable. Queue notifications are best-effort, launched alongside
+cleanup and never awaited by disable. An acknowledgement may remain pending if
+the CLI exits before delivery; the durable receipt reconciles at enable/rejoin.
+
+Host control carries a durable monotonic generation in the local flag/receipt
+and queue host record. A stale enable or disable is rejected; retrying the same
+disable acknowledgement requeues jobs only once. Enable must follow acknowledged
+cleanup. Generations survive reboot and reconciliation retries, including a lost
+enable response. Preserve the host control directory; do not reset its counter.
+One OS-user control directory is the ordering authority for each physical host.
+A reachable queue fences every card on that host and requeues displaced jobs
+without charging a retry. Exact saved attempts can refund an outage loss.
+Interrupted model HTTP calls return an error and must be retried by the caller.
+
+Use `--config /absolute/path/config.json` for a custom installer root.
+`MYCE_HOST_STATE_DIR` / `--host-state-dir` selects an isolated control directory
+for laptop drills; every worker and control command must use the same directory.
+`enable` archives the flag and receipt in recoverable local `.Trash`, starts the
+detected service, or prints the saved foreground join command. It refuses an
+unconfirmed disable. Concurrent controls fail rather than waiting on their lock.
+The flag is persisted before installer configuration discovery; the model proxy
+also refuses disabled-host admission, including a request-body read race.
+
+Check exit status and the confirmation line. Systemd success means native work
+in that worker service's cgroup is gone; secondary success means best-effort
+registry cleanup completed. Queue status is separate: verify **disabled by
+operator** and **requeued** when notifications or reconciliation have reached
+it. On failure, keep the flag and rerun disable. After enable, verify a newly
+joined worker and an agreed small job.
+
+Docker containers live under dockerd, outside the worker cgroup. This branch
+**does not certify container disappearance**. `HostControl.ConfirmContainers`
+is the confirmation hook where the Docker containment branch must verify that
+Mycelium-labeled containers are gone before a receipt and cleanup acknowledgement.
+Container confirmation failures keep the flag and return nonzero. Production
+containers and unrelated containers are outside that hook's ownership scope.
 
 ## Render service files
 

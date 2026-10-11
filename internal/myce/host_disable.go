@@ -78,6 +78,7 @@ func hostLaunchGate(dir string) (func(), error) {
 }
 
 type HostWorker struct {
+	Generation   uint64   `json:"generation,omitempty"`
 	Executions   []Result `json:"executions,omitempty"`
 	Command      []string `json:"command,omitempty"`
 	State        string   `json:"state_dir"`
@@ -139,13 +140,21 @@ type HostProcesses struct {
 	Pause  func(time.Duration)
 }
 type HostControl struct {
-	Prepare   func() error // Local discovery runs only after the durable disable flag.
-	Dir       string
-	Clock     Clock
-	Processes HostProcesses
-	Notify    func(context.Context, HostWorker, bool, bool, string) error
+	ResolveService    func() HostService
+	Service           HostService
+	Timeout           time.Duration
+	StopSecondary     func(context.Context) error
+	ConfirmContainers func(context.Context) error
+	ctx               context.Context
+	Prepare           func() error // Local discovery runs only after the durable disable flag.
+	Dir               string
+	Clock             Clock
+	Processes         HostProcesses
+	Notify            func(context.Context, HostWorker, bool, bool, string) error
 }
 type DisableReport struct {
+	Confirmed   bool
+	BestEffort  bool
 	Stopped     int
 	Unconfirmed []string
 	QueueErrors []string
@@ -169,8 +178,22 @@ func (h *HostControl) defaults() error {
 	if h.Processes.Signal == nil {
 		h.Processes.Signal = signalHostProcess
 	}
+	originalSignal := h.Processes.Signal
+	h.Processes.Signal = func(st workerState, sig syscall.Signal) error {
+		if h.ctx != nil && h.ctx.Err() != nil {
+			return h.ctx.Err()
+		}
+		return originalSignal(st, sig)
+	}
 	if h.Processes.Pause == nil {
 		h.Processes.Pause = func(d time.Duration) { t := time.NewTimer(d); defer t.Stop(); <-t.C }
+	}
+	pause := h.Processes.Pause
+	h.Processes.Pause = func(d time.Duration) {
+		if h.ctx != nil && h.ctx.Err() != nil {
+			return
+		}
+		pause(d)
 	}
 	return os.MkdirAll(h.Dir, 0700)
 }
@@ -219,6 +242,7 @@ func (h HostControl) notify(ctx context.Context, workers []HostWorker, enable, c
 		}
 		seen[key] = true
 		n++
+		w.Executions = append([]Result(nil), w.Executions...)
 		for _, sibling := range workers {
 			if sibling.State != w.State && sibling.Queue == w.Queue && sibling.Host == w.Host {
 				w.Executions = append(w.Executions, sibling.Executions...)
@@ -247,11 +271,36 @@ func NotifyHost(client Client) func(context.Context, HostWorker, bool, bool, str
 		if enable {
 			action = "enable"
 		}
-		return c.Call(ctx, "POST", "/api/hosts/"+url.PathEscape(w.Host)+"/"+action, map[string]any{"reason": reason, "cleared": cleared, "executions": w.Executions}, nil)
+		return c.Call(ctx, "POST", "/api/hosts/"+url.PathEscape(w.Host)+"/"+action, map[string]any{"reason": reason, "cleared": cleared, "executions": w.Executions, "generation": w.Generation}, nil)
 	}
 }
 
 func (h HostControl) Disable(ctx context.Context, reason string, grace time.Duration) (DisableReport, error) {
+	timeout := h.Timeout
+	if timeout == 0 {
+		timeout = grace + 20*time.Second
+	}
+	if timeout < 0 {
+		return DisableReport{}, errors.New("timeout must be positive")
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	h.ctx = ctx
+	type outcome struct {
+		report DisableReport
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() { r, e := h.disable(ctx, reason, grace); done <- outcome{r, e} }()
+	select {
+	case result := <-done:
+		return result.report, result.err
+	case <-ctx.Done():
+		r := DisableReport{Unconfirmed: []string{"overall deadline: cleanup, receipt and queue acknowledgement unconfirmed"}}
+		return r, ctx.Err()
+	}
+}
+func (h HostControl) disable(ctx context.Context, reason string, grace time.Duration) (DisableReport, error) {
 	var r DisableReport
 	if grace < 0 || grace > time.Minute {
 		return r, errors.New("grace must be between 0 and 1m")
@@ -268,122 +317,205 @@ func (h HostControl) Disable(ctx context.Context, reason string, grace time.Dura
 	}
 	defer unlock()
 	// The flag is first: neither queue reachability nor a hung worker can delay it.
+	generation, err := readNextHostGeneration(h.Dir)
+	generationErr := err
 	flag := struct {
+		Generation   uint64    `json:"generation"`
 		Who          string    `json:"who"`
 		When         time.Time `json:"when"`
 		Reason       string    `json:"reason"`
 		GraceSeconds float64   `json:"grace_seconds"`
-	}{strconv.Itoa(os.Getuid()), h.Clock.Now(), reason, grace.Seconds()}
+	}{generation, strconv.Itoa(os.Getuid()), h.Clock.Now(), reason, grace.Seconds()}
 	if err := saveWorkerJSON(h.Dir, "DISABLED", flag); err != nil {
 		return r, err
 	}
 	if err := archiveHostFile(h.Dir, "disable-receipt.json"); err != nil {
 		return r, err
 	}
+	if err := archiveHostFile(h.Dir, "enable-pending.json"); err != nil {
+		return r, err
+	}
+	if generationErr != nil {
+		return r, generationErr
+	}
+	if err := saveWorkerJSON(h.Dir, "control-generation.json", generation); err != nil {
+		return r, err
+	}
+	if ctx.Err() != nil {
+		return r, ctx.Err()
+	}
 	if h.Prepare != nil {
 		if err := h.Prepare(); err != nil {
 			return r, err
 		}
 	}
+	if ctx.Err() != nil {
+		return r, ctx.Err()
+	}
+	if h.ResolveService != nil {
+		h.Service = h.ResolveService()
+	}
 	workers, err := h.workers()
 	if err != nil {
-		return r, err
+		if h.Service == nil {
+			return r, err
+		}
+		r.QueueErrors = append(r.QueueErrors, "worker registry unavailable; queue reconciliation incomplete")
+	}
+
+	if ctx.Err() != nil {
+		return r, ctx.Err()
+	}
+	for i := range workers {
+		workers[i].Generation = generation
 	}
 	notifications := make(chan []string, 1)
-	go func() { notifications <- h.notify(ctx, workers, false, false, reason) }()
-	// Stop recorded worker lifetimes. Children have independent groups and get their own grace.
-	for _, w := range workers {
-		if w.PID == 0 {
-			continue
-		}
-		st := workerState{PID: w.PID, Birth: w.Birth}
-		owned, e := h.Processes.Owned(st)
-		if e == nil && owned {
-			e = h.Processes.Signal(st, syscall.SIGKILL)
-		}
-		if e != nil {
-			r.Unconfirmed = append(r.Unconfirmed, "worker "+w.Name+": "+e.Error())
-		}
-	}
-	lock, e := os.OpenFile(filepath.Join(h.Dir, "launch.lock"), os.O_CREATE|os.O_RDWR, 0600)
-	if e == nil {
-		deadline := h.Clock.Now().Add(time.Second)
-		for {
-			e = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-			if e == nil || !h.Clock.Now().Before(deadline) {
-				break
-			}
-			h.Processes.Pause(10 * time.Millisecond)
-		}
-	}
-	if e != nil {
-		if lock != nil {
-			lock.Close()
-		}
-		r.Unconfirmed = append(r.Unconfirmed, "launch gate not confirmed: "+e.Error())
-	} else {
-		defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() }()
-	}
-	records, readErr := hostProcessRecords(workers)
-	if readErr != nil {
-		r.Unconfirmed = append(r.Unconfirmed, readErr.Error())
-	}
-	r.Stopped, err = h.stopOwned(records, grace)
-	if err != nil {
-		r.Unconfirmed = append(r.Unconfirmed, err.Error())
-	}
-	// Docker containment extends this confirmation boundary with labeled-container cleanup.
-	for _, w := range workers {
-		if w.PID == 0 {
-			continue
-		}
-		deadline := h.Clock.Now().Add(5 * time.Second)
-		var live bool
-		var e error
-		for {
-			live, e = h.Processes.Owned(workerState{PID: w.PID, Birth: w.Birth})
-			if e != nil || !live || !h.Clock.Now().Before(deadline) {
-				break
-			}
-			h.Processes.Pause(10 * time.Millisecond)
-		}
-		if e != nil || live {
-			r.Unconfirmed = append(r.Unconfirmed, "worker "+w.Name+" exit not confirmed")
-		}
-	}
-	// A legacy or in-process worker has no signalable supervisor identity.
-	// Its spool lock must be released before cleanup can be certified.
-	spoolDeadline := h.Clock.Now().Add(5 * time.Second)
-	for _, w := range workers {
-		f, e := os.OpenFile(filepath.Join(w.State, "worker.lock"), os.O_RDWR, 0)
-		if errors.Is(e, os.ErrNotExist) {
-			continue
-		}
-		if e == nil {
+	go func() { notifications <- h.notify(context.WithoutCancel(ctx), workers, false, false, reason) }()
+	if h.Service != nil {
+		if err = h.Service.Stop(ctx, grace); err == nil {
 			for {
-				e = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-				if e == nil || !h.Clock.Now().Before(spoolDeadline) {
+				var empty bool
+				empty, err = h.Service.Empty(ctx)
+				if err != nil || empty {
+					r.Confirmed = empty && err == nil
+					break
+				}
+				select {
+				case <-ctx.Done():
+					err = ctx.Err()
+				case <-time.After(10 * time.Millisecond):
+				}
+				if err != nil {
+					break
+				}
+			}
+		}
+		if err != nil {
+			r.Unconfirmed = append(r.Unconfirmed, "systemd cgroup: "+err.Error())
+		}
+	} else {
+		r.BestEffort = true
+		if len(workers) == 0 {
+			r.Unconfirmed = append(r.Unconfirmed, "not running under the systemd service; ownership is best-effort; empty registry cannot confirm cleanup")
+		}
+		// Stop recorded worker lifetimes. Children have independent groups and get their own grace.
+		for _, w := range workers {
+			if w.PID == 0 {
+				continue
+			}
+			st := workerState{PID: w.PID, Birth: w.Birth}
+			owned, e := h.Processes.Owned(st)
+			if e == nil && owned {
+				e = h.Processes.Signal(st, syscall.SIGKILL)
+			}
+			if e != nil {
+				r.Unconfirmed = append(r.Unconfirmed, "worker "+w.Name+": "+e.Error())
+			}
+		}
+		lock, e := os.OpenFile(filepath.Join(h.Dir, "launch.lock"), os.O_CREATE|os.O_RDWR, 0600)
+		if e == nil {
+			deadline := h.Clock.Now().Add(time.Second)
+			for {
+				e = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+				if e == nil || (!h.Clock.Now().Before(deadline) || h.contextDone()) {
 					break
 				}
 				h.Processes.Pause(10 * time.Millisecond)
 			}
-			if e == nil {
-				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-			}
-			_ = f.Close()
 		}
 		if e != nil {
-			r.Unconfirmed = append(r.Unconfirmed, "worker "+w.Name+" spool still in use or unreadable: "+e.Error())
+			if lock != nil {
+				lock.Close()
+			}
+			r.Unconfirmed = append(r.Unconfirmed, "launch gate not confirmed: "+e.Error())
+		} else {
+			defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() }()
+		}
+		records, readErr := hostProcessRecords(workers)
+		if readErr != nil {
+			r.Unconfirmed = append(r.Unconfirmed, readErr.Error())
+		}
+		r.Stopped, err = h.stopOwned(records, grace)
+		if err != nil {
+			r.Unconfirmed = append(r.Unconfirmed, err.Error())
+		}
+		// Docker containment extends this confirmation boundary with labeled-container cleanup.
+		for _, w := range workers {
+			if w.PID == 0 {
+				continue
+			}
+			deadline := h.Clock.Now().Add(5 * time.Second)
+			var live bool
+			var e error
+			for {
+				live, e = h.Processes.Owned(workerState{PID: w.PID, Birth: w.Birth})
+				if e != nil || !live || (!h.Clock.Now().Before(deadline) || h.contextDone()) {
+					break
+				}
+				h.Processes.Pause(10 * time.Millisecond)
+			}
+			if e != nil || live {
+				r.Unconfirmed = append(r.Unconfirmed, "worker "+w.Name+" exit not confirmed")
+			}
+		}
+		// A legacy or in-process worker has no signalable supervisor identity.
+		// Its spool lock must be released before cleanup can be certified.
+		spoolDeadline := h.Clock.Now().Add(5 * time.Second)
+		for _, w := range workers {
+			f, e := os.OpenFile(filepath.Join(w.State, "worker.lock"), os.O_RDWR, 0)
+			if errors.Is(e, os.ErrNotExist) {
+				continue
+			}
+			if e == nil {
+				for {
+					e = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+					if e == nil || (!h.Clock.Now().Before(spoolDeadline) || h.contextDone()) {
+						break
+					}
+					h.Processes.Pause(10 * time.Millisecond)
+				}
+				if e == nil {
+					_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				}
+				_ = f.Close()
+			}
+			if e != nil {
+				r.Unconfirmed = append(r.Unconfirmed, "worker "+w.Name+" spool still in use or unreadable: "+e.Error())
+			}
 		}
 	}
-	r.QueueErrors = <-notifications
+	if h.Service == nil && h.StopSecondary != nil {
+		if e := h.StopSecondary(ctx); e != nil {
+			r.Unconfirmed = append(r.Unconfirmed, e.Error())
+		}
+	}
+	// Docker branch must verify Mycelium-labeled containers gone before receipt/acknowledgement.
+	if h.ConfirmContainers != nil {
+		if e := h.ConfirmContainers(ctx); e != nil {
+			r.Unconfirmed = append(r.Unconfirmed, "Docker containers: "+e.Error())
+		}
+	}
+	if ctx.Err() != nil {
+		return r, ctx.Err()
+	}
+	select {
+	case failures := <-notifications:
+		r.QueueErrors = append(r.QueueErrors, failures...)
+	default:
+		r.QueueErrors = append(r.QueueErrors, "queue notification pending; durable receipt will reconcile")
+	}
 	if len(r.Unconfirmed) == 0 {
-		if err = saveWorkerJSON(h.Dir, "disable-receipt.json", struct {
-			Workers []HostWorker `json:"workers"`
-		}{workers}); err != nil {
+		if ctx.Err() != nil {
+			return r, ctx.Err()
+		}
+		if err = saveWorkerJSON(h.Dir, "disable-receipt.json", hostReceipt{Workers: workers, Generation: generation}); err != nil {
 			r.Unconfirmed = append(r.Unconfirmed, err.Error())
 		} else {
-			r.QueueErrors = append(r.QueueErrors, h.notify(ctx, workers, false, true, reason)...)
+			if ctx.Err() != nil {
+				return r, ctx.Err()
+			}
+			go h.notify(context.WithoutCancel(ctx), workers, false, true, reason)
+			r.QueueErrors = append(r.QueueErrors, "queue cleanup notification pending; durable receipt will reconcile")
 		}
 	}
 	if len(r.Unconfirmed) > 0 {
@@ -517,7 +649,7 @@ func (h HostControl) stopOwned(records []workerState, grace time.Duration) (int,
 			if !owned {
 				continue
 			}
-			if !h.Clock.Now().Before(deadline) {
+			if !h.Clock.Now().Before(deadline) || h.contextDone() {
 				if err = h.Processes.Signal(st, syscall.SIGKILL); err != nil {
 					errs = append(errs, err)
 				}
@@ -528,7 +660,7 @@ func (h HostControl) stopOwned(records []workerState, grace time.Duration) (int,
 		if len(live) == 0 {
 			break
 		}
-		if !h.Clock.Now().Before(killDeadline) {
+		if !h.Clock.Now().Before(killDeadline) || h.contextDone() {
 			errs = append(errs, fmt.Errorf("%d recorded process groups still live", len(live)))
 			break
 		}
@@ -549,13 +681,48 @@ func (h HostControl) Enable(ctx context.Context) error {
 	if reason, e := HostDisabled(h.Dir); e != nil {
 		return e
 	} else if reason != "" {
-		if _, e = os.Stat(filepath.Join(h.Dir, "disable-receipt.json")); e != nil {
+		b, e := os.ReadFile(filepath.Join(h.Dir, "DISABLED"))
+		if e != nil {
+			return e
+		}
+		var flag struct {
+			Generation uint64 `json:"generation"`
+		}
+		if e = json.Unmarshal(b, &flag); e != nil {
+			return e
+		}
+		b, e = os.ReadFile(filepath.Join(h.Dir, "disable-receipt.json"))
+		if e != nil {
 			return errors.New("cleanup unconfirmed; rerun myce disable before enable")
 		}
+		var receipt hostReceipt
+		if e = json.Unmarshal(b, &receipt); e != nil {
+			return e
+		}
+		if flag.Generation == 0 || receipt.Generation != flag.Generation {
+			return errors.New("cleanup receipt does not match current disable generation; rerun disable")
+		}
+
 	}
 	_, err = h.workers()
 	if err != nil {
 		return err
+	}
+	// Persist the enable generation before removing the flag; reconciliation retries reuse it.
+	if b, e := os.ReadFile(filepath.Join(h.Dir, "disable-receipt.json")); e == nil {
+		var receipt hostReceipt
+		if err = json.Unmarshal(b, &receipt); err != nil {
+			return err
+		}
+		if receipt.EnableGeneration == 0 {
+			receipt.EnableGeneration, err = nextHostGeneration(h.Dir)
+			if err != nil {
+				return err
+			}
+		}
+		if err = saveWorkerJSON(h.Dir, "disable-receipt.json", receipt); err != nil {
+			return err
+		}
 	}
 	// Preserve an audit copy in recoverable local Trash.
 	if _, e := os.Stat(filepath.Join(h.Dir, "disable-receipt.json")); e == nil {
@@ -617,15 +784,19 @@ func (h HostControl) reconcileEnable(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var receipt struct {
-		Workers []HostWorker `json:"workers"`
-	}
+	var receipt hostReceipt
 	if err = json.Unmarshal(b, &receipt); err != nil {
 		return err
 	}
 	workers := receipt.Workers
-	if failures := h.notify(ctx, workers, false, true, "disabled by operator"); len(failures) > 0 {
-		return errors.New("disable receipt not yet acknowledged")
+	// A lost enable response may leave a receipt after the queue accepted its generation.
+	// Queue enable requires acknowledged cleanup, so retry enable even if the old disable is stale.
+	_ = h.notify(ctx, workers, false, true, "disabled by operator")
+	for i := range workers {
+		workers[i].Generation = receipt.EnableGeneration
+	}
+	if receipt.EnableGeneration == 0 {
+		return errors.New("legacy receipt has no ordered enable; rerun disable and enable")
 	}
 	if failures := h.notify(ctx, workers, true, false, ""); len(failures) > 0 {
 		return errors.New("enable not yet acknowledged")
@@ -835,4 +1006,49 @@ func archiveHostFile(dir, name string) error {
 		return err
 	}
 	return os.Rename(path, filepath.Join(trash, ID()+"-"+name))
+}
+
+type hostReceipt struct {
+	Generation       uint64       `json:"generation"`
+	Workers          []HostWorker `json:"workers"`
+	EnableGeneration uint64       `json:"enable_generation,omitempty"`
+}
+
+func (h HostControl) contextDone() bool { return h.ctx != nil && h.ctx.Err() != nil }
+
+// Serialized by control.lock; retained across enable and reboot.
+func nextHostGeneration(dir string) (uint64, error) {
+	n, e := readNextHostGeneration(dir)
+	if e != nil {
+		return 0, e
+	}
+	return n, saveWorkerJSON(dir, "control-generation.json", n)
+}
+func readNextHostGeneration(dir string) (uint64, error) {
+	var last uint64
+	b, e := os.ReadFile(filepath.Join(dir, "control-generation.json"))
+	if e == nil {
+		if e = json.Unmarshal(b, &last); e != nil {
+			return 0, e
+		}
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return 0, e
+	}
+	// The flag covers a crash after flag fsync but before counter fsync.
+	if b, e := os.ReadFile(filepath.Join(dir, "DISABLED")); e == nil {
+		var flag struct {
+			Generation uint64 `json:"generation"`
+		}
+		if e = json.Unmarshal(b, &flag); e != nil {
+			return 0, e
+		}
+		last = max(last, flag.Generation)
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return 0, e
+	}
+	if last == ^uint64(0) {
+		return 0, errors.New("host generation exhausted")
+	}
+	last++
+	return last, nil
 }

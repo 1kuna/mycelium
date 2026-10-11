@@ -128,6 +128,7 @@ func (a API) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /api/hosts/{id}/disable", func(w http.ResponseWriter, r *http.Request) {
 		var c struct {
+			Generation uint64   `json:"generation"`
 			Reason     string   `json:"reason"`
 			Cleared    bool     `json:"cleared"`
 			Executions []Result `json:"executions,omitempty"`
@@ -135,10 +136,19 @@ func (a API) Handler() http.Handler {
 		if !decode(w, r, &c) {
 			return
 		}
-		respond(w, map[string]bool{"ok": true}, a.Queue.DisableHostExecutions(r.PathValue("id"), c.Reason, c.Cleared, c.Executions))
+		respond(w, map[string]bool{"ok": true}, a.Queue.DisableHostGeneration(r.PathValue("id"), c.Reason, c.Cleared, c.Executions, c.Generation))
 	})
 	mux.HandleFunc("POST /api/hosts/{id}/enable", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, map[string]bool{"ok": true}, a.Queue.EnableHost(r.PathValue("id")))
+		var c struct {
+			Generation uint64   `json:"generation"`
+			Reason     string   `json:"reason"`
+			Cleared    bool     `json:"cleared"`
+			Executions []Result `json:"executions,omitempty"`
+		}
+		if !decode(w, r, &c) {
+			return
+		}
+		respond(w, map[string]bool{"ok": true}, a.Queue.EnableHostGeneration(r.PathValue("id"), c.Generation))
 	})
 	mux.HandleFunc("POST /api/workers/{id}/leave", func(w http.ResponseWriter, r *http.Request) {
 		var c struct {

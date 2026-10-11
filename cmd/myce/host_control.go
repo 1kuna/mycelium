@@ -26,6 +26,7 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
 	reason := f.String("reason", "disabled by operator", "operator reason")
 	grace := f.Duration("grace", 10*time.Second, "checkpoint grace, from 0 to 1m")
+	timeout := f.Duration("timeout", 0, "overall disable deadline (default grace + 20s)")
 	now := f.Bool("now", false, "kill owned work immediately")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
@@ -99,16 +100,37 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 		return nil
 	}
 	ctx := context.Background()
-	h := myce.HostControl{Dir: *dir, Prepare: prepare, Notify: func(ctx context.Context, w myce.HostWorker, enable, cleared bool, reason string) error {
+	if *timeout < 0 {
+		return errors.New("timeout must be positive")
+	}
+	h := myce.HostControl{Timeout: *timeout, Dir: *dir, Prepare: prepare, Notify: func(ctx context.Context, w myce.HostWorker, enable, cleared bool, reason string) error {
 		return myce.NotifyHost(myce.Client{Token: token})(ctx, w, enable, cleared, reason)
 	}}
 	if args[0] == "disable" {
-		r, cleanupErr := h.Disable(ctx, *reason, *grace)
-		serviceErr := hostService(ctx, probe, service, false)
-		if len(r.QueueErrors) > 0 {
-			fmt.Fprintln(out, "Queue unavailable; local disable is effective. Receipt will reconcile at enable/rejoin.")
+		h.ResolveService = func() myce.HostService {
+			if probe.OS == "linux" && service != "" {
+				return &myce.SystemdHostService{Unit: filepath.Base(service), Command: probe.Command}
+			}
+			return nil
 		}
-		err = errors.Join(cleanupErr, serviceErr)
+		h.StopSecondary = func(ctx context.Context) error {
+			if probe.OS != "linux" {
+				return hostService(ctx, probe, service, false)
+			}
+			return nil
+		}
+		r, cleanupErr := h.Disable(ctx, *reason, *grace)
+
+		if r.BestEffort {
+			fmt.Fprintln(out, "Not running under the systemd service; ownership is best-effort.")
+		}
+		if r.Confirmed {
+			fmt.Fprintln(out, "Native process cleanup confirmed by empty systemd worker cgroup; Docker confirmation requires the containment branch.")
+		}
+		if len(r.QueueErrors) > 0 {
+			fmt.Fprintln(out, "Queue notification unconfirmed; local flag is in place. A completed cleanup receipt will reconcile at enable/rejoin.")
+		}
+		err = cleanupErr
 		confirmation := "none"
 		if err != nil {
 			confirmation = err.Error()
