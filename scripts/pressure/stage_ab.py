@@ -606,6 +606,8 @@ class Run:
                 assert any('production idle' in text or 'production hold' in text for text in holds)
                 waiting=None
                 if mode=='full':
+                    spark_machine=next(m for m in status['machines'] if m['id']=='spark-pressure')
+                    assert spark_machine['free_memory_gb']==0, 'Spark-full worker reported capacity'
                     waiting=next(j for j in status['jobs'] if j['id']==experiment)
                     assert waiting['state']=='queued' and waiting.get('reason'), 'no visible capacity/hold explanation'
                 self.finished([experiment,production],300)
