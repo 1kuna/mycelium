@@ -605,3 +605,148 @@ func TestProductionHoldExpiredDemandDoesNotStopExperiments(t *testing.T) {
 		t.Fatal("expired demand stopped an experiment")
 	}
 }
+
+func TestProductionHoldKeepsProductionEnvironmentBuild(t *testing.T) {
+	q, _, a, _, _ := holdFleet(t, true)
+	r := binaryRecipe(t, "fake")
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"production-tools": {"fake": r}}}); err != nil {
+		t.Fatal(err)
+	}
+	a.EnvironmentBuilder = true
+	check(t, q, a, nil)
+	p := spec("production")
+	p.AllowedMachines = []string{a.ID}
+	p.Environment.Name = "production-tools"
+	prod := submit(t, q, p)
+	reply := check(t, q, a, nil)
+	if reply.Job != nil || len(reply.EnvironmentPlan) != 1 {
+		t.Fatalf("missing production build: %+v", reply)
+	}
+	a.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "building"}}
+	reply = check(t, q, a, nil)
+	if len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Key != r.Key {
+		t.Fatalf("hold canceled its own production build: %+v", reply)
+	}
+	a.EnvironmentReports[0].State = "ready"
+	a.Environments = []string{r.Key}
+	if got := check(t, q, a, nil).Job; got == nil || got.ID != prod.ID {
+		t.Fatalf("production did not start: %+v", got)
+	}
+}
+
+func TestProductionHoldLostModelNeedsPriorSessionCleanup(t *testing.T) {
+	q, c, a := modelFixture(t)
+	a.HostID = "b70"
+	check(t, q, a, nil)
+	b := machine("two", "fake")
+	b.HostID = "b70"
+	check(t, q, b, nil)
+	if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}}); err != nil {
+		t.Fatal(err)
+	}
+	call := addModelCall(t, q, "experiment")
+	reportModel(t, q, a, "ready")
+	p := spec("production")
+	p.AllowedMachines = []string{b.ID}
+	prod := submit(t, q, p)
+	for range 61 {
+		c.Advance(time.Second)
+		check(t, q, b, nil)
+	}
+	if !q.s.Machines[a.ID].Gone {
+		t.Fatal("model worker not lost")
+	}
+	replacement := a
+	replacement.Session = "new-without-cleanup"
+	for _, previous := range []string{"", "wrong-session"} {
+		_, err := q.Checkin(Checkin{Machine: replacement, Fresh: previous != "", PreviousSession: previous})
+		if err == nil {
+			t.Fatal("new session erased lost model execution without cleanup")
+		}
+	}
+	if got := check(t, q, b, nil).Job; got != nil {
+		t.Fatal("unknown model release granted production")
+	}
+	if _, err := q.Checkin(Checkin{Machine: replacement, Fresh: true, PreviousSession: a.Session}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.finishCall(call.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := check(t, q, b, nil).Job; got == nil || got.ID != prod.ID {
+		t.Fatalf("cleaned model did not release production: %+v", got)
+	}
+}
+
+func TestProductionHoldResidentCallUsesReservedHostMemory(t *testing.T) {
+	q, _, a := modelFixture(t)
+	config := q.models
+	config.Models[0].HostMemoryGB = 1
+	if err := q.ConfigureModels(config); err != nil {
+		t.Fatal(err)
+	}
+	a.HostID = "b70"
+	a.HostMemoryMeasured = true
+	a.HostAvailableMemoryGB = 1
+	a.ModelConfigHash = modelConfigHash(config)
+	check(t, q, a, nil)
+	b := machine("two", "fake")
+	b.HostID = "b70"
+	b.HostMemoryMeasured = true
+	b.HostAvailableMemoryGB = 1
+	check(t, q, b, nil)
+	if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: a.ID}); err != nil {
+		t.Fatal(err)
+	}
+	reportModel(t, q, a, "ready")
+	x := submit(t, q, spec("experiment"))
+	x = check(t, q, b, nil).Job
+	if x == nil {
+		t.Fatal("experiment not started")
+	}
+	if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}}); err != nil {
+		t.Fatal(err)
+	}
+	prod := addModelCall(t, q, "production")
+	if prod.ProductionHost != "b70" || prod.Machine != "" {
+		t.Fatalf("resident call bypassed host hold: %+v", prod)
+	}
+	if !check(t, q, b, x).Stop {
+		t.Fatal("sibling experiment not stopped")
+	}
+	finish(t, q, x, false)
+	reportModel(t, q, a, "ready")
+	if prod.Machine != a.ID {
+		t.Fatalf("resident production call not dispatched: %+v", prod)
+	}
+}
+
+func TestProductionHoldReportsModelUnloadFailure(t *testing.T) {
+	q, _, a := modelFixture(t)
+	a.HostID = "b70"
+	check(t, q, a, nil)
+	b := machine("two", "fake")
+	b.HostID = "b70"
+	check(t, q, b, nil)
+	call := addModelCall(t, q, "experiment")
+	reportModel(t, q, a, "ready")
+	if err := q.finishCall(call.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}}); err != nil {
+		t.Fatal(err)
+	}
+	p := spec("production")
+	p.AllowedMachines = []string{b.ID}
+	prod := submit(t, q, p)
+	reportModel(t, q, a, "unload_failed")
+	if slot := q.s.ModelSlots[slotKey(a.ID, "test")]; slot.State != "unload_failed" {
+		t.Fatalf("hold erased unload failure: %+v", slot)
+	}
+	if reason := job(t, q, prod.ID).Reason; !strings.Contains(reason, "release unknown") {
+		t.Fatalf("failed cleanup described as cooperative stopping: %s", reason)
+	}
+	if got := check(t, q, b, nil).Job; got != nil {
+		t.Fatal("failed cleanup granted production")
+	}
+}

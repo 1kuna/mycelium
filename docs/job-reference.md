@@ -299,7 +299,9 @@ are killed immediately and requeued without consuming an infrastructure retry.
 Repeated demand cannot extend a stop deadline. Unpinned lower-priority models
 drain; their outstanding calls get the same grace, then fail with
 `preempted by production host hold` rather than being silently replayed.
-Background copies/builds are canceled and their reported cleanup must settle.
+Lower-priority background copies/builds are canceled and their reported cleanup
+must settle. Environment builds required by queued production continue during
+the hold.
 Production waits for the entire host's lower-priority allocations to release.
 
 The grace bounds cooperative stopping, **not successful recovery from an
@@ -309,8 +311,10 @@ cleanup, cancellation or queue restart never acts as a release acknowledgement.
 Attempt/session-specific results can settle old custody without changing a new
 attempt. A fresh worker must have cleaned its old processes before reconciling
 its previous session. Reopened model slots require measured in-flight counts;
-older workers without those reports cannot clear a recovering hold. Forced-stop
-results retain `last_stop_outcome`; periodic NAS checkpoints remain available.
+older workers without those reports cannot clear a recovering hold. A replacement
+model worker must acknowledge cleanup of the prior session, even after worker
+loss. Forced-stop results retain `last_stop_outcome`; periodic NAS checkpoints
+remain available.
 These are process/model cleanup acknowledgements, not native GPU-driver proofs.
 
 Stopped experiments return to the shared priority line with a fresh attempt and

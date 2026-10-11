@@ -192,7 +192,7 @@ func (q *Queue) hostBlockers(host string) string {
 		m := q.s.Machines[s.Machine]
 		if m != nil && hostID(m) == host && (s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || !q.slotPinned(s) && s.State == "draining" || s.State == "unload_failed") {
 			count++
-			if s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] {
+			if s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || s.State == "unload_failed" || expired(s.StopAt, q.clock.Now()) {
 				unknown = append(unknown, m.ID)
 			}
 		}
@@ -280,8 +280,12 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 		if m.TotalMemoryGB-pinned < j.Spec.Needs.MemoryGB {
 			continue
 		}
-		if _, _, ok := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, "production"); !ok {
-			continue
+		slot := q.s.ModelSlots[slotKey(m.ID, j.Spec.Needs.Model)]
+		// Calls reuse a ready/loading model's existing host-memory reservation.
+		if call == nil || slot == nil || slot.State != "ready" && slot.State != "loading" {
+			if _, _, ok := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, "production"); !ok {
+				continue
+			}
 		}
 		stops := 0
 		for _, r := range q.s.Jobs {
@@ -399,7 +403,7 @@ func (q *Queue) maintainHolds() {
 			if m == nil || hostID(m) != host || q.slotPinned(s) {
 				continue
 			}
-			if rank(s.Priority) > 0 && (!s.ProductionUsed || s.InFlight > 0) || q.unreported[m.ID] {
+			if s.State != "unload_failed" && (rank(s.Priority) > 0 && (!s.ProductionUsed || s.InFlight > 0) || q.unreported[m.ID]) {
 				s.State = "draining"
 			}
 			if s.State == "draining" {
@@ -453,7 +457,16 @@ func (q *Queue) maintainHolds() {
 func (q *Queue) backgroundPreparing(m *Machine) bool {
 	for _, r := range m.EnvironmentReports {
 		if r.State == "building" {
-			return true
+			production := false
+			for _, j := range q.s.Jobs {
+				if j.State == "queued" && j.Spec.Priority == "production" && j.ProductionHost == hostID(m) && q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) && environmentKey(j, m) == r.Key {
+					production = true
+					break
+				}
+			}
+			if !production {
+				return true
+			}
 		}
 	}
 	for _, r := range m.CopyReports {
