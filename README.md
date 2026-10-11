@@ -120,6 +120,7 @@ myce status
 myce logs <id> --follow
 myce cancel <id>
 myce dev --workers 1 --memory-gb 8
+myce sim --days 7 --seed 1           # GPU-free scheduler replay; docs/simulator.md
 ```
 
 Use `MYCE_QUEUE` (or `--queue`) for the queue's address. Use `MYCE_TOKEN` for

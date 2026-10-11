@@ -39,6 +39,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) == 0 {
 		return errors.New("usage: myce queue|join|leave|submit|status|logs|wait|cancel|dev")
 	}
+	if args[0] == "sim" {
+		return simCommand(args[1:], os.Stdout)
+	}
 	if args[0] == "install" || args[0] == "uninstall" || args[0] == "doctor" {
 		return setupCommand(args)
 	}

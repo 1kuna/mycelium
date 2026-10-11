@@ -424,7 +424,7 @@ func (q *Queue) maintainModels() {
 			}
 			var victim *Job
 			for _, j := range q.s.Jobs {
-				if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && (j.Spec.Resumable || c.Priority == "production") && !m.CheckpointUnavailable && checkpointAvailable(q.root) && rank(j.Spec.Priority) > rank(c.Priority) {
+				if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && (j.Spec.Resumable || c.Priority == "production") && !m.CheckpointUnavailable && q.checkpointsAvailable() && rank(j.Spec.Priority) > rank(c.Priority) {
 					victim = j
 					possible += j.Spec.Needs.MemoryGB
 				}
@@ -453,7 +453,7 @@ func (q *Queue) maintainModels() {
 
 	}
 
-	if !checkpointAvailable(q.root) {
+	if !q.checkpointsAvailable() {
 		return
 	}
 	waiting := []*Job{}
@@ -464,6 +464,9 @@ func (q *Queue) maintainModels() {
 	}
 	sort.Slice(waiting, func(i, j int) bool { return before(waiting[i], waiting[j], &Machine{}) })
 	for _, j := range waiting {
+		if j.Spec.Priority == "experiment" {
+			continue
+		} // Nothing has a lower priority to reclaim.
 		q.makeBatchRoom(j)
 	}
 }
@@ -498,7 +501,7 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 		}
 	}
 	for _, j := range q.s.Jobs {
-		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && (j.Spec.Resumable || c.Priority == "production") && !m.CheckpointUnavailable && checkpointAvailable(q.root) && rank(j.Spec.Priority) > rank(c.Priority) {
+		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && (j.Spec.Resumable || c.Priority == "production") && !m.CheckpointUnavailable && q.checkpointsAvailable() && rank(j.Spec.Priority) > rank(c.Priority) {
 			possible += j.Spec.Needs.MemoryGB
 		}
 	}
@@ -506,25 +509,51 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 	return possible >= model.MemoryGB && hostOK
 }
 func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
-	for _, j := range q.s.Jobs {
-		memory := m.FreeMemoryGB
+	// Reclaimable room depends on priority, not on the individual waiting job.
+	room := [3]float64{m.FreeMemoryGB, m.FreeMemoryGB, m.FreeMemoryGB}
+	for priority := 0; priority < 3; priority++ {
 		for _, s := range q.s.ModelSlots {
-			if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > rank(j.Spec.Priority) {
+			if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > priority {
 				model, _ := q.model(s.Model)
-				memory += model.MemoryGB
+				room[priority] += model.MemoryGB
 			}
 		}
 		for _, r := range q.s.Jobs {
-			if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") && (r.Spec.Resumable || j.Spec.Priority == "production") && rank(r.Spec.Priority) > rank(j.Spec.Priority) {
-				memory += r.Spec.Needs.MemoryGB
+			if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") && (r.Spec.Resumable || priority == 0) && rank(r.Spec.Priority) > priority {
+				room[priority] += r.Spec.Needs.MemoryGB
 			}
 		}
-		if j.State == "queued" && q.capReason(j) == "" && fits(j, m, memory) && q.fairBefore(j, callJob(c), m) {
+	}
+	scores := map[string]float64{}
+	call := callJob(c)
+	score := func(j *Job) float64 {
+		if n, ok := scores[j.Spec.Project]; ok {
+			return n
+		}
+		n := q.fairScore(j, m)
+		scores[j.Spec.Project] = n
+		return n
+	}
+	for _, j := range q.s.Jobs {
+		if j.State != "queued" || rank(j.Spec.Priority) > rank(c.Priority) || q.capReason(j) != "" || !fits(j, m, room[rank(j.Spec.Priority)]) {
+			continue
+		}
+		if j.Spec.Priority == "experiment" && c.Priority == "experiment" && j.Spec.Project != c.Project {
+			a, b := score(j), score(call)
+			if math.Abs(a-b) > 1e-6 {
+				if a < b {
+					return true
+				}
+				continue
+			}
+		}
+		if before(j, call, m) {
 			return true
 		}
 	}
 	return false
 }
+
 func (q *Queue) makeModelRoom(m *Machine, need float64, priority string) {
 	slots := []*ModelSlot{}
 	for _, s := range q.s.ModelSlots {
@@ -569,7 +598,9 @@ func (q *Queue) addCall(c *ModelCall) error {
 		if _, ok := q.model(c.Model); !ok {
 			return errors.New("unknown model")
 		}
-		c.ID = ID()
+		if !q.simulation || c.ID == "" {
+			c.ID = ID()
+		}
 		c.Queued = q.clock.Now()
 		q.calls[c.ID] = c
 		q.maintain()

@@ -1,0 +1,25 @@
+# Illustrative synthetic workload; identities and numbers are invented.
+# Durations vary +/-20% by seed. Arrivals are independent, not a trace replay.
+# Compatible workers have model files pre-staged and unlimited simulated cache;
+# no NAS copying or environment setup cost is modeled. Portability is assumed.
+projects:
+  project-a: {weight: 3}
+  project-b: {weight: 2}
+  project-c: {weight: 1}
+models:
+  - {name: model-a, size_bytes: 4000000000, memory_gb: 10, host_memory_gb: 5, load_seconds: 5, platforms: [xpu, cuda]}
+  # Omitted size_bytes illustrates an unknown bundle size (defaults to zero).
+  - {name: model-b, memory_gb: 5, host_memory_gb: 5, load_seconds: 5, platforms: [xpu]}
+  - {name: model-c, size_bytes: 20000000000, memory_gb: 30, host_memory_gb: 5, load_seconds: 40, platforms: [xpu, cuda, metal]}
+  - {name: model-d, size_bytes: 3000000000, memory_gb: 10, host_memory_gb: 5, load_seconds: 20, platforms: [cuda]}
+  - {name: model-e, size_bytes: 40000000000, memory_gb: 60, host_memory_gb: 10, load_seconds: 100, platforms: [cuda]}
+  - {name: model-f, size_bytes: 1000000000, memory_gb: 5, host_memory_gb: 5, load_seconds: 10, platforms: [metal]}
+streams:
+  - {name: stream-a, project: project-a, priority: production, platforms: [xpu], memory_gb: 30, host_memory_gb: 5, duration_seconds: 300, every_hours: 6, start_hour: 8, count: 1}
+  - {name: stream-b, project: project-a, priority: experiment, model: model-c, platforms: [xpu, cuda, metal], memory_gb: 30, host_memory_gb: 5, duration_seconds: 3600, checkpoint_seconds: 180, every_hours: 1, start_hour: 0, count: 4}
+  - {name: stream-c, project: project-b, priority: experiment, model: model-d, platforms: [cuda], memory_gb: 10, host_memory_gb: 5, duration_seconds: 900, checkpoint_seconds: 120, every_hours: 1, start_hour: 0, count: 4}
+  - {name: stream-d, project: project-b, priority: experiment, model: model-e, call: true, duration_seconds: 120, every_hours: 2, start_hour: 1, count: 4}
+  - {name: stream-e, project: project-b, priority: deadline, model: model-d, platforms: [cuda], memory_gb: 10, host_memory_gb: 5, duration_seconds: 1800, checkpoint_seconds: 120, every_hours: 24, start_hour: 14, count: 1, deadline_seconds: 2400}
+  - {name: stream-f, project: project-c, priority: experiment, model: model-f, platforms: [metal], memory_gb: 5, host_memory_gb: 5, duration_seconds: 900, checkpoint_seconds: 120, every_hours: 1, start_hour: 0, count: 2}
+  # Identical illustrative 12-file work, one serial job versus 12 queue jobs.
+  - {name: stream-g, project: project-a, priority: experiment, model: model-a, platforms: [xpu, cuda], memory_gb: 10, host_memory_gb: 5, duration_seconds: 300, checkpoint_seconds: 180, every_hours: 24, start_hour: 8, count: 1, batch_files: 12}

@@ -1,0 +1,22 @@
+# Illustrative synthetic fleet; no real hosts, topology or measured capacities.
+# Monday=0; memory values are GiB of admission budget, after reserves.
+# Workers on the same host share its host RAM budget.
+machines:
+  - {name: gpu-a, host: host-a, platform: xpu, memory_gb: 40, host_memory_gb: 60, speed: 1}
+  - {name: gpu-b, host: host-b, platform: cuda, memory_gb: 20, host_memory_gb: 80, speed: 2}
+  - {name: gpu-c, host: host-b, platform: cuda, memory_gb: 20, host_memory_gb: 80, speed: 2}
+  - name: gpu-d
+    host: host-c
+    platform: metal
+    memory_gb: 60
+    host_memory_gb: 60
+    unified: true
+    speed: 0.5
+    windows: [{days: [0,1,2,3,4], start_hour: 8, end_hour: 16}]
+  - name: gpu-e
+    host: host-d
+    platform: cuda
+    memory_gb: 80
+    host_memory_gb: 100
+    speed: 1
+    windows: [{days: [0,1,2,3,4,5,6], start_hour: 0, end_hour: 6}, {days: [0,1,2,3,4,5,6], start_hour: 18, end_hour: 24}]

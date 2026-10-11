@@ -44,6 +44,9 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	// simulation bypasses durable storage only; all scheduling/accounting paths remain shared.
+	simulation       bool
+	simID            int64
 	uploadSpool      uploadSpool
 	environments     EnvironmentCatalog
 	productionGrace  time.Duration
@@ -175,6 +178,10 @@ func (q *Queue) machineLossTimeout(id string) time.Duration {
 	return q.lossTimeouts[priority]
 }
 
+// Simulated workers have an always-available pretend NAS; production still probes it.
+func (q *Queue) checkpointsAvailable() bool {
+	return q.simulation || checkpointAvailable(q.root)
+}
 func checkpointAvailable(root string) bool {
 	info, err := os.Stat(root)
 	if err != nil || !info.IsDir() {
@@ -205,6 +212,11 @@ func (q *Queue) Close() error {
 func (q *Queue) update(fn func() error) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.simulation {
+		q.usageWrites = nil
+		q.accountUsage(q.clock.Now())
+		return fn() // Simulation aborts on any error; it never resumes a failed mutation.
+	}
 	old, _ := json.Marshal(q.s)
 	oldCalls := map[string]*ModelCall{}
 	for id, c := range q.calls {
@@ -249,7 +261,13 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 		if e != nil {
 			return e
 		}
-		id := ID()
+		var id string
+		if q.simulation {
+			q.simID++
+			id = fmt.Sprintf("sim-%012d", q.simID)
+		} else {
+			id = ID()
+		}
 		j := &Job{EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		copy := cloneJob(j)
 		j = &copy
@@ -419,7 +437,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			j := q.s.Jobs[c.Running.ID]
 			if j != nil && !terminal(j.State) && j.Reason != "cancel requested" && (j.State == "queued" || j.Attempt != c.Running.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 				for _, copy := range j.Copies {
-					if copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !checkpointAvailable(q.root)) {
+					if copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable()) {
 						reply.Hold = true
 						return nil
 					}
@@ -473,7 +491,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 					break
 				}
-				if m.CheckpointUnavailable || !checkpointAvailable(q.root) {
+				if m.CheckpointUnavailable || !q.checkpointsAvailable() {
 					return nil
 				}
 				out := cloneJob(j)
@@ -481,7 +499,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				return nil
 			}
 		}
-		if !m.Leaving && !m.CheckpointUnavailable && checkpointAvailable(q.root) {
+		if !m.Leaving && !m.CheckpointUnavailable && q.checkpointsAvailable() {
 			j := q.pick(&m)
 			if j != nil {
 				for _, c := range q.calls {
@@ -649,7 +667,7 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 		if q.clock.Now().Before(q.restartUntil) && len(q.unreported) > 0 {
 			out.Warning = "queue restarted: waiting for workers to report"
 		}
-		if !checkpointAvailable(q.root) {
+		if !q.checkpointsAvailable() {
 			out.Warning = "NAS checkpoint root is unreachable; jobs will not start"
 		}
 		for _, m := range q.s.Machines {
@@ -662,7 +680,7 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 		for _, j := range q.s.Jobs {
 			if j.State == "queued" {
 				j.Reason = reasons[j.ID]
-				if !checkpointAvailable(q.root) {
+				if !q.checkpointsAvailable() {
 					j.Reason = "NAS checkpoint root is unreachable"
 				}
 			}
