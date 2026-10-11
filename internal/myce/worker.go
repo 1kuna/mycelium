@@ -705,6 +705,7 @@ func (w Worker) Run(stop context.Context) error {
 					}
 					if s.state.Result != nil && (err == nil || stale(err)) {
 						s.state.Job = nil
+						s.checkpointUnavailable = false
 						s.state.Result = nil
 						s.state.PID = 0
 						s.state.Identity = ""
