@@ -541,7 +541,9 @@ class Run:
             'TestPressureLargeState|TestPressureDockerProxyMatrix|TestPressureForeignVersoStateMustReject|TestWorkerStateLockAndCorruption|TestAPIRejectsMalformedRequests|'
             'TestWorkerAttemptCheckpointIsolation|TestWorkerOrphanCleanupVerifiesIdentity|'
             'TestWorkerLegacyRootCheckpointAndSymlink|TestWorkerStopEventPreservesQueueDeadline|'
-            'TestWorkerStopAndGraceDuringBlockedUpload|TestWorkerStopAndGraceDuringBlockedCheckin',
+            'TestWorkerStopAndGraceDuringBlockedUpload|TestWorkerStopAndGraceDuringBlockedCheckin|'
+            'TestProductionPreemptsDuringNASLoss|TestWorkerProductionWithoutNAS|TestBlockedNASDoesNotHoldQueue|'
+            'TestBlockedCheckpointPreparationIsBounded|TestWorkerForceStopsBlockedSaveAtGrace',
             '-test.v','-test.timeout','5m'],{**self.env,'TMPDIR':str(temp)})
         self.wait(lambda:p.poll() is not None,310)
         self.result('B-native-CPU-state-and-control-matrix','PASS' if p.returncode==0 else 'FAIL',
