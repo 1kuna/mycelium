@@ -51,8 +51,9 @@ class Checkpoint:
             if path.is_file():
                 value = json.loads(path.read_text(encoding="utf-8"))
                 generation = 0
-                if isinstance(value, dict) and "myce_checkpoint" in value:
-                    generation = value["myce_checkpoint"]["generation"]
+                metadata = value.get("myce_checkpoint") if isinstance(value, dict) else None
+                if isinstance(metadata, dict) and "generation" in metadata:
+                    generation = metadata["generation"]
                     if type(generation) is not int or not 1 <= generation < 2**63:
                         raise ValueError("invalid checkpoint generation")
                     value = value["value"]
