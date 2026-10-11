@@ -78,9 +78,12 @@ class EvidenceTests(unittest.TestCase):
             class Scan:
                 def __enter__(self):return [entry]
                 def __exit__(self,*_):pass
-            with patch('pressure.os.scandir',return_value=Scan()):
+            scan = os.scandir
+            def rescan(path):
+                return Scan() if path == pid / 'fdinfo' else scan(path)
+            with patch('pressure.os.scandir',side_effect=rescan):
                 self.assertEqual(drm_owners(['0000:07:00.0'],root), {'0000:07:00.0':[]})
-            with patch('pressure.os.scandir',return_value=Scan()), patch('pressure.os.readlink',side_effect=PermissionError(13,'denied')):
+            with patch('pressure.os.scandir',side_effect=rescan), patch('pressure.os.readlink',side_effect=PermissionError(13,'denied')):
                 with self.assertRaises(PermissionError):drm_owners(['0000:07:00.0'],root)
 
     def test_drm_numeric_identity_and_multiple_processes(self) -> None:
