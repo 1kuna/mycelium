@@ -196,3 +196,34 @@ The first r5 preflight stopped before allocation because DRM engine total-cycle
 counters were parsed as memory. They are now explicitly excluded, with the
 recorded driver field in a regression. The corrected attempt uses fresh r5b
 roots; r5 evidence is preserved and its operational installs moved to Trash.
+
+Round6 tests Mycelium 2ad39fc (host disable included) in fresh r6 roots.
+Calibration deliberately ran the pinned xpu-smi stats, discovery and a five-sample
+dump once each behind the GPU1-only device fence. Peak combined per-client
+resident/allocated footprint was195,829,760bytes (186.76MiB); a50 percent margin
+rounded up to281MiB is stored with measurements in diagnostic-limits.json.
+Observed lifetimes were0.89/0.45/5.45seconds. The orchestrator's60-second maximum
+covers transient dumps; no persistent daemon qualifies. Read-only commands alone
+qualify, with streamed hash checks, process birth and measured memory checks.
+Foreign diagnostics pause submissions, refresh ownership every2seconds and
+resume only after exit plus fresh driver-memory release evidence (1MiB release
+margin above baseline and proven allocation VRAM). Continued results carry
+`interrupted-by-foreign-reader, continued`; excess memory, untrusted executables,
+unreadable identities or persistence beyond60seconds remain safety holds.
+Memory/status/counters continue independently during this pause. Deadlines are
+not renewed. Internal diagnostic readers use the same memory/lifetime checks.
+A separate fenced reader canary proves the native pause path without inference.
+
+The additional disable/enable drill installs myce-worker.service through
+`myce install worker` at the private r6 installation root. The initial install
+start is gated until its private GPU1-only mount namespace and explicit selector
+are ready; no other device node exists in that namespace. The installed binary
+joins GPU1 with the original config/state/checkpoint paths. During this drill,
+the coordinator is capped at2GiB and the installed worker at6GiB (8GiB total).
+The test requires confirmed empty cgroup within20seconds, the durable DISABLED
+flag, refused conditioned start, no-loss requeue, stale-generation rejection,
+then enable and retained-checkpoint completion. Queue acknowledgement remains
+a separately observed requirement; pending notification is not a pass.
+Cleanup reconciles the flag, uninstalls only this unit to recoverable local
+Trash and removes its test drop-in. Control generation/audit records remain.
+Docker containment is explicitly outside host-disable acceptance.
