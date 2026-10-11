@@ -15,6 +15,16 @@ sys.path.insert(0,str(root/'source/scripts/pressure'))
 from pressure import DiagnosticReaders, drm_owners
 receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r6.service')
 try:
+    from types import SimpleNamespace
+    from disable_drill import cleanup as installed_cleanup, UNIT, DROP
+    if UNIT.exists() or DROP.exists():
+        assert DROP.exists() and str(root) in DROP.read_text(), 'test unit ownership changed'
+        run=SimpleNamespace(installed=True,env=dict(os.environ),worker_cgroup=None)
+        installed_cleanup(run)
+    receipt['installed_worker']='flag and unit absent' if not UNIT.exists() and not (Path('/home/user/.local/share/myce')/'DISABLED').exists() else 'HOLD'
+except Exception as error:
+    receipt['installed_worker']='HOLD:'+type(error).__name__
+try:
     baseline=json.loads((root/'display-baseline.json').read_text())
     evidence={}
     readers=DiagnosticReaders(json.loads((root/'diagnostic-executables.json').read_text()),root/'diagnostics.jsonl')
@@ -81,6 +91,6 @@ for child in ('files','info'):
 if not (root/'DONE').exists() and not (root/'FAILED').exists():
     (root/'FAILED').write_text(json.dumps(dict(reason='runner exited without terminal receipt',cleanup=receipt),indent=2))
 
-if receipt['physical']!='released' or remaining or occupied:
+if receipt['physical']!='released' or remaining or occupied or receipt['installed_worker']!='flag and unit absent':
     if (root/'DONE').exists():(root/'DONE').rename(root/'DONE.invalid-release')
     (root/'FAILED').write_text(json.dumps(dict(reason='final release not qualified',cleanup=receipt),indent=2))

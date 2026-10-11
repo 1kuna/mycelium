@@ -221,6 +221,9 @@ class Run:
                 if available < 18: raise RuntimeError('host headroom below 18 GiB')
                 group = Path('/sys/fs/cgroup') / self.cgroup.split('::',1)[1].lstrip('/')
                 charged = int((group / 'memory.current').read_text())
+                if self.worker_cgroup:
+                    worker_group=Path('/sys/fs/cgroup')/self.worker_cgroup.split('::',1)[1].lstrip('/')
+                    if worker_group.exists():charged+=int((worker_group/'memory.current').read_text())
                 self.total_peak['host_used_gib'] = max(self.total_peak['host_used_gib'], (mem['MemTotal:']-mem['MemAvailable:'])/1024**2)
                 self.total_peak['cgroup_bytes'] = max(self.total_peak['cgroup_bytes'], charged)
                 if active:
@@ -469,6 +472,8 @@ class Run:
         self.release_owned();self.start_worker()
 
     def cleanup(self):
+        from disable_drill import cleanup as installed_cleanup
+        installed_cleanup(self)
         self.active=None;self.stop.set()
         for thread in (self.observer,self.counter):
             if thread.ident is not None:thread.join(timeout=5)
@@ -543,6 +548,8 @@ class Run:
                 assert not (s.get('state') in ('running','stopping','preempting') and s.get('assigned_xpu')==1)
             self.counter.start();self.observer.start()
             self.wait(lambda:self.device_at>0,5)
+            self.scenario('B-foreign-reader-canary',self.foreign_reader_canary)
+            self.scenario('B-installed-disable-enable',self.disable_enable)
             self.scenario('A3-direct-queue-60s',self.direct)
             self.begin('A-memory')
             for host in (512,1024,2048,4096):self.measure(host)
@@ -582,6 +589,25 @@ class Run:
             except Exception as e:cleanup=dict(error=type(e).__name__);marker='FAILED'
             if cleanup.get('remaining_pids') or cleanup.get('physical')!='released':marker='FAILED'
             atomic(ROOT/marker,dict(results=str(self.output),cleanup=cleanup,error=error))
+
+    def foreign_reader_canary(self):
+        count=self.foreign.interruptions
+        subprocess.run(['systemd-run','--quiet','--collect','--unit=myce-test-r6-foreign-reader',
+            '--property=DevicePolicy=closed','--property=DeviceAllow=/dev/dri/card1 rw',
+            '--property=DeviceAllow=/dev/dri/renderD129 rw','--property=MemoryMax=512M',
+            '--property=RuntimeMaxSec=15s','--property=StandardOutput=null',
+            '/usr/bin/xpu-smi','dump','-d','0','-m','0,18','-n','5'],check=True)
+        self.wait(lambda:self.foreign.interruptions>count,20)
+        job=self.submit('experiment',1)
+        self.finished([job],15)
+
+    def disable_enable(self):
+        from disable_drill import drill,cleanup
+        try:
+            evidence=drill(self)
+            self.result('B-disable-switch-evidence','PASS',**evidence)
+        finally:
+            cleanup(self)
 
     def fixed_defect_probes(self):
         for name,pattern in (('B-mtime-skew','^TestVersoPressureR2CheckpointSkew$'),

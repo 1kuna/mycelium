@@ -450,6 +450,34 @@ class NativeRunnerTests(unittest.TestCase):
         self.assertTrue(stage_ab.ROOT.name.endswith('r6-20261011'))
         self.assertTrue(stage_ab.NAS.name.endswith('r6-20261011'))
 
+    def test_disable_confirmation_includes_descendant_population_and_unit_state(self):
+        import disable_drill
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);(root/'test').mkdir();(root/'test/cgroup.procs').write_text('')
+            (root/'test/cgroup.events').write_text('populated 1\n')
+            state=dict(ActiveState='inactive',ControlGroup='')
+            with patch.object(disable_drill,'Path',return_value=root):
+                self.assertFalse(disable_drill.empty('/test',state))
+                (root/'test/cgroup.events').write_text('populated 0\n')
+                self.assertTrue(disable_drill.empty('/test',state))
+            self.assertTrue(disable_drill.empty('',state))
+            self.assertFalse(disable_drill.empty('',dict(ActiveState='active',ControlGroup='')))
+
+    def test_submission_waits_for_foreign_reader_release(self):
+        import stage_ab
+        from unittest.mock import patch
+        import threading
+        run=object.__new__(stage_ab.Run)
+        run.foreign_paused=threading.Event();run.foreign_paused.set()
+        run.safety=None;run.stop=threading.Event();run.a=None;run.url='unused'
+        order=[];run.physical=lambda:order.append('scan')
+        def release(*_):
+            order.append('paused');run.foreign_paused.clear()
+        with patch.object(run.stop,'wait',side_effect=release),patch.object(stage_ab,'submit',side_effect=lambda *_:order.append('submit') or 'id'):
+            self.assertEqual(run.submit('experiment',1),'id')
+        self.assertEqual(order,['scan','paused','submit'])
+
     def test_allowlists_refresh_after_inventory(self):
         import pressure
         from unittest.mock import patch
