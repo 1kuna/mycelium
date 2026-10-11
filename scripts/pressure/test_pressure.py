@@ -271,5 +271,34 @@ class CommandTests(unittest.TestCase):
                 first.stderr.close()
 
 
+class NativeRunnerTests(unittest.TestCase):
+    def test_native_process_allowlist_requires_recorded_start_and_cgroup(self):
+        import stage_ab
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger=Path(tmp)/'events.jsonl'
+            ledger.write_text(json.dumps(dict(kind='start',pid=17,start_ticks=42))+'\n')
+            run=object.__new__(stage_ab.Run)
+            run.receipts=[ledger];run.cgroup='0::/test.service'
+            identity=dict(pid=17,start=42,exe=os.path.realpath(stage_ab.XPU),cgroup=run.cgroup,boot='b')
+            with patch.object(stage_ab,'process',return_value=identity):self.assertEqual(run.owned(),[identity])
+            with patch.object(stage_ab,'process',return_value=dict(identity,start=43)):self.assertEqual(run.owned(),[])
+            with patch.object(stage_ab,'process',return_value=dict(identity,cgroup='0::/foreign')):self.assertEqual(run.owned(),[])
+
+    def test_wrong_selector_rejected_before_torch_import_or_gpu_allocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);cp=root/'cp';cp.mkdir()
+            env={k:v for k,v in os.environ.items() if not k.startswith('MYCE_')}
+            env.update(MYCE_JOB_ID='selector-test',MYCE_ATTEMPT='1',MYCE_CHECKPOINT_DIR=str(cp),
+                       ONEAPI_DEVICE_SELECTOR='level_zero:invalid',ZE_AFFINITY_MASK='invalid')
+            completed=subprocess.run([sys.executable,str(Path(__file__).with_name('pressure.py')),'job',
+                '--events',str(root/'events.jsonl'),'--backend','xpu','--card','1','--host-mib','1'],
+                env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            self.assertNotEqual(completed.returncode,0)
+            self.assertEqual(json.loads(completed.stderr), {'error':'RuntimeError'})
+            records=[json.loads(s) for s in (root/'events.jsonl').read_text().splitlines()]
+            self.assertFalse(any(e['kind']=='allocated' for e in records))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -73,25 +73,28 @@ def workload(a: argparse.Namespace) -> int:
             return 91
         # This lock detects participating test commands, not arbitrary GPU holders.
         emit(a.events, "start", job=jid, attempt=attempt, card=a.card,
-             resumed=n, units=a.units, contract=contract, resumable=a.resumable, pid=os.getpid())
+             resumed=n, units=a.units, contract=contract, resumable=a.resumable, pid=os.getpid(), start_ticks=(
+                 int(Path("/proc/self/stat").read_bytes().rsplit(b")", 1)[1].split()[19])
+                 if sys.platform == "linux" else None))
         host = bytearray(a.host_mib * 1024 * 1024)
         for offset in range(0, len(host), 4096):
             host[offset] = 1
         torch = None
         if a.backend != "cpu":
+            if a.backend == "xpu" and (os.environ.get("ONEAPI_DEVICE_SELECTOR") != "level_zero:" + a.card
+                                       or os.environ.get("ZE_AFFINITY_MASK") != a.card):
+                raise RuntimeError("XPU worker selector does not match approved physical card")
             import torch
             backend = getattr(torch, a.backend)
             if not backend.is_available() or backend.device_count() != 1:
                 raise RuntimeError("expected exactly one visible real GPU; no fallback")
-            if a.backend == "xpu" and (os.environ.get("ONEAPI_DEVICE_SELECTOR") != "level_zero:" + a.card
-                                       or os.environ.get("ZE_AFFINITY_MASK") != a.card):
-                raise RuntimeError("XPU worker selector does not match approved physical card")
             device = a.backend + ":0"
             # Explicit payload plus three matrices; reserve runtime/driver overhead separately.
             payload = torch.ones(a.gpu_mib * 1024 * 1024, dtype=torch.uint8, device=device)
             left = torch.ones((1024, 1024), device=device)
             right, result = torch.ones_like(left), torch.empty_like(left)
             backend.synchronize()
+        kernels, began = 0, time.monotonic()
         emit(a.events, "allocated", job=jid, attempt=attempt, card=a.card,
              host_mib=a.host_mib, gpu_mib=a.gpu_mib, backend=a.backend)
         while n < a.units and (a.refuse_stop or not stop.requested):
@@ -102,6 +105,7 @@ def workload(a: argparse.Namespace) -> int:
                 else:
                     torch.mm(left, right, out=result)
                     backend.synchronize()
+                    kernels += 1
             if a.resumable:
                 while True:
                     try:
@@ -118,7 +122,7 @@ def workload(a: argparse.Namespace) -> int:
             backend.empty_cache()
             backend.synchronize()
         emit(a.events, "finish", job=jid, attempt=attempt, unit=n, complete=n == a.units,
-             stopped=stop.requested, card=a.card)
+             stopped=stop.requested, card=a.card, kernels=kernels, compute_seconds=time.monotonic() - began)
     return 0
 
 
