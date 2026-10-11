@@ -70,6 +70,8 @@ class Run:
         self.counter = threading.Thread(target=self.counters, daemon=True)
         self.passive = []
         self.device_peak = 0
+        self.device_current = 0
+        self.device_at = 0
 
     def result(self, name, state, **evidence):
         self.results.append(dict(scenario=name, result=state, **evidence))
@@ -79,6 +81,12 @@ class Run:
         atomic(self.output, dict(results=self.results, peaks=self.total_peak,
             safety_hold=self.safety, cleanup='pending', boot=clock_domain(),
             issue=238, source_sha256=digest((BASE / 'pressure.py').read_text())))
+
+    def nas_directory(self,path):
+        # Create as the same UID that will save/copy checkpoints; never chmod/chown a share.
+        groups=[int(v) for v in subprocess.check_output(['id','-G','1000']).split()]
+        subprocess.run(['/usr/bin/mkdir','-m','700',str(path)],check=True,
+                       user=1000,group=1000,extra_groups=groups)
 
     def spawn(self, key, args, env=None):
         log = (ROOT / 'logs' / (key + '.log')).open('a')
@@ -152,11 +160,13 @@ class Run:
                     emit(active,'memory',valid=True,available_gib=available,minimum_available_gib=18)
                     try: observe(self.url, active)
                     except OSError: emit(active,'outage')
-                gpu = self.device_peak
+                gpu = self.device_current
+                if self.device_at and time.monotonic()-self.device_at>3:
+                    raise RuntimeError("native device counter stale")
                 with (ROOT / 'samples.jsonl').open('a') as f:
                     f.write(json.dumps(dict(at=time.monotonic(),available_gib=available,
                         host_used_gib=(mem['MemTotal:']-mem['MemAvailable:'])/1024**2,
-                        device_gib=gpu,cgroup_bytes=charged,scenario=str(active)))+'\n')
+                        device_gib=gpu,counter_at=self.device_at,cgroup_bytes=charged,scenario=str(active)))+'\n')
             except Exception as e:
                 self.safety = type(e).__name__ + ':' + str(e)
                 self.save(); return
@@ -181,6 +191,7 @@ class Run:
                 metrics={v['metrics_type']:v.get('value') for v in stats['device_level']}
                 gpu=float(metrics['XPUM_STATS_MEMORY_USED'])/1024
                 if gpu>4:raise RuntimeError('device usage above 4 GiB test envelope')
+                self.device_current=gpu;self.device_at=time.monotonic()
                 self.device_peak=max(self.device_peak,gpu)
                 self.total_peak['device_gib']=self.device_peak
             except Exception as e:
@@ -218,7 +229,7 @@ class Run:
         self.gate()
         self.phase = ROOT/'phases'/name; self.phase.mkdir()
         os.chown(self.phase,1000,1000)
-        self.cp = NAS/name; self.cp.mkdir();os.chown(self.cp,1000,1000)
+        self.cp = NAS/name; self.nas_directory(self.cp)
         self.events = self.phase/'events.jsonl'
         self.receipts.append(self.events)
         self.checker = Checker(bound, True, (PCI,))
@@ -340,7 +351,7 @@ class Run:
 
     def direct(self):
         self.a.units=300
-        cp=self.cp/'direct';cp.mkdir();os.chown(cp,1000,1000)
+        cp=self.cp/'direct';self.nas_directory(cp)
         env={**self.env,'MYCE_JOB_ID':'direct','MYCE_ATTEMPT':'1','MYCE_CHECKPOINT_DIR':str(cp),
              'ONEAPI_DEVICE_SELECTOR':'level_zero:0','ZE_AFFINITY_MASK':'0'}
         env.pop('MYCE_TOKEN')
@@ -427,7 +438,7 @@ class Run:
         try:
             assert Path('/mnt/nas').is_mount()
             assert not NAS.exists()
-            NAS.mkdir();os.chown(NAS,1000,1000)
+            self.nas_directory(NAS)
             for path in (ROOT/'logs',ROOT/'phases'):
                 path.mkdir();os.chown(path,1000,1000)
             assert not (ROOT/'DONE').exists() and not (ROOT/'FAILED').exists()
@@ -450,6 +461,7 @@ class Run:
                 except (ValueError,OSError):continue
                 assert not (s.get('state') in ('running','stopping','preempting') and s.get('assigned_xpu')==1)
             self.counter.start();self.observer.start()
+            self.wait(lambda:self.device_at>0,5)
             self.scenario('A1-30-production',lambda:self.production_only())
             for seed in range(20):self.scenario(f'A2-swap-{seed:02}',lambda seed=seed:self.swap(seed))
             self.scenario('A3-direct-queue-60s',self.direct)
@@ -553,7 +565,7 @@ class Run:
     def wrong_selector(self):
         # A deliberately incompatible selector pair fails before importing torch.
         # Do not initialize GPU0 even to demonstrate rejection.
-        cp=self.cp/'wrong';cp.mkdir();os.chown(cp,1000,1000)
+        cp=self.cp/'wrong';self.nas_directory(cp)
         cmd=spec(self.a,'experiment',1)['run']['command']
         env={**self.env,'MYCE_JOB_ID':'wrong-selector','MYCE_ATTEMPT':'1','MYCE_CHECKPOINT_DIR':str(cp),
              'ONEAPI_DEVICE_SELECTOR':'level_zero:invalid','ZE_AFFINITY_MASK':'invalid'}

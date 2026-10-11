@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import time
 from urllib.parse import quote
@@ -20,6 +21,16 @@ try:
     receipt.update(owners=owners,display=evidence['baseline_clients'],physical='released')
 except Exception as e:
     receipt.update(physical='HOLD',error=type(e).__name__)
+try:
+    stats=json.loads(subprocess.check_output(['xpu-smi','stats','-d','0','--json'],timeout=3))
+    assert stats['device_id']==0
+    metrics={v['metrics_type']:v.get('value') for v in stats['device_level']}
+    receipt['device_memory_mib']=float(metrics['XPUM_STATS_MEMORY_USED'])
+    receipt['baseline_memory_mib']=float(os.environ["MYCE_DIAGNOSTIC_BASELINE_MIB"])
+    receipt['release_tolerance_mib']=16
+    if receipt['device_memory_mib']>float(os.environ["MYCE_DIAGNOSTIC_BASELINE_MIB"])+16:receipt['physical']='HOLD-driver-memory'
+except Exception as e:
+    receipt.update(physical='HOLD-driver-counter',counter_error=type(e).__name__)
 pause=Path('/home/user/exp42-queue/PAUSED')
 owned=root/'owned-pause'
 if owned.exists() and pause.exists() and pause.read_bytes()==owned.read_bytes():
@@ -53,3 +64,7 @@ for child in ('files','info'):
 # A hard stop must never be mistaken for a successful matrix.
 if not (root/'DONE').exists() and not (root/'FAILED').exists():
     (root/'FAILED').write_text(json.dumps(dict(reason='runner exited without terminal receipt',cleanup=receipt),indent=2))
+
+if receipt['physical']!='released' or remaining:
+    if (root/'DONE').exists():(root/'DONE').rename(root/'DONE.invalid-release')
+    (root/'FAILED').write_text(json.dumps(dict(reason='final release not qualified',cleanup=receipt),indent=2))
