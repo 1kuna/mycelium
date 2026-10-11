@@ -44,6 +44,16 @@ for proc in Path('/proc').iterdir():
         if (proc/'cgroup').read_text().strip()=='0::/system.slice/myce-test-stage-ab-r2.service':remaining.append(int(proc.name))
     except OSError:pass
 receipt['remaining_pids']=remaining
+ports=json.loads((root/'ports.json').read_text()) if (root/'ports.json').exists() else []
+for path in (root/'phases').glob('*/measure-*.pid.json'):
+    data=json.loads(path.read_text())
+    if 'port' in data:ports.append(data['port'])
+occupied=[]
+for port in set(ports):
+    with socket.socket() as connection:
+        connection.settimeout(.2)
+        if connection.connect_ex(('127.0.0.1',port))==0:occupied.append(port)
+receipt['occupied_test_ports']=occupied
 trash=Path('/home/kuna/.local/share/Trash')
 for child in ('files','info'):(trash/child).mkdir(parents=True,exist_ok=True)
 moved=[]
@@ -65,6 +75,6 @@ for child in ('files','info'):
 if not (root/'DONE').exists() and not (root/'FAILED').exists():
     (root/'FAILED').write_text(json.dumps(dict(reason='runner exited without terminal receipt',cleanup=receipt),indent=2))
 
-if receipt['physical']!='released' or remaining:
+if receipt['physical']!='released' or remaining or occupied:
     if (root/'DONE').exists():(root/'DONE').rename(root/'DONE.invalid-release')
     (root/'FAILED').write_text(json.dumps(dict(reason='final release not qualified',cleanup=receipt),indent=2))
