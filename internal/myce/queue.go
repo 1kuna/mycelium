@@ -402,6 +402,7 @@ func (q *Queue) maintain() {
 	q.maintainHolds()
 	q.refreshHostMemory()
 	q.maintainModels()
+	q.escalateDockerCleanup()
 	q.refreshHostMemory()
 	q.maintainHolds()
 }

@@ -37,7 +37,20 @@ func run(args []string) error {
 }
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce queue|join|leave|submit|status|logs|wait|cancel|dev")
+		return errors.New("usage: myce queue|join|leave|submit|status|logs|wait|cancel|resolve-docker|dev")
+	}
+	if args[0] == "resolve-docker" {
+		f := flag.NewFlagSet("resolve-docker", flag.ContinueOnError)
+		dir := f.String("state-dir", "", "offline worker spool directory")
+		identity := f.String("attempt-id", "", "exact MYCE_ATTEMPT_ID from worker custody")
+		confirmed := f.Bool("confirm-gone", false, "confirm execution/memory gone and all delayed starts fenced")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if f.NArg() != 0 {
+			return errors.New("resolve-docker accepts flags only")
+		}
+		return myce.ConfirmDockerGone(*dir, *identity, *confirmed)
 	}
 	if args[0] == "sim" {
 		return simCommand(args[1:], os.Stdout)

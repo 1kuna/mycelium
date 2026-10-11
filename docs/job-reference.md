@@ -113,6 +113,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `join --model-listen` | `127.0.0.1:0` | Authenticated worker proxy bind; engines stay loopback |
 | `join --model-advertise` | Local proxy URL | Explicit URL reachable by queue for LAN workers |
 | `leave --name` | Hostname | Stop assigning work; ask wait/stop for non-resumable jobs |
+| `resolve-docker --state-dir DIR --attempt-id ID --confirm-gone` | Explicit offline assertion | Record externally verified release of a stuck managed attempt; see [operator recovery](operations.md#docker-cleanup-custody) |
 | `leave --now` | `false` | Signal all jobs, still allowing checkpoint grace |
 | `wait ID [ID...] --timeout DURATION` | Unlimited | Wait for every final state; timeout never cancels jobs |
 | `logs ID --follow` | `false` | Follow until terminal and drain final logs |
@@ -437,7 +438,9 @@ placement environment and selected-device environment. `MYCE_CHECKPOINT_DIR`
 is `/myce/checkpoint`, bind-mounted from the worker's prepared attempt directory.
 `run.env` ordinary entries are also explicit container env; `MYCE_TOKEN` is
 removed from the Docker client and never forwarded. MYCE identity overrides
-in Docker `--env` are rejected. GPU device mappings and image/library behavior
+in Docker `--env` are rejected. `CUDA_VISIBLE_DEVICES`, `ONEAPI_DEVICE_SELECTOR`
+and `ZE_AFFINITY_MASK` are worker-owned: neither `run.env` nor Docker `--env`
+may override them. Configure the worker device instead. GPU device mappings and image/library behavior
 still need native qualification; this adapter is not a device or RAM sandbox.
 
 The worker pins the daemon endpoint from its own `DOCKER_HOST` (default

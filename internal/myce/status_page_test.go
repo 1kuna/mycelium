@@ -26,8 +26,9 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 		CopyReports:      []CopyReport{{Model: "embed", State: "copying", Bytes: 50, Total: 100}},
 	}
 	snapshot := Snapshot{
-		Jobs:     []*Job{job},
-		Machines: []*Machine{machine},
+		HostHolds: []string{"b70: Docker cleanup unconfirmed; operator action required (myce resolve-docker)"},
+		Jobs:      []*Job{job},
+		Machines:  []*Machine{machine},
 		LoadedModels: []ModelSlot{
 			{Machine: "spark", Model: "qwen", State: "ready", InFlight: 2, Error: "load warning"},
 		},
@@ -50,7 +51,7 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 	for _, want := range []string{
 		"Mycelium", "spark", "cuda", "21.5", "38.5", "qwen", "torch-cuda",
 		"2 calls", "load warning", "cache read failed", "Docker cleanup unconfirmed: start",
-		"index backlog", "atlas is ahead of its fair share; verso goes first",
+		"index backlog", "atlas is ahead of its fair share; verso goes first", "operator action required (myce resolve-docker)",
 		`<svg class="chart"`, `data-project="atlas"`, `setInterval(refresh, 5000)`,
 	} {
 		if !strings.Contains(html, want) {

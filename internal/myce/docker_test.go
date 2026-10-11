@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,12 @@ func TestDockerCLIHelper(t *testing.T) {
 	}
 	args = args[1:]
 	root := os.Getenv("MYCE_TEST_DOCKER_ROOT")
+	if args[0] == "late-create" {
+		time.Sleep(600 * time.Millisecond)
+		_ = os.WriteFile(filepath.Join(root, "created"), []byte("id1"), 0600)
+		_ = os.WriteFile(filepath.Join(root, "running"), []byte("yes"), 0600)
+		os.Exit(0)
+	}
 	if args[0] == "late" {
 		time.Sleep(600 * time.Millisecond)
 		_ = os.WriteFile(filepath.Join(root, "running"), []byte("yes"), 0600)
@@ -81,6 +88,13 @@ func TestDockerCLIHelper(t *testing.T) {
 				_ = os.WriteFile(filepath.Join(root, "label"), []byte(strings.TrimPrefix(args[i+1], "myce.attempt=")), 0600)
 			}
 		}
+		if string(mode) == "late-create" {
+			c := exec.Command(os.Args[0], "-test.run=^TestDockerCLIHelper$", "--", "late-create")
+			c.Env = os.Environ()
+			c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			_ = c.Start()
+			time.Sleep(time.Minute)
+		}
 		_ = os.WriteFile(filepath.Join(root, "created"), []byte("id1"), 0600)
 		fmt.Println("id1")
 	case "start":
@@ -94,6 +108,10 @@ func TestDockerCLIHelper(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(root, "running"), []byte("yes"), 0600)
 		fmt.Println("id1")
 	case "ps":
+		if !slices.Contains(args, "--no-trunc") {
+			fmt.Println("short-id")
+			os.Exit(0)
+		}
 		if _, e := os.Stat(filepath.Join(root, "created")); e == nil {
 			fmt.Println("id1")
 			if _, e := os.Stat(filepath.Join(root, "extra")); e == nil {
@@ -109,6 +127,9 @@ func TestDockerCLIHelper(t *testing.T) {
 		label, _ := os.ReadFile(filepath.Join(root, "label"))
 		objects := []map[string]any{}
 		for _, id := range args[1:] {
+			if id == "short-id" {
+				id = "id1"
+			}
 			file := "running"
 			if id == "id2" {
 				file = "extra"
@@ -759,6 +780,13 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 	if e = q.Cancel(j.ID); e != nil {
 		t.Fatal(e)
 	}
+	if e = q.Tick(); e != nil {
+		t.Fatal(e)
+	}
+	c.Advance(2 * time.Minute)
+	if e = q.Tick(); e != nil {
+		t.Fatal(e)
+	}
 	if e = q.Close(); e != nil {
 		t.Fatal(e)
 	}
@@ -780,6 +808,9 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 	if len(snap.HostHolds) == 0 || !strings.Contains(snap.HostHolds[0], "Docker cleanup unconfirmed") {
 		t.Fatal("queue restart/fresh session freed Docker")
 	}
+	if !strings.Contains(strings.Join(snap.HostHolds, " "), "operator action required") {
+		t.Fatal("restart forgot escalation")
+	}
 	if snap.Machines[0].FreeHostMemoryGB != 18 {
 		t.Fatalf("original unified RAM charge changed: %v", snap.Machines[0].FreeHostMemoryGB)
 	}
@@ -789,5 +820,128 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 	snap, _ = q.Snapshot()
 	if len(snap.HostHolds) != 0 {
 		t.Fatal("exact old-attempt release did not settle custody")
+	}
+}
+
+func TestDockerCleanupEscalatesDurably(t *testing.T) {
+	q, c := fixture(t)
+	m := machine("b70", "xpu")
+	check(t, q, m, nil)
+	j := submit(t, q, dockerJob().Spec)
+	running := check(t, q, m, nil).Job
+	if running == nil {
+		t.Fatal("not assigned")
+	}
+	if err := q.Cancel(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(before.HostHolds, " "), "operator action required") {
+		t.Fatal("early escalation")
+	}
+	c.Advance(2 * time.Minute)
+	after, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(after.HostHolds, " "), "operator action required") {
+		t.Fatal("stuck cleanup was not escalated")
+	}
+	for _, r := range q.s.HostReleases {
+		if r.EscalatedAt == nil {
+			t.Fatal("escalation not durable")
+		}
+	}
+	if next := check(t, q, m, nil); next.Job != nil {
+		t.Fatal("escalation released memory")
+	}
+}
+
+func TestDockerOperatorResolutionIsOfflineAndExact(t *testing.T) {
+	w, s, _, _ := dockerFixture(t)
+	j := dockerJob()
+	s.state.Job = &j
+	s.state.Identity = "owned"
+	s.state.Log = "owned.log"
+	if err := s.save(); err != nil {
+		t.Fatal(err)
+	}
+	state := dockerExecution{Identity: "owned", Endpoint: "unix:///old.sock", Operation: "start", Pending: true}
+	if err := saveWorkerJSON(s.dir, "owned.docker.json", state); err != nil {
+		t.Fatal(err)
+	}
+	if err := ConfirmDockerGone(w.StateDir, "owned", true); err == nil {
+		t.Fatal("accepted live worker lock")
+	}
+	s.close()
+	for _, tc := range []struct {
+		id      string
+		confirm bool
+	}{{"owned", false}, {"other", true}, {"../owned", true}} {
+		if err := ConfirmDockerGone(w.StateDir, tc.id, tc.confirm); err == nil {
+			t.Fatal("accepted unconfirmed or wrong attempt")
+		}
+	}
+	if err := ConfirmDockerGone(w.StateDir, "owned", true); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.close()
+	p, err := w.restoreDocker(restored)
+	if err != nil || p != nil {
+		t.Fatalf("resolution restarted cleanup: %v", err)
+	}
+	if restored.state.Result == nil || !restored.state.Result.Forced {
+		t.Fatal("missing forced release acknowledgement")
+	}
+}
+
+func TestDockerDelayedCreateAfterEmptyScanRetainsCustody(t *testing.T) {
+	w, s, c, root := dockerFixture(t)
+	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("late-create"), 0600)
+	j := dockerJob()
+	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
+	p, err := w.start(s, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.docker.close)
+	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed: create") })
+	objects, err := p.docker.containers()
+	if err != nil || len(objects) != 0 {
+		t.Fatalf("first scan not empty: %v %v", objects, err)
+	}
+	p.stop(c.Now(), 0, true)
+	await(t, func() bool { _, err := os.Stat(filepath.Join(root, "stopped")); return err == nil })
+	select {
+	case <-p.done:
+		t.Fatal("empty scan or late cleanup settled an unknown create")
+	default:
+	}
+	data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
+	if err != nil || !strings.Contains(string(data), `"pending":true`) {
+		t.Fatal("unknown create custody lost")
+	}
+}
+
+func TestDockerCannotOverrideAssignedDevice(t *testing.T) {
+	for _, name := range []string{"CUDA_VISIBLE_DEVICES", "ONEAPI_DEVICE_SELECTOR", "ZE_AFFINITY_MASK"} {
+		for _, flag := range []bool{false, true} {
+			s := dockerJob().Spec
+			if flag {
+				s.Run.Command = append([]string{"docker", "run", "--env", name + "=other"}, s.Run.Command[2:]...)
+			} else {
+				s.Run.Env = map[string]string{name: "other"}
+			}
+			if err := s.Validate(); err == nil {
+				t.Fatalf("accepted worker device override %s (flag=%v)", name, flag)
+			}
+		}
 	}
 }
