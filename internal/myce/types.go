@@ -170,6 +170,7 @@ func rank(p string) int {
 }
 
 type Copy struct {
+	LossCharged bool   `json:"loss_charged,omitempty"`
 	Recoverable bool   `json:"recoverable"`
 	Machine     string `json:"machine"`
 	Session     string `json:"session"`
@@ -179,6 +180,7 @@ type Copy struct {
 
 type Job struct {
 	ReleaseConfirmed      bool                         `json:"release_confirmed,omitempty"`
+	RequeuedByOperator    bool                         `json:"requeued_by_operator,omitempty"`
 	LastStopOutcome       string                       `json:"last_stop_outcome,omitempty"`
 	ProductionHost        string                       `json:"production_host,omitempty"`
 	WaitingSince          time.Time                    `json:"waiting_since,omitempty"`
@@ -207,6 +209,7 @@ type Job struct {
 }
 type Machine struct {
 	DockerCleanup           string              `json:"docker_cleanup,omitempty"`
+	Disabled                string              `json:"disabled,omitempty"`
 	HostID                  string              `json:"host_id,omitempty"`
 	HostAvailableMemoryGB   float64             `json:"host_available_memory_gb"`
 	FreeHostMemoryGB        float64             `json:"free_host_memory_gb"`

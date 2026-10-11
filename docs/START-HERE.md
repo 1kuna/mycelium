@@ -296,3 +296,4 @@ Zach decides when to enable it after the required hardware and ownership gates.
 - [Deployment templates](../deploy/README.md): read only when preparing authorized service installation.
 
 Docker batch jobs must opt into [managed containment](job-reference.md#managed-docker-batch-commands); [unconfirmed cleanup](operations.md#docker-cleanup-custody) retains the physical host's reservation.
+To take a worker host out immediately and keep it out across reboots, run `myce disable`; use `myce enable` to rejoin ([operations](operations.md#take-a-machine-out-of-mycelium)).

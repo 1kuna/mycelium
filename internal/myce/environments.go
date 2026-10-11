@@ -250,12 +250,13 @@ func environmentSeconds(j *Job, m *Machine) float64 {
 // EnvironmentCache uses OS file locks, atomic publication and shared use leases.
 // Partial builds and evictions are moved to recoverable local Trash, never deleted.
 type EnvironmentCache struct {
-	once    sync.Once
-	initErr error
-	Root    string
-	Limit   int64
-	Clock   Clock
-	Run     func(context.Context, []string, string, []string, io.Writer) error
+	HostStateDir string
+	once         sync.Once
+	initErr      error
+	Root         string
+	Limit        int64
+	Clock        Clock
+	Run          func(context.Context, []string, string, []string, io.Writer) error
 }
 
 func (c *EnvironmentCache) init() error {
@@ -704,8 +705,17 @@ func (c *EnvironmentCache) cleanupBuild(path string) error {
 	return store.cleanupOrphan(c.Clock)
 }
 func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir string, env []string, out io.Writer) error {
+	unlock, err := hostLaunchGate(c.HostStateDir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
 	identity := ID()
-	state := workerState{Identity: identity}
+	state := workerState{Identity: identity, LaunchPending: true}
 	if e := saveWorkerJSON(dir, "build-state.json", state); e != nil {
 		return e
 	}
@@ -735,6 +745,7 @@ func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir stri
 		return e
 	}
 	state.PID = cmd.Process.Pid
+	state.LaunchPending = false
 	if e = saveWorkerJSON(dir, "build-state.json", state); e != nil {
 		_ = syscall.Kill(-state.PID, syscall.SIGKILL)
 		_ = cmd.Wait()
@@ -743,6 +754,8 @@ func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir stri
 	if _, e = writer.Write([]byte("start\n")); e != nil {
 		_ = syscall.Kill(-state.PID, syscall.SIGKILL)
 	}
+	unlock()
+	unlock = nil
 	waitErr := cmd.Wait()
 	_ = syscall.Kill(-state.PID, syscall.SIGKILL)
 	groupErr := waitWorkerGroup(state.PID, c.Clock)

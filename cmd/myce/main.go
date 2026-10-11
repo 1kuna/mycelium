@@ -37,7 +37,7 @@ func run(args []string) error {
 }
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce queue|join|leave|submit|status|logs|wait|cancel|resolve-docker|dev")
+		return errors.New("usage: myce queue|join|leave|disable|enable|submit|status|logs|wait|cancel|resolve-docker|dev")
 	}
 	if args[0] == "resolve-docker" {
 		f := flag.NewFlagSet("resolve-docker", flag.ContinueOnError)
@@ -51,6 +51,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return errors.New("resolve-docker accepts flags only")
 		}
 		return myce.ConfirmDockerGone(*dir, *identity, *confirmed)
+	}
+	if args[0] == "disable" || args[0] == "enable" {
+		return hostCommand(args, probe, os.Stdout)
 	}
 	if args[0] == "sim" {
 		return simCommand(args[1:], os.Stdout)
@@ -100,6 +103,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	deadlineLoss := f.Duration("deadline-loss-timeout", myce.DeadlineLossAfter, "quiet timeout for deadline work")
 	experimentLoss := f.Duration("experiment-loss-timeout", myce.LossAfter, "quiet timeout for experiment work")
 	restartGrace := f.Duration("restart-grace", myce.RestartGrace, "worker recovery grace after queue restart")
+	hostStateDir := f.String("host-state-dir", "", "shared local host control directory")
 	stateDir := f.String("state-dir", "", "durable local worker spool directory")
 	hostname, _ := os.Hostname()
 	name := f.String("name", hostname, "unique machine name")
@@ -132,6 +136,16 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "dev" && *token == "" {
 		*token = "dev-token"
+	}
+	if args[0] == "join" {
+		reason, e := myce.HostDisabled(*hostStateDir)
+		if e != nil {
+			return e
+		}
+		if reason != "" {
+			fmt.Println("Worker disabled by operator:", reason)
+			return nil
+		}
 	}
 	if *token == "" {
 		return errors.New("set MYCE_TOKEN to the shared fleet token (dev defaults to dev-token)")
@@ -166,7 +180,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{HostStateDir: *hostStateDir, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -268,7 +282,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err != nil {
 			return err
 		}
-		w := myce.Worker{HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
@@ -384,7 +398,9 @@ func printStatus(s myce.Snapshot, full bool) {
 	}
 	for _, m := range s.Machines {
 		state := "joined"
-		if m.Gone {
+		if m.Disabled != "" {
+			state = "disabled by operator: " + m.Disabled
+		} else if m.Gone {
 			state = "gone"
 		} else if m.Leaving {
 			state = "leaving"
