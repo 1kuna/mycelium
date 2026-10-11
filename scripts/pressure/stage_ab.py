@@ -21,8 +21,8 @@ from pressure import (Checker, DiagnosticReaders, api, clock_domain, digest, drm
                       drm_owners, emit, observe, replay, spec, submit)
 
 PCI = '0000:07:00.0'
-ROOT = Path('/home/kuna/myce-test-stage-ab-r5-20261011')
-NAS = Path('/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r5-20261011')
+ROOT = Path('/home/kuna/myce-test-stage-ab-r5b-20261011')
+NAS = Path('/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r5b-20261011')
 XPU = '/home/kuna/verso-labs/runtimes/experiment-xpu-venv/bin/python'
 QUEUE = Path('/home/kuna/exp42-queue')
 BASE = Path(__file__).parent
@@ -50,7 +50,7 @@ class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r5.service'
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r5b.service'
         self.baseline = json.loads((ROOT / 'display-baseline.json').read_text())
         self.diagnostics = DiagnosticReaders(json.loads((ROOT/'diagnostic-executables.json').read_text()),
                                              ROOT/'diagnostics.jsonl')
@@ -485,7 +485,7 @@ class Run:
             self.result('B-forced-reboots','EXCLUDED',executed=False,reason='not approved')
             self.physical()
             pause_path=QUEUE/'PAUSED'
-            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r5',nonce=os.urandom(16).hex()))+'\n').encode()
+            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r5b',nonce=os.urandom(16).hex()))+'\n').encode()
             with pause_path.open('xb') as f:f.write(self.pause);f.flush();os.fsync(f.fileno())
             (ROOT/'owned-pause').write_bytes(self.pause)
             time.sleep(1)

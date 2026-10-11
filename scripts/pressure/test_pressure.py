@@ -71,7 +71,8 @@ class EvidenceTests(unittest.TestCase):
             (pid/'exe').symlink_to('/usr/bin/xpu-smi');(pid/'cgroup').write_text('0::/session.scope')
             (pid/'fd/1').symlink_to('/dev/dri/renderD129')
             (pid/'fdinfo/1').write_text('drm-pdev: 0000:07:00.0\ndrm-client-id: 28670\n'
-                'drm-resident-vram0: 2780 KiB\ndrm-resident-gtt: 40 KiB\ndrm-total-vram0: 8 MiB\n')
+                'drm-resident-vram0: 2780 KiB\ndrm-resident-gtt: 40 KiB\ndrm-total-vram0: 8 MiB\n'
+                'drm-total-cycles-rcs: 700892831130\n')
             for flag in (b'-j',b'--json'):
                 (pid/'cmdline').write_bytes(b'/usr/bin/xpu-smi\0stats\0-d\0'+b'0\0'+flag+b'\0')
                 h=pressure.drm_inventory(['0000:07:00.0'],root)[0]
@@ -412,8 +413,8 @@ class CommandTests(unittest.TestCase):
 class NativeRunnerTests(unittest.TestCase):
     def test_attempt_roots_use_the_same_fresh_suffix(self):
         import stage_ab
-        self.assertTrue(stage_ab.ROOT.name.endswith('r5-20261011'))
-        self.assertTrue(stage_ab.NAS.name.endswith('r5-20261011'))
+        self.assertTrue(stage_ab.ROOT.name.endswith('r5b-20261011'))
+        self.assertTrue(stage_ab.NAS.name.endswith('r5b-20261011'))
 
     def test_allowlists_refresh_after_inventory(self):
         import pressure
