@@ -269,3 +269,122 @@ both flags require positive values. Each model reports `load_seconds` and
 parallel limit, load timeout, and combined absolute device/host peaks. Concurrent
 warm-up peaks are joint observations, not attributed per-model deltas. Failure
 cancels all warm-ups, waits for them to exit, and unloads every attempted engine.
+
+## Physical-host production hold
+
+Opt in with `queue --host-config hosts.yaml` (also accepted by `dev` and `sim`):
+
+```yaml
+hosts:
+  b70:
+    production_hold: true
+    production_idle: 180s
+```
+
+`production_hold` defaults **false**. When enabled, `production_idle` defaults
+180 seconds, accepts zero, and rejects negative/invalid durations. Each card's
+worker must use the same `join --host-id b70` and a distinct `--name` (for example,
+`b70-0` and `b70-1`). `dev --host-id b70 --workers 2` groups its fake workers too.
+Simulation fleet YAML can include the same `hosts` mapping; `sim --host-config`
+overrides it. Effective host policies and hold state live in SQLite. Omitting the
+file on restart retains the saved policy; an explicitly different policy fails
+startup. There is no hot reload or implicit policy relaxation.
+
+A feasible production command/model request selects one physical host before
+reclaiming anything. On an enabled host, it closes every lower-priority command,
+model-call/load and environment-preparation admission path, even if production
+only needs one card. All lower-priority commands stop concurrently. Resumable
+commands get `--production-stop-grace` (default 10 seconds); non-resumable ones
+are killed immediately and requeued without consuming an infrastructure retry.
+Repeated demand cannot extend a stop deadline. Unpinned lower-priority models
+drain; their outstanding calls get the same grace, then fail with
+`preempted by production host hold` rather than being silently replayed.
+Background copies/builds are canceled and their reported cleanup must settle.
+Production waits for the entire host's lower-priority allocations to release.
+
+The grace bounds cooperative stopping, **not successful recovery from an
+unresponsive worker/driver**. After grace, pending release becomes visibly
+unknown and still blocks production. Worker loss, stop expiry, a failed process
+cleanup, cancellation or queue restart never acts as a release acknowledgement.
+Attempt/session-specific results can settle old custody without changing a new
+attempt. A fresh worker must have cleaned its old processes before reconciling
+its previous session. Reopened model slots require measured in-flight counts;
+older workers without those reports cannot clear a recovering hold. Forced-stop
+results retain `last_stop_outcome`; periodic NAS checkpoints remain available.
+These are process/model cleanup acknowledgements, not native GPU-driver proofs.
+
+Stopped experiments return to the shared priority line with a fresh attempt and
+may resume immediately on **any** eligible worker, including Spark. Only
+production has a selected `production_host`; an experiment never inherits it.
+Platform, environment, memory and both machine allow-lists still apply. Verso
+must supply a cross-platform command and validate its checkpoint's scientific
+identity; Mycelium copies checkpoint files without interpreting them.
+
+Queued/running/preparing/stopping production demand shares the hold. Cooldown
+starts when the final demand and all cleanup obligations settle. At 180 idle
+seconds lower-priority admission reopens. A new submission committed at the
+boundary wins over expiry; backward clock movement postpones reopening. Worker
+poll/tick delivery adds latency. Unpinned idle production models stay resident
+during cooldown and can drain immediately when it ends. Existing pins are never
+automatically removed: they may prevent production placement or experiments
+from using all memory. A resident pinned model still refuses experiment calls
+during the hold. Pin loads also obey project restrictions and release gates.
+
+Status/API `host_holds` and CLI/web status show, for example,
+`b70: production hold; stopping 2 attempts; grace remaining 7s`,
+`production idle; experiments resume in 179s`, or
+`release unknown: worker b70-1`. Blocked experiments show
+`host b70 reserved for production`; pinned capacity conflicts identify the pin.
+This is observable GPU demand, not a CPU publication/session lock. No absolute
+production startup expiry, cgroup enforcement, managed Docker or native device
+fence is provided by this option. Do not downgrade a database with active holds
+or mix old workers while depending on hold recovery.
+
+## Attempt placement environment
+
+Every command attempt receives worker-owned `MYCE_PLATFORM` (`cuda`, `xpu`,
+`metal`, or `cpu-fake`), `MYCE_DEVICES` (the worker's selected `--device` string,
+empty when no device is selected), and `MYCE_MACHINE` (worker name, not host ID).
+Queue-managed model servers receive the same three variables on every load.
+`run.env` and catalog overrides cannot change them. Existing CUDA/XPU visibility
+selectors still apply; these variables describe placement, not a hardware fence.
+`MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR` retain their existing
+command-only contract. `MYCE_TOKEN` remains removed from payload environments.
+
+## Project machine allow-list
+
+The existing `queue/dev --project-config projects.yaml` accepts:
+
+```yaml
+verso:
+  weight: 1
+  allowed_machines: [b70-0, b70-1]
+study:
+  weight: 1
+  # Unset/empty allowed_machines means unrestricted.
+```
+
+This restriction covers **every priority**, command and model call (including
+pin placement). It intersects a command's own `allowed_machines`; weights and
+experiment caps keep their existing meaning. An empty intersection fails
+submission with `project verso allowed_machines has no overlap with job
+allowed_machines`. If every permitted worker is known and structurally
+incompatible with the required platform, device, capacity or environment,
+submission fails with `no compatible machine in project verso allowed_machines`.
+This check uses last-known inventory, not current free memory: busy/offline
+workers can return, and unreported machine names are allowed to join later.
+Resubmit after correcting restrictions or updating incompatible inventory.
+Policies persist across restart when the configuration flag is omitted.
+
+For a small synthetic example run:
+
+```sh
+myce sim --fleet examples/sim/production-hold/fleet.yaml \
+  --workload examples/sim/production-hold/workload.yaml --days .01 --seed 1 \
+  --json /tmp/production-hold-sim.json
+```
+
+Two B70 experiments run for 600 seconds each; a 60-second production command
+arrives at second 60. Both experiments are displaced, one continues on Spark,
+and the other returns after cooldown. Speeds, admission budgets and checkpoint
+behavior are synthetic; this is not a native throughput/latency qualification.

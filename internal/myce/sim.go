@@ -16,7 +16,8 @@ import (
 )
 
 type SimFleet struct {
-	Machines []SimMachine `yaml:"machines"`
+	Hosts    map[string]HostPolicy `yaml:"hosts"`
+	Machines []SimMachine          `yaml:"machines"`
 }
 type SimMachine struct {
 	Name      string      `yaml:"name"`
@@ -277,6 +278,9 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 	root := "/simulated-checkpoints"
 	var e error
 	q := &Queue{simulation: true, clock: clock, root: root, productionGrace: 10 * time.Second, lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, unreported: map[string]bool{}, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	if e = q.ConfigureHosts(f.Hosts); e != nil {
+		return r, e
+	}
 	models := map[string]SimModel{}
 	mc := ModelConfig{Idle: 10 * time.Minute, Wait: 5 * time.Minute}
 	for _, m := range w.Models {
@@ -736,6 +740,23 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 		}
 
 		next := horizon
+		for _, h := range q.s.Hosts {
+			if h.Active && h.IdleSince != nil {
+				idle, _ := time.ParseDuration(h.Policy.ProductionIdle)
+				at := float64(h.IdleSince.Add(idle).Sub(epoch).Nanoseconds()) / 1e9
+				if at > now+1e-7 {
+					next = min(next, at)
+				}
+			}
+		}
+		for _, c := range q.calls {
+			if c.StopAt != nil && c.Error == "" {
+				at := float64(c.StopAt.Sub(epoch).Nanoseconds()) / 1e9
+				if at > now+1e-7 {
+					next = min(next, at)
+				}
+			}
+		}
 		if ai < len(arrivals) {
 			next = min(next, arrivals[ai].at)
 		}

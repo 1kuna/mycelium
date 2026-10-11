@@ -144,6 +144,10 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
+	ReleasingCalls    bool               `json:"releasing_calls,omitempty"`
+	Recovering        bool               `json:"recovering,omitempty"`
+	ProductionUsed    bool               `json:"production_used,omitempty"`
+	StopAt            *time.Time         `json:"stop_at,omitempty"`
 	EnvironmentRecipe *EnvironmentRecipe `json:"environment_recipe,omitempty"`
 	Model             string             `json:"model"`
 	Machine           string             `json:"machine"`
@@ -156,11 +160,15 @@ type ModelSlot struct {
 	IdleSeconds       float64            `json:"idle_seconds"`
 }
 type ModelReport struct {
-	Name  string `json:"name"`
-	State string `json:"state"`
-	Error string `json:"error,omitempty"`
+	InFlight      int    `json:"calls_in_flight,omitempty"`
+	CallsMeasured bool   `json:"calls_measured,omitempty"`
+	Name          string `json:"name"`
+	State         string `json:"state"`
+	Error         string `json:"error,omitempty"`
 }
 type ModelCall struct {
+	StopAt                           *time.Time
+	ProductionHost                   string
 	WaitingSince                     time.Time
 	StartedAt                        *time.Time
 	ID, Model, Project, Priority     string
@@ -209,6 +217,12 @@ func (q *Queue) ConfigureModels(c ModelConfig) error {
 	}
 	// HTTP requests do not survive queue restart. Reconnected workers reconcile slots.
 	for _, s := range q.s.ModelSlots {
+		m := q.s.Machines[s.Machine]
+		if m != nil {
+			if h := q.s.Hosts[hostID(m)]; h != nil && h.Policy.ProductionHold {
+				s.Recovering = true
+			}
+		}
 		s.InFlight = 0
 	}
 	return nil
@@ -268,6 +282,21 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 		}
 		for _, r := range reports {
 			if r.Name == s.Model {
+				if r.CallsMeasured && r.InFlight == 0 {
+					s.ReleasingCalls = false
+				}
+				if s.Recovering {
+					if !r.CallsMeasured {
+						continue
+					}
+					s.InFlight = max(0, r.InFlight)
+					if s.InFlight == 0 {
+						s.Recovering = false
+					} else if !q.slotPinned(s) {
+						s.State = "draining"
+					}
+				}
+
 				if r.State == "failed" {
 					for _, c := range q.calls {
 						if c.Model == s.Model && c.Machine == "" {
@@ -314,6 +343,9 @@ func (q *Queue) maintainModels() {
 	for k, s := range q.s.ModelSlots {
 		m := q.s.Machines[s.Machine]
 		if m == nil || m.Gone || m.Session != s.Session {
+			if m != nil && q.s.Hosts[hostID(m)] != nil && q.s.Hosts[hostID(m)].Policy.ProductionHold && m.Session == s.Session {
+				continue
+			}
 			delete(q.s.ModelSlots, k)
 			continue
 		}
@@ -357,12 +389,15 @@ func (q *Queue) maintainModels() {
 			return machines[i].ID < machines[j].ID
 		})
 		for _, m := range machines {
-			if q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] {
+			if !q.placementAllowed(callJob(c), m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] {
 				continue
 			}
 			s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
 			if s != nil && s.State == "ready" && (model.MaxInFlight == 0 || s.InFlight < model.MaxInFlight) && !q.batchBeforeCall(c, m) {
 				c.Machine = m.ID
+				if c.Priority == "production" {
+					s.ProductionUsed = true
+				}
 				c.StartedAt = &now
 				c.Session = m.Session
 				if s.InFlight == 0 || rank(c.Priority) < rank(s.Priority) {
@@ -380,13 +415,16 @@ func (q *Queue) maintainModels() {
 		eligible := []*Machine{}
 		loading := false
 		for _, m := range machines {
-			if q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
+			if !q.placementAllowed(callJob(c), m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
 				continue
 			}
 			if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
 				if s.State == "loading" {
 					if rank(c.Priority) < rank(s.Priority) {
 						s.Priority = c.Priority
+						if c.Priority == "production" {
+							s.ProductionUsed = true
+						}
 					}
 					loading = true
 				}
@@ -401,7 +439,7 @@ func (q *Queue) maintainModels() {
 		// Check all free workers before draining a model or stopping any batch.
 		for _, m := range eligible {
 			if m.FreeMemoryGB >= model.MemoryGB && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
-				q.s.ModelSlots[slotKey(m.ID, c.Model)] = &ModelSlot{Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", Priority: c.Priority, LastUsed: now}
+				q.s.ModelSlots[slotKey(m.ID, c.Model)] = &ModelSlot{Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", Priority: c.Priority, ProductionUsed: c.Priority == "production", LastUsed: now}
 				m.FreeMemoryGB -= model.MemoryGB
 				q.refreshHostMemory()
 				allocated = true
@@ -475,7 +513,7 @@ func (q *Queue) maintainModels() {
 	}
 }
 func callJob(c *ModelCall) *Job {
-	j := &Job{ID: c.ID, Queued: c.Queued, WaitingSince: c.WaitingSince, StartedAt: c.StartedAt, Spec: Spec{Project: c.Project, Priority: c.Priority, Deadline: c.Deadline}}
+	j := &Job{ProductionHost: c.ProductionHost, ID: c.ID, Queued: c.Queued, WaitingSince: c.WaitingSince, StartedAt: c.StartedAt, Spec: Spec{Project: c.Project, Priority: c.Priority, Deadline: c.Deadline}}
 	j.Spec.Needs.Model = c.Model
 	return j
 }
@@ -485,7 +523,7 @@ func callJob(c *ModelCall) *Job {
 // behind requests that cannot reclaim higher-priority work.
 func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 	model, ok := q.model(c.Model)
-	if !ok || c.Machine != "" || c.Error != "" || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] {
+	if !ok || !q.placementAllowed(callJob(c), m) || c.Machine != "" || c.Error != "" || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] {
 		return false
 	}
 	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "ready" {
@@ -539,7 +577,7 @@ func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
 		return n
 	}
 	for _, j := range q.s.Jobs {
-		if j.State != "queued" || rank(j.Spec.Priority) > rank(c.Priority) || q.capReason(j) != "" || !fits(j, m, room[rank(j.Spec.Priority)]) {
+		if j.State != "queued" || rank(j.Spec.Priority) > rank(c.Priority) || q.capReason(j) != "" || !q.placementAllowed(j, m) || !fits(j, m, room[rank(j.Spec.Priority)]) {
 			continue
 		}
 		if j.Spec.Priority == "experiment" && c.Priority == "experiment" && j.Spec.Project != c.Project {
@@ -601,6 +639,9 @@ func (q *Queue) addCall(c *ModelCall) error {
 	return q.update(func() error {
 		if _, ok := q.model(c.Model); !ok {
 			return errors.New("unknown model")
+		}
+		if e := q.validateProjectCapacity(callJob(c)); e != nil {
+			return e
 		}
 		if !q.simulation || c.ID == "" {
 			c.ID = ID()
@@ -784,7 +825,8 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 					case <-wake.C:
 						a.Queue.mu.Lock()
 						m := a.Queue.s.Machines[call.Machine]
-						lost := m == nil || m.Gone || m.Session != call.Session
+						live := a.Queue.calls[c.ID]
+						lost := m == nil || m.Gone || m.Session != call.Session || live != nil && live.Error != ""
 						a.Queue.mu.Unlock()
 						if lost {
 							cancel()
@@ -895,6 +937,17 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			if r.Context().Err() != nil {
 				return
 			}
+			a.Queue.mu.Lock()
+			live := a.Queue.calls[c.ID]
+			preempted := ""
+			if live != nil {
+				preempted = live.Error
+			}
+			a.Queue.mu.Unlock()
+			if preempted != "" {
+				modelError(w, 503, preempted)
+				return
+			}
 			if attempt >= 1 {
 				modelError(w, 503, "model call failed after one retry on another worker")
 				return
@@ -955,7 +1008,7 @@ func (q *Queue) makeBatchRoom(j *Job, planned map[string]bool) string {
 	}
 	var best *plan
 	for _, m := range q.s.Machines {
-		if q.unreported[m.ID] || planned[m.ID] {
+		if !q.placementAllowed(j, m) || q.unreported[m.ID] || planned[m.ID] {
 			continue
 		}
 		p := &plan{machine: m.ID}

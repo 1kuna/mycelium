@@ -13,11 +13,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ProjectPolicy limits only experiments. Zero caps mean unlimited.
+// Caps limit experiments; allowed_machines restricts every priority and model call.
 type ProjectPolicy struct {
-	Weight                   float64 `json:"weight" yaml:"weight"`
-	MaxConcurrentExperiments int     `json:"max_concurrent_experiments" yaml:"max_concurrent_experiments"`
-	MaxMemoryShare           float64 `json:"max_memory_share" yaml:"max_memory_share"`
+	AllowedMachines          []string `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
+	Weight                   float64  `json:"weight" yaml:"weight"`
+	MaxConcurrentExperiments int      `json:"max_concurrent_experiments" yaml:"max_concurrent_experiments"`
+	MaxMemoryShare           float64  `json:"max_memory_share" yaml:"max_memory_share"`
 }
 type FairUsage struct {
 	Seconds float64   `json:"seconds"`
@@ -69,6 +70,11 @@ func ReadProjectPolicies(path string) (map[string]ProjectPolicy, error) {
 }
 func (q *Queue) ConfigureProjects(p map[string]ProjectPolicy) error {
 	for name, v := range p {
+		for _, machine := range v.AllowedMachines {
+			if strings.TrimSpace(machine) == "" {
+				return errors.New("project allowed_machines must contain nonempty machine names")
+			}
+		}
 		if name == "" || !validMemoryValue(v.Weight) || v.Weight <= 0 || v.MaxConcurrentExperiments < 0 || !validMemoryValue(v.MaxMemoryShare) || v.MaxMemoryShare > 1 {
 			return errors.New("project requires positive finite weight, nonnegative experiment cap, and memory share in [0,1]")
 		}
@@ -76,6 +82,7 @@ func (q *Queue) ConfigureProjects(p map[string]ProjectPolicy) error {
 	return q.update(func() error {
 		copy := map[string]ProjectPolicy{}
 		for k, v := range p {
+			v.AllowedMachines = slices.Clone(v.AllowedMachines)
 			copy[k] = v
 		}
 		q.s.Policies = copy
@@ -141,7 +148,7 @@ func (q *Queue) candidate(m *Machine, excluded map[string]bool) *Job {
 	// project's best ordinary candidate instead of rescanning for every queued job.
 	byProject := map[string]*Job{}
 	for _, j := range q.s.Jobs {
-		if !excluded[j.ID] && j.State == "queued" && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" {
+		if !excluded[j.ID] && j.State == "queued" && q.placementAllowed(j, m) && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" {
 			old := byProject[j.Spec.Project]
 			if old == nil || before(j, old, m) {
 				byProject[j.Spec.Project] = j
@@ -273,7 +280,16 @@ func (q *Queue) waitReason(j *Job) string {
 		copy.Spec.Needs.HostMemoryGB = model.HostMemoryGB
 		j = &copy
 	}
-	return waitingReason(j, q.s.Machines, q.s.Jobs)
+	if r := q.holdWaitReason(j); r != "" {
+		return r
+	}
+	machines := map[string]*Machine{}
+	for id, m := range q.s.Machines {
+		if q.projectAllows(j.Spec.Project, id) {
+			machines[id] = m
+		}
+	}
+	return waitingReason(j, machines, q.s.Jobs)
 }
 
 // Deficit uses only competing runnable projects. An absent project reserves no
@@ -281,7 +297,7 @@ func (q *Queue) waitReason(j *Job) string {
 func (q *Queue) fairScore(j *Job, m *Machine) float64 {
 	projects := map[string]bool{j.Spec.Project: true}
 	for _, r := range q.s.Jobs {
-		if r.State == "queued" && r.Spec.Priority == "experiment" && q.capReason(r) == "" && (m.ID == "" || fits(r, m, m.FreeMemoryGB)) {
+		if r.State == "queued" && r.Spec.Priority == "experiment" && q.capReason(r) == "" && (m.ID == "" || q.placementAllowed(r, m) && fits(r, m, m.FreeMemoryGB)) {
 			projects[r.Spec.Project] = true
 		}
 	}
@@ -300,4 +316,59 @@ func (q *Queue) fairScore(j *Job, m *Machine) float64 {
 		weights += q.weight(p) / largest
 	}
 	return decayed(q.s.FairUsage[j.Spec.Project], q.clock.Now()) - total*(q.weight(j.Spec.Project)/largest)/weights
+}
+
+func (q *Queue) projectAllows(project, machine string) bool {
+	v := q.s.Policies[project].AllowedMachines
+	return len(v) == 0 || contains(v, machine)
+}
+
+func (q *Queue) validateProjectPlacement(project string, allowed []string) error {
+	p := q.s.Policies[project].AllowedMachines
+	if len(p) > 0 && len(allowed) > 0 {
+		for _, m := range allowed {
+			if contains(p, m) {
+				return nil
+			}
+		}
+		return fmt.Errorf("project %s allowed_machines has no overlap with job allowed_machines", project)
+	}
+	return nil
+}
+
+// Missing inventory can return later; reject only restrictions whose entire
+// last-known fleet is structurally incompatible, never temporary occupancy.
+func (q *Queue) validateProjectCapacity(j *Job) error {
+	if model, ok := q.model(j.Spec.Needs.Model); ok && j.Spec.Needs.MemoryGB == 0 {
+		copy := cloneJob(j)
+		copy.Spec.Needs.MemoryGB = model.MemoryGB
+		copy.Spec.Needs.Platform = Platform{Required: model.Platforms}
+		j = &copy
+	}
+	allowed := q.s.Policies[j.Spec.Project].AllowedMachines
+	if len(allowed) == 0 {
+		return nil
+	}
+	for _, name := range allowed {
+		if len(j.Spec.AllowedMachines) > 0 && !contains(j.Spec.AllowedMachines, name) {
+			continue
+		}
+		m := q.s.Machines[name]
+		if m == nil || m.TotalMemoryGB == 0 {
+			return nil
+		}
+		copy := *m
+		copy.Gone = false
+		copy.Leaving = false
+		copy.MemoryError = ""
+		copy.CheckpointUnavailable = false
+		if !fitsWithoutHostMemory(j, &copy, copy.TotalMemoryGB) {
+			continue
+		}
+		if model, ok := q.model(j.Spec.Needs.Model); ok && !modelFitsMachine(model, m) {
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("no compatible machine in project %s allowed_machines (last-known platform, capacity and environment)", j.Spec.Project)
 }

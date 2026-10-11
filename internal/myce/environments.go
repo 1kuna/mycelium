@@ -207,7 +207,7 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 	}
 	jobs := []*Job{}
 	for _, j := range q.s.Jobs {
-		if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && !environmentReady(j, m) {
+		if j.State == "queued" && q.placementAllowed(j, m) && fits(j, m, m.FreeMemoryGB) && !environmentReady(j, m) {
 			jobs = append(jobs, j)
 		}
 	}
@@ -217,7 +217,7 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 	}
 	j := jobs[0]
 	for _, other := range q.s.Machines {
-		if other.ID == m.ID || !q.workerIdle(other) || !fits(j, other, other.FreeMemoryGB) {
+		if other.ID == m.ID || !q.workerIdle(other) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
 		if q.placementBetter(j, other, m) {
@@ -865,7 +865,7 @@ func (q *Queue) reconcileEnvironments(m *Machine) error {
 			continue
 		}
 		for _, j := range q.s.Jobs {
-			if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && environmentKey(j, m) == r.Key {
+			if j.State == "queued" && q.placementAllowed(j, m) && fits(j, m, m.FreeMemoryGB) && environmentKey(j, m) == r.Key {
 				j.State = "failed"
 				j.Reason = "environment build failed on " + m.ID + ": " + r.Error
 				if e := q.copyEnvironmentLogs(j, m, r.Key); e != nil {

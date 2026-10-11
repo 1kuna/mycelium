@@ -203,6 +203,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			env["CUDA_VISIBLE_DEVICES"] = w.DeviceBinding
 		}
 	}
+	for k, v := range placementEnvironment(w.Machine) {
+		env[k] = v
+	}
 	env["MYCE_PROCESS_ID"] = identity
 	env["MYCE_JOB_ID"] = j.ID
 	env["MYCE_ATTEMPT"] = strconv.Itoa(j.Attempt)
@@ -276,6 +279,10 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		// Descendants must not outlive the command or append to delivered output.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		groupErr := waitWorkerGroup(cmd.Process.Pid, w.Clock)
+		result.ReleasePending = groupErr != nil
+		p.mu.Lock()
+		result.Forced = p.killed
+		p.mu.Unlock()
 		syncErr := output.Sync()
 		closeErr := output.Close()
 		result.Success = waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil

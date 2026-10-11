@@ -47,6 +47,9 @@ func (q *Queue) Pin(p ModelPin) error {
 		if p.Project == "" || (p.Machine == "") == (p.Platform == "") {
 			return errors.New("pin requires project and exactly one machine or platform")
 		}
+		if e := q.validateProjectPlacement(p.Project, []string{p.Machine}); p.Machine != "" && e != nil {
+			return e
+		}
 		if p.Platform != "" && !contains(model.Platforms, p.Platform) {
 			return errors.New("model cannot run on pin platform")
 		}
@@ -114,7 +117,7 @@ func (q *Queue) maintainPins() {
 		model, _ := q.model(p.Model)
 		candidates := []*Machine{}
 		for _, m := range q.s.Machines {
-			if !m.Gone && !m.Leaving && m.MemoryError == "" && m.ModelURL != "" && !q.unreported[m.ID] && modelFitsMachine(model, m) && (p.Machine == "" || p.Machine == m.ID) && (p.Platform == "" || p.Platform == m.GPU) {
+			if q.projectAllows(p.Project, m.ID) && !m.Gone && !m.Leaving && m.MemoryError == "" && m.ModelURL != "" && !q.unreported[m.ID] && modelFitsMachine(model, m) && (p.Machine == "" || p.Machine == m.ID) && (p.Platform == "" || p.Platform == m.GPU) {
 				candidates = append(candidates, m)
 			}
 		}
@@ -138,6 +141,9 @@ func (q *Queue) maintainPins() {
 			if s := q.s.ModelSlots[key]; s != nil && s.State != "draining" {
 				p.Assigned = m.ID
 				break
+			}
+			if !q.placementAllowed(&Job{Spec: Spec{Project: p.Project, Priority: "production"}}, m) {
+				continue
 			}
 			if m.FreeMemoryGB >= model.MemoryGB && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
 				q.s.ModelSlots[key] = &ModelSlot{Model: p.Model, Machine: m.ID, Session: m.Session, State: "loading", Priority: "production", LastUsed: now}

@@ -167,6 +167,8 @@ type Copy struct {
 }
 
 type Job struct {
+	LastStopOutcome       string                       `json:"last_stop_outcome,omitempty"`
+	ProductionHost        string                       `json:"production_host,omitempty"`
 	WaitingSince          time.Time                    `json:"waiting_since,omitempty"`
 	AssignedAt            *time.Time                   `json:"assigned_at,omitempty"`
 	FinishedAt            *time.Time                   `json:"finished_at,omitempty"`
@@ -254,8 +256,10 @@ type Reply struct {
 	GraceSeconds    float64             `json:"grace_seconds"`
 }
 type Result struct {
-	Machine string `json:"machine"`
-	Session string `json:"session"`
+	Forced         bool   `json:"forced,omitempty"`
+	ReleasePending bool   `json:"release_pending,omitempty"`
+	Machine        string `json:"machine"`
+	Session        string `json:"session"`
 	Execution
 	Interrupted bool   `json:"interrupted,omitempty"`
 	Success     bool   `json:"success"`
@@ -267,6 +271,7 @@ type LogChunk struct {
 	Text   string `json:"text"`
 }
 type Snapshot struct {
+	HostHolds    []string      `json:"host_holds,omitempty"`
 	Now          time.Time     `json:"now"`
 	Usage        UsageReport   `json:"usage"`
 	SyncRequests []SyncRequest `json:"sync_requests"`

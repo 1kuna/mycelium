@@ -250,7 +250,8 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
   </header>
 
   {{$failed := failedJobs .Jobs}}{{$lost := lostMachines .Machines}}{{$nas := checkpointWarnings .Machines}}
-  {{if or .Warning $failed $lost $nas}}<div class="alerts" aria-label="Recent problems">
+  {{if or .Warning .HostHolds $failed $lost $nas}}<div class="alerts" aria-label="Recent problems">
+    {{range .HostHolds}}<div class="alert" role="status">{{.}}</div>{{end}}
     {{if .Warning}}<div class="alert" role="alert">{{.Warning}}</div>{{end}}
     {{range $nas}}<div class="alert" role="alert"><strong>NAS unavailable on {{.ID}}.</strong> New checkpointed work will wait until access returns.</div>{{end}}
     {{range $lost}}<div class="alert bad" role="alert"><strong>{{.ID}} is offline.</strong> Its work may be reassigned.</div>{{end}}

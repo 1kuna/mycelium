@@ -64,6 +64,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	since := f.String("since", "7d", "usage lookback, up to 90d")
 	by := f.String("by", "project", "usage grouping: project or machine")
+	hostConfig := f.String("host-config", "", "physical-host production hold policy YAML")
 	projectConfig := f.String("project-config", "", "project weights and experiment caps YAML")
 	url := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
 	token := f.String("token", env("MYCE_TOKEN", ""), "shared fleet token (prefer MYCE_TOKEN)")
@@ -135,6 +136,10 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if *modelWait > 0 {
 		mc.Wait = *modelWait
 	}
+	hosts, err := myce.ReadHostPolicies(*hostConfig)
+	if err != nil {
+		return err
+	}
 	ec, err := myce.ReadEnvironments(*environmentFile)
 	if err != nil {
 		return err
@@ -148,7 +153,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -165,6 +170,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		defer q.Close()
+		if *hostConfig != "" {
+			if err = q.ConfigureHosts(hosts); err != nil {
+				return err
+			}
+		}
 		if err = q.ConfigureUploadSpool(*uploadSpoolDir, *uploadSpoolBytes); err != nil {
 			return err
 		}
@@ -353,6 +363,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {
+	for _, hold := range s.HostHolds {
+		fmt.Println(hold)
+	}
 	if s.Warning != "" {
 		fmt.Println(s.Warning)
 	}
