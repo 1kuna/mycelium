@@ -281,6 +281,17 @@ def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str,
     """One receipt per process, with unique device/client pairs and measured memory."""
     if not pcis or any(not re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]", p) for p in pcis):
         raise ValueError("explicit lowercase PCI identities required")
+    nodes = None
+    if proc == Path("/proc") and sys.platform == "linux":
+        nodes = set()
+        for pci in pcis:
+            directory = Path("/sys/bus/pci/devices") / pci / "drm"
+            if not directory.is_dir():
+                raise ValueError("PCI DRM device mapping unavailable")
+            nodes.update("/dev/dri/" + p.name for p in directory.iterdir()
+                         if re.fullmatch(r"(?:card|renderD)[0-9]+", p.name))
+        if not nodes:
+            raise ValueError("PCI DRM device nodes unavailable")
     holders = []
     for pid in proc.iterdir():
         if not pid.name.isdigit():
@@ -293,11 +304,17 @@ def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str,
             # Keep the collector's own directory descriptor alive during inspection.
             with os.scandir(pid / "fdinfo") as descriptors:
                 for info in descriptors:
-                    target = os.readlink(pid / "fd" / info.name)
-                    if not target.startswith("/dev/dri/"):
-                        continue
-                    with open(info.path, "rb") as stream:
-                        raw = stream.read(65537)
+                    descriptor = pid / "fd" / info.name
+                    try:
+                        target = os.readlink(descriptor)
+                        if not target.startswith("/dev/dri/") or nodes is not None and target not in nodes:
+                            continue
+                        with open(info.path, "rb") as stream:
+                            raw = stream.read(65537)
+                    except FileNotFoundError:
+                        if not os.path.lexists(descriptor) and not Path(info.path).exists():
+                            continue  # This descriptor closed; other holders and permission errors still qualify.
+                        raise
                     if len(raw) > 65536:
                         raise ValueError("oversized fdinfo")
                     metrics = {line.split(b":", 1)[0].decode("ascii"):
@@ -349,6 +366,7 @@ def drm_identity(holder: dict[str, Any]) -> dict[str, Any]:
 def drm_owners(pcis: list[str], proc: Path = Path("/proc"), *,
                baseline: list[dict[str, Any]] | None = None,
                allowed: list[dict[str, Any]] | None = None,
+               observers: list[dict[str, Any]] = (),
                evidence: dict[str, Any] | None = None) -> dict[str, list[str]]:
     """Pinned display baseline is separate from allocation owners; unknowns fail closed."""
     holders = drm_inventory(pcis, proc)
@@ -365,6 +383,8 @@ def drm_owners(pcis: list[str], proc: Path = Path("/proc"), *,
                 shared[key] = {k: max(v, old.get(k, 0)) for k, v in c["resident_bytes"].items()}
             continue
         process = {k: holder[k] for k in ("boot", "pid", "start", "exe", "cgroup")}
+        if process in observers:
+            continue  # Exact PID/start identity of an operator-launched passive counter reader.
         if allowed is not None and process not in allowed:
             raise ValueError("UNKNOWN GPU user: " + digest(identity)[:24])
         token = digest([holder["boot"], holder["pid"], holder["start"]])[:24]
