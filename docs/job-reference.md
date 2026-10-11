@@ -314,7 +314,12 @@ its previous session. Reopened model slots require measured in-flight counts;
 older workers without those reports cannot clear a recovering hold. A replacement
 model worker must acknowledge cleanup of the prior session, even after worker
 loss. Forced-stop results retain `last_stop_outcome`; periodic NAS checkpoints
-remain available.
+remain available. A checkpoint save blocked on NAS I/O is force-stopped at the
+same grace deadline; production without `resumable: true` uses local scratch
+and can start after the host's actual release acknowledgements even while the
+NAS is unavailable. Displaced experiments wait for checkpoint storage to recover,
+then resume from the last complete checkpoint generation. NAS reconciliation
+cannot keep a late experiment copy alive on the held host.
 These are process/model cleanup acknowledgements, not native GPU-driver proofs.
 
 Stopped experiments return to the shared priority line with a fresh attempt and

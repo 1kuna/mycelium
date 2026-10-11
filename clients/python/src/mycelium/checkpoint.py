@@ -27,7 +27,10 @@ class Checkpoint:
         """Flush/fsync a same-directory temp, replace, then fsync directory."""
         if Path(name).name != name or name in {"", ".", ".."} or not name.endswith(".json"):
             raise ValueError("checkpoint name must be a plain .json filename")
-        data = json.dumps(value, allow_nan=False).encode("utf-8")
+        generation = max((g for g, _, _ in self._saves()), default=0) + 1
+        if generation >= 2**63:
+            raise OverflowError("checkpoint generation exhausted")
+        data = json.dumps({"myce_checkpoint": {"generation": generation}, "value": value}, allow_nan=False).encode("utf-8")
         path = self.directory / name
         # Failed temporary writes remain ignored and recoverable for inspection.
         with tempfile.NamedTemporaryFile(dir=self.directory, suffix=".tmp", delete=False) as stream:
@@ -43,13 +46,25 @@ class Checkpoint:
             os.close(fd)
         return path
 
+    def _saves(self):
+        for path in self.directory.glob("*.json"):
+            if path.is_file():
+                value = json.loads(path.read_text(encoding="utf-8"))
+                generation = 0
+                metadata = value.get("myce_checkpoint") if isinstance(value, dict) else None
+                if isinstance(metadata, dict) and "generation" in metadata:
+                    generation = metadata["generation"]
+                    if type(generation) is not int or not 1 <= generation < 2**63:
+                        raise ValueError("invalid checkpoint generation")
+                    value = value["value"]
+                yield generation, path.name, value
+
     def load(self, default: Any = None) -> Any:
-        """Load newest complete JSON save by mtime; ignore temporary files."""
-        paths = [p for p in self.directory.glob("*.json") if p.is_file()]
-        if not paths:
+        """Highest generation wins; legacy/tied saves use greatest filename."""
+        saves = list(self._saves())
+        if not saves:
             return default
-        newest = max(paths, key=lambda p: (p.stat().st_mtime_ns, p.name))
-        return json.loads(newest.read_text(encoding="utf-8"))
+        return max(saves, key=lambda save: save[:2])[2]
 
 
 class StopSignal:

@@ -51,9 +51,13 @@ type workerState struct {
 	Log             string  `json:"log,omitempty"`
 }
 type workerStore struct {
-	dir   string
-	lock  *os.File
-	state workerState
+	checkpointUnavailable bool
+	nasProbe              checkpointIO[bool]
+	nasProgress           checkpointIO[int64]
+	nasPrepare            checkpointIO[string]
+	dir                   string
+	lock                  *os.File
+	state                 workerState
 }
 
 func (w Worker) openStore() (*workerStore, error) {
@@ -226,10 +230,16 @@ func attemptCheckpoint(j Job) string {
 	return filepath.Join(j.Checkpoint, fmt.Sprintf("attempt-%d", j.Attempt))
 }
 func checkpointProgress(dir string) (int64, error) {
-	var latest int64
+	return scanCheckpointProgress(dir, false)
+}
+func scanCheckpointProgress(dir string, jobRoot bool) (int64, error) {
+	latest := int64(-1)
 	err := filepath.WalkDir(dir, func(path string, e os.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if jobRoot && filepath.Dir(path) == dir && e.IsDir() && strings.HasPrefix(e.Name(), "attempt-") {
+			return filepath.SkipDir
 		}
 		if strings.HasSuffix(e.Name(), ".tmp") {
 			if e.IsDir() {
@@ -245,17 +255,46 @@ func checkpointProgress(dir string) (int64, error) {
 			return err
 		}
 		if info.Mode().IsRegular() {
-			latest = max(latest, info.ModTime().UnixNano())
+			latest = max(latest, 0) // Unsequenced legacy saves rank below every generation.
+			if strings.HasSuffix(e.Name(), ".json") {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				var save map[string]json.RawMessage
+				if json.Unmarshal(data, &save) == nil && save["myce_checkpoint"] != nil {
+					var metadata map[string]json.RawMessage
+					if json.Unmarshal(save["myce_checkpoint"], &metadata) == nil && metadata["generation"] != nil {
+						var generation int64
+						if err := json.Unmarshal(metadata["generation"], &generation); err != nil || generation <= 0 {
+							return fmt.Errorf("invalid checkpoint generation: %s", path)
+						}
+						latest = max(latest, generation)
+					}
+				}
+			}
 		}
 		return nil
 	})
 	return latest, err
 }
 func prepareCheckpoint(j Job) (string, error) {
+	return prepareCheckpointCopy(j, io.Copy)
+}
+func prepareCheckpointCopy(j Job, copyFile func(io.Writer, io.Reader) (int64, error)) (string, error) {
 	if _, err := os.Stat(filepath.Dir(j.Checkpoint)); err != nil {
 		return "", fmt.Errorf("checkpoint root unavailable: %w", err)
 	}
 	if err := os.MkdirAll(j.Checkpoint, 0700); err != nil {
+		return "", err
+	}
+	dest := attemptCheckpoint(j)
+	if _, err := os.Stat(dest); err == nil {
+		progress, err := checkpointProgress(dest)
+		if err != nil || progress >= 0 {
+			return dest, err // A prepared retry must not overwrite its own durable saves.
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
 	entries, err := os.ReadDir(j.Checkpoint)
@@ -263,7 +302,11 @@ func prepareCheckpoint(j Job) (string, error) {
 		return "", err
 	}
 	source := j.Checkpoint
-	var newest int64
+	newest, err := scanCheckpointProgress(j.Checkpoint, true)
+	if err != nil {
+		return "", err
+	}
+	newestAttempt := 0
 	for _, e := range entries {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), "attempt-") {
 			continue
@@ -277,13 +320,15 @@ func prepareCheckpoint(j Job) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if progress > newest {
+		if progress >= 0 && (progress > newest || (progress == newest && n > newestAttempt)) {
 			newest = progress
+			newestAttempt = n
 			source = dir
 		}
 	}
-	dest := attemptCheckpoint(j)
-	if err = os.MkdirAll(dest, 0700); err != nil {
+	// Publish the whole copy together: a manifest must not outrank missing payloads.
+	staging, err := os.MkdirTemp(j.Checkpoint, ".myce-prepare-*.tmp")
+	if err != nil {
 		return "", err
 	}
 	if source != "" {
@@ -304,7 +349,7 @@ func prepareCheckpoint(j Job) (string, error) {
 			if err != nil {
 				return err
 			}
-			target := filepath.Join(dest, rel)
+			target := filepath.Join(staging, rel)
 			if e.IsDir() {
 				return os.MkdirAll(target, 0700)
 			}
@@ -327,7 +372,7 @@ func prepareCheckpoint(j Job) (string, error) {
 			if err != nil {
 				return err
 			}
-			_, err = io.Copy(out, in)
+			_, err = copyFile(out, in)
 			if err == nil {
 				err = out.Sync()
 			}
@@ -338,9 +383,6 @@ func prepareCheckpoint(j Job) (string, error) {
 			if err != nil {
 				return err
 			}
-			if err = os.Chtimes(target+".tmp", info.ModTime(), info.ModTime()); err != nil {
-				return err
-			}
 			if err = os.Rename(target+".tmp", target); err != nil {
 				return err
 			}
@@ -348,7 +390,18 @@ func prepareCheckpoint(j Job) (string, error) {
 		})
 	}
 	if err == nil {
-		err = syncWorkerDir(dest)
+		progress, readErr := scanCheckpointProgress(source, source == j.Checkpoint)
+		if readErr != nil {
+			err = readErr
+		} else if progress != newest {
+			err = errors.New("checkpoint changed during preparation; retry")
+		}
+	}
+	if err == nil {
+		err = syncWorkerDir(staging)
+	}
+	if err == nil {
+		err = os.Rename(staging, dest)
 	}
 	if err == nil {
 		err = syncWorkerDir(j.Checkpoint)

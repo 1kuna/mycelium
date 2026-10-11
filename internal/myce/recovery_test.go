@@ -143,6 +143,13 @@ func TestLateReturnCheckpointWinner(t *testing.T) {
 			if next == nil {
 				t.Fatal("lost job not reassigned")
 			}
+			dir := filepath.Join(q.root, next.Checkpoint, "attempt-2")
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "checkpoint.json"), []byte(`{"myce_checkpoint":{"generation":20},"value":20}`), 0600); err != nil {
+				t.Fatal(err)
+			}
 			_, err := q.Checkin(Checkin{Machine: n, Running: &Execution{ID: next.ID, Attempt: next.Attempt, Progress: 20}})
 			if err != nil {
 				t.Fatal(err)
