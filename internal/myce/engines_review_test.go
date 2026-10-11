@@ -17,15 +17,12 @@ import (
 )
 
 func TestGenericRequestSpoolIsBoundedReplayableAndCancellable(t *testing.T) {
-	f, n, err := spoolModelRequest(context.Background(), strings.NewReader("large-audio"), 32)
+	spool := &uploadSpool{limit: 32}
+	f, n, err := spool.request(context.Background(), strings.NewReader("large-audio"), 32, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := f.Name()
-	defer func() {
-		_ = f.Close()
-		_ = os.Remove(name)
-	}()
+	defer f.Close()
 	if n != int64(len("large-audio")) {
 		t.Fatalf("size=%d", n)
 	}
@@ -38,12 +35,12 @@ func TestGenericRequestSpoolIsBoundedReplayableAndCancellable(t *testing.T) {
 			t.Fatalf("attempt %d: %q %v", attempt, got, err)
 		}
 	}
-	if _, _, err = spoolModelRequest(context.Background(), strings.NewReader("12345"), 4); !errors.Is(err, errModelRequestTooLarge) {
+	if _, _, err = spool.request(context.Background(), strings.NewReader("12345"), 4, -1); !errors.Is(err, errModelRequestTooLarge) {
 		t.Fatalf("oversize error=%v", err)
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err = spoolModelRequest(cancelled, strings.NewReader("data"), 4); !errors.Is(err, context.Canceled) {
+	if _, _, err = spool.request(cancelled, strings.NewReader("data"), 4, -1); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel error=%v", err)
 	}
 }

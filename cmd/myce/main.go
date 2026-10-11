@@ -66,6 +66,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	token := f.String("token", env("MYCE_TOKEN", ""), "shared fleet token (prefer MYCE_TOKEN)")
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce.db", "SQLite database file")
+	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default OS temporary directory)")
+	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total bytes held in the queue model-upload spool")
 	checkpoint := f.String("checkpoints", "./checkpoints", "queue NAS checkpoint root")
 	workerCheckpoint := f.String("checkpoint-root", env("MYCE_CHECKPOINT_ROOT", ""), "worker-local NAS root (may differ from queue mount path)")
 	cacheRoot := f.String("model-cache", "", "worker local model cache directory")
@@ -158,6 +160,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		defer q.Close()
+		if err = q.ConfigureUploadSpool(*uploadSpoolDir, *uploadSpoolBytes); err != nil {
+			return err
+		}
 		if err = q.ConfigureEnvironments(ec); err != nil {
 			return err
 		}

@@ -18,31 +18,6 @@ const maxGenericRequestBytes int64 = 8 << 30
 
 var errModelRequestTooLarge = errors.New("generic model request exceeds 8 GiB disk-spool limit")
 
-// spoolModelRequest makes a bounded, seekable copy so the queue can replay one
-// transport failure without retaining large media in memory.
-func spoolModelRequest(ctx context.Context, body io.Reader, limit int64) (*os.File, int64, error) {
-	f, err := os.CreateTemp("", "myce-model-request-*")
-	if err != nil {
-		return nil, 0, err
-	}
-	cleanup := func() {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-	}
-	n, err := io.Copy(f, io.LimitReader(contextReader{ctx: ctx, reader: body}, limit+1))
-	if err == nil && n > limit {
-		err = errModelRequestTooLarge
-	}
-	if err == nil {
-		_, err = f.Seek(0, io.SeekStart)
-	}
-	if err != nil {
-		cleanup()
-		return nil, 0, err
-	}
-	return f, n, nil
-}
-
 // PrepareModelEnvironment holds the cache use lock for the complete server life.
 func PrepareModelEnvironment(ctx context.Context, m Model, platform string, catalog EnvironmentCatalog, cache *EnvironmentCache) (Model, func(), error) {
 	if m.Environment == "" {

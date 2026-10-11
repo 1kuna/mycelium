@@ -28,7 +28,7 @@ that produces a useful result and preserve its existing inputs and outputs.
 | Long experiment that survives being stopped | [Resumable jobs](guide-resumable-jobs.md) and [Python checkpoint helpers](../clients/python/README.md#resumable-commands) | Checklist step 7; test stop/save/restart |
 | Production work that must start promptly | [Production handoff](integrating.md#production-handoff), [production reservations](integrating.md#nas-model-masters-and-instant-production), and [scheduling](job-reference.md#scheduling-and-results) | Checklist step 4; measure startup separately from model loading |
 | Calls to a model the queue keeps loaded, using OpenAI-style chat, text, or embeddings | [Model calls](guide-model-calls.md) | Checklist steps 3–5 and 8–9; use calls from the CPU caller |
-| Speech, OCR, or another model HTTP server | [General model servers](guide-servers.md) | Same call path; preserve the server's existing HTTP interface |
+| Speech, OCR, or another model HTTP server | [General model servers](guide-servers.md) | Preserve the HTTP interface; set `max_in_flight: 1` for serial servers |
 | Python packages or other software built on workers | [Software environments](environments.md) | Checklist step 6; a ready environment is required before execution |
 | A model file from network-attached storage (NAS), the shared file server | [Model masters and cache](guide-model-calls.md#explicit-master-download-and-pins) and [cache operations](operations.md#model-master-folder-worker-cache-and-production-reservations) | Checklist step 6; arrange verified files before real use |
 

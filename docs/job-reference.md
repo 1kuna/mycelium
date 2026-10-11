@@ -81,6 +81,8 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | Command / flag | Default | Purpose |
 |---|---|---|
 | `queue --listen` | `127.0.0.1:7331` | HTTP bind address |
+| `queue --upload-spool-bytes` | `17179869184` | Positive total held model-upload bytes (16 GiB); full budget returns HTTP 507 |
+| `queue --upload-spool-dir` | OS temporary directory | Local model-upload spool location; files removed after completion/abort |
 | `queue --db` | `myce.db` | Durable local SQLite file; one queue owner |
 | `queue --checkpoints` | `./checkpoints` | Shared root; create on mounted NAS first |
 | `queue --restart-grace` | `3m` | Worker reconciliation after queue restart |
@@ -147,7 +149,9 @@ defaults to empty. Each entry requires unique `name`, `engine` (`llama.cpp`,
 `server`, `vllm`, or explicit test-only `fake`), NAS master `path`, positive `memory_gb`, and nonempty
 `platforms`. Real models also require positive `size_bytes` and a 64-digit
 hex `sha256`. `direct_nas` defaults false; enable only for small models.
-Optional `args` defaults empty. For llama.cpp, adapter-owned host/port/model/alias
+Optional `max_in_flight` defaults to `0` (unlimited), otherwise a positive
+integer caps simultaneous requests per loaded copy; excess calls wait by
+priority/deadline. Optional `args` defaults empty. For llama.cpp, adapter-owned host/port/model/alias
 flags cannot be overridden; default GPU layers is 99. Embedding models need
 appropriate engine embedding args. Server/vLLM fields and multi-file manifests
 are described in [general servers](guide-servers.md). Catalog hashes must match
