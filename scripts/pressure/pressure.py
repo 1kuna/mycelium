@@ -318,10 +318,14 @@ def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str,
                                 if retry == 2:raise ValueError("DRM descriptor repeatedly reused")
                                 continue
                             break
-                        except FileNotFoundError:
+                        except OSError as error:
+                            if error.errno not in (errno.ENOENT, errno.ESRCH):
+                                raise
                             raw = None
-                            if not os.path.lexists(descriptor) and not Path(info.path).exists():
-                                break  # Confirmed closed; permission errors and unresolved reuse still fail.
+                            # fdinfo can linger after closure; confirm against a fresh fd listing.
+                            with os.scandir(pid / "fd") as current:
+                                if info.name not in {entry.name for entry in current}:
+                                    break
                             if retry == 2:raise
                     if raw is None:
                         continue
@@ -366,8 +370,9 @@ def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str,
                                 exe=executable, cgroup=(pid / "cgroup").read_text().strip(),
                                 clients=sorted(clients.values(), key=lambda c: (c["pci"], c["device"], c["client"]))))
         except OSError as error:
-            if error.errno in (errno.ENOENT, errno.ESRCH) and not pid.exists():
-                continue
+            if error.errno in (errno.ENOENT, errno.ESRCH):
+                if pid.name not in {entry.name for entry in proc.iterdir()}:
+                    continue
             raise
     return sorted(holders, key=lambda h: h["pid"])
 

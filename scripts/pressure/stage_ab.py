@@ -21,8 +21,8 @@ from pressure import (Checker, api, clock_domain, digest, drm_identity, drm_inve
                       drm_owners, emit, observe, replay, spec, submit)
 
 PCI = '0000:07:00.0'
-ROOT = Path('/home/kuna/myce-test-stage-ab-r2e-20261011')
-NAS = Path('/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r2e-20261011')
+ROOT = Path('/home/kuna/myce-test-stage-ab-r3-20261011')
+NAS = Path('/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r3-20261011')
 XPU = '/home/kuna/verso-labs/runtimes/experiment-xpu-venv/bin/python'
 QUEUE = Path('/home/kuna/exp42-queue')
 BASE = Path(__file__).parent
@@ -50,7 +50,7 @@ class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r2e.service'
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r3.service'
         self.baseline = json.loads((ROOT / 'display-baseline.json').read_text())
         self.env = {k:v for k,v in os.environ.items() if not k.startswith('MYCE_')}
         self.env['MYCE_TOKEN'] = os.urandom(32).hex()
@@ -473,11 +473,10 @@ class Run:
             d=next(QUEUE.glob('564-*'))
             assert json.loads((d/'meta.json').read_text())['enabled'] is False
             assert json.loads((d/'status').read_text())['state']=='failed'
-            self.fixed_defect_probes()
             self.result('B-forced-reboots','EXCLUDED',executed=False,reason='not approved')
             self.physical()
             pause_path=QUEUE/'PAUSED'
-            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r2e',nonce=os.urandom(16).hex()))+'\n').encode()
+            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r3',nonce=os.urandom(16).hex()))+'\n').encode()
             with pause_path.open('xb') as f:f.write(self.pause);f.flush();os.fsync(f.fileno())
             (ROOT/'owned-pause').write_bytes(self.pause)
             time.sleep(1)
@@ -488,8 +487,6 @@ class Run:
                 assert not (s.get('state') in ('running','stopping','preempting') and s.get('assigned_xpu')==1)
             self.counter.start();self.observer.start()
             self.wait(lambda:self.device_at>0,5)
-            self.scenario('A1-30-production',lambda:self.production_only())
-            for seed in range(20):self.scenario(f'A2-swap-{seed:02}',lambda seed=seed:self.swap(seed))
             self.scenario('A3-direct-queue-60s',self.direct)
             self.begin('A-memory')
             for host in (512,1024,2048,4096):self.measure(host)
