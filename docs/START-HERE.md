@@ -294,3 +294,5 @@ maintainer decides when to enable it after the required hardware and ownership g
 - [Sharing and usage](guide-fairness-usage.md): read for project weights, experiment limits, and usage reports.
 - [Examples](../examples/): use as configuration starting points; replace and qualify placeholders.
 - [Deployment templates](../deploy/README.md): read only when preparing authorized service installation.
+
+To take a worker host out immediately and keep it out across reboots, run `myce disable`; use `myce enable` to rejoin ([operations](operations.md#take-a-machine-out-of-mycelium)).

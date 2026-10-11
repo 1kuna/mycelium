@@ -22,6 +22,9 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	HostStateDir          string
+	SuperviseProcess      bool
+	ResumeCommand         []string
 	checkpointPrepare     func(Job) (string, error) // Filesystem fault seam.
 	control               *processControl
 	DeviceBinding         string
@@ -187,6 +190,11 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			return nil, err
 		}
 	}
+	unlock, err := hostLaunchGate(w.HostStateDir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	identity := ID()
 	args := []string{"-c", `read gate || exit 125; trap 'wait "$child"; exit $?' TERM; "$@" < /dev/null & child=$!; wait "$child"; exit $?`, "myce-supervisor-" + identity, command}
 	args = append(args, j.Spec.Run.Command[1:]...)
@@ -263,6 +271,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	s.state.Pending = 0
 	s.state.Result = nil
 	s.state.PID = 0
+	s.state.LaunchPending = true
 	if err = s.save(); err != nil {
 		output.Close()
 		return nil, err
@@ -272,6 +281,13 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		return nil, err
 	}
 	s.state.PID = cmd.Process.Pid
+	s.state.LaunchPending = false
+	if err = saveWorkerJSON(s.dir, "attempt-"+identity+".json", workerState{PID: s.state.PID, Identity: identity}); err != nil {
+		_ = syscall.Kill(-s.state.PID, syscall.SIGKILL)
+		_ = cmd.Wait()
+		output.Close()
+		return nil, err
+	}
 	if err = s.save(); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
@@ -365,6 +381,14 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	reason, disableErr := HostDisabled(w.HostStateDir)
+	if disableErr != nil {
+		return disableErr
+	}
+	if reason != "" {
+		log.Printf("worker disabled by operator: %s", reason)
+		return nil
+	}
 	if w.Interval <= 0 {
 		w.Interval = time.Second
 	}
@@ -385,7 +409,16 @@ func (w Worker) Run(stop context.Context) error {
 	if w.EnvironmentLimit == 0 {
 		w.EnvironmentLimit = 20 * 1024 * 1024 * 1024
 	}
-	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
+	if err = w.registerHost(s); err != nil {
+		if errors.Is(err, errHostDisabled) {
+			return nil
+		}
+		return err
+	}
+	if err = (HostControl{Dir: w.HostStateDir, Notify: NotifyHost(w.Client)}).ReconcileEnable(context.Background()); err != nil {
+		return err
+	}
+	w.environmentCache = &EnvironmentCache{HostStateDir: w.HostStateDir, Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
 	}
@@ -495,7 +528,24 @@ func (w Worker) Run(stop context.Context) error {
 		free = max(0, free-used)
 		return free, e
 	}
-	ctx := context.Background()
+	ctx, disableCancel := context.WithCancel(context.Background())
+	defer disableCancel()
+	go func() {
+		tick := time.NewTicker(50 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				reason, e := HostDisabled(w.HostStateDir)
+				if e != nil || reason != "" {
+					disableCancel()
+					return
+				}
+			}
+		}
+	}()
 	ticker := time.NewTicker(min(w.Interval, 100*time.Millisecond))
 	defer ticker.Stop()
 	var p *process
@@ -526,6 +576,23 @@ func (w Worker) Run(stop context.Context) error {
 		}
 	}()
 	for {
+		if ctx.Err() != nil {
+			if p != nil {
+				grace := hostDisableGrace(w.HostStateDir)
+				p.stop(w.Clock.Now(), grace, false)
+				for {
+					p.enforceGrace(w.Clock.Now())
+					select {
+					case <-p.done:
+						p = nil
+						goto disabledExit
+					case <-ticker.C:
+					}
+				}
+			}
+		disabledExit:
+			return nil
+		}
 		now := w.Clock.Now()
 		batch := 0.0
 		if s.state.Job != nil {
