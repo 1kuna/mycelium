@@ -1114,7 +1114,7 @@ func (q *Queue) Started(r Result) error {
 }
 
 func (q *Queue) renewRecoveryStartWindow(j *Job) {
-	if j.Spec.Priority == "production" && j.StartedAt != nil && j.Spec.StartBy != nil {
+	if j.Spec.Priority == "production" && j.State == "running" && j.StartedAt != nil && j.Spec.StartBy != nil {
 		// Recovery is bounded from loss detection, using the original first-start window.
 		if j.StartWindow == 0 {
 			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)

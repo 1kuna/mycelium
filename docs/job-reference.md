@@ -317,7 +317,12 @@ attempt or cancellation refuses execution. The worker stores launch intent befor
 asking, so restart reconciles/cleans that attempt and replays buffered results
 instead of executing it again. A lost positive reply conservatively leaves the
 attempt started in the queue but unexecuted; reconciliation handles recovery.
-Deploy the matching queue and workers together. Late result messages cannot
+Deploy the matching queue and workers together. Check-in requires the durable-start
+protocol marker; older workers receive HTTP 426 before assignment. Production
+workers also require an explicit matching durable-start answer and `start_by`,
+so an older queue cannot authorize execution. Shared and instance disable flags
+are checked before and after the start request; cleanup retains attempt custody.
+Late result messages cannot
 revive failure. Assigned expiry sends an attempt-specific kill and retains release custody and memory accounting;
 status says `release pending` until the matching cleanup acknowledgement.
 Experiment stops and Docker cleanup continue independently after production fails.
