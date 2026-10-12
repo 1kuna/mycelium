@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Detached Mac transport for the approved Spark worker; no fleet service changes."""
 import json
+from kernel_reads import kernel_read, Vanished
 from pathlib import Path
 import shlex
 import signal
@@ -8,14 +9,15 @@ import socket
 import subprocess
 import time
 
-ROOT='/home/kuna/myce-test-stage-ab-r6-20261011'
-UNIT='myce-test-stage-ab-r6-spark.service'
+ROOT='/home/kuna/myce-test-stage-ab-r7-20261011'
+UNIT='myce-test-stage-ab-r7-spark.service'
 UUID='GPU-90c3e7f2-22d3-5055-5f80-3ce0250c2830'
 procs=[]
 ports=[]
 state=None
 
 def remote(host,code,data=None):
+    if "kernel_read" in code or "Vanished" in code or "disable_drill" in code:code="import sys; sys.path.insert(0,"+repr(ROOT+'/source/scripts/pressure')+"); from kernel_reads import kernel_read, Vanished\n"+code
     result=subprocess.run(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=5',host,
         'python3 -c '+shlex.quote(code)],input=json.dumps(data).encode() if data is not None else b'',
         stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=25)
@@ -24,7 +26,7 @@ def remote(host,code,data=None):
 
 def read_request():
     result=subprocess.run(['ssh','b70','sudo -n python3 -c '+shlex.quote(
-        'from pathlib import Path; import json; p=Path("'+ROOT+'/spark-request.json"); print(p.read_text() if p.exists() else "null")')],
+        'import sys; sys.path.insert(0,"'+ROOT+'/source/scripts/pressure"); from kernel_reads import kernel_read; from pathlib import Path; import json; p=Path("'+ROOT+'/spark-request.json"); print(kernel_read(p) if p.exists() else "null")')],
         stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=15)
     if result.returncode:raise RuntimeError('B70 request unavailable')
     return json.loads(result.stdout)
@@ -35,7 +37,7 @@ def respond(data):
 def stop():
     global state
     if state is not None:
-        remote('spark','import subprocess; subprocess.run(["systemctl","--user","stop","'+UNIT+'"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)')
+        remote('spark',"from pathlib import Path; import subprocess; from disable_drill import empty; d={};\nfor k in ('ActiveState','ControlGroup'):\n d[k]=subprocess.check_output(['systemctl','--user','show','"+UNIT+"','-p',k,'--value'],text=True).strip()\ngroup=d['ControlGroup']; subprocess.run(['systemctl','--user','stop','"+UNIT+"'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\nfor k in d:\n d[k]=subprocess.check_output(['systemctl','--user','show','"+UNIT+"','-p',k,'--value'],text=True).strip()\nassert empty(group,d),'Spark test cgroup unconfirmed'")
     for process in procs:
         if process.poll() is None:process.terminate()
     for process in procs:
@@ -60,12 +62,12 @@ def start(request):
 import json,sys,subprocess,os
 r=json.load(sys.stdin);assert Path('/home/kuna/nas-dev').is_mount();root=Path("'''+ROOT+'''")
 cg=subprocess.check_output(['systemctl','--user','show','verso-loan-233-next-queue.service','-p','ControlGroup','--value'],text=True).strip()
-assert cg and int((Path('/sys/fs/cgroup')/cg.lstrip('/')/'memory.current').read_text()) < 14*1024**3
-assert int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))) >= 40*1024**2
+assert cg and int(kernel_read(Path('/sys/fs/cgroup')/cg.lstrip('/')/'memory.current')) < 14*1024**3
+assert int(next(line.split()[1] for line in kernel_read('/proc/meminfo').splitlines() if line.startswith('MemAvailable:'))) >= 40*1024**2
 phase=root/'phases'/r['phase'];phase.mkdir(parents=True,exist_ok=True)
 env=phase/'worker.env';env.touch(mode=0o600);os.chmod(env,0o600);env.write_text('MYCE_TOKEN='+r['token']+'\\n')
 budget='38' if r['mode']=='full' else '40'
-args=['systemd-run','--user','--unit='''+UNIT+'''','--collect','--property=MemoryMax=2G','--property=MemorySwapMax=0','--property=CPUQuota=200%','--property=TimeoutStopSec=20s','--property=RuntimeMaxSec=20min','--property=EnvironmentFile='+str(env),str(root/'myce'),'join','--queue','http://127.0.0.1:'+str(r['sparkport']),'--name','spark-pressure','--host-id','spark-pressure-host','--gpu','cuda','--device','''+UUID+'''','--memory-mode','unified','--memory-gb',budget,'--reserve-memory-gb','38','--reserve-host-memory-gb','38','--heartbeat','250ms','--state-dir',str(phase/'worker'),'--checkpoint-root','/home/kuna/nas-dev/Verso/experiments/exp-238-mycelium-stage-ab-r6-20261011/'+r['phase']]
+args=['systemd-run','--user','--unit='''+UNIT+'''','--collect','--property=MemoryMax=2G','--property=MemorySwapMax=0','--property=CPUQuota=200%','--property=TimeoutStopSec=20s','--property=RuntimeMaxSec=20min','--property=EnvironmentFile='+str(env),str(root/'myce'),'join','--queue','http://127.0.0.1:'+str(r['sparkport']),'--name','spark-pressure','--host-id','spark-pressure-host','--gpu','cuda','--device','''+UUID+'''','--memory-mode','unified','--memory-gb',budget,'--reserve-memory-gb','38','--reserve-host-memory-gb','38','--heartbeat','250ms','--state-dir',str(phase/'worker'),'--checkpoint-root','/home/kuna/nas-dev/Verso/experiments/exp-238-mycelium-stage-ab-r7-20261011/'+r['phase']]
 result=subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 if result.returncode:raise SystemExit(result.returncode)
 print(json.dumps({'started':True,'reservation_gib':38,'atlas_reserve_gib':24,'verso_reserve_gib':14,'budget_gib':int(budget)}))
@@ -82,7 +84,7 @@ print(json.dumps({'started':True,'reservation_gib':38,'atlas_reserve_gib':24,'ve
 
 def collect():
     request=state.copy()
-    rows=remote('spark','from pathlib import Path; import json; p=Path("'+ROOT+'/phases/'+request['phase']+'/events.jsonl"); print(json.dumps([json.loads(r) for r in p.read_text().splitlines()] if p.exists() else []))')
+    rows=remote('spark','from pathlib import Path; import json; p=Path("'+ROOT+'/phases/'+request['phase']+'/events.jsonl"); print(json.dumps([json.loads(r) for r in kernel_read(p).splitlines()] if p.exists() else []))')
     stop()
     for row in rows:
         row['original_at']=row['at'];row['original_boot']=row['boot'];row['at']+=request['offset'];row['boot']=request['boot']
@@ -102,16 +104,17 @@ for port in ports:
  with socket.socket() as s:
   s.settimeout(.2)
   if s.connect_ex(('127.0.0.1',port))==0:occupied.append(port)
-unit=subprocess.run(['systemctl','--user','is-active','myce-test-stage-ab-r6-spark.service'],capture_output=True,text=True).stdout.strip()
+unit=subprocess.run(['systemctl','--user','is-active','myce-test-stage-ab-r7-spark.service'],capture_output=True,text=True).stdout.strip()
 remaining=[]
-for p in Path('/proc').iterdir():
+for p in kernel_read('/proc','list'):
  if not p.name.isdigit():continue
  try:
-  if (p/'cgroup').read_text().strip().endswith('/myce-test-stage-ab-r6-spark.service'):remaining.append(int(p.name))
- except OSError:pass
-root=Path('/home/kuna/myce-test-stage-ab-r6-20261011');trash=Path('/home/kuna/.local/share/Trash')
+  if kernel_read(p/'cgroup').strip().endswith('/myce-test-stage-ab-r7-spark.service'):remaining.append(int(p.name))
+ except Vanished:pass
+assert unit in ('inactive','unknown','failed') and not remaining and not occupied,'Spark cleanup unconfirmed'
+root=Path('/home/kuna/myce-test-stage-ab-r7-20261011');trash=Path('/home/kuna/.local/share/Trash')
 for sub in ('files','info'):(trash/sub).mkdir(parents=True,exist_ok=True)
-dest=trash/'files'/('myce-test-stage-ab-r6-spark-'+str(time.time_ns()))
+dest=trash/'files'/('myce-test-stage-ab-r7-spark-'+str(time.time_ns()))
 info=trash/'info'/(dest.name+'.trashinfo')
 if root.exists():
  info.write_text('[Trash Info]\\nPath='+quote(str(root))+'\\nDeletionDate='+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')+'\\n');root.rename(dest)
@@ -124,6 +127,11 @@ if __name__=='__main__':
     try:
         until=time.monotonic()+2*3600
         while time.monotonic()<until:
+            complete=remote('b70','from pathlib import Path; import json; print(json.dumps(Path("'+ROOT+'/final-cleanup.json").exists()))')
+            if complete:break
+            source_ready=remote('b70','from pathlib import Path; import json; print(json.dumps(Path("'+ROOT+'/source/scripts/pressure/kernel_reads.py").exists()))')
+            if not source_ready:
+                time.sleep(1);continue
             request=read_request()
             if request and request['request_id']!=last:
                 last=request['request_id']
@@ -134,7 +142,7 @@ if __name__=='__main__':
                     respond(dict(mode=request['mode'],phase=request['phase'],ok=False,error=type(e).__name__))
                     stop()
             if state:
-                available=remote('spark','from pathlib import Path; import json; print(json.dumps(int(next(r.split()[1] for r in Path("/proc/meminfo").read_text().splitlines() if r.startswith("MemAvailable:"))))')
+                available=remote('spark','from pathlib import Path; import json; print(json.dumps(int(next(r.split()[1] for r in kernel_read("/proc/meminfo").splitlines() if r.startswith("MemAvailable:"))))')
                 if available<38*1024**2:raise RuntimeError('Spark reserved headroom breached')
             complete=remote('b70','from pathlib import Path; import json; print(json.dumps(Path("'+ROOT+'/final-cleanup.json").exists()))')
             if complete:break
