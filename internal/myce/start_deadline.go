@@ -59,7 +59,11 @@ func (q *Queue) maintainStartDeadlines() {
 			deadline := j.Queued.Add(ProductionStartTimeout)
 			j.Spec.StartBy = &deadline
 		}
-		if !startupPending(j) || !expired(j.Spec.StartBy, now) {
+		if !startupPending(j) {
+			continue
+		}
+		disabled := j.State == "queued" && q.allStartHostsDisabled(j)
+		if !expired(j.Spec.StartBy, now) && !disabled {
 			continue
 		}
 		reason := q.startWaitingReason(j)
@@ -81,6 +85,9 @@ func (q *Queue) maintainStartDeadlines() {
 		}
 		j.State = "failed"
 		j.Reason = "production start deadline exceeded: " + reason
+		if disabled && !expired(j.Spec.StartBy, now) {
+			j.Reason = "production cannot start: no eligible host is enabled; " + reason
+		}
 		j.FinishedAt = &now
 		for i := range j.Copies {
 			j.Copies[i].Recoverable = false
@@ -115,6 +122,12 @@ func (q *Queue) PermitStart(r Result) (StartPermit, error) {
 			return nil
 		}
 		m := q.s.Machines[j.Machine]
+		if m != nil && j.Spec.Run.Docker && (m.DockerCleanup == "creating" || m.DockerCleanup == "create pending") {
+			// This attempt has completed create before requesting its permit; sibling custody still blocks.
+			previous := m.DockerCleanup
+			m.DockerCleanup = ""
+			defer func() { m.DockerCleanup = previous }()
+		}
 		if j.State != "running" || m == nil || !q.placementAllowed(j, m) {
 			rejected = ErrStale
 			return nil
@@ -132,4 +145,35 @@ func (q *Queue) PermitStart(r Result) (StartPermit, error) {
 
 func (q *Queue) startStatusReason(j *Job) string {
 	return q.startWaitingReason(j) + fmt.Sprintf("; %.0fs left to start", max(0, j.Spec.StartBy.Sub(q.clock.Now()).Seconds()))
+}
+
+// An unknown fleet may still join; an explicit operator disable is not incoming room.
+func (q *Queue) allStartHostsDisabled(j *Job) bool {
+	if model, ok := q.model(j.Spec.Needs.Model); ok && j.Spec.Needs.MemoryGB == 0 {
+		copy := cloneJob(j)
+		copy.Spec.Needs.MemoryGB = model.MemoryGB
+		copy.Spec.Needs.Platform = Platform{Required: model.Platforms}
+		j = &copy
+	}
+	found := false
+	for _, m := range q.s.Machines {
+		if !q.projectAllows(j.Spec.Project, m.ID) || len(j.Spec.AllowedMachines) > 0 && !slices.Contains(j.Spec.AllowedMachines, m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
+			continue
+		}
+		capacity := *m
+		capacity.Gone, capacity.Leaving, capacity.CheckpointUnavailable = false, false, false
+		capacity.MemoryError = ""
+		memory := m.TotalMemoryGB
+		if memory == 0 {
+			memory = j.Spec.Needs.MemoryGB
+		}
+		if !fitsWithoutHostMemory(j, &capacity, memory) {
+			continue
+		}
+		found = true
+		if m.Disabled == "" && q.s.DisabledHosts[hostID(m)] == "" {
+			return false
+		}
+	}
+	return found
 }

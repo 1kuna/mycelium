@@ -113,6 +113,8 @@ var errWorkerMemory = errors.New("free memory unavailable or insufficient")
 
 var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 
+var errWorkerReleasePending = errors.New("command release unconfirmed")
+
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if j.Spec.Needs.HostMemoryGB > 0 {
 		if w.HostMemorySource == nil {
@@ -312,29 +314,29 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if readyWriter != nil {
 		readyWriter.Close()
 	}
-	s.state.PID = cmd.Process.Pid
-	s.state.LaunchPending = false
-	if err = saveWorkerJSON(s.dir, "attempt-"+identity+".json", workerState{PID: s.state.PID, Identity: identity}); err != nil {
-		_ = syscall.Kill(-s.state.PID, syscall.SIGKILL)
-		_ = cmd.Wait()
-		output.Close()
-		return nil, err
-	}
-	if err = s.save(); err != nil {
+	abort := func(cause error) error {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
 		output.Close()
-		return nil, err
+		if releaseErr := waitWorkerGroup(cmd.Process.Pid, w.Clock); releaseErr != nil {
+			return errors.Join(cause, fmt.Errorf("%w: %v", errWorkerReleasePending, releaseErr))
+		}
+		return cause
+	}
+	s.state.PID = cmd.Process.Pid
+	s.state.LaunchPending = false
+	if err = saveWorkerJSON(s.dir, "attempt-"+identity+".json", workerState{PID: s.state.PID, Identity: identity}); err != nil {
+		return nil, abort(err)
+	}
+	if err = s.save(); err != nil {
+		return nil, abort(err)
 	}
 	p := &process{job: j, cmd: cmd, done: make(chan workerFinish, 1)}
 	if w.control != nil {
 		w.control.set(p)
 	}
 	if err = w.authorizeStart(j, s.state.Session); err != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		_ = cmd.Wait()
-		output.Close()
-		return nil, err
+		return nil, abort(err)
 	}
 	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -344,13 +346,10 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		_ = readyReader.SetReadDeadline(time.Now().Add(2 * time.Second))
 		receipt, e := io.ReadAll(io.LimitReader(readyReader, 4096))
 		if e != nil || len(receipt) > 0 {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			_ = cmd.Wait()
-			output.Close()
 			if e != nil {
-				return nil, fmt.Errorf("command exec receipt: %w", e)
+				return nil, abort(fmt.Errorf("command exec receipt: %w", e))
 			}
-			return nil, errors.New(string(receipt))
+			return nil, abort(errors.New(string(receipt)))
 		}
 	}
 	result := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
@@ -852,7 +851,13 @@ func (w Worker) Run(stop context.Context) error {
 					if !(reply.Stop && reply.Kill) {
 						err = w.replay(ctx, s)
 					} else if s.state.Result != nil && !s.state.Job.Spec.Run.Docker {
-						err = &HTTPError{Status: 409}
+						// Reject stale output, but deliver the exact attempt's cleanup status.
+						released := *s.state.Result
+						released.ReleaseOnly = !released.ReleasePending
+						err = w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil)
+						if err == nil {
+							err = &HTTPError{Status: 409}
+						}
 					}
 					if err == nil && s.state.Result != nil {
 						err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
@@ -933,13 +938,15 @@ func (w Worker) Run(stop context.Context) error {
 							}
 						}
 						if err != nil && !(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory)) {
-							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error()}
+							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), ReleasePending: errors.Is(err, errWorkerReleasePending)}
 							s.state.Job = &j
 							if w.batchMemory != nil {
 								w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
 							}
 							s.state.Result = &r
-							s.state.PID = 0
+							if !r.ReleasePending {
+								s.state.PID = 0
+							}
 							err = s.save()
 						}
 					}
