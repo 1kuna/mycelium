@@ -329,6 +329,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	s.state.Offset = 0
 	s.state.Pending = 0
 	s.state.Result = nil
+	s.state.OperatorStopped = false
 	s.state.PID = 0
 	s.state.LaunchPending = true
 	if err = s.save(); err != nil {
@@ -575,6 +576,12 @@ func (w Worker) Run(stop context.Context) error {
 		s.state.Result = &r
 		s.state.PID = 0
 	}
+	if s.state.Result != nil && s.state.OperatorStopped {
+		s.state.Result.OperatorStop = true
+		if !s.state.Result.Success {
+			s.state.Result.Interrupted = true
+		}
+	}
 	if s.state.Job != nil && (s.state.Result != nil || recoveringProcess != nil) {
 		recovering = true
 		w.Machine.Session = s.state.Session
@@ -760,6 +767,12 @@ func (w Worker) Run(stop context.Context) error {
 				if f.err != nil {
 					return fmt.Errorf("persist command result: %w", f.err)
 				}
+				if s.state.OperatorStopped {
+					f.result.OperatorStop = true
+					if !f.result.Success {
+						f.result.Interrupted = true
+					}
+				}
 				s.state.Result = &f.result
 				s.state.PID = 0
 				if err = s.save(); err != nil {
@@ -942,6 +955,7 @@ func (w Worker) Run(stop context.Context) error {
 					}
 					if s.state.Result != nil && (err == nil || stale(err)) {
 						s.state.Job = nil
+						s.state.OperatorStopped = false
 						s.checkpointUnavailable = false
 						s.state.Result = nil
 						s.state.PID = 0

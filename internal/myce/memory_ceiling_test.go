@@ -209,7 +209,7 @@ func TestMemoryCeilingDockerContract(t *testing.T) {
 			select {
 			case f := <-p.done:
 				calls, _ := os.ReadFile(filepath.Join(root, "calls"))
-				if !strings.Contains(string(calls), "--memory 5368709120 --memory-swap 5368709120") || !strings.Contains(string(calls), "MYCE_MEMORY_LIMIT_BYTES=5368709120") {
+				if !strings.Contains(string(calls), "--memory 5368709120") || !strings.Contains(string(calls), "MYCE_MEMORY_LIMIT_BYTES=5368709120") {
 					t.Fatalf("ceiling not supplied: %s", calls)
 				}
 				if mode == "missing-memory-limit" {

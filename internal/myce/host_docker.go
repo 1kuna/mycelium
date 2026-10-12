@@ -156,6 +156,32 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 				failures = append(failures, "Docker label inventory unconfirmed: "+e.Error())
 				continue
 			}
+			var networks []dockerNetworkInspection
+			if unitParent(h.Dir) == "" {
+				networks, e = scan.networks()
+			} else {
+				for _, d := range attempts {
+					if d.state.Endpoint == endpoint {
+						scan.state.Identity = d.state.Identity
+						n, err := scan.networks()
+						networks = append(networks, n...)
+						e = errors.Join(e, err)
+					}
+				}
+			}
+			if e != nil {
+				failures = append(failures, "Docker network inventory unconfirmed: "+e.Error())
+			}
+			for _, n := range networks {
+				key := endpoint + "\x00" + n.Labels["myce.attempt"]
+				d := attempts[key]
+				if d == nil {
+					d = &dockerAttempt{binary: binary, env: env, ctx: ctx, clock: h.Clock, timeout: 2 * time.Second, state: dockerExecution{Identity: n.Labels["myce.attempt"], Endpoint: endpoint, Network: n.Name}}
+					d.stop(h.Clock.Now(), max(0, stopAt.Sub(h.Clock.Now())), !h.Clock.Now().Before(stopAt))
+					attempts[key] = d
+				}
+				d.state.Released = false
+			}
 			for key := range liveContainers {
 				if strings.HasPrefix(key, endpoint+"\x00") {
 					delete(liveContainers, key)
