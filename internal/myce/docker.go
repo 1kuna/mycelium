@@ -464,6 +464,10 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		if e != nil {
 			return e
 		}
+		if e = w.authorizeStart(j, j.Session); e != nil {
+			d.stop(w.Clock.Now(), 0, true)
+			return e
+		}
 		_, e = d.operation("start", "start", id)
 		return e
 	})

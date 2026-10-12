@@ -29,6 +29,9 @@ func TestHostDisableRequeuesProductionWithoutRetryAndFencesSiblings(t *testing.T
 	check(t, q, other, nil)
 	s := spec("production")
 	s.Resumable = false
+	// This recovery scenario intentionally waits ten minutes before a new attempt.
+	startBy := clock.Now().Add(20 * time.Minute)
+	s.StartBy = &startBy
 	j := submit(t, q, s)
 	running := check(t, q, a, nil).Job
 	if running == nil {
@@ -248,6 +251,9 @@ func TestHostDisablePendingDoesNotPrematurelyRequeueDuringGrace(t *testing.T) {
 	check(t, q, m, nil)
 	j := submit(t, q, spec("production"))
 	running := check(t, q, m, nil).Job
+	if err := q.Started(result(running, true)); err != nil {
+		t.Fatal(err)
+	}
 	if err := q.DisableHost("host", "checkpoint grace", false); err != nil {
 		t.Fatal(err)
 	}
