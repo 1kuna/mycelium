@@ -258,3 +258,70 @@ func TestSystemdGraceWithoutMutableTimeoutProperty(t *testing.T) {
 		t.Fatal("kill not confirmed", empty, err)
 	}
 }
+
+func TestSystemdRechecksTransitionalMissingCgroup(t *testing.T) {
+	shows := 0
+	stopped := false
+	s := &SystemdHostService{Unit: "myce-worker@gpu1.service", Command: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if args[1] == "stop" {
+			stopped = true
+		}
+		state := "active"
+		if args[1] == "show" {
+			shows++
+		}
+		if shows > 1 {
+			state = "failed"
+		}
+		return []byte("LoadState=loaded\nKillMode=control-group\nSendSIGKILL=yes\nActiveState=" + state + "\nControlGroup=\n"), nil
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := s.Stop(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !stopped || shows < 2 {
+		t.Fatal("transitional snapshot not rechecked", shows, stopped)
+	}
+	if empty, err := s.Empty(ctx); err != nil || !empty {
+		t.Fatal(empty, err)
+	}
+}
+
+func TestSystemdPersistentMissingCgroupFailsClosed(t *testing.T) {
+	stopped := false
+	s := &SystemdHostService{Unit: "myce-worker@gpu1.service", Command: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if args[1] == "stop" || args[1] == "kill" {
+			stopped = true
+		}
+		return []byte("LoadState=loaded\nKillMode=control-group\nSendSIGKILL=yes\nActiveState=active\nControlGroup=\n"), nil
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := s.Stop(ctx, 0); err == nil || stopped {
+		t.Fatal("inconsistent unit authorized signaling", err, stopped)
+	}
+}
+
+func TestInstallerRejectsUnrelatedWorkerUnit(t *testing.T) {
+	for _, action := range []string{"install", "uninstall"} {
+		t.Run(action, func(t *testing.T) {
+			home := t.TempDir()
+			c, _ := PlanInstall("worker", home, "", home, "http://127.0.0.1:1", "test", Detection{OS: "linux", Platform: "fake"})
+			c.Service = filepath.Join(home, "verso.service")
+			executable := filepath.Join(home, "myce-source")
+			os.WriteFile(executable, []byte("fixture"), 0700)
+			called := false
+			command := func(context.Context, string, ...string) ([]byte, error) { called = true; return nil, nil }
+			var err error
+			if action == "install" {
+				err = Install(context.Background(), c, executable, "fixture-token", command)
+			} else {
+				err = Uninstall(context.Background(), c, false, command)
+			}
+			if err == nil || called {
+				t.Fatal("installer operated on unrelated unit", err, called)
+			}
+		})
+	}
+}
