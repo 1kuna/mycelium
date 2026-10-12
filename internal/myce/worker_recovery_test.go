@@ -84,6 +84,67 @@ func TestWorkerStateLockAndCorruption(t *testing.T) {
 		t.Fatal("corrupt state silently discarded")
 	}
 }
+func TestWorkerStateRejectsForeignDocuments(t *testing.T) {
+	for _, data := range []string{
+		`{"state":"failed","pid":null,"assigned_xpu":1,"preemption_count":0,"attempt_token":"synthetic-old-attempt"}`,
+		`{"state":"running","pid":999999,"assigned_xpu":1,"preemption_count":2,"attempt_token":"synthetic-old-attempt"}`,
+		`{}`, `null`, `{"pid":999999}`, `{"session":"old","fresh":false}`,
+		`{"session":null,"fresh":false,"offset":0}`,
+		`{"session":"old","fresh":false,"offset":0,"attempt_token":"foreign"}`,
+		`{"session":"old","fresh":false,"offset":0} {}`,
+	} {
+		t.Run(data, func(t *testing.T) {
+			w := recoveryWorker(t)
+			path := filepath.Join(w.StateDir, "state.json")
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				store, err := w.openStore()
+				if err == nil {
+					store.close()
+					t.Fatal("foreign or incomplete state accepted")
+				}
+				if !strings.Contains(err.Error(), "read worker state") {
+					t.Fatal(err)
+				}
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != data {
+				t.Fatalf("rejected state changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkerStateAcceptsExistingSchema(t *testing.T) {
+	for _, data := range []string{
+		`{"session":"old","fresh":false,"offset":0}`,
+		`{"session":"old","previous_session":"previous","fresh":true,"offset":17,"pid":42,"identity":"owned","launch_pending":true,"birth":"birth","pending":2,"checkpoint_root":"/local","log":"owned.log"}`,
+	} {
+		w := recoveryWorker(t)
+		if err := os.WriteFile(filepath.Join(w.StateDir, "state.json"), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		store, err := w.openStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if store.state.Session != "old" {
+			t.Fatal("existing session lost")
+		}
+		if err := store.save(); err != nil {
+			t.Fatal(err)
+		}
+		store.close()
+		store, err = w.openStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		store.close()
+	}
+}
+
 func TestWorkerOfflineLargeOutputIsDurable(t *testing.T) {
 	w := recoveryWorker(t)
 	w.Client.URL = "http://127.0.0.1:1"
