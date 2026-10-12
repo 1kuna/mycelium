@@ -711,6 +711,8 @@ func (q *Queue) Complete(r Result) error {
 				j.ReleaseConfirmed = true
 				if r.Forced {
 					j.LastStopOutcome = "forced"
+				} else if j.LastStopOutcome == "release pending" {
+					j.LastStopOutcome = "released"
 				}
 			}
 			q.maintain()

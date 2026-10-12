@@ -290,8 +290,8 @@ HTTP calls retain their separate `max_wait` contract, and models loaded inside a
 batch command are not covered by its command-start acknowledgement.
 
 Status, the status page and the job record show the blocker and seconds left.
-Disabled hosts remain visible until expiry, allowing a brief operator recovery
-without silently extending the wait. No eligible machine, pending stops,
+Queued production fails immediately when every known eligible host is disabled
+by the operator. Unknown inventory may still join within the deadline. Pending stops,
 unconfirmed Docker cleanup, worker recovery, environment preparation and capacity
 can all exhaust the budget. At `now >= start_by`, an unstarted job fails with
 `production start deadline exceeded: <blocker>`; a past deadline fails on submit
