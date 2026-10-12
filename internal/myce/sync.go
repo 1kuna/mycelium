@@ -92,6 +92,9 @@ func (q *Queue) modelScores(m *Machine) map[string]int {
 	return scores
 }
 func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
+	if m.EnablePending {
+		return nil, nil, nil
+	}
 	scores := q.modelScores(m)
 	pins := q.cachePins(m)
 	for _, j := range q.s.Jobs {

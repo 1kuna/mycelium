@@ -529,16 +529,6 @@ func (w Worker) Run(stop context.Context) error {
 	if err = w.refreshHostMemoryBudget(); err != nil {
 		return err
 	}
-	notify := NotifyHost(w.Client)
-	if parent := unitParent(w.HostStateDir); parent != "" {
-		if err = (HostControl{Dir: parent, Notify: notify}).ReconcileEnable(context.Background()); err != nil {
-			return err
-		}
-		notify = nil
-	}
-	if err = (HostControl{Dir: w.HostStateDir, Notify: notify}).ReconcileEnable(context.Background()); err != nil {
-		return err
-	}
 	w.environmentCache = &EnvironmentCache{HostStateDir: w.HostStateDir, Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
@@ -714,7 +704,8 @@ func (w Worker) Run(stop context.Context) error {
 		w.control.run(eventCtx, stop, events)
 	}()
 	defer func() { eventCancel(); <-controlDone }()
-	var retry workerRetry
+	var retry, enableRetry workerRetry
+	enablePending := true
 	defer func() {
 		if p != nil {
 			p.stop(w.Clock.Now(), 0, true)
@@ -747,6 +738,14 @@ func (w Worker) Run(stop context.Context) error {
 			return nil
 		}
 		now := w.Clock.Now()
+		if enablePending && enableRetry.ready(now) {
+			if e := w.reconcileEnable(ctx); e != nil {
+				log.Printf("worker %s held: enable not yet acknowledged; retrying: %v", w.Machine.ID, e)
+				enableRetry.failed(w.Clock.Now(), time.Second)
+			} else {
+				enablePending = false
+			}
+		}
 		if !now.Before(nextLogCleanup) {
 			if err = pruneWorkerLogs(s.dir, s.state.Log, now, w.LogRetention); err != nil {
 				return errors.New("worker log retention failed")
@@ -798,6 +797,7 @@ func (w Worker) Run(stop context.Context) error {
 			rt.session = w.Machine.Session
 			rt.mu.Unlock()
 			m := w.Machine
+			m.EnablePending = enablePending
 			if p != nil && p.docker != nil {
 				status := p.docker.status()
 				if status != "running" {
@@ -812,7 +812,7 @@ func (w Worker) Run(stop context.Context) error {
 			m.Environments = append(slices.Clone(w.Machine.Environments), ready...)
 			m.EnvironmentReports = envReports
 			m.EnvironmentBuildSeconds = envTimes
-			if !recovering {
+			if !recovering && !enablePending {
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
@@ -878,6 +878,10 @@ func (w Worker) Run(stop context.Context) error {
 			var reply Reply
 			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running"), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
 			if err == nil {
+				if enablePending {
+					reply.Leave, reply.AdmissionBlocked = false, true
+					reply.Job, reply.ModelPlan, reply.EnvironmentPlan, reply.CopyPlan = nil, nil, nil, nil
+				}
 				if s.state.Job != nil && s.state.Job.Spec.Run.Docker && s.state.Result != nil {
 					ack := *s.state.Result
 					ack.ReleaseOnly = true
@@ -885,7 +889,7 @@ func (w Worker) Run(stop context.Context) error {
 						log.Printf("Docker release acknowledgement: %v", ackErr)
 					}
 				}
-				busy := reply.Job != nil || s.state.Job != nil || leaving || recovering
+				busy := reply.Job != nil || s.state.Job != nil || leaving || recovering || enablePending
 				for _, slot := range reply.ModelPlan {
 					if slot.State == "loading" || slot.InFlight > 0 {
 						busy = true
@@ -1071,7 +1075,7 @@ func (w Worker) Run(stop context.Context) error {
 				environments.sync(nil, true)
 				rt.cancelCopies()
 				var he *HTTPError
-				if errors.As(err, &he) && (he.Status == 400 || he.Status == 401) {
+				if !enablePending && errors.As(err, &he) && (he.Status == 400 || he.Status == 401) {
 					return err
 				}
 				log.Printf("worker %s reconnecting: %v", m.ID, err)
@@ -1117,4 +1121,15 @@ func (w Worker) checkHostRAM(gpu, host float64) error {
 		return fmt.Errorf("%w: host RAM need %.1f GiB, available %.1f GiB: %v", errWorkerMemory, need, free, err)
 	}
 	return nil
+}
+
+func (w Worker) reconcileEnable(ctx context.Context) error {
+	notify := NotifyHost(w.Client)
+	if parent := unitParent(w.HostStateDir); parent != "" {
+		if err := (HostControl{Dir: parent, Notify: notify}).ReconcileWorkerEnable(ctx, w.Client.URL, w.Machine.HostID); err != nil {
+			return err
+		}
+		notify = nil
+	}
+	return (HostControl{Dir: w.HostStateDir, Notify: notify}).ReconcileWorkerEnable(ctx, w.Client.URL, w.Machine.HostID)
 }

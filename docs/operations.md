@@ -264,14 +264,27 @@ unconfirmed work. A blocked kernel filesystem operation cannot be interrupted
 by Go: flag durability is claimed only after write/fsync succeeds, and any
 in-progress operation remains under the control lock until it returns. No NAS
 operation gates disable. Queue notifications are best-effort, launched alongside
-cleanup and never awaited by disable. An acknowledgement may remain pending if
+cleanup and never awaited by disable. A pending/unconfirmed notification message
+is not proof that the fleet queue rejected the request; another registered queue
+may be offline, or delivery may still be in flight. An acknowledgement may remain pending if
 the CLI exits before delivery; the durable receipt reconciles at enable/rejoin.
 
 Host control carries a durable monotonic generation in the local flag/receipt
 and queue host record. A stale enable or disable is rejected; retrying the same
 disable acknowledgement requeues jobs only once. Enable must follow acknowledged
 cleanup. Generations survive reboot and reconciliation retries, including a lost
-enable response. Preserve the host control directory; do not reset its counter.
+enable response. Acknowledgements are independent for each registered queue and
+host: accepted targets are removed from the pending receipt, and offline targets
+remain durable. Old laptop/drill queue registrations cannot veto a worker's
+rejoin to its own queue. A worker reconciles only its configured queue and host.
+Until that acknowledgement succeeds it stays running, sends held heartbeats,
+and admits no batch, model, copy or environment work. CLI/HTML/JSON status shows
+`held: enable not yet acknowledged (retrying)` (`enable_pending` in JSON).
+Reconciliation uses injected-clock backoff of 1, 2, 4, 8, 16, then 30 seconds;
+network I/O remains bounded. Local host/unit flags still cause successful exit.
+If the queue is unavailable, held status cannot reach it; inspect the worker log.
+Upgrade the queue before workers for the new held-status protocol; older queues
+reject unknown check-in fields. Preserve the host control directory; do not reset its counter.
 One OS-user control directory is the ordering authority for each physical host.
 A reachable queue fences every card on that host and requeues displaced jobs
 without charging a retry. Exact saved attempts can refund an outage loss.

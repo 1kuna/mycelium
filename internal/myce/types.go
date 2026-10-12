@@ -220,6 +220,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	EnablePending               bool                `json:"enable_pending,omitempty"`
 	HostMemoryBudgetGeneration  uint64              `json:"host_memory_budget_generation,omitempty"`
 	EffectiveHostMemoryBudgetGB float64             `json:"effective_host_memory_budget_gb,omitempty"`
 	HostMemoryInUseGB           float64             `json:"host_memory_in_use_gb,omitempty"`

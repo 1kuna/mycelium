@@ -463,6 +463,9 @@ func printStatus(s myce.Snapshot, full bool) {
 		} else if m.Leaving {
 			state = "leaving"
 		}
+		if m.EnablePending {
+			state += "; held: enable not yet acknowledged (retrying)"
+		}
 		if m.DockerCleanup != "" {
 			state += "; Docker " + m.DockerCleanup
 		}
