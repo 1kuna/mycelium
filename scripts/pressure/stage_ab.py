@@ -42,9 +42,10 @@ def atomic(path, value):
 def process(pid):
     p = Path('/proc') / str(pid)
     raw = kernel_read(p / 'stat', 'bytes')
-    return dict(boot=clock_domain(), pid=pid,
-                start=int(raw.rsplit(b')', 1)[1].split()[19]),
-                exe=kernel_read(p / 'exe', 'link'), cgroup=kernel_read(p / 'cgroup', 'text').strip())
+    identity=dict(boot=clock_domain(),pid=pid,start=int(raw.rsplit(b')',1)[1].split()[19]),
+                  exe=kernel_read(p/'exe','link'),cgroup=kernel_read(p/'cgroup').strip())
+    assert int(kernel_read(p/'stat','bytes').rsplit(b')',1)[1].split()[19])==identity['start'],'process identity changed'
+    return identity
 
 
 class Run:
@@ -62,6 +63,7 @@ class Run:
         self.safety = None
         self.recovering = threading.Event()
         self.counter_idle = threading.Event()
+        self.observer_idle = threading.Event()
         self.pause = None
         self.active = None
         self.stop = threading.Event()
@@ -215,8 +217,10 @@ class Run:
 
     def monitor(self):
         while not self.stop.is_set():
+            self.observer_idle.set()
             if self.recovering.is_set():
                 self.stop.wait(.1);continue
+            self.observer_idle.clear()
             began = time.monotonic()
             try:
                 active = self.active
@@ -230,7 +234,9 @@ class Run:
                 if self.worker_cgroup:
                     worker_group=Path('/sys/fs/cgroup')/self.worker_cgroup.split('::',1)[1].lstrip('/')
                     try:charged+=int(kernel_read(worker_group/'memory.current'))
-                    except Vanished:pass
+                    except Vanished:
+                        from disable_drill import empty,show
+                        assert empty(self.worker_cgroup.split('::',1)[1],show(self)),'worker RAM evidence unavailable'
                 self.total_peak['host_used_gib'] = max(self.total_peak['host_used_gib'], (mem['MemTotal:']-mem['MemAvailable:'])/1024**2)
                 self.total_peak['cgroup_bytes'] = max(self.total_peak['cgroup_bytes'], charged)
                 if active:
@@ -383,12 +389,13 @@ class Run:
             self.result(name,'HOLD' if self.safety else 'FAIL',error=type(e).__name__,
                         detail=str(e),events=str(getattr(self,'events','')))
             self.scenario_cleanup()
-            self.safety=None
 
     def scenario_cleanup(self):
         from disable_drill import cleanup as installed_cleanup
         self.active=None;self.recovering.set()
         try:
+            if self.observer.ident is not None and not self.observer_idle.wait(10):
+                raise RuntimeError('observer did not settle')
             if self.counter.ident is not None and not self.counter_idle.wait(10):
                 raise RuntimeError('counter did not settle')
             with self.inventory_lock:
@@ -436,7 +443,7 @@ class Run:
                 self.results[-1]['scenario_cleanup']=receipt
                 self.device_current=device_mib/1024;self.device_at=time.monotonic()
                 self.foreign_paused.clear();self.foreign.since=None;self.foreign_exited_at=None;self.next_scan=0
-                self.save()
+                self.safety=None;self.save()
         finally:self.recovering.clear()
 
     def swap(self,seed,action=None):
@@ -778,7 +785,6 @@ class Run:
                 if spark_started:
                     self.spark_request('stop')
                 self.scenario_cleanup()
-                self.safety=None
 
     def boundary(self,boundary):
         if boundary=='completion-ack':

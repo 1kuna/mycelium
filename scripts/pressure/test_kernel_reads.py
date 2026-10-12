@@ -82,6 +82,24 @@ class KernelReadTests(unittest.TestCase):
         with patch('kernel_reads._read',side_effect=OSError(errno.EACCES,'exited')),patch('kernel_reads._rescan',return_value=False):
             with self.assertRaises(k.Vanished):k.kernel_read(Path('/proc/17/fd/8'),'link')
 
+    def test_observer_survives_a_hold_until_cleanup(self):
+        import stage_ab
+        import threading
+        from unittest.mock import Mock
+        run=stage_ab.Run.__new__(stage_ab.Run)
+        run.stop=threading.Event();run.recovering=threading.Event();run.observer_idle=threading.Event()
+        run.active=None;run.safety=None;run.save=Mock()
+        count=[]
+        def broken(*_):
+            count.append(1)
+            if len(count)==2:run.stop.set()
+            raise OSError(errno.EIO,'injected collector error')
+        run.physical=broken
+        run.monitor()
+        self.assertEqual(len(count),2)
+        self.assertIsNotNone(run.safety)
+        self.assertEqual(run.save.call_count,2)
+
     def test_scenario_hold_continues_only_after_confirmed_cleanup(self):
         import stage_ab
         from types import SimpleNamespace
@@ -89,7 +107,7 @@ class KernelReadTests(unittest.TestCase):
         run=stage_ab.Run.__new__(stage_ab.Run)
         run.safety='collector fault';run.active=None
         run.result=Mock();run.begin=Mock(side_effect=RuntimeError('hold'))
-        run.scenario_cleanup=Mock()
+        run.scenario_cleanup=Mock(side_effect=lambda:setattr(run,'safety',None))
         run.scenario('first',lambda:None)
         self.assertIsNone(run.safety)
         run.scenario_cleanup.assert_called_once()
