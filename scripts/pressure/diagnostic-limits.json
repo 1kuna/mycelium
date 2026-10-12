@@ -1,0 +1,91 @@
+{
+  "pci": "0000:07:00.0",
+  "executable": "/usr/bin/xpu-smi",
+  "sha256": "2b5b128edf28b38da8637413fe8bfe3a4a40e8113210ba9ddaed945bd56d826e",
+  "results": [
+    {
+      "command": "stats",
+      "args": [
+        "stats",
+        "-d",
+        "0",
+        "-j"
+      ],
+      "exit": 0,
+      "lifetime_seconds": 0.8935849449990201,
+      "drm_observed_seconds": 0.7972611829973175,
+      "samples": 17,
+      "peak_fields": {
+        "drm-resident-system": 65536,
+        "drm-resident-gtt": 40960,
+        "drm-resident-vram0": 2846720,
+        "drm-resident-stolen": 0,
+        "drm-total-system": 192937984,
+        "drm-total-gtt": 40960,
+        "drm-total-vram0": 2846720,
+        "drm-total-stolen": 0
+      },
+      "footprint_bytes": 195825664,
+      "max_scan_seconds": 0.04579915899375919
+    },
+    {
+      "command": "discovery",
+      "args": [
+        "discovery",
+        "-j"
+      ],
+      "exit": 0,
+      "lifetime_seconds": 0.4547508960022242,
+      "drm_observed_seconds": 0.3522408770004404,
+      "samples": 8,
+      "peak_fields": {
+        "drm-resident-system": 65536,
+        "drm-resident-gtt": 40960,
+        "drm-resident-vram0": 2846720,
+        "drm-resident-stolen": 0,
+        "drm-total-system": 192937984,
+        "drm-total-gtt": 40960,
+        "drm-total-vram0": 2846720,
+        "drm-total-stolen": 0
+      },
+      "footprint_bytes": 195825664,
+      "max_scan_seconds": 0.04699622499902034
+    },
+    {
+      "command": "dump",
+      "args": [
+        "dump",
+        "-d",
+        "0",
+        "-m",
+        "0,18",
+        "-i",
+        "1",
+        "-n",
+        "5"
+      ],
+      "exit": 0,
+      "lifetime_seconds": 5.452348703001917,
+      "drm_observed_seconds": 5.345980992002296,
+      "samples": 109,
+      "peak_fields": {
+        "drm-resident-system": 65536,
+        "drm-resident-gtt": 40960,
+        "drm-resident-vram0": 2850816,
+        "drm-resident-stolen": 0,
+        "drm-total-system": 192937984,
+        "drm-total-gtt": 40960,
+        "drm-total-vram0": 2850816,
+        "drm-total-stolen": 0
+      },
+      "footprint_bytes": 195829760,
+      "max_scan_seconds": 0.0503644600030384
+    }
+  ],
+  "peak_bytes": 195829760,
+  "margin_fraction": 0.5,
+  "max_memory_bytes": 294649856,
+  "max_seconds": 60,
+  "sample_sleep_seconds": 0.01,
+  "final_no_diagnostic_holder": true
+}
