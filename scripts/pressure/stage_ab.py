@@ -48,11 +48,23 @@ def process(pid):
     return identity
 
 
+def cgroup_pids(group):
+    root=Path('/sys/fs/cgroup')/group.split('::',1)[-1].lstrip('/')
+    def members(path):
+        try:
+            ids={int(v) for v in kernel_read(path/'cgroup.procs').split()}
+            for child in kernel_read(path,'directories'):
+                ids.update(members(child))
+            return ids
+        except Vanished:return set()
+    return sorted(members(root)-{os.getpid()})
+
+
 class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r7.service'
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r8.service'
         self.baseline = json.loads(kernel_read(ROOT / 'display-baseline.json', 'text'))
         self.diagnostics = DiagnosticReaders(json.loads(kernel_read(ROOT/'diagnostic-executables.json', 'text')),
                                              ROOT/'diagnostics.jsonl')
@@ -406,19 +418,19 @@ class Run:
                 self.release_owned()
                 # Only the runner may remain in its exact unit; no substring ownership.
                 for sig in (signal.SIGTERM,signal.SIGKILL):
-                    for pid in kernel_read('/proc','list'):
-                        if not pid.name.isdigit() or int(pid.name)==os.getpid():continue
+                    for number in cgroup_pids(self.cgroup):
+                        pid=Path('/proc')/str(number)
                         try:
                             identity=process(int(pid.name))
-                            if identity['cgroup']==self.cgroup and process(identity['pid'])==identity:
+                            if (identity['cgroup']==self.cgroup or identity['cgroup'].startswith(self.cgroup+'/')) and process(identity['pid'])==identity:
                                 os.kill(identity['pid'],sig)
                         except (Vanished,ProcessLookupError):pass
                     time.sleep(.3)
                 remaining=[]
-                for pid in kernel_read('/proc','list'):
-                    if not pid.name.isdigit() or int(pid.name)==os.getpid():continue
+                for number in cgroup_pids(self.cgroup):
+                    pid=Path('/proc')/str(number)
                     try:
-                        if process(int(pid.name))['cgroup']==self.cgroup:remaining.append(int(pid.name))
+                        remaining.append(int(pid.name))
                     except Vanished:pass
                 if remaining:raise RuntimeError('test processes remain')
                 end=time.monotonic()+60
@@ -558,11 +570,11 @@ class Run:
         for key in list(self.procs):self.halt(key)
         # Processes in this cgroup cannot be unrelated services; verify before each signal.
         for sig in (signal.SIGTERM,signal.SIGKILL):
-            for p in kernel_read(Path('/proc'), 'list'):
-                if not p.name.isdigit() or int(p.name)==os.getpid():continue
+            for number in cgroup_pids(self.cgroup):
+                p=Path('/proc')/str(number)
                 try:
                     i=process(int(p.name))
-                    if i['cgroup']==self.cgroup and process(i['pid'])==i:os.kill(i['pid'],sig)
+                    if (i['cgroup']==self.cgroup or i['cgroup'].startswith(self.cgroup+'/')) and process(i['pid'])==i:os.kill(i['pid'],sig)
                 except (Vanished,ProcessLookupError):pass
             time.sleep(.3)
         final_evidence={}
@@ -583,10 +595,10 @@ class Run:
             else:pause='ownership-changed; not altered'
         else:pause='not created'
         remaining=[]
-        for p in kernel_read(Path('/proc'), 'list'):
-            if not p.name.isdigit() or int(p.name)==os.getpid():continue
+        for number in cgroup_pids(self.cgroup):
+            p=Path('/proc')/str(number)
             try:
-                if process(int(p.name))['cgroup']==self.cgroup:remaining.append(int(p.name))
+                remaining.append(int(p.name))
             except (Vanished,ProcessLookupError):pass
         cleanup=dict(physical=physical,queue_pause=pause,remaining_pids=remaining,
                      final_display=final_evidence,units='transient unit collected on runner exit',
@@ -613,7 +625,7 @@ class Run:
             self.result('B-forced-reboots','EXCLUDED',executed=False,reason='not approved')
             self.physical()
             pause_path=QUEUE/'PAUSED'
-            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r7',nonce=os.urandom(16).hex()))+'\n').encode()
+            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r8',nonce=os.urandom(16).hex()))+'\n').encode()
             with pause_path.open('xb') as f:f.write(self.pause);f.flush();os.fsync(f.fileno())
             (ROOT/'owned-pause').write_bytes(self.pause)
             time.sleep(1)
@@ -667,7 +679,7 @@ class Run:
 
     def foreign_reader_canary(self):
         count=self.foreign.interruptions
-        subprocess.run(['systemd-run','--quiet','--collect','--unit=myce-test-r7-foreign-reader',
+        subprocess.run(['systemd-run','--quiet','--collect','--unit=myce-test-r8-foreign-reader',
             '--property=DevicePolicy=closed','--property=DeviceAllow=/dev/dri/card1 rw',
             '--property=DeviceAllow=/dev/dri/renderD129 rw','--property=MemoryMax=512M',
             '--property=RuntimeMaxSec=15s','--property=StandardOutput=null',

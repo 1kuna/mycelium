@@ -2,7 +2,6 @@
 """ExecStopPost: preserve evidence, release only our pause, trash disposable installs."""
 import datetime
 import json
-from kernel_reads import kernel_read, Vanished
 import os
 from pathlib import Path
 import socket
@@ -13,8 +12,10 @@ from urllib.parse import quote
 
 root=Path('/home/user/synthetic-run')
 sys.path.insert(0,str(root/'source/scripts/pressure'))
+from kernel_reads import kernel_read, Vanished
+from stage_ab import cgroup_pids
 from pressure import DiagnosticReaders, drm_owners
-receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r7.service')
+receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r8.service')
 try:
     from types import SimpleNamespace
     from disable_drill import cleanup as installed_cleanup, UNIT, DROP
@@ -54,12 +55,7 @@ if owned.exists() and pause.exists() and kernel_read(pause, 'bytes')==kernel_rea
     pause.rename(root/'queue-PAUSED.released')
 receipt['queue_pause']='released' if owned.exists() and not pause.exists() else 'not changed'
 # At ExecStopPost the kernel has stopped the unit's child processes. Read-only verify it.
-remaining=[]
-for proc in kernel_read(Path('/proc'), 'list'):
-    if not proc.name.isdigit() or int(proc.name)==os.getpid():continue
-    try:
-        if kernel_read(proc/'cgroup', 'text').strip()=='0::/system.slice/myce-test-stage-ab-r7.service':remaining.append(int(proc.name))
-    except Vanished:pass
+remaining=cgroup_pids('0::/system.slice/myce-test-stage-ab-r8.service')
 receipt['remaining_pids']=remaining
 ports=json.loads(kernel_read(root/'ports.json', 'text')) if (root/'ports.json').exists() else []
 for path in (root/'phases').glob('*/measure-*.pid.json'):

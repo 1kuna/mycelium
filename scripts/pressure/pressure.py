@@ -293,82 +293,85 @@ def drm_inventory(pcis: list[str], proc: Path = Path("/proc")) -> list[dict[str,
             raise ValueError("PCI DRM device nodes unavailable")
     holders = []
     for pid in kernel_read(proc, 'list'):
-        if not pid.name.isdigit():
-            continue
-        try:
-            before = kernel_read(pid / "stat", 'bytes')
-            fields = before[before.rfind(b")") + 2:].split()
-            group, start = int(fields[2]), int(fields[19])
-            clients = {}
-            for info in kernel_read(pid / "fdinfo", 'list'):
-                descriptor = pid / "fd" / info.name
-                raw = None
-                for retry in range(3):
+        if not pid.name.isdigit():continue
+        for attempt in range(3):
+            try:
+                descriptors=[]
+                for descriptor in kernel_read(pid/'fd','list'):
+                    try:target=kernel_read(descriptor,'link')
+                    except Vanished:continue
+                    if target.startswith('/dev/dri/') and (nodes is None or target in nodes):
+                        descriptors.append((descriptor,target))
+                if not descriptors:break
+                before = kernel_read(pid / "stat", 'bytes')
+                fields = before[before.rfind(b")") + 2:].split()
+                group, start = int(fields[2]), int(fields[19])
+                clients = {}
+                for descriptor,target in descriptors:
+                    info=pid/'fdinfo'/descriptor.name
                     try:
-                        target = kernel_read(descriptor, 'link')
-                        if not target.startswith("/dev/dri/") or nodes is not None and target not in nodes:
-                            break
-                        raw = kernel_read(info, 'fdinfo')
-                        if kernel_read(descriptor, 'link') != target:
-                            raw = None
-                            if retry == 2:raise ValueError("DRM descriptor repeatedly reused")
-                            continue
-                        break
+                        raw=kernel_read(info,'fdinfo')
+                        if kernel_read(descriptor,'link')!=target:
+                            raise Vanished(errno.ENOENT,'descriptor changed',str(descriptor))
                     except Vanished:
-                        raw = None
-                        if info.name not in {entry.name for entry in kernel_read(pid / "fd", 'list')}:
-                            break
-                        if retry == 2:raise
-                if raw is None:
+                        try:current=kernel_read(descriptor,'link')
+                        except Vanished:continue
+                        if not current.startswith('/dev/dri/') or nodes is not None and current not in nodes:continue
+                        raise
+                    if len(raw) > 65536:
+                        raise ValueError("oversized fdinfo")
+                    metrics = {line.split(b":", 1)[0].decode("ascii"):
+                               line.split(b":", 1)[1].strip().decode("ascii")
+                               for line in raw.splitlines() if line.startswith(b"drm-")}
+                    pci = metrics.get("drm-pdev")
+                    if pci is None:
+                        raise ValueError("DRM descriptor lacks PCI identity")
+                    if pci not in pcis:
+                        if nodes is not None:raise ValueError('selected DRM node PCI mismatch')
+                        continue
+                    client = metrics.get("drm-client-id", "")
+                    if not client.isdigit():
+                        raise ValueError("DRM descriptor lacks numeric client identity")
+                    resident, allocated = {}, {}
+                    for key, value in metrics.items():
+                        if key.startswith(("drm-resident-", "drm-total-", "drm-memory-")) and not key.startswith("drm-total-cycles-"):
+                            memory = resident if key.startswith("drm-resident-") else allocated
+                            parts = value.split()
+                            if len(parts) == 1 and parts[0] == "0":
+                                memory[key] = 0
+                            elif len(parts) == 2 and parts[0].isdigit() and parts[1] in {"B", "bytes", "KiB", "MiB", "GiB"}:
+                                memory[key] = int(parts[0]) * {"B":1,"bytes":1,"KiB":1024,"MiB":1024**2,"GiB":1024**3}[parts[1]]
+                            else:
+                                raise ValueError("unsupported DRM memory units: " + key + "=" + repr(value))
+                    key = (pci, target, int(client))
+                    old = clients.get(key, {}).get("resident_bytes", {})
+                    old_allocated = clients.get(key, {}).get("allocated_bytes", {})
+                    clients[key] = dict(pci=pci, device=target, client=int(client),
+                                        resident_bytes={k: max(v, old.get(k, 0)) for k, v in resident.items()},
+                                        allocated_bytes={k: max(v, old_allocated.get(k, 0)) for k, v in allocated.items()})
+                if not clients:
                     continue
-                if len(raw) > 65536:
-                    raise ValueError("oversized fdinfo")
-                metrics = {line.split(b":", 1)[0].decode("ascii"):
-                           line.split(b":", 1)[1].strip().decode("ascii")
-                           for line in raw.splitlines() if line.startswith(b"drm-")}
-                pci = metrics.get("drm-pdev")
-                if pci is None:
-                    raise ValueError("DRM descriptor lacks PCI identity")
-                if pci not in pcis:
-                    continue
-                client = metrics.get("drm-client-id", "")
-                if not client.isdigit():
-                    raise ValueError("DRM descriptor lacks numeric client identity")
-                resident, allocated = {}, {}
-                for key, value in metrics.items():
-                    if key.startswith(("drm-resident-", "drm-total-", "drm-memory-")) and not key.startswith("drm-total-cycles-"):
-                        memory = resident if key.startswith("drm-resident-") else allocated
-                        parts = value.split()
-                        if len(parts) == 1 and parts[0] == "0":
-                            memory[key] = 0
-                        elif len(parts) == 2 and parts[0].isdigit() and parts[1] in {"B", "bytes", "KiB", "MiB", "GiB"}:
-                            memory[key] = int(parts[0]) * {"B":1,"bytes":1,"KiB":1024,"MiB":1024**2,"GiB":1024**3}[parts[1]]
-                        else:
-                            raise ValueError("unsupported DRM memory units: " + key + "=" + repr(value))
-                key = (pci, target, int(client))
-                old = clients.get(key, {}).get("resident_bytes", {})
-                old_allocated = clients.get(key, {}).get("allocated_bytes", {})
-                clients[key] = dict(pci=pci, device=target, client=int(client),
-                                    resident_bytes={k: max(v, old.get(k, 0)) for k, v in resident.items()},
-                                    allocated_bytes={k: max(v, old_allocated.get(k, 0)) for k, v in allocated.items()})
-            if not clients:
-                continue
-            after = kernel_read(pid / "stat", 'bytes')
-            after_fields = after[after.rfind(b")") + 2:].split()
-            if (int(after_fields[2]), int(after_fields[19])) != (group, start):
-                raise ValueError("process identity changed during DRM sample")
-            executable=kernel_read(pid/'exe', 'link')
-            arguments=kernel_read(pid/'cmdline', 'bytes').split(b'\0') if os.path.basename(executable)=='xpu-smi' else []
-            stats_readonly=diagnostic_readonly(arguments[1:-1]) if arguments else False
-            holders.append(dict(boot=clock_domain(), pid=int(pid.name), start=start,
-                                ppid=int(after_fields[1]),stats_readonly=stats_readonly,
-                                exe=executable, cgroup=kernel_read(pid / "cgroup", 'text').strip(),
-                                clients=sorted(clients.values(), key=lambda c: (c["pci"], c["device"], c["client"]))))
-        except Vanished:
-            if pid.name not in {entry.name for entry in kernel_read(proc, 'list')}:
-                continue
-            raise
-    return sorted(holders, key=lambda h: h["pid"])
+                after = kernel_read(pid / "stat", 'bytes')
+                after_fields = after[after.rfind(b")") + 2:].split()
+                if (int(after_fields[2]), int(after_fields[19])) != (group, start):
+                    raise ValueError("process identity changed during DRM sample")
+                executable=kernel_read(pid/'exe', 'link')
+                arguments=kernel_read(pid/'cmdline', 'bytes').split(b'\0') if os.path.basename(executable)=='xpu-smi' else []
+                stats_readonly=diagnostic_readonly(arguments[1:-1]) if arguments else False
+                cgroup=kernel_read(pid/'cgroup').strip()
+                final=kernel_read(pid/'stat','bytes').rsplit(b')',1)[1].split()
+                if (int(final[2]),int(final[19]))!=(group,start):
+                    raise Vanished(errno.ENOENT,'candidate identity changed',str(pid))
+                holders.append(dict(boot=clock_domain(), pid=int(pid.name), start=start,
+                                    ppid=int(after_fields[1]),stats_readonly=stats_readonly,
+                                    exe=executable, cgroup=cgroup,
+                                    clients=sorted(clients.values(), key=lambda c: (c["pci"], c["device"], c["client"]))))
+                break
+            except Vanished:
+                # Only candidates are reread; an exited/closed holder becomes irrelevant.
+                if pid.name not in {entry.name for entry in kernel_read(proc,'list')}:break
+                if attempt==2:raise
+    return sorted(holders, key=lambda h: h['pid'])
 
 
 def drm_identity(holder: dict[str, Any]) -> dict[str, Any]:

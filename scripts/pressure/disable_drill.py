@@ -10,7 +10,7 @@ from pressure import api
 
 USER_HOME=Path('/home/user')
 UNIT=USER_HOME/'.config/systemd/user/myce-worker.service'
-DROP=UNIT.with_name(UNIT.name+'.d')/'myce-test-r7.conf'
+DROP=UNIT.with_name(UNIT.name+'.d')/'myce-test-r8.conf'
 CONTROL=USER_HOME/'.local/share/myce'
 
 
@@ -54,7 +54,7 @@ def drill(run):
     os.chown(DROP,1000,1000)
     run.halt('worker');run.release_owned()
     # Combined enforced memory allowance stays 8GiB while the worker is in a separate user cgroup.
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r7.service','MemoryMax=2G'],check=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r8.service','MemoryMax=2G'],check=True)
     run.installed=True
     result=user(run,[str(ROOT/'myce'),'install','worker','--root',str(ROOT/'installation'),
         '--nas',str(run.cp),'--queue',run.url,'--name','b70-pressure-gpu1','--gpu','xpu',
@@ -144,6 +144,6 @@ def cleanup(run):
     user(run,['systemctl','--user','daemon-reload'])
     assert not UNIT.exists() and not DROP.parent.exists() and show(run)['MainPID']=='0'
     run.worker_cgroup=None;run.installed=False
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r7.service','MemoryMax=8G'],check=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r8.service','MemoryMax=8G'],check=True)
     (ROOT/'installed-cleanup.json').write_text(json.dumps(dict(flag_absent=True,unit_absent=True,
         confirmed_empty=True,installation_recoverable_trash=str(ROOT/'installation/.Trash'))))

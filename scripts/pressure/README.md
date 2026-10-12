@@ -237,3 +237,11 @@ scenario start. Observer errors remain sticky until cleanup confirms release;
 the observer threads survive a HOLD. Failed cleanup stops the entire runner.
 Each memory-ramp measurement now has its own scenario and checkpoint root.
 The measurement allocator checks the r7 cgroup rather than the stale r3 unit.
+
+Round 8 collector: resolve explicit PCI DRM nodes, enumerate `/proc/*/fd`
+through `kernel_read`, and inspect identity/fdinfo only for matching holders.
+ENOENT/ESRCH invalidates the candidate snapshot and rescans; live permission
+denial fails closed. Cleanup enumerates the exact test cgroup tree rather than
+all process identities. `collector_soak.py` requires 30 collector-only minutes
+at the scenario's 0.5-second cadence with zero holds/failures before it can
+start Stage A/B. `COLLECTOR-DONE` is distinct from scenario `DONE`/`FAILED`.

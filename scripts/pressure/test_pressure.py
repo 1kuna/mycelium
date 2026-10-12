@@ -25,6 +25,81 @@ def beginning(c: Checker, resumed: int = 0, attempt: int = 1) -> None:
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_kernel_threads_and_non_gpu_processes_need_no_identity(self):
+        from unittest.mock import patch
+        import kernel_reads
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            for n in ('2','17','18'):(root/n/'fd').mkdir(parents=True)
+            (root/'17/fd/1').symlink_to('/dev/null')
+            (root/'18/fd/1').symlink_to('/dev/null')
+            original=kernel_reads._read
+            def read(path,op):
+                if path.name in ('stat','exe','cmdline','cgroup','fdinfo'):
+                    self.fail('irrelevant process identity inspected: '+str(path))
+                return original(path,op)
+            with patch('kernel_reads._read',side_effect=read):
+                self.assertEqual(drm_inventory(['0000:07:00.0'],root),[])
+
+    def test_candidate_vanish_rescans_and_live_permission_fails_closed(self):
+        import errno
+        from unittest.mock import patch
+        import kernel_reads
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);pid=root/'17';(pid/'fd').mkdir(parents=True);(pid/'fdinfo').mkdir()
+            (pid/'fd/1').symlink_to('/dev/dri/renderD129')
+            (pid/'fdinfo/1').write_text('drm-pdev: 0000:07:00.0\ndrm-client-id: 1\n')
+            (pid/'stat').write_text('17 (test) '+' '.join(['S','1','17']+['0']*16+['42']))
+            (pid/'exe').symlink_to('/usr/bin/synthetic');(pid/'cgroup').write_text('0::/test.scope')
+            original=kernel_reads._read
+            seen=[]
+            def vanished(path,op):
+                seen.append(path)
+                if path==pid/'exe':
+                    (pid/'fd/1').unlink()
+                    raise FileNotFoundError(errno.ENOENT,'vanished')
+                return original(path,op)
+            with patch('kernel_reads._read',side_effect=vanished):
+                self.assertEqual(drm_inventory(['0000:07:00.0'],root),[])
+            self.assertGreaterEqual(seen.count(pid/'fd'),2)
+            (pid/'fd/1').symlink_to('/dev/dri/renderD129')
+            def denied(path,op):
+                if path==pid/'exe':raise PermissionError(errno.EACCES,'denied')
+                return original(path,op)
+            with patch('kernel_reads._read',side_effect=denied):
+                with self.assertRaises(PermissionError):drm_inventory(['0000:07:00.0'],root)
+
+    def test_selected_pci_fd_filter_does_not_inspect_gpu0_identity(self):
+        from unittest.mock import patch
+        pid=Path('/proc/17');sysdir=Path('/sys/bus/pci/devices/0000:07:00.0/drm')
+        def read(path,op='text'):
+            if path==sysdir:return [sysdir/'card1',sysdir/'renderD129']
+            if path==Path('/proc'):return [pid]
+            if path==pid/'fd':return [pid/'fd/1']
+            if path==pid/'fd/1':return '/dev/dri/renderD128'
+            self.fail('GPU0 process inspected beyond fd: '+str(path))
+        with patch('pressure.sys.platform','linux'),patch('pressure.kernel_read',side_effect=read):
+            self.assertEqual(drm_inventory(['0000:07:00.0']),[])
+
+    def test_collector_soak_gates_scenarios_on_zero_holds(self):
+        import collector_soak
+        from unittest.mock import patch,Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);(root/'display-baseline.json').write_text('[]')
+            (root/'diagnostic-executables.json').write_text('{}')
+            readers=Mock(pending={})
+            with patch('collector_soak.DiagnosticReaders',return_value=readers),patch('collector_soak.drm_owners',side_effect=PermissionError(13,'unknown candidate')):
+                result=collector_soak.soak(root,duration=.01,interval=.001)
+            self.assertEqual(result['holds'],1)
+            self.assertTrue((root/'COLLECTOR-FAILED').exists())
+            def owners(*_,**kw):
+                kw['evidence'].update(holders=[],baseline_clients=[])
+                return {'0000:07:00.0':[]}
+            with patch('collector_soak.DiagnosticReaders',return_value=readers),patch('collector_soak.drm_owners',side_effect=owners):
+                result=collector_soak.soak(root,duration=.01,interval=.001)
+            self.assertEqual(result['result'],'PASS');self.assertEqual(result['holds'],0)
+            self.assertGreaterEqual(result['seconds'],.01)
+
     def test_foreign_reader_pause_continues_only_after_exit_and_memory_release(self):
         import pressure
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,17 +214,6 @@ class EvidenceTests(unittest.TestCase):
                     self.assertEqual(drm_owners(['0000:07:00.0'], root), {'0000:07:00.0': []})
                     self.assertEqual(rescans.call_count, 3)
 
-    def test_live_process_and_denied_rescans_fail_closed(self):
-        import errno
-        from unittest.mock import patch
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); p = root / '1115'; p.mkdir()
-            for code in (errno.ENOENT, errno.ESRCH, errno.EACCES):
-                with self.subTest(errno=code), patch.object(Path, 'read_bytes', side_effect=OSError(code, 'unreadable')):
-                    with self.assertRaises(OSError):drm_owners(['0000:07:00.0'], root)
-            with patch('kernel_reads._read',side_effect=[[p],FileNotFoundError(errno.ENOENT,'exited'),PermissionError(errno.EACCES,'denied')]), patch('kernel_reads._rescan',side_effect=[False,True]):
-                with self.assertRaises(PermissionError):drm_owners(['0000:07:00.0'], root)
-
     @unittest.skipUnless(Path('/proc/self/fdinfo').is_dir(), 'Linux procfs required')
     def test_drm_collector_does_not_race_its_own_directory_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -170,7 +234,7 @@ class EvidenceTests(unittest.TestCase):
                 def __exit__(self,*_):pass
             scan = os.scandir
             def rescan(path):
-                return Scan() if path == pid / 'fdinfo' else scan(path)
+                return Scan() if path == pid / 'fd' else scan(path)
             with patch('pressure.os.scandir',side_effect=rescan):
                 self.assertEqual(drm_owners(['0000:07:00.0'],root), {'0000:07:00.0':[]})
             with patch('pressure.os.scandir',side_effect=rescan), patch('pressure.os.readlink',side_effect=PermissionError(13,'denied')):
@@ -447,8 +511,8 @@ class CommandTests(unittest.TestCase):
 class NativeRunnerTests(unittest.TestCase):
     def test_attempt_roots_use_the_same_fresh_suffix(self):
         import stage_ab
-        self.assertTrue(stage_ab.ROOT.name.endswith('r7-20261011'))
-        self.assertTrue(stage_ab.NAS.name.endswith('r7-20261011'))
+        self.assertTrue(stage_ab.ROOT.name.endswith('r8-20261011'))
+        self.assertTrue(stage_ab.NAS.name.endswith('r8-20261011'))
 
     def test_disable_confirmation_includes_descendant_population_and_unit_state(self):
         import disable_drill

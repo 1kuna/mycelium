@@ -20,10 +20,11 @@ def _read(path, operation):
     if operation=='text':return path.read_text()
     if operation=='bytes':return path.read_bytes()
     if operation=='link':return os.readlink(path)
-    if operation=='list':
+    if operation in ('list','directories'):
         rows=[]
         with os.scandir(path) as entries:
             for entry in entries:
+                if operation=='directories' and not entry.is_dir(follow_symlinks=False):continue
                 if path.name in ('fd','fdinfo') and path.parent.name in ('self',str(os.getpid())):
                     # Inspect during iteration: scandir closes its fd on exhaustion.
                     try:target=kernel_read(path.parent/'fd'/entry.name,'link')
@@ -42,7 +43,8 @@ def _read(path, operation):
 
 def _rescan(path):
     try:
-        return path.name in {e.name for e in _read(path.parent,'list')}
+        with os.scandir(path.parent) as entries:
+            return path.name in {e.name for e in entries}
     except OSError as error:
         if error.errno in (errno.ENOENT,errno.ESRCH):return False
         raise
@@ -59,6 +61,9 @@ def kernel_read(path, operation='text'):
             print(json.dumps(dict(kind='kernel-read',status=status,path=str(path),
                                   operation=operation,errno=error.errno,at=time.monotonic())),file=sys.stderr)
             if status=='error':raise
+            if status=='vanished':
+                _rescan(path)
+                raise Vanished(error.errno,'vanished; caller must rescan',str(path)) from error
             try:present=_rescan(path)
             except OSError as scan_error:
                 print(json.dumps(dict(kind='kernel-read',status='rescan-error',path=str(path.parent),
