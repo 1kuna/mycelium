@@ -95,6 +95,24 @@ class SnippetTests(unittest.TestCase):
         self.assertEqual(run.scenario_cleanup.call_count,2)
         self.assertEqual(responses[0]['phase_error'],'ValueError')
 
+    def test_cleanup_ack_after_start_failed_before_clock_mapping(self):
+        t.closed_state=dict(phase='partial-start')
+        t.phase_errors['partial-start']='RuntimeError'
+        responses=[]
+        rows=[dict(at=1,boot='spark',kind='start')]
+        def remote(host,source,data=None):
+            checked_python(source)
+            if 'unit_state' in source:return {'confirmed':True,'unit_state':'inactive'}
+            if 'occupied=[]' in source:return []
+            if 'events.jsonl' in source:return rows
+        with patch.object(t,'remote',side_effect=remote),patch.object(t,'respond',side_effect=responses.append):
+            t.service_request(dict(mode='stop',phase='partial-start',request_id='fresh-stop'))
+        self.assertTrue(responses[-1]['ok'])
+        self.assertTrue(responses[-1]['cleanup_confirmed'])
+        self.assertEqual(responses[-1]['phase_error'],'RuntimeError')
+        self.assertIsNone(responses[-1]['clock_uncertainty_seconds'])
+        self.assertEqual(rows[0]['at'],1)
+
     def test_unconfirmed_cleanup_never_acknowledged(self):
         t.state=dict(phase='failure');responses=[]
         with patch.object(t,'poll',side_effect=ValueError),patch.object(t,'stop',side_effect=RuntimeError), \

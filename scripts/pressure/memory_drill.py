@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import time
 from stage_ab import ROOT, atomic
-from disable_drill import user, empty
+from disable_drill import empty
 from pressure import api
 
 UNIT='myce-worker@myce-test-r11-ceiling.service'
@@ -22,21 +22,24 @@ def scenario(run):
           '--state-dir',str(run.phase/'ceiling-worker'),'--checkpoint-root',str(cp),
           '--host-state-dir',str(run.phase/'ceiling-control')]
     env=run.phase/'ceiling.env';env.write_text('MYCE_TOKEN='+run.env['MYCE_TOKEN']+'\n');os.chmod(env,0o600);os.chown(env,1000,1000)
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11.service','MemoryMax=7680M'],check=True,capture_output=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11b.service','MemoryMax=7680M'],check=True,capture_output=True)
     group=''
     run.active=None
+    def control(args):
+        return subprocess.run(args,capture_output=True,text=True,timeout=35,check=True)
     def show():
-        r=user(run,['systemctl','--user','show',UNIT,'-p','ActiveState','-p','ControlGroup','-p','MainPID'])
+        r=control(['systemctl','show',UNIT,'-p','ActiveState','-p','ControlGroup','-p','MainPID','-p','DevicePolicy'])
         return dict(v.split('=',1) for v in r.stdout.splitlines() if '=' in v)
-    assert not user(run,['systemctl','--user','is-active',UNIT],check=False).stdout.strip()=='active'
-    assert not Path('/home/user/.config/systemd/user/'+UNIT).exists()
+    assert show()['ActiveState']!='active'
+    assert not Path('/etc/systemd/system/'+UNIT).exists()
     atomic(ROOT/'memory-unit.json',dict(unit=UNIT))
     try:
-        user(run,['systemd-run','--user','--unit='+UNIT,'--collect','--property=Delegate=memory',
+        control(['systemd-run','--unit='+UNIT,'--collect','--property=Delegate=memory',
+             '--property=User=1000','--property=Group=1000','--property=DevicePolicy=closed',
              '--property=MemoryMax=512M','--property=MemorySwapMax=0','--property=CPUQuota=100%',
              '--property=KillMode=control-group','--property=RuntimeMaxSec=2min',
              '--property=EnvironmentFile='+str(env),'--property=StandardOutput=append:'+str(run.phase/'worker.log'),*args])
-        group=show()['ControlGroup']
+        state=show();group=state['ControlGroup'];assert state['DevicePolicy']=='closed'
         machine=run.wait(lambda:next((m for m in api(run.url)['machines'] if m['id']=='ceiling-cpu'),None),15)
         assert machine['memory_enforcement']=='memory ceilings enforced (cgroup v2)'
         def submit(name,command,host):
@@ -61,8 +64,8 @@ def scenario(run):
     except Exception as exc:
         run.result('Memory-ceiling-isolation','FAIL',error=type(exc).__name__)
     finally:
-        user(run,['systemctl','--user','stop',UNIT]);state=show()
+        control(['systemctl','stop',UNIT]);state=show()
         assert empty(group,state),'memory worker cleanup unconfirmed'
         run.halt('queue');run.scenario_cleanup()
-        subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11.service','MemoryMax=8G'],check=True,capture_output=True)
+        subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11b.service','MemoryMax=8G'],check=True,capture_output=True)
         atomic(run.phase/'memory-cleanup.json',dict(unit=UNIT,empty=True,cgroup=group))

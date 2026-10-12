@@ -56,7 +56,7 @@ def drill(run):
     os.chown(DROP,1000,1000)
     run.halt('worker');run.release_owned()
     # Combined enforced memory allowance stays 8GiB while the worker is in a separate user cgroup.
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11.service','MemoryMax=2G'],check=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11b.service','MemoryMax=2G'],check=True)
     run.installed=True
     from installed_validation import install
     result=install(run,[str(ROOT/'myce'),'install','worker','--instance','gpu1','--root',str(ROOT/'installation'),
@@ -143,6 +143,6 @@ def cleanup(run):
     state=user(run,['systemctl','--user','show','myce-worker@gpu1.service','-p','MainPID'],check=False)
     assert not GPU_UNIT.exists() and not DROP.parent.exists() and 'MainPID=0' in state.stdout
     run.worker_cgroup=None;run.installed=False
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11.service','MemoryMax=8G'],check=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11b.service','MemoryMax=8G'],check=True)
     (ROOT/'installed-cleanup.json').write_text(json.dumps(dict(flag_absent=True,unit_absent=True,
         confirmed_empty=True,installation_recoverable_trash=str(ROOT/'installation/.Trash'))))

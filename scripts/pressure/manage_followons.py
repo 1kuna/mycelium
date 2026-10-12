@@ -10,7 +10,7 @@ import time
 from remote_snippets import python_command
 
 ROOT='/home/user/synthetic-run'
-UNIT='myce-test-stage-ab-r11-spark.service'
+UNIT='myce-test-stage-ab-r11b-spark.service'
 UUID='GPU-00000000-0000-0000-0000-000000000000'
 procs=[]
 ports=[]
@@ -119,12 +119,14 @@ def collect(incoming):
     rows=[]
     if request is not None:
         rows=remote('spark','from pathlib import Path; import json; p=Path("'+ROOT+'/phases/'+request['phase']+'/events.jsonl"); print(json.dumps([json.loads(r) for r in kernel_read(p).splitlines()] if p.exists() else []))')
-        for row in rows:
+        if 'offset' not in request:
+            phase_errors.setdefault(incoming['phase'],'clock_mapping_unavailable')
+        for row in rows if 'offset' in request else []:
             row['original_at']=row['at'];row['original_boot']=row['boot'];row['at']+=request['offset'];row['boot']=request['boot']
             row['clock_uncertainty_seconds']=request['uncertainty']
     remote('b70','from pathlib import Path; import json,sys; rows=json.load(sys.stdin); p=Path("'+ROOT+'/phases/'+incoming['phase']+'/spark-events.json"); p.write_text(json.dumps(rows))',rows)
     respond(dict(mode='stop',phase=incoming['phase'],request_id=incoming['request_id'],ok=True,events=len(rows),
-                 cleanup_confirmed=receipt['confirmed'],phase_error=phase_errors.get(incoming['phase']),clock_uncertainty_seconds=request['uncertainty'] if request else None))
+                 cleanup_confirmed=receipt['confirmed'],phase_error=phase_errors.get(incoming['phase']),clock_uncertainty_seconds=request.get('uncertainty') if request else None))
 
 def loan():
     return remote('spark','import subprocess,json; d={};\nfor k in ("ActiveState","MainPID","ControlGroup"):\n d[k]=subprocess.check_output(["systemctl","--user","show","verso-loan-233-next-queue.service","-p",k,"--value"],text=True).strip()\nprint(json.dumps(d))')
@@ -138,12 +140,12 @@ for port in ports:
  with socket.socket() as s:
   s.settimeout(.2)
   if s.connect_ex(('127.0.0.1',port))==0:occupied.append(port)
-unit=subprocess.run(['systemctl','--user','is-active','myce-test-stage-ab-r11-spark.service'],capture_output=True,text=True).stdout.strip()
+unit=subprocess.run(['systemctl','--user','is-active','myce-test-stage-ab-r11b-spark.service'],capture_output=True,text=True).stdout.strip()
 remaining=[]
 for p in kernel_read('/proc','list'):
  if not p.name.isdigit():continue
  try:
-  if kernel_read(p/'cgroup').strip().endswith('/myce-test-stage-ab-r11-spark.service'):remaining.append(int(p.name))
+  if kernel_read(p/'cgroup').strip().endswith('/myce-test-stage-ab-r11b-spark.service'):remaining.append(int(p.name))
  except Vanished:pass
 assert unit in ('inactive','unknown','failed') and not remaining and not occupied,'Spark cleanup unconfirmed'
 root=Path('/home/user/synthetic-run');trash=Path('/home/user/.local/share/Trash')

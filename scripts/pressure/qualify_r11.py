@@ -8,7 +8,7 @@ import subprocess
 from remote_snippets import checked_python, checked_shell, python_command
 HERE = Path('/Users/user/Documents/Git/Verso/.private/missions/mycelium-stage-ab-20261011')
 ROOT = '/home/user/synthetic-run'
-PROOF = 'Verso/experiments/exp-238-mycelium-stage-ab-r11-proof-20261011'
+PROOF = 'Verso/experiments/exp-238-mycelium-stage-ab-r11b-proof-20261011'
 
 def runtime_source():
     source = kernel_read(Path(__file__).with_name('worker_fence.py'), 'text')
