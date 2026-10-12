@@ -251,3 +251,4 @@ denial fails closed. Cleanup enumerates the exact test cgroup tree rather than
 all process identities. `collector_soak.py` requires 30 collector-only minutes
 at the scenario's 0.5-second cadence with zero holds/failures before it can
 start Stage A/B. `COLLECTOR-DONE` is distinct from scenario `DONE`/`FAILED`.
+The exact owned legacy-admission pause spans both the soak and scenarios; final cleanup releases it.

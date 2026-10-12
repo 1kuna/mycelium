@@ -630,9 +630,8 @@ class Run:
             self.result('B-forced-reboots','EXCLUDED',executed=False,reason='not approved')
             self.physical()
             pause_path=QUEUE/'PAUSED'
-            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r8',nonce=os.urandom(16).hex()))+'\n').encode()
-            with pause_path.open('xb') as f:f.write(self.pause);f.flush();os.fsync(f.fileno())
-            (ROOT/'owned-pause').write_bytes(self.pause)
+            self.pause=kernel_read(ROOT/'owned-pause','bytes')
+            assert kernel_read(pause_path,'bytes')==self.pause,'legacy pause ownership changed'
             time.sleep(1)
             for d in kernel_read(QUEUE, 'list'):
                 if not d.is_dir():continue
