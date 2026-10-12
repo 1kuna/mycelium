@@ -742,6 +742,7 @@ func (w Worker) Run(stop context.Context) error {
 	}()
 	defer func() { eventCancel(); <-controlDone }()
 	var retry, enableRetry workerRetry
+	probeUnavailable := false
 	enablePending := true
 	defer func() {
 		if p != nil {
@@ -894,7 +895,15 @@ func (w Worker) Run(stop context.Context) error {
 				m.HostMemoryError = fmt.Sprintf("host RAM probe failed: %v", hostErr)
 			}
 			root := s.state.CheckpointRoot
-			available, _ := s.nasProbe.run(root, func() (bool, error) { err := workerCheckpointAvailable(root); return err == nil, err })
+			available, probeErr := s.nasProbe.run(root, func() (bool, error) { err := workerCheckpointAvailable(root); return err == nil, err })
+			if !available != probeUnavailable {
+				if available {
+					log.Printf("worker %s NAS checkpoint probe recovered", m.ID)
+				} else {
+					log.Printf("worker %s NAS checkpoint probe failed: %v", m.ID, probeErr)
+				}
+				probeUnavailable = !available
+			}
 			m.CheckpointUnavailable = !available || s.checkpointUnavailable
 			var running *Execution
 			if s.state.Job != nil {

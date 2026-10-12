@@ -13,6 +13,7 @@ type checkpointIO[T any] struct {
 	mu      sync.Mutex
 	key     string
 	pending *checkpointIOResult[T]
+	timeout time.Duration
 }
 type checkpointIOResult[T any] struct {
 	done  chan struct{}
@@ -41,7 +42,11 @@ func (n *checkpointIO[T]) run(key string, fn func() (T, error)) (T, error) {
 	pending := n.pending
 	n.mu.Unlock()
 	// This is an I/O budget, not a scheduling deadline; grace still uses Clock.
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	timeout := n.timeout
+	if timeout == 0 {
+		timeout = 25 * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	select {
 	case <-pending.done:
