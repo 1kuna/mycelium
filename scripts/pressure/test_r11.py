@@ -12,7 +12,7 @@ class SnippetTests(unittest.TestCase):
         t.phase_errors.clear();t.procs.clear();t.ports.clear()
 
     def test_every_transport_snippet_variant(self):
-        sources=[]
+        sources=[];finalized=iter([False,True])
         def remote(host, source, data=None):
             checked_python(source);checked_shell(python_command(source));sources.append(source)
             if 'unit_state' in source:return {'confirmed':True,'unit_state':'inactive'}
@@ -23,10 +23,13 @@ class SnippetTests(unittest.TestCase):
             if 'events.jsonl' in source:return []
             if 'ActiveState' in source:return {'ActiveState':'inactive','MainPID':'0','ControlGroup':''}
             if 'getsockname' in source:return 12345
-            if 'final-cleanup.json' in source:return True
+            if 'final-cleanup.json' in source:return next(finalized)
+            if 'kernel_reads.py' in source:return True
             return None
         with patch.object(t,'remote',side_effect=remote), patch.object(t.time,'sleep'), \
-             patch.object(t.subprocess,'Popen',return_value=MagicMock(poll=lambda:None)),patch.object(t.subprocess,'run',return_value=MagicMock(returncode=0,stdout=b'null')):
+             patch.object(t,'subprocess') as processes:
+            processes.Popen.return_value=MagicMock(poll=lambda:None)
+            processes.run.return_value=MagicMock(returncode=0,stdout=b'null')
             t.respond({'ok':True});t.read_request();t.loan();t.stop();t.cleanup_spark();t.poll();t.serve()
             for mode in ('active','full'):
                 req=dict(port=12344,mode=mode,phase=mode,token='synthetic',boot='test',request_id=mode)
@@ -39,7 +42,7 @@ class SnippetTests(unittest.TestCase):
     def test_all_preparation_launch_qualification_and_receipt_snippets(self):
         import ast
         import prepare_r11, launch_r11, qualify_r11, collect_r11
-        sources=[prepare_r11.generated_0(),prepare_r11.generated_1(),prepare_r11.staging_source(),
+        sources=[t.final_receipt_source(),prepare_r11.generated_0(),prepare_r11.generated_1(),prepare_r11.staging_source(),
                  launch_r11.generated_0(),qualify_r11.runtime_source(),qualify_r11.writer_source(),
                  launch_r11.receipt_writer_source(),collect_r11.receipt_source(),collect_r11.inventory_source(),
                  *[qualify_r11.proof_source(m) for m in ('write','copy','reread')]]
