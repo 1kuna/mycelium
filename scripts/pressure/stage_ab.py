@@ -22,8 +22,8 @@ from pressure import (Checker, DiagnosticReaders, ForeignReaderPause, api, clock
                       drm_owners, emit, observe, replay, spec, submit)
 
 PCI = '0000:07:00.0'
-ROOT = Path('/home/kuna/myce-test-stage-ab-r11b-20261011')
-NAS = Path('/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r11b-20261011')
+ROOT = Path('/home/kuna/myce-test-stage-ab-r11c-20261011')
+NAS = Path('/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r11c-20261011')
 XPU = '/home/kuna/verso-labs/runtimes/experiment-xpu-venv/bin/python'
 QUEUE = Path('/home/kuna/exp42-queue')
 BASE = Path(__file__).parent
@@ -71,7 +71,7 @@ class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r11b.service'
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r11c.service'
         self.baseline = json.loads(kernel_read(ROOT / 'display-baseline.json', 'text'))
         self.diagnostics = DiagnosticReaders(json.loads(kernel_read(ROOT/'diagnostic-executables.json', 'text')),
                                              ROOT/'diagnostics.jsonl')

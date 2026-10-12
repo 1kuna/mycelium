@@ -10,12 +10,12 @@ import sys
 import time
 from urllib.parse import quote
 
-root=Path('/home/kuna/myce-test-stage-ab-r11b-20261011')
+root=Path('/home/kuna/myce-test-stage-ab-r11c-20261011')
 sys.path.insert(0,str(root/'source/scripts/pressure'))
 from kernel_reads import kernel_read, Vanished
 from stage_ab import cgroup_pids
 from pressure import DiagnosticReaders, drm_owners
-receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r11b.service')
+receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r11c.service')
 try:
     from types import SimpleNamespace
     from disable_drill import cleanup as installed_cleanup, UNIT, GPU_UNIT, DROP
@@ -32,16 +32,9 @@ except Exception as error:
     receipt['installed_worker']='HOLD:'+type(error).__name__
 try:
     if (root/'memory-unit.json').exists():
-        from memory_drill import UNIT as memory_unit
-        from disable_drill import user, empty
+        from memory_drill import UNIT as memory_unit, unit_state, cleanup_unit
         assert json.loads(kernel_read(root/'memory-unit.json'))['unit']==memory_unit
-        run=SimpleNamespace(env=dict(os.environ))
-        def memory_show():
-            r=subprocess.run(['systemctl','show',memory_unit,'-p','ActiveState','-p','ControlGroup'],check=True,capture_output=True,text=True)
-            return dict(v.split('=',1) for v in r.stdout.splitlines() if '=' in v)
-        state=memory_show();group=state.get('ControlGroup','')
-        subprocess.run(['systemctl','stop',memory_unit],check=True,capture_output=True,timeout=15)
-        assert empty(group,memory_show()),'memory worker cleanup unconfirmed'
+        cleanup_unit(unit_state().get('ControlGroup',''))
     receipt['memory_worker_settled']=True
 except Exception as error:receipt['cpu_cleanup_error']=type(error).__name__
 try:
@@ -101,13 +94,13 @@ try:
 except Exception as e:receipt['docker_error']=type(e).__name__
 # Retire only this attempt's runtime unit configuration after execution is gone.
 try:
-    allowed={'myce-test-r11-docker.slice','myce-test-stage-ab-r11b.service',
+    allowed={'myce-test-r11-docker.slice','myce-test-stage-ab-r11c.service',
              'myce-test-r11-installed-validation.service','myce-test-r11-cpu-fast-matrix.service','myce-test-r11-cpu-large-local-checkpoint.service','myce-test-r11-nas-small-latency-probe.service'}
     retired=root/'runtime-units.retired';retired.mkdir(exist_ok=True)
     for base in (Path('/run/systemd/system.control'),Path('/run/systemd/transient')):
         for name in allowed:
             for path in (base/name,base/(name+'.d')):
-                if path.exists() and name!='myce-test-stage-ab-r11b.service':path.rename(retired/(base.name+'-'+path.name))
+                if path.exists() and name!='myce-test-stage-ab-r11c.service':path.rename(retired/(base.name+'-'+path.name))
     subprocess.run(['systemctl','daemon-reload'],check=True,capture_output=True)
     receipt['runtime_units_retired']=True
 except Exception as error:receipt['runtime_unit_error']=type(error).__name__
@@ -116,7 +109,7 @@ owned=root/'owned-pause'
 headroom=int(next(r.split()[1] for r in kernel_read('/proc/meminfo').splitlines() if r.startswith('MemAvailable:')))/1024**2
 receipt['headroom_gib']=headroom
 # At ExecStopPost the kernel has stopped the unit's child processes. Read-only verify it.
-remaining=cgroup_pids('0::/system.slice/myce-test-stage-ab-r11b.service')
+remaining=cgroup_pids('0::/system.slice/myce-test-stage-ab-r11c.service')
 receipt['remaining_pids']=remaining
 ports=json.loads(kernel_read(root/'ports.json', 'text')) if (root/'ports.json').exists() else []
 for path in (root/'phases').glob('*/measure-*.pid.json'):

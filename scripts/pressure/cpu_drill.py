@@ -83,6 +83,6 @@ def isolated(run,name,args,seconds):
 
 
 def scenarios(run):
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11b.service','MemoryMax=4G'],check=True,capture_output=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11c.service','MemoryMax=4G'],check=True,capture_output=True)
     isolated(run,'CPU-fast-matrix',[str(ROOT/'cpu-matrix.test'),'-test.run','^('+FAST+')','-test.v','-test.timeout','5m'],300)
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11b.service','MemoryMax=8G'],check=True,capture_output=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11c.service','MemoryMax=8G'],check=True,capture_output=True)

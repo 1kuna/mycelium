@@ -9,7 +9,7 @@ import stat
 import subprocess
 import sys
 
-root=Path('/home/kuna/myce-test-stage-ab-r11b-20261011')
+root=Path('/home/kuna/myce-test-stage-ab-r11c-20261011')
 config=root/'installation/worker-gpu1/config.json'
 assert os.getuid()==0 and sys.argv[1:] in ([str(config)],[str(config),'detect'])
 validation=sys.argv[-1]=='detect'

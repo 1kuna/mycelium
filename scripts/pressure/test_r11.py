@@ -126,6 +126,21 @@ class SnippetTests(unittest.TestCase):
         with patch.object(memory_drill.subprocess,'run',return_value=MagicMock(returncode=1,stdout='')):
             with self.assertRaises(AssertionError):memory_drill.unit_state()
 
+    def test_memory_cleanup_after_unit_collected_never_sends_stop(self):
+        import memory_drill
+        reply=MagicMock(returncode=1,stdout='LoadState=not-found\nActiveState=inactive\nControlGroup=\nMainPID=0\nDevicePolicy=auto\n')
+        with patch.object(memory_drill.subprocess,'run',return_value=reply) as calls:
+            state=memory_drill.cleanup_unit('')
+        self.assertEqual(state['ActiveState'],'inactive')
+        self.assertTrue(all(call.args[0][1]=='show' for call in calls.call_args_list))
+
+    def test_memory_cleanup_with_remaining_members_fails_closed(self):
+        import memory_drill
+        state=dict(LoadState='loaded',ActiveState='active',ControlGroup='/owned')
+        with patch.object(memory_drill,'unit_state',return_value=state),patch.object(memory_drill,'empty',return_value=False), \
+             patch.object(memory_drill.subprocess,'run'):
+            with self.assertRaises(AssertionError):memory_drill.cleanup_unit('/owned')
+
     def test_unconfirmed_cleanup_never_acknowledged(self):
         t.state=dict(phase='failure');responses=[]
         with patch.object(t,'poll',side_effect=ValueError),patch.object(t,'stop',side_effect=RuntimeError), \
