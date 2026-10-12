@@ -419,7 +419,6 @@ echo FINISHED
 	// Running commands keep their assignment, queued work cannot start/preempt,
 	// and no worker creates a replacement local mount.
 	must(os.Rename(nas, nas+"-offline"))
-	nasJob := submitAPI(short("nas-blocked-production", "production", []string{"cuda"}))
 	clock.Advance(time.Second)
 	wait("NAS status on all workers", func() bool {
 		s := snapshot()
@@ -434,7 +433,12 @@ echo FINISHED
 		return true
 	})
 	if j := get(experiment.ID); j.State != "running" || j.Attempt != before.Attempt {
-		t.Fatal("NAS outage stopped running command")
+		t.Fatalf("NAS outage stopped running command: state=%s attempt=%d reason=%q", j.State, j.Attempt, j.Reason)
+	}
+	// Submit after asynchronous probes observe the outage, not an older healthy receipt.
+	nasJob := submitAPI(short("nas-blocked-production", "production", []string{"cuda"}))
+	if j := get(experiment.ID); j.State != "running" || j.Attempt != before.Attempt {
+		t.Fatalf("NAS-blocked job preempted running command: state=%s attempt=%d reason=%q", j.State, j.Attempt, j.Reason)
 	}
 	if get(nasJob.ID).Attempt != 0 {
 		t.Fatal("job started with NAS absent")
