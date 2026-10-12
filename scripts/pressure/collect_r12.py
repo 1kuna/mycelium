@@ -46,7 +46,7 @@ subprocess.run(['systemctl','daemon-reload'],check=True,capture_output=True)
     for host in ('b70','spark'):
         prefix='import sys;sys.argv=["inventory",'+repr(host)+']\n'
         if host=='b70':prefix+='from pathlib import Path;import json;sys.argv.append(",".join(map(str,json.loads(Path('+repr(ROOT+'/ports.json')+').read_text()))))\n'
-        p=subprocess.run(['ssh',host,python_command(prefix+source,sudo=host=='b70')],capture_output=True,text=True,timeout=45)
+        p=subprocess.run(['ssh',host,('sudo -n ' if host=='b70' else '')+'python3 -'],input=prefix+source,capture_output=True,text=True,timeout=45)
         assert p.returncode==0,'independent inventory unavailable'
         data=json.loads(p.stdout);(HERE/('r12-final-'+host+'-inventory.json')).write_text(json.dumps(data,indent=2))
         assert not any(data[k] for k in ('test_pids','scan_errors','test_cgroups','disabled_flags','test_slices','occupied_test_ports'))
