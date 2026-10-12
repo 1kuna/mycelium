@@ -37,7 +37,18 @@ def respond(data):
 def stop():
     global state
     if state is not None:
-        remote('spark',"from pathlib import Path; import subprocess; from disable_drill import empty; d={};\nfor k in ('ActiveState','ControlGroup'):\n d[k]=subprocess.check_output(['systemctl','--user','show','"+UNIT+"','-p',k,'--value'],text=True).strip()\ngroup=d['ControlGroup']; subprocess.run(['systemctl','--user','stop','"+UNIT+"'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\nfor k in d:\n d[k]=subprocess.check_output(['systemctl','--user','show','"+UNIT+"','-p',k,'--value'],text=True).strip()\nassert empty(group,d),'Spark test cgroup unconfirmed'")
+        code="""import subprocess
+from disable_drill import empty
+def show():
+ r=subprocess.run(['systemctl','--user','show','"""+UNIT+"""','-p','ActiveState','-p','ControlGroup','-p','LoadState'],capture_output=True,text=True)
+ d=dict(line.split('=',1) for line in r.stdout.splitlines() if '=' in line)
+ assert r.returncode==0 or d.get('LoadState')=='not-found','unreadable Spark unit'
+ return d
+group=show()['ControlGroup']
+r=subprocess.run(['systemctl','--user','stop','"""+UNIT+"""'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+d=show();assert empty(group,d),'Spark test cgroup unconfirmed'
+"""
+        remote('spark',code)
     for process in procs:
         if process.poll() is None:process.terminate()
     for process in procs:
