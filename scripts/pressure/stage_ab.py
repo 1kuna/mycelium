@@ -71,7 +71,7 @@ class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r13.service'
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r14.service'
         self.baseline = json.loads(kernel_read(ROOT / 'display-baseline.json', 'text'))
         self.diagnostics = DiagnosticReaders(json.loads(kernel_read(ROOT/'diagnostic-executables.json', 'text')),
                                              ROOT/'diagnostics.jsonl')
@@ -681,7 +681,7 @@ class Run:
 
     def foreign_reader_canary(self):
         count=self.foreign.interruptions
-        subprocess.run(['systemd-run','--quiet','--collect','--unit=myce-test-r13-foreign-reader',
+        subprocess.run(['systemd-run','--quiet','--collect','--unit=myce-test-r14-foreign-reader',
             '--property=DevicePolicy=closed','--property=DeviceAllow=/dev/dri/card1 rw',
             '--property=DeviceAllow=/dev/dri/renderD129 rw','--property=MemoryMax=512M',
             '--property=RuntimeMaxSec=15s','--property=StandardOutput=null',
@@ -695,6 +695,10 @@ class Run:
         try:
             evidence=drill(self)
             self.result('B-disable-switch-evidence','PASS',**evidence)
+        except Exception:
+            import traceback
+            (self.phase/'disable-error.log').write_text(traceback.format_exc())
+            raise
         finally:
             cleanup(self)
 

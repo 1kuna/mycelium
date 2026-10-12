@@ -8,7 +8,7 @@ import subprocess
 from remote_snippets import checked_python, checked_shell, python_command
 HERE = Path('/Users/user/Documents/Git/Verso/.private/missions/mycelium-stage-ab-20261011')
 ROOT = '/home/user/synthetic-run'
-PROOF = 'Verso/experiments/exp-238-mycelium-stage-ab-r13-proof-20261011'
+PROOF = 'Verso/experiments/exp-238-mycelium-stage-ab-r14-proof-20261011'
 
 def runtime_source():
     source = kernel_read(Path(__file__).with_name('worker_fence.py'), 'text')
@@ -33,14 +33,14 @@ if __name__ == '__main__':
     writer = writer_source()
     p = subprocess.run(['ssh', 'b70', python_command(writer)], input=source.encode(), capture_output=True, timeout=15)
     assert p.returncode == 0
-    args = ['sudo', '-n', 'systemd-run', '--unit=myce-test-r13-installed-validation.service', '--wait', '--pipe', '--collect', '--property=MemoryMax=1G', '--property=MemorySwapMax=0', '--property=CPUQuota=100%', '--property=RuntimeMaxSec=45s', '--property=DevicePolicy=closed', '--property=DeviceAllow=/dev/dri/card1 rw', '--property=DeviceAllow=/dev/dri/renderD129 rw', '/usr/bin/python3', path, ROOT + '/installation/worker-versotest-r13-gpu1/config.json', 'detect']
+    args = ['sudo', '-n', 'systemd-run', '--unit=myce-test-r14-installed-validation.service', '--wait', '--pipe', '--collect', '--property=MemoryMax=1G', '--property=MemorySwapMax=0', '--property=CPUQuota=100%', '--property=RuntimeMaxSec=45s', '--property=DevicePolicy=closed', '--property=DeviceAllow=/dev/dri/card1 rw', '--property=DeviceAllow=/dev/dri/renderD129 rw', '/usr/bin/python3', path, ROOT + '/installation/worker-versotest-r14-gpu1/config.json', 'detect']
     p = subprocess.run(['ssh', 'b70', checked_shell(shlex.join(args))], capture_output=True, text=True, timeout=55)
-    (HERE / 'r13-runtime-qualification.log').write_text(p.stdout + p.stderr)
+    (HERE / 'r14-runtime-qualification.log').write_text(p.stdout + p.stderr)
     assert p.returncode == 0
     result = json.loads(p.stdout)
     assert result == {'available': True, 'visible_devices': 1}
-    (HERE / 'r13-runtime-qualification.json').write_text(json.dumps(result, indent=2))
+    (HERE / 'r14-runtime-qualification.json').write_text(json.dumps(result, indent=2))
     rows = [remote('b70', proof_source('write')), remote('spark', proof_source('copy')), remote('b70', proof_source('reread'))]
     assert len({r['sha256'] for r in rows}) == 1
-    (HERE / 'r13-cross-mount-receipt.json').write_text(json.dumps(dict(cross_mount_verified=True, rows=rows), indent=2))
+    (HERE / 'r14-cross-mount-receipt.json').write_text(json.dumps(dict(cross_mount_verified=True, rows=rows), indent=2))
     print(json.dumps(dict(runtime_qualified=True, cross_mount_verified=True)))

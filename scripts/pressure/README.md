@@ -376,3 +376,33 @@ an empty-worker queue drill rejects stale enable generation 1 after disable 2,
 then accepts enable 3. Cleanup uninstalls only this exact test instance and
 preserves the legacy GPU1 guard. Detached collector updates report-r13.md after
 terminal, finalizer and independent B70/Spark cleanup receipts.
+
+Round 14 repairs harness expectations from issue #238 without changing core.
+All active retry paths, units, disposable installer names and collectors use
+fresh r14 identities. Existing r13 evidence must remain untouched. The memory
+check runs the 32-MiB OOM victim first, witnesses live limits/membership, then
+runs a 1-MiB post-OOM payload on the same worker and checks PID continuity.
+It does not claim simultaneous worker isolation. The installer shell runs the
+actual installer directly; installed detect/config still uses the GPU1 fence.
+Disable requires matching cleanup generation and restart refusal before enable;
+`stopping` until enable reconciliation is valid. Stage receipts are retained.
+
+Build from an explicit immutable core commit in a **new** local directory:
+
+```sh
+python3.13 scripts/pressure/build_retry.py --repo /PATH/TO/CORE/REPO \
+  --commit CORE_SHA --root /NEW/RETRY/ROOT
+```
+
+This extracts core source into the new root, adds both pressure test overlays,
+builds one shared queue/worker binary plus the CPU matrix, and writes hashes,
+commit pins and distinct queue/spool/control paths in `artifacts/build-manifest.json`.
+For B70 staging builds use `--goos linux --goarch amd64`; cross-built artifacts
+are preparation only. `prepare_r11.py --artifacts /NEW/RETRY/ROOT/artifacts`
+and `launch_r12.py --artifacts /NEW/RETRY/ROOT/artifacts` consume that selected
+pin instead of assuming current main. These two commands touch fleet hosts and
+require separate current authorization; do not execute for local verification.
+Preparation refuses existing remote roots. CPU receipts preserve the raw child
+exit, detailed log and systemd state, separately classifying assertion, timeout,
+OOM and execution failures. Fake Docker and foreign-state rejection remain in
+FAST; real Docker qualification stays deferred.

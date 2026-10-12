@@ -10,11 +10,11 @@ import subprocess
 import sys
 
 root=Path('/home/user/synthetic-run')
-config=root/'installation/worker-versotest-r13-gpu1/config.json'
+config=root/'installation/worker-versotest-r14-gpu1/config.json'
 assert os.getuid()==0 and sys.argv[1:] in ([str(config)],[str(config),'detect'])
 validation=sys.argv[-1]=='detect'
 group=kernel_read(Path('/proc/self/cgroup')).strip()
-assert group.endswith('/myce-test-r13-installed-validation.service' if validation else '/myce-worker@versotest-r13-gpu1.service')
+assert group.endswith('/myce-test-r14-installed-validation.service' if validation else '/myce-worker@versotest-r14-gpu1.service')
 assert {p.name for p in kernel_read(Path('/sys/bus/pci/devices/0000:07:00.0/drm'), 'list')} >= {'card1','renderD129'}
 nodes={name:os.stat('/dev/dri/'+name) for name in ('card1','renderD129')}
 assert all(stat.S_ISCHR(v.st_mode) for v in nodes.values())
