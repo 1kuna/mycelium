@@ -545,3 +545,25 @@ func TestMemoryCeilingModelOOMDuringLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMemoryCeilingDockerUndeclaredOOM(t *testing.T) {
+	w, s, _, root := dockerFixture(t)
+	j := dockerJob()
+	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoints")
+	if err := os.WriteFile(filepath.Join(root, "mode"), []byte("docker-oom"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := startDockerFixture(w, s, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.docker.close()
+	select {
+	case f := <-p.done:
+		if f.result.Success || f.result.Interrupted || !strings.Contains(f.result.Error, "OOM-killed without a declared memory ceiling") {
+			t.Fatalf("undeclared OOM claimed a ceiling: %+v", f)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Docker did not finish")
+	}
+}

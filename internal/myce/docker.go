@@ -555,7 +555,10 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 		result.Error = d.state.MemoryFailure
 	}
 	if d.state.OOMKilled {
-		result.Error = fmt.Sprintf("exceeded its %g GiB memory ceiling", float64(d.state.MemoryLimitBytes)/(1<<30))
+		result.Error = "Docker container OOM-killed without a declared memory ceiling"
+		if d.state.MemoryLimitBytes > 0 {
+			result.Error = fmt.Sprintf("exceeded its %g GiB memory ceiling", float64(d.state.MemoryLimitBytes)/(1<<30))
+		}
 		result.Interrupted = false
 		result.Forced = false
 	}
