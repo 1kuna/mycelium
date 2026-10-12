@@ -537,8 +537,8 @@ class CommandTests(unittest.TestCase):
 class NativeRunnerTests(unittest.TestCase):
     def test_attempt_roots_use_the_same_fresh_suffix(self):
         import stage_ab
-        self.assertTrue(stage_ab.ROOT.name.endswith('r13-20261012'))
-        self.assertTrue(stage_ab.NAS.name.endswith('r13-20261012'))
+        self.assertTrue(stage_ab.ROOT.name.endswith('r14-20261012'))
+        self.assertTrue(stage_ab.NAS.name.endswith('r14-20261012'))
 
     def test_disable_confirmation_includes_descendant_population_and_unit_state(self):
         import disable_drill

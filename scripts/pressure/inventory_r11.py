@@ -2,7 +2,7 @@ from kernel_reads import kernel_read
 import datetime, json, os, pathlib, re, subprocess, sys
 host = sys.argv[1]
 home = pathlib.Path('/home/kuna')
-root = home / 'myce-test-stage-ab-r13-20261012'
+root = home / 'myce-test-stage-ab-r14-20261012'
 
 def run(args):
     p = subprocess.run(args, capture_output=True, text=True, timeout=25)

@@ -11,12 +11,12 @@ import sys
 import time
 from urllib.parse import quote
 
-root=Path('/home/kuna/myce-test-stage-ab-r13-20261012')
+root=Path('/home/kuna/myce-test-stage-ab-r14-20261012')
 sys.path.insert(0,str(root/'source/scripts/pressure'))
 from kernel_reads import kernel_read, Vanished
 from stage_ab import cgroup_pids
 from pressure import DiagnosticReaders, drm_owners
-receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r13.service')
+receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r14.service')
 try:
     from types import SimpleNamespace
     from disable_drill import cleanup as installed_cleanup, UNIT, GPU_UNIT, DROP
@@ -24,7 +24,7 @@ try:
         assert DROP.exists() and str(root) in kernel_read(DROP, 'text'), 'test unit ownership changed'
         run=SimpleNamespace(installed=True,env=dict(os.environ),worker_cgroup=None)
         installed_cleanup(run)
-    receipt['installed_worker']='flag and unit absent' if not GPU_UNIT.exists() and not (root/'installed-host-state/DISABLED').exists() and not (root/'installed-host-state/units/myce-worker@versotest-r13-gpu1.service/DISABLED').exists() else 'HOLD'
+    receipt['installed_worker']='flag and unit absent' if not GPU_UNIT.exists() and not (root/'installed-host-state/DISABLED').exists() and not (root/'installed-host-state/units/myce-worker@versotest-r14-gpu1.service/DISABLED').exists() else 'HOLD'
 except Exception as error:
     receipt['installed_worker']='HOLD:'+type(error).__name__
 try:
@@ -36,7 +36,7 @@ try:
 except Exception as error:receipt['cpu_cleanup_error']=type(error).__name__
 try:
     cpu_units=json.loads(kernel_read(root/'cpu-units.json')) if (root/'cpu-units.json').exists() else []
-    allowed={'myce-test-r13-cpu-fast-matrix.service','myce-test-r13-cpu-large-local-checkpoint.service','myce-test-r13-nas-small-latency-probe.service'}
+    allowed={'myce-test-r14-cpu-fast-matrix.service','myce-test-r14-cpu-large-local-checkpoint.service','myce-test-r14-nas-small-latency-probe.service'}
     for unit in cpu_units:
         assert unit in allowed,'unexpected CPU unit'
         state=subprocess.run(['systemctl','show',unit,'-p','ActiveState','-p','LoadState','-p','ControlGroup'],capture_output=True,text=True)
@@ -77,13 +77,13 @@ try:
 except Exception as e:receipt['docker_error']=type(e).__name__
 # Retire only this attempt's runtime unit configuration after execution is gone.
 try:
-    allowed={'myce-test-r13-docker.slice','myce-test-stage-ab-r13.service',
-             'myce-test-r13-installed-validation.service','myce-test-r13-cpu-fast-matrix.service','myce-test-r13-cpu-large-local-checkpoint.service','myce-test-r13-nas-small-latency-probe.service'}
+    allowed={'myce-test-r14-docker.slice','myce-test-stage-ab-r14.service',
+             'myce-test-r14-installed-validation.service','myce-test-r14-cpu-fast-matrix.service','myce-test-r14-cpu-large-local-checkpoint.service','myce-test-r14-nas-small-latency-probe.service'}
     retired=root/'runtime-units.retired';retired.mkdir(exist_ok=True)
     for base in (Path('/run/systemd/system.control'),Path('/run/systemd/transient')):
         for name in allowed:
             for path in (base/name,base/(name+'.d')):
-                if path.exists() and name!='myce-test-stage-ab-r13.service':shutil.move(str(path),str(retired/(base.name+'-'+path.name)))
+                if path.exists() and name!='myce-test-stage-ab-r14.service':shutil.move(str(path),str(retired/(base.name+'-'+path.name)))
     subprocess.run(['systemctl','daemon-reload'],check=True,capture_output=True)
     receipt['runtime_units_retired']=True
 except Exception as error:receipt['runtime_unit_error']=type(error).__name__
@@ -98,7 +98,7 @@ owned=root/'owned-pause'
 headroom=int(next(r.split()[1] for r in kernel_read('/proc/meminfo').splitlines() if r.startswith('MemAvailable:')))/1024**2
 receipt['headroom_gib']=headroom
 # At ExecStopPost the kernel has stopped the unit's child processes. Read-only verify it.
-remaining=cgroup_pids('0::/system.slice/myce-test-stage-ab-r13.service')
+remaining=cgroup_pids('0::/system.slice/myce-test-stage-ab-r14.service')
 receipt['remaining_pids']=remaining
 ports=json.loads(kernel_read(root/'ports.json', 'text')) if (root/'ports.json').exists() else []
 for path in (root/'phases').glob('*/measure-*.pid.json'):

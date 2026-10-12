@@ -41,7 +41,7 @@ class ReceiptRegression(unittest.TestCase):
         import collect_r12 as collector
         with tempfile.TemporaryDirectory() as tmp,patch.object(collector,'HERE',Path(tmp)):
             collector.render({'launch-manifest.json':{'main':'test-main','harness':'test-harness'},'launch-receipt.json':{}})
-            report=(Path(tmp)/'report-r13.md').read_text()
+            report=(Path(tmp)/'report-r14.md').read_text()
             self.assertIn('native outcomes pending',report)
             self.assertLessEqual(len(report.split('## DIGEST\n')[1].splitlines()),10)
             self.assertIn('Memory-ceiling-isolation: pending',report)
@@ -51,7 +51,7 @@ class ReceiptRegression(unittest.TestCase):
         data={'results.json':{'results':[{'scenario':'Docker-grace','result':'PASS'}]},'FAILED':{}}
         with tempfile.TemporaryDirectory() as tmp,patch.object(collector,'HERE',Path(tmp)),patch.object(collector.subprocess,'run',return_value=CompletedProcess([],0,json.dumps(data),'')):
             self.assertEqual(collector.collect(),data)
-            self.assertTrue((Path(tmp)/'native-r13-receipts/FAILED').exists())
+            self.assertTrue((Path(tmp)/'native-r14-receipts/FAILED').exists())
     def test_new_generated_collector_and_installer_python_compiles(self):
         import collect_r12 as collector
         from remote_snippets import checked_python,python_command
