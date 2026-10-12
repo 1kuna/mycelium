@@ -587,25 +587,40 @@ func TestDockerWorkerPublishesUnconfirmedCleanupWhileDaemonHangs(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(root, "mode"), nil, 0600)
 	c.advance(StopGrace)
 	cancel()
-	deadline := time.After(3 * time.Second)
-	for job(t, q, j.ID).State != "cancelled" {
+	deadline := time.After(5 * time.Second)
+	// Worker completion happens after the final queue acknowledgement.
+	for {
 		c.advance(time.Millisecond)
 		select {
-		case e := <-done:
-			t.Fatalf("worker ended before completing cancellation: %v; job=%+v", e, job(t, q, j.ID))
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := job(t, q, j.ID)
+			if final.State != "cancelled" || !final.ReleaseConfirmed || final.LastStopOutcome != "forced" || final.Losses != 0 {
+				t.Fatalf("worker exited without confirmed cancellation: %+v", final)
+			}
+			paths, err := filepath.Glob(filepath.Join(w.StateDir, "*.docker.json"))
+			if err != nil || len(paths) != 1 {
+				t.Fatalf("missing attempt custody: %v, %v", paths, err)
+			}
+			data, err := os.ReadFile(paths[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var custody dockerExecution
+			if err := json.Unmarshal(data, &custody); err != nil {
+				t.Fatal(err)
+			}
+			if !custody.Stopped || !custody.Forced || !custody.Released || custody.Pending {
+				t.Fatalf("unsettled Docker custody: %+v", custody)
+			}
+			return
 		case <-deadline:
 			data, _ := os.ReadFile(filepath.Join(w.StateDir, "state.json"))
 			t.Fatalf("cancellation stuck: job=%+v state=%s", job(t, q, j.ID), data)
 		case <-time.After(5 * time.Millisecond):
 		}
-	}
-	select {
-	case e := <-done:
-		if e != nil {
-			t.Fatal(e)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("worker did not finish after confirmed cleanup")
 	}
 }
 
