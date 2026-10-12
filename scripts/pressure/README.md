@@ -249,7 +249,7 @@ The exact owned legacy-admission pause spans both the soak and scenarios; final 
 
 ## Frozen round 9 native test runner
 
-The issue-238 round-9 launcher pins current Mycelium `ba2707c`, runs the same
+The issue-238 round-9 launcher pins current Mycelium `b980b4c` (which includes `ba2707c` Docker containment), runs the same
 30-minute zero-hold collector gate, then whole-host hold, NAS migration,
 Spark-full return, managed Docker, and isolated CPU cases in that order.
 Every scenario has fresh queue/checkpoint/spool/control state and a cleanup
@@ -281,3 +281,8 @@ Source overlays add fixture files without changing internal/, cmd/ or clients/.
 No model inference, production enablement, reboot or raw-container compatibility
 claim is part of this test. Results require the final scenario receipts and
 both host cleanup receipts; launch admission alone is not a native pass.
+
+The launcher foreground workers omit inherited INVOCATION_ID; the dedicated
+CPU-only disable worker retains its real myce-worker.service identity. Current
+main refuses pretending that a generic test runner is a registered Myce unit.
+No core check is changed; exact outer test-cgroup ownership remains enforced.

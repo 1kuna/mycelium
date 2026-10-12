@@ -75,7 +75,7 @@ class Run:
         self.baseline = json.loads(kernel_read(ROOT / 'display-baseline.json', 'text'))
         self.diagnostics = DiagnosticReaders(json.loads(kernel_read(ROOT/'diagnostic-executables.json', 'text')),
                                              ROOT/'diagnostics.jsonl')
-        self.env = {k:v for k,v in os.environ.items() if not k.startswith('MYCE_')}
+        self.env = {k:v for k,v in os.environ.items() if not k.startswith('MYCE_') and k!='INVOCATION_ID'}
         self.env['MYCE_TOKEN'] = os.urandom(32).hex()
         os.environ['MYCE_TOKEN'] = self.env['MYCE_TOKEN']
         self.results, self.procs, self.files, self.receipts = [], {}, [], []
@@ -661,7 +661,7 @@ class Run:
             from cpu_drill import scenarios as cpu_scenarios
             cpu_scenarios(self)
             self.result('B-installed-disable-enable','SKIP',executed=False,
-                reason='ba2707c has no installed-user-unit XPU visibility fix; maintainer fix remains pending')
+                reason='b980b4c adds registered worker-instance controls, but no fix for the custom installed-service zero-XPU namespace; maintainer visibility fix remains pending')
             marker='DONE' if all(r['result'] in ('PASS','SKIP','EXCLUDED') for r in self.results) else 'FAILED'
         except Exception as e:
             error=dict(type=type(e).__name__,detail=str(e));self.result('runner','HOLD' if self.safety else 'FAIL',error=error)
