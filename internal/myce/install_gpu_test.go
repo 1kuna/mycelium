@@ -170,7 +170,7 @@ func TestDetectServiceSelectedXPUUsesWorkerBinding(t *testing.T) {
 	p := fakeProbe("linux", "amd64", "", "[level_zero:gpu] Intel Arc GPU")
 	command := p.Command
 	p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if os.Getenv("ZE_AFFINITY_MASK") != "1" || os.Getenv("ONEAPI_DEVICE_SELECTOR") != "level_zero:1" || os.Getenv("PATH") != c.Path {
+		if os.Getenv("ZE_AFFINITY_MASK") != "1" || os.Getenv("ONEAPI_DEVICE_SELECTOR") != "level_zero:0" || os.Getenv("PATH") != c.Path {
 			t.Fatal("service probe differs from job binding")
 		}
 		return command(ctx, name, args...)

@@ -218,7 +218,12 @@ func WithModelDevice(m Model, platform, device string) (Model, error) {
 	case "cuda":
 		env["CUDA_VISIBLE_DEVICES"] = device
 	case "xpu":
-		env["ONEAPI_DEVICE_SELECTOR"] = "level_zero:" + device
+		// Level Zero renumbers the affinity-masked physical devices from zero.
+		indices := strings.Split(device, ",")
+		for i := range indices {
+			indices[i] = strconv.Itoa(i)
+		}
+		env["ONEAPI_DEVICE_SELECTOR"] = "level_zero:" + strings.Join(indices, ",")
 		env["ZE_AFFINITY_MASK"] = device
 	case "fake":
 	case "metal":
