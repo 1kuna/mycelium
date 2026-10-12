@@ -189,6 +189,7 @@ func TestInstallInstanceTargetsItsOwnUnit(t *testing.T) {
 		calls = append(calls, strings.Join(args, " "))
 		return nil, nil
 	}
+	c.AllowDeviceless = true
 	if err = Install(context.Background(), c, executable, "private-fixture", command); err != nil {
 		t.Fatal(err)
 	}
@@ -204,6 +205,7 @@ func TestInstallInstanceTargetsItsOwnUnit(t *testing.T) {
 			t.Fatal(setting, string(text))
 		}
 	}
+	c.AllowDeviceless = true
 	if err = Install(context.Background(), c, executable, "private-fixture", command); err != nil {
 		t.Fatal("upgrade", err)
 	}

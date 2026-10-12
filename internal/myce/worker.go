@@ -114,7 +114,12 @@ var errWorkerMemory = errors.New("free memory unavailable or insufficient")
 
 var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 
+var errWorkerReleasePending = errors.New("command release unconfirmed")
+
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
+	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
+		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
+	}
 	if j.Spec.Needs.HostMemoryGB > 0 {
 		if w.HostMemorySource == nil {
 			return nil, fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
@@ -209,9 +214,32 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	}
 	defer unlock()
 	identity := ID()
-	args := []string{"-c", `read gate || exit 125; trap 'wait "$child"; exit $?' TERM; "$@" < /dev/null & child=$!; wait "$child"; exit $?`, "myce-supervisor-" + identity, command}
+	args := []string{"-c", `read gate || exit 125; trap 'wait "$child"; exit $?' TERM; "$@" < /dev/null & child=$!; exec 3>&-; wait "$child"; exit $?`, "myce-supervisor-" + identity, command}
 	args = append(args, j.Spec.Run.Command[1:]...)
+	var readyReader, readyWriter, approvalReader, approvalWriter *os.File
+	if j.Spec.StartBy != nil {
+		executable, e := os.Executable()
+		if e != nil {
+			return nil, e
+		}
+		readyReader, readyWriter, err = os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		defer readyReader.Close()
+		defer readyWriter.Close()
+		approvalReader, approvalWriter, err = os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		defer approvalReader.Close()
+		defer approvalWriter.Close()
+		args = append(args[:3], append([]string{executable, "_command-exec"}, args[3:]...)...)
+	}
 	cmd := exec.Command("sh", args...)
+	if readyWriter != nil {
+		cmd.ExtraFiles = []*os.File{readyWriter, approvalReader}
+	}
 	cmd.Dir = j.Spec.Run.Workdir
 	env := map[string]string{}
 	for _, v := range os.Environ() {
@@ -293,19 +321,25 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		output.Close()
 		return nil, err
 	}
-	s.state.PID = cmd.Process.Pid
-	s.state.LaunchPending = false
-	if err = saveWorkerJSON(s.dir, "attempt-"+identity+".json", workerState{PID: s.state.PID, Identity: identity}); err != nil {
-		_ = syscall.Kill(-s.state.PID, syscall.SIGKILL)
-		_ = cmd.Wait()
-		output.Close()
-		return nil, err
+	if readyWriter != nil {
+		readyWriter.Close()
 	}
-	if err = s.save(); err != nil {
+	abort := func(cause error) error {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
 		output.Close()
-		return nil, err
+		if releaseErr := waitWorkerGroup(cmd.Process.Pid, w.Clock); releaseErr != nil {
+			return errors.Join(cause, fmt.Errorf("%w: %v", errWorkerReleasePending, releaseErr))
+		}
+		return cause
+	}
+	s.state.PID = cmd.Process.Pid
+	s.state.LaunchPending = false
+	if err = saveWorkerJSON(s.dir, "attempt-"+identity+".json", workerState{PID: s.state.PID, Identity: identity}); err != nil {
+		return nil, abort(err)
+	}
+	if err = s.save(); err != nil {
+		return nil, abort(err)
 	}
 	p := &process{job: j, cmd: cmd, done: make(chan workerFinish, 1)}
 	if w.control != nil {
@@ -314,6 +348,30 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
+	if readyReader != nil {
+		// Bound receipt I/O; queue startup decisions still use its injected Clock.
+		_ = readyReader.SetReadDeadline(time.Now().Add(2 * time.Second))
+		var ready [1]byte
+		if _, e := io.ReadFull(readyReader, ready[:]); e != nil || ready[0] != 'R' {
+			return nil, abort(fmt.Errorf("command start gate unavailable: %v", e))
+		}
+		err = w.authorizeStart(j, s.state.Session)
+		if err == nil {
+			_, err = approvalWriter.Write([]byte("S"))
+		}
+		approvalWriter.Close()
+		// A refused hand-off is an ordinary failed attempt; the payload remains gated.
+		if err == nil {
+			receipt, e := io.ReadAll(io.LimitReader(readyReader, 4096))
+			if e != nil || len(receipt) > 0 {
+				if e != nil {
+					return nil, abort(fmt.Errorf("command exec receipt: %w", e))
+				}
+				return nil, abort(errors.New(string(receipt)))
+			}
+		}
+	}
+	launchErr := err
 	result := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
 	go func() {
@@ -330,8 +388,10 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		p.mu.Unlock()
 		syncErr := output.Sync()
 		closeErr := output.Close()
-		result.Success = waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil
-		if waitErr != nil {
+		result.Success = launchErr == nil && waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil
+		if launchErr != nil {
+			result.Error = "command start hand-off: " + launchErr.Error()
+		} else if waitErr != nil {
 			result.Error = waitErr.Error()
 		} else if groupErr != nil {
 			result.Error = groupErr.Error()
@@ -794,9 +854,11 @@ func (w Worker) Run(stop context.Context) error {
 							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) {
 								log.Printf("retry pending start: %v", err)
 							} else {
-								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error()}
+								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error(), ReleasePending: errors.Is(err, errWorkerReleasePending)}
 								s.state.Result = &r
-								s.state.PID = 0
+								if !r.ReleasePending {
+									s.state.PID = 0
+								}
 								err = s.save()
 							}
 						}
@@ -820,7 +882,13 @@ func (w Worker) Run(stop context.Context) error {
 					if !(reply.Stop && reply.Kill) {
 						err = w.replay(ctx, s)
 					} else if s.state.Result != nil && !s.state.Job.Spec.Run.Docker {
-						err = &HTTPError{Status: 409}
+						// Reject stale output, but deliver the exact attempt's cleanup status.
+						released := *s.state.Result
+						released.ReleaseOnly = !released.ReleasePending
+						err = w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil)
+						if err == nil {
+							err = &HTTPError{Status: 409}
+						}
 					}
 					if err == nil && s.state.Result != nil {
 						err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
@@ -890,23 +958,26 @@ func (w Worker) Run(stop context.Context) error {
 							err = nil
 						} else {
 							p, err = w.start(s, j)
-							if err == nil && p != nil && p.docker == nil {
+							if err == nil && p != nil && p.docker == nil && j.Spec.StartBy == nil {
 								startedCtx, startedCancel := context.WithTimeout(ctx, 2*time.Second)
 								startedErr := w.Client.Call(startedCtx, "POST", "/api/workers/started", Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, nil)
 								startedCancel()
 								if startedErr != nil {
 									log.Printf("worker startup acknowledgement: %v", startedErr)
+									p.stop(w.Clock.Now(), 0, true)
 								}
 							}
 						}
 						if err != nil && !(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory)) {
-							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error()}
+							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), ReleasePending: errors.Is(err, errWorkerReleasePending)}
 							s.state.Job = &j
 							if w.batchMemory != nil {
 								w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
 							}
 							s.state.Result = &r
-							s.state.PID = 0
+							if !r.ReleasePending {
+								s.state.PID = 0
+							}
 							err = s.save()
 						}
 					}

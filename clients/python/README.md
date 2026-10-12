@@ -83,7 +83,10 @@ with StopSignal() as stop:
 The helper uses the worker's current attempt directory. Workers copy the highest-generation
 previous attempt's saves there. `save(value, name="checkpoint.json")` writes one
 JSON value to a unique same-directory `.tmp`, flushes and fsyncs it, atomically
-replaces the target, then fsyncs the directory. `load(default=None)` selects the
+replaces the target, then fsyncs the directory except on positively identified
+Linux CIFS mounts, where directory fsync is a kernel no-op. Unknown mounts retain
+directory fsync; file fsync and atomic rename always remain. NAS/server durability
+and mount options still require qualification. `load(default=None)` selects the
 highest-generation complete `.json` (legacy files rank at zero; ties use the
 lexicographically greatest filename), ignoring temporary
 files. Do not mix unrelated JSON files into this directory. Invalid complete

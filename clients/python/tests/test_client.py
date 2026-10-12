@@ -16,6 +16,13 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ClientTests(unittest.TestCase):
+    def test_wait_reports_production_start_deadline(self):
+        client = Client(token="test-only")
+        failed = {"id": "prod", "state": "failed", "reason": "production start deadline exceeded: host b70 disabled by operator"}
+        with patch.object(client, "_call", return_value={"jobs": [failed]}):
+            self.assertEqual(client.wait("prod"), failed)
+
+
     def test_log_pages_and_terminal_drain(self):
         client = Client(token="test-only")
         page = [{"seq": n, "attempt": 1, "text": str(n)} for n in range(1, 257)]
@@ -54,6 +61,50 @@ class CheckpointTests(unittest.TestCase):
             Path(folder, "two.json").write_text("corrupt")
             with self.assertRaises(json.JSONDecodeError):
                 checkpoint.load()
+
+    def test_cifs_save_keeps_file_sync_and_atomic_generations(self):
+        with tempfile.TemporaryDirectory() as folder:
+            checkpoint = Checkpoint(folder)
+            sync = os.fsync
+            calls = []
+            def file_sync_only(fd):
+                import stat
+                self.assertFalse(stat.S_ISDIR(os.fstat(fd).st_mode), "CIFS directory fsync must be skipped")
+                calls.append(fd)
+                sync(fd)
+            with patch("mycelium.checkpoint._is_linux_cifs", return_value=True, create=True):
+                with patch("mycelium.checkpoint.os.fsync", side_effect=file_sync_only):
+                    checkpoint.save({"step": 1})
+                    checkpoint.save({"step": 2})
+                self.assertEqual(checkpoint.load(), {"step": 2})
+                self.assertEqual(len(calls), 2)
+                with patch("mycelium.checkpoint.os.fsync", side_effect=OSError("file flush failed")):
+                    with self.assertRaises(OSError):
+                        checkpoint.save({"step": 3})
+                self.assertEqual(checkpoint.load(), {"step": 2})
+                self.assertEqual(json.loads(Path(folder, "checkpoint.json").read_text())["myce_checkpoint"]["generation"], 2)
+
+    def test_cifs_mount_selection_and_unknown_mounts_keep_sync(self):
+        from mycelium.checkpoint import _is_linux_cifs
+        mounts = "1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 0:1 / /mnt/verso\\040nas rw - cifs //nas/share rw\n3 2 8:2 / /mnt/verso\\040nas/local rw - ext4 /dev/local rw\n"
+        with patch("mycelium.checkpoint.sys.platform", "linux"):
+            with patch("mycelium.checkpoint.Path.read_text", return_value=mounts):
+                self.assertTrue(_is_linux_cifs(Path("/mnt/verso nas/checkpoints")))
+                self.assertFalse(_is_linux_cifs(Path("/mnt/verso nas/local/checkpoints")))
+                self.assertFalse(_is_linux_cifs(Path("/mnt/verso nas-other/checkpoints")))
+            ambiguous = "1 0 0:1 / /mnt rw - cifs //nas/share rw\n2 1 8:1 / /mnt rw - ext4 /dev/root rw\n"
+            with patch("mycelium.checkpoint.Path.read_text", return_value=ambiguous):
+                self.assertFalse(_is_linux_cifs(Path("/mnt/checkpoints")))
+            with patch("mycelium.checkpoint.Path.read_text", side_effect=OSError("unavailable")):
+                self.assertFalse(_is_linux_cifs(Path("/mnt/verso nas/checkpoints")))
+        with tempfile.TemporaryDirectory() as folder:
+            checkpoint = Checkpoint(folder)
+            sync = os.fsync
+            calls = []
+            with patch("mycelium.checkpoint._is_linux_cifs", return_value=False):
+                with patch("mycelium.checkpoint.os.fsync", side_effect=lambda fd: (calls.append(fd), sync(fd))):
+                    checkpoint.save({"step": 1})
+            self.assertEqual(len(calls), 2)
 
     def test_generation_survives_skew_and_restart(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -132,6 +183,17 @@ class DevTests(unittest.TestCase):
 
     def spec(self, command, **extra):
         return {"name": "python-test", "project": "test", "priority": "experiment", "run": {"command": command}, "needs": {"memory_gb": 1, "platform": ["fake"]}, "resumable": False, **extra}
+
+    def test_production_start_deadline(self):
+        job = self.client.submit(self.spec(
+            [sys.executable, "-c", "raise SystemExit('must not run')"],
+            priority="production", start_by="2000-01-01T00:00:00Z",
+            needs={"memory_gb": 1, "platform": ["xpu"]}))
+        failed = self.client.wait(job["id"], timeout=2)
+        self.assertEqual(failed["state"], "failed")
+        self.assertIn("production start deadline exceeded", failed["reason"])
+        self.assertIn("needs xpu", failed["reason"])
+        self.assertEqual(failed["attempt"], 0)
 
     def test_submit_wait_logs_and_failure(self):
         original = self.spec([sys.executable, "-c", "print('first', flush=True); print('last', flush=True)"])

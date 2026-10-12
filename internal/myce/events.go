@@ -26,7 +26,7 @@ func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
 		wake := a.Queue.wake
 		var event WorkerEvent
 		for _, j := range a.Queue.s.Jobs {
-			if j.Machine == r.PathValue("id") && j.Session == r.URL.Query().Get("session") && j.State == "stopping" && j.StopAt != nil {
+			if j.Machine == r.PathValue("id") && j.Session == r.URL.Query().Get("session") && (j.State == "stopping" || terminal(j.State) && !j.ReleaseConfirmed) && j.StopAt != nil {
 				deadline := *j.StopAt
 				event = WorkerEvent{StopAt: &deadline, Cursor: fmt.Sprintf("%s:%d:%s", j.ID, j.Attempt, j.StopAt.Format(time.RFC3339Nano)), Execution: Execution{ID: j.ID, Attempt: j.Attempt}, GraceSeconds: max(0, j.StopAt.Sub(a.Queue.clock.Now()).Seconds()), Kill: expired(j.StopAt, a.Queue.clock.Now())}
 				break
