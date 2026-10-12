@@ -28,7 +28,8 @@ Old step-1 checkpoint files directly in the job folder are also preserved when
 resuming. Checkpoints remain after completion or failure.
 
 **Every save must be atomic:** write to a temporary file in the same directory,
-flush and fsync it, rename it into place, then fsync the directory. Use one
+flush and fsync it, rename it into place, then fsync the directory (except the
+Linux CIFS no-op described below). Use one
 self-contained checkpoint file, or a single atomic manifest referencing immutable
 files, so readers never combine pieces from different saves. The newest complete
 save is determined by a positive monotonic `generation` recorded inside the
@@ -49,6 +50,38 @@ a tie; worker resume chooses the greatest numeric prior attempt (direct job-fold
 saves lose a tie). Reconciliation retains the current execution on a tie. These
 are deterministic compatibility rules, not estimates of legacy progress.
 Invalid generation metadata fails visibly instead of using timestamps. A job must also make its output writes safe to retry.
+
+On Linux CIFS/SMB mounts, the Go checkpoint-copy path and Python helper skip
+only directory fsync: Linux `cifs_dir_fsync` is explicitly a dummy operation
+because directory operations are synchronous. Go identifies CIFS on the opened
+directory with `fstatfs`; Python uses the most specific resolved mount in
+`/proc/self/mountinfo`. Unknown filesystems and other platforms retain directory
+fsync. File fsync and same-directory atomic rename remain mandatory. A mount
+using `nostrictsync` may omit the server flush for files; avoid that option for
+durable checkpoints. Server acknowledgements do not independently prove power-loss
+survival of NAS caches: qualify server/storage guarantees and power-loss behavior
+separately. Neither helper returns early from a still-running file flush.
+
+Resume copies now sync each copied file, then each staged directory once,
+children before parents, before atomically publishing the entire attempt and
+syncing its parent. This removes per-file directory barriers on local filesystems
+without weakening publication ordering. Verso's 40,002-file timeout occurred on
+ext4, not CIFS; this change does not certify that fixture's five-minute budget.
+File flushes, copying, generation scanning and remote I/O can still be slow or
+block. A timeout after rename on a filesystem requiring directory fsync must not
+be reported as a durable save; visibility alone does not prove durability.
+
+Size Verso checkpoint intervals from measured worst-case/p99 save duration and
+acceptable lost work, including time spent doing the next bounded work unit.
+Avoid overlapping saves. Measure resume-copy latency separately, including file
+count and payload size. Stop grace must exceed the longest bounded work unit plus
+a complete final save and process-exit margin; the 10-second production default
+is not a NAS latency guarantee. Increase configured grace only within the agreed
+production-start budget; otherwise reduce checkpoint payload/file count or save
+more frequently so the previous complete generation is sufficient after forced
+stop. The queue's 25 ms wait budget does not bound a command's save syscall.
+Run the large ext4 fixture separately with a qualified storage-duration budget
+and memory/cache accounting; preserve all file-count/hash/heap assertions.
 
 This complete Python command atomically replaces one checkpoint and retries NAS
 failures while continuing to run:

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -285,6 +286,9 @@ func prepareCheckpoint(j Job) (string, error) {
 	return prepareCheckpointCopy(j, io.Copy)
 }
 func prepareCheckpointCopy(j Job, copyFile func(io.Writer, io.Reader) (int64, error)) (string, error) {
+	return prepareCheckpointCopySync(j, copyFile, syncWorkerDir)
+}
+func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64, error), syncDir func(string) error) (string, error) {
 	if _, err := os.Stat(filepath.Dir(j.Checkpoint)); err != nil {
 		return "", fmt.Errorf("checkpoint root unavailable: %w", err)
 	}
@@ -334,6 +338,7 @@ func prepareCheckpointCopy(j Job, copyFile func(io.Writer, io.Reader) (int64, er
 	if err != nil {
 		return "", err
 	}
+	directories := []string{}
 	if source != "" {
 		err = filepath.WalkDir(source, func(path string, e os.DirEntry, err error) error {
 			if err != nil {
@@ -354,6 +359,7 @@ func prepareCheckpointCopy(j Job, copyFile func(io.Writer, io.Reader) (int64, er
 			}
 			target := filepath.Join(staging, rel)
 			if e.IsDir() {
+				directories = append(directories, target)
 				return os.MkdirAll(target, 0700)
 			}
 			if e.Type()&os.ModeSymlink != 0 {
@@ -389,7 +395,7 @@ func prepareCheckpointCopy(j Job, copyFile func(io.Writer, io.Reader) (int64, er
 			if err = os.Rename(target+".tmp", target); err != nil {
 				return err
 			}
-			return syncWorkerDir(filepath.Dir(target))
+			return nil // Staging is unpublished; sync each directory once below.
 		})
 	}
 	if err == nil {
@@ -401,13 +407,22 @@ func prepareCheckpointCopy(j Job, copyFile func(io.Writer, io.Reader) (int64, er
 		}
 	}
 	if err == nil {
-		err = syncWorkerDir(staging)
+		// Children before parents; every directory entry is durable before publication.
+		sort.Slice(directories, func(i, k int) bool { return len(directories[i]) > len(directories[k]) })
+		for _, dir := range directories {
+			if err = syncDir(dir); err != nil {
+				break
+			}
+		}
+		if len(directories) == 0 {
+			err = syncDir(staging)
+		}
 	}
 	if err == nil {
 		err = os.Rename(staging, dest)
 	}
 	if err == nil {
-		err = syncWorkerDir(j.Checkpoint)
+		err = syncDir(j.Checkpoint)
 	}
 	return dest, err
 }
@@ -437,10 +452,18 @@ func workerCheckpointAvailable(root string) error {
 }
 
 func syncWorkerDir(dir string) error {
+	return syncCheckpointDirectory(dir, checkpointCIFS, (*os.File).Sync)
+}
+
+func syncCheckpointDirectory(dir string, filesystem func(*os.File) (bool, error), syncFile func(*os.File) error) error {
 	f, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	return f.Sync()
+	// Linux CIFS directory fsync is a dummy operation; file flushes remain required.
+	if cifs, err := filesystem(f); err == nil && cifs {
+		return nil
+	}
+	return syncFile(f)
 }
