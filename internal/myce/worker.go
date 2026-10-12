@@ -212,7 +212,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	identity := ID()
 	args := []string{"-c", `read gate || exit 125; trap 'wait "$child"; exit $?' TERM; "$@" < /dev/null & child=$!; exec 3>&-; wait "$child"; exit $?`, "myce-supervisor-" + identity, command}
 	args = append(args, j.Spec.Run.Command[1:]...)
-	var readyReader, readyWriter *os.File
+	var readyReader, readyWriter, approvalReader, approvalWriter *os.File
 	if j.Spec.StartBy != nil {
 		executable, e := os.Executable()
 		if e != nil {
@@ -224,11 +224,17 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		}
 		defer readyReader.Close()
 		defer readyWriter.Close()
+		approvalReader, approvalWriter, err = os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		defer approvalReader.Close()
+		defer approvalWriter.Close()
 		args = append(args[:3], append([]string{executable, "_command-exec"}, args[3:]...)...)
 	}
 	cmd := exec.Command("sh", args...)
 	if readyWriter != nil {
-		cmd.ExtraFiles = []*os.File{readyWriter}
+		cmd.ExtraFiles = []*os.File{readyWriter, approvalReader}
 	}
 	cmd.Dir = j.Spec.Run.Workdir
 	env := map[string]string{}
@@ -335,23 +341,33 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if w.control != nil {
 		w.control.set(p)
 	}
-	if err = w.authorizeStart(j, s.state.Session); err != nil {
-		return nil, abort(err)
-	}
 	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	if readyReader != nil {
 		// Bound receipt I/O; queue startup decisions still use its injected Clock.
 		_ = readyReader.SetReadDeadline(time.Now().Add(2 * time.Second))
-		receipt, e := io.ReadAll(io.LimitReader(readyReader, 4096))
-		if e != nil || len(receipt) > 0 {
-			if e != nil {
-				return nil, abort(fmt.Errorf("command exec receipt: %w", e))
+		var ready [1]byte
+		if _, e := io.ReadFull(readyReader, ready[:]); e != nil || ready[0] != 'R' {
+			return nil, abort(fmt.Errorf("command start gate unavailable: %v", e))
+		}
+		err = w.authorizeStart(j, s.state.Session)
+		if err == nil {
+			_, err = approvalWriter.Write([]byte("S"))
+		}
+		approvalWriter.Close()
+		// A refused hand-off is an ordinary failed attempt; the payload remains gated.
+		if err == nil {
+			receipt, e := io.ReadAll(io.LimitReader(readyReader, 4096))
+			if e != nil || len(receipt) > 0 {
+				if e != nil {
+					return nil, abort(fmt.Errorf("command exec receipt: %w", e))
+				}
+				return nil, abort(errors.New(string(receipt)))
 			}
-			return nil, abort(errors.New(string(receipt)))
 		}
 	}
+	launchErr := err
 	result := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
 	go func() {
@@ -368,8 +384,10 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		p.mu.Unlock()
 		syncErr := output.Sync()
 		closeErr := output.Close()
-		result.Success = waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil
-		if waitErr != nil {
+		result.Success = launchErr == nil && waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil
+		if launchErr != nil {
+			result.Error = "command start hand-off: " + launchErr.Error()
+		} else if waitErr != nil {
 			result.Error = waitErr.Error()
 		} else if groupErr != nil {
 			result.Error = groupErr.Error()
@@ -927,7 +945,7 @@ func (w Worker) Run(stop context.Context) error {
 							err = nil
 						} else {
 							p, err = w.start(s, j)
-							if err == nil && p != nil && p.docker == nil {
+							if err == nil && p != nil && p.docker == nil && j.Spec.StartBy == nil {
 								startedCtx, startedCancel := context.WithTimeout(ctx, 2*time.Second)
 								startedErr := w.Client.Call(startedCtx, "POST", "/api/workers/started", Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, nil)
 								startedCancel()

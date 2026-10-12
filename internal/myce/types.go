@@ -194,6 +194,7 @@ type Job struct {
 	EnvironmentFailureLog string                       `json:"environment_failure_log,omitempty"`
 	EnvironmentRecipes    map[string]EnvironmentRecipe `json:"environment_recipes,omitempty"`
 	Copies                []Copy                       `json:"copies,omitempty"`
+	StartWindow           time.Duration                `json:"start_window,omitempty"`
 	StartedAt             *time.Time                   `json:"started_at,omitempty"`
 	StartLatencySeconds   float64                      `json:"start_latency_seconds"`
 	Starts                int                          `json:"starts"`

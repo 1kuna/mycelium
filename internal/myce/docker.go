@@ -469,14 +469,6 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 			return e
 		}
 		_, e = d.operation("start", "start", id)
-		if e == nil && j.Spec.StartBy != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			e = w.Client.Call(ctx, "POST", "/api/workers/started", Result{Machine: w.Machine.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, nil)
-			cancel()
-			if e != nil {
-				d.stop(w.Clock.Now(), 0, true)
-			}
-		}
 		return e
 	})
 	return p, nil
