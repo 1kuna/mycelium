@@ -270,8 +270,8 @@ empty user cgroup and no labeled execution, not installed XPU visibility.
 
 The fast CPU matrix, unchanged 40,001-file/256 MiB checkpoint assertions and
 8-generation NAS-latency probe run separately. CPU TMPDIR is verified local
-ext4; budgets are 5 minutes, 30 minutes and 120 seconds respectively. Each
-child has its own capped cgroup, memory.stat/events samples, explicit exit
+ext4; budgets are 5 minutes, 30 minutes and 120 seconds respectively. The continuing runner drops to 4 GiB during CPU work, keeping the combined
+runner/child cap at 8 GiB. Each child has its own 4 GiB capped cgroup, memory.stat/events samples, explicit exit
 receipt, empty/removed-cgroup proof and recoverable temporary-tree custody.
 The continuing runner's settlement excludes only measured inactive file cache
 and reclaimable slab; anonymous/unknown/active charges and the 18 GiB host
