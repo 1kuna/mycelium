@@ -35,6 +35,9 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 		flags = flags[1:]
 	}
 	f := flag.NewFlagSet(action, flag.ContinueOnError)
+	instance := f.String("instance", "", "Linux worker instance (e.g. gpu1)")
+	device := f.String("device", "", "physical GPU selector (one device per worker)")
+	hostDir := f.String("host-state-dir", "", "shared local host control directory")
 	root := f.String("root", "", "installation root (default ~/.local/share/mycelium)")
 
 	config := f.String("config", "", "installed config path (doctor/uninstall)")
@@ -110,7 +113,7 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 				return e
 			}
 		} else {
-			d, e = probe.Detect(ctx)
+			d, e = probe.DetectDevice(ctx, *device)
 			if e != nil {
 				return e
 			}
@@ -119,6 +122,31 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	c, e := myce.PlanInstall(role, home, *root, *nas, *queue, *name, d)
 	if e != nil {
 		return e
+	}
+	if *instance != "" {
+		nameSet := false
+		f.Visit(func(v *flag.Flag) {
+			if v.Name == "name" {
+				nameSet = true
+			}
+		})
+		if !nameSet {
+			c.Name += "-" + *instance
+		}
+		if e = c.WorkerInstance(*instance); e != nil {
+			return e
+		}
+	}
+	c.Device = *device
+	c.HostStateDir = *hostDir
+	if c.HostStateDir == "" {
+		c.HostStateDir = os.Getenv("MYCE_HOST_STATE_DIR")
+	}
+	if c.HostStateDir != "" {
+		c.HostStateDir, e = filepath.Abs(c.HostStateDir)
+		if e != nil {
+			return e
+		}
 	}
 	c.Listen = *listen
 	// Services start in a different working directory from the install command.
@@ -172,7 +200,18 @@ func serviceCommand(args []string) error {
 		return e
 	}
 	if c.Role == "worker" {
-		reason, err := myce.HostDisabled("")
+		dir := c.HostStateDir
+		unit, err := myce.CurrentWorkerUnit()
+		if err != nil {
+			return err
+		}
+		if unit != "" {
+			dir, err = myce.WorkerUnitDirectory(dir, unit)
+			if err != nil {
+				return err
+			}
+		}
+		reason, err := myce.HostDisabled(dir)
 		if err != nil {
 			return err
 		}

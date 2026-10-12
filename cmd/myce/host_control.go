@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	unit := f.String("unit", "", "target one registered Mycelium worker unit (Linux only)")
 	dir := f.String("host-state-dir", "", "shared local host control directory (default ~/.local/share/myce)")
 	config := f.String("config", "", "installed worker config (auto-detected by default)")
 	state := f.String("state-dir", "", "worker spool to adopt from before this upgrade")
@@ -43,6 +45,19 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 	}
 	if *dir == "" {
 		*dir, err = myce.HostStateDirectory()
+		if err != nil {
+			return err
+		}
+	}
+	sharedDir := *dir
+	if *unit != "" {
+		if probe.OS != "linux" {
+			return errors.New("--unit requires Linux systemd")
+		}
+		if _, err = myce.WorkerUnits(sharedDir, *unit); err != nil {
+			return err
+		}
+		*dir, err = myce.WorkerUnitDirectory(sharedDir, *unit)
 		if err != nil {
 			return err
 		}
@@ -80,7 +95,7 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 		}
 		// Upgrade adoption is local-only and records no token. New workers register automatically.
 		if *state != "" {
-			if err = myce.AdoptHostWorker(*dir, myce.HostWorker{State: *state, Host: *host, Name: *name, Queue: *queue, Environments: c.EnvironmentCache}); err != nil {
+			if err = myce.AdoptHostWorker(sharedDir, myce.HostWorker{Unit: filepath.Base(c.Service), State: *state, Host: *host, Name: *name, Queue: *queue, Environments: c.EnvironmentCache}); err != nil {
 				return err
 			}
 		}
@@ -97,6 +112,39 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 				return e
 			}
 		}
+		if *unit != "" {
+			workers, e := myce.HostWorkers(sharedDir)
+			if e != nil {
+				return e
+			}
+			for _, w := range workers {
+				if w.Unit == *unit {
+					if e = myce.AdoptHostWorker(*dir, w); e != nil {
+						return e
+					}
+				}
+			}
+			service = *unit
+		}
+		return nil
+	}
+	units := []string{}
+	resolveUnits := func() error {
+		if probe.OS != "linux" {
+			return nil
+		}
+		var e error
+		units, e = myce.WorkerUnits(sharedDir, *unit)
+		if e != nil {
+			return e
+		}
+		if len(units) == 0 && service != "" {
+			candidate := filepath.Base(service)
+			if !myce.ValidWorkerUnit(candidate) {
+				return errors.New("refusing non-Mycelium worker unit")
+			}
+			units = []string{candidate}
+		}
 		return nil
 	}
 	ctx := context.Background()
@@ -106,12 +154,19 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 	h := myce.HostControl{Docker: true, Timeout: *timeout, Dir: *dir, Prepare: prepare, Notify: func(ctx context.Context, w myce.HostWorker, enable, cleared bool, reason string) error {
 		return myce.NotifyHost(myce.Client{Token: token})(ctx, w, enable, cleared, reason)
 	}}
+	if *unit != "" {
+		h.Notify = nil
+	}
 	if args[0] == "disable" {
-		h.ResolveService = func() myce.HostService {
-			if probe.OS == "linux" && service != "" {
-				return &myce.SystemdHostService{Unit: filepath.Base(service), Command: probe.Command}
+		h.ResolveServices = func() (map[string]myce.HostService, error) {
+			if err := resolveUnits(); err != nil {
+				return nil, err
 			}
-			return nil
+			services := map[string]myce.HostService{}
+			for _, u := range units {
+				services[u] = &myce.SystemdHostService{Unit: u, Command: probe.Command}
+			}
+			return services, nil
 		}
 		h.StopSecondary = func(ctx context.Context) error {
 			if probe.OS != "linux" {
@@ -121,6 +176,18 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 		}
 		r, cleanupErr := h.Disable(ctx, *reason, *grace)
 
+		reportedUnits := []string{}
+		for u := range r.Units {
+			reportedUnits = append(reportedUnits, u)
+		}
+		slices.Sort(reportedUnits)
+		for _, u := range reportedUnits {
+			result := r.Units[u]
+			if result == "" {
+				result = "unconfirmed (overall cleanup did not finish)"
+			}
+			fmt.Fprintf(out, "Unit %s: %s\n", u, result)
+		}
 		if r.BestEffort {
 			fmt.Fprintln(out, "Not running under the systemd service; ownership is best-effort.")
 		}
@@ -147,11 +214,23 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 	if err = h.Enable(ctx); err != nil {
 		return err
 	}
-	if err = hostService(ctx, probe, service, true); err != nil {
+	if err = resolveUnits(); err != nil {
+		return err
+	}
+	if probe.OS != "linux" {
+		units = []string{service}
+	}
+	var startErrors []error
+	for _, u := range units {
+		if e := hostService(ctx, probe, u, true); e != nil {
+			startErrors = append(startErrors, e)
+		}
+	}
+	if err = errors.Join(startErrors...); err != nil {
 		fmt.Fprintf(out, "Enabled locally. Start worker: %s\n", hostServiceCommand(probe.OS, service, true))
 		return err
 	}
-	if service == "" {
+	if service == "" && len(units) == 0 {
 		commands, e := myce.HostResumeCommands(*dir)
 		if e != nil {
 			return e

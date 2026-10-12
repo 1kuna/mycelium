@@ -181,7 +181,7 @@ func TestSystemdProtocolAndDescendantPopulation(t *testing.T) {
 				if !strings.Contains(joined, "kill --kill-whom=all --signal=SIGKILL myce-worker.service") {
 					t.Fatal(joined)
 				}
-			} else if !strings.Contains(joined, "set-property --runtime myce-worker.service TimeoutStopSec=3s") {
+			} else if strings.Contains(joined, "set-property") || !strings.Contains(joined, "stop --no-block myce-worker.service") {
 				t.Fatal(joined)
 			}
 		})
