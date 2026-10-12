@@ -23,6 +23,7 @@ import (
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
 	dockerCallTimeout     time.Duration
+	Unit                  string
 	HostStateDir          string
 	SuperviseProcess      bool
 	ResumeCommand         []string
@@ -484,7 +485,14 @@ func (w Worker) Run(stop context.Context) error {
 		}
 		return err
 	}
-	if err = (HostControl{Dir: w.HostStateDir, Notify: NotifyHost(w.Client)}).ReconcileEnable(context.Background()); err != nil {
+	notify := NotifyHost(w.Client)
+	if parent := unitParent(w.HostStateDir); parent != "" {
+		if err = (HostControl{Dir: parent, Notify: notify}).ReconcileEnable(context.Background()); err != nil {
+			return err
+		}
+		notify = nil
+	}
+	if err = (HostControl{Dir: w.HostStateDir, Notify: notify}).ReconcileEnable(context.Background()); err != nil {
 		return err
 	}
 	w.environmentCache = &EnvironmentCache{HostStateDir: w.HostStateDir, Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
