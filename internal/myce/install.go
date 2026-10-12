@@ -157,6 +157,8 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
+	Device                string    `json:"device,omitempty"`
+	HostStateDir          string    `json:"host_state_dir,omitempty"`
 	Path                  string    `json:"path"`
 	EnvironmentRoot       string    `json:"environment_root"`
 	Role                  string    `json:"role"`
@@ -223,13 +225,47 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection) (Servic
 	}
 	return c, nil
 }
+func (c *ServiceConfig) WorkerInstance(instance string) error {
+	unit := "myce-worker@" + instance + ".service"
+	if c.Role != "worker" || c.Detection.OS != "linux" || !ValidWorkerUnit(unit) {
+		return errors.New("instance requires Linux worker and letters, digits, dash or underscore")
+	}
+	old := filepath.Dir(c.Config)
+	root := filepath.Join(filepath.Dir(old), "worker-"+instance)
+	for _, p := range []*string{&c.Config, &c.Binary, &c.Credentials, &c.State, &c.ModelCache, &c.EnvironmentCache} {
+		rel, err := filepath.Rel(old, *p)
+		if err != nil {
+			return err
+		}
+		*p = filepath.Join(root, rel)
+	}
+	c.Service = filepath.Join(filepath.Dir(c.Service), unit)
+	return nil
+}
 func unitQuote(v string) string { v = strings.ReplaceAll(v, "%", "%%"); return strconv.Quote(v) }
+
+// Condition paths consume the whole value, not ExecStart's quoted argument syntax.
+func unitConditionPath(v string) string {
+	return strings.NewReplacer("%", "%%", "\n", "\\x0a", "\r", "\\x0d").Replace(v)
+}
 func (c ServiceConfig) ServiceText() string {
 	if c.Detection.OS == "linux" {
 		condition := ""
 		stopSettings := ""
 		if c.Role == "worker" {
 			condition = "ConditionPathExists=!%h/.local/share/myce/DISABLED\n"
+			if c.HostStateDir != "" {
+				condition = "ConditionPathExists=!" + unitConditionPath(filepath.Join(c.HostStateDir, "DISABLED")) + "\n"
+			}
+			if ValidWorkerUnit(filepath.Base(c.Service)) {
+				dir := c.HostStateDir
+				if dir == "" {
+					condition += "ConditionPathExists=!%h/.local/share/myce/units/" + filepath.Base(c.Service) + "/DISABLED\n"
+				} else {
+					scoped, _ := WorkerUnitDirectory(dir, filepath.Base(c.Service))
+					condition += "ConditionPathExists=!" + unitConditionPath(filepath.Join(scoped, "DISABLED")) + "\n"
+				}
+			}
 			stopSettings = "KillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
 		}
 		return "[Unit]\n" + condition + "Description=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\nExecStart=" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + "\n" + stopSettings + "Restart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
@@ -245,6 +281,10 @@ func (c ServiceConfig) ServiceText() string {
 // Install is only called by an explicit install invocation. Tests use plans or
 // inject a no-op service runner and temp home; no test installs a boot service.
 func Install(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) error {
+	if c.Detection.OS == "linux" && (c.Role == "worker" && !ValidWorkerUnit(filepath.Base(c.Service)) || c.Role != "worker" && (c.Role != "queue" || filepath.Base(c.Service) != "myce-queue.service")) {
+		return errors.New("refusing non-Mycelium service unit")
+	}
+
 	if token == "" {
 		return errors.New("set MYCE_TOKEN before installing")
 	}
@@ -308,7 +348,7 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 		if _, e = command(ctx, "systemctl", "--user", "daemon-reload"); e != nil {
 			return e
 		}
-		_, e = command(ctx, "systemctl", "--user", "enable", "--now", "myce-"+c.Role+".service")
+		_, e = command(ctx, "systemctl", "--user", "enable", "--now", filepath.Base(c.Service))
 	} else {
 		_, e = command(ctx, "launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), c.Service)
 	}
@@ -324,6 +364,10 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	return c, e
 }
 func Uninstall(ctx context.Context, c ServiceConfig, dry bool, command func(context.Context, string, ...string) ([]byte, error)) error {
+	if c.Detection.OS == "linux" && (c.Role == "worker" && !ValidWorkerUnit(filepath.Base(c.Service)) || c.Role != "worker" && (c.Role != "queue" || filepath.Base(c.Service) != "myce-queue.service")) {
+		return errors.New("refusing non-Mycelium service unit")
+	}
+
 	if dry {
 		return nil
 	}
@@ -332,7 +376,7 @@ func Uninstall(ctx context.Context, c ServiceConfig, dry bool, command func(cont
 	}
 	var e error
 	if c.Detection.OS == "linux" {
-		_, e = command(ctx, "systemctl", "--user", "disable", "--now", "myce-"+c.Role+".service")
+		_, e = command(ctx, "systemctl", "--user", "disable", "--now", filepath.Base(c.Service))
 	} else {
 		_, e = command(ctx, "launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid()), c.Service)
 	}
@@ -440,7 +484,7 @@ func Doctor(ctx context.Context, c ServiceConfig, p DoctorProbe) []DoctorCheck {
 		out = append(out, DoctorCheck{Name: name, OK: e == nil, Detail: detail})
 	}
 	if c.Role == "worker" {
-		d, e := p.Machine.Detect(ctx)
+		d, e := p.Machine.DetectDevice(ctx, c.Device)
 		if e == nil && d.Platform != c.Detection.Platform {
 			e = fmt.Errorf("detected %s; configured %s", d.Platform, c.Detection.Platform)
 		}
@@ -522,6 +566,14 @@ func (c ServiceConfig) Args() []string {
 		args = []string{"queue", "--listen", c.Listen, "--db", filepath.Join(c.State, "myce.db"), "--checkpoints", c.Checkpoints}
 	} else {
 		args = []string{"join", "--name", c.Name, "--queue", c.Queue, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
+	}
+	if c.Role == "worker" {
+		if c.HostStateDir != "" {
+			args = append(args, "--host-state-dir", c.HostStateDir)
+		}
+		if c.Device != "" {
+			args = append(args, "--device", c.Device)
+		}
 	}
 	if c.ModelCatalog != "" {
 		args = append(args, "--model-config", c.ModelCatalog)

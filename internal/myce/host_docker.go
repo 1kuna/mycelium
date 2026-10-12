@@ -17,10 +17,28 @@ import (
 // The watchdog reads the last known obligations without waiting for dockerd.
 type dockerDisableProgress struct {
 	mu     sync.Mutex
+	units  map[string]string
 	status string
 	left   []string
 }
 
+func (p *dockerDisableProgress) unit(name, result string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.units == nil {
+		p.units = map[string]string{}
+	}
+	p.units[name] = result
+}
+func (p *dockerDisableProgress) unitReport() map[string]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	units := map[string]string{}
+	for k, v := range p.units {
+		units[k] = v
+	}
+	return units
+}
 func (p *dockerDisableProgress) set(status string, left []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -69,7 +87,7 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 			if !slices.Contains(endpoints, st.Endpoint) {
 				endpoints = append(endpoints, st.Endpoint)
 			}
-			if st.Released {
+			if st.Released && unitParent(h.Dir) == "" {
 				continue
 			}
 			key := st.Endpoint + "\x00" + st.Identity
@@ -119,7 +137,21 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 				}
 				h.dockerProgress.set("unconfirmed", left)
 			}, binary: binary, env: env, ctx: ctx, timeout: 2 * time.Second, state: dockerExecution{Endpoint: endpoint}}
-			containers, e := scan.containers()
+			var containers []dockerInspection
+			var e error
+			if unitParent(h.Dir) == "" {
+				containers, e = scan.containers()
+			} else {
+				for _, d := range attempts {
+					if d.state.Endpoint != endpoint {
+						continue
+					}
+					scan.state.Identity = d.state.Identity
+					objects, scanErr := scan.containers()
+					containers = append(containers, objects...)
+					e = errors.Join(e, scanErr)
+				}
+			}
 			if e != nil {
 				failures = append(failures, "Docker label inventory unconfirmed: "+e.Error())
 				continue
