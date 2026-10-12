@@ -214,3 +214,13 @@ func TestInstallInstanceTargetsItsOwnUnit(t *testing.T) {
 		t.Fatal(calls)
 	}
 }
+
+func TestInstalledWorkerConditionAbsolutePath(t *testing.T) {
+	c := ServiceConfig{Role: "worker", Detection: Detection{OS: "linux"}, Service: "/tmp/myce-worker@gpu1.service", HostStateDir: "/tmp/myce host"}
+	text := c.ServiceText()
+	for _, path := range []string{c.HostStateDir + "/DISABLED", c.HostStateDir + "/units/myce-worker@gpu1.service/DISABLED"} {
+		if !strings.Contains(text, "ConditionPathExists=!"+path+"\n") {
+			t.Fatal("systemd condition must begin with the absolute path, without quotes", text)
+		}
+	}
+}

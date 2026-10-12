@@ -243,6 +243,11 @@ func (c *ServiceConfig) WorkerInstance(instance string) error {
 	return nil
 }
 func unitQuote(v string) string { v = strings.ReplaceAll(v, "%", "%%"); return strconv.Quote(v) }
+
+// Condition paths consume the whole value, not ExecStart's quoted argument syntax.
+func unitConditionPath(v string) string {
+	return strings.NewReplacer("%", "%%", "\n", "\\x0a", "\r", "\\x0d").Replace(v)
+}
 func (c ServiceConfig) ServiceText() string {
 	if c.Detection.OS == "linux" {
 		condition := ""
@@ -250,7 +255,7 @@ func (c ServiceConfig) ServiceText() string {
 		if c.Role == "worker" {
 			condition = "ConditionPathExists=!%h/.local/share/myce/DISABLED\n"
 			if c.HostStateDir != "" {
-				condition = "ConditionPathExists=!" + unitQuote(filepath.Join(c.HostStateDir, "DISABLED")) + "\n"
+				condition = "ConditionPathExists=!" + unitConditionPath(filepath.Join(c.HostStateDir, "DISABLED")) + "\n"
 			}
 			if ValidWorkerUnit(filepath.Base(c.Service)) {
 				dir := c.HostStateDir
@@ -258,7 +263,7 @@ func (c ServiceConfig) ServiceText() string {
 					condition += "ConditionPathExists=!%h/.local/share/myce/units/" + filepath.Base(c.Service) + "/DISABLED\n"
 				} else {
 					scoped, _ := WorkerUnitDirectory(dir, filepath.Base(c.Service))
-					condition += "ConditionPathExists=!" + unitQuote(filepath.Join(scoped, "DISABLED")) + "\n"
+					condition += "ConditionPathExists=!" + unitConditionPath(filepath.Join(scoped, "DISABLED")) + "\n"
 				}
 			}
 			stopSettings = "KillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
