@@ -1139,6 +1139,34 @@ exact worker spool. Loads stay serial; N bounds requests after all models load.
 load and warm-up seconds and record the combined sampled peak. Brief spikes
 can be missed; real CUDA/XPU qualification remains necessary.
 
+## Forget old queue registrations
+
+`myce host-queues list` prints the registered queue URLs in this OS user's shared
+host state. `myce host-queues forget <queue-url>` forgets one stale registration
+without contacting the queue. Both accept `--host-state-dir DIR`; `--config PATH`
+checks an installed worker config and selects its host-state directory unless
+explicitly overridden. Flags can follow the URL, for example:
+
+```sh
+myce host-queues list --host-state-dir "$HOME/.local/share/myce"
+myce host-queues forget http://127.0.0.1:12345 --host-state-dir "$HOME/.local/share/myce"
+```
+
+Forget refuses a queue used by a configured installed worker or a locked local
+worker spool. It checks default installation configs, the config beside a
+registered spool, and the installed config path recorded by updated workers.
+For an older custom installation, supply its `--config`; an unverifiable legacy
+worker unit is refused. `--force` explicitly overrides these checks. A forgotten
+queue is registered again when a worker configured for it rejoins.
+
+The operation uses the host control/launch locks and one fsynced atomic,
+generation-bearing tombstone. Existing disable and pending enable receipts
+ignore the forgotten registration; remaining queues retain their original
+control generations and can reconcile independently. Worker/unit/spool custody
+is retained for cleanup. No worker is stopped, no host/unit flag is cleared,
+and no queue admission state is changed remotely. Forgetting a queue is not
+proof of cleanup or an instruction to resume work.
+
 ## Docker cleanup custody
 
 For opt-in `run.docker` batches, the local `<identity>.docker.json` record is
@@ -1153,7 +1181,26 @@ injected-clock grace boundary. Every matching container is inspected for the
 exact ownership label before signaling. A final successful scan must prove
 all are nonrunning (or absent), followed by owned endpoint disconnection, labeled
 network removal and confirmed network absence. Stopped container objects remain
-as recoverable evidence; private networks are removed.
+as evidence until retention expires; private networks are removed.
+
+`join --container-retention 24h` keeps stopped containers for 24 hours after
+confirmed cleanup and successful queue result acknowledgement (the default).
+`--container-retention 0` requests removal immediately after acknowledgement;
+negative durations are refused. `install worker` accepts the same flag and
+persists it in the worker config. The worker checks retention in the background
+once per minute and after each acknowledgement when retention is zero, using
+its injected clock. Restart preserves the first acknowledgement timestamp.
+
+Removal inspects both `myce.attempt=<execution ID>` and `myce.worker=<worker ID>`
+on every container and requires a settled nonrunning state. Docker removal
+never uses force. Running, unconfirmed, unacknowledged, active, foreign-worker,
+and unlabelled containers are protected. Failures are logged and retried on the
+next retention sweep; they never become cleanup failures or fence admission.
+Successful retention also removes only that attempt's cidfiles, Docker custody,
+result and acknowledgement records. Captured Mycelium logs keep their independent
+`--log-retention` policy. Existing evidence without a durable acknowledgement
+marker, including pre-upgrade evidence and rejected stale results, is preserved;
+retention does not guess acknowledgement from file age or queue job state.
 Each lifecycle Docker call has a 2-second I/O timeout; retries run independently
 of heartbeat/control, checkpoint walks and queue log upload. Grace is never
 renewed by a Docker retry. Restart reconciles the saved daemon and containers

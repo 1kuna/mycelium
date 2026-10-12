@@ -173,7 +173,7 @@ func installDisabled(ctx context.Context, c ServiceConfig, command func(context.
 	if err != nil {
 		return err
 	}
-	w := HostWorker{Unit: unit, State: c.State, Host: c.HostID, Name: c.Name, Queue: c.Queue, Environments: c.EnvironmentCache}
+	w := HostWorker{Config: c.Config, Unit: unit, State: c.State, Host: c.HostID, Name: c.Name, Queue: c.Queue, Environments: c.EnvironmentCache}
 	if err = AdoptHostWorker(c.HostStateDir, w); err != nil {
 		return err
 	}
@@ -235,6 +235,9 @@ func (c ServiceConfig) ValidateInstall() error {
 	}
 	if strings.ContainsAny(c.Path, "\x00\n\r\"\\") {
 		return errors.New("PATH cannot contain newlines, quotes or backslashes for service capture")
+	}
+	if c.ContainerRetention != nil && *c.ContainerRetention < 0 {
+		return errors.New("container-retention must be nonnegative")
 	}
 	if c.Heartbeat <= 0 || c.LogRetention <= 0 || c.RestartGrace < 0 || c.ProductionLossTimeout <= 0 || c.DeadlineLossTimeout <= 0 || c.ExperimentLossTimeout <= 0 {
 		return errors.New("heartbeat, retention and loss timeouts must be positive; restart grace must be nonnegative")

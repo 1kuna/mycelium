@@ -177,57 +177,58 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
-	EnvironmentFile       string        `json:"environment_file,omitempty"`
-	HostID                string        `json:"host_id,omitempty"`
-	DB                    string        `json:"db,omitempty"`
-	ProjectConfig         string        `json:"project_config,omitempty"`
-	HostConfig            string        `json:"host_config,omitempty"`
-	UploadSpoolDir        string        `json:"upload_spool_dir,omitempty"`
-	UploadSpoolBytes      int64         `json:"upload_spool_bytes,omitempty"`
-	LogRetention          time.Duration `json:"log_retention,omitempty"`
-	Heartbeat             time.Duration `json:"heartbeat,omitempty"`
-	RestartGrace          time.Duration `json:"restart_grace,omitempty"`
-	ProductionLossTimeout time.Duration `json:"production_loss_timeout,omitempty"`
-	DeadlineLossTimeout   time.Duration `json:"deadline_loss_timeout,omitempty"`
-	ExperimentLossTimeout time.Duration `json:"experiment_loss_timeout,omitempty"`
-	ReserveHostMemoryGB   float64       `json:"reserve_host_memory_gb"`
-	PrivateDevices        bool          `json:"private_devices"`
-	NoNewPrivileges       bool          `json:"no_new_privileges"`
-	Nice                  int           `json:"nice"`
-	CPUQuota              string        `json:"cpu_quota,omitempty"`
-	MemoryMax             string        `json:"memory_max,omitempty"`
-	TasksMax              string        `json:"tasks_max,omitempty"`
-	StartDisabled         bool          `json:"start_disabled,omitempty"`
-	RequireMemoryCeilings bool          `json:"require_memory_ceilings,omitempty"`
-	RequireMountedNAS     bool          `json:"require_mounted_nas,omitempty"`
-	Force                 bool          `json:"-"`
-	HostMemoryBudgetGB    float64       `json:"host_memory_budget_gb,omitempty"`
-	MemoryCeilingSlackGB  float64       `json:"memory_ceiling_slack_gb"`
-	MemorySwapMaxBytes    int64         `json:"memory_swap_max_bytes"`
-	AllowDeviceless       bool          `json:"allow_deviceless,omitempty"`
-	Device                string        `json:"device,omitempty"`
-	HostStateDir          string        `json:"host_state_dir,omitempty"`
-	Path                  string        `json:"path"`
-	EnvironmentRoot       string        `json:"environment_root"`
-	Role                  string        `json:"role"`
-	Detection             Detection     `json:"detection"`
-	Name                  string        `json:"name"`
-	Queue                 string        `json:"queue"`
-	Listen                string        `json:"listen"`
-	NAS                   string        `json:"nas"`
-	Checkpoints           string        `json:"checkpoint_root"`
-	ModelRoot             string        `json:"model_root"`
-	ModelCatalog          string        `json:"model_catalog,omitempty"`
-	EnvironmentCatalog    string        `json:"environment_catalog,omitempty"`
-	State                 string        `json:"state_dir"`
-	ModelCache            string        `json:"model_cache"`
-	EnvironmentCache      string        `json:"environment_cache"`
-	ModelCacheBytes       int64         `json:"model_cache_bytes"`
-	EnvironmentCacheBytes int64         `json:"environment_cache_bytes"`
-	Binary                string        `json:"binary"`
-	Credentials           string        `json:"credentials"`
-	Service               string        `json:"service"`
-	Config                string        `json:"config"`
+	EnvironmentFile       string         `json:"environment_file,omitempty"`
+	HostID                string         `json:"host_id,omitempty"`
+	DB                    string         `json:"db,omitempty"`
+	ProjectConfig         string         `json:"project_config,omitempty"`
+	HostConfig            string         `json:"host_config,omitempty"`
+	UploadSpoolDir        string         `json:"upload_spool_dir,omitempty"`
+	UploadSpoolBytes      int64          `json:"upload_spool_bytes,omitempty"`
+	ContainerRetention    *time.Duration `json:"container_retention,omitempty"`
+	LogRetention          time.Duration  `json:"log_retention,omitempty"`
+	Heartbeat             time.Duration  `json:"heartbeat,omitempty"`
+	RestartGrace          time.Duration  `json:"restart_grace,omitempty"`
+	ProductionLossTimeout time.Duration  `json:"production_loss_timeout,omitempty"`
+	DeadlineLossTimeout   time.Duration  `json:"deadline_loss_timeout,omitempty"`
+	ExperimentLossTimeout time.Duration  `json:"experiment_loss_timeout,omitempty"`
+	ReserveHostMemoryGB   float64        `json:"reserve_host_memory_gb"`
+	PrivateDevices        bool           `json:"private_devices"`
+	NoNewPrivileges       bool           `json:"no_new_privileges"`
+	Nice                  int            `json:"nice"`
+	CPUQuota              string         `json:"cpu_quota,omitempty"`
+	MemoryMax             string         `json:"memory_max,omitempty"`
+	TasksMax              string         `json:"tasks_max,omitempty"`
+	StartDisabled         bool           `json:"start_disabled,omitempty"`
+	RequireMemoryCeilings bool           `json:"require_memory_ceilings,omitempty"`
+	RequireMountedNAS     bool           `json:"require_mounted_nas,omitempty"`
+	Force                 bool           `json:"-"`
+	HostMemoryBudgetGB    float64        `json:"host_memory_budget_gb,omitempty"`
+	MemoryCeilingSlackGB  float64        `json:"memory_ceiling_slack_gb"`
+	MemorySwapMaxBytes    int64          `json:"memory_swap_max_bytes"`
+	AllowDeviceless       bool           `json:"allow_deviceless,omitempty"`
+	Device                string         `json:"device,omitempty"`
+	HostStateDir          string         `json:"host_state_dir,omitempty"`
+	Path                  string         `json:"path"`
+	EnvironmentRoot       string         `json:"environment_root"`
+	Role                  string         `json:"role"`
+	Detection             Detection      `json:"detection"`
+	Name                  string         `json:"name"`
+	Queue                 string         `json:"queue"`
+	Listen                string         `json:"listen"`
+	NAS                   string         `json:"nas"`
+	Checkpoints           string         `json:"checkpoint_root"`
+	ModelRoot             string         `json:"model_root"`
+	ModelCatalog          string         `json:"model_catalog,omitempty"`
+	EnvironmentCatalog    string         `json:"environment_catalog,omitempty"`
+	State                 string         `json:"state_dir"`
+	ModelCache            string         `json:"model_cache"`
+	EnvironmentCache      string         `json:"environment_cache"`
+	ModelCacheBytes       int64          `json:"model_cache_bytes"`
+	EnvironmentCacheBytes int64          `json:"environment_cache_bytes"`
+	Binary                string         `json:"binary"`
+	Credentials           string         `json:"credentials"`
+	Service               string         `json:"service"`
+	Config                string         `json:"config"`
 }
 
 func PlanInstall(role, home, root, nas, queue, name string, d Detection) (ServiceConfig, error) {
@@ -708,6 +709,12 @@ func (c ServiceConfig) Args() []string {
 		args = []string{"queue", "--listen", c.Listen, "--db", c.DB, "--checkpoints", c.Checkpoints}
 	} else {
 		args = []string{"join", "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
+	}
+	if c.Role == "worker" {
+		args = append(args, "--service-config", c.Config)
+		if c.ContainerRetention != nil {
+			args = append(args, "--container-retention", c.ContainerRetention.String())
+		}
 	}
 	if c.LogRetention > 0 {
 		args = append(args, "--log-retention", c.LogRetention.String())

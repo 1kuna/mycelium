@@ -46,6 +46,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) == 0 {
 		return errors.New("usage: myce queue|join|leave|disable|enable|submit|status|logs|wait|cancel|resolve-docker|dev")
 	}
+	if args[0] == "host-queues" {
+		return hostQueuesCommand(args[1:], probe, os.Stdout)
+	}
 	if args[0] == "host-memory-budget" {
 		return hostMemoryBudgetCommand(args[1:])
 	}
@@ -119,6 +122,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce.db", "SQLite database file")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
+	containerRetention := f.Duration("container-retention", myce.DefaultContainerRetention, "acknowledged stopped Docker container retention (0 removes immediately)")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total bytes held in the queue model-upload spool")
 	checkpoint := f.String("checkpoints", "./checkpoints", "queue NAS checkpoint root")
@@ -141,6 +145,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	experimentLoss := f.Duration("experiment-loss-timeout", myce.LossAfter, "quiet timeout for experiment work")
 	restartGrace := f.Duration("restart-grace", myce.RestartGrace, "worker recovery grace after queue restart")
 	hostStateDir := f.String("host-state-dir", "", "shared local host control directory")
+	serviceConfig := f.String("service-config", "", "installed worker configuration path")
 	stateDir := f.String("state-dir", "", "durable local worker spool directory")
 	hostname, _ := os.Hostname()
 	name := f.String("name", hostname, "unique machine name")
@@ -340,7 +345,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err != nil {
 			return err
 		}
-		w := myce.Worker{RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{ServiceConfig: *serviceConfig, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
