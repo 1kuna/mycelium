@@ -89,8 +89,11 @@ def start(request):
     code='''from pathlib import Path
 import json,sys,subprocess,os
 r=json.load(sys.stdin);assert Path('/mnt/nas').is_mount();root=Path("'''+ROOT+'''")
-cg=subprocess.check_output(['systemctl','--user','show','verso-loan-233-next-queue.service','-p','ControlGroup','--value'],text=True).strip()
-assert cg and int(kernel_read(Path('/sys/fs/cgroup')/cg.lstrip('/')/'memory.current')) < 14*1024**3
+loan={k:subprocess.check_output(['systemctl','--user','show','verso-loan-233-next-queue.service','-p',k,'--value'],text=True).strip() for k in ('ActiveState','MainPID','ControlGroup')}
+assert loan==json.loads(kernel_read(root/'preflight.json'))['loan'], 'protected loan identity changed'
+if loan['ActiveState']=='active':
+ assert loan['ControlGroup'] and int(kernel_read(Path('/sys/fs/cgroup')/loan['ControlGroup'].lstrip('/')/'memory.current')) < 14*1024**3
+else:assert loan['ActiveState']=='inactive' and loan['MainPID']=='0' and not loan['ControlGroup'], 'protected loan not settled'
 assert int(next(line.split()[1] for line in kernel_read('/proc/meminfo').splitlines() if line.startswith('MemAvailable:'))) >= 40*1024**2
 phase=root/'phases'/r['phase'];phase.mkdir(parents=True,exist_ok=True)
 env=phase/'worker.env';env.touch(mode=0o600);os.chmod(env,0o600);env.write_text('MYCE_TOKEN='+r['token']+'\\n')
@@ -155,7 +158,7 @@ print(json.dumps(dict(unit_state=unit,remaining_pids=remaining,occupied_test_por
 ''',ports)
 
 if __name__=='__main__':
-    before=loan();assert before['ActiveState']=='active';last=None;error=None
+    before=loan();assert before['ActiveState'] in ('active','inactive');last=None;error=None
     try:
         until=time.monotonic()+4*3600
         while time.monotonic()<until:
