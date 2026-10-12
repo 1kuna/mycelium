@@ -135,9 +135,9 @@ class EvidenceTests(unittest.TestCase):
         for code in (errno.ENOENT, errno.ESRCH):
             with self.subTest(errno=code), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp); p = root / '1115'; p.mkdir()
-                with patch.object(Path, 'iterdir', side_effect=[iter([p]), iter([])]) as rescans, patch.object(Path, 'read_bytes', side_effect=OSError(code, 'exited')):
+                with patch('kernel_reads._read',side_effect=[[p],OSError(code,'exited'),[]]) as rescans, patch('kernel_reads._rescan',return_value=False):
                     self.assertEqual(drm_owners(['0000:07:00.0'], root), {'0000:07:00.0': []})
-                    self.assertEqual(rescans.call_count, 2)
+                    self.assertEqual(rescans.call_count, 3)
 
     def test_live_process_and_denied_rescans_fail_closed(self):
         import errno
@@ -147,7 +147,7 @@ class EvidenceTests(unittest.TestCase):
             for code in (errno.ENOENT, errno.ESRCH, errno.EACCES):
                 with self.subTest(errno=code), patch.object(Path, 'read_bytes', side_effect=OSError(code, 'unreadable')):
                     with self.assertRaises(OSError):drm_owners(['0000:07:00.0'], root)
-            with patch.object(Path, 'iterdir', side_effect=[iter([p]), PermissionError(errno.EACCES, 'denied')]), patch.object(Path, 'read_bytes', side_effect=FileNotFoundError(errno.ENOENT, 'exited')):
+            with patch('kernel_reads._read',side_effect=[[p],FileNotFoundError(errno.ENOENT,'exited'),PermissionError(errno.EACCES,'denied')]), patch('kernel_reads._rescan',side_effect=[False,True]):
                 with self.assertRaises(PermissionError):drm_owners(['0000:07:00.0'], root)
 
     @unittest.skipUnless(Path('/proc/self/fdinfo').is_dir(), 'Linux procfs required')
@@ -447,8 +447,8 @@ class CommandTests(unittest.TestCase):
 class NativeRunnerTests(unittest.TestCase):
     def test_attempt_roots_use_the_same_fresh_suffix(self):
         import stage_ab
-        self.assertTrue(stage_ab.ROOT.name.endswith('r6-20261011'))
-        self.assertTrue(stage_ab.NAS.name.endswith('r6-20261011'))
+        self.assertTrue(stage_ab.ROOT.name.endswith('r7-20261011'))
+        self.assertTrue(stage_ab.NAS.name.endswith('r7-20261011'))
 
     def test_disable_confirmation_includes_descendant_population_and_unit_state(self):
         import disable_drill

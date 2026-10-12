@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pause one synthetic command at startup or checkpoint-file fsync, never a service."""
 import os
+from kernel_reads import kernel_read, Vanished
 from pathlib import Path
 import sys
 import time
@@ -25,7 +26,7 @@ def emit(path,kind,**fields):
 
 def fsync(fd):
     if boundary=='save':
-        target=Path(os.readlink(f'/proc/self/fd/{fd}'))
+        target=Path(kernel_read(f'/proc/self/fd/{fd}', 'link'))
         if target.parent==Path(os.environ['MYCE_CHECKPOINT_DIR']) and target.suffix=='.tmp':pause()
     return original_fsync(fd)
 

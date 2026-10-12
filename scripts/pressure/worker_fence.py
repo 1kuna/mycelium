@@ -2,6 +2,7 @@
 """Give the disposable installed user worker a private GPU1-only /dev/dri."""
 import ctypes
 import json
+from kernel_reads import kernel_read, Vanished
 import os
 from pathlib import Path
 import stat
@@ -11,8 +12,8 @@ import sys
 root=Path('/home/user/synthetic-run')
 config=root/'installation/worker/config.json'
 assert os.getuid()==0 and sys.argv[1:]==[str(config)]
-assert Path('/proc/self/cgroup').read_text().strip().endswith('/myce-worker.service')
-assert {p.name for p in Path('/sys/bus/pci/devices/0000:07:00.0/drm').iterdir()} >= {'card1','renderD129'}
+assert kernel_read(Path('/proc/self/cgroup'), 'text').strip().endswith('/myce-worker.service')
+assert {p.name for p in kernel_read(Path('/sys/bus/pci/devices/0000:07:00.0/drm'), 'list')} >= {'card1','renderD129'}
 nodes={name:os.stat('/dev/dri/'+name) for name in ('card1','renderD129')}
 assert all(stat.S_ISCHR(v.st_mode) for v in nodes.values())
 libc=ctypes.CDLL(None,use_errno=True)
@@ -21,12 +22,12 @@ subprocess.run(['mount','--make-rprivate','/'],check=True)
 subprocess.run(['mount','-t','tmpfs','-o','size=64k,mode=755','myce-test-gpu1','/dev/dri'],check=True)
 for name,st in nodes.items():
     os.mknod('/dev/dri/'+name,stat.S_IFCHR|0o666,st.st_rdev)
-assert sorted(p.name for p in Path('/dev/dri').iterdir())==['card1','renderD129']
+assert sorted(p.name for p in kernel_read(Path('/dev/dri'), 'list'))==['card1','renderD129']
 (root/'installed-fence.json').write_text(json.dumps(dict(pci='0000:07:00.0',nodes=list(nodes),
-    cgroup=Path('/proc/self/cgroup').read_text().strip(),mount_namespace=os.readlink('/proc/self/ns/mnt'))))
-c=json.loads(config.read_text())
+    cgroup=kernel_read(Path('/proc/self/cgroup'), 'text').strip(),mount_namespace=kernel_read('/proc/self/ns/mnt', 'link'))))
+c=json.loads(kernel_read(config, 'text'))
 os.environ['MYCE_HOST_STATE_DIR']='/home/user/.local/share/myce'
-os.environ['MYCE_TOKEN']=json.loads(Path(c['credentials']).read_text())['token']
+os.environ['MYCE_TOKEN']=json.loads(kernel_read(Path(c['credentials']), 'text'))['token']
 # The installer has no device option; bind its installed binary explicitly inside this private view.
 args=[c['binary'],'join','--name',c['name'],'--queue',c['queue'],'--gpu','xpu','--device','0',
       '--memory-mode','fixed','--memory-gb','4','--reserve-host-memory-gb','18','--heartbeat','250ms',

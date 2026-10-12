@@ -2,6 +2,7 @@
 """Small cross-platform allocation with the same durable progress contract."""
 import ctypes
 import json
+from kernel_reads import kernel_read, Vanished
 import os
 from pathlib import Path
 import sys
@@ -21,7 +22,7 @@ job=os.environ['MYCE_JOB_ID'];attempt=int(os.environ['MYCE_ATTEMPT'])
 contract=pressure.digest(['portable-allocation-v1',units,16])
 n=pressure.validate_save(saved,job,contract,units) if saved else 0
 pressure.emit(events,'start',job=job,attempt=attempt,card=platform,resumed=n,units=units,
-    resumable=True,contract=contract,pid=os.getpid(),start_ticks=int(Path('/proc/self/stat').read_bytes().rsplit(b')',1)[1].split()[19]),
+    resumable=True,contract=contract,pid=os.getpid(),start_ticks=int(kernel_read(Path('/proc/self/stat'), 'bytes').rsplit(b')',1)[1].split()[19]),
     platform=platform,devices=os.environ['MYCE_DEVICES'],machine=os.environ['MYCE_MACHINE'])
 host=bytearray(16*1024**2)
 for i in range(0,len(host),4096):host[i]=1

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Detached, GPU1-only synthetic Stage A/B runner; never changes Mycelium core."""
 from __future__ import annotations
+from kernel_reads import kernel_read, Vanished
 import argparse
 import json
 import os
@@ -40,25 +41,27 @@ def atomic(path, value):
 
 def process(pid):
     p = Path('/proc') / str(pid)
-    raw = (p / 'stat').read_bytes()
+    raw = kernel_read(p / 'stat', 'bytes')
     return dict(boot=clock_domain(), pid=pid,
                 start=int(raw.rsplit(b')', 1)[1].split()[19]),
-                exe=os.readlink(p / 'exe'), cgroup=(p / 'cgroup').read_text().strip())
+                exe=kernel_read(p / 'exe', 'link'), cgroup=kernel_read(p / 'cgroup', 'text').strip())
 
 
 class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r6.service'
-        self.baseline = json.loads((ROOT / 'display-baseline.json').read_text())
-        self.diagnostics = DiagnosticReaders(json.loads((ROOT/'diagnostic-executables.json').read_text()),
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r7.service'
+        self.baseline = json.loads(kernel_read(ROOT / 'display-baseline.json', 'text'))
+        self.diagnostics = DiagnosticReaders(json.loads(kernel_read(ROOT/'diagnostic-executables.json', 'text')),
                                              ROOT/'diagnostics.jsonl')
         self.env = {k:v for k,v in os.environ.items() if not k.startswith('MYCE_')}
         self.env['MYCE_TOKEN'] = os.urandom(32).hex()
         os.environ['MYCE_TOKEN'] = self.env['MYCE_TOKEN']
         self.results, self.procs, self.files, self.receipts = [], {}, [], []
         self.safety = None
+        self.recovering = threading.Event()
+        self.counter_idle = threading.Event()
         self.pause = None
         self.active = None
         self.stop = threading.Event()
@@ -93,7 +96,7 @@ class Run:
     def save(self):
         atomic(self.output, dict(results=self.results, peaks=self.total_peak,
             safety_hold=self.safety, cleanup='pending', boot=clock_domain(),
-            issue=238, source_sha256=digest((BASE / 'pressure.py').read_text())))
+            issue=238, source_sha256=digest(kernel_read(BASE / 'pressure.py', 'text'))))
 
     def nas_directory(self,path):
         # Create as the same UID that will save/copy checkpoints; never chmod/chown a share.
@@ -151,11 +154,11 @@ class Run:
                             continue  # A writer may be holding its append lock; replay validates it later.
                         if e.get('kind') == 'start': data.append(e)
             else:
-                try: data = [json.loads(f.read_text())]
+                try: data = [json.loads(kernel_read(f, 'text'))]
                 except (ValueError, OSError): continue
             for e in data:
                 try: identity = process(e['pid'])
-                except (OSError, KeyError): continue
+                except Vanished: continue
                 if (identity['start'] == e.get('start_ticks') and identity['cgroup'] in (self.cgroup,self.worker_cgroup)
                         and identity['exe'] == os.path.realpath(XPU)):
                     ids.append(identity)
@@ -203,7 +206,8 @@ class Run:
                 else:self.foreign_paused.clear();self.next_scan=0
                 evidence['foreign_reader_paused']=paused
                 self.last_physical=evidence
-            except Exception:
+            except Exception as error:
+                self.safety=type(error).__name__+':'+str(error)
                 atomic(ROOT/'ownership-failure.json',evidence);raise
         if len(owners[PCI])>1:raise RuntimeError('physical_double_owner')
         if events:emit(events,'physical',valid=True,owners=owners)
@@ -211,19 +215,22 @@ class Run:
 
     def monitor(self):
         while not self.stop.is_set():
+            if self.recovering.is_set():
+                self.stop.wait(.1);continue
             began = time.monotonic()
             try:
                 active = self.active
                 self.physical(active)
-                mem = {r.split()[0]:int(r.split()[1]) for r in Path('/proc/meminfo').read_text().splitlines()
+                mem = {r.split()[0]:int(r.split()[1]) for r in kernel_read(Path('/proc/meminfo'), 'text').splitlines()
                        if r.startswith(('MemTotal:', 'MemAvailable:'))}
                 available = mem['MemAvailable:'] / 1024**2
                 if available < 18: raise RuntimeError('host headroom below 18 GiB')
                 group = Path('/sys/fs/cgroup') / self.cgroup.split('::',1)[1].lstrip('/')
-                charged = int((group / 'memory.current').read_text())
+                charged = int(kernel_read(group / 'memory.current', 'text'))
                 if self.worker_cgroup:
                     worker_group=Path('/sys/fs/cgroup')/self.worker_cgroup.split('::',1)[1].lstrip('/')
-                    if worker_group.exists():charged+=int((worker_group/'memory.current').read_text())
+                    try:charged+=int(kernel_read(worker_group/'memory.current'))
+                    except Vanished:pass
                 self.total_peak['host_used_gib'] = max(self.total_peak['host_used_gib'], (mem['MemTotal:']-mem['MemAvailable:'])/1024**2)
                 self.total_peak['cgroup_bytes'] = max(self.total_peak['cgroup_bytes'], charged)
                 if active:
@@ -239,19 +246,21 @@ class Run:
                         device_gib=gpu,counter_at=self.device_at,cgroup_bytes=charged,scenario=str(active)))+'\n')
             except Exception as e:
                 self.safety = type(e).__name__ + ':' + str(e)
-                self.save(); return
+                self.save()
             self.stop.wait(max(0,.5-(time.monotonic()-began)))
 
     def counters(self):
         # CLI probes take about one second. Keep physical/status/headroom at 0.5s independently.
         executable=os.path.realpath(shutil.which('xpu-smi'))
         while not self.stop.is_set():
+            self.counter_idle.set()
+            if self.recovering.is_set():
+                self.stop.wait(.1);continue
+            self.counter_idle.clear()
             try:
                 with self.inventory_lock:
                     p=subprocess.Popen([executable,'stats','-d','0','--json'],stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,env={k:v for k,v in self.env.items() if not k.startswith('MYCE_')})
-                    identity=process(p.pid);identity['exe']=executable
-                    self.passive=[identity]
                 try:
                     output,_=p.communicate(timeout=3)
                 except subprocess.TimeoutExpired:
@@ -267,7 +276,7 @@ class Run:
                 self.device_peak=max(self.device_peak,gpu)
                 self.total_peak['device_gib']=self.device_peak
             except Exception as e:
-                self.safety=type(e).__name__+':'+str(e);self.save();return
+                self.safety=type(e).__name__+':'+str(e);self.save()
             self.stop.wait(.05)
 
     def wait(self, condition, seconds=180):
@@ -302,6 +311,7 @@ class Run:
     def begin(self,name,bound=30,hold=False):
         self.gate()
         self.interruptions_at_begin=self.foreign.interruptions
+        self.idle_charged=int(kernel_read(Path('/sys/fs/cgroup')/self.cgroup.split('::',1)[1].lstrip('/')/'memory.current'))
         self.phase = ROOT/'phases'/name; self.phase.mkdir()
         os.chown(self.phase,1000,1000)
         self.cp = NAS/name; self.nas_directory(self.cp)
@@ -324,7 +334,7 @@ class Run:
 
     def rows(self):
         if not self.events.exists(): return []
-        return [json.loads(line) for line in self.events.read_text().splitlines()]
+        return [json.loads(line) for line in kernel_read(self.events, 'text').splitlines()]
 
     def event(self,job,kind):
         return next((e for e in self.rows() if e['kind']==kind and e.get('job')==job),None)
@@ -347,6 +357,7 @@ class Run:
         finally: connection.close()
         assert integrity=='ok'
         self.results[-1]['sqlite_integrity']=integrity;self.save()
+        self.scenario_cleanup()
 
     def release_owned(self):
         # Signal only exact numeric/start identities proven to belong to this test unit.
@@ -357,18 +368,76 @@ class Run:
                     if process(i['pid'])==i: os.kill(i['pid'],sig)
                 except ProcessLookupError: pass
             time.sleep(.3)
-        self.wait(lambda: not self.owned(),5)
-        self.physical()
+        end=time.monotonic()+5
+        while self.owned():
+            if time.monotonic()>=end:raise RuntimeError('test payload process remains')
+            time.sleep(.1)
 
     def scenario(self,name,work,bound=30):
         try:
-            self.begin(name,bound); work();self.end(name)
+            self.begin(name,bound);work()
+            if name.startswith('A-memory-') or name=='B-CPU-matrix-container':
+                self.scenario_cleanup()
+            else:self.end(name)
         except Exception as e:
             self.result(name,'HOLD' if self.safety else 'FAIL',error=type(e).__name__,
                         detail=str(e),events=str(getattr(self,'events','')))
-            self.active=None;self.halt('worker');self.halt('queue')
-            self.release_owned()
-            if self.safety: raise
+            self.scenario_cleanup()
+            self.safety=None
+
+    def scenario_cleanup(self):
+        from disable_drill import cleanup as installed_cleanup
+        self.active=None;self.recovering.set()
+        try:
+            if self.counter.ident is not None and not self.counter_idle.wait(10):
+                raise RuntimeError('counter did not settle')
+            with self.inventory_lock:
+                installed_cleanup(self)
+                for key in list(self.procs):self.halt(key)
+                self.block.clear();self.ack_armed=False
+                if self.proxy:self.proxy.shutdown();self.proxy.server_close();self.proxy=None
+                self.release_owned()
+                # Only the runner may remain in its exact unit; no substring ownership.
+                for sig in (signal.SIGTERM,signal.SIGKILL):
+                    for pid in kernel_read('/proc','list'):
+                        if not pid.name.isdigit() or int(pid.name)==os.getpid():continue
+                        try:
+                            identity=process(int(pid.name))
+                            if identity['cgroup']==self.cgroup and process(identity['pid'])==identity:
+                                os.kill(identity['pid'],sig)
+                        except (Vanished,ProcessLookupError):pass
+                    time.sleep(.3)
+                remaining=[]
+                for pid in kernel_read('/proc','list'):
+                    if not pid.name.isdigit() or int(pid.name)==os.getpid():continue
+                    try:
+                        if process(int(pid.name))['cgroup']==self.cgroup:remaining.append(int(pid.name))
+                    except Vanished:pass
+                if remaining:raise RuntimeError('test processes remain')
+                end=time.monotonic()+60
+                evidence={}
+                while True:
+                    owners=drm_owners([PCI],baseline=self.baseline,allowed=[],diagnostics=self.diagnostics,evidence=evidence)
+                    if not self.diagnostics.pending:break
+                    if time.monotonic()>=end:raise RuntimeError('diagnostic release unconfirmed')
+                    time.sleep(2)
+                stats=json.loads(subprocess.check_output(['xpu-smi','stats','-d','0','--json'],timeout=3))
+                metrics={v['metrics_type']:v.get('value') for v in stats['device_level']}
+                device_mib=float(metrics['XPUM_STATS_MEMORY_USED'])
+                assert stats['device_id']==0 and device_mib<=float(os.environ["MYCE_DIAGNOSTIC_BASELINE_MIB"])+16,'driver release unconfirmed'
+                mem={r.split()[0]:int(r.split()[1]) for r in kernel_read('/proc/meminfo').splitlines()
+                     if r.startswith(('MemTotal:','MemAvailable:'))}
+                charged=int(kernel_read(Path('/sys/fs/cgroup')/self.cgroup.split('::',1)[1].lstrip('/')/'memory.current'))
+                assert mem['MemAvailable:']/1024**2>=18,'RAM headroom unconfirmed'
+                assert charged<=self.idle_charged+345*1024**2,'test RAM release unconfirmed'
+                receipt=dict(physical='released',remaining_pids=remaining,device_memory_mib=device_mib,
+                             cgroup_bytes=charged,idle_cgroup_bytes=self.idle_charged,ram_released=True)
+                atomic(self.phase/'scenario-cleanup.json',receipt)
+                self.results[-1]['scenario_cleanup']=receipt
+                self.device_current=device_mib/1024;self.device_at=time.monotonic()
+                self.foreign_paused.clear();self.foreign.since=None;self.foreign_exited_at=None;self.next_scan=0
+                self.save()
+        finally:self.recovering.clear()
 
     def swap(self,seed,action=None):
         self.a.units=400 if action in ('refuse','worker-before-kill','worker-after-kill') else 40
@@ -452,7 +521,7 @@ class Run:
         manifest=self.phase/'synthetic-manifest';manifest.write_bytes(b'synthetic allocator, no inference\n')
         config=self.phase/f'measure-{host}.yaml'
         config.write_text(json.dumps(dict(models=[dict(name='synthetic',engine='server',path=str(manifest),
-            size_bytes=manifest.stat().st_size,sha256=__import__('hashlib').sha256(manifest.read_bytes()).hexdigest(),
+            size_bytes=manifest.stat().st_size,sha256=__import__('hashlib').sha256(kernel_read(manifest, 'bytes')).hexdigest(),
             platforms=['xpu'],memory_gb=4,host_memory_gb=6,device='0',
             device_env=dict(ONEAPI_DEVICE_SELECTOR='level_zero:{device}',ZE_AFFINITY_MASK='{device}'),
             start_command=[XPU,str(BASE/'measure_allocator.py'),'--port','{port}',
@@ -466,7 +535,7 @@ class Run:
             '--memory-gb','4','--state-dir',str(self.phase/'worker'),'--warmup',str(warm),
             '--report-prefix',str(prefix),'--load-timeout','40s']
         p=self.spawn('measure',args);self.wait(lambda:p.poll() is not None,70)
-        measured=json.loads(prefix.with_suffix('.json').read_text())
+        measured=json.loads(kernel_read(prefix.with_suffix('.json'), 'text'))
         self.result(f'A-memory-myce-measure-{host}MiB','PASS' if p.returncode==0 else 'FAIL',
                     measured=measured,report=str(prefix))
         self.release_owned();self.start_worker()
@@ -482,12 +551,12 @@ class Run:
         for key in list(self.procs):self.halt(key)
         # Processes in this cgroup cannot be unrelated services; verify before each signal.
         for sig in (signal.SIGTERM,signal.SIGKILL):
-            for p in Path('/proc').iterdir():
+            for p in kernel_read(Path('/proc'), 'list'):
                 if not p.name.isdigit() or int(p.name)==os.getpid():continue
                 try:
                     i=process(int(p.name))
                     if i['cgroup']==self.cgroup and process(i['pid'])==i:os.kill(i['pid'],sig)
-                except OSError:pass
+                except (Vanished,ProcessLookupError):pass
             time.sleep(.3)
         final_evidence={}
         try:
@@ -501,17 +570,17 @@ class Run:
         except Exception as e:physical='HOLD:'+type(e).__name__
         if self.pause:
             p=QUEUE/'PAUSED'
-            if p.exists() and p.read_bytes()==self.pause:
+            if p.exists() and kernel_read(p, 'bytes')==self.pause:
                 p.rename(ROOT/'queue-PAUSED.released')
                 pause='released'
             else:pause='ownership-changed; not altered'
         else:pause='not created'
         remaining=[]
-        for p in Path('/proc').iterdir():
+        for p in kernel_read(Path('/proc'), 'list'):
             if not p.name.isdigit() or int(p.name)==os.getpid():continue
             try:
                 if process(int(p.name))['cgroup']==self.cgroup:remaining.append(int(p.name))
-            except OSError:pass
+            except (Vanished,ProcessLookupError):pass
         cleanup=dict(physical=physical,queue_pause=pause,remaining_pids=remaining,
                      final_display=final_evidence,units='transient unit collected on runner exit',
                      install='source/binary retained as inert reproduction evidence; no package installed')
@@ -532,18 +601,18 @@ class Run:
             assert not (ROOT/'DONE').exists() and not (ROOT/'FAILED').exists()
             # Require the pre-existing disabled 564 hold, without mutating its state/timer.
             d=next(QUEUE.glob('564-*'))
-            assert json.loads((d/'meta.json').read_text())['enabled'] is False
-            assert json.loads((d/'status').read_text())['state']=='failed'
+            assert json.loads(kernel_read(d/'meta.json', 'text'))['enabled'] is False
+            assert json.loads(kernel_read(d/'status', 'text'))['state']=='failed'
             self.result('B-forced-reboots','EXCLUDED',executed=False,reason='not approved')
             self.physical()
             pause_path=QUEUE/'PAUSED'
-            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r6',nonce=os.urandom(16).hex()))+'\n').encode()
+            self.pause=(json.dumps(dict(owner='myce-test-stage-ab-r7',nonce=os.urandom(16).hex()))+'\n').encode()
             with pause_path.open('xb') as f:f.write(self.pause);f.flush();os.fsync(f.fileno())
             (ROOT/'owned-pause').write_bytes(self.pause)
             time.sleep(1)
-            for d in QUEUE.iterdir():
+            for d in kernel_read(QUEUE, 'list'):
                 if not d.is_dir():continue
-                try:s=json.loads((d/'status').read_text())
+                try:s=json.loads(kernel_read(d/'status', 'text'))
                 except (ValueError,OSError):continue
                 assert not (s.get('state') in ('running','stopping','preempting') and s.get('assigned_xpu')==1)
             self.counter.start();self.observer.start()
@@ -551,9 +620,8 @@ class Run:
             self.scenario('B-foreign-reader-canary',self.foreign_reader_canary)
             self.scenario('B-installed-disable-enable',self.disable_enable)
             self.scenario('A3-direct-queue-60s',self.direct)
-            self.begin('A-memory')
-            for host in (512,1024,2048,4096):self.measure(host)
-            self.halt('worker');self.halt('queue');self.active=None
+            for host in (512,1024,2048,4096):
+                self.scenario(f'A-memory-{host}MiB',lambda host=host:self.measure(host))
             self.scenario('A4-over-declaration',self.overcap)
             self.scenario('A4-wrong-allowlist',self.wrong_allowlist)
             # Wrong selectors are rejected by the workload before any XPU runtime allocation.
@@ -561,7 +629,7 @@ class Run:
             for boundary in ('startup','save','completion-ack'):
                 self.scenario('B-production-during-'+boundary,lambda boundary=boundary:self.boundary(boundary))
                 if self.proxy:self.proxy.shutdown();self.proxy.server_close();self.proxy=None
-            self.cpu_matrix()
+            self.scenario('B-CPU-matrix-container',self.cpu_matrix)
             for seed in (17,43,91):
                 for fault in ('queue-compute','queue-stopping','queue-assigned','queue-result','queue-idle',
                               'worker-compute','worker-before-kill','worker-after-kill','refuse','partition'):
@@ -592,7 +660,7 @@ class Run:
 
     def foreign_reader_canary(self):
         count=self.foreign.interruptions
-        subprocess.run(['systemd-run','--quiet','--collect','--unit=myce-test-r6-foreign-reader',
+        subprocess.run(['systemd-run','--quiet','--collect','--unit=myce-test-r7-foreign-reader',
             '--property=DevicePolicy=closed','--property=DeviceAllow=/dev/dri/card1 rw',
             '--property=DeviceAllow=/dev/dri/renderD129 rw','--property=MemoryMax=512M',
             '--property=RuntimeMaxSec=15s','--property=StandardOutput=null',
@@ -644,7 +712,7 @@ class Run:
         def reply():
             path=ROOT/'spark-response.json'
             if not path.exists():return None
-            value=json.loads(path.read_text())
+            value=json.loads(kernel_read(path, 'text'))
             if value.get('mode')==mode and value.get('phase')==self.phase.name:return value
         response=self.wait(reply,45)
         assert response['ok'], 'Spark transport/worker failed: '+response.get('error','unknown')
@@ -686,7 +754,7 @@ class Run:
                 self.finished([experiment,production],300)
                 if spark_started:
                     mapping=self.spark_request('stop');spark_started=False
-                    sparkrows=json.loads((self.phase/'spark-events.json').read_text())
+                    sparkrows=json.loads(kernel_read(self.phase/'spark-events.json', 'text'))
                 else:sparkrows=[];mapping={}
                 resumed=[r for r in self.rows()+sparkrows if r['kind']=='start' and r.get('job')==experiment and r['attempt']>1]
                 assert len(resumed)==1 and resumed[0]['resumed']>0
@@ -708,10 +776,9 @@ class Run:
             except Exception as error:
                 self.result(name,'HOLD' if self.safety else 'FAIL',error=type(error).__name__,detail=str(error))
                 if spark_started:
-                    try:self.spark_request('stop')
-                    except Exception:pass
-                self.active=None;self.halt('worker');self.halt('queue');self.release_owned()
-                if self.safety:raise
+                    self.spark_request('stop')
+                self.scenario_cleanup()
+                self.safety=None
 
     def boundary(self,boundary):
         if boundary=='completion-ack':

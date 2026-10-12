@@ -221,3 +221,19 @@ a separately observed requirement; pending notification is not a pass.
 Cleanup reconciles the flag, uninstalls only this unit to recoverable local
 Trash and removes its test drop-in. Control generation/audit records remain.
 Docker containment is explicitly outside host-disable acceptance.
+
+
+Round 7 keeps Mycelium core read-only at 2ad39fc and uses fresh r7 roots.
+Every kernel read (and ordinary evidence content read) goes through
+`kernel_reads.kernel_read`: ENOENT/ESRCH logs vanished and rescans before retry
+or confirmed absence; live EACCES/EPERM stays unknown; other errors hold the
+current scenario. The helper excludes its own listing descriptor while the
+iterator is still open. Regression tests inject random fd/process losses into
+the helper and inventory; an AST check rejects direct reads, including SSH
+program literals. Permission failures are never treated as an empty holder.
+A scenario HOLD stops its work and suspends the observers for cleanup. Only
+confirmed process, driver, cgroup RAM and host-headroom release lets the next
+scenario start. Observer errors remain sticky until cleanup confirms release;
+the observer threads survive a HOLD. Failed cleanup stops the entire runner.
+Each memory-ramp measurement now has its own scenario and checkpoint root.
+The measurement allocator checks the r7 cgroup rather than the stale r3 unit.

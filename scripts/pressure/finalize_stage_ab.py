@@ -2,6 +2,7 @@
 """ExecStopPost: preserve evidence, release only our pause, trash disposable installs."""
 import datetime
 import json
+from kernel_reads import kernel_read, Vanished
 import os
 from pathlib import Path
 import socket
@@ -13,21 +14,21 @@ from urllib.parse import quote
 root=Path('/home/user/synthetic-run')
 sys.path.insert(0,str(root/'source/scripts/pressure'))
 from pressure import DiagnosticReaders, drm_owners
-receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r6.service')
+receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r7.service')
 try:
     from types import SimpleNamespace
     from disable_drill import cleanup as installed_cleanup, UNIT, DROP
     if UNIT.exists() or DROP.exists():
-        assert DROP.exists() and str(root) in DROP.read_text(), 'test unit ownership changed'
+        assert DROP.exists() and str(root) in kernel_read(DROP, 'text'), 'test unit ownership changed'
         run=SimpleNamespace(installed=True,env=dict(os.environ),worker_cgroup=None)
         installed_cleanup(run)
     receipt['installed_worker']='flag and unit absent' if not UNIT.exists() and not (Path('/home/user/.local/share/myce')/'DISABLED').exists() else 'HOLD'
 except Exception as error:
     receipt['installed_worker']='HOLD:'+type(error).__name__
 try:
-    baseline=json.loads((root/'display-baseline.json').read_text())
+    baseline=json.loads(kernel_read(root/'display-baseline.json', 'text'))
     evidence={}
-    readers=DiagnosticReaders(json.loads((root/'diagnostic-executables.json').read_text()),root/'diagnostics.jsonl')
+    readers=DiagnosticReaders(json.loads(kernel_read(root/'diagnostic-executables.json', 'text')),root/'diagnostics.jsonl')
     end=time.monotonic()+60
     while True:
         owners=drm_owners(['0000:07:00.0'],baseline=baseline,allowed=[],diagnostics=readers,evidence=evidence)
@@ -49,20 +50,20 @@ except Exception as e:
     receipt.update(physical='HOLD-driver-counter',counter_error=type(e).__name__)
 pause=Path('/home/user/exp42-queue/PAUSED')
 owned=root/'owned-pause'
-if owned.exists() and pause.exists() and pause.read_bytes()==owned.read_bytes():
+if owned.exists() and pause.exists() and kernel_read(pause, 'bytes')==kernel_read(owned, 'bytes'):
     pause.rename(root/'queue-PAUSED.released')
 receipt['queue_pause']='released' if owned.exists() and not pause.exists() else 'not changed'
 # At ExecStopPost the kernel has stopped the unit's child processes. Read-only verify it.
 remaining=[]
-for proc in Path('/proc').iterdir():
+for proc in kernel_read(Path('/proc'), 'list'):
     if not proc.name.isdigit() or int(proc.name)==os.getpid():continue
     try:
-        if (proc/'cgroup').read_text().strip()=='0::/system.slice/myce-test-stage-ab-r6.service':remaining.append(int(proc.name))
-    except OSError:pass
+        if kernel_read(proc/'cgroup', 'text').strip()=='0::/system.slice/myce-test-stage-ab-r7.service':remaining.append(int(proc.name))
+    except Vanished:pass
 receipt['remaining_pids']=remaining
-ports=json.loads((root/'ports.json').read_text()) if (root/'ports.json').exists() else []
+ports=json.loads(kernel_read(root/'ports.json', 'text')) if (root/'ports.json').exists() else []
 for path in (root/'phases').glob('*/measure-*.pid.json'):
-    data=json.loads(path.read_text())
+    data=json.loads(kernel_read(path, 'text'))
     if 'port' in data:ports.append(data['port'])
 occupied=[]
 for port in set(ports):

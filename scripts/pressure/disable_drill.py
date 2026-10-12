@@ -1,5 +1,6 @@
 """Installed-user-service host switch drill, confined to the disposable GPU1 worker."""
 import json
+from kernel_reads import kernel_read, Vanished
 import os
 from pathlib import Path
 import subprocess
@@ -9,7 +10,7 @@ from pressure import api
 
 USER_HOME=Path('/home/user')
 UNIT=USER_HOME/'.config/systemd/user/myce-worker.service'
-DROP=UNIT.with_name(UNIT.name+'.d')/'myce-test-r6.conf'
+DROP=UNIT.with_name(UNIT.name+'.d')/'myce-test-r7.conf'
 CONTROL=USER_HOME/'.local/share/myce'
 
 
@@ -30,8 +31,10 @@ def show(run):
 def empty(group,state):
     if not group:return state['ActiveState'] in ('inactive','failed') and not state['ControlGroup']
     path=Path('/sys/fs/cgroup')/group.lstrip('/')
-    if not path.exists():return state['ActiveState'] in ('inactive','failed') and not state['ControlGroup']
-    return not (path/'cgroup.procs').read_text().strip() and 'populated 0' in (path/'cgroup.events').read_text()
+    try:
+        return not kernel_read(path/'cgroup.procs').strip() and 'populated 0' in kernel_read(path/'cgroup.events')
+    except Vanished:
+        return state['ActiveState'] in ('inactive','failed') and not state['ControlGroup']
 
 
 def drill(run):
@@ -51,7 +54,7 @@ def drill(run):
     os.chown(DROP,1000,1000)
     run.halt('worker');run.release_owned()
     # Combined enforced memory allowance stays 8GiB while the worker is in a separate user cgroup.
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r6.service','MemoryMax=2G'],check=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r7.service','MemoryMax=2G'],check=True)
     run.installed=True
     result=user(run,[str(ROOT/'myce'),'install','worker','--root',str(ROOT/'installation'),
         '--nas',str(run.cp),'--queue',run.url,'--name','b70-pressure-gpu1','--gpu','xpu',
@@ -59,7 +62,7 @@ def drill(run):
     record('installed',install_exit=result.returncode,installed_condition=show(run)['ConditionResult'])
     assert result.returncode==0 and show(run)['ConditionResult']=='no'
     run.installed_config=ROOT/'installation/worker/config.json'
-    c=json.loads(run.installed_config.read_text());c['checkpoint_root']=str(run.cp)
+    c=json.loads(kernel_read(run.installed_config, 'text'));c['checkpoint_root']=str(run.cp)
     run.installed_config.write_text(json.dumps(c));os.chown(run.installed_config,1000,1000)
     (ROOT/'installed-ready').touch()
     user(run,['systemctl','--user','start','myce-worker.service'])
@@ -76,8 +79,8 @@ def drill(run):
         '--now','--reason','drill','--timeout','20s'],check=False)
     elapsed=time.monotonic()-began
     state=show(run)
-    flag=json.loads((CONTROL/'DISABLED').read_text())
-    receipt=json.loads((CONTROL/'disable-receipt.json').read_text())
+    flag=json.loads(kernel_read(CONTROL/'DISABLED', 'text'))
+    receipt=json.loads(kernel_read(CONTROL/'disable-receipt.json', 'text'))
     record('disabled',disable_exit=disabled.returncode,disable_seconds=elapsed,empty_cgroup=empty(group,state),
            flag_observed=True,generation=flag['generation'],receipt_generation=receipt['generation'],
            cli_cgroup_confirmation='confirmed by empty systemd worker cgroup' in disabled.stdout)
@@ -121,8 +124,8 @@ def drill(run):
 def cleanup(run):
     from stage_ab import ROOT
     if not getattr(run,'installed',False):return
-    assert DROP.exists() and str(ROOT) in DROP.read_text(), 'test drop-in ownership changed'
-    assert UNIT.exists() and str(ROOT/'installation') in UNIT.read_text(), 'test unit ownership changed'
+    assert DROP.exists() and str(ROOT) in kernel_read(DROP, 'text'), 'test drop-in ownership changed'
+    assert UNIT.exists() and str(ROOT/'installation') in kernel_read(UNIT, 'text'), 'test unit ownership changed'
     state=show(run);group=state['ControlGroup'] or (run.worker_cgroup or '0::').split('::',1)[1]
     user(run,['systemctl','--user','stop','myce-worker.service'])
     state=show(run);assert empty(group,state),'installed test worker did not settle'
@@ -130,9 +133,9 @@ def cleanup(run):
     if (CONTROL/'DISABLED').exists():
         ready=ROOT/'installed-ready'
         if ready.exists():ready.rename(ROOT/'installed-ready.retired')
-        flag=json.loads((CONTROL/'DISABLED').read_text())
+        flag=json.loads(kernel_read(CONTROL/'DISABLED', 'text'))
         receipt=CONTROL/'disable-receipt.json'
-        if not receipt.exists() or json.loads(receipt.read_text())['generation']!=flag['generation']:
+        if not receipt.exists() or json.loads(kernel_read(receipt, 'text'))['generation']!=flag['generation']:
             user(run,[str(ROOT/'myce'),'disable','--now','--reason','test cleanup','--config',str(config),'--timeout','20s'])
         user(run,[str(ROOT/'myce'),'enable','--config',str(config)])
     assert not (CONTROL/'DISABLED').exists()
@@ -141,6 +144,6 @@ def cleanup(run):
     user(run,['systemctl','--user','daemon-reload'])
     assert not UNIT.exists() and not DROP.parent.exists() and show(run)['MainPID']=='0'
     run.worker_cgroup=None;run.installed=False
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r6.service','MemoryMax=8G'],check=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r7.service','MemoryMax=8G'],check=True)
     (ROOT/'installed-cleanup.json').write_text(json.dumps(dict(flag_absent=True,unit_absent=True,
         confirmed_empty=True,installation_recoverable_trash=str(ROOT/'installation/.Trash'))))
