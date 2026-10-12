@@ -331,3 +331,8 @@ asserts a 32-MiB victim fails alone while its concurrent neighbor survives. It i
 a native ceiling test, not GPU admission evidence. Installed GPU1 ownership accepts
 only ledger-proven identities inside its exact unit or delegated child cgroups.
 Long runs are detached; inspect DONE/FAILED and both cleanup receipts afterward.
+
+The initial r11 collector was stopped before any scenario: partial startup could
+leave no clock mapping and still prevent cleanup acknowledgement. The regression
+now retains raw ledger clocks, preserves phase FAIL and acknowledges only confirmed
+physical cleanup. The fresh detached retry uses r11b roots; report filenames stay r11.

@@ -76,7 +76,7 @@ def scenarios(run):
     # The adapter owns lifecycle; this test-only wrapper owns additional OS containment.
     subprocess.run(['systemctl','set-property','--runtime',SLICE,'MemoryMax=512M','MemorySwapMax=0',
                     'CPUQuota=100%','DevicePolicy=closed'],check=True,capture_output=True)
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11.service','MemoryMax=7G'],check=True,capture_output=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11b.service','MemoryMax=7G'],check=True,capture_output=True)
     bindir=ROOT/'docker-bin';bindir.mkdir();(bindir/'docker').symlink_to(BASE/'docker_wrapper.py')
     old_env=run.env.copy()
     try:
@@ -155,5 +155,5 @@ def scenarios(run):
     finally:
         assert not any(r['State']['Running'] for r in containers(run))
         subprocess.run(['systemctl','stop',SLICE],check=True,capture_output=True)
-        subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11.service','MemoryMax=8G'],check=True,capture_output=True)
+        subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11b.service','MemoryMax=8G'],check=True,capture_output=True)
         run.env=old_env

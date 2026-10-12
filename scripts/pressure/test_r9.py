@@ -12,7 +12,7 @@ class DockerFenceTests(unittest.TestCase):
         path=Path(__file__).with_name('docker_wrapper.py')
         spec=importlib.util.spec_from_file_location('pressure_docker_wrapper_test',path)
         module=importlib.util.module_from_spec(spec)
-        with patch.dict(os.environ,MYCE_TEST_DOCKER_PHASE='/home/kuna/myce-test-stage-ab-r11-20261011/phases/test'):
+        with patch.dict(os.environ,MYCE_TEST_DOCKER_PHASE='/home/kuna/myce-test-stage-ab-r11b-20261011/phases/test'):
             spec.loader.exec_module(module)
         module.ROOT=root;module.PHASE=root/'phases/test';module.PHASE.mkdir(parents=True)
         state=module.PHASE/'worker';state.mkdir();(state/'owned.docker.json').write_text(json.dumps(dict(identity='owned')))

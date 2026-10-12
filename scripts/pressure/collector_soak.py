@@ -36,7 +36,7 @@ def soak(root=ROOT, duration=1800, interval=.5):
 
 if __name__=='__main__':
     # Fence legacy admissions throughout the soak; finalizer releases only these bytes.
-    pause=(json.dumps(dict(owner='myce-test-stage-ab-r11',nonce=os.urandom(16).hex()))+'\n').encode()
+    pause=(json.dumps(dict(owner='myce-test-stage-ab-r11b',nonce=os.urandom(16).hex()))+'\n').encode()
     with (QUEUE/'PAUSED').open('xb') as stream:
         stream.write(pause);stream.flush();os.fsync(stream.fileno())
     (ROOT/'owned-pause').write_bytes(pause)

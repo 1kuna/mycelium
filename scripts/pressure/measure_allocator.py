@@ -14,7 +14,7 @@ p.add_argument('--receipt', type=Path, required=True)
 p.add_argument('--host-mib', type=int, default=512)
 p.add_argument('--gpu-mib', type=int, default=1024)
 a = p.parse_args()
-assert kernel_read(Path('/proc/self/cgroup'), 'text').strip() == '0::/system.slice/myce-test-stage-ab-r11.service'
+assert kernel_read(Path('/proc/self/cgroup'), 'text').strip() == '0::/system.slice/myce-test-stage-ab-r11b.service'
 assert 'MYCE_TOKEN' not in os.environ
 assert os.environ.get('ONEAPI_DEVICE_SELECTOR') == 'level_zero:0'
 assert os.environ.get('ZE_AFFINITY_MASK') == '0'

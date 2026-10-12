@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-root=Path('/home/kuna/myce-test-stage-ab-r11-20261011')
+root=Path('/home/kuna/myce-test-stage-ab-r11b-20261011')
 args=sys.argv[1:];config=root/'installation/worker-gpu1/config.json'
 expected=[str(root/'installation/worker-gpu1/myce'),'detect','--config',str(config)]
 # Installer binary name is read from its generated, private config; never from argv.
