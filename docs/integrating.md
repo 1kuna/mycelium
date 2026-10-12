@@ -76,7 +76,6 @@ run:
 needs:
   memory_gb: 40
   platform: [cuda]
-  model: atlas-embedding
 environment: atlas-cuda
 allowed_machines: [spark, pc4090]
 expected_minutes: 90
@@ -84,24 +83,27 @@ resumable: false
 ```
 
 The `REPLACE` path is deliberately not claimed to exist. `needs.model` provides
-an affinity hint, not an embedding API. A batch that runs its own GPU code
+an affinity hint, not an inference API. A batch that runs its own GPU code
 reserves the memory itself. Avoid nesting queue calls from a running batch that
-already holds the memory needed by those calls. Call the embedding API from the
-CPU orchestrator instead when using queue-managed inference.
+already holds the memory needed by those calls. Make model calls from the CPU
+orchestrator instead when using queue-managed inference.
 
-### Atlas embeddings
+### Atlas chat and OCR
 
-The following request is complete and works against dev's explicit fake model:
+Atlas's main GPU workload on the DGX Spark is a roughly 35B chat model plus an
+OCR server, both running vLLM 0.27.1. Its embeddings use FastEmbed on CPU and
+stay outside Mycelium. Keep that existing embedding contract unchanged.
 
-```sh
-curl --fail-with-body "$MYCE_QUEUE/v1/embeddings" \
-  -H "Authorization: Bearer $MYCE_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -H 'X-Myce-Project: atlas' -H 'X-Myce-Priority: production' \
-  -d '{"model":"dev-model","input":["First document chunk","Second document chunk"]}'
-```
+Use two `engine: server` entries with Atlas's exact reviewed executable and
+argv, rather than the `vllm` preset. The preset adds its own flags and aliases;
+generic server entries preserve supplied argv. See the
+[placeholder catalog](../examples/atlas-judge-vllm.example.yaml). Replace every
+placeholder from approved local configuration, including immutable file
+manifests and measured joint memory. Preserve model identity, math,
+context/output limits, generation configuration, template, reasoning and tool
+parsers. No fleet settings are inferred by this example.
 
-Or install the OpenAI client in your project's existing environment and use:
+Call from the CPU orchestrator with a finite deadline and no SDK retries:
 
 ```python
 import os
@@ -112,44 +114,18 @@ client = OpenAI(
     default_headers={"X-Myce-Project": "atlas", "X-Myce-Priority": "production"},
     timeout=600, max_retries=0,
 )
-result = client.embeddings.create(
-    model=os.environ.get("ATLAS_EMBEDDING_MODEL", "dev-model"),
-    input=["First document chunk", "Second document chunk"],
+result = client.chat.completions.create(
+    model="REPLACE_APPROVED_CHAT_CATALOG_NAME",
+    messages=[{"role": "user", "content": "Synthetic test input"}],
 )
-vectors = [item.embedding for item in sorted(result.data, key=lambda item: item.index)]
-print(vectors)
+# Consume the complete result locally; never print document text or error bodies.
 ```
 
-Real Atlas callers set `ATLAS_EMBEDDING_MODEL` to their approved catalog name.
-Keep the exact embedding model, dimensions, normalization, and preprocessing
-consistent with the existing index. Changing the model requires an explicit
-index migration, not just a different name. The caller holds the fleet token;
-worker commands do not inherit it.
-
-Queue and eligible workers share a catalog like this, with the actual approved
-model path, budget and model-specific arguments substituted:
-
-```yaml
-idle_timeout: 10m
-max_wait: 5m
-models:
-  - name: atlas-embedding
-    engine: llama.cpp
-    path: REPLACE_APPROVED_EMBEDDING_MODEL.gguf
-    size_bytes: REPLACE_WITH_EXACT_BYTES
-    sha256: REPLACE_WITH_APPROVED_SHA256
-    memory_gb: 8
-    platforms: [cuda, metal, xpu]
-    args: [--embedding, --ctx-size, "8192"]
-```
-
-These numbers are examples, not a verified inference contract. Read the current
-official model card and generation configuration before deployment, verify the
-served identity/template/context/output/sampler/tool settings, and record them.
-Provide a suitable GPU-enabled llama-server on worker PATH or through a declared
-environment recipe, which workers build on demand. Model weights never download
-at load. Use the [model guide](guide-model-calls.md) for LAN proxy
-configuration. An unsupported platform must fail visibly, not use a CPU fallback.
+OCR callers can use OpenAI routes when their exact server supports them, or
+`/models/REPLACE_APPROVED_OCR_CATALOG_NAME/PATH` for its native API. Generic
+retry defaults to off; opt in only when replay cannot duplicate side effects.
+Apply [private workload settings](guide-servers.md#private-workloads) before
+sending company documents. Workers never inherit the fleet token.
 
 ### Verso production model calls
 
@@ -182,7 +158,7 @@ GPU unit, explicitly labeled; replace one unit with real bounded Verso GPU work
 and make its outputs idempotent before production use.
 
 ```sh
-# Wait for the earlier embedding model to idle-unload before occupying all memory.
+# Wait for earlier models to idle-unload before occupying all memory.
 python3 - <<'PYWAIT'
 import json, os, time, urllib.request
 for _ in range(300):
@@ -402,14 +378,15 @@ print(client.list())
 # client.cancel(job["id"])  # an explicit cancellation decision
 ```
 
-For Atlas's embedding path, the helper sets OpenAI routing headers, a 600-second
+For Atlas's chat path, the helper sets OpenAI routing headers, a 600-second
 timeout and no SDK retries; override the timeout to match loading plus inference:
 
 ```python
 from mycelium import Client
 with Client().openai(project="atlas", priority="production", timeout=600) as sdk:
-    result = sdk.embeddings.create(model="dev-model", input=["Find documents about GPU scheduling"])
-    print(result.data[0].embedding)
+    result = sdk.chat.completions.create(model="dev-model",
+        messages=[{"role": "user", "content": "Synthetic test input"}])
+    # Consume locally; do not log private inputs, outputs or error bodies.
 ```
 
 Use the approved real catalog name outside dev. `Client.openai` also accepts

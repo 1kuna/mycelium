@@ -296,7 +296,9 @@ func TestHostDisableQueueAndPagePersistAcrossRestart(t *testing.T) {
 	}
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	resp, err := http.Get(server.URL)
+	req, _ := http.NewRequest("GET", server.URL, nil)
+	req.Header.Set("Authorization", "Bearer test")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,6 +22,7 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	LogRetention          time.Duration
 	dockerCallTimeout     time.Duration
 	Unit                  string
 	HostStateDir          string
@@ -589,6 +590,13 @@ func (w Worker) Run(stop context.Context) error {
 	if s.state.Job != nil {
 		w.batchMemory.Store(math.Float64bits(s.state.Job.Spec.Needs.MemoryGB))
 	}
+	if w.LogRetention == 0 {
+		w.LogRetention = DefaultLogRetention
+	}
+	if w.LogRetention < 0 {
+		return errors.New("log-retention must be positive")
+	}
+	var nextLogCleanup time.Time
 	rt, err := startModels(w, s.dir)
 	if err != nil {
 		return err
@@ -689,6 +697,12 @@ func (w Worker) Run(stop context.Context) error {
 			return nil
 		}
 		now := w.Clock.Now()
+		if !now.Before(nextLogCleanup) {
+			if err = pruneWorkerLogs(s.dir, s.state.Log, now, w.LogRetention); err != nil {
+				return errors.New("worker log retention failed")
+			}
+			nextLogCleanup = now.Add(time.Minute)
+		}
 		batch := 0.0
 		if s.state.Job != nil {
 			batch = s.state.Job.Spec.Needs.MemoryGB

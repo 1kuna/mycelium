@@ -255,7 +255,7 @@ func TestPinnedLoadFailureVisible(t *testing.T) {
 		t.Fatal(e)
 	}
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	if s == nil || s.State != "failed" || s.Error != "disk full" {
+	if s == nil || s.State != "failed" || s.Error != "model load or unload failed" {
 		t.Fatal("pin failure hidden", s)
 	}
 }

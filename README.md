@@ -133,7 +133,7 @@ on the mounted NAS before running `queue`; a missing root blocks new jobs.
 Use `join --state-dir /durable/local/worker` to choose the worker spool location
 (default: a per-queue, per-machine directory in your user cache). Keep it
 across worker restarts. Examples for boot services are in [deploy/](deploy/README.md). The HTML page is
-read-only and LAN-visible; all `/api/` and `/v1/` routes require the token. This is a
+read-only and token-protected; HTML, API and model routes require the fleet token. This is a
 trusted local-network service; commands run with the worker user's permissions.
 
 `myce join` auto-detects the GPU using the same probe as `myce install worker`, including memory mode and reserve defaults. `--gpu` bypasses detection; `--device` selects a card, and explicit memory flags override detected defaults. Detection failure suggests `--gpu`; multi-GPU CUDA hosts need a device selector. `myce dev` still uses fake inventory.

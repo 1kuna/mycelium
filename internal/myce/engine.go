@@ -145,7 +145,11 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	l.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	l.cmd.Env = env
 	l.cmd.Env = append(l.cmd.Env, "MYCE_PROCESS_ID="+l.identity)
-	l.log, e = os.OpenFile(filepath.Join(l.Dir, name+".log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if m.Logs == "none" {
+		l.log, e = os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	} else {
+		l.log, e = os.OpenFile(filepath.Join(l.Dir, name+".log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	}
 	if e != nil {
 		return e
 	}
@@ -341,6 +345,7 @@ func cleanupEngines(dir string, clock Clock) error {
 			return e
 		}
 		st.PID = 0
+		st.LaunchPending = false
 		if e = saveWorkerJSON(dir, filepath.Base(p), st); e != nil {
 			return e
 		}
@@ -453,7 +458,7 @@ func (rt *modelRuntime) report() ([]ModelReport, float64) {
 	out := []ModelReport{}
 	memory := 0.0
 	for name, m := range rt.models {
-		out = append(out, ModelReport{Name: name, State: m.state, Error: m.err, InFlight: m.inflight, CallsMeasured: true})
+		out = append(out, ModelReport{Name: name, State: m.state, Error: diagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true})
 		if m.state != "unloaded" && m.state != "failed" {
 			memory += m.model.MemoryGB
 		}
@@ -490,7 +495,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		if s.State != "loading" || s.Session != rt.session {
 			continue
 		}
-		if m := rt.models[s.Model]; m != nil && m.state != "unloaded" {
+		if m := rt.models[s.Model]; m != nil && m.state != "unloaded" && m.state != "failed" {
 			continue
 		}
 		var model Model
@@ -758,6 +763,8 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 			rt.unload(m)
 		}
 	}()
+	callCtx, cancel := context.WithTimeout(r.Context(), m.model.requestTimeout())
+	defer cancel()
 	var res *http.Response
 	if generic {
 		engine, ok := m.engine.(StreamRequestEngine)
@@ -765,17 +772,25 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 			modelError(w, 503, "engine does not support streaming request bodies")
 			return
 		}
-		res, e = engine.StreamRequest(r.Context(), r.Method, endpoint, r.Body, r.ContentLength, proxyHeaders(r.Header))
+		res, e = engine.StreamRequest(callCtx, r.Method, endpoint, r.Body, r.ContentLength, proxyHeaders(r.Header))
 	} else if engine, ok := m.engine.(CallRequestEngine); ok {
-		res, e = engine.CallRequest(r.Context(), r.Method, endpoint, data, proxyHeaders(r.Header))
+		res, e = engine.CallRequest(callCtx, r.Method, endpoint, data, proxyHeaders(r.Header))
 	} else {
-		res, e = m.engine.Call(r.Context(), endpoint, data)
+		res, e = m.engine.Call(callCtx, endpoint, data)
 	}
 	if e != nil {
-		modelError(w, 503, e.Error())
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+			modelError(w, 504, errModelRequestTimeout.Error())
+			return
+		}
+		modelError(w, 503, "model request failed")
 		return
 	}
 	defer res.Body.Close()
+	if res.StatusCode >= 400 {
+		modelError(w, res.StatusCode, "upstream model request failed")
+		return
+	}
 	copyProxyHeaders(w.Header(), res.Header)
 	w.WriteHeader(res.StatusCode)
 	buf := make([]byte, 16384)

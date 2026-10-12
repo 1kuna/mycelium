@@ -188,14 +188,16 @@ func TestUnifiedProbeFailureStatusAndRecovery(t *testing.T) {
 	if job(t, q, j.ID).Attempt != 0 {
 		t.Fatal("failed telemetry admitted work")
 	}
-	// The public status page displays the diagnostic (escaped by html/template).
-	response, err := http.Get(server.URL)
+	// Public status keeps a fixed diagnostic and omits raw probe output.
+	req, _ := http.NewRequest("GET", server.URL, nil)
+	req.Header.Set("Authorization", "Bearer test")
+	response, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	data, err := io.ReadAll(response.Body)
 	response.Body.Close()
-	if err != nil || !strings.Contains(string(data), "meminfo denied") {
+	if err != nil || !strings.Contains(string(data), "memory probe failed") || strings.Contains(string(data), "meminfo denied") {
 		t.Fatalf("status page hid failure: %v", err)
 	}
 	recovered.Store(true)

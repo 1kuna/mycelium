@@ -379,7 +379,7 @@ func TestModelUnloadFailureKeepsMemory(t *testing.T) {
 		t.Fatal(e)
 	}
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	if s == nil || s.Error != "process survived" || q.s.Machines[m.ID].FreeMemoryGB != 0 {
+	if s == nil || s.Error != "model load or unload failed" || q.s.Machines[m.ID].FreeMemoryGB != 0 {
 		t.Fatal("failed unload released memory or hid error")
 	}
 }

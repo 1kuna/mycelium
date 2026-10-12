@@ -65,6 +65,8 @@ type Queue struct {
 	simulation       bool
 	simID            int64
 	uploadSpool      uploadSpool
+	logRetention     time.Duration
+	nextLogCleanup   time.Time
 	environments     EnvironmentCatalog
 	productionGrace  time.Duration
 	wake             chan struct{}
@@ -119,7 +121,7 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	q := &Queue{uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes}, productionGrace: 10 * time.Second, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
 		db.Close()
 		return nil, err
@@ -149,6 +151,10 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 		}
 	}
 	if err = q.ConfigureModels(ModelConfig{Idle: 10 * time.Minute, Wait: 5 * time.Minute}); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err = q.ConfigureUploadSpool("", DefaultUploadSpoolBytes); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -219,6 +225,10 @@ func (q *Queue) Close() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	err := q.db.Close()
+	if q.uploadSpool.lock != nil {
+		err = errors.Join(err, q.uploadSpool.lock.Close())
+		q.uploadSpool.lock = nil
+	}
 	if q.lock != nil {
 		err = errors.Join(err, syscall.Flock(int(q.lock.Fd()), syscall.LOCK_UN), q.lock.Close())
 		q.lock = nil
@@ -422,7 +432,12 @@ func (q *Queue) maintain() {
 		}
 	}
 }
-func (q *Queue) Tick() error { return q.update(func() error { q.maintain(); return nil }) }
+func (q *Queue) Tick() error {
+	if err := q.update(func() error { q.maintain(); return nil }); err != nil {
+		return err
+	}
+	return q.pruneBatchLogs()
+}
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	reply := Reply{CheckpointRoot: q.root}
 	var durableProgress int64
