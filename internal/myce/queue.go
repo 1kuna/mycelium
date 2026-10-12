@@ -299,6 +299,10 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 		} else {
 			id = ID()
 		}
+		if s.Priority == "production" && s.StartBy == nil {
+			deadline := q.clock.Now().Add(ProductionStartTimeout)
+			s.StartBy = &deadline
+		}
 		j := &Job{EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		if e := q.validateProjectCapacity(j); e != nil {
 			return e
@@ -316,6 +320,7 @@ func (q *Queue) retry(j *Job, why string) {
 	j.Machine = ""
 	j.Session = ""
 	j.StopAt = nil
+	j.StartedAt = nil
 	j.Reason = why
 	if j.Losses >= 3 {
 		j.State = "failed"
@@ -343,6 +348,7 @@ func (q *Queue) maintain() {
 			q.retainRelease(j)
 		}
 	}
+	q.maintainStartDeadlines()
 	q.maintainHolds()
 	for machine, release := range q.s.BatchReleases {
 		if !now.Before(release.Until) {
@@ -402,12 +408,18 @@ func (q *Queue) maintain() {
 			j.Reason = "give-up time reached"
 		}
 	}
+	q.maintainStartDeadlines()
 	q.maintainHolds()
 	q.refreshHostMemory()
 	q.maintainModels()
 	q.escalateDockerCleanup()
 	q.refreshHostMemory()
 	q.maintainHolds()
+	for _, j := range q.s.Jobs {
+		if startupPending(j) {
+			j.Reason = q.startStatusReason(j)
+		}
+	}
 }
 func (q *Queue) Tick() error { return q.update(func() error { q.maintain(); return nil }) }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
@@ -577,7 +589,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				reply.Kill = true
 				return nil
 			}
-			if c.Started && j.StartedAt == nil {
+			if c.Started && j.StartedAt == nil && j.State == "running" {
 				q.markStarted(j)
 			}
 			j.Progress = c.Running.Progress
@@ -689,6 +701,7 @@ func (q *Queue) current(r Result) (*Job, error) {
 }
 func (q *Queue) Complete(r Result) error {
 	return q.update(func() error {
+		q.maintainStartDeadlines()
 		if r.ReleaseOnly {
 			if r.ReleasePending {
 				return errors.New("release-only acknowledgement cannot be pending")
@@ -707,6 +720,12 @@ func (q *Queue) Complete(r Result) error {
 		pendingTracked := false
 		if !r.ReleasePending {
 			settled = q.settleRelease(r)
+			if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+				j.ReleaseConfirmed = true
+				if j.LastStopOutcome == "release pending" {
+					j.LastStopOutcome = "released"
+				}
+			}
 		}
 		if r.ReleasePending {
 			if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
@@ -865,8 +884,14 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 					j.Reason = "NAS checkpoint root is unreachable"
 				}
 			}
+			if startupPending(j) {
+				j.Reason = q.startStatusReason(j)
+			}
 			copy := cloneJob(j)
 			copy.QueueOrder = order[j.ID]
+			if terminal(j.State) && j.LastStopOutcome == "release pending" {
+				copy.Reason += "; release pending"
+			}
 			out.Jobs = append(out.Jobs, &copy)
 		}
 		for _, c := range q.calls {
@@ -1047,6 +1072,7 @@ func (q *Queue) markStarted(j *Job) {
 	if j.StartedAt == nil {
 		now := q.clock.Now()
 		j.StartedAt = &now
+		j.Reason = ""
 		j.StartLatencySeconds = now.Sub(j.Queued).Seconds()
 		if j.Spec.Priority == "production" {
 			q.s.ProductionStarts = append(q.s.ProductionStarts, ProductionStart{At: now, Job: j.ID, Seconds: j.StartLatencySeconds})
@@ -1054,12 +1080,23 @@ func (q *Queue) markStarted(j *Job) {
 	}
 }
 func (q *Queue) Started(r Result) error {
-	return q.update(func() error {
+	var rejected error
+	err := q.update(func() error {
+		q.maintainStartDeadlines()
 		j, e := q.current(r)
 		if e != nil {
-			return e
+			rejected = e
+			return nil
+		}
+		if j.State != "running" {
+			rejected = ErrStale
+			return nil
 		}
 		q.markStarted(j)
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	return rejected
 }

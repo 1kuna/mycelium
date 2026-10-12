@@ -114,7 +114,7 @@ func (q *Queue) retainRelease(j *Job) {
 		return
 	}
 	policy := q.s.Hosts[hostID(m)]
-	if !j.Spec.Run.Docker && (policy == nil || !policy.Policy.ProductionHold) {
+	if j.Spec.StartBy == nil && !j.Spec.Run.Docker && (policy == nil || !policy.Policy.ProductionHold) {
 		return
 	}
 	if q.s.HostReleases == nil {
@@ -154,7 +154,7 @@ func (q *Queue) reconcileHostReleases(c Checkin) {
 
 // Placement policy is shared by batch, model, preparation and projections.
 func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
-	if q.dockerBlocker(hostID(m)) != "" || m.Disabled != "" || q.s.DisabledHosts[hostID(m)] != "" || !q.projectAllows(j.Spec.Project, m.ID) {
+	if q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || m.Disabled != "" || q.s.DisabledHosts[hostID(m)] != "" || !q.projectAllows(j.Spec.Project, m.ID) {
 		return false
 	}
 	if j.ProductionHost != "" && j.ProductionHost != hostID(m) {
@@ -505,6 +505,11 @@ func (q *Queue) backgroundPreparing(m *Machine) bool {
 
 // Lost/stopping Docker executions fence the physical host, even without host policy.
 func (q *Queue) dockerBlocker(host string) string {
+	for _, m := range q.s.Machines {
+		if hostID(m) == host && m.DockerCleanup != "" {
+			return host + ": Docker cleanup unconfirmed; " + m.DockerCleanup
+		}
+	}
 	waiting := ""
 	for _, r := range q.s.HostReleases {
 		if !r.Docker || r.Host != host {

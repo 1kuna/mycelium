@@ -16,6 +16,13 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ClientTests(unittest.TestCase):
+    def test_wait_reports_production_start_deadline(self):
+        client = Client(token="test-only")
+        failed = {"id": "prod", "state": "failed", "reason": "production start deadline exceeded: host b70 disabled by operator"}
+        with patch.object(client, "_call", return_value={"jobs": [failed]}):
+            self.assertEqual(client.wait("prod"), failed)
+
+
     def test_log_pages_and_terminal_drain(self):
         client = Client(token="test-only")
         page = [{"seq": n, "attempt": 1, "text": str(n)} for n in range(1, 257)]
@@ -132,6 +139,17 @@ class DevTests(unittest.TestCase):
 
     def spec(self, command, **extra):
         return {"name": "python-test", "project": "test", "priority": "experiment", "run": {"command": command}, "needs": {"memory_gb": 1, "platform": ["fake"]}, "resumable": False, **extra}
+
+    def test_production_start_deadline(self):
+        job = self.client.submit(self.spec(
+            [sys.executable, "-c", "raise SystemExit('must not run')"],
+            priority="production", start_by="2000-01-01T00:00:00Z",
+            needs={"memory_gb": 1, "platform": ["xpu"]}))
+        failed = self.client.wait(job["id"], timeout=2)
+        self.assertEqual(failed["state"], "failed")
+        self.assertIn("production start deadline exceeded", failed["reason"])
+        self.assertIn("needs xpu", failed["reason"])
+        self.assertEqual(failed["attempt"], 0)
 
     def test_submit_wait_logs_and_failure(self):
         original = self.spec([sys.executable, "-c", "print('first', flush=True); print('last', flush=True)"])

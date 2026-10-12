@@ -9,6 +9,12 @@ import (
 var dockerTestOriginalPath = os.Getenv("PATH")
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
+		if CommandExec(os.Args[2:]) != nil {
+			os.Exit(125)
+		}
+		return
+	}
 	dir, err := os.MkdirTemp("", "myce-host-tests-")
 	if err != nil {
 		panic(err)

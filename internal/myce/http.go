@@ -98,6 +98,14 @@ func (a API) Handler() http.Handler {
 		v, err := a.Queue.Checkin(c)
 		respond(w, v, err)
 	})
+	mux.HandleFunc("POST /api/workers/start-permit", func(w http.ResponseWriter, r *http.Request) {
+		var c Result
+		if !decode(w, r, &c) {
+			return
+		}
+		permit, err := a.Queue.PermitStart(c)
+		respond(w, permit, err)
+	})
 	mux.HandleFunc("POST /api/workers/started", func(w http.ResponseWriter, r *http.Request) {
 		var c Result
 		if !decode(w, r, &c) {
