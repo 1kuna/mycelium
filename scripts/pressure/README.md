@@ -336,3 +336,30 @@ The initial r11 collector was stopped before any scenario: partial startup could
 leave no clock mapping and still prevent cleanup acknowledgement. The regression
 now retains raw ledger clocks, preserves phase FAIL and acknowledges only confirmed
 physical cleanup. The fresh detached retry uses r11c roots; report filenames stay r11.
+
+## Round 12 remaining scenarios
+
+Round 11 migration and Spark-full return passed. Round 12 runs only Docker
+(grace, force, worker restart/loss, delayed start, wrapper slowness and disable),
+the native memory-ceiling isolation scenario, the local CPU matrix and installed
+GPU1 disable/enable, from fresh r12-20261012 state. Use `prepare_r11.py` for the
+updated B70-only staging, `qualify_r11.runtime_source()` for device qualification,
+`launch_r12.py` to start, and `collect_r12.py` for detached terminal/cleanup receipts.
+The original Mycelium checkout and all core source remain unchanged.
+
+Before fleet work, run `python3 -m unittest discover -s scripts/pressure` on Mac.
+`test_remaining_dry_run.py` executes all remaining scenario bodies and Docker
+wrapper branches with fake queue responses, Docker and proc/cgroup data. It also
+executes the generated installer device-fence prelude with fake character nodes.
+Fixtures are the exact inspect and ps JSON shapes of one labelled B70 test
+container; production containers were not captured. Docker payload start receipts
+have attempt identities, not host PIDs. Native-process ownership skips those
+receipts; daemon custody requires the container ID, exact label and cgroup.
+Prior stopped test containers stay as evidence and never authorize signaling.
+
+The installer invocation itself sees the same GPU1-only namespace as join and
+its service validation. Kernel OOM isolation also requires an unchanged live
+worker PID. Runtime unit configuration crosses filesystems through recoverable
+moves. Final cleanup preserves the explicit legacy-GPU1 queue guard, checks
+production health, retires only owned runtime configuration and independently
+inventories both hosts. No Spark service or tunnel is launched this round.
