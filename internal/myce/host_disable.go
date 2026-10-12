@@ -32,6 +32,11 @@ func HostStateDirectory() (string, error) {
 	return filepath.Join(home, ".local", "share", "myce"), nil
 }
 func HostDisabled(dir string) (string, error) {
+	if parent := unitParent(dir); parent != "" {
+		if reason, err := HostDisabled(parent); err != nil || reason != "" {
+			return reason, err
+		}
+	}
 	if dir == "" {
 		var err error
 		dir, err = HostStateDirectory()
@@ -60,15 +65,25 @@ func hostLaunchGate(dir string) (func(), error) {
 	if dir == "" {
 		return func() {}, nil
 	}
+	parentUnlock := func() {}
+	if parent := unitParent(dir); parent != "" {
+		var err error
+		parentUnlock, err = hostLaunchGate(parent)
+		if err != nil {
+			return nil, err
+		}
+	}
 	f, err := os.OpenFile(filepath.Join(dir, "launch.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
+		parentUnlock()
 		return nil, err
 	}
 	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		f.Close()
+		parentUnlock()
 		return nil, fmt.Errorf("host launch gate busy: %w", err)
 	}
-	unlock := func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() }
+	unlock := func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close(); parentUnlock() }
 	reason, err := HostDisabled(dir)
 	if err != nil || reason != "" {
 		unlock()
@@ -78,6 +93,7 @@ func hostLaunchGate(dir string) (func(), error) {
 }
 
 type HostWorker struct {
+	Unit         string   `json:"unit,omitempty"`
 	Generation   uint64   `json:"generation,omitempty"`
 	Executions   []Result `json:"executions,omitempty"`
 	Command      []string `json:"command,omitempty"`
@@ -120,7 +136,7 @@ func (w *Worker) registerHost(s *workerStore) error {
 	if err != nil {
 		return err
 	}
-	r := HostWorker{State: state, Environments: env, Host: w.Machine.HostID, Name: w.Machine.ID, Queue: w.Client.URL, Command: w.ResumeCommand}
+	r := HostWorker{Unit: w.Unit, State: state, Environments: env, Host: w.Machine.HostID, Name: w.Machine.ID, Queue: w.Client.URL, Command: w.ResumeCommand}
 	if w.SuperviseProcess {
 		r.PID = os.Getpid()
 		r.Birth, err = processBirth(r.PID)
@@ -129,6 +145,11 @@ func (w *Worker) registerHost(s *workerStore) error {
 		}
 	}
 	sum := sha256.Sum256([]byte(state))
+	if parent := unitParent(w.HostStateDir); parent != "" {
+		if err := saveWorkerJSON(parent, "worker-"+hex.EncodeToString(sum[:16])+".json", r); err != nil {
+			return err
+		}
+	}
 	return saveWorkerJSON(w.HostStateDir, "worker-"+hex.EncodeToString(sum[:16])+".json", r)
 }
 
@@ -142,6 +163,8 @@ type HostProcesses struct {
 type HostControl struct {
 	Docker            bool
 	dockerProgress    *dockerDisableProgress
+	ResolveServices   func() (map[string]HostService, error)
+	Services          map[string]HostService
 	ResolveService    func() HostService
 	Service           HostService
 	Timeout           time.Duration
@@ -155,6 +178,7 @@ type HostControl struct {
 	Notify            func(context.Context, HostWorker, bool, bool, string) error
 }
 type DisableReport struct {
+	Units       map[string]string
 	Docker      string
 	Confirmed   bool
 	BestEffort  bool
@@ -303,7 +327,7 @@ func (h HostControl) Disable(ctx context.Context, reason string, grace time.Dura
 	case result := <-done:
 		return result.report, result.err
 	case <-ctx.Done():
-		r := DisableReport{Unconfirmed: []string{"overall deadline: cleanup, receipt and queue acknowledgement unconfirmed"}}
+		r := DisableReport{Units: h.dockerProgress.unitReport(), Unconfirmed: []string{"overall deadline: cleanup, receipt and queue acknowledgement unconfirmed"}}
 		r.Docker, r.Unconfirmed = h.dockerProgress.report(r.Unconfirmed)
 		return r, ctx.Err()
 	}
@@ -363,9 +387,19 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 	if h.ResolveService != nil {
 		h.Service = h.ResolveService()
 	}
+	if h.ResolveServices != nil {
+		var e error
+		h.Services, e = h.ResolveServices()
+		if e != nil {
+			return r, e
+		}
+	}
+	if h.Service != nil {
+		h.Services = map[string]HostService{"worker": h.Service}
+	}
 	workers, err := h.workers()
 	if err != nil {
-		if h.Service == nil {
+		if len(h.Services) == 0 {
 			return r, err
 		}
 		r.QueueErrors = append(r.QueueErrors, "worker registry unavailable; queue reconciliation incomplete")
@@ -382,28 +416,50 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 	}
 	notifications := make(chan []string, 1)
 	go func() { notifications <- h.notify(context.WithoutCancel(ctx), workers, false, false, reason) }()
-	if h.Service != nil {
-		if err = h.Service.Stop(ctx, grace); err == nil {
-			for {
-				var empty bool
-				empty, err = h.Service.Empty(ctx)
-				if err != nil || empty {
-					r.Confirmed = empty && err == nil
-					break
-				}
-				select {
-				case <-ctx.Done():
-					err = ctx.Err()
-				case <-time.After(10 * time.Millisecond):
-				}
-				if err != nil {
-					break
-				}
+	if len(h.Services) > 0 {
+		r.Units = map[string]string{}
+		pending := map[string]HostService{}
+		for unit := range h.Services {
+			r.Units[unit] = "unconfirmed"
+			h.dockerProgress.unit(unit, r.Units[unit])
+		}
+		for unit, service := range h.Services {
+			if e := service.Stop(ctx, grace); e != nil {
+				r.Units[unit] = "unconfirmed: " + e.Error()
+				h.dockerProgress.unit(unit, r.Units[unit])
+				r.Unconfirmed = append(r.Unconfirmed, unit+": "+e.Error())
+			} else {
+				pending[unit] = service
 			}
 		}
-		if err != nil {
-			r.Unconfirmed = append(r.Unconfirmed, "systemd cgroup: "+err.Error())
+		for len(pending) > 0 {
+			for unit, service := range pending {
+				empty, e := service.Empty(ctx)
+				if e != nil || empty {
+					delete(pending, unit)
+					if e != nil {
+						r.Units[unit] = "unconfirmed: " + e.Error()
+						h.dockerProgress.unit(unit, r.Units[unit])
+						r.Unconfirmed = append(r.Unconfirmed, unit+": "+e.Error())
+					} else {
+						r.Units[unit] = "confirmed empty cgroup"
+						h.dockerProgress.unit(unit, r.Units[unit])
+					}
+				}
+			}
+			if len(pending) == 0 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				for unit := range pending {
+					r.Unconfirmed = append(r.Unconfirmed, unit+": "+ctx.Err().Error())
+				}
+				return r, ctx.Err()
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
+		r.Confirmed = len(r.Unconfirmed) == 0
 	} else {
 		r.BestEffort = true
 		if len(workers) == 0 {
@@ -495,7 +551,7 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 			}
 		}
 	}
-	if h.Service == nil && h.StopSecondary != nil {
+	if len(h.Services) == 0 && h.StopSecondary != nil {
 		if e := h.StopSecondary(ctx); e != nil {
 			r.Unconfirmed = append(r.Unconfirmed, e.Error())
 		}
@@ -978,6 +1034,11 @@ func ownedRecordGroups(st workerState) ([]int, error) {
 }
 
 func hostDisableGrace(dir string) time.Duration {
+	if parent := unitParent(dir); parent != "" {
+		if reason, _ := HostDisabled(parent); reason != "" {
+			return hostDisableGrace(parent)
+		}
+	}
 	b, err := os.ReadFile(filepath.Join(dir, "DISABLED"))
 	if err != nil {
 		return 0
