@@ -52,7 +52,7 @@ func (s *SystemdHostService) show(ctx context.Context) (map[string]string, error
 	return p, nil
 }
 func (s *SystemdHostService) Stop(ctx context.Context, grace time.Duration) error {
-	if s.Unit != "myce-worker.service" && s.Unit != "myce-spark-worker.service" {
+	if !ValidWorkerUnit(s.Unit) {
 		return errors.New("refusing non-Mycelium worker unit")
 	}
 	p, e := s.show(ctx)
