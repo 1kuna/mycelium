@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Fleet files deliberately accept only literal values, never shell expansion.
@@ -215,6 +216,21 @@ func (c ServiceConfig) ValidateInstall() error {
 	for _, p := range []string{c.NAS, c.State, c.Checkpoints, c.ModelRoot, c.EnvironmentRoot, c.ModelCache, c.EnvironmentCache, c.Config, c.Binary, c.Service, c.Credentials, c.HostStateDir, c.DB, c.UploadSpoolDir, c.ProjectConfig, c.HostConfig, c.ModelCatalog, c.EnvironmentCatalog, c.EnvironmentFile} {
 		if p != "" && (!filepath.IsAbs(p) || strings.ContainsAny(p, "\x00\n\r")) {
 			return errors.New("installed paths must be absolute and single-line")
+		}
+	}
+	if c.Detection.OS == "linux" {
+		// These paths occur in directives that do not support ExecStart quoting.
+		paths := []string{c.EnvironmentFile}
+		if c.Role == "worker" {
+			paths = append(paths, c.GPUEnvironmentFile(), c.HostStateDir)
+		}
+		for _, p := range paths {
+			if strings.ContainsAny(p, "'\"\\") || strings.IndexFunc(p, unicode.IsSpace) >= 0 {
+				return errors.New("systemd directive paths cannot contain whitespace, quotes or backslashes (EnvironmentFile and ConditionPathExists)")
+			}
+		}
+		if c.Role == "queue" && c.PrivateDevices {
+			return errors.New("PrivateDevices is unsupported for portable systemd user queues; use --private-devices=false (queue checks for inherited GPU descriptors)")
 		}
 	}
 	if strings.ContainsAny(c.Path, "\x00\n\r\"\\") {

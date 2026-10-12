@@ -19,7 +19,7 @@ func TestInstallWorkerRuntimeAndServiceDetection(t *testing.T) {
 			t.Setenv("MYCE_TOKEN", "must-not-copy")
 			t.Setenv("ZE_SECRET", "must-not-copy")
 			t.Setenv("AWS_SECRET_ACCESS_KEY", "must-not-copy")
-			home := filepath.Join(t.TempDir(), "home % space")
+			home := filepath.Join(t.TempDir(), "home%test")
 			if err := os.MkdirAll(home, 0700); err != nil {
 				t.Fatal(err)
 			}

@@ -241,6 +241,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return errors.Join(err, d.Close())
 		}
 	case "queue":
+		if err := myce.CheckQueueGPUDescriptors(); err != nil {
+			return err
+		}
 		q, err := myce.Open(*db, *checkpoint, myce.RealClock{})
 		if err != nil {
 			return err

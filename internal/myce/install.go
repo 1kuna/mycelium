@@ -258,7 +258,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection) (Servic
 	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = ProductionLossAfter, DeadlineLossAfter, LossAfter
 	c.UploadSpoolDir = filepath.Join(c.State, "uploads")
 	c.UploadSpoolBytes = DefaultUploadSpoolBytes
-	c.PrivateDevices, c.NoNewPrivileges = true, true
+	c.PrivateDevices, c.NoNewPrivileges = false, true
 	c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax = 10, "25%", "512M", "64"
 	c.EnvironmentRoot = filepath.Join(nas, "mycelium", "environments")
 	c.Path = filepath.Join(home, ".local", "bin") + ":" + filepath.Join(home, ".cargo", "bin") + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -310,11 +310,11 @@ func (c ServiceConfig) ServiceText() string {
 					condition += "ConditionPathExists=!" + unitConditionPath(filepath.Join(scoped, "DISABLED")) + "\n"
 				}
 			}
-			stopSettings = "EnvironmentFile=" + unitQuote(c.GPUEnvironmentFile()) + "\nDelegate=memory\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
+			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\nDelegate=memory\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
 		}
 		settings := ""
 		if c.EnvironmentFile != "" {
-			settings += "EnvironmentFile=" + unitQuote(c.EnvironmentFile) + "\n"
+			settings += "EnvironmentFile=" + unitConditionPath(c.EnvironmentFile) + "\n"
 		}
 		if c.Role == "queue" {
 			yesno := func(v bool) string {
