@@ -26,6 +26,7 @@ when shell expansion is needed.
 | `needs.model` | Absent | Batch affinity hint; does not load a model |
 | `environment` | Absent | Catalog name, `{name: torch-cuda}`, or `{lock_file: /shared/project/requirements.txt, python: "3.12", platforms: [cuda]}`; never both name and lock file |
 | `allowed_machines` | Empty: any eligible worker | Machine-name allow-list |
+| `start_by` | Production: submission + 150 seconds; absent for other priorities | Absolute RFC3339 startup deadline, production only; preserved across retries and queue restarts |
 | `give_up_at` | Absent: wait indefinitely | RFC3339 expiry while queued; not a running-job timeout |
 | `expected_minutes` | `0` | Rough planning hint, never enforced |
 | `resumable` | `false` | Set true only for a command implementing the checkpoint/stop contract |
@@ -271,6 +272,47 @@ parallel limit, load timeout, and combined absolute device/host peaks. Concurren
 warm-up peaks are joint observations, not attributed per-model deltas. Failure
 cancels all warm-ups, waits for them to exit, and unloads every attempted engine.
 
+## Production start deadline
+
+Production jobs must acknowledge command startup before `start_by`. Set an
+absolute RFC3339 timestamp, for example `start_by: 2026-10-12T14:00:30Z`.
+If omitted, the queue saves submission time plus **150 seconds**: the ordinary
+10-second experiment grace, two-minute Docker cleanup escalation, and a small
+reporting margin. This is a bounded availability policy, not a native startup
+latency guarantee. A shorter caller-owned deadline can trigger fallback sooner.
+Retries, re-delivery and restarts never renew it. Older unfinished production
+records without the field receive the same default from their original submission.
+
+`give_up_at` keeps its queued-only meaning; the earlier applicable expiry wins.
+`deadline` remains an ordering hint. A command that has started may finish after
+`start_by`; a new attempt must still start before the original deadline. Model
+HTTP calls retain their separate `max_wait` contract, and models loaded inside a
+batch command are not covered by its command-start acknowledgement.
+
+Status, the status page and the job record show the blocker and seconds left.
+Disabled hosts remain visible until expiry, allowing a brief operator recovery
+without silently extending the wait. No eligible machine, pending stops,
+unconfirmed Docker cleanup, worker recovery, environment preparation and capacity
+can all exhaust the budget. At `now >= start_by`, an unstarted job fails with
+`production start deadline exceeded: <blocker>`; a past deadline fails on submit
+without preempting anything. `myce wait` exits **1** and prints the reason; Python
+`Client.wait()` returns the failed record with its reason.
+
+Assignment alone is not startup. Plain commands report successful exec through a
+private receipt pipe; managed Docker reports a confirmed start operation. Workers
+reauthorize the exact attempt immediately
+before command dispatch; preparation completing after expiry cannot open the
+command gate. Late start/result messages cannot revive failure. Assigned expiry
+sends an attempt-specific kill and retains release custody and memory accounting;
+status says `release pending` until the matching cleanup acknowledgement.
+Experiment stops and Docker cleanup continue independently after production fails.
+Failure does **not** authorize a fallback to reuse uncertain resources.
+
+Expiry runs on queue ticks and API mutations (including status), so observation
+adds tick/poll delivery latency. Queue downtime or local storage failure cannot
+promise timely durable failure; the caller still owns its outage watchdog and safe
+fallback. Do not downgrade to workers/queues that ignore `start_by`.
+
 ## Physical-host production hold
 
 Opt in with `queue --host-config hosts.yaml` (also accepted by `dev` and `sim`):
@@ -345,9 +387,9 @@ Status/API `host_holds` and CLI/web status show, for example,
 `production idle; experiments resume in 179s`, or
 `release unknown: worker b70-1`. Blocked experiments show
 `host b70 reserved for production`; pinned capacity conflicts identify the pin.
-This is observable GPU demand, not a CPU publication/session lock. No absolute
-production startup expiry, cgroup enforcement, managed Docker or native device
-fence is provided by this option. Do not downgrade a database with active holds
+This is observable GPU demand, not a CPU publication/session lock. Production
+startup expiry and managed Docker are separate contracts; this option alone does
+not provide cgroup enforcement or a native device fence. Do not downgrade a database with active holds
 or mix old workers while depending on hold recovery.
 
 ## Attempt placement environment

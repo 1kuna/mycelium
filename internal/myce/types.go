@@ -91,6 +91,7 @@ type Spec struct {
 	} `json:"needs" yaml:"needs"`
 	Environment     Environment `json:"environment,omitempty" yaml:"environment,omitempty"`
 	AllowedMachines []string    `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
+	StartBy         *time.Time  `json:"start_by,omitempty" yaml:"start_by,omitempty"`
 	GiveUpAt        *time.Time  `json:"give_up_at,omitempty" yaml:"give_up_at,omitempty"`
 	ExpectedMinutes float64     `json:"expected_minutes,omitempty" yaml:"expected_minutes,omitempty"`
 	Resumable       bool        `json:"resumable" yaml:"resumable"`
@@ -102,6 +103,9 @@ func (s Spec) Validate() error {
 	}
 	if rank(s.Priority) == 3 {
 		return errors.New("priority must be production, deadline or experiment")
+	}
+	if s.StartBy != nil && s.Priority != "production" {
+		return errors.New("start_by is only supported for production")
 	}
 	if s.Priority == "deadline" && s.Deadline == nil {
 		return errors.New("deadline priority requires a deadline")

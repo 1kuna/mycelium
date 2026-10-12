@@ -208,9 +208,26 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	}
 	defer unlock()
 	identity := ID()
-	args := []string{"-c", `read gate || exit 125; trap 'wait "$child"; exit $?' TERM; "$@" < /dev/null & child=$!; wait "$child"; exit $?`, "myce-supervisor-" + identity, command}
+	args := []string{"-c", `read gate || exit 125; trap 'wait "$child"; exit $?' TERM; "$@" < /dev/null & child=$!; exec 3>&-; wait "$child"; exit $?`, "myce-supervisor-" + identity, command}
 	args = append(args, j.Spec.Run.Command[1:]...)
+	var readyReader, readyWriter *os.File
+	if j.Spec.StartBy != nil {
+		executable, e := os.Executable()
+		if e != nil {
+			return nil, e
+		}
+		readyReader, readyWriter, err = os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		defer readyReader.Close()
+		defer readyWriter.Close()
+		args = append(args[:3], append([]string{executable, "_command-exec"}, args[3:]...)...)
+	}
 	cmd := exec.Command("sh", args...)
+	if readyWriter != nil {
+		cmd.ExtraFiles = []*os.File{readyWriter}
+	}
 	cmd.Dir = j.Spec.Run.Workdir
 	env := map[string]string{}
 	for _, v := range os.Environ() {
@@ -292,6 +309,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		output.Close()
 		return nil, err
 	}
+	if readyWriter != nil {
+		readyWriter.Close()
+	}
 	s.state.PID = cmd.Process.Pid
 	s.state.LaunchPending = false
 	if err = saveWorkerJSON(s.dir, "attempt-"+identity+".json", workerState{PID: s.state.PID, Identity: identity}); err != nil {
@@ -310,8 +330,28 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if w.control != nil {
 		w.control.set(p)
 	}
+	if err = w.authorizeStart(j, s.state.Session); err != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		output.Close()
+		return nil, err
+	}
 	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	if readyReader != nil {
+		// Bound receipt I/O; queue startup decisions still use its injected Clock.
+		_ = readyReader.SetReadDeadline(time.Now().Add(2 * time.Second))
+		receipt, e := io.ReadAll(io.LimitReader(readyReader, 4096))
+		if e != nil || len(receipt) > 0 {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+			output.Close()
+			if e != nil {
+				return nil, fmt.Errorf("command exec receipt: %w", e)
+			}
+			return nil, errors.New(string(receipt))
+		}
 	}
 	result := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
@@ -888,6 +928,7 @@ func (w Worker) Run(stop context.Context) error {
 								startedCancel()
 								if startedErr != nil {
 									log.Printf("worker startup acknowledgement: %v", startedErr)
+									p.stop(w.Clock.Now(), 0, true)
 								}
 							}
 						}

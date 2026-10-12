@@ -21,6 +21,12 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
+		if myce.CommandExec(os.Args[2:]) != nil {
+			os.Exit(125)
+		}
+		return
+	}
 	if err := run(os.Args[1:]); err != nil {
 		log.Print(err)
 		os.Exit(exitCode(err))
