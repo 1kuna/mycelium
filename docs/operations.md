@@ -196,7 +196,32 @@ Existing workers must run the updated binary once to record their unit custody.
 Re-running `myce install worker` on an existing Linux installation upgrades its
 unit settings and reloads systemd, preserving its saved configuration, token,
 spools and installed binary; the previous unit is kept in local `.Trash`.
-Upgrade the installed binary separately if it predates this switch. Manual
+Linux worker installation also writes a private `gpu.env` beside `config.json`.
+It captures only recognized runtime controls from the invoking shell: `LD_LIBRARY_PATH`,
+`LIBRARY_PATH`, selected `ZE_*`, `ONEAPI_*`, `SYCL_*`, and `CUDA_*` variables.
+It never imports arbitrary prefixed variables, credentials, or `MYCE_TOKEN`.
+Source the trusted oneAPI `setvars.sh`/profile before installing if that is what
+makes foreground GPU detection work. PATH remains in the private service config.
+Reinstallation refreshes PATH and this runtime file while retaining the saved
+GPU/device settings, token, spool and binary.
+
+After writing/reloading the unit, install runs the installed binary's
+`detect --config PATH` through `systemd-run --user --wait --pipe`, loading the
+same `gpu.env`, PATH and device binding. This command reads no credentials.
+It checks actual read/write access to render/NVIDIA card nodes, the running
+user manager's groups, and runtime inventory. Missing nodes or denied access
+produce driver/group diagnostics, including administrator-only `sudo usermod
+-aG render/video <worker-user>` guidance; install never runs sudo. ACL access
+can be sufficient without those groups. A failed validation refuses installation
+acceptance and does not enable/start the new worker; written files remain for
+inspection/retry. Upgrades do not stop an already running worker on failure.
+`--instance` and `--device` follow the same check and selected XPU runtime binding.
+Use `--allow-deviceless` explicitly for CPU/fake test workers. Without `--gpu`,
+failed foreground detection then requires a positive `--memory-gb` test budget
+and configures the fake platform. This flag bypasses service GPU validation,
+not the normal scheduler/checkpoint contracts.
+
+Upgrade the installed binary separately if it predates `detect --config` or this switch. Manual
 unit users must install the updated template and reload their user manager.
 The flag condition and the worker's successful exit while disabled prevent
 restart loops, including after reboot.
