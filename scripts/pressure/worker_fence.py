@@ -9,10 +9,12 @@ import stat
 import subprocess
 import sys
 
-root=Path('/home/kuna/myce-test-stage-ab-r9-20261011')
+root=Path('/home/kuna/myce-test-stage-ab-r9b-20261011')
 config=root/'installation/worker/config.json'
-assert os.getuid()==0 and sys.argv[1:]==[str(config)]
-assert kernel_read(Path('/proc/self/cgroup'), 'text').strip().endswith('/myce-worker.service')
+assert os.getuid()==0 and sys.argv[1:] in ([str(config)],[str(config),'detect'])
+validation=sys.argv[-1]=='detect'
+group=kernel_read(Path('/proc/self/cgroup')).strip()
+assert group.endswith('/myce-test-r9-installed-validation.service' if validation else '/myce-worker.service')
 assert {p.name for p in kernel_read(Path('/sys/bus/pci/devices/0000:07:00.0/drm'), 'list')} >= {'card1','renderD129'}
 nodes={name:os.stat('/dev/dri/'+name) for name in ('card1','renderD129')}
 assert all(stat.S_ISCHR(v.st_mode) for v in nodes.values())
@@ -23,14 +25,15 @@ subprocess.run(['mount','-t','tmpfs','-o','size=64k,mode=755','myce-test-gpu1','
 for name,st in nodes.items():
     os.mknod('/dev/dri/'+name,stat.S_IFCHR|0o666,st.st_rdev)
 assert sorted(p.name for p in kernel_read(Path('/dev/dri'), 'list'))==['card1','renderD129']
-(root/'installed-fence.json').write_text(json.dumps(dict(pci='0000:07:00.0',nodes=list(nodes),
+(root/('installed-validation-fence.json' if validation else 'installed-fence.json')).write_text(json.dumps(dict(pci='0000:07:00.0',nodes=list(nodes),
     cgroup=kernel_read(Path('/proc/self/cgroup'), 'text').strip(),mount_namespace=kernel_read('/proc/self/ns/mnt', 'link'))))
 c=json.loads(kernel_read(config, 'text'))
-os.environ['MYCE_HOST_STATE_DIR']='/home/kuna/.local/share/myce'
-os.environ['MYCE_TOKEN']=json.loads(kernel_read(Path(c['credentials']), 'text'))['token']
+os.environ['MYCE_HOST_STATE_DIR']=str(root/'installed-host-state')
+if not validation:os.environ['MYCE_TOKEN']=json.loads(kernel_read(Path(c['credentials']), 'text'))['token']
 # The installer has no device option; bind its installed binary explicitly inside this private view.
 args=[c['binary'],'join','--name',c['name'],'--queue',c['queue'],'--gpu','xpu','--device','0',
       '--memory-mode','fixed','--memory-gb','4','--reserve-host-memory-gb','18','--heartbeat','250ms',
-      '--state-dir',c['state_dir'],'--checkpoint-root',c['checkpoint_root']]
+      '--state-dir',c['state_dir'],'--checkpoint-root',c['checkpoint_root'],'--host-state-dir',str(root/'installed-host-state')]
+if validation:args=[c['binary'],'detect','--config',str(config)]
 os.execv('/usr/bin/setpriv',['setpriv','--reuid=1000','--regid=1000','--init-groups','--no-new-privs',
                            *args])

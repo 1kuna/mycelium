@@ -10,7 +10,7 @@ import time
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from kernel_reads import kernel_read
 
-ROOT=Path('/home/kuna/myce-test-stage-ab-r9-20261011')
+ROOT=Path('/home/kuna/myce-test-stage-ab-r9b-20261011')
 REAL='/usr/bin/docker'
 PHASE=Path(os.environ['MYCE_TEST_DOCKER_PHASE'])
 assert PHASE.parent==ROOT/'phases'

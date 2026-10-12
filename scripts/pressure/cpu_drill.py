@@ -83,9 +83,9 @@ def isolated(run,name,args,seconds):
 
 
 def scenarios(run):
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r9.service','MemoryMax=4G'],check=True,capture_output=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r9b.service','MemoryMax=4G'],check=True,capture_output=True)
     isolated(run,'CPU-fast-matrix',[str(ROOT/'cpu-matrix.test'),'-test.run','^('+FAST+')','-test.v','-test.timeout','5m'],300)
     isolated(run,'CPU-large-local-checkpoint',[str(ROOT/'cpu-matrix.test'),'-test.run','^TestPressureLargeState$','-test.v','-test.timeout','30m'],1800)
     isolated(run,'NAS-small-latency-probe',['/usr/bin/python3',str(ROOT/'source/scripts/pressure/nas_latency.py'),str(NAS/'latency-probe'),str(ROOT/'phases/NAS-small-latency-probe/latency.json')],120)
 
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r9.service','MemoryMax=8G'],check=True,capture_output=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r9b.service','MemoryMax=8G'],check=True,capture_output=True)

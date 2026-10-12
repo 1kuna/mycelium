@@ -10,12 +10,12 @@ import sys
 import time
 from urllib.parse import quote
 
-root=Path('/home/kuna/myce-test-stage-ab-r9-20261011')
+root=Path('/home/kuna/myce-test-stage-ab-r9b-20261011')
 sys.path.insert(0,str(root/'source/scripts/pressure'))
 from kernel_reads import kernel_read, Vanished
 from stage_ab import cgroup_pids
 from pressure import DiagnosticReaders, drm_owners
-receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r9.service')
+receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r9b.service')
 try:
     from types import SimpleNamespace
     from disable_drill import cleanup as installed_cleanup, UNIT, DROP
@@ -27,7 +27,7 @@ try:
         assert DROP.exists() and str(root) in kernel_read(DROP, 'text'), 'test unit ownership changed'
         run=SimpleNamespace(installed=True,env=dict(os.environ),worker_cgroup=None)
         installed_cleanup(run)
-    receipt['installed_worker']='flag and unit absent' if not UNIT.exists() and not (Path('/home/kuna/.local/share/myce')/'DISABLED').exists() else 'HOLD'
+    receipt['installed_worker']='flag and unit absent' if not UNIT.exists() and not (root/'installed-host-state/DISABLED').exists() else 'HOLD'
 except Exception as error:
     receipt['installed_worker']='HOLD:'+type(error).__name__
 try:
@@ -93,7 +93,7 @@ if receipt['physical']=='released' and not receipt.get('cpu_cleanup_error') and 
     pause.rename(root/'queue-PAUSED.released')
 receipt['queue_pause']='released' if owned.exists() and not pause.exists() else 'HOLD; not changed'
 # At ExecStopPost the kernel has stopped the unit's child processes. Read-only verify it.
-remaining=cgroup_pids('0::/system.slice/myce-test-stage-ab-r9.service')
+remaining=cgroup_pids('0::/system.slice/myce-test-stage-ab-r9b.service')
 receipt['remaining_pids']=remaining
 ports=json.loads(kernel_read(root/'ports.json', 'text')) if (root/'ports.json').exists() else []
 for path in (root/'phases').glob('*/measure-*.pid.json'):
