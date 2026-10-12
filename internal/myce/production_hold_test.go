@@ -2,6 +2,7 @@ package myce
 
 import (
 	"errors"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -846,6 +847,9 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 	}
 	productionWorker := recoveryWorker(t)
 	productionWorker.Machine = a
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	productionWorker.Client = Client{URL: server.URL, Token: "test"}
 	productionWorker.checkpointPrepare = func(Job) (string, error) {
 		t.Error("production touched NAS preparation")
 		return "", errors.New("NAS unavailable")
@@ -855,6 +859,7 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 		t.Fatal(err)
 	}
 	defer productionStore.close()
+	productionStore.state.Session = run.Session
 	productionProcess, err := productionWorker.start(productionStore, *run)
 	if err != nil {
 		t.Fatal(err)
