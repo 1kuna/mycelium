@@ -6,7 +6,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory=%h/.local/share/myce
 Environment=GOMAXPROCS=1
-PrivateDevices=yes
+PrivateDevices=no
 NoNewPrivileges=yes
 Nice=10
 CPUQuota=25%

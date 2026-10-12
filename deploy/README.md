@@ -19,9 +19,13 @@ The worker template is batch-only. For model serving add `--model-config`,
 proxy address; see the [model guide](../docs/guide-model-calls.md). Installing a
 worker is not authorization to compete with an existing GPU owner.
 
-The Linux queue template uses `PrivateDevices=yes` to hide GPUs, one Go CPU,
-and initial limits of 25% CPU and 512 MiB RAM. Verify user-manager support and
-GPU hiding before accepting the B70 queue; stop on unsupported sandboxing.
+The Linux user queue uses `PrivateDevices=no`, `NoNewPrivileges=yes`, one Go CPU,
+and initial limits of 25% CPU and 512 MiB RAM. Device namespaces (even with
+`PrivateUsers=yes`) can fail with 218/CAPABILITIES in unprivileged user managers.
+The queue never opens GPU devices and refuses inherited GPU descriptors at
+startup; this is not an OS device-access sandbox. Verify it holds no GPU
+descriptors before accepting a queue. Worker units retain GPU access and
+`Delegate=memory`.
 B70 is queue-only at `192.168.0.153:7331` for the first Spark acceptance test;
 never enable a B70 worker as part of that test.
 CUDA dedicated/auto inventory requires one selected device (or one device in
@@ -39,3 +43,9 @@ recognized Level Zero/oneAPI/SYCL controls), and qualify detection under the use
 manager before starting. `myce install worker` automates the separate private
 `gpu.env` capture and transient-service validation, including per-card instances;
 see `docs/operations.md`. Do not copy the whole shell environment into a unit.
+
+Linux installer EnvironmentFile and ConditionPathExists paths are unquoted;
+paths containing whitespace, quotes or backslashes are rejected. ExecStart
+arguments remain quoted. `--private-devices=true` is rejected for Linux user
+queues; the default uses the startup GPU-descriptor check described above.
+Installer linger advice reads loginctl and requests enable-linger only when off.
