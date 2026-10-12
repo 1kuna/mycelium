@@ -11,24 +11,20 @@ import sys
 import time
 from urllib.parse import quote
 
-root=Path('/home/kuna/myce-test-stage-ab-r12-20261012')
+root=Path('/home/kuna/myce-test-stage-ab-r13-20261012')
 sys.path.insert(0,str(root/'source/scripts/pressure'))
 from kernel_reads import kernel_read, Vanished
 from stage_ab import cgroup_pids
 from pressure import DiagnosticReaders, drm_owners
-receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r12.service')
+receipt=dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(),unit='myce-test-stage-ab-r13.service')
 try:
     from types import SimpleNamespace
     from disable_drill import cleanup as installed_cleanup, UNIT, GPU_UNIT, DROP
-    if UNIT.exists() and 'Docker-disable' in kernel_read(UNIT):
-        from docker_disable import cleanup as docker_user_cleanup
-        run=SimpleNamespace(env=dict(os.environ),worker_cgroup=None,phase=root/'phases/Docker-disable')
-        docker_user_cleanup(run)
     if GPU_UNIT.exists() or DROP.exists():
         assert DROP.exists() and str(root) in kernel_read(DROP, 'text'), 'test unit ownership changed'
         run=SimpleNamespace(installed=True,env=dict(os.environ),worker_cgroup=None)
         installed_cleanup(run)
-    receipt['installed_worker']='flag and unit absent' if not UNIT.exists() and not GPU_UNIT.exists() and not (root/'installed-host-state/DISABLED').exists() and not (root/'installed-host-state/units/myce-worker@gpu1.service/DISABLED').exists() else 'HOLD'
+    receipt['installed_worker']='flag and unit absent' if not GPU_UNIT.exists() and not (root/'installed-host-state/DISABLED').exists() and not (root/'installed-host-state/units/myce-worker@versotest-r13-gpu1.service/DISABLED').exists() else 'HOLD'
 except Exception as error:
     receipt['installed_worker']='HOLD:'+type(error).__name__
 try:
@@ -40,7 +36,7 @@ try:
 except Exception as error:receipt['cpu_cleanup_error']=type(error).__name__
 try:
     cpu_units=json.loads(kernel_read(root/'cpu-units.json')) if (root/'cpu-units.json').exists() else []
-    allowed={'myce-test-r12-cpu-fast-matrix.service','myce-test-r12-cpu-large-local-checkpoint.service','myce-test-r12-nas-small-latency-probe.service'}
+    allowed={'myce-test-r13-cpu-fast-matrix.service','myce-test-r13-cpu-large-local-checkpoint.service','myce-test-r13-nas-small-latency-probe.service'}
     for unit in cpu_units:
         assert unit in allowed,'unexpected CPU unit'
         state=subprocess.run(['systemctl','show',unit,'-p','ActiveState','-p','LoadState','-p','ControlGroup'],capture_output=True,text=True)
@@ -75,37 +71,19 @@ try:
 except Exception as e:
     receipt.update(physical='HOLD-driver-counter',counter_error=type(e).__name__)
 try:
-    for p in (root/'phases').glob('*/late-unit'):
-        unit=kernel_read(p).strip();assert unit.startswith('myce-test-r12-late-')
-        prefix=['/usr/sbin/runuser','-u','kuna','--','env','XDG_RUNTIME_DIR=/run/user/1000','systemctl','--user']
-        subprocess.run([*prefix,'stop',unit],check=True,capture_output=True)
-        state=subprocess.run([*prefix,'show',unit,'-p','ActiveState','-p','ControlGroup'],capture_output=True,text=True)
-        d=dict(v.split('=',1) for v in state.stdout.splitlines() if '=' in v)
-        assert d.get('ActiveState') in ('inactive','failed') and not d.get('ControlGroup'),'late helper not fenced'
-    ids=subprocess.check_output(['/usr/bin/docker','ps','-aq','--filter','label=myce.attempt'],timeout=3).decode().split()
-    rows=json.loads(subprocess.check_output(['/usr/bin/docker','inspect',*ids],timeout=3)) if ids else []
-    identities={json.loads(kernel_read(p,'text'))['identity'] for p in (root/'phases').glob('*/worker/*.docker.json')}
-    assert all(r['Config']['Labels'].get('myce.attempt') in identities or (not r['State']['Running'] and not r['State']['Pid']) for r in rows),'foreign running Docker custody'
-    rows=[r for r in rows if r['Config']['Labels'].get('myce.attempt') in identities]
-    ids=[r['Id'] for r in rows]
-    for r in rows:
-        if r['State']['Running']:subprocess.run(['/usr/bin/docker','kill',r['Id']],check=True,capture_output=True,timeout=3)
-    subprocess.run(['systemctl','stop','myce-test-r12-docker.slice'],check=True,capture_output=True)
-    rows=json.loads(subprocess.check_output(['/usr/bin/docker','inspect',*ids],timeout=3)) if ids else []
-    for parent in ('myce-test-r12.slice','myce-test.slice'):
-        subprocess.run(['systemctl','stop',parent],check=True,capture_output=True)
-    assert not any(r['State']['Running'] or r['State']['Pid'] for r in rows),'Docker execution not gone'
+    ids=subprocess.check_output(['/usr/bin/docker','ps','-q','--filter','label=myce.attempt'],timeout=3).decode().split()
+    assert not ids,'running Docker custody exists'
     receipt['docker_running']=0
 except Exception as e:receipt['docker_error']=type(e).__name__
 # Retire only this attempt's runtime unit configuration after execution is gone.
 try:
-    allowed={'myce-test-r12-docker.slice','myce-test-stage-ab-r12.service',
-             'myce-test-r12-installed-validation.service','myce-test-r12-cpu-fast-matrix.service','myce-test-r12-cpu-large-local-checkpoint.service','myce-test-r12-nas-small-latency-probe.service'}
+    allowed={'myce-test-r13-docker.slice','myce-test-stage-ab-r13.service',
+             'myce-test-r13-installed-validation.service','myce-test-r13-cpu-fast-matrix.service','myce-test-r13-cpu-large-local-checkpoint.service','myce-test-r13-nas-small-latency-probe.service'}
     retired=root/'runtime-units.retired';retired.mkdir(exist_ok=True)
     for base in (Path('/run/systemd/system.control'),Path('/run/systemd/transient')):
         for name in allowed:
             for path in (base/name,base/(name+'.d')):
-                if path.exists() and name!='myce-test-stage-ab-r12.service':shutil.move(str(path),str(retired/(base.name+'-'+path.name)))
+                if path.exists() and name!='myce-test-stage-ab-r13.service':shutil.move(str(path),str(retired/(base.name+'-'+path.name)))
     subprocess.run(['systemctl','daemon-reload'],check=True,capture_output=True)
     receipt['runtime_units_retired']=True
 except Exception as error:receipt['runtime_unit_error']=type(error).__name__
@@ -120,7 +98,7 @@ owned=root/'owned-pause'
 headroom=int(next(r.split()[1] for r in kernel_read('/proc/meminfo').splitlines() if r.startswith('MemAvailable:')))/1024**2
 receipt['headroom_gib']=headroom
 # At ExecStopPost the kernel has stopped the unit's child processes. Read-only verify it.
-remaining=cgroup_pids('0::/system.slice/myce-test-stage-ab-r12.service')
+remaining=cgroup_pids('0::/system.slice/myce-test-stage-ab-r13.service')
 receipt['remaining_pids']=remaining
 ports=json.loads(kernel_read(root/'ports.json', 'text')) if (root/'ports.json').exists() else []
 for path in (root/'phases').glob('*/measure-*.pid.json'):

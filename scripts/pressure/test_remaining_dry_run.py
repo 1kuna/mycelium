@@ -28,7 +28,7 @@ CONFIRM='Host cleanup confirmed: empty systemd worker cgroup and Mycelium Docker
 class FakeRun(s.Run):
     def __init__(self, world):
         self.world=world;self.env={'MYCE_TOKEN':'fake-local-token','PATH':'/usr/bin:/bin'}
-        self.cgroup='0::/system.slice/myce-test-stage-ab-r12.service';self.worker_cgroup=None
+        self.cgroup='0::/system.slice/myce-test-stage-ab-r13.service';self.worker_cgroup=None
         self.safety=None;self.stop=threading.Event();self.foreign_paused=threading.Event()
         self.foreign=SimpleNamespace(interruptions=0);self.receipts=[];self.ports=[]
         self.interruptions_at_begin=0;self.results=[];self.procs={};self.a=SimpleNamespace();self.active=None
@@ -79,6 +79,12 @@ class World:
         self.restarting=False
     def api(self,url,method='GET',path='/api/status',data=None,**kwargs):
         phase=self.run.phase;name=phase.name
+        if method=='POST' and path.startswith('/api/hosts/'):
+            from urllib.error import HTTPError
+            if path.endswith('/disable'):self.machine['disabled']='stale-enable drill'
+            elif data['generation']==1:raise HTTPError(url,400,'request failed',{},None)
+            else:self.machine.pop('disabled',None)
+            return {}
         if method=='POST' and path=='/api/jobs':
             jid='job-'+str(len(self.jobs));job=dict(id=jid,state='running',attempt=1,losses=0,reason='')
             self.jobs[jid]=job
@@ -94,7 +100,7 @@ class World:
                 pressure.emit(self.run.events,'start',job=jid,attempt=1,card='docker-cpu',identity=ident)
                 pressure.emit(self.run.events,'commit',job=jid,attempt=1,unit=1)
                 if name=='Docker-late':
-                    (phase/'delayed-accepted').touch();(phase/'late-unit').write_text('myce-test-r12-late-fake.service')
+                    (phase/'delayed-accepted').touch();(phase/'late-unit').write_text('myce-test-r13-late-fake.service')
             else:
                 pressure.emit(self.run.events,'start',job=jid,attempt=1,pid=900,start_ticks=123)
                 pressure.emit(self.run.events,'commit',job=jid,attempt=1,unit=1)
@@ -126,10 +132,10 @@ class World:
         if parts=='/dev/dri':return [Path('/dev/dri')/name for name in self.device_nodes]
         if parts=='/proc/self/ns/mnt':return 'fake-private-namespace'
         if parts.startswith('/proc/'):
-            if parts=='/proc/self/cgroup':return '0::/system.slice/myce-test-r12-installed-invocation.service'
+            if parts=='/proc/self/cgroup':return '0::/system.slice/myce-test-r13-installed-invocation.service'
             if path.name=='cgroup':
                 row=next(r for r in self.rows if r['State']['Pid']==int(path.parent.name))
-                return '0::/myce.slice/myce-test.slice/myce-test-r12.slice/'+d.SLICE+'/docker-'+row['Id']+'.scope\n'
+                return '0::/myce.slice/myce-test.slice/myce-test-r13.slice/'+d.SLICE+'/docker-'+row['Id']+'.scope\n'
             if path.name=='stat':return b'900 (fake) '+b' '.join([b'0']*19+[b'123'])
             if path.name=='exe':return s.XPU
         if parts.startswith('/sys/fs/cgroup'):
@@ -155,8 +161,8 @@ class World:
                 assert any(r['Id']==args[-1] for r in self.rows);self.settle()
             elif args[1:3]!=['image','inspect']:raise AssertionError(args)
         elif args[0]=='systemd-run':
-            if '--unit=myce-test-r12-installed-invocation.service' in args:
-                code=(self.root/'installed-invocation.py').read_text().replace('/home/kuna/myce-test-stage-ab-r12-20261012',str(self.root))
+            if '--unit=myce-test-r13-installed-invocation.service' in args:
+                code=(self.root/'installed-invocation.py').read_text().replace('/home/kuna/myce-test-stage-ab-r13-20261012',str(self.root))
                 original_stat=os.stat
                 def node_stat(path,*args,**kwargs):
                     if str(path)=='/dev/null':return SimpleNamespace(st_mode=stat.S_IFCHR,st_rdev=0)
@@ -164,7 +170,7 @@ class World:
                     return original_stat(path,*args,**kwargs)
                 with patch.object(os,'getuid',return_value=0),patch.object(os,'stat',side_effect=node_stat), \
                      patch.object(ctypes,'CDLL',return_value=SimpleNamespace(unshare=lambda flags:0)), \
-                     patch.object(os,'execv') as execute,patch.object(sys,'argv',['fenced-installer',str(self.root/'installation/worker-gpu1/config.json'),'detect']), \
+                     patch.object(os,'execv') as execute,patch.object(sys,'argv',['fenced-installer',str(self.root/'installation/worker-versotest-r13-gpu1/config.json'),'detect']), \
                      patch('kernel_reads.kernel_read',self.kernel):
                     exec(compile(code,'fenced-installer','exec'),{'__name__':'__main__'})
                     exec_args=execute.call_args.args[1][4:]
@@ -173,7 +179,7 @@ class World:
             self.unit_active=True
             if any('CPU-fast-matrix' in a for a in args):
                 marker=self.run.phase/'child.exit';marker.write_text('0')
-                self.cgroups['cpu']='/system.slice/myce-test-r12-cpu-fast-matrix.service'
+                self.cgroups['cpu']='/system.slice/myce-test-r13-cpu-fast-matrix.service'
             else:self.unit_active=True
         elif args[0]=='systemctl':
             if 'show' in args and m.UNIT in args:
@@ -192,7 +198,7 @@ class World:
         out='';scoped=i.SCOPED if getattr(self.run,'installed',False) else self.run.phase/'host-state'
         if 'install' in args:
             i.GPU_UNIT.write_text(str(self.root/'installation'))
-            config=self.root/'installation/worker-gpu1/config.json';config.parent.mkdir(parents=True)
+            config=self.root/'installation/worker-versotest-r13-gpu1/config.json';config.parent.mkdir(parents=True)
             config.write_text('{}');self.unit_active=False
         elif 'uninstall' in args:
             i.GPU_UNIT.rename(self.root/'retired-unit');self.unit_active=False
@@ -206,7 +212,7 @@ class World:
             (scoped/'DISABLED').rename(scoped/'retired-DISABLED');self.disabled=False;self.unit_active=True
         elif 'show' in args:
             enabled=self.unit_active
-            out='ActiveState='+('active' if enabled else 'inactive')+'\nControlGroup='+(('/user.slice/myce-worker@gpu1.service' if getattr(self.run,'installed',False) else '/user.slice/myce-worker.service') if enabled else '')+'\nMainPID='+('901' if enabled else '0')+'\nConditionResult='+('yes' if enabled else 'no')+'\nKillMode=control-group\nSendSIGKILL=yes\n'
+            out='ActiveState='+('active' if enabled else 'inactive')+'\nControlGroup='+(('/user.slice/myce-worker@versotest-r13-gpu1.service' if getattr(self.run,'installed',False) else '/user.slice/myce-worker.service') if enabled else '')+'\nMainPID='+('901' if enabled else '0')+'\nConditionResult='+('yes' if enabled else 'no')+'\nKillMode=control-group\nSendSIGKILL=yes\n'
         elif 'start' in args:
             self.unit_active=not self.disabled and ((self.root/'installed-ready').exists() if getattr(self.run,'installed',False) else True)
             self.machine=dict(id='b70-pressure-gpu1',gone=False,host_id='installed-host')
@@ -226,10 +232,10 @@ class RemainingDryRun(unittest.TestCase):
                 if hasattr(mod,'NAS'):stack.enter_context(patch.object(mod,'NAS',nas))
                 if hasattr(mod,'api'):stack.enter_context(patch.object(mod,'api',world.api))
                 if hasattr(mod,'kernel_read'):stack.enter_context(patch.object(mod,'kernel_read',world.kernel))
-            units=Path(temp)/'units';units.mkdir();unit=units/'myce-worker.service';gpu=units/'myce-worker@gpu1.service'
+            units=Path(temp)/'units';units.mkdir();unit=units/'myce-worker.service';gpu=units/'myce-worker@versotest-r13-gpu1.service'
             for mod in (i,dd):stack.enter_context(patch.object(mod,'UNIT',unit))
-            stack.enter_context(patch.object(i,'GPU_UNIT',gpu));stack.enter_context(patch.object(i,'DROP',units/(gpu.name+'.d')/'myce-test-r12.conf'))
-            control=root/'installed-host-state';stack.enter_context(patch.object(i,'CONTROL',control));stack.enter_context(patch.object(i,'SCOPED',control/'units/myce-worker@gpu1.service'))
+            stack.enter_context(patch.object(i,'GPU_UNIT',gpu));stack.enter_context(patch.object(i,'DROP',units/(gpu.name+'.d')/'myce-test-r13.conf'))
+            control=root/'installed-host-state';stack.enter_context(patch.object(i,'CONTROL',control));stack.enter_context(patch.object(i,'SCOPED',control/'units/myce-worker@versotest-r13-gpu1.service'))
             stack.enter_context(patch('os.chown'));stack.enter_context(patch('time.sleep',world.sleep));stack.enter_context(patch('time.monotonic',lambda:world.clock))
             stack.enter_context(patch.object(subprocess,'run',world.command));stack.enter_context(patch.object(subprocess,'check_output',world.output))
             stack.enter_context(patch.object(c,'cgroup_pids',return_value=[]))
@@ -274,3 +280,47 @@ class DockerWrapperDryRun(unittest.TestCase):
             with patch.object(subprocess,'run',return_value=subprocess.CompletedProcess([],0)) as commands:
                 wrapper.main(['--delayed',row['Id']]);self.assertEqual(commands.call_args.args[0],['/usr/bin/docker','start',row['Id']])
             self.assertTrue((phase/'delayed-started').exists())
+
+class RetainedContainerRegression(unittest.TestCase):
+    def test_ps_preserves_inert_foreign_container_but_rejects_running_foreign(self):
+        with patch.dict(os.environ,{'MYCE_TEST_DOCKER_PHASE':str(s.ROOT/'phases/fake')}):
+            import docker_wrapper as wrapper
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);phase=root/'phases/current';phase.mkdir(parents=True)
+            (phase/'docker-config.json').write_text('{"mode":"normal"}')
+            owned=dict(Id='current',Config=dict(Labels={'myce.attempt':'current'}),State=dict(Running=False,Pid=0))
+            inert=dict(Id='prior',Config=dict(Labels={'myce.attempt':'prior'}),State=dict(Running=False,Pid=0))
+            def output(args,**kwargs):
+                return b'current\nprior\n' if args[1]=='ps' else json.dumps([owned,inert]).encode()
+            with patch.object(wrapper,'ROOT',root),patch.object(wrapper,'PHASE',phase),patch.object(wrapper,'known',return_value={'current'}),patch.object(subprocess,'check_output',side_effect=output),patch.object(os,'execv') as execute,patch('builtins.print') as printed:
+                wrapper.main(['--host','unix:///var/run/docker.sock','ps','-aq','--filter','label=myce.attempt'])
+                printed.assert_called_once_with('current');execute.assert_not_called()
+                with self.assertRaises(AssertionError):wrapper.inspect(['prior'])
+                inert['State'].update(Running=True,Pid=123)
+                with self.assertRaises(AssertionError):wrapper.main(['--host','unix:///var/run/docker.sock','ps','-aq','--filter','label=myce.attempt'])
+
+class InstalledShellProbeRegression(unittest.TestCase):
+    def test_join_uses_installer_shell_device_and_always_stops_before_install(self):
+        import installed_shell
+        with tempfile.TemporaryDirectory() as tmp,patch.object(installed_shell,'ROOT',Path(tmp)),patch.object(installed_shell.subprocess,'Popen') as start,patch.object(installed_shell,'api',return_value={'machines':[{'id':'installed-shell-probe','gpu':'xpu','device':'0'}]}),patch.object(installed_shell.os,'execv') as install:
+            child=start.return_value;child.poll.return_value=None
+            args=['/test/myce','install','worker','--queue','http://isolated','--nas','/checkpoints']
+            installed_shell.probe(args)
+            command=start.call_args.args[0]
+            self.assertNotIn('--gpu',command)
+            self.assertEqual(command[command.index('--device')+1],'0')
+            child.terminate.assert_called_once();child.wait.assert_called_once_with(timeout=15)
+            install.assert_called_once_with(args[0],args)
+            self.assertTrue(json.loads((Path(tmp)/'installed-shell-join.json').read_text())['authenticated'])
+
+class PartialInstalledCleanupRegression(unittest.TestCase):
+    def test_shell_probe_failure_retires_only_owned_dropin_without_real_unit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);drop=root/'unit.d/test.conf';drop.parent.mkdir();drop.write_text(str(root))
+            run=SimpleNamespace(installed=True,worker_cgroup=None,env={})
+            reply=subprocess.CompletedProcess([],1,'ActiveState=inactive\nMainPID=0\nControlGroup=\n','')
+            with patch.object(s,'ROOT',root),patch.object(i,'GPU_UNIT',root/'absent.service'),patch.object(i,'DROP',drop),patch.object(i,'user',return_value=reply),patch.object(subprocess,'run'):
+                i.cleanup(run)
+            self.assertFalse(run.installed);self.assertFalse(drop.parent.exists())
+            self.assertTrue((root/'installed-dropin.retired/test.conf').exists())
+            self.assertTrue(json.loads((root/'installed-cleanup.json').read_text())['partial_install'])

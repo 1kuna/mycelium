@@ -12,7 +12,7 @@ class DockerFenceTests(unittest.TestCase):
         path=Path(__file__).with_name('docker_wrapper.py')
         spec=importlib.util.spec_from_file_location('pressure_docker_wrapper_test',path)
         module=importlib.util.module_from_spec(spec)
-        with patch.dict(os.environ,MYCE_TEST_DOCKER_PHASE='/home/kuna/myce-test-stage-ab-r12-20261012/phases/test'):
+        with patch.dict(os.environ,MYCE_TEST_DOCKER_PHASE='/home/kuna/myce-test-stage-ab-r13-20261012/phases/test'):
             spec.loader.exec_module(module)
         module.ROOT=root;module.PHASE=root/'phases/test';module.PHASE.mkdir(parents=True)
         state=module.PHASE/'worker';state.mkdir();(state/'owned.docker.json').write_text(json.dumps(dict(identity='owned')))
@@ -35,7 +35,7 @@ class DockerFenceTests(unittest.TestCase):
                 args=execution.call_args.args[1]
                 self.assertEqual(args[args.index('--memory')+1],'134217728')
                 self.assertEqual(args.count('--memory'),1)
-                self.assertIn('--cgroup-parent=myce-test-r12-docker.slice',args)
+                self.assertIn('--cgroup-parent=myce-test-r13-docker.slice',args)
                 self.assertIn('--network=none',args)
                 with self.assertRaises(AssertionError):
                     wrapper.main(['--host','unix:///var/run/docker.sock','create','--label','myce.attempt=owned','--device','/dev/dri/renderD128','image'])
