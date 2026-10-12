@@ -110,7 +110,7 @@ type StartPermit struct {
 	RemainingSeconds float64 `json:"remaining_seconds"`
 }
 
-// A permit authorizes dispatch, not successful startup. Expiry/start receipts are serialized.
+// Legacy preparation probe; only Started commits the execution hand-off.
 func (q *Queue) PermitStart(r Result) (StartPermit, error) {
 	var permit StartPermit
 	var rejected error
@@ -121,14 +121,7 @@ func (q *Queue) PermitStart(r Result) (StartPermit, error) {
 			rejected = e
 			return nil
 		}
-		m := q.s.Machines[j.Machine]
-		if m != nil && j.Spec.Run.Docker && (m.DockerCleanup == "creating" || m.DockerCleanup == "create pending") {
-			// This attempt has completed create before requesting its permit; sibling custody still blocks.
-			previous := m.DockerCleanup
-			m.DockerCleanup = ""
-			defer func() { m.DockerCleanup = previous }()
-		}
-		if j.State != "running" || m == nil || !q.placementAllowed(j, m) {
+		if j.State != "running" || !q.startPlacementAllowed(j) {
 			rejected = ErrStale
 			return nil
 		}
@@ -176,4 +169,18 @@ func (q *Queue) allStartHostsDisabled(j *Job) bool {
 		}
 	}
 	return found
+}
+
+func (q *Queue) startPlacementAllowed(j *Job) bool {
+	m := q.s.Machines[j.Machine]
+	if m == nil {
+		return false
+	}
+	if j.Spec.Run.Docker && (m.DockerCleanup == "creating" || m.DockerCleanup == "create pending") {
+		// Own completed create is safe; sibling custody must still block the hand-off.
+		previous := m.DockerCleanup
+		m.DockerCleanup = ""
+		defer func() { m.DockerCleanup = previous }()
+	}
+	return q.placementAllowed(j, m)
 }

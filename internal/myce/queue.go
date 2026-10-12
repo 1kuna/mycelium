@@ -388,6 +388,7 @@ func (q *Queue) maintain() {
 							j.Losses++
 							q.chargeLoss(j)
 						}
+						q.renewRecoveryStartWindow(j)
 						q.retry(j, fmt.Sprintf("machine quiet for %s", q.machineLossTimeout(m.ID)))
 					}
 				}
@@ -517,6 +518,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 						j.Losses++
 						q.chargeLoss(j)
 					}
+					q.renewRecoveryStartWindow(j)
 					q.retry(j, "worker restarted after cleaning old processes")
 				}
 			}
@@ -589,7 +591,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				reply.Kill = true
 				return nil
 			}
-			if c.Started && j.StartedAt == nil && j.State == "running" {
+			if c.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" {
 				q.markStarted(j)
 			}
 			j.Progress = c.Running.Progress
@@ -784,6 +786,7 @@ func (q *Queue) Complete(r Result) error {
 		} else if r.Interrupted {
 			j.Losses++
 			q.chargeLoss(j)
+			q.renewRecoveryStartWindow(j)
 			q.retry(j, "worker restarted after cleaning old processes")
 		} else if r.Success {
 			q.recordModelUse(j.Spec.Needs.Model)
@@ -1074,6 +1077,9 @@ func (q *Queue) markStarted(j *Job) {
 	if j.StartedAt == nil {
 		now := q.clock.Now()
 		j.StartedAt = &now
+		if j.Spec.StartBy != nil && j.StartWindow == 0 {
+			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
+		}
 		j.Reason = ""
 		j.StartLatencySeconds = now.Sub(j.Queued).Seconds()
 		if j.Spec.Priority == "production" {
@@ -1090,7 +1096,11 @@ func (q *Queue) Started(r Result) error {
 			rejected = e
 			return nil
 		}
-		if j.State != "running" {
+		if j.State != "running" || j.Reason == "cancel requested" || (j.Spec.StartBy != nil && j.StartedAt != nil) {
+			rejected = ErrStale
+			return nil
+		}
+		if j.Spec.StartBy != nil && !q.startPlacementAllowed(j) {
 			rejected = ErrStale
 			return nil
 		}
@@ -1101,4 +1111,15 @@ func (q *Queue) Started(r Result) error {
 		return err
 	}
 	return rejected
+}
+
+func (q *Queue) renewRecoveryStartWindow(j *Job) {
+	if j.Spec.Priority == "production" && j.StartedAt != nil && j.Spec.StartBy != nil {
+		// Recovery is bounded from loss detection, using the original first-start window.
+		if j.StartWindow == 0 {
+			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
+		}
+		deadline := q.clock.Now().Add(j.StartWindow)
+		j.Spec.StartBy = &deadline
+	}
 }

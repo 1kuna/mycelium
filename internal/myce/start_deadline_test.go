@@ -210,8 +210,19 @@ func TestProductionStartDeadlineWorkerPreparationCannotLaunchLate(t *testing.T) 
 	defer store.close()
 	store.state.Session = assigned.Session
 	p, err := w.start(store, *assigned)
-	if err == nil || p != nil {
-		t.Fatalf("late launch: %v %v", p, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil {
+		t.Fatal("missing failed attempt")
+	}
+	select {
+	case f := <-p.done:
+		if f.result.Success || !strings.Contains(f.result.Error, "hand-off") {
+			t.Fatalf("late launch: %+v", f)
+		}
+	case <-time.After(testWaitTimeout):
+		t.Fatal("refused attempt stalled")
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("command ran: %v", err)
@@ -258,9 +269,9 @@ func TestProductionStartDeadlineRetryAndGiveUp(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	failed := job(t, q, j.ID)
-	if failed.State != "failed" || !failed.Spec.StartBy.Equal(*j.Spec.StartBy) {
-		t.Fatalf("retry renewed deadline: %+v", failed)
+	requeued := job(t, q, j.ID)
+	if requeued.State != "queued" || !requeued.Spec.StartBy.Equal(c.Now().Add(ProductionStartTimeout)) {
+		t.Fatalf("started attempt did not get a recovery window: %+v", requeued)
 	}
 	s := spec("production")
 	giveUp := c.Now().Add(time.Second)
@@ -505,6 +516,7 @@ func TestProductionStartDeadlineExecErrorPreservesUnknownRelease(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	s := spec("production")
+	s.Resumable = false
 	s.Run.Command = []string{command}
 	submit(t, q, s)
 	assigned := check(t, q, machine("b70", "xpu"), nil).Job

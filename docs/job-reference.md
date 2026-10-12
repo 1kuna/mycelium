@@ -26,7 +26,7 @@ when shell expansion is needed.
 | `needs.model` | Absent | Batch affinity hint; does not load a model |
 | `environment` | Absent | Catalog name, `{name: torch-cuda}`, or `{lock_file: /shared/project/requirements.txt, python: "3.12", platforms: [cuda]}`; never both name and lock file |
 | `allowed_machines` | Empty: any eligible worker | Machine-name allow-list |
-| `start_by` | Production: submission + 150 seconds; absent for other priorities | Absolute RFC3339 startup deadline, production only; preserved across retries and queue restarts |
+| `start_by` | Production: submission + 150 seconds; absent for other priorities | Absolute RFC3339 first-start deadline, production batch only; loss recovery gets a fresh original-length window |
 | `give_up_at` | Absent: wait indefinitely | RFC3339 expiry while queued; not a running-job timeout |
 | `expected_minutes` | `0` | Rough planning hint, never enforced |
 | `resumable` | `false` | Set true only for a command implementing the checkpoint/stop contract |
@@ -280,14 +280,21 @@ If omitted, the queue saves submission time plus **150 seconds**: the ordinary
 10-second experiment grace, two-minute Docker cleanup escalation, and a small
 reporting margin. This is a bounded availability policy, not a native startup
 latency guarantee. A shorter caller-owned deadline can trigger fallback sooner.
-Retries, re-delivery and restarts never renew it. Older unfinished production
-records without the field receive the same default from their original submission.
+Unstarted retries, re-delivery and queue restarts never renew it. Older unfinished
+production records without the field receive the same default from their original submission.
 
 `give_up_at` keeps its queued-only meaning; the earlier applicable expiry wins.
 `deadline` remains an ordering hint. A command that has started may finish after
-`start_by`; a new attempt must still start before the original deadline. Model
-HTTP calls retain their separate `max_wait` contract, and models loaded inside a
-batch command are not covered by its command-start acknowledgement.
+`start_by`. After a started attempt loses its machine (including worker restart),
+the recovery attempt gets a fresh window from the queue's loss-detection time:
+loss time plus the original `start_by` minus submission time. That original window
+length is durable and does not grow across repeated losses. Brief outages can
+resume; a recovery attempt that does not start within its window fails with
+`production start deadline exceeded: <blocker>` so the caller can run fallback.
+Planned stops are not production loss recovery and do not renew this budget.
+`start_by` covers production **batch jobs only**. Model HTTP calls rely on their
+own request timeouts and the separate `max_wait` contract; they do not honor
+`start_by`. Models loaded inside a batch command are outside its start hand-off.
 
 Status, the status page and the job record show the blocker and seconds left.
 Queued production fails immediately when every known eligible host is disabled
@@ -298,12 +305,20 @@ can all exhaust the budget. At `now >= start_by`, an unstarted job fails with
 without preempting anything. `myce wait` exits **1** and prints the reason; Python
 `Client.wait()` returns the failed record with its reason.
 
-Assignment alone is not startup. Plain commands report successful exec through a
-private receipt pipe; managed Docker reports a confirmed start operation. Workers
-reauthorize the exact attempt immediately
-before command dispatch; preparation completing after expiry cannot open the
-command gate. Late start/result messages cannot revive failure. Assigned expiry
-sends an attempt-specific kill and retains release custody and memory accounting;
+Assignment alone is not startup. Before executing a production batch command,
+the worker asks the queue to durably record its exact attempt as started. The
+queue serializes that hand-off with expiry in one SQLite transaction: at the
+deadline expiry wins; a previously accepted start is not failed by `start_by`.
+This records an accepted hand-off, not proof of successful physical exec or
+model readiness. A private exec-helper pipe holds plain-command execution until
+the positive reply; managed Docker uses the same confirmation before its start
+operation. An unreachable queue, failed durable write, duplicate start, stale
+attempt or cancellation refuses execution. The worker stores launch intent before
+asking, so restart reconciles/cleans that attempt and replays buffered results
+instead of executing it again. A lost positive reply conservatively leaves the
+attempt started in the queue but unexecuted; reconciliation handles recovery.
+Deploy the matching queue and workers together. Late result messages cannot
+revive failure. Assigned expiry sends an attempt-specific kill and retains release custody and memory accounting;
 status says `release pending` until the matching cleanup acknowledgement.
 Experiment stops and Docker cleanup continue independently after production fails.
 Failure does **not** authorize a fallback to reuse uncertain resources.
