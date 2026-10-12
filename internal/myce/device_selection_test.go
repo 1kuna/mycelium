@@ -177,3 +177,61 @@ func TestDeviceSelectionDockerEnvironment(t *testing.T) {
 		}
 	}
 }
+
+func TestDeviceSelectionDockerSidecarEnvironment(t *testing.T) {
+	for _, device := range []string{"0", "1", "0,1"} {
+		t.Run(device, func(t *testing.T) {
+			w, s, c, root := dockerFixture(t)
+			w.Machine.GPU, w.Machine.Device = "xpu", device
+			j := dockerGroupJob(t)
+			mapping := []string{"docker", "run", "--device", "/dev/dri/renderD128", "--device", "/dev/dri/renderD129"}
+			j.Spec.Run.Command = append(mapping, j.Spec.Run.Command[2:]...)
+			for i := range j.Spec.Run.DockerSidecars {
+				j.Spec.Run.DockerSidecars[i].Command = append([]string(nil), j.Spec.Run.Command...)
+			}
+			p, err := startDockerFixture(w, s, j)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(p.docker.close)
+			await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
+			p.stop(c.Now(), 0, true)
+			<-p.done
+			data, err := os.ReadFile(filepath.Join(root, "calls"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen := map[string]bool{}
+			for _, line := range strings.Split(string(data), "\n") {
+				if !strings.HasPrefix(line, "create ") {
+					continue
+				}
+				fields := strings.Fields(line)
+				for _, name := range []string{"main", "sortformer", "naming"} {
+					if !strings.Contains(line, "--network-alias "+name+" ") {
+						continue
+					}
+					if seen[name] {
+						t.Fatalf("duplicate create for %s", name)
+					}
+					seen[name] = true
+					wantEnv := selectedDeviceEnv("xpu", device)
+					wantEnv["MYCE_DEVICES"] = device
+					for key, want := range wantEnv {
+						if !slices.Contains(fields, key+"="+want) {
+							t.Fatalf("%s missing %s=%s", name, key, want)
+						}
+					}
+					for _, path := range []string{"/dev/dri/renderD128", "/dev/dri/renderD129"} {
+						if !strings.Contains(line, "--device "+path+" ") {
+							t.Fatalf("%s missing device mapping %s", name, path)
+						}
+					}
+				}
+			}
+			if len(seen) != 3 {
+				t.Fatalf("validated %d containers, want 3", len(seen))
+			}
+		})
+	}
+}
