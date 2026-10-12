@@ -94,6 +94,9 @@ func TestDockerCLIHelper(t *testing.T) {
 			os.Exit(1)
 		}
 		for i, arg := range args {
+			if (arg == "--memory" || arg == "--memory-swap") && i+1 < len(args) {
+				_ = os.WriteFile(filepath.Join(root, arg), []byte(args[i+1]), 0600)
+			}
 			if arg == "--label" && i+1 < len(args) && strings.HasPrefix(args[i+1], "myce.attempt=") {
 				_ = os.WriteFile(filepath.Join(root, "label"), []byte(strings.TrimPrefix(args[i+1], "myce.attempt=")), 0600)
 			}
@@ -115,7 +118,9 @@ func TestDockerCLIHelper(t *testing.T) {
 			_ = c.Start()
 			time.Sleep(time.Minute)
 		}
-		_ = os.WriteFile(filepath.Join(root, "running"), []byte("yes"), 0600)
+		if string(mode) != "docker-oom" {
+			_ = os.WriteFile(filepath.Join(root, "running"), []byte("yes"), 0600)
+		}
 		fmt.Println("id1")
 	case "ps":
 		if !slices.Contains(args, "label=myce.attempt") && !strings.Contains(strings.Join(args, " "), "label=myce.attempt=") {
@@ -160,7 +165,14 @@ func TestDockerCLIHelper(t *testing.T) {
 			if running {
 				status = "running"
 			}
-			objects = append(objects, map[string]any{"Id": id, "Config": map[string]any{"Labels": map[string]string{"myce.attempt": objectLabel}}, "State": map[string]any{"Running": running, "Status": status, "ExitCode": 0}})
+			limit, _ := os.ReadFile(filepath.Join(root, "--memory"))
+			swap, _ := os.ReadFile(filepath.Join(root, "--memory-swap"))
+			memory, _ := strconv.ParseInt(string(limit), 10, 64)
+			memorySwap, _ := strconv.ParseInt(string(swap), 10, 64)
+			if string(mode) == "missing-memory-limit" {
+				memory = 0
+			}
+			objects = append(objects, map[string]any{"HostConfig": map[string]any{"Memory": memory, "MemorySwap": memorySwap}, "Id": id, "Config": map[string]any{"Labels": map[string]string{"myce.attempt": objectLabel}}, "State": map[string]any{"Running": running, "Status": status, "ExitCode": 0, "OOMKilled": string(mode) == "docker-oom"}})
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(objects)
 		if string(mode) == "late" {

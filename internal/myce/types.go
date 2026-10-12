@@ -213,6 +213,10 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	hostBudgetGB            float64             // Effective shared-host budget, rebuilt from worker reports.
+	MemoryEnforcement       string              `json:"memory_enforcement,omitempty"`
+	HostMemoryBudgetGB      float64             `json:"host_memory_budget_gb,omitempty"`
+	MemoryCeilingSlackGB    float64             `json:"memory_ceiling_slack_gb,omitempty"`
 	DockerCleanup           string              `json:"docker_cleanup,omitempty"`
 	Disabled                string              `json:"disabled,omitempty"`
 	HostID                  string              `json:"host_id,omitempty"`

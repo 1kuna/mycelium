@@ -241,3 +241,15 @@ the physical host's exclusion across loss/restart. Plain commands remain the
 default; no container scheduler, peer network or extra service is introduced.
 The exact supported subset and limits are in [job reference](job-reference.md#managed-docker-batch-commands)
 and [operations](operations.md#docker-cleanup-custody).
+
+## Per-attempt RAM ceilings (authorized Verso gap-2 extension)
+
+Declared batch/model host RAM is enforced on Linux cgroup v2 workers with
+systemd memory delegation. Each execution remains inside its worker service's
+cgroup, so service-wide disable still contains every native descendant.
+Workers report unsupported enforcement plainly and keep laptop admission-only
+execution. An optional physical-host budget caps the sum of declared ceilings,
+including configurable slack, and retains unconfirmed allocations after loss.
+Managed Docker batches install and inspect daemon-side memory limits. OOM is a
+normal failure rather than infrastructure loss. The configuration, unsupported
+cases and qualification limits are in [operations](operations.md#host-ram-admission-and-ceilings).

@@ -21,7 +21,7 @@ when shell expansion is needed.
 | `run.workdir` | Absent: worker's working directory | Existing working directory; use an absolute shared or consistently installed path |
 | `run.env` | Empty map | String environment overrides, merged with worker environment |
 | `needs.memory_gb` | Required, finite and positive | GPU memory reservation in GB, including model/runtime overhead |
-| `needs.host_memory_gb` | Absent / `0`: GPU-only admission | Finite nonnegative additional host RAM in GiB, including CPU-side model/runtime/activation peaks; shared across workers on one host |
+| `needs.host_memory_gb` | Absent / `0`: GPU-only admission on uncapped hosts | Additional host RAM in GiB, including runtime/activation peaks; capped hosts require a positive declaration; qualified Linux services enforce it plus worker slack |
 | `needs.platform` | Required | `[cuda]` shorthand, `{required: [cuda, xpu]}`, `{preferred: [metal]}`, or `any` / `{any: true}`; exactly one mode |
 | `needs.model` | Absent | Batch affinity hint; does not load a model |
 | `environment` | Absent | Catalog name, `{name: torch-cuda}`, or `{lock_file: /shared/project/requirements.txt, python: "3.12", platforms: [cuda]}`; never both name and lock file |
@@ -93,6 +93,9 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --experiment-loss-timeout` | `60s` | Experiment loss detection |
 | `join --name` | Hostname | Unique stable worker name |
 | `join --host-id` | OS hostname | Physical host identity; every per-card worker on the same machine must use the same stable value |
+| `join/install worker --host-memory-budget-gb` | `0` | Aggregate per-host admitted RAM ceilings; positive budgets reject zero host declarations and retain unconfirmed release charges |
+| `join/install worker --memory-ceiling-slack-gb` | `0.125` | Extra GiB per declared ceiling; included in host admission |
+| `join/install worker --memory-swap-max-bytes` | `0` | Swap allowance per attempt; managed Docker uses RAM + swap as `--memory-swap` |
 | `join --reserve-host-memory-gb` | `4` | RAM withheld from observed available memory; configure OS/other-workload headroom; unified uses the larger host/GPU reserve once |
 | `join --device` | Sole detected CUDA card / platform default | One physical card per worker; CUDA resolves to a stable UUID for inventory/execution; select explicitly on multi-GPU hosts |
 | `join --gpu` | Auto-detected | Override with `cuda`, `xpu`, `metal`, or `fake`; same detection as `install worker` |
@@ -496,14 +499,18 @@ checkpoint contract; `--init` is not a checkpoint implementation.
 
 The container receives `MYCE_ATTEMPT_ID` (opaque, unique across attempts),
 `MYCE_DOCKER_LABEL` (`myce.attempt=<ID>`), `MYCE_JOB_ID`, `MYCE_ATTEMPT`,
-placement environment and selected-device environment. `MYCE_CHECKPOINT_DIR`
+placement environment, selected-device environment, and `MYCE_MEMORY_LIMIT_BYTES`
+when host RAM is declared. The adapter installs and inspects this limit before
+start; payload arguments cannot override it. `MYCE_CHECKPOINT_DIR`
 is `/myce/checkpoint`, bind-mounted from the worker's prepared attempt directory.
 `run.env` ordinary entries are also explicit container env; `MYCE_TOKEN` is
 removed from the Docker client and never forwarded. MYCE identity overrides
 in Docker `--env` are rejected. `CUDA_VISIBLE_DEVICES`, `ONEAPI_DEVICE_SELECTOR`
 and `ZE_AFFINITY_MASK` are worker-owned: neither `run.env` nor Docker `--env`
 may override them. Configure the worker device instead. GPU device mappings and image/library behavior
-still need native qualification; this adapter is not a device or RAM sandbox.
+still need native qualification. Declared host RAM ceilings are enforced through
+worker-owned Docker memory flags and verified inspection; device isolation still
+requires qualification.
 
 The worker pins the daemon endpoint from its own `DOCKER_HOST` (default
 `unix:///var/run/docker.sock`) in its custody record; `DOCKER_CONTEXT` is
@@ -513,7 +520,9 @@ collected into the ordinary job log after the container settles.
 
 For an existing **unmanaged** wrapper (`run.docker: false`), a cooperative
 container launch would be `docker run --label "$MYCE_DOCKER_LABEL" ...`, but
-that wrapper must supply a unique label itself. Mycelium cannot prove custody
+that wrapper must supply a unique label itself **and** use
+`--memory "$MYCE_MEMORY_LIMIT_BYTES" --memory-swap "$MYCE_MEMORY_LIMIT_BYTES"`
+for the default no-swap contract. Mycelium cannot prove custody
 for hidden shell/nested Docker calls or infer their labels from a process tree.
 Use managed direct argv for production handover. A managed job cannot forget
 its label; inspection mismatches remain visibly unconfirmed and no unrelated

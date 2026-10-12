@@ -55,6 +55,9 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	gpu := f.String("gpu", "", "explicit GPU platform override")
 	mode := f.String("memory-mode", "auto", "explicit memory mode with --gpu")
 	memory := f.Float64("memory-gb", 0, "explicit GPU budget")
+	hostBudget := f.Float64("host-memory-budget-gb", 0, "aggregate declared RAM ceiling budget per physical host")
+	memorySlack := f.Float64("memory-ceiling-slack-gb", .125, "extra GiB per declared RAM ceiling")
+	memorySwap := f.Int64("memory-swap-max-bytes", 0, "swap allowance per ceiling in bytes")
 	reserve := f.Float64("reserve-memory-gb", 0, "explicit memory reserve")
 	models := f.String("model-config", "", "NAS model catalog")
 	environments := f.String("environment-config", "", "NAS environment catalog")
@@ -144,6 +147,10 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 			return e
 		}
 	}
+	if _, err := myce.MemoryCeilingConfig(*hostBudget, *memorySlack, *memorySwap); err != nil {
+		return err
+	}
+	c.HostMemoryBudgetGB, c.MemoryCeilingSlackGB, c.MemorySwapMaxBytes = *hostBudget, *memorySlack, *memorySwap
 	c.AllowDeviceless = *allowDeviceless
 	c.Device = *device
 	c.HostStateDir = *hostDir
@@ -190,6 +197,9 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	}
 	if e = myce.Install(ctx, c, executable, env("MYCE_TOKEN", ""), probe.Command); e != nil {
 		return e
+	}
+	if role == "worker" {
+		fmt.Println(myce.WorkerMemoryDelegationStatus(ctx, c, probe.Command))
 	}
 	fmt.Println("Installed. Run myce doctor to verify prerequisites.")
 	return nil

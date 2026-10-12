@@ -13,17 +13,19 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 	job.Spec.Project = "atlas"
 	job.Spec.Priority = "experiment"
 	machine := &Machine{
-		ID:               "spark",
-		DockerCleanup:    "cleanup unconfirmed: start",
-		GPU:              "cuda",
-		Device:           "0",
-		MemoryUsedGB:     21.5,
-		FreeMemoryGB:     38.5,
-		ReservedMemoryGB: 4,
-		CachedModels:     []string{"qwen"},
-		CacheError:       "cache read failed",
-		Environments:     []string{"torch-cuda"},
-		CopyReports:      []CopyReport{{Model: "embed", State: "copying", Bytes: 50, Total: 100}},
+		ID:                 "spark",
+		MemoryEnforcement:  "memory ceiling not enforced on this host (requires Linux cgroup v2)",
+		HostMemoryBudgetGB: 5,
+		DockerCleanup:      "cleanup unconfirmed: start",
+		GPU:                "cuda",
+		Device:             "0",
+		MemoryUsedGB:       21.5,
+		FreeMemoryGB:       38.5,
+		ReservedMemoryGB:   4,
+		CachedModels:       []string{"qwen"},
+		CacheError:         "cache read failed",
+		Environments:       []string{"torch-cuda"},
+		CopyReports:        []CopyReport{{Model: "embed", State: "copying", Bytes: 50, Total: 100}},
 	}
 	snapshot := Snapshot{
 		HostHolds: []string{"b70: Docker cleanup unconfirmed; operator action required (myce resolve-docker)"},
@@ -50,6 +52,7 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 	html := rendered.String()
 	for _, want := range []string{
 		"Mycelium", "spark", "cuda", "21.5", "38.5", "qwen", "torch-cuda",
+		"memory ceiling not enforced on this host (requires Linux cgroup v2)", "Host ceiling budget", "5 GiB",
 		"2 calls", "load warning", "cache read failed", "Docker cleanup unconfirmed: start",
 		"index backlog", "atlas is ahead of its fair share; verso goes first", "operator action required (myce resolve-docker)",
 		`<svg class="chart"`, `data-project="atlas"`, `setInterval(refresh, 5000)`,

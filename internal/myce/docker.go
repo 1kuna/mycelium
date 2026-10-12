@@ -91,6 +91,10 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
+	MemoryLimitBytes  int64      `json:"memory_limit_bytes,omitempty"`
+	MemorySwapBytes   int64      `json:"memory_swap_bytes,omitempty"`
+	MemoryFailure     string     `json:"memory_failure,omitempty"`
+	OOMKilled         bool       `json:"oom_killed,omitempty"`
 	Identity          string     `json:"identity"`
 	Endpoint          string     `json:"endpoint"`
 	Container         string     `json:"container,omitempty"`
@@ -227,12 +231,17 @@ func (d *dockerAttempt) operation(kind string, args ...string) ([]byte, error) {
 }
 
 type dockerInspection struct {
+	HostConfig struct {
+		Memory     int64
+		MemorySwap int64
+	} `json:"HostConfig"`
 	ID     string                             `json:"Id"`
 	Config struct{ Labels map[string]string } `json:"Config"`
 	State  struct {
-		Running  *bool
-		Status   string
-		ExitCode int
+		Running   *bool
+		Status    string
+		ExitCode  int
+		OOMKilled bool
 	} `json:"State"`
 }
 
@@ -320,6 +329,22 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 	d.mu.Unlock()
 	running := false
 	for _, c := range containers {
+		if d.state.MemoryLimitBytes > 0 && (c.HostConfig.Memory != d.state.MemoryLimitBytes || c.HostConfig.MemorySwap != d.state.MemorySwapBytes) {
+			d.mu.Lock()
+			d.state.MemoryFailure = "Docker memory ceiling not enforced"
+			err = d.saveLocked()
+			d.mu.Unlock()
+			if err != nil {
+				return false, err
+			}
+			if *c.State.Running {
+				if _, err = d.call("kill", "--signal=KILL", c.ID); err != nil {
+					return false, err
+				}
+				running = true
+				continue
+			}
+		}
 		if *c.State.Running {
 			running = true
 			if stopped || pending {
@@ -341,6 +366,9 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 	// A final successful inventory after a definite start response is the release proof.
 	if len(containers) > 0 {
 		d.state.ExitCode = containers[0].State.ExitCode
+		for _, c := range containers {
+			d.state.OOMKilled = d.state.OOMKilled || c.State.OOMKilled
+		}
 	}
 	d.state.Released = true
 	d.state.Error = ""
@@ -378,6 +406,10 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	if err != nil {
 		return nil, err
 	}
+	ceilingBytes, err := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	if err != nil {
+		return nil, err
+	}
 	identity := ID()
 	endpoint := os.Getenv("DOCKER_HOST")
 	if endpoint == "" {
@@ -386,7 +418,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	if os.Getenv("DOCKER_CONTEXT") != "" {
 		return nil, errors.New("managed Docker requires DOCKER_HOST, not DOCKER_CONTEXT")
 	}
-	d := &dockerAttempt{closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, hostDir: w.HostStateDir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint}}
+	d := &dockerAttempt{closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, hostDir: w.HostStateDir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: ceilingBytes + w.MemorySwapMaxBytes}}
 	if d.timeout <= 0 {
 		d.timeout = 2 * time.Second
 	}
@@ -425,6 +457,9 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	}
 	label := "myce.attempt=" + identity
 	create := []string{"create", "--pull=never", "--init", "--name", "myce-" + identity, "--label", label, "--label", "myce.worker=" + w.Machine.ID, "--cidfile", filepath.Join(s.dir, identity+".cid"), "--env", "MYCE_ATTEMPT_ID=" + identity, "--env", "MYCE_DOCKER_LABEL=" + label, "--env", "MYCE_JOB_ID=" + j.ID, "--env", "MYCE_ATTEMPT=" + strconv.Itoa(j.Attempt), "--env", "MYCE_CHECKPOINT_DIR=/myce/checkpoint", "--volume", checkpoint + ":/myce/checkpoint"}
+	if ceilingBytes > 0 {
+		create = append(create, "--memory", strconv.FormatInt(ceilingBytes, 10), "--memory-swap", strconv.FormatInt(ceilingBytes+w.MemorySwapMaxBytes, 10), "--env", "MYCE_MEMORY_LIMIT_BYTES="+strconv.FormatInt(ceilingBytes, 10))
+	}
 	for k, v := range placementEnvironment(w.Machine) {
 		create = append(create, "--env", k+"="+v)
 	}
@@ -463,6 +498,15 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		d.mu.Unlock()
 		if e != nil {
 			return e
+		}
+		if ceilingBytes > 0 {
+			containers, inspectErr := d.containers()
+			if inspectErr != nil {
+				return fmt.Errorf("Docker memory ceiling not enforced: %w", inspectErr)
+			}
+			if len(containers) != 1 || containers[0].ID != id || containers[0].HostConfig.Memory != ceilingBytes || containers[0].HostConfig.MemorySwap != ceilingBytes+w.MemorySwapMaxBytes {
+				return errors.New("Docker memory ceiling not enforced")
+			}
 		}
 		if e = w.authorizeStart(j, j.Session); e != nil {
 			d.stop(w.Clock.Now(), 0, true)
@@ -506,11 +550,22 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	d.mu.Lock()
 	result.Interrupted = d.state.Stopped
 	result.Forced = d.state.Forced
-	result.Success = e == nil && d.state.ExitCode == 0
+	result.Success = e == nil && d.state.ExitCode == 0 && d.state.MemoryFailure == "" && !d.state.OOMKilled
+	if d.state.MemoryFailure != "" {
+		result.Error = d.state.MemoryFailure
+	}
+	if d.state.OOMKilled {
+		result.Error = fmt.Sprintf("exceeded its %g GiB memory ceiling", float64(d.state.MemoryLimitBytes)/(1<<30))
+		result.Interrupted = false
+		result.Forced = false
+	}
 	container := d.state.Container
 	d.mu.Unlock()
 	if e != nil {
 		result.Error = "Docker launch failed"
+		if strings.HasPrefix(e.Error(), "Docker memory ceiling not enforced") {
+			result.Error = "Docker memory ceiling not enforced"
+		}
 	}
 	if container != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
