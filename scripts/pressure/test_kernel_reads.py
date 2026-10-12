@@ -81,7 +81,7 @@ class KernelReadTests(unittest.TestCase):
     def test_cleanup_reads_only_exact_cgroup_and_descendants(self):
         import stage_ab
         import os
-        root=Path('/sys/fs/cgroup/system.slice/myce-test-stage-ab-r12.service')
+        root=Path('/sys/fs/cgroup/system.slice/myce-test-stage-ab-r13.service')
         def read(path,op='text'):
             if path==root/'cgroup.procs':return str(os.getpid())+' 17'
             if path==root and op=='directories':return [root/'child']
@@ -89,7 +89,7 @@ class KernelReadTests(unittest.TestCase):
             if path==root/'child' and op=='directories':return []
             self.fail('cleanup crossed cgroup boundary: '+str(path))
         with patch('stage_ab.kernel_read',side_effect=read):
-            self.assertEqual(stage_ab.cgroup_pids('0::/system.slice/myce-test-stage-ab-r12.service'),[17,18])
+            self.assertEqual(stage_ab.cgroup_pids('0::/system.slice/myce-test-stage-ab-r13.service'),[17,18])
 
     def test_observer_survives_a_hold_until_cleanup(self):
         import stage_ab

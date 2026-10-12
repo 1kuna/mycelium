@@ -10,7 +10,7 @@ from kernel_reads import kernel_read
 
 IMAGE='verso-render@sha256:226e1e5d062ddbf4feda0fbfc4d299e2039f773b19f5ac8c2f93934201910a23'
 REAL='/usr/bin/docker'
-SLICE='myce-test-r12-docker.slice'
+SLICE='myce-test-r13-docker.slice'
 
 
 def containers(run):
@@ -64,7 +64,7 @@ def cleanup(run):
     # Fence the only delayed helper before claiming no future starts; no daemon restart.
     path=run.phase/'late-unit'
     if path.exists():
-        unit=kernel_read(path,'text');assert unit.startswith('myce-test-r12-late-')
+        unit=kernel_read(path,'text');assert unit.startswith('myce-test-r13-late-')
         subprocess.run(['/usr/sbin/runuser','-u','user','--','env','XDG_RUNTIME_DIR=/run/user/1000',
                         'systemctl','--user','stop',unit],check=True,capture_output=True)
         state=subprocess.run(['/usr/sbin/runuser','-u','user','--','env','XDG_RUNTIME_DIR=/run/user/1000',
@@ -95,7 +95,7 @@ def scenarios(run):
     # The adapter owns lifecycle; this test-only wrapper owns additional OS containment.
     subprocess.run(['systemctl','set-property','--runtime',SLICE,'MemoryMax=512M','MemorySwapMax=0',
                     'CPUQuota=100%','DevicePolicy=closed'],check=True,capture_output=True)
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r12.service','MemoryMax=7G'],check=True,capture_output=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r13.service','MemoryMax=7G'],check=True,capture_output=True)
     bindir=ROOT/'docker-bin';bindir.mkdir();(bindir/'docker').symlink_to(BASE/'docker_wrapper.py')
     old_env=run.env.copy()
     try:
@@ -174,5 +174,5 @@ def scenarios(run):
     finally:
         assert not any(r['State']['Running'] for r in containers(run))
         subprocess.run(['systemctl','stop',SLICE],check=True,capture_output=True)
-        subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r12.service','MemoryMax=8G'],check=True,capture_output=True)
+        subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r13.service','MemoryMax=8G'],check=True,capture_output=True)
         run.env=old_env

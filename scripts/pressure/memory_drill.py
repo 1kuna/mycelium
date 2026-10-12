@@ -8,7 +8,7 @@ from stage_ab import ROOT, atomic
 from disable_drill import empty
 from pressure import api
 
-UNIT='myce-worker@myce-test-r12-ceiling.service'
+UNIT='myce-worker@myce-test-r13-ceiling.service'
 
 
 def unit_state():
@@ -40,7 +40,7 @@ def scenario(run):
           '--state-dir',str(run.phase/'ceiling-worker'),'--checkpoint-root',str(cp),
           '--host-state-dir',str(run.phase/'ceiling-control')]
     env=run.phase/'ceiling.env';env.write_text('MYCE_TOKEN='+run.env['MYCE_TOKEN']+'\n');os.chmod(env,0o600);os.chown(env,1000,1000)
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r12.service','MemoryMax=7680M'],check=True,capture_output=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r13.service','MemoryMax=7680M'],check=True,capture_output=True)
     group=''
     run.active=None
     def control(args):
@@ -83,5 +83,5 @@ def scenario(run):
     finally:
         cleanup_unit(group)
         run.halt('queue');run.scenario_cleanup()
-        subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r12.service','MemoryMax=8G'],check=True,capture_output=True)
+        subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r13.service','MemoryMax=8G'],check=True,capture_output=True)
         atomic(run.phase/'memory-cleanup.json',dict(unit=UNIT,empty=True,cgroup=group))

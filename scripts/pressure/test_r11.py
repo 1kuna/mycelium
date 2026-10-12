@@ -61,7 +61,7 @@ class SnippetTests(unittest.TestCase):
 
     def test_delegated_attempt_is_owned_only_below_exact_worker_unit(self):
         run=stage_ab.Run.__new__(stage_ab.Run)
-        run.cgroup='0::/system.slice/myce-test.service';run.worker_cgroup='0::/user.slice/myce-worker@gpu1.service'
+        run.cgroup='0::/system.slice/myce-test.service';run.worker_cgroup='0::/user.slice/myce-worker@versotest-r13-gpu1.service'
         self.assertTrue(run.owned_group(run.worker_cgroup+'/attempt-synthetic'))
         self.assertFalse(run.owned_group(run.worker_cgroup+'-foreign/attempt-synthetic'))
         self.assertFalse(run.owned_group('0::/user.slice/myce-worker@gpu0.service/attempt-synthetic'))

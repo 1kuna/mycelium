@@ -4,8 +4,8 @@ import subprocess, json, datetime, shlex, importlib.util, hashlib
 from remote_snippets import checked_python, checked_shell, python_command
 HERE = Path('/Users/user/Documents/Git/Verso/.private/missions/mycelium-stage-ab-20261011')
 ROOT = '/home/user/synthetic-run'
-UNIT = 'myce-test-stage-ab-r12.service'
-WORK = Path('/Users/user/Developer/worktrees/mycelium-verso-pressure-r12')
+UNIT = 'myce-test-stage-ab-r13.service'
+WORK = Path('/Users/user/Developer/worktrees/mycelium-verso-pressure-r13')
 MAIN = '968c15d5d3e39060e997b1b3ba7f6450db881269'
 SHA = 'unprepared'
 
@@ -20,11 +20,11 @@ def receipt_writer_source():
 if __name__ == '__main__':
     SHA = subprocess.check_output(['git', '-C', str(WORK), 'rev-parse', 'HEAD'], text=True).strip()
     assert subprocess.check_output(['git', '-C', str(WORK), 'merge-base', '--is-ancestor', MAIN, 'HEAD']) == b''
-    assert subprocess.check_output(['git', '-C', str(WORK), 'ls-remote', 'origin', 'refs/heads/feat/verso-pressure-harness-r12'], text=True).split()[0] == SHA
-    assert json.loads(kernel_read(HERE / 'r12-cross-mount-receipt.json', 'text'))['cross_mount_verified']
+    assert subprocess.check_output(['git', '-C', str(WORK), 'ls-remote', 'origin', 'refs/heads/feat/verso-pressure-harness-r13'], text=True).split()[0] == SHA
+    assert json.loads(kernel_read(HERE / 'r13-cross-mount-receipt.json', 'text'))['cross_mount_verified']
     code = generated_0()
     r = subprocess.run(['ssh', 'b70', checked_shell('sudo -n python3 -')], input=checked_python(code), capture_output=True, text=True, timeout=25)
-    (HERE / 'r12-final-launch-gate.log').write_text(r.stdout + r.stderr)
+    (HERE / 'r13-final-launch-gate.log').write_text(r.stdout + r.stderr)
     assert r.returncode == 0
     manager = HERE / 'manage_followons_r11.py'
     manager.write_bytes(kernel_read(WORK / 'scripts/pressure/manage_followons.py', 'bytes'))
@@ -38,14 +38,14 @@ if __name__ == '__main__':
     log.close()
     args = launch_args()
     r = subprocess.run(['ssh', 'b70', checked_shell(shlex.join(args))], capture_output=True, text=True, timeout=20)
-    (HERE / 'r12-launch-command.log').write_text(r.stdout + r.stderr)
+    (HERE / 'r13-launch-command.log').write_text(r.stdout + r.stderr)
     assert r.returncode == 0, 'launch failed; inspect exact unit, do not duplicate'
     fields = ['ActiveState', 'SubState', 'MainPID', 'ControlGroup', 'MemoryMax', 'MemorySwapMax', 'DevicePolicy', 'DeviceAllow', 'CPUQuotaPerSecUSec']
     args = ['systemctl', 'show', UNIT] + [v for f in fields for v in ('-p', f)]
     r = subprocess.run(['ssh', 'b70', checked_shell(shlex.join(args))], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0
     receipt = dict(when=datetime.datetime.now(datetime.timezone.utc).isoformat(), main=MAIN, harness=SHA, systemd=r.stdout, manager_pid=p.pid, unit=UNIT)
-    (HERE / 'r12-launch-receipt.json').write_text(json.dumps(receipt, indent=2))
+    (HERE / 'r13-launch-receipt.json').write_text(json.dumps(receipt, indent=2))
     remote = receipt_writer_source()
     r2 = subprocess.run(['ssh', 'b70', python_command(remote)], input=json.dumps(receipt).encode(), capture_output=True, timeout=15)
     assert r2.returncode == 0

@@ -31,7 +31,7 @@ def isolated(run,name,args,seconds):
     # Test-only root must be local ext4; NAS is measured separately, never the CPU TMPDIR.
     fs=subprocess.check_output(['findmnt','-n','-T',str(temp),'-o','FSTYPE'],text=True).strip()
     assert fs=='ext4', 'CPU checkpoint root must be local ext4'
-    unit='myce-test-r12-'+name.lower()+'.service'
+    unit='myce-test-r13-'+name.lower()+'.service'
     registry=ROOT/'cpu-units.json'
     units=json.loads(kernel_read(registry)) if registry.exists() else []
     atomic(registry,units+[unit])
@@ -83,6 +83,6 @@ def isolated(run,name,args,seconds):
 
 
 def scenarios(run):
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r12.service','MemoryMax=4G'],check=True,capture_output=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r13.service','MemoryMax=4G'],check=True,capture_output=True)
     isolated(run,'CPU-fast-matrix',[str(ROOT/'cpu-matrix.test'),'-test.run','^('+FAST+')','-test.v','-test.timeout','5m'],300)
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r12.service','MemoryMax=8G'],check=True,capture_output=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r13.service','MemoryMax=8G'],check=True,capture_output=True)

@@ -71,7 +71,7 @@ class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r12.service'
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r13.service'
         self.baseline = json.loads(kernel_read(ROOT / 'display-baseline.json', 'text'))
         self.diagnostics = DiagnosticReaders(json.loads(kernel_read(ROOT/'diagnostic-executables.json', 'text')),
                                              ROOT/'diagnostics.jsonl')
@@ -664,8 +664,7 @@ class Run:
             self.counter.start();self.observer.start()
             self.wait(lambda:self.device_at>0,5)
             self.result('C-migration-r11','EXCLUDED',executed=False,reason='both migration scenarios passed round 11; remaining scenarios only')
-            from docker_drill import scenarios
-            scenarios(self)
+            self.result('Docker-scenarios','EXCLUDED',executed=False,reason='round 12 harness defect classified; deep Docker qualification deferred to docker-job-network')
             from memory_drill import scenario as memory_scenario
             memory_scenario(self)
             from cpu_drill import scenarios as cpu_scenarios
@@ -682,7 +681,7 @@ class Run:
 
     def foreign_reader_canary(self):
         count=self.foreign.interruptions
-        subprocess.run(['systemd-run','--quiet','--collect','--unit=myce-test-r12-foreign-reader',
+        subprocess.run(['systemd-run','--quiet','--collect','--unit=myce-test-r13-foreign-reader',
             '--property=DevicePolicy=closed','--property=DeviceAllow=/dev/dri/card1 rw',
             '--property=DeviceAllow=/dev/dri/renderD129 rw','--property=MemoryMax=512M',
             '--property=RuntimeMaxSec=15s','--property=StandardOutput=null',

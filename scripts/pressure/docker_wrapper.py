@@ -20,13 +20,14 @@ def known():
     return {json.loads(kernel_read(p,'text'))['identity'] for p in (ROOT/'phases').glob('*/worker/*.docker.json')}
 
 
-def inspect(ids):
+def inspect(ids, inventory=False):
     if not ids:return []
     rows=json.loads(subprocess.check_output([REAL,'inspect',*ids],timeout=2))
     assert len(rows)==len(ids)
     for row in rows:
-        assert row['Config']['Labels'].get('myce.attempt') in known(),'foreign label: no operation allowed'
-    return rows
+        owned=row['Config']['Labels'].get('myce.attempt') in known()
+        assert owned or (inventory and not row['State']['Running'] and row['State']['Pid']==0),'foreign label: no operation allowed'
+    return [row for row in rows if row['Config']['Labels'].get('myce.attempt') in known()]
 
 
 def main(argv):
@@ -48,20 +49,20 @@ def main(argv):
         limit=int(limits[0].split('=',1)[1]);assert limit==128*1024**2
         assert args[args.index('--memory')+1]==str(limit) and args[args.index('--memory-swap')+1]==str(limit)
         args=[verb,'--cpus=.5','--network=none',
-              '--cgroup-parent=myce-test-r12-docker.slice',*args[1:]]
+              '--cgroup-parent=myce-test-r13-docker.slice',*args[1:]]
     elif verb in ('kill','start','logs'):
         inspect([args[-1]])
     elif verb=='inspect':inspect(args[1:])
     elif verb=='ps':
-        # Host disable inventories all labels. Refuse foreign custody before returning IDs.
-        ids=subprocess.check_output([REAL,'ps','-aq','--filter','label=myce.attempt'],timeout=2).decode().split()
-        inspect(ids)
+        # Retained stopped objects are evidence, never current-attempt custody.
+        ids=subprocess.check_output([REAL,*args],timeout=2).decode().split()
+        rows=inspect(ids,inventory=True)
     else:raise ValueError('unqualified Docker verb')
     with (PHASE/'docker-calls.jsonl').open('a') as stream:
         fcntl.flock(stream,fcntl.LOCK_EX)
         stream.write(json.dumps(dict(at=time.monotonic(),verb=verb,signal=args[1] if verb=='kill' else None))+'\n');stream.flush();os.fsync(stream.fileno())
     if config['mode']=='late' and verb=='start':
-        unit='myce-test-r12-late-'+args[-1][:12]+'.service'
+        unit='myce-test-r13-late-'+args[-1][:12]+'.service'
         (PHASE/'late-unit').write_text(unit)
         subprocess.run(['systemd-run','--user','--unit='+unit,'--collect','--property=MemoryMax=128M',
             '--property=RuntimeMaxSec=20s','--setenv=MYCE_TEST_DOCKER_PHASE='+str(PHASE),
@@ -69,6 +70,9 @@ def main(argv):
         (PHASE/'delayed-accepted').touch()
         time.sleep(20)
     if config['mode']=='slow' and verb in ('ps','inspect','kill'):time.sleep(10)
+    if verb=='ps':
+        if rows:print('\n'.join(row['Id'] for row in rows))
+        return
     os.execv(REAL,[REAL,*argv[:2],*args])
 
 

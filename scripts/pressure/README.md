@@ -357,3 +357,22 @@ worker PID. Runtime unit configuration crosses filesystems through recoverable
 moves. Final cleanup preserves the explicit legacy-GPU1 queue guard, checks
 production health, retires only owned runtime configuration and independently
 inventories both hosts. No Spark service or tunnel is launched this round.
+
+
+## Round 13 classification and non-Docker continuation
+
+Round 12's first create succeeded, but the Docker wrapper's broad ps inventory
+rejected the inert round-11 container before returning the exact attempt IDs.
+The failing-first retained-container test now proves inert evidence is excluded
+from current custody while foreign running containers and direct foreign calls
+still fail closed. Native Docker scenarios are excluded pending docker-job-network.
+
+Fresh r13 state runs only kernel OOM isolation, local-ext4 CPU matrix and the
+installed GPU1 drill. The test instance is versotest-r13-gpu1, never gpu0/gpu1
+or the real queue unit. A trusted oneAPI shell inside the GPU1 device fence
+first registers foreground join, then performs real installer device validation.
+Targeted disable/enable proves refusal while disabled and checkpoint resumption;
+an empty-worker queue drill rejects stale enable generation 1 after disable 2,
+then accepts enable 3. Cleanup uninstalls only this exact test instance and
+preserves the legacy GPU1 guard. Detached collector updates report-r13.md after
+terminal, finalizer and independent B70/Spark cleanup receipts.

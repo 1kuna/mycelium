@@ -35,7 +35,7 @@ class DockerFenceTests(unittest.TestCase):
                 args=execution.call_args.args[1]
                 self.assertEqual(args[args.index('--memory')+1],'134217728')
                 self.assertEqual(args.count('--memory'),1)
-                self.assertIn('--cgroup-parent=myce-test-r12-docker.slice',args)
+                self.assertIn('--cgroup-parent=myce-test-r13-docker.slice',args)
                 self.assertIn('--network=none',args)
                 with self.assertRaises(AssertionError):
                     wrapper.main(['--host','unix:///var/run/docker.sock','create','--label','myce.attempt=owned','--device','/dev/dri/renderD128','image'])

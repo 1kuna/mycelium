@@ -3,7 +3,7 @@ from pathlib import Path
 import hashlib, io, json, subprocess, tarfile, shlex, datetime, os
 from remote_snippets import checked_python, checked_shell, python_command
 HERE = Path('/Users/user/Documents/Git/Verso/.private/missions/mycelium-stage-ab-20261011')
-WORK = Path('/Users/user/Developer/worktrees/mycelium-verso-pressure-r12')
+WORK = Path('/Users/user/Developer/worktrees/mycelium-verso-pressure-r13')
 ROOT = '/home/user/synthetic-run'
 MAIN = '968c15d5d3e39060e997b1b3ba7f6450db881269'
 SHA = 'unprepared'
@@ -18,7 +18,7 @@ def staging_source():
     return 'from pathlib import Path; import time; root=Path(' + repr(ROOT) + '); root.mkdir(exist_ok=True); assert not any((root/n).exists() for n in ("owned-pause","logs","phases","DONE","FAILED","launch-receipt.json")); suffix=".prepared-retired-"+str(time.time_ns()); [(root/n).rename(root/(n+suffix)) for n in ("source","myce","cpu-matrix.test","finalize.py","diagnostic-executables.json") if (root/n).exists()]'
 if __name__ == '__main__':
     SHA = subprocess.check_output(['git', '-C', str(WORK), 'rev-parse', 'HEAD'], text=True).strip()
-    assert subprocess.check_output(['git', '-C', str(WORK), 'ls-remote', 'origin', 'refs/heads/feat/verso-pressure-harness-r12'], text=True).split()[0] == SHA
+    assert subprocess.check_output(['git', '-C', str(WORK), 'ls-remote', 'origin', 'refs/heads/feat/verso-pressure-harness-r13'], text=True).split()[0] == SHA
     assert subprocess.check_output(['git', '-C', str(WORK), 'merge-base', '--is-ancestor', MAIN, 'HEAD']) == b''
     assert not subprocess.check_output(['git', '-C', str(WORK), 'status', '--porcelain'])
     assert not subprocess.check_output(['git', '-C', str(WORK), 'diff', MAIN, '--', 'internal', 'cmd', 'clients'])
@@ -26,7 +26,7 @@ if __name__ == '__main__':
 
     def remote(host, code, sudo=False):
         r = subprocess.run(['ssh', host, checked_shell(('sudo -n ' if sudo else '') + 'python3 -')], input=checked_python(code), capture_output=True, text=True, timeout=45)
-        (HERE / ('r12-prepare-' + host + '.log')).write_text(r.stdout + r.stderr)
+        (HERE / ('r13-prepare-' + host + '.log')).write_text(r.stdout + r.stderr)
         assert r.returncode == 0, host + ' preflight failed; inspect private log'
         return json.loads(r.stdout)
 
@@ -40,7 +40,7 @@ if __name__ == '__main__':
                     a.addfile(m, f)
             files = [(binary, 'myce')]
             if host == 'b70':
-                files += [(Path('/private/tmp/myce-test-r12-cpu-matrix.test'), 'cpu-matrix.test'), (WORK / 'scripts/pressure/finalize_stage_ab.py', 'finalize.py'), (WORK / 'scripts/pressure/diagnostic-executables.json', 'diagnostic-executables.json')]
+                files += [(Path('/private/tmp/myce-test-r13-cpu-matrix.test'), 'cpu-matrix.test'), (WORK / 'scripts/pressure/finalize_stage_ab.py', 'finalize.py'), (WORK / 'scripts/pressure/diagnostic-executables.json', 'diagnostic-executables.json')]
             for (path, name) in files:
                 a.add(path, arcname=name)
         prep = staging_source()
@@ -49,7 +49,7 @@ if __name__ == '__main__':
         r = subprocess.run(['ssh', host, checked_shell('tar -xz -C ' + ROOT)], input=b.getvalue(), capture_output=True)
         assert r.returncode == 0, host + ' staging failure'
         print(json.dumps(dict(staged=host, sha=SHA)))
-    stage('b70', Path('/private/tmp/myce-test-r12-b70'))
+    stage('b70', Path('/private/tmp/myce-test-r13-b70'))
     code = generated_0()
     r = remote('b70', code, True)
     print(json.dumps(r))
