@@ -115,9 +115,6 @@ pause=Path('/home/user/exp42-queue/PAUSED')
 owned=root/'owned-pause'
 headroom=int(next(r.split()[1] for r in kernel_read('/proc/meminfo').splitlines() if r.startswith('MemAvailable:')))/1024**2
 receipt['headroom_gib']=headroom
-if receipt['physical']=='released' and not receipt.get('cpu_cleanup_error') and not receipt.get('docker_error') and headroom>=18 and owned.exists() and pause.exists() and kernel_read(pause,'bytes')==kernel_read(owned,'bytes'):
-    pause.rename(root/'queue-PAUSED.released')
-receipt['queue_pause']='released' if owned.exists() and not pause.exists() else 'HOLD; not changed'
 # At ExecStopPost the kernel has stopped the unit's child processes. Read-only verify it.
 remaining=cgroup_pids('0::/system.slice/myce-test-stage-ab-r11.service')
 receipt['remaining_pids']=remaining
@@ -131,6 +128,9 @@ for port in set(ports):
         connection.settimeout(.2)
         if connection.connect_ex(('127.0.0.1',port))==0:occupied.append(port)
 receipt['occupied_test_ports']=occupied
+if receipt['physical']=='released' and not receipt.get('cpu_cleanup_error') and not receipt.get('docker_error') and not receipt.get('runtime_unit_error') and receipt['installed_worker']=='flag and unit absent' and receipt.get('memory_worker_settled') and not remaining and not occupied and headroom>=18 and owned.exists() and pause.exists() and kernel_read(pause,'bytes')==kernel_read(owned,'bytes'):
+    pause.rename(root/'queue-PAUSED.released')
+receipt['queue_pause']='released' if owned.exists() and not pause.exists() else 'HOLD; not changed'
 trash=Path('/home/user/.local/share/Trash')
 for child in ('files','info'):(trash/child).mkdir(parents=True,exist_ok=True)
 moved=[]

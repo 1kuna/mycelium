@@ -213,6 +213,10 @@ def serve(seconds=4*3600):
     raise TimeoutError('follow-on transport deadline')
 
 
+def final_receipt_source():
+    return 'from pathlib import Path; import json,sys; Path('+repr(ROOT+'/spark-cleanup.json')+').write_text(json.dumps(json.load(sys.stdin),indent=2))'
+
+
 if __name__=='__main__':
     before=loan();assert before['ActiveState']=='inactive' and before['MainPID']=='0' and not before['ControlGroup']
     error=None
@@ -222,4 +226,4 @@ if __name__=='__main__':
         stop();after=loan();cleanup=cleanup_spark()
         receipt=dict(error=error,phase_errors=phase_errors,loan_identity_unchanged=before==after,
                      loan_before=before,loan_after=after,tunnels_stopped=True,cleanup=cleanup)
-        remote('b70','from pathlib import Path; import json,sys; Path('+repr(ROOT+'/spark-cleanup.json')+').write_text(json.dumps(json.load(sys.stdin),indent=2))',receipt)
+        remote('b70',final_receipt_source(),receipt)

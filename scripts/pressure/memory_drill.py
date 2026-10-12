@@ -22,6 +22,7 @@ def scenario(run):
           '--state-dir',str(run.phase/'ceiling-worker'),'--checkpoint-root',str(cp),
           '--host-state-dir',str(run.phase/'ceiling-control')]
     env=run.phase/'ceiling.env';env.write_text('MYCE_TOKEN='+run.env['MYCE_TOKEN']+'\n');os.chmod(env,0o600);os.chown(env,1000,1000)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11.service','MemoryMax=7680M'],check=True,capture_output=True)
     group=''
     run.active=None
     def show():
@@ -63,4 +64,5 @@ def scenario(run):
         user(run,['systemctl','--user','stop',UNIT]);state=show()
         assert empty(group,state),'memory worker cleanup unconfirmed'
         run.halt('queue');run.scenario_cleanup()
+        subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11.service','MemoryMax=8G'],check=True,capture_output=True)
         atomic(run.phase/'memory-cleanup.json',dict(unit=UNIT,empty=True,cgroup=group))
