@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const startGateProtocol = "durable-start-v1"
+
 type API struct {
 	Queue *Queue
 	Token string
@@ -91,6 +93,10 @@ func (a API) Handler() http.Handler {
 		respond(w, ls, err)
 	})
 	mux.HandleFunc("POST /api/workers/checkin", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Myce-Start-Gate") != startGateProtocol {
+			http.Error(w, "worker start-gate protocol mismatch: upgrade queue and workers together", http.StatusUpgradeRequired)
+			return
+		}
 		var c Checkin
 		if !decode(w, r, &c) {
 			return
@@ -98,12 +104,20 @@ func (a API) Handler() http.Handler {
 		v, err := a.Queue.Checkin(c)
 		respond(w, v, err)
 	})
+	mux.HandleFunc("POST /api/workers/start-permit", func(w http.ResponseWriter, r *http.Request) {
+		var c Result
+		if !decode(w, r, &c) {
+			return
+		}
+		permit, err := a.Queue.PermitStart(c)
+		respond(w, permit, err)
+	})
 	mux.HandleFunc("POST /api/workers/started", func(w http.ResponseWriter, r *http.Request) {
 		var c Result
 		if !decode(w, r, &c) {
 			return
 		}
-		respond(w, map[string]bool{"ok": true}, a.Queue.Started(c))
+		respond(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.Started(c))
 	})
 	mux.HandleFunc("POST /api/workers/complete", func(w http.ResponseWriter, r *http.Request) {
 		var c Result
@@ -232,6 +246,9 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/json")
+	if path == "/api/workers/checkin" {
+		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)
+	}
 	hc := c.HTTP
 	if hc == nil {
 		hc = &http.Client{Timeout: 10 * time.Second}

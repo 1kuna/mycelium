@@ -131,3 +131,29 @@ func TestSetupCLIRejectsMissingOrUnknownAction(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallCLIDevicelessNeedsExplicitFlagAndBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		ok   bool
+	}{
+		{name: "no opt out"},
+		{name: "no budget", args: []string{"--allow-deviceless"}},
+		{name: "CPU test budget", args: []string{"--allow-deviceless", "--memory-gb", "2"}, ok: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("no GPU") }}
+			args := append([]string{"install", "worker", "--nas", home, "--dry-run"}, tc.args...)
+			err := setupCommandWithProbe(args, probe, home)
+			if (err == nil) != tc.ok {
+				t.Fatal(err)
+			}
+			entries, _ := os.ReadDir(home)
+			if len(entries) != 0 {
+				t.Fatal("dry run wrote files")
+			}
+		})
+	}
+}

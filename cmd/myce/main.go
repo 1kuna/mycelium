@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,6 +22,12 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
+		if myce.CommandExec(os.Args[2:]) != nil {
+			os.Exit(125)
+		}
+		return
+	}
 	if err := run(os.Args[1:]); err != nil {
 		log.Print(err)
 		os.Exit(exitCode(err))
@@ -61,6 +68,27 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "install" || args[0] == "uninstall" || args[0] == "doctor" {
 		return setupCommand(args)
+	}
+	if args[0] == "detect" {
+		f := flag.NewFlagSet("detect", flag.ContinueOnError)
+		path := f.String("config", "", "installed worker config (no credentials read)")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if f.NArg() != 0 || *path == "" {
+			return errors.New("detect requires --config")
+		}
+		c, err := myce.ReadServiceConfig(*path)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := myce.SetupTimeout(context.Background())
+		defer cancel()
+		d, err := myce.DetectService(ctx, c, probe, myce.LocalGPUAccessProbe())
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(d)
 	}
 	if args[0] == "service" {
 		return serviceCommand(args[1:])

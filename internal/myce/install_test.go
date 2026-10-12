@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -87,12 +88,15 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 	commands := []string{}
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
+		if name == "systemd-run" {
+			return json.Marshal(c.Detection)
+		}
 		return nil, nil
 	}
 	if e = Install(context.Background(), c, executable, "private-test-secret", runner); e != nil {
 		t.Fatal(e)
 	}
-	if len(commands) != 2 {
+	if len(commands) != 3 {
 		t.Fatal(commands)
 	}
 	token, e := ReadServiceToken(c)

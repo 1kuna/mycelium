@@ -1,12 +1,19 @@
 package main
 
 import (
+	"mycelium/internal/myce"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
+		if myce.CommandExec(os.Args[2:]) != nil {
+			os.Exit(125)
+		}
+		return
+	}
 	dir, err := os.MkdirTemp("", "myce-cli-host-tests-")
 	if err != nil {
 		panic(err)

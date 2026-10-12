@@ -115,11 +115,21 @@ func TestWorkerProductionWithoutNAS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.close()
-	j := recoveryJob(t, []string{"true"})
-	j.Spec.Priority = "production"
-	j.Spec.Resumable = false
+	q, _ := fixture(t)
+	s := spec("production")
+	s.Resumable = false
+	s.Run.Command = []string{"true"}
+	submit(t, q, s)
+	j := check(t, q, w.Machine, nil).Job
+	if j == nil {
+		t.Fatal("production not assigned")
+	}
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	w.Client = Client{URL: server.URL, Token: "test"}
+	store.state.Session = j.Session
 	j.Checkpoint = filepath.Join(t.TempDir(), "missing", "job")
-	p, err := w.start(store, j)
+	p, err := w.start(store, *j)
 	if err != nil {
 		t.Fatalf("production requires NAS: %v", err)
 	}

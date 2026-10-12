@@ -43,7 +43,7 @@ func (q *Queue) refreshHostMemory() {
 			}
 		}
 		for _, r := range q.s.HostReleases {
-			if !r.Docker || r.Host != hostID(m) {
+			if r.Host != hostID(m) {
 				continue
 			}
 			j := q.s.Jobs[r.Job]

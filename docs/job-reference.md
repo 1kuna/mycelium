@@ -26,6 +26,7 @@ when shell expansion is needed.
 | `needs.model` | Absent | Batch affinity hint; does not load a model |
 | `environment` | Absent | Catalog name, `{name: torch-cuda}`, or `{lock_file: /shared/project/requirements.txt, python: "3.12", platforms: [cuda]}`; never both name and lock file |
 | `allowed_machines` | Empty: any eligible worker | Machine-name allow-list |
+| `start_by` | Production: submission + 150 seconds; absent for other priorities | Absolute RFC3339 first-start deadline, production batch only; loss recovery gets a fresh original-length window |
 | `give_up_at` | Absent: wait indefinitely | RFC3339 expiry while queued; not a running-job timeout |
 | `expected_minutes` | `0` | Rough planning hint, never enforced |
 | `resumable` | `false` | Set true only for a command implementing the checkpoint/stop contract |
@@ -271,6 +272,67 @@ parallel limit, load timeout, and combined absolute device/host peaks. Concurren
 warm-up peaks are joint observations, not attributed per-model deltas. Failure
 cancels all warm-ups, waits for them to exit, and unloads every attempted engine.
 
+## Production start deadline
+
+Production jobs must acknowledge command startup before `start_by`. Set an
+absolute RFC3339 timestamp, for example `start_by: 2026-10-12T14:00:30Z`.
+If omitted, the queue saves submission time plus **150 seconds**: the ordinary
+10-second experiment grace, two-minute Docker cleanup escalation, and a small
+reporting margin. This is a bounded availability policy, not a native startup
+latency guarantee. A shorter caller-owned deadline can trigger fallback sooner.
+Unstarted retries, re-delivery and queue restarts never renew it. Older unfinished
+production records without the field receive the same default from their original submission.
+
+`give_up_at` keeps its queued-only meaning; the earlier applicable expiry wins.
+`deadline` remains an ordering hint. A command that has started may finish after
+`start_by`. After a started attempt loses its machine (including worker restart),
+the recovery attempt gets a fresh window from the queue's loss-detection time:
+loss time plus the original `start_by` minus submission time. That original window
+length is durable and does not grow across repeated losses. Brief outages can
+resume; a recovery attempt that does not start within its window fails with
+`production start deadline exceeded: <blocker>` so the caller can run fallback.
+Planned stops are not production loss recovery and do not renew this budget.
+`start_by` covers production **batch jobs only**. Model HTTP calls rely on their
+own request timeouts and the separate `max_wait` contract; they do not honor
+`start_by`. Models loaded inside a batch command are outside its start hand-off.
+
+Status, the status page and the job record show the blocker and seconds left.
+Queued production fails immediately when every known eligible host is disabled
+by the operator. Unknown inventory may still join within the deadline. Pending stops,
+unconfirmed Docker cleanup, worker recovery, environment preparation and capacity
+can all exhaust the budget. At `now >= start_by`, an unstarted job fails with
+`production start deadline exceeded: <blocker>`; a past deadline fails on submit
+without preempting anything. `myce wait` exits **1** and prints the reason; Python
+`Client.wait()` returns the failed record with its reason.
+
+Assignment alone is not startup. Before executing a production batch command,
+the worker asks the queue to durably record its exact attempt as started. The
+queue serializes that hand-off with expiry in one SQLite transaction: at the
+deadline expiry wins; a previously accepted start is not failed by `start_by`.
+This records an accepted hand-off, not proof of successful physical exec or
+model readiness. A private exec-helper pipe holds plain-command execution until
+the positive reply; managed Docker uses the same confirmation before its start
+operation. An unreachable queue, failed durable write, duplicate start, stale
+attempt or cancellation refuses execution. The worker stores launch intent before
+asking, so restart reconciles/cleans that attempt and replays buffered results
+instead of executing it again. A lost positive reply conservatively leaves the
+attempt started in the queue but unexecuted; reconciliation handles recovery.
+Deploy the matching queue and workers together. Check-in requires the durable-start
+protocol marker; older workers receive HTTP 426 before assignment. Production
+workers also require an explicit matching durable-start answer and `start_by`,
+so an older queue cannot authorize execution. Shared and instance disable flags
+are checked before and after the start request; cleanup retains attempt custody.
+Late result messages cannot
+revive failure. Assigned expiry sends an attempt-specific kill and retains release custody and memory accounting;
+status says `release pending` until the matching cleanup acknowledgement.
+Experiment stops and Docker cleanup continue independently after production fails.
+Failure does **not** authorize a fallback to reuse uncertain resources.
+
+Expiry runs on queue ticks and API mutations (including status), so observation
+adds tick/poll delivery latency. Queue downtime or local storage failure cannot
+promise timely durable failure; the caller still owns its outage watchdog and safe
+fallback. Do not downgrade to workers/queues that ignore `start_by`.
+
 ## Physical-host production hold
 
 Opt in with `queue --host-config hosts.yaml` (also accepted by `dev` and `sim`):
@@ -345,9 +407,9 @@ Status/API `host_holds` and CLI/web status show, for example,
 `production idle; experiments resume in 179s`, or
 `release unknown: worker b70-1`. Blocked experiments show
 `host b70 reserved for production`; pinned capacity conflicts identify the pin.
-This is observable GPU demand, not a CPU publication/session lock. No absolute
-production startup expiry, cgroup enforcement, managed Docker or native device
-fence is provided by this option. Do not downgrade a database with active holds
+This is observable GPU demand, not a CPU publication/session lock. Production
+startup expiry and managed Docker are separate contracts; this option alone does
+not provide cgroup enforcement or a native device fence. Do not downgrade a database with active holds
 or mix old workers while depending on hold recovery.
 
 ## Attempt placement environment
