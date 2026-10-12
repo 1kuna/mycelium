@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -18,6 +17,8 @@ type HostService interface {
 }
 
 type SystemdHostService struct {
+	Clock    Clock
+	killAt   time.Time
 	Unit     string
 	Command  func(context.Context, string, ...string) ([]byte, error)
 	ReadFile func(string) ([]byte, error)
@@ -35,7 +36,7 @@ func (s *SystemdHostService) call(ctx context.Context, args ...string) ([]byte, 
 	return s.Command(ctx, "systemctl", append([]string{"--user"}, args...)...)
 }
 func (s *SystemdHostService) show(ctx context.Context) (map[string]string, error) {
-	b, e := s.call(ctx, "show", s.Unit, "-p", "LoadState", "-p", "ActiveState", "-p", "ControlGroup", "-p", "KillMode", "-p", "SendSIGKILL")
+	b, e := s.call(ctx, "show", s.Unit, "-p", "LoadState", "-p", "ActiveState", "-p", "ControlGroup", "-p", "KillMode", "-p", "SendSIGKILL", "-p", "TimeoutStopUSec")
 	if e != nil {
 		return nil, e
 	}
@@ -75,9 +76,13 @@ func (s *SystemdHostService) Stop(ctx context.Context, grace time.Duration) erro
 			}
 		}
 	} else {
-		if _, e = s.call(ctx, "set-property", "--runtime", s.Unit, "TimeoutStopSec="+strconv.FormatFloat(grace.Seconds(), 'f', -1, 64)+"s"); e != nil {
-			return e
+		if timeout, e := time.ParseDuration(p["TimeoutStopUSec"]); e == nil && grace > timeout {
+			return errors.New("requested grace exceeds the unit stop timeout; configure TimeoutStopSec before disabling")
 		}
+		if s.Clock == nil {
+			s.Clock = RealClock{}
+		}
+		s.killAt = s.Clock.Now().Add(grace)
 	}
 	// Confirmation polls the retained cgroup, never merely stop-request admission.
 	if _, e = s.call(ctx, "stop", "--no-block", s.Unit); e != nil {
@@ -103,6 +108,12 @@ func (s *SystemdHostService) Empty(ctx context.Context) (bool, error) {
 	}
 	if p["ControlGroup"] != "" && p["ControlGroup"] != s.group {
 		return false, errors.New("worker cgroup changed during disable")
+	}
+	if !s.killAt.IsZero() && !s.Clock.Now().Before(s.killAt) && p["ControlGroup"] != "" {
+		if _, e = s.call(ctx, "kill", "--kill-whom=all", "--signal=SIGKILL", s.Unit); e != nil {
+			return false, e
+		}
+		s.killAt = time.Time{}
 	}
 	if p["ActiveState"] != "inactive" && p["ActiveState"] != "failed" {
 		return false, nil
