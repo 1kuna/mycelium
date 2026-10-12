@@ -11,7 +11,7 @@ import (
 
 func TestStatusFullIDsAndOneBasedAttempts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"jobs":[{"id":"12345678abcdef","state":"running","attempt":1,"spec":{"name":"work","priority":"production"}},{"id":"abcdefgh123456","state":"queued","attempt":0,"spec":{"name":"waiting","priority":"experiment"}}]}`)
+		fmt.Fprint(w, `{"machines":[{"id":"b70-gpu1","enable_pending":true}],"jobs":[{"id":"12345678abcdef","state":"running","attempt":1,"spec":{"name":"work","priority":"production"}},{"id":"abcdefgh123456","state":"queued","attempt":0,"spec":{"name":"waiting","priority":"experiment"}}]}`)
 	}))
 	defer server.Close()
 	saved := os.Stdout
@@ -36,6 +36,9 @@ func TestStatusFullIDsAndOneBasedAttempts(t *testing.T) {
 		}
 		output := string(data)
 		if strings.Contains(output, "12345678abcdef") != full {
+			t.Fatal(output)
+		}
+		if !strings.Contains(output, "held: enable not yet acknowledged (retrying)") {
 			t.Fatal(output)
 		}
 		if !strings.Contains(output, "running · attempt 1") || strings.Contains(output, "attempt 0") {

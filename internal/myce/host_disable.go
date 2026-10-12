@@ -275,14 +275,32 @@ func (h HostControl) notify(ctx context.Context, workers []HostWorker, enable, c
 				w.Executions = append(w.Executions, sibling.Executions...)
 			}
 		}
-		go func(w HostWorker) { results <- h.Notify(ctx, w, enable, cleared, reason) }(w)
+		go func(w HostWorker) {
+			err := h.Notify(ctx, w, enable, cleared, reason)
+			if err != nil {
+				detail := "unavailable"
+				var httpErr *HTTPError
+				if errors.As(err, &httpErr) {
+					detail = fmt.Sprintf("HTTP %d", httpErr.Status)
+				}
+				if errors.Is(err, context.DeadlineExceeded) {
+					detail = "timed out"
+				}
+				endpoint := "invalid address"
+				if u, e := url.Parse(w.Queue); e == nil {
+					endpoint = u.Scheme + "://" + u.Host
+				}
+				err = fmt.Errorf("host %q queue %s: %s", w.Host, endpoint, detail)
+			}
+			results <- err
+		}(w)
 	}
 	var out []string
 	for i := 0; i < n; i++ {
 		select {
 		case err := <-results:
 			if err != nil {
-				out = append(out, "queue notification unavailable")
+				out = append(out, err.Error())
 			}
 		case <-ctx.Done():
 			return append(out, "queue notification timed out")
@@ -822,8 +840,8 @@ func (h HostControl) Enable(ctx context.Context) error {
 			return err
 		}
 	}
-	if err = h.reconcileEnable(ctx); err != nil {
-		log.Print("enabled locally; queue unavailable; worker will reconcile on rejoin")
+	if err = h.reconcileEnable(ctx, "", ""); err != nil {
+		log.Printf("enabled locally; queue acknowledgements pending; workers reconcile their own queue on rejoin: %v", err)
 	}
 	return syncWorkerDir(h.Dir)
 }
@@ -838,10 +856,26 @@ func (h HostControl) ReconcileEnable(ctx context.Context) error {
 		return err
 	}
 	defer unlock()
-	return h.reconcileEnable(ctx)
+	return h.reconcileEnable(ctx, "", "")
 }
 
-func (h HostControl) reconcileEnable(ctx context.Context) error {
+// ReconcileWorkerEnable cannot let an unrelated queue veto this worker's rejoin.
+func (h HostControl) ReconcileWorkerEnable(ctx context.Context, queue, host string) error {
+	if queue == "" || host == "" {
+		return errors.New("worker queue and host required")
+	}
+	if err := h.defaults(); err != nil {
+		return err
+	}
+	unlock, err := hostOperationLock(h.Dir, "control.lock", false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return h.reconcileEnable(ctx, queue, host)
+}
+
+func (h HostControl) reconcileEnable(ctx context.Context, queue, host string) error {
 	if reason, err := HostDisabled(h.Dir); err != nil || reason != "" {
 		return errors.Join(err, errHostDisabled)
 	}
@@ -864,18 +898,48 @@ func (h HostControl) reconcileEnable(ctx context.Context) error {
 	if err = json.Unmarshal(b, &receipt); err != nil {
 		return err
 	}
-	workers := receipt.Workers
-	// A lost enable response may leave a receipt after the queue accepted its generation.
-	// Queue enable requires acknowledged cleanup, so retry enable even if the old disable is stale.
-	_ = h.notify(ctx, workers, false, true, "disabled by operator")
-	for i := range workers {
-		workers[i].Generation = receipt.EnableGeneration
-	}
 	if receipt.EnableGeneration == 0 {
 		return errors.New("legacy receipt has no ordered enable; rerun disable and enable")
 	}
-	if failures := h.notify(ctx, workers, true, false, ""); len(failures) > 0 {
-		return errors.New("enable not yet acknowledged")
+	remaining := []HostWorker{}
+	failures := []string{}
+	seen := map[string]bool{}
+	for _, target := range receipt.Workers {
+		key := target.Queue + "\x00" + target.Host
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		group := []HostWorker{}
+		for _, worker := range receipt.Workers {
+			if worker.Queue == target.Queue && worker.Host == target.Host {
+				group = append(group, worker)
+			}
+		}
+		if queue != "" && (target.Queue != queue || target.Host != host) {
+			remaining = append(remaining, group...)
+			continue
+		}
+		// A lost enable response can make the old disable stale; still retry enable.
+		_ = h.notify(ctx, group, false, true, "disabled by operator")
+		enabled := append([]HostWorker(nil), group...)
+		for i := range enabled {
+			enabled[i].Generation = receipt.EnableGeneration
+		}
+		if errs := h.notify(ctx, enabled, true, false, ""); len(errs) > 0 {
+			failures = append(failures, errs...)
+			remaining = append(remaining, group...)
+		}
+	}
+	if len(remaining) > 0 {
+		receipt.Workers = remaining
+		if err := saveWorkerJSON(h.Dir, "enable-pending.json", receipt); err != nil {
+			return err
+		}
+		if len(failures) > 0 {
+			return fmt.Errorf("enable not yet acknowledged: %s", strings.Join(failures, "; "))
+		}
+		return nil
 	}
 	trash := filepath.Join(h.Dir, ".Trash")
 	if err = os.MkdirAll(trash, 0700); err != nil {

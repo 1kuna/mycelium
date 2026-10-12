@@ -568,11 +568,17 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		m.FreeMemoryGB = max(0, m.FreeMemoryGB-q.modelReservation(&m, c.ModelReports))
 		q.maintain()
 		defer func() {
-			reply.AdmissionBlocked = m.HostMemoryBudgetStatus() != ""
+			reply.AdmissionBlocked = m.EnablePending || m.HostMemoryBudgetStatus() != ""
+			if m.EnablePending {
+				return
+			}
 			reply.EnvironmentPlan = q.environmentPlan(&m)
 			reply.ModelPlan = q.modelPlan(m.ID)
 			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
 		}()
+		if m.EnablePending {
+			return nil
+		}
 		reply.Leave = m.Leaving
 		if m.Leaving {
 			for _, j := range q.s.Jobs {

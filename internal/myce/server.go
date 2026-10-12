@@ -191,7 +191,7 @@ func (l *LlamaEngine) StreamRequest(ctx context.Context, method, path string, bo
 }
 
 func modelFitsMachine(model Model, m *Machine) bool {
-	return contains(model.Platforms, m.GPU) && (model.Device == "" || model.Device == m.Device)
+	return !m.EnablePending && contains(model.Platforms, m.GPU) && (model.Device == "" || model.Device == m.Device)
 }
 
 // WithModelDevice applies a per-process selector; global environment is untouched.
