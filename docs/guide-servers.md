@@ -82,8 +82,8 @@ queue for placement/retry; larger payloads fail explicitly. The worker streams
 the body to the engine, preserving content length. The spool is removed on every
 normal/error return. `queue --upload-spool-bytes` sets a shared positive byte
 budget (default **16 GiB**, enough for two maximum-size uploads); lower it on
-small disks. `--upload-spool-dir` selects the directory, otherwise the OS temp
-directory is used. Known lengths reserve before reading; chunked uploads reserve
+small disks. `--upload-spool-dir` selects the directory, otherwise a private
+`<db>.uploads` directory beside the queue DB is used. Known lengths reserve before reading; chunked uploads reserve
 before each disk write. Bytes stay charged while waiting, running and retrying.
 A full budget returns plain HTTP **507** explaining the limit; an over-8-GiB
 request returns **413**. Failed/aborted uploads remove their files and release
@@ -95,11 +95,66 @@ through the queue while retaining an unbounded replay buffer.
 Responses stream without buffering. A generic stream that loses its worker after
 bytes start aborts its connection; no JSON/SSE error is inserted into binary data.
 Before response bytes start, worker transport failure may retry once on another
-worker. Side-effecting server APIs must be idempotent or accept an application
+worker only with catalog `retry_safe: true` (default false). Side-effecting server APIs must be idempotent or accept an application
 idempotency key: a failed transport cannot prove the server did no work.
 
 The ordinary `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` routes
 continue working for OpenAI-speaking engines, with the unchanged JSON body.
+
+## Private workloads
+
+Generic uploads use 0600 files in a 0700 queue-owned directory. Startup takes
+an exclusive directory lock and deletes owned `myce-model-request-*` leftovers;
+cleanup failure refuses startup. Normal completion, upload/admission errors and
+cancellation unlink the upload and release quota. Choose a dedicated **local
+disk** directory with `queue --upload-spool-dir /local/private/myce-uploads`;
+never put document spools on NAS. Keep the DB local too. Legacy uploads in the
+old OS temporary directory are not claimed automatically; handle them through
+an authorized local cleanup. Unlinking is not forensic erasure. RAM-backed
+storage needs its own swap/core-dump policy.
+
+Set `logs: none` on both Atlas entries. Server and stop-command stdout/stderr
+go to the OS null device, without creating server output logs. The default
+`logs: keep` (also omitted) captures output. Queue and join accept
+`--log-retention`, default `168h` (seven days), strictly positive. Queue batch
+logs expire by final completion age (submission age for terminal jobs with no
+completion timestamp). Worker batch/server logs expire by last-write age at
+startup/within one minute. Active server logs and current unacknowledged batch
+replay remain protected. Retention does not bound active log size or securely
+erase SQLite/WAL, backups or disk remnants. Environment build logs are outside
+this policy. Batch commands must never print confidential inputs/outputs.
+
+Disable request logging in the **exact vLLM 0.27.1 launch command** too.
+`--disable-log-requests` is a candidate flag to **check** against that version's
+`vllm serve --help` or source before use: no offline vLLM source/docs were
+available to verify its 0.27.x spelling. `logs: none` gives Mycelium's
+deterministic no-capture guarantee independently of that flag. Check that
+vLLM and wrappers do not write separate request files or send telemetry.
+
+Models accept `request_timeout` (default `10m`; positive, zero/omitted uses the
+default). It bounds dispatched inference across retries, including stalled
+headers/body reads. Placement still has separate `max_wait`. Before response
+bytes, expiry returns HTTP 504, `model request timeout exceeded`. Started chat
+streams receive a fixed SSE timeout error; started generic streams abort and
+must be discarded. The worker also bounds its engine request and releases its
+in-flight count on failure. Upload duration is not bounded by this field.
+
+Generic `retry_safe` defaults to false. Opt-in permits one transport retry on
+another copy only before client response bytes. This is an assertion of replay
+safety, not deduplication or exactly-once execution. OpenAI chat/completions/
+embeddings retain one pre-response retry. HTTP error bodies and headers become
+a fixed message plus HTTP status; control errors/public diagnostics never echo
+upstream bodies.
+
+Pinned warm-up failures report a fixed error and `retry_at` in status, then
+retry after 1s, 2s, 4s, up to 30s, using the queue Clock. Success clears backoff.
+Only successfully cleaned failures retry; `unload_failed` stays held visibly.
+Pins and retry state persist; a new worker session reloads.
+
+Machine-only egress for arbitrary commands, proxies, installers and server
+telemetry still requires host/network permissions and locally provisioned
+weights/environments. Keep project/model/job labels, argv and configuration
+metadata non-sensitive: authenticated status still shows these supplied fields.
 `llama.cpp` is a preset of this same supervised server engine. The vLLM preset
 starts `vllm serve` on loopback and supplies `served_name`, `max_context`,
 `kv_cache_dtype` and `gpu_memory_utilization` from `vllm`. `args` supplies the
@@ -109,10 +164,10 @@ from `served_name`, so unchanged OpenAI bodies can name the catalog entry.
 Hugging Face and transformers offline mode is enforced; missing weights fail.
 Trusted custom commands must respect the no-download contract too.
 
-See [Atlas example](../examples/atlas-judge-vllm.example.yaml). It mirrors the
-historical Ornith FP8, 262144 context, FP8 KV, 0.65 utilization and parser settings.
-It intentionally has invalid placeholders. It is not measured, deployable, or
-proof of current Spark/runtime qualification. Read current official model and
+See the [Atlas placeholder catalog](../examples/atlas-judge-vllm.example.yaml):
+two generic servers for a roughly 35B chat model and an OCR model, both vLLM
+0.27.1. Use exact approved argv, not the vLLM preset. CPU FastEmbed stays outside
+the GPU queue. This is not deployable or Spark qualification. Read official model and
 runtime guidance and record the effective contract before a hardware run.
 
 ## Immutable multi-file weights

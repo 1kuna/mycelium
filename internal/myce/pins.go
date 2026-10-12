@@ -140,6 +140,9 @@ func (q *Queue) maintainPins() {
 			key := slotKey(m.ID, p.Model)
 			if s := q.s.ModelSlots[key]; s != nil && s.State != "draining" {
 				p.Assigned = m.ID
+				if s.State == "failed" && s.RetryAt != nil && !now.Before(*s.RetryAt) {
+					s.State = "loading"
+				}
 				break
 			}
 			if !q.placementAllowed(&Job{Spec: Spec{Project: p.Project, Priority: "production"}}, m) {

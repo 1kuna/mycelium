@@ -50,6 +50,7 @@ func TestAPIAuthenticationAndFlow(t *testing.T) {
 	}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer secret")
 	API{Queue: q, Token: "secret"}.Handler().ServeHTTP(rr, req)
 	if strings.Contains(rr.Body.String(), "<script>") || !strings.Contains(rr.Body.String(), "&lt;script&gt;") {
 		t.Fatal("status HTML must escape job content")

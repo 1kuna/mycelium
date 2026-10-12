@@ -66,10 +66,20 @@ set +a
 
 Queue binds loopback by default; explicitly select its trusted LAN address for
 fleet use. Recheck port 7331 availability first. The HTML page is read-only but
-unauthenticated; API/model routes use bearer auth. No TLS, public exposure,
+token-protected; HTML/API/model routes require the fleet token. No TLS, public exposure,
 proxy, or firewall changes are part of these recipes.
 
 ## Inventory and foreground start/stop
+
+`myce status` reads `MYCE_TOKEN` as before. Browsers can authenticate the HTML
+page with username `myce` and the fleet token as the Basic-auth password;
+refreshes reuse browser credentials. API clients use Bearer auth. Never put
+tokens in URLs, printed commands, catalogs or screenshots.
+
+Queue and join accept `--log-retention 168h` (default seven days). Confidential
+model entries should use `logs: none`; read the
+[private workload settings](guide-servers.md#private-workloads). Public error
+messages deliberately omit raw upstream, subprocess and filesystem text.
 
 CUDA queries `nvidia-smi` before each start/load and check-in. `join --device ID`
 selects one card per worker and resolves CUDA selectors to stable UUIDs for both

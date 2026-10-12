@@ -137,6 +137,8 @@ func TestWorkerStreamsGenericBodyHeadersAndLength(t *testing.T) {
 
 func TestGenericDiskSpoolReplaysTransportRetry(t *testing.T) {
 	q, _, firstMachine := modelFixture(t)
+	q.models.Models[0].RetrySafe = true
+	firstMachine.ModelConfigHash = modelConfigHash(q.models)
 	var firstCalls, secondCalls atomic.Int32
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		firstCalls.Add(1)

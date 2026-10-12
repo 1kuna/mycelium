@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
 )
 
 // DefaultUploadSpoolBytes bounds the queue's held media to two maximum uploads.
@@ -16,11 +18,13 @@ var errUploadSpoolFull = errors.New("upload spool byte budget exhausted; retry a
 type uploadSpool struct {
 	mu          sync.Mutex
 	dir         string
+	lock        *os.File
+	defaultDir  string
 	limit, used int64
 }
 
 // ConfigureUploadSpool configures queue-local storage before serving requests.
-// An empty directory uses the OS temporary directory. The budget must be positive.
+// An empty directory uses a private directory beside the queue DB. The budget must be positive.
 func (q *Queue) ConfigureUploadSpool(dir string, budget int64) error {
 	if budget <= 0 {
 		return errors.New("upload-spool-bytes must be positive")
@@ -30,11 +34,46 @@ func (q *Queue) ConfigureUploadSpool(dir string, budget int64) error {
 	if q.uploadSpool.used != 0 {
 		return errors.New("cannot configure upload spool while uploads are held")
 	}
-	if dir != "" {
-		if err := os.MkdirAll(dir, 0700); err != nil {
+	if dir == "" {
+		dir = q.uploadSpool.defaultDir
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return err
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	if abs != q.uploadSpool.dir || q.uploadSpool.lock == nil {
+		lock, err := os.OpenFile(abs+".lock", os.O_CREATE|os.O_RDWR, 0600)
+		if err != nil {
 			return err
 		}
+		if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			lock.Close()
+			return errors.New("upload spool already in use")
+		}
+		files, err := filepath.Glob(filepath.Join(abs, "myce-model-request-*"))
+		if err == nil {
+			for _, file := range files {
+				if err = os.Remove(file); err != nil {
+					break
+				}
+			}
+		}
+		if err != nil {
+			lock.Close()
+			return errors.New("upload spool startup cleanup failed")
+		}
+		if q.uploadSpool.lock != nil {
+			q.uploadSpool.lock.Close()
+		}
+		q.uploadSpool.lock = lock
 	}
+	dir = abs
 	q.uploadSpool.dir, q.uploadSpool.limit = dir, budget
 	return nil
 }

@@ -1,12 +1,12 @@
-# EXAMPLE ONLY: not deployable until immutable files and real joint memory are measured.
-# From migration-prep-2026-10-09.md, a historical contract, not current qualification.
+# Placeholder only: supply exact approved Atlas vLLM 0.27.1 argv and manifests.
+# Use generic servers to preserve the inference contract; not the vLLM preset.
 idle_timeout: 10m
 max_wait: 15m
 models:
-  - name: atlas-ornith35-fp8-production
-    engine: vllm
-    environment: atlas-vllm-py313-cu130
-    path: Ornith-1.0-35B-FP8
+  - name: REPLACE_CHAT_CATALOG_NAME
+    engine: server
+    environment: REPLACE_VLLM_0271_ENVIRONMENT
+    path: REPLACE_CHAT_MODEL_DIRECTORY
     size_bytes: REPLACE_WITH_MANIFEST_TOTAL
     sha256: REPLACE_WITH_MANIFEST_IDENTITY
     files: [] # Insert every required local config, tokenizer and weight shard with bytes/hash.
@@ -17,9 +17,27 @@ models:
       CUDA_VISIBLE_DEVICES: '{device}'
     ready_timeout: 15m
     stop_timeout: 30s
-    vllm:
-      served_name: atlas-ornith35-fp8-production
-      max_context: 262144
-      kv_cache_dtype: fp8
-      gpu_memory_utilization: 0.65
-    args: [--reasoning-parser, qwen3, --enable-auto-tool-choice, --tool-call-parser, qwen3_coder]
+    logs: none
+    request_timeout: 10m
+    retry_safe: false
+    start_command: [REPLACE_EXACT_LOCAL_LAUNCHER, "{model}", "{port}"]
+    health_url: 'http://127.0.0.1:{port}/health'
+  - name: REPLACE_OCR_CATALOG_NAME
+    engine: server
+    environment: REPLACE_VLLM_0271_ENVIRONMENT
+    path: REPLACE_OCR_MODEL_DIRECTORY
+    size_bytes: REPLACE_WITH_MANIFEST_TOTAL
+    sha256: REPLACE_WITH_MANIFEST_IDENTITY
+    files: []
+    memory_gb: REPLACE_WITH_MEASURED_TOTAL_GIB
+    platforms: [cuda]
+    logs: none
+    request_timeout: 10m
+    retry_safe: false
+    ready_timeout: 15m
+    stop_timeout: 30s
+    start_command: [REPLACE_EXACT_LOCAL_LAUNCHER, "{model}", "{port}"]
+    health_url: 'http://127.0.0.1:{port}/health'
+# Launchers must exec exact approved foreground argv and bind loopback.
+# Choose request limits and joint memory from approved local measurements.
+# Atlas embeddings use CPU FastEmbed and stay outside this GPU queue.

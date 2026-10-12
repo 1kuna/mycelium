@@ -58,16 +58,16 @@ func (a API) Handler() http.Handler {
 		mux.HandleFunc("POST "+path, a.modelCall)
 	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		s, err := a.Queue.Snapshot()
+		s, err := a.Queue.publicSnapshot()
 		if err != nil {
-			http.Error(w, err.Error(), 500)
+			http.Error(w, "status unavailable", 500)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = statusPage.Execute(w, s)
 	})
-	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) { s, err := a.Queue.Snapshot(); respond(w, s, err) })
+	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) { s, err := a.Queue.publicSnapshot(); respond(w, s, err) })
 	mux.HandleFunc("POST /api/jobs", func(w http.ResponseWriter, r *http.Request) {
 		var s Spec
 		if !decode(w, r, &s) {
@@ -174,7 +174,16 @@ func (a API) Handler() http.Handler {
 		respond(w, map[string]bool{"ok": true}, a.Queue.Leave(r.PathValue("id"), c.Now))
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/") || strings.HasPrefix(r.URL.Path, "/models/")) && (a.Token == "" || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")), []byte(a.Token)) != 1) {
+		credential := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if r.Method == "GET" && (r.URL.Path == "/" || r.URL.Path == "/api/status") {
+			if user, password, ok := r.BasicAuth(); ok && user == "myce" {
+				credential = password
+			}
+		}
+		if a.Token == "" || subtle.ConstantTimeCompare([]byte(credential), []byte(a.Token)) != 1 {
+			if r.URL.Path == "/" {
+				w.Header().Set("WWW-Authenticate", `Basic realm="Mycelium", charset="UTF-8"`)
+			}
 			http.Error(w, "invalid fleet token", 401)
 			return
 		}
@@ -192,7 +201,7 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 		}
 	}
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		http.Error(w, "invalid JSON request", 400)
 		return false
 	}
 	return true
@@ -205,7 +214,7 @@ func respond(w http.ResponseWriter, v any, err error) {
 			status = http.StatusConflict
 		}
 		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "request failed"})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(v)
@@ -259,8 +268,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return &HTTPError{Status: res.StatusCode, Message: string(data)}
+		return &HTTPError{Status: res.StatusCode, Message: "request failed"}
 	}
 	if out != nil {
 		return json.NewDecoder(res.Body).Decode(out)

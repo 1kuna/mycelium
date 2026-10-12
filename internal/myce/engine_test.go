@@ -163,7 +163,7 @@ func TestRuntimeFailedLoadCleanupRetainsMemory(t *testing.T) {
 	rt, m, ctx := runtimeLoadFixture(t, e)
 	rt.load(ctx, m)
 	reports, used := rt.report()
-	if m.state != "unload_failed" || used != 8 || !strings.Contains(reports[0].Error, "process survived") {
+	if m.state != "unload_failed" || used != 8 || reports[0].Error != "model load or unload failed" {
 		t.Fatalf("failed cleanup released reservation: %+v memory=%v", reports, used)
 	}
 }

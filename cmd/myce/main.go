@@ -115,7 +115,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	token := f.String("token", env("MYCE_TOKEN", ""), "shared fleet token (prefer MYCE_TOKEN)")
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce.db", "SQLite database file")
-	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default OS temporary directory)")
+	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
+	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total bytes held in the queue model-upload spool")
 	checkpoint := f.String("checkpoints", "./checkpoints", "queue NAS checkpoint root")
 	workerCheckpoint := f.String("checkpoint-root", env("MYCE_CHECKPOINT_ROOT", ""), "worker-local NAS root (may differ from queue mount path)")
@@ -243,6 +244,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
+		if err = q.ConfigureLogRetention(*logRetention); err != nil {
+			return err
+		}
 		if err = q.ConfigureUploadSpool(*uploadSpoolDir, *uploadSpoolBytes); err != nil {
 			return err
 		}
@@ -323,7 +327,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err != nil {
 			return err
 		}
-		w := myce.Worker{Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":

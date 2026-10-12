@@ -179,7 +179,8 @@ also stops non-resumable lower-priority batches immediately; deadlines grant
 or surrender their memory to other work.
 
 `max_wait` defaults to five minutes and bounds queue/load waiting (including a
-retry's placement). It is not an inference execution limit. Clients should use
+retry's placement). Inference has a separate per-model `request_timeout`
+(default `10m`). Clients should use
 a timeout that includes loading and inference. The load process itself has the
 worker's configured maximum wait. A failed load returns a clear error and a
 later request can try loading again.

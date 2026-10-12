@@ -32,6 +32,9 @@ type VLLMPreset struct {
 	GPUMemoryUtilization float64 `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
 }
 type Model struct {
+	RequestTimeout  time.Duration     `yaml:"request_timeout,omitempty" json:"request_timeout,omitempty"`
+	RetrySafe       bool              `yaml:"retry_safe,omitempty" json:"retry_safe,omitempty"`
+	Logs            string            `yaml:"logs,omitempty" json:"logs,omitempty"`
 	HostMemoryGB    float64           `yaml:"host_memory_gb,omitempty" json:"host_memory_gb,omitempty"`
 	MaxInFlight     int               `yaml:"max_in_flight,omitempty" json:"max_in_flight,omitempty"`
 	Files           []ModelFile       `yaml:"files,omitempty" json:"files,omitempty"`
@@ -92,6 +95,12 @@ func validateModels(c ModelConfig) error {
 		if !validMemoryValue(m.HostMemoryGB) {
 			return errors.New("host_memory_gb must be finite and nonnegative")
 		}
+		if m.RequestTimeout < 0 {
+			return errors.New("request_timeout must be positive (zero uses 10m)")
+		}
+		if m.Logs != "" && m.Logs != "keep" && m.Logs != "none" {
+			return errors.New("logs must be keep or none")
+		}
 		if m.MaxInFlight < 0 {
 			return errors.New("max_in_flight must be nonnegative (zero means unlimited)")
 		}
@@ -144,6 +153,8 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
+	RetryAt           *time.Time         `json:"retry_at,omitempty"`
+	RetryDelay        time.Duration      `json:"retry_delay,omitempty"`
 	ReleasingCalls    bool               `json:"releasing_calls,omitempty"`
 	Recovering        bool               `json:"recovering,omitempty"`
 	ProductionUsed    bool               `json:"production_used,omitempty"`
@@ -300,20 +311,32 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 				if r.State == "failed" {
 					for _, c := range q.calls {
 						if c.Model == s.Model && c.Machine == "" {
-							c.Error = "model load failed: " + r.Error
+							c.Error = "model load failed"
 						}
 					}
 					if q.slotPinned(s) {
+						if s.State != "failed" || s.RetryAt == nil {
+							if s.RetryDelay == 0 {
+								s.RetryDelay = time.Second
+							} else {
+								s.RetryDelay = min(s.RetryDelay*2, 30*time.Second)
+							}
+							next := q.clock.Now().Add(s.RetryDelay)
+							s.RetryAt = &next
+						}
 						s.State = "failed"
-						s.Error = r.Error
+						s.Error = "model load or unload failed"
 					} else {
 						delete(q.s.ModelSlots, key)
 					}
 				} else if r.State == "unload_failed" {
 					s.State = "unload_failed"
-					s.Error = r.Error
+					s.Error = "model load or unload failed"
 				} else if r.State == "ready" && s.State == "loading" {
 					s.State = "ready"
+					s.Error = ""
+					s.RetryAt = nil
+					s.RetryDelay = 0
 					s.LastUsed = q.clock.Now()
 				} else if r.State == "unloaded" && s.State == "draining" && s.InFlight == 0 {
 					delete(q.s.ModelSlots, key)
@@ -719,7 +742,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		}
 		body.Model, e = url.PathUnescape(parts[0])
 		if e != nil {
-			modelError(w, 400, e.Error())
+			modelError(w, 400, "invalid model request")
 			return
 		}
 		body.Stream = true
@@ -736,18 +759,25 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(e, errUploadSpoolFull) {
 				status = http.StatusInsufficientStorage
 			}
-			http.Error(w, e.Error(), status)
+			message := "model upload failed"
+			if errors.Is(e, errModelRequestTooLarge) {
+				message = "model request too large"
+			}
+			if errors.Is(e, errUploadSpoolFull) {
+				message = errUploadSpoolFull.Error()
+			}
+			http.Error(w, message, status)
 			return
 		}
 		defer func() {
 			if err := spool.Close(); err != nil {
-				log.Printf("model upload spool cleanup: %v", err)
+				log.Print("model upload spool cleanup failed")
 			}
 		}()
 	} else {
 		data, e = io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))
 		if e != nil {
-			modelError(w, 400, e.Error())
+			modelError(w, 400, "invalid model request")
 			return
 		}
 		if e = json.Unmarshal(data, &body); e != nil {
@@ -755,13 +785,18 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	a.Queue.mu.Lock()
+	model, _ := a.Queue.model(body.Model)
+	a.Queue.mu.Unlock()
+	retrySafe := !generic || model.RetrySafe
+	var requestUntil time.Time
 	c.Model = body.Model
 	if !generic && body.Stream && r.URL.Path != "/v1/chat/completions" {
 		modelError(w, 400, "streaming is supported for chat only")
 		return
 	}
 	if e = a.Queue.addCall(c); e != nil {
-		modelError(w, 400, e.Error())
+		modelError(w, 400, "invalid model request")
 		return
 	}
 	defer a.Queue.finishCall(c.ID)
@@ -774,18 +809,23 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		}
 		var call ModelCall
 		var target string
-		var timedOut bool
+		var timedOut, requestExpired bool
 		e = a.Queue.update(func() error {
 			a.Queue.maintain()
 			call = *a.Queue.calls[c.ID]
 			timedOut = a.Queue.clock.Now().Sub(call.Queued) >= a.Queue.models.Wait
+			requestExpired = !requestUntil.IsZero() && !a.Queue.clock.Now().Before(requestUntil)
 			if m := a.Queue.s.Machines[call.Machine]; m != nil && !m.Gone && m.Session == call.Session {
 				target = m.ModelURL
 			}
 			return nil
 		})
 		if e != nil {
-			modelError(w, 503, e.Error())
+			modelError(w, 503, "model call failed")
+			return
+		}
+		if requestExpired {
+			modelError(w, 504, errModelRequestTimeout.Error())
 			return
 		}
 		if call.Error != "" {
@@ -797,19 +837,25 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if target == "" && call.Machine != "" {
-			if attempt >= 1 {
-				modelError(w, 503, "model call failed after one retry on another worker")
+			if !retrySafe || attempt >= 1 {
+				modelError(w, 503, "model call failed; retry unavailable or exhausted")
 				return
 			}
 			attempt++
 			if e = a.Queue.retryCall(c.ID); e != nil {
-				modelError(w, 503, e.Error())
+				modelError(w, 503, "model call failed")
 				return
 			}
 			continue
 		}
 		if target != "" {
-			proxyCtx, cancel := context.WithCancel(r.Context())
+			if requestUntil.IsZero() {
+				a.Queue.mu.Lock()
+				requestUntil = a.Queue.clock.Now().Add(model.requestTimeout())
+				a.Queue.mu.Unlock()
+			}
+			proxyCtx, cancelCause := context.WithCancelCause(r.Context())
+			cancel := func() { cancelCause(context.Canceled) }
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
@@ -823,8 +869,13 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 						a.Queue.mu.Lock()
 						m := a.Queue.s.Machines[call.Machine]
 						live := a.Queue.calls[c.ID]
+						expired := !a.Queue.clock.Now().Before(requestUntil)
 						lost := m == nil || m.Gone || m.Session != call.Session || live != nil && live.Error != ""
 						a.Queue.mu.Unlock()
+						if expired {
+							cancelCause(errModelRequestTimeout)
+							return
+						}
 						if lost {
 							cancel()
 							return
@@ -837,7 +888,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 				if _, e = spool.Seek(0, io.SeekStart); e != nil {
 					cancel()
 					<-done
-					modelError(w, 503, e.Error())
+					modelError(w, 503, "model call failed")
 					return
 				}
 				// LimitReader intentionally exposes only io.Reader, so the HTTP
@@ -852,7 +903,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				cancel()
 				<-done
-				modelError(w, 503, e.Error())
+				modelError(w, 503, "model call failed")
 				return
 			}
 			req.Header = proxyHeaders(r.Header)
@@ -863,7 +914,27 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			}
 
 			res, e := modelHTTPClient.Do(req)
-			if e == nil && (generic || res.StatusCode < 500) {
+			a.Queue.mu.Lock()
+			expired := !a.Queue.clock.Now().Before(requestUntil)
+			a.Queue.mu.Unlock()
+			if expired {
+				if res != nil {
+					res.Body.Close()
+				}
+				cancelCause(errModelRequestTimeout)
+				<-done
+				modelError(w, 504, errModelRequestTimeout.Error())
+				return
+			}
+			if e == nil && res.StatusCode >= 400 && (generic || res.StatusCode < 500) {
+				status := res.StatusCode
+				res.Body.Close()
+				cancel()
+				<-done
+				modelError(w, status, "upstream model request failed")
+				return
+			}
+			if e == nil && res.StatusCode < 400 {
 				if !body.Stream {
 					response, readErr := io.ReadAll(res.Body)
 					if readErr == nil {
@@ -899,7 +970,11 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 						}
 						if readErr != nil {
 							if readErr != io.EOF && started && !generic {
-								_, _ = fmt.Fprint(w, "\ndata: {\"error\":{\"message\":\"worker lost after streaming response started; unsafe to retry\"}}\n\n")
+								message := "worker lost after streaming response started; unsafe to retry"
+								if errors.Is(context.Cause(proxyCtx), errModelRequestTimeout) {
+									message = errModelRequestTimeout.Error()
+								}
+								_, _ = fmt.Fprintf(w, "\ndata: {\"error\":{\"message\":%q}}\n\n", message)
 								if f, ok := w.(http.Flusher); ok {
 									f.Flush()
 								}
@@ -929,8 +1004,18 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			if res != nil {
 				res.Body.Close()
 			}
+			a.Queue.mu.Lock()
+			expired = !a.Queue.clock.Now().Before(requestUntil)
+			a.Queue.mu.Unlock()
+			if expired {
+				cancelCause(errModelRequestTimeout)
+			}
 			cancel()
 			<-done
+			if errors.Is(context.Cause(proxyCtx), errModelRequestTimeout) {
+				modelError(w, 504, errModelRequestTimeout.Error())
+				return
+			}
 			if r.Context().Err() != nil {
 				return
 			}
@@ -945,14 +1030,14 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 				modelError(w, 503, preempted)
 				return
 			}
-			if attempt >= 1 {
-				modelError(w, 503, "model call failed after one retry on another worker")
+			if !retrySafe || attempt >= 1 {
+				modelError(w, 503, "model call failed; retry unavailable or exhausted")
 				return
 			}
 			attempt++
 			e = a.Queue.retryCall(c.ID)
 			if e != nil {
-				modelError(w, 503, e.Error())
+				modelError(w, 503, "model call failed")
 				return
 			}
 		}
@@ -1138,4 +1223,13 @@ func (q *Queue) makeBatchRoom(j *Job, planned map[string]bool) string {
 		s.State = "draining"
 	}
 	return best.machine
+}
+
+var errModelRequestTimeout = errors.New("model request timeout exceeded")
+
+func (m Model) requestTimeout() time.Duration {
+	if m.RequestTimeout == 0 {
+		return 10 * time.Minute
+	}
+	return m.RequestTimeout
 }
