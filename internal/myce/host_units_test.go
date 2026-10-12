@@ -224,3 +224,37 @@ func TestInstalledWorkerConditionAbsolutePath(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemdGraceWithoutMutableTimeoutProperty(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1000, 0)}
+	killed := false
+	unit := "myce-worker@gpu1.service"
+	s := &SystemdHostService{Unit: unit, Clock: clock, Command: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if args[1] == "set-property" {
+			return nil, os.ErrPermission
+		}
+		if args[1] == "kill" {
+			killed = true
+		}
+		state := "deactivating"
+		group := "/user.slice/" + unit
+		if killed {
+			state = "inactive"
+			group = ""
+		}
+		return []byte("LoadState=loaded\nKillMode=control-group\nSendSIGKILL=yes\nActiveState=" + state + "\nControlGroup=" + group + "\n"), nil
+	}, ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }}
+	if err := s.Stop(context.Background(), 3*time.Second); err != nil {
+		t.Fatal("normal disable must work without mutable TimeoutStopUSec", err)
+	}
+	if empty, err := s.Empty(context.Background()); err != nil || empty || killed {
+		t.Fatal("killed before grace", empty, err)
+	}
+	clock.now = clock.now.Add(3 * time.Second)
+	if _, err := s.Empty(context.Background()); err != nil || !killed {
+		t.Fatal("grace did not kill cgroup", err)
+	}
+	if empty, err := s.Empty(context.Background()); err != nil || !empty {
+		t.Fatal("kill not confirmed", empty, err)
+	}
+}
