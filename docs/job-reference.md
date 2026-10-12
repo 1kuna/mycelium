@@ -423,6 +423,10 @@ empty when no device is selected), and `MYCE_MACHINE` (worker name, not host ID)
 Queue-managed model servers receive the same three variables on every load.
 `run.env` and catalog overrides cannot change them. Existing CUDA/XPU visibility
 selectors still apply; these variables describe placement, not a hardware fence.
+`MYCE_DEVICES` contains physical selectors, not framework-local indices. XPU
+`ZE_AFFINITY_MASK=1` is paired with `ONEAPI_DEVICE_SELECTOR=level_zero:0`: use
+`xpu:0` inside that process. A mask `0,1` uses `level_zero:0,1`. CUDA also
+renumbers `CUDA_VISIBLE_DEVICES`: one selected physical card is `cuda:0`.
 `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR` retain their existing
 command-only contract. `MYCE_TOKEN` remains removed from payload environments.
 
@@ -507,8 +511,15 @@ is `/myce/checkpoint`, bind-mounted from the worker's prepared attempt directory
 removed from the Docker client and never forwarded. MYCE identity overrides
 in Docker `--env` are rejected. `CUDA_VISIBLE_DEVICES`, `ONEAPI_DEVICE_SELECTOR`
 and `ZE_AFFINITY_MASK` are worker-owned: neither `run.env` nor Docker `--env`
-may override them. Configure the worker device instead. GPU device mappings and image/library behavior
-still need native qualification. Declared host RAM ceilings are enforced through
+may override them. Configure the worker device instead. Docker `--device`
+mappings are forwarded as declared; Mycelium does not add or translate render
+nodes. Keep the Intel card inventory visible in the container
+(for example, pass both `/dev/dri/renderD128` and `/dev/dri/renderD129` for a
+two-card host) when using the host physical affinity mask. Passing only one card
+can renumber the container inventory before the mask is applied; do not assume
+that a host mask `1` still identifies it. After the mask, SYCL/PyTorch use local
+index zero for a single card. GPU mappings and image/library behavior still
+need native qualification. Declared host RAM ceilings are enforced through
 worker-owned Docker memory flags and verified inspection; device isolation still
 requires qualification.
 
