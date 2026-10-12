@@ -528,3 +528,92 @@ Use managed direct argv for production handover. A managed job cannot forget
 its label; inspection mismatches remain visibly unconfirmed and no unrelated
 container is signaled. Docker-backed catalog model servers are not covered by
 this batch adapter; keep them out of a containment-qualified handover.
+
+### Private networks and worker-owned sidecars
+
+Add `run.docker_network: private` to a managed batch. The worker creates one
+`myce-<opaque attempt ID>` bridge with `--internal` and the exact `myce.attempt`
+label. Each container joins only that network and receives
+`MYCE_DOCKER_NETWORK`, attempt/checkpoint identity, and placement/device selectors.
+No outbound option is offered: models and images must be local and work offline.
+Without this field the managed container uses `--network none`.
+
+`run.docker_sidecars` is an optional ordered list with unique lowercase DNS
+`name` (1–63 letters/digits/hyphens; `main` is reserved), direct Docker `command`,
+positive `memory_gb`, optional `env`, optional `memory_swap`, and optional
+`readiness: {port, path, timeout}`. Main retains `run.command` and declares
+positive `run.docker_memory_gb`. Sidecars require this main declaration and the
+private network. The worker starts sidecars in order, awaits each configured
+HTTP GET readiness (2xx), then starts main. DNS aliases are the declared names
+and `main`. Jobs have no Docker socket and cannot launch containers themselves.
+Readiness probes use the inspected container IP from the worker, without proxies
+or redirects. The worker must reach the daemon's bridge IP (normally local Linux);
+Docker Desktop/remote bridge reachability is not assumed. Unreachable probes fail
+at their positive declared timeout, measured with the injected Clock.
+
+Each container's limit must individually fit `needs.host_memory_gb`; their sum
+may exceed it. Admission and the host budget charge the job's measured
+simultaneous need, rather than summing peaks at different times. Each Docker
+`--memory` limit is supplied and verified separately. This is not a shared kernel
+ceiling: overlapping peaks can exceed the declared simultaneous need, so qualify
+the actual workload overlap.
+
+Main's `run.docker_memory_swap` and sidecar `memory_swap` are optional GiB values
+for Docker's total RAM plus swap limit (`--memory-swap`), at least the container's
+RAM limit. Equal to RAM explicitly forbids swap. When omitted, the worker leaves
+the flag unset: Docker's daemon default applies (normally RAM plus an equal swap
+allowance when host swap is available). Native `--memory-swap-max-bytes` still
+defaults to zero for native cgroups; it does not configure managed Docker.
+Swap-free Verso production is not qualified.
+
+A Verso-shaped production batch (replace placeholders with real local digests
+and use measured memory/device mappings):
+
+```yaml
+name: verso-recording-batch
+project: verso
+priority: production
+run:
+  docker: true
+  docker_network: private
+  docker_memory_gb: 24
+  # docker_memory_swap: 28  # optional total RAM plus swap, GiB
+  command: [docker, run, --device, /dev/dri/renderD128, "PIPELINE@sha256:REPLACE_WITH_64_HEX_DIGITS", python, /app/process.py]
+  env:
+    SORTFORMER_URL: http://sortformer:8080
+    NAMING_URL: http://naming:8080
+  docker_sidecars:
+    - name: sortformer
+      memory_gb: 16
+      command: [docker, run, --device, /dev/dri/renderD128, "SORTFORMER@sha256:REPLACE_WITH_64_HEX_DIGITS", python, /app/server.py]
+      readiness: {port: 8080, path: /health, timeout: 120s}
+    - name: naming
+      memory_gb: 12
+      command: [docker, run, --device, /dev/dri/renderD128, "NAMING@sha256:REPLACE_WITH_64_HEX_DIGITS", python, /app/server.py]
+      readiness: {port: 8080, path: /health, timeout: 120s}
+needs:
+  memory_gb: 24
+  host_memory_gb: 24.5
+  platform: [xpu]
+resumable: false
+```
+
+These memory values illustrate nonsummed peaks, not qualification evidence.
+Verso's CPU api/worker/render services remain outside Mycelium. This is a batch
+lifecycle, not a Docker-backed catalog model server.
+
+Main's exit code determines the result; early sidecar exit fails the job. Main
+exit stops remaining sidecars with ordinary grace, then KILL. Stop, restart,
+loss reconciliation and `myce disable` stop all labeled containers, confirm
+nonrunning/absent execution, disconnect owned stopped endpoints, remove labeled
+networks, and confirm network absence. Stopped containers remain evidence;
+networks do not. RAM custody stays held until both proofs succeed. Late containers
+are rescanned. Stuck removal uses existing cleanup status, the two-minute
+`docker_cleanup_escalated` event and `myce resolve-docker`; that assertion must
+also cover network absence.
+
+Publishing host ports (including publish-all), host networking, joining other
+networks, socket mounts, privileged mode and submitted network/alias/lifecycle
+flags remain forbidden. Inspected violations stop the whole attempt with a
+specific reason. Labels are inspected before removal; unlabeled networks and
+unrelated containers are never touched.

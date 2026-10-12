@@ -505,9 +505,10 @@ func (q *Queue) backgroundPreparing(m *Machine) bool {
 
 // Lost/stopping Docker executions fence the physical host, even without host policy.
 func (q *Queue) dockerBlocker(host string) string {
+	reported := ""
 	for _, m := range q.s.Machines {
 		if hostID(m) == host && m.DockerCleanup != "" {
-			return host + ": Docker cleanup unconfirmed; " + m.DockerCleanup
+			reported = host + ": Docker cleanup unconfirmed; " + m.DockerCleanup
 		}
 	}
 	waiting := ""
@@ -523,6 +524,9 @@ func (q *Queue) dockerBlocker(host string) string {
 			return reason + "; operator action required (myce resolve-docker)"
 		}
 		waiting = reason
+	}
+	if reported != "" {
+		return reported
 	}
 	return waiting
 }

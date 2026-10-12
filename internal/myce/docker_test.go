@@ -87,14 +87,21 @@ func TestDockerCLIHelper(t *testing.T) {
 		time.Sleep(time.Minute)
 		os.Exit(1)
 	}
+	if fakeDockerNetwork(root, args, string(mode)) {
+		os.Exit(0)
+	}
 	switch args[0] {
 	case "create":
+		if _, e := os.Stat(filepath.Join(root, "network")); e == nil {
+			fakeDockerGroupCreate(root, args)
+			os.Exit(0)
+		}
 		if string(mode) == "refuse-create" {
 			fmt.Fprintln(os.Stderr, "Error response from daemon: create refused")
 			os.Exit(1)
 		}
 		for i, arg := range args {
-			if (arg == "--memory" || arg == "--memory-swap") && i+1 < len(args) {
+			if (arg == "--memory" || arg == "--memory-swap" || arg == "--network") && i+1 < len(args) {
 				_ = os.WriteFile(filepath.Join(root, arg), []byte(args[i+1]), 0600)
 			}
 			if arg == "--label" && i+1 < len(args) && strings.HasPrefix(args[i+1], "myce.attempt=") {
@@ -111,6 +118,11 @@ func TestDockerCLIHelper(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(root, "created"), []byte("id1"), 0600)
 		fmt.Println("id1")
 	case "start":
+		if strings.HasPrefix(args[1], "sidecar-") {
+			_ = os.WriteFile(filepath.Join(root, "running-"+args[1]), nil, 0600)
+			fmt.Println(args[1])
+			os.Exit(0)
+		}
 		if string(mode) == "late" {
 			c := exec.Command(os.Args[0], "-test.run=^TestDockerCLIHelper$", "--", "late")
 			c.Env = os.Environ()
@@ -123,6 +135,10 @@ func TestDockerCLIHelper(t *testing.T) {
 		}
 		fmt.Println("id1")
 	case "ps":
+		paths, _ := filepath.Glob(filepath.Join(root, "object-sidecar-*.json"))
+		for _, p := range paths {
+			fmt.Println(strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), "object-"), ".json"))
+		}
 		if !slices.Contains(args, "label=myce.attempt") && !strings.Contains(strings.Join(args, " "), "label=myce.attempt=") {
 			if _, e := os.Stat(filepath.Join(root, "unlabeled")); e == nil {
 				fmt.Println("legacy")
@@ -139,6 +155,10 @@ func TestDockerCLIHelper(t *testing.T) {
 			}
 		}
 	case "inspect":
+		if _, e := os.Stat(filepath.Join(root, "network")); e == nil {
+			fakeDockerGroupInspect(root, args[1:], string(mode))
+			os.Exit(0)
+		}
 		if string(mode) == "bad-inspect" {
 			label, _ := os.ReadFile(filepath.Join(root, "label"))
 			fmt.Printf(`[{"Id":"id1","Config":{"Labels":{"myce.attempt":%q}},"State":{}}]`, string(label))
@@ -172,7 +192,7 @@ func TestDockerCLIHelper(t *testing.T) {
 			if string(mode) == "missing-memory-limit" {
 				memory = 0
 			}
-			objects = append(objects, map[string]any{"HostConfig": map[string]any{"Memory": memory, "MemorySwap": memorySwap}, "Id": id, "Config": map[string]any{"Labels": map[string]string{"myce.attempt": objectLabel}}, "State": map[string]any{"Running": running, "Status": status, "ExitCode": 0, "OOMKilled": string(mode) == "docker-oom"}})
+			objects = append(objects, map[string]any{"HostConfig": map[string]any{"Memory": memory, "MemorySwap": memorySwap, "NetworkMode": "none"}, "Id": id, "Config": map[string]any{"Labels": map[string]string{"myce.attempt": objectLabel}}, "State": map[string]any{"Running": running, "Status": status, "ExitCode": 0, "OOMKilled": string(mode) == "docker-oom"}})
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(objects)
 		if string(mode) == "late" {
@@ -181,6 +201,10 @@ func TestDockerCLIHelper(t *testing.T) {
 			}
 		}
 	case "kill":
+		if strings.HasPrefix(args[2], "sidecar-") && (args[1] == "--signal=KILL" || string(mode) == "term") {
+			_ = os.Rename(filepath.Join(root, "running-"+args[2]), filepath.Join(root, "stopped-"+args[2]))
+			os.Exit(0)
+		}
 		if string(mode) == "refuse-kill" {
 			fmt.Fprintln(os.Stderr, "Error response from daemon: kill refused")
 			os.Exit(1)
@@ -234,7 +258,7 @@ func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string
 	hostDir := t.TempDir()
 	t.Setenv("MYCE_HOST_STATE_DIR", hostDir)
 	clock := &dockerTestClock{now: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)}
-	w := Worker{HostStateDir: hostDir, Machine: machine("docker-worker", "fake"), StateDir: t.TempDir(), Clock: clock}
+	w := Worker{HostStateDir: hostDir, Machine: machine("docker-worker", "fake"), StateDir: t.TempDir(), Clock: clock, HostMemorySource:func(context.Context)(float64,error){return 32,nil}}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)

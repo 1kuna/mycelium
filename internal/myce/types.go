@@ -78,10 +78,14 @@ type Spec struct {
 	Priority string     `json:"priority" yaml:"priority"`
 	Deadline *time.Time `json:"deadline,omitempty" yaml:"deadline,omitempty"`
 	Run      struct {
-		Docker  bool              `json:"docker,omitempty" yaml:"docker,omitempty"`
-		Command []string          `json:"command" yaml:"command"`
-		Workdir string            `json:"workdir,omitempty" yaml:"workdir,omitempty"`
-		Env     map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+		Docker           bool              `json:"docker,omitempty" yaml:"docker,omitempty"`
+		DockerNetwork    string            `json:"docker_network,omitempty" yaml:"docker_network,omitempty"`
+		DockerMemoryGB   float64           `json:"docker_memory_gb,omitempty" yaml:"docker_memory_gb,omitempty"`
+		DockerMemorySwap *float64          `json:"docker_memory_swap,omitempty" yaml:"docker_memory_swap,omitempty"`
+		DockerSidecars   []DockerSidecar   `json:"docker_sidecars,omitempty" yaml:"docker_sidecars,omitempty"`
+		Command          []string          `json:"command" yaml:"command"`
+		Workdir          string            `json:"workdir,omitempty" yaml:"workdir,omitempty"`
+		Env              map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
 	} `json:"run" yaml:"run"`
 	Needs struct {
 		MemoryGB     float64  `json:"memory_gb" yaml:"memory_gb"`
@@ -115,6 +119,9 @@ func (s Spec) Validate() error {
 	}
 	if !validMemoryValue(s.Needs.HostMemoryGB) {
 		return errors.New("needs.host_memory_gb must be finite and nonnegative")
+	}
+	if err := s.validateDockerGroup(); err != nil {
+		return err
 	}
 	if s.Run.Docker {
 		for name := range s.Run.Env {
@@ -281,6 +288,7 @@ type Reply struct {
 	GraceSeconds    float64             `json:"grace_seconds"`
 }
 type Result struct {
+	OperatorStop   bool   `json:"operator_stop,omitempty"`
 	ReleaseOnly    bool   `json:"release_only,omitempty"`
 	Forced         bool   `json:"forced,omitempty"`
 	ReleasePending bool   `json:"release_pending,omitempty"`

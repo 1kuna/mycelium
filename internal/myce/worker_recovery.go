@@ -39,6 +39,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	OperatorStopped bool                   `json:"operator_stopped,omitempty"`
 	Groups          map[int]map[int]string `json:"-"`
 	LaunchPending   bool                   `json:"launch_pending,omitempty"`
 	Birth           string                 `json:"birth,omitempty"`
@@ -94,8 +95,34 @@ func (w Worker) openStore() (*workerStore, error) {
 		s.close()
 		return nil, fmt.Errorf("read worker state: %w", err)
 	}
+	if err = s.readOperatorStop(); err != nil {
+		s.close()
+		return nil, err
+	}
 	return s, nil
 }
+
+// The binary-free marker is an atomic snapshot of state.json taken before unit stop.
+func (s *workerStore) readOperatorStop() error {
+	data, err := os.ReadFile(filepath.Join(s.dir, "operator-stop.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var marker workerState
+	if err = json.Unmarshal(data, &marker); err != nil {
+		return fmt.Errorf("read operator-stop marker: %w", err)
+	}
+	st := &s.state
+	if marker.Job != nil && marker.Result == nil && st.Job != nil && marker.Identity != "" && marker.Identity == st.Identity && marker.Session == st.Session && marker.Job.ID == st.Job.ID && marker.Job.Attempt == st.Job.Attempt {
+		st.OperatorStopped = true
+		return s.save()
+	}
+	return nil
+}
+
 func (s *workerStore) close() {
 	_ = syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN)
 	_ = s.lock.Close()

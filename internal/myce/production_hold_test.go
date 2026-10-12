@@ -937,3 +937,63 @@ func TestProductionHoldKillsLateCopyDuringNASLoss(t *testing.T) {
 		t.Fatalf("late copy replaced the current attempt: %+v", got)
 	}
 }
+
+func TestProductionHoldSequentialStageGap(t *testing.T) {
+	for _, gap := range []time.Duration{5 * time.Second, 200 * time.Second} {
+		t.Run(gap.String(), func(t *testing.T) {
+			q, c, a, b, _ := holdFleet(t, true)
+			stage := spec("production")
+			stage.AllowedMachines = []string{a.ID}
+			first := submit(t, q, stage)
+			running := check(t, q, a, nil).Job
+			if running == nil || running.ID != first.ID {
+				t.Fatal("stage A not assigned")
+			}
+			experiment := spec("experiment")
+			experiment.AllowedMachines = []string{b.ID}
+			waiting := submit(t, q, experiment)
+			finish(t, q, running, true)
+			if check(t, q, b, nil).Job != nil {
+				t.Fatal("experiment admitted immediately after stage A")
+			}
+			if gap == 5*time.Second {
+				c.Advance(gap)
+				if check(t, q, b, nil).Job != nil {
+					t.Fatal("experiment admitted in five-second stage gap")
+				}
+			} else {
+				c.Advance(179 * time.Second)
+				check(t, q, a, nil)
+				if check(t, q, b, nil).Job != nil {
+					t.Fatal("experiment admitted before A's 180-second idle interval")
+				}
+				c.Advance(time.Second)
+				between := check(t, q, b, nil).Job
+				if between == nil || between.ID != waiting.ID {
+					t.Fatal("experiment did not run during long stage gap")
+				}
+				finish(t, q, between, true)
+				c.Advance(gap - 180*time.Second)
+				waiting = submit(t, q, experiment)
+			}
+			second := submit(t, q, stage)
+			if check(t, q, b, nil).Job != nil {
+				t.Fatal("experiment admitted while stage B waits")
+			}
+			running = check(t, q, a, nil).Job
+			if running == nil || running.ID != second.ID {
+				t.Fatal("stage B not assigned")
+			}
+			finish(t, q, running, true)
+			c.Advance(179 * time.Second)
+			check(t, q, a, nil)
+			if check(t, q, b, nil).Job != nil {
+				t.Fatal("experiment admitted before 180 seconds from B completion")
+			}
+			c.Advance(time.Second)
+			if got := check(t, q, b, nil).Job; got == nil || got.ID != waiting.ID {
+				t.Fatal("experiment not admitted 180 seconds after stage B")
+			}
+		})
+	}
+}

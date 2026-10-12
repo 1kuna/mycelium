@@ -720,6 +720,7 @@ func (q *Queue) current(r Result) (*Job, error) {
 func (q *Queue) Complete(r Result) error {
 	return q.update(func() error {
 		q.maintainStartDeadlines()
+		operatorMatched := q.refundOperatorStop(r)
 		if r.ReleaseOnly {
 			if r.ReleasePending {
 				return errors.New("release-only acknowledgement cannot be pending")
@@ -735,6 +736,15 @@ func (q *Queue) Complete(r Result) error {
 			}
 			q.maintain()
 			return nil
+		}
+		if operatorMatched {
+			if _, e := q.current(r); e != nil {
+				if !r.ReleasePending {
+					q.settleRelease(r)
+				}
+				q.maintain()
+				return nil
+			}
 		}
 		settled := false
 		pendingTracked := false
@@ -801,6 +811,9 @@ func (q *Queue) Complete(r Result) error {
 			} else {
 				q.retry(j, j.Reason)
 			}
+		} else if r.Interrupted && r.OperatorStop {
+			q.retry(j, "requeued: stopped by operator")
+			j.RequeuedByOperator = true
 		} else if r.Interrupted {
 			j.Losses++
 			q.chargeLoss(j)

@@ -319,6 +319,15 @@ cgroup path before stopping, because systemd may remove the empty cgroup:
 
 ```sh
 unit=myce-worker.service
+# Use this unit's actual --state-dir (inspect systemctl --user cat "$unit").
+worker_spool="$HOME/.local/share/myce/worker"
+# Snapshot operator intent BEFORE stopping; no myce binary is needed.
+umask 077
+cp "$worker_spool/state.json" "$worker_spool/operator-stop.json.tmp" &&
+  sync "$worker_spool/operator-stop.json.tmp" &&
+  mv "$worker_spool/operator-stop.json.tmp" "$worker_spool/operator-stop.json" &&
+  sync "$worker_spool"
+# If snapshotting failed, fix that error before stopping when practical.
 worker_cgroup=$(systemctl --user show "$unit" -p ControlGroup --value)
 systemctl --user disable --now "$unit"
 systemctl --user show "$unit" -p ActiveState -p MainPID -p ControlGroup
@@ -342,6 +351,12 @@ docker ps --filter label=myce.attempt --format '{{.ID}}'
 docker inspect --format '{{ index .Config.Labels "myce.attempt" }}' CONTAINER_ID
 # Only after confirming its nonempty Mycelium attempt label and ownership:
 docker rm -f CONTAINER_ID
+# After ALL containers for the exact attempt are nonrunning/absent:
+docker network ls --filter label=myce.attempt=ATTEMPT_ID --no-trunc
+docker network inspect --format '{{ index .Labels "myce.attempt" }}' NETWORK_ID
+# Confirm exact ownership; disconnect owned stopped endpoints first.
+docker network rm NETWORK_ID
+# Repeat filtered inventory and confirm no labeled network remains.
 ```
 
 For a single instance, filter with `label=myce.attempt=ATTEMPT_ID` from its saved
@@ -350,8 +365,24 @@ Verso/Atlas containers. Pending Docker create/start custody still requires the
 recovery procedure under **Docker cleanup custody**; an empty inventory cannot
 rule out a delayed start.
 
+The marker is exactly `<worker --state-dir>/operator-stop.json`; for the manual
+unit above it is `$HOME/.local/share/myce/worker/operator-stop.json`. Its format is
+an unmodified JSON snapshot of that spool's `state.json`, containing active
+`session`, `identity`, and `job.id`/`job.attempt`. Installed instances can use
+other directories: use the selected unit's actual spool, never a sibling's.
+Startup durably imports intent only if these fields match the current execution
+and the snapshot has no completed result. Stale markers cannot apply to a new
+attempt; preserve the marker with the spool as evidence. This is intent, not
+proof of process/container/network release. Never use `touch DISABLED` instead.
+
 The queue handles host loss and requeues unfinished batch work after its
 configured loss/recovery handling; model calls fail and callers retry them.
+After cleanup and reconnect, the worker's exact-attempt operator acknowledgement
+refunds that attempt's infrastructure loss once, including restoring jobs failed
+only by the three-loss limit. Operator stops acknowledged before loss are never
+charged. Real crashes and other attempts retain their losses. Without this
+snapshot or an ordinary disable receipt, a systemd stop cannot reliably be
+distinguished from a crash and can consume the loss allowance.
 An existing ordered host disable may keep work held until its cleanup receipt
 reconciles. Restore a working binary, then recover the exact unit:
 
@@ -862,8 +893,9 @@ cannot install/confirm an attempt's limit or membership, it refuses that payload
 it does not silently run it without a ceiling.
 
 Managed `run.docker: true` jobs are limited by the Docker daemon, since container
-processes are outside the worker service. The adapter supplies `--memory` and
-`--memory-swap` (RAM ceiling plus configured swap), injects
+processes are outside the worker service. The adapter supplies `--memory`;
+optional per-container `memory_swap` supplies `--memory-swap` (total RAM plus
+swap GiB), otherwise Docker defaults apply. It injects
 `MYCE_MEMORY_LIMIT_BYTES`, and verifies the labeled container's HostConfig before
 start and during reconciliation. Missing or changed limits refuse start or kill
 the owned container; `State.OOMKilled` reports the same ordinary failure. An
@@ -929,7 +961,9 @@ The worker reports creating/start pending, running, stopping, released or
 **cleanup unconfirmed**. Stop sends container TERM, then KILL at the original
 injected-clock grace boundary. Every matching container is inspected for the
 exact ownership label before signaling. A final successful scan must prove
-all are nonrunning (or absent). Stopped objects remain as recoverable evidence.
+all are nonrunning (or absent), followed by owned endpoint disconnection, labeled
+network removal and confirmed network absence. Stopped container objects remain
+as recoverable evidence; private networks are removed.
 Each lifecycle Docker call has a 2-second I/O timeout; retries run independently
 of heartbeat/control, checkpoint walks and queue log upload. Grace is never
 renewed by a Docker retry. Restart reconciles the saved daemon and containers
@@ -955,7 +989,8 @@ Operator recovery is explicit and offline:
 
 1. Stop the affected worker/service and prevent automatic restart. Keep its spool.
 2. Independently fence all accepted/delayed Docker operations on the saved daemon
-   endpoint, and verify the exact attempt's execution, GPU use and RAM are gone.
+   endpoint, and verify the exact attempt's execution, GPU use, RAM and labeled
+   private networks are gone.
    Empty scans, worker exit and elapsed time alone do not prove this. Do not stop
    unrelated or legacy Verso containers. If a qualified fence cannot be established,
    keep the hold and escalate host maintenance.
