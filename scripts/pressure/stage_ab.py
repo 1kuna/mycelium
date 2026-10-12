@@ -474,7 +474,7 @@ class Run:
                 stat=dict((k,int(v)) for k,v in (line.split() for line in kernel_read(group/'memory.stat').splitlines()))
                 accounting=ram_settlement(charged,stat,self.idle_charged)
                 atomic(self.phase/'ram-settlement.json',accounting)
-                assert accounting['ram_released'],'test RAM release unconfirmed; see ram-settlement.json' 
+                assert accounting['ram_released'],'test RAM release unconfirmed; see ram-settlement.json'
                 receipt=dict(physical='released',remaining_pids=remaining,device_memory_mib=device_mib,
                              **accounting)
                 atomic(self.phase/'scenario-cleanup.json',receipt)
