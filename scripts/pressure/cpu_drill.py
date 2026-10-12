@@ -42,10 +42,10 @@ def isolated(run,name,args,seconds):
         '--property=TimeoutStopSec=10s','--property=RuntimeMaxSec='+str(seconds+15),
         '--property=StandardOutput=append:'+str(log),'--property=StandardError=append:'+str(log),
         '--setenv=TMPDIR='+str(temp),'/usr/bin/python3',str(ROOT/'source/scripts/pressure/cpu_child.py'),str(marker),*args]
-    error=None;exitcode=None;child_state={};accounting=[];group='';start=time.monotonic()
+    error=None;exitcode=None;child_state={};accounting=[];group='/system.slice/'+unit;start=time.monotonic()
     try:
         subprocess.run(launch,check=True,capture_output=True)
-        group=show(unit)['ControlGroup'];assert group=='/system.slice/'+unit
+        assert show(unit)['ControlGroup']==group
         end=time.monotonic()+seconds+10
         while not marker.exists():
             run.gate()
