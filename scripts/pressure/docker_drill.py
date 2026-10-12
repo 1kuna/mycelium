@@ -52,11 +52,14 @@ def cleanup(run):
                               'systemctl','--user','is-active',unit],capture_output=True,text=True).stdout.strip()
         assert state in ('inactive','failed','unknown'),'delayed helper remains'
     atomic(run.phase/'docker-config.json',dict(mode='normal'));os.chown(run.phase/'docker-config.json',1000,1000)
+    run.halt('worker')
+    if run.phase.name=='Docker-disable':
+        from disable_drill import user
+        user(run,['systemctl','--user','stop','myce-worker.service'])
     for row in current(run):
         if row['State']['Running']:subprocess.run([REAL,'kill',row['Id']],check=True,capture_output=True,timeout=3)
-    assert not any(row['State']['Running'] for row in current(run)), 'Docker execution remains'
+    assert not any(row['State']['Running'] or row['State']['Pid'] for row in current(run)), 'Docker execution remains'
     # Once helper dispatch is fenced, prove native execution/RAM gone before resolving an unobserved start.
-    run.halt('worker')
     for p in (run.phase/'worker').glob('*.docker.json'):
         record=json.loads(kernel_read(p,'text'))
         if not record.get('released'):
