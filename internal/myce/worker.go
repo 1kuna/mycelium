@@ -25,6 +25,8 @@ type Worker struct {
 	RequireMemoryCeilings bool
 	memoryCeilings        *memoryCeilings
 	MemorySwapMaxBytes    int64
+	ServiceConfig         string
+	ContainerRetention    *time.Duration
 	LogRetention          time.Duration
 	dockerCallTimeout     time.Duration
 	Unit                  string
@@ -505,6 +507,13 @@ func (w Worker) Run(stop context.Context) error {
 	if w.Machine.ID == "" || !validGPU(w.Machine.GPU) || (w.MemorySource == nil && (!validMemoryValue(w.Machine.FreeMemoryGB) || w.Machine.FreeMemoryGB <= 0)) {
 		return errors.New("worker requires a name, GPU platform and positive free-memory budget")
 	}
+	retention := DefaultContainerRetention
+	if w.ContainerRetention != nil {
+		retention = *w.ContainerRetention
+	}
+	if retention < 0 {
+		return errors.New("container-retention must be nonnegative")
+	}
 	w.initMemoryCeilings()
 	if err := w.requireMemoryCeilings(); err != nil {
 		return err
@@ -637,6 +646,34 @@ func (w Worker) Run(stop context.Context) error {
 		return errors.New("log-retention must be positive")
 	}
 	var nextLogCleanup time.Time
+	retentionCtx, retentionCancel := context.WithCancel(context.Background())
+	type retentionRequest struct {
+		active string
+		now    time.Time
+	}
+	retentionRequests := make(chan retentionRequest, 1)
+	retentionDone := make(chan struct{})
+	go func() {
+		defer close(retentionDone)
+		for {
+			select {
+			case <-retentionCtx.Done():
+				return
+			case request := <-retentionRequests:
+				if e := pruneStoppedDocker(retentionCtx, s.dir, w.Machine.ID, request.active, request.now, retention, nil); e != nil && retentionCtx.Err() == nil {
+					log.Printf("stopped-container retention (will retry): %v", e)
+				}
+			}
+		}
+	}()
+	defer func() { retentionCancel(); <-retentionDone }()
+	requestRetention := func(active string, now time.Time) {
+		select {
+		case retentionRequests <- retentionRequest{active: active, now: now}:
+		default:
+		}
+	}
+
 	rt, err := startModels(w, s.dir)
 	if err != nil {
 		return err
@@ -750,6 +787,7 @@ func (w Worker) Run(stop context.Context) error {
 			if err = pruneWorkerLogs(s.dir, s.state.Log, now, w.LogRetention); err != nil {
 				return errors.New("worker log retention failed")
 			}
+			requestRetention(s.state.Identity, now)
 			nextLogCleanup = now.Add(time.Minute)
 		}
 		batch := 0.0
@@ -975,6 +1013,11 @@ func (w Worker) Run(stop context.Context) error {
 					if err == nil && s.state.Result != nil {
 						err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
 					}
+					if s.state.Result != nil && err == nil && s.state.Job.Spec.Run.Docker && !s.state.Result.ReleasePending {
+						if e := acknowledgeDocker(s, w.Machine.ID, now); e != nil {
+							return e
+						}
+					}
 					if s.state.Result != nil && (err == nil || stale(err)) {
 						s.state.Job = nil
 						s.state.OperatorStopped = false
@@ -999,6 +1042,9 @@ func (w Worker) Run(stop context.Context) error {
 						}
 						if e := s.save(); e != nil {
 							return e
+						}
+						if retention == 0 {
+							requestRetention("", now)
 						}
 						err = nil
 					} else if stale(err) && p != nil {

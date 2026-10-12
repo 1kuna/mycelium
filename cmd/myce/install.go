@@ -78,6 +78,7 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	db := f.String("db", "", "queue SQLite path (default state/myce.db)")
 	projectConfig := f.String("project-config", "", "project policy YAML")
 	hostConfig := f.String("host-config", "", "host policy YAML")
+	containerRetention := f.Duration("container-retention", myce.DefaultContainerRetention, "acknowledged stopped container retention (0 removes immediately)")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "completed log retention")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "local upload spool (default state/uploads)")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total upload spool bytes")
@@ -232,6 +233,13 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	c.Listen = *listen
 	c.EnvironmentFile = *environmentFile
 	c.ProjectConfig, c.HostConfig = *projectConfig, *hostConfig
+	if role == "worker" {
+		f.Visit(func(v *flag.Flag) {
+			if v.Name == "container-retention" {
+				c.ContainerRetention = containerRetention
+			}
+		})
+	}
 	c.LogRetention, c.UploadSpoolBytes, c.RestartGrace = *logRetention, *uploadSpoolBytes, *restartGrace
 	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = *productionLoss, *deadlineLoss, *experimentLoss
 	c.PrivateDevices, c.NoNewPrivileges, c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax = *privateDevices, *noNewPrivileges, *nice, *cpuQuota, *memoryMax, *tasksMax

@@ -93,6 +93,7 @@ func hostLaunchGate(dir string) (func(), error) {
 }
 
 type HostWorker struct {
+	Config       string   `json:"config,omitempty"`
 	Unit         string   `json:"unit,omitempty"`
 	Generation   uint64   `json:"generation,omitempty"`
 	Executions   []Result `json:"executions,omitempty"`
@@ -117,6 +118,15 @@ func (w *Worker) registerHost(s *workerStore) error {
 	if err := os.MkdirAll(w.HostStateDir, 0700); err != nil {
 		return err
 	}
+	registryDir := w.HostStateDir
+	if parent := unitParent(registryDir); parent != "" {
+		registryDir = parent
+	}
+	controlUnlock, err := hostOperationLock(registryDir, "control.lock", true)
+	if err != nil {
+		return err
+	}
+	defer controlUnlock()
 	unlock, err := hostLaunchGate(w.HostStateDir)
 	if err != nil {
 		return err
@@ -136,10 +146,20 @@ func (w *Worker) registerHost(s *workerStore) error {
 	if err != nil {
 		return err
 	}
-	r := HostWorker{Unit: w.Unit, State: state, Environments: env, Host: w.Machine.HostID, Name: w.Machine.ID, Queue: w.Client.URL, Command: w.ResumeCommand}
+	r := HostWorker{Config: w.ServiceConfig, Unit: w.Unit, State: state, Environments: env, Host: w.Machine.HostID, Name: w.Machine.ID, Queue: w.Client.URL, Command: w.ResumeCommand}
 	if w.SuperviseProcess {
 		r.PID = os.Getpid()
 		r.Birth, err = processBirth(r.PID)
+		if err != nil {
+			return err
+		}
+	}
+	forgotten, err := readForgottenQueues(registryDir)
+	if err != nil {
+		return err
+	}
+	if _, ok := forgotten.Queues[r.Queue]; ok {
+		r.Generation, err = nextHostGeneration(registryDir)
 		if err != nil {
 			return err
 		}
@@ -229,6 +249,14 @@ func (h HostControl) workers() ([]HostWorker, error) {
 	if err != nil {
 		return nil, err
 	}
+	forgottenDir := h.Dir
+	if parent := unitParent(forgottenDir); parent != "" {
+		forgottenDir = parent
+	}
+	forgotten, err := readForgottenQueues(forgottenDir)
+	if err != nil {
+		return nil, err
+	}
 	var out []HostWorker
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
@@ -248,6 +276,9 @@ func (h HostControl) workers() ([]HostWorker, error) {
 				r.Executions = []Result{{Machine: r.Name, Session: st.Session, Execution: Execution{ID: st.Job.ID, Attempt: st.Job.Attempt}}}
 			}
 		}
+		if generation, ok := forgotten.Queues[r.Queue]; ok && r.Generation <= generation {
+			r.Queue = ""
+		}
 		out = append(out, r)
 	}
 	return out, nil
@@ -256,6 +287,14 @@ func (h HostControl) notify(ctx context.Context, workers []HostWorker, enable, c
 	if h.Notify == nil {
 		return nil
 	}
+	forgottenDir := h.Dir
+	if parent := unitParent(forgottenDir); parent != "" {
+		forgottenDir = parent
+	}
+	forgotten, err := readForgottenQueues(forgottenDir)
+	if err != nil {
+		return []string{"queue registry unreadable"}
+	}
 	// One shared deadline, regardless of the number of workers/queues.
 	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
@@ -263,6 +302,12 @@ func (h HostControl) notify(ctx context.Context, workers []HostWorker, enable, c
 	results := make(chan error, len(workers))
 	n := 0
 	for _, w := range workers {
+		if w.Queue == "" {
+			continue
+		}
+		if generation, ok := forgotten.Queues[w.Queue]; ok && w.Generation <= generation {
+			continue
+		}
 		key := w.Queue + "\x00" + w.Host
 		if seen[key] {
 			continue
@@ -901,10 +946,24 @@ func (h HostControl) reconcileEnable(ctx context.Context, queue, host string) er
 	if receipt.EnableGeneration == 0 {
 		return errors.New("legacy receipt has no ordered enable; rerun disable and enable")
 	}
+	forgottenDir := h.Dir
+	if parent := unitParent(forgottenDir); parent != "" {
+		forgottenDir = parent
+	}
+	forgotten, err := readForgottenQueues(forgottenDir)
+	if err != nil {
+		return err
+	}
 	remaining := []HostWorker{}
 	failures := []string{}
 	seen := map[string]bool{}
 	for _, target := range receipt.Workers {
+		if generation, ok := forgotten.Queues[target.Queue]; ok && receipt.Generation <= generation {
+			continue
+		}
+		if target.Queue == "" {
+			continue
+		}
 		key := target.Queue + "\x00" + target.Host
 		if seen[key] {
 			continue
