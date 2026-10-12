@@ -116,6 +116,7 @@ type dockerExecution struct {
 	ExitCode          int                     `json:"exit_code"`
 }
 type dockerAttempt struct {
+	admit       func() error
 	dirty       bool
 	closed      chan struct{}
 	halt        chan struct{}
@@ -207,6 +208,12 @@ func (d *dockerAttempt) operation(kind string, args ...string) ([]byte, error) {
 		return nil, err
 	}
 	defer unlock()
+	if d.admit != nil {
+		if err := d.admit(); err != nil {
+			d.stop(d.clock.Now(), 0, true)
+			return nil, err
+		}
+	}
 	d.mu.Lock()
 	if d.state.Stopped {
 		d.mu.Unlock()
@@ -414,6 +421,9 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		return nil, err
 	}
 	defer unlock()
+	if err := w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
+		return nil, err
+	}
 	if j.Spec.Run.Workdir != "" {
 		st, err := os.Stat(j.Spec.Run.Workdir)
 		if err != nil {
@@ -448,7 +458,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	if os.Getenv("DOCKER_CONTEXT") != "" {
 		return nil, errors.New("managed Docker requires DOCKER_HOST, not DOCKER_CONTEXT")
 	}
-	d := &dockerAttempt{closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, hostDir: w.HostStateDir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
+	d := &dockerAttempt{admit: func() error { return w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) }, closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, hostDir: w.HostStateDir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
 	if j.Spec.Run.DockerNetwork == "private" {
 		d.state.Network = "myce-" + identity
 		d.state.Containers = map[string]dockerMember{}

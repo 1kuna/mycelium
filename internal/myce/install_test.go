@@ -284,3 +284,182 @@ func TestDoctorNASMountFormats(t *testing.T) {
 		})
 	}
 }
+
+func TestInstallDeploymentNASAndUpgrade(t *testing.T) {
+	for _, role := range []string{"queue", "worker"} {
+		t.Run(role, func(t *testing.T) {
+			home := t.TempDir()
+			nas := filepath.Join(home, "nas")
+			os.Mkdir(nas, 0700)
+			c, _ := PlanInstall(role, home, "", nas, "http://queue:7331", "test", Detection{OS: "linux", Arch: "amd64", Platform: "fake", MemoryMode: "fixed", MemoryGB: 2})
+			c.AllowDeviceless = true
+			c.RequireMountedNAS = true
+			c.EnvironmentFile = filepath.Join(home, "fleet.env")
+			os.WriteFile(c.EnvironmentFile, []byte("MYCE_TOKEN='private-test-secret'\nMYCE_QUEUE=http://queue:7331\n"), 0600)
+			executable := filepath.Join(home, "binary")
+			os.WriteFile(executable, []byte("version 1"), 0700)
+			mounted := false
+			runner := func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "cat" {
+					if !mounted {
+						return []byte("root / ext4 rw 0 0\n"), nil
+					}
+					return []byte("server " + nas + " cifs rw 0 0\n"), nil
+				}
+				return nil, nil
+			}
+			if err := Install(context.Background(), c, executable, "", runner); err == nil || !strings.Contains(err.Error(), "mount") {
+				t.Fatal("unmounted NAS accepted", err)
+			}
+			if _, err := os.Stat(filepath.Join(nas, "mycelium")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("wrote to unmounted NAS")
+			}
+			mounted = true
+			if err := Install(context.Background(), c, executable, "", runner); err != nil {
+				t.Fatal(err)
+			}
+			for _, dir := range []string{"checkpoints", "models", "environments"} {
+				entries, err := os.ReadDir(filepath.Join(nas, "mycelium", dir))
+				if err != nil || len(entries) != 0 {
+					t.Fatal("NAS probe not removed", entries, err)
+				}
+			}
+			for _, p := range []string{c.Service, c.Config, c.GPUEnvironmentFile()} {
+				b, _ := os.ReadFile(p)
+				if strings.Contains(string(b), "private-test-secret") {
+					t.Fatal("secret persisted", p)
+				}
+			}
+			state := filepath.Join(c.State, "custody")
+			os.WriteFile(state, []byte("preserve"), 0600)
+			os.WriteFile(executable, []byte("version 2"), 0700)
+			if err := Install(context.Background(), c, executable, "", runner); err != nil {
+				t.Fatal(err)
+			}
+			b, _ := os.ReadFile(c.Binary)
+			if string(b) != "version 2" {
+				t.Fatal("binary not upgraded")
+			}
+			b, _ = os.ReadFile(state)
+			if string(b) != "preserve" {
+				t.Fatal("state lost")
+			}
+			changed := c
+			changed.LogRetention = 24 * 60 * 60 * 1e9
+			if err := Install(context.Background(), changed, executable, "", runner); err == nil || !strings.Contains(err.Error(), "--force") || !strings.Contains(err.Error(), "log_retention") {
+				t.Fatal("missing config diff", err)
+			}
+			changed.Force = true
+			if err := Install(context.Background(), changed, executable, "", runner); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestInstallStartDisabledPreservesHostGate(t *testing.T) {
+	home := t.TempDir()
+	nas := filepath.Join(home, "nas")
+	os.Mkdir(nas, 0700)
+	c, _ := PlanInstall("worker", home, "", nas, "http://queue:7331", "card", Detection{OS: "linux", Arch: "amd64", Platform: "fake", MemoryMode: "fixed", MemoryGB: 2})
+	c.HostStateDir = filepath.Join(home, "host-control")
+	c.AllowDeviceless = true
+	c.StartDisabled = true
+	c.WorkerInstance("gpu0")
+	os.MkdirAll(c.HostStateDir, 0700)
+	saveWorkerJSON(c.HostStateDir, "DISABLED", map[string]any{"generation": 9, "reason": "legacy ownership"})
+	hostFlag, _ := os.ReadFile(filepath.Join(c.HostStateDir, "DISABLED"))
+	executable := filepath.Join(home, "binary")
+	os.WriteFile(executable, []byte("test"), 0700)
+	runner := func(_ context.Context, n string, a ...string) ([]byte, error) {
+		text := strings.Join(a, " ")
+		if strings.Contains(text, "enable --now") || strings.Contains(text, "restart ") {
+			t.Fatal("started disabled worker")
+		}
+		if strings.Contains(text, "show ") {
+			return []byte("LoadState=loaded\nActiveState=inactive\nControlGroup=\nKillMode=control-group\nSendSIGKILL=yes\n"), nil
+		}
+		return nil, nil
+	}
+	if err := Install(context.Background(), c, executable, "test-token", runner); err != nil {
+		t.Fatal(err)
+	}
+	unitDir, _ := WorkerUnitDirectory(c.HostStateDir, filepath.Base(c.Service))
+	flag, _ := os.ReadFile(filepath.Join(unitDir, "DISABLED"))
+	receipt, _ := os.ReadFile(filepath.Join(unitDir, "disable-receipt.json"))
+	var f struct{ Generation uint64 }
+	var r hostReceipt
+	json.Unmarshal(flag, &f)
+	json.Unmarshal(receipt, &r)
+	if f.Generation == 0 || f.Generation != r.Generation {
+		t.Fatal("missing ordered disable receipt")
+	}
+	after, _ := os.ReadFile(filepath.Join(c.HostStateDir, "DISABLED"))
+	if string(after) != string(hostFlag) {
+		t.Fatal("host gate changed")
+	}
+	scoped := c
+	scoped.HostStateDir = unitDir
+	if err := (Worker{HostStateDir: unitDir}).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(context.Background(), c, executable, "test-token", runner); err != nil {
+		t.Fatal("disabled rerun", err)
+	}
+}
+
+func TestInstallDeploymentDefaultUnitAndNASBoundary(t *testing.T) {
+	home := t.TempDir()
+	nas := filepath.Join(home, "nas")
+	os.Mkdir(nas, 0700)
+	c, _ := PlanInstall("queue", home, "", nas, "http://queue:7331", "q", Detection{OS: "linux", Arch: "amd64"})
+	for _, want := range []string{"PrivateDevices=yes", "NoNewPrivileges=yes", "Nice=10", "CPUQuota=25%", "MemoryMax=512M", "TasksMax=64", "Environment=GOMAXPROCS=1", "--restart-grace", "3m0s", "--production-loss-timeout", "5s", "--deadline-loss-timeout", "20s", "--experiment-loss-timeout", "1m0s", "--upload-spool-bytes", "17179869184", "--log-retention", "168h0m0s"} {
+		if !strings.Contains(c.ServiceText(), want) {
+			t.Error("missing default", want)
+		}
+	}
+	outside := t.TempDir()
+	os.Symlink(outside, filepath.Join(nas, "mycelium"))
+	executable := filepath.Join(home, "binary")
+	os.WriteFile(executable, []byte("test"), 0700)
+	if err := Install(context.Background(), c, executable, "token", func(context.Context, string, ...string) ([]byte, error) {
+		t.Fatal("service changed before NAS check")
+		return nil, nil
+	}); err == nil {
+		t.Fatal("NAS symlink followed")
+	}
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 0 {
+		t.Fatal("outside namespace touched")
+	}
+}
+
+func TestFleetEnvironmentPrivacyAndLiteralValues(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		mode       os.FileMode
+		ok         bool
+	}{
+		{"literal", "MYCE_TOKEN='test $literal'\nMYCE_QUEUE=\"http://queue:7331\"\n", 0600, true},
+		{"public", "MYCE_TOKEN=test\nMYCE_QUEUE=http://queue:7331\n", 0644, false},
+		{"missing", "MYCE_TOKEN=test\n", 0600, false},
+		{"malformed", "MYCE_TOKEN='test\nMYCE_QUEUE=http://queue:7331\n", 0600, false},
+		{"token URL", "MYCE_TOKEN=test\nMYCE_QUEUE=http://user:secret@queue:7331\n", 0600, false},
+		{"extra", "MYCE_TOKEN=test\nMYCE_QUEUE=http://queue:7331\nOTHER=secret\n", 0600, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "fleet.env")
+			os.WriteFile(p, []byte(tc.text), tc.mode)
+			token, queue, err := ReadFleetEnvironment(p)
+			if (err == nil) != tc.ok {
+				t.Fatal(err)
+			}
+			if tc.ok && (token != "test $literal" || queue != "http://queue:7331") {
+				t.Fatal("literal changed")
+			}
+			if err != nil && strings.Contains(err.Error(), "secret") {
+				t.Fatal("credential in error")
+			}
+		})
+	}
+}

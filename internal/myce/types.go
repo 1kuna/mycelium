@@ -220,45 +220,48 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
-	hostBudgetGB            float64             // Effective shared-host budget, rebuilt from worker reports.
-	MemoryEnforcement       string              `json:"memory_enforcement,omitempty"`
-	HostMemoryBudgetGB      float64             `json:"host_memory_budget_gb,omitempty"`
-	MemoryCeilingSlackGB    float64             `json:"memory_ceiling_slack_gb,omitempty"`
-	DockerCleanup           string              `json:"docker_cleanup,omitempty"`
-	Disabled                string              `json:"disabled,omitempty"`
-	HostID                  string              `json:"host_id,omitempty"`
-	HostAvailableMemoryGB   float64             `json:"host_available_memory_gb"`
-	FreeHostMemoryGB        float64             `json:"free_host_memory_gb"`
-	HostMemoryMeasured      bool                `json:"host_memory_measured,omitempty"`
-	HostMemoryError         string              `json:"host_memory_error,omitempty"`
-	UnifiedMemory           bool                `json:"unified_memory,omitempty"`
-	MemoryUsedGB            float64             `json:"memory_used_gb"`
-	TotalMemoryGB           float64             `json:"total_memory_gb"`
-	ReservedMemoryGB        float64             `json:"reserved_memory_gb"`
-	Device                  string              `json:"device,omitempty"`
-	EnvironmentBuilder      bool                `json:"environment_builder,omitempty"`
-	EnvironmentReports      []EnvironmentReport `json:"environment_reports,omitempty"`
-	EnvironmentBuildSeconds map[string]float64  `json:"environment_build_seconds,omitempty"`
-	ModelCopySeconds        map[string]float64  `json:"model_copy_seconds,omitempty"`
-	CopyReports             []CopyReport        `json:"copy_reports,omitempty"`
-	CopyBytesPerSecond      float64             `json:"copy_bytes_per_second,omitempty"`
-	CachedModels            []string            `json:"cached_models,omitempty"`
-	CacheFreeBytes          int64               `json:"cache_free_bytes"`
-	CacheError              string              `json:"cache_error,omitempty"`
-	MemoryError             string              `json:"memory_error,omitempty"`
-	MemoryMeasured          bool                `json:"memory_measured,omitempty"`
-	ModelConfigHash         string              `json:"model_config_hash,omitempty"`
-	ModelURL                string              `json:"model_url,omitempty"`
-	CheckpointUnavailable   bool                `json:"checkpoint_unavailable"`
-	ID                      string              `json:"id"`
-	Session                 string              `json:"session"`
-	GPU                     string              `json:"gpu"`
-	FreeMemoryGB            float64             `json:"free_memory_gb"`
-	Models                  []string            `json:"models,omitempty"`
-	Environments            []string            `json:"environments,omitempty"`
-	LastSeen                time.Time           `json:"last_seen"`
-	Leaving                 bool                `json:"leaving"`
-	Gone                    bool                `json:"gone"`
+	HostMemoryBudgetGeneration  uint64              `json:"host_memory_budget_generation,omitempty"`
+	EffectiveHostMemoryBudgetGB float64             `json:"effective_host_memory_budget_gb,omitempty"`
+	HostMemoryInUseGB           float64             `json:"host_memory_in_use_gb,omitempty"`
+	hostBudgetGB                float64             // Effective shared-host budget, rebuilt from worker reports.
+	MemoryEnforcement           string              `json:"memory_enforcement,omitempty"`
+	HostMemoryBudgetGB          float64             `json:"host_memory_budget_gb,omitempty"`
+	MemoryCeilingSlackGB        float64             `json:"memory_ceiling_slack_gb,omitempty"`
+	DockerCleanup               string              `json:"docker_cleanup,omitempty"`
+	Disabled                    string              `json:"disabled,omitempty"`
+	HostID                      string              `json:"host_id,omitempty"`
+	HostAvailableMemoryGB       float64             `json:"host_available_memory_gb"`
+	FreeHostMemoryGB            float64             `json:"free_host_memory_gb"`
+	HostMemoryMeasured          bool                `json:"host_memory_measured,omitempty"`
+	HostMemoryError             string              `json:"host_memory_error,omitempty"`
+	UnifiedMemory               bool                `json:"unified_memory,omitempty"`
+	MemoryUsedGB                float64             `json:"memory_used_gb"`
+	TotalMemoryGB               float64             `json:"total_memory_gb"`
+	ReservedMemoryGB            float64             `json:"reserved_memory_gb"`
+	Device                      string              `json:"device,omitempty"`
+	EnvironmentBuilder          bool                `json:"environment_builder,omitempty"`
+	EnvironmentReports          []EnvironmentReport `json:"environment_reports,omitempty"`
+	EnvironmentBuildSeconds     map[string]float64  `json:"environment_build_seconds,omitempty"`
+	ModelCopySeconds            map[string]float64  `json:"model_copy_seconds,omitempty"`
+	CopyReports                 []CopyReport        `json:"copy_reports,omitempty"`
+	CopyBytesPerSecond          float64             `json:"copy_bytes_per_second,omitempty"`
+	CachedModels                []string            `json:"cached_models,omitempty"`
+	CacheFreeBytes              int64               `json:"cache_free_bytes"`
+	CacheError                  string              `json:"cache_error,omitempty"`
+	MemoryError                 string              `json:"memory_error,omitempty"`
+	MemoryMeasured              bool                `json:"memory_measured,omitempty"`
+	ModelConfigHash             string              `json:"model_config_hash,omitempty"`
+	ModelURL                    string              `json:"model_url,omitempty"`
+	CheckpointUnavailable       bool                `json:"checkpoint_unavailable"`
+	ID                          string              `json:"id"`
+	Session                     string              `json:"session"`
+	GPU                         string              `json:"gpu"`
+	FreeMemoryGB                float64             `json:"free_memory_gb"`
+	Models                      []string            `json:"models,omitempty"`
+	Environments                []string            `json:"environments,omitempty"`
+	LastSeen                    time.Time           `json:"last_seen"`
+	Leaving                     bool                `json:"leaving"`
+	Gone                        bool                `json:"gone"`
 }
 type Execution struct {
 	Progress int64  `json:"progress,omitempty"`
@@ -274,18 +277,19 @@ type Checkin struct {
 	Running         *Execution    `json:"running,omitempty"`
 }
 type Reply struct {
-	EnvironmentPlan []EnvironmentRecipe `json:"environment_plan,omitempty"`
-	CopyPlan        []CopyTask          `json:"copy_plan,omitempty"`
-	CacheUsage      []CopyTask          `json:"cache_usage,omitempty"`
-	CachePins       []string            `json:"cache_pins,omitempty"`
-	ModelPlan       []ModelSlot         `json:"model_plan,omitempty"`
-	Hold            bool                `json:"hold"`
-	CheckpointRoot  string              `json:"checkpoint_root"`
-	Job             *Job                `json:"job,omitempty"`
-	Stop            bool                `json:"stop"`
-	Kill            bool                `json:"kill"`
-	Leave           bool                `json:"leave"`
-	GraceSeconds    float64             `json:"grace_seconds"`
+	AdmissionBlocked bool                `json:"admission_blocked,omitempty"`
+	EnvironmentPlan  []EnvironmentRecipe `json:"environment_plan,omitempty"`
+	CopyPlan         []CopyTask          `json:"copy_plan,omitempty"`
+	CacheUsage       []CopyTask          `json:"cache_usage,omitempty"`
+	CachePins        []string            `json:"cache_pins,omitempty"`
+	ModelPlan        []ModelSlot         `json:"model_plan,omitempty"`
+	Hold             bool                `json:"hold"`
+	CheckpointRoot   string              `json:"checkpoint_root"`
+	Job              *Job                `json:"job,omitempty"`
+	Stop             bool                `json:"stop"`
+	Kill             bool                `json:"kill"`
+	Leave            bool                `json:"leave"`
+	GraceSeconds     float64             `json:"grace_seconds"`
 }
 type Result struct {
 	OperatorStop   bool   `json:"operator_stop,omitempty"`

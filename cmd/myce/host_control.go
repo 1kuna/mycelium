@@ -49,6 +49,29 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 			return err
 		}
 	}
+
+	if *config != "" {
+		installed, e := myce.ReadServiceConfig(*config)
+		// A broken config must not delay disable's durable local fence.
+		if e != nil && args[0] != "disable" {
+			return e
+		}
+		explicitDir, explicitHost := false, false
+		f.Visit(func(v *flag.Flag) {
+			if v.Name == "host-state-dir" {
+				explicitDir = true
+			}
+			if v.Name == "host-id" {
+				explicitHost = true
+			}
+		})
+		if !explicitDir && installed.HostStateDir != "" {
+			*dir = installed.HostStateDir
+		}
+		if !explicitHost && installed.HostID != "" {
+			*host = installed.HostID
+		}
+	}
 	sharedDir := *dir
 	if *unit != "" {
 		if probe.OS != "linux" {
@@ -86,6 +109,13 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 				token, _ = myce.ReadServiceToken(c)
 			}
 			*state, *name, *queue = c.State, c.Name, c.Queue
+			if c.EnvironmentFile != "" {
+				_, address, e := myce.ReadFleetEnvironment(c.EnvironmentFile)
+				if e != nil {
+					return e
+				}
+				*queue = address
+			}
 		}
 		if *state == "" {
 			candidate := filepath.Join(home, ".local", "share", "myce", "worker")

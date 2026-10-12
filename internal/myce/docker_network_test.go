@@ -194,6 +194,9 @@ func fakeDockerGroupInspect(root string, ids []string, mode string) {
 		if mode == "published-port" {
 			obj["HostConfig"].(map[string]any)["PortBindings"] = map[string]any{"80/tcp": []any{map[string]string{"HostPort": "8080"}}}
 		}
+		if mode == "wrong-memory-"+id {
+			obj["HostConfig"].(map[string]any)["Memory"] = int64(6 << 30)
+		}
 		objects = append(objects, obj)
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(objects)
@@ -240,6 +243,128 @@ func dockerGroupJob(t *testing.T) Job {
 	j.Spec.Needs.HostMemoryGB = 6
 	j.Spec.Run.DockerSidecars = []DockerSidecar{{Name: "sortformer", MemoryGB: 2, Command: append([]string(nil), j.Spec.Run.Command...)}, {Name: "naming", MemoryGB: 2, Command: append([]string(nil), j.Spec.Run.Command...)}}
 	return j
+}
+
+func TestDockerGroupInspectsEachDeclaredMemoryLimit(t *testing.T) {
+	for _, id := range []string{"", "id1", "sidecar-sortformer", "sidecar-naming"} {
+		for _, afterStart := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/after-start=%v", id, afterStart), func(t *testing.T) {
+				w, s, c, root := dockerFixture(t)
+				j := dockerGroupJob(t)
+				j.Spec.Run.DockerSidecars[0].MemoryGB = 3
+				j.Spec.Run.DockerSidecars[1].MemoryGB = 4
+				if id != "" && !afterStart {
+					if e := os.WriteFile(filepath.Join(root, "mode"), []byte("wrong-memory-"+id), 0600); e != nil {
+						t.Fatal(e)
+					}
+				}
+				p, e := startDockerFixture(w, s, j)
+				if e != nil {
+					t.Fatal(e)
+				}
+				t.Cleanup(p.docker.close)
+				if afterStart || id == "" {
+					await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+					for container, limit := range map[string]int64{"id1": 2 << 30, "sidecar-sortformer": 3 << 30, "sidecar-naming": 4 << 30} {
+						data, e := os.ReadFile(filepath.Join(root, "object-"+container+".json"))
+						var object dockerInspection
+						if e != nil || json.Unmarshal(data, &object) != nil || object.HostConfig.Memory != limit {
+							t.Fatalf("%s: own declared memory %d missing", container, limit)
+						}
+					}
+					if id == "" {
+						p.stop(c.Now(), 0, true)
+					} else if e := os.WriteFile(filepath.Join(root, "mode"), []byte("wrong-memory-"+id), 0600); e != nil {
+						t.Fatal(e)
+					}
+				}
+				if afterStart && id == "id1" {
+					await(t, func() bool {
+						calls, _ := os.ReadFile(filepath.Join(root, "calls"))
+						return strings.Contains(string(calls), "kill --signal=TERM sidecar-")
+					})
+					c.advance(StopGrace)
+				}
+				select {
+				case f := <-p.done:
+					if id != "" && (f.result.Success || f.result.Interrupted || f.result.Error != "Docker memory ceiling not enforced") {
+						t.Fatalf("wrong container ceiling accepted: %+v", f.result)
+					}
+				case <-time.After(4 * time.Second):
+					t.Fatal("container memory failure did not settle")
+				}
+				if id != "" && !afterStart {
+					calls, _ := os.ReadFile(filepath.Join(root, "calls"))
+					if strings.Contains(string(calls), "\nstart "+id+"\n") {
+						t.Fatal("container started before its limit was verified")
+					}
+				}
+				if _, e := os.Stat(filepath.Join(root, "network-removed")); e != nil {
+					t.Fatal("memory failure retained private network")
+				}
+			})
+		}
+	}
+}
+
+func TestDockerGroupLiveBudgetChangeDuringReadiness(t *testing.T) {
+	w, s, _, root := dockerFixture(t)
+	budget, e := SetHostMemoryBudget(w.HostStateDir, 6)
+	if e != nil {
+		t.Fatal(e)
+	}
+	w.Machine.HostMemoryBudgetGeneration = budget.Generation
+	w.Machine.HostMemoryBudgetGB = budget.GiB
+	j := dockerGroupJob(t)
+	var ready, probed atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		probed.Store(true)
+		if !ready.Load() {
+			rw.WriteHeader(503)
+		}
+	}))
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	port, _ := strconv.Atoi(u.Port())
+	j.Spec.Run.DockerSidecars[0].Readiness = &DockerReadiness{Port: port, Path: "/ready", Timeout: "10s"}
+	p, e := startDockerFixture(w, s, j)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(p.docker.close)
+	await(t, probed.Load)
+	if _, e := SetHostMemoryBudget(w.HostStateDir, 3); e != nil {
+		t.Fatal(e)
+	}
+	ready.Store(true)
+	select {
+	case f := <-p.done:
+		if f.result.Success || !strings.Contains(f.result.Error, "budget changed since queue admission") {
+			t.Fatalf("stale admission accepted: %+v", f.result)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("stale budget did not settle")
+	}
+	if _, e := os.Stat(filepath.Join(root, "created")); !os.IsNotExist(e) {
+		t.Fatal("main created after live budget changed")
+	}
+	if _, e := os.Stat(filepath.Join(root, "network-removed")); e != nil {
+		t.Fatal("network not released after stale admission")
+	}
+}
+
+func TestDockerRequiresHostMemoryDeclaration(t *testing.T) {
+	w, s, _, root := dockerFixture(t)
+	w.RequireMemoryCeilings = true
+	j := dockerJob()
+	j.Checkpoint = t.TempDir()
+	j.Spec.Needs.HostMemoryGB = 0
+	if _, e := startDockerFixture(w, s, j); e == nil || !strings.Contains(e.Error(), "host_memory_gb") {
+		t.Fatalf("required Docker declaration not refused: %v", e)
+	}
+	if _, e := os.Stat(filepath.Join(root, "calls")); !os.IsNotExist(e) {
+		t.Fatal("Docker contacted before required declaration validation")
+	}
 }
 func TestDockerSidecarsMainExitAndReadiness(t *testing.T) {
 	w, s, c, root := dockerFixture(t)

@@ -41,17 +41,30 @@ func (q *Queue) refreshHostMemory() {
 				}
 			}
 		}
+
 		m.hostBudgetGB = 0
+		generation := uint64(0)
 		for _, other := range q.s.Machines {
-			if hostID(other) == hostID(m) && other.HostMemoryBudgetGB > 0 {
-				if m.hostBudgetGB == 0 {
-					m.hostBudgetGB = other.HostMemoryBudgetGB
-				} else {
-					m.hostBudgetGB = min(m.hostBudgetGB, other.HostMemoryBudgetGB)
-				}
-				available = min(available, other.HostMemoryBudgetGB)
+			if hostID(other) == hostID(m) && other.HostMemoryBudgetGeneration > generation {
+				generation = other.HostMemoryBudgetGeneration
+				m.hostBudgetGB = other.HostMemoryBudgetGB
 			}
 		}
+		if generation == 0 {
+			for _, other := range q.s.Machines {
+				if hostID(other) == hostID(m) && other.HostMemoryBudgetGB > 0 {
+					if m.hostBudgetGB == 0 {
+						m.hostBudgetGB = other.HostMemoryBudgetGB
+					} else {
+						m.hostBudgetGB = min(m.hostBudgetGB, other.HostMemoryBudgetGB)
+					}
+				}
+			}
+		}
+		if m.hostBudgetGB > 0 {
+			available = min(available, m.hostBudgetGB)
+		}
+		m.EffectiveHostMemoryBudgetGB = m.hostBudgetGB
 		reserved := 0.0
 		for _, j := range q.s.Jobs {
 			owner := q.s.Machines[j.Machine]
@@ -76,6 +89,7 @@ func (q *Queue) refreshHostMemory() {
 				reserved += hostNeed(owner, model.MemoryGB, model.HostMemoryGB)
 			}
 		}
+		m.HostMemoryInUseGB = reserved
 		m.FreeHostMemoryGB = max(0, available-reserved)
 	}
 }
@@ -84,6 +98,9 @@ func (q *Queue) refreshHostMemory() {
 // acknowledgement arrives. GPU releases are local; RAM releases may be on any
 // card on the same physical host. Pins and failed unloads remain protected.
 func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string) ([]*Job, []*ModelSlot, bool) {
+	if m.HostMemoryBudgetStatus() != "" {
+		return nil, nil, false
+	}
 	if host == 0 && (m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0) {
 		return nil, nil, false
 	}
