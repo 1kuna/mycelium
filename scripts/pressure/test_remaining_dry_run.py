@@ -167,7 +167,7 @@ class World:
                      patch.object(os,'execv') as execute,patch.object(sys,'argv',['fenced-installer',str(self.root/'installation/worker-gpu1/config.json'),'detect']), \
                      patch('kernel_reads.kernel_read',self.kernel):
                     exec(compile(code,'fenced-installer','exec'),{'__name__':'__main__'})
-                    exec_args=execute.call_args.args[1][5:]
+                    exec_args=execute.call_args.args[1][4:]
                 assert self.device_nodes['card0']==self.device_nodes['renderD128']==0
                 return self.user_command(exec_args)
             self.unit_active=True

@@ -18,7 +18,8 @@ def install(run,args):
         # Foreground installer detection gets the same physical GPU1-only view as join.
         source='import sys;sys.path.insert(0,'+repr(str(BASE))+');\n'+kernel_read(BASE/'worker_fence.py').split('c=json.loads(kernel_read(config,')[0]
         source=source.replace('myce-test-r12-installed-validation.service','myce-test-r12-installed-invocation.service')
-        source+='os.execv("/usr/bin/setpriv",["setpriv","--reuid=1000","--regid=1000","--init-groups","--no-new-privs",*'+repr(args)+'])\n'
+        # The installer's exact privileged service-validation helper still needs sudo.
+        source+='os.execv("/usr/bin/setpriv",["setpriv","--reuid=1000","--regid=1000","--init-groups",*'+repr(args)+'])\n'
         script=ROOT/'installed-invocation.py';script.write_text(checked_python(source))
         env=ROOT/'installed-invocation.env'
         with env.open('x') as stream:
