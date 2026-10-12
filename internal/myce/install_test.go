@@ -413,7 +413,7 @@ func TestInstallDeploymentDefaultUnitAndNASBoundary(t *testing.T) {
 	nas := filepath.Join(home, "nas")
 	os.Mkdir(nas, 0700)
 	c, _ := PlanInstall("queue", home, "", nas, "http://queue:7331", "q", Detection{OS: "linux", Arch: "amd64"})
-	for _, want := range []string{"PrivateDevices=yes", "NoNewPrivileges=yes", "Nice=10", "CPUQuota=25%", "MemoryMax=512M", "TasksMax=64", "Environment=GOMAXPROCS=1", "--restart-grace", "3m0s", "--production-loss-timeout", "5s", "--deadline-loss-timeout", "20s", "--experiment-loss-timeout", "1m0s", "--upload-spool-bytes", "17179869184", "--log-retention", "168h0m0s"} {
+	for _, want := range []string{"PrivateDevices=no", "NoNewPrivileges=yes", "Nice=10", "CPUQuota=25%", "MemoryMax=512M", "TasksMax=64", "Environment=GOMAXPROCS=1", "--restart-grace", "3m0s", "--production-loss-timeout", "5s", "--deadline-loss-timeout", "20s", "--experiment-loss-timeout", "1m0s", "--upload-spool-bytes", "17179869184", "--log-retention", "168h0m0s"} {
 		if !strings.Contains(c.ServiceText(), want) {
 			t.Error("missing default", want)
 		}
@@ -461,5 +461,51 @@ func TestFleetEnvironmentPrivacyAndLiteralValues(t *testing.T) {
 				t.Fatal("credential in error")
 			}
 		})
+	}
+}
+
+func TestUserUnitLiteralPaths(t *testing.T) {
+	for _, role := range []string{"queue", "worker"} {
+		c, _ := PlanInstall(role, "/tmp/home%test", "", "/tmp/nas", "http://queue:7331", "test", Detection{OS: "linux", Arch: "amd64", Platform: "cuda", MemoryMode: "dedicated"})
+		c.EnvironmentFile = "/tmp/fleet%test.env"
+		text := c.ServiceText()
+		for _, path := range []string{c.EnvironmentFile, c.GPUEnvironmentFile()} {
+			if role == "queue" && path == c.GPUEnvironmentFile() {
+				continue
+			}
+			if !strings.Contains(text, "EnvironmentFile="+strings.ReplaceAll(path, "%", "%%")+"\n") {
+				t.Errorf("quoted or unescaped EnvironmentFile: %s", text)
+			}
+		}
+		if role == "worker" && (!strings.Contains(text, "Delegate=memory\n") || strings.Contains(text, "PrivateDevices=") || strings.Contains(text, "PrivateUsers=")) {
+			t.Fatal("worker device access/delegation changed")
+		}
+		for _, bad := range []string{" ", "\t", "'", "\"", "\\", "\n", "\r", "\u00a0"} {
+			for _, field := range []string{"environment", "config", "host"} {
+				broken := c
+				switch field {
+				case "environment":
+					broken.EnvironmentFile += bad
+				case "config":
+					if role == "queue" {
+						continue
+					}
+					broken.Config = filepath.Join(filepath.Dir(c.Config)+bad, "config.json")
+				case "host":
+					if role == "queue" {
+						continue
+					}
+					broken.HostStateDir += bad
+				}
+				if err := broken.ValidateInstall(); err == nil {
+					t.Errorf("accepted unsafe %s path %q", field, bad)
+				}
+			}
+		}
+	}
+	c, _ := PlanInstall("queue", "/tmp/home", "", "/tmp/nas", "http://queue:7331", "test", Detection{OS: "linux"})
+	c.PrivateDevices = true
+	if err := c.ValidateInstall(); err == nil {
+		t.Fatal("accepted unsupported user sandbox")
 	}
 }
