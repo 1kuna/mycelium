@@ -31,7 +31,7 @@ func TestWorkerPlacementEnvironmentEveryAttempt(t *testing.T) {
 				}
 				done := <-p.done
 				if done.err != nil || !done.result.Success {
-					t.Fatalf("placement env attempt %d: %+v", attempt, done)
+					t.Fatalf("placement env attempt %d: success=%t result error=%q save error=%v", attempt, done.result.Success, done.result.Error, done.err)
 				}
 			}
 		})
