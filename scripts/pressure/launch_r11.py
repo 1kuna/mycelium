@@ -4,7 +4,7 @@ import subprocess, json, datetime, shlex, importlib.util, hashlib
 from remote_snippets import checked_python, checked_shell, python_command
 HERE = Path('/Users/user/Documents/Git/Verso/.private/missions/mycelium-stage-ab-20261011')
 ROOT = '/home/user/synthetic-run'
-UNIT = 'myce-test-stage-ab-r11b.service'
+UNIT = 'myce-test-stage-ab-r11c.service'
 WORK = Path('/Users/user/Developer/worktrees/mycelium-verso-pressure-r11')
 MAIN = '968c15d5d3e39060e997b1b3ba7f6450db881269'
 SHA = 'unprepared'
