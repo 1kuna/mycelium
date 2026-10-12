@@ -88,6 +88,8 @@ func (w Worker) openStore() (*workerStore, error) {
 		return nil, fmt.Errorf("worker state already in use: %w", err)
 	}
 	s := &workerStore{dir: dir, lock: lock}
+	// CIFS metadata round trips can exceed the queue's 25 ms I/O budget.
+	s.nasProbe.timeout = 250 * time.Millisecond
 	data, err := os.ReadFile(filepath.Join(dir, "state.json"))
 	if err == nil {
 		err = decodeWorkerState(data, &s.state)
