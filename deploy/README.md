@@ -32,3 +32,10 @@ Linux `MemAvailable` automatically; missing/invalid OS telemetry blocks work.
 `--memory-mode auto --reserve-memory-gb 16`. Its zero cap uses the live reading;
 choose a positive cap if the admitted workload needs a stricter allowance.
 See [the production test plan](../docs/production-test-plan.md).
+
+Linux manual worker templates load `worker.env`. Include only the GPU runtime
+variables your foreground detection needs (for example `LD_LIBRARY_PATH` and
+recognized Level Zero/oneAPI/SYCL controls), and qualify detection under the user
+manager before starting. `myce install worker` automates the separate private
+`gpu.env` capture and transient-service validation, including per-card instances;
+see `docs/operations.md`. Do not copy the whole shell environment into a unit.

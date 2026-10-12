@@ -35,6 +35,7 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 		flags = flags[1:]
 	}
 	f := flag.NewFlagSet(action, flag.ContinueOnError)
+	allowDeviceless := f.Bool("allow-deviceless", false, "allow CPU/fake test worker without service GPU validation")
 	instance := f.String("instance", "", "Linux worker instance (e.g. gpu1)")
 	device := f.String("device", "", "physical GPU selector (one device per worker)")
 	hostDir := f.String("host-state-dir", "", "shared local host control directory")
@@ -115,7 +116,13 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 		} else {
 			d, e = probe.DetectDevice(ctx, *device)
 			if e != nil {
-				return e
+				if !*allowDeviceless {
+					return e
+				}
+				d = myce.Detection{OS: probe.OS, Arch: probe.Arch, Platform: "fake", MemoryMode: "fixed", MemoryGB: *memory, ReserveGB: *reserve}
+				if d.MemoryGB <= 0 {
+					return errors.New("deviceless worker requires a positive --memory-gb CPU/test budget")
+				}
 			}
 		}
 	}
@@ -137,6 +144,7 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 			return e
 		}
 	}
+	c.AllowDeviceless = *allowDeviceless
 	c.Device = *device
 	c.HostStateDir = *hostDir
 	if c.HostStateDir == "" {

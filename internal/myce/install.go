@@ -157,6 +157,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
+	AllowDeviceless       bool      `json:"allow_deviceless,omitempty"`
 	Device                string    `json:"device,omitempty"`
 	HostStateDir          string    `json:"host_state_dir,omitempty"`
 	Path                  string    `json:"path"`
@@ -266,7 +267,7 @@ func (c ServiceConfig) ServiceText() string {
 					condition += "ConditionPathExists=!" + unitConditionPath(filepath.Join(scoped, "DISABLED")) + "\n"
 				}
 			}
-			stopSettings = "KillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
+			stopSettings = "EnvironmentFile=" + unitQuote(c.GPUEnvironmentFile()) + "\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
 		}
 		return "[Unit]\n" + condition + "Description=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\nExecStart=" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + "\n" + stopSettings + "Restart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
 	}
@@ -307,11 +308,21 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 			if !st.Mode().IsRegular() {
 				return errors.New("worker unit must be a regular file")
 			}
+			existing.AllowDeviceless = c.AllowDeviceless
+			existing.Path = c.Path
+			if e = os.WriteFile(existing.GPUEnvironmentFile(), []byte(gpuRuntimeEnvironment(os.Environ())), 0600); e != nil {
+				return e
+			}
+			if e = saveWorkerJSON(filepath.Dir(existing.Config), filepath.Base(existing.Config), existing); e != nil {
+				return e
+			}
 			if e = saveServiceText(existing); e != nil {
 				return e
 			}
-			_, e = command(ctx, "systemctl", "--user", "daemon-reload")
-			return e
+			if _, e = command(ctx, "systemctl", "--user", "daemon-reload"); e != nil {
+				return e
+			}
+			return validateWorkerService(ctx, existing, command)
 		} else if !errors.Is(e, os.ErrNotExist) {
 			return e
 		}
@@ -341,12 +352,22 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 	if e = saveWorkerJSON(filepath.Dir(c.Credentials), filepath.Base(c.Credentials), map[string]string{"token": token}); e != nil {
 		return e
 	}
+	if c.Role == "worker" && c.Detection.OS == "linux" {
+		if e = os.WriteFile(c.GPUEnvironmentFile(), []byte(gpuRuntimeEnvironment(os.Environ())), 0600); e != nil {
+			return e
+		}
+	}
 	if e = os.WriteFile(c.Service, []byte(c.ServiceText()), 0600); e != nil {
 		return e
 	}
 	if c.Detection.OS == "linux" {
 		if _, e = command(ctx, "systemctl", "--user", "daemon-reload"); e != nil {
 			return e
+		}
+		if c.Role == "worker" {
+			if e = validateWorkerService(ctx, c, command); e != nil {
+				return e
+			}
 		}
 		_, e = command(ctx, "systemctl", "--user", "enable", "--now", filepath.Base(c.Service))
 	} else {
