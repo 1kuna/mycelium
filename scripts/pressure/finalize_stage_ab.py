@@ -31,6 +31,19 @@ try:
 except Exception as error:
     receipt['installed_worker']='HOLD:'+type(error).__name__
 try:
+    cpu_units=json.loads(kernel_read(root/'cpu-units.json')) if (root/'cpu-units.json').exists() else []
+    allowed={'myce-test-r9-cpu-fast-matrix.service','myce-test-r9-cpu-large-local-checkpoint.service','myce-test-r9-nas-small-latency-probe.service'}
+    for unit in cpu_units:
+        assert unit in allowed,'unexpected CPU unit'
+        state=subprocess.run(['systemctl','show',unit,'-p','ActiveState','-p','LoadState','-p','ControlGroup'],capture_output=True,text=True)
+        d=dict(v.split('=',1) for v in state.stdout.splitlines() if '=' in v)
+        if d.get('LoadState')!='not-found':
+            subprocess.run(['systemctl','stop',unit],check=True,capture_output=True,timeout=15)
+        assert not cgroup_pids('0::/system.slice/'+unit),'CPU test processes remain'
+        subprocess.run(['systemctl','reset-failed',unit],capture_output=True)
+    receipt['cpu_units_settled']=True
+except Exception as e:receipt['cpu_cleanup_error']=type(e).__name__
+try:
     baseline=json.loads(kernel_read(root/'display-baseline.json', 'text'))
     evidence={}
     readers=DiagnosticReaders(json.loads(kernel_read(root/'diagnostic-executables.json', 'text')),root/'diagnostics.jsonl')
@@ -76,7 +89,7 @@ pause=Path('/home/user/exp42-queue/PAUSED')
 owned=root/'owned-pause'
 headroom=int(next(r.split()[1] for r in kernel_read('/proc/meminfo').splitlines() if r.startswith('MemAvailable:')))/1024**2
 receipt['headroom_gib']=headroom
-if receipt['physical']=='released' and not receipt.get('docker_error') and headroom>=18 and owned.exists() and pause.exists() and kernel_read(pause,'bytes')==kernel_read(owned,'bytes'):
+if receipt['physical']=='released' and not receipt.get('cpu_cleanup_error') and not receipt.get('docker_error') and headroom>=18 and owned.exists() and pause.exists() and kernel_read(pause,'bytes')==kernel_read(owned,'bytes'):
     pause.rename(root/'queue-PAUSED.released')
 receipt['queue_pause']='released' if owned.exists() and not pause.exists() else 'HOLD; not changed'
 # At ExecStopPost the kernel has stopped the unit's child processes. Read-only verify it.
@@ -113,6 +126,6 @@ for child in ('files','info'):
 if not (root/'DONE').exists() and not (root/'FAILED').exists():
     (root/'FAILED').write_text(json.dumps(dict(reason='runner exited without terminal receipt',cleanup=receipt),indent=2))
 
-if receipt['physical']!='released' or remaining or occupied or receipt['installed_worker']!='flag and unit absent' or receipt.get('docker_error') or receipt['queue_pause']!='released' or headroom<18:
+if receipt['physical']!='released' or remaining or occupied or receipt['installed_worker']!='flag and unit absent' or receipt.get('cpu_cleanup_error') or receipt.get('docker_error') or receipt['queue_pause']!='released' or headroom<18:
     if (root/'DONE').exists():(root/'DONE').rename(root/'DONE.invalid-release')
     (root/'FAILED').write_text(json.dumps(dict(reason='final release not qualified',cleanup=receipt),indent=2))
