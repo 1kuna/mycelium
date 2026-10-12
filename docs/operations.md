@@ -212,19 +212,39 @@ unconfirmed disable. Concurrent controls fail rather than waiting on their lock.
 The flag is persisted before installer configuration discovery; the model proxy
 also refuses disabled-host admission, including a request-body read race.
 
-Check exit status and the confirmation line. Systemd success means native work
-in that worker service's cgroup is gone; secondary success means best-effort
-registry cleanup completed. Queue status is separate: verify **disabled by
+Docker cleanup is part of the same confirmation and overall deadline. The trusted
+`DOCKER_HOST` (default local Unix socket) and endpoints saved in registered
+worker custody are inventoried with the exact `myce.attempt` label. Every object
+is inspected before signaling; only objects with that nonempty label qualify.
+Labeled execution receives TERM, then KILL at the original disable grace deadline
+(`--now` kills immediately). Native cleanup does not grant Docker a fresh grace.
+Stopped container objects are retained; “gone” means no running execution, not
+container deletion. Unlabeled containers, including legacy Verso production,
+are never signaled.
+
+Pending create/start custody is reconciled even after the client or worker dies.
+An empty scan cannot settle an uncertain operation: a late accepted start must
+be positively observed and stopped, or independently fenced through the existing
+`resolve-docker --confirm-gone` procedure. Unknown create acceptance remains
+unconfirmed even after a discovered late container is stopped. Slow, hanging or
+refusing Docker retains DISABLED, returns nonzero, and reports known attempt and
+container IDs; an unavailable inventory is explicitly unconfirmed, not a claim
+that all IDs are known. A missing Docker CLI is **not applicable** only when
+there is no unresolved custody. An unreadable worker registry cannot certify
+pending-operation absence. Saved obligations with a missing CLI still fail.
+Workers refuse startup and Docker create/start dispatch while DISABLED is present.
+Use the same `--host-state-dir` (or `MYCE_HOST_STATE_DIR`) for custom controls.
+Offline `resolve-docker` is serialized with host controls, preserves the flag,
+and records only the operator's independent release proof; it never launches work.
+
+Check exit status and the confirmation line. Systemd success requires both the
+empty worker service cgroup and confirmed labeled Docker cleanup (or Docker not
+applicable). Secondary success remains best-effort registry cleanup. This does
+not fence arbitrary external Docker clients or other users; unregistered delayed
+launches cannot be proved absent. Queue status is separate: verify **disabled by
 operator** and **requeued** when notifications or reconciliation have reached
 it. On failure, keep the flag and rerun disable. After enable, verify a newly
 joined worker and an agreed small job.
-
-Docker containers live under dockerd, outside the worker cgroup. This branch
-**does not certify container disappearance**. `HostControl.ConfirmContainers`
-is the confirmation hook where the Docker containment branch must verify that
-Mycelium-labeled containers are gone before a receipt and cleanup acknowledgement.
-Container confirmation failures keep the flag and return nonzero. Production
-containers and unrelated containers are outside that hook's ownership scope.
 
 ## Render service files
 
@@ -730,7 +750,9 @@ Operator recovery is explicit and offline:
    `myce resolve-docker --state-dir /absolute/worker/spool --attempt-id ID --confirm-gone`.
    This takes the exclusive worker lock, refuses a different attempt, and durably
    records operator-confirmed forced release. It makes no Docker or network calls.
-4. Restart the same worker with the same spool/queue/name. It sends the existing
+4. If DISABLED is present, rerun `myce disable` to confirm host cleanup, then
+   `myce enable`, using the same host control directory. Resolution never removes
+   the flag. Restart the same worker with the same spool/queue/name. It sends the existing
    exact job/machine/session/attempt release acknowledgement before log replay.
    Confirm the queue hold clears in status. The command alone does not clear the
    queue; keep the old spool until that acknowledgement is accepted.

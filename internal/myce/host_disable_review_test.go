@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"os"
@@ -148,6 +149,12 @@ func TestHostSignalSkipsVanishedGroupsIndependently(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := workerState{Groups: map[int]map[int]string{cmd.Process.Pid: {cmd.Process.Pid: birth}, 99999999: {}}}
+	// Keep this signaling test independent of the shared host's ps latency.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ps"), []byte(fmt.Sprintf("#!/bin/sh\necho '%d %d S'\n", cmd.Process.Pid, cmd.Process.Pid)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	var signaled []int
 	if err := signalHostProcessUsing(st, syscall.SIGTERM, func(group int, _ syscall.Signal) error { signaled = append(signaled, group); return nil }); err != nil {
 		t.Fatal(err)
