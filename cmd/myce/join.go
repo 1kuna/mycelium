@@ -26,6 +26,12 @@ func detectJoinGPU(ctx context.Context, probe myce.MachineProbe, options joinGPU
 			return command(ctx, name, args...)
 		}
 	}
+	if command := probe.CommandEnv; command != nil {
+		probe.CommandEnv = func(ctx context.Context, env map[string]string, name string, args ...string) ([]byte, error) {
+			checked = append(checked, name)
+			return command(ctx, env, name, args...)
+		}
+	}
 	d, err := probe.DetectDevice(ctx, options.device)
 	if err != nil {
 		return options, fmt.Errorf("GPU auto-detection on %s/%s checked %s: %s; specify --gpu (and --device on multi-GPU hosts)", probe.OS, probe.Arch, strings.Join(checked, ", "), strings.ReplaceAll(err.Error(), "\n", " "))

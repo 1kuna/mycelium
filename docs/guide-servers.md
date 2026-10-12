@@ -21,7 +21,7 @@ models:
     platforms: [xpu]
     device: '0'
     device_env:
-      ONEAPI_DEVICE_SELECTOR: 'level_zero:{device}'
+      ONEAPI_DEVICE_SELECTOR: 'level_zero:0'
       ZE_AFFINITY_MASK: '{device}'
     start_command: [python, /shared/speech/server.py, --port, '{port}', --weights, '{model_path}']
     health_url: 'http://127.0.0.1:{port}/health'
@@ -47,6 +47,15 @@ verification. Failed unload retains its memory reservation and environment lease
 Start one worker per physical card, using `join --name b70-gpu0 --gpu xpu
 --device 0 --memory-mode fixed --memory-gb REVIEWED_ALLOWANCE`. Device selectors
 apply to batch commands and server processes without changing global env.
+For XPU, `ZE_AFFINITY_MASK` names physical cards while `ONEAPI_DEVICE_SELECTOR`
+uses indices after that mask: physical device `1` becomes `level_zero:0` /
+PyTorch `xpu:0`. A mask `0,1` exposes local indices `0,1`. `MYCE_DEVICES`
+always retains the physical selector. CUDA visibility also renumbers selected
+cards from zero; a single selected card is `cuda:0` inside the process.
+Keep `{device}` for physical selectors, not framework-local device arguments.
+A server launched through `docker run` must explicitly forward these variables
+with Docker `--env NAME` and expose the required device nodes; a Docker client
+environment is not automatically the container environment.
 CUDA selectors resolve to a stable GPU UUID used by both server execution and
 `nvidia-smi --id` inventory; numeric CUDA ordering cannot change the measured card. XPU admission remains
 an explicit conservative fixed allowance, not a live external-allocation guard.

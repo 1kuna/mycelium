@@ -29,11 +29,21 @@ type Detection struct {
 type MachineProbe struct {
 	OS, Arch string
 	Command  func(context.Context, string, ...string) ([]byte, error)
+	// CommandEnv runs a probe with per-process overrides; nil keeps injected Command fixtures.
+	CommandEnv func(context.Context, map[string]string, string, ...string) ([]byte, error)
 }
 
 func LocalMachineProbe() MachineProbe {
-	return MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
-		return exec.CommandContext(ctx, n, args...).Output()
+	run := func(ctx context.Context, env map[string]string, n string, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, n, args...)
+		cmd.Env = os.Environ()
+		for key, value := range env {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
+		return cmd.Output()
+	}
+	return MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
+		return run(ctx, nil, n, args...)
 	}}
 }
 func (p MachineProbe) Detect(ctx context.Context) (Detection, error) {
@@ -94,7 +104,17 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 		d.MemoryMode = "dedicated"
 		return d, nil
 	}
-	b, e = p.Command(ctx, "sycl-ls")
+	sycl := p.Command
+	if device != "" && p.CommandEnv != nil {
+		bound, err := WithModelDevice(Model{}, "xpu", device)
+		if err != nil {
+			return d, err
+		}
+		sycl = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			return p.CommandEnv(ctx, bound.DeviceEnv, name, args...)
+		}
+	}
+	b, e = sycl(ctx, "sycl-ls")
 	if e != nil {
 		b, e = p.Command(ctx, "xpu-smi", "discovery")
 	}
@@ -113,7 +133,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 		// do not silently substitute host RAM for its device memory.
 		low := strings.ToLower(intelGPU)
 		if !strings.Contains(low, "integrated") && !strings.Contains(low, "uhd") && !strings.Contains(low, "iris") {
-			verbose, err := p.Command(ctx, "sycl-ls", "--verbose")
+			verbose, err := sycl(ctx, "sycl-ls", "--verbose")
 			if err == nil {
 				budget := uint64(0)
 				for _, line := range strings.Split(string(verbose), "\n") {

@@ -215,7 +215,7 @@ func TestWithModelDeviceDropsOtherPlatformSelectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := xpu.DeviceEnv["CUDA_VISIBLE_DEVICES"]; ok || xpu.DeviceEnv["ZE_AFFINITY_MASK"] != "1" || xpu.DeviceEnv["ONEAPI_DEVICE_SELECTOR"] != "level_zero:1" {
+	if _, ok := xpu.DeviceEnv["CUDA_VISIBLE_DEVICES"]; ok || xpu.DeviceEnv["ZE_AFFINITY_MASK"] != "1" || xpu.DeviceEnv["ONEAPI_DEVICE_SELECTOR"] != "level_zero:0" {
 		t.Fatalf("XPU isolation=%v", xpu.DeviceEnv)
 	}
 	cuda, err := WithModelDevice(base, "cuda", "GPU-selected")
