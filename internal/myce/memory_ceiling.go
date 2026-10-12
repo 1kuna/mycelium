@@ -37,6 +37,8 @@ type memoryAttempt struct {
 	bytes int64
 }
 
+var ErrMemoryCeilingsRequired = errors.New("required memory ceilings unavailable")
+
 func delegateMemory(fs memoryFS, root string, pid int) (*memoryCeilings, error) {
 	b, err := fs.ReadFile(filepath.Join(root, "cgroup.controllers"))
 	if err != nil {
@@ -52,6 +54,14 @@ func delegateMemory(fs memoryFS, root string, pid int) (*memoryCeilings, error) 
 	// Domain controllers cannot be enabled while the parent has internal processes.
 	if err = fs.WriteFile(filepath.Join(leaf, "cgroup.procs"), []byte(strconv.Itoa(pid))); err != nil {
 		return nil, err
+	}
+	members, err := fs.ReadFile(filepath.Join(leaf, "cgroup.procs"))
+	if err != nil || !strings.Contains(" "+strings.Join(strings.Fields(string(members)), " ")+" ", " "+strconv.Itoa(pid)+" ") {
+		return nil, errors.New("worker leaf membership not confirmed")
+	}
+	members, err = fs.ReadFile(filepath.Join(root, "cgroup.procs"))
+	if err != nil || strings.TrimSpace(string(members)) != "" {
+		return nil, errors.New("worker service parent still contains processes")
 	}
 	if err = fs.WriteFile(filepath.Join(root, "cgroup.subtree_control"), []byte("+memory")); err != nil {
 		return nil, err
@@ -104,6 +114,24 @@ func (w *Worker) initMemoryCeilings() {
 	}
 	w.Machine.MemoryEnforcement = "memory ceiling not enforced on this host (" + reason + ")"
 }
+func (w Worker) requireMemoryCeilings() error {
+	if !w.RequireMemoryCeilings {
+		return nil
+	}
+	if w.memoryCeilings == nil {
+		return fmt.Errorf("%w: %s; delegate memory to the worker service before enabling it", ErrMemoryCeilingsRequired, w.Machine.MemoryEnforcement)
+	}
+	// An empty child tests the exact per-attempt controls before any queue contact.
+	probe, err := w.memoryCeilings.create("myce-ceiling-preflight", 128<<20, 0)
+	if err != nil {
+		return fmt.Errorf("%w: cgroup preflight: %v", ErrMemoryCeilingsRequired, err)
+	}
+	if err = probe.fs.Remove(probe.path); err != nil {
+		return fmt.Errorf("%w: remove preflight child: %v", ErrMemoryCeilingsRequired, err)
+	}
+	return nil
+}
+
 func memoryBytes(gb float64) (int64, error) {
 	if !validMemoryValue(gb) || gb >= float64(math.MaxInt64)/(1<<30) {
 		return 0, errors.New("invalid memory ceiling")
@@ -213,8 +241,8 @@ func (a *memoryAttempt) cleanup(clock Clock) error {
 }
 func (w Worker) ceilingBytes(gpu, host float64) (int64, error) {
 	if host == 0 {
-		if w.Machine.HostMemoryBudgetGB > 0 {
-			return 0, errors.New("capped host requires host_memory_gb")
+		if w.RequireMemoryCeilings || w.Machine.HostMemoryBudgetGB > 0 {
+			return 0, errors.New("worker requires positive host_memory_gb")
 		}
 		return 0, nil
 	}

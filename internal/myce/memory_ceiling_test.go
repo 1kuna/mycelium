@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +26,14 @@ func (f fakeMemoryFS) Mkdir(p string) error {
 		}
 	}
 	return nil
+}
+func (f fakeMemoryFS) WriteFile(p string, b []byte) error {
+	if filepath.Base(filepath.Dir(p)) == "worker" && filepath.Base(p) == "cgroup.procs" {
+		if err := os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(p)), "cgroup.procs"), nil, 0600); err != nil {
+			return err
+		}
+	}
+	return f.osMemoryFS.WriteFile(p, b)
 }
 func (f fakeMemoryFS) Remove(p string) error { return os.Rename(p, p+".finished") }
 func fakeCeilings(t *testing.T) *memoryCeilings {
@@ -565,5 +574,39 @@ func TestMemoryCeilingDockerUndeclaredOOM(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Docker did not finish")
+	}
+}
+
+func TestRequireMemoryCeilingsStartupAndDeclarations(t *testing.T) {
+	w := recoveryWorker(t)
+	w.RequireMemoryCeilings = true
+	if err := w.Run(context.Background()); !errors.Is(err, ErrMemoryCeilingsRequired) {
+		t.Fatal("started without mandatory delegation", err)
+	}
+	c := fakeCeilings(t)
+	w.memoryCeilings = c
+	if err := w.requireMemoryCeilings(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(c.root, "myce-ceiling-preflight")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("preflight child remained", err)
+	}
+	s, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	j := recoveryJob(t, []string{"sh", "-c", "exit 0"})
+	j.Spec.Needs.HostMemoryGB = 0
+	if _, err := w.start(s, j); err == nil || !strings.Contains(err.Error(), "host_memory_gb") {
+		t.Fatal("undeclared job started", err)
+	}
+	rt := modelRuntime{requireMemoryCeilings: true}
+	if err := rt.checkLoadMemory(context.Background(), &workerModel{model: Model{MemoryGB: 1}}); err == nil || !strings.Contains(err.Error(), "host_memory_gb") {
+		t.Fatal("undeclared model started", err)
+	}
+	w.memoryCeilings = &memoryCeilings{fs: deniedMemoryFS{}, root: c.root}
+	if err := w.requireMemoryCeilings(); !errors.Is(err, ErrMemoryCeilingsRequired) {
+		t.Fatal("unwritable ceiling accepted", err)
 	}
 }

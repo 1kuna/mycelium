@@ -203,17 +203,19 @@ its device and other fields before installation. `--host-state-dir DIR` is also
 saved by the installer, so isolated services and controls share the same authority.
 Existing workers must run the updated binary once to record their unit custody.
 
-Re-running `myce install worker` on an existing Linux installation upgrades its
-unit settings and reloads systemd, preserving its saved configuration, token,
-spools and installed binary; the previous unit is kept in local `.Trash`.
+Re-running either installer with identical flags upgrades its binary and unit,
+reloads the service manager and preserves local state. Changed configuration
+prints a diff and requires `--force`; role/service/binary/spool paths cannot be
+relocated over an installed role. The previous unit is kept in local `.Trash`.
 Linux worker installation also writes a private `gpu.env` beside `config.json`.
 It captures only recognized runtime controls from the invoking shell: `LD_LIBRARY_PATH`,
 `LIBRARY_PATH`, selected `ZE_*`, `ONEAPI_*`, `SYCL_*`, and `CUDA_*` variables.
 It never imports arbitrary prefixed variables, credentials, or `MYCE_TOKEN`.
 Source the trusted oneAPI `setvars.sh`/profile before installing if that is what
-makes foreground GPU detection work. PATH remains in the private service config.
-Reinstallation refreshes PATH and this runtime file while retaining the saved
-GPU/device settings, token, spool and binary.
+makes foreground GPU detection work. PATH is captured in the private config and
+`gpu.env`; newline, quote and backslash values are rejected. Reinstallation
+refreshes this runtime file. Changes to saved PATH or GPU/device settings require
+`--force`, like other configuration changes.
 
 After writing/reloading the unit, install runs the installed binary's
 `detect --config PATH` through `systemd-run --user --wait --pipe`, loading the
@@ -231,8 +233,8 @@ failed foreground detection then requires a positive `--memory-gb` test budget
 and configures the fake platform. This flag bypasses service GPU validation,
 not the normal scheduler/checkpoint contracts.
 
-Upgrade the installed binary separately if it predates `detect --config` or this switch. Manual
-unit users must install the updated template and reload their user manager.
+Re-run the installer with the updated staging binary to upgrade the role binary.
+Manual unit users must install the updated template and reload their user manager.
 The flag condition and the worker's successful exit while disabled prevent
 restart loops, including after reboot.
 
@@ -678,7 +680,9 @@ Prerequisites: the matching `myce` binary, mounted NAS with an existing
 `mycelium/checkpoints` directory, uv on PATH, and an existing queue address and
 fleet token. A Windows 4090 PC uses its Linux installation/WSL environment with
 CUDA visible to `nvidia-smi`; native Windows services are not supported.
-Set `MYCE_TOKEN` privately in the shell; avoid putting it in a command argument.
+Create private `~/.config/myce/fleet.env` containing literal `MYCE_TOKEN` and
+`MYCE_QUEUE` assignments, as in the deployment sequence below. Avoid putting
+credentials in arguments. `--environment-file PATH` selects a different file.
 
 On a Mac mini (adjust the mount name):
 
@@ -699,7 +703,7 @@ myce doctor
 ```
 
 Pass `--environment-config NAS/mycelium/environments/catalog.yaml` and
-`--model-config NAS/models/catalog.yaml` when using those catalogs (substitute
+`--model-config NAS/mycelium/models/catalog.yaml` when using those catalogs (substitute
 absolute mounted paths). The setup summary shows OS/architecture, GPU platform,
 memory mode/reserve, checkpoint root, cache locations/limits, config and service.
 Apple Silicon uses unified memory with 4 GiB reserve, ordinary CUDA uses
@@ -710,14 +714,13 @@ cannot be measured, supply an explicit fixed device budget. Unknown GPU or
 memory detection fails clearly. OS CPU architecture is detected, not emulated.
 
 Default local setup is `~/.local/share/mycelium/worker`, with its own binary,
-config, credentials and state. Linux uses `myce-worker.service`; macOS uses
+config and state; credentials stay in the private fleet EnvironmentFile. Linux uses `myce-worker.service`; macOS uses
 `local.mycelium.worker.plist` / `local.mycelium.worker`, unlike the manual template.
-Automatic CUDA setup requires exactly one GPU; the installer has no `--device`
-flag. Use foreground `join` or manual templates for separately selected cards.
-The service uses a
-private 0600 credentials file and preserves the installer shell's executable
-PATH, so launchd can find uv installed in a user directory. Edit `config.json`
-for operational settings; keep `credentials.json` private. A worker starts with
+Automatic CUDA setup requires exactly one GPU unless `--device` selects a card.
+Use `--instance` for separate Linux per-card units. The service reads the private
+0600 fleet EnvironmentFile, and preserves the installer's executable PATH so
+launchd can find tools in a user directory. Re-run with flags and `--force` for
+changed operational settings. A worker starts with
 an empty environment cache and builds waiting-job software on demand.
 
 Linux systemd *user* services start at login. Boot before login additionally
@@ -735,8 +738,11 @@ myce doctor --config ~/.local/share/mycelium/queue/config.json
 ```
 
 Queue setup defaults to loopback binding. Point clients/workers at its reachable
-LAN address. Mount the NAS before starting the service; setup never creates a
-fake local replacement for an unavailable mount. Doctor checks the mount and
+LAN address. Mount the NAS before installing. Linux installs require the exact `--nas` root
+in `/proc/mounts` by default. Only local tests should opt out with
+`--require-mounted-nas=false`. Installers create only the `mycelium/checkpoints`,
+`mycelium/models` and `mycelium/environments` namespace, refuse symlinks, and
+write/sync/rename/remove a small generated probe in each directory. Doctor checks the mount and
 write access (its generated probe is retained in NAS `.Trash`), queue
 reachability/authentication, GPU visibility for workers, uv, free disk space,
 and Linux user lingering (doctor fails unless it is enabled).
@@ -753,6 +759,168 @@ See [environments](environments.md) for catalog authoring, lock files, build
 logs, cache limits, and interrupted-build recovery. Laptop tests use fake GPU
 probe output, temporary home directories and injected service runners; they
 never install actual boot services.
+
+## Short B70 and Spark deployment
+
+Build the same revision for both hosts, then copy the amd64 binary to the B70
+and arm64 binary to the Spark's staging directory. These commands are a recipe;
+addresses, NAS mounts and device budgets are operator inputs. No command here
+changes legacy Verso ownership, Atlas services, earlyoom, mounts or user lingering.
+The production handoff and native device/memory acceptance remain separate gates.
+
+```sh
+GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/myce-linux-amd64 ./cmd/myce
+GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/myce-linux-arm64 ./cmd/myce
+scp /tmp/myce-linux-amd64 <B70_USER>@<B70_ADDRESS>:myce
+scp /tmp/myce-linux-arm64 <SPARK_USER>@<SPARK_ADDRESS>:myce
+```
+
+On each host, create the same private fleet file without displaying its token.
+Replace the placeholder privately; use simple literal assignments (no `export`,
+shell interpolation or multiline values). Installed units load this file and the
+worker's captured GPU runtime file; secrets never enter the unit or argv.
+
+```sh
+umask 077
+mkdir -p "$HOME/.config/myce"
+cat > "$HOME/.config/myce/fleet.env" <<'ENV'
+MYCE_TOKEN=<FLEET_TOKEN>
+MYCE_QUEUE=http://<B70_LAN_ADDRESS>:7331
+ENV
+chmod 600 "$HOME/.config/myce/fleet.env"
+chmod 700 "$HOME/myce"
+```
+
+On the B70, prepare the two policy inputs (retain existing approved policies
+rather than overwriting them). The hold protects production **inside Mycelium**;
+Verso separately controls legacy production. The shared **3 GiB** host budget
+accounts for legacy production outside Mycelium; it is 3 GiB across both cards.
+
+```yaml
+# ~/.config/myce/projects.yaml
+verso:
+  weight: 1
+  allowed_machines: [b70-gpu0, b70-gpu1, spark]
+```
+
+```yaml
+# ~/.config/myce/hosts.yaml
+hosts:
+  b70:
+    production_hold: true
+    production_idle: 180s
+  spark:
+    production_hold: false
+    production_idle: 180s
+```
+
+Source the trusted existing oneAPI runtime before installing B70 workers. Replace
+`<B70_NAS_MOUNT>`, `<GPU0_GIB>`, `<GPU1_GIB>` and `<GPU_RESERVE_GIB>` with the
+mounted root and qualified device budgets. Do not use `--allow-deviceless`.
+
+```sh
+"$HOME/myce" install queue --nas <B70_NAS_MOUNT> \
+  --listen <B70_LAN_ADDRESS>:7331 \
+  --project-config "$HOME/.config/myce/projects.yaml" \
+  --host-config "$HOME/.config/myce/hosts.yaml"
+"$HOME/myce" install worker --nas <B70_NAS_MOUNT> \
+  --name b70-gpu0 --host-id b70 --instance gpu0 --device 0 \
+  --gpu xpu --memory-mode fixed --memory-gb <GPU0_GIB> \
+  --reserve-memory-gb <GPU_RESERVE_GIB> --reserve-host-memory-gb 4 \
+  --host-memory-budget-gb 3 --memory-ceiling-slack-gb 0 --start-disabled
+"$HOME/myce" install worker --nas <B70_NAS_MOUNT> \
+  --name b70-gpu1 --host-id b70 --instance gpu1 --device 1 \
+  --gpu xpu --memory-mode fixed --memory-gb <GPU1_GIB> \
+  --reserve-memory-gb <GPU_RESERVE_GIB> --reserve-host-memory-gb 4 \
+  --host-memory-budget-gb 3 --memory-ceiling-slack-gb 0 --start-disabled
+```
+
+`--start-disabled` writes an ordered per-unit DISABLED flag and cleanup receipt
+before installation, registers the unit for boot without starting it, and adopts
+its spool into host control. Unit conditions and the service entry point prevent
+joining, including after reboot. An existing host-wide gate and receipt stay
+intact. Reinstallation with this flag confirms cleanup of an existing worker;
+unconfirmed native/Docker custody fails closed. When Verso separately releases
+ownership, clear any shared gate while the card gates remain, then explicitly
+`myce enable --config .../worker-gpu1/config.json --unit myce-worker@gpu1.service`
+for the released card. Enabling GPU0 needs its own coordinated production handoff.
+Set the shared budget once while both workers remain disabled. Verso uses this
+local command for every switch and fallback; it needs no queue connection and
+works with stopped services. The durable override wins over install-time flags.
+
+```sh
+"$HOME/myce" host-memory-budget set 3
+"$HOME/myce" host-memory-budget show
+```
+
+Verso's production switch order is: keep 3 GiB while legacy production owns the
+GPUs; clear and verify legacy GPU owners; set 27 GiB; then enable GPU0. Retain the
+approved host production hold until Verso's separate production admission gate
+releases it. If a shared DISABLED gate exists, clear it while both per-card gates
+remain in place, before enabling the selected card.
+
+```sh
+# After legacy GPU owners are confirmed cleared:
+"$HOME/myce" host-memory-budget set 27
+"$HOME/myce" enable --unit myce-worker@gpu0.service
+```
+
+On fallback, complete and verify the disable first. A failed disable blocks the
+fallback. Only then set 3 GiB and let legacy production load.
+
+```sh
+"$HOME/myce" disable --now && "$HOME/myce" host-memory-budget set 3
+# Legacy production loads only after both commands succeed.
+```
+
+Budget updates use atomic replacement with file/directory fsync and ordered
+generations in the shared host-state directory next to DISABLED. All instances
+read it at heartbeats and admission; new admissions use a raise without restart.
+A lower budget preserves running work and blocks further admissions while
+status reports `over budget: N GiB in use > M GiB`. Status usage is the sum of
+reserved per-attempt/model host ceilings (including slack), not measured RSS.
+`show` prints the effective value and source; use `--host-state-dir DIR` for a
+custom shared directory, or `show --config PATH` for a custom install fallback.
+Corrupt/regressed overrides fail admissions closed. Never relocate the spool or
+reset generations during a reinstall.
+
+On the Spark, after the coordinated Atlas loan, use the unified GPU pool,
+**16 GiB** reserve and **105 GiB** host budget. Keep earlyoom armed.
+
+```sh
+"$HOME/myce" install worker --nas <SPARK_NAS_MOUNT> \
+  --name spark --host-id spark --device 0 --gpu cuda --memory-mode unified \
+  --reserve-memory-gb 16 --reserve-host-memory-gb 16 \
+  --host-memory-budget-gb 105 --require-memory-ceilings
+```
+
+Append `--dry-run` to each install command to inspect its generated unit without
+writes or service changes. A dry run does not prove systemd or NAS acceptance.
+After actual installation, inspect exact units and authenticated `myce status`;
+B70 workers must remain unjoined. Use `myce doctor --config PATH` for prerequisites.
+Source fleet.env privately (`set -a; . "$HOME/.config/myce/fleet.env"; set +a`)
+for client commands, never with shell tracing or token output.
+
+`--require-memory-ceilings` checks the worker's own service cgroup at every
+startup: memory delegation, confirmed worker leaf membership, an empty service
+parent, and create/write/read/remove of a child with `memory.max=134217728`,
+`memory.swap.max=0`, `memory.oom.group=1`. Failure exits 78 with a clear message;
+`RestartPreventExitStatus=78` prevents a restart loop. Required workers reject
+batch attempts and model loads with unset/zero `host_memory_gb`, even without a
+host budget. This is a real kernel-control preflight, not GPU workload proof.
+Qualify actual per-attempt limits and GPU/driver accounting before admission.
+
+Queue defaults: loopback listen; role-local `state/myce.db` and `state/uploads`;
+16 GiB upload spool; 7-day log retention; 3-minute restart grace; production,
+deadline and experiment loss timeouts 5s/20s/60s. Queue units set
+`PrivateDevices=yes`, `NoNewPrivileges=yes`, `Nice=10`, `CPUQuota=25%`,
+`MemoryMax=512M`, `TasksMax=64`, `GOMAXPROCS=1` and a 150s stop timeout. Flags
+`--private-devices`, `--no-new-privileges`, `--nice`, `--cpu-quota`, `--memory-max`
+and `--tasks-max` change that envelope. Worker defaults: role-local spool,
+`~/.local/share/myce` host control, 1s heartbeat, 4 GiB host reserve, 0.125 GiB
+ceiling slack, zero swap, 100 GiB model cache and 20 GiB environment cache.
+NAS roots default to `<nas>/mycelium/{checkpoints,models,environments}`.
+The install help lists all policy, path, timeout, cache and memory overrides.
 
 ## General model servers and joint measurement
 
@@ -877,16 +1045,14 @@ Unmanaged/nested containers and Docker-backed catalog servers cannot be
 certified by the native cgroup or inspected automatically; use the managed batch
 adapter and its custody/label contract for qualified container work.
 
-Provisional B70 GPU1-only configuration (replace with measured Monday values):
-31 GiB host RAM minus 22 GiB legacy-production reservation minus 4 GiB OS/worker
-margin leaves **5 GiB total Mycelium ceilings**. Install the GPU1 worker with
-`--instance gpu1 --device 1 --host-memory-budget-gb 5
---memory-ceiling-slack-gb 0 --memory-swap-max-bytes 0`, plus the ordinary queue,
-NAS and GPU arguments. Declare `needs.host_memory_gb: 5` for one full-envelope
-experiment. Alternatively keep the default 0.125-GiB slack and declare at most
-4.875 GiB. If another Mycelium card worker runs on the same host, configure the
-same host ID/budget; the 5 GiB is shared, not 5 GiB per card. These numbers are
-operator settings, not code defaults or measured qualification.
+B70 coexistence uses **3 GiB total Mycelium ceilings**, shared across both cards.
+Install with `--host-memory-budget-gb 3 --memory-ceiling-slack-gb 0
+--memory-swap-max-bytes 0` and set the durable shared override to 3. Declare at
+most `needs.host_memory_gb: 3` for a full-envelope experiment; with the default
+0.125-GiB slack, declare at most 2.875 GiB. The coordinated production switch
+raises the shared override to 27 GiB only after legacy GPU owners are cleared.
+See the short deployment section for the switch/fallback command order. These
+budgets are operator settings, not code defaults or measured qualification.
 
 The budget bounds admitted attempt/server RAM ceilings, not every byte used by
 the worker, environment builds, copies, Docker daemon or unrelated software.

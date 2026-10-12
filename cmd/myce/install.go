@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"mycelium/internal/myce"
 )
@@ -59,6 +60,39 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	memorySlack := f.Float64("memory-ceiling-slack-gb", .125, "extra GiB per declared RAM ceiling")
 	memorySwap := f.Int64("memory-swap-max-bytes", 0, "swap allowance per ceiling in bytes")
 	reserve := f.Float64("reserve-memory-gb", 0, "explicit memory reserve")
+	hostID := f.String("host-id", hostname, "physical host identity shared by per-card workers")
+	hostReserve := f.Float64("reserve-host-memory-gb", 4, "host RAM reserve in GiB")
+	stateDir := f.String("state-dir", "", "local worker spool (default role/state)")
+	checkpointRoot := f.String("checkpoint-root", "", "worker NAS checkpoint root")
+	modelRoot := f.String("model-root", "", "worker NAS model root")
+	environmentRoot := f.String("environment-root", "", "worker NAS environment root")
+	modelCache := f.String("model-cache", "", "local model cache")
+	modelCacheBytes := f.Int64("model-cache-bytes", 100<<30, "local model cache bytes")
+	environmentCache := f.String("environment-cache", "", "local environment cache")
+	environmentCacheBytes := f.Int64("environment-cache-bytes", 20<<30, "local environment cache bytes")
+	heartbeat := f.Duration("heartbeat", time.Second, "worker check-in interval")
+	startDisabled := f.Bool("start-disabled", false, "install with a durable per-unit disable gate; enable explicitly later")
+	requireCeilings := f.Bool("require-memory-ceilings", false, "refuse startup without tested cgroup v2 memory ceilings")
+	requireMounted := f.Bool("require-mounted-nas", probe.OS == "linux", "require NAS root to be a mount point in /proc/mounts")
+	force := f.Bool("force", false, "accept displayed installed configuration changes")
+	db := f.String("db", "", "queue SQLite path (default state/myce.db)")
+	projectConfig := f.String("project-config", "", "project policy YAML")
+	hostConfig := f.String("host-config", "", "host policy YAML")
+	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "completed log retention")
+	uploadSpoolDir := f.String("upload-spool-dir", "", "local upload spool (default state/uploads)")
+	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total upload spool bytes")
+	restartGrace := f.Duration("restart-grace", myce.RestartGrace, "queue restart recovery grace")
+	productionLoss := f.Duration("production-loss-timeout", myce.ProductionLossAfter, "production quiet timeout")
+	deadlineLoss := f.Duration("deadline-loss-timeout", myce.DeadlineLossAfter, "deadline quiet timeout")
+	experimentLoss := f.Duration("experiment-loss-timeout", myce.LossAfter, "experiment quiet timeout")
+	checkpoints := f.String("checkpoints", "", "queue NAS checkpoint root")
+	environmentFile := f.String("environment-file", filepath.Join(home, ".config", "myce", "fleet.env"), "private fleet MYCE_TOKEN and MYCE_QUEUE EnvironmentFile")
+	privateDevices := f.Bool("private-devices", true, "queue private device namespace")
+	noNewPrivileges := f.Bool("no-new-privileges", true, "queue disallows privilege escalation")
+	nice := f.Int("nice", 10, "queue scheduling priority")
+	cpuQuota := f.String("cpu-quota", "25%", "queue systemd CPUQuota")
+	memoryMax := f.String("memory-max", "512M", "queue systemd MemoryMax")
+	tasksMax := f.String("tasks-max", "64", "queue systemd TasksMax")
 	models := f.String("model-config", "", "NAS model catalog")
 	environments := f.String("environment-config", "", "NAS environment catalog")
 	if e = f.Parse(flags); e != nil {
@@ -129,6 +163,21 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 			}
 		}
 	}
+	if role == "worker" {
+		f.Visit(func(v *flag.Flag) {
+			switch v.Name {
+			case "reserve-memory-gb":
+				d.ReserveGB = *reserve
+			case "memory-gb":
+				d.MemoryGB = *memory
+			case "memory-mode":
+				d.MemoryMode = *mode
+			}
+		})
+		if _, err := myce.NewMemorySourceWithMode(d.Platform, d.MemoryGB, d.ReserveGB, d.MemoryMode); err != nil {
+			return err
+		}
+	}
 	c, e := myce.PlanInstall(role, home, *root, *nas, *queue, *name, d)
 	if e != nil {
 		return e
@@ -153,9 +202,10 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	c.HostMemoryBudgetGB, c.MemoryCeilingSlackGB, c.MemorySwapMaxBytes = *hostBudget, *memorySlack, *memorySwap
 	c.AllowDeviceless = *allowDeviceless
 	c.Device = *device
-	c.HostStateDir = *hostDir
-	if c.HostStateDir == "" {
-		c.HostStateDir = os.Getenv("MYCE_HOST_STATE_DIR")
+	if *hostDir != "" {
+		c.HostStateDir = *hostDir
+	} else if v := os.Getenv("MYCE_HOST_STATE_DIR"); v != "" {
+		c.HostStateDir = v
 	}
 	if c.HostStateDir != "" {
 		c.HostStateDir, e = filepath.Abs(c.HostStateDir)
@@ -163,7 +213,36 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 			return e
 		}
 	}
+	c.HostID, c.ReserveHostMemoryGB, c.Heartbeat = *hostID, *hostReserve, *heartbeat
+	c.StartDisabled, c.RequireMemoryCeilings, c.RequireMountedNAS, c.Force = *startDisabled, *requireCeilings, *requireMounted, *force
+	c.ModelCacheBytes, c.EnvironmentCacheBytes = *modelCacheBytes, *environmentCacheBytes
+	if *stateDir != "" {
+		c.State = *stateDir
+		c.ModelCache = filepath.Join(c.State, "model-cache")
+		c.EnvironmentCache = filepath.Join(c.State, "environment-cache")
+	}
+	for _, v := range []struct {
+		dst   *string
+		value string
+	}{{&c.Checkpoints, *checkpointRoot}, {&c.ModelRoot, *modelRoot}, {&c.EnvironmentRoot, *environmentRoot}, {&c.ModelCache, *modelCache}, {&c.EnvironmentCache, *environmentCache}} {
+		if v.value != "" {
+			*v.dst = v.value
+		}
+	}
 	c.Listen = *listen
+	c.EnvironmentFile = *environmentFile
+	c.ProjectConfig, c.HostConfig = *projectConfig, *hostConfig
+	c.LogRetention, c.UploadSpoolBytes, c.RestartGrace = *logRetention, *uploadSpoolBytes, *restartGrace
+	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = *productionLoss, *deadlineLoss, *experimentLoss
+	c.PrivateDevices, c.NoNewPrivileges, c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax = *privateDevices, *noNewPrivileges, *nice, *cpuQuota, *memoryMax, *tasksMax
+	for _, v := range []struct {
+		dst   *string
+		value string
+	}{{&c.DB, *db}, {&c.UploadSpoolDir, *uploadSpoolDir}, {&c.Checkpoints, *checkpoints}} {
+		if v.value != "" {
+			*v.dst = v.value
+		}
+	}
 	// Services start in a different working directory from the install command.
 	for _, path := range []*string{models, environments} {
 		if *path != "" {
@@ -175,17 +254,42 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	}
 	c.ModelCatalog = *models
 	c.EnvironmentCatalog = *environments
-	if *environments != "" {
+	if *environments != "" && *environmentRoot == "" {
 		c.EnvironmentRoot = filepath.Dir(*environments)
 	}
+	// Resolve caller-relative paths before the service changes working directory.
+	for _, p := range []*string{&c.State, &c.Checkpoints, &c.ModelRoot, &c.EnvironmentRoot, &c.ModelCache, &c.EnvironmentCache, &c.DB, &c.UploadSpoolDir, &c.ProjectConfig, &c.HostConfig, &c.EnvironmentFile} {
+		if *p != "" {
+			*p, e = filepath.Abs(*p)
+			if e != nil {
+				return e
+			}
+		}
+	}
+	if e = c.ValidateInstall(); e != nil {
+		return e
+	}
 	if p := os.Getenv("PATH"); p != "" {
+		if strings.ContainsAny(p, "\x00\n\r\"\\") {
+			return errors.New("PATH cannot contain newlines, quotes or backslashes for service capture")
+		}
 		c.Path = p
+	}
+	if !*dry && c.EnvironmentFile != "" {
+		_, address, err := myce.ReadFleetEnvironment(c.EnvironmentFile)
+		if err != nil {
+			return err
+		}
+		c.Queue = address
 	}
 	fmt.Printf("%s %s/%s: platform=%s memory=%s reserve=%.0f GiB\nQueue: %s\nNAS: %s\nCheckpoint root: %s\nModel cache: %s (%d bytes)\nEnvironment cache: %s (%d bytes)\nConfig: %s\nBoot service: %s\n", role, d.OS, d.Arch, d.Platform, d.MemoryMode, d.ReserveGB, c.Queue, c.NAS, c.Checkpoints, c.ModelCache, c.ModelCacheBytes, c.EnvironmentCache, c.EnvironmentCacheBytes, c.Config, c.Service)
 	if d.OS == "linux" {
 		fmt.Printf("Starts at login; for boot without login and after logout, an administrator must run loginctl enable-linger %d. Run myce doctor to check lingering.\n", os.Getuid())
 	}
 	fmt.Printf("Command: myce %s\n", strings.Join(c.Args(), " "))
+	if c.StartDisabled {
+		fmt.Println("Worker will remain disabled until myce enable.")
+	}
 	if *dry {
 		fmt.Println("Dry run: no files written, packages installed, or services changed.")
 		fmt.Print(c.ServiceText())
@@ -223,6 +327,9 @@ func serviceCommand(args []string) error {
 		if err != nil {
 			return err
 		}
+		if unit == "" && myce.ValidWorkerUnit(filepath.Base(c.Service)) {
+			unit = filepath.Base(c.Service)
+		}
 		if unit != "" {
 			dir, err = myce.WorkerUnitDirectory(dir, unit)
 			if err != nil {
@@ -238,6 +345,15 @@ func serviceCommand(args []string) error {
 			return nil
 		}
 	}
+	if c.EnvironmentFile != "" {
+		_, queue, err := myce.ReadFleetEnvironment(c.EnvironmentFile)
+		if err != nil {
+			return err
+		}
+		if err = os.Setenv("MYCE_QUEUE", queue); err != nil {
+			return err
+		}
+	}
 	token, e := myce.ReadServiceToken(c)
 	if e != nil {
 		return e
@@ -251,5 +367,9 @@ func serviceCommand(args []string) error {
 	if e = os.Setenv("MYCE_TOKEN", token); e != nil {
 		return e
 	}
-	return run(c.Args())
+	args = c.Args()
+	if f.NArg() > 0 {
+		args = f.Args()
+	}
+	return run(args)
 }

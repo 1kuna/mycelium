@@ -141,6 +141,9 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 			unlock()
 		}
 	}()
+	if err := (Worker{HostStateDir: l.HostStateDir, Machine: l.memoryMachine}).checkHostMemoryBudget(m.MemoryGB, m.HostMemoryGB); err != nil {
+		return err
+	}
 	l.identity = ID()
 	name := "engine-" + l.identity
 	shell := []string{"-c", `read gate || exit 125; exec "$@"`, "myce-supervisor-" + l.identity}
@@ -405,6 +408,8 @@ type workerModel struct {
 	drainRequested     bool
 }
 type modelRuntime struct {
+	admissionBlocked      bool
+	requireMemoryCeilings bool
 	memoryCeilings        *memoryCeilings
 	memoryMachine         Machine
 	memorySwapMaxBytes    int64
@@ -478,6 +483,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	rt.environmentCache = w.environmentCache
 	rt.environmentSourceRoot = w.EnvironmentSourceRoot
 	rt.memoryCeilings, rt.memoryMachine, rt.memorySwapMaxBytes = w.memoryCeilings, w.Machine, w.MemorySwapMaxBytes
+	rt.requireMemoryCeilings = w.RequireMemoryCeilings
 	rt.hostMemorySource = w.HostMemorySource
 	rt.unifiedMemory = w.Machine.UnifiedMemory
 	rt.memorySource = w.MemorySource
@@ -559,6 +565,9 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		}
 		if model.Name == "" {
 			rt.models[s.Model] = &workerModel{state: "failed", err: "model absent from worker config"}
+			continue
+		}
+		if rt.admissionBlocked {
 			continue
 		}
 		var engine Engine
@@ -651,12 +660,21 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 }
 
 func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {
+	rt.mu.Lock()
+	machine := rt.memoryMachine
+	rt.mu.Unlock()
+	if err := (Worker{HostStateDir: rt.hostStateDir, Machine: machine}).checkHostMemoryBudget(loading.model.MemoryGB, loading.model.HostMemoryGB); err != nil {
+		return err
+	}
+	if rt.requireMemoryCeilings && loading.model.HostMemoryGB <= 0 {
+		return errors.New("worker requires positive host_memory_gb")
+	}
+
 	if loading.model.HostMemoryGB > 0 {
 		if rt.hostMemorySource == nil {
 			return errors.New("model load requires host RAM source")
 		}
 		free, e := rt.hostMemorySource(ctx)
-		machine := rt.memoryMachine
 		machine.UnifiedMemory, machine.HostMemoryMeasured = rt.unifiedMemory, true
 		need := hostNeed(&machine, loading.model.MemoryGB, loading.model.HostMemoryGB)
 		if e != nil || !validMemoryValue(free) || free < need {
