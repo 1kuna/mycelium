@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"mycelium/internal/myce"
 )
@@ -60,8 +65,11 @@ func TestInstallCLIDryRunFakeDetection(t *testing.T) {
 func TestInstallCLIStoresAbsoluteCatalogPaths(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("MYCE_TOKEN", "test-only-token")
+	fleet := filepath.Join(home, ".config", "myce", "fleet.env")
+	os.MkdirAll(filepath.Dir(fleet), 0700)
+	os.WriteFile(fleet, []byte("MYCE_TOKEN=test-only-token\nMYCE_QUEUE=http://queue:7331\n"), 0600)
 	p := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) { return nil, nil }}
-	if err := setupCommandWithProbe([]string{"install", "queue", "--nas", home, "--model-config", "models.yaml", "--environment-config", "environments/catalog.yaml"}, p, home); err != nil {
+	if err := setupCommandWithProbe([]string{"install", "queue", "--nas", home, "--require-mounted-nas=false", "--model-config", "models.yaml", "--environment-config", "environments/catalog.yaml"}, p, home); err != nil {
 		t.Fatal(err)
 	}
 	c, err := myce.ReadServiceConfig(filepath.Join(home, ".local", "share", "mycelium", "queue", "config.json"))
@@ -155,5 +163,147 @@ func TestInstallCLIDevicelessNeedsExplicitFlagAndBudget(t *testing.T) {
 				t.Fatal("dry run wrote files")
 			}
 		})
+	}
+}
+
+func TestInstallQueueDeploymentFlags(t *testing.T) {
+	home := t.TempDir()
+	out, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stdout
+	os.Stdout = out
+	defer func() { os.Stdout = saved; out.Close() }()
+	args := []string{"install", "queue", "--nas", home, "--dry-run", "--listen", "192.0.2.1:7331", "--db", home + "/db.sqlite", "--project-config", home + "/projects.yaml", "--host-config", home + "/hosts.yaml", "--log-retention", "24h", "--upload-spool-dir", home + "/uploads", "--upload-spool-bytes", "12345", "--restart-grace", "2m", "--production-loss-timeout", "6s", "--deadline-loss-timeout", "21s", "--experiment-loss-timeout", "61s", "--checkpoints", home + "/checkpoints", "--environment-file", home + "/fleet.env", "--private-devices=false", "--no-new-privileges=false", "--nice", "12", "--cpu-quota", "30%", "--memory-max", "600M", "--tasks-max", "70"}
+	if err := setupCommandWithProbe(args, myce.MachineProbe{OS: "linux", Arch: "amd64"}, home); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(out.Name())
+	for _, want := range []string{"--listen", "192.0.2.1:7331", "--db", home + "/db.sqlite", "--project-config", home + "/projects.yaml", "--host-config", home + "/hosts.yaml", "--log-retention", "24h0m0s", "--upload-spool-dir", home + "/uploads", "--upload-spool-bytes", "12345", "--restart-grace", "2m0s", "--production-loss-timeout", "6s", "--deadline-loss-timeout", "21s", "--experiment-loss-timeout", "1m1s", "--checkpoints", home + "/checkpoints", "EnvironmentFile=", home + "/fleet.env", "PrivateDevices=no", "NoNewPrivileges=no", "Nice=12", "CPUQuota=30%", "MemoryMax=600M", "TasksMax=70"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("missing %q in dry-run unit", want)
+		}
+	}
+	entries, _ := os.ReadDir(home)
+	if len(entries) != 0 {
+		t.Fatal("dry run wrote files")
+	}
+}
+
+func TestInstallWorkerDeploymentFlags(t *testing.T) {
+	home := t.TempDir()
+	out, _ := os.CreateTemp(t.TempDir(), "stdout")
+	saved := os.Stdout
+	os.Stdout = out
+	defer func() { os.Stdout = saved; out.Close() }()
+	args := []string{"install", "worker", "--nas", home, "--dry-run", "--name", "b70-gpu1", "--host-id", "b70", "--instance", "gpu1", "--device", "1", "--gpu", "xpu", "--memory-mode", "fixed", "--memory-gb", "16", "--reserve-memory-gb", "2", "--reserve-host-memory-gb", "4", "--host-memory-budget-gb", "5", "--memory-ceiling-slack-gb", "0", "--memory-swap-max-bytes", "0", "--state-dir", home + "/spool", "--host-state-dir", home + "/control", "--checkpoint-root", home + "/cp", "--model-root", home + "/models", "--environment-root", home + "/envs", "--model-cache", home + "/mc", "--model-cache-bytes", "1111", "--environment-cache", home + "/ec", "--environment-cache-bytes", "2222", "--heartbeat", "2s", "--log-retention", "24h", "--start-disabled", "--require-memory-ceilings", "--require-mounted-nas=false"}
+	if err := setupCommandWithProbe(args, myce.MachineProbe{OS: "linux", Arch: "amd64"}, home); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(out.Name())
+	for _, want := range []string{"b70-gpu1", "--host-id", `"b70"`, "myce-worker@gpu1.service", "--device", `"1"`, "--gpu", `"xpu"`, "--memory-mode", `"fixed"`, "--memory-gb", `"16"`, "--reserve-memory-gb", `"2"`, "--reserve-host-memory-gb", `"4"`, "--host-memory-budget-gb", `"5"`, "--memory-ceiling-slack-gb", `"0"`, "--memory-swap-max-bytes", "--state-dir", home + "/spool", "--host-state-dir", home + "/control", "--checkpoint-root", home + "/cp", "--model-root", home + "/models", "--environment-root", home + "/envs", "--model-cache", home + "/mc", "--model-cache-bytes", "1111", "--environment-cache", home + "/ec", "--environment-cache-bytes", "2222", "--heartbeat", "2s", "--log-retention", "24h0m0s", "--require-memory-ceilings", "RestartPreventExitStatus=78", "disabled"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+}
+
+func TestRequireMemoryCeilingsExitPreventsRestart(t *testing.T) {
+	if got := exitCode(fmt.Errorf("startup refused: %w", myce.ErrMemoryCeilingsRequired)); got != 78 {
+		t.Fatal("wrong startup exit", got)
+	}
+}
+
+// A subprocess exercises the installed service entry point without an OS service manager.
+func TestInstalledQueueServiceProcess(t *testing.T) {
+	if path := os.Getenv("MYCE_TEST_INSTALLED_SERVICE"); path != "" {
+		if err := serviceCommand([]string{"--config", path}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestInstallQueueStartsAndReportsLocally(t *testing.T) {
+	home := t.TempDir()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := ln.Addr().String()
+	ln.Close()
+	c, err := myce.PlanInstall("queue", home, "", home, "http://"+address, "queue", myce.Detection{OS: "linux", Arch: "amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Listen = address
+	c.EnvironmentFile = filepath.Join(home, "fleet.env")
+	os.WriteFile(c.EnvironmentFile, []byte("MYCE_TOKEN=private-test-only\nMYCE_QUEUE=http://"+address+"\n"), 0600)
+	var child *exec.Cmd
+	runner := func(_ context.Context, n string, a ...string) ([]byte, error) {
+		if strings.Contains(strings.Join(a, " "), "enable --now") {
+			child = exec.Command(c.Binary, "-test.run=^TestInstalledQueueServiceProcess$")
+			child.Env = append(os.Environ(), "MYCE_TEST_INSTALLED_SERVICE="+c.Config, "INVOCATION_ID=")
+			return nil, child.Start()
+		}
+		return nil, nil
+	}
+	if err = myce.Install(context.Background(), c, os.Args[0], "", runner); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		child.Process.Signal(syscall.SIGTERM)
+		if err := child.Wait(); err != nil {
+			t.Error("queue shutdown", err)
+		}
+	}()
+	client := myce.Client{URL: "http://" + address, Token: "private-test-only"}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var snapshot myce.Snapshot
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		err = client.Call(ctx, "GET", "/api/status", nil, &snapshot)
+		cancel()
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("installed queue did not report", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestInstalledDisabledServiceDoesNotReadCredentialsOrJoin(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "control")
+	c, _ := myce.PlanInstall("worker", home, "", home, "http://unused:7331", "card", myce.Detection{OS: "linux", Arch: "amd64", Platform: "fake", MemoryMode: "fixed", MemoryGB: 2})
+	c.HostStateDir = dir
+	c.EnvironmentFile = filepath.Join(home, "missing-fleet.env")
+	scoped, _ := myce.WorkerUnitDirectory(dir, filepath.Base(c.Service))
+	os.MkdirAll(scoped, 0700)
+	os.WriteFile(filepath.Join(scoped, "DISABLED"), []byte(`{"generation":1,"reason":"installed disabled"}`), 0600)
+	os.MkdirAll(filepath.Dir(c.Config), 0700)
+	b, _ := json.Marshal(c)
+	os.WriteFile(c.Config, b, 0600)
+	t.Setenv("INVOCATION_ID", "")
+	if err := serviceCommand([]string{"--config", c.Config}); err != nil {
+		t.Fatal("disabled service tried to start", err)
+	}
+}
+
+func TestInstallWorkerOverridesDetectedReserve(t *testing.T) {
+	home := t.TempDir()
+	out, _ := os.CreateTemp(t.TempDir(), "stdout")
+	saved := os.Stdout
+	os.Stdout = out
+	defer func() { os.Stdout = saved; out.Close() }()
+	probe := myce.MachineProbe{OS: "linux", Arch: "arm64", Command: func(context.Context, string, ...string) ([]byte, error) { return []byte("NVIDIA GB10, [N/A]"), nil }}
+	if err := setupCommandWithProbe([]string{"install", "worker", "--nas", home, "--reserve-memory-gb", "24", "--dry-run"}, probe, home); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(out.Name())
+	if !strings.Contains(string(b), `"--reserve-memory-gb" "24"`) {
+		t.Fatal("explicit reserve ignored after detection")
 	}
 }

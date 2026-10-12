@@ -95,7 +95,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `join --host-id` | OS hostname | Physical host identity; every per-card worker on the same machine must use the same stable value |
 | `join/install worker --host-memory-budget-gb` | `0` | Aggregate per-host admitted RAM ceilings; positive budgets reject zero host declarations and retain unconfirmed release charges |
 | `join/install worker --memory-ceiling-slack-gb` | `0.125` | Extra GiB per declared ceiling; included in host admission |
-| `join/install worker --memory-swap-max-bytes` | `0` | Swap allowance per attempt; managed Docker uses RAM + swap as `--memory-swap` |
+| `join/install worker --memory-swap-max-bytes` | `0` | Swap allowance per native attempt; managed Docker uses optional run-spec total RAM-plus-swap values |
 | `join --reserve-host-memory-gb` | `4` | RAM withheld from observed available memory; configure OS/other-workload headroom; unified uses the larger host/GPU reserve once |
 | `join --device` | Sole detected CUDA card / platform default | One physical card per worker; CUDA resolves to a stable UUID for inventory/execution; select explicitly on multi-GPU hosts |
 | `join --gpu` | Auto-detected | Override with `cuda`, `xpu`, `metal`, or `fake`; same detection as `install worker` |

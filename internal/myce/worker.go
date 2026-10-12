@@ -22,6 +22,7 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	RequireMemoryCeilings bool
 	memoryCeilings        *memoryCeilings
 	MemorySwapMaxBytes    int64
 	LogRetention          time.Duration
@@ -216,6 +217,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		return nil, err
 	}
 	defer unlock()
+	if err := w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
+		return nil, err
+	}
 	identity := ID()
 	memoryAttempt, err := w.memoryCeilings.create("attempt-"+identity, ceilingBytes, w.MemorySwapMaxBytes)
 	if err != nil {
@@ -501,6 +505,10 @@ func (w Worker) Run(stop context.Context) error {
 	if w.Machine.ID == "" || !validGPU(w.Machine.GPU) || (w.MemorySource == nil && (!validMemoryValue(w.Machine.FreeMemoryGB) || w.Machine.FreeMemoryGB <= 0)) {
 		return errors.New("worker requires a name, GPU platform and positive free-memory budget")
 	}
+	w.initMemoryCeilings()
+	if err := w.requireMemoryCeilings(); err != nil {
+		return err
+	}
 	s, err := w.openStore()
 	if err != nil {
 		return err
@@ -516,6 +524,9 @@ func (w Worker) Run(stop context.Context) error {
 		if errors.Is(err, errHostDisabled) {
 			return nil
 		}
+		return err
+	}
+	if err = w.refreshHostMemoryBudget(); err != nil {
 		return err
 	}
 	notify := NotifyHost(w.Client)
@@ -623,7 +634,6 @@ func (w Worker) Run(stop context.Context) error {
 	if _, err := MemoryCeilingConfig(w.Machine.HostMemoryBudgetGB, w.Machine.MemoryCeilingSlackGB, w.MemorySwapMaxBytes); err != nil {
 		return err
 	}
-	w.initMemoryCeilings()
 	log.Print(w.Machine.MemoryEnforcement)
 	w.Machine.HostMemoryMeasured = true
 	w.batchMemory = &atomic.Uint64{}
@@ -783,6 +793,8 @@ func (w Worker) Run(stop context.Context) error {
 		}
 		if retry.ready(now) {
 			rt.mu.Lock()
+			budgetErr := w.refreshHostMemoryBudget()
+			rt.memoryMachine = w.Machine
 			rt.session = w.Machine.Session
 			rt.mu.Unlock()
 			m := w.Machine
@@ -835,6 +847,9 @@ func (w Worker) Run(stop context.Context) error {
 				m.MemoryMeasured = w.MemoryMeasured
 			}
 			hostFree, hostErr := w.HostMemorySource(ctx)
+			if budgetErr != nil {
+				hostErr = budgetErr
+			}
 			m.HostAvailableMemoryGB = hostFree
 			if hostErr != nil || !validMemoryValue(hostFree) {
 				m.HostAvailableMemoryGB = 0
@@ -887,6 +902,9 @@ func (w Worker) Run(stop context.Context) error {
 				// syncCopies cancels immediately; do not block heartbeats behind an
 				// outstanding filesystem syscall on an unavailable NAS. Loads share
 				// the cache admission gate and wait for the reservation to release.
+				rt.mu.Lock()
+				rt.admissionBlocked = reply.AdmissionBlocked || budgetErr != nil
+				rt.mu.Unlock()
 				rt.sync(reply.ModelPlan)
 				fresh = false
 				if s.state.Fresh {
@@ -908,7 +926,7 @@ func (w Worker) Run(stop context.Context) error {
 						if e := s.save(); e != nil {
 							return e
 						}
-					} else if !needsCheckpoint(s.state.Job) || available {
+					} else if !reply.AdmissionBlocked && budgetErr == nil && (!needsCheckpoint(s.state.Job) || available) {
 						p, err = w.start(s, *s.state.Job)
 						if err != nil {
 							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) {
@@ -1084,6 +1102,9 @@ func (w Worker) String() string {
 }
 
 func (w Worker) checkHostRAM(gpu, host float64) error {
+	if err := w.checkHostMemoryBudget(gpu, host); err != nil {
+		return err
+	}
 	if host == 0 {
 		return nil
 	}
