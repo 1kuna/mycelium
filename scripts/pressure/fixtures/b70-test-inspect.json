@@ -1,0 +1,279 @@
+[
+  {
+    "Id": "9a5b78d96057b92f793bcefe83cc8d21ea209095d197571a50c655d6f8a22ee7",
+    "Created": "2026-10-12T05:16:23.395012315Z",
+    "Path": "/usr/local/bin/python",
+    "Args": [
+      "/payload.py",
+      "save"
+    ],
+    "State": {
+      "Status": "exited",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-10-12T05:16:23.580430289Z",
+      "FinishedAt": "2026-10-12T05:16:24.221334067Z"
+    },
+    "Image": "sha256:226e1e5d062ddbf4feda0fbfc4d299e2039f773b19f5ac8c2f93934201910a23",
+    "ResolvConfPath": "/var/lib/docker/containers/9a5b78d96057b92f793bcefe83cc8d21ea209095d197571a50c655d6f8a22ee7/resolv.conf",
+    "HostnamePath": "/var/lib/docker/containers/9a5b78d96057b92f793bcefe83cc8d21ea209095d197571a50c655d6f8a22ee7/hostname",
+    "HostsPath": "/var/lib/docker/containers/9a5b78d96057b92f793bcefe83cc8d21ea209095d197571a50c655d6f8a22ee7/hosts",
+    "LogPath": "/var/lib/docker/containers/9a5b78d96057b92f793bcefe83cc8d21ea209095d197571a50c655d6f8a22ee7/9a5b78d96057b92f793bcefe83cc8d21ea209095d197571a50c655d6f8a22ee7-json.log",
+    "Name": "/myce-5fb153a2186b7749a5bed034353290c0",
+    "RestartCount": 0,
+    "Driver": "overlayfs",
+    "Platform": "linux",
+    "MountLabel": "",
+    "ProcessLabel": "",
+    "AppArmorProfile": "docker-default",
+    "ExecIDs": null,
+    "HostConfig": {
+      "Binds": [
+        "/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r11c-20261011/Docker-grace/40f5b6067894cda55507e610799490e5/attempt-1:/myce/checkpoint",
+        "/home/kuna/myce-test-stage-ab-r11c-20261011/source/scripts/pressure/docker_job.py:/payload.py:ro",
+        "/home/kuna/myce-test-stage-ab-r11c-20261011/source/scripts/pressure/kernel_reads.py:/kernel_reads.py:ro",
+        "/home/kuna/myce-test-stage-ab-r11c-20261011/phases/Docker-grace:/evidence"
+      ],
+      "ContainerIDFile": "/home/kuna/myce-test-stage-ab-r11c-20261011/phases/Docker-grace/worker/5fb153a2186b7749a5bed034353290c0.cid",
+      "LogConfig": {
+        "Type": "json-file",
+        "Config": {}
+      },
+      "NetworkMode": "none",
+      "PortBindings": {},
+      "RestartPolicy": {
+        "Name": "no",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": null,
+      "CgroupnsMode": "private",
+      "Dns": null,
+      "DnsOptions": [],
+      "DnsSearch": [],
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "private",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": false,
+      "SecurityOpt": null,
+      "UTSMode": "",
+      "UsernsMode": "",
+      "ShmSize": 67108864,
+      "Runtime": "runc",
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 134217728,
+      "NanoCpus": 500000000,
+      "CgroupParent": "myce-test-r11-docker.slice",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": [],
+      "BlkioDeviceReadBps": [],
+      "BlkioDeviceWriteBps": [],
+      "BlkioDeviceReadIOps": [],
+      "BlkioDeviceWriteIOps": [],
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": [],
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 134217728,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": [],
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "MaskedPaths": [
+        "/proc/acpi",
+        "/proc/asound",
+        "/proc/interrupts",
+        "/proc/kcore",
+        "/proc/keys",
+        "/proc/latency_stats",
+        "/proc/sched_debug",
+        "/proc/scsi",
+        "/proc/timer_list",
+        "/proc/timer_stats",
+        "/sys/devices/virtual/powercap",
+        "/sys/firmware",
+        "/sys/devices/system/cpu/cpu0/thermal_throttle",
+        "/sys/devices/system/cpu/cpu1/thermal_throttle",
+        "/sys/devices/system/cpu/cpu2/thermal_throttle",
+        "/sys/devices/system/cpu/cpu3/thermal_throttle",
+        "/sys/devices/system/cpu/cpu4/thermal_throttle",
+        "/sys/devices/system/cpu/cpu5/thermal_throttle",
+        "/sys/devices/system/cpu/cpu6/thermal_throttle",
+        "/sys/devices/system/cpu/cpu7/thermal_throttle",
+        "/sys/devices/system/cpu/cpu8/thermal_throttle",
+        "/sys/devices/system/cpu/cpu9/thermal_throttle",
+        "/sys/devices/system/cpu/cpu10/thermal_throttle",
+        "/sys/devices/system/cpu/cpu11/thermal_throttle",
+        "/sys/devices/system/cpu/cpu12/thermal_throttle",
+        "/sys/devices/system/cpu/cpu13/thermal_throttle",
+        "/sys/devices/system/cpu/cpu14/thermal_throttle",
+        "/sys/devices/system/cpu/cpu15/thermal_throttle"
+      ],
+      "ReadonlyPaths": [
+        "/proc/bus",
+        "/proc/fs",
+        "/proc/irq",
+        "/proc/sys",
+        "/proc/sysrq-trigger"
+      ],
+      "Init": true
+    },
+    "Storage": {
+      "RootFS": {
+        "Snapshot": {
+          "Name": "overlayfs"
+        }
+      }
+    },
+    "Mounts": [
+      {
+        "Type": "bind",
+        "Source": "/home/kuna/myce-test-stage-ab-r11c-20261011/source/scripts/pressure/kernel_reads.py",
+        "Destination": "/kernel_reads.py",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "/home/kuna/myce-test-stage-ab-r11c-20261011/phases/Docker-grace",
+        "Destination": "/evidence",
+        "Mode": "",
+        "RW": true,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "/mnt/verso-nas/Verso/experiments/exp-238-mycelium-stage-ab-r11c-20261011/Docker-grace/40f5b6067894cda55507e610799490e5/attempt-1",
+        "Destination": "/myce/checkpoint",
+        "Mode": "",
+        "RW": true,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "/home/kuna/myce-test-stage-ab-r11c-20261011/source/scripts/pressure/docker_job.py",
+        "Destination": "/payload.py",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      }
+    ],
+    "Config": {
+      "Hostname": "9a5b78d96057",
+      "Domainname": "",
+      "User": "app",
+      "AttachStdin": false,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [
+        "MYCE_PLATFORM=xpu",
+        "MYCE_DEVICES=0",
+        "ONEAPI_DEVICE_SELECTOR=level_zero:0",
+        "ZE_AFFINITY_MASK=0",
+        "MYCE_DOCKER_LABEL=myce.attempt=5fb153a2186b7749a5bed034353290c0",
+        "MYCE_ATTEMPT=1",
+        "MYCE_MEMORY_LIMIT_BYTES=134217728",
+        "MYCE_MACHINE=b70-pressure-gpu1",
+        "MYCE_ATTEMPT_ID=5fb153a2186b7749a5bed034353290c0",
+        "MYCE_JOB_ID=40f5b6067894cda55507e610799490e5",
+        "MYCE_CHECKPOINT_DIR=/myce/checkpoint",
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a",
+        "DEBIAN_FRONTEND=noninteractive",
+        "PYTHONUNBUFFERED=1",
+        "PYTHONDONTWRITEBYTECODE=1"
+      ],
+      "Cmd": [
+        "/payload.py",
+        "save"
+      ],
+      "Image": "verso-render@sha256:226e1e5d062ddbf4feda0fbfc4d299e2039f773b19f5ac8c2f93934201910a23",
+      "Volumes": null,
+      "WorkingDir": "/opt/verso-render",
+      "Entrypoint": [
+        "/usr/local/bin/python"
+      ],
+      "Labels": {
+        "com.docker.compose.project": "docker",
+        "com.docker.compose.service": "render",
+        "com.docker.compose.version": "5.0.0",
+        "com.verso.payload-source-revision": "ddae49b312d86d0abe20fea144c830d3b5cdc03a",
+        "com.verso.reused-runtime-base": "sha256:88d2e9684d5f4ce75624030d9e0570a66c8c98fe4b0bb8c971cb6aa38e531bbc",
+        "myce.attempt": "5fb153a2186b7749a5bed034353290c0",
+        "myce.worker": "b70-pressure-gpu1",
+        "org.opencontainers.image.revision": "8ef882c06b9fc893e8a2bb15311613daccc489f0",
+        "org.opencontainers.image.version": "2.0.28"
+      }
+    },
+    "NetworkSettings": {
+      "SandboxID": "",
+      "SandboxKey": "",
+      "Ports": {},
+      "Networks": {
+        "none": {
+          "IPAMConfig": null,
+          "Links": null,
+          "Aliases": null,
+          "DriverOpts": null,
+          "GwPriority": 0,
+          "NetworkID": "b14953ad8f66bb244bb31cfd484d730da86d53b87506715cd11b76c8fa93ef06",
+          "EndpointID": "",
+          "Gateway": "",
+          "IPAddress": "",
+          "MacAddress": "",
+          "IPPrefixLen": 0,
+          "IPv6Gateway": "",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "DNSNames": null
+        }
+      }
+    },
+    "ImageManifestDescriptor": {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:078b804e67e5e03cbaa417bd382a553094a5c49669354a574473e3f9d5d67a7f",
+      "size": 1626,
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      }
+    }
+  }
+]
