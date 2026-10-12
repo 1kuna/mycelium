@@ -117,6 +117,9 @@ var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 var errWorkerReleasePending = errors.New("command release unconfirmed")
 
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
+	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
+		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
+	}
 	if j.Spec.Needs.HostMemoryGB > 0 {
 		if w.HostMemorySource == nil {
 			return nil, fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
@@ -851,9 +854,11 @@ func (w Worker) Run(stop context.Context) error {
 							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) {
 								log.Printf("retry pending start: %v", err)
 							} else {
-								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error()}
+								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error(), ReleasePending: errors.Is(err, errWorkerReleasePending)}
 								s.state.Result = &r
-								s.state.PID = 0
+								if !r.ReleasePending {
+									s.state.PID = 0
+								}
 								err = s.save()
 							}
 						}

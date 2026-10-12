@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -10,7 +11,27 @@ func (w Worker) authorizeStart(j Job, session string) error {
 	if j.Spec.StartBy == nil {
 		return nil
 	}
+	if reason, err := HostDisabled(w.HostStateDir); err != nil {
+		return err
+	} else if reason != "" {
+		return fmt.Errorf("worker start refused: %s", reason)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	return w.Client.Call(ctx, "POST", "/api/workers/started", Result{Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, nil)
+	var reply struct {
+		OK        bool   `json:"ok"`
+		StartGate string `json:"start_gate"`
+	}
+	if err := w.Client.Call(ctx, "POST", "/api/workers/started", Result{Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, &reply); err != nil {
+		return err
+	}
+	if !reply.OK || reply.StartGate != startGateProtocol {
+		return fmt.Errorf("queue start-gate protocol mismatch: upgrade queue and workers together")
+	}
+	if reason, err := HostDisabled(w.HostStateDir); err != nil {
+		return err
+	} else if reason != "" {
+		return fmt.Errorf("worker start refused: %s", reason)
+	}
+	return nil
 }
