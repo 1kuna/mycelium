@@ -249,7 +249,7 @@ The exact owned legacy-admission pause spans both the soak and scenarios; final 
 
 ## Frozen round 9 native test runner
 
-The issue-238 round-9 launcher pins current Mycelium `b980b4c` (which includes `ba2707c` Docker containment), runs the same
+The issue-238 round-9 launcher pins current Mycelium `29c585e` (which includes `ba2707c` Docker containment), runs the same
 30-minute zero-hold collector gate, then whole-host hold, NAS migration,
 Spark-full return, managed Docker, and isolated CPU cases in that order.
 Every scenario has fresh queue/checkpoint/spool/control state and a cleanup
@@ -286,3 +286,9 @@ The launcher foreground workers omit inherited INVOCATION_ID; the dedicated
 CPU-only disable worker retains its real myce-worker.service identity. Current
 main refuses pretending that a generic test runner is a registered Myce unit.
 No core check is changed; exact outer test-cgroup ownership remains enforced.
+
+The installed GPU validation uses the exact written gpu.env and installed
+binary in a privileged disposable GPU1-only test namespace. No validation
+process can open GPU0. Failure of this prerequisite is a failed drill and
+cleanup, not installer acceptance. The subsequent worker retains the same
+private device view, with its local control directory isolated in the attempt.

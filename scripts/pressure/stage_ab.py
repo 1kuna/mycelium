@@ -71,7 +71,7 @@ class Run:
     def __init__(self):
         assert os.getuid() == 0, 'privileged read-only proc collector required'
         self.cgroup = process(os.getpid())['cgroup']
-        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r9.service'
+        assert self.cgroup == '0::/system.slice/myce-test-stage-ab-r9b.service'
         self.baseline = json.loads(kernel_read(ROOT / 'display-baseline.json', 'text'))
         self.diagnostics = DiagnosticReaders(json.loads(kernel_read(ROOT/'diagnostic-executables.json', 'text')),
                                              ROOT/'diagnostics.jsonl')
@@ -660,8 +660,7 @@ class Run:
             scenarios(self)
             from cpu_drill import scenarios as cpu_scenarios
             cpu_scenarios(self)
-            self.result('B-installed-disable-enable','SKIP',executed=False,
-                reason='b980b4c adds registered worker-instance controls, but no fix for the custom installed-service zero-XPU namespace; maintainer visibility fix remains pending')
+            self.scenario('B-installed-disable-enable',self.disable_enable)
             marker='DONE' if all(r['result'] in ('PASS','SKIP','EXCLUDED') for r in self.results) else 'FAILED'
         except Exception as e:
             error=dict(type=type(e).__name__,detail=str(e));self.result('runner','HOLD' if self.safety else 'FAIL',error=error)

@@ -11,7 +11,8 @@ from pressure import api
 USER_HOME=Path('/home/user')
 UNIT=USER_HOME/'.config/systemd/user/myce-worker.service'
 DROP=UNIT.with_name(UNIT.name+'.d')/'myce-test-r9.conf'
-CONTROL=USER_HOME/'.local/share/myce'
+from stage_ab import ROOT
+CONTROL=ROOT/'installed-host-state'
 
 
 def user(run,args,check=True):
@@ -54,11 +55,12 @@ def drill(run):
     os.chown(DROP,1000,1000)
     run.halt('worker');run.release_owned()
     # Combined enforced memory allowance stays 8GiB while the worker is in a separate user cgroup.
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r9.service','MemoryMax=2G'],check=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r9b.service','MemoryMax=2G'],check=True)
     run.installed=True
-    result=user(run,[str(ROOT/'myce'),'install','worker','--root',str(ROOT/'installation'),
+    from installed_validation import install
+    result=install(run,[str(ROOT/'myce'),'install','worker','--root',str(ROOT/'installation'),
         '--nas',str(run.cp),'--queue',run.url,'--name','b70-pressure-gpu1','--gpu','xpu',
-        '--memory-mode','fixed','--memory-gb','4'])
+        '--memory-mode','fixed','--memory-gb','4','--device','0','--host-state-dir',str(CONTROL)])
     record('installed',install_exit=result.returncode,installed_condition=show(run)['ConditionResult'])
     assert result.returncode==0 and show(run)['ConditionResult']=='no'
     run.installed_config=ROOT/'installation/worker/config.json'
@@ -71,7 +73,7 @@ def drill(run):
     assert group.endswith('/myce-worker.service') and state['KillMode']=='control-group' and state['SendSIGKILL']=='yes'
     run.wait(lambda:any(m['id']=='b70-pressure-gpu1' and m.get('host_id')!='b70-pressure-host' for m in api(run.url)['machines']),15)
     run.a.units=200;experiment=run.submit('experiment',200)
-    run.wait(lambda:run.event(experiment,'commit'))
+    run.wait_event(experiment,'commit')
     before=next(j for j in api(run.url)['jobs'] if j['id']==experiment)
     record('experiment-running',job=experiment,initial_attempt=before['attempt'],losses_before=before['losses'])
     began=time.monotonic()
@@ -83,10 +85,10 @@ def drill(run):
     receipt=json.loads(kernel_read(CONTROL/'disable-receipt.json', 'text'))
     record('disabled',disable_exit=disabled.returncode,disable_seconds=elapsed,empty_cgroup=empty(group,state),
            flag_observed=True,generation=flag['generation'],receipt_generation=receipt['generation'],
-           cli_cgroup_confirmation='confirmed by empty systemd worker cgroup' in disabled.stdout)
+           cli_cgroup_confirmation='Host cleanup confirmed: empty systemd worker cgroup and Mycelium Docker execution gone' in disabled.stdout)
     assert disabled.returncode==0
     assert elapsed<=20 and empty(group,state)
-    assert 'confirmed by empty systemd worker cgroup' in disabled.stdout
+    assert 'Host cleanup confirmed: empty systemd worker cgroup and Mycelium Docker execution gone' in disabled.stdout
     assert receipt['generation']==flag['generation'], 'no matching cgroup cleanup receipt'
     refused=user(run,['systemctl','--user','start','myce-worker.service'],check=False)
     state=show(run)
@@ -118,7 +120,7 @@ def drill(run):
         refused_start_exit=refused.returncode,refused_start_condition=state['ConditionResult'],
         waiting_state=waiting['state'],losses_before=before['losses'],losses_after=current['losses'],
         generation=generation,stale_enable_http=stale_status,resumed=resumed,
-        enabled_service_back=True,docker='EXPECTED FAIL: not covered by disable')
+        enabled_service_back=True,docker='covered by independently verified managed-Docker phases; empty installed GPU drill inventory')
 
 
 def cleanup(run):
@@ -142,8 +144,10 @@ def cleanup(run):
     if config.exists():user(run,[str(ROOT/'myce'),'uninstall','--config',str(config)])
     if DROP.parent.exists():DROP.parent.rename(ROOT/'installed-dropin.retired')
     user(run,['systemctl','--user','daemon-reload'])
-    assert not UNIT.exists() and not DROP.parent.exists() and show(run)['MainPID']=='0'
+    user(run,['systemctl','--user','reset-failed','myce-worker.service'],check=False)
+    state=user(run,['systemctl','--user','show','myce-worker.service','-p','MainPID'],check=False)
+    assert not UNIT.exists() and not DROP.parent.exists() and 'MainPID=0' in state.stdout
     run.worker_cgroup=None;run.installed=False
-    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r9.service','MemoryMax=8G'],check=True)
+    subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r9b.service','MemoryMax=8G'],check=True)
     (ROOT/'installed-cleanup.json').write_text(json.dumps(dict(flag_absent=True,unit_absent=True,
         confirmed_empty=True,installation_recoverable_trash=str(ROOT/'installation/.Trash'))))

@@ -10,7 +10,7 @@ import subprocess
 import time
 
 ROOT='/home/user/synthetic-run'
-UNIT='myce-test-stage-ab-r9-spark.service'
+UNIT='myce-test-stage-ab-r9b-spark.service'
 UUID='GPU-00000000-0000-0000-0000-000000000000'
 procs=[]
 ports=[]
@@ -115,17 +115,17 @@ for port in ports:
  with socket.socket() as s:
   s.settimeout(.2)
   if s.connect_ex(('127.0.0.1',port))==0:occupied.append(port)
-unit=subprocess.run(['systemctl','--user','is-active','myce-test-stage-ab-r9-spark.service'],capture_output=True,text=True).stdout.strip()
+unit=subprocess.run(['systemctl','--user','is-active','myce-test-stage-ab-r9b-spark.service'],capture_output=True,text=True).stdout.strip()
 remaining=[]
 for p in kernel_read('/proc','list'):
  if not p.name.isdigit():continue
  try:
-  if kernel_read(p/'cgroup').strip().endswith('/myce-test-stage-ab-r9-spark.service'):remaining.append(int(p.name))
+  if kernel_read(p/'cgroup').strip().endswith('/myce-test-stage-ab-r9b-spark.service'):remaining.append(int(p.name))
  except Vanished:pass
 assert unit in ('inactive','unknown','failed') and not remaining and not occupied,'Spark cleanup unconfirmed'
 root=Path('/home/user/synthetic-run');trash=Path('/home/user/.local/share/Trash')
 for sub in ('files','info'):(trash/sub).mkdir(parents=True,exist_ok=True)
-dest=trash/'files'/('myce-test-stage-ab-r9-spark-'+str(time.time_ns()))
+dest=trash/'files'/('myce-test-stage-ab-r9b-spark-'+str(time.time_ns()))
 info=trash/'info'/(dest.name+'.trashinfo')
 if root.exists():
  info.write_text('[Trash Info]\\nPath='+quote(str(root))+'\\nDeletionDate='+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')+'\\n');root.rename(dest)
