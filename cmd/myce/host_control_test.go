@@ -93,3 +93,61 @@ func TestDisableWritesFlagBeforeBrokenInstallConfig(t *testing.T) {
 		t.Fatalf("config failure prevented local fence: %q %v", reason, err)
 	}
 }
+
+func TestHostCommandsInstanceSelection(t *testing.T) {
+	for _, target := range []string{"", "myce-worker@gpu1.service"} {
+		t.Run(target, func(t *testing.T) {
+			home := t.TempDir()
+			dir := filepath.Join(home, "host")
+			t.Setenv("HOME", home)
+			t.Setenv("MYCE_HOST_STATE_DIR", dir)
+			t.Setenv("MYCE_TOKEN", "")
+			t.Setenv("PATH", t.TempDir())
+			for _, u := range []string{"myce-worker@gpu0.service", "myce-worker@gpu1.service", "verso.service"} {
+				if err := myce.AdoptHostWorker(dir, myce.HostWorker{State: t.TempDir(), Unit: u}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var calls []string
+			p := myce.MachineProbe{OS: "linux", Command: func(_ context.Context, n string, args ...string) ([]byte, error) {
+				calls = append(calls, strings.Join(args, " "))
+				return []byte("LoadState=loaded\nActiveState=inactive\nControlGroup=\nKillMode=control-group\nSendSIGKILL=yes\n"), nil
+			}}
+			args := []string{"disable", "--now"}
+			if target != "" {
+				args = append(args, "--unit", target)
+			}
+			var out bytes.Buffer
+			if err := hostCommand(args, p, &out); err != nil {
+				t.Fatal(err, out.String())
+			}
+			joined := strings.Join(calls, "\n")
+			if strings.Contains(joined, "verso.service") || !strings.Contains(joined, "myce-worker@gpu1.service") {
+				t.Fatal(joined)
+			}
+			if strings.Contains(joined, "myce-worker@gpu0.service") != (target == "") {
+				t.Fatal(joined)
+			}
+			if target != "" {
+				if reason, err := myce.HostDisabled(dir); err != nil || reason != "" {
+					t.Fatal("target fenced whole host", reason, err)
+				}
+				other, _ := myce.WorkerUnitDirectory(dir, "myce-worker@gpu0.service")
+				if reason, err := myce.HostDisabled(other); err != nil || reason != "" {
+					t.Fatal("target fenced sibling", reason, err)
+				}
+			}
+			args[0] = "enable"
+			calls = nil
+			if err := hostCommand(args, p, &out); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(strings.Join(calls, "\n"), "start myce-worker@gpu1.service") {
+				t.Fatal(calls)
+			}
+			if err := hostCommand([]string{"disable", "--unit", "myce-worker@unknown.service"}, p, &out); err == nil {
+				t.Fatal("unknown target accepted")
+			}
+		})
+	}
+}

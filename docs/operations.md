@@ -13,7 +13,7 @@ Spark's Atlas GPU ownership still requires an agreed handoff.
 | Binary | `~/.local/bin/myce` |
 | Database, spools, local logs | `~/.local/share/myce` |
 | Private config | `~/.config/myce` |
-| Linux user units | `myce-queue.service`, `myce-worker.service` |
+| Linux user units | `myce-queue.service`, `myce-worker.service`, `myce-worker@INSTANCE.service` |
 | Mac launchd labels | `local.myce.queue`, `local.myce.worker` |
 | Shared progress | NAS root supplied with queue `--checkpoints` and worker `--checkpoint-root` |
 
@@ -89,7 +89,7 @@ reading, clamped at zero. An optional positive `--memory-gb` caps the reading
 raise it for Atlas growth, other programs and measured pressure. Existing Atlas
 resident memory is already excluded from `MemAvailable`; the reserve provides
 additional headroom, not a substitute for measuring Atlas usage or owner admission.
-See [Spark worker example](../deploy/myce-spark-worker.service).
+See [Spark worker example](../deploy/myce-spark-worker.service); install that example as `myce-worker.service`.
 
 `--memory-mode auto` is the default; `unified` explicitly selects OS accounting,
 `dedicated` requires numeric CUDA telemetry (invalid for Metal), and `fixed`
@@ -152,7 +152,11 @@ On Linux under the systemd user worker service, ownership is the worker unit's
 cgroup. Disable stops that whole cgroup, including jobs, model servers, build
 processes, and descendants that change sessions/groups or daemonize. Units use
 `KillMode=control-group`, `SendSIGKILL=yes`, and `TimeoutStopSec=10s` by default.
-`--grace 3s` sets the unit's runtime stop timeout to 3 seconds (maximum 1 minute).
+`--grace 3s` allows up to 3 seconds before systemd receives a whole-unit SIGKILL
+(maximum 1 minute). The requested grace must fit the unit's configured
+`TimeoutStopSec`; increase that setting before requesting more than the default
+10 seconds. This works with systemd versions that cannot mutate service timeouts
+through `set-property`.
 `--now` sends SIGKILL to all members through systemd, then stops the unit.
 Confirmation requires the retained cgroup's `cgroup.procs` to be empty and
 `cgroup.events` to say `populated 0` (which includes nested cgroups), plus an
@@ -160,8 +164,34 @@ inactive/failed unit. A cgroup removed by systemd counts as empty only when the
 stopped unit no longer reports a cgroup. A stop request alone is not confirmation.
 Invalid units, unreadable cgroups, a changed cgroup, or remaining processes fail
 closed. No PID/PGID records authorize signaling in this path. This controls only
-`myce-worker.service` or `myce-spark-worker.service` for this OS user; it does not
-stop Verso's legacy controller or unrelated services/processes.
+`myce-worker.service` and `myce-worker@INSTANCE.service` for this OS user. Instance
+names contain only letters, digits, dash, and underscore. Workers discover their
+own systemd unit from the invocation's kernel cgroup and record it in their
+registry. Default disable stops every allowed unit registered in the selected
+host control directory and reports each result; every requested unit must be
+confirmed before a cleanup receipt is written. It does not stop Verso's legacy
+controller or unrelated services/processes.
+
+For one card only, use `myce disable --unit myce-worker@gpu1.service` and
+`myce enable --unit myce-worker@gpu1.service`. The unit must already be registered
+in this host control directory. Its generation-bearing flag and receipt live in
+`units/myce-worker@gpu1.service/` below that directory. Every instance also obeys
+the shared host flag: enabling one cannot bypass a disabled host. Targeted control
+leaves sibling units and queue host admission alone; its work follows ordinary
+worker leave/loss handling. Docker cleanup targets only attempts recorded in that
+instance's spool, including retained released custody, using exact attempt labels.
+
+Install an independent Linux instance with
+`myce install worker --instance gpu1 --device 1` plus the normal GPU, queue and NAS
+options. Instance names and physical device selectors are independent. The
+installer renders `myce-worker@gpu1.service`, uses a separate `worker-gpu1/`
+installation/spool, and preserves the same cgroup kill policy and both disabled
+conditions. The default worker name gains the instance suffix; `--name` can
+override it. Use its printed `--config` path for doctor, uninstall, and custom-root
+controls. A manual template is available at `deploy/myce-worker@.service`; resolve
+its device and other fields before installation. `--host-state-dir DIR` is also
+saved by the installer, so isolated services and controls share the same authority.
+Existing workers must run the updated binary once to record their unit custody.
 
 Re-running `myce install worker` on an existing Linux installation upgrades its
 unit settings and reloads systemd, preserving its saved configuration, token,
@@ -245,6 +275,61 @@ launches cannot be proved absent. Queue status is separate: verify **disabled by
 operator** and **requeued** when notifications or reconciliation have reached
 it. On failure, keep the flag and rerun disable. After enable, verify a newly
 joined worker and an agreed small job.
+
+## Emergency stop when the myce binary is broken
+
+Run as the worker's OS user. Stop each installed Mycelium worker by its exact
+name; for an instance substitute `myce-worker@gpu1.service` below. Retain its
+cgroup path before stopping, because systemd may remove the empty cgroup:
+
+```sh
+unit=myce-worker.service
+worker_cgroup=$(systemctl --user show "$unit" -p ControlGroup --value)
+systemctl --user disable --now "$unit"
+systemctl --user show "$unit" -p ActiveState -p MainPID -p ControlGroup
+if [ -n "$worker_cgroup" ] && [ -e "/sys/fs/cgroup$worker_cgroup/cgroup.procs" ]; then
+  cat "/sys/fs/cgroup$worker_cgroup/cgroup.procs"
+  cat "/sys/fs/cgroup$worker_cgroup/cgroup.events"
+fi
+```
+
+Confirm inactive/failed, `MainPID=0`, and an empty retained `cgroup.procs` with
+`populated 0` in `cgroup.events` (including descendants). If the cgroup was
+removed, confirm the stopped unit now reports no `ControlGroup`. Do not treat
+stop-command success alone as proof. Repeat for all owned instances for a
+host-wide emergency stop.
+
+Containers require separate cleanup. Inventory the exact Mycelium attempt label
+and inspect each selected ID before removing only those labeled objects:
+
+```sh
+docker ps --filter label=myce.attempt --format '{{.ID}}'
+docker inspect --format '{{ index .Config.Labels "myce.attempt" }}' CONTAINER_ID
+# Only after confirming its nonempty Mycelium attempt label and ownership:
+docker rm -f CONTAINER_ID
+```
+
+For a single instance, filter with `label=myce.attempt=ATTEMPT_ID` from its saved
+spool custody and leave sibling containers alone. Never remove unlabeled or
+Verso/Atlas containers. Pending Docker create/start custody still requires the
+recovery procedure under **Docker cleanup custody**; an empty inventory cannot
+rule out a delayed start.
+
+The queue handles host loss and requeues unfinished batch work after its
+configured loss/recovery handling; model calls fail and callers retry them.
+An existing ordered host disable may keep work held until its cleanup receipt
+reconciles. Restore a working binary, then recover the exact unit:
+
+```sh
+systemctl --user enable --now myce-worker.service
+myce enable
+# Instance: enable --now myce-worker@gpu1.service; myce enable --unit myce-worker@gpu1.service
+```
+
+Use the original config/control directory. If enable reports unconfirmed cleanup,
+rerun `myce disable` with the repaired binary before enabling. Never write,
+remove, or replace `DISABLED` by hand: it carries a generation tied to the cleanup
+receipt and queue ordering. Keep the control directory and worker spool.
 
 ## Render service files
 
@@ -333,8 +418,8 @@ systemctl --user start myce-worker.service
 systemctl --user disable --now myce-worker.service
 ```
 
-Worker stop can wait for a non-resumable command indefinitely. Decide whether to
-finish or call `leave --now` before stop. Do not lower timeout to force a kill.
+Worker service stop uses its configured cgroup timeout (10 seconds by default).
+Drain non-resumable work with `leave` before stopping when it should finish.
 Services use restart-on-failure; an API leave alone is not durable deactivation.
 Use `myce disable` above for bounded, persistent host removal.
 For B70 lending, Verso must own the start/stop decision after its own admission
