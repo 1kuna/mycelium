@@ -1,0 +1,31 @@
+[
+  {
+    "Id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "Name": "/myce-synthetic-fixture",
+    "State": {
+      "Running": false,
+      "Pid": 0,
+      "Status": "exited",
+      "ExitCode": 0,
+      "OOMKilled": false,
+      "Error": ""
+    },
+    "Config": {
+      "Labels": {
+        "myce.attempt": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "myce.worker": "synthetic-worker"
+      },
+      "Image": "synthetic-image",
+      "Env": []
+    },
+    "HostConfig": {
+      "CgroupParent": "synthetic.slice",
+      "Memory": 134217728,
+      "MemorySwap": 134217728,
+      "Devices": [],
+      "DeviceRequests": null,
+      "NetworkMode": "none"
+    },
+    "Mounts": []
+  }
+]
