@@ -325,13 +325,13 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 							s.RetryAt = &next
 						}
 						s.State = "failed"
-						s.Error = "model load or unload failed"
+						s.Error = ceilingDiagnostic(r.Error, "model load or unload failed")
 					} else {
 						delete(q.s.ModelSlots, key)
 					}
 				} else if r.State == "unload_failed" {
 					s.State = "unload_failed"
-					s.Error = "model load or unload failed"
+					s.Error = ceilingDiagnostic(r.Error, "model load or unload failed")
 				} else if r.State == "ready" && s.State == "loading" {
 					s.State = "ready"
 					s.Error = ""
@@ -366,7 +366,7 @@ func (q *Queue) maintainModels() {
 	for k, s := range q.s.ModelSlots {
 		m := q.s.Machines[s.Machine]
 		if m == nil || m.Gone || m.Session != s.Session {
-			if m != nil && q.s.Hosts[hostID(m)] != nil && q.s.Hosts[hostID(m)].Policy.ProductionHold && m.Session == s.Session {
+			if m != nil && m.Session == s.Session && (m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0 || q.s.Hosts[hostID(m)] != nil && q.s.Hosts[hostID(m)].Policy.ProductionHold) {
 				continue
 			}
 			delete(q.s.ModelSlots, k)

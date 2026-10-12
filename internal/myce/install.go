@@ -157,6 +157,9 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
+	HostMemoryBudgetGB    float64   `json:"host_memory_budget_gb,omitempty"`
+	MemoryCeilingSlackGB  float64   `json:"memory_ceiling_slack_gb"`
+	MemorySwapMaxBytes    int64     `json:"memory_swap_max_bytes"`
 	AllowDeviceless       bool      `json:"allow_deviceless,omitempty"`
 	Device                string    `json:"device,omitempty"`
 	HostStateDir          string    `json:"host_state_dir,omitempty"`
@@ -267,7 +270,7 @@ func (c ServiceConfig) ServiceText() string {
 					condition += "ConditionPathExists=!" + unitConditionPath(filepath.Join(scoped, "DISABLED")) + "\n"
 				}
 			}
-			stopSettings = "EnvironmentFile=" + unitQuote(c.GPUEnvironmentFile()) + "\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
+			stopSettings = "EnvironmentFile=" + unitQuote(c.GPUEnvironmentFile()) + "\nDelegate=memory\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
 		}
 		return "[Unit]\n" + condition + "Description=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\nExecStart=" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + "\n" + stopSettings + "Restart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
 	}
@@ -309,6 +312,7 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 				return errors.New("worker unit must be a regular file")
 			}
 			existing.AllowDeviceless = c.AllowDeviceless
+			existing.HostMemoryBudgetGB, existing.MemoryCeilingSlackGB, existing.MemorySwapMaxBytes = c.HostMemoryBudgetGB, c.MemoryCeilingSlackGB, c.MemorySwapMaxBytes
 			existing.Path = c.Path
 			if e = os.WriteFile(existing.GPUEnvironmentFile(), []byte(gpuRuntimeEnvironment(os.Environ())), 0600); e != nil {
 				return e
@@ -505,6 +509,9 @@ func Doctor(ctx context.Context, c ServiceConfig, p DoctorProbe) []DoctorCheck {
 		out = append(out, DoctorCheck{Name: name, OK: e == nil, Detail: detail})
 	}
 	if c.Role == "worker" {
+		status := WorkerMemoryDelegationStatus(ctx, c, p.Machine.Command)
+		// Enforcement is advisory on unsupported hosts; report its capability plainly.
+		add("memory ceilings", nil, status)
 		d, e := p.Machine.DetectDevice(ctx, c.Device)
 		if e == nil && d.Platform != c.Detection.Platform {
 			e = fmt.Errorf("detected %s; configured %s", d.Platform, c.Detection.Platform)
@@ -586,7 +593,7 @@ func (c ServiceConfig) Args() []string {
 	if c.Role == "queue" {
 		args = []string{"queue", "--listen", c.Listen, "--db", filepath.Join(c.State, "myce.db"), "--checkpoints", c.Checkpoints}
 	} else {
-		args = []string{"join", "--name", c.Name, "--queue", c.Queue, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
+		args = []string{"join", "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--queue", c.Queue, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}
 	if c.Role == "worker" {
 		if c.HostStateDir != "" {

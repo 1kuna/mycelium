@@ -13,13 +13,19 @@ func hostID(m *Machine) string {
 // Legacy workers/requests keep the GPU-only contract.
 func hostNeed(m *Machine, gpu, host float64) float64 {
 	if m.UnifiedMemory && m.HostMemoryMeasured {
+		if host > 0 {
+			return gpu + host + m.MemoryCeilingSlackGB
+		}
 		return gpu + host
+	}
+	if host > 0 {
+		return host + m.MemoryCeilingSlackGB
 	}
 	return host
 }
 func hostFits(m *Machine, gpu, host float64) bool {
 	if host == 0 {
-		return true
+		return m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0
 	}
 	return m.HostMemoryMeasured && m.HostMemoryError == "" && m.FreeHostMemoryGB >= hostNeed(m, gpu, host)
 }
@@ -33,6 +39,17 @@ func (q *Queue) refreshHostMemory() {
 				} else {
 					available = min(available, other.HostAvailableMemoryGB)
 				}
+			}
+		}
+		m.hostBudgetGB = 0
+		for _, other := range q.s.Machines {
+			if hostID(other) == hostID(m) && other.HostMemoryBudgetGB > 0 {
+				if m.hostBudgetGB == 0 {
+					m.hostBudgetGB = other.HostMemoryBudgetGB
+				} else {
+					m.hostBudgetGB = min(m.hostBudgetGB, other.HostMemoryBudgetGB)
+				}
+				available = min(available, other.HostMemoryBudgetGB)
 			}
 		}
 		reserved := 0.0
@@ -67,6 +84,9 @@ func (q *Queue) refreshHostMemory() {
 // acknowledgement arrives. GPU releases are local; RAM releases may be on any
 // card on the same physical host. Pins and failed unloads remain protected.
 func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string) ([]*Job, []*ModelSlot, bool) {
+	if host == 0 && (m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0) {
+		return nil, nil, false
+	}
 	if host == 0 || hostFits(m, gpu, host) {
 		return nil, nil, true
 	}

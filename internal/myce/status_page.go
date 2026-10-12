@@ -271,6 +271,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
           <div class="metric"><span class="label">Free</span><strong>{{printf "%.1f" .FreeMemoryGB}} GB</strong></div>
 	          <div class="metric"><span class="label">Reserved</span><strong>{{printf "%.1f" .ReservedMemoryGB}} GB</strong></div>
         </div>
+        {{if .MemoryEnforcement}}<div class="detail"><div class="label">RAM ceiling</div><div class="value">{{.MemoryEnforcement}}{{if .HostMemoryBudgetGB}}<div>Host ceiling budget: {{printf "%g" .HostMemoryBudgetGB}} GiB</div>{{end}}</div></div>{{end}}
         {{if .DockerCleanup}}<div class="alert bad">Docker {{.DockerCleanup}}</div>{{end}}
         {{if .MemoryError}}<div class="alert bad">Memory unavailable: {{.MemoryError}}</div>{{end}}
 		{{if .CacheError}}<div class="alert bad">Model cache unavailable: {{.CacheError}}</div>{{end}}

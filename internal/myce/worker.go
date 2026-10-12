@@ -22,6 +22,8 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	memoryCeilings        *memoryCeilings
+	MemorySwapMaxBytes    int64
 	LogRetention          time.Duration
 	dockerCallTimeout     time.Duration
 	Unit                  string
@@ -121,15 +123,12 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
 		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
-	if j.Spec.Needs.HostMemoryGB > 0 {
-		if w.HostMemorySource == nil {
-			return nil, fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
-		}
-		free, e := w.HostMemorySource(context.Background())
-		need := hostNeed(&w.Machine, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-		if e != nil || !validMemoryValue(free) || free < need {
-			return nil, fmt.Errorf("%w: host RAM need %.1f GiB, available %.1f GiB: %v", errWorkerMemory, need, free, e)
-		}
+	ceilingBytes, ceilingErr := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	if ceilingErr != nil {
+		return nil, ceilingErr
+	}
+	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
+		return nil, err
 	}
 	if w.MemorySource != nil {
 		free, e := w.MemorySource(context.Background())
@@ -176,6 +175,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			return nil, err
 		}
 	}
+	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
+		return nil, err
+	}
 	if j.Spec.Run.Docker {
 		p, e := w.startDocker(s, j, checkpoint, release)
 		environmentStarted = e == nil
@@ -215,6 +217,16 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	}
 	defer unlock()
 	identity := ID()
+	memoryAttempt, err := w.memoryCeilings.create("attempt-"+identity, ceilingBytes, w.MemorySwapMaxBytes)
+	if err != nil {
+		return nil, fmt.Errorf("memory ceiling setup: %w", err)
+	}
+	started := false
+	defer func() {
+		if !started {
+			_ = memoryAttempt.cleanup(w.Clock)
+		}
+	}()
 	args := []string{"-c", `read gate || exit 125; trap 'wait "$child"; exit $?' TERM; "$@" < /dev/null & child=$!; exec 3>&-; wait "$child"; exit $?`, "myce-supervisor-" + identity, command}
 	args = append(args, j.Spec.Run.Command[1:]...)
 	var readyReader, readyWriter, approvalReader, approvalWriter *os.File
@@ -271,6 +283,11 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	}
 	for k, v := range placementEnvironment(w.Machine) {
 		env[k] = v
+	}
+	if ceilingBytes > 0 {
+		env["MYCE_MEMORY_LIMIT_BYTES"] = strconv.FormatInt(ceilingBytes, 10)
+	} else {
+		delete(env, "MYCE_MEMORY_LIMIT_BYTES")
 	}
 	env["MYCE_PROCESS_ID"] = identity
 	env["MYCE_JOB_ID"] = j.ID
@@ -334,6 +351,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		}
 		return cause
 	}
+	if err = memoryAttempt.attach(cmd.Process.Pid); err != nil {
+		return nil, abort(fmt.Errorf("memory ceiling attach: %w", err))
+	}
 	s.state.PID = cmd.Process.Pid
 	s.state.LaunchPending = false
 	if err = saveWorkerJSON(s.dir, "attempt-"+identity+".json", workerState{PID: s.state.PID, Identity: identity}); err != nil {
@@ -375,6 +395,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	launchErr := err
 	result := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
+	started = true
 	go func() {
 		if release != nil {
 			defer release()
@@ -382,15 +403,18 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		waitErr := cmd.Wait()
 		// Descendants must not outlive the command or append to delivered output.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		groupErr := waitWorkerGroup(cmd.Process.Pid, w.Clock)
+		oomErr := memoryAttempt.failure()
+		groupErr := errors.Join(waitWorkerGroup(cmd.Process.Pid, w.Clock), memoryAttempt.cleanup(w.Clock))
 		result.ReleasePending = groupErr != nil
 		p.mu.Lock()
 		result.Forced = p.killed
 		p.mu.Unlock()
 		syncErr := output.Sync()
 		closeErr := output.Close()
-		result.Success = launchErr == nil && waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil
-		if launchErr != nil {
+		result.Success = oomErr == nil && launchErr == nil && waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil
+		if oomErr != nil {
+			result.Error = oomErr.Error()
+		} else if launchErr != nil {
 			result.Error = "command start hand-off: " + launchErr.Error()
 		} else if waitErr != nil {
 			result.Error = waitErr.Error()
@@ -403,6 +427,10 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		}
 		p.mu.Lock()
 		result.Interrupted = p.stopped || p.killed
+		if oomErr != nil && ceilingDiagnostic(oomErr.Error(), "") != "" {
+			result.Interrupted = false
+			result.Forced = false
+		}
 		p.mu.Unlock()
 		// Persist independently of the reconnect loop, which may be in a network
 		// request when the command finishes. Restart replays this exact session.
@@ -585,6 +613,11 @@ func (w Worker) Run(stop context.Context) error {
 			return err
 		}
 	}
+	if _, err := MemoryCeilingConfig(w.Machine.HostMemoryBudgetGB, w.Machine.MemoryCeilingSlackGB, w.MemorySwapMaxBytes); err != nil {
+		return err
+	}
+	w.initMemoryCeilings()
+	log.Print(w.Machine.MemoryEnforcement)
 	w.Machine.HostMemoryMeasured = true
 	w.batchMemory = &atomic.Uint64{}
 	if s.state.Job != nil {
@@ -1034,4 +1067,19 @@ func (w Worker) Run(stop context.Context) error {
 }
 func (w Worker) String() string {
 	return fmt.Sprintf("%s (%s, %.1f GB)", w.Machine.ID, w.Machine.GPU, w.Machine.FreeMemoryGB)
+}
+
+func (w Worker) checkHostRAM(gpu, host float64) error {
+	if host == 0 {
+		return nil
+	}
+	if w.HostMemorySource == nil {
+		return fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
+	}
+	free, err := w.HostMemorySource(context.Background())
+	need := hostNeed(&w.Machine, gpu, host)
+	if err != nil || !validMemoryValue(free) || free < need {
+		return fmt.Errorf("%w: host RAM need %.1f GiB, available %.1f GiB: %v", errWorkerMemory, need, free, err)
+	}
+	return nil
 }

@@ -138,7 +138,7 @@ func TestDoctorChecks(t *testing.T) {
 	c := ServiceConfig{Role: "worker", Detection: Detection{Platform: "cuda"}, NAS: "/nas", State: "/cache"}
 	p := DoctorProbe{Machine: fakeProbe("linux", "amd64", "RTX 4090, 24564", ""), NAS: func(context.Context, string) error { return nil }, Disk: func(string) (int64, error) { return 2 << 30, nil }, Queue: func(context.Context, ServiceConfig) error { return nil }}
 	checks := Doctor(context.Background(), c, p)
-	if len(checks) != 5 {
+	if len(checks) != 6 {
 		t.Fatal(checks)
 	}
 	for _, v := range checks {

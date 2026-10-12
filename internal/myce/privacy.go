@@ -14,9 +14,10 @@ func diagnostic(value, message string) string {
 func (q *Queue) publicSnapshot() (Snapshot, error) {
 	s, err := q.Snapshot()
 	for i := range s.LoadedModels {
-		s.LoadedModels[i].Error = diagnostic(s.LoadedModels[i].Error, "model load or unload failed")
+		s.LoadedModels[i].Error = ceilingDiagnostic(s.LoadedModels[i].Error, "model load or unload failed")
 	}
 	for _, m := range s.Machines {
+		m.MemoryEnforcement = memoryEnforcementDiagnostic(m.MemoryEnforcement)
 		m.HostMemoryError = diagnostic(m.HostMemoryError, "host memory probe failed")
 		m.MemoryError = diagnostic(m.MemoryError, "memory probe failed")
 		m.CacheError = diagnostic(m.CacheError, "cache operation failed")
@@ -37,7 +38,7 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 			case strings.HasPrefix(j.Reason, "production cannot start: no eligible host is enabled;"):
 				j.Reason = "production cannot start: no eligible host is enabled"
 			default:
-				j.Reason = diagnostic(j.Reason, "execution failed")
+				j.Reason = ceilingDiagnostic(j.Reason, "execution failed")
 			}
 		}
 	}

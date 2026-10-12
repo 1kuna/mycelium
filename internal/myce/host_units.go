@@ -79,13 +79,24 @@ func CurrentWorkerUnit() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, line := range strings.Split(string(b), "\n") {
-		if path, ok := strings.CutPrefix(line, "0::"); ok {
-			unit := filepath.Base(path)
-			if ValidWorkerUnit(unit) {
-				return unit, nil
-			}
-		}
+	if unit := workerUnitFromCgroup(b); unit != "" {
+		return unit, nil
 	}
 	return "", errors.New("systemd worker invocation has no allowed worker cgroup")
+}
+func workerUnitFromCgroup(b []byte) string {
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.SplitN(line, ":", 3)
+		if len(fields) != 3 || !(fields[0] == "0" && fields[1] == "" || strings.Contains(","+fields[1]+",", ",name=systemd,")) {
+			continue
+		}
+		path := filepath.Clean(fields[2])
+		if filepath.Base(path) == "worker" {
+			path = filepath.Dir(path)
+		}
+		if unit := filepath.Base(path); ValidWorkerUnit(unit) {
+			return unit
+		}
+	}
+	return ""
 }

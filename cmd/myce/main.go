@@ -127,6 +127,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	productionGrace := f.Duration("production-stop-grace", 10*time.Second, "production checkpoint grace")
 	heartbeat := f.Duration("heartbeat", time.Second, "worker check-in interval")
 	memoryMode := f.String("memory-mode", "auto", "memory source: auto, unified, dedicated, or fixed")
+	hostBudget := f.Float64("host-memory-budget-gb", 0, "aggregate declared RAM ceiling budget per physical host, including slack")
+	memorySlack := f.Float64("memory-ceiling-slack-gb", .125, "extra GiB per declared RAM ceiling (counts against host budget)")
+	memorySwap := f.Int64("memory-swap-max-bytes", 0, "swap allowance per memory ceiling in bytes")
 	hostReserve := f.Float64("reserve-host-memory-gb", 4, "host RAM reserve in GiB (unified uses the larger GPU/host reserve once)")
 	reserve := f.Float64("reserve-memory-gb", 0, "GPU memory to keep outside Mycelium")
 	productionLoss := f.Duration("production-loss-timeout", myce.ProductionLossAfter, "quiet timeout for production work")
@@ -309,6 +312,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err != nil {
 			return err
 		}
+		if _, err := myce.MemoryCeilingConfig(*hostBudget, *memorySlack, *memorySwap); err != nil {
+			return err
+		}
 		if *heartbeat <= 0 {
 			return errors.New("heartbeat must be positive")
 		}
@@ -327,7 +333,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err != nil {
 			return err
 		}
-		w := myce.Worker{LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
@@ -455,6 +461,12 @@ func printStatus(s myce.Snapshot, full bool) {
 		}
 		if m.HostMemoryError != "" {
 			state += "; host RAM unavailable: " + m.HostMemoryError
+		}
+		if m.MemoryEnforcement != "" {
+			state += "; " + m.MemoryEnforcement
+		}
+		if m.HostMemoryBudgetGB > 0 {
+			state += fmt.Sprintf("; host ceiling budget %.3g GiB", m.HostMemoryBudgetGB)
 		}
 		if m.HostMemoryMeasured {
 			state += fmt.Sprintf("; host %s RAM %.1f GiB available for admission", m.HostID, m.FreeHostMemoryGB)

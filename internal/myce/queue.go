@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -468,7 +469,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		if progressErr != nil {
 			m.CheckpointUnavailable = true
 		}
-		if !validMemoryValue(m.HostAvailableMemoryGB) {
+		if !validMemoryValue(m.HostAvailableMemoryGB) || !validMemoryValue(m.HostMemoryBudgetGB) || !validMemoryValue(m.MemoryCeilingSlackGB) {
 			return errors.New("invalid host memory report")
 		}
 		if m.ID == "" || m.Session == "" || !validGPU(m.GPU) || !validMemoryValue(m.TotalMemoryGB) || m.FreeMemoryGB < 0 || math.IsNaN(m.FreeMemoryGB) || math.IsInf(m.FreeMemoryGB, 0) {
@@ -479,7 +480,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 		old := q.s.Machines[m.ID]
 		if old != nil && old.Session != m.Session && !(c.Fresh && c.PreviousSession == old.Session) {
-			if h := q.s.Hosts[hostID(old)]; h != nil && h.Policy.ProductionHold {
+			if h := q.s.Hosts[hostID(old)]; old.HostMemoryBudgetGB > 0 || old.hostBudgetGB > 0 || h != nil && h.Policy.ProductionHold {
 				for _, slot := range q.s.ModelSlots {
 					if slot.Machine == m.ID && slot.Session == old.Session {
 						return errors.New("previous model execution release unknown; prior-session cleanup required")
@@ -785,7 +786,9 @@ func (q *Queue) Complete(r Result) error {
 			m.LastSeen = q.clock.Now()
 			delete(q.unreported, m.ID)
 		}
-		if j.State == "stopping" {
+		// A kernel OOM is the payload's failure even if preemption raced it.
+		ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
+		if j.State == "stopping" && (!ceilingFailure || j.Reason == "cancel requested") {
 			if j.StopAt != nil && q.clock.Now().Before(*j.StopAt) {
 				if q.s.BatchReleases == nil {
 					q.s.BatchReleases = map[string]batchRelease{}

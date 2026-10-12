@@ -68,10 +68,14 @@ func NewModelEngine(m Model, dir string, clock Clock) Engine {
 }
 
 type LlamaEngine struct {
-	HostStateDir string
-	stopCommand  []string
-	stopTimeout  time.Duration
-	env          []string
+	memoryCeilings     *memoryCeilings
+	memoryAttempt      *memoryAttempt
+	memoryMachine      Machine
+	memorySwapMaxBytes int64
+	HostStateDir       string
+	stopCommand        []string
+	stopTimeout        time.Duration
+	env                []string
 
 	Dir      string
 	Clock    Clock
@@ -167,12 +171,27 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		l.log.Close()
 		return e
 	}
+	bytes, limitErr := (Worker{Machine: l.memoryMachine}).ceilingBytes(m.MemoryGB, m.HostMemoryGB)
+	if limitErr != nil {
+		l.log.Close()
+		return limitErr
+	}
+	l.memoryAttempt, e = l.memoryCeilings.create("engine-"+l.identity, bytes, l.memorySwapMaxBytes)
+	if e != nil {
+		l.log.Close()
+		return e
+	}
 	if e = l.cmd.Start(); e != nil {
+		_ = l.memoryAttempt.cleanup(l.Clock)
 		l.log.Close()
 		return e
 	}
 	l.done = make(chan error, 1)
 	go func() { l.done <- l.cmd.Wait() }()
+	if e = l.memoryAttempt.attach(l.cmd.Process.Pid); e != nil {
+		_ = l.Unload()
+		return fmt.Errorf("memory ceiling attach: %w", e)
+	}
 	if e = saveWorkerJSON(l.Dir, name+".json", workerState{Identity: l.identity, PID: l.cmd.Process.Pid}); e != nil {
 		_ = l.Unload()
 		return e
@@ -199,7 +218,11 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 				select {
 				case e := <-l.done:
 					l.done = nil
+					oomErr := l.memoryAttempt.failure()
 					_ = l.Unload()
+					if oomErr != nil {
+						return oomErr
+					}
 					return fmt.Errorf("server exited as health became ready: %v; see %s.log", e, name)
 				default:
 					return nil
@@ -208,11 +231,19 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		}
 		select {
 		case <-ctx.Done():
+			oomErr := l.memoryAttempt.failure()
 			_ = l.Unload()
+			if oomErr != nil {
+				return oomErr
+			}
 			return ctx.Err()
 		case e := <-l.done:
 			l.done = nil
+			oomErr := l.memoryAttempt.failure()
 			_ = l.Unload()
+			if oomErr != nil {
+				return oomErr
+			}
 			return fmt.Errorf("server exited during load: %v; see %s.log", e, name)
 		case <-tick.C:
 		}
@@ -252,7 +283,10 @@ func (l *LlamaEngine) Unload() error {
 		<-l.done
 		l.done = nil
 	}
-	e = errors.Join(e, stopErr, waitWorkerGroup(l.cmd.Process.Pid, l.Clock))
+	e = errors.Join(e, stopErr, waitWorkerGroup(l.cmd.Process.Pid, l.Clock), l.memoryAttempt.cleanup(l.Clock))
+	if e == nil {
+		l.memoryAttempt = nil
+	}
 	if l.log != nil {
 		e = errors.Join(e, l.log.Close())
 		l.log = nil
@@ -305,6 +339,11 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 			_ = cmd.Wait()
 			return err
 		}
+		if err := l.memoryAttempt.attach(cmd.Process.Pid); err != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+			return fmt.Errorf("stop helper memory ceiling attach: %w", err)
+		}
 		_, gateErr := writer.Write([]byte("start\n"))
 		// A helper killed at the grace deadline can close its gate first.
 		// Still inspect its group below; a broken pipe alone is expected.
@@ -354,6 +393,7 @@ func cleanupEngines(dir string, clock Clock) error {
 }
 
 type workerModel struct {
+	memoryFailed       bool
 	model              Model
 	engine             Engine
 	state, err         string
@@ -365,6 +405,9 @@ type workerModel struct {
 	drainRequested     bool
 }
 type modelRuntime struct {
+	memoryCeilings        *memoryCeilings
+	memoryMachine         Machine
+	memorySwapMaxBytes    int64
 	hostStateDir          string
 	lastSavedSpeed        float64
 	copies                map[string]*workerCopy
@@ -434,6 +477,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	rt.machine = w.Machine.ID
 	rt.environmentCache = w.environmentCache
 	rt.environmentSourceRoot = w.EnvironmentSourceRoot
+	rt.memoryCeilings, rt.memoryMachine, rt.memorySwapMaxBytes = w.memoryCeilings, w.Machine, w.MemorySwapMaxBytes
 	rt.hostMemorySource = w.HostMemorySource
 	rt.unifiedMemory = w.Machine.UnifiedMemory
 	rt.memorySource = w.MemorySource
@@ -458,7 +502,16 @@ func (rt *modelRuntime) report() ([]ModelReport, float64) {
 	out := []ModelReport{}
 	memory := 0.0
 	for name, m := range rt.models {
-		out = append(out, ModelReport{Name: name, State: m.state, Error: diagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true})
+		if m.state == "ready" {
+			if owned, ok := m.engine.(*LlamaEngine); ok {
+				if err := owned.memoryAttempt.failure(); err != nil {
+					m.err = err.Error()
+					m.memoryFailed = true
+					rt.unload(m)
+				}
+			}
+		}
+		out = append(out, ModelReport{Name: name, State: m.state, Error: ceilingDiagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true})
 		if m.state != "unloaded" && m.state != "failed" {
 			memory += m.model.MemoryGB
 		}
@@ -517,6 +570,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			engine = NewModelEngine(model, rt.dir, rt.clock)
 			if owned, ok := engine.(*LlamaEngine); ok {
 				owned.HostStateDir = rt.hostStateDir
+				owned.memoryCeilings, owned.memoryMachine, owned.memorySwapMaxBytes = rt.memoryCeilings, rt.memoryMachine, rt.memorySwapMaxBytes
 			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), rt.config.Wait)
@@ -559,6 +613,9 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		model.Path, e = rt.cache.Prepare(ctx, model)
 	}
 	if e == nil {
+		e = rt.checkLoadMemory(ctx, m)
+	}
+	if e == nil {
 		e = m.engine.Load(ctx, model)
 	}
 	m.cancel()
@@ -599,10 +656,9 @@ func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerMode
 			return errors.New("model load requires host RAM source")
 		}
 		free, e := rt.hostMemorySource(ctx)
-		need := loading.model.HostMemoryGB
-		if rt.unifiedMemory {
-			need += loading.model.MemoryGB
-		}
+		machine := rt.memoryMachine
+		machine.UnifiedMemory, machine.HostMemoryMeasured = rt.unifiedMemory, true
+		need := hostNeed(&machine, loading.model.MemoryGB, loading.model.HostMemoryGB)
 		if e != nil || !validMemoryValue(free) || free < need {
 			return fmt.Errorf("insufficient host RAM for model %s: need %.1f GiB, available %.1f GiB: %v", loading.model.Name, need, free, e)
 		}
@@ -653,6 +709,9 @@ func (rt *modelRuntime) unload(m *workerModel) {
 				m.releaseEnvironment = nil
 			}
 			m.state = "unloaded"
+			if m.memoryFailed {
+				m.state = "failed"
+			}
 		}
 	}()
 }

@@ -71,7 +71,7 @@ func TestDisableEmptyRegistryIsUnconfirmed(t *testing.T) {
 func TestWorkerUnitCgroupSettings(t *testing.T) {
 	c := ServiceConfig{Role: "worker", Detection: Detection{OS: "linux"}}
 	texts := []string{c.ServiceText()}
-	for _, p := range []string{"../../deploy/myce-worker.service", "../../deploy/myce-spark-worker.service"} {
+	for _, p := range []string{"../../deploy/myce-worker.service", "../../deploy/myce-worker@.service", "../../deploy/myce-spark-worker.service"} {
 		b, e := os.ReadFile(p)
 		if e != nil {
 			t.Fatal(e)
@@ -79,7 +79,7 @@ func TestWorkerUnitCgroupSettings(t *testing.T) {
 		texts = append(texts, string(b))
 	}
 	for _, text := range texts {
-		for _, setting := range []string{"KillMode=control-group", "SendSIGKILL=yes", "TimeoutStopSec=10s", "ConditionPathExists=!%h/.local/share/myce/DISABLED", "Restart=on-failure"} {
+		for _, setting := range []string{"Delegate=memory", "KillMode=control-group", "SendSIGKILL=yes", "TimeoutStopSec=10s", "ConditionPathExists=!%h/.local/share/myce/DISABLED", "Restart=on-failure"} {
 			if !strings.Contains(text, setting) {
 				t.Errorf("missing %s", setting)
 			}

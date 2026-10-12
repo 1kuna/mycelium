@@ -778,13 +778,15 @@ and unloads them. Missing native counters fail visibly. See the separate
 [B70 weekend measurement](production-test-plan.md#b70-gpu0-weekend-joint-residency-measurement)
 checklist; this is not the first-machine Spark acceptance test.
 
-## Host RAM admission
+## Host RAM admission and ceilings
 
 Declare batch `needs.host_memory_gb` or catalog `host_memory_gb` in GiB for
 additional CPU-side memory, including the measured load and overlapping
 activation peak. NeMo's historical 9.58 GiB peak suggests a roughly 10 GiB
 request, but qualify the actual wrapper and workload. Unset/zero retains
-GPU-only admission. Host requests require valid live RAM telemetry.
+GPU-only admission on uncapped hosts. A configured host ceiling budget rejects
+zero host declarations, including on sibling workers. Host requests require
+valid live RAM telemetry.
 
 All per-card workers on one physical machine must share a stable `join
 --host-id` (default hostname); use unique host IDs across different machines.
@@ -796,8 +798,8 @@ and stopping/draining work. This is intentionally conservative: resident memory
 already reduces the live OS allowance, and its declared reservation is retained
 to cover growth rather than guessing process usage. A slower/stale sibling
 report can temporarily reduce admission until its next check-in. This is
-admission, not an OS memory limit; external allocations can still race it.
-Workers repeat live refusal immediately before batch/model starts.
+aggregate admission; external allocations can still race it. Workers repeat
+live refusal after preparation and before batch/model starts.
 
 On dedicated GPUs the host pool charges only `host_memory_gb`. On unified
 Metal/Spark/integrated machines, GPU and CPU allocations share one host pool:
@@ -809,6 +811,98 @@ GPU admission remains a cap; passing both checks does not charge a second
 GPU allocation. The OS reserve is the larger GPU/host reserve, applied once
 to the shared allowance. Auto CUDA detects unsupported NVIDIA memory fields;
 explicit `--memory-mode unified` and Metal always use this rule.
+
+
+Linux cgroup v2 workers installed as systemd user services enforce declared
+ceilings. The generated and manual worker units use `Delegate=memory` and retain
+`KillMode=control-group`. At startup the worker moves itself into the service's
+`worker` leaf, then enables the delegated memory controller in the service
+parent. Each native batch attempt and model-server execution gets a unique
+`attempt-<execution-id>` or `engine-<execution-id>` child of that same parent.
+The worker writes and reads back `memory.max`, `memory.swap.max` and
+`memory.oom.group=1`, then confirms the gated process's `cgroup.procs` membership
+before releasing the command. Model stop helpers share the server's ceiling.
+No attempt is moved into a separate systemd scope. `myce disable` therefore
+still stops the worker **and every attempt child**, and its parent
+`cgroup.events populated` check includes those descendants.
+
+`join` and `install worker` accept:
+
+- `--host-memory-budget-gb`: aggregate host ceiling budget; default `0` leaves
+  legacy admission unchanged. Use the same value and `--host-id` on all cards.
+  The queue takes the smallest positive budget reported for that physical host,
+  caps its live RAM allowance, and subtracts outstanding job/model ceilings.
+  Capped hosts retain charges after loss or unconfirmed cleanup, including model
+  residency, until the exact execution is released or a fresh worker proves
+  prior-session cleanup. Do not reduce declarations to fit a guessed budget.
+- `--memory-ceiling-slack-gb`: extra memory per declared allocation; default
+  `0.125` GiB (128 MiB). Slack counts against the aggregate budget. Unified
+  machines enforce `memory_gb + host_memory_gb + slack` once; dedicated cards
+  enforce `host_memory_gb + slack`.
+- `--memory-swap-max-bytes`: swap allowance per attempt; default `0`. Swap is
+  separate from the RAM budget; leave it zero for the no-swap envelope.
+
+The kernel can OOM-kill an undersized attempt. The worker reads
+`memory.events oom_kill` and reports `exceeded its <actual limit> GiB memory
+ceiling`, kills remaining descendants, confirms release and removes the empty
+kernel cgroup. This is a normal command failure: jobs become **failed**, with
+no infrastructure loss and no automatic retry. It preserves existing checkpoint
+files. A pinned model retains its pin and follows the existing bounded load
+retry backoff; an unpinned failed load is removed. Ready model-server OOMs are
+also detected at heartbeat and reported as failed after cleanup. Cleanup failure
+retains RAM custody instead of granting a new allocation.
+
+macOS, cgroup v1, missing delegation and foreground `myce join` retain
+admission-only execution. Startup logs and `myce status` say exactly
+`memory ceiling not enforced on this host (reason)`. Installer and doctor inspect
+the live service's delegation and controller; startup can still be in progress,
+so refresh worker status before claiming enforcement. Doctor reports this as an
+advisory capability, not a required laptop prerequisite. If a qualified worker
+cannot install/confirm an attempt's limit or membership, it refuses that payload;
+it does not silently run it without a ceiling.
+
+Managed `run.docker: true` jobs are limited by the Docker daemon, since container
+processes are outside the worker service. The adapter supplies `--memory` and
+`--memory-swap` (RAM ceiling plus configured swap), injects
+`MYCE_MEMORY_LIMIT_BYTES`, and verifies the labeled container's HostConfig before
+start and during reconciliation. Missing or changed limits refuse start or kill
+the owned container; `State.OOMKilled` reports the same ordinary failure. An
+unmanaged shell wrapper **must** pass the provided limit itself, for example:
+
+```sh
+docker run --memory "$MYCE_MEMORY_LIMIT_BYTES" \
+  --memory-swap "$MYCE_MEMORY_LIMIT_BYTES" IMAGE COMMAND
+```
+
+Unmanaged/nested containers and Docker-backed catalog servers cannot be
+certified by the native cgroup or inspected automatically; use the managed batch
+adapter and its custody/label contract for qualified container work.
+
+Provisional B70 GPU1-only configuration (replace with measured Monday values):
+31 GiB host RAM minus 22 GiB legacy-production reservation minus 4 GiB OS/worker
+margin leaves **5 GiB total Mycelium ceilings**. Install the GPU1 worker with
+`--instance gpu1 --device 1 --host-memory-budget-gb 5
+--memory-ceiling-slack-gb 0 --memory-swap-max-bytes 0`, plus the ordinary queue,
+NAS and GPU arguments. Declare `needs.host_memory_gb: 5` for one full-envelope
+experiment. Alternatively keep the default 0.125-GiB slack and declare at most
+4.875 GiB. If another Mycelium card worker runs on the same host, configure the
+same host ID/budget; the 5 GiB is shared, not 5 GiB per card. These numbers are
+operator settings, not code defaults or measured qualification.
+
+The budget bounds admitted attempt/server RAM ceilings, not every byte used by
+the worker, environment builds, copies, Docker daemon or unrelated software.
+Reserve measured overhead separately. Admission-only hosts do not provide a
+kernel bound. GPU/device allocations that the driver does not charge to memcg
+still require native qualification, especially on unified-memory hardware.
+No configuration prevents unrelated programs from allocating their own RAM.
+
+Optional CPU-only native check: on Linux with an already delegated cgroup v2
+parent and the test runner in its `worker` leaf, set
+`MYCE_TEST_MEMORY_CGROUP=/sys/fs/cgroup/.../OWNED_PARENT` and run
+`go test ./internal/myce -run '^TestMemoryCeilingLinuxIntegration$' -v`.
+It creates an owned 32-MiB child, attempts a 128-MiB allocation, checks kernel
+OOM evidence and removes that empty cgroup. It skips without explicit delegation;
+no fleet or GPU access is needed.
 
 Production can stop lower-priority commands or drain unpinned models on another
 card of the same host when that releases RAM; GPU reclaim remains card-local.
