@@ -157,33 +157,57 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
-	HostMemoryBudgetGB    float64   `json:"host_memory_budget_gb,omitempty"`
-	MemoryCeilingSlackGB  float64   `json:"memory_ceiling_slack_gb"`
-	MemorySwapMaxBytes    int64     `json:"memory_swap_max_bytes"`
-	AllowDeviceless       bool      `json:"allow_deviceless,omitempty"`
-	Device                string    `json:"device,omitempty"`
-	HostStateDir          string    `json:"host_state_dir,omitempty"`
-	Path                  string    `json:"path"`
-	EnvironmentRoot       string    `json:"environment_root"`
-	Role                  string    `json:"role"`
-	Detection             Detection `json:"detection"`
-	Name                  string    `json:"name"`
-	Queue                 string    `json:"queue"`
-	Listen                string    `json:"listen"`
-	NAS                   string    `json:"nas"`
-	Checkpoints           string    `json:"checkpoint_root"`
-	ModelRoot             string    `json:"model_root"`
-	ModelCatalog          string    `json:"model_catalog,omitempty"`
-	EnvironmentCatalog    string    `json:"environment_catalog,omitempty"`
-	State                 string    `json:"state_dir"`
-	ModelCache            string    `json:"model_cache"`
-	EnvironmentCache      string    `json:"environment_cache"`
-	ModelCacheBytes       int64     `json:"model_cache_bytes"`
-	EnvironmentCacheBytes int64     `json:"environment_cache_bytes"`
-	Binary                string    `json:"binary"`
-	Credentials           string    `json:"credentials"`
-	Service               string    `json:"service"`
-	Config                string    `json:"config"`
+	EnvironmentFile       string        `json:"environment_file,omitempty"`
+	HostID                string        `json:"host_id,omitempty"`
+	DB                    string        `json:"db,omitempty"`
+	ProjectConfig         string        `json:"project_config,omitempty"`
+	HostConfig            string        `json:"host_config,omitempty"`
+	UploadSpoolDir        string        `json:"upload_spool_dir,omitempty"`
+	UploadSpoolBytes      int64         `json:"upload_spool_bytes,omitempty"`
+	LogRetention          time.Duration `json:"log_retention,omitempty"`
+	Heartbeat             time.Duration `json:"heartbeat,omitempty"`
+	RestartGrace          time.Duration `json:"restart_grace,omitempty"`
+	ProductionLossTimeout time.Duration `json:"production_loss_timeout,omitempty"`
+	DeadlineLossTimeout   time.Duration `json:"deadline_loss_timeout,omitempty"`
+	ExperimentLossTimeout time.Duration `json:"experiment_loss_timeout,omitempty"`
+	ReserveHostMemoryGB   float64       `json:"reserve_host_memory_gb"`
+	PrivateDevices        bool          `json:"private_devices"`
+	NoNewPrivileges       bool          `json:"no_new_privileges"`
+	Nice                  int           `json:"nice"`
+	CPUQuota              string        `json:"cpu_quota,omitempty"`
+	MemoryMax             string        `json:"memory_max,omitempty"`
+	TasksMax              string        `json:"tasks_max,omitempty"`
+	StartDisabled         bool          `json:"start_disabled,omitempty"`
+	RequireMemoryCeilings bool          `json:"require_memory_ceilings,omitempty"`
+	RequireMountedNAS     bool          `json:"require_mounted_nas,omitempty"`
+	Force                 bool          `json:"-"`
+	HostMemoryBudgetGB    float64       `json:"host_memory_budget_gb,omitempty"`
+	MemoryCeilingSlackGB  float64       `json:"memory_ceiling_slack_gb"`
+	MemorySwapMaxBytes    int64         `json:"memory_swap_max_bytes"`
+	AllowDeviceless       bool          `json:"allow_deviceless,omitempty"`
+	Device                string        `json:"device,omitempty"`
+	HostStateDir          string        `json:"host_state_dir,omitempty"`
+	Path                  string        `json:"path"`
+	EnvironmentRoot       string        `json:"environment_root"`
+	Role                  string        `json:"role"`
+	Detection             Detection     `json:"detection"`
+	Name                  string        `json:"name"`
+	Queue                 string        `json:"queue"`
+	Listen                string        `json:"listen"`
+	NAS                   string        `json:"nas"`
+	Checkpoints           string        `json:"checkpoint_root"`
+	ModelRoot             string        `json:"model_root"`
+	ModelCatalog          string        `json:"model_catalog,omitempty"`
+	EnvironmentCatalog    string        `json:"environment_catalog,omitempty"`
+	State                 string        `json:"state_dir"`
+	ModelCache            string        `json:"model_cache"`
+	EnvironmentCache      string        `json:"environment_cache"`
+	ModelCacheBytes       int64         `json:"model_cache_bytes"`
+	EnvironmentCacheBytes int64         `json:"environment_cache_bytes"`
+	Binary                string        `json:"binary"`
+	Credentials           string        `json:"credentials"`
+	Service               string        `json:"service"`
+	Config                string        `json:"config"`
 }
 
 func PlanInstall(role, home, root, nas, queue, name string, d Detection) (ServiceConfig, error) {
@@ -219,7 +243,23 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection) (Servic
 	c.ModelCacheBytes = 100 * 1024 * 1024 * 1024
 	c.EnvironmentCacheBytes = 20 * 1024 * 1024 * 1024
 	c.Checkpoints = filepath.Join(nas, "mycelium", "checkpoints")
-	c.ModelRoot = filepath.Join(nas, "models")
+	c.ModelRoot = filepath.Join(nas, "mycelium", "models")
+	c.DB = filepath.Join(c.State, "myce.db")
+	c.HostStateDir = os.Getenv("MYCE_HOST_STATE_DIR")
+	if c.HostStateDir == "" {
+		c.HostStateDir = filepath.Join(home, ".local", "share", "myce")
+	}
+	c.HostID, _ = os.Hostname()
+	c.ReserveHostMemoryGB = 4
+	c.MemoryCeilingSlackGB = .125
+	c.Heartbeat = time.Second
+	c.LogRetention = DefaultLogRetention
+	c.RestartGrace = RestartGrace
+	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = ProductionLossAfter, DeadlineLossAfter, LossAfter
+	c.UploadSpoolDir = filepath.Join(c.State, "uploads")
+	c.UploadSpoolBytes = DefaultUploadSpoolBytes
+	c.PrivateDevices, c.NoNewPrivileges = true, true
+	c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax = 10, "25%", "512M", "64"
 	c.EnvironmentRoot = filepath.Join(nas, "mycelium", "environments")
 	c.Path = filepath.Join(home, ".local", "bin") + ":" + filepath.Join(home, ".cargo", "bin") + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 	if d.OS == "linux" {
@@ -236,7 +276,7 @@ func (c *ServiceConfig) WorkerInstance(instance string) error {
 	}
 	old := filepath.Dir(c.Config)
 	root := filepath.Join(filepath.Dir(old), "worker-"+instance)
-	for _, p := range []*string{&c.Config, &c.Binary, &c.Credentials, &c.State, &c.ModelCache, &c.EnvironmentCache} {
+	for _, p := range []*string{&c.Config, &c.Binary, &c.Credentials, &c.State, &c.ModelCache, &c.EnvironmentCache, &c.DB, &c.UploadSpoolDir} {
 		rel, err := filepath.Rel(old, *p)
 		if err != nil {
 			return err
@@ -272,7 +312,27 @@ func (c ServiceConfig) ServiceText() string {
 			}
 			stopSettings = "EnvironmentFile=" + unitQuote(c.GPUEnvironmentFile()) + "\nDelegate=memory\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
 		}
-		return "[Unit]\n" + condition + "Description=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\nExecStart=" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + "\n" + stopSettings + "Restart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
+		settings := ""
+		if c.EnvironmentFile != "" {
+			settings += "EnvironmentFile=" + unitQuote(c.EnvironmentFile) + "\n"
+		}
+		if c.Role == "queue" {
+			yesno := func(v bool) string {
+				if v {
+					return "yes"
+				}
+				return "no"
+			}
+			settings += fmt.Sprintf("Environment=GOMAXPROCS=1\nPrivateDevices=%s\nNoNewPrivileges=%s\nNice=%d\nCPUQuota=%s\nMemoryMax=%s\nTasksMax=%s\nTimeoutStopSec=150\n", yesno(c.PrivateDevices), yesno(c.NoNewPrivileges), c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax)
+		}
+		if c.RequireMemoryCeilings {
+			settings += "RestartPreventExitStatus=78\n"
+		}
+		argv := ""
+		for _, arg := range c.Args() {
+			argv += " " + unitQuote(arg)
+		}
+		return "[Unit]\n" + condition + "Description=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\nExecStart=:" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + " --" + argv + "\n" + settings + stopSettings + "Restart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
 	}
 	vals := []string{c.Binary, "service", "--config", c.Config}
 	args := ""
@@ -289,96 +349,126 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 		return errors.New("refusing non-Mycelium service unit")
 	}
 
-	if token == "" {
-		return errors.New("set MYCE_TOKEN before installing")
-	}
 	if command == nil {
 		return errors.New("service runner unavailable")
 	}
+	if err := c.ValidateInstall(); err != nil {
+		return err
+	}
+	if c.StartDisabled && (c.Role != "worker" || c.Detection.OS != "linux") {
+		return errors.New("--start-disabled requires a Linux worker")
+	}
+	if c.EnvironmentFile != "" {
+		var err error
+		token, c.Queue, err = ReadFleetEnvironment(c.EnvironmentFile)
+		if err != nil {
+			return err
+		}
+	}
+	if token == "" {
+		return errors.New("set MYCE_TOKEN before installing")
+	}
+	existing := false
+	if _, err := os.Lstat(c.Config); err == nil {
+		old, err := ReadServiceConfig(c.Config)
+		if err != nil {
+			return err
+		}
+		if diff := installConfigDiff(old, c); diff != "" {
+			fmt.Fprintln(os.Stdout, "Installed configuration changes:\n"+diff)
+			if !c.Force {
+				return fmt.Errorf("installed configuration differs; review the diff and rerun with --force:\n%s", diff)
+			}
+		}
+		if old.Role != c.Role || old.Service != c.Service || old.Binary != c.Binary || old.State != c.State {
+			return errors.New("installed role, service, binary and state paths cannot change; preserve custody and install separately")
+		}
+		existing = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, path := range []string{c.Config, c.Binary, c.Credentials, c.Service} {
+		st, err := os.Lstat(path)
+		if err == nil {
+			if !existing || !st.Mode().IsRegular() {
+				return fmt.Errorf("refusing unexpected installed path %s", path)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if err := prepareInstallNAS(ctx, c, command); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		return err
+	}
+	if c.StartDisabled {
+		if err = installDisabled(ctx, c, command, existing); err != nil {
+			return err
+		}
+	}
+	for _, path := range []string{filepath.Dir(c.Config), filepath.Dir(c.Service), c.State} {
+		if err = os.MkdirAll(path, 0700); err != nil {
+			return err
+		}
+	}
+	if err = replaceInstallBinary(c.Binary, data); err != nil {
+		return err
+	}
+	if err = saveWorkerJSON(filepath.Dir(c.Config), filepath.Base(c.Config), c); err != nil {
+		return err
+	}
+	// Legacy programmatic installs retain their private credential file; CLI installs use fleet.env.
+	if c.EnvironmentFile == "" && !existing {
+		if err = saveWorkerJSON(filepath.Dir(c.Credentials), filepath.Base(c.Credentials), map[string]string{"token": token}); err != nil {
+			return err
+		}
+	}
 	if c.Role == "worker" && c.Detection.OS == "linux" {
-		if _, e := os.Lstat(c.Config); e == nil {
-			existing, e := ReadServiceConfig(c.Config)
-			if e != nil {
-				return e
-			}
-			if existing.Role != "worker" || existing.Detection.OS != "linux" || existing.Config != c.Config || existing.Service != c.Service {
-				return errors.New("existing worker configuration does not match upgrade")
-			}
-			st, e := os.Lstat(c.Service)
-			if e != nil {
-				return e
-			}
-			if !st.Mode().IsRegular() {
-				return errors.New("worker unit must be a regular file")
-			}
-			existing.AllowDeviceless = c.AllowDeviceless
-			existing.HostMemoryBudgetGB, existing.MemoryCeilingSlackGB, existing.MemorySwapMaxBytes = c.HostMemoryBudgetGB, c.MemoryCeilingSlackGB, c.MemorySwapMaxBytes
-			existing.Path = c.Path
-			if e = os.WriteFile(existing.GPUEnvironmentFile(), []byte(gpuRuntimeEnvironment(os.Environ())), 0600); e != nil {
-				return e
-			}
-			if e = saveWorkerJSON(filepath.Dir(existing.Config), filepath.Base(existing.Config), existing); e != nil {
-				return e
-			}
-			if e = saveServiceText(existing); e != nil {
-				return e
-			}
-			if _, e = command(ctx, "systemctl", "--user", "daemon-reload"); e != nil {
-				return e
-			}
-			return validateWorkerService(ctx, existing, command)
-		} else if !errors.Is(e, os.ErrNotExist) {
-			return e
+		if err = os.WriteFile(c.GPUEnvironmentFile(), []byte(gpuRuntimeEnvironment(os.Environ())), 0600); err != nil {
+			return err
 		}
 	}
-	for _, p := range []string{c.Config, c.Binary, c.Credentials, c.Service} {
-		if _, e := os.Lstat(p); e == nil {
-			return fmt.Errorf("refusing to overwrite %s; uninstall the existing role first", p)
-		} else if !errors.Is(e, os.ErrNotExist) {
-			return e
-		}
+	if _, e := os.Stat(c.Service); e == nil {
+		err = saveServiceText(c)
+	} else {
+		err = os.WriteFile(c.Service, []byte(c.ServiceText()), 0600)
 	}
-	for _, p := range []string{filepath.Dir(c.Config), filepath.Dir(c.Service), c.State} {
-		if e := os.MkdirAll(p, 0700); e != nil {
-			return e
-		}
-	}
-	b, e := os.ReadFile(executable)
-	if e != nil {
-		return e
-	}
-	if e = os.WriteFile(c.Binary, b, 0700); e != nil {
-		return e
-	}
-	if e = saveWorkerJSON(filepath.Dir(c.Config), filepath.Base(c.Config), c); e != nil {
-		return e
-	}
-	if e = saveWorkerJSON(filepath.Dir(c.Credentials), filepath.Base(c.Credentials), map[string]string{"token": token}); e != nil {
-		return e
-	}
-	if c.Role == "worker" && c.Detection.OS == "linux" {
-		if e = os.WriteFile(c.GPUEnvironmentFile(), []byte(gpuRuntimeEnvironment(os.Environ())), 0600); e != nil {
-			return e
-		}
-	}
-	if e = os.WriteFile(c.Service, []byte(c.ServiceText()), 0600); e != nil {
-		return e
+	if err != nil {
+		return err
 	}
 	if c.Detection.OS == "linux" {
-		if _, e = command(ctx, "systemctl", "--user", "daemon-reload"); e != nil {
-			return e
+		if _, err = command(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
+			return err
 		}
 		if c.Role == "worker" {
-			if e = validateWorkerService(ctx, c, command); e != nil {
-				return e
+			if err = validateWorkerService(ctx, c, command); err != nil {
+				return err
 			}
 		}
-		_, e = command(ctx, "systemctl", "--user", "enable", "--now", filepath.Base(c.Service))
+		if c.StartDisabled {
+			_, err = command(ctx, "systemctl", "--user", "enable", filepath.Base(c.Service))
+			return err
+		}
+		if _, err = command(ctx, "systemctl", "--user", "enable", "--now", filepath.Base(c.Service)); err != nil {
+			return err
+		}
+		if existing {
+			_, err = command(ctx, "systemctl", "--user", "restart", filepath.Base(c.Service))
+		}
 	} else {
-		_, e = command(ctx, "launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), c.Service)
+		if existing {
+			if _, err = command(ctx, "launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid()), c.Service); err != nil {
+				return err
+			}
+		}
+		_, err = command(ctx, "launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), c.Service)
 	}
-	return e
+	return err
 }
+
 func ReadServiceConfig(path string) (ServiceConfig, error) {
 	var c ServiceConfig
 	b, e := os.ReadFile(path)
@@ -566,6 +656,10 @@ func Doctor(ctx context.Context, c ServiceConfig, p DoctorProbe) []DoctorCheck {
 	return out
 }
 func ReadServiceToken(c ServiceConfig) (string, error) {
+	if c.EnvironmentFile != "" {
+		token, _, err := ReadFleetEnvironment(c.EnvironmentFile)
+		return token, err
+	}
 	st, e := os.Stat(c.Credentials)
 	if e != nil {
 		return "", e
@@ -591,11 +685,29 @@ func ReadServiceToken(c ServiceConfig) (string, error) {
 func (c ServiceConfig) Args() []string {
 	args := []string{}
 	if c.Role == "queue" {
-		args = []string{"queue", "--listen", c.Listen, "--db", filepath.Join(c.State, "myce.db"), "--checkpoints", c.Checkpoints}
+		args = []string{"queue", "--listen", c.Listen, "--db", c.DB, "--checkpoints", c.Checkpoints}
 	} else {
-		args = []string{"join", "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--queue", c.Queue, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
+		args = []string{"join", "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
+	}
+	if c.LogRetention > 0 {
+		args = append(args, "--log-retention", c.LogRetention.String())
+	}
+	if c.Role == "queue" {
+		for _, v := range [][2]string{{"--project-config", c.ProjectConfig}, {"--host-config", c.HostConfig}, {"--upload-spool-dir", c.UploadSpoolDir}} {
+			if v[1] != "" {
+				args = append(args, v[0], v[1])
+			}
+		}
+		args = append(args, "--upload-spool-bytes", strconv.FormatInt(c.UploadSpoolBytes, 10), "--restart-grace", c.RestartGrace.String(), "--production-loss-timeout", c.ProductionLossTimeout.String(), "--deadline-loss-timeout", c.DeadlineLossTimeout.String(), "--experiment-loss-timeout", c.ExperimentLossTimeout.String())
 	}
 	if c.Role == "worker" {
+		if c.EnvironmentFile == "" {
+			args = append(args, "--queue", c.Queue)
+		}
+		args = append(args, "--host-id", c.HostID, "--reserve-host-memory-gb", strconv.FormatFloat(c.ReserveHostMemoryGB, 'f', -1, 64), "--heartbeat", c.Heartbeat.String())
+		if c.RequireMemoryCeilings {
+			args = append(args, "--require-memory-ceilings")
+		}
 		if c.HostStateDir != "" {
 			args = append(args, "--host-state-dir", c.HostStateDir)
 		}

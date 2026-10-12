@@ -26,6 +26,9 @@ func exitCode(err error) int {
 	if err == nil {
 		return 0
 	}
+	if errors.Is(err, myce.ErrMemoryCeilingsRequired) {
+		return 78
+	}
 	var e *exitError
 	if errors.As(err, &e) {
 		return e.code

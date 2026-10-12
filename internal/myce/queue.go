@@ -472,6 +472,15 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		if !validMemoryValue(m.HostAvailableMemoryGB) || !validMemoryValue(m.HostMemoryBudgetGB) || !validMemoryValue(m.MemoryCeilingSlackGB) {
 			return errors.New("invalid host memory report")
 		}
+		for _, other := range q.s.Machines {
+			if hostID(other) == hostID(&m) {
+				if other.HostMemoryBudgetGeneration > m.HostMemoryBudgetGeneration {
+					m.HostMemoryBudgetGB, m.HostMemoryBudgetGeneration = other.HostMemoryBudgetGB, other.HostMemoryBudgetGeneration
+				} else if m.HostMemoryBudgetGeneration > 0 && m.HostMemoryBudgetGeneration == other.HostMemoryBudgetGeneration && m.HostMemoryBudgetGB != other.HostMemoryBudgetGB {
+					return errors.New("conflicting shared host memory budget generation")
+				}
+			}
+		}
 		if m.ID == "" || m.Session == "" || !validGPU(m.GPU) || !validMemoryValue(m.TotalMemoryGB) || m.FreeMemoryGB < 0 || math.IsNaN(m.FreeMemoryGB) || math.IsInf(m.FreeMemoryGB, 0) {
 			return errors.New("invalid machine report")
 		}
@@ -559,6 +568,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		m.FreeMemoryGB = max(0, m.FreeMemoryGB-q.modelReservation(&m, c.ModelReports))
 		q.maintain()
 		defer func() {
+			reply.AdmissionBlocked = m.HostMemoryBudgetStatus() != ""
 			reply.EnvironmentPlan = q.environmentPlan(&m)
 			reply.ModelPlan = q.modelPlan(m.ID)
 			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
