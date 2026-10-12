@@ -55,6 +55,50 @@ class CheckpointTests(unittest.TestCase):
             with self.assertRaises(json.JSONDecodeError):
                 checkpoint.load()
 
+    def test_cifs_save_keeps_file_sync_and_atomic_generations(self):
+        with tempfile.TemporaryDirectory() as folder:
+            checkpoint = Checkpoint(folder)
+            sync = os.fsync
+            calls = []
+            def file_sync_only(fd):
+                import stat
+                self.assertFalse(stat.S_ISDIR(os.fstat(fd).st_mode), "CIFS directory fsync must be skipped")
+                calls.append(fd)
+                sync(fd)
+            with patch("mycelium.checkpoint._is_linux_cifs", return_value=True, create=True):
+                with patch("mycelium.checkpoint.os.fsync", side_effect=file_sync_only):
+                    checkpoint.save({"step": 1})
+                    checkpoint.save({"step": 2})
+                self.assertEqual(checkpoint.load(), {"step": 2})
+                self.assertEqual(len(calls), 2)
+                with patch("mycelium.checkpoint.os.fsync", side_effect=OSError("file flush failed")):
+                    with self.assertRaises(OSError):
+                        checkpoint.save({"step": 3})
+                self.assertEqual(checkpoint.load(), {"step": 2})
+                self.assertEqual(json.loads(Path(folder, "checkpoint.json").read_text())["myce_checkpoint"]["generation"], 2)
+
+    def test_cifs_mount_selection_and_unknown_mounts_keep_sync(self):
+        from mycelium.checkpoint import _is_linux_cifs
+        mounts = "1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 0:1 / /mnt/verso\\040nas rw - cifs //nas/share rw\n3 2 8:2 / /mnt/verso\\040nas/local rw - ext4 /dev/local rw\n"
+        with patch("mycelium.checkpoint.sys.platform", "linux"):
+            with patch("mycelium.checkpoint.Path.read_text", return_value=mounts):
+                self.assertTrue(_is_linux_cifs(Path("/mnt/verso nas/checkpoints")))
+                self.assertFalse(_is_linux_cifs(Path("/mnt/verso nas/local/checkpoints")))
+                self.assertFalse(_is_linux_cifs(Path("/mnt/verso nas-other/checkpoints")))
+            ambiguous = "1 0 0:1 / /mnt rw - cifs //nas/share rw\n2 1 8:1 / /mnt rw - ext4 /dev/root rw\n"
+            with patch("mycelium.checkpoint.Path.read_text", return_value=ambiguous):
+                self.assertFalse(_is_linux_cifs(Path("/mnt/checkpoints")))
+            with patch("mycelium.checkpoint.Path.read_text", side_effect=OSError("unavailable")):
+                self.assertFalse(_is_linux_cifs(Path("/mnt/verso nas/checkpoints")))
+        with tempfile.TemporaryDirectory() as folder:
+            checkpoint = Checkpoint(folder)
+            sync = os.fsync
+            calls = []
+            with patch("mycelium.checkpoint._is_linux_cifs", return_value=False):
+                with patch("mycelium.checkpoint.os.fsync", side_effect=lambda fd: (calls.append(fd), sync(fd))):
+                    checkpoint.save({"step": 1})
+            self.assertEqual(len(calls), 2)
+
     def test_generation_survives_skew_and_restart(self):
         with tempfile.TemporaryDirectory() as folder:
             checkpoint = Checkpoint(folder)

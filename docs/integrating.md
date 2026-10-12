@@ -445,7 +445,8 @@ with StopSignal() as stop:
             time.sleep(1)
 ```
 
-`Checkpoint.save` writes atomic JSON through fsync/rename/directory fsync;
+`Checkpoint.save` writes atomic JSON through file fsync/rename/directory fsync
+(the Linux CIFS directory no-op is skipped; see the resumable-jobs guide);
 `load` chooses the newest complete JSON and ignores `.tmp`. I/O errors and
 corrupt complete JSON fail visibly; temporary NAS errors can be retried as above.
 `StopSignal` sets `requested` on SIGTERM/SIGINT and restores handlers on exit;

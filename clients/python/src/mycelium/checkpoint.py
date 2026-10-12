@@ -5,9 +5,35 @@ import json
 import os
 from pathlib import Path
 import signal
+import sys
 import tempfile
 from types import FrameType
 from typing import Any
+
+
+def _is_linux_cifs(directory: Path) -> bool:
+    # CIFS directory fsync is a no-op in Linux; unknown mounts retain fsync.
+    if sys.platform != "linux":
+        return False
+    try:
+        target = directory.resolve()
+        mounts = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+        best = (0, "")
+        for line in mounts.splitlines():
+            fields = line.split()
+            separator = fields.index("-")
+            mount = fields[4]
+            for escaped, literal in ((r"\040", " "), (r"\011", "\t"), (r"\012", "\n"), (r"\134", "\\")):
+                mount = mount.replace(escaped, literal)
+            path = Path(mount)
+            if target == path or path in target.parents:
+                if len(mount) > best[0]:
+                    best = (len(mount), fields[separator + 1])
+                elif len(mount) == best[0] and fields[separator + 1] != best[1]:
+                    best = (best[0], "unknown")
+        return best[1] == "cifs"
+    except (OSError, ValueError, IndexError):
+        return False
 
 
 class Checkpoint:
@@ -24,7 +50,7 @@ class Checkpoint:
         self.directory.mkdir(parents=True, exist_ok=True)
 
     def save(self, value: Any, name: str = "checkpoint.json") -> Path:
-        """Flush/fsync a same-directory temp, replace, then fsync directory."""
+        """Fsync temp, atomically replace, then sync directory except Linux CIFS."""
         if Path(name).name != name or name in {"", ".", ".."} or not name.endswith(".json"):
             raise ValueError("checkpoint name must be a plain .json filename")
         generation = max((g for g, _, _ in self._saves()), default=0) + 1
@@ -39,11 +65,12 @@ class Checkpoint:
             os.fsync(stream.fileno())
             temporary = Path(stream.name)
         temporary.replace(path)
-        fd = os.open(self.directory, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        if not _is_linux_cifs(self.directory):
+            fd = os.open(self.directory, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
         return path
 
     def _saves(self):
