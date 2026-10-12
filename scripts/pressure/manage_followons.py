@@ -136,7 +136,7 @@ print(json.dumps(dict(unit_state=unit,remaining_pids=remaining,occupied_test_por
 if __name__=='__main__':
     before=loan();assert before['ActiveState']=='active';last=None;error=None
     try:
-        until=time.monotonic()+2*3600
+        until=time.monotonic()+4*3600
         while time.monotonic()<until:
             complete=remote('b70','from pathlib import Path; import json; print(json.dumps(Path("'+ROOT+'/final-cleanup.json").exists()))')
             if complete:break
