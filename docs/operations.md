@@ -139,6 +139,13 @@ non-resumable jobs finish. `myce leave --name mac-worker` asks wait/stop if need
 `--now` signals everything but still permits checkpoint grace. Keep the local
 spool across restarts. Queue Ctrl-C stops the API without deleting durable jobs.
 Workers continue through temporary queue/network loss and replay logs/results.
+An existing `state.json` must use the Mycelium worker schema: `session`, `fresh`
+and `offset` are required, and unknown fields are refused before recovery.
+Foreign, incomplete or newer incompatible state produces `read worker state`
+and remains untouched. Preserve that spool for inspection; do not replace it
+with an empty spool to claim cleanup. Unrelated files are not imported as state.
+The `operator-stop.json` snapshot uses the same strict schema; invalid markers
+refuse startup, while an unchanged `state.json` snapshot remains compatible.
 
 ## Take a machine out of Mycelium
 

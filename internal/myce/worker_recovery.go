@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -89,7 +90,7 @@ func (w Worker) openStore() (*workerStore, error) {
 	s := &workerStore{dir: dir, lock: lock}
 	data, err := os.ReadFile(filepath.Join(dir, "state.json"))
 	if err == nil {
-		err = json.Unmarshal(data, &s.state)
+		err = decodeWorkerState(data, &s.state)
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		s.close()
@@ -112,13 +113,32 @@ func (s *workerStore) readOperatorStop() error {
 		return err
 	}
 	var marker workerState
-	if err = json.Unmarshal(data, &marker); err != nil {
+	if err = decodeWorkerState(data, &marker); err != nil {
 		return fmt.Errorf("read operator-stop marker: %w", err)
 	}
 	st := &s.state
 	if marker.Job != nil && marker.Result == nil && st.Job != nil && marker.Identity != "" && marker.Identity == st.Identity && marker.Session == st.Session && marker.Job.ID == st.Job.ID && marker.Job.Attempt == st.Job.Attempt {
 		st.OperatorStopped = true
 		return s.save()
+	}
+	return nil
+}
+
+// Existing spools always include these fields, even when their values are zero.
+func decodeWorkerState(data []byte, state *workerState) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(state); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, name := range []string{"session", "fresh", "offset"} {
+		if value, ok := fields[name]; !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return fmt.Errorf("not Mycelium worker state: missing %s", name)
+		}
 	}
 	return nil
 }

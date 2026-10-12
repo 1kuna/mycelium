@@ -222,3 +222,47 @@ func TestOperatorStopRefundRevivesThirdLossAndPreservesOtherLosses(t *testing.T)
 		t.Fatal("duplicate refunded another attempt")
 	}
 }
+
+func TestOperatorStopMarkerRejectsForeignDocuments(t *testing.T) {
+	for _, marker := range []string{`{}`, `null`, `{"state":"running","pid":999999}`, `{"session":"old","fresh":false,"offset":0,"attempt_token":"foreign"}`} {
+		t.Run(marker, func(t *testing.T) {
+			w := recoveryWorker(t)
+			s, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.save(); err != nil {
+				s.close()
+				t.Fatal(err)
+			}
+			s.close()
+			statePath := filepath.Join(w.StateDir, "state.json")
+			before, err := os.ReadFile(statePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			markerPath := filepath.Join(w.StateDir, "operator-stop.json")
+			if err = os.WriteFile(markerPath, []byte(marker), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				store, err := w.openStore()
+				if err == nil {
+					store.close()
+					t.Fatal("invalid marker accepted")
+				}
+				if !strings.Contains(err.Error(), "read operator-stop marker") {
+					t.Fatal(err)
+				}
+			}
+			after, err := os.ReadFile(statePath)
+			if err != nil || string(after) != string(before) {
+				t.Fatal("rejected marker changed state")
+			}
+			after, err = os.ReadFile(markerPath)
+			if err != nil || string(after) != marker {
+				t.Fatal("rejected marker changed")
+			}
+		})
+	}
+}
