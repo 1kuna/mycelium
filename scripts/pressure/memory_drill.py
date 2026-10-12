@@ -11,10 +11,19 @@ from pressure import api
 UNIT='myce-worker@myce-test-r11-ceiling.service'
 
 
+def unit_state():
+    r=subprocess.run(['systemctl','show',UNIT,'-p','ActiveState','-p','ControlGroup','-p','MainPID','-p','DevicePolicy','-p','LoadState'],
+                     capture_output=True,text=True,timeout=15)
+    state=dict(v.split('=',1) for v in r.stdout.splitlines() if '=' in v)
+    assert r.returncode==0 or state.get('LoadState')=='not-found', 'memory worker state unreadable'
+    return state
+
+
 def scenario(run):
     run.begin('Memory-ceiling-isolation')
     run.halt('worker');run.release_owned()
     cp=run.phase/'local-checkpoints';cp.mkdir();os.chown(cp,1000,1000)
+    run.halt('queue');run.cp=cp;run.start_queue()
     assert subprocess.check_output(['findmnt','-n','-T',str(cp),'-o','FSTYPE'],text=True).strip()=='ext4'
     args=[str(ROOT/'myce'),'join','--queue',run.url,'--name','ceiling-cpu','--host-id','ceiling-cpu-host',
           '--gpu','fake','--memory-gb','4','--host-memory-budget-gb','1','--memory-ceiling-slack-gb','0',
@@ -27,10 +36,7 @@ def scenario(run):
     run.active=None
     def control(args):
         return subprocess.run(args,capture_output=True,text=True,timeout=35,check=True)
-    def show():
-        r=control(['systemctl','show',UNIT,'-p','ActiveState','-p','ControlGroup','-p','MainPID','-p','DevicePolicy'])
-        return dict(v.split('=',1) for v in r.stdout.splitlines() if '=' in v)
-    assert show()['ActiveState']!='active'
+    assert unit_state()['ActiveState']!='active'
     assert not Path('/etc/systemd/system/'+UNIT).exists()
     atomic(ROOT/'memory-unit.json',dict(unit=UNIT))
     try:
@@ -39,7 +45,7 @@ def scenario(run):
              '--property=MemoryMax=512M','--property=MemorySwapMax=0','--property=CPUQuota=100%',
              '--property=KillMode=control-group','--property=RuntimeMaxSec=2min',
              '--property=EnvironmentFile='+str(env),'--property=StandardOutput=append:'+str(run.phase/'worker.log'),*args])
-        state=show();group=state['ControlGroup'];assert state['DevicePolicy']=='closed'
+        state=unit_state();group=state['ControlGroup'];assert state['DevicePolicy']=='closed'
         machine=run.wait(lambda:next((m for m in api(run.url)['machines'] if m['id']=='ceiling-cpu'),None),15)
         assert machine['memory_enforcement']=='memory ceilings enforced (cgroup v2)'
         def submit(name,command,host):
@@ -64,7 +70,7 @@ def scenario(run):
     except Exception as exc:
         run.result('Memory-ceiling-isolation','FAIL',error=type(exc).__name__)
     finally:
-        control(['systemctl','stop',UNIT]);state=show()
+        control(['systemctl','stop',UNIT]);state=unit_state()
         assert empty(group,state),'memory worker cleanup unconfirmed'
         run.halt('queue');run.scenario_cleanup()
         subprocess.run(['systemctl','set-property','--runtime','myce-test-stage-ab-r11b.service','MemoryMax=8G'],check=True,capture_output=True)

@@ -113,6 +113,19 @@ class SnippetTests(unittest.TestCase):
         self.assertIsNone(responses[-1]['clock_uncertainty_seconds'])
         self.assertEqual(rows[0]['at'],1)
 
+    def test_memory_unit_not_found_is_known_empty_inventory(self):
+        import memory_drill
+        reply=MagicMock(returncode=1,stdout='LoadState=not-found\nActiveState=inactive\nControlGroup=\nMainPID=0\nDevicePolicy=auto\n')
+        with patch.object(memory_drill.subprocess,'run',return_value=reply):
+            state=memory_drill.unit_state()
+        self.assertEqual(state['LoadState'],'not-found')
+        self.assertEqual(state['ControlGroup'],'')
+
+    def test_memory_unit_unreadable_inventory_fails_closed(self):
+        import memory_drill
+        with patch.object(memory_drill.subprocess,'run',return_value=MagicMock(returncode=1,stdout='')):
+            with self.assertRaises(AssertionError):memory_drill.unit_state()
+
     def test_unconfirmed_cleanup_never_acknowledged(self):
         t.state=dict(phase='failure');responses=[]
         with patch.object(t,'poll',side_effect=ValueError),patch.object(t,'stop',side_effect=RuntimeError), \
