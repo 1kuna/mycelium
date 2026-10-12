@@ -199,7 +199,8 @@ class World:
         if 'install' in args:
             i.GPU_UNIT.write_text(str(self.root/'installation'))
             config=self.root/'installation/worker-versotest-r13-gpu1/config.json';config.parent.mkdir(parents=True)
-            config.write_text('{}');self.unit_active=False
+            binary=self.root/'installation/worker-versotest-r13-gpu1/myce';binary.write_bytes(b'fake-same-executable');(self.root/'myce').write_bytes(b'fake-same-executable')
+            config.write_text(json.dumps(dict(binary=str(binary))));self.unit_active=False
         elif 'uninstall' in args:
             i.GPU_UNIT.rename(self.root/'retired-unit');self.unit_active=False
         elif 'disable' in args:

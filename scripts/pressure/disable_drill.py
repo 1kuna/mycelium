@@ -1,5 +1,6 @@
 """Installed-user-service host switch drill, confined to the disposable GPU1 worker."""
 import json
+import hashlib
 from kernel_reads import kernel_read, Vanished
 import os
 from pathlib import Path
@@ -67,7 +68,11 @@ def drill(run):
     record('installed',install_exit=result.returncode,installed_condition=show(run)['ConditionResult'])
     assert result.returncode==0 and show(run)['ConditionResult']=='no'
     run.installed_config=ROOT/'installation/worker-versotest-r13-gpu1/config.json'
-    c=json.loads(kernel_read(run.installed_config, 'text'));c['checkpoint_root']=str(run.cp)
+    c=json.loads(kernel_read(run.installed_config, 'text'))
+    executable_hash=hashlib.sha256(kernel_read(ROOT/'myce','bytes')).hexdigest()
+    assert hashlib.sha256(kernel_read(c['binary'],'bytes')).hexdigest()==executable_hash, 'installed worker executable differs from queue'
+    record('same-executable',sha256=executable_hash)
+    c['checkpoint_root']=str(run.cp)
     run.installed_config.write_text(json.dumps(c));os.chown(run.installed_config,1000,1000)
     (ROOT/'installed-ready').touch()
     user(run,['systemctl','--user','start','myce-worker@versotest-r13-gpu1.service'])
