@@ -112,6 +112,9 @@ type dockerAttempt struct {
 	mu          sync.Mutex
 	state       dockerExecution
 	dir, binary string
+	hostDir     string
+	ctx         context.Context
+	inventory   func([]string)
 	workdir     string
 	env         []string
 	clock       Clock
@@ -119,6 +122,9 @@ type dockerAttempt struct {
 }
 
 func (d *dockerAttempt) saveLocked() error {
+	if d.dir == "" {
+		return nil
+	}
 	err := saveWorkerJSON(d.dir, d.state.Identity+".docker.json", d.state)
 	d.dirty = err != nil
 	return err
@@ -165,7 +171,11 @@ func (d *dockerAttempt) stop(now time.Time, grace time.Duration, kill bool) {
 	}
 }
 func (d *dockerAttempt) call(args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
+	parent := d.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, d.timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, d.binary, append([]string{"--host", d.state.Endpoint}, args...)...)
 	cmd.Env = d.env
@@ -180,6 +190,12 @@ func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 	return out, err
 }
 func (d *dockerAttempt) operation(kind string, args ...string) ([]byte, error) {
+	unlock, err := hostLaunchGate(d.hostDir)
+	if err != nil {
+		d.stop(d.clock.Now(), 0, true)
+		return nil, err
+	}
+	defer unlock()
 	d.mu.Lock()
 	if d.state.Stopped {
 		d.mu.Unlock()
@@ -187,7 +203,7 @@ func (d *dockerAttempt) operation(kind string, args ...string) ([]byte, error) {
 	}
 	d.state.Operation = kind
 	d.state.Pending = true
-	err := d.saveLocked()
+	err = d.saveLocked()
 	d.mu.Unlock()
 	if err != nil {
 		return nil, err
@@ -222,17 +238,20 @@ type dockerInspection struct {
 
 // Every object is inspected before signaling: names and cidfiles are not ownership proof.
 func (d *dockerAttempt) containers() ([]dockerInspection, error) {
-	out, err := d.call("ps", "--all", "--quiet", "--no-trunc", "--filter", "label=myce.attempt="+d.state.Identity)
+	out, err := d.call("ps", "--all", "--quiet", "--no-trunc", "--filter", dockerAttemptFilter(d.state.Identity))
 	if err != nil {
 		return nil, err
 	}
 	ids := strings.Fields(string(out))
+	if d.inventory != nil {
+		d.inventory(ids)
+	}
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	out, err = d.call(append([]string{"inspect"}, ids...)...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Docker inspection unconfirmed for containers %s: %w", strings.Join(ids, ","), err)
 	}
 	var containers []dockerInspection
 	if err = json.Unmarshal(out, &containers); err != nil {
@@ -250,7 +269,7 @@ func (d *dockerAttempt) containers() ([]dockerInspection, error) {
 			return nil, errors.New("Docker execution not settled")
 		}
 		seen[c.ID] = true
-		if c.Config.Labels["myce.attempt"] != d.state.Identity {
+		if c.Config.Labels["myce.attempt"] == "" || (d.state.Identity != "" && c.Config.Labels["myce.attempt"] != d.state.Identity) {
 			return nil, errors.New("Docker ownership mismatch")
 		}
 	}
@@ -332,6 +351,11 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 	return true, nil
 }
 func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release func()) (*process, error) {
+	unlock, err := hostLaunchGate(w.HostStateDir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if j.Spec.Run.Workdir != "" {
 		st, err := os.Stat(j.Spec.Run.Workdir)
 		if err != nil {
@@ -362,7 +386,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	if os.Getenv("DOCKER_CONTEXT") != "" {
 		return nil, errors.New("managed Docker requires DOCKER_HOST, not DOCKER_CONTEXT")
 	}
-	d := &dockerAttempt{closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint}}
+	d := &dockerAttempt{closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, hostDir: w.HostStateDir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint}}
 	if d.timeout <= 0 {
 		d.timeout = 2 * time.Second
 	}
@@ -555,10 +579,25 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 
 // ConfirmDockerGone records an operator's external fence/release proof while the
 // worker is offline. It never asks an unresponsive daemon to prove its own fence.
-func ConfirmDockerGone(dir, identity string, confirmed bool) error {
+func ConfirmDockerGone(hostDir, dir, identity string, confirmed bool) error {
 	if dir == "" || identity == "" || filepath.Base(identity) != identity || !confirmed {
 		return errors.New("resolve-docker requires --state-dir, --attempt-id and --confirm-gone after fencing delayed starts and verifying release")
 	}
+	var err error
+	if hostDir == "" {
+		hostDir, err = HostStateDirectory()
+		if err != nil {
+			return err
+		}
+	}
+	if err = os.MkdirAll(hostDir, 0700); err != nil {
+		return err
+	}
+	unlock, err := hostOperationLock(hostDir, "control.lock", false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	s, err := (Worker{StateDir: dir}).openStore()
 	if err != nil {
 		return err
@@ -589,4 +628,11 @@ func ConfirmDockerGone(dir, identity string, confirmed bool) error {
 
 func dockerDeviceEnvironment(name string) bool {
 	return slices.Contains([]string{"CUDA_VISIBLE_DEVICES", "ONEAPI_DEVICE_SELECTOR", "ZE_AFFINITY_MASK"}, name)
+}
+
+func dockerAttemptFilter(identity string) string {
+	if identity == "" {
+		return "label=myce.attempt"
+	}
+	return "label=myce.attempt=" + identity
 }

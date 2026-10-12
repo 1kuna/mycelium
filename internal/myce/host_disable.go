@@ -140,6 +140,8 @@ type HostProcesses struct {
 	Pause  func(time.Duration)
 }
 type HostControl struct {
+	Docker            bool
+	dockerProgress    *dockerDisableProgress
 	ResolveService    func() HostService
 	Service           HostService
 	Timeout           time.Duration
@@ -153,6 +155,7 @@ type HostControl struct {
 	Notify            func(context.Context, HostWorker, bool, bool, string) error
 }
 type DisableReport struct {
+	Docker      string
 	Confirmed   bool
 	BestEffort  bool
 	Stopped     int
@@ -286,6 +289,10 @@ func (h HostControl) Disable(ctx context.Context, reason string, grace time.Dura
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	h.ctx = ctx
+	h.dockerProgress = &dockerDisableProgress{}
+	if h.Docker {
+		h.dockerProgress.set("unconfirmed", []string{"Docker cleanup not yet confirmed"})
+	}
 	type outcome struct {
 		report DisableReport
 		err    error
@@ -297,6 +304,7 @@ func (h HostControl) Disable(ctx context.Context, reason string, grace time.Dura
 		return result.report, result.err
 	case <-ctx.Done():
 		r := DisableReport{Unconfirmed: []string{"overall deadline: cleanup, receipt and queue acknowledgement unconfirmed"}}
+		r.Docker, r.Unconfirmed = h.dockerProgress.report(r.Unconfirmed)
 		return r, ctx.Err()
 	}
 }
@@ -361,6 +369,9 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 			return r, err
 		}
 		r.QueueErrors = append(r.QueueErrors, "worker registry unavailable; queue reconciliation incomplete")
+		if h.Docker {
+			r.Unconfirmed = append(r.Unconfirmed, "Docker pending-operation custody unconfirmed: worker registry unavailable")
+		}
 	}
 
 	if ctx.Err() != nil {
@@ -489,11 +500,20 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 			r.Unconfirmed = append(r.Unconfirmed, e.Error())
 		}
 	}
-	// Docker branch must verify Mycelium-labeled containers gone before receipt/acknowledgement.
+	// Docker cleanup shares the native cleanup deadline and must precede the receipt.
+	if h.Docker {
+		if e := h.confirmDocker(ctx, workers, flag.When.Add(grace)); e != nil {
+			r.Unconfirmed = append(r.Unconfirmed, e.Error())
+		}
+		r.Docker, _ = h.dockerProgress.report(nil)
+	}
 	if h.ConfirmContainers != nil {
 		if e := h.ConfirmContainers(ctx); e != nil {
 			r.Unconfirmed = append(r.Unconfirmed, "Docker containers: "+e.Error())
 		}
+	}
+	if len(r.Unconfirmed) > 0 || ctx.Err() != nil {
+		r.Confirmed = false
 	}
 	if ctx.Err() != nil {
 		return r, ctx.Err()

@@ -103,7 +103,7 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 	if *timeout < 0 {
 		return errors.New("timeout must be positive")
 	}
-	h := myce.HostControl{Timeout: *timeout, Dir: *dir, Prepare: prepare, Notify: func(ctx context.Context, w myce.HostWorker, enable, cleared bool, reason string) error {
+	h := myce.HostControl{Docker: true, Timeout: *timeout, Dir: *dir, Prepare: prepare, Notify: func(ctx context.Context, w myce.HostWorker, enable, cleared bool, reason string) error {
 		return myce.NotifyHost(myce.Client{Token: token})(ctx, w, enable, cleared, reason)
 	}}
 	if args[0] == "disable" {
@@ -125,7 +125,10 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 			fmt.Fprintln(out, "Not running under the systemd service; ownership is best-effort.")
 		}
 		if r.Confirmed {
-			fmt.Fprintln(out, "Native process cleanup confirmed by empty systemd worker cgroup; Docker confirmation requires the containment branch.")
+			fmt.Fprintln(out, "Host cleanup confirmed: empty systemd worker cgroup and Mycelium Docker execution gone (or Docker not applicable).")
+		}
+		if r.Docker != "" {
+			fmt.Fprintln(out, "Docker:", r.Docker)
 		}
 		if len(r.QueueErrors) > 0 {
 			fmt.Fprintln(out, "Queue notification unconfirmed; local flag is in place. A completed cleanup receipt will reconcile at enable/rejoin.")
