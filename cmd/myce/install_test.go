@@ -307,3 +307,35 @@ func TestInstallWorkerOverridesDetectedReserve(t *testing.T) {
 		t.Fatal("explicit reserve ignored after detection")
 	}
 }
+
+func TestInstallCLILingerMessage(t *testing.T) {
+	for _, state := range []string{"yes\n", "no\n", "unknown\n"} {
+		t.Run(strings.TrimSpace(state), func(t *testing.T) {
+			out, err := os.CreateTemp(t.TempDir(), "stdout")
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved := os.Stdout
+			os.Stdout = out
+			defer func() { os.Stdout = saved; out.Close() }()
+			calls := 0
+			p := myce.MachineProbe{OS: "linux", Arch: "arm64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name != "loginctl" || strings.Join(args, " ") != fmt.Sprintf("show-user %d --property=Linger --value", os.Getuid()) {
+					t.Fatalf("unexpected command %s %v", name, args)
+				}
+				calls++
+				return []byte(state), nil
+			}}
+			if err := setupCommandWithProbe([]string{"install", "queue", "--nas", "/tmp/nas", "--dry-run"}, p, t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+			b, _ := os.ReadFile(out.Name())
+			if calls != 1 || strings.Contains(string(b), "must run loginctl enable-linger") != (state == "no\n") {
+				t.Fatalf("incorrect linger advice: calls=%d %s", calls, b)
+			}
+			if state == "unknown\n" && !strings.Contains(string(b), "cannot inspect user lingering") {
+				t.Fatal("unknown state hidden")
+			}
+		})
+	}
+}

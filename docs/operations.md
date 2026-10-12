@@ -577,9 +577,13 @@ acknowledges. For full request/catalog contracts and field defaults see
 [reference](job-reference.md), [integration recipes](integrating.md), and the
 [model](guide-model-calls.md) / [checkpoint](guide-resumable-jobs.md) guides.
 
-The Linux queue template uses `PrivateDevices=yes` to hide GPUs, one Go CPU,
-and initial limits of 25% CPU and 512 MiB RAM. Verify user-manager support and
-GPU hiding before accepting the B70 queue; stop on unsupported sandboxing.
+The Linux user queue uses `PrivateDevices=no`, `NoNewPrivileges=yes`, one Go CPU,
+and initial limits of 25% CPU and 512 MiB RAM. Device namespaces (even with
+`PrivateUsers=yes`) can fail with 218/CAPABILITIES in unprivileged user managers.
+The queue never opens GPU devices and refuses inherited GPU descriptors at
+startup; this is not an OS device-access sandbox. Verify it holds no GPU
+descriptors before accepting a queue. Worker units retain GPU access and
+`Delegate=memory`.
 B70 is queue-only at `192.168.0.153:7331` for the first Spark acceptance test;
 never enable a B70 worker as part of that test. CUDA dedicated/auto inventory
 requires one selected device (or one device in unselected output). Spark
@@ -913,9 +917,9 @@ Qualify actual per-attempt limits and GPU/driver accounting before admission.
 Queue defaults: loopback listen; role-local `state/myce.db` and `state/uploads`;
 16 GiB upload spool; 7-day log retention; 3-minute restart grace; production,
 deadline and experiment loss timeouts 5s/20s/60s. Queue units set
-`PrivateDevices=yes`, `NoNewPrivileges=yes`, `Nice=10`, `CPUQuota=25%`,
+`PrivateDevices=no`, `NoNewPrivileges=yes`, `Nice=10`, `CPUQuota=25%`,
 `MemoryMax=512M`, `TasksMax=64`, `GOMAXPROCS=1` and a 150s stop timeout. Flags
-`--private-devices`, `--no-new-privileges`, `--nice`, `--cpu-quota`, `--memory-max`
+`--no-new-privileges`, `--nice`, `--cpu-quota`, `--memory-max`
 and `--tasks-max` change that envelope. Worker defaults: role-local spool,
 `~/.local/share/myce` host control, 1s heartbeat, 4 GiB host reserve, 0.125 GiB
 ceiling slack, zero swap, 100 GiB model cache and 20 GiB environment cache.
@@ -1157,3 +1161,9 @@ and `MYCE_REAL_DOCKER_IMAGE` names an already-local digest-pinned shell image.
 It never pulls an image and retains uniquely labelled stopped test containers.
 Do not enable it on a shared Mac or fleet without current authorization.
 Native device/driver release and aggregate memory limits remain separate gates.
+
+Linux installer EnvironmentFile and ConditionPathExists paths are unquoted;
+paths containing whitespace, quotes or backslashes are rejected. ExecStart
+arguments remain quoted. `--private-devices=true` is rejected for Linux user
+queues; the default uses the startup GPU-descriptor check described above.
+Installer linger advice reads loginctl and requests enable-linger only when off.

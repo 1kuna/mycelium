@@ -87,7 +87,7 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	experimentLoss := f.Duration("experiment-loss-timeout", myce.LossAfter, "experiment quiet timeout")
 	checkpoints := f.String("checkpoints", "", "queue NAS checkpoint root")
 	environmentFile := f.String("environment-file", filepath.Join(home, ".config", "myce", "fleet.env"), "private fleet MYCE_TOKEN and MYCE_QUEUE EnvironmentFile")
-	privateDevices := f.Bool("private-devices", true, "queue private device namespace")
+	privateDevices := f.Bool("private-devices", false, "queue private device namespace (unsupported for Linux user units)")
 	noNewPrivileges := f.Bool("no-new-privileges", true, "queue disallows privilege escalation")
 	nice := f.Int("nice", 10, "queue scheduling priority")
 	cpuQuota := f.String("cpu-quota", "25%", "queue systemd CPUQuota")
@@ -284,7 +284,22 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	}
 	fmt.Printf("%s %s/%s: platform=%s memory=%s reserve=%.0f GiB\nQueue: %s\nNAS: %s\nCheckpoint root: %s\nModel cache: %s (%d bytes)\nEnvironment cache: %s (%d bytes)\nConfig: %s\nBoot service: %s\n", role, d.OS, d.Arch, d.Platform, d.MemoryMode, d.ReserveGB, c.Queue, c.NAS, c.Checkpoints, c.ModelCache, c.ModelCacheBytes, c.EnvironmentCache, c.EnvironmentCacheBytes, c.Config, c.Service)
 	if d.OS == "linux" {
-		fmt.Printf("Starts at login; for boot without login and after logout, an administrator must run loginctl enable-linger %d. Run myce doctor to check lingering.\n", os.Getuid())
+		if probe.Command == nil {
+			fmt.Println("cannot inspect user lingering: command probe missing; run myce doctor.")
+		} else {
+			uid := fmt.Sprint(os.Getuid())
+			b, err := probe.Command(context.Background(), "loginctl", "show-user", uid, "--property=Linger", "--value")
+			switch {
+			case err != nil:
+				fmt.Printf("cannot inspect user lingering: %v; run myce doctor.\n", err)
+			case strings.TrimSpace(string(b)) == "yes":
+				fmt.Println("User lingering enabled: starts at boot and survives logout.")
+			case strings.TrimSpace(string(b)) == "no":
+				fmt.Printf("Starts at login; for boot without login and after logout, an administrator must run loginctl enable-linger %s.\n", uid)
+			default:
+				fmt.Println("cannot inspect user lingering: unexpected loginctl result; run myce doctor.")
+			}
+		}
 	}
 	fmt.Printf("Command: myce %s\n", strings.Join(c.Args(), " "))
 	if c.StartDisabled {
