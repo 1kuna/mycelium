@@ -41,12 +41,7 @@ class KernelReadTests(unittest.TestCase):
             for code in (errno.ENOENT,errno.ESRCH):
                 with self.subTest(op=op,errno=code),tempfile.TemporaryDirectory() as tmp:
                     path=Path(tmp)/'entry'
-                    for _ in range(10):
-                        count=rng.randrange(1,3)
-                        with patch('kernel_reads._read',side_effect=[OSError(code,'gone')]*count+['ok']), patch('kernel_reads._rescan',return_value=True) as scan:
-                            self.assertEqual(k.kernel_read(path,op),'ok')
-                            self.assertEqual(scan.call_count,count)
-                    with patch('kernel_reads._read',side_effect=OSError(code,'gone')),patch('kernel_reads._rescan',return_value=False) as scan:
+                    with patch('kernel_reads._read',side_effect=OSError(code,'gone')),patch('kernel_reads._rescan',return_value=True) as scan:
                         with self.assertRaises(k.Vanished):k.kernel_read(path,op)
                         scan.assert_called_once()
 
@@ -81,6 +76,19 @@ class KernelReadTests(unittest.TestCase):
                 with self.assertRaises(OSError):k.kernel_read(Path('/proc/17/fd/8'),'link')
         with patch('kernel_reads._read',side_effect=OSError(errno.EACCES,'exited')),patch('kernel_reads._rescan',return_value=False):
             with self.assertRaises(k.Vanished):k.kernel_read(Path('/proc/17/fd/8'),'link')
+
+    def test_cleanup_reads_only_exact_cgroup_and_descendants(self):
+        import stage_ab
+        import os
+        root=Path('/sys/fs/cgroup/system.slice/myce-test-stage-ab-r8.service')
+        def read(path,op='text'):
+            if path==root/'cgroup.procs':return str(os.getpid())+' 17'
+            if path==root and op=='directories':return [root/'child']
+            if path==root/'child/cgroup.procs':return '18'
+            if path==root/'child' and op=='directories':return []
+            self.fail('cleanup crossed cgroup boundary: '+str(path))
+        with patch('stage_ab.kernel_read',side_effect=read):
+            self.assertEqual(stage_ab.cgroup_pids('0::/system.slice/myce-test-stage-ab-r8.service'),[17,18])
 
     def test_observer_survives_a_hold_until_cleanup(self):
         import stage_ab

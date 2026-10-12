@@ -9,7 +9,7 @@ import stat
 import subprocess
 import sys
 
-root=Path('/home/kuna/myce-test-stage-ab-r7-20261011')
+root=Path('/home/kuna/myce-test-stage-ab-r8-20261011')
 config=root/'installation/worker/config.json'
 assert os.getuid()==0 and sys.argv[1:]==[str(config)]
 assert kernel_read(Path('/proc/self/cgroup'), 'text').strip().endswith('/myce-worker.service')
