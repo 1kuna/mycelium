@@ -60,10 +60,19 @@ func (s *SystemdHostService) Stop(ctx context.Context, grace time.Duration) erro
 	if e != nil {
 		return e
 	}
-	s.group = p["ControlGroup"]
-	if s.group == "" && p["ActiveState"] != "inactive" && p["ActiveState"] != "failed" {
-		return errors.New("active worker has no cgroup")
+	// systemctl properties may straddle a worker's exit; do not certify that snapshot.
+	for p["ControlGroup"] == "" && p["ActiveState"] != "inactive" && p["ActiveState"] != "failed" {
+		select {
+		case <-ctx.Done():
+			return errors.New("active worker has no cgroup: " + ctx.Err().Error())
+		case <-time.After(10 * time.Millisecond):
+		}
+		p, e = s.show(ctx)
+		if e != nil {
+			return e
+		}
 	}
+	s.group = p["ControlGroup"]
 	if s.group != "" {
 		if _, e = s.cgroupPath(); e != nil {
 			return e

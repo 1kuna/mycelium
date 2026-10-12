@@ -281,6 +281,10 @@ func (c ServiceConfig) ServiceText() string {
 // Install is only called by an explicit install invocation. Tests use plans or
 // inject a no-op service runner and temp home; no test installs a boot service.
 func Install(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) error {
+	if c.Detection.OS == "linux" && (c.Role == "worker" && !ValidWorkerUnit(filepath.Base(c.Service)) || c.Role != "worker" && (c.Role != "queue" || filepath.Base(c.Service) != "myce-queue.service")) {
+		return errors.New("refusing non-Mycelium service unit")
+	}
+
 	if token == "" {
 		return errors.New("set MYCE_TOKEN before installing")
 	}
@@ -360,6 +364,10 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	return c, e
 }
 func Uninstall(ctx context.Context, c ServiceConfig, dry bool, command func(context.Context, string, ...string) ([]byte, error)) error {
+	if c.Detection.OS == "linux" && (c.Role == "worker" && !ValidWorkerUnit(filepath.Base(c.Service)) || c.Role != "worker" && (c.Role != "queue" || filepath.Base(c.Service) != "myce-queue.service")) {
+		return errors.New("refusing non-Mycelium service unit")
+	}
+
 	if dry {
 		return nil
 	}
