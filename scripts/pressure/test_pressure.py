@@ -69,6 +69,18 @@ class EvidenceTests(unittest.TestCase):
             with patch('kernel_reads._read',side_effect=denied):
                 with self.assertRaises(PermissionError):drm_inventory(['0000:07:00.0'],root)
 
+    def test_collector_allowlist_inspects_only_supplied_gpu_holders(self):
+        import stage_ab
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt=Path(tmp)/'events.jsonl'
+            receipt.write_text(json.dumps(dict(kind='start',pid=17,start_ticks=42))+'\n')
+            run=stage_ab.Run.__new__(stage_ab.Run)
+            run.receipts=[receipt];run.cgroup='0::/test';run.worker_cgroup=None
+            with patch('stage_ab.process',side_effect=AssertionError('irrelevant identity read')):
+                self.assertEqual(run.owned([]),[])
+
     def test_selected_pci_fd_filter_does_not_inspect_gpu0_identity(self):
         from unittest.mock import patch
         pid=Path('/proc/17');sysdir=Path('/sys/bus/pci/devices/0000:07:00.0/drm')
@@ -549,7 +561,7 @@ class NativeRunnerTests(unittest.TestCase):
         identity={k:h[k] for k in ('boot','pid','start','exe','cgroup')}
         order=[]
         with patch.object(pressure,'drm_inventory',side_effect=lambda *_:order.append('inventory') or [h]):
-            self.assertEqual(pressure.drm_owners(['p'],allowed=lambda:order.append('allowlist') or [identity])['p'],[pressure.digest(['boot',17,42])[:24]])
+            self.assertEqual(pressure.drm_owners(['p'],allowed=lambda holders:order.append('allowlist') or [identity])['p'],[pressure.digest(['boot',17,42])[:24]])
         self.assertEqual(order,['inventory','allowlist'])
 
     def test_measurement_observers_requires_live_owned_parent(self):

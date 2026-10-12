@@ -502,7 +502,7 @@ def drm_owners(pcis: list[str], proc: Path = Path("/proc"), *,
                evidence: dict[str, Any] | None = None) -> dict[str, list[str]]:
     """Pinned display baseline is separate from allocation owners; unknowns fail closed."""
     holders = drm_inventory(pcis, proc)
-    allowed = allowed() if callable(allowed) else allowed
+    allowed = allowed(holders) if callable(allowed) else allowed
     observers = observers(holders) if callable(observers) else observers
     if evidence is not None:evidence["holders"] = holders
     if diagnostics is not None:observers = [*observers, *diagnostics(holders)]

@@ -154,7 +154,7 @@ class Run:
         self.gate()
         return api(self.url,'POST','/api/jobs',request)
 
-    def owned(self):
+    def owned(self, holders=None):
         ids = []
         for f in self.receipts:
             if not f.exists(): continue
@@ -171,8 +171,13 @@ class Run:
                 try: data = [json.loads(kernel_read(f, 'text'))]
                 except (ValueError, OSError): continue
             for e in data:
-                try: identity = process(e['pid'])
-                except Vanished: continue
+                if holders is None:
+                    try: identity = process(e['pid'])
+                    except Vanished: continue
+                else:
+                    holder=next((h for h in holders if h['pid']==e['pid']),None)
+                    if holder is None:continue
+                    identity={k:holder[k] for k in ('boot','pid','start','exe','cgroup')}
                 if (identity['start'] == e.get('start_ticks') and identity['cgroup'] in (self.cgroup,self.worker_cgroup)
                         and identity['exe'] == os.path.realpath(XPU)):
                     ids.append(identity)
@@ -205,7 +210,7 @@ class Run:
                 elif self.foreign.since is not None and self.foreign_exited_at is None:
                     self.foreign_exited_at=now
                 # Corroborate vanished processes/DRM with a fresh independent driver counter.
-                allowed=self.owned();vram={}
+                allowed=self.owned(evidence['holders']);vram={}
                 for holder in evidence['holders']:
                     identity={k:holder[k] for k in ('boot','pid','start','exe','cgroup')}
                     if identity not in allowed:continue
@@ -384,7 +389,7 @@ class Run:
             for i in ids:
                 try:
                     if process(i['pid'])==i: os.kill(i['pid'],sig)
-                except ProcessLookupError: pass
+                except (Vanished,ProcessLookupError): pass
             time.sleep(.3)
         end=time.monotonic()+5
         while self.owned():
