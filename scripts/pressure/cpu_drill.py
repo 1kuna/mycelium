@@ -32,6 +32,9 @@ def isolated(run,name,args,seconds):
     fs=subprocess.check_output(['findmnt','-n','-T',str(temp),'-o','FSTYPE'],text=True).strip()
     assert fs=='ext4', 'CPU checkpoint root must be local ext4'
     unit='myce-test-r9-'+name.lower()+'.service'
+    registry=ROOT/'cpu-units.json'
+    units=json.loads(kernel_read(registry)) if registry.exists() else []
+    atomic(registry,units+[unit])
     log=run.phase/'cpu.log';marker=run.phase/'child.exit'
     launch=['systemd-run','--unit='+unit,'--property=User=1000','--property=Group=1000',
         '--property=MemoryMax=4G','--property=MemorySwapMax=0','--property=CPUQuota=200%',
