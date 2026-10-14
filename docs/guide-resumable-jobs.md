@@ -1,5 +1,10 @@
 # Resumable jobs
 
+On v3, [files without a NAS](guide-files-v3.md) adds local saves transferred to
+the queue hypha before publication. The atomic generation contract below is the
+same; newer local-only saves cannot resume elsewhere. Explicit NAS configuration
+keeps the path described below.
+
 Set `resumable: true` only when the command can safely restart. Mycelium sends
 SIGTERM to the command's process group, allows 10 seconds for production preemption (configurable), or two minutes for
 deadline preemption and planned leave, to save and exit,
