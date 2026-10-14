@@ -2,38 +2,72 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
-func workerFixture(t *testing.T, q *Queue) context.CancelFunc {
+type workerTestRun struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	err    error
+	state  string
+}
+
+func workerFixture(t *testing.T, q *Queue) *workerTestRun {
 	t.Helper()
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	ctx, cancel := context.WithCancel(context.Background())
-	w := Worker{StateDir: t.TempDir(), Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "fake"), Interval: 5 * time.Millisecond}
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
+	run := &workerTestRun{cancel: cancel, done: make(chan struct{}), state: t.TempDir()}
+	// Stop events carry absolute queue deadlines. Use the queue's clock so a
+	// fake deadline cannot appear already expired to the worker.
+	w := Worker{StateDir: run.state, Clock: q.clock, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "fake"), Interval: 5 * time.Millisecond}
+	go func() { run.err = w.Run(ctx); close(run.done) }()
 	t.Cleanup(func() {
+		defer server.Close()
 		cancel()
 		s, _ := q.Snapshot()
 		for _, j := range s.Jobs {
 			_ = q.Cancel(j.ID)
 		}
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Error(err)
+		await(t, func() bool {
+			if clock, ok := q.clock.(*workerFakeClock); ok {
+				clock.Advance(time.Millisecond)
 			}
-		case <-time.After(testWaitTimeout):
-			t.Error("worker did not exit")
+			select {
+			case <-run.done:
+				return true
+			default:
+				return false
+			}
+		})
+		if run.err != nil {
+			t.Error(run.err)
 		}
-		server.Close()
 	})
-	return cancel
+	return run
+}
+
+func (run *workerTestRun) result(t *testing.T) Result {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(run.state, "*.result.json"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("expected one persisted attempt result, got %d: %v", len(files), err)
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result Result
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 // testWaitTimeout bounds real I/O and goroutine synchronization, not scheduler time.
@@ -71,12 +105,55 @@ func TestWorkerCancelledBeforeJoining(t *testing.T) {
 	}
 }
 func TestWorkerGracefulStopAndCheckpoint(t *testing.T) {
+	for _, stop := range []string{"interrupt", "leave"} {
+		t.Run(stop, func(t *testing.T) { testWorkerGracefulStopAndCheckpoint(t, stop) })
+	}
+}
+
+func testWorkerGracefulStopAndCheckpoint(t *testing.T, stop string) {
+	t.Helper()
 	q, _ := fixture(t)
+	clock := &workerFakeClock{now: q.clock.Now()}
+	q.clock = clock
+	wait := func(f func() bool) {
+		t.Helper()
+		await(t, func() bool {
+			clock.Advance(time.Millisecond)
+			return f()
+		})
+	}
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "save")
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := os.OpenFile(fifo, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		// Unblock a TERM handler even when an assertion fails before the save.
+		_, _ = gate.WriteString("save\n")
+		_ = gate.Close()
+	}()
+	stopping := filepath.Join(dir, "stopping")
 	s := spec("experiment")
-	s.Run.Command = []string{"sh", "-c", `trap 'echo saved > "$MYCE_CHECKPOINT_DIR/saved"; exit 0' TERM; echo ready; while :; do sleep 0.01; done`}
+	// Hold the final save after observing TERM. This also makes a premature
+	// SIGKILL visible instead of racing a one-line checkpoint write.
+	s.Run.Command = []string{"sh", "-c", `
+if [ "$MYCE_ATTEMPT" -gt 1 ]; then
+  [ "$(cat "$MYCE_CHECKPOINT_DIR/saved")" = saved ] || exit 1
+  echo resumed
+  exit 0
+fi
+exec 3<> "$SAVE_FIFO"
+trap 'echo term > "$STOP_FILE"; read gate <&3; echo saved > "$MYCE_CHECKPOINT_DIR/saved"; exit 0' TERM
+echo ready
+while :; do read line <&3; done`}
+	s.Run.Env = map[string]string{"SAVE_FIFO": fifo, "STOP_FILE": stopping}
 	j := submit(t, q, s)
-	cancel := workerFixture(t, q)
-	await(t, func() bool {
+	run := workerFixture(t, q)
+	wait(func() bool {
 		ls, _ := q.Logs(j.ID, 0)
 		for _, l := range ls {
 			if strings.Contains(l.Text, "ready") {
@@ -85,20 +162,75 @@ func TestWorkerGracefulStopAndCheckpoint(t *testing.T) {
 		}
 		return false
 	})
-	cancel()
-	await(t, func() bool { return job(t, q, j.ID).State == "queued" })
+	if stop == "interrupt" {
+		run.cancel()
+	} else if err := q.Leave("worker", false); err != nil {
+		t.Fatal(err)
+	}
+	wait(func() bool {
+		_, err := os.Stat(stopping)
+		return err == nil || job(t, q, j.ID).State == "queued"
+	})
+	if _, err := os.Stat(stopping); err != nil {
+		t.Fatalf("job requeued without delivering TERM before the checkpoint save: %v; result: %+v", err, run.result(t))
+	}
+	wait(func() bool { return job(t, q, j.ID).State == "stopping" })
+	deadline := job(t, q, j.ID).StopAt
+	if deadline == nil || !q.clock.Now().Before(*deadline) {
+		t.Fatal("checkpoint save did not begin within stop grace")
+	}
+	if _, err := gate.WriteString("save\n"); err != nil {
+		t.Fatal(err)
+	}
+	wait(func() bool { return job(t, q, j.ID).State == "queued" })
+	if !q.clock.Now().Before(*deadline) {
+		t.Fatal("checkpoint save did not finish within stop grace")
+	}
 	data, err := os.ReadFile(filepath.Join(j.Checkpoint, "attempt-1", "saved"))
 	if err != nil || strings.TrimSpace(string(data)) != "saved" {
 		t.Fatalf("checkpoint %q: %v", data, err)
 	}
+	wait(func() bool {
+		select {
+		case <-run.done:
+			return true
+		default:
+			return false
+		}
+	})
+	result := run.result(t)
+	if !result.Success || !result.Interrupted || result.Forced || result.ReleasePending {
+		t.Fatalf("stop did not finish gracefully: %+v", result)
+	}
+	// Leave's capacity reservation expires at the original deadline, even
+	// when the payload releases early. Advance scheduler time explicitly.
+	clock.Advance(deadline.Sub(clock.Now()))
+	// A fresh worker must actually consume the copied checkpoint, not just
+	// find the prior attempt's save on disk.
+	workerFixture(t, q)
+	wait(func() bool { return job(t, q, j.ID).State == "succeeded" })
+	if got := job(t, q, j.ID); got.Attempt != 2 || got.Losses != 0 {
+		t.Fatalf("resume attempt=%d losses=%d, want attempt 2 without infrastructure losses", got.Attempt, got.Losses)
+	}
+	logs, err := q.Logs(j.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range logs {
+		if strings.Contains(l.Text, "resumed") {
+			return
+		}
+	}
+	t.Fatal("resumed command did not consume the checkpoint")
 }
 func TestWorkerWaitsForNonresumableOnInterrupt(t *testing.T) {
 	q, _ := fixture(t)
+	q.clock = RealClock{}
 	s := spec("experiment")
 	s.Resumable = false
 	s.Run.Command = []string{"sh", "-c", `echo ready; while [ ! -f "$MYCE_CHECKPOINT_DIR/finish" ]; do sleep 0.01; done; echo finished`}
 	j := submit(t, q, s)
-	cancel := workerFixture(t, q)
+	run := workerFixture(t, q)
 	await(t, func() bool {
 		ls, _ := q.Logs(j.ID, 0)
 		for _, l := range ls {
@@ -108,7 +240,7 @@ func TestWorkerWaitsForNonresumableOnInterrupt(t *testing.T) {
 		}
 		return false
 	})
-	cancel()
+	run.cancel()
 	await(t, func() bool { sn, _ := q.Snapshot(); return len(sn.Machines) == 1 && sn.Machines[0].Leaving })
 	requireState(t, q, j.ID, "running")
 	if err := os.WriteFile(filepath.Join(j.Checkpoint, "attempt-1", "finish"), nil, 0600); err != nil {
@@ -118,6 +250,7 @@ func TestWorkerWaitsForNonresumableOnInterrupt(t *testing.T) {
 }
 func TestWorkerCommandStartFailure(t *testing.T) {
 	q, _ := fixture(t)
+	q.clock = RealClock{}
 	s := spec("experiment")
 	s.Run.Command = []string{"/does-not-exist/myce-test"}
 	j := submit(t, q, s)
