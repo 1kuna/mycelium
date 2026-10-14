@@ -177,6 +177,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	modelWait := f.Duration("model-wait", 0, "override maximum model wait")
 	modelListen := f.String("model-listen", "127.0.0.1:0", "worker model proxy listen address")
 	modelAdvertise := f.String("model-advertise", "", "worker model proxy URL reachable by queue")
+	dailyUse := f.Bool("daily-use", false, "take work only after 5 idle minutes, on external power, with known safe heat signals")
+	laptop := f.Bool("laptop", false, "require external power even in dedicated mode")
+	maxJobs := f.Int("max-jobs", 0, "optional maximum simultaneous jobs/calls per physical host (0 means unlimited)")
 	workers := f.Int("workers", 2, "fake workers in dev mode")
 	now := f.Bool("now", false, "stop every job on leave")
 	full := f.Bool("full", false, "show full job IDs in status")
@@ -379,6 +382,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		defer cancel()
 		return errors.Join(err, server.Shutdown(shutdown))
 	case "join":
+		if *maxJobs < 0 {
+			return errors.New("max-jobs must be nonnegative")
+		}
 		options := joinGPUOptions{*gpu, *device, *memoryMode, *memory, *reserve}
 		explicit := map[string]bool{}
 		f.Visit(func(v *flag.Flag) { explicit[v.Name] = true })
@@ -437,7 +443,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
-		w := myce.Worker{ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, ServiceConfig: *serviceConfig, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{DailyUse: *dailyUse, Laptop: *laptop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, ServiceConfig: *serviceConfig, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
@@ -559,6 +565,15 @@ func printStatus(s myce.Snapshot, full bool) {
 			state = "gone"
 		} else if m.Leaving {
 			state = "leaving"
+		}
+		if m.CapabilityProfile != nil && m.CapabilityProfile.Availability != nil {
+			state += "; " + m.CapabilityProfile.Availability.Summary()
+		}
+		if m.MaxJobs > 0 {
+			state += fmt.Sprintf("; maximum simultaneous jobs %d", m.MaxJobs)
+		}
+		if m.AdmissionReason != "" {
+			state += "; admission: " + m.AdmissionReason
 		}
 		if m.EnablePending {
 			state += "; held: enable not yet acknowledged (retrying)"

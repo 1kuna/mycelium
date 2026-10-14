@@ -606,6 +606,9 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 			return
 		}
 	}
+	p.mu.Lock()
+	result.PoliteStop = p.polite
+	p.mu.Unlock()
 	d.mu.Lock()
 	result.Interrupted = d.state.Stopped && !d.state.MainFinished
 	result.Forced = d.state.Forced && !d.state.MainFinished
