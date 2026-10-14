@@ -1,0 +1,175 @@
+package myce
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+)
+
+// Memory needs name accelerator-reachable memory and additional system memory.
+// A profile bounds capacity; live free-memory reports still bound admission.
+func capabilityCapacity(m *Machine) (accelerator, system float64, ok bool) {
+	p := m.CapabilityProfile
+	if p == nil {
+		// V2 workers keep their existing contract.
+		return m.TotalMemoryGB, m.HostAvailableMemoryGB, true
+	}
+	if p.MemoryLayout != "unified" && p.MemoryLayout != "separate" {
+		return 0, 0, false
+	}
+	system = float64(p.SystemMemoryBytes) / (1 << 30)
+	for _, a := range p.Accelerators {
+		if a.Type == m.GPU {
+			accelerator = max(accelerator, float64(a.MemoryBytes)/(1<<30))
+		}
+	}
+	// Fake resources explicitly use an operator allowance, never a native guess.
+	if m.GPU == "fake" && accelerator == 0 {
+		accelerator = m.TotalMemoryGB
+	}
+	if p.MemoryLayout == "unified" {
+		accelerator = min(accelerator, system)
+	}
+	return accelerator, system, accelerator > 0 && system > 0
+}
+
+func capabilityFits(j *Job, m *Machine) bool {
+	if !j.Spec.extensionJob() {
+		return true
+	}
+	accelerator, system, ok := capabilityCapacity(m)
+	systemNeed := j.Spec.Needs.HostMemoryGB
+	if m.CapabilityProfile != nil && m.CapabilityProfile.MemoryLayout == "unified" {
+		systemNeed += j.Spec.Needs.MemoryGB
+	}
+	if !ok || accelerator < j.Spec.Needs.MemoryGB || system < systemNeed {
+		return false
+	}
+	if j.OOMCapacity != nil {
+		// Larger means no smaller in either pool, strictly larger in at least one.
+		old := j.OOMCapacity
+		return accelerator >= old.MemoryGB && system >= old.HostMemoryGB && (accelerator > old.MemoryGB || system > old.HostMemoryGB)
+	}
+	return true
+}
+
+// Profile v0 has no throughput measurement. Memory-first ordering is provisional
+// until #33 supplies measurements. IDs make equal profiles deterministic.
+func capabilityBetter(a, b *Machine) bool {
+	aa, as, aok := capabilityCapacity(a)
+	ba, bs, bok := capabilityCapacity(b)
+	if aok != bok {
+		return aok
+	}
+	if aa != ba {
+		return aa > ba
+	}
+	if as != bs {
+		return as > bs
+	}
+	if a.CapabilityProfile != nil && b.CapabilityProfile != nil && a.CapabilityProfile.LogicalCPUs != b.CapabilityProfile.LogicalCPUs {
+		return a.CapabilityProfile.LogicalCPUs > b.CapabilityProfile.LogicalCPUs
+	}
+	return a.ID < b.ID
+}
+
+// NAS references must be immutable. Input content addressing belongs to #24.
+func programNeedsKey(j *Job, e Extension, platform string) string {
+	if j.Spec.Program == nil {
+		return ""
+	}
+	data, _ := json.Marshal(struct {
+		Project             string
+		Program             *Program
+		Inputs              map[string]string
+		Env                 map[string]string
+		Extension, Platform string
+	}{j.Spec.Project, j.Spec.Program, j.Spec.Inputs, j.Spec.Run.Env, e.Digest, platform})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func (q *Queue) applyLearnedNeeds(j *Job) {
+	if j.Spec.Program == nil {
+		return
+	}
+	for _, e := range j.Extensions {
+		for _, p := range e.Platforms {
+			if needs, ok := q.s.ProgramNeeds[programNeedsKey(j, e, p)]; ok {
+				j.Spec.Needs.MemoryGB = max(j.Spec.Needs.MemoryGB, needs.MemoryGB)
+				j.Spec.Needs.HostMemoryGB = max(j.Spec.Needs.HostMemoryGB, needs.HostMemoryGB)
+			}
+		}
+	}
+}
+
+func (q *Queue) unmeasuredProgram(j *Job, m *Machine) bool {
+	if j.Spec.Program == nil || j.OOMRetries > 0 {
+		return false
+	}
+	e := qualifiedExtension(j, m)
+	if e == nil {
+		return false
+	}
+	_, learned := q.s.ProgramNeeds[programNeedsKey(j, *e, m.GPU)]
+	return !learned
+}
+
+func (q *Queue) recordProgramNeeds(j *Job, r Result) {
+	if j.Spec.Program == nil || j.Extension == nil || r.Usage == nil || !r.Usage.valid() {
+		return
+	}
+	if !validMemoryValue(r.Usage.MemoryGB*1.25) || !validMemoryValue(r.Usage.HostMemoryGB*1.25) {
+		return
+	}
+	m := q.s.Machines[r.Machine]
+	if m == nil {
+		return
+	}
+	for _, e := range j.Extensions {
+		if e.Digest != j.Extension.Digest {
+			continue
+		}
+		if q.s.ProgramNeeds == nil {
+			q.s.ProgramNeeds = map[string]SizeHint{}
+		}
+		key := programNeedsKey(j, e, m.GPU)
+		old := q.s.ProgramNeeds[key]
+		// Floors and 25% headroom remain conservative; observations never shrink.
+		q.s.ProgramNeeds[key] = SizeHint{MemoryGB: max(old.MemoryGB, e.MemoryGB, r.Usage.MemoryGB*1.25), HostMemoryGB: max(old.HostMemoryGB, e.HostMemoryGB, r.Usage.HostMemoryGB*1.25)}
+		observation := *r.Usage
+		j.MeasuredNeeds = &observation
+	}
+}
+
+func (q *Queue) retryOOM(j *Job) {
+	if j.OOMRetries > 0 {
+		j.State, j.Reason = "failed", "out of memory after one retry on a larger hypha"
+		return
+	}
+	m := q.s.Machines[j.Machine]
+	if m == nil {
+		j.State, j.Reason = "failed", "out of memory; previous capability unavailable"
+		return
+	}
+	accelerator, system, ok := capabilityCapacity(m)
+	if !ok {
+		j.State, j.Reason = "failed", "out of memory; previous capability unavailable"
+		return
+	}
+	j.OOMRetries++
+	j.OOMCapacity = &SizeHint{MemoryGB: accelerator, HostMemoryGB: system}
+	// Failed observations are lower bounds, never successful learned needs.
+	j.Spec.Needs.MemoryGB *= 2
+	j.Spec.Needs.HostMemoryGB *= 2
+	j.ProductionHost = ""
+	q.retry(j, "out of memory; waiting for one retry on a larger hypha")
+}
+
+func capabilityWaitingReason(j *Job) string {
+	if j.OOMCapacity != nil {
+		return fmt.Sprintf("waiting for a larger qualified hypha after out of memory (at least %.1f GiB accelerator-reachable and %.1f GiB system, with one pool larger)", j.OOMCapacity.MemoryGB, j.OOMCapacity.HostMemoryGB)
+	}
+	return ""
+}

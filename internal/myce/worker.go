@@ -330,6 +330,11 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	env["MYCE_JOB_ID"] = j.ID
 	env["MYCE_ATTEMPT"] = strconv.Itoa(j.Attempt)
 	env["MYCE_CHECKPOINT_DIR"] = checkpoint
+	if j.Spec.Program != nil {
+		env["MYCE_USAGE_FILE"] = programUsageFile(s.dir, identity)
+	} else {
+		delete(env, "MYCE_USAGE_FILE")
+	}
 	delete(env, "MYCE_TOKEN")
 	keys := make([]string, 0, len(env))
 	for k := range env {
@@ -454,6 +459,10 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		syncErr := output.Sync()
 		closeErr := output.Close()
 		result.Success = oomErr == nil && launchErr == nil && waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil
+		if j.Spec.Program != nil {
+			collectProgramUsage(&result, cmd.ProcessState, programUsageFile(s.dir, identity))
+			result.OutOfMemory = result.OutOfMemory || (oomErr != nil && strings.HasPrefix(ceilingDiagnostic(oomErr.Error(), ""), "exceeded its "))
+		}
 		if oomErr != nil {
 			result.Error = oomErr.Error()
 		} else if launchErr != nil {

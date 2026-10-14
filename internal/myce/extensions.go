@@ -66,6 +66,11 @@ type SizeHint struct {
 	MemoryGB     float64 `json:"memory_gb,omitempty" yaml:"memory_gb,omitempty"`
 	HostMemoryGB float64 `json:"host_memory_gb,omitempty" yaml:"host_memory_gb,omitempty"`
 }
+
+func (s SizeHint) valid() bool {
+	return validMemoryValue(s.MemoryGB) && validMemoryValue(s.HostMemoryGB) && (s.MemoryGB > 0 || s.HostMemoryGB > 0)
+}
+
 type ExtensionSelection struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`

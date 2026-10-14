@@ -1,5 +1,5 @@
 name: pytorch-script
-version: '0.1.0'
+version: '0.2.1'
 purpose: Run an unchanged device-agnostic PyTorch program using MYCE_DEVICE.
 platforms: [cuda, xpu, metal]
 program_types: [pytorch-script]
@@ -13,7 +13,9 @@ notes: |
   Programs choose torch.device(os.environ['MYCE_DEVICE']); Mycelium supplies
   cuda:0, xpu:0, or mps after applying the hypha's resource selector. No CPU
   fallback. Programs opt into resumable only when they implement the checkpoint
-  contract; the runner forwards signals unchanged. The baseline only covers its sample.
+  contract; the program runs in the signal-receiving Python process. Reports
+  allocator peaks on CUDA/XPU and sampled allocations on MPS (brief peaks may
+  be missed). The baseline only covers its sample.
 baselines:
   program:pytorch-script:
     input: baseline/input.json
