@@ -256,6 +256,14 @@ a cleanup receipt. Use `--state-dir DIR --name NAME --host-id HOST` to adopt a
 known old spool; registered spool locks must be released before a receipt.
 Other users and unregistered workers remain outside this secondary scope.
 
+macOS can hide restricted executables' environment variables from process
+inspection, including inherited `MYCE_PROCESS_ID` markers. Disable still stops
+discoverable groups, but native execution records make detached-descendant
+cleanup explicitly **unconfirmed** on macOS: it returns nonzero, retains
+`DISABLED`, and writes no cleanup receipt. Even an empty marker scan cannot
+prove absence. Enable remains blocked; rerunning disable alone cannot resolve
+this OS visibility limitation. Do not remove records or the flag to bypass it.
+
 `--timeout 30s` sets one overall wall-clock deadline for disable; its default is
 chosen grace plus 20 seconds. At that deadline the command stops waiting,
 returns nonzero with unconfirmed work, and retains the flag. Cancellation fences

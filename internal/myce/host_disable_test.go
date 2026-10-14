@@ -232,10 +232,9 @@ func TestDisableRealOwnedGroupsAndSimilarUnownedProcess(t *testing.T) {
 	if err := saveWorkerJSON(state, "attempt-stale.json", workerState{PID: unrelated.Process.Pid, Identity: "similar-but-not-owned-extra"}); err != nil {
 		t.Fatal(err)
 	}
-	r, err := (HostControl{Dir: root}).Disable(context.Background(), "drill", 100*time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := HostControl{Dir: root}
+	r, err := h.Disable(context.Background(), "drill", 100*time.Millisecond)
+	requireNativeMarkerDisableReport(t, h, r, err)
 	if r.Stopped != 3 {
 		t.Fatalf("stopped %+v", r)
 	}
