@@ -83,7 +83,7 @@ func programNeedsKey(j *Job, e Extension, platform string) string {
 		Project             string
 		Program             *Program
 		Inputs              map[string]string
-		Files               FileManifest
+		Files               FileManifest `json:",omitempty"`
 		Env                 map[string]string
 		Extension, Platform string
 	}{j.Spec.Project, j.Spec.Program, j.Spec.Inputs, j.Spec.Files, j.Spec.Run.Env, e.Digest, platform})
