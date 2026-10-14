@@ -213,7 +213,7 @@ func (c ServiceConfig) ValidateInstall() error {
 	if c.Role != "queue" && c.Role != "worker" {
 		return errors.New("install requires worker or queue")
 	}
-	for _, p := range []string{c.NAS, c.State, c.Checkpoints, c.ModelRoot, c.EnvironmentRoot, c.ModelCache, c.EnvironmentCache, c.Config, c.Binary, c.Service, c.Credentials, c.HostStateDir, c.DB, c.UploadSpoolDir, c.ProjectConfig, c.HostConfig, c.ModelCatalog, c.EnvironmentCatalog, c.EnvironmentFile} {
+	for _, p := range []string{c.JoiningFile, c.NAS, c.State, c.Checkpoints, c.ModelRoot, c.EnvironmentRoot, c.ModelCache, c.EnvironmentCache, c.Config, c.Binary, c.Service, c.Credentials, c.HostStateDir, c.DB, c.UploadSpoolDir, c.ProjectConfig, c.HostConfig, c.ModelCatalog, c.EnvironmentCatalog, c.EnvironmentFile} {
 		if p != "" && (!filepath.IsAbs(p) || strings.ContainsAny(p, "\x00\n\r")) {
 			return errors.New("installed paths must be absolute and single-line")
 		}
