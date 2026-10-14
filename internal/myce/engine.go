@@ -463,7 +463,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if limit == 0 {
 		limit = 100 * 1024 * 1024 * 1024
 	}
-	rt.cache = &ModelCache{Root: root, NASRoot: w.ModelRoot, Limit: limit, Clock: w.Clock}
+	rt.cache = &ModelCache{FileClient: &w.Client, Root: root, NASRoot: w.ModelRoot, Limit: limit, Clock: w.Clock}
 	rt.engineFactory = w.modelEngine
 	rt.cache.beforeChunk = w.beforeModelCopy
 	rt.cache.Parallel = max(1, w.CopyParallel)

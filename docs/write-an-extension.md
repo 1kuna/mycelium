@@ -153,14 +153,17 @@ see [placement and measurement limits](guide-placement-v3.md). Multiple matching
 are tried in deterministic name/version order, only when qualified. A job
 records the exact chosen name/version/content digest on every attempt.
 
-The shared-storage transport is deliberately the existing NAS model in this
-slice. `--job-file-root` is the hypha's local mount; every input/shared prefix is
+On v3, [files without a NAS](guide-files-v3.md) supports `submit --files-from`
+and hash-addressed `files`, private staging and accepted `output_refs`. Model
+files can be inputs too. The following NAS transport remains available unchanged.
+
+The shared-storage transport uses the existing NAS model. `--job-file-root` is the hypha's local mount; every input/shared prefix is
 relative to it. Mycelium copies inputs into a private per-attempt working folder,
 then runs the extension there. Successful outputs go to
 `PREFIX/JOB_ID/ATTEMPT/LOCAL_NAME`; `job.output_files` gives these relative names.
 Consume outputs only from the successful current attempt. Publication never
-overwrites another attempt, including a late stale execution. Shared-storage
-transport without a NAS remains #24, and is not implemented here. Missing files,
+overwrites another attempt, including a late stale execution. The no-NAS path uses the same private attempt isolation, with HTTP transfers
+and durable publication instead of shared paths. Missing files,
 unsafe paths, unavailable storage and copy errors fail visibly. No personal or
 private machine paths need appear in a job.
 
