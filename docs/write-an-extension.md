@@ -177,7 +177,7 @@ the actual API and runner using deliberately fake extension fixtures.
 
 ## Starter extensions
 
-- `extensions/pytorch-script`: PyTorch 2.8.0, extension v0.2.0, CUDA/XPU/MPS, unmodified programs
+- `extensions/pytorch-script`: PyTorch 2.8.0, extension v0.2.1, CUDA/XPU/MPS, unmodified programs
   choosing `torch.device(os.environ['MYCE_DEVICE'])`. Includes a small native
   MPS pointwise float32 reference and repeated measurements. This qualifies
   that sample only, not every PyTorch model or script.

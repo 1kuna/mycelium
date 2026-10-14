@@ -311,7 +311,10 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 				stops++
 			}
 		}
-		if best == nil || stops < bestStops {
+		// A first program still chooses the most capable free hypha before the
+		// hold binds it to a host. Existing minimal-preemption ordering remains.
+		preferFreeProgram := best != nil && stops == 0 && bestStops == 0 && q.unmeasuredProgram(j, m) && fits(j, m, m.FreeMemoryGB) && (!fits(j, best, best.FreeMemoryGB) || capabilityBetter(m, best))
+		if best == nil || stops < bestStops || preferFreeProgram {
 			best = m
 			bestStops = stops
 		}
