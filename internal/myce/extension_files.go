@@ -63,18 +63,36 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 		return nil
 	}
 	dir := filepath.Join(stateDir, "job-files", j.ID, strconv.Itoa(j.Attempt))
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if info, err := os.Lstat(dir); err == nil {
+		if !info.IsDir() {
+			return errors.New("attempt input folder is not a directory")
+		}
+		j.Spec.Run.Workdir = dir
+		return nil // Atomic publication makes retries idempotent.
+	} else if !os.IsNotExist(err) {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0700); err != nil {
+		return err
+	}
+	staged, err := os.MkdirTemp(filepath.Dir(dir), ".inputs-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staged)
 	for name, source := range j.Spec.Inputs {
 		p, err := confinedPath(w.JobFileRoot, source)
 		if err != nil {
 			return err
 		}
-		if err := copyJobFile(p, filepath.Join(dir, name)); err != nil {
+		if err := copyJobFile(p, filepath.Join(staged, name)); err != nil {
 			return err
 		}
 	}
+	if err := os.Rename(staged, dir); err != nil {
+		return err
+	}
+
 	j.Spec.Run.Workdir = dir
 	return nil
 }

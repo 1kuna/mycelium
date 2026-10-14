@@ -251,6 +251,9 @@ func TestExtensionJobFilesStayRelativeAndAttemptSpecific(t *testing.T) {
 	if err := w.prepareExtensionFiles(&j, state); err != nil {
 		t.Fatal(err)
 	}
+	if err := w.prepareExtensionFiles(&j, state); err != nil {
+		t.Fatal("repeat preparation must reuse the attempt snapshot:", err)
+	}
 	if err := os.WriteFile(filepath.Join(j.Spec.Run.Workdir, "output"), []byte("result"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -275,6 +278,18 @@ func TestExtensionDevEndToEnd(t *testing.T) {
 	root := t.TempDir()
 	shared := t.TempDir()
 	e := fakeExtension(t)
+	e.Run = []string{"extension-test-runtime"}
+	e.Setup = []string{"sh", "setup.sh"}
+	e.Files["run.sh"] = append([]byte("#!/bin/sh\n"), e.Files["run.sh"]...)
+	e.Files["setup.sh"] = []byte(`mkdir -p "$MYCE_EXTENSION_CACHE/bin"
+cp "$MYCE_EXTENSION_DIR/run.sh" "$MYCE_EXTENSION_CACHE/bin/extension-test-runtime"
+chmod +x "$MYCE_EXTENSION_CACHE/bin/extension-test-runtime"
+`)
+	e.Files["extension.yaml"], _ = yaml.Marshal(e)
+	e, err := extensionFromFiles(e.Files)
+	if err != nil {
+		t.Fatal(err)
+	}
 	installQualified(t, root, e, "0")
 	if err := os.WriteFile(filepath.Join(shared, "input"), []byte("unchanged input\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -308,7 +323,7 @@ func TestExtensionDevEndToEnd(t *testing.T) {
 		for _, out := range snap.Jobs {
 			if out.ID == j.ID && terminal(out.State) {
 				if out.State != "succeeded" {
-					t.Fatalf("extension failed: %+v", out)
+					t.Fatalf("extension failed: state=%s reason=%s", out.State, out.Reason)
 				}
 				j = *out
 				return true
@@ -342,7 +357,7 @@ func TestExtensionDevEndToEnd(t *testing.T) {
 		for _, out := range snap.Jobs {
 			if out.ID == id && terminal(out.State) {
 				if out.State != "succeeded" {
-					t.Fatalf("program failed: %+v", out)
+					t.Fatalf("program failed: state=%s reason=%s", out.State, out.Reason)
 				}
 				j = *out
 				return true
@@ -440,4 +455,10 @@ func TestExtensionUnqualifiedIsNotStructuralRejection(t *testing.T) {
 	if _, err := q.Submit(Spec{Name: "waiting", Project: "test", Priority: "experiment", Kind: "sample"}); err != nil {
 		t.Fatalf("qualification is temporary, not structural incompatibility: %v", err)
 	}
+}
+
+func TestExtensionQualificationWithRelativeRoot(t *testing.T) {
+	t.Chdir(t.TempDir())
+	e := fakeExtension(t)
+	installQualified(t, "relative-root", e, "")
 }

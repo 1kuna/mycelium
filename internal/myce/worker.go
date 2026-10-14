@@ -136,9 +136,21 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			extensionRelease()
 		}
 	}()
-	if err := w.prepareExtensionFiles(&j, s.dir); err != nil {
-		return nil, err
+	if j.Spec.extensionJob() {
+		value := j
+		dir, err := s.extensionFiles.run(attemptCheckpoint(j), func() (string, error) {
+			err := w.prepareExtensionFiles(&value, s.dir)
+			return value.Spec.Run.Workdir, err
+		})
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "NAS unreachable:") {
+				return nil, fmt.Errorf("%w: input copy pending", errWorkerCheckpoint)
+			}
+			return nil, err
+		}
+		j.Spec.Run.Workdir = dir
 	}
+
 	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
 		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
