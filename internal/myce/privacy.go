@@ -33,6 +33,8 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 		j.EnvironmentFailureLog = ""
 		if j.State == "failed" {
 			switch {
+			case j.Reason == "out of memory after one retry on a larger hypha", j.Reason == "out of memory; previous capability unavailable":
+				// Fixed scheduler diagnostics contain no payload or machine paths.
 			case strings.HasPrefix(j.Reason, "production start deadline exceeded:"):
 				j.Reason = "production start deadline exceeded"
 			case strings.HasPrefix(j.Reason, "production cannot start: no eligible host is enabled;"):

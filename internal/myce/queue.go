@@ -37,6 +37,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	ProgramNeeds     map[string]SizeHint              `json:"program_needs,omitempty"`
 	Extensions       map[string]Extension             `json:"extensions,omitempty"`
 	HostControls     map[string]HostControlGeneration `json:"host_controls,omitempty"`
 	DisabledHosts    map[string]string                `json:"disabled_hosts,omitempty"`
@@ -320,6 +321,7 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 			s.StartBy = &deadline
 		}
 		j := &Job{Extensions: extensions, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		q.applyLearnedNeeds(j)
 		if e := q.validateProjectCapacity(j); e != nil {
 			return e
 		}
@@ -360,6 +362,9 @@ func (q *Queue) stop(j *Job, why string) {
 func (q *Queue) maintain() {
 	now := q.clock.Now()
 	for _, j := range q.s.Jobs {
+		if j.State == "queued" {
+			q.applyLearnedNeeds(j)
+		}
 		if j.State == "running" || j.State == "stopping" {
 			q.retainRelease(j)
 		}
@@ -529,6 +534,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			if old != nil {
 				m.TotalMemoryGB = max(m.TotalMemoryGB, old.TotalMemoryGB)
 			}
+		}
+		if m.CapabilityProfile != nil {
+			m.UnifiedMemory = m.CapabilityProfile.MemoryLayout == "unified"
 		}
 		if old != nil && old.Session != m.Session && !old.Gone && !(c.Fresh && c.PreviousSession == old.Session) {
 			return errors.New("machine name already joined; leave the other worker first")
@@ -828,7 +836,8 @@ func (q *Queue) Complete(r Result) error {
 		}
 		// A kernel OOM is the payload's failure even if preemption raced it.
 		ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
-		if j.State == "stopping" && (!ceilingFailure || j.Reason == "cancel requested") {
+		oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
+		if j.State == "stopping" && (!oomFailure || j.Reason == "cancel requested") {
 			if j.StopAt != nil && q.clock.Now().Before(*j.StopAt) {
 				if q.s.BatchReleases == nil {
 					q.s.BatchReleases = map[string]batchRelease{}
@@ -841,6 +850,8 @@ func (q *Queue) Complete(r Result) error {
 			} else {
 				q.retry(j, j.Reason)
 			}
+		} else if oomFailure && j.Spec.extensionJob() {
+			q.retryOOM(j)
 		} else if r.ExtensionUnavailable && j.Spec.extensionJob() && j.StartedAt == nil && j.Extension != nil {
 			if m := q.s.Machines[r.Machine]; m != nil {
 				for i := range m.ExtensionReports {
@@ -861,6 +872,7 @@ func (q *Queue) Complete(r Result) error {
 			q.renewRecoveryStartWindow(j)
 			q.retry(j, "worker restarted after cleaning old processes")
 		} else if r.Success {
+			q.recordProgramNeeds(j, r)
 			q.recordModelUse(j.Spec.Needs.Model)
 			j.State = "succeeded"
 		} else {

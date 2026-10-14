@@ -203,6 +203,9 @@ type Copy struct {
 }
 
 type Job struct {
+	MeasuredNeeds         *SizeHint                    `json:"measured_needs,omitempty"`
+	OOMCapacity           *SizeHint                    `json:"oom_capacity,omitempty"`
+	OOMRetries            int                          `json:"oom_retries,omitempty"`
 	Extensions            []Extension                  `json:"extensions,omitempty"`
 	Extension             *ExtensionSelection          `json:"extension,omitempty"`
 	OutputFiles           map[string]string            `json:"output_files,omitempty"`
@@ -311,13 +314,15 @@ type Reply struct {
 	GraceSeconds     float64             `json:"grace_seconds"`
 }
 type Result struct {
-	ExtensionUnavailable bool   `json:"extension_unavailable,omitempty"`
-	OperatorStop         bool   `json:"operator_stop,omitempty"`
-	ReleaseOnly          bool   `json:"release_only,omitempty"`
-	Forced               bool   `json:"forced,omitempty"`
-	ReleasePending       bool   `json:"release_pending,omitempty"`
-	Machine              string `json:"machine"`
-	Session              string `json:"session"`
+	Usage                *SizeHint `json:"usage,omitempty"`
+	OutOfMemory          bool      `json:"out_of_memory,omitempty"`
+	ExtensionUnavailable bool      `json:"extension_unavailable,omitempty"`
+	OperatorStop         bool      `json:"operator_stop,omitempty"`
+	ReleaseOnly          bool      `json:"release_only,omitempty"`
+	Forced               bool      `json:"forced,omitempty"`
+	ReleasePending       bool      `json:"release_pending,omitempty"`
+	Machine              string    `json:"machine"`
+	Session              string    `json:"session"`
 	Execution
 	Interrupted bool   `json:"interrupted,omitempty"`
 	Success     bool   `json:"success"`
