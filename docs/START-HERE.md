@@ -1,6 +1,8 @@
 # Start here: move a project's GPU work to Mycelium v2
 
 Read this first when working in another repository. Follow the links for your chosen path; you do not need to read every guide before trying a job.
+On the experimental v3 branch, see [automatic joining and capability profile v0](guide-joining-v3.md). The v2 setup below remains available.
+
 ## 1. What Mycelium is
 
 Mycelium is one Go program, `myce`, that shares GPUs across projects.

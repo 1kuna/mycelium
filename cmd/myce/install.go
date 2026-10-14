@@ -40,6 +40,7 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	instance := f.String("instance", "", "Linux worker instance (e.g. gpu1)")
 	device := f.String("device", "", "physical GPU selector (one device per worker)")
 	hostDir := f.String("host-state-dir", "", "shared local host control directory")
+	joiningFile := f.String("joining-file", "", "private invitation; discovers queue and provisions trust")
 	root := f.String("root", "", "installation root (default ~/.local/share/mycelium)")
 
 	config := f.String("config", "", "installed config path (doctor/uninstall)")
@@ -141,6 +142,40 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 		}
 		return nil
 	}
+	if *joiningFile != "" {
+		if role != "worker" {
+			return errors.New("--joining-file is for installing a hypha")
+		}
+		path, err := filepath.Abs(*joiningFile)
+		if err != nil {
+			return err
+		}
+		*joiningFile = path
+		i, err := myce.ReadInvitation(path)
+		if err != nil {
+			return err
+		}
+		if !*dry {
+			explicit := ""
+			f.Visit(func(v *flag.Flag) {
+				if v.Name == "queue" {
+					explicit = *queue
+				}
+			})
+			client, err := myce.ResolveJoining(ctx, i, explicit, myce.MDNSDiscovery{})
+			if err != nil {
+				return err
+			}
+			i.Address = client.URL
+			if err = myce.WriteInvitation(path, i); err != nil {
+				return err
+			}
+		}
+		if i.Address != "" {
+			*queue = i.Address
+		}
+		*environmentFile = ""
+	}
 	d := myce.Detection{OS: probe.OS, Arch: probe.Arch}
 	if role == "worker" {
 		if *gpu != "" {
@@ -232,6 +267,7 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	}
 	c.Listen = *listen
 	c.EnvironmentFile = *environmentFile
+	c.JoiningFile = *joiningFile
 	c.ProjectConfig, c.HostConfig = *projectConfig, *hostConfig
 	if role == "worker" {
 		f.Visit(func(v *flag.Flag) {
