@@ -20,6 +20,7 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 		m.MemoryEnforcement = memoryEnforcementDiagnostic(m.MemoryEnforcement)
 		m.HostMemoryError = diagnostic(m.HostMemoryError, "host memory probe failed")
 		m.MemoryError = diagnostic(m.MemoryError, "memory probe failed")
+		m.FileTransferError = diagnostic(m.FileTransferError, "file transfer pending; only published progress is available elsewhere")
 		m.CacheError = diagnostic(m.CacheError, "cache operation failed")
 		m.DockerCleanup = diagnostic(m.DockerCleanup, "Docker cleanup unconfirmed")
 		for i := range m.CopyReports {

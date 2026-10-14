@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Existing shared storage is the transport in slice 1. Only relative names go
@@ -59,7 +61,7 @@ func copyJobFile(src, dst string) error {
 	return errors.Join(copyErr, syncErr, out.Close())
 }
 func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
-	if !j.Spec.extensionJob() {
+	if !j.Spec.extensionJob() && len(j.Spec.Files) == 0 {
 		return nil
 	}
 	dir := filepath.Join(stateDir, "job-files", j.ID, strconv.Itoa(j.Attempt))
@@ -80,6 +82,14 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 		return err
 	}
 	defer os.RemoveAll(staged)
+	for name, ref := range j.Spec.Files {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := w.fileCache.copyTo(ctx, ref, filepath.Join(staged, name))
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
 	for name, source := range j.Spec.Inputs {
 		p, err := confinedPath(w.JobFileRoot, source)
 		if err != nil {
@@ -89,10 +99,16 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 			return err
 		}
 	}
+	if err := syncModelDirectory(staged); err != nil {
+		return err
+	}
 	if err := os.Rename(staged, dir); err != nil {
 		return err
 	}
 
+	if err := syncWorkerDir(filepath.Dir(dir)); err != nil {
+		return err
+	}
 	j.Spec.Run.Workdir = dir
 	return nil
 }
@@ -100,7 +116,7 @@ func outputRelative(j Job, name, prefix string) string {
 	return filepath.Join(prefix, j.ID, strconv.Itoa(j.Attempt), name)
 }
 func (w Worker) publishExtensionFiles(j Job) error {
-	if !j.Spec.extensionJob() || len(j.Spec.Outputs) == 0 {
+	if j.FileTransport || !j.Spec.extensionJob() || len(j.Spec.Outputs) == 0 {
 		return nil
 	}
 	root, err := filepath.EvalSymlinks(w.JobFileRoot)
@@ -161,7 +177,9 @@ func validateExtensionJob(s Spec) error {
 		if !extensionName.MatchString(s.Program.Type) || !safeRelative(s.Program.File) {
 			return errors.New("program requires type and an input file name")
 		}
-		if _, ok := s.Inputs[s.Program.File]; !ok {
+		_, nas := s.Inputs[s.Program.File]
+		_, stored := s.Files[s.Program.File]
+		if !nas && !stored {
 			return errors.New("program file must name an input")
 		}
 		if len(s.Args) > 0 {
@@ -175,6 +193,9 @@ func validateExtensionJob(s Spec) error {
 		return errors.New("size hints must be finite and nonnegative")
 	}
 	names := []string{}
+	for name := range s.Files {
+		names = append(names, name)
+	}
 	for name, p := range s.Inputs {
 		if !safeRelative(name) || !safeRelative(p) {
 			return errors.New("inputs require clean relative local names and shared paths")

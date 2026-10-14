@@ -13,6 +13,8 @@ import (
 )
 
 type DevConfig struct {
+	FileStore                             string
+	FileStoreLimit                        int64
 	ExtensionRoot, JobFileRoot            string
 	HostStateDir                          string
 	HostPolicies                          map[string]HostPolicy
@@ -57,6 +59,16 @@ func StartDev(c DevConfig) (*Dev, error) {
 	q, err := Open(c.Database, c.Checkpoints, RealClock{})
 	if err != nil {
 		return nil, err
+	}
+	if c.FileStore != "" {
+		limit := c.FileStoreLimit
+		if limit == 0 {
+			limit = 100 << 30
+		}
+		if err = q.ConfigureFileStore(c.FileStore, limit, true); err != nil {
+			q.Close()
+			return nil, err
+		}
 	}
 	if c.ModelConfig.Idle <= 0 {
 		c.ModelConfig.Idle = 10 * time.Minute
