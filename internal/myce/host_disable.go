@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -568,6 +569,11 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 		r.Stopped, err = h.stopOwned(records, grace)
 		if err != nil {
 			r.Unconfirmed = append(r.Unconfirmed, err.Error())
+		}
+		if runtime.GOOS == "darwin" && h.Processes.native && len(records) > 0 {
+			// macOS can hide restricted executables' environments even from ps -E.
+			// Stopping visible groups cannot rule out a detached, hidden marker.
+			r.Unconfirmed = append(r.Unconfirmed, "macOS can hide process environment markers; detached descendants unconfirmed")
 		}
 		// Docker containment extends this confirmation boundary with labeled-container cleanup.
 		for _, w := range workers {
