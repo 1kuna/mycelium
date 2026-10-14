@@ -22,6 +22,10 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	FileCacheRoot         string
+	FileCacheLimit        int64
+	fileCache             *FileCache
+	fileCheckpoints       bool
 	ExtensionRoot         string
 	JobFileRoot           string
 	extensionFingerprint  string
@@ -136,7 +140,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			extensionRelease()
 		}
 	}()
-	if j.Spec.extensionJob() {
+	if j.Spec.extensionJob() || len(j.Spec.Files) > 0 {
 		value := j
 		dir, err := s.extensionFiles.run(attemptCheckpoint(j), func() (string, error) {
 			err := w.prepareExtensionFiles(&value, s.dir)
@@ -168,6 +172,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		}
 	}
 	prepare := prepareCheckpoint
+	if j.FileTransport {
+		prepare = func(value Job) (string, error) { return w.prepareFileCheckpoint(value, s.dir) }
+	}
 	if w.checkpointPrepare != nil {
 		prepare = w.checkpointPrepare
 	}
@@ -573,6 +580,9 @@ func (w Worker) Run(stop context.Context) error {
 		return err
 	}
 	defer s.close()
+	if err = w.initFileTransfers(stop, s); err != nil {
+		return err
+	}
 	if w.Machine.CapabilityProfile == nil {
 		probeCtx, cancel := context.WithTimeout(stop, 5*time.Second)
 		profile := LocalProfileProbe().Detect(probeCtx, w.Machine, s.dir, w.Clock.Now())
@@ -901,6 +911,7 @@ func (w Worker) Run(stop context.Context) error {
 			rt.session = w.Machine.Session
 			rt.mu.Unlock()
 			m := w.Machine
+			m.FileTransferError = s.fileError
 			if w.ExtensionRoot != "" {
 				m.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, m.GPU, w.extensionFingerprint)
 				w.Machine.ExtensionReports = m.ExtensionReports
@@ -989,6 +1000,17 @@ func (w Worker) Run(stop context.Context) error {
 						log.Printf("NAS checkpoint progress unavailable: %v", progressErr)
 					}
 				}
+				if s.state.Job.FileTransport && s.state.Result == nil && progress > s.fileGeneration {
+					value := *s.state.Job
+					transferWorker := w
+					published, e := s.fileProgress.run(attemptCheckpoint(value), func() (int64, error) { return transferWorker.publishFileCheckpoint(value, s.dir) })
+					if e == nil {
+						s.fileGeneration = published
+						s.fileError = ""
+					} else {
+						s.fileError = "checkpoint transfer pending; only published progress can resume elsewhere"
+					}
+				}
 				running = &Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt, Progress: progress}
 			}
 			var reply Reply
@@ -1033,7 +1055,20 @@ func (w Worker) Run(stop context.Context) error {
 						return e
 					}
 				}
-				if w.CheckpointRoot == "" && reply.CheckpointRoot != "" && reply.CheckpointRoot != s.state.CheckpointRoot {
+				if reply.FileCheckpoints && !w.fileCheckpoints {
+					if w.CheckpointRoot != "" {
+						return errors.New("NAS checkpoint-root cannot be combined with file-store checkpoints")
+					}
+					w.fileCheckpoints = true
+					s.state.CheckpointRoot = filepath.Join(s.dir, "file-checkpoints")
+					if e := os.MkdirAll(s.state.CheckpointRoot, 0700); e != nil {
+						return e
+					}
+					if e := s.save(); e != nil {
+						return e
+					}
+				}
+				if !w.fileCheckpoints && w.CheckpointRoot == "" && reply.CheckpointRoot != "" && reply.CheckpointRoot != s.state.CheckpointRoot {
 					s.state.CheckpointRoot = reply.CheckpointRoot
 					if e := s.save(); e != nil {
 						return e
@@ -1088,6 +1123,28 @@ func (w Worker) Run(stop context.Context) error {
 							err = &HTTPError{Status: 409}
 						}
 					}
+					if err == nil && s.state.Result != nil && s.state.Job.FileTransport {
+						if !s.state.Result.ReleasePending {
+							released := *s.state.Result
+							released.ReleaseOnly = true
+							released.OutputRefs = nil
+							if e := w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil); e != nil && !stale(e) {
+								err = e
+							}
+						}
+						value := *s.state.Job
+						result := *s.state.Result
+						transferWorker := w
+						finished, e := s.fileFinish.run(attemptCheckpoint(value), func() (Result, error) { return transferWorker.finishFileResult(value, result, s.dir) })
+						if e != nil {
+							err = e
+							s.fileError = "file publication pending; local results retained"
+						} else {
+							s.fileError = ""
+							s.state.Result = &finished
+							err = s.save()
+						}
+					}
 					if err == nil && s.state.Result != nil {
 						err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
 					}
@@ -1098,6 +1155,7 @@ func (w Worker) Run(stop context.Context) error {
 					}
 					if s.state.Result != nil && (err == nil || stale(err)) {
 						s.state.Job = nil
+						s.fileGeneration = 0
 						s.state.OperatorStopped = false
 						s.checkpointUnavailable = false
 						s.state.Result = nil
@@ -1135,7 +1193,9 @@ func (w Worker) Run(stop context.Context) error {
 						return errors.New("queue assigned a job while an execution is still pending")
 					}
 					j := *reply.Job
-					if !filepath.IsAbs(j.Checkpoint) {
+					if j.FileTransport {
+						j.Checkpoint = filepath.Join(s.dir, "file-checkpoints", j.ID)
+					} else if !filepath.IsAbs(j.Checkpoint) {
 						rel := filepath.Clean(j.Checkpoint)
 						if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 							return errors.New("invalid relative checkpoint path")

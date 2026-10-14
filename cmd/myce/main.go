@@ -49,6 +49,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "invite" {
 		return inviteCommand(args[1:])
 	}
+	if args[0] == "file" {
+		return fileCommand(args[1:])
+	}
 	if args[0] == "extension" {
 		return extensionCommand(args[1:])
 	}
@@ -136,6 +139,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	containerRetention := f.Duration("container-retention", myce.DefaultContainerRetention, "acknowledged stopped Docker container retention (0 removes immediately)")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total bytes held in the queue model-upload spool")
+	fileStore := f.String("file-store", "", "authoritative file storage folder (default beside database)")
+	fileStoreLimit := f.Int64("file-store-bytes", 100<<30, "authoritative files plus upload reservations limit")
+	fileCache := f.String("file-cache", "", "local reproducible file cache folder")
+	fileCacheLimit := f.Int64("file-cache-bytes", 10<<30, "maximum local file cache bytes")
+	filesFrom := f.String("files-from", "", "upload explicitly mapped inputs from this local folder")
 	checkpoint := f.String("checkpoints", "./checkpoints", "queue NAS checkpoint root")
 	workerCheckpoint := f.String("checkpoint-root", env("MYCE_CHECKPOINT_ROOT", ""), "worker-local NAS root (may differ from queue mount path)")
 	extensionRoot := f.String("extension-root", "", "local extension library/cache (opt in)")
@@ -272,7 +280,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostStateDir: *hostStateDir, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostStateDir: *hostStateDir, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -292,6 +300,24 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		defer q.Close()
+		root := *fileStore
+		if root == "" {
+			root = *db + ".files"
+		}
+		nasConfigured := false
+		f.Visit(func(value *flag.Flag) {
+			if value.Name == "checkpoints" {
+				nasConfigured = true
+			}
+		})
+		if !nasConfigured {
+			if err = os.MkdirAll(*checkpoint, 0700); err != nil {
+				return err
+			}
+		}
+		if err = q.ConfigureFileStore(root, *fileStoreLimit, !nasConfigured); err != nil {
+			return err
+		}
 		if *hostConfig != "" {
 			if err = q.ConfigureHosts(hosts); err != nil {
 				return err
@@ -437,7 +463,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
-		w := myce.Worker{ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, ServiceConfig: *serviceConfig, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, ServiceConfig: *serviceConfig, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
@@ -458,6 +484,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		var extra any
 		if d.Decode(&extra) != io.EOF {
 			return errors.New("expected one YAML job")
+		}
+		if *filesFrom != "" {
+			if err := uploadJobInputs(ctx, client, &s, *filesFrom); err != nil {
+				return err
+			}
 		}
 		var j myce.Job
 		if err := client.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
@@ -594,6 +625,9 @@ func printStatus(s myce.Snapshot, full bool) {
 			fmt.Printf("copy %s/%s: %s %d/%d bytes %s\n", m.ID, r.Model, r.State, r.Bytes, r.Total, r.Error)
 		}
 		fmt.Printf("copy speed %s: %.0f bytes/s; estimated NAS copy seconds %v\n", m.ID, m.CopyBytesPerSecond, m.ModelCopySeconds)
+		if m.FileTransferError != "" {
+			fmt.Printf("files %s: %s\n", m.ID, m.FileTransferError)
+		}
 		fmt.Printf("cache %s: %v, %d bytes free %s\n", m.ID, m.CachedModels, m.CacheFreeBytes, m.CacheError)
 		if m.CapabilityProfile != nil {
 			fmt.Printf("hypha %s %s\n", m.ID, m.CapabilityProfile.Summary())

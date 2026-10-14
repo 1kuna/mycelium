@@ -73,6 +73,7 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	Files    FileManifest      `json:"files,omitempty" yaml:"files,omitempty"`
 	Kind     string            `json:"kind,omitempty" yaml:"kind,omitempty"`
 	Program  *Program          `json:"program,omitempty" yaml:"program,omitempty"`
 	Args     []string          `json:"args,omitempty" yaml:"args,omitempty"`
@@ -120,10 +121,13 @@ func (s Spec) Validate() error {
 	if s.Priority == "deadline" && s.Deadline == nil {
 		return errors.New("deadline priority requires a deadline")
 	}
+	if err := validateJobFiles(s); err != nil {
+		return err
+	}
 	if s.extensionJob() {
 		return validateExtensionJob(s)
 	}
-	if s.Kind == "" && (len(s.Inputs)+len(s.Outputs)+len(s.Args) > 0 || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
+	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0) || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return errors.New("inputs, outputs, args and size_hint require a kind/program job")
 	}
 	if s.Needs.MemoryGB <= 0 || math.IsInf(s.Needs.MemoryGB, 0) || math.IsNaN(s.Needs.MemoryGB) {
@@ -203,6 +207,10 @@ type Copy struct {
 }
 
 type Job struct {
+	FileTransport         bool                         `json:"file_transport,omitempty"`
+	FileCheckpoints       map[int]FileCheckpoint       `json:"file_checkpoints,omitempty"`
+	ResumeFiles           *FileCheckpoint              `json:"resume_files,omitempty"`
+	OutputRefs            FileManifest                 `json:"output_refs,omitempty"`
 	MeasuredNeeds         *SizeHint                    `json:"measured_needs,omitempty"`
 	OOMCapacity           *SizeHint                    `json:"oom_capacity,omitempty"`
 	OOMRetries            int                          `json:"oom_retries,omitempty"`
@@ -239,6 +247,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	FileTransferError           string              `json:"file_transfer_error,omitempty"`
 	CapabilityProfile           *CapabilityProfile  `json:"capability_profile,omitempty"`
 	ExtensionReports            []ExtensionReport   `json:"extension_reports,omitempty"`
 	EnablePending               bool                `json:"enable_pending,omitempty"`
@@ -299,6 +308,7 @@ type Checkin struct {
 	Running         *Execution    `json:"running,omitempty"`
 }
 type Reply struct {
+	FileCheckpoints  bool                `json:"file_checkpoints,omitempty"`
 	AdmissionBlocked bool                `json:"admission_blocked,omitempty"`
 	EnvironmentPlan  []EnvironmentRecipe `json:"environment_plan,omitempty"`
 	CopyPlan         []CopyTask          `json:"copy_plan,omitempty"`
@@ -314,15 +324,16 @@ type Reply struct {
 	GraceSeconds     float64             `json:"grace_seconds"`
 }
 type Result struct {
-	Usage                *SizeHint `json:"usage,omitempty"`
-	OutOfMemory          bool      `json:"out_of_memory,omitempty"`
-	ExtensionUnavailable bool      `json:"extension_unavailable,omitempty"`
-	OperatorStop         bool      `json:"operator_stop,omitempty"`
-	ReleaseOnly          bool      `json:"release_only,omitempty"`
-	Forced               bool      `json:"forced,omitempty"`
-	ReleasePending       bool      `json:"release_pending,omitempty"`
-	Machine              string    `json:"machine"`
-	Session              string    `json:"session"`
+	OutputRefs           FileManifest `json:"output_refs,omitempty"`
+	Usage                *SizeHint    `json:"usage,omitempty"`
+	OutOfMemory          bool         `json:"out_of_memory,omitempty"`
+	ExtensionUnavailable bool         `json:"extension_unavailable,omitempty"`
+	OperatorStop         bool         `json:"operator_stop,omitempty"`
+	ReleaseOnly          bool         `json:"release_only,omitempty"`
+	Forced               bool         `json:"forced,omitempty"`
+	ReleasePending       bool         `json:"release_pending,omitempty"`
+	Machine              string       `json:"machine"`
+	Session              string       `json:"session"`
 	Execution
 	Interrupted bool   `json:"interrupted,omitempty"`
 	Success     bool   `json:"success"`
