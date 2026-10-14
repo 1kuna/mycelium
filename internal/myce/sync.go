@@ -228,6 +228,14 @@ func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
 	return q.loadSeconds(j.Spec.Needs.Model, a)+environmentSeconds(j, a) < q.loadSeconds(j.Spec.Needs.Model, b)+environmentSeconds(j, b)
 }
 func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
+	if q.unmeasuredProgram(j, m) {
+		for _, other := range q.s.Machines {
+			if other.ID != m.ID && !q.unreported[other.ID] && q.workerIdle(other) && q.placementAllowed(j, other) && q.checkpointReady(j, other) && fits(j, other, other.FreeMemoryGB) && capabilityBetter(other, m) {
+				return true
+			}
+		}
+		return false
+	}
 	if j.Spec.Needs.Model == "" && j.Spec.Environment.Key() == "" {
 		return false
 	}
