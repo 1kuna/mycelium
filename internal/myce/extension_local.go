@@ -384,7 +384,7 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 				err = errors.New(r.Reason)
 				continue
 			}
-			tmp, e2 := os.MkdirTemp(extensionCache(root, e, platform), "check-")
+			tmp, e2 := os.MkdirTemp(env["MYCE_EXTENSION_CACHE"], "check-")
 			if e2 != nil {
 				return reports, e2
 			}
@@ -458,6 +458,15 @@ func (w Worker) prepareExtensionExecution(j *Job) (map[string]string, func(), er
 		argv = append(argv, j.Spec.Program.Args...)
 	} else {
 		argv = append(argv, j.Spec.Args...)
+	}
+	if !strings.Contains(argv[0], "/") {
+		for _, bin := range []string{filepath.Join(env["MYCE_EXTENSION_CACHE"], "venv", "bin"), filepath.Join(env["MYCE_EXTENSION_CACHE"], "bin")} {
+			candidate := filepath.Join(bin, argv[0])
+			if st, err := os.Stat(candidate); err == nil && st.Mode().IsRegular() && st.Mode()&0111 != 0 {
+				argv[0] = candidate
+				break
+			}
+		}
 	}
 	j.Spec.Run.Command = argv
 	env["MYCE_WORK"] = j.Spec.workType()

@@ -57,6 +57,7 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
+	extensionFiles        checkpointIO[string]
 	checkpointUnavailable bool
 	nasProbe              checkpointIO[bool]
 	nasProgress           checkpointIO[int64]
