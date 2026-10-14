@@ -17,6 +17,8 @@ import (
 	"syscall"
 )
 
+var errExtensionUnavailable = errors.New("extension qualification unavailable")
+
 type ExtensionReport struct {
 	Name        string `json:"name"`
 	Version     string `json:"version"`
@@ -416,7 +418,12 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 
 // prepareExtensionExecution only expands a qualified plain command. The
 // existing worker still owns memory admission, start gates, signals and resume.
-func (w Worker) prepareExtensionExecution(j *Job) (map[string]string, func(), error) {
+func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, releaseOut func(), errOut error) {
+	defer func() {
+		if errOut != nil {
+			errOut = fmt.Errorf("%w: %v", errExtensionUnavailable, errOut)
+		}
+	}()
 	if !j.Spec.extensionJob() {
 		return nil, nil, nil
 	}

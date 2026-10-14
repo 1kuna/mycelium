@@ -1033,7 +1033,7 @@ func (w Worker) Run(stop context.Context) error {
 							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) {
 								log.Printf("retry pending start: %v", err)
 							} else {
-								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error(), ReleasePending: errors.Is(err, errWorkerReleasePending)}
+								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
 								s.state.Result = &r
 								if !r.ReleasePending {
 									s.state.PID = 0
@@ -1157,7 +1157,7 @@ func (w Worker) Run(stop context.Context) error {
 							}
 						}
 						if err != nil && !(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory)) {
-							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), ReleasePending: errors.Is(err, errWorkerReleasePending)}
+							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
 							s.state.Job = &j
 							if w.batchMemory != nil {
 								w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))

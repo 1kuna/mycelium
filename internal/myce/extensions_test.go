@@ -462,3 +462,42 @@ func TestExtensionQualificationWithRelativeRoot(t *testing.T) {
 	e := fakeExtension(t)
 	installQualified(t, "relative-root", e, "")
 }
+
+func TestExtensionQualificationChangeBeforeStartRequeuesWithoutLoss(t *testing.T) {
+	q, _ := fixture(t)
+	e := fakeExtension(t)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	reports := installQualified(t, t.TempDir(), e, "")
+	a, b := machine("a", "fake"), machine("b", "fake")
+	for _, m := range []*Machine{&a, &b} {
+		m.ExtensionReports = reports
+		m.HostMemoryMeasured = true
+		m.FreeHostMemoryGB = 8
+		m.HostAvailableMemoryGB = 8
+	}
+	j := submit(t, q, Spec{Name: "qual-change", Project: "test", Priority: "experiment", Kind: "sample"})
+	first := check(t, q, a, nil).Job
+	if first == nil {
+		t.Fatal("no first assignment")
+	}
+	result := Result{Machine: a.ID, Session: a.Session, Execution: Execution{ID: j.ID, Attempt: first.Attempt}, ExtensionUnavailable: true}
+	if err := q.Complete(result); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Jobs[0].State != "queued" || snap.Jobs[0].Losses != 0 {
+		t.Fatal("qualification failure charged loss or failed job")
+	}
+	second := check(t, q, b, nil).Job
+	if second == nil || second.Attempt <= first.Attempt {
+		t.Fatal("did not try another qualified hypha")
+	}
+	if err := q.Complete(result); err != ErrStale {
+		t.Fatal("stale qualification failure affected current attempt:", err)
+	}
+}
