@@ -253,3 +253,14 @@ including configurable slack, and retains unconfirmed allocations after loss.
 Managed Docker batches install and inspect daemon-side memory limits. OOM is a
 normal failure rather than infrastructure loss. The configuration, unsupported
 cases and qualification limits are in [operations](operations.md#host-ram-admission-and-ceilings).
+
+## Experimental v3 file movement (resolved #24, slice #42)
+
+On the separate v3 branch the queue hypha can store SHA-256-identified files and
+serve resumable HTTP transfers, with bounded caches on execution hyphae. Inputs
+and models are explicit; outputs and checkpoint generations are published only
+after verified durable transfer. Checkpoint commands still use
+`MYCE_CHECKPOINT_DIR`; local-only progress cannot resume elsewhere. The single
+SQLite queue, plain commands, injected scheduling clock and attempt ownership
+remain. Explicit NAS configuration retains the v2 path. One store is not a backup.
+See [files without a NAS](guide-files-v3.md) for configuration and retention limits.

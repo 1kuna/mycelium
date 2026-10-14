@@ -306,3 +306,9 @@ The separate v3 branch adds small extensions and jobs described as a kind of
 work or a program. This is opt-in and does not change the v2 migration steps.
 Start with [write an extension](write-an-extension.md); the decisions are in
 issues #18, #20, #35 and #36. Production remains on its frozen version.
+
+## v3 files without a NAS
+
+[Files without a NAS](guide-files-v3.md) explains the default v3 queue file store,
+explicit input uploads, bounded local caches, model imports, returned outputs and
+checkpoints resumed on another hypha. Existing explicit NAS roots still work.
