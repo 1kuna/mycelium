@@ -369,6 +369,13 @@ func (q *Queue) maintain() {
 			q.retainRelease(j)
 		}
 	}
+	for _, m := range q.s.Machines {
+		if a := machineAvailability(m); a != nil && a.Available && (a.Mode == "daily" || a.Signals.Laptop) && now.Sub(m.LastSeen) > signalMaxAge {
+			a.Available = false
+			a.Reason = "owner signals stale"
+		}
+		q.withdrawUnavailable(m)
+	}
 	q.maintainStartDeadlines()
 	q.maintainHolds()
 	for machine, release := range q.s.BatchReleases {
@@ -491,6 +498,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				}
 			}
 		}
+		if m.MaxJobs < 0 {
+			return errors.New("max-jobs must be nonnegative")
+		}
 		if m.ID == "" || m.Session == "" || !validGPU(m.GPU) || !validMemoryValue(m.TotalMemoryGB) || m.FreeMemoryGB < 0 || math.IsNaN(m.FreeMemoryGB) || math.IsInf(m.FreeMemoryGB, 0) {
 			return errors.New("invalid machine report")
 		}
@@ -579,9 +589,14 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			return e
 		}
 		m.FreeMemoryGB = max(0, m.FreeMemoryGB-q.modelReservation(&m, c.ModelReports))
+		q.withdrawUnavailable(&m)
 		q.maintain()
 		defer func() {
-			reply.AdmissionBlocked = m.EnablePending || m.HostMemoryBudgetStatus() != ""
+			m.AdmissionReason = q.machineLimitReason(&m)
+			if a := machineAvailability(&m); a != nil && !a.Available {
+				m.AdmissionReason = a.Reason
+			}
+			reply.AdmissionBlocked = availabilityBlocked(&m) || m.EnablePending || m.HostMemoryBudgetStatus() != ""
 			if m.EnablePending {
 				return
 			}
@@ -863,6 +878,8 @@ func (q *Queue) Complete(r Result) error {
 				}
 			}
 			q.retry(j, "waiting for a qualified extension")
+		} else if r.Interrupted && r.PoliteStop {
+			q.retry(j, "requeued: hypha availability withdrawn")
 		} else if r.Interrupted && r.OperatorStop {
 			q.retry(j, "requeued: stopped by operator")
 			j.RequeuedByOperator = true
@@ -1030,6 +1047,10 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 		}
 		for _, m := range q.s.Machines {
 			copy := cloneMachine(m)
+			copy.AdmissionReason = q.machineLimitReason(m)
+			if a := machineAvailability(m); a != nil && !a.Available {
+				copy.AdmissionReason = a.Reason
+			}
 			copy.ReservedMemoryGB = 0
 			copy.MemoryUsedGB = max(0, copy.TotalMemoryGB-copy.FreeMemoryGB)
 			for _, slot := range q.s.ModelSlots {

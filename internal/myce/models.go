@@ -372,7 +372,7 @@ func (q *Queue) maintainModels() {
 			delete(q.s.ModelSlots, k)
 			continue
 		}
-		if m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle {
+		if availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle {
 			s.State = "draining"
 		}
 	}

@@ -273,6 +273,9 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
         </div>
         {{if or .MemoryEnforcement .EffectiveHostMemoryBudgetGB .HostMemoryBudgetGB}}<div class="detail"><div class="label">RAM ceiling</div><div class="value">{{.MemoryEnforcement}}{{if .EffectiveHostMemoryBudgetGB}}<div>Host ceiling budget: {{printf "%g" .EffectiveHostMemoryBudgetGB}} GiB</div>{{else if .HostMemoryBudgetGB}}<div>Host ceiling budget: {{printf "%g" .HostMemoryBudgetGB}} GiB</div>{{end}}{{if .HostMemoryBudgetStatus}}<div>{{.HostMemoryBudgetStatus}}</div>{{end}}</div></div>{{end}}
         {{if .DockerCleanup}}<div class="alert bad">Docker {{.DockerCleanup}}</div>{{end}}
+        {{if .CapabilityProfile}}{{if .CapabilityProfile.Availability}}<div class="detail"><div class="label">Availability</div><div class="value">{{.CapabilityProfile.Availability.Summary}}</div></div>{{end}}{{end}}
+        {{if .MaxJobs}}<div class="detail"><div class="label">Job limit</div><div class="value">{{.MaxJobs}} simultaneous jobs per machine</div></div>{{end}}
+        {{if .AdmissionReason}}<div class="detail"><div class="label">Waiting</div><div class="value">{{.AdmissionReason}}</div></div>{{end}}
         {{if .EnablePending}}<div class="alert bad">Held: enable not yet acknowledged (retrying)</div>{{end}}
         {{if .MemoryError}}<div class="alert bad">Memory unavailable: {{.MemoryError}}</div>{{end}}
 		{{if .CacheError}}<div class="alert bad">Model cache unavailable: {{.CacheError}}</div>{{end}}

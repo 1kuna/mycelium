@@ -81,12 +81,13 @@ func (w Worker) watchStops(ctx context.Context, events chan<- WorkerEvent) {
 // Process control never takes the upload/store loop's locks or performs I/O.
 // A stop received before command startup is retained for that exact attempt.
 type processControl struct {
-	mu      sync.Mutex
-	clock   Clock
-	current *process
-	pending WorkerEvent
-	leaving bool
-	wake    chan struct{}
+	availability *availabilityMonitor
+	mu           sync.Mutex
+	clock        Clock
+	current      *process
+	pending      WorkerEvent
+	leaving      bool
+	wake         chan struct{}
 }
 
 func (c *processControl) apply() {
@@ -95,6 +96,16 @@ func (c *processControl) apply() {
 		return
 	}
 	now := c.clock.Now()
+	if c.availability != nil && !c.availability.snapshot().Available {
+		p.mu.Lock()
+		p.polite = true
+		p.mu.Unlock()
+		grace := 10 * time.Second
+		if !p.job.Spec.Resumable {
+			grace = 0
+		}
+		p.stop(now, grace, false)
+	}
 	if c.leaving && p.job.Spec.Resumable {
 		p.stop(now, StopGrace, false)
 	}

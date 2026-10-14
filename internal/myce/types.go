@@ -239,6 +239,8 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	MaxJobs                     int                 `json:"max_jobs,omitempty"`
+	AdmissionReason             string              `json:"admission_reason,omitempty"`
 	CapabilityProfile           *CapabilityProfile  `json:"capability_profile,omitempty"`
 	ExtensionReports            []ExtensionReport   `json:"extension_reports,omitempty"`
 	EnablePending               bool                `json:"enable_pending,omitempty"`
@@ -314,6 +316,7 @@ type Reply struct {
 	GraceSeconds     float64             `json:"grace_seconds"`
 }
 type Result struct {
+	PoliteStop           bool      `json:"polite_stop,omitempty"`
 	Usage                *SizeHint `json:"usage,omitempty"`
 	OutOfMemory          bool      `json:"out_of_memory,omitempty"`
 	ExtensionUnavailable bool      `json:"extension_unavailable,omitempty"`
