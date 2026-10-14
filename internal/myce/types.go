@@ -309,12 +309,13 @@ type Reply struct {
 	GraceSeconds     float64             `json:"grace_seconds"`
 }
 type Result struct {
-	OperatorStop   bool   `json:"operator_stop,omitempty"`
-	ReleaseOnly    bool   `json:"release_only,omitempty"`
-	Forced         bool   `json:"forced,omitempty"`
-	ReleasePending bool   `json:"release_pending,omitempty"`
-	Machine        string `json:"machine"`
-	Session        string `json:"session"`
+	ExtensionUnavailable bool   `json:"extension_unavailable,omitempty"`
+	OperatorStop         bool   `json:"operator_stop,omitempty"`
+	ReleaseOnly          bool   `json:"release_only,omitempty"`
+	Forced               bool   `json:"forced,omitempty"`
+	ReleasePending       bool   `json:"release_pending,omitempty"`
+	Machine              string `json:"machine"`
+	Session              string `json:"session"`
 	Execution
 	Interrupted bool   `json:"interrupted,omitempty"`
 	Success     bool   `json:"success"`

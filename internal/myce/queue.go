@@ -841,6 +841,17 @@ func (q *Queue) Complete(r Result) error {
 			} else {
 				q.retry(j, j.Reason)
 			}
+		} else if r.ExtensionUnavailable && j.Spec.extensionJob() && j.StartedAt == nil && j.Extension != nil {
+			if m := q.s.Machines[r.Machine]; m != nil {
+				for i := range m.ExtensionReports {
+					report := &m.ExtensionReports[i]
+					if report.Digest == j.Extension.Digest && report.Work == j.Spec.workType() {
+						report.Qualified = false
+						report.Reason = "qualification unavailable; setup/check required"
+					}
+				}
+			}
+			q.retry(j, "waiting for a qualified extension")
 		} else if r.Interrupted && r.OperatorStop {
 			q.retry(j, "requeued: stopped by operator")
 			j.RequeuedByOperator = true
