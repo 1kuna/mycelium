@@ -120,6 +120,9 @@ func (q *Queue) recordProgramNeeds(j *Job, r Result) {
 	if j.Spec.Program == nil || j.Extension == nil || r.Usage == nil || !r.Usage.valid() {
 		return
 	}
+	if !validMemoryValue(r.Usage.MemoryGB*1.25) || !validMemoryValue(r.Usage.HostMemoryGB*1.25) {
+		return
+	}
 	m := q.s.Machines[r.Machine]
 	if m == nil {
 		return
@@ -135,7 +138,8 @@ func (q *Queue) recordProgramNeeds(j *Job, r Result) {
 		old := q.s.ProgramNeeds[key]
 		// Floors and 25% headroom remain conservative; observations never shrink.
 		q.s.ProgramNeeds[key] = SizeHint{MemoryGB: max(old.MemoryGB, e.MemoryGB, r.Usage.MemoryGB*1.25), HostMemoryGB: max(old.HostMemoryGB, e.HostMemoryGB, r.Usage.HostMemoryGB*1.25)}
-		j.MeasuredNeeds = r.Usage
+		observation := *r.Usage
+		j.MeasuredNeeds = &observation
 	}
 }
 

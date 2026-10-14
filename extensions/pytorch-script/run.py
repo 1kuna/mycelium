@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import json
 import runpy
+import resource
 import threading
 
 # This file is entered with cached Python via worker-owned PATH. Checking the
@@ -57,4 +58,9 @@ finally:
     path = os.environ.get("MYCE_USAGE_FILE")
     if path:
         with open(path, "x", encoding="utf-8") as report:
-            json.dump({"memory_gb": peak / (1 << 30), "out_of_memory": oom}, report)
+            ram = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            if sys.platform != "darwin":
+                ram *= 1024
+            json.dump({"memory_gb": peak / (1 << 30),
+                       "host_memory_gb": ram / (1 << 30),
+                       "out_of_memory": oom}, report)

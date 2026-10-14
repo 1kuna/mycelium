@@ -45,7 +45,7 @@ and may include shared accelerator allocations, so unified-memory learning can
 conservatively overreserve. Descendant-process RAM is not a complete process-tree
 measurement. No configured budget is labelled as an observation.
 
-The PyTorch starter v0.2.0 runs the script in its Python process, preserving its
+The PyTorch starter v0.2.1 runs the script in its Python process, preserving its
 arguments, imports and signal handlers. CUDA/XPU report allocator high-water
 marks; MPS samples current allocations every 50 ms, so brief peaks can be missed.
 Its bundled-reference qualification remains required. Unsupported counters
