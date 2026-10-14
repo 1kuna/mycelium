@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -60,9 +61,11 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
-	nasProbe     checkpointIO[bool]
-	nasProgress  checkpointIO[int64]
-	nasAvailable bool
+	files           *FileStore
+	fileCheckpoints bool
+	nasProbe        checkpointIO[bool]
+	nasProgress     checkpointIO[int64]
+	nasAvailable    bool
 	// simulation bypasses durable storage only; all scheduling/accounting paths remain shared.
 	checkpointProbe  func() bool // Filesystem fault seam.
 	simulation       bool
@@ -293,6 +296,14 @@ func (q *Queue) update(fn func() error) error {
 	return err
 }
 func (q *Queue) Submit(s Spec) (*Job, error) {
+	if len(s.Files) > 0 && !q.fileCheckpoints {
+		return nil, errors.New("stored job files require file-store checkpoints; omit queue --checkpoints")
+	}
+	if len(s.Files) > 0 {
+		if err := q.verifyManifest(context.Background(), s.Files); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
@@ -320,7 +331,7 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 			deadline := q.clock.Now().Add(ProductionStartTimeout)
 			s.StartBy = &deadline
 		}
-		j := &Job{Extensions: extensions, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j := &Job{FileTransport: q.fileCheckpoints, Extensions: extensions, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		q.applyLearnedNeeds(j)
 		if e := q.validateProjectCapacity(j); e != nil {
 			return e
@@ -457,13 +468,21 @@ func (q *Queue) Tick() error {
 	return q.pruneBatchLogs()
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
-	reply := Reply{CheckpointRoot: q.root}
+	reply := Reply{FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	var durableProgress int64
 	var progressErr error
 	var progressPath string
 	if c.Running != nil {
 		q.mu.Lock()
-		if j := q.s.Jobs[c.Running.ID]; j != nil && j.Spec.Resumable && j.Attempt != c.Running.Attempt {
+		if j := q.s.Jobs[c.Running.ID]; j != nil && j.FileTransport {
+			c.Running.Progress = 0
+			if save, ok := j.FileCheckpoints[c.Running.Attempt]; ok {
+				c.Running.Progress = save.Generation
+			}
+			if save, ok := j.FileCheckpoints[j.Attempt]; ok {
+				durableProgress = save.Generation
+			}
+		} else if j != nil && j.Spec.Resumable && j.Attempt != c.Running.Attempt {
 			progressPath = attemptCheckpoint(*j)
 		}
 		q.mu.Unlock()
@@ -730,7 +749,11 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
 				j.Starts = max(j.Starts, j.Attempt) + 1
 				j.Attempt = j.Starts
-				if j.Spec.extensionJob() {
+				if j.FileTransport {
+					j.OutputRefs = nil
+					j.ResumeFiles = bestFileCheckpoint(j)
+				}
+				if j.Spec.extensionJob() && !j.FileTransport {
 					j.OutputFiles = map[string]string{}
 					for name, prefix := range j.Spec.Outputs {
 						j.OutputFiles[name] = outputRelative(*j, name, prefix)
@@ -771,6 +794,29 @@ func (q *Queue) current(r Result) (*Job, error) {
 	return j, nil
 }
 func (q *Queue) Complete(r Result) error {
+	if r.Success && !r.Interrupted && !r.ReleaseOnly {
+		q.mu.Lock()
+		j := q.s.Jobs[r.ID]
+		var expected map[string]string
+		remote := j != nil && j.FileTransport
+		if remote {
+			expected = cloneJob(j).Spec.Outputs
+		}
+		q.mu.Unlock()
+		if remote {
+			if len(expected) != len(r.OutputRefs) {
+				return errors.New("complete output manifest required")
+			}
+			for name := range expected {
+				if _, ok := r.OutputRefs[name]; !ok {
+					return errors.New("missing output")
+				}
+			}
+			if err := q.verifyManifest(context.Background(), r.OutputRefs); err != nil {
+				return err
+			}
+		}
+	}
 	return q.update(func() error {
 		q.maintainStartDeadlines()
 		operatorMatched := q.refundOperatorStop(r)
@@ -889,6 +935,10 @@ func (q *Queue) Complete(r Result) error {
 			q.renewRecoveryStartWindow(j)
 			q.retry(j, "worker restarted after cleaning old processes")
 		} else if r.Success {
+			if j.FileTransport {
+				j.OutputRefs = r.OutputRefs
+				j.OutputFiles = nil
+			}
 			q.recordProgramNeeds(j, r)
 			q.recordModelUse(j.Spec.Needs.Model)
 			j.State = "succeeded"

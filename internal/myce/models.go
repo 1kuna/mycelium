@@ -32,6 +32,7 @@ type VLLMPreset struct {
 	GPUMemoryUtilization float64 `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
 }
 type Model struct {
+	FileStore       bool              `yaml:"file_store,omitempty" json:"file_store,omitempty"`
 	RequestTimeout  time.Duration     `yaml:"request_timeout,omitempty" json:"request_timeout,omitempty"`
 	RetrySafe       bool              `yaml:"retry_safe,omitempty" json:"retry_safe,omitempty"`
 	Logs            string            `yaml:"logs,omitempty" json:"logs,omitempty"`
@@ -104,11 +105,14 @@ func validateModels(c ModelConfig) error {
 		if m.MaxInFlight < 0 {
 			return errors.New("max_in_flight must be nonnegative (zero means unlimited)")
 		}
-		if m.Name == "" || seen[m.Name] || m.Path == "" || m.MemoryGB <= 0 || math.IsNaN(m.MemoryGB) || math.IsInf(m.MemoryGB, 0) || len(m.Platforms) == 0 {
+		if m.Name == "" || seen[m.Name] || (m.Path == "" && !m.FileStore) || m.MemoryGB <= 0 || math.IsNaN(m.MemoryGB) || math.IsInf(m.MemoryGB, 0) || len(m.Platforms) == 0 {
 			return errors.New("models require unique names, path, positive memory and platforms")
 		}
 		if m.Engine != "fake" && (m.SizeBytes <= 0 || len(m.SHA256) != 64) {
 			return fmt.Errorf("model %s requires size_bytes and sha256", m.Name)
+		}
+		if m.FileStore && (m.DirectNAS || m.SizeBytes <= 0) {
+			return errors.New("file_store models require verified cached bytes, not direct_nas")
 		}
 		if m.SHA256 != "" {
 			if _, err := hex.DecodeString(m.SHA256); err != nil || len(m.SHA256) != 64 {

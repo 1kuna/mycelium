@@ -20,6 +20,8 @@ import (
 
 // ModelCache reserves complete copy sizes under one admission lock.
 type ModelCache struct {
+	storedModels  sync.Map
+	FileClient    *Client
 	mu            sync.Mutex
 	Root, NASRoot string
 	Limit         int64
@@ -70,6 +72,21 @@ func (c *ModelCache) discard(path string) error {
 func (c *ModelCache) discardContext(ctx context.Context, path string) error {
 	if e := ctx.Err(); e != nil {
 		return e
+	}
+	if model, ok := c.storedModels.Load(strings.TrimSuffix(filepath.Base(path), ".partial")); ok && c.FileClient != nil {
+		m := model.(Model)
+		if len(m.Files) == 0 {
+			if e := c.FileClient.HasFile(ctx, FileRef{m.SHA256, m.SizeBytes}); e != nil {
+				return e
+			}
+		} else {
+			for _, f := range m.Files {
+				if e := c.FileClient.HasFile(ctx, FileRef{f.SHA256, f.SizeBytes}); e != nil {
+					return e
+				}
+			}
+		}
+		return os.RemoveAll(path) // Disposable, hash-verified authoritative bytes remain in the store.
 	}
 	home, e := os.UserHomeDir()
 	if e != nil {
@@ -126,6 +143,12 @@ func cacheKey(m Model) string {
 	return fmt.Sprintf("%x-%s.model", h[:8], m.SHA256)
 }
 func (c *ModelCache) source(m Model) (string, error) {
+	if m.FileStore {
+		if c.FileClient == nil {
+			return "", errors.New("model file store unavailable")
+		}
+		return "", nil
+	}
 	if filepath.IsAbs(m.Path) {
 		return m.Path, nil
 	}
@@ -190,6 +213,9 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		}
 	}
 	key := cacheKey(m)
+	if m.FileStore {
+		c.storedModels.Store(key, m)
+	}
 	// Admission, reservations, and eviction share one short lock. File I/O does
 	// not hold it, so independent copies can run with an explicit parallel limit.
 	for {
@@ -395,6 +421,28 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		}
 		c.speedMu.Unlock()
 	}()
+	if m.FileStore {
+		e = c.copyStoredModel(ctx, temp, m, &r, &copied)
+		if e != nil {
+			r.State = "paused"
+			r.Error = e.Error()
+			c.progress.Store(key, r)
+			return "", e
+		}
+		if e = os.Rename(temp, dest); e != nil {
+			return "", e
+		}
+		if e = syncWorkerDir(c.Root); e != nil {
+			return "", e
+		}
+		c.verified.Store(key, true)
+		r.State = "ready"
+		r.Error = ""
+		r.Bytes = m.SizeBytes
+		c.progress.Store(key, r)
+		now := c.Clock.Now()
+		return dest, os.Chtimes(dest, now, now)
+	}
 	if len(m.Files) > 0 {
 		e = c.copyModelFiles(ctx, source, temp, m, &r, &copied)
 		if e != nil {
@@ -523,6 +571,9 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 // happens before joining; it cannot block heartbeats behind a large NAS copy.
 func (c *ModelCache) ValidateInventory(models []Model) {
 	for _, m := range models {
+		if m.FileStore {
+			c.storedModels.Store(cacheKey(m), m)
+		}
 		c.verified.Delete(cacheKey(m))
 		if size, e := cacheEntrySize(filepath.Join(c.Root, cacheKey(m)+".partial")); e == nil {
 			c.progress.Store(cacheKey(m), CopyReport{Model: m.Name, State: "paused", Bytes: size, Total: m.SizeBytes})

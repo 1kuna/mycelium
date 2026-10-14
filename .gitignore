@@ -29,3 +29,5 @@ ops/private/
 
 /.venv-prod-ready*/
 clients/python/src/*.egg-info/
+
+/myce.db.files/
