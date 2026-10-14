@@ -241,7 +241,7 @@ func (q *Queue) machineLimitReason(m *Machine) string {
 		}
 	}
 	for _, c := range q.calls {
-		if c.Machine != "" && c.Error == "" && q.s.Machines[c.Machine] != nil && hostID(q.s.Machines[c.Machine]) == host {
+		if c.Machine != "" && q.s.Machines[c.Machine] != nil && hostID(q.s.Machines[c.Machine]) == host {
 			count++
 		}
 	}

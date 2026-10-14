@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 func LocalOwnerSignals(ctx context.Context) OwnerSignals {
@@ -15,6 +17,12 @@ func LocalOwnerSignals(ctx context.Context) OwnerSignals {
 			}
 		}
 		return filepath.Glob(pattern)
-	}, command: LocalMachineProbe().Command}
+	}, command: LocalMachineProbe().Command, monotonic: func() (float64, error) {
+		var stamp unix.Timespec
+		if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &stamp); err != nil {
+			return 0, err
+		}
+		return float64(stamp.Sec) + float64(stamp.Nsec)/1e9, nil
+	}}
 	return p.detect(ctx)
 }
