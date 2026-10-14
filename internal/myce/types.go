@@ -73,10 +73,16 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
-	Name     string     `json:"name" yaml:"name"`
-	Project  string     `json:"project" yaml:"project"`
-	Priority string     `json:"priority" yaml:"priority"`
-	Deadline *time.Time `json:"deadline,omitempty" yaml:"deadline,omitempty"`
+	Kind     string            `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Program  *Program          `json:"program,omitempty" yaml:"program,omitempty"`
+	Args     []string          `json:"args,omitempty" yaml:"args,omitempty"`
+	SizeHint SizeHint          `json:"size_hint,omitempty" yaml:"size_hint,omitempty"`
+	Inputs   map[string]string `json:"inputs,omitempty" yaml:"inputs,omitempty"`
+	Outputs  map[string]string `json:"outputs,omitempty" yaml:"outputs,omitempty"`
+	Name     string            `json:"name" yaml:"name"`
+	Project  string            `json:"project" yaml:"project"`
+	Priority string            `json:"priority" yaml:"priority"`
+	Deadline *time.Time        `json:"deadline,omitempty" yaml:"deadline,omitempty"`
 	Run      struct {
 		Docker           bool              `json:"docker,omitempty" yaml:"docker,omitempty"`
 		DockerNetwork    string            `json:"docker_network,omitempty" yaml:"docker_network,omitempty"`
@@ -102,7 +108,7 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
-	if s.Name == "" || s.Project == "" || len(s.Run.Command) == 0 || s.Run.Command[0] == "" {
+	if s.Name == "" || s.Project == "" || (!s.extensionJob() && (len(s.Run.Command) == 0 || s.Run.Command[0] == "")) {
 		return errors.New("name, project and run.command are required")
 	}
 	if rank(s.Priority) == 3 {
@@ -113,6 +119,12 @@ func (s Spec) Validate() error {
 	}
 	if s.Priority == "deadline" && s.Deadline == nil {
 		return errors.New("deadline priority requires a deadline")
+	}
+	if s.extensionJob() {
+		return validateExtensionJob(s)
+	}
+	if s.Kind == "" && (len(s.Inputs)+len(s.Outputs)+len(s.Args) > 0 || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
+		return errors.New("inputs, outputs, args and size_hint require a kind/program job")
 	}
 	if s.Needs.MemoryGB <= 0 || math.IsInf(s.Needs.MemoryGB, 0) || math.IsNaN(s.Needs.MemoryGB) {
 		return errors.New("needs.memory_gb must be positive: CPU-only work stays outside Mycelium")
@@ -190,6 +202,9 @@ type Copy struct {
 }
 
 type Job struct {
+	Extensions            []Extension                  `json:"extensions,omitempty"`
+	Extension             *ExtensionSelection          `json:"extension,omitempty"`
+	OutputFiles           map[string]string            `json:"output_files,omitempty"`
 	ReleaseConfirmed      bool                         `json:"release_confirmed,omitempty"`
 	RequeuedByOperator    bool                         `json:"requeued_by_operator,omitempty"`
 	LastStopOutcome       string                       `json:"last_stop_outcome,omitempty"`
@@ -220,6 +235,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	ExtensionReports            []ExtensionReport   `json:"extension_reports,omitempty"`
 	EnablePending               bool                `json:"enable_pending,omitempty"`
 	HostMemoryBudgetGeneration  uint64              `json:"host_memory_budget_generation,omitempty"`
 	EffectiveHostMemoryBudgetGB float64             `json:"effective_host_memory_budget_gb,omitempty"`

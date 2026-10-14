@@ -37,6 +37,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	Extensions       map[string]Extension             `json:"extensions,omitempty"`
 	HostControls     map[string]HostControlGeneration `json:"host_controls,omitempty"`
 	DisabledHosts    map[string]string                `json:"disabled_hosts,omitempty"`
 	Hosts            map[string]*HostState            `json:"hosts,omitempty"`
@@ -299,6 +300,10 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
 			return e
 		}
+		extensions, e := q.resolveExtensions(&s)
+		if e != nil {
+			return e
+		}
 		recipes, e := q.resolveEnvironment(s.Environment)
 		if e != nil {
 			return e
@@ -314,7 +319,7 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 			deadline := q.clock.Now().Add(ProductionStartTimeout)
 			s.StartBy = &deadline
 		}
-		j := &Job{EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j := &Job{Extensions: extensions, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		if e := q.validateProjectCapacity(j); e != nil {
 			return e
 		}
@@ -688,6 +693,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				j = nil
 			}
 			if j != nil {
+				if e := qualifiedExtension(j, &m); e != nil {
+					j.Extension = &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}
+				}
 				j.State = "running"
 				j.ReleaseConfirmed = false
 				j.RequeuedByOperator = false
@@ -699,6 +707,12 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
 				j.Starts = max(j.Starts, j.Attempt) + 1
 				j.Attempt = j.Starts
+				if j.Spec.extensionJob() {
+					j.OutputFiles = map[string]string{}
+					for name, prefix := range j.Spec.Outputs {
+						j.OutputFiles[name] = outputRelative(*j, name, prefix)
+					}
+				}
 				j.Progress = 0
 				j.Copies = append(j.Copies, Copy{Machine: m.ID, Session: m.Session, Attempt: j.Attempt})
 				j.Machine = m.ID

@@ -46,6 +46,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) == 0 {
 		return errors.New("usage: myce queue|join|leave|disable|enable|submit|status|logs|wait|cancel|resolve-docker|dev")
 	}
+	if args[0] == "extension" {
+		return extensionCommand(args[1:])
+	}
 	if args[0] == "host-queues" {
 		return hostQueuesCommand(args[1:], probe, os.Stdout)
 	}
@@ -127,6 +130,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total bytes held in the queue model-upload spool")
 	checkpoint := f.String("checkpoints", "./checkpoints", "queue NAS checkpoint root")
 	workerCheckpoint := f.String("checkpoint-root", env("MYCE_CHECKPOINT_ROOT", ""), "worker-local NAS root (may differ from queue mount path)")
+	extensionRoot := f.String("extension-root", "", "local extension library/cache (opt in)")
+	jobFileRoot := f.String("job-file-root", "", "local shared-storage root for extension job inputs/outputs")
 	cacheRoot := f.String("model-cache", "", "worker local model cache directory")
 	modelRoot := f.String("model-root", "", "worker NAS model root for relative model paths")
 	copyParallel := f.Int("model-copy-parallel", 1, "maximum concurrent NAS copies per worker")
@@ -234,7 +239,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{HostStateDir: *hostStateDir, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostStateDir: *hostStateDir, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -345,7 +350,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err != nil {
 			return err
 		}
-		w := myce.Worker{ServiceConfig: *serviceConfig, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, ServiceConfig: *serviceConfig, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
