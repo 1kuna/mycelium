@@ -177,6 +177,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
+	JoiningFile           string         `json:"joining_file,omitempty"`
 	EnvironmentFile       string         `json:"environment_file,omitempty"`
 	HostID                string         `json:"host_id,omitempty"`
 	DB                    string         `json:"db,omitempty"`
@@ -386,6 +387,19 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 			return err
 		}
 	}
+	var invitation *Invitation
+	if c.JoiningFile != "" {
+		if c.Role != "worker" || c.EnvironmentFile != "" {
+			return errors.New("joining invitation requires a worker without EnvironmentFile")
+		}
+		i, err := ReadInvitation(c.JoiningFile)
+		if err != nil {
+			return err
+		}
+		invitation = &i
+		token = i.Token
+		c.JoiningFile = filepath.Join(filepath.Dir(c.Config), "joining.json")
+	}
 	if token == "" {
 		return errors.New("set MYCE_TOKEN before installing")
 	}
@@ -432,6 +446,11 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 	}
 	for _, path := range []string{filepath.Dir(c.Config), filepath.Dir(c.Service), c.State} {
 		if err = os.MkdirAll(path, 0700); err != nil {
+			return err
+		}
+	}
+	if invitation != nil {
+		if err = WriteInvitation(c.JoiningFile, *invitation); err != nil {
 			return err
 		}
 	}
@@ -608,7 +627,18 @@ func LocalDoctorProbeWithMachine(token string, machine MachineProbe) DoctorProbe
 			path = parent
 		}
 	}, Queue: func(ctx context.Context, c ServiceConfig) error {
-		return (Client{URL: c.Queue, Token: token}).Call(ctx, "GET", "/api/status", nil, &Snapshot{})
+		client := Client{URL: c.Queue, Token: token}
+		if c.JoiningFile != "" {
+			i, err := ReadInvitation(c.JoiningFile)
+			if err != nil {
+				return err
+			}
+			client, err = i.Client(i.Address)
+			if err != nil {
+				return err
+			}
+		}
+		return client.Call(ctx, "GET", "/api/status", nil, &Snapshot{})
 	}}
 }
 func Doctor(ctx context.Context, c ServiceConfig, p DoctorProbe) []DoctorCheck {
@@ -677,6 +707,10 @@ func Doctor(ctx context.Context, c ServiceConfig, p DoctorProbe) []DoctorCheck {
 	return out
 }
 func ReadServiceToken(c ServiceConfig) (string, error) {
+	if c.JoiningFile != "" {
+		i, err := ReadInvitation(c.JoiningFile)
+		return i.Token, err
+	}
 	if c.EnvironmentFile != "" {
 		token, _, err := ReadFleetEnvironment(c.EnvironmentFile)
 		return token, err
@@ -728,7 +762,9 @@ func (c ServiceConfig) Args() []string {
 		args = append(args, "--upload-spool-bytes", strconv.FormatInt(c.UploadSpoolBytes, 10), "--restart-grace", c.RestartGrace.String(), "--production-loss-timeout", c.ProductionLossTimeout.String(), "--deadline-loss-timeout", c.DeadlineLossTimeout.String(), "--experiment-loss-timeout", c.ExperimentLossTimeout.String())
 	}
 	if c.Role == "worker" {
-		if c.EnvironmentFile == "" {
+		if c.JoiningFile != "" {
+			args = append(args, "--joining-file", c.JoiningFile)
+		} else if c.EnvironmentFile == "" {
 			args = append(args, "--queue", c.Queue)
 		}
 		args = append(args, "--host-id", c.HostID, "--reserve-host-memory-gb", strconv.FormatFloat(c.ReserveHostMemoryGB, 'f', -1, 64), "--heartbeat", c.Heartbeat.String())

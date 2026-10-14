@@ -523,6 +523,16 @@ func (w Worker) Run(stop context.Context) error {
 		return err
 	}
 	defer s.close()
+	if w.Machine.CapabilityProfile == nil {
+		probeCtx, cancel := context.WithTimeout(stop, 5*time.Second)
+		profile := LocalProfileProbe().Detect(probeCtx, w.Machine, s.dir, w.Clock.Now())
+		cancel()
+		w.Machine.CapabilityProfile = &profile
+		if err = saveWorkerJSON(s.dir, "capability-profile.json", profile); err != nil {
+			return err
+		}
+	}
+
 	if w.EnvironmentRoot == "" {
 		w.EnvironmentRoot = filepath.Join(s.dir, "environment-cache")
 	}

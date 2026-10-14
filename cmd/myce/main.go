@@ -46,6 +46,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) == 0 {
 		return errors.New("usage: myce queue|join|leave|disable|enable|submit|status|logs|wait|cancel|resolve-docker|dev")
 	}
+	if args[0] == "invite" {
+		return inviteCommand(args[1:])
+	}
 	if args[0] == "host-queues" {
 		return hostQueuesCommand(args[1:], probe, os.Stdout)
 	}
@@ -102,6 +105,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "wait" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+
 		return waitCommand(ctx, args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "measure" {
@@ -115,6 +119,10 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	since := f.String("since", "7d", "usage lookback, up to 90d")
 	by := f.String("by", "project", "usage grouping: project or machine")
+	joiningFile := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
+	discovery := f.Bool("discovery", true, "advertise a pinned TLS joining endpoint over DNS-SD")
+	discoveryListen := f.String("discovery-listen", "", "TLS joining listen address (default same interface as queue, automatic port)")
+	identityDir := f.String("identity-dir", "", "durable joining identity directory (default DB.joining)")
 	hostConfig := f.String("host-config", "", "physical-host production hold policy YAML")
 	projectConfig := f.String("project-config", "", "project weights and experiment caps YAML")
 	url := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
@@ -201,12 +209,37 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return nil
 		}
 	}
+	var invitation *myce.Invitation
+	if *joiningFile != "" {
+		i, e := myce.ReadInvitation(*joiningFile)
+		if e != nil {
+			return e
+		}
+		invitation = &i
+		*token = i.Token
+	}
 	if *token == "" {
 		return errors.New("set MYCE_TOKEN to the shared fleet token (dev defaults to dev-token)")
 	}
 	client := myce.Client{URL: *url, Token: *token}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if invitation != nil && args[0] != "join" {
+		explicit := ""
+		f.Visit(func(v *flag.Flag) {
+			if v.Name == "queue" {
+				explicit = *url
+			}
+		})
+		if explicit == "" {
+			explicit = invitation.Address
+		}
+		var e error
+		client, e = invitation.Client(explicit)
+		if e != nil {
+			return e
+		}
+	}
 	mc, err := myce.ReadModels(*modelFile)
 	if err != nil {
 		return err
@@ -291,6 +324,42 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err != nil {
 			return err
 		}
+		defer listener.Close()
+		if *discovery {
+			dir := *identityDir
+			if dir == "" {
+				dir = *db + ".joining"
+			}
+			identity, e := myce.LoadJoiningIdentity(dir)
+			if e != nil {
+				return e
+			}
+			bind := *discoveryListen
+			if bind == "" {
+				host, _, e := net.SplitHostPort(listener.Addr().String())
+				if e != nil {
+					return e
+				}
+				bind = net.JoinHostPort(host, "0")
+			}
+			tlsListener, e := net.Listen("tcp", bind)
+			if e != nil {
+				return e
+			}
+			defer tlsListener.Close()
+			joiningServer, _, e := myce.ServeJoining(tlsListener, myce.API{Queue: q, Token: *token}.Handler(), identity)
+			if e != nil {
+				return e
+			}
+			defer joiningServer.Close()
+			withdraw, e := myce.AdvertiseJoining(tlsListener.Addr(), identity.Fingerprint())
+			if e != nil {
+				fmt.Fprintln(os.Stderr, "Discovery unavailable; use a saved HTTPS joining address")
+			} else {
+				defer withdraw()
+			}
+			fmt.Printf("Mycelium joining: https://%s\n", tlsListener.Addr())
+		}
 		server := &http.Server{Handler: myce.API{Queue: q, Token: *token}.Handler(), ReadHeaderTimeout: 5 * time.Second}
 		errs := make(chan error, 2)
 		go func() { errs <- server.Serve(listener) }()
@@ -344,6 +413,24 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		hostSource, err := myce.NewHostMemorySource(ramReserve)
 		if err != nil {
 			return err
+		}
+		if invitation != nil {
+			explicit := ""
+			f.Visit(func(v *flag.Flag) {
+				if v.Name == "queue" {
+					explicit = *url
+				}
+			})
+			resolveCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			client, err = myce.ResolveJoining(resolveCtx, *invitation, explicit, myce.MDNSDiscovery{})
+			cancel()
+			if err != nil {
+				return err
+			}
+			invitation.Address = client.URL
+			if err = myce.WriteInvitation(*joiningFile, *invitation); err != nil {
+				return err
+			}
 		}
 		w := myce.Worker{ServiceConfig: *serviceConfig, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
@@ -503,6 +590,9 @@ func printStatus(s myce.Snapshot, full bool) {
 		}
 		fmt.Printf("copy speed %s: %.0f bytes/s; estimated NAS copy seconds %v\n", m.ID, m.CopyBytesPerSecond, m.ModelCopySeconds)
 		fmt.Printf("cache %s: %v, %d bytes free %s\n", m.ID, m.CachedModels, m.CacheFreeBytes, m.CacheError)
+		if m.CapabilityProfile != nil {
+			fmt.Printf("hypha %s %s\n", m.ID, m.CapabilityProfile.Summary())
+		}
 		fmt.Printf("machine %s: %s, %.1f GB free, %s\n", m.ID, m.GPU, m.FreeMemoryGB, state)
 	}
 	for _, r := range s.SyncRequests {
