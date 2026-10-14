@@ -10,6 +10,7 @@ import (
 func linuxSignalsFixture() (linuxOwnerProbe, map[string]string) {
 	files := map[string]string{"/proc/sys/kernel/osrelease": "6.8.0", "/proc/uptime": "1000.00 0", "/sys/class/power_supply/BAT0/type": "Battery", "/sys/class/power_supply/BAT0/present": "1", "/sys/class/power_supply/BAT0/status": "Full", "/sys/class/power_supply/AC/type": "Mains", "/sys/class/power_supply/AC/online": "1", "/sys/class/hwmon/hwmon0/name": "coretemp", "/sys/class/hwmon/hwmon0/temp1_input": "60000", "/sys/class/hwmon/hwmon0/temp1_max": "90000"}
 	p := linuxOwnerProbe{
+		monotonic: func() (float64, error) { return 1000, nil },
 		read: func(path string) ([]byte, error) {
 			s, ok := files[path]
 			if !ok {
@@ -127,5 +128,18 @@ func TestLinuxIdleSessionCoverage(t *testing.T) {
 	}
 	if seconds, known := p.idle(context.Background()); !known || seconds != 0 {
 		t.Fatal("second owner session ignored", seconds, known)
+	}
+}
+
+func TestLinuxIdleUsesLogindClockDomain(t *testing.T) {
+	p, files := linuxSignalsFixture()
+	files["/proc/uptime"] = "4600.00 0" // includes an hour asleep
+	idle, known := p.idle(context.Background())
+	if !known || idle != 400 {
+		t.Fatal("sleep inflated logind idle duration", idle, known)
+	}
+	p.monotonic = func() (float64, error) { return 0, errors.New("clock unavailable") }
+	if _, known := p.idle(context.Background()); known {
+		t.Fatal("unknown monotonic time admitted")
 	}
 }

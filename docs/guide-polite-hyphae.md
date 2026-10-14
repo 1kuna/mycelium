@@ -54,9 +54,12 @@ concurrency, not watts, GPU percentage, fan speed or noise.
   withholds at fair/serious/critical; nominal must persist for 60 seconds after
   a heat hold. Building on macOS needs cgo and the usual Xcode command-line SDK.
   A macOS binary built without cgo reports unknown signals and waits in daily mode.
+  The aggregate query covers the worker's login session; fast user switching
+  and coverage of other logged-in users remain unverified.
 - **Linux:** logind, queried through `loginctl`, covers every listed user session.
   Work waits five minutes after every user session's idle hint, which is more
-  conservative than claiming it is a last-input timer. No user session, an
+  conservative than claiming it is a last-input timer. Hint age uses the same
+  OS monotonic clock as logind, rather than boot uptime that includes sleep. No user session, an
   uncovered session, denied access or missing desktop idle hints means waiting.
   Power comes from read-only kernel `power_supply` attributes. Heat comes from
   recognized CPU/GPU hwmon sensors with valid max/critical limits and no faults.

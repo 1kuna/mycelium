@@ -12,9 +12,10 @@ import (
 // files are injected for laptop tests. Neither raw input devices nor X cookies
 // are read. Missing/unsupported desktop hints conservatively stay unavailable.
 type linuxOwnerProbe struct {
-	read    func(string) ([]byte, error)
-	glob    func(string) ([]string, error)
-	command func(context.Context, string, ...string) ([]byte, error)
+	read      func(string) ([]byte, error)
+	glob      func(string) ([]string, error)
+	command   func(context.Context, string, ...string) ([]byte, error)
+	monotonic func() (float64, error)
 }
 
 func (p linuxOwnerProbe) detect(ctx context.Context) OwnerSignals {
@@ -40,16 +41,13 @@ func properties(raw []byte) map[string]string {
 	return m
 }
 func (p linuxOwnerProbe) idle(ctx context.Context) (float64, bool) {
-	raw, err := p.read("/proc/uptime")
-	fields := strings.Fields(string(raw))
-	if err != nil || len(fields) == 0 {
-		return 0, false
-	}
-	uptime, err := strconv.ParseFloat(fields[0], 64)
+	uptime, err := p.monotonic()
 	if err != nil || math.IsNaN(uptime) || math.IsInf(uptime, 0) || uptime < 0 {
 		return 0, false
 	}
-	raw, err = p.command(ctx, "loginctl", "list-sessions", "--no-legend", "--no-pager")
+	// logind's hint uses CLOCK_MONOTONIC. /proc/uptime includes suspend,
+	// so subtracting it would incorrectly turn sleep into owner inactivity.
+	raw, err := p.command(ctx, "loginctl", "list-sessions", "--no-legend", "--no-pager")
 	if err != nil {
 		return 0, false
 	}
