@@ -714,7 +714,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 				}
 				j.Progress = 0
-				j.Copies = append(j.Copies, Copy{Machine: m.ID, Session: m.Session, Attempt: j.Attempt})
+				j.Copies = append(j.Copies, Copy{Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension})
 				j.Machine = m.ID
 				j.Session = m.Session
 				j.Reason = ""

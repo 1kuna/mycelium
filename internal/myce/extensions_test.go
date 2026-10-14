@@ -494,6 +494,13 @@ func TestExtensionQualificationChangeBeforeStartRequeuesWithoutLoss(t *testing.T
 		t.Fatal("qualification failure charged loss or failed job")
 	}
 	second := check(t, q, b, nil).Job
+	if second != nil {
+		for _, copy := range second.Copies {
+			if copy.Extension == nil || copy.Extension.Digest != e.Digest {
+				t.Fatal("attempt extension identity lost")
+			}
+		}
+	}
 	if second == nil || second.Attempt <= first.Attempt {
 		t.Fatal("did not try another qualified hypha")
 	}

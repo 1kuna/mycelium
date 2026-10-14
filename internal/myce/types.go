@@ -193,12 +193,13 @@ func rank(p string) int {
 }
 
 type Copy struct {
-	LossCharged bool   `json:"loss_charged,omitempty"`
-	Recoverable bool   `json:"recoverable"`
-	Machine     string `json:"machine"`
-	Session     string `json:"session"`
-	Attempt     int    `json:"attempt"`
-	Progress    int64  `json:"progress"`
+	Extension   *ExtensionSelection `json:"extension,omitempty"`
+	LossCharged bool                `json:"loss_charged,omitempty"`
+	Recoverable bool                `json:"recoverable"`
+	Machine     string              `json:"machine"`
+	Session     string              `json:"session"`
+	Attempt     int                 `json:"attempt"`
+	Progress    int64               `json:"progress"`
 }
 
 type Job struct {
