@@ -2,12 +2,14 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -15,15 +17,50 @@ import (
 )
 
 func TestDisableFindsMarkedDetachedGroupAfterLeaderExit(t *testing.T) {
+	for _, helper := range []bool{false, true} {
+		name := "system-command"
+		if helper {
+			name = "visible-environment"
+		}
+		t.Run(name, func(t *testing.T) { testDisableDetachedGroup(t, helper) })
+	}
+}
+
+func TestDisableDetachedMarkerHelper(t *testing.T) {
+	if os.Getenv("MYCE_DETACHED_TEST_HELPER") != "1" {
+		return
+	}
+	fmt.Println("ready")
+	time.Sleep(time.Minute)
+}
+
+func testDisableDetachedGroup(t *testing.T, helper bool) {
+	t.Helper()
 	root, state := t.TempDir(), t.TempDir()
 	identity := ID()
 	cmd := exec.Command("sleep", "60")
-	cmd.Env = append(os.Environ(), "MYCE_PROCESS_ID="+identity)
+	if helper {
+		cmd = exec.Command(os.Args[0], "-test.run=^TestDisableDetachedMarkerHelper$")
+	}
+	cmd.Env = []string{"MYCE_PROCESS_ID=" + identity}
+	if helper {
+		cmd.Env = append(cmd.Env, "MYCE_DETACHED_TEST_HELPER=1")
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	if helper {
+		ready := make([]byte, len("ready\n"))
+		if _, err := io.ReadFull(stdout, ready); err != nil || string(ready) != "ready\n" {
+			t.Fatalf("helper readiness: %q %v", ready, err)
+		}
+	}
 	// A child used setsid; its original group no longer exists.
 	if err := saveWorkerJSON(root, "worker-test.json", HostWorker{State: state}); err != nil {
 		t.Fatal(err)
@@ -31,13 +68,53 @@ func TestDisableFindsMarkedDetachedGroupAfterLeaderExit(t *testing.T) {
 	if err := saveWorkerJSON(state, "attempt-test.json", workerState{PID: 99999999, Identity: identity}); err != nil {
 		t.Fatal(err)
 	}
-	r, err := (HostControl{Dir: root}).Disable(context.Background(), "detached child", 0)
-	if err != nil {
-		t.Fatal(err)
+	h := HostControl{Dir: root}
+	if helper {
+		groups, err := ownedRecordGroups(workerState{PID: 99999999, Identity: identity})
+		if err != nil || len(groups) != 1 || groups[0] != cmd.Process.Pid {
+			t.Fatalf("detached environment marker not discovered: %v %v", groups, err)
+		}
 	}
+	r, err := h.Disable(context.Background(), "detached child", 0)
+	requireNativeMarkerDisableReport(t, h, r, err)
 	birth, err := processBirth(cmd.Process.Pid)
 	if err == nil && birth != "" {
-		t.Fatalf("disable certified cleanup with detached child alive: %+v", r)
+		// Restricted system binaries can have hidden environments on macOS.
+		// They must be explicitly unconfirmed, never silently accepted.
+		if helper || runtime.GOOS != "darwin" {
+			t.Fatalf("disable left a discoverable detached child alive: %+v", r)
+		}
+	}
+	if (helper || runtime.GOOS != "darwin") && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("detached child exit not verified: %q %v", birth, err)
+	}
+	if helper && r.Stopped != 1 {
+		t.Fatalf("detached group was not stopped: %+v", r)
+	}
+}
+
+func requireNativeMarkerDisableReport(t *testing.T, h HostControl, r DisableReport, err error) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		if err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if err == nil || r.Confirmed || !r.BestEffort || !strings.Contains(strings.Join(r.Unconfirmed, "; "), "process environment markers") {
+		t.Fatalf("hidden macOS descendants not explicitly unconfirmed: %+v %v", r, err)
+	}
+	if reason, err := HostDisabled(h.Dir); err != nil || reason == "" {
+		t.Fatalf("unconfirmed cleanup lost disable flag: %q %v", reason, err)
+	}
+	if _, err := os.Stat(filepath.Join(h.Dir, "disable-receipt.json")); !os.IsNotExist(err) {
+		t.Fatalf("unconfirmed cleanup got receipt: %v", err)
+	}
+	if err := h.Enable(context.Background()); err == nil {
+		t.Fatal("unconfirmed cleanup allowed enable")
+	}
+	if reason, err := HostDisabled(h.Dir); err != nil || reason == "" {
+		t.Fatalf("refused enable lost disable flag: %q %v", reason, err)
 	}
 }
 
