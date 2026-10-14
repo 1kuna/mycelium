@@ -148,9 +148,8 @@ Python `Client.submit(dict)` use these identical fields. Kind/program jobs do
 not declare `needs`, an environment, command or workdir. Ordinary `run.env` can
 supply program configuration, but cannot override worker/extension identity,
 resource selectors or the ready resource string. Mycelium derives conservative
-memory reservations from the extensions and optional size hint. Capability
-profiles and measured program needs belong to slice #37/later work; no claims
-of automatic memory estimation are made here. Multiple matching extensions
+memory reservations from the extensions and optional size hint. Capability profiles and measured program needs are used by the v3 queue;
+see [placement and measurement limits](guide-placement-v3.md). Multiple matching extensions
 are tried in deterministic name/version order, only when qualified. A job
 records the exact chosen name/version/content digest on every attempt.
 
@@ -178,7 +177,7 @@ the actual API and runner using deliberately fake extension fixtures.
 
 ## Starter extensions
 
-- `extensions/pytorch-script`: PyTorch 2.8.0, CUDA/XPU/MPS, unmodified programs
+- `extensions/pytorch-script`: PyTorch 2.8.0, extension v0.2.0, CUDA/XPU/MPS, unmodified programs
   choosing `torch.device(os.environ['MYCE_DEVICE'])`. Includes a small native
   MPS pointwise float32 reference and repeated measurements. This qualifies
   that sample only, not every PyTorch model or script.
