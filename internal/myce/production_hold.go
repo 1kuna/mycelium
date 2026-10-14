@@ -114,7 +114,7 @@ func (q *Queue) retainRelease(j *Job) {
 		return
 	}
 	policy := q.s.Hosts[hostID(m)]
-	if j.Spec.StartBy == nil && !j.Spec.Run.Docker && m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0 && (policy == nil || !policy.Policy.ProductionHold) {
+	if j.Spec.StartBy == nil && !j.Spec.Run.Docker && m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0 && q.machineJobLimit(m) == 0 && (policy == nil || !policy.Policy.ProductionHold) {
 		return
 	}
 	if q.s.HostReleases == nil {

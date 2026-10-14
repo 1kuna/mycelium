@@ -218,7 +218,7 @@ func availabilityBlocked(m *Machine) bool {
 
 // Limits are admission-only and shared by all resource workers on this host.
 // Ready idle model servers aren't jobs; in-flight model calls are.
-func (q *Queue) machineLimitReason(m *Machine) string {
+func (q *Queue) machineJobLimit(m *Machine) int {
 	limit := 0
 	host := hostID(m)
 	for _, other := range q.s.Machines {
@@ -231,12 +231,24 @@ func (q *Queue) machineLimitReason(m *Machine) string {
 	if m.MaxJobs > 0 && (limit == 0 || m.MaxJobs < limit) {
 		limit = m.MaxJobs
 	}
+	return limit
+}
+func (q *Queue) machineLimitReason(m *Machine) string {
+	limit := q.machineJobLimit(m)
 	if limit == 0 {
 		return ""
 	}
+	host := hostID(m)
 	count := 0
+	seen := map[string]bool{}
 	for _, j := range q.s.Jobs {
 		if (j.State == "running" || j.State == "stopping") && q.s.Machines[j.Machine] != nil && hostID(q.s.Machines[j.Machine]) == host {
+			count++
+			seen[releaseKey(HostRelease{Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt})] = true
+		}
+	}
+	for key, r := range q.s.HostReleases {
+		if r.Host == host && !r.Preparation && !seen[key] {
 			count++
 		}
 	}

@@ -492,3 +492,37 @@ func TestAvailabilityCancelsModelWorkAndRecovers(t *testing.T) {
 		t.Fatal("stale model work not cancelled")
 	}
 }
+
+func TestMachineLimitRetainsUnacknowledgedStop(t *testing.T) {
+	q, clock := fixture(t)
+	a, b := machine("limited-a", "fake"), machine("limited-b", "fake")
+	a.HostID = "limited-host"
+	b.HostID = "limited-host"
+	a.MaxJobs = 1
+	b.MaxJobs = 1
+	check(t, q, a, nil)
+	check(t, q, b, nil)
+	j := submit(t, q, spec("experiment"))
+	assigned := check(t, q, a, nil).Job
+	if assigned == nil {
+		t.Fatal("no initial assignment")
+	}
+	a = profileAvailability(a, Availability{Mode: "daily", Reason: "owner active"})
+	check(t, q, a, assigned)
+	clock.Advance(11 * time.Second)
+	q.Tick()
+	if q.machineLimitReason(&b) == "" {
+		t.Fatal("expired grace credited unacknowledged physical release")
+	}
+	if r := check(t, q, b, nil); r.Job != nil {
+		t.Fatal("limit admitted over an unacknowledged attempt")
+	}
+	ack := result(assigned, true)
+	ack.ReleaseOnly = true
+	if err := q.Complete(ack); err != nil {
+		t.Fatal(err)
+	}
+	if r := check(t, q, b, nil); r.Job == nil || r.Job.ID != j.ID || r.Job.Attempt != 2 {
+		t.Fatal("confirmed release didn't free machine limit", r)
+	}
+}
