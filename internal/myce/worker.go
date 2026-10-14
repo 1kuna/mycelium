@@ -22,6 +22,9 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	ExtensionRoot         string
+	JobFileRoot           string
+	extensionFingerprint  string
 	RequireMemoryCeilings bool
 	memoryCeilings        *memoryCeilings
 	MemorySwapMaxBytes    int64
@@ -123,6 +126,31 @@ var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 var errWorkerReleasePending = errors.New("command release unconfirmed")
 
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
+	extensionEnv, extensionRelease, extensionErr := w.prepareExtensionExecution(&j)
+	if extensionErr != nil {
+		return nil, extensionErr
+	}
+	extensionStarted := false
+	defer func() {
+		if !extensionStarted && extensionRelease != nil {
+			extensionRelease()
+		}
+	}()
+	if j.Spec.extensionJob() {
+		value := j
+		dir, err := s.extensionFiles.run(attemptCheckpoint(j), func() (string, error) {
+			err := w.prepareExtensionFiles(&value, s.dir)
+			return value.Spec.Run.Workdir, err
+		})
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "NAS unreachable:") {
+				return nil, fmt.Errorf("%w: input copy pending", errWorkerCheckpoint)
+			}
+			return nil, err
+		}
+		j.Spec.Run.Workdir = dir
+	}
+
 	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
 		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
@@ -275,6 +303,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		env["VIRTUAL_ENV"] = filepath.Join(environmentPath, "venv")
 		env["MYCE_ENVIRONMENT_DIR"] = environmentPath
 	}
+	for k, v := range extensionEnv {
+		env[k] = v
+	}
 	if w.Machine.Device != "" {
 		bound, e := WithModelDevice(Model{}, w.Machine.GPU, w.Machine.Device)
 		if e != nil {
@@ -402,8 +433,12 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	launchErr := err
 	result := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
+	extensionStarted = true
 	started = true
 	go func() {
+		if extensionRelease != nil {
+			defer extensionRelease()
+		}
 		if release != nil {
 			defer release()
 		}
@@ -431,6 +466,12 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			result.Error = syncErr.Error()
 		} else if closeErr != nil {
 			result.Error = closeErr.Error()
+		}
+		if result.Success {
+			if e := w.publishExtensionFiles(j); e != nil {
+				result.Success = false
+				result.Error = e.Error()
+			}
 		}
 		p.mu.Lock()
 		result.Interrupted = p.stopped || p.killed
@@ -738,6 +779,11 @@ func (w Worker) Run(stop context.Context) error {
 	leaving := stop.Err() != nil
 	leaveSent := false
 	stopCh := stop.Done()
+	if w.ExtensionRoot != "" {
+		probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		w.extensionFingerprint, _ = ExtensionFingerprint(probeCtx, w.Machine.GPU, w.Machine.Device)
+		cancel()
+	}
 	base := w.Machine.FreeMemoryGB
 	fresh := !recovering && s.state.Fresh
 	eventCtx, eventCancel := context.WithCancel(context.Background())
@@ -846,6 +892,10 @@ func (w Worker) Run(stop context.Context) error {
 			rt.session = w.Machine.Session
 			rt.mu.Unlock()
 			m := w.Machine
+			if w.ExtensionRoot != "" {
+				m.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, m.GPU, w.extensionFingerprint)
+				w.Machine.ExtensionReports = m.ExtensionReports
+			}
 			m.EnablePending = enablePending
 			if p != nil && p.docker != nil {
 				status := p.docker.status()
@@ -993,7 +1043,7 @@ func (w Worker) Run(stop context.Context) error {
 							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) {
 								log.Printf("retry pending start: %v", err)
 							} else {
-								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error(), ReleasePending: errors.Is(err, errWorkerReleasePending)}
+								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
 								s.state.Result = &r
 								if !r.ReleasePending {
 									s.state.PID = 0
@@ -1117,7 +1167,7 @@ func (w Worker) Run(stop context.Context) error {
 							}
 						}
 						if err != nil && !(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory)) {
-							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), ReleasePending: errors.Is(err, errWorkerReleasePending)}
+							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
 							s.state.Job = &j
 							if w.batchMemory != nil {
 								w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))

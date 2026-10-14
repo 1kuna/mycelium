@@ -1,0 +1,25 @@
+name: pytorch-script
+version: '0.1.0'
+purpose: Run an unchanged device-agnostic PyTorch program using MYCE_DEVICE.
+platforms: [cuda, xpu, metal]
+program_types: [pytorch-script]
+memory_gb: 1
+host_memory_gb: 1
+resumable: true
+setup: [python3, setup.py]
+run: [python3, '{extension}/run.py']
+check: [python3, check.py]
+notes: |
+  Programs choose torch.device(os.environ['MYCE_DEVICE']); Mycelium supplies
+  cuda:0, xpu:0, or mps after applying the hypha's resource selector. No CPU
+  fallback. Programs opt into resumable only when they implement the checkpoint
+  contract; the runner forwards signals unchanged. The baseline only covers its sample.
+baselines:
+  program:pytorch-script:
+    input: baseline/input.json
+    output: baseline/native-output.json
+    measure: numeric
+    absolute: 0
+    relative: 0
+    native: PyTorch 2.8.0, Apple silicon MPS, float32 pointwise tensor operations.
+    variation: Three native repetitions had zero spread; see baseline/measurement.json. No wider cross-platform allowance is claimed.

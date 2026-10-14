@@ -22,6 +22,14 @@ type API struct {
 
 func (a API) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/extensions", func(w http.ResponseWriter, r *http.Request) {
+		var e Extension
+		if !decode(w, r, &e) {
+			return
+		}
+		respond(w, map[string]bool{"ok": true}, a.Queue.AddExtension(e))
+	})
+	mux.HandleFunc("GET /api/extensions", func(w http.ResponseWriter, r *http.Request) { respond(w, a.Queue.Extensions(), nil) })
 	mux.HandleFunc("GET /api/usage", func(w http.ResponseWriter, r *http.Request) {
 		d, e := time.ParseDuration(r.URL.Query().Get("since"))
 		if e != nil || d <= 0 || d > 90*24*time.Hour {
@@ -191,7 +199,11 @@ func (a API) Handler() http.Handler {
 	})
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	limit := int64(1 << 20)
+	if r.URL.Path == "/api/extensions" {
+		limit = 2 << 20
+	} // base64 transport of a <=1 MiB folder
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	d.DisallowUnknownFields()
 	err := d.Decode(v)
 	if err == nil {

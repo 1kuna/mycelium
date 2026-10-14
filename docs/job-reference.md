@@ -628,3 +628,12 @@ networks, socket mounts, privileged mode and submitted network/alias/lifecycle
 flags remain forbidden. Inspected violations stop the whole attempt with a
 specific reason. Labels are inspected before removal; unlabeled networks and
 unrelated containers are never touched.
+
+## v3 extension jobs
+
+On the opt-in v3 branch, jobs can describe a `kind` (with `args`) or a `program`
+(`type`, `file`, `args`), plus NAS-relative `inputs`, `outputs` and optional
+`size_hint`. Their commands and hardware reservations come from a qualified,
+frozen extension version. Existing v2 forms above are unchanged. See
+[write an extension](write-an-extension.md) for the common YAML/JSON/Python
+form, setup/check qualification and per-attempt output contract.
