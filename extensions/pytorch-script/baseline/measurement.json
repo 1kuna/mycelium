@@ -1,0 +1,15 @@
+{
+  "resource": "mps",
+  "torch": "2.8.0",
+  "dtype": "float32",
+  "samples": 3,
+  "maximum_absolute_spread": 0.0,
+  "output": [
+    0.265625,
+    -0.4375,
+    1.25,
+    4.0625,
+    1.25,
+    32.0625
+  ]
+}

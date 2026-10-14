@@ -1,0 +1,9 @@
+{
+  "model": "stories15M-q4_0.gguf",
+  "url": "https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories15M-q4_0.gguf",
+  "sha256": "66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739",
+  "prompt": "Once upon a time",
+  "tokens": 8,
+  "seed": 42,
+  "temperature": 0
+}
