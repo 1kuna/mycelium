@@ -6,6 +6,8 @@ Atlas, Verso, or GPU guards/controllers. The old B70 v1 service was already
 removed on 2026-10-09; do not reinstall it. Other legacy data is outside v2 scope.
 Spark's Atlas GPU ownership still requires an agreed handoff.
 
+For the v3 invitation and Bonjour/mDNS path, see [automatic joining](guide-joining-v3.md). Its pinned TLS joining endpoint is separate from the existing HTTP recipes below.
+
 ## Paths and prerequisites
 
 | Item | v2 path/name |
