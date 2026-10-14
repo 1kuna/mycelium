@@ -22,6 +22,10 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	DailyUse              bool
+	Laptop                bool
+	OwnerSignals          OwnerSignalSource
+	availability          *availabilityMonitor
 	ExtensionRoot         string
 	JobFileRoot           string
 	extensionFingerprint  string
@@ -77,6 +81,7 @@ type process struct {
 	done    chan workerFinish
 	stopAt  *time.Time
 	stopped bool
+	polite  bool
 	killed  bool
 }
 
@@ -126,6 +131,9 @@ var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 var errWorkerReleasePending = errors.New("command release unconfirmed")
 
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
+	if err := w.checkAvailability(); err != nil {
+		return nil, err
+	}
 	extensionEnv, extensionRelease, extensionErr := w.prepareExtensionExecution(&j)
 	if extensionErr != nil {
 		return nil, extensionErr
@@ -209,6 +217,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
 		return nil, err
 	}
+	if err := w.checkAvailability(); err != nil {
+		return nil, err
+	}
 	if j.Spec.Run.Docker {
 		p, e := w.startDocker(s, j, checkpoint, release)
 		environmentStarted = e == nil
@@ -247,6 +258,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		return nil, err
 	}
 	defer unlock()
+	if err := w.checkAvailability(); err != nil {
+		return nil, err
+	}
 	if err := w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
 		return nil, err
 	}
@@ -484,6 +498,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		}
 		p.mu.Lock()
 		result.Interrupted = p.stopped || p.killed
+		result.PoliteStop = p.polite
 		if oomErr != nil && ceilingDiagnostic(oomErr.Error(), "") != "" {
 			result.Interrupted = false
 			result.Forced = false
@@ -553,6 +568,9 @@ func (w Worker) Run(stop context.Context) error {
 	}
 	if w.Clock == nil {
 		w.Clock = RealClock{}
+	}
+	if w.Machine.MaxJobs < 0 {
+		return errors.New("max-jobs must be nonnegative")
 	}
 	if w.Machine.ID == "" || !validGPU(w.Machine.GPU) || (w.MemorySource == nil && (!validMemoryValue(w.Machine.FreeMemoryGB) || w.Machine.FreeMemoryGB <= 0)) {
 		return errors.New("worker requires a name, GPU platform and positive free-memory budget")
@@ -734,11 +752,43 @@ func (w Worker) Run(stop context.Context) error {
 		}
 	}
 
+	availabilityCtx, availabilityCancel := context.WithCancel(context.Background())
+	availabilityDone := make(chan struct{})
+	availabilityWake := make(chan struct{}, 1)
+	w.availability = newAvailabilityMonitor(w.Clock, w.DailyUse, w.Laptop)
+	if w.OwnerSignals == nil {
+		w.OwnerSignals = LocalOwnerSignals
+	}
+	probeCtx, probeCancel := context.WithTimeout(availabilityCtx, 2*time.Second)
+	w.availability.sample(w.OwnerSignals(probeCtx))
+	probeCancel()
+	go func() {
+		defer close(availabilityDone)
+		w.availability.run(availabilityCtx, w.OwnerSignals, availabilityWake)
+	}()
+	defer func() { availabilityCancel(); <-availabilityDone }()
 	rt, err := startModels(w, s.dir)
 	if err != nil {
 		return err
 	}
+	modelAvailabilityDone := make(chan struct{})
+	go func() {
+		defer close(modelAvailabilityDone)
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-availabilityCtx.Done():
+				return
+			case <-tick.C:
+				rt.withdrawLocalAvailability()
+			}
+		}
+	}()
 	defer func() {
+		availabilityCancel()
+		<-modelAvailabilityDone
+
 		if e := rt.close(); e != nil {
 			log.Printf("model engine cleanup: %v", e)
 		}
@@ -799,7 +849,7 @@ func (w Worker) Run(stop context.Context) error {
 	defer eventCancel()
 	events := make(chan WorkerEvent, 1)
 	go w.watchStops(eventCtx, events)
-	w.control = &processControl{clock: w.Clock, wake: make(chan struct{}, 1)}
+	w.control = &processControl{clock: w.Clock, wake: make(chan struct{}, 1), availability: w.availability}
 	controlDone := make(chan struct{})
 	go func() {
 		defer close(controlDone)
@@ -905,6 +955,12 @@ func (w Worker) Run(stop context.Context) error {
 				m.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, m.GPU, w.extensionFingerprint)
 				w.Machine.ExtensionReports = m.ExtensionReports
 			}
+			if m.CapabilityProfile != nil {
+				profile := *m.CapabilityProfile
+				a := w.availability.snapshot()
+				profile.Availability = &a
+				m.CapabilityProfile = &profile
+			}
 			m.EnablePending = enablePending
 			if p != nil && p.docker != nil {
 				status := p.docker.status()
@@ -1005,7 +1061,7 @@ func (w Worker) Run(stop context.Context) error {
 						log.Printf("Docker release acknowledgement: %v", ackErr)
 					}
 				}
-				busy := reply.Job != nil || s.state.Job != nil || leaving || recovering || enablePending
+				busy := reply.Job != nil || s.state.Job != nil || leaving || recovering || enablePending || w.checkAvailability() != nil
 				for _, slot := range reply.ModelPlan {
 					if slot.State == "loading" || slot.InFlight > 0 {
 						busy = true
@@ -1049,7 +1105,7 @@ func (w Worker) Run(stop context.Context) error {
 					} else if !reply.AdmissionBlocked && budgetErr == nil && (!needsCheckpoint(s.state.Job) || available) {
 						p, err = w.start(s, *s.state.Job)
 						if err != nil {
-							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) {
+							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) || errors.Is(err, errWorkerUnavailable) {
 								log.Printf("retry pending start: %v", err)
 							} else {
 								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
@@ -1175,7 +1231,7 @@ func (w Worker) Run(stop context.Context) error {
 								}
 							}
 						}
-						if err != nil && !(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory)) {
+						if err != nil && !(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) || errors.Is(err, errWorkerUnavailable)) {
 							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
 							s.state.Job = &j
 							if w.batchMemory != nil {
@@ -1219,6 +1275,8 @@ func (w Worker) Run(stop context.Context) error {
 			if p != nil && p.job.Spec.Resumable {
 				p.stop(w.Clock.Now(), StopGrace, false)
 			}
+		case <-availabilityWake:
+			retry = workerRetry{}
 		case <-w.control.wake:
 			retry = workerRetry{}
 		case <-ticker.C:

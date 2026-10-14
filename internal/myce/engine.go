@@ -408,6 +408,7 @@ type workerModel struct {
 	drainRequested     bool
 }
 type modelRuntime struct {
+	availability          *availabilityMonitor
 	admissionBlocked      bool
 	requireMemoryCeilings bool
 	memoryCeilings        *memoryCeilings
@@ -453,7 +454,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if e != nil {
 		return nil, e
 	}
-	rt := &modelRuntime{hostStateDir: w.HostStateDir, copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
+	rt := &modelRuntime{availability: w.availability, hostStateDir: w.HostStateDir, copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
 	root := w.CacheRoot
 	if root == "" {
 		root = filepath.Join(dir, "model-cache")
@@ -567,7 +568,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			rt.models[s.Model] = &workerModel{state: "failed", err: "model absent from worker config"}
 			continue
 		}
-		if rt.admissionBlocked {
+		if rt.admissionBlocked || rt.availability != nil && !rt.availability.snapshot().Available {
 			continue
 		}
 		var engine Engine
@@ -582,7 +583,11 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 				owned.memoryCeilings, owned.memoryMachine, owned.memorySwapMaxBytes = rt.memoryCeilings, rt.memoryMachine, rt.memorySwapMaxBytes
 			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), rt.config.Wait)
+		parent := context.Background()
+		if rt.availability != nil {
+			parent = rt.availability.workContext()
+		}
+		ctx, cancel := context.WithTimeout(parent, rt.config.Wait)
 		m := &workerModel{model: model, engine: engine, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
 		rt.models[s.Model] = m
 		rt.wg.Add(1)
@@ -660,6 +665,9 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 }
 
 func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {
+	if rt.availability != nil && !rt.availability.snapshot().Available {
+		return errWorkerUnavailable
+	}
 	rt.mu.Lock()
 	machine := rt.memoryMachine
 	rt.mu.Unlock()
@@ -818,6 +826,12 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	rt.mu.Lock()
 	m := rt.models[req.Model]
+	if rt.availability != nil && !rt.availability.snapshot().Available {
+		rt.mu.Unlock()
+		unlock()
+		modelError(w, 503, "hypha availability withdrawn")
+		return
+	}
 	if m == nil || (m.state != "ready" && !(m.state == "draining" && m.queueFlight > 0)) {
 		rt.mu.Unlock()
 		unlock()
@@ -842,6 +856,10 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 	}()
 	callCtx, cancel := context.WithTimeout(r.Context(), m.model.requestTimeout())
 	defer cancel()
+	if rt.availability != nil {
+		stopCancel := context.AfterFunc(rt.availability.workContext(), cancel)
+		defer stopCancel()
+	}
 	var res *http.Response
 	if generic {
 		engine, ok := m.engine.(StreamRequestEngine)
@@ -886,6 +904,29 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 				panic(http.ErrAbortHandler)
 			}
 			return
+		}
+	}
+}
+
+// Withholding also drains local servers during a queue/network outage. Contexts
+// cancel active loads/calls; memory remains reserved until the engine releases.
+func (rt *modelRuntime) withdrawLocalAvailability() {
+	if rt.availability == nil || rt.availability.snapshot().Available {
+		return
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for _, m := range rt.models {
+		m.drainRequested = true
+		m.queueFlight = 0
+		if m.state == "loading" && m.cancel != nil {
+			m.cancel()
+		}
+		if m.state == "ready" {
+			m.state = "draining"
+		}
+		if m.state == "draining" && m.inflight == 0 {
+			rt.unload(m)
 		}
 	}
 }

@@ -8,6 +8,9 @@ import (
 
 // A positive reply means this exact attempt is durably started, before execution.
 func (w Worker) authorizeStart(j Job, session string) error {
+	if err := w.checkAvailability(); err != nil {
+		return err
+	}
 	if j.Spec.StartBy == nil {
 		return nil
 	}
@@ -33,5 +36,5 @@ func (w Worker) authorizeStart(j Job, session string) error {
 	} else if reason != "" {
 		return fmt.Errorf("worker start refused: %s", reason)
 	}
-	return nil
+	return w.checkAvailability()
 }

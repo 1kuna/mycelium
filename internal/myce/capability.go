@@ -17,10 +17,12 @@ type AcceleratorProfile struct {
 	MemoryBytes uint64 `json:"memory_bytes,omitempty"`
 }
 
-// CapabilityProfile v0 records facts, not throughput or scheduling allowances.
+// CapabilityProfile v0 records hardware facts and current participation availability.
+// It does not claim measured throughput.
 // Shared memory is counted once, in SystemMemoryBytes, and is also reachable by
 // each accelerator. Zero sizes with an unavailable note mean unknown.
 type CapabilityProfile struct {
+	Availability      *Availability        `json:"availability,omitempty"`
 	Version           int                  `json:"version"`
 	Onboarding        string               `json:"onboarding"`
 	RecordedAt        time.Time            `json:"recorded_at"`
