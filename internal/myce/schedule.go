@@ -11,7 +11,7 @@ func fits(j *Job, m *Machine, memory float64) bool {
 	return hostFits(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) && fitsWithoutHostMemory(j, m, memory)
 }
 func fitsWithoutHostMemory(j *Job, m *Machine, memory float64) bool {
-	return m.MemoryError == "" && !m.Gone && !m.Leaving && (!needsCheckpoint(j) || !m.CheckpointUnavailable) && memory >= j.Spec.Needs.MemoryGB && (len(j.Spec.AllowedMachines) == 0 || slices.Contains(j.Spec.AllowedMachines, m.ID)) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && environmentCanRun(j, m)
+	return extensionCanRun(j, m) && m.MemoryError == "" && !m.Gone && !m.Leaving && (!needsCheckpoint(j) || !m.CheckpointUnavailable) && memory >= j.Spec.Needs.MemoryGB && (len(j.Spec.AllowedMachines) == 0 || slices.Contains(j.Spec.AllowedMachines, m.ID)) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && environmentCanRun(j, m)
 }
 func affinity(j *Job, m *Machine) int {
 	n := 0
@@ -66,6 +66,9 @@ func pick(jobs map[string]*Job, m *Machine) *Job {
 	return best
 }
 func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) string {
+	if reason := extensionWaitingReason(j, machines); reason != "" {
+		return reason
+	}
 	for _, m := range machines {
 		memory := m.FreeMemoryGB
 		for _, r := range jobs {

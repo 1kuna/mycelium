@@ -1,0 +1,103 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"mycelium/internal/myce"
+)
+
+func extensionCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: myce extension add|list|setup|check [flags] [folder|name@version]")
+	}
+	f := flag.NewFlagSet("extension "+args[0], flag.ContinueOnError)
+	root := f.String("root", myce.DefaultExtensionRoot(), "local extension library and download cache")
+	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
+	token := f.String("token", env("MYCE_TOKEN", ""), "queue token (prefer MYCE_TOKEN)")
+	local := f.Bool("local", false, "add locally without registering with the queue")
+	platform := f.String("gpu", "", "qualification platform: cuda, xpu, metal or fake")
+	device := f.String("device", "", "same selector as join --device")
+	timeout := f.Duration("timeout", 10*time.Minute, "setup/check time limit")
+	if err := f.Parse(args[1:]); err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	client := myce.Client{URL: *queue, Token: *token}
+	switch args[0] {
+	case "add":
+		if f.NArg() != 1 {
+			return errors.New("extension add requires a small folder")
+		}
+		e, err := myce.ReadExtension(f.Arg(0))
+		if err != nil {
+			return err
+		}
+		// Queue first: a frozen-version refusal must not leave a misleading local add.
+		if !*local {
+			if *token == "" {
+				return errors.New("set MYCE_TOKEN or use --local")
+			}
+			if err := client.Call(ctx, "POST", "/api/extensions", e, nil); err != nil {
+				return err
+			}
+		}
+		if err := myce.InstallExtension(*root, e); err != nil {
+			return err
+		}
+		fmt.Printf("added %s@%s %s\n", e.Name, e.Version, e.Digest)
+		return nil
+	case "list":
+		if f.NArg() != 0 {
+			return errors.New("extension list accepts no positional arguments")
+		}
+		extensions, err := myce.LocalExtensions(*root)
+		if err != nil {
+			return err
+		}
+		if *platform == "" {
+			for i := range extensions {
+				extensions[i].Files = nil
+			}
+			return json.NewEncoder(os.Stdout).Encode(extensions)
+		}
+		probe, cancel := context.WithTimeout(ctx, 15*time.Second)
+		fingerprint, _ := myce.ExtensionFingerprint(probe, *platform, *device)
+		cancel()
+		for _, r := range myce.LocalExtensionReports(*root, *platform, fingerprint) {
+			fmt.Println(myce.FormatExtensionReport(r))
+		}
+		return nil
+	case "setup", "check":
+		if f.NArg() != 1 || *platform == "" || *timeout <= 0 {
+			return errors.New("setup/check requires --gpu, positive --timeout and name@version")
+		}
+		extensions, err := myce.LocalExtensions(*root)
+		if err != nil {
+			return err
+		}
+		for _, e := range extensions {
+			if e.Name+"@"+e.Version != f.Arg(0) {
+				continue
+			}
+			bounded, cancel := context.WithTimeout(ctx, *timeout)
+			defer cancel()
+			reports, err := myce.PrepareExtension(bounded, *root, e, *platform, *device, args[0] == "check", os.Stderr)
+			for _, r := range reports {
+				fmt.Println(myce.FormatExtensionReport(r))
+			}
+			return err
+		}
+		return errors.New("extension not installed")
+	default:
+		return errors.New("unknown extension command")
+	}
+}

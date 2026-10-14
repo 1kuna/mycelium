@@ -362,7 +362,14 @@ func (q *Queue) validateProjectCapacity(j *Job) error {
 		copy.Leaving = false
 		copy.MemoryError = ""
 		copy.CheckpointUnavailable = false
-		if !fitsWithoutHostMemory(j, &copy, copy.TotalMemoryGB) {
+		structural := j
+		if j.Spec.extensionJob() {
+			value := cloneJob(j)
+			value.Spec.Kind = ""
+			value.Spec.Program = nil
+			structural = &value
+		}
+		if !fitsWithoutHostMemory(structural, &copy, copy.TotalMemoryGB) {
 			continue
 		}
 		if model, ok := q.model(j.Spec.Needs.Model); ok && !modelFitsMachine(model, m) {
