@@ -1,0 +1,25 @@
+name: llama-cpp
+version: '0.1.0'
+purpose: Run llama.cpp text generation with Metal, CUDA, SYCL or Vulkan builds.
+platforms: [metal, cuda, xpu]
+kinds: [text-generation]
+memory_gb: 2
+host_memory_gb: 1
+setup: [python3, setup.py]
+run: [python3, '{extension}/run.py']
+check: [python3, check.py]
+notes: |
+  Inputs contain the immutable GGUF model and prompt; args are ordinary
+  llama-cli arguments (-m model.gguf -f prompt.txt). Setup builds release b6800.
+  XPU uses SYCL by default; MYCE_LLAMA_BACKEND=vulkan is an explicit setup
+  choice with a Vulkan-capable resource. Backend choice is fixed in this cache.
+  The small bundled native baseline covers only its model, prompt and settings.
+  CUDA/SYCL/Vulkan stay not qualified unless their output passes that reference.
+  Setup caches the tiny reference model; real job models remain explicit inputs.
+baselines:
+  kind:text-generation:
+    input: baseline/input.json
+    output: baseline/native-output.txt
+    measure: exact
+    native: llama.cpp b6800, Apple silicon Metal, stories15M-q4_0, greedy 8-token generation.
+    variation: Two native repetitions were byte-identical; see baseline/measurement.json. No wider allowance is claimed.

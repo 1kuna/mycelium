@@ -1,0 +1,9 @@
+{
+  "backend": "metal",
+  "llama_cpp_commit": "0398752dd450dfabdd1b9e289f6364c2600f6ab5",
+  "model_sha256": "66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739",
+  "samples": 2,
+  "byte_equal": true,
+  "gpu_offload_confirmed": true,
+  "tokens": 8
+}
