@@ -299,3 +299,10 @@ Zach decides when to enable it after the required hardware and ownership gates.
 
 Docker batch jobs must opt into [managed containment](job-reference.md#managed-docker-batch-commands); [unconfirmed cleanup](operations.md#docker-cleanup-custody) retains the physical host's reservation.
 To take a worker host out immediately and keep it out across reboots, run `myce disable`; use `myce enable` to rejoin ([operations](operations.md#take-a-machine-out-of-mycelium)).
+
+## v3 extension work
+
+The separate v3 branch adds small extensions and jobs described as a kind of
+work or a program. This is opt-in and does not change the v2 migration steps.
+Start with [write an extension](write-an-extension.md); the decisions are in
+issues #18, #20, #35 and #36. Production remains on its frozen version.
