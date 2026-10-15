@@ -785,3 +785,59 @@ func TestMemoryCeilingTinyRequestReservation(t *testing.T) {
 		})
 	}
 }
+
+func TestMemoryCeilingFractionalByteReservation(t *testing.T) {
+	for _, page := range []int64{4096, 65536} {
+		for _, requestBytes := range []float64{131072 - 0.5, 65536 - 0.5, 0.5} {
+			for _, allocations := range []int{1, 2} {
+				t.Run(fmt.Sprintf("%d/%g/%d", page, requestBytes, allocations), func(t *testing.T) {
+					requestGiB := requestBytes / (1 << 30)
+					reservedBytes := max(requestBytes, 65536)
+					q, _ := fixture(t)
+					var enforced int64
+					var reserved float64
+					for i := 0; i < allocations; i++ {
+						m := machine(fmt.Sprintf("card%d", i), "fake")
+						m.HostID = "shared"
+						m.HostMemoryMeasured = true
+						m.HostAvailableMemoryGB = 1
+						m.HostMemoryBudgetGB = float64(allocations) * reservedBytes / (1 << 30)
+						check(t, q, m, nil)
+						s := spec("experiment")
+						s.Needs.HostMemoryGB = requestGiB
+						s.AllowedMachines = []string{m.ID}
+						submit(t, q, s)
+						j := check(t, q, m, nil).Job
+						if j == nil {
+							t.Fatal("budget-fitting fractional request refused")
+						}
+						charge := hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) * (1 << 30)
+						if charge != reservedBytes {
+							t.Fatalf("reserved %g bytes, want %g", charge, reservedBytes)
+						}
+						w := Worker{Machine: m}
+						bytes, err := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+						if err != nil {
+							t.Fatal(err)
+						}
+						c := fakeCeilings(t)
+						c.pageSize = int(page)
+						c.fs = pagedMemoryFS{pageSize: page}
+						attempt, err := c.create("attempt", bytes, 0)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if float64(attempt.bytes) > charge {
+							t.Errorf("enforced %d > reserved %g", attempt.bytes, charge)
+						}
+						enforced += attempt.bytes
+						reserved += charge
+					}
+					if float64(enforced) > reserved {
+						t.Errorf("aggregate enforced %d > reserved %g", enforced, reserved)
+					}
+				})
+			}
+		}
+	}
+}
