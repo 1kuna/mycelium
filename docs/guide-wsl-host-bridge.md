@@ -19,14 +19,14 @@ dwell still applies. See [NVIDIA temperature semantics](https://docs.nvidia.com/
 The query is hidden, bounded by a 750 ms deadline and invoked only when sampled.
 
 GPU heat appears in `gpu_heat`, with `heat_coverage=gpu-only`. It cannot certify
-CPU/host thermal coverage. Consequently safe GPU readings leave host
-`heat=unknown`, with status reason **host CPU thermal coverage unavailable**.
-A known hot GPU can still veto work. Generic ACPI thermal zones do not establish
-CPU coverage; no nominal CPU reading is inferred from an unidentified zone.
-No uniform nonprivileged CPU sensor was qualified on the acceptance PC.
-Daily idle admission and daily CUDA execution therefore remain blocked there.
-No driver, service, third-party sensor install, guest fallback, or policy bypass
-is supplied to hide this limitation.
+CPU/host thermal coverage; host `heat` remains `unknown`. On an externally
+powered desktop (no `--laptop` flag or detected laptop), daily admission uses
+GPU heat and reports **CPU thermal coverage waived for desktop**. Laptops
+still wait with **host CPU thermal coverage unavailable**. Unknown power,
+unknown owner activity, and unknown or hot GPU heat continue to withhold work.
+Generic ACPI thermal zones do not establish CPU coverage; no nominal CPU
+reading is inferred from an unidentified zone. No driver, service, third-party
+sensor install or guest fallback is required for the desktop exemption.
 
 ## Build on a Mac or Linux laptop
 
@@ -104,6 +104,9 @@ Set `MYCE_HOST_BRIDGE_CONFIG` to the WSL path of the installed Windows config
 export MYCE_HOST_BRIDGE_CONFIG='/mnt/c/Users/<owner>/AppData/Local/MyceliumHostBridge/bridge.json'
 ./myce join --daily-use --laptop --max-jobs 1 --joining-file '<private invitation path>'
 ```
+
+For a desktop, omit `--laptop`. Detected laptop hardware still requires CPU
+thermal coverage and confirmed AC.
 
 The path is explicit to avoid guessing Windows user/session identity. WSL reads
 the file through its existing Windows filesystem access. No credential is
