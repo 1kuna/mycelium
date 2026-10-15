@@ -279,6 +279,10 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if err != nil {
 		return nil, fmt.Errorf("memory ceiling setup: %w", err)
 	}
+	// Report the actual cgroup limit to the payload.
+	if memoryAttempt != nil {
+		ceilingBytes = memoryAttempt.bytes
+	}
 	started := false
 	defer func() {
 		if !started {

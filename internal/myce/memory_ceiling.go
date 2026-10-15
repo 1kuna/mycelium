@@ -28,8 +28,9 @@ func (osMemoryFS) Mkdir(p string) error               { return os.Mkdir(p, 0700)
 func (osMemoryFS) Remove(p string) error              { return os.Remove(p) }
 
 type memoryCeilings struct {
-	fs   memoryFS
-	root string
+	fs       memoryFS
+	root     string
+	pageSize int // Zero uses the host kernel page size.
 }
 type memoryAttempt struct {
 	fs    memoryFS
@@ -138,12 +139,41 @@ func memoryBytes(gb float64) (int64, error) {
 	}
 	return int64(math.Ceil(gb * (1 << 30))), nil
 }
+
+// Round up at the cgroup boundary: Linux stores byte limits in whole pages.
+// Reject overflow rather than granting less memory than requested.
+func pageAlignedMemory(bytes int64, pageSize int) (int64, error) {
+	if bytes < 0 || pageSize <= 0 {
+		return 0, errors.New("invalid memory ceiling or page size")
+	}
+	page := int64(pageSize)
+	if remainder := bytes % page; remainder != 0 {
+		extra := page - remainder
+		if bytes > math.MaxInt64-extra {
+			return 0, errors.New("page-aligned memory ceiling overflows bytes")
+		}
+		bytes += extra
+	}
+	return bytes, nil
+}
 func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, error) {
 	if c == nil || bytes == 0 {
 		return nil, nil
 	}
 	if id == "" || filepath.Base(id) != id || id == "." || id == ".." {
 		return nil, errors.New("invalid memory cgroup identity")
+	}
+	pageSize := c.pageSize
+	if pageSize == 0 {
+		pageSize = os.Getpagesize()
+	}
+	bytes, err := pageAlignedMemory(bytes, pageSize)
+	if err != nil {
+		return nil, err
+	}
+	swap, err = pageAlignedMemory(swap, pageSize)
+	if err != nil {
+		return nil, err
 	}
 	a := &memoryAttempt{fs: c.fs, path: filepath.Join(c.root, id), bytes: bytes}
 	if err := c.fs.Mkdir(a.path); err != nil {
