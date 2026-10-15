@@ -46,3 +46,30 @@ func TestStatusFullIDsAndOneBasedAttempts(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusShowsProfileQualificationAndEveryWaitingReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"machines":[{"id":"example","gpu":"cuda","capability_profile":{"os":"linux","arch":"arm64","logical_cpus":8,"memory_layout":"unified","system_memory_bytes":17179869184,"accelerators":[{"type":"cuda","memory_bytes":17179869184}],"availability":{"available":false,"reason":"on battery"}},"extension_reports":[{"name":"sample","version":"1","work":"kind:sample","qualified":true}]}],"jobs":[{"id":"running-job","machine":"example","state":"running","spec":{"name":"running sample","priority":"experiment","kind":"sample"}},{"id":"waiting-job","state":"queued","reason":"example: hypha on battery; waiting for external power","spec":{"name":"waiting sample","priority":"experiment"}},{"id":"no-reason","state":"queued","spec":{"name":"new sample","priority":"experiment"}}]}`)
+	}))
+	defer server.Close()
+	saved := os.Stdout
+	defer func() { os.Stdout = saved }()
+	f, err := os.CreateTemp(t.TempDir(), "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = f
+	if err = run([]string{"status", "--queue", server.URL, "--token", "test-only"}); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"hypha example capability profile v0:", "unified memory", "NVIDIA (CUDA): 16.0 GiB", "hypha example:", "hypha on battery; waiting for external power", "sample@1 · kind of work sample · qualified", "running sample", "hypha=example", "waiting sample", "waiting for a hypha to take this job"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+}
