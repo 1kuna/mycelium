@@ -202,9 +202,7 @@ func TestDockerRestartUnfinishedMainStaysLoss(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "running")); err != nil {
 		t.Fatal(err)
 	}
-	restartOnce(t, w, s)
-	restartOnce(t, w, s)
-	r := restartReleasedResult(t, w, s)
+	r := restartSavedResult(t, w, s)
 	if r.Success || !r.Interrupted {
 		t.Fatalf("promoted cleanup exit zero: %+v", r)
 	}
