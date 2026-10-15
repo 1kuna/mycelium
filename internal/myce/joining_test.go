@@ -163,3 +163,37 @@ func TestProfileCheckinAndPersistence(t *testing.T) {
 		t.Fatal("profile missing from status")
 	}
 }
+
+func TestJoiningFailureIdentifiesStage(t *testing.T) {
+	_, invitation := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+	invitation.Address = ""
+	evil, _ := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("untrusted request") }))
+	tests := []struct {
+		name, want string
+		discovery  *fakeDiscovery
+	}{
+		{"empty", "mDNS browse returned no compatible addresses", &fakeDiscovery{}},
+		{"transport", "mDNS browse failed", &fakeDiscovery{err: errors.New("private diagnostic")}},
+		{"pin", "identity verification rejected", &fakeDiscovery{addresses: []string{evil.URL}}},
+		{"credential", "credential rejected", &fakeDiscovery{addresses: []string{"placeholder"}}},
+		{"connect", "connection failed", &fakeDiscovery{addresses: []string{"https://127.0.0.1:1"}}},
+	}
+	server, valid := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			i := invitation
+			if tc.name == "credential" {
+				i = valid
+				i.Address = ""
+				tc.discovery.addresses = []string{server.URL}
+			}
+			_, err := ResolveJoining(context.Background(), i, "", tc.discovery)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %q, got %v", tc.want, err)
+			}
+			if strings.Contains(err.Error(), "private diagnostic") || strings.Contains(err.Error(), i.Token) {
+				t.Fatal("private data in error")
+			}
+		})
+	}
+}

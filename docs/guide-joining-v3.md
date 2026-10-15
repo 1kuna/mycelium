@@ -71,7 +71,11 @@ privately provisioned pin, then tries the saved HTTPS address. The whole CLI
 resolution has a bounded deadline. A wrong certificate receives no credential;
 a wrong credential cannot join; redirects are never followed. Several discovered
 mycelia are safe to encounter: only the one matching the invitation can admit
-the hypha. Failure never creates another mycelium or changes the pin.
+the hypha. Failure never creates another mycelium or changes the pin. Errors identify a
+failed mDNS browse or zero compatible addresses, connection failure, identity
+verification rejection, or credential rejection without exposing candidate
+addresses or the credential. A started advertisement does not prove that
+other machines can see it.
 
 For a network that blocks multicast, supply a reachable HTTPS queue origin
 with `invite --queue HTTPS_ORIGIN`, or `join --queue HTTPS_ORIGIN` together with
