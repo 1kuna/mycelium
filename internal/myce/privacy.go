@@ -97,7 +97,7 @@ func statusEnvironmentName(name string) string {
 
 func safeAvailabilityReason(reason string) string {
 	switch reason {
-	case "waiting for 5 idle minutes", "on battery", "cooling down", "owner signals stale", "power source unavailable", "external power required", "owner activity unavailable", "heat sensing unavailable":
+	case "host CPU thermal coverage unavailable", "waiting for 5 idle minutes", "on battery", "cooling down", "owner signals stale", "power source unavailable", "external power required", "owner activity unavailable", "heat sensing unavailable":
 		return reason
 	default:
 		return "availability unknown"

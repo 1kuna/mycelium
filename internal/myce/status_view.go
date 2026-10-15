@@ -31,6 +31,9 @@ func HyphaAvailability(m *Machine) string {
 	if m.DockerCleanup != "" {
 		return "waiting for previous work to finish cleaning up"
 	}
+	if a := machineAvailability(m); a != nil && a.Available && a.Reason == "CPU thermal coverage waived for desktop" {
+		return "available for work; CPU thermal coverage waived for desktop"
+	}
 	return "available for work"
 }
 
@@ -50,6 +53,8 @@ func availabilityWords(reason string) string {
 		return "hypha needs external power"
 	case "owner activity unavailable":
 		return "hypha owner activity is unknown"
+	case "host CPU thermal coverage unavailable":
+		return "host CPU thermal coverage unavailable"
 	case "heat sensing unavailable":
 		return "hypha temperature is unknown"
 	default:

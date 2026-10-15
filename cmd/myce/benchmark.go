@@ -21,8 +21,12 @@ func benchmarkCommand(args []string) error {
 	device := f.String("device", "", "physical resource selector")
 	daily := f.Bool("daily-use", false, "wait for owner idle and safe power/heat; cancel on return")
 	laptop := f.Bool("laptop", false, "require external power")
+	desktop := f.Bool("desktop", false, "declare a desktop; allow GPU-only thermal coverage on external power")
 	if err := f.Parse(args); err != nil {
 		return err
+	}
+	if *desktop && *laptop {
+		return errors.New("--desktop and --laptop are mutually exclusive")
 	}
 	if *state == "" || *gpu == "" || f.NArg() != 0 {
 		return errors.New("benchmark requires --state-dir and --gpu")
@@ -36,7 +40,7 @@ func benchmarkCommand(args []string) error {
 	probe, cancel := context.WithTimeout(ctx, 5*time.Second)
 	profile := myce.LocalProfileProbe().Detect(probe, m, *state, myce.RealClock{}.Now())
 	cancel()
-	err := myce.RunOnboardingBenchmark(ctx, myce.BenchmarkConfig{Clock: myce.RealClock{}, Machine: m, StateDir: *state, ExtensionRoot: *root, Client: myce.Client{URL: *queue, Token: env("MYCE_TOKEN", "")}, DailyUse: *daily, Laptop: *laptop}, &profile)
+	err := myce.RunOnboardingBenchmark(ctx, myce.BenchmarkConfig{Clock: myce.RealClock{}, Machine: m, StateDir: *state, ExtensionRoot: *root, Client: myce.Client{URL: *queue, Token: env("MYCE_TOKEN", "")}, DailyUse: *daily, Laptop: *laptop, Desktop: *desktop}, &profile)
 	if err != nil {
 		return err
 	}

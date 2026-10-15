@@ -101,3 +101,14 @@ func TestJoinCLIUsesDetectedOrExplicitGPU(t *testing.T) {
 		}
 	}
 }
+
+func TestJoinRejectsConflictingChassisDeclarations(t *testing.T) {
+	err := run([]string{"join", "--desktop", "--laptop"})
+	if err == nil || !strings.Contains(err.Error(), "--desktop and --laptop are mutually exclusive") {
+		t.Fatal(err)
+	}
+	err = benchmarkCommand([]string{"--desktop", "--laptop"})
+	if err == nil || !strings.Contains(err.Error(), "--desktop and --laptop are mutually exclusive") {
+		t.Fatal(err)
+	}
+}

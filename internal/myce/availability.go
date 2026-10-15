@@ -18,11 +18,13 @@ const coolingWait = time.Minute
 // Power is desktop (no battery), ac, battery, or unknown. Heat is nominal, fair,
 // serious, critical, or unknown. Laptop stays true even if its power read fails.
 type OwnerSignals struct {
-	IdleSeconds float64 `json:"idle_seconds"`
-	IdleKnown   bool    `json:"idle_known"`
-	Laptop      bool    `json:"laptop"`
-	Power       string  `json:"power"`
-	Heat        string  `json:"heat"`
+	GPUHeat      string  `json:"gpu_heat,omitempty"`
+	HeatCoverage string  `json:"heat_coverage,omitempty"`
+	IdleSeconds  float64 `json:"idle_seconds"`
+	IdleKnown    bool    `json:"idle_known"`
+	Laptop       bool    `json:"laptop"`
+	Power        string  `json:"power"`
+	Heat         string  `json:"heat"`
 }
 type OwnerSignalSource func(context.Context) OwnerSignals
 
@@ -48,6 +50,7 @@ type availabilityPolicy struct {
 	clock      Clock
 	daily      bool
 	laptop     bool
+	desktop    bool
 	last       time.Time
 	awakeSince time.Time
 	hot        bool
@@ -73,8 +76,15 @@ func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
 	p.last = now
 	wait := func(reason string) Availability { a.Available = false; a.Reason = reason; return a }
 	heatReason := ""
+	// Only an explicit desktop declaration permits the CPU waiver.
+	// --laptop and detected battery hardware remain sticky vetoes.
+	desktopWaiver := p.desktop && !p.laptop && (s.Power == "ac" || s.Power == "desktop") && s.HeatCoverage == "gpu-only"
+	heat := s.Heat
+	if desktopWaiver {
+		heat = s.GPUHeat
+	}
 	if p.daily {
-		switch s.Heat {
+		switch heat {
 		case "fair", "serious", "critical":
 			p.hot = true
 			p.coolSince = time.Time{}
@@ -93,6 +103,9 @@ func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
 		default:
 			p.coolSince = time.Time{}
 			heatReason = "heat sensing unavailable"
+			if s.HeatCoverage == "gpu-only" && !desktopWaiver {
+				heatReason = "host CPU thermal coverage unavailable"
+			}
 		}
 	}
 	// Dedicated servers ignore presence and heat. Known battery-equipped machines
@@ -120,6 +133,9 @@ func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
 	if heatReason != "" {
 		return wait(heatReason)
 	}
+	if desktopWaiver {
+		a.Reason = "CPU thermal coverage waived for desktop"
+	}
 	return a
 }
 
@@ -132,8 +148,8 @@ type availabilityMonitor struct {
 	cancel  context.CancelFunc
 }
 
-func newAvailabilityMonitor(clock Clock, daily, laptop bool) *availabilityMonitor {
-	m := &availabilityMonitor{policy: availabilityPolicy{clock: clock, daily: daily, laptop: laptop}}
+func newAvailabilityMonitor(clock Clock, daily, laptop, desktop bool) *availabilityMonitor {
+	m := &availabilityMonitor{policy: availabilityPolicy{clock: clock, daily: daily, laptop: laptop, desktop: desktop}}
 	m.work, m.cancel = context.WithCancel(context.Background())
 	m.current = m.policy.evaluate(OwnerSignals{Power: "unknown", Heat: "unknown"})
 	if !m.current.Available {
