@@ -38,6 +38,7 @@ type Extension struct {
 	Resumable         bool                                    `json:"resumable,omitempty" yaml:"resumable,omitempty"`
 	Setup             []string                                `json:"setup,omitempty" yaml:"setup,omitempty"`
 	Run               []string                                `json:"run" yaml:"run"`
+	Benchmark         []string                                `json:"benchmark,omitempty" yaml:"benchmark,omitempty"`
 	Check             []string                                `json:"check,omitempty" yaml:"check,omitempty"`
 	Baselines         map[string]ExtensionBaseline            `json:"baselines,omitempty" yaml:"baselines,omitempty"`
 	PlatformBaselines map[string]map[string]ExtensionBaseline `json:"platform_baselines,omitempty" yaml:"platform_baselines,omitempty"`

@@ -246,3 +246,5 @@ Before publishing, test on a laptop with a fake extension: folder validation,
 frozen versions, absent baseline, setup/check failures, identity changes,
 routing both forms and waiting explanations. Then run the ordinary build, vet,
 race suite and dev end-to-end. Use isolated native hardware only when authorized.
+
+For optional timed native-reference work, see [Onboarding benchmark](guide-benchmark-v3.md).

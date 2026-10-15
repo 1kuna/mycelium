@@ -1,5 +1,5 @@
 name: llama-cpp
-version: '0.1.0'
+version: '0.1.1'
 purpose: Run llama.cpp text generation with Metal, CUDA, SYCL or Vulkan builds.
 platforms: [metal, cuda, xpu]
 kinds: [text-generation]
@@ -8,6 +8,7 @@ host_memory_gb: 1
 setup: [python3, setup.py]
 run: [python3, '{extension}/run.py']
 check: [python3, check.py]
+benchmark: [python3, check.py]
 notes: |
   Inputs contain the immutable GGUF model and prompt; args are ordinary
   llama-cli arguments (-m model.gguf -f prompt.txt). Setup builds release b6800.
