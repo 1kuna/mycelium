@@ -2,7 +2,7 @@
 
 Base: `b989acc138fc160c60430855e415ea3846048b44`.
 Branch: `hotfix/b989acc-stop-protocol`.
-Tested ruling implementation: `e7745ab92cd50fc3f94401de90ef49b9901a66db`.
+Latest tested orphan implementation: `520aa30a6e9f7011c641b345204ee9a0319f3378`.
 The final published head is recorded below and
 in the [#54 implementation report](https://github.com/1kuna/mycelium/issues/54).
 
@@ -28,6 +28,10 @@ in the [#54 implementation report](https://github.com/1kuna/mycelium/issues/54).
   permanent, record delivery outcomes, and retry deadline KILL despite storage
   failures. Tests cover generic/prefixed uncertain errors, both crash boundaries,
   storage failure/recovery, restart, deadline retries and private custody.
+- `34eb63c94c33bb44992d8381d1d8919c1cad4d42`: round-2 ruling release note.
+- `520aa30a6e9f7011c641b345204ee9a0319f3378`: round-3 orphan correction:
+  one bounded Docker stop per process lifetime, deadline KILL fallback, truthful
+  missing-evidence report, lifecycle call-site audit and fake/real-Docker tests.
 - Following documentation-only commit records the tested implementation SHA
   and fresh verification. A commit cannot embed its own SHA; the final head is
   recorded in #54 with an immutable link to this note.
@@ -37,11 +41,12 @@ PR, merge, main/v3 update, production deployment or fleet access.
 
 ## Defined stop behavior
 
-The existing asynchronous reconciler and injected-clock deadline remain.
-A blocking `docker stop --timeout` would require recovering a separate outstanding
-operation; the existing bounded calls implement this policy directly.
+For durable attempts, the existing asynchronous reconciler and injected-clock
+deadline remain. Existing bounded signal calls preserve attempt recovery without
+introducing a separate outstanding Docker stop operation.
 
-TERM is attempted **at most once per exact container per stop request**.
+For durable attempts, TERM is attempted **at most once per exact container per
+stop request**.
 The worker saves intent before calling Docker and never clears a recorded intent,
 regardless of success, generic daemon/runtime/transport error, or crash. A failed
 intent write sends no TERM that tick; persistence is retried on subsequent ticks.
@@ -68,9 +73,41 @@ Unavailable Docker/inspection still retains custody and retries; elapsed time is
 never release proof. After stopping, evidence and release persistence must succeed
 before capacity is acknowledged as released.
 
+## Orphans: round-3 correction
+
+An orphan is a Mycelium-labelled container without a durable attempt record.
+It has no owning job and does not use the per-attempt TERM latch. Instead, one
+bounded `docker stop --time <grace>` is allowed per exact container/daemon per
+process lifetime. Docker sends TERM once and KILL at its timeout. Whole-second
+Docker grace is rounded up; the CLI call is bounded by that grace plus the
+existing call allowance and any enclosing cleanup deadline.
+
+A process-local standard `sync.Map` preserves that one call and its original
+fallback deadline across reconstructed cleanup objects. Any stop error or
+uncertain delivery consumes the call; subsequent reconciliation waits for grace,
+then retries only idempotent KILL while inspection proves the container running.
+Existing explicit forced containment/operator cleanup still uses immediate KILL.
+A fresh process can issue one new orphan stop; this is deliberately not a durable
+attempt/restart guarantee.
+
+Orphan cleanup does not collect or claim durable attempt evidence. Its cleanup
+report records **`exit code/stderr not retained: orphan without attempt record`**,
+and `EvidenceSaved` remains false. A no-store save can no longer authorize the
+per-attempt TERM path or claim private evidence was saved. Durable attempts still
+require a successful evidence-file write before marking evidence saved.
+
+Fake-clock/Docker/store regressions cover success, failed and uncertain stop,
+reconstruction within a process, no early KILL, repeated failed KILL followed by
+recovery, and absent attempt/evidence files. The existing host orphan test checks
+the truthful report. A source-enumeration regression guards the sole durable TERM
+call, orphan stop/KILL calls, stopped-only retention removal and network removal;
+behavioral regressions prove both dispatchers do not loop TERM. Isolated real
+Docker coverage adds graceful orphan exit 143 and stop-error fallback exit 137.
+
 ## Private evidence and operator runbook
 
-Every settled main/sidecar retains its exit code and stderr tail in the attempt
+For durable attempts, every settled main/sidecar retains its exit code and stderr
+tail in the attempt
 record and `<identity>.docker-evidence.json` in the private worker spool, mode
 0600. Stderr is limited to the last 256 Docker log lines and 64 KiB per container.
 Sidecar tails stay out of queue logs, results and public status. Main success
@@ -149,7 +186,53 @@ Private logs and exit ledger remain in ignored project scratch.
   Their private pointer is retained for cleanup after handle release, without
   restarting Docker or disturbing unrelated workloads. No test payload remains.
 
-Current state: requested implementation and verification complete; final head
-and normal-push/equality results are recorded in #54. Next: orchestrator review,
-separately authorized native fleet/Verso acceptance, and guarded artifact cleanup
-when Docker releases its directory handles. Issue #54 remains open.
+The preceding verification applies to the earlier implementation. Round-3
+correction results and final head are recorded in the latest #54 implementation
+report. Next: orchestrator re-review and separately authorized native fleet/Verso
+acceptance. Issue #54 remains open.
+
+
+## Round-3 verification
+
+Preserved initial full race failure: **1**, solely at
+`TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration`,
+`production_hold_test.go:787`, during `w.start` checkpoint preparation:
+`filesystem operation timed out`. The test, worker preparation and checkpoint-I/O
+files are byte-identical to `34eb63c`. Ten targeted race repetitions on the current
+source and ten on an untouched `34eb63c` archive both pass (**0 / 0**,
+3.819 / 3.850 s). The precise timeout cause remains unresolved; this resembles the
+historical 25 ms checkpoint-I/O failures but is not proven to share their cause.
+No timeout or assertion was changed. Revisit checkpoint I/O on recurrence.
+
+Fresh isolated MacBook Docker checks: **0**. Main exits **0**; signal-sensitive
+sidecar exits **143** with one TERM and no KILL; ignoring sidecar exits **137**
+with one TERM and one deadline KILL. Required private exit/stderr/TERM-outcome
+assertions pass. New orphan cases exit **143 / 137** with one bounded stop each;
+the injected stop-error case uses one fallback KILL after grace, including
+reconstruction with a longer requested grace. No orphan evidence-saved claim.
+Uploaded test-binary and copied private evidence archive hashes match. Test-label
+container/network inventories are empty. No image pull; owned remote temporary
+folder moved to Trash after confirming no active files and preserving evidence;
+its original location is absent. No production fleet access.
+
+Final source: `520aa30a6e9f7011c641b345204ee9a0319f3378`. All renewed checks use
+this source; the following release-note commit changes documentation only.
+Light serial runs: `GOMAXPROCS=2`, `nice -n 19`, tests `-p 1`. Bash captured
+`${PIPESTATUS[@]}` immediately and gated command index 0 and the log writer.
+Every final log-writer exit is **0**.
+
+- Focused regressions **0**, build **0**, vet **0**.
+- Two renewed uncached full `go test ./... -race -p 1 -count=1`: **0 / 0**;
+  internal package **138.882 / 137.272 s**. No source changes between runs.
+- Executable dev checkpoint/model E2E **0** (16.253 s).
+- Linux amd64/arm64 cross-compiles **0 / 0**; ELF architectures asserted.
+- Real Docker test process and SSH wrapper **0 / 0**, all four scenarios pass.
+- Initial original-behavior regressions **1**; initial source-enumeration test
+  fixture **1** (matched function names and missed nested retention argv), then
+  corrected without production changes. Initial full race timeout **1** is
+  preserved above, alongside the bounded current/baseline checks **0 / 0**.
+
+Final head and normal-push/remote-equality results are in #54. Current state:
+implemented and verified locally/on isolated Docker, pending orchestrator
+re-review. Next: separately authorized native fleet/Verso acceptance. No PR,
+issue closure, production access or native GPU qualification is claimed.
