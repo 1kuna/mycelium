@@ -12,12 +12,14 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -29,6 +31,8 @@ type Invitation struct {
 	Token       string `json:"token"`
 	Address     string `json:"address,omitempty"`
 }
+
+var errJoiningIdentity = errors.New("queue identity does not match invitation")
 
 func (i Invitation) Validate() error {
 	pin, err := hex.DecodeString(i.Fingerprint)
@@ -111,7 +115,7 @@ func (i Invitation) Client(address string) (Client, error) {
 			hash := sha256.Sum256(cert.Raw)
 			now := time.Now() // TLS validity, never queue or scheduling time.
 			if hex.EncodeToString(hash[:]) != i.Fingerprint || now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
-				return errors.New("queue identity does not match invitation")
+				return errJoiningIdentity
 			}
 			return nil
 		},
@@ -131,7 +135,13 @@ func ResolveJoining(ctx context.Context, i Invitation, explicit string, d Discov
 	if explicit != "" {
 		return verifiedJoining(ctx, i, explicit)
 	}
-	addresses, _ := d.Browse(ctx)
+	addresses, browseErr := d.Browse(ctx)
+	failures := []string{}
+	if browseErr != nil {
+		failures = append(failures, "mDNS browse failed")
+	} else if len(addresses) == 0 {
+		failures = append(failures, "mDNS browse returned no compatible addresses")
+	}
 	if i.Address != "" {
 		addresses = append(addresses, i.Address)
 	}
@@ -147,8 +157,24 @@ func ResolveJoining(ctx context.Context, i Invitation, explicit string, d Discov
 		if err == nil {
 			return c, nil
 		}
+		stage := "connection failed"
+		var response *HTTPError
+		if errors.Is(err, errJoiningIdentity) {
+			stage = "identity verification rejected a candidate"
+		} else if errors.As(err, &response) {
+			if response.Status == http.StatusUnauthorized || response.Status == http.StatusForbidden {
+				stage = "credential rejected"
+			} else {
+				stage = "queue status request failed"
+			}
+		}
+		if !seen[stage] {
+			failures = append(failures, stage)
+			seen[stage] = true
+		}
 	}
-	return Client{}, errors.New("cannot find your mycelium with the provisioned identity; check discovery or supply its saved HTTPS address")
+	// Fixed stage labels disclose neither candidate addresses nor credentials.
+	return Client{}, fmt.Errorf("cannot find your mycelium: %s; supply its saved HTTPS address", strings.Join(failures, "; "))
 }
 func verifiedJoining(ctx context.Context, i Invitation, address string) (Client, error) {
 	c, err := i.Client(address)

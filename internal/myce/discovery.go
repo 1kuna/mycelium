@@ -79,7 +79,7 @@ func AdvertiseJoining(address net.Addr, fingerprint string) (func(), error) {
 	}
 	// Opaque names and protocol hints only; no hostname, credential or profile.
 	name := "myce-" + fingerprint[:16]
-	server, err := zeroconf.RegisterProxy(name, discoveryService, "local.", number, name+".local.", ips, []string{"version=1"}, nil)
+	server, err := zeroconf.RegisterProxy(name, discoveryService, "local", number, name+".local.", ips, []string{"version=1"}, nil)
 	if err != nil {
 		return nil, err
 	}
