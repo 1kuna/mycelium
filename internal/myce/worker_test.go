@@ -264,7 +264,7 @@ func TestWorkerCommandStartFailure(t *testing.T) {
 
 // workerWithPreparedCheckpoint synchronizes real filesystem setup for tests of
 // process behavior. A single start may legitimately defer preparation after its
-// 25 ms I/O budget; Worker.Run retries it, but these tests call start directly.
+// I/O budget; Worker.Run retries it, but these tests call start directly.
 // Force that path, then consume the completed operation on the caller's start.
 // Scheduling and production I/O budgets remain unchanged.
 func workerWithPreparedCheckpoint(t *testing.T, w Worker, store *workerStore, payload Job) Worker {
