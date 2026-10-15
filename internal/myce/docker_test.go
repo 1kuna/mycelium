@@ -546,10 +546,12 @@ func TestDockerIncompleteInspectionCannotProveRelease(t *testing.T) {
 		t.Fatal(e)
 	}
 	t.Cleanup(p.docker.close)
+	// Wait until the incomplete inspection has actually been processed.
+	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed") })
 	select {
 	case <-p.done:
 		t.Fatal("incomplete inspection released running container")
-	case <-time.After(400 * time.Millisecond):
+	default:
 	}
 	if !strings.Contains(p.docker.status(), "unconfirmed") {
 		t.Fatal("incomplete inspection not visible")

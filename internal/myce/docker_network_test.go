@@ -645,7 +645,12 @@ func TestDockerGroupAdmissionUsesSimultaneousJobMemory(t *testing.T) {
 func TestDockerReadinessRejectsSuccessAtDeadline(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
 	j := dockerGroupJob(t)
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { c.advance(time.Second); rw.WriteHeader(200) }))
+	var checked atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		c.advance(time.Second)
+		checked.Store(true)
+		rw.WriteHeader(200)
+	}))
 	defer server.Close()
 	u, _ := url.Parse(server.URL)
 	port, _ := strconv.Atoi(u.Port())
@@ -655,14 +660,19 @@ func TestDockerReadinessRejectsSuccessAtDeadline(t *testing.T) {
 		t.Fatal(e)
 	}
 	t.Cleanup(p.docker.close)
-	select {
-	case f := <-p.done:
-		if f.result.Success || !strings.Contains(f.result.Error, "readiness timeout") {
-			t.Fatalf("late readiness: %+v", f.result)
+	// Synchronize readiness and cleanup independently of laptop load.
+	await(t, func() bool { return checked.Load() })
+	await(t, func() bool {
+		select {
+		case f := <-p.done:
+			if f.result.Success || !strings.Contains(f.result.Error, "readiness timeout") {
+				t.Fatalf("late readiness: %+v", f.result)
+			}
+			return true
+		default:
+			return false
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("deadline response admitted main")
-	}
+	})
 	if _, e := os.Stat(filepath.Join(root, "running")); e == nil {
 		t.Fatal("main started at expired readiness boundary")
 	}
