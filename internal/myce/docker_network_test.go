@@ -184,7 +184,24 @@ func fakeDockerGroupInspect(root string, ids []string, mode string) {
 		if running {
 			status = "running"
 		}
-		obj["State"] = map[string]any{"Running": running, "Status": status, "ExitCode": 0}
+		code := 0
+		if !running {
+			if mode == "main-nonzero" && id == "id1" {
+				code = 7
+			}
+			if strings.HasPrefix(id, "sidecar-") {
+				if _, e := os.Stat(filepath.Join(root, "stopped-"+id)); e == nil {
+					code = 137
+					if mode == "term" {
+						code = 143
+					}
+				}
+			}
+		}
+		obj["State"] = map[string]any{"Running": running, "Status": status, "ExitCode": code, "OOMKilled": mode == "main-oom" && id == "id1"}
+		if _, e := os.Stat(filepath.Join(root, "disconnected-"+id)); e == nil {
+			obj["NetworkSettings"] = map[string]any{"Networks": map[string]any{}}
+		}
 		if mode == "other-network" {
 			obj["HostConfig"].(map[string]any)["NetworkMode"] = "host"
 		}

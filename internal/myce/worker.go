@@ -570,15 +570,8 @@ func (w Worker) Run(stop context.Context) error {
 	}
 	recovering := recoveringProcess != nil
 	if s.state.Job != nil && s.state.Identity != "" && recoveringProcess == nil {
-		var r Result
-		data, e := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".result.json"))
-		if e == nil {
-			if e = decodeWorkerJSON(data, &r); e != nil {
-				return e
-			}
-			s.state.Result = &r
-		} else if !errors.Is(e, os.ErrNotExist) {
-			return e
+		if err = s.recoverResult(w.Machine.ID); err != nil {
+			return err
 		}
 	}
 	if s.state.Job != nil && s.state.Result == nil && recoveringProcess == nil {

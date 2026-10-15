@@ -217,7 +217,8 @@ func (d *dockerAttempt) containerViolation(c dockerInspection) string {
 			return "Docker containment violation: joining another network is forbidden"
 		}
 	}
-	if d.state.Network != "" && len(c.NetworkSettings.Networks) != 1 {
+	// Cleanup deliberately disconnects stopped containers before removing the network.
+	if d.state.Network != "" && len(c.NetworkSettings.Networks) != 1 && !(d.state.Stopped && !*c.State.Running) {
 		return "Docker containment violation: private network attachment missing"
 	}
 	return ""
@@ -244,6 +245,7 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 		d.state.Forced = true
 	}
 	for _, c := range containers {
+		d.state.OOMKilled = d.state.OOMKilled || c.State.OOMKilled
 		if why := d.containerViolation(c); why != "" {
 			d.state.Failure = why
 			d.state.Stopped = true

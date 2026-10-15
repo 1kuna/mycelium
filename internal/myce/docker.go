@@ -93,6 +93,7 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
+	Owner             *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
 	EvidenceSaved     bool                    `json:"evidence_saved,omitempty"`
 	NetworkID         string                  `json:"network_id,omitempty"`
 	NetworkRemoved    bool                    `json:"network_removed,omitempty"`
@@ -616,6 +617,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		return nil, errors.New("managed Docker requires DOCKER_HOST, not DOCKER_CONTEXT")
 	}
 	d := &dockerAttempt{admit: func() error { return w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) }, closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, hostDir: w.HostStateDir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
+	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	if j.Spec.Run.DockerNetwork == "private" {
 		d.state.Network = "myce-" + identity
 		d.state.Containers = map[string]dockerMember{}
@@ -769,34 +771,9 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 		}
 	}
 	d.mu.Lock()
-	result.Interrupted = d.state.Stopped && !d.state.MainFinished
-	result.Forced = d.state.Forced && !d.state.MainFinished
-	result.Success = e == nil && d.state.ExitCode == 0 && d.state.MemoryFailure == "" && d.state.Failure == "" && !d.state.OOMKilled
-	if d.state.Failure != "" {
-		result.Error = d.state.Failure
-		result.Interrupted = false
-		result.Forced = false
-	}
-	if d.state.MemoryFailure != "" {
-		result.Error = d.state.MemoryFailure
-	}
-	if d.state.OOMKilled {
-		result.Error = "Docker container OOM-killed without a declared memory ceiling"
-		if d.state.MemoryLimitBytes > 0 {
-			result.Error = fmt.Sprintf("exceeded its %g GiB memory ceiling", float64(d.state.MemoryLimitBytes)/(1<<30))
-		}
-		result.Interrupted = false
-		result.Forced = false
-	}
+	result = dockerOutcome(d.state, result, e)
 	container := d.state.Container
 	d.mu.Unlock()
-	if e != nil {
-		result.Interrupted = e.Error() == "worker restarted; Docker cleanup required" || errors.Is(e, context.DeadlineExceeded)
-		result.Error = "Docker launch failed: " + e.Error()
-		if strings.HasPrefix(e.Error(), "Docker memory ceiling not enforced") {
-			result.Error = "Docker memory ceiling not enforced"
-		}
-	}
 	if container != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 		cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", container)
@@ -821,7 +798,56 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	err := saveWorkerJSON(d.dir, d.state.Identity+".result.json", result)
 	p.done <- workerFinish{result: result, err: err}
 }
+
+// A bare zero exit code, or terminal state first observed during recovery,
+// cannot authorize main success. Eligibility is frozen before cleanup resumes.
+func (state dockerExecution) completedMain() bool {
+	return state.MainFinished && state.Container != "" && state.Stopped && state.StopAt != nil && !state.Pending && !state.OperatorConfirmed
+}
+
+func dockerOutcome(state dockerExecution, owner Result, e error) Result {
+	result := owner
+	if e != nil {
+		result.Interrupted = e.Error() == "worker restarted; Docker cleanup required" || errors.Is(e, context.DeadlineExceeded)
+		result.Error = "Docker launch failed: " + e.Error()
+		if strings.HasPrefix(e.Error(), "Docker memory ceiling not enforced") {
+			result.Error = "Docker memory ceiling not enforced"
+		}
+	}
+	if e == nil {
+		result.Interrupted = (state.Stopped && !state.MainFinished)
+	}
+	result.Forced = state.Forced && !state.MainFinished
+	result.Success = !result.Interrupted && e == nil && state.ExitCode == 0 && state.MemoryFailure == "" && state.Failure == "" && !state.OOMKilled
+	if state.Failure != "" {
+		result.Error = state.Failure
+		result.Interrupted = false
+		result.Forced = false
+	}
+	if state.MemoryFailure != "" {
+		result.Interrupted = false
+		result.Forced = false
+		result.Error = state.MemoryFailure
+	}
+	if state.OOMKilled {
+		result.Error = "Docker container OOM-killed without a declared memory ceiling"
+		if state.MemoryLimitBytes > 0 {
+			result.Error = fmt.Sprintf("exceeded its %g GiB memory ceiling", float64(state.MemoryLimitBytes)/(1<<30))
+		}
+		result.Interrupted = false
+		result.Forced = false
+	}
+	return result
+}
+
 func (d *dockerAttempt) close() { d.haltOnce.Do(func() { close(d.halt) }); <-d.closed }
+
+func dockerRecoveryError(state dockerExecution) error {
+	if state.completedMain() {
+		return nil
+	}
+	return errors.New("worker restarted; Docker cleanup required")
+}
 
 func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
@@ -832,12 +858,12 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	if err = json.Unmarshal(data, &state); err != nil {
 		return nil, err
 	}
-	if state.Identity != s.state.Identity || state.Endpoint == "" {
+	if state.Identity != s.state.Identity || state.Endpoint == "" || (state.Owner != nil && !s.matchesResult(*state.Owner, w.Machine.ID)) {
 		return nil, errors.New("invalid Docker custody record")
 	}
 	if state.Released {
 		if s.state.Result == nil {
-			r := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Interrupted: true, Forced: state.Forced, Error: "worker restarted after Docker release"}
+			r := dockerOutcome(state, Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}}, dockerRecoveryError(state))
 			s.state.Result = &r
 		}
 		return nil, nil
@@ -858,6 +884,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	}
 	// A saved stop keeps its original deadline and dispatch latches. An
 	// unfinished launch/running attempt still requires immediate forced cleanup.
+	recoveryErr := dockerRecoveryError(state)
 	if !state.Stopped {
 		d.stop(w.Clock.Now(), 0, true)
 	}
@@ -866,7 +893,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 		return nil, err
 	}
 	p := &process{job: *s.state.Job, machine: w.Machine.ID, done: make(chan workerFinish, 1), docker: d}
-	go d.run(p, *s.state.Job, s.state.Session, output, nil, func() error { return errors.New("worker restarted; Docker cleanup required") })
+	go d.run(p, *s.state.Job, s.state.Session, output, nil, func() error { return recoveryErr })
 	return p, nil
 }
 

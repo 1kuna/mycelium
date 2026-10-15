@@ -236,3 +236,42 @@ Final head and normal-push/remote-equality results are in #54. Current state:
 implemented and verified locally/on isolated Docker, pending orchestrator
 re-review. Next: separately authorized native fleet/Verso acceptance. No PR,
 issue closure, production access or native GPU qualification is claimed.
+
+
+## Restart during main-completion grace (#55)
+
+Recovery now resumes cleanup without a synthetic launch failure when the exact
+main's completion was already durable before restart. Main exit zero succeeds
+only after confirmed container cleanup, private evidence persistence, network
+removal/absence and durable release. Saved nonzero, memory, OOM and containment
+failures retain their failure disposition. Main OOM observations are persisted
+with terminal observation, before sidecar TERM. A main first found finished during
+recovery remains interrupted/lost. Operator release cannot fabricate success.
+
+The same outcome is reconstructed if release was saved before the result file.
+New custody records bind job/attempt/machine/session as well as opaque execution
+identity; recovered result files and worker-state results validate those fields.
+Existing custody without the added binding retains its opaque identity check.
+Queue current-attempt and exact release-key matching are unchanged. Stopped
+containers already disconnected by cleanup remain valid during release retries;
+running/foreign-network containment checks remain enforced.
+
+No stop dispatcher changes: permanent TERM intent, original grace, deadline KILL,
+orphan stop bounds and private sidecar evidence/retention remain as in #54.
+Fake-clock/fake-CLI regressions cover all seven findings cases, including repeated
+restart, persistence/inspection/log/network faults, stale results, exact old
+custody settlement and acknowledgement replay. Native Docker/GPU acceptance and
+the v3 forward-port remain separate work; neither is authorized by this hotfix.
+
+Local verification on `hotfix/55-restart-mid-grace`: build **0**, two uncached
+full race suites **0 / 0** (internal package **168.705 / 171.475 s**), vet **0**,
+and `./myce dev` **0** after a real API/command smoke and graceful shutdown.
+The smoke's submit/wait/log commands each exited **0** and confirmed jobs do not
+inherit the token. Both full suites include the executable dev checkpoint/model
+E2E tests. Runs were serial, `GOMAXPROCS=2`, `GOFLAGS=-p=1`, `nice -n 19`;
+command exit codes were captured directly without pipelines. Final focused race
+regressions also passed (**0**). No real Docker/GPU tests or remote hosts used.
+
+Current state: implemented and verified locally for #55; committed for review.
+Next: orchestrator review, then separately authorized native acceptance and v3
+forward-port. No push, GitHub post, issue closure or fleet qualification.

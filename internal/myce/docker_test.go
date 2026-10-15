@@ -155,7 +155,9 @@ func TestDockerCLIHelper(t *testing.T) {
 			}
 		}
 	case "inspect":
-		if _, e := os.Stat(filepath.Join(root, "network")); e == nil {
+		_, networkErr := os.Stat(filepath.Join(root, "network"))
+		_, removedErr := os.Stat(filepath.Join(root, "network-removed"))
+		if networkErr == nil || removedErr == nil {
 			fakeDockerGroupInspect(root, args[1:], string(mode))
 			os.Exit(0)
 		}
@@ -240,6 +242,9 @@ func TestDockerCLIHelper(t *testing.T) {
 			_ = os.Rename(filepath.Join(root, file), filepath.Join(root, target))
 		}
 	case "logs":
+		if string(mode) == "logs-error" {
+			os.Exit(1)
+		}
 		fmt.Println("payload output")
 		fmt.Fprintln(os.Stderr, "payload stderr")
 	default:

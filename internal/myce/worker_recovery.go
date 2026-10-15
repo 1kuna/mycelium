@@ -145,6 +145,33 @@ func decodeWorkerState(data []byte, state *workerState) error {
 	return nil
 }
 
+// Results from a different execution must never be adopted from a spool file.
+func (s *workerStore) matchesResult(r Result, machine string) bool {
+	return s.state.Job != nil && r.ID == s.state.Job.ID && r.Attempt == s.state.Job.Attempt && r.Machine == machine && r.Session == s.state.Session
+}
+
+func (s *workerStore) recoverResult(machine string) error {
+	if s.state.Result != nil && !s.matchesResult(*s.state.Result, machine) {
+		return errors.New("mismatched saved worker result")
+	}
+	var r Result
+	data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".result.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err = decodeWorkerJSON(data, &r); err != nil {
+		return err
+	}
+	if !s.matchesResult(r, machine) {
+		return errors.New("mismatched recovered worker result")
+	}
+	s.state.Result = &r
+	return nil
+}
+
 func (s *workerStore) close() {
 	_ = syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN)
 	_ = s.lock.Close()
