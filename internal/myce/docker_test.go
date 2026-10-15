@@ -200,6 +200,15 @@ func TestDockerCLIHelper(t *testing.T) {
 				_ = os.WriteFile(filepath.Join(root, "inspected-stopped"), nil, 0600)
 			}
 		}
+	case "stop":
+		if string(mode) == "stop-error" || string(mode) == "delivered-stop-error" {
+			if string(mode) == "delivered-stop-error" {
+				_ = os.WriteFile(filepath.Join(root, "stop-delivered"), nil, 0600)
+			}
+			fmt.Fprintln(os.Stderr, "Error response from daemon: stop reply lost")
+			os.Exit(1)
+		}
+		_ = os.Rename(filepath.Join(root, "running"), filepath.Join(root, "stopped"))
 	case "kill":
 		if strings.HasPrefix(args[2], "sidecar-") && (args[1] == "--signal=KILL" || string(mode) == "term") {
 			_ = os.Rename(filepath.Join(root, "running-"+args[2]), filepath.Join(root, "stopped-"+args[2]))
