@@ -90,10 +90,14 @@ func (s Spec) validateDockerGroup() error {
 }
 
 type dockerMember struct {
-	Name    string `json:"name"`
-	Memory  int64  `json:"memory"`
-	Swap    int64  `json:"swap"`
-	Started bool   `json:"started"`
+	Name           string `json:"name"`
+	Memory         int64  `json:"memory"`
+	Swap           int64  `json:"swap"`
+	Started        bool   `json:"started"`
+	TermDispatched bool   `json:"term_dispatched,omitempty"`
+	TermOutcome    string `json:"term_outcome,omitempty"`
+	ExitCode       *int   `json:"exit_code,omitempty"`
+	StderrTail     string `json:"stderr_tail,omitempty"`
 }
 
 type dockerNetworkInspection struct {
@@ -240,6 +244,7 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 		d.state.Forced = true
 	}
 	for _, c := range containers {
+		d.state.OOMKilled = d.state.OOMKilled || c.State.OOMKilled
 		if why := d.containerViolation(c); why != "" {
 			d.state.Failure = why
 			d.state.Stopped = true
