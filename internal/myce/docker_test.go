@@ -258,7 +258,7 @@ func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string
 	hostDir := t.TempDir()
 	t.Setenv("MYCE_HOST_STATE_DIR", hostDir)
 	clock := &dockerTestClock{now: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)}
-	w := Worker{HostStateDir: hostDir, Machine: machine("docker-worker", "fake"), StateDir: t.TempDir(), Clock: clock, HostMemorySource:func(context.Context)(float64,error){return 32,nil}}
+	w := Worker{HostStateDir: hostDir, Machine: machine("docker-worker", "fake"), StateDir: t.TempDir(), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)
@@ -839,7 +839,7 @@ func TestDockerFreshWorkerAndStaleAckCannotClearCustody(t *testing.T) {
 	}
 }
 
-func TestDockerEveryLabeledContainerAndKillRefusal(t *testing.T) {
+func TestDockerEveryLabeledContainerAndKillRefusalRetainsCustody(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
 	j := dockerJob()
 	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
@@ -858,12 +858,22 @@ func TestDockerEveryLabeledContainerAndKillRefusal(t *testing.T) {
 		t.Fatal("kill refusal released resources")
 	default:
 	}
+	// A refused/uncertain dispatch is never resent. Positive external exit
+	// evidence is still required before custody can be released.
 	_ = os.WriteFile(filepath.Join(root, "mode"), nil, 0600)
+	callsBefore, _ := os.ReadFile(filepath.Join(root, "calls"))
+	_ = os.Rename(filepath.Join(root, "running"), filepath.Join(root, "stopped"))
+	_ = os.Rename(filepath.Join(root, "extra"), filepath.Join(root, "extra-stopped"))
 	select {
 	case <-p.done:
 	case <-time.After(3 * time.Second):
-		t.Fatal("containers not reclaimed")
+		t.Fatal("positive exit proof did not release custody")
 	}
+	callsAfter, _ := os.ReadFile(filepath.Join(root, "calls"))
+	if strings.Count(string(callsAfter), "kill ") != strings.Count(string(callsBefore), "kill ") {
+		t.Fatal("uncertain KILL was resent")
+	}
+
 	if _, e = os.Stat(filepath.Join(root, "extra-stopped")); e != nil {
 		t.Fatal("second owned container survived")
 	}
