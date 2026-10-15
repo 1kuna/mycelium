@@ -128,7 +128,9 @@ func TestDeviceSelectionBatchEnvironment(t *testing.T) {
 				for key, want := range selectedDeviceEnv(platform, device) {
 					check += fmt.Sprintf(` && test "$%s" = '%s'`, key, want)
 				}
-				p, err := w.start(s, recoveryJob(t, []string{"sh", "-c", check}))
+				j := recoveryJob(t, []string{"sh", "-c", check})
+				w = workerWithPreparedCheckpoint(t, w, s, j)
+				p, err := w.start(s, j)
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -155,6 +155,7 @@ func TestWorkerOfflineLargeOutputIsDurable(t *testing.T) {
 	defer s.close()
 	s.state.Session = "offline-session"
 	j := recoveryJob(t, []string{"sh", "-c", `head -c 4194304 /dev/zero; echo done`})
+	w = workerWithPreparedCheckpoint(t, w, s, j)
 	p, err := w.start(s, j)
 	if err != nil {
 		t.Fatal(err)
@@ -288,6 +289,7 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 	}
 	s.state.Session = "old-session"
 	j := recoveryJob(t, []string{"sh", "-c", "echo recovered"})
+	w = workerWithPreparedCheckpoint(t, w, s, j)
 	p, err := w.start(s, j)
 	if err != nil {
 		t.Fatal(err)
