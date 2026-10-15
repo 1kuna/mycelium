@@ -75,8 +75,15 @@ func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
 	p.last = now
 	wait := func(reason string) Availability { a.Available = false; a.Reason = reason; return a }
 	heatReason := ""
+	// --laptop and detected battery hardware remain sticky vetoes. With no
+	// laptop indication, known external power permits the desktop CPU waiver.
+	desktopWaiver := !p.laptop && (s.Power == "ac" || s.Power == "desktop") && s.HeatCoverage == "gpu-only"
+	heat := s.Heat
+	if desktopWaiver {
+		heat = s.GPUHeat
+	}
 	if p.daily {
-		switch s.Heat {
+		switch heat {
 		case "fair", "serious", "critical":
 			p.hot = true
 			p.coolSince = time.Time{}
@@ -95,7 +102,7 @@ func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
 		default:
 			p.coolSince = time.Time{}
 			heatReason = "heat sensing unavailable"
-			if s.HeatCoverage == "gpu-only" {
+			if s.HeatCoverage == "gpu-only" && !desktopWaiver {
 				heatReason = "host CPU thermal coverage unavailable"
 			}
 		}
@@ -124,6 +131,9 @@ func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
 	}
 	if heatReason != "" {
 		return wait(heatReason)
+	}
+	if desktopWaiver {
+		a.Reason = "CPU thermal coverage waived for desktop"
 	}
 	return a
 }

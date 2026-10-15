@@ -526,3 +526,47 @@ func TestMachineLimitRetainsUnacknowledgedStop(t *testing.T) {
 		t.Fatal("confirmed release didn't free machine limit", r)
 	}
 }
+
+func TestDailyDesktopCPUThermalWaiver(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		laptop, detectedLaptop bool
+		power, gpu             string
+		idle                   float64
+		known, available       bool
+		reason                 string
+	}{
+		{"desktop", false, false, "ac", "nominal", 300, true, true, "CPU thermal coverage waived for desktop"},
+		{"configured laptop", true, false, "ac", "nominal", 300, true, false, "host CPU thermal coverage unavailable"},
+		{"detected laptop", false, true, "ac", "nominal", 300, true, false, "host CPU thermal coverage unavailable"},
+		{"hot GPU", false, false, "ac", "serious", 300, true, false, "cooling down"},
+		{"unknown GPU", false, false, "ac", "unknown", 300, true, false, "heat sensing unavailable"},
+		{"unknown power", false, false, "unknown", "nominal", 300, true, false, "power source unavailable"},
+		{"unknown idle", false, false, "ac", "nominal", 300, false, false, "owner activity unavailable"},
+		{"owner returned", false, false, "ac", "nominal", 0, true, false, "waiting for 5 idle minutes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := &fakeClock{now: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
+			p := availabilityPolicy{clock: clock, daily: true, laptop: tc.laptop}
+			s := OwnerSignals{IdleKnown: tc.known, IdleSeconds: tc.idle, Laptop: tc.detectedLaptop, Power: tc.power, Heat: "unknown", GPUHeat: tc.gpu, HeatCoverage: "gpu-only"}
+			a := p.evaluate(s)
+			if a.Available != tc.available || a.Reason != tc.reason {
+				t.Fatal(a)
+			}
+			if a.Signals.Heat != "unknown" {
+				t.Fatal("waiver fabricated CPU heat", a)
+			}
+			if a.Available {
+				m := profileAvailability(machine("desktop", "fake"), a)
+				if !strings.Contains(HyphaAvailability(&m), tc.reason) {
+					t.Fatal(HyphaAvailability(&m))
+				}
+				clock.Advance(signalRefresh)
+				s.IdleSeconds = 0
+				if p.evaluate(s).Available {
+					t.Fatal("owner return did not withdraw availability")
+				}
+			}
+		})
+	}
+}
