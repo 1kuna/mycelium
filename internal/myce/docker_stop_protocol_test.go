@@ -3,6 +3,8 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -214,5 +216,113 @@ func TestDockerSidecarEvidenceSurvivesRetention(t *testing.T) {
 				t.Fatal("container removed without matching evidence")
 			}
 		})
+	}
+}
+
+// Fail only a pre-dispatch write; all earlier stop/deadline writes reach disk.
+type dockerFaultStore struct {
+	dir        string
+	kill, fail bool
+	failures   int
+}
+
+func (s *dockerFaultStore) save(state dockerExecution) error {
+	m := state.Containers["id1"]
+	if s.fail && ((!s.kill && m.TermDispatched) || (s.kill && m.KillDispatched)) {
+		s.failures++
+		return errors.New("injected custody persistence failure")
+	}
+	return saveWorkerJSON(s.dir, state.Identity+".docker.json", state)
+}
+
+func TestDockerSignalPersistenceFailureRetry(t *testing.T) {
+	for _, kill := range []bool{false, true} {
+		for _, recovery := range []string{"live", "restart", "flush-then-restart", "deadline-then-restart"} {
+			t.Run(fmt.Sprintf("kill=%v/%s", kill, recovery), func(t *testing.T) {
+				_, s, c, root := dockerFixture(t)
+				for name, value := range map[string]string{"created": "id1", "running": "yes", "label": "owned"} {
+					if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				prior := dockerMember{Name: "main", Started: true, TermDispatched: kill}
+				store := &dockerFaultStore{dir: s.dir, kill: kill, fail: true}
+				d := &dockerAttempt{persist: store.save, dir: s.dir, binary: filepath.Join(root, "docker"), clock: c, timeout: 2 * time.Second, env: withoutToken(os.Environ()), state: dockerExecution{Identity: "owned", Endpoint: "fake", Container: "id1", Containers: map[string]dockerMember{"id1": prior}}}
+				d.stop(c.Now(), StopGrace, false)
+				deadline := *d.state.StopAt
+				if kill {
+					c.advance(StopGrace)
+				}
+				for i := 0; i < 2; i++ {
+					if released, err := d.reconcile(); err == nil || released {
+						t.Fatal("failed store did not retain custody", err)
+					}
+				}
+				if store.failures != 2 {
+					t.Fatalf("faults=%d, want 2", store.failures)
+				}
+				calls := func(signal string) int {
+					data, _ := os.ReadFile(filepath.Join(root, "calls"))
+					return strings.Count(string(data), "kill --signal="+signal+" id1")
+				}
+				if calls("TERM") != 0 || calls("KILL") != 0 {
+					t.Fatal("dispatched before persistence")
+				}
+				if d.state.Containers["id1"] != prior {
+					t.Fatal("failed save consumed signal or changed member")
+				}
+				store.fail = false
+				deadlinePassed := recovery == "deadline-then-restart"
+				if deadlinePassed && !kill {
+					c.advance(StopGrace)
+				}
+				if recovery == "flush-then-restart" {
+					// Reproduce the next tick's dirty-state flush without dispatch.
+					if err := d.saveLocked(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if recovery != "live" {
+					data, err := os.ReadFile(filepath.Join(s.dir, "owned.docker.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					var state dockerExecution
+					if err := json.Unmarshal(data, &state); err != nil {
+						t.Fatal(err)
+					}
+					d = &dockerAttempt{dir: s.dir, binary: d.binary, clock: c, timeout: d.timeout, env: d.env, state: state}
+				}
+				tick := func() bool {
+					released, err := d.reconcile()
+					if err != nil {
+						t.Fatal(err)
+					}
+					return released
+				}
+				tick()
+				if !d.state.StopAt.Equal(deadline) {
+					t.Fatal("recovery renewed deadline")
+				}
+				if !kill && !deadlinePassed {
+					tick()
+					if calls("TERM") != 1 || calls("KILL") != 0 {
+						t.Fatal("TERM retry missing, repeated, or escalated early")
+					}
+					c.advance(StopGrace)
+					tick()
+				}
+				if !tick() || !d.state.Released {
+					t.Fatal("custody stuck after storage recovery")
+				}
+				wantTerm := 1
+				if kill || deadlinePassed {
+					wantTerm = 0
+				}
+				if calls("TERM") != wantTerm || calls("KILL") != 1 {
+					t.Fatalf("TERM=%d KILL=%d", calls("TERM"), calls("KILL"))
+				}
+			})
+		}
 	}
 }
