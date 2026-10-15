@@ -223,7 +223,7 @@ the actual API and runner using deliberately fake extension fixtures.
 ## Starter extensions
 
 - `extensions/pytorch-script`: PyTorch 2.9.1+cu130 on Linux CUDA (arm64/amd64), 2.8.0 on MPS/XPU,
-  extension v0.2.2, CUDA/XPU/MPS, unmodified programs
+  extension v0.2.3, CUDA/XPU/MPS, unmodified programs
   choosing `torch.device(os.environ['MYCE_DEVICE'])`. Includes a small native
   MPS reference retained unchanged and a separately recorded GB10 CUDA
   pointwise float32 reference, each with zero measured spread. Setup requires a
