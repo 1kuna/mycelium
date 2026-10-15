@@ -273,11 +273,17 @@ new signals and acknowledgement of unfinished cleanup; no cleanup receipt is iss
 unconfirmed work. A blocked kernel filesystem operation cannot be interrupted
 by Go: flag durability is claimed only after write/fsync succeeds, and any
 in-progress operation remains under the control lock until it returns. No NAS
-operation gates disable. Queue notifications are best-effort, launched alongside
-cleanup and never awaited by disable. A pending/unconfirmed notification message
-is not proof that the fleet queue rejected the request; another registered queue
-may be offline, or delivery may still be in flight. An acknowledgement may remain pending if
-the CLI exits before delivery; the durable receipt reconciles at enable/rejoin.
+operation gates disable. Initial queue fencing runs alongside cleanup. Once
+physical cleanup is confirmed, a notified host disable sends the saved exact
+job/machine/session/attempt release acknowledgements through the worker completion
+endpoint, then confirms host cleanup. The final notification phase has a shared
+250 ms deadline, preserving offline-disable responsiveness. On acceptance the
+queue clears the old cleanup status and custody hold without enable/rejoin.
+If notification fails, the durable local receipt reconciles at enable/rejoin.
+A pending/unconfirmed notification message is not proof that the fleet queue
+rejected the request; another registered queue may be offline or initial fencing
+may still be in flight. Unconfirmed physical cleanup still holds and escalates
+after two minutes.
 
 Host control carries a durable monotonic generation in the local flag/receipt
 and queue host record. A stale enable or disable is rejected; retrying the same
@@ -297,7 +303,8 @@ Upgrade the queue before workers for the new held-status protocol; older queues
 reject unknown check-in fields. Preserve the host control directory; do not reset its counter.
 One OS-user control directory is the ordering authority for each physical host.
 A reachable queue fences every card on that host and requeues displaced jobs
-without charging a retry. Exact saved attempts can refund an outage loss.
+without charging a retry; an already-requested cancellation remains cancelled.
+Exact saved attempts can refund an outage loss.
 Interrupted model HTTP calls return an error and must be retried by the caller.
 
 Use `--config /absolute/path/config.json` for a custom installer root.
@@ -1284,12 +1291,13 @@ Operator recovery is explicit and offline:
    `myce resolve-docker --state-dir /absolute/worker/spool --attempt-id ID --confirm-gone`.
    This takes the exclusive worker lock, refuses a different attempt, and durably
    records operator-confirmed forced release. It makes no Docker or network calls.
-4. If DISABLED is present, rerun `myce disable` to confirm host cleanup, then
-   `myce enable`, using the same host control directory. Resolution never removes
-   the flag. Restart the same worker with the same spool/queue/name. It sends the existing
-   exact job/machine/session/attempt release acknowledgement before log replay.
-   Confirm the queue hold clears in status. The command alone does not clear the
-   queue; keep the old spool until that acknowledgement is accepted.
+4. If DISABLED is present, rerun a notified `myce disable` using the same host
+   control directory. After confirmed host cleanup it sends the saved exact
+   job/machine/session/attempt release acknowledgement; confirm the hold clears
+   in queue status. Resolution alone does not notify the queue or remove the flag.
+   If notification remains unavailable, `myce enable` and restart the same worker
+   with the same spool/queue/name to reconcile before log replay. Keep the old
+   spool until the acknowledgement is accepted.
 
 `--confirm-gone` is an operator assertion of external proof, not an automatic
 check or permission to release uncertain memory. A crash after the custody write
