@@ -508,3 +508,76 @@ func TestExtensionQualificationChangeBeforeStartRequeuesWithoutLoss(t *testing.T
 		t.Fatal("stale qualification failure affected current attempt:", err)
 	}
 }
+
+func TestPlatformBaselinesSelectNativeReferenceWithoutFallback(t *testing.T) {
+	e := fakeExtension(t)
+	metal := e.Baselines["kind:sample"]
+	cuda := metal
+	cuda.Output = "baseline/cuda-output"
+	e.Files[cuda.Output] = []byte("[9,10]\n")
+	e.Platforms = []string{"fake", "cuda", "xpu"}
+	e.PlatformBaselines = map[string]map[string]ExtensionBaseline{"fake": {"kind:sample": metal}, "cuda": {"kind:sample": cuda}}
+	e.Baselines = nil
+	if err := e.validate(); err != nil {
+		t.Fatal(err)
+	}
+	b, ok := e.baseline("kind:sample", "cuda")
+	if !ok || b.Output != cuda.Output {
+		t.Fatal("CUDA reference not selected")
+	}
+	if _, ok := e.baseline("kind:sample", "xpu"); ok {
+		t.Fatal("fell back to another platform")
+	}
+	if err := compareExtensionOutput(e.Files[metal.Output], e.Files[b.Output], b); err == nil {
+		t.Fatal("accepted different platform output")
+	}
+	// Reparse a frozen folder, then run the actual check against the selected reference.
+	description, err := yaml.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Files["extension.yaml"] = description
+	e, err = extensionFromFiles(e.Files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := InstallExtension(root, e); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareExtension(context.Background(), root, e, "fake", "", false, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	reports, err := PrepareExtension(context.Background(), root, e, "fake", "", true, io.Discard)
+	if err == nil {
+		t.Fatal("missing program reference did not fail check")
+	}
+	for _, r := range reports {
+		if r.Work == "kind:sample" && !r.Qualified {
+			t.Fatal(r)
+		}
+		if r.Work == "program:sample-script" && r.Qualified {
+			t.Fatal("unreferenced work qualified")
+		}
+	}
+}
+
+func TestPlatformBaselineValidation(t *testing.T) {
+	e := fakeExtension(t)
+	baseline := e.Baselines["kind:sample"]
+	e.PlatformBaselines = map[string]map[string]ExtensionBaseline{"fake": {"kind:sample": baseline}}
+	if err := e.validate(); err == nil {
+		t.Fatal("ambiguous fallback allowed")
+	}
+	e.Baselines = nil
+	e.PlatformBaselines["cuda"] = map[string]ExtensionBaseline{"kind:sample": baseline}
+	if err := e.validate(); err == nil {
+		t.Fatal("unsupported platform reference accepted")
+	}
+	delete(e.PlatformBaselines, "cuda")
+	baseline.Output = "missing"
+	e.PlatformBaselines["fake"]["kind:sample"] = baseline
+	if err := e.validate(); err == nil {
+		t.Fatal("missing native output accepted")
+	}
+}

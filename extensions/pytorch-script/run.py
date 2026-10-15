@@ -12,12 +12,8 @@ import threading
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
 import torch
 
-device = os.environ["MYCE_DEVICE"]
-available = {"mps": torch.backends.mps.is_available,
-             "cuda:0": torch.cuda.is_available,
-             "xpu:0": torch.xpu.is_available}
-if device not in available or not available[device]():
-    raise SystemExit("assigned PyTorch resource unavailable; no CPU fallback")
+from backend import assigned_device
+device = assigned_device()
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
 
 # CUDA/XPU expose allocator high-water marks; MPS currently exposes only current
