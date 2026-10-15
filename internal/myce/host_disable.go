@@ -362,6 +362,17 @@ func NotifyHost(client Client) func(context.Context, HostWorker, bool, bool, str
 		if enable {
 			action = "enable"
 		}
+		// Confirmed physical cleanup can acknowledge only the saved executions.
+		// Send before host disable requeues them and clears their current keys.
+		if !enable && cleared {
+			for _, r := range w.Executions {
+				r.ReleaseOnly = true
+				r.ReleasePending = false
+				if err := c.Call(ctx, "POST", "/api/workers/complete", r, nil); err != nil {
+					return err
+				}
+			}
+		}
 		return c.Call(ctx, "POST", "/api/hosts/"+url.PathEscape(w.Host)+"/"+action, map[string]any{"reason": reason, "cleared": cleared, "executions": w.Executions, "generation": w.Generation}, nil)
 	}
 }
@@ -659,8 +670,10 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 			if ctx.Err() != nil {
 				return r, ctx.Err()
 			}
-			go h.notify(context.WithoutCancel(ctx), workers, false, true, reason)
-			r.QueueErrors = append(r.QueueErrors, "queue cleanup notification pending; durable receipt will reconcile")
+			// Keep offline disable below its existing 400 ms responsiveness bound.
+			notifyCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			r.QueueErrors = append(r.QueueErrors, h.notify(notifyCtx, workers, false, true, reason)...)
+			cancel()
 		}
 	}
 	if len(r.Unconfirmed) > 0 {

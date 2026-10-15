@@ -52,6 +52,7 @@ func (q *Queue) DisableHostGeneration(host, reason string, cleared bool, executi
 			delete(q.unreported, m.ID)
 			if cleared {
 				m.Gone = true
+				m.DockerCleanup = ""
 				m.Models = nil
 				delete(q.s.BatchReleases, m.ID)
 			}
