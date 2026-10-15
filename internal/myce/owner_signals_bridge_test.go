@@ -54,6 +54,7 @@ func TestWSLHostBridgeEndToEnd(t *testing.T) {
 			signals.Power = "battery"
 		}, false, "on battery"},
 		{"missing physical heat", func() { signals.Power = "ac"; signals.Heat = "unknown" }, false, "heat sensing unavailable"},
+		{"GPU-only coverage", func() { signals.SetGPUHeat("nominal") }, false, "host CPU thermal coverage unavailable"},
 		{"unsafe physical heat", func() { signals.Heat = "serious" }, false, "cooling down"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

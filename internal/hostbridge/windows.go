@@ -6,8 +6,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -59,9 +62,17 @@ func WindowsSource() func(context.Context) Signals {
 		if ok, _, _ := powerStatus.Call(uintptr(unsafe.Pointer(&power))); ok != 0 {
 			s.Power, s.Laptop = Power(power.AC, power.Battery, power.Saver)
 		}
-		// No uniform nonprivileged Windows CPU/GPU thermal API exists. Neither an
-		// absent WMI sensor nor a power-saving/cooling policy is a safe heat reading.
-		// Keep Heat unknown, including on desktops: daily admission still withholds.
+		// Use the driver-installed executable, never PATH/current-directory lookup.
+		probe, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+		system, err := windows.GetSystemDirectory()
+		if err == nil {
+			cmd := exec.CommandContext(probe, filepath.Join(system, "nvidia-smi.exe"), "--query-gpu=temperature.gpu,temperature.gpu.tlimit", "--format=csv,noheader")
+			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+			if raw, err := cmd.Output(); err == nil && len(raw) <= 4096 {
+				s.SetGPUHeat(NVIDIAHeat(string(raw)))
+			}
+		}
+		cancel()
 		self, covered := sessionCoverage()
 		var input struct{ Size, Tick uint32 }
 		input.Size = uint32(unsafe.Sizeof(input))
@@ -138,3 +149,6 @@ func WindowsInstallHooks() InstallHooks {
 		},
 	}
 }
+
+// InteractiveInstallAllowed verifies the installer belongs to the covered console.
+func InteractiveInstallAllowed() bool { _, covered := sessionCoverage(); return covered }

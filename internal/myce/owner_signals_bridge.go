@@ -19,5 +19,5 @@ func configuredHostOwnerSignals(ctx context.Context) OwnerSignals {
 			}
 		}
 	}
-	return OwnerSignals{IdleKnown: s.IdleKnown, IdleSeconds: s.IdleSeconds, Laptop: s.Laptop, Power: s.Power, Heat: s.Heat}
+	return OwnerSignals{IdleKnown: s.IdleKnown, IdleSeconds: s.IdleSeconds, Laptop: s.Laptop, Power: s.Power, Heat: s.Heat, GPUHeat: s.GPUHeat, HeatCoverage: s.HeatCoverage}
 }

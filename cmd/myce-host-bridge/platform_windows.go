@@ -31,6 +31,9 @@ func platformRun(ctx context.Context, action string) error {
 	}
 	switch action {
 	case "install":
+		if !hostbridge.InteractiveInstallAllowed() {
+			return errors.New("install from the covered interactive desktop session")
+		}
 		if err = hostbridge.Install(root, source, hostbridge.WindowsInstallHooks()); err != nil {
 			return err
 		}

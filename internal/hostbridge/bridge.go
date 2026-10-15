@@ -20,11 +20,13 @@ import (
 )
 
 type Signals struct {
-	IdleSeconds float64 `json:"idle_seconds"`
-	IdleKnown   bool    `json:"idle_known"`
-	Laptop      bool    `json:"laptop"`
-	Power       string  `json:"power"`
-	Heat        string  `json:"heat"`
+	GPUHeat      string  `json:"gpu_heat,omitempty"`
+	HeatCoverage string  `json:"heat_coverage,omitempty"`
+	IdleSeconds  float64 `json:"idle_seconds"`
+	IdleKnown    bool    `json:"idle_known"`
+	Laptop       bool    `json:"laptop"`
+	Power        string  `json:"power"`
+	Heat         string  `json:"heat"`
 }
 
 func Unknown() Signals { return Signals{Power: "unknown", Heat: "unknown"} }
@@ -155,6 +157,15 @@ func Fetch(ctx context.Context, c Config) (Signals, error) {
 		return fail()
 	}
 	if s.Heat != "nominal" && s.Heat != "fair" && s.Heat != "serious" && s.Heat != "critical" && s.Heat != "unknown" {
+		return fail()
+	}
+	if s.HeatCoverage != "" && s.HeatCoverage != "gpu-only" {
+		return fail()
+	}
+	if s.GPUHeat != "" && s.GPUHeat != "nominal" && s.GPUHeat != "fair" && s.GPUHeat != "serious" && s.GPUHeat != "unknown" {
+		return fail()
+	}
+	if s.HeatCoverage == "gpu-only" && s.Heat != "unknown" && s.Heat != "fair" && s.Heat != "serious" {
 		return fail()
 	}
 	return s, nil

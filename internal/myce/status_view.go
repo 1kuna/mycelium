@@ -50,6 +50,8 @@ func availabilityWords(reason string) string {
 		return "hypha needs external power"
 	case "owner activity unavailable":
 		return "hypha owner activity is unknown"
+	case "host CPU thermal coverage unavailable":
+		return "host CPU thermal coverage unavailable"
 	case "heat sensing unavailable":
 		return "hypha temperature is unknown"
 	default:
