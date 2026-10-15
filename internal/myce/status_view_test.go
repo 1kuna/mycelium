@@ -31,7 +31,7 @@ func TestStatusViewAvailabilityAndWaiting(t *testing.T) {
 			q, c := fixture(t)
 			m := machine("daily", "fake")
 			m.TotalMemoryGB = 8
-			m.CapabilityProfile = &CapabilityProfile{OS: "darwin", Arch: "arm64", LogicalCPUs: 8, MemoryLayout: "unified", SystemMemoryBytes: 16 << 30, Accelerators: []AcceleratorProfile{{Type: "fake"}}, Availability: &Availability{Mode: "daily", Reason: tc.reason, CheckedAt: c.Now(), Signals: OwnerSignals{Power: "ac"}}}
+			m.CapabilityProfile = &CapabilityProfile{OS: "darwin", Arch: "arm64", LogicalCPUs: 8, Benchmark: &BenchmarkResult{State: "complete", Measurements: []Throughput{{Resource: "cpu", Work: "sha256", Rate: 123, Unit: "bytes/s"}}}, MemoryLayout: "unified", SystemMemoryBytes: 16 << 30, Accelerators: []AcceleratorProfile{{Type: "fake"}}, Availability: &Availability{Mode: "daily", Reason: tc.reason, CheckedAt: c.Now(), Signals: OwnerSignals{Power: "ac"}}}
 			check(t, q, m, nil)
 			submit(t, q, spec("experiment"))
 			for _, path := range []string{"/", "/api/status"} {
@@ -44,6 +44,9 @@ func TestStatusViewAvailabilityAndWaiting(t *testing.T) {
 					if len(snapshot.Jobs) != 1 || !strings.Contains(snapshot.Jobs[0].Reason, tc.want) {
 						t.Errorf("waiting job missing %q", tc.want)
 					}
+				}
+				if path == "/" && !strings.Contains(body, "cpu sha256 123.00 bytes/s") {
+					t.Errorf("%s missing measured benchmark rate", path)
 				}
 				if !strings.Contains(body, tc.want) {
 					t.Errorf("%s missing %q", path, tc.want)

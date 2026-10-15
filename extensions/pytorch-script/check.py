@@ -1,6 +1,7 @@
 """Replay bundled inputs on the assigned accelerator, never known-answer grading."""
 import json
 import os
+import time
 from pathlib import Path
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
 import torch
@@ -14,5 +15,20 @@ if resource not in available or not available[resource]():
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
 values = json.loads(Path(os.environ["MYCE_CHECK_INPUT"]).read_text())
 x = torch.tensor(values, dtype=torch.float32, device=resource)
-result = ((x * x) + (x * 2)).cpu().tolist()
+def reference():
+    # The host read synchronizes completion on CUDA, XPU and MPS.
+    return ((x * x) + (x * 2)).cpu().tolist()
+
+result = reference()
+if os.environ.get("MYCE_BENCHMARK_OUTPUT"):
+    count = 0
+    start = time.perf_counter()
+    while time.perf_counter() - start < 2:
+        if reference() != result:
+            raise SystemExit("reference output changed during measurement")
+        count += 1
+    seconds = time.perf_counter() - start
+    Path(os.environ["MYCE_BENCHMARK_OUTPUT"]).write_text(json.dumps({
+        "units": count, "seconds": seconds, "unit": "references/s", "reference_units": 1
+    }))
 Path(os.environ["MYCE_CHECK_OUTPUT"]).write_text(json.dumps(result) + "\n")
