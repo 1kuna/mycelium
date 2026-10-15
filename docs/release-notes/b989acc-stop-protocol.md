@@ -3,6 +3,7 @@
 Base: `b989acc138fc160c60430855e415ea3846048b44`.
 Branch: `hotfix/b989acc-stop-protocol`.
 Stop-protocol implementation: `9900291b9bb9d55d4b195012bfe003faac1a52fc`.
+Independent-review fix implementation: `09b7f83abb278b47b04686c0002ec111c561fa5d`.
 macOS cleanup backport: `f5e24f8` (source `8863083f01ad9bffc4ccd4276f2062da01900d50`).
 The final published head and immutable release-note link are recorded in the
 [latest #54 report](https://github.com/1kuna/mycelium/issues/54).
@@ -24,9 +25,17 @@ The final published head and immutable release-note link are recorded in the
    This corrects the baseline macOS failure that blocked both previous full
    race suites. Retrying disable cannot resolve the OS visibility limitation;
    never remove records or the flag to bypass it.
-4. This release-note update records the authorized backport and renewed gates.
+4. `cc625cc1e0ce555306f2273a9db0ea693ed3ad00` — release note for the
+   authorized backport and renewed gates.
+5. `09b7f83abb278b47b04686c0002ec111c561fa5d` — restore retryable TERM/KILL state
+   after known non-dispatch persistence failures; retry definite daemon refusals;
+   split refusal/uncertain-delivery regressions; make real-Docker evidence
+   mandatory and add negative acceptance cases.
+6. Following documentation-only commit updates this note with the tested fix
+   head and fresh gates. Its final published SHA is in the linked #54 report.
 
-Diff review against `6377bb1` confirms the sole production-code change is the
+For the #39 backport, diff review against `6377bb1` confirms its sole
+production-code change is the
 `runtime` import and an added `runtime.GOOS == "darwin"` conditional in native
 secondary cleanup. Non-macOS paths, Linux systemd/cgroup cleanup, marker scans,
 signaling, and grace logic are unchanged. The backport matches the source patch.
@@ -104,7 +113,7 @@ Private raw evidence is retained in ignored project scratch, not published.
 
 ## Renewed gates after the #39 backport
 
-Current state: the required two-green-full-race gate now passes locally on
+Historical backport verification: the required two-green-full-race gate passed on
 Darwin/arm64, Go 1.25.6, at implementation head
 `f5e24f8cac0cbd888a8c8c815bd3e57d9de24ca2`. The following documentation-only
 commit does not change the tested source. Commands ran serially with
@@ -129,6 +138,78 @@ No full-suite retry, test skip, assertion change beyond the original #39 fix,
 Docker runtime rerun, machine access, or fleet acceptance is claimed. Raw gate
 logs and exit ledger remain in ignored project scratch. Next: orchestrator
 review and separately authorized native acceptance; #54 remains open.
+
+## Independent-review fixes (issue #54)
+
+The NO-GO review at cc625cc found a known non-dispatch path that incorrectly
+consumed the live TERM/KILL latch. The follow-up implementation restores the
+prior member (or removes a newly introduced member) if the pre-dispatch save
+fails. The dirty-state retry therefore writes the restored latch before retrying
+Docker. A transient failed write no longer permanently suppresses escalation.
+The original injected-clock deadline is retained, including when it expires
+while storage is unavailable; recovery then dispatches KILL without a late TERM.
+Storage must become writable for durable dispatch to proceed.
+
+A definite `Error response from daemon:` refusal now clears and persists only
+the refused signal's latch, permitting a safe retry. Both TERM and KILL refusal
+regressions require automatic reclamation after the daemon recovers. A separate
+uncertain-delivery regression requires no repeated KILL across further healthy
+reconciliations and release only after positive external exit proof. This
+restores the prior refusal-recovery assertion rather than substituting an
+external exit for it.
+
+The real-Docker check now requires exactly two evidence records: one main with
+exit 0 and one named sidecar with exit 143 or 137 as appropriate. It checks the
+sidecar's exact fixture stderr content, the 64 KiB bound, one TERM, and zero or
+one KILL. Missing/unreadable signal ledgers fail. CPU-only negative cases prove
+that empty/omitted/duplicated records, missing/wrong exits, missing/wrong/oversized
+stderr, and missing/unreadable/incorrect signal ledgers fail acceptance.
+
+These changes do not make filesystem persistence and Docker delivery atomic.
+A crash after saved intent but before dispatch, an ambiguous storage commit
+followed by process loss, or uncertain Docker delivery still cannot prove that
+a signal arrived. Uncertain KILL remains latched; positive exit/absence proof or
+existing operator resolution remains required. This trade-off still needs
+explicit release acceptance by the orchestrator; passing local gates is not
+that acceptance. Existing evidence privacy/retention, attempt binding, token
+filtering, and the sole #39 backport remain unchanged.
+
+### Fresh verification of `09b7f83`
+
+All code/test changes were verified before committing this implementation head;
+the following release-note commit changes documentation only. Commands again
+used serial `GOMAXPROCS=2`, `nice -n 19`, test `-p 1`, and immediate Bash
+`${PIPESTATUS[@]}` capture, gating on command index 0 and `tee`. Every log-writer
+exit was **0**.
+
+- Failing-first P1 regression: **1** in all six initial TERM/KILL recovery cases
+  on reviewed behavior. Final eight-case fake-store regression and targeted
+  race checks: **0**. Acceptance negative cases cover both real-test scenarios.
+- Build **0**, vet **0**, executable dev checkpoint/model E2E **0**.
+- Initial full race run **1**, solely at unchanged
+  `TestWorkerOrphanCleanupVerifiesIdentity` (25 ms checkpoint filesystem-probe
+  timeout). Current and untouched `cc625cc` each passed three isolated checks
+  (**0 / 0**); the cause of the initial timeout was not established. No unrelated
+  assertion or timeout was changed.
+- Two subsequent uncached full race suites **0 / 0** (internal package
+  **136.234 s / 130.739 s**). No source changes between those runs.
+- Linux amd64/arm64 cross-compiles **0 / 0**; ELF architectures verified.
+- Strengthened real-Docker acceptance on isolated MacBook **0**: main **0** in
+  both cases; signal-sensitive sidecar **143**, TERM **1**, KILL **0**; ignoring
+  sidecar **137**, TERM **1**, KILL **1**. Required exact bounded stderr and exit
+  evidence passed. No image pull; throwaway token; labelled test objects only.
+  Binary and preserved log checksums matched; labelled container/network
+  inventories empty, no test process running, owned temporary artifacts trashed.
+- An intermediate expanded uncertain-delivery test exited **1** because it
+  counted the second container's first KILL as a resend. Waiting for both initial
+  uncertain calls fixed the fixture; the unchanged no-resend assertion passes
+  in targeted and full gates. This was not a second full-suite failure.
+
+Current state: implementation and requested local/runtime gates complete.
+Private logs and exact exit ledger remain in ignored project scratch. Next:
+orchestrator re-review and explicit acceptance of the documented crash/unknown
+signal-delivery trade-off before separately authorized native fleet acceptance.
+Issue #54 remains open.
 
 ## Upgrade and remaining acceptance
 
