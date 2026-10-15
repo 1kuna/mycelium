@@ -133,11 +133,11 @@ NAS checkpoints. Experiments and resumable production still wait for NAS recover
 
 The worker heartbeat allows 250 ms for its checkpoint-root probe, including
 creating and removing a temporary file; slower or blocked probes report the root
-unavailable. Probe failures and recovery are logged on state changes. Queue I/O,
-checkpoint progress reads, and attempt preparation retain their 25 ms waits;
-an outstanding filesystem operation is reused on retry rather than duplicated.
-Checkpoint probes, progress reads, and resume preparation have a 25 ms I/O wait
-budget; the queue performs them outside its lock. A blocked filesystem syscall
+unavailable. Probe failures and recovery are logged on state changes. Worker
+attempt preparation also allows 250 ms for network-filesystem metadata and cold
+automount access. Queue I/O and checkpoint progress reads retain their 25 ms
+waits; the queue performs them outside its lock. An outstanding filesystem
+operation is reused on retry rather than duplicated. A blocked filesystem syscall
 may continue in the background, with at most one outstanding call per operation;
 commands never start from an incomplete preparation. Status reports the NAS as
 unreachable while a probe fails or exceeds its budget.
