@@ -117,6 +117,7 @@ func CapabilityProfileLines(m *Machine) []string {
 		lines = append(lines, "accelerator measurements not reported")
 	}
 	lines = append(lines, "local storage: "+profileSize(p.DiskFreeBytes)+" free / "+profileSize(p.DiskTotalBytes)+" total")
+	lines = append(lines, "onboarding benchmark: "+p.Benchmark.Summary())
 	return lines
 }
 func ExtensionStatus(r ExtensionReport) string {

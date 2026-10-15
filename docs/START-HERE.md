@@ -312,3 +312,5 @@ issues #18, #20, #35 and #36. Production remains on its frozen version.
 [Files without a NAS](guide-files-v3.md) explains the default v3 queue file store,
 explicit input uploads, bounded local caches, model imports, returned outputs and
 checkpoints resumed on another hypha. Existing explicit NAS roots still work.
+
+Measured throughput and placement: [Onboarding benchmark](guide-benchmark-v3.md).

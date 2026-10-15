@@ -17,11 +17,11 @@ type AcceleratorProfile struct {
 	MemoryBytes uint64 `json:"memory_bytes,omitempty"`
 }
 
-// CapabilityProfile v0 records hardware facts and current participation availability.
-// It does not claim measured throughput.
+// CapabilityProfile records hardware, participation and measured reference throughput.
 // Shared memory is counted once, in SystemMemoryBytes, and is also reachable by
 // each accelerator. Zero sizes with an unavailable note mean unknown.
 type CapabilityProfile struct {
+	Benchmark         *BenchmarkResult     `json:"benchmark,omitempty"`
 	Availability      *Availability        `json:"availability,omitempty"`
 	Version           int                  `json:"version"`
 	Onboarding        string               `json:"onboarding"`
@@ -114,5 +114,5 @@ func (p CapabilityProfile) Summary() string {
 	for _, a := range p.Accelerators {
 		resources = append(resources, fmt.Sprintf("%s %.1f GiB", a.Type, float64(a.MemoryBytes)/(1<<30)))
 	}
-	return fmt.Sprintf("capability profile v%d: %s/%s, %d logical CPUs, %s memory, system %.1f GiB, resources [%s], disk %.1f GiB total / %.1f GiB free; %s; unavailable=%v", p.Version, p.OS, p.Arch, p.LogicalCPUs, p.MemoryLayout, float64(p.SystemMemoryBytes)/(1<<30), strings.Join(resources, ", "), float64(p.DiskTotalBytes)/(1<<30), float64(p.DiskFreeBytes)/(1<<30), p.Onboarding, p.Unavailable)
+	return fmt.Sprintf("capability profile v%d: %s/%s, %d logical CPUs, %s memory, system %.1f GiB, resources [%s], disk %.1f GiB total / %.1f GiB free; %s; unavailable=%v", p.Version, p.OS, p.Arch, p.LogicalCPUs, p.MemoryLayout, float64(p.SystemMemoryBytes)/(1<<30), strings.Join(resources, ", "), float64(p.DiskTotalBytes)/(1<<30), float64(p.DiskFreeBytes)/(1<<30), p.Onboarding+"; "+p.Benchmark.Summary(), p.Unavailable)
 }

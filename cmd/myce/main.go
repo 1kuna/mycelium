@@ -52,6 +52,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "file" {
 		return fileCommand(args[1:])
 	}
+	if args[0] == "benchmark" {
+		return benchmarkCommand(args[1:])
+	}
 	if args[0] == "extension" {
 		return extensionCommand(args[1:])
 	}
@@ -469,7 +472,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
-		w := myce.Worker{FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, ServiceConfig: *serviceConfig, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, ServiceConfig: *serviceConfig, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
