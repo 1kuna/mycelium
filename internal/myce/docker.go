@@ -197,18 +197,21 @@ func (d *dockerAttempt) stop(now time.Time, grace time.Duration, kill bool) {
 	}
 }
 func (d *dockerAttempt) call(args ...string) ([]byte, error) {
+	return d.callWithTimeout(d.timeout, args...)
+}
+func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) ([]byte, error) {
 	parent := d.ctx
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, d.timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, d.binary, append([]string{"--host", d.state.Endpoint}, args...)...)
 	cmd.Env = d.env
 	cmd.Dir = d.workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = d.timeout
+	cmd.WaitDelay = timeout
 	out, err := cmd.Output()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -435,6 +438,9 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 // TERM intent is permanent once durable; every delivery error waits for the
 // deadline. KILL is idempotent and is retried while inspection proves running.
 func (d *dockerAttempt) signalContainer(id string, kill bool) ([]byte, error) {
+	if d.dir == "" {
+		return d.stopOrphan(id, kill)
+	}
 	if kill {
 		return d.call("kill", "--signal=KILL", id)
 	}
@@ -506,6 +512,14 @@ func (b *dockerTail) Write(p []byte) (int, error) {
 // Evidence stays in the private spool, independent of disposable Docker custody.
 // It is not included in Result, queue logs, status, or public diagnostics.
 func (d *dockerAttempt) retainEvidence(containers []dockerInspection) error {
+	if d.dir == "" {
+		// Orphans have no owning attempt/spool. The host cleanup report records
+		// the evidence gap; an in-memory observation is not retained evidence.
+		d.mu.Lock()
+		d.state.EvidenceSaved = false
+		d.mu.Unlock()
+		return nil
+	}
 	for _, c := range containers {
 		d.mu.Lock()
 		m := d.state.Containers[c.ID]
@@ -551,10 +565,8 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.dir != "" {
-		if err := saveWorkerJSON(d.dir, d.state.Identity+".docker-evidence.json", d.state.Containers); err != nil {
-			return err
-		}
+	if err := saveWorkerJSON(d.dir, d.state.Identity+".docker-evidence.json", d.state.Containers); err != nil {
+		return err
 	}
 	d.state.EvidenceSaved = true
 	return d.saveLocked()

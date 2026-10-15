@@ -123,6 +123,139 @@ while True: time.sleep(.05)
 	}
 }
 
+func TestDockerRealOrphanStopProtocol(t *testing.T) {
+	if os.Getenv("MYCE_REAL_STOP_TEST") != "1" {
+		t.Skip("isolated real Docker opt-in disabled")
+	}
+	image := os.Getenv("MYCE_REAL_DOCKER_IMAGE")
+	if image == "" {
+		t.Fatal("local digest-pinned image required")
+	}
+	t.Setenv("PATH", dockerTestOriginalPath)
+	binary, err := exec.LookPath("docker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MYCE_TOKEN", "throwaway-stop-protocol-test-token")
+	t.Setenv("DOCKER_CONTEXT", "")
+	for _, failStop := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stop-error=%v", failStop), func(t *testing.T) {
+			root := t.TempDir()
+			script := "#!/bin/sh\ncase \"$3\" in stop|kill) printf '%s\\n' \"$*\" >> '" + filepath.Join(root, "signals") + "';; esac\n"
+			if failStop {
+				script += "if [ \"$3\" = stop ]; then exit 1; fi\n"
+			}
+			script += "exec '" + binary + "' \"$@\"\n"
+			wrapper := filepath.Join(root, "docker")
+			if err := os.WriteFile(wrapper, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			d := &dockerAttempt{binary: wrapper, env: withoutToken(os.Environ()), clock: RealClock{}, timeout: 2 * time.Second, state: dockerExecution{Identity: ID(), Endpoint: os.Getenv("DOCKER_HOST")}}
+			code := `import signal,time,sys,os
+seen=False
+def stop(sig,frame):
+ global seen
+ if seen: os._exit(134)
+ seen=True
+ print('first TERM',file=sys.stderr,flush=True)
+ time.sleep(.2)
+ sys.exit(143)
+signal.signal(signal.SIGTERM,stop)
+print('ready',flush=True)
+while True: time.sleep(.05)
+`
+			out, err := d.call("create", "--network", "none", "--label", "myce.attempt="+d.state.Identity, "--label", "myce.worker=isolated-orphan-stop-test", image, "python3", "-c", code)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := strings.TrimSpace(string(out))
+			d.state.Container = id
+			defer func() {
+				cs, err := d.containers()
+				if err != nil {
+					t.Error("cleanup inventory", err)
+					return
+				}
+				for _, c := range cs {
+					if *c.State.Running {
+						if _, err := d.signalContainer(c.ID, true); err != nil {
+							t.Error(err)
+							continue
+						}
+					}
+					if _, err := d.call("rm", c.ID); err != nil {
+						t.Error(err)
+					}
+				}
+			}()
+			if _, err := d.call("start", id); err != nil {
+				t.Fatal(err)
+			}
+			await(t, func() bool {
+				out, err := d.call("logs", id)
+				return err == nil && strings.Contains(string(out), "ready")
+			})
+			d.stop(d.clock.Now(), time.Second, false)
+			deadline := *d.state.StopAt
+			if _, err := d.reconcile(); (err != nil) != failStop {
+				t.Fatalf("stop error=%v", err)
+			}
+			if failStop {
+				// Reconstruct cleanup with a longer grace in the same process.
+				d = &dockerAttempt{binary: wrapper, env: d.env, clock: d.clock, timeout: d.timeout, state: dockerExecution{Identity: d.state.Identity, Endpoint: d.state.Endpoint, Container: id}}
+				d.stop(d.clock.Now(), 10*time.Second, false)
+				for i := 0; i < 2; i++ {
+					if _, err := d.reconcile(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				b, err := os.ReadFile(filepath.Join(root, "signals"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(b), "--signal=KILL") {
+					t.Fatal("early orphan KILL")
+				}
+			}
+			wake := time.NewTicker(20 * time.Millisecond)
+			defer wake.Stop()
+			limit := time.After(5 * time.Second)
+			for !d.state.Released {
+				if _, err := d.reconcile(); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-limit:
+					t.Fatal("orphan cleanup timeout")
+				case <-wake.C:
+				}
+			}
+			cs, err := d.containers()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantExit, wantKills := 143, 0
+			if failStop {
+				wantExit, wantKills = 137, 1
+				if d.clock.Now().Before(deadline) {
+					t.Fatal("early fallback")
+				}
+			}
+			if len(cs) != 1 || cs[0].State.ExitCode != wantExit || *cs[0].State.Running || d.state.EvidenceSaved {
+				t.Fatalf("orphan exit/evidence mismatch: containers=%d saved=%v", len(cs), d.state.EvidenceSaved)
+			}
+			b, err := os.ReadFile(filepath.Join(root, "signals"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(string(b), " stop --time 1 "+id+"\n") != 1 || strings.Count(string(b), "--signal=KILL "+id+"\n") != wantKills || strings.Contains(string(b), "--signal=TERM") {
+				t.Fatalf("orphan signals: %s", b)
+			}
+			t.Logf("Linux orphan: exit=%d stop=1 fallback KILL=%d; %s", wantExit, wantKills, dockerOrphanEvidenceNote)
+		})
+	}
+}
+
 // Return an error so the same acceptance assertions can be tested negatively
 // without requiring Docker or weakening the opt-in runtime test.
 func validateRealStopEvidence(evidence map[string]dockerMember, signalPath string, ignore bool) error {
