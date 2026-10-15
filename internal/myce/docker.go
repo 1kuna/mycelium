@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -91,6 +93,8 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
+	Owner             *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
+	EvidenceSaved     bool                    `json:"evidence_saved,omitempty"`
 	NetworkID         string                  `json:"network_id,omitempty"`
 	NetworkRemoved    bool                    `json:"network_removed,omitempty"`
 	Network           string                  `json:"network,omitempty"`
@@ -116,6 +120,7 @@ type dockerExecution struct {
 	ExitCode          int                     `json:"exit_code"`
 }
 type dockerAttempt struct {
+	persist     func(dockerExecution) error // Optional custody store for fault injection.
 	admit       func() error
 	dirty       bool
 	closed      chan struct{}
@@ -134,11 +139,21 @@ type dockerAttempt struct {
 }
 
 func (d *dockerAttempt) saveLocked() error {
+	err := d.saveState(d.state)
+	d.dirty = err != nil
+	return err
+}
+
+func (d *dockerAttempt) saveState(state dockerExecution) error {
 	if d.dir == "" {
 		return nil
 	}
-	err := saveWorkerJSON(d.dir, d.state.Identity+".docker.json", d.state)
-	d.dirty = err != nil
+	var err error
+	if d.persist != nil {
+		err = d.persist(state)
+	} else {
+		err = saveWorkerJSON(d.dir, state.Identity+".docker.json", state)
+	}
 	return err
 }
 func (d *dockerAttempt) status() string {
@@ -183,18 +198,21 @@ func (d *dockerAttempt) stop(now time.Time, grace time.Duration, kill bool) {
 	}
 }
 func (d *dockerAttempt) call(args ...string) ([]byte, error) {
+	return d.callWithTimeout(d.timeout, args...)
+}
+func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) ([]byte, error) {
 	parent := d.ctx
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, d.timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, d.binary, append([]string{"--host", d.state.Endpoint}, args...)...)
 	cmd.Env = d.env
 	cmd.Dir = d.workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = d.timeout
+	cmd.WaitDelay = timeout
 	out, err := cmd.Output()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -306,9 +324,12 @@ func (d *dockerAttempt) containers() ([]dockerInspection, error) {
 	return containers, nil
 }
 func (d *dockerAttempt) reconcile() (bool, error) {
+	// Deadline KILL must remain possible when the spool is unwritable.
+	// Preserve pending-start acceptance before signaling any container.
 	d.mu.Lock()
+	killDue := d.state.Forced || (d.state.Stopped && d.state.StopAt != nil && !d.clock.Now().Before(*d.state.StopAt))
 	if d.dirty {
-		if err := d.saveLocked(); err != nil {
+		if err := d.saveLocked(); err != nil && !killDue {
 			d.mu.Unlock()
 			return false, err
 		}
@@ -328,7 +349,7 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 				d.state.Stopped = true
 				d.state.Forced = true
 				d.state.Error = ""
-				if err = d.saveLocked(); err != nil {
+				if err = d.saveLocked(); err != nil && !killDue {
 					d.mu.Unlock()
 					return false, err
 				}
@@ -342,13 +363,13 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 	if (pending || (stopped && d.state.StopAt != nil && !d.clock.Now().Before(*d.state.StopAt))) && !forced {
 		d.state.Forced = true
 		forced = true
-		if err = d.saveLocked(); err != nil {
+		if err = d.saveLocked(); err != nil && !killDue {
 			d.mu.Unlock()
 			return false, err
 		}
 	}
 	d.mu.Unlock()
-	if err := d.observeGroup(containers); err != nil {
+	if err := d.observeGroup(containers); err != nil && !killDue {
 		return false, err
 	}
 	d.mu.Lock()
@@ -362,11 +383,11 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 			d.state.MemoryFailure = "Docker memory ceiling not enforced"
 			err = d.saveLocked()
 			d.mu.Unlock()
-			if err != nil {
+			if err != nil && !killDue {
 				return false, err
 			}
 			if *c.State.Running {
-				if _, err = d.call("kill", "--signal=KILL", c.ID); err != nil {
+				if _, err = d.signalContainer(c.ID, true); err != nil {
 					return false, err
 				}
 				running = true
@@ -376,11 +397,7 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 		if *c.State.Running {
 			running = true
 			if stopped || pending {
-				signal := "--signal=TERM"
-				if forced || pending {
-					signal = "--signal=KILL"
-				}
-				if _, err = d.call("kill", signal, c.ID); err != nil {
+				if _, err = d.signalContainer(c.ID, forced || pending); err != nil {
 					return false, err
 				}
 			}
@@ -388,6 +405,9 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 	}
 	if running || pending {
 		return false, nil
+	}
+	if err := d.retainEvidence(containers); err != nil {
+		return false, err
 	}
 	if err := d.removeNetworks(containers); err != nil {
 		return false, err
@@ -415,6 +435,144 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 	}
 	return true, nil
 }
+
+// TERM intent is permanent once durable; every delivery error waits for the
+// deadline. KILL is idempotent and is retried while inspection proves running.
+func (d *dockerAttempt) signalContainer(id string, kill bool) ([]byte, error) {
+	if d.dir == "" {
+		return d.stopOrphan(id, kill)
+	}
+	if kill {
+		return d.call("kill", "--signal=KILL", id)
+	}
+	d.mu.Lock()
+	m, known := d.state.Containers[id]
+	if m.TermDispatched {
+		d.mu.Unlock()
+		return nil, nil
+	}
+	if !known {
+		m.Memory = d.state.MemoryLimitBytes
+		m.Swap = d.state.MemorySwapBytes
+	}
+	if id == d.state.Container && m.Name == "" {
+		m.Name = "main"
+	}
+	m.TermDispatched = true
+	m.TermOutcome = "unknown-after-restart"
+	// Save a candidate without changing live state: a failed write leaves
+	// no intent for a later dirty flush to consume, and sends no TERM.
+	next := d.state
+	next.Containers = maps.Clone(d.state.Containers)
+	if next.Containers == nil {
+		next.Containers = map[string]dockerMember{}
+	}
+	next.Containers[id] = m
+	if err := d.saveState(next); err != nil {
+		d.mu.Unlock()
+		return nil, err
+	}
+	d.state = next
+	d.dirty = false
+	d.mu.Unlock()
+	out, err := d.call("kill", "--signal=TERM", id)
+	d.mu.Lock()
+	m = d.state.Containers[id]
+	m.TermOutcome = "sent"
+	if err != nil {
+		m.TermOutcome = "error"
+	}
+	d.state.Containers[id] = m
+	saveErr := d.saveLocked()
+	d.mu.Unlock()
+	if saveErr != nil {
+		return out, saveErr
+	}
+	return out, err
+}
+
+const dockerStderrTailBytes = 64 * 1024
+
+// Docker --tail bounds lines; this writer additionally bounds bytes, including
+// one arbitrarily long line. stdout is discarded, never folded into stderr.
+type dockerTail struct{ data []byte }
+
+func (b *dockerTail) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(p) >= dockerStderrTailBytes {
+		b.data = append(b.data[:0], p[len(p)-dockerStderrTailBytes:]...)
+	} else {
+		if extra := len(b.data) + len(p) - dockerStderrTailBytes; extra > 0 {
+			b.data = append(b.data[:0], b.data[extra:]...)
+		}
+		b.data = append(b.data, p...)
+	}
+	return n, nil
+}
+
+// Evidence stays in the private spool, independent of disposable Docker custody.
+// It is not included in Result, queue logs, status, or public diagnostics.
+func (d *dockerAttempt) retainEvidence(containers []dockerInspection) error {
+	if d.dir == "" {
+		// Orphans have no owning attempt/spool. The host cleanup report records
+		// the evidence gap; an in-memory observation is not retained evidence.
+		d.mu.Lock()
+		d.state.EvidenceSaved = false
+		d.mu.Unlock()
+		return nil
+	}
+	for _, c := range containers {
+		d.mu.Lock()
+		m := d.state.Containers[c.ID]
+		d.mu.Unlock()
+		if m.ExitCode != nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
+		cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", "--tail", "256", c.ID)
+		cmd.Env = d.env
+		cmd.Dir = d.workdir
+		cmd.Stdout = io.Discard
+		tail := &dockerTail{}
+		cmd.Stderr = tail
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL) }
+		cmd.WaitDelay = d.timeout
+		err := cmd.Run()
+		cancel()
+		if err != nil {
+			return errors.New("Docker private stderr collection failed")
+		}
+		d.mu.Lock()
+		if d.state.Containers == nil {
+			d.state.Containers = map[string]dockerMember{}
+		}
+		m = d.state.Containers[c.ID]
+		if c.ID == d.state.Container && m.Name == "" {
+			m.Name = "main"
+		}
+		code := c.State.ExitCode
+		if m.TermDispatched && m.TermOutcome == "" {
+			m.TermOutcome = "unknown-after-restart"
+		}
+		m.ExitCode = &code
+		m.StderrTail = string(tail.data)
+		d.state.Containers[c.ID] = m
+		err = d.saveLocked()
+		d.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := saveWorkerJSON(d.dir, d.state.Identity+".docker-evidence.json", d.state.Containers); err != nil {
+		return err
+	}
+	d.state.EvidenceSaved = true
+	return d.saveLocked()
+}
+
 func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release func()) (*process, error) {
 	unlock, err := hostLaunchGate(w.HostStateDir)
 	if err != nil {
@@ -459,6 +617,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		return nil, errors.New("managed Docker requires DOCKER_HOST, not DOCKER_CONTEXT")
 	}
 	d := &dockerAttempt{admit: func() error { return w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) }, closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, hostDir: w.HostStateDir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
+	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	if j.Spec.Run.DockerNetwork == "private" {
 		d.state.Network = "myce-" + identity
 		d.state.Containers = map[string]dockerMember{}
@@ -581,7 +740,12 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	result := Result{Machine: p.machine, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	e := launch()
 	if e != nil {
-		d.stop(d.clock.Now(), 0, true)
+		d.mu.Lock()
+		alreadyStopping := d.state.Stopped
+		d.mu.Unlock()
+		if !alreadyStopping {
+			d.stop(d.clock.Now(), 0, true)
+		}
 	}
 	wake := time.NewTicker(100 * time.Millisecond)
 	defer wake.Stop()
@@ -610,34 +774,9 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	result.PoliteStop = p.polite
 	p.mu.Unlock()
 	d.mu.Lock()
-	result.Interrupted = d.state.Stopped && !d.state.MainFinished
-	result.Forced = d.state.Forced && !d.state.MainFinished
-	result.Success = e == nil && d.state.ExitCode == 0 && d.state.MemoryFailure == "" && d.state.Failure == "" && !d.state.OOMKilled
-	if d.state.Failure != "" {
-		result.Error = d.state.Failure
-		result.Interrupted = false
-		result.Forced = false
-	}
-	if d.state.MemoryFailure != "" {
-		result.Error = d.state.MemoryFailure
-	}
-	if d.state.OOMKilled {
-		result.Error = "Docker container OOM-killed without a declared memory ceiling"
-		if d.state.MemoryLimitBytes > 0 {
-			result.Error = fmt.Sprintf("exceeded its %g GiB memory ceiling", float64(d.state.MemoryLimitBytes)/(1<<30))
-		}
-		result.Interrupted = false
-		result.Forced = false
-	}
+	result = dockerOutcome(d.state, result, e)
 	container := d.state.Container
 	d.mu.Unlock()
-	if e != nil {
-		result.Interrupted = e.Error() == "worker restarted; Docker cleanup required" || errors.Is(e, context.DeadlineExceeded)
-		result.Error = "Docker launch failed: " + e.Error()
-		if strings.HasPrefix(e.Error(), "Docker memory ceiling not enforced") {
-			result.Error = "Docker memory ceiling not enforced"
-		}
-	}
 	if container != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 		cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", container)
@@ -662,7 +801,56 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	err := saveWorkerJSON(d.dir, d.state.Identity+".result.json", result)
 	p.done <- workerFinish{result: result, err: err}
 }
+
+// A bare zero exit code, or terminal state first observed during recovery,
+// cannot authorize main success. Eligibility is frozen before cleanup resumes.
+func (state dockerExecution) completedMain() bool {
+	return state.MainFinished && state.Container != "" && state.Stopped && state.StopAt != nil && !state.Pending && !state.OperatorConfirmed
+}
+
+func dockerOutcome(state dockerExecution, owner Result, e error) Result {
+	result := owner
+	if e != nil {
+		result.Interrupted = e.Error() == "worker restarted; Docker cleanup required" || errors.Is(e, context.DeadlineExceeded)
+		result.Error = "Docker launch failed: " + e.Error()
+		if strings.HasPrefix(e.Error(), "Docker memory ceiling not enforced") {
+			result.Error = "Docker memory ceiling not enforced"
+		}
+	}
+	if e == nil {
+		result.Interrupted = (state.Stopped && !state.MainFinished)
+	}
+	result.Forced = state.Forced && !state.MainFinished
+	result.Success = !result.Interrupted && e == nil && state.ExitCode == 0 && state.MemoryFailure == "" && state.Failure == "" && !state.OOMKilled
+	if state.Failure != "" {
+		result.Error = state.Failure
+		result.Interrupted = false
+		result.Forced = false
+	}
+	if state.MemoryFailure != "" {
+		result.Interrupted = false
+		result.Forced = false
+		result.Error = state.MemoryFailure
+	}
+	if state.OOMKilled {
+		result.Error = "Docker container OOM-killed without a declared memory ceiling"
+		if state.MemoryLimitBytes > 0 {
+			result.Error = fmt.Sprintf("exceeded its %g GiB memory ceiling", float64(state.MemoryLimitBytes)/(1<<30))
+		}
+		result.Interrupted = false
+		result.Forced = false
+	}
+	return result
+}
+
 func (d *dockerAttempt) close() { d.haltOnce.Do(func() { close(d.halt) }); <-d.closed }
+
+func dockerRecoveryError(state dockerExecution) error {
+	if state.completedMain() {
+		return nil
+	}
+	return errors.New("worker restarted; Docker cleanup required")
+}
 
 func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
@@ -673,7 +861,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	if err = json.Unmarshal(data, &state); err != nil {
 		return nil, err
 	}
-	if state.Identity != s.state.Identity || state.Endpoint == "" {
+	if state.Identity != s.state.Identity || state.Endpoint == "" || (state.Owner != nil && !s.matchesResult(*state.Owner, w.Machine.ID)) {
 		return nil, errors.New("invalid Docker custody record")
 	}
 	if state.Released {
@@ -697,13 +885,18 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 			d.env = append(d.env, v)
 		}
 	}
-	d.stop(w.Clock.Now(), 0, true)
+	// A saved stop keeps its original deadline and dispatch latches. An
+	// unfinished launch/running attempt still requires immediate forced cleanup.
+	recoveryErr := dockerRecoveryError(state)
+	if !state.Stopped {
+		d.stop(w.Clock.Now(), 0, true)
+	}
 	output, err := os.OpenFile(filepath.Join(s.dir, s.state.Log), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, err
 	}
 	p := &process{job: *s.state.Job, machine: w.Machine.ID, done: make(chan workerFinish, 1), docker: d}
-	go d.run(p, *s.state.Job, s.state.Session, output, nil, func() error { return errors.New("worker restarted; Docker cleanup required") })
+	go d.run(p, *s.state.Job, s.state.Session, output, nil, func() error { return recoveryErr })
 	return p, nil
 }
 

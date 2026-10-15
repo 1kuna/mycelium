@@ -155,7 +155,9 @@ func TestDockerCLIHelper(t *testing.T) {
 			}
 		}
 	case "inspect":
-		if _, e := os.Stat(filepath.Join(root, "network")); e == nil {
+		_, networkErr := os.Stat(filepath.Join(root, "network"))
+		_, removedErr := os.Stat(filepath.Join(root, "network-removed"))
+		if networkErr == nil || removedErr == nil {
 			fakeDockerGroupInspect(root, args[1:], string(mode))
 			os.Exit(0)
 		}
@@ -200,10 +202,30 @@ func TestDockerCLIHelper(t *testing.T) {
 				_ = os.WriteFile(filepath.Join(root, "inspected-stopped"), nil, 0600)
 			}
 		}
+	case "stop":
+		if string(mode) == "stop-error" || string(mode) == "delivered-stop-error" {
+			if string(mode) == "delivered-stop-error" {
+				_ = os.WriteFile(filepath.Join(root, "stop-delivered"), nil, 0600)
+			}
+			fmt.Fprintln(os.Stderr, "Error response from daemon: stop reply lost")
+			os.Exit(1)
+		}
+		_ = os.Rename(filepath.Join(root, "running"), filepath.Join(root, "stopped"))
 	case "kill":
 		if strings.HasPrefix(args[2], "sidecar-") && (args[1] == "--signal=KILL" || string(mode) == "term") {
 			_ = os.Rename(filepath.Join(root, "running-"+args[2]), filepath.Join(root, "stopped-"+args[2]))
 			os.Exit(0)
+		}
+		if string(mode) == "delivered-error" {
+			f, _ := os.OpenFile(filepath.Join(root, "delivered"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+			fmt.Fprintln(f, args[1], args[2])
+			f.Close()
+			fmt.Fprintln(os.Stderr, "Error response from daemon: runtime Kill RPC reply lost")
+			os.Exit(1)
+		}
+		if string(mode) == "unknown-kill" {
+			fmt.Fprintln(os.Stderr, "connection closed before reply")
+			os.Exit(1)
 		}
 		if string(mode) == "refuse-kill" {
 			fmt.Fprintln(os.Stderr, "Error response from daemon: kill refused")
@@ -220,6 +242,9 @@ func TestDockerCLIHelper(t *testing.T) {
 			_ = os.Rename(filepath.Join(root, file), filepath.Join(root, target))
 		}
 	case "logs":
+		if string(mode) == "logs-error" {
+			os.Exit(1)
+		}
 		fmt.Println("payload output")
 		fmt.Fprintln(os.Stderr, "payload stderr")
 	default:
@@ -258,7 +283,7 @@ func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string
 	hostDir := t.TempDir()
 	t.Setenv("MYCE_HOST_STATE_DIR", hostDir)
 	clock := &dockerTestClock{now: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)}
-	w := Worker{HostStateDir: hostDir, Machine: machine("docker-worker", "fake"), StateDir: t.TempDir(), Clock: clock, HostMemorySource:func(context.Context)(float64,error){return 32,nil}}
+	w := Worker{HostStateDir: hostDir, Machine: machine("docker-worker", "fake"), StateDir: t.TempDir(), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)
@@ -839,33 +864,44 @@ func TestDockerFreshWorkerAndStaleAckCannotClearCustody(t *testing.T) {
 	}
 }
 
-func TestDockerEveryLabeledContainerAndKillRefusal(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	j := dockerJob()
-	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
-	p, e := startDockerFixture(w, s, j)
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(p.docker.close)
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
-	_ = os.WriteFile(filepath.Join(root, "extra"), []byte("yes"), 0600)
-	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("refuse-kill"), 0600)
-	p.stop(c.Now(), 0, true)
-	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed") })
-	select {
-	case <-p.done:
-		t.Fatal("kill refusal released resources")
-	default:
-	}
-	_ = os.WriteFile(filepath.Join(root, "mode"), nil, 0600)
-	select {
-	case <-p.done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("containers not reclaimed")
-	}
-	if _, e = os.Stat(filepath.Join(root, "extra-stopped")); e != nil {
-		t.Fatal("second owned container survived")
+func TestDockerEveryLabeledContainerAndKillRefusalRetainsCustody(t *testing.T) {
+	for _, kill := range []bool{false, true} {
+		t.Run(fmt.Sprintf("kill=%v", kill), func(t *testing.T) {
+			w, s, c, root := dockerFixture(t)
+			j := dockerJob()
+			j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
+			p, e := startDockerFixture(w, s, j)
+			if e != nil {
+				t.Fatal(e)
+			}
+			t.Cleanup(p.docker.close)
+			await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+			_ = os.WriteFile(filepath.Join(root, "extra"), []byte("yes"), 0600)
+			_ = os.WriteFile(filepath.Join(root, "mode"), []byte("refuse-kill"), 0600)
+			p.stop(c.Now(), StopGrace, kill)
+			await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed") })
+			select {
+			case <-p.done:
+				t.Fatal("kill refusal released resources")
+			default:
+			}
+			// TERM is never retried, even after a daemon refusal. Deadline
+			// KILL must automatically reclaim both without external intervention.
+			_ = os.WriteFile(filepath.Join(root, "mode"), []byte("term"), 0600)
+			if !kill {
+				c.advance(StopGrace)
+			}
+			select {
+			case <-p.done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("definite refusal did not recover automatically")
+			}
+
+			if _, e = os.Stat(filepath.Join(root, "extra-stopped")); e != nil {
+				t.Fatal("second owned container survived")
+			}
+
+		})
 	}
 }
 

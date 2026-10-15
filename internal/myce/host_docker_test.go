@@ -148,6 +148,12 @@ func TestDisableDocker(t *testing.T) {
 				if mode != "term" {
 					signal = "--signal=KILL"
 				}
+				if mode == "orphan" {
+					signal = "stop --time 1 id1"
+					if !strings.Contains(r.Docker, dockerOrphanEvidenceNote) || strings.Contains(string(calls), "--signal=TERM") {
+						t.Fatalf("orphan protocol/evidence report: %+v calls=%s", r, calls)
+					}
+				}
 				if !strings.Contains(string(calls), signal) {
 					t.Fatalf("missing %s: %s", signal, calls)
 				}
