@@ -589,25 +589,9 @@ func printStatus(s myce.Snapshot, full bool) {
 		fmt.Println(s.Warning)
 	}
 	for _, m := range s.Machines {
-		state := "joined"
-		if m.Disabled != "" {
-			state = "disabled by operator: " + m.Disabled
-		} else if m.Gone {
-			state = "gone"
-		} else if m.Leaving {
-			state = "leaving"
-		}
-		if m.CapabilityProfile != nil && m.CapabilityProfile.Availability != nil {
-			state += "; " + m.CapabilityProfile.Availability.Summary()
-		}
+		state := myce.HyphaAvailability(m)
 		if m.MaxJobs > 0 {
 			state += fmt.Sprintf("; maximum simultaneous jobs %d", m.MaxJobs)
-		}
-		if m.AdmissionReason != "" {
-			state += "; admission: " + m.AdmissionReason
-		}
-		if m.EnablePending {
-			state += "; held: enable not yet acknowledged (retrying)"
 		}
 		if m.DockerCleanup != "" {
 			state += "; Docker " + m.DockerCleanup
@@ -632,6 +616,17 @@ func printStatus(s myce.Snapshot, full bool) {
 		if m.MemoryError != "" {
 			state += "; memory unavailable: " + m.MemoryError
 		}
+		profileLabel := "capability profile"
+		if m.CapabilityProfile != nil {
+			profileLabel = fmt.Sprintf("capability profile v%d", m.CapabilityProfile.Version)
+		}
+		for _, line := range myce.CapabilityProfileLines(m) {
+			fmt.Printf("hypha %s %s: %s\n", m.ID, profileLabel, line)
+		}
+		for _, r := range m.ExtensionReports {
+			fmt.Printf("extension %s: %s\n", m.ID, myce.ExtensionStatus(r))
+		}
+		fmt.Printf("hypha %s: %s, %.1f GiB free, %s\n", m.ID, m.GPU, m.FreeMemoryGB, state)
 		fmt.Printf("environments %s: ready=%v build seconds=%v\n", m.ID, m.Environments, m.EnvironmentBuildSeconds)
 		for _, r := range m.EnvironmentReports {
 			fmt.Printf("environment %s/%s: %s %s\n", m.ID, r.Key, r.State, r.Error)
@@ -644,10 +639,6 @@ func printStatus(s myce.Snapshot, full bool) {
 			fmt.Printf("files %s: %s\n", m.ID, m.FileTransferError)
 		}
 		fmt.Printf("cache %s: %v, %d bytes free %s\n", m.ID, m.CachedModels, m.CacheFreeBytes, m.CacheError)
-		if m.CapabilityProfile != nil {
-			fmt.Printf("hypha %s %s\n", m.ID, m.CapabilityProfile.Summary())
-		}
-		fmt.Printf("machine %s: %s, %.1f GB free, %s\n", m.ID, m.GPU, m.FreeMemoryGB, state)
 	}
 	for _, r := range s.SyncRequests {
 		fmt.Printf("sync %s to %s cancelled=%t\n", r.Model, r.To, r.Cancel)
@@ -666,7 +657,7 @@ func printStatus(s myce.Snapshot, full bool) {
 		if j.StartedAt != nil && j.Spec.Priority == "production" {
 			fmt.Printf("production start latency %s: %.3fs\n", id, j.StartLatencySeconds)
 		}
-		fmt.Printf("%s %s [%s] %s machine=%s %s %s\n", id, j.Spec.Name, j.Spec.Priority, myce.JobState(j), j.Machine, j.Reason, myce.JobAge(j, s.Now))
+		fmt.Printf("%s %s [%s] %s hypha=%s %s %s; %s\n", id, j.Spec.Name, j.Spec.Priority, myce.JobState(j), j.Machine, myce.JobReason(j), myce.JobAge(j, s.Now), myce.JobWork(j))
 	}
 	if len(s.Jobs) == 0 {
 		fmt.Println("No jobs yet.")

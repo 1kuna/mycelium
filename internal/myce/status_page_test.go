@@ -100,7 +100,7 @@ func TestStatusPageEmptyStates(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := rendered.String()
-	for _, want := range []string{"No machines have joined", "No production work", "No usage samples yet"} {
+	for _, want := range []string{"No hyphae have joined", "No production work", "No usage samples yet"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("empty page does not contain %q", want)
 		}
