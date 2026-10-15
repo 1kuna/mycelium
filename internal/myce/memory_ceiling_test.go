@@ -129,6 +129,7 @@ func TestMemoryCeilingWorkerOOMIsCommandFailure(t *testing.T) {
 	j := recoveryJob(t, []string{"sh", "-c", fmt.Sprintf("for file in %s/attempt-*/memory.events; do printf 'oom_kill 1\\n' > \"$file\"; done; exit 137", w.memoryCeilings.root)})
 	j.Spec.Resumable = false
 	j.Spec.Needs.HostMemoryGB = 5
+	w = workerWithPreparedCheckpoint(t, w, s, j)
 	p, err := w.start(s, j)
 	if err != nil {
 		t.Fatal(err)
