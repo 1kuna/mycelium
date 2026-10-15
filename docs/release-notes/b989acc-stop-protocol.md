@@ -243,18 +243,19 @@ issue closure, production access or native GPU qualification is claimed.
 Recovery now resumes cleanup without a synthetic launch failure when the exact
 main's completion was already durable before restart. Main exit zero succeeds
 only after confirmed container cleanup, private evidence persistence, network
-removal/absence and durable release. Saved nonzero, memory, OOM and containment
-failures retain their failure disposition. Main OOM observations are persisted
+removal/absence, durable release and output finalization. Saved nonzero, memory,
+OOM and containment failures retain their failure disposition. Main OOM observations are persisted
 with terminal observation, before sidecar TERM. A main first found finished during
 recovery remains interrupted/lost. Operator release cannot fabricate success.
 
-The same outcome is reconstructed if release was saved before the result file.
+A crash after durable release but before result save remains interrupted and retries.
+A failed release write or network-removal retry may conservatively report containment
+failure for disconnected containers; missing private attachment is never accepted.
 New custody records bind job/attempt/machine/session as well as opaque execution
 identity; recovered result files and worker-state results validate those fields.
 Existing custody without the added binding retains its opaque identity check.
-Queue current-attempt and exact release-key matching are unchanged. Stopped
-containers already disconnected by cleanup remain valid during release retries;
-running/foreign-network containment checks remain enforced.
+Queue current-attempt and exact release-key matching are unchanged.
+Containment checks retain the pre-#55 behavior for stopped and running containers.
 
 No stop dispatcher changes: permanent TERM intent, original grace, deadline KILL,
 orphan stop bounds and private sidecar evidence/retention remain as in #54.
@@ -263,7 +264,7 @@ restart, persistence/inspection/log/network faults, stale results, exact old
 custody settlement and acknowledgement replay. Native Docker/GPU acceptance and
 the v3 forward-port remain separate work; neither is authorized by this hotfix.
 
-Local verification on `hotfix/55-restart-mid-grace`: build **0**, two uncached
+Round-1 verification on `hotfix/55-restart-mid-grace`: build **0**, two uncached
 full race suites **0 / 0** (internal package **168.705 / 171.475 s**), vet **0**,
 and `./myce dev` **0** after a real API/command smoke and graceful shutdown.
 The smoke's submit/wait/log commands each exited **0** and confirmed jobs do not
@@ -275,3 +276,47 @@ regressions also passed (**0**). No real Docker/GPU tests or remote hosts used.
 Current state: implemented and verified locally for #55; committed for review.
 Next: orchestrator review, then separately authorized native acceptance and v3
 forward-port. No push, GitHub post, issue closure or fleet qualification.
+
+
+### Round 2: conservative crash recovery and strict containment
+
+The released-custody fallback again reports interruption when no result was saved;
+only full recovery with output finalization and result persistence may succeed.
+The stopped-container disconnection exception is removed, restoring the exact
+`f5c4461` containment check. No new state, phases, stop-dispatch changes or queue
+matching changes were introduced.
+
+`TestDockerRestartReleasedWithoutResultStaysLoss` covers the unsaved-result crash
+and failed output sync/close, with one queue loss and attempt-2 retry.
+`TestDockerRestartDisconnectedSidecarIsContainmentFailure` covers unexpected
+attachment loss and sidecar exit before inspection during grace.
+Existing proof-failure tests now require containment failure after release-write
+or network-removal failures leave disconnected containers. All seven #55 cases
+remain covered, including full recovery success with one attempt and zero losses.
+
+Round-2 local gates, serial with `GOMAXPROCS=2`, `GOFLAGS=-p=1`, `nice -n 19`,
+and direct subprocess exit codes (no pipelines):
+
+- `go build -o myce ./cmd/myce`: **0**.
+- First `go test ./... -race -count=1`: **1**. Checkpoint filesystem-operation
+  timeouts in `TestProductionHoldDisplacesBothCardsAndCooldown`,
+  `TestWorkerOrphanCleanupVerifiesIdentity`, and
+  `TestWorkerRelativeCommandUsesJobWorkdir`.
+- Second `go test ./... -race -count=1`: **1**.
+  `TestReviewDeadlineDelayedGateMustNotExecute` timed out waiting for its worker
+  condition after 60 seconds. The first-run failures did not recur.
+- `go vet ./...`: **0**.
+- `./myce dev` with isolated local paths and loopback port: **0**, including real
+  API submission, command execution, token noninheritance, wait/log verification
+  and graceful shutdown. Wait and logs each returned **0**.
+
+The focused non-race restart suite returned **0**; no #55 test failed in either
+full race run. The four failing tests and checkpoint-I/O implementation are
+unchanged from `915be3a` and `f5c4461`; the causes remain unresolved. No tests or
+timeouts were weakened. Logs and direct gate receipts remain in the ignored
+`.reports/issue-55/round-2/` directory.
+
+Current state: both round-2 findings addressed and committed locally; the full
+race gate is **not clear**. Next: orchestrator review and triage of the recorded
+gate failures before acceptance. No implementation deviation from the ruling,
+push, GitHub post, remote-host access, native acceptance or v3 forward-port.

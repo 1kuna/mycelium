@@ -217,8 +217,7 @@ func (d *dockerAttempt) containerViolation(c dockerInspection) string {
 			return "Docker containment violation: joining another network is forbidden"
 		}
 	}
-	// Cleanup deliberately disconnects stopped containers before removing the network.
-	if d.state.Network != "" && len(c.NetworkSettings.Networks) != 1 && !(d.state.Stopped && !*c.State.Running) {
+	if d.state.Network != "" && len(c.NetworkSettings.Networks) != 1 {
 		return "Docker containment violation: private network attachment missing"
 	}
 	return ""

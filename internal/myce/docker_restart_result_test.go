@@ -82,8 +82,33 @@ func restartReleasedResult(t *testing.T, w Worker, s *workerStore) Result {
 	return *s.state.Result
 }
 
+// Complete the full recovery path, including output finalization and result save.
+func restartSavedResult(t *testing.T, w Worker, s *workerStore) Result {
+	t.Helper()
+	p, err := w.restoreDocker(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p != nil {
+		defer p.docker.close()
+		select {
+		case f := <-p.done:
+			if f.err != nil {
+				t.Fatal(f.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("recovery did not finish")
+		}
+	}
+	s.state.Result = nil
+	if err := s.recoverResult(w.Machine.ID); err != nil || s.state.Result == nil {
+		t.Fatalf("missing finalized result: %v", err)
+	}
+	return *s.state.Result
+}
+
 // Cases 1, 4 and 7: disk reload, repeated recovery, original deadline, private
-// evidence and the release-before-result / result-before-ack crash boundaries.
+// evidence and the result-before-ack crash boundary.
 func TestDockerRestartCompletedMain(t *testing.T) {
 	w, s, d, c, root := restartResultFixture(t)
 	restartMainExit(t, d, root)
@@ -122,18 +147,11 @@ func TestDockerRestartCompletedMain(t *testing.T) {
 	if e != nil || json.Unmarshal(data, &saved) != nil || !saved.Success || saved.Interrupted {
 		t.Fatalf("saved resumed result: %+v %v", saved, e)
 	}
-	// Simulate the durable-release/before-result-write crash window.
-	if e := os.Remove(filepath.Join(s.dir, s.state.Identity+".result.json")); e != nil {
-		t.Fatal(e)
-	}
 	st := restartRead(t, s)
 	if !st.Released || !st.EvidenceSaved || !st.NetworkRemoved {
 		t.Fatalf("incomplete release: %+v", st)
 	}
-	r := restartReleasedResult(t, w, s) // No result file: release-only crash window.
-	if !r.Success || r.Interrupted || r.Forced {
-		t.Fatalf("main result lost: %+v", r)
-	}
+	r := saved
 	for id, m := range st.Containers {
 		want := 0
 		if id != "id1" {
@@ -231,9 +249,7 @@ func TestDockerRestartMainFailures(t *testing.T) {
 				t.Fatal(e)
 			}
 			c.advance(StopGrace)
-			restartOnce(t, w, s)
-			restartOnce(t, w, s)
-			r := restartReleasedResult(t, w, s)
+			r := restartSavedResult(t, w, s)
 			if r.Success || (kind != "operator" && r.Interrupted) {
 				t.Fatalf("failure changed: %+v", r)
 			}
@@ -262,9 +278,7 @@ func TestDockerRestartProofFailures(t *testing.T) {
 				if strings.Contains(string(b), "--signal=TERM") {
 					t.Fatal("TERM before main persistence")
 				}
-				restartOnce(t, w, s)
-				restartOnce(t, w, s)
-				r := restartReleasedResult(t, w, s)
+				r := restartSavedResult(t, w, s)
 				if r.Success || !r.Interrupted {
 					t.Fatal("unknown main promoted")
 				}
@@ -316,10 +330,12 @@ func TestDockerRestartProofFailures(t *testing.T) {
 				}
 			}
 			d.persist = nil
-			restartOnce(t, w, s)
-			restartOnce(t, w, s)
-			r := restartReleasedResult(t, w, s)
-			if !r.Success || r.Interrupted {
+			r := restartSavedResult(t, w, s)
+			if kind == "release-save" || kind == "network" {
+				if r.Success || !strings.Contains(r.Error, "private network attachment missing") {
+					t.Fatalf("disconnected retry hid containment failure: %+v", r)
+				}
+			} else if !r.Success || r.Interrupted {
 				t.Fatalf("retry lost outcome: %+v", r)
 			}
 		})
@@ -427,8 +443,7 @@ func TestDockerRestartGracefulSidecarEvidence(t *testing.T) {
 		t.Fatal(e)
 	}
 	restartMainExit(t, d, root)
-	restartOnce(t, w, s)
-	r := restartReleasedResult(t, w, s)
+	r := restartSavedResult(t, w, s)
 	if !r.Success || r.Interrupted {
 		t.Fatalf("sidecar TERM became loss: %+v", r)
 	}
@@ -439,5 +454,85 @@ func TestDockerRestartGracefulSidecarEvidence(t *testing.T) {
 		if m.ExitCode == nil || *m.ExitCode != 143 || m.TermOutcome != "sent" || m.StderrTail != "payload stderr\n" {
 			t.Fatalf("TERM evidence: %+v", m)
 		}
+	}
+}
+
+// Released custody cannot prove that output finalization would have succeeded.
+func TestDockerRestartReleasedWithoutResultStaysLoss(t *testing.T) {
+	for _, kind := range []string{"crash", "output-sync-close"} {
+		t.Run(kind, func(t *testing.T) {
+			w, s, d, c, root := restartResultFixture(t)
+			restartMainExit(t, d, root)
+			c.advance(StopGrace)
+			for i := 0; i < 3 && !d.state.Released; i++ {
+				restartTick(t, d)
+			}
+			if !restartRead(t, s).Released {
+				t.Fatal("release not durable")
+			}
+			if kind == "output-sync-close" {
+				output, err := os.OpenFile(filepath.Join(s.dir, s.state.Identity+".log"), os.O_CREATE|os.O_WRONLY, 0600)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := output.Close(); err != nil {
+					t.Fatal(err)
+				}
+				// Run post-release finalization with an invalidated handle, then
+				// prevent result persistence to model the same unsaved boundary.
+				resultPath := filepath.Join(s.dir, s.state.Identity+".result.json")
+				if err := os.Mkdir(resultPath, 0700); err != nil {
+					t.Fatal(err)
+				}
+				p := &process{machine: w.Machine.ID, done: make(chan workerFinish, 1)}
+				finalizer := &dockerAttempt{state: d.state, dir: d.dir, binary: d.binary, env: d.env, clock: d.clock, timeout: d.timeout, closed: make(chan struct{}), halt: make(chan struct{})}
+				finalizer.run(p, *s.state.Job, s.state.Session, output, nil, func() error { return nil })
+				f := <-p.done
+				if f.err == nil || f.result.Success || f.result.Error != "persist Docker output failed" {
+					t.Fatalf("expected failed finalization and unsaved result: %+v", f)
+				}
+				if err := os.Remove(resultPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(s.dir, s.state.Identity+".result.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("expected crash before result save: %v", err)
+			}
+			r := restartReleasedResult(t, w, s)
+			if r.Success || !r.Interrupted {
+				t.Fatalf("release fabricated success: %+v", r)
+			}
+			q := restartQueue(t, s, w)
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			if got := job(t, q, r.ID); got.State != "queued" || got.Losses != 1 {
+				t.Fatalf("expected one loss: %+v", got)
+			}
+			m := w.Machine
+			m.HostAvailableMemoryGB, m.FreeHostMemoryGB, m.HostMemoryMeasured = 32, 32, true
+			if reply := check(t, q, m, nil); reply.Job == nil || reply.Job.Attempt != 2 {
+				t.Fatalf("expected retry: %+v", reply)
+			}
+		})
+	}
+}
+
+func TestDockerRestartDisconnectedSidecarIsContainmentFailure(t *testing.T) {
+	w, s, d, _, root := restartResultFixture(t)
+	restartMainExit(t, d, root)
+	// The sidecar exits and loses its attachment during grace, before recovery.
+	if err := os.Remove(filepath.Join(root, "running-sidecar-naming")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "disconnected-sidecar-naming"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := restartSavedResult(t, w, s)
+	if r.Success || r.Interrupted || !strings.Contains(r.Error, "private network attachment missing") {
+		t.Fatalf("missing containment failure: %+v", r)
+	}
+	if !strings.Contains(restartRead(t, s).Failure, "private network attachment missing") {
+		t.Fatal("containment failure not durable")
 	}
 }

@@ -1215,13 +1215,17 @@ before fresh readiness, including when the old CLI/process group has vanished.
 
 If the exact main's terminal outcome was durably recorded before restart and
 before sidecar cleanup, recovery resumes that cleanup at the saved deadline.
-After evidence and physical release are durable, the saved main result determines
-success or failure; expected sidecar TERM/KILL does not count as worker loss.
+After evidence, physical release and output finalization succeed, the saved main
+result determines success or failure; expected sidecar TERM/KILL does not count
+as worker loss.
 A restart before durable main completion remains a loss, even if cleanup later
 observes exit zero. Existing memory, OOM and containment failures remain failures.
 Operator-confirmed release alone never establishes main success. Replayed results
 must match the saved job, attempt, machine and session; old custody release is
 separate from completion of any replacement attempt.
+A crash after durable release but before result save remains interrupted and retries.
+A failed release write or network-removal retry may conservatively report a containment
+failure for disconnected containers; missing private attachment is never accepted.
 
 An empty scan does not settle a timed-out create/start. A definite daemon
 refusal can settle without execution. A lost start response can settle only

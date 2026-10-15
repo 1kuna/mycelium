@@ -863,7 +863,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	}
 	if state.Released {
 		if s.state.Result == nil {
-			r := dockerOutcome(state, Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}}, dockerRecoveryError(state))
+			r := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Interrupted: true, Forced: state.Forced, Error: "worker restarted after Docker release"}
 			s.state.Result = &r
 		}
 		return nil, nil
