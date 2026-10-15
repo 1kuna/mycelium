@@ -69,13 +69,13 @@ concurrency, not watts, GPU percentage, fan speed or noise.
   60 seconds. Unknown heat holds work. The recognized sensor list is intentionally
   small; unsensed accelerators and these margins are not hardware-qualified.
 - **WSL2:** owner activity, power and physical heat must come from the **Windows
-  host**, never the Linux guest. This slice detects WSL2 and reports unknown,
-  withholding daily work. The proposed Windows executable/interop bridge is
-  deferred: `GetLastInputInfo` covers only its interactive Windows session,
-  unattended starts need verified session coverage, and Windows has no uniform
-  nonprivileged live thermal API. Guest readings cannot safely substitute.
-  Dedicated server behavior remains available; use `--daily-use --laptop` for a
-  personal WSL machine so absent host signals cannot admit work.
+  host**, never the Linux guest. The [per-user Windows host bridge](guide-wsl-host-bridge.md)
+  supplies authenticated host idle/power over mirrored-network IPv4 loopback,
+  with verified single-console-session coverage or explicit unknowns. Missing,
+  stopped or unauthenticated helpers never fall back to guest signals. Windows
+  thermal coverage is currently **unknown**, so daily work still withholds.
+  Use `--daily-use --laptop` for a personal WSL machine. Native session, logon,
+  networking and install behavior require the separate acceptance plan.
 
 Thresholds follow #25's research where compatible with #43. Unlike the research
 note's proposed missing-heat exception, missing heat **withholds** daily work, as
