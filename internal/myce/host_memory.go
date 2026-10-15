@@ -9,19 +9,22 @@ func hostID(m *Machine) string {
 	return m.ID
 }
 
+// Reserve at least 64 KiB for declared host memory: a sub-page cgroup limit
+// needs one page. Use the largest supported worker page (4/64 KiB), rather
+// than the queue host's page size, so enforced <= reserved across hosts.
+const minimumHostMemoryGB = 65536.0 / (1 << 30)
+
 // CPU allocations are additional to GPU allocations on unified machines.
 // Legacy workers/requests keep the GPU-only contract.
 func hostNeed(m *Machine, gpu, host float64) float64 {
+	need := host
 	if m.UnifiedMemory && m.HostMemoryMeasured {
-		if host > 0 {
-			return gpu + host + m.MemoryCeilingSlackGB
-		}
-		return gpu + host
+		need += gpu
 	}
 	if host > 0 {
-		return host + m.MemoryCeilingSlackGB
+		return max(need+m.MemoryCeilingSlackGB, minimumHostMemoryGB)
 	}
-	return host
+	return need
 }
 func hostFits(m *Machine, gpu, host float64) bool {
 	if host == 0 {

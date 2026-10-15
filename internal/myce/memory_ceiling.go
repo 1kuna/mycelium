@@ -140,21 +140,18 @@ func memoryBytes(gb float64) (int64, error) {
 	return int64(math.Ceil(gb * (1 << 30))), nil
 }
 
-// Round up at the cgroup boundary: Linux stores byte limits in whole pages.
-// Reject overflow rather than granting less memory than requested.
+// Round positive limits down to whole kernel pages so enforced <= reserved.
+// Sub-page requests get one page; hostNeed reserves at least the largest
+// supported page size. Zero stays zero, preserving disabled swap.
 func pageAlignedMemory(bytes int64, pageSize int) (int64, error) {
 	if bytes < 0 || pageSize <= 0 {
 		return 0, errors.New("invalid memory ceiling or page size")
 	}
-	page := int64(pageSize)
-	if remainder := bytes % page; remainder != 0 {
-		extra := page - remainder
-		if bytes > math.MaxInt64-extra {
-			return 0, errors.New("page-aligned memory ceiling overflows bytes")
-		}
-		bytes += extra
+	if bytes == 0 {
+		return 0, nil
 	}
-	return bytes, nil
+	page := int64(pageSize)
+	return max(page, bytes/page*page), nil
 }
 func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, error) {
 	if c == nil || bytes == 0 {
