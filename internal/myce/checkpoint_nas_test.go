@@ -285,6 +285,7 @@ func TestWorkerForceStopsBlockedSaveAtGrace(t *testing.T) {
 	}
 	defer store.close()
 	j := recoveryJob(t, []string{"sh", "-c", `trap 'echo saving; cat "$MYCE_CHECKPOINT_DIR/save-block"; exit 0' TERM; echo ready; while :; do sleep 0.01; done`})
+	w = workerWithPreparedCheckpoint(t, w, store, j)
 	p, err := w.start(store, j)
 	if err != nil {
 		t.Fatal(err)
