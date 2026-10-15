@@ -84,12 +84,34 @@ Use a fixed TLS port for a saved address that must survive queue restarts.
 The hypha retries its selected endpoint while running; rediscovery happens at
 its next join/start, rather than migrating an active worker between URLs.
 
-macOS and Linux use the same Go DNS-SD implementation, without an Avahi process
-or a second executable. mDNS needs local-link UDP 5353 multicast; joining also
-needs the queue's selected TCP port. Segmented networks, guest isolation and
-firewalls can block either separately. Do not disable firewalls to fix discovery.
-macOS local-network permission can differ between Terminal and a launch agent;
-a foreground check does not establish login/reboot service behavior.
+macOS uses the system mDNSResponder through `/usr/bin/dns-sd` for proxy
+registration, browsing and address resolution. Linux uses the running Avahi
+daemon through `avahi-browse`, `avahi-publish-service` and
+`avahi-publish-address`. These client tools must be available when Avahi is
+running; a missing tool or daemon failure reports discovery unavailable rather
+than starting a competing responder. Only Linux without a running Avahi daemon
+(and other platforms) uses the existing pure-Go fallback. Mycelium does not
+install packages, start daemons or alter their configuration.
+
+Native publication uses opaque proxy host/service names and `version=1`, with
+one service per usable listener address; no machine name, token or profile is
+published. Registration waits for the daemon's acknowledgement. Browse commands
+have the same two-second bound; advertisement commands live with the queue and
+are stopped and reaped when it exits. The daemon owns multicast sockets.
+
+mDNS needs local-link UDP 5353 multicast; joining also needs the queue's selected
+TCP port. Segmented networks, guest isolation and firewalls can block either
+separately. Do not disable firewalls to fix discovery.
+
+[Apple TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
+says macOS automatically allows local-network access for command-line tools
+started in Terminal or over SSH, including their children. SSH alone therefore
+does not require a Local Network permission grant. App-launched helpers and
+launch agents can instead require user approval for the responsible app in
+System Settings > Privacy & Security > Local Network. If denied or prompted,
+stop and have the user review that permission; Mycelium does not grant or reset
+it. A successful foreground/SSH check does not establish launch-agent,
+login/reboot or app-launch behavior.
 
 WSL2 default NAT does not reliably carry mDNS. Use a saved/supplied address, or
 mirrored networking with appropriate private-network and Hyper-V firewall rules.
@@ -142,5 +164,6 @@ The CLI dev end-to-end tests exercise the real queue and command runner with
 fake GPU inventory. A short isolated macOS check additionally exercised a queue
 and joining hypha as separate processes, real mDNS with no supplied address,
 actual Apple hardware facts, a short command without `MYCE_TOKEN`, and explicit
-saved-origin joining. Linux multicast, WSL2 and installed-service discovery have
-not been verified on native systems by this slice.
+saved-origin joining. Native cross-machine results and remaining verification limits are recorded in
+[#48](https://github.com/1kuna/mycelium/issues/48). WSL2 and installed-service
+discovery require separate verification.
