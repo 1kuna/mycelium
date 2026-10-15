@@ -32,6 +32,7 @@ func TestReviewDeadlineDelayedGateMustNotExecute(t *testing.T) {
 	}
 	defer store.close()
 	store.state.Session = assigned.Session
+	w = workerWithPreparedCheckpoint(t, w, store, *assigned)
 	done := make(chan error, 1)
 	go func() {
 		p, e := w.start(store, *assigned)
@@ -40,7 +41,15 @@ func TestReviewDeadlineDelayedGateMustNotExecute(t *testing.T) {
 		}
 		done <- e
 	}()
-	await(t, func() bool { _, e := os.Stat(ready); return e == nil })
+	await(t, func() bool {
+		select {
+		case err := <-done:
+			t.Fatalf("worker exited before gate readiness: %v", err)
+		default:
+		}
+		_, err := os.Stat(ready)
+		return err == nil
+	})
 	c.advance(ProductionStartTimeout)
 	requireState(t, q, assigned.ID, "failed")
 	if e := os.WriteFile(release, nil, 0600); e != nil {

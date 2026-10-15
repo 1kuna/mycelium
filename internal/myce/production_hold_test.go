@@ -74,6 +74,7 @@ func TestProductionHoldDisplacesBothCardsAndCooldown(t *testing.T) {
 	payload := cloneJob(resumed)
 	payload.Checkpoint = filepath.Join(q.root, payload.Checkpoint)
 	payload.Spec.Run.Command = []string{"sh", "-c", `test "$MYCE_ATTEMPT" = 2 && test "$(cat "$MYCE_CHECKPOINT_DIR/saved")" = unit-7 && test "$MYCE_MACHINE" = spark`}
+	w = workerWithPreparedCheckpoint(t, w, store, payload)
 	process, e2 := w.start(store, payload)
 	if e2 != nil {
 		t.Fatal(e2)
@@ -755,43 +756,6 @@ func TestProductionHoldReportsModelUnloadFailure(t *testing.T) {
 }
 
 func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testing.T) {
-	// Startup may legitimately return errWorkerCheckpoint while its bounded
-	// filesystem call is still running. Synchronize on that real preparation,
-	// rather than requiring local copy/fsync to beat a 25 ms wall-clock budget.
-	// Force this path with a channel so the test also covers completed-I/O reuse.
-	startAfterPreparation := func(w Worker, store *workerStore, payload Job) *process {
-		t.Helper()
-		release := make(chan struct{})
-		w.checkpointPrepare = func(value Job) (string, error) {
-			<-release
-			return prepareCheckpoint(value)
-		}
-		process, err := w.start(store, payload)
-		close(release)
-		if process != nil || !errors.Is(err, errWorkerCheckpoint) || !store.checkpointUnavailable {
-			t.Fatalf("blocked preparation must defer startup: process=%v err=%v unavailable=%v", process, err, store.checkpointUnavailable)
-		}
-		pending := store.nasPrepare.pending
-		if pending == nil {
-			t.Fatal("timed-out preparation lost its pending filesystem operation")
-		}
-		select {
-		case <-pending.done:
-		case <-time.After(3 * time.Second):
-			t.Fatal("released checkpoint preparation did not finish")
-		}
-		w.checkpointPrepare = func(Job) (string, error) {
-			return "", errors.New("completed checkpoint preparation was repeated")
-		}
-		process, err = w.start(store, payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if store.checkpointUnavailable {
-			t.Fatal("completed checkpoint preparation did not recover storage")
-		}
-		return process
-	}
 	q, clock, a, b, spark := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, a, nil).Job
@@ -819,7 +783,14 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 	store.state.Session = b.Session
 	payload := cloneJob(y)
 	payload.Checkpoint = filepath.Join(q.root, y.Checkpoint)
-	process := startAfterPreparation(w, store, payload)
+	w = workerWithPreparedCheckpoint(t, w, store, payload)
+	process, err := w.start(store, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.checkpointUnavailable {
+		t.Fatal("completed checkpoint preparation did not recover storage")
+	}
 	defer process.stop(workerClock.Now(), 0, true)
 	logged := func(text string) bool {
 		data, _ := os.ReadFile(filepath.Join(store.dir, store.state.Log))
@@ -930,7 +901,14 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 	defer resumeStore.close()
 	resumePayload.Spec.Run.Env = map[string]string{"EXPECTED_CHECKPOINT": string(durable)}
 	resumePayload.Spec.Run.Command = []string{"sh", "-c", `test "$MYCE_MACHINE" = spark && test "$MYCE_ATTEMPT" = 2 && test "$(cat "$MYCE_CHECKPOINT_DIR/checkpoint.json")" = "$EXPECTED_CHECKPOINT"`}
-	resumeProcess := startAfterPreparation(resumeWorker, resumeStore, resumePayload)
+	resumeWorker = workerWithPreparedCheckpoint(t, resumeWorker, resumeStore, resumePayload)
+	resumeProcess, err := resumeWorker.start(resumeStore, resumePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumeStore.checkpointUnavailable {
+		t.Fatal("completed checkpoint preparation did not recover storage")
+	}
 	if receipt := <-resumeProcess.done; receipt.err != nil || !receipt.result.Success {
 		t.Fatalf("migrated command did not consume its durable checkpoint: %+v", receipt)
 	}

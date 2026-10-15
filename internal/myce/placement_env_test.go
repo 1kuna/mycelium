@@ -25,6 +25,7 @@ func TestWorkerPlacementEnvironmentEveryAttempt(t *testing.T) {
 				j := recoveryJob(t, []string{"sh", "-c", `test "$MYCE_PLATFORM" = "$EXPECTED_PLATFORM" && test "$MYCE_DEVICES" = 0 && test "$MYCE_MACHINE" = "$EXPECTED_MACHINE" && test -z "$MYCE_TOKEN"`})
 				j.Attempt = attempt
 				j.Spec.Run.Env = map[string]string{"MYCE_PLATFORM": "wrong", "MYCE_MACHINE": "wrong", "MYCE_DEVICES": "wrong", "EXPECTED_PLATFORM": want, "EXPECTED_MACHINE": w.Machine.ID}
+				w = workerWithPreparedCheckpoint(t, w, store, j)
 				p, e := w.start(store, j)
 				if e != nil {
 					t.Fatal(e)
