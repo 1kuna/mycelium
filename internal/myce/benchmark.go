@@ -54,13 +54,13 @@ func (b *BenchmarkResult) Summary() string {
 func validRate(v float64) bool { return v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 type BenchmarkConfig struct {
-	Clock                   Clock
-	Machine                 Machine
-	StateDir, ExtensionRoot string
-	HostStateDir            string
-	Client                  Client
-	DailyUse, Laptop        bool
-	OwnerSignals            OwnerSignalSource
+	Clock                     Clock
+	Machine                   Machine
+	StateDir, ExtensionRoot   string
+	HostStateDir              string
+	Client                    Client
+	DailyUse, Laptop, Desktop bool
+	OwnerSignals              OwnerSignalSource
 	// Measure is an injected resource runner for laptop tests. Calls are serial.
 	Measure func(context.Context, string) ([]Throughput, error)
 }
@@ -123,7 +123,7 @@ func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *Capabilit
 	p.Version = 1
 	p.Benchmark = result
 	p.Onboarding = "measured; qualified reference replay"
-	monitor := newAvailabilityMonitor(c.Clock, c.DailyUse, c.Laptop)
+	monitor := newAvailabilityMonitor(c.Clock, c.DailyUse, c.Laptop, c.Desktop)
 	sample := func() {
 		probe, stop := context.WithTimeout(ctx, 2*time.Second)
 		defer stop()

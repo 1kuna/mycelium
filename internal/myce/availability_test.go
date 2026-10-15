@@ -119,7 +119,7 @@ func TestDedicatedAvailabilityAndStaleness(t *testing.T) {
 	if p.evaluate(OwnerSignals{Power: "unknown"}).Available {
 		t.Fatal("explicit laptop allowed unknown power")
 	}
-	monitor := newAvailabilityMonitor(clock, true, false)
+	monitor := newAvailabilityMonitor(clock, true, false, false)
 	monitor.sample(idleSignals())
 	clock.Advance(signalMaxAge + time.Second)
 	if a := monitor.snapshot(); a.Available || a.Reason != "owner signals stale" {
@@ -464,7 +464,7 @@ func TestPoliteOwnerStopDuringBlockedCheckin(t *testing.T) {
 
 func TestAvailabilityCancelsModelWorkAndRecovers(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
-	monitor := newAvailabilityMonitor(clock, true, false)
+	monitor := newAvailabilityMonitor(clock, true, false, false)
 	monitor.sample(idleSignals())
 	work := monitor.workContext()
 	if work.Err() != nil {
@@ -529,25 +529,26 @@ func TestMachineLimitRetainsUnacknowledgedStop(t *testing.T) {
 
 func TestDailyDesktopCPUThermalWaiver(t *testing.T) {
 	for _, tc := range []struct {
-		name                   string
-		laptop, detectedLaptop bool
-		power, gpu             string
-		idle                   float64
-		known, available       bool
-		reason                 string
+		name                            string
+		desktop, laptop, detectedLaptop bool
+		power, gpu                      string
+		idle                            float64
+		known, available                bool
+		reason                          string
 	}{
-		{"desktop", false, false, "ac", "nominal", 300, true, true, "CPU thermal coverage waived for desktop"},
-		{"configured laptop", true, false, "ac", "nominal", 300, true, false, "host CPU thermal coverage unavailable"},
-		{"detected laptop", false, true, "ac", "nominal", 300, true, false, "host CPU thermal coverage unavailable"},
-		{"hot GPU", false, false, "ac", "serious", 300, true, false, "cooling down"},
-		{"unknown GPU", false, false, "ac", "unknown", 300, true, false, "heat sensing unavailable"},
-		{"unknown power", false, false, "unknown", "nominal", 300, true, false, "power source unavailable"},
-		{"unknown idle", false, false, "ac", "nominal", 300, false, false, "owner activity unavailable"},
-		{"owner returned", false, false, "ac", "nominal", 0, true, false, "waiting for 5 idle minutes"},
+		{"undeclared missing battery", false, false, false, "ac", "nominal", 300, true, false, "host CPU thermal coverage unavailable"},
+		{"desktop", true, false, false, "ac", "nominal", 300, true, true, "CPU thermal coverage waived for desktop"},
+		{"configured laptop", true, true, false, "ac", "nominal", 300, true, false, "host CPU thermal coverage unavailable"},
+		{"detected laptop", true, false, true, "ac", "nominal", 300, true, false, "host CPU thermal coverage unavailable"},
+		{"hot GPU", true, false, false, "ac", "serious", 300, true, false, "cooling down"},
+		{"unknown GPU", true, false, false, "ac", "unknown", 300, true, false, "heat sensing unavailable"},
+		{"unknown power", true, false, false, "unknown", "nominal", 300, true, false, "power source unavailable"},
+		{"unknown idle", true, false, false, "ac", "nominal", 300, false, false, "owner activity unavailable"},
+		{"owner returned", true, false, false, "ac", "nominal", 0, true, false, "waiting for 5 idle minutes"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clock := &fakeClock{now: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
-			p := availabilityPolicy{clock: clock, daily: true, laptop: tc.laptop}
+			p := availabilityPolicy{clock: clock, daily: true, desktop: tc.desktop, laptop: tc.laptop}
 			s := OwnerSignals{IdleKnown: tc.known, IdleSeconds: tc.idle, Laptop: tc.detectedLaptop, Power: tc.power, Heat: "unknown", GPUHeat: tc.gpu, HeatCoverage: "gpu-only"}
 			a := p.evaluate(s)
 			if a.Available != tc.available || a.Reason != tc.reason {

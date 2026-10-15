@@ -149,8 +149,16 @@ func Fetch(ctx context.Context, c Config) (Signals, error) {
 	if err != nil || len(body) > 4096 || resp.StatusCode != 200 || ctx.Err() != nil || !validMAC(resp.Header.Get("X-Myce-MAC"), mac(key, "response", nonce, body)) {
 		return fail()
 	}
-	var s Signals
-	if json.Unmarshal(body, &s) != nil || math.IsNaN(s.IdleSeconds) || math.IsInf(s.IdleSeconds, 0) || s.IdleSeconds < 0 {
+	var wire struct {
+		Signals
+		Laptop *bool `json:"laptop"`
+	}
+	if json.Unmarshal(body, &wire) != nil || wire.Laptop == nil {
+		return fail()
+	}
+	s := wire.Signals
+	s.Laptop = *wire.Laptop
+	if math.IsNaN(s.IdleSeconds) || math.IsInf(s.IdleSeconds, 0) || s.IdleSeconds < 0 {
 		return fail()
 	}
 	if s.Power != "ac" && s.Power != "battery" && s.Power != "unknown" {

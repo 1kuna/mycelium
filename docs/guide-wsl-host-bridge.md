@@ -20,8 +20,8 @@ The query is hidden, bounded by a 750 ms deadline and invoked only when sampled.
 
 GPU heat appears in `gpu_heat`, with `heat_coverage=gpu-only`. It cannot certify
 CPU/host thermal coverage; host `heat` remains `unknown`. On an externally
-powered desktop (no `--laptop` flag or detected laptop), daily admission uses
-GPU heat and reports **CPU thermal coverage waived for desktop**. Laptops
+powered desktop explicitly declared with `--desktop` (and no detected battery),
+daily admission uses GPU heat and reports **CPU thermal coverage waived for desktop**. Laptops
 still wait with **host CPU thermal coverage unavailable**. Unknown power,
 unknown owner activity, and unknown or hot GPU heat continue to withhold work.
 Generic ACPI thermal zones do not establish CPU coverage; no nominal CPU
@@ -69,9 +69,11 @@ This uses the standard Windows Task Scheduler COM API: InteractiveToken (no
 password) and LUA/limited run level. The one-shot task runs the **same Setup.ps1**
 in the existing desktop session and is deleted after completion. Aggregate
 receipt fields verify exit code, session and elevation; no credential is logged.
-A timeout retains an active task for inspection rather than killing setup or
-blindly retrying. Replace Install with Uninstall for either command. Downloads
-files and aggregate receipts are intentionally retained after uninstall.
+The exact task name is `MyceliumHostBridge-Setup`. Setup deletes it as its
+last step on success or failure, even after a launcher timeout. A retry first
+removes an inactive leftover with that exact name and refuses a running or queued
+setup; it never kills an active installer. Replace Install with Uninstall for
+either command. Downloads files and aggregate receipts are intentionally retained after uninstall.
 No logoff, service, persistent task, administrator install or settings change
 is required. The helper also refuses installation outside the covered console.
 
@@ -105,8 +107,9 @@ export MYCE_HOST_BRIDGE_CONFIG='/mnt/c/Users/<owner>/AppData/Local/MyceliumHostB
 ./myce join --daily-use --laptop --max-jobs 1 --joining-file '<private invitation path>'
 ```
 
-For a desktop, omit `--laptop`. Detected laptop hardware still requires CPU
-thermal coverage and confirmed AC.
+For a desktop, use `--desktop`; it is mutually exclusive with `--laptop`.
+Without `--desktop`, CPU coverage is required. Detected battery hardware still
+requires CPU thermal coverage and confirmed AC.
 
 The path is explicit to avoid guessing Windows user/session identity. WSL reads
 the file through its existing Windows filesystem access. No credential is

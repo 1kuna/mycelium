@@ -73,13 +73,17 @@ concurrency, not watts, GPU percentage, fan speed or noise.
   supplies authenticated host idle/power over mirrored-network IPv4 loopback,
   with verified single-console-session coverage or explicit unknowns. Missing,
   stopped or unauthenticated helpers never fall back to guest signals. Windows
-  thermal coverage is currently **unknown**, so daily work still withholds.
-  Use `--daily-use --laptop` for a personal WSL machine. Native session, logon,
-  networking and install behavior require the separate acceptance plan.
+  CPU thermal coverage remains **unknown**. An externally powered desktop
+  explicitly joined with `--daily-use --desktop` may use nominal measured GPU
+  heat, with status **CPU thermal coverage waived for desktop**. A detected
+  battery vetoes the waiver; without `--desktop`, CPU coverage stays required.
+  Use `--daily-use --laptop` for a laptop; the flags are mutually exclusive.
+  Native session, logon, networking and install behavior require the separate acceptance plan.
 
 Thresholds follow #25's research where compatible with #43. Unlike the research
-note's proposed missing-heat exception, missing heat **withholds** daily work, as
-required by the resolved unknown-signal rule. These OS observations aren't a
+note's proposed missing-heat exception, missing required heat **withholds** daily
+work, with the explicit-desktop CPU waiver described above. These OS observations
+aren't a
 promise that a machine is silent, that a motionless owner is absent, or that all
 physical components have thermal coverage. No quietness claim is made.
 
