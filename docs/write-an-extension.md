@@ -38,6 +38,11 @@ Setup downloads models, packages, source or installers into
 `MYCE_EXTENSION_CACHE`, once per hypha/version/platform. They stay outside the
 small folder. Use pinned versions and verify model/download hashes. Setup is
 explicit, with a bounded timeout; it is never silently started by a queued job.
+The CLI default setup/check timeout is ten minutes (`--timeout` overrides it).
+The pinned CUDA llama.cpp build completed in about eight minutes on the native
+GB10 retest with two build jobs and under 2 GiB aggregate build RSS. The earlier
+160-second harness deadline was shorter than the default. Keep qualification
+checks and memory guards intact when allowing build time.
 The cache is trusted local code, not a sandbox. Setup/check obtain an exclusive
 cache lock; running jobs hold a shared lock. A setup failure clears qualification.
 Cache cleanup is explicit, not automatic in this slice.
