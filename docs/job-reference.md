@@ -526,8 +526,12 @@ requires qualification.
 The worker pins the daemon endpoint from its own `DOCKER_HOST` (default
 `unix:///var/run/docker.sock`) in its custody record; `DOCKER_CONTEXT` is
 unsupported. Configure each worker for its intended daemon. Workers retain
-stopped containers, cidfiles and spool records as evidence. Docker output is
+stopped containers, cidfiles and spool records as evidence. Main Docker output is
 collected into the ordinary job log after the container settles.
+Every settled main/sidecar also retains its exit code and private stderr tail
+(last 256 lines, at most 64 KiB) in the attempt record and mode-0600
+`<identity>.docker-evidence.json`. Sidecar stderr is excluded from queue logs,
+results and public status; this private evidence survives container retention.
 
 For an existing **unmanaged** wrapper (`run.docker: false`), a cooperative
 container launch would be `docker run --label "$MYCE_DOCKER_LABEL" ...`, but
@@ -614,8 +618,25 @@ Verso's CPU api/worker/render services remain outside Mycelium. This is a batch
 lifecycle, not a Docker-backed catalog model server.
 
 Main's exit code determines the result; early sidecar exit fails the job. Main
-exit stops remaining sidecars with ordinary grace, then KILL. Stop, restart,
-loss reconciliation and `myce disable` stop all labeled containers, confirm
+exit stops remaining sidecars with ordinary grace (normally two minutes).
+Each exact container gets at most one TERM attempt, with permanent intent saved
+before delivery. Failed/uncertain TERM waits for idempotent, retried KILL at the
+original deadline; worker restart never renews grace or resends recorded TERM.
+Existing forced containment/operator cleanup remains immediate. Label-only orphans
+instead get one bounded `docker stop --time` per worker process lifetime; their
+report records that no attempt exit/stderr evidence was retained.
+
+A restart during grace succeeds with one attempt and no loss only when main exit
+zero was already durable and the full recovery path completes: cleanup, private
+evidence, network removal, durable release, output finalization and result save.
+A restart before durable main completion remains a loss and retries. Released
+custody without a saved result also remains interrupted and retries; unexpected
+private-network disconnection remains a containment failure. Replayed results
+must match the exact job, attempt, machine and session.
+See [Docker cleanup custody](operations.md#docker-cleanup-custody) for delivery
+outcomes, private-evidence review and recovery.
+
+Stop, restart, loss reconciliation and `myce disable` stop all labeled containers, confirm
 nonrunning/absent execution, disconnect owned stopped endpoints, remove labeled
 networks, and confirm network absence. Stopped containers remain evidence;
 networks do not. RAM custody stays held until both proofs succeed. Late containers

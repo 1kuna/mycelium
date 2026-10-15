@@ -1180,18 +1180,42 @@ proof of cleanup or an instruction to resume work.
 ## Docker cleanup custody
 
 For opt-in `run.docker` batches, the local `<identity>.docker.json` record is
-fsynced before create/start and before forced KILL. It retains the unique
-attempt identity, exact container ID when known, daemon endpoint, pending
+fsynced before create/start and before TERM intent is delivered. It retains the
+unique attempt identity, exact container ID when known, daemon endpoint, pending
 operation, stop deadline and forced/released disposition. Preserve the worker
 spool during upgrades/restarts; an empty replacement spool is not release proof.
 
 The worker reports creating/start pending, running, stopping, released or
-**cleanup unconfirmed**. Stop sends container TERM, then KILL at the original
-injected-clock grace boundary. Every matching container is inspected for the
-exact ownership label before signaling. A final successful scan must prove
-all are nonrunning (or absent), followed by owned endpoint disconnection, labeled
+**cleanup unconfirmed**. A normal stop attempts TERM at most once per exact
+container, after saving permanent intent. Failed intent persistence sends no
+TERM and retries the write; failed or uncertain delivery never clears intent or
+resends TERM. KILL is idempotent and retried at the original injected-clock grace
+boundary (normally two minutes), even if spool writes fail. Restart preserves
+that deadline. Existing forced containment/operator cleanup remains immediate.
+Every matching container is inspected for the exact ownership label before
+signaling. A final successful scan must prove all are nonrunning (or absent), followed by owned endpoint disconnection, labeled
 network removal and confirmed network absence. Stopped container objects remain
 as evidence until retention expires; private networks are removed.
+
+Before release, every main/sidecar exit code and private stderr tail is saved
+in the attempt record and `<identity>.docker-evidence.json` (mode 0600). The tail
+is limited to the last 256 lines and 64 KiB per container. Sidecar stderr stays
+out of queue logs, results and public status. Separate evidence survives container
+retention; missing/mismatched evidence blocks sidecar disposal. TERM outcome is
+`sent`, `error`, or `unknown-after-restart`; `sent` means Docker returned success,
+not that the application completed graceful shutdown. For exit 137 with TERM
+`error` or `unknown-after-restart`, review the private evidence; no further action
+is required beyond that review. Do not clear intent, edit the spool or resend
+TERM. Preserve evidence before emergency container disposal; never publish raw stderr.
+
+Label-discovered orphans have no durable attempt record. They receive one bounded
+`docker stop --time <grace>` per exact container/daemon per worker process lifetime.
+Reconstructing cleanup in that process never repeats stop, including after an
+uncertain error. Docker grace rounds up to whole seconds; the CLI timeout is that
+grace plus the normal call allowance, bounded by any enclosing cleanup deadline.
+After grace, positive running inspection permits idempotent KILL retries. A fresh
+process may issue one new orphan stop. Orphan reports explicitly say exit
+code/stderr was not retained, and never claim private attempt evidence was saved.
 
 `join --container-retention 24h` keeps stopped containers for 24 hours after
 confirmed cleanup and successful queue result acknowledgement (the default).
@@ -1211,10 +1235,24 @@ result and acknowledgement records. Captured Mycelium logs keep their independen
 `--log-retention` policy. Existing evidence without a durable acknowledgement
 marker, including pre-upgrade evidence and rejected stale results, is preserved;
 retention does not guess acknowledgement from file age or queue job state.
-Each lifecycle Docker call has a 2-second I/O timeout; retries run independently
-of heartbeat/control, checkpoint walks and queue log upload. Grace is never
-renewed by a Docker retry. Restart reconciles the saved daemon and containers
+Except for the bounded orphan stop above, each lifecycle Docker call has a
+2-second I/O timeout; retries run independently of heartbeat/control, checkpoint
+walks and queue log upload. Grace is never renewed by a Docker retry. Restart reconciles the saved daemon and containers
 before fresh readiness, including when the old CLI/process group has vanished.
+
+If the exact main's terminal outcome was durably recorded before restart and
+before sidecar cleanup, recovery resumes that cleanup at the saved deadline.
+Success requires the full path: confirmed container cleanup, private evidence,
+network removal/absence, durable release, output finalization, then result save.
+Expected sidecar TERM/KILL after main exit zero does not count as worker loss.
+A restart before durable main completion remains a loss, even if cleanup later
+observes exit zero. Existing memory, OOM and containment failures remain failures.
+Operator-confirmed release alone never establishes main success. Replayed results
+must match the saved job, attempt, machine and session; old custody release is
+separate from completion of any replacement attempt. A crash after durable release
+but before result save remains interrupted and retries. A failed release write or
+network-removal retry may conservatively report containment failure for disconnected
+containers; missing private attachment is never accepted.
 
 An empty scan does not settle a timed-out create/start. A definite daemon
 refusal can settle without execution. A lost start response can settle only

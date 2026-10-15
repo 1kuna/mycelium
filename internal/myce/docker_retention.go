@@ -131,6 +131,29 @@ func pruneStoppedDocker(ctx context.Context, dir, worker, active string, now tim
 					}
 					seen[c.ID] = true
 				}
+				// Never discard sidecar evidence on upgrade or after a failed capture.
+				needsEvidence := st.EvidenceSaved
+				for _, m := range st.Containers {
+					if m.Name != "" && m.Name != "main" {
+						needsEvidence = true
+					}
+				}
+				if needsEvidence {
+					data, e := os.ReadFile(filepath.Join(dir, identity+".docker-evidence.json"))
+					if e != nil {
+						return errors.New("private Docker evidence unavailable; containers retained")
+					}
+					var evidence map[string]dockerMember
+					if json.Unmarshal(data, &evidence) != nil {
+						return errors.New("invalid private Docker evidence")
+					}
+					for _, c := range cs {
+						m, ok := evidence[c.ID]
+						if !ok || m.ExitCode == nil || *m.ExitCode != c.State.ExitCode {
+							return errors.New("Docker exit evidence incomplete; containers retained")
+						}
+					}
+				}
 				if _, err = call(append([]string{"rm"}, ids...)...); err != nil {
 					return err
 				}
