@@ -1192,6 +1192,14 @@ unique attempt identity, exact container ID when known, daemon endpoint, pending
 operation, stop deadline and forced/released disposition. Preserve the worker
 spool during upgrades/restarts; an empty replacement spool is not release proof.
 
+A worker service restart during Docker grace normally reaches systemd's
+`TimeoutStopSec=10s` and ends in SIGKILL; this is the intended stop bound.
+This is safe because worker state is crash-safe: authoritative saves write a
+temporary file, fsync it, atomically rename it, then fsync the directory, while
+systemd's `KillMode=control-group` clears native children.
+Native mid-grace restart acceptance at `eeaa8d8` proved recovery with one
+successful attempt, zero losses, and sidecar KILL at the original deadline.
+
 The worker reports creating/start pending, running, stopping, released or
 **cleanup unconfirmed**. A normal stop attempts TERM at most once per exact
 container, after saving permanent intent. Failed intent persistence sends no
