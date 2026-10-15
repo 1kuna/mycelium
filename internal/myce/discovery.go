@@ -14,6 +14,17 @@ const discoveryService = "_mycelium._tcp"
 type MDNSDiscovery struct{}
 
 func (MDNSDiscovery) Browse(ctx context.Context) ([]string, error) {
+	backend, err := systemDiscoveryBackend()
+	if err != nil {
+		return nil, err
+	}
+	if backend != "" {
+		return browseNative(ctx, backend, runDiscoveryCommand)
+	}
+	return browseGo(ctx)
+}
+
+func browseGo(ctx context.Context) ([]string, error) {
 	resolver, err := zeroconf.NewResolver(nil)
 	if err != nil {
 		return nil, err
@@ -55,6 +66,17 @@ func (MDNSDiscovery) Browse(ctx context.Context) ([]string, error) {
 	}
 }
 func AdvertiseJoining(address net.Addr, fingerprint string) (func(), error) {
+	backend, err := systemDiscoveryBackend()
+	if err != nil {
+		return nil, err
+	}
+	if backend != "" {
+		return advertiseNative(address, fingerprint, backend, runDiscoveryCommand)
+	}
+	return advertiseGo(address, fingerprint)
+}
+
+func advertiseGo(address net.Addr, fingerprint string) (func(), error) {
 	host, port, err := net.SplitHostPort(address.String())
 	if err != nil {
 		return nil, err
