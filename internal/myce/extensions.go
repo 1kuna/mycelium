@@ -27,22 +27,23 @@ var extensionName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // Extension is one small folder. Files and Digest are immutable transport data,
 // not extra authoring fields in extension.yaml. Downloads live in its cache.
 type Extension struct {
-	Name         string                       `json:"name" yaml:"name"`
-	Version      string                       `json:"version" yaml:"version"`
-	Purpose      string                       `json:"purpose" yaml:"purpose"`
-	Platforms    []string                     `json:"platforms" yaml:"platforms"`
-	Kinds        []string                     `json:"kinds,omitempty" yaml:"kinds,omitempty"`
-	ProgramTypes []string                     `json:"program_types,omitempty" yaml:"program_types,omitempty"`
-	MemoryGB     float64                      `json:"memory_gb" yaml:"memory_gb"`
-	HostMemoryGB float64                      `json:"host_memory_gb,omitempty" yaml:"host_memory_gb,omitempty"`
-	Resumable    bool                         `json:"resumable,omitempty" yaml:"resumable,omitempty"`
-	Setup        []string                     `json:"setup,omitempty" yaml:"setup,omitempty"`
-	Run          []string                     `json:"run" yaml:"run"`
-	Check        []string                     `json:"check,omitempty" yaml:"check,omitempty"`
-	Baselines    map[string]ExtensionBaseline `json:"baselines,omitempty" yaml:"baselines,omitempty"`
-	Notes        string                       `json:"notes,omitempty" yaml:"notes,omitempty"`
-	Files        map[string][]byte            `json:"files" yaml:"-"`
-	Digest       string                       `json:"digest" yaml:"-"`
+	Name              string                                  `json:"name" yaml:"name"`
+	Version           string                                  `json:"version" yaml:"version"`
+	Purpose           string                                  `json:"purpose" yaml:"purpose"`
+	Platforms         []string                                `json:"platforms" yaml:"platforms"`
+	Kinds             []string                                `json:"kinds,omitempty" yaml:"kinds,omitempty"`
+	ProgramTypes      []string                                `json:"program_types,omitempty" yaml:"program_types,omitempty"`
+	MemoryGB          float64                                 `json:"memory_gb" yaml:"memory_gb"`
+	HostMemoryGB      float64                                 `json:"host_memory_gb,omitempty" yaml:"host_memory_gb,omitempty"`
+	Resumable         bool                                    `json:"resumable,omitempty" yaml:"resumable,omitempty"`
+	Setup             []string                                `json:"setup,omitempty" yaml:"setup,omitempty"`
+	Run               []string                                `json:"run" yaml:"run"`
+	Check             []string                                `json:"check,omitempty" yaml:"check,omitempty"`
+	Baselines         map[string]ExtensionBaseline            `json:"baselines,omitempty" yaml:"baselines,omitempty"`
+	PlatformBaselines map[string]map[string]ExtensionBaseline `json:"platform_baselines,omitempty" yaml:"platform_baselines,omitempty"`
+	Notes             string                                  `json:"notes,omitempty" yaml:"notes,omitempty"`
+	Files             map[string][]byte                       `json:"files" yaml:"-"`
+	Digest            string                                  `json:"digest" yaml:"-"`
 }
 
 // Baselines are per kind/program type, so a program check cannot qualify an
@@ -111,7 +112,36 @@ func (e Extension) validate() error {
 			return errors.New("invalid extension work type")
 		}
 	}
-	for k, b := range e.Baselines {
+	if len(e.PlatformBaselines) > 0 && len(e.Baselines) > 0 {
+		return errors.New("choose baselines or platform_baselines; cross-platform fallback is not allowed")
+	}
+	if err := e.validateBaselines(e.Baselines); err != nil {
+		return err
+	}
+	for platform, baselines := range e.PlatformBaselines {
+		if !slices.Contains(e.Platforms, platform) || len(baselines) == 0 {
+			return errors.New("platform baselines require a supported platform and native work references")
+		}
+		if err := e.validateBaselines(baselines); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Platform-specific references never fall back to another backend's output.
+// Older frozen extensions retain their declared common reference.
+func (e Extension) baseline(work, platform string) (ExtensionBaseline, bool) {
+	if len(e.PlatformBaselines) > 0 {
+		b, ok := e.PlatformBaselines[platform][work]
+		return b, ok
+	}
+	b, ok := e.Baselines[work]
+	return b, ok
+}
+
+func (e Extension) validateBaselines(baselines map[string]ExtensionBaseline) error {
+	for k, b := range baselines {
 		s := Spec{Kind: strings.TrimPrefix(k, "kind:")}
 		if strings.HasPrefix(k, "program:") {
 			s = Spec{Program: &Program{Type: strings.TrimPrefix(k, "program:")}}
@@ -277,7 +307,7 @@ func qualifiedExtension(j *Job, m *Machine) *Extension {
 		if !slices.Contains(e.Platforms, m.GPU) || (j.Spec.Resumable && !e.Resumable) {
 			continue
 		}
-		if _, ok := e.Baselines[j.Spec.workType()]; !ok {
+		if _, ok := e.baseline(j.Spec.workType(), m.GPU); !ok {
 			continue
 		}
 		for _, r := range m.ExtensionReports {

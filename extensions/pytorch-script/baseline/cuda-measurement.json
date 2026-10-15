@@ -1,0 +1,54 @@
+{
+  "torch": "2.9.1+cu130",
+  "cuda": "13.0",
+  "capability": [
+    12,
+    1
+  ],
+  "architectures": [
+    "sm_80",
+    "sm_90",
+    "sm_100",
+    "sm_110",
+    "sm_120",
+    "compute_120"
+  ],
+  "resource": "cuda:0",
+  "os": "linux",
+  "arch": "arm64",
+  "accelerator": "NVIDIA GB10",
+  "dtype": "float32",
+  "samples": 3,
+  "outputs": [
+    [
+      0.265625,
+      -0.4375,
+      1.25,
+      4.0625,
+      1.25,
+      32.0625
+    ],
+    [
+      0.265625,
+      -0.4375,
+      1.25,
+      4.0625,
+      1.25,
+      32.0625
+    ],
+    [
+      0.265625,
+      -0.4375,
+      1.25,
+      4.0625,
+      1.25,
+      32.0625
+    ]
+  ],
+  "maximum_absolute_spread": 0.0,
+  "check_exit_codes": [
+    0,
+    0,
+    0
+  ]
+}

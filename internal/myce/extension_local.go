@@ -380,7 +380,7 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 				err = errors.New(r.Reason)
 				continue
 			}
-			b, ok := e.Baselines[r.Work]
+			b, ok := e.baseline(r.Work, platform)
 			if !ok {
 				r.Reason = "no native baseline"
 				err = errors.New(r.Reason)

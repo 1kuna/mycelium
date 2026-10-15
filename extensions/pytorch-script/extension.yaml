@@ -1,5 +1,5 @@
 name: pytorch-script
-version: '0.2.1'
+version: '0.2.2'
 purpose: Run an unchanged device-agnostic PyTorch program using MYCE_DEVICE.
 platforms: [cuda, xpu, metal]
 program_types: [pytorch-script]
@@ -15,13 +15,26 @@ notes: |
   fallback. Programs opt into resumable only when they implement the checkpoint
   contract; the program runs in the signal-receiving Python process. Reports
   allocator peaks on CUDA/XPU and sampled allocations on MPS (brief peaks may
-  be missed). The baseline only covers its sample.
-baselines:
-  program:pytorch-script:
-    input: baseline/input.json
-    output: baseline/native-output.json
-    measure: numeric
-    absolute: 0
-    relative: 0
-    native: PyTorch 2.8.0, Apple silicon MPS, float32 pointwise tensor operations.
-    variation: Three native repetitions had zero spread; see baseline/measurement.json. No wider cross-platform allowance is claimed.
+  be missed). Setup pins Linux CUDA 13 PyTorch 2.9.1+cu130 and requires a
+  real assigned-backend kernel launch. MPS/XPU retain PyTorch 2.8.0. Native
+  references exist separately for MPS and CUDA; XPU has no matching native
+  reference and stays not qualified. The baseline only covers its sample.
+platform_baselines:
+  metal:
+    program:pytorch-script:
+      input: baseline/input.json
+      output: baseline/native-output.json
+      measure: numeric
+      absolute: 0
+      relative: 0
+      native: PyTorch 2.8.0, Apple silicon MPS, float32 pointwise tensor operations.
+      variation: Three native repetitions had zero spread; see baseline/measurement.json. No wider cross-platform allowance is claimed.
+  cuda:
+    program:pytorch-script:
+      input: baseline/input.json
+      output: baseline/cuda-native-output.json
+      measure: numeric
+      absolute: 0
+      relative: 0
+      native: PyTorch 2.9.1+cu130, CUDA 13.0, Linux arm64 NVIDIA GB10 (sm_121), float32 pointwise tensor operations.
+      variation: Three CUDA-native repetitions had zero spread; see baseline/cuda-measurement.json. No wider allowance is claimed.

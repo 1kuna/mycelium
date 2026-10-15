@@ -75,6 +75,48 @@ an allowance needs an explicit reviewed change and a new frozen version. There
 is no automatic learning from failures. The first extension for a kind supplies
 its native reference; later extensions should reuse that matching reference.
 
+For different native backends, use `platform_baselines` instead of `baselines`:
+
+```yaml
+platform_baselines:
+  metal:
+    program:example-script:
+      input: baseline/input.json
+      output: baseline/mps-output.json
+      measure: numeric
+      absolute: 0
+      relative: 0
+      native: Describe the actual MPS recording.
+      variation: Link its repeated measurements.
+  cuda:
+    program:example-script:
+      input: baseline/input.json
+      output: baseline/cuda-output.json
+      measure: numeric
+      absolute: 0
+      relative: 0
+      native: Describe the actual CUDA recording.
+      variation: Link its repeated measurements.
+```
+
+Use one map style per extension. With `platform_baselines`, a missing matching
+platform/work reference stays not qualified; it never falls back to MPS or any
+other backend. Existing frozen extensions with `baselines` keep their declared
+common-reference contract.
+
+To record a reference, run the extension's actual check on authorized **native**
+hardware after its pinned setup and backend check succeed. Supply the bundled
+input as `MYCE_CHECK_INPUT`, a new recording path as `MYCE_CHECK_OUTPUT`, and the
+same `MYCE_DEVICE`/resource selector and cached Python used for jobs. Run at least
+three repetitions. Retain each actual output, software/backend versions,
+architecture, precision, exit codes and measured spread in a bundled measurement
+file. Copy an actual recorded output into the corresponding platform reference;
+do not compute the reference from known answers or copy another backend's output.
+Keep existing references intact. Review the measurements and freeze the scripts,
+reference and description under a new extension version **before** installing
+and qualifying it. Recording is an explicit author operation; qualification
+never records or updates its own reference. No wider allowance is implied.
+
 For each handled work type, Mycelium runs check with `MYCE_CHECK_WORK`,
 `MYCE_CHECK_INPUT` (the bundled input) and `MYCE_CHECK_OUTPUT` (a fresh output
 path). Check must replay that input on the assigned resource and write **actual
@@ -180,9 +222,13 @@ the actual API and runner using deliberately fake extension fixtures.
 
 ## Starter extensions
 
-- `extensions/pytorch-script`: PyTorch 2.8.0, extension v0.2.1, CUDA/XPU/MPS, unmodified programs
+- `extensions/pytorch-script`: PyTorch 2.9.1+cu130 on Linux CUDA (arm64/amd64), 2.8.0 on MPS/XPU,
+  extension v0.2.2, CUDA/XPU/MPS, unmodified programs
   choosing `torch.device(os.environ['MYCE_DEVICE'])`. Includes a small native
-  MPS pointwise float32 reference and repeated measurements. This qualifies
+  MPS reference retained unchanged and a separately recorded GB10 CUDA
+  pointwise float32 reference, each with zero measured spread. Setup requires a
+  real assigned-backend kernel launch. XPU stays unqualified until an author
+  supplies its matching native reference. This qualifies
   that sample only, not every PyTorch model or script.
 - `extensions/llama-cpp`: pinned llama.cpp build with Metal/CUDA/SYCL, or an
   explicit Vulkan build. Build tools and accelerator toolchains must be available.
