@@ -646,8 +646,11 @@ func TestMemoryCeilingPageNormalization(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantMemory := (limits[0] + page - 1) / page * page
-				wantSwap := (limits[1] + page - 1) / page * page
+				wantMemory := max(page, limits[0]/page*page)
+				wantSwap := int64(0)
+				if limits[1] > 0 {
+					wantSwap = max(page, limits[1]/page*page)
+				}
 				if a.bytes != wantMemory {
 					t.Fatalf("diagnostic bytes = %d, want %d", a.bytes, wantMemory)
 				}
@@ -671,8 +674,8 @@ func TestMemoryCeilingPageNormalization(t *testing.T) {
 		}
 	}
 }
-func TestMemoryCeilingPageNormalizationOverflow(t *testing.T) {
-	for _, limits := range [][2]int64{{math.MaxInt64, 0}, {4096, math.MaxInt64}, {-1, 0}, {4096, -1}} {
+func TestMemoryCeilingPageNormalizationInvalid(t *testing.T) {
+	for _, limits := range [][2]int64{{-1, 0}, {4096, -1}} {
 		c := fakeCeilings(t)
 		c.pageSize = 4096
 		if a, err := c.create("attempt-overflow", limits[0], limits[1]); err == nil || a != nil {
@@ -681,5 +684,104 @@ func TestMemoryCeilingPageNormalizationOverflow(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(c.root, "attempt-overflow")); !os.IsNotExist(err) {
 			t.Fatal("invalid limits created cgroup", err)
 		}
+	}
+}
+
+func TestMemoryCeilingPageNormalizationMaxInt(t *testing.T) {
+	for _, page := range []int64{4096, 65536} {
+		got, err := pageAlignedMemory(math.MaxInt64, int(page))
+		if err != nil || got != math.MaxInt64/page*page {
+			t.Fatalf("max limit = %d, %v", got, err)
+		}
+	}
+}
+
+// Exercise real queue admission across sibling cards, then independent kernel readback.
+func TestMemoryCeilingAggregateBudget(t *testing.T) {
+	for _, page := range []int64{4096, 65536} {
+		t.Run(fmt.Sprint(page), func(t *testing.T) {
+			q, _ := fixture(t)
+			a, b := machine("card0", "fake"), machine("card1", "fake")
+			for _, m := range []*Machine{&a, &b} {
+				m.HostID = "shared"
+				m.HostMemoryMeasured = true
+				m.HostAvailableMemoryGB = 1
+				m.HostMemoryBudgetGB = 1
+				check(t, q, *m, nil)
+			}
+			var total int64
+			for i, m := range []Machine{a, b} {
+				s := spec("experiment")
+				s.Needs.HostMemoryGB = []float64{0.3, 0.7}[i]
+				s.AllowedMachines = []string{m.ID}
+				submit(t, q, s)
+				j := check(t, q, m, nil).Job
+				if j == nil {
+					t.Fatal("budget-fitting job refused")
+				}
+				w := Worker{Machine: m}
+				bytes, err := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c := fakeCeilings(t)
+				c.pageSize = int(page)
+				c.fs = pagedMemoryFS{pageSize: page}
+				attempt, err := c.create("attempt", bytes, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				total += attempt.bytes
+			}
+			if total > 1<<30 {
+				t.Fatalf("enforced %d > budget %d", total, 1<<30)
+			}
+		})
+	}
+}
+
+func TestMemoryCeilingTinyRequestReservation(t *testing.T) {
+	for _, page := range []int64{4096, 65536} {
+		t.Run(fmt.Sprint(page), func(t *testing.T) {
+			q, _ := fixture(t)
+			a, b := machine("card0", "fake"), machine("card1", "fake")
+			for _, m := range []*Machine{&a, &b} {
+				m.HostID = "shared"
+				m.HostMemoryMeasured = true
+				m.HostAvailableMemoryGB = 1
+				m.HostMemoryBudgetGB = 1
+				check(t, q, *m, nil)
+			}
+			s := spec("experiment")
+			s.Needs.HostMemoryGB = 1 - float64(page/2)/(1<<30)
+			s.AllowedMachines = []string{a.ID}
+			submit(t, q, s)
+			if check(t, q, a, nil).Job == nil {
+				t.Fatal("initial job refused")
+			}
+			s.Needs.HostMemoryGB = 1.0 / (1 << 30)
+			s.AllowedMachines = []string{b.ID}
+			submit(t, q, s)
+			if check(t, q, b, nil).Job != nil {
+				t.Fatal("sub-page request overcommitted near-full budget")
+			}
+			charge := hostNeed(&b, s.Needs.MemoryGB, s.Needs.HostMemoryGB)
+			if charge*(1<<30) < float64(page) {
+				t.Fatal("reservation smaller than one page")
+			}
+			w := Worker{HostStateDir: t.TempDir(), Machine: b}
+			w.Machine.HostMemoryBudgetGB = float64(page/2) / (1 << 30)
+			if err := w.checkHostMemoryBudget(s.Needs.MemoryGB, s.Needs.HostMemoryGB); !errors.Is(err, errWorkerMemory) {
+				t.Fatal("worker accepted budget below minimum reservation", err)
+			}
+			w.Machine.HostMemoryBudgetGB = charge
+			if err := w.checkHostMemoryBudget(s.Needs.MemoryGB, s.Needs.HostMemoryGB); err != nil {
+				t.Fatal("worker rejected minimum reservation", err)
+			}
+			b.FreeHostMemoryGB = charge
+			if !hostFits(&b, s.Needs.MemoryGB, s.Needs.HostMemoryGB) {
+				t.Fatal("minimum reservation does not fit")
+			}
+		})
 	}
 }
