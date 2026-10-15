@@ -1,5 +1,5 @@
 name: pytorch-script
-version: '0.2.2'
+version: '0.2.3'
 purpose: Run an unchanged device-agnostic PyTorch program using MYCE_DEVICE.
 platforms: [cuda, xpu, metal]
 program_types: [pytorch-script]
