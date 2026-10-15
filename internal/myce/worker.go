@@ -26,6 +26,7 @@ type Worker struct {
 	Benchmark             func(context.Context, BenchmarkConfig, *CapabilityProfile) error
 	DailyUse              bool
 	Laptop                bool
+	Desktop               bool
 	OwnerSignals          OwnerSignalSource
 	availability          *availabilityMonitor
 	FileCacheRoot         string
@@ -764,7 +765,7 @@ func (w Worker) Run(stop context.Context) error {
 	availabilityCtx, availabilityCancel := context.WithCancel(context.Background())
 	availabilityDone := make(chan struct{})
 	availabilityWake := make(chan struct{}, 1)
-	w.availability = newAvailabilityMonitor(w.Clock, w.DailyUse, w.Laptop)
+	w.availability = newAvailabilityMonitor(w.Clock, w.DailyUse, w.Laptop, w.Desktop)
 	if w.OwnerSignals == nil {
 		w.OwnerSignals = LocalOwnerSignals
 	}
@@ -779,7 +780,7 @@ func (w Worker) Run(stop context.Context) error {
 	// Benchmark before any model load or admission, and never over a recovered job.
 	// Fake inventory keeps dev/tests light; measured fake runners are tested separately.
 	if w.Benchmark != nil && w.Machine.GPU != "fake" && s.state.Job == nil {
-		if err = w.Benchmark(stop, BenchmarkConfig{Clock: w.Clock, Machine: w.Machine, StateDir: s.dir, HostStateDir: w.HostStateDir, ExtensionRoot: w.ExtensionRoot, Client: w.Client, DailyUse: w.DailyUse, Laptop: w.Laptop, OwnerSignals: w.OwnerSignals}, w.Machine.CapabilityProfile); err != nil {
+		if err = w.Benchmark(stop, BenchmarkConfig{Clock: w.Clock, Machine: w.Machine, StateDir: s.dir, HostStateDir: w.HostStateDir, ExtensionRoot: w.ExtensionRoot, Client: w.Client, DailyUse: w.DailyUse, Laptop: w.Laptop, Desktop: w.Desktop, OwnerSignals: w.OwnerSignals}, w.Machine.CapabilityProfile); err != nil {
 			return err
 		}
 	} else if err = saveWorkerJSON(s.dir, "capability-profile.json", w.Machine.CapabilityProfile); err != nil {

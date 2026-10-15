@@ -13,7 +13,7 @@ import (
 )
 
 func TestWSLHostBridgeEndToEnd(t *testing.T) {
-	signals := hostbridge.Signals{IdleKnown: true, IdleSeconds: 400, Power: "ac", Heat: "nominal"}
+	signals := hostbridge.Signals{IdleKnown: true, IdleSeconds: 400, Power: "ac", Heat: "unknown", GPUHeat: "nominal", HeatCoverage: "gpu-only"}
 	c := hostbridge.Config{Address: "127.0.0.1:47353", Key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
 	handler, err := hostbridge.Handler(c, func(context.Context) hostbridge.Signals { return signals })
 	if err != nil {
@@ -37,27 +37,24 @@ func TestWSLHostBridgeEndToEnd(t *testing.T) {
 	p.glob = func(string) ([]string, error) { t.Fatal("WSL queried guest power/heat"); return nil, nil }
 	p.host = configuredHostOwnerSignals
 	clock := &dockerTestClock{now: time.Unix(1000, 0)}
-	policy := availabilityPolicy{clock: clock, daily: true}
 	for _, tc := range []struct {
 		name      string
 		change    func()
 		available bool
 		reason    string
 	}{
-		{"idle known safe", func() {}, true, ""},
+		{"undeclared GPU-only", func() {}, false, "host CPU thermal coverage unavailable"},
+		{"desktop GPU-only", func() {}, true, "CPU thermal coverage waived for desktop"},
 		{"owner returns", func() { signals.IdleSeconds = 0 }, false, "waiting for 5 idle minutes"},
-		{"session coverage lost", func() { signals.IdleSeconds = 0; signals.IdleKnown = false }, false, "owner activity unavailable"},
-		{"battery", func() {
-			signals.IdleKnown = true
-			signals.IdleSeconds = 400
-			signals.Laptop = true
-			signals.Power = "battery"
-		}, false, "on battery"},
-		{"missing physical heat", func() { signals.Power = "ac"; signals.Heat = "unknown" }, false, "heat sensing unavailable"},
-		{"GPU-only coverage", func() { signals.SetGPUHeat("nominal") }, false, "host CPU thermal coverage unavailable"},
-		{"unsafe physical heat", func() { signals.Heat = "serious" }, false, "cooling down"},
+		{"session coverage lost", func() { signals.IdleKnown = false }, false, "owner activity unavailable"},
+		{"battery", func() { signals.Laptop = true; signals.Power = "battery" }, false, "on battery"},
+		{"detected laptop", func() { signals.Laptop = true }, false, "host CPU thermal coverage unavailable"},
+		{"unknown GPU heat", func() { signals.SetGPUHeat("unknown") }, false, "heat sensing unavailable"},
+		{"unsafe GPU heat", func() { signals.SetGPUHeat("serious") }, false, "cooling down"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			signals = hostbridge.Signals{IdleKnown: true, IdleSeconds: 400, Power: "ac", Heat: "unknown", GPUHeat: "nominal", HeatCoverage: "gpu-only"}
+			policy := availabilityPolicy{clock: clock, daily: true, desktop: tc.name != "undeclared GPU-only"}
 			tc.change()
 			s := p.detect(context.Background())
 			a := policy.evaluate(s)
@@ -66,6 +63,7 @@ func TestWSLHostBridgeEndToEnd(t *testing.T) {
 			}
 		})
 	}
+	policy := availabilityPolicy{clock: clock, daily: true, desktop: true}
 	// Credential revocation or a stopped host must never fall back to guest data.
 	if err = os.Remove(path); err != nil {
 		t.Fatal(err)

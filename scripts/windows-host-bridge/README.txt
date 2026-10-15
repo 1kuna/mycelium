@@ -22,8 +22,19 @@ For an authorized remote operator signed in as the same desktop user:
 This launches Setup.ps1 in the existing interactive session with limited
 rights, without a password. The one-shot task is deleted after completion.
 A small aggregate receipt remains beside these files for verification.
-A timed-out running task is retained for inspection, never blindly stopped.
+After a launcher timeout, setup still deletes its task when it exits.
 
 Downloads files are intentionally kept for reinstall/uninstall. Uninstall
 removes the installed directory, credential, startup entry and listener.
 It preserves unknown files or a modified startup entry with an error.
+
+WSL desktop join (use your private invitation file):
+  ./myce join --daily-use --desktop --max-jobs 1 --joining-file '<private invitation path>'
+Only an explicitly declared, externally powered desktop without a detected battery
+may waive CPU thermal coverage. Measured GPU heat must still be nominal.
+Without --desktop CPU coverage is required. --desktop and --laptop conflict.
+
+Remote setup uses the exact one-shot task MyceliumHostBridge-Setup, with
+InteractiveToken and limited rights. Setup deletes its task on success or failure,
+including after a launcher timeout. A retry refuses an active/queued task and
+removes only an inactive leftover with that exact name.

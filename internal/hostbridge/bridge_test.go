@@ -261,6 +261,8 @@ func TestRejectMalformedSignedResponses(t *testing.T) {
 	c := Config{Address: "127.0.0.1:47353", Key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
 	key, _ := c.validate()
 	for _, body := range []string{
+		`{"idle_known":true,"idle_seconds":400,"power":"ac","heat":"unknown","gpu_heat":"nominal","heat_coverage":"gpu-only"}`,
+		`{"idle_known":true,"idle_seconds":400,"laptop":null,"power":"ac","heat":"unknown","gpu_heat":"nominal","heat_coverage":"gpu-only"}`,
 		`{"idle_seconds":-1,"power":"ac","heat":"nominal"}`,
 		`{"power":"desktop","heat":"nominal"}`,
 		`{"power":"ac","heat":"cool"}`,

@@ -50,6 +50,7 @@ type availabilityPolicy struct {
 	clock      Clock
 	daily      bool
 	laptop     bool
+	desktop    bool
 	last       time.Time
 	awakeSince time.Time
 	hot        bool
@@ -75,9 +76,9 @@ func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
 	p.last = now
 	wait := func(reason string) Availability { a.Available = false; a.Reason = reason; return a }
 	heatReason := ""
-	// --laptop and detected battery hardware remain sticky vetoes. With no
-	// laptop indication, known external power permits the desktop CPU waiver.
-	desktopWaiver := !p.laptop && (s.Power == "ac" || s.Power == "desktop") && s.HeatCoverage == "gpu-only"
+	// Only an explicit desktop declaration permits the CPU waiver.
+	// --laptop and detected battery hardware remain sticky vetoes.
+	desktopWaiver := p.desktop && !p.laptop && (s.Power == "ac" || s.Power == "desktop") && s.HeatCoverage == "gpu-only"
 	heat := s.Heat
 	if desktopWaiver {
 		heat = s.GPUHeat
@@ -147,8 +148,8 @@ type availabilityMonitor struct {
 	cancel  context.CancelFunc
 }
 
-func newAvailabilityMonitor(clock Clock, daily, laptop bool) *availabilityMonitor {
-	m := &availabilityMonitor{policy: availabilityPolicy{clock: clock, daily: daily, laptop: laptop}}
+func newAvailabilityMonitor(clock Clock, daily, laptop, desktop bool) *availabilityMonitor {
+	m := &availabilityMonitor{policy: availabilityPolicy{clock: clock, daily: daily, laptop: laptop, desktop: desktop}}
 	m.work, m.cancel = context.WithCancel(context.Background())
 	m.current = m.policy.evaluate(OwnerSignals{Power: "unknown", Heat: "unknown"})
 	if !m.current.Available {

@@ -1,6 +1,7 @@
 param(
     [ValidateSet('Install','Uninstall')][string]$Action = 'Install',
-    [string]$Receipt
+    [string]$Receipt,
+    [ValidateSet('MyceliumHostBridge-Setup')][string]$TaskName
 )
 $ErrorActionPreference = 'Stop'
 $code = 1
@@ -23,10 +24,18 @@ try {
 } catch {
     Write-Error $_ -ErrorAction Continue
 } finally {
-    if ($Receipt) {
-        # Aggregate evidence only; never copy config/key into a receipt.
-        @{ exit_code=$code; session_id=$session; elevated=$elevated; action=$Action } |
-            ConvertTo-Json -Compress | Set-Content -LiteralPath $Receipt -Encoding UTF8
+    try {
+        if ($Receipt) {
+            # Aggregate evidence only; never copy config/key into a receipt.
+            @{ exit_code=$code; session_id=$session; elevated=$elevated; action=$Action } |
+                ConvertTo-Json -Compress | Set-Content -LiteralPath $Receipt -Encoding UTF8
+        }
+    } finally {
+        if ($TaskName) {
+            $service = New-Object -ComObject 'Schedule.Service'
+            $service.Connect()
+            $service.GetFolder('\').DeleteTask($TaskName, 0)
+        }
     }
 }
 exit $code
