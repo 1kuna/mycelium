@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -259,4 +260,39 @@ func TestWorkerCommandStartFailure(t *testing.T) {
 	if !strings.Contains(job(t, q, j.ID).Reason, "no such file") {
 		t.Fatal("start failure was not explained")
 	}
+}
+
+// workerWithPreparedCheckpoint synchronizes real filesystem setup for tests of
+// process behavior. A single start may legitimately defer preparation after its
+// 25 ms I/O budget; Worker.Run retries it, but these tests call start directly.
+// Force that path, then consume the completed operation on the caller's start.
+// Scheduling and production I/O budgets remain unchanged.
+func workerWithPreparedCheckpoint(t *testing.T, w Worker, store *workerStore, payload Job) Worker {
+	t.Helper()
+	if !needsCheckpoint(&payload) {
+		return w
+	}
+	release := make(chan struct{})
+	w.checkpointPrepare = func(value Job) (string, error) {
+		<-release
+		return prepareCheckpoint(value)
+	}
+	process, err := w.start(store, payload)
+	close(release)
+	if process != nil || !errors.Is(err, errWorkerCheckpoint) || !store.checkpointUnavailable {
+		t.Fatalf("blocked preparation must defer startup: process=%v err=%v unavailable=%v", process, err, store.checkpointUnavailable)
+	}
+	pending := store.nasPrepare.pending
+	if pending == nil {
+		t.Fatal("timed-out preparation lost its pending filesystem operation")
+	}
+	select {
+	case <-pending.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("released checkpoint preparation did not finish")
+	}
+	w.checkpointPrepare = func(Job) (string, error) {
+		return "", errors.New("completed checkpoint preparation was repeated")
+	}
+	return w
 }
