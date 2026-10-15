@@ -263,9 +263,9 @@ func TestRejectMalformedSignedResponses(t *testing.T) {
 	for _, body := range []string{
 		`{"idle_known":true,"idle_seconds":400,"power":"ac","heat":"unknown","gpu_heat":"nominal","heat_coverage":"gpu-only"}`,
 		`{"idle_known":true,"idle_seconds":400,"laptop":null,"power":"ac","heat":"unknown","gpu_heat":"nominal","heat_coverage":"gpu-only"}`,
-		`{"idle_seconds":-1,"power":"ac","heat":"nominal"}`,
-		`{"power":"desktop","heat":"nominal"}`,
-		`{"power":"ac","heat":"cool"}`,
+		`{"laptop":false,"idle_seconds":-1,"power":"ac","heat":"nominal"}`,
+		`{"laptop":false,"power":"desktop","heat":"nominal"}`,
+		`{"laptop":false,"power":"ac","heat":"cool"}`,
 		`{"power":"ac","heat":"nominal"} trailing`,
 		string(make([]byte, 4097)),
 	} {
