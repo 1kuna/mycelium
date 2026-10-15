@@ -53,15 +53,25 @@ func waitSubmit(t *testing.T, q *myce.Queue) *myce.Job {
 // A fake worker uses the real queue assignment/result protocol, without processes/GPU.
 func waitFinish(t *testing.T, q *myce.Queue, success bool) {
 	t.Helper()
-	reply, err := q.Checkin(myce.Checkin{Machine: myce.Machine{ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A bounded NAS probe may defer a check-in on a loaded laptop. Observe
+	// assignment before completing it, just as a real worker does. Keep the
+	// scheduling clock fixed while waiting for filesystem work to finish.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var reply myce.Reply
+	wait(t, ctx, func() bool {
+		var err error
+		reply, err = q.Checkin(myce.Checkin{Machine: myce.Machine{ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply.Job != nil
+	})
 	if reply.Job == nil {
 		t.Fatal("no assignment")
 	}
 	j := reply.Job
-	err = q.Complete(myce.Result{Machine: j.Machine, Session: j.Session, Execution: myce.Execution{ID: j.ID, Attempt: j.Attempt}, Success: success, Error: "bad\ncommand"})
+	err := q.Complete(myce.Result{Machine: j.Machine, Session: j.Session, Execution: myce.Execution{ID: j.ID, Attempt: j.Attempt}, Success: success, Error: "bad\ncommand"})
 	if err != nil {
 		t.Fatal(err)
 	}
