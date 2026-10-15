@@ -10,7 +10,7 @@ import (
 )
 
 func LocalOwnerSignals(ctx context.Context) OwnerSignals {
-	p := linuxOwnerProbe{read: os.ReadFile, glob: func(pattern string) ([]string, error) {
+	p := linuxOwnerProbe{host: configuredHostOwnerSignals, read: os.ReadFile, glob: func(pattern string) ([]string, error) {
 		if strings.HasPrefix(pattern, "/sys/class/power_supply/") {
 			if _, err := os.ReadDir("/sys/class/power_supply"); err != nil {
 				return nil, err

@@ -16,13 +16,21 @@ type linuxOwnerProbe struct {
 	glob      func(string) ([]string, error)
 	command   func(context.Context, string, ...string) ([]byte, error)
 	monotonic func() (float64, error)
+	host      OwnerSignalSource
 }
 
 func (p linuxOwnerProbe) detect(ctx context.Context) OwnerSignals {
 	s := OwnerSignals{Power: "unknown", Heat: "unknown"}
 	release, err := p.read("/proc/sys/kernel/osrelease")
-	if err != nil || strings.Contains(strings.ToLower(string(release)), "microsoft") {
-		// Guest signals cannot describe the Windows owner. See guide-polite-hyphae.
+	if err != nil {
+		return s
+	}
+	if strings.Contains(strings.ToLower(string(release)), "microsoft") {
+		// Only the explicitly configured authenticated host bridge may supply WSL
+		// readings. Never fall back to guest probes, including on bridge failure.
+		if p.host != nil {
+			return p.host(ctx)
+		}
 		return s
 	}
 	s.IdleSeconds, s.IdleKnown = p.idle(ctx)
