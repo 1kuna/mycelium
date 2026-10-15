@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -609,5 +611,75 @@ func TestRequireMemoryCeilingsStartupAndDeclarations(t *testing.T) {
 	w.memoryCeilings = &memoryCeilings{fs: deniedMemoryFS{}, root: c.root}
 	if err := w.requireMemoryCeilings(); !errors.Is(err, ErrMemoryCeilingsRequired) {
 		t.Fatal("unwritable ceiling accepted", err)
+	}
+}
+
+// Model Linux's page truncation independently of the requested limit.
+type pagedMemoryFS struct {
+	fakeMemoryFS
+	pageSize int64
+	mismatch string
+}
+
+func (f pagedMemoryFS) WriteFile(p string, b []byte) error {
+	name := filepath.Base(p)
+	if name == "memory.max" || name == "memory.swap.max" {
+		n, err := strconv.ParseInt(string(b), 10, 64)
+		if err != nil {
+			return err
+		}
+		b = []byte(strconv.FormatInt(n/f.pageSize*f.pageSize, 10))
+	}
+	if name == f.mismatch {
+		b = []byte("0")
+	}
+	return f.fakeMemoryFS.WriteFile(p, b)
+}
+func TestMemoryCeilingPageNormalization(t *testing.T) {
+	for _, page := range []int64{4096, 65536} {
+		for _, limits := range [][2]int64{{146028889, 1}, {403726926, 70001}, {1, 0}, {2 * page, page}} {
+			t.Run(fmt.Sprintf("%d/%d/%d", page, limits[0], limits[1]), func(t *testing.T) {
+				c := fakeCeilings(t)
+				c.pageSize = int(page)
+				c.fs = pagedMemoryFS{pageSize: page}
+				a, err := c.create("attempt-rounded", limits[0], limits[1])
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantMemory := (limits[0] + page - 1) / page * page
+				wantSwap := (limits[1] + page - 1) / page * page
+				if a.bytes != wantMemory {
+					t.Fatalf("diagnostic bytes = %d, want %d", a.bytes, wantMemory)
+				}
+				for name, want := range map[string]int64{"memory.max": wantMemory, "memory.swap.max": wantSwap, "memory.oom.group": 1} {
+					b, err := c.fs.ReadFile(filepath.Join(a.path, name))
+					if err != nil || string(b) != strconv.FormatInt(want, 10) {
+						t.Fatalf("%s = %s, %v; want %d", name, b, err, want)
+					}
+				}
+			})
+		}
+		for _, name := range []string{"memory.max", "memory.swap.max", "memory.oom.group"} {
+			t.Run(fmt.Sprintf("%d/mismatch/%s", page, name), func(t *testing.T) {
+				c := fakeCeilings(t)
+				c.pageSize = int(page)
+				c.fs = pagedMemoryFS{pageSize: page, mismatch: name}
+				if a, err := c.create("attempt-mismatch", page+1, page+1); err == nil || a != nil || !strings.Contains(err.Error(), "write did not take effect") {
+					t.Fatalf("mismatch accepted: %v %v", a, err)
+				}
+			})
+		}
+	}
+}
+func TestMemoryCeilingPageNormalizationOverflow(t *testing.T) {
+	for _, limits := range [][2]int64{{math.MaxInt64, 0}, {4096, math.MaxInt64}, {-1, 0}, {4096, -1}} {
+		c := fakeCeilings(t)
+		c.pageSize = 4096
+		if a, err := c.create("attempt-overflow", limits[0], limits[1]); err == nil || a != nil {
+			t.Fatalf("invalid limits accepted: %v %v", a, err)
+		}
+		if _, err := os.Stat(filepath.Join(c.root, "attempt-overflow")); !os.IsNotExist(err) {
+			t.Fatal("invalid limits created cgroup", err)
+		}
 	}
 }
