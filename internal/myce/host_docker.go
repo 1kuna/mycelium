@@ -59,6 +59,7 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 	}
 	endpoints := []string{endpoint}
 	attempts := map[string]*dockerAttempt{}
+	orphanNote := ""
 	var env []string
 	for _, v := range os.Environ() {
 		k, _, _ := strings.Cut(v, "=")
@@ -176,6 +177,7 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 				key := endpoint + "\x00" + n.Labels["myce.attempt"]
 				d := attempts[key]
 				if d == nil {
+					orphanNote = "; " + dockerOrphanEvidenceNote
 					d = &dockerAttempt{binary: binary, env: env, ctx: ctx, clock: h.Clock, timeout: 2 * time.Second, state: dockerExecution{Identity: n.Labels["myce.attempt"], Endpoint: endpoint, Network: n.Name}}
 					d.stop(h.Clock.Now(), max(0, stopAt.Sub(h.Clock.Now())), !h.Clock.Now().Before(stopAt))
 					attempts[key] = d
@@ -198,6 +200,7 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 				key := endpoint + "\x00" + id
 				d := attempts[key]
 				if d == nil {
+					orphanNote = "; " + dockerOrphanEvidenceNote
 					d = &dockerAttempt{binary: binary, env: env, ctx: ctx, clock: h.Clock, timeout: 2 * time.Second, state: dockerExecution{Identity: id, Endpoint: endpoint, Container: c.ID}}
 					d.stop(h.Clock.Now(), max(0, stopAt.Sub(h.Clock.Now())), !h.Clock.Now().Before(stopAt))
 					attempts[key] = d
@@ -212,7 +215,7 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 		for _, c := range liveContainers {
 			known = append(known, c)
 		}
-		h.dockerProgress.set("unconfirmed", append(known, failures...))
+		h.dockerProgress.set("unconfirmed"+orphanNote, append(known, failures...))
 		for _, d := range attempts {
 			if d.state.Released {
 				continue
@@ -226,12 +229,12 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 			left = append(left, c)
 		}
 		slices.Sort(left)
-		h.dockerProgress.set("unconfirmed", left)
+		h.dockerProgress.set("unconfirmed"+orphanNote, left)
 		if ctx.Err() != nil {
 			return fmt.Errorf("Docker cleanup unconfirmed: %s: %w", strings.Join(left, "; "), ctx.Err())
 		}
 		if len(left) == 0 {
-			h.dockerProgress.set("confirmed (no labeled execution; pending operations settled)", nil)
+			h.dockerProgress.set("confirmed (no labeled execution; pending operations settled)"+orphanNote, nil)
 			return nil
 		}
 		select {
