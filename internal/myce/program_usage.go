@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"syscall"
 )
@@ -11,7 +12,7 @@ import (
 // The optional extension observation belongs to this execution, outside its
 // input/output directory. No unsupported accelerator counter is invented.
 func programUsageFile(spool, identity string) string {
-	return spool + string(os.PathSeparator) + identity + ".usage.json"
+	return filepath.Join(spool, identity+".usage.json")
 }
 
 func collectProgramUsage(result *Result, process *os.ProcessState, path string) {

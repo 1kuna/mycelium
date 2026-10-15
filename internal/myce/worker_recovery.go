@@ -81,6 +81,13 @@ func (w Worker) openStore() (*workerStore, error) {
 		sum := sha256.Sum256([]byte(w.Client.URL + "\x00" + w.Machine.ID))
 		dir = filepath.Join(cache, "mycelium", "workers", hex.EncodeToString(sum[:16]))
 	}
+	// Jobs change cwd to their private input folder. All paths derived from the
+	// worker-owned spool (usage reports, checkpoints and staging) must retain
+	// their meaning there, including when --state-dir is relative.
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
