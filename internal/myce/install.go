@@ -177,6 +177,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
+	OnboardingBenchmark   bool           `json:"onboarding_benchmark,omitempty"`
 	JoiningFile           string         `json:"joining_file,omitempty"`
 	EnvironmentFile       string         `json:"environment_file,omitempty"`
 	HostID                string         `json:"host_id,omitempty"`
@@ -746,6 +747,9 @@ func (c ServiceConfig) Args() []string {
 	}
 	if c.Role == "worker" {
 		args = append(args, "--service-config", c.Config)
+		if c.OnboardingBenchmark {
+			args = append(args, "--onboarding-benchmark")
+		}
 		if c.ContainerRetention != nil {
 			args = append(args, "--container-retention", c.ContainerRetention.String())
 		}

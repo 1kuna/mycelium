@@ -128,8 +128,9 @@ revocation remain work for #32.
 
 ## Capability profile v0
 
-Each hypha records hardware facts at startup, sends them on check-in, and saves
-`capability-profile.json` in its private worker spool. `myce status` shows:
+Each hypha records hardware facts at startup and sends them on check-in.
+Opted-in benchmarks save `capability-profile.json` in the private worker spool;
+default joins leave that cache untouched. `myce status` shows:
 
 - OS, architecture and logical CPU count;
 - accelerator type/name and reachable memory size;
@@ -143,9 +144,18 @@ one-card-per-worker contract. Fake resources remain explicitly fake. The queue
 stores the profile with the normal SQLite machine state. These facts are distinct
 from the live free-memory admission readings and operator caps.
 
-The onboarding benchmark is explicitly `hardware-facts-only; throughput pending`.
-Facts refresh when the hypha starts again. No speed, similarity, placement change
-or extension qualification is implied; throughput measurement remains #33.
+Without a benchmark, the profile reports `hardware-facts-only; throughput pending`.
+Facts refresh when the hypha starts again. Joining does not run or wait for
+throughput measurement by default; placement still uses declared resources and
+hardware profiles with the existing fallback rules.
+
+For throughput measurement before admission, pass `myce join --onboarding-benchmark`
+(or add it to the join argv after `service ... --`). Installed worker configs can
+set `"onboarding_benchmark": true`. For personal or polite hyphae, also pass
+`--daily-use` and the appropriate `--laptop` or `--desktop` declaration. Operators
+following an invitation can instead run `myce benchmark` explicitly with their
+private queue credentials and prepared extensions. See the
+[benchmark guide](guide-benchmark-v3.md) for its bounds and cache behavior.
 
 ## Verification
 
