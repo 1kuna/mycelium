@@ -90,10 +90,14 @@ func (s Spec) validateDockerGroup() error {
 }
 
 type dockerMember struct {
-	Name    string `json:"name"`
-	Memory  int64  `json:"memory"`
-	Swap    int64  `json:"swap"`
-	Started bool   `json:"started"`
+	Name           string `json:"name"`
+	Memory         int64  `json:"memory"`
+	Swap           int64  `json:"swap"`
+	Started        bool   `json:"started"`
+	TermDispatched bool   `json:"term_dispatched,omitempty"`
+	KillDispatched bool   `json:"kill_dispatched,omitempty"`
+	ExitCode       *int   `json:"exit_code,omitempty"`
+	StderrTail     string `json:"stderr_tail,omitempty"`
 }
 
 type dockerNetworkInspection struct {
