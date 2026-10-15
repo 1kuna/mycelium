@@ -18,11 +18,13 @@ const coolingWait = time.Minute
 // Power is desktop (no battery), ac, battery, or unknown. Heat is nominal, fair,
 // serious, critical, or unknown. Laptop stays true even if its power read fails.
 type OwnerSignals struct {
-	IdleSeconds float64 `json:"idle_seconds"`
-	IdleKnown   bool    `json:"idle_known"`
-	Laptop      bool    `json:"laptop"`
-	Power       string  `json:"power"`
-	Heat        string  `json:"heat"`
+	GPUHeat      string  `json:"gpu_heat,omitempty"`
+	HeatCoverage string  `json:"heat_coverage,omitempty"`
+	IdleSeconds  float64 `json:"idle_seconds"`
+	IdleKnown    bool    `json:"idle_known"`
+	Laptop       bool    `json:"laptop"`
+	Power        string  `json:"power"`
+	Heat         string  `json:"heat"`
 }
 type OwnerSignalSource func(context.Context) OwnerSignals
 
@@ -93,6 +95,9 @@ func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
 		default:
 			p.coolSince = time.Time{}
 			heatReason = "heat sensing unavailable"
+			if s.HeatCoverage == "gpu-only" {
+				heatReason = "host CPU thermal coverage unavailable"
+			}
 		}
 	}
 	// Dedicated servers ignore presence and heat. Known battery-equipped machines

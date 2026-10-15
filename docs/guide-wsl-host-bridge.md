@@ -8,14 +8,25 @@ IDs and connection states are checked locally and are never sent to WSL or the
 hub. There is no service, driver, administrator requirement, or firewall change.
 Elevated invocation is refused.
 
-**Thermal coverage is currently unknown on Windows.** There is no uniform
-nonprivileged Windows API that establishes live CPU and GPU thermal coverage.
-The helper reports `heat=unknown`; it does not use the unpopulated WMI
-`Win32_TemperatureProbe.CurrentReading`, invent a nominal reading, or substitute
-WSL guest sensors. Consequently daily-use work **continues to withhold**, even
-when idle and power are known. A separately qualified Windows thermal source is
-still needed before enabling daily work. This implements the host bridge, not
-complete Windows daily-use thermal qualification.
+**Thermal coverage remains conservative.** The helper queries the driver-installed
+Windows system-directory `nvidia-smi.exe` (never PATH/current-directory lookup):
+`--query-gpu=temperature.gpu,temperature.gpu.tlimit --format=csv,noheader`.
+All GPU rows must parse; missing/unsupported values remain unknown. NVIDIA
+T.Limit is signed **remaining headroom**, not an absolute ceiling: at/below zero
+means serious, below five degrees means fair, otherwise nominal. This follows
+the Linux probe's five-degree recovery margin; the existing 60-second cooling
+dwell still applies. See [NVIDIA temperature semantics](https://docs.nvidia.com/deploy/nvidia-smi/index.html#temperature).
+The query is hidden, bounded by a 750 ms deadline and invoked only when sampled.
+
+GPU heat appears in `gpu_heat`, with `heat_coverage=gpu-only`. It cannot certify
+CPU/host thermal coverage. Consequently safe GPU readings leave host
+`heat=unknown`, with status reason **host CPU thermal coverage unavailable**.
+A known hot GPU can still veto work. Generic ACPI thermal zones do not establish
+CPU coverage; no nominal CPU reading is inferred from an unidentified zone.
+No uniform nonprivileged CPU sensor was qualified on the acceptance PC.
+Daily idle admission and daily CUDA execution therefore remain blocked there.
+No driver, service, third-party sensor install, guest fallback, or policy bypass
+is supplied to hide this limitation.
 
 ## Build on a Mac or Linux laptop
 
@@ -33,24 +44,36 @@ window, UI, input hooks, or access log. Use `Start-Process -Wait -PassThru` to
 check install/uninstall exit codes with a GUI binary; errors do not have a
 console. A console build without `-ldflags` is useful for troubleshooting.
 
-## Install and start (regular interactive Windows PowerShell)
+## One-step install and uninstall
 
-These are instructions for a separately authorized native task. Do not launch
-`serve` from WSL interop, SSH/session 0, a service, or an elevated terminal. Those
-contexts cannot establish the intended console-session coverage. Install may be
-prepared via regular-user SSH, but **start must be in the desktop session** (or
-at the next natural user logon). Do not log the user off to test it.
+Stage `scripts/windows-host-bridge/*` and the Windows executable together in
+`%USERPROFILE%\Downloads\MyceliumHostBridge-Setup`. From the regular Windows
+desktop double-click **Install.cmd**; double-click **Uninstall.cmd** to remove
+the installed helper. Setup checks each binary exit code, starts the installed
+helper immediately, and leaves a failed window open. Do not run as administrator.
+The original downloaded executable must remain outside the installed directory.
 
-Keep the original downloaded executable outside the installation directory:
+PowerShell one-line alternative:
 
 ```powershell
-$download = (Resolve-Path '.\myce-host-bridge.exe').Path
-$p = Start-Process -FilePath $download -ArgumentList 'install' -Wait -PassThru
-if ($p.ExitCode -ne 0) { throw 'Helper install failed; inspect with a console build' }
-$root = Join-Path $env:LOCALAPPDATA 'MyceliumHostBridge'
-$helper = Join-Path $root 'myce-host-bridge.exe'
-$helperProcess = Start-Process -FilePath $helper -ArgumentList 'serve' -PassThru
+& "$env:USERPROFILE\Downloads\MyceliumHostBridge-Setup\Setup.ps1" -Action Install
 ```
+
+For an authorized remote operator using the same account as the logged-on owner:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\MyceliumHostBridge-Setup\Remote-Setup.ps1" -Action Install
+```
+
+This uses the standard Windows Task Scheduler COM API: InteractiveToken (no
+password) and LUA/limited run level. The one-shot task runs the **same Setup.ps1**
+in the existing desktop session and is deleted after completion. Aggregate
+receipt fields verify exit code, session and elevation; no credential is logged.
+A timeout retains an active task for inspection rather than killing setup or
+blindly retrying. Replace Install with Uninstall for either command. Downloads
+files and aggregate receipts are intentionally retained after uninstall.
+No logoff, service, persistent task, administrator install or settings change
+is required. The helper also refuses installation outside the covered console.
 
 Installation creates only that previously absent directory with the executable
 and `bridge.json`, plus the single `MyceliumHostBridge` value in
@@ -120,12 +143,8 @@ its existing policy; use `--daily-use` for a personal machine.
 
 ## Uninstall and undo
 
-Run the **original downloaded executable**, from outside the installed folder:
-
-```powershell
-$p = Start-Process -FilePath $download -ArgumentList 'uninstall' -Wait -PassThru
-if ($p.ExitCode -ne 0) { throw 'Helper uninstall incomplete; inspect and retry' }
-```
+Double-click **Uninstall.cmd**, or use Setup.ps1/Remote-Setup.ps1 with
+`-Action Uninstall`. Both use the original downloaded executable.
 
 Uninstall checks ownership of the Run command, removes that one value, revokes
 `bridge.json`, waits up to five seconds for the executable to become removable,
@@ -137,68 +156,18 @@ a folder recursively. Reinstall creates a fresh key. Remove the WSL environment
 setting (`unset MYCE_HOST_BRIDGE_CONFIG`) and any explicit shell configuration
 you added. No system startup/service/driver setting needs undoing.
 
-## Exact native acceptance plan (separate authorization, at/after 08:50 EDT)
+## Native verification
 
-1. Verify the authorized branch commit and SHA-256 of both Mac-built executables
-   after copying to a new private test folder. No native compile/install of
-   dependencies, CUDA, GPU workload, sensor drivers, stress or game interruption.
-   Keep the #52 envelope: Linux nice 19, four-CPU affinity, `GOMAXPROCS=4`, memory
-   allowance at most the approximate 4 GiB aggregate, track owned PIDs and RSS.
-   Fail the task if limits or source custody cannot be established.
-2. Record the target distro's initial state and whether other distros/workloads
-   are active. Save **exact original bytes** and SHA-256 of `%USERPROFILE%\.wslconfig`
-   in approved private storage, recording whether it was absent. Preserve all
-   existing settings. Set only `networkingMode=mirrored` in its `[wsl2]` section
-   (create that section/file if absent; stop for duplicate/ambiguous entries).
-   Apply/restart only within the later task's explicit disruption authorization:
-   Windows can require `wsl --shutdown` for global config. If another active
-   distro would be affected, stop and report the gate; do not shut it down.
-   `wsl --terminate <test distro>` alone does not prove global config took effect.
-   Record the edited file hash too; undo must stop if the current file differs
-   from that owned edit, preserving concurrent changes. On restart require
-   `wslinfo --networking-mode` to report `mirrored`; do not infer
-   success from the file edit. No firewall change, host reboot or logoff.
-3. Install using the commands above as the regular user. Privately verify the
-   single Run value, protected DACL and inherited config permissions, new file
-   names/counts, and loopback-only listening socket; an existing install/port
-   collision stops the test. Start `serve` in the real interactive desktop
-   session using the commands above. If only SSH/session 0 is available, defer
-   the trustworthy idle test until natural logon/user desktop launch; never use
-   session-0 success as console coverage. Keep the exact helper PID.
-4. Set the WSL config path privately, join a throwaway pinned invitation to an
-   isolated local-test hub, and inspect `capability_profile.availability`.
-   Expect real `idle_known=true`, near-zero idle while the owner is active,
-   `power=ac` on this desktop if the API confirms it, `heat=unknown`, and
-   `available=false`. Check again after five observed minutes without asking
-   the user to stop gaming; if idle cannot occur naturally, mark that pending.
-   Heat unknown must still withhold. A harmless queued command must remain at
-   attempt 0/unassigned, then cancel only that test job. No CUDA test here.
-5. With an intentionally wrong **private copy** of the config key, expect
-   unknown host signals and no work; restore the original path without printing
-   either key. Stop only the owned helper PID (or revoke config via uninstall)
-   and verify WSL returns unknown/no guest fallback on the next sample. An
-   optional helper deliberately started from session-0 interop must yield
-   `idle_known=false`; avoid port collision, stop only that owned process, then
-   restart the interactive helper. Do not create/switch/disconnect user sessions
-   or unplug power for this background test. Those scenarios have fake tests;
-   native fast-user-switch, RDP, battery, sleep and thermal qualification remain
-   pending unless separately authorized.
-6. Stop the owned worker/hub cleanly; cancel test jobs. Uninstall using the
-   original executable, and verify Run value absent, helper exited, port closed,
-   owned config/executable absent. Undo the WSL setting by restoring the exact
-   backed-up `.wslconfig` bytes (or remove only the newly created file if it was
-   absent), verify its original hash, and apply using the same authorized
-   distro/global restart gate as above. Confirm the original networking mode
-   and distro states. If restoring an originally running distro is outside the
-   authorized scope, report it rather than launching unrelated work. Remove
-   credentials and owned temp files only after owned processes stop and useful
-   sanitized evidence is retained. Report actual exit codes, hashes/counts and
-   aggregate signals only; no user/machine names, paths, addresses or keys.
-
-The networking switch is independent of installing the helper; uninstall does
-not modify `.wslconfig`. If any native gate fails, stop, undo only owned changes,
-verify the prior state, and report the remaining hold. Never weaken the thermal
-or interactive-session rule to get an available result.
+Use an isolated Mac-hosted hub with saved-address joining and the real WSL
+worker. Discovery is a separate concern; do not change firewall/networking
+settings to test this helper. Verify artifact hashes before installation.
+Check limited interactive install, protected directory/config ACL, Run value,
+loopback listener, real authenticated signals, continuous five-minute idle
+sampling, fail-closed CPU coverage, easy uninstall residue checks and reinstall.
+Leave the helper installed when requested and stop the owned worker, hub,
+forwarding processes and test distro. Never synthesize owner input or treat a
+GPU-only nominal reading as host coverage. Native sleep, battery unplug, RDP,
+fast user switching and natural logon require separate checks.
 
 ## Laptop verification
 
