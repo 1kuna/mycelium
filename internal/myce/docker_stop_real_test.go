@@ -143,6 +143,9 @@ func validateRealStopEvidence(evidence map[string]dockerMember, signalPath strin
 			}
 		case "signal-test":
 			sidecarCount++
+			if !m.TermDispatched || m.TermOutcome != "sent" {
+				return fmt.Errorf("sidecar TERM outcome missing or not sent")
+			}
 			wantExit, wantKills, wantTail := 143, 0, "ready\nfirst TERM\n"
 			if ignore {
 				wantExit, wantKills, wantTail = 137, 1, "ignoring TERM\n"
@@ -170,7 +173,7 @@ func validateRealStopEvidence(evidence map[string]dockerMember, signalPath strin
 
 func TestDockerRealStopEvidenceRequired(t *testing.T) {
 	for _, ignore := range []bool{false, true} {
-		for _, fault := range []string{"none", "empty", "missing-sidecar", "missing-main", "duplicate-sidecar", "missing-exit", "wrong-exit", "missing-main-exit", "wrong-main-exit", "missing-stderr", "wrong-stderr", "oversized-stderr", "missing-ledger", "unreadable-ledger", "wrong-signals"} {
+		for _, fault := range []string{"none", "empty", "missing-sidecar", "missing-main", "duplicate-sidecar", "missing-exit", "wrong-exit", "missing-main-exit", "wrong-main-exit", "missing-stderr", "wrong-stderr", "oversized-stderr", "missing-ledger", "unreadable-ledger", "wrong-signals", "missing-term-outcome", "error-term-outcome"} {
 			t.Run(fmt.Sprintf("ignore=%v/%s", ignore, fault), func(t *testing.T) {
 				zero, code := 0, 143
 				tail, signals := "ready\nfirst TERM\n", "--signal=TERM sidecar-id\n"
@@ -179,8 +182,12 @@ func TestDockerRealStopEvidenceRequired(t *testing.T) {
 					signals += "--signal=KILL sidecar-id\n"
 				}
 				main := dockerMember{Name: "main", ExitCode: &zero}
-				sidecar := dockerMember{Name: "signal-test", ExitCode: &code, StderrTail: tail}
+				sidecar := dockerMember{Name: "signal-test", ExitCode: &code, StderrTail: tail, TermDispatched: true, TermOutcome: "sent"}
 				switch fault {
+				case "missing-term-outcome":
+					sidecar.TermOutcome = ""
+				case "error-term-outcome":
+					sidecar.TermOutcome = "error"
 				case "missing-exit":
 					sidecar.ExitCode = nil
 				case "wrong-exit":

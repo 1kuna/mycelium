@@ -205,6 +205,13 @@ func TestDockerCLIHelper(t *testing.T) {
 			_ = os.Rename(filepath.Join(root, "running-"+args[2]), filepath.Join(root, "stopped-"+args[2]))
 			os.Exit(0)
 		}
+		if string(mode) == "delivered-error" {
+			f, _ := os.OpenFile(filepath.Join(root, "delivered"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+			fmt.Fprintln(f, args[1], args[2])
+			f.Close()
+			fmt.Fprintln(os.Stderr, "Error response from daemon: runtime Kill RPC reply lost")
+			os.Exit(1)
+		}
 		if string(mode) == "unknown-kill" {
 			fmt.Fprintln(os.Stderr, "connection closed before reply")
 			os.Exit(1)
@@ -864,9 +871,12 @@ func TestDockerEveryLabeledContainerAndKillRefusalRetainsCustody(t *testing.T) {
 				t.Fatal("kill refusal released resources")
 			default:
 			}
-			// A definite refusal did not signal either container. Removing it must
-			// automatically reclaim both, without simulating an external exit.
+			// TERM is never retried, even after a daemon refusal. Deadline
+			// KILL must automatically reclaim both without external intervention.
 			_ = os.WriteFile(filepath.Join(root, "mode"), []byte("term"), 0600)
+			if !kill {
+				c.advance(StopGrace)
+			}
 			select {
 			case <-p.done:
 			case <-time.After(3 * time.Second):
@@ -878,63 +888,6 @@ func TestDockerEveryLabeledContainerAndKillRefusalRetainsCustody(t *testing.T) {
 			}
 
 		})
-	}
-}
-
-func TestDockerUncertainKillRetainsCustodyWithoutResend(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	j := dockerJob()
-	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
-	p, e := startDockerFixture(w, s, j)
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(p.docker.close)
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
-	_ = os.WriteFile(filepath.Join(root, "extra"), []byte("yes"), 0600)
-	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("unknown-kill"), 0600)
-	p.stop(c.Now(), 0, true)
-	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed") })
-	// Both owned containers must have reached the uncertain-call boundary;
-	// otherwise the second container's first KILL is not a resend.
-	await(t, func() bool {
-		calls, _ := os.ReadFile(filepath.Join(root, "calls"))
-		return strings.Count(string(calls), "kill --signal=KILL id1") == 1 && strings.Count(string(calls), "kill --signal=KILL id2") == 1
-	})
-	select {
-	case <-p.done:
-		t.Fatal("uncertain kill released resources")
-	default:
-	}
-	// An uncertain dispatch is never resent. Positive external exit
-	// evidence is still required before custody can be released.
-	_ = os.WriteFile(filepath.Join(root, "mode"), nil, 0600)
-	callsBefore, _ := os.ReadFile(filepath.Join(root, "calls"))
-	// Observe further reconciliations with the daemon healthy and containers
-	// still running before supplying any external exit proof.
-	await(t, func() bool {
-		calls, _ := os.ReadFile(filepath.Join(root, "calls"))
-		return strings.Count(string(calls), "inspect ") >= strings.Count(string(callsBefore), "inspect ")+3
-	})
-	callsRecovered, _ := os.ReadFile(filepath.Join(root, "calls"))
-	if strings.Count(string(callsRecovered), "kill ") != strings.Count(string(callsBefore), "kill ") {
-		t.Fatal("uncertain KILL was retried after daemon recovery")
-	}
-
-	_ = os.Rename(filepath.Join(root, "running"), filepath.Join(root, "stopped"))
-	_ = os.Rename(filepath.Join(root, "extra"), filepath.Join(root, "extra-stopped"))
-	select {
-	case <-p.done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("positive exit proof did not release custody")
-	}
-	callsAfter, _ := os.ReadFile(filepath.Join(root, "calls"))
-	if strings.Count(string(callsAfter), "kill ") != strings.Count(string(callsBefore), "kill ") {
-		t.Fatal("uncertain KILL was resent")
-	}
-
-	if _, e = os.Stat(filepath.Join(root, "extra-stopped")); e != nil {
-		t.Fatal("second owned container survived")
 	}
 }
 

@@ -56,13 +56,13 @@ func TestDockerStopProtocol(t *testing.T) {
 		t.Fatal("restart changed stop protocol")
 	}
 	c.advance(time.Nanosecond)
-	// Keep the fake containers alive after KILL to prove it is latched too.
+	// Keep containers running to prove deadline KILL is safely repeated.
 	for i := 0; i < 3; i++ {
 		tick()
 		_ = os.WriteFile(filepath.Join(root, "running"), nil, 0600)
 		_ = os.WriteFile(filepath.Join(root, "extra"), nil, 0600)
 	}
-	if calls("TERM") != 2 || calls("KILL") != 2 {
+	if calls("TERM") != 2 || calls("KILL") != 6 {
 		t.Fatalf("signals at deadline: TERM=%d KILL=%d", calls("TERM"), calls("KILL"))
 	}
 }
@@ -219,110 +219,274 @@ func TestDockerSidecarEvidenceSurvivesRetention(t *testing.T) {
 	}
 }
 
-// Fail only a pre-dispatch write; all earlier stop/deadline writes reach disk.
-type dockerFaultStore struct {
-	dir        string
-	kill, fail bool
-	failures   int
+// Synchronous fake Docker/clock/store fixture, without background reconcile ticks.
+func stopAttempt(t *testing.T) (*dockerAttempt, *dockerTestClock, string) {
+	t.Helper()
+	_, s, c, root := dockerFixture(t)
+	for name, value := range map[string]string{"created": "id1", "running": "yes", "label": "owned"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &dockerAttempt{dir: s.dir, binary: filepath.Join(root, "docker"), clock: c, timeout: 2 * time.Second, env: withoutToken(os.Environ()), state: dockerExecution{Identity: "owned", Endpoint: "fake", Container: "id1"}}
+	d.stop(c.Now(), StopGrace, false)
+	return d, c, root
 }
 
-func (s *dockerFaultStore) save(state dockerExecution) error {
-	m := state.Containers["id1"]
-	if s.fail && ((!s.kill && m.TermDispatched) || (s.kill && m.KillDispatched)) {
-		s.failures++
-		return errors.New("injected custody persistence failure")
+func reloadStopAttempt(t *testing.T, d *dockerAttempt) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(d.dir, "owned.docker.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	return saveWorkerJSON(s.dir, state.Identity+".docker.json", state)
+	if err := json.Unmarshal(data, &d.state); err != nil {
+		t.Fatal(err)
+	}
+	d.dirty = false
+}
+
+func stopCalls(t *testing.T, root, signal string) int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, "calls"))
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(data), "kill --signal="+signal+" id1")
+}
+
+func TestDockerTermAtMostOnce(t *testing.T) {
+	for _, mode := range []string{"", "refuse-kill", "unknown-kill", "delivered-error", "crash-before-call", "crash-after-call"} {
+		t.Run(mode, func(t *testing.T) {
+			d, c, root := stopAttempt(t)
+			deadline := *d.state.StopAt
+			if err := os.WriteFile(filepath.Join(root, "mode"), []byte(mode), 0600); err != nil {
+				t.Fatal(err)
+			}
+			crashed := strings.HasPrefix(mode, "crash-")
+			if mode == "crash-before-call" {
+				// Exact durable state at the persist-before-delivery crash boundary.
+				d.state.Containers = map[string]dockerMember{"id1": {Name: "main", TermDispatched: true, TermOutcome: "unknown-after-restart"}}
+				if err := d.saveLocked(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if mode == "crash-after-call" {
+					d.persist = func(st dockerExecution) error {
+						if st.Containers["id1"].TermOutcome == "sent" {
+							return errors.New("crash before outcome persistence")
+						}
+						return saveWorkerJSON(d.dir, st.Identity+".docker.json", st)
+					}
+				}
+				_, err := d.reconcile()
+				if (err != nil) != (mode != "") {
+					t.Fatalf("first reconcile error=%v", err)
+				}
+			}
+			d.persist = nil
+			// New process state: do not overlay the old map/outcome during unmarshal.
+			d.state = dockerExecution{}
+			reloadStopAttempt(t, d)
+			wantOutcome := "error"
+			if mode == "" {
+				wantOutcome = "sent"
+			}
+			if crashed {
+				wantOutcome = "unknown-after-restart"
+			}
+			if got := d.state.Containers["id1"].TermOutcome; got != wantOutcome {
+				t.Fatalf("outcome=%q want %q", got, wantOutcome)
+			}
+			// Daemon recovery never permits a second TERM, across healthy ticks/reload.
+			if err := os.WriteFile(filepath.Join(root, "mode"), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 3; i++ {
+				if _, err := d.reconcile(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c.advance(StopGrace - time.Nanosecond)
+			if _, err := d.reconcile(); err != nil {
+				t.Fatal(err)
+			}
+			wantTerm := 1
+			if mode == "crash-before-call" {
+				wantTerm = 0
+			}
+			if stopCalls(t, root, "TERM") != wantTerm || stopCalls(t, root, "KILL") != 0 || !d.state.StopAt.Equal(deadline) {
+				t.Fatal("TERM repeated or KILL early/deadline renewed")
+			}
+			if mode == "delivered-error" {
+				data, err := os.ReadFile(filepath.Join(root, "delivered"))
+				if err != nil || strings.Count(string(data), "--signal=TERM id1") != 1 {
+					t.Fatal("fixture did not deliver TERM", err)
+				}
+			}
+			c.advance(time.Nanosecond)
+			if _, err := d.reconcile(); err != nil {
+				t.Fatal(err)
+			}
+			if done, err := d.reconcile(); err != nil || !done {
+				t.Fatal("deadline cleanup failed", err)
+			}
+			data, err := os.ReadFile(filepath.Join(d.dir, "owned.docker-evidence.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var evidence map[string]dockerMember
+			if err := json.Unmarshal(data, &evidence); err != nil {
+				t.Fatal(err)
+			}
+			if evidence["id1"].TermOutcome != wantOutcome || evidence["id1"].ExitCode == nil || evidence["id1"].StderrTail != "payload stderr\n" {
+				t.Fatal("outcome/exit/stderr custody lost")
+			}
+		})
+	}
 }
 
 func TestDockerSignalPersistenceFailureRetry(t *testing.T) {
-	for _, kill := range []bool{false, true} {
-		for _, recovery := range []string{"live", "restart", "flush-then-restart", "deadline-then-restart"} {
-			t.Run(fmt.Sprintf("kill=%v/%s", kill, recovery), func(t *testing.T) {
-				_, s, c, root := dockerFixture(t)
-				for name, value := range map[string]string{"created": "id1", "running": "yes", "label": "owned"} {
-					if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0600); err != nil {
-						t.Fatal(err)
-					}
+	for _, recovery := range []string{"live", "restart", "flush-then-restart", "deadline-then-restart"} {
+		t.Run(recovery, func(t *testing.T) {
+			d, c, root := stopAttempt(t)
+			deadline := *d.state.StopAt
+			failures := 0
+			d.persist = func(st dockerExecution) error {
+				if st.Containers["id1"].TermDispatched {
+					failures++
+					return errors.New("injected intent write failure")
 				}
-				prior := dockerMember{Name: "main", Started: true, TermDispatched: kill}
-				store := &dockerFaultStore{dir: s.dir, kill: kill, fail: true}
-				d := &dockerAttempt{persist: store.save, dir: s.dir, binary: filepath.Join(root, "docker"), clock: c, timeout: 2 * time.Second, env: withoutToken(os.Environ()), state: dockerExecution{Identity: "owned", Endpoint: "fake", Container: "id1", Containers: map[string]dockerMember{"id1": prior}}}
+				return saveWorkerJSON(d.dir, st.Identity+".docker.json", st)
+			}
+			for i := 0; i < 2; i++ {
+				if done, err := d.reconcile(); err == nil || done {
+					t.Fatal("failed store did not retain custody")
+				}
+			}
+			if failures != 2 || d.state.Containers["id1"].TermDispatched || stopCalls(t, root, "TERM") != 0 {
+				t.Fatal("failed intent consumed/sent TERM")
+			}
+			d.persist = nil
+			if recovery == "flush-then-restart" {
+				if err := d.saveLocked(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if recovery == "deadline-then-restart" {
+				c.advance(StopGrace)
+			}
+			if recovery != "live" {
+				d.state = dockerExecution{}
+				reloadStopAttempt(t, d)
+			}
+			if _, err := d.reconcile(); err != nil {
+				t.Fatal(err)
+			}
+			wantTerm := 1
+			if recovery == "deadline-then-restart" {
+				wantTerm = 0
+			} else {
+				if stopCalls(t, root, "TERM") != 1 || stopCalls(t, root, "KILL") != 0 {
+					t.Fatal("persistence recovery failed or KILL early")
+				}
+				c.advance(StopGrace)
+				if _, err := d.reconcile(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if done, err := d.reconcile(); err != nil || !done {
+				t.Fatal("cleanup failed", err)
+			}
+			if !d.state.StopAt.Equal(deadline) || stopCalls(t, root, "TERM") != wantTerm || stopCalls(t, root, "KILL") != 1 {
+				t.Fatal("recovery changed deadline/signals")
+			}
+		})
+	}
+}
+
+func TestDockerDeadlineKillDespitePersistenceFailure(t *testing.T) {
+	for _, failStop := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stop-write-fails=%v", failStop), func(t *testing.T) {
+			d, c, root := stopAttempt(t)
+			if failStop {
+				d.state.Stopped = false
+				d.state.StopAt = nil
+			}
+			d.persist = func(dockerExecution) error { return errors.New("spool unavailable") }
+			if failStop {
 				d.stop(c.Now(), StopGrace, false)
-				deadline := *d.state.StopAt
-				if kill {
-					c.advance(StopGrace)
+			}
+			for i := 0; i < 2; i++ {
+				if done, err := d.reconcile(); err == nil || done {
+					t.Fatal("storage failure released custody")
 				}
-				for i := 0; i < 2; i++ {
-					if released, err := d.reconcile(); err == nil || released {
-						t.Fatal("failed store did not retain custody", err)
-					}
+			}
+			c.advance(StopGrace - time.Nanosecond)
+			_, _ = d.reconcile()
+			if stopCalls(t, root, "TERM") != 0 || stopCalls(t, root, "KILL") != 0 {
+				t.Fatal("signal before persistence/deadline")
+			}
+			c.advance(time.Nanosecond)
+			if _, err := d.reconcile(); err != nil {
+				t.Fatal(err)
+			}
+			if stopCalls(t, root, "KILL") != 1 {
+				t.Fatal("storage outage suppressed deadline KILL")
+			}
+			if done, err := d.reconcile(); err == nil || done {
+				t.Fatal("storage outage lost evidence custody")
+			}
+			d.persist = nil
+			if done, err := d.reconcile(); err != nil || !done {
+				t.Fatal("storage recovery did not capture/release", err)
+			}
+		})
+	}
+}
+
+func TestDockerDeadlineKillRetry(t *testing.T) {
+	for _, mode := range []string{"refuse-kill", "unknown-kill", "delivered-error"} {
+		t.Run(mode, func(t *testing.T) {
+			d, c, root := stopAttempt(t)
+			if _, err := d.reconcile(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "mode"), []byte(mode), 0600); err != nil {
+				t.Fatal(err)
+			}
+			c.advance(StopGrace - time.Nanosecond)
+			if _, err := d.reconcile(); err != nil {
+				t.Fatal(err)
+			}
+			if stopCalls(t, root, "KILL") != 0 {
+				t.Fatal("premature KILL")
+			}
+			c.advance(time.Nanosecond)
+			for i := 0; i < 2; i++ {
+				if done, err := d.reconcile(); err == nil || done {
+					t.Fatal("failed KILL released custody")
 				}
-				if store.failures != 2 {
-					t.Fatalf("faults=%d, want 2", store.failures)
-				}
-				calls := func(signal string) int {
-					data, _ := os.ReadFile(filepath.Join(root, "calls"))
-					return strings.Count(string(data), "kill --signal="+signal+" id1")
-				}
-				if calls("TERM") != 0 || calls("KILL") != 0 {
-					t.Fatal("dispatched before persistence")
-				}
-				if d.state.Containers["id1"] != prior {
-					t.Fatal("failed save consumed signal or changed member")
-				}
-				store.fail = false
-				deadlinePassed := recovery == "deadline-then-restart"
-				if deadlinePassed && !kill {
-					c.advance(StopGrace)
-				}
-				if recovery == "flush-then-restart" {
-					// Reproduce the next tick's dirty-state flush without dispatch.
-					if err := d.saveLocked(); err != nil {
-						t.Fatal(err)
-					}
-				}
-				if recovery != "live" {
-					data, err := os.ReadFile(filepath.Join(s.dir, "owned.docker.json"))
-					if err != nil {
-						t.Fatal(err)
-					}
-					var state dockerExecution
-					if err := json.Unmarshal(data, &state); err != nil {
-						t.Fatal(err)
-					}
-					d = &dockerAttempt{dir: s.dir, binary: d.binary, clock: c, timeout: d.timeout, env: d.env, state: state}
-				}
-				tick := func() bool {
-					released, err := d.reconcile()
-					if err != nil {
-						t.Fatal(err)
-					}
-					return released
-				}
-				tick()
-				if !d.state.StopAt.Equal(deadline) {
-					t.Fatal("recovery renewed deadline")
-				}
-				if !kill && !deadlinePassed {
-					tick()
-					if calls("TERM") != 1 || calls("KILL") != 0 {
-						t.Fatal("TERM retry missing, repeated, or escalated early")
-					}
-					c.advance(StopGrace)
-					tick()
-				}
-				if !tick() || !d.state.Released {
-					t.Fatal("custody stuck after storage recovery")
-				}
-				wantTerm := 1
-				if kill || deadlinePassed {
-					wantTerm = 0
-				}
-				if calls("TERM") != wantTerm || calls("KILL") != 1 {
-					t.Fatalf("TERM=%d KILL=%d", calls("TERM"), calls("KILL"))
-				}
-			})
-		}
+				d.state = dockerExecution{}
+				reloadStopAttempt(t, d)
+			}
+			if stopCalls(t, root, "TERM") != 1 || stopCalls(t, root, "KILL") != 2 {
+				t.Fatal("KILL not retried across restart")
+			}
+			if err := os.WriteFile(filepath.Join(root, "mode"), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.reconcile(); err != nil {
+				t.Fatal(err)
+			}
+			if done, err := d.reconcile(); err != nil || !done {
+				t.Fatal("KILL retry did not reclaim", err)
+			}
+			if stopCalls(t, root, "KILL") != 3 {
+				t.Fatal("missing final retry")
+			}
+		})
 	}
 }

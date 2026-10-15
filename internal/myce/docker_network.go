@@ -95,7 +95,7 @@ type dockerMember struct {
 	Swap           int64  `json:"swap"`
 	Started        bool   `json:"started"`
 	TermDispatched bool   `json:"term_dispatched,omitempty"`
-	KillDispatched bool   `json:"kill_dispatched,omitempty"`
+	TermOutcome    string `json:"term_outcome,omitempty"`
 	ExitCode       *int   `json:"exit_code,omitempty"`
 	StderrTail     string `json:"stderr_tail,omitempty"`
 }

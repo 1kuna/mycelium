@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -137,16 +138,21 @@ type dockerAttempt struct {
 }
 
 func (d *dockerAttempt) saveLocked() error {
+	err := d.saveState(d.state)
+	d.dirty = err != nil
+	return err
+}
+
+func (d *dockerAttempt) saveState(state dockerExecution) error {
 	if d.dir == "" {
 		return nil
 	}
 	var err error
 	if d.persist != nil {
-		err = d.persist(d.state)
+		err = d.persist(state)
 	} else {
-		err = saveWorkerJSON(d.dir, d.state.Identity+".docker.json", d.state)
+		err = saveWorkerJSON(d.dir, state.Identity+".docker.json", state)
 	}
-	d.dirty = err != nil
 	return err
 }
 func (d *dockerAttempt) status() string {
@@ -314,9 +320,12 @@ func (d *dockerAttempt) containers() ([]dockerInspection, error) {
 	return containers, nil
 }
 func (d *dockerAttempt) reconcile() (bool, error) {
+	// Deadline KILL must remain possible when the spool is unwritable.
+	// Preserve pending-start acceptance before signaling any container.
 	d.mu.Lock()
+	killDue := d.state.Forced || (d.state.Stopped && d.state.StopAt != nil && !d.clock.Now().Before(*d.state.StopAt))
 	if d.dirty {
-		if err := d.saveLocked(); err != nil {
+		if err := d.saveLocked(); err != nil && !killDue {
 			d.mu.Unlock()
 			return false, err
 		}
@@ -336,7 +345,7 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 				d.state.Stopped = true
 				d.state.Forced = true
 				d.state.Error = ""
-				if err = d.saveLocked(); err != nil {
+				if err = d.saveLocked(); err != nil && !killDue {
 					d.mu.Unlock()
 					return false, err
 				}
@@ -350,13 +359,13 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 	if (pending || (stopped && d.state.StopAt != nil && !d.clock.Now().Before(*d.state.StopAt))) && !forced {
 		d.state.Forced = true
 		forced = true
-		if err = d.saveLocked(); err != nil {
+		if err = d.saveLocked(); err != nil && !killDue {
 			d.mu.Unlock()
 			return false, err
 		}
 	}
 	d.mu.Unlock()
-	if err := d.observeGroup(containers); err != nil {
+	if err := d.observeGroup(containers); err != nil && !killDue {
 		return false, err
 	}
 	d.mu.Lock()
@@ -370,7 +379,7 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 			d.state.MemoryFailure = "Docker memory ceiling not enforced"
 			err = d.saveLocked()
 			d.mu.Unlock()
-			if err != nil {
+			if err != nil && !killDue {
 				return false, err
 			}
 			if *c.State.Running {
@@ -423,15 +432,18 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 	return true, nil
 }
 
-// Persist before dispatch: a lost reply or worker crash must not repeat a signal.
-// An uncertain KILL keeps custody until positive nonrunning/absent proof.
+// TERM intent is permanent once durable; every delivery error waits for the
+// deadline. KILL is idempotent and is retried while inspection proves running.
 func (d *dockerAttempt) signalContainer(id string, kill bool) ([]byte, error) {
-	d.mu.Lock()
-	if d.state.Containers == nil {
-		d.state.Containers = map[string]dockerMember{}
+	if kill {
+		return d.call("kill", "--signal=KILL", id)
 	}
+	d.mu.Lock()
 	m, known := d.state.Containers[id]
-	prior := m
+	if m.TermDispatched {
+		d.mu.Unlock()
+		return nil, nil
+	}
 	if !known {
 		m.Memory = d.state.MemoryLimitBytes
 		m.Swap = d.state.MemorySwapBytes
@@ -439,48 +451,35 @@ func (d *dockerAttempt) signalContainer(id string, kill bool) ([]byte, error) {
 	if id == d.state.Container && m.Name == "" {
 		m.Name = "main"
 	}
-	if (kill && m.KillDispatched) || (!kill && m.TermDispatched) {
+	m.TermDispatched = true
+	m.TermOutcome = "unknown-after-restart"
+	// Save a candidate without changing live state: a failed write leaves
+	// no intent for a later dirty flush to consume, and sends no TERM.
+	next := d.state
+	next.Containers = maps.Clone(d.state.Containers)
+	if next.Containers == nil {
+		next.Containers = map[string]dockerMember{}
+	}
+	next.Containers[id] = m
+	if err := d.saveState(next); err != nil {
 		d.mu.Unlock()
-		return nil, nil
-	}
-	signal := "--signal=TERM"
-	if kill {
-		m.KillDispatched = true
-		signal = "--signal=KILL"
-	} else {
-		m.TermDispatched = true
-	}
-	d.state.Containers[id] = m
-	err := d.saveLocked()
-	if err != nil {
-		// Docker was never called. Do not let the dirty-state retry persist a
-		// consumed latch for a signal we know was not dispatched.
-		if known {
-			d.state.Containers[id] = prior
-		} else {
-			delete(d.state.Containers, id)
-		}
-	}
-	d.mu.Unlock()
-	if err != nil {
 		return nil, err
 	}
-	out, err := d.call("kill", signal, id)
-	if refusal, ok := err.(*exec.ExitError); ok && strings.HasPrefix(strings.TrimSpace(string(refusal.Stderr)), "Error response from daemon:") {
-		// A definite daemon refusal is safe to retry. Unknown delivery keeps
-		// the durable latch: repeating TERM could abort a graceful shutdown.
-		d.mu.Lock()
-		m = d.state.Containers[id]
-		if kill {
-			m.KillDispatched = false
-		} else {
-			m.TermDispatched = false
-		}
-		d.state.Containers[id] = m
-		if saveErr := d.saveLocked(); saveErr != nil {
-			err = saveErr
-		}
-		d.mu.Unlock()
+	d.state = next
+	d.dirty = false
+	d.mu.Unlock()
+	out, err := d.call("kill", "--signal=TERM", id)
+	d.mu.Lock()
+	m = d.state.Containers[id]
+	m.TermOutcome = "sent"
+	if err != nil {
+		m.TermOutcome = "error"
+	}
+	d.state.Containers[id] = m
+	saveErr := d.saveLocked()
+	d.mu.Unlock()
+	if saveErr != nil {
+		return out, saveErr
 	}
 	return out, err
 }
@@ -538,6 +537,9 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) error {
 			m.Name = "main"
 		}
 		code := c.State.ExitCode
+		if m.TermDispatched && m.TermOutcome == "" {
+			m.TermOutcome = "unknown-after-restart"
+		}
 		m.ExitCode = &code
 		m.StderrTail = string(tail.data)
 		d.state.Containers[c.ID] = m
