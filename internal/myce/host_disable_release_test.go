@@ -119,7 +119,7 @@ func TestNotifiedDisableDockerRelease(t *testing.T) {
 			if len(snap.HostHolds) != 0 || len(q.s.HostReleases) != 0 {
 				t.Fatalf("hold after cleanup: %+v", snap.HostHolds)
 			}
-			// Rejoin's same release acknowledgement and result are safe to replay.
+			// Rejoin's same release-only acknowledgement is safe to replay.
 			ack := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: running.Attempt}, ReleaseOnly: true}
 			if err := q.Complete(ack); err != nil {
 				t.Fatal(err)
@@ -132,7 +132,7 @@ func TestNotifiedDisableDockerRelease(t *testing.T) {
 			if next == nil || next.Attempt != running.Attempt+1 {
 				t.Fatal("not reassigned")
 			}
-			for _, change := range []func(*Result){func(r *Result) {}, func(r *Result) { r.Session = "foreign" }, func(r *Result) { r.Machine = "foreign" }, func(r *Result) { r.ID = "foreign" }} {
+			for _, change := range []func(*Result){func(r *Result) {}, func(r *Result) { r.Attempt = next.Attempt; r.Session = "foreign" }, func(r *Result) { r.Attempt = next.Attempt; r.Machine = "foreign" }, func(r *Result) { r.Attempt = next.Attempt; r.ID = "foreign" }} {
 				stale := ack
 				change(&stale)
 				if err := q.Complete(stale); err != nil {
