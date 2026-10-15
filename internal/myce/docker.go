@@ -118,6 +118,7 @@ type dockerExecution struct {
 	ExitCode          int                     `json:"exit_code"`
 }
 type dockerAttempt struct {
+	persist     func(dockerExecution) error // Optional custody store for fault injection.
 	admit       func() error
 	dirty       bool
 	closed      chan struct{}
@@ -139,7 +140,12 @@ func (d *dockerAttempt) saveLocked() error {
 	if d.dir == "" {
 		return nil
 	}
-	err := saveWorkerJSON(d.dir, d.state.Identity+".docker.json", d.state)
+	var err error
+	if d.persist != nil {
+		err = d.persist(d.state)
+	} else {
+		err = saveWorkerJSON(d.dir, d.state.Identity+".docker.json", d.state)
+	}
 	d.dirty = err != nil
 	return err
 }
@@ -425,6 +431,7 @@ func (d *dockerAttempt) signalContainer(id string, kill bool) ([]byte, error) {
 		d.state.Containers = map[string]dockerMember{}
 	}
 	m, known := d.state.Containers[id]
+	prior := m
 	if !known {
 		m.Memory = d.state.MemoryLimitBytes
 		m.Swap = d.state.MemorySwapBytes
@@ -445,11 +452,37 @@ func (d *dockerAttempt) signalContainer(id string, kill bool) ([]byte, error) {
 	}
 	d.state.Containers[id] = m
 	err := d.saveLocked()
+	if err != nil {
+		// Docker was never called. Do not let the dirty-state retry persist a
+		// consumed latch for a signal we know was not dispatched.
+		if known {
+			d.state.Containers[id] = prior
+		} else {
+			delete(d.state.Containers, id)
+		}
+	}
 	d.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return d.call("kill", signal, id)
+	out, err := d.call("kill", signal, id)
+	if refusal, ok := err.(*exec.ExitError); ok && strings.HasPrefix(strings.TrimSpace(string(refusal.Stderr)), "Error response from daemon:") {
+		// A definite daemon refusal is safe to retry. Unknown delivery keeps
+		// the durable latch: repeating TERM could abort a graceful shutdown.
+		d.mu.Lock()
+		m = d.state.Containers[id]
+		if kill {
+			m.KillDispatched = false
+		} else {
+			m.TermDispatched = false
+		}
+		d.state.Containers[id] = m
+		if saveErr := d.saveLocked(); saveErr != nil {
+			err = saveErr
+		}
+		d.mu.Unlock()
+	}
+	return out, err
 }
 
 const dockerStderrTailBytes = 64 * 1024

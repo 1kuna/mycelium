@@ -114,27 +114,116 @@ while True: time.sleep(.05)
 			if err = json.Unmarshal(data, &evidence); err != nil {
 				t.Fatal(err)
 			}
-			signals, _ := os.ReadFile(filepath.Join(root, "signals"))
-			want := 143
-			kills := 0
-			if ignore {
-				want = 137
-				kills = 1
+			if err := validateRealStopEvidence(evidence, filepath.Join(root, "signals"), ignore); err != nil {
+				t.Fatal(err)
 			}
-			for id, m := range evidence {
-				if m.Name != "signal-test" {
-					continue
-				}
-				if m.ExitCode == nil || *m.ExitCode != want {
-					t.Fatalf("sidecar exit != %d", want)
-				}
-				term := strings.Count(string(signals), "--signal=TERM "+id+"\n")
-				kill := strings.Count(string(signals), "--signal=KILL "+id+"\n")
-				if term != 1 || kill != kills || m.StderrTail == "" {
-					t.Fatalf("TERM=%d KILL=%d stderr-bytes=%d", term, kill, len(m.StderrTail))
-				}
-				t.Logf("Linux container: main=0 sidecar=%d TERM=%d KILL=%d private-stderr=true", *m.ExitCode, term, kill)
-			}
+			t.Logf("Linux containers: main=0 sidecar evidence and bounded stderr verified; ignore-term=%v", ignore)
+
 		})
+	}
+}
+
+// Return an error so the same acceptance assertions can be tested negatively
+// without requiring Docker or weakening the opt-in runtime test.
+func validateRealStopEvidence(evidence map[string]dockerMember, signalPath string, ignore bool) error {
+	signals, err := os.ReadFile(signalPath)
+	if err != nil {
+		return fmt.Errorf("signal ledger: %w", err)
+	}
+	if len(evidence) != 2 {
+		return fmt.Errorf("container evidence count=%d, want main and sidecar", len(evidence))
+	}
+	mainCount, sidecarCount := 0, 0
+	for id, m := range evidence {
+		switch m.Name {
+		case "main":
+			mainCount++
+			if m.ExitCode == nil || *m.ExitCode != 0 {
+				return fmt.Errorf("main exit evidence missing or nonzero")
+			}
+		case "signal-test":
+			sidecarCount++
+			wantExit, wantKills, wantTail := 143, 0, "ready\nfirst TERM\n"
+			if ignore {
+				wantExit, wantKills, wantTail = 137, 1, "ignoring TERM\n"
+			}
+			if m.ExitCode == nil || *m.ExitCode != wantExit {
+				return fmt.Errorf("sidecar exit evidence != %d", wantExit)
+			}
+			if len(m.StderrTail) > dockerStderrTailBytes || m.StderrTail != wantTail {
+				return fmt.Errorf("sidecar bounded stderr content mismatch (bytes=%d)", len(m.StderrTail))
+			}
+			term := strings.Count(string(signals), "--signal=TERM "+id+"\n")
+			kill := strings.Count(string(signals), "--signal=KILL "+id+"\n")
+			if term != 1 || kill != wantKills {
+				return fmt.Errorf("sidecar TERM=%d KILL=%d, want 1/%d", term, kill, wantKills)
+			}
+		default:
+			return fmt.Errorf("unexpected container evidence name")
+		}
+	}
+	if mainCount != 1 || sidecarCount != 1 {
+		return fmt.Errorf("main evidence count=%d sidecar=%d, want one each", mainCount, sidecarCount)
+	}
+	return nil
+}
+
+func TestDockerRealStopEvidenceRequired(t *testing.T) {
+	for _, ignore := range []bool{false, true} {
+		for _, fault := range []string{"none", "empty", "missing-sidecar", "missing-main", "duplicate-sidecar", "missing-exit", "wrong-exit", "missing-main-exit", "wrong-main-exit", "missing-stderr", "wrong-stderr", "oversized-stderr", "missing-ledger", "unreadable-ledger", "wrong-signals"} {
+			t.Run(fmt.Sprintf("ignore=%v/%s", ignore, fault), func(t *testing.T) {
+				zero, code := 0, 143
+				tail, signals := "ready\nfirst TERM\n", "--signal=TERM sidecar-id\n"
+				if ignore {
+					code, tail = 137, "ignoring TERM\n"
+					signals += "--signal=KILL sidecar-id\n"
+				}
+				main := dockerMember{Name: "main", ExitCode: &zero}
+				sidecar := dockerMember{Name: "signal-test", ExitCode: &code, StderrTail: tail}
+				switch fault {
+				case "missing-exit":
+					sidecar.ExitCode = nil
+				case "wrong-exit":
+					sidecar.ExitCode = &zero
+				case "missing-main-exit":
+					main.ExitCode = nil
+				case "wrong-main-exit":
+					main.ExitCode = &code
+				case "missing-stderr":
+					sidecar.StderrTail = ""
+				case "wrong-stderr":
+					sidecar.StderrTail = "unrelated stderr\n"
+				case "oversized-stderr":
+					sidecar.StderrTail = strings.Repeat("x", dockerStderrTailBytes+1)
+				case "wrong-signals":
+					signals = ""
+				}
+				evidence := map[string]dockerMember{"main-id": main, "sidecar-id": sidecar}
+				switch fault {
+				case "empty":
+					evidence = nil
+				case "missing-sidecar":
+					delete(evidence, "sidecar-id")
+				case "missing-main":
+					delete(evidence, "main-id")
+				case "duplicate-sidecar":
+					evidence["main-id"] = sidecar
+				}
+				path := filepath.Join(t.TempDir(), "signals")
+				if fault == "unreadable-ledger" {
+					if err := os.Mkdir(path, 0700); err != nil {
+						t.Fatal(err)
+					}
+				} else if fault != "missing-ledger" {
+					if err := os.WriteFile(path, []byte(signals), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				err := validateRealStopEvidence(evidence, path, ignore)
+				if (err == nil) != (fault == "none") {
+					t.Fatalf("fault=%s validation=%v", fault, err)
+				}
+			})
+		}
 	}
 }
