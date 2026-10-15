@@ -137,7 +137,7 @@ func memoryBytes(gb float64) (int64, error) {
 	if !validMemoryValue(gb) || gb >= float64(math.MaxInt64)/(1<<30) {
 		return 0, errors.New("invalid memory ceiling")
 	}
-	return int64(math.Ceil(gb * (1 << 30))), nil
+	return int64(math.Floor(gb * (1 << 30))), nil
 }
 
 // Round positive limits down to whole kernel pages so enforced <= reserved.
