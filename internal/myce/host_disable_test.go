@@ -306,8 +306,11 @@ func TestHostDisableQueueAndPagePersistAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), "Disabled by operator: operator drill") {
+	if !strings.Contains(string(b), "disabled by operator") {
 		t.Fatal("disabled host not shown on status page")
+	}
+	if strings.Contains(string(b), "operator drill") || q.s.DisabledHosts["host"] != "operator drill" {
+		t.Fatal("status must retain the private operator reason internally without displaying it")
 	}
 }
 

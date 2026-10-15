@@ -212,6 +212,11 @@ func stringsList(values ...string) []string { return values }
 
 var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
 	"activeJobs":         activeJobs,
+	"hyphaAvailability":  HyphaAvailability,
+	"profileLines":       CapabilityProfileLines,
+	"extensionStatus":    ExtensionStatus,
+	"jobWork":            JobWork,
+	"jobReason":          JobReason,
 	"shortID":            ShortID,
 	"jobState":           JobState,
 	"jobAge":             JobAge,
@@ -245,7 +250,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
 <body>
 <main id="status-root" class="shell">
   <header class="topbar">
-    <div><div class="eyebrow">Fleet overview</div><h1>Mycelium</h1><p class="muted">GPU work across the shared queue</p></div>
+    <div><div class="eyebrow">Your mycelium</div><h1>Mycelium</h1><p class="muted">Work across your hyphae</p></div>
     <div class="refresh-state" data-refresh-state role="status" aria-live="polite"><span class="refresh-dot"></span><span data-refresh-copy>Live · every 5s</span></div>
   </header>
 
@@ -259,12 +264,12 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
   </div>{{end}}
 
   <section aria-labelledby="fleet-title">
-    <div class="section-head"><h2 id="fleet-title">Machines</h2><p>{{len .Machines}} in fleet</p></div>
+    <div class="section-head"><h2 id="fleet-title">Hyphae</h2><p>{{len .Machines}} in your mycelium</p></div>
     {{if .Machines}}<div class="fleet">
     {{range .Machines}}{{$machine := .}}{{$jobs := machineJobs $.Jobs .ID}}{{$models := machineModels $.LoadedModels .ID}}{{$pins := machinePins $.Pins .ID}}
       <article class="card machine">
         <div class="card-head"><div class="identity"><h3>{{.ID}}</h3><div class="platform">{{if .GPU}}{{.GPU}}{{else}}platform unknown{{end}}{{if .Device}} · {{.Device}}{{end}}</div></div>
-          {{if .Disabled}}<span class="badge offline">Disabled by operator: {{.Disabled}}</span>{{else if .Gone}}<span class="badge offline">Offline</span>{{else if .Leaving}}<span class="badge leaving">Leaving</span>{{else}}<span class="badge">Online</span>{{end}}
+          <span class="badge {{if or .Disabled .Gone}}offline{{else if or .Leaving .EnablePending .AdmissionReason}}leaving{{end}}">{{hyphaAvailability .}}</span>
         </div>
         <div class="metrics" aria-label="GPU memory">
           <div class="metric"><span class="label">Used</span><strong>{{printf "%.1f" .MemoryUsedGB}} GB</strong></div>
@@ -273,9 +278,10 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
         </div>
         {{if or .MemoryEnforcement .EffectiveHostMemoryBudgetGB .HostMemoryBudgetGB}}<div class="detail"><div class="label">RAM ceiling</div><div class="value">{{.MemoryEnforcement}}{{if .EffectiveHostMemoryBudgetGB}}<div>Host ceiling budget: {{printf "%g" .EffectiveHostMemoryBudgetGB}} GiB</div>{{else if .HostMemoryBudgetGB}}<div>Host ceiling budget: {{printf "%g" .HostMemoryBudgetGB}} GiB</div>{{end}}{{if .HostMemoryBudgetStatus}}<div>{{.HostMemoryBudgetStatus}}</div>{{end}}</div></div>{{end}}
         {{if .DockerCleanup}}<div class="alert bad">Docker {{.DockerCleanup}}</div>{{end}}
-        {{if .CapabilityProfile}}{{if .CapabilityProfile.Availability}}<div class="detail"><div class="label">Availability</div><div class="value">{{.CapabilityProfile.Availability.Summary}}</div></div>{{end}}{{end}}
-        {{if .MaxJobs}}<div class="detail"><div class="label">Job limit</div><div class="value">{{.MaxJobs}} simultaneous jobs per machine</div></div>{{end}}
-        {{if .AdmissionReason}}<div class="detail"><div class="label">Waiting</div><div class="value">{{.AdmissionReason}}</div></div>{{end}}
+        <div class="detail"><div class="label">Capability profile</div><div class="value">{{range profileLines .}}<div>{{.}}</div>{{end}}</div></div>
+        <div class="detail"><div class="label">Availability</div><div class="value">{{hyphaAvailability .}}</div></div>
+        <div class="detail"><div class="label">Extensions</div><div class="value">{{range .ExtensionReports}}<div>{{extensionStatus .}}</div>{{else}}<span class="empty-inline">No qualification reported</span>{{end}}</div></div>
+        {{if .MaxJobs}}<div class="detail"><div class="label">Job limit</div><div class="value">{{.MaxJobs}} simultaneous jobs per hypha</div></div>{{end}}
         {{if .EnablePending}}<div class="alert bad">Held: enable not yet acknowledged (retrying)</div>{{end}}
         {{if .MemoryError}}<div class="alert bad">Memory unavailable: {{.MemoryError}}</div>{{end}}
 		{{if .CacheError}}<div class="alert bad">Model cache unavailable: {{.CacheError}}</div>{{end}}
@@ -289,7 +295,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
           {{range .EnvironmentReports}}<div class="progress-row"><div class="progress-copy"><span>Build {{.Key}}</span><span>{{displayState .State}}{{if .BuildSeconds}} · {{printf "%.0f" .BuildSeconds}}s{{end}}</span></div>{{if .Error}}<div class="muted">{{.Error}}</div>{{end}}</div>{{end}}
         </div></div>{{end}}
       </article>
-    {{end}}</div>{{else}}<div class="empty">No machines have joined the fleet.</div>{{end}}
+    {{end}}</div>{{else}}<div class="empty">No hyphae have joined your mycelium.</div>{{end}}
   </section>
 
   <section aria-labelledby="queue-title">
@@ -297,11 +303,11 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
     <div class="queue">
     {{range $priority := (list "production" "deadline" "experiment")}}{{$jobs := activeJobs $.Jobs $priority}}
       <div class="card priority"><div class="priority-head"><h3>{{$priority}}</h3><span class="count">{{len $jobs}} active</span></div>
-      {{range $jobs}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason {{if .Reason}}important{{end}}">{{if .Reason}}{{.Reason}}{{else if eq .State "running"}}Running now{{else}}Waiting for a compatible machine{{end}}</div></div>
+      {{range $jobs}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><div class="muted">{{jobWork .}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason {{if .Reason}}important{{end}}">{{jobReason .}}</div></div>
       {{else}}<div class="job"><span class="muted">No {{$priority}} work.</span></div>{{end}}</div>
     {{end}}
 	{{$finished := recentFinishedJobs .Jobs}}{{if $finished}}<div class="card priority"><div class="priority-head"><h3>Recent outcomes</h3><span class="count">{{len $finished}} shown</span></div>
-	  {{range $finished}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason">{{.Reason}}</div></div>{{end}}
+	  {{range $finished}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><div class="muted">{{jobWork .}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason">{{.Reason}}</div></div>{{end}}
 	</div>{{end}}
     </div>
   </section>
@@ -311,7 +317,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
     <div class="samples" aria-hidden="true">{{range .Usage.Daily}}<i data-day="{{.Date}}" data-project="{{.Project}}" data-machine="{{.Machine}}" data-gpu-hours="{{.GPUHours}}" data-busy-percent="{{.BusyPercent}}"></i>{{end}}</div>
     {{if or .Usage.Projects .Usage.Machines}}<div class="usage-grid">
 	      {{range .Usage.Projects}}<article class="card chart-card" data-chart-kind="project" data-chart-name="{{.Name}}"><div class="chart-meta"><div><h3>{{.Name}}</h3><span class="muted">Project GPU time</span></div><strong>{{printf "%.1f" .GPUHours}}h</strong></div><div class="chart-wrap"><svg class="chart" viewBox="0 0 280 105" role="img" aria-label="Seven day usage for {{.Name}}"></svg></div></article>{{end}}
-	      {{range .Usage.Machines}}<article class="card chart-card" data-chart-kind="machine" data-chart-name="{{.Name}}"><div class="chart-meta"><div><h3>{{.Name}}</h3><span class="muted">Machine busy</span></div><strong>{{printf "%.0f" .BusyPercent}}%</strong></div><div class="chart-wrap"><svg class="chart" viewBox="0 0 280 105" role="img" aria-label="Seven day usage for {{.Name}}"></svg></div></article>{{end}}
+	      {{range .Usage.Machines}}<article class="card chart-card" data-chart-kind="machine" data-chart-name="{{.Name}}"><div class="chart-meta"><div><h3>{{.Name}}</h3><span class="muted">Hypha busy</span></div><strong>{{printf "%.0f" .BusyPercent}}%</strong></div><div class="chart-wrap"><svg class="chart" viewBox="0 0 280 105" role="img" aria-label="Seven day usage for {{.Name}}"></svg></div></article>{{end}}
     </div>{{else}}<div class="empty">No usage samples yet. Charts appear after the first recorded interval.</div>{{end}}
   </section>
 </main>
