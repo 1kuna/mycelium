@@ -988,7 +988,9 @@ func (q *Queue) Cancel(id string) error {
 		return nil
 	})
 }
-func (q *Queue) Snapshot() (Snapshot, error) {
+func (q *Queue) Snapshot() (Snapshot, error) { return q.snapshot(false) }
+
+func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 	var out Snapshot
 	err := q.update(func() error {
 		q.maintain()
@@ -1116,6 +1118,13 @@ func (q *Queue) Snapshot() (Snapshot, error) {
 				}
 			}
 			out.Machines = append(out.Machines, &copy)
+		}
+		if forStatus {
+			for _, j := range out.Jobs {
+				if j.State == "queued" {
+					j.Reason = q.statusWaitingReason(j)
+				}
+			}
 		}
 		sort.SliceStable(out.Jobs, func(i, k int) bool { return statusBefore(out.Jobs[i], out.Jobs[k]) })
 		sort.Slice(out.Machines, func(i, k int) bool { return out.Machines[i].ID < out.Machines[k].ID })
