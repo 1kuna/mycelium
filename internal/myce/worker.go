@@ -22,7 +22,8 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
-	// Benchmark is injected by native CLI joins; embedded fake workers need no host load.
+	// Benchmark runs only when explicitly enabled; fake inventory never loads the host.
+	OnboardingBenchmark   bool
 	Benchmark             func(context.Context, BenchmarkConfig, *CapabilityProfile) error
 	DailyUse              bool
 	Laptop                bool
@@ -776,12 +777,14 @@ func (w Worker) Run(stop context.Context) error {
 	defer func() { availabilityCancel(); <-availabilityDone }()
 	// Benchmark before any model load or admission, and never over a recovered job.
 	// Fake inventory keeps dev/tests light; measured fake runners are tested separately.
-	if w.Benchmark != nil && w.Machine.GPU != "fake" && s.state.Job == nil {
+	if w.OnboardingBenchmark && w.Benchmark != nil && w.Machine.GPU != "fake" && s.state.Job == nil {
 		if err = w.Benchmark(stop, BenchmarkConfig{Clock: w.Clock, Machine: w.Machine, StateDir: s.dir, HostStateDir: w.HostStateDir, ExtensionRoot: w.ExtensionRoot, Client: w.Client, DailyUse: w.DailyUse, Laptop: w.Laptop, Desktop: w.Desktop, OwnerSignals: w.OwnerSignals}, w.Machine.CapabilityProfile); err != nil {
 			return err
 		}
-	} else if err = saveWorkerJSON(s.dir, "capability-profile.json", w.Machine.CapabilityProfile); err != nil {
-		return err
+	} else if w.OnboardingBenchmark {
+		if err = saveWorkerJSON(s.dir, "capability-profile.json", w.Machine.CapabilityProfile); err != nil {
+			return err
+		}
 	}
 	rt, err := startModels(w, s.dir)
 	if err != nil {

@@ -1,6 +1,10 @@
 # Onboarding benchmark (experimental v3)
 
-A native hypha measures throughput before it starts taking work. Results are in
+Throughput measurement is opt-in. Pass `myce join --onboarding-benchmark` to
+measure before admission, or use the explicit `myce benchmark` command below.
+Default joins do not run or wait for a benchmark and leave its cache untouched.
+They report hardware facts and use existing placement fallbacks when throughput
+is unknown. Results from an enabled benchmark are in
 `capability_profile.benchmark` in the status API, the CLI capability summary, and
 an additive benchmark detail in the status page. Fake inventory in `myce dev`
 does not load the host; tests inject measurements instead.
@@ -47,11 +51,17 @@ five idle minutes, external power for laptops and known safe heat. Owner return
 or unsafe/unknown signals cancel a running measurement. The benchmark runs before
 job admission and model loads, never over a recovered attempt. Per-host benchmark
 locks serialize resource workers sharing a host-control folder. A missing resource
-or interruption is reported as partial, with a reason; retry on the next join.
+or interruption is reported as partial, with a reason; retry on the next join with `--onboarding-benchmark`.
 Complete results are reused when hardware/driver identity, CPU count, memory,
 extension digests and file-store address are unchanged. Changed identities trigger
-measurement on rejoin, as with extension requalification; live driver replacement
+measurement on an opted-in rejoin, as with extension requalification; live driver replacement
 while a worker runs is not supported.
+
+Installed service configurations can set `"onboarding_benchmark": true`;
+`service ... -- join` also accepts `--onboarding-benchmark` in its join argv.
+Existing configurations default to false. On personal or polite hyphae, combine
+the opt-in with `--daily-use` and the appropriate `--laptop` or `--desktop`
+declaration so measurements respect owner activity, power and heat.
 
 For an explicit isolated measurement, use your own state, prepared extensions
 and test file-store queue. Add `--daily-use --laptop` on a daily laptop:

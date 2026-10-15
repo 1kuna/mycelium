@@ -112,3 +112,13 @@ func TestJoinRejectsConflictingChassisDeclarations(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestJoinAcceptsOnboardingBenchmarkFlag(t *testing.T) {
+	t.Setenv("MYCE_TOKEN", "test-only-token")
+	for _, value := range []string{"true", "false"} {
+		err := run([]string{"join", "--gpu", "fake", "--heartbeat", "0", "--onboarding-benchmark=" + value})
+		if err == nil || err.Error() != "heartbeat must be positive" {
+			t.Fatalf("flag %s: %v", value, err)
+		}
+	}
+}

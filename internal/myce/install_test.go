@@ -509,3 +509,26 @@ func TestUserUnitLiteralPaths(t *testing.T) {
 		t.Fatal("accepted unsupported user sandbox")
 	}
 }
+
+func TestServiceConfigOnboardingBenchmark(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		c := ServiceConfig{Role: "worker", OnboardingBenchmark: enabled}
+		data, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var restored ServiceConfig
+		if err := json.Unmarshal(data, &restored); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, arg := range restored.Args() {
+			if arg == "--onboarding-benchmark" {
+				found = true
+			}
+		}
+		if found != enabled {
+			t.Fatalf("enabled=%v args=%v", enabled, restored.Args())
+		}
+	}
+}

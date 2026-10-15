@@ -2,7 +2,6 @@ package myce
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -81,7 +80,7 @@ func TestJoiningExtensionEndToEnd(t *testing.T) {
 			if completed == nil {
 				return false
 			}
-			if len(snap.Machines) != 1 || snap.Machines[0].CapabilityProfile == nil || len(snap.Machines[0].ExtensionReports) != 2 {
+			if len(snap.Machines) != 1 || snap.Machines[0].CapabilityProfile == nil || len(snap.Machines[0].ExtensionReports) != 2 || snap.Machines[0].CapabilityProfile.Onboarding != "hardware-facts-only; throughput pending" || snap.Machines[0].CapabilityProfile.Benchmark != nil {
 				t.Fatal("check-in lost profile or extension reports")
 			}
 			for _, report := range snap.Machines[0].ExtensionReports {
@@ -99,9 +98,7 @@ func TestJoiningExtensionEndToEnd(t *testing.T) {
 			t.Fatal("joined extension output mismatch", err)
 		}
 	}
-	data, err := os.ReadFile(filepath.Join(state, "capability-profile.json"))
-	var profile CapabilityProfile
-	if err != nil || json.Unmarshal(data, &profile) != nil || profile.Onboarding != "hardware-facts-only; throughput pending" {
-		t.Fatal("startup profile was not persisted", err)
+	if _, err := os.Stat(filepath.Join(state, "capability-profile.json")); !os.IsNotExist(err) {
+		t.Fatal("default join wrote benchmark cache", err)
 	}
 }
