@@ -6,7 +6,7 @@ Optional `size_hint.memory_gb` and `size_hint.host_memory_gb` are lower bounds,
 never requirements to submit a job. Existing v2 command jobs keep their contract.
 
 The queue requires a qualified extension for the work and accelerator type.
-Capability profile v0 bounds each hypha's capacity. Separate memory must fit
+The capability profile bounds each hypha's capacity. Separate memory must fit
 accelerator-reachable memory and additional system memory independently. Unified
 memory must fit their sum in one shared pool. For example, 64 GiB RAM plus
 24 GiB accelerator memory fits RAM-heavy work but not 40 GiB accelerator work;
@@ -15,14 +15,13 @@ Live free-memory checks, operator budgets and reservations still apply. Unknown
 native profile sizes wait; explicitly fake resources use their configured
 allowance. Older workers without profiles retain the v2 admission contract.
 
-A previously unmeasured program goes to the most capable **free, eligible**
-hypha. Profile v0 has no throughput measurements: the provisional order is
-accelerator-reachable capacity, system capacity, logical CPUs, then hypha ID.
-A busy or disabled hypha, an unqualified extension, project restrictions,
-checkpoint availability or a production hold cannot be bypassed by this preference.
-Priority, preemption, fairness and start authorization use the existing scheduler.
-No additional service, queue or background benchmark is introduced. Throughput
-and the full onboarding benchmark remain #33.
+Among free eligible hyphae, measured reference throughput now supplies a
+provisional predicted finish time, including file delivery and known preparation.
+See [the onboarding benchmark](guide-benchmark-v3.md) for units, unknown-data
+fallbacks and limits. Without comparable measurements a first program retains
+the capacity order (accelerator-reachable memory, system memory, CPUs, hypha ID).
+Priority, preemption, fairness, production holds and start authorization still
+use the existing scheduler and cannot be bypassed by speed.
 
 Successful current attempts save observations in the same SQLite queue. The
 next matching submission and already queued matching programs reuse the largest
@@ -45,7 +44,7 @@ and may include shared accelerator allocations, so unified-memory learning can
 conservatively overreserve. Descendant-process RAM is not a complete process-tree
 measurement. No configured budget is labelled as an observation.
 
-The PyTorch starter v0.2.3 runs the script in its Python process, preserving its
+The PyTorch starter (since v0.2.3) runs the script in its Python process, preserving its
 arguments, imports and signal handlers. CUDA/XPU report allocator high-water
 marks; MPS samples current allocations every 50 ms, so brief peaks can be missed.
 Its bundled-reference qualification remains required. Unsupported counters
