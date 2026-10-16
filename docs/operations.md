@@ -201,6 +201,19 @@ admission alone. Confirmed cleanup settles only its saved executions; notificati
 failure still leaves the unit disabled locally and does not fail a completed
 disable. Docker cleanup targets only attempts recorded in that instance's spool,
 including retained released custody, using exact attempt labels.
+Once the queue accepts an uncleared unit disable, that machine is Disabled and
+exempt from ordinary loss detection. Its job stays `stopping` until cleanup is
+confirmed or an operator acts; disappearance alone cannot requeue it. Unconfirmed
+Docker releases still escalate after two minutes.
+
+Keep a unit's `control-generation.json` across reinstalls. If its counter is
+lost, the queue rejects lower generations and includes the accepted generation in
+the API error response.
+With control operations stopped, restore that JSON integer to at least the
+reported value, then rerun disable and enable. This preserves monotonic ordering
+without accepting old receipts. A machine moved to a different host starts an
+independent control history after checking in there; prior execution custody is
+still retained.
 
 Install an independent Linux instance with
 `myce install worker --instance gpu1 --device 1` plus the normal GPU, queue and NAS
@@ -292,15 +305,19 @@ myce queue --local-disable-receipts --host-id HOST_ID --host-state-dir HOST_STAT
 ```
 
 Use the workers' exact host ID and shared local host-state directory. Both must
-be supplied explicitly. `myce install queue` accepts the same three flags and
+be supplied explicitly. The directory must already exist and be readable at
+startup. Run the queue as the same OS user as the workers: receipts are mode 0600.
+`myce install queue` accepts the same three flags and
 preserves them in the queue service configuration. This is off by default;
 existing queue installations keep their current behavior. The queue reads shared
 and per-unit completed disable receipts at startup before maintenance, then at
 one-second intervals determined by its injected clock. It matches the current
 flag/receipt generation, host, machine, session and saved attempt before settling
-only the covered releases. Receipts are never modified or deleted. Missing, stale,
-busy or unconfirmed evidence leaves custody intact and the two-minute escalation
-bound unchanged. Shared-host and per-unit generations remain independent.
+only the covered releases. The reader takes no operator control lock and never
+modifies or deletes receipts. Skip reasons are logged at most once per reason per
+minute. Missing, stale or unconfirmed evidence leaves custody intact and the
+two-minute escalation bound unchanged. Shared-host and per-unit generations remain
+independent.
 
 This local reader cannot see receipts on remote hosts. Remote disabled workers
 still converge through notified enable or worker rejoin when their queue returns;

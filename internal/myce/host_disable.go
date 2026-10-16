@@ -313,7 +313,7 @@ func (h HostControl) notify(ctx context.Context, workers []HostWorker, enable, c
 		}
 		key := w.Queue + "\x00" + w.Host
 		if unitParent(h.Dir) != "" {
-			key += "\x00" + w.Name
+			key += "\x00" + w.Name + "\x00" + w.Session
 		}
 		if seen[key] {
 			continue

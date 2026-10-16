@@ -3,9 +3,10 @@ package myce
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -30,7 +31,15 @@ func (q *Queue) ControlMachine(host, machine, session, reason string, enable, cl
 }
 func (q *Queue) controlMachine(host, machine, session, reason string, enable, cleared bool, executions []Result, generation uint64, hostScoped bool) error {
 	m := q.s.Machines[machine]
-	if host == "" || session == "" || generation == 0 || m == nil || hostID(m) != host {
+	if host == "" || machine == "" || generation == 0 {
+		return errors.New("unit control identity does not match machine")
+	}
+	// An enable conveys no cleanup evidence. A never-started installation has
+	// neither a queue machine nor a saved worker session to acknowledge.
+	if m == nil && enable {
+		return nil
+	}
+	if m == nil || hostID(m) != host {
 		return errors.New("unit control identity does not match machine")
 	}
 	key := machine
@@ -43,16 +52,18 @@ func (q *Queue) controlMachine(host, machine, session, reason string, enable, cl
 		key = "\x00host/" + machine
 	}
 	old := q.s.MachineControls[key]
-	if m.Session != session && old.PreviousSession != session && !(enable && old.Session == session) {
+	// A machine name can move hosts; the former host's counter is unrelated.
+	// This resets intent only, never saved execution custody.
+	if old.Host != "" && old.Host != host {
+		old = machineControl{}
+	}
+	if !enable && !(cleared && len(executions) == 0) && (session == "" || m.Session != session && old.PreviousSession != session) {
 		return errors.New("unit control session does not match machine history")
 	}
-	if old.Host != "" && old.Host != host {
-		return errors.New("unit control host changed")
-	}
 	if generation < old.Generation || (generation == old.Generation && old.Enabled != enable) {
-		return errors.New("stale unit control generation")
+		return fmt.Errorf("stale unit control generation; restore the unit control counter to at least %d, then rerun disable and enable", old.Generation)
 	}
-	if enable && generation > old.Generation && !old.Cleared {
+	if enable && generation > old.Generation && old.Generation > 0 && !old.Cleared {
 		return errors.New("unit cleanup must be acknowledged before enable")
 	}
 	// Validate the entire payload before fencing, refunding or settling anything.
@@ -74,7 +85,7 @@ func (q *Queue) controlMachine(host, machine, session, reason string, enable, cl
 			return errors.New("unit execution does not match saved attempt")
 		}
 	}
-	if generation == old.Generation && (old.Enabled || old.Cleared || !cleared) {
+	if generation == old.Generation && (enable || old.Session == session) && (old.Enabled || old.Cleared || !cleared) {
 		return nil
 	}
 	if reason == "" && !enable {
@@ -138,6 +149,13 @@ func (q *Queue) controlMachine(host, machine, session, reason string, enable, cl
 		if !outstanding && m.Session == session {
 			m.Gone = true
 			m.DockerCleanup = ""
+			m.Models = nil
+			delete(q.s.BatchReleases, machine)
+			for key, slot := range q.s.ModelSlots {
+				if slot.Machine == machine && slot.Session == session {
+					delete(q.s.ModelSlots, key)
+				}
+			}
 		}
 	}
 	return nil
@@ -146,6 +164,7 @@ func (q *Queue) controlMachine(host, machine, session, reason string, enable, cl
 type localDisableReceipts struct {
 	host, dir string
 	next      time.Time
+	nextLog   map[string]time.Time
 }
 
 // ConfigureLocalDisableReceipts opts into read-only local receipt reconciliation.
@@ -158,8 +177,11 @@ func (q *Queue) ConfigureLocalDisableReceipts(host, dir string) error {
 	if err != nil {
 		return err
 	}
+	if _, err := os.ReadDir(abs); err != nil {
+		return fmt.Errorf("local disable receipts require an existing readable host-state directory: %w", err)
+	}
 	return q.update(func() error {
-		q.localReceipts = localDisableReceipts{host: host, dir: abs}
+		q.localReceipts = localDisableReceipts{host: host, dir: abs, nextLog: map[string]time.Time{}}
 		q.maintain()
 		return nil
 	})
@@ -174,7 +196,10 @@ func (q *Queue) reconcileLocalDisableReceipts() {
 	}
 	config.next = q.clock.Now().Add(time.Second)
 	dirs := []string{config.dir}
-	entries, _ := os.ReadDir(filepath.Join(config.dir, "units"))
+	entries, err := os.ReadDir(filepath.Join(config.dir, "units"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		q.logLocalReceiptSkip("units-unreadable")
+	}
 	for _, entry := range entries {
 		if entry.IsDir() && ValidWorkerUnit(entry.Name()) {
 			dirs = append(dirs, filepath.Join(config.dir, "units", entry.Name()))
@@ -186,17 +211,9 @@ func (q *Queue) reconcileLocalDisableReceipts() {
 }
 
 func (q *Queue) readLocalDisableReceipt(dir string) {
-	// Do not create locks or alter receipts. An in-progress disable/enable owns
-	// this same lock exclusively; retry its completed durable evidence next tick.
-	lock, err := os.Open(filepath.Join(dir, "control.lock"))
-	if err != nil {
-		return
-	}
-	defer lock.Close()
-	if syscall.Flock(int(lock.Fd()), syscall.LOCK_SH|syscall.LOCK_NB) != nil {
-		return
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	// Never contend with operator control. Atomic renames publish whole files;
+	// the flag/receipt/counter must agree, and an enable invalidates the counter
+	// before removing the receipt or flag. A mixed cycle cannot authorize cleanup.
 	var flag struct {
 		Generation uint64 `json:"generation"`
 		Reason     string `json:"reason"`
@@ -204,11 +221,24 @@ func (q *Queue) readLocalDisableReceipt(dir string) {
 	var receipt hostReceipt
 	read := func(name string, value any) bool {
 		data, err := os.ReadFile(filepath.Join(dir, name))
-		return err == nil && json.Unmarshal(data, value) == nil
+		if err != nil {
+			if name != "DISABLED" || !errors.Is(err, os.ErrNotExist) {
+				q.logLocalReceiptSkip(name + "-unreadable-or-missing")
+			}
+			return false
+		}
+		if json.Unmarshal(data, value) != nil {
+			q.logLocalReceiptSkip(name + "-invalid-json")
+			return false
+		}
+		return true
 	}
 	var generation uint64
-	if !read("DISABLED", &flag) || !read("disable-receipt.json", &receipt) || !read("control-generation.json", &generation) ||
-		flag.Generation == 0 || receipt.Generation != flag.Generation || generation != flag.Generation || receipt.EnableGeneration != 0 {
+	if !read("DISABLED", &flag) || !read("disable-receipt.json", &receipt) || !read("control-generation.json", &generation) {
+		return
+	}
+	if flag.Generation == 0 || receipt.Generation != flag.Generation || generation != flag.Generation || receipt.EnableGeneration != 0 {
+		q.logLocalReceiptSkip("generation-mismatch-or-enabled")
 		return
 	}
 	forgottenDir := dir
@@ -217,6 +247,7 @@ func (q *Queue) readLocalDisableReceipt(dir string) {
 	}
 	forgotten, err := readForgottenQueues(forgottenDir)
 	if err != nil {
+		q.logLocalReceiptSkip("forgotten-queues-unreadable")
 		return
 	}
 	seen := map[string]bool{}
@@ -225,12 +256,15 @@ func (q *Queue) readLocalDisableReceipt(dir string) {
 			continue
 		}
 		if generation, ok := forgotten.Queues[w.Queue]; ok && w.Generation <= generation {
+			q.logLocalReceiptSkip("forgotten-queue")
 			continue
 		}
 		if w.Host != q.localReceipts.host || w.Generation != receipt.Generation {
+			q.logLocalReceiptSkip("worker-host-or-generation-mismatch")
 			continue
 		}
 		if unitParent(dir) != "" && w.Unit != filepath.Base(dir) {
+			q.logLocalReceiptSkip("worker-unit-mismatch")
 			continue
 		}
 		// Receipts from before the explicit session field retain it in executions.
@@ -253,6 +287,16 @@ func (q *Queue) readLocalDisableReceipt(dir string) {
 				executions = append(executions, other.Executions...)
 			}
 		}
-		_ = q.controlMachine(w.Host, w.Name, session, flag.Reason, false, true, executions, w.Generation, unitParent(dir) == "")
+		if err := q.controlMachine(w.Host, w.Name, session, flag.Reason, false, true, executions, w.Generation, unitParent(dir) == ""); err != nil {
+			q.logLocalReceiptSkip(err.Error())
+		}
 	}
+}
+
+func (q *Queue) logLocalReceiptSkip(reason string) {
+	if q.clock.Now().Before(q.localReceipts.nextLog[reason]) {
+		return
+	}
+	q.localReceipts.nextLog[reason] = q.clock.Now().Add(time.Minute)
+	log.Printf("event=local_disable_receipt_skipped reason=%q", reason)
 }
