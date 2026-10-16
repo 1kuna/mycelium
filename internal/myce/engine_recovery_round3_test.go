@@ -72,10 +72,55 @@ func TestEngineRecoveryReplacementWaitsForCleanup(t *testing.T) {
 	}
 }
 
+// Copy/environment preparation can outlast process readiness. These worker
+// receipts represent a cold load still preparing weights before engine launch.
+func TestEngineRecoveryLoadDeadlineCoversCopy(t *testing.T) {
+	for _, pinned := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pinned=%v", pinned), func(t *testing.T) {
+			q, clock, m := modelFixture(t)
+			config := q.models
+			config.Wait = 10 * time.Minute
+			config.Models[0].ReadyTimeout = time.Minute
+			if err := q.ConfigureModels(config); err != nil {
+				t.Fatal(err)
+			}
+			m.ModelConfigHash = modelConfigHash(q.models)
+			check(t, q, m, nil)
+			if pinned {
+				if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			call := addModelCall(t, q, "experiment")
+			s := q.s.ModelSlots[slotKey(m.ID, "test")]
+			deadline := *s.LoadUntil
+			attempt := s.Attempt
+			for i := 0; i < 12; i++ {
+				clock.Advance(10 * time.Second)
+				recoveryReport(t, q, m, s, "loading")
+			}
+			if s.State != "loading" || s.LoadTimedOut || s.CrashCount != 0 || s.Attempt != attempt || call.Error != "" {
+				t.Fatalf("pre-launch preparation crossed readiness timeout: %+v %+v", s, call)
+			}
+			if !s.LoadUntil.Equal(deadline) || deadline.Sub(clock.Now()) != config.Wait-2*time.Minute+engineLoadSlack {
+				t.Fatal("whole-load deadline does not match max_wait plus slack, or was extended by a heartbeat")
+			}
+			recoveryReport(t, q, m, s, "ready")
+			if s.State != "ready" || call.Machine != m.ID || s.LoadUntil != nil {
+				t.Fatal("cold load did not become routable")
+			}
+			if err := q.finishCall(call.ID); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestEngineRecoveryLoadingDeadlineClock(t *testing.T) {
 	for _, pinned := range []bool{false, true} {
 		t.Run(fmt.Sprint(pinned), func(t *testing.T) {
 			q, clock, m := modelFixture(t)
+			q.models.Wait = 20 * time.Second
 			q.models.Models[0].ReadyTimeout = 2 * time.Second
 			m.ModelConfigHash = modelConfigHash(q.models)
 			check(t, q, m, nil)
@@ -86,8 +131,8 @@ func TestEngineRecoveryLoadingDeadlineClock(t *testing.T) {
 			}
 			call := addModelCall(t, q, "experiment")
 			s := q.s.ModelSlots[slotKey(m.ID, "test")]
-			if s.LoadUntil == nil || s.LoadUntil.Sub(clock.Now()) != 2*time.Second+engineReadySlack {
-				t.Fatal("missing ready timeout plus slack")
+			if s.LoadUntil == nil || s.LoadUntil.Sub(clock.Now()) != q.models.Wait+engineLoadSlack {
+				t.Fatal("missing whole-load max_wait plus slack")
 			}
 			old := s.Attempt
 			clock.Advance(s.LoadUntil.Sub(clock.Now()) - time.Nanosecond)
@@ -99,6 +144,9 @@ func TestEngineRecoveryLoadingDeadlineClock(t *testing.T) {
 			check(t, q, m, nil)
 			if s.State != "unloading" || !s.LoadTimedOut || q.modelMemory(m.ID) != 8 {
 				t.Fatalf("expiry credited unconfirmed memory: %+v", s)
+			}
+			if s.RuntimeFailed || call.Error != "model load failed" {
+				t.Fatal("deadline must promptly fail waiting calls as a load failure")
 			}
 			// A late ready receipt cannot resurrect the timed-out attempt.
 			recoveryReport(t, q, m, s, "ready")
@@ -115,11 +163,17 @@ func TestEngineRecoveryLoadingDeadlineClock(t *testing.T) {
 			if _, err := q.Checkin(Checkin{Machine: m, ModelReports: reports}); err != nil {
 				t.Fatal(err)
 			}
-			if s.State != "failed" || call.Error != "" || s.CrashCount != 1 {
-				t.Fatalf("deadline did not enter crash recovery: %+v %+v", s, call)
+			if s.State != "failed" || s.RuntimeFailed || call.Error != "model load failed" || s.CrashCount != 1 {
+				t.Fatalf("deadline did not remain a load failure: %+v %+v", s, call)
 			}
 			clock.Advance(time.Second)
 			check(t, q, m, nil)
+			if !pinned {
+				if q.s.ModelSlots[slotKey(m.ID, "test")] != nil {
+					t.Fatal("failed unpinned demand kept retrying")
+				}
+				return
+			}
 			if s.State != "loading" || s.Attempt == old || s.LoadTimedOut {
 				t.Fatal("load deadline did not recover under a fresh attempt")
 			}
@@ -405,8 +459,8 @@ func TestEngineRecoveryDeadlineCancelsWarmup(t *testing.T) {
 	rt.sync(plan)
 	rt.wg.Wait()
 	reports, used := rt.report()
-	if reports[0].State != "failed" || !reports[0].RuntimeFailed || used != 0 || e.cleaned.Load() != 1 {
-		t.Fatalf("deadline cancellation lost cleanup/recovery receipt: %+v", reports)
+	if reports[0].State != "failed" || reports[0].RuntimeFailed || used != 0 || e.cleaned.Load() != 1 {
+		t.Fatalf("deadline cancellation lost cleanup/load-failure receipt: %+v", reports)
 	}
 }
 

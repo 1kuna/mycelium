@@ -38,8 +38,9 @@ precede PATH. `{environment}` is the published environment directory;
 `{model}` and `{model_path}` are the verified local weights path; `{device}` is
 the physical selector; `{port}` is a chosen loopback port. Templates substitute
 individual argv strings with no implicit shell. The health check requires HTTP
-2xx. Loading includes copies and environment setup inside `max_wait`; the
-optional `ready_timeout` additionally bounds process readiness. Timeout or crash
+2xx. The whole load, including copies, environment setup and admission waits,
+is bounded by `max_wait`. The optional `ready_timeout` starts at engine launch
+and additionally bounds process readiness. Timeout or crash
 kills the owned group and returns a visible error. The optional stop command
 and TERM share `stop_timeout` (default 10 seconds), followed by KILL and group
 verification. Failed unload retains its memory reservation and environment lease.
@@ -212,10 +213,12 @@ With no pin or remaining demand, the failed slot is removed. Pins and retry stat
 persist; a new worker session reloads. If a rejoining worker still holds a
 different engine attempt, it drains and cleans that attempt before starting the
 replacement. Cleanup failure blocks the replacement and retains custody. A load
-plan expires after `ready_timeout` plus five seconds of check-in slack, using the
-injected queue Clock (`load_until`). If `ready_timeout` is omitted, `max_wait`
-supplies the timeout. Expiry withdraws the load and enters normal crash backoff
-only after cleanup is acknowledged; it never credits unconfirmed memory.
+plan expires after `max_wait` plus five seconds of check-in slack, using the
+injected queue Clock (`load_until`), covering the whole load rather than just
+process readiness. Expiry fails waiting calls promptly as a load failure
+(`runtime_failed: false`) and withdraws the load; it never credits unconfirmed
+memory. After cleanup is acknowledged, pins retry with backoff, while unpinned
+demand cannot drive retries of the failed load.
 
 Queued calls may wait for recovery only within their existing `max_wait`.
 The failed-worker exclusion is scoped to an engine attempt: a fresh attempt on
