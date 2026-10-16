@@ -57,8 +57,21 @@ func assertEligibleStatus(t *testing.T, q *Queue, id, state string, allowed, hos
 		t.Fatalf("allowed=%v want %v", s.AllowedMachines, allowed)
 	}
 	if unrestricted {
-		if string(j["eligible_unrestricted"]) != "true" || j["eligible_hosts"] != nil {
+		if string(j["eligible_unrestricted"]) != "true" {
 			t.Fatalf("unrestricted fields: %v", j)
+		}
+		if hosts == nil {
+			if j["eligible_hosts"] != nil {
+				t.Fatal("unoccupied unrestricted job must omit hosts")
+			}
+		} else {
+			var got []string
+			if err := json.Unmarshal(j["eligible_hosts"], &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, hosts) {
+				t.Fatalf("eligible=%v want %v", got, hosts)
+			}
 		}
 	} else {
 		var got []string
@@ -110,11 +123,11 @@ func TestStatusEligibleHostsLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	terminalJob := statusJobs(t, q)[j.ID]
-	if string(terminalJob["state"]) != `"cancelled"` || terminalJob["eligible_hosts"] != nil || terminalJob["eligible_unrestricted"] != nil {
+	if string(terminalJob["state"]) != `"cancelled"` || terminalJob["eligible_hosts"] != nil || terminalJob["eligible_unrestricted"] != nil || terminalJob["eligible_unknown_machines"] != nil {
 		t.Fatal("terminal eligibility must be omitted")
 	}
 	stored := job(t, q, j.ID)
-	if stored.EligibleHosts != nil || stored.EligibleUnrestricted || stored.Spec.Run.Env["SECRET"] != "private-env" || stored.Spec.Run.Command[0] != "private-command" {
+	if stored.EligibleHosts != nil || stored.EligibleUnrestricted || stored.EligibleUnknownMachines != nil || stored.Spec.Run.Env["SECRET"] != "private-env" || stored.Spec.Run.Command[0] != "private-command" {
 		t.Fatal("status mutated persisted job")
 	}
 }
@@ -207,5 +220,130 @@ func TestStatusEligibilityKeepsRequestPrivate(t *testing.T) {
 		if id != j.ID && string(call["eligible_unrestricted"]) != "true" {
 			t.Fatal("call missing eligibility")
 		}
+	}
+}
+
+func assertUnknownMachines(t *testing.T, q *Queue, id string, want []string) {
+	t.Helper()
+	raw := statusJobs(t, q)[id]["eligible_unknown_machines"]
+	if len(want) == 0 {
+		if raw != nil {
+			t.Fatalf("empty unknown machines must be omitted: %s", raw)
+		}
+		return
+	}
+	var got []string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unknown machines=%v want %v", got, want)
+	}
+}
+
+func TestStatusEligibleUnknownMachines(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		job, project []string
+	}{
+		{name: "project only", project: []string{"unknown-z", "other", "unknown-a", "unknown-z"}},
+		{name: "job only", job: []string{"unknown-z", "other", "unknown-a", "unknown-z"}},
+		{name: "intersection", job: []string{"unknown-z", "job-only", "other", "unknown-a", "unknown-z"}, project: []string{"project-only", "unknown-a", "other", "unknown-z"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, _ := fixture(t)
+			m := machine("other", "fake")
+			m.HostID = "host-other"
+			check(t, q, m, nil)
+			if err := q.ConfigureProjects(map[string]ProjectPolicy{"test": {Weight: 1, AllowedMachines: tc.project}}); err != nil {
+				t.Fatal(err)
+			}
+			s := spec("experiment")
+			s.AllowedMachines = tc.job
+			j := submit(t, q, s)
+			assertEligibleStatus(t, q, j.ID, "queued", tc.job, []string{"host-other"}, false)
+			assertUnknownMachines(t, q, j.ID, []string{"unknown-a", "unknown-z"})
+			// A joining worker resolves only its own unknown name into a host ID.
+			joined := machine("unknown-a", "fake")
+			joined.HostID = "host-new"
+			joined.Leaving = true
+			check(t, q, joined, nil)
+			assertEligibleStatus(t, q, j.ID, "queued", tc.job, []string{"host-new", "host-other"}, false)
+			assertUnknownMachines(t, q, j.ID, []string{"unknown-z"})
+			if err := q.Cancel(j.ID); err != nil {
+				t.Fatal(err)
+			}
+			assertUnknownMachines(t, q, j.ID, nil)
+		})
+	}
+	q, _ := fixture(t)
+	j := submit(t, q, spec("experiment"))
+	assertUnknownMachines(t, q, j.ID, nil)
+}
+
+func TestStatusEligibleHostsRetainActiveAssignment(t *testing.T) {
+	q, _ := fixture(t)
+	a, b := machine("a", "fake"), machine("b", "fake")
+	a.HostID, b.HostID = "host-a", "host-b"
+	check(t, q, a, nil)
+	check(t, q, b, nil)
+	j := submit(t, q, spec("experiment"))
+	if check(t, q, a, nil).Job == nil {
+		t.Fatal("no assignment")
+	}
+	assertEligibleStatus(t, q, j.ID, "running", nil, []string{"host-a"}, true)
+	if err := q.ConfigureProjects(map[string]ProjectPolicy{"test": {Weight: 1, AllowedMachines: []string{"b"}}}); err != nil {
+		t.Fatal(err)
+	}
+	assertEligibleStatus(t, q, j.ID, "running", nil, []string{"host-a", "host-b"}, false)
+	if err := q.update(func() error { q.s.Jobs[j.ID].ProductionHost = "host-production"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	assertEligibleStatus(t, q, j.ID, "running", nil, []string{"host-a", "host-b", "host-production"}, false)
+	if err := q.Cancel(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertEligibleStatus(t, q, j.ID, "stopping", nil, []string{"host-a", "host-b", "host-production"}, false)
+}
+
+func TestStatusEligibleHostsRetainInflightModelCall(t *testing.T) {
+	for _, restricted := range []bool{false, true} {
+		t.Run(stringBool(restricted), func(t *testing.T) {
+			q, _, m := modelFixture(t)
+			m.HostID = "host-current"
+			check(t, q, m, nil)
+			other := machine("other", "fake")
+			other.HostID = "host-other"
+			check(t, q, other, nil)
+			call := addModelCall(t, q, "production")
+			reportModel(t, q, m, "ready")
+			if call.Machine != m.ID {
+				t.Fatal("call not in flight")
+			}
+			if restricted {
+				if err := q.ConfigureProjects(map[string]ProjectPolicy{"test": {Weight: 1, AllowedMachines: []string{"other"}}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := q.update(func() error { call.ProductionHost = "host-production"; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			raw := statusJobs(t, q)[call.ID]
+			var hosts []string
+			if err := json.Unmarshal(raw["eligible_hosts"], &hosts); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"host-current", "host-production"}
+			if restricted {
+				want = []string{"host-current", "host-other", "host-production"}
+			}
+			if !reflect.DeepEqual(hosts, want) {
+				t.Fatalf("hosts=%v want %v", hosts, want)
+			}
+			if (string(raw["eligible_unrestricted"]) == "true") == restricted {
+				t.Fatal("incorrect unrestricted marker")
+			}
+			assertUnknownMachines(t, q, call.ID, nil)
+		})
 	}
 }
