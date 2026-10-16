@@ -131,7 +131,10 @@ completion timestamp). Worker batch/server logs expire by last-write age at
 startup/within one minute. Active server logs and current unacknowledged batch
 replay remain protected. Retention does not bound active log size or securely
 erase SQLite/WAL, backups or disk remnants. Environment build logs are outside
-this policy. Batch commands must never print confidential inputs/outputs.
+this policy. Batch jobs also accept top-level `logs: none`, with the same null-device
+output behavior and no queue log rows or worker attempt log; see the
+[job reference](job-reference.md#scheduling-and-results). Keep confidential
+inputs/outputs out of captured batch output.
 
 Disable request logging in the **exact vLLM 0.27.1 launch command** too.
 `--disable-log-requests` is a candidate flag to **check** against that version's

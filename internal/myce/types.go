@@ -83,6 +83,7 @@ type Spec struct {
 	Name     string            `json:"name" yaml:"name"`
 	Project  string            `json:"project" yaml:"project"`
 	Priority string            `json:"priority" yaml:"priority"`
+	Logs     string            `json:"logs,omitempty" yaml:"logs,omitempty"`
 	Deadline *time.Time        `json:"deadline,omitempty" yaml:"deadline,omitempty"`
 	Run      struct {
 		Docker           bool              `json:"docker,omitempty" yaml:"docker,omitempty"`
@@ -109,6 +110,9 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if s.Logs != "" && s.Logs != "keep" && s.Logs != "none" {
+		return errors.New("logs must be keep or none")
+	}
 	if s.Name == "" || s.Project == "" || (!s.extensionJob() && (len(s.Run.Command) == 0 || s.Run.Command[0] == "")) {
 		return errors.New("name, project and run.command are required")
 	}

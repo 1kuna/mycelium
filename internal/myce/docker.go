@@ -93,6 +93,7 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
+	LogsNone          bool                    `json:"logs_none,omitempty"`
 	Owner             *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
 	EvidenceSaved     bool                    `json:"evidence_saved,omitempty"`
 	NetworkID         string                  `json:"network_id,omitempty"`
@@ -524,24 +525,27 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) error {
 	for _, c := range containers {
 		d.mu.Lock()
 		m := d.state.Containers[c.ID]
+		logsNone := d.state.LogsNone
 		d.mu.Unlock()
 		if m.ExitCode != nil {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
-		cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", "--tail", "256", c.ID)
-		cmd.Env = d.env
-		cmd.Dir = d.workdir
-		cmd.Stdout = io.Discard
 		tail := &dockerTail{}
-		cmd.Stderr = tail
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error { return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL) }
-		cmd.WaitDelay = d.timeout
-		err := cmd.Run()
-		cancel()
-		if err != nil {
-			return errors.New("Docker private stderr collection failed")
+		if !logsNone {
+			ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
+			cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", "--tail", "256", c.ID)
+			cmd.Env = d.env
+			cmd.Dir = d.workdir
+			cmd.Stdout = io.Discard
+			cmd.Stderr = tail
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			cmd.Cancel = func() error { return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL) }
+			cmd.WaitDelay = d.timeout
+			err := cmd.Run()
+			cancel()
+			if err != nil {
+				return errors.New("Docker private stderr collection failed")
+			}
 		}
 		d.mu.Lock()
 		if d.state.Containers == nil {
@@ -558,7 +562,7 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) error {
 		m.ExitCode = &code
 		m.StderrTail = string(tail.data)
 		d.state.Containers[c.ID] = m
-		err = d.saveLocked()
+		err := d.saveLocked()
 		d.mu.Unlock()
 		if err != nil {
 			return err
@@ -618,6 +622,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	}
 	d := &dockerAttempt{admit: func() error { return w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) }, closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, hostDir: w.HostStateDir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
 	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	d.state.LogsNone = j.Spec.Logs == "none"
 	if j.Spec.Run.DockerNetwork == "private" {
 		d.state.Network = "myce-" + identity
 		d.state.Containers = map[string]dockerMember{}
@@ -639,12 +644,15 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	s.state.Job = &j
 	s.state.Identity = identity
 	s.state.Log = identity + ".log"
+	if d.state.LogsNone {
+		s.state.Log = ""
+	}
 	s.state.Result = nil
 	s.state.OperatorStopped = false
 	s.state.PID = 0
 	s.state.Offset = 0
 	s.state.Pending = 0
-	output, err := os.OpenFile(filepath.Join(s.dir, s.state.Log), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	output, err := openCommandOutput(s.dir, s.state.Log, j.Spec.Logs, os.O_EXCL)
 	if err != nil {
 		return nil, err
 	}
@@ -661,6 +669,9 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	}
 	label := "myce.attempt=" + identity
 	create := []string{"create", "--pull=never", "--init", "--name", "myce-" + identity, "--label", label, "--label", "myce.worker=" + w.Machine.ID, "--cidfile", filepath.Join(s.dir, identity+".cid"), "--env", "MYCE_ATTEMPT_ID=" + identity, "--env", "MYCE_DOCKER_LABEL=" + label, "--env", "MYCE_JOB_ID=" + j.ID, "--env", "MYCE_ATTEMPT=" + strconv.Itoa(j.Attempt), "--env", "MYCE_CHECKPOINT_DIR=/myce/checkpoint", "--volume", checkpoint + ":/myce/checkpoint"}
+	if d.state.LogsNone {
+		create = append(create, "--log-driver", "none")
+	}
 	if d.state.Network != "" {
 		create = append(create, "--network", d.state.Network, "--network-alias", "main", "--env", "MYCE_DOCKER_NETWORK="+d.state.Network)
 	} else {
@@ -776,8 +787,9 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	d.mu.Lock()
 	result = dockerOutcome(d.state, result, e)
 	container := d.state.Container
+	logsNone := d.state.LogsNone
 	d.mu.Unlock()
-	if container != "" {
+	if container != "" && !logsNone {
 		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 		cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", container)
 		cmd.Env = d.env
@@ -792,7 +804,7 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 		}
 		cancel()
 	}
-	syncErr := output.Sync()
+	syncErr := syncCommandOutput(output)
 	closeErr := output.Close()
 	if syncErr != nil || closeErr != nil {
 		result.Success = false
@@ -891,7 +903,11 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	if !state.Stopped {
 		d.stop(w.Clock.Now(), 0, true)
 	}
-	output, err := os.OpenFile(filepath.Join(s.dir, s.state.Log), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	policy := ""
+	if state.LogsNone {
+		policy = "none"
+	}
+	output, err := openCommandOutput(s.dir, s.state.Log, policy, os.O_APPEND)
 	if err != nil {
 		return nil, err
 	}

@@ -375,9 +375,12 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	logName := identity + ".log"
-	output, err := os.OpenFile(filepath.Join(s.dir, logName), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, os.O_EXCL)
 	if err != nil {
 		return nil, err
+	}
+	if j.Spec.Logs == "none" {
+		logName = ""
 	}
 	gateReader, gateWriter, err := os.Pipe()
 	if err != nil {
@@ -485,7 +488,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		p.mu.Lock()
 		result.Forced = p.killed
 		p.mu.Unlock()
-		syncErr := output.Sync()
+		syncErr := syncCommandOutput(output)
 		closeErr := output.Close()
 		result.Success = oomErr == nil && launchErr == nil && waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil
 		if j.Spec.Program != nil {
