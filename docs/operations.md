@@ -305,8 +305,10 @@ myce queue --local-disable-receipts --host-id HOST_ID --host-state-dir HOST_STAT
 ```
 
 Use the workers' exact host ID and shared local host-state directory. Both must
-be supplied explicitly. The directory must already exist and be readable at
-startup. Run the queue as the same OS user as the workers: receipts are mode 0600.
+be supplied explicitly. If the directory is missing or unreadable at startup,
+the queue logs an error and continues without local receipts. The reader retries
+on subsequent ticks and keeps reporting rate-limited skips until access returns.
+Run the queue as the same OS user as the workers: receipts are mode 0600.
 `myce install queue` accepts the same three flags and
 preserves them in the queue service configuration. This is off by default;
 existing queue installations keep their current behavior. The queue reads shared
