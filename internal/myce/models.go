@@ -179,6 +179,10 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
+	RuntimeFailed        bool            `json:"runtime_failed,omitempty"`
+	LoadUntil            *time.Time      `json:"load_until,omitempty"`
+	LoadTimedOut         bool            `json:"load_timed_out,omitempty"`
+	RetryReserved        bool            `json:"retry_reserved,omitempty"`
 	FailureCounted       bool            `json:"failure_counted,omitempty"`
 	Attempt              string          `json:"attempt,omitempty"`
 	CrashCount           int             `json:"crash_count,omitempty"`
@@ -288,7 +292,7 @@ func (q *Queue) model(name string) (Model, bool) {
 func (q *Queue) modelMemory(machine string) float64 {
 	n := 0.0
 	for _, s := range q.s.ModelSlots {
-		if s.Machine == machine && s.State != "failed" {
+		if s.Machine == machine && slotReservesMemory(s) {
 			m, _ := q.model(s.Model)
 			n += m.MemoryGB
 		}
@@ -314,7 +318,7 @@ func (q *Queue) modelReservation(m *Machine, reports []ModelReport) float64 {
 	}
 	reservation := 0.0
 	for _, s := range q.s.ModelSlots {
-		if s.Machine == m.ID && s.State != "failed" && !resident[s.Model] {
+		if s.Machine == m.ID && slotReservesMemory(s) && !resident[s.Model] {
 			model, _ := q.model(s.Model)
 			reservation += model.MemoryGB
 		}
@@ -386,11 +390,12 @@ func (q *Queue) maintainModels() {
 			continue
 		}
 		model, exists := q.model(s.Model)
+		q.expireEngineLoad(s)
 		if s.State == "failed" {
 			q.maintainEngineRetry(k, s, m, model)
 			continue
 		}
-		if (!exists || !q.modelUsableMachine(model, m)) && s.State != "unload_failed" || availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle {
+		if s.State != "unloading" && s.State != "unload_failed" && ((!exists || !q.modelUsableMachine(model, m)) || availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle) {
 			s.State = "draining"
 		}
 	}
@@ -487,7 +492,7 @@ func (q *Queue) maintainModels() {
 				if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
 					q.beginEngineAttempt(s, c.Priority)
 				} else {
-					q.s.ModelSlots[slotKey(m.ID, c.Model)] = &ModelSlot{Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", Attempt: ID(), Priority: c.Priority, ProductionUsed: c.Priority == "production", LastUsed: now}
+					q.s.ModelSlots[slotKey(m.ID, c.Model)] = &ModelSlot{Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(model), Attempt: ID(), Priority: c.Priority, ProductionUsed: c.Priority == "production", LastUsed: now}
 				}
 				m.FreeMemoryGB -= model.MemoryGB
 				q.refreshHostMemory()
@@ -947,6 +952,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			}
 
 			res, e := modelHTTPClient.Do(req)
+			notForwarded := res != nil && call.Attempt != "" && res.Header.Get("X-Myce-Engine-Rejected") == call.Attempt
 			a.Queue.mu.Lock()
 			expired := !a.Queue.clock.Now().Before(requestUntil)
 			a.Queue.mu.Unlock()
@@ -963,7 +969,10 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			attemptLost := !a.Queue.callAttemptLive(&call)
 			engineLost = a.Queue.engineAttemptLost(&call)
 			a.Queue.mu.Unlock()
-			if res != nil && (attemptLost || call.Attempt != "" && res.Header.Get("X-Myce-Engine-Failed") == call.Attempt) {
+			if notForwarded {
+				res.Body.Close()
+				res, e = nil, errors.New("engine rejected before forwarding")
+			} else if res != nil && (attemptLost || call.Attempt != "" && res.Header.Get("X-Myce-Engine-Failed") == call.Attempt) {
 				engineLost = true
 				res.Body.Close()
 				res = nil
@@ -1074,7 +1083,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 				modelError(w, 503, preempted)
 				return
 			}
-			if !retrySafe || engineLost && !model.RetrySafe || attempt >= 1 {
+			if !notForwarded && (!retrySafe || engineLost && !model.RetrySafe) || attempt >= 1 {
 				modelError(w, 503, "model call failed; retry unavailable or exhausted")
 				return
 			}

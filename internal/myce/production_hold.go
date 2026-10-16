@@ -249,7 +249,7 @@ func (q *Queue) hostBlockerState(host string) (string, hostBlockerClass) {
 	}
 	for _, s := range q.s.ModelSlots {
 		m := q.s.Machines[s.Machine]
-		if m != nil && hostID(m) == host && (s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || !q.slotPinned(s) && s.State == "draining" || s.State == "unload_failed") {
+		if m != nil && hostID(m) == host && (s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || !q.slotPinned(s) && s.State == "draining" || s.State == "unloading" || s.State == "unload_failed") {
 			count++
 			if s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || s.State == "unload_failed" || expired(s.StopAt, q.clock.Now()) {
 				unknown = append(unknown, m.ID)
@@ -498,7 +498,7 @@ func (q *Queue) maintainHolds() {
 			if m == nil || hostID(m) != host || q.slotPinned(s) || s.State == "failed" {
 				continue
 			}
-			if s.State != "unload_failed" && (rank(s.Priority) > 0 && (!s.ProductionUsed || s.InFlight > 0) || q.unreported[m.ID]) {
+			if s.State != "unload_failed" && s.State != "unloading" && (rank(s.Priority) > 0 && (!s.ProductionUsed || s.InFlight > 0) || q.unreported[m.ID]) {
 				s.State = "draining"
 			}
 			if s.State == "draining" {

@@ -241,6 +241,11 @@ func TestDevModelHTTPFormats(t *testing.T) {
 
 func TestModelIdleStartsAfterLoad(t *testing.T) {
 	q, clock, m := modelFixture(t)
+	// Permit a load longer than the idle interval without crossing its own
+	// readiness deadline. Idle accounting starts only once readiness arrives.
+	q.models.Models[0].ReadyTimeout = 15 * time.Minute
+	m.ModelConfigHash = modelConfigHash(q.models)
+	check(t, q, m, nil)
 	c := addModelCall(t, q, "production")
 	clock.Advance(10 * time.Minute)
 	reportModel(t, q, m, "ready")

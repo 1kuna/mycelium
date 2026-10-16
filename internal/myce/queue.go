@@ -626,7 +626,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		if e := q.reconcileEnvironments(&m); e != nil {
 			return e
 		}
-		m.FreeMemoryGB = max(0, m.FreeMemoryGB-q.modelReservation(&m, c.ModelReports))
+		reservation := q.modelReservation(&m, c.ModelReports)
+		m.modelReservationDebtGB = max(0, reservation-m.FreeMemoryGB)
+		m.FreeMemoryGB = max(0, m.FreeMemoryGB-reservation)
 		q.withdrawUnavailable(&m)
 		q.maintain()
 		defer func() {
@@ -1195,7 +1197,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			copy.ReservedMemoryGB = 0
 			copy.MemoryUsedGB = max(0, copy.TotalMemoryGB-copy.FreeMemoryGB)
 			for _, slot := range q.s.ModelSlots {
-				if slot.Machine == m.ID && slot.State != "failed" && q.slotPinned(slot) {
+				if slot.Machine == m.ID && slotReservesMemory(slot) && q.slotPinned(slot) {
 					model, _ := q.model(slot.Model)
 					copy.ReservedMemoryGB += model.MemoryGB
 				}

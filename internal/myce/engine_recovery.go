@@ -6,6 +6,39 @@ import (
 	"time"
 )
 
+const engineReadySlack = 5 * time.Second
+
+func slotReservesMemory(s *ModelSlot) bool { return s.State != "failed" || s.RetryReserved }
+
+func (q *Queue) engineLoadDeadline(model Model) *time.Time {
+	timeout := model.ReadyTimeout
+	if timeout == 0 {
+		timeout = q.models.Wait
+	}
+	until := q.clock.Now().Add(timeout + engineReadySlack)
+	return &until
+}
+
+func (q *Queue) expireEngineLoad(s *ModelSlot) {
+	if s.State != "loading" {
+		return
+	}
+	if s.LoadUntil == nil {
+		// Upgrade persisted slots conservatively: initialize once, never extend
+		// this deadline on subsequent heartbeats or queue restarts.
+		model, _ := q.model(s.Model)
+		s.LoadUntil = q.engineLoadDeadline(model)
+	}
+	if q.clock.Now().Before(*s.LoadUntil) {
+		return
+	}
+	q.noteEngineFailure(s)
+	s.LoadTimedOut = true
+	s.RuntimeFailed = true
+	s.State = "unloading"
+	s.Error = "engine readiness timed out; cleanup pending"
+}
+
 // A slot's attempt identifies an engine, independently of the worker session.
 // Empty attempts preserve compatibility with reports from older workers.
 func (q *Queue) callExcludes(c *ModelCall, machine string) bool {
@@ -47,6 +80,10 @@ func (q *Queue) noteEngineFailure(s *ModelSlot) {
 }
 
 func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
+	q.expireEngineLoad(s)
+	if s.LoadTimedOut && r.State == "unloaded" {
+		r.State, r.RuntimeFailed = "failed", true
+	}
 	if r.RuntimeFailed && s.State != "failed" && s.State != "unloading" && s.State != "unload_failed" {
 		q.noteEngineFailure(s)
 		s.State = "unloading"
@@ -56,7 +93,7 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 		// Preserve prompt failure of an initial load (for example corrupt
 		// weights). Runtime recovery keeps queued demand through its backoff;
 		// it must not turn initial verification errors into silent retry waits.
-		if !r.RuntimeFailed && s.CrashCount == 0 {
+		if !r.RuntimeFailed {
 			for _, c := range q.calls {
 				if c.Model == s.Model && c.Machine == "" {
 					c.Error = "model load failed"
@@ -66,6 +103,10 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 		if s.State != "failed" && !(r.RuntimeFailed && s.RetryAt != nil) {
 			q.noteEngineFailure(s)
 		}
+		if s.State != "failed" {
+			s.RetryReserved = q.slotPinned(s)
+		}
+		s.RuntimeFailed = r.RuntimeFailed
 		s.State = "failed"
 		s.Error = ceilingDiagnostic(r.Error, "model load or unload failed")
 		// Reports confirm process/group cleanup; old call completions must not
@@ -88,6 +129,7 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 			s.Error = ""
 			s.RetryAt = nil
 			s.LastUsed = q.clock.Now()
+			s.LoadUntil = nil
 		}
 		if s.State != "ready" {
 			return
@@ -132,7 +174,24 @@ func (q *Queue) engineDemand(s *ModelSlot, m *Machine) *ModelCall {
 
 func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model Model) {
 	pinned := q.slotPinned(s)
+	if !pinned && s.RetryReserved {
+		s.RetryReserved = false
+		debt := min(model.MemoryGB, m.modelReservationDebtGB)
+		m.modelReservationDebtGB -= debt
+		m.FreeMemoryGB += model.MemoryGB - debt
+		q.refreshHostMemory()
+	}
 	demand := q.engineDemand(s, m)
+	if !pinned && !s.RuntimeFailed {
+		// A late transport retry can arrive after the failed load report.
+		// It must fail too, rather than turn a warm-up failure into a loop.
+		for _, c := range q.calls {
+			if c.Model == s.Model && c.Machine == "" {
+				c.Error = "model load failed"
+			}
+		}
+		demand = nil
+	}
 	if !pinned && demand == nil {
 		// An HTTP handler may still be converting a lost attempt into its
 		// permitted retry. Keep history until it retries or finishes; no memory
@@ -150,7 +209,7 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 	if !pinned {
 		return
 	}
-	if s.RetryAt == nil || q.clock.Now().Before(*s.RetryAt) || m.Gone || m.Leaving || q.networkQuiet || q.unreported[m.ID] || m.MemoryError != "" || m.ModelURL == "" || !q.modelUsableMachine(model, m) {
+	if s.RetryAt == nil || m.Gone || m.Leaving || q.networkQuiet || q.unreported[m.ID] || m.MemoryError != "" || m.ModelURL == "" || !q.modelUsableMachine(model, m) {
 		return
 	}
 	priority := "production"
@@ -169,9 +228,15 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 	if !q.placementAllowed(job, m) {
 		return
 	}
-	if m.FreeMemoryGB < model.MemoryGB || !hostFits(m, model.MemoryGB, model.HostMemoryGB) {
-		// Reuse ordinary pin reclamation after backoff; released crash memory
-		// may have been borrowed by lower-priority work in the meantime.
+	room := *m
+	if s.RetryReserved {
+		// The pin alone can spend its planning reservation. It is never
+		// returned to the batch scheduler during crash backoff.
+		room.FreeMemoryGB = max(0, room.FreeMemoryGB+model.MemoryGB-m.modelReservationDebtGB)
+		room.FreeHostMemoryGB = max(0, room.FreeHostMemoryGB+hostNeed(m, model.MemoryGB, model.HostMemoryGB)-m.hostReservationDebtGB)
+	}
+	if room.FreeMemoryGB < model.MemoryGB || !hostFits(&room, model.MemoryGB, model.HostMemoryGB) {
+		// A newly added pin can still need ordinary pin reclamation.
 		if q.reclaimableGPUMemory(m, priority) < model.MemoryGB || !q.reclaimHost(m, model.MemoryGB, model.HostMemoryGB, priority, "pin") {
 			return
 		}
@@ -183,13 +248,23 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 		}
 		return
 	}
-	q.beginEngineAttempt(s, priority)
-	m.FreeMemoryGB -= model.MemoryGB
+	if !s.RetryReserved {
+		s.RetryReserved = true
+		m.FreeMemoryGB -= model.MemoryGB
+	}
 	q.refreshHostMemory()
+	if !q.clock.Now().Before(*s.RetryAt) {
+		q.beginEngineAttempt(s, priority)
+	}
 }
 
 func (q *Queue) beginEngineAttempt(s *ModelSlot, priority string) {
 	s.State = "loading"
+	s.RetryReserved = false
+	s.LoadTimedOut = false
+	s.RuntimeFailed = false
+	model, _ := q.model(s.Model)
+	s.LoadUntil = q.engineLoadDeadline(model)
 	s.FailureCounted = false
 	s.Attempt = ID()
 	s.InFlight = 0

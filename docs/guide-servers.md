@@ -183,26 +183,38 @@ upstream bodies.
 
 After readiness, the supervisor watches process exit for the entire engine
 lifetime. It also repeats the startup health check every **100 ms**, with a
-**one-second timeout per probe**, requiring HTTP 2xx without redirects. Three
-consecutive failures while the process is alive withdraw readiness; a successful
-probe resets that failure count. Probes are serial, so three timed-out probes
-can take about three seconds. Process exit requires no health-failure threshold.
+**five-second timeout per probe**, requiring HTTP 2xx without redirects. Readiness is
+withdrawn after **at least three consecutive failures spanning at least 15
+seconds**, measured from the start of the first failed probe. Fast HTTP failures
+keep probing through that window; a successful probe resets both the failure
+count and window. Probes are serial and each has a five-second deadline. Process
+exit requires no health-failure threshold.
 At the next worker check-in the slot leaves `ready`, routing stops, and cleanup
 terminates/verifies the owned group. Memory and the environment lease stay held
 until cleanup succeeds. `unload_failed` stays held visibly and never auto-reloads.
 
 Pinned entries and entries with queued demand reload automatically after cleanup.
-An initial load failure still fails its waiting calls promptly, including model
-verification failures; pin warm-up retains its automatic retry policy.
+Every failed load fails its waiting calls promptly, including repeated model
+verification failures. Unpinned demand does not retry failed warm-up; pin warm-up
+retains its automatic retry policy. Recovery waits apply to runtime crashes.
 Startup and runtime failures back off for 1s, 2s, 4s, 8s, 16s, then at most 30s,
 using the injected queue Clock. Brief readiness does **not** clear crash history:
 backoff resets after **60 continuously healthy seconds**. Even a recovered probe
 failure between heartbeats interrupts that healthy interval. Status exposes
 `attempt`, `crash_count` (failures since that reset), `retry_at`, `retry_delay`,
 `healthy_since`, and a fixed `error`; queued-call reasons explain pending cleanup,
-loading or the next restart time. Backoff holds no memory after confirmed cleanup.
+loading or the next restart time. Confirmed cleanup releases physical custody
+and environment leases. During crash backoff, an active pin keeps its scheduler
+GPU/host-memory reservation (`retry_reserved`); batches cannot borrow it. Unpinning
+releases that planning reservation. Unpinned crash backoff holds no memory.
 With no pin or remaining demand, the failed slot is removed. Pins and retry state
-persist; a new worker session reloads.
+persist; a new worker session reloads. If a rejoining worker still holds a
+different engine attempt, it drains and cleans that attempt before starting the
+replacement. Cleanup failure blocks the replacement and retains custody. A load
+plan expires after `ready_timeout` plus five seconds of check-in slack, using the
+injected queue Clock (`load_until`). If `ready_timeout` is omitted, `max_wait`
+supplies the timeout. Expiry withdraws the load and enters normal crash backoff
+only after cleanup is acknowledged; it never credits unconfirmed memory.
 
 Queued calls may wait for recovery only within their existing `max_wait`.
 The failed-worker exclusion is scoped to an engine attempt: a fresh attempt on
@@ -214,7 +226,10 @@ headers are sent. Opted-in calls retain one pre-response retry, now also on a
 fresh engine attempt. Ordinary
 OpenAI transport failures without confirmed engine death retain their existing
 single pre-response retry. No replay is allowed
-after response bytes have started. Attempt identity travels only between queue
+after response bytes have started. A worker rejects missing, stale or unhealthy
+engines before forwarding. Such calls have not executed and may retry once even
+with `retry_safe: false`; an internal attempt-bound rejection receipt distinguishes
+these from possibly executed engine failures. Attempt identity travels only between queue
 and worker and is never forwarded to the engine. A late report or completion
 from an old attempt cannot make the replacement ready or consume its capacity.
 

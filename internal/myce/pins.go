@@ -146,7 +146,7 @@ func (q *Queue) maintainPins() {
 				continue
 			}
 			if m.FreeMemoryGB >= model.MemoryGB && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
-				q.s.ModelSlots[key] = &ModelSlot{Model: p.Model, Machine: m.ID, Session: m.Session, State: "loading", Attempt: ID(), Priority: "production", LastUsed: now}
+				q.s.ModelSlots[key] = &ModelSlot{Model: p.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(model), Attempt: ID(), Priority: "production", LastUsed: now}
 				m.FreeMemoryGB -= model.MemoryGB
 				q.refreshHostMemory()
 				p.Assigned = m.ID

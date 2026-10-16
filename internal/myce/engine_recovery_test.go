@@ -57,8 +57,12 @@ func TestEngineRecoveryCrashLoopClockAndFreshAttempt(t *testing.T) {
 				if s.State != "failed" || s.RetryAt == nil || s.RetryDelay != delay || s.RetryAt.Sub(clock.Now()) != delay {
 					t.Fatalf("backoff: %+v", s)
 				}
-				if got := q.modelMemory(m.ID); got != 0 {
-					t.Fatalf("dead group retained memory: %v", got)
+				reserved := 0.0
+				if pinned {
+					reserved = q.models.Models[0].MemoryGB
+				}
+				if got := q.modelMemory(m.ID); got != reserved {
+					t.Fatalf("incorrect planning reservation after cleanup: %v", got)
 				}
 				if pending.Machine != "" {
 					t.Fatal("routed into dead engine")
@@ -289,7 +293,8 @@ func TestEngineRecoveryHealthThresholdAndTimeout(t *testing.T) {
 				w.WriteHeader(code)
 			}))
 			defer health.Close()
-			e := &LlamaEngine{exited: make(chan struct{})}
+			clock := &manualWorkerClock{now: time.Unix(0, 0)}
+			e := &LlamaEngine{exited: make(chan struct{}), Clock: clock}
 			e.startHealthMonitor(health.URL)
 			defer func() { e.monitorCancel(); <-e.monitorDone }()
 			// Two failures, then a success: failure count must start over.
@@ -305,6 +310,7 @@ func TestEngineRecoveryHealthThresholdAndTimeout(t *testing.T) {
 					t.Fatalf("failed before third consecutive failure: %v", err)
 				}
 			}
+			clock.Advance(serverHealthWindow)
 			permits <- false
 			await(t, func() bool { err, _, _ := e.runtimeHealth(); return err != nil })
 		})
@@ -479,7 +485,7 @@ func TestEngineRecoveryRejectsLateCallAndCompletion(t *testing.T) {
 	req.Header.Set("X-Myce-Engine-Attempt", "old")
 	recorder := httptest.NewRecorder()
 	rt.serve(recorder, req)
-	if recorder.Code != 503 || recorder.Header().Get("X-Myce-Engine-Failed") != "old" {
+	if recorder.Code != 503 || recorder.Header().Get("X-Myce-Engine-Failed") != "" || recorder.Header().Get("X-Myce-Engine-Rejected") != "old" {
 		t.Fatal("late call reached replacement engine")
 	}
 	q, _, m := modelFixture(t)
@@ -496,7 +502,7 @@ func TestEngineRecoveryRejectsLateCallAndCompletion(t *testing.T) {
 	}
 }
 
-func TestEngineRecoveryPinReclaimsBorrowedMemory(t *testing.T) {
+func TestEngineRecoveryPinReservesBackoffMemory(t *testing.T) {
 	q, clock, m := modelFixture(t)
 	if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
 		t.Fatal(err)
@@ -506,17 +512,12 @@ func TestEngineRecoveryPinReclaimsBorrowedMemory(t *testing.T) {
 	recoveryReport(t, q, m, s, "failed")
 	borrowed := submit(t, q, spec("experiment"))
 	running := check(t, q, m, nil).Job
-	if running == nil || running.ID != borrowed.ID {
-		t.Fatal("cleaned crash memory was not released")
+	if running != nil || q.s.Jobs[borrowed.ID].State != "queued" || !s.RetryReserved {
+		t.Fatal("batch borrowed pinned crash-backoff reservation")
 	}
 	clock.Advance(time.Second)
-	check(t, q, m, running)
-	if q.s.Jobs[borrowed.ID].State != "stopping" || s.State != "failed" {
-		t.Fatal("pin did not reclaim or loaded before stop acknowledgement")
-	}
-	finish(t, q, running, true)
 	check(t, q, m, nil)
-	if s.State != "loading" || s.CrashCount != 1 {
+	if s.State != "loading" || s.CrashCount != 1 || q.s.Jobs[borrowed.ID].State != "queued" {
 		t.Fatalf("pin recovery lost priority/history: %+v", s)
 	}
 }
