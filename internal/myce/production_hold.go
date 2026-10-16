@@ -154,11 +154,20 @@ func (q *Queue) reconcileHostReleases(c Checkin) {
 
 // Placement policy is shared by batch, model, preparation and projections.
 func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
+	return q.placementAllowedForUse(j, m, false)
+}
+
+func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
 	if !logPolicyFits(j.Spec.Logs, m) {
 		return false
 	}
-	if model, ok := q.model(j.Spec.Needs.Model); ok && (!logPolicyFits(model.Logs, m) || !modelFenceAllows(model, m) || !q.projectAllows(model.Project, m.ID)) {
-		return false
+	if model, ok := q.model(j.Spec.Needs.Model); ok {
+		if resident {
+			model = q.residentModel(model, m)
+		}
+		if !logPolicyFits(model.Logs, m) || !modelFenceAllows(model, m) || !q.projectAllows(model.Project, m.ID) {
+			return false
+		}
 	}
 
 	if availabilityBlocked(m) || (q.machineLimitReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))) || m.EnablePending || q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || m.Disabled != "" || q.s.DisabledHosts[hostID(m)] != "" || !q.projectAllows(j.Spec.Project, m.ID) {
@@ -287,6 +296,9 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 			continue
 		}
 		model, hasModel := q.model(j.Spec.Needs.Model)
+		if hasModel && call != nil {
+			model = q.residentModel(model, m)
+		}
 		if hasModel && !q.modelFitsMachine(model, m) {
 			continue
 		}

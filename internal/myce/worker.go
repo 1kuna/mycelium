@@ -1006,8 +1006,8 @@ func (w Worker) Run(stop context.Context) error {
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
 			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none")
-			m.ApprovedModels = rt.cache.ApprovedModels(w.ModelConfig.Models)
-			rt.setLocalApprovals(m.ApprovedModels)
+			m.ApprovedModels, m.ModelApprovalStates = rt.cache.modelApprovals(w.ModelConfig.Models)
+			rt.setLocalApprovals(m.ApprovedModels, m.ModelApprovalStates)
 			reports, _ := rt.report()
 			if rt.cache != nil {
 				var ce error

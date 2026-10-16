@@ -208,24 +208,41 @@ func (c *ModelCache) prepareLocal(ctx context.Context, m Model) (string, error) 
 // helper to retain at most one outstanding scan, including after a timeout.
 const localApprovalTimeout = 250 * time.Millisecond
 
+// ModelApprovalState describes the last bounded check of a local source.
+// An omitted state retains the legacy approved_models-only behavior.
+type ModelApprovalState string
+
+const (
+	approvalVerified ModelApprovalState = "verified"
+	approvalInvalid  ModelApprovalState = "invalid"
+	approvalUnknown  ModelApprovalState = "unknown"
+)
+
 type localApprovalSnapshot struct {
 	models map[string]string
+	states map[string]ModelApprovalState
 	ctx    context.Context
 }
 
 func (c *ModelCache) ApprovedModels(models []Model) map[string]string {
+	approved, _ := c.modelApprovals(models)
+	return approved
+}
+
+func (c *ModelCache) modelApprovals(models []Model) (map[string]string, map[string]ModelApprovalState) {
 	hasLocal := false
 	for _, m := range models {
 		hasLocal = hasLocal || m.LocalSource != ""
 	}
 	if !hasLocal {
-		return nil
+		return nil, nil
 	}
 	c.localProbeInit.Do(func() { c.localProbe.timeout = localApprovalTimeout })
 	ctx, cancel := context.WithTimeout(context.Background(), localApprovalTimeout)
 	defer cancel()
 	approved, err := c.localProbe.run(modelConfigHash(ModelConfig{Models: models}), func() (localApprovalSnapshot, error) {
 		out := map[string]string{}
+		states := map[string]ModelApprovalState{}
 		// Multiple entries can reference the same immutable approval.
 		checked := map[string]bool{}
 		for _, m := range models {
@@ -237,14 +254,16 @@ func (c *ModelCache) ApprovedModels(models []Model) map[string]string {
 				continue
 			}
 			checked[key] = true
+			states[m.LocalSource] = approvalInvalid
 			if _, err := c.prepareLocal(ctx, m); err == nil {
 				out[m.LocalSource] = m.SHA256
+				states[m.LocalSource] = approvalVerified
 			}
 			if err := ctx.Err(); err != nil {
 				return localApprovalSnapshot{}, err
 			}
 		}
-		return localApprovalSnapshot{models: out, ctx: ctx}, nil
+		return localApprovalSnapshot{models: out, states: states, ctx: ctx}, nil
 	})
 	// A completed result from an earlier timed-out heartbeat stays invalid.
 	if err != nil || approved.ctx.Err() != nil {
@@ -255,11 +274,17 @@ func (c *ModelCache) ApprovedModels(models []Model) map[string]string {
 		c.localWarningMu.Lock()
 		now := clock.Now()
 		if !now.Before(c.nextApprovalWarning) {
-			log.Print("local model approval not currently verifiable; withholding loads and routing (will retry)")
+			log.Print("local model approval not currently verifiable; withholding new loads; ready servers keep serving (will retry)")
 			c.nextApprovalWarning = now.Add(time.Minute)
 		}
 		c.localWarningMu.Unlock()
-		return nil
+		states := map[string]ModelApprovalState{}
+		for _, m := range models {
+			if m.LocalSource != "" {
+				states[m.LocalSource] = approvalUnknown
+			}
+		}
+		return nil, states
 	}
-	return approved.models
+	return approved.models, approved.states
 }

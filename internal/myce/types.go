@@ -301,6 +301,9 @@ type Machine struct {
 	LastSeen                    time.Time           `json:"last_seen"`
 	Leaving                     bool                `json:"leaving"`
 	Gone                        bool                `json:"gone"`
+
+	// Per-local_source tri-state; omission preserves legacy approved_models semantics.
+	ModelApprovalStates map[string]ModelApprovalState `json:"model_approval_states,omitempty"`
 }
 type Execution struct {
 	Progress int64  `json:"progress,omitempty"`

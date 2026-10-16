@@ -398,7 +398,7 @@ func TestEntryWorkerLoadsApprovedSourceWithLocalSecrets(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	rt.setLocalApprovals(rt.cache.ApprovedModels([]Model{model}))
+	rt.setLocalApprovals(rt.cache.ApprovedModels([]Model{model}), nil)
 	rt.sync([]ModelSlot{{Model: model.Name, State: "loading", Session: "entry-session", Placement: &ModelPlacement{AllowedMachines: []string{"eligible"}}}})
 	await(t, func() bool { reports, _ := rt.report(); return len(reports) == 1 && reports[0].State == "ready" })
 	path, err := rt.cache.Prepare(context.Background(), model)
