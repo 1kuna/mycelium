@@ -62,6 +62,8 @@ type Worker struct {
 	CopyParallel                int
 	CacheRoot, ModelRoot        string
 	CacheLimit                  int64
+	SecretRoot                  string
+	ModelApprovalRoot           string
 	ModelConfig                 ModelConfig
 	ModelListen, ModelAdvertise string
 	Client                      Client
@@ -1003,6 +1005,7 @@ func (w Worker) Run(stop context.Context) error {
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
+			m.ApprovedModels = rt.cache.ApprovedModels(w.ModelConfig.Models)
 			reports, _ := rt.report()
 			if rt.cache != nil {
 				var ce error

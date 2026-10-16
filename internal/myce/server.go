@@ -103,12 +103,25 @@ func serverCommand(m Model, port int) ([]string, string, []string, []string, err
 	if len(argv) == 0 {
 		return nil, "", nil, nil, errors.New("server command missing")
 	}
+	if err := validateModelEnv(m); err != nil {
+		return nil, "", nil, nil, err
+	}
 	env := map[string]string{}
 	for _, entry := range os.Environ() {
 		k, v, ok := strings.Cut(entry, "=")
 		if ok && k != "MYCE_TOKEN" {
 			env[k] = v
 		}
+	}
+	for k, v := range m.Env {
+		env[k] = v
+	}
+	secrets, err := readModelSecrets(m.secretRoot, m.SecretEnv, m.fleetToken)
+	if err != nil {
+		return nil, "", nil, nil, err
+	}
+	for k, v := range secrets {
+		env[k] = v
 	}
 	if m.Device != "" {
 		// Explicit per-process bindings override inherited selectors for every backend.
@@ -191,7 +204,7 @@ func (l *LlamaEngine) StreamRequest(ctx context.Context, method, path string, bo
 }
 
 func modelFitsMachine(model Model, m *Machine) bool {
-	return !m.EnablePending && contains(model.Platforms, m.GPU) && (model.Device == "" || model.Device == m.Device)
+	return !m.EnablePending && modelFenceAllows(model, m) && contains(model.Platforms, m.GPU) && (model.Device == "" || model.Device == m.Device)
 }
 
 // WithModelDevice applies a per-process selector; global environment is untouched.

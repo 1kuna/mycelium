@@ -25,7 +25,7 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 		"queue", "join", "leave", "submit", "usage", "status", "logs", "cancel", "dev",
 		"disable", "enable", "resolve-docker", "detect", "service", "wait", "measure",
 		"invite", "benchmark", "sim", "install worker", "install queue", "uninstall", "doctor",
-		"file put", "file get", "model fetch", "model sync", "model pin", "model unpin",
+		"file put", "file get", "model fetch", "model approve-local", "model sync", "model pin", "model unpin",
 		"extension add", "extension list", "extension setup", "extension check",
 		"host-queues list", "host-queues forget", "host-memory-budget show", "host-memory-budget set 8",
 	}

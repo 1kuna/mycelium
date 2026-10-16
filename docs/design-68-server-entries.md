@@ -1,119 +1,94 @@
-# Proposal: native Atlas server entries (#68)
+# Native server entries (#68)
 
-Design only; [the approved design](design-proposal.md) remains the product spec.
-Reuse `Model`, `engine: server`, `start_command`, environment recipes, health
-checks, pins, memory admission and idle unloading for the chat LLM, GLM-OCR and
-Chandra. Preserve each approved vLLM argv on CUDA arm64; qualify its exact
-runtime/environment separately. No new server supervisor, dependency manager,
-CPU-only jobs or automatic permanent reservations. `logs: none` already exists
-on models and now also covers batch jobs; it does not control HTTP upload spools.
+Approved by maintainer on 2026-10-16. These additions reuse the existing scheduler,
+server supervisor, environment recipes, health checks, pins and memory admission.
+They do not qualify a CUDA arm64 runtime or change capacity declarations.
 
-## 1. Entry ownership and placement
+## Shared entries and placement
 
-Add optional `Model.project` and `Model.allowed_machines`, matching `Spec`.
-Omission retains shared entries and existing placement. A nonempty project owns
-the entry: reject calls and pins from another project. Intersect the entry's
-allow-list with `ProjectPolicy.AllowedMachines`, platform/device/environment
-eligibility and any pin restriction; never let one widen another. Empty lists
-mean unrestricted at that layer. An empty intersection waits with a clear reason.
+Optional `project` identifies the entry owner, accounts for its idle model
+reservation, and supplies missing `/v1` project labels. Models remain shared:
+any project may call or pin any entry. Explicit caller labels retain their own
+call accounting and scheduling policy.
 
-Extend catalog validation in `models.go`, `modelFitsMachine` in `server.go`,
-call selection/reclamation in `models.go`, `maintainPins` in `pins.go` and
-pre-copy planning in `sync.go`. Snapshot restrictions into worker load plans;
-recheck them on dispatch and reconnect, including already loaded copies. Status
-keeps ownership and placement visible. Changing a fence must drain an excluded
-copy before reuse, preserving cleanup custody and memory accounting.
+Optional `allowed_machines` intersects the owner's project machine policy, the
+caller's policy, platform/device eligibility and pin restrictions. Empty lists
+are unrestricted at that layer. Calls wait if no eligible worker is available;
+status shows the placement fences. A tightened fence drains excluded copies and
+retains memory custody until the worker confirms unloading. Load plans carry
+current fences; workers recheck them. Pre-copy and pins obey the same fences.
 
-Risk: missing any warmup/reuse path bypasses the fence. Project labels with the
-shared fleet token are accounting controls, not independent tenant credentials;
-plain commands retain worker-user permissions. This extends the approved
-project allow-list rule without conflicting with AGENTS.md or scheduling order.
-**Question for maintainer:** should `project` make an entry exclusive? Recommend yes
-when set, retaining shared access only for entries that omit it.
+## Environment and local named secrets
 
-## 2. Explicit environment and named secrets
+`env` is a map of non-secret literals, applied to start and stop commands.
+`secret_env` maps environment-variable names to local secret names. Provision
+one regular **mode-0600 file** per name in a **mode-0700 directory**, then pass
+`myce join --secret-root SECRET_DIRECTORY`. Directory traversal, symlink files,
+missing files and permissive modes refuse loading. Files may contain up to
+64 KiB; one trailing LF or CRLF is stripped. No remote secret service is used.
 
-Add `Model.env: map[string]string` for non-secret literal values and
-`Model.secret_env: map[string]string` mapping environment variable to a local
-secret name. Extend `serverCommand` in `server.go`; reuse environment acquisition
-and launch rather than wrappers. Resolve approved names from operator-provisioned
-worker-local secret storage only immediately before start; unavailable names
-refuse load. Use the same process environment for the optional stop command.
-Keep values out of catalog/SQLite/load plans, errors, command lines and status.
+Only names enter catalogs and queue messages. Values are read immediately before
+launch and kept in process memory, including the stop helper's environment.
+`secret_env` requires `logs: none`: even a server that prints its environment
+must not leave secret values in Mycelium logs. Errors never include secret
+contents or local secret paths. Plain commands can read their supplied secrets;
+operators must also control application telemetry and external log sinks.
 
-Reject overrides of `MYCE_*`, device selectors, framework offline controls and
-worker environment paths; worker-owned values win. Never inherit, reference or
-alias the fleet token into either process. Device selection remains
-`device_env`, with its existing validation. Operators must keep `env` literals
-non-secret; a validator cannot reliably identify arbitrary credentials.
+The maps cannot override `MYCE_*`, accelerator selectors, offline controls,
+`LLAMA_ARG_*`, or worker-controlled executable/environment paths. Use `device`
+and `device_env` for device selection. `MYCE_TOKEN` is stripped; provisioning
+its value under another local secret name is rejected. Keep `env` literals
+non-secret; arbitrary credentials cannot be identified from their spelling.
 
-Risk: a trusted payload can read its supplied secret or write its own telemetry;
-`logs: none` only stops Mycelium output capture. No sandbox is implied. This is
-compatible with plain-command execution and AGENTS.md's token prohibition; named
-secret storage is a small new configuration contract.
-**Question for maintainer:** include secret resolution now? Recommend the two maps
-with only explicitly provisioned local names, no remote secret service; Atlas
-can start with non-secret `env` alone if no runtime secret is needed.
+## Approved in-place model folders
 
-## 3. Operator-approved local weights
+On each host, explicitly approve the exact folder and a root bounding both the
+folder and any symlinked HF snapshot blobs:
 
-Add `Model.local_source: APPROVAL_NAME`, mutually exclusive with `file_store`
-and `direct_nas`. Keep `files`, `size_bytes` and `sha256` as the manifest identity.
-An explicit worker-local approval binds the alias, physical host, immutable HF
-snapshot revision, canonical snapshot root, permitted blob root and manifest.
-Approval computes hashes once, following snapshot symlinks only into that blob
-root; reject dangling links, traversal, special files and unlisted files. Cache
-the manifest/approval durably in worker state. Catalogs and check-ins carry the
-alias and identity, never the private source path.
+```sh
+myce model approve-local APPROVAL_NAME \
+  --path MODEL_FOLDER --approved-root SNAPSHOT_AND_BLOB_ROOT \
+  --model-approval-root LOCAL_APPROVAL_DIRECTORY
+```
 
-Extend `ModelCache.Prepare` in `cache.go` and bundle validation in
-`model_files.go` with this separate source mode; do not weaken the normal
-no-symlink copy path. Later loads check the cached approval, link targets and
-file metadata, then pass the original snapshot path to `{model_path}` without
-copying or reading weight bytes again. Missing/changed metadata invalidates
-approval and requires explicit reapproval; no silent NAS/download fallback.
-Only workers advertising that approved identity are eligible. Sync reports
-local readiness without transfers; Mycelium never evicts or deletes external
-snapshots/blobs. The operator must protect them from HF cache cleanup/mutation
-while approved, including while unloaded, and retain a recovery source.
+This is a local command and does not contact the queue. It hashes regular files
+once, records the canonical folder, host, complete file/directory metadata and
+symlink targets, and prints portable `local_source`, `files`, `size_bytes` and
+`sha256` fields. Put those fields in the entry. Omit `path`, `file_store` and
+`direct_nas`. Start the worker with the same `--model-approval-root` directory.
+Keep the approval directory mode 0700 and records private and local; they contain source paths and host
+identity. File names in the portable manifest should also be reviewed before
+sharing a catalog.
 
-Risk: metadata checks cannot prove unchanged bytes against a malicious writer.
-This explicitly trusts operator-controlled immutable storage; read-only access
-for the runtime alone is insufficient if another process can modify the blobs.
-It conflicts with the approved NAS-master/local-verified-copy contract and
-relaxes no-symlink custody for this mode only. AGENTS.md's laptop testability,
-attempt custody and token rules remain intact.
-**Question for maintainer:** approve this custody exception? Recommend opt-in per-host
-approval only for operator-protected snapshots, with explicit reapproval after
-changes, rather than hashing on every load or accepting arbitrary argv paths.
+Loads use the original folder as `{model_path}`, with no copy, NAS fallback,
+rehash or external-file eviction. Workers advertise only approved identities.
+Every check uses the file set, size, mtime, mode, device/inode and symlink-target
+metadata. A changed/missing file, new file, changed blob or different host
+invalidates readiness. Re-run the explicit approval command after changes and
+update the catalog manifest if its content identity changed. All symlink targets
+must stay within the approved root; directory symlinks and special files are
+rejected. The ordinary copied-model no-symlink rules are unchanged.
 
-## 4. Header-less OpenAI clients
+Protect approved snapshots/blobs against writes and HF cleanup while used.
+Metadata checks trust operator-controlled immutable storage; they do not detect
+a malicious writer preserving all observed metadata. Retain a recovery source.
 
-After parsing the model name in `API.modelCall` (`models.go`), use its nonempty
-`project` when `X-Myce-Project` is absent. Add optional
-`ProjectPolicy.default_call_priority` for a missing priority header; recommend
-`experiment`, allowing explicit operator approval of `production`. Invalid
-supplied headers still fail; explicit projects must satisfy entry ownership.
-Deadline priority still needs a valid deadline. Shared models without an owner
-still require a project header. The OpenAI JSON body and `/v1` routes stay intact.
+## Header-less OpenAI clients
 
-Fleet bearer authentication remains mandatory and is stripped before forwarding
-by `proxyHeaders`. A project default supplies scheduling context, never authority;
-it cannot make a shared bearer token project-scoped. Standard OpenAI clients can
-use their API-key setting for authentication. A client that cannot hold the
-fleet token needs an operator-controlled local adapter or a separately approved
-credential design. Do not expose the queue publicly or embed its token in YAML.
+Fleet bearer authentication is always required. On `/v1` routes, an owned entry
+supplies its `project` when `X-Myce-Project` is absent and uses `experiment` when
+`X-Myce-Priority` is absent. A project policy can explicitly set
+`default_call_priority: production`; that opt-in applies to missing priority
+headers for that project. Explicit caller headers remain supported, including
+production calls under the existing contract. Invalid/empty/duplicate supplied
+headers fail; deadline priority still requires an RFC3339 deadline.
 
-Risk: defaults can misattribute work or grant unintended production priority.
-No AGENTS.md conflict; selecting a priority by configured default extends the
-spec's “with a priority” contract and needs approval. Generic OCR routes still
-spool uploads; header defaults and log opt-out do not satisfy #10's body-free
-storage rule for those routes.
-**Question for maintainer:** allow model-owned project fallback and per-project priority
-defaults? Recommend yes, explicit opt-in with `experiment` as the safe default;
-retain fleet authentication and keep project-scoped credentials separate.
+Entries without `project` retain the existing required-header behavior. Generic
+`/models/NAME/PATH` calls retain required headers and upload spooling; these
+changes do not resolve the separate body-storage privacy hold.
 
-Before any native proof: fake-clock placement/pin/reuse tests, laptop symlink
-approval/invalidation tests, secret/token exclusion tests and HTTP default/auth
-tests. Then the integration owner agrees capacity/pin hours, runtime identity
-and body-storage privacy before a separately authorized hardware run.
+[The dry Atlas example](examples/atlas-server-entries.yaml) uses placeholders.
+Replace every placeholder using approved runtime argv, an environment recipe,
+qualified memory declarations and the local approval output. Pinning is separate
+and requires agreed capacity/hours. Native runtime, memory peaks and application
+telemetry need separate authorized hardware verification.

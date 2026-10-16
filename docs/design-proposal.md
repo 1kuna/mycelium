@@ -264,3 +264,18 @@ after verified durable transfer. Checkpoint commands still use
 SQLite queue, plain commands, injected scheduling clock and attempt ownership
 remain. Explicit NAS configuration retains the v2 path. One store is not a backup.
 See [files without a NAS](guide-files-v3.md) for configuration and retention limits.
+
+## Shared native server entry additions (approved 2026-10-16, #68)
+
+Server entries may set `project` and `allowed_machines`. Models stay shared
+across projects; owner and caller placement policies intersect. Optional `env`
+contains non-secret literals; `secret_env` references worker-local named secrets,
+read only at launch from private mode-0600 files, with `logs: none` required.
+An explicit per-folder/per-host `local_source` approval permits in-place model
+use, including HF blob symlinks within the approved root. Fingerprint once,
+check metadata subsequently, and require explicit reapproval after changes.
+This opt-in source is an exception to the normal verified-copy contract;
+ordinary copied-model custody is unchanged. Authenticated header-less `/v1`
+calls default to the entry owner and `experiment`; a per-project production
+default requires explicit operator opt-in. Existing entries retain defaults.
+See [operator configuration](design-68-server-entries.md).

@@ -98,7 +98,7 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 			}
 			if !found {
 				model, _ := q.model(slot.Model)
-				rows = append(rows, usageSample{Model: slot.Model, Memory: model.MemoryGB})
+				rows = append(rows, usageSample{Project: model.Project, Model: slot.Model, Memory: model.MemoryGB})
 			}
 		}
 	}

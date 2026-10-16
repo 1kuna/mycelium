@@ -211,6 +211,8 @@ on the main thread; callers explicitly save and exit. See the
 | `join --model-cache-bytes N` | Active cache allowance in bytes; default 107374182400 (100 GiB) |
 | `queue --production-stop-grace 10s` | Resumable experiment/deadline save allowance when production needs room |
 | `model fetch FILE --model-root DIR --url URL --size-bytes N --sha256 HASH` | Explicitly download one Hugging Face master; refuse overwrite |
+| `model approve-local NAME --path FOLDER --approved-root ROOT --model-approval-root DIR` | Approve an in-place folder on this host; emit a portable manifest |
+| `join --model-approval-root DIR --secret-root DIR` | Local approval records and named secret files; see the server-entry guide |
 | `join --model-copy-parallel N` | Concurrent background copies; default 1 |
 | `model sync MODEL --to M\|cuda\|metal\|xpu\|all` | Persist a pre-copy request; `--cancel` pauses it and preserves partial bytes |
 | `model pin MODEL --project P --machine M` | Hold a production model on M |
@@ -672,3 +674,6 @@ On the opt-in v3 branch, jobs can describe a `kind` (with `args`) or a `program`
 frozen extension version. Existing v2 forms above are unchanged. See
 [write an extension](write-an-extension.md) for the common YAML/JSON/Python
 form, setup/check qualification and per-attempt output contract.
+
+Native server entry placement, `env`/`secret_env`, local model approval and
+OpenAI client defaults: [operator configuration](design-68-server-entries.md).

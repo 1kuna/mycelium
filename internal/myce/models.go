@@ -32,6 +32,14 @@ type VLLMPreset struct {
 	GPUMemoryUtilization float64 `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
 }
 type Model struct {
+	Project         string            `yaml:"project,omitempty" json:"project,omitempty"`
+	AllowedMachines []string          `yaml:"allowed_machines,omitempty" json:"allowed_machines,omitempty"`
+	Env             map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	SecretEnv       map[string]string `yaml:"secret_env,omitempty" json:"secret_env,omitempty"`
+	LocalSource     string            `yaml:"local_source,omitempty" json:"local_source,omitempty"`
+	secretRoot      string
+	fleetToken      string
+
 	FileStore       bool              `yaml:"file_store,omitempty" json:"file_store,omitempty"`
 	RequestTimeout  time.Duration     `yaml:"request_timeout,omitempty" json:"request_timeout,omitempty"`
 	RetrySafe       bool              `yaml:"retry_safe,omitempty" json:"retry_safe,omitempty"`
@@ -105,11 +113,25 @@ func validateModels(c ModelConfig) error {
 		if m.MaxInFlight < 0 {
 			return errors.New("max_in_flight must be nonnegative (zero means unlimited)")
 		}
-		if m.Name == "" || seen[m.Name] || (m.Path == "" && !m.FileStore) || m.MemoryGB <= 0 || math.IsNaN(m.MemoryGB) || math.IsInf(m.MemoryGB, 0) || len(m.Platforms) == 0 {
+		if m.Name == "" || seen[m.Name] || (m.Path == "" && !m.FileStore && m.LocalSource == "") || m.MemoryGB <= 0 || math.IsNaN(m.MemoryGB) || math.IsInf(m.MemoryGB, 0) || len(m.Platforms) == 0 {
 			return errors.New("models require unique names, path, positive memory and platforms")
 		}
 		if m.Engine != "fake" && (m.SizeBytes <= 0 || len(m.SHA256) != 64) {
 			return fmt.Errorf("model %s requires size_bytes and sha256", m.Name)
+		}
+		if m.LocalSource != "" && (!localName(m.LocalSource) || m.FileStore || m.DirectNAS || m.Path != "" || len(m.Files) == 0) {
+			return errors.New("local_source requires a named approval and files; omit path, file_store and direct_nas")
+		}
+		if strings.TrimSpace(m.Project) != m.Project {
+			return errors.New("model project must not contain surrounding whitespace")
+		}
+		for _, machine := range m.AllowedMachines {
+			if strings.TrimSpace(machine) == "" {
+				return errors.New("model allowed_machines requires nonempty names")
+			}
+		}
+		if err := validateModelEnv(m); err != nil {
+			return err
 		}
 		if m.FileStore && (m.DirectNAS || m.SizeBytes <= 0) {
 			return errors.New("file_store models require verified cached bytes, not direct_nas")
@@ -157,6 +179,8 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
+	Placement *ModelPlacement `json:"placement,omitempty"`
+
 	RetryAt           *time.Time         `json:"retry_at,omitempty"`
 	RetryDelay        time.Duration      `json:"retry_delay,omitempty"`
 	ReleasingCalls    bool               `json:"releasing_calls,omitempty"`
@@ -376,7 +400,8 @@ func (q *Queue) maintainModels() {
 			delete(q.s.ModelSlots, k)
 			continue
 		}
-		if availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle {
+		model, exists := q.model(s.Model)
+		if (!exists || !q.modelFitsMachine(model, m)) && s.State != "unload_failed" || availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle {
 			s.State = "draining"
 		}
 	}
@@ -416,7 +441,7 @@ func (q *Queue) maintainModels() {
 			return machines[i].ID < machines[j].ID
 		})
 		for _, m := range machines {
-			if !q.placementAllowed(callJob(c), m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] {
+			if !q.placementAllowed(callJob(c), m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !q.modelFitsMachine(model, m) || q.unreported[m.ID] {
 				continue
 			}
 			s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
@@ -442,7 +467,7 @@ func (q *Queue) maintainModels() {
 		eligible := []*Machine{}
 		loading := false
 		for _, m := range machines {
-			if !q.placementAllowed(callJob(c), m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
+			if !q.placementAllowed(callJob(c), m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !q.modelFitsMachine(model, m) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
 				continue
 			}
 			if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
@@ -547,7 +572,7 @@ func callJob(c *ModelCall) *Job {
 // behind requests that cannot reclaim higher-priority work.
 func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 	model, ok := q.model(c.Model)
-	if !ok || !q.placementAllowed(callJob(c), m) || c.Machine != "" || c.Error != "" || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) || q.unreported[m.ID] {
+	if !ok || !q.placementAllowed(callJob(c), m) || c.Machine != "" || c.Error != "" || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !q.modelFitsMachine(model, m) || q.unreported[m.ID] {
 		return false
 	}
 	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "ready" {
@@ -649,6 +674,7 @@ func (q *Queue) modelPlan(machine string) []ModelSlot {
 		if s.Machine == machine {
 			slot := *s
 			model, _ := q.model(s.Model)
+			slot.Placement = q.modelPlacement(model)
 			if model.Environment != "" {
 				recipe := q.environments.Environments[model.Environment][q.s.Machines[machine].GPU]
 				slot.EnvironmentRecipe = &recipe
@@ -716,18 +742,6 @@ func modelError(w http.ResponseWriter, status int, message string) {
 }
 func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 	c := &ModelCall{Project: r.Header.Get("X-Myce-Project"), Priority: r.Header.Get("X-Myce-Priority")}
-	if c.Project == "" || rank(c.Priority) == 3 {
-		modelError(w, 400, "X-Myce-Project and X-Myce-Priority are required")
-		return
-	}
-	if c.Priority == "deadline" {
-		d, err := time.Parse(time.RFC3339, r.Header.Get("X-Myce-Deadline"))
-		if err != nil {
-			modelError(w, 400, "deadline priority requires X-Myce-Deadline (RFC3339)")
-			return
-		}
-		c.Deadline = &d
-	}
 	var data []byte
 	var spool *spooledModelRequest
 	var bodySize int64
@@ -792,6 +806,10 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 	a.Queue.mu.Lock()
 	model, _ := a.Queue.model(body.Model)
 	a.Queue.mu.Unlock()
+	if e := a.Queue.callDefaults(c, model, r.Header, !generic); e != nil {
+		modelError(w, 400, "invalid model routing headers")
+		return
+	}
 	retrySafe := !generic || model.RetrySafe
 	var requestUntil time.Time
 	c.Model = body.Model
@@ -1236,4 +1254,11 @@ func (m Model) requestTimeout() time.Duration {
 		return 10 * time.Minute
 	}
 	return m.RequestTimeout
+}
+
+func (q *Queue) modelPlacement(model Model) *ModelPlacement {
+	if model.Project == "" && len(model.AllowedMachines) == 0 {
+		return nil
+	}
+	return &ModelPlacement{Project: model.Project, AllowedMachines: append([]string(nil), model.AllowedMachines...), ProjectMachines: append([]string(nil), q.s.Policies[model.Project].AllowedMachines...)}
 }

@@ -282,6 +282,7 @@ type Machine struct {
 	ModelCopySeconds            map[string]float64  `json:"model_copy_seconds,omitempty"`
 	CopyReports                 []CopyReport        `json:"copy_reports,omitempty"`
 	CopyBytesPerSecond          float64             `json:"copy_bytes_per_second,omitempty"`
+	ApprovedModels              map[string]string   `json:"approved_models,omitempty"`
 	CachedModels                []string            `json:"cached_models,omitempty"`
 	CacheFreeBytes              int64               `json:"cache_free_bytes"`
 	CacheError                  string              `json:"cache_error,omitempty"`
