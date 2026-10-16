@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -35,15 +36,23 @@ func TestGeneralServerChild(t *testing.T) {
 	port := os.Args[len(os.Args)-1]
 	streamRelease := make(chan struct{})
 	var releaseOnce sync.Once
+	var healthFailed atomic.Bool
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
-			if mode == "timeout" {
+			if mode == "timeout" || healthFailed.Load() {
 				w.WriteHeader(503)
 			}
 			if mode == "redirect" {
 				http.Redirect(w, r, "/ready-somewhere-else", http.StatusFound)
 			}
 			return
+		}
+		if r.URL.Path == "/fail-health" {
+			healthFailed.Store(true)
+			return
+		}
+		if r.URL.Path == "/exit" {
+			os.Exit(7)
 		}
 		w.Header().Set("X-Engine-Header", "preserved")
 		w.Header().Set("Content-Type", "application/octet-stream")

@@ -87,7 +87,7 @@ func (q *Queue) refreshHostMemory() {
 		}
 		for _, s := range q.s.ModelSlots {
 			owner := q.s.Machines[s.Machine]
-			if owner != nil && hostID(owner) == hostID(m) {
+			if owner != nil && s.State != "failed" && hostID(owner) == hostID(m) {
 				model, _ := q.model(s.Model)
 				reserved += hostNeed(owner, model.MemoryGB, model.HostMemoryGB)
 			}

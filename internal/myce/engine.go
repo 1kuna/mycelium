@@ -80,10 +80,19 @@ type LlamaEngine struct {
 	Dir      string
 	Clock    Clock
 	cmd      *exec.Cmd
-	done     chan error
 	url      string
 	identity string
 	log      *os.File
+	// Completion is broadcast so readiness, monitoring and cleanup never steal
+	// each other's Wait result. waitErr is published by closing exited.
+	exited         chan struct{}
+	waitErr        error
+	monitorCancel  context.CancelFunc
+	monitorDone    chan struct{}
+	healthMu       sync.Mutex
+	healthErr      error
+	healthRevision uint64
+	healthDegraded bool
 }
 
 func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
@@ -189,8 +198,8 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		l.log.Close()
 		return e
 	}
-	l.done = make(chan error, 1)
-	go func() { l.done <- l.cmd.Wait() }()
+	l.exited = make(chan struct{})
+	go func() { l.waitErr = l.cmd.Wait(); close(l.exited) }()
 	if e = l.memoryAttempt.attach(l.cmd.Process.Pid); e != nil {
 		_ = l.Unload()
 		return fmt.Errorf("memory ceiling attach: %w", e)
@@ -206,10 +215,10 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	unlock()
 	unlock = nil
 	l.url = "http://127.0.0.1:" + strconv.Itoa(port)
-	tick := time.NewTicker(100 * time.Millisecond)
+	tick := time.NewTicker(serverProbeInterval)
 	defer tick.Stop()
 	hc := &http.Client{
-		Timeout:       time.Second,
+		Timeout:       serverProbeTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	for {
@@ -219,15 +228,15 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 			res.Body.Close()
 			if res.StatusCode >= 200 && res.StatusCode < 300 {
 				select {
-				case e := <-l.done:
-					l.done = nil
+				case <-l.exited:
 					oomErr := l.memoryAttempt.failure()
 					_ = l.Unload()
 					if oomErr != nil {
 						return oomErr
 					}
-					return fmt.Errorf("server exited as health became ready: %v%s", e, logHint)
+					return fmt.Errorf("server exited as health became ready: %v%s", l.waitErr, logHint)
 				default:
+					l.startHealthMonitor(health)
 					return nil
 				}
 			}
@@ -240,14 +249,13 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 				return oomErr
 			}
 			return ctx.Err()
-		case e := <-l.done:
-			l.done = nil
+		case <-l.exited:
 			oomErr := l.memoryAttempt.failure()
 			_ = l.Unload()
 			if oomErr != nil {
 				return oomErr
 			}
-			return fmt.Errorf("server exited during load: %v%s", e, logHint)
+			return fmt.Errorf("server exited during load: %v%s", l.waitErr, logHint)
 		case <-tick.C:
 		}
 	}
@@ -266,6 +274,11 @@ func (l *LlamaEngine) Request(ctx context.Context, method, path string, headers 
 }
 
 func (l *LlamaEngine) Unload() error {
+	if l.monitorCancel != nil {
+		l.monitorCancel()
+		<-l.monitorDone
+		l.monitorCancel = nil
+	}
 	if l.cmd == nil || l.cmd.Process == nil {
 		return nil
 	}
@@ -274,17 +287,15 @@ func (l *LlamaEngine) Unload() error {
 	defer cancel()
 	stopErr := l.runStopCommand(grace)
 	_ = syscall.Kill(-l.cmd.Process.Pid, syscall.SIGTERM)
-	if l.done != nil {
+	if l.exited != nil {
 		select {
-		case <-l.done:
-			l.done = nil
+		case <-l.exited:
 		case <-grace.Done():
 		}
 	}
 	e := signalWorkerGroup(l.cmd.Process.Pid, syscall.SIGKILL)
-	if l.done != nil {
-		<-l.done
-		l.done = nil
+	if l.exited != nil {
+		<-l.exited
 	}
 	e = errors.Join(e, stopErr, waitWorkerGroup(l.cmd.Process.Pid, l.Clock), l.memoryAttempt.cleanup(l.Clock))
 	if e == nil {
@@ -299,7 +310,6 @@ func (l *LlamaEngine) Unload() error {
 	}
 	if e == nil {
 		l.cmd = nil
-		l.url = ""
 	}
 	return e
 }
@@ -396,7 +406,8 @@ func cleanupEngines(dir string, clock Clock) error {
 }
 
 type workerModel struct {
-	memoryFailed       bool
+	runtimeFailed      bool
+	attempt            string
 	model              Model
 	engine             Engine
 	state, err         string
@@ -525,16 +536,26 @@ func (rt *modelRuntime) report() ([]ModelReport, float64) {
 	out := []ModelReport{}
 	memory := 0.0
 	for name, m := range rt.models {
-		if m.state == "ready" {
+		if m.state == "ready" || m.state == "draining" {
 			if owned, ok := m.engine.(*LlamaEngine); ok {
-				if err := owned.memoryAttempt.failure(); err != nil {
+				err, _, _ := owned.runtimeHealth()
+				if ceiling := owned.memoryAttempt.failure(); ceiling != nil {
+					err = ceiling
+				}
+				if err != nil {
 					m.err = err.Error()
-					m.memoryFailed = true
+					m.runtimeFailed = true
 					rt.unload(m)
 				}
 			}
 		}
-		out = append(out, ModelReport{Name: name, State: m.state, Error: ceilingDiagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true})
+		report := ModelReport{Name: name, Attempt: m.attempt, RuntimeFailed: m.runtimeFailed, State: m.state, Error: ceilingDiagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true}
+		if m.state == "ready" {
+			if owned, ok := m.engine.(*LlamaEngine); ok {
+				_, report.HealthRevision, report.HealthDegraded = owned.runtimeHealth()
+			}
+		}
+		out = append(out, report)
 		if m.state != "unloaded" && m.state != "failed" {
 			memory += m.model.MemoryGB
 		}
@@ -611,7 +632,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			parent = rt.availability.workContext()
 		}
 		ctx, cancel := context.WithTimeout(parent, rt.config.Wait)
-		m := &workerModel{model: model, engine: engine, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
+		m := &workerModel{model: model, engine: engine, attempt: s.Attempt, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
 		rt.models[s.Model] = m
 		rt.wg.Add(1)
 		go func() {
@@ -759,7 +780,7 @@ func (rt *modelRuntime) unload(m *workerModel) {
 				m.releaseEnvironment = nil
 			}
 			m.state = "unloaded"
-			if m.memoryFailed {
+			if m.runtimeFailed {
 				m.state = "failed"
 			}
 		}
@@ -813,7 +834,8 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Model string `json:"model"`
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
 	}
 	var data []byte
 	var e error
@@ -850,6 +872,13 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	rt.mu.Lock()
 	m := rt.models[req.Model]
+	if attempt := r.Header.Get("X-Myce-Engine-Attempt"); attempt != "" && m != nil && m.attempt != "" && attempt != m.attempt {
+		rt.mu.Unlock()
+		unlock()
+		w.Header().Set("X-Myce-Engine-Failed", attempt)
+		modelError(w, 503, "engine attempt is no longer ready")
+		return
+	}
 	if rt.availability != nil && !rt.availability.snapshot().Available {
 		rt.mu.Unlock()
 		unlock()
@@ -857,6 +886,9 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if m == nil || !(rt.localApprovalAvailable(m.model) || rt.localApprovalStates[m.model.LocalSource] == approvalUnknown) || (m.state != "ready" && !(m.state == "draining" && m.queueFlight > 0)) {
+		if m == nil || m.runtimeFailed {
+			w.Header().Set("X-Myce-Engine-Failed", r.Header.Get("X-Myce-Engine-Attempt"))
+		}
 		rt.mu.Unlock()
 		unlock()
 		modelError(w, 503, "model is not ready")
@@ -897,12 +929,21 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 	} else {
 		res, e = m.engine.Call(callCtx, endpoint, data)
 	}
-	if e != nil {
+	requestFailed := func() {
+		// A failed worker->engine transport cannot prove the engine did no
+		// work. Bind this control receipt to the attempted engine even if Wait
+		// has not completed yet; retry_safe:false must never replay a crash.
+		if callCtx.Err() == nil {
+			w.Header().Set("X-Myce-Engine-Failed", m.attempt)
+		}
 		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
 			modelError(w, 504, errModelRequestTimeout.Error())
 			return
 		}
 		modelError(w, 503, "model request failed")
+	}
+	if e != nil {
+		requestFailed()
 		return
 	}
 	defer res.Body.Close()
@@ -910,11 +951,30 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, res.StatusCode, "upstream model request failed")
 		return
 	}
+	if !generic && !req.Stream {
+		// OpenAI non-stream responses are already buffered at the queue. Finish
+		// reading here too so an engine body failure carries the attempt-bound
+		// failure receipt before any response headers are committed.
+		var response []byte
+		response, e = io.ReadAll(res.Body)
+		if e != nil {
+			requestFailed()
+			return
+		}
+		copyProxyHeaders(w.Header(), res.Header)
+		w.WriteHeader(res.StatusCode)
+		_, _ = w.Write(response)
+		return
+	}
+	buf := make([]byte, 16384)
+	n, e := res.Body.Read(buf)
+	if n == 0 && e != nil && e != io.EOF {
+		requestFailed()
+		return
+	}
 	copyProxyHeaders(w.Header(), res.Header)
 	w.WriteHeader(res.StatusCode)
-	buf := make([]byte, 16384)
 	for {
-		n, e := res.Body.Read(buf)
 		if n > 0 {
 			if _, err := w.Write(buf[:n]); err != nil {
 				return
@@ -929,6 +989,7 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		n, e = res.Body.Read(buf)
 	}
 }
 
