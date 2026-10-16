@@ -386,7 +386,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err = q.SetLossTimeouts(*productionLoss, *deadlineLoss, *experimentLoss); err != nil {
 			return err
 		}
-		listener, err := net.Listen("tcp", *address)
+		listener, err := listenWithRetry(ctx, *address, net.Listen, myce.RealClock{}, waitForBind, log.Printf)
 		if err != nil {
 			return err
 		}
@@ -408,7 +408,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				}
 				bind = net.JoinHostPort(host, "0")
 			}
-			tlsListener, e := net.Listen("tcp", bind)
+			tlsListener, e := listenWithRetry(ctx, bind, net.Listen, myce.RealClock{}, waitForBind, log.Printf)
 			if e != nil {
 				return e
 			}
