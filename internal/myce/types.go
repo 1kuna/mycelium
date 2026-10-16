@@ -361,7 +361,19 @@ type LogChunk struct {
 	Offset int64  `json:"offset,omitempty"`
 	Text   string `json:"text"`
 }
+
+// HoldDetail describes a host fence independently of its compatibility text.
+// A missing ClearsAt is not a promise of automatic recovery.
+type HoldDetail struct {
+	Host                   string     `json:"host"`
+	Kind                   string     `json:"kind"`
+	OperatorActionRequired bool       `json:"operator_action_required"`
+	ClearsAt               *time.Time `json:"clears_at,omitempty"`
+	Text                   string     `json:"text"`
+}
+
 type Snapshot struct {
+	HoldsDetail  []HoldDetail  `json:"holds_detail"`
 	HostHolds    []string      `json:"host_holds,omitempty"`
 	Now          time.Time     `json:"now"`
 	Usage        UsageReport   `json:"usage"`

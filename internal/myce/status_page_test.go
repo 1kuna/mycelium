@@ -208,3 +208,19 @@ func TestRequeuedWaitAgeExcludesPreviousRunningTime(t *testing.T) {
 		t.Fatal("display age changed dispatch's submission time")
 	}
 }
+
+func TestStatusPageStoppedWorkerBudgetIsLastReported(t *testing.T) {
+	for _, effective := range []bool{false, true} {
+		m := &Machine{ID: "stopped", Gone: true, HostMemoryBudgetGB: 22}
+		if effective {
+			m.EffectiveHostMemoryBudgetGB = 22
+		}
+		var b bytes.Buffer
+		if err := statusPage.Execute(&b, Snapshot{Machines: []*Machine{m}}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(b.String(), "Host ceiling budget (last reported): 22 GiB") {
+			t.Fatal(b.String())
+		}
+	}
+}
