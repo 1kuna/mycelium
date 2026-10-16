@@ -388,6 +388,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		}
 		listener, err := listenWithRetry(ctx, *address, net.Listen, myce.RealClock{}, waitForBind, log.Printf)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
 			return err
 		}
 		defer listener.Close()
@@ -410,6 +413,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			}
 			tlsListener, e := listenWithRetry(ctx, bind, net.Listen, myce.RealClock{}, waitForBind, log.Printf)
 			if e != nil {
+				if errors.Is(e, context.Canceled) {
+					return nil
+				}
 				return e
 			}
 			defer tlsListener.Close()

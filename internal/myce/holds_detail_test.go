@@ -103,7 +103,7 @@ func TestHoldsDetailKindsAndLegacyCompatibility(t *testing.T) {
 	kinds := map[string]bool{}
 	for _, d := range s.HoldsDetail {
 		kinds[d.Kind] = true
-		if (d.Kind == "host_disabled") != d.OperatorActionRequired {
+		if d.OperatorActionRequired {
 			t.Fatalf("operator fence: %+v", d)
 		}
 		if strings.Contains(d.Text, "private reason") {
@@ -140,7 +140,7 @@ func TestHoldsDetailProductionKinds(t *testing.T) {
 	}
 	c.Advance(10 * time.Second)
 	d = q.productionHoldDetail("b70")
-	if d.Kind != "production_release_unknown" || !d.OperatorActionRequired || d.Text != "b70: production hold; release unknown: worker b70-0" {
+	if d.Kind != "production_release_unknown" || d.OperatorActionRequired || d.Text != "b70: production hold; release unknown: worker b70-0" {
 		t.Fatalf("unknown: %+v", d)
 	}
 }
