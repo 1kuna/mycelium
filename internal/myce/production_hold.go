@@ -495,7 +495,7 @@ func (q *Queue) maintainHolds() {
 		}
 		for _, s := range q.s.ModelSlots {
 			m := q.s.Machines[s.Machine]
-			if m == nil || hostID(m) != host || q.slotPinned(s) {
+			if m == nil || hostID(m) != host || q.slotPinned(s) || s.State == "failed" {
 				continue
 			}
 			if s.State != "unload_failed" && (rank(s.Priority) > 0 && (!s.ProductionUsed || s.InFlight > 0) || q.unreported[m.ID]) {
@@ -523,7 +523,7 @@ func (q *Queue) maintainHolds() {
 		}
 		for _, s := range q.s.ModelSlots {
 			m := q.s.Machines[s.Machine]
-			if m != nil && hostID(m) == host && (s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || s.State == "loading" || s.State == "draining" || s.State == "unload_failed" || s.InFlight > 0) {
+			if m != nil && hostID(m) == host && (s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || s.State == "loading" || s.State == "draining" || s.State == "unloading" || s.State == "unload_failed" || s.InFlight > 0) {
 				unsettled = true
 			}
 		}

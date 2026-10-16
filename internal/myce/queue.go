@@ -1157,7 +1157,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			if c.Machine == "" && model.HostMemoryGB > 0 {
 				eligible, room := false, false
 				for _, m := range q.s.Machines {
-					if m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !q.modelFitsMachine(model, m) {
+					if m.Gone || m.Leaving || q.callExcludes(c, m.ID) || m.ModelURL == "" || !q.modelFitsMachine(model, m) {
 						continue
 					}
 					eligible = true
@@ -1171,6 +1171,9 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 				}
 			}
 			if reason := q.logsWaitingReason(call); reason != "" {
+				call.Reason = reason
+			}
+			if reason := q.engineWaitReason(c); reason != "" && call.Reason == "waiting for model "+c.Model+" on an eligible worker" {
 				call.Reason = reason
 			}
 			if c.Machine != "" {
@@ -1192,7 +1195,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			copy.ReservedMemoryGB = 0
 			copy.MemoryUsedGB = max(0, copy.TotalMemoryGB-copy.FreeMemoryGB)
 			for _, slot := range q.s.ModelSlots {
-				if slot.Machine == m.ID && q.slotPinned(slot) {
+				if slot.Machine == m.ID && slot.State != "failed" && q.slotPinned(slot) {
 					model, _ := q.model(slot.Model)
 					copy.ReservedMemoryGB += model.MemoryGB
 				}

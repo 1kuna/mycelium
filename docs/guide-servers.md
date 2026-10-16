@@ -104,7 +104,8 @@ through the queue while retaining an unbounded replay buffer.
 Responses stream without buffering. A generic stream that loses its worker after
 bytes start aborts its connection; no JSON/SSE error is inserted into binary data.
 Before response bytes start, worker transport failure may retry once on another
-worker only with catalog `retry_safe: true` (default false). Side-effecting server APIs must be idempotent or accept an application
+worker or a fresh engine attempt only with catalog `retry_safe: true` (default
+false). Side-effecting server APIs must be idempotent or accept an application
 idempotency key: a failed transport cannot prove the server did no work.
 
 The ordinary `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` routes
@@ -174,16 +175,49 @@ must be discarded. The worker also bounds its engine request and releases its
 in-flight count on failure. Upload duration is not bounded by this field.
 
 Generic `retry_safe` defaults to false. Opt-in permits one transport retry on
-another copy only before client response bytes. This is an assertion of replay
-safety, not deduplication or exactly-once execution. OpenAI chat/completions/
-embeddings retain one pre-response retry. HTTP error bodies and headers become
+another copy or fresh engine attempt only before client response bytes. This is
+an assertion of replay safety, not deduplication or exactly-once execution. OpenAI chat/completions/
+embeddings retain one pre-response transport retry; detected engine death also
+requires `retry_safe: true`. HTTP error bodies and headers become
 a fixed message plus HTTP status; control errors/public diagnostics never echo
 upstream bodies.
 
-Pinned warm-up failures report a fixed error and `retry_at` in status, then
-retry after 1s, 2s, 4s, up to 30s, using the queue Clock. Success clears backoff.
-Only successfully cleaned failures retry; `unload_failed` stays held visibly.
-Pins and retry state persist; a new worker session reloads.
+After readiness, the supervisor watches process exit for the entire engine
+lifetime. It also repeats the startup health check every **100 ms**, with a
+**one-second timeout per probe**, requiring HTTP 2xx without redirects. Three
+consecutive failures while the process is alive withdraw readiness; a successful
+probe resets that failure count. Probes are serial, so three timed-out probes
+can take about three seconds. Process exit requires no health-failure threshold.
+At the next worker check-in the slot leaves `ready`, routing stops, and cleanup
+terminates/verifies the owned group. Memory and the environment lease stay held
+until cleanup succeeds. `unload_failed` stays held visibly and never auto-reloads.
+
+Pinned entries and entries with queued demand reload automatically after cleanup.
+An initial load failure still fails its waiting calls promptly, including model
+verification failures; pin warm-up retains its automatic retry policy.
+Startup and runtime failures back off for 1s, 2s, 4s, 8s, 16s, then at most 30s,
+using the injected queue Clock. Brief readiness does **not** clear crash history:
+backoff resets after **60 continuously healthy seconds**. Even a recovered probe
+failure between heartbeats interrupts that healthy interval. Status exposes
+`attempt`, `crash_count` (failures since that reset), `retry_at`, `retry_delay`,
+`healthy_since`, and a fixed `error`; queued-call reasons explain pending cleanup,
+loading or the next restart time. Backoff holds no memory after confirmed cleanup.
+With no pin or remaining demand, the failed slot is removed. Pins and retry state
+persist; a new worker session reloads.
+
+Queued calls may wait for recovery only within their existing `max_wait`.
+The failed-worker exclusion is scoped to an engine attempt: a fresh attempt on
+the same worker is eligible. In-flight calls with `retry_safe: false`
+fail cleanly on detected engine death or worker-to-engine transport failure,
+including OpenAI routes. Non-streaming OpenAI responses are buffered at the
+worker as well as the queue so an incomplete engine response fails before
+headers are sent. Opted-in calls retain one pre-response retry, now also on a
+fresh engine attempt. Ordinary
+OpenAI transport failures without confirmed engine death retain their existing
+single pre-response retry. No replay is allowed
+after response bytes have started. Attempt identity travels only between queue
+and worker and is never forwarded to the engine. A late report or completion
+from an old attempt cannot make the replacement ready or consume its capacity.
 
 Machine-only egress for arbitrary commands, proxies, installers and server
 telemetry still requires host/network permissions and locally provisioned

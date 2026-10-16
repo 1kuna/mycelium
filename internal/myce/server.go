@@ -174,7 +174,7 @@ func proxyHeaders(h http.Header) http.Header {
 			out.Del(strings.TrimSpace(key))
 		}
 	}
-	for _, k := range []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Authorization", "X-Myce-Session", "X-Myce-Project", "X-Myce-Priority", "X-Myce-Deadline"} {
+	for _, k := range []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Authorization", "X-Myce-Session", "X-Myce-Project", "X-Myce-Priority", "X-Myce-Deadline", "X-Myce-Engine-Attempt", "X-Myce-Engine-Failed"} {
 		out.Del(k)
 	}
 	return out

@@ -179,6 +179,11 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
+	FailureCounted       bool            `json:"failure_counted,omitempty"`
+	Attempt              string          `json:"attempt,omitempty"`
+	CrashCount           int             `json:"crash_count,omitempty"`
+	HealthySince         *time.Time      `json:"healthy_since,omitempty"`
+	HealthRevision       uint64          `json:"health_revision,omitempty"`
 	ApprovalUnknownSince *time.Time      `json:"approval_unknown_since,omitempty"`
 	Placement            *ModelPlacement `json:"placement,omitempty"`
 
@@ -200,13 +205,18 @@ type ModelSlot struct {
 	IdleSeconds       float64            `json:"idle_seconds"`
 }
 type ModelReport struct {
-	InFlight      int    `json:"calls_in_flight,omitempty"`
-	CallsMeasured bool   `json:"calls_measured,omitempty"`
-	Name          string `json:"name"`
-	State         string `json:"state"`
-	Error         string `json:"error,omitempty"`
+	Attempt        string `json:"attempt,omitempty"`
+	RuntimeFailed  bool   `json:"runtime_failed,omitempty"`
+	HealthRevision uint64 `json:"health_revision,omitempty"`
+	HealthDegraded bool   `json:"health_degraded,omitempty"`
+	InFlight       int    `json:"calls_in_flight,omitempty"`
+	CallsMeasured  bool   `json:"calls_measured,omitempty"`
+	Name           string `json:"name"`
+	State          string `json:"state"`
+	Error          string `json:"error,omitempty"`
 }
 type ModelCall struct {
+	Attempt, ExcludeAttempt          string
 	StopAt                           *time.Time
 	ProductionHost                   string
 	WaitingSince                     time.Time
@@ -278,7 +288,7 @@ func (q *Queue) model(name string) (Model, bool) {
 func (q *Queue) modelMemory(machine string) float64 {
 	n := 0.0
 	for _, s := range q.s.ModelSlots {
-		if s.Machine == machine {
+		if s.Machine == machine && s.State != "failed" {
 			m, _ := q.model(s.Model)
 			n += m.MemoryGB
 		}
@@ -295,13 +305,16 @@ func (q *Queue) modelReservation(m *Machine, reports []ModelReport) float64 {
 	}
 	resident := map[string]bool{}
 	for _, r := range reports {
+		if slot := q.s.ModelSlots[slotKey(m.ID, r.Name)]; slot != nil && r.Attempt != "" && slot.Attempt != r.Attempt {
+			continue
+		}
 		if contains([]string{"ready", "draining", "unloading", "unload_failed"}, r.State) {
 			resident[r.Name] = true
 		}
 	}
 	reservation := 0.0
 	for _, s := range q.s.ModelSlots {
-		if s.Machine == m.ID && !resident[s.Model] {
+		if s.Machine == m.ID && s.State != "failed" && !resident[s.Model] {
 			model, _ := q.model(s.Model)
 			reservation += model.MemoryGB
 		}
@@ -322,6 +335,9 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 		}
 		for _, r := range reports {
 			if r.Name == s.Model {
+				if r.Attempt != "" && r.Attempt != s.Attempt {
+					continue
+				}
 				if r.CallsMeasured && r.InFlight == 0 {
 					s.ReleasingCalls = false
 				}
@@ -337,39 +353,7 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 					}
 				}
 
-				if r.State == "failed" {
-					for _, c := range q.calls {
-						if c.Model == s.Model && c.Machine == "" {
-							c.Error = "model load failed"
-						}
-					}
-					if q.slotPinned(s) {
-						if s.State != "failed" || s.RetryAt == nil {
-							if s.RetryDelay == 0 {
-								s.RetryDelay = time.Second
-							} else {
-								s.RetryDelay = min(s.RetryDelay*2, 30*time.Second)
-							}
-							next := q.clock.Now().Add(s.RetryDelay)
-							s.RetryAt = &next
-						}
-						s.State = "failed"
-						s.Error = ceilingDiagnostic(r.Error, "model load or unload failed")
-					} else {
-						delete(q.s.ModelSlots, key)
-					}
-				} else if r.State == "unload_failed" {
-					s.State = "unload_failed"
-					s.Error = ceilingDiagnostic(r.Error, "model load or unload failed")
-				} else if r.State == "ready" && s.State == "loading" {
-					s.State = "ready"
-					s.Error = ""
-					s.RetryAt = nil
-					s.RetryDelay = 0
-					s.LastUsed = q.clock.Now()
-				} else if r.State == "unloaded" && s.State == "draining" && s.InFlight == 0 {
-					delete(q.s.ModelSlots, key)
-				}
+				q.applyEngineReport(key, s, r)
 			}
 		}
 	}
@@ -402,6 +386,10 @@ func (q *Queue) maintainModels() {
 			continue
 		}
 		model, exists := q.model(s.Model)
+		if s.State == "failed" {
+			q.maintainEngineRetry(k, s, m, model)
+			continue
+		}
 		if (!exists || !q.modelUsableMachine(model, m)) && s.State != "unload_failed" || availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle {
 			s.State = "draining"
 		}
@@ -442,7 +430,7 @@ func (q *Queue) maintainModels() {
 			return machines[i].ID < machines[j].ID
 		})
 		for _, m := range machines {
-			if !q.callPlacementAllowed(c, m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !q.modelUsableMachine(model, m) || q.unreported[m.ID] {
+			if !q.callPlacementAllowed(c, m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || q.callExcludes(c, m.ID) || m.ModelURL == "" || !q.modelUsableMachine(model, m) || q.unreported[m.ID] {
 				continue
 			}
 			s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
@@ -453,6 +441,7 @@ func (q *Queue) maintainModels() {
 				}
 				c.StartedAt = &now
 				c.Session = m.Session
+				c.Attempt = s.Attempt
 				if s.InFlight == 0 || rank(c.Priority) < rank(s.Priority) {
 					s.Priority = c.Priority
 				}
@@ -468,10 +457,13 @@ func (q *Queue) maintainModels() {
 		eligible := []*Machine{}
 		loading := false
 		for _, m := range machines {
-			if !q.placementAllowed(callJob(c), m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !q.modelFitsMachine(model, m) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
+			if !q.placementAllowed(callJob(c), m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || q.callExcludes(c, m.ID) || m.ModelURL == "" || !q.modelFitsMachine(model, m) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
 				continue
 			}
 			if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
+				if s.State == "failed" && s.RetryAt != nil && !now.Before(*s.RetryAt) {
+					eligible = append(eligible, m)
+				}
 				if s.State == "loading" {
 					if rank(c.Priority) < rank(s.Priority) {
 						s.Priority = c.Priority
@@ -492,7 +484,11 @@ func (q *Queue) maintainModels() {
 		// Check all free workers before draining a model or stopping any batch.
 		for _, m := range eligible {
 			if m.FreeMemoryGB >= model.MemoryGB && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
-				q.s.ModelSlots[slotKey(m.ID, c.Model)] = &ModelSlot{Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", Priority: c.Priority, ProductionUsed: c.Priority == "production", LastUsed: now}
+				if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
+					q.beginEngineAttempt(s, c.Priority)
+				} else {
+					q.s.ModelSlots[slotKey(m.ID, c.Model)] = &ModelSlot{Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", Attempt: ID(), Priority: c.Priority, ProductionUsed: c.Priority == "production", LastUsed: now}
+				}
 				m.FreeMemoryGB -= model.MemoryGB
 				q.refreshHostMemory()
 				allocated = true
@@ -508,7 +504,7 @@ func (q *Queue) maintainModels() {
 			}
 			possible := m.FreeMemoryGB
 			for _, s := range q.s.ModelSlots {
-				if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > rank(c.Priority) {
+				if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && s.State != "failed" && rank(s.Priority) > rank(c.Priority) {
 					mm, _ := q.model(s.Model)
 					possible += mm.MemoryGB
 				}
@@ -573,21 +569,24 @@ func callJob(c *ModelCall) *Job {
 // behind requests that cannot reclaim higher-priority work.
 func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 	model, ok := q.model(c.Model)
-	if !ok || !q.callPlacementAllowed(c, m) || c.Machine != "" || c.Error != "" || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !q.modelUsableMachine(model, m) || q.unreported[m.ID] {
+	if !ok || !q.callPlacementAllowed(c, m) || c.Machine != "" || c.Error != "" || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || q.callExcludes(c, m.ID) || m.ModelURL == "" || !q.modelUsableMachine(model, m) || q.unreported[m.ID] {
 		return false
 	}
 	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "ready" {
 		return model.MaxInFlight == 0 || s.InFlight < model.MaxInFlight
 	}
+	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "failed" && (s.RetryAt == nil || q.clock.Now().Before(*s.RetryAt)) {
+		return false
+	}
 	possible := m.FreeMemoryGB
 	for _, s := range q.s.ModelSlots {
-		if s.Machine != m.ID || s.State == "unload_failed" {
+		if s.Machine != m.ID || s.State == "unload_failed" || s.State == "failed" {
 			continue
 		}
 		if s.Model == c.Model && s.State == "loading" {
 			return true
 		}
-		if !q.slotPinned(s) && s.InFlight == 0 && rank(s.Priority) > rank(c.Priority) {
+		if !q.slotPinned(s) && s.State != "failed" && s.InFlight == 0 && rank(s.Priority) > rank(c.Priority) {
 			resident, _ := q.model(s.Model)
 			possible += resident.MemoryGB
 		}
@@ -605,7 +604,7 @@ func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
 	room := [3]float64{m.FreeMemoryGB, m.FreeMemoryGB, m.FreeMemoryGB}
 	for priority := 0; priority < 3; priority++ {
 		for _, s := range q.s.ModelSlots {
-			if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > priority {
+			if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && s.State != "failed" && rank(s.Priority) > priority {
 				model, _ := q.model(s.Model)
 				room[priority] += model.MemoryGB
 			}
@@ -649,7 +648,7 @@ func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
 func (q *Queue) makeModelRoom(m *Machine, need float64, priority string) {
 	slots := []*ModelSlot{}
 	for _, s := range q.s.ModelSlots {
-		if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > rank(priority) {
+		if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && s.State != "failed" && rank(s.Priority) > rank(priority) {
 			slots = append(slots, s)
 		}
 	}
@@ -710,7 +709,7 @@ func (q *Queue) finishCall(id string) error {
 	return q.update(func() error {
 		c := q.calls[id]
 		if c != nil {
-			if s := q.s.ModelSlots[slotKey(c.Machine, c.Model)]; s != nil && s.Session == c.Session {
+			if s := q.s.ModelSlots[slotKey(c.Machine, c.Model)]; s != nil && s.Session == c.Session && s.Attempt == c.Attempt {
 				s.InFlight = max(0, s.InFlight-1)
 				s.LastUsed = q.clock.Now()
 			}
@@ -729,12 +728,12 @@ func (q *Queue) finishCall(id string) error {
 // request must not protect remaining experiments (or an entirely idle model).
 func (q *Queue) refreshModelPriority(c *ModelCall) {
 	s := q.s.ModelSlots[slotKey(c.Machine, c.Model)]
-	if s == nil || s.Session != c.Session {
+	if s == nil || s.Session != c.Session || s.Attempt != c.Attempt {
 		return
 	}
 	s.Priority = "experiment"
 	for _, live := range q.calls {
-		if live.Machine == c.Machine && live.Session == c.Session && live.Model == c.Model && rank(live.Priority) < rank(s.Priority) {
+		if live.Machine == c.Machine && live.Session == c.Session && live.Attempt == c.Attempt && live.Model == c.Model && rank(live.Priority) < rank(s.Priority) {
 			s.Priority = live.Priority
 		}
 	}
@@ -841,13 +840,14 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		}
 		var call ModelCall
 		var target string
-		var timedOut, requestExpired bool
+		var timedOut, requestExpired, engineLost bool
 		e = a.Queue.update(func() error {
 			a.Queue.maintain()
 			call = *a.Queue.calls[c.ID]
 			timedOut = a.Queue.clock.Now().Sub(call.Queued) >= a.Queue.models.Wait
 			requestExpired = !requestUntil.IsZero() && !a.Queue.clock.Now().Before(requestUntil)
-			if m := a.Queue.s.Machines[call.Machine]; m != nil && !m.Gone && m.Session == call.Session {
+			engineLost = a.Queue.engineAttemptLost(&call)
+			if m := a.Queue.s.Machines[call.Machine]; m != nil && !m.Gone && m.Session == call.Session && a.Queue.callAttemptLive(&call) {
 				target = m.ModelURL
 			}
 			return nil
@@ -869,7 +869,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if target == "" && call.Machine != "" {
-			if !retrySafe || attempt >= 1 {
+			if !retrySafe || engineLost && !model.RetrySafe || attempt >= 1 {
 				modelError(w, 503, "model call failed; retry unavailable or exhausted")
 				return
 			}
@@ -902,7 +902,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 						m := a.Queue.s.Machines[call.Machine]
 						live := a.Queue.calls[c.ID]
 						expired := !a.Queue.clock.Now().Before(requestUntil)
-						lost := m == nil || m.Gone || m.Session != call.Session || live != nil && live.Error != ""
+						lost := m == nil || m.Gone || m.Session != call.Session || live != nil && live.Error != "" || !a.Queue.callAttemptLive(&call)
 						a.Queue.mu.Unlock()
 						if expired {
 							cancelCause(errModelRequestTimeout)
@@ -941,6 +941,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			req.Header = proxyHeaders(r.Header)
 			req.Header.Set("Authorization", "Bearer "+a.Token)
 			req.Header.Set("X-Myce-Session", call.Session)
+			req.Header.Set("X-Myce-Engine-Attempt", call.Attempt)
 			if generic {
 				req.ContentLength = bodySize
 			}
@@ -957,6 +958,16 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 				<-done
 				modelError(w, 504, errModelRequestTimeout.Error())
 				return
+			}
+			a.Queue.mu.Lock()
+			attemptLost := !a.Queue.callAttemptLive(&call)
+			engineLost = a.Queue.engineAttemptLost(&call)
+			a.Queue.mu.Unlock()
+			if res != nil && (attemptLost || call.Attempt != "" && res.Header.Get("X-Myce-Engine-Failed") == call.Attempt) {
+				engineLost = true
+				res.Body.Close()
+				res = nil
+				e = errors.New("engine attempt lost")
 			}
 			if e == nil && res.StatusCode >= 400 && (generic || res.StatusCode < 500) {
 				status := res.StatusCode
@@ -1053,6 +1064,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			}
 			a.Queue.mu.Lock()
 			live := a.Queue.calls[c.ID]
+			engineLost = engineLost || a.Queue.engineAttemptLost(&call)
 			preempted := ""
 			if live != nil {
 				preempted = live.Error
@@ -1062,7 +1074,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 				modelError(w, 503, preempted)
 				return
 			}
-			if !retrySafe || attempt >= 1 {
+			if !retrySafe || engineLost && !model.RetrySafe || attempt >= 1 {
 				modelError(w, 503, "model call failed; retry unavailable or exhausted")
 				return
 			}
@@ -1088,11 +1100,13 @@ func (q *Queue) retryCall(id string) error {
 			return errors.New("model call no longer active")
 		}
 		previous := *live
-		if s := q.s.ModelSlots[slotKey(live.Machine, live.Model)]; s != nil && s.Session == live.Session {
+		if s := q.s.ModelSlots[slotKey(live.Machine, live.Model)]; s != nil && s.Session == live.Session && s.Attempt == live.Attempt {
 			s.InFlight = max(0, s.InFlight-1)
 			s.LastUsed = q.clock.Now()
 		}
 		live.Exclude = live.Machine
+		live.ExcludeAttempt = live.Attempt
+		live.Attempt = ""
 		live.Machine = ""
 		live.StartedAt = nil
 		live.WaitingSince = q.clock.Now()

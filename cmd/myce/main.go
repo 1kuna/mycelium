@@ -685,6 +685,9 @@ func printStatus(s myce.Snapshot, full bool) {
 		fmt.Printf("pin %s/%s: machine=%s platform=%s assigned=%s window=%s-%s %s\n", p.Project, p.Model, p.Machine, p.Platform, p.Assigned, p.Start, p.End, p.Timezone)
 	}
 	for _, m := range s.LoadedModels {
+		if m.CrashCount > 0 {
+			fmt.Printf("engine recovery %s on %s: attempt=%s crashes=%d retry_at=%v\n", m.Model, m.Machine, m.Attempt, m.CrashCount, m.RetryAt)
+		}
 		fmt.Printf("model %s on %s: %s, idle %.1fs, calls in flight %d %s\n", m.Model, m.Machine, m.State, m.IdleSeconds, m.InFlight, m.Error)
 	}
 	for _, j := range s.Jobs {

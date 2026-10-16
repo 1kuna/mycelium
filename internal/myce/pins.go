@@ -140,16 +140,13 @@ func (q *Queue) maintainPins() {
 			key := slotKey(m.ID, p.Model)
 			if s := q.s.ModelSlots[key]; s != nil && s.State != "draining" {
 				p.Assigned = m.ID
-				if s.State == "failed" && s.RetryAt != nil && !now.Before(*s.RetryAt) {
-					s.State = "loading"
-				}
 				break
 			}
 			if !q.placementAllowed(&Job{Spec: Spec{Project: p.Project, Priority: "production"}}, m) {
 				continue
 			}
 			if m.FreeMemoryGB >= model.MemoryGB && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
-				q.s.ModelSlots[key] = &ModelSlot{Model: p.Model, Machine: m.ID, Session: m.Session, State: "loading", Priority: "production", LastUsed: now}
+				q.s.ModelSlots[key] = &ModelSlot{Model: p.Model, Machine: m.ID, Session: m.Session, State: "loading", Attempt: ID(), Priority: "production", LastUsed: now}
 				m.FreeMemoryGB -= model.MemoryGB
 				q.refreshHostMemory()
 				p.Assigned = m.ID
