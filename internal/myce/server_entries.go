@@ -104,6 +104,12 @@ func readModelSecrets(root string, refs map[string]string, fleetToken string) (m
 func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults bool) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	for _, name := range []string{"X-Myce-Project", "X-Myce-Priority", "X-Myce-Deadline"} {
+		if values, supplied := h[name]; supplied && len(values) != 1 {
+			return errors.New("duplicate model routing header: supply each X-Myce header once")
+		}
+	}
+	c.Project = strings.TrimSpace(c.Project)
 	if defaults && model.Project != "" {
 		if _, supplied := h["X-Myce-Project"]; !supplied {
 			c.Project = model.Project
@@ -115,21 +121,19 @@ func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults 
 			}
 		}
 	}
-	if c.Project == "" || strings.TrimSpace(c.Project) != c.Project || rank(c.Priority) == 3 {
-		return errors.New("project and priority required")
+	if c.Project == "" || c.Priority == "" {
+		return errors.New("X-Myce-Project and X-Myce-Priority are required (or set the entry's project/default_call_priority)")
 	}
-	// Supplied malformed deadlines are errors even when priority is not deadline.
-	if _, supplied := h["X-Myce-Deadline"]; supplied || c.Priority == "deadline" {
+	if rank(c.Priority) == 3 {
+		return errors.New("X-Myce-Priority must be production, deadline, or experiment")
+	}
+	c.Deadline = nil
+	if c.Priority == "deadline" {
 		deadline, err := time.Parse(time.RFC3339, h.Get("X-Myce-Deadline"))
 		if err != nil {
-			return errors.New("invalid deadline header")
+			return errors.New("X-Myce-Deadline must be RFC3339 for deadline priority")
 		}
 		c.Deadline = &deadline
-	}
-	for _, name := range []string{"X-Myce-Project", "X-Myce-Priority", "X-Myce-Deadline"} {
-		if values, supplied := h[name]; supplied && len(values) != 1 {
-			return errors.New("ambiguous routing header")
-		}
 	}
 	return nil
 }

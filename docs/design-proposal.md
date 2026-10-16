@@ -277,7 +277,8 @@ check metadata subsequently, and require explicit reapproval after changes.
 This opt-in source is an exception to the normal verified-copy contract;
 ordinary copied-model custody is unchanged. Authenticated header-less `/v1`
 calls default to the entry owner and `experiment`; a per-project production
-default requires explicit operator opt-in. Existing entries retain defaults.
+default requires explicit operator opt-in by the effective caller project, even
+when calling another owner's entry. Existing entries retain defaults.
 See [operator configuration](design-68-server-entries.md).
 
 ## Log opt-out rollout (#68 review decision)
@@ -287,5 +288,6 @@ Workers advertise `logs_none` in optional `capabilities`; the queue assigns
 names the missing capability. Environment build output remains in environment
 records, without per-job copies or job-log fallback text for opted-out jobs.
 Roll queue and workers together; do not downgrade with opted-out work live.
+A queue-first upgrade drains live opted-out servers until their workers upgrade.
 See [log policy and downgrade behavior](job-reference.md#scheduling-and-results)
 and the [native proof checklist](guide-servers.md).

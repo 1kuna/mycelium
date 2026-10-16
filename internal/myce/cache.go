@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // ModelCache reserves complete copy sizes under one admission lock.
@@ -38,6 +39,12 @@ type ModelCache struct {
 	speed         float64
 	speedMu       sync.Mutex
 	beforeChunk   func(context.Context) // deterministic interruption hook for tests
+
+	localProbe          checkpointIO[localApprovalSnapshot]
+	localProbeInit      sync.Once
+	localWarningMu      sync.Mutex
+	nextApprovalWarning time.Time
+	localMetadataProbe  func(context.Context, string, string) ([]localModelMetadata, error) // Filesystem fault seam.
 }
 
 func diskFree(path string) (int64, error) {
@@ -593,6 +600,11 @@ func (c *ModelCache) ValidateInventory(models []Model) {
 	}
 }
 func (c *ModelCache) Report(models []Model) ([]string, int64, error) {
+	return c.report(models, c.ApprovedModels(models))
+}
+
+// The heartbeat shares its one approval snapshot with cache inventory.
+func (c *ModelCache) report(models []Model, approved map[string]string) ([]string, int64, error) {
 	entries, e := os.ReadDir(c.Root)
 	if e != nil {
 		return nil, 0, e
@@ -624,7 +636,7 @@ func (c *ModelCache) Report(models []Model) ([]string, int64, error) {
 	}
 	for _, m := range models {
 		if m.LocalSource != "" {
-			if _, err := c.prepareLocal(context.Background(), m); err == nil {
+			if approved[m.LocalSource] == m.SHA256 {
 				names = append(names, m.Name)
 			}
 		}

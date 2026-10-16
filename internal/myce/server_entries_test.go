@@ -153,8 +153,21 @@ func TestEntryHeaderlessDefaultsAndAuthentication(t *testing.T) {
 	if code := request(h, true); code != 200 || seenProject != "other" {
 		t.Fatal("entry made exclusive", code)
 	}
+	if err := q.ConfigureProjects(map[string]ProjectPolicy{"owner": {Weight: 1}, "other": {Weight: 1, DefaultCallPriority: "production"}}); err != nil {
+		t.Fatal(err)
+	}
+	h.Set("X-Myce-Project", " other ")
+	h.Del("X-Myce-Priority")
+	if code := request(h, true); code != 200 || seenProject != "other" || seenPriority != "production" {
+		t.Fatal("caller's production default not applied on another owner's entry", code)
+	}
+	h.Set("X-Myce-Priority", "experiment")
+	h.Set("X-Myce-Deadline", "ignored-invalid-deadline")
+	if code := request(h, true); code != 200 || seenPriority != "experiment" {
+		t.Fatal("non-deadline header compatibility changed", code)
+	}
 	for _, h := range []http.Header{
-		{"X-Myce-Project": {""}}, {"X-Myce-Project": {"  "}}, {"X-Myce-Priority": {""}}, {"X-Myce-Priority": {"invalid"}}, {"X-Myce-Priority": {"deadline"}}, {"X-Myce-Deadline": {"bad"}}, {"X-Myce-Project": {"owner", "other"}},
+		{"X-Myce-Project": {""}}, {"X-Myce-Project": {"  "}}, {"X-Myce-Priority": {""}}, {"X-Myce-Priority": {"invalid"}}, {"X-Myce-Priority": {"deadline"}}, {"X-Myce-Project": {"owner", "other"}},
 	} {
 		if code := request(h, true); code != 400 {
 			t.Fatal("invalid supplied header accepted", code)
@@ -385,6 +398,7 @@ func TestEntryWorkerLoadsApprovedSourceWithLocalSecrets(t *testing.T) {
 			t.Error(err)
 		}
 	})
+	rt.setLocalApprovals(rt.cache.ApprovedModels([]Model{model}))
 	rt.sync([]ModelSlot{{Model: model.Name, State: "loading", Session: "entry-session", Placement: &ModelPlacement{AllowedMachines: []string{"eligible"}}}})
 	await(t, func() bool { reports, _ := rt.report(); return len(reports) == 1 && reports[0].State == "ready" })
 	path, err := rt.cache.Prepare(context.Background(), model)

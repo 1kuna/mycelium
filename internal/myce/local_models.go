@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type localModelMetadata struct {
@@ -161,6 +163,9 @@ func ApproveLocalModel(ctx context.Context, approvals, name, path, root string) 
 	return Model{LocalSource: name, Files: files, SizeBytes: size, SHA256: hash}, nil
 }
 func (c *ModelCache) prepareLocal(ctx context.Context, m Model) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if !privateLocalDirectory(c.ApprovalRoot) || !localName(m.LocalSource) || m.FileStore || m.DirectNAS || m.Path != "" {
 		return "", errLocalApproval
 	}
@@ -185,20 +190,76 @@ func (c *ModelCache) prepareLocal(ctx context.Context, m Model) (string, error) 
 	if err != nil || size != m.SizeBytes || hash != m.SHA256 || validateModelFiles(m) != nil {
 		return "", errLocalApproval
 	}
-	current, err := localMetadata(ctx, approval.Path, approval.Root)
+	metadata := localMetadata
+	if c.localMetadataProbe != nil {
+		metadata = c.localMetadataProbe
+	}
+	current, err := metadata(ctx, approval.Path, approval.Root)
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	if err != nil || !reflect.DeepEqual(approval.Metadata, current) {
 		return "", errLocalApproval
 	}
 	return approval.Path, nil
 }
+
+// Metadata syscalls can outlive context cancellation. Reuse the bounded I/O
+// helper to retain at most one outstanding scan, including after a timeout.
+const localApprovalTimeout = 250 * time.Millisecond
+
+type localApprovalSnapshot struct {
+	models map[string]string
+	ctx    context.Context
+}
+
 func (c *ModelCache) ApprovedModels(models []Model) map[string]string {
-	out := map[string]string{}
+	hasLocal := false
 	for _, m := range models {
-		if m.LocalSource != "" {
-			if _, err := c.prepareLocal(context.Background(), m); err == nil {
+		hasLocal = hasLocal || m.LocalSource != ""
+	}
+	if !hasLocal {
+		return nil
+	}
+	c.localProbeInit.Do(func() { c.localProbe.timeout = localApprovalTimeout })
+	ctx, cancel := context.WithTimeout(context.Background(), localApprovalTimeout)
+	defer cancel()
+	approved, err := c.localProbe.run(modelConfigHash(ModelConfig{Models: models}), func() (localApprovalSnapshot, error) {
+		out := map[string]string{}
+		// Multiple entries can reference the same immutable approval.
+		checked := map[string]bool{}
+		for _, m := range models {
+			if m.LocalSource == "" {
+				continue
+			}
+			key := m.LocalSource + ":" + m.SHA256
+			if checked[key] {
+				continue
+			}
+			checked[key] = true
+			if _, err := c.prepareLocal(ctx, m); err == nil {
 				out[m.LocalSource] = m.SHA256
 			}
+			if err := ctx.Err(); err != nil {
+				return localApprovalSnapshot{}, err
+			}
 		}
+		return localApprovalSnapshot{models: out, ctx: ctx}, nil
+	})
+	// A completed result from an earlier timed-out heartbeat stays invalid.
+	if err != nil || approved.ctx.Err() != nil {
+		clock := c.Clock
+		if clock == nil {
+			clock = RealClock{}
+		}
+		c.localWarningMu.Lock()
+		now := clock.Now()
+		if !now.Before(c.nextApprovalWarning) {
+			log.Print("local model approval not currently verifiable; withholding loads and routing (will retry)")
+			c.nextApprovalWarning = now.Add(time.Minute)
+		}
+		c.localWarningMu.Unlock()
+		return nil
 	}
-	return out
+	return approved.models
 }

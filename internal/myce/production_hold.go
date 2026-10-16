@@ -286,8 +286,8 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 		if q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.projectAllows(j.Spec.Project, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 			continue
 		}
-		model, _ := q.model(j.Spec.Needs.Model)
-		if call != nil && !q.modelFitsMachine(model, m) {
+		model, hasModel := q.model(j.Spec.Needs.Model)
+		if hasModel && !q.modelFitsMachine(model, m) {
 			continue
 		}
 		if call != nil && (m.ModelURL == "" || m.ID == call.Exclude) {

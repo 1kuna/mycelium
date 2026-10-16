@@ -67,7 +67,20 @@ metadata. A changed/missing file, new file, changed blob or different host
 invalidates readiness. Re-run the explicit approval command after changes and
 update the catalog manifest if its content identity changed. All symlink targets
 must stay within the approved root; directory symlinks and special files are
-rejected. The ordinary copied-model no-symlink rules are unchanged.
+rejected. Hard links are regular files: another name for the same inode can
+exist outside that root, so the root does not bound hard-link aliases. This is
+acceptable because approval trusts operator-controlled immutable storage, not a
+filesystem sandbox. Protect every alias from writes; inode/size/mtime checks
+detect ordinary changes through any alias. The ordinary copied-model no-symlink
+rules are unchanged.
+
+Each heartbeat checks each distinct local approval once, sharing the result with
+cache inventory. The metadata pass has a 250 ms I/O budget. If storage stalls,
+approval is not currently verifiable: new loads and routing are withheld, a
+sanitized warning appears at most once per minute, and checks retry without
+accumulating blocked filesystem calls. Existing allocations remain reserved until
+the worker confirms unloading; a timeout alone never proves release. An expired
+check cannot restore readiness, even if its filesystem call finishes later.
 
 Protect approved snapshots/blobs against writes and HF cleanup while used.
 Metadata checks trust operator-controlled immutable storage; they do not detect
@@ -79,12 +92,16 @@ Fleet bearer authentication is always required. On `/v1` routes, an owned entry
 supplies its `project` when `X-Myce-Project` is absent and uses `experiment` when
 `X-Myce-Priority` is absent. A project policy can explicitly set
 `default_call_priority: production`; that opt-in applies to missing priority
-headers for that project. Explicit caller headers remain supported, including
-production calls under the existing contract. Invalid/empty/duplicate supplied
-headers fail; deadline priority still requires an RFC3339 deadline.
+headers for the effective caller project. An explicit caller project therefore
+uses its own production opt-in even on another owner's entry; the owner's
+default does not override it. Explicit priorities remain supported, including
+production calls under the existing contract. Project headers are trimmed.
+Empty project/priority and duplicate routing headers fail. A deadline header is
+ignored for non-deadline calls; deadline priority requires an RFC3339 deadline.
 
 Entries without `project` retain the existing required-header behavior. Generic
-`/models/NAME/PATH` calls retain required headers and upload spooling; these
+`/models/NAME/PATH` calls validate required headers before reading or spooling
+the body. Valid requests retain upload spooling; these
 changes do not resolve the separate body-storage privacy hold.
 
 [The dry Atlas example](examples/atlas-server-entries.yaml) uses placeholders.
