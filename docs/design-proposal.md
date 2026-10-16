@@ -279,3 +279,13 @@ ordinary copied-model custody is unchanged. Authenticated header-less `/v1`
 calls default to the entry owner and `experiment`; a per-project production
 default requires explicit operator opt-in. Existing entries retain defaults.
 See [operator configuration](design-68-server-entries.md).
+
+## Log opt-out rollout (#68 review decision)
+
+Workers advertise `logs_none` in optional `capabilities`; the queue assigns
+`logs: none` batches and server entries only to those workers. Waiting status
+names the missing capability. Environment build output remains in environment
+records, without per-job copies or job-log fallback text for opted-out jobs.
+Roll queue and workers together; do not downgrade with opted-out work live.
+See [log policy and downgrade behavior](job-reference.md#scheduling-and-results)
+and the [native proof checklist](guide-servers.md).

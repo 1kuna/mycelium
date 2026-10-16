@@ -130,11 +130,31 @@ logs expire by final completion age (submission age for terminal jobs with no
 completion timestamp). Worker batch/server logs expire by last-write age at
 startup/within one minute. Active server logs and current unacknowledged batch
 replay remain protected. Retention does not bound active log size or securely
-erase SQLite/WAL, backups or disk remnants. Environment build logs are outside
-this policy. Batch jobs also accept top-level `logs: none`, with the same null-device
-output behavior and no queue log rows or worker attempt log; see the
+erase SQLite/WAL, backups or disk remnants. Environment build logs remain under
+their own environment records; they are not copied to jobs with `logs: none`.
+Batch jobs also accept top-level `logs: none`, with the same null-device output
+behavior and no queue log rows or worker attempt log; see the
 [job reference](job-reference.md#scheduling-and-results). Keep confidential
 inputs/outputs out of captured batch output.
+
+`logs: none` server entries require a worker advertising `logs_none`; older
+workers cannot receive their load plans or serve their calls. Roll workers and
+queue together and do not downgrade with these entries live. See the
+[job reference](job-reference.md#scheduling-and-results) for downgrade behavior.
+
+Before claiming native Docker qualification, use an authorized disposable daemon
+and a retained managed container with `logs: none` to verify:
+
+- `docker logs CONTAINER` refuses because the `none` driver does not support logs.
+- The daemon's container directory has neither `*-json.log` nor
+  `container-cached.log`, including after completion and worker recovery.
+- Managed `create` still succeeds when that daemon has default `log-opts` set
+  for its normal logging driver. Check the container's actual driver is `none`.
+
+The fake Docker tests cover argv and recovery behavior; they do not establish
+these daemon results or native journald behavior. For native journal proof, have
+a harmless payload assert fd 1 and fd 2 identify the null device, then emit
+synthetic markers and confirm neither marker reaches the worker's journal.
 
 Disable request logging in the **exact vLLM 0.27.1 launch command** too.
 `--disable-log-requests` is a candidate flag to **check** against that version's

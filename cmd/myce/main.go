@@ -689,13 +689,27 @@ func printStatus(s myce.Snapshot, full bool) {
 		if j.StartedAt != nil && j.Spec.Priority == "production" {
 			fmt.Printf("production start latency %s: %.3fs\n", id, j.StartLatencySeconds)
 		}
-		fmt.Printf("%s %s [%s] %s hypha=%s %s %s; %s\n", id, j.Spec.Name, j.Spec.Priority, myce.JobState(j), j.Machine, myce.JobReason(j), myce.JobAge(j, s.Now), myce.JobWork(j))
+		policy := j.Spec.Logs
+		if policy == "" {
+			policy = "keep"
+		}
+		fmt.Printf("%s %s [%s] %s hypha=%s logs=%s %s %s; %s\n", id, j.Spec.Name, j.Spec.Priority, myce.JobState(j), j.Machine, policy, myce.JobReason(j), myce.JobAge(j, s.Now), myce.JobWork(j))
 	}
 	if len(s.Jobs) == 0 {
 		fmt.Println("No jobs yet.")
 	}
 }
 func logs(ctx context.Context, c myce.Client, id string, follow bool) error {
+	s, err := status(ctx, c)
+	if err != nil {
+		return err
+	}
+	for _, j := range s.Jobs {
+		if j.ID == id && j.Spec.Logs == "none" {
+			fmt.Println("logs are disabled for this job (logs: none)")
+			return nil
+		}
+	}
 	var after int64
 	for {
 		var chunks []myce.Log

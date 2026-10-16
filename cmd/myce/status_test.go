@@ -73,3 +73,31 @@ func TestStatusShowsProfileQualificationAndEveryWaitingReason(t *testing.T) {
 		}
 	}
 }
+
+func TestLogsNoneOperatorOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/status" {
+			fmt.Fprint(w, `{"jobs":[{"id":"private-job","state":"succeeded","spec":{"name":"private","logs":"none"}},{"id":"default-job","state":"queued","spec":{"name":"default"}}]}`)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer server.Close()
+	for _, command := range []string{"status", "logs"} {
+		args := []string{command}
+		if command == "logs" {
+			args = append(args, "private-job", "--follow")
+		}
+		args = append(args, "--queue", server.URL, "--token", "test-only")
+		out, _, err := captureUsageOutput(t, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if command == "status" && (!strings.Contains(out, "logs=none") || !strings.Contains(out, "logs=keep")) {
+			t.Fatal(out)
+		}
+		if command == "logs" && !strings.Contains(out, "logs are disabled") {
+			t.Fatal(out)
+		}
+	}
+}

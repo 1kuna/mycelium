@@ -76,7 +76,19 @@ Docker uses the `none` logging driver for every member, skips log collection and
 private stderr tails, and preserves exit/cleanup evidence through recovery.
 Omitted or `logs: keep` retains existing capture and retention behavior. This
 does not remove older logs or control files/telemetry written by the payload or
-environment-build logs. Keep submitted metadata non-sensitive.
+environment-build logs held under their own environment records. These logs are
+not copied into a `logs: none` job or returned by its logs endpoint. `myce status`
+shows the log policy; `myce logs` reports when logs are disabled. Keep submitted
+metadata non-sensitive.
+
+Workers advertise `capabilities: [logs_none]`. The queue leaves `logs: none`
+jobs and server loads waiting, with a capability reason, until a compatible
+worker checks in. Omitted/`keep` entries can still use older workers.
+
+Roll workers and queue together. An old queue silently treats `logs: none`
+jobs as `keep`, and an old worker refuses saved state containing the field.
+Do not downgrade while `logs: none` jobs or server entries are live; first stop
+and drain them with the compatible versions.
 
 Priority loss timeouts are `production: 5s`, `deadline: 20s`, `experiment: 60s`.
 They apply when a worker stops checking in; they are not job execution limits.

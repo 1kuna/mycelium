@@ -887,6 +887,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	if err != nil {
 		binary = "docker"
 	} // Retry a missing CLI without declaring release.
+	state.LogsNone = state.LogsNone || s.state.Job.Spec.Logs == "none"
 	d := &dockerAttempt{closed: make(chan struct{}), halt: make(chan struct{}), state: state, dir: s.dir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout}
 	if d.timeout <= 0 {
 		d.timeout = 2 * time.Second

@@ -1005,6 +1005,7 @@ func (w Worker) Run(stop context.Context) error {
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
+			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none")
 			m.ApprovedModels = rt.cache.ApprovedModels(w.ModelConfig.Models)
 			reports, _ := rt.report()
 			if rt.cache != nil {

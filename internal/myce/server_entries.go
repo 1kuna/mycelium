@@ -20,7 +20,7 @@ type ModelPlacement struct {
 }
 
 func (q *Queue) modelFitsMachine(model Model, m *Machine) bool {
-	return modelFitsMachine(model, m) && q.projectAllows(model.Project, m.ID)
+	return logPolicyFits(model.Logs, m) && modelFitsMachine(model, m) && q.projectAllows(model.Project, m.ID)
 }
 
 var localNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)

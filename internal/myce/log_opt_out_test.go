@@ -43,7 +43,7 @@ func TestBatchLogsNoneQueueDiscardsCurrentAttemptOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	j := submit(t, q, s)
-	assigned := check(t, q, machine("worker", "fake"), nil).Job
+	assigned := check(t, q, logsNoneMachine(t, "worker"), nil).Job
 	chunk := LogChunk{Result: result(assigned, true), Offset: 1, Text: "synthetic stdout/stderr"}
 	for range 2 {
 		if err := q.AppendLog(chunk); err != nil {
@@ -72,7 +72,12 @@ func TestBatchLogsNoneLifecycle(t *testing.T) {
 			if err := json.Unmarshal([]byte(`{"logs":"none"}`), &s); err != nil {
 				t.Fatal(err)
 			}
-			script := "echo synthetic-stdout; echo synthetic-stderr >&2; "
+			exe, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Run.Env = map[string]string{"NULL_ASSERT": exe}
+			script := nullDescriptorAssertion + "echo synthetic-stdout; echo synthetic-stderr >&2; "
 			want := "succeeded"
 			switch mode {
 			case "failure":
@@ -81,7 +86,7 @@ func TestBatchLogsNoneLifecycle(t *testing.T) {
 			case "cancel":
 				// The marker proves payload startup without relying on captured logs.
 				marker := filepath.Join(t.TempDir(), "started")
-				s.Run.Env = map[string]string{"START_MARKER": marker}
+				s.Run.Env["START_MARKER"] = marker
 				script += `echo ready > "$START_MARKER"; exec sleep 60`
 				want = "cancelled"
 			case "large-output":
@@ -184,10 +189,20 @@ func TestServerLogPolicyOutput(t *testing.T) {
 			m.StopTimeout = 3 * time.Second
 			prefix := "echo synthetic-stdout; echo synthetic-stderr >&2; "
 			if policy == "none" {
+				exe, err := os.Executable()
+				if err != nil {
+					t.Fatal(err)
+				}
+				m.Env = map[string]string{"NULL_ASSERT": exe, "NULL_STOP_MARKER": filepath.Join(t.TempDir(), "checked")}
+				prefix = nullDescriptorAssertion + prefix
 				prefix += "dd if=/dev/zero bs=65536 count=32; dd if=/dev/zero bs=65536 count=32 >&2; "
 			}
 			m.StartCommand = append([]string{"sh", "-c", prefix + `exec "$@"`, "server"}, m.StartCommand...)
-			m.StopCommand = []string{"sh", "-c", "echo synthetic-stop-stdout; echo synthetic-stop-stderr >&2"}
+			stop := "echo synthetic-stop-stdout; echo synthetic-stop-stderr >&2"
+			if policy == "none" {
+				stop = nullDescriptorAssertion + `echo checked > "$NULL_STOP_MARKER"; ` + stop
+			}
+			m.StopCommand = []string{"sh", "-c", stop}
 			dir := t.TempDir()
 			e := NewModelEngine(m, dir, RealClock{})
 			ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
@@ -204,6 +219,9 @@ func TestServerLogPolicyOutput(t *testing.T) {
 				t.Fatal(err)
 			}
 			if policy == "none" {
+				if data, err := os.ReadFile(m.Env["NULL_STOP_MARKER"]); err != nil || string(data) != "checked\n" {
+					t.Fatal("stop helper did not verify null descriptors", err)
+				}
 				if len(files) != 0 {
 					t.Fatal("server output retained")
 				}
@@ -221,6 +239,16 @@ func TestServerLogPolicyOutput(t *testing.T) {
 }
 
 func TestDockerLogsNoneRecovery(t *testing.T) {
+	for _, missingFlag := range []bool{false, true} {
+		name := "runtime-flag"
+		if missingFlag {
+			name = "job-policy"
+		}
+		t.Run(name, func(t *testing.T) { testDockerLogsNoneRecovery(t, missingFlag) })
+	}
+}
+
+func testDockerLogsNoneRecovery(t *testing.T, missingFlag bool) {
 	w, s, clock, root := dockerFixture(t)
 	j := dockerGroupJob(t)
 	j.Spec.Logs = "none"
@@ -237,6 +265,20 @@ func TestDockerLogsNoneRecovery(t *testing.T) {
 		return strings.Count(string(data), "kill --signal=TERM sidecar-") == 2
 	})
 	p.docker.close()
+	// Simulate saved custody lacking the redundant flag. The job policy must win.
+	var saved dockerExecution
+	custody := filepath.Join(s.dir, s.state.Identity+".docker.json")
+	data, err := os.ReadFile(custody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	saved.LogsNone = !missingFlag
+	if err := saveWorkerJSON(s.dir, s.state.Identity+".docker.json", saved); err != nil {
+		t.Fatal(err)
+	}
 	restored, err := w.restoreDocker(s)
 	if err != nil {
 		t.Fatal(err)
@@ -251,7 +293,7 @@ func TestDockerLogsNoneRecovery(t *testing.T) {
 	case <-time.After(testWaitTimeout):
 		t.Fatal("Docker cleanup stuck")
 	}
-	data, err := os.ReadFile(filepath.Join(root, "calls"))
+	data, err = os.ReadFile(filepath.Join(root, "calls"))
 	if err != nil || strings.Contains(string(data), "logs ") || strings.Count(string(data), "--log-driver none") != 3 {
 		t.Fatal("Docker capture not disabled for all containers")
 	}
@@ -288,6 +330,166 @@ func assertNoBatchLogs(t *testing.T, q *Queue, id, dir string) {
 		files, err := filepath.Glob(filepath.Join(dir, "*.log"))
 		if err != nil || len(files) != 0 {
 			t.Fatalf("created attempt logs: %d files, %v", len(files), err)
+		}
+	}
+}
+
+// This runs inside the payload, not in the parent test's output plumbing.
+func TestLogsNoneChild(t *testing.T) {
+	if os.Args[len(os.Args)-1] != "assert-null" {
+		return
+	}
+	null, err := os.Stat(os.DevNull)
+	if err != nil {
+		os.Exit(90)
+	}
+	for _, f := range []*os.File{os.Stdout, os.Stderr} {
+		st, err := f.Stat()
+		if err != nil || !os.SameFile(null, st) {
+			os.Exit(91)
+		}
+	}
+}
+
+const nullDescriptorAssertion = `"$NULL_ASSERT" -test.run=^TestLogsNoneChild$ -- assert-null || exit 91; `
+
+func logsNoneMachine(t *testing.T, id string) Machine {
+	t.Helper()
+	m := machine(id, "fake")
+	if err := json.Unmarshal([]byte(`{"capabilities":["logs_none"]}`), &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func TestLogsNoneRequiresWorkerCapability(t *testing.T) {
+	for _, policy := range []string{"", "keep", "none"} {
+		t.Run(policy, func(t *testing.T) {
+			q, clock := fixture(t)
+			s := spec("experiment")
+			s.Logs = policy
+			j := submit(t, q, s)
+			old := machine("old", "fake")
+			r := check(t, q, old, nil)
+			if policy != "none" {
+				if r.Job == nil {
+					t.Fatal("default/keep no longer works with old workers")
+				}
+				return
+			}
+			if r.Job != nil {
+				t.Fatal("old worker received logs: none")
+			}
+			clock.Advance(time.Second)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if got := job(t, q, j.ID); got.State != "queued" || !strings.Contains(got.Reason, "logs_none") {
+				t.Fatalf("missing waiting reason: %+v", got)
+			}
+			capable := logsNoneMachine(t, "new")
+			if check(t, q, capable, nil).Job == nil {
+				t.Fatal("capable worker did not receive job")
+			}
+			// A lost-response redelivery must also respect current advertisement.
+			if check(t, q, machine("new", "fake"), nil).Job != nil {
+				t.Fatal("redelivered to incompatible worker")
+			}
+		})
+	}
+}
+
+func TestLogsNoneServerRequiresWorkerCapability(t *testing.T) {
+	q, clock, old := modelFixture(t)
+	q.models.Models[0].Logs = "none"
+	old.ModelConfigHash = modelConfigHash(q.models)
+	check(t, q, old, nil)
+	if err := q.Pin(ModelPin{Project: "test", Model: "test", Platform: "fake"}); err != nil {
+		t.Fatal(err)
+	}
+	c := addModelCall(t, q, "experiment")
+	if q.s.Pins[0].Assigned != "" {
+		t.Fatal("pin assigned to old worker")
+	}
+	if len(q.s.ModelSlots) != 0 || c.Machine != "" {
+		t.Fatal("old worker received server")
+	}
+	clock.Advance(time.Second)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, c.ID); !strings.Contains(got.Reason, "logs_none") {
+		t.Fatal(got.Reason)
+	}
+	capable := logsNoneMachine(t, "new")
+	capable.ModelURL, capable.ModelConfigHash = old.ModelURL, old.ModelConfigHash
+	if len(check(t, q, capable, nil).ModelPlan) != 1 {
+		t.Fatal("capable worker missing server plan")
+	}
+	reportModel(t, q, capable, "ready")
+	if c.Machine != capable.ID {
+		t.Fatal("call not routed")
+	}
+	if err := q.finishCall(c.ID); err != nil {
+		t.Fatal(err)
+	}
+	// A previously ready copy cannot be reused after capability disappears.
+	capable = machine("new", "fake")
+	capable.ModelURL, capable.ModelConfigHash = old.ModelURL, old.ModelConfigHash
+	reportModel(t, q, capable, "ready")
+	next := addModelCall(t, q, "experiment")
+	if next.Machine != "" {
+		t.Fatal("incompatible ready server reused")
+	}
+}
+
+func TestLogsNoneEnvironmentOutput(t *testing.T) {
+	q, _ := fixture(t)
+	r := binaryRecipe(t, "fake")
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"broken": {"fake": r}}}); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("experiment")
+	s.Environment.Name, s.Logs = "broken", "none"
+	j := submit(t, q, s)
+	m := logsNoneMachine(t, "builder")
+	m.EnvironmentBuilder = true
+	check(t, q, m, nil)
+	if err := q.AppendEnvironmentLog(EnvironmentLog{Machine: m.ID, Session: m.Session, Key: r.Key, Offset: 1, Text: "synthetic-build-output"}); err != nil {
+		t.Fatal(err)
+	}
+	assertNoBatchLogs(t, q, j.ID, "")
+	if err := q.copyEnvironmentLogs(q.s.Jobs[j.ID], &m, r.Key); err != nil {
+		t.Fatal(err)
+	}
+	assertNoBatchLogs(t, q, j.ID, "")
+	m.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "failed", Error: "build exit 9", Log: "synthetic-failure-output"}}
+	check(t, q, m, nil)
+	if got := job(t, q, j.ID); got.State != "failed" || got.EnvironmentFailureLog != "" {
+		t.Fatal("failure retained job output or lost lifecycle")
+	}
+	// Old persisted fallback text must not escape through Logs either.
+	q.s.Jobs[j.ID].EnvironmentFailureLog = "saved-build-output"
+	assertNoBatchLogs(t, q, j.ID, "")
+	var count int
+	if err := q.db.QueryRow("SELECT count(*) FROM environment_build_logs WHERE key=?", r.Key).Scan(&count); err != nil || count != 1 {
+		t.Fatal("environment's independent log was lost", err)
+	}
+}
+
+func TestLogsNoneServerFailureDiagnostic(t *testing.T) {
+	for _, policy := range []string{"none", "keep"} {
+		m := serverTestModel(t, "crash")
+		m.Logs = policy
+		e := NewModelEngine(m, t.TempDir(), RealClock{})
+		ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+		err := e.Load(ctx, m)
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), "exit status 7") {
+			t.Fatalf("missing exit diagnostic: %v", err)
+		}
+		if strings.Contains(err.Error(), "see engine-") != (policy == "keep") {
+			t.Fatalf("incorrect log advice: %v", err)
 		}
 	}
 }
