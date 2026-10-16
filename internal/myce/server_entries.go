@@ -3,6 +3,7 @@ package myce
 import (
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,11 +28,40 @@ func (q *Queue) modelFitsMachine(model Model, m *Machine) bool {
 // All remaining fences (owner, machine, platform, log policy) still apply.
 func (q *Queue) residentModel(model Model, m *Machine) Model {
 	if model.LocalSource != "" && m.ModelApprovalStates[model.LocalSource] == approvalUnknown {
-		if s := q.s.ModelSlots[slotKey(m.ID, model.Name)]; s != nil && s.Session == m.Session && s.State == "ready" {
+		if s := q.s.ModelSlots[slotKey(m.ID, model.Name)]; s != nil && s.Session == m.Session && s.State == "ready" && (s.ApprovalUnknownSince == nil || q.clock.Now().Sub(*s.ApprovalUnknownSince) <= localApprovalUnknownGrace) {
 			model.LocalSource = ""
 		}
 	}
 	return model
+}
+
+const localApprovalUnknownGrace = 5 * time.Minute
+
+func (q *Queue) maintainApprovalGrace() {
+	now := q.clock.Now()
+	for _, slot := range q.s.ModelSlots {
+		model, ok := q.model(slot.Model)
+		machine := q.s.Machines[slot.Machine]
+		if !ok || model.LocalSource == "" || machine == nil || machine.Session != slot.Session || machine.ModelApprovalStates[model.LocalSource] != approvalUnknown {
+			slot.ApprovalUnknownSince = nil
+			continue
+		}
+		if slot.State != "ready" {
+			continue
+		}
+		if slot.ApprovalUnknownSince == nil {
+			since := now
+			slot.ApprovalUnknownSince = &since
+		}
+		if now.Sub(*slot.ApprovalUnknownSince) > localApprovalUnknownGrace {
+			slot.State = "draining"
+			slot.Error = "local model approval unknown for more than 5m; draining until the source is verified or re-approved"
+			if !now.Before(q.nextApprovalWarning) {
+				log.Print(slot.Error)
+				q.nextApprovalWarning = now.Add(time.Minute)
+			}
+		}
+	}
 }
 
 func (q *Queue) modelUsableMachine(model Model, m *Machine) bool {

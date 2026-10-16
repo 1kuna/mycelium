@@ -300,7 +300,7 @@ func TestEntryApprovalHeartbeatRejectsExpiredCompletedSnapshot(t *testing.T) {
 	// Completion and the heartbeat timeout can race; cancellation wins even if
 	// the filesystem computed a valid manifest just before the timeout returned.
 	c.localProbe.key = modelConfigHash(ModelConfig{Models: []Model{model}})
-	c.localProbe.pending = &checkpointIOResult[localApprovalSnapshot]{done: done, value: localApprovalSnapshot{models: map[string]string{model.LocalSource: model.SHA256}, ctx: ctx}}
+	c.localProbe.pending = &checkpointIOResult[localApprovalSnapshot]{done: done, value: localApprovalSnapshot{ctx: ctx}}
 	cancel()
 	if len(c.ApprovedModels([]Model{model})) != 0 {
 		t.Fatal("expired completed result revived readiness")

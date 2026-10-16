@@ -40,6 +40,10 @@ type ModelCache struct {
 	speedMu       sync.Mutex
 	beforeChunk   func(context.Context) // deterministic interruption hook for tests
 
+	localCheckMu        sync.Mutex
+	localApprovalRound  uint64
+	localResults        sync.Map // Completed metadata checks, consumed once by their heartbeat.
+	localRecordProbe    checkpointIO[localApprovalRecords]
 	localProbe          checkpointIO[localApprovalSnapshot]
 	localProbeInit      sync.Once
 	localWarningMu      sync.Mutex
