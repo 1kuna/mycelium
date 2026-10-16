@@ -635,9 +635,9 @@ func printStatus(s myce.Snapshot, full bool) {
 			state += "; " + m.MemoryEnforcement
 		}
 		if m.EffectiveHostMemoryBudgetGB > 0 {
-			state += fmt.Sprintf("; host ceiling budget %.3g GiB", m.EffectiveHostMemoryBudgetGB)
+			state += fmt.Sprintf("; host ceiling budget (last reported) %.3g GiB", m.EffectiveHostMemoryBudgetGB)
 		} else if m.HostMemoryBudgetGB > 0 {
-			state += fmt.Sprintf("; host ceiling budget %.3g GiB", m.HostMemoryBudgetGB)
+			state += fmt.Sprintf("; host ceiling budget (last reported) %.3g GiB", m.HostMemoryBudgetGB)
 		}
 		if over := m.HostMemoryBudgetStatus(); over != "" {
 			state += "; " + over

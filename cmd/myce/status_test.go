@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"mycelium/internal/myce"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,6 +99,33 @@ func TestLogsNoneOperatorOutput(t *testing.T) {
 		}
 		if command == "logs" && !strings.Contains(out, "logs are disabled") {
 			t.Fatal(out)
+		}
+	}
+}
+
+func TestStatusStoppedWorkerBudgetIsLastReported(t *testing.T) {
+	for _, effective := range []bool{false, true} {
+		m := &myce.Machine{ID: "stopped", Gone: true, HostMemoryBudgetGB: 22}
+		if effective {
+			m.EffectiveHostMemoryBudgetGB = 22
+		}
+		f, err := os.CreateTemp(t.TempDir(), "status")
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved := os.Stdout
+		func() {
+			os.Stdout = f
+			defer func() { os.Stdout = saved }()
+			printStatus(myce.Snapshot{Machines: []*myce.Machine{m}}, false)
+		}()
+		f.Close()
+		data, err := os.ReadFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "host ceiling budget (last reported) 22 GiB") {
+			t.Fatal(string(data))
 		}
 	}
 }

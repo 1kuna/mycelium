@@ -59,3 +59,49 @@ check current assignments and release/hold state before maintenance: policy
 eligibility alone proves no release of existing work. Loaded model servers
 appear under `loaded_models`, not jobs, and must be checked separately. Terminal
 jobs omit all three derived eligibility fields.
+
+Host gates should read `holds_detail`, an array (empty when there are no holds)
+whose entries have `host`, `kind`, `operator_action_required`, `text` and an
+optional `clears_at` timestamp. Entries are sorted by host and kind; a host can
+have several holds at once. Do not match English text to choose an action.
+
+- `production_hold`: active production demand, including work between stages.
+- `production_stopping`: lower-priority work is within its stop grace.
+- `production_release_unknown`: release cannot be confirmed; operator attention
+  is required, though a fresh release acknowledgement can still clear it.
+- `production_cooldown`: idle production reservation; `clears_at` is the end of
+  the configured idle interval, calculated with the queue's clock. New production
+  demand can extend the reservation, so refresh before acting.
+- `docker_transition`: an ordinary Docker create/start/stop operation is pending.
+- `docker_cleanup_waiting`: custody is awaiting cleanup confirmation.
+- `docker_cleanup_operator_action`: cleanup has reached its escalation bound;
+  operator attention is required (`myce resolve-docker`). Custody remains fenced.
+- `startup_release`: a failed startup still awaits its exact execution's release.
+- `host_disabled`: an operator disabled the host; enabling it requires operator
+  action.
+
+`operator_action_required` is true for `production_release_unknown`,
+`docker_cleanup_operator_action` and `host_disabled`, and false for the other
+kinds. False means no operator action is currently demanded, not that release is
+proven or that recovery has a deadline. Only `production_cooldown` supplies
+`clears_at`. A cleanup acknowledgement may clear an escalated hold without an
+operator override. An ordinary Docker transition is not itself a cleanup failure.
+
+For run monitoring, distinguish routine reservations and transitions from
+operator holds using these fields, including the target host. For maintenance,
+a hold's automatic recovery does not make the host safe: wait for relevant holds
+to clear and verify assignments, loaded models and attempt release evidence.
+Treat unreadable status, missing/invalid details, or unknown kinds as unresolved.
+An empty hold list alone does not prove a specific attempt has released custody.
+
+The compatibility field `host_holds` remains a list of the existing strings and
+is **omitted when empty**. `text` equals the corresponding existing string; the
+additional startup-release and disabled-host entries use the queue's existing
+fence messages and appear only in `holds_detail`.
+
+The CLI and page label host ceiling budgets **last reported**, including stopped
+workers. Both `host_memory_budget_gb` and `effective_host_memory_budget_gb` are
+worker-reported queue state, not a live read of an offline host's budget file.
+Check the host's setting locally with `myce host-memory-budget show` when a
+current value is required; the queue cannot observe file changes while all of
+that host's workers are stopped.

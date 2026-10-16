@@ -276,7 +276,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
           <div class="metric"><span class="label">Free</span><strong>{{printf "%.1f" .FreeMemoryGB}} GB</strong></div>
 	          <div class="metric"><span class="label">Reserved</span><strong>{{printf "%.1f" .ReservedMemoryGB}} GB</strong></div>
         </div>
-        {{if or .MemoryEnforcement .EffectiveHostMemoryBudgetGB .HostMemoryBudgetGB}}<div class="detail"><div class="label">RAM ceiling</div><div class="value">{{.MemoryEnforcement}}{{if .EffectiveHostMemoryBudgetGB}}<div>Host ceiling budget: {{printf "%g" .EffectiveHostMemoryBudgetGB}} GiB</div>{{else if .HostMemoryBudgetGB}}<div>Host ceiling budget: {{printf "%g" .HostMemoryBudgetGB}} GiB</div>{{end}}{{if .HostMemoryBudgetStatus}}<div>{{.HostMemoryBudgetStatus}}</div>{{end}}</div></div>{{end}}
+        {{if or .MemoryEnforcement .EffectiveHostMemoryBudgetGB .HostMemoryBudgetGB}}<div class="detail"><div class="label">RAM ceiling</div><div class="value">{{.MemoryEnforcement}}{{if .EffectiveHostMemoryBudgetGB}}<div>Host ceiling budget (last reported): {{printf "%g" .EffectiveHostMemoryBudgetGB}} GiB</div>{{else if .HostMemoryBudgetGB}}<div>Host ceiling budget (last reported): {{printf "%g" .HostMemoryBudgetGB}} GiB</div>{{end}}{{if .HostMemoryBudgetStatus}}<div>{{.HostMemoryBudgetStatus}}</div>{{end}}</div></div>{{end}}
         {{if .DockerCleanup}}<div class="alert bad">Docker {{.DockerCleanup}}</div>{{end}}
         <div class="detail"><div class="label">Capability profile</div><div class="value">{{range profileLines .}}<div>{{.}}</div>{{end}}</div></div>
         <div class="detail"><div class="label">Availability</div><div class="value">{{hyphaAvailability .}}</div></div>

@@ -1013,7 +1013,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 	var out Snapshot
 	err := q.update(func() error {
 		q.maintain()
-		out = Snapshot{SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+		out = Snapshot{HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 		for _, s := range q.s.ModelSlots {
 			copy := *s
 			model, _ := q.model(s.Model)
@@ -1042,15 +1042,61 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 		}
 		for host := range q.s.Hosts {
 			if q.held(host) {
-				out.HostHolds = append(out.HostHolds, q.holdReason(host))
+				detail := q.productionHoldDetail(host)
+				out.HostHolds = append(out.HostHolds, detail.Text)
+				out.HoldsDetail = append(out.HoldsDetail, detail)
 			}
 		}
-		for host := range q.s.Machines {
-			if b := q.dockerBlocker(hostID(q.s.Machines[host])); b != "" && !slices.Contains(out.HostHolds, b) {
-				out.HostHolds = append(out.HostHolds, b)
+		hosts := map[string]bool{}
+		for _, m := range q.s.Machines {
+			hosts[hostID(m)] = true
+		}
+		for host := range hosts {
+			if detail := q.dockerHoldDetail(host); detail.Text != "" {
+				if !slices.Contains(out.HostHolds, detail.Text) {
+					out.HostHolds = append(out.HostHolds, detail.Text)
+				}
+				out.HoldsDetail = append(out.HoldsDetail, detail)
+			}
+		}
+		// Also report fences without a configured production policy or live worker.
+		for _, r := range q.s.HostReleases {
+			if _, ok := hosts[r.Host]; !ok {
+				hosts[r.Host] = false
+			}
+		}
+		for host := range q.s.DisabledHosts {
+			if _, ok := hosts[host]; !ok {
+				hosts[host] = false
+			}
+		}
+		for host, hasMachine := range hosts {
+			if !hasMachine {
+				if detail := q.dockerHoldDetail(host); detail.Text != "" {
+					out.HoldsDetail = append(out.HoldsDetail, detail)
+				}
+			}
+			if text := q.startupReleaseBlocker(host); text != "" {
+				out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "startup_release", Text: text})
+			}
+			disabled := q.s.DisabledHosts[host] != ""
+			for _, m := range q.s.Machines {
+				if hostID(m) == host && m.Disabled != "" {
+					disabled = true
+				}
+			}
+			if disabled {
+				out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "host_disabled", OperatorActionRequired: true, Text: "host " + host + " disabled by operator"})
 			}
 		}
 		sort.Strings(out.HostHolds)
+		sort.Slice(out.HoldsDetail, func(i, j int) bool {
+			a, b := out.HoldsDetail[i], out.HoldsDetail[j]
+			if a.Host != b.Host {
+				return a.Host < b.Host
+			}
+			return a.Kind < b.Kind
+		})
 		out.Now = q.clock.Now()
 		order, reasons := q.queueProjection()
 		for _, j := range q.s.Jobs {

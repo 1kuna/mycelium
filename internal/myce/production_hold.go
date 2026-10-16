@@ -185,6 +185,10 @@ func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
 	return q.hostBlockers(hostID(m)) == ""
 }
 func (q *Queue) hostBlockers(host string) string {
+	text, _ := q.hostBlockerState(host)
+	return text
+}
+func (q *Queue) hostBlockerState(host string) (string, bool) {
 	count := 0
 	remaining := 0.0
 	unknown := []string{}
@@ -226,23 +230,34 @@ func (q *Queue) hostBlockers(host string) string {
 	}
 	if len(unknown) > 0 {
 		sort.Strings(unknown)
-		return "release unknown: worker " + strings.Join(unknown, ", ")
+		return "release unknown: worker " + strings.Join(unknown, ", "), true
 	}
 	if count > 0 {
-		return fmt.Sprintf("stopping %d attempts; grace remaining %.0fs", count, remaining)
+		return fmt.Sprintf("stopping %d attempts; grace remaining %.0fs", count, remaining), false
 	}
-	return ""
+	return "", false
 }
-func (q *Queue) holdReason(host string) string {
-	if b := q.hostBlockers(host); b != "" {
-		return host + ": production hold; " + b
+func (q *Queue) holdReason(host string) string { return q.productionHoldDetail(host).Text }
+func (q *Queue) productionHoldDetail(host string) HoldDetail {
+	detail := HoldDetail{Host: host, Kind: "production_hold", Text: host + ": production hold"}
+	if b, unknown := q.hostBlockerState(host); b != "" {
+		detail.Text += "; " + b
+		detail.Kind = "production_stopping"
+		if unknown {
+			detail.Kind = "production_release_unknown"
+			detail.OperatorActionRequired = true
+		}
+		return detail
 	}
 	h := q.s.Hosts[host]
 	if h.IdleSince != nil {
 		d, _ := time.ParseDuration(h.Policy.ProductionIdle)
-		return fmt.Sprintf("%s: production idle; experiments resume in %.0fs", host, max(0, h.IdleSince.Add(d).Sub(q.clock.Now()).Seconds()))
+		clearsAt := h.IdleSince.Add(d)
+		detail.Kind = "production_cooldown"
+		detail.ClearsAt = &clearsAt
+		detail.Text = fmt.Sprintf("%s: production idle; experiments resume in %.0fs", host, max(0, clearsAt.Sub(q.clock.Now()).Seconds()))
 	}
-	return host + ": production hold"
+	return detail
 }
 func (q *Queue) holdWaitReason(j *Job) string {
 	for _, m := range q.s.Machines {
@@ -526,28 +541,35 @@ func (q *Queue) backgroundPreparing(m *Machine) bool {
 }
 
 // Lost/stopping Docker executions fence the physical host, even without host policy.
-func (q *Queue) dockerBlocker(host string) string {
-	reported := ""
+func (q *Queue) dockerBlocker(host string) string { return q.dockerHoldDetail(host).Text }
+
+func (q *Queue) dockerHoldDetail(host string) HoldDetail {
+	reported := HoldDetail{}
 	for _, m := range q.s.Machines {
 		if hostID(m) == host && m.DockerCleanup != "" {
-			reported = host + ": Docker cleanup unconfirmed; " + m.DockerCleanup
+			kind := "docker_cleanup_waiting"
+			switch m.DockerCleanup {
+			case "creating", "stopping", "released", "create pending", "start pending", "wait pending", "inspect pending", "stop pending", "kill pending", "logs pending", "remove pending", "network-create pending", "network-remove pending":
+				kind = "docker_transition"
+			}
+			reported = HoldDetail{Host: host, Kind: kind, Text: host + ": Docker cleanup unconfirmed; " + m.DockerCleanup}
 		}
 	}
-	waiting := ""
+	waiting := HoldDetail{}
 	for _, r := range q.s.HostReleases {
-		if !r.Docker || r.Host != host {
+		if !r.Docker || r.Host != host || q.dockerReleaseLive(r) {
 			continue
 		}
-		if q.dockerReleaseLive(r) {
-			continue
-		}
-		reason := host + ": Docker cleanup unconfirmed; waiting for attempt " + r.Job + fmt.Sprintf("/%d", r.Attempt)
+		detail := HoldDetail{Host: host, Kind: "docker_cleanup_waiting", Text: host + ": Docker cleanup unconfirmed; waiting for attempt " + r.Job + fmt.Sprintf("/%d", r.Attempt)}
 		if r.EscalatedAt != nil {
-			return reason + "; operator action required (myce resolve-docker)"
+			detail.Kind = "docker_cleanup_operator_action"
+			detail.OperatorActionRequired = true
+			detail.Text += "; operator action required (myce resolve-docker)"
+			return detail
 		}
-		waiting = reason
+		waiting = detail
 	}
-	if reported != "" {
+	if reported.Text != "" {
 		return reported
 	}
 	return waiting
