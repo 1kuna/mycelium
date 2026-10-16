@@ -207,6 +207,9 @@ type Copy struct {
 }
 
 type Job struct {
+	// Derived status-only policy projection; a pointer preserves an empty host list.
+	EligibleHosts         *[]string                    `json:"eligible_hosts,omitempty"`
+	EligibleUnrestricted  bool                         `json:"eligible_unrestricted,omitempty"`
 	FileTransport         bool                         `json:"file_transport,omitempty"`
 	FileCheckpoints       map[int]FileCheckpoint       `json:"file_checkpoints,omitempty"`
 	ResumeFiles           *FileCheckpoint              `json:"resume_files,omitempty"`
