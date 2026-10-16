@@ -185,7 +185,9 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 		return myce.NotifyHost(myce.Client{Token: token})(ctx, w, enable, cleared, reason)
 	}}
 	if *unit != "" {
-		h.Notify = nil
+		h.Notify = func(ctx context.Context, w myce.HostWorker, enable, cleared bool, reason string) error {
+			return myce.NotifyUnit(myce.Client{Token: token})(ctx, w, enable, cleared, reason)
+		}
 	}
 	if args[0] == "disable" {
 		h.ResolveServices = func() (map[string]myce.HostService, error) {

@@ -87,6 +87,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --upload-spool-dir` | OS temporary directory | Local model-upload spool location; files removed after completion/abort |
 | `queue --db` | `myce.db` | Durable local SQLite file; one queue owner |
 | `queue --checkpoints` | `./checkpoints` | Shared root; create on mounted NAS first |
+| `queue/install queue --local-disable-receipts` | `false` | Read co-located completed disable receipts at startup and every second; requires explicit `--host-id` and shared `--host-state-dir`; remote receipts reconcile at enable/rejoin |
 | `queue --restart-grace` | `3m` | Worker reconciliation after queue restart |
 | `queue --production-loss-timeout` | `5s` | Production loss detection |
 | `queue --deadline-loss-timeout` | `20s` | Deadline loss detection |

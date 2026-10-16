@@ -38,6 +38,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	MachineControls  map[string]machineControl        `json:"machine_controls,omitempty"`
 	ProgramNeeds     map[string]SizeHint              `json:"program_needs,omitempty"`
 	Extensions       map[string]Extension             `json:"extensions,omitempty"`
 	HostControls     map[string]HostControlGeneration `json:"host_controls,omitempty"`
@@ -61,6 +62,7 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	localReceipts   localDisableReceipts
 	files           *FileStore
 	fileCheckpoints bool
 	nasProbe        checkpointIO[bool]
@@ -371,6 +373,7 @@ func (q *Queue) stop(j *Job, why string) {
 	j.Reason = why
 }
 func (q *Queue) maintain() {
+	q.reconcileLocalDisableReceipts()
 	now := q.clock.Now()
 	for _, j := range q.s.Jobs {
 		if j.State == "queued" {
@@ -527,6 +530,18 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			return errors.New("worker model config does not match queue")
 		}
 		old := q.s.Machines[m.ID]
+		// A held rejoin may rotate its session before an offline unit receipt is
+		// acknowledged. Retain only the predecessor verified by the normal fresh
+		// check-in contract, so that receipt retries cannot invent session history.
+		if old != nil && old.Session != m.Session && m.EnablePending && c.Fresh && c.PreviousSession == old.Session && hostID(old) == hostID(&m) {
+			if q.s.MachineControls == nil {
+				q.s.MachineControls = map[string]machineControl{}
+			}
+			control := q.s.MachineControls[m.ID]
+			control.Host = hostID(old)
+			control.PreviousSession = old.Session
+			q.s.MachineControls[m.ID] = control
+		}
 		if old != nil && old.Session != m.Session && !(c.Fresh && c.PreviousSession == old.Session) {
 			if h := q.s.Hosts[hostID(old)]; old.HostMemoryBudgetGB > 0 || old.hostBudgetGB > 0 || h != nil && h.Policy.ProductionHold {
 				for _, slot := range q.s.ModelSlots {

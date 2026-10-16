@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,6 +148,47 @@ func TestHostCommandsInstanceSelection(t *testing.T) {
 			}
 			if err := hostCommand([]string{"disable", "--unit", "myce-worker@unknown.service"}, p, &out); err == nil {
 				t.Fatal("unknown target accepted")
+			}
+		})
+	}
+}
+
+func TestHostCommandUnitNotifiesQueue(t *testing.T) {
+	for _, unit := range []string{"myce-worker.service", "myce-worker@gpu0.service"} {
+		t.Run(unit, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("MYCE_TOKEN", "test")
+			t.Setenv("PATH", t.TempDir())
+			dir := filepath.Join(home, "host")
+			q, err := myce.Open(filepath.Join(home, "queue.db"), home, myce.RealClock{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer q.Close()
+			server := httptest.NewServer(myce.API{Queue: q, Token: "test"}.Handler())
+			defer server.Close()
+			m := myce.Machine{ID: "gpu0", HostID: "host", Session: "session", GPU: "fake", FreeMemoryGB: 8}
+			if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+				t.Fatal(err)
+			}
+			state := t.TempDir()
+			if err := os.WriteFile(filepath.Join(state, "state.json"), []byte(`{"session":"session"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := myce.AdoptHostWorker(dir, myce.HostWorker{State: state, Unit: unit, Name: m.ID, Host: m.HostID, Queue: server.URL}); err != nil {
+				t.Fatal(err)
+			}
+			p := myce.MachineProbe{OS: "linux", Command: func(context.Context, string, ...string) ([]byte, error) {
+				return []byte("LoadState=loaded\nActiveState=inactive\nControlGroup=\nKillMode=control-group\nSendSIGKILL=yes\n"), nil
+			}}
+			var out bytes.Buffer
+			if err := hostCommand([]string{"disable", "--now", "--host-state-dir", dir, "--unit", unit}, p, &out); err != nil {
+				t.Fatal(err)
+			}
+			snap, err := q.Snapshot()
+			if err != nil || len(snap.Machines) != 1 || snap.Machines[0].Disabled == "" {
+				t.Fatalf("unit notification missing: %+v %v", snap.Machines, err)
 			}
 		})
 	}

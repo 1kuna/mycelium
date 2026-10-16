@@ -151,7 +151,10 @@ func (q *Queue) EnableHostGeneration(host string, generation uint64) error {
 		for _, m := range q.s.Machines {
 			if hostID(m) == host {
 				m.Disabled = ""
-				m.Leaving = false
+				if unit, ok := q.s.MachineControls[m.ID]; ok && unit.Host == host && unit.Generation > 0 && !unit.Enabled {
+					m.Disabled = unit.Reason
+				}
+				m.Leaving = m.Disabled != ""
 			}
 		}
 		return nil

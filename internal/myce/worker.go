@@ -1380,7 +1380,7 @@ func (w Worker) reconcileEnable(ctx context.Context) error {
 		if err := (HostControl{Dir: parent, Notify: notify}).ReconcileWorkerEnable(ctx, w.Client.URL, w.Machine.HostID); err != nil {
 			return err
 		}
-		notify = nil
+		notify = NotifyUnit(w.Client)
 	}
 	return (HostControl{Dir: w.HostStateDir, Notify: notify}).ReconcileWorkerEnable(ctx, w.Client.URL, w.Machine.HostID)
 }

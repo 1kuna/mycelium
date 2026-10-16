@@ -532,3 +532,26 @@ func TestServiceConfigOnboardingBenchmark(t *testing.T) {
 		}
 	}
 }
+
+func TestQueueLocalDisableReceiptsServiceArgs(t *testing.T) {
+	c, err := PlanInstall("queue", t.TempDir(), "", t.TempDir(), "http://queue:7331", "queue", Detection{OS: "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(c.Args(), " "), "--local-disable-receipts") {
+		t.Fatal("enabled by default")
+	}
+	c.LocalDisableReceipts = true
+	c.HostID = "local-host"
+	c.HostStateDir = filepath.Join(t.TempDir(), "host-state")
+	args := strings.Join(c.Args(), " ")
+	for _, value := range []string{"--local-disable-receipts", "--host-id local-host", "--host-state-dir " + c.HostStateDir} {
+		if !strings.Contains(args, value) {
+			t.Fatal("missing queue argument", value)
+		}
+	}
+	service := c.ServiceText()
+	if !strings.Contains(service, "--local-disable-receipts") {
+		t.Fatal("queue unit omitted reconciliation")
+	}
+}
