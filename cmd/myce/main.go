@@ -136,6 +136,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	projectConfig := f.String("project-config", "", "project weights and experiment caps YAML")
 	url := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
 	token := f.String("token", env("MYCE_TOKEN", ""), "shared fleet token (prefer MYCE_TOKEN)")
+	// DefValue is only help text; keep the actual environment default private.
+	f.Lookup("token").DefValue = ""
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce.db", "SQLite database file")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
