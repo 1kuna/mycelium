@@ -492,7 +492,7 @@ func (q *Queue) maintainModels() {
 				if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
 					q.beginEngineAttempt(s, c.Priority)
 				} else {
-					q.s.ModelSlots[slotKey(m.ID, c.Model)] = &ModelSlot{Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(model), Attempt: ID(), Priority: c.Priority, ProductionUsed: c.Priority == "production", LastUsed: now}
+					q.s.ModelSlots[slotKey(m.ID, c.Model)] = &ModelSlot{Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: c.Priority, ProductionUsed: c.Priority == "production", LastUsed: now}
 				}
 				m.FreeMemoryGB -= model.MemoryGB
 				q.refreshHostMemory()

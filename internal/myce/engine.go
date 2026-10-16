@@ -593,9 +593,6 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		}
 		if !ok || replaced || s.State == "draining" || s.State == "unloading" || !s.Placement.allows(rt.machine) {
 			m.drainRequested = true
-			if s.State == "unloading" && s.LoadTimedOut && !replaced {
-				m.runtimeFailed = true
-			}
 			if m.state == "loading" {
 				m.cancel()
 			}

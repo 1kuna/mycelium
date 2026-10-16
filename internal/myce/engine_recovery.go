@@ -6,17 +6,23 @@ import (
 	"time"
 )
 
-const engineReadySlack = 5 * time.Second
+const engineLoadSlack = 5 * time.Second
 
 func slotReservesMemory(s *ModelSlot) bool { return s.State != "failed" || s.RetryReserved }
 
-func (q *Queue) engineLoadDeadline(model Model) *time.Time {
-	timeout := model.ReadyTimeout
-	if timeout == 0 {
-		timeout = q.models.Wait
-	}
-	until := q.clock.Now().Add(timeout + engineReadySlack)
+func (q *Queue) engineLoadDeadline() *time.Time {
+	// Match the worker's entire load context, including copies, environments
+	// and admission waits. ready_timeout starts only at engine launch.
+	until := q.clock.Now().Add(q.models.Wait + engineLoadSlack)
 	return &until
+}
+
+func (q *Queue) failModelLoadCalls(model string) {
+	for _, c := range q.calls {
+		if c.Model == model && c.Machine == "" {
+			c.Error = "model load failed"
+		}
+	}
 }
 
 func (q *Queue) expireEngineLoad(s *ModelSlot) {
@@ -26,17 +32,17 @@ func (q *Queue) expireEngineLoad(s *ModelSlot) {
 	if s.LoadUntil == nil {
 		// Upgrade persisted slots conservatively: initialize once, never extend
 		// this deadline on subsequent heartbeats or queue restarts.
-		model, _ := q.model(s.Model)
-		s.LoadUntil = q.engineLoadDeadline(model)
+		s.LoadUntil = q.engineLoadDeadline()
 	}
 	if q.clock.Now().Before(*s.LoadUntil) {
 		return
 	}
 	q.noteEngineFailure(s)
 	s.LoadTimedOut = true
-	s.RuntimeFailed = true
+	s.RuntimeFailed = false
 	s.State = "unloading"
-	s.Error = "engine readiness timed out; cleanup pending"
+	s.Error = "model load timed out; cleanup pending"
+	q.failModelLoadCalls(s.Model)
 }
 
 // A slot's attempt identifies an engine, independently of the worker session.
@@ -82,7 +88,7 @@ func (q *Queue) noteEngineFailure(s *ModelSlot) {
 func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 	q.expireEngineLoad(s)
 	if s.LoadTimedOut && r.State == "unloaded" {
-		r.State, r.RuntimeFailed = "failed", true
+		r.State, r.RuntimeFailed = "failed", false
 	}
 	if r.RuntimeFailed && s.State != "failed" && s.State != "unloading" && s.State != "unload_failed" {
 		q.noteEngineFailure(s)
@@ -94,11 +100,7 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 		// weights). Runtime recovery keeps queued demand through its backoff;
 		// it must not turn initial verification errors into silent retry waits.
 		if !r.RuntimeFailed {
-			for _, c := range q.calls {
-				if c.Model == s.Model && c.Machine == "" {
-					c.Error = "model load failed"
-				}
-			}
+			q.failModelLoadCalls(s.Model)
 		}
 		if s.State != "failed" && !(r.RuntimeFailed && s.RetryAt != nil) {
 			q.noteEngineFailure(s)
@@ -185,11 +187,7 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 	if !pinned && !s.RuntimeFailed {
 		// A late transport retry can arrive after the failed load report.
 		// It must fail too, rather than turn a warm-up failure into a loop.
-		for _, c := range q.calls {
-			if c.Model == s.Model && c.Machine == "" {
-				c.Error = "model load failed"
-			}
-		}
+		q.failModelLoadCalls(s.Model)
 		demand = nil
 	}
 	if !pinned && demand == nil {
@@ -263,8 +261,7 @@ func (q *Queue) beginEngineAttempt(s *ModelSlot, priority string) {
 	s.RetryReserved = false
 	s.LoadTimedOut = false
 	s.RuntimeFailed = false
-	model, _ := q.model(s.Model)
-	s.LoadUntil = q.engineLoadDeadline(model)
+	s.LoadUntil = q.engineLoadDeadline()
 	s.FailureCounted = false
 	s.Attempt = ID()
 	s.InFlight = 0
