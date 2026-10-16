@@ -23,6 +23,25 @@ func (q *Queue) modelFitsMachine(model Model, m *Machine) bool {
 	return logPolicyFits(model.Logs, m) && modelFitsMachine(model, m) && q.projectAllows(model.Project, m.ID)
 }
 
+// Unknown storage checks preserve only ready slots from this worker session.
+// All remaining fences (owner, machine, platform, log policy) still apply.
+func (q *Queue) residentModel(model Model, m *Machine) Model {
+	if model.LocalSource != "" && m.ModelApprovalStates[model.LocalSource] == approvalUnknown {
+		if s := q.s.ModelSlots[slotKey(m.ID, model.Name)]; s != nil && s.Session == m.Session && s.State == "ready" {
+			model.LocalSource = ""
+		}
+	}
+	return model
+}
+
+func (q *Queue) modelUsableMachine(model Model, m *Machine) bool {
+	return q.modelFitsMachine(q.residentModel(model, m), m)
+}
+
+func (q *Queue) callPlacementAllowed(c *ModelCall, m *Machine) bool {
+	return q.placementAllowedForUse(callJob(c), m, true)
+}
+
 var localNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -122,6 +141,9 @@ func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults 
 		}
 	}
 	if c.Project == "" || c.Priority == "" {
+		if !defaults {
+			return errors.New("X-Myce-Project and X-Myce-Priority are required for generic model routes")
+		}
 		return errors.New("X-Myce-Project and X-Myce-Priority are required (or set the entry's project/default_call_priority)")
 	}
 	if rank(c.Priority) == 3 {
@@ -139,7 +161,7 @@ func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults 
 }
 
 func modelFenceAllows(model Model, m *Machine) bool {
-	return (len(model.AllowedMachines) == 0 || contains(model.AllowedMachines, m.ID)) && (model.LocalSource == "" || m.ApprovedModels[model.LocalSource] == model.SHA256)
+	return (len(model.AllowedMachines) == 0 || contains(model.AllowedMachines, m.ID)) && (model.LocalSource == "" || (m.ModelApprovalStates[model.LocalSource] == "" || m.ModelApprovalStates[model.LocalSource] == approvalVerified) && m.ApprovedModels[model.LocalSource] == model.SHA256)
 }
 func (p *ModelPlacement) allows(machine string) bool {
 	return p == nil || (len(p.AllowedMachines) == 0 || contains(p.AllowedMachines, machine)) && (len(p.ProjectMachines) == 0 || contains(p.ProjectMachines, machine))

@@ -409,6 +409,7 @@ type workerModel struct {
 }
 type modelRuntime struct {
 	localApprovals        map[string]string
+	localApprovalStates   map[string]ModelApprovalState
 	availability          *availabilityMonitor
 	admissionBlocked      bool
 	requireMemoryCeilings bool
@@ -506,15 +507,16 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	}()
 	return rt, nil
 }
-func (rt *modelRuntime) setLocalApprovals(approved map[string]string) {
+func (rt *modelRuntime) setLocalApprovals(approved map[string]string, states map[string]ModelApprovalState) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.localApprovals = approved
+	rt.localApprovalStates = states
 }
 
 // Called under the runtime lock; withholding readiness never releases custody.
 func (rt *modelRuntime) localApprovalAvailable(m Model) bool {
-	return m.LocalSource == "" || rt.localApprovals[m.LocalSource] == m.SHA256
+	return m.LocalSource == "" || (rt.localApprovalStates[m.LocalSource] == "" || rt.localApprovalStates[m.LocalSource] == approvalVerified) && rt.localApprovals[m.LocalSource] == m.SHA256
 }
 
 func (rt *modelRuntime) report() ([]ModelReport, float64) {
@@ -854,7 +856,7 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 503, "hypha availability withdrawn")
 		return
 	}
-	if m == nil || !rt.localApprovalAvailable(m.model) || (m.state != "ready" && !(m.state == "draining" && m.queueFlight > 0)) {
+	if m == nil || !(rt.localApprovalAvailable(m.model) || rt.localApprovalStates[m.model.LocalSource] == approvalUnknown) || (m.state != "ready" && !(m.state == "draining" && m.queueFlight > 0)) {
 		rt.mu.Unlock()
 		unlock()
 		modelError(w, 503, "model is not ready")

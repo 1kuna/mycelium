@@ -76,11 +76,15 @@ rules are unchanged.
 
 Each heartbeat checks each distinct local approval once, sharing the result with
 cache inventory. The metadata pass has a 250 ms I/O budget. If storage stalls,
-approval is not currently verifiable: new loads and routing are withheld, a
-sanitized warning appears at most once per minute, and checks retry without
-accumulating blocked filesystem calls. Existing allocations remain reserved until
-the worker confirms unloading; a timeout alone never proves release. An expired
-check cannot restore readiness, even if its filesystem call finishes later.
+the check-in reports `model_approval_states[local_source]: unknown`: new loads,
+pre-copy and slot creation wait, while existing ready servers keep serving and
+routing, including pinned slots. A completed check reports `verified` (with its
+identity in `approved_models`) or `invalid`; changed folders and revoked approvals
+still drain. Missing state from an older worker retains the previous behavior:
+a missing approved identity drains. A sanitized warning appears at most once per
+minute, and retries do not accumulate blocked filesystem calls. Allocations remain
+reserved until unloading is confirmed. An expired check cannot authorize new work,
+even if its filesystem call finishes later.
 
 Protect approved snapshots/blobs against writes and HF cleanup while used.
 Metadata checks trust operator-controlled immutable storage; they do not detect

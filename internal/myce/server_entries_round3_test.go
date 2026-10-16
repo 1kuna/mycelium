@@ -243,7 +243,7 @@ func TestEntryApprovalHeartbeatOneWalkAndBoundedTimeout(t *testing.T) {
 func TestEntryUnverifiableApprovalWithholdsLoadsAndRoutingKeepsCustody(t *testing.T) {
 	c, model, _, _ := localApprovalFixture(t)
 	rt := &modelRuntime{cache: c, config: ModelConfig{Models: []Model{model}}, models: map[string]*workerModel{}, session: "session", token: "test"}
-	rt.setLocalApprovals(nil)
+	rt.setLocalApprovals(nil, nil)
 	rt.sync([]ModelSlot{{Model: model.Name, State: "loading", Session: rt.session}})
 	if len(rt.models) != 0 {
 		t.Fatal("unverified source started a load")
