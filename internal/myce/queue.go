@@ -1076,17 +1076,20 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 					out.HoldsDetail = append(out.HoldsDetail, detail)
 				}
 			}
-			if text := q.startupReleaseBlocker(host); text != "" {
-				out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "startup_release", Text: text})
+			if detail := q.startupReleaseDetail(host); detail.Text != "" {
+				out.HoldsDetail = append(out.HoldsDetail, detail)
 			}
-			disabled := q.s.DisabledHosts[host] != ""
+			workers, disabledWorkers := 0, 0
 			for _, m := range q.s.Machines {
-				if hostID(m) == host && m.Disabled != "" {
-					disabled = true
+				if hostID(m) == host {
+					workers++
+					if m.Disabled != "" {
+						disabledWorkers++
+					}
 				}
 			}
-			if disabled {
-				out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "host_disabled", OperatorActionRequired: true, Text: "host " + host + " disabled by operator"})
+			if q.s.DisabledHosts[host] != "" || workers > 0 && disabledWorkers == workers {
+				out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "host_disabled", Text: "host " + host + " disabled by operator"})
 			}
 		}
 		sort.Strings(out.HostHolds)

@@ -96,14 +96,20 @@ func (q *Queue) maintainStartDeadlines() {
 }
 
 // Keep a failed startup's resources fenced until its exact execution is released.
-func (q *Queue) startupReleaseBlocker(host string) string {
+func (q *Queue) startupReleaseBlocker(host string) string { return q.startupReleaseDetail(host).Text }
+
+func (q *Queue) startupReleaseDetail(host string) HoldDetail {
+	detail := HoldDetail{}
 	for _, r := range q.s.HostReleases {
 		j := q.s.Jobs[r.Job]
 		if r.Host == host && j != nil && terminal(j.State) && j.Spec.StartBy != nil {
-			return fmt.Sprintf("host %s: production startup release pending", host)
+			detail.Host, detail.Kind = host, "startup_release"
+			detail.Text = fmt.Sprintf("host %s: production startup release pending", host)
+			m := q.s.Machines[r.Machine]
+			detail.OperatorActionRequired = detail.OperatorActionRequired || m == nil || m.Gone
 		}
 	}
-	return ""
+	return detail
 }
 
 type StartPermit struct {

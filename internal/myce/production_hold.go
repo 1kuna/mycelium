@@ -193,10 +193,31 @@ func (q *Queue) hostBlockers(host string) string {
 	text, _ := q.hostBlockerState(host)
 	return text
 }
-func (q *Queue) hostBlockerState(host string) (string, bool) {
+
+// Unknown release gets attention only after ordinary kill/report latency.
+const releaseAttentionDelay = 2 * time.Minute
+
+type hostBlockerClass struct {
+	Kind                   string
+	OperatorActionRequired bool
+}
+
+func (q *Queue) releaseNeedsOperator(m *Machine, until *time.Time, failed bool) bool {
+	if m == nil || m.Gone || failed {
+		return true
+	}
+	now := q.clock.Now()
+	if q.unreported[m.ID] && now.Before(q.restartUntil) {
+		return false
+	}
+	return until != nil && !until.IsZero() && !now.Before(until.Add(releaseAttentionDelay))
+}
+
+func (q *Queue) hostBlockerState(host string) (string, hostBlockerClass) {
 	count := 0
 	remaining := 0.0
 	unknown := []string{}
+	needsOperator := false
 	for _, r := range q.s.HostReleases {
 		if r.Host != host {
 			continue
@@ -210,6 +231,7 @@ func (q *Queue) hostBlockerState(host string) (string, bool) {
 		remaining = max(remaining, r.Until.Sub(q.clock.Now()).Seconds())
 		if m := q.s.Machines[r.Machine]; m == nil || m.Gone || q.unreported[r.Machine] || r.CleanupFailed || r.Until.IsZero() || !q.clock.Now().Before(r.Until) {
 			unknown = append(unknown, r.Machine)
+			needsOperator = needsOperator || q.releaseNeedsOperator(m, &r.Until, r.CleanupFailed)
 		}
 	}
 	for _, c := range q.calls {
@@ -220,6 +242,7 @@ func (q *Queue) hostBlockerState(host string) (string, bool) {
 				remaining = max(remaining, c.StopAt.Sub(q.clock.Now()).Seconds())
 				if expired(c.StopAt, q.clock.Now()) {
 					unknown = append(unknown, m.ID)
+					needsOperator = needsOperator || q.releaseNeedsOperator(m, c.StopAt, false)
 				}
 			}
 		}
@@ -230,29 +253,24 @@ func (q *Queue) hostBlockerState(host string) (string, bool) {
 			count++
 			if s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || s.State == "unload_failed" || expired(s.StopAt, q.clock.Now()) {
 				unknown = append(unknown, m.ID)
+				needsOperator = needsOperator || q.releaseNeedsOperator(m, s.StopAt, s.State == "unload_failed")
 			}
 		}
 	}
 	if len(unknown) > 0 {
 		sort.Strings(unknown)
-		return "release unknown: worker " + strings.Join(unknown, ", "), true
+		return "release unknown: worker " + strings.Join(unknown, ", "), hostBlockerClass{Kind: "production_release_unknown", OperatorActionRequired: needsOperator}
 	}
 	if count > 0 {
-		return fmt.Sprintf("stopping %d attempts; grace remaining %.0fs", count, remaining), false
+		return fmt.Sprintf("stopping %d attempts; grace remaining %.0fs", count, remaining), hostBlockerClass{Kind: "production_stopping"}
 	}
-	return "", false
+	return "", hostBlockerClass{}
 }
 func (q *Queue) holdReason(host string) string { return q.productionHoldDetail(host).Text }
 func (q *Queue) productionHoldDetail(host string) HoldDetail {
 	detail := HoldDetail{Host: host, Kind: "production_hold", Text: host + ": production hold"}
-	if b, unknown := q.hostBlockerState(host); b != "" {
-		detail.Text += "; " + b
-		detail.Kind = "production_stopping"
-		if unknown {
-			detail.Kind = "production_release_unknown"
-			detail.OperatorActionRequired = true
-		}
-		return detail
+	if b, class := q.hostBlockerState(host); b != "" {
+		return productionBlockerDetail(host, b, class)
 	}
 	h := q.s.Hosts[host]
 	if h.IdleSince != nil {
@@ -264,6 +282,18 @@ func (q *Queue) productionHoldDetail(host string) HoldDetail {
 	}
 	return detail
 }
+
+// Classification is explicit: new blocker paths cannot silently become routine.
+func productionBlockerDetail(host, text string, class hostBlockerClass) HoldDetail {
+	detail := HoldDetail{Host: host, Kind: "unclassified", OperatorActionRequired: true, Text: host + ": production hold; " + text}
+	switch class.Kind {
+	case "production_stopping", "production_release_unknown":
+		detail.Kind = class.Kind
+		detail.OperatorActionRequired = class.OperatorActionRequired
+	}
+	return detail
+}
+
 func (q *Queue) holdWaitReason(j *Job) string {
 	for _, m := range q.s.Machines {
 		if q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
@@ -549,35 +579,39 @@ func (q *Queue) backgroundPreparing(m *Machine) bool {
 func (q *Queue) dockerBlocker(host string) string { return q.dockerHoldDetail(host).Text }
 
 func (q *Queue) dockerHoldDetail(host string) HoldDetail {
-	reported := HoldDetail{}
-	for _, m := range q.s.Machines {
-		if hostID(m) == host && m.DockerCleanup != "" {
-			kind := "docker_cleanup_waiting"
-			switch m.DockerCleanup {
-			case "creating", "stopping", "released", "create pending", "start pending", "wait pending", "inspect pending", "stop pending", "kill pending", "logs pending", "remove pending", "network-create pending", "network-remove pending":
-				kind = "docker_transition"
-			}
-			reported = HoldDetail{Host: host, Kind: kind, Text: host + ": Docker cleanup unconfirmed; " + m.DockerCleanup}
+	best := HoldDetail{}
+	severity := 0
+	choose := func(detail HoldDetail, rank int) {
+		if rank > severity || rank == severity && detail.Text < best.Text {
+			best, severity = detail, rank
 		}
 	}
-	waiting := HoldDetail{}
+	for _, m := range q.s.Machines {
+		if hostID(m) != host || m.DockerCleanup == "" {
+			continue
+		}
+		kind, rank := "docker_cleanup_waiting", 3 // Reported cleanup error.
+		switch m.DockerCleanup {
+		case "creating", "stopping", "released", "create pending", "start pending", "wait pending", "inspect pending", "stop pending", "kill pending", "logs pending", "remove pending", "network-create pending", "network-remove pending":
+			kind, rank = "docker_transition", 1
+		}
+		choose(HoldDetail{Host: host, Kind: kind, Text: host + ": Docker cleanup unconfirmed; " + m.DockerCleanup}, rank)
+	}
 	for _, r := range q.s.HostReleases {
 		if !r.Docker || r.Host != host || q.dockerReleaseLive(r) {
 			continue
 		}
 		detail := HoldDetail{Host: host, Kind: "docker_cleanup_waiting", Text: host + ": Docker cleanup unconfirmed; waiting for attempt " + r.Job + fmt.Sprintf("/%d", r.Attempt)}
+		rank := 2
 		if r.EscalatedAt != nil {
 			detail.Kind = "docker_cleanup_operator_action"
 			detail.OperatorActionRequired = true
 			detail.Text += "; operator action required (myce resolve-docker)"
-			return detail
+			rank = 4
 		}
-		waiting = detail
+		choose(detail, rank)
 	}
-	if reported.Text != "" {
-		return reported
-	}
-	return waiting
+	return best
 }
 
 // Escalation bounds silent waiting, never custody or physical memory ownership.

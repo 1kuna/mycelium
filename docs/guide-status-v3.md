@@ -65,27 +65,33 @@ whose entries have `host`, `kind`, `operator_action_required`, `text` and an
 optional `clears_at` timestamp. Entries are sorted by host and kind; a host can
 have several holds at once. Do not match English text to choose an action.
 
-- `production_hold`: active production demand, including work between stages.
-- `production_stopping`: lower-priority work is within its stop grace.
-- `production_release_unknown`: release cannot be confirmed; operator attention
-  is required, though a fresh release acknowledgement can still clear it.
-- `production_cooldown`: idle production reservation; `clears_at` is the end of
-  the configured idle interval, calculated with the queue's clock. New production
-  demand can extend the reservation, so refresh before acting.
-- `docker_transition`: an ordinary Docker create/start/stop operation is pending.
-- `docker_cleanup_waiting`: custody is awaiting cleanup confirmation.
-- `docker_cleanup_operator_action`: cleanup has reached its escalation bound;
-  operator attention is required (`myce resolve-docker`). Custody remains fenced.
-- `startup_release`: a failed startup still awaits its exact execution's release.
-- `host_disabled`: an operator disabled the host; enabling it requires operator
-  action.
+| `kind` | `operator_action_required` | `clears_at` | When emitted |
+| --- | --- | --- | --- |
+| `production_hold` | false | omitted | Active production demand, including work between stages. |
+| `production_stopping` | false | omitted | Lower-priority work is within its stop grace. |
+| `production_release_unknown` | conditional | omitted | Production reservation has an unconfirmed release. True only for a gone/missing worker, failed cleanup, or release still unknown at least two minutes after grace. Restart check-in grace suppresses the time-based flag. Draining calls, recovery and the short wait for a kill result are false. |
+| `production_cooldown` | false | idle interval end | Idle production reservation; calculated with the queue's injected clock. New demand can extend it. |
+| `docker_transition` | false | omitted | Ordinary Docker startup/stop operation or final release report in progress. |
+| `docker_cleanup_waiting` | false | omitted | Docker custody or a cleanup error awaits confirmation, before escalation. |
+| `docker_cleanup_operator_action` | true | omitted | Docker custody reached the cleanup escalation bound (`myce resolve-docker`). |
+| `startup_release` | conditional | omitted | Failed startup awaits exact execution release; true when any corresponding worker is gone/missing. |
+| `host_disabled` | false | omitted | `DisabledHosts[host]` is set, or every known worker on the host is disabled. Does not clear by itself; not a fault. Partial unit disables are omitted from hold details; check each machine's disabled state. |
+| `unclassified` | true | omitted | A production host blocker has no recognized explicit classification. Never treated as self-clearing. |
 
-`operator_action_required` is true for `production_release_unknown`,
-`docker_cleanup_operator_action` and `host_disabled`, and false for the other
-kinds. False means no operator action is currently demanded, not that release is
-proven or that recovery has a deadline. Only `production_cooldown` supplies
-`clears_at`. A cleanup acknowledgement may clear an escalated hold without an
-operator override. An ordinary Docker transition is not itself a cleanup failure.
+Only `production_cooldown` supplies `clears_at`; refresh before acting. A false
+operator flag means no fault currently demands operator attention, not that
+release is proven or that recovery has a deadline. In particular, deliberate
+disabling persists until re-enabled. Cleanup acknowledgements may clear an
+escalated hold without an operator override; custody remains fenced until proven.
+
+Docker summaries choose deterministically by severity: escalation, reported
+cleanup error, waiting release, then ordinary transition. Equal severity uses
+lexical text order. A transition cannot hide waiting custody. Exact current
+executions that are healthy and starting or running do not accrue cleanup time;
+becoming live again clears stale timers. Stopped attempts escalate two minutes
+**after stop grace expires**. Lost/unconfirmed custody without a stop deadline
+starts its two-minute window when first observed. All decisions use the queue's
+injected clock.
 
 For run monitoring, distinguish routine reservations and transitions from
 operator holds using these fields, including the target host. For maintenance,
