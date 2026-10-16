@@ -1,6 +1,9 @@
 package myce
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // Public diagnostics use fixed messages: truncation cannot remove confidential
 // text from an arbitrary upstream error.
@@ -59,7 +62,7 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 	for _, j := range s.Jobs {
 		// Status is a summary, never a copy of a submitted command, environment,
 		// program arguments, extension files, or local filesystem paths.
-		spec := Spec{Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
+		spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
 		if j.Spec.Program != nil {
 			spec.Program = &Program{Type: j.Spec.Program.Type}
 		}
@@ -101,5 +104,52 @@ func safeAvailabilityReason(reason string) string {
 		return reason
 	default:
 		return "availability unknown"
+	}
+}
+
+// Called under the queue lock on snapshot copies, never on persisted jobs.
+func (q *Queue) statusEligibility(j *Job) {
+	j.EligibleHosts, j.EligibleUnrestricted, j.EligibleUnknownMachines = nil, false, nil
+	if terminal(j.State) {
+		return
+	}
+	allowed := j.Spec.AllowedMachines
+	if len(allowed) == 0 {
+		allowed = q.s.Policies[j.Spec.Project].AllowedMachines
+	}
+	j.EligibleUnrestricted = len(allowed) == 0
+	hosts := []string{}
+	seen := map[string]bool{}
+	addHost := func(host string) {
+		if host != "" && !seen[host] {
+			hosts = append(hosts, host)
+			seen[host] = true
+		}
+	}
+	if !j.EligibleUnrestricted {
+		for _, m := range q.s.Machines {
+			if q.jobAllowsMachine(j, m.ID) {
+				addHost(hostID(m))
+			}
+		}
+		unknown := map[string]bool{}
+		for _, name := range allowed {
+			if q.jobAllowsMachine(j, name) && q.s.Machines[name] == nil && !unknown[name] {
+				j.EligibleUnknownMachines = append(j.EligibleUnknownMachines, name)
+				unknown[name] = true
+			}
+		}
+		sort.Strings(j.EligibleUnknownMachines)
+	}
+	// A policy change cannot release an existing execution or in-flight call.
+	if j.State == "running" || j.State == "stopping" {
+		if m := q.s.Machines[j.Machine]; m != nil {
+			addHost(hostID(m))
+		}
+		addHost(j.ProductionHost)
+	}
+	if !j.EligibleUnrestricted || len(hosts) > 0 {
+		sort.Strings(hosts)
+		j.EligibleHosts = &hosts
 	}
 }

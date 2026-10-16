@@ -326,9 +326,18 @@ func (q *Queue) fairScore(j *Job, m *Machine) float64 {
 	return decayed(q.s.FairUsage[j.Spec.Project], q.clock.Now()) - total*(q.weight(j.Spec.Project)/largest)/weights
 }
 
+// Machine restrictions are policy, independent of temporary availability or capacity.
+func machineAllowed(allowed []string, machine string) bool {
+	return len(allowed) == 0 || contains(allowed, machine)
+}
+
+func (q *Queue) jobAllowsMachine(j *Job, machine string) bool {
+	return machineAllowed(j.Spec.AllowedMachines, machine) && q.projectAllows(j.Spec.Project, machine)
+}
+
 func (q *Queue) projectAllows(project, machine string) bool {
 	v := q.s.Policies[project].AllowedMachines
-	return len(v) == 0 || contains(v, machine)
+	return machineAllowed(v, machine)
 }
 
 func (q *Queue) validateProjectPlacement(project string, allowed []string) error {

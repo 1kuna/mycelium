@@ -170,7 +170,7 @@ func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
 		}
 	}
 
-	if availabilityBlocked(m) || (q.machineLimitReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))) || m.EnablePending || q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || m.Disabled != "" || q.s.DisabledHosts[hostID(m)] != "" || !q.projectAllows(j.Spec.Project, m.ID) {
+	if availabilityBlocked(m) || (q.machineLimitReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))) || m.EnablePending || q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || m.Disabled != "" || q.s.DisabledHosts[hostID(m)] != "" || !q.jobAllowsMachine(j, m.ID) {
 		return false
 	}
 	if j.ProductionHost != "" && j.ProductionHost != hostID(m) {
@@ -258,7 +258,7 @@ func (q *Queue) holdWaitReason(j *Job) string {
 	if j.Spec.Priority == "production" && j.ProductionHost == "" {
 		for _, m := range q.s.Machines {
 			h := q.s.Hosts[hostID(m)]
-			if h == nil || !h.Policy.ProductionHold || !q.projectAllows(j.Spec.Project, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
+			if h == nil || !h.Policy.ProductionHold || !q.jobAllowsMachine(j, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 				continue
 			}
 			for _, slot := range q.s.ModelSlots {
@@ -292,7 +292,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 	var best *Machine
 	bestStops := int(^uint(0) >> 1)
 	for _, m := range machines {
-		if q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.projectAllows(j.Spec.Project, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
+		if q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 			continue
 		}
 		model, hasModel := q.model(j.Spec.Needs.Model)
