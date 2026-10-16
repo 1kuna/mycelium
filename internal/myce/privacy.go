@@ -109,22 +109,47 @@ func safeAvailabilityReason(reason string) string {
 
 // Called under the queue lock on snapshot copies, never on persisted jobs.
 func (q *Queue) statusEligibility(j *Job) {
-	j.EligibleHosts, j.EligibleUnrestricted = nil, false
+	j.EligibleHosts, j.EligibleUnrestricted, j.EligibleUnknownMachines = nil, false, nil
 	if terminal(j.State) {
 		return
 	}
-	if len(j.Spec.AllowedMachines) == 0 && len(q.s.Policies[j.Spec.Project].AllowedMachines) == 0 {
-		j.EligibleUnrestricted = true
-		return
+	allowed := j.Spec.AllowedMachines
+	if len(allowed) == 0 {
+		allowed = q.s.Policies[j.Spec.Project].AllowedMachines
 	}
+	j.EligibleUnrestricted = len(allowed) == 0
 	hosts := []string{}
 	seen := map[string]bool{}
-	for _, m := range q.s.Machines {
-		if q.jobAllowsMachine(j, m.ID) && !seen[hostID(m)] {
-			hosts = append(hosts, hostID(m))
-			seen[hostID(m)] = true
+	addHost := func(host string) {
+		if host != "" && !seen[host] {
+			hosts = append(hosts, host)
+			seen[host] = true
 		}
 	}
-	sort.Strings(hosts)
-	j.EligibleHosts = &hosts
+	if !j.EligibleUnrestricted {
+		for _, m := range q.s.Machines {
+			if q.jobAllowsMachine(j, m.ID) {
+				addHost(hostID(m))
+			}
+		}
+		unknown := map[string]bool{}
+		for _, name := range allowed {
+			if q.jobAllowsMachine(j, name) && q.s.Machines[name] == nil && !unknown[name] {
+				j.EligibleUnknownMachines = append(j.EligibleUnknownMachines, name)
+				unknown[name] = true
+			}
+		}
+		sort.Strings(j.EligibleUnknownMachines)
+	}
+	// A policy change cannot release an existing execution or in-flight call.
+	if j.State == "running" || j.State == "stopping" {
+		if m := q.s.Machines[j.Machine]; m != nil {
+			addHost(hostID(m))
+		}
+		addHost(j.ProductionHost)
+	}
+	if !j.EligibleUnrestricted || len(hosts) > 0 {
+		sort.Strings(hosts)
+		j.EligibleHosts = &hosts
+	}
 }

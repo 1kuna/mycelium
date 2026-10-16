@@ -22,21 +22,40 @@ environment values, program arguments, extension files, or local checkpoint
 paths. Use the existing job output and log commands when you need their results.
 
 For maintenance gates, every nonterminal job in redacted `GET /api/status`
-retains `spec.allowed_machines` (machine names) and reports one of:
+retains `spec.allowed_machines` (machine names) and reports:
 
 - `eligible_hosts`: sorted, unique host IDs of currently known machines allowed
-  by both the job and project allow-lists. An empty array means no known match.
-  Workers without an explicit host ID use their machine ID.
-- `eligible_unrestricted: true`, with `eligible_hosts` omitted: neither allow-list
-  restricts the job. Treat it as able to run anywhere, including future hosts.
+  by both the job and project allow-lists. For running and stopping jobs, including
+  in-flight model calls, this also includes the current machine's host and
+  `production_host` when set, even if policy no longer allows them. A restricted
+  job with no known eligible or occupied host reports an empty array.
+- `eligible_unknown_machines`: sorted, unique machine names in the effective
+  allow-list that are not currently known machines. The effective list is the intersection
+  when both job and project lists are nonempty, or whichever list is nonempty.
+  This field is omitted when there are no unknown names. A joining machine
+  resolves its name into a host ID on subsequent status reads.
+- `eligible_unrestricted: true`: neither allow-list restricts the job. Treat it
+  as able to run anywhere, including future hosts. `eligible_hosts` is omitted
+  unless the job currently occupies a host; listed hosts never limit this marker.
 
 These fields cover queued, infra-requeued, running and stopping jobs. They
-express placement policy, not current dispatch readiness: busy, disabled, offline
-or temporarily unavailable machines remain candidates under that policy.
-Unknown machine names remain in `spec.allowed_machines` but contribute no host
-until they join. Refresh status before each decision. A gate may ignore a
-restricted job only when its protected host is absent from `eligible_hosts`;
-unrestricted jobs, missing/invalid eligibility fields and unreadable status must
-fail closed. Also check current assignments (`machine` / `production_host`) and
-release/hold state before maintenance: policy eligibility alone proves no release
-of work already on a host. Terminal jobs omit both derived eligibility fields.
+express placement policy and current occupancy, not dispatch readiness: busy,
+disabled, offline or temporarily unavailable machines remain policy candidates.
+Workers normally default `HostID` to the OS hostname. The queue uses a machine-ID
+fallback only when a check-in has no host ID. Gates must match the exact `host_id`
+strings workers report, rather than assuming host IDs equal machine names.
+
+Refresh status before each decision. Count a job as the protected host's work if
+any of these apply:
+
+- `eligible_hosts` contains that host ID;
+- `eligible_unrestricted` is true;
+- `eligible_unknown_machines` is nonempty, unless the gate can map all those names
+  to other hosts;
+- `spec.allowed_machines` names a worker on that host.
+
+Missing/invalid eligibility fields and unreadable status must fail closed. Also
+check current assignments and release/hold state before maintenance: policy
+eligibility alone proves no release of existing work. Loaded model servers
+appear under `loaded_models`, not jobs, and must be checked separately. Terminal
+jobs omit all three derived eligibility fields.
