@@ -128,6 +128,11 @@ func (q *Queue) retainRelease(j *Job) {
 	r.CleanupFailed = old.CleanupFailed
 	r.CleanupSince = old.CleanupSince
 	r.EscalatedAt = old.EscalatedAt
+	// A new stop starts a new cleanup window; an old boot/create timer must
+	// never be inherited by an otherwise healthy execution's later stop (#74).
+	if r.Docker && (q.dockerReleaseLive(r) || old.Until.IsZero() && !r.Until.IsZero()) {
+		r.CleanupSince, r.EscalatedAt = nil, nil
+	}
 	q.s.HostReleases[releaseKey(r)] = r
 }
 func (q *Queue) settleRelease(r Result) bool {
@@ -579,11 +584,21 @@ func (q *Queue) dockerHoldDetail(host string) HoldDetail {
 func (q *Queue) escalateDockerCleanup() {
 	now := q.clock.Now()
 	for key, r := range q.s.HostReleases {
-		if !r.Docker || q.dockerReleaseLive(r) {
+		if !r.Docker {
 			continue
 		}
-		if r.CleanupSince == nil {
-			r.CleanupSince = &now
+		if q.dockerReleaseLive(r) {
+			r.CleanupSince, r.EscalatedAt = nil, nil
+			q.s.HostReleases[key] = r
+			continue
+		}
+		if r.CleanupSince == nil || !r.Until.IsZero() && r.CleanupSince.Before(r.Until) {
+			since := now
+			// Stopped attempts retain ordinary grace before the cleanup bound.
+			if !r.Until.IsZero() {
+				since = r.Until
+			}
+			r.CleanupSince = &since
 		}
 		if r.EscalatedAt == nil && !now.Before(r.CleanupSince.Add(2*time.Minute)) {
 			r.EscalatedAt = &now
@@ -596,5 +611,16 @@ func (q *Queue) escalateDockerCleanup() {
 func (q *Queue) dockerReleaseLive(r HostRelease) bool {
 	j := q.s.Jobs[r.Job]
 	m := q.s.Machines[r.Machine]
-	return j != nil && j.Attempt == r.Attempt && j.Session == r.Session && j.Machine == r.Machine && j.State == "running" && m != nil && !m.Gone && !q.unreported[m.ID] && m.DockerCleanup == "" && !r.CleanupFailed
+	return j != nil && j.Attempt == r.Attempt && j.Session == r.Session && j.Machine == r.Machine && j.State == "running" && j.StopAt == nil && m != nil && m.Session == r.Session && !m.Gone && !q.unreported[m.ID] && dockerStartingOrRunning(m.DockerCleanup) && !r.CleanupFailed
+}
+
+// Only healthy startup/running reports keep the exact current execution live.
+// Stopping, errors, replacement sessions and lost workers retain custody.
+func dockerStartingOrRunning(status string) bool {
+	switch status {
+	case "", "creating", "create pending", "network-create pending", "start pending":
+		return true
+	default:
+		return false
+	}
 }

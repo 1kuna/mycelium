@@ -935,7 +935,7 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 	if e = q.Tick(); e != nil {
 		t.Fatal(e)
 	}
-	c.Advance(2 * time.Minute)
+	c.Advance(StopGrace + 2*time.Minute)
 	if e = q.Tick(); e != nil {
 		t.Fatal(e)
 	}
@@ -994,7 +994,7 @@ func TestDockerCleanupEscalatesDurably(t *testing.T) {
 	if strings.Contains(strings.Join(before.HostHolds, " "), "operator action required") {
 		t.Fatal("early escalation")
 	}
-	c.Advance(2 * time.Minute)
+	c.Advance(StopGrace + 2*time.Minute)
 	after, err := q.Snapshot()
 	if err != nil {
 		t.Fatal(err)
