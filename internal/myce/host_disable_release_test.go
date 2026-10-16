@@ -78,7 +78,26 @@ func TestNotifiedDisableDockerRelease(t *testing.T) {
 				if err == nil || report.Confirmed {
 					t.Fatalf("unconfirmed accepted: %+v %v", report, err)
 				}
-				clock.Advance(2 * time.Minute)
+				if len(q.s.HostReleases) != 1 {
+					t.Fatal("unconfirmed cleanup lost custody")
+				}
+				var release HostRelease
+				for _, r := range q.s.HostReleases {
+					release = r
+				}
+				if release.Until.IsZero() {
+					t.Fatal("stop grace deadline missing")
+				}
+				// #74 counts escalation from grace expiry, not the disable notification.
+				clock.Advance(release.Until.Add(2*time.Minute).Sub(clock.Now()) - time.Nanosecond)
+				before, err := q.Snapshot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(q.s.HostReleases) != 1 || strings.Contains(strings.Join(before.HostHolds, " "), "operator action required") {
+					t.Fatalf("custody lost or escalated before grace plus cleanup bound: %+v", before.HostHolds)
+				}
+				clock.Advance(time.Nanosecond)
 				snap, err := q.Snapshot()
 				if err != nil {
 					t.Fatal(err)
