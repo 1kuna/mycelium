@@ -74,17 +74,22 @@ filesystem sandbox. Protect every alias from writes; inode/size/mtime checks
 detect ordinary changes through any alias. The ordinary copied-model no-symlink
 rules are unchanged.
 
-Each heartbeat checks each distinct local approval once, sharing the result with
-cache inventory. The metadata pass has a 250 ms I/O budget. If storage stalls,
-the check-in reports `model_approval_states[local_source]: unknown`: new loads,
-pre-copy and slot creation wait, while existing ready servers keep serving and
-routing, including pinned slots. A completed check reports `verified` (with its
-identity in `approved_models`) or `invalid`; changed folders and revoked approvals
-still drain. Missing state from an older worker retains the previous behavior:
-a missing approved identity drains. A sanitized warning appears at most once per
-minute, and retries do not accumulate blocked filesystem calls. Allocations remain
-reserved until unloading is confirmed. An expired check cannot authorize new work,
-even if its filesystem call finishes later.
+Each heartbeat checks all cheap local approval records before any directory walk,
+including when an earlier walk is still blocked. Missing, revoked or host-mismatched
+records report `invalid`. Completed metadata results survive a sibling timeout;
+only unfinished checks report `unknown`. Record preflight and the metadata pass
+have separate 250 ms I/O budgets; checks do not accumulate blocked filesystem calls.
+Results are shared with cache inventory, and old valid results are not replayed.
+
+`unknown` blocks new loads, pre-copy and slot creation. Ready servers, including
+pinned slots, keep serving and routing for up to five continuous minutes of unknown
+state, measured by the queue Clock and persisted with the slot. A definite report
+resets the timer. Beyond five minutes the queue drains, with a clear status reason
+and rate-limited warning; memory stays reserved until unloading is confirmed.
+A load already in progress may drain immediately on unknown; this is an accepted trade-off.
+Changed folders and revoked approvals still drain immediately. Missing state from
+an older worker retains the previous approved-identity-only behavior. Worker
+warnings appear at most once per minute; expired checks cannot authorize new work.
 
 Protect approved snapshots/blobs against writes and HF cleanup while used.
 Metadata checks trust operator-controlled immutable storage; they do not detect

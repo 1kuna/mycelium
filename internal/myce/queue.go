@@ -68,6 +68,9 @@ type Queue struct {
 	nasProbe        checkpointIO[bool]
 	nasProgress     checkpointIO[int64]
 	nasAvailable    bool
+
+	nextApprovalWarning time.Time
+
 	// simulation bypasses durable storage only; all scheduling/accounting paths remain shared.
 	checkpointProbe  func() bool // Filesystem fault seam.
 	simulation       bool
@@ -390,6 +393,7 @@ func (q *Queue) maintain() {
 		}
 		q.withdrawUnavailable(m)
 	}
+	q.maintainApprovalGrace()
 	q.maintainStartDeadlines()
 	q.maintainHolds()
 	for machine, release := range q.s.BatchReleases {

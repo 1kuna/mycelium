@@ -274,9 +274,12 @@ read only at launch from private mode-0600 files, with `logs: none` required.
 An explicit per-folder/per-host `local_source` approval permits in-place model
 use, including HF blob symlinks within the approved root. Fingerprint once,
 check metadata subsequently, and require explicit reapproval after changes.
-A timed-out/in-progress check blocks new loads and pre-copy but preserves ready
-servers and routing; a verified change or revoked approval still drains. Check-ins
-carry the approval state; older workers retain approved-identity-only behavior.
+Cheap approval records are checked before directory walks, and completed results
+survive sibling timeouts. Unknown blocks new loads/pre-copy and preserves ready
+routing for at most five continuous minutes under the queue Clock; definite reports
+reset that timer. Expiry, verified changes and revocation drain with custody until
+unload acknowledgement. Mid-load draining on unknown is accepted. Check-ins carry
+the approval state; older workers retain approved-identity-only behavior.
 This opt-in source is an exception to the normal verified-copy contract;
 ordinary copied-model custody is unchanged. Authenticated header-less `/v1`
 calls default to the entry owner and `experiment`; a per-project production

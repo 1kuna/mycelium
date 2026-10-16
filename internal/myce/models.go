@@ -179,7 +179,8 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
-	Placement *ModelPlacement `json:"placement,omitempty"`
+	ApprovalUnknownSince *time.Time      `json:"approval_unknown_since,omitempty"`
+	Placement            *ModelPlacement `json:"placement,omitempty"`
 
 	RetryAt           *time.Time         `json:"retry_at,omitempty"`
 	RetryDelay        time.Duration      `json:"retry_delay,omitempty"`
