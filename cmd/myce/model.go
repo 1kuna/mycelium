@@ -18,6 +18,8 @@ func modelCommand(args []string) error {
 	f := flag.NewFlagSet("model "+args[0], flag.ContinueOnError)
 	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue URL")
 	token := f.String("token", env("MYCE_TOKEN", ""), "fleet token (prefer MYCE_TOKEN)")
+	// DefValue is only help text; keep the actual environment default private.
+	f.Lookup("token").DefValue = ""
 	to := f.String("to", "", "sync to machine, platform, or all")
 	cancel := f.Bool("cancel", false, "cancel pre-copy request; keep resumable partial bytes")
 	project := f.String("project", "", "project owning pin")

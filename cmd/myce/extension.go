@@ -22,6 +22,8 @@ func extensionCommand(args []string) error {
 	root := f.String("root", myce.DefaultExtensionRoot(), "local extension library and download cache")
 	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
 	token := f.String("token", env("MYCE_TOKEN", ""), "queue token (prefer MYCE_TOKEN)")
+	// DefValue is only help text; keep the actual environment default private.
+	f.Lookup("token").DefValue = ""
 	local := f.Bool("local", false, "add locally without registering with the queue")
 	platform := f.String("gpu", "", "qualification platform: cuda, xpu, metal or fake")
 	device := f.String("device", "", "same selector as join --device")
