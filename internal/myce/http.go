@@ -151,6 +151,8 @@ func (a API) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /api/hosts/{id}/disable", func(w http.ResponseWriter, r *http.Request) {
 		var c struct {
+			Machine    string   `json:"machine,omitempty"`
+			Session    string   `json:"session,omitempty"`
 			Generation uint64   `json:"generation"`
 			Reason     string   `json:"reason"`
 			Cleared    bool     `json:"cleared"`
@@ -159,16 +161,26 @@ func (a API) Handler() http.Handler {
 		if !decode(w, r, &c) {
 			return
 		}
+		if c.Machine != "" {
+			respond(w, map[string]bool{"ok": true}, a.Queue.ControlMachine(r.PathValue("id"), c.Machine, c.Session, c.Reason, false, c.Cleared, c.Executions, c.Generation))
+			return
+		}
 		respond(w, map[string]bool{"ok": true}, a.Queue.DisableHostGeneration(r.PathValue("id"), c.Reason, c.Cleared, c.Executions, c.Generation))
 	})
 	mux.HandleFunc("POST /api/hosts/{id}/enable", func(w http.ResponseWriter, r *http.Request) {
 		var c struct {
+			Machine    string   `json:"machine,omitempty"`
+			Session    string   `json:"session,omitempty"`
 			Generation uint64   `json:"generation"`
 			Reason     string   `json:"reason"`
 			Cleared    bool     `json:"cleared"`
 			Executions []Result `json:"executions,omitempty"`
 		}
 		if !decode(w, r, &c) {
+			return
+		}
+		if c.Machine != "" {
+			respond(w, map[string]bool{"ok": true}, a.Queue.ControlMachine(r.PathValue("id"), c.Machine, c.Session, c.Reason, true, false, nil, c.Generation))
 			return
 		}
 		respond(w, map[string]bool{"ok": true}, a.Queue.EnableHostGeneration(r.PathValue("id"), c.Generation))

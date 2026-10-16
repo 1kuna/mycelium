@@ -196,9 +196,11 @@ For one card only, use `myce disable --unit myce-worker@gpu1.service` and
 in this host control directory. Its generation-bearing flag and receipt live in
 `units/myce-worker@gpu1.service/` below that directory. Every instance also obeys
 the shared host flag: enabling one cannot bypass a disabled host. Targeted control
-leaves sibling units and queue host admission alone; its work follows ordinary
-worker leave/loss handling. Docker cleanup targets only attempts recorded in that
-instance's spool, including retained released custody, using exact attempt labels.
+notifies only that machine's queue record and leaves sibling units and whole-host
+admission alone. Confirmed cleanup settles only its saved executions; notification
+failure still leaves the unit disabled locally and does not fail a completed
+disable. Docker cleanup targets only attempts recorded in that instance's spool,
+including retained released custody, using exact attempt labels.
 
 Install an independent Linux instance with
 `myce install worker --instance gpu1 --device 1` plus the normal GPU, queue and NAS
@@ -279,7 +281,30 @@ job/machine/session/attempt release acknowledgements through the worker completi
 endpoint, then confirms host cleanup. The final notification phase has a shared
 250 ms deadline, preserving offline-disable responsiveness. On acceptance the
 queue clears the old cleanup status and custody hold without enable/rejoin.
+Per-unit notification uses the same host-control endpoint with machine and session
+scope; generation validation and exact execution cleanup are accepted atomically.
 If notification fails, the durable local receipt reconciles at enable/rejoin.
+
+For a queue co-located with workers, opt into read-only receipt reconciliation:
+
+```sh
+myce queue --local-disable-receipts --host-id HOST_ID --host-state-dir HOST_STATE_DIR
+```
+
+Use the workers' exact host ID and shared local host-state directory. Both must
+be supplied explicitly. `myce install queue` accepts the same three flags and
+preserves them in the queue service configuration. This is off by default;
+existing queue installations keep their current behavior. The queue reads shared
+and per-unit completed disable receipts at startup before maintenance, then at
+one-second intervals determined by its injected clock. It matches the current
+flag/receipt generation, host, machine, session and saved attempt before settling
+only the covered releases. Receipts are never modified or deleted. Missing, stale,
+busy or unconfirmed evidence leaves custody intact and the two-minute escalation
+bound unchanged. Shared-host and per-unit generations remain independent.
+
+This local reader cannot see receipts on remote hosts. Remote disabled workers
+still converge through notified enable or worker rejoin when their queue returns;
+until then an unconfirmed release can escalate and remains held.
 A pending/unconfirmed notification message is not proof that the fleet queue
 rejected the request; another registered queue may be offline or initial fencing
 may still be in flight. Unconfirmed physical cleanup still holds and escalates

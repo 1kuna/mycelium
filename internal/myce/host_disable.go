@@ -94,6 +94,7 @@ func hostLaunchGate(dir string) (func(), error) {
 }
 
 type HostWorker struct {
+	Session      string   `json:"session,omitempty"`
 	Config       string   `json:"config,omitempty"`
 	Unit         string   `json:"unit,omitempty"`
 	Generation   uint64   `json:"generation,omitempty"`
@@ -273,6 +274,7 @@ func (h HostControl) workers() ([]HostWorker, error) {
 			if e = json.Unmarshal(b, &st); e != nil {
 				return nil, e
 			}
+			r.Session = st.Session
 			if st.Job != nil {
 				r.Executions = []Result{{Machine: r.Name, Session: st.Session, Execution: Execution{ID: st.Job.ID, Attempt: st.Job.Attempt}}}
 			}
@@ -310,6 +312,9 @@ func (h HostControl) notify(ctx context.Context, workers []HostWorker, enable, c
 			continue
 		}
 		key := w.Queue + "\x00" + w.Host
+		if unitParent(h.Dir) != "" {
+			key += "\x00" + w.Name
+		}
 		if seen[key] {
 			continue
 		}
@@ -317,7 +322,7 @@ func (h HostControl) notify(ctx context.Context, workers []HostWorker, enable, c
 		n++
 		w.Executions = append([]Result(nil), w.Executions...)
 		for _, sibling := range workers {
-			if sibling.State != w.State && sibling.Queue == w.Queue && sibling.Host == w.Host {
+			if sibling.State != w.State && sibling.Queue == w.Queue && sibling.Host == w.Host && (unitParent(h.Dir) == "" || sibling.Name == w.Name && sibling.Session == w.Session) {
 				w.Executions = append(w.Executions, sibling.Executions...)
 			}
 		}
@@ -374,6 +379,26 @@ func NotifyHost(client Client) func(context.Context, HostWorker, bool, bool, str
 			}
 		}
 		return c.Call(ctx, "POST", "/api/hosts/"+url.PathEscape(w.Host)+"/"+action, map[string]any{"reason": reason, "cleared": cleared, "executions": w.Executions, "generation": w.Generation}, nil)
+	}
+}
+
+// NotifyUnit uses the host API with an explicit machine scope. Cleanup and
+// generation acceptance are atomic, so a stale notification cannot release custody.
+func NotifyUnit(client Client) func(context.Context, HostWorker, bool, bool, string) error {
+	return func(ctx context.Context, w HostWorker, enable, cleared bool, reason string) error {
+		if w.Name == "" {
+			return errors.New("unit notification requires machine name")
+		}
+		if w.Session == "" && len(w.Executions) > 0 {
+			w.Session = w.Executions[0].Session
+		}
+		c := client
+		c.URL = w.Queue
+		action := "disable"
+		if enable {
+			action = "enable"
+		}
+		return c.Call(ctx, "POST", "/api/hosts/"+url.PathEscape(w.Host)+"/"+action, map[string]any{"machine": w.Name, "session": w.Session, "generation": w.Generation, "reason": reason, "cleared": cleared, "executions": w.Executions}, nil)
 	}
 }
 

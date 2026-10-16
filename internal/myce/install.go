@@ -177,6 +177,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
+	LocalDisableReceipts  bool           `json:"local_disable_receipts,omitempty"`
 	OnboardingBenchmark   bool           `json:"onboarding_benchmark,omitempty"`
 	JoiningFile           string         `json:"joining_file,omitempty"`
 	EnvironmentFile       string         `json:"environment_file,omitempty"`
@@ -742,6 +743,9 @@ func (c ServiceConfig) Args() []string {
 	args := []string{}
 	if c.Role == "queue" {
 		args = []string{"queue", "--listen", c.Listen, "--db", c.DB, "--checkpoints", c.Checkpoints}
+		if c.LocalDisableReceipts {
+			args = append(args, "--local-disable-receipts", "--host-id", c.HostID, "--host-state-dir", c.HostStateDir)
+		}
 	} else {
 		args = []string{"join", "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}

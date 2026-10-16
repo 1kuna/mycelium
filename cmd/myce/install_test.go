@@ -339,3 +339,44 @@ func TestInstallCLILingerMessage(t *testing.T) {
 		})
 	}
 }
+
+func TestInstallQueueLocalDisableReceiptsFlags(t *testing.T) {
+	t.Setenv("MYCE_TOKEN", "test-only-token")
+	for _, tc := range []struct {
+		name    string
+		flags   []string
+		wantErr bool
+	}{
+		{"default", nil, false},
+		{"missing-host", []string{"--local-disable-receipts", "--host-state-dir", "host-state"}, true},
+		{"missing-directory", []string{"--local-disable-receipts", "--host-id", "local-host"}, true},
+		{"explicit", []string{"--local-disable-receipts", "--host-id", "local-host", "--host-state-dir", "host-state"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			args := append([]string{"install", "queue", "--nas", home, "--dry-run"}, tc.flags...)
+			err := setupCommandWithProbe(args, myce.MachineProbe{OS: "linux", Arch: "arm64"}, home)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("flags: %v", err)
+			}
+			entries, err := os.ReadDir(home)
+			if err != nil || len(entries) != 0 {
+				t.Fatal("dry run wrote files", err)
+			}
+		})
+	}
+}
+
+func TestQueueLocalDisableReceiptsRequiresExplicitIdentity(t *testing.T) {
+	t.Setenv("MYCE_TOKEN", "test-only-token")
+	for _, flags := range [][]string{
+		{"--local-disable-receipts"},
+		{"--local-disable-receipts", "--host-id", "local-host"},
+		{"--local-disable-receipts", "--host-state-dir", "host-state"},
+	} {
+		err := runWithProbe(append([]string{"queue"}, flags...), myce.MachineProbe{OS: "linux", Arch: "arm64"})
+		if err == nil || !strings.Contains(err.Error(), "requires explicit --host-id and --host-state-dir") {
+			t.Fatal("queue identity was implicit", err)
+		}
+	}
+}
