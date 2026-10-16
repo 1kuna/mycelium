@@ -1155,8 +1155,12 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 func (q *Queue) AppendLog(l LogChunk) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if _, err := q.current(l.Result); err != nil {
+	j, err := q.current(l.Result)
+	if err != nil {
 		return err
+	}
+	if j.Spec.Logs == "none" {
+		return nil
 	}
 	tx, err := q.db.Begin()
 	if err != nil {

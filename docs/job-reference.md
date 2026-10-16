@@ -16,6 +16,7 @@ when shell expansion is needed.
 | `name` | Required, nonempty | Human-readable job name; not a deduplication key |
 | `project` | Required, nonempty | Project label |
 | `priority` | Required | `production`, `deadline`, or `experiment`, in that order |
+| `logs` | Omitted / `keep` | `none` discards command stdout/stderr; no queue log rows or worker attempt `.log` file |
 | `deadline` | Required for `deadline`; optional otherwise | RFC3339 time; ordering hint, not an execution timeout |
 | `run.command` | Required, nonempty argv | Executable and arguments; resolved from its environment, then worker PATH |
 | `run.workdir` | Absent: worker's working directory | Existing working directory; use an absolute shared or consistently installed path |
@@ -64,6 +65,18 @@ immediately. Non-resumable work fails after three infrastructure losses;
 planned pauses do not consume that limit. Resumable work restarts from the latest
 complete checkpoint. An attempt is an execution identity, not a retry budget.
 Logs and results are accepted only for the current execution identity.
+
+Use top-level `logs: none` for private batch output, matching the model/server
+catalog field. Both streams go directly to the OS null device, so large output
+cannot fill an undrained pipe or reach the worker's journal. The queue also
+discards log chunks for that job after checking execution identity. Success,
+failure (including the command exit-status diagnostic), cancellation and lifecycle
+timestamps remain available through the existing result/status paths. Managed
+Docker uses the `none` logging driver for every member, skips log collection and
+private stderr tails, and preserves exit/cleanup evidence through recovery.
+Omitted or `logs: keep` retains existing capture and retention behavior. This
+does not remove older logs or control files/telemetry written by the payload or
+environment-build logs. Keep submitted metadata non-sensitive.
 
 Priority loss timeouts are `production: 5s`, `deadline: 20s`, `experiment: 60s`.
 They apply when a worker stops checking in; they are not job execution limits.

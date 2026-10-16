@@ -152,11 +152,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	l.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	l.cmd.Env = env
 	l.cmd.Env = append(l.cmd.Env, "MYCE_PROCESS_ID="+l.identity)
-	if m.Logs == "none" {
-		l.log, e = os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	} else {
-		l.log, e = os.OpenFile(filepath.Join(l.Dir, name+".log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	}
+	l.log, e = openCommandOutput(l.Dir, name+".log", m.Logs, os.O_EXCL)
 	if e != nil {
 		return e
 	}
