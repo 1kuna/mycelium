@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -102,6 +104,9 @@ func TestUnitControlCounterRecoveryAndHostMove(t *testing.T) {
 	// Restoring the durable counter to the floor makes the next disable usable.
 	if err := q.ControlMachine(m.HostID, m.ID, m.Session, "", false, true, nil, 11); err != nil {
 		t.Fatal(err)
+	}
+	if err := q.ControlMachine(m.HostID, m.ID, m.Session, "", true, false, nil, 11); err == nil || !strings.Contains(err.Error(), "already records") || strings.Contains(err.Error(), "restore") {
+		t.Fatalf("opposite operation guidance: %v", err)
 	}
 	if err := q.ControlMachine(m.HostID, m.ID, m.Session, "", true, false, nil, 12); err != nil {
 		t.Fatal(err)
@@ -233,8 +238,7 @@ func TestLocalDisableReceiptsCorruptJSONLoggedAndLimited(t *testing.T) {
 	}
 }
 
-func TestLocalDisableReceiptsRequireReadableDirectory(t *testing.T) {
-	q, _ := fixture(t)
+func TestLocalDisableReceiptsUnavailableDirectoryIsNonfatal(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "file")
 	if err := os.WriteFile(file, nil, 0600); err != nil {
@@ -246,9 +250,34 @@ func TestLocalDisableReceiptsRequireReadableDirectory(t *testing.T) {
 	}
 	defer os.Chmod(unreadable, 0700)
 	for _, path := range []string{filepath.Join(root, "missing"), file, unreadable} {
-		if err := q.ConfigureLocalDisableReceipts("host", path); err == nil || !strings.Contains(err.Error(), "existing readable host-state directory") {
-			t.Fatalf("directory accepted: %v", err)
-		}
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			f := newUnitDisableFixture(t, false)
+			var logs bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(previous)
+			if err := f.q.ConfigureLocalDisableReceipts("host", path); err != nil {
+				t.Fatalf("optional reader blocked startup: %v", err)
+			}
+			reason := "host-state-directory-unreadable-or-missing"
+			if !strings.Contains(logs.String(), "continuing without local receipts") || strings.Count(logs.String(), reason) != 1 {
+				t.Fatalf("missing startup error or skip log: %s", logs.String())
+			}
+			f.clock.Advance(time.Second)
+			if err := f.q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(logs.String(), reason) != 1 {
+				t.Fatal("skip logging not limited")
+			}
+			f.clock.Advance(time.Minute)
+			if _, err := f.q.Snapshot(); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(logs.String(), reason) != 2 || len(f.q.s.HostReleases) != 1 {
+				t.Fatal("queue unavailable, skip logging stopped, or custody changed")
+			}
+		})
 	}
 }
 
@@ -325,7 +354,12 @@ func TestUnitDisableRetainsModelsWithoutMatchingCompleteEvidence(t *testing.T) {
 			if mode == "other-session" {
 				session = "previous-session"
 			}
-			if err := f.q.ControlMachine("host", m.ID, session, "", false, true, nil, 1); err != nil {
+			err := f.q.ControlMachine("host", m.ID, session, "", false, true, nil, 1)
+			if mode == "other-session" {
+				if err == nil {
+					t.Fatal("stale session accepted")
+				}
+			} else if err != nil {
 				t.Fatal(err)
 			}
 			if f.q.s.ModelSlots[slotKey(m.ID, "model")] == nil {
@@ -380,8 +414,8 @@ func TestUnitControlStaleIdleSessionCannotShadowCleanup(t *testing.T) {
 	f := newUnitDisableFixture(t, false)
 	m := f.machines[0]
 	// A stale idle registry entry can notify first at this same unit generation.
-	if err := f.q.ControlMachine(m.HostID, m.ID, "old-session", "", false, true, nil, 1); err != nil {
-		t.Fatal(err)
+	if err := f.q.ControlMachine(m.HostID, m.ID, "old-session", "", false, true, nil, 1); err == nil {
+		t.Fatal("stale session accepted")
 	}
 	r := result(f.jobs[0], true)
 	if err := f.q.ControlMachine(m.HostID, m.ID, m.Session, "", false, true, []Result{r}, 1); err != nil {
@@ -390,5 +424,90 @@ func TestUnitControlStaleIdleSessionCannotShadowCleanup(t *testing.T) {
 	assertNoUnitDockerHold(t, f.q)
 	if !f.q.s.Machines[m.ID].Gone {
 		t.Fatal("live cleanup shadowed by stale idle session")
+	}
+}
+
+// A failed cleanup replay must preserve its evidence until a later retry settles it.
+func TestUnitEnableRetainsPendingAfterFailedClearedReplay(t *testing.T) {
+	f := newUnitDisableFixture(t, false)
+	f.disable(t, 0)
+	if err := f.controls[0].Enable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(API{Queue: f.q, Token: "test"}.Handler())
+	defer server.Close()
+	var failed, enableRejected atomic.Bool
+	h := f.controls[0]
+	h.Notify = func(ctx context.Context, w HostWorker, enable, cleared bool, reason string) error {
+		if !enable && failed.CompareAndSwap(false, true) {
+			return errors.New("transient cleanup replay failure")
+		}
+		w.Queue = server.URL
+		err := NotifyUnit(Client{Token: "test"})(ctx, w, enable, cleared, reason)
+		var httpErr *HTTPError
+		if enable && errors.As(err, &httpErr) && httpErr.Status == 400 {
+			enableRejected.Store(true)
+		}
+		return err
+	}
+	if err := h.ReconcileWorkerEnable(context.Background(), "http://127.0.0.1:1", "host"); err == nil || !enableRejected.Load() {
+		t.Fatalf("enable accepted before cleanup acknowledgement: %v", err)
+	}
+	pending := filepath.Join(h.Dir, "enable-pending.json")
+	data, err := os.ReadFile(pending)
+	if err != nil {
+		t.Fatalf("cleanup evidence lost: %v", err)
+	}
+	var receipt hostReceipt
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if len(receipt.Workers) != 1 || len(receipt.Workers[0].Executions) != 1 || len(f.q.s.HostReleases) != 1 || f.q.s.MachineControls["gpu0"].Generation != 0 {
+		t.Fatal("failed replay changed custody or lost pending execution")
+	}
+	if err := h.ReconcileWorkerEnable(context.Background(), "http://127.0.0.1:1", "host"); err != nil {
+		t.Fatalf("later replay failed: %v", err)
+	}
+	assertNoUnitDockerHold(t, f.q)
+	if _, err := os.Stat(pending); !os.IsNotExist(err) {
+		t.Fatalf("acknowledged enable still pending: %v", err)
+	}
+}
+
+func TestLocalDisableReceiptsAlternatingSessionsDoNotReprocess(t *testing.T) {
+	f := newUnitDisableFixture(t, false)
+	h := f.controls[0]
+	workers, err := HostWorkers(h.Dir)
+	if err != nil || len(workers) != 1 {
+		t.Fatalf("registry: %v", err)
+	}
+	stale := t.TempDir()
+	if err := saveWorkerJSON(stale, "state.json", workerState{Session: "old-session"}); err != nil {
+		t.Fatal(err)
+	}
+	w := workers[0]
+	if err := AdoptHostWorker(h.Dir, HostWorker{State: stale, Host: w.Host, Name: w.Name, Unit: w.Unit, Queue: w.Queue}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.disable(t, 0)
+	f.restart(t, true)
+	assertNoUnitDockerHold(t, f.q)
+	for i := 0; i < 4; i++ {
+		if err := f.q.update(func() error {
+			f.q.s.Jobs[f.jobs[0].ID].ProductionHost = "host"
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		f.clock.Advance(time.Second)
+		if err := f.q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		if f.q.s.Jobs[f.jobs[0].ID].ProductionHost != "host" || f.q.s.MachineControls["gpu0"].Session != f.machines[0].Session {
+			t.Fatalf("tick %d reprocessed settled receipt", i)
+		}
 	}
 }

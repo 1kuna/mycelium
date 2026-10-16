@@ -57,13 +57,16 @@ func (q *Queue) controlMachine(host, machine, session, reason string, enable, cl
 	if old.Host != "" && old.Host != host {
 		old = machineControl{}
 	}
-	if !enable && !(cleared && len(executions) == 0) && (session == "" || m.Session != session && old.PreviousSession != session) {
+	if !enable && !(cleared && len(executions) == 0 && session == "") && (session == "" || m.Session != session && old.PreviousSession != session) {
 		return errors.New("unit control session does not match machine history")
 	}
-	if generation < old.Generation || (generation == old.Generation && old.Enabled != enable) {
+	if generation < old.Generation {
 		return fmt.Errorf("stale unit control generation; restore the unit control counter to at least %d, then rerun disable and enable", old.Generation)
 	}
-	if enable && generation > old.Generation && old.Generation > 0 && !old.Cleared {
+	if generation == old.Generation && old.Enabled != enable {
+		return fmt.Errorf("unit control generation %d already records enable=%t; rerun disable and enable with a newer generation", generation, old.Enabled)
+	}
+	if enable && generation > old.Generation && !old.Cleared {
 		return errors.New("unit cleanup must be acknowledged before enable")
 	}
 	// Validate the entire payload before fencing, refunding or settling anything.
@@ -85,7 +88,9 @@ func (q *Queue) controlMachine(host, machine, session, reason string, enable, cl
 			return errors.New("unit execution does not match saved attempt")
 		}
 	}
-	if generation == old.Generation && (enable || old.Session == session) && (old.Enabled || old.Cleared || !cleared) {
+	// A sessionless stale entry processed first can shadow live cleanup at the
+	// same generation. Custody stays held and may escalate; it cannot leak.
+	if generation == old.Generation && (old.Enabled || old.Cleared || !cleared) {
 		return nil
 	}
 	if reason == "" && !enable {
@@ -178,7 +183,7 @@ func (q *Queue) ConfigureLocalDisableReceipts(host, dir string) error {
 		return err
 	}
 	if _, err := os.ReadDir(abs); err != nil {
-		return fmt.Errorf("local disable receipts require an existing readable host-state directory: %w", err)
+		log.Printf("event=local_disable_receipts_unavailable error=%q; continuing without local receipts", err)
 	}
 	return q.update(func() error {
 		q.localReceipts = localDisableReceipts{host: host, dir: abs, nextLog: map[string]time.Time{}}
@@ -195,6 +200,10 @@ func (q *Queue) reconcileLocalDisableReceipts() {
 		return
 	}
 	config.next = q.clock.Now().Add(time.Second)
+	if _, err := os.ReadDir(config.dir); err != nil {
+		q.logLocalReceiptSkip("host-state-directory-unreadable-or-missing")
+		return
+	}
 	dirs := []string{config.dir}
 	entries, err := os.ReadDir(filepath.Join(config.dir, "units"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
