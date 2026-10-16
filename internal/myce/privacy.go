@@ -1,6 +1,9 @@
 package myce
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // Public diagnostics use fixed messages: truncation cannot remove confidential
 // text from an arbitrary upstream error.
@@ -59,7 +62,7 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 	for _, j := range s.Jobs {
 		// Status is a summary, never a copy of a submitted command, environment,
 		// program arguments, extension files, or local filesystem paths.
-		spec := Spec{Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
+		spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
 		if j.Spec.Program != nil {
 			spec.Program = &Program{Type: j.Spec.Program.Type}
 		}
@@ -102,4 +105,26 @@ func safeAvailabilityReason(reason string) string {
 	default:
 		return "availability unknown"
 	}
+}
+
+// Called under the queue lock on snapshot copies, never on persisted jobs.
+func (q *Queue) statusEligibility(j *Job) {
+	j.EligibleHosts, j.EligibleUnrestricted = nil, false
+	if terminal(j.State) {
+		return
+	}
+	if len(j.Spec.AllowedMachines) == 0 && len(q.s.Policies[j.Spec.Project].AllowedMachines) == 0 {
+		j.EligibleUnrestricted = true
+		return
+	}
+	hosts := []string{}
+	seen := map[string]bool{}
+	for _, m := range q.s.Machines {
+		if q.jobAllowsMachine(j, m.ID) && !seen[hostID(m)] {
+			hosts = append(hosts, hostID(m))
+			seen[hostID(m)] = true
+		}
+	}
+	sort.Strings(hosts)
+	j.EligibleHosts = &hosts
 }

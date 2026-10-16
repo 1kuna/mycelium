@@ -1136,6 +1136,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 		}
 		if forStatus {
 			for _, j := range out.Jobs {
+				q.statusEligibility(j)
 				if j.State == "queued" {
 					j.Reason = q.statusWaitingReason(j)
 				}
