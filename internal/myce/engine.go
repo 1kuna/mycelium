@@ -536,19 +536,7 @@ func (rt *modelRuntime) report() ([]ModelReport, float64) {
 	out := []ModelReport{}
 	memory := 0.0
 	for name, m := range rt.models {
-		if m.state == "ready" || m.state == "draining" {
-			if owned, ok := m.engine.(*LlamaEngine); ok {
-				err, _, _ := owned.runtimeHealth()
-				if ceiling := owned.memoryAttempt.failure(); ceiling != nil {
-					err = ceiling
-				}
-				if err != nil {
-					m.err = err.Error()
-					m.runtimeFailed = true
-					rt.unload(m)
-				}
-			}
-		}
+		rt.checkEngineHealth(m)
 		report := ModelReport{Name: name, Attempt: m.attempt, RuntimeFailed: m.runtimeFailed, State: m.state, Error: ceilingDiagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true}
 		if m.state == "ready" {
 			if owned, ok := m.engine.(*LlamaEngine); ok {
@@ -562,6 +550,25 @@ func (rt *modelRuntime) report() ([]ModelReport, float64) {
 	}
 	return out, memory
 }
+
+// Caller holds rt.mu. Both heartbeat reporting and request admission must see
+// process/health failure before granting the engine any new in-flight work.
+func (rt *modelRuntime) checkEngineHealth(m *workerModel) {
+	if m == nil || m.state != "ready" && m.state != "draining" {
+		return
+	}
+	if owned, ok := m.engine.(*LlamaEngine); ok {
+		err, _, _ := owned.runtimeHealth()
+		if ceiling := owned.memoryAttempt.failure(); ceiling != nil {
+			err = ceiling
+		}
+		if err != nil {
+			m.err, m.runtimeFailed = err.Error(), true
+			rt.unload(m)
+		}
+	}
+}
+
 func (rt *modelRuntime) sync(plan []ModelSlot) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -572,11 +579,23 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 	for name, m := range rt.models {
 		s, ok := desired[name]
 		m.queueFlight = s.InFlight
+		replaced := ok && s.Attempt != "" && m.attempt != "" && s.Attempt != m.attempt
+		if replaced {
+			m.queueFlight = 0 // B's assignments cannot keep A alive.
+			if m.state == "unload_failed" {
+				// Transfer the cleanup failure receipt to the desired attempt,
+				// retaining A's engine and custody. B must never start over it.
+				m.attempt = s.Attempt
+			}
+		}
 		if !ok && m.state == "failed" {
 			m.state = "unloaded"
 		}
-		if !ok || s.State == "draining" || !s.Placement.allows(rt.machine) {
+		if !ok || replaced || s.State == "draining" || s.State == "unloading" || !s.Placement.allows(rt.machine) {
 			m.drainRequested = true
+			if s.State == "unloading" && s.LoadTimedOut && !replaced {
+				m.runtimeFailed = true
+			}
 			if m.state == "loading" {
 				m.cancel()
 			}
@@ -589,6 +608,17 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		}
 	}
 	for _, s := range plan {
+		if s.Session != rt.session {
+			continue
+		}
+		if s.State == "unloading" {
+			if m := rt.models[s.Model]; m == nil || m.state == "unloaded" || m.state == "failed" {
+				// The load deadline can expire before B starts. A has been
+				// cleaned (or never existed), so acknowledge absence under B.
+				rt.models[s.Model] = &workerModel{model: Model{Name: s.Model}, attempt: s.Attempt, state: "unloaded"}
+			}
+			continue
+		}
 		if s.State != "loading" || s.Session != rt.session {
 			continue
 		}
@@ -605,11 +635,11 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			model.Project = s.Placement.Project
 		}
 		if model.Name != "" && (len(model.AllowedMachines) > 0 && !contains(model.AllowedMachines, rt.machine) || !s.Placement.allows(rt.machine)) {
-			rt.models[s.Model] = &workerModel{state: "failed", err: "model placement excludes this worker"}
+			rt.models[s.Model] = &workerModel{model: model, attempt: s.Attempt, state: "failed", err: "model placement excludes this worker"}
 			continue
 		}
 		if model.Name == "" {
-			rt.models[s.Model] = &workerModel{state: "failed", err: "model absent from worker config"}
+			rt.models[s.Model] = &workerModel{model: Model{Name: s.Model}, attempt: s.Attempt, state: "failed", err: "model absent from worker config"}
 			continue
 		}
 		if !rt.localApprovalAvailable(model) || rt.admissionBlocked || rt.availability != nil && !rt.availability.snapshot().Available {
@@ -875,7 +905,7 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 	if attempt := r.Header.Get("X-Myce-Engine-Attempt"); attempt != "" && m != nil && m.attempt != "" && attempt != m.attempt {
 		rt.mu.Unlock()
 		unlock()
-		w.Header().Set("X-Myce-Engine-Failed", attempt)
+		w.Header().Set("X-Myce-Engine-Rejected", attempt)
 		modelError(w, 503, "engine attempt is no longer ready")
 		return
 	}
@@ -885,10 +915,9 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 503, "hypha availability withdrawn")
 		return
 	}
-	if m == nil || !(rt.localApprovalAvailable(m.model) || rt.localApprovalStates[m.model.LocalSource] == approvalUnknown) || (m.state != "ready" && !(m.state == "draining" && m.queueFlight > 0)) {
-		if m == nil || m.runtimeFailed {
-			w.Header().Set("X-Myce-Engine-Failed", r.Header.Get("X-Myce-Engine-Attempt"))
-		}
+	rt.checkEngineHealth(m)
+	if m == nil || m.runtimeFailed || !(rt.localApprovalAvailable(m.model) || rt.localApprovalStates[m.model.LocalSource] == approvalUnknown) || (m.state != "ready" && !(m.state == "draining" && m.queueFlight > 0)) {
+		w.Header().Set("X-Myce-Engine-Rejected", r.Header.Get("X-Myce-Engine-Attempt"))
 		rt.mu.Unlock()
 		unlock()
 		modelError(w, 503, "model is not ready")
