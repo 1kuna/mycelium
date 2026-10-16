@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"mycelium/internal/myce"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -70,5 +72,24 @@ func TestModelSyncCLI(t *testing.T) {
 	}
 	if e := run([]string{"model", "sync", "m", "--queue", server.URL}); e == nil {
 		t.Fatal("missing target accepted")
+	}
+}
+
+func TestModelApproveLocalCLI(t *testing.T) {
+	t.Setenv("MYCE_TOKEN", "")
+	folder := t.TempDir()
+	approvals := filepath.Join(t.TempDir(), "approvals")
+	if err := os.WriteFile(filepath.Join(folder, "weights.bin"), []byte("fake weights"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	output := captureJoiningOutput(t, func() error {
+		return run([]string{"model", "approve-local", "approval-placeholder", "--path", folder, "--approved-root", folder, "--model-approval-root", approvals})
+	})
+	var model myce.Model
+	if err := json.Unmarshal([]byte(output), &model); err != nil {
+		t.Fatal(err)
+	}
+	if model.LocalSource != "approval-placeholder" || len(model.Files) != 1 || model.SizeBytes != 12 || len(model.SHA256) != 64 || strings.Contains(output, folder) || strings.Contains(output, approvals) {
+		t.Fatal("approval output is not a portable manifest")
 	}
 }

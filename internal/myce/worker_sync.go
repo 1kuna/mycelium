@@ -51,7 +51,7 @@ func (rt *modelRuntime) syncCopies(plan, usage []CopyTask, pins []string, busy b
 				break
 			}
 		}
-		if model.Name == "" {
+		if model.Name == "" || len(model.AllowedMachines) > 0 && !contains(model.AllowedMachines, rt.machine) {
 			continue
 		}
 		ctx, cancel := context.WithCancel(context.Background())

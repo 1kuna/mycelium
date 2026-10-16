@@ -154,6 +154,10 @@ func (q *Queue) reconcileHostReleases(c Checkin) {
 
 // Placement policy is shared by batch, model, preparation and projections.
 func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
+	if model, ok := q.model(j.Spec.Needs.Model); ok && (!modelFenceAllows(model, m) || !q.projectAllows(model.Project, m.ID)) {
+		return false
+	}
+
 	if availabilityBlocked(m) || (q.machineLimitReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))) || m.EnablePending || q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || m.Disabled != "" || q.s.DisabledHosts[hostID(m)] != "" || !q.projectAllows(j.Spec.Project, m.ID) {
 		return false
 	}
@@ -280,7 +284,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 			continue
 		}
 		model, _ := q.model(j.Spec.Needs.Model)
-		if call != nil && !modelFitsMachine(model, m) {
+		if call != nil && !q.modelFitsMachine(model, m) {
 			continue
 		}
 		if call != nil && (m.ModelURL == "" || m.ID == call.Exclude) {

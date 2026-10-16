@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"mycelium/internal/myce"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,7 +15,7 @@ import (
 
 func modelCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce model fetch|sync|pin|unpin [flags]")
+		return errors.New("usage: myce model fetch|approve-local|sync|pin|unpin [flags]")
 	}
 	f := flag.NewFlagSet("model "+args[0], flag.ContinueOnError)
 	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue URL")
@@ -33,6 +35,9 @@ func modelCommand(args []string) error {
 	root := f.String("model-root", "", "NAS model folder")
 	size := f.Int64("size-bytes", 0, "expected size")
 	sum := f.String("sha256", "", "expected SHA-256")
+	approvalRoot := f.String("model-approval-root", "", "worker-local approval directory")
+	localPath := f.String("path", "", "exact local model folder to approve")
+	approvedRoot := f.String("approved-root", "", "root bounding model folder and symlinked blobs")
 	flags := args[1:]
 	if len(flags) > 0 && !strings.HasPrefix(flags[0], "-") {
 		flags = append(append([]string{}, flags[1:]...), flags[0])
@@ -42,6 +47,18 @@ func modelCommand(args []string) error {
 	}
 	if f.NArg() != 1 {
 		return errors.New("supply one model name (or NAS-relative destination for fetch)")
+	}
+	if args[0] == "approve-local" {
+		m, err := myce.ApproveLocalModel(context.Background(), *approvalRoot, f.Arg(0), *localPath, *approvedRoot)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(struct {
+			LocalSource string           `json:"local_source"`
+			Files       []myce.ModelFile `json:"files"`
+			SizeBytes   int64            `json:"size_bytes"`
+			SHA256      string           `json:"sha256"`
+		}{m.LocalSource, m.Files, m.SizeBytes, m.SHA256})
 	}
 	if args[0] == "fetch" {
 		p := filepath.Clean(f.Arg(0))

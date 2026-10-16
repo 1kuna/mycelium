@@ -1012,6 +1012,8 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 		out = Snapshot{SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 		for _, s := range q.s.ModelSlots {
 			copy := *s
+			model, _ := q.model(s.Model)
+			copy.Placement = q.modelPlacement(model)
 			if s.State == "ready" && s.InFlight == 0 {
 				copy.IdleSeconds = max(0, q.clock.Now().Sub(s.LastUsed).Seconds())
 			}
@@ -1076,6 +1078,18 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			call.Machine = c.Machine
 			call.State = "queued"
 			call.Reason = "waiting for model " + c.Model + " on an eligible worker"
+			if c.Machine == "" && (model.Project != "" || len(model.AllowedMachines) > 0 || model.LocalSource != "") {
+				eligible := false
+				for _, worker := range q.s.Machines {
+					if q.projectAllows(c.Project, worker.ID) && q.modelFitsMachine(model, worker) && !worker.Gone && !worker.Leaving {
+						eligible = true
+						break
+					}
+				}
+				if !eligible {
+					call.Reason = "waiting for model placement: entry/owner/caller allowed_machines or local_source approval excludes available workers"
+				}
+			}
 			call.QueueOrder = order[c.ID]
 			if reason := reasons[c.ID]; reason != "" {
 				call.Reason = reason
@@ -1089,7 +1103,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			if c.Machine == "" && model.HostMemoryGB > 0 {
 				eligible, room := false, false
 				for _, m := range q.s.Machines {
-					if m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !modelFitsMachine(model, m) {
+					if m.Gone || m.Leaving || m.ID == c.Exclude || m.ModelURL == "" || !q.modelFitsMachine(model, m) {
 						continue
 					}
 					eligible = true
@@ -1128,7 +1142,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			}
 			copy.ModelCopySeconds = map[string]float64{}
 			for _, model := range q.models.Models {
-				if modelFitsMachine(model, m) {
+				if q.modelFitsMachine(model, m) {
 					copy.ModelCopySeconds[model.Name] = q.loadSeconds(model.Name, m)
 				}
 			}

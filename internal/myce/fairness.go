@@ -15,6 +15,7 @@ import (
 
 // Caps limit experiments; allowed_machines restricts every priority and model call.
 type ProjectPolicy struct {
+	DefaultCallPriority      string   `json:"default_call_priority,omitempty" yaml:"default_call_priority,omitempty"`
 	AllowedMachines          []string `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
 	Weight                   float64  `json:"weight" yaml:"weight"`
 	MaxConcurrentExperiments int      `json:"max_concurrent_experiments" yaml:"max_concurrent_experiments"`
@@ -70,6 +71,10 @@ func ReadProjectPolicies(path string) (map[string]ProjectPolicy, error) {
 }
 func (q *Queue) ConfigureProjects(p map[string]ProjectPolicy) error {
 	for name, v := range p {
+		if v.DefaultCallPriority != "" && v.DefaultCallPriority != "experiment" && v.DefaultCallPriority != "production" {
+			return errors.New("default_call_priority must be experiment or production")
+		}
+
 		for _, machine := range v.AllowedMachines {
 			if strings.TrimSpace(machine) == "" {
 				return errors.New("project allowed_machines must contain nonempty machine names")
@@ -372,7 +377,7 @@ func (q *Queue) validateProjectCapacity(j *Job) error {
 		if !fitsWithoutHostMemory(structural, &copy, copy.TotalMemoryGB) {
 			continue
 		}
-		if model, ok := q.model(j.Spec.Needs.Model); ok && !modelFitsMachine(model, m) {
+		if model, ok := q.model(j.Spec.Needs.Model); ok && !q.modelFitsMachine(model, m) {
 			continue
 		}
 		return nil

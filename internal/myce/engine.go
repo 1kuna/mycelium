@@ -436,6 +436,7 @@ type modelRuntime struct {
 	environmentSourceRoot string
 	device, platform      string
 	machine               string
+	secretRoot            string
 }
 
 func startModels(w Worker, dir string) (*modelRuntime, error) {
@@ -459,7 +460,8 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if limit == 0 {
 		limit = 100 * 1024 * 1024 * 1024
 	}
-	rt.cache = &ModelCache{FileClient: &w.Client, Root: root, NASRoot: w.ModelRoot, Limit: limit, Clock: w.Clock}
+	rt.secretRoot = w.SecretRoot
+	rt.cache = &ModelCache{ApprovalRoot: w.ModelApprovalRoot, FileClient: &w.Client, Root: root, NASRoot: w.ModelRoot, Limit: limit, Clock: w.Clock}
 	rt.engineFactory = w.modelEngine
 	rt.cache.beforeChunk = w.beforeModelCopy
 	rt.cache.Parallel = max(1, w.CopyParallel)
@@ -534,7 +536,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		if !ok && m.state == "failed" {
 			m.state = "unloaded"
 		}
-		if !ok || s.State == "draining" {
+		if !ok || s.State == "draining" || !s.Placement.allows(rt.machine) {
 			m.drainRequested = true
 			if m.state == "loading" {
 				m.cancel()
@@ -559,6 +561,13 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			if m.Name == s.Model {
 				model = m
 			}
+		}
+		if s.Placement != nil {
+			model.Project = s.Placement.Project
+		}
+		if model.Name != "" && (len(model.AllowedMachines) > 0 && !contains(model.AllowedMachines, rt.machine) || !s.Placement.allows(rt.machine)) {
+			rt.models[s.Model] = &workerModel{state: "failed", err: "model placement excludes this worker"}
+			continue
 		}
 		if model.Name == "" {
 			rt.models[s.Model] = &workerModel{state: "failed", err: "model absent from worker config"}
@@ -604,6 +613,7 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		return
 	}
 	model := withPlacementEnvironment(m.model, Machine{ID: rt.machine, GPU: rt.platform, Device: rt.device})
+	model.secretRoot, model.fleetToken = rt.secretRoot, rt.token
 	var e error
 	if rt.device != "" {
 		model, e = WithModelDevice(model, rt.platform, rt.device)
