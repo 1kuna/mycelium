@@ -128,9 +128,9 @@ func (q *Queue) retainRelease(j *Job) {
 	r.CleanupFailed = old.CleanupFailed
 	r.CleanupSince = old.CleanupSince
 	r.EscalatedAt = old.EscalatedAt
-	// A new stop starts a new cleanup window; an old boot/create timer must
-	// never be inherited by an otherwise healthy execution's later stop (#74).
-	if r.Docker && (q.dockerReleaseLive(r) || old.Until.IsZero() && !r.Until.IsZero()) {
+	// A new stop resets an un-escalated boot/create timer (#74), but must
+	// preserve an existing escalation until the release resolves.
+	if r.Docker && (q.dockerReleaseLive(r) || old.EscalatedAt == nil && old.Until.IsZero() && !r.Until.IsZero()) {
 		r.CleanupSince, r.EscalatedAt = nil, nil
 	}
 	q.s.HostReleases[releaseKey(r)] = r
@@ -590,12 +590,15 @@ func (q *Queue) dockerHoldDetail(host string) HoldDetail {
 		if hostID(m) != host || m.DockerCleanup == "" {
 			continue
 		}
-		kind, rank := "docker_cleanup_waiting", 3 // Reported cleanup error.
+		kind, rank, action := "unclassified", 4, true
+		if strings.HasPrefix(m.DockerCleanup, "cleanup unconfirmed:") {
+			kind, rank, action = "docker_cleanup_waiting", 3, false
+		}
 		switch m.DockerCleanup {
 		case "creating", "stopping", "released", "create pending", "start pending", "wait pending", "inspect pending", "stop pending", "kill pending", "logs pending", "remove pending", "network-create pending", "network-remove pending":
-			kind, rank = "docker_transition", 1
+			kind, rank, action = "docker_transition", 1, false
 		}
-		choose(HoldDetail{Host: host, Kind: kind, Text: host + ": Docker cleanup unconfirmed; " + m.DockerCleanup}, rank)
+		choose(HoldDetail{Host: host, Kind: kind, OperatorActionRequired: action, Text: host + ": Docker cleanup unconfirmed; " + m.DockerCleanup}, rank)
 	}
 	for _, r := range q.s.HostReleases {
 		if !r.Docker || r.Host != host || q.dockerReleaseLive(r) {
@@ -607,7 +610,7 @@ func (q *Queue) dockerHoldDetail(host string) HoldDetail {
 			detail.Kind = "docker_cleanup_operator_action"
 			detail.OperatorActionRequired = true
 			detail.Text += "; operator action required (myce resolve-docker)"
-			rank = 4
+			rank = 5
 		}
 		choose(detail, rank)
 	}
