@@ -711,7 +711,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 					break
 				}
-				if !q.checkpointReady(j, &m) {
+				if !logPolicyFits(j.Spec.Logs, &m) || !q.checkpointReady(j, &m) {
 					return nil
 				}
 				out := cloneJob(j)
@@ -1073,6 +1073,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			call := callJob(c)
 			call.Spec.Name = "model call: " + c.Model
 			model, _ := q.model(c.Model)
+			call.Spec.Logs = model.Logs
 			call.Spec.Needs.MemoryGB = model.MemoryGB
 			call.Spec.Needs.HostMemoryGB = model.HostMemoryGB
 			call.Machine = c.Machine
@@ -1115,6 +1116,9 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 				if eligible && !room {
 					call.Reason = fmt.Sprintf("waiting for RAM: model %s needs %.1f GiB host memory (or telemetry unavailable)", c.Model, model.HostMemoryGB)
 				}
+			}
+			if reason := q.logsWaitingReason(call); reason != "" {
+				call.Reason = reason
 			}
 			if c.Machine != "" {
 				call.State = "running"
@@ -1218,6 +1222,9 @@ func (q *Queue) Logs(id string, after int64) ([]Log, error) {
 	defer q.mu.Unlock()
 	if q.s.Jobs[id] == nil {
 		return nil, fmt.Errorf("job not found")
+	}
+	if q.s.Jobs[id].Spec.Logs == "none" {
+		return []Log{}, nil
 	}
 	rows, err := q.db.Query("SELECT seq,attempt,text FROM logs WHERE job=? AND seq>? ORDER BY seq LIMIT 256", id, after)
 	if err != nil {

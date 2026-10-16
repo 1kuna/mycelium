@@ -674,6 +674,9 @@ func (q *Queue) modelPlan(machine string) []ModelSlot {
 		if s.Machine == machine {
 			slot := *s
 			model, _ := q.model(s.Model)
+			if s.State == "loading" && !logPolicyFits(model.Logs, q.s.Machines[machine]) {
+				continue
+			}
 			slot.Placement = q.modelPlacement(model)
 			if model.Environment != "" {
 				recipe := q.environments.Environments[model.Environment][q.s.Machines[machine].GPU]

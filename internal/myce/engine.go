@@ -146,6 +146,10 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	}
 	l.identity = ID()
 	name := "engine-" + l.identity
+	logHint := "; logs disabled"
+	if m.Logs != "none" {
+		logHint = "; see " + name + ".log"
+	}
 	shell := []string{"-c", `read gate || exit 125; exec "$@"`, "myce-supervisor-" + l.identity}
 	shell = append(shell, argv...)
 	l.cmd = exec.Command("sh", shell...)
@@ -222,7 +226,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 					if oomErr != nil {
 						return oomErr
 					}
-					return fmt.Errorf("server exited as health became ready: %v; see %s.log", e, name)
+					return fmt.Errorf("server exited as health became ready: %v%s", e, logHint)
 				default:
 					return nil
 				}
@@ -243,7 +247,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 			if oomErr != nil {
 				return oomErr
 			}
-			return fmt.Errorf("server exited during load: %v; see %s.log", e, name)
+			return fmt.Errorf("server exited during load: %v%s", e, logHint)
 		case <-tick.C:
 		}
 	}

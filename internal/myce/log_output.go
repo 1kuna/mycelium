@@ -20,3 +20,28 @@ func syncCommandOutput(output *os.File) error {
 	}
 	return output.Sync()
 }
+
+// Missing capability advertisement denotes an older worker. Never infer
+// software support from its hardware profile or inventory.
+func logPolicyFits(policy string, m *Machine) bool {
+	return policy != "none" || contains(m.Capabilities, "logs_none")
+}
+
+func (q *Queue) logsWaitingReason(j *Job) string {
+	model, hasModel := q.model(j.Spec.Needs.Model)
+	if j.Spec.Logs != "none" && (!hasModel || model.Logs != "none") {
+		return ""
+	}
+	for _, m := range q.s.Machines {
+		if m.Gone || m.Leaving || !q.projectAllows(j.Spec.Project, m.ID) || len(j.Spec.AllowedMachines) > 0 && !contains(j.Spec.AllowedMachines, m.ID) {
+			continue
+		}
+		if hasModel && (!modelFenceAllows(model, m) || !q.projectAllows(model.Project, m.ID)) {
+			continue
+		}
+		if contains(m.Capabilities, "logs_none") {
+			return ""
+		}
+	}
+	return "waiting for a worker with logs_none capability (logs: none)"
+}

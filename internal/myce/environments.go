@@ -884,7 +884,9 @@ func (q *Queue) reconcileEnvironments(m *Machine) error {
 				if e := q.copyEnvironmentLogs(j, m, r.Key); e != nil {
 					return e
 				}
-				j.EnvironmentFailureLog = r.Log + "\n" + j.Reason + "\n"
+				if j.Spec.Logs != "none" {
+					j.EnvironmentFailureLog = r.Log + "\n" + j.Reason + "\n"
+				}
 			}
 		}
 	}
@@ -969,14 +971,18 @@ func (q *Queue) AppendEnvironmentLog(l EnvironmentLog) error {
 	}
 	for _, j := range q.s.Jobs {
 		if j.State == "queued" && environmentKey(j, m) == l.Key {
-			if e = insertEnvironmentJobLog(tx, j.ID, l); e != nil {
+			if e = insertEnvironmentJobLog(tx, j, l); e != nil {
 				return e
 			}
 		}
 	}
 	return tx.Commit()
 }
-func insertEnvironmentJobLog(tx *sql.Tx, id string, l EnvironmentLog) error {
+func insertEnvironmentJobLog(tx *sql.Tx, j *Job, l EnvironmentLog) error {
+	if j.Spec.Logs == "none" {
+		return nil
+	}
+	id := j.ID
 	res, e := tx.Exec("INSERT OR IGNORE INTO environment_log_offsets(job,machine,session,key,offset) VALUES(?,?,?,?,?)", id, l.Machine, l.Session, l.Key, l.Offset)
 	if e != nil {
 		return e
@@ -991,6 +997,9 @@ func insertEnvironmentJobLog(tx *sql.Tx, id string, l EnvironmentLog) error {
 	return e
 }
 func (q *Queue) copyEnvironmentLogs(j *Job, m *Machine, key string) error {
+	if j.Spec.Logs == "none" {
+		return nil
+	}
 	rows, e := q.db.Query("SELECT offset,text FROM environment_build_logs WHERE machine=? AND session=? AND key=? ORDER BY offset", m.ID, m.Session, key)
 	if e != nil {
 		return e
@@ -1015,7 +1024,7 @@ func (q *Queue) copyEnvironmentLogs(j *Job, m *Machine, key string) error {
 	}
 	defer tx.Rollback()
 	for _, l := range chunks {
-		if e = insertEnvironmentJobLog(tx, j.ID, l); e != nil {
+		if e = insertEnvironmentJobLog(tx, j, l); e != nil {
 			return e
 		}
 	}

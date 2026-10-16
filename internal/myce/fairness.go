@@ -276,6 +276,9 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 	return order, reasons
 }
 func (q *Queue) waitReason(j *Job) string {
+	if reason := q.logsWaitingReason(j); reason != "" {
+		return reason
+	}
 	if reason := q.capReason(j); reason != "" {
 		return reason
 	}
