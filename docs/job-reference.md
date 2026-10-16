@@ -87,6 +87,9 @@ worker checks in. Omitted/`keep` entries can still use older workers.
 
 Roll workers and queue together. An old queue silently treats `logs: none`
 jobs as `keep`, and an old worker refuses saved state containing the field.
+Upgrading the queue first drains live `logs: none` servers on older workers;
+they cannot load or serve calls again until their host's worker is upgraded.
+Roll the queue and workers together.
 Do not downgrade while `logs: none` jobs or server entries are live; first stop
 and drain them with the compatible versions.
 

@@ -138,8 +138,9 @@ behavior and no queue log rows or worker attempt log; see the
 inputs/outputs out of captured batch output.
 
 `logs: none` server entries require a worker advertising `logs_none`; older
-workers cannot receive their load plans or serve their calls. Roll workers and
-queue together and do not downgrade with these entries live. See the
+workers cannot receive their load plans or serve their calls. A queue-first
+upgrade drains live opted-out servers until each host's worker is upgraded.
+Roll queue and workers together. Do not downgrade with these entries live. See the
 [job reference](job-reference.md#scheduling-and-results) for downgrade behavior.
 
 Before claiming native Docker qualification, use an authorized disposable daemon

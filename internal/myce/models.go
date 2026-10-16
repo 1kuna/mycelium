@@ -756,6 +756,10 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 	generic := strings.HasPrefix(r.URL.Path, "/models/")
 	endpoint := r.URL.RequestURI()
 	if generic {
+		if err := a.Queue.callDefaults(c, Model{}, r.Header, false); err != nil {
+			modelError(w, 400, err.Error())
+			return
+		}
 		parts := strings.SplitN(strings.TrimPrefix(r.URL.EscapedPath(), "/models/"), "/", 2)
 		if len(parts) != 2 || parts[0] == "" {
 			modelError(w, 400, "expected /models/NAME/PATH")
@@ -809,9 +813,11 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 	a.Queue.mu.Lock()
 	model, _ := a.Queue.model(body.Model)
 	a.Queue.mu.Unlock()
-	if e := a.Queue.callDefaults(c, model, r.Header, !generic); e != nil {
-		modelError(w, 400, "invalid model routing headers")
-		return
+	if !generic {
+		if err := a.Queue.callDefaults(c, model, r.Header, true); err != nil {
+			modelError(w, 400, err.Error())
+			return
+		}
 	}
 	retrySafe := !generic || model.RetrySafe
 	var requestUntil time.Time

@@ -1007,10 +1007,11 @@ func (w Worker) Run(stop context.Context) error {
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
 			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none")
 			m.ApprovedModels = rt.cache.ApprovedModels(w.ModelConfig.Models)
+			rt.setLocalApprovals(m.ApprovedModels)
 			reports, _ := rt.report()
 			if rt.cache != nil {
 				var ce error
-				m.CachedModels, m.CacheFreeBytes, ce = rt.cache.Report(w.ModelConfig.Models)
+				m.CachedModels, m.CacheFreeBytes, ce = rt.cache.report(w.ModelConfig.Models, m.ApprovedModels)
 				m.CopyReports, m.CopyBytesPerSecond = rt.copyTelemetry()
 				if ce != nil {
 					m.CacheError = ce.Error()
