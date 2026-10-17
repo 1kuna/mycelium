@@ -96,7 +96,7 @@ func TestHostConversionFlagMatrix(t *testing.T) {
 				}
 			}
 			for _, src := range m.Sources {
-				if err = verifyConversionSource(filepath.Join(conversionDir(o.Dir), src.Original), src); err != nil {
+				if err = verifyConversionOriginal(filepath.Join(conversionDir(o.Dir), src.Original), src); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -175,7 +175,7 @@ func TestHostConversionInterruptedPhases(t *testing.T) {
 				t.Fatal(m)
 			}
 			for _, src := range m.Sources {
-				if err = verifyConversionSource(filepath.Join(conversionDir(o.Dir), src.Original), src); err != nil {
+				if err = verifyConversionOriginal(filepath.Join(conversionDir(o.Dir), src.Original), src); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -282,7 +282,7 @@ func TestHostConversionQueuePendingAndWALOriginals(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, src := range m.Sources {
-		if err = verifyConversionSource(filepath.Join(conversionDir(o.Dir), src.Original), src); err != nil {
+		if err = verifyConversionOriginal(filepath.Join(conversionDir(o.Dir), src.Original), src); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -314,7 +314,7 @@ func TestHostConversionUnitOnlyRegistryPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, src := range m.Sources {
-		if err = verifyConversionSource(filepath.Join(conversionDir(o.Dir), src.Original), src); err != nil {
+		if err = verifyConversionOriginal(filepath.Join(conversionDir(o.Dir), src.Original), src); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -366,7 +366,7 @@ func TestHostConversionArchivedCountersAndReceipts(t *testing.T) {
 			for _, src := range m.Sources {
 				if src.Path == path {
 					found = true
-					if err = verifyConversionSource(filepath.Join(conversionDir(o.Dir), src.Original), src); err != nil {
+					if err = verifyConversionOriginal(filepath.Join(conversionDir(o.Dir), src.Original), src); err != nil {
 						t.Fatal(err)
 					}
 					if src.Mode != 0640 || src.SHA256 != conversionHash(receipt) {
@@ -378,5 +378,57 @@ func TestHostConversionArchivedCountersAndReceipts(t *testing.T) {
 				t.Fatal("archived receipt not preserved")
 			}
 		})
+	}
+}
+
+func TestHostConversionClampsPreservedModes(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		o := oldHostFixture(t)
+		path := filepath.Join(o.Dir, "units", "myce-worker@card-a.service", "control-generation.json")
+		if err := os.Chmod(path, 0664); err != nil {
+			t.Fatal(err)
+		}
+		o.Apply = true
+		if interrupted {
+			o.boundary = func(phase string) error {
+				if phase == "retired-source" {
+					return errors.New("interrupted")
+				}
+				return nil
+			}
+			if _, err := ConvertHostControl(o); err == nil {
+				t.Fatal("expected interruption")
+			}
+			o.boundary = nil
+		}
+		m, err := ConvertHostControl(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for i, src := range m.Sources {
+			if src.Path != path {
+				continue
+			}
+			found = true
+			if src.Mode != 0664 {
+				t.Fatal("manifest lost original mode", src.Mode)
+			}
+			for _, preserved := range []string{filepath.Join(conversionDir(o.Dir), src.Original), filepath.Join(conversionDir(o.Dir), "retired", fmt.Sprintf("%06d", i))} {
+				st, err := os.Stat(preserved)
+				if err != nil || st.Mode().Perm() != 0644 {
+					t.Fatal(st, err)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("source not inventoried")
+		}
+		if err = ValidateHostControlTree(o.Dir, uint32(os.Geteuid())); err != nil {
+			t.Fatal("converted tree unusable", err)
+		}
+		if _, err = ConvertHostControl(o); err != nil {
+			t.Fatal("completed conversion is not resumable", err)
+		}
 	}
 }

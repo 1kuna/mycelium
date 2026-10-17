@@ -18,8 +18,11 @@ func GuardRootStartup() error {
 			return nil, e
 		}
 		defer f.Close()
+		if e = hostFileAccessACL(int(f.Fd())); e != nil {
+			return nil, e
+		}
 		return f.Stat()
-	}, Readlink: os.Readlink, Lstat: os.Lstat}); e != nil {
+	}, Readlink: os.Readlink, Lstat: os.Lstat, AccessACL: hostAccessACL}); e != nil {
 		return e
 	}
 	return rootCloseOnExec()

@@ -15,10 +15,11 @@ type RootBinaryProbe struct {
 	Executing func() (os.FileInfo, error)
 	Readlink  func(string) (string, error)
 	Lstat     func(string) (os.FileInfo, error)
+	AccessACL func(string) error
 }
 
 func CheckRootBinary(p RootBinaryProbe) error {
-	if p.Executing == nil || p.Readlink == nil || p.Lstat == nil {
+	if p.Executing == nil || p.Readlink == nil || p.Lstat == nil || p.AccessACL == nil {
 		return ErrRootBinaryUntrusted
 	}
 	running, e := p.Executing()
@@ -30,12 +31,12 @@ func CheckRootBinary(p RootBinaryProbe) error {
 		return ErrRootBinaryUntrusted
 	}
 	st, e := p.Lstat(path)
-	if e != nil || !trustedRootMode(st, false) || !sameRootInode(running, st) {
+	if e != nil || !trustedRootMode(st, false) || !sameRootInode(running, st) || p.AccessACL(path) != nil {
 		return ErrRootBinaryUntrusted
 	}
 	for path = filepath.Dir(path); ; path = filepath.Dir(path) {
 		st, e = p.Lstat(path)
-		if e != nil || !trustedRootMode(st, true) {
+		if e != nil || !trustedRootMode(st, true) || p.AccessACL(path) != nil {
 			return ErrRootBinaryUntrusted
 		}
 		if filepath.Dir(path) == path {

@@ -192,16 +192,16 @@ func validWorkerAccount(a WorkerAccount) bool {
 
 // Only root-owned symlinked ancestors are permitted (for example /home ->
 // /var/home). Targets and non-root-owned ancestors must not be writable by
-// group/other. Root-owned sticky temporary ancestors remain usable on laptops.
+// group/other. Writable root-owned ancestors require ModeSticky (for example /tmp).
 func validateHostTarget(path string, uid uint32, directory bool) error {
-	return validateHostTargetLinks(path, uid, directory, 0)
+	return validateHostTargetLinks(path, uid, directory, 0, hostAccessACL)
 }
-func validateHostTargetLinks(path string, uid uint32, directory bool, links int) error {
+func validateHostTargetLinks(path string, uid uint32, directory bool, links int, checkACL func(string) error) error {
 	if links > 40 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return ErrHostTarget
 	}
-	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	cur := "/"
+	parts := append([]string{"/"}, strings.Split(strings.TrimPrefix(path, "/"), "/")...)
+	cur := ""
 	for i, part := range parts {
 		cur = filepath.Join(cur, part)
 		st, e := os.Lstat(cur)
@@ -210,6 +210,9 @@ func validateHostTargetLinks(path string, uid uint32, directory bool, links int)
 		}
 		owner, ok := st.Sys().(*syscall.Stat_t)
 		if !ok {
+			return ErrHostTarget
+		}
+		if checkACL(cur) != nil {
 			return ErrHostTarget
 		}
 		last := i == len(parts)-1
@@ -224,18 +227,29 @@ func validateHostTargetLinks(path string, uid uint32, directory bool, links int)
 			if !filepath.IsAbs(target) {
 				target = filepath.Join(filepath.Dir(cur), target)
 			}
-			return validateHostTargetLinks(filepath.Join(append([]string{target}, parts[i+1:]...)...), uid, directory, links+1)
+			return validateHostTargetLinks(filepath.Join(append([]string{target}, parts[i+1:]...)...), uid, directory, links+1, checkACL)
 		}
 		if last {
 			if owner.Uid != uid || st.Mode().Perm()&0022 != 0 || st.IsDir() != directory || (!directory && !st.Mode().IsRegular()) {
 				return ErrHostTarget
 			}
-		} else if !st.IsDir() || (owner.Uid != 0 && (owner.Uid != uid || st.Mode().Perm()&0022 != 0)) {
+		} else if !safeHostAncestor(st, uid) {
 			return ErrHostTarget
 		}
 	}
 	return nil
 }
+func safeHostAncestor(st os.FileInfo, uid uint32) bool {
+	owner, ok := st.Sys().(*syscall.Stat_t)
+	if !ok || !st.IsDir() {
+		return false
+	}
+	if owner.Uid == 0 {
+		return st.Mode().Perm()&0022 == 0 || st.Mode()&os.ModeSticky != 0
+	}
+	return owner.Uid == uid && st.Mode().Perm()&0022 == 0
+}
+
 func ValidateHostControlTree(dir string, uid uint32) error {
 	if os.Geteuid() == 0 {
 		return ErrHostIdentity
@@ -517,6 +531,16 @@ func HostWorkerChildEntry(ctx context.Context, in io.Reader, out io.Writer, r Ho
 	return ServeHostWorkerChild(ctx, in, out, r, handle)
 }
 
+const hostChildWaitDelay = time.Second
+
+func hostChildLaunchContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if deadline, ok := ctx.Deadline(); ok {
+		// Reserve WaitDelay inside the caller's deadline, including forced exit.
+		return context.WithDeadline(ctx, deadline.Add(-hostChildWaitDelay))
+	}
+	return context.WithCancel(ctx)
+}
+
 func LaunchHostWorkerChild(ctx context.Context, s HostChildLaunch) ([]byte, error) {
 	executable, e := hostChildExecutable(s.ForceChild)
 	if e != nil {
@@ -526,6 +550,8 @@ func LaunchHostWorkerChild(ctx context.Context, s HostChildLaunch) ([]byte, erro
 	if e != nil {
 		return nil, ErrHostChild
 	}
+	ctx, cancel := hostChildLaunchContext(ctx)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, executable, "_host-worker-mutation")
 	cmd.Env = WorkerChildEnvironment(s.Account)
 	cmd.Dir = "/"
@@ -539,7 +565,7 @@ func LaunchHostWorkerChild(ctx context.Context, s HostChildLaunch) ([]byte, erro
 		return nil, e
 	}
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-	cmd.WaitDelay = time.Second
+	cmd.WaitDelay = hostChildWaitDelay
 	var output bytes.Buffer
 	cmd.Stdout = &limitedHostOutput{buffer: &output, remaining: 64 << 10}
 	e = cmd.Run()

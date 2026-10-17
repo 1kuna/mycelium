@@ -118,11 +118,15 @@ func TestDoctorCLIUsesInjectedRunner(t *testing.T) {
 			return nil, errors.New("unexpected command")
 		}
 	}}
-	if err = setupCommandWithProbe([]string{"doctor", "--config", path}, p, home); err != nil {
+	noAccount := func(string) (myce.WorkerAccount, error) {
+		t.Fatal("doctor looked up worker account")
+		return myce.WorkerAccount{}, myce.ErrHostIdentity
+	}
+	if err = setupCommandWithAccountLookup([]string{"doctor", "--config", path}, p, home, noAccount); err != nil {
 		t.Fatal(err)
 	}
 	lingering = "no\n"
-	if err = setupCommandWithProbe([]string{"doctor", "--config", path}, p, home); err == nil || !strings.Contains(err.Error(), "doctor found problems") {
+	if err = setupCommandWithAccountLookup([]string{"doctor", "--config", path}, p, home, noAccount); err == nil || !strings.Contains(err.Error(), "doctor found problems") {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"mount", "uv", "loginctl"} {
@@ -400,5 +404,49 @@ func TestLegacyReceiptInstalledServiceRejected(t *testing.T) {
 		if err = serviceCommand(args); err == nil || !strings.Contains(err.Error(), "reinstall") {
 			t.Fatal("installed legacy flag did not explain recovery", err)
 		}
+	}
+}
+
+func TestInstallWithoutPasswdEntry(t *testing.T) {
+	for _, role := range []string{"queue", "worker"} {
+		t.Run(role, func(t *testing.T) {
+			home := t.TempDir()
+			calls := 0
+			lookup := func(string) (myce.WorkerAccount, error) {
+				calls++
+				if role != "worker" {
+					t.Fatal("queue looked up worker account")
+				}
+				return myce.WorkerAccount{Name: "discard-on-error", Home: home}, myce.ErrHostIdentity
+			}
+			args := []string{"install", role, "--nas", home, "--dry-run"}
+			if role == "worker" {
+				args = append(args, "--gpu", "fake", "--memory-mode", "fixed", "--memory-gb", "2")
+			}
+			captureJoiningOutput(t, func() error {
+				return setupCommandWithAccountLookup(args, myce.MachineProbe{OS: "linux", Arch: "amd64"}, home, lookup)
+			})
+			if (role == "worker" && calls != 1) || (role == "queue" && calls != 0) {
+				t.Fatal(calls)
+			}
+		})
+	}
+}
+
+func TestUninstallWithoutPasswdEntry(t *testing.T) {
+	home := t.TempDir()
+	config := filepath.Join(home, "config.json")
+	b, err := json.Marshal(myce.ServiceConfig{Role: "queue", Config: config, Service: filepath.Join(home, "myce-queue.service"), Detection: myce.Detection{OS: "linux"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(config, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = setupCommandWithAccountLookup([]string{"uninstall", "--config", config, "--dry-run"}, myce.MachineProbe{}, home, func(string) (myce.WorkerAccount, error) {
+		t.Fatal("uninstall looked up worker account")
+		return myce.WorkerAccount{}, myce.ErrHostIdentity
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
