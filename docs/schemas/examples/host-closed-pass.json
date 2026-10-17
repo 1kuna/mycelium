@@ -50,5 +50,11 @@
   "verdict": "PASS",
   "reasons": [],
   "queue_reachable": true,
-  "memory_allowance_bytes": null
+  "memory_allowance_bytes": null,
+  "last_close": {
+    "operation_id": "example-close-id",
+    "revision": 7,
+    "settlement": "confirmed",
+    "settled_at": "2026-10-17T12:00:00Z"
+  }
 }

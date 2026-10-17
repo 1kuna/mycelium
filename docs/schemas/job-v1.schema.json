@@ -1,0 +1,910 @@
+{
+  "$defs": {
+    "Copy": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "extension": {
+          "$ref": "#/$defs/ExtensionSelection"
+        },
+        "loss_charged": {
+          "type": "boolean"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "recoverable": {
+          "type": "boolean"
+        },
+        "release_confirmed": {
+          "type": "boolean"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "recoverable",
+        "machine",
+        "session",
+        "attempt",
+        "progress"
+      ],
+      "type": "object"
+    },
+    "DockerReadiness": {
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "timeout": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "port",
+        "path",
+        "timeout"
+      ],
+      "type": "object"
+    },
+    "DockerSidecar": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "memory_swap": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        },
+        "readiness": {
+          "$ref": "#/$defs/DockerReadiness"
+        }
+      },
+      "required": [
+        "name",
+        "command",
+        "memory_gb"
+      ],
+      "type": "object"
+    },
+    "Environment": {
+      "properties": {
+        "lock_file": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "python": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "EnvironmentRecipe": {
+      "properties": {
+        "binary": {
+          "type": "string"
+        },
+        "binary_relative": {
+          "type": "string"
+        },
+        "build": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "files": {
+          "additionalProperties": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "lock_file": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "python": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "platform"
+      ],
+      "type": "object"
+    },
+    "Extension": {
+      "properties": {
+        "baselines": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ExtensionBaseline"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "benchmark": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "check": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "digest": {
+          "type": "string"
+        },
+        "files": {
+          "additionalProperties": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "host_memory_gb": {
+          "type": "number"
+        },
+        "kinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "platform_baselines": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/$defs/ExtensionBaseline"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "program_types": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "resumable": {
+          "type": "boolean"
+        },
+        "run": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "setup": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "purpose",
+        "platforms",
+        "memory_gb",
+        "run",
+        "files",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "ExtensionBaseline": {
+      "properties": {
+        "absolute": {
+          "type": "number"
+        },
+        "input": {
+          "type": "string"
+        },
+        "measure": {
+          "type": "string"
+        },
+        "native": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
+        "relative": {
+          "type": "number"
+        },
+        "variation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "measure",
+        "native",
+        "variation"
+      ],
+      "type": "object"
+    },
+    "ExtensionSelection": {
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "FileCheckpoint": {
+      "properties": {
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "generation": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation",
+        "files"
+      ],
+      "type": "object"
+    },
+    "FileManifest": {
+      "additionalProperties": {
+        "$ref": "#/$defs/FileRef"
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "FileRef": {
+      "properties": {
+        "sha256": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sha256",
+        "size_bytes"
+      ],
+      "type": "object"
+    },
+    "Job": {
+      "properties": {
+        "assigned_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "attempt": {
+          "minimum": 0,
+          "type": "integer",
+          "x-contract": "stable"
+        },
+        "cancelled_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "checkpoint": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "copies": {
+          "items": {
+            "$ref": "#/$defs/Copy"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "eligible_hosts": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "eligible_unknown_machines": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "eligible_unrestricted": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "environment_failure_log": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "environment_recipes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EnvironmentRecipe"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "extension": {
+          "$ref": "#/$defs/ExtensionSelection",
+          "x-contract": "diagnostic"
+        },
+        "extensions": {
+          "items": {
+            "$ref": "#/$defs/Extension"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "file_checkpoints": {
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[0-9]+$": {
+              "$ref": "#/$defs/FileCheckpoint"
+            }
+          },
+          "type": "object",
+          "x-contract": "diagnostic"
+        },
+        "file_transport": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "finished_at": {
+          "description": "Recorded terminal time, when present. Historical terminal records may omit it.",
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "front": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "last_stop_outcome": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "losses": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "machine": {
+          "description": "Assigned execution identity; omitted before assignment or after requeue.",
+          "minLength": 1,
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "measured_needs": {
+          "$ref": "#/$defs/SizeHint",
+          "x-contract": "diagnostic"
+        },
+        "oom_capacity": {
+          "$ref": "#/$defs/SizeHint",
+          "x-contract": "diagnostic"
+        },
+        "oom_retries": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "output_files": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "output_refs": {
+          "$ref": "#/$defs/FileManifest",
+          "x-contract": "diagnostic"
+        },
+        "production_host": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "progress": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "queue_order": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "queued": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "reason": {
+          "description": "Sanitized diagnostic only. Do not parse or match its text.",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "release_confirmed": {
+          "description": "Exact current execution release proof when true. Omitted false is not confirmation; older copies may still have pending custody. Use the cancellation acknowledgement for aggregate release.",
+          "type": "boolean",
+          "x-contract": "stable"
+        },
+        "requeued_by_operator": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "resume_files": {
+          "$ref": "#/$defs/FileCheckpoint",
+          "x-contract": "diagnostic"
+        },
+        "session": {
+          "description": "Worker session of the assigned execution; combine with job ID and attempt.",
+          "minLength": 1,
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "spec": {
+          "$ref": "#/$defs/Spec",
+          "x-contract": "stable"
+        },
+        "start_latency_seconds": {
+          "type": "number",
+          "x-contract": "diagnostic"
+        },
+        "start_window": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "started_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "starts": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "running",
+            "stopping",
+            "succeeded",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "stop_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "waiting_since": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        }
+      },
+      "required": [
+        "start_latency_seconds",
+        "starts",
+        "losses",
+        "progress",
+        "id",
+        "spec",
+        "state",
+        "attempt",
+        "queued",
+        "front",
+        "checkpoint"
+      ],
+      "type": "object"
+    },
+    "Platform": {
+      "properties": {
+        "any": {
+          "type": "boolean"
+        },
+        "preferred": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "required": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Program": {
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "file": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "file"
+      ],
+      "type": "object"
+    },
+    "SizeHint": {
+      "properties": {
+        "host_memory_gb": {
+          "type": "number"
+        },
+        "memory_gb": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "Spec": {
+      "properties": {
+        "allowed_machines": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "deadline": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment",
+          "x-contract": "diagnostic"
+        },
+        "expected_minutes": {
+          "type": "number",
+          "x-contract": "diagnostic"
+        },
+        "files": {
+          "$ref": "#/$defs/FileManifest",
+          "x-contract": "diagnostic"
+        },
+        "give_up_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "kind": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "logs": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "name": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "needs": {
+          "properties": {
+            "host_memory_gb": {
+              "type": "number"
+            },
+            "memory_gb": {
+              "type": "number"
+            },
+            "model": {
+              "type": "string"
+            },
+            "platform": {
+              "$ref": "#/$defs/Platform"
+            }
+          },
+          "required": [
+            "memory_gb",
+            "platform"
+          ],
+          "type": "object",
+          "x-contract": "diagnostic"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "priority": {
+          "enum": [
+            "",
+            "production",
+            "deadline",
+            "experiment"
+          ],
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "program": {
+          "$ref": "#/$defs/Program",
+          "x-contract": "diagnostic"
+        },
+        "project": {
+          "minLength": 1,
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "resumable": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "run": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "docker": {
+              "type": "boolean"
+            },
+            "docker_memory_gb": {
+              "type": "number"
+            },
+            "docker_memory_swap": {
+              "type": "number"
+            },
+            "docker_network": {
+              "type": "string"
+            },
+            "docker_sidecars": {
+              "items": {
+                "$ref": "#/$defs/DockerSidecar"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "workdir": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object",
+          "x-contract": "diagnostic"
+        },
+        "size_hint": {
+          "$ref": "#/$defs/SizeHint",
+          "x-contract": "diagnostic"
+        },
+        "start_by": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "submission_key": {
+          "description": "Exact project-scoped submission identity echo. Omitted for an unkeyed job.",
+          "minLength": 1,
+          "type": "string",
+          "x-contract": "stable"
+        }
+      },
+      "required": [
+        "name",
+        "project",
+        "priority",
+        "run",
+        "needs",
+        "resumable"
+      ],
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/Job",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty. Additional diagnostics may grow.",
+  "title": "Mycelium Job reply v1"
+}

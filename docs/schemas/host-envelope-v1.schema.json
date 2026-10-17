@@ -231,6 +231,44 @@
     },
     "memory_allowance_bytes": {
       "$ref": "#/$defs/nullableCount"
+    },
+    "last_close": {
+      "description": "Previous accepted close; replaced by close, updated by settlement, unchanged by open/status. Top-level host_settlement equals this settlement, or unknown when null.",
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation_id": {
+              "$ref": "#/$defs/identity"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "settlement": {
+              "enum": [
+                "confirmed",
+                "pending",
+                "unknown"
+              ]
+            },
+            "settled_at": {
+              "$ref": "#/$defs/nullableUtcTime"
+            }
+          },
+          "required": [
+            "operation_id",
+            "revision",
+            "settlement",
+            "settled_at"
+          ],
+          "additionalProperties": false
+        }
+      ]
     }
   },
   "required": [
@@ -244,6 +282,7 @@
     "observed",
     "local_exclusion",
     "host_settlement",
+    "last_close",
     "queue_observed_revision",
     "counts",
     "units",
@@ -295,6 +334,139 @@
         },
         "required": [
           "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "accepted_revision": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "last_close": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "last_close"
+        ]
+      },
+      "then": {
+        "properties": {
+          "host_settlement": {
+            "const": "unknown"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "last_close": {
+            "type": "object",
+            "properties": {
+              "settlement": {
+                "const": "confirmed"
+              }
+            },
+            "required": [
+              "settlement"
+            ]
+          }
+        },
+        "required": [
+          "last_close"
+        ]
+      },
+      "then": {
+        "properties": {
+          "host_settlement": {
+            "const": "confirmed"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "last_close": {
+            "type": "object",
+            "properties": {
+              "settlement": {
+                "const": "pending"
+              }
+            },
+            "required": [
+              "settlement"
+            ]
+          }
+        },
+        "required": [
+          "last_close"
+        ]
+      },
+      "then": {
+        "properties": {
+          "host_settlement": {
+            "const": "pending"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "last_close": {
+            "type": "object",
+            "properties": {
+              "settlement": {
+                "const": "unknown"
+              }
+            },
+            "required": [
+              "settlement"
+            ]
+          }
+        },
+        "required": [
+          "last_close"
+        ]
+      },
+      "then": {
+        "properties": {
+          "host_settlement": {
+            "const": "unknown"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "errors": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "component": {
+                  "const": "host_intent"
+                },
+                "code": {
+                  "const": "revision_mismatch"
+                }
+              },
+              "required": [
+                "component",
+                "code"
+              ]
+            }
+          }
+        },
+        "required": [
+          "errors"
         ]
       },
       "then": {

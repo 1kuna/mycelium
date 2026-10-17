@@ -1,0 +1,9 @@
+{
+  "job_id": "example-job-id",
+  "project": "example",
+  "submission_key": "example-key",
+  "state": "cancelled",
+  "will_not_run": true,
+  "release": "not_applicable",
+  "acknowledged_at": "2026-10-17T12:00:00Z"
+}

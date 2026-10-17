@@ -53,5 +53,6 @@
     "evidence_unavailable"
   ],
   "queue_reachable": null,
-  "memory_allowance_bytes": null
+  "memory_allowance_bytes": null,
+  "last_close": null
 }

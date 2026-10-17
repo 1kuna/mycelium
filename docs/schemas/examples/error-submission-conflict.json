@@ -1,0 +1,4 @@
+{
+  "code": "submission_key_conflict",
+  "error": "submission key is already bound to a different job spec"
+}

@@ -1,0 +1,11 @@
+{
+  "acknowledged_at": null,
+  "code": "job_unknown",
+  "error": "job is unknown",
+  "job_id": "example-unknown-id",
+  "project": null,
+  "release": null,
+  "state": "unknown",
+  "submission_key": null,
+  "will_not_run": null
+}
