@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Mycelium HTTP error body v1",
-  "description": "Wire bodies emitted by respond from HTTPError. HTTP status is not a JSON property. Messages are sanitized diagnostics; code is stable.",
+  "description": "Wire bodies emitted by respond from HTTPError. HTTP status is not a JSON property. Messages are sanitized diagnostics; code is stable. submission_key_invalid is HTTP 400 for a key outside 1-128 ASCII characters from A-Z, a-z, 0-9, dot, underscore, colon and hyphen; keyed submit and cancel use the same rule.",
   "type": "object",
   "properties": {
     "error": {
@@ -12,7 +12,8 @@
       "enum": [
         "job_unknown",
         "submission_key_conflict",
-        "submission_key_expired"
+        "submission_key_expired",
+        "submission_key_invalid"
       ]
     },
     "job_id": {

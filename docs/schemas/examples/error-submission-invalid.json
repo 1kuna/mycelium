@@ -1,0 +1,4 @@
+{
+  "code": "submission_key_invalid",
+  "error": "submission key must be 1-128 characters from A-Z, a-z, 0-9, dot, underscore, colon or hyphen"
+}

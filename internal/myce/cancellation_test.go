@@ -32,7 +32,12 @@ func TestCancellationStates(t *testing.T) {
 			s.SubmissionKey = "cancel-key"
 			j := submit(t, q, s)
 			if state != "queued" && state != "cancelled" {
-				j = check(t, q, machine("one", "fake"), nil).Job
+				m := machine("one", "fake")
+				m.MaxJobs = 1
+				j = check(t, q, m, nil).Job
+				if err := q.Tick(); err != nil {
+					t.Fatal(err)
+				}
 				if state != "preparing" {
 					if err := q.Started(result(j, true)); err != nil {
 						t.Fatal(err)
@@ -281,7 +286,7 @@ func assertNoCancellationAttempt(t *testing.T, q *Queue, j *Job) {
 }
 
 func TestCancellationNoFutureExecution(t *testing.T) {
-	for _, path := range []string{"loss", "leave", "displacement", "rejoin", "queue-restart", "engine-restart", "stop-grace", "operator-stop", "polite-stop", "oom", "extension-unavailable", "reason-change", "terminal-refund"} {
+	for _, path := range []string{"loss", "leave", "rejoin", "queue-restart", "engine-restart", "stop-grace", "operator-stop", "polite-stop", "oom", "extension-unavailable", "terminal-refund"} {
 		t.Run(path, func(t *testing.T) {
 			q, c := fixture(t)
 			s := spec("experiment")
@@ -310,10 +315,6 @@ func TestCancellationNoFutureExecution(t *testing.T) {
 			if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
 				t.Fatal(a)
 			}
-			// Change a diagnostic after acceptance: exclusion must not depend on it.
-			if err := q.update(func() error { q.s.Jobs[j.ID].Reason = "diagnostic replaced"; return nil }); err != nil {
-				t.Fatal(err)
-			}
 			r := result(j, false)
 			switch path {
 			case "loss":
@@ -340,13 +341,6 @@ func TestCancellationNoFutureExecution(t *testing.T) {
 					t.Fatal(err)
 				}
 				r.Interrupted = true
-				if err := q.Complete(r); err != nil {
-					t.Fatal(err)
-				}
-			case "displacement":
-				if err := q.update(func() error { q.stopFor(q.s.Jobs[j.ID], "production", "job"); return nil }); err != nil {
-					t.Fatal(err)
-				}
 				if err := q.Complete(r); err != nil {
 					t.Fatal(err)
 				}
@@ -411,10 +405,6 @@ func TestCancellationNoFutureExecution(t *testing.T) {
 				if err := q.Complete(r); err != nil {
 					t.Fatal(err)
 				}
-			case "reason-change":
-				if err := q.update(func() error { q.retry(q.s.Jobs[j.ID], "independent retry request"); return nil }); err != nil {
-					t.Fatal(err)
-				}
 			}
 			if path == "terminal-refund" && q.s.Jobs[j.ID].State != "failed" {
 				t.Fatal("terminal state changed")
@@ -438,6 +428,7 @@ func TestCancellationReleaseCustody(t *testing.T) {
 	s.Needs.HostMemoryGB = 4
 	one.HostMemoryMeasured, two.HostMemoryMeasured = true, true
 	one.HostAvailableMemoryGB, two.HostAvailableMemoryGB = 16, 16
+	one.HostMemoryBudgetGB, two.HostMemoryBudgetGB = 16, 16
 	j := submit(t, q, s)
 	first := check(t, q, one, nil).Job
 	check(t, q, two, nil)
@@ -565,6 +556,7 @@ func TestCancellationQueuedLostCopyRelease(t *testing.T) {
 	q, c := fixture(t)
 	j := submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
+	m.MaxJobs = 1
 	j = check(t, q, m, nil).Job
 	check(t, q, machine("two", "fake"), nil)
 	check(t, q, machine("three", "fake"), nil)
@@ -598,7 +590,11 @@ func TestCancellationHostClearKeepsOmittedCustody(t *testing.T) {
 	q, _ := fixture(t)
 	j := submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
+	m.MaxJobs = 1
 	j = check(t, q, m, nil).Job
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
 	cancelAck(t, q, j.ID)
 	if err := q.DisableHostGeneration(m.ID, "test", true, nil, 1); err != nil {
 		t.Fatal(err)

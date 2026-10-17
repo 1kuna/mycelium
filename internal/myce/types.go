@@ -212,7 +212,8 @@ type Copy struct {
 	Progress    int64               `json:"progress"`
 
 	// Exact cleanup evidence, retained even after another attempt is assigned.
-	ReleaseConfirmed bool `json:"release_confirmed,omitempty"`
+	ReleaseConfirmed bool   `json:"release_confirmed,omitempty"`
+	ReleaseReason    string `json:"release_reason,omitempty"`
 }
 
 type Job struct {

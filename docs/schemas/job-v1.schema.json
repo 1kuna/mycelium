@@ -23,6 +23,9 @@
         "release_confirmed": {
           "type": "boolean"
         },
+        "release_reason": {
+          "type": "string"
+        },
         "session": {
           "type": "string"
         }
@@ -406,7 +409,7 @@
         "cancelled_at": {
           "format": "date-time",
           "type": "string",
-          "x-contract": "diagnostic"
+          "x-contract": "stable"
         },
         "checkpoint": {
           "type": "string",
@@ -887,7 +890,9 @@
         },
         "submission_key": {
           "description": "Exact project-scoped submission identity echo. Omitted for an unkeyed job.",
+          "maxLength": 128,
           "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]{1,128}$",
           "type": "string",
           "x-contract": "stable"
         }

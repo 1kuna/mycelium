@@ -89,6 +89,9 @@ func (q *Queue) DisableHostGeneration(host, reason string, cleared bool, executi
 								j.Losses = max(0, j.Losses-1)
 								c.LossCharged = false
 							}
+							if matched {
+								q.confirmCopyRelease(Result{Execution: Execution{ID: j.ID, Attempt: c.Attempt}, Machine: c.Machine, Session: c.Session})
+							}
 						}
 					}
 					if j.State == "failed" && j.Losses < 3 && strings.HasPrefix(j.Reason, "failed after 3 infrastructure losses:") {
@@ -117,6 +120,7 @@ func (q *Queue) DisableHostGeneration(host, reason string, cleared bool, executi
 								continue
 							}
 						}
+						q.confirmCopyRelease(Result{Execution: Execution{ID: r.Job, Attempt: r.Attempt}, Machine: r.Machine, Session: r.Session})
 						delete(q.s.HostReleases, key)
 					}
 				}
