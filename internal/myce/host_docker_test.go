@@ -8,13 +8,16 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
 func TestDisableDocker(t *testing.T) {
 	for _, mode := range []string{"term", "ignore-term", "hang", "refuse-kill", "unlabeled", "late", "no-docker", "unknown-create", "no-docker-custody", "now", "native-grace", "orphan", "hang-inspect"} {
-		t.Run(mode, func(t *testing.T) {
+		run := func(t *testing.T) {
 			w, s, clock, root := dockerFixture(t)
+			// Each fixture is a distinct daemon; stop-once state must not cross runs.
+			t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(root, "docker.sock"))
 			for name, value := range map[string]string{"created": "id1", "running": "yes", "label": "owned", "mode": mode} {
 				if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0600); err != nil {
 					t.Fatal(err)
@@ -25,7 +28,7 @@ func TestDisableDocker(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			st := dockerExecution{Identity: "owned", Endpoint: "unix:///var/run/docker.sock", Container: "id1", Operation: "start"}
+			st := dockerExecution{Identity: "owned", Endpoint: os.Getenv("DOCKER_HOST"), Container: "id1", Operation: "start"}
 			if mode == "late" {
 				if err := os.Rename(filepath.Join(root, "running"), filepath.Join(root, "waiting")); err != nil {
 					t.Fatal(err)
@@ -77,8 +80,13 @@ func TestDisableDocker(t *testing.T) {
 				service = dockerGraceService{clock}
 			}
 			h := HostControl{Dir: w.HostStateDir, Service: service, Clock: clock, Docker: true, Timeout: timeout}
-			advanceDone := make(chan struct{})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			advanceDone, driverDone := make(chan struct{}), make(chan struct{})
+			exists := func(name string) bool { _, err := os.Stat(filepath.Join(root, name)); return err == nil }
 			go func() {
+				defer close(driverDone)
+				advanced := false
 				tick := time.NewTicker(5 * time.Millisecond)
 				defer tick.Stop()
 				for {
@@ -92,21 +100,40 @@ func TestDisableDocker(t *testing.T) {
 								return
 							}
 						}
-						calls, _ := os.ReadFile(filepath.Join(root, "calls"))
-						if strings.Contains(string(calls), "--signal=TERM") {
-							clock.advance(time.Second)
+						if mode == "refuse-kill" && exists("refused-kill-id1") && exists("completed-inspect-id2") {
+							// Inventory has proved both obligations; KILL has actually failed.
+							cancel()
 							return
+						}
+						if mode == "unknown-create" && exists("completed-inventory") {
+							cancel()
+							return
+						}
+						if !advanced && (exists("completed---signal=TERM-id1") || exists("refused-term-id1") || (mode == "orphan" && exists("completed-stop"))) {
+							clock.advance(time.Second)
+							advanced = true
+							if mode != "refuse-kill" {
+								return
+							}
 						}
 					}
 				}
 			}()
-			defer close(advanceDone)
+			defer func() { close(advanceDone); <-driverDone }()
 			start := time.Now()
 			grace := 30 * time.Millisecond
 			if mode == "now" {
 				grace = 0
 			}
-			r, err := h.Disable(context.Background(), "test", grace)
+			r, err := h.Disable(ctx, "test", grace)
+			await(t, func() bool {
+				unlock, err := hostOperationLock(h.Dir, "control.lock", false)
+				if err != nil {
+					return false
+				}
+				unlock()
+				return true
+			})
 			if (err != nil) != failed || r.Confirmed == failed {
 				t.Fatalf("report %+v error %v", r, err)
 			}
@@ -169,6 +196,15 @@ func TestDisableDocker(t *testing.T) {
 					}
 				}
 			}
+		}
+		t.Run(mode, func(t *testing.T) {
+			// Real hung subprocesses cannot become durably blocked in a bubble.
+			// Keep these dedicated real-I/O deadline cases on the real clock.
+			if mode == "hang" || mode == "hang-inspect" {
+				run(t)
+				return
+			}
+			synctest.Test(t, run)
 		})
 	}
 }

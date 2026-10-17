@@ -228,6 +228,11 @@ func TestDockerCLIHelper(t *testing.T) {
 			os.Exit(1)
 		}
 		if string(mode) == "refuse-kill" {
+			event := "refused-kill-"
+			if args[1] == "--signal=TERM" {
+				event = "refused-term-"
+			}
+			_ = os.WriteFile(filepath.Join(root, event+args[2]), nil, 0600)
 			fmt.Fprintln(os.Stderr, "Error response from daemon: kill refused")
 			os.Exit(1)
 		}
@@ -249,6 +254,18 @@ func TestDockerCLIHelper(t *testing.T) {
 		fmt.Fprintln(os.Stderr, "payload stderr")
 	default:
 		os.Exit(2)
+	}
+	switch args[0] {
+	case "kill":
+		_ = os.WriteFile(filepath.Join(root, "completed-"+args[1]+"-"+args[2]), nil, 0600)
+	case "stop":
+		_ = os.WriteFile(filepath.Join(root, "completed-stop"), nil, 0600)
+	case "ps":
+		_ = os.WriteFile(filepath.Join(root, "completed-inventory"), nil, 0600)
+	case "inspect":
+		for _, id := range args[1:] {
+			_ = os.WriteFile(filepath.Join(root, "completed-inspect-"+id), nil, 0600)
+		}
 	}
 	os.Exit(0)
 }

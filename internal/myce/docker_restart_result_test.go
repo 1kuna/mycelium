@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -257,9 +258,11 @@ func TestDockerRestartMainFailures(t *testing.T) {
 }
 
 // Case 5: each failed proof retains custody; retries never renew grace.
+// Fake timers keep subprocess scheduling latency out of CLI/recovery budgets;
+// real CLI completion and the injected grace clock still drive every assertion.
 func TestDockerRestartProofFailures(t *testing.T) {
 	for _, kind := range []string{"main-save", "evidence-save", "logs", "inspect", "network", "release-save", "pending-start"} {
-		t.Run(kind, func(t *testing.T) {
+		run := func(t *testing.T) {
 			w, s, d, c, root := restartResultFixture(t)
 			if kind == "main-save" {
 				d.persist = func(dockerExecution) error { return errors.New("disk unavailable") }
@@ -337,7 +340,8 @@ func TestDockerRestartProofFailures(t *testing.T) {
 			} else if !r.Success || r.Interrupted {
 				t.Fatalf("retry lost outcome: %+v", r)
 			}
-		})
+		}
+		t.Run(kind, func(t *testing.T) { synctest.Test(t, run) })
 	}
 }
 

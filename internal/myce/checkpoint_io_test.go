@@ -5,10 +5,17 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
+// synctest drives the existing I/O budget and simulated metadata delays with
+// fake timers; callbacks and real filesystem work must finish before time moves.
 func TestWorkerPreparationToleratesSlowMetadata(t *testing.T) {
+	synctest.Test(t, testWorkerPreparationToleratesSlowMetadata)
+}
+
+func testWorkerPreparationToleratesSlowMetadata(t *testing.T) {
 	w := recoveryWorker(t)
 	s, err := w.openStore()
 	if err != nil {
@@ -41,6 +48,10 @@ func TestWorkerPreparationToleratesSlowMetadata(t *testing.T) {
 }
 
 func TestWorkerPreparationTimeoutRetainsSingleCall(t *testing.T) {
+	synctest.Test(t, testWorkerPreparationTimeoutRetainsSingleCall)
+}
+
+func testWorkerPreparationTimeoutRetainsSingleCall(t *testing.T) {
 	w := recoveryWorker(t)
 	s, err := w.openStore()
 	if err != nil {
@@ -78,6 +89,10 @@ func TestWorkerPreparationTimeoutRetainsSingleCall(t *testing.T) {
 }
 
 func TestWorkerNASProbeToleratesSlowMetadata(t *testing.T) {
+	synctest.Test(t, testWorkerNASProbeToleratesSlowMetadata)
+}
+
+func testWorkerNASProbeToleratesSlowMetadata(t *testing.T) {
 	w := recoveryWorker(t)
 	s, err := w.openStore()
 	if err != nil {
@@ -96,6 +111,10 @@ func TestWorkerNASProbeToleratesSlowMetadata(t *testing.T) {
 }
 
 func TestWorkerNASProbeBlockedAndRecovery(t *testing.T) {
+	synctest.Test(t, testWorkerNASProbeBlockedAndRecovery)
+}
+
+func testWorkerNASProbeBlockedAndRecovery(t *testing.T) {
 	w := recoveryWorker(t)
 	s, err := w.openStore()
 	if err != nil {

@@ -200,9 +200,10 @@ func TestProductionStartDeadlineWorkerPreparationCannotLaunchLate(t *testing.T) 
 	if assigned == nil {
 		t.Fatal("not assigned")
 	}
+	prepared := t.TempDir()
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	w := Worker{StateDir: t.TempDir(), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}, checkpointPrepare: func(Job) (string, error) { c.Advance(ProductionStartTimeout); return t.TempDir(), nil }}
+	w := Worker{StateDir: t.TempDir(), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}, checkpointPrepare: func(Job) (string, error) { c.Advance(ProductionStartTimeout); return prepared, nil }}
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
