@@ -120,7 +120,7 @@ type StartPermit struct {
 func (q *Queue) PermitStart(r Result) (StartPermit, error) {
 	var permit StartPermit
 	var rejected error
-	err := q.update(func() error {
+	err := q.updateMachine(r.Machine, func() error {
 		q.maintainStartDeadlines()
 		j, e := q.current(r)
 		if e != nil {

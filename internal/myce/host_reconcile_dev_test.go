@@ -67,7 +67,7 @@ func TestHostReconcileDevQueueOutageCompletesBeforeAdmission(t *testing.T) {
 		t.Fatal(report, err)
 	}
 	before, err := ReadHostIntent(hostDir)
-	if err != nil || before.HostSettlement() != "pending" || len(before.Pending) != 1 {
+	if err != nil || before.HostSettlement() != "pending" || before.LocalExclusion == nil || len(before.LocalExclusion.Released) != 1 {
 		t.Fatal(before, err)
 	}
 	restarted, err := Open(database, checkpoints, RealClock{})

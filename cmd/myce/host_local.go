@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"os"
 	"time"
 
 	"mycelium/internal/myce"
@@ -16,7 +17,15 @@ import (
 // S05 wires mandatory reconciliation and settlement here so in-process and
 // re-executed commands use exactly the same handler construction.
 func hostMutationExecutor(probe myce.MachineProbe) myce.HostMutationExecutor {
-	return myce.HostMutationExecutor{Probe: probe}
+	return myce.HostMutationExecutor{Probe: probe, Reconcile: func(ctx context.Context, v myce.HostInvocation) error {
+		return myce.ReconcileHostLocal(ctx, v.StateDir, myce.RealClock{}, func(endpoint string) (myce.Client, error) {
+			workers, err := myce.HostWorkers(v.StateDir)
+			if err != nil {
+				return myce.Client{}, err
+			}
+			return myce.HostQueueClient(workers, os.Getenv("MYCE_TOKEN"))(endpoint)
+		})
+	}}
 }
 
 func hostLocalCommand(args []string, probe myce.MachineProbe, out io.Writer) error {

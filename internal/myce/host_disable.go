@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -83,7 +84,7 @@ func (w *Worker) registerHost(s *workerStore) error {
 	if err != nil {
 		return err
 	}
-	r := HostWorker{Config: w.ServiceConfig, Unit: w.Unit, State: state, Environments: env, Host: w.Machine.HostID, Name: w.Machine.ID, Queue: w.Client.URL, Command: w.ResumeCommand}
+	r := HostWorker{Session: s.state.Session, Config: w.ServiceConfig, Unit: w.Unit, State: state, Environments: env, Host: w.Machine.HostID, Name: w.Machine.ID, Queue: w.Client.URL, Command: w.ResumeCommand}
 	if w.SuperviseProcess {
 		r.PID = os.Getpid()
 		r.Birth, err = processBirth(r.PID)
@@ -112,6 +113,7 @@ type HostControl struct {
 	Expected          HostRevision  // Open only.
 	CloseExpected     *HostRevision // Explicit close CAS; nil always accepts close.
 	Settled           func(HostIntent) error
+	accepted          HostRevision
 	Timeout           time.Duration
 	StopSecondary     func(context.Context) error
 	ConfirmContainers func(context.Context) error
@@ -154,7 +156,7 @@ func (h *HostControl) defaults() error {
 		if h.ctx != nil && h.ctx.Err() != nil {
 			return h.ctx.Err()
 		}
-		return originalSignal(st, sig)
+		return h.closedAction(func() error { return originalSignal(st, sig) })
 	}
 	if h.Processes.Pause == nil {
 		h.Processes.Pause = func(d time.Duration) { t := time.NewTimer(d); defer t.Stop(); <-t.C }
@@ -188,7 +190,9 @@ func (h HostControl) workers() ([]HostWorker, error) {
 			if e = json.Unmarshal(b, &st); e != nil {
 				return nil, e
 			}
-			r.Session = st.Session
+			if r.Session == "" {
+				r.Session = st.Session
+			}
 			if st.Job != nil {
 				r.Executions = []Result{{Machine: r.Name, Session: st.Session, Execution: Execution{ID: st.Job.ID, Attempt: st.Job.Attempt}}}
 			}
@@ -244,15 +248,36 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 	r.HostRevision = intent.HostRevision
 	unlock, err := hostOperationLock(h.Dir, "reconcile.lock", false)
 	if err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			boot, _ := HostBootID()
+			r.Confirmed = localExclusionConfirmed(intent, boot)
+			return r, nil
+		}
 		return r, err
 	}
 	defer unlock()
+	current, e := ReadHostIntent(h.Dir)
+	if e != nil {
+		return r, e
+	}
+	if current.HostRevision != intent.HostRevision || current.Desired != "closed" {
+		return r, ErrHostRevision
+	}
+	h.accepted = intent.HostRevision
+	boot, e := HostBootID()
+	if e != nil {
+		return r, e
+	}
+	if localExclusionConfirmed(current, boot) {
+		r.Confirmed = true
+		return r, nil
+	}
 	// Persist both failed and successful exclusion attempts for this revision.
 	// Re-read after Stop: a worker can save a result or a new attempt during stop.
 	var initial []HostObligation
 	defer func() {
 		workers, e := h.workers()
-		final, _, custodyErr := hostCustody(workers)
+		final, _, holds, custodyErr := hostCustody(workers)
 		boot, bootErr := HostBootID()
 		evidenceErrors := append([]string(nil), r.Unconfirmed...)
 		if retErr != nil {
@@ -268,8 +293,20 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 		r.Unconfirmed = evidenceErrors
 		released := mergeObligations(initial, final)
 		saveErr := mutateHostIntent(h.Dir, intent.HostRevision, func(s *HostIntent) error {
-			s.Pending = mergeObligations(s.Pending, released)
-			s.LocalExclusion = &HostLocalExclusion{HostObservation: HostObservation{HostRevision: intent.HostRevision, Boot: boot, State: "closed", At: h.Clock.Now()}, Confirmed: r.Confirmed, Errors: evidenceErrors, Released: released}
+			for _, hold := range holds {
+				if !slices.Contains(s.Holds, hold) {
+					s.Holds = append(s.Holds, hold)
+				}
+			}
+			var sessions []HostSession
+			if r.Confirmed {
+				for _, w := range workers {
+					if w.Host == intent.Host && w.Name != "" && w.Session != "" {
+						sessions = append(sessions, HostSession{Machine: w.Name, Session: w.Session})
+					}
+				}
+			}
+			s.LocalExclusion = &HostLocalExclusion{HostObservation: HostObservation{HostRevision: intent.HostRevision, Boot: boot, State: "closed", At: h.Clock.Now()}, Confirmed: r.Confirmed, Errors: evidenceErrors, Released: released, Sessions: sessions}
 			if s.LastClose == nil {
 				s.LastClose = &HostClose{HostRevision: intent.HostRevision, Settlement: "pending"}
 			}
@@ -317,7 +354,7 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 	workers, err := h.workers()
 	if err == nil {
 		var custodyErr error
-		initial, _, custodyErr = hostCustody(workers)
+		initial, _, _, custodyErr = hostCustody(workers)
 		if custodyErr != nil {
 			r.Unconfirmed = append(r.Unconfirmed, "initial custody unreadable: "+custodyErr.Error())
 		}
@@ -344,7 +381,7 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 			h.dockerProgress.unit(unit, r.Units[unit])
 		}
 		for unit, service := range h.Services {
-			if e := service.Stop(ctx, max(0, intent.StopDeadline.Sub(h.Clock.Now()))); e != nil {
+			if e := h.closedAction(func() error { return service.Stop(ctx, max(0, intent.StopDeadline.Sub(h.Clock.Now()))) }); e != nil {
 				r.Units[unit] = "unconfirmed: " + e.Error()
 				h.dockerProgress.unit(unit, r.Units[unit])
 				r.Unconfirmed = append(r.Unconfirmed, unit+": "+e.Error())
@@ -482,19 +519,19 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 		}
 	}
 	if len(h.Services) == 0 && h.StopSecondary != nil {
-		if e := h.StopSecondary(ctx); e != nil {
+		if e := h.closedAction(func() error { return h.StopSecondary(ctx) }); e != nil {
 			r.Unconfirmed = append(r.Unconfirmed, e.Error())
 		}
 	}
 	// Docker cleanup shares the native cleanup deadline and must precede the receipt.
 	if h.Docker {
-		if e := h.confirmDocker(ctx, workers, *intent.StopDeadline); e != nil {
+		if e := h.closedAction(func() error { return h.confirmDocker(ctx, workers, *intent.StopDeadline) }); e != nil {
 			r.Unconfirmed = append(r.Unconfirmed, e.Error())
 		}
 		r.Docker, _ = h.dockerProgress.report(nil)
 	}
 	if h.ConfirmContainers != nil {
-		if e := h.ConfirmContainers(ctx); e != nil {
+		if e := h.closedAction(func() error { return h.ConfirmContainers(ctx) }); e != nil {
 			r.Unconfirmed = append(r.Unconfirmed, "Docker containers: "+e.Error())
 		}
 	}
@@ -697,7 +734,12 @@ func (h HostControl) Enable(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, err := changeHostIntent(h.Dir, h.Clock, hostIntentChange{Desired: "open", Expected: h.Expected, Settled: h.Settled})
+	unlock, err := HostOpenReconcileLock(h.Dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	_, err = changeHostIntent(h.Dir, h.Clock, hostIntentChange{Desired: "open", Expected: h.Expected, Settled: h.Settled})
 	return err
 }
 
@@ -882,3 +924,47 @@ func hostOperationLock(dir, name string, wait bool) (func(), error) {
 	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() }, nil
 }
 func (h HostControl) contextDone() bool { return h.ctx != nil && h.ctx.Err() != nil }
+
+// S08 open uses the same exclusion lock as cleanup and Docker-hold clearance.
+func HostOpenReconcileLock(dir string) (func(), error) {
+	return hostOperationLock(dir, "reconcile.lock", true)
+}
+func (h HostControl) closedAction(fn func() error) error {
+	if h.accepted.Revision == 0 {
+		return fn()
+	}
+	unlock, err := hostOperationLock(h.Dir, "intake.lock", true)
+	if err != nil {
+		return err
+	}
+	s, err := ReadHostIntent(h.Dir)
+	unlock()
+	if err != nil {
+		return err
+	}
+	if s.HostRevision != h.accepted || s.Desired != "closed" {
+		return ErrHostRevision
+	}
+	// Open holds reconcile.lock, so discovery/stop cannot straddle an accepted open.
+	// Do not hold intake.lock across systemctl, dockerd or process waits: repeated
+	// close must still return the accepted revision while cleanup is in progress.
+	return fn()
+}
+func hostOperationLockContext(ctx context.Context, dir, name string) (func(), error) {
+	for {
+		unlock, err := hostOperationLock(dir, name, false)
+		if err == nil {
+			return unlock, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			return nil, err
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}

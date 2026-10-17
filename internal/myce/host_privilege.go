@@ -312,9 +312,11 @@ type HostMutation struct {
 	CloseExpected *HostRevision `json:"close_expected,omitempty"`
 }
 type HostMutationResult struct {
-	StateDir string `json:"state_dir,omitempty"`
-	Desired  string `json:"desired,omitempty"`
-	Partial  bool   `json:"partial"`
+	Code     string   `json:"code,omitempty"`
+	Errors   []string `json:"errors,omitempty"`
+	StateDir string   `json:"state_dir,omitempty"`
+	Desired  string   `json:"desired,omitempty"`
+	Partial  bool     `json:"partial"`
 	HostRevision
 	Stopped int `json:"stopped"`
 	// CleanupConfirmed is not the full local-exclusion PASS (S07).
@@ -516,7 +518,7 @@ func executeResolvedHost(ctx context.Context, v HostInvocation, m HostMutation, 
 		m.CloseExpected = &expected
 	}
 	if m.Operation == "resolve" || m.Operation == "status" {
-		return HostMutationResult{HostRevision: s.HostRevision, StateDir: v.StateDir, Desired: s.Desired}, nil
+		return HostMutationResult{HostRevision: s.HostRevision, StateDir: v.StateDir, Desired: s.Desired, Code: hostStatusCode(s), Errors: s.Errors}, nil
 	}
 	if handle == nil {
 		return zero, ErrHostChild

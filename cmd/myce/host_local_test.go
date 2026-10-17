@@ -15,6 +15,62 @@ import (
 	"mycelium/internal/myce"
 )
 
+func TestHostLocalReconcileUsesWorkerExecutor(t *testing.T) {
+	r, account, config := localIdentityFixture(t)
+	config.Service = filepath.Join(account.Home, "myce-worker.service")
+	b, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(config.Config, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	readConfig, validatePath := r.ReadConfig, r.ValidatePath
+	r.ReadConfig = func(string) (myce.ServiceConfig, error) {
+		t.Fatal("root read worker config")
+		return myce.ServiceConfig{}, nil
+	}
+	r.ValidatePath = func(string, uint32, bool) error { t.Fatal("root inspected worker files"); return nil }
+	insideChild := false
+	stops := 0
+	probe := myce.MachineProbe{OS: "linux", Command: func(_ context.Context, command string, args ...string) ([]byte, error) {
+		if !insideChild {
+			t.Fatal("root ran mutation or worker discovery")
+		}
+		if command != "systemctl" {
+			t.Fatal(command)
+		}
+		for _, arg := range args {
+			if arg == "stop" {
+				stops++
+			}
+		}
+		return []byte("LoadState=loaded\nActiveState=inactive\nControlGroup=\nKillMode=control-group\nSendSIGKILL=yes\n"), nil
+	}}
+	var out bytes.Buffer
+	err = hostLocalCommandWithIdentity([]string{"reconcile", "--local", "--worker-user", account.Name, "--config", config.Config}, probe, &out, r, func(ctx context.Context, launch myce.HostChildLaunch) ([]byte, error) {
+		worker := r
+		worker.EUID = int(account.UID)
+		worker.ReadConfig, worker.ValidatePath = readConfig, validatePath
+		b, err := json.Marshal(launch.Request)
+		if err != nil {
+			return nil, err
+		}
+		var response bytes.Buffer
+		insideChild = true
+		defer func() { insideChild = false }()
+		err = myce.ServeHostWorkerChild(ctx, bytes.NewReader(b), &response, worker, hostMutationExecutor(probe).Execute)
+		return response.Bytes(), err
+	})
+	if err != nil || stops != 1 {
+		t.Fatal(err, stops, out.String())
+	}
+	state, err := myce.ReadHostIntent(config.HostStateDir)
+	if err != nil || state.LocalExclusion == nil || !state.LocalExclusion.Confirmed {
+		t.Fatal(state, err)
+	}
+}
+
 func localIdentityFixture(t *testing.T) (myce.HostIdentityResolver, myce.WorkerAccount, myce.ServiceConfig) {
 	t.Helper()
 	home, e := filepath.EvalSymlinks(t.TempDir())

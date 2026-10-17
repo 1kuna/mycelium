@@ -62,8 +62,15 @@ type HostLocalExclusion struct {
 	Confirmed bool             `json:"confirmed"`
 	Errors    []string         `json:"errors"`
 	Released  []HostObligation `json:"released"`
+	Sessions  []HostSession    `json:"sessions"`
+}
+type HostSession struct {
+	Machine string `json:"machine"`
+	Session string `json:"session"`
 }
 type HostIntent struct {
+	Errors         []string                       `json:"errors,omitempty"`
+	QueueObserved  map[string]HostRevision        `json:"queue_observed,omitempty"`
 	LastClose      *HostClose                     `json:"last_close"`
 	LocalExclusion *HostLocalExclusion            `json:"local_exclusion"`
 	QueueAcks      map[string]HostAcknowledgement `json:"queue_acknowledgements"`
@@ -320,13 +327,17 @@ func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, 
 			return zero, err
 		}
 	}
-	if s.Desired == c.Desired {
+	highest := s.Revision
+	for _, observed := range s.QueueObserved {
+		highest = max(highest, observed.Revision)
+	}
+	if s.Desired == c.Desired && !(c.Desired == "closed" && highest > s.Revision) {
 		return s, nil
 	} // Repeated close never renews stop grace.
-	if s.Revision == ^uint64(0) {
+	if highest == ^uint64(0) {
 		return zero, errors.New("host revision exhausted")
 	}
-	s.HostRevision = HostRevision{Revision: s.Revision + 1, Operation: ID()}
+	s.HostRevision = HostRevision{Revision: highest + 1, Operation: ID()}
 	s.Desired, s.Reason, s.AcceptedAt, s.Observed = c.Desired, c.Reason, clock.Now(), nil
 	if c.Desired == "closed" {
 		deadline := s.AcceptedAt.Add(c.Grace)
@@ -335,6 +346,7 @@ func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, 
 		s.LastClose = &HostClose{HostRevision: s.HostRevision, Settlement: "pending"}
 		s.LocalExclusion = nil
 		s.QueueAcks = nil
+		s.Errors = nil
 	} else {
 		// Previous-close history is immutable across open. Only reconciled custody
 		// can be cleared; an unresolved hold cannot pass previousCloseSettled.

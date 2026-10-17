@@ -179,6 +179,9 @@ func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
 		}
 	}
 
+	if hostID(m) == q.localHostID && q.localHostErr != nil {
+		return false
+	}
 	if availabilityBlocked(m) || (q.machineLimitReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))) || q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || m.Disabled != "" || q.hostClosedReason(hostID(m)) != "" || !q.jobAllowsMachine(j, m.ID) {
 		return false
 	}

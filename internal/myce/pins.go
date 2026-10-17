@@ -39,7 +39,7 @@ func (p ModelPin) active(now time.Time) bool {
 	return hm >= p.Start && hm < p.End
 }
 func (q *Queue) Pin(p ModelPin) error {
-	return q.update(func() error {
+	return q.updateScoped(nil, true, func() error {
 		model, ok := q.model(p.Model)
 		if !ok {
 			return errors.New("unknown model")

@@ -185,7 +185,7 @@ func (a API) Handler() http.Handler {
 			return
 		}
 		if c.Host != r.PathValue("id") {
-			respond(w, nil, errors.New("host identity mismatch"))
+			respond(w, nil, &hostReconcileError{cause: errors.New("host identity mismatch"), code: "host_reconcile_rejected"})
 			return
 		}
 		v, err := a.Queue.ReconcileHost(c)
@@ -245,6 +245,11 @@ func respond(w http.ResponseWriter, v any, err error) {
 			status = http.StatusConflict
 		}
 		body := map[string]any{"error": "request failed"}
+		var rejected *hostReconcileError
+		if errors.As(err, &rejected) {
+			status = http.StatusConflict
+			body = map[string]any{"error": "host reconciliation rejected; retry", "code": rejected.code, "queue_revision": rejected.revision}
+		}
 		var apiError *HTTPError
 		if errors.As(err, &apiError) && (apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "submission_key_invalid" || apiError.Code == "job_unknown") {
 			status = apiError.Status
@@ -312,11 +317,12 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	if res.StatusCode >= 300 {
 		e := &HTTPError{Status: res.StatusCode, Message: "request failed"}
 		var body struct {
-			Code  string `json:"code"`
-			Error string `json:"error"`
+			QueueRevision HostRevision `json:"queue_revision"`
+			Code          string       `json:"code"`
+			Error         string       `json:"error"`
 		}
-		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown") {
-			e.Code, e.Message = body.Code, body.Error
+		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown" || body.Code == "host_reconcile_rejected" || body.Code == "host_revision_behind_queue") {
+			e.Code, e.Message, e.QueueRevision = body.Code, body.Error, body.QueueRevision
 		}
 		return e
 	}
@@ -328,10 +334,11 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 }
 
 type HTTPError struct {
-	JobID   string // Only job_unknown carries the requested cancellation identity.
-	Code    string
-	Status  int
-	Message string
+	QueueRevision HostRevision
+	JobID         string // Only job_unknown carries the requested cancellation identity.
+	Code          string
+	Status        int
+	Message       string
 }
 
 func (e *HTTPError) Error() string {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func closeQueueHost(q *Queue, host, reason string, results []Result) error {
 	}
 	request := HostExchange{Host: host, HostRevision: revision, Desired: "closed", Boot: "test-boot", Request: ID(), AcceptedAt: accepted, Reason: reason}
 	for _, r := range results {
-		request.Released = append(request.Released, HostObligation{Result: r})
+		request.Sessions = append(request.Sessions, HostSession{Machine: r.Machine, Session: r.Session})
 	}
 	_, err := q.ReconcileHost(request)
 	return err
@@ -53,69 +54,78 @@ func closeExchange(host string, clock Clock) HostExchange {
 	return HostExchange{Host: host, HostRevision: HostRevision{Revision: 1, Operation: ID()}, Desired: "closed", Boot: "boot", Request: ID(), AcceptedAt: clock.Now()}
 }
 func TestHostReconcileExactEvidenceAndCancellation(t *testing.T) {
-	for _, mode := range []string{"empty", "session", "attempt", "machine", "stale", "partial", "cancel"} {
+	for _, mode := range []string{"empty", "partial", "session", "machine", "stale", "cancel"} {
 		t.Run(mode, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("one", "fake")
 			m.HostID = "host"
-			m.MaxJobs = 1
+			m.MaxJobs = 2
 			check(t, q, m, nil)
+			other := machine("two", "fake")
+			other.HostID = "host"
+			other.MaxJobs = 2
+			check(t, q, other, nil)
+			foreign := machine("elsewhere", "fake")
+			foreign.HostID = "foreign"
+			check(t, q, foreign, nil)
 			s := spec("experiment")
-			s.Run = dockerJob().Spec.Run
+			// Small native copies fit two sessions in the shared host budget.
+			s.Needs.MemoryGB = 1
 			j := submit(t, q, s)
 			j = check(t, q, m, nil).Job
+			if err := q.Started(result(j, false)); err != nil {
+				t.Fatal(err)
+			}
+			second := submit(t, q, s)
+			secondID := second.ID
+			second = check(t, q, other, nil).Job
+			if second == nil || second.ID != secondID {
+				t.Fatal("partial fixture did not assign second job", second, job(t, q, secondID))
+			}
 			if mode == "cancel" {
 				cancelAck(t, q, j.ID)
 			}
 			request := closeExchange("host", clock)
-			ack, err := q.ReconcileHost(request)
-			if err != nil || len(ack.Pending) != 1 {
+			if ack, err := q.ReconcileHost(request); err != nil || len(ack.Pending) != 2 {
 				t.Fatal(ack, err)
 			}
 			clock.Advance(20 * time.Minute)
-			if err = q.Tick(); err != nil {
+			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
-			if got := job(t, q, j.ID); got.Losses != 0 {
-				t.Fatal("closed host charged a loss", got)
-			}
 			before := cloneJob(q.s.Jobs[j.ID])
-			release := HostObligation{Result: result(j, false)}
-			request.Released = []HostObligation{release}
 			switch mode {
-			case "empty":
-				request.Released = nil
-			case "partial":
-				request.Released = nil
+			case "partial", "cancel":
+				request.Sessions = []HostSession{{Machine: m.ID, Session: m.Session}}
 			case "session":
-				request.Released[0].Result.Session = "wrong"
-			case "attempt":
-				request.Released[0].Result.Attempt++
+				request.Sessions = []HostSession{{Machine: m.ID, Session: "wrong"}}
 			case "machine":
-				request.Released[0].Result.Machine = "elsewhere"
+				request.Sessions = []HostSession{{Machine: "elsewhere", Session: m.Session}}
 			case "stale":
 				request.Operation = ID()
 			}
-			ack, err = q.ReconcileHost(request)
-			if mode == "cancel" {
-				if err != nil || len(ack.Pending) != 0 {
+			ack, err := q.ReconcileHost(request)
+			switch mode {
+			case "cancel":
+				if err != nil || len(ack.Pending) != 1 || ackRelease(cancelAck(t, q, j.ID)) != "confirmed" {
 					t.Fatal(ack, err)
-				}
-				if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
-					t.Fatal("cancel stayed pending", a)
 				}
 				assertNoCancellationAttempt(t, q, j)
-				return
-			}
-			if mode == "empty" || mode == "partial" {
-				if err != nil || len(ack.Pending) != 1 {
+			case "partial":
+				if err != nil || len(ack.Pending) != 1 || ack.Pending[0].Result.ID != second.ID || job(t, q, j.ID).State != "queued" {
 					t.Fatal(ack, err)
 				}
-			} else if err == nil {
-				t.Fatal("bad identity accepted")
+			case "machine", "stale":
+				if err == nil {
+					t.Fatal("bad identity accepted")
+				}
+			default:
+				if err != nil || len(ack.Pending) != 2 || !reflect.DeepEqual(&before, q.s.Jobs[j.ID]) {
+					t.Fatal(ack, err)
+				}
 			}
-			if !reflect.DeepEqual(&before, q.s.Jobs[j.ID]) || len(q.s.HostReleases) != 1 {
-				t.Fatal("uncovered reservation changed")
+			if job(t, q, j.ID).Losses != 0 || job(t, q, second.ID).Losses != 0 {
+				t.Fatal("closed host charged loss")
 			}
 		})
 	}
@@ -144,7 +154,7 @@ func TestHostReconcilePlannedDisplacementAndLossRefund(t *testing.T) {
 					t.Fatal("fixture did not charge loss", got)
 				}
 			}
-			request.Released = []HostObligation{{Result: result(j, false)}}
+			request.Sessions = []HostSession{{Machine: j.Machine, Session: j.Session}}
 			ack, err := q.ReconcileHost(request)
 			if err != nil || len(ack.Pending) != 0 {
 				t.Fatal(ack, err)
@@ -186,7 +196,7 @@ func TestHostReconcileProductionPinnedFailsWithoutLoss(t *testing.T) {
 	if got := job(t, q, j.ID); got.Losses != 0 || got.State != "stopping" {
 		t.Fatal("closed running production consumed its loss budget", got)
 	}
-	request.Released = []HostObligation{{Result: result(j, false)}}
+	request.Sessions = []HostSession{{Machine: j.Machine, Session: j.Session}}
 	if _, err := q.ReconcileHost(request); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +216,6 @@ func TestHostReconcileEnginesPreparationsAndOldCopies(t *testing.T) {
 	check(t, q, m, nil)
 	j := submit(t, q, spec("experiment"))
 	j = check(t, q, m, nil).Job
-	old := HostObligation{Result: Result{Machine: m.ID, Session: "old", Execution: Execution{ID: j.ID, Attempt: 3}}}
 	q.s.Jobs[j.ID].Copies = append(q.s.Jobs[j.ID].Copies, Copy{Machine: m.ID, Session: "old", Attempt: 3, ReleaseReason: "awaiting_release"})
 	q.s.ModelSlots = map[string]*ModelSlot{slotKey(m.ID, "model"): {Machine: m.ID, Session: m.Session, Model: "model", Attempt: "engine-attempt", State: "unloading"}}
 	prep := HostRelease{Host: "host", Machine: m.ID, Session: m.Session, Job: "preparation", Preparation: true}
@@ -216,12 +225,12 @@ func TestHostReconcileEnginesPreparationsAndOldCopies(t *testing.T) {
 	if err != nil || len(ack.Pending) != 4 {
 		t.Fatal(ack, err)
 	}
-	request.Released = []HostObligation{{Result: result(j, false)}}
+	request.Sessions = []HostSession{{Machine: j.Machine, Session: j.Session}}
 	ack, err = q.ReconcileHost(request)
-	if err != nil || len(ack.Pending) != 3 {
-		t.Fatal("omitted engines/preparations/old copies vanished", ack, err)
+	if err != nil || len(ack.Pending) != 1 {
+		t.Fatal("registered session did not discharge engines/preparations; unregistered session must stay charged", ack, err)
 	}
-	request.Released = []HostObligation{old, {Preparation: true, Result: Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: "preparation"}}}, {Engine: &HostEngineExecution{Machine: m.ID, Session: m.Session, Model: "model", Attempt: "engine-attempt"}}}
+	request.Sessions = []HostSession{{Machine: m.ID, Session: "old"}}
 	ack, err = q.ReconcileHost(request)
 	if err != nil || len(ack.Pending) != 0 {
 		t.Fatal(ack, err)
@@ -361,7 +370,7 @@ func TestHostReconcileHTTPAndTimer(t *testing.T) {
 	}
 	config := ServiceConfig{Binary: "/binary path/myce", HostStateDir: "/state path", Role: "worker"}
 	service := config.HostReconcileServiceText()
-	if !strings.Contains(service, `host reconcile --local --host-state-dir "/state path"`) || strings.Contains(service, "MYCE_TOKEN") {
+	if !strings.Contains(service, `--state-dir "/state path"`) || strings.Contains(service, "MYCE_TOKEN") {
 		t.Fatal(service)
 	}
 	for _, path := range []string{"myce-host-reconcile.service", "myce-host-reconcile.timer"} {
@@ -389,7 +398,7 @@ func workerTestServer(handler http.Handler) *httptest.Server {
 	}))
 }
 
-func TestHostReconcileOmittedLocalCustodyAndHolds(t *testing.T) {
+func TestHostReconcileUnmatchedLocalCustodyDiagnosticAndBlockingHolds(t *testing.T) {
 	q, clock := fixture(t)
 	dir := t.TempDir()
 	testHostOpen(t, dir, clock)
@@ -411,8 +420,8 @@ func TestHostReconcileOmittedLocalCustodyAndHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 	s, _ = ReadHostIntent(dir)
-	if len(s.Pending) != 1 || s.HostSettlement() == "confirmed" {
-		t.Fatal("empty queue ack erased unacknowledged local custody", s)
+	if len(s.Pending) != 0 || s.HostSettlement() != "confirmed" || !slices.Contains(s.Holds, "diagnostic:unmatched_local_custody") {
+		t.Fatal("unmatched local evidence was not diagnostic", s)
 	}
 	if err = mutateHostIntent(dir, s.HostRevision, func(s *HostIntent) error { s.Pending = nil; s.Holds = []string{"ambiguous_execution"}; return nil }); err != nil {
 		t.Fatal(err)
@@ -448,7 +457,7 @@ func TestHostReconcileReadsFinalCustodyAfterStop(t *testing.T) {
 		t.Fatal(report, err)
 	}
 	s, err := ReadHostIntent(dir)
-	if err != nil || len(s.Pending) != 1 || s.Pending[0].Result.ID != "final-attempt" || s.Observed == nil {
+	if err != nil || s.LocalExclusion == nil || len(s.LocalExclusion.Released) != 1 || s.LocalExclusion.Released[0].Result.ID != "final-attempt" || s.Observed == nil {
 		t.Fatal("final custody omitted", s, err)
 	}
 }
