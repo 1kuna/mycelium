@@ -28,7 +28,7 @@ func TestProductionStartGateMixedVersions(t *testing.T) {
 			}))
 			defer server.Close()
 			w := recoveryWorker(t)
-			w.HostStateDir = t.TempDir()
+			w.HostStateDir = readyTestHost(t, t.TempDir())
 			w.Client = Client{URL: server.URL}
 			now := time.Now()
 			j := Job{ID: "test", Spec: spec("production")}
@@ -54,7 +54,7 @@ func TestProductionStartGateDisableInFlight(t *testing.T) {
 			s.Run.Command = []string{"/bin/sh", "-c", "echo ran > " + marker}
 			submit(t, q, s)
 			a := check(t, q, machine("b70", "xpu"), nil).Job
-			root := t.TempDir()
+			root := readyTestHost(t, t.TempDir())
 			unit, err := WorkerUnitDirectory(root, "myce-worker@gpu1.service")
 			if err != nil {
 				t.Fatal(err)
@@ -71,7 +71,7 @@ func TestProductionStartGateDisableInFlight(t *testing.T) {
 				handler.ServeHTTP(rw, r)
 				if r.URL.Path == "/api/workers/started" {
 					// The durable answer is accepted, but disable wins before it reaches the worker.
-					if e := saveWorkerJSON(flagDir, "DISABLED", map[string]any{"generation": 1, "reason": "test disable"}); e != nil {
+					if e := closeTestHost(flagDir); e != nil {
 						t.Error(e)
 					}
 				}

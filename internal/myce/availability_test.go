@@ -273,7 +273,7 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 			s.IdleSeconds = 0
 		}
 		return s
-	}, Clock: clock, Interval: time.Millisecond, Machine: machine("daily", "fake"), StateDir: t.TempDir(), HostStateDir: t.TempDir(), Client: Client{URL: server.URL, Token: "test"}}
+	}, Clock: clock, Interval: time.Millisecond, Machine: machine("daily", "fake"), StateDir: t.TempDir(), HostStateDir: readyTestHost(t, t.TempDir()), Client: Client{URL: server.URL, Token: "test"}}
 	go func() { done <- w.Run(ctx) }()
 	defer func() {
 		cancel()
@@ -415,7 +415,7 @@ func TestPoliteOwnerStopDuringBlockedCheckin(t *testing.T) {
 			s.IdleSeconds = 0
 		}
 		return s
-	}, Interval: time.Millisecond, StateDir: state, HostStateDir: t.TempDir(), Machine: machine("daily", "fake"), Client: Client{URL: server.URL, Token: "test"}}
+	}, Interval: time.Millisecond, StateDir: state, HostStateDir: readyTestHost(t, t.TempDir()), Machine: machine("daily", "fake"), Client: Client{URL: server.URL, Token: "test"}}
 	go func() { done <- worker.Run(ctx) }()
 	defer func() {
 		close(release)

@@ -88,7 +88,7 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 			if !slices.Contains(endpoints, st.Endpoint) {
 				endpoints = append(endpoints, st.Endpoint)
 			}
-			if st.Released && unitParent(h.Dir) == "" {
+			if st.Released {
 				continue
 			}
 			key := st.Endpoint + "\x00" + st.Identity
@@ -140,36 +140,13 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 			}, binary: binary, env: env, ctx: ctx, timeout: 2 * time.Second, state: dockerExecution{Endpoint: endpoint}}
 			var containers []dockerInspection
 			var e error
-			if unitParent(h.Dir) == "" {
-				containers, e = scan.containers()
-			} else {
-				for _, d := range attempts {
-					if d.state.Endpoint != endpoint {
-						continue
-					}
-					scan.state.Identity = d.state.Identity
-					objects, scanErr := scan.containers()
-					containers = append(containers, objects...)
-					e = errors.Join(e, scanErr)
-				}
-			}
+			containers, e = scan.containers()
 			if e != nil {
 				failures = append(failures, "Docker label inventory unconfirmed: "+e.Error())
 				continue
 			}
 			var networks []dockerNetworkInspection
-			if unitParent(h.Dir) == "" {
-				networks, e = scan.networks()
-			} else {
-				for _, d := range attempts {
-					if d.state.Endpoint == endpoint {
-						scan.state.Identity = d.state.Identity
-						n, err := scan.networks()
-						networks = append(networks, n...)
-						e = errors.Join(e, err)
-					}
-				}
-			}
+			networks, e = scan.networks()
 			if e != nil {
 				failures = append(failures, "Docker network inventory unconfirmed: "+e.Error())
 			}

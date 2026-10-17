@@ -101,6 +101,7 @@ func TestDisableOfflineFlagAndOwnedProcessGrace(t *testing.T) {
 		},
 		Pause: func(d time.Duration) { clock.Advance(d) },
 	}, Notify: func(context.Context, HostWorker, bool, bool, string) error { return errors.New("queue down") }}
+	ensureTestHost(t, h.Dir, h.Clock)
 	r, err := h.Disable(context.Background(), "Verso drill", 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +109,7 @@ func TestDisableOfflineFlagAndOwnedProcessGrace(t *testing.T) {
 	if live || len(signals) != 2 || signals[0] != syscall.SIGTERM || signals[1] != syscall.SIGKILL {
 		t.Fatalf("cleanup signals %v, live=%v", signals, live)
 	}
-	if r.Stopped != 1 || len(r.QueueErrors) == 0 {
+	if r.Stopped != 1 || len(r.QueueErrors) != 0 {
 		t.Fatalf("report %+v", r)
 	}
 	disabled, err := HostDisabled(root)
@@ -119,6 +120,12 @@ func TestDisableOfflineFlagAndOwnedProcessGrace(t *testing.T) {
 	if err := w.Run(context.Background()); err != nil {
 		t.Fatalf("disabled restart did not exit cleanly: %v", err)
 	}
+	current, e := ReadHostIntent(root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	h.Expected = current.HostRevision
+	h.Settled = func(HostIntent) error { return nil }
 	if err := h.Enable(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -148,56 +155,12 @@ func TestDisableNowNeverSignalsUnownedAndReportsSurvivor(t *testing.T) {
 					return nil
 				}, Pause: func(d time.Duration) { clock.Advance(d) },
 			}}
+			ensureTestHost(t, h.Dir, h.Clock)
 			r, err := h.Disable(context.Background(), "now", 0)
 			if (err != nil) != survives || (len(r.Unconfirmed) > 0) != survives {
 				t.Fatalf("cleanup result %+v %v", r, err)
 			}
 		})
-	}
-}
-
-func TestHostDisableOfflineLossIsRefundedOnEnableReceipt(t *testing.T) {
-	q, clock := fixture(t)
-	m, other := machine("b70", "fake"), machine("other", "fake")
-	m.HostID = "b70"
-	check(t, q, m, nil)
-	check(t, q, other, nil)
-	j := submit(t, q, spec("production"))
-	running := check(t, q, m, nil).Job
-	if running == nil {
-		t.Fatal("no job")
-	}
-	clock.Advance(6 * time.Second)
-	check(t, q, other, nil)
-	if got := job(t, q, j.ID); got.Losses != 1 {
-		t.Fatalf("no simulated loss: %+v", got)
-	}
-	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	defer server.Close()
-	root, state := t.TempDir(), t.TempDir()
-	saveWorkerJSON(root, "worker-test.json", HostWorker{State: state, Host: "b70", Name: m.ID, Queue: server.URL})
-	saveWorkerJSON(state, "state.json", workerState{Session: m.Session, Job: running})
-	h := HostControl{Dir: root, Clock: clock, Notify: func(context.Context, HostWorker, bool, bool, string) error { return errors.New("offline") }}
-	if _, err := h.Disable(context.Background(), "offline drill", 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.Enable(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	h.Notify = NotifyHost(Client{URL: server.URL, Token: "test"})
-	// Registry supplies queue URL, as the installed worker will on restart.
-	saveWorkerJSON(root, "worker-test.json", HostWorker{State: state, Host: "b70", Queue: server.URL})
-	if err := h.ReconcileEnable(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := job(t, q, j.ID); got.Losses != 0 || got.Machine != "other" {
-		t.Fatalf("operator drill charged loss: %+v", got)
-	}
-	next := spec("production")
-	next.AllowedMachines = []string{m.ID}
-	submit(t, q, next)
-	if reply := check(t, q, m, nil); reply.Job == nil {
-		t.Fatal("enabled host did not rejoin")
 	}
 }
 
@@ -233,6 +196,7 @@ func TestDisableRealOwnedGroupsAndSimilarUnownedProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := HostControl{Dir: root}
+	ensureTestHost(t, h.Dir, h.Clock)
 	r, err := h.Disable(context.Background(), "drill", 100*time.Millisecond)
 	requireNativeMarkerDisableReport(t, h, r, err)
 	if r.Stopped != 3 {
@@ -315,7 +279,7 @@ func TestHostDisableQueueAndPagePersistAcrossRestart(t *testing.T) {
 }
 
 func TestDisableRecordedWorkerLifetimeAndPIDReuse(t *testing.T) {
-	root := t.TempDir()
+	root := readyTestHost(t, t.TempDir())
 	cmd := exec.Command("sleep", "60")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -360,18 +324,5 @@ func TestHostDisableDoesNotRefundEarlierUnrelatedLoss(t *testing.T) {
 	}
 	if got := job(t, q, j.ID); got.Losses != 1 {
 		t.Fatal("refunded unrelated loss")
-	}
-}
-
-func TestEnableRefusesUnconfirmedDisable(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "DISABLED"), []byte("{}"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := (HostControl{Dir: root}).Enable(context.Background()); err == nil {
-		t.Fatal("enabled without cleanup proof")
-	}
-	if reason, err := HostDisabled(root); err != nil || reason == "" {
-		t.Fatal("unconfirmed flag was cleared")
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"os/exec"
@@ -31,66 +30,6 @@ func HostStateDirectory() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".local", "share", "myce"), nil
-}
-func HostDisabled(dir string) (string, error) {
-	if parent := unitParent(dir); parent != "" {
-		if reason, err := HostDisabled(parent); err != nil || reason != "" {
-			return reason, err
-		}
-	}
-	if dir == "" {
-		var err error
-		dir, err = HostStateDirectory()
-		if err != nil {
-			return "", err
-		}
-	}
-	b, err := os.ReadFile(filepath.Join(dir, "DISABLED"))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	var flag struct {
-		Reason string `json:"reason"`
-	}
-	if json.Unmarshal(b, &flag) != nil || flag.Reason == "" {
-		return "disabled by operator (flag present)", nil
-	}
-	return flag.Reason, nil
-}
-
-// launchGate covers only durable process creation, never network calls or preparation.
-func hostLaunchGate(dir string) (func(), error) {
-	if dir == "" {
-		return func() {}, nil
-	}
-	parentUnlock := func() {}
-	if parent := unitParent(dir); parent != "" {
-		var err error
-		parentUnlock, err = hostLaunchGate(parent)
-		if err != nil {
-			return nil, err
-		}
-	}
-	f, err := os.OpenFile(filepath.Join(dir, "launch.lock"), os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		parentUnlock()
-		return nil, err
-	}
-	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
-		parentUnlock()
-		return nil, fmt.Errorf("host launch gate busy: %w", err)
-	}
-	unlock := func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close(); parentUnlock() }
-	reason, err := HostDisabled(dir)
-	if err != nil || reason != "" {
-		unlock()
-		return nil, errors.Join(err, errHostDisabled)
-	}
-	return unlock, nil
 }
 
 type HostWorker struct {
@@ -120,20 +59,14 @@ func (w *Worker) registerHost(s *workerStore) error {
 	if err := os.MkdirAll(w.HostStateDir, 0700); err != nil {
 		return err
 	}
-	registryDir := w.HostStateDir
-	if parent := unitParent(registryDir); parent != "" {
-		registryDir = parent
-	}
-	controlUnlock, err := hostOperationLock(registryDir, "control.lock", true)
+	controlUnlock, err := hostOperationLock(w.HostStateDir, "intake.lock", true)
 	if err != nil {
 		return err
 	}
 	defer controlUnlock()
-	unlock, err := hostLaunchGate(w.HostStateDir)
-	if err != nil {
+	if err := CheckHostRevision(w.HostStateDir, w.hostRevision); err != nil {
 		return err
 	}
-	defer unlock()
 	if w.Machine.HostID == "" {
 		w.Machine.HostID, err = os.Hostname()
 		if err != nil {
@@ -156,22 +89,7 @@ func (w *Worker) registerHost(s *workerStore) error {
 			return err
 		}
 	}
-	forgotten, err := readForgottenQueues(registryDir)
-	if err != nil {
-		return err
-	}
-	if _, ok := forgotten.Queues[r.Queue]; ok {
-		r.Generation, err = nextHostGeneration(registryDir)
-		if err != nil {
-			return err
-		}
-	}
 	sum := sha256.Sum256([]byte(state))
-	if parent := unitParent(w.HostStateDir); parent != "" {
-		if err := saveWorkerJSON(parent, "worker-"+hex.EncodeToString(sum[:16])+".json", r); err != nil {
-			return err
-		}
-	}
 	return saveWorkerJSON(w.HostStateDir, "worker-"+hex.EncodeToString(sum[:16])+".json", r)
 }
 
@@ -189,6 +107,8 @@ type HostControl struct {
 	Services          map[string]HostService
 	ResolveService    func() HostService
 	Service           HostService
+	Expected          HostRevision
+	Settled           func(HostIntent) error
 	Timeout           time.Duration
 	StopSecondary     func(context.Context) error
 	ConfirmContainers func(context.Context) error
@@ -200,6 +120,7 @@ type HostControl struct {
 	Notify            func(context.Context, HostWorker, bool, bool, string) error
 }
 type DisableReport struct {
+	HostRevision
 	Units       map[string]string
 	Docker      string
 	Confirmed   bool
@@ -251,14 +172,6 @@ func (h HostControl) workers() ([]HostWorker, error) {
 	if err != nil {
 		return nil, err
 	}
-	forgottenDir := h.Dir
-	if parent := unitParent(forgottenDir); parent != "" {
-		forgottenDir = parent
-	}
-	forgotten, err := readForgottenQueues(forgottenDir)
-	if err != nil {
-		return nil, err
-	}
 	var out []HostWorker
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
@@ -279,85 +192,9 @@ func (h HostControl) workers() ([]HostWorker, error) {
 				r.Executions = []Result{{Machine: r.Name, Session: st.Session, Execution: Execution{ID: st.Job.ID, Attempt: st.Job.Attempt}}}
 			}
 		}
-		if generation, ok := forgotten.Queues[r.Queue]; ok && r.Generation <= generation {
-			r.Queue = ""
-		}
 		out = append(out, r)
 	}
 	return out, nil
-}
-func (h HostControl) notify(ctx context.Context, workers []HostWorker, enable, cleared bool, reason string) []string {
-	if h.Notify == nil {
-		return nil
-	}
-	forgottenDir := h.Dir
-	if parent := unitParent(forgottenDir); parent != "" {
-		forgottenDir = parent
-	}
-	forgotten, err := readForgottenQueues(forgottenDir)
-	if err != nil {
-		return []string{"queue registry unreadable"}
-	}
-	// One shared deadline, regardless of the number of workers/queues.
-	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-	defer cancel()
-	seen := map[string]bool{}
-	results := make(chan error, len(workers))
-	n := 0
-	for _, w := range workers {
-		if w.Queue == "" {
-			continue
-		}
-		if generation, ok := forgotten.Queues[w.Queue]; ok && w.Generation <= generation {
-			continue
-		}
-		key := w.Queue + "\x00" + w.Host
-		if unitParent(h.Dir) != "" {
-			key += "\x00" + w.Name + "\x00" + w.Session
-		}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		n++
-		w.Executions = append([]Result(nil), w.Executions...)
-		for _, sibling := range workers {
-			if sibling.State != w.State && sibling.Queue == w.Queue && sibling.Host == w.Host && (unitParent(h.Dir) == "" || sibling.Name == w.Name && sibling.Session == w.Session) {
-				w.Executions = append(w.Executions, sibling.Executions...)
-			}
-		}
-		go func(w HostWorker) {
-			err := h.Notify(ctx, w, enable, cleared, reason)
-			if err != nil {
-				detail := "unavailable"
-				var httpErr *HTTPError
-				if errors.As(err, &httpErr) {
-					detail = fmt.Sprintf("HTTP %d", httpErr.Status)
-				}
-				if errors.Is(err, context.DeadlineExceeded) {
-					detail = "timed out"
-				}
-				endpoint := "invalid address"
-				if u, e := url.Parse(w.Queue); e == nil {
-					endpoint = u.Scheme + "://" + u.Host
-				}
-				err = fmt.Errorf("host %q queue %s: %s", w.Host, endpoint, detail)
-			}
-			results <- err
-		}(w)
-	}
-	var out []string
-	for i := 0; i < n; i++ {
-		select {
-		case err := <-results:
-			if err != nil {
-				out = append(out, err.Error())
-			}
-		case <-ctx.Done():
-			return append(out, "queue notification timed out")
-		}
-	}
-	return out
 }
 func NotifyHost(client Client) func(context.Context, HostWorker, bool, bool, string) error {
 	return func(ctx context.Context, w HostWorker, enable, cleared bool, reason string) error {
@@ -443,36 +280,13 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 	if reason == "" {
 		reason = "disabled by operator"
 	}
-	unlock, opErr := hostOperationLock(h.Dir, "control.lock", false)
-	if opErr != nil {
-		return r, opErr
-	}
-	defer unlock()
-	// The flag is first: neither queue reachability nor a hung worker can delay it.
-	generation, err := readNextHostGeneration(h.Dir)
-	generationErr := err
-	flag := struct {
-		Generation   uint64    `json:"generation"`
-		Who          string    `json:"who"`
-		When         time.Time `json:"when"`
-		Reason       string    `json:"reason"`
-		GraceSeconds float64   `json:"grace_seconds"`
-	}{generation, strconv.Itoa(os.Getuid()), h.Clock.Now(), reason, grace.Seconds()}
-	if err := saveWorkerJSON(h.Dir, "DISABLED", flag); err != nil {
+	intent, err := changeHostIntent(h.Dir, h.Clock, hostIntentChange{Desired: "closed", Expected: h.Expected, Reason: reason, Grace: grace})
+	if err != nil {
 		return r, err
 	}
-	if err := archiveHostFile(h.Dir, "disable-receipt.json"); err != nil {
-		return r, err
-	}
-	if err := archiveHostFile(h.Dir, "enable-pending.json"); err != nil {
-		return r, err
-	}
-	if generationErr != nil {
-		return r, generationErr
-	}
-	if err := saveWorkerJSON(h.Dir, "control-generation.json", generation); err != nil {
-		return r, err
-	}
+	r.HostRevision = intent.HostRevision
+	// A retry retains the original deadline, including after reboot.
+	grace = max(0, intent.StopDeadline.Sub(h.Clock.Now()))
 	if ctx.Err() != nil {
 		return r, ctx.Err()
 	}
@@ -511,11 +325,6 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 	if ctx.Err() != nil {
 		return r, ctx.Err()
 	}
-	for i := range workers {
-		workers[i].Generation = generation
-	}
-	notifications := make(chan []string, 1)
-	go func() { notifications <- h.notify(context.WithoutCancel(ctx), workers, false, false, reason) }()
 	if len(h.Services) > 0 {
 		r.Units = map[string]string{}
 		pending := map[string]HostService{}
@@ -524,7 +333,7 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 			h.dockerProgress.unit(unit, r.Units[unit])
 		}
 		for unit, service := range h.Services {
-			if e := service.Stop(ctx, grace); e != nil {
+			if e := service.Stop(ctx, max(0, intent.StopDeadline.Sub(h.Clock.Now()))); e != nil {
 				r.Units[unit] = "unconfirmed: " + e.Error()
 				h.dockerProgress.unit(unit, r.Units[unit])
 				r.Unconfirmed = append(r.Unconfirmed, unit+": "+e.Error())
@@ -602,7 +411,7 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 		if readErr != nil {
 			r.Unconfirmed = append(r.Unconfirmed, readErr.Error())
 		}
-		r.Stopped, err = h.stopOwned(records, grace)
+		r.Stopped, err = h.stopOwned(records, max(0, intent.StopDeadline.Sub(h.Clock.Now())))
 		if err != nil {
 			r.Unconfirmed = append(r.Unconfirmed, err.Error())
 		}
@@ -663,7 +472,7 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 	}
 	// Docker cleanup shares the native cleanup deadline and must precede the receipt.
 	if h.Docker {
-		if e := h.confirmDocker(ctx, workers, flag.When.Add(grace)); e != nil {
+		if e := h.confirmDocker(ctx, workers, *intent.StopDeadline); e != nil {
 			r.Unconfirmed = append(r.Unconfirmed, e.Error())
 		}
 		r.Docker, _ = h.dockerProgress.report(nil)
@@ -679,27 +488,11 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 	if ctx.Err() != nil {
 		return r, ctx.Err()
 	}
-	select {
-	case failures := <-notifications:
-		r.QueueErrors = append(r.QueueErrors, failures...)
-	default:
-		r.QueueErrors = append(r.QueueErrors, "queue notification pending; durable receipt will reconcile")
-	}
-	if len(r.Unconfirmed) == 0 {
-		if ctx.Err() != nil {
-			return r, ctx.Err()
-		}
-		if err = saveWorkerJSON(h.Dir, "disable-receipt.json", hostReceipt{Workers: workers, Generation: generation}); err != nil {
-			r.Unconfirmed = append(r.Unconfirmed, err.Error())
-		} else {
-			if ctx.Err() != nil {
-				return r, ctx.Err()
-			}
-			// Keep offline disable below its existing 400 ms responsiveness bound.
-			notifyCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-			r.QueueErrors = append(r.QueueErrors, h.notify(notifyCtx, workers, false, true, reason)...)
-			cancel()
-		}
+	// Cleanup is local evidence only. S05 will reconcile exact custody with
+	// the queue; neither an old cleared receipt nor this report opens admission.
+	if current, e := ReadHostIntent(h.Dir); e != nil || current.HostRevision != intent.HostRevision {
+		r.Confirmed = false
+		r.Unconfirmed = append(r.Unconfirmed, "host revision changed during cleanup")
 	}
 	if len(r.Unconfirmed) > 0 {
 		return r, fmt.Errorf("disabled; cleanup not confirmed: %s", strings.Join(r.Unconfirmed, "; "))
@@ -856,199 +649,19 @@ func (h HostControl) Enable(ctx context.Context) error {
 	if err := h.defaults(); err != nil {
 		return err
 	}
-	unlock, err := hostOperationLock(h.Dir, "control.lock", false)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	defer unlock()
-	if reason, e := HostDisabled(h.Dir); e != nil {
-		return e
-	} else if reason != "" {
-		b, e := os.ReadFile(filepath.Join(h.Dir, "DISABLED"))
-		if e != nil {
-			return e
-		}
-		var flag struct {
-			Generation uint64 `json:"generation"`
-		}
-		if e = json.Unmarshal(b, &flag); e != nil {
-			return e
-		}
-		b, e = os.ReadFile(filepath.Join(h.Dir, "disable-receipt.json"))
-		if e != nil {
-			return errors.New("cleanup unconfirmed; rerun myce disable before enable")
-		}
-		var receipt hostReceipt
-		if e = json.Unmarshal(b, &receipt); e != nil {
-			return e
-		}
-		if flag.Generation == 0 || receipt.Generation != flag.Generation {
-			return errors.New("cleanup receipt does not match current disable generation; rerun disable")
-		}
-
-	}
-	_, err = h.workers()
-	if err != nil {
-		return err
-	}
-	// Persist the enable generation before removing the flag; reconciliation retries reuse it.
-	if b, e := os.ReadFile(filepath.Join(h.Dir, "disable-receipt.json")); e == nil {
-		var receipt hostReceipt
-		if err = json.Unmarshal(b, &receipt); err != nil {
-			return err
-		}
-		if receipt.EnableGeneration == 0 {
-			receipt.EnableGeneration, err = nextHostGeneration(h.Dir)
-			if err != nil {
-				return err
-			}
-		}
-		if err = saveWorkerJSON(h.Dir, "disable-receipt.json", receipt); err != nil {
-			return err
-		}
-	}
-	// Preserve an audit copy in recoverable local Trash.
-	if _, e := os.Stat(filepath.Join(h.Dir, "disable-receipt.json")); e == nil {
-		if e = os.Rename(filepath.Join(h.Dir, "disable-receipt.json"), filepath.Join(h.Dir, "enable-pending.json")); e != nil {
-			return e
-		}
-	}
-	for _, name := range []string{"DISABLED"} {
-		path := filepath.Join(h.Dir, name)
-		if _, err = os.Stat(path); errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		trash := filepath.Join(h.Dir, ".Trash")
-		if err = os.MkdirAll(trash, 0700); err != nil {
-			return err
-		}
-		if err = os.Rename(path, filepath.Join(trash, ID()+"-"+name)); err != nil {
-			return err
-		}
-	}
-	if err = h.reconcileEnable(ctx, "", ""); err != nil {
-		log.Printf("enabled locally; queue acknowledgements pending; workers reconcile their own queue on rejoin: %v", err)
-	}
-	return syncWorkerDir(h.Dir)
+	_, err := changeHostIntent(h.Dir, h.Clock, hostIntentChange{Desired: "open", Expected: h.Expected, Settled: h.Settled})
+	return err
 }
 
-// Reconcile saved cleanup before clearing queue fencing, including an offline disable.
+// Retained API seams for S05; the old receipt delivery path is deliberately inert.
 func (h HostControl) ReconcileEnable(ctx context.Context) error {
-	if err := h.defaults(); err != nil {
-		return err
-	}
-	unlock, err := hostOperationLock(h.Dir, "control.lock", false)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	return h.reconcileEnable(ctx, "", "")
+	return CheckHostRevision(h.Dir, h.Expected)
 }
-
-// ReconcileWorkerEnable cannot let an unrelated queue veto this worker's rejoin.
 func (h HostControl) ReconcileWorkerEnable(ctx context.Context, queue, host string) error {
-	if queue == "" || host == "" {
-		return errors.New("worker queue and host required")
-	}
-	if err := h.defaults(); err != nil {
-		return err
-	}
-	unlock, err := hostOperationLock(h.Dir, "control.lock", false)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	return h.reconcileEnable(ctx, queue, host)
-}
-
-func (h HostControl) reconcileEnable(ctx context.Context, queue, host string) error {
-	if reason, err := HostDisabled(h.Dir); err != nil || reason != "" {
-		return errors.Join(err, errHostDisabled)
-	}
-	unlock, err := hostOperationLock(h.Dir, "reconcile.lock", false)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	path := filepath.Join(h.Dir, "enable-pending.json")
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	var receipt hostReceipt
-	if err = json.Unmarshal(b, &receipt); err != nil {
-		return err
-	}
-	if receipt.EnableGeneration == 0 {
-		return errors.New("legacy receipt has no ordered enable; rerun disable and enable")
-	}
-	forgottenDir := h.Dir
-	if parent := unitParent(forgottenDir); parent != "" {
-		forgottenDir = parent
-	}
-	forgotten, err := readForgottenQueues(forgottenDir)
-	if err != nil {
-		return err
-	}
-	remaining := []HostWorker{}
-	failures := []string{}
-	seen := map[string]bool{}
-	for _, target := range receipt.Workers {
-		if generation, ok := forgotten.Queues[target.Queue]; ok && receipt.Generation <= generation {
-			continue
-		}
-		if target.Queue == "" {
-			continue
-		}
-		key := target.Queue + "\x00" + target.Host
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		group := []HostWorker{}
-		for _, worker := range receipt.Workers {
-			if worker.Queue == target.Queue && worker.Host == target.Host {
-				group = append(group, worker)
-			}
-		}
-		if queue != "" && (target.Queue != queue || target.Host != host) {
-			remaining = append(remaining, group...)
-			continue
-		}
-		// A lost enable response can make the old disable stale; still retry enable.
-		_ = h.notify(ctx, group, false, true, "disabled by operator")
-		enabled := append([]HostWorker(nil), group...)
-		for i := range enabled {
-			enabled[i].Generation = receipt.EnableGeneration
-		}
-		if errs := h.notify(ctx, enabled, true, false, ""); len(errs) > 0 {
-			failures = append(failures, errs...)
-			remaining = append(remaining, group...)
-		}
-	}
-	if len(remaining) > 0 {
-		receipt.Workers = remaining
-		if err := saveWorkerJSON(h.Dir, "enable-pending.json", receipt); err != nil {
-			return err
-		}
-		if len(failures) > 0 {
-			return fmt.Errorf("enable not yet acknowledged: %s", strings.Join(failures, "; "))
-		}
-		return nil
-	}
-	trash := filepath.Join(h.Dir, ".Trash")
-	if err = os.MkdirAll(trash, 0700); err != nil {
-		return err
-	}
-	return os.Rename(path, filepath.Join(trash, ID()+"-enable-pending.json"))
+	return CheckHostRevision(h.Dir, h.Expected)
 }
 
 func AdoptHostWorker(dir string, w HostWorker) error {
@@ -1200,23 +813,12 @@ func ownedRecordGroups(st workerState) ([]int, error) {
 	return outGroups, nil
 }
 
-func hostDisableGrace(dir string) time.Duration {
-	if parent := unitParent(dir); parent != "" {
-		if reason, _ := HostDisabled(parent); reason != "" {
-			return hostDisableGrace(parent)
-		}
-	}
-	b, err := os.ReadFile(filepath.Join(dir, "DISABLED"))
-	if err != nil {
+func hostDisableGrace(dir string, clock Clock) time.Duration {
+	s, err := ReadHostIntent(dir)
+	if err != nil || s.StopDeadline == nil {
 		return 0
 	}
-	var flag struct {
-		GraceSeconds float64 `json:"grace_seconds"`
-	}
-	if json.Unmarshal(b, &flag) != nil {
-		return 0
-	}
-	return time.Duration(max(0, min(60, flag.GraceSeconds)) * float64(time.Second))
+	return max(0, s.StopDeadline.Sub(clock.Now()))
 }
 
 func hostPS(args ...string) ([]byte, error) {
@@ -1242,61 +844,4 @@ func hostOperationLock(dir, name string, wait bool) (func(), error) {
 	}
 	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() }, nil
 }
-func archiveHostFile(dir, name string) error {
-	path := filepath.Join(dir, name)
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	trash := filepath.Join(dir, ".Trash")
-	if err := os.MkdirAll(trash, 0700); err != nil {
-		return err
-	}
-	return os.Rename(path, filepath.Join(trash, ID()+"-"+name))
-}
-
-type hostReceipt struct {
-	Generation       uint64       `json:"generation"`
-	Workers          []HostWorker `json:"workers"`
-	EnableGeneration uint64       `json:"enable_generation,omitempty"`
-}
-
 func (h HostControl) contextDone() bool { return h.ctx != nil && h.ctx.Err() != nil }
-
-// Serialized by control.lock; retained across enable and reboot.
-func nextHostGeneration(dir string) (uint64, error) {
-	n, e := readNextHostGeneration(dir)
-	if e != nil {
-		return 0, e
-	}
-	return n, saveWorkerJSON(dir, "control-generation.json", n)
-}
-func readNextHostGeneration(dir string) (uint64, error) {
-	var last uint64
-	b, e := os.ReadFile(filepath.Join(dir, "control-generation.json"))
-	if e == nil {
-		if e = json.Unmarshal(b, &last); e != nil {
-			return 0, e
-		}
-	} else if !errors.Is(e, os.ErrNotExist) {
-		return 0, e
-	}
-	// The flag covers a crash after flag fsync but before counter fsync.
-	if b, e := os.ReadFile(filepath.Join(dir, "DISABLED")); e == nil {
-		var flag struct {
-			Generation uint64 `json:"generation"`
-		}
-		if e = json.Unmarshal(b, &flag); e != nil {
-			return 0, e
-		}
-		last = max(last, flag.Generation)
-	} else if !errors.Is(e, os.ErrNotExist) {
-		return 0, e
-	}
-	if last == ^uint64(0) {
-		return 0, errors.New("host generation exhausted")
-	}
-	last++
-	return last, nil
-}

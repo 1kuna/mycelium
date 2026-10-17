@@ -1,12 +1,12 @@
 # Spark GB10 unified memory: live MemAvailable minus 16 GiB headroom.
 # Replace checkpoint root; confirm Atlas owner admission before installation.
 [Unit]
-ConditionPathExists=!%h/.local/share/myce/DISABLED
 Description=Mycelium v2 plain-command worker
 After=network-online.target
 
 [Service]
 Type=simple
+ExecCondition=%h/.local/bin/myce _host-start-check --host-state-dir %h/.local/share/myce
 WorkingDirectory=%h/.local/share/myce
 EnvironmentFile=%h/.config/myce/worker.env
 ExecStart=%h/.local/bin/myce join --state-dir %h/.local/share/myce/worker --name spark-v2-test --gpu cuda --memory-gb 0 --memory-mode auto --reserve-memory-gb 16 --heartbeat 1s --checkpoint-root REPLACE_CHECKPOINT_ROOT

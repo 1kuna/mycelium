@@ -173,6 +173,11 @@ func installDisabled(ctx context.Context, c ServiceConfig, command func(context.
 	if err != nil {
 		return err
 	}
+	if _, e := os.Stat(filepath.Join(dir, hostStateFile)); errors.Is(e, os.ErrNotExist) {
+		if _, e = InitializeHostIntent(dir, c.HostID, RealClock{}); e != nil {
+			return e
+		}
+	}
 	w := HostWorker{Config: c.Config, Unit: unit, State: c.State, Host: c.HostID, Name: c.Name, Queue: c.Queue, Environments: c.EnvironmentCache}
 	if err = AdoptHostWorker(c.HostStateDir, w); err != nil {
 		return err
@@ -184,7 +189,7 @@ func installDisabled(ctx context.Context, c ServiceConfig, command func(context.
 	if installed {
 		h.Services = map[string]HostService{unit: &SystemdHostService{Unit: unit, Command: command}}
 	}
-	// The existing host gate and its receipt are never rewritten by an instance install.
+	// Installation preserves the whole-host revision and its original stop deadline.
 	_, err = h.Disable(ctx, "installed with --start-disabled", 0)
 	return err
 }

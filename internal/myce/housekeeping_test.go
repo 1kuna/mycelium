@@ -100,56 +100,6 @@ func TestStoppedContainerRetention(t *testing.T) {
 	}
 }
 
-func TestHostQueuesForgetReceipts(t *testing.T) {
-	dir := t.TempDir()
-	dead := HostWorker{Name: "old", State: t.TempDir(), Queue: "http://127.0.0.1:1111", Host: "local", Unit: "myce-worker@gpu1.service"}
-	live := HostWorker{Name: "current", State: t.TempDir(), Queue: "http://queue", Host: "local"}
-	for name, w := range map[string]HostWorker{"old": dead, "live": live} {
-		if err := saveWorkerJSON(dir, "worker-"+name+".json", w); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, name := range []string{"enable-pending.json", "disable-receipt.json"} {
-		if err := saveWorkerJSON(dir, name, hostReceipt{Generation: 1, EnableGeneration: 2, Workers: []HostWorker{dead, live}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	h := HostControl{Dir: dir, Notify: func(_ context.Context, w HostWorker, enable, cleared bool, reason string) error {
-		if w.Queue == dead.Queue {
-			t.Fatal("forgotten queue notified")
-		}
-		return nil
-	}}
-	if err := h.ForgetQueue(dead.Queue, false, func(w HostWorker) (bool, error) { return w.Queue == live.Queue, nil }); err != nil {
-		t.Fatal(err)
-	}
-	queues, err := h.Queues()
-	if err != nil || len(queues) != 1 || queues[0] != live.Queue {
-		t.Fatalf("queues %v err %v", queues, err)
-	}
-	workers, err := h.workers()
-	if err != nil || len(workers) != 2 {
-		t.Fatal("forgot queue destroyed worker custody")
-	}
-	if err := h.ReconcileWorkerEnable(context.Background(), dead.Queue, dead.Host); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.ReconcileEnable(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.ForgetQueue(live.Queue, false, func(HostWorker) (bool, error) { return true, nil }); err == nil {
-		t.Fatal("forgot configured queue")
-	}
-	if err := h.ForgetQueue(live.Queue, true, nil); err != nil {
-		t.Fatal(err)
-	}
-	var state forgottenQueues
-	b, err := os.ReadFile(filepath.Join(dir, "forgotten-queues.json"))
-	if err != nil || json.Unmarshal(b, &state) != nil || state.Generation == 0 {
-		t.Fatal("missing atomic generation")
-	}
-}
-
 func TestDockerAcknowledgementSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	s := &workerStore{dir: dir, state: workerState{Identity: "attempt"}}
@@ -180,25 +130,5 @@ func TestDockerAcknowledgementSurvivesRestart(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatal("background sweep touched current durable attempt")
-	}
-}
-
-func TestForgottenQueueRegistersAgain(t *testing.T) {
-	dir := t.TempDir()
-	w := Worker{HostStateDir: dir, Machine: Machine{ID: "worker", HostID: "host"}, Client: Client{URL: "http://queue"}, EnvironmentRoot: t.TempDir()}
-	s := &workerStore{dir: t.TempDir()}
-	if err := w.registerHost(s); err != nil {
-		t.Fatal(err)
-	}
-	h := HostControl{Dir: dir}
-	if err := h.ForgetQueue(w.Client.URL, true, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.registerHost(s); err != nil {
-		t.Fatal(err)
-	}
-	queues, err := h.Queues()
-	if err != nil || len(queues) != 1 || queues[0] != w.Client.URL {
-		t.Fatal("rejoin did not restore registration")
 	}
 }

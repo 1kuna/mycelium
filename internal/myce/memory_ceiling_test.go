@@ -769,7 +769,7 @@ func TestMemoryCeilingTinyRequestReservation(t *testing.T) {
 			if charge*(1<<30) < float64(page) {
 				t.Fatal("reservation smaller than one page")
 			}
-			w := Worker{HostStateDir: t.TempDir(), Machine: b}
+			w := Worker{HostStateDir: readyTestHost(t, t.TempDir()), Machine: b}
 			w.Machine.HostMemoryBudgetGB = float64(page/2) / (1 << 30)
 			if err := w.checkHostMemoryBudget(s.Needs.MemoryGB, s.Needs.HostMemoryGB); !errors.Is(err, errWorkerMemory) {
 				t.Fatal("worker accepted budget below minimum reservation", err)

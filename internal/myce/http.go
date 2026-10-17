@@ -179,42 +179,13 @@ func (a API) Handler() http.Handler {
 		}
 		respond(w, map[string]bool{"ok": true}, a.Queue.AppendLog(c))
 	})
-	mux.HandleFunc("POST /api/hosts/{id}/disable", func(w http.ResponseWriter, r *http.Request) {
-		var c struct {
-			Machine    string   `json:"machine,omitempty"`
-			Session    string   `json:"session,omitempty"`
-			Generation uint64   `json:"generation"`
-			Reason     string   `json:"reason"`
-			Cleared    bool     `json:"cleared"`
-			Executions []Result `json:"executions,omitempty"`
-		}
-		if !decode(w, r, &c) {
-			return
-		}
-		if c.Machine != "" {
-			respond(w, map[string]bool{"ok": true}, a.Queue.ControlMachine(r.PathValue("id"), c.Machine, c.Session, c.Reason, false, c.Cleared, c.Executions, c.Generation))
-			return
-		}
-		respond(w, map[string]bool{"ok": true}, a.Queue.DisableHostGeneration(r.PathValue("id"), c.Reason, c.Cleared, c.Executions, c.Generation))
-	})
-	mux.HandleFunc("POST /api/hosts/{id}/enable", func(w http.ResponseWriter, r *http.Request) {
-		var c struct {
-			Machine    string   `json:"machine,omitempty"`
-			Session    string   `json:"session,omitempty"`
-			Generation uint64   `json:"generation"`
-			Reason     string   `json:"reason"`
-			Cleared    bool     `json:"cleared"`
-			Executions []Result `json:"executions,omitempty"`
-		}
-		if !decode(w, r, &c) {
-			return
-		}
-		if c.Machine != "" {
-			respond(w, map[string]bool{"ok": true}, a.Queue.ControlMachine(r.PathValue("id"), c.Machine, c.Session, c.Reason, true, false, nil, c.Generation))
-			return
-		}
-		respond(w, map[string]bool{"ok": true}, a.Queue.EnableHostGeneration(r.PathValue("id"), c.Generation))
-	})
+	// The per-unit/generation protocol is retired. S05 supplies the single
+	// host-revision exchange; no legacy decoder may allocate control counters.
+	for _, route := range []string{"POST /api/hosts/{id}/disable", "POST /api/hosts/{id}/enable"} {
+		mux.HandleFunc(route, func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "legacy host control unsupported; convert host state offline and upgrade queue and workers together", http.StatusUpgradeRequired)
+		})
+	}
 	mux.HandleFunc("POST /api/workers/{id}/leave", func(w http.ResponseWriter, r *http.Request) {
 		var c struct {
 			Now bool `json:"now"`

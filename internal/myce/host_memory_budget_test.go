@@ -16,11 +16,11 @@ import (
 )
 
 func TestHostMemoryBudgetDurableWhileDisabled(t *testing.T) {
-	dir := t.TempDir()
+	dir := readyTestHost(t, t.TempDir())
 	if _, err := (HostControl{Dir: dir, Service: &fakeHostService{}}).Disable(context.Background(), "legacy owner", 0); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.ReadFile(filepath.Join(dir, "DISABLED"))
+	before, _ := os.ReadFile(filepath.Join(dir, hostStateFile))
 	first, err := SetHostMemoryBudget(dir, 3)
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func TestHostMemoryBudgetDurableWhileDisabled(t *testing.T) {
 	if err != nil || budget.GiB != 27 || budget.Generation != second.Generation || !strings.HasSuffix(source, "host-memory-budget.json") {
 		t.Fatal(budget, source, err)
 	}
-	after, _ := os.ReadFile(filepath.Join(dir, "DISABLED"))
+	after, _ := os.ReadFile(filepath.Join(dir, hostStateFile))
 	if string(after) != string(before) {
 		t.Fatal("set cleared disable gate")
 	}
@@ -55,7 +55,7 @@ func TestHostMemoryBudgetDurableWhileDisabled(t *testing.T) {
 	if err := w.refreshHostMemoryBudget(); err != nil || w.Machine.HostMemoryBudgetGB != 27 {
 		t.Fatal("disabled install budget not overridden", err)
 	}
-	if err := (HostControl{Dir: dir}).Enable(context.Background()); err != nil {
+	if err := (HostControl{Dir: dir, Expected: readTestHostRevision(t, dir), Settled: func(HostIntent) error { return nil }}).Enable(context.Background()); err != nil {
 		t.Fatal("could not enable after offline budget change", err)
 	}
 	if err := w.refreshHostMemoryBudget(); err != nil || w.Machine.HostMemoryBudgetGB != 27 {
@@ -65,7 +65,7 @@ func TestHostMemoryBudgetDurableWhileDisabled(t *testing.T) {
 
 func TestHostMemoryBudgetLiveRaiseLowerAndQueueStatus(t *testing.T) {
 	q, c := fixture(t)
-	dir := t.TempDir()
+	dir := readyTestHost(t, t.TempDir())
 	a, b := machine("card0", "fake"), machine("card1", "fake")
 	for _, m := range []*Machine{&a, &b} {
 		m.HostID = "box"
@@ -158,12 +158,18 @@ func TestHostMemoryBudgetLiveRaiseLowerAndQueueStatus(t *testing.T) {
 }
 
 func TestHostMemoryBudgetWorkerReportsLiveWithoutRestart(t *testing.T) {
-	dir := t.TempDir()
+	dir := readyTestHost(t, t.TempDir())
 	h := HostControl{Dir: dir, Service: &fakeHostService{}}
 	if _, err := h.Disable(context.Background(), "install disabled", 0); err != nil {
 		t.Fatal(err)
 	}
 	SetHostMemoryBudget(dir, 3)
+	current, e := ReadHostIntent(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	h.Expected = current.HostRevision
+	h.Settled = func(HostIntent) error { return nil }
 	if err := h.Enable(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +247,7 @@ func TestHostMemoryBudgetWorkerReportsLiveWithoutRestart(t *testing.T) {
 }
 
 func TestHostMemoryBudgetSerializesGenerationsAndRefusesStaleAdmission(t *testing.T) {
-	dir := t.TempDir()
+	dir := readyTestHost(t, t.TempDir())
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)

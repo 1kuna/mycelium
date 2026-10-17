@@ -251,6 +251,7 @@ func environmentSeconds(j *Job, m *Machine) float64 {
 // Partial builds and evictions are moved to recoverable local Trash, never deleted.
 type EnvironmentCache struct {
 	HostStateDir string
+	hostRevision HostRevision
 	once         sync.Once
 	initErr      error
 	Root         string
@@ -705,7 +706,11 @@ func (c *EnvironmentCache) cleanupBuild(path string) error {
 	return store.cleanupOrphan(c.Clock)
 }
 func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir string, env []string, out io.Writer) error {
-	unlock, err := hostLaunchGate(c.HostStateDir)
+	revision := c.hostRevision
+	if err := bindHostRevision(c.HostStateDir, &revision); err != nil {
+		return err
+	}
+	unlock, err := hostLaunchGate(c.HostStateDir, revision)
 	if err != nil {
 		return err
 	}
@@ -741,7 +746,7 @@ func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir stri
 	defer reader.Close()
 	defer writer.Close()
 	cmd.Stdin = reader
-	if e = cmd.Start(); e != nil {
+	if e = hostDispatch(c.HostStateDir, revision, cmd.Start); e != nil {
 		return e
 	}
 	state.PID = cmd.Process.Pid
@@ -751,7 +756,7 @@ func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir stri
 		_ = cmd.Wait()
 		return e
 	}
-	if _, e = writer.Write([]byte("start\n")); e != nil {
+	if e = hostDispatch(c.HostStateDir, revision, func() error { _, e := writer.Write([]byte("start\n")); return e }); e != nil {
 		_ = syscall.Kill(-state.PID, syscall.SIGKILL)
 	}
 	unlock()

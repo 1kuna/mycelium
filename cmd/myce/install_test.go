@@ -282,7 +282,9 @@ func TestInstalledDisabledServiceDoesNotReadCredentialsOrJoin(t *testing.T) {
 	c.EnvironmentFile = filepath.Join(home, "missing-fleet.env")
 	scoped, _ := myce.WorkerUnitDirectory(dir, filepath.Base(c.Service))
 	os.MkdirAll(scoped, 0700)
-	os.WriteFile(filepath.Join(scoped, "DISABLED"), []byte(`{"generation":1,"reason":"installed disabled"}`), 0600)
+	if _, e := myce.InitializeHostIntent(scoped, c.HostID, myce.RealClock{}); e != nil {
+		t.Fatal(e)
+	}
 	os.MkdirAll(filepath.Dir(c.Config), 0700)
 	b, _ := json.Marshal(c)
 	os.WriteFile(c.Config, b, 0600)

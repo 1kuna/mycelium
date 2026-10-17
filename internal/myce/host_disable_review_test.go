@@ -75,6 +75,7 @@ func testDisableDetachedGroup(t *testing.T, helper bool) {
 			t.Fatalf("detached environment marker not discovered: %v %v", groups, err)
 		}
 	}
+	ensureTestHost(t, h.Dir, h.Clock)
 	r, err := h.Disable(context.Background(), "detached child", 0)
 	requireNativeMarkerDisableReport(t, h, r, err)
 	birth, err := processBirth(cmd.Process.Pid)
@@ -129,7 +130,7 @@ func TestDisableRefusesActiveLegacySpool(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := &fakeClock{now: time.Unix(1000, 0)}
-	r, err := (HostControl{Dir: root, Clock: clock, Processes: HostProcesses{Pause: func(d time.Duration) { clock.Advance(d) }}}).Disable(context.Background(), "old worker", 0)
+	r, err := (HostControl{Dir: readyTestHost(t, root), Clock: clock, Processes: HostProcesses{Pause: func(d time.Duration) { clock.Advance(d) }}}).Disable(context.Background(), "old worker", 0)
 	if err == nil || len(r.Unconfirmed) == 0 {
 		t.Fatalf("active legacy worker certified: %+v %v", r, err)
 	}
@@ -138,51 +139,6 @@ func TestDisableRefusesActiveLegacySpool(t *testing.T) {
 	}
 	if reason, err := HostDisabled(root); err != nil || reason == "" {
 		t.Fatalf("flag absent: %q %v", reason, err)
-	}
-}
-
-func TestReconcileEnableCannotClearFreshDisable(t *testing.T) {
-	root := t.TempDir()
-	saveWorkerJSON(root, "worker-test.json", HostWorker{State: t.TempDir(), Host: "test"})
-	if err := saveWorkerJSON(root, "enable-pending.json", struct {
-		Workers []HostWorker `json:"workers"`
-	}{[]HostWorker{{Host: "test"}}}); err != nil {
-		t.Fatal(err)
-	}
-	h := HostControl{Dir: root, Notify: func(_ context.Context, _ HostWorker, enable, cleared bool, _ string) error {
-		if enable {
-			t.Error("stale enable receipt cleared fresh disable")
-		}
-		return nil
-	}}
-	if _, err := h.Disable(context.Background(), "new disable", 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.ReconcileEnable(context.Background()); err == nil {
-		t.Error("reconciled enable while disabled")
-	}
-}
-
-func TestReconcileEnableDoesNotWaitOnBusyLock(t *testing.T) {
-	root := t.TempDir()
-	unlock, err := hostOperationLock(root, "reconcile.lock", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unlock()
-	// Bounded context is not honored by blocking flock; use a subprocess-free
-	// release to avoid hanging this regression on the broken implementation.
-	done := make(chan error, 1)
-	go func() { done <- (HostControl{Dir: root}).ReconcileEnable(context.Background()) }()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("busy reconciliation succeeded")
-		}
-	case <-time.After(100 * time.Millisecond):
-		unlock()
-		<-done
-		t.Fatal("reconciliation blocked on flock")
 	}
 }
 
@@ -241,46 +197,10 @@ func TestHostSignalSkipsVanishedGroupsIndependently(t *testing.T) {
 	}
 }
 
-func TestDisableFencesLaunchRaceAndRepeatedControls(t *testing.T) {
-	root := t.TempDir()
-	saveWorkerJSON(root, "worker-test.json", HostWorker{State: t.TempDir(), Host: "test"})
-	unlock, err := hostOperationLock(root, "launch.lock", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unlock()
-	clock := &fakeClock{now: time.Unix(1000, 0)}
-	h := HostControl{Dir: root, Clock: clock, Processes: HostProcesses{Pause: func(d time.Duration) { clock.Advance(d) }}}
-	if _, err := h.Disable(context.Background(), "assignment race", 0); err == nil {
-		t.Fatal("held launch gate certified")
-	}
-	if err := h.Enable(context.Background()); err == nil {
-		t.Fatal("enabled during unconfirmed launch")
-	}
-	unlock()
-	if gate, err := hostLaunchGate(root); err == nil {
-		gate()
-		t.Fatal("assigned job admitted after disable")
-	}
-	for i := 0; i < 2; i++ {
-		if _, err := h.Disable(context.Background(), "repeat", 0); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := h.Enable(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	gate, err := hostLaunchGate(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gate()
-}
-
 func TestDisabledRuntimeRefusesAlreadyRoutedModelCall(t *testing.T) {
-	root := t.TempDir()
+	root := readyTestHost(t, t.TempDir())
 	rt := &modelRuntime{hostStateDir: root, models: map[string]*workerModel{"test": {model: Model{Name: "test"}, engine: &FakeEngine{Model: "test"}, state: "ready"}}, session: "session", token: "test"}
-	if err := saveWorkerJSON(root, "DISABLED", map[string]string{"reason": "disabled"}); err != nil {
+	if err := closeTestHost(root); err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test"}`))
@@ -294,7 +214,7 @@ func TestDisabledRuntimeRefusesAlreadyRoutedModelCall(t *testing.T) {
 }
 
 func TestDisabledRuntimeRefusesCallWhenFlagAppearsDuringBodyRead(t *testing.T) {
-	root := t.TempDir()
+	root := readyTestHost(t, t.TempDir())
 	rt := &modelRuntime{hostStateDir: root, models: map[string]*workerModel{"test": {model: Model{Name: "test"}, engine: &FakeEngine{Model: "test"}, state: "ready"}}, session: "session", token: "test"}
 	reader, writer := io.Pipe()
 	defer reader.Close()
@@ -309,7 +229,7 @@ func TestDisabledRuntimeRefusesCallWhenFlagAppearsDuringBodyRead(t *testing.T) {
 	if _, err := writer.Write([]byte(`{"model":`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveWorkerJSON(root, "DISABLED", map[string]string{"reason": "disabled"}); err != nil {
+	if err := closeTestHost(root); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := writer.Write([]byte(`"test"}`)); err != nil {

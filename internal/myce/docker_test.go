@@ -300,6 +300,7 @@ func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string
 	hostDir := t.TempDir()
 	t.Setenv("MYCE_HOST_STATE_DIR", hostDir)
 	clock := &dockerTestClock{now: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)}
+	ensureTestHost(t, hostDir, clock)
 	w := Worker{HostStateDir: hostDir, Machine: machine("docker-worker", "fake"), StateDir: t.TempDir(), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
 	s, e := w.openStore()
 	if e != nil {

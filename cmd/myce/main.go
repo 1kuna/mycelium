@@ -46,6 +46,17 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) == 0 {
 		return errors.New("usage: myce queue|join|leave|disable|enable|submit|status|logs|wait|cancel|resolve-docker|dev")
 	}
+	if args[0] == "_host-start-check" {
+		f := flag.NewFlagSet("_host-start-check", flag.ContinueOnError)
+		dir := f.String("host-state-dir", "", "shared host state")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if f.NArg() != 0 {
+			return errors.New("unexpected start-check arguments")
+		}
+		return myce.CheckHostRevision(*dir, myce.HostRevision{})
+	}
 	if args[0] == "invite" {
 		return inviteCommand(args[1:])
 	}
@@ -57,6 +68,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "extension" {
 		return extensionCommand(args[1:])
+	}
+	if args[0] == "host" && len(args) > 1 && args[1] == "convert" {
+		return hostConvertCommand(args[2:], os.Stdout)
 	}
 	if args[0] == "host-queues" {
 		return hostQueuesCommand(args[1:], probe, os.Stdout)

@@ -125,6 +125,7 @@ func TestDisableDocker(t *testing.T) {
 			if mode == "now" {
 				grace = 0
 			}
+			ensureTestHost(t, h.Dir, h.Clock)
 			r, err := h.Disable(ctx, "test", grace)
 			await(t, func() bool {
 				unlock, err := hostOperationLock(h.Dir, "control.lock", false)
@@ -140,7 +141,7 @@ func TestDisableDocker(t *testing.T) {
 			if time.Since(start) > timeout+time.Second {
 				t.Fatal("overall deadline exceeded")
 			}
-			if _, err := os.Stat(filepath.Join(h.Dir, "DISABLED")); err != nil {
+			if _, err := os.Stat(filepath.Join(h.Dir, hostStateFile)); err != nil {
 				t.Fatal(err)
 			}
 			if failed {
@@ -211,7 +212,7 @@ func TestDisableDocker(t *testing.T) {
 
 func TestDockerDisabledLaunchAndResolution(t *testing.T) {
 	w, s, _, root := dockerFixture(t)
-	if err := saveWorkerJSON(w.HostStateDir, "DISABLED", map[string]string{"reason": "test"}); err != nil {
+	if err := closeTestHost(w.HostStateDir); err != nil {
 		t.Fatal(err)
 	}
 	d := &dockerAttempt{hostDir: w.HostStateDir, clock: w.Clock, state: dockerExecution{Identity: "dispatch", Endpoint: "unix:///fake"}}
