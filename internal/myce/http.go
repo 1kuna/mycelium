@@ -238,8 +238,14 @@ func respond(w http.ResponseWriter, v any, err error) {
 		if errors.Is(err, ErrStale) {
 			status = http.StatusConflict
 		}
+		body := map[string]string{"error": "request failed"}
+		var apiError *HTTPError
+		if errors.As(err, &apiError) && (apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired") {
+			status = apiError.Status
+			body = map[string]string{"error": apiError.Message, "code": apiError.Code}
+		}
 		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "request failed"})
+		_ = json.NewEncoder(w).Encode(body)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(v)
@@ -293,7 +299,15 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 300 {
-		return &HTTPError{Status: res.StatusCode, Message: "request failed"}
+		e := &HTTPError{Status: res.StatusCode, Message: "request failed"}
+		var body struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (body.Code == "submission_key_conflict" || body.Code == "submission_key_expired") {
+			e.Code, e.Message = body.Code, body.Error
+		}
+		return e
 	}
 	if out != nil {
 		return json.NewDecoder(res.Body).Decode(out)
@@ -303,11 +317,17 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 }
 
 type HTTPError struct {
+	Code    string
 	Status  int
 	Message string
 }
 
-func (e *HTTPError) Error() string { return fmt.Sprintf("queue: HTTP %d: %s", e.Status, e.Message) }
+func (e *HTTPError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("queue: HTTP %d: %s: %s", e.Status, e.Code, e.Message)
+	}
+	return fmt.Sprintf("queue: HTTP %d: %s", e.Status, e.Message)
+}
 func stale(err error) bool {
 	var e *HTTPError
 	return errors.As(err, &e) && e.Status == http.StatusConflict

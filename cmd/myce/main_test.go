@@ -162,6 +162,7 @@ func TestDevCheckpointEndToEnd(t *testing.T) {
 	})
 	production := s
 	production.Name = "production"
+	production.SubmissionKey = "dev-production-key"
 	production.Priority = "production"
 	production.Resumable = false
 	production.Run.Command = []string{"sh", "-c", "printf 'production finished\\n'"}
@@ -169,6 +170,13 @@ func TestDevCheckpointEndToEnd(t *testing.T) {
 	var prod myce.Job
 	if err := c.Call(ctx, "POST", "/api/jobs", production, &prod); err != nil {
 		t.Fatal(err)
+	}
+	var repeated myce.Job
+	if err := c.Call(ctx, "POST", "/api/jobs", production, &repeated); err != nil {
+		t.Fatal(err)
+	}
+	if repeated.ID != prod.ID {
+		t.Fatal("keyed repeat created another job")
 	}
 	wait(t, ctx, func() bool {
 		if strings.Contains(readLogs(t, ctx, c, prod.ID), "production finished") {
@@ -180,8 +188,14 @@ func TestDevCheckpointEndToEnd(t *testing.T) {
 	if err := c.Call(ctx, "GET", "/api/status", nil, &started); err != nil {
 		t.Fatal(err)
 	}
+	if len(started.Jobs) != 2 {
+		t.Fatalf("keyed repeat left %d jobs, want 2", len(started.Jobs))
+	}
 	for _, j := range started.Jobs {
 		if j.ID == prod.ID {
+			if j.Attempt != 1 {
+				t.Fatalf("keyed production executions: %d", j.Attempt)
+			}
 			if j.StartedAt == nil || j.StartLatencySeconds != j.StartedAt.Sub(j.Queued).Seconds() || j.StartLatencySeconds >= 15 {
 				t.Fatalf("queue-measured production startup exceeded target or missing timestamp: %+v", j)
 			}

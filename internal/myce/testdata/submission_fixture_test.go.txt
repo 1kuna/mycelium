@@ -1,0 +1,38 @@
+package myce
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestWriteSubmissionLegacyFixture(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.db")
+	c := &fakeClock{now: time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)}
+	q, err := Open(path, dir, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(func() error {
+		s := Spec{Name: "legacy", Project: "test", Priority: "experiment"}
+		s.Run.Command = []string{"echo", "legacy"}
+		s.Needs.MemoryGB = 1
+		s.Needs.Platform.Any = true
+		q.s.Jobs["legacy-job"] = &Job{ID: "legacy-job", Spec: s, State: "queued", Queued: c.Now(), Checkpoint: "checkpoints/legacy-job"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("../../../../internal/myce/testdata/submission-legacy.db", data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
