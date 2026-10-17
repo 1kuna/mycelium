@@ -17,23 +17,61 @@ type HostService interface {
 }
 
 type SystemdHostService struct {
-	Clock    Clock
-	killAt   time.Time
-	Unit     string
-	Command  func(context.Context, string, ...string) ([]byte, error)
-	ReadFile func(string) ([]byte, error)
-	group    string
-	stopped  bool
+	// Observation selects the worker manager for read-only root show calls.
+	Observation *HostObservationContext
+	// WorkerInvocation provides the fixed worker-child mutation boundary.
+	WorkerInvocation *HostInvocation
+	Launch           HostChildLauncher
+	Clock            Clock
+	killAt           time.Time
+	Unit             string
+	Command          func(context.Context, string, ...string) ([]byte, error)
+	ReadFile         func(string) ([]byte, error)
+	group            string
+	stopped          bool
 }
 
 func (s *SystemdHostService) call(ctx context.Context, args ...string) ([]byte, error) {
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	if os.Geteuid() == 0 && (s.Observation == nil || !s.Observation.Privileged) {
+		return nil, ErrHostIdentity
+	}
 	if s.Command == nil {
 		return nil, errors.New("systemd runner unavailable")
 	}
-	return s.Command(ctx, "systemctl", append([]string{"--user"}, args...)...)
+	if s.Observation != nil && s.Observation.Privileged {
+		if len(args) > 0 && args[0] == "show" {
+			b, err := s.Command(ctx, "systemctl", s.Observation.SystemdArgs(args...)...)
+			if err != nil {
+				return nil, ErrHostUserManager
+			}
+			return b, nil
+		}
+		if s.WorkerInvocation == nil || len(args) == 0 {
+			return nil, ErrHostChild
+		}
+		if !s.WorkerInvocation.Privileged || s.WorkerInvocation.Account.UID != s.Observation.Account.UID || s.WorkerInvocation.StateDir != s.Observation.StateDir {
+			return nil, ErrHostIdentity
+		}
+		operation := ""
+		switch args[0] {
+		case "stop":
+			operation = "unit-stop"
+		case "kill":
+			operation = "unit-kill"
+		default:
+			return nil, ErrHostChild
+		}
+		_, err := s.WorkerInvocation.Mutate(ctx, HostMutation{Operation: operation, Unit: s.Unit}, s.Launch, nil)
+		return nil, err
+	}
+	b, err := s.Command(ctx, "systemctl", append([]string{"--user"}, args...)...)
+	if err != nil {
+		return nil, ErrHostUserManager
+	}
+	return b, nil
 }
 func (s *SystemdHostService) show(ctx context.Context) (map[string]string, error) {
 	b, e := s.call(ctx, "show", s.Unit, "-p", "LoadState", "-p", "ActiveState", "-p", "ControlGroup", "-p", "KillMode", "-p", "SendSIGKILL", "-p", "TimeoutStopUSec")
