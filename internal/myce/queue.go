@@ -879,29 +879,6 @@ func (q *Queue) current(r Result) (*Job, error) {
 	return j, nil
 }
 func (q *Queue) Complete(r Result) error {
-	if r.Success && !r.Interrupted && !r.ReleaseOnly {
-		q.mu.Lock()
-		j := q.s.Jobs[r.ID]
-		var expected map[string]string
-		remote := j != nil && j.FileTransport
-		if remote {
-			expected = cloneJob(j).Spec.Outputs
-		}
-		q.mu.Unlock()
-		if remote {
-			if len(expected) != len(r.OutputRefs) {
-				return errors.New("complete output manifest required")
-			}
-			for name := range expected {
-				if _, ok := r.OutputRefs[name]; !ok {
-					return errors.New("missing output")
-				}
-			}
-			if err := q.verifyManifest(context.Background(), r.OutputRefs); err != nil {
-				return err
-			}
-		}
-	}
 	return q.updateMachine(r.Machine, func() error { return q.complete(r) })
 }
 func (q *Queue) complete(r Result) error {
@@ -985,7 +962,7 @@ func (q *Queue) complete(r Result) error {
 	// A kernel OOM is the payload's failure even if preemption raced it.
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
-	if cancelled(j) || j.State == "stopping" && !oomFailure && !(q.hostClosedReason(q.executionHost(j.Machine)) != "" && r.Success && !r.Interrupted) {
+	if cancelled(j) || j.State == "stopping" && !oomFailure {
 		if j.StopAt != nil && q.clock.Now().Before(*j.StopAt) {
 			if q.s.BatchReleases == nil {
 				q.s.BatchReleases = map[string]batchRelease{}
@@ -1027,6 +1004,19 @@ func (q *Queue) complete(r Result) error {
 		q.retry(j, "worker restarted after cleaning old processes")
 	} else if r.Success {
 		if j.FileTransport {
+			// Validate delivery only when accepting a current successful result.
+			// Superseded attempts are stale; interrupted attempts publish nothing.
+			if len(j.Spec.Outputs) != len(r.OutputRefs) {
+				return errors.New("complete output manifest required")
+			}
+			for name := range j.Spec.Outputs {
+				if _, ok := r.OutputRefs[name]; !ok {
+					return errors.New("missing output")
+				}
+			}
+			if err := q.verifyManifest(context.Background(), r.OutputRefs); err != nil {
+				return err
+			}
 			j.OutputRefs = r.OutputRefs
 			j.OutputFiles = nil
 		}

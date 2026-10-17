@@ -277,7 +277,10 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 	var initial []HostObligation
 	defer func() {
 		workers, e := h.workers()
-		final, _, holds, custodyErr := hostCustody(workers)
+		final, results, holds, custodyErr := hostCustody(workers)
+		if len(results) > 0 {
+			holds = append(holds, "diagnostic:undelivered_result")
+		}
 		boot, bootErr := HostBootID()
 		evidenceErrors := append([]string(nil), r.Unconfirmed...)
 		if retErr != nil {

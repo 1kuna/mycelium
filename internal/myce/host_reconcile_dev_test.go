@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -95,11 +96,11 @@ func TestHostReconcileDevQueueOutageCompletesBeforeAdmission(t *testing.T) {
 			completed = copy
 		}
 	}
-	if completed == nil || completed.State != "succeeded" || completed.Attempt != 1 || completed.Losses != 0 {
-		t.Fatal("offline completion was lost or rerun", completed)
+	if completed == nil || completed.State != "queued" || completed.Attempt != 1 || completed.Losses != 0 {
+		t.Fatal("undelivered attempt was not interrupted by close", completed)
 	}
 	current, err := ReadHostIntent(hostDir)
-	if err != nil || current.HostSettlement() != "confirmed" || len(current.Pending) != 0 {
+	if err != nil || current.HostSettlement() != "confirmed" || len(current.Pending) != 0 || !slices.Contains(current.Holds, "diagnostic:undelivered_result") {
 		t.Fatal(current, err)
 	}
 	m := machine("fake-1", "fake")

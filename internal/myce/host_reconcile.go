@@ -364,9 +364,7 @@ func reconcileHostEndpoint(dir, endpoint, boot string, clock Clock, workers []Ho
 	if s.Desired != "closed" || local == nil || !local.Confirmed || local.HostRevision != s.HostRevision || local.Boot != boot {
 		return nil
 	}
-	if err = hostReleaseEvidence(&request, s, endpoint, boot, ack.Pending, workers); err != nil {
-		return err
-	}
+	hostReleaseEvidence(&request, s, endpoint, boot, workers)
 	request.Request = ID()
 	ack, err = exchange(request)
 	if err != nil {
@@ -419,9 +417,7 @@ func (q *Queue) reconcileLocalAdmission() (func() error, error) {
 		return nil, err
 	}
 	request := newHostExchange(s, boot)
-	if err = hostReleaseEvidence(&request, s, q.localHostQueue, boot, q.hostObligations(s.Host), workers); err != nil {
-		return nil, err
-	}
+	hostReleaseEvidence(&request, s, q.localHostQueue, boot, workers)
 	ack, err := q.reconcileHost(request)
 	if err != nil {
 		observeHostQueueRevision(q.localHostDir, request, q.localHostQueue, q.s.HostIntents[s.Host].HostRevision)
@@ -457,9 +453,9 @@ func HostQueueClient(workers []HostWorker, token string) func(string) (Client, e
 	}
 }
 
-func hostReleaseEvidence(request *HostExchange, s HostIntent, endpoint, boot string, pending []HostObligation, workers []HostWorker) error {
+func hostReleaseEvidence(request *HostExchange, s HostIntent, endpoint, boot string, workers []HostWorker) {
 	if s.Desired != "closed" || !localExclusionConfirmed(s, boot) {
-		return nil
+		return
 	}
 	for _, session := range s.LocalExclusion.Sessions {
 		for _, w := range workers {
@@ -469,24 +465,6 @@ func hostReleaseEvidence(request *HostExchange, s HostIntent, endpoint, boot str
 			}
 		}
 	}
-	_, results, _, err := hostCustody(workers)
-	if err != nil {
-		return err
-	}
-	for _, r := range results {
-		matched := false
-		for _, p := range pending {
-			matched = matched || p.Engine == nil && obligationKey(p) == obligationKey(HostObligation{Result: r})
-		}
-		for _, session := range request.Sessions {
-			if matched && session.Machine == r.Machine && session.Session == r.Session {
-				r.ReleasePending = false
-				request.Results = append(request.Results, r)
-				break
-			}
-		}
-	}
-	return nil
 }
 
 func localCustody(s *HostIntent) []HostObligation {
