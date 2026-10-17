@@ -366,13 +366,13 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 			r := &reports[i]
 			if !r.Setup {
 				r.Reason = "setup required"
-				err = errors.New(r.Reason)
+				err = errors.Join(err, errors.New(r.Reason))
 				continue
 			}
 			b, ok := e.baseline(r.Work, platform)
 			if !ok {
 				r.Reason = "no native baseline"
-				err = errors.New(r.Reason)
+				err = errors.Join(err, errors.New(r.Reason))
 				continue
 			}
 			tmp, e2 := os.MkdirTemp(env["MYCE_EXTENSION_CACHE"], "check-")
@@ -398,7 +398,7 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 			}
 			_ = os.RemoveAll(tmp) // Only this invocation's reproducible check output.
 			if !r.Qualified {
-				err = errors.New(r.Reason)
+				err = errors.Join(err, errors.New(r.Reason), e2)
 			}
 		}
 	}

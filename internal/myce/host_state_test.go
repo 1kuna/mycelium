@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -137,6 +138,30 @@ func TestHostRevisionMissingCorruptUnsupportedAndMixed(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "DISABLED"), []byte(`{}`), 0600)
 	if _, err := ReadHostIntent(dir); !errors.Is(err, ErrHostState) {
 		t.Fatal(err)
+	}
+}
+
+func TestHostStateMissingAndLegacyMessages(t *testing.T) {
+	for _, legacy := range []string{"", "DISABLED", "worker-old.json"} {
+		t.Run("missing-"+legacy, func(t *testing.T) {
+			dir := t.TempDir()
+			if legacy != "" {
+				if err := os.WriteFile(filepath.Join(dir, legacy), []byte(`{}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := ReadHostIntent(dir)
+			if !errors.Is(err, ErrHostState) {
+				t.Fatal(err)
+			}
+			if legacy == "" {
+				if !strings.Contains(err.Error(), "this host has no Mycelium host state yet; provision it with `myce host open` (coming in #80 S08) or `myce dev`") || strings.Contains(err.Error(), "convert") {
+					t.Fatal("misleading provisioning error", err)
+				}
+			} else if !strings.Contains(err.Error(), "myce host convert offline") {
+				t.Fatal("missing legacy conversion pointer", err)
+			}
+		})
 	}
 }
 func TestHostRevisionReboot(t *testing.T) {

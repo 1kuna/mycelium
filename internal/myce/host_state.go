@@ -13,8 +13,12 @@ import (
 const hostStateFile = "host-state.json"
 const hostStateVersion = 1
 
-var ErrHostState = errors.New("host state unavailable; run myce host convert offline")
+var ErrHostState = errors.New("host state unavailable")
 var ErrHostRevision = errors.New("stale host revision")
+
+func legacyHostStateError() error {
+	return fmt.Errorf("%w: legacy host control state; run myce host convert offline", ErrHostState)
+}
 
 // HostRevision binds asynchronous work to one accepted operation, including across reopen.
 type HostRevision struct {
@@ -64,7 +68,7 @@ func hostRoot(dir string) (string, error) {
 		return HostStateDirectory()
 	}
 	if unitParent(dir) != "" {
-		return "", fmt.Errorf("%w: per-unit control directory", ErrHostState)
+		return "", legacyHostStateError()
 	}
 	return dir, nil
 }
@@ -84,21 +88,24 @@ func legacyHostPaths(dir string) ([]string, error) {
 }
 
 func validateHostIntent(s HostIntent) error {
-	if s.Schema != hostStateVersion || s.Host == "" || s.Revision == 0 || s.Operation == "" || s.AcceptedAt.IsZero() || (s.Desired != "open" && s.Desired != "closed") || s.PreviousClose > s.Revision {
-		return ErrHostState
+	if s.Schema != hostStateVersion {
+		return fmt.Errorf("%w: unsupported host state schema %d; use a compatible myce version", ErrHostState, s.Schema)
+	}
+	if s.Host == "" || s.Revision == 0 || s.Operation == "" || s.AcceptedAt.IsZero() || (s.Desired != "open" && s.Desired != "closed") || s.PreviousClose > s.Revision {
+		return fmt.Errorf("%w: invalid host intent fields", ErrHostState)
 	}
 	if s.Desired == "closed" && (s.StopDeadline == nil || s.PreviousClose != s.Revision) {
-		return ErrHostState
+		return fmt.Errorf("%w: invalid closed host intent", ErrHostState)
 	}
 	for _, p := range s.Pending {
 		if p.Engine != nil {
 			if p.Queue == "" || p.Engine.Machine == "" || p.Engine.Session == "" || p.Engine.Model == "" || p.Engine.Attempt == "" {
-				return ErrHostState
+				return fmt.Errorf("%w: incomplete engine custody", ErrHostState)
 			}
 			continue
 		}
 		if p.Queue == "" || p.Result.Machine == "" || p.Result.Session == "" || p.Result.ID == "" || p.Result.Attempt <= 0 {
-			return ErrHostState
+			return fmt.Errorf("%w: incomplete execution custody", ErrHostState)
 		}
 	}
 	return nil
@@ -111,20 +118,33 @@ func ReadHostIntent(dir string) (HostIntent, error) {
 		return s, err
 	}
 	if _, err = os.Stat(filepath.Join(dir, ".host-conversion", "IN_PROGRESS")); err == nil {
-		return s, fmt.Errorf("%w: conversion incomplete", ErrHostState)
+		return s, fmt.Errorf("%w: conversion incomplete; resume myce host convert offline", ErrHostState)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return s, errors.Join(ErrHostState, err)
 	}
 	paths, err := legacyHostPaths(dir)
-	if err != nil || len(paths) > 0 {
+	if err != nil {
 		return s, errors.Join(ErrHostState, err)
 	}
+	if len(paths) > 0 {
+		return s, legacyHostStateError()
+	}
 	b, err := os.ReadFile(filepath.Join(dir, hostStateFile))
+	if errors.Is(err, os.ErrNotExist) {
+		registries, e := filepath.Glob(filepath.Join(dir, "worker-*.json"))
+		if e != nil {
+			return s, errors.Join(ErrHostState, e)
+		}
+		if len(registries) > 0 {
+			return s, legacyHostStateError()
+		}
+		return s, fmt.Errorf("%w: this host has no Mycelium host state yet; provision it with `myce host open` (coming in #80 S08) or `myce dev`", ErrHostState)
+	}
 	if err != nil {
 		return s, errors.Join(ErrHostState, err)
 	}
 	if err = json.Unmarshal(b, &s); err != nil {
-		return HostIntent{}, errors.Join(ErrHostState, err)
+		return HostIntent{}, fmt.Errorf("%w: corrupt host state: %w", ErrHostState, err)
 	}
 	if err = validateHostIntent(s); err != nil {
 		return HostIntent{}, err
@@ -203,14 +223,14 @@ func InitializeHostIntent(dir, host string, clock Clock) (HostIntent, error) {
 	}
 	paths, err := legacyHostPaths(dir)
 	if err != nil || len(paths) > 0 {
-		return s, ErrHostState
+		return s, errors.Join(legacyHostStateError(), err)
 	}
 	registries, err := filepath.Glob(filepath.Join(dir, "worker-*.json"))
 	if err != nil || len(registries) > 0 {
-		return s, ErrHostState
+		return s, errors.Join(legacyHostStateError(), err)
 	}
 	if _, err = os.Lstat(filepath.Join(dir, ".host-conversion", "IN_PROGRESS")); !errors.Is(err, os.ErrNotExist) {
-		return s, ErrHostState
+		return s, fmt.Errorf("%w: conversion incomplete; resume myce host convert offline", ErrHostState)
 	}
 	now := clock.Now()
 	s = HostIntent{Schema: hostStateVersion, Host: host, HostRevision: HostRevision{Revision: 1, Operation: ID()}, Desired: "closed", Reason: "initial provisioning", AcceptedAt: now, StopDeadline: &now, PreviousClose: 1}
