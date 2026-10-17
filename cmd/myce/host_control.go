@@ -17,9 +17,6 @@ import (
 )
 
 func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
-	if len(args) > 0 && args[0] == "enable" {
-		return errors.New("myce enable is retired; use myce host open --expect-revision with the v3 host CLI (S08)")
-	}
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	unit := f.String("unit", "", "target one registered Mycelium worker unit (Linux only)")
 	dir := f.String("host-state-dir", "", "shared local host control directory (default ~/.local/share/myce)")
@@ -38,6 +35,9 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 	}
 	if f.NArg() != 0 {
 		return errors.New("unexpected host-control arguments")
+	}
+	if len(args) > 0 && args[0] == "enable" {
+		return errors.New("myce enable is retired; use myce host open --expect-revision with the v3 host CLI (S08)")
 	}
 	if *now {
 		*grace = 0
