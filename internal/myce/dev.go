@@ -30,7 +30,8 @@ type DevConfig struct {
 	Interval                              time.Duration
 }
 
-// Dev runs the real API and command-executing workers. The only fake is GPU inventory.
+// Dev runs the real API and command-executing workers with fake GPU inventory
+// and an advance-only queue clock.
 type Dev struct {
 	workerWG  sync.WaitGroup
 	stopQueue context.CancelFunc
@@ -56,6 +57,7 @@ func StartDev(c DevConfig) (*Dev, error) {
 	if err := os.MkdirAll(c.Checkpoints, 0700); err != nil {
 		return nil, err
 	}
+	clock := &devClock{}
 	freshHost := false
 	if c.HostID == "" {
 		c.HostID = "dev-host"
@@ -65,7 +67,7 @@ func StartDev(c DevConfig) (*Dev, error) {
 		c.HostStateDir = filepath.Join(filepath.Dir(c.Database), "dev-host")
 	}
 	if _, e := os.Stat(filepath.Join(c.HostStateDir, hostStateFile)); errors.Is(e, os.ErrNotExist) {
-		_, e := InitializeHostIntent(c.HostStateDir, c.HostID, RealClock{})
+		_, e := InitializeHostIntent(c.HostStateDir, c.HostID, clock)
 		if e != nil {
 			return nil, e
 		}
@@ -74,7 +76,7 @@ func StartDev(c DevConfig) (*Dev, error) {
 	if _, e := ReadHostIntent(c.HostStateDir); e != nil {
 		return nil, e
 	}
-	q, err := Open(c.Database, c.Checkpoints, RealClock{})
+	q, err := Open(c.Database, c.Checkpoints, clock)
 	if err != nil {
 		return nil, err
 	}
