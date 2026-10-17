@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "command": "status",
+  "host_id": null,
+  "operation_id": null,
+  "boot_id": null,
+  "accepted_revision": null,
+  "desired": {
+    "state": null,
+    "revision": null
+  },
+  "observed": {
+    "state": "unknown",
+    "revision": null
+  },
+  "local_exclusion": "UNKNOWN",
+  "host_settlement": "unknown",
+  "queue_observed_revision": null,
+  "counts": {
+    "active_attempts": null,
+    "preparing_attempts": null,
+    "stopping_attempts": null,
+    "pending_daemon_operations": null,
+    "running_containers": null,
+    "owned_gpu_holders": null,
+    "unsettled_attempts": null,
+    "queued_jobs": null,
+    "fenced_queued_jobs": null,
+    "unresolved_placement": null
+  },
+  "units": null,
+  "attempts": null,
+  "restart_safe": null,
+  "observed_at": "2026-10-17T12:00:00Z",
+  "source_observed_at": {
+    "local_intent": null,
+    "cgroups": null,
+    "docker": null,
+    "gpu_holders": null,
+    "queue": null
+  },
+  "errors": [
+    {
+      "component": "local_intent",
+      "code": "state_uninitialized",
+      "message": "Host state has not been initialized."
+    }
+  ],
+  "expectation": "closed",
+  "verdict": "UNKNOWN",
+  "reasons": [
+    "state_uninitialized",
+    "evidence_unavailable"
+  ],
+  "queue_reachable": null,
+  "memory_allowance_bytes": null
+}
