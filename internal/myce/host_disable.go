@@ -369,6 +369,24 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 			case <-time.After(10 * time.Millisecond):
 			}
 		}
+		// CLI commands are outside worker service cgroups and the worker registry.
+		unlock, e := h.waitHostLaunches()
+		if e != nil {
+			r.Unconfirmed = append(r.Unconfirmed, "launch gate not confirmed: "+e.Error())
+		} else {
+			defer unlock()
+		}
+		records, readErr := hostProcessRecords(nil, hostCommandDirectory(h.Dir))
+		if readErr != nil {
+			r.Unconfirmed = append(r.Unconfirmed, readErr.Error())
+		}
+		r.Stopped, err = h.stopOwned(records, max(0, intent.StopDeadline.Sub(h.Clock.Now())))
+		if err != nil {
+			r.Unconfirmed = append(r.Unconfirmed, err.Error())
+		}
+		if runtime.GOOS == "darwin" && h.Processes.native && len(records) > 0 {
+			r.Unconfirmed = append(r.Unconfirmed, "macOS can hide process environment markers; detached descendants unconfirmed")
+		}
 		r.Confirmed = len(r.Unconfirmed) == 0
 	} else {
 		r.BestEffort = true
@@ -389,26 +407,13 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 				r.Unconfirmed = append(r.Unconfirmed, "worker "+w.Name+": "+e.Error())
 			}
 		}
-		lock, e := os.OpenFile(filepath.Join(h.Dir, "launch.lock"), os.O_CREATE|os.O_RDWR, 0600)
-		if e == nil {
-			deadline := h.Clock.Now().Add(time.Second)
-			for {
-				e = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-				if e == nil || (!h.Clock.Now().Before(deadline) || h.contextDone()) {
-					break
-				}
-				h.Processes.Pause(10 * time.Millisecond)
-			}
-		}
+		unlock, e := h.waitHostLaunches()
 		if e != nil {
-			if lock != nil {
-				lock.Close()
-			}
 			r.Unconfirmed = append(r.Unconfirmed, "launch gate not confirmed: "+e.Error())
 		} else {
-			defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() }()
+			defer unlock()
 		}
-		records, readErr := hostProcessRecords(workers)
+		records, readErr := hostProcessRecords(workers, hostCommandDirectory(h.Dir))
 		if readErr != nil {
 			r.Unconfirmed = append(r.Unconfirmed, readErr.Error())
 		}
@@ -501,7 +506,27 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 	return r, nil
 }
 
-func hostProcessRecords(workers []HostWorker) ([]workerState, error) {
+// Wait for durable process custody from any launch accepted before close.
+func (h HostControl) waitHostLaunches() (func(), error) {
+	lock, err := os.OpenFile(filepath.Join(h.Dir, "launch.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	deadline := h.Clock.Now().Add(time.Second)
+	for {
+		err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() }, nil
+		}
+		if !h.Clock.Now().Before(deadline) || h.contextDone() {
+			_ = lock.Close()
+			return nil, err
+		}
+		h.Processes.Pause(10 * time.Millisecond)
+	}
+}
+
+func hostProcessRecords(workers []HostWorker, commandDirs ...string) ([]workerState, error) {
 	var records []workerState
 	var errs []error
 	seen := map[string]bool{}
@@ -525,6 +550,15 @@ func hostProcessRecords(workers []HostWorker) ([]workerState, error) {
 		}
 		if st.Identity != "" || st.PID > 0 {
 			records = append(records, st)
+		}
+	}
+	for _, dir := range commandDirs {
+		paths, err := filepath.Glob(filepath.Join(dir, "attempt-command-*.json"))
+		if err != nil {
+			errs = append(errs, err)
+		}
+		for _, path := range paths {
+			add(path)
 		}
 	}
 	for _, w := range workers {

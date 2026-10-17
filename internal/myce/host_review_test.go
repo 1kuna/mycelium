@@ -263,53 +263,64 @@ func TestHostRevisionDockerCloseBeforeDispatch(t *testing.T) {
 }
 
 func TestHostRevisionBenchmarkCommandCustody(t *testing.T) {
-	dir := readyTestHost(t, t.TempDir())
-	state := t.TempDir()
-	scope := hostCommandScope{HostDir: dir, StateDir: state, Revision: readTestHostRevision(t, dir), Clock: RealClock{}}
-	done := make(chan error, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ready := filepath.Join(state, "ready")
-	go func() {
-		done <- runExtensionCommand(ctx, []string{"/bin/sh", "-c", `printf ready > "$1"; sleep 60`, "benchmark", ready}, state, map[string]string{}, io.Discard, scope)
-	}()
-	var records []workerState
-	await(t, func() bool {
-		if _, err := os.Stat(ready); err != nil {
-			return false
-		}
-		workers, err := HostWorkers(dir)
-		if err != nil {
-			return false
-		}
-		records, err = hostProcessRecords(workers)
-		return err == nil && len(records) == 1 && records[0].PID > 0
-	})
-	report, err := (HostControl{Dir: dir}).Disable(context.Background(), "close benchmark", 0)
-	if report.Stopped != 1 {
-		t.Fatal("Disable did not find benchmark custody", report, err)
-	}
-	if err != nil && (runtime.GOOS != "darwin" || !strings.Contains(err.Error(), "macOS can hide process environment markers")) {
-		t.Fatal(report, err)
-	}
-	select {
-	case err = <-done:
-		if err == nil {
-			t.Fatal("benchmark survived close")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("benchmark group not stopped")
-	}
-	// A delayed benchmark command cannot bind itself to a subsequent open.
-	closed, err := ReadHostIntent(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = changeHostIntent(dir, RealClock{}, hostIntentChange{Desired: "open", Expected: closed.HostRevision, Settled: func(HostIntent) error { return nil }}); err != nil {
-		t.Fatal(err)
-	}
-	if err = runExtensionCommand(context.Background(), []string{"/bin/true"}, state, nil, io.Discard, scope); !errors.Is(err, ErrHostRevision) {
-		t.Fatal("stale benchmark command admitted", err)
+	for _, service := range []bool{false, true} {
+		t.Run(map[bool]string{false: "standalone", true: "service"}[service], func(t *testing.T) {
+			dir := readyTestHost(t, t.TempDir())
+			state := t.TempDir()
+			scope := hostCommandScope{HostDir: dir, StateDir: state, Revision: readTestHostRevision(t, dir), Clock: RealClock{}}
+			done := make(chan error, 1)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ready := filepath.Join(state, "ready")
+			go func() {
+				done <- runExtensionCommand(ctx, []string{"/bin/sh", "-c", `printf ready > "$1"; sleep 60`, "benchmark", ready}, state, map[string]string{}, io.Discard, scope)
+			}()
+			var records []workerState
+			await(t, func() bool {
+				if _, err := os.Stat(ready); err != nil {
+					return false
+				}
+				workers, err := HostWorkers(dir)
+				if err != nil {
+					return false
+				}
+				if len(workers) != 0 {
+					t.Fatal("active command registered as worker", workers)
+				}
+				records, err = hostProcessRecords(workers, hostCommandDirectory(dir))
+				return err == nil && len(records) == 1 && records[0].PID > 0
+			})
+			control := HostControl{Dir: dir}
+			if service {
+				control.Service = &fakeHostService{}
+			}
+			report, err := control.Disable(context.Background(), "close benchmark", 0)
+			if report.Stopped != 1 {
+				t.Fatal("Disable did not find benchmark custody", report, err)
+			}
+			if err != nil && (runtime.GOOS != "darwin" || !strings.Contains(err.Error(), "macOS can hide process environment markers")) {
+				t.Fatal(report, err)
+			}
+			select {
+			case err = <-done:
+				if err == nil {
+					t.Fatal("benchmark survived close")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("benchmark group not stopped")
+			}
+			// A delayed benchmark command cannot bind itself to a subsequent open.
+			closed, err := ReadHostIntent(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = changeHostIntent(dir, RealClock{}, hostIntentChange{Desired: "open", Expected: closed.HostRevision, Settled: func(HostIntent) error { return nil }}); err != nil {
+				t.Fatal(err)
+			}
+			if err = runExtensionCommand(context.Background(), []string{"/bin/true"}, state, nil, io.Discard, scope); !errors.Is(err, ErrHostRevision) {
+				t.Fatal("stale benchmark command admitted", err)
+			}
+		})
 	}
 }
 

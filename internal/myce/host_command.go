@@ -17,6 +17,8 @@ type hostCommandScope struct {
 	Clock             Clock
 }
 
+func hostCommandDirectory(dir string) string { return filepath.Join(dir, "local-commands") }
+
 func (s *hostCommandScope) prepare() error {
 	var err error
 	s.HostDir, err = hostRoot(s.HostDir)
@@ -29,23 +31,15 @@ func (s *hostCommandScope) prepare() error {
 	if err = bindHostRevision(s.HostDir, &s.Revision); err != nil {
 		return err
 	}
-	if s.StateDir == "" {
-		s.StateDir = filepath.Join(s.HostDir, "local-commands")
-	}
-	s.StateDir, err = filepath.Abs(s.StateDir)
+	// Standalone commands have host custody, not worker membership or a queue.
+	s.StateDir, err = filepath.Abs(hostCommandDirectory(s.HostDir))
 	if err != nil {
 		return err
 	}
 	if err = os.MkdirAll(s.StateDir, 0700); err != nil {
 		return err
 	}
-	intent, err := ReadHostIntent(s.HostDir)
-	if err != nil {
-		return err
-	}
-	return hostDispatch(s.HostDir, s.Revision, func() error {
-		return AdoptHostWorker(s.HostDir, HostWorker{State: s.StateDir, Host: intent.Host, Name: "local-command"})
-	})
+	return nil
 }
 
 // The ordinary build/extension command supervisor persists custody before
@@ -112,5 +106,12 @@ func runRecordedHostCommand(ctx context.Context, argv []string, dir string, env 
 	waitErr := cmd.Wait()
 	_ = syscall.Kill(-state.PID, syscall.SIGKILL)
 	groupErr := waitWorkerGroup(state.PID, scope.Clock)
+	if groupErr == nil {
+		if err := os.Remove(filepath.Join(scope.StateDir, record)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			groupErr = err
+		} else {
+			groupErr = syncWorkerDir(scope.StateDir)
+		}
+	}
 	return errors.Join(e, waitErr, groupErr)
 }
