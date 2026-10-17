@@ -1,0 +1,409 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mycelium host envelope v1",
+  "description": "Specified, not yet implemented. Shared close/open/status envelope. Null is unknown, never zero. Verdict fields occur together. Additional diagnostic fields are allowed. Validation checks structure, not evidence freshness or release safety.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "command": {
+      "enum": [
+        "close",
+        "open",
+        "status"
+      ]
+    },
+    "host_id": {
+      "$ref": "#/$defs/nullableIdentity"
+    },
+    "operation_id": {
+      "$ref": "#/$defs/nullableIdentity"
+    },
+    "boot_id": {
+      "$ref": "#/$defs/nullableIdentity"
+    },
+    "accepted_revision": {
+      "$ref": "#/$defs/nullableRevision"
+    },
+    "desired": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "open",
+            "closed",
+            null
+          ]
+        },
+        "revision": {
+          "$ref": "#/$defs/nullableRevision"
+        }
+      },
+      "required": [
+        "state",
+        "revision"
+      ]
+    },
+    "observed": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "open",
+            "closed",
+            "releasing",
+            "unknown"
+          ]
+        },
+        "revision": {
+          "$ref": "#/$defs/nullableRevision"
+        }
+      },
+      "required": [
+        "state",
+        "revision"
+      ]
+    },
+    "local_exclusion": {
+      "$ref": "#/$defs/verdict"
+    },
+    "host_settlement": {
+      "enum": [
+        "confirmed",
+        "pending",
+        "unknown"
+      ]
+    },
+    "queue_observed_revision": {
+      "$ref": "#/$defs/nullableRevision"
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "active_attempts": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "preparing_attempts": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "stopping_attempts": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "pending_daemon_operations": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "running_containers": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "owned_gpu_holders": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "unsettled_attempts": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "queued_jobs": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "fenced_queued_jobs": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "unresolved_placement": {
+          "$ref": "#/$defs/nullableCount"
+        }
+      },
+      "required": [
+        "active_attempts",
+        "preparing_attempts",
+        "stopping_attempts",
+        "pending_daemon_operations",
+        "running_containers",
+        "owned_gpu_holders",
+        "unsettled_attempts",
+        "queued_jobs",
+        "fenced_queued_jobs",
+        "unresolved_placement"
+      ]
+    },
+    "units": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/unit"
+      },
+      "description": "Null means unreadable or incomplete; [] means a complete empty inventory."
+    },
+    "attempts": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/attempt"
+      },
+      "description": "Null means unreadable or incomplete; [] means a complete empty inventory."
+    },
+    "restart_safe": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "observed_at": {
+      "$ref": "#/$defs/utcTime"
+    },
+    "source_observed_at": {
+      "type": "object",
+      "properties": {
+        "local_intent": {
+          "$ref": "#/$defs/nullableUtcTime"
+        },
+        "cgroups": {
+          "$ref": "#/$defs/nullableUtcTime"
+        },
+        "docker": {
+          "$ref": "#/$defs/nullableUtcTime"
+        },
+        "gpu_holders": {
+          "$ref": "#/$defs/nullableUtcTime"
+        },
+        "queue": {
+          "$ref": "#/$defs/nullableUtcTime"
+        }
+      },
+      "required": [
+        "local_intent",
+        "cgroups",
+        "docker",
+        "gpu_holders",
+        "queue"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/nullableUtcTime"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "component": {
+            "$ref": "#/$defs/identity"
+          },
+          "code": {
+            "$ref": "#/$defs/identity"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "component",
+          "code",
+          "message"
+        ]
+      }
+    },
+    "expectation": {
+      "enum": [
+        "closed",
+        "ready"
+      ]
+    },
+    "verdict": {
+      "$ref": "#/$defs/verdict"
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/identity"
+      },
+      "uniqueItems": true
+    },
+    "queue_reachable": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "memory_allowance_bytes": {
+      "$ref": "#/$defs/nullableCount"
+    }
+  },
+  "required": [
+    "schema_version",
+    "command",
+    "host_id",
+    "operation_id",
+    "boot_id",
+    "accepted_revision",
+    "desired",
+    "observed",
+    "local_exclusion",
+    "host_settlement",
+    "queue_observed_revision",
+    "counts",
+    "units",
+    "attempts",
+    "restart_safe",
+    "observed_at",
+    "source_observed_at",
+    "errors"
+  ],
+  "dependentRequired": {
+    "expectation": [
+      "verdict",
+      "reasons",
+      "queue_reachable",
+      "memory_allowance_bytes"
+    ],
+    "verdict": [
+      "expectation",
+      "reasons",
+      "queue_reachable",
+      "memory_allowance_bytes"
+    ],
+    "reasons": [
+      "expectation",
+      "verdict",
+      "queue_reachable",
+      "memory_allowance_bytes"
+    ],
+    "queue_reachable": [
+      "expectation",
+      "verdict",
+      "reasons",
+      "memory_allowance_bytes"
+    ],
+    "memory_allowance_bytes": [
+      "expectation",
+      "verdict",
+      "reasons",
+      "queue_reachable"
+    ]
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "status"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "accepted_revision": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nullableIdentity": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "nullableRevision": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "nullableCount": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "utcTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)(\\.[0-9]+)?Z$"
+    },
+    "nullableUtcTime": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/utcTime"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "verdict": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "UNKNOWN"
+      ]
+    },
+    "unit": {
+      "type": "object",
+      "properties": {
+        "unit": {
+          "$ref": "#/$defs/identity"
+        },
+        "cgroup": {
+          "$ref": "#/$defs/nullableIdentity"
+        },
+        "populated": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "unit",
+        "cgroup",
+        "populated"
+      ]
+    },
+    "attempt": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/identity"
+        },
+        "machine_id": {
+          "$ref": "#/$defs/identity"
+        },
+        "session_id": {
+          "$ref": "#/$defs/identity"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "release_state": {
+          "$ref": "#/$defs/identity"
+        }
+      },
+      "required": [
+        "job_id",
+        "machine_id",
+        "session_id",
+        "attempt",
+        "release_state"
+      ]
+    }
+  }
+}

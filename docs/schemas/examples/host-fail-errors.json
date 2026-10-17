@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "command": "close",
+  "host_id": "example-host-id",
+  "operation_id": "example-close-id",
+  "boot_id": "example-boot-id",
+  "accepted_revision": 7,
+  "desired": {
+    "state": "closed",
+    "revision": 7
+  },
+  "observed": {
+    "state": "releasing",
+    "revision": 7
+  },
+  "local_exclusion": "FAIL",
+  "host_settlement": "pending",
+  "queue_observed_revision": 7,
+  "counts": {
+    "active_attempts": 1,
+    "preparing_attempts": 0,
+    "stopping_attempts": 0,
+    "pending_daemon_operations": 0,
+    "running_containers": 0,
+    "owned_gpu_holders": 1,
+    "unsettled_attempts": 1,
+    "queued_jobs": 2,
+    "fenced_queued_jobs": 2,
+    "unresolved_placement": 0
+  },
+  "units": null,
+  "attempts": [
+    {
+      "job_id": "example-job-id",
+      "machine_id": "example-worker-id",
+      "session_id": "example-session-id",
+      "attempt": 1,
+      "release_state": "pending"
+    }
+  ],
+  "restart_safe": null,
+  "observed_at": "2026-10-17T12:00:00Z",
+  "source_observed_at": {
+    "local_intent": "2026-10-17T12:00:00Z",
+    "cgroups": null,
+    "docker": "2026-10-17T12:00:00Z",
+    "gpu_holders": "2026-10-17T12:00:00Z",
+    "queue": "2026-10-17T12:00:00Z"
+  },
+  "errors": [
+    {
+      "component": "gpu_holders",
+      "code": "owned_gpu_holder",
+      "message": "An owned process still holds an affected device."
+    },
+    {
+      "component": "cgroups",
+      "code": "permission_denied",
+      "message": "Complete cgroup inventory is unavailable."
+    }
+  ],
+  "expectation": "closed",
+  "verdict": "FAIL",
+  "reasons": [
+    "owned_gpu_holder",
+    "cgroup_unreadable"
+  ],
+  "queue_reachable": true,
+  "memory_allowance_bytes": null
+}

@@ -1,4 +1,4 @@
-# Mycelium v2
+# Mycelium v3
 
 - `docs/design-proposal.md` is the approved design and the only product spec.
 - Keep every feature easy to use and testable on a laptop with no GPU.
