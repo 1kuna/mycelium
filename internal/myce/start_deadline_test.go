@@ -446,7 +446,7 @@ func TestProductionStartDeadlineOwnDockerPreparationPermit(t *testing.T) {
 
 func TestProductionStartDeadlineWorkerSendsRejectedResultCleanup(t *testing.T) {
 	w := recoveryWorker(t)
-	w.HostStateDir = t.TempDir()
+	w.HostStateDir = readyTestHost(t, t.TempDir())
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)

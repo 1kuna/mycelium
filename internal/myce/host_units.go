@@ -27,7 +27,7 @@ func ValidWorkerUnit(unit string) bool {
 	return true
 }
 
-// Instance state reuses the generation/receipt contract, but never fences the queue's entire physical host.
+// Unit selection is diagnostic; all worker units share one host authority.
 func WorkerUnitDirectory(dir, unit string) (string, error) {
 	if !ValidWorkerUnit(unit) {
 		return "", errors.New("refusing non-Mycelium worker unit")
@@ -39,7 +39,7 @@ func WorkerUnitDirectory(dir, unit string) (string, error) {
 			return "", err
 		}
 	}
-	return filepath.Join(dir, "units", unit), nil
+	return dir, nil
 }
 func unitParent(dir string) string {
 	if filepath.Base(filepath.Dir(dir)) == "units" && ValidWorkerUnit(filepath.Base(dir)) {

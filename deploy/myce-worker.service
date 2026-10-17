@@ -1,10 +1,10 @@
 [Unit]
-ConditionPathExists=!%h/.local/share/myce/DISABLED
 Description=Mycelium v2 plain-command worker
 After=network-online.target
 
 [Service]
 Type=simple
+ExecCondition=%h/.local/bin/myce _host-start-check --host-state-dir %h/.local/share/myce
 WorkingDirectory=%h/.local/share/myce
 EnvironmentFile=%h/.config/myce/worker.env
 ExecStart=%h/.local/bin/myce join --state-dir %h/.local/share/myce/worker --name REPLACE_WORKER_NAME --gpu REPLACE_GPU --memory-gb REPLACE_BUDGET_GB --reserve-memory-gb REPLACE_RESERVE_GB --heartbeat 1s --checkpoint-root REPLACE_CHECKPOINT_ROOT

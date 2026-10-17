@@ -1,48 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
+
 	"testing"
 	"time"
 
 	"mycelium/internal/myce"
 )
-
-func TestHostQueuesCLI(t *testing.T) {
-	dir := t.TempDir()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	w := myce.HostWorker{State: t.TempDir(), Name: "worker", Queue: "http://127.0.0.1:1111", Host: "local"}
-	if err := myce.AdoptHostWorker(dir, w); err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	if err := hostQueuesCommand([]string{"list", "--host-state-dir", dir}, myce.MachineProbe{}, &out); err != nil || strings.TrimSpace(out.String()) != w.Queue {
-		t.Fatalf("list failed: %v", err)
-	}
-	lock, err := os.OpenFile(filepath.Join(w.State, "worker.lock"), os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lock.Close()
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		t.Fatal(err)
-	}
-	if err = hostQueuesCommand([]string{"forget", w.Queue, "--host-state-dir", dir}, myce.MachineProbe{}, &out); err == nil {
-		t.Fatal("forgot live worker")
-	}
-	if err = hostQueuesCommand([]string{"forget", w.Queue, "--force", "--host-state-dir", dir}, myce.MachineProbe{}, &out); err != nil {
-		t.Fatal(err)
-	}
-	out.Reset()
-	if err = hostQueuesCommand([]string{"list", "--host-state-dir", dir}, myce.MachineProbe{}, &out); err != nil || out.Len() != 0 {
-		t.Fatal("forgotten queue still listed")
-	}
-}
 
 func TestLocalWorkerQueueConfig(t *testing.T) {
 	home := t.TempDir()

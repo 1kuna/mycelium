@@ -45,6 +45,7 @@ type Worker struct {
 	LogRetention          time.Duration
 	dockerCallTimeout     time.Duration
 	Unit                  string
+	hostRevision          HostRevision
 	HostStateDir          string
 	SuperviseProcess      bool
 	ResumeCommand         []string
@@ -141,6 +142,9 @@ var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 var errWorkerReleasePending = errors.New("command release unconfirmed")
 
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
+	if err := bindHostRevision(w.HostStateDir, &w.hostRevision); err != nil {
+		return nil, err
+	}
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
 	}
@@ -266,7 +270,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			return nil, err
 		}
 	}
-	unlock, err := hostLaunchGate(w.HostStateDir)
+	unlock, err := hostLaunchGate(w.HostStateDir, w.hostRevision)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +416,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		output.Close()
 		return nil, err
 	}
-	if err = cmd.Start(); err != nil {
+	if err = hostDispatch(w.HostStateDir, w.hostRevision, cmd.Start); err != nil {
 		output.Close()
 		return nil, err
 	}
@@ -443,7 +447,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if w.control != nil {
 		w.control.set(p)
 	}
-	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
+	if err = hostDispatch(w.HostStateDir, w.hostRevision, func() error { _, e := gateWriter.Write([]byte("start\n")); return e }); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	if readyReader != nil {
@@ -455,7 +459,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		}
 		err = w.authorizeStart(j, s.state.Session)
 		if err == nil {
-			_, err = approvalWriter.Write([]byte("S"))
+			err = hostDispatch(w.HostStateDir, w.hostRevision, func() error { _, e := approvalWriter.Write([]byte("S")); return e })
 		}
 		approvalWriter.Close()
 		// A refused hand-off is an ordinary failed attempt; the payload remains gated.
@@ -575,6 +579,12 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	if err := bindHostRevision(w.HostStateDir, &w.hostRevision); err != nil {
+		if errors.Is(err, errHostDisabled) {
+			return nil
+		}
+		return err
+	}
 	reason, disableErr := HostDisabled(w.HostStateDir)
 	if disableErr != nil {
 		return disableErr
@@ -636,7 +646,7 @@ func (w Worker) Run(stop context.Context) error {
 	if err = w.refreshHostMemoryBudget(); err != nil {
 		return err
 	}
-	w.environmentCache = &EnvironmentCache{HostStateDir: w.HostStateDir, Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
+	w.environmentCache = &EnvironmentCache{hostRevision: w.hostRevision, HostStateDir: w.HostStateDir, Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
 	}
@@ -848,8 +858,8 @@ func (w Worker) Run(stop context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
-				reason, e := HostDisabled(w.HostStateDir)
-				if e != nil || reason != "" {
+				e := CheckHostRevision(w.HostStateDir, w.hostRevision)
+				if e != nil {
 					disableCancel()
 					return
 				}
@@ -899,7 +909,7 @@ func (w Worker) Run(stop context.Context) error {
 	for {
 		if ctx.Err() != nil {
 			if p != nil {
-				grace := hostDisableGrace(w.HostStateDir)
+				grace := hostDisableGrace(w.HostStateDir, w.Clock)
 				p.stop(w.Clock.Now(), grace, false)
 				for {
 					p.enforceGrace(w.Clock.Now())
@@ -1087,8 +1097,16 @@ func (w Worker) Run(stop context.Context) error {
 				running = &Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt, Progress: progress}
 			}
 			var reply Reply
+			if e := CheckHostRevision(w.HostStateDir, w.hostRevision); e != nil {
+				disableCancel()
+				continue
+			}
 			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running"), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
 			if err == nil {
+				if e := CheckHostRevision(w.HostStateDir, w.hostRevision); e != nil {
+					disableCancel()
+					continue
+				}
 				if enablePending {
 					reply.Leave, reply.AdmissionBlocked = false, true
 					reply.Job, reply.ModelPlan, reply.EnvironmentPlan, reply.CopyPlan = nil, nil, nil, nil
@@ -1383,12 +1401,5 @@ func (w Worker) checkHostRAM(gpu, host float64) error {
 }
 
 func (w Worker) reconcileEnable(ctx context.Context) error {
-	notify := NotifyHost(w.Client)
-	if parent := unitParent(w.HostStateDir); parent != "" {
-		if err := (HostControl{Dir: parent, Notify: notify}).ReconcileWorkerEnable(ctx, w.Client.URL, w.Machine.HostID); err != nil {
-			return err
-		}
-		notify = NotifyUnit(w.Client)
-	}
-	return (HostControl{Dir: w.HostStateDir, Notify: notify}).ReconcileWorkerEnable(ctx, w.Client.URL, w.Machine.HostID)
+	return CheckHostRevision(w.HostStateDir, w.hostRevision)
 }

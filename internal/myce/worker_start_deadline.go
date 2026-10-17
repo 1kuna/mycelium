@@ -8,6 +8,9 @@ import (
 
 // A positive reply means this exact attempt is durably started, before execution.
 func (w Worker) authorizeStart(j Job, session string) error {
+	if err := CheckHostRevision(w.HostStateDir, w.hostRevision); err != nil {
+		return err
+	}
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
@@ -35,6 +38,9 @@ func (w Worker) authorizeStart(j Job, session string) error {
 		return err
 	} else if reason != "" {
 		return fmt.Errorf("worker start refused: %s", reason)
+	}
+	if err := CheckHostRevision(w.HostStateDir, w.hostRevision); err != nil {
+		return err
 	}
 	return w.checkAvailability()
 }

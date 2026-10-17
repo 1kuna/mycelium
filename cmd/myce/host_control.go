@@ -74,16 +74,7 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 	}
 	sharedDir := *dir
 	if *unit != "" {
-		if probe.OS != "linux" {
-			return errors.New("--unit requires Linux systemd")
-		}
-		if _, err = myce.WorkerUnits(sharedDir, *unit); err != nil {
-			return err
-		}
-		*dir, err = myce.WorkerUnitDirectory(sharedDir, *unit)
-		if err != nil {
-			return err
-		}
+		return errors.New("unit selection is diagnostic only; control the whole host")
 	}
 	token := env("MYCE_TOKEN", "")
 	var c myce.ServiceConfig
@@ -142,20 +133,6 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 				return e
 			}
 		}
-		if *unit != "" {
-			workers, e := myce.HostWorkers(sharedDir)
-			if e != nil {
-				return e
-			}
-			for _, w := range workers {
-				if w.Unit == *unit {
-					if e = myce.AdoptHostWorker(*dir, w); e != nil {
-						return e
-					}
-				}
-			}
-			service = *unit
-		}
 		return nil
 	}
 	units := []string{}
@@ -181,14 +158,7 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 	if *timeout < 0 {
 		return errors.New("timeout must be positive")
 	}
-	h := myce.HostControl{Docker: true, Timeout: *timeout, Dir: *dir, Prepare: prepare, Notify: func(ctx context.Context, w myce.HostWorker, enable, cleared bool, reason string) error {
-		return myce.NotifyHost(myce.Client{Token: token})(ctx, w, enable, cleared, reason)
-	}}
-	if *unit != "" {
-		h.Notify = func(ctx context.Context, w myce.HostWorker, enable, cleared bool, reason string) error {
-			return myce.NotifyUnit(myce.Client{Token: token})(ctx, w, enable, cleared, reason)
-		}
-	}
+	h := myce.HostControl{Docker: true, Timeout: *timeout, Dir: *dir, Prepare: prepare}
 	if args[0] == "disable" {
 		h.ResolveServices = func() (map[string]myce.HostService, error) {
 			if err := resolveUnits(); err != nil {
@@ -230,14 +200,14 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 			fmt.Fprintln(out, "Docker:", r.Docker)
 		}
 		if len(r.QueueErrors) > 0 {
-			fmt.Fprintln(out, "Queue notification unconfirmed; local flag is in place. A completed cleanup receipt will reconcile at enable/rejoin.")
+			fmt.Fprintln(out, "Queue notification unconfirmed; durable host intent remains closed.")
 		}
 		err = cleanupErr
 		confirmation := "none"
 		if err != nil {
 			confirmation = err.Error()
 		}
-		fmt.Fprintf(out, "Disabled: stopped %d owned process groups; unconfirmed: %s. Flag: %s.\n", r.Stopped, confirmation, filepath.Join(*dir, "DISABLED"))
+		fmt.Fprintf(out, "Disabled: stopped %d owned process groups; unconfirmed: %s. State: %s.\n", r.Stopped, confirmation, filepath.Join(*dir, "host-state.json"))
 		return err
 	}
 	if err = prepare(); err != nil {

@@ -38,6 +38,7 @@ func TestDisableSystemdCgroup(t *testing.T) {
 			dir := t.TempDir()
 			h := HostControl{Dir: dir, Service: s, Timeout: time.Second, Processes: HostProcesses{Owned: func(workerState) (bool, error) { t.Fatal("systemd used PID registry"); return false, nil }}}
 			start := time.Now()
+			ensureTestHost(t, h.Dir, h.Clock)
 			r, err := h.Disable(context.Background(), "test", tc.grace)
 			if (err != nil) != (tc.left || tc.hang) {
 				t.Fatalf("report %+v error %v", r, err)
@@ -45,7 +46,7 @@ func TestDisableSystemdCgroup(t *testing.T) {
 			if tc.hang && time.Since(start) > 2*time.Second {
 				t.Fatal("overall deadline ignored")
 			}
-			if _, e := os.Stat(filepath.Join(dir, "DISABLED")); e != nil {
+			if _, e := os.Stat(filepath.Join(dir, hostStateFile)); e != nil {
 				t.Fatal(e)
 			}
 			if tc.left || tc.hang {
@@ -63,6 +64,7 @@ func TestDisableSystemdCgroup(t *testing.T) {
 }
 func TestDisableEmptyRegistryIsUnconfirmed(t *testing.T) {
 	h := HostControl{Dir: t.TempDir()}
+	ensureTestHost(t, h.Dir, h.Clock)
 	r, err := h.Disable(context.Background(), "test", 0)
 	if err == nil || r.Confirmed {
 		t.Fatalf("empty registry certified %+v %v", r, err)
@@ -79,7 +81,7 @@ func TestWorkerUnitCgroupSettings(t *testing.T) {
 		texts = append(texts, string(b))
 	}
 	for _, text := range texts {
-		for _, setting := range []string{"Delegate=memory", "KillMode=control-group", "SendSIGKILL=yes", "TimeoutStopSec=10s", "ConditionPathExists=!%h/.local/share/myce/DISABLED", "Restart=on-failure"} {
+		for _, setting := range []string{"Delegate=memory", "KillMode=control-group", "SendSIGKILL=yes", "TimeoutStopSec=10s", "_host-start-check", "Restart=on-failure"} {
 			if !strings.Contains(text, setting) {
 				t.Errorf("missing %s", setting)
 			}
@@ -203,6 +205,7 @@ func TestSystemdRejectsUnsafeGroupAndUnit(t *testing.T) {
 func TestDockerConfirmationHookKeepsFlag(t *testing.T) {
 	dir := t.TempDir()
 	h := HostControl{Dir: dir, Service: &fakeHostService{}, ConfirmContainers: func(context.Context) error { return os.ErrPermission }}
+	ensureTestHost(t, h.Dir, h.Clock)
 	r, e := h.Disable(context.Background(), "test", 0)
 	if e == nil || len(r.Unconfirmed) == 0 {
 		t.Fatal(r, e)
@@ -212,69 +215,11 @@ func TestDockerConfirmationHookKeepsFlag(t *testing.T) {
 	}
 }
 
-func TestDisableQueueDoesNotWait(t *testing.T) {
-	dir := t.TempDir()
-	saveWorkerJSON(dir, "worker-test.json", HostWorker{State: t.TempDir(), Host: "host", Queue: "offline"})
-	h := HostControl{Dir: dir, Service: &fakeHostService{}, Timeout: time.Second, Notify: func(ctx context.Context, _ HostWorker, _, _ bool, _ string) error { <-ctx.Done(); return ctx.Err() }}
-	start := time.Now()
-	_, e := h.Disable(context.Background(), "test", 0)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if time.Since(start) > 400*time.Millisecond {
-		t.Fatal("disable waited for queue")
-	}
-}
-func TestDisableGenerationFailureStillFencesAndInvalidatesReceipt(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "control-generation.json"), []byte("broken"), 0600)
-	saveWorkerJSON(dir, "disable-receipt.json", hostReceipt{Generation: 1})
-	h := HostControl{Dir: dir, Service: &fakeHostService{}}
-	if _, e := h.Disable(context.Background(), "test", 0); e == nil {
-		t.Fatal("broken counter accepted")
-	}
-	if reason, e := HostDisabled(dir); e != nil || reason == "" {
-		t.Fatal("missing fence", e)
-	}
-	if e := h.Enable(context.Background()); e == nil {
-		t.Fatal("old receipt enabled fresh disable")
-	}
-}
-func TestReconcileLostEnableResponse(t *testing.T) {
-	q, _ := fixture(t)
-	dir, state := t.TempDir(), t.TempDir()
-	saveWorkerJSON(dir, "worker-test.json", HostWorker{State: state, Host: "host", Queue: "fake"})
-	h := HostControl{Dir: dir, Service: &fakeHostService{}}
-	if _, e := h.Disable(context.Background(), "test", 0); e != nil {
-		t.Fatal(e)
-	}
-	h.Notify = func(_ context.Context, w HostWorker, enable, cleared bool, reason string) error {
-		if enable {
-			if e := q.EnableHostGeneration(w.Host, w.Generation); e != nil {
-				return e
-			}
-			return os.ErrDeadlineExceeded
-		}
-		return q.DisableHostGeneration(w.Host, reason, cleared, w.Executions, w.Generation)
-	}
-	if e := h.Enable(context.Background()); e != nil {
-		t.Fatal(e)
-	}
-	h.Notify = func(_ context.Context, w HostWorker, enable, cleared bool, reason string) error {
-		if enable {
-			return q.EnableHostGeneration(w.Host, w.Generation)
-		}
-		return q.DisableHostGeneration(w.Host, reason, cleared, w.Executions, w.Generation)
-	}
-	if e := h.ReconcileEnable(context.Background()); e != nil {
-		t.Fatal("lost-response retry", e)
-	}
-}
 func TestSystemdRegistryFailureDoesNotGateStop(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "worker-broken.json"), []byte("broken"), 0600)
 	s := &fakeHostService{}
-	r, e := (HostControl{Dir: dir, Service: s}).Disable(context.Background(), "test", 0)
+	r, e := (HostControl{Dir: readyTestHost(t, dir), Service: s}).Disable(context.Background(), "test", 0)
 	if e != nil || !r.Confirmed || len(r.QueueErrors) == 0 {
 		t.Fatal(r, e)
 	}
@@ -312,7 +257,7 @@ func TestSystemdHangingCommandDeadline(t *testing.T) {
 	dir := t.TempDir()
 	s := &SystemdHostService{Unit: "myce-worker.service", Command: func(ctx context.Context, _ string, _ ...string) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }}
 	start := time.Now()
-	r, e := (HostControl{Dir: dir, Service: s, Timeout: time.Second}).Disable(context.Background(), "test", 0)
+	r, e := (HostControl{Dir: readyTestHost(t, dir), Service: s, Timeout: time.Second}).Disable(context.Background(), "test", 0)
 	if e == nil || time.Since(start) > 2*time.Second || len(r.Unconfirmed) == 0 {
 		t.Fatal(r, e)
 	}

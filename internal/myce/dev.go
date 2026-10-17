@@ -56,6 +56,27 @@ func StartDev(c DevConfig) (*Dev, error) {
 	if err := os.MkdirAll(c.Checkpoints, 0700); err != nil {
 		return nil, err
 	}
+	// Dev owns its isolated fake host; real runtimes never initialize missing state.
+	if c.HostStateDir == "" {
+		c.HostStateDir = filepath.Join(filepath.Dir(c.Database), "dev-host")
+	}
+	if _, e := os.Stat(filepath.Join(c.HostStateDir, hostStateFile)); errors.Is(e, os.ErrNotExist) {
+		host := c.HostID
+		if host == "" {
+			host = "dev-host"
+		}
+		initial, e := InitializeHostIntent(c.HostStateDir, host, RealClock{})
+		if e != nil {
+			return nil, e
+		}
+		_, e = changeHostIntent(c.HostStateDir, RealClock{}, hostIntentChange{Desired: "open", Expected: initial.HostRevision, Settled: func(HostIntent) error { return nil }})
+		if e != nil {
+			return nil, e
+		}
+	}
+	if _, e := ReadHostIntent(c.HostStateDir); e != nil {
+		return nil, e
+	}
 	q, err := Open(c.Database, c.Checkpoints, RealClock{})
 	if err != nil {
 		return nil, err

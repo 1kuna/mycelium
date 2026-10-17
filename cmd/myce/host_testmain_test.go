@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"mycelium/internal/myce"
 	"os"
 	"path/filepath"
@@ -20,6 +21,13 @@ func TestMain(m *testing.M) {
 	}
 	if err = os.Setenv("MYCE_HOST_STATE_DIR", dir); err != nil {
 		panic(err)
+	}
+	s, e := myce.InitializeHostIntent(dir, "test-host", myce.RealClock{})
+	if e != nil {
+		panic(e)
+	}
+	if e = (myce.HostControl{Dir: dir, Expected: s.HostRevision, Settled: func(myce.HostIntent) error { return nil }}).Enable(context.Background()); e != nil {
+		panic(e)
 	}
 	// Keep ordinary laptop tests off any installed daemon; Docker fault fixtures override this CLI.
 	if err = os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\ncase \"$3:$4\" in ps:*|network:ls) exit 0;; *) exit 99;; esac\n"), 0700); err != nil {

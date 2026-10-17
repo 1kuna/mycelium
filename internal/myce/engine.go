@@ -73,6 +73,7 @@ type LlamaEngine struct {
 	memoryMachine      Machine
 	memorySwapMaxBytes int64
 	HostStateDir       string
+	hostRevision       HostRevision
 	stopCommand        []string
 	stopTimeout        time.Duration
 	env                []string
@@ -96,6 +97,9 @@ type LlamaEngine struct {
 }
 
 func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
+	if err := bindHostRevision(l.HostStateDir, &l.hostRevision); err != nil {
+		return err
+	}
 	for _, v := range os.Environ() {
 		if strings.HasPrefix(v, "LLAMA_ARG_HF_") {
 			return errors.New("remote llama-server model environment is forbidden; use myce model fetch")
@@ -141,7 +145,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		ctx, cancel = context.WithTimeout(ctx, m.ReadyTimeout)
 		defer cancel()
 	}
-	unlock, gateErr := hostLaunchGate(l.HostStateDir)
+	unlock, gateErr := hostLaunchGate(l.HostStateDir, l.hostRevision)
 	if gateErr != nil {
 		return gateErr
 	}
@@ -193,7 +197,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		l.log.Close()
 		return e
 	}
-	if e = l.cmd.Start(); e != nil {
+	if e = hostDispatch(l.HostStateDir, l.hostRevision, l.cmd.Start); e != nil {
 		_ = l.memoryAttempt.cleanup(l.Clock)
 		l.log.Close()
 		return e
@@ -208,7 +212,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		_ = l.Unload()
 		return e
 	}
-	if _, e = writer.Write([]byte("start\n")); e != nil {
+	if e = hostDispatch(l.HostStateDir, l.hostRevision, func() error { _, e := writer.Write([]byte("start\n")); return e }); e != nil {
 		_ = l.Unload()
 		return e
 	}
@@ -314,7 +318,7 @@ func (l *LlamaEngine) Unload() error {
 	return e
 }
 func (l *LlamaEngine) runStopCommand(grace context.Context) error {
-	if reason, _ := HostDisabled(l.HostStateDir); reason != "" {
+	if err := CheckHostRevision(l.HostStateDir, l.hostRevision); err != nil {
 		return nil
 	}
 	if len(l.stopCommand) > 0 {
@@ -338,7 +342,7 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 		if err := saveWorkerJSON(l.Dir, name+".json", workerState{Identity: identity}); err != nil {
 			return err
 		}
-		if err := cmd.Start(); err != nil {
+		if err := hostDispatch(l.HostStateDir, l.hostRevision, cmd.Start); err != nil {
 			// The shared stop grace may expire while persisting the helper's
 			// recovery record, before Start. That is normal escalation: no
 			// helper started, and Unload must still stop the server group.
@@ -357,7 +361,7 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 			_ = cmd.Wait()
 			return fmt.Errorf("stop helper memory ceiling attach: %w", err)
 		}
-		_, gateErr := writer.Write([]byte("start\n"))
+		gateErr := hostDispatch(l.HostStateDir, l.hostRevision, func() error { _, e := writer.Write([]byte("start\n")); return e })
 		// A helper killed at the grace deadline can close its gate first.
 		// Still inspect its group below; a broken pipe alone is expected.
 		if grace.Err() != nil && errors.Is(gateErr, syscall.EPIPE) {
@@ -428,6 +432,7 @@ type modelRuntime struct {
 	memoryMachine         Machine
 	memorySwapMaxBytes    int64
 	hostStateDir          string
+	hostRevision          HostRevision
 	lastSavedSpeed        float64
 	copies                map[string]*workerCopy
 	copyParallel          int
@@ -468,7 +473,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if e != nil {
 		return nil, e
 	}
-	rt := &modelRuntime{availability: w.availability, hostStateDir: w.HostStateDir, copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
+	rt := &modelRuntime{availability: w.availability, hostStateDir: w.HostStateDir, hostRevision: w.hostRevision, copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
 	root := w.CacheRoot
 	if root == "" {
 		root = filepath.Join(dir, "model-cache")
@@ -651,6 +656,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			engine = NewModelEngine(model, rt.dir, rt.clock)
 			if owned, ok := engine.(*LlamaEngine); ok {
 				owned.HostStateDir = rt.hostStateDir
+				owned.hostRevision = rt.hostRevision
 				owned.memoryCeilings, owned.memoryMachine, owned.memorySwapMaxBytes = rt.memoryCeilings, rt.memoryMachine, rt.memorySwapMaxBytes
 			}
 		}
@@ -704,6 +710,9 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	if e == nil {
 		e = m.engine.Load(ctx, model)
 	}
+	if e == nil {
+		e = CheckHostRevision(rt.hostStateDir, rt.hostRevision)
+	}
 	m.cancel()
 	// A failed load may have started a process. Keep its memory reserved unless
 	// cleanup actually succeeds, even when the engine's own load cleanup failed.
@@ -737,6 +746,9 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 }
 
 func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {
+	if err := CheckHostRevision(rt.hostStateDir, rt.hostRevision); err != nil {
+		return err
+	}
 	if rt.availability != nil && !rt.availability.snapshot().Available {
 		return errWorkerUnavailable
 	}
@@ -892,7 +904,7 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 400, "invalid JSON")
 		return
 	}
-	unlock, err := hostLaunchGate(rt.hostStateDir)
+	unlock, err := hostLaunchGate(rt.hostStateDir, rt.hostRevision)
 	if err != nil {
 		modelError(w, 503, "host disabled or local admission unavailable")
 		return

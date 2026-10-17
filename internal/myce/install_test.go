@@ -367,8 +367,11 @@ func TestInstallStartDisabledPreservesHostGate(t *testing.T) {
 	c.StartDisabled = true
 	c.WorkerInstance("gpu0")
 	os.MkdirAll(c.HostStateDir, 0700)
-	saveWorkerJSON(c.HostStateDir, "DISABLED", map[string]any{"generation": 9, "reason": "legacy ownership"})
-	hostFlag, _ := os.ReadFile(filepath.Join(c.HostStateDir, "DISABLED"))
+	initial, e := InitializeHostIntent(c.HostStateDir, c.HostID, RealClock{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	hostFlag, _ := os.ReadFile(filepath.Join(c.HostStateDir, hostStateFile))
 	executable := filepath.Join(home, "binary")
 	os.WriteFile(executable, []byte("test"), 0700)
 	runner := func(_ context.Context, n string, a ...string) ([]byte, error) {
@@ -385,16 +388,11 @@ func TestInstallStartDisabledPreservesHostGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	unitDir, _ := WorkerUnitDirectory(c.HostStateDir, filepath.Base(c.Service))
-	flag, _ := os.ReadFile(filepath.Join(unitDir, "DISABLED"))
-	receipt, _ := os.ReadFile(filepath.Join(unitDir, "disable-receipt.json"))
-	var f struct{ Generation uint64 }
-	var r hostReceipt
-	json.Unmarshal(flag, &f)
-	json.Unmarshal(receipt, &r)
-	if f.Generation == 0 || f.Generation != r.Generation {
-		t.Fatal("missing ordered disable receipt")
+	current, e := ReadHostIntent(unitDir)
+	if e != nil || current.Desired != "closed" || current.HostRevision != initial.HostRevision {
+		t.Fatal(current, e)
 	}
-	after, _ := os.ReadFile(filepath.Join(c.HostStateDir, "DISABLED"))
+	after, _ := os.ReadFile(filepath.Join(c.HostStateDir, hostStateFile))
 	if string(after) != string(hostFlag) {
 		t.Fatal("host gate changed")
 	}

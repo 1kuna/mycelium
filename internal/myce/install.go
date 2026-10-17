@@ -321,18 +321,13 @@ func (c ServiceConfig) ServiceText() string {
 		condition := ""
 		stopSettings := ""
 		if c.Role == "worker" {
-			condition = "ConditionPathExists=!%h/.local/share/myce/DISABLED\n"
-			if c.HostStateDir != "" {
-				condition = "ConditionPathExists=!" + unitConditionPath(filepath.Join(c.HostStateDir, "DISABLED")) + "\n"
+			dir := c.HostStateDir
+			if dir == "" {
+				dir = "%h/.local/share/myce"
 			}
-			if ValidWorkerUnit(filepath.Base(c.Service)) {
-				dir := c.HostStateDir
-				if dir == "" {
-					condition += "ConditionPathExists=!%h/.local/share/myce/units/" + filepath.Base(c.Service) + "/DISABLED\n"
-				} else {
-					scoped, _ := WorkerUnitDirectory(dir, filepath.Base(c.Service))
-					condition += "ConditionPathExists=!" + unitConditionPath(filepath.Join(scoped, "DISABLED")) + "\n"
-				}
+			condition = "ExecCondition=" + unitQuote(c.Binary) + " _host-start-check --host-state-dir " + unitQuote(dir) + "\n"
+			if c.HostStateDir == "" {
+				condition = strings.ReplaceAll(condition, "%%h/", "%h/")
 			}
 			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\nDelegate=memory\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
 		}

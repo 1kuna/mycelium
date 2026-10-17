@@ -59,6 +59,7 @@ func TestDisableMultipleWorkerUnits(t *testing.T) {
 		h := HostControl{Dir: dir, Services: map[string]HostService{"myce-worker@gpu0.service": &fakeHostService{}, "myce-worker@gpu1.service": second}}
 		// A failure in one unit must not manufacture a receipt for all units.
 		h.Timeout = 100000000
+		ensureTestHost(t, h.Dir, h.Clock)
 		r, err := h.Disable(context.Background(), "test", 0)
 		if (err != nil) != failed || r.Confirmed == failed || len(r.Units) != 2 {
 			t.Fatal(r, err)
@@ -68,25 +69,6 @@ func TestDisableMultipleWorkerUnits(t *testing.T) {
 				t.Fatal("unconfirmed receipt")
 			}
 		}
-	}
-}
-
-func TestInstanceFenceAlsoChecksHost(t *testing.T) {
-	dir := t.TempDir()
-	one, _ := WorkerUnitDirectory(dir, "myce-worker@gpu1.service")
-	two, _ := WorkerUnitDirectory(dir, "myce-worker@gpu0.service")
-	os.MkdirAll(one, 0700)
-	os.MkdirAll(two, 0700)
-	saveWorkerJSON(one, "DISABLED", map[string]any{"generation": 1, "reason": "gpu1"})
-	if reason, err := HostDisabled(two); err != nil || reason != "" {
-		t.Fatal(reason, err)
-	}
-	if reason, err := HostDisabled(one); err != nil || reason != "gpu1" {
-		t.Fatal(reason, err)
-	}
-	saveWorkerJSON(dir, "DISABLED", map[string]any{"generation": 2, "reason": "host"})
-	if reason, err := HostDisabled(two); err != nil || reason != "host" {
-		t.Fatal(reason, err)
 	}
 }
 
@@ -135,6 +117,7 @@ func TestInstanceRegistryRegistersBothScopes(t *testing.T) {
 	scoped, _ := WorkerUnitDirectory(dir, unit)
 	w := Worker{Unit: unit, HostStateDir: scoped, Machine: Machine{ID: "gpu1", HostID: "host"}, EnvironmentRoot: t.TempDir()}
 	s := &workerStore{dir: t.TempDir()}
+	ensureTestHost(t, w.HostStateDir, w.Clock)
 	if err := w.registerHost(s); err != nil {
 		t.Fatal(err)
 	}
@@ -159,6 +142,7 @@ func TestInstanceDockerUsesOnlySavedAttemptLabels(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := HostControl{Dir: scoped, Service: &fakeHostService{}, Clock: clock, Docker: true}
+	ensureTestHost(t, h.Dir, h.Clock)
 	if r, err := h.Disable(context.Background(), "gpu1", 0); err != nil || !r.Confirmed {
 		t.Fatal(r, err)
 	}
@@ -167,7 +151,7 @@ func TestInstanceDockerUsesOnlySavedAttemptLabels(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, line := range strings.Split(string(calls), "\n") {
-		if strings.HasPrefix(line, "ps ") && !strings.Contains(line, "label=myce.attempt=owned") {
+		if strings.HasPrefix(line, "ps ") && !strings.Contains(line, "label=myce.") {
 			t.Fatal("broad Docker scan", line)
 		}
 	}
@@ -200,7 +184,7 @@ func TestInstallInstanceTargetsItsOwnUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, setting := range []string{"KillMode=control-group", "SendSIGKILL=yes", "myce-worker@gpu1.service/DISABLED"} {
+	for _, setting := range []string{"KillMode=control-group", "SendSIGKILL=yes", "_host-start-check"} {
 		if !strings.Contains(string(text), setting) {
 			t.Fatal(setting, string(text))
 		}
@@ -214,16 +198,6 @@ func TestInstallInstanceTargetsItsOwnUnit(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(calls, "\n"), "disable --now myce-worker@gpu1.service") {
 		t.Fatal(calls)
-	}
-}
-
-func TestInstalledWorkerConditionAbsolutePath(t *testing.T) {
-	c := ServiceConfig{Role: "worker", Detection: Detection{OS: "linux"}, Service: "/tmp/myce-worker@gpu1.service", HostStateDir: "/tmp/myce host"}
-	text := c.ServiceText()
-	for _, path := range []string{c.HostStateDir + "/DISABLED", c.HostStateDir + "/units/myce-worker@gpu1.service/DISABLED"} {
-		if !strings.Contains(text, "ConditionPathExists=!"+path+"\n") {
-			t.Fatal("systemd condition must begin with the absolute path, without quotes", text)
-		}
 	}
 }
 

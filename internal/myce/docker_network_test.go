@@ -517,6 +517,7 @@ func TestDisableDockerPrivateNetwork(t *testing.T) {
 	if e = saveWorkerJSON(w.HostStateDir, "worker-test.json", HostWorker{State: s.dir, Host: "docker-host"}); e != nil {
 		t.Fatal(e)
 	}
+	ensureTestHost(t, w.HostStateDir, c)
 	h := HostControl{Dir: w.HostStateDir, Clock: c, Docker: true, Processes: HostProcesses{Owned: func(workerState) (bool, error) { return false, nil }, Signal: func(workerState, syscall.Signal) error { return nil }, Pause: func(d time.Duration) { c.advance(d) }}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -533,6 +534,7 @@ func TestDisableOrphanNetworkWithoutContainer(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
 	s.close()
 	fakeDockerNetwork(root, []string{"network", "create", "--label", "myce.attempt=orphan", "myce-orphan"}, "")
+	ensureTestHost(t, w.HostStateDir, c)
 	h := HostControl{Dir: w.HostStateDir, Clock: c, Docker: true, Service: &fakeHostService{}, Timeout: 2 * time.Second}
 	report, e := h.Disable(context.Background(), "orphan network", 0)
 	if e != nil || !report.Confirmed {
