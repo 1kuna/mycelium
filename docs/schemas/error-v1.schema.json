@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mycelium HTTP error body v1",
+  "description": "Wire bodies emitted by respond from HTTPError. HTTP status is not a JSON property. Messages are sanitized diagnostics; code is stable.",
+  "type": "object",
+  "properties": {
+    "error": {
+      "type": "string",
+      "minLength": 1
+    },
+    "code": {
+      "enum": [
+        "job_unknown",
+        "submission_key_conflict",
+        "submission_key_expired"
+      ]
+    },
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project": {
+      "type": "null"
+    },
+    "submission_key": {
+      "type": "null"
+    },
+    "state": {
+      "const": "unknown"
+    },
+    "will_not_run": {
+      "type": "null"
+    },
+    "release": {
+      "type": "null"
+    },
+    "acknowledged_at": {
+      "type": "null"
+    }
+  },
+  "required": [
+    "error",
+    "code"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "const": "job_unknown"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "job_id",
+          "project",
+          "submission_key",
+          "state",
+          "will_not_run",
+          "release",
+          "acknowledged_at"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "job_id"
+              ]
+            },
+            {
+              "required": [
+                "project"
+              ]
+            },
+            {
+              "required": [
+                "submission_key"
+              ]
+            },
+            {
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "required": [
+                "will_not_run"
+              ]
+            },
+            {
+              "required": [
+                "release"
+              ]
+            },
+            {
+              "required": [
+                "acknowledged_at"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -119,8 +119,8 @@ These GPU-work and setup features are implemented now:
 **Specified, not yet implemented.** One durable desired-state record controls the whole physical host. A serialized local controller allocates monotonically increasing revisions; every action and retry binds to its accepted revision. Desired state is durable intent. Observed state is what has been applied and verified on this boot. Queue acknowledgement is separate. Recheck the revision before every native/Docker create, start and admission; stale actions cannot reopen a newer close. Device selection is diagnostic only, not staged per-device enable.
 
 ```sh
-myce host close --local --worker-user <user> --wait-released --timeout 30s --json
-myce host open --local --worker-user <user> --timeout 30s --json
+myce host close --local [--expect-revision <R>] --worker-user <user> --wait-released --timeout 30s --json
+myce host open --local --expect-revision <R> --worker-user <user> --timeout 30s --json
 myce host status --local --worker-user <user> --expect closed --verdict --timeout 10s --json
 myce host status --local --worker-user <user> --expect ready --wait --timeout 30s --json
 ```
@@ -128,6 +128,14 @@ myce host status --local --worker-user <user> --expect ready --wait --timeout 30
 `close` durably records closed intent before discovery or network calls, fences all launches and stops all Mycelium work on the host. Save stop intent and its deadline before TERM; a restart or bounded KILL never renews grace. Keep resource charges until release is proven. Queued jobs stay durable and fenced here; eligible work elsewhere is unaffected. A reboot invalidates observations, never closed intent.
 
 One installed standard systemd user timer per host runs `myce host reconcile --local`, using the same binary and reconciliation function, even when all GPU workers are stopped. It converges on reconnect. A co-located queue also reconciles before admission. The timer is lifecycle plumbing, not another authority. There is no notify-versus-local-receipt choice. Use systemd startup gates, `Restart=on-failure`, `KillMode=control-group` and bounded stop timeouts; Docker labels, inspect, stop and wait; atomic replace/fsync for local intent; SQLite transactions for queue changes. Reconciliation bridges accepted daemon operations and queue custody, which unit state alone cannot prove.
+
+### Revision selection (specified; runtime is S08)
+
+`open` requires `--expect-revision <R>`. `close` accepts it optionally. HTTP/API equivalents use the request field `expect_revision`. Compare-and-set compares that selector with the **durable** `desired.revision` before allocating anything. A mismatch changes nothing, exits **3**, and returns the current `desired.state` and `desired.revision`, `accepted_revision: null`, and an error with `component: "host_intent"`, `code: "revision_mismatch"`. It never reports acceptance of the rejected operation. Missing the required open selector is a usage error.
+
+An accepted operation allocates `desired.revision = previous + 1` and a fresh `operation_id`. Close **without** a selector always wins admission to closing: it does not lose a race to a newer revision, an open or an unsettled prior close. The ordinary durable-write and revision-overflow failure rules still apply; no failed write is acceptance. Close with a selector must match it. Open additionally requires `last_close.settlement == "confirmed"` and, before allocation, `R == last_close.revision == desired.revision`. An unsettled or missing previous close is rejected with `component: "host_intent"`, `code: "previous_close_unsettled"`; a stale selector/previous-close revision is rejected with `revision_mismatch`. Rejections allocate neither a revision nor an operation ID. Revision-mismatch exit 3 is distinct from usage, persistence, observation and wait failures.
+
+A close creates `last_close` with its new operation ID/revision, `settlement: "pending"` and `settled_at: null`; reconciliation updates its settlement and records the UTC RFC3339 completion time when confirmed. Missing or unverified settlement evidence is `unknown`, never confirmed. A subsequent accepted close replaces that object. Open changes the current desired operation/revision, but **does not change `last_close`**: the confirmed close remains bound to its original ID/revision as history until the next close. Read-only status returns that same history and never creates or repairs it. In every envelope `host_settlement == last_close.settlement`; when `last_close` is null, `host_settlement` is `unknown`. Previous-close confirmation does not mean that an accepted open is ready on this boot.
 
 ### Local exclusion
 
@@ -147,7 +155,7 @@ Host-local commands are supported under **root** with `--worker-user <user>`. In
 
 ### Host settlement and reopening
 
-`host_settlement` covers only Mycelium's host/release obligations. Confirmed means the queue durably acknowledged the close revision, every known execution on this host is settled as released, and nothing new can be placed here while closed. Pending reconciliation keeps unknown releases charged. Reconcile exact job/machine/session/attempt and revision before admission after reconnect/restart; omitted obligations remain fenced and charged, and stale acknowledgements/results are rejected. Planned displacement requeues resumable experiments without an infrastructure retry.
+`host_settlement` covers only Mycelium's host/release obligations, bound to `last_close`. Confirmed means the queue durably acknowledged that close revision, every execution covered by that close is settled as released, and placement was fenced for its closed period. After open this remains historical confirmation of the previous close; current admission/readiness uses the newer open revision. Pending reconciliation keeps unknown releases charged. Reconcile exact job/machine/session/attempt and revision before admission after reconnect/restart; omitted obligations remain fenced and charged, and stale acknowledgements/results are rejected. Planned displacement requeues resumable experiments without an infrastructure retry.
 
 **Host settlement never covers consumer cancellation.** Closing a host cannot cancel jobs that may run elsewhere. Consumers close their own operation, fence late publication, cancel its exact jobs/keys through the API, and persist their own completion. No consumer operation, mode or completion state belongs in the generic queue. Queue-independent local PASS can permit another owner's local recovery while settlement is pending; it is not full rest PASS and cannot attest remote execution. Never repair queue custody by editing SQLite offline.
 
@@ -155,7 +163,7 @@ Host-local commands are supported under **root** with `--worker-user <user>`. In
 
 ### Shared JSON envelope, schema v1
 
-Close, open and read-only status with `--json` emit one envelope, including on error. The machine-readable contract is [JSON Schema draft 2020-12](schemas/host-envelope-v1.schema.json), with [closed PASS](schemas/examples/host-closed-pass.json), [UNKNOWN with nulls](schemas/examples/host-unknown-nulls.json) and [FAIL with errors](schemas/examples/host-fail-errors.json) examples. All fields below are required; nullable fields stay present. Status never initializes state. Unknown identity is not a fabricated operation, revision or zero.
+Close, open and read-only status with `--json` emit one envelope, including on error. The machine-readable contract is [JSON Schema draft 2020-12](schemas/host-envelope-v1.schema.json), with [closed PASS](schemas/examples/host-closed-pass.json), [UNKNOWN with nulls](schemas/examples/host-unknown-nulls.json), [FAIL with errors](schemas/examples/host-fail-errors.json), [open accepted](schemas/examples/host-open-accepted.json) and [revision mismatch](schemas/examples/host-revision-mismatch.json) examples. All fields below are required; nullable fields stay present. Status never initializes state. Unknown identity is not a fabricated operation, revision or zero.
 
 | Field | Type / meaning |
 | --- | --- |
@@ -165,7 +173,8 @@ Close, open and read-only status with `--json` emit one envelope, including on e
 | `desired` | `{state: "open" or "closed" or null, revision: uint64 or null}`; only verified durable intent. |
 | `observed` | `{state: "open", "closed", "releasing" or "unknown", revision: uint64 or null}`; verified on this boot. |
 | `local_exclusion` | `PASS`, `FAIL` or `UNKNOWN` under the complete local predicate. |
-| `host_settlement` | `confirmed`, `pending` or `unknown`; the close/previous-close obligation above, never consumer coverage. Unknown means acknowledgement or execution coverage cannot be established. |
+| `host_settlement` | Exactly `last_close.settlement`; `unknown` when `last_close` is null. Covers the close/previous-close obligation, never consumer coverage. |
+| `last_close` | Required nullable object `{operation_id, revision, settlement, settled_at}`. Nonempty close operation ID, uint64 revision, `confirmed` / `pending` / `unknown`, and UTC RFC3339 settlement time or null. Created/replaced by close, updated by reconciliation, unchanged by open and status. |
 | `queue_observed_revision` | Queue-acknowledged revision, or null if unavailable/unverified; current open acknowledgement is distinct from previous-close settlement. Historical acknowledgement alone is not fresh evidence. |
 | `counts` | Nullable nonnegative `active_attempts`, `preparing_attempts`, `stopping_attempts`, `pending_daemon_operations`, `running_containers`, `owned_gpu_holders`, `unsettled_attempts`, `queued_jobs`, `fenced_queued_jobs`, `unresolved_placement`. Null means unknown. |
 | `units`, `attempts` | Units: `{unit, cgroup, populated}`; unit is a nonempty string, cgroup a nonempty string or null, populated boolean or null. Attempts: `{job_id, machine_id, session_id, attempt, release_state}`; exact identity/release-state strings are nonempty and attempt is a positive integer. Null arrays mean unreadable/incomplete; empty arrays mean complete empty inventory. |
@@ -175,7 +184,7 @@ Close, open and read-only status with `--json` emit one envelope, including on e
 
 Uninitialized/corrupt state gives UNKNOWN with stable `state_uninitialized` / `state_corrupt` errors and nullable unverified identity/desired fields. Close allocates an operation/revision only after worker-owned durable persistence succeeds. Status cannot repair or invent it. Collect observations within a bounded window (10 seconds default); queue evidence older than 10 seconds is unknown. A boot/revision change during collection requires a fresh observation.
 
-Without a verdict/wait request, close/open exit zero on durable acceptance and status on a successful snapshot; acceptance/snapshot success alone is not PASS. `close --wait-released` exits zero only on local PASS, even with queue settlement pending. `status --expect ready --wait` exits zero only on ready PASS. Errors, timeouts and non-PASS waits exit nonzero and retain the JSON result.
+Revision mismatch exits 3 with the unchanged desired state and null accepted revision. Otherwise, without a verdict/wait request, close/open exit zero on durable acceptance and status on a successful snapshot; acceptance/snapshot success alone is not PASS. `close --wait-released` exits zero only on local PASS, even with queue settlement pending. `status --expect ready --wait` exits zero only on ready PASS. Errors, timeouts and non-PASS waits exit nonzero and retain the JSON result.
 
 ### Rest verdict
 
@@ -204,19 +213,27 @@ FAIL beats UNKNOWN; retain all reasons. Fenced queued jobs do **not** fail rest:
 
 A key's acknowledged `will_not_run: true` remains true permanently, including after expiry. While a consumer operation is open, recover a lost response by retrying its stored identical spec/key within retention. Once closed, cancel by key only, never resubmit. An expired/unknown answer leaves consumer coverage unresolved and blocks its reopen. Consumers own key generation, stored specs, operation intent and acknowledgement persistence. This promises no exactly-once external effects; keep output writes safe to repeat.
 
+### Job reply contract
+
+The generated [Job reply schema](schemas/job-v1.schema.json) describes actual `Job`/`Spec` JSON output, including the minimal reserved terminal job. Identity echo is **`spec.project` and `spec.submission_key`**, never top-level fields. Stable contract fields are annotated `x-contract: "stable"`: job ID/state, project/key echo, execution identity (`machine`, `session`, `attempt`), recorded release confirmation, and recorded terminal time (`finished_at`). The state enum is `queued`, `running`, `stopping`, `succeeded`, `failed`, `cancelled`; preparation is an assigned `running` job with no `started_at` yet. Optional identity/time/release fields follow the Go JSON omission rules: absent `release_confirmed` is not confirmation; queued/reserved jobs omit machine/session, and a reserved job has attempt 0. A reservation's minimal spec preserves only project/key identity: zero/empty command, priority, needs and environment fields are valid **reply** data, not a valid new runnable submission. `reason`, progress, placement, accounting and other projections are diagnostic (`x-contract: "diagnostic"`); clients must not parse reason text or infer release from it. Diagnostics may grow. Terminal state/results stay intact when cancellation adds durable exclusion metadata.
+
+Schemas describe wire shape, not proof of physical release or permission to consume results. Go tests regenerate the Job schema from the actual types and validate real marshalled jobs, cancellation acknowledgements and HTTP error responses. Examples cover queued, running, succeeded and reserved cancelled replies.
+
 ### Cancellation acknowledgement
 
-Cancel by ID with `POST /api/jobs/{id}/cancel`, or by key with `POST /api/jobs/cancel` and `{project, submission_key}`. Both are idempotent and return `{job_id, project, submission_key, state, will_not_run, release, acknowledged_at}`. `job_id` and `submission_key` may be null where no binding exists. `acknowledged_at` is UTC RFC3339 for an acknowledgement. `will_not_run: true` durably means no attempt of that job will start again anywhere; it is separate from current resource release. `release` is `not_applicable`, `pending` or `confirmed`, or null when no release fact can be established.
+Cancel by ID with `POST /api/jobs/{id}/cancel`, or by key with `POST /api/jobs/cancel` and `{project, submission_key}`. Both are idempotent and return `{job_id, project, submission_key, state, will_not_run, release, acknowledged_at}`. `job_id` and `submission_key` may be null where no binding exists. `acknowledged_at` is UTC RFC3339 for an acknowledgement. `will_not_run: true` durably means no attempt of that job will start again anywhere; it is separate from current resource release. `release` is `not_applicable`, `pending` or `confirmed`, or null when no release fact can be established. For a retained job, release always covers **every known attempt**, regardless of whether the job is queued, active, terminal or removed: `not_applicable` only when it never had an attempt; `pending` while any known attempt has unproven release (its charge remains); `confirmed` once all known attempts are proven released. In particular, a requeued job can still have a lost, unreleased attempt; cancelling it returns `pending`, then a repeated cancellation returns `confirmed` after that exact release is proven.
 
 | State at cancellation | Acknowledgement |
 | --- | --- |
-| queued | Atomically `cancelled`; `will_not_run: true`, `release: "not_applicable"`. |
+| queued | Atomically `cancelled`; `will_not_run: true`, release follows the all-attempt rule above. |
 | preparing / running / stopping | Persist cancel intent and issue stop. `will_not_run: true` immediately prevents retry/requeue. `release: "pending"` until proven, then `confirmed`; charges remain meanwhile. |
 | terminal: succeeded / failed / cancelled | State/results unchanged; `will_not_run: true`, release as recorded. Consumers decide not to consume results. |
 | removed, retained tombstone | `state: "removed"`, retained ID/key, `will_not_run: true`, release as recorded. |
 | never-seen key | Atomically create cancelled reservation; exact project/key echoed, `job_id: null`, `state: "absent"`, `will_not_run: true`, `release: "not_applicable"`. |
 | expired key, digest marker only | `job_id: null`, `state: "unknown"`, `will_not_run: true`; historical execution/release coverage is unknown, so `release: null`. Consumer coverage remains unresolved. |
 | unknown ID, no retained tombstone | HTTP 404 `job_unknown`, requested ID, `state: "unknown"`, `project: null`, `submission_key: null`, `will_not_run: null`, `release: null`, no acknowledgement (`acknowledged_at: null`). Keep the obligation open. |
+
+The [cancellation acknowledgement schema](schemas/cancel-ack-v1.schema.json) covers successful replies; the [HTTP error body schema](schemas/error-v1.schema.json) covers 404 `job_unknown`, 409 `submission_key_conflict` and 410 `submission_key_expired`. HTTP status is outside the body. The 404 body contains `code` and sanitized `error` plus the non-acknowledging nullable cancellation fields above; 409/410 contain `code` and sanitized `error`. All ack fields remain present, including null release for expired coverage. Examples under `docs/schemas/examples/` cover every acknowledgement row and each error.
 
 Reservations, tombstones and markers follow the retention table. Accept a key reservation only when the exact project/key is echoed. During queue outage, persist host close and exact local attempt/release evidence; consumers persist pending cancellation intents and drain them through the API on reconnect. Host settlement cannot substitute for those acknowledgements.
 

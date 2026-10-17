@@ -66,5 +66,11 @@
     "cgroup_unreadable"
   ],
   "queue_reachable": true,
-  "memory_allowance_bytes": null
+  "memory_allowance_bytes": null,
+  "last_close": {
+    "operation_id": "example-close-id",
+    "revision": 7,
+    "settlement": "pending",
+    "settled_at": null
+  }
 }

@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "command": "open",
+  "host_id": "example-host-id",
+  "operation_id": "example-open-id",
+  "boot_id": "example-boot-id",
+  "accepted_revision": 8,
+  "desired": {
+    "state": "open",
+    "revision": 8
+  },
+  "observed": {
+    "state": "closed",
+    "revision": 7
+  },
+  "local_exclusion": "PASS",
+  "host_settlement": "confirmed",
+  "queue_observed_revision": 7,
+  "counts": {
+    "active_attempts": 0,
+    "preparing_attempts": 0,
+    "stopping_attempts": 0,
+    "pending_daemon_operations": 0,
+    "running_containers": 0,
+    "owned_gpu_holders": 0,
+    "unsettled_attempts": 0,
+    "queued_jobs": 2,
+    "fenced_queued_jobs": 0,
+    "unresolved_placement": 0
+  },
+  "units": [
+    {
+      "unit": "myce-worker.service",
+      "cgroup": "/example-cgroup",
+      "populated": false
+    }
+  ],
+  "attempts": [],
+  "restart_safe": true,
+  "observed_at": "2026-10-17T12:00:00Z",
+  "source_observed_at": {
+    "local_intent": "2026-10-17T12:00:00Z",
+    "cgroups": "2026-10-17T12:00:00Z",
+    "docker": "2026-10-17T12:00:00Z",
+    "gpu_holders": "2026-10-17T12:00:00Z",
+    "queue": "2026-10-17T12:00:00Z"
+  },
+  "errors": [],
+  "last_close": {
+    "operation_id": "example-close-id",
+    "revision": 7,
+    "settlement": "confirmed",
+    "settled_at": "2026-10-17T12:00:00Z"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "job_id": null,
+  "project": "example",
+  "submission_key": "example-key",
+  "state": "unknown",
+  "will_not_run": true,
+  "release": null,
+  "acknowledged_at": "2026-10-17T12:00:00Z"
+}

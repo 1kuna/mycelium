@@ -1,0 +1,345 @@
+package myce
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	generate "github.com/invopop/jsonschema"
+	validate "github.com/santhosh-tekuri/jsonschema/v6"
+)
+
+const schemaRoot = "../../docs/schemas"
+
+// Regenerate after intentional wire changes:
+// MYCE_UPDATE_SCHEMAS=1 go test ./internal/myce -run '^TestWireSchemas$'
+// Reflection preserves the real JSON tags/types; annotations describe the
+// stable consumer surface without changing the production structs.
+func generatedJobSchema(t *testing.T) []byte {
+	t.Helper()
+	r := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
+	data, err := json.Marshal(r.Reflect(&Job{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema map[string]any
+	if err = json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	// encoding/json emits nil Go slices/maps as null. Reflection describes their
+	// nonnil type; allow the standard nil representation as well.
+	var nullableCollections func(any)
+	nullableCollections = func(value any) {
+		switch v := value.(type) {
+		case map[string]any:
+			if v["type"] == "array" {
+				v["type"] = []string{"array", "null"}
+			}
+			if v["type"] == "object" {
+				if _, ok := v["additionalProperties"].(map[string]any); ok {
+					v["type"] = []string{"object", "null"}
+				}
+			}
+			for _, child := range v {
+				nullableCollections(child)
+			}
+		case []any:
+			for _, child := range v {
+				nullableCollections(child)
+			}
+		}
+	}
+	nullableCollections(schema)
+	schema["title"] = "Mycelium Job reply v1"
+	schema["description"] = "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty. Additional diagnostics may grow."
+	defs := schema["$defs"].(map[string]any)
+	for _, definition := range []string{"Job", "Spec"} {
+		properties := defs[definition].(map[string]any)["properties"].(map[string]any)
+		for _, property := range properties {
+			property.(map[string]any)["x-contract"] = "diagnostic"
+		}
+		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued"}
+		if definition == "Spec" {
+			stable = []string{"project", "submission_key"}
+		}
+		for _, name := range stable {
+			properties[name].(map[string]any)["x-contract"] = "stable"
+		}
+	}
+	job := defs["Job"].(map[string]any)["properties"].(map[string]any)
+	job["state"].(map[string]any)["enum"] = []string{"queued", "running", "stopping", "succeeded", "failed", "cancelled"}
+	for _, name := range []string{"id", "machine", "session"} {
+		job[name].(map[string]any)["minLength"] = 1
+	}
+	job["attempt"].(map[string]any)["minimum"] = 0
+	job["reason"].(map[string]any)["description"] = "Sanitized diagnostic only. Do not parse or match its text."
+	job["release_confirmed"].(map[string]any)["description"] = "Exact current execution release proof when true. Omitted false is not confirmation; older copies may still have pending custody. Use the cancellation acknowledgement for aggregate release."
+	job["finished_at"].(map[string]any)["description"] = "Recorded terminal time, when present. Historical terminal records may omit it."
+	job["machine"].(map[string]any)["description"] = "Assigned execution identity; omitted before assignment or after requeue."
+	job["session"].(map[string]any)["description"] = "Worker session of the assigned execution; combine with job ID and attempt."
+	spec := defs["Spec"].(map[string]any)["properties"].(map[string]any)
+	spec["priority"].(map[string]any)["enum"] = []string{"", "production", "deadline", "experiment"}
+	for _, name := range []string{"project", "submission_key"} {
+		spec[name].(map[string]any)["minLength"] = 1
+	}
+	spec["submission_key"].(map[string]any)["description"] = "Exact project-scoped submission identity echo. Omitted for an unkeyed job."
+	result, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(result, '\n')
+}
+
+func wireJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(data, '\n')
+}
+
+func wireError(t *testing.T, err *HTTPError) map[string]any {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	respond(recorder, nil, err) // Exercise the actual HTTPError-to-JSON wire path.
+	if recorder.Code != err.Status {
+		t.Fatalf("HTTP status %d != %d", recorder.Code, err.Status)
+	}
+	var body map[string]any
+	if e := json.Unmarshal(recorder.Body.Bytes(), &body); e != nil {
+		t.Fatal(e)
+	}
+	return body
+}
+
+func wireExamples(t *testing.T) map[string]any {
+	t.Helper()
+	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	s := spec("experiment")
+	s.Name = "example-job"
+	s.Project = "example"
+	s.SubmissionKey = "example-key"
+	queued := Job{ID: "example-job-id", Spec: s, State: "queued", Queued: now, Checkpoint: "example-checkpoints/example-job-id"}
+	running := queued
+	running.State, running.Machine, running.Session, running.Attempt = "running", "example-worker-id", "example-session-id", 1
+	running.AssignedAt, running.StartedAt = &now, &now
+	running.Starts = 1
+	succeeded := running
+	succeeded.State = "succeeded"
+	succeeded.FinishedAt = &now
+	succeeded.ReleaseConfirmed = true
+	reserved := Job{ID: "example-reserved-id", Spec: Spec{Project: "example", SubmissionKey: "example-reserved-key"}, State: "cancelled", Queued: now, CancelledAt: &now, FinishedAt: &now, Reason: "cancelled before submission"}
+	ack := Cancellation{JobID: &queued.ID, Project: "example", SubmissionKey: &s.SubmissionKey, State: "cancelled", WillNotRun: true, Release: releaseState("not_applicable"), AcknowledgedAt: now}
+	pending := ack
+	pending.State = "stopping"
+	pending.Release = releaseState("pending")
+	terminal := ack
+	terminal.State = "succeeded"
+	terminal.Release = releaseState("confirmed")
+	removed := terminal
+	removed.State = "removed"
+	absent := ack
+	absent.JobID = nil
+	absent.State = "absent"
+	expired := absent
+	expired.State = "unknown"
+	expired.Release = nil
+	return map[string]any{
+		"job-queued-keyed": queued, "job-running": running, "job-succeeded": succeeded, "job-reserved-cancelled": reserved,
+		"cancel-queued": ack, "cancel-running-pending": pending, "cancel-terminal": terminal, "cancel-removed": removed, "cancel-absent": absent, "cancel-expired-unknown": expired,
+		"error-job-unknown":         wireError(t, &HTTPError{Status: 404, Code: "job_unknown", Message: "job is unknown", JobID: "example-unknown-id"}),
+		"error-submission-conflict": wireError(t, submissionFailure(false)), "error-submission-expired": wireError(t, submissionFailure(true)),
+	}
+}
+
+func compileWireSchema(t *testing.T, name string) *validate.Schema {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(schemaRoot, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema any
+	if err = json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	compiler := validate.NewCompiler()
+	compiler.AssertFormat()
+	if err = compiler.AddResource("https://schemas.example/"+name, schema); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile("https://schemas.example/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compiled
+}
+
+func validateWireValue(t *testing.T, schema *validate.Schema, value any) {
+	t.Helper()
+	var decoded any
+	if err := json.Unmarshal(wireJSON(t, value), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(decoded); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWireSchemas(t *testing.T) {
+	generated := generatedJobSchema(t)
+	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
+		if err := os.WriteFile(filepath.Join(schemaRoot, "job-v1.schema.json"), generated, 0644); err != nil {
+			t.Fatal(err)
+		}
+		for name, value := range wireExamples(t) {
+			if err := os.WriteFile(filepath.Join(schemaRoot, "examples", name+".json"), wireJSON(t, value), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	actual, err := os.ReadFile(filepath.Join(schemaRoot, "job-v1.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actual, generated) {
+		t.Fatal("Job/Spec schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1 go test ./internal/myce -run '^TestWireSchemas$'")
+	}
+	schemas := map[string]*validate.Schema{}
+	for _, name := range []string{"job-v1.schema.json", "cancel-ack-v1.schema.json", "error-v1.schema.json", "host-envelope-v1.schema.json"} {
+		schemas[name] = compileWireSchema(t, name)
+	}
+	for name, value := range wireExamples(t) {
+		t.Run(name, func(t *testing.T) {
+			kind := strings.SplitN(name, "-", 2)[0]
+			schemaName := map[string]string{"job": "job-v1.schema.json", "cancel": "cancel-ack-v1.schema.json", "error": "error-v1.schema.json"}[kind]
+			validateWireValue(t, schemas[schemaName], value)
+		})
+	}
+	// Real queue values include assignments, actual S02 reservation binding, and
+	// every nullable cancellation row; tests fail if wire omissions/types drift.
+	q, c := fixture(t)
+	s := spec("experiment")
+	s.SubmissionKey = "schema-key"
+	j := submit(t, q, s)
+	validateWireValue(t, schemas["job-v1.schema.json"], j)
+	j = check(t, q, machine("one", "fake"), nil).Job
+	validateWireValue(t, schemas["job-v1.schema.json"], j)
+	ack, err := q.CancelJob(j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateWireValue(t, schemas["cancel-ack-v1.schema.json"], ack)
+	finish(t, q, j, true)
+	validateWireValue(t, schemas["job-v1.schema.json"], q.s.Jobs[j.ID])
+	ack, err = q.CancelSubmission(s.Project, s.SubmissionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateWireValue(t, schemas["cancel-ack-v1.schema.json"], ack)
+	ack, err = q.CancelSubmission(s.Project, "reservation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateWireValue(t, schemas["cancel-ack-v1.schema.json"], ack)
+	reserved := s
+	reserved.SubmissionKey = "reservation"
+	reserved.Run.Command = nil
+	validateWireValue(t, schemas["job-v1.schema.json"], submit(t, q, reserved))
+	ack, err = q.CancelSubmission(s.Project, "expired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(submissionRetention)
+	ack, err = q.CancelSubmission(s.Project, "expired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateWireValue(t, schemas["cancel-ack-v1.schema.json"], ack)
+	paths, err := filepath.Glob(filepath.Join(schemaRoot, "examples", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var value any
+		if err = json.Unmarshal(data, &value); err != nil {
+			t.Fatal(err)
+		}
+		prefix := strings.SplitN(filepath.Base(path), "-", 2)[0]
+		schemaName := map[string]string{"job": "job-v1.schema.json", "cancel": "cancel-ack-v1.schema.json", "error": "error-v1.schema.json", "host": "host-envelope-v1.schema.json"}[prefix]
+		if schemaName == "" {
+			t.Fatalf("example has no schema: %s", path)
+		}
+		if err := schemas[schemaName].Validate(value); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+	}
+}
+
+func TestWireSchemaRejectsMalformedReplies(t *testing.T) {
+	cases := []struct {
+		schema, example, field string
+		value                  any
+	}{
+		{"job-v1.schema.json", "job-queued-keyed", "state", "absent"},
+		{"job-v1.schema.json", "job-running", "attempt", "one"},
+		{"cancel-ack-v1.schema.json", "cancel-running-pending", "will_not_run", false},
+		{"cancel-ack-v1.schema.json", "cancel-expired-unknown", "release", "unknown"},
+		{"error-v1.schema.json", "error-job-unknown", "will_not_run", true},
+		{"error-v1.schema.json", "error-submission-expired", "code", "unspecified"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.example+"/"+tc.field, func(t *testing.T) {
+			var value map[string]any
+			if err := json.Unmarshal(wireJSON(t, wireExamples(t)[tc.example]), &value); err != nil {
+				t.Fatal(err)
+			}
+			value[tc.field] = tc.value
+			if err := compileWireSchema(t, tc.schema).Validate(value); err == nil {
+				t.Fatal("malformed reply accepted")
+			}
+		})
+	}
+}
+
+func TestHostSchemaCloseBinding(t *testing.T) {
+	schema := compileWireSchema(t, "host-envelope-v1.schema.json")
+	for _, change := range []string{"missing-history", "null-history-confirmed", "settlement-mismatch", "accepted-rejection"} {
+		t.Run(change, func(t *testing.T) {
+			name := "host-closed-pass.json"
+			if change == "accepted-rejection" {
+				name = "host-revision-mismatch.json"
+			}
+			data, err := os.ReadFile(filepath.Join(schemaRoot, "examples", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var value map[string]any
+			if err = json.Unmarshal(data, &value); err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "missing-history":
+				delete(value, "last_close")
+			case "null-history-confirmed":
+				value["last_close"] = nil
+			case "settlement-mismatch":
+				value["host_settlement"] = "pending"
+			case "accepted-rejection":
+				value["accepted_revision"] = 7.0
+			}
+			if err := schema.Validate(value); err == nil {
+				t.Fatal("invalid close binding accepted")
+			}
+		})
+	}
+}

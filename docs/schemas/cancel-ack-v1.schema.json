@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mycelium cancellation acknowledgement v1",
+  "description": "Successful cancellation reply. Unknown expired coverage has will_not_run true but is not consumer completion. Release is independent of exclusion.",
+  "type": "object",
+  "properties": {
+    "job_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "project": {
+      "type": "string",
+      "minLength": 1
+    },
+    "submission_key": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "state": {
+      "enum": [
+        "cancelled",
+        "stopping",
+        "succeeded",
+        "failed",
+        "removed",
+        "absent",
+        "unknown"
+      ]
+    },
+    "will_not_run": {
+      "const": true
+    },
+    "release": {
+      "enum": [
+        "not_applicable",
+        "pending",
+        "confirmed",
+        null
+      ],
+      "description": "Aggregate release across every known attempt of the job, regardless of queued, active, terminal or removed state: not_applicable only if there was never an attempt; pending while any known attempt release is unproven, retaining its charge; confirmed once every known attempt is proven released. A requeued lost attempt remains pending until exact release proof. Null means historical coverage cannot be established from an expired digest marker."
+    },
+    "acknowledged_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    }
+  },
+  "required": [
+    "job_id",
+    "project",
+    "submission_key",
+    "state",
+    "will_not_run",
+    "release",
+    "acknowledged_at"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "absent"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "job_id": {
+            "type": "null"
+          },
+          "submission_key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "release": {
+            "const": "not_applicable"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "unknown"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "job_id": {
+            "type": "null"
+          },
+          "submission_key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "release": {
+            "const": null
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "not": {
+              "enum": [
+                "absent",
+                "unknown"
+              ]
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "release": {
+            "enum": [
+              "not_applicable",
+              "pending",
+              "confirmed"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "stopping"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "release": {
+            "enum": [
+              "pending",
+              "confirmed"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "cancelled_at": "2026-10-17T12:00:00Z",
+  "waiting_since": "0001-01-01T00:00:00Z",
+  "finished_at": "2026-10-17T12:00:00Z",
+  "start_latency_seconds": 0,
+  "starts": 0,
+  "losses": 0,
+  "progress": 0,
+  "id": "example-reserved-id",
+  "spec": {
+    "submission_key": "example-reserved-key",
+    "size_hint": {},
+    "name": "",
+    "project": "example",
+    "priority": "",
+    "run": {
+      "command": null
+    },
+    "needs": {
+      "memory_gb": 0,
+      "platform": {}
+    },
+    "environment": {},
+    "resumable": false
+  },
+  "state": "cancelled",
+  "attempt": 0,
+  "queued": "2026-10-17T12:00:00Z",
+  "front": 0,
+  "reason": "cancelled before submission",
+  "checkpoint": ""
+}
