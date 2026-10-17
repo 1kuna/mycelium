@@ -149,7 +149,7 @@ func (q *Queue) reconcileHostReleases(c Checkin) {
 			continue
 		}
 		old := q.s.Machines[c.Machine.ID]
-		fresh := c.Fresh && old != nil && c.PreviousSession == old.Session && c.Machine.Session != old.Session && r.Session != c.Machine.Session
+		fresh := c.Fresh && old != nil && c.PreviousSession == old.Session && c.Machine.Session != old.Session && r.Session == c.PreviousSession
 		stopped := r.Session == c.Machine.Session && c.Running == nil && !r.Until.IsZero() && !r.Preparation && !r.CleanupFailed
 		if r.Preparation {
 			stopped = r.Session == c.Machine.Session && !q.backgroundPreparing(&c.Machine)
