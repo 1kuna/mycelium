@@ -83,9 +83,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "host" && len(args) > 1 {
 		return hostLocalCommand(args[1:], probe, os.Stdout)
 	}
-	if args[0] == "host-queues" {
-		return hostQueuesCommand(args[1:], probe, os.Stdout)
-	}
 	if args[0] == "host-memory-budget" {
 		return hostMemoryBudgetCommand(args[1:])
 	}
@@ -197,7 +194,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	deadlineLoss := f.Duration("deadline-loss-timeout", myce.DeadlineLossAfter, "quiet timeout for deadline work")
 	experimentLoss := f.Duration("experiment-loss-timeout", myce.LossAfter, "quiet timeout for experiment work")
 	restartGrace := f.Duration("restart-grace", myce.RestartGrace, "worker recovery grace after queue restart")
-	f.BoolFunc("local-disable-receipts", "retired; reinstall the queue without this option", func(string) error { return myce.ErrLegacyLocalDisableReceipts })
 	hostStateDir := f.String("host-state-dir", "", "shared local host control directory")
 	serviceConfig := f.String("service-config", "", "installed worker configuration path")
 	stateDir := f.String("state-dir", "", "durable local worker spool directory")
@@ -249,9 +245,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return e
 		}
 		if workerUnit != "" {
-			*hostStateDir, e = myce.WorkerUnitDirectory(*hostStateDir, workerUnit)
-			if e != nil {
-				return e
+			if !myce.ValidWorkerUnit(workerUnit) {
+				return errors.New("invalid worker unit")
 			}
 		}
 		reason, e := myce.HostDisabled(*hostStateDir)
@@ -398,6 +393,27 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
+			return err
+		}
+
+		endpoint := "http://" + listener.Addr().String()
+		// Match the configured worker endpoint, which may name this listener
+		// through a hostname rather than its wildcard/bind address.
+		explicitQueue := os.Getenv("MYCE_QUEUE") != ""
+		f.Visit(func(value *flag.Flag) {
+			if value.Name == "queue" {
+				explicitQueue = true
+			}
+		})
+		if explicitQueue {
+			endpoint = *url
+		}
+		if err = q.ConfigureLocalHost(*hostStateDir, endpoint); err != nil {
+			listener.Close()
+			return err
+		}
+		if err = q.Tick(); err != nil {
+			listener.Close()
 			return err
 		}
 		defer listener.Close()

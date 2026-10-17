@@ -18,8 +18,8 @@ func sharedHostDirectory(dir string) (string, error) {
 	if dir == "" {
 		return HostStateDirectory()
 	}
-	if parent := unitParent(dir); parent != "" {
-		return parent, nil
+	if legacyUnitParent(dir) != "" {
+		return "", legacyHostStateError()
 	}
 	return dir, nil
 }

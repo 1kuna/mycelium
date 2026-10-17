@@ -276,7 +276,7 @@ func TestEngineRecoveryHealthThresholdAndTimeout(t *testing.T) {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			var probes atomic.Int32
 			permits := make(chan bool, 8)
-			health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			health := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				probes.Add(1)
 				select {
 				case healthy := <-permits:
@@ -368,7 +368,7 @@ func TestEngineRecoveryInFlightReplaySafety(t *testing.T) {
 				m.ModelConfigHash = modelConfigHash(q.models)
 				started := make(chan struct{}, 2)
 				var hits atomic.Int32
-				worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				worker := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					io.Copy(io.Discard, r.Body)
 					if hits.Add(1) == 1 {
 						started <- struct{}{}
@@ -556,12 +556,12 @@ func TestEngineRecoveryUnsafeTransportBeforeWait(t *testing.T) {
 				engine.bodyPrefix = `{"partial":`
 			}
 			rt := &modelRuntime{models: map[string]*workerModel{"test": {model: q.models.Models[0], engine: engine, state: "ready", attempt: s.Attempt}}, session: m.Session, token: "test"}
-			worker := httptest.NewServer(http.HandlerFunc(rt.serve))
+			worker := workerTestServer(http.HandlerFunc(rt.serve))
 			defer worker.Close()
 			m.ModelURL = worker.URL
 			check(t, q, m, nil)
 			var replays atomic.Int32
-			otherWorker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { replays.Add(1); fmt.Fprint(w, "unexpected replay") }))
+			otherWorker := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { replays.Add(1); fmt.Fprint(w, "unexpected replay") }))
 			defer otherWorker.Close()
 			other := machine("two", "fake")
 			other.ModelURL = otherWorker.URL

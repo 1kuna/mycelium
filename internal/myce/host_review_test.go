@@ -310,6 +310,7 @@ func TestHostRevisionBenchmarkCommandCustody(t *testing.T) {
 				t.Fatal("benchmark group not stopped")
 			}
 			// A delayed benchmark command cannot bind itself to a subsequent open.
+			testConfirmClose(t, dir)
 			closed, err := ReadHostIntent(dir)
 			if err != nil {
 				t.Fatal(err)

@@ -40,6 +40,7 @@ func TestDisableSystemdCgroup(t *testing.T) {
 			start := time.Now()
 			ensureTestHost(t, h.Dir, h.Clock)
 			r, err := h.Disable(context.Background(), "test", tc.grace)
+			defer waitHostCleanup(t, dir)
 			if (err != nil) != (tc.left || tc.hang) {
 				t.Fatalf("report %+v error %v", r, err)
 			}
@@ -84,55 +85,6 @@ func TestWorkerUnitCgroupSettings(t *testing.T) {
 		}
 	}
 }
-func TestHostControlGenerationOrdering(t *testing.T) {
-	q, _ := fixture(t)
-	m := machine("worker", "fake")
-	m.HostID = "host"
-	check(t, q, m, nil)
-	j := submit(t, q, spec("experiment"))
-	check(t, q, m, nil)
-	if e := q.DisableHostGeneration("host", "test", false, nil, 3); e != nil {
-		t.Fatal(e)
-	}
-	if e := q.EnableHostGeneration("host", 2); e == nil {
-		t.Fatal("stale enable accepted")
-	}
-	if e := q.DisableHostGeneration("host", "test", true, nil, 3); e != nil {
-		t.Fatal(e)
-	}
-	if job(t, q, j.ID).State != "queued" {
-		t.Fatal("not requeued")
-	}
-	if e := q.DisableHostGeneration("host", "test", true, nil, 3); e != nil {
-		t.Fatal("ack retry", e)
-	}
-	if e := q.DisableHostGeneration("host", "late pending", false, nil, 3); e != nil {
-		t.Fatal("pending retry", e)
-	}
-	if !q.s.HostControls["host"].Cleared {
-		t.Fatal("late pending undid acknowledgement")
-	}
-
-	if e := q.EnableHostGeneration("host", 4); e != nil {
-		t.Fatal(e)
-	}
-	check(t, q, m, nil)
-	before := job(t, q, j.ID)
-	if e := q.DisableHostGeneration("host", "replay", true, nil, 3); e == nil {
-		t.Fatal("old disable accepted")
-	}
-	after := job(t, q, j.ID)
-	if before.Attempt != after.Attempt || after.State != "running" {
-		t.Fatal("replay requeued new attempt")
-	}
-	if e := q.EnableHostGeneration("host", 4); e != nil {
-		t.Fatal("enable retry", e)
-	}
-	if e := q.DisableHostGeneration("host", "conflict", true, nil, 4); e == nil {
-		t.Fatal("same generation changed action")
-	}
-}
-
 func TestSystemdProtocolAndDescendantPopulation(t *testing.T) {
 	for _, grace := range []time.Duration{0, 3 * time.Second} {
 		t.Run(grace.String(), func(t *testing.T) {
@@ -214,37 +166,8 @@ func TestSystemdRegistryFailureDoesNotGateStop(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "worker-broken.json"), []byte("broken"), 0600)
 	s := &fakeHostService{}
 	r, e := (HostControl{Dir: readyTestHost(t, dir), Service: s}).Disable(context.Background(), "test", 0)
-	if e != nil || !r.Confirmed || len(r.QueueErrors) == 0 {
+	if e == nil || r.Confirmed || len(r.Unconfirmed) == 0 {
 		t.Fatal(r, e)
-	}
-}
-func TestHostGenerationPersistsAcrossQueueRestart(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "queue.db")
-	clock := &fakeClock{now: time.Unix(1000, 0)}
-	q, e := Open(path, dir, clock)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if e = q.DisableHostGeneration("host", "test", true, nil, 5); e != nil {
-		t.Fatal(e)
-	}
-	if e = q.Close(); e != nil {
-		t.Fatal(e)
-	}
-	q, e = Open(path, dir, clock)
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer q.Close()
-	if e = q.EnableHostGeneration("host", 4); e == nil {
-		t.Fatal("restart lost ordering")
-	}
-	if e = q.EnableHostGeneration("host", 6); e != nil {
-		t.Fatal(e)
-	}
-	if e = q.DisableHostGeneration("host", "legacy", true, nil, 0); e == nil {
-		t.Fatal("unordered legacy request bypassed generation")
 	}
 }
 func TestSystemdHangingCommandDeadline(t *testing.T) {
@@ -252,6 +175,7 @@ func TestSystemdHangingCommandDeadline(t *testing.T) {
 	s := &SystemdHostService{Unit: "myce-worker.service", Command: func(ctx context.Context, _ string, _ ...string) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }}
 	start := time.Now()
 	r, e := (HostControl{Dir: readyTestHost(t, dir), Service: s, Timeout: time.Second}).Disable(context.Background(), "test", 0)
+	defer waitHostCleanup(t, dir)
 	if e == nil || time.Since(start) > 2*time.Second || len(r.Unconfirmed) == 0 {
 		t.Fatal(r, e)
 	}

@@ -363,7 +363,7 @@ func TestWorkerClearsWithdrawnPreparationFailure(t *testing.T) {
 	w.checkpointPrepare = func(Job) (string, error) { return "", errors.New("NAS unavailable during preparation") }
 	reports := make(chan bool, 1)
 	assigned := false
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		if req.URL.Path != "/api/workers/checkin" {
 			if req.URL.Path == "/api/workers/complete" {
 				return

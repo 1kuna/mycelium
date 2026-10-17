@@ -31,7 +31,7 @@ func TestHoldsReviewHostDisableScope(t *testing.T) {
 	q.s.Machines[b.ID].Disabled = "deliberate"
 	assert(true)
 	q.s.Machines[b.ID].Disabled = ""
-	q.s.DisabledHosts = map[string]string{"b70": "deliberate"}
+	closeQueueHost(q, "b70", "deliberate", nil)
 	assert(true)
 }
 

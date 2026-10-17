@@ -201,9 +201,6 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 		if r.Docker != "" {
 			fmt.Fprintln(out, "Docker:", r.Docker)
 		}
-		if len(r.QueueErrors) > 0 {
-			fmt.Fprintln(out, "Queue notification unconfirmed; durable host intent remains closed.")
-		}
 		err = cleanupErr
 		confirmation := "none"
 		if err != nil {

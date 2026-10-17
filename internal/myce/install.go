@@ -495,6 +495,9 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 				return err
 			}
 		}
+		if err = installHostReconcileTimer(ctx, c, command); err != nil {
+			return err
+		}
 		if c.StartDisabled {
 			_, err = command(ctx, "systemctl", "--user", "enable", filepath.Base(c.Service))
 			return err
@@ -747,7 +750,10 @@ func ReadServiceToken(c ServiceConfig) (string, error) {
 func (c ServiceConfig) Args() []string {
 	args := []string{}
 	if c.Role == "queue" {
-		args = []string{"queue", "--listen", c.Listen, "--db", c.DB, "--checkpoints", c.Checkpoints}
+		args = []string{"queue", "--listen", c.Listen, "--db", c.DB, "--checkpoints", c.Checkpoints, "--queue", c.Queue}
+		if c.HostStateDir != "" {
+			args = append(args, "--host-state-dir", c.HostStateDir)
+		}
 	} else {
 		args = []string{"join", "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}

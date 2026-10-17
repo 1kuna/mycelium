@@ -245,7 +245,7 @@ func TestInstallQueueStartsAndReportsLocally(t *testing.T) {
 	os.WriteFile(c.EnvironmentFile, []byte("MYCE_TOKEN=private-test-only\nMYCE_QUEUE=http://"+address+"\n"), 0600)
 	var child *exec.Cmd
 	runner := func(_ context.Context, n string, a ...string) ([]byte, error) {
-		if strings.Contains(strings.Join(a, " "), "enable --now") {
+		if strings.Join(a, " ") == "--user enable --now myce-queue.service" {
 			child = exec.Command(c.Binary, "-test.run=^TestInstalledQueueServiceProcess$")
 			child.Env = append(os.Environ(), "MYCE_TEST_INSTALLED_SERVICE="+c.Config, "INVOCATION_ID=")
 			return nil, child.Start()
@@ -284,7 +284,7 @@ func TestInstalledDisabledServiceDoesNotReadCredentialsOrJoin(t *testing.T) {
 	c, _ := myce.PlanInstall("worker", home, "", home, "http://unused:7331", "card", myce.Detection{OS: "linux", Arch: "amd64", Platform: "fake", MemoryMode: "fixed", MemoryGB: 2})
 	c.HostStateDir = dir
 	c.EnvironmentFile = filepath.Join(home, "missing-fleet.env")
-	scoped, _ := myce.WorkerUnitDirectory(dir, filepath.Base(c.Service))
+	scoped := dir
 	os.MkdirAll(scoped, 0700)
 	if _, e := myce.InitializeHostIntent(scoped, c.HostID, myce.RealClock{}); e != nil {
 		t.Fatal(e)
@@ -373,7 +373,7 @@ func TestInstallQueueLocalDisableReceiptsFlags(t *testing.T) {
 	}
 }
 
-func TestQueueLocalDisableReceiptsRequiresExplicitIdentity(t *testing.T) {
+func TestQueueLocalDisableReceiptsOptionRemoved(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "test-only-token")
 	for _, flags := range [][]string{
 		{"--local-disable-receipts"},
@@ -381,8 +381,8 @@ func TestQueueLocalDisableReceiptsRequiresExplicitIdentity(t *testing.T) {
 		{"--local-disable-receipts", "--host-state-dir", "host-state"},
 	} {
 		err := runWithProbe(append([]string{"queue"}, flags...), myce.MachineProbe{OS: "linux", Arch: "arm64"})
-		if err == nil || !strings.Contains(err.Error(), "reinstall") {
-			t.Fatal("queue identity was implicit", err)
+		if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -local-disable-receipts") {
+			t.Fatal("removed delivery-mode flag accepted", err)
 		}
 	}
 }

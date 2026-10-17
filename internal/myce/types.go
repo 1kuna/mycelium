@@ -271,7 +271,6 @@ type Machine struct {
 	FileTransferError           string              `json:"file_transfer_error,omitempty"`
 	CapabilityProfile           *CapabilityProfile  `json:"capability_profile,omitempty"`
 	ExtensionReports            []ExtensionReport   `json:"extension_reports,omitempty"`
-	EnablePending               bool                `json:"enable_pending,omitempty"`
 	HostMemoryBudgetGeneration  uint64              `json:"host_memory_budget_generation,omitempty"`
 	EffectiveHostMemoryBudgetGB float64             `json:"effective_host_memory_budget_gb,omitempty"`
 	HostMemoryInUseGB           float64             `json:"host_memory_in_use_gb,omitempty"`

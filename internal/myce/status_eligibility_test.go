@@ -166,7 +166,7 @@ func TestStatusEligibilityKeepsRequestPrivate(t *testing.T) {
 	q, _, m := modelFixture(t)
 	received := make(chan string, 1)
 	release := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			return

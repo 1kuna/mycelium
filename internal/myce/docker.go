@@ -944,7 +944,7 @@ func ConfirmDockerGone(hostDir, dir, identity string, confirmed bool) error {
 	if err = os.MkdirAll(hostDir, 0700); err != nil {
 		return err
 	}
-	unlock, err := hostOperationLock(hostDir, "control.lock", false)
+	unlock, err := hostOperationLock(hostDir, "reconcile.lock", false)
 	if err != nil {
 		return err
 	}

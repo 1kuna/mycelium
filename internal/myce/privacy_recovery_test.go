@@ -83,7 +83,7 @@ func TestPrivacyStatusAuthentication(t *testing.T) {
 }
 
 func TestPrivacyControlErrorDoesNotEchoBody(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(503)
 		w.Write([]byte(strings.Repeat("synthetic-secret", 1000)))
 	}))
@@ -104,7 +104,7 @@ func privacyRequest(path string) *http.Request {
 
 func TestPrivacyUpstreamErrorsAreFixed(t *testing.T) {
 	q, _, m := modelFixture(t)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Private", "synthetic-secret")
 		w.WriteHeader(422)
 		w.Write([]byte("synthetic-secret"))
@@ -132,7 +132,7 @@ func TestPrivacyFrozenCallTimesOutAndReleasesSlot(t *testing.T) {
 			if err := json.Unmarshal([]byte(`{"request_timeout":40000000}`), &q.models.Models[0]); err != nil {
 				t.Fatal(err)
 			}
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			upstream := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				io.Copy(io.Discard, r.Body)
 				w.WriteHeader(200)
 				w.(http.Flusher).Flush()
@@ -169,10 +169,10 @@ func TestPrivacyGenericRetryRequiresCatalogOptIn(t *testing.T) {
 			if err := json.Unmarshal([]byte(fmt.Sprintf(`{"retry_safe":%v}`, safe)), &q.models.Models[0]); err != nil {
 				t.Fatal(err)
 			}
-			first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); panic(http.ErrAbortHandler) }))
+			first := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); panic(http.ErrAbortHandler) }))
 			defer first.Close()
 			var retries atomic.Int32
-			second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { retries.Add(1); w.Write([]byte("ok")) }))
+			second := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { retries.Add(1); w.Write([]byte("ok")) }))
 			defer second.Close()
 			m.ModelURL = first.URL
 			m.ModelConfigHash = modelConfigHash(q.models)
@@ -452,7 +452,7 @@ func TestPrivacyStatusBrowserAuthUsesFleetToken(t *testing.T) {
 }
 
 func TestPrivacyWorkerFrozenHeadersTimesOut(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); <-r.Context().Done() }))
+	upstream := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); <-r.Context().Done() }))
 	defer upstream.Close()
 	wm := &workerModel{state: "ready", model: Model{RequestTimeout: 20 * time.Millisecond}, engine: &LlamaEngine{url: upstream.URL}}
 	rt := &modelRuntime{models: map[string]*workerModel{"test": wm}, session: "session", token: "test"}

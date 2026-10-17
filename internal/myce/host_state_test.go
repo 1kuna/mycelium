@@ -12,9 +12,13 @@ import (
 	"time"
 )
 
-func testHostOpen(t *testing.T, dir string, clock Clock) HostIntent {
+func testHostOpen(t *testing.T, dir string, clock Clock, host ...string) HostIntent {
 	t.Helper()
-	s := HostIntent{Schema: 1, Host: "test-host", HostRevision: HostRevision{Revision: 1, Operation: ID()}, Desired: "open", AcceptedAt: clock.Now()}
+	identity := "test-host"
+	if len(host) > 0 {
+		identity = host[0]
+	}
+	s := HostIntent{Schema: 1, Host: identity, HostRevision: HostRevision{Revision: 1, Operation: ID()}, Desired: "open", AcceptedAt: clock.Now()}
 	if err := atomicHostJSON(dir, hostStateFile, s, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +46,7 @@ func TestHostRevisionSupersession(t *testing.T) {
 	if _, err = changeHostIntent(dir, clock, hostIntentChange{Desired: "open", Expected: closed.HostRevision}); err == nil {
 		t.Fatal("open without settlement")
 	}
+	testConfirmClose(t, dir)
 	// A close accepted while the settlement source is read defeats the old open.
 	_, err = changeHostIntent(dir, clock, hostIntentChange{Desired: "open", Expected: closed.HostRevision, Settled: func(HostIntent) error {
 		opened, e := changeHostIntent(dir, clock, hostIntentChange{Desired: "open", Expected: closed.HostRevision, Settled: func(HostIntent) error { return nil }})
@@ -213,17 +218,7 @@ func TestHostRevisionIntakeDuringNetworkAndNativeGate(t *testing.T) {
 		t.Fatal(closed)
 	}
 }
-func TestHostRevisionLegacyDeliveryInert(t *testing.T) {
-	q, _ := fixture(t)
-	if err := q.ConfigureLocalDisableReceipts("test-host", t.TempDir()); err == nil {
-		t.Fatal("old receipt decoder activated")
-	}
-	if err := (HostControl{Dir: t.TempDir()}).ReconcileEnable(context.Background()); !errors.Is(err, ErrHostState) {
-		t.Fatal(err)
-	}
-}
-
-func ensureTestHost(t *testing.T, dir string, clock Clock) {
+func ensureTestHost(t *testing.T, dir string, clock Clock, host ...string) {
 	t.Helper()
 	if dir == "" {
 		return
@@ -237,11 +232,11 @@ func ensureTestHost(t *testing.T, dir string, clock Clock) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	testHostOpen(t, dir, clock)
+	testHostOpen(t, dir, clock, host...)
 }
-func readyTestHost(t *testing.T, dir string) string {
+func readyTestHost(t *testing.T, dir string, host ...string) string {
 	t.Helper()
-	ensureTestHost(t, dir, RealClock{})
+	ensureTestHost(t, dir, RealClock{}, host...)
 	return dir
 }
 func closeTestHost(dir string) error {
@@ -302,6 +297,7 @@ func TestHostRevisionDevClosesBothDevicesAndRejectsDelayedLaunch(t *testing.T) {
 		t.Fatal("delayed launch admitted", err)
 	}
 	// Even after a subsequent, settled open the old action cannot launch.
+	testConfirmClose(t, hostDir)
 	if _, err = changeHostIntent(hostDir, RealClock{}, hostIntentChange{Desired: "open", Expected: closed.HostRevision, Settled: func(HostIntent) error { return nil }}); err != nil {
 		t.Fatal(err)
 	}
@@ -317,23 +313,6 @@ func readTestHostRevision(t *testing.T, dir string) HostRevision {
 	}
 	return s.HostRevision
 }
-func TestHostRevisionForgetCannotDiscardPendingCustody(t *testing.T) {
-	dir := readyTestHost(t, t.TempDir())
-	s, _ := ReadHostIntent(dir)
-	for _, force := range []bool{false, true} {
-		if e := (HostControl{Dir: dir}).ForgetQueue("http://offline", force, nil); e == nil {
-			t.Fatal("forgot release custody")
-		}
-	}
-	after, e := ReadHostIntent(dir)
-	if e != nil || after.HostRevision != s.HostRevision {
-		t.Fatal(after, e)
-	}
-	if _, e = os.Stat(filepath.Join(dir, "forgotten-queues.json")); !errors.Is(e, os.ErrNotExist) {
-		t.Fatal("legacy counter recreated")
-	}
-}
-
 func TestHostRevisionLegacyHTTPControlRejected(t *testing.T) {
 	q, _ := fixture(t)
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
@@ -342,11 +321,11 @@ func TestHostRevisionLegacyHTTPControlRejected(t *testing.T) {
 	for _, action := range []string{"enable", "disable"} {
 		e := client.Call(context.Background(), "POST", "/api/hosts/test-host/"+action, map[string]any{"machine": "card-a", "generation": 999, "cleared": true}, nil)
 		var httpErr *HTTPError
-		if !errors.As(e, &httpErr) || httpErr.Status != 426 {
+		if !errors.As(e, &httpErr) || httpErr.Status != 404 {
 			t.Fatal(e)
 		}
 	}
-	if len(q.s.HostControls) > 0 || len(q.s.MachineControls) > 0 {
+	if len(q.s.HostIntents) > 0 {
 		t.Fatal("legacy control changed queue")
 	}
 }

@@ -1,0 +1,9 @@
+[Unit]
+Description=Mycelium host reconciliation
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/myce host reconcile --local --timeout 30s
+TimeoutStartSec=35s
+UMask=0077

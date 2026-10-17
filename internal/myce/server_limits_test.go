@@ -121,7 +121,7 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 	release := make(chan struct{}, 8)
 	exited := make(chan struct{}, 8)
 	var active, overlap atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		if active.Add(1) > 1 {
 			overlap.Add(1)
@@ -223,7 +223,7 @@ func TestUploadSpoolBudgetHTTPAdmissionAndCleanup(t *testing.T) {
 	}
 	entered := make(chan struct{}, 4)
 	release := make(chan struct{}, 4)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		entered <- struct{}{}
 		select {

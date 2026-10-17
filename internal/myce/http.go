@@ -179,13 +179,18 @@ func (a API) Handler() http.Handler {
 		}
 		respond(w, map[string]bool{"ok": true}, a.Queue.AppendLog(c))
 	})
-	// The per-unit/generation protocol is retired. S05 supplies the single
-	// host-revision exchange; no legacy decoder may allocate control counters.
-	for _, route := range []string{"POST /api/hosts/{id}/disable", "POST /api/hosts/{id}/enable"} {
-		mux.HandleFunc(route, func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "legacy host control unsupported; convert host state offline and upgrade queue and workers together", http.StatusUpgradeRequired)
-		})
-	}
+	mux.HandleFunc("POST /api/hosts/{id}/reconcile", func(w http.ResponseWriter, r *http.Request) {
+		var c HostExchange
+		if !decode(w, r, &c) {
+			return
+		}
+		if c.Host != r.PathValue("id") {
+			respond(w, nil, errors.New("host identity mismatch"))
+			return
+		}
+		v, err := a.Queue.ReconcileHost(c)
+		respond(w, v, err)
+	})
 	mux.HandleFunc("POST /api/workers/{id}/leave", func(w http.ResponseWriter, r *http.Request) {
 		var c struct {
 			Now bool `json:"now"`

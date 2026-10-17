@@ -43,7 +43,7 @@ func oldHostFixture(t *testing.T) HostConversionOptions {
 	writeOld(filepath.Join(root, "control-generation.json"), `7`)
 	writeOld(filepath.Join(root, "units", "myce-worker@card-a.service", "control-generation.json"), `19`)
 	writeOld(filepath.Join(spool, "state.json"), `{"session":"session-a","fresh":false,"offset":0}`)
-	w := HostWorker{Host: "test-host", Name: "card-a", Unit: "myce-worker@card-a.service", State: spool, Queue: "http://offline", Session: "session-a", Generation: 19}
+	w := legacyHostWorker{HostWorker: HostWorker{Host: "test-host", Name: "card-a", Unit: "myce-worker@card-a.service", State: spool, Queue: "http://offline", Session: "session-a"}, Generation: 19}
 	b, err := json.Marshal(w)
 	if err != nil {
 		t.Fatal(err)
@@ -328,10 +328,9 @@ func TestHostConversionArchivedCountersAndReceipts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			w := workers[0]
-			w.Generation = 117
+			w := legacyHostWorker{HostWorker: workers[0], Generation: 117}
 			w.Executions = []Result{{Machine: w.Name, Session: w.Session, Execution: Execution{ID: "old-job", Attempt: 3}}}
-			receipt, err := json.Marshal(hostReceipt{Generation: 91, EnableGeneration: 92, Workers: []HostWorker{w}})
+			receipt, err := json.Marshal(hostReceipt{Generation: 91, EnableGeneration: 92, Workers: []legacyHostWorker{w}})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -49,7 +49,25 @@ type HostObligation struct {
 	Result      Result               `json:"execution"`
 }
 
+type HostClose struct {
+	HostRevision
+	Settlement string     `json:"settlement"`
+	SettledAt  *time.Time `json:"settled_at"`
+}
+
+// Cleanup evidence is scoped to one boot and one revision. It is not the
+// privileged rest verdict (GPU/restart observation is supplied by S07).
+type HostLocalExclusion struct {
+	HostObservation
+	Confirmed bool             `json:"confirmed"`
+	Errors    []string         `json:"errors"`
+	Released  []HostObligation `json:"released"`
+}
 type HostIntent struct {
+	LastClose      *HostClose                     `json:"last_close"`
+	LocalExclusion *HostLocalExclusion            `json:"local_exclusion"`
+	QueueAcks      map[string]HostAcknowledgement `json:"queue_acknowledgements"`
+
 	Schema int    `json:"schema_version"`
 	Host   string `json:"host_id"`
 	HostRevision
@@ -67,7 +85,7 @@ func hostRoot(dir string) (string, error) {
 	if dir == "" {
 		return HostStateDirectory()
 	}
-	if unitParent(dir) != "" {
+	if legacyUnitParent(dir) != "" {
 		return "", legacyHostStateError()
 	}
 	return dir, nil
@@ -97,6 +115,12 @@ func validateHostIntent(s HostIntent) error {
 	if s.Desired == "closed" && (s.StopDeadline == nil || s.PreviousClose != s.Revision) {
 		return fmt.Errorf("%w: invalid closed host intent", ErrHostState)
 	}
+	if s.LastClose != nil {
+		c := s.LastClose
+		if c.Revision == 0 || c.Operation == "" || c.Revision != s.PreviousClose || c.Revision > s.Revision || (c.Settlement != "pending" && c.Settlement != "unknown" && c.Settlement != "confirmed") || (c.Settlement == "confirmed") != (c.SettledAt != nil) {
+			return fmt.Errorf("%w: invalid last close", ErrHostState)
+		}
+	}
 	for _, p := range s.Pending {
 		if p.Engine != nil {
 			if p.Queue == "" || p.Engine.Machine == "" || p.Engine.Session == "" || p.Engine.Model == "" || p.Engine.Attempt == "" {
@@ -104,7 +128,7 @@ func validateHostIntent(s HostIntent) error {
 			}
 			continue
 		}
-		if p.Queue == "" || p.Result.Machine == "" || p.Result.Session == "" || p.Result.ID == "" || p.Result.Attempt <= 0 {
+		if p.Queue == "" || p.Result.Machine == "" || p.Result.Session == "" || p.Result.ID == "" || (p.Result.Attempt <= 0 && !(p.Preparation && p.Result.ID == "preparation" && p.Result.Attempt == 0)) {
 			return fmt.Errorf("%w: incomplete execution custody", ErrHostState)
 		}
 	}
@@ -237,6 +261,7 @@ func InitializeHostIntent(dir, host string, clock Clock) (HostIntent, error) {
 	}
 	now := clock.Now()
 	s = HostIntent{Schema: hostStateVersion, Host: host, HostRevision: HostRevision{Revision: 1, Operation: ID()}, Desired: "closed", Reason: "initial provisioning", AcceptedAt: now, StopDeadline: &now, PreviousClose: 1}
+	s.LastClose = &HostClose{HostRevision: s.HostRevision, Settlement: "pending"}
 	return s, atomicHostJSON(dir, hostStateFile, s, nil)
 }
 
@@ -271,7 +296,7 @@ func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, 
 		}
 		if s.PreviousClose > 0 {
 			if c.Settled == nil {
-				return zero, errors.New("previous close requires host reconciliation before open")
+				c.Settled = previousCloseSettled
 			}
 			if err = c.Settled(s); err != nil {
 				return zero, err
@@ -290,6 +315,11 @@ func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, 
 	if (c.Desired == "open" && s.HostRevision != c.Expected) || (c.Desired == "closed" && c.CloseExpected != nil && s.HostRevision != *c.CloseExpected) {
 		return zero, ErrHostRevision
 	}
+	if c.Desired == "open" {
+		if err = previousCloseSettled(s); err != nil {
+			return zero, err
+		}
+	}
 	if s.Desired == c.Desired {
 		return s, nil
 	} // Repeated close never renews stop grace.
@@ -302,6 +332,17 @@ func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, 
 		deadline := s.AcceptedAt.Add(c.Grace)
 		s.StopDeadline = &deadline
 		s.PreviousClose = s.Revision
+		s.LastClose = &HostClose{HostRevision: s.HostRevision, Settlement: "pending"}
+		s.LocalExclusion = nil
+		s.QueueAcks = nil
+	} else {
+		// Previous-close history is immutable across open. Only reconciled custody
+		// can be cleared; an unresolved hold cannot pass previousCloseSettled.
+		s.Pending = nil
+		s.Holds = nil
+		s.LocalExclusion = nil
+		s.QueueAcks = nil
+		s.StopDeadline = nil
 	}
 	if err = atomicHostJSON(dir, hostStateFile, s, c.boundary); err != nil {
 		return zero, err

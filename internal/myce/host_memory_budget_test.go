@@ -32,7 +32,7 @@ func TestHostMemoryBudgetDurableWhileDisabled(t *testing.T) {
 	if first.Generation == 0 || second.Generation != first.Generation+1 {
 		t.Fatal("unordered generation")
 	}
-	scoped, _ := WorkerUnitDirectory(dir, "myce-worker@gpu1.service")
+	scoped := dir
 	budget, source, err := EffectiveHostMemoryBudget(scoped, 5)
 	if err != nil || budget.GiB != 27 || budget.Generation != second.Generation || !strings.HasSuffix(source, "host-memory-budget.json") {
 		t.Fatal(budget, source, err)
@@ -55,6 +55,7 @@ func TestHostMemoryBudgetDurableWhileDisabled(t *testing.T) {
 	if err := w.refreshHostMemoryBudget(); err != nil || w.Machine.HostMemoryBudgetGB != 27 {
 		t.Fatal("disabled install budget not overridden", err)
 	}
+	testConfirmClose(t, dir)
 	if err := (HostControl{Dir: dir, Expected: readTestHostRevision(t, dir), Settled: func(HostIntent) error { return nil }}).Enable(context.Background()); err != nil {
 		t.Fatal("could not enable after offline budget change", err)
 	}
@@ -169,12 +170,13 @@ func TestHostMemoryBudgetWorkerReportsLiveWithoutRestart(t *testing.T) {
 		t.Fatal(e)
 	}
 	h.Expected = current.HostRevision
+	testConfirmClose(t, dir)
 	h.Settled = func(HostIntent) error { return nil }
 	if err := h.Enable(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	reports := make(chan Machine, 100)
-	server := httptest.NewServer(http.HandlerFunc(func(out http.ResponseWriter, r *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(out http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/workers/checkin" {
 			var c Checkin
 			if err := json.NewDecoder(r.Body).Decode(&c); err != nil {

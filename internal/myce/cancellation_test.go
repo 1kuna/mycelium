@@ -596,7 +596,7 @@ func TestCancellationHostClearKeepsOmittedCustody(t *testing.T) {
 		t.Fatal(err)
 	}
 	cancelAck(t, q, j.ID)
-	if err := q.DisableHostGeneration(m.ID, "test", true, nil, 1); err != nil {
+	if err := closeQueueHost(q, m.ID, "test", nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(q.s.HostReleases) != 1 {
@@ -605,7 +605,7 @@ func TestCancellationHostClearKeepsOmittedCustody(t *testing.T) {
 	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
 		t.Fatal(a)
 	}
-	if err := q.DisableHostGeneration(m.ID, "test", true, []Result{result(j, false)}, 2); err != nil {
+	if err := closeQueueHost(q, m.ID, "test", []Result{result(j, false)}); err != nil {
 		t.Fatal(err)
 	}
 	if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {

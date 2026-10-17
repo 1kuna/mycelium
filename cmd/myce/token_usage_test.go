@@ -27,7 +27,7 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 		"invite", "benchmark", "sim", "install worker", "install queue", "uninstall", "doctor",
 		"file put", "file get", "model fetch", "model approve-local", "model sync", "model pin", "model unpin",
 		"extension add", "extension list", "extension setup", "extension check",
-		"host-queues list", "host-queues forget", "host-memory-budget show", "host-memory-budget set 8",
+		"host reconcile", "host convert", "_host-start-check", "host-memory-budget show", "host-memory-budget set 8",
 	}
 	for _, command := range commands {
 		for _, option := range []string{"-h", "--help", "--unknown-flag"} {

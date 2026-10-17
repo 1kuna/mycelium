@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -43,7 +42,7 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	var once sync.Once
 	var uploaded atomic.Bool
 	api := API{Queue: q, Token: "test"}.Handler()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/workers/log" {
 			uploaded.Store(true)
 			if !blockCheckin {
@@ -155,7 +154,7 @@ func TestWorkerStopEventPreservesQueueDeadline(t *testing.T) {
 	clock := &workerFakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
 	deadline := clock.Now().Add(10 * time.Second)
 	event := WorkerEvent{Cursor: "stop", Execution: Execution{ID: "job", Attempt: 1}, GraceSeconds: 10, StopAt: &deadline}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clock.Advance(9 * time.Second) // delay in transit must not grant another 10s
 		_ = json.NewEncoder(w).Encode(event)
 	}))

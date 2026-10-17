@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,7 +35,6 @@ type HostWorker struct {
 	Session      string   `json:"session,omitempty"`
 	Config       string   `json:"config,omitempty"`
 	Unit         string   `json:"unit,omitempty"`
-	Generation   uint64   `json:"generation,omitempty"`
 	Executions   []Result `json:"executions,omitempty"`
 	Command      []string `json:"command,omitempty"`
 	State        string   `json:"state_dir"`
@@ -67,11 +65,15 @@ func (w *Worker) registerHost(s *workerStore) error {
 	if err := CheckHostRevision(w.HostStateDir, w.hostRevision); err != nil {
 		return err
 	}
+	intent, err := ReadHostIntent(w.HostStateDir)
+	if err != nil {
+		return err
+	}
 	if w.Machine.HostID == "" {
-		w.Machine.HostID, err = os.Hostname()
-		if err != nil {
-			return err
-		}
+		w.Machine.HostID = intent.Host
+	}
+	if w.Machine.HostID != intent.Host {
+		return errors.New("worker host identity does not match local host intent")
 	}
 	state, err := filepath.Abs(s.dir)
 	if err != nil {
@@ -118,7 +120,6 @@ type HostControl struct {
 	Dir               string
 	Clock             Clock
 	Processes         HostProcesses
-	Notify            func(context.Context, HostWorker, bool, bool, string) error
 }
 type DisableReport struct {
 	HostRevision
@@ -128,7 +129,6 @@ type DisableReport struct {
 	BestEffort  bool
 	Stopped     int
 	Unconfirmed []string
-	QueueErrors []string
 }
 
 func (h *HostControl) defaults() error {
@@ -197,49 +197,6 @@ func (h HostControl) workers() ([]HostWorker, error) {
 	}
 	return out, nil
 }
-func NotifyHost(client Client) func(context.Context, HostWorker, bool, bool, string) error {
-	return func(ctx context.Context, w HostWorker, enable, cleared bool, reason string) error {
-		c := client
-		c.URL = w.Queue
-		action := "disable"
-		if enable {
-			action = "enable"
-		}
-		// Confirmed physical cleanup can acknowledge only the saved executions.
-		// Send before host disable requeues them and clears their current keys.
-		if !enable && cleared {
-			for _, r := range w.Executions {
-				r.ReleaseOnly = true
-				r.ReleasePending = false
-				if err := c.Call(ctx, "POST", "/api/workers/complete", r, nil); err != nil {
-					return err
-				}
-			}
-		}
-		return c.Call(ctx, "POST", "/api/hosts/"+url.PathEscape(w.Host)+"/"+action, map[string]any{"reason": reason, "cleared": cleared, "executions": w.Executions, "generation": w.Generation}, nil)
-	}
-}
-
-// NotifyUnit uses the host API with an explicit machine scope. Cleanup and
-// generation acceptance are atomic, so a stale notification cannot release custody.
-func NotifyUnit(client Client) func(context.Context, HostWorker, bool, bool, string) error {
-	return func(ctx context.Context, w HostWorker, enable, cleared bool, reason string) error {
-		if w.Name == "" {
-			return errors.New("unit notification requires machine name")
-		}
-		if w.Session == "" && len(w.Executions) > 0 {
-			w.Session = w.Executions[0].Session
-		}
-		c := client
-		c.URL = w.Queue
-		action := "disable"
-		if enable {
-			action = "enable"
-		}
-		return c.Call(ctx, "POST", "/api/hosts/"+url.PathEscape(w.Host)+"/"+action, map[string]any{"machine": w.Name, "session": w.Session, "generation": w.Generation, "reason": reason, "cleared": cleared, "executions": w.Executions}, nil)
-	}
-}
-
 func (h HostControl) Disable(ctx context.Context, reason string, grace time.Duration) (DisableReport, error) {
 	timeout := h.Timeout
 	if timeout == 0 {
@@ -270,8 +227,7 @@ func (h HostControl) Disable(ctx context.Context, reason string, grace time.Dura
 		return r, ctx.Err()
 	}
 }
-func (h HostControl) disable(ctx context.Context, reason string, grace time.Duration) (DisableReport, error) {
-	var r DisableReport
+func (h HostControl) disable(ctx context.Context, reason string, grace time.Duration) (r DisableReport, retErr error) {
 	if grace < 0 || grace > time.Minute {
 		return r, errors.New("grace must be between 0 and 1m")
 	}
@@ -286,6 +242,52 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 		return r, err
 	}
 	r.HostRevision = intent.HostRevision
+	unlock, err := hostOperationLock(h.Dir, "reconcile.lock", false)
+	if err != nil {
+		return r, err
+	}
+	defer unlock()
+	// Persist both failed and successful exclusion attempts for this revision.
+	// Re-read after Stop: a worker can save a result or a new attempt during stop.
+	var initial []HostObligation
+	defer func() {
+		workers, e := h.workers()
+		final, _, custodyErr := hostCustody(workers)
+		boot, bootErr := HostBootID()
+		evidenceErrors := append([]string(nil), r.Unconfirmed...)
+		if retErr != nil {
+			evidenceErrors = append(evidenceErrors, retErr.Error())
+		}
+		for _, failure := range []error{e, custodyErr, bootErr} {
+			if failure != nil {
+				evidenceErrors = append(evidenceErrors, failure.Error())
+				retErr = errors.Join(retErr, failure)
+			}
+		}
+		r.Confirmed = len(evidenceErrors) == 0
+		r.Unconfirmed = evidenceErrors
+		released := mergeObligations(initial, final)
+		saveErr := mutateHostIntent(h.Dir, intent.HostRevision, func(s *HostIntent) error {
+			s.Pending = mergeObligations(s.Pending, released)
+			s.LocalExclusion = &HostLocalExclusion{HostObservation: HostObservation{HostRevision: intent.HostRevision, Boot: boot, State: "closed", At: h.Clock.Now()}, Confirmed: r.Confirmed, Errors: evidenceErrors, Released: released}
+			if s.LastClose == nil {
+				s.LastClose = &HostClose{HostRevision: intent.HostRevision, Settlement: "pending"}
+			}
+			if !r.Confirmed {
+				s.LastClose.Settlement = "pending"
+				s.LastClose.SettledAt = nil
+			}
+			return nil
+		})
+		if saveErr == nil && r.Confirmed {
+			saveErr = PublishHostObservation(h.Dir, intent.HostRevision, boot, "closed", h.Clock)
+		}
+		if saveErr != nil {
+			r.Confirmed = false
+			retErr = errors.Join(retErr, saveErr)
+		}
+	}()
+
 	// A retry retains the original deadline, including after reboot.
 	grace = max(0, intent.StopDeadline.Sub(h.Clock.Now()))
 	if ctx.Err() != nil {
@@ -313,11 +315,19 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 		h.Services = map[string]HostService{"worker": h.Service}
 	}
 	workers, err := h.workers()
+	if err == nil {
+		var custodyErr error
+		initial, _, custodyErr = hostCustody(workers)
+		if custodyErr != nil {
+			r.Unconfirmed = append(r.Unconfirmed, "initial custody unreadable: "+custodyErr.Error())
+		}
+	}
+
 	if err != nil {
 		if len(h.Services) == 0 {
 			return r, err
 		}
-		r.QueueErrors = append(r.QueueErrors, "worker registry unavailable; queue reconciliation incomplete")
+		r.Unconfirmed = append(r.Unconfirmed, "worker registry unavailable; queue reconciliation incomplete")
 		if h.Docker {
 			r.Unconfirmed = append(r.Unconfirmed, "Docker pending-operation custody unconfirmed: worker registry unavailable")
 		}
@@ -689,14 +699,6 @@ func (h HostControl) Enable(ctx context.Context) error {
 	}
 	_, err := changeHostIntent(h.Dir, h.Clock, hostIntentChange{Desired: "open", Expected: h.Expected, Settled: h.Settled})
 	return err
-}
-
-// Retained API seams for S05; the old receipt delivery path is deliberately inert.
-func (h HostControl) ReconcileEnable(ctx context.Context) error {
-	return CheckHostRevision(h.Dir, h.Expected)
-}
-func (h HostControl) ReconcileWorkerEnable(ctx context.Context, queue, host string) error {
-	return CheckHostRevision(h.Dir, h.Expected)
 }
 
 func AdoptHostWorker(dir string, w HostWorker) error {

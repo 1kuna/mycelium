@@ -276,7 +276,7 @@ func TestModelRetryAndStreamFailure(t *testing.T) {
 		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
 			q, _, m := modelFixture(t)
 			var firstCalls, secondCalls atomic.Int32
-			first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			first := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				firstCalls.Add(1)
 				if stream {
 					w.Header().Set("Content-Type", "text/event-stream")
@@ -290,7 +290,7 @@ func TestModelRetryAndStreamFailure(t *testing.T) {
 				panic(http.ErrAbortHandler)
 			}))
 			defer first.Close()
-			second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			second := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				secondCalls.Add(1)
 				w.Header().Set("Content-Type", "application/json")
 				fmt.Fprint(w, `{"answer":"retried"}`)
@@ -393,14 +393,14 @@ func TestModelLostWorkerRetriesInFlightCall(t *testing.T) {
 	q, clock, m := modelFixture(t)
 	q.models.Wait = 10 * time.Minute
 	started := make(chan struct{})
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	first := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		close(started)
 		<-r.Context().Done()
 	}))
 	defer first.Close()
 	var secondCalls atomic.Int32
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	second := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		secondCalls.Add(1)
 		fmt.Fprint(w, `{"answer":"other worker"}`)
 	}))
@@ -547,7 +547,7 @@ func TestCallCanUseDoesNotBlockBatchForImpossibleCall(t *testing.T) {
 
 func TestEmptyStreamingResponsePreservesStatus(t *testing.T) {
 	q, _, m := modelFixture(t)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 	}))
@@ -587,7 +587,7 @@ func TestFailedUnloadIsNotCountedAsReclaimable(t *testing.T) {
 func TestCancelledModelCallDoesNotLoadRetryWorker(t *testing.T) {
 	q, _, m := modelFixture(t)
 	started := make(chan struct{})
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	first := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		close(started)
 		<-r.Context().Done()

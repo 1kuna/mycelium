@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,7 +26,7 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 			admitted := make(chan struct{})
 			var once sync.Once
 			handler := API{Queue: q, Token: "test"}.Handler()
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handler.ServeHTTP(w, r)
 				snap, err := q.Snapshot()
 				if err == nil && len(snap.Machines) > 0 {

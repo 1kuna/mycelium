@@ -610,6 +610,7 @@ func TestDockerWorkerPublishesUnconfirmedCleanupWhileDaemonHangs(t *testing.T) {
 	w.Client = Client{URL: server.URL, Token: "test"}
 	w.Interval = time.Millisecond
 	w.Machine.HostID = "docker-host"
+	testHostOpen(t, w.HostStateDir, c, "docker-host")
 	w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 	w.HostMemorySource = func(context.Context) (float64, error) { return 32, nil }
 	w.CheckpointRoot = q.root

@@ -81,7 +81,7 @@ func TestWorkerStreamsGenericBodyHeadersAndLength(t *testing.T) {
 		session: "session",
 		token:   "token",
 	}
-	server := httptest.NewServer(http.HandlerFunc(rt.serve))
+	server := workerTestServer(http.HandlerFunc(rt.serve))
 	defer server.Close()
 
 	reader, writer := io.Pipe()
@@ -140,7 +140,7 @@ func TestGenericDiskSpoolReplaysTransportRetry(t *testing.T) {
 	q.models.Models[0].RetrySafe = true
 	firstMachine.ModelConfigHash = modelConfigHash(q.models)
 	var firstCalls, secondCalls atomic.Int32
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	first := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		firstCalls.Add(1)
 		_, _ = io.Copy(io.Discard, r.Body)
 		panic(http.ErrAbortHandler)
@@ -150,7 +150,7 @@ func TestGenericDiskSpoolReplaysTransportRetry(t *testing.T) {
 		body   string
 		length int64
 	}, 1)
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	second := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		secondCalls.Add(1)
 		data, _ := io.ReadAll(r.Body)
 		received <- struct {

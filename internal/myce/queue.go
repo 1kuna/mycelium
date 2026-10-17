@@ -38,21 +38,19 @@ type batchRelease struct {
 }
 
 type state struct {
-	Submissions      map[string]*submissionRecord     `json:"submissions,omitempty"`
-	MachineControls  map[string]machineControl        `json:"machine_controls,omitempty"`
-	ProgramNeeds     map[string]SizeHint              `json:"program_needs,omitempty"`
-	Extensions       map[string]Extension             `json:"extensions,omitempty"`
-	HostControls     map[string]HostControlGeneration `json:"host_controls,omitempty"`
-	DisabledHosts    map[string]string                `json:"disabled_hosts,omitempty"`
-	Hosts            map[string]*HostState            `json:"hosts,omitempty"`
-	HostReleases     map[string]HostRelease           `json:"host_releases,omitempty"`
-	BatchReleases    map[string]batchRelease          `json:"batch_releases,omitempty"`
-	UsageMaintenance time.Time                        `json:"usage_maintenance,omitempty"`
-	ProductionStarts []ProductionStart                `json:"production_starts,omitempty"`
-	Policies         map[string]ProjectPolicy         `json:"project_policies,omitempty"`
-	FairUsage        map[string]FairUsage             `json:"fair_usage,omitempty"`
-	UsageAt          time.Time                        `json:"usage_at,omitempty"`
-	Preemptions      []Preemption                     `json:"preemptions,omitempty"`
+	HostIntents      map[string]QueueHostIntent   `json:"host_intents,omitempty"`
+	Submissions      map[string]*submissionRecord `json:"submissions,omitempty"`
+	ProgramNeeds     map[string]SizeHint          `json:"program_needs,omitempty"`
+	Extensions       map[string]Extension         `json:"extensions,omitempty"`
+	Hosts            map[string]*HostState        `json:"hosts,omitempty"`
+	HostReleases     map[string]HostRelease       `json:"host_releases,omitempty"`
+	BatchReleases    map[string]batchRelease      `json:"batch_releases,omitempty"`
+	UsageMaintenance time.Time                    `json:"usage_maintenance,omitempty"`
+	ProductionStarts []ProductionStart            `json:"production_starts,omitempty"`
+	Policies         map[string]ProjectPolicy     `json:"project_policies,omitempty"`
+	FairUsage        map[string]FairUsage         `json:"fair_usage,omitempty"`
+	UsageAt          time.Time                    `json:"usage_at,omitempty"`
+	Preemptions      []Preemption                 `json:"preemptions,omitempty"`
 
 	SyncRequests []SyncRequest         `json:"sync_requests,omitempty"`
 	ModelUses    map[string]ModelUse   `json:"model_uses,omitempty"`
@@ -63,7 +61,8 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
-	localReceipts   localDisableReceipts
+	localHostDir    string
+	localHostQueue  string
 	files           *FileStore
 	fileCheckpoints bool
 	nasProbe        checkpointIO[bool]
@@ -141,7 +140,19 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 	var data []byte
 	err = db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&data)
 	if err == nil {
-		err = json.Unmarshal(data, &q.s)
+		var legacy map[string]json.RawMessage
+		err = json.Unmarshal(data, &legacy)
+		if err == nil {
+			for _, name := range []string{"host_controls", "machine_controls", "disabled_hosts"} {
+				if value := legacy[name]; len(value) > 0 && string(value) != "{}" && string(value) != "null" {
+					err = errors.New("legacy queue host controls require offline conversion")
+					break
+				}
+			}
+		}
+		if err == nil {
+			err = json.Unmarshal(data, &q.s)
+		}
 	}
 	if err != nil && err != sql.ErrNoRows {
 		db.Close()
@@ -286,7 +297,10 @@ func (q *Queue) update(fn func() error) error {
 	oldQuiet := q.networkQuiet
 	q.usageWrites = nil
 	q.accountUsage(q.clock.Now())
-	err := fn()
+	afterCommit, err := q.reconcileLocalAdmission()
+	if err == nil {
+		err = fn()
+	}
 	if err == nil {
 		var data []byte
 		q.maintainSubmissions()
@@ -305,6 +319,9 @@ func (q *Queue) update(fn func() error) error {
 		q.networkQuiet = oldQuiet
 		q.s = state{}
 		_ = json.Unmarshal(old, &q.s)
+	}
+	if err == nil && afterCommit != nil {
+		return afterCommit()
 	}
 	return err
 }
@@ -416,7 +433,6 @@ func (q *Queue) stop(j *Job, why string) {
 }
 func (q *Queue) maintain() {
 	q.maintainSubmissions()
-	q.reconcileLocalDisableReceipts()
 	now := q.clock.Now()
 	for _, j := range q.s.Jobs {
 		if j.State == "queued" {
@@ -482,7 +498,7 @@ func (q *Queue) maintain() {
 		}
 	}
 	for _, j := range q.s.Jobs {
-		if j.Reason != "disabled by operator" && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !j.Spec.Run.Docker && expired(j.StopAt, now) {
+		if q.hostClosedReason(q.executionHost(j.Machine)) == "" && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !j.Spec.Run.Docker && expired(j.StopAt, now) {
 			if cancelled(j) {
 				j.State = "cancelled"
 				j.StopAt = nil
@@ -545,10 +561,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	}
 	err := q.update(func() error {
 		m := cloneMachine(&c.Machine)
-		m.Disabled = q.s.DisabledHosts[hostID(&m)]
-		if old := q.s.Machines[m.ID]; old != nil && old.Disabled != "" {
-			m.Disabled = old.Disabled
-		}
+		m.Disabled = q.hostClosedReason(hostID(&m))
 		if progressErr != nil {
 			m.CheckpointUnavailable = true
 		}
@@ -574,18 +587,6 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			return errors.New("worker model config does not match queue")
 		}
 		old := q.s.Machines[m.ID]
-		// A held rejoin may rotate its session before an offline unit receipt is
-		// acknowledged. Retain only the predecessor verified by the normal fresh
-		// check-in contract, so that receipt retries cannot invent session history.
-		if old != nil && old.Session != m.Session && m.EnablePending && c.Fresh && c.PreviousSession == old.Session && hostID(old) == hostID(&m) {
-			if q.s.MachineControls == nil {
-				q.s.MachineControls = map[string]machineControl{}
-			}
-			control := q.s.MachineControls[m.ID]
-			control.Host = hostID(old)
-			control.PreviousSession = old.Session
-			q.s.MachineControls[m.ID] = control
-		}
 		if old != nil && old.Session != m.Session && !(c.Fresh && c.PreviousSession == old.Session) {
 			if h := q.s.Hosts[hostID(old)]; old.HostMemoryBudgetGB > 0 || old.hostBudgetGB > 0 || h != nil && h.Policy.ProductionHold {
 				for _, slot := range q.s.ModelSlots {
@@ -677,17 +678,11 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			if a := machineAvailability(&m); a != nil && !a.Available {
 				m.AdmissionReason = a.Reason
 			}
-			reply.AdmissionBlocked = availabilityBlocked(&m) || m.EnablePending || m.HostMemoryBudgetStatus() != ""
-			if m.EnablePending {
-				return
-			}
+			reply.AdmissionBlocked = availabilityBlocked(&m) || m.HostMemoryBudgetStatus() != ""
 			reply.EnvironmentPlan = q.environmentPlan(&m)
 			reply.ModelPlan = q.modelPlan(m.ID)
 			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
 		}()
-		if m.EnablePending {
-			return nil
-		}
 		reply.Leave = m.Leaving
 		if m.Leaving {
 			for _, j := range q.s.Jobs {
@@ -880,142 +875,143 @@ func (q *Queue) Complete(r Result) error {
 			}
 		}
 	}
-	return q.update(func() error {
-		q.maintainStartDeadlines()
-		operatorMatched := q.refundOperatorStop(r)
-		if r.ReleaseOnly {
-			if r.ReleasePending {
-				return errors.New("release-only acknowledgement cannot be pending")
-			}
-			q.settleRelease(r)
-			if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
-				j.ReleaseConfirmed = true
-				if r.Forced {
-					j.LastStopOutcome = "forced"
-				} else if j.LastStopOutcome == "release pending" {
-					j.LastStopOutcome = "released"
-				}
-			}
-			q.maintain()
-			return nil
-		}
-		if operatorMatched {
-			if _, e := q.current(r); e != nil {
-				if !r.ReleasePending {
-					q.settleRelease(r)
-				}
-				q.maintain()
-				return nil
-			}
-		}
-		settled := false
-		pendingTracked := false
-		if !r.ReleasePending {
-			settled = q.settleRelease(r)
-			if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
-				j.ReleaseConfirmed = true
-				if j.LastStopOutcome == "release pending" {
-					j.LastStopOutcome = "released"
-				}
-			}
-		}
+	return q.update(func() error { return q.complete(r) })
+}
+func (q *Queue) complete(r Result) error {
+	q.maintainStartDeadlines()
+	operatorMatched := q.refundOperatorStop(r)
+	if r.ReleaseOnly {
 		if r.ReleasePending {
-			if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
-				q.retainRelease(j)
-			}
-			key := releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})
-			if hold, ok := q.s.HostReleases[key]; ok {
-				pendingTracked = true
-				hold.CleanupFailed = true
-				q.s.HostReleases[key] = hold
-			}
+			return errors.New("release-only acknowledgement cannot be pending")
 		}
-		if j := q.s.Jobs[r.ID]; j != nil && r.Forced && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
-			j.LastStopOutcome = "forced"
-			if r.ReleasePending {
-				j.LastStopOutcome += "; release pending"
+		q.settleRelease(r)
+		if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+			j.ReleaseConfirmed = true
+			if r.Forced {
+				j.LastStopOutcome = "forced"
+			} else if j.LastStopOutcome == "release pending" {
+				j.LastStopOutcome = "released"
 			}
-		}
-		if r.ReleasePending && pendingTracked && q.s.HostReleases[releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})].Docker {
-			q.maintain()
-			return nil
-		}
-		if settled || pendingTracked {
-			if _, err := q.current(r); err != nil {
-				q.maintain()
-				return nil
-			}
-		}
-		// A retransmitted acknowledgement must not turn a completed job into stale work.
-		if j := q.s.Jobs[r.ID]; j != nil && terminal(j.State) && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
-			return nil
-		}
-		j, err := q.current(r)
-		if err != nil {
-			return err
-		}
-		if m := q.s.Machines[r.Machine]; m != nil {
-			m.LastSeen = q.clock.Now()
-			delete(q.unreported, m.ID)
-		}
-		// A kernel OOM is the payload's failure even if preemption raced it.
-		ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
-		oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
-		if cancelled(j) || j.State == "stopping" && !oomFailure {
-			if j.StopAt != nil && q.clock.Now().Before(*j.StopAt) {
-				if q.s.BatchReleases == nil {
-					q.s.BatchReleases = map[string]batchRelease{}
-				}
-				q.s.BatchReleases[j.Machine] = batchRelease{Session: j.Session, MemoryGB: j.Spec.Needs.MemoryGB, Until: *j.StopAt}
-			}
-			if cancelled(j) {
-				j.State = "cancelled"
-				j.StopAt = nil
-			} else {
-				q.retry(j, j.Reason)
-			}
-		} else if oomFailure && j.Spec.extensionJob() {
-			q.retryOOM(j)
-		} else if r.ExtensionUnavailable && j.Spec.extensionJob() && j.StartedAt == nil && j.Extension != nil {
-			if m := q.s.Machines[r.Machine]; m != nil {
-				for i := range m.ExtensionReports {
-					report := &m.ExtensionReports[i]
-					if report.Digest == j.Extension.Digest && report.Work == j.Spec.workType() {
-						report.Qualified = false
-						report.Reason = "qualification unavailable; setup/check required"
-					}
-				}
-			}
-			q.retry(j, "waiting for a qualified extension")
-		} else if r.Interrupted && r.PoliteStop {
-			q.retry(j, "requeued: hypha availability withdrawn")
-		} else if r.Interrupted && r.OperatorStop {
-			q.retry(j, "requeued: stopped by operator")
-			j.RequeuedByOperator = true
-		} else if r.Interrupted {
-			j.Losses++
-			q.chargeLoss(j)
-			q.renewRecoveryStartWindow(j)
-			q.retry(j, "worker restarted after cleaning old processes")
-		} else if r.Success {
-			if j.FileTransport {
-				j.OutputRefs = r.OutputRefs
-				j.OutputFiles = nil
-			}
-			q.recordProgramNeeds(j, r)
-			q.recordModelUse(j.Spec.Needs.Model)
-			j.State = "succeeded"
-		} else {
-			j.State = "failed"
-			j.Reason = "command failed: " + r.Error
-		}
-		if terminal(j.State) {
-			now := q.clock.Now()
-			j.FinishedAt = &now
 		}
 		q.maintain()
 		return nil
-	})
+	}
+	if operatorMatched {
+		if _, e := q.current(r); e != nil {
+			if !r.ReleasePending {
+				q.settleRelease(r)
+			}
+			q.maintain()
+			return nil
+		}
+	}
+	settled := false
+	pendingTracked := false
+	if !r.ReleasePending {
+		settled = q.settleRelease(r)
+		if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+			j.ReleaseConfirmed = true
+			if j.LastStopOutcome == "release pending" {
+				j.LastStopOutcome = "released"
+			}
+		}
+	}
+	if r.ReleasePending {
+		if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+			q.retainRelease(j)
+		}
+		key := releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})
+		if hold, ok := q.s.HostReleases[key]; ok {
+			pendingTracked = true
+			hold.CleanupFailed = true
+			q.s.HostReleases[key] = hold
+		}
+	}
+	if j := q.s.Jobs[r.ID]; j != nil && r.Forced && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+		j.LastStopOutcome = "forced"
+		if r.ReleasePending {
+			j.LastStopOutcome += "; release pending"
+		}
+	}
+	if r.ReleasePending && pendingTracked && q.s.HostReleases[releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})].Docker {
+		q.maintain()
+		return nil
+	}
+	if settled || pendingTracked {
+		if _, err := q.current(r); err != nil {
+			q.maintain()
+			return nil
+		}
+	}
+	// A retransmitted acknowledgement must not turn a completed job into stale work.
+	if j := q.s.Jobs[r.ID]; j != nil && terminal(j.State) && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+		return nil
+	}
+	j, err := q.current(r)
+	if err != nil {
+		return err
+	}
+	if m := q.s.Machines[r.Machine]; m != nil {
+		m.LastSeen = q.clock.Now()
+		delete(q.unreported, m.ID)
+	}
+	// A kernel OOM is the payload's failure even if preemption raced it.
+	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
+	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
+	if cancelled(j) || j.State == "stopping" && !oomFailure && !(q.hostClosedReason(q.executionHost(j.Machine)) != "" && r.Success && !r.Interrupted) {
+		if j.StopAt != nil && q.clock.Now().Before(*j.StopAt) {
+			if q.s.BatchReleases == nil {
+				q.s.BatchReleases = map[string]batchRelease{}
+			}
+			q.s.BatchReleases[j.Machine] = batchRelease{Session: j.Session, MemoryGB: j.Spec.Needs.MemoryGB, Until: *j.StopAt}
+		}
+		if cancelled(j) {
+			j.State = "cancelled"
+			j.StopAt = nil
+		} else {
+			q.retry(j, j.Reason)
+		}
+	} else if oomFailure && j.Spec.extensionJob() {
+		q.retryOOM(j)
+	} else if r.ExtensionUnavailable && j.Spec.extensionJob() && j.StartedAt == nil && j.Extension != nil {
+		if m := q.s.Machines[r.Machine]; m != nil {
+			for i := range m.ExtensionReports {
+				report := &m.ExtensionReports[i]
+				if report.Digest == j.Extension.Digest && report.Work == j.Spec.workType() {
+					report.Qualified = false
+					report.Reason = "qualification unavailable; setup/check required"
+				}
+			}
+		}
+		q.retry(j, "waiting for a qualified extension")
+	} else if r.Interrupted && r.PoliteStop {
+		q.retry(j, "requeued: hypha availability withdrawn")
+	} else if r.Interrupted && r.OperatorStop {
+		q.retry(j, "requeued: stopped by operator")
+		j.RequeuedByOperator = true
+	} else if r.Interrupted {
+		j.Losses++
+		q.chargeLoss(j)
+		q.renewRecoveryStartWindow(j)
+		q.retry(j, "worker restarted after cleaning old processes")
+	} else if r.Success {
+		if j.FileTransport {
+			j.OutputRefs = r.OutputRefs
+			j.OutputFiles = nil
+		}
+		q.recordProgramNeeds(j, r)
+		q.recordModelUse(j.Spec.Needs.Model)
+		j.State = "succeeded"
+	} else {
+		j.State = "failed"
+		j.Reason = "command failed: " + r.Error
+	}
+	if terminal(j.State) {
+		now := q.clock.Now()
+		j.FinishedAt = &now
+	}
+	q.maintain()
+	return nil
 }
 func (q *Queue) Leave(id string, now bool) error {
 	return q.update(func() error {
@@ -1091,7 +1087,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 				hosts[r.Host] = false
 			}
 		}
-		for host := range q.s.DisabledHosts {
+		for host := range q.s.HostIntents {
 			if _, ok := hosts[host]; !ok {
 				hosts[host] = false
 			}
@@ -1114,7 +1110,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 					}
 				}
 			}
-			if q.s.DisabledHosts[host] != "" || workers > 0 && disabledWorkers == workers {
+			if q.hostClosedReason(host) != "" || workers > 0 && disabledWorkers == workers {
 				out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "host_disabled", Text: "host " + host + " disabled by operator"})
 			}
 		}

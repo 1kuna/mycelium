@@ -112,7 +112,7 @@ func TestEntryHeaderlessDefaultsAndAuthentication(t *testing.T) {
 	q.models.Models[0].Project = "owner"
 	m.ModelConfigHash = modelConfigHash(q.models)
 	var seenProject, seenPriority string
-	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	worker := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q.mu.Lock()
 		for _, c := range q.calls {
 			seenProject, seenPriority = c.Project, c.Priority
