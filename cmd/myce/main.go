@@ -65,6 +65,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		}
 		return myce.CheckHostRevision(*dir, myce.HostRevision{})
 	}
+	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
+		return devClockCommand(args[2:], os.Stdout)
+	}
 	if args[0] == "invite" {
 		return inviteCommand(args[1:])
 	}
@@ -309,6 +312,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	switch args[0] {
 	case "dev":
+		if f.NArg() != 0 {
+			return errors.New("unexpected dev arguments; use myce dev clock advance <duration>")
+		}
 		if *memory == 0 {
 			*memory = 64
 		}
@@ -328,6 +334,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return errors.Join(err, d.Close())
 		}
 	case "queue":
+		if f.NArg() != 0 {
+			return errors.New("queue accepts flags only")
+		}
 		if err := myce.CheckQueueGPUDescriptors(); err != nil {
 			return err
 		}

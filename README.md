@@ -136,6 +136,15 @@ across worker restarts. Examples for boot services are in [deploy/](deploy/READM
 read-only and token-protected; HTML, API and model routes require the fleet token. This is a
 trusted local-network service; commands run with the worker user's permissions.
 
+For dev expiry tests, `myce dev clock advance 30d --queue "$MYCE_QUEUE"`
+advances the running dev queue's clock. It also accepts Go durations such as
+`1s` or `720h`, with a positive limit of 90 days per request. The authenticated
+HTTP equivalent is `POST /api/dev/clock/advance {"seconds": 2592000}`. Real time
+continues to pass; the added offset resets when dev restarts. Retention, expiry,
+loss detection and start deadlines use this clock. Production queues have no
+clock route. Job-bound keys remain valid for the job's lifetime; use an unbound
+cancelled reservation to test 30-day submission-key expiry without job removal.
+
 `myce join` auto-detects the GPU using the same probe as `myce install worker`, including memory mode and reserve defaults. `--gpu` bypasses detection; `--device` selects a card, and explicit memory flags override detected defaults. Detection failure suggests `--gpu`; multi-GPU CUDA hosts need a device selector. `myce dev` still uses fake inventory.
 
 CUDA workers query live `nvidia-smi` free GPU memory minus
