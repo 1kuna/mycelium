@@ -23,7 +23,7 @@ func (s rootStatFixture) IsDir() bool        { return s.mode.IsDir() }
 func (s rootStatFixture) Sys() any           { return &syscall.Stat_t{Uid: s.uid, Ino: s.inode, Dev: 1} }
 
 func TestRootBinaryGuard(t *testing.T) {
-	for _, bad := range []string{"", "inode", "file-owner", "file-write", "file-setuid", "file-mode", "ancestor-owner", "ancestor-write", "symlink", "worker-copy", "deleted", "fstat"} {
+	for _, bad := range []string{"", "inode", "file-owner", "file-write", "file-setuid", "file-mode", "ancestor-owner", "ancestor-write", "symlink", "worker-copy", "deleted", "fstat", "file-acl", "ancestor-acl"} {
 		t.Run(bad, func(t *testing.T) {
 			p := RootBinaryProbe{Executing: func() (os.FileInfo, error) {
 				if bad == "fstat" {
@@ -67,6 +67,11 @@ func TestRootBinaryGuard(t *testing.T) {
 					}
 				}
 				return s, nil
+			}, AccessACL: func(path string) error {
+				if (bad == "file-acl" && path == RootHostExecutable) || (bad == "ancestor-acl" && path == "/usr") {
+					return ErrHostTarget
+				}
+				return nil
 			}}
 			err := CheckRootBinary(p)
 			if bad == "" {

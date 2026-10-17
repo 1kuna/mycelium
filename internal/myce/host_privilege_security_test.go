@@ -290,3 +290,44 @@ func TestHostSafeReadRejectsReplacedLeaf(t *testing.T) {
 		})
 	}
 }
+
+func TestHostAncestorModesAndACLs(t *testing.T) {
+	for _, tc := range []struct {
+		uid  uint32
+		mode os.FileMode
+		safe bool
+	}{
+		{0, os.ModeDir | 0755, true}, {0, os.ModeDir | 0777, false},
+		{0, os.ModeDir | 0770, false}, {0, os.ModeDir | os.ModeSticky | 0777, true},
+		{1001, os.ModeDir | os.ModeSticky | 0777, false}, {1001, os.ModeDir | 0700, true},
+	} {
+		if got := safeHostAncestor(rootStatFixture{uid: tc.uid, mode: tc.mode}, 1001); got != tc.safe {
+			t.Fatal(tc, got)
+		}
+	}
+	v, _ := realHostChildFixture(t)
+	for _, denied := range []string{v.ConfigPath, filepath.Dir(v.ConfigPath), "/"} {
+		calls := 0
+		e := validateHostTargetLinks(v.ConfigPath, v.Account.UID, false, 0, func(path string) error {
+			calls++
+			if path == denied {
+				return ErrHostTarget
+			}
+			return nil
+		})
+		if !errors.Is(e, ErrHostTarget) || calls == 0 {
+			t.Fatal(e, calls)
+		}
+	}
+}
+func TestHostChildWaitDelayStaysWithinDeadline(t *testing.T) {
+	parent, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	child, cancel := hostChildLaunchContext(parent)
+	defer cancel()
+	outer, _ := parent.Deadline()
+	inner, _ := child.Deadline()
+	if inner.Add(hostChildWaitDelay) != outer {
+		t.Fatal("child cancellation did not reserve WaitDelay")
+	}
+}

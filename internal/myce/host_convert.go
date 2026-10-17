@@ -137,7 +137,7 @@ func ConvertHostControl(o HostConversionOptions) (HostConversionManifest, error)
 
 		if m.Phase == "complete" {
 			for _, src := range m.Sources {
-				if err = verifyConversionSource(filepath.Join(root, src.Original), src); err != nil {
+				if err = verifyConversionOriginal(filepath.Join(root, src.Original), src); err != nil {
 					return m, err
 				}
 			}
@@ -208,6 +208,14 @@ func conversionBoundary(o HostConversionOptions, phase string) error {
 	}
 	return nil
 }
+
+// The manifest retains original permissions as evidence. Preserved files use
+// safe permissions so the completed tree remains usable by host control.
+func verifyConversionOriginal(path string, src HostConversionSource) error {
+	src.Mode &^= 0022
+	return verifyConversionSource(path, src)
+}
+
 func verifyConversionSource(path string, src HostConversionSource) error {
 	st, err := os.Lstat(path)
 	if err != nil {
@@ -273,7 +281,7 @@ func copyConversionOriginal(source, target string, mode fs.FileMode) error {
 	defer os.Remove(tmp)
 	_, err = io.Copy(out, in)
 	if err == nil {
-		err = out.Chmod(mode)
+		err = out.Chmod(mode &^ 0022)
 	}
 	if err == nil {
 		err = out.Sync()
@@ -327,7 +335,7 @@ func resumeHostConversion(o HostConversionOptions, m HostConversionManifest) (Ho
 		for _, src := range m.Sources {
 			target := filepath.Join(root, src.Original)
 			if _, err := os.Stat(target); err == nil {
-				if err = verifyConversionSource(target, src); err != nil {
+				if err = verifyConversionOriginal(target, src); err != nil {
 					return m, err
 				}
 				continue
@@ -355,7 +363,7 @@ func resumeHostConversion(o HostConversionOptions, m HostConversionManifest) (Ho
 	}
 	// Verify all originals and all still-active sources before any publication.
 	for _, src := range m.Sources {
-		if err := verifyConversionSource(filepath.Join(root, src.Original), src); err != nil {
+		if err := verifyConversionOriginal(filepath.Join(root, src.Original), src); err != nil {
 			return m, err
 		}
 		if _, err := os.Stat(src.Path); err == nil {
@@ -384,16 +392,23 @@ func resumeHostConversion(o HostConversionOptions, m HostConversionManifest) (Ho
 	if m.Phase == "staged" {
 		for i, src := range m.Sources {
 			if src.Retire {
+				retired := filepath.Join(root, "retired", fmt.Sprintf("%06d", i))
 				if _, err := os.Stat(src.Path); errors.Is(err, os.ErrNotExist) {
+					// Resume an interrupted rename before its permission clamp.
+					if err = os.Chmod(retired, fs.FileMode(src.Mode)&^0022); err != nil {
+						return m, err
+					}
 					continue
 				} else if err != nil {
 					return m, err
 				}
-				retired := filepath.Join(root, "retired", fmt.Sprintf("%06d", i))
 				if err := os.MkdirAll(filepath.Dir(retired), 0700); err != nil {
 					return m, err
 				}
 				if err := os.Rename(src.Path, retired); err != nil {
+					return m, err
+				}
+				if err := os.Chmod(retired, fs.FileMode(src.Mode)&^0022); err != nil {
 					return m, err
 				}
 				if err := syncWorkerDir(filepath.Dir(src.Path)); err != nil {

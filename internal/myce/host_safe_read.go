@@ -25,6 +25,9 @@ func readHostRegular(path string, uid uint32, limit int64) ([]byte, error) {
 	}
 	f := os.NewFile(uintptr(fd), "host-data")
 	defer f.Close()
+	if e = hostFileAccessACL(fd); e != nil {
+		return nil, ErrHostTarget
+	}
 	st, e := f.Stat()
 	if e != nil {
 		return nil, ErrHostTarget

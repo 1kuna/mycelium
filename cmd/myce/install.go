@@ -21,6 +21,9 @@ func setupCommand(args []string) error {
 	return setupCommandWithProbe(args, myce.LocalMachineProbe(), home)
 }
 func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) error {
+	return setupCommandWithAccountLookup(args, probe, home, myce.LookupWorkerAccount)
+}
+func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error)) error {
 	var e error
 	if len(args) == 0 || (args[0] != "install" && args[0] != "uninstall" && args[0] != "doctor") {
 		return errors.New("usage: myce install|uninstall|doctor")
@@ -215,9 +218,11 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 			return err
 		}
 	}
-	account, accountErr := myce.LookupWorkerAccount("")
-	if accountErr != nil {
-		return accountErr
+	var account myce.WorkerAccount
+	if role == "worker" {
+		if found, err := lookup(""); err == nil {
+			account = found
+		}
 	}
 	c, e := myce.PlanInstall(role, home, *root, *nas, *queue, *name, d, account)
 	if e != nil {
