@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"syscall"
 	"testing"
 
 	"mycelium/internal/myce"
@@ -33,12 +35,15 @@ func localIdentityFixture(t *testing.T) (myce.HostIdentityResolver, myce.WorkerA
 	if e = os.WriteFile(c.Config, b, 0600); e != nil {
 		t.Fatal(e)
 	}
-	r := myce.HostIdentityResolver{EUID: 0, OS: "linux", Lookup: func(name string) (myce.WorkerAccount, error) {
+	r := myce.LocalHostIdentityResolver()
+	r.EUID = 0
+	r.OS = "linux"
+	r.Lookup = func(name string) (myce.WorkerAccount, error) {
 		if name != a.Name {
 			return a, myce.ErrHostIdentity
 		}
 		return a, nil
-	}, ReadConfig: myce.ReadServiceConfig, ValidatePath: func(string, uint32, bool) error { return nil }}
+	}
 	return r, a, c
 }
 func snapshotHostFiles(t *testing.T, dir string) map[string]string {
@@ -65,8 +70,8 @@ func snapshotHostFiles(t *testing.T, dir string) map[string]string {
 	}
 	return result
 }
-func TestHostLocalStatusNeverLaunchesOrWrites(t *testing.T) {
-	r, _, c := localIdentityFixture(t)
+func TestHostLocalStatusUsesReadOnlyChildAndNeverWrites(t *testing.T) {
+	r, a, c := localIdentityFixture(t)
 	before := snapshotHostFiles(t, c.HostStateDir)
 	var out bytes.Buffer
 	e := hostLocalCommandWithIdentity([]string{"status", "--local", "--worker-user", "worker", "--config", c.Config}, myce.MachineProbe{OS: "linux", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -74,7 +79,19 @@ func TestHostLocalStatusNeverLaunchesOrWrites(t *testing.T) {
 			t.Fatal("status attempted mutation", name, args)
 		}
 		return []byte("test-manager"), nil
-	}}, &out, r, func(context.Context, myce.HostChildLaunch) ([]byte, error) { t.Fatal("status child"); return nil, nil })
+	}}, &out, r, func(ctx context.Context, s myce.HostChildLaunch) ([]byte, error) {
+		if s.Request.Operation != "status" {
+			t.Fatal("status mutation child")
+		}
+		worker := r
+		worker.EUID = int(a.UID)
+		b, _ := json.Marshal(s.Request)
+		var result bytes.Buffer
+		if e := myce.ServeHostWorkerChild(ctx, bytes.NewReader(b), &result, worker, nil); e != nil {
+			return nil, e
+		}
+		return result.Bytes(), nil
+	})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -93,12 +110,63 @@ func TestHostLocalAllMutationsEnterChildAndFailClosed(t *testing.T) {
 			var out bytes.Buffer
 			e := hostLocalCommandWithIdentity([]string{op, "--local", "--worker-user", "worker", "--config", c.Config}, myce.MachineProbe{OS: "linux", Command: func(context.Context, string, ...string) ([]byte, error) { t.Fatal("root mutation"); return nil, nil }}, &out, r, func(_ context.Context, s myce.HostChildLaunch) ([]byte, error) {
 				calls++
-				if !reflect.DeepEqual(s.Account, a) || !reflect.DeepEqual(s.Env, myce.WorkerChildEnvironment(a)) || s.Request.Operation != op || s.Request.StateDir != c.HostStateDir {
+				if !reflect.DeepEqual(s.Account, a) || !reflect.DeepEqual(s.Env, myce.WorkerChildEnvironment(a)) || s.Request.Operation != op || s.Request.StateDir != "" {
 					t.Fatal("wrong child selection")
 				}
 				return nil, errors.New("child failed")
 			})
 			if !errors.Is(e, myce.ErrHostChild) || calls != 1 || out.Len() != 0 {
+				t.Fatal(e, calls, out.String())
+			}
+		})
+	}
+}
+
+func TestHostLocalUnsafePathsWithRealValidation(t *testing.T) {
+	for _, kind := range []string{"state-symlink", "config-symlink", "config-fifo", "config-unowned", "config-writable", "ancestor-writable"} {
+		t.Run(kind, func(t *testing.T) {
+			r, a, c := localIdentityFixture(t)
+			config, state := c.Config, ""
+			var e error
+			switch kind {
+			case "state-symlink":
+				state = filepath.Join(a.Home, "alias")
+				e = os.Symlink(c.HostStateDir, state)
+			case "config-symlink":
+				config = filepath.Join(a.Home, "alias.json")
+				e = os.Symlink(c.Config, config)
+			case "config-fifo":
+				config = filepath.Join(a.Home, "fifo")
+				e = syscall.Mkfifo(config, 0600)
+			case "config-unowned":
+				// Root-owned on both supported laptop/native platforms. Validation
+				// must reject ownership before any content is opened.
+				config = "/etc/passwd"
+			case "config-writable":
+				e = os.Chmod(c.Config, 0666)
+			case "ancestor-writable":
+				e = os.Chmod(a.Home, 0770)
+			}
+			if e != nil {
+				t.Fatal(e)
+			}
+			var out bytes.Buffer
+			calls := 0
+			e = hostLocalCommandWithIdentity([]string{"status", "--local", "--worker-user", a.Name, "--config", config, "--state-dir", state}, myce.MachineProbe{OS: "linux", Command: func(context.Context, string, ...string) ([]byte, error) {
+				t.Fatal("observation after unsafe read")
+				return nil, nil
+			}}, &out, r, func(ctx context.Context, launch myce.HostChildLaunch) ([]byte, error) {
+				calls++
+				worker := r
+				worker.EUID = int(a.UID)
+				b, _ := json.Marshal(launch.Request)
+				var response bytes.Buffer
+				if err := myce.ServeHostWorkerChild(ctx, bytes.NewReader(b), &response, worker, nil); err != nil {
+					return nil, err
+				}
+				return response.Bytes(), nil
+			})
+			if !errors.Is(e, myce.ErrHostTarget) || calls != 1 || out.Len() != 0 || strings.Contains(e.Error(), config) {
 				t.Fatal(e, calls, out.String())
 			}
 		})

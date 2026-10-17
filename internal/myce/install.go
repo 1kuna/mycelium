@@ -236,12 +236,14 @@ type ServiceConfig struct {
 	Config                string         `json:"config"`
 }
 
-func PlanInstall(role, home, root, nas, queue, name string, d Detection) (ServiceConfig, error) {
+// PlanInstall is pure. The command boundary supplies the OS account; omitted
+// accounts support synthetic plans without consulting the host account database.
+func PlanInstall(role, home, root, nas, queue, name string, d Detection, account ...WorkerAccount) (ServiceConfig, error) {
 	c := ServiceConfig{Role: role, Detection: d, Name: name, Queue: queue, Listen: "127.0.0.1:7331", NAS: nas}
 	if role == "worker" {
 		c.WorkerHome = home
-		if a, err := LookupWorkerAccount(""); err == nil && a.Home == home {
-			c.WorkerUser = a.Name
+		if len(account) == 1 && account[0].Home == home {
+			c.WorkerUser = account[0].Name
 		}
 	}
 	if role != "worker" && role != "queue" {

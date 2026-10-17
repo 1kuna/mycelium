@@ -215,7 +215,11 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 			return err
 		}
 	}
-	c, e := myce.PlanInstall(role, home, *root, *nas, *queue, *name, d)
+	account, accountErr := myce.LookupWorkerAccount("")
+	if accountErr != nil {
+		return accountErr
+	}
+	c, e := myce.PlanInstall(role, home, *root, *nas, *queue, *name, d, account)
 	if e != nil {
 		return e
 	}

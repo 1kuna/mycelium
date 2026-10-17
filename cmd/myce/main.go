@@ -22,17 +22,9 @@ import (
 )
 
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "_host-worker-mutation" {
-		if myce.ServeHostWorkerChild(context.Background(), os.Stdin, os.Stdout, myce.LocalHostIdentityResolver(), hostMutationExecutor(myce.LocalMachineProbe()).Execute) != nil {
-			os.Exit(125)
-		}
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
-		if myce.CommandExec(os.Args[2:]) != nil {
-			os.Exit(125)
-		}
-		return
+	if err := myce.GuardRootStartup(); err != nil {
+		log.Print(err)
+		os.Exit(exitCode(err))
 	}
 	if err := run(os.Args[1:]); err != nil {
 		log.Print(err)
@@ -49,6 +41,16 @@ func run(args []string) error {
 	return runWithProbe(args, myce.LocalMachineProbe())
 }
 func runWithProbe(args []string, probe myce.MachineProbe) error {
+	if err := myce.CheckRootCommand(args, os.Geteuid()); err != nil {
+		return err
+	}
+	if len(args) == 1 && args[0] == "_host-worker-mutation" {
+		return myce.HostWorkerChildEntry(context.Background(), os.Stdin, os.Stdout, myce.LocalHostIdentityResolver(), hostMutationExecutor(probe).Execute)
+	}
+	if len(args) > 0 && args[0] == "_command-exec" {
+		return myce.CommandExec(args[1:])
+	}
+
 	if len(args) == 0 {
 		return errors.New("usage: myce queue|join|leave|disable|enable|submit|status|logs|wait|cancel|resolve-docker|dev")
 	}

@@ -8,10 +8,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -20,6 +22,12 @@ import (
 // no raw command/account/config cause, which could contain private credentials.
 type HostInvocationError struct{ Code, Message string }
 
+func (e *HostInvocationError) Is(target error) bool {
+	if target == ErrHostTarget && e.Code == "root_binary_untrusted" {
+		return true
+	}
+	return false
+}
 func (e *HostInvocationError) Error() string {
 	if e.Message == "" {
 		return e.Code
@@ -33,6 +41,7 @@ var (
 	ErrHostUserManager          = &HostInvocationError{"host_user_manager_unavailable", ""}
 	ErrHostChild                = &HostInvocationError{"host_child_failed", "mutation not confirmed"}
 	ErrHostPrivilegeUnsupported = &HostInvocationError{"host_privilege_unsupported", "root host control requires Linux"}
+	ErrHostDeadline             = &HostInvocationError{"host_deadline", "intent may be durable; release is unconfirmed"}
 	ErrHostReconcileUnavailable = &HostInvocationError{"host_reconcile_unavailable", "mandatory reconciliation is required"}
 )
 
@@ -84,7 +93,7 @@ type HostIdentityResolver struct {
 }
 
 func LocalHostIdentityResolver() HostIdentityResolver {
-	return HostIdentityResolver{Lookup: LookupWorkerAccount, ReadConfig: ReadServiceConfig, ValidatePath: validateHostTarget, EUID: os.Geteuid(), OS: runtime.GOOS}
+	return HostIdentityResolver{Lookup: LookupWorkerAccount, ReadConfig: readHostServiceConfig, ValidatePath: validateHostTarget, EUID: os.Geteuid(), OS: runtime.GOOS}
 }
 
 type HostInvocation struct {
@@ -93,19 +102,18 @@ type HostInvocation struct {
 	ConfigPath string
 	StateDir   string
 	Privileged bool
+	// ForceChild is test-only; no CLI or environment switch enables it.
+	ForceChild bool
 }
 
-// stateDir overrides only the shared host-control directory, never the worker
-// spool, account, config, service, or queue. Existing state must name the same host.
-func (r HostIdentityResolver) Resolve(workerUser, configPath, stateDir string) (HostInvocation, error) {
+// Select performs only account-database lookup and lexical path validation.
+// In particular EUID 0 must never stat, open, glob or walk worker paths.
+func (r HostIdentityResolver) Select(workerUser, configPath, stateDir string) (HostInvocation, error) {
 	var v HostInvocation
 	if r.EUID == 0 && r.OS != "linux" {
 		return v, ErrHostPrivilegeUnsupported
 	}
-	if r.EUID == 0 && workerUser == "" {
-		return v, ErrHostIdentity
-	}
-	if r.Lookup == nil || r.ReadConfig == nil || r.ValidatePath == nil {
+	if r.Lookup == nil || (r.EUID == 0 && workerUser == "") {
 		return v, ErrHostIdentity
 	}
 	a, e := r.Lookup(workerUser)
@@ -115,12 +123,35 @@ func (r HostIdentityResolver) Resolve(workerUser, configPath, stateDir string) (
 	if configPath == "" {
 		configPath = filepath.Join(a.Home, ".local", "share", "mycelium", "worker", "config.json")
 	}
+	for _, p := range []string{configPath, stateDir} {
+		if p != "" && (!filepath.IsAbs(p) || filepath.Clean(p) != p) {
+			return v, ErrHostTarget
+		}
+	}
+	return HostInvocation{Account: a, ConfigPath: configPath, StateDir: stateDir, Privileged: r.EUID == 0}, nil
+}
+
+// Resolve reads installed identity and state only in the worker process. Root
+// receives a selection and must use a read-only child resolve/status operation.
+func (r HostIdentityResolver) Resolve(workerUser, configPath, stateDir string) (HostInvocation, error) {
+	v, e := r.Select(workerUser, configPath, stateDir)
+	if e != nil || v.Privileged {
+		return v, e
+	}
+	if r.ReadConfig == nil || r.ValidatePath == nil {
+		return HostInvocation{}, ErrHostIdentity
+	}
+	a := v.Account
+	configPath = v.ConfigPath
 	if e = r.ValidatePath(configPath, a.UID, false); e != nil {
-		return v, ErrHostTarget
+		return HostInvocation{}, ErrHostTarget
 	}
 	c, e := r.ReadConfig(configPath)
-	if e != nil || c.Role != "worker" || c.HostID == "" || (c.Config != "" && c.Config != configPath) || (c.WorkerUser != "" && c.WorkerUser != a.Name) || (c.WorkerHome != "" && c.WorkerHome != a.Home) {
-		return v, ErrHostIdentity
+	if e != nil {
+		return HostInvocation{}, hostProtocolError(hostProtocolCode(e))
+	}
+	if c.Role != "worker" || c.HostID == "" || (c.Config != "" && c.Config != configPath) || (c.WorkerUser != "" && c.WorkerUser != a.Name) || (c.WorkerHome != "" && c.WorkerHome != a.Home) {
+		return HostInvocation{}, ErrHostIdentity
 	}
 	if stateDir == "" {
 		stateDir = c.HostStateDir
@@ -130,18 +161,21 @@ func (r HostIdentityResolver) Resolve(workerUser, configPath, stateDir string) (
 	}
 	for _, p := range []string{stateDir, c.State} {
 		if p == "" || r.ValidatePath(p, a.UID, true) != nil {
-			return v, ErrHostTarget
+			return HostInvocation{}, ErrHostTarget
 		}
 	}
-	// This is read-only identity validation; it creates neither a directory nor a lock.
+	if e = ValidateHostControlTree(stateDir, a.UID); e != nil {
+		return HostInvocation{}, ErrHostTarget
+	}
 	s, e := ReadHostIntent(stateDir)
 	if e != nil {
-		return v, e
+		return HostInvocation{}, hostProtocolError(hostProtocolCode(e))
 	}
 	if s.Host != c.HostID {
-		return v, ErrHostIdentity
+		return HostInvocation{}, ErrHostIdentity
 	}
-	v = HostInvocation{Account: a, Config: c, ConfigPath: configPath, StateDir: stateDir, Privileged: r.EUID == 0}
+	v.Config = c
+	v.StateDir = stateDir
 	return v, nil
 }
 func validWorkerAccount(a WorkerAccount) bool {
@@ -156,33 +190,56 @@ func validWorkerAccount(a WorkerAccount) bool {
 	return true
 }
 
-// Ancestors may be root-owned, but no component may be a symlink. The selected
-// file/directory and every active host-control entry must belong to the worker.
+// Only root-owned symlinked ancestors are permitted (for example /home ->
+// /var/home). Targets and non-root-owned ancestors must not be writable by
+// group/other. Root-owned sticky temporary ancestors remain usable on laptops.
 func validateHostTarget(path string, uid uint32, directory bool) error {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+	return validateHostTargetLinks(path, uid, directory, 0)
+}
+func validateHostTargetLinks(path string, uid uint32, directory bool, links int) error {
+	if links > 40 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return ErrHostTarget
 	}
-	for p := path; ; p = filepath.Dir(p) {
-		st, e := os.Lstat(p)
-		if e != nil || st.Mode()&os.ModeSymlink != 0 {
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	cur := "/"
+	for i, part := range parts {
+		cur = filepath.Join(cur, part)
+		st, e := os.Lstat(cur)
+		if e != nil {
 			return ErrHostTarget
 		}
-		if p == path {
-			owner, ok := st.Sys().(*syscall.Stat_t)
-			if !ok || owner.Uid != uid || st.IsDir() != directory || (!directory && !st.Mode().IsRegular()) {
+		owner, ok := st.Sys().(*syscall.Stat_t)
+		if !ok {
+			return ErrHostTarget
+		}
+		last := i == len(parts)-1
+		if st.Mode()&os.ModeSymlink != 0 {
+			if last || owner.Uid != 0 {
 				return ErrHostTarget
 			}
+			target, e := os.Readlink(cur)
+			if e != nil {
+				return ErrHostTarget
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(cur), target)
+			}
+			return validateHostTargetLinks(filepath.Join(append([]string{target}, parts[i+1:]...)...), uid, directory, links+1)
 		}
-		if filepath.Dir(p) == p {
-			break
+		if last {
+			if owner.Uid != uid || st.Mode().Perm()&0022 != 0 || st.IsDir() != directory || (!directory && !st.Mode().IsRegular()) {
+				return ErrHostTarget
+			}
+		} else if !st.IsDir() || (owner.Uid != 0 && (owner.Uid != uid || st.Mode().Perm()&0022 != 0)) {
+			return ErrHostTarget
 		}
 	}
 	return nil
 }
-
-// ValidateHostControlTree rejects pre-existing foreign locks and symlinks before
-// root launches a child. It never repairs ownership or follows links.
 func ValidateHostControlTree(dir string, uid uint32) error {
+	if os.Geteuid() == 0 {
+		return ErrHostIdentity
+	}
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return ErrHostTarget
@@ -241,6 +298,9 @@ type HostMutation struct {
 	CloseExpected *HostRevision `json:"close_expected,omitempty"`
 }
 type HostMutationResult struct {
+	StateDir string `json:"state_dir,omitempty"`
+	Desired  string `json:"desired,omitempty"`
+	Partial  bool   `json:"partial"`
 	HostRevision
 	Stopped int `json:"stopped"`
 	// CleanupConfirmed is not the full local-exclusion PASS (S07).
@@ -254,9 +314,10 @@ type hostChildResponse struct {
 }
 type HostMutationHandler func(context.Context, HostInvocation, HostMutation) (HostMutationResult, error)
 type HostChildLaunch struct {
-	Account WorkerAccount
-	Env     []string
-	Request HostMutation
+	ForceChild bool
+	Account    WorkerAccount
+	Env        []string
+	Request    HostMutation
 }
 type HostChildLauncher func(context.Context, HostChildLaunch) ([]byte, error)
 
@@ -268,16 +329,28 @@ func (v HostInvocation) Mutate(ctx context.Context, m HostMutation, launch HostC
 		return HostMutationResult{}, ErrHostChild
 	}
 	m.WorkerUser, m.ConfigPath, m.StateDir = v.Account.Name, v.ConfigPath, v.StateDir
-	if !v.Privileged {
-		if handle == nil {
-			return HostMutationResult{}, ErrHostChild
-		}
-		return handle(ctx, v, m)
+	if !v.Privileged && !v.ForceChild {
+		return executeResolvedHost(ctx, v, m, handle)
 	}
 	if launch == nil {
 		launch = LaunchHostWorkerChild
 	}
-	b, e := launch(ctx, HostChildLaunch{v.Account, WorkerChildEnvironment(v.Account), m})
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		timeout := m.Timeout
+		if timeout == 0 {
+			timeout = 30 * time.Second
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+		deadline, _ = ctx.Deadline()
+	}
+	m.Timeout = time.Until(deadline) - 2*time.Second
+	if m.Timeout <= 0 {
+		return HostMutationResult{}, ErrHostDeadline
+	}
+	b, e := launch(ctx, HostChildLaunch{Account: v.Account, Env: WorkerChildEnvironment(v.Account), Request: m, ForceChild: v.ForceChild})
 	if e != nil {
 		return HostMutationResult{}, ErrHostChild
 	}
@@ -285,7 +358,15 @@ func (v HostInvocation) Mutate(ctx context.Context, m HostMutation, launch HostC
 	if decodeHostProtocol(bytes.NewReader(b), &r) != nil || r.Version != 1 || r.Operation != m.Operation {
 		return HostMutationResult{}, ErrHostChild
 	}
+	if ctx.Err() != nil && r.Code == "" {
+		r.Code = "deadline"
+		r.Result.Partial = true
+		r.Result.CleanupConfirmed = false
+	}
 	if r.Code != "" {
+		if r.Code == "deadline" && r.Result.Partial && !r.Result.CleanupConfirmed {
+			return r.Result, ErrHostDeadline
+		}
 		return HostMutationResult{}, hostProtocolError(r.Code)
 	}
 	if (m.Operation == "close" || m.Operation == "open" || m.Operation == "reconcile") && (r.Result.Revision == 0 || r.Result.Operation == "") {
@@ -294,10 +375,16 @@ func (v HostInvocation) Mutate(ctx context.Context, m HostMutation, launch HostC
 	return r.Result, nil
 }
 func validHostMutation(m HostMutation) bool {
-	return (m.Operation == "close" || m.Operation == "open" || m.Operation == "reconcile" || (ValidWorkerUnit(m.Unit) && (m.Operation == "unit-stop" || m.Operation == "unit-kill" || m.Operation == "unit-start"))) && m.Grace >= 0 && m.Grace <= time.Minute && m.Timeout >= 0 && len(m.Reason) <= 4096
+	return (m.Operation == "resolve" || m.Operation == "status" || m.Operation == "close" || m.Operation == "open" || m.Operation == "reconcile" || (ValidWorkerUnit(m.Unit) && (m.Operation == "unit-stop" || m.Operation == "unit-kill" || m.Operation == "unit-start"))) && m.Grace >= 0 && m.Grace <= time.Minute && m.Timeout >= 0 && len(m.Reason) <= 4096
 }
 func hostProtocolError(code string) error {
 	switch code {
+	case "deadline":
+		return ErrHostDeadline
+	case "revision":
+		return ErrHostRevision
+	case "state":
+		return ErrHostState
 	case "identity":
 		return ErrHostIdentity
 	case "target":
@@ -311,12 +398,18 @@ func hostProtocolError(code string) error {
 }
 func hostProtocolCode(e error) string {
 	switch {
+	case errors.Is(e, ErrHostRevision):
+		return "revision"
+	case errors.Is(e, ErrHostTarget):
+		return "target"
+	case errors.Is(e, ErrHostState):
+		return "state"
+	case errors.Is(e, ErrHostDeadline) || errors.Is(e, context.DeadlineExceeded) || errors.Is(e, context.Canceled):
+		return "deadline"
 	case e == nil:
 		return ""
 	case errors.Is(e, ErrHostIdentity):
 		return "identity"
-	case errors.Is(e, ErrHostTarget):
-		return "target"
 	case errors.Is(e, ErrHostUserManager):
 		return "user_manager"
 	case errors.Is(e, ErrHostReconcileUnavailable):
@@ -346,6 +439,12 @@ func ServeHostWorkerChild(ctx context.Context, in io.Reader, out io.Writer, r Ho
 	if e == nil && !validHostMutation(m) {
 		e = ErrHostChild
 	}
+	timeout := m.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	var v HostInvocation
 	if e == nil {
 		if r.EUID == 0 {
@@ -355,34 +454,73 @@ func ServeHostWorkerChild(ctx context.Context, in io.Reader, out io.Writer, r Ho
 		}
 	}
 	if e == nil {
-		e = ValidateHostControlTree(v.StateDir, v.Account.UID)
+		e = ctx.Err()
 	}
 	if e == nil {
-		timeout := m.Timeout
-		if timeout == 0 {
-			timeout = 30 * time.Second
-		}
-		childCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		ctx = childCtx
-		if handle == nil {
-			e = ErrHostChild
-		} else {
-			result, e = handle(ctx, v, m)
-		}
+		result, e = executeResolvedHost(ctx, v, m, handle)
 	}
-	if e != nil {
+	// A handler finishing at the deadline cannot turn cancellation into success.
+	if e == nil {
+		e = ctx.Err()
+	}
+	code := hostProtocolCode(e)
+	if code == "deadline" {
+		result.CleanupConfirmed = false
+		result.Partial = true
+		if result.Revision == 0 && v.StateDir != "" && m.Operation == "close" {
+			if s, err := ReadHostIntent(v.StateDir); err == nil && s.Desired == "closed" {
+				result.HostRevision = s.HostRevision
+				result.Desired = s.Desired
+			}
+		}
+	} else if e != nil {
 		result = HostMutationResult{}
 	}
-	// Deliberately never forward raw handler errors, command output, or stderr:
-	// those can contain credentials read by the worker after durable close.
-	return json.NewEncoder(out).Encode(hostChildResponse{Version: 1, Operation: m.Operation, Result: result, Code: hostProtocolCode(e)})
+	return json.NewEncoder(out).Encode(hostChildResponse{Version: 1, Operation: m.Operation, Result: result, Code: code})
+}
+
+func executeResolvedHost(ctx context.Context, v HostInvocation, m HostMutation, handle HostMutationHandler) (HostMutationResult, error) {
+	var zero HostMutationResult
+	if e := ctx.Err(); e != nil {
+		return zero, e
+	}
+	s, e := ReadHostIntent(v.StateDir)
+	if e != nil {
+		return zero, hostProtocolError(hostProtocolCode(e))
+	}
+	if m.Expected.Revision != 0 && m.Expected.Operation == "" {
+		if s.Revision != m.Expected.Revision {
+			return zero, ErrHostRevision
+		}
+		m.Expected = s.HostRevision
+	}
+	if m.CloseExpected != nil && m.CloseExpected.Operation == "" {
+		if s.Revision != m.CloseExpected.Revision {
+			return zero, ErrHostRevision
+		}
+		expected := s.HostRevision
+		m.CloseExpected = &expected
+	}
+	if m.Operation == "resolve" || m.Operation == "status" {
+		return HostMutationResult{HostRevision: s.HostRevision, StateDir: v.StateDir, Desired: s.Desired}, nil
+	}
+	if handle == nil {
+		return zero, ErrHostChild
+	}
+	return handle(ctx, v, m)
+}
+
+// HostWorkerChildEntry is shared by the production executable and test binary.
+func HostWorkerChildEntry(ctx context.Context, in io.Reader, out io.Writer, r HostIdentityResolver, handle HostMutationHandler) error {
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM)
+	defer stop()
+	return ServeHostWorkerChild(ctx, in, out, r, handle)
 }
 
 func LaunchHostWorkerChild(ctx context.Context, s HostChildLaunch) ([]byte, error) {
-	executable, e := os.Executable()
+	executable, e := hostChildExecutable(s.ForceChild)
 	if e != nil {
-		return nil, ErrHostChild
+		return nil, e
 	}
 	b, e := json.Marshal(s.Request)
 	if e != nil {
@@ -393,13 +531,32 @@ func LaunchHostWorkerChild(ctx context.Context, s HostChildLaunch) ([]byte, erro
 	cmd.Dir = "/"
 	cmd.Stdin = bytes.NewReader(b)
 	cmd.Stderr = io.Discard
-	if e = setHostWorkerCredential(cmd, s.Account); e != nil {
+	if s.ForceChild {
+		if os.Geteuid() == 0 || uint32(os.Geteuid()) != s.Account.UID {
+			return nil, ErrHostIdentity
+		}
+	} else if e = setHostWorkerCredential(cmd, s.Account); e != nil {
 		return nil, e
 	}
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = time.Second
 	var output bytes.Buffer
 	cmd.Stdout = &limitedHostOutput{buffer: &output, remaining: 64 << 10}
-	if e = cmd.Run(); e != nil {
-		return nil, ErrHostChild
+	e = cmd.Run()
+	if e != nil {
+		var response hostChildResponse
+		if decodeHostProtocol(bytes.NewReader(output.Bytes()), &response) != nil {
+			return nil, ErrHostChild
+		}
+		if ctx.Err() != nil && response.Code == "" {
+			response.Code = "deadline"
+			response.Result.Partial = true
+			response.Result.CleanupConfirmed = false
+			return json.Marshal(response)
+		}
+		if response.Code != "deadline" {
+			return nil, ErrHostChild
+		}
 	}
 	return output.Bytes(), nil
 }

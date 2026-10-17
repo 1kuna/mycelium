@@ -50,49 +50,36 @@ func hostLocalCommandWithIdentity(args []string, probe myce.MachineProbe, out io
 	if *timeout <= 0 {
 		return errors.New("timeout must be positive")
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
 	v, e := resolver.Resolve(*user, *config, *state)
 	if e != nil {
 		return e
 	}
-	if e = myce.ValidateHostControlTree(v.StateDir, v.Account.UID); e != nil {
-		return e
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-	if op == "status" {
-		// Deliberately no HostControl, mutation handler, lock or persisted observation.
-		if probe.OS == "linux" {
-			if e := v.ObservationContext().CheckUserManager(ctx, probe.Command); e != nil {
-				return e
-			}
-		}
-		s, e := myce.ReadHostIntent(v.StateDir)
-		if e != nil {
-			return e
-		}
-		return json.NewEncoder(out).Encode(struct {
-			Desired    string `json:"desired"`
-			Revision   uint64 `json:"revision"`
-			Privileged bool   `json:"privileged_observation"`
-		}{s.Desired, s.Revision, v.Privileged})
-	}
 	expected := myce.HostRevision{Revision: *revision, Operation: *operation}
-	if *revision != 0 && *operation == "" {
-		s, e := myce.ReadHostIntent(v.StateDir)
-		if e != nil {
-			return e
-		}
-		if s.Revision != *revision {
-			return myce.ErrHostRevision
-		}
-		expected = s.HostRevision
-	}
 	m := myce.HostMutation{Operation: op, Reason: *reason, Grace: *grace, Timeout: *timeout, Expected: expected}
 	if op == "close" && *revision != 0 {
 		m.CloseExpected = &expected
 	}
+	if op == "status" {
+		r, e := v.Mutate(ctx, m, launch, hostMutationExecutor(probe).Execute)
+		if e != nil {
+			return e
+		}
+		if probe.OS == "linux" {
+			if e = v.ObservationContext().CheckUserManager(ctx, probe.Command); e != nil {
+				return e
+			}
+		}
+		return json.NewEncoder(out).Encode(r)
+	}
 	r, e := v.Mutate(ctx, m, launch, hostMutationExecutor(probe).Execute)
 	if e != nil {
+		if r.Partial {
+			if writeErr := json.NewEncoder(out).Encode(r); writeErr != nil {
+				return writeErr
+			}
+		}
 		return e
 	}
 	return json.NewEncoder(out).Encode(r)
