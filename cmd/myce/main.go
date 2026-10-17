@@ -22,6 +22,12 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "_host-worker-mutation" {
+		if myce.ServeHostWorkerChild(context.Background(), os.Stdin, os.Stdout, myce.LocalHostIdentityResolver(), hostMutationExecutor(myce.LocalMachineProbe()).Execute) != nil {
+			os.Exit(125)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
 		if myce.CommandExec(os.Args[2:]) != nil {
 			os.Exit(125)
@@ -71,6 +77,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "host" && len(args) > 1 && args[1] == "convert" {
 		return hostConvertCommand(args[2:], os.Stdout)
+	}
+	if args[0] == "host" && len(args) > 1 {
+		return hostLocalCommand(args[1:], probe, os.Stdout)
 	}
 	if args[0] == "host-queues" {
 		return hostQueuesCommand(args[1:], probe, os.Stdout)

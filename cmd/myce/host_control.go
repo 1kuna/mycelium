@@ -39,6 +39,9 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 	if len(args) > 0 && args[0] == "enable" {
 		return errors.New("myce enable is retired; use myce host open --expect-revision with the v3 host CLI (S08)")
 	}
+	if os.Geteuid() == 0 {
+		return myce.ErrHostIdentity
+	}
 	if *now {
 		*grace = 0
 	}
@@ -75,7 +78,6 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 			*host = installed.HostID
 		}
 	}
-	sharedDir := *dir
 	if *unit != "" {
 		return errors.New("unit selection is diagnostic only; control the whole host")
 	}
@@ -117,11 +119,8 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 				*state = candidate
 			}
 		}
-		// Upgrade adoption is local-only and records no token. New workers register automatically.
-		if *state != "" {
-			if err = myce.AdoptHostWorker(sharedDir, myce.HostWorker{Unit: filepath.Base(c.Service), State: *state, Host: *host, Name: *name, Queue: *queue, Environments: c.EnvironmentCache}); err != nil {
-				return err
-			}
+		if *state != "" && c.State == "" {
+			return errors.New("legacy adoption is retired; run myce host convert offline")
 		}
 		service = c.Service
 		if service == "" {
@@ -144,7 +143,7 @@ func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
 			return nil
 		}
 		var e error
-		units, e = myce.WorkerUnits(sharedDir, *unit)
+		units, e = myce.WorkerUnits(*dir, *unit)
 		if e != nil {
 			return e
 		}

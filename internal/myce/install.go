@@ -177,6 +177,8 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
+	WorkerUser            string         `json:"worker_user,omitempty"`
+	WorkerHome            string         `json:"worker_home,omitempty"`
 	LocalDisableReceipts  bool           `json:"local_disable_receipts,omitempty"`
 	OnboardingBenchmark   bool           `json:"onboarding_benchmark,omitempty"`
 	JoiningFile           string         `json:"joining_file,omitempty"`
@@ -236,6 +238,12 @@ type ServiceConfig struct {
 
 func PlanInstall(role, home, root, nas, queue, name string, d Detection) (ServiceConfig, error) {
 	c := ServiceConfig{Role: role, Detection: d, Name: name, Queue: queue, Listen: "127.0.0.1:7331", NAS: nas}
+	if role == "worker" {
+		c.WorkerHome = home
+		if a, err := LookupWorkerAccount(""); err == nil && a.Home == home {
+			c.WorkerUser = a.Name
+		}
+	}
 	if role != "worker" && role != "queue" {
 		return c, errors.New("install requires worker or queue")
 	}
