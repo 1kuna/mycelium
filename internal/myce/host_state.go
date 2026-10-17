@@ -112,6 +112,9 @@ func validateHostIntent(s HostIntent) error {
 }
 
 func ReadHostIntent(dir string) (HostIntent, error) {
+	if os.Geteuid() == 0 {
+		return HostIntent{}, ErrHostIdentity
+	}
 	var s HostIntent
 	dir, err := hostRoot(dir)
 	if err != nil {
@@ -129,7 +132,7 @@ func ReadHostIntent(dir string) (HostIntent, error) {
 	if len(paths) > 0 {
 		return s, legacyHostStateError()
 	}
-	b, err := os.ReadFile(filepath.Join(dir, hostStateFile))
+	b, err := readHostRegular(filepath.Join(dir, hostStateFile), uint32(os.Geteuid()), 16<<20)
 	if errors.Is(err, os.ErrNotExist) {
 		registries, e := filepath.Glob(filepath.Join(dir, "worker-*.json"))
 		if e != nil {

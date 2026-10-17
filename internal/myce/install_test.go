@@ -549,3 +549,17 @@ func TestQueueLocalDisableReceiptsServiceArgs(t *testing.T) {
 		t.Fatal("retired config accepted", err)
 	}
 }
+
+func TestPlanInstallUsesOnlySuppliedAccount(t *testing.T) {
+	home := "/home/fixture-worker"
+	d := Detection{OS: "linux", Platform: "fake"}
+	account := WorkerAccount{Name: "fixture-worker", Home: home, UID: 12345, GID: 23456}
+	c, e := PlanInstall("worker", home, "", "/fixture/nas", "http://queue:7331", "fixture", d, account)
+	if e != nil || c.WorkerUser != account.Name || c.WorkerHome != home {
+		t.Fatal(c, e)
+	}
+	c, e = PlanInstall("worker", home, "", "/fixture/nas", "http://queue:7331", "fixture", d)
+	if e != nil || c.WorkerUser != "" || c.WorkerHome != home {
+		t.Fatal(c, e)
+	}
+}

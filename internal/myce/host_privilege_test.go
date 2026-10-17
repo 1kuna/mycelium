@@ -40,10 +40,13 @@ func hostIdentityFixture(t *testing.T) (HostIdentityResolver, HostInvocation) {
 		}
 		return a, nil
 	}, ReadConfig: ReadServiceConfig, ValidatePath: validateHostTarget}
+	r.EUID = int(a.UID)
 	v, e := r.Resolve(a.Name, c.Config, "")
 	if e != nil {
 		t.Fatal(e)
 	}
+	r.EUID = 0
+	v.Privileged = true
 	return r, v
 }
 func childProtocolLaunch(t *testing.T, r HostIdentityResolver, handler HostMutationHandler) HostChildLauncher {
@@ -118,6 +121,7 @@ func TestHostPrivilegeIdentityAndTargetErrors(t *testing.T) {
 	}
 	r.OS = "linux"
 	// Override retains the installed host and account, rather than adopting data.
+	r.EUID = int(v.Account.UID)
 	alt := filepath.Join(v.Account.Home, "alternate")
 	if e := os.Mkdir(alt, 0700); e != nil {
 		t.Fatal(e)
@@ -207,10 +211,11 @@ func TestHostPrivilegeCloseBeforeManagerDiscovery(t *testing.T) {
 	}
 }
 func TestHostPrivilegeDevProtocolWithFakeIdentity(t *testing.T) {
-	// Dev's fake identity uses the real command runner. This is an actual process
-	// failure, transported over JSON, rather than a fake successful mutation.
-	r, v := hostIdentityFixture(t)
-	d, e := StartDev(DevConfig{HostStateDir: v.StateDir, HostID: "test-host", Database: filepath.Join(v.Account.Home, "queue.db"), Checkpoints: filepath.Join(v.Account.Home, "checkpoints"), Address: "127.0.0.1:0", Token: "dev-test", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
+	// Dev uses fake inventory and a temporary installed identity, with the real
+	// launcher, child entry, command runner and scrubbed process environment.
+	v, _ := realHostChildFixture(t)
+	fixtureRoot := filepath.Dir(v.ConfigPath)
+	d, e := StartDev(DevConfig{HostStateDir: v.StateDir, HostID: "test-host", Database: filepath.Join(fixtureRoot, "queue.db"), Checkpoints: filepath.Join(fixtureRoot, "checkpoints"), Address: "127.0.0.1:0", Token: "dev-test", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -234,19 +239,11 @@ func TestHostPrivilegeDevProtocolWithFakeIdentity(t *testing.T) {
 		return false
 	})
 	for _, fail := range []bool{false, true} {
-		handler := func(ctx context.Context, child HostInvocation, m HostMutation) (HostMutationResult, error) {
-			command := "true"
-			if fail {
-				command = "false"
-			}
-			_, e := LocalMachineProbe().Command(ctx, command)
-			if e != nil {
-				return HostMutationResult{}, e
-			}
-			s, e := changeHostIntent(child.StateDir, RealClock{}, hostIntentChange{Desired: "closed"})
-			return HostMutationResult{HostRevision: s.HostRevision}, e
+		reason := ""
+		if fail {
+			reason = "fail"
 		}
-		result, e := v.Mutate(context.Background(), HostMutation{Operation: "close"}, childProtocolLaunch(t, r, handler), nil)
+		result, e := v.Mutate(context.Background(), HostMutation{Operation: "close", Reason: reason}, nil, nil)
 		if fail {
 			if !errors.Is(e, ErrHostChild) || result.Revision != 0 {
 				t.Fatal(result, e)
@@ -256,6 +253,7 @@ func TestHostPrivilegeDevProtocolWithFakeIdentity(t *testing.T) {
 		}
 	}
 	v.Privileged = false
+	v.ForceChild = false
 	called := false
 	_, e = v.Mutate(context.Background(), HostMutation{Operation: "reconcile"}, func(context.Context, HostChildLaunch) ([]byte, error) { t.Fatal("non-root launch"); return nil, nil }, func(context.Context, HostInvocation, HostMutation) (HostMutationResult, error) {
 		called = true

@@ -10,6 +10,13 @@ import (
 var dockerTestOriginalPath = os.Getenv("PATH")
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "_host-worker-mutation" {
+		if HostWorkerChildEntry(context.Background(), os.Stdin, os.Stdout, LocalHostIdentityResolver(), hostProtocolTestHandler) != nil {
+			os.Exit(125)
+		}
+		return
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
 		if CommandExec(os.Args[2:]) != nil {
 			os.Exit(125)

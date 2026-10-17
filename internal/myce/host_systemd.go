@@ -68,10 +68,10 @@ func (s *SystemdHostService) call(ctx context.Context, args ...string) ([]byte, 
 		return nil, err
 	}
 	b, err := s.Command(ctx, "systemctl", append([]string{"--user"}, args...)...)
-	if err != nil {
+	if err != nil && len(args) > 0 && args[0] == "show" {
 		return nil, ErrHostUserManager
 	}
-	return b, nil
+	return b, err
 }
 func (s *SystemdHostService) show(ctx context.Context) (map[string]string, error) {
 	b, e := s.call(ctx, "show", s.Unit, "-p", "LoadState", "-p", "ActiveState", "-p", "ControlGroup", "-p", "KillMode", "-p", "SendSIGKILL", "-p", "TimeoutStopUSec")
