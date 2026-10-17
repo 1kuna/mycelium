@@ -229,7 +229,7 @@ func (q *Queue) confirmPreviousCopies(c Checkin) {
 	}
 	confirm := func(j *Job) {
 		for _, copy := range j.Copies {
-			if copy.Machine == c.Machine.ID && copy.Session != c.Machine.Session {
+			if copy.Machine == c.Machine.ID && copy.Session == c.PreviousSession {
 				q.confirmCopyRelease(Result{Execution: Execution{ID: j.ID, Attempt: copy.Attempt}, Machine: copy.Machine, Session: copy.Session})
 			}
 		}

@@ -599,6 +599,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			for _, j := range q.s.Jobs {
 				if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !j.Spec.Run.Docker && q.held(hostID(old)) {
 					if cancelled(j) {
+						q.settleRelease(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session})
 						j.State = "cancelled"
 						j.StopAt = nil
 					} else {
@@ -750,6 +751,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 						return nil
 					}
 					if cancelled(j) {
+						q.settleRelease(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session})
 						j.State = "cancelled"
 						j.StopAt = nil
 					} else {

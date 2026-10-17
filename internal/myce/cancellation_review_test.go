@@ -86,8 +86,115 @@ func TestCancellationFreshRejoinUntrackedCopies(t *testing.T) {
 	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: j.Session}); err != nil {
 		t.Fatal(err)
 	}
+	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
+		t.Fatal("fresh rejoin confirmed an older session", a)
+	}
+	copies := q.s.Jobs[j.ID].Copies
+	if copies[0].ReleaseConfirmed || !copies[1].ReleaseConfirmed {
+		t.Fatal("fresh cleanup must cover only the immediately previous session", copies)
+	}
+	r := Result{Execution: Execution{ID: j.ID, Attempt: 1}, Machine: m.ID, Session: "session-one", ReleaseOnly: true}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
 	if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
-		t.Fatal("fresh rejoin omitted untracked copy", a)
+		t.Fatal("exact older-session proof did not settle release", a)
+	}
+}
+
+func TestCancellationFreshRejoinKeepsOlderProductionCustody(t *testing.T) {
+	q, c := fixture(t)
+	m := machine("one", "fake")
+	m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.HostMemoryBudgetGB = true, 16, 16
+	if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true, ProductionIdle: "0s"}}); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("production")
+	s.AllowedMachines, s.Needs.HostMemoryGB = []string{m.ID}, 4
+	j := submit(t, q, s)
+	first := check(t, q, m, nil).Job
+	if first == nil {
+		t.Fatal("missing production assignment")
+	}
+	if err := q.Started(result(first, true)); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, machine("two", "fake"), nil)
+	check(t, q, machine("three", "fake"), nil)
+	c.Advance(ProductionLossAfter)
+	if err := q.update(func() error {
+		q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
+		q.maintain()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if q.s.Jobs[j.ID].State != "queued" {
+		t.Fatal("production loss did not requeue")
+	}
+	m.Session = "second-one"
+	if reply := check(t, q, m, nil); reply.Job != nil {
+		t.Fatal("old custody allowed production reassignment")
+	}
+	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
+		t.Fatal(a)
+	}
+	m.Session = "fresh-one"
+	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: "second-one"}); err != nil {
+		t.Fatal(err)
+	}
+	key := releaseKey(HostRelease{Job: j.ID, Machine: first.Machine, Session: first.Session, Attempt: first.Attempt})
+	if _, retained := q.s.HostReleases[key]; !retained || !q.held(m.ID) || q.s.Machines[m.ID].HostMemoryInUseGB != 4 {
+		t.Fatal("fresh S2 cleanup freed S1 production custody")
+	}
+	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" || q.s.Jobs[j.ID].Copies[0].ReleaseConfirmed {
+		t.Fatal("older production session was confirmed", a)
+	}
+	r := result(first, false)
+	r.ReleaseOnly = true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" || q.held(m.ID) {
+		t.Fatal("exact S1 cleanup failed to settle custody", a)
+	}
+}
+
+func TestCancellationLostAssignmentEmptyCheckin(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		t.Run(map[bool]string{false: "redelivery", true: "held-host"}[held], func(t *testing.T) {
+			q, _ := fixture(t)
+			m := machine("one", "fake")
+			if held {
+				if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true, ProductionIdle: "0s"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			j := submit(t, q, spec("production"))
+			assigned := check(t, q, m, nil).Job // Assignment reply is lost before launch.
+			if assigned == nil {
+				t.Fatal("missing assignment")
+			}
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if len(q.s.HostReleases) != 1 {
+				t.Fatal("fixture must retain runtime custody before cancellation")
+			}
+			if a := cancelAck(t, q, j.ID); a.State != "stopping" || ackRelease(a) != "pending" {
+				t.Fatal(a)
+			}
+			if reply := check(t, q, m, nil); reply.Job != nil {
+				t.Fatal("cancelled assignment was redelivered")
+			}
+			if a := cancelAck(t, q, j.ID); a.State != "cancelled" || ackRelease(a) != "confirmed" {
+				t.Fatal("same-session empty report did not prove exact release", a)
+			}
+			if !q.s.Jobs[j.ID].Copies[0].ReleaseConfirmed || len(q.s.HostReleases) != 0 {
+				t.Fatal("exact attempt evidence or release record was not settled")
+			}
+			assertNoCancellationAttempt(t, q, assigned)
+		})
 	}
 }
 
