@@ -163,7 +163,7 @@ func (a API) Handler() http.Handler {
 		if !decode(w, r, &c) {
 			return
 		}
-		respond(w, map[string]bool{"ok": true}, a.Queue.Complete(c))
+		respond(w, map[string]bool{"ok": true}, a.Queue.CompleteContext(r.Context(), c))
 	})
 	mux.HandleFunc("POST /api/workers/environment-log", func(w http.ResponseWriter, r *http.Request) {
 		var c EnvironmentLog
