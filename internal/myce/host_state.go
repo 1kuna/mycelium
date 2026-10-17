@@ -205,16 +205,24 @@ func InitializeHostIntent(dir, host string, clock Clock) (HostIntent, error) {
 	if err != nil || len(paths) > 0 {
 		return s, ErrHostState
 	}
+	registries, err := filepath.Glob(filepath.Join(dir, "worker-*.json"))
+	if err != nil || len(registries) > 0 {
+		return s, ErrHostState
+	}
+	if _, err = os.Lstat(filepath.Join(dir, ".host-conversion", "IN_PROGRESS")); !errors.Is(err, os.ErrNotExist) {
+		return s, ErrHostState
+	}
 	now := clock.Now()
 	s = HostIntent{Schema: hostStateVersion, Host: host, HostRevision: HostRevision{Revision: 1, Operation: ID()}, Desired: "closed", Reason: "initial provisioning", AcceptedAt: now, StopDeadline: &now, PreviousClose: 1}
 	return s, atomicHostJSON(dir, hostStateFile, s, nil)
 }
 
 type hostIntentChange struct {
-	Desired  string
-	Expected HostRevision
-	Reason   string
-	Grace    time.Duration
+	Desired       string
+	Expected      HostRevision
+	CloseExpected *HostRevision
+	Reason        string
+	Grace         time.Duration
 	// S05 supplies durable previous-close settlement. Called outside intake.lock;
 	// the expected revision is checked again before committing open.
 	Settled  func(HostIntent) error
@@ -256,7 +264,7 @@ func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, 
 	if err != nil {
 		return zero, err
 	}
-	if c.Expected.Revision != 0 && s.HostRevision != c.Expected {
+	if (c.Desired == "open" && s.HostRevision != c.Expected) || (c.Desired == "closed" && c.CloseExpected != nil && s.HostRevision != *c.CloseExpected) {
 		return zero, ErrHostRevision
 	}
 	if s.Desired == c.Desired {

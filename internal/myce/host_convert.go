@@ -28,12 +28,13 @@ type HostConversionOptions struct {
 	boundary       func(string) error
 }
 type HostConversionSource struct {
-	Path     string `json:"path"`
-	SHA256   string `json:"sha256"`
-	Bytes    int64  `json:"bytes"`
-	Mode     uint32 `json:"mode"`
-	Retire   bool   `json:"retire"`
-	Original string `json:"original"`
+	Path       string `json:"path"`
+	SHA256     string `json:"sha256"`
+	Bytes      int64  `json:"bytes"`
+	Mode       uint32 `json:"mode"`
+	Retire     bool   `json:"retire"`
+	Original   string `json:"original"`
+	Historical bool   `json:"historical"`
 }
 type HostConversionManifest struct {
 	Schema     int                    `json:"schema_version"`
@@ -48,6 +49,7 @@ type HostConversionManifest struct {
 	LowerBound uint64                 `json:"revision_lower_bound"`
 	Conflicts  []string               `json:"conflicts"`
 	Sources    []HostConversionSource `json:"sources"`
+	Pointers   []string               `json:"preserved_in_place"`
 	Intent     HostIntent             `json:"target"`
 }
 
@@ -214,15 +216,44 @@ func verifyConversionSource(path string, src HostConversionSource) error {
 	if !st.Mode().IsRegular() || uint32(st.Mode().Perm()) != src.Mode || st.Size() != src.Bytes {
 		return errors.New("conversion source type/mode/size changed")
 	}
-	b, err := os.ReadFile(path)
+	hash, err := conversionFileHash(path)
 	if err != nil {
 		return err
 	}
-	if conversionHash(b) != src.SHA256 {
+	if hash != src.SHA256 {
 		return errors.New("conversion source hash changed")
 	}
 	return nil
 }
+func conversionFileHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	hash := sha256.New()
+	if _, err = io.Copy(hash, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+func readConversionCustody(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	const limit = 16 << 20
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > limit {
+		return nil, errors.New("custody record exceeds conversion limit")
+	}
+	return b, nil
+}
+
 func copyConversionOriginal(source, target string, mode fs.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 		return err
@@ -267,6 +298,11 @@ func resumeHostConversion(o HostConversionOptions, m HostConversionManifest) (Ho
 	}()
 	lockPaths := map[string]bool{}
 	for _, dir := range m.Spools {
+		if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return m, err
+		}
 		lockPaths[filepath.Join(dir, "worker.lock")] = true
 	}
 	for _, path := range o.QueueDatabases {
@@ -456,31 +492,37 @@ func resumeHostConversion(o HostConversionOptions, m HostConversionManifest) (Ho
 func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, error) {
 	m := HostConversionManifest{Schema: 1, Host: o.Host, Phase: "dry-run", Queues: o.QueueDatabases, Conflicts: []string{}, Sources: []HostConversionSource{}}
 	now := o.Clock.Now()
-	m.Intent = HostIntent{Schema: 1, Host: o.Host, Desired: "open", Reason: "offline conversion; fresh reconciliation required", AcceptedAt: now, Pending: []HostObligation{}, Holds: []string{}}
+	m.Intent = HostIntent{Schema: 1, Host: o.Host, Desired: "closed", Reason: "offline conversion; explicit open after reconciliation required", AcceptedAt: now, Pending: []HostObligation{}, Holds: []string{}}
 	seen := map[string]bool{}
-	add := func(path string, retire bool) ([]byte, error) {
+	inventory := func(path string, retire bool) error {
 		path, err := filepath.Abs(path)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if seen[path] {
-			return os.ReadFile(path)
+			return nil
 		}
 		st, err := os.Lstat(path)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if !st.Mode().IsRegular() {
-			return nil, errors.New("conversion refuses non-regular source")
+			return errors.New("conversion refuses non-regular custody source")
 		}
-		b, err := os.ReadFile(path)
+		hash, err := conversionFileHash(path)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		index := len(m.Sources)
-		m.Sources = append(m.Sources, HostConversionSource{Path: path, SHA256: conversionHash(b), Bytes: st.Size(), Mode: uint32(st.Mode().Perm()), Retire: retire, Original: fmt.Sprintf("originals/%06d", index)})
+		m.Sources = append(m.Sources, HostConversionSource{Path: path, SHA256: hash, Bytes: st.Size(), Mode: uint32(st.Mode().Perm()), Retire: retire, Original: fmt.Sprintf("originals/%06d", index)})
 		seen[path] = true
-		return b, nil
+		return nil
+	}
+	add := func(path string, retire bool) ([]byte, error) {
+		if err := inventory(path, retire); err != nil {
+			return nil, err
+		}
+		return readConversionCustody(path)
 	}
 	hold := func(code string) {
 		if !slices.Contains(m.Intent.Holds, code) {
@@ -522,6 +564,7 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 		m.Intent.Pending = append(m.Intent.Pending, p)
 		hold("pending_release")
 	}
+	forgotten := map[string]bool{}
 	var workers []HostWorker
 	dirs := []string{o.Dir}
 	entries, err := os.ReadDir(filepath.Join(o.Dir, "units"))
@@ -573,6 +616,10 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 					return e
 				}
 				if d.IsDir() {
+					if path != filepath.Join(dir, ".Trash") {
+						m.Pointers = append(m.Pointers, path)
+						return filepath.SkipDir
+					}
 					return nil
 				}
 				name := ""
@@ -582,6 +629,10 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 						break
 					}
 				}
+				if name == "" {
+					m.Pointers = append(m.Pointers, path)
+					return nil
+				}
 				sources = append(sources, controlSource{name: name, path: path, archived: true})
 				return nil
 			}); err != nil {
@@ -590,6 +641,16 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 		}
 		for _, source := range sources {
 			name, path := source.name, source.path
+			if source.archived {
+				if err := inventory(path, dir != o.Dir); err != nil {
+					return m, err
+				}
+				for i := range m.Sources {
+					if m.Sources[i].Path == path {
+						m.Sources[i].Historical = true
+					}
+				}
+			}
 			retire := !source.archived || dir != o.Dir
 			switch {
 			case name == "DISABLED":
@@ -597,13 +658,17 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 				if e != nil {
 					return m, e
 				}
-				hold("disabled_flag")
+				if !source.archived {
+					hold("disabled_flag")
+				}
 				if err := counters(b); err != nil {
 					return m, err
 				}
 				var f legacyControlFlag
 				if json.Unmarshal(b, &f) != nil {
-					hold("malformed_flag")
+					if !source.archived {
+						hold("malformed_flag")
+					}
 				} else {
 					bound(f.Generation)
 				}
@@ -627,10 +692,13 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 					return m, errors.New("unreadable queue counters")
 				}
 				bound(f.Generation)
-				for _, n := range f.Queues {
+				for queue, n := range f.Queues {
+					forgotten[queue] = true
 					bound(n)
 				}
-				hold("forgotten_queue_custody")
+				if !source.archived {
+					hold("forgotten_queue_custody")
+				}
 			case name == "disable-receipt.json" || name == "enable-pending.json":
 				b, e := add(path, retire)
 				if e != nil {
@@ -640,18 +708,36 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 				if err := counters(b); err != nil {
 					return m, err
 				}
-				hold("historical_receipt")
+				if !source.archived {
+					hold("incomplete_receipt")
+				}
 				var r hostReceipt
 				if json.Unmarshal(b, &r) != nil {
-					hold("malformed_receipt")
+					if !source.archived {
+						hold("malformed_receipt")
+					}
 					continue
 				}
 				bound(r.Generation)
 				bound(r.EnableGeneration)
+				if source.archived {
+					for _, w := range r.Workers {
+						bound(w.Generation)
+					}
+					continue
+				}
 				if r.Generation == 0 || r.Workers == nil {
 					hold("incomplete_receipt")
 				}
 				workers = append(workers, r.Workers...)
+			case name == "host-memory-budget.json":
+				b, err := add(path, false)
+				if err != nil {
+					return m, err
+				}
+				if err = counters(b); err != nil {
+					return m, err
+				}
 			case strings.HasPrefix(name, "worker-") && strings.HasSuffix(name, ".json"):
 				b, e := add(path, dir != o.Dir)
 				if e != nil {
@@ -707,30 +793,37 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 	}
 	for _, dir := range stateDirs {
 		w := byState[dir]
+		entries, e := os.ReadDir(dir)
+		if errors.Is(e, os.ErrNotExist) {
+			hold("missing_worker_spool")
+			continue
+		}
+		if e != nil {
+			return m, e
+		}
 		lock, e := hostOperationLock(dir, "worker.lock", false)
 		if e != nil {
 			return m, e
 		}
 		unlocks = append(unlocks, lock)
-		// Preserve the spool as bytes; do not reinterpret checkpoints or rewrite
-		// executions. S12b owns general persisted custody/checkpoint conversion.
-		e = filepath.WalkDir(dir, func(path string, d fs.DirEntry, e error) error {
-			if e != nil {
-				return e
+		// Only bounded custody JSON is read/copied. Caches, venvs, models and
+		// unique payloads remain untouched at these recorded pointers.
+		for _, entry := range entries {
+			name := entry.Name()
+			path := filepath.Join(dir, name)
+			custody := name == "state.json" || strings.HasPrefix(name, "attempt-") && strings.HasSuffix(name, ".json") || strings.HasPrefix(name, "engine-") && strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".docker.json")
+			if custody {
+				if _, err := add(path, false); err != nil {
+					return m, err
+				}
+			} else if !strings.HasSuffix(name, ".lock") {
+				m.Pointers = append(m.Pointers, path)
 			}
-			if d.IsDir() {
-				return nil
-			}
-			if strings.HasSuffix(path, ".lock") {
-				return nil
-			}
-			_, err := add(path, false)
-			return err
-		})
-		if e != nil {
-			return m, e
 		}
-		b, e := os.ReadFile(filepath.Join(dir, "state.json"))
+		if w.Environments != "" {
+			m.Pointers = append(m.Pointers, w.Environments)
+		}
+		b, e := readConversionCustody(filepath.Join(dir, "state.json"))
 		if errors.Is(e, os.ErrNotExist) {
 			hold("missing_worker_spool")
 			continue
@@ -748,7 +841,7 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 		}
 		paths, _ := filepath.Glob(filepath.Join(dir, "*.docker.json"))
 		for _, path := range paths {
-			b, e := os.ReadFile(path)
+			b, e := readConversionCustody(path)
 			if e != nil {
 				return m, e
 			}
@@ -798,11 +891,10 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 				} else if err != nil {
 					return err
 				}
-				data, err := add(path+suffix, false)
-				if err != nil {
+				if err := inventory(path+suffix, false); err != nil {
 					return err
 				}
-				if err = os.WriteFile(copyPath+suffix, data, 0600); err != nil {
+				if err := copyConversionOriginal(path+suffix, copyPath+suffix, 0600); err != nil {
 					return err
 				}
 			}
@@ -838,15 +930,18 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 		}
 		for _, r := range s.HostReleases {
 			machine := s.Machines[r.Machine]
-			if machine == nil {
-				m.Conflicts = append(m.Conflicts, "unknown_queue_host_mapping")
+			host := r.Host
+			if host == "" && machine != nil {
+				host = hostID(machine)
+			}
+			if host == "" {
+				hold("unknown_queue_host_mapping")
 				continue
 			}
-			if r.Host != "" && r.Host != hostID(machine) {
-				m.Conflicts = append(m.Conflicts, "conflicting_release_host_mapping")
-				continue
-			}
-			if hostID(machine) == o.Host {
+			if host == o.Host {
+				if machine == nil || hostID(machine) != o.Host {
+					hold("stale_release_machine_mapping")
+				}
 				pending(endpoint, Result{Machine: r.Machine, Session: r.Session, Execution: Execution{ID: r.Job, Attempt: r.Attempt}})
 				if r.Preparation {
 					for i := range m.Intent.Pending {
@@ -865,10 +960,14 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 			}
 			machine := s.Machines[slot.Machine]
 			if machine == nil {
-				m.Conflicts = append(m.Conflicts, "unknown_engine_host_mapping")
+				hold("unknown_engine_host_mapping")
 				continue
 			}
-			if hostID(machine) != o.Host || slot.State == "unloaded" {
+			if slot.State == "unloaded" {
+				continue
+			}
+			if hostID(machine) != o.Host {
+				hold("foreign_engine_machine_mapping")
 				continue
 			}
 			hold("pending_engine_release")
@@ -898,6 +997,11 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 			if _, ok := o.QueueDatabases[w.Queue]; !ok {
 				m.Conflicts = append(m.Conflicts, "queue_database_mapping_missing")
 			}
+		}
+	}
+	for queue := range forgotten {
+		if _, ok := o.QueueDatabases[queue]; !ok {
+			m.Conflicts = append(m.Conflicts, "forgotten_queue_database_mapping_missing")
 		}
 	}
 	if m.LowerBound == ^uint64(0) {

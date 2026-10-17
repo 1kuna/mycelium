@@ -6,6 +6,7 @@ import (
 	"mycelium/internal/myce"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -36,5 +37,22 @@ func TestHostConvertCLI(t *testing.T) {
 	}
 	if err := hostCommand([]string{"enable", "--unit", "myce-worker@card-a.service", "--host-state-dir", dir}, myce.MachineProbe{OS: "linux"}, &out); err == nil {
 		t.Fatal("per-card enable accepted")
+	}
+}
+
+func TestLegacyEnableHasMigrationPointer(t *testing.T) {
+	var out bytes.Buffer
+	err := hostCommand([]string{"enable"}, myce.MachineProbe{}, &out)
+	if err == nil || !strings.Contains(err.Error(), "myce host open --expect-revision") {
+		t.Fatal(err)
+	}
+}
+func TestBenchmarkCLIClosedHostRefused(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := myce.InitializeHostIntent(dir, "test-host", myce.RealClock{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := benchmarkCommand([]string{"--state-dir", t.TempDir(), "--gpu", "fake", "--host-state-dir", dir}); err == nil || !strings.Contains(err.Error(), "host disabled") {
+		t.Fatal("closed benchmark admitted", err)
 	}
 }

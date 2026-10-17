@@ -39,7 +39,7 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	allowDeviceless := f.Bool("allow-deviceless", false, "allow CPU/fake test worker without service GPU validation")
 	instance := f.String("instance", "", "Linux worker instance (e.g. gpu1)")
 	device := f.String("device", "", "physical GPU selector (one device per worker)")
-	localReceipts := f.Bool("local-disable-receipts", false, "queue reconciles co-located disable receipts (requires --host-id and --host-state-dir)")
+	f.BoolFunc("local-disable-receipts", "retired; reinstall the queue without this option", func(string) error { return myce.ErrLegacyLocalDisableReceipts })
 	hostDir := f.String("host-state-dir", "", "shared local host control directory")
 	joiningFile := f.String("joining-file", "", "private invitation; discovers queue and provisions trust")
 	root := f.String("root", "", "installation root (default ~/.local/share/mycelium)")
@@ -250,21 +250,6 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 			return e
 		}
 	}
-	if *localReceipts {
-		explicitHost, explicitDir := false, false
-		f.Visit(func(v *flag.Flag) {
-			if v.Name == "host-id" {
-				explicitHost = true
-			}
-			if v.Name == "host-state-dir" {
-				explicitDir = true
-			}
-		})
-		if role != "queue" || !explicitHost || !explicitDir || *hostID == "" || *hostDir == "" {
-			return errors.New("--local-disable-receipts requires queue, explicit --host-id and --host-state-dir")
-		}
-	}
-	c.LocalDisableReceipts = *localReceipts
 	c.HostID, c.ReserveHostMemoryGB, c.Heartbeat = *hostID, *hostReserve, *heartbeat
 	c.StartDisabled, c.RequireMemoryCeilings, c.RequireMountedNAS, c.Force = *startDisabled, *requireCeilings, *requireMounted, *force
 	c.ModelCacheBytes, c.EnvironmentCacheBytes = *modelCacheBytes, *environmentCacheBytes
@@ -392,9 +377,17 @@ func serviceCommand(args []string) error {
 	if *path == "" {
 		return errors.New("service requires --config")
 	}
+	for _, arg := range f.Args() {
+		if arg == "--local-disable-receipts" || strings.HasPrefix(arg, "--local-disable-receipts=") {
+			return myce.ErrLegacyLocalDisableReceipts
+		}
+	}
 	c, e := myce.ReadServiceConfig(*path)
 	if e != nil {
 		return e
+	}
+	if c.LocalDisableReceipts {
+		return myce.ErrLegacyLocalDisableReceipts
 	}
 	if c.Role == "worker" {
 		dir := c.HostStateDir

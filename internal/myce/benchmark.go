@@ -58,6 +58,7 @@ type BenchmarkConfig struct {
 	Machine                   Machine
 	StateDir, ExtensionRoot   string
 	HostStateDir              string
+	hostRevision              HostRevision
 	Client                    Client
 	DailyUse, Laptop, Desktop bool
 	OwnerSignals              OwnerSignalSource
@@ -69,6 +70,14 @@ type BenchmarkConfig struct {
 // Setup/download/build is an explicit extension operation, outside this budget.
 // A repeat on unchanged hardware, drivers, extensions and store reuses results.
 func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *CapabilityProfile) error {
+	var err error
+	c.HostStateDir, err = hostRoot(c.HostStateDir)
+	if err != nil {
+		return err
+	}
+	if err = bindHostRevision(c.HostStateDir, &c.hostRevision); err != nil {
+		return err
+	}
 	if c.Clock == nil {
 		c.Clock = RealClock{}
 	}
@@ -157,7 +166,7 @@ func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *Capabilit
 			case <-work.Done():
 				return
 			case <-tick.C:
-				if !monitor.snapshot().Available {
+				if !monitor.snapshot().Available || CheckHostRevision(c.HostStateDir, c.hostRevision) != nil {
 					cancelWork()
 					return
 				}
@@ -172,7 +181,7 @@ func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *Capabilit
 		}
 	}
 	for _, resource := range []string{"cpu", "memory", "disk", "network", "accelerator"} {
-		if work.Err() != nil {
+		if work.Err() != nil || CheckHostRevision(c.HostStateDir, c.hostRevision) != nil {
 			result.Measurements = append(result.Measurements, Throughput{Resource: resource, Reason: "benchmark interrupted; retry on next join"})
 			continue
 		}
@@ -355,7 +364,7 @@ func measureReferences(ctx context.Context, c BenchmarkConfig, extensions []Exte
 				env["MYCE_CHECK_OUTPUT"] = filepath.Join(tmp, "actual")
 				env["MYCE_CHECK_WORK"] = r.Work
 				env["MYCE_BENCHMARK_OUTPUT"] = filepath.Join(tmp, "timing.json")
-				if err = runExtensionCommand(ctx, e.Benchmark, env["MYCE_EXTENSION_DIR"], env, io.Discard); err != nil {
+				if err = runExtensionCommand(ctx, e.Benchmark, env["MYCE_EXTENSION_DIR"], env, io.Discard, hostCommandScope{HostDir: c.HostStateDir, StateDir: c.StateDir, Revision: c.hostRevision, Clock: c.Clock}); err != nil {
 					return err
 				}
 				data, err := os.ReadFile(env["MYCE_CHECK_OUTPUT"])

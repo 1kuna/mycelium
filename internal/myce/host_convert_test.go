@@ -75,7 +75,7 @@ func TestHostConversionFlagMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if dry.Intent.Revision != 31 || dry.Intent.Observed != nil || dry.Intent.Desired == "closed" != (mask != 0) {
+			if dry.Intent.Revision != 31 || dry.Intent.Observed != nil || dry.Intent.Desired != "closed" {
 				t.Fatal(dry)
 			}
 			if _, err = os.Stat(filepath.Join(o.Dir, hostStateFile)); !errors.Is(err, os.ErrNotExist) {
@@ -359,7 +359,7 @@ func TestHostConversionArchivedCountersAndReceipts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if m.Intent.Revision != 118 || m.Intent.Desired != "closed" || m.Pending != 1 {
+			if m.Intent.Revision != 118 || m.Intent.Desired != "closed" || m.Pending != 0 {
 				t.Fatalf("archive omitted: revision=%d desired=%s pending=%d", m.Intent.Revision, m.Intent.Desired, m.Pending)
 			}
 			found := false

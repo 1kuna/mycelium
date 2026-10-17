@@ -186,7 +186,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	deadlineLoss := f.Duration("deadline-loss-timeout", myce.DeadlineLossAfter, "quiet timeout for deadline work")
 	experimentLoss := f.Duration("experiment-loss-timeout", myce.LossAfter, "quiet timeout for experiment work")
 	restartGrace := f.Duration("restart-grace", myce.RestartGrace, "worker recovery grace after queue restart")
-	localReceipts := f.Bool("local-disable-receipts", false, "reconcile co-located disable receipts (requires explicit --host-id and --host-state-dir)")
+	f.BoolFunc("local-disable-receipts", "retired; reinstall the queue without this option", func(string) error { return myce.ErrLegacyLocalDisableReceipts })
 	hostStateDir := f.String("host-state-dir", "", "shared local host control directory")
 	serviceConfig := f.String("service-config", "", "installed worker configuration path")
 	stateDir := f.String("state-dir", "", "durable local worker spool directory")
@@ -322,20 +322,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return errors.Join(err, d.Close())
 		}
 	case "queue":
-		if *localReceipts {
-			explicitHost, explicitDir := false, false
-			f.Visit(func(v *flag.Flag) {
-				if v.Name == "host-id" {
-					explicitHost = true
-				}
-				if v.Name == "host-state-dir" {
-					explicitDir = true
-				}
-			})
-			if !explicitHost || !explicitDir || *hostID == "" || *hostStateDir == "" {
-				return errors.New("--local-disable-receipts requires explicit --host-id and --host-state-dir")
-			}
-		}
 		if err := myce.CheckQueueGPUDescriptors(); err != nil {
 			return err
 		}
@@ -344,11 +330,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		defer q.Close()
-		if *localReceipts {
-			if err = q.ConfigureLocalDisableReceipts(*hostID, *hostStateDir); err != nil {
-				return err
-			}
-		}
+
 		root := *fileStore
 		if root == "" {
 			root = *db + ".files"

@@ -11,7 +11,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -706,65 +705,7 @@ func (c *EnvironmentCache) cleanupBuild(path string) error {
 	return store.cleanupOrphan(c.Clock)
 }
 func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir string, env []string, out io.Writer) error {
-	revision := c.hostRevision
-	if err := bindHostRevision(c.HostStateDir, &revision); err != nil {
-		return err
-	}
-	unlock, err := hostLaunchGate(c.HostStateDir, revision)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if unlock != nil {
-			unlock()
-		}
-	}()
-	identity := ID()
-	state := workerState{Identity: identity, LaunchPending: true}
-	if e := saveWorkerJSON(dir, "build-state.json", state); e != nil {
-		return e
-	}
-	args := []string{"-c", `read gate || exit 125; "$@" < /dev/null & child=$!; wait "$child"; exit $?`, "myce-supervisor-" + identity}
-	args = append(args, argv...)
-	cmd := exec.CommandContext(ctx, "sh", args...)
-	cmd.Dir = dir
-	cmd.Env = append(env, "MYCE_PROCESS_ID="+identity)
-	cmd.Stdout = out
-	cmd.Stderr = out
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
-	cmd.WaitDelay = time.Second
-	reader, writer, e := os.Pipe()
-	if e != nil {
-		return e
-	}
-	defer reader.Close()
-	defer writer.Close()
-	cmd.Stdin = reader
-	if e = hostDispatch(c.HostStateDir, revision, cmd.Start); e != nil {
-		return e
-	}
-	state.PID = cmd.Process.Pid
-	state.LaunchPending = false
-	if e = saveWorkerJSON(dir, "build-state.json", state); e != nil {
-		_ = syscall.Kill(-state.PID, syscall.SIGKILL)
-		_ = cmd.Wait()
-		return e
-	}
-	if e = hostDispatch(c.HostStateDir, revision, func() error { _, e := writer.Write([]byte("start\n")); return e }); e != nil {
-		_ = syscall.Kill(-state.PID, syscall.SIGKILL)
-	}
-	unlock()
-	unlock = nil
-	waitErr := cmd.Wait()
-	_ = syscall.Kill(-state.PID, syscall.SIGKILL)
-	groupErr := waitWorkerGroup(state.PID, c.Clock)
-	return errors.Join(e, waitErr, groupErr)
+	return runRecordedHostCommand(ctx, argv, dir, env, out, hostCommandScope{HostDir: c.HostStateDir, StateDir: dir, Revision: c.hostRevision, Clock: c.Clock}, "build-state.json")
 }
 
 type environmentRuntime struct {

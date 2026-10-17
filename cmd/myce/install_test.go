@@ -352,7 +352,7 @@ func TestInstallQueueLocalDisableReceiptsFlags(t *testing.T) {
 		{"default", nil, false},
 		{"missing-host", []string{"--local-disable-receipts", "--host-state-dir", "host-state"}, true},
 		{"missing-directory", []string{"--local-disable-receipts", "--host-id", "local-host"}, true},
-		{"explicit", []string{"--local-disable-receipts", "--host-id", "local-host", "--host-state-dir", "host-state"}, false},
+		{"explicit", []string{"--local-disable-receipts", "--host-id", "local-host", "--host-state-dir", "host-state"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -377,8 +377,28 @@ func TestQueueLocalDisableReceiptsRequiresExplicitIdentity(t *testing.T) {
 		{"--local-disable-receipts", "--host-state-dir", "host-state"},
 	} {
 		err := runWithProbe(append([]string{"queue"}, flags...), myce.MachineProbe{OS: "linux", Arch: "arm64"})
-		if err == nil || !strings.Contains(err.Error(), "requires explicit --host-id and --host-state-dir") {
+		if err == nil || !strings.Contains(err.Error(), "reinstall") {
 			t.Fatal("queue identity was implicit", err)
+		}
+	}
+}
+
+func TestLegacyReceiptInstalledServiceRejected(t *testing.T) {
+	for _, configFlag := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		data, err := json.Marshal(myce.ServiceConfig{Role: "queue", LocalDisableReceipts: configFlag})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		args := []string{"--config", path}
+		if !configFlag {
+			args = append(args, "--", "queue", "--local-disable-receipts")
+		}
+		if err = serviceCommand(args); err == nil || !strings.Contains(err.Error(), "reinstall") {
+			t.Fatal("installed legacy flag did not explain recovery", err)
 		}
 	}
 }
