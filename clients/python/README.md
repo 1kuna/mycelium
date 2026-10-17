@@ -45,6 +45,15 @@ logs. Save the last `seq` and pass `after=seq` to reconnect without duplicates.
 Without follow, all currently available pages are drained. Close the generator
 to stop following; an HTTP call can block for the configured request timeout.
 
+For retryable submissions, store a stable `submission_key` in the job mapping or
+YAML before the first POST. Keys are unique within a project. Repeating the same
+spec/key returns the original job, including terminal jobs. A changed spec raises
+`APIError` with `status == 409` and `code == "submission_key_conflict"`. Expired
+keys raise status 410 with code `submission_key_expired` and cannot create jobs.
+A cancelled key reservation returns its terminal cancelled job for any spec.
+Keep the exact original submitted spec for retries; generated defaults in the
+returned job are not part of that original request.
+
 ## Standard OpenAI SDK
 
 ```python

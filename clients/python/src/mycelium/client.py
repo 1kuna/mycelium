@@ -21,6 +21,13 @@ class APIError(RuntimeError):
     def __init__(self, status: int, body: str):
         self.status = status
         self.body = body
+        self.code = None
+        try:
+            response = json.loads(body)
+            if isinstance(response, dict):
+                self.code = response.get("code")
+        except (ValueError, TypeError):
+            pass
         super().__init__(f"Mycelium HTTP {status}: {body}")
 
 

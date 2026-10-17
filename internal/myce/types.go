@@ -73,6 +73,8 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	SubmissionKey string `json:"submission_key,omitempty" yaml:"submission_key,omitempty"`
+
 	Files    FileManifest      `json:"files,omitempty" yaml:"files,omitempty"`
 	Kind     string            `json:"kind,omitempty" yaml:"kind,omitempty"`
 	Program  *Program          `json:"program,omitempty" yaml:"program,omitempty"`

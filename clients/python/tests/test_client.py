@@ -16,6 +16,18 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ClientTests(unittest.TestCase):
+    def test_submission_key_and_error_code(self):
+        client = Client(token="test-only")
+        spec = {"project": "test", "submission_key": "stable-key"}
+        with patch.object(client, "_call", return_value={"id": "original"}) as call:
+            self.assertEqual(client.submit(spec)["id"], "original")
+        self.assertEqual(call.call_args.args[2]["submission_key"], "stable-key")
+        self.assertEqual(spec, {"project": "test", "submission_key": "stable-key"})
+        error = APIError(409, '{"code":"submission_key_conflict","error":"different spec"}')
+        self.assertEqual(error.status, 409)
+        self.assertEqual(error.code, "submission_key_conflict")
+        self.assertIsNone(APIError(400, "invalid request").code)
+
     def test_wait_reports_production_start_deadline(self):
         client = Client(token="test-only")
         failed = {"id": "prod", "state": "failed", "reason": "production start deadline exceeded: host b70 disabled by operator"}
@@ -183,6 +195,17 @@ class DevTests(unittest.TestCase):
 
     def spec(self, command, **extra):
         return {"name": "python-test", "project": "test", "priority": "experiment", "run": {"command": command}, "needs": {"memory_gb": 1, "platform": ["fake"]}, "resumable": False, **extra}
+
+    def test_keyed_submission_repeat_and_conflict(self):
+        spec = self.spec([sys.executable, "-c", "print('keyed')"], submission_key="python-key")
+        first = self.client.submit(spec)
+        self.assertEqual(self.client.wait(first["id"], timeout=10)["state"], "succeeded")
+        self.assertEqual(self.client.submit(spec)["id"], first["id"])
+        spec["name"] = "changed"
+        with self.assertRaises(APIError) as caught:
+            self.client.submit(spec)
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(caught.exception.code, "submission_key_conflict")
 
     def test_production_start_deadline(self):
         job = self.client.submit(self.spec(

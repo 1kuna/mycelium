@@ -38,6 +38,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	Submissions      map[string]*submissionRecord     `json:"submissions,omitempty"`
 	MachineControls  map[string]machineControl        `json:"machine_controls,omitempty"`
 	ProgramNeeds     map[string]SizeHint              `json:"program_needs,omitempty"`
 	Extensions       map[string]Extension             `json:"extensions,omitempty"`
@@ -282,6 +283,7 @@ func (q *Queue) update(fn func() error) error {
 	err := fn()
 	if err == nil {
 		var data []byte
+		q.maintainSubmissions()
 		data, err = json.Marshal(q.s)
 		if err == nil {
 			err = q.persistUsage(data)
@@ -301,19 +303,32 @@ func (q *Queue) update(fn func() error) error {
 	return err
 }
 func (q *Queue) Submit(s Spec) (*Job, error) {
-	if len(s.Files) > 0 && !q.fileCheckpoints {
-		return nil, errors.New("stored job files require file-store checkpoints; omit queue --checkpoints")
-	}
-	if len(s.Files) > 0 {
-		if err := q.verifyManifest(context.Background(), s.Files); err != nil {
-			return nil, err
-		}
-	}
-	if err := s.Validate(); err != nil {
+	fingerprint, err := submissionFingerprint(s)
+	if err != nil {
 		return nil, err
 	}
 	var out Job
-	err := q.update(func() error {
+	err = q.update(func() error {
+		q.maintainSubmissions()
+		existing, err := q.existingSubmission(s, fingerprint)
+		if err != nil {
+			return err
+		}
+		if existing != nil {
+			out = *existing
+			return nil
+		}
+		if len(s.Files) > 0 && !q.fileCheckpoints {
+			return errors.New("stored job files require file-store checkpoints; omit queue --checkpoints")
+		}
+		if len(s.Files) > 0 {
+			if err := q.verifyManifest(context.Background(), s.Files); err != nil {
+				return err
+			}
+		}
+		if err := s.Validate(); err != nil {
+			return err
+		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
 			return e
 		}
@@ -344,6 +359,13 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 		copy := cloneJob(j)
 		j = &copy
 		q.s.Jobs[id] = j
+		if s.SubmissionKey != "" {
+			if q.s.Submissions == nil {
+				q.s.Submissions = map[string]*submissionRecord{}
+			}
+			created := q.clock.Now()
+			q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)] = &submissionRecord{Kind: submissionBinding, Project: s.Project, Key: s.SubmissionKey, Fingerprint: fingerprint, JobID: id, Created: &created, Job: j}
+		}
 		q.maintain()
 		out = cloneJob(j)
 		return nil
@@ -376,6 +398,7 @@ func (q *Queue) stop(j *Job, why string) {
 	j.Reason = why
 }
 func (q *Queue) maintain() {
+	q.maintainSubmissions()
 	q.reconcileLocalDisableReceipts()
 	now := q.clock.Now()
 	for _, j := range q.s.Jobs {
