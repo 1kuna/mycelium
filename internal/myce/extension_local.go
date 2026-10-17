@@ -278,7 +278,7 @@ func LocalExtensionReports(root, platform, fingerprint string) []ExtensionReport
 	}
 	return out
 }
-func runExtensionCommand(ctx context.Context, args []string, dir string, env map[string]string, log io.Writer) error {
+func runExtensionCommand(ctx context.Context, args []string, dir string, env map[string]string, log io.Writer, scopes ...hostCommandScope) error {
 	if len(args) == 0 {
 		return nil
 	}
@@ -293,26 +293,15 @@ func runExtensionCommand(ctx context.Context, args []string, dir string, env map
 			break
 		}
 	}
-	cmd := exec.Command(command, args[1:]...)
-	cmd.Dir = dir
-	cmd.Env = cleanExtensionEnv(env)
-	cmd.Stdout = log
-	cmd.Stderr = log
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	scope := hostCommandScope{}
+	if len(scopes) > 0 {
+		scope = scopes[0]
+	}
+	if err := scope.prepare(); err != nil {
 		return err
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		return err
-	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-done
-		return ctx.Err()
-	}
+	argv := append([]string{command}, args[1:]...)
+	return runRecordedHostCommand(ctx, argv, dir, cleanExtensionEnv(env), log, scope, "attempt-command-"+ID()+".json")
 }
 
 // Setup/check are explicit local operations, never background services. Their

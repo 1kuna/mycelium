@@ -168,9 +168,11 @@ type localDisableReceipts struct {
 	nextLog   map[string]time.Time
 }
 
+var ErrLegacyLocalDisableReceipts = errors.New("--local-disable-receipts is retired; reinstall the queue without this option using myce install queue")
+
 // ConfigureLocalDisableReceipts no longer activates legacy receipt replay.
 // S05 replaces this option with mandatory exact host reconciliation.
 func (q *Queue) ConfigureLocalDisableReceipts(host, dir string) error {
-	return errors.New("legacy local receipts unsupported; run myce host convert offline")
+	return ErrLegacyLocalDisableReceipts
 }
 func (q *Queue) reconcileLocalDisableReceipts() {}

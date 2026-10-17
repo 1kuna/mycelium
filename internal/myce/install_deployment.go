@@ -256,9 +256,10 @@ func (c ServiceConfig) ValidateInstall() error {
 	if c.HostID == "" || strings.ContainsAny(c.HostID, "\x00\n\r") || c.Name == "" || strings.ContainsAny(c.Name, "\x00\n\r") {
 		return errors.New("host ID and worker name must be nonempty single-line values")
 	}
-	if c.LocalDisableReceipts && (c.Role != "queue" || c.HostID == "" || c.HostStateDir == "") {
-		return errors.New("local disable receipts require queue, host ID and host-state directory")
+	if c.LocalDisableReceipts {
+		return ErrLegacyLocalDisableReceipts
 	}
+
 	if c.StartDisabled && (c.Role != "worker" || c.Detection.OS != "linux") {
 		return errors.New("--start-disabled requires a Linux worker")
 	}

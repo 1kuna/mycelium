@@ -1,0 +1,392 @@
+package myce
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+func TestInstalledWorkerConditionAbsolutePath(t *testing.T) {
+	for _, custom := range []bool{false, true} {
+		home := t.TempDir()
+		t.Setenv("MYCE_HOST_STATE_DIR", "")
+		c, err := PlanInstall("worker", home, "", home, "http://queue", "worker", Detection{OS: "linux", Platform: "fake"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if custom {
+			c.HostStateDir = filepath.Join(home, "host space%")
+		}
+		text := c.ServiceText()
+		want := "ExecCondition=" + unitQuote(c.Binary) + " _host-start-check --host-state-dir " + unitQuote(c.HostStateDir)
+		section := ""
+		found := false
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, "[") {
+				section = line
+			}
+			if strings.HasPrefix(line, "ExecCondition=") {
+				found = true
+				if section != "[Service]" || line != want || !filepath.IsAbs(c.HostStateDir) {
+					t.Fatalf("condition section=%s line=%s", section, line)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("missing startup condition")
+		}
+	}
+}
+
+func TestHostRevisionInitializeRefusesLegacyAndConversion(t *testing.T) {
+	for _, name := range []string{"DISABLED", "worker-old.json", ".host-conversion/IN_PROGRESS"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, name)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := InitializeHostIntent(dir, "test-host", RealClock{}); err == nil {
+				t.Fatal("initialized over legacy/conversion state")
+			}
+		})
+	}
+}
+
+func TestHostConversionCustodyOnlyAndMissingSpool(t *testing.T) {
+	o := oldHostFixture(t)
+	workers, err := HostWorkers(o.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := workers[0].State
+	cache := filepath.Join(dir, "model-cache")
+	if err = os.Mkdir(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	large := filepath.Join(cache, "large-model")
+	f, err := os.Create(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.Truncate(8 << 30); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "venv")
+	if err = os.Symlink(cache, link); err != nil {
+		t.Fatal(err)
+	}
+	o.Apply = true
+	m, err := ConvertHostControl(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Intent.Desired != "closed" {
+		t.Fatal("clean conversion must close")
+	}
+	for _, src := range m.Sources {
+		if strings.Contains(src.Path, "model-cache") || src.Path == link {
+			t.Fatal("cache was copied", src.Path)
+		}
+	}
+	if st, err := os.Stat(large); err != nil || st.Size() != 8<<30 {
+		t.Fatal("cache changed", err)
+	}
+	if target, err := os.Readlink(link); err != nil || target != cache {
+		t.Fatal("symlink changed", err)
+	}
+	if !slices.Contains(m.Pointers, link) || !slices.Contains(m.Pointers, cache) {
+		t.Fatal("preserved cache pointers missing")
+	}
+	o = oldHostFixture(t)
+	workers, err = HostWorkers(o.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Preserve the fixture's original spool, then point a stale registry at a missing directory.
+	workers[0].State = filepath.Join(t.TempDir(), "missing")
+	if err = saveWorkerJSON(o.Dir, "worker-a.json", workers[0]); err != nil {
+		t.Fatal(err)
+	}
+	o.Apply = true
+	m, err = ConvertHostControl(o)
+	if err != nil || !slices.Contains(m.Intent.Holds, "missing_worker_spool") {
+		t.Fatal(m.Intent.Holds, err)
+	}
+}
+
+func TestHostConversionHistoricalFlagsNotHolds(t *testing.T) {
+	o := oldHostFixture(t)
+	trash := filepath.Join(o.Dir, ".Trash")
+	if err := os.Mkdir(trash, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trash, "old-DISABLED"), []byte(`{"generation":61}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := ConvertHostControl(o)
+	if err != nil || m.Intent.Revision != 62 || slices.Contains(m.Intent.Holds, "disabled_flag") {
+		t.Fatal(m.Intent.Holds, err)
+	}
+}
+
+func TestHostRevisionDisableWaitsForNonSystemdLaunch(t *testing.T) {
+	dir := readyTestHost(t, t.TempDir())
+	clock := &fakeClock{now: time.Unix(1000, 0)}
+	unlock, err := hostOperationLock(dir, "launch.lock", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
+	pauses := 0
+	spool := t.TempDir()
+	if err = saveWorkerJSON(spool, "state.json", workerState{Session: "session"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = AdoptHostWorker(dir, HostWorker{State: spool, Host: "test-host", Name: "worker"}); err != nil {
+		t.Fatal(err)
+	}
+	h := HostControl{Dir: dir, Clock: clock, Processes: HostProcesses{
+		Owned: func(workerState) (bool, error) { return false, nil }, Signal: func(workerState, syscall.Signal) error { return nil },
+		Pause: func(d time.Duration) {
+			pauses++
+			clock.Advance(d)
+			if pauses == 3 {
+				unlock()
+				unlock = nil
+			}
+		},
+	}}
+	_, err = h.Disable(context.Background(), "test", 0)
+	if err != nil || pauses != 3 {
+		t.Fatalf("launch wait pauses=%d error=%v", pauses, err)
+	}
+}
+
+func TestHostRevisionCloseRequiresExplicitCAS(t *testing.T) {
+	dir := readyTestHost(t, t.TempDir())
+	initial, err := ReadHostIntent(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := HostRevision{Revision: initial.Revision + 10, Operation: "unrelated-open-selector"}
+	// Expected is an open selector and must never accidentally turn close into CAS.
+	h := HostControl{Dir: dir, Expected: stale}
+	_, _ = h.Disable(context.Background(), "unconditional", 0)
+	current, err := ReadHostIntent(dir)
+	if err != nil || current.Desired != "closed" || current.Revision != initial.Revision+1 {
+		t.Fatal(current, err)
+	}
+	h.CloseExpected = &stale
+	if _, err = h.Disable(context.Background(), "explicit CAS", 0); !errors.Is(err, ErrHostRevision) {
+		t.Fatal("stale explicit close accepted", err)
+	}
+	h.CloseExpected = &current.HostRevision
+	if _, err = changeHostIntent(dir, RealClock{}, hostIntentChange{Desired: "closed", CloseExpected: h.CloseExpected}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type closeOnMemoryCreate struct {
+	memoryFS
+	close func()
+}
+
+func (f closeOnMemoryCreate) Mkdir(path string) error { f.close(); return f.memoryFS.Mkdir(path) }
+
+func TestHostRevisionLlamaCloseBeforeDispatch(t *testing.T) {
+	dir := readyTestHost(t, t.TempDir())
+	c := fakeCeilings(t)
+	closed := false
+	c.fs = closeOnMemoryCreate{memoryFS: c.fs, close: func() {
+		if closed {
+			return
+		}
+		closed = true
+		if err := closeTestHost(dir); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	m := serverTestModel(t, "ready")
+	m.HostMemoryGB = 1
+	e := &LlamaEngine{Dir: t.TempDir(), HostStateDir: dir, Clock: RealClock{}, memoryCeilings: c}
+	err := e.Load(context.Background(), m)
+	if !closed || !errors.Is(err, ErrHostRevision) {
+		t.Fatal("stale engine dispatched", closed, err)
+	}
+	if e.cmd != nil && e.cmd.Process != nil {
+		t.Fatal("engine process created after close")
+	}
+}
+
+func TestHostRevisionDockerCloseBeforeDispatch(t *testing.T) {
+	dir := readyTestHost(t, t.TempDir())
+	revision := readTestHostRevision(t, dir)
+	marker := filepath.Join(t.TempDir(), "called")
+	binary := filepath.Join(t.TempDir(), "docker")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	d := &dockerAttempt{dir: t.TempDir(), timeout: time.Second, hostDir: dir, hostRevision: revision, clock: RealClock{}, binary: binary, halt: make(chan struct{}), state: dockerExecution{Identity: "attempt", Endpoint: "unix:///fake"}, persist: func(dockerExecution) error {
+		if !closed {
+			closed = true
+			return closeTestHost(dir)
+		}
+		return nil
+	}}
+	if _, err := d.operation("create", "create"); !errors.Is(err, ErrHostRevision) {
+		t.Fatal("stale daemon operation dispatched", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("daemon CLI ran", err)
+	}
+}
+
+func TestHostRevisionBenchmarkCommandCustody(t *testing.T) {
+	dir := readyTestHost(t, t.TempDir())
+	state := t.TempDir()
+	scope := hostCommandScope{HostDir: dir, StateDir: state, Revision: readTestHostRevision(t, dir), Clock: RealClock{}}
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := filepath.Join(state, "ready")
+	go func() {
+		done <- runExtensionCommand(ctx, []string{"/bin/sh", "-c", `printf ready > "$1"; sleep 60`, "benchmark", ready}, state, map[string]string{}, io.Discard, scope)
+	}()
+	var records []workerState
+	await(t, func() bool {
+		if _, err := os.Stat(ready); err != nil {
+			return false
+		}
+		workers, err := HostWorkers(dir)
+		if err != nil {
+			return false
+		}
+		records, err = hostProcessRecords(workers)
+		return err == nil && len(records) == 1 && records[0].PID > 0
+	})
+	report, err := (HostControl{Dir: dir}).Disable(context.Background(), "close benchmark", 0)
+	if report.Stopped != 1 {
+		t.Fatal("Disable did not find benchmark custody", report, err)
+	}
+	if err != nil && (runtime.GOOS != "darwin" || !strings.Contains(err.Error(), "macOS can hide process environment markers")) {
+		t.Fatal(report, err)
+	}
+	select {
+	case err = <-done:
+		if err == nil {
+			t.Fatal("benchmark survived close")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("benchmark group not stopped")
+	}
+	// A delayed benchmark command cannot bind itself to a subsequent open.
+	closed, err := ReadHostIntent(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = changeHostIntent(dir, RealClock{}, hostIntentChange{Desired: "open", Expected: closed.HostRevision, Settled: func(HostIntent) error { return nil }}); err != nil {
+		t.Fatal(err)
+	}
+	if err = runExtensionCommand(context.Background(), []string{"/bin/true"}, state, nil, io.Discard, scope); !errors.Is(err, ErrHostRevision) {
+		t.Fatal("stale benchmark command admitted", err)
+	}
+}
+
+func TestHostConversionForgottenQueueCountersRequireMapping(t *testing.T) {
+	o := oldHostFixture(t)
+	if err := os.WriteFile(filepath.Join(o.Dir, "forgotten-queues.json"), []byte(`{"generation":40,"queues":{"http://forgotten":45}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := ConvertHostControl(o)
+	if err == nil || !slices.Contains(m.Conflicts, "forgotten_queue_database_mapping_missing") {
+		t.Fatal("forgotten queue silently waived", m.Conflicts, err)
+	}
+	path := filepath.Join(t.TempDir(), "forgotten.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE queue(id INTEGER PRIMARY KEY,data BLOB NOT NULL); INSERT INTO queue VALUES(1,'{"jobs":{},"machines":{},"host_controls":{"test-host":{"generation":91,"enabled":true,"cleared":true}}}')`)
+	err = errors.Join(err, db.Close())
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.QueueDatabases["http://forgotten"] = path
+	o.Apply = true
+	m, err = ConvertHostControl(o)
+	if err != nil || m.Intent.Revision != 92 {
+		t.Fatal("forgotten queue counter omitted", m.Intent.Revision, err)
+	}
+}
+
+func TestHostConversionSavedReleaseHostAndForeignEngine(t *testing.T) {
+	o := oldHostFixture(t)
+	db, err := sql.Open("sqlite", o.QueueDatabases["http://offline"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`UPDATE queue SET data='{"jobs":{},"machines":{"card-a":{"id":"card-a","host_id":"other-host"}},"host_releases":{"r":{"Host":"test-host","Job":"job","Machine":"card-a","Session":"old-session","Attempt":2}},"model_slots":{"s":{"machine":"card-a","session":"old-session","model":"model","attempt":"engine-attempt","state":"ready"}}}'`)
+	err = errors.Join(err, db.Close())
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Apply = true
+	m, err := ConvertHostControl(o)
+	if err != nil || m.Pending != 1 || !slices.Contains(m.Intent.Holds, "stale_release_machine_mapping") || !slices.Contains(m.Intent.Holds, "foreign_engine_machine_mapping") {
+		t.Fatal(m.Intent.Holds, m.Pending, err)
+	}
+	if m.Intent.Pending[0].Result.ID != "job" || m.Intent.Pending[0].Result.Attempt != 2 {
+		t.Fatal("saved exact release lost")
+	}
+}
+
+func TestHostConversionBudgetAndHistoricalManifest(t *testing.T) {
+	o := oldHostFixture(t)
+	if err := os.WriteFile(filepath.Join(o.Dir, "host-memory-budget.json"), []byte(`{"gib":16,"generation":72}`), 0640); err != nil {
+		t.Fatal(err)
+	}
+	trash := filepath.Join(o.Dir, ".Trash")
+	if err := os.Mkdir(trash, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trash, "old-disable-receipt.json"), []byte(`{"generation":71,"workers":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := ConvertHostControl(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Intent.Revision != 73 || len(m.Intent.Holds) != 0 {
+		t.Fatal(m.Intent.Revision, m.Intent.Holds)
+	}
+	found := false
+	for _, src := range m.Sources {
+		if strings.Contains(src.Path, ".Trash") {
+			found = src.Historical
+		}
+	}
+	if !found {
+		t.Fatal("archive not marked historical")
+	}
+}

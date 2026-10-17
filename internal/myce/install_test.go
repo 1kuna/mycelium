@@ -542,14 +542,10 @@ func TestQueueLocalDisableReceiptsServiceArgs(t *testing.T) {
 	c.LocalDisableReceipts = true
 	c.HostID = "local-host"
 	c.HostStateDir = filepath.Join(t.TempDir(), "host-state")
-	args := strings.Join(c.Args(), " ")
-	for _, value := range []string{"--local-disable-receipts", "--host-id local-host", "--host-state-dir " + c.HostStateDir} {
-		if !strings.Contains(args, value) {
-			t.Fatal("missing queue argument", value)
-		}
+	if strings.Contains(strings.Join(c.Args(), " "), "--local-disable-receipts") || strings.Contains(c.ServiceText(), "--local-disable-receipts") {
+		t.Fatal("retired receipt option emitted")
 	}
-	service := c.ServiceText()
-	if !strings.Contains(service, "--local-disable-receipts") {
-		t.Fatal("queue unit omitted reconciliation")
+	if err := c.ValidateInstall(); err == nil || !strings.Contains(err.Error(), "reinstall") {
+		t.Fatal("retired config accepted", err)
 	}
 }

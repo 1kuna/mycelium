@@ -323,12 +323,9 @@ func (c ServiceConfig) ServiceText() string {
 		if c.Role == "worker" {
 			dir := c.HostStateDir
 			if dir == "" {
-				dir = "%h/.local/share/myce"
+				dir, _ = HostStateDirectory()
 			}
 			condition = "ExecCondition=" + unitQuote(c.Binary) + " _host-start-check --host-state-dir " + unitQuote(dir) + "\n"
-			if c.HostStateDir == "" {
-				condition = strings.ReplaceAll(condition, "%%h/", "%h/")
-			}
 			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\nDelegate=memory\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
 		}
 		settings := ""
@@ -351,7 +348,7 @@ func (c ServiceConfig) ServiceText() string {
 		for _, arg := range c.Args() {
 			argv += " " + unitQuote(arg)
 		}
-		return "[Unit]\n" + condition + "Description=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\nExecStart=:" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + " --" + argv + "\n" + settings + stopSettings + "Restart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
+		return "[Unit]\nDescription=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\n" + condition + "ExecStart=:" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + " --" + argv + "\n" + settings + stopSettings + "Restart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
 	}
 	vals := []string{c.Binary, "service", "--config", c.Config}
 	args := ""
@@ -364,6 +361,9 @@ func (c ServiceConfig) ServiceText() string {
 // Install is only called by an explicit install invocation. Tests use plans or
 // inject a no-op service runner and temp home; no test installs a boot service.
 func Install(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) error {
+	if c.LocalDisableReceipts {
+		return ErrLegacyLocalDisableReceipts
+	}
 	if c.Detection.OS == "linux" && (c.Role == "worker" && !ValidWorkerUnit(filepath.Base(c.Service)) || c.Role != "worker" && (c.Role != "queue" || filepath.Base(c.Service) != "myce-queue.service")) {
 		return errors.New("refusing non-Mycelium service unit")
 	}
@@ -738,9 +738,6 @@ func (c ServiceConfig) Args() []string {
 	args := []string{}
 	if c.Role == "queue" {
 		args = []string{"queue", "--listen", c.Listen, "--db", c.DB, "--checkpoints", c.Checkpoints}
-		if c.LocalDisableReceipts {
-			args = append(args, "--local-disable-receipts", "--host-id", c.HostID, "--host-state-dir", c.HostStateDir)
-		}
 	} else {
 		args = []string{"join", "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}

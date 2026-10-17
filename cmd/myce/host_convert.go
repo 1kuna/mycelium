@@ -19,7 +19,7 @@ func hostConvertCommand(args []string, out io.Writer) error {
 	dry := f.Bool("dry-run", false, "inventory only; do not publish state")
 	apply := f.Bool("apply", false, "preserve originals and publish validated state offline")
 	queues := map[string]string{}
-	f.Func("queue-db", "repeat QUEUE_URL=OFFLINE_DB for every referenced queue", func(value string) error {
+	f.Func("queue-db", "repeat QUEUE_URL=OFFLINE_DB for every referenced or forgotten queue", func(value string) error {
 		queue, path, ok := strings.Cut(value, "=")
 		if !ok || queue == "" || path == "" {
 			return errors.New("queue-db requires QUEUE_URL=OFFLINE_DB")
