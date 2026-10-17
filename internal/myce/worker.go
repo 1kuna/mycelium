@@ -707,6 +707,14 @@ func (w Worker) Run(stop context.Context) error {
 	if err = s.save(); err != nil {
 		return err
 	}
+	// Startup may rotate an idle session after orphan recovery. Persist that
+	// exact session under the admission fence before its first queue check-in.
+	if err = w.registerHost(s); err != nil {
+		if errors.Is(err, errHostDisabled) {
+			return nil
+		}
+		return err
+	}
 	if w.ModelConfig.Idle <= 0 {
 		w.ModelConfig.Idle = 10 * time.Minute
 	}
@@ -1254,6 +1262,15 @@ func (w Worker) Run(stop context.Context) error {
 							s.state.Session = ID()
 							s.state.Fresh = true
 							w.Machine.Session = s.state.Session
+							if e := s.save(); e != nil {
+								return e
+							}
+							if e := w.registerHost(s); e != nil {
+								if errors.Is(e, errHostDisabled) {
+									return nil
+								}
+								return e
+							}
 							eventCancel()
 							sessionCtx, sessionCancel := context.WithCancel(context.Background())
 							defer sessionCancel()

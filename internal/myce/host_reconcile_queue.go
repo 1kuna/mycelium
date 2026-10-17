@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -30,7 +29,6 @@ type HostExchange struct {
 	Reason     string        `json:"reason"`
 	LastClose  *HostClose    `json:"last_close"`
 	Sessions   []HostSession `json:"discharged_sessions"`
-	Results    []Result      `json:"results"`
 }
 type HostAcknowledgement struct {
 	Host string `json:"host_id"`
@@ -208,38 +206,6 @@ func (q *Queue) reconcileHost(c HostExchange) (HostAcknowledgement, error) {
 			}
 		}
 	}
-	releaseKeys := map[string]bool{}
-	for _, p := range releases {
-		releaseKeys[obligationKey(p)] = true
-	}
-	for _, r := range c.Results {
-		if (!releaseKeys[obligationKey(HostObligation{Result: r})] && !hasReleased(old.Released, obligationKey(HostObligation{Result: r}))) || r.ReleasePending {
-			return zero, errors.New("result lacks exact release coverage")
-		}
-		if q.executionHost(r.Machine) != c.Host {
-			return zero, errors.New("result host mismatch")
-		}
-		j := q.retainedJob(r.ID)
-		if j == nil {
-			return zero, errors.New("result has no saved job")
-		}
-		if j.FileTransport && r.Success && !r.Interrupted && !r.ReleaseOnly {
-			if len(j.Spec.Outputs) != len(r.OutputRefs) {
-				return zero, errors.New("complete output manifest required")
-			}
-			for name := range j.Spec.Outputs {
-				if _, ok := r.OutputRefs[name]; !ok {
-					return zero, errors.New("missing output")
-				}
-			}
-			if err := q.verifyManifest(context.Background(), r.OutputRefs); err != nil {
-				return zero, err
-			}
-		}
-		if err := q.complete(r); err != nil && !errors.Is(err, ErrStale) {
-			return zero, err
-		}
-	}
 	if c.Desired == "closed" {
 		for _, j := range q.s.Jobs {
 			if q.executionHost(j.Machine) != c.Host || j.State != "running" && j.State != "stopping" {
@@ -311,12 +277,16 @@ func (q *Queue) reconcileHost(c HostExchange) (HostAcknowledgement, error) {
 				q.retry(j, "requeued: host closed")
 				j.RequeuedByOperator = true
 			}
+			// The close interrupted this attempt. Its audit copy remains, but no
+			// current execution can accept a late result from that placement.
+			if current {
+				j.Machine, j.Session = "", ""
+			}
 		}
 	}
 	return HostAcknowledgement{Host: c.Host, HostRevision: c.HostRevision, Desired: c.Desired, Boot: c.Boot, Request: c.Request, Pending: q.hostObligations(c.Host), Covered: q.hostCoverage(c.Host)}, nil
 }
 
-func hasReleased(saved map[string]HostObligation, key string) bool { _, ok := saved[key]; return ok }
 func (q *Queue) hostCoverage(host string) []HostObligation {
 	out := []HostObligation{}
 	for _, p := range q.s.HostIntents[host].Released {
