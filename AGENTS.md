@@ -12,6 +12,8 @@
 - Checkpoints use `MYCE_CHECKPOINT_DIR`; assignments are NAS-relative and each
   worker configures its own local NAS root with `--checkpoint-root`.
 - Treat worker results as attempt-specific; reject stale executions.
+- No file or network I/O inside `q.mu`; output verification once stalled unrelated
+  host control transactions (maintainer disposition on #80).
 - Never expose or commit the fleet token. Jobs must not inherit `MYCE_TOKEN`.
 
 ## Map

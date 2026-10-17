@@ -34,6 +34,9 @@ func bestFileCheckpoint(j *Job) *FileCheckpoint {
 	return best
 }
 func (q *Queue) verifyManifest(ctx context.Context, m FileManifest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if q.files == nil {
 		return errors.New("file store unavailable")
 	}
@@ -47,7 +50,13 @@ func (q *Queue) verifyManifest(ctx context.Context, m FileManifest) error {
 	}
 	// A retry after a directory-sync failure must repeat the barrier, not infer
 	// durability from a visible blob name.
-	return q.files.syncDir(filepath.Join(q.files.root, "blobs"))
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := q.files.syncDir(filepath.Join(q.files.root, "blobs")); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) error {
 	if p.Checkpoint.Generation < 0 || len(p.Checkpoint.Files) == 0 {

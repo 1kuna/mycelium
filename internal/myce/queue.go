@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -879,9 +880,62 @@ func (q *Queue) current(r Result) (*Job, error) {
 	return j, nil
 }
 func (q *Queue) Complete(r Result) error {
-	return q.updateMachine(r.Machine, func() error { return q.complete(r) })
+	return q.CompleteContext(context.Background(), r)
 }
-func (q *Queue) complete(r Result) error {
+
+// CompleteContext keeps bulk output verification outside the queue transaction.
+// Only a current, publishable attempt needs verification; release acknowledgements
+// and interrupted or retransmitted results retain their normal handling.
+func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
+	q.mu.Lock()
+	j, err := q.current(r)
+	verify := err == nil && j.FileTransport && j.State == "running" && !cancelled(j) && r.Success && !r.Interrupted && !r.ReleaseOnly
+	var outputs map[string]string
+	var host string
+	var revision HostRevision
+	if verify {
+		host = q.executionHost(r.Machine)
+		verify = q.hostClosedReason(host) == "" && q.s.Machines[r.Machine] != nil && q.s.Machines[r.Machine].Session == r.Session
+		if verify {
+			outputs = maps.Clone(j.Spec.Outputs)
+			revision = q.s.HostIntents[host].HostRevision
+			r.OutputRefs = maps.Clone(r.OutputRefs)
+		}
+	}
+	q.mu.Unlock()
+	if verify {
+		if len(outputs) != len(r.OutputRefs) {
+			return errors.New("complete output manifest required")
+		}
+		for name := range outputs {
+			if _, ok := r.OutputRefs[name]; !ok {
+				return errors.New("missing output")
+			}
+		}
+		verificationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := q.verifyManifest(verificationCtx, r.OutputRefs); err != nil {
+			return err
+		}
+		ctx = verificationCtx
+	}
+	return q.updateMachine(r.Machine, func() error {
+		if verify {
+			q.maintainStartDeadlines()
+			j, err := q.current(r)
+			m := q.s.Machines[r.Machine]
+			if err != nil || j.State != "running" || cancelled(j) || m == nil || m.Session != r.Session ||
+				q.executionHost(r.Machine) != host || q.s.HostIntents[host].HostRevision != revision || q.hostClosedReason(host) != "" || !maps.Equal(j.Spec.Outputs, outputs) {
+				return ErrStale
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		return q.complete(r, verify)
+	})
+}
+func (q *Queue) complete(r Result, outputsVerified bool) error {
 	q.maintainStartDeadlines()
 	operatorMatched := q.refundOperatorStop(r)
 	if r.ReleaseOnly {
@@ -1004,18 +1058,8 @@ func (q *Queue) complete(r Result) error {
 		q.retry(j, "worker restarted after cleaning old processes")
 	} else if r.Success {
 		if j.FileTransport {
-			// Validate delivery only when accepting a current successful result.
-			// Superseded attempts are stale; interrupted attempts publish nothing.
-			if len(j.Spec.Outputs) != len(r.OutputRefs) {
-				return errors.New("complete output manifest required")
-			}
-			for name := range j.Spec.Outputs {
-				if _, ok := r.OutputRefs[name]; !ok {
-					return errors.New("missing output")
-				}
-			}
-			if err := q.verifyManifest(context.Background(), r.OutputRefs); err != nil {
-				return err
+			if !outputsVerified {
+				return ErrStale
 			}
 			j.OutputRefs = r.OutputRefs
 			j.OutputFiles = nil
