@@ -234,6 +234,15 @@ func TestDisableRecordedWorkerLifetimeAndPIDReuse(t *testing.T) {
 	if err = syscall.Kill(cmd.Process.Pid, 0); err != nil {
 		t.Fatal("reused unrelated worker PID was killed")
 	}
+	// A confirmed close is idempotent. Admit this new lifetime only after open.
+	testConfirmClose(t, root)
+	accepted, e := ReadHostIntent(root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = (HostControl{Dir: root, Expected: accepted.HostRevision}).Enable(context.Background()); e != nil {
+		t.Fatal(e)
+	}
 	saveWorkerJSON(root, "worker-test.json", HostWorker{State: t.TempDir(), PID: cmd.Process.Pid, Birth: birth})
 	if _, err = (HostControl{Dir: root}).Disable(context.Background(), "real worker", 0); err != nil {
 		t.Fatal(err)

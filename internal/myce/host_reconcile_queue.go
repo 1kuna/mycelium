@@ -13,23 +13,24 @@ import (
 // interpreting an empty payload as a blanket release.
 type QueueHostIntent struct {
 	HostRevision
-	Desired    string                    `json:"desired"`
-	Boot       string                    `json:"boot_id"`
-	Reason     string                    `json:"reason"`
-	AcceptedAt time.Time                 `json:"accepted_at"`
-	Released   map[string]HostObligation `json:"released,omitempty"`
+	Desired       string                    `json:"desired"`
+	Boot          string                    `json:"boot_id"`
+	Reason        string                    `json:"reason"`
+	AcceptedAt    time.Time                 `json:"accepted_at"`
+	Released      map[string]HostObligation `json:"released,omitempty"`
+	ClosedLeaving map[string]string         `json:"closed_leaving,omitempty"`
 }
 type HostExchange struct {
 	Host string `json:"host_id"`
 	HostRevision
-	Desired    string           `json:"desired"`
-	Boot       string           `json:"boot_id"`
-	Request    string           `json:"request_id"`
-	AcceptedAt time.Time        `json:"accepted_at"`
-	Reason     string           `json:"reason"`
-	LastClose  *HostClose       `json:"last_close"`
-	Released   []HostObligation `json:"released"`
-	Results    []Result         `json:"results"`
+	Desired    string        `json:"desired"`
+	Boot       string        `json:"boot_id"`
+	Request    string        `json:"request_id"`
+	AcceptedAt time.Time     `json:"accepted_at"`
+	Reason     string        `json:"reason"`
+	LastClose  *HostClose    `json:"last_close"`
+	Sessions   []HostSession `json:"discharged_sessions"`
+	Results    []Result      `json:"results"`
 }
 type HostAcknowledgement struct {
 	Host string `json:"host_id"`
@@ -106,7 +107,7 @@ func (q *Queue) hostObligations(host string) []HostObligation {
 }
 func (q *Queue) ReconcileHost(c HostExchange) (HostAcknowledgement, error) {
 	var ack HostAcknowledgement
-	err := q.update(func() error {
+	err := q.updateScoped(func() string { return c.Host }, false, func() error {
 		var err error
 		ack, err = q.reconcileHost(c)
 		if err == nil {
@@ -117,7 +118,14 @@ func (q *Queue) ReconcileHost(c HostExchange) (HostAcknowledgement, error) {
 		return err
 	})
 	if err != nil {
-		return HostAcknowledgement{}, err
+		q.mu.Lock()
+		revision := q.s.HostIntents[c.Host].HostRevision
+		q.mu.Unlock()
+		code := "host_reconcile_rejected"
+		if revision.Revision > c.Revision {
+			code = "host_revision_behind_queue"
+		}
+		return HostAcknowledgement{}, &hostReconcileError{cause: err, revision: revision, code: code}
 	}
 	return ack, nil
 }
@@ -135,21 +143,25 @@ func (q *Queue) reconcileHost(c HostExchange) (HostAcknowledgement, error) {
 			return zero, errors.New("previous_close_unsettled")
 		}
 	}
-	if c.Desired == "open" && len(c.Released) > 0 {
+	if c.Desired == "open" && len(c.Sessions) > 0 {
 		return zero, errors.New("open carries release evidence")
 	}
-	outstanding := map[string]HostObligation{}
-	for _, p := range q.hostObligations(c.Host) {
-		outstanding[obligationKey(p)] = p
-	}
-	// Validate all evidence before changing either intent or custody.
-	for _, p := range c.Released {
-		key := obligationKey(p)
-		if _, ok := outstanding[key]; !ok && !hasReleased(old.Released, key) {
-			return zero, errors.New("host release does not match saved execution")
+	var releases []HostObligation
+	for _, session := range c.Sessions {
+		if session.Machine == "" || session.Session == "" {
+			return zero, errors.New("incomplete session discharge")
 		}
-		if p.Result.ReleasePending {
-			return zero, errors.New("pending host release")
+		if savedHost := q.executionHost(session.Machine); savedHost != "" && savedHost != c.Host {
+			return zero, errors.New("session host mismatch")
+		}
+		for _, p := range q.hostObligations(c.Host) {
+			machine, savedSession := p.Result.Machine, p.Result.Session
+			if p.Engine != nil {
+				machine, savedSession = p.Engine.Machine, p.Engine.Session
+			}
+			if machine == session.Machine && savedSession == session.Session {
+				releases = mergeObligations(releases, []HostObligation{p})
+			}
 		}
 	}
 	if q.s.HostIntents == nil {
@@ -159,16 +171,24 @@ func (q *Queue) reconcileHost(c HostExchange) (HostAcknowledgement, error) {
 	if released == nil || c.Revision != old.Revision {
 		released = map[string]HostObligation{}
 	}
-	q.s.HostIntents[c.Host] = QueueHostIntent{HostRevision: c.HostRevision, Desired: c.Desired, Boot: c.Boot, Reason: c.Reason, AcceptedAt: c.AcceptedAt, Released: released}
+	closedLeaving := old.ClosedLeaving
+	if closedLeaving == nil {
+		closedLeaving = map[string]string{}
+	}
+	q.s.HostIntents[c.Host] = QueueHostIntent{ClosedLeaving: closedLeaving, HostRevision: c.HostRevision, Desired: c.Desired, Boot: c.Boot, Reason: c.Reason, AcceptedAt: c.AcceptedAt, Released: released}
 	for _, m := range q.s.Machines {
 		if hostID(m) != c.Host {
 			continue
 		}
 		m.Disabled = q.hostClosedReason(c.Host)
 		if c.Desired == "closed" {
+			if !m.Leaving {
+				closedLeaving[m.ID] = m.Session
+			}
 			m.Leaving = true
-		} else if old.Desired == "closed" {
+		} else if old.Desired == "closed" && closedLeaving[m.ID] == m.Session {
 			m.Leaving = false
+			delete(closedLeaving, m.ID)
 		}
 		if c.Desired == "closed" {
 			delete(q.unreported, m.ID)
@@ -189,11 +209,11 @@ func (q *Queue) reconcileHost(c HostExchange) (HostAcknowledgement, error) {
 		}
 	}
 	releaseKeys := map[string]bool{}
-	for _, p := range c.Released {
+	for _, p := range releases {
 		releaseKeys[obligationKey(p)] = true
 	}
 	for _, r := range c.Results {
-		if !releaseKeys[obligationKey(HostObligation{Result: r})] || r.ReleasePending {
+		if (!releaseKeys[obligationKey(HostObligation{Result: r})] && !hasReleased(old.Released, obligationKey(HostObligation{Result: r}))) || r.ReleasePending {
 			return zero, errors.New("result lacks exact release coverage")
 		}
 		if q.executionHost(r.Machine) != c.Host {
@@ -234,7 +254,7 @@ func (q *Queue) reconcileHost(c HostExchange) (HostAcknowledgement, error) {
 			}
 		}
 	}
-	for _, p := range c.Released {
+	for _, p := range releases {
 		released[obligationKey(p)] = p
 		if p.Engine != nil {
 			e := p.Engine
@@ -260,9 +280,14 @@ func (q *Queue) reconcileHost(c HostExchange) (HostAcknowledgement, error) {
 		}
 		// Planned cleanup refunds only the exact saved copy. Other attempts keep
 		// their infrastructure losses; host and queue wall clocks do not order them.
+		matched := false
 		for i := range j.Copies {
 			copy := &j.Copies[i]
-			if copy.Machine == r.Machine && copy.Session == r.Session && copy.Attempt == r.Attempt && copy.LossCharged {
+			if copy.Machine != r.Machine || copy.Session != r.Session || copy.Attempt != r.Attempt {
+				continue
+			}
+			matched = true
+			if copy.LossCharged {
 				j.Losses = max(0, j.Losses-1)
 				copy.LossCharged = false
 			}
@@ -271,7 +296,8 @@ func (q *Queue) reconcileHost(c HostExchange) (HostAcknowledgement, error) {
 			j.RequeuedByOperator = true
 		}
 		current := j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt
-		if current && (j.State == "running" || j.State == "stopping" || j.State == "queued" || j.Losses < 3 && strings.HasPrefix(j.Reason, "failed after 3 infrastructure losses:")) {
+		revive := matched && !cancelled(j) && j.State == "failed" && j.Losses < 3 && strings.HasPrefix(j.Reason, "failed after 3 infrastructure losses:")
+		if current && (j.State == "running" || j.State == "stopping" || j.State == "queued") || revive {
 			if cancelled(j) {
 				j.State = "cancelled"
 				j.StopAt = nil
@@ -279,6 +305,8 @@ func (q *Queue) reconcileHost(c HostExchange) (HostAcknowledgement, error) {
 				j.State = "failed"
 				j.Reason = "host closed"
 				j.StopAt = nil
+				now := q.clock.Now()
+				j.FinishedAt = &now
 			} else {
 				q.retry(j, "requeued: host closed")
 				j.RequeuedByOperator = true
@@ -309,5 +337,15 @@ func (q *Queue) hostCoverage(host string) []HostObligation {
 			add(r.Job)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return obligationKey(out[i]) < obligationKey(out[j]) })
 	return out
 }
+
+type hostReconcileError struct {
+	cause    error
+	code     string
+	revision HostRevision
+}
+
+func (e *hostReconcileError) Error() string { return e.code }
+func (e *hostReconcileError) Unwrap() error { return e.cause }

@@ -694,7 +694,7 @@ func (q *Queue) modelPlan(machine string) []ModelSlot {
 	return out
 }
 func (q *Queue) addCall(c *ModelCall) error {
-	return q.update(func() error {
+	return q.updateScoped(nil, true, func() error {
 		if _, ok := q.model(c.Model); !ok {
 			return errors.New("unknown model")
 		}
@@ -846,7 +846,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		var call ModelCall
 		var target string
 		var timedOut, requestExpired, engineLost bool
-		e = a.Queue.update(func() error {
+		e = a.Queue.updateScoped(nil, true, func() error {
 			a.Queue.maintain()
 			call = *a.Queue.calls[c.ID]
 			timedOut = a.Queue.clock.Now().Sub(call.Queued) >= a.Queue.models.Wait
@@ -1103,7 +1103,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (q *Queue) retryCall(id string) error {
-	return q.update(func() error {
+	return q.updateScoped(nil, true, func() error {
 		live := q.calls[id]
 		if live == nil {
 			return errors.New("model call no longer active")

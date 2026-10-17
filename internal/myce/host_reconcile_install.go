@@ -11,7 +11,7 @@ func (c ServiceConfig) HostReconcileServiceText() string {
 	if dir == "" {
 		dir, _ = HostStateDirectory()
 	}
-	return "[Unit]\nDescription=Mycelium host reconciliation\nAfter=network-online.target\n\n[Service]\nType=oneshot\nExecStart=:" + unitQuote(c.Binary) + " host reconcile --local --host-state-dir " + unitQuote(dir) + " --timeout 30s\nTimeoutStartSec=35s\nUMask=0077\n"
+	return "[Unit]\nDescription=Mycelium host reconciliation\nAfter=network-online.target\n\n[Service]\nType=oneshot\nExecStart=:" + unitQuote(c.Binary) + " host reconcile --local --config " + unitQuote(c.Config) + " --state-dir " + unitQuote(dir) + " --timeout 30s\nTimeoutStartSec=35s\nUMask=0077\n"
 }
 
 const hostReconcileTimerText = "[Unit]\nDescription=Converge Mycelium host intent with its queues\n\n[Timer]\nOnBootSec=5s\nOnUnitInactiveSec=5s\nUnit=myce-host-reconcile.service\n\n[Install]\nWantedBy=timers.target\n"

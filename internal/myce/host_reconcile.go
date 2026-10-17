@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -37,7 +38,7 @@ func readHostBootID() (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 func previousCloseSettled(s HostIntent) error {
-	if s.LastClose == nil || s.LastClose.Settlement != "confirmed" || s.LastClose.SettledAt == nil || len(s.Pending) > 0 || len(s.Holds) > 0 {
+	if s.LastClose == nil || s.LastClose.Settlement != "confirmed" || s.LastClose.SettledAt == nil || len(s.Pending) > 0 || blockingHostHolds(s.Holds) {
 		return errors.New("previous_close_unsettled")
 	}
 	if s.LastClose.HostRevision != s.HostRevision {
@@ -64,8 +65,13 @@ func mutateHostIntent(dir string, revision HostRevision, fn func(*HostIntent) er
 	if s.HostRevision != revision {
 		return ErrHostRevision
 	}
+	before, _ := json.Marshal(s)
 	if err = fn(&s); err != nil {
 		return err
+	}
+	after, _ := json.Marshal(s)
+	if bytes.Equal(before, after) {
+		return nil
 	}
 	return atomicHostJSON(dir, hostStateFile, s, nil)
 }
@@ -85,64 +91,94 @@ func mergeObligations(a, b []HostObligation) []HostObligation {
 	return out
 }
 
-// Read both state and durable attempt/result files. A service may complete and
-// clear state.json during Stop; neither its initial nor its final snapshot alone
-// is a complete inventory.
-func hostCustody(workers []HostWorker) ([]HostObligation, []Result, error) {
+// Local files are undelivered results, never the proof of session release.
+func hostCustody(workers []HostWorker) ([]HostObligation, []Result, []string, error) {
 	var obligations []HostObligation
 	var results []Result
+	var holds []string
 	for _, w := range workers {
 		if w.Queue == "" {
 			continue
 		}
-		paths := []string{filepath.Join(w.State, "state.json")}
-		for _, pattern := range []string{"attempt-*.json", "*.result.json", "*.docker.json"} {
-			more, err := filepath.Glob(filepath.Join(w.State, pattern))
-			if err != nil {
-				return nil, nil, err
+		if _, err := os.Stat(w.State); errors.Is(err, os.ErrNotExist) {
+			holds = append(holds, "missing_worker_spool")
+			continue
+		} else if err != nil {
+			return nil, nil, nil, err
+		}
+		var st workerState
+		b, err := os.ReadFile(filepath.Join(w.State, "state.json"))
+		if err == nil {
+			err = json.Unmarshal(b, &st)
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, nil, nil, err
+		}
+		add := func(r Result) {
+			if r.ID != "" && r.Attempt > 0 && r.Machine == w.Name && r.Session != "" {
+				obligations = mergeObligations(obligations, []HostObligation{{Queue: w.Queue, Result: r}})
 			}
-			paths = append(paths, more...)
+		}
+		currentResult := ""
+		if st.Job != nil {
+			add(Result{Machine: w.Name, Session: st.Session, Execution: Execution{ID: st.Job.ID, Attempt: st.Job.Attempt}})
+			currentResult = st.Identity + ".result.json"
+			r := st.Result
+			if r == nil && st.Identity != "" {
+				if b, e := os.ReadFile(filepath.Join(w.State, currentResult)); e == nil {
+					var saved Result
+					if e = json.Unmarshal(b, &saved); e != nil {
+						return nil, nil, nil, e
+					}
+					r = &saved
+				} else if !errors.Is(e, os.ErrNotExist) {
+					return nil, nil, nil, e
+				}
+			}
+			if r != nil && r.ID == st.Job.ID && r.Attempt == st.Job.Attempt && r.Machine == w.Name && r.Session == st.Session {
+				add(*r)
+				results = append(results, *r)
+			}
+		}
+		paths, err := filepath.Glob(filepath.Join(w.State, "*.docker.json"))
+		if err != nil {
+			return nil, nil, nil, err
 		}
 		for _, path := range paths {
-			b, err := os.ReadFile(path)
-			if errors.Is(err, os.ErrNotExist) && filepath.Base(path) == "state.json" {
-				continue
+			b, e := os.ReadFile(path)
+			if e != nil {
+				return nil, nil, nil, e
 			}
-			if err != nil {
-				return nil, nil, err
+			var d dockerExecution
+			if e = json.Unmarshal(b, &d); e != nil {
+				return nil, nil, nil, e
 			}
-			var r *Result
-			if strings.HasSuffix(path, ".result.json") {
-				var result Result
-				if err = json.Unmarshal(b, &result); err != nil {
-					return nil, nil, err
-				}
-				r = &result
-			} else if strings.HasSuffix(path, ".docker.json") {
-				var d dockerExecution
-				if err = json.Unmarshal(b, &d); err != nil {
-					return nil, nil, err
-				}
-				r = d.Owner
-			} else {
-				var st workerState
-				if err = json.Unmarshal(b, &st); err != nil {
-					return nil, nil, err
-				}
-				r = st.Result
-				if st.Job != nil {
-					obligations = mergeObligations(obligations, []HostObligation{{Queue: w.Queue, Result: Result{Machine: w.Name, Session: st.Session, Execution: Execution{ID: st.Job.ID, Attempt: st.Job.Attempt}}}})
-				}
+			if !d.Released && d.Owner != nil {
+				add(*d.Owner)
 			}
-			if r != nil && r.ID != "" && r.Attempt > 0 && r.Machine == w.Name && r.Session != "" {
-				obligations = mergeObligations(obligations, []HostObligation{{Queue: w.Queue, Result: Result{Machine: r.Machine, Session: r.Session, Execution: r.Execution}}})
-				if strings.HasSuffix(path, ".result.json") {
-					results = append(results, *r)
-				}
+		}
+		paths, err = filepath.Glob(filepath.Join(w.State, "*.result.json"))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		for _, path := range paths {
+			if filepath.Base(path) != currentResult {
+				holds = append(holds, "diagnostic:historical_result")
 			}
 		}
 	}
-	return obligations, results, nil
+	return obligations, results, holds, nil
+}
+func blockingHostHolds(holds []string) bool {
+	for _, hold := range holds {
+		if !strings.HasPrefix(hold, "diagnostic:") {
+			return true
+		}
+	}
+	return false
+}
+func localExclusionConfirmed(s HostIntent, boot string) bool {
+	return s.LocalExclusion != nil && s.LocalExclusion.Confirmed && s.LocalExclusion.Boot == boot && s.LocalExclusion.HostRevision == s.HostRevision
 }
 func newHostExchange(s HostIntent, boot string) HostExchange {
 	return HostExchange{Host: s.Host, HostRevision: s.HostRevision, Desired: s.Desired, Boot: boot, Request: ID(), AcceptedAt: s.AcceptedAt, Reason: s.Reason, LastClose: s.LastClose}
@@ -168,33 +204,48 @@ func saveHostAck(dir, queue string, c HostExchange, a HostAcknowledgement, clock
 		if s.QueueAcks == nil {
 			s.QueueAcks = map[string]HostAcknowledgement{}
 		}
+		a.Request = "" // The nonce is validated, not heartbeat-persisted.
 		s.QueueAcks[queue] = a
-		covered := map[string]bool{}
-		for _, p := range a.Covered {
-			covered[obligationKey(p)] = true
+		if s.QueueObserved[queue].Revision <= s.Revision {
+			delete(s.QueueObserved, queue)
 		}
-		pending := s.Pending[:0]
+		for _, p := range mergeObligations(s.Pending, localCustody(s)) {
+			if p.Queue != queue {
+				continue
+			}
+			matched := false
+			for _, q := range append(slices.Clone(a.Covered), a.Pending...) {
+				matched = matched || obligationKey(p) == obligationKey(q)
+			}
+			if !matched && !slices.Contains(s.Holds, "diagnostic:unmatched_local_custody") {
+				s.Holds = append(s.Holds, "diagnostic:unmatched_local_custody")
+			}
+		}
+		pending := []HostObligation{}
 		for _, p := range s.Pending {
-			if p.Queue != queue || !covered[obligationKey(p)] {
+			if p.Queue != queue {
 				pending = append(pending, p)
 			}
 		}
-		s.Pending = pending
 		for _, p := range a.Pending {
 			p.Queue = queue
-			s.Pending = mergeObligations(s.Pending, []HostObligation{p})
+			pending = mergeObligations(pending, []HostObligation{p})
 		}
+		s.Pending = pending
 		if s.Desired != "closed" {
 			return nil
 		}
 		if s.LastClose == nil {
 			s.LastClose = &HostClose{HostRevision: s.HostRevision, Settlement: "pending"}
 		}
+		if s.LastClose.Settlement == "confirmed" && len(s.Pending) == 0 && !blockingHostHolds(s.Holds) {
+			return nil
+		}
 		priorSettledAt := s.LastClose.SettledAt
 		s.LastClose.Settlement = "pending"
 		s.LastClose.SettledAt = nil
 		local := s.LocalExclusion
-		if local == nil || !local.Confirmed || local.Boot != c.Boot || local.HostRevision != c.HostRevision || len(s.Pending) > 0 || len(s.Holds) > 0 {
+		if local == nil || !local.Confirmed || local.Boot != c.Boot || local.HostRevision != c.HostRevision || len(s.Pending) > 0 || blockingHostHolds(s.Holds) {
 			return nil
 		}
 		queues, err := (HostControl{Dir: dir}).Queues()
@@ -224,6 +275,13 @@ func saveHostAck(dir, queue string, c HostExchange, a HostAcknowledgement, clock
 // Cleanup is supplied by the host control path, independently of queue reachability.
 // Each queue returns its exact obligations before any release is offered.
 func ReconcileHostLocal(ctx context.Context, dir string, clock Clock, client func(string) (Client, error)) error {
+	s, err := ReadHostIntent(dir)
+	if err != nil {
+		return err
+	}
+	if hostOpenConverged(s) {
+		return nil
+	}
 	if clock == nil {
 		return errors.New("clock required")
 	}
@@ -239,7 +297,7 @@ func ReconcileHostLocal(ctx context.Context, dir string, clock Clock, client fun
 	if err != nil {
 		return err
 	}
-	s, err := ReadHostIntent(dir)
+	s, err = ReadHostIntent(dir)
 	if err != nil {
 		return err
 	}
@@ -279,6 +337,10 @@ func reconcileHostClient(ctx context.Context, dir, boot string, clock Clock, wor
 	return reconcileHostEndpoint(dir, client.URL, boot, clock, workers, func(request HostExchange) (HostAcknowledgement, error) {
 		var ack HostAcknowledgement
 		err := client.Call(ctx, "POST", "/api/hosts/"+request.Host+"/reconcile", request, &ack)
+		var rejected *HTTPError
+		if errors.As(err, &rejected) {
+			observeHostQueueRevision(dir, request, client.URL, rejected.QueueRevision)
+		}
 		return ack, err
 	})
 }
@@ -325,6 +387,9 @@ func (q *Queue) ConfigureLocalHost(dir, endpoint string) error {
 	}
 	q.mu.Lock()
 	q.localHostDir, q.localHostQueue = dir, endpoint
+	if s, e := ReadHostIntent(dir); e == nil {
+		q.localHostID = s.Host
+	}
 	q.mu.Unlock()
 	return nil
 }
@@ -344,6 +409,7 @@ func (q *Queue) reconcileLocalAdmission() (func() error, error) {
 		}
 		return nil, err
 	}
+	q.localHostID = s.Host
 	boot, err := HostBootID()
 	if err != nil {
 		return nil, err
@@ -358,6 +424,7 @@ func (q *Queue) reconcileLocalAdmission() (func() error, error) {
 	}
 	ack, err := q.reconcileHost(request)
 	if err != nil {
+		observeHostQueueRevision(q.localHostDir, request, q.localHostQueue, q.s.HostIntents[s.Host].HostRevision)
 		return nil, err
 	}
 	return func() error {
@@ -391,43 +458,28 @@ func HostQueueClient(workers []HostWorker, token string) func(string) (Client, e
 }
 
 func hostReleaseEvidence(request *HostExchange, s HostIntent, endpoint, boot string, pending []HostObligation, workers []HostWorker) error {
-	if s.Desired != "closed" || s.LocalExclusion == nil || !s.LocalExclusion.Confirmed || s.LocalExclusion.Boot != boot || s.LocalExclusion.HostRevision != s.HostRevision {
+	if s.Desired != "closed" || !localExclusionConfirmed(s, boot) {
 		return nil
 	}
-	known := map[string]bool{}
-	for _, p := range s.LocalExclusion.Released {
-		if p.Queue == endpoint {
-			known[obligationKey(p)] = true
-		}
-	}
-	for _, p := range pending {
-		covered := known[obligationKey(p)]
-		// A completed full worker cleanup also covers its session's preparations
-		// and engine slots, whose exact attempts come from the queue, never a host-wide clear.
-		if p.Engine != nil || p.Preparation {
-			for _, w := range workers {
-				machine, session := p.Result.Machine, p.Result.Session
-				if p.Engine != nil {
-					machine, session = p.Engine.Machine, p.Engine.Session
-				}
-				if w.Queue == endpoint && w.Name == machine && w.Session == session {
-					covered = true
-				}
+	for _, session := range s.LocalExclusion.Sessions {
+		for _, w := range workers {
+			if w.Queue == endpoint && w.Host == s.Host && w.Name == session.Machine {
+				request.Sessions = append(request.Sessions, session)
+				break
 			}
 		}
-		if covered {
-			request.Released = append(request.Released, p)
-		}
 	}
-	_, results, err := hostCustody(workers)
+	_, results, _, err := hostCustody(workers)
 	if err != nil {
 		return err
 	}
 	for _, r := range results {
-		for _, p := range request.Released {
-			if p.Engine == nil && p.Result.ID == r.ID && p.Result.Machine == r.Machine && p.Result.Session == r.Session && p.Result.Attempt == r.Attempt {
-				// The saved result can predate this successful cleanup retry.
-				// Current exact exclusion evidence supersedes its pending flag.
+		matched := false
+		for _, p := range pending {
+			matched = matched || p.Engine == nil && obligationKey(p) == obligationKey(HostObligation{Result: r})
+		}
+		for _, session := range request.Sessions {
+			if matched && session.Machine == r.Machine && session.Session == r.Session {
 				r.ReleasePending = false
 				request.Results = append(request.Results, r)
 				break
@@ -435,4 +487,44 @@ func hostReleaseEvidence(request *HostExchange, s HostIntent, endpoint, boot str
 		}
 	}
 	return nil
+}
+
+func localCustody(s *HostIntent) []HostObligation {
+	if s.LocalExclusion != nil {
+		return s.LocalExclusion.Released
+	}
+	return nil
+}
+
+func hostStatusCode(s HostIntent) string {
+	for _, revision := range s.QueueObserved {
+		if revision.Revision > s.Revision {
+			return "host_revision_behind_queue"
+		}
+	}
+	return ""
+}
+func hostOpenConverged(s HostIntent) bool {
+	if s.Desired != "open" || s.HostSettlement() != "confirmed" || len(s.QueueObserved) > 0 || len(s.QueueAcks) == 0 {
+		return false
+	}
+	for _, ack := range s.QueueAcks {
+		if ack.HostRevision != s.HostRevision || ack.Desired != "open" {
+			return false
+		}
+	}
+	return true
+}
+
+func observeHostQueueRevision(dir string, request HostExchange, queue string, revision HostRevision) {
+	if revision.Revision <= request.Revision {
+		return
+	}
+	_ = mutateHostIntent(dir, request.HostRevision, func(s *HostIntent) error {
+		if s.QueueObserved == nil {
+			s.QueueObserved = map[string]HostRevision{}
+		}
+		s.QueueObserved[queue] = revision
+		return nil
+	})
 }

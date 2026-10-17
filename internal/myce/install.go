@@ -495,8 +495,10 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 				return err
 			}
 		}
-		if err = installHostReconcileTimer(ctx, c, command); err != nil {
-			return err
+		if c.Role == "worker" {
+			if err = installHostReconcileTimer(ctx, c, command); err != nil {
+				return err
+			}
 		}
 		if c.StartDisabled {
 			_, err = command(ctx, "systemctl", "--user", "enable", filepath.Base(c.Service))

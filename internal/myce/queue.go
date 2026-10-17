@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -61,6 +62,8 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	localHostID     string
+	localHostErr    error
 	localHostDir    string
 	localHostQueue  string
 	files           *FileStore
@@ -266,7 +269,11 @@ func (q *Queue) Close() error {
 }
 
 // Every mutation is atomic and durable; failed writes restore the previous state.
-func (q *Queue) update(fn func() error) error {
+func (q *Queue) update(fn func() error) error { return q.updateScoped(nil, false, fn) }
+func (q *Queue) updateMachine(machine string, fn func() error) error {
+	return q.updateScoped(func() string { return q.executionHost(machine) }, false, fn)
+}
+func (q *Queue) updateScoped(host func() string, admission bool, fn func() error) error {
 	available := true
 	if !q.simulation {
 		available, _ = q.nasProbe.run(q.root, func() (bool, error) {
@@ -297,7 +304,20 @@ func (q *Queue) update(fn func() error) error {
 	oldQuiet := q.networkQuiet
 	q.usageWrites = nil
 	q.accountUsage(q.clock.Now())
-	afterCommit, err := q.reconcileLocalAdmission()
+	var afterCommit func() error
+	var err error
+	if admission || host != nil && q.localHostID != "" && host() == q.localHostID {
+		localState, _ := json.Marshal(q.s)
+		afterCommit, err = q.reconcileLocalAdmission()
+		q.localHostErr = err
+		if err != nil {
+			log.Printf("local host admission fenced; retry on Tick: %v", err)
+			q.s = state{}
+			_ = json.Unmarshal(localState, &q.s)
+			q.calls, q.unreported, q.networkQuiet = oldCalls, oldUnreported, oldQuiet
+			err = nil
+		}
+	}
 	if err == nil {
 		err = fn()
 	}
@@ -321,7 +341,9 @@ func (q *Queue) update(fn func() error) error {
 		_ = json.Unmarshal(old, &q.s)
 	}
 	if err == nil && afterCommit != nil {
-		return afterCommit()
+		if ackErr := afterCommit(); ackErr != nil {
+			log.Printf("local host acknowledgement pending; retry on Tick: %v", ackErr)
+		}
 	}
 	return err
 }
@@ -336,7 +358,7 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 		return nil, err
 	}
 	var out Job
-	err = q.update(func() error {
+	err = q.updateScoped(nil, true, func() error {
 		q.maintainSubmissions()
 		existing, err := q.existingSubmission(s, fingerprint)
 		if err != nil {
@@ -525,7 +547,7 @@ func (q *Queue) maintain() {
 	}
 }
 func (q *Queue) Tick() error {
-	if err := q.update(func() error { q.maintain(); return nil }); err != nil {
+	if err := q.updateScoped(nil, true, func() error { q.maintain(); return nil }); err != nil {
 		return err
 	}
 	return q.pruneBatchLogs()
@@ -559,7 +581,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			})
 		}
 	}
-	err := q.update(func() error {
+	err := q.updateScoped(func() string { return hostID(&c.Machine) }, false, func() error {
 		m := cloneMachine(&c.Machine)
 		m.Disabled = q.hostClosedReason(hostID(&m))
 		if progressErr != nil {
@@ -678,7 +700,12 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			if a := machineAvailability(&m); a != nil && !a.Available {
 				m.AdmissionReason = a.Reason
 			}
-			reply.AdmissionBlocked = availabilityBlocked(&m) || m.HostMemoryBudgetStatus() != ""
+			localBlocked := hostID(&m) == q.localHostID && q.localHostErr != nil
+			reply.AdmissionBlocked = availabilityBlocked(&m) || m.HostMemoryBudgetStatus() != "" || localBlocked
+			if localBlocked {
+				reply.Job = nil
+				return
+			}
 			reply.EnvironmentPlan = q.environmentPlan(&m)
 			reply.ModelPlan = q.modelPlan(m.ID)
 			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
@@ -875,7 +902,7 @@ func (q *Queue) Complete(r Result) error {
 			}
 		}
 	}
-	return q.update(func() error { return q.complete(r) })
+	return q.updateMachine(r.Machine, func() error { return q.complete(r) })
 }
 func (q *Queue) complete(r Result) error {
 	q.maintainStartDeadlines()
@@ -967,6 +994,10 @@ func (q *Queue) complete(r Result) error {
 		}
 		if cancelled(j) {
 			j.State = "cancelled"
+			j.StopAt = nil
+		} else if j.Spec.Priority == "production" && q.hostClosedReason(q.executionHost(j.Machine)) != "" {
+			j.State = "failed"
+			j.Reason = "host closed"
 			j.StopAt = nil
 		} else {
 			q.retry(j, j.Reason)
@@ -1372,7 +1403,7 @@ func (q *Queue) markStarted(j *Job) {
 }
 func (q *Queue) Started(r Result) error {
 	var rejected error
-	err := q.update(func() error {
+	err := q.updateMachine(r.Machine, func() error {
 		q.maintainStartDeadlines()
 		j, e := q.current(r)
 		if e != nil {

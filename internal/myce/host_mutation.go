@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strconv"
 )
@@ -171,9 +172,40 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 		if x.Reconcile == nil {
 			return result, ErrHostReconcileUnavailable
 		}
-		if e := x.Reconcile(ctx, v); e != nil {
+		s, e := ReadHostIntent(v.StateDir)
+		if e != nil {
 			return result, e
 		}
+		if hostOpenConverged(s) && len(s.Errors) == 0 {
+			return HostMutationResult{HostRevision: s.HostRevision, Desired: s.Desired}, nil
+		}
+		boot, e := HostBootID()
+		if e != nil {
+			return result, e
+		}
+		var cleanupErr error
+		if s.Desired == "closed" && !localExclusionConfirmed(s, boot) {
+			h.CloseExpected = &s.HostRevision
+			_, cleanupErr = h.Disable(ctx, s.Reason, 0)
+		}
+		reconcileErr := x.Reconcile(ctx, v)
+		current, e := ReadHostIntent(v.StateDir)
+		if e != nil {
+			return result, e
+		}
+		var codes []string
+		if cleanupErr != nil {
+			codes = append(codes, "local_exclusion_unconfirmed")
+		}
+		if reconcileErr != nil {
+			codes = append(codes, "host_reconcile_pending")
+		}
+		if e = mutateHostIntent(v.StateDir, current.HostRevision, func(s *HostIntent) error { s.Errors = codes; return nil }); e != nil {
+			return result, e
+		}
+		result = HostMutationResult{HostRevision: current.HostRevision, Desired: current.Desired, Errors: codes, Code: hostStatusCode(current)}
+		return result, errors.Join(cleanupErr, reconcileErr)
+
 	}
 	s, e := ReadHostIntent(v.StateDir)
 	if e != nil {

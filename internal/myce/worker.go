@@ -1094,7 +1094,8 @@ func (w Worker) Run(stop context.Context) error {
 				disableCancel()
 				continue
 			}
-			err = reconcileWorkerHost(ctx, w.HostStateDir, w.Clock, w.Client)
+			reconcileErr := reconcileWorkerHost(ctx, w.HostStateDir, w.Clock, w.Client)
+			err = reconcileErr
 			if err == nil {
 				err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running"), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
 			}
@@ -1342,7 +1343,7 @@ func (w Worker) Run(stop context.Context) error {
 				environments.sync(nil, true)
 				rt.cancelCopies()
 				var he *HTTPError
-				if errors.As(err, &he) && (he.Status == 400 || he.Status == 401) {
+				if reconcileErr == nil && errors.As(err, &he) && (he.Status == 400 || he.Status == 401) {
 					return err
 				}
 				log.Printf("worker %s reconnecting: %v", m.ID, err)
