@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -241,7 +242,14 @@ func TestProductionHoldWorkerLoss(t *testing.T) {
 	}
 	_ = y
 }
+
+// Reopening restores real NAS probes. Fake their I/O budget too, so disk/CPU
+// latency cannot masquerade as a lost cooldown while scheduling uses c.
 func TestProductionHoldRestartDuringReclaimAndCooldown(t *testing.T) {
+	synctest.Test(t, testProductionHoldRestartDuringReclaimAndCooldown)
+}
+
+func testProductionHoldRestartDuringReclaimAndCooldown(t *testing.T) {
 	q, c, a, b, _ := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, a, nil).Job
