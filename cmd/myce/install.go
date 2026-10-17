@@ -408,9 +408,8 @@ func serviceCommand(args []string) error {
 			unit = filepath.Base(c.Service)
 		}
 		if unit != "" {
-			dir, err = myce.WorkerUnitDirectory(dir, unit)
-			if err != nil {
-				return err
+			if !myce.ValidWorkerUnit(unit) {
+				return errors.New("invalid worker unit")
 			}
 		}
 		reason, err := myce.HostDisabled(dir)

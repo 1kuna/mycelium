@@ -292,14 +292,14 @@ func TestEngineRecoveryRejectedUnsafeCallRetries(t *testing.T) {
 			recoveryReport(t, q, m, s, "ready")
 			q.finishCall(warm.ID)
 			var forwards atomic.Int32
-			rejected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rejected := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				// Race the rejection receipt with the heartbeat withdrawing this attempt.
 				recoveryReport(t, q, m, s, "failed")
 				w.Header().Set("X-Myce-Engine-Rejected", r.Header.Get("X-Myce-Engine-Attempt"))
 				w.WriteHeader(503)
 			}))
 			defer rejected.Close()
-			other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { forwards.Add(1); fmt.Fprint(w, "accepted") }))
+			other := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { forwards.Add(1); fmt.Fprint(w, "accepted") }))
 			defer other.Close()
 			m.ModelURL = rejected.URL
 			check(t, q, m, nil)

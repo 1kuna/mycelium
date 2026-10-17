@@ -111,17 +111,17 @@ func TestInstanceSystemdCgroup(t *testing.T) {
 	}
 }
 
-func TestInstanceRegistryRegistersBothScopes(t *testing.T) {
+func TestInstanceRegistryUsesSharedHostScope(t *testing.T) {
 	dir := t.TempDir()
 	unit := "myce-worker@gpu1.service"
-	scoped, _ := WorkerUnitDirectory(dir, unit)
+	scoped := dir
 	w := Worker{Unit: unit, HostStateDir: scoped, Machine: Machine{ID: "gpu1", HostID: "host"}, EnvironmentRoot: t.TempDir()}
 	s := &workerStore{dir: t.TempDir()}
-	ensureTestHost(t, w.HostStateDir, w.Clock)
+	ensureTestHost(t, w.HostStateDir, w.Clock, "host")
 	if err := w.registerHost(s); err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range []string{dir, scoped} {
+	for _, d := range []string{dir} {
 		got, err := WorkerUnits(d, unit)
 		if err != nil || len(got) != 1 {
 			t.Fatal(got, err)
@@ -131,7 +131,7 @@ func TestInstanceRegistryRegistersBothScopes(t *testing.T) {
 
 func TestInstanceDockerUsesOnlySavedAttemptLabels(t *testing.T) {
 	w, s, clock, root := dockerFixture(t)
-	scoped, _ := WorkerUnitDirectory(w.HostStateDir, "myce-worker@gpu1.service")
+	scoped := w.HostStateDir
 	os.MkdirAll(scoped, 0700)
 	for name, value := range map[string]string{"created": "id1", "running": "yes", "label": "owned", "mode": "term"} {
 		os.WriteFile(filepath.Join(root, name), []byte(value), 0600)

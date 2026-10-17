@@ -103,7 +103,7 @@ func TestProductionStartDeadlineBlockers(t *testing.T) {
 				}
 				submit(t, q, s)
 				experiment = check(t, q, m, nil).Job
-			} else if err := q.DisableHost("b70", "disabled by operator", false); err != nil {
+			} else if err := closeQueueHost(q, "b70", "disabled by operator", nil); err != nil {
 				t.Fatal(err)
 			}
 			s := spec("production")
@@ -402,7 +402,7 @@ func TestProductionStartDeadlineDisabledFleetFailsPromptly(t *testing.T) {
 			if alternate != "" {
 				check(t, q, machine("other", alternate), nil)
 			}
-			if err := q.DisableHost("b70", "maintenance", true); err != nil {
+			if err := closeQueueHost(q, "b70", "maintenance", nil); err != nil {
 				t.Fatal(err)
 			}
 			s := spec("production")
@@ -465,7 +465,7 @@ func TestProductionStartDeadlineWorkerSendsRejectedResultCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	completed := make(chan Result, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		switch req.URL.Path {
 		case "/api/workers/checkin":
 			var c Checkin

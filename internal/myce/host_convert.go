@@ -53,10 +53,14 @@ type HostConversionManifest struct {
 	Intent     HostIntent             `json:"target"`
 }
 
+type legacyHostWorker struct {
+	HostWorker
+	Generation uint64 `json:"generation"`
+}
 type hostReceipt struct {
-	Generation       uint64       `json:"generation"`
-	Workers          []HostWorker `json:"workers"`
-	EnableGeneration uint64       `json:"enable_generation,omitempty"`
+	Generation       uint64             `json:"generation"`
+	Workers          []legacyHostWorker `json:"workers"`
+	EnableGeneration uint64             `json:"enable_generation,omitempty"`
 }
 
 type forgottenQueues struct {
@@ -100,7 +104,7 @@ func ConvertHostControl(o HostConversionOptions) (HostConversionManifest, error)
 		queuePaths[endpoint] = absolute
 	}
 	o.QueueDatabases = queuePaths
-	if unitParent(dir) != "" {
+	if legacyUnitParent(dir) != "" {
 		return m, errors.New("convert the whole host, not a worker unit")
 	}
 	if _, err = os.Stat(dir); err != nil {
@@ -744,7 +748,10 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 				if r.Generation == 0 || r.Workers == nil {
 					hold("incomplete_receipt")
 				}
-				workers = append(workers, r.Workers...)
+				for _, w := range r.Workers {
+					bound(w.Generation)
+					workers = append(workers, w.HostWorker)
+				}
 			case name == "host-memory-budget.json":
 				b, err := add(path, false)
 				if err != nil {
@@ -758,11 +765,12 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 				if e != nil {
 					return m, e
 				}
-				var w HostWorker
+				var w legacyHostWorker
 				if json.Unmarshal(b, &w) != nil {
 					return m, errors.New("unreadable worker host mapping")
 				}
-				workers = append(workers, w)
+				bound(w.Generation)
+				workers = append(workers, w.HostWorker)
 			case source.archived:
 				if _, err := add(path, dir != o.Dir); err != nil {
 					return m, err
@@ -774,7 +782,6 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 	}
 	byState := map[string]HostWorker{}
 	for _, w := range workers {
-		bound(w.Generation)
 		if w.Host != o.Host || w.Name == "" || !filepath.IsAbs(w.State) {
 			m.Conflicts = append(m.Conflicts, "unknown_host_mapping")
 			continue
@@ -924,7 +931,19 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 		if e != nil {
 			return m, e
 		}
-		var s state
+		var s struct {
+			state
+			HostControls map[string]struct {
+				Generation       uint64
+				Enabled, Cleared bool
+			} `json:"host_controls"`
+			DisabledHosts   map[string]string `json:"disabled_hosts"`
+			MachineControls map[string]struct {
+				Host             string
+				Generation       uint64
+				Enabled, Cleared bool
+			} `json:"machine_controls"`
+		}
 		if e = json.Unmarshal(b, &s); e != nil {
 			return m, e
 		}
@@ -1023,6 +1042,7 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 		return m, errors.New("host revision exhausted")
 	}
 	m.Intent.HostRevision = HostRevision{Revision: m.LowerBound + 1, Operation: ID()}
+	m.Intent.LastClose = &HostClose{HostRevision: m.Intent.HostRevision, Settlement: "pending"}
 	if m.Intent.Desired == "closed" {
 		m.Intent.StopDeadline = &now
 		m.Intent.PreviousClose = m.Intent.Revision
@@ -1032,4 +1052,12 @@ func inventoryHostConversion(o HostConversionOptions) (HostConversionManifest, e
 		return m, err
 	}
 	return m, nil
+}
+
+// Offline legacy lookup only. Never used to redirect active host state.
+func legacyUnitParent(dir string) string {
+	if filepath.Base(filepath.Dir(dir)) == "units" && ValidWorkerUnit(filepath.Base(dir)) {
+		return filepath.Dir(filepath.Dir(dir))
+	}
+	return ""
 }

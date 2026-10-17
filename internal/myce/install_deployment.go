@@ -169,7 +169,7 @@ func installConfigDiff(old, new ServiceConfig) string {
 
 func installDisabled(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), installed bool) error {
 	unit := filepath.Base(c.Service)
-	dir, err := WorkerUnitDirectory(c.HostStateDir, unit)
+	dir, err := hostRoot(c.HostStateDir)
 	if err != nil {
 		return err
 	}
@@ -182,9 +182,7 @@ func installDisabled(ctx context.Context, c ServiceConfig, command func(context.
 	if err = AdoptHostWorker(c.HostStateDir, w); err != nil {
 		return err
 	}
-	if err = AdoptHostWorker(dir, w); err != nil {
-		return err
-	}
+
 	h := HostControl{Dir: dir, Docker: true}
 	if installed {
 		h.Services = map[string]HostService{unit: &SystemdHostService{Unit: unit, Command: command}}

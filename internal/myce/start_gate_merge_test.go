@@ -22,7 +22,7 @@ func TestProductionStartGateMixedVersions(t *testing.T) {
 	}
 	for _, body := range []string{`{"ok":true}`, `{"ok":false,"start_gate":"durable-start-v1"}`} {
 		t.Run(body, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 				rw.Header().Set("Content-Type", "application/json")
 				_, _ = rw.Write([]byte(body))
 			}))
@@ -55,7 +55,7 @@ func TestProductionStartGateDisableInFlight(t *testing.T) {
 			submit(t, q, s)
 			a := check(t, q, machine("b70", "xpu"), nil).Job
 			root := readyTestHost(t, t.TempDir())
-			unit, err := WorkerUnitDirectory(root, "myce-worker@gpu1.service")
+			unit, err := root, error(nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -67,7 +67,7 @@ func TestProductionStartGateDisableInFlight(t *testing.T) {
 				flagDir = unit
 			}
 			handler := API{Queue: q, Token: "test"}.Handler()
-			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 				handler.ServeHTTP(rw, r)
 				if r.URL.Path == "/api/workers/started" {
 					// The durable answer is accepted, but disable wins before it reaches the worker.
@@ -116,7 +116,7 @@ func TestProductionStartGateQueueHostDisable(t *testing.T) {
 	q, _ := fixture(t)
 	submit(t, q, spec("production"))
 	a := check(t, q, machine("b70", "xpu"), nil).Job
-	if err := q.DisableHost("b70", "test disable", false); err != nil {
+	if err := closeQueueHost(q, "b70", "test disable", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := q.Started(result(a, true)); err == nil {

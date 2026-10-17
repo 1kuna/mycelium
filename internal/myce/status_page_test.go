@@ -14,7 +14,7 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 	job.Spec.Priority = "experiment"
 	machine := &Machine{
 		ID:                 "spark",
-		EnablePending:      true,
+		Disabled:           "host closed",
 		MemoryEnforcement:  "memory ceiling not enforced on this host (requires Linux cgroup v2)",
 		HostMemoryBudgetGB: 5,
 		DockerCleanup:      "cleanup unconfirmed: start",
@@ -52,7 +52,7 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 	}
 	html := rendered.String()
 	for _, want := range []string{
-		"Held: enable not yet acknowledged (retrying)", "Mycelium", "spark", "cuda", "21.5", "38.5", "qwen", "torch-cuda",
+		"disabled by operator", "Mycelium", "spark", "cuda", "21.5", "38.5", "qwen", "torch-cuda",
 		"memory ceiling not enforced on this host (requires Linux cgroup v2)", "Host ceiling budget", "5 GiB",
 		"2 calls", "load warning", "cache read failed", "Docker cleanup unconfirmed: start",
 		"index backlog", "atlas is ahead of its fair share; verso goes first", "operator action required (myce resolve-docker)",

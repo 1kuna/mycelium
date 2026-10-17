@@ -138,7 +138,7 @@ func TestGeneralServerQueuePassthroughAndStreaming(t *testing.T) {
 	}
 	defer engine.Unload()
 	rt := &modelRuntime{models: map[string]*workerModel{"test": {engine: engine, state: "ready"}}, session: machine.Session, token: "token"}
-	worker := httptest.NewServer(http.HandlerFunc(rt.serve))
+	worker := workerTestServer(http.HandlerFunc(rt.serve))
 	defer worker.Close()
 	machine.ModelURL = worker.URL
 	check(t, q, machine, nil)

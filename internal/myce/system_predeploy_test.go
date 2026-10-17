@@ -78,7 +78,7 @@ func TestPreDeployFullSystem(t *testing.T) {
 	// touch a closed DB, and workers keep the same endpoint across the restart.
 	var apiMu sync.RWMutex
 	handler := API{Queue: q, Token: "predeploy-token"}.Handler()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiMu.RLock()
 		defer apiMu.RUnlock()
 		handler.ServeHTTP(w, r)
@@ -629,7 +629,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 	q := open()
 	var apiMu sync.RWMutex
 	handler := API{Queue: q, Token: "copy-fault-test"}.Handler()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiMu.RLock()
 		defer apiMu.RUnlock()
 		handler.ServeHTTP(w, r)

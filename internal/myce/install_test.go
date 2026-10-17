@@ -96,7 +96,7 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 	if e = Install(context.Background(), c, executable, "private-test-secret", runner); e != nil {
 		t.Fatal(e)
 	}
-	if len(commands) != 3 {
+	if len(commands) != 5 {
 		t.Fatal(commands)
 	}
 	token, e := ReadServiceToken(c)
@@ -371,12 +371,11 @@ func TestInstallStartDisabledPreservesHostGate(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	hostFlag, _ := os.ReadFile(filepath.Join(c.HostStateDir, hostStateFile))
 	executable := filepath.Join(home, "binary")
 	os.WriteFile(executable, []byte("test"), 0700)
 	runner := func(_ context.Context, n string, a ...string) ([]byte, error) {
 		text := strings.Join(a, " ")
-		if strings.Contains(text, "enable --now") || strings.Contains(text, "restart ") {
+		if strings.HasSuffix(text, filepath.Base(c.Service)) && (strings.Contains(text, "enable --now") || strings.Contains(text, "restart ")) {
 			t.Fatal("started disabled worker")
 		}
 		if strings.Contains(text, "show ") {
@@ -387,14 +386,13 @@ func TestInstallStartDisabledPreservesHostGate(t *testing.T) {
 	if err := Install(context.Background(), c, executable, "test-token", runner); err != nil {
 		t.Fatal(err)
 	}
-	unitDir, _ := WorkerUnitDirectory(c.HostStateDir, filepath.Base(c.Service))
+	unitDir := c.HostStateDir
 	current, e := ReadHostIntent(unitDir)
 	if e != nil || current.Desired != "closed" || current.HostRevision != initial.HostRevision {
 		t.Fatal(current, e)
 	}
-	after, _ := os.ReadFile(filepath.Join(c.HostStateDir, hostStateFile))
-	if string(after) != string(hostFlag) {
-		t.Fatal("host gate changed")
+	if current.Reason != initial.Reason || !current.AcceptedAt.Equal(initial.AcceptedAt) || !current.StopDeadline.Equal(*initial.StopDeadline) {
+		t.Fatal("install changed accepted close or renewed its deadline", current)
 	}
 	scoped := c
 	scoped.HostStateDir = unitDir

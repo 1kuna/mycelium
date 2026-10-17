@@ -127,14 +127,7 @@ func TestDisableDocker(t *testing.T) {
 			}
 			ensureTestHost(t, h.Dir, h.Clock)
 			r, err := h.Disable(ctx, "test", grace)
-			await(t, func() bool {
-				unlock, err := hostOperationLock(h.Dir, "control.lock", false)
-				if err != nil {
-					return false
-				}
-				unlock()
-				return true
-			})
+			waitHostCleanup(t, h.Dir)
 			if (err != nil) != failed || r.Confirmed == failed {
 				t.Fatalf("report %+v error %v", r, err)
 			}
@@ -235,7 +228,7 @@ func TestDockerDisabledLaunchAndResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.close()
-	unlock, err := hostOperationLock(w.HostStateDir, "control.lock", false)
+	unlock, err := hostOperationLock(w.HostStateDir, "reconcile.lock", false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"context"
+	"encoding/json"
 	"mycelium/internal/myce"
 	"os"
 	"path/filepath"
@@ -26,9 +26,16 @@ func TestMain(m *testing.M) {
 	if e != nil {
 		panic(e)
 	}
-	if e = (myce.HostControl{Dir: dir, Expected: s.HostRevision, Settled: func(myce.HostIntent) error { return nil }}).Enable(context.Background()); e != nil {
+	s.Desired = "open"
+	s.HostRevision = myce.HostRevision{Revision: s.Revision + 1, Operation: myce.ID()}
+	b, e := json.Marshal(s)
+	if e != nil {
 		panic(e)
 	}
+	if e = os.WriteFile(filepath.Join(dir, "host-state.json"), b, 0600); e != nil {
+		panic(e)
+	}
+
 	// Keep ordinary laptop tests off any installed daemon; Docker fault fixtures override this CLI.
 	if err = os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\ncase \"$3:$4\" in ps:*|network:ls) exit 0;; *) exit 99;; esac\n"), 0700); err != nil {
 		panic(err)

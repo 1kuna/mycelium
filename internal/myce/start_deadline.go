@@ -31,7 +31,7 @@ func (q *Queue) startWaitingReason(j *Job) string {
 		if b := q.startupReleaseBlocker(host); b != "" {
 			return b
 		}
-		if m.Disabled != "" || q.s.DisabledHosts[host] != "" {
+		if m.Disabled != "" || q.hostClosedReason(host) != "" {
 			return "host " + host + " disabled by operator"
 		}
 		if b := q.dockerBlocker(host); b != "" {
@@ -170,7 +170,7 @@ func (q *Queue) allStartHostsDisabled(j *Job) bool {
 			continue
 		}
 		found = true
-		if m.Disabled == "" && q.s.DisabledHosts[hostID(m)] == "" {
+		if m.Disabled == "" && q.hostClosedReason(hostID(m)) == "" {
 			return false
 		}
 	}

@@ -3,7 +3,6 @@ package myce
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,68 +15,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestHostDisableRequeuesProductionWithoutRetryAndFencesSiblings(t *testing.T) {
-	q, clock := fixture(t)
-	a, b, other := machine("b70-card0", "fake"), machine("b70-card1", "fake"), machine("other", "fake")
-	a.HostID, b.HostID, other.HostID = "b70", "b70", "other"
-	if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}, "other": {ProductionHold: true}}); err != nil {
-		t.Fatal(err)
-	}
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	check(t, q, other, nil)
-	s := spec("production")
-	s.Resumable = false
-	// This recovery scenario intentionally waits ten minutes before a new attempt.
-	startBy := clock.Now().Add(20 * time.Minute)
-	s.StartBy = &startBy
-	j := submit(t, q, s)
-	running := check(t, q, a, nil).Job
-	if running == nil {
-		t.Fatal("production did not start")
-	}
-	if err := q.DisableHost("b70", "Verso drill", false); err != nil {
-		t.Fatal(err)
-	}
-	if got := check(t, q, b, nil); got.Job != nil || !got.Leave {
-		t.Fatalf("disabled sibling admitted work: %+v", got)
-	}
-	if err := q.DisableHost("b70", "Verso drill", true); err != nil {
-		t.Fatal(err)
-	}
-	got := job(t, q, j.ID)
-	if got.State != "queued" || got.Losses != 0 || got.ProductionHost == "b70" {
-		t.Fatalf("displaced job: %+v", got)
-	}
-	if err := q.Complete(result(running, true)); err == nil {
-		t.Fatal("stale disabled attempt accepted")
-	}
-	clock.Advance(10 * time.Minute)
-	got = job(t, q, j.ID)
-	if got.Losses != 0 {
-		t.Fatal("operator disable consumed retry")
-	}
-	if got := check(t, q, a, nil); got.Job != nil {
-		t.Fatal("disabled worker regained work")
-	}
-	if got := check(t, q, other, nil); got.Job == nil {
-		t.Fatal("displaced production did not resume elsewhere")
-	}
-	if err := q.EnableHost("b70"); err != nil {
-		t.Fatal(err)
-	}
-	check(t, q, a, nil)
-	snap, err := q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, m := range snap.Machines {
-		if m.HostID == "b70" && m.Disabled != "" {
-			t.Fatal("enable retained disable")
-		}
-	}
-}
 
 func TestDisableOfflineFlagAndOwnedProcessGrace(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1000, 0)}
@@ -100,7 +37,7 @@ func TestDisableOfflineFlagAndOwnedProcessGrace(t *testing.T) {
 			return nil
 		},
 		Pause: func(d time.Duration) { clock.Advance(d) },
-	}, Notify: func(context.Context, HostWorker, bool, bool, string) error { return errors.New("queue down") }}
+	}}
 	ensureTestHost(t, h.Dir, h.Clock)
 	r, err := h.Disable(context.Background(), "Verso drill", 10*time.Second)
 	if err != nil {
@@ -109,7 +46,7 @@ func TestDisableOfflineFlagAndOwnedProcessGrace(t *testing.T) {
 	if live || len(signals) != 2 || signals[0] != syscall.SIGTERM || signals[1] != syscall.SIGKILL {
 		t.Fatalf("cleanup signals %v, live=%v", signals, live)
 	}
-	if r.Stopped != 1 || len(r.QueueErrors) != 0 {
+	if r.Stopped != 1 {
 		t.Fatalf("report %+v", r)
 	}
 	disabled, err := HostDisabled(root)
@@ -126,11 +63,12 @@ func TestDisableOfflineFlagAndOwnedProcessGrace(t *testing.T) {
 	}
 	h.Expected = current.HostRevision
 	h.Settled = func(HostIntent) error { return nil }
-	if err := h.Enable(context.Background()); err != nil {
-		t.Fatal(err)
+	h.Expected = readTestHostRevision(t, root)
+	if err := h.Enable(context.Background()); err == nil {
+		t.Fatal("offline close opened without queue settlement")
 	}
-	if disabled, err = HostDisabled(root); err != nil || disabled != "" {
-		t.Fatalf("enable flag %q %v", disabled, err)
+	if disabled, err = HostDisabled(root); err != nil || disabled == "" {
+		t.Fatalf("refused open changed close flag %q %v", disabled, err)
 	}
 }
 
@@ -217,7 +155,7 @@ func TestHostDisablePendingDoesNotPrematurelyRequeueDuringGrace(t *testing.T) {
 	if err := q.Started(result(running, true)); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.DisableHost("host", "checkpoint grace", false); err != nil {
+	if err := closeQueueHost(q, "host", "checkpoint grace", nil); err != nil {
 		t.Fatal(err)
 	}
 	clock.Advance(3 * time.Minute)
@@ -243,7 +181,7 @@ func TestHostDisableQueueAndPagePersistAcrossRestart(t *testing.T) {
 	m := machine("worker", "fake")
 	m.HostID = "host"
 	check(t, q, m, nil)
-	if err = q.DisableHost("host", "operator drill", true); err != nil {
+	if err = closeQueueHost(q, "host", "operator drill", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err = q.Close(); err != nil {
@@ -273,7 +211,7 @@ func TestHostDisableQueueAndPagePersistAcrossRestart(t *testing.T) {
 	if !strings.Contains(string(b), "disabled by operator") {
 		t.Fatal("disabled host not shown on status page")
 	}
-	if strings.Contains(string(b), "operator drill") || q.s.DisabledHosts["host"] != "operator drill" {
+	if strings.Contains(string(b), "operator drill") || q.s.HostIntents["host"].Reason != "operator drill" {
 		t.Fatal("status must retain the private operator reason internally without displaying it")
 	}
 }
@@ -303,26 +241,5 @@ func TestDisableRecordedWorkerLifetimeAndPIDReuse(t *testing.T) {
 	live, err := ownedHostProcess(workerState{PID: cmd.Process.Pid, Birth: birth})
 	if err != nil || live {
 		t.Fatalf("worker not gone %v %v", live, err)
-	}
-}
-
-func TestHostDisableDoesNotRefundEarlierUnrelatedLoss(t *testing.T) {
-	q, clock := fixture(t)
-	m, other := machine("worker", "fake"), machine("other", "fake")
-	m.HostID = "host"
-	check(t, q, m, nil)
-	check(t, q, other, nil)
-	j := submit(t, q, spec("production"))
-	check(t, q, m, nil)
-	clock.Advance(6 * time.Second)
-	check(t, q, other, nil)
-	if got := job(t, q, j.ID); got.Losses != 1 {
-		t.Fatal("missing loss")
-	}
-	if err := q.DisableHostExecutions("host", "new drill", true, []Result{{Machine: m.ID, Session: m.Session, Execution: Execution{ID: "different-job", Attempt: 1}}}); err != nil {
-		t.Fatal(err)
-	}
-	if got := job(t, q, j.ID); got.Losses != 1 {
-		t.Fatal("refunded unrelated loss")
 	}
 }

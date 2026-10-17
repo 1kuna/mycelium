@@ -334,7 +334,7 @@ func TestDockerGroupLiveBudgetChangeDuringReadiness(t *testing.T) {
 	w.Machine.HostMemoryBudgetGB = budget.GiB
 	j := dockerGroupJob(t)
 	var ready, probed atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		probed.Store(true)
 		if !ready.Load() {
 			rw.WriteHeader(503)
@@ -387,7 +387,7 @@ func TestDockerSidecarsMainExitAndReadiness(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
 	j := dockerGroupJob(t)
 	var ready atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if !ready.Load() {
 			rw.WriteHeader(503)
 		}
@@ -550,7 +550,7 @@ func TestDockerReadinessTimeoutAndStop(t *testing.T) {
 			w, s, c, root := dockerFixture(t)
 			j := dockerGroupJob(t)
 			var checked atomic.Bool
-			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { checked.Store(true); rw.WriteHeader(503) }))
+			server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { checked.Store(true); rw.WriteHeader(503) }))
 			defer server.Close()
 			u, _ := url.Parse(server.URL)
 			port, _ := strconv.Atoi(u.Port())
@@ -648,7 +648,7 @@ func TestDockerReadinessRejectsSuccessAtDeadline(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
 	j := dockerGroupJob(t)
 	var checked atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		c.advance(time.Second)
 		checked.Store(true)
 		rw.WriteHeader(200)
@@ -684,7 +684,7 @@ func TestDockerReadinessFailureIsCommandFailureNotLoss(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
 	j := dockerGroupJob(t)
 	var checked atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { checked.Store(true); rw.WriteHeader(503) }))
+	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { checked.Store(true); rw.WriteHeader(503) }))
 	defer server.Close()
 	u, _ := url.Parse(server.URL)
 	port, _ := strconv.Atoi(u.Port())
@@ -751,6 +751,7 @@ func TestDockerNetworkRemovalEscalatesThroughQueue(t *testing.T) {
 	w.Client = Client{URL: server.URL, Token: "test"}
 	w.Interval = time.Millisecond
 	w.Machine.HostID = "network-host"
+	testHostOpen(t, w.HostStateDir, c, "network-host")
 	w.CheckpointRoot = q.root
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

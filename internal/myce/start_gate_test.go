@@ -184,7 +184,7 @@ func TestProductionStartGateWorkerRestartReconciles(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var reconciled Result
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/workers/complete" {
 			if !decode(rw, r, &reconciled) {
 				return
@@ -238,7 +238,7 @@ func TestProductionStartGateExecutionAndReplay(t *testing.T) {
 	calls := 0
 	var latency time.Duration
 	handler := API{Queue: q, Token: "test"}.Handler()
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/workers/start-permit" {
 			t.Error("extra preparation round trip")
 		}

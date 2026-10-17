@@ -201,7 +201,7 @@ func TestBenchmarkPreferenceRespectsEligibility(t *testing.T) {
 			check(t, q, slow, nil)
 			check(t, q, fast, nil)
 			if why == "disabled" {
-				if err := q.DisableHost(fast.ID, "test", false); err != nil {
+				if err := closeQueueHost(q, fast.ID, "test", nil); err != nil {
 					t.Fatal(err)
 				}
 			}

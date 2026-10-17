@@ -16,8 +16,6 @@ func HyphaAvailability(m *Machine) string {
 		return "offline; waiting for this hypha to return"
 	case m.Leaving:
 		return "leaving; no new work"
-	case m.EnablePending:
-		return "held: enable not yet acknowledged (retrying)"
 	}
 	if a := machineAvailability(m); a != nil && !a.Available {
 		return availabilityWords(a.Reason)
@@ -200,7 +198,7 @@ func (q *Queue) statusWaitingReason(j *Job) string {
 			}
 			possible++
 			state := HyphaAvailability(m)
-			if q.s.DisabledHosts[hostID(m)] != "" {
+			if q.hostClosedReason(hostID(m)) != "" {
 				state = "disabled by operator"
 			}
 			if state == "available for work" && q.machineLimitReason(m) != "" {

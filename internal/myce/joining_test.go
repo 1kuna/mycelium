@@ -97,7 +97,7 @@ func TestJoiningFallbackExplicitAndWrongCredential(t *testing.T) {
 }
 func TestJoiningNeverFollowsRedirects(t *testing.T) {
 	var leaked atomic.Bool
-	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Store(true) }))
+	evil := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Store(true) }))
 	defer evil.Close()
 	_, i := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, evil.URL, 307) }))
 	if _, err := ResolveJoining(context.Background(), i, "", &fakeDiscovery{}); err == nil || leaked.Load() {

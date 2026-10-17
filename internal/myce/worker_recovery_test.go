@@ -306,7 +306,7 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 	var calls []string
 	var total string
 	var uploadedSession string
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		switch r.URL.Path {
@@ -381,7 +381,7 @@ func TestWorkerReplayRetriesIdenticalChunkAfterLostAck(t *testing.T) {
 	os.WriteFile(filepath.Join(s.dir, s.state.Log), []byte("first"), 0600)
 	var count atomic.Int32
 	var chunks []LogChunk
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		var l LogChunk
 		json.NewDecoder(r.Body).Decode(&l)
 		chunks = append(chunks, l)

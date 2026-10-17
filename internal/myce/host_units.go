@@ -27,27 +27,6 @@ func ValidWorkerUnit(unit string) bool {
 	return true
 }
 
-// Unit selection is diagnostic; all worker units share one host authority.
-func WorkerUnitDirectory(dir, unit string) (string, error) {
-	if !ValidWorkerUnit(unit) {
-		return "", errors.New("refusing non-Mycelium worker unit")
-	}
-	if dir == "" {
-		var err error
-		dir, err = HostStateDirectory()
-		if err != nil {
-			return "", err
-		}
-	}
-	return dir, nil
-}
-func unitParent(dir string) string {
-	if filepath.Base(filepath.Dir(dir)) == "units" && ValidWorkerUnit(filepath.Base(dir)) {
-		return filepath.Dir(filepath.Dir(dir))
-	}
-	return ""
-}
-
 func HostWorkers(dir string) ([]HostWorker, error) { return (HostControl{Dir: dir}).workers() }
 func WorkerUnits(dir, target string) ([]string, error) {
 	if target != "" && !ValidWorkerUnit(target) {

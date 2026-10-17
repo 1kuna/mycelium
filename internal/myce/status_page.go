@@ -269,7 +269,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
     {{range .Machines}}{{$machine := .}}{{$jobs := machineJobs $.Jobs .ID}}{{$models := machineModels $.LoadedModels .ID}}{{$pins := machinePins $.Pins .ID}}
       <article class="card machine">
         <div class="card-head"><div class="identity"><h3>{{.ID}}</h3><div class="platform">{{if .GPU}}{{.GPU}}{{else}}platform unknown{{end}}{{if .Device}} · {{.Device}}{{end}}</div></div>
-          <span class="badge {{if or .Disabled .Gone}}offline{{else if or .Leaving .EnablePending .AdmissionReason}}leaving{{end}}">{{hyphaAvailability .}}</span>
+          <span class="badge {{if or .Disabled .Gone}}offline{{else if or .Leaving .AdmissionReason}}leaving{{end}}">{{hyphaAvailability .}}</span>
         </div>
         <div class="metrics" aria-label="GPU memory">
           <div class="metric"><span class="label">Used</span><strong>{{printf "%.1f" .MemoryUsedGB}} GB</strong></div>
@@ -282,7 +282,6 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
         <div class="detail"><div class="label">Availability</div><div class="value">{{hyphaAvailability .}}</div></div>
         <div class="detail"><div class="label">Extensions</div><div class="value">{{range .ExtensionReports}}<div>{{extensionStatus .}}</div>{{else}}<span class="empty-inline">No qualification reported</span>{{end}}</div></div>
         {{if .MaxJobs}}<div class="detail"><div class="label">Job limit</div><div class="value">{{.MaxJobs}} simultaneous jobs per hypha</div></div>{{end}}
-        {{if .EnablePending}}<div class="alert bad">Held: enable not yet acknowledged (retrying)</div>{{end}}
         {{if .MemoryError}}<div class="alert bad">Memory unavailable: {{.MemoryError}}</div>{{end}}
 		{{if .CacheError}}<div class="alert bad">Model cache unavailable: {{.CacheError}}</div>{{end}}
         <div class="detail"><div class="label">Current</div><div class="value">{{range $jobs}}<div><strong>{{.Spec.Name}}</strong> · {{jobState .}}{{if .Progress}} · progress {{.Progress}}{{end}}{{with jobAge . $.Now}} · {{.}}{{end}}</div>{{else}}<span class="empty-inline">Idle</span>{{end}}</div></div>

@@ -56,23 +56,20 @@ func StartDev(c DevConfig) (*Dev, error) {
 	if err := os.MkdirAll(c.Checkpoints, 0700); err != nil {
 		return nil, err
 	}
+	freshHost := false
+	if c.HostID == "" {
+		c.HostID = "dev-host"
+	}
 	// Dev owns its isolated fake host; real runtimes never initialize missing state.
 	if c.HostStateDir == "" {
 		c.HostStateDir = filepath.Join(filepath.Dir(c.Database), "dev-host")
 	}
 	if _, e := os.Stat(filepath.Join(c.HostStateDir, hostStateFile)); errors.Is(e, os.ErrNotExist) {
-		host := c.HostID
-		if host == "" {
-			host = "dev-host"
-		}
-		initial, e := InitializeHostIntent(c.HostStateDir, host, RealClock{})
+		_, e := InitializeHostIntent(c.HostStateDir, c.HostID, RealClock{})
 		if e != nil {
 			return nil, e
 		}
-		_, e = changeHostIntent(c.HostStateDir, RealClock{}, hostIntentChange{Desired: "open", Expected: initial.HostRevision, Settled: func(HostIntent) error { return nil }})
-		if e != nil {
-			return nil, e
-		}
+		freshHost = true
 	}
 	if _, e := ReadHostIntent(c.HostStateDir); e != nil {
 		return nil, e
@@ -134,6 +131,43 @@ func StartDev(c DevConfig) (*Dev, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &Dev{Queue: q, URL: "http://" + listener.Addr().String(), cancel: cancel, errors: make(chan error, c.Workers+2)}
 	d.client = Client{URL: d.URL, Token: c.Token}
+	if err = q.ConfigureLocalHost(c.HostStateDir, d.URL); err != nil {
+		listener.Close()
+		q.Close()
+		cancel()
+		return nil, err
+	}
+	if freshHost {
+		s, e := ReadHostIntent(c.HostStateDir)
+		if e != nil {
+			listener.Close()
+			q.Close()
+			cancel()
+			return nil, e
+		}
+		boot, e := HostBootID()
+		if e == nil {
+			e = mutateHostIntent(c.HostStateDir, s.HostRevision, func(current *HostIntent) error {
+				current.LocalExclusion = &HostLocalExclusion{HostObservation: HostObservation{HostRevision: s.HostRevision, Boot: boot, State: "closed", At: q.clock.Now()}, Confirmed: true}
+				return nil
+			})
+		}
+		// Dev has just provisioned an empty isolated fake host; the real queue
+		// transaction still must acknowledge it before opening.
+		if e == nil {
+			e = q.Tick()
+		}
+		if e == nil {
+			_, e = changeHostIntent(c.HostStateDir, q.clock, hostIntentChange{Desired: "open", Expected: s.HostRevision})
+		}
+		if e != nil {
+			listener.Close()
+			q.Close()
+			cancel()
+			return nil, e
+		}
+	}
+
 	d.server = &http.Server{Handler: API{Queue: q, Token: c.Token}.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	queueCtx, stopQueue := context.WithCancel(context.Background())
 	d.stopQueue = stopQueue
