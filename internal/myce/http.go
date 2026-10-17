@@ -22,6 +22,7 @@ type API struct {
 
 func (a API) Handler() http.Handler {
 	mux := http.NewServeMux()
+	a.registerDevClock(mux)
 	a.registerFiles(mux)
 	mux.HandleFunc("POST /api/extensions", func(w http.ResponseWriter, r *http.Request) {
 		var e Extension
