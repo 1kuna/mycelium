@@ -86,7 +86,16 @@ func (a API) Handler() http.Handler {
 		respond(w, j, err)
 	})
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, map[string]bool{"ok": true}, a.Queue.Cancel(r.PathValue("id")))
+		ack, err := a.Queue.CancelJob(r.PathValue("id"))
+		respond(w, ack, err)
+	})
+	mux.HandleFunc("POST /api/jobs/cancel", func(w http.ResponseWriter, r *http.Request) {
+		var request CancelSubmissionRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		ack, err := a.Queue.CancelSubmission(request.Project, request.SubmissionKey)
+		respond(w, ack, err)
 	})
 	mux.HandleFunc("GET /api/jobs/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
 		after, err := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
@@ -238,11 +247,16 @@ func respond(w http.ResponseWriter, v any, err error) {
 		if errors.Is(err, ErrStale) {
 			status = http.StatusConflict
 		}
-		body := map[string]string{"error": "request failed"}
+		body := map[string]any{"error": "request failed"}
 		var apiError *HTTPError
-		if errors.As(err, &apiError) && (apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired") {
+		if errors.As(err, &apiError) && (apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "job_unknown") {
 			status = apiError.Status
-			body = map[string]string{"error": apiError.Message, "code": apiError.Code}
+			body = map[string]any{"error": apiError.Message, "code": apiError.Code}
+			if apiError.Code == "job_unknown" {
+				body["will_not_run"] = nil
+				body["job_id"], body["project"], body["submission_key"] = apiError.JobID, nil, nil
+				body["state"], body["release"], body["acknowledged_at"] = "unknown", nil, nil
+			}
 		}
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(body)
@@ -304,7 +318,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			Code  string `json:"code"`
 			Error string `json:"error"`
 		}
-		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (body.Code == "submission_key_conflict" || body.Code == "submission_key_expired") {
+		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown") {
 			e.Code, e.Message = body.Code, body.Error
 		}
 		return e
@@ -317,6 +331,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 }
 
 type HTTPError struct {
+	JobID   string // Only job_unknown carries the requested cancellation identity.
 	Code    string
 	Status  int
 	Message string

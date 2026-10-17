@@ -210,9 +210,15 @@ type Copy struct {
 	Session     string              `json:"session"`
 	Attempt     int                 `json:"attempt"`
 	Progress    int64               `json:"progress"`
+
+	// Exact cleanup evidence, retained even after another attempt is assigned.
+	ReleaseConfirmed bool `json:"release_confirmed,omitempty"`
 }
 
 type Job struct {
+	// Durable cancellation fence, independent of diagnostic reason text.
+	CancelledAt *time.Time `json:"cancelled_at,omitempty"`
+
 	// Derived status-only policy projection; a pointer preserves an empty host list.
 	EligibleHosts           *[]string `json:"eligible_hosts,omitempty"`
 	EligibleUnknownMachines []string  `json:"eligible_unknown_machines,omitempty"`

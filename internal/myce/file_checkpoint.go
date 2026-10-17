@@ -87,7 +87,7 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 	}
 	return q.update(func() error {
 		j := q.s.Jobs[p.ID]
-		if j == nil || !j.FileTransport || !j.Spec.Resumable || terminal(j.State) || j.Reason == "cancel requested" {
+		if j == nil || !j.FileTransport || !j.Spec.Resumable || terminal(j.State) || cancelled(j) {
 			return ErrStale
 		}
 		allowed := false

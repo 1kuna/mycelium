@@ -120,8 +120,14 @@ class Client:
         raise KeyError(job_id)
 
     def cancel(self, job_id: str) -> dict[str, Any]:
-        """Request cancellation."""
+        """Acknowledge no future execution; release may still be pending."""
         return self._call("POST", f"/api/jobs/{quote(job_id, safe='')}/cancel", {})
+
+    def cancel_submission(self, project: str, submission_key: str) -> dict[str, Any]:
+        """Cancel a project/key, reserving an unseen key against future execution."""
+        return self._call("POST", "/api/jobs/cancel", {
+            "project": project, "submission_key": submission_key,
+        })
 
     def wait(self, job_id: str, *, timeout: float | None = None) -> dict[str, Any]:
         """Wait for any terminal state, returning it (including failure)."""

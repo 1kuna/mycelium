@@ -16,6 +16,21 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ClientTests(unittest.TestCase):
+    def test_cancellation_acknowledgements(self):
+        client = Client(token="test-only")
+        ack = {"job_id": None, "project": "test", "submission_key": "key",
+               "state": "absent", "will_not_run": True,
+               "release": "not_applicable", "acknowledged_at": "2026-10-17T12:00:00Z"}
+        with patch.object(client, "_call", return_value=ack) as call:
+            self.assertEqual(client.cancel_submission("test", "key"), ack)
+            self.assertEqual(call.call_args.args, ("POST", "/api/jobs/cancel",
+                             {"project": "test", "submission_key": "key"}))
+            ack = {**ack, "job_id": "job/one", "state": "stopping", "release": "pending"}
+            call.return_value = ack
+            self.assertEqual(client.cancel("job/one"), ack)
+            self.assertEqual(call.call_args.args, ("POST", "/api/jobs/job%2Fone/cancel", {}))
+        self.assertEqual(APIError(404, '{"code":"job_unknown","will_not_run":null}').code, "job_unknown")
+
     def test_submission_key_and_error_code(self):
         client = Client(token="test-only")
         spec = {"project": "test", "submission_key": "stable-key"}
@@ -195,6 +210,26 @@ class DevTests(unittest.TestCase):
 
     def spec(self, command, **extra):
         return {"name": "python-test", "project": "test", "priority": "experiment", "run": {"command": command}, "needs": {"memory_gb": 1, "platform": ["fake"]}, "resumable": False, **extra}
+
+    def test_cancel_running_by_key(self):
+        spec = self.spec([sys.executable, "-u", "-c",
+                          "import time; print('cancel-ready', flush=True); time.sleep(60)"],
+                         submission_key="python-running-cancel")
+        job = self.client.submit(spec)
+        end = time.monotonic() + 15
+        while "cancel-ready" not in "".join(chunk["text"] for chunk in self.client.logs(job["id"])):
+            if time.monotonic() >= end:
+                self.fail("running job did not report ready")
+            time.sleep(0.05)
+        ack = self.client.cancel_submission("test", spec["submission_key"])
+        self.assertEqual(ack["job_id"], job["id"])
+        self.assertTrue(ack["will_not_run"])
+        self.assertEqual(ack["release"], "pending")
+        self.assertEqual(self.client.wait(job["id"], timeout=15)["state"], "cancelled")
+        ack = self.client.cancel_submission("test", spec["submission_key"])
+        self.assertEqual(ack["release"], "confirmed")
+        self.assertEqual(self.client.submit(spec)["id"], job["id"])
+        self.assertEqual(self.client.get(job["id"])["attempt"], 1)
 
     def test_keyed_submission_repeat_and_conflict(self):
         spec = self.spec([sys.executable, "-c", "print('keyed')"], submission_key="python-key")

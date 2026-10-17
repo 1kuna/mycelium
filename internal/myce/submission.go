@@ -101,7 +101,7 @@ func (q *Queue) existingSubmission(s Spec, fingerprint string) (*Job, error) {
 	}
 	if record.Kind == submissionReservation {
 		cancelled := *record.Created
-		j := &Job{ID: ID(), Spec: Spec{Project: record.Project, SubmissionKey: record.Key}, State: "cancelled", Queued: cancelled, FinishedAt: &cancelled, Reason: "cancelled before submission"}
+		j := &Job{ID: ID(), Spec: Spec{Project: record.Project, SubmissionKey: record.Key}, State: "cancelled", CancelledAt: &cancelled, Queued: cancelled, FinishedAt: &cancelled, Reason: "cancelled before submission"}
 		q.s.Jobs[j.ID] = j
 		record.Kind = submissionBinding
 		record.JobID = j.ID

@@ -124,7 +124,7 @@ func (q *Queue) controlMachine(host, machine, session, reason string, enable, cl
 		r.OperatorStop = true
 		q.refundOperatorStop(r)
 		if current {
-			if j.Reason == "cancel requested" {
+			if cancelled(j) {
 				j.State, j.StopAt = "cancelled", nil
 			} else {
 				q.retry(j, "requeued: disabled by operator")

@@ -11,7 +11,7 @@ import (
 const ProductionStartTimeout = 150 * time.Second
 
 func startupPending(j *Job) bool {
-	return j.Spec.StartBy != nil && !terminal(j.State) && j.Reason != "cancel requested" && (j.State == "queued" || j.StartedAt == nil)
+	return j.Spec.StartBy != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
 }
 
 func (q *Queue) startWaitingReason(j *Job) string {
@@ -127,7 +127,7 @@ func (q *Queue) PermitStart(r Result) (StartPermit, error) {
 			rejected = e
 			return nil
 		}
-		if j.State != "running" || !q.startPlacementAllowed(j) {
+		if cancelled(j) || j.State != "running" || !q.startPlacementAllowed(j) {
 			rejected = ErrStale
 			return nil
 		}
