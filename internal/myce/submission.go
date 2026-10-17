@@ -4,10 +4,21 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"regexp"
 	"time"
 )
 
 const submissionRetention = 30 * 24 * time.Hour
+
+var submissionKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+
+func validateSubmissionKey(key string) error {
+	if !submissionKeyPattern.MatchString(key) {
+		return &HTTPError{Status: 400, Code: "submission_key_invalid", Message: "submission key must be 1-128 characters from A-Z, a-z, 0-9, dot, underscore, colon or hyphen"}
+	}
+	return nil
+}
+
 const (
 	submissionBinding     = "binding"
 	submissionReservation = "reservation"

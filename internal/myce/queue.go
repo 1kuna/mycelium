@@ -151,10 +151,6 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 	if len(data) > 0 {
 		q.restartUntil = clock.Now().Add(RestartGrace)
 		for _, j := range q.s.Jobs {
-			if j.CancelledAt == nil && j.Reason == "cancel requested" {
-				now := clock.Now()
-				j.CancelledAt = &now
-			}
 			if j.Attempt > 0 && len(j.Copies) == 0 && j.Machine != "" {
 				j.Starts = j.Attempt
 				j.Copies = append(j.Copies, Copy{Machine: j.Machine, Session: j.Session, Attempt: j.Attempt})
@@ -173,6 +169,12 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 	if err = q.ConfigureUploadSpool("", DefaultUploadSpoolBytes); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if q.importCancellationEvidence() {
+		if err = q.update(func() error { return nil }); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	success = true
 	return q, nil
@@ -307,6 +309,11 @@ func (q *Queue) update(fn func() error) error {
 	return err
 }
 func (q *Queue) Submit(s Spec) (*Job, error) {
+	if s.SubmissionKey != "" {
+		if err := validateSubmissionKey(s.SubmissionKey); err != nil {
+			return nil, err
+		}
+	}
 	fingerprint, err := submissionFingerprint(s)
 	if err != nil {
 		return nil, err
@@ -814,7 +821,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 				}
 				j.Progress = 0
-				j.Copies = append(j.Copies, Copy{Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension})
+				j.Copies = append(j.Copies, Copy{Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 				j.Machine = m.ID
 				j.Session = m.Session
 				j.Reason = ""

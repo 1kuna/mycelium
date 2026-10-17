@@ -114,7 +114,7 @@ func (q *Queue) retainRelease(j *Job) {
 		return
 	}
 	policy := q.s.Hosts[hostID(m)]
-	if !cancelled(j) && j.Spec.StartBy == nil && !j.Spec.Run.Docker && m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0 && q.machineJobLimit(m) == 0 && (policy == nil || !policy.Policy.ProductionHold) {
+	if j.Spec.StartBy == nil && !j.Spec.Run.Docker && m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0 && q.machineJobLimit(m) == 0 && (policy == nil || !policy.Policy.ProductionHold) {
 		return
 	}
 	if q.s.HostReleases == nil {
@@ -143,11 +143,13 @@ func (q *Queue) settleRelease(r Result) bool {
 	return ok
 }
 func (q *Queue) reconcileHostReleases(c Checkin) {
+	q.confirmPreviousCopies(c)
 	for key, r := range q.s.HostReleases {
 		if r.Docker || r.Machine != c.Machine.ID {
 			continue
 		}
-		fresh := c.Fresh && c.PreviousSession == r.Session
+		old := q.s.Machines[c.Machine.ID]
+		fresh := c.Fresh && old != nil && c.PreviousSession == old.Session && c.Machine.Session != old.Session && r.Session != c.Machine.Session
 		stopped := r.Session == c.Machine.Session && c.Running == nil && !r.Until.IsZero() && !r.Preparation && !r.CleanupFailed
 		if r.Preparation {
 			stopped = r.Session == c.Machine.Session && !q.backgroundPreparing(&c.Machine)
@@ -407,7 +409,7 @@ func (q *Queue) maintainHolds() {
 	demand := map[string]bool{}
 	jobs := []*Job{}
 	for _, j := range q.s.Jobs {
-		if j.Spec.Priority == "production" && !terminal(j.State) && !(j.State == "queued" && expired(j.Spec.GiveUpAt, now)) {
+		if j.Spec.Priority == "production" && !terminal(j.State) && !cancelled(j) && !(j.State == "queued" && expired(j.Spec.GiveUpAt, now)) {
 			jobs = append(jobs, j)
 		}
 	}

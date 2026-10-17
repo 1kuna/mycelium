@@ -78,11 +78,24 @@ func (a API) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) { s, err := a.Queue.publicSnapshot(); respond(w, s, err) })
 	mux.HandleFunc("POST /api/jobs", func(w http.ResponseWriter, r *http.Request) {
-		var s Spec
-		if !decode(w, r, &s) {
+		var request struct {
+			Spec
+			SubmissionKey json.RawMessage `json:"submission_key"`
+		}
+		if !decode(w, r, &request) {
 			return
 		}
-		j, err := a.Queue.Submit(s)
+		if request.SubmissionKey != nil {
+			if err := json.Unmarshal(request.SubmissionKey, &request.Spec.SubmissionKey); err != nil {
+				respond(w, nil, validateSubmissionKey(""))
+				return
+			}
+			if err := validateSubmissionKey(request.Spec.SubmissionKey); err != nil {
+				respond(w, nil, err)
+				return
+			}
+		}
+		j, err := a.Queue.Submit(request.Spec)
 		respond(w, j, err)
 	})
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
@@ -90,11 +103,19 @@ func (a API) Handler() http.Handler {
 		respond(w, ack, err)
 	})
 	mux.HandleFunc("POST /api/jobs/cancel", func(w http.ResponseWriter, r *http.Request) {
-		var request CancelSubmissionRequest
+		var request struct {
+			Project       string          `json:"project"`
+			SubmissionKey json.RawMessage `json:"submission_key"`
+		}
 		if !decode(w, r, &request) {
 			return
 		}
-		ack, err := a.Queue.CancelSubmission(request.Project, request.SubmissionKey)
+		var key string
+		if err := json.Unmarshal(request.SubmissionKey, &key); err != nil {
+			respond(w, nil, validateSubmissionKey(""))
+			return
+		}
+		ack, err := a.Queue.CancelSubmission(request.Project, key)
 		respond(w, ack, err)
 	})
 	mux.HandleFunc("GET /api/jobs/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
@@ -249,7 +270,7 @@ func respond(w http.ResponseWriter, v any, err error) {
 		}
 		body := map[string]any{"error": "request failed"}
 		var apiError *HTTPError
-		if errors.As(err, &apiError) && (apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "job_unknown") {
+		if errors.As(err, &apiError) && (apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "submission_key_invalid" || apiError.Code == "job_unknown") {
 			status = apiError.Status
 			body = map[string]any{"error": apiError.Message, "code": apiError.Code}
 			if apiError.Code == "job_unknown" {

@@ -63,7 +63,7 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued"}
+		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at"}
 		if definition == "Spec" {
 			stable = []string{"project", "submission_key"}
 		}
@@ -88,6 +88,8 @@ func generatedJobSchema(t *testing.T) []byte {
 		spec[name].(map[string]any)["minLength"] = 1
 	}
 	spec["submission_key"].(map[string]any)["description"] = "Exact project-scoped submission identity echo. Omitted for an unkeyed job."
+	spec["submission_key"].(map[string]any)["pattern"] = `^[A-Za-z0-9._:-]{1,128}$`
+	spec["submission_key"].(map[string]any)["maxLength"] = 128
 	result, err := json.MarshalIndent(schema, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +137,7 @@ func wireExamples(t *testing.T) map[string]any {
 	succeeded.FinishedAt = &now
 	succeeded.ReleaseConfirmed = true
 	reserved := Job{ID: "example-reserved-id", Spec: Spec{Project: "example", SubmissionKey: "example-reserved-key"}, State: "cancelled", Queued: now, CancelledAt: &now, FinishedAt: &now, Reason: "cancelled before submission"}
-	ack := Cancellation{JobID: &queued.ID, Project: "example", SubmissionKey: &s.SubmissionKey, State: "cancelled", WillNotRun: true, Release: releaseState("not_applicable"), AcknowledgedAt: now}
+	ack := Cancellation{JobID: &queued.ID, Project: "example", SubmissionKey: &s.SubmissionKey, State: "cancelled", WillNotRun: true, Release: releaseState("not_applicable"), AcknowledgedAt: &now}
 	pending := ack
 	pending.State = "stopping"
 	pending.Release = releaseState("pending")
@@ -150,11 +152,13 @@ func wireExamples(t *testing.T) map[string]any {
 	expired := absent
 	expired.State = "unknown"
 	expired.Release = nil
+	expired.AcknowledgedAt = nil
 	return map[string]any{
 		"job-queued-keyed": queued, "job-running": running, "job-succeeded": succeeded, "job-reserved-cancelled": reserved,
 		"cancel-queued": ack, "cancel-running-pending": pending, "cancel-terminal": terminal, "cancel-removed": removed, "cancel-absent": absent, "cancel-expired-unknown": expired,
 		"error-job-unknown":         wireError(t, &HTTPError{Status: 404, Code: "job_unknown", Message: "job is unknown", JobID: "example-unknown-id"}),
 		"error-submission-conflict": wireError(t, submissionFailure(false)), "error-submission-expired": wireError(t, submissionFailure(true)),
+		"error-submission-invalid": wireError(t, validateSubmissionKey("").(*HTTPError)),
 	}
 }
 
