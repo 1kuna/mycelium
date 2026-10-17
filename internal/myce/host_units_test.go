@@ -56,7 +56,7 @@ func TestDisableMultipleWorkerUnits(t *testing.T) {
 		if failed {
 			second = &rejectingUnit{}
 		}
-		h := HostControl{Dir: dir, Services: map[string]HostService{"myce-worker@gpu0.service": &fakeHostService{}, "myce-worker@gpu1.service": second}}
+		h := HostControl{Observe: testHostExclusion, Dir: dir, Services: map[string]HostService{"myce-worker@gpu0.service": &fakeHostService{}, "myce-worker@gpu1.service": second}}
 		// A failure in one unit must not manufacture a receipt for all units.
 		h.Timeout = 100000000
 		ensureTestHost(t, h.Dir, h.Clock)
@@ -141,7 +141,7 @@ func TestInstanceDockerUsesOnlySavedAttemptLabels(t *testing.T) {
 	if err := AdoptHostWorker(scoped, HostWorker{State: s.dir, Unit: "myce-worker@gpu1.service"}); err != nil {
 		t.Fatal(err)
 	}
-	h := HostControl{Dir: scoped, Service: &fakeHostService{}, Clock: clock, Docker: true}
+	h := HostControl{Observe: testHostExclusion, Dir: scoped, Service: &fakeHostService{}, Clock: clock, Docker: true}
 	ensureTestHost(t, h.Dir, h.Clock)
 	if r, err := h.Disable(context.Background(), "gpu1", 0); err != nil || !r.Confirmed {
 		t.Fatal(r, err)

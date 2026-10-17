@@ -36,7 +36,7 @@ func TestDisableSystemdCgroup(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &fakeHostService{left: tc.left, hang: tc.hang}
 			dir := t.TempDir()
-			h := HostControl{Dir: dir, Service: s, Timeout: time.Second, Processes: HostProcesses{Owned: func(workerState) (bool, error) { t.Fatal("systemd used PID registry"); return false, nil }}}
+			h := HostControl{Observe: testHostExclusion, Dir: dir, Service: s, Timeout: time.Second, Processes: HostProcesses{Owned: func(workerState) (bool, error) { t.Fatal("systemd used PID registry"); return false, nil }}}
 			start := time.Now()
 			ensureTestHost(t, h.Dir, h.Clock)
 			r, err := h.Disable(context.Background(), "test", tc.grace)
@@ -60,7 +60,7 @@ func TestDisableSystemdCgroup(t *testing.T) {
 	}
 }
 func TestDisableEmptyRegistryIsUnconfirmed(t *testing.T) {
-	h := HostControl{Dir: t.TempDir()}
+	h := HostControl{Observe: testHostExclusion, Dir: t.TempDir()}
 	ensureTestHost(t, h.Dir, h.Clock)
 	r, err := h.Disable(context.Background(), "test", 0)
 	if err == nil || r.Confirmed {
@@ -152,7 +152,7 @@ func TestSystemdRejectsUnsafeGroupAndUnit(t *testing.T) {
 }
 func TestDockerConfirmationHookKeepsFlag(t *testing.T) {
 	dir := t.TempDir()
-	h := HostControl{Dir: dir, Service: &fakeHostService{}, ConfirmContainers: func(context.Context) error { return os.ErrPermission }}
+	h := HostControl{Dir: dir, Service: &fakeHostService{}, Observe: testUnknownExclusion}
 	ensureTestHost(t, h.Dir, h.Clock)
 	r, e := h.Disable(context.Background(), "test", 0)
 	if e == nil || len(r.Unconfirmed) == 0 {
@@ -165,7 +165,7 @@ func TestSystemdRegistryFailureDoesNotGateStop(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "worker-broken.json"), []byte("broken"), 0600)
 	s := &fakeHostService{}
-	r, e := (HostControl{Dir: readyTestHost(t, dir), Service: s}).Disable(context.Background(), "test", 0)
+	r, e := (HostControl{Observe: testHostExclusion, Dir: readyTestHost(t, dir), Service: s}).Disable(context.Background(), "test", 0)
 	if e == nil || r.Confirmed || len(r.Unconfirmed) == 0 {
 		t.Fatal(r, e)
 	}
@@ -174,7 +174,7 @@ func TestSystemdHangingCommandDeadline(t *testing.T) {
 	dir := t.TempDir()
 	s := &SystemdHostService{Unit: "myce-worker.service", Command: func(ctx context.Context, _ string, _ ...string) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }}
 	start := time.Now()
-	r, e := (HostControl{Dir: readyTestHost(t, dir), Service: s, Timeout: time.Second}).Disable(context.Background(), "test", 0)
+	r, e := (HostControl{Observe: testHostExclusion, Dir: readyTestHost(t, dir), Service: s, Timeout: time.Second}).Disable(context.Background(), "test", 0)
 	defer waitHostCleanup(t, dir)
 	if e == nil || time.Since(start) > 2*time.Second || len(r.Unconfirmed) == 0 {
 		t.Fatal(r, e)
@@ -182,4 +182,17 @@ func TestSystemdHangingCommandDeadline(t *testing.T) {
 	if reason, e := HostDisabled(dir); e != nil || reason == "" {
 		t.Fatal("missing deadline fence", e)
 	}
+}
+
+// A full fake kernel/GPU observation, explicit at HostControl fixture sites.
+func testHostExclusion(_ context.Context, s HostIntent) HostExclusionReport {
+	boot, _ := HostBootID()
+	safe := true
+	zero := 0
+	return HostExclusionReport{HostRevision: s.HostRevision, Boot: boot, Verdict: "PASS", RestartSafe: &safe, GPUHolders: &zero, RunningContainers: &zero, PendingOperations: &zero, At: s.AcceptedAt, Units: []ExclusionUnit{{Unit: "myce-worker.service", Populated: new(bool)}}, Sources: map[string]*time.Time{"local_intent": &s.AcceptedAt, "cgroups": &s.AcceptedAt, "docker": &s.AcceptedAt, "gpu_holders": &s.AcceptedAt}, Errors: []ExclusionError{}}
+}
+func testUnknownExclusion(ctx context.Context, s HostIntent) HostExclusionReport {
+	r := testHostExclusion(ctx, s)
+	r.problem("docker", "permission_denied", false)
+	return r
 }

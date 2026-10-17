@@ -133,7 +133,7 @@ func TestHostReconcileRotatedWorkerSessionSettles(t *testing.T) {
 			}
 			// The worker and recorded command really stopped. Only the Linux
 			// service/cgroup observation is a fake on this laptop.
-			if r, err := (HostControl{Dir: hostDir, Clock: clock, Service: &fakeHostService{}}).Disable(context.Background(), "stopped worker", 0); err != nil || !r.Confirmed {
+			if r, err := (HostControl{Observe: testHostExclusion, Dir: hostDir, Clock: clock, Service: &fakeHostService{}}).Disable(context.Background(), "stopped worker", 0); err != nil || !r.Confirmed {
 				t.Fatal(r, err)
 			}
 			if err := ReconcileHostLocal(context.Background(), hostDir, clock, func(endpoint string) (Client, error) { return Client{URL: endpoint, Token: "test"}, nil }); err != nil {
@@ -266,7 +266,7 @@ func TestHostReconcileUndeliveredFileOutputsDoNotBlockRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r, err := (HostControl{Dir: hostDir, Clock: clock, Service: &fakeHostService{}}).Disable(context.Background(), "undelivered output", 0); err != nil || !r.Confirmed {
+	if r, err := (HostControl{Observe: testHostExclusion, Dir: hostDir, Clock: clock, Service: &fakeHostService{}}).Disable(context.Background(), "undelivered output", 0); err != nil || !r.Confirmed {
 		t.Fatal(r, err)
 	}
 	mu.Lock()

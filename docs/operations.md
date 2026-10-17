@@ -360,9 +360,9 @@ unconfirmed disable. Concurrent controls fail rather than waiting on their lock.
 The flag is persisted before installer configuration discovery; the model proxy
 also refuses disabled-host admission, including a request-body read race.
 
-Docker cleanup is part of the same confirmation and overall deadline. The trusted
-`DOCKER_HOST` (default local Unix socket) and endpoints saved in registered
-worker custody are inventoried with the exact `myce.attempt` label. Every object
+Docker cleanup is part of the same confirmation and overall deadline. The Docker
+endpoints recorded in installed worker configs and registered worker custody
+are inventoried with the exact `myce.attempt` label. Every object
 is inspected before signaling; only objects with that nonempty label qualify.
 Labeled execution receives TERM, then KILL at the original disable grace deadline
 (`--now` kills immediately). Native cleanup does not grant Docker a fresh grace.
@@ -371,10 +371,10 @@ container deletion. Unlabeled containers, including legacy Verso production,
 are never signaled.
 
 Pending create/start custody is reconciled even after the client or worker dies.
-An empty scan cannot settle an uncertain operation: a late accepted start must
-be positively observed and stopped, or independently fenced through the existing
-`resolve-docker --confirm-gone` procedure. Unknown create acceptance remains
-unconfirmed even after a discovered late container is stopped. Slow, hanging or
+An empty scan cannot settle an uncertain operation. Exact label/name evidence can
+settle a late create, and a matching running container or a fresh `StartedAt` can
+settle start acceptance; confirmed cleanup must follow. `resolve-docker` uses
+this same journal and inspection path, with no operator assertion escape. Slow, hanging or
 refusing Docker retains DISABLED, returns nonzero, and reports known attempt and
 container IDs; an unavailable inventory is explicitly unconfirmed, not a claim
 that all IDs are known. A missing Docker CLI is **not applicable** only when
@@ -1314,7 +1314,8 @@ containers; missing private attachment is never accepted.
 
 An empty scan does not settle a timed-out create/start. A definite daemon
 refusal can settle without execution. A lost start response can settle only
-after positive inspection witnesses the exact created container running,
+after positive inspection witnesses the exact created container running or a
+`StartedAt` at or after the durable start dispatch,
 followed by confirmed cleanup: the adapter sends one start, never retries it,
 and rejects restart policies. Until that witness, a future delayed start is
 still possible. If no definite disposition or positive acceptance evidence
@@ -1328,31 +1329,30 @@ and queue restart do not renew it. The reservation stays held. This bounds silen
 waiting, not physical recovery: Verso has only the B70, so alternate placement is
 not a recovery plan for its production jobs.
 
-Operator recovery is explicit and offline:
+Operator recovery uses verified offline custody:
 
-1. Stop the affected worker/service and prevent automatic restart. Keep its spool.
-2. Independently fence all accepted/delayed Docker operations on the saved daemon
-   endpoint, and verify the exact attempt's execution, GPU use, RAM and labeled
-   private networks are gone.
-   Empty scans, worker exit and elapsed time alone do not prove this. Do not stop
-   unrelated or legacy Verso containers. If a qualified fence cannot be established,
-   keep the hold and escalate host maintenance.
-3. Read the opaque identity from that worker's `state.json` and matching
+1. Close the host with `myce host close --local`, selecting the installed worker
+   account/config when required. Keep the worker stopped and preserve its spool.
+2. Read the opaque identity from that worker's `state.json` and matching
    `<identity>.docker.json`. Run
-   `myce resolve-docker --state-dir /absolute/worker/spool --attempt-id ID --confirm-gone`.
-   This takes the exclusive worker lock, refuses a different attempt, and durably
-   records operator-confirmed forced release. It makes no Docker or network calls.
-4. If DISABLED is present, rerun a notified `myce disable` using the same host
-   control directory. After confirmed host cleanup it sends the saved exact
-   job/machine/session/attempt release acknowledgement; confirm the hold clears
-   in queue status. Resolution alone does not notify the queue or remove the flag.
-   If notification remains unavailable, `myce enable` and restart the same worker
-   with the same spool/queue/name to reconcile before log replay. Keep the old
-   spool until the acknowledgement is accepted.
+   `myce resolve-docker --state-dir /path/to/spool --attempt-id ID`, adding
+   `--worker-user USER --config /path/to/config.json` under root or for a custom
+   installation. The selected config or host registry must name that exact spool.
+3. The dropped worker executor takes the host reconciliation and exclusive worker
+   locks, inspects the saved endpoint with exact attempt labels, reconciles the
+   operation journal and performs scoped cleanup. It records release only after
+   verified terminal disposition and stopped, nonrestartable inventory. A timeout,
+   empty scan or external assertion cannot clear unknown acceptance. Keep the hold
+   and escalate maintenance if positive disposition evidence remains unavailable.
+4. Run `myce host reconcile --local` through the same installed identity. Root's
+   fresh cgroup/proc/device observation is required for full local exclusion.
+   Confirm queue settlement before opening the host. Exact Docker reconciliation
+   alone neither opens the launch gates nor certifies whole-host exclusion.
 
-`--confirm-gone` is an operator assertion of external proof, not an automatic
-check or permission to release uncertain memory. A crash after the custody write
-is recoverable; restart reads the durable disposition without killing containers.
+The old `--confirm-gone` flag is rejected. Persisted operator assertions from an
+older binary remain UNKNOWN, and cannot authorize release or evidence disposal.
+Result delivery does not gate a confirmed session discharge; undelivered results
+stay in the spool as nonblocking diagnostic evidence, and stale replay is rejected.
 
 Queue obligations survive stop expiry, machine loss, queue restart and fresh
 worker sessions, even on hosts without production-hold policy. Unconfirmed

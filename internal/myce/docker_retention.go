@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 )
@@ -29,7 +28,7 @@ func acknowledgeDocker(s *workerStore, worker string, now time.Time) error {
 	if err = json.Unmarshal(b, &st); err != nil {
 		return err
 	}
-	if st.Identity != s.state.Identity || !st.Released || st.Pending {
+	if st.Identity != s.state.Identity || !st.Released || st.Pending || st.OperatorConfirmed {
 		return nil
 	}
 	// Preserve the first acknowledgement across replay after a crash.
@@ -80,7 +79,7 @@ func pruneStoppedDocker(ctx context.Context, dir, worker, active string, now tim
 			if err = json.Unmarshal(b, &st); err != nil {
 				return err
 			}
-			if st.Identity != identity || st.Endpoint == "" || !st.Released || st.Pending {
+			if st.Identity != identity || st.Endpoint == "" || !st.Released || st.Pending || st.OperatorConfirmed {
 				return nil
 			}
 			// A queued background scan can outlive the active identity it captured.
@@ -106,31 +105,23 @@ func pruneStoppedDocker(ctx context.Context, dir, worker, active string, now tim
 			if caller != nil {
 				call = caller(d)
 			}
-			out, err := call("ps", "--all", "--quiet", "--no-trunc", "--filter", dockerAttemptFilter(identity), "--filter", "label=myce.worker="+worker)
+			cs, err := inspectOwnedDocker(ctx, st.Endpoint, identity, func(_ context.Context, _ string, args ...string) ([]byte, error) {
+				if args[0] == "ps" {
+					args = append(args, "--filter", "label=myce.worker="+worker)
+				}
+				return call(args...)
+			})
 			if err != nil {
 				return err
 			}
-			ids := strings.Fields(string(out))
+			ids := []string{}
+			for _, c := range cs {
+				if c.Config.Labels["myce.worker"] != worker || dockerLive(c) || c.HostConfig.RestartPolicy == nil || c.HostConfig.RestartPolicy.Name != "no" {
+					return errors.New("retention ownership or stopped state unconfirmed")
+				}
+				ids = append(ids, c.ID)
+			}
 			if len(ids) > 0 {
-				out, err = call(append([]string{"inspect"}, ids...)...)
-				if err != nil {
-					return err
-				}
-				var cs []dockerInspection
-				if err = json.Unmarshal(out, &cs); err != nil {
-					return err
-				}
-				if len(cs) != len(ids) {
-					return errors.New("incomplete retention inventory")
-				}
-				seen := map[string]bool{}
-				for _, c := range cs {
-
-					if !slices.Contains(ids, c.ID) || seen[c.ID] || c.Config.Labels["myce.attempt"] != identity || c.Config.Labels["myce.worker"] != worker || c.State.Running == nil || *c.State.Running || (c.State.Status != "exited" && c.State.Status != "dead" && c.State.Status != "created") {
-						return errors.New("retention ownership or stopped state unconfirmed")
-					}
-					seen[c.ID] = true
-				}
 				// Never discard sidecar evidence on upgrade or after a failed capture.
 				needsEvidence := st.EvidenceSaved
 				for _, m := range st.Containers {

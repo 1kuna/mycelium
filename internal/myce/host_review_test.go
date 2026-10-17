@@ -165,7 +165,7 @@ func TestHostRevisionDisableWaitsForNonSystemdLaunch(t *testing.T) {
 	if err = AdoptHostWorker(dir, HostWorker{State: spool, Host: "test-host", Name: "worker"}); err != nil {
 		t.Fatal(err)
 	}
-	h := HostControl{Dir: dir, Clock: clock, Processes: HostProcesses{
+	h := HostControl{Observe: testHostExclusion, Dir: dir, Clock: clock, Processes: HostProcesses{
 		Owned: func(workerState) (bool, error) { return false, nil }, Signal: func(workerState, syscall.Signal) error { return nil },
 		Pause: func(d time.Duration) {
 			pauses++
@@ -190,7 +190,7 @@ func TestHostRevisionCloseRequiresExplicitCAS(t *testing.T) {
 	}
 	stale := HostRevision{Revision: initial.Revision + 10, Operation: "unrelated-open-selector"}
 	// Expected is an open selector and must never accidentally turn close into CAS.
-	h := HostControl{Dir: dir, Expected: stale}
+	h := HostControl{Observe: testHostExclusion, Dir: dir, Expected: stale}
 	_, _ = h.Disable(context.Background(), "unconditional", 0)
 	current, err := ReadHostIntent(dir)
 	if err != nil || current.Desired != "closed" || current.Revision != initial.Revision+1 {
@@ -290,7 +290,7 @@ func TestHostRevisionBenchmarkCommandCustody(t *testing.T) {
 				records, err = hostProcessRecords(workers, hostCommandDirectory(dir))
 				return err == nil && len(records) == 1 && records[0].PID > 0
 			})
-			control := HostControl{Dir: dir}
+			control := HostControl{Observe: testHostExclusion, Dir: dir}
 			if service {
 				control.Service = &fakeHostService{}
 			}

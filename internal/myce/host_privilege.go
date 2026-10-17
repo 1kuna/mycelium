@@ -300,23 +300,28 @@ func (o HostObservationContext) Observe(ctx context.Context, hook func(context.C
 // HostMutation has a closed operation vocabulary, no arbitrary command/argv/env.
 // Inputs and results travel over pipes, never command-line arguments or a shell.
 type HostMutation struct {
-	Unit          string        `json:"unit,omitempty"`
-	Operation     string        `json:"operation"`
-	WorkerUser    string        `json:"worker_user"`
-	ConfigPath    string        `json:"config"`
-	StateDir      string        `json:"state_dir"`
-	Reason        string        `json:"reason,omitempty"`
-	Grace         time.Duration `json:"grace,omitempty"`
-	Timeout       time.Duration `json:"timeout,omitempty"`
-	Expected      HostRevision  `json:"expected"`
-	CloseExpected *HostRevision `json:"close_expected,omitempty"`
+	SpoolDir      string               `json:"spool_dir,omitempty"`
+	AttemptID     string               `json:"attempt_id,omitempty"`
+	Evidence      *HostExclusionReport `json:"evidence,omitempty"`
+	Unit          string               `json:"unit,omitempty"`
+	Operation     string               `json:"operation"`
+	WorkerUser    string               `json:"worker_user"`
+	ConfigPath    string               `json:"config"`
+	StateDir      string               `json:"state_dir"`
+	Reason        string               `json:"reason,omitempty"`
+	Grace         time.Duration        `json:"grace,omitempty"`
+	Timeout       time.Duration        `json:"timeout,omitempty"`
+	Expected      HostRevision         `json:"expected"`
+	CloseExpected *HostRevision        `json:"close_expected,omitempty"`
 }
 type HostMutationResult struct {
-	Code     string   `json:"code,omitempty"`
-	Errors   []string `json:"errors,omitempty"`
-	StateDir string   `json:"state_dir,omitempty"`
-	Desired  string   `json:"desired,omitempty"`
-	Partial  bool     `json:"partial"`
+	Input     *HostExclusionInput  `json:"exclusion_input,omitempty"`
+	Exclusion *HostExclusionReport `json:"exclusion,omitempty"`
+	Code      string               `json:"code,omitempty"`
+	Errors    []string             `json:"errors,omitempty"`
+	StateDir  string               `json:"state_dir,omitempty"`
+	Desired   string               `json:"desired,omitempty"`
+	Partial   bool                 `json:"partial"`
 	HostRevision
 	Stopped int `json:"stopped"`
 	// CleanupConfirmed is not the full local-exclusion PASS (S07).
@@ -385,13 +390,13 @@ func (v HostInvocation) Mutate(ctx context.Context, m HostMutation, launch HostC
 		}
 		return HostMutationResult{}, hostProtocolError(r.Code)
 	}
-	if (m.Operation == "close" || m.Operation == "open" || m.Operation == "reconcile") && (r.Result.Revision == 0 || r.Result.Operation == "") {
+	if (m.Operation == "resolve-docker" || m.Operation == "close" || m.Operation == "open" || m.Operation == "reconcile") && (r.Result.Revision == 0 || r.Result.Operation == "") {
 		return HostMutationResult{}, ErrHostChild
 	}
 	return r.Result, nil
 }
 func validHostMutation(m HostMutation) bool {
-	return (m.Operation == "resolve" || m.Operation == "status" || m.Operation == "close" || m.Operation == "open" || m.Operation == "reconcile" || (ValidWorkerUnit(m.Unit) && (m.Operation == "unit-stop" || m.Operation == "unit-kill" || m.Operation == "unit-start"))) && m.Grace >= 0 && m.Grace <= time.Minute && m.Timeout >= 0 && len(m.Reason) <= 4096
+	return (m.Operation == "resolve-docker" || m.Operation == "inspect-exclusion" || m.Operation == "record-exclusion" || m.Operation == "resolve" || m.Operation == "status" || m.Operation == "close" || m.Operation == "open" || m.Operation == "reconcile" || (ValidWorkerUnit(m.Unit) && (m.Operation == "unit-stop" || m.Operation == "unit-kill" || m.Operation == "unit-start"))) && m.Grace >= 0 && m.Grace <= time.Minute && m.Timeout >= 0 && len(m.Reason) <= 4096
 }
 func hostProtocolError(code string) error {
 	switch code {
@@ -519,6 +524,10 @@ func executeResolvedHost(ctx context.Context, v HostInvocation, m HostMutation, 
 	}
 	if m.Operation == "resolve" || m.Operation == "status" {
 		return HostMutationResult{HostRevision: s.HostRevision, StateDir: v.StateDir, Desired: s.Desired, Code: hostStatusCode(s), Errors: s.Errors}, nil
+	}
+	if m.Operation == "inspect-exclusion" {
+		input, err := readHostExclusionInput(v)
+		return HostMutationResult{HostRevision: s.HostRevision, Desired: s.Desired, Input: input}, err
 	}
 	if handle == nil {
 		return zero, ErrHostChild

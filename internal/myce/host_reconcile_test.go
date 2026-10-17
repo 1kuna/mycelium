@@ -240,7 +240,7 @@ func TestHostReconcileUnconfirmedCloseCannotOpen(t *testing.T) {
 	q, clock := fixture(t)
 	dir := t.TempDir()
 	testHostOpen(t, dir, clock)
-	h := HostControl{Dir: dir, Clock: clock, Service: &fakeHostService{}, ConfirmContainers: func(context.Context) error { return os.ErrPermission }}
+	h := HostControl{Dir: dir, Clock: clock, Service: &fakeHostService{}, Observe: testUnknownExclusion}
 	if _, err := h.Disable(context.Background(), "close", 0); err == nil {
 		t.Fatal("fixture cleanup confirmed")
 	}
@@ -265,7 +265,7 @@ func TestHostReconcileFreshAckHistoryAndSupersession(t *testing.T) {
 	q, clock := fixture(t)
 	dir := t.TempDir()
 	testHostOpen(t, dir, clock)
-	h := HostControl{Dir: dir, Clock: clock, Service: &fakeHostService{}}
+	h := HostControl{Observe: testHostExclusion, Dir: dir, Clock: clock, Service: &fakeHostService{}}
 	if r, err := h.Disable(context.Background(), "close", 0); err != nil || !r.Confirmed {
 		t.Fatal(r, err)
 	}
@@ -402,7 +402,7 @@ func TestHostReconcileUnmatchedLocalCustodyDiagnosticAndBlockingHolds(t *testing
 	q, clock := fixture(t)
 	dir := t.TempDir()
 	testHostOpen(t, dir, clock)
-	if _, err := (HostControl{Dir: dir, Clock: clock, Service: &fakeHostService{}}).Disable(context.Background(), "close", 0); err != nil {
+	if _, err := (HostControl{Observe: testHostExclusion, Dir: dir, Clock: clock, Service: &fakeHostService{}}).Disable(context.Background(), "close", 0); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := ReadHostIntent(dir)
@@ -448,7 +448,7 @@ func TestHostReconcileReadsFinalCustodyAfterStop(t *testing.T) {
 	if err := saveWorkerJSON(spool, "state.json", workerState{Session: "session"}); err != nil {
 		t.Fatal(err)
 	}
-	h := HostControl{Dir: dir, Clock: clock, Service: reconcileStopHook{stop: func() {
+	h := HostControl{Observe: testHostExclusion, Dir: dir, Clock: clock, Service: reconcileStopHook{stop: func() {
 		if err := saveWorkerJSON(spool, "state.json", workerState{Session: "session", Job: &Job{ID: "final-attempt", Attempt: 1}}); err != nil {
 			t.Fatal(err)
 		}
@@ -489,7 +489,7 @@ func TestHostReconcileFinalCustodyFailureCannotConfirm(t *testing.T) {
 	if err := AdoptHostWorker(dir, HostWorker{State: spool, Host: "test-host", Name: "one", Queue: "queue"}); err != nil {
 		t.Fatal(err)
 	}
-	h := HostControl{Dir: dir, Clock: clock, Service: reconcileStopHook{stop: func() {
+	h := HostControl{Observe: testHostExclusion, Dir: dir, Clock: clock, Service: reconcileStopHook{stop: func() {
 		if err := os.WriteFile(filepath.Join(spool, "state.json"), []byte("broken"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -563,7 +563,7 @@ func TestHostReconcileCancelledSavedResultAfterConfirmedCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The saved result predates the successful retry of local container cleanup.
-	h := HostControl{Dir: dir, Clock: clock, Service: &fakeHostService{}, ConfirmContainers: func(context.Context) error { return nil }}
+	h := HostControl{Observe: testHostExclusion, Dir: dir, Clock: clock, Service: &fakeHostService{}}
 	if report, err := h.Disable(context.Background(), "close", 0); err != nil || !report.Confirmed {
 		t.Fatal(report, err)
 	}

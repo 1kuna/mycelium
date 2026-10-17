@@ -63,6 +63,7 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	devExclusion    bool // Set only by StartDev; never part of persisted state.
 	localHostID     string
 	localHostErr    error
 	localHostDir    string

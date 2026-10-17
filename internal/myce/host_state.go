@@ -58,6 +58,8 @@ type HostClose struct {
 // Cleanup evidence is scoped to one boot and one revision. It is not the
 // privileged rest verdict (GPU/restart observation is supplied by S07).
 type HostLocalExclusion struct {
+	Simulated bool                 `json:"simulated,omitempty"`
+	Evidence  *HostExclusionReport `json:"evidence,omitempty"`
 	HostObservation
 	Confirmed bool             `json:"confirmed"`
 	Errors    []string         `json:"errors"`

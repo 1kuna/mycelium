@@ -63,7 +63,7 @@ func TestHostReconcileDevQueueOutageCompletesBeforeAdmission(t *testing.T) {
 	}
 	closed = true
 	// Workers are stopped. Fake GPU/service inventory is the only fake boundary.
-	report, err := (HostControl{Dir: hostDir, Clock: RealClock{}, Service: &fakeHostService{}}).Disable(context.Background(), "planned queue outage", 0)
+	report, err := (HostControl{Observe: testHostExclusion, Dir: hostDir, Clock: RealClock{}, Service: &fakeHostService{}}).Disable(context.Background(), "planned queue outage", 0)
 	if err != nil || !report.Confirmed {
 		t.Fatal(report, err)
 	}

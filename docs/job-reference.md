@@ -146,7 +146,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `join --model-listen` | `127.0.0.1:0` | Authenticated worker proxy bind; engines stay loopback |
 | `join --model-advertise` | Local proxy URL | Explicit URL reachable by queue for LAN workers |
 | `leave --name` | Hostname | Stop assigning work; ask wait/stop for non-resumable jobs |
-| `resolve-docker --state-dir DIR --attempt-id ID --confirm-gone` | Explicit offline assertion | Record externally verified release of a stuck managed attempt; see [operator recovery](operations.md#docker-cleanup-custody) |
+| `resolve-docker --state-dir DIR --attempt-id ID [--worker-user USER] [--config FILE]` | Verified offline reconciliation | Reconcile exact registered custody through the worker executor; unknown operation disposition stays charged; see [operator recovery](operations.md#docker-cleanup-custody) |
 | `leave --now` | `false` | Signal all jobs, still allowing checkpoint grace |
 | `wait ID [ID...] --timeout DURATION` | Unlimited | Wait for every final state; timeout never cancels jobs |
 | `logs ID --follow` | `false` | Follow until terminal and drain final logs |

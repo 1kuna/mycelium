@@ -79,7 +79,7 @@ func TestDisableDocker(t *testing.T) {
 			if mode == "native-grace" {
 				service = dockerGraceService{clock}
 			}
-			h := HostControl{Dir: w.HostStateDir, Service: service, Clock: clock, Docker: true, Timeout: timeout}
+			h := HostControl{Observe: testHostExclusion, Dir: w.HostStateDir, Service: service, Clock: clock, Docker: true, Timeout: timeout}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			advanceDone, driverDone := make(chan struct{}), make(chan struct{})
@@ -232,12 +232,14 @@ func TestDockerDisabledLaunchAndResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = ConfirmDockerGone(w.HostStateDir, w.StateDir, "owned", true); err == nil {
+	lockCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err = ReconcileDockerAttempt(lockCtx, w.HostStateDir, w.StateDir, "owned"); err == nil {
 		t.Fatal("resolution raced host controls")
 	}
 	unlock()
-	if err := ConfirmDockerGone(w.HostStateDir, w.StateDir, "owned", true); err != nil {
-		t.Fatal(err)
+	if err := ReconcileDockerAttempt(context.Background(), w.HostStateDir, w.StateDir, "owned"); err == nil {
+		t.Fatal("unknown operation settled by assertion")
 	}
 	if reason, err := HostDisabled(w.HostStateDir); err != nil || reason == "" {
 		t.Fatal("resolution cleared disabled flag")
@@ -245,8 +247,10 @@ func TestDockerDisabledLaunchAndResolution(t *testing.T) {
 	if err := w.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "calls")); !os.IsNotExist(err) {
-		t.Fatal("disabled startup contacted Docker")
+	// Offline reconciliation may inspect Docker; disabled worker startup may not launch.
+	calls, _ := os.ReadFile(filepath.Join(root, "calls"))
+	if strings.Contains(string(calls), "create ") || strings.Contains(string(calls), "start ") {
+		t.Fatal("disabled path launched Docker")
 	}
 }
 
@@ -263,7 +267,7 @@ func TestDisableDockerRegistryUnavailable(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(w.HostStateDir, "worker-broken.json"), []byte("{"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	r, err := (HostControl{Dir: w.HostStateDir, Docker: true, Service: &fakeHostService{}, Timeout: time.Second}).Disable(context.Background(), "test", 0)
+	r, err := (HostControl{Observe: testHostExclusion, Dir: w.HostStateDir, Docker: true, Service: &fakeHostService{}, Timeout: time.Second}).Disable(context.Background(), "test", 0)
 	if err == nil || r.Confirmed || !strings.Contains(strings.Join(r.Unconfirmed, " "), "custody unconfirmed") {
 		t.Fatalf("%+v %v", r, err)
 	}

@@ -17,7 +17,7 @@ import (
 
 func TestHostMemoryBudgetDurableWhileDisabled(t *testing.T) {
 	dir := readyTestHost(t, t.TempDir())
-	if _, err := (HostControl{Dir: dir, Service: &fakeHostService{}}).Disable(context.Background(), "legacy owner", 0); err != nil {
+	if _, err := (HostControl{Observe: testHostExclusion, Dir: dir, Service: &fakeHostService{}}).Disable(context.Background(), "legacy owner", 0); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(filepath.Join(dir, hostStateFile))
@@ -56,7 +56,7 @@ func TestHostMemoryBudgetDurableWhileDisabled(t *testing.T) {
 		t.Fatal("disabled install budget not overridden", err)
 	}
 	testConfirmClose(t, dir)
-	if err := (HostControl{Dir: dir, Expected: readTestHostRevision(t, dir), Settled: func(HostIntent) error { return nil }}).Enable(context.Background()); err != nil {
+	if err := (HostControl{Observe: testHostExclusion, Dir: dir, Expected: readTestHostRevision(t, dir), Settled: func(HostIntent) error { return nil }}).Enable(context.Background()); err != nil {
 		t.Fatal("could not enable after offline budget change", err)
 	}
 	if err := w.refreshHostMemoryBudget(); err != nil || w.Machine.HostMemoryBudgetGB != 27 {
@@ -160,7 +160,7 @@ func TestHostMemoryBudgetLiveRaiseLowerAndQueueStatus(t *testing.T) {
 
 func TestHostMemoryBudgetWorkerReportsLiveWithoutRestart(t *testing.T) {
 	dir := readyTestHost(t, t.TempDir())
-	h := HostControl{Dir: dir, Service: &fakeHostService{}}
+	h := HostControl{Observe: testHostExclusion, Dir: dir, Service: &fakeHostService{}}
 	if _, err := h.Disable(context.Background(), "install disabled", 0); err != nil {
 		t.Fatal(err)
 	}

@@ -249,6 +249,17 @@ func TestDockerRestartMainFailures(t *testing.T) {
 				t.Fatal(e)
 			}
 			c.advance(StopGrace)
+			if kind == "operator" {
+				p, err := w.restoreDocker(s)
+				if err != nil || p == nil {
+					t.Fatal("legacy assertion did not retain cleanup", p, err)
+				}
+				p.docker.close()
+				if p.docker.state.Released || !p.docker.state.Pending {
+					t.Fatal("legacy assertion became release", p.docker.state)
+				}
+				return
+			}
 			r := restartSavedResult(t, w, s)
 			if r.Success || (kind != "operator" && r.Interrupted) {
 				t.Fatalf("failure changed: %+v", r)

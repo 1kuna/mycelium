@@ -53,9 +53,9 @@ func (p *dockerDisableProgress) report(left []string) (string, []string) {
 
 func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, stopAt time.Time) error {
 	h.dockerProgress.set("unconfirmed", []string{"Docker inventory not yet confirmed"})
-	endpoint := os.Getenv("DOCKER_HOST")
+	endpoint := h.DockerEndpoint
 	if endpoint == "" {
-		endpoint = "unix:///var/run/docker.sock"
+		endpoint = defaultDockerEndpoint(os.Getenv("DOCKER_HOST"))
 	}
 	endpoints := []string{endpoint}
 	attempts := map[string]*dockerAttempt{}
@@ -87,6 +87,10 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 			}
 			if !slices.Contains(endpoints, st.Endpoint) {
 				endpoints = append(endpoints, st.Endpoint)
+			}
+			if st.OperatorConfirmed {
+				st.Released = false
+				st.Pending = true
 			}
 			if st.Released {
 				continue
@@ -168,7 +172,7 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 			}
 			for _, c := range containers {
 				containerKey := endpoint + "\x00" + c.ID
-				if *c.State.Running {
+				if dockerLive(c) {
 					liveContainers[containerKey] = fmt.Sprintf("Docker attempt %s container %s: execution unconfirmed", c.Config.Labels["myce.attempt"], c.ID)
 				} else {
 					delete(liveContainers, containerKey)
@@ -183,7 +187,7 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 					attempts[key] = d
 				}
 				// A previously stopped object may have started while another obligation was settling.
-				if *c.State.Running {
+				if dockerLive(c) {
 					d.state.Released = false
 				}
 			}
@@ -211,6 +215,9 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 			return fmt.Errorf("Docker cleanup unconfirmed: %s: %w", strings.Join(left, "; "), ctx.Err())
 		}
 		if len(left) == 0 {
+			if err := h.maintainDocker(ctx, workers); err != nil {
+				return err
+			}
 			h.dockerProgress.set("confirmed (no labeled execution; pending operations settled)"+orphanNote, nil)
 			return nil
 		}
@@ -220,4 +227,30 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 		case <-wake.C:
 		}
 	}
+}
+
+func (h HostControl) maintainDocker(ctx context.Context, workers []HostWorker) error {
+	retention := DefaultContainerRetention
+	if h.ContainerRetention != nil {
+		retention = *h.ContainerRetention
+	}
+	if retention < 0 {
+		return errors.New("invalid container retention")
+	}
+	clock := h.Clock
+	if clock == nil {
+		clock = RealClock{}
+	}
+	var failures []error
+	for _, w := range workers {
+		if w.Name == "" || w.State == "" {
+			// Missing identity never authorizes broad maintenance. The observer
+			// reports registry incompleteness separately from disposal.
+			continue
+		}
+		if err := pruneStoppedDocker(ctx, w.State, w.Name, "", clock.Now(), retention, nil); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
 }
