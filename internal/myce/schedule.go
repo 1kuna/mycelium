@@ -11,7 +11,7 @@ func fits(j *Job, m *Machine, memory float64) bool {
 	return hostFits(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) && fitsWithoutHostMemory(j, m, memory)
 }
 func fitsWithoutHostMemory(j *Job, m *Machine, memory float64) bool {
-	return logPolicyFits(j.Spec.Logs, m) && !availabilityBlocked(m) && capabilityFits(j, m) && extensionCanRun(j, m) && m.MemoryError == "" && !m.Gone && !m.Leaving && (!needsCheckpoint(j) || !m.CheckpointUnavailable) && memory >= j.Spec.Needs.MemoryGB && machineAllowed(j.Spec.AllowedMachines, m.ID) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && environmentCanRun(j, m)
+	return !cancelled(j) && logPolicyFits(j.Spec.Logs, m) && !availabilityBlocked(m) && capabilityFits(j, m) && extensionCanRun(j, m) && m.MemoryError == "" && !m.Gone && !m.Leaving && (!needsCheckpoint(j) || !m.CheckpointUnavailable) && memory >= j.Spec.Needs.MemoryGB && machineAllowed(j.Spec.AllowedMachines, m.ID) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && environmentCanRun(j, m)
 }
 func affinity(j *Job, m *Machine) int {
 	n := 0

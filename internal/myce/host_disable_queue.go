@@ -59,7 +59,7 @@ func (q *Queue) DisableHostGeneration(host, reason string, cleared bool, executi
 			for _, j := range q.s.Jobs {
 				if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {
 					if cleared {
-						if j.Reason == "cancel requested" {
+						if cancelled(j) {
 							j.State = "cancelled"
 							j.StopAt = nil
 						} else {
@@ -103,6 +103,20 @@ func (q *Queue) DisableHostGeneration(host, reason string, cleared bool, executi
 			if cleared {
 				for key, r := range q.s.HostReleases {
 					if r.Machine == m.ID {
+						if j := q.retainedJob(r.Job); j != nil && cancelled(j) {
+							matched := false
+							for _, execution := range executions {
+								if execution.ID == r.Job && execution.Machine == r.Machine && execution.Session == r.Session && execution.Attempt == r.Attempt {
+									q.confirmCopyRelease(execution)
+									matched = true
+									break
+								}
+							}
+							// A blanket clear cannot discharge cancellation custody.
+							if !matched {
+								continue
+							}
+						}
 						delete(q.s.HostReleases, key)
 					}
 				}

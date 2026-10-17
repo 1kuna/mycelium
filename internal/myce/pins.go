@@ -192,7 +192,7 @@ func (q *Queue) stopFor(j *Job, priority, kind string) {
 		t := q.clock.Now().Add(grace)
 		if j.StopAt == nil || t.Before(*j.StopAt) {
 			j.StopAt = &t
-			if j.Reason != "cancel requested" {
+			if !cancelled(j) {
 				j.Reason = "making room for " + priority + " " + kind
 			}
 		}

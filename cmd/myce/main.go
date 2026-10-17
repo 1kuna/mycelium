@@ -564,7 +564,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if f.NArg() != 1 {
 			return errors.New("usage: myce cancel <id>")
 		}
-		return client.Call(ctx, "POST", "/api/jobs/"+f.Arg(0)+"/cancel", nil, nil)
+		ack, err := client.Cancel(ctx, f.Arg(0))
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(ack)
 	case "leave":
 		s, err := status(ctx, client)
 		if err != nil {

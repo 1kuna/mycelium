@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -242,6 +243,50 @@ func TestDevCheckpointEndToEnd(t *testing.T) {
 		t.Fatalf("checkpoint=%s", data)
 	}
 	t.Logf("real myce dev: production completed; experiment stopped, saved, resumed on attempt 2 from checkpoint %d", progress)
+
+	// Cancel a running command by key through the executable dev server. Treat
+	// the accepted submit response as lost: cancellation uses only project/key.
+	s.SubmissionKey = "dev-cancel-running"
+	var discarded myce.Job
+	if err := c.Call(ctx, "POST", "/api/jobs", s, &discarded); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, ctx, func() bool { return strings.Contains(readLogs(t, ctx, c, discarded.ID), "checkpoint ready") })
+	ack, err := c.CancelSubmission(ctx, s.Project, s.SubmissionKey)
+	if err != nil || ack.JobID == nil || *ack.JobID != discarded.ID || !ack.WillNotRun || (ack.Release == nil || *ack.Release != "pending") {
+		t.Fatalf("running cancel: %+v %v", ack, err)
+	}
+	wait(t, ctx, func() bool {
+		ack, err = c.CancelSubmission(ctx, s.Project, s.SubmissionKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ack.State == "cancelled" && (ack.Release != nil && *ack.Release == "confirmed")
+	})
+	if !strings.Contains(readLogs(t, ctx, c, discarded.ID), "saved on stop progress=") {
+		t.Fatal("cancelled process did not stop and save")
+	}
+	var replay myce.Job
+	if err := c.Call(ctx, "POST", "/api/jobs", s, &replay); err != nil {
+		t.Fatal(err)
+	}
+	if replay.ID != discarded.ID || replay.State != "cancelled" || replay.Attempt != 1 {
+		t.Fatalf("cancel replay executed again: %+v", replay)
+	}
+
+	output, err := exec.CommandContext(ctx, binary, "cancel", discarded.ID, "--queue", c.URL, "--token", "e2e-token").CombinedOutput()
+	if err != nil {
+		t.Fatalf("CLI cancel: %v %s", err, output)
+	}
+	var cliAck myce.Cancellation
+	if err := json.Unmarshal(output, &cliAck); err != nil {
+		t.Fatal(err)
+	}
+	if cliAck.JobID == nil || *cliAck.JobID != discarded.ID || !cliAck.WillNotRun || (cliAck.Release == nil || *cliAck.Release != "confirmed") {
+		t.Fatalf("CLI envelope: %+v", cliAck)
+	}
+	t.Log("real myce dev: cancel by key stopped attempt 1; release confirmed; submit replay stayed cancelled")
+
 }
 
 const devTestTimeout = 60 * time.Second

@@ -114,7 +114,7 @@ func (q *Queue) retainRelease(j *Job) {
 		return
 	}
 	policy := q.s.Hosts[hostID(m)]
-	if j.Spec.StartBy == nil && !j.Spec.Run.Docker && m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0 && q.machineJobLimit(m) == 0 && (policy == nil || !policy.Policy.ProductionHold) {
+	if !cancelled(j) && j.Spec.StartBy == nil && !j.Spec.Run.Docker && m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0 && q.machineJobLimit(m) == 0 && (policy == nil || !policy.Policy.ProductionHold) {
 		return
 	}
 	if q.s.HostReleases == nil {
@@ -136,6 +136,7 @@ func (q *Queue) retainRelease(j *Job) {
 	q.s.HostReleases[releaseKey(r)] = r
 }
 func (q *Queue) settleRelease(r Result) bool {
+	q.confirmCopyRelease(r)
 	key := releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})
 	_, ok := q.s.HostReleases[key]
 	delete(q.s.HostReleases, key)
@@ -152,6 +153,7 @@ func (q *Queue) reconcileHostReleases(c Checkin) {
 			stopped = r.Session == c.Machine.Session && !q.backgroundPreparing(&c.Machine)
 		}
 		if fresh || stopped {
+			q.confirmCopyRelease(Result{Execution: Execution{ID: r.Job, Attempt: r.Attempt}, Machine: r.Machine, Session: r.Session})
 			delete(q.s.HostReleases, key)
 		}
 	}
@@ -163,7 +165,7 @@ func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
-	if !logPolicyFits(j.Spec.Logs, m) {
+	if cancelled(j) || !logPolicyFits(j.Spec.Logs, m) {
 		return false
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok {

@@ -151,6 +151,10 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 	if len(data) > 0 {
 		q.restartUntil = clock.Now().Add(RestartGrace)
 		for _, j := range q.s.Jobs {
+			if j.CancelledAt == nil && j.Reason == "cancel requested" {
+				now := clock.Now()
+				j.CancelledAt = &now
+			}
 			if j.Attempt > 0 && len(j.Copies) == 0 && j.Machine != "" {
 				j.Starts = j.Attempt
 				j.Copies = append(j.Copies, Copy{Machine: j.Machine, Session: j.Session, Attempt: j.Attempt})
@@ -373,6 +377,12 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 	return &out, err
 }
 func (q *Queue) retry(j *Job, why string) {
+	if cancelled(j) {
+		if !terminal(j.State) {
+			q.finishCancellation(j)
+		}
+		return
+	}
 	j.Machine = ""
 	j.Session = ""
 	j.StopAt = nil
@@ -444,7 +454,7 @@ func (q *Queue) maintain() {
 			m.Models = nil
 			for _, j := range q.s.Jobs {
 				if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
-					if j.Reason == "cancel requested" {
+					if cancelled(j) {
 						j.State = "cancelled"
 						j.StopAt = nil
 					} else {
@@ -466,7 +476,7 @@ func (q *Queue) maintain() {
 	}
 	for _, j := range q.s.Jobs {
 		if j.Reason != "disabled by operator" && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !j.Spec.Run.Docker && expired(j.StopAt, now) {
-			if j.Reason == "cancel requested" {
+			if cancelled(j) {
 				j.State = "cancelled"
 				j.StopAt = nil
 			} else {
@@ -581,7 +591,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		if c.Running == nil && old != nil && old.Session == m.Session {
 			for _, j := range q.s.Jobs {
 				if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !j.Spec.Run.Docker && q.held(hostID(old)) {
-					if j.Reason == "cancel requested" {
+					if cancelled(j) {
 						j.State = "cancelled"
 						j.StopAt = nil
 					} else {
@@ -618,7 +628,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		if old != nil && old.Session != m.Session && c.Fresh {
 			for _, j := range q.s.Jobs {
 				if j.Machine == m.ID && j.Session == old.Session && (j.State == "running" || j.State == "stopping") {
-					if j.Reason == "cancel requested" {
+					if cancelled(j) {
 						j.State = "cancelled"
 						j.StopAt = nil
 						continue
@@ -680,7 +690,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 		if c.Running != nil {
 			j := q.s.Jobs[c.Running.ID]
-			if j != nil && !terminal(j.State) && j.Reason != "cancel requested" && (j.State == "queued" || j.Attempt != c.Running.Attempt || j.Machine != m.ID || j.Session != m.Session) {
+			if j != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.Attempt != c.Running.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 				for _, copy := range j.Copies {
 					if q.placementAllowed(j, &m) && copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progressErr != nil || (progressPath != "" && progressPath != attemptCheckpoint(*j))) {
 						reply.Hold = true
@@ -732,7 +742,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					if j.Spec.Run.Docker && !j.ReleaseConfirmed {
 						return nil
 					}
-					if j.Reason == "cancel requested" {
+					if cancelled(j) {
 						j.State = "cancelled"
 						j.StopAt = nil
 					} else {
@@ -942,14 +952,14 @@ func (q *Queue) Complete(r Result) error {
 		// A kernel OOM is the payload's failure even if preemption raced it.
 		ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 		oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
-		if j.State == "stopping" && (!oomFailure || j.Reason == "cancel requested") {
+		if cancelled(j) || j.State == "stopping" && !oomFailure {
 			if j.StopAt != nil && q.clock.Now().Before(*j.StopAt) {
 				if q.s.BatchReleases == nil {
 					q.s.BatchReleases = map[string]batchRelease{}
 				}
 				q.s.BatchReleases[j.Machine] = batchRelease{Session: j.Session, MemoryGB: j.Spec.Needs.MemoryGB, Until: *j.StopAt}
 			}
-			if j.Reason == "cancel requested" {
+			if cancelled(j) {
 				j.State = "cancelled"
 				j.StopAt = nil
 			} else {
@@ -1010,24 +1020,6 @@ func (q *Queue) Leave(id string, now bool) error {
 			if j.Machine == id && (j.Spec.Resumable || now) {
 				q.stop(j, "machine leaving")
 			}
-		}
-		return nil
-	})
-}
-func (q *Queue) Cancel(id string) error {
-	return q.update(func() error {
-		j := q.s.Jobs[id]
-		if j == nil {
-			return errors.New("job not found")
-		}
-		if j.State == "queued" {
-			j.State = "cancelled"
-			j.Reason = "cancel requested"
-		} else if !terminal(j.State) {
-			if j.State == "running" {
-				q.stop(j, "cancel requested")
-			}
-			j.Reason = "cancel requested"
 		}
 		return nil
 	})
@@ -1382,7 +1374,7 @@ func (q *Queue) Started(r Result) error {
 			rejected = e
 			return nil
 		}
-		if j.State != "running" || j.Reason == "cancel requested" || (j.Spec.StartBy != nil && j.StartedAt != nil) {
+		if j.State != "running" || cancelled(j) || (j.Spec.StartBy != nil && j.StartedAt != nil) {
 			rejected = ErrStale
 			return nil
 		}
