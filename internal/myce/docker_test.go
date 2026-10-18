@@ -101,7 +101,7 @@ func TestDockerCLIHelper(t *testing.T) {
 			os.Exit(1)
 		}
 		for i, arg := range args {
-			if (arg == "--memory" || arg == "--memory-swap" || arg == "--network") && i+1 < len(args) {
+			if (arg == "--memory" || arg == "--memory-swap" || arg == "--network" || arg == "--name") && i+1 < len(args) {
 				_ = os.WriteFile(filepath.Join(root, arg), []byte(args[i+1]), 0600)
 			}
 			if arg == "--label" && i+1 < len(args) && strings.HasPrefix(args[i+1], "myce.attempt=") {
@@ -194,7 +194,8 @@ func TestDockerCLIHelper(t *testing.T) {
 			if string(mode) == "missing-memory-limit" {
 				memory = 0
 			}
-			objects = append(objects, map[string]any{"HostConfig": map[string]any{"Memory": memory, "MemorySwap": memorySwap, "NetworkMode": "none"}, "Id": id, "Config": map[string]any{"Labels": map[string]string{"myce.attempt": objectLabel}}, "State": map[string]any{"Running": running, "Status": status, "ExitCode": 0, "OOMKilled": string(mode) == "docker-oom"}})
+			name, _ := os.ReadFile(filepath.Join(root, "--name"))
+			objects = append(objects, map[string]any{"Name": "/" + string(name), "HostConfig": map[string]any{"RestartPolicy": map[string]any{"Name": "no"}, "Memory": memory, "MemorySwap": memorySwap, "NetworkMode": "none"}, "Id": id, "Config": map[string]any{"Labels": map[string]string{"myce.attempt": objectLabel, "myce.worker": "docker-worker"}}, "State": map[string]any{"Running": running, "Status": status, "ExitCode": 0, "OOMKilled": string(mode) == "docker-oom"}})
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(objects)
 		if string(mode) == "late" {
@@ -246,6 +247,11 @@ func TestDockerCLIHelper(t *testing.T) {
 			}
 			_ = os.Rename(filepath.Join(root, file), filepath.Join(root, target))
 		}
+	case "rm":
+		if len(args) != 2 || args[1] != "id1" {
+			os.Exit(2)
+		}
+		_ = os.Rename(filepath.Join(root, "created"), filepath.Join(root, "removed"))
 	case "logs":
 		if string(mode) == "logs-error" {
 			os.Exit(1)
@@ -327,6 +333,9 @@ func TestDockerWorkerGraceAndIdentity(t *testing.T) {
 	}
 	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
 	data, _ := os.ReadFile(filepath.Join(root, "calls"))
+	if !strings.Contains(string(data), "create --restart=no ") {
+		t.Fatal("owned create is restartable", string(data))
+	}
 	if !strings.Contains(string(data), "--label myce.attempt="+s.state.Identity) || !strings.Contains(string(data), "--cidfile ") {
 		t.Fatalf("identity missing: %s", data)
 	}
@@ -1044,33 +1053,24 @@ func TestDockerOperatorResolutionIsOfflineAndExact(t *testing.T) {
 	if err := saveWorkerJSON(s.dir, "owned.docker.json", state); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmDockerGone(w.HostStateDir, w.StateDir, "owned", true); err == nil {
+	if err := closeTestHost(w.HostStateDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReconcileDockerAttempt(context.Background(), w.HostStateDir, w.StateDir, "owned"); err == nil {
 		t.Fatal("accepted live worker lock")
 	}
 	s.close()
-	for _, tc := range []struct {
-		id      string
-		confirm bool
-	}{{"owned", false}, {"other", true}, {"../owned", true}} {
-		if err := ConfirmDockerGone(w.HostStateDir, w.StateDir, tc.id, tc.confirm); err == nil {
-			t.Fatal("accepted unconfirmed or wrong attempt")
+	for _, id := range []string{"owned", "other", "../owned"} {
+		if err := ReconcileDockerAttempt(context.Background(), w.HostStateDir, w.StateDir, id); err == nil {
+			t.Fatal("accepted unknown or wrong attempt")
 		}
 	}
-	if err := ConfirmDockerGone(w.HostStateDir, w.StateDir, "owned", true); err != nil {
-		t.Fatal(err)
+	b, err := os.ReadFile(filepath.Join(s.dir, "owned.docker.json"))
+	var saved dockerExecution
+	if err != nil || json.Unmarshal(b, &saved) != nil || !saved.Pending || saved.Released {
+		t.Fatal("unknown custody changed", err, saved)
 	}
-	restored, err := w.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restored.close()
-	p, err := w.restoreDocker(restored)
-	if err != nil || p != nil {
-		t.Fatalf("resolution restarted cleanup: %v", err)
-	}
-	if restored.state.Result == nil || !restored.state.Result.Forced {
-		t.Fatal("missing forced release acknowledgement")
-	}
+
 }
 
 func TestDockerDelayedCreateAfterEmptyScanRetainsCustody(t *testing.T) {
@@ -1093,15 +1093,13 @@ func TestDockerDelayedCreateAfterEmptyScanRetainsCustody(t *testing.T) {
 		t.Fatal(err)
 	}
 	await(t, func() bool { _, err := os.Stat(filepath.Join(root, "stopped")); return err == nil })
-	select {
-	case <-p.done:
-		t.Fatal("empty scan or late cleanup settled an unknown create")
-	default:
+	await(t, func() bool { p.docker.mu.Lock(); defer p.docker.mu.Unlock(); return p.docker.state.Released })
+	p.docker.mu.Lock()
+	defer p.docker.mu.Unlock()
+	if p.docker.state.Pending {
+		t.Fatal("positive exact late-create evidence did not settle acceptance")
 	}
-	data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
-	if err != nil || !strings.Contains(string(data), `"pending":true`) {
-		t.Fatal("unknown create custody lost")
-	}
+
 }
 
 func TestDockerCannotOverrideAssignedDevice(t *testing.T) {

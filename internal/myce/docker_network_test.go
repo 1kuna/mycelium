@@ -145,7 +145,7 @@ func fakeDockerGroupCreate(root string, args []string) {
 	if alias != "main" {
 		id = "sidecar-" + alias
 	}
-	obj := map[string]any{"Id": id, "Config": map[string]any{"Labels": map[string]string{"myce.attempt": label}}, "HostConfig": map[string]any{"Memory": memory, "MemorySwap": swap, "NetworkMode": net}, "NetworkSettings": map[string]any{"Networks": map[string]any{net: map[string]any{"IPAddress": "127.0.0.1"}}}}
+	obj := map[string]any{"Id": id, "Config": map[string]any{"Labels": map[string]string{"myce.attempt": label}}, "HostConfig": map[string]any{"RestartPolicy": map[string]any{"Name": "no"}, "Memory": memory, "MemorySwap": swap, "NetworkMode": net}, "NetworkSettings": map[string]any{"Networks": map[string]any{net: map[string]any{"IPAddress": "127.0.0.1"}}}}
 	data, _ := json.Marshal(obj)
 	_ = os.WriteFile(filepath.Join(root, "object-"+id+".json"), data, 0600)
 	netdata, _ := os.ReadFile(filepath.Join(root, "network"))
@@ -514,11 +514,11 @@ func TestDisableDockerPrivateNetwork(t *testing.T) {
 	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
 	p.docker.close() // worker disappeared; daemon and spool survive
 	s.close()
-	if e = saveWorkerJSON(w.HostStateDir, "worker-test.json", HostWorker{State: s.dir, Host: "docker-host"}); e != nil {
+	if e = saveWorkerJSON(w.HostStateDir, "worker-test.json", HostWorker{State: s.dir, Host: "docker-host", Name: w.Machine.ID}); e != nil {
 		t.Fatal(e)
 	}
 	ensureTestHost(t, w.HostStateDir, c)
-	h := HostControl{Dir: w.HostStateDir, Clock: c, Docker: true, Processes: HostProcesses{Owned: func(workerState) (bool, error) { return false, nil }, Signal: func(workerState, syscall.Signal) error { return nil }, Pause: func(d time.Duration) { c.advance(d) }}}
+	h := HostControl{Observe: testHostExclusion, Dir: w.HostStateDir, Clock: c, Docker: true, Processes: HostProcesses{Owned: func(workerState) (bool, error) { return false, nil }, Signal: func(workerState, syscall.Signal) error { return nil }, Pause: func(d time.Duration) { c.advance(d) }}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	report, e := h.Disable(ctx, "network test", 0)
@@ -535,7 +535,7 @@ func TestDisableOrphanNetworkWithoutContainer(t *testing.T) {
 	s.close()
 	fakeDockerNetwork(root, []string{"network", "create", "--label", "myce.attempt=orphan", "myce-orphan"}, "")
 	ensureTestHost(t, w.HostStateDir, c)
-	h := HostControl{Dir: w.HostStateDir, Clock: c, Docker: true, Service: &fakeHostService{}, Timeout: 2 * time.Second}
+	h := HostControl{Observe: testHostExclusion, Dir: w.HostStateDir, Clock: c, Docker: true, Service: &fakeHostService{}, Timeout: 2 * time.Second}
 	report, e := h.Disable(context.Background(), "orphan network", 0)
 	if e != nil || !report.Confirmed {
 		t.Fatalf("disable: %+v %v", report, e)

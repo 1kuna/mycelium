@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// HostService owns native processes; Docker containment supplies ConfirmContainers separately.
+// HostService drives native cleanup. Only the privileged observer proves exclusion.
 type HostService interface {
 	Stop(context.Context, time.Duration) error
 	Empty(context.Context) (bool, error)

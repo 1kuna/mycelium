@@ -40,6 +40,7 @@ type Worker struct {
 	RequireMemoryCeilings bool
 	memoryCeilings        *memoryCeilings
 	MemorySwapMaxBytes    int64
+	DockerEndpoint        string
 	ServiceConfig         string
 	ContainerRetention    *time.Duration
 	LogRetention          time.Duration

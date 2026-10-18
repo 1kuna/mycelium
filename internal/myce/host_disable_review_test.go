@@ -68,7 +68,7 @@ func testDisableDetachedGroup(t *testing.T, helper bool) {
 	if err := saveWorkerJSON(state, "attempt-test.json", workerState{PID: 99999999, Identity: identity}); err != nil {
 		t.Fatal(err)
 	}
-	h := HostControl{Dir: root}
+	h := HostControl{Observe: testHostExclusion, Dir: root}
 	if helper {
 		groups, err := ownedRecordGroups(workerState{PID: 99999999, Identity: identity})
 		if err != nil || len(groups) != 1 || groups[0] != cmd.Process.Pid {
@@ -130,7 +130,7 @@ func TestDisableRefusesActiveLegacySpool(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := &fakeClock{now: time.Unix(1000, 0)}
-	r, err := (HostControl{Dir: readyTestHost(t, root), Clock: clock, Processes: HostProcesses{Pause: func(d time.Duration) { clock.Advance(d) }}}).Disable(context.Background(), "old worker", 0)
+	r, err := (HostControl{Observe: testHostExclusion, Dir: readyTestHost(t, root), Clock: clock, Processes: HostProcesses{Pause: func(d time.Duration) { clock.Advance(d) }}}).Disable(context.Background(), "old worker", 0)
 	if err == nil || len(r.Unconfirmed) == 0 {
 		t.Fatalf("active legacy worker certified: %+v %v", r, err)
 	}
@@ -165,7 +165,7 @@ func TestDisableRejectsRecordWithoutIdentityEvenWhenPIDIsGone(t *testing.T) {
 	if err := saveWorkerJSON(state, "state.json", workerState{PID: 99999999}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (HostControl{Dir: root}).Disable(context.Background(), "old record", 0); err == nil {
+	if _, err := (HostControl{Observe: testHostExclusion, Dir: root}).Disable(context.Background(), "old record", 0); err == nil {
 		t.Fatal("identity-free legacy record certified")
 	}
 }

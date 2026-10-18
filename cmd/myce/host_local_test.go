@@ -66,7 +66,7 @@ func TestHostLocalReconcileUsesWorkerExecutor(t *testing.T) {
 		t.Fatal(err, stops, out.String())
 	}
 	state, err := myce.ReadHostIntent(config.HostStateDir)
-	if err != nil || state.LocalExclusion == nil || !state.LocalExclusion.Confirmed {
+	if err != nil || state.LocalExclusion == nil || state.LocalExclusion.Confirmed || state.LocalExclusion.Evidence == nil || state.LocalExclusion.Evidence.Verdict != "UNKNOWN" {
 		t.Fatal(state, err)
 	}
 }
@@ -136,7 +136,7 @@ func TestHostLocalStatusUsesReadOnlyChildAndNeverWrites(t *testing.T) {
 		}
 		return []byte("test-manager"), nil
 	}}, &out, r, func(ctx context.Context, s myce.HostChildLaunch) ([]byte, error) {
-		if s.Request.Operation != "status" {
+		if s.Request.Operation != "status" && s.Request.Operation != "inspect-exclusion" {
 			t.Fatal("status mutation child")
 		}
 		worker := r

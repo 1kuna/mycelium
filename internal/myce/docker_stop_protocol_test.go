@@ -187,6 +187,7 @@ func TestDockerSidecarEvidenceSurvivesRetention(t *testing.T) {
 				case "inspect":
 					running := false
 					obj := dockerInspection{ID: "sidecar"}
+					obj.HostConfig.RestartPolicy = &dockerRestartPolicy{Name: "no"}
 					obj.Config.Labels = map[string]string{"myce.attempt": "owned", "myce.worker": "worker"}
 					obj.State.Running = &running
 					obj.State.Status = "exited"

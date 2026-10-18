@@ -183,12 +183,17 @@ func installDisabled(ctx context.Context, c ServiceConfig, command func(context.
 		return err
 	}
 
-	h := HostControl{Dir: dir, Docker: true}
+	h := HostControl{Dir: dir, Docker: true, DockerEndpoint: c.DockerEndpoint, dockerConfigPath: c.Config}
 	if installed {
 		h.Services = map[string]HostService{unit: &SystemdHostService{Unit: unit, Command: command}}
 	}
 	// Installation preserves the whole-host revision and its original stop deadline.
-	_, err = h.Disable(ctx, "installed with --start-disabled", 0)
+	r, err := h.Disable(ctx, "installed with --start-disabled", 0)
+	// A disabled install needs successful cleanup, not a privileged exclusion
+	// certificate. Keep UNKNOWN persisted until root performs fresh observation.
+	if r.cleanupComplete {
+		return nil
+	}
 	return err
 }
 

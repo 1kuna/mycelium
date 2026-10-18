@@ -20,7 +20,8 @@ type QueueHostIntent struct {
 	ClosedLeaving map[string]string         `json:"closed_leaving,omitempty"`
 }
 type HostExchange struct {
-	Host string `json:"host_id"`
+	Simulated bool   `json:"simulated,omitempty"`
+	Host      string `json:"host_id"`
 	HostRevision
 	Desired    string        `json:"desired"`
 	Boot       string        `json:"boot_id"`
@@ -129,6 +130,9 @@ func (q *Queue) ReconcileHost(c HostExchange) (HostAcknowledgement, error) {
 }
 func (q *Queue) reconcileHost(c HostExchange) (HostAcknowledgement, error) {
 	var zero HostAcknowledgement
+	if _, dev := q.clock.(*devClock); c.Simulated && !dev {
+		return zero, errors.New("simulated_exclusion_unknown")
+	}
 	if c.Host == "" || c.Revision == 0 || c.Operation == "" || c.Boot == "" || c.Request == "" || c.AcceptedAt.IsZero() || (c.Desired != "closed" && c.Desired != "open") {
 		return zero, errors.New("incomplete host reconciliation identity")
 	}

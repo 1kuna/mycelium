@@ -80,6 +80,13 @@ func hostLocalCommandWithIdentity(args []string, probe myce.MachineProbe, out io
 				return e
 			}
 		}
+		if v.Privileged {
+			observation, err := v.InspectExclusion(ctx, launch, hostMutationExecutor(probe).Execute, myce.LocalHostKernelReaders())
+			if err != nil {
+				return err
+			}
+			r.Exclusion = &observation
+		}
 		return json.NewEncoder(out).Encode(r)
 	}
 	r, e := v.Mutate(ctx, m, launch, hostMutationExecutor(probe).Execute)
@@ -90,6 +97,19 @@ func hostLocalCommandWithIdentity(args []string, probe myce.MachineProbe, out io
 			}
 		}
 		return e
+	}
+	if v.Privileged && (op == "close" || op == "reconcile") {
+		observation, err := v.InspectExclusion(ctx, launch, hostMutationExecutor(probe).Execute, myce.LocalHostKernelReaders())
+		if err != nil {
+			return err
+		}
+		r.Exclusion = &observation
+		if observation.Verdict != "PASS" {
+			r.CleanupConfirmed = false
+		}
+		if _, err = v.Mutate(ctx, myce.HostMutation{Operation: "record-exclusion", Evidence: &observation}, launch, hostMutationExecutor(probe).Execute); err != nil {
+			return err
+		}
 	}
 	return json.NewEncoder(out).Encode(r)
 }

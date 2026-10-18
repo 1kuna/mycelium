@@ -62,7 +62,7 @@ func TestHostCommandsDoNotRegisterWorkers(t *testing.T) {
 	if err != nil || len(workers) != 0 {
 		t.Fatal("completed command registered as a worker", workers, err)
 	}
-	queues, err := (HostControl{Dir: dir}).Queues()
+	queues, err := (HostControl{Observe: testHostExclusion, Dir: dir}).Queues()
 	if err != nil || len(queues) != 0 {
 		t.Fatal("command created queue custody", queues, err)
 	}
