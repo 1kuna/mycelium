@@ -124,7 +124,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --experiment-loss-timeout` | `60s` | Experiment loss detection |
 | `join --name` | Hostname | Unique stable worker name |
 | `join --host-id` | OS hostname | Physical host identity; every per-card worker on the same machine must use the same stable value |
-| `join/install worker --host-memory-budget-gb` | `0` | Aggregate per-host admitted RAM ceilings; positive budgets reject zero host declarations and retain unconfirmed release charges |
+| `join/install worker --host-memory-budget-gb` | `0` | UNQUALIFIED migration input; a positive value requires explicit CLOSED host allowance configuration before runtime use |
 | `join/install worker --memory-ceiling-slack-gb` | `0.125` | Extra GiB per declared ceiling; included in host admission |
 | `join/install worker --memory-swap-max-bytes` | `0` | Swap allowance per native attempt; managed Docker uses optional run-spec total RAM-plus-swap values |
 | `join --reserve-host-memory-gb` | `4` | RAM withheld from observed available memory; configure OS/other-workload headroom; unified uses the larger host/GPU reserve once |

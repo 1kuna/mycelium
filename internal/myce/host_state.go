@@ -71,11 +71,12 @@ type HostSession struct {
 	Session string `json:"session"`
 }
 type HostIntent struct {
-	Errors         []string                       `json:"errors,omitempty"`
-	QueueObserved  map[string]HostRevision        `json:"queue_observed,omitempty"`
-	LastClose      *HostClose                     `json:"last_close"`
-	LocalExclusion *HostLocalExclusion            `json:"local_exclusion"`
-	QueueAcks      map[string]HostAcknowledgement `json:"queue_acknowledgements"`
+	MemoryAllowanceBytes int64                          `json:"memory_allowance_bytes,omitempty"`
+	Errors               []string                       `json:"errors,omitempty"`
+	QueueObserved        map[string]HostRevision        `json:"queue_observed,omitempty"`
+	LastClose            *HostClose                     `json:"last_close"`
+	LocalExclusion       *HostLocalExclusion            `json:"local_exclusion"`
+	QueueAcks            map[string]HostAcknowledgement `json:"queue_acknowledgements"`
 
 	Schema int    `json:"schema_version"`
 	Host   string `json:"host_id"`
@@ -115,6 +116,9 @@ func legacyHostPaths(dir string) ([]string, error) {
 }
 
 func validateHostIntent(s HostIntent) error {
+	if s.MemoryAllowanceBytes < 0 {
+		return fmt.Errorf("%w: invalid memory allowance", ErrHostState)
+	}
 	if s.Schema != hostStateVersion {
 		return fmt.Errorf("%w: unsupported host state schema %d; use a compatible myce version", ErrHostState, s.Schema)
 	}

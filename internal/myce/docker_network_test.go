@@ -324,14 +324,10 @@ func TestDockerGroupInspectsEachDeclaredMemoryLimit(t *testing.T) {
 	}
 }
 
-func TestDockerGroupLiveBudgetChangeDuringReadiness(t *testing.T) {
+func TestDockerGroupPolicyMismatchDuringReadiness(t *testing.T) {
 	w, s, _, root := dockerFixture(t)
-	budget, e := SetHostMemoryBudget(w.HostStateDir, 6)
-	if e != nil {
-		t.Fatal(e)
-	}
-	w.Machine.HostMemoryBudgetGeneration = budget.Generation
-	w.Machine.HostMemoryBudgetGB = budget.GiB
+	w.Machine.HostMemoryBudgetGB = 6
+	w.hostRevision = configureTestHostMemoryAllowance(t, w.HostStateDir, 6)
 	j := dockerGroupJob(t)
 	var ready, probed atomic.Bool
 	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
@@ -350,20 +346,29 @@ func TestDockerGroupLiveBudgetChangeDuringReadiness(t *testing.T) {
 	}
 	t.Cleanup(p.docker.close)
 	await(t, probed.Load)
-	if _, e := SetHostMemoryBudget(w.HostStateDir, 3); e != nil {
+	if _, e := SetHostMemoryBudget(w.HostStateDir, 3); e == nil {
+		t.Fatal("OPEN reconfiguration accepted")
+	}
+	// Simulate corrupted/stale admission, not an authorized live policy switch.
+	state, e := ReadHostIntent(w.HostStateDir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	state.MemoryAllowanceBytes = 3 << 30
+	if e := atomicHostJSON(w.HostStateDir, hostStateFile, state, nil); e != nil {
 		t.Fatal(e)
 	}
 	ready.Store(true)
 	select {
 	case f := <-p.done:
-		if f.result.Success || !strings.Contains(f.result.Error, "budget changed since queue admission") {
+		if f.result.Success || !strings.Contains(f.result.Error, "allowance changed since queue admission") {
 			t.Fatalf("stale admission accepted: %+v", f.result)
 		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("stale budget did not settle")
 	}
 	if _, e := os.Stat(filepath.Join(root, "created")); !os.IsNotExist(e) {
-		t.Fatal("main created after live budget changed")
+		t.Fatal("main created with mismatched allowance")
 	}
 	if _, e := os.Stat(filepath.Join(root, "network-removed")); e != nil {
 		t.Fatal("network not released after stale admission")

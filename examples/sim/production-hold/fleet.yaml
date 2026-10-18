@@ -1,6 +1,6 @@
 # Synthetic admission budgets/speeds; not measured fleet performance.
 hosts:
-  b70: {production_hold: true, production_idle: 180s}
+  b70: {production_hold: true}
 machines:
   - {name: b70-0, host: b70, platform: xpu, memory_gb: 8, host_memory_gb: 24, speed: 1}
   - {name: b70-1, host: b70, platform: xpu, memory_gb: 8, host_memory_gb: 24, speed: 1}

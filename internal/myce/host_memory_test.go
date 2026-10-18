@@ -303,3 +303,87 @@ func TestHostMemoryProductionUsesFreeHostBeforeReclaim(t *testing.T) {
 		t.Fatal("free physical host not used")
 	}
 }
+
+// Running includes accepted preparation before Started; Docker's declared host
+// total already includes its simultaneous main/sidecar ceilings. Both retain
+// their whole charge until the exact execution releases.
+func TestHostMemoryAllowanceAggregatePreparationsAndSidecars(t *testing.T) {
+	for _, docker := range []bool{false, true} {
+		t.Run(fmt.Sprint(docker), func(t *testing.T) {
+			q, clock := fixture(t)
+			a, b := machine("card-a", "fake"), machine("card-b", "fake")
+			for _, m := range []*Machine{&a, &b} {
+				m.HostID = "host"
+				m.HostMemoryMeasured = true
+				m.HostAvailableMemoryGB = 64
+				m.HostMemoryBudgetGB = 6
+				m.MemoryCeilingSlackGB = .25
+			}
+			check(t, q, a, nil)
+			check(t, q, b, nil)
+			first := spec("experiment")
+			if docker {
+				first = dockerGroupJob(t).Spec
+			}
+			first.Needs.HostMemoryGB = 6
+			first.AllowedMachines = []string{a.ID}
+			submitted := submit(t, q, first)
+			preparing := check(t, q, a, nil).Job
+			if preparing != nil {
+				t.Fatal("slack exceeded host allowance")
+			}
+			for _, m := range []*Machine{&a, &b} {
+				m.HostMemoryBudgetGB = 7
+			}
+			check(t, q, b, nil)
+			preparing = check(t, q, a, nil).Job
+			if preparing == nil || preparing.ID != submitted.ID || preparing.StartedAt != nil {
+				t.Fatal("missing accepted preparation", preparing)
+			}
+			second := spec("experiment")
+			second.Needs.HostMemoryGB = 1
+			second.AllowedMachines = []string{b.ID}
+			submit(t, q, second)
+			if check(t, q, b, nil).Job != nil {
+				t.Fatal("preparation/sidecars double-spent sibling allowance")
+			}
+			snap, err := q.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range snap.Machines {
+				if m.HostMemoryInUseGB != 6.25 {
+					t.Fatal("missing whole preparation/sidecar charge", m.HostMemoryInUseGB)
+				}
+			}
+			cancelAck(t, q, preparing.ID)
+			receipt := result(preparing, false)
+			receipt.ReleasePending = true
+			receipt.Interrupted = true
+			if err := q.Complete(receipt); err != nil {
+				t.Fatal(err)
+			}
+			for range 3 {
+				clock.Advance(24 * time.Hour)
+				check(t, q, b, nil)
+			}
+			snap, err = q.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range snap.Machines {
+				if m.HostMemoryInUseGB != 6.25 {
+					t.Fatal("unconfirmed release refunded", m.HostMemoryInUseGB)
+				}
+			}
+			receipt.ReleasePending = false
+			receipt.ReleaseOnly = true
+			if err := q.Complete(receipt); err != nil {
+				t.Fatal(err)
+			}
+			if check(t, q, b, nil).Job == nil {
+				t.Fatal("exact release did not refund allowance")
+			}
+		})
+	}
+}

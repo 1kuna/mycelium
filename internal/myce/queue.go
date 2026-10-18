@@ -588,17 +588,11 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		if progressErr != nil {
 			m.CheckpointUnavailable = true
 		}
+		if _, err := MemoryCeilingConfig(m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB, 0); err != nil {
+			return err
+		}
 		if !validMemoryValue(m.HostAvailableMemoryGB) || !validMemoryValue(m.HostMemoryBudgetGB) || !validMemoryValue(m.MemoryCeilingSlackGB) {
 			return errors.New("invalid host memory report")
-		}
-		for _, other := range q.s.Machines {
-			if hostID(other) == hostID(&m) {
-				if other.HostMemoryBudgetGeneration > m.HostMemoryBudgetGeneration {
-					m.HostMemoryBudgetGB, m.HostMemoryBudgetGeneration = other.HostMemoryBudgetGB, other.HostMemoryBudgetGeneration
-				} else if m.HostMemoryBudgetGeneration > 0 && m.HostMemoryBudgetGeneration == other.HostMemoryBudgetGeneration && m.HostMemoryBudgetGB != other.HostMemoryBudgetGB {
-					return errors.New("conflicting shared host memory budget generation")
-				}
-			}
 		}
 		if m.MaxJobs < 0 {
 			return errors.New("max-jobs must be nonnegative")

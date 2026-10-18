@@ -4,14 +4,28 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 )
 
+// HostMemoryBudget is the one host allowance, always UNQUALIFIED until a
+// separately authorized native measurement. GiB is a configuration convenience;
+// Bytes is the validated effective limit used at launch and in status.
 type HostMemoryBudget struct {
-	GiB        float64 `json:"gib"`
-	Generation uint64  `json:"generation"`
+	GiB           float64 `json:"gib"`
+	Bytes         int64   `json:"memory_allowance_bytes"`
+	Qualification string  `json:"qualification"`
+}
+
+func hostMemoryAllowance(gib float64) (HostMemoryBudget, error) {
+	n, err := MemoryCeilingConfig(gib, 0, 0)
+	if err != nil {
+		return HostMemoryBudget{}, err
+	}
+	if gib > 0 && n == 0 {
+		return HostMemoryBudget{}, errors.New("host allowance is smaller than one byte")
+	}
+	return HostMemoryBudget{GiB: float64(n) / (1 << 30), Bytes: n, Qualification: "UNQUALIFIED"}, nil
 }
 
 func sharedHostDirectory(dir string) (string, error) {
@@ -29,60 +43,92 @@ func EffectiveHostMemoryBudget(dir string, fallback float64) (HostMemoryBudget, 
 	if err != nil {
 		return HostMemoryBudget{}, "", err
 	}
-	path := filepath.Join(dir, "host-memory-budget.json")
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return HostMemoryBudget{GiB: fallback}, "install-time --host-memory-budget-gb", nil
-	}
+	state, err := ReadHostIntent(dir)
 	if err != nil {
-		return HostMemoryBudget{}, path, err
+		return HostMemoryBudget{}, "", err
 	}
-	var budget HostMemoryBudget
-	if err = json.Unmarshal(data, &budget); err != nil {
-		return budget, path, errors.New("invalid shared host memory budget file")
+	if state.MemoryAllowanceBytes > 0 {
+		return HostMemoryBudget{GiB: float64(state.MemoryAllowanceBytes) / (1 << 30), Bytes: state.MemoryAllowanceBytes, Qualification: "UNQUALIFIED"}, hostStateFile, nil
 	}
-	if budget.Generation == 0 || budget.GiB <= 0 {
-		return budget, path, errors.New("invalid shared host memory budget generation/value")
+	// Preserve the old file in place as inert migration input. Never select its
+	// independent generation at runtime or silently replace a conservative limit.
+	if _, err := os.Lstat(filepath.Join(dir, "host-memory-budget.json")); err == nil {
+		return HostMemoryBudget{}, "", errors.New("legacy memory policy requires explicit CLOSED host-memory-budget import")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return HostMemoryBudget{}, "", err
 	}
-	if _, err = MemoryCeilingConfig(budget.GiB, 0, 0); err != nil {
-		return budget, path, err
+	budget, err := hostMemoryAllowance(fallback)
+	if err == nil && budget.Bytes > 0 {
+		err = errors.New("install-time allowance is UNQUALIFIED migration input; explicitly configure it while CLOSED")
 	}
-	return budget, path, nil
+	return budget, "install-time --host-memory-budget-gb (UNQUALIFIED)", err
 }
 
+// SetHostMemoryBudget is explicit CLOSED-host reconfiguration. The existing
+// host controller owns persistence and serialization; open/close preserve it.
 func SetHostMemoryBudget(dir string, gib float64) (HostMemoryBudget, error) {
-	if gib <= 0 {
-		return HostMemoryBudget{}, errors.New("host memory budget must be positive GiB")
+	return setHostMemoryBudget(dir, gib, false)
+}
+
+func setHostMemoryBudget(dir string, gib float64, importOnly bool) (HostMemoryBudget, error) {
+	budget, err := hostMemoryAllowance(gib)
+	if err != nil || budget.Bytes <= 0 {
+		return HostMemoryBudget{}, errors.New("host allowance must be positive finite GiB")
 	}
-	if _, err := MemoryCeilingConfig(gib, 0, 0); err != nil {
-		return HostMemoryBudget{}, err
-	}
-	dir, err := sharedHostDirectory(dir)
+	dir, err = sharedHostDirectory(dir)
 	if err != nil {
 		return HostMemoryBudget{}, err
 	}
-	if err = os.MkdirAll(dir, 0700); err != nil {
-		return HostMemoryBudget{}, err
-	}
-	// Serialize with every instance's final launch gate, even when DISABLED exists.
+	// Same lock order as launch: launch then intake. No daemon/network work here.
 	unlock, err := hostOperationLock(dir, "launch.lock", true)
 	if err != nil {
 		return HostMemoryBudget{}, err
 	}
 	defer unlock()
-	old, _, err := EffectiveHostMemoryBudget(dir, 0)
+	intake, err := hostOperationLock(dir, "intake.lock", true)
 	if err != nil {
-		return old, err
+		return HostMemoryBudget{}, err
 	}
-	if old.Generation == math.MaxUint64 {
-		return old, errors.New("host memory budget generation exhausted")
+	defer intake()
+	state, err := ReadHostIntent(dir)
+	if err != nil {
+		return HostMemoryBudget{}, err
 	}
-	budget := HostMemoryBudget{GiB: gib, Generation: old.Generation + 1}
-	// Existing atomic rename + file and directory fsync preserve one complete generation.
-	if err = saveWorkerJSON(dir, "host-memory-budget.json", budget); err != nil {
-		return budget, err
+	if state.Desired != "closed" {
+		return HostMemoryBudget{}, errors.New("host must be CLOSED before allowance reconfiguration")
 	}
-	return budget, nil
+	if importOnly && state.MemoryAllowanceBytes != 0 {
+		return HostMemoryBudget{}, errors.New("host allowance is already configured")
+	}
+	state.MemoryAllowanceBytes = budget.Bytes
+	return budget, atomicHostJSON(dir, hostStateFile, state, nil)
+}
+
+// ImportHostMemoryBudget is an explicit one-time conversion of the former
+// file's value. The source bytes remain intact, inert, and UNQUALIFIED.
+func ImportHostMemoryBudget(dir string) (HostMemoryBudget, error) {
+	dir, err := sharedHostDirectory(dir)
+	if err != nil {
+		return HostMemoryBudget{}, err
+	}
+	state, err := ReadHostIntent(dir)
+	if err != nil {
+		return HostMemoryBudget{}, err
+	}
+	if state.MemoryAllowanceBytes != 0 {
+		return HostMemoryBudget{}, errors.New("host allowance is already configured")
+	}
+	data, err := readHostRegular(filepath.Join(dir, "host-memory-budget.json"), uint32(os.Geteuid()), 4096)
+	if err != nil {
+		return HostMemoryBudget{}, err
+	}
+	var old struct {
+		GiB float64 `json:"gib"`
+	}
+	if json.Unmarshal(data, &old) != nil {
+		return HostMemoryBudget{}, errors.New("invalid legacy allowance input")
+	}
+	return setHostMemoryBudget(dir, old.GiB, true)
 }
 
 func (w *Worker) refreshHostMemoryBudget() error {
@@ -90,10 +136,7 @@ func (w *Worker) refreshHostMemoryBudget() error {
 	if err != nil {
 		return err
 	}
-	if budget.Generation < w.Machine.HostMemoryBudgetGeneration {
-		return errors.New("shared host memory budget generation regressed")
-	}
-	w.Machine.HostMemoryBudgetGB, w.Machine.HostMemoryBudgetGeneration = budget.GiB, budget.Generation
+	w.Machine.HostMemoryBudgetGB = budget.GiB
 	return nil
 }
 
@@ -103,18 +146,22 @@ func (w Worker) checkHostMemoryBudget(gpu, host float64) error {
 	}
 	budget, _, err := EffectiveHostMemoryBudget(w.HostStateDir, w.Machine.HostMemoryBudgetGB)
 	if err != nil {
-		return fmt.Errorf("%w: shared host memory budget: %v", errWorkerMemory, err)
+		return fmt.Errorf("%w: host allowance: %v", errWorkerMemory, err)
 	}
-	if budget.Generation != w.Machine.HostMemoryBudgetGeneration {
-		return fmt.Errorf("%w: shared host memory budget changed since queue admission", errWorkerMemory)
+	reported, err := hostMemoryAllowance(w.Machine.HostMemoryBudgetGB)
+	if err != nil || budget.Bytes != reported.Bytes {
+		return fmt.Errorf("%w: host allowance changed since queue admission", errWorkerMemory)
 	}
-	if budget.GiB > 0 && (host <= 0 || hostNeed(&w.Machine, gpu, host) > budget.GiB) {
-		return fmt.Errorf("%w: allocation exceeds shared host memory budget %.3g GiB", errWorkerMemory, budget.GiB)
+	if budget.Bytes > 0 && (host <= 0 || hostNeed(&w.Machine, gpu, host) > budget.GiB) {
+		return fmt.Errorf("%w: allocation exceeds host allowance %d bytes", errWorkerMemory, budget.Bytes)
 	}
 	return nil
 }
 
 func (m Machine) HostMemoryBudgetStatus() string {
+	if m.HostMemoryPolicyMismatch {
+		return "host allowance policy mismatch"
+	}
 	if m.EffectiveHostMemoryBudgetGB > 0 && m.HostMemoryInUseGB > m.EffectiveHostMemoryBudgetGB {
 		return fmt.Sprintf("over budget: %g GiB in use > %g GiB", m.HostMemoryInUseGB, m.EffectiveHostMemoryBudgetGB)
 	}

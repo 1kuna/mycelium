@@ -106,7 +106,7 @@ func TestCancellationFreshRejoinKeepsOlderProductionCustody(t *testing.T) {
 	q, c := fixture(t)
 	m := machine("one", "fake")
 	m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.HostMemoryBudgetGB = true, 16, 16
-	if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true, ProductionIdle: "0s"}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true}}); err != nil {
 		t.Fatal(err)
 	}
 	s := spec("production")
@@ -166,7 +166,7 @@ func TestCancellationLostAssignmentEmptyCheckin(t *testing.T) {
 			q, _ := fixture(t)
 			m := machine("one", "fake")
 			if held {
-				if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true, ProductionIdle: "0s"}}); err != nil {
+				if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true}}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -422,7 +422,7 @@ func TestCancellationExcludedFromHoldDemand(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	if q.s.Hosts[hostID(&a)].IdleSince == nil {
+	if q.held(hostID(&a)) {
 		t.Fatal("cancelled stopping job retained production demand")
 	}
 }

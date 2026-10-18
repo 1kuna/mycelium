@@ -271,7 +271,9 @@ type Machine struct {
 	FileTransferError           string              `json:"file_transfer_error,omitempty"`
 	CapabilityProfile           *CapabilityProfile  `json:"capability_profile,omitempty"`
 	ExtensionReports            []ExtensionReport   `json:"extension_reports,omitempty"`
-	HostMemoryBudgetGeneration  uint64              `json:"host_memory_budget_generation,omitempty"`
+	HostMemoryAllowanceBytes    int64               `json:"memory_allowance_bytes,omitempty"`
+	HostMemoryQualification     string              `json:"memory_allowance_qualification,omitempty"`
+	HostMemoryPolicyMismatch    bool                `json:"host_memory_policy_mismatch,omitempty"`
 	EffectiveHostMemoryBudgetGB float64             `json:"effective_host_memory_budget_gb,omitempty"`
 	HostMemoryInUseGB           float64             `json:"host_memory_in_use_gb,omitempty"`
 	hostBudgetGB                float64             // Effective shared-host budget, rebuilt from worker reports.

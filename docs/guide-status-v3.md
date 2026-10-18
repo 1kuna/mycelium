@@ -112,9 +112,10 @@ is **omitted when empty**. `text` equals the corresponding existing string; the
 additional startup-release and disabled-host entries use the queue's existing
 fence messages and appear only in `holds_detail`.
 
-The CLI and page label host ceiling budgets **last reported**, including stopped
-workers. Both `host_memory_budget_gb` and `effective_host_memory_budget_gb` are
-worker-reported queue state, not a live read of an offline host's budget file.
-Check the host's setting locally with `myce host-memory-budget show` when a
-current value is required; the queue cannot observe file changes while all of
-that host's workers are stopped.
+The CLI and page label the effective host allowance **last reported**, including
+stopped workers, with `memory_allowance_bytes` and UNQUALIFIED qualification.
+The queue derives it from the host's worker reports and fences admission when
+their policy values disagree. It is not a live read of an offline host's intent.
+Check locally with `myce host-memory-budget show --host-state-dir DIR` for the
+current value. Changes require explicit CLOSED host reconfiguration; open/close
+preserve the allowance. Native measurement and qualification remain separate.
