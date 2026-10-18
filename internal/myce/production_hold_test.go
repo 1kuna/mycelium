@@ -321,20 +321,12 @@ func TestProductionHoldModelPathsAndResidency(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := reportModel(t, q, a, "ready")
-	if len(r.ModelPlan) == 0 || r.ModelPlan[0].State != "draining" {
-		t.Fatalf("idle takeover residency not released: %+v", r.ModelPlan)
+	if len(r.ModelPlan) != 1 || r.ModelPlan[0].State != "ready" {
+		t.Fatalf("production residency bypassed engine idle interval: %+v", r.ModelPlan)
 	}
 	next := addModelCall(t, q, "experiment")
-	if next.Machine != "" {
-		t.Fatal("experiment bypassed model unload acknowledgement")
-	}
-	reportModel(t, q, a, "unloaded")
-	// Once the final production residency releases, ordinary placement may choose either card.
-	for _, m := range []Machine{a, b} {
-		reportModel(t, q, m, "ready")
-	}
-	if next.Machine != a.ID && next.Machine != b.ID {
-		t.Fatalf("experiment not admitted after exact unload: %+v", next)
+	if next.Machine != a.ID {
+		t.Fatal("resident model withheld after settled production demand")
 	}
 
 }
@@ -1016,5 +1008,45 @@ func TestProductionDemandWithoutIdleCooldown(t *testing.T) {
 	finish(t, q, run, true)
 	if got := check(t, q, b, nil).Job; got == nil || got.ID != first.ID {
 		t.Fatal("final demand retained idle cooldown")
+	}
+}
+
+func TestProductionDemandPreservesModelIdleUnload(t *testing.T) {
+	q, clock, a := modelFixture(t)
+	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&a): {ProductionHold: true}}); err != nil {
+		t.Fatal(err)
+	}
+	prod := addModelCall(t, q, "production")
+	reportModel(t, q, a, "ready")
+	if prod.Machine != a.ID {
+		t.Fatal("production not routed")
+	}
+	if err := q.finishCall(prod.ID); err != nil {
+		t.Fatal(err)
+	}
+	slot := q.s.ModelSlots[slotKey(a.ID, "test")]
+	if slot == nil || slot.State != "ready" || q.held(hostID(&a)) {
+		t.Fatal("settled production replaced engine idle interval", slot)
+	}
+	lower := addModelCall(t, q, "experiment")
+	if lower.Machine != a.ID {
+		t.Fatal("resident model withheld from lower priority after settled demand")
+	}
+	if err := q.finishCall(lower.ID); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(9 * time.Minute)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if slot.State != "ready" {
+		t.Fatal("engine idle deadline shortened", slot.State)
+	}
+	clock.Advance(time.Minute)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if slot.State != "draining" {
+		t.Fatal("engine idle unload deadline lost", slot.State)
 	}
 }
