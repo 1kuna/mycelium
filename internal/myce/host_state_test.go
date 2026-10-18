@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -251,7 +252,16 @@ func TestHostRevisionDevClosesBothDevicesAndRejectsDelayedLaunch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
+	defer func() {
+		// Keep cleanup valid even when an assertion fails after reopen: stop real
+		// commands under closed admission before waiting for the dev workers.
+		if _, e := changeHostIntent(hostDir, RealClock{}, hostIntentChange{Desired: "closed"}); e != nil {
+			t.Error(e)
+		}
+		if e := d.Close(); e != nil {
+			t.Error(e)
+		}
+	}()
 	await(t, func() bool { snap, e := d.Queue.Snapshot(); return e == nil && len(snap.Machines) == 2 })
 	s, err := ReadHostIntent(hostDir)
 	if err != nil {
@@ -282,6 +292,15 @@ func TestHostRevisionDevClosesBothDevicesAndRejectsDelayedLaunch(t *testing.T) {
 		}
 		return len(pids) == 2
 	})
+	// Delay queue convergence until the old worker runs have stopped. This
+	// forces the ordering that synthetic local settlement used to bypass.
+	d.Queue.mu.Lock()
+	queueLocked := true
+	defer func() {
+		if queueLocked {
+			d.Queue.mu.Unlock()
+		}
+	}()
 	// Uses the real command runner and workers. Only inventory is fake.
 	closed, err := changeHostIntent(hostDir, RealClock{}, hostIntentChange{Desired: "closed", Grace: 0})
 	if err != nil {
@@ -296,13 +315,58 @@ func TestHostRevisionDevClosesBothDevicesAndRejectsDelayedLaunch(t *testing.T) {
 	if _, err = w.start(nil, Job{}); !errors.Is(err, ErrHostRevision) {
 		t.Fatal("delayed launch admitted", err)
 	}
+	// Process exit alone is insufficient: wait for both worker runs to release
+	// their real spool locks before collecting exclusion evidence.
+	for _, name := range []string{"fake-1", "fake-2"} {
+		await(t, func() bool {
+			unlock, e := hostOperationLock(filepath.Join(root, "workers", name), "worker.lock", false)
+			if errors.Is(e, syscall.EWOULDBLOCK) || errors.Is(e, syscall.EAGAIN) {
+				return false
+			}
+			if e != nil {
+				t.Fatal(e)
+			}
+			unlock()
+			return true
+		})
+	}
+	queueLocked = false
+	d.Queue.mu.Unlock()
+	if _, err = changeHostIntent(hostDir, RealClock{}, hostIntentChange{Desired: "open", Expected: closed.HostRevision}); err == nil || err.Error() != "previous_close_unsettled" {
+		t.Fatal("open before exclusion and queue settlement", err)
+	}
+	// Only kernel/service inventory is fake. Cleanup records the registered
+	// sessions; the real authenticated exchange and SQLite commit settle them.
+	report, err := (HostControl{Dir: hostDir, Clock: RealClock{}, Service: &fakeHostService{}, Observe: testHostExclusion}).Disable(context.Background(), "test close", 0)
+	if err != nil || !report.Confirmed || report.HostRevision != closed.HostRevision {
+		t.Fatal(report, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+	defer cancel()
+	if err = ReconcileHostLocal(ctx, hostDir, RealClock{}, func(string) (Client, error) { return d.Client(), nil }); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := ReadHostIntent(hostDir)
+	if err != nil || settled.HostSettlement() != "confirmed" || settled.LocalExclusion == nil || len(settled.LocalExclusion.Sessions) != 2 || len(settled.Pending) != 0 {
+		t.Fatal("close did not settle both registered sessions", settled, err)
+	}
+	ack, ok := settled.QueueAcks[d.URL]
+	if !ok || ack.HostRevision != closed.HostRevision || ack.Desired != "closed" || len(ack.Pending) != 0 || len(ack.Covered) != 2 {
+		t.Fatal("missing real queue close coverage", ack)
+	}
 	// Even after a subsequent, settled open the old action cannot launch.
-	testConfirmClose(t, hostDir)
-	if _, err = changeHostIntent(hostDir, RealClock{}, hostIntentChange{Desired: "open", Expected: closed.HostRevision, Settled: func(HostIntent) error { return nil }}); err != nil {
+	if _, err = changeHostIntent(hostDir, RealClock{}, hostIntentChange{Desired: "open", Expected: closed.HostRevision}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = w.start(nil, Job{}); !errors.Is(err, ErrHostRevision) {
 		t.Fatal("delayed launch after reopen", err)
+	}
+	if err = d.Queue.Tick(); err != nil {
+		t.Fatal("queue rejected settled reopen", err)
+	}
+	opened, err := ReadHostIntent(hostDir)
+	if err != nil || !hostOpenConverged(opened) {
+		t.Fatal("reopen did not converge", opened, err)
 	}
 }
 func readTestHostRevision(t *testing.T, dir string) HostRevision {
