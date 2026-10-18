@@ -9,8 +9,8 @@ import (
 
 func TestHostPolicyDefaultsValidationAndPersistence(t *testing.T) {
 	q, _ := fixture(t)
-	if e := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true, ProductionIdle: "-1s"}}); e == nil {
-		t.Fatal("negative idle accepted")
+	if e := q.ConfigureHosts(map[string]HostPolicy{"": {ProductionHold: true}}); e == nil {
+		t.Fatal("empty host accepted")
 	}
 	file := filepath.Join(t.TempDir(), "hosts.yaml")
 	if e := os.WriteFile(file, []byte("hosts:\n  b70: {production_hold: true}\n"), 0600); e != nil {

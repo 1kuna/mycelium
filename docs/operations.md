@@ -924,10 +924,8 @@ verso:
 hosts:
   b70:
     production_hold: true
-    production_idle: 180s
   spark:
     production_hold: false
-    production_idle: 180s
 ```
 
 Source the trusted existing oneAPI runtime before installing B70 workers. Replace
@@ -960,45 +958,31 @@ unconfirmed native/Docker custody fails closed. When Verso separately releases
 ownership, clear any shared gate while the card gates remain, then explicitly
 `myce enable --config .../worker-gpu1/config.json --unit myce-worker@gpu1.service`
 for the released card. Enabling GPU0 needs its own coordinated production handoff.
-Set the shared budget once while both workers remain disabled. Verso uses this
-local command for every switch and fallback; it needs no queue connection and
-works with stopped services. The durable override wins over install-time flags.
+The host memory allowance is configured explicitly while the whole host is
+CLOSED. Open/close switches preserve its bytes; do not rewrite it for each owner
+or each run. Positive install-time flags are UNQUALIFIED migration input and
+cannot supply an active runtime allowance before that explicit configuration.
 
 ```sh
-"$HOME/myce" host-memory-budget set 3
-"$HOME/myce" host-memory-budget show
+# After closing the host, preserve its conservative existing input:
+myce host-memory-budget configure <EXISTING_CONSERVATIVE_GIB> --host-state-dir <HOST_STATE_DIR>
+myce host-memory-budget show --host-state-dir <HOST_STATE_DIR>
+# Alternatively, explicitly import the former shared file's value once:
+myce host-memory-budget import --host-state-dir <HOST_STATE_DIR>
 ```
 
-Verso's production switch order is: keep 3 GiB while legacy production owns the
-GPUs; clear and verify legacy GPU owners; set 27 GiB; then enable GPU0. Retain the
-approved host production hold until Verso's separate production admission gate
-releases it. If a shared DISABLED gate exists, clear it while both per-card gates
-remain in place, before enabling the selected card.
+The existing host controller serializes the CLOSED check and atomic allowance
+write in `host-state.json`. The former file remains intact as inert input after
+import; its generation is never an admission authority. Reports that disagree
+on the allowance fence further admission until they agree. Aggregate charges
+include both devices, model residency, preparation, sidecars and retained
+unconfirmed releases, including slack. Status shows effective bytes and
+UNQUALIFIED qualification; reservations are not measured RSS.
 
-```sh
-# After legacy GPU owners are confirmed cleared:
-"$HOME/myce" host-memory-budget set 27
-"$HOME/myce" enable --unit myce-worker@gpu0.service
-```
-
-On fallback, complete and verify the disable first. A failed disable blocks the
-fallback. Only then set 3 GiB and let legacy production load.
-
-```sh
-"$HOME/myce" disable --now && "$HOME/myce" host-memory-budget set 3
-# Legacy production loads only after both commands succeed.
-```
-
-Budget updates use atomic replacement with file/directory fsync and ordered
-generations in the shared host-state directory next to DISABLED. All instances
-read it at heartbeats and admission; new admissions use a raise without restart.
-A lower budget preserves running work and blocks further admissions while
-status reports `over budget: N GiB in use > M GiB`. Status usage is the sum of
-reserved per-attempt/model host ceilings (including slack), not measured RSS.
-`show` prints the effective value and source; use `--host-state-dir DIR` for a
-custom shared directory, or `show --config PATH` for a custom install fallback.
-Corrupt/regressed overrides fail admissions closed. Never relocate the spool or
-reset generations during a reinstall.
+Neither the former conservative setting nor an example number qualifies native
+capacity. A separately authorized simultaneous-envelope measurement plus
+headroom is required before native FULL admission. This example authorizes no
+native operation or ownership switch.
 
 On the Spark, after the coordinated Atlas loan, use the unified GPU pool,
 **16 GiB** reserve and **105 GiB** host budget. Keep earlyoom armed.
@@ -1111,13 +1095,13 @@ still stops the worker **and every attempt child**, and its parent
 
 `join` and `install worker` accept:
 
-- `--host-memory-budget-gb`: aggregate host ceiling budget; default `0` leaves
-  legacy admission unchanged. Use the same value and `--host-id` on all cards.
-  The queue takes the smallest positive budget reported for that physical host,
-  caps its live RAM allowance, and subtracts outstanding job/model ceilings.
-  Capped hosts retain charges after loss or unconfirmed cleanup, including model
-  residency, until the exact execution is released or a fresh worker proves
-  prior-session cleanup. Do not reduce declarations to fit a guessed budget.
+- `--host-memory-budget-gb`: UNQUALIFIED migration input; default `0` keeps
+  uncapped admission-only operation. A positive install-time input requires
+  explicit `host-memory-budget configure` while CLOSED before runtime use.
+  All cards read the same allowance from the host intent; differing worker
+  reports fence admission. Retain aggregate attempt/model charges, including
+  slack and unconfirmed releases, until exact release proof. Do not reduce
+  declarations to fit a guessed allowance.
 - `--memory-ceiling-slack-gb`: extra memory per declared allocation; default
   `0.125` GiB (128 MiB). Slack counts against the aggregate budget. Unified
   machines enforce `memory_gb + host_memory_gb + slack` once; dedicated cards
@@ -1162,14 +1146,10 @@ Unmanaged/nested containers and Docker-backed catalog servers cannot be
 certified by the native cgroup or inspected automatically; use the managed batch
 adapter and its custody/label contract for qualified container work.
 
-B70 coexistence uses **3 GiB total Mycelium ceilings**, shared across both cards.
-Install with `--host-memory-budget-gb 3 --memory-ceiling-slack-gb 0
---memory-swap-max-bytes 0` and set the durable shared override to 3. Declare at
-most `needs.host_memory_gb: 3` for a full-envelope experiment; with the default
-0.125-GiB slack, declare at most 2.875 GiB. The coordinated production switch
-raises the shared override to 27 GiB only after legacy GPU owners are cleared.
-See the short deployment section for the switch/fallback command order. These
-budgets are operator settings, not code defaults or measured qualification.
+Preserve the conservative existing value as UNQUALIFIED input during explicit
+CLOSED configuration/import. Do not raise or lower it during an owner switch.
+Native capacity requires separately authorized simultaneous-envelope and
+headroom measurement; laptop fixture values do not qualify native admission.
 
 The budget bounds admitted attempt/server RAM ceilings, not every byte used by
 the worker, environment builds, copies, Docker daemon or unrelated software.

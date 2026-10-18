@@ -108,6 +108,7 @@ func TestStatusStoppedWorkerBudgetIsLastReported(t *testing.T) {
 		m := &myce.Machine{ID: "stopped", Gone: true, HostMemoryBudgetGB: 22}
 		if effective {
 			m.EffectiveHostMemoryBudgetGB = 22
+			m.HostMemoryAllowanceBytes = 22 << 30
 		}
 		f, err := os.CreateTemp(t.TempDir(), "status")
 		if err != nil {
@@ -124,7 +125,11 @@ func TestStatusStoppedWorkerBudgetIsLastReported(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(data), "host ceiling budget (last reported) 22 GiB") {
+		want := "host ceiling budget (last reported) 22 GiB"
+		if effective {
+			want = "host allowance (last reported) 23622320128 bytes (UNQUALIFIED)"
+		}
+		if !strings.Contains(string(data), want) {
 			t.Fatal(string(data))
 		}
 	}

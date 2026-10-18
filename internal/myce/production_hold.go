@@ -16,13 +16,11 @@ import (
 
 // Policies are keyed by physical host_id (worker name when host_id is unset).
 type HostPolicy struct {
-	ProductionHold bool   `json:"production_hold" yaml:"production_hold"`
-	ProductionIdle string `json:"production_idle" yaml:"production_idle"`
+	ProductionHold bool `json:"production_hold" yaml:"production_hold"`
 }
 type HostState struct {
-	Policy    HostPolicy `json:"policy"`
-	IdleSince *time.Time `json:"production_idle_since,omitempty"`
-	Active    bool       `json:"active,omitempty"`
+	Policy HostPolicy `json:"policy"`
+	Active bool       `json:"active,omitempty"`
 }
 
 // Release obligations survive requeue/loss; only an execution acknowledgement or
@@ -70,14 +68,6 @@ func (q *Queue) ConfigureHosts(p map[string]HostPolicy) error {
 		if strings.TrimSpace(host) == "" {
 			return errors.New("host name is required")
 		}
-		if v.ProductionIdle == "" {
-			v.ProductionIdle = "180s"
-		}
-		d, e := time.ParseDuration(v.ProductionIdle)
-		if e != nil || d < 0 {
-			return fmt.Errorf("host %s: production_idle must be a nonnegative duration", host)
-		}
-		v.ProductionIdle = d.String()
 		normalized[host] = v
 	}
 	return q.update(func() error {
@@ -279,14 +269,6 @@ func (q *Queue) productionHoldDetail(host string) HoldDetail {
 	if b, class := q.hostBlockerState(host); b != "" {
 		return productionBlockerDetail(host, b, class)
 	}
-	h := q.s.Hosts[host]
-	if h.IdleSince != nil {
-		d, _ := time.ParseDuration(h.Policy.ProductionIdle)
-		clearsAt := h.IdleSince.Add(d)
-		detail.Kind = "production_cooldown"
-		detail.ClearsAt = &clearsAt
-		detail.Text = fmt.Sprintf("%s: production idle; experiments resume in %.0fs", host, max(0, clearsAt.Sub(q.clock.Now()).Seconds()))
-	}
 	return detail
 }
 
@@ -459,7 +441,6 @@ func (q *Queue) maintainHolds() {
 		}
 		if demand[host] {
 			h.Active = true
-			h.IdleSince = nil
 		}
 		if !h.Active {
 			continue
@@ -535,22 +516,13 @@ func (q *Queue) maintainHolds() {
 			}
 		}
 		if demand[host] || unsettled {
-			h.IdleSince = nil
 			continue
 		}
-		if h.IdleSince == nil {
-			t := now
-			h.IdleSince = &t
-		}
-		idle, _ := time.ParseDuration(h.Policy.ProductionIdle)
-		if !now.Before(h.IdleSince.Add(idle)) {
-			h.Active = false
-			h.IdleSince = nil
-			for _, s := range q.s.ModelSlots {
-				m := q.s.Machines[s.Machine]
-				if m != nil && hostID(m) == host && !q.slotPinned(s) && s.InFlight == 0 {
-					s.State = "draining"
-				}
+		h.Active = false
+		for _, s := range q.s.ModelSlots {
+			m := q.s.Machines[s.Machine]
+			if m != nil && hostID(m) == host && !q.slotPinned(s) && s.InFlight == 0 {
+				s.State = "draining"
 			}
 		}
 	}

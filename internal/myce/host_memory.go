@@ -27,6 +27,9 @@ func hostNeed(m *Machine, gpu, host float64) float64 {
 	return need
 }
 func hostFits(m *Machine, gpu, host float64) bool {
+	if m.HostMemoryPolicyMismatch {
+		return false
+	}
 	if host == 0 {
 		return m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0
 	}
@@ -46,23 +49,23 @@ func (q *Queue) refreshHostMemory() {
 		}
 
 		m.hostBudgetGB = 0
-		generation := uint64(0)
+		m.HostMemoryPolicyMismatch = false
 		for _, other := range q.s.Machines {
-			if hostID(other) == hostID(m) && other.HostMemoryBudgetGeneration > generation {
-				generation = other.HostMemoryBudgetGeneration
+			if hostID(other) != hostID(m) {
+				continue
+			}
+			if other.HostMemoryBudgetGB != m.HostMemoryBudgetGB {
+				m.HostMemoryPolicyMismatch = true
+			}
+			if other.HostMemoryBudgetGB > 0 && (m.hostBudgetGB == 0 || other.HostMemoryBudgetGB < m.hostBudgetGB) {
 				m.hostBudgetGB = other.HostMemoryBudgetGB
 			}
 		}
-		if generation == 0 {
-			for _, other := range q.s.Machines {
-				if hostID(other) == hostID(m) && other.HostMemoryBudgetGB > 0 {
-					if m.hostBudgetGB == 0 {
-						m.hostBudgetGB = other.HostMemoryBudgetGB
-					} else {
-						m.hostBudgetGB = min(m.hostBudgetGB, other.HostMemoryBudgetGB)
-					}
-				}
-			}
+		allowance, _ := hostMemoryAllowance(m.hostBudgetGB)
+		m.HostMemoryAllowanceBytes = allowance.Bytes
+		m.HostMemoryQualification = ""
+		if allowance.Bytes > 0 {
+			m.HostMemoryQualification = "UNQUALIFIED"
 		}
 		if m.hostBudgetGB > 0 {
 			available = min(available, m.hostBudgetGB)

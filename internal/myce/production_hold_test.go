@@ -16,7 +16,7 @@ func holdFleet(t *testing.T, enabled bool) (*Queue, *fakeClock, Machine, Machine
 	t.Helper()
 	q, c := fixture(t)
 	if enabled {
-		if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true, ProductionIdle: "180s"}}); err != nil {
+		if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -28,7 +28,7 @@ func holdFleet(t *testing.T, enabled bool) (*Queue, *fakeClock, Machine, Machine
 	check(t, q, s, nil)
 	return q, c, a, b, s
 }
-func TestProductionHoldDisplacesBothCardsAndCooldown(t *testing.T) {
+func TestProductionHoldDisplacesBothCardsAndReturnsImmediately(t *testing.T) {
 	q, c, a, b, s := holdFleet(t, true)
 	e := spec("experiment")
 	x := submit(t, q, e)
@@ -93,20 +93,10 @@ func TestProductionHoldDisplacesBothCardsAndCooldown(t *testing.T) {
 		t.Fatalf("production: %+v", run)
 	}
 	finish(t, q, run, true)
-	if check(t, q, b, nil).Job != nil {
-		t.Fatal("admitted during cooldown")
-	}
-	c.Advance(179 * time.Second)
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	check(t, q, s, resumed)
-	if check(t, q, b, nil).Job != nil {
-		t.Fatal("admitted at 179s")
-	}
-	c.Advance(time.Second)
 	if got := check(t, q, b, nil).Job; got == nil || got.ID != y.ID || got.Attempt != 2 {
-		t.Fatalf("after cooldown: %+v", got)
+		t.Fatalf("after final release: %+v", got)
 	}
+
 }
 
 func TestProductionHoldDefaultOffAndOtherHost(t *testing.T) {
@@ -135,49 +125,27 @@ func TestProductionHoldDefaultOffAndOtherHost(t *testing.T) {
 		})
 	}
 }
-func TestProductionHoldSecondArrivalAndZeroIdle(t *testing.T) {
-	for _, idle := range []string{"180s", "0s"} {
-		t.Run(idle, func(t *testing.T) {
-			q, c := fixture(t)
-			if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true, ProductionIdle: idle}}); err != nil {
-				t.Fatal(err)
-			}
-			a, b := machine("a", "fake"), machine("b", "fake")
-			a.HostID = "b70"
-			b.HostID = "b70"
-			check(t, q, a, nil)
-			check(t, q, b, nil)
-			p := spec("production")
-			p.AllowedMachines = []string{a.ID}
-			x := submit(t, q, p)
-			x = check(t, q, a, nil).Job
-			e := submit(t, q, spec("experiment"))
-			second := submit(t, q, p)
-			finish(t, q, x, true)
-			if check(t, q, b, nil).Job != nil {
-				t.Fatal("second queued production must hold")
-			}
-			second = check(t, q, a, nil).Job
-			finish(t, q, second, true)
-			if idle == "180s" {
-				c.Advance(180 * time.Second)
-				// Arrival is committed before expiry maintenance; it wins at the boundary.
-				third := submit(t, q, p)
-				if check(t, q, b, nil).Job != nil {
-					t.Fatal("arrival at expiry must win")
-				}
-				third = check(t, q, a, nil).Job
-				finish(t, q, third, true)
-				c.Advance(-time.Second)
-				if check(t, q, b, nil).Job != nil {
-					t.Fatal("backward time reopened hold")
-				}
-				c.Advance(181 * time.Second)
-			}
-			if got := check(t, q, b, nil).Job; got == nil || got.ID != e.ID {
-				t.Fatalf("idle expiry: %+v", got)
-			}
-		})
+func TestProductionHoldSecondArrival(t *testing.T) {
+	q, _, a, b, _ := holdFleet(t, true)
+	p := spec("production")
+	p.AllowedMachines = []string{a.ID}
+	submit(t, q, p)
+	first := check(t, q, a, nil).Job
+	e := spec("experiment")
+	e.AllowedMachines = []string{b.ID}
+	waiting := submit(t, q, e)
+	second := submit(t, q, p)
+	finish(t, q, first, true)
+	if check(t, q, b, nil).Job != nil {
+		t.Fatal("queued second production must hold")
+	}
+	running := check(t, q, a, nil).Job
+	if running == nil || running.ID != second.ID {
+		t.Fatal("second production not assigned")
+	}
+	finish(t, q, running, true)
+	if got := check(t, q, b, nil).Job; got == nil || got.ID != waiting.ID {
+		t.Fatal("final settled demand did not return experiment")
 	}
 }
 func TestProductionHoldExpiryAndLostWorkerRetainRelease(t *testing.T) {
@@ -244,12 +212,12 @@ func TestProductionHoldWorkerLoss(t *testing.T) {
 }
 
 // Reopening restores real NAS probes. Fake their I/O budget too, so disk/CPU
-// latency cannot masquerade as a lost cooldown while scheduling uses c.
-func TestProductionHoldRestartDuringReclaimAndCooldown(t *testing.T) {
-	synctest.Test(t, testProductionHoldRestartDuringReclaimAndCooldown)
+// latency cannot masquerade as a lost release while scheduling uses c.
+func TestProductionHoldRestartDuringReclaimAndReturn(t *testing.T) {
+	synctest.Test(t, testProductionHoldRestartDuringReclaimAndReturn)
 }
 
-func testProductionHoldRestartDuringReclaimAndCooldown(t *testing.T) {
+func testProductionHoldRestartDuringReclaimAndReturn(t *testing.T) {
 	q, c, a, b, _ := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, a, nil).Job
@@ -283,7 +251,6 @@ func testProductionHoldRestartDuringReclaimAndCooldown(t *testing.T) {
 		t.Fatalf("production %+v", run)
 	}
 	finish(t, q2, run, true)
-	c.Advance(179 * time.Second)
 	if err := q2.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -292,13 +259,9 @@ func testProductionHoldRestartDuringReclaimAndCooldown(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q3.Close()
-	if got := check(t, q3, b, nil).Job; got != nil {
-		t.Fatal("179s idle forgotten")
-	}
 	check(t, q3, a, nil)
-	c.Advance(time.Second)
 	if got := check(t, q3, b, nil).Job; got == nil {
-		t.Fatal("idle interval not preserved")
+		t.Fatal("settled demand was held after restart")
 	}
 }
 func (q *Queue) dbPathForTest(t *testing.T) string {
@@ -319,7 +282,7 @@ func TestProductionHoldModelPathsAndResidency(t *testing.T) {
 	b.ID = "two"
 	b.Session = "session-two"
 	check(t, q, b, nil)
-	if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true, ProductionIdle: "180s"}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}}); err != nil {
 		t.Fatal(err)
 	}
 	call := addModelCall(t, q, "experiment")
@@ -358,18 +321,22 @@ func TestProductionHoldModelPathsAndResidency(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := reportModel(t, q, a, "ready")
-	if len(r.ModelPlan) != 1 || r.ModelPlan[0].State != "ready" {
-		t.Fatalf("production residency should survive cooldown: %+v", r.ModelPlan)
+	if len(r.ModelPlan) == 0 || r.ModelPlan[0].State != "draining" {
+		t.Fatalf("idle takeover residency not released: %+v", r.ModelPlan)
 	}
 	next := addModelCall(t, q, "experiment")
 	if next.Machine != "" {
-		t.Fatal("resident model bypassed hold")
+		t.Fatal("experiment bypassed model unload acknowledgement")
 	}
-	c.Advance(180 * time.Second)
-	r = reportModel(t, q, a, "ready")
-	if len(r.ModelPlan) == 0 || r.ModelPlan[0].State != "draining" {
-		t.Fatal("idle production residency should drain at expiry")
+	reportModel(t, q, a, "unloaded")
+	// Once the final production residency releases, ordinary placement may choose either card.
+	for _, m := range []Machine{a, b} {
+		reportModel(t, q, m, "ready")
 	}
+	if next.Machine != a.ID && next.Machine != b.ID {
+		t.Fatalf("experiment not admitted after exact unload: %+v", next)
+	}
+
 }
 func TestProductionHoldPinProtected(t *testing.T) {
 	q, _, a := modelFixture(t)
@@ -961,56 +928,93 @@ func TestProductionHoldSequentialStageGap(t *testing.T) {
 			q, c, a, b, _ := holdFleet(t, true)
 			stage := spec("production")
 			stage.AllowedMachines = []string{a.ID}
-			first := submit(t, q, stage)
-			running := check(t, q, a, nil).Job
-			if running == nil || running.ID != first.ID {
-				t.Fatal("stage A not assigned")
+			submit(t, q, stage)
+			first := check(t, q, a, nil).Job
+			e := spec("experiment")
+			e.AllowedMachines = []string{b.ID}
+			waiting := submit(t, q, e)
+			finish(t, q, first, true)
+			between := check(t, q, b, nil).Job
+			if between == nil || between.ID != waiting.ID {
+				t.Fatal("experiment did not return immediately in stage gap")
 			}
-			experiment := spec("experiment")
-			experiment.AllowedMachines = []string{b.ID}
-			waiting := submit(t, q, experiment)
-			finish(t, q, running, true)
-			if check(t, q, b, nil).Job != nil {
-				t.Fatal("experiment admitted immediately after stage A")
-			}
-			if gap == 5*time.Second {
-				c.Advance(gap)
-				if check(t, q, b, nil).Job != nil {
-					t.Fatal("experiment admitted in five-second stage gap")
-				}
-			} else {
-				c.Advance(179 * time.Second)
-				check(t, q, a, nil)
-				if check(t, q, b, nil).Job != nil {
-					t.Fatal("experiment admitted before A's 180-second idle interval")
-				}
-				c.Advance(time.Second)
-				between := check(t, q, b, nil).Job
-				if between == nil || between.ID != waiting.ID {
-					t.Fatal("experiment did not run during long stage gap")
-				}
-				finish(t, q, between, true)
-				c.Advance(gap - 180*time.Second)
-				waiting = submit(t, q, experiment)
-			}
-			second := submit(t, q, stage)
-			if check(t, q, b, nil).Job != nil {
-				t.Fatal("experiment admitted while stage B waits")
-			}
-			running = check(t, q, a, nil).Job
-			if running == nil || running.ID != second.ID {
-				t.Fatal("stage B not assigned")
-			}
-			finish(t, q, running, true)
-			c.Advance(179 * time.Second)
+			c.Advance(gap)
 			check(t, q, a, nil)
-			if check(t, q, b, nil).Job != nil {
-				t.Fatal("experiment admitted before 180 seconds from B completion")
+			check(t, q, b, between)
+			second := submit(t, q, stage)
+			if !check(t, q, b, between).Stop {
+				t.Fatal("new stage did not immediately reclaim")
 			}
-			c.Advance(time.Second)
+			if check(t, q, a, nil).Job != nil {
+				t.Fatal("new stage bypassed experiment release")
+			}
+			finish(t, q, between, false)
+			run := check(t, q, a, nil).Job
+			if run == nil || run.ID != second.ID {
+				t.Fatal("second stage not admitted")
+			}
+			finish(t, q, run, true)
 			if got := check(t, q, b, nil).Job; got == nil || got.ID != waiting.ID {
-				t.Fatal("experiment not admitted 180 seconds after stage B")
+				t.Fatal("final stage retained idle hold")
 			}
 		})
+	}
+}
+
+func TestProductionDemandWithoutIdleCooldown(t *testing.T) {
+	q, clock, a, b, _ := holdFleet(t, true)
+	e := spec("experiment")
+	e.AllowedMachines = []string{b.ID}
+	first := submit(t, q, e)
+	running := check(t, q, b, nil).Job
+	if running == nil || running.ID != first.ID {
+		t.Fatal("experiment did not start")
+	}
+	p := spec("production")
+	p.AllowedMachines = []string{a.ID}
+	prod := submit(t, q, p)
+	if !check(t, q, b, running).Stop {
+		t.Fatal("production did not immediately preempt")
+	}
+	// Neither demand cancellation nor years of elapsed grace prove release.
+	if err := q.Cancel(prod.ID); err != nil {
+		t.Fatal(err)
+	}
+	receipt := result(running, false)
+	receipt.Interrupted = true
+	receipt.ReleasePending = true
+	if err := q.Complete(receipt); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		clock.Advance(365 * 24 * time.Hour)
+		check(t, q, a, nil)
+		if !q.held(hostID(&a)) {
+			t.Fatal("unconfirmed release expired")
+		}
+	}
+	receipt.ReleasePending = false
+	receipt.ReleaseOnly = true
+	if err := q.Complete(receipt); err != nil {
+		t.Fatal(err)
+	}
+	// Keep worker sessions current after the deliberately long fake loss interval.
+	check(t, q, a, nil)
+	got := check(t, q, b, nil).Job
+	if got == nil || got.ID != first.ID || got.Attempt != 2 || got.Losses != 0 {
+		t.Fatalf("settled demand did not immediately return experiment: %+v", got)
+	}
+	next := submit(t, q, p)
+	if !check(t, q, b, got).Stop {
+		t.Fatal("new production did not reclaim")
+	}
+	finish(t, q, got, false)
+	run := check(t, q, a, nil).Job
+	if run == nil || run.ID != next.ID {
+		t.Fatal("new production not admitted after release")
+	}
+	finish(t, q, run, true)
+	if got := check(t, q, b, nil).Job; got == nil || got.ID != first.ID {
+		t.Fatal("final demand retained idle cooldown")
 	}
 }

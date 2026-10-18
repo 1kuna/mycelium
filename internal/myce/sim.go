@@ -740,15 +740,6 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 		}
 
 		next := horizon
-		for _, h := range q.s.Hosts {
-			if h.Active && h.IdleSince != nil {
-				idle, _ := time.ParseDuration(h.Policy.ProductionIdle)
-				at := float64(h.IdleSince.Add(idle).Sub(epoch).Nanoseconds()) / 1e9
-				if at > now+1e-7 {
-					next = min(next, at)
-				}
-			}
-		}
 		for _, c := range q.calls {
 			if c.StopAt != nil && c.Error == "" {
 				at := float64(c.StopAt.Sub(epoch).Nanoseconds()) / 1e9

@@ -62,7 +62,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	gpu := f.String("gpu", "", "explicit GPU platform override")
 	mode := f.String("memory-mode", "auto", "explicit memory mode with --gpu")
 	memory := f.Float64("memory-gb", 0, "explicit GPU budget")
-	hostBudget := f.Float64("host-memory-budget-gb", 0, "aggregate declared RAM ceiling budget per physical host")
+	hostBudget := f.Float64("host-memory-budget-gb", 0, "UNQUALIFIED allowance migration input; configure the host allowance explicitly while CLOSED")
 	memorySlack := f.Float64("memory-ceiling-slack-gb", .125, "extra GiB per declared RAM ceiling")
 	memorySwap := f.Int64("memory-swap-max-bytes", 0, "swap allowance per ceiling in bytes")
 	reserve := f.Float64("reserve-memory-gb", 0, "explicit memory reserve")

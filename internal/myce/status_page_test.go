@@ -214,12 +214,17 @@ func TestStatusPageStoppedWorkerBudgetIsLastReported(t *testing.T) {
 		m := &Machine{ID: "stopped", Gone: true, HostMemoryBudgetGB: 22}
 		if effective {
 			m.EffectiveHostMemoryBudgetGB = 22
+			m.HostMemoryAllowanceBytes = 22 << 30
 		}
 		var b bytes.Buffer
 		if err := statusPage.Execute(&b, Snapshot{Machines: []*Machine{m}}); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(b.String(), "Host ceiling budget (last reported): 22 GiB") {
+		want := "Host ceiling budget (last reported): 22 GiB"
+		if effective {
+			want = "Host allowance (last reported): 23622320128 bytes (UNQUALIFIED)"
+		}
+		if !strings.Contains(b.String(), want) {
 			t.Fatal(b.String())
 		}
 	}

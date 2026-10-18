@@ -1,6 +1,6 @@
 # Both experiments start on B70 at t=0; production arrives at t=60s.
 # Spark has space for one plain-command worker: one displaced experiment
-# resumes there immediately, the other can return after B70's cooldown.
+# resumes there immediately, the other returns as soon as production and its releases settle.
 duration_jitter: 0
 projects:
   verso: {weight: 1, allowed_machines: [b70-0, b70-1]}

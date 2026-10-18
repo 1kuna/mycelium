@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestHoldsDetailCooldownAndDockerEscalation(t *testing.T) {
+func TestHoldsDetailDemandReturnAndDockerEscalation(t *testing.T) {
 	q, c, a, _, _ := holdFleet(t, true)
 	p := spec("production")
 	p.AllowedMachines = []string{a.ID}
@@ -19,34 +19,22 @@ func TestHoldsDetailCooldownAndDockerEscalation(t *testing.T) {
 	}
 	finish(t, q, running, true)
 	idle := c.Now()
-	// A worker-reported cleanup obligation can coexist with the host's cooldown.
+	// A worker-reported Docker blocker survives settled production demand.
 	q.s.Machines[a.ID].DockerCleanup = "cleanup unconfirmed: inspect"
 	snap, err := q.publicSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"b70: Docker cleanup unconfirmed; cleanup unconfirmed: inspect", "b70: production idle; experiments resume in 180s"}
+	want := []string{"b70: Docker cleanup unconfirmed; cleanup unconfirmed: inspect"}
 	if !reflect.DeepEqual(snap.HostHolds, want) {
 		t.Fatalf("legacy strings changed: %v", snap.HostHolds)
 	}
-	var cooldown, cleanup *HoldDetail
-	for i := range snap.HoldsDetail {
-		d := &snap.HoldsDetail[i]
-		if d.Kind == "production_cooldown" {
-			cooldown = d
-		}
-		if d.Kind == "docker_cleanup_waiting" {
-			cleanup = d
-		}
+	if len(snap.HoldsDetail) != 1 {
+		t.Fatalf("retired idle hold remains: %+v", snap.HoldsDetail)
 	}
-	if cooldown == nil || cleanup == nil || cooldown.OperatorActionRequired || cleanup.OperatorActionRequired {
-		t.Fatalf("details: %+v", snap.HoldsDetail)
-	}
-	if cooldown.Host != "b70" || cleanup.Host != "b70" || cooldown.ClearsAt == nil || !cooldown.ClearsAt.Equal(idle.Add(180*time.Second)) || cleanup.ClearsAt != nil {
-		t.Fatalf("holds: %+v %+v", cooldown, cleanup)
-	}
-	if cooldown.Text != want[1] || cleanup.Text != want[0] {
-		t.Fatalf("text: %+v %+v", cooldown, cleanup)
+	cleanup := snap.HoldsDetail[0]
+	if cleanup.Kind != "docker_cleanup_waiting" || cleanup.Host != "b70" || cleanup.OperatorActionRequired || cleanup.ClearsAt != nil || cleanup.Text != want[0] {
+		t.Fatalf("Docker blocker: %+v", cleanup)
 	}
 	// An attempt-specific custody record drives the existing escalation timer.
 	r := HostRelease{Host: "b70", Job: "old-job", Machine: a.ID, Session: "old-session", Attempt: 1, Docker: true, CleanupSince: &idle}

@@ -826,7 +826,7 @@ func TestDockerStopBeforeDispatchNeverStarts(t *testing.T) {
 }
 func TestDockerProductionRetargetPreservesOldHostObligation(t *testing.T) {
 	q, _ := fixture(t)
-	if e := q.ConfigureHosts(map[string]HostPolicy{"shared": {ProductionHold: true, ProductionIdle: "180s"}}); e != nil {
+	if e := q.ConfigureHosts(map[string]HostPolicy{"shared": {ProductionHold: true}}); e != nil {
 		t.Fatal(e)
 	}
 	a := machine("a", "fake")
