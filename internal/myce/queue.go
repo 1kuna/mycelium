@@ -63,15 +63,16 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
-	localHostID     string
-	localHostErr    error
-	localHostDir    string
-	localHostQueue  string
-	files           *FileStore
-	fileCheckpoints bool
-	nasProbe        checkpointIO[bool]
-	nasProgress     checkpointIO[int64]
-	nasAvailable    bool
+	localHostID            string
+	localHostErr           error
+	localHostDir           string
+	localHostQueue         string
+	files                  *FileStore
+	fileCheckpoints        bool
+	submitVerificationSlot chan struct{}
+	nasProbe               checkpointIO[bool]
+	nasProgress            checkpointIO[int64]
+	nasAvailable           bool
 
 	nextApprovalWarning time.Time
 
@@ -349,6 +350,14 @@ func (q *Queue) updateScoped(host func() string, admission bool, fn func() error
 	return err
 }
 func (q *Queue) Submit(s Spec) (*Job, error) {
+	return q.SubmitContext(context.Background(), s)
+}
+
+// SubmitContext snapshots input custody before bulk verification. Key replay,
+// cancellation and job creation still serialize in the final update transaction.
+func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
+	ctx, cancel := context.WithTimeout(ctx, submitVerificationTimeout)
+	defer cancel()
 	if s.SubmissionKey != "" {
 		if err := validateSubmissionKey(s.SubmissionKey); err != nil {
 			return nil, err
@@ -357,6 +366,24 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 	fingerprint, err := submissionFingerprint(s)
 	if err != nil {
 		return nil, err
+	}
+	q.mu.Lock()
+	// Own all client maps/slices across the unlocked verification interval.
+	s = cloneJob(&Job{Spec: s}).Spec
+	store, fileCheckpoints := q.files, q.fileCheckpoints
+	replay := s.SubmissionKey != "" && q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)] != nil
+	if len(s.Files) > 0 && !replay && q.submitVerificationSlot == nil {
+		q.submitVerificationSlot = make(chan struct{}, 1)
+	}
+	slot := q.submitVerificationSlot
+	q.mu.Unlock()
+	var verificationErr error
+	if len(s.Files) > 0 && !replay {
+		if !fileCheckpoints {
+			verificationErr = errors.New("stored job files require file-store checkpoints; omit queue --checkpoints")
+		} else {
+			verificationErr = verifySubmissionInputs(ctx, store, s.Files, slot)
+		}
 	}
 	var out Job
 	err = q.updateScoped(nil, true, func() error {
@@ -369,13 +396,15 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 			out = *existing
 			return nil
 		}
-		if len(s.Files) > 0 && !q.fileCheckpoints {
-			return errors.New("stored job files require file-store checkpoints; omit queue --checkpoints")
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		if len(s.Files) > 0 {
-			if err := q.verifyManifest(context.Background(), s.Files); err != nil {
-				return err
-			}
+		// A concurrent key binding/reservation wins even if verification failed.
+		if verificationErr != nil {
+			return verificationErr
+		}
+		if len(s.Files) > 0 && (q.files != store || q.fileCheckpoints != fileCheckpoints) {
+			return ErrStale
 		}
 		if err := s.Validate(); err != nil {
 			return err
