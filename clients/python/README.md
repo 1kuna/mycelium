@@ -109,21 +109,20 @@ handler. See `docs/guide-resumable-jobs.md` for NAS and retry requirements.
 ## Tests (no GPU)
 
 ```sh
-# From the repository root; use an installed Python 3.10+ (macOS may ship 3.9).
-python3.13 -m venv .venv-prod-ready-py313
-. .venv-prod-ready-py313/bin/activate
-python -m pip install -e './clients/python[yaml,openai]'
-python -m unittest discover -s clients/python/tests -v
+# From the repository root, using an installed Python 3.10+ (here, Python 3.14).
+PYTHONPATH=clients/python/src:clients/python/tests python3.14 -m unittest test_client.DevTests.test_production_start_deadline -v
+PYTHONPATH=clients/python/src python3.14 -m unittest discover -s clients/python/tests -v
 ```
 
 Tests build the local Go CLI into a temporary directory and launch `myce dev`
 on an ephemeral loopback port with one fake GPU worker and real command runner.
 They cover submission, wait/failure/timeout, authentication, paged log cursors,
 cancellation, YAML, SDK embeddings/chat/streaming, atomic checkpoint failure,
-signals, and production preemption/resumption. The full acceptance run requires
-both extras and must end with zero skips.
-A base-only client installation can still skip the optional integration tests;
-it is not the full acceptance run. No fleet access is required.
+signals, and production preemption/resumption. No client installation or optional
+dependency download is needed for this run. Without the optional extras, only
+`DevTests.test_yaml` (`install yaml extra`) and `DevTests.test_openai_sdk`
+(`install openai extra`) may skip. With both extras installed, those tests run
+against the local dev server too. No fleet access or paid service call is required.
 
 Saves contain `{"myce_checkpoint": {"generation": N}, "value": ...}`; `load()`
 returns the original value. Each save increments the highest generation retained
