@@ -22,6 +22,36 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 	if v.Privileged || !validHostMutation(m) {
 		return result, ErrHostChild
 	}
+	if m.Operation == "resolve-docker" {
+		allowed := m.SpoolDir != "" && m.SpoolDir == v.Config.State
+		workers, e := HostWorkers(v.StateDir)
+		if e != nil {
+			return result, e
+		}
+		for _, w := range workers {
+			allowed = allowed || m.SpoolDir != "" && m.SpoolDir == w.State
+		}
+		if !allowed || !filepath.IsAbs(m.SpoolDir) || filepath.Clean(m.SpoolDir) != m.SpoolDir {
+			return result, ErrHostTarget
+		}
+		if e = validateHostTarget(m.SpoolDir, v.Account.UID, true); e != nil {
+			return result, e
+		}
+		if e = ReconcileDockerAttempt(ctx, v.StateDir, m.SpoolDir, m.AttemptID); e != nil {
+			return result, e
+		}
+		state, e := ReadHostIntent(v.StateDir)
+		return HostMutationResult{HostRevision: state.HostRevision}, e
+	}
+	if m.Operation == "record-exclusion" {
+		if err := recordHostExclusion(ctx, v, m.Evidence, x.Clock); err != nil {
+			return result, err
+		}
+		if x.Reconcile != nil {
+			_ = x.Reconcile(ctx, v)
+		}
+		return HostMutationResult{HostRevision: m.Evidence.HostRevision, Exclusion: m.Evidence, CleanupConfirmed: m.Evidence.Verdict == "PASS"}, nil
+	}
 	if m.Operation == "unit-stop" || m.Operation == "unit-kill" || m.Operation == "unit-start" {
 		// Only units installed for this host may be mutated.
 		units, e := WorkerUnits(v.StateDir, "")
@@ -60,7 +90,7 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 		}
 		return result, e
 	}
-	h := HostControl{Clock: x.Clock, Dir: v.StateDir, Docker: true, Timeout: m.Timeout, Expected: m.Expected, CloseExpected: m.CloseExpected, Settled: x.Settled}
+	h := HostControl{ContainerRetention: v.Config.ContainerRetention, DockerEndpoint: v.Config.DockerEndpoint, Clock: x.Clock, Dir: v.StateDir, Docker: true, Timeout: m.Timeout, Expected: m.Expected, CloseExpected: m.CloseExpected, Settled: x.Settled}
 	h.Prepare = func() error {
 		workers, err := HostWorkers(v.StateDir)
 		if err != nil {
@@ -106,17 +136,17 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 			if !ValidWorkerUnit(u) {
 				return nil, ErrHostIdentity
 			}
-			services[u] = &SystemdHostService{Unit: u, Command: x.Probe.Command}
+			services[u] = &SystemdHostService{Unit: u, Command: x.Probe.Command, Clock: x.Clock}
 		}
 		return services, nil
 	}
 	switch m.Operation {
 	case "close":
 		r, e := h.Disable(ctx, m.Reason, m.Grace)
-		if e != nil {
+		if !r.cleanupComplete && e != nil {
 			return result, e
 		}
-		return HostMutationResult{HostRevision: r.HostRevision, Stopped: r.Stopped, CleanupConfirmed: r.Confirmed}, nil
+		return HostMutationResult{HostRevision: r.HostRevision, Stopped: r.Stopped, CleanupConfirmed: r.Confirmed, Exclusion: r.Exclusion}, nil
 	case "open":
 		if e := h.Prepare(); e != nil {
 			return result, e
@@ -183,11 +213,27 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 		if e != nil {
 			return result, e
 		}
+		if s.Desired == "closed" && localExclusionConfirmed(s, boot) {
+			// The stopped worker cannot perform ordinary retention; the timer uses
+			// the same exact-label inventory, without creating a maintenance daemon.
+			workers, e := HostWorkers(v.StateDir)
+			if e != nil {
+				return result, e
+			}
+			if e = h.maintainDocker(ctx, workers); e != nil {
+				return result, e
+			}
+		}
 		var cleanupErr error
 		if s.Desired == "closed" && !localExclusionConfirmed(s, boot) {
 			h.CloseExpected = &s.HostRevision
-			_, cleanupErr = h.Disable(ctx, s.Reason, 0)
+			report, e := h.Disable(ctx, s.Reason, 0)
+			if !report.cleanupComplete {
+				cleanupErr = e
+			}
 		}
+		// A worker timer may relay an already privileged proof, but cleanup
+		// performed here cannot manufacture one. Root collects after this child.
 		reconcileErr := x.Reconcile(ctx, v)
 		current, e := ReadHostIntent(v.StateDir)
 		if e != nil {

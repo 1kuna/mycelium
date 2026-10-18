@@ -150,7 +150,7 @@ func StartDev(c DevConfig) (*Dev, error) {
 		boot, e := HostBootID()
 		if e == nil {
 			e = mutateHostIntent(c.HostStateDir, s.HostRevision, func(current *HostIntent) error {
-				current.LocalExclusion = &HostLocalExclusion{HostObservation: HostObservation{HostRevision: s.HostRevision, Boot: boot, State: "closed", At: q.clock.Now()}, Confirmed: true}
+				current.LocalExclusion = &HostLocalExclusion{Simulated: true, HostObservation: HostObservation{HostRevision: s.HostRevision, Boot: boot, State: "closed", At: q.clock.Now()}, Confirmed: true}
 				return nil
 			})
 		}

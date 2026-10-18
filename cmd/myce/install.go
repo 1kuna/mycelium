@@ -43,6 +43,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	instance := f.String("instance", "", "Linux worker instance (e.g. gpu1)")
 	device := f.String("device", "", "physical GPU selector (one device per worker)")
 	f.BoolFunc("local-disable-receipts", "retired; reinstall the queue without this option", func(string) error { return myce.ErrLegacyLocalDisableReceipts })
+	dockerHost := f.String("docker-host", env("DOCKER_HOST", "unix:///var/run/docker.sock"), "worker Docker endpoint persisted in config")
 	hostDir := f.String("host-state-dir", "", "shared local host control directory")
 	joiningFile := f.String("joining-file", "", "private invitation; discovers queue and provisions trust")
 	root := f.String("root", "", "installation root (default ~/.local/share/mycelium)")
@@ -248,6 +249,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	c.HostMemoryBudgetGB, c.MemoryCeilingSlackGB, c.MemorySwapMaxBytes = *hostBudget, *memorySlack, *memorySwap
 	c.AllowDeviceless = *allowDeviceless
 	c.Device = *device
+	c.DockerEndpoint = *dockerHost
 	if *hostDir != "" {
 		c.HostStateDir = *hostDir
 	} else if v := os.Getenv("MYCE_HOST_STATE_DIR"); v != "" {

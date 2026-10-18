@@ -102,6 +102,7 @@ type dockerExecution struct {
 	Network           string                  `json:"network,omitempty"`
 	Containers        map[string]dockerMember `json:"containers,omitempty"`
 	PendingContainer  string                  `json:"pending_container,omitempty"`
+	PendingName       string                  `json:"pending_name,omitempty"`
 	MainFinished      bool                    `json:"main_finished,omitempty"`
 	Failure           string                  `json:"failure,omitempty"`
 	MemoryLimitBytes  int64                   `json:"memory_limit_bytes,omitempty"`
@@ -111,6 +112,7 @@ type dockerExecution struct {
 	Identity          string                  `json:"identity"`
 	Endpoint          string                  `json:"endpoint"`
 	Container         string                  `json:"container,omitempty"`
+	DispatchedAt      *time.Time              `json:"dispatched_at,omitempty"`
 	Operation         string                  `json:"operation,omitempty"`
 	Pending           bool                    `json:"pending,omitempty"`
 	Stopped           bool                    `json:"stopped,omitempty"`
@@ -122,7 +124,8 @@ type dockerExecution struct {
 	ExitCode          int                     `json:"exit_code"`
 }
 type dockerAttempt struct {
-	persist      func(dockerExecution) error // Optional custody store for fault injection.
+	command      func(context.Context, ...string) ([]byte, error) // Injectable daemon boundary.
+	persist      func(dockerExecution) error                      // Optional custody store for fault injection.
 	admit        func() error
 	dirty        bool
 	closed       chan struct{}
@@ -210,6 +213,9 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	if d.command != nil {
+		return d.command(ctx, args...)
+	}
 	cmd := exec.CommandContext(ctx, d.binary, append([]string{"--host", d.state.Endpoint}, args...)...)
 	cmd.Env = d.env
 	cmd.Dir = d.workdir
@@ -247,6 +253,17 @@ func (d *dockerAttempt) operation(kind string, args ...string) ([]byte, error) {
 	}
 	d.state.Operation = kind
 	d.state.Pending = true
+	if kind == "create" {
+		d.state.PendingName = ""
+		d.state.PendingContainer = ""
+		for i, arg := range args {
+			if arg == "--name" && i+1 < len(args) {
+				d.state.PendingName = args[i+1]
+			}
+		}
+	}
+	at := d.clock.Now().UTC()
+	d.state.DispatchedAt = &at
 	err = d.saveLocked()
 	d.mu.Unlock()
 	if err != nil {
@@ -276,6 +293,7 @@ func (d *dockerAttempt) operation(kind string, args ...string) ([]byte, error) {
 
 type dockerInspection struct {
 	HostConfig struct {
+		RestartPolicy   *dockerRestartPolicy
 		Memory          int64
 		MemorySwap      int64
 		NetworkMode     string
@@ -287,55 +305,79 @@ type dockerInspection struct {
 	} `json:"NetworkSettings"`
 	Mounts []struct{ Source, Destination string } `json:"Mounts"`
 	ID     string                                 `json:"Id"`
+	Name   string                                 `json:"Name"`
 	Config struct{ Labels map[string]string }     `json:"Config"`
 	State  struct {
-		Running   *bool
-		Status    string
-		ExitCode  int
-		OOMKilled bool
+		Pid        int
+		StartedAt  time.Time
+		Paused     bool
+		Restarting bool
+		Running    *bool
+		Status     string
+		ExitCode   int
+		OOMKilled  bool
 	} `json:"State"`
 }
 
-// Every object is inspected before signaling: names and cidfiles are not ownership proof.
-func (d *dockerAttempt) containers() ([]dockerInspection, error) {
-	out, err := d.call("ps", "--all", "--quiet", "--no-trunc", "--filter", dockerAttemptFilter(d.state.Identity))
+type dockerRestartPolicy struct {
+	Name              string
+	MaximumRetryCount int
+}
+
+func dockerLive(c dockerInspection) bool {
+	return c.State.Running != nil && *c.State.Running || c.State.Paused || c.State.Restarting || c.State.Status == "paused" || c.State.Status == "restarting" || c.State.Status == "removing"
+}
+
+// One inventory implementation is shared by privileged observation and cleanup.
+func inspectOwnedDocker(ctx context.Context, endpoint, identity string, call func(context.Context, string, ...string) ([]byte, error)) ([]dockerInspection, error) {
+	out, err := call(ctx, endpoint, "ps", "--all", "--quiet", "--no-trunc", "--filter", dockerAttemptFilter(identity))
 	if err != nil {
 		return nil, err
 	}
 	ids := strings.Fields(string(out))
-	if d.inventory != nil {
-		d.inventory(ids)
-	}
 	if len(ids) == 0 {
-		return nil, nil
+		return []dockerInspection{}, nil
 	}
-	out, err = d.call(append([]string{"inspect"}, ids...)...)
-	if err != nil {
-		return nil, fmt.Errorf("Docker inspection unconfirmed for containers %s: %w", strings.Join(ids, ","), err)
+	out, inspectErr := call(ctx, endpoint, append([]string{"inspect"}, ids...)...)
+	var cs []dockerInspection
+	if json.Unmarshal(out, &cs) != nil {
+		return nil, errors.New("Docker inspection unconfirmed")
 	}
-	var containers []dockerInspection
-	if err = json.Unmarshal(out, &containers); err != nil {
-		return nil, err
-	}
-	if len(containers) != len(ids) {
-		return nil, errors.New("incomplete Docker inventory")
-	}
+	var valid []dockerInspection
+	incomplete := inspectErr != nil || len(cs) != len(ids)
 	seen := map[string]bool{}
-	for _, c := range containers {
-		if c.ID == "" || !slices.Contains(ids, c.ID) || seen[c.ID] || c.State.Running == nil || !slices.Contains([]string{"created", "running", "paused", "restarting", "removing", "exited", "dead"}, c.State.Status) {
-			return nil, errors.New("incomplete Docker inspection")
-		}
-		if c.State.Status == "paused" || c.State.Status == "restarting" || c.State.Status == "removing" {
-			return nil, errors.New("Docker execution not settled")
+	for _, c := range cs {
+		if c.ID == "" || !slices.Contains(ids, c.ID) || seen[c.ID] || c.Config.Labels["myce.attempt"] == "" || identity != "" && c.Config.Labels["myce.attempt"] != identity {
+			incomplete = true
+			continue
 		}
 		seen[c.ID] = true
-		if c.Config.Labels["myce.attempt"] == "" || (d.state.Identity != "" && c.Config.Labels["myce.attempt"] != d.state.Identity) {
-			return nil, errors.New("Docker ownership mismatch")
+		valid = append(valid, c)
+		if c.State.Running == nil || !slices.Contains([]string{"created", "running", "paused", "restarting", "removing", "exited", "dead"}, c.State.Status) {
+			incomplete = true
 		}
 	}
-	return containers, nil
+	if incomplete {
+		return valid, errors.New("incomplete Docker inventory")
+	}
+	cs = valid
+	return cs, nil
+}
+
+// Every object is inspected before signaling: names and cidfiles are not ownership proof.
+func (d *dockerAttempt) containers() ([]dockerInspection, error) {
+	return inspectOwnedDocker(d.ctx, d.state.Endpoint, d.state.Identity, func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		b, err := d.call(args...)
+		if len(args) > 0 && args[0] == "ps" && err == nil && d.inventory != nil {
+			d.inventory(strings.Fields(string(b)))
+		}
+		return b, err
+	})
 }
 func (d *dockerAttempt) reconcile() (bool, error) {
+	if d.state.OperatorConfirmed {
+		return false, errors.New("legacy Docker assertion has unknown operation disposition")
+	}
 	// Deadline KILL must remain possible when the spool is unwritable.
 	// Preserve pending-start acceptance before signaling any container.
 	d.mu.Lock()
@@ -351,12 +393,61 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	for _, c := range containers {
+		if c.HostConfig.RestartPolicy == nil {
+			return false, errors.New("Docker restart policy unknown")
+		}
+		if c.HostConfig.RestartPolicy.Name != "no" {
+			if _, err := d.call("update", "--restart=no", c.ID); err != nil {
+				return false, errors.New("Docker restart policy update unconfirmed")
+			}
+			return false, nil // Verify effective policy in the next inventory.
+		}
+	}
+	// A positively identified network settles its accepted creation; absence cannot.
+	d.mu.Lock()
+	networkPending := d.state.Pending && d.state.Operation == "network-create"
+	d.mu.Unlock()
+	if networkPending {
+		ns, e := d.networks()
+		if e != nil {
+			return false, e
+		}
+		for _, n := range ns {
+			if n.Name == d.state.Network && n.Internal && n.Driver == "bridge" {
+				d.mu.Lock()
+				d.state.Pending = false
+				d.state.NetworkID = n.ID
+				d.state.Error = ""
+				e = d.saveLocked()
+				d.mu.Unlock()
+				if e != nil {
+					return false, e
+				}
+				break
+			}
+		}
+	}
 	d.mu.Lock()
 	stopped, forced, pending := d.state.Stopped, d.state.Forced, d.state.Pending
+	// Created objects settle create acceptance; an empty scan never does.
+	if pending && d.state.Operation == "create" {
+		for _, c := range containers {
+			if d.state.PendingName != "" && c.Name == "/"+d.state.PendingName {
+				d.state.Pending, pending = false, false
+				d.state.Error = ""
+				if err = d.saveLocked(); err != nil {
+					d.mu.Unlock()
+					return false, err
+				}
+				break
+			}
+		}
+	}
 	// One worker-owned start request, no restart policy: running is positive acceptance evidence.
 	if pending && d.state.Operation == "start" {
 		for _, c := range containers {
-			if c.ID == d.state.PendingContainer && *c.State.Running || (d.state.PendingContainer == "" && c.ID == d.state.Container && *c.State.Running) {
+			if (c.ID == d.state.PendingContainer || d.state.PendingContainer == "" && c.ID == d.state.Container) && (dockerLive(c) || d.state.DispatchedAt != nil && !c.State.StartedAt.IsZero() && !c.State.StartedAt.Before(*d.state.DispatchedAt)) {
 				d.state.Pending = false
 				d.state.Stopped = true
 				d.state.Forced = true
@@ -398,7 +489,7 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 			if err != nil && !killDue {
 				return false, err
 			}
-			if *c.State.Running {
+			if dockerLive(c) {
 				if _, err = d.signalContainer(c.ID, true); err != nil {
 					return false, err
 				}
@@ -406,7 +497,12 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 				continue
 			}
 		}
-		if *c.State.Running {
+		if dockerLive(c) {
+			if c.State.Paused || c.State.Status == "paused" {
+				if _, err := d.call("unpause", c.ID); err != nil {
+					return false, err
+				}
+			}
 			running = true
 			if stopped || pending {
 				if _, err = d.signalContainer(c.ID, forced || pending); err != nil {
@@ -624,9 +720,9 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		return nil, err
 	}
 	identity := ID()
-	endpoint := os.Getenv("DOCKER_HOST")
+	endpoint := w.DockerEndpoint
 	if endpoint == "" {
-		endpoint = "unix:///var/run/docker.sock"
+		endpoint = defaultDockerEndpoint(os.Getenv("DOCKER_HOST"))
 	}
 	if os.Getenv("DOCKER_CONTEXT") != "" {
 		return nil, errors.New("managed Docker requires DOCKER_HOST, not DOCKER_CONTEXT")
@@ -679,7 +775,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		w.control.set(p)
 	}
 	label := "myce.attempt=" + identity
-	create := []string{"create", "--pull=never", "--init", "--name", "myce-" + identity, "--label", label, "--label", "myce.worker=" + w.Machine.ID, "--cidfile", filepath.Join(s.dir, identity+".cid"), "--env", "MYCE_ATTEMPT_ID=" + identity, "--env", "MYCE_DOCKER_LABEL=" + label, "--env", "MYCE_JOB_ID=" + j.ID, "--env", "MYCE_ATTEMPT=" + strconv.Itoa(j.Attempt), "--env", "MYCE_CHECKPOINT_DIR=/myce/checkpoint", "--volume", checkpoint + ":/myce/checkpoint"}
+	create := []string{"create", "--restart=no", "--pull=never", "--init", "--name", "myce-" + identity, "--label", label, "--label", "myce.worker=" + w.Machine.ID, "--cidfile", filepath.Join(s.dir, identity+".cid"), "--env", "MYCE_ATTEMPT_ID=" + identity, "--env", "MYCE_DOCKER_LABEL=" + label, "--env", "MYCE_JOB_ID=" + j.ID, "--env", "MYCE_ATTEMPT=" + strconv.Itoa(j.Attempt), "--env", "MYCE_CHECKPOINT_DIR=/myce/checkpoint", "--volume", checkpoint + ":/myce/checkpoint"}
 	if d.state.LogsNone {
 		create = append(create, "--log-driver", "none")
 	}
@@ -887,6 +983,10 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	if state.Identity != s.state.Identity || state.Endpoint == "" || (state.Owner != nil && !s.matchesResult(*state.Owner, w.Machine.ID)) {
 		return nil, errors.New("invalid Docker custody record")
 	}
+	if state.OperatorConfirmed {
+		state.Released = false
+		state.Pending = true
+	}
 	if state.Released {
 		if s.state.Result == nil {
 			r := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Interrupted: true, Forced: state.Forced, Error: "worker restarted after Docker release"}
@@ -928,55 +1028,72 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	return p, nil
 }
 
-// ConfirmDockerGone records an operator's external fence/release proof while the
-// worker is offline. It never asks an unresponsive daemon to prove its own fence.
-func ConfirmDockerGone(hostDir, dir, identity string, confirmed bool) error {
-	if dir == "" || identity == "" || filepath.Base(identity) != identity || !confirmed {
-		return errors.New("resolve-docker requires --state-dir, --attempt-id and --confirm-gone after fencing delayed starts and verifying release")
+// ReconcileDockerAttempt never replaces unknown disposition with an assertion.
+func ReconcileDockerAttempt(ctx context.Context, hostDir, dir, identity string) error {
+	if os.Geteuid() == 0 {
+		return ErrHostIdentity
 	}
-	var err error
+	if dir == "" || identity == "" || filepath.Base(identity) != identity {
+		return errors.New("resolve-docker requires exact worker state and attempt identity")
+	}
 	if hostDir == "" {
+		var err error
 		hostDir, err = HostStateDirectory()
 		if err != nil {
 			return err
 		}
 	}
-	if err = os.MkdirAll(hostDir, 0700); err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
 	unlock, err := hostOperationLockContext(ctx, hostDir, "reconcile.lock")
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	s, err := (Worker{StateDir: dir}).openStore()
+	intent, err := ReadHostIntent(hostDir)
+	if err != nil || intent.Desired != "closed" {
+		return errors.New("Docker reconciliation requires a closed host")
+	}
+	store, err := (Worker{StateDir: dir}).openStore()
 	if err != nil {
 		return err
 	}
-	defer s.close()
-	if s.state.Identity != identity || s.state.Job == nil || !s.state.Job.Spec.Run.Docker {
+	defer store.close()
+	if store.state.Identity != identity || store.state.Job == nil || !store.state.Job.Spec.Run.Docker {
 		return errors.New("Docker attempt does not match current worker custody")
 	}
-	data, err := os.ReadFile(filepath.Join(dir, identity+".docker.json"))
+	b, err := readHostRegular(filepath.Join(dir, identity+".docker.json"), uint32(os.Geteuid()), 1<<20)
 	if err != nil {
 		return err
 	}
 	var state dockerExecution
-	if err = json.Unmarshal(data, &state); err != nil {
-		return err
-	}
-	if state.Identity != identity || state.Endpoint == "" {
+	if json.Unmarshal(b, &state) != nil || state.Identity != identity || state.Endpoint == "" {
 		return errors.New("invalid Docker custody record")
 	}
-	state.Released = true
-	state.Pending = false
-	state.Stopped = true
-	state.Forced = true
-	state.OperatorConfirmed = true
-	state.Error = "operator confirmed execution gone and delayed starts fenced"
-	return saveWorkerJSON(dir, identity+".docker.json", state)
+	d := &dockerAttempt{ctx: ctx, dir: dir, binary: "docker", clock: RealClock{}, timeout: 2 * time.Second, state: state, env: dockerClientEnvironment()}
+	d.stop(d.clock.Now(), hostDisableGrace(hostDir, d.clock), false)
+	released, err := d.reconcile()
+	if err != nil {
+		return err
+	}
+	if !released {
+		return errors.New("Docker operation disposition or release remains unconfirmed")
+	}
+	return nil
+}
+func defaultDockerEndpoint(value string) string {
+	if value == "" {
+		return "unix:///var/run/docker.sock"
+	}
+	return value
+}
+func dockerClientEnvironment() []string {
+	var env []string
+	for _, v := range os.Environ() {
+		k, _, _ := strings.Cut(v, "=")
+		if k != "MYCE_TOKEN" && k != "DOCKER_CONTEXT" {
+			env = append(env, v)
+		}
+	}
+	return env
 }
 
 func dockerDeviceEnvironment(name string) bool {

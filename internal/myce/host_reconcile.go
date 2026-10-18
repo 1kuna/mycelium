@@ -177,11 +177,18 @@ func blockingHostHolds(holds []string) bool {
 	}
 	return false
 }
-func localExclusionConfirmed(s HostIntent, boot string) bool {
-	return s.LocalExclusion != nil && s.LocalExclusion.Confirmed && s.LocalExclusion.Boot == boot && s.LocalExclusion.HostRevision == s.HostRevision
+func localExclusionConfirmed(s HostIntent, boot string, dev ...bool) bool {
+	e := s.LocalExclusion
+	if e == nil || !e.Confirmed || e.Boot != boot || e.HostRevision != s.HostRevision {
+		return false
+	}
+	if e.Simulated {
+		return len(dev) > 0 && dev[0]
+	}
+	return e.Evidence.completePass() && e.Evidence.Boot == boot && e.Evidence.HostRevision == s.HostRevision
 }
 func newHostExchange(s HostIntent, boot string) HostExchange {
-	return HostExchange{Host: s.Host, HostRevision: s.HostRevision, Desired: s.Desired, Boot: boot, Request: ID(), AcceptedAt: s.AcceptedAt, Reason: s.Reason, LastClose: s.LastClose}
+	return HostExchange{Host: s.Host, HostRevision: s.HostRevision, Desired: s.Desired, Boot: boot, Request: ID(), AcceptedAt: s.AcceptedAt, Reason: s.Reason, LastClose: s.LastClose, Simulated: s.LocalExclusion != nil && s.LocalExclusion.Simulated}
 }
 func validateHostAck(c HostExchange, a HostAcknowledgement) error {
 	if a.Host != c.Host || a.HostRevision != c.HostRevision || a.Desired != c.Desired || a.Boot != c.Boot || a.Request != c.Request || a.Pending == nil || a.Covered == nil {
@@ -189,7 +196,7 @@ func validateHostAck(c HostExchange, a HostAcknowledgement) error {
 	}
 	return nil
 }
-func saveHostAck(dir, queue string, c HostExchange, a HostAcknowledgement, clock Clock) error {
+func saveHostAck(dir, queue string, c HostExchange, a HostAcknowledgement, clock Clock, dev ...bool) error {
 	boot, err := HostBootID()
 	if err != nil {
 		return err
@@ -245,7 +252,7 @@ func saveHostAck(dir, queue string, c HostExchange, a HostAcknowledgement, clock
 		s.LastClose.Settlement = "pending"
 		s.LastClose.SettledAt = nil
 		local := s.LocalExclusion
-		if local == nil || !local.Confirmed || local.Boot != c.Boot || local.HostRevision != c.HostRevision || len(s.Pending) > 0 || blockingHostHolds(s.Holds) {
+		if local == nil || !localExclusionConfirmed(*s, c.Boot, dev...) || len(s.Pending) > 0 || blockingHostHolds(s.Holds) {
 			return nil
 		}
 		queues, err := (HostControl{Dir: dir}).Queues()
@@ -361,7 +368,7 @@ func reconcileHostEndpoint(dir, endpoint, boot string, clock Clock, workers []Ho
 		return err
 	}
 	local := s.LocalExclusion
-	if s.Desired != "closed" || local == nil || !local.Confirmed || local.HostRevision != s.HostRevision || local.Boot != boot {
+	if s.Desired != "closed" || local == nil || !localExclusionConfirmed(s, boot) {
 		return nil
 	}
 	hostReleaseEvidence(&request, s, endpoint, boot, workers)
@@ -417,7 +424,8 @@ func (q *Queue) reconcileLocalAdmission() (func() error, error) {
 		return nil, err
 	}
 	request := newHostExchange(s, boot)
-	hostReleaseEvidence(&request, s, q.localHostQueue, boot, workers)
+	_, dev := q.clock.(*devClock)
+	hostReleaseEvidence(&request, s, q.localHostQueue, boot, workers, dev)
 	ack, err := q.reconcileHost(request)
 	if err != nil {
 		observeHostQueueRevision(q.localHostDir, request, q.localHostQueue, q.s.HostIntents[s.Host].HostRevision)
@@ -426,7 +434,7 @@ func (q *Queue) reconcileLocalAdmission() (func() error, error) {
 	return func() error {
 		ack.Pending = q.hostObligations(s.Host)
 		ack.Covered = q.hostCoverage(s.Host)
-		return saveHostAck(q.localHostDir, q.localHostQueue, request, ack, q.clock)
+		return saveHostAck(q.localHostDir, q.localHostQueue, request, ack, q.clock, dev)
 	}, nil
 }
 
@@ -453,8 +461,8 @@ func HostQueueClient(workers []HostWorker, token string) func(string) (Client, e
 	}
 }
 
-func hostReleaseEvidence(request *HostExchange, s HostIntent, endpoint, boot string, workers []HostWorker) {
-	if s.Desired != "closed" || !localExclusionConfirmed(s, boot) {
+func hostReleaseEvidence(request *HostExchange, s HostIntent, endpoint, boot string, workers []HostWorker, dev ...bool) {
+	if s.Desired != "closed" || !localExclusionConfirmed(s, boot, dev...) {
 		return
 	}
 	for _, session := range s.LocalExclusion.Sessions {

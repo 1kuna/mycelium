@@ -27,7 +27,7 @@ func TestSystemdUserCgroupIntegration(t *testing.T) {
 		t.Fatalf("transient unit: %v %s", e, b)
 	}
 	defer probe.Command(context.Background(), "systemctl", "--user", "stop", "myce-worker.service")
-	h := HostControl{Dir: t.TempDir(), Service: &SystemdHostService{Unit: "myce-worker.service", Command: probe.Command}, Timeout: 10 * time.Second}
+	h := HostControl{Observe: testHostExclusion, Dir: t.TempDir(), Service: &SystemdHostService{Unit: "myce-worker.service", Command: probe.Command}, Timeout: 10 * time.Second}
 	r, e := h.Disable(ctx, "integration", time.Second)
 	if e != nil || !r.Confirmed {
 		t.Fatalf("report %+v: %v", r, e)

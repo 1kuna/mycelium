@@ -52,7 +52,7 @@ func TestHostReconcileSessionDischargeWithoutAssignmentFile(t *testing.T) {
 					t.Fatal("missing unregistered-session fixture")
 				}
 			}
-			if report, err := (HostControl{Dir: dir, Clock: clock, Service: &fakeHostService{}}).Disable(context.Background(), "planned", 0); err != nil || !report.Confirmed {
+			if report, err := (HostControl{Observe: testHostExclusion, Dir: dir, Clock: clock, Service: &fakeHostService{}}).Disable(context.Background(), "planned", 0); err != nil || !report.Confirmed {
 				t.Fatal(report, err)
 			}
 			if err := ReconcileHostLocal(context.Background(), dir, clock, func(endpoint string) (Client, error) { return Client{URL: endpoint, Token: "test"}, nil }); err != nil {
@@ -85,7 +85,7 @@ func TestHostReconcileUnknownCurrentCustodyIsDiagnostic(t *testing.T) {
 	if err := saveWorkerJSON(spool, "state.json", workerState{Session: "session", Job: &Job{ID: "unknown-job", Attempt: 1}}); err != nil {
 		t.Fatal(err)
 	}
-	if report, err := (HostControl{Dir: dir, Clock: clock, Service: &fakeHostService{}}).Disable(context.Background(), "close", 0); err != nil || !report.Confirmed {
+	if report, err := (HostControl{Observe: testHostExclusion, Dir: dir, Clock: clock, Service: &fakeHostService{}}).Disable(context.Background(), "close", 0); err != nil || !report.Confirmed {
 		t.Fatal(report, err)
 	}
 	if err := ReconcileHostLocal(context.Background(), dir, clock, func(endpoint string) (Client, error) { return Client{URL: endpoint, Token: "test"}, nil }); err != nil {
@@ -335,7 +335,7 @@ func TestHostReconcileConfirmedCleanupAndContentionAreIdempotent(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1000, 0)}
 	testHostOpen(t, dir, clock)
 	var stops int
-	h := HostControl{Dir: dir, Clock: clock, Service: reconcileStopHook{stop: func() { stops++ }}}
+	h := HostControl{Observe: testHostExclusion, Dir: dir, Clock: clock, Service: reconcileStopHook{stop: func() { stops++ }}}
 	first, err := h.Disable(context.Background(), "close", 0)
 	if err != nil || !first.Confirmed {
 		t.Fatal(first, err)
@@ -366,7 +366,7 @@ func TestHostReconcileRepeatedCloseDuringStopReturnsAccepted(t *testing.T) {
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	defer unblock()
-	h := HostControl{Dir: dir, Clock: clock, Service: reconcileStopHook{stop: func() { close(stopping); <-release }}}
+	h := HostControl{Observe: testHostExclusion, Dir: dir, Clock: clock, Service: reconcileStopHook{stop: func() { close(stopping); <-release }}}
 	done := make(chan error, 1)
 	go func() { _, err := h.Disable(context.Background(), "close", 0); done <- err }()
 	select {
@@ -390,6 +390,10 @@ func TestHostReconcileRepeatedCloseDuringStopReturnsAccepted(t *testing.T) {
 
 func TestHostReconcileDockerClearanceWaitsForCleanupLock(t *testing.T) {
 	hostDir, spool := t.TempDir(), t.TempDir()
+	ensureTestHost(t, hostDir, RealClock{})
+	if err := closeTestHost(hostDir); err != nil {
+		t.Fatal(err)
+	}
 	w := Worker{StateDir: spool}
 	s, err := w.openStore()
 	if err != nil {
@@ -412,15 +416,15 @@ func TestHostReconcileDockerClearanceWaitsForCleanupLock(t *testing.T) {
 	release := func() { once.Do(unlock) }
 	defer release()
 	done := make(chan error, 1)
-	go func() { done <- ConfirmDockerGone(hostDir, spool, "owned", true) }()
+	go func() { done <- ReconcileDockerAttempt(context.Background(), hostDir, spool, "owned") }()
 	select {
 	case err := <-done:
 		t.Fatal("clearance returned before cleanup released its lock", err)
 	case <-time.After(30 * time.Millisecond):
 	}
 	release()
-	if err := <-done; err != nil {
-		t.Fatal("clearance failed after brief contention", err)
+	if err := <-done; err == nil {
+		t.Fatal("unknown custody settled after brief contention")
 	}
 }
 
@@ -549,7 +553,7 @@ func TestHostReconcileRechecksRevisionBeforeStop(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1000, 0)}
 	testHostOpen(t, dir, clock)
 	stops := 0
-	h := HostControl{Dir: dir, Clock: clock, Service: reconcileStopHook{stop: func() { stops++ }}}
+	h := HostControl{Observe: testHostExclusion, Dir: dir, Clock: clock, Service: reconcileStopHook{stop: func() { stops++ }}}
 	h.Prepare = func() error {
 		testConfirmClose(t, dir)
 		s, err := ReadHostIntent(dir)
@@ -611,7 +615,7 @@ func TestHostReconcileDockerHoldClearsAfterQueueRestart(t *testing.T) {
 	if err = q.Complete(pending); err != nil {
 		t.Fatal(err)
 	}
-	h := HostControl{Dir: w.HostStateDir, Clock: clock, Service: &fakeHostService{}, Docker: true, Timeout: 150 * time.Millisecond}
+	h := HostControl{Observe: testHostExclusion, Dir: w.HostStateDir, Clock: clock, Service: &fakeHostService{}, Docker: true, Timeout: 150 * time.Millisecond}
 	if report, err := h.Disable(context.Background(), "close", 0); err == nil || report.Confirmed {
 		t.Fatal(report, err)
 	}
@@ -665,7 +669,7 @@ func TestHostReconcileDockerHoldClearsAfterQueueRestart(t *testing.T) {
 func TestHostReconcileTransientErrorPreservesConfirmedClose(t *testing.T) {
 	_, v := hostIdentityFixture(t)
 	clock := &fakeClock{now: time.Unix(1000, 0)}
-	h := HostControl{Dir: v.StateDir, Clock: clock, Service: &fakeHostService{}}
+	h := HostControl{Observe: testHostExclusion, Dir: v.StateDir, Clock: clock, Service: &fakeHostService{}}
 	if report, err := h.Disable(context.Background(), "close", 0); err != nil || !report.Confirmed {
 		t.Fatal(report, err)
 	}

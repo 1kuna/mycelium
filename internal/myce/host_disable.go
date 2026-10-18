@@ -104,26 +104,31 @@ type HostProcesses struct {
 	Pause  func(time.Duration)
 }
 type HostControl struct {
-	Docker            bool
-	dockerProgress    *dockerDisableProgress
-	ResolveServices   func() (map[string]HostService, error)
-	Services          map[string]HostService
-	ResolveService    func() HostService
-	Service           HostService
-	Expected          HostRevision  // Open only.
-	CloseExpected     *HostRevision // Explicit close CAS; nil always accepts close.
-	Settled           func(HostIntent) error
-	accepted          HostRevision
-	Timeout           time.Duration
-	StopSecondary     func(context.Context) error
-	ConfirmContainers func(context.Context) error
-	ctx               context.Context
-	Prepare           func() error // Local discovery runs only after the durable disable flag.
-	Dir               string
-	Clock             Clock
-	Processes         HostProcesses
+	ContainerRetention *time.Duration
+	DockerEndpoint     string
+	dockerConfigPath   string                                                // Primary endpoint already selected by the caller.
+	Observe            func(context.Context, HostIntent) HostExclusionReport // Injected full observer for laptop fixtures.
+	Docker             bool
+	dockerProgress     *dockerDisableProgress
+	ResolveServices    func() (map[string]HostService, error)
+	Services           map[string]HostService
+	ResolveService     func() HostService
+	Service            HostService
+	Expected           HostRevision  // Open only.
+	CloseExpected      *HostRevision // Explicit close CAS; nil always accepts close.
+	Settled            func(HostIntent) error
+	accepted           HostRevision
+	Timeout            time.Duration
+	StopSecondary      func(context.Context) error
+	ctx                context.Context
+	Prepare            func() error // Local discovery runs only after the durable disable flag.
+	Dir                string
+	Clock              Clock
+	Processes          HostProcesses
 }
 type DisableReport struct {
+	cleanupComplete bool
+	Exclusion       *HostExclusionReport `json:"exclusion,omitempty"`
 	HostRevision
 	Units       map[string]string
 	Docker      string
@@ -293,6 +298,20 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 			}
 		}
 		r.Confirmed = len(evidenceErrors) == 0
+		r.cleanupComplete = r.Confirmed
+		report := HostExclusionReport{HostRevision: intent.HostRevision, Boot: boot, Verdict: "UNKNOWN", At: h.Clock.Now().UTC(), Errors: []ExclusionError{{Component: "kernel", Code: "privileged_observation_required", Message: "Cleanup alone cannot prove exclusion"}}}
+		if h.Observe != nil {
+			report = h.Observe(ctx, intent)
+		}
+		if report.Verdict == "PASS" && !report.completePass() {
+			report.problem("kernel", "exclusion_incomplete", false)
+		}
+		if report.Verdict != "PASS" || report.HostRevision != intent.HostRevision || report.Boot != boot {
+			r.Confirmed = false
+			retErr = errors.Join(retErr, errors.New("local_exclusion_unconfirmed"))
+			evidenceErrors = append(evidenceErrors, "local_exclusion_unconfirmed")
+		}
+		r.Exclusion = &report
 		r.Unconfirmed = evidenceErrors
 		released := mergeObligations(initial, final)
 		saveErr := mutateHostIntent(h.Dir, intent.HostRevision, func(s *HostIntent) error {
@@ -309,7 +328,7 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 					}
 				}
 			}
-			s.LocalExclusion = &HostLocalExclusion{HostObservation: HostObservation{HostRevision: intent.HostRevision, Boot: boot, State: "closed", At: h.Clock.Now()}, Confirmed: r.Confirmed, Errors: evidenceErrors, Released: released, Sessions: sessions}
+			s.LocalExclusion = &HostLocalExclusion{HostObservation: HostObservation{HostRevision: intent.HostRevision, Boot: boot, State: "closed", At: h.Clock.Now()}, Evidence: r.Exclusion, Confirmed: r.Confirmed, Errors: evidenceErrors, Released: released, Sessions: sessions}
 			if s.LastClose == nil {
 				s.LastClose = &HostClose{HostRevision: intent.HostRevision, Settlement: "pending"}
 			}
@@ -377,6 +396,11 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 		return r, ctx.Err()
 	}
 	if len(h.Services) > 0 {
+		for _, w := range workers {
+			if !ValidWorkerUnit(w.Unit) && h.Observe == nil {
+				r.Unconfirmed = append(r.Unconfirmed, "registry_worker_without_unit")
+			}
+		}
 		r.Units = map[string]string{}
 		pending := map[string]HostService{}
 		for unit := range h.Services {
@@ -533,11 +557,7 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 		}
 		r.Docker, _ = h.dockerProgress.report(nil)
 	}
-	if h.ConfirmContainers != nil {
-		if e := h.closedAction(func() error { return h.ConfirmContainers(ctx) }); e != nil {
-			r.Unconfirmed = append(r.Unconfirmed, "Docker containers: "+e.Error())
-		}
-	}
+
 	if len(r.Unconfirmed) > 0 || ctx.Err() != nil {
 		r.Confirmed = false
 	}

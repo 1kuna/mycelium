@@ -27,7 +27,7 @@ func TestDisableOfflineFlagAndOwnedProcessGrace(t *testing.T) {
 	}
 	live := true
 	signals := []syscall.Signal{}
-	h := HostControl{Dir: root, Clock: clock, Processes: HostProcesses{
+	h := HostControl{Observe: testHostExclusion, Dir: root, Clock: clock, Processes: HostProcesses{
 		Owned: func(st workerState) (bool, error) { return st.Identity == "owned" && live, nil },
 		Signal: func(st workerState, sig syscall.Signal) error {
 			signals = append(signals, sig)
@@ -81,7 +81,7 @@ func TestDisableNowNeverSignalsUnownedAndReportsSurvivor(t *testing.T) {
 			saveWorkerJSON(state, "state.json", workerState{PID: 42, Identity: "owned"})
 			saveWorkerJSON(state, "engine-unrelated.json", workerState{PID: 43, Identity: "similar-name"})
 			live := true
-			h := HostControl{Dir: root, Clock: clock, Processes: HostProcesses{
+			h := HostControl{Observe: testHostExclusion, Dir: root, Clock: clock, Processes: HostProcesses{
 				Owned: func(st workerState) (bool, error) { return st.Identity == "owned" && live, nil },
 				Signal: func(st workerState, sig syscall.Signal) error {
 					if st.Identity != "owned" || sig != syscall.SIGKILL {
@@ -133,7 +133,7 @@ func TestDisableRealOwnedGroupsAndSimilarUnownedProcess(t *testing.T) {
 	if err := saveWorkerJSON(state, "attempt-stale.json", workerState{PID: unrelated.Process.Pid, Identity: "similar-but-not-owned-extra"}); err != nil {
 		t.Fatal(err)
 	}
-	h := HostControl{Dir: root}
+	h := HostControl{Observe: testHostExclusion, Dir: root}
 	ensureTestHost(t, h.Dir, h.Clock)
 	r, err := h.Disable(context.Background(), "drill", 100*time.Millisecond)
 	requireNativeMarkerDisableReport(t, h, r, err)
@@ -228,7 +228,7 @@ func TestDisableRecordedWorkerLifetimeAndPIDReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	saveWorkerJSON(root, "worker-test.json", HostWorker{State: t.TempDir(), PID: cmd.Process.Pid, Birth: birth + "-stale"})
-	if _, err = (HostControl{Dir: root}).Disable(context.Background(), "stale PID", 0); err != nil {
+	if _, err = (HostControl{Observe: testHostExclusion, Dir: root}).Disable(context.Background(), "stale PID", 0); err != nil {
 		t.Fatal(err)
 	}
 	if err = syscall.Kill(cmd.Process.Pid, 0); err != nil {
@@ -240,11 +240,11 @@ func TestDisableRecordedWorkerLifetimeAndPIDReuse(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = (HostControl{Dir: root, Expected: accepted.HostRevision}).Enable(context.Background()); e != nil {
+	if e = (HostControl{Observe: testHostExclusion, Dir: root, Expected: accepted.HostRevision}).Enable(context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	saveWorkerJSON(root, "worker-test.json", HostWorker{State: t.TempDir(), PID: cmd.Process.Pid, Birth: birth})
-	if _, err = (HostControl{Dir: root}).Disable(context.Background(), "real worker", 0); err != nil {
+	if _, err = (HostControl{Observe: testHostExclusion, Dir: root}).Disable(context.Background(), "real worker", 0); err != nil {
 		t.Fatal(err)
 	}
 	live, err := ownedHostProcess(workerState{PID: cmd.Process.Pid, Birth: birth})

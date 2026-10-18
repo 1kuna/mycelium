@@ -57,6 +57,7 @@ func TestStoppedContainerRetention(t *testing.T) {
 					return []byte("id"), nil
 				case "inspect":
 					c := dockerInspection{ID: "id"}
+					c.HostConfig.RestartPolicy = &dockerRestartPolicy{Name: "no"}
 					c.Config.Labels = map[string]string{"myce.attempt": "attempt", "myce.worker": tc.worker}
 					c.State.Running = &tc.running
 					c.State.Status = "exited"
