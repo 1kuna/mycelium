@@ -265,6 +265,8 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	HostRevision                HostRevision        `json:"host_revision"`
+	HostBoot                    string              `json:"host_boot_id,omitempty"`
 	Capabilities                []string            `json:"capabilities,omitempty"`
 	MaxJobs                     int                 `json:"max_jobs,omitempty"`
 	AdmissionReason             string              `json:"admission_reason,omitempty"`

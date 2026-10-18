@@ -37,9 +37,12 @@ func readHostBootID() (string, error) {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:]), nil
 }
+
+var ErrPreviousCloseUnsettled = errors.New("previous_close_unsettled")
+
 func previousCloseSettled(s HostIntent) error {
 	if s.LastClose == nil || s.LastClose.Settlement != "confirmed" || s.LastClose.SettledAt == nil || len(s.Pending) > 0 || blockingHostHolds(s.Holds) {
-		return errors.New("previous_close_unsettled")
+		return ErrPreviousCloseUnsettled
 	}
 	if s.LastClose.HostRevision != s.HostRevision {
 		return ErrHostRevision
