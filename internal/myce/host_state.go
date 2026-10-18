@@ -14,8 +14,6 @@ const hostStateFile = "host-state.json"
 const hostStateVersion = 1
 
 var ErrHostState = errors.New("host state unavailable")
-var ErrHostStateUninitialized = errors.New("state_uninitialized")
-var ErrHostStateCorrupt = errors.New("state_corrupt")
 var ErrHostRevision = errors.New("stale host revision")
 
 func legacyHostStateError() error {
@@ -176,13 +174,13 @@ func ReadHostIntent(dir string) (HostIntent, error) {
 		if len(registries) > 0 {
 			return s, legacyHostStateError()
 		}
-		return s, fmt.Errorf("%w: this host has no Mycelium host state yet; provision it with `myce host open` or `myce dev`", errors.Join(ErrHostState, ErrHostStateUninitialized))
+		return s, fmt.Errorf("%w: this host has no Mycelium host state yet; provision it with `myce host open` (coming in #80 S08) or `myce dev`", ErrHostState)
 	}
 	if err != nil {
 		return s, errors.Join(ErrHostState, err)
 	}
 	if err = json.Unmarshal(b, &s); err != nil {
-		return HostIntent{}, errors.Join(ErrHostState, ErrHostStateCorrupt)
+		return HostIntent{}, fmt.Errorf("%w: corrupt host state: %w", ErrHostState, err)
 	}
 	if err = validateHostIntent(s); err != nil {
 		return HostIntent{}, err
@@ -284,9 +282,8 @@ type hostIntentChange struct {
 	Grace         time.Duration
 	// S05 supplies durable previous-close settlement. Called outside intake.lock;
 	// the expected revision is checked again before committing open.
-	FreshClose bool
-	Settled    func(HostIntent) error
-	boundary   func(string) error
+	Settled  func(HostIntent) error
+	boundary func(string) error
 }
 
 func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, error) {
@@ -336,7 +333,7 @@ func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, 
 	for _, observed := range s.QueueObserved {
 		highest = max(highest, observed.Revision)
 	}
-	if s.Desired == c.Desired && !c.FreshClose && !(c.Desired == "closed" && highest > s.Revision) {
+	if s.Desired == c.Desired && !(c.Desired == "closed" && highest > s.Revision) {
 		return s, nil
 	} // Repeated close never renews stop grace.
 	if highest == ^uint64(0) {
@@ -346,10 +343,6 @@ func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, 
 	s.Desired, s.Reason, s.AcceptedAt, s.Observed = c.Desired, c.Reason, clock.Now(), nil
 	if c.Desired == "closed" {
 		deadline := s.AcceptedAt.Add(c.Grace)
-		// A fresh close changes identity, never extends an existing stop budget.
-		if s.StopDeadline != nil && s.StopDeadline.Before(deadline) {
-			deadline = *s.StopDeadline
-		}
 		s.StopDeadline = &deadline
 		s.PreviousClose = s.Revision
 		s.LastClose = &HostClose{HostRevision: s.HostRevision, Settlement: "pending"}

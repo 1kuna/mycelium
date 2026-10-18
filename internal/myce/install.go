@@ -177,7 +177,6 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
-	RequiredWorkers       []string       `json:"required_workers,omitempty"`
 	DockerEndpoint        string         `json:"docker_endpoint"`
 	WorkerUser            string         `json:"worker_user,omitempty"`
 	WorkerHome            string         `json:"worker_home,omitempty"`
