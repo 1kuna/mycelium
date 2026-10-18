@@ -84,7 +84,7 @@ baselines:
 			if err == nil || ctx.Err() != nil {
 				t.Fatalf("expected prompt refusal: %v, deadline: %v", err, ctx.Err())
 			}
-			if !strings.Contains(string(out), "this host has no Mycelium host state yet; provision it with `myce host open` or `myce dev`") || strings.Contains(string(out), "convert offline") {
+			if !strings.Contains(string(out), "this host has no Mycelium host state yet; provision it with `myce host open` (coming in #80 S08) or `myce dev`") || strings.Contains(string(out), "convert offline") {
 				t.Fatalf("misleading fresh-host error: %s", out)
 			}
 			if _, err := os.Stat(filepath.Join(home, ".local", "share", "myce", "host-state.json")); !os.IsNotExist(err) {

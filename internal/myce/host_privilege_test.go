@@ -202,7 +202,7 @@ func TestHostPrivilegeCloseBeforeManagerDiscovery(t *testing.T) {
 		return nil, errors.New("manager absent with worker-secret-fixture")
 	}}}
 	result, e := v.Mutate(context.Background(), HostMutation{Operation: "close"}, childProtocolLaunch(t, r, x.Execute), nil)
-	if !errors.Is(e, ErrHostUserManager) || !observed || result.Revision == 0 || !result.Partial || result.CleanupConfirmed {
+	if !errors.Is(e, ErrHostUserManager) || !observed || result.Revision != 0 {
 		t.Fatal(result, e, observed)
 	}
 	s, e := ReadHostIntent(v.StateDir)

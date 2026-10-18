@@ -18,26 +18,23 @@ func TestSafeResumeCommandNeverRecordsToken(t *testing.T) {
 	}
 }
 
-func TestRetiredHostFormsNeverMutate(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := myce.InitializeHostIntent(dir, "fixture-host", myce.RealClock{}); err != nil {
+func TestDisableWritesFlagBeforeBrokenInstallConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("MYCE_HOST_STATE_DIR", filepath.Join(home, "host"))
+	dir := filepath.Join(home, "host")
+	if _, e := myce.InitializeHostIntent(dir, "test-host", myce.RealClock{}); e != nil {
+		t.Fatal(e)
+	}
+	config := filepath.Join(home, "broken-config.json")
+	if err := os.WriteFile(config, []byte("not json"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(filepath.Join(dir, "host-state.json"))
-	if err != nil {
-		t.Fatal(err)
+	var out bytes.Buffer
+	if err := hostCommand([]string{"disable", "--now", "--config", config}, myce.MachineProbe{OS: "linux"}, &out); err == nil {
+		t.Fatal("broken config succeeded")
 	}
-	for _, op := range []string{"disable", "enable"} {
-		var out bytes.Buffer
-		if err := hostCommand([]string{op, "--unit", "myce-worker.service"}, myce.MachineProbe{}, &out); err == nil {
-			t.Fatal("retired command accepted")
-		}
-		if err := runWithProbe([]string{op, "--state-dir", dir}, myce.MachineProbe{}); err == nil {
-			t.Fatal("retired dispatch accepted")
-		}
-	}
-	after, err := os.ReadFile(filepath.Join(dir, "host-state.json"))
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("retired command mutated state", err)
+	if reason, err := myce.HostDisabled(""); err != nil || reason == "" {
+		t.Fatalf("config failure prevented local fence: %q %v", reason, err)
 	}
 }

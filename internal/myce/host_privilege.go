@@ -315,7 +315,6 @@ type HostMutation struct {
 	CloseExpected *HostRevision        `json:"close_expected,omitempty"`
 }
 type HostMutationResult struct {
-	Envelope  *HostEnvelope        `json:"envelope,omitempty"`
 	Input     *HostExclusionInput  `json:"exclusion_input,omitempty"`
 	Exclusion *HostExclusionReport `json:"exclusion,omitempty"`
 	Code      string               `json:"code,omitempty"`
@@ -389,9 +388,6 @@ func (v HostInvocation) Mutate(ctx context.Context, m HostMutation, launch HostC
 		if r.Code == "deadline" && r.Result.Partial && !r.Result.CleanupConfirmed {
 			return r.Result, ErrHostDeadline
 		}
-		if (m.Operation == "close" || m.Operation == "open") && r.Result.Partial && r.Result.Revision > 0 && r.Result.Operation != "" {
-			return r.Result, hostProtocolError(r.Code)
-		}
 		return HostMutationResult{}, hostProtocolError(r.Code)
 	}
 	if (m.Operation == "resolve-docker" || m.Operation == "close" || m.Operation == "open" || m.Operation == "reconcile") && (r.Result.Revision == 0 || r.Result.Operation == "") {
@@ -408,10 +404,6 @@ func hostProtocolError(code string) error {
 		return ErrHostDeadline
 	case "revision":
 		return ErrHostRevision
-	case "state_uninitialized":
-		return errors.Join(ErrHostState, ErrHostStateUninitialized)
-	case "state_corrupt":
-		return errors.Join(ErrHostState, ErrHostStateCorrupt)
 	case "state":
 		return ErrHostState
 	case "identity":
@@ -420,8 +412,6 @@ func hostProtocolError(code string) error {
 		return ErrHostTarget
 	case "user_manager":
 		return ErrHostUserManager
-	case "unsettled":
-		return ErrPreviousCloseUnsettled
 	case "reconcile":
 		return ErrHostReconcileUnavailable
 	}
@@ -429,16 +419,10 @@ func hostProtocolError(code string) error {
 }
 func hostProtocolCode(e error) string {
 	switch {
-	case errors.Is(e, ErrPreviousCloseUnsettled):
-		return "unsettled"
 	case errors.Is(e, ErrHostRevision):
 		return "revision"
 	case errors.Is(e, ErrHostTarget):
 		return "target"
-	case errors.Is(e, ErrHostStateUninitialized):
-		return "state_uninitialized"
-	case errors.Is(e, ErrHostStateCorrupt):
-		return "state_corrupt"
 	case errors.Is(e, ErrHostState):
 		return "state"
 	case errors.Is(e, ErrHostDeadline) || errors.Is(e, context.DeadlineExceeded) || errors.Is(e, context.Canceled):
@@ -510,7 +494,7 @@ func ServeHostWorkerChild(ctx context.Context, in io.Reader, out io.Writer, r Ho
 				result.Desired = s.Desired
 			}
 		}
-	} else if e != nil && !result.Partial {
+	} else if e != nil {
 		result = HostMutationResult{}
 	}
 	return json.NewEncoder(out).Encode(hostChildResponse{Version: 1, Operation: m.Operation, Result: result, Code: code})
@@ -538,11 +522,7 @@ func executeResolvedHost(ctx context.Context, v HostInvocation, m HostMutation, 
 		expected := s.HostRevision
 		m.CloseExpected = &expected
 	}
-	if m.Operation == "status" {
-		e, err := HostSnapshot(ctx, v, RealClock{})
-		return HostMutationResult{HostRevision: s.HostRevision, Envelope: &e}, err
-	}
-	if m.Operation == "resolve" {
+	if m.Operation == "resolve" || m.Operation == "status" {
 		return HostMutationResult{HostRevision: s.HostRevision, StateDir: v.StateDir, Desired: s.Desired, Code: hostStatusCode(s), Errors: s.Errors}, nil
 	}
 	if m.Operation == "inspect-exclusion" {

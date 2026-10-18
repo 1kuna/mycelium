@@ -114,8 +114,7 @@ type HostControl struct {
 	Services           map[string]HostService
 	ResolveService     func() HostService
 	Service            HostService
-	Expected           HostRevision // Open only.
-	FreshClose         bool
+	Expected           HostRevision  // Open only.
 	CloseExpected      *HostRevision // Explicit close CAS; nil always accepts close.
 	Settled            func(HostIntent) error
 	accepted           HostRevision
@@ -247,7 +246,7 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 	if reason == "" {
 		reason = "disabled by operator"
 	}
-	intent, err := changeHostIntent(h.Dir, h.Clock, hostIntentChange{Desired: "closed", FreshClose: h.FreshClose, CloseExpected: h.CloseExpected, Reason: reason, Grace: grace})
+	intent, err := changeHostIntent(h.Dir, h.Clock, hostIntentChange{Desired: "closed", CloseExpected: h.CloseExpected, Reason: reason, Grace: grace})
 	if err != nil {
 		return r, err
 	}
@@ -758,7 +757,7 @@ func (h HostControl) Enable(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	unlock, err := hostOperationLockContext(ctx, h.Dir, "reconcile.lock")
+	unlock, err := HostOpenReconcileLock(h.Dir)
 	if err != nil {
 		return err
 	}
