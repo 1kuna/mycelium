@@ -45,7 +45,7 @@ class ClientTests(unittest.TestCase):
 
     def test_wait_reports_production_start_deadline(self):
         client = Client(token="test-only")
-        failed = {"id": "prod", "state": "failed", "reason": "production start deadline exceeded: host b70 disabled by operator"}
+        failed = {"id": "prod", "state": "failed", "reason": "production start deadline exceeded"}
         with patch.object(client, "_call", return_value={"jobs": [failed]}):
             self.assertEqual(client.wait("prod"), failed)
 
@@ -243,15 +243,19 @@ class DevTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "submission_key_conflict")
 
     def test_production_start_deadline(self):
+        start_by = "2000-01-01T00:00:00Z"
         job = self.client.submit(self.spec(
             [sys.executable, "-c", "raise SystemExit('must not run')"],
-            priority="production", start_by="2000-01-01T00:00:00Z",
+            priority="production", start_by=start_by,
             needs={"memory_gb": 1, "platform": ["xpu"]}))
         failed = self.client.wait(job["id"], timeout=2)
         self.assertEqual(failed["state"], "failed")
-        self.assertIn("production start deadline exceeded", failed["reason"])
-        self.assertIn("needs xpu", failed["reason"])
+        # Public status strips internal placement blockers from this diagnostic.
+        self.assertEqual(failed["reason"], "production start deadline exceeded")
+        self.assertEqual(failed["spec"]["start_by"], start_by)
         self.assertEqual(failed["attempt"], 0)
+        self.assertIsNone(failed.get("started_at"))
+        self.assertIsNotNone(failed.get("finished_at"))
 
     def test_submit_wait_logs_and_failure(self):
         original = self.spec([sys.executable, "-c", "print('first', flush=True); print('last', flush=True)"])
