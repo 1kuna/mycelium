@@ -518,13 +518,9 @@ func (q *Queue) maintainHolds() {
 		if demand[host] || unsettled {
 			continue
 		}
+		// Ready idle residency remains available under the engine's own idle
+		// timer. Only actual demand or unresolved releases keep takeover.
 		h.Active = false
-		for _, s := range q.s.ModelSlots {
-			m := q.s.Machines[s.Machine]
-			if m != nil && hostID(m) == host && !q.slotPinned(s) && s.InFlight == 0 {
-				s.State = "draining"
-			}
-		}
 	}
 }
 
