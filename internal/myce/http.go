@@ -96,7 +96,7 @@ func (a API) Handler() http.Handler {
 				return
 			}
 		}
-		j, err := a.Queue.Submit(request.Spec)
+		j, err := a.Queue.SubmitContext(r.Context(), request.Spec)
 		respond(w, j, err)
 	})
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
