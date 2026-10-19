@@ -109,7 +109,8 @@ type dockerNetworkInspection struct {
 	Containers map[string]json.RawMessage
 }
 
-func (d *dockerAttempt) networks() ([]dockerNetworkInspection, error) {
+func (d *dockerAttempt) networks() (result []dockerNetworkInspection, err error) {
+	defer func() { err = runtimeErrorFor("network.inspect", err) }()
 	out, e := d.call("network", "ls", "--quiet", "--no-trunc", "--filter", dockerAttemptFilter(d.state.Identity))
 	if e != nil {
 		return nil, e
@@ -424,7 +425,7 @@ func (d *dockerAttempt) waitReady(id, name string, r DockerReadiness) error {
 			return fmt.Errorf("Docker sidecar %s readiness stopped: %s", name, failure)
 		}
 		if !d.clock.Now().Before(deadline) {
-			return fmt.Errorf("Docker sidecar %s HTTP readiness timeout", name)
+			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: fmt.Errorf("Docker sidecar %s HTTP readiness timeout", name)}
 		}
 		for _, c := range objects {
 			if c.ID != id || !*c.State.Running {
@@ -443,7 +444,7 @@ func (d *dockerAttempt) waitReady(id, name string, r DockerReadiness) error {
 			}
 		}
 		if !d.clock.Now().Before(deadline) {
-			return fmt.Errorf("Docker sidecar %s HTTP readiness timeout", name)
+			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: fmt.Errorf("Docker sidecar %s HTTP readiness timeout", name)}
 		}
 		select {
 		case <-wake.C:

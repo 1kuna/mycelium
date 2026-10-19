@@ -183,3 +183,18 @@ to its freshness bound is fresh; just past it, missing time or a future timestam
 makes evidence absent. Default collection/queue freshness is 10 seconds.
 Collection or fence error gives UNKNOWN with `collection_failed`. Printed verdict
 and exit status use that same result; a timeout is non-PASS, never release proof.
+
+### Rejection and runtime diagnostics
+
+Job API rejections return a stable `code` and a fixed `error` naming the field or
+rule. Codes distinguish JSON/body, required fields, priority/deadline, files,
+program, memory, platform, Docker, environment, placement and capacity rules.
+The queue logs the status and code, without the request body or credentials.
+The Go client retains these codes as `HTTPError.Code`.
+
+Optional `execution_cause` and `cleanup_cause` on results/jobs, and `docker_cause`
+on workers, retain safe operation/error-class pairs (plus a command exit code
+when available). A transient cleanup failure remains diagnostic evidence after
+release; it does not replace the execution outcome or prove release. Raw daemon
+stderr, arguments, paths and environment values are excluded. Unknown worker
+cause values are removed from public status.

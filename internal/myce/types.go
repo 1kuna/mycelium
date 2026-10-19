@@ -40,7 +40,7 @@ func (p *Platform) UnmarshalJSON(data []byte) error {
 func (p *Platform) UnmarshalYAML(n *yaml.Node) error {
 	var value Platform
 	invalid := func() error {
-		return errors.New("needs.platform requires a platform string, nonempty list, or one required/preferred/any mapping")
+		return reject("job_platform_invalid", nil)
 	}
 	list := func(n *yaml.Node) ([]string, error) {
 		if n.Kind != yaml.SequenceNode || len(n.Content) == 0 {
@@ -57,6 +57,11 @@ func (p *Platform) UnmarshalYAML(n *yaml.Node) error {
 	}
 	switch n.Kind {
 	case yaml.ScalarNode:
+		// YAML treats null as the unset value without calling UnmarshalYAML.
+		if n.Tag == "!!null" {
+			*p = value
+			return nil
+		}
 		if n.Tag != "!!str" {
 			return invalid()
 		}
@@ -175,46 +180,46 @@ type Spec struct {
 
 func (s Spec) Validate() error {
 	if s.Logs != "" && s.Logs != "keep" && s.Logs != "none" {
-		return errors.New("logs must be keep or none")
+		return reject("job_logs_invalid", errors.New("logs must be keep or none"))
 	}
 	if s.Name == "" || s.Project == "" || (!s.extensionJob() && (len(s.Run.Command) == 0 || s.Run.Command[0] == "")) {
-		return errors.New("name, project and run.command are required")
+		return reject("job_fields_required", errors.New("name, project and run.command are required"))
 	}
 	if rank(s.Priority) == 3 {
-		return errors.New("priority must be production, deadline or experiment")
+		return reject("job_priority_invalid", errors.New("priority must be production, deadline or experiment"))
 	}
 	if s.StartBy != nil && s.Priority != "production" {
-		return errors.New("start_by is only supported for production")
+		return reject("job_deadline_invalid", errors.New("start_by is only supported for production"))
 	}
 	if s.Priority == "deadline" && s.Deadline == nil {
-		return errors.New("deadline priority requires a deadline")
+		return reject("job_deadline_invalid", errors.New("deadline priority requires a deadline"))
 	}
 	if err := validateJobFiles(s); err != nil {
-		return err
+		return reject("job_files_invalid", err)
 	}
 	if s.extensionJob() {
-		return validateExtensionJob(s)
+		return rejectIf("job_program_invalid", validateExtensionJob(s))
 	}
 	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0) || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
-		return errors.New("inputs, outputs, args and size_hint require a kind/program job")
+		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
 	if s.Needs.MemoryGB <= 0 || math.IsInf(s.Needs.MemoryGB, 0) || math.IsNaN(s.Needs.MemoryGB) {
-		return errors.New("needs.memory_gb must be positive: CPU-only work stays outside Mycelium")
+		return reject("job_memory_invalid", errors.New("needs.memory_gb must be positive: CPU-only work stays outside Mycelium"))
 	}
 	if !validMemoryValue(s.Needs.HostMemoryGB) {
-		return errors.New("needs.host_memory_gb must be finite and nonnegative")
+		return reject("job_memory_invalid", errors.New("needs.host_memory_gb must be finite and nonnegative"))
 	}
 	if err := s.validateDockerGroup(); err != nil {
-		return err
+		return reject("job_docker_invalid", err)
 	}
 	if s.Run.Docker {
 		for name := range s.Run.Env {
 			if dockerDeviceEnvironment(name) {
-				return fmt.Errorf("Docker run.env cannot override worker device selector %s", name)
+				return reject("job_docker_invalid", fmt.Errorf("Docker run.env cannot override worker device selector %s", name))
 			}
 		}
 		if _, err := dockerRunArgs(s.Run.Command); err != nil {
-			return err
+			return reject("job_docker_invalid", err)
 		}
 	}
 	p := s.Needs.Platform
@@ -229,25 +234,25 @@ func (s Spec) Validate() error {
 		modes++
 	}
 	if modes != 1 {
-		return errors.New("needs.platform must specify exactly one of required, preferred or any")
+		return reject("job_platform_invalid", errors.New("needs.platform must specify exactly one of required, preferred or any"))
 	}
 	for _, v := range append(slices.Clone(p.Required), p.Preferred...) {
 		if !slices.Contains([]string{"cuda", "xpu", "metal", "fake"}, v) {
-			return fmt.Errorf("unknown GPU platform %q", v)
+			return reject("job_platform_invalid", fmt.Errorf("unknown GPU platform %q", v))
 		}
 	}
 	if s.Environment.Name != "" && s.Environment.LockFile != "" {
-		return errors.New("environment must name an environment or a lock_file, not both")
+		return reject("job_environment_invalid", errors.New("environment must name an environment or a lock_file, not both"))
 	}
 	if s.Environment.LockFile == "" && (s.Environment.Python != "" || len(s.Environment.Platforms) > 0) {
-		return errors.New("python and platforms belong to a lock_file environment")
+		return reject("job_environment_invalid", errors.New("python and platforms belong to a lock_file environment"))
 	}
 	if s.Environment.LockFile != "" && s.Environment.Python == "" {
-		return errors.New("lock_file environment requires python version")
+		return reject("job_environment_invalid", errors.New("lock_file environment requires python version"))
 	}
 	for _, p := range s.Environment.Platforms {
 		if !validGPU(p) {
-			return fmt.Errorf("invalid environment platform %s", p)
+			return reject("job_environment_invalid", fmt.Errorf("invalid environment platform %s", p))
 		}
 	}
 	return nil
@@ -279,6 +284,8 @@ type Copy struct {
 }
 
 type Job struct {
+	ExecutionCause *RuntimeCause `json:"execution_cause,omitempty"`
+	CleanupCause   *RuntimeCause `json:"cleanup_cause,omitempty"`
 	// Durable cancellation fence, independent of diagnostic reason text.
 	CancelledAt *time.Time `json:"cancelled_at,omitempty"`
 
@@ -328,6 +335,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	DockerCause                 *RuntimeCause       `json:"docker_cause,omitempty"`
 	HostRevision                HostRevision        `json:"host_revision"`
 	HostBoot                    string              `json:"host_boot_id,omitempty"`
 	Capabilities                []string            `json:"capabilities,omitempty"`
@@ -417,17 +425,19 @@ type Reply struct {
 	GraceSeconds     float64             `json:"grace_seconds"`
 }
 type Result struct {
-	PoliteStop           bool         `json:"polite_stop,omitempty"`
-	OutputRefs           FileManifest `json:"output_refs,omitempty"`
-	Usage                *SizeHint    `json:"usage,omitempty"`
-	OutOfMemory          bool         `json:"out_of_memory,omitempty"`
-	ExtensionUnavailable bool         `json:"extension_unavailable,omitempty"`
-	OperatorStop         bool         `json:"operator_stop,omitempty"`
-	ReleaseOnly          bool         `json:"release_only,omitempty"`
-	Forced               bool         `json:"forced,omitempty"`
-	ReleasePending       bool         `json:"release_pending,omitempty"`
-	Machine              string       `json:"machine"`
-	Session              string       `json:"session"`
+	ExecutionCause       *RuntimeCause `json:"execution_cause,omitempty"`
+	CleanupCause         *RuntimeCause `json:"cleanup_cause,omitempty"`
+	PoliteStop           bool          `json:"polite_stop,omitempty"`
+	OutputRefs           FileManifest  `json:"output_refs,omitempty"`
+	Usage                *SizeHint     `json:"usage,omitempty"`
+	OutOfMemory          bool          `json:"out_of_memory,omitempty"`
+	ExtensionUnavailable bool          `json:"extension_unavailable,omitempty"`
+	OperatorStop         bool          `json:"operator_stop,omitempty"`
+	ReleaseOnly          bool          `json:"release_only,omitempty"`
+	Forced               bool          `json:"forced,omitempty"`
+	ReleasePending       bool          `json:"release_pending,omitempty"`
+	Machine              string        `json:"machine"`
+	Session              string        `json:"session"`
 	Execution
 	Interrupted bool   `json:"interrupted,omitempty"`
 	Success     bool   `json:"success"`

@@ -409,7 +409,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 		}
 		// A concurrent key binding/reservation wins even if verification failed.
 		if verificationErr != nil {
-			return verificationErr
+			return reject("job_files_invalid", verificationErr)
 		}
 		if len(s.Files) > 0 && (q.files != store || q.fileCheckpoints != fileCheckpoints) {
 			return ErrStale
@@ -418,15 +418,15 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 			return err
 		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
-			return e
+			return reject("job_placement_invalid", e)
 		}
 		extensions, e := q.resolveExtensions(&s)
 		if e != nil {
-			return e
+			return reject("job_program_invalid", e)
 		}
 		recipes, e := q.resolveEnvironment(s.Environment)
 		if e != nil {
-			return e
+			return reject("job_environment_invalid", e)
 		}
 		var id string
 		if q.simulation {
@@ -442,7 +442,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 		j := &Job{FileTransport: q.fileCheckpoints, Extensions: extensions, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		q.applyLearnedNeeds(j)
 		if e := q.validateProjectCapacity(j); e != nil {
-			return e
+			return reject("job_capacity_invalid", e)
 		}
 		copy := cloneJob(j)
 		j = &copy
@@ -1084,6 +1084,8 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		m.LastSeen = q.clock.Now()
 		delete(q.unreported, m.ID)
 	}
+	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
+	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
 	// A kernel OOM is the payload's failure even if preemption raced it.
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)

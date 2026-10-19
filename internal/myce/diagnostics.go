@@ -1,0 +1,155 @@
+package myce
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os/exec"
+	"syscall"
+)
+
+// Only this vocabulary crosses API boundaries. Wrapped causes stay local.
+var rejectionMessages = map[string]string{
+	"request_method_invalid":  "method must be POST for /api/jobs",
+	"request_invalid":         "body must be one JSON object with known fields and valid field types",
+	"authentication_required": "authentication requires a valid fleet token",
+	"job_fields_required":     "name, project and run.command are required",
+	"job_logs_invalid":        "logs must be keep or none",
+	"job_priority_invalid":    "priority must be production, deadline or experiment",
+	"job_deadline_invalid":    "deadline priority requires deadline; start_by requires production priority",
+	"job_files_invalid":       "files must reference valid available input files with file-store checkpoints enabled",
+	"job_program_invalid":     "kind/program, inputs, outputs, args and size_hint must describe a valid extension job",
+	"job_memory_invalid":      "needs.memory_gb must be positive and needs.host_memory_gb finite and nonnegative",
+	"job_platform_invalid":    "needs.platform requires one valid platform string, list, or required/preferred/any mapping",
+	"job_docker_invalid":      "run Docker command, environment, network, sidecars and memory must satisfy managed Docker rules",
+	"job_environment_invalid": "environment must identify one configured environment or supported lock_file recipe",
+	"job_placement_invalid":   "allowed_machines must satisfy the project's placement policy",
+	"job_capacity_invalid":    "needs must fit the project's configured capacity",
+	"request_stale":           "attempt or input custody is stale; refresh before retrying",
+	"request_failed":          "request could not satisfy queue rules",
+}
+
+type rejectionError struct {
+	code  string
+	cause error
+}
+
+func (e *rejectionError) Error() string {
+	if e.cause != nil {
+		return e.cause.Error()
+	}
+	return rejectionMessages[e.code]
+}
+func (e *rejectionError) Unwrap() error     { return e.cause }
+func reject(code string, cause error) error { return &rejectionError{code: code, cause: cause} }
+
+// RuntimeCause retains safe operation/class information, never daemon stderr,
+// command arguments, environment values, endpoint URLs, or filesystem paths.
+type RuntimeCause struct {
+	Operation string `json:"operation"`
+	Class     string `json:"class"`
+	ExitCode  *int   `json:"exit_code,omitempty"`
+}
+
+func (c RuntimeCause) String() string {
+	if c.ExitCode != nil {
+		return fmt.Sprintf("%s: %s (exit %d)", c.Operation, c.Class, *c.ExitCode)
+	}
+	return c.Operation + ": " + c.Class
+}
+
+type runtimeError struct {
+	diagnostic RuntimeCause
+	cause      error
+}
+
+func (e *runtimeError) Error() string { return e.diagnostic.String() }
+func (e *runtimeError) Unwrap() error { return e.cause }
+func runtimeErrorFor(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var typed *runtimeError
+	if errors.As(err, &typed) {
+		// The outer error may add raw transport/decoder text. Preserve that chain
+		// for errors.Is/As, while rendering only the existing safe diagnostic.
+		if _, direct := err.(*runtimeError); direct {
+			return err
+		}
+		return &runtimeError{diagnostic: typed.diagnostic, cause: err}
+	}
+	c := RuntimeCause{Operation: operation, Class: "io_error"}
+	var exit *exec.ExitError
+	var syntax *json.SyntaxError
+	var mismatch *json.UnmarshalTypeError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		c.Class = "timeout"
+	case errors.Is(err, context.Canceled):
+		c.Class = "cancelled"
+	case errors.Is(err, fs.ErrPermission):
+		c.Class = "permission_denied"
+	case errors.Is(err, fs.ErrNotExist):
+		c.Class = "not_found"
+	case errors.Is(err, syscall.ENOSPC):
+		c.Class = "storage_full"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		c.Class = "connection_refused"
+	case errors.As(err, &exit):
+		c.Class = "command_exit"
+		code := exit.ExitCode()
+		c.ExitCode = &code
+	case errors.As(err, &syntax), errors.As(err, &mismatch):
+		c.Class = "invalid_response"
+	default:
+		switch err.Error() {
+		case "Docker inspection unconfirmed", "incomplete Docker inventory", "incomplete Docker network inventory":
+			c.Class = "inventory_incomplete"
+		case "Docker ownership mismatch", "Docker network ownership mismatch":
+			c.Class = "ownership_mismatch"
+		case errWorkerMemory.Error() + ": host allowance changed since queue admission":
+			c.Class = "admission_changed"
+		case "Docker restart policy unknown":
+			c.Class = "restart_policy_unknown"
+		case "legacy Docker assertion has unknown operation disposition":
+			c.Class = "disposition_unknown"
+		}
+	}
+	return &runtimeError{diagnostic: c, cause: err}
+}
+func runtimeDiagnostic(err error) *RuntimeCause {
+	if err == nil {
+		return nil
+	}
+	var typed *runtimeError
+	errors.As(runtimeErrorFor("reconcile", err), &typed)
+	c := typed.diagnostic
+	return &c
+}
+
+// Reports are untrusted even when authenticated. Reconstruct both enum fields
+// before showing them publicly; arbitrary worker text never becomes a cause.
+func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
+	if c == nil {
+		return nil
+	}
+	operations := map[string]bool{"main": true, "group": true, "command": true, "process_group": true, "outputs": true, "launch": true, "readiness": true, "reconcile": true, "persist": true, "ps": true, "inspect": true, "create": true, "start": true, "update": true, "unpause": true, "kill": true, "stop": true, "logs": true, "network.ls": true, "network.inspect": true, "network.rm": true, "network.create": true, "network.disconnect": true, "retain_evidence": true, "observe_group": true, "remove_networks": true}
+	classes := map[string]bool{"admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true, "inventory_incomplete": true, "ownership_mismatch": true, "restart_policy_unknown": true, "disposition_unknown": true}
+	if !operations[c.Operation] || !classes[c.Class] {
+		return nil
+	}
+	out := *c
+	if out.Class != "command_exit" {
+		out.ExitCode = nil
+	}
+	return &out
+}
+
+func rejectIf(code string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return reject(code, err)
+}

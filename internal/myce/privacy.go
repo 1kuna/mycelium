@@ -51,7 +51,11 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 		m.MemoryError = diagnostic(m.MemoryError, "memory probe failed")
 		m.FileTransferError = diagnostic(m.FileTransferError, "file transfer pending; only published progress is available elsewhere")
 		m.CacheError = diagnostic(m.CacheError, "cache operation failed")
+		m.DockerCause = safeRuntimeCause(m.DockerCause)
 		m.DockerCleanup = diagnostic(m.DockerCleanup, "Docker cleanup unconfirmed")
+		if m.DockerCleanup != "" && m.DockerCause != nil {
+			m.DockerCleanup += "; " + m.DockerCause.String()
+		}
 		for i := range m.CopyReports {
 			m.CopyReports[i].Error = diagnostic(m.CopyReports[i].Error, "model copy failed")
 		}
@@ -59,7 +63,23 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 			m.EnvironmentReports[i].Error = diagnostic(m.EnvironmentReports[i].Error, "environment build failed")
 		}
 	}
+	// Hold text is derived from worker reports too. Sanitize that projection,
+	// rather than only the machine field from which it was built.
+	for i := range s.HoldsDetail {
+		detail := &s.HoldsDetail[i]
+		if strings.HasPrefix(detail.Kind, "docker_") || detail.Kind == "unclassified" {
+			old := detail.Text
+			detail.Text = detail.Host + ": Docker cleanup unconfirmed"
+			for n, text := range s.HostHolds {
+				if text == old {
+					s.HostHolds[n] = detail.Text
+				}
+			}
+		}
+	}
 	for _, j := range s.Jobs {
+		j.ExecutionCause = safeRuntimeCause(j.ExecutionCause)
+		j.CleanupCause = safeRuntimeCause(j.CleanupCause)
 		// Status is a summary, never a copy of a submitted command, environment,
 		// program arguments, extension files, or local filesystem paths.
 		spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
