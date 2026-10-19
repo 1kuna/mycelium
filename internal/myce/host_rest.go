@@ -174,32 +174,9 @@ func (e *HostEnvelope) ApplyRestVerdict(expect string, now time.Time) {
 		default:
 			add("UNKNOWN", "local_exclusion_unknown")
 		}
-		for _, fact := range []struct {
-			n            *int
-			source, code string
-		}{
-			{e.Counts.PendingDaemon, "docker", "daemon_operations_pending"},
-			{e.Counts.Containers, "docker", "owned_containers_running"},
-			{e.Counts.GPUHolders, "gpu_holders", "owned_gpu_holders"},
-		} {
-			if fact.n == nil || !source(fact.source) {
-				add("UNKNOWN", fact.code+"_unknown")
-			} else if *fact.n > 0 {
-				add("FAIL", fact.code)
-			}
-		}
-		if e.RestartSafe == nil {
-			add("UNKNOWN", "restart_safety_unknown")
-		} else if !*e.RestartSafe {
-			add("FAIL", "restart_unsafe")
-		}
-		if source("cgroups") {
-			for _, unit := range e.Units {
-				if unit.Populated != nil && *unit.Populated {
-					add("FAIL", "owned_cgroup_populated")
-				}
-			}
-		}
+		// WP3 owns the complete local exclusion predicate. Counters are
+		// diagnostics here: an unresolved daemon operation is not proof of
+		// live execution, and must not promote its UNKNOWN verdict to FAIL.
 		for _, err := range e.Errors {
 			if err.Contrary {
 				add("FAIL", err.Component+"/"+err.Code)
