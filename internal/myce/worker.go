@@ -143,6 +143,11 @@ var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 var errWorkerReleasePending = errors.New("command release unconfirmed")
 
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
+	if !j.Spec.extensionJob() {
+		if err := lowerExecution(&j.Spec); err != nil {
+			return nil, err
+		}
+	}
 	if err := bindHostRevision(w.HostStateDir, &w.hostRevision); err != nil {
 		return nil, err
 	}
@@ -159,6 +164,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			extensionRelease()
 		}
 	}()
+	executionWorkdir := j.Spec.Run.Workdir
 	if j.Spec.extensionJob() || len(j.Spec.Files) > 0 {
 		value := j
 		dir, err := s.extensionFiles.run(attemptCheckpoint(j), func() (string, error) {
@@ -174,6 +180,10 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		j.Spec.Run.Workdir = dir
 	}
 
+	executionWork := j.Spec.Run.Workdir
+	if executionWorkdir != "" {
+		j.Spec.Run.Workdir = executionWorkdir
+	}
 	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
 		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
@@ -232,6 +242,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			return nil, err
 		}
 	}
+	expandExecution(&j.Spec, executionWork, environmentPath, machineTarget(&w.Machine))
 	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
 		return nil, err
 	}
@@ -334,13 +345,11 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	for k, v := range j.Spec.Run.Env {
 		env[k] = v
 	}
-	if environmentPath != "" {
-		env["PATH"] = filepath.Join(environmentPath, "venv", "bin") + string(os.PathListSeparator) + filepath.Join(environmentPath, "bin") + string(os.PathListSeparator) + env["PATH"]
-		env["VIRTUAL_ENV"] = filepath.Join(environmentPath, "venv")
-		env["MYCE_ENVIRONMENT_DIR"] = environmentPath
-	}
 	for k, v := range extensionEnv {
 		env[k] = v
+	}
+	if environmentPath != "" {
+		bindEnvironment(env, environmentPath)
 	}
 	if w.Machine.Device != "" {
 		bound, e := WithModelDevice(Model{}, w.Machine.GPU, w.Machine.Device)

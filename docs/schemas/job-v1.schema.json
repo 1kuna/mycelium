@@ -126,6 +126,9 @@
     },
     "EnvironmentRecipe": {
       "properties": {
+        "backend": {
+          "type": "string"
+        },
         "binary": {
           "type": "string"
         },
@@ -162,10 +165,87 @@
         },
         "python": {
           "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
         }
       },
       "required": [
         "key",
+        "platform"
+      ],
+      "type": "object"
+    },
+    "ExecutionMember": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "environment": {
+          "type": "string"
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "workdir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "ExecutionSpec": {
+      "properties": {
+        "main": {
+          "$ref": "#/$defs/ExecutionMember"
+        },
+        "sidecars": {
+          "items": {
+            "$ref": "#/$defs/NativeSidecar"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "main"
+      ],
+      "type": "object"
+    },
+    "ExecutionTarget": {
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "os": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "os",
+        "arch",
         "platform"
       ],
       "type": "object"
@@ -198,6 +278,9 @@
             "array",
             "null"
           ]
+        },
+        "default_class": {
+          "type": "string"
         },
         "digest": {
           "type": "string"
@@ -290,6 +373,15 @@
             "null"
           ]
         },
+        "variants": {
+          "items": {
+            "$ref": "#/$defs/ExtensionVariant"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "version": {
           "type": "string"
         }
@@ -355,6 +447,61 @@
         "name",
         "version",
         "digest"
+      ],
+      "type": "object"
+    },
+    "ExtensionVariant": {
+      "properties": {
+        "baselines": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ExtensionBaseline"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "check": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "environments": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EnvironmentRecipe"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "execution": {
+          "$ref": "#/$defs/ExecutionSpec"
+        },
+        "needs": {
+          "$ref": "#/$defs/ResourceNeeds"
+        },
+        "setup": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "target",
+        "needs",
+        "execution"
       ],
       "type": "object"
     },
@@ -668,6 +815,64 @@
       ],
       "type": "object"
     },
+    "NativeReadiness": {
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "timeout"
+      ],
+      "type": "object"
+    },
+    "NativeSidecar": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "environment": {
+          "type": "string"
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "readiness": {
+          "$ref": "#/$defs/NativeReadiness"
+        }
+      },
+      "required": [
+        "name",
+        "command",
+        "memory_gb"
+      ],
+      "type": "object"
+    },
     "Platform": {
       "properties": {
         "any": {
@@ -741,6 +946,86 @@
       ],
       "type": "object"
     },
+    "ResourceNeeds": {
+      "properties": {
+        "host_memory_gb": {
+          "type": "number"
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "platform": {
+          "$ref": "#/$defs/Platform"
+        }
+      },
+      "required": [
+        "memory_gb",
+        "platform"
+      ],
+      "type": "object"
+    },
+    "RunSpec": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "docker": {
+          "type": "boolean"
+        },
+        "docker_memory_gb": {
+          "type": "number"
+        },
+        "docker_memory_swap": {
+          "type": "number"
+        },
+        "docker_network": {
+          "type": "string"
+        },
+        "docker_sidecars": {
+          "items": {
+            "$ref": "#/$defs/DockerSidecar"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "sidecars": {
+          "items": {
+            "$ref": "#/$defs/NativeSidecar"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "workdir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
     "RuntimeCause": {
       "properties": {
         "class": {
@@ -805,8 +1090,20 @@
           "$ref": "#/$defs/Environment",
           "x-contract": "diagnostic"
         },
+        "execution": {
+          "$ref": "#/$defs/ExecutionSpec",
+          "x-contract": "diagnostic"
+        },
         "expected_minutes": {
           "type": "number",
+          "x-contract": "diagnostic"
+        },
+        "extension": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "extension_digest": {
+          "type": "string",
           "x-contract": "diagnostic"
         },
         "files": {
@@ -841,25 +1138,7 @@
           "x-contract": "diagnostic"
         },
         "needs": {
-          "properties": {
-            "host_memory_gb": {
-              "type": "number"
-            },
-            "memory_gb": {
-              "type": "number"
-            },
-            "model": {
-              "type": "string"
-            },
-            "platform": {
-              "$ref": "#/$defs/Platform"
-            }
-          },
-          "required": [
-            "memory_gb",
-            "platform"
-          ],
-          "type": "object",
+          "$ref": "#/$defs/ResourceNeeds",
           "x-contract": "diagnostic"
         },
         "outputs": {
@@ -896,54 +1175,7 @@
           "x-contract": "diagnostic"
         },
         "run": {
-          "properties": {
-            "command": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "docker": {
-              "type": "boolean"
-            },
-            "docker_memory_gb": {
-              "type": "number"
-            },
-            "docker_memory_swap": {
-              "type": "number"
-            },
-            "docker_network": {
-              "type": "string"
-            },
-            "docker_sidecars": {
-              "items": {
-                "$ref": "#/$defs/DockerSidecar"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "env": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "type": [
-                "object",
-                "null"
-              ]
-            },
-            "workdir": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "command"
-          ],
-          "type": "object",
+          "$ref": "#/$defs/RunSpec",
           "x-contract": "diagnostic"
         },
         "size_hint": {

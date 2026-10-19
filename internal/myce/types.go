@@ -142,44 +142,38 @@ func (e Environment) Key() string {
 type Spec struct {
 	SubmissionKey string `json:"submission_key,omitempty" yaml:"submission_key,omitempty"`
 
-	Files    FileManifest      `json:"files,omitempty" yaml:"files,omitempty"`
-	Kind     string            `json:"kind,omitempty" yaml:"kind,omitempty"`
-	Program  *Program          `json:"program,omitempty" yaml:"program,omitempty"`
-	Args     []string          `json:"args,omitempty" yaml:"args,omitempty"`
-	SizeHint SizeHint          `json:"size_hint,omitempty" yaml:"size_hint,omitempty"`
-	Inputs   map[string]string `json:"inputs,omitempty" yaml:"inputs,omitempty"`
-	Outputs  map[string]string `json:"outputs,omitempty" yaml:"outputs,omitempty"`
-	Name     string            `json:"name" yaml:"name"`
-	Project  string            `json:"project" yaml:"project"`
-	Priority string            `json:"priority" yaml:"priority"`
-	Class    string            `json:"class,omitempty" yaml:"class,omitempty"`
-	Logs     string            `json:"logs,omitempty" yaml:"logs,omitempty"`
-	Deadline *time.Time        `json:"deadline,omitempty" yaml:"deadline,omitempty"`
-	Run      struct {
-		Docker           bool              `json:"docker,omitempty" yaml:"docker,omitempty"`
-		DockerNetwork    string            `json:"docker_network,omitempty" yaml:"docker_network,omitempty"`
-		DockerMemoryGB   float64           `json:"docker_memory_gb,omitempty" yaml:"docker_memory_gb,omitempty"`
-		DockerMemorySwap *float64          `json:"docker_memory_swap,omitempty" yaml:"docker_memory_swap,omitempty"`
-		DockerSidecars   []DockerSidecar   `json:"docker_sidecars,omitempty" yaml:"docker_sidecars,omitempty"`
-		Command          []string          `json:"command" yaml:"command"`
-		Workdir          string            `json:"workdir,omitempty" yaml:"workdir,omitempty"`
-		Env              map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-	} `json:"run" yaml:"run"`
-	Needs struct {
-		MemoryGB     float64  `json:"memory_gb" yaml:"memory_gb"`
-		HostMemoryGB float64  `json:"host_memory_gb,omitempty" yaml:"host_memory_gb,omitempty"`
-		Platform     Platform `json:"platform" yaml:"platform"`
-		Model        string   `json:"model,omitempty" yaml:"model,omitempty"`
-	} `json:"needs" yaml:"needs"`
-	Environment     Environment `json:"environment,omitempty" yaml:"environment,omitempty"`
-	AllowedMachines []string    `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
-	StartBy         *time.Time  `json:"start_by,omitempty" yaml:"start_by,omitempty"`
-	GiveUpAt        *time.Time  `json:"give_up_at,omitempty" yaml:"give_up_at,omitempty"`
-	ExpectedMinutes float64     `json:"expected_minutes,omitempty" yaml:"expected_minutes,omitempty"`
-	Resumable       bool        `json:"resumable" yaml:"resumable"`
+	Files           FileManifest      `json:"files,omitempty" yaml:"files,omitempty"`
+	Kind            string            `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Program         *Program          `json:"program,omitempty" yaml:"program,omitempty"`
+	Args            []string          `json:"args,omitempty" yaml:"args,omitempty"`
+	SizeHint        SizeHint          `json:"size_hint,omitempty" yaml:"size_hint,omitempty"`
+	Inputs          map[string]string `json:"inputs,omitempty" yaml:"inputs,omitempty"`
+	Outputs         map[string]string `json:"outputs,omitempty" yaml:"outputs,omitempty"`
+	Name            string            `json:"name" yaml:"name"`
+	Project         string            `json:"project" yaml:"project"`
+	Priority        string            `json:"priority" yaml:"priority"`
+	Class           string            `json:"class,omitempty" yaml:"class,omitempty"`
+	Logs            string            `json:"logs,omitempty" yaml:"logs,omitempty"`
+	Deadline        *time.Time        `json:"deadline,omitempty" yaml:"deadline,omitempty"`
+	Run             RunSpec           `json:"run" yaml:"run"`
+	Needs           ResourceNeeds     `json:"needs" yaml:"needs"`
+	Execution       *ExecutionSpec    `json:"execution,omitempty" yaml:"execution,omitempty"`
+	Extension       string            `json:"extension,omitempty" yaml:"extension,omitempty"`
+	ExtensionDigest string            `json:"extension_digest,omitempty" yaml:"extension_digest,omitempty"`
+	Environment     Environment       `json:"environment,omitempty" yaml:"environment,omitempty"`
+	AllowedMachines []string          `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
+	StartBy         *time.Time        `json:"start_by,omitempty" yaml:"start_by,omitempty"`
+	GiveUpAt        *time.Time        `json:"give_up_at,omitempty" yaml:"give_up_at,omitempty"`
+	ExpectedMinutes float64           `json:"expected_minutes,omitempty" yaml:"expected_minutes,omitempty"`
+	Resumable       bool              `json:"resumable" yaml:"resumable"`
 }
 
 func (s Spec) Validate() error {
+	if !s.extensionJob() {
+		if err := lowerExecution(&s); err != nil {
+			return reject("job_execution_invalid", err)
+		}
+	}
 	if err := normalizeJobClass(&s); err != nil {
 		return err
 	}

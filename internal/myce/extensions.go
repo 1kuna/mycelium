@@ -27,6 +27,8 @@ var extensionName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // Extension is one small folder. Files and Digest are immutable transport data,
 // not extra authoring fields in extension.yaml. Downloads live in its cache.
 type Extension struct {
+	DefaultClass      string                                  `json:"default_class,omitempty" yaml:"default_class,omitempty"`
+	Variants          []ExtensionVariant                      `json:"variants,omitempty" yaml:"variants,omitempty"`
 	Name              string                                  `json:"name" yaml:"name"`
 	Version           string                                  `json:"version" yaml:"version"`
 	Purpose           string                                  `json:"purpose" yaml:"purpose"`
@@ -83,20 +85,36 @@ func safeRelative(p string) bool {
 	return p != "" && !strings.Contains(p, "\\") && !strings.Contains(p, ":") && !filepath.IsAbs(p) && filepath.Clean(p) == p && p != "." && p != ".." && !strings.HasPrefix(p, "../")
 }
 func extensionKey(e Extension) string { return e.Name + "@" + e.Version }
-func (s Spec) extensionJob() bool     { return s.Kind != "" || s.Program != nil }
+func (s Spec) extensionJob() bool {
+	return s.Kind != "" || s.Program != nil || s.Extension != "" || s.ExtensionDigest != ""
+}
 func (s Spec) workType() string {
 	if s.Program != nil {
 		return "program:" + s.Program.Type
 	}
-	return "kind:" + s.Kind
+	if s.Kind != "" {
+		return "kind:" + s.Kind
+	}
+	name, _, _ := strings.Cut(s.Extension, "@")
+	return "extension:" + name
 }
 func (e Extension) handles(s Spec) bool {
+	if s.Kind == "" && s.Program == nil {
+		name, _, _ := strings.Cut(s.Extension, "@")
+		return name == e.Name
+	}
 	if s.Program != nil {
 		return slices.Contains(e.ProgramTypes, s.Program.Type)
 	}
 	return slices.Contains(e.Kinds, s.Kind)
 }
 func (e Extension) validate() error {
+	if strings.Contains(e.DefaultClass, "/") {
+		return errors.New("default_class cannot contain slash")
+	}
+	if len(e.Variants) > 0 {
+		return e.validateVariants()
+	}
 	if !extensionName.MatchString(e.Name) || !extensionName.MatchString(e.Version) || e.Purpose == "" || len(e.Platforms) == 0 || len(e.Kinds)+len(e.ProgramTypes) == 0 || len(e.Run) == 0 || e.Run[0] == "" {
 		return errors.New("extension requires name, version, purpose, platforms, work types and run argv")
 	}
@@ -146,6 +164,8 @@ func (e Extension) validateBaselines(baselines map[string]ExtensionBaseline) err
 		s := Spec{Kind: strings.TrimPrefix(k, "kind:")}
 		if strings.HasPrefix(k, "program:") {
 			s = Spec{Program: &Program{Type: strings.TrimPrefix(k, "program:")}}
+		} else if strings.HasPrefix(k, "extension:") {
+			s = Spec{Extension: strings.TrimPrefix(k, "extension:")}
 		} else if !strings.HasPrefix(k, "kind:") {
 			return errors.New("baseline key must be kind:NAME or program:TYPE")
 		}
@@ -171,6 +191,11 @@ func (e Extension) validateBaselines(baselines map[string]ExtensionBaseline) err
 	return nil
 }
 func extensionFromFiles(files map[string][]byte) (Extension, error) {
+	owned := make(map[string][]byte, len(files))
+	for n, b := range files {
+		owned[n] = slices.Clone(b)
+	}
+	files = owned
 	var e Extension
 	total := 0
 	for n, b := range files {
@@ -201,6 +226,9 @@ func extensionFromFiles(files map[string][]byte) (Extension, error) {
 	}
 	h := sha256.Sum256(b)
 	e.Digest = hex.EncodeToString(h[:])
+	if err := e.snapshotVariantEnvironments(); err != nil {
+		return e, err
+	}
 	return e, nil
 }
 func ReadExtension(folder string) (Extension, error) {
@@ -277,6 +305,9 @@ func (q *Queue) resolveExtensions(s *Spec) ([]Extension, error) {
 	if !s.extensionJob() {
 		return nil, nil
 	}
+	if s.Extension != "" || s.ExtensionDigest != "" {
+		return q.resolveExplicitExtension(s)
+	}
 	out := []Extension{}
 	platforms := []string{}
 	for _, e := range q.s.Extensions {
@@ -284,7 +315,11 @@ func (q *Queue) resolveExtensions(s *Spec) ([]Extension, error) {
 			continue
 		}
 		out = append(out, e)
-		platforms = append(platforms, e.Platforms...)
+		for _, v := range e.Variants {
+			s.Needs.MemoryGB = max(s.Needs.MemoryGB, v.Needs.MemoryGB)
+			s.Needs.HostMemoryGB = max(s.Needs.HostMemoryGB, v.Needs.HostMemoryGB)
+		}
+		platforms = append(platforms, e.platforms()...)
 		s.Needs.MemoryGB = max(s.Needs.MemoryGB, e.MemoryGB)
 		s.Needs.HostMemoryGB = max(s.Needs.HostMemoryGB, e.HostMemoryGB)
 	}
@@ -305,13 +340,20 @@ func (q *Queue) resolveExtensions(s *Spec) ([]Extension, error) {
 func qualifiedExtension(j *Job, m *Machine) *Extension {
 	for i := range j.Extensions {
 		e := &j.Extensions[i]
-		if !slices.Contains(e.Platforms, m.GPU) || (j.Spec.Resumable && !e.Resumable) {
+		if !e.matchesTarget(m) || !slices.Contains(e.platforms(), m.GPU) || (j.Spec.Resumable && !e.Resumable) {
 			continue
 		}
-		if _, ok := e.baseline(j.Spec.workType(), m.GPU); !ok {
+		view, ok := e.forMachine(m)
+		if !ok {
+			continue
+		}
+		if _, ok := view.baseline(j.Spec.workType(), m.GPU); !ok {
 			continue
 		}
 		for _, r := range m.ExtensionReports {
+			if len(e.Variants) > 0 && (r.Target == nil || *r.Target != machineTarget(m)) {
+				continue
+			}
 			if r.Digest == e.Digest && r.Work == j.Spec.workType() && r.Qualified && r.Platform == m.GPU {
 				return e
 			}

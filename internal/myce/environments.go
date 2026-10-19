@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -25,6 +26,8 @@ import (
 // EnvironmentRecipe is an immutable submission-time snapshot. Only the cache
 // destination is substituted in binary build arguments; no implicit shell.
 type EnvironmentRecipe struct {
+	Backend        string            `json:"backend,omitempty" yaml:"backend,omitempty"`
+	Target         *ExecutionTarget  `json:"target,omitempty" yaml:"-"`
 	Python         string            `json:"python,omitempty" yaml:"python,omitempty"`
 	LockFile       string            `json:"lock_file,omitempty" yaml:"lock_file,omitempty"`
 	Binary         string            `json:"binary,omitempty" yaml:"binary,omitempty"`
@@ -82,6 +85,9 @@ func ReadEnvironments(path string) (EnvironmentCatalog, error) {
 	return c, nil
 }
 func snapshotEnvironment(r EnvironmentRecipe, platform string) (EnvironmentRecipe, error) {
+	if r.Backend != "" && r.Backend != "uv" {
+		return r, errors.New("unsupported environment backend; E1 supports uv")
+	}
 	r.Platform = platform
 	r.Key = ""
 	if (r.LockFile != "") == (r.Binary != "" || len(r.Build) > 0) {
@@ -172,6 +178,13 @@ func (q *Queue) resolveEnvironment(e Environment) (map[string]EnvironmentRecipe,
 	return out, nil
 }
 func environmentKey(j *Job, m *Machine) string {
+	if j.Spec.extensionJob() {
+		if e := qualifiedExtension(j, m); e != nil {
+			if r, ok := extensionRecipe(*e, m); ok {
+				return r.Key
+			}
+		}
+	}
 	if len(j.EnvironmentRecipes) > 0 {
 		return j.EnvironmentRecipes[m.GPU].Key
 	}
@@ -179,17 +192,25 @@ func environmentKey(j *Job, m *Machine) string {
 }
 func environmentReady(j *Job, m *Machine) bool {
 	k := environmentKey(j, m)
-	return j.Spec.Environment.Key() == "" || k != "" && slices.Contains(m.Environments, k)
+	return k == "" && j.Spec.Environment.Key() == "" || k != "" && slices.Contains(m.Environments, k)
 }
 func environmentCanRun(j *Job, m *Machine) bool {
-	if j.Spec.Environment.Key() == "" {
+	if j.Spec.Environment.Key() == "" && environmentKey(j, m) == "" {
 		return true
 	}
 	k := environmentKey(j, m)
 	if k == "" {
 		return false
 	}
-	return slices.Contains(m.Environments, k) || len(j.EnvironmentRecipes) > 0 && m.EnvironmentBuilder
+	if slices.Contains(m.Environments, k) {
+		return true
+	}
+	if e := qualifiedExtension(j, m); e != nil {
+		if _, ok := extensionRecipe(*e, m); ok {
+			return m.EnvironmentBuilder
+		}
+	}
+	return len(j.EnvironmentRecipes) > 0 && m.EnvironmentBuilder
 }
 
 type EnvironmentReport struct {
@@ -221,6 +242,11 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 		}
 		if q.placementBetter(j, other, m) {
 			return nil
+		}
+	}
+	if e := qualifiedExtension(j, m); e != nil {
+		if r, ok := extensionRecipe(*e, m); ok {
+			return []EnvironmentRecipe{r}
 		}
 	}
 	return []EnvironmentRecipe{j.EnvironmentRecipes[m.GPU]}
@@ -451,6 +477,12 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 	return nil
 }
 func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (string, func(), error) {
+	if r.Backend != "" && r.Backend != "uv" {
+		return "", nil, errors.New("unsupported environment backend; E1 supports uv")
+	}
+	if r.Target != nil && (r.Target.OS != runtime.GOOS || r.Target.Arch != runtime.GOARCH) {
+		return "", nil, errors.New("environment target does not match this host")
+	}
 	if len(r.Key) != 64 {
 		return "", nil, errors.New("invalid environment hash")
 	}

@@ -8,7 +8,7 @@ v1 tried to do too much at once and never thought about how people would use or 
 
 ## What it is
 
-One shared queue of GPU jobs for production, research and future projects. **GPU work only:** every real job must need a GPU. CPU-only work, such as file watching and input preparation, stays outside the queue. Laptop tests use fake GPU inventory. Projects submit jobs. Machines pull the most important job they can run. No machine sits idle because its "own" project is quiet.
+One shared queue for production, research and future projects. The approved extension direction includes CPU and accelerator workloads through the same execution interface. **Current admission remains GPU-only:** CPU/core reservations and CPU-only workers are a later #98 resource slice; E1 does not enable them. Laptop tests use fake GPU inventory. Projects submit jobs. Machines pull the most important job they can run. No machine sits idle because its "own" project is quiet.
 
 ## The parts
 
@@ -375,7 +375,7 @@ Supported v3 features include plain batch commands, queue-managed model calls an
 
 Explicit NAS roots remain supported for models, shared files and checkpoints. The queue file store also supports jobs without a NAS. Ordinary commands and servers do not need to become extensions. These are supported v3 paths, not a second runtime or a reason to restore older worker/report protocols.
 
-Broader CPU-only scheduling, multi-machine/gang work and vision expansion remain deferred under #17, #22 and #69. Automatic dependency detection for arbitrary projects, automatic memory estimation and a backup queue service also wait. Jobs must name their software recipe or lock file and declare their needs.
+CPU-only scheduling is approved direction under #98, with implementation deferred to its resource slices; multi-machine/gang work and vision expansion remain deferred under #17, #22 and #69. Automatic dependency detection for arbitrary projects, automatic memory estimation and a backup queue service also wait. Jobs must name their software recipe or lock file and declare their needs.
 
 ## Product decisions
 
@@ -521,3 +521,96 @@ Roll queue and workers together; do not downgrade with opted-out work live.
 A queue-first upgrade drains live opted-out servers until their workers upgrade.
 See [log policy and downgrade behavior](job-reference.md#scheduling-and-results)
 and the [native proof checklist](guide-servers.md).
+
+
+## Extension composition (E1, #98)
+
+An extension wraps a project's existing setup and commands. Applications keep
+that setup and use the queue's submit/wait or model endpoint seam. Mycelium
+provides execution, environment and placement mechanisms, not application
+packages or project-specific rewrites.
+
+Jobs may select `extension: name@version` and optionally `extension_digest`, a
+lowercase SHA-256 of the frozen folder. Digest-only selection is also accepted.
+The name/version and digest must agree. A bare name is accepted when exactly
+one version is registered; otherwise the caller must pin a version or digest.
+First admission persists the resolved name/version, digest and extension
+snapshot in the existing SQLite job. Submission-key replay occurs before
+resolution, retaining that snapshot and class after registry changes or restart.
+An unknown explicit reference is rejected. Legacy kind/program routing retains
+its existing wait-for-registration behavior. Registry and job snapshots own
+their bytes; caller mutations cannot change registered content.
+
+An explicitly selected extension supplies `default_class` when the caller
+omits both class and legacy priority. The caller still supplies project, inputs,
+arguments, allowed machines and optional size hints. It cannot override
+extension-owned commands, environments, workdir, env, or resource floors.
+
+An extension may retain its old `platforms`, memory floors, `run: [argv...]`,
+setup/check and baselines, or declare complete `variants`. A variant has an
+exact `target: {os, arch, platform}` (Go OS/architecture names and the existing
+cuda/xpu/metal/fake backend), named `environments`, `needs`, `execution`, and
+its own setup/check and baselines. Targets are unique. No field inheritance,
+recipe merging, backend fallback or implicit OS emulation occurs. Legacy
+execution fields cannot accompany variants. Qualification reports for variants
+include the exact target as well as folder digest, work type and fingerprint.
+Explicit jobs without kind/program use baseline key `extension:NAME`;
+kind/program jobs retain their existing baseline keys. Missing baselines never
+qualify. Explicit setup and check remain required on every worker.
+
+```yaml
+name: example.stage
+version: '1'
+purpose: Wrap the existing stage command
+default_class: experiment
+variants:
+  - target: {os: linux, arch: amd64, platform: cuda}
+    environments:
+      main: {backend: uv, python: '3.12', lock_file: locks/requirements.txt}
+    needs: {memory_gb: 4, host_memory_gb: 8}
+    execution:
+      main:
+        environment: main
+        command: ['{env.main.python}', '{extension}/adapter.py']
+        workdir: '{work}'
+    # Supply target-specific check argv and bundled native baselines to qualify.
+```
+
+Environment references name a member of that variant's `environments` map.
+E1 supports the existing uv requirements or uv project lock snapshots, with
+`backend: uv` (also the default), Python version and bundled relative lock
+path. A uv project includes both uv.lock and pyproject.toml. Immutable recipe
+keys include lock bytes, Python, backend and exact OS/arch/platform, excluding
+private mount paths. The existing environment cache, exclusive build locks,
+atomic publication and shared execution references remain authoritative.
+`backend` leaves room for a later pixi adapter; unsupported backends are rejected
+and never executed as uv. E1 adds no solver, driver installer or package catalog.
+For variant setup/check, pass `--environment-cache` (and optionally
+`--environment-cache-bytes`) to the existing extension CLI. Both qualification
+and jobs acquire the same immutable recipe through the existing cache builder.
+The existing worker environment preparation may populate its configured cache;
+automatic extension distribution/setup/qualification is E2 and is not enabled.
+
+Ordinary jobs may use `execution.main` instead of `run`. Main contains command,
+workdir, env and an optional environment reference (an existing catalog name
+for an ordinary job). Both forms lower through one adapter into `RunSpec`, the
+existing run wire contract and worker runner. Old extension argv becomes a
+single main member through this adapter too. Literal substitutions cover
+`{extension}`, `{cache}`, `{work}`, `{env.NAME.python}` and `{env.NAME.root}`;
+argv and environment values are never shell-interpolated. Existing staged
+input files remain available beneath `{work}`. No workflow graph, application
+configuration patch language or second extension executor is introduced.
+Current admission conservatively uses the maximum declared memory floors
+across candidate variants plus caller size hints; target-specific resource
+admission is left to the resource slices. This may withhold a smaller host,
+but never lowers a reservation below the selected recipe's floor.
+
+The shared schema reserves `execution.sidecars` and `run.sidecars` for D4:
+name, command, optional environment/env, member host-RAM cap, optional port and
+HTTP readiness path/timeout. An absent port means a plain helper; zero requests
+an allocated loopback port. Main may declare a member RAM cap as well. E1
+round-trips these declarations but does not launch them: direct jobs reject
+native sidecars/member caps, and extensions requiring them remain unqualified
+for execution until D4. Docker sidecars retain their existing behavior. CPU
+admission, multi-GPU vectors, native group supervision, assets/archive expansion
+and native Windows execution are not enabled by this schema amendment.

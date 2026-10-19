@@ -20,6 +20,8 @@ func extensionCommand(args []string) error {
 	}
 	f := flag.NewFlagSet("extension "+args[0], flag.ContinueOnError)
 	root := f.String("root", myce.DefaultExtensionRoot(), "local extension library and download cache")
+	environmentRoot := f.String("environment-cache", "", "existing local environment cache for variant setup/check")
+	environmentLimit := f.Int64("environment-cache-bytes", 20*1024*1024*1024, "environment cache limit")
 	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
 	token := f.String("token", env("MYCE_TOKEN", ""), "queue token (prefer MYCE_TOKEN)")
 	// DefValue is only help text; keep the actual environment default private.
@@ -92,7 +94,11 @@ func extensionCommand(args []string) error {
 			}
 			bounded, cancel := context.WithTimeout(ctx, *timeout)
 			defer cancel()
-			reports, err := myce.PrepareExtension(bounded, *root, e, *platform, *device, args[0] == "check", os.Stderr)
+			var cache *myce.EnvironmentCache
+			if *environmentRoot != "" {
+				cache = &myce.EnvironmentCache{Root: *environmentRoot, Limit: *environmentLimit}
+			}
+			reports, err := myce.PrepareExtension(bounded, *root, e, *platform, *device, args[0] == "check", os.Stderr, cache)
 			for _, r := range reports {
 				fmt.Println(myce.FormatExtensionReport(r))
 			}
