@@ -97,6 +97,8 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 	}
 	envelope := myce.UnknownHostEnvelope(op, clock)
 	jsonOutput := false
+	verdictRequested := false
+	expectation := ""
 	// Parse errors must still honor --json, even if it follows a bad flag.
 	for _, arg := range args {
 		if arg == "--json" || arg == "--json=true" {
@@ -106,6 +108,9 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 	defer func() {
 		if retErr != nil {
 			envelope.Errors = append(envelope.Errors, myce.HostEnvelopeError(retErr))
+		}
+		if verdictRequested && op == "status" && (expectation == "closed" || expectation == "ready") {
+			envelope.ApplyRestVerdict(expectation, clock.Now())
 		}
 		if jsonOutput {
 			if err := json.NewEncoder(out).Encode(envelope); err != nil {
@@ -117,6 +122,9 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 				state = *envelope.Desired.State
 			}
 			_, err := fmt.Fprintf(out, "Host %s: local exclusion %s; settlement %s\n", state, envelope.LocalExclusion, envelope.Settlement)
+			if err == nil && envelope.HostRestVerdict != nil {
+				_, err = fmt.Fprintf(out, "%s: %s (%s)\n", envelope.Expectation, envelope.Verdict, strings.Join(envelope.Reasons, ", "))
+			}
 			if err != nil {
 				retErr = err
 			}
@@ -136,7 +144,9 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 	timeout := f.Duration("timeout", 30*time.Second, "total command budget")
 	revision := f.Uint64("expect-revision", 0, "durable desired revision")
 	waitReleased := f.Bool("wait-released", false, "wait for local exclusion")
-	expect := f.String("expect", "", "closed or ready")
+	expect := &expectation
+	f.StringVar(expect, "expect", "", "closed or ready")
+	f.BoolVar(&verdictRequested, "verdict", false, "compute the product rest verdict")
 	wait := f.Bool("wait", false, "wait for expectation")
 	f.BoolVar(&jsonOutput, "json", jsonOutput, "JSON envelope")
 	if err := f.Parse(args[1:]); err != nil {
@@ -148,7 +158,7 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 			hasRevision = true
 		}
 	})
-	if !*local || f.NArg() != 0 || *timeout <= 0 || *grace < 0 || *grace > time.Minute || op == "open" && !hasRevision || op != "close" && *waitReleased || op != "status" && (*wait || *expect != "") || *wait && *expect == "" || *expect != "" && *expect != "closed" && *expect != "ready" {
+	if !*local || f.NArg() != 0 || *timeout <= 0 || *grace < 0 || *grace > time.Minute || op == "open" && !hasRevision || op != "close" && *waitReleased || op != "status" && (*wait || *expect != "" || verdictRequested) || (*wait || verdictRequested) && *expect == "" || *expect != "" && *expect != "closed" && *expect != "ready" {
 		return waitError(2, "invalid host command arguments")
 	}
 	// This deadline is created once, before identity/config resolution.
@@ -275,10 +285,16 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 		if *expect == "ready" {
 			satisfied = envelope.Ready != nil && *envelope.Ready
 		}
-		// WP4 supplies the complete closed rest verdict. This local readiness seam
-		// never promotes local exclusion plus a cached acknowledgement to rest PASS.
 		if *expect == "closed" {
-			satisfied = envelope.Desired.State != nil && *envelope.Desired.State == "closed" && envelope.Observed.State != nil && *envelope.Observed.State == "closed" && envelope.LocalExclusion == "PASS" && envelope.Settlement == "confirmed" && envelope.QueueRevision != nil && envelope.Desired.Revision != nil && *envelope.QueueRevision == *envelope.Desired.Revision
+			envelope.ApplyRestVerdict(*expect, clock.Now())
+			satisfied = envelope.Verdict == "PASS"
+			if !verdictRequested {
+				envelope.HostRestVerdict = nil
+			}
+		}
+		if verdictRequested {
+			envelope.ApplyRestVerdict(*expect, clock.Now())
+			satisfied = envelope.Verdict == "PASS"
 		}
 		if satisfied {
 			return nil
