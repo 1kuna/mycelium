@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,17 +40,18 @@ func TestInvitePrintsCommandWithoutCredential(t *testing.T) {
 func captureJoiningOutput(t *testing.T, run func() error) string {
 	t.Helper()
 	old := os.Stdout
-	r, w, err := os.Pipe()
+	// Dry-run install plans can exceed the pipe buffer before run returns.
+	// A temporary file captures all output without blocking the command writer.
+	w, err := os.CreateTemp(t.TempDir(), "stdout")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer w.Close()
 	os.Stdout = w
 	defer func() { os.Stdout = old }()
 	err = run()
-	w.Close()
 	os.Stdout = old
-	data, readErr := io.ReadAll(r)
-	r.Close()
+	data, readErr := os.ReadFile(w.Name())
 	if err != nil || readErr != nil {
 		t.Fatal("command failed", err, readErr)
 	}
