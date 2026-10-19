@@ -127,7 +127,9 @@ func TestDedicatedAvailabilityAndStaleness(t *testing.T) {
 	}
 }
 func profileAvailability(m Machine, a Availability) Machine {
-	m.CapabilityProfile = &CapabilityProfile{Availability: &a}
+	profile := *m.CapabilityProfile
+	profile.Availability = &a
+	m.CapabilityProfile = &profile
 	return m
 }
 func TestPoliteQueueStopAndResume(t *testing.T) {

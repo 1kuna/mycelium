@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -354,16 +355,15 @@ func TestSubmissionLegacyState(t *testing.T) {
 	}
 	c := &fakeClock{now: time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)}
 	q, err := Open(path, t.TempDir(), c)
-	if err != nil {
-		t.Fatal(err)
+	if q != nil {
+		q.Close()
 	}
-	defer q.Close()
-	if len(q.s.Jobs) != 1 || q.s.Jobs["legacy-job"].Spec.SubmissionKey != "" {
-		t.Fatal("legacy jobs changed")
+	if !errors.Is(err, ErrLegacyState) {
+		t.Fatal("old submission state accepted", err)
 	}
-	submit(t, q, keyedSpec())
-	if len(q.s.Jobs) != 2 {
-		t.Fatal("legacy job lost")
+	after, e := os.ReadFile(path)
+	if e != nil || !bytes.Equal(data, after) {
+		t.Fatal("refusal mutated old submission state", e)
 	}
 }
 

@@ -393,6 +393,9 @@ func (q *Queue) ConfigureLocalHost(dir, endpoint string) error {
 			return err
 		}
 	}
+	if err := refuseLegacyHost(dir); err != nil {
+		return err
+	}
 	q.mu.Lock()
 	q.localHostDir, q.localHostQueue = dir, endpoint
 	if s, e := ReadHostIntent(dir); e == nil {

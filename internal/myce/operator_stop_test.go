@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -251,7 +252,7 @@ func TestOperatorStopMarkerRejectsForeignDocuments(t *testing.T) {
 					store.close()
 					t.Fatal("invalid marker accepted")
 				}
-				if !strings.Contains(err.Error(), "read operator-stop marker") {
+				if !errors.Is(err, ErrLegacyState) {
 					t.Fatal(err)
 				}
 			}

@@ -83,7 +83,7 @@ func TestSimFairWeights(t *testing.T) {
 func TestSimIdleWaitingFit(t *testing.T) {
 	clock := &simClock{time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)}
 	q := &Queue{simulation: true, clock: clock, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
-	m := &Machine{ID: "a", GPU: "fake", FreeMemoryGB: 8, TotalMemoryGB: 8}
+	m := &Machine{ID: "a", GPU: "fake", FreeMemoryGB: 8, TotalMemoryGB: 8, CapabilityProfile: machine("a", "fake").CapabilityProfile}
 	q.s.Machines[m.ID] = m
 	s := simTestStream("a", "experiment", 0, 10, 1)
 	q.s.Jobs["a"] = &Job{ID: "a", State: "queued", Spec: simSpec(&simTask{stream: s}, clock.Now())}

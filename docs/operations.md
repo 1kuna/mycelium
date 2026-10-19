@@ -1359,3 +1359,13 @@ paths containing whitespace, quotes or backslashes are rejected. ExecStart
 arguments remain quoted. `--private-devices=true` is rejected for Linux user
 queues; the default uses the startup GPU-descriptor check described above.
 Installer linger advice reads loginctl and requests enable-linger only when off.
+
+## Replacing an RC installation (#90)
+
+Old formats are refused; operators archive and install fresh. Stop the old
+services and prevent restarts before moving their data. Keep configuration and
+secret references, replace both worker template instance definitions through
+`myce install`, and leave admission CLOSED. Follow [Retiring RC state](guide-fresh-install.md)
+for archive paths, fresh-install settlement and revision-bound open. There is
+no conversion command. Read the open revision from status `desired.revision`,
+not the null status `accepted_revision`. Fleet activation is a separate task.

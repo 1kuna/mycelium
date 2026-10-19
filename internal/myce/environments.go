@@ -690,6 +690,9 @@ func relocateEnvironment(from, to string) error {
 	})
 }
 func (c *EnvironmentCache) cleanupBuild(path string) error {
+	if err := requireStateMarker(filepath.Join(path, "build-state.json"), c.Root); err != nil {
+		return err
+	}
 	b, e := os.ReadFile(filepath.Join(path, "build-state.json"))
 	if errors.Is(e, os.ErrNotExist) {
 		return nil

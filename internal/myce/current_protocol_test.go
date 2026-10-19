@@ -38,6 +38,17 @@ func TestCurrentProtocolRejectsMissingIdentity(t *testing.T) {
 			t.Fatal("accepted absent identity/profile/approval")
 		}
 	}
+	server := httptest.NewServer(API{q, "test"}.Handler())
+	defer server.Close()
+	client := Client{URL: server.URL, Token: "test"}
+	badCheckin := Checkin{Machine: machine("current", "fake")}
+	badCheckin.Machine.CapabilityProfile = nil
+	var reply Reply
+	err := client.Call(context.Background(), "POST", "/api/workers/checkin", badCheckin, &reply)
+	var refusal *HTTPError
+	if !errors.As(err, &refusal) || refusal.Status != 426 || refusal.Code != "worker_protocol_invalid" || !strings.Contains(refusal.Message, "capability profile") {
+		t.Fatalf("unhelpful protocol refusal: %v", err)
+	}
 	for _, gpu := range []string{"cuda", "xpu", "metal", "fake"} {
 		for _, layout := range []string{"separate", "unified"} {
 			m := machine("current-"+gpu+layout, gpu)

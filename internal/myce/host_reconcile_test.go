@@ -384,7 +384,11 @@ func TestHostReconcileHTTPAndTimer(t *testing.T) {
 // Unit fixtures for worker behavior use a synthetic empty queue for the host
 // protocol; tests of convergence itself always use API{Queue: ...}.
 func workerTestServer(handler http.Handler) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(workerTestHandler(handler))
+}
+
+func workerTestHandler(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/reconcile") && strings.HasPrefix(r.URL.Path, "/api/hosts/") {
 			var request HostExchange
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -395,7 +399,7 @@ func workerTestServer(handler http.Handler) *httptest.Server {
 			return
 		}
 		handler.ServeHTTP(w, r)
-	}))
+	})
 }
 
 func TestHostReconcileUnmatchedLocalCustodyDiagnosticAndBlockingHolds(t *testing.T) {

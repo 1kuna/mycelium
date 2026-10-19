@@ -314,7 +314,7 @@ func TestInstallClosedSiblingAndChildOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := filepath.Join(c.HostStateDir, "worker-sibling.json")
-	if err = os.WriteFile(registry, []byte("preserved sibling registry"), 0600); err != nil {
+	if err = os.WriteFile(registry, []byte(`{"schema_version":3,"name":"preserved sibling registry"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	manager := func(_ context.Context, _ string, args ...string) ([]byte, error) {
@@ -331,7 +331,7 @@ func TestInstallClosedSiblingAndChildOwnership(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(before, after) || after.Desired != "closed" {
 		t.Fatal("sibling gate or revision changed", err)
 	}
-	if data, _ := os.ReadFile(registry); string(data) != "preserved sibling registry" {
+	if data, _ := os.ReadFile(registry); string(data) != `{"schema_version":3,"name":"preserved sibling registry"}` {
 		t.Fatal("sibling registry changed")
 	}
 	for _, worker := range []ServiceConfig{c, sibling} {

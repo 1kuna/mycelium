@@ -164,8 +164,8 @@ func TestHostStateMissingAndLegacyMessages(t *testing.T) {
 				if !strings.Contains(err.Error(), "this host has no Mycelium host state yet; provision it with `myce host open` or `myce dev`") || strings.Contains(err.Error(), "convert") {
 					t.Fatal("misleading provisioning error", err)
 				}
-			} else if !strings.Contains(err.Error(), "myce host convert offline") {
-				t.Fatal("missing legacy conversion pointer", err)
+			} else if !strings.Contains(err.Error(), "legacy_state_present") {
+				t.Fatal("missing legacy archive pointer", err)
 			}
 		})
 	}

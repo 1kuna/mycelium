@@ -2,13 +2,11 @@ package myce
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -62,86 +60,6 @@ func TestHostRevisionInitializeRefusesLegacyAndConversion(t *testing.T) {
 				t.Fatal("initialized over legacy/conversion state")
 			}
 		})
-	}
-}
-
-func TestHostConversionCustodyOnlyAndMissingSpool(t *testing.T) {
-	o := oldHostFixture(t)
-	workers, err := HostWorkers(o.Dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := workers[0].State
-	cache := filepath.Join(dir, "model-cache")
-	if err = os.Mkdir(cache, 0700); err != nil {
-		t.Fatal(err)
-	}
-	large := filepath.Join(cache, "large-model")
-	f, err := os.Create(large)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = f.Truncate(8 << 30); err != nil {
-		t.Fatal(err)
-	}
-	if err = f.Close(); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(dir, "venv")
-	if err = os.Symlink(cache, link); err != nil {
-		t.Fatal(err)
-	}
-	o.Apply = true
-	m, err := ConvertHostControl(o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m.Intent.Desired != "closed" {
-		t.Fatal("clean conversion must close")
-	}
-	for _, src := range m.Sources {
-		if strings.Contains(src.Path, "model-cache") || src.Path == link {
-			t.Fatal("cache was copied", src.Path)
-		}
-	}
-	if st, err := os.Stat(large); err != nil || st.Size() != 8<<30 {
-		t.Fatal("cache changed", err)
-	}
-	if target, err := os.Readlink(link); err != nil || target != cache {
-		t.Fatal("symlink changed", err)
-	}
-	if !slices.Contains(m.Pointers, link) || !slices.Contains(m.Pointers, cache) {
-		t.Fatal("preserved cache pointers missing")
-	}
-	o = oldHostFixture(t)
-	workers, err = HostWorkers(o.Dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Preserve the fixture's original spool, then point a stale registry at a missing directory.
-	workers[0].State = filepath.Join(t.TempDir(), "missing")
-	if err = saveWorkerJSON(o.Dir, "worker-a.json", workers[0]); err != nil {
-		t.Fatal(err)
-	}
-	o.Apply = true
-	m, err = ConvertHostControl(o)
-	if err != nil || !slices.Contains(m.Intent.Holds, "missing_worker_spool") {
-		t.Fatal(m.Intent.Holds, err)
-	}
-}
-
-func TestHostConversionHistoricalFlagsNotHolds(t *testing.T) {
-	o := oldHostFixture(t)
-	trash := filepath.Join(o.Dir, ".Trash")
-	if err := os.Mkdir(trash, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(trash, "old-DISABLED"), []byte(`{"generation":61}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	m, err := ConvertHostControl(o)
-	if err != nil || m.Intent.Revision != 62 || slices.Contains(m.Intent.Holds, "disabled_flag") {
-		t.Fatal(m.Intent.Holds, err)
 	}
 }
 
@@ -322,83 +240,5 @@ func TestHostRevisionBenchmarkCommandCustody(t *testing.T) {
 				t.Fatal("stale benchmark command admitted", err)
 			}
 		})
-	}
-}
-
-func TestHostConversionForgottenQueueCountersRequireMapping(t *testing.T) {
-	o := oldHostFixture(t)
-	if err := os.WriteFile(filepath.Join(o.Dir, "forgotten-queues.json"), []byte(`{"generation":40,"queues":{"http://forgotten":45}}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	m, err := ConvertHostControl(o)
-	if err == nil || !slices.Contains(m.Conflicts, "forgotten_queue_database_mapping_missing") {
-		t.Fatal("forgotten queue silently waived", m.Conflicts, err)
-	}
-	path := filepath.Join(t.TempDir(), "forgotten.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Exec(`CREATE TABLE queue(id INTEGER PRIMARY KEY,data BLOB NOT NULL); INSERT INTO queue VALUES(1,'{"jobs":{},"machines":{},"host_controls":{"test-host":{"generation":91,"enabled":true,"cleared":true}}}')`)
-	err = errors.Join(err, db.Close())
-	if err != nil {
-		t.Fatal(err)
-	}
-	o.QueueDatabases["http://forgotten"] = path
-	o.Apply = true
-	m, err = ConvertHostControl(o)
-	if err != nil || m.Intent.Revision != 92 {
-		t.Fatal("forgotten queue counter omitted", m.Intent.Revision, err)
-	}
-}
-
-func TestHostConversionSavedReleaseHostAndForeignEngine(t *testing.T) {
-	o := oldHostFixture(t)
-	db, err := sql.Open("sqlite", o.QueueDatabases["http://offline"])
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Exec(`UPDATE queue SET data='{"jobs":{},"machines":{"card-a":{"id":"card-a","host_id":"other-host"}},"host_releases":{"r":{"Host":"test-host","Job":"job","Machine":"card-a","Session":"old-session","Attempt":2}},"model_slots":{"s":{"machine":"card-a","session":"old-session","model":"model","attempt":"engine-attempt","state":"ready"}}}'`)
-	err = errors.Join(err, db.Close())
-	if err != nil {
-		t.Fatal(err)
-	}
-	o.Apply = true
-	m, err := ConvertHostControl(o)
-	if err != nil || m.Pending != 1 || !slices.Contains(m.Intent.Holds, "stale_release_machine_mapping") || !slices.Contains(m.Intent.Holds, "foreign_engine_machine_mapping") {
-		t.Fatal(m.Intent.Holds, m.Pending, err)
-	}
-	if m.Intent.Pending[0].Result.ID != "job" || m.Intent.Pending[0].Result.Attempt != 2 {
-		t.Fatal("saved exact release lost")
-	}
-}
-
-func TestHostConversionBudgetAndHistoricalManifest(t *testing.T) {
-	o := oldHostFixture(t)
-	if err := os.WriteFile(filepath.Join(o.Dir, "host-memory-budget.json"), []byte(`{"gib":16,"generation":72}`), 0640); err != nil {
-		t.Fatal(err)
-	}
-	trash := filepath.Join(o.Dir, ".Trash")
-	if err := os.Mkdir(trash, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(trash, "old-disable-receipt.json"), []byte(`{"generation":71,"workers":[]}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	m, err := ConvertHostControl(o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m.Intent.Revision != 73 || len(m.Intent.Holds) != 0 {
-		t.Fatal(m.Intent.Revision, m.Intent.Holds)
-	}
-	found := false
-	for _, src := range m.Sources {
-		if strings.Contains(src.Path, ".Trash") {
-			found = src.Historical
-		}
-	}
-	if !found {
-		t.Fatal("archive not marked historical")
 	}
 }
