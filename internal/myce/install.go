@@ -178,6 +178,8 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
+	ProductionInfrastructureRetries int `json:"production_infrastructure_retries"`
+
 	Version               int            `json:"version"`
 	RequiredWorkers       []string       `json:"required_workers"`
 	DockerEndpoint        string         `json:"docker_endpoint"`
@@ -292,6 +294,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.Heartbeat = time.Second
 	c.LogRetention = DefaultLogRetention
 	c.RestartGrace = RestartGrace
+	c.ProductionInfrastructureRetries = DefaultProductionInfrastructureRetries
 	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = ProductionLossAfter, DeadlineLossAfter, LossAfter
 	c.UploadSpoolDir = filepath.Join(c.State, "uploads")
 	c.UploadSpoolBytes = DefaultUploadSpoolBytes
@@ -557,7 +560,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 }
 
 func ReadServiceConfig(path string) (ServiceConfig, error) {
-	var c ServiceConfig
+	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries}
 	b, e := os.ReadFile(path)
 	if e != nil {
 		return c, e
@@ -804,7 +807,7 @@ func (c ServiceConfig) Args() []string {
 				args = append(args, v[0], v[1])
 			}
 		}
-		args = append(args, "--upload-spool-bytes", strconv.FormatInt(c.UploadSpoolBytes, 10), "--restart-grace", c.RestartGrace.String(), "--production-loss-timeout", c.ProductionLossTimeout.String(), "--deadline-loss-timeout", c.DeadlineLossTimeout.String(), "--experiment-loss-timeout", c.ExperimentLossTimeout.String())
+		args = append(args, "--upload-spool-bytes", strconv.FormatInt(c.UploadSpoolBytes, 10), "--restart-grace", c.RestartGrace.String(), "--production-infrastructure-retries", strconv.Itoa(c.ProductionInfrastructureRetries), "--production-loss-timeout", c.ProductionLossTimeout.String(), "--deadline-loss-timeout", c.DeadlineLossTimeout.String(), "--experiment-loss-timeout", c.ExperimentLossTimeout.String())
 	}
 	if c.Role == "worker" {
 		if c.JoiningFile != "" {

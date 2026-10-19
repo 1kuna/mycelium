@@ -181,6 +181,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	memorySwap := f.Int64("memory-swap-max-bytes", 0, "swap allowance per memory ceiling in bytes")
 	hostReserve := f.Float64("reserve-host-memory-gb", 4, "host RAM reserve in GiB (unified uses the larger GPU/host reserve once)")
 	reserve := f.Float64("reserve-memory-gb", 0, "GPU memory to keep outside Mycelium")
+	productionRetries := f.Int("production-infrastructure-retries", myce.DefaultProductionInfrastructureRetries, "maximum infrastructure requeues per production job")
 	productionLoss := f.Duration("production-loss-timeout", myce.ProductionLossAfter, "quiet timeout for production work")
 	deadlineLoss := f.Duration("deadline-loss-timeout", myce.DeadlineLossAfter, "quiet timeout for deadline work")
 	experimentLoss := f.Duration("experiment-loss-timeout", myce.LossAfter, "quiet timeout for experiment work")
@@ -310,7 +311,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostStateDir: *hostStateDir, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostStateDir: *hostStateDir, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -389,6 +390,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if e = q.ConfigureProjects(policies); e != nil {
 				return e
 			}
+		}
+		if err = q.SetProductionInfrastructureRetries(*productionRetries); err != nil {
+			return err
 		}
 		q.SetRestartGrace(*restartGrace)
 		if err = q.SetProductionGrace(*productionGrace); err != nil {

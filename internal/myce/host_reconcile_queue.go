@@ -271,12 +271,6 @@ func (q *Queue) reconcileHost(c HostExchange) (HostAcknowledgement, error) {
 			if cancelled(j) {
 				j.State = "cancelled"
 				j.StopAt = nil
-			} else if j.Spec.Priority == "production" {
-				j.State = "failed"
-				j.Reason = "host closed"
-				j.StopAt = nil
-				now := q.clock.Now()
-				j.FinishedAt = &now
 			} else {
 				q.retry(j, "requeued: host closed")
 				j.RequeuedByOperator = true

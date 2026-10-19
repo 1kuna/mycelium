@@ -541,7 +541,7 @@ func TestHostReconcileProductionResultAndDischargeAgree(t *testing.T) {
 				}
 			}
 			got := job(t, q, j.ID)
-			if got.State != "failed" || got.Reason != "host closed" || got.FinishedAt == nil || !got.FinishedAt.Equal(clock.Now()) || got.Losses != 0 {
+			if got.State != "queued" || got.InfrastructureRetries != 1 || got.FinishedAt != nil || got.Losses != 0 {
 				t.Fatal(got)
 			}
 		})

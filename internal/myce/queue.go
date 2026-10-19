@@ -64,6 +64,8 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	productionInfrastructureRetries int
+
 	localHostID            string
 	localHostErr           error
 	localHostDir           string
@@ -141,7 +143,7 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	q := &Queue{logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
 		db.Close()
 		return nil, err
@@ -189,6 +191,20 @@ func (q *Queue) SetRestartGrace(d time.Duration) {
 	if len(q.unreported) > 0 {
 		q.restartUntil = q.clock.Now().Add(d)
 	}
+}
+
+const DefaultProductionInfrastructureRetries = 2
+
+// SetProductionInfrastructureRetries bounds infrastructure requeues per production job.
+// Zero disables retries; stage failures never use this budget.
+func (q *Queue) SetProductionInfrastructureRetries(n int) error {
+	if n < 0 {
+		return errors.New("production infrastructure retries must be nonnegative")
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.productionInfrastructureRetries = n
+	return nil
 }
 
 // SetLossTimeouts sets the quiet-worker thresholds by workload priority.
@@ -445,12 +461,28 @@ func (q *Queue) retry(j *Job, why string) {
 		}
 		return
 	}
+	if j.Spec.Priority == "production" {
+		// Fence every old copy, including a lost copy that later reports newer progress.
+		for i := range j.Copies {
+			j.Copies[i].Recoverable = false
+		}
+		if j.InfrastructureRetries >= q.productionInfrastructureRetries {
+			j.State, j.Reason = "failed", "infrastructure_retries_exhausted"
+			j.StopAt = nil
+			now := q.clock.Now()
+			j.FinishedAt = &now
+			return
+		}
+		q.renewRecoveryStartWindow(j)
+		j.InfrastructureRetries++
+	}
 	j.Machine = ""
 	j.Session = ""
 	j.StopAt = nil
 	j.StartedAt = nil
+	j.FinishedAt = nil
 	j.Reason = why
-	if j.Losses >= 3 {
+	if j.Spec.Priority != "production" && j.Losses >= 3 {
 		j.State = "failed"
 		j.Reason = "failed after 3 infrastructure losses: " + why
 		return
@@ -528,7 +560,6 @@ func (q *Queue) maintain() {
 							j.Losses++
 							q.chargeLoss(j)
 						}
-						q.renewRecoveryStartWindow(j)
 						q.retry(j, fmt.Sprintf("machine quiet for %s", q.machineLossTimeout(m.ID)))
 					}
 				}
@@ -681,7 +712,6 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 						j.Losses++
 						q.chargeLoss(j)
 					}
-					q.renewRecoveryStartWindow(j)
 					q.retry(j, "worker restarted after cleaning old processes")
 				}
 			}
@@ -931,7 +961,8 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		}
 		ctx = verificationCtx
 	}
-	return q.updateMachine(r.Machine, func() error {
+	var rejected error
+	err = q.updateMachine(r.Machine, func() error {
 		if verify {
 			q.maintainStartDeadlines()
 			j, err := q.current(r)
@@ -944,8 +975,18 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 				return err
 			}
 		}
+		// Release-only evidence still settles custody. A superseded production result
+		// is rejected after committing that settlement, without publishing its payload.
+		if j := q.s.Jobs[r.ID]; j != nil && j.Spec.Priority == "production" && !r.ReleaseOnly &&
+			(j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session || j.State == "queued") {
+			rejected = ErrStale
+		}
 		return q.complete(r, verify)
 	})
+	if err != nil {
+		return err
+	}
+	return rejected
 }
 func (q *Queue) complete(r Result, outputsVerified bool) error {
 	q.maintainStartDeadlines()
@@ -1028,7 +1069,8 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 	// A kernel OOM is the payload's failure even if preemption raced it.
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
-	if cancelled(j) || j.State == "stopping" && !oomFailure {
+	stageFailure := j.Spec.Priority == "production" && !r.Success && !r.Interrupted
+	if cancelled(j) || j.State == "stopping" && !oomFailure && !stageFailure {
 		if j.StopAt != nil && q.clock.Now().Before(*j.StopAt) {
 			if q.s.BatchReleases == nil {
 				q.s.BatchReleases = map[string]batchRelease{}
@@ -1038,13 +1080,11 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		if cancelled(j) {
 			j.State = "cancelled"
 			j.StopAt = nil
-		} else if j.Spec.Priority == "production" && q.hostClosedReason(q.executionHost(j.Machine)) != "" {
-			j.State = "failed"
-			j.Reason = "host closed"
-			j.StopAt = nil
 		} else {
 			q.retry(j, j.Reason)
 		}
+	} else if j.Spec.Priority == "production" && (stageFailure || oomFailure) {
+		j.State, j.Reason = "failed", "command failed: "+r.Error
 	} else if oomFailure && j.Spec.extensionJob() {
 		q.retryOOM(j)
 	} else if r.ExtensionUnavailable && j.Spec.extensionJob() && j.StartedAt == nil && j.Extension != nil {
@@ -1066,7 +1106,6 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 	} else if r.Interrupted {
 		j.Losses++
 		q.chargeLoss(j)
-		q.renewRecoveryStartWindow(j)
 		q.retry(j, "worker restarted after cleaning old processes")
 	} else if r.Success {
 		if j.FileTransport {
@@ -1474,7 +1513,10 @@ func (q *Queue) Started(r Result) error {
 }
 
 func (q *Queue) renewRecoveryStartWindow(j *Job) {
-	if j.Spec.Priority == "production" && j.State == "running" && j.StartedAt != nil && j.Spec.StartBy != nil {
+	// Planned leave keeps its original start deadline. A confirmed host close
+	// interrupts even an undelivered completed attempt and needs a recovery window.
+	recovering := j.State == "running" || j.State == "stopping" && q.hostClosedReason(q.executionHost(j.Machine)) != ""
+	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil {
 		// Recovery is bounded from loss detection, using the original first-start window.
 		if j.StartWindow == 0 {
 			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)

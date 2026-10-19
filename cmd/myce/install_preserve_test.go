@@ -131,7 +131,7 @@ func TestInstallPreservesEveryConfigField(t *testing.T) {
 
 func TestInstallExplicitZeroFalse(t *testing.T) {
 	c, p := savedInstallFixture(t)
-	args := []string{"install", "queue", "--config", c.Config, "--nice=0", "--restart-grace=0", "--reserve-host-memory-gb=0", "--memory-ceiling-slack-gb=0", "--memory-swap-max-bytes=0", "--no-new-privileges=false"}
+	args := []string{"install", "queue", "--config", c.Config, "--nice=0", "--restart-grace=0", "--production-infrastructure-retries=0", "--reserve-host-memory-gb=0", "--memory-ceiling-slack-gb=0", "--memory-swap-max-bytes=0", "--no-new-privileges=false"}
 	if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestInstallExplicitZeroFalse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Nice != 0 || got.RestartGrace != 0 || got.ReserveHostMemoryGB != 0 || got.MemoryCeilingSlackGB != 0 || got.MemorySwapMaxBytes != 0 || got.NoNewPrivileges {
+	if got.Nice != 0 || got.RestartGrace != 0 || got.ProductionInfrastructureRetries != 0 || got.ReserveHostMemoryGB != 0 || got.MemoryCeilingSlackGB != 0 || got.MemorySwapMaxBytes != 0 || got.NoNewPrivileges {
 		t.Fatal("explicit zero/false was ignored")
 	}
 	if got.DB != c.DB || got.Path != c.Path || got.ModelCache != c.ModelCache {

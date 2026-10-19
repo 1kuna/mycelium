@@ -62,8 +62,14 @@ save checkpoints frequently.
 
 States are `queued`, `running`, `stopping`, `succeeded`, `failed`, and `cancelled`. Status
 includes a reason for waiting or failure. A command's own nonzero exit fails
-immediately. Non-resumable work fails after three infrastructure losses;
-planned pauses do not consume that limit. Resumable work restarts from the latest
+immediately. Production infrastructure interruptions requeue at most twice by
+default, then fail with `infrastructure_retries_exhausted`;
+`queue --production-infrastructure-retries` configures the nonnegative limit.
+The durable optional `infrastructure_retries` job/status field counts requeues used
+(omitted at zero). Worker/queue recovery, host close/release, leave and reboot
+share that budget; release acknowledgements do not refund it. Production OOMs
+and job-caused command/container failures fail without retry. Experiments and
+deadline work keep the three-loss limit; their planned pauses do not consume it. Resumable work restarts from the latest
 complete checkpoint. An attempt is an execution identity, not a retry budget.
 Logs and results are accepted only for the current execution identity.
 
@@ -117,6 +123,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --db` | `myce.db` | Durable local SQLite file; one queue owner |
 | `queue --checkpoints` | `./checkpoints` | Shared root; create on mounted NAS first |
 | `queue --restart-grace` | `3m` | Worker reconciliation after queue restart |
+| `queue --production-infrastructure-retries` | `2` | Maximum production infrastructure requeues (zero disables) |
 | `queue --production-loss-timeout` | `5s` | Production loss detection |
 | `queue --deadline-loss-timeout` | `20s` | Deadline loss detection |
 | `queue --experiment-loss-timeout` | `60s` | Experiment loss detection |
@@ -330,14 +337,16 @@ loss time plus the original `start_by` minus submission time. That original wind
 length is durable and does not grow across repeated losses. Brief outages can
 resume; a recovery attempt that does not start within its window fails with
 `production start deadline exceeded: <blocker>` so the caller can run fallback.
-Planned stops are not production loss recovery and do not renew this budget.
+Production host close/release uses the same bounded recovery window. Planned
+leave keeps its original start deadline; both use the infrastructure retry budget.
 `start_by` covers production **batch jobs only**. Model HTTP calls rely on their
 own request timeouts and the separate `max_wait` contract; they do not honor
 `start_by`. Models loaded inside a batch command are outside its start hand-off.
 
 Status, the status page and the job record show the blocker and seconds left.
-Queued production fails immediately when every known eligible host is disabled
-by the operator. Unknown inventory may still join within the deadline. Pending stops,
+New queued production fails immediately when every known eligible host is disabled
+by the operator. An interrupted production job may wait for reopening until its
+recovery start window expires. Unknown inventory may still join within the deadline. Pending stops,
 unconfirmed Docker cleanup, worker recovery, environment preparation and capacity
 can all exhaust the budget. At `now >= start_by`, an unstarted job fails with
 `production start deadline exceeded: <blocker>`; a past deadline fails on submit

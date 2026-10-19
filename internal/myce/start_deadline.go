@@ -62,7 +62,7 @@ func (q *Queue) maintainStartDeadlines() {
 		if !startupPending(j) {
 			continue
 		}
-		disabled := j.State == "queued" && q.allStartHostsDisabled(j)
+		disabled := j.State == "queued" && j.InfrastructureRetries == 0 && q.allStartHostsDisabled(j)
 		if !expired(j.Spec.StartBy, now) && !disabled {
 			continue
 		}
