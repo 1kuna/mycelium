@@ -9,7 +9,7 @@ import (
 // Every host work kind crosses the same maintenance and wait boundary. Sidecars
 // share their parent execution's exact release, including pending Docker creates.
 func TestMaintenanceEveryWorkKind(t *testing.T) {
-	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "engine-failed-pinned", "environment-build", "environment-plan-pending", "preparation", "benchmark", "sidecar"} {
+	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "engine-failed-pinned", "environment-build", "environment-plan-pending", "preparation", "benchmark", "sidecar", "native-sidecar"} {
 		for _, action := range []struct {
 			name, action string
 			stop         bool
@@ -41,7 +41,7 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 					if err := q.AuthorizeLaunch(*benchmark); err != nil {
 						t.Fatal(err)
 					}
-				case "batch-production", "batch-experiment", "sidecar":
+				case "batch-production", "batch-experiment", "sidecar", "native-sidecar":
 					priority := "experiment"
 					if kind == "batch-production" {
 						priority = "production"
@@ -53,6 +53,9 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 						m.CapabilityProfile.OS = "linux"
 						s = dockerGroupJob(t).Spec
 						s.Priority = priority
+					}
+					if kind == "native-sidecar" {
+						s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"helper"}, MemoryGB: 1}}
 					}
 					submit(t, q, s)
 					batch = check(t, q, m, nil).Job

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -246,6 +247,7 @@ func TestCompositionEnvironmentSnapshotsAndBackend(t *testing.T) {
 func TestCompositionSidecarSeamAndCallerFences(t *testing.T) {
 	zero := 0
 	execution := ExecutionSpec{Main: ExecutionMember{Command: []string{"main"}, Env: map[string]string{"HELPER_URL": "{sidecars.helper.url}"}}, Sidecars: []NativeSidecar{{Name: "helper", Command: []string{"server", "{port}"}, MemoryGB: 1, Port: &zero, Readiness: &NativeReadiness{Path: "/health", Timeout: "150s"}}}}
+	execution.Sidecars[0].Env = map[string]string{"EXTENSION_DIR": "{extension}"}
 	if err := execution.validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -265,13 +267,22 @@ func TestCompositionSidecarSeamAndCallerFences(t *testing.T) {
 	s := spec("experiment")
 	s.Run = RunSpec{}
 	s.Execution = &execution
-	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "D4") {
-		t.Fatal("unimplemented group admitted", err)
+	s.Needs.HostMemoryGB = 2
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	lowered := s
+	if err := lowerExecution(&lowered); err != nil {
+		t.Fatal(err)
+	}
+	expandNativeExtension(&lowered, map[string]string{"MYCE_EXTENSION_DIR": "expanded"})
+	if execution.Sidecars[0].Env["EXTENSION_DIR"] != "{extension}" {
+		t.Fatal("lowering mutated frozen member env")
 	}
 	s.Execution = nil
 	s.Run = RunSpec{Command: []string{"main"}, Sidecars: execution.Sidecars}
-	if s.Validate() == nil {
-		t.Fatal("run.sidecars bypass")
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
 	}
 	s = Spec{Name: "x", Project: "test", Extension: "sample"}
 	for _, field := range []string{"env", "execution", "digest"} {
@@ -300,6 +311,13 @@ func TestCompositionEnvironmentWorkerEndToEnd(t *testing.T) {
 	e.Files["run.sh"] = append([]byte(`test "$(command -v python)" = "$VIRTUAL_ENV/bin/python" || exit 96
 `), e.Files["run.sh"]...)
 	e.Variants[0].Execution.Main.Command[0] = "python"
+	nativeDir := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero := 0
+	e.Variants[0].Execution.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{executable, "-test.run=^TestNativeCPUHelper$"}, Environment: "main", Port: &zero, Readiness: &NativeReadiness{Path: "/ready", Timeout: "5s"}, MemoryGB: .05, Env: map[string]string{"NATIVE_TEST_MODE": "side", "NATIVE_TEST_DIR": nativeDir, "GORACE": "atexit_sleep_ms=0", "HELPER_ROOT": "{env.main.root}"}}}
 	e = freezeComposition(t, e)
 	root := t.TempDir()
 	if err := InstallExtension(root, e); err != nil {
@@ -379,6 +397,23 @@ func TestCompositionEnvironmentWorkerEndToEnd(t *testing.T) {
 	if err != nil || string(data) != "existing-project-result\n" {
 		t.Fatal("existing program output changed", string(data), err)
 	}
+	helperEnv := nativeEnv(t, nativeDir, "side")
+	if helperEnv["HELPER_ROOT"] != helperEnv["MYCE_ENVIRONMENT_DIR"] || helperEnv["MYCE_TOKEN"] != "" {
+		t.Fatal("extension helper environment mismatch")
+	}
+	attempts, err := filepath.Glob(filepath.Join(w.StateDir, "attempt-*.json"))
+	if err != nil || len(attempts) != 1 {
+		t.Fatal("missing group custody", attempts, err)
+	}
+	record, err := os.ReadFile(attempts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state workerState
+	if err := json.Unmarshal(record, &state); err != nil {
+		t.Fatal(err)
+	}
+	nativeNoSurvivors(t, &nativeTestRun{p: &process{cmd: &exec.Cmd{Process: &os.Process{Pid: state.PID}}}, dir: nativeDir})
 }
 
 func TestCompositionRegistrationOwnsBytes(t *testing.T) {

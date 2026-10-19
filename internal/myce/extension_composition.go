@@ -200,8 +200,8 @@ func (e Extension) targetUnavailableReason(t ExecutionTarget) string {
 	if v == nil {
 		return fmt.Sprintf("no variant matches this host's OS/arch/backend: missing target %s/%s/%s", t.OS, t.Arch, t.Platform)
 	}
-	if len(v.Execution.Sidecars) > 0 || v.Execution.Main.MemoryGB > 0 {
-		return "native sidecars and member RAM caps require D4"
+	if v.Execution.Main.MemoryGB > 0 {
+		return "main member RAM caps require D5"
 	}
 	return ""
 }
@@ -209,7 +209,7 @@ func (e Extension) forMachine(m *Machine) (Extension, bool) {
 	if len(e.Variants) == 0 {
 		return e, true
 	}
-	// D4 owns group lifecycle, so E1 never admits a group it cannot contain.
+	// Refuse targets whose requested member caps are not yet enforceable.
 	if e.targetUnavailableReason(machineTarget(m)) != "" {
 		return e, false
 	}

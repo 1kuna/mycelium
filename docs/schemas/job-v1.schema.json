@@ -788,6 +788,22 @@
           "type": "string",
           "x-contract": "stable"
         },
+        "sidecar_environment_recipes": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/$defs/EnvironmentRecipe"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "spec": {
           "$ref": "#/$defs/Spec",
           "x-contract": "stable"

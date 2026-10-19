@@ -233,6 +233,17 @@ func (a *memoryAttempt) failure() error {
 
 // Kill the entire attempt subtree, including descendants that changed sessions.
 func (a *memoryAttempt) cleanup(clock Clock) error {
+	if err := a.stop(clock); err != nil {
+		return err
+	}
+	if a == nil {
+		return nil
+	}
+	return a.fs.Remove(a.path)
+}
+
+// Stop and verify the subtree while retaining its reservation for a group retry.
+func (a *memoryAttempt) stop(clock Clock) error {
 	if a == nil {
 		return nil
 	}
@@ -258,7 +269,7 @@ func (a *memoryAttempt) cleanup(clock Clock) error {
 			}
 		}
 		if empty {
-			return a.fs.Remove(a.path)
+			return nil
 		}
 		if !clock.Now().Before(deadline) {
 			return errors.New("memory attempt cgroup release unconfirmed")

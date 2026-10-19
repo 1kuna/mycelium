@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -46,7 +47,8 @@ type ExecutionMember struct {
 	MemoryGB    float64           `json:"memory_gb,omitempty" yaml:"memory_gb,omitempty"`
 }
 
-// NativeSidecar reserves D4's main-plus-members shape. E1 cannot launch groups.
+// NativeSidecar is an attempt-owned native helper. MemoryGB is admission-only;
+// child cgroup enforcement belongs to the memory-controller adapter.
 // Port nil is a plain helper; zero requests an allocated loopback port.
 type NativeSidecar struct {
 	Name        string            `json:"name" yaml:"name"`
@@ -71,16 +73,19 @@ func (e ExecutionSpec) validate() error {
 	}
 	names := map[string]bool{}
 	for _, s := range e.Sidecars {
-		normalized := strings.ToUpper(strings.ReplaceAll(s.Name, "-", "_"))
-		if !extensionName.MatchString(s.Name) || names[normalized] || len(s.Command) == 0 || s.Command[0] == "" || !validMemoryValue(s.MemoryGB) || s.MemoryGB == 0 {
+		normalized := strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(s.Name))
+		if s.Name == "main" || !extensionName.MatchString(s.Name) || names[normalized] || len(s.Command) == 0 || s.Command[0] == "" || !validMemoryValue(s.MemoryGB) || s.MemoryGB == 0 {
 			return errors.New("sidecars require unique names, commands and positive finite RAM caps")
 		}
 		names[normalized] = true
 		if s.Port != nil && (*s.Port < 0 || *s.Port > 65535) {
 			return errors.New("invalid sidecar port")
 		}
-		if s.Readiness != nil && (s.Port == nil || !strings.HasPrefix(s.Readiness.Path, "/") || strings.HasPrefix(s.Readiness.Path, "//") || !positiveDuration(s.Readiness.Timeout)) {
-			return errors.New("readiness requires a local port, absolute path and positive timeout")
+		if s.Readiness != nil {
+			path, err := url.ParseRequestURI(s.Readiness.Path)
+			if err != nil || path.Host != "" || path.Scheme != "" || s.Port == nil || !strings.HasPrefix(s.Readiness.Path, "/") || strings.HasPrefix(s.Readiness.Path, "//") || !positiveDuration(s.Readiness.Timeout) {
+				return errors.New("readiness requires a local port, absolute path and positive timeout")
+			}
 		}
 		if err := validateMemberEnv(s.Env); err != nil {
 			return err
@@ -101,7 +106,13 @@ func validateMemberEnv(env map[string]string) error {
 func lowerExecution(s *Spec) error {
 	if s.Execution == nil {
 		if len(s.Run.Sidecars) > 0 {
-			return errors.New("native sidecars require D4")
+			if s.Run.Docker {
+				return errors.New("native sidecars cannot use Docker")
+			}
+			if err := (ExecutionSpec{Main: ExecutionMember{Command: s.Run.Command, Env: s.Run.Env}, Sidecars: s.Run.Sidecars}).validate(); err != nil {
+				return err
+			}
+			return validateNativeMemory(s)
 		}
 		return nil
 	}
@@ -112,8 +123,11 @@ func lowerExecution(s *Spec) error {
 	if err := e.validate(); err != nil {
 		return err
 	}
-	if len(e.Sidecars) > 0 || e.Main.MemoryGB > 0 {
-		return errors.New("native sidecars and member RAM caps require D4")
+	if e.Main.MemoryGB > 0 {
+		return errors.New("main member RAM caps require D5")
+	}
+	if err := validateNativeMemory(s); err != nil {
+		return err
 	}
 	if e.Main.Environment != "" {
 		if s.Environment.Key() != "" {
@@ -121,7 +135,10 @@ func lowerExecution(s *Spec) error {
 		}
 		s.Environment = Environment{Name: e.Main.Environment}
 	}
-	s.Run = RunSpec{Command: slices.Clone(e.Main.Command), Workdir: e.Main.Workdir, Env: maps.Clone(e.Main.Env)}
+	s.Run = RunSpec{Command: slices.Clone(e.Main.Command), Workdir: e.Main.Workdir, Env: maps.Clone(e.Main.Env), Sidecars: slices.Clone(e.Sidecars)}
+	for i := range s.Run.Sidecars {
+		s.Run.Sidecars[i].Env = maps.Clone(s.Run.Sidecars[i].Env)
+	}
 	s.Execution = nil
 	return nil
 }
@@ -154,9 +171,33 @@ func expandExecution(s *Spec, work, root string, target ExecutionTarget) {
 	for k, v := range s.Run.Env {
 		s.Run.Env[k] = r.Replace(v)
 	}
+	wr := strings.NewReplacer("{work}", work)
+	for i := range s.Run.Sidecars {
+		side := &s.Run.Sidecars[i]
+		side.Command = expandArgs(side.Command, wr)
+		side.Env = maps.Clone(side.Env)
+		for k, v := range side.Env {
+			side.Env[k] = wr.Replace(v)
+		}
+	}
 }
 func bindEnvironment(env map[string]string, root string) {
 	env["PATH"] = filepath.Join(root, "venv", "bin") + string(os.PathListSeparator) + filepath.Join(root, "bin") + string(os.PathListSeparator) + env["PATH"]
 	env["VIRTUAL_ENV"] = filepath.Join(root, "venv")
 	env["MYCE_ENVIRONMENT_DIR"] = root
+}
+
+// Member ceilings fit the whole simultaneous host envelope; they are not extra
+// reservations or a sum of independent peaks. D5 enforces these child ceilings.
+func validateNativeMemory(s *Spec) error {
+	members := s.Run.Sidecars
+	if s.Execution != nil {
+		members = s.Execution.Sidecars
+	}
+	for _, m := range members {
+		if m.MemoryGB > s.Needs.HostMemoryGB {
+			return errors.New("sidecar RAM exceeds whole-job host memory reservation")
+		}
+	}
+	return nil
 }
