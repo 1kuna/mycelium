@@ -271,6 +271,15 @@ func TestHostMemoryAllowanceDevSwitches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// S5 owns the effective allowance in the queue. Configure it while the
+	// local fence is closed, then resume queue admission so the assertions below
+	// still prove that local close alone prevents execution across every cycle.
+	if err := client.Call(workCtx, "POST", "/api/hosts/dev-host/maintenance", HostMaintenanceRequest{Action: "drain", MemoryBudgetGB: &configured.GiB}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Call(workCtx, "POST", "/api/hosts/dev-host/maintenance", HostMaintenanceRequest{Action: "resume"}, nil); err != nil {
+		t.Fatal(err)
+	}
 	for cycle := 0; cycle < 3; cycle++ {
 		effect := filepath.Join(root, "effect-"+string(rune('a'+cycle)))
 		s := spec("experiment")
