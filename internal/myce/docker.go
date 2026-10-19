@@ -93,35 +93,37 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
-	HostRevision      HostRevision            `json:"host_revision"`
-	LogsNone          bool                    `json:"logs_none,omitempty"`
-	Owner             *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
-	EvidenceSaved     bool                    `json:"evidence_saved,omitempty"`
-	NetworkID         string                  `json:"network_id,omitempty"`
-	NetworkRemoved    bool                    `json:"network_removed,omitempty"`
-	Network           string                  `json:"network,omitempty"`
-	Containers        map[string]dockerMember `json:"containers,omitempty"`
-	PendingContainer  string                  `json:"pending_container,omitempty"`
-	PendingName       string                  `json:"pending_name,omitempty"`
-	MainFinished      bool                    `json:"main_finished,omitempty"`
-	Failure           string                  `json:"failure,omitempty"`
-	MemoryLimitBytes  int64                   `json:"memory_limit_bytes,omitempty"`
-	MemorySwapBytes   int64                   `json:"memory_swap_bytes,omitempty"`
-	MemoryFailure     string                  `json:"memory_failure,omitempty"`
-	OOMKilled         bool                    `json:"oom_killed,omitempty"`
-	Identity          string                  `json:"identity"`
-	Endpoint          string                  `json:"endpoint"`
-	Container         string                  `json:"container,omitempty"`
-	DispatchedAt      *time.Time              `json:"dispatched_at,omitempty"`
-	Operation         string                  `json:"operation,omitempty"`
-	Pending           bool                    `json:"pending,omitempty"`
-	Stopped           bool                    `json:"stopped,omitempty"`
-	Forced            bool                    `json:"forced,omitempty"`
-	StopAt            *time.Time              `json:"stop_at,omitempty"`
-	OperatorConfirmed bool                    `json:"operator_confirmed,omitempty"`
-	Released          bool                    `json:"released,omitempty"`
-	Error             string                  `json:"error,omitempty"`
-	ExitCode          int                     `json:"exit_code"`
+	HostRevision       HostRevision            `json:"host_revision"`
+	LogsNone           bool                    `json:"logs_none,omitempty"`
+	Owner              *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
+	EvidenceSaved      bool                    `json:"evidence_saved,omitempty"`
+	NetworkID          string                  `json:"network_id,omitempty"`
+	NetworkRemoved     bool                    `json:"network_removed,omitempty"`
+	Network            string                  `json:"network,omitempty"`
+	Containers         map[string]dockerMember `json:"containers,omitempty"`
+	PendingContainer   string                  `json:"pending_container,omitempty"`
+	PendingName        string                  `json:"pending_name,omitempty"`
+	MainFinished       bool                    `json:"main_finished,omitempty"`
+	InfrastructureStop bool                    `json:"infrastructure_stop,omitempty"`
+	AmbiguousKill      bool                    `json:"ambiguous_kill,omitempty"`
+	Failure            string                  `json:"failure,omitempty"`
+	MemoryLimitBytes   int64                   `json:"memory_limit_bytes,omitempty"`
+	MemorySwapBytes    int64                   `json:"memory_swap_bytes,omitempty"`
+	MemoryFailure      string                  `json:"memory_failure,omitempty"`
+	OOMKilled          bool                    `json:"oom_killed,omitempty"`
+	Identity           string                  `json:"identity"`
+	Endpoint           string                  `json:"endpoint"`
+	Container          string                  `json:"container,omitempty"`
+	DispatchedAt       *time.Time              `json:"dispatched_at,omitempty"`
+	Operation          string                  `json:"operation,omitempty"`
+	Pending            bool                    `json:"pending,omitempty"`
+	Stopped            bool                    `json:"stopped,omitempty"`
+	Forced             bool                    `json:"forced,omitempty"`
+	StopAt             *time.Time              `json:"stop_at,omitempty"`
+	OperatorConfirmed  bool                    `json:"operator_confirmed,omitempty"`
+	Released           bool                    `json:"released,omitempty"`
+	Error              string                  `json:"error,omitempty"`
+	ExitCode           int                     `json:"exit_code"`
 }
 type dockerAttempt struct {
 	command      func(context.Context, ...string) ([]byte, error) // Injectable daemon boundary.
@@ -185,6 +187,14 @@ func (d *dockerAttempt) status() string {
 func (d *dockerAttempt) stop(now time.Time, grace time.Duration, kill bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if !d.state.Stopped {
+		d.state.InfrastructureStop = true
+	}
+	d.stopLocked(now, grace, kill)
+}
+
+// Cleanup after a launch error is not itself evidence of infrastructure loss.
+func (d *dockerAttempt) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	changed := !d.state.Stopped
 	d.state.Stopped = true
 	deadline := now.Add(grace)
@@ -366,13 +376,19 @@ func inspectOwnedDocker(ctx context.Context, endpoint, identity string, call fun
 
 // Every object is inspected before signaling: names and cidfiles are not ownership proof.
 func (d *dockerAttempt) containers() ([]dockerInspection, error) {
-	return inspectOwnedDocker(d.ctx, d.state.Endpoint, d.state.Identity, func(_ context.Context, _ string, args ...string) ([]byte, error) {
+	containers, err := inspectOwnedDocker(d.ctx, d.state.Endpoint, d.state.Identity, func(_ context.Context, _ string, args ...string) ([]byte, error) {
 		b, err := d.call(args...)
 		if len(args) > 0 && args[0] == "ps" && err == nil && d.inventory != nil {
 			d.inventory(strings.Fields(string(b)))
 		}
 		return b, err
 	})
+	if err != nil && d.clock != nil {
+		// Outcome observation was lost. Retain custody until inventory recovers,
+		// then clean this attempt rather than interpreting recovery exits as work.
+		d.stop(d.clock.Now(), 0, true)
+	}
+	return containers, err
 }
 func (d *dockerAttempt) reconcile() (bool, error) {
 	if d.state.OperatorConfirmed {
@@ -450,6 +466,7 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 			if (c.ID == d.state.PendingContainer || d.state.PendingContainer == "" && c.ID == d.state.Container) && (dockerLive(c) || d.state.DispatchedAt != nil && !c.State.StartedAt.IsZero() && !c.State.StartedAt.Before(*d.state.DispatchedAt)) {
 				d.state.Pending = false
 				d.state.Stopped = true
+				d.state.InfrastructureStop = true
 				d.state.Forced = true
 				d.state.Error = ""
 				if err = d.saveLocked(); err != nil && !killDue {
@@ -859,15 +876,22 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	e := launch()
 	if e != nil {
 		d.mu.Lock()
-		alreadyStopping := d.state.Stopped
-		d.mu.Unlock()
-		if !alreadyStopping {
-			d.stop(d.clock.Now(), 0, true)
+		if !d.state.Stopped {
+			d.stopLocked(d.clock.Now(), 0, true)
 		}
+		d.mu.Unlock()
 	}
 	wake := time.NewTicker(100 * time.Millisecond)
 	defer wake.Stop()
 	for {
+		// Release proof is already durable. Re-observing the intentionally
+		// disconnected containers here would fabricate a containment failure.
+		d.mu.Lock()
+		released := d.state.Released
+		d.mu.Unlock()
+		if released {
+			break
+		}
 		done, cleanupErr := d.reconcile()
 		if cleanupErr != nil {
 			d.mu.Lock()
@@ -929,26 +953,23 @@ func (state dockerExecution) completedMain() bool {
 
 func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 	result := owner
+	infrastructure := state.InfrastructureStop
 	if e != nil {
-		result.Interrupted = e.Error() == "worker restarted; Docker cleanup required" || errors.Is(e, context.DeadlineExceeded)
+		infrastructure = infrastructure || e.Error() == "worker restarted; Docker cleanup required" || errors.Is(e, context.DeadlineExceeded) || errors.Is(e, context.Canceled)
 		result.Error = "Docker launch failed: " + e.Error()
 		if strings.HasPrefix(e.Error(), "Docker memory ceiling not enforced") {
 			result.Error = "Docker memory ceiling not enforced"
 		}
 	}
-	if e == nil {
-		result.Interrupted = (state.Stopped && !state.MainFinished)
-	}
 	result.Forced = state.Forced && !state.MainFinished
-	result.Success = !result.Interrupted && e == nil && state.ExitCode == 0 && state.MemoryFailure == "" && state.Failure == "" && !state.OOMKilled
+	result.Success = e == nil && state.ExitCode == 0
+	if state.MainFinished && state.ExitCode != 0 {
+		result.Error = fmt.Sprintf("Docker main exited with status %d", state.ExitCode)
+	}
 	if state.Failure != "" {
 		result.Error = state.Failure
-		result.Interrupted = false
-		result.Forced = false
 	}
 	if state.MemoryFailure != "" {
-		result.Interrupted = false
-		result.Forced = false
 		result.Error = state.MemoryFailure
 	}
 	if state.OOMKilled {
@@ -956,8 +977,15 @@ func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 		if state.MemoryLimitBytes > 0 {
 			result.Error = fmt.Sprintf("exceeded its %g GiB memory ceiling", float64(state.MemoryLimitBytes)/(1<<30))
 		}
-		result.Interrupted = false
-		result.Forced = false
+	}
+	result = classifyAttemptOutcome(result, attemptCause{
+		Infrastructure: infrastructure,
+		StageFailure:   state.Failure != "" || state.MemoryFailure != "" || state.MainFinished && state.ExitCode != 0 || e != nil && !infrastructure,
+		OutOfMemory:    state.OOMKilled,
+		AmbiguousKill:  state.AmbiguousKill || state.ExitCode == 137,
+	})
+	if result.Interrupted {
+		result.Success = false
 	}
 	return result
 }
@@ -989,7 +1017,14 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	}
 	if state.Released {
 		if s.state.Result == nil {
-			r := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Interrupted: true, Forced: state.Forced, Error: "worker restarted after Docker release"}
+			// Missing final output/result remains an interruption, but durable
+			// stage/OOM evidence cannot be erased by this recovery boundary.
+			state.InfrastructureStop = true
+			r := dockerOutcome(state, Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}}, nil)
+			r.Success = false
+			if r.Interrupted {
+				r.Error = "worker restarted after Docker release"
+			}
 			s.state.Result = &r
 		}
 		return nil, nil

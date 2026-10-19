@@ -196,14 +196,15 @@ func (q *Queue) SetRestartGrace(d time.Duration) {
 const DefaultProductionInfrastructureRetries = 2
 
 // SetProductionInfrastructureRetries bounds infrastructure requeues per production job.
-// Zero disables retries; stage failures never use this budget.
+// Zero disables retries; values above two are clamped to the agreed maximum.
+// Stage failures never use this budget.
 func (q *Queue) SetProductionInfrastructureRetries(n int) error {
 	if n < 0 {
 		return errors.New("production infrastructure retries must be nonnegative")
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.productionInfrastructureRetries = n
+	q.productionInfrastructureRetries = min(n, 2)
 	return nil
 }
 

@@ -186,6 +186,12 @@ func fakeDockerGroupInspect(root string, ids []string, mode string) {
 		}
 		code := 0
 		if !running {
+			if mode == "main-exit-one" && id == "id1" {
+				code = 1
+			}
+			if mode == "main-killed" && id == "id1" || mode == "sidecar-killed" && id == "sidecar-sortformer" {
+				code = 137
+			}
 			if mode == "main-nonzero" && id == "id1" {
 				code = 7
 			}
