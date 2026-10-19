@@ -25,4 +25,4 @@ converted; provision current credentials through the secret mechanism when
 installing fresh. No token is passed in argv, logs, or job environments.
 
 Old persisted formats return `legacy_state_present`; operators archive and
-install fresh as described in [Retiring RC state](guide-fresh-install.md).
+install fresh as described in [Archive plus fresh install](guide-fresh-install.md).

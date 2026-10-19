@@ -14,6 +14,7 @@ when shell expansion is needed.
 | Field | Required / default | Meaning |
 |---|---|---|
 | `name` | Required, nonempty | Human-readable job name; not a deduplication key |
+| `submission_key` | Optional | Project-scoped 1–128 ASCII `[A-Za-z0-9._:-]`; identical spec replays the same job; see [identity/cancellation](design-proposal.md#submission-identity-and-cancellation-80) |
 | `project` | Required, nonempty | Project label |
 | `priority` | Required | `production`, `deadline`, or `experiment`, in that order |
 | `logs` | Omitted / `keep` | `none` discards command stdout/stderr; no queue log rows or worker attempt `.log` file |
@@ -83,15 +84,13 @@ metadata non-sensitive.
 
 Workers advertise `capabilities: [logs_none]`. The queue leaves `logs: none`
 jobs and server loads waiting, with a capability reason, until a compatible
-worker checks in. Omitted/`keep` entries can still use older workers.
+worker checks in. Omitted/`keep` entries use normal log capture; all workers still need the current wire protocol.
 
 Roll workers and queue together. An old queue silently treats `logs: none`
 jobs as `keep`, and an old worker refuses saved state containing the field.
 Upgrading the queue first drains live `logs: none` servers on older workers;
 they cannot load or serve calls again until their host's worker is upgraded.
-The fleet rolls the queue and workers together. At the #68 rollout decision,
-the fleet had no loaded models and no configured model catalog, so this drain
-affected no live servers.
+Upgrade queue and workers together; first stop and drain incompatible work.
 Do not downgrade while `logs: none` jobs or server entries are live; first stop
 and drain them with the compatible versions.
 
@@ -103,7 +102,7 @@ checkpoint isolation and reconciliation do not guarantee exactly-once side effec
 
 ## CLI flags and defaults
 
-All commands accept `--queue` (`MYCE_QUEUE`, otherwise
+Queue API clients accept `--queue` (`MYCE_QUEUE`, otherwise
 `http://127.0.0.1:7331`) and `--token` (`MYCE_TOKEN`, otherwise required).
 Prefer the environment over a token argument visible in process listings.
 Dev alone defaults to `dev-token`. Use `myce <command> --help` for the live parser.
@@ -117,7 +116,6 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --upload-spool-dir` | OS temporary directory | Local model-upload spool location; files removed after completion/abort |
 | `queue --db` | `myce.db` | Durable local SQLite file; one queue owner |
 | `queue --checkpoints` | `./checkpoints` | Shared root; create on mounted NAS first |
-| `queue/install queue --local-disable-receipts` | `false` | Read co-located completed disable receipts at startup and every second; requires explicit `--host-id` and shared `--host-state-dir`; remote receipts reconcile at enable/rejoin |
 | `queue --restart-grace` | `3m` | Worker reconciliation after queue restart |
 | `queue --production-loss-timeout` | `5s` | Production loss detection |
 | `queue --deadline-loss-timeout` | `20s` | Deadline loss detection |
@@ -171,6 +169,12 @@ omit it to wait indefinitely. Timeout/interruption leaves the jobs running.
 Run one wait detached for long jobs; see [the agent workflow](START-HERE.md#waiting-for-long-jobs-agents).
 
 ## HTTP and models
+
+Batch `POST /api/jobs` supports project-scoped `submission_key`.
+`POST /api/jobs/cancel` cancels by `{project, submission_key}`;
+`POST /api/jobs/ID/cancel` cancels by ID. Replies are durable typed
+acknowledgements. See [submission/cancellation](design-proposal.md#submission-identity-and-cancellation-80)
+and [examples](integrating.md#keyed-submission-and-cancellation).
 
 `GET /api/status`, `POST /api/jobs` (JSON job spec),
 `POST /api/jobs/ID/cancel`, `GET /api/jobs/ID/logs?after=SEQ`, and
@@ -259,7 +263,7 @@ is still batch metadata: commands must use a local model path themselves.
 
 `myce install worker --nas DIR --queue URL [--dry-run]` detects OS, CPU and
 GPU, writes private configuration/credentials, copies this binary, and enables a
-Linux systemd user service or macOS launchd agent. `myce install queue --nas DIR
+Linux systemd user service or macOS launchd agent. Workers are installed CLOSED and never started by install; explicit revision-bound open follows reconciliation. See [installer overlay/rollback](operations.md#installer-overlay-and-rollback). `myce install queue --nas DIR
 --listen ADDRESS [--dry-run]` creates the queue service. No dry run writes files
 or invokes service managers. Use `--environment-config FILE` and `--model-config
 FILE` for shared catalogs. `--root DIR` changes the local installation root.
@@ -296,8 +300,7 @@ production pins, run `myce measure` locally in an approved maintenance window
 with the exact worker identity/spool, explicit platform/device/budget and model
 list. It holds all models together, optionally warms them, writes JSON and text,
 and unloads them. Missing native counters fail visibly. See the separate
-[B70 weekend measurement](production-test-plan.md#b70-gpu0-weekend-joint-residency-measurement)
-checklist; this is not the first-machine Spark acceptance test.
+[native measurement checklist](production-test-plan.md#model-and-memory-qualification).
 
 `measure --warmup-parallel N` defaults to `1` (warm each model after loading it).
 With `N > 1`, load all selected models first, then run at most N warm-up
@@ -356,8 +359,8 @@ attempt started in the queue but unexecuted; reconciliation handles recovery.
 Deploy the matching queue and workers together. Check-in requires the durable-start
 protocol marker; older workers receive HTTP 426 before assignment. Production
 workers also require an explicit matching durable-start answer and `start_by`,
-so an older queue cannot authorize execution. Shared and instance disable flags
-are checked before and after the start request; cleanup retains attempt custody.
+so an older queue cannot authorize execution. Whole-host CLOSED intent
+is checked before and after the start request; cleanup retains attempt custody.
 Late result messages cannot
 revive failure. Assigned expiry sends an attempt-specific kill and retains release custody and memory accounting;
 status says `release pending` until the matching cleanup acknowledgement.
@@ -375,78 +378,25 @@ Opt in with `queue --host-config hosts.yaml` (also accepted by `dev` and `sim`):
 
 ```yaml
 hosts:
-  b70:
+  example-host:
     production_hold: true
-    production_idle: 180s
 ```
 
-`production_hold` defaults **false**. When enabled, `production_idle` defaults
-180 seconds, accepts zero, and rejects negative/invalid durations. Each card's
-worker must use the same `join --host-id b70` and a distinct `--name` (for example,
-`b70-0` and `b70-1`). `dev --host-id b70 --workers 2` groups its fake workers too.
-Simulation fleet YAML can include the same `hosts` mapping; `sim --host-config`
-overrides it. Effective host policies and hold state live in SQLite. Omitting the
-file on restart retains the saved policy; an explicitly different policy fails
-startup. There is no hot reload or implicit policy relaxation.
+`production_hold` defaults false. Each per-card worker uses the same physical
+`--host-id` and a distinct `--name`. Production selects an eligible host and
+stops lower-priority commands, models and preparations across its cards.
+Resumable work receives the original production save grace; non-resumable work
+restarts from scratch without an infrastructure loss. All lower-priority release
+acknowledgements must settle before production starts. Unknown custody remains
+charged across stop expiry, worker loss and queue restart; elapsed grace never
+proves release. Pins remain protected and can prevent placement.
 
-A feasible production command/model request selects one physical host before
-reclaiming anything. On an enabled host, it closes every lower-priority command,
-model-call/load and environment-preparation admission path, even if production
-only needs one card. All lower-priority commands stop concurrently. Resumable
-commands get `--production-stop-grace` (default 10 seconds); non-resumable ones
-are killed immediately and requeued without consuming an infrastructure retry.
-Repeated demand cannot extend a stop deadline. Unpinned lower-priority models
-drain; their outstanding calls get the same grace, then fail with
-`preempted by production host hold` rather than being silently replayed.
-Lower-priority background copies/builds are canceled and their reported cleanup
-must settle. Environment builds required by queued production continue during
-the hold.
-Production waits for the entire host's lower-priority allocations to release.
-
-The grace bounds cooperative stopping, **not successful recovery from an
-unresponsive worker/driver**. After grace, pending release becomes visibly
-unknown and still blocks production. Worker loss, stop expiry, a failed process
-cleanup, cancellation or queue restart never acts as a release acknowledgement.
-Attempt/session-specific results can settle old custody without changing a new
-attempt. A fresh worker must have cleaned its old processes before reconciling
-its previous session. Reopened model slots require measured in-flight counts;
-older workers without those reports cannot clear a recovering hold. A replacement
-model worker must acknowledge cleanup of the prior session, even after worker
-loss. Forced-stop results retain `last_stop_outcome`; periodic NAS checkpoints
-remain available. A checkpoint save blocked on NAS I/O is force-stopped at the
-same grace deadline; production without `resumable: true` uses local scratch
-and can start after the host's actual release acknowledgements even while the
-NAS is unavailable. Displaced experiments wait for checkpoint storage to recover,
-then resume from the last complete checkpoint generation. NAS reconciliation
-cannot keep a late experiment copy alive on the held host.
-These are process/model cleanup acknowledgements, not native GPU-driver proofs.
-
-Stopped experiments return to the shared priority line with a fresh attempt and
-may resume immediately on **any** eligible worker, including Spark. Only
-production has a selected `production_host`; an experiment never inherits it.
-Platform, environment, memory and both machine allow-lists still apply. Verso
-must supply a cross-platform command and validate its checkpoint's scientific
-identity; Mycelium copies checkpoint files without interpreting them.
-
-Queued/running/preparing/stopping production demand shares the hold. Cooldown
-starts when the final demand and all cleanup obligations settle. At 180 idle
-seconds lower-priority admission reopens. A new submission committed at the
-boundary wins over expiry; backward clock movement postpones reopening. Worker
-poll/tick delivery adds latency. Unpinned idle production models stay resident
-during cooldown and can drain immediately when it ends. Existing pins are never
-automatically removed: they may prevent production placement or experiments
-from using all memory. A resident pinned model still refuses experiment calls
-during the hold. Pin loads also obey project restrictions and release gates.
-
-Status/API `host_holds` and CLI/web status show, for example,
-`b70: production hold; stopping 2 attempts; grace remaining 7s`,
-`production idle; experiments resume in 179s`, or
-`release unknown: worker b70-1`. Blocked experiments show
-`host b70 reserved for production`; pinned capacity conflicts identify the pin.
-This is observable GPU demand, not a CPU publication/session lock. Production
-startup expiry and managed Docker are separate contracts; this option alone does
-not provide cgroup enforcement or a native device fence. Do not downgrade a database with active holds
-or mix old workers while depending on hold recovery.
+There is **no idle production cooldown**. Once the final production demand and
+cleanup settle, ordinary admission resumes. Displaced experiments rejoin the
+shared queue and can run on any eligible machine; they do not inherit production's
+host pin. Whole-host admission close/open and consumer cancellation are separate
+contracts, described in [operations](operations.md#close-reconcile-and-reopen-a-host).
+No CPU publication/session lock is implied by a GPU production hold.
 
 ## Attempt placement environment
 
@@ -498,7 +448,7 @@ myce sim --fleet examples/sim/production-hold/fleet.yaml \
 
 Two B70 experiments run for 600 seconds each; a 60-second production command
 arrives at second 60. Both experiments are displaced, one continues on Spark,
-and the other returns after cooldown. Speeds, admission budgets and checkpoint
+and the other returns after production and cleanup settle. Speeds, admission budgets and checkpoint
 behavior are synthetic; this is not a native throughput/latency qualification.
 
 ## Managed Docker batch commands
@@ -669,7 +619,7 @@ must match the exact job, attempt, machine and session.
 See [Docker cleanup custody](operations.md#docker-cleanup-custody) for delivery
 outcomes, private-evidence review and recovery.
 
-Stop, restart, loss reconciliation and `myce disable` stop all labeled containers, confirm
+Stop, restart, loss reconciliation and `myce host close --local` stop all labeled containers, confirm
 nonrunning/absent execution, disconnect owned stopped endpoints, remove labeled
 networks, and confirm network absence. Stopped containers remain evidence;
 networks do not. RAM custody stays held until both proofs succeed. Late containers
@@ -685,12 +635,12 @@ unrelated containers are never touched.
 
 ## v3 extension jobs
 
-On the opt-in v3 branch, jobs can describe a `kind` (with `args`) or a `program`
+Jobs can describe a `kind` (with `args`) or a `program`
 (`type`, `file`, `args`), plus NAS-relative `inputs`, `outputs` and optional
 `size_hint`. Their commands and hardware reservations come from a qualified,
-frozen extension version. Existing v2 forms above are unchanged. See
+frozen extension version. Plain command forms above remain supported. See
 [write an extension](write-an-extension.md) for the common YAML/JSON/Python
 form, setup/check qualification and per-attempt output contract.
 
 Native server entry placement, `env`/`secret_env`, local model approval and
-OpenAI client defaults: [operator configuration](design-68-server-entries.md).
+OpenAI client defaults: [operator configuration](guide-servers.md#shared-entries-local-secrets-and-approved-model-folders).

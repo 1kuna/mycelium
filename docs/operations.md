@@ -1,1055 +1,300 @@
-# Operating Mycelium v2
+# Operating Mycelium v3
 
-One CPU queue, one SQLite database, plain-command GPU workers. These instructions
-are local installation recipes, not a fleet deployment. Do not stop or replace
-Atlas, Verso, or GPU guards/controllers. The old B70 v1 service was already
-removed on 2026-10-09; do not reinstall it. Other legacy data is outside v2 scope.
-Spark's Atlas GPU ownership still requires an agreed handoff.
-
-For the v3 invitation and Bonjour/mDNS path, see [automatic joining](guide-joining-v3.md). Its pinned TLS joining endpoint is separate from the existing HTTP recipes below.
+This is the canonical runbook for installation, host close/open, reconciliation
+and recovery. The [approved design](design-proposal.md) is the product spec;
+[status](guide-status-v3.md) defines machine-readable fields and verdicts.
+These instructions describe the implementation. Laptop checks do not qualify
+native GPU, systemd, Docker, boot or consumer behavior.
 
 ## Paths and prerequisites
 
-| Item | v2 path/name |
-|---|---|
-| Binary | `~/.local/bin/myce` |
-| Database, spools, local logs | `~/.local/share/myce` |
-| Private config | `~/.config/myce` |
+Use one queue, one local SQLite database and one worker per selected GPU.
+Installed workers on a physical host share one host ID and host-control directory.
+Run the installer as the worker account. It never installs packages, changes
+hardware owners or grants privileges. Supply GPU drivers, the required runtime,
+software recipes and storage explicitly. `myce doctor --config CONFIG` checks
+prerequisites; Linux boot without login also needs administrator-managed linger.
+
+| Item | Default / selection |
+| --- | --- |
+| Installed role | `~/.local/share/mycelium/queue/`, `worker/` or `worker-INSTANCE/` |
+| Role files | `myce`, `config.json`, private credentials and `state/` inside that role |
+| Shared host control | `~/.local/share/myce/`; saved `host_state_dir` selects a custom location |
 | Linux user units | `myce-queue.service`, `myce-worker.service`, `myce-worker@INSTANCE.service` |
-| Mac launchd labels | `local.myce.queue`, `local.myce.worker` |
-| Shared progress | NAS root supplied with queue `--checkpoints` and worker `--checkpoint-root` |
+| Reconciliation | `myce-host-reconcile.service` and `.timer` in the worker user manager |
+| macOS installer labels | `local.mycelium.queue`, `local.mycelium.worker` |
+| Protected root control | Separate `/usr/local/libexec/myce/myce`, mode 0755 |
 
-These manual-template paths are distinct from v1's `mycelium` paths and services.
-`myce install` instead defaults to `~/.local/share/mycelium/ROLE` and macOS
-`local.mycelium.ROLE` labels; inspect their ownership separately. Before installation,
-inspect existing destination paths and stop if their ownership is unclear.
-Use Go 1.25.6+ to build for the target OS/architecture. Project source/workdirs
-and build tools must already be available on eligible workers. Workers build declared environment recipes on
-demand (Python recipes need uv); GPU-enabled llama-server can be provided on
-PATH or by a recipe. Model weights never download at load;
-`myce model fetch` is the explicit master-download command.
+Saved config is authoritative for actual paths. Manual [deploy templates](../deploy/README.md)
+require substituted binary/config/state paths; their macOS labels are distinct.
+Do not run two service definitions against the same spool or database.
 
-Mount the NAS before creating the root. Verify the actual share identity, write
-permissions, and a write/read/rename across participating machines. Configure
-the mount to fail closed so an unmounted share cannot become a writable local
-substitute. Mycelium probes access, not remote-server identity. Spark uses `/home/kuna/nas-dev/mycelium/checkpoints`; B70 may use
-`/mnt/verso-nas/mycelium/checkpoints` or `/home/kuna/nas-dev/mycelium/checkpoints`; Mac might use
-`/Volumes/dev/mycelium/checkpoints`. These may differ: both must refer to the
-**same shared directory**. Assignment paths are relative on the wire, resolved
-against the worker root; the queue retains its own absolute paths. Never put
-SQLite or the worker spool on the NAS.
+NAS mode uses each machine's local mount of the same shared root. Queue
+`--checkpoints` and worker `--checkpoint-root` may differ locally; assignments
+carry relative paths. Verify mount identity independently before creating the
+checkpoint root: a writable directory alone can be an unmounted fallback.
+For jobs without a NAS, use [verified file transport](guide-files-v3.md).
+Never publish private paths, invitations, credentials or operational snapshots.
 
-## Install binary and private configuration (Linux or Mac)
+## Install binary and private configuration
 
-Run on the intended machine, from the checkout. This block stops at an existing
-binary; upgrades use the separate procedure below.
+Build a trusted artifact with Go 1.25.6 or newer. Provision `MYCE_TOKEN` through
+private environment/secret files, never argv or job YAML. An existing installation
+retains its credential or EnvironmentFile reference. Jobs do not inherit the token.
+The invitation alternative is in [joining](guide-joining-v3.md).
 
 ```sh
-set -eu
-umask 077
-test ! -e "$HOME/.local/bin/myce"
-mkdir -p "$HOME/.local/bin" "$HOME/.local/share/myce" "$HOME/.config/myce"
-go build -trimpath -o "$HOME/.local/bin/myce" ./cmd/myce
-chmod 700 "$HOME/.local/bin/myce" "$HOME/.local/share/myce" "$HOME/.config/myce"
+go build -o myce ./cmd/myce
+./myce install queue --nas NAS_ROOT --listen QUEUE_BIND_ADDRESS:7331 --dry-run
+./myce install worker --nas NAS_ROOT --queue QUEUE_URL --dry-run
 ```
 
-Create `~/.config/myce/queue.env` privately with `MYCE_TOKEN=<fleet token>`;
-worker.env contains the same token plus `MYCE_QUEUE=http://<queue LAN IP>:7331`.
-Use a secret manager/editor, mode 0600; never put the token in shell history,
-argv, the repo, model catalogs, logs or NAS. Do not enable shell tracing. Source
-only your trusted file for foreground CLI commands:
+Replace uppercase placeholders before use. Inspect dry-run output, then perform
+an authorized install without `--dry-run`. For an existing role use its exact
+config instead of new defaults:
 
 ```sh
-set -a
-. "$HOME/.config/myce/worker.env"
-set +a
-"$HOME/.local/bin/myce" status
+./myce install worker --config WORKER_CONFIG --dry-run
+./myce install queue --config QUEUE_CONFIG --dry-run
 ```
 
-Queue binds loopback by default; explicitly select its trusted LAN address for
-fleet use. Recheck port 7331 availability first. The HTML page is read-only but
-token-protected; HTML/API/model routes require the fleet token. No TLS, public exposure,
-proxy, or firewall changes are part of these recipes.
+### Installer overlay and rollback
+
+The installer reads saved configuration **before** detection/defaults. Omitted
+flags preserve queue address, NAS, worker name, Docker endpoint, credentials,
+EnvironmentFile, GPU runtime file, catalogs, memory policy and custom settings.
+Only explicit flags change configurable values; even explicit false/zero/empty
+values are deliberate overlays. `--force` is deprecated and unnecessary.
+Installed role, account, host, device, unit, binary and state identity cannot be
+relocated over an existing installation. Preserve custody and install separately.
+An old config missing `docker_endpoint` retains its empty value unless
+`--docker-host` explicitly selects an endpoint.
+
+Worker installation requires CLOSED intent. It preserves the revision and never
+opens the host. A genuinely empty installation starts revision 1 CLOSED with
+confirmed empty previous custody; surviving worker data prevents that shortcut.
+Workers are enabled but not started. All card instances must be upgraded before
+opening. Linux units keep `_host-start-check`, `Restart=on-failure`,
+`KillMode=control-group`, bounded stop timeouts and `Delegate=memory`. The service
+entry repeats the revision gate. Conflicting effective drop-ins block activation;
+consumer-owned drop-ins are preserved for resolution.
+
+Publication snapshots prior artifact bytes/modes and manager state, atomically
+replaces files and keeps recoverable `.Trash` backups. Failures restore the
+binary, config, credentials/runtime files, worker/reconcile units and prior
+service/timer enablement/activity. Rollback uses a separate bounded recovery
+context, including after cancellation. It never opens or renews host intent.
+A rollback failure is reported as **rollback incomplete** and leaves convergence
+stopped/fenced; inspect files and actual manager state before retrying. An install
+error followed by a manual restart is not successful rollback qualification.
+
+Linux validates GPU access through a transient user service using the installed
+runtime environment and selected device. Unknown devices, denied access or a
+conflicting startup gate refuse acceptance. `--allow-deviceless` is an explicit
+laptop test option, not hardware qualification. `gpu.env` contains only recognized
+GPU runtime controls, never the whole shell environment or fleet token.
 
 ## Inventory and foreground start/stop
 
-`myce status` reads `MYCE_TOKEN` as before. Browsers can authenticate the HTML
-page with username `myce` and the fleet token as the Basic-auth password;
-refreshes reuse browser credentials. API clients use Bearer auth. Never put
-tokens in URLs, printed commands, catalogs or screenshots.
+`myce detect` reports the GPU inventory used by `join` and `install worker`.
+Bare `join` auto-detects; explicit `--gpu` and `--device` override it. Select one
+CUDA card by stable UUID (numeric selection resolves to that UUID); use distinct
+worker names and one shared physical `--host-id` across cards. Multi-card live
+CUDA inventory without a selector refuses rather than summing cards.
 
-Queue and join accept `--log-retention 168h` (default seven days). Confidential
-model entries should use `logs: none`; read the
-[private workload settings](guide-servers.md#private-workloads). Public error
-messages deliberately omit raw upstream, subprocess and filesystem text.
+CUDA dedicated memory uses live `nvidia-smi` readings. Unified CUDA uses Linux
+`MemAvailable`; Metal uses free plus inactive pages. Reserve is subtracted after
+an optional cap. XPU/fake use configured budgets; `--memory-mode fixed` needs a
+positive explicit budget and cannot see external allocations. Invalid telemetry
+blocks admission visibly. A GPU selector is not an OS isolation boundary.
 
-CUDA queries `nvidia-smi` before each start/load and check-in. `join --device ID`
-selects one card per worker and resolves CUDA selectors to stable UUIDs for both
-inventory and execution. Multi-GPU hosts can run separately named workers for
-separately selected cards. Without a selector, live dedicated/auto inventory
-rejects multiple CUDA devices rather than summing memory. Numeric readings use
-dedicated GPU memory; `N/A`, `[N/A]`,
-`Not Supported`, and `[Not Supported]` automatically select unified memory.
-Metal always uses unified memory. Linux reads `MemAvailable` from `/proc/meminfo`;
-macOS runs `vm_stat` without cgo and uses free + inactive pages with the reported
-page size, excluding active, wired and compressed pages. This is a conservative
-reclaimable-memory estimate, not a GPU allocation guarantee.
+Foreground `join` runs ordinary commands as the worker user. Ctrl-C or `leave`
+prevents new work and lets resumable commands save; `leave --now` stops all work
+with checkpoint grace. Leave does not fence automatic service restart. Use host
+close for durable whole-host ownership changes. Preserve worker spools through
+outages: logs/results replay only for their exact session and attempt.
 
-`--reserve-memory-gb` subtracts an OS/other-program reserve from each live
-reading, clamped at zero. An optional positive `--memory-gb` caps the reading
-**before** reserve. Values are GiB. For Spark, start with a **16 GiB reserve**;
-raise it for Atlas growth, other programs and measured pressure. Existing Atlas
-resident memory is already excluded from `MemAvailable`; the reserve provides
-additional headroom, not a substitute for measuring Atlas usage or owner admission.
-See [Spark worker example](../deploy/myce-spark-worker.service); install that example as `myce-worker.service`.
+## Close, reconcile and reopen a host
 
-`--memory-mode auto` is the default; `unified` explicitly selects OS accounting,
-`dedicated` requires numeric CUDA telemetry (invalid for Metal), and `fixed`
-requires a positive operator-selected `--memory-gb` budget. Fixed mode never
-probes live memory and cannot observe external allocations: choose it only with
-an independently enforced conservative allowance. XPU/fake keep configured
-budgets by default; XPU can explicitly select `unified` where applicable.
-A failed live source reports zero and its reason in `myce status` and the status
-page, refuses new work, and retries on subsequent checks. A cap alone never
-hides a failed probe. Own batch/model reservations are deducted without double
-subtraction. This is memory admission, not permission to bypass a GPU owner or guard.
+Host control is **whole physical host**, including every card, engine, native
+descendant, preparation and managed Docker attempt. There is no per-device enable.
+`disable`/`enable`, local-disable receipts and manual receipt-based reopening are
+retired. Local intent, fresh physical evidence and queue acknowledgement have
+separate meanings; see [the envelope reference](guide-status-v3.md#host-control-envelope).
+
+On Linux, privileged control must use the separate protected copy described
+below. As the installed worker user, these commands use the same controller but
+cannot prove privileged GPU-holder absence:
 
 ```sh
-# Queue terminal: MYCE_TOKEN is already exported privately.
-"$HOME/.local/bin/myce" queue --listen 127.0.0.1:7331 \
-  --db "$HOME/.local/share/myce/queue.db" \
-  --checkpoints /Volumes/dev/mycelium/checkpoints \
-  --production-loss-timeout 5s --deadline-loss-timeout 20s \
-  --experiment-loss-timeout 60s --restart-grace 3m
-# Mac worker terminal; example budget only, choose a safe measured/configured value.
-"$HOME/.local/bin/myce" join --name mac-worker --gpu metal \
-  --memory-gb 16 --reserve-memory-gb 4 --heartbeat 1s \
-  --checkpoint-root /Volumes/dev/mycelium/checkpoints \
-  --state-dir "$HOME/.local/share/myce/worker"
+myce host close --local --config WORKER_CONFIG --wait-released --timeout 30s --json
+myce host reconcile --local --config WORKER_CONFIG --timeout 30s
+myce host status --local --config WORKER_CONFIG --expect closed --verdict --timeout 10s --json
 ```
 
-`myce join` without `--gpu` uses installer GPU detection and its memory/reserve defaults; explicit device and memory flags override them. Use `--gpu` to bypass detection.
+Close durably writes CLOSED before discovery/network calls and fences all launch
+paths. Saved stop intent and its original deadline survive restart; TERM/KILL or
+retry does not renew grace. Charges remain until exact release. Without
+`--wait-released`, exit 0 means durable acceptance. With it, exit 0 means local
+exclusion PASS, which can occur while queue settlement is pending. Rest PASS
+also needs current queue acknowledgement and settlement. A timeout leaves
+CLOSED intent and unconfirmed obligations intact.
 
-For explicit CUDA use `--gpu cuda --reserve-memory-gb VALUE`; for XPU use
-`--gpu xpu --memory-gb VALUE --reserve-memory-gb VALUE`. Configure unique stable
-names. The queue heartbeat-loss defaults are 5s production, 20s deadline, 60s
-experiment; worker heartbeat defaults to 1s. Startup recovery remains 3m. Production preemption gives resumable work 10s
-by default; deadline preemption and planned leave give 2m. Avoid heartbeat intervals near or above the shortest loss timeout.
+Close can use `--expect-revision REVISION` for compare-and-set. Without that
+selector, close accepts a new closing revision even during another operation.
+A rejected selector returns exit 3, `revision_mismatch`, unchanged desired state
+and `accepted_revision: null`. If an accepted close is overtaken, it keeps its
+accepted revision and reports `revision_superseded` with the current revision.
+Without a release wait its acceptance still exits 0; with the wait it fails
+nonzero, never as a CAS rejection. Follow the newer revision.
 
-Ctrl-C/SIGTERM tells a worker to leave: no new work, resumable jobs save/exit,
-non-resumable jobs finish. `myce leave --name mac-worker` asks wait/stop if needed;
-`--now` signals everything but still permits checkpoint grace. Keep the local
-spool across restarts. Queue Ctrl-C stops the API without deleting durable jobs.
-Workers continue through temporary queue/network loss and replay logs/results.
-An existing `state.json` must use the Mycelium worker schema: `session`, `fresh`
-and `offset` are required, and unknown fields are refused before recovery.
-Foreign, incomplete or newer incompatible state produces `read worker state`
-and remains untouched. Preserve that spool for inspection; do not replace it
-with an empty spool to claim cleanup. Unrelated files are not imported as state.
-The `operator-stop.json` snapshot uses the same strict schema; invalid markers
-refuse startup, while an unchanged `state.json` snapshot remains compatible.
+Reconcile retries the same revision using durable custody. The installed timer
+runs it even when workers are stopped; a co-located queue also reconciles before
+admission. Every worker session is registered durably before its first check-in.
+Current-boot local exclusion discharges only the exact registered sessions and
+covered attempts at the queue. Unregistered or unknown custody remains charged.
+A queue ahead of local intent reports `host_revision_behind_queue`: inspect the
+mismatch, then issue a new close; it allocates above the observed queue revision.
+Never edit SQLite or delete state to declare release.
 
-## Take a machine out of Mycelium
-
-Run as the OS user that runs the worker, on that machine:
+Before reopening, the consumer must persist completion of its **own** cancellations,
+fence late publication and verify the other owner's release. Mycelium settlement
+covers Mycelium only. Read the current status, require `host_settlement: confirmed`
+and use **`desired.revision`**, since read-only status has null accepted revision:
 
 ```sh
-myce disable --reason "Verso rollback drill"
-myce enable
+myce host status --local --config WORKER_CONFIG --json
+myce host open --local --config WORKER_CONFIG --expect-revision REVISION --timeout 30s --json
+myce host status --local --config WORKER_CONFIG --expect ready --wait --timeout 30s --json
 ```
 
-`disable` immediately persists `~/.local/share/myce/DISABLED` (private JSON:
-operator UID, UTC time, reason, grace seconds, generation). All workers run by that user,
-including per-card workers and installed workers with custom spools, share this
-flag and register their spool locations there. It survives reboot. `join` and
-installed worker services exit successfully while the flag exists, before GPU
-or queue checks; systemd's restart-on-failure and launchd's unsuccessful-exit
-restart therefore do not loop. Linux worker units also have a flag condition.
-Run the same commands separately for workers run by another OS user.
+Open requires the current confirmed close revision, allocates a new revision,
+and preserves `last_close` as history. `previous_close_unsettled` refuses pending
+or unknown prior settlement. Acceptance restores eligibility; it is not readiness.
+Ready needs every installed required worker fresh and healthy on this boot at
+the open revision, queue acknowledgement and no unresolved release. It does not
+certify model/application health. No idle timer proves either rest or readiness.
 
-On Linux under the systemd user worker service, ownership is the worker unit's
-cgroup. Disable stops that whole cgroup, including jobs, model servers, build
-processes, and descendants that change sessions/groups or daemonize. Units use
-`KillMode=control-group`, `SendSIGKILL=yes`, and `TimeoutStopSec=10s` by default.
-`--grace 3s` allows up to 3 seconds before systemd receives a whole-unit SIGKILL
-(maximum 1 minute). The requested grace must fit the unit's configured
-`TimeoutStopSec`; increase that setting before requesting more than the default
-10 seconds. This works with systemd versions that cannot mutate service timeouts
-through `set-property`.
-`--now` sends SIGKILL to all members through systemd, then stops the unit.
-Confirmation requires the retained cgroup's `cgroup.procs` to be empty and
-`cgroup.events` to say `populated 0` (which includes nested cgroups), plus an
-inactive/failed unit. A cgroup removed by systemd counts as empty only when the
-stopped unit no longer reports a cgroup. A stop request alone is not confirmation.
-Invalid units, unreadable cgroups, a changed cgroup, or remaining processes fail
-closed. No PID/PGID records authorize signaling in this path. This controls only
-`myce-worker.service` and `myce-worker@INSTANCE.service` for this OS user. Instance
-names contain only letters, digits, dash, and underscore. Workers discover their
-own systemd unit from the invocation's kernel cgroup and record it in their
-registry. Default disable stops every allowed unit registered in the selected
-host control directory and reports each result; every requested unit must be
-confirmed before a cleanup receipt is written. It does not stop Verso's legacy
-controller or unrelated services/processes.
+### Protected root-owned copy
 
-For one card only, use `myce disable --unit myce-worker@gpu1.service` and
-`myce enable --unit myce-worker@gpu1.service`. The unit must already be registered
-in this host control directory. Its generation-bearing flag and receipt live in
-`units/myce-worker@gpu1.service/` below that directory. Every instance also obeys
-the shared host flag: enabling one cannot bypass a disabled host. Targeted control
-notifies only that machine's queue record and leaves sibling units and whole-host
-admission alone. Confirmed cleanup settles only its saved executions; notification
-failure still leaves the unit disabled locally and does not fail a completed
-disable. Docker cleanup targets only attempts recorded in that instance's spool,
-including retained released custody, using exact attempt labels.
-Once the queue accepts an uncleared unit disable, that machine is Disabled and
-exempt from ordinary loss detection. Its job stays `stopping` until cleanup is
-confirmed or an operator acts; disappearance alone cannot requeue it. Unconfirmed
-Docker releases still escalate after two minutes.
-
-Keep a unit's `control-generation.json` across reinstalls. If its counter is
-lost, the queue rejects lower generations and includes the accepted generation in
-the API error response.
-With control operations stopped, restore that JSON integer to at least the
-reported value, then rerun disable and enable. This preserves monotonic ordering
-without accepting old receipts. A machine moved to a different host starts an
-independent control history after checking in there; prior execution custody is
-still retained.
-
-Install an independent Linux instance with
-`myce install worker --instance gpu1 --device 1` plus the normal GPU, queue and NAS
-options. Instance names and physical device selectors are independent. The
-installer renders `myce-worker@gpu1.service`, uses a separate `worker-gpu1/`
-installation/spool, and preserves the same cgroup kill policy and both disabled
-conditions. The default worker name gains the instance suffix; `--name` can
-override it. Use its printed `--config` path for doctor, uninstall, and custom-root
-controls. A manual template is available at `deploy/myce-worker@.service`; resolve
-its device and other fields before installation. `--host-state-dir DIR` is also
-saved by the installer, so isolated services and controls share the same authority.
-Existing workers must run the updated binary once to record their unit custody.
-
-Re-running either installer with identical flags upgrades its binary and unit,
-reloads the service manager and preserves local state. Changed configuration
-prints a diff and requires `--force`; role/service/binary/spool paths cannot be
-relocated over an installed role. The previous unit is kept in local `.Trash`.
-Linux worker installation also writes a private `gpu.env` beside `config.json`.
-It captures only recognized runtime controls from the invoking shell: `LD_LIBRARY_PATH`,
-`LIBRARY_PATH`, selected `ZE_*`, `ONEAPI_*`, `SYCL_*`, and `CUDA_*` variables.
-It never imports arbitrary prefixed variables, credentials, or `MYCE_TOKEN`.
-Source the trusted oneAPI `setvars.sh`/profile before installing if that is what
-makes foreground GPU detection work. PATH is captured in the private config and
-`gpu.env`; newline, quote and backslash values are rejected. Reinstallation
-refreshes this runtime file. Changes to saved PATH or GPU/device settings require
-`--force`, like other configuration changes.
-
-After writing/reloading the unit, install runs the installed binary's
-`detect --config PATH` through `systemd-run --user --wait --pipe`, loading the
-same `gpu.env`, PATH and device binding. This command reads no credentials.
-It checks actual read/write access to render/NVIDIA card nodes, the running
-user manager's groups, and runtime inventory. Missing nodes or denied access
-produce driver/group diagnostics, including administrator-only `sudo usermod
--aG render/video <worker-user>` guidance; install never runs sudo. ACL access
-can be sufficient without those groups. A failed validation refuses installation
-acceptance and does not enable/start the new worker; written files remain for
-inspection/retry. Upgrades do not stop an already running worker on failure.
-`--instance` and `--device` follow the same check and selected XPU runtime binding.
-Use `--allow-deviceless` explicitly for CPU/fake test workers. Without `--gpu`,
-failed foreground detection then requires a positive `--memory-gb` test budget
-and configures the fake platform. This flag bypasses service GPU validation,
-not the normal scheduler/checkpoint contracts.
-
-Re-run the installer with the updated staging binary to upgrade the role binary.
-Manual unit users must install the updated template and reload their user manager.
-The flag condition and the worker's successful exit while disabled prevent
-restart loops, including after reboot.
-
-On macOS/launchd or foreground `myce join`, recorded supervisors and
-attempt/engine/build groups receive the existing bounded cleanup. This path
-prints **not running under the systemd service; ownership is best-effort**.
-Exact markers and process birth identities reduce stale-record mistakes, but
-inspection followed by signaling cannot prove ownership atomically or discover
-children that remove their markers. Successful secondary cleanup is best-effort,
-never cgroup certification. An empty registry returns nonzero and cannot produce
-a cleanup receipt. Use `--state-dir DIR --name NAME --host-id HOST` to adopt a
-known old spool; registered spool locks must be released before a receipt.
-Other users and unregistered workers remain outside this secondary scope.
-
-macOS can hide restricted executables' environment variables from process
-inspection, including inherited `MYCE_PROCESS_ID` markers. Disable still stops
-discoverable groups, but native execution records make detached-descendant
-cleanup explicitly **unconfirmed** on macOS: it returns nonzero, retains
-`DISABLED`, and writes no cleanup receipt. Even an empty marker scan cannot
-prove absence. Enable remains blocked; rerunning disable alone cannot resolve
-this OS visibility limitation. Do not remove records or the flag to bypass it.
-
-`--timeout 30s` sets one overall wall-clock deadline for disable; its default is
-chosen grace plus 20 seconds. At that deadline the command stops waiting,
-returns nonzero with unconfirmed work, and retains the flag. Cancellation fences
-new signals and acknowledgement of unfinished cleanup; no cleanup receipt is issued for
-unconfirmed work. A blocked kernel filesystem operation cannot be interrupted
-by Go: flag durability is claimed only after write/fsync succeeds, and any
-in-progress operation remains under the control lock until it returns. No NAS
-operation gates disable. Initial queue fencing runs alongside cleanup. Once
-physical cleanup is confirmed, a notified host disable sends the saved exact
-job/machine/session/attempt release acknowledgements through the worker completion
-endpoint, then confirms host cleanup. The final notification phase has a shared
-250 ms deadline, preserving offline-disable responsiveness. On acceptance the
-queue clears the old cleanup status and custody hold without enable/rejoin.
-Per-unit notification uses the same host-control endpoint with machine and session
-scope; generation validation and exact execution cleanup are accepted atomically.
-If notification fails, the durable local receipt reconciles at enable/rejoin.
-
-For a queue co-located with workers, opt into read-only receipt reconciliation:
+A trusted operator deploys and hashes a separate `/usr/local/libexec/myce/myce`
+copy, mode 0755, with root-owned, non-group/other-writable ancestors. The worker
+installer never writes it. Use its **absolute path** in root commands and sudoers;
+never execute the worker-owned binary as root. The precise install/hash/ACL and
+native user-manager checks are in the [identity checklist](probe-s11-worker-identity.md).
 
 ```sh
-myce queue --local-disable-receipts --host-id HOST_ID --host-state-dir HOST_STATE_DIR
+sudo /usr/local/libexec/myce/myce host close --local --worker-user WORKER_USER --wait-released --timeout 30s --json
+sudo /usr/local/libexec/myce/myce host status --local --worker-user WORKER_USER --expect closed --verdict --timeout 10s --json
 ```
 
-Use the workers' exact host ID and shared local host-state directory. Both must
-be supplied explicitly. If the directory is missing or unreadable at startup,
-the queue logs an error and continues without local receipts. The reader retries
-on subsequent ticks and keeps reporting rate-limited skips until access returns.
-Run the queue as the same OS user as the workers: receipts are mode 0600.
-`myce install queue` accepts the same three flags and
-preserves them in the queue service configuration. This is off by default;
-existing queue installations keep their current behavior. The queue reads shared
-and per-unit completed disable receipts at startup before maintenance, then at
-one-second intervals determined by its injected clock. It matches the current
-flag/receipt generation, host, machine, session and saved attempt before settling
-only the covered releases. The reader takes no operator control lock and never
-modifies or deletes receipts. Skip reasons are logged at most once per reason per
-minute. Missing, stale or unconfirmed evidence leaves custody intact and the
-two-minute escalation bound unchanged. Shared-host and per-unit generations remain
-independent.
+Root startup checks its executing inode, ancestors and Linux access ACLs and
+restricts commands to local host control. Root resolves the OS worker account,
+then drops all worker config/state reads and mutations into a scrubbed same-binary
+child with that account's groups, HOME and runtime directory. No caller HOME,
+user bus or inherited fleet token chooses identity. Root performs read-only
+cgroup/Docker/GPU observations. Unsafe ownership, symlinks or ACLs produce typed
+errors. Non-Linux root control is unsupported; unprivileged GPU-holder evidence
+is UNKNOWN. Do not bypass these checks to obtain PASS.
 
-This local reader cannot see receipts on remote hosts. Remote disabled workers
-still converge through notified enable or worker rejoin when their queue returns;
-until then an unconfirmed release can escalate and remains held.
-A pending/unconfirmed notification message is not proof that the fleet queue
-rejected the request; another registered queue may be offline or initial fencing
-may still be in flight. Unconfirmed physical cleanup still holds and escalates
-after two minutes.
+## Rest and recovery
 
-Host control carries a durable monotonic generation in the local flag/receipt
-and queue host record. A stale enable or disable is rejected; retrying the same
-disable acknowledgement requeues jobs only once. Enable must follow acknowledged
-cleanup. Generations survive reboot and reconciliation retries, including a lost
-enable response. Acknowledgements are independent for each registered queue and
-host: accepted targets are removed from the pending receipt, and offline targets
-remain durable. Old laptop/drill queue registrations cannot veto a worker's
-rejoin to its own queue. A worker reconciles only its configured queue and host.
-Until that acknowledgement succeeds it stays running, sends held heartbeats,
-and admits no batch, model, copy or environment work. CLI/HTML/JSON status shows
-`held: enable not yet acknowledged (retrying)` (`enable_pending` in JSON).
-Reconciliation uses injected-clock backoff of 1, 2, 4, 8, 16, then 30 seconds;
-network I/O remains bounded. Local host/unit flags still cause successful exit.
-If the queue is unavailable, held status cannot reach it; inspect the worker log.
-Upgrade the queue before workers for the new held-status protocol; older queues
-reject unknown check-in fields. Preserve the host control directory; do not reset its counter.
-One OS-user control directory is the ordering authority for each physical host.
-A reachable queue fences every card on that host and requeues displaced jobs
-without charging a retry; an already-requested cancellation remains cancelled.
-Exact saved attempts can refund an outage loss.
-Interrupted model HTTP calls return an error and must be retried by the caller.
+Use `host status --local --expect closed|ready --verdict --json` for the product
+verdict, not English hold text or an empty process list. FAIL means fresh contrary
+evidence; UNKNOWN means missing/stale/ambiguous evidence. FAIL wins while all
+causes are retained. Null counts mean unknown; empty arrays prove a complete
+empty inventory only. Evidence is evaluated after collection at one instant,
+bound to current boot/revision, with the default 10-second freshness window;
+future timestamps are absent. Collection/fence failures yield UNKNOWN.
 
-Use `--config /absolute/path/config.json` for a custom installer root.
-`MYCE_HOST_STATE_DIR` / `--host-state-dir` selects an isolated control directory
-for laptop drills; every worker and control command must use the same directory.
-`enable` archives the flag and receipt in recoverable local `.Trash`, starts the
-detected service, or prints the saved foreground join command. It refuses an
-unconfirmed disable. Concurrent controls fail rather than waiting on their lock.
-The flag is persisted before installer configuration discovery; the model proxy
-also refuses disabled-host admission, including a request-body read race.
+Closed PASS requires launch fencing, empty owned cgroups, complete terminal
+Docker operations/inventory, no owned GPU holder, safe restart policy and fresh
+queue settlement/placement evidence. Fenced queued work is counted and allowed;
+positively foreign-only work is outside scope; unknown placement stays unresolved.
+Ready PASS requires current open revision and all required workers, not empty
+cgroups. With `--verdict`, zero exit means PASS only.
 
-Docker cleanup is part of the same confirmation and overall deadline. The Docker
-endpoints recorded in installed worker configs and registered worker custody
-are inventoried with the exact `myce.attempt` label. Every object
-is inspected before signaling; only objects with that nonempty label qualify.
-Labeled execution receives TERM, then KILL at the original disable grace deadline
-(`--now` kills immediately). Native cleanup does not grant Docker a fresh grace.
-Stopped container objects are retained; “gone” means no running execution, not
-container deletion. Unlabeled containers, including legacy Verso production,
-are never signaled.
+During a queue outage, close can prove local exclusion while settlement remains
+pending. Another owner may use that local release under its own recovery rules;
+full rest and consumer coverage remain unresolved. Reconnect/reboot reconciles
+before admission. Old observations do not survive a boot change. Undelivered
+results stay as diagnostic Holds, superseded attempts cannot publish, and eligible
+experiments can resume without a loss charge after close. Keep outputs safe to repeat.
 
-Pending create/start custody is reconciled even after the client or worker dies.
-An empty scan cannot settle an uncertain operation. Exact label/name evidence can
-settle a late create, and a matching running container or a fresh `StartedAt` can
-settle start acceptance; confirmed cleanup must follow. `resolve-docker` uses
-this same journal and inspection path, with no operator assertion escape. Slow, hanging or
-refusing Docker retains DISABLED, returns nonzero, and reports known attempt and
-container IDs; an unavailable inventory is explicitly unconfirmed, not a claim
-that all IDs are known. A missing Docker CLI is **not applicable** only when
-there is no unresolved custody. An unreadable worker registry cannot certify
-pending-operation absence. Saved obligations with a missing CLI still fail.
-Workers refuse startup and Docker create/start dispatch while DISABLED is present.
-Use the same `--host-state-dir` (or `MYCE_HOST_STATE_DIR`) for custom controls.
-Offline `resolve-docker` is serialized with host controls, preserves the flag,
-and records only the operator's independent release proof; it never launches work.
-
-Check exit status and the confirmation line. Systemd success requires both the
-empty worker service cgroup and confirmed labeled Docker cleanup (or Docker not
-applicable). Secondary success remains best-effort registry cleanup. This does
-not fence arbitrary external Docker clients or other users; unregistered delayed
-launches cannot be proved absent. Queue status is separate: verify **disabled by
-operator** and **requeued** when notifications or reconciliation have reached
-it. On failure, keep the flag and rerun disable. After enable, verify a newly
-joined worker and an agreed small job.
-
-## Emergency stop when the myce binary is broken
-
-Run as the worker's OS user. Stop each installed Mycelium worker by its exact
-name; for an instance substitute `myce-worker@gpu1.service` below. Retain its
-cgroup path before stopping, because systemd may remove the empty cgroup:
-
-```sh
-unit=myce-worker.service
-# Use this unit's actual --state-dir (inspect systemctl --user cat "$unit").
-worker_spool="$HOME/.local/share/myce/worker"
-# Snapshot operator intent BEFORE stopping; no myce binary is needed.
-umask 077
-cp "$worker_spool/state.json" "$worker_spool/operator-stop.json.tmp" &&
-  sync "$worker_spool/operator-stop.json.tmp" &&
-  mv "$worker_spool/operator-stop.json.tmp" "$worker_spool/operator-stop.json" &&
-  sync "$worker_spool"
-# If snapshotting failed, fix that error before stopping when practical.
-worker_cgroup=$(systemctl --user show "$unit" -p ControlGroup --value)
-systemctl --user disable --now "$unit"
-systemctl --user show "$unit" -p ActiveState -p MainPID -p ControlGroup
-if [ -n "$worker_cgroup" ] && [ -e "/sys/fs/cgroup$worker_cgroup/cgroup.procs" ]; then
-  cat "/sys/fs/cgroup$worker_cgroup/cgroup.procs"
-  cat "/sys/fs/cgroup$worker_cgroup/cgroup.events"
-fi
-```
-
-Confirm inactive/failed, `MainPID=0`, and an empty retained `cgroup.procs` with
-`populated 0` in `cgroup.events` (including descendants). If the cgroup was
-removed, confirm the stopped unit now reports no `ControlGroup`. Do not treat
-stop-command success alone as proof. Repeat for all owned instances for a
-host-wide emergency stop.
-
-Containers require separate cleanup. Inventory the exact Mycelium attempt label
-and inspect each selected ID before removing only those labeled objects:
-
-```sh
-docker ps --filter label=myce.attempt --format '{{.ID}}'
-docker inspect --format '{{ index .Config.Labels "myce.attempt" }}' CONTAINER_ID
-# Only after confirming its nonempty Mycelium attempt label and ownership:
-docker rm -f CONTAINER_ID
-# After ALL containers for the exact attempt are nonrunning/absent:
-docker network ls --filter label=myce.attempt=ATTEMPT_ID --no-trunc
-docker network inspect --format '{{ index .Labels "myce.attempt" }}' NETWORK_ID
-# Confirm exact ownership; disconnect owned stopped endpoints first.
-docker network rm NETWORK_ID
-# Repeat filtered inventory and confirm no labeled network remains.
-```
-
-For a single instance, filter with `label=myce.attempt=ATTEMPT_ID` from its saved
-spool custody and leave sibling containers alone. Never remove unlabeled or
-Verso/Atlas containers. Pending Docker create/start custody still requires the
-recovery procedure under **Docker cleanup custody**; an empty inventory cannot
-rule out a delayed start.
-
-The marker is exactly `<worker --state-dir>/operator-stop.json`; for the manual
-unit above it is `$HOME/.local/share/myce/worker/operator-stop.json`. Its format is
-an unmodified JSON snapshot of that spool's `state.json`, containing active
-`session`, `identity`, and `job.id`/`job.attempt`. Installed instances can use
-other directories: use the selected unit's actual spool, never a sibling's.
-Startup durably imports intent only if these fields match the current execution
-and the snapshot has no completed result. Stale markers cannot apply to a new
-attempt; preserve the marker with the spool as evidence. This is intent, not
-proof of process/container/network release. Never use `touch DISABLED` instead.
-
-The queue handles host loss and requeues unfinished batch work after its
-configured loss/recovery handling; model calls fail and callers retry them.
-After cleanup and reconnect, the worker's exact-attempt operator acknowledgement
-refunds that attempt's infrastructure loss once, including restoring jobs failed
-only by the three-loss limit. Operator stops acknowledged before loss are never
-charged. Real crashes and other attempts retain their losses. Without this
-snapshot or an ordinary disable receipt, a systemd stop cannot reliably be
-distinguished from a crash and can consume the loss allowance.
-An existing ordered host disable may keep work held until its cleanup receipt
-reconciles. Restore a working binary, then recover the exact unit:
-
-```sh
-systemctl --user enable --now myce-worker.service
-myce enable
-# Instance: enable --now myce-worker@gpu1.service; myce enable --unit myce-worker@gpu1.service
-```
-
-Use the original config/control directory. If enable reports unconfirmed cleanup,
-rerun `myce disable` with the repaired binary before enabling. Never write,
-remove, or replace `DISABLED` by hand: it carries a generation tied to the cleanup
-receipt and queue ordering. Keep the control directory and worker spool.
-
-## Render service files
-
-This local renderer makes a private file from the checked-in template. Edit the
-configuration assignments for the target host, select the role and OS, and run
-from the checkout. For live CUDA/Metal, budget `"0"` means no optional cap; XPU/fixed
-need a positive configured budget. For Mac workers select GPU `"metal"`.
-No service is started by rendering. The Mac token prompt is hidden; Linux reads
-the private EnvironmentFile at service startup instead.
-
-```sh
-python3 - <<'PYRENDER'
-import getpass, os, pathlib, plistlib
-role = "worker"                  # queue or worker
-system = "mac"                   # mac or linux
-queue_ip = "127.0.0.1"           # use the queue LAN address for fleet use
-root = "/Volumes/dev/mycelium/checkpoints"  # host's mount of the shared root
-worker_name, gpu = "mac-worker", "metal"
-budget, reserve = "16", "4"       # examples: choose a conservative allowance
-home = str(pathlib.Path.home())
-replacements = {"REPLACE_HOME": home, "REPLACE_QUEUE_IP": queue_ip,
-    "REPLACE_CHECKPOINT_ROOT": root, "REPLACE_WORKER_NAME": worker_name,
-    "REPLACE_GPU": gpu, "REPLACE_BUDGET_GB": budget, "REPLACE_RESERVE_GB": reserve}
-output = pathlib.Path(home) / ".config/myce/rendered"
-output.mkdir(parents=True, exist_ok=True, mode=0o700)
-if system == "mac":
-    name = f"local.myce.{role}.plist"
-    config = plistlib.loads((pathlib.Path("deploy") / name).read_bytes())
-    config["EnvironmentVariables"]["MYCE_TOKEN"] = getpass.getpass("Fleet token: ")
-    if not config["EnvironmentVariables"]["MYCE_TOKEN"]:
-        raise SystemExit("token required")
-    for i, value in enumerate(config["ProgramArguments"]):
-        for old, new in replacements.items(): value = value.replace(old, new)
-        config["ProgramArguments"][i] = value
-    for key in ("WorkingDirectory", "StandardOutPath", "StandardErrorPath"):
-        config[key] = config[key].replace("REPLACE_HOME", home)
-    config["EnvironmentVariables"]["MYCE_QUEUE"] = f"http://{queue_ip}:7331"
-    data = plistlib.dumps(config)
-elif system == "linux":
-    name = f"myce-{role}.service"
-    text = (pathlib.Path("deploy") / name).read_text()
-    for old, new in replacements.items(): text = text.replace(old, new)
-    if "REPLACE_" in text: raise SystemExit("unresolved service field")
-    data = text.encode()
-else: raise SystemExit("system must be mac or linux")
-path = output / name
-fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "wb") as stream: stream.write(data)
-print(path)  # path only; never print credentials
-PYRENDER
-```
-
-For both roles run the renderer once per role. Installed Mac worker templates
-use Metal; Linux supports the configured GPU selection. Replace the
-`/path/to/rendered` prefix in the following installation commands with
-`$HOME/.config/myce/rendered` (the destination printed above).
-
-## Linux user services
-
-Render private copies of the templates by replacing every `REPLACE_*` value.
-The units use `%h` for the user's home directory. Install only the role needed;
-a queue-only host must not receive an enabled worker.
-
-```sh
-mkdir -p "$HOME/.config/systemd/user"
-# First edit deploy templates into private files outside this checkout.
-install -m 600 "$HOME/.config/myce/rendered/myce-queue.service" "$HOME/.config/systemd/user/myce-queue.service"
-# Worker host instead:
-# install -m 600 "$HOME/.config/myce/rendered/myce-worker.service" "$HOME/.config/systemd/user/myce-worker.service"
-systemd-analyze --user verify "$HOME/.config/systemd/user/myce-queue.service"
-systemctl --user daemon-reload
-systemctl --user enable --now myce-queue.service
-systemctl --user is-active myce-queue.service
-journalctl --user -u myce-queue.service -n 30 --no-pager
-```
-
-For workers substitute `myce-worker.service` in the verification/start commands.
-User services run at login; to run before login, an administrator must explicitly
-configure `loginctl enable-linger USER`. Do not change existing linger settings
-incidentally. Stop/start only the chosen v2 role:
-
-```sh
-systemctl --user stop myce-worker.service
-systemctl --user start myce-worker.service
-# For permanent deactivation:
-systemctl --user disable --now myce-worker.service
-```
-
-Worker service stop uses its configured cgroup timeout (10 seconds by default).
-Drain non-resumable work with `leave` before stopping when it should finish.
-Services use restart-on-failure; an API leave alone is not durable deactivation.
-Use `myce disable` above for bounded, persistent host removal.
-For B70 lending, Verso must own the start/stop decision after its own admission
-checks; this document does not install a controller or bypass existing scheduling.
-
-## macOS launchd
-
-Render templates in `deploy/` into private copies with every `REPLACE_*` value
-resolved, including an absolute home, IP, root, worker name, budget/reserve and
-private token. launchd does not expand `$HOME` or `~` in these fields. The worker
-source and label are `local.myce.worker.plist` and `local.myce.worker`.
-
-```sh
-mkdir -p "$HOME/Library/LaunchAgents"
-install -m 600 "$HOME/.config/myce/rendered/local.myce.worker.plist" "$HOME/Library/LaunchAgents/local.myce.worker.plist"
-plutil -lint "$HOME/Library/LaunchAgents/local.myce.worker.plist"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.myce.worker.plist"
-launchctl print "gui/$(id -u)/local.myce.worker"
-tail -n 30 "$HOME/.local/share/myce/worker.log"
-```
-
-For queue installation use `local.myce.queue.plist` and `local.myce.queue`.
-LaunchAgents start at login. Boot before login requires an administrator-owned
-LaunchDaemon under `/Library/LaunchDaemons`, explicit `UserName`, absolute paths
-and `launchctl bootstrap system`; that consequential machine change is separate.
-Stop via bootout so launchd cannot restart a deliberately leaving worker:
-
-```sh
-launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.myce.worker.plist"
-# Start it again:
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.myce.worker.plist"
-```
-
-The worker plist has an unlimited exit timeout for non-resumable completion;
-choose finish or explicit `leave --now` before stopping. Check status and the
-process exit, not just launchctl's command return.
+If the binary or a daemon is broken, preserve intent, spools and pending operation
+journals. Stop only independently identified Mycelium-owned units/containers;
+a stopped unit, dead Docker client or elapsed deadline alone never proves release.
+Restore a trusted matching binary and rerun close/reconcile. Do not remove intent,
+create a format marker by hand, reset counters or assert unknown operations away.
 
 ## Upgrade
 
-Build and check the new binary first, then drain/stop only v2 services using the
-platform's commands above. Stop workers before replacing their binary; wait for
-owned processes to exit. For a queue upgrade leave workers running only when
-prepared for interrupted model HTTP requests and the recovery grace. Never run
-two queue processes against one database or two workers against one spool.
+Close first and preserve config, secret references, state and manager snapshots.
+Upgrade queue and all workers together; [current worker protocol](current-worker-protocol.md)
+rejects old or missing protocol with HTTP 426. Reinstall by exact `--config` to
+apply the overlay above. Check rollback outcome on any failure; do not open until
+settlement and the consumer's obligations are complete. Then explicitly open
+against the fresh desired revision and verify ready. Root control is deployed
+separately from worker installation.
 
-With queue stopped, make a private recoverable snapshot of the entire local
-state, including SQLite sidecars if present. Preserve NAS checkpoints in place.
-Example on either OS:
+### Old formats: archive plus fresh install
 
-```sh
-set -eu
-umask 077
-go build -trimpath -o "$HOME/.local/bin/myce.next" ./cmd/myce
-upgrade_dir="$HOME/.local/share/myce-upgrade-$(date +%Y%m%dT%H%M%S)"
-test ! -e "$upgrade_dir"
-mkdir -m 700 "$upgrade_dir"
-cp -p "$HOME/.local/bin/myce" "$upgrade_dir/myce.previous"
-cp -Rp "$HOME/.local/share/myce" "$upgrade_dir/state"
-test -x "$upgrade_dir/myce.previous"
-test -d "$upgrade_dir/state"
-mv "$HOME/.local/bin/myce.next" "$HOME/.local/bin/myce"
-```
+Every queue, worker, cache and shared host-control state root needs `.myce-format`
+containing exactly `v3` and a newline. Startup checks all roots before writes.
+Absent/empty roots get a fsynced marker first. Any nonempty root without the exact
+marker refuses with `legacy_state_present`; even pre-marker development state is
+old. There is no migration/converter or old-format fallback.
 
-Restart the selected role, inspect service logs and `myce status`, and verify a
-small agreed job completes. A binary start is not migration acceptance. On
-failure stop again and retain evidence; restore the previous binary and its
-matching state only after checking compatibility. Never overwrite current state
-with an older snapshot while new jobs or results exist. No schema rollback or
-production cutover is implied by this recipe.
+Stop old services/controllers and prevent their restart, archive **whole** data
+roots outside active lookup paths, retain config and secret references, then
+install matching current binaries/units fresh. Inventory saved `state_dir`, `db`,
+`host_state_dir`, `model_cache` and `environment_cache` for custom roots. Preserve
+checkpoints, archives and unique evidence; fresh queues do not adopt old attempts.
+See [the archive and fresh-install procedure](guide-fresh-install.md) for default
+paths, per-card units and the first CLOSED reconciliation/open sequence.
 
 ## Uninstall without deleting data
 
-Drain work and stop/disable v2 services (Linux) or bootout v2 agents (Mac).
-Do not remove shared NAS checkpoints or touch v1. Use Trash, never permanent
-removal. macOS provides `/usr/bin/trash`; Linux requires an available
-`trash-put` from trash-cli. If unavailable, stop after deactivation and retain
-files until a recoverable Trash tool is available.
-
-```sh
-# Linux, after services are inactive:
-command -v trash-put
-trash-put "$HOME/.local/bin/myce" "$HOME/.config/myce" "$HOME/.local/share/myce"
-# Trash each installed v2 unit, then reload the user manager.
-trash-put "$HOME/.config/systemd/user/myce-worker.service"
-systemctl --user daemon-reload
-trash-list
-# Restore uses trash-restore; inspect its recorded original paths before selection.
-```
-
-```sh
-# Mac, after agents are booted out and processes have exited:
-/usr/bin/trash "$HOME/.local/bin/myce" "$HOME/.config/myce" "$HOME/.local/share/myce"
-/usr/bin/trash "$HOME/Library/LaunchAgents/local.myce.worker.plist"
-# Finder > Trash: verify each item is present and Put Back is available.
-```
-
-Trash only actually installed units/plists; queue hosts use their queue file.
-Before moving state, verify a private backup can be read and its binary restored
-using the upgrade snapshot procedure. Afterward verify recovery records/items
-and original paths; do not empty Trash. Deactivation alone does not reclaim disk
-space, and this is not destruction of job history or checkpoints.
+Close and verify release before uninstalling a worker. Inspect
+`myce uninstall --config CONFIG --dry-run`, then run the authorized uninstall.
+It stops/disables the selected boot service and moves its role files to recoverable
+Trash. NAS data stays intact. Preserve shared host-control state, archives and
+spools needed by other instances; do not remove shared state to uninstall one card.
+Restore only from a verified snapshot, then reconcile before any reopen.
 
 ## Monitoring and failures
 
-Use `myce status`, `myce logs ID --follow`, the HTML page, and service logs.
-Monitor SQLite disk/WAL space, worker spools (acknowledged logs/results remain),
-checkpoint space, model errors, and NAS availability. Archive retained spools
-only while their worker is stopped and after checking recovery requirements.
-Missing NAS prevents new starts; running jobs must retry saves themselves.
-Directory access cannot prove a real mount. Strict-majority silence preserves
-assignments; a single lost worker may restart work elsewhere. Disconnected
-copies may overlap until reconciliation. Atomic checkpoints and retry-safe
-outputs are required, not exactly-once external side effects.
-
-Model calls are not durable HTTP requests across queue restart. Started streams
-cannot safely replay. An unloaded/draining model reserves memory until unload
-acknowledges. For full request/catalog contracts and field defaults see
-[reference](job-reference.md), [integration recipes](integrating.md), and the
-[model](guide-model-calls.md) / [checkpoint](guide-resumable-jobs.md) guides.
-
-The Linux user queue uses `PrivateDevices=no`, `NoNewPrivileges=yes`, one Go CPU,
-and initial limits of 25% CPU and 512 MiB RAM. Device namespaces (even with
-`PrivateUsers=yes`) can fail with 218/CAPABILITIES in unprivileged user managers.
-The queue never opens GPU devices and refuses inherited GPU descriptors at
-startup; this is not an OS device-access sandbox. Verify it holds no GPU
-descriptors before accepting a queue. Worker units retain GPU access and
-`Delegate=memory`.
-B70 is queue-only at `192.168.0.153:7331` for the first Spark acceptance test;
-never enable a B70 worker as part of that test. CUDA dedicated/auto inventory
-requires one selected device (or one device in unselected output). Spark
-unsupported memory fields select
-Linux `MemAvailable`; missing/invalid OS telemetry blocks work. Reserve 16 GiB
-initially and verify actual headroom under Atlas load before admission. See
-[the production test plan](production-test-plan.md).
-
-## Private founder test preparation
-
-[The production test plan](production-test-plan.md) is the single ordered founder
-checklist, including cross-builds, private configuration, CPU-only B70 queue,
-Spark unified-memory worker, NAS verification, measured pre-copy, calls, batch,
-faults and undo. Follow it instead of assembling a sequence from these general
-installation recipes. No fleet operations were performed during the local review.
+`myce status`, the HTML page and `GET /api/status` show queue projections with
+redacted job specifications. Use [typed status](guide-status-v3.md) for holds,
+eligibility and last-reported allowance. Inspect exact jobs/logs separately when
+authorized. Status and logs require the privately configured queue credential.
+Never put that token in URLs or copy private payloads into reports.
 
 ## Model master folder, worker cache, and production reservations
 
-Create a NAS `models` folder and mount it on each eligible worker. Keep the
-catalog paths relative to that folder, with trusted `size_bytes` and `sha256`
-for every real model. Download only by an explicit `myce model fetch` command;
-see [model setup](guide-model-calls.md). Model weights never download at load;
-a declared software environment may build on demand.
-Run workers with `--model-root` set to their mount, `--model-cache` on local disk,
-and an explicit `--model-cache-bytes` allowance. Ensure the worker can write the
-NAS folder's `.Trash/myce-model-cache` for recoverable evictions; cross-filesystem
-moves keep a verified recovery copy before releasing local blocks. This can
-consume NAS space, so manage recovery retention manually; never automatically
-empty Trash. Without `--model-root`, evictions use user Trash and may not release
-physical disk blocks. Disk checks fail closed if space is still insufficient.
-
-Status shows cached models, free cache bytes, and copy/disk errors. Cache
-inventory does not block heartbeats while a large copy is in progress. Corrupt or
-partial copies are never published. Restart retains `.partial` bytes and rehashes
-the prefix before resuming; only a full size/SHA-256 check publishes the copy.
-Loading, ready, and draining models cannot be evicted from the local cache.
-`direct_nas: true` is reserved for an operator-approved small model.
-
-Pin with `myce model pin MODEL --project atlas --machine spark` or `--platform
-cuda`; inspect status for assigned worker and ready state. Pins persist across
-queue restarts and protect GPU memory even against production batch work. Optional
-weekday/time-zone windows activate reservations. Unpin with `myce model unpin
-MODEL --project atlas`. A worker leaving still drains its models; availability
-cannot survive loss of the only eligible worker.
-
-Production is considered first at check-in and on submission; a long-poll control
-connection delivers stop requests immediately. Keep check-ins enabled for
-inventory and loss detection; notifications do not replace heartbeats. Resumable
-victims get `--production-stop-grace` (10s default); non-resumable victims stop
-immediately and restart later without a loss retry. Deadline victims still get
-2m and must be resumable. Strongly prefer resumable experiments with frequent
-atomic checkpoints. Status reports production start acknowledgement latency, using queue time to avoid clock skew;
-for batch commands without model loads it measures queue clearance directly.
-
-## Pre-copy models before production
-
-Use `myce model sync MODEL --to MACHINE`, `--to cuda|metal|xpu`, or `--to all`.
-Machine names must have joined once; platform/all requests also apply to future
-workers. Requests persist in the queue SQLite file. Status lists the requests,
-per-worker bytes copied/total, paused/failed/ready state and errors, measured
-bytes per second, and estimated NAS copy seconds per model. `myce model sync
-MODEL --to TARGET --cancel` stops that request and suppresses idle copies for the
-same target/model; partial bytes remain resumable. Repeat without `--cancel` to
-resume. Cancellation cannot override a pin's required copy.
-
-Pins pre-copy to every compatible landing worker, including before a scheduled
-window; only the assigned worker reserves GPU memory and loads the engine.
-An idle worker also copies models needed by compatible queued jobs or recent
-use. Recent-use counts expire after 24 hours without use. Most-needed models go
-first, with pins first. A batch, model load/call, or queue disconnection cancels background copying;
-copy loops check cancellation between bounded chunks and during prefix hashing
-and recoverable eviction. An already outstanding NAS filesystem syscall still
-obeys the OS mount timeout, but it does not block worker heartbeats. No new
-background work starts while real work is assigned.
-
-`myce join --model-copy-parallel 1` is the default: one NAS copy per worker.
-Increase only after measurement; NAS bandwidth is shared. Each copy reserves
-its full size before admission. Partial bytes count toward `--model-cache-bytes`;
-pre-copy eviction protects pins, loaded/loading/draining engines, active batch
-models and active copies, and never replaces a more-used model with a less-used
-one. Refusal is visible in status. Evictions remain recoverable in Trash.
-
-Before a future authorized production test, measure free local disk and leave
-headroom for the OS, checkpoints and other applications. About 100 GB free on
-B70 does not safely support a 100 GiB active cache; choose a smaller allowance
-from live inventory. Spark's larger disk still needs an explicit limit. Queue
-placement uses verified cache affinity and remaining bytes / measured achieved
-copy speed; until measured it uses an explicit conservative 40 MB/s prior.
-This estimates NAS transfer, not engine startup or inference. Speeds are saved
-in worker state and refreshed by actual copies, including resumed transfers.
-Measure a cold copy independently on each worker, then pre-copy every production
-model and confirm verified `ready` cache reports before sending traffic. A pin
-must additionally report its loaded engine ready.
-
-## Add a Mac mini or the 4090 PC in 2 minutes
-
-Prerequisites: the matching `myce` binary, mounted NAS with an existing
-`mycelium/checkpoints` directory, uv on PATH, and an existing queue address and
-fleet token. A Windows 4090 PC uses its Linux installation/WSL environment with
-CUDA visible to `nvidia-smi`; native Windows services are not supported.
-Create private `~/.config/myce/fleet.env` containing literal `MYCE_TOKEN` and
-`MYCE_QUEUE` assignments, as in the deployment sequence below. Avoid putting
-credentials in arguments. `--environment-file PATH` selects a different file.
-
-On a Mac mini (adjust the mount name):
-
-```sh
-export MYCE_QUEUE=http://QUEUE_LAN_ADDRESS:7331
-myce install worker --nas /Volumes/NAS --dry-run
-myce install worker --nas /Volumes/NAS
-myce doctor
-```
-
-On the Linux 4090 PC:
-
-```sh
-export MYCE_QUEUE=http://QUEUE_LAN_ADDRESS:7331
-myce install worker --nas /mnt/nas --dry-run
-myce install worker --nas /mnt/nas
-myce doctor
-```
-
-Pass `--environment-config NAS/mycelium/environments/catalog.yaml` and
-`--model-config NAS/mycelium/models/catalog.yaml` when using those catalogs (substitute
-absolute mounted paths). The setup summary shows OS/architecture, GPU platform,
-memory mode/reserve, checkpoint root, cache locations/limits, config and service.
-Apple Silicon uses unified memory with 4 GiB reserve, ordinary CUDA uses
-nvidia-smi with 2 GiB reserve, and Spark GB10 uses unified memory with 16 GiB
-reserve. Integrated Intel XPU uses OS memory with 8 GiB reserve. For discrete
-Intel GPUs, setup uses the device memory reported by verbose sycl-ls; if that
-cannot be measured, supply an explicit fixed device budget. Unknown GPU or
-memory detection fails clearly. OS CPU architecture is detected, not emulated.
-
-Default local setup is `~/.local/share/mycelium/worker`, with its own binary,
-config and state; credentials stay in the private fleet EnvironmentFile. Linux uses `myce-worker.service`; macOS uses
-`local.mycelium.worker.plist` / `local.mycelium.worker`, unlike the manual template.
-Automatic CUDA setup requires exactly one GPU unless `--device` selects a card.
-Use `--instance` for separate Linux per-card units. The service reads the private
-0600 fleet EnvironmentFile, and preserves the installer's executable PATH so
-launchd can find tools in a user directory. Re-run with flags and `--force` for
-changed operational settings. A worker starts with
-an empty environment cache and builds waiting-job software on demand.
-
-Linux systemd *user* services start at login. Boot before login additionally
-requires an administrator to enable lingering for that user (`loginctl
-enable-linger USER`); the installer deliberately does not obtain privileges.
-A macOS launchd agent starts when its user logs in, not before login. First
-software/model preparation can take longer than machine registration.
-
-To install the queue instead, provide a LAN bind address explicitly:
-
-```sh
-myce install queue --nas /mnt/nas --listen 0.0.0.0:7331 --dry-run
-myce install queue --nas /mnt/nas --listen 0.0.0.0:7331
-myce doctor --config ~/.local/share/mycelium/queue/config.json
-```
-
-Queue setup defaults to loopback binding. Point clients/workers at its reachable
-LAN address. Mount the NAS before installing. Linux installs require the exact `--nas` root
-in `/proc/mounts` by default. Only local tests should opt out with
-`--require-mounted-nas=false`. Installers create only the `mycelium/checkpoints`,
-`mycelium/models` and `mycelium/environments` namespace, refuse symlinks, and
-write/sync/rename/remove a small generated probe in each directory. Doctor checks the mount and
-write access (its generated probe is retained in NAS `.Trash`), queue
-reachability/authentication, GPU visibility for workers, uv, free disk space,
-and Linux user lingering (doctor fails unless it is enabled).
-A healthy doctor is a prerequisite check, not a real-hardware workload proof.
-
-`myce uninstall --dry-run` previews removal of the worker setup. `myce uninstall`
-stops/disables its service, then moves service, private credentials, binary,
-spools and caches to recoverable local `.Trash` beneath the installation root.
-Use `--config .../queue/config.json` for queue removal. Nothing on the NAS is
-removed. Review recovery contents privately; never commit credentials or empty
-Trash automatically. An existing installation is never overwritten silently.
-
-See [environments](environments.md) for catalog authoring, lock files, build
-logs, cache limits, and interrupted-build recovery. Laptop tests use fake GPU
-probe output, temporary home directories and injected service runners; they
-never install actual boot services.
-
-## Short B70 and Spark deployment
-
-Build the same revision for both hosts, then copy the amd64 binary to the B70
-and arm64 binary to the Spark's staging directory. These commands are a recipe;
-addresses, NAS mounts and device budgets are operator inputs. No command here
-changes legacy Verso ownership, Atlas services, earlyoom, mounts or user lingering.
-The production handoff and native device/memory acceptance remain separate gates.
-
-```sh
-GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/myce-linux-amd64 ./cmd/myce
-GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/myce-linux-arm64 ./cmd/myce
-scp /tmp/myce-linux-amd64 <B70_USER>@<B70_ADDRESS>:myce
-scp /tmp/myce-linux-arm64 <SPARK_USER>@<SPARK_ADDRESS>:myce
-```
-
-On each host, create the same private fleet file without displaying its token.
-Replace the placeholder privately; use simple literal assignments (no `export`,
-shell interpolation or multiline values). Installed units load this file and the
-worker's captured GPU runtime file; secrets never enter the unit or argv.
-
-```sh
-umask 077
-mkdir -p "$HOME/.config/myce"
-cat > "$HOME/.config/myce/fleet.env" <<'ENV'
-MYCE_TOKEN=<FLEET_TOKEN>
-MYCE_QUEUE=http://<B70_LAN_ADDRESS>:7331
-ENV
-chmod 600 "$HOME/.config/myce/fleet.env"
-chmod 700 "$HOME/myce"
-```
-
-On the B70, prepare the two policy inputs (retain existing approved policies
-rather than overwriting them). The hold protects production **inside Mycelium**;
-Verso separately controls legacy production. The shared **3 GiB** host budget
-accounts for legacy production outside Mycelium; it is 3 GiB across both cards.
-
-```yaml
-# ~/.config/myce/projects.yaml
-verso:
-  weight: 1
-  allowed_machines: [b70-gpu0, b70-gpu1, spark]
-```
-
-```yaml
-# ~/.config/myce/hosts.yaml
-hosts:
-  b70:
-    production_hold: true
-  spark:
-    production_hold: false
-```
-
-Source the trusted existing oneAPI runtime before installing B70 workers. Replace
-`<B70_NAS_MOUNT>`, `<GPU0_GIB>`, `<GPU1_GIB>` and `<GPU_RESERVE_GIB>` with the
-mounted root and qualified device budgets. Do not use `--allow-deviceless`.
-
-```sh
-"$HOME/myce" install queue --nas <B70_NAS_MOUNT> \
-  --listen <B70_LAN_ADDRESS>:7331 \
-  --project-config "$HOME/.config/myce/projects.yaml" \
-  --host-config "$HOME/.config/myce/hosts.yaml"
-"$HOME/myce" install worker --nas <B70_NAS_MOUNT> \
-  --name b70-gpu0 --host-id b70 --instance gpu0 --device 0 \
-  --gpu xpu --memory-mode fixed --memory-gb <GPU0_GIB> \
-  --reserve-memory-gb <GPU_RESERVE_GIB> --reserve-host-memory-gb 4 \
-  --host-memory-budget-gb 3 --memory-ceiling-slack-gb 0 --start-disabled
-"$HOME/myce" install worker --nas <B70_NAS_MOUNT> \
-  --name b70-gpu1 --host-id b70 --instance gpu1 --device 1 \
-  --gpu xpu --memory-mode fixed --memory-gb <GPU1_GIB> \
-  --reserve-memory-gb <GPU_RESERVE_GIB> --reserve-host-memory-gb 4 \
-  --host-memory-budget-gb 3 --memory-ceiling-slack-gb 0 --start-disabled
-```
-
-`--start-disabled` writes an ordered per-unit DISABLED flag and cleanup receipt
-before installation, registers the unit for boot without starting it, and adopts
-its spool into host control. Unit conditions and the service entry point prevent
-joining, including after reboot. An existing host-wide gate and receipt stay
-intact. Reinstallation with this flag confirms cleanup of an existing worker;
-unconfirmed native/Docker custody fails closed. When Verso separately releases
-ownership, clear any shared gate while the card gates remain, then explicitly
-`myce enable --config .../worker-gpu1/config.json --unit myce-worker@gpu1.service`
-for the released card. Enabling GPU0 needs its own coordinated production handoff.
-The host memory allowance is configured explicitly while the whole host is
-CLOSED. Open/close switches preserve its bytes; do not rewrite it for each owner
-or each run. Positive install-time flags are UNQUALIFIED migration input and
-cannot supply an active runtime allowance before that explicit configuration.
-
-```sh
-# After closing the host, preserve its conservative existing input:
-myce host-memory-budget configure <EXISTING_CONSERVATIVE_GIB> --host-state-dir <HOST_STATE_DIR>
-myce host-memory-budget show --host-state-dir <HOST_STATE_DIR>
-```
-
-The existing host controller serializes the CLOSED check and atomic allowance
-write in `host-state.json`. RC roots must be archived before a fresh install;
-there is no memory-budget file converter. Reports that disagree
-on the allowance fence further admission until they agree. Aggregate charges
-include both devices, model residency, preparation, sidecars and retained
-unconfirmed releases, including slack. Status shows effective bytes and
-UNQUALIFIED qualification; reservations are not measured RSS.
-
-Neither the former conservative setting nor an example number qualifies native
-capacity. A separately authorized simultaneous-envelope measurement plus
-headroom is required before native FULL admission. This example authorizes no
-native operation or ownership switch.
-
-On the Spark, after the coordinated Atlas loan, use the unified GPU pool,
-**16 GiB** reserve and **105 GiB** host budget. Keep earlyoom armed.
-
-```sh
-"$HOME/myce" install worker --nas <SPARK_NAS_MOUNT> \
-  --name spark --host-id spark --device 0 --gpu cuda --memory-mode unified \
-  --reserve-memory-gb 16 --reserve-host-memory-gb 16 \
-  --host-memory-budget-gb 105 --require-memory-ceilings
-```
-
-Append `--dry-run` to each install command to inspect its generated unit without
-writes or service changes. A dry run does not prove systemd or NAS acceptance.
-After actual installation, inspect exact units and authenticated `myce status`;
-B70 workers must remain unjoined. Use `myce doctor --config PATH` for prerequisites.
-Source fleet.env privately (`set -a; . "$HOME/.config/myce/fleet.env"; set +a`)
-for client commands, never with shell tracing or token output.
-
-`--require-memory-ceilings` checks the worker's own service cgroup at every
-startup: memory delegation, confirmed worker leaf membership, an empty service
-parent, and create/write/read/remove of a child with `memory.max=134217728`,
-`memory.swap.max=0`, `memory.oom.group=1`. Failure exits 78 with a clear message;
-`RestartPreventExitStatus=78` prevents a restart loop. Required workers reject
-batch attempts and model loads with unset/zero `host_memory_gb`, even without a
-host budget. This is a real kernel-control preflight, not GPU workload proof.
-Qualify actual per-attempt limits and GPU/driver accounting before admission.
-
-Queue defaults: loopback listen; role-local `state/myce.db` and `state/uploads`;
-16 GiB upload spool; 7-day log retention; 3-minute restart grace; production,
-deadline and experiment loss timeouts 5s/20s/60s. Queue units set
-`PrivateDevices=no`, `NoNewPrivileges=yes`, `Nice=10`, `CPUQuota=25%`,
-`MemoryMax=512M`, `TasksMax=64`, `GOMAXPROCS=1` and a 150s stop timeout. Flags
-`--no-new-privileges`, `--nice`, `--cpu-quota`, `--memory-max`
-and `--tasks-max` change that envelope. Worker defaults: role-local spool,
-`~/.local/share/myce` host control, 1s heartbeat, 4 GiB host reserve, 0.125 GiB
-ceiling slack, zero swap, 100 GiB model cache and 20 GiB environment cache.
-NAS roots default to `<nas>/mycelium/{checkpoints,models,environments}`.
-The install help lists all policy, path, timeout, cache and memory overrides.
+Models use immutable NAS masters, verified file-store imports or explicit local
+source approvals. Loading never downloads weights. Catalog hashes and byte counts
+identify content; cache verification precedes publication. Protect loaded/pinned
+files from eviction and keep recoverable copies. Use `model sync` for pre-copy;
+partial transfers and pins persist through restart. See [models](guide-model-calls.md)
+and [files](guide-files-v3.md) for transfer, retention and cache limits.
 
 ## General model servers and joint measurement
 
-Catalog `engine: server` owns a foreground HTTP process with `start_command`,
-`health_url`, `ready_timeout`, optional `stop_command`, `stop_timeout`, named
-`environment`, `memory_gb`, and `device`/`device_env`. `engine: vllm` is a preset
-with served name, context, KV dtype, utilization and extra parser arguments.
-Single-file masters or immutable `files` manifests use the same cache and pins.
-See [general server contract](guide-servers.md) for full fields and examples.
-
-Call `/models/NAME/PATH` with any method, body and end-to-end headers, plus the
-usual fleet token, project and priority. Responses stream; request bodies have
-an explicit 8 GiB generic disk-spool limit (OpenAI JSON retains 64 MiB).
-The worker streams generic uploads to the engine. Batch `needs.model` remains a scheduling hint, not a
-request to launch a server. Queued commands never inherit the fleet token.
-
-`join --device ID` isolates commands/engines to one card and binds CUDA memory
-probes. XPU fixed admission cannot detect other owners. Before enabling warm
-production pins, run `myce measure` locally in an approved maintenance window
-with the exact worker identity/spool, explicit platform/device/budget and model
-list. It holds all models together, optionally warms them, writes JSON and text,
-and unloads them. Missing native counters fail visibly. See the separate
-[B70 weekend measurement](production-test-plan.md#b70-gpu0-weekend-joint-residency-measurement)
-checklist; this is not the first-machine Spark acceptance test.
+General HTTP servers, llama.cpp and vLLM share the queue's engine lifecycle,
+placement, pins and release custody. See [servers](guide-servers.md) for routing,
+local secrets, approved folders, timeout/retry behavior and log policy.
+`myce measure` loads declared models together, optionally overlaps warm-ups,
+records observations, and unloads. Use explicit runtime/device/worker identity
+and an authorized maintenance window. Measured peaks and headroom, not model-file
+sizes or a guessed budget, qualify native admission. The [native test plan](production-test-plan.md)
+keeps this proof separate from laptop fixtures.
 
 ## Host RAM admission and ceilings
 
 Declare batch `needs.host_memory_gb` or catalog `host_memory_gb` in GiB for
 additional CPU-side memory, including the measured load and overlapping
-activation peak. NeMo's historical 9.58 GiB peak suggests a roughly 10 GiB
-request, but qualify the actual wrapper and workload. Unset/zero retains
+activation peak. Qualify the actual wrapper and workload. Unset/zero retains
 GPU-only admission on uncapped hosts. A configured host ceiling budget rejects
 zero host declarations, including on sibling workers. Host requests require
 valid live RAM telemetry.
@@ -1088,7 +333,7 @@ parent. Each native batch attempt and model-server execution gets a unique
 The worker writes and reads back `memory.max`, `memory.swap.max` and
 `memory.oom.group=1`, then confirms the gated process's `cgroup.procs` membership
 before releasing the command. Model stop helpers share the server's ceiling.
-No attempt is moved into a separate systemd scope. `myce disable` therefore
+No attempt is moved into a separate systemd scope. `myce host close --local` therefore
 still stops the worker **and every attempt child**, and its parent
 `cgroup.events populated` check includes those descendants.
 
@@ -1178,192 +423,19 @@ exact worker spool. Loads stay serial; N bounds requests after all models load.
 load and warm-up seconds and record the combined sampled peak. Brief spikes
 can be missed; real CUDA/XPU qualification remains necessary.
 
-## Forget old queue registrations
-
-`myce host-queues list` prints the registered queue URLs in this OS user's shared
-host state. `myce host-queues forget <queue-url>` forgets one stale registration
-without contacting the queue. Both accept `--host-state-dir DIR`; `--config PATH`
-checks an installed worker config and selects its host-state directory unless
-explicitly overridden. Flags can follow the URL, for example:
-
-```sh
-myce host-queues list --host-state-dir "$HOME/.local/share/myce"
-myce host-queues forget http://127.0.0.1:12345 --host-state-dir "$HOME/.local/share/myce"
-```
-
-Forget refuses a queue used by a configured installed worker or a locked local
-worker spool. It checks default installation configs, the config beside a
-registered spool, and the installed config path recorded by updated workers.
-For an older custom installation, supply its `--config`; an unverifiable legacy
-worker unit is refused. `--force` explicitly overrides these checks. A forgotten
-queue is registered again when a worker configured for it rejoins.
-
-The operation uses the host control/launch locks and one fsynced atomic,
-generation-bearing tombstone. Existing disable and pending enable receipts
-ignore the forgotten registration; remaining queues retain their original
-control generations and can reconcile independently. Worker/unit/spool custody
-is retained for cleanup. No worker is stopped, no host/unit flag is cleared,
-and no queue admission state is changed remotely. Forgetting a queue is not
-proof of cleanup or an instruction to resume work.
-
 ## Docker cleanup custody
 
-For opt-in `run.docker` batches, the local `<identity>.docker.json` record is
-fsynced before create/start and before TERM intent is delivered. It retains the
-unique attempt identity, exact container ID when known, daemon endpoint, pending
-operation, stop deadline and forced/released disposition. Preserve the worker
-spool during upgrades/restarts; an empty replacement spool is not release proof.
+Managed Docker batches use exact immutable attempt labels and a durable create/start
+journal. Inventory every configured endpoint, including sidecars and late accepted
+operations. Only Mycelium-owned labeled objects may be stopped. Native cgroup
+release alone does not settle daemon custody. Paused/restarting containers are
+live; an unavailable endpoint or unknown create/start disposition stays UNKNOWN
+and charged. Preserve journals and stopped evidence containers.
 
-A worker service restart during Docker grace normally reaches systemd's
-`TimeoutStopSec=10s` and ends in SIGKILL; this is the intended stop bound.
-This is safe because worker state is crash-safe: authoritative saves write a
-temporary file, fsync it, atomically rename it, then fsync the directory, while
-systemd's `KillMode=control-group` clears native children.
-Native mid-grace restart acceptance at `eeaa8d8` proved recovery with one
-successful attempt, zero losses, and sidecar KILL at the original deadline.
-
-The worker reports creating/start pending, running, stopping, released or
-**cleanup unconfirmed**. A normal stop attempts TERM at most once per exact
-container, after saving permanent intent. Failed intent persistence sends no
-TERM and retries the write; failed or uncertain delivery never clears intent or
-resends TERM. KILL is idempotent and retried at the original injected-clock grace
-boundary (normally two minutes), even if spool writes fail. Restart preserves
-that deadline. Existing forced containment/operator cleanup remains immediate.
-Every matching container is inspected for the exact ownership label before
-signaling. A final successful scan must prove all are nonrunning (or absent), followed by owned endpoint disconnection, labeled
-network removal and confirmed network absence. Stopped container objects remain
-as evidence until retention expires; private networks are removed.
-
-Before release, every main/sidecar exit code and private stderr tail is saved
-in the attempt record and `<identity>.docker-evidence.json` (mode 0600). The tail
-is limited to the last 256 lines and 64 KiB per container. Sidecar stderr stays
-out of queue logs, results and public status. Separate evidence survives container
-retention; missing/mismatched evidence blocks sidecar disposal. TERM outcome is
-`sent`, `error`, or `unknown-after-restart`; `sent` means Docker returned success,
-not that the application completed graceful shutdown. For exit 137 with TERM
-`error` or `unknown-after-restart`, review the private evidence; no further action
-is required beyond that review. Do not clear intent, edit the spool or resend
-TERM. Preserve evidence before emergency container disposal; never publish raw stderr.
-
-Label-discovered orphans have no durable attempt record. They receive one bounded
-`docker stop --time <grace>` per exact container/daemon per worker process lifetime.
-Reconstructing cleanup in that process never repeats stop, including after an
-uncertain error. Docker grace rounds up to whole seconds; the CLI timeout is that
-grace plus the normal call allowance, bounded by any enclosing cleanup deadline.
-After grace, positive running inspection permits idempotent KILL retries. A fresh
-process may issue one new orphan stop. Orphan reports explicitly say exit
-code/stderr was not retained, and never claim private attempt evidence was saved.
-
-`join --container-retention 24h` keeps stopped containers for 24 hours after
-confirmed cleanup and successful queue result acknowledgement (the default).
-`--container-retention 0` requests removal immediately after acknowledgement;
-negative durations are refused. `install worker` accepts the same flag and
-persists it in the worker config. The worker checks retention in the background
-once per minute and after each acknowledgement when retention is zero, using
-its injected clock. Restart preserves the first acknowledgement timestamp.
-
-Removal inspects both `myce.attempt=<execution ID>` and `myce.worker=<worker ID>`
-on every container and requires a settled nonrunning state. Docker removal
-never uses force. Running, unconfirmed, unacknowledged, active, foreign-worker,
-and unlabelled containers are protected. Failures are logged and retried on the
-next retention sweep; they never become cleanup failures or fence admission.
-Successful retention also removes only that attempt's cidfiles, Docker custody,
-result and acknowledgement records. Captured Mycelium logs keep their independent
-`--log-retention` policy. Existing evidence without a durable acknowledgement
-marker, including pre-upgrade evidence and rejected stale results, is preserved;
-retention does not guess acknowledgement from file age or queue job state.
-Except for the bounded orphan stop above, each lifecycle Docker call has a
-2-second I/O timeout; retries run independently of heartbeat/control, checkpoint
-walks and queue log upload. Grace is never renewed by a Docker retry. Restart reconciles the saved daemon and containers
-before fresh readiness, including when the old CLI/process group has vanished.
-
-If the exact main's terminal outcome was durably recorded before restart and
-before sidecar cleanup, recovery resumes that cleanup at the saved deadline.
-Success requires the full path: confirmed container cleanup, private evidence,
-network removal/absence, durable release, output finalization, then result save.
-Expected sidecar TERM/KILL after main exit zero does not count as worker loss.
-A restart before durable main completion remains a loss, even if cleanup later
-observes exit zero. Existing memory, OOM and containment failures remain failures.
-Operator-confirmed release alone never establishes main success. Replayed results
-must match the saved job, attempt, machine and session; old custody release is
-separate from completion of any replacement attempt. A crash after durable release
-but before result save remains interrupted and retries. A failed release write or
-network-removal retry may conservatively report containment failure for disconnected
-containers; missing private attachment is never accepted.
-
-An empty scan does not settle a timed-out create/start. A definite daemon
-refusal can settle without execution. A lost start response can settle only
-after positive inspection witnesses the exact created container running or a
-`StartedAt` at or after the durable start dispatch,
-followed by confirmed cleanup: the adapter sends one start, never retries it,
-and rejects restart policies. Until that witness, a future delayed start is
-still possible. If no definite disposition or positive acceptance evidence
-arrives, retry cleanup indefinitely and preserve exclusion; do not clear state
-or treat a daemon restart, worker reboot, elapsed grace or empty scan as proof.
-After two minutes of unresolved custody, the queue durably marks that exact
-attempt escalated, emits `event=docker_cleanup_escalated` in its log, and shows
-**operator action required (myce resolve-docker)** in `myce status` and the status
-page. The injected Clock measures from the first unresolved observation; retries
-and queue restart do not renew it. The reservation stays held. This bounds silent
-waiting, not physical recovery: Verso has only the B70, so alternate placement is
-not a recovery plan for its production jobs.
-
-Operator recovery uses verified offline custody:
-
-1. Close the host with `myce host close --local`, selecting the installed worker
-   account/config when required. Keep the worker stopped and preserve its spool.
-2. Read the opaque identity from that worker's `state.json` and matching
-   `<identity>.docker.json`. Run
-   `myce resolve-docker --state-dir /path/to/spool --attempt-id ID`, adding
-   `--config /path/to/config.json` for a custom installation. Run this command as
-   the installed worker account; root uses the protected `myce host reconcile
-   --local --worker-user USER` entry instead. The selected config or host registry
-   must name that exact spool.
-3. The dropped worker executor takes the host reconciliation and exclusive worker
-   locks, inspects the saved endpoint with exact attempt labels, reconciles the
-   operation journal and performs scoped cleanup. It records release only after
-   verified terminal disposition and stopped, nonrestartable inventory. A timeout,
-   empty scan or external assertion cannot clear unknown acceptance. Keep the hold
-   and escalate maintenance if positive disposition evidence remains unavailable.
-4. Run `myce host reconcile --local` through the same installed identity. Root's
-   fresh cgroup/proc/device observation is required for full local exclusion.
-   Confirm queue settlement before opening the host. Exact Docker reconciliation
-   alone neither opens the launch gates nor certifies whole-host exclusion.
-
-The old `--confirm-gone` flag is rejected. Persisted operator assertions from an
-older binary remain UNKNOWN, and cannot authorize release or evidence disposal.
-Result delivery does not gate a confirmed session discharge; undelivered results
-stay in the spool as nonblocking diagnostic evidence, and stale replay is rejected.
-
-Queue obligations survive stop expiry, machine loss, queue restart and fresh
-worker sessions, even on hosts without production-hold policy. Unconfirmed
-Docker custody blocks new batch/model/preparation allocations on the implicated
-physical host, retains declared host RAM, and appears in CLI/HTML/JSON status.
-Production may use other eligible hosts; it cannot borrow memory from that
-obligation. An attempt-specific release acknowledgement precedes log upload;
-stale acknowledgements cannot settle a different attempt. Job retry/terminal
-state after worker loss is separate from the old host's physical custody.
-
-The default suite uses a fake CLI plus daemon state outside the CLI's process
-group; no Docker daemon or GPU is needed. The optional
-`TestDockerRealCheckpointResume` is disabled unless `MYCE_REAL_DOCKER_TEST=1`
-and `MYCE_REAL_DOCKER_IMAGE` names an already-local digest-pinned shell image.
-It never pulls an image and retains uniquely labelled stopped test containers.
-Do not enable it on a shared Mac or fleet without current authorization.
-Native device/driver release and aggregate memory limits remain separate gates.
-
-Linux installer EnvironmentFile and ConditionPathExists paths are unquoted;
-paths containing whitespace, quotes or backslashes are rejected. ExecStart
-arguments remain quoted. `--private-devices=true` is rejected for Linux user
-queues; the default uses the startup GPU-descriptor check described above.
-Installer linger advice reads loginctl and requests enable-linger only when off.
-
-## Replacing an RC installation (#90)
-
-Old formats are refused; operators archive and install fresh. Stop the old
-services and prevent restarts before moving their data. Keep configuration and
-secret references, replace both worker template instance definitions through
-`myce install`, and leave admission CLOSED. Follow [Retiring RC state](guide-fresh-install.md)
-for archive paths, fresh-install settlement and revision-bound open. There is
-no conversion command. Read the open revision from status `desired.revision`,
-not the null status `accepted_revision`. Fleet activation is a separate task.
+Use `myce resolve-docker --state-dir WORKER_SPOOL --attempt-id ATTEMPT_ID`
+(with installed identity/config options where required) to reconcile exact offline
+custody. This uses the same worker executor and inspection path; it does not
+accept an operator assertion or launch work. Repeat host close/reconcile afterward
+and require fresh rest evidence. See [managed Docker](job-reference.md#managed-docker-batch-commands)
+for supported command/network/sidecar forms. Unmanaged containers remain outside
+this containment contract.

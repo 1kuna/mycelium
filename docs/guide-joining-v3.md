@@ -1,4 +1,4 @@
-# Automatic joining on the v3 branch
+# Automatic joining
 
 A new hypha uses Bonjour/mDNS to find the mycelium. Discovery is only an
 address finder: a private invitation supplies the queue's certificate pin and
@@ -35,12 +35,12 @@ An existing hypha can invite another using its installed invitation:
 myce invite --joining-file joining.json --out invitation.json
 ```
 
-This slice uses the existing installer, including its GPU, service, software and
+Joining uses the installer, including its GPU, service, software and
 mounted-storage prerequisites. Add the usual `--nas` option when that mount is
 not at the installer's default location. Automatic joining supplies the address
 and trust; it does not mount storage or install GPU drivers. The installer
 copies the invitation into its private installation directory, and the service
-uses that copy on future starts. Existing disabled-host flags still take
+uses that copy on future starts. CLOSED host intent takes
 precedence over joining. Foreground joining is also available:
 
 ```sh
@@ -51,7 +51,7 @@ myce status --joining-file invitation.json
 Foreground join saves the authenticated address back into the private invitation.
 `MYCE_JOINING_FILE` can select it for these commands. Separate commands with
 independent parsers, such as `wait` and `model`, retain their existing explicit
-URL/token configuration in this slice.
+URL/token configuration.
 
 ## Address and network behavior
 
@@ -115,11 +115,11 @@ login/reboot or app-launch behavior.
 
 WSL2 default NAT does not reliably carry mDNS. Use a saved/supplied address, or
 mirrored networking with appropriate private-network and Hyper-V firewall rules.
-Mycelium does not change WSL networking or firewall configuration. Windows host
-owner-presence signals and daily-use politeness remain separate work; this
-slice runs no throughput benchmark, idle load or stress test.
+Mycelium does not change WSL networking or firewall configuration. Windows host owner-presence and power signals use the
+[host bridge](guide-wsl-host-bridge.md). Joining runs no throughput benchmark
+unless explicitly requested; see the benchmark section below.
 
-Explicit v2 `MYCE_QUEUE` plus `MYCE_TOKEN` joining continues to work as before,
+Explicit `MYCE_QUEUE` plus `MYCE_TOKEN` joining continues to work as before,
 including the existing HTTP transport. The pinned transport applies to the
 invitation path; it does not convert existing model callback transports to TLS.
 This is still a shared credential, without per-hypha revocation or approval.

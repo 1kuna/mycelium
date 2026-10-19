@@ -1,8 +1,7 @@
-# Retiring RC state (#90)
+# Archive old state and install fresh
 
 Old formats are refused; operators archive and install fresh. There is no
-in-place converter, recovery journal, or `myce host convert` command. The RC
-installation's queued work was canary/test work, and is not imported. Production
+in-place converter, recovery journal, or `myce host convert` command. Old queued work is not imported. Production
 that runs outside the queue stays under its existing owner's control.
 
 Every current state root carries `.myce-format` containing `v3` followed by a
@@ -37,7 +36,7 @@ old checkpoints or attempts. Do not remove any archive as part of this procedure
 
 Keep each role's `config.json`, binary/service locations, and private secret
 references in place. Run `myce install queue --config <queue-config>` and
-`myce install worker --config <worker-config>` for each worker. The WP7 overlay
+`myce install worker --config <worker-config>` for each worker. The installer overlay
 reads the saved configuration first; omitted options preserve queue address,
 NAS, name, Docker endpoint, environment-file reference, and all other saved
 settings. Only explicitly supplied flags change configurable values. An RC
@@ -48,7 +47,7 @@ mechanism; old JSON credentials are not converted.
 `myce-worker@gpu0.service` and `myce-worker@gpu1.service` are still valid current
 unit names. Install replaces each selected RC unit file at that same path with
 the current definition, including `_host-start-check`, and reloads the manager.
-It preserves the previous file through the WP7 installer transaction. No second
+It preserves the previous file through the installer transaction. No second
 worker unit is created. Workers are enabled but never started by install; each
 must be installed before the operator starts any worker. Current closed upgrades
 do not open the host or renew its revision.

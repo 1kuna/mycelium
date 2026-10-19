@@ -1,4 +1,4 @@
-# Onboarding benchmark (experimental v3)
+# Onboarding benchmark
 
 Throughput measurement is opt-in. Pass `myce join --onboarding-benchmark` to
 measure before admission, or use the explicit `myce benchmark` command below.

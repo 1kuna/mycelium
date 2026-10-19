@@ -3,7 +3,7 @@
 Submit a kind of work or a program as described in
 [Write an extension](write-an-extension.md). No hardware fields are needed.
 Optional `size_hint.memory_gb` and `size_hint.host_memory_gb` are lower bounds,
-never requirements to submit a job. Existing v2 command jobs keep their contract.
+never requirements to submit a job. Plain command jobs keep their contract.
 
 The queue requires a qualified extension for the work and accelerator type.
 The capability profile bounds each hypha's capacity. Separate memory must fit
@@ -13,7 +13,7 @@ memory must fit their sum in one shared pool. For example, 64 GiB RAM plus
 128 GiB unified memory fits that work if enough of its shared pool is free.
 Live free-memory checks, operator budgets and reservations still apply. Unknown
 native profile sizes wait; explicitly fake resources use their configured
-allowance. Older workers without profiles retain the v2 admission contract.
+allowance. Workers must report the current protocol and a capability profile; unknown capacity withholds admission.
 
 Among free eligible hyphae, measured reference throughput now supplies a
 provisional predicted finish time, including file delivery and known preparation.
@@ -29,9 +29,9 @@ observed needs with 25% headroom, never below the extension's reservations or
 optional hints. Learning is per project, program description, arguments,
 configuration, input references, frozen extension digest and accelerator platform.
 Changing any of these starts a new learning record. Input references must be
-immutable: the current NAS transport cannot detect replacement bytes at submit
-time. Use a new reference when changing an input; content-addressed transport
-is separate work (#24). Measurements are observations, not a guarantee that
+immutable: NAS transport cannot detect replacement bytes at submit time. Use a
+new reference when changing an input; [file-store inputs](guide-files-v3.md)
+carry content identities. Measurements are observations, not a guarantee that
 future data-dependent executions need exactly the same memory.
 
 The command runner records OS peak process RAM. Extensions may write a bounded

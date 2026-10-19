@@ -19,7 +19,7 @@ PRIVATE_OPS.md
 ops/private/
 .reports/
 
-# v2 local queue and quick-start files
+# Local queue and quick-start files
 /myce.db*
 /checkpoints/
 /job.yaml
