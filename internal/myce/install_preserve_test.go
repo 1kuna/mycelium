@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func preserveWorkerFixture(t *testing.T) (ServiceConfig, string) {
@@ -28,6 +30,154 @@ func preserveWorkerFixture(t *testing.T) (ServiceConfig, string) {
 	return c, source
 }
 func fakeInstallManager(context.Context, string, ...string) ([]byte, error) { return nil, nil }
+
+type inactiveInstallUnit struct{}
+
+func (inactiveInstallUnit) Error() string { return "inactive fixture unit" }
+func (inactiveInstallUnit) ExitCode() int { return 3 }
+
+func TestInstallManagerRollback(t *testing.T) {
+	for _, role := range []string{"worker", "queue"} {
+		for _, active := range []bool{false, true} {
+			for _, failure := range []string{"reload", "enable", "restart"} {
+				if role == "worker" && failure == "restart" {
+					continue // Workers are never started or restarted by install.
+				}
+				t.Run(fmt.Sprintf("%s/active=%t/%s", role, active, failure), func(t *testing.T) {
+					c, source := preserveWorkerFixture(t)
+					if role == "queue" {
+						var err error
+						c, err = PlanInstall(role, c.NAS, "", c.NAS, c.Queue, c.Name, c.Detection)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := Install(context.Background(), c, source, "fixture", fakeInstallManager); err != nil {
+						t.Fatal(err)
+					}
+					paths := []string{c.Binary, c.Config, c.Service}
+					unit := filepath.Base(c.Service)
+					if role == "worker" {
+						unit = "myce-host-reconcile.timer"
+						paths = append(paths, filepath.Join(filepath.Dir(c.Service), "myce-host-reconcile.service"), filepath.Join(filepath.Dir(c.Service), unit))
+					}
+					before, loaded := map[string][]byte{}, map[string][]byte{}
+					for _, path := range paths {
+						data, err := os.ReadFile(path)
+						if err != nil {
+							t.Fatal(err)
+						}
+						before[path], loaded[path] = data, data
+					}
+					currentActive, fired, reloads := active, false, 0
+					injected := errors.New("injected manager failure")
+					manager := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+						call := strings.Join(args, " ")
+						if call == "--user is-active --quiet "+unit {
+							if currentActive {
+								return []byte("active"), nil
+							}
+							return nil, inactiveInstallUnit{}
+						}
+						if call == "--user daemon-reload" {
+							reloads++
+							for _, path := range paths {
+								data, err := os.ReadFile(path)
+								if err != nil {
+									t.Fatal(err)
+								}
+								loaded[path] = data
+							}
+						}
+						if call == "--user enable --now "+unit || call == "--user restart "+unit {
+							currentActive = true // Even a failing command can partially activate.
+						}
+						if !fired && (failure == "reload" && call == "--user daemon-reload" || failure == "enable" && call == "--user enable "+filepath.Base(c.Service) || role == "queue" && failure == "enable" && call == "--user enable --now "+unit || failure == "restart" && call == "--user restart "+unit) {
+							fired = true
+							return nil, injected
+						}
+						if fired && (call == "--user restart "+unit || call == "--user stop "+unit) {
+							for path, data := range before {
+								if !bytes.Equal(loaded[path], data) {
+									t.Fatal("restored active state before reloading restored files")
+								}
+							}
+							currentActive = call == "--user restart "+unit
+						}
+						return fakeInstallManager(ctx, name, args...)
+					}
+					c.Heartbeat = 2 * time.Second
+					if err := Install(context.Background(), c, source, "", manager); !errors.Is(err, injected) || !fired {
+						t.Fatal("fault was not exercised", err)
+					}
+					for path, want := range before {
+						got, err := os.ReadFile(path)
+						if err != nil || !bytes.Equal(got, want) || !bytes.Equal(loaded[path], want) {
+							t.Fatalf("disk and manager did not both restore %s", filepath.Base(path))
+						}
+					}
+					if reloads != 2 || currentActive != active {
+						t.Fatalf("rollback: reloads=%d active=%t; want 2 and %t", reloads, currentActive, active)
+					}
+					if role == "worker" {
+						if reason, err := HostDisabled(c.HostStateDir); err != nil || reason == "" {
+							t.Fatal("rollback opened host", err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestInstallManagerRollbackRecoveryFailure(t *testing.T) {
+	for _, failure := range []string{"reload", "restart", "canceled"} {
+		t.Run(failure, func(t *testing.T) {
+			c, source := preserveWorkerFixture(t)
+			if err := Install(context.Background(), c, source, "fixture", fakeInstallManager); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			injected, recoveryFailure := errors.New("registration failed"), errors.New("recovery failed")
+			failed, stopped, recovered := false, false, false
+			manager := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				call := strings.Join(args, " ")
+				if call == "--user enable myce-worker.service" {
+					failed = true
+					cancel()
+					return nil, injected
+				}
+				if failed {
+					if ctx.Err() != nil {
+						t.Fatal("rollback reused canceled install context")
+					}
+					if failure == "reload" && call == "--user daemon-reload" || failure == "restart" && call == "--user restart myce-host-reconcile.timer" {
+						return nil, recoveryFailure
+					}
+					stopped = stopped || call == "--user stop myce-host-reconcile.timer"
+					recovered = recovered || call == "--user restart myce-host-reconcile.timer"
+				}
+				return fakeInstallManager(ctx, name, args...)
+			}
+			c.Heartbeat = 2 * time.Second
+			err := Install(ctx, c, source, "", manager)
+			if !errors.Is(err, injected) {
+				t.Fatal("lost original failure", err)
+			}
+			if failure == "canceled" {
+				if !recovered || stopped {
+					t.Fatal("canceled install did not recover prior active timer")
+				}
+			} else if !errors.Is(err, recoveryFailure) || !stopped || !strings.Contains(err.Error(), "rollback incomplete") {
+				t.Fatal("failed rollback did not stop timer and report recovery failure", err)
+			}
+			if reason, err := HostDisabled(c.HostStateDir); err != nil || reason == "" {
+				t.Fatal("failed recovery opened host", err)
+			}
+		})
+	}
+}
 
 func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 	for _, failure := range []string{"write", "rename", "fsync", "directory-fsync", "EXDEV", "reload", "preactivation", "enable"} {

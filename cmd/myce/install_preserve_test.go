@@ -145,6 +145,45 @@ func TestInstallExplicitZeroFalse(t *testing.T) {
 	if got.DB != c.DB || got.Path != c.Path || got.ModelCache != c.ModelCache {
 		t.Fatal("unrelated field changed")
 	}
+	if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config}, p, c.NAS); err != nil {
+		t.Fatal(err)
+	}
+	preserved, err := myce.ReadServiceConfig(c.Config)
+	if err != nil || !reflect.DeepEqual(got, preserved) {
+		t.Fatal("omitted flags reset saved zero/false values", err)
+	}
+}
+
+func TestInstallExplicitQueueNASName(t *testing.T) {
+	for _, role := range []string{"queue", "worker"} {
+		for _, field := range []string{"queue", "nas", "name"} {
+			t.Run(role+"/"+field, func(t *testing.T) {
+				c, p := savedInstallFixture(t, role)
+				want := c
+				value := "changed-fixture"
+				switch field {
+				case "queue":
+					value = "http://changed.invalid"
+					want.Queue = value
+				case "nas":
+					value = t.TempDir()
+					want.NAS = value
+				case "name":
+					want.Name = value
+				}
+				if err := setupCommandWithProbe([]string{"install", role, "--config", c.Config, "--" + field, value}, p, c.NAS); err != nil {
+					t.Fatal(err)
+				}
+				got, err := myce.ReadServiceConfig(c.Config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(want, got) {
+					t.Fatalf("explicit --%s was ignored or changed unrelated saved fields", field)
+				}
+			})
+		}
+	}
 }
 
 func TestInstallWorkerExplicitOverlayAndIdentity(t *testing.T) {

@@ -96,8 +96,11 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 	if e = Install(context.Background(), c, executable, "private-test-secret", runner); e != nil {
 		t.Fatal(e)
 	}
-	if len(commands) != 7 {
+	if len(commands) != 8 {
 		t.Fatal(commands)
+	}
+	if commands[5] != "systemctl --user is-active --quiet myce-host-reconcile.timer" {
+		t.Fatal("did not inspect prior timer state before activation", commands)
 	}
 	token, e := ReadServiceToken(c)
 	if e != nil || token != "private-test-secret" {
