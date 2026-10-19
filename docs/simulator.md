@@ -26,7 +26,9 @@ fields, multiple documents and invalid values. Runs allow at most 90 days and
 
 Fleet workers are individual cards with names, platforms, usable `memory_gb`,
 shared physical `host`, usable `host_memory_gb`, `unified`, and relative `speed`.
-Illustrative workers may share one host RAM budget or unified GPU/CPU RAM. Budgets are **GiB after reserves**, not apparent model-file sizes.
+The two CUDA workers on `host-b` share one host RAM budget; the Metal worker
+on `host-c` shares GPU/CPU RAM. Budgets are **GiB after reserves**, not apparent
+model-file sizes.
 No availability windows means always present. Windows use Monday=0 through
 Sunday=6, with start-inclusive/end-exclusive hours in a repeating synthetic
 UTC week. `departure: planned` (default) saves resumable work and restarts
@@ -80,7 +82,12 @@ YAML files; there is no plugin system.
 ## Limits
 
 This is a measuring tool for the scheduler under stated assumptions, **not** a
-fleet benchmark or hardware qualification. All supplied identities, topology, sizes, speeds, memory budgets, arrival patterns and durations are fictional examples. File sizes do not establish native peak memory. Portability is hypothetical.
+fleet benchmark or hardware qualification. All example host/model/project
+identities, topology, speeds, memory budgets,
+file sizes, startup times and arrival/duration values are invented for illustration.
+They contain no fleet measurements or consumer traces. File sizes do not establish
+native peak memory. Streams arrive independently rather than forming a dependency
+graph, and cross-platform portability is hypothetical.
 
 The workers have continuous healthy heartbeat coverage and instant pull/stop
 notification outside the modeled stop response. Transport polling, HTTP overhead,
