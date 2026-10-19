@@ -139,13 +139,17 @@ func (e *HostEnvelope) ApplyRestVerdict(expect string, now time.Time) {
 		if n == nil || !source("queue") {
 			add("UNKNOWN", code+"_unknown")
 		} else if *n > 0 {
-			add("FAIL", code)
+			if code == "release_pending" {
+				add("UNKNOWN", code)
+			} else {
+				add("FAIL", code)
+			}
 		}
 	}
 	partialFresh := e.RestEvidence.QueueAt != nil && freshHostSource(*e.RestEvidence.QueueAt, now)
 	if expect == "ready" {
 		if partialFresh && slices.Contains(e.RestEvidence.ClosedViolations, "release_pending") {
-			add("FAIL", "release_pending")
+			add("UNKNOWN", "release_pending")
 		}
 		if partialFresh && e.RestEvidence.ReadyViolation {
 			add("FAIL", "required_worker_unhealthy")
@@ -210,7 +214,11 @@ func (e *HostEnvelope) ApplyRestVerdict(expect string, now time.Time) {
 		checkCount(e.Counts.Unsettled, "release_pending")
 		if partialFresh {
 			for _, code := range e.RestEvidence.ClosedViolations {
-				add("FAIL", code)
+				if code == "release_pending" {
+					add("UNKNOWN", code)
+				} else {
+					add("FAIL", code)
+				}
 			}
 		}
 		if e.Counts.Queued == nil || e.Counts.FencedQueued == nil || e.RestEvidence.UnfencedQueued == nil || !source("queue") {

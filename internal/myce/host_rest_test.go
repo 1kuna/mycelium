@@ -51,6 +51,11 @@ func TestHostRestClosedMatrix(t *testing.T) {
 			e.LastClose.SettledAt = nil
 		}},
 		{"previous-close", "UNKNOWN", "close_settlement_pending", func(e *HostEnvelope) { e.LastClose.Revision-- }},
+		{"local-pass-release-proof-pending", "UNKNOWN", "release_pending", func(e *HostEnvelope) {
+			e.Settlement, e.LastClose.Settlement = "pending", "pending"
+			e.LastClose.SettledAt = nil
+			e.Counts.Unsettled = hostPtr(1)
+		}},
 		{"fenced", "PASS", "queued_work_fenced", func(e *HostEnvelope) { e.Counts.Queued = hostPtr(3); e.Counts.FencedQueued = hostPtr(3) }},
 		{"unfenced", "FAIL", "eligible_unfenced_work", func(e *HostEnvelope) { e.Counts.Queued = hostPtr(1); e.RestEvidence.UnfencedQueued = hostPtr(1) }},
 		{"queue-open", "FAIL", "queue_admission_open", func(e *HostEnvelope) {
@@ -62,12 +67,16 @@ func TestHostRestClosedMatrix(t *testing.T) {
 		{"active", "FAIL", "active_attempts", func(e *HostEnvelope) { e.Counts.Active = hostPtr(1) }},
 		{"preparing", "FAIL", "preparing_attempts", func(e *HostEnvelope) { e.Counts.Preparing = hostPtr(1) }},
 		{"stopping", "FAIL", "stopping_attempts", func(e *HostEnvelope) { e.Counts.Stopping = hostPtr(1) }},
-		{"terminal-unreleased", "FAIL", "release_pending", func(e *HostEnvelope) { e.Counts.Unsettled = hostPtr(1) }},
+		{"terminal-unreleased", "UNKNOWN", "release_pending", func(e *HostEnvelope) { e.Counts.Unsettled = hostPtr(1) }},
 		{"pending-daemon", "FAIL", "daemon_operations_pending", func(e *HostEnvelope) { e.Counts.PendingDaemon = hostPtr(1) }},
 		{"gpu-holder", "FAIL", "owned_gpu_holders", func(e *HostEnvelope) { e.Counts.GPUHolders = hostPtr(1) }},
 		{"restart", "FAIL", "restart_unsafe", func(e *HostEnvelope) { e.RestartSafe = hostPtr(false) }},
 		{"local-fail-and-queue-unknown", "FAIL", "queue_acknowledgement_unknown", func(e *HostEnvelope) { e.LocalExclusion = "FAIL"; e.Sources["queue"] = nil }},
-		{"one-queue-fails-another-unknown", "FAIL", "release_pending", func(e *HostEnvelope) {
+		{"partial-active-and-unknown", "FAIL", "active_attempts", func(e *HostEnvelope) {
+			e.Sources["queue"] = nil
+			e.RestEvidence.ClosedViolations = []string{"active_attempts", "release_pending"}
+		}},
+		{"one-queue-release-another-unknown", "UNKNOWN", "release_pending", func(e *HostEnvelope) {
 			e.Sources["queue"] = nil
 			e.Counts.Unsettled = nil
 			e.RestEvidence.ClosedViolations = []string{"release_pending"}
@@ -105,8 +114,8 @@ func TestHostRestReadyMatrix(t *testing.T) {
 		{"unhealthy-required-worker", "FAIL", "required_worker_unhealthy", func(e *HostEnvelope) { e.Ready = hostPtr(false); e.RestEvidence.ReadyViolation = true }},
 		{"closed", "FAIL", "desired_state_mismatch", func(e *HostEnvelope) { e.Desired.State = hostPtr("closed") }},
 		{"stale-revision", "FAIL", "observed_state_mismatch", func(e *HostEnvelope) { e.Observed.Revision = hostPtr(uint64(2)) }},
-		{"unreleased", "FAIL", "release_pending", func(e *HostEnvelope) { e.Counts.Unsettled = hostPtr(1) }},
-		{"partial-unreleased", "FAIL", "release_pending", func(e *HostEnvelope) {
+		{"unreleased", "UNKNOWN", "release_pending", func(e *HostEnvelope) { e.Counts.Unsettled = hostPtr(1) }},
+		{"partial-unreleased", "UNKNOWN", "release_pending", func(e *HostEnvelope) {
 			e.Ready = nil
 			e.Sources["queue"] = nil
 			e.RestEvidence.ClosedViolations = []string{"release_pending"}
