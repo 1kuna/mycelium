@@ -13,6 +13,7 @@ import (
 )
 
 type DevConfig struct {
+	ProductionInfrastructureRetries       *int
 	FileStore                             string
 	FileStoreLimit                        int64
 	ExtensionRoot, JobFileRoot            string
@@ -87,6 +88,12 @@ func StartDev(c DevConfig) (*Dev, error) {
 	q, err := Open(c.Database, c.Checkpoints, clock)
 	if err != nil {
 		return nil, err
+	}
+	if c.ProductionInfrastructureRetries != nil {
+		if err = q.SetProductionInfrastructureRetries(*c.ProductionInfrastructureRetries); err != nil {
+			q.Close()
+			return nil, err
+		}
 	}
 	if c.FileStore != "" {
 		limit := c.FileStoreLimit

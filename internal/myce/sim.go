@@ -277,7 +277,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 	// A pretend NAS avoids filesystem probes; persistence is disabled only here.
 	root := "/simulated-checkpoints"
 	var e error
-	q := &Queue{simulation: true, clock: clock, root: root, productionGrace: 10 * time.Second, lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, unreported: map[string]bool{}, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{simulation: true, clock: clock, root: root, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, unreported: map[string]bool{}, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	if e = q.ConfigureHosts(f.Hosts); e != nil {
 		return r, e
 	}

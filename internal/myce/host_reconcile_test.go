@@ -173,7 +173,7 @@ func TestHostReconcilePlannedDisplacementAndLossRefund(t *testing.T) {
 		})
 	}
 }
-func TestHostReconcileProductionPinnedFailsWithoutLoss(t *testing.T) {
+func TestHostReconcileProductionPinnedRequeuesWithoutLoss(t *testing.T) {
 	q, clock := fixture(t)
 	m := machine("one", "fake")
 	m.HostID = "host"
@@ -201,7 +201,7 @@ func TestHostReconcileProductionPinnedFailsWithoutLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := job(t, q, j.ID)
-	if got.State != "failed" || got.Losses != 0 {
+	if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 1 {
 		t.Fatal(got)
 	}
 	queued := submit(t, q, s)

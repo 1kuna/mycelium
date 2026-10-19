@@ -21,6 +21,12 @@ to run work. The status API returns job summaries without submitted commands,
 environment values, program arguments, extension files, or local checkpoint
 paths. Use the existing job output and log commands when you need their results.
 
+Production job summaries and the [job-v1 reply](schemas/job-v1.schema.json) may
+include `infrastructure_retries`, the durable number of infrastructure requeues
+already used. It is an optional nonnegative integer, omitted at zero, with a
+queue-configurable default limit of 2. Exhaustion reports
+`infrastructure_retries_exhausted`; stage failures do not consume this budget.
+
 For maintenance gates, every nonterminal job in redacted `GET /api/status`
 retains `spec.allowed_machines` (machine names) and reports:
 

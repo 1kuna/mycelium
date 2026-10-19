@@ -63,7 +63,7 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at"}
+		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries"}
 		if definition == "Spec" {
 			stable = []string{"project", "submission_key"}
 		}
@@ -77,6 +77,8 @@ func generatedJobSchema(t *testing.T) []byte {
 		job[name].(map[string]any)["minLength"] = 1
 	}
 	job["attempt"].(map[string]any)["minimum"] = 0
+	job["infrastructure_retries"].(map[string]any)["minimum"] = 0
+	job["infrastructure_retries"].(map[string]any)["description"] = "Production infrastructure requeues already used. Omitted zero; default maximum is 2, configurable by the queue. Stage failures do not consume this budget."
 	job["reason"].(map[string]any)["description"] = "Sanitized diagnostic only. Do not parse or match its text."
 	job["release_confirmed"].(map[string]any)["description"] = "Exact current execution release proof when true. Omitted false is not confirmation; older copies may still have pending custody. Use the cancellation acknowledgement for aggregate release."
 	job["finished_at"].(map[string]any)["description"] = "Recorded terminal time, when present. Historical terminal records may omit it."
@@ -232,6 +234,11 @@ func TestWireSchemas(t *testing.T) {
 	s.SubmissionKey = "schema-key"
 	j := submit(t, q, s)
 	validateWireValue(t, schemas["job-v1.schema.json"], j)
+	// The retry counter is additive: old zero/omitted replies and new nonzero
+	// replies validate against the same v1 reply contract.
+	retried := cloneJob(j)
+	retried.InfrastructureRetries = 1
+	validateWireValue(t, schemas["job-v1.schema.json"], &retried)
 	j = check(t, q, machine("one", "fake"), nil).Job
 	validateWireValue(t, schemas["job-v1.schema.json"], j)
 	ack, err := q.CancelJob(j.ID)

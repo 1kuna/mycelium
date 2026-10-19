@@ -190,6 +190,12 @@ func InstallSettings() []InstallSetting {
 		installPath("upload-spool-dir", "UploadSpoolDir", "local upload spool", func(c *ServiceConfig) *string { return &c.UploadSpoolDir }, false),
 		installSetting("upload-spool-bytes", "UploadSpoolBytes", "total upload spool bytes", func(c *ServiceConfig) *int64 { return &c.UploadSpoolBytes }, installBytes),
 		installSetting("restart-grace", "RestartGrace", "queue restart recovery grace", func(c *ServiceConfig) *time.Duration { return &c.RestartGrace }, installNonnegativeDuration),
+		installSetting("production-infrastructure-retries", "ProductionInfrastructureRetries", "maximum infrastructure requeues per production job", func(c *ServiceConfig) *int { return &c.ProductionInfrastructureRetries }, func(n int) error {
+			if n < 0 {
+				return errors.New("must be nonnegative")
+			}
+			return nil
+		}),
 		installSetting("production-loss-timeout", "ProductionLossTimeout", "production quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.ProductionLossTimeout }, installPositiveDuration),
 		installSetting("deadline-loss-timeout", "DeadlineLossTimeout", "deadline quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.DeadlineLossTimeout }, installPositiveDuration),
 		installSetting("experiment-loss-timeout", "ExperimentLossTimeout", "experiment quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.ExperimentLossTimeout }, installPositiveDuration),

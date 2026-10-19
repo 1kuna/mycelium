@@ -506,6 +506,12 @@
           "type": "string",
           "x-contract": "stable"
         },
+        "infrastructure_retries": {
+          "description": "Production infrastructure requeues already used. Omitted zero; default maximum is 2, configurable by the queue. Stage failures do not consume this budget.",
+          "minimum": 0,
+          "type": "integer",
+          "x-contract": "stable"
+        },
         "last_stop_outcome": {
           "type": "string",
           "x-contract": "diagnostic"

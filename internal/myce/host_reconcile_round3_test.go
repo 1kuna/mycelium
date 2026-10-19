@@ -171,7 +171,6 @@ func TestHostReconcileCloseSupersedesUndeliveredAttempts(t *testing.T) {
 			if mode == "production" {
 				s = spec("production")
 				s.AllowedMachines = []string{m.ID}
-				want = "failed"
 			}
 			j := submit(t, q, s)
 			j = check(t, q, m, nil).Job

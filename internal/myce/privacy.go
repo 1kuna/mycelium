@@ -77,7 +77,7 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 		}
 		if j.State == "failed" {
 			switch {
-			case j.Reason == "out of memory after one retry on a larger hypha", j.Reason == "out of memory; previous capability unavailable":
+			case j.Reason == "infrastructure_retries_exhausted", j.Reason == "out of memory after one retry on a larger hypha", j.Reason == "out of memory; previous capability unavailable":
 				// Fixed scheduler diagnostics contain no payload or machine paths.
 			case strings.HasPrefix(j.Reason, "production start deadline exceeded:"):
 				j.Reason = "production start deadline exceeded"
