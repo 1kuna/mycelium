@@ -395,7 +395,7 @@ func (q *Queue) maintainModels() {
 			q.maintainEngineRetry(k, s, m, model)
 			continue
 		}
-		if s.State != "unloading" && s.State != "unload_failed" && ((!exists || !q.modelUsableMachine(model, m)) || q.maintenanceBlocked(hostID(m)) || availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle) {
+		if s.State != "unloading" && s.State != "unload_failed" && ((!exists || !q.modelUsableMachine(model, m)) || availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle) {
 			s.State = "draining"
 		}
 	}

@@ -596,6 +596,9 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		if !ok && m.state == "failed" {
 			m.state = "unloaded"
 		}
+		if ok && s.Attempt != "" && s.Attempt == m.attempt && s.Session == rt.session && s.StopAt != nil && expired(s.StopAt, rt.clock.Now()) && (m.state == "ready" || m.state == "draining") {
+			rt.unload(m)
+		}
 		if !ok || replaced || s.State == "draining" || s.State == "unloading" || !s.Placement.allows(rt.machine) {
 			m.drainRequested = true
 			if m.state == "loading" {

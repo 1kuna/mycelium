@@ -1154,8 +1154,9 @@ func (w Worker) Run(stop context.Context) error {
 						r.Binary = filepath.Join(w.EnvironmentSourceRoot, r.BinaryRelative)
 					}
 				}
-				environments.sync(reply.EnvironmentPlan, busy)
-				rt.syncCopies(reply.CopyPlan, reply.CacheUsage, reply.CachePins, busy)
+				keepPreparations := (reply.HostMaintenance == "drained" || reply.HostMaintenance == "disabled") && reply.PreparationStopAt == nil
+				environments.sync(reply.EnvironmentPlan, busy, keepPreparations)
+				rt.syncCopies(reply.CopyPlan, reply.CacheUsage, reply.CachePins, busy, keepPreparations)
 				// syncCopies cancels immediately; do not block heartbeats behind an
 				// outstanding filesystem syscall on an unavailable NAS. Loads share
 				// the cache admission gate and wait for the reservation to release.

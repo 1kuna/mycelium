@@ -14,6 +14,7 @@ const maintenanceStopCause = "planned_host_maintenance"
 // A nil budget is possible before the first worker report; zero is uncapped.
 // Existing hosts bootstrap their allowance once, then worker reports cannot edit it.
 type HostMaintenance struct {
+	StopAt       *time.Time        `json:"stop_at,omitempty"`
 	Mode         string            `json:"mode"`
 	MemoryBudget *HostMemoryBudget `json:"memory_budget,omitempty"`
 	UpdatedAt    time.Time         `json:"updated_at"`
@@ -45,6 +46,7 @@ type HostMaintenanceStatus struct {
 	LocalFence      string               `json:"local_fence,omitempty"`
 	Workers         []MaintenanceWorker  `json:"workers"`
 	Attempts        []MaintenanceAttempt `json:"attempts"`
+	Calls           int                  `json:"calls"`
 	Preparations    int                  `json:"preparations"`
 	Sidecars        int                  `json:"sidecars"`
 	PendingReleases []HostRelease        `json:"pending_releases"`
@@ -136,27 +138,15 @@ func (q *Queue) ChangeHostMaintenance(host string, request HostMaintenanceReques
 			}
 			policy.MemoryBudget = &budget
 		}
+		if request.Action == "resume" || request.Action == "drain" {
+			policy.StopAt = nil
+		}
+		if request.Stop && policy.StopAt == nil {
+			deadline := q.clock.Now().Add(StopGrace)
+			policy.StopAt = &deadline
+		}
 		policy.UpdatedAt = q.clock.Now()
 		q.s.HostMaintenance[host] = policy
-		for _, j := range q.s.Jobs {
-			if q.executionHost(j.Machine) != host || j.State != "running" && j.State != "stopping" {
-				continue
-			}
-			// Drain leaves authorized work alone. Unstarted assignments must release
-			// their preparation/create before being retried elsewhere.
-			if request.Stop || policy.Mode != "enabled" && j.StartedAt == nil {
-				if !cancelled(j) {
-					for i := range j.Copies {
-						c := &j.Copies[i]
-						if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session && c.StopCause == "" && j.State == "running" {
-							c.StopCause = maintenanceStopCause
-						}
-					}
-					q.stop(j, maintenanceStopCause)
-				}
-			}
-			q.retainRelease(j)
-		}
 		q.maintain()
 		out = q.hostMaintenanceStatus(host)
 		return nil
@@ -181,6 +171,10 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	if out.Policy.Mode == "" {
 		out.Policy.Mode = "enabled"
 	}
+	if out.Policy.StopAt != nil {
+		deadline := *out.Policy.StopAt
+		out.Policy.StopAt = &deadline
+	}
 	if out.Policy.MemoryBudget != nil {
 		budget := *out.Policy.MemoryBudget
 		out.Policy.MemoryBudget = &budget
@@ -199,25 +193,32 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		if m.DockerCleanup != "" {
 			out.PendingCleanup = append(out.PendingCleanup, m.ID+": "+m.DockerCleanup)
 		}
-		for _, r := range m.EnvironmentReports {
-			if r.State == "building" {
-				out.Preparations++
-			}
-		}
-		for _, r := range m.CopyReports {
-			if r.State == "copying" {
-				out.Preparations++
-			}
-		}
 	}
-	for _, obligation := range q.hostObligations(host) {
+	obligations := q.hostObligations(host)
+	for _, obligation := range obligations {
+		if obligation.Call != nil {
+			out.Calls++
+			continue
+		}
 		if obligation.Engine != nil {
 			out.Sidecars++
 			continue
 		}
 		if obligation.Preparation {
+			if m := q.s.Machines[obligation.Result.Machine]; m != nil && m.Session == obligation.Result.Session {
+				for _, r := range m.EnvironmentReports {
+					if r.State == "building" {
+						out.Preparations++
+					}
+				}
+				for _, r := range m.CopyReports {
+					if r.State == "copying" {
+						out.Preparations++
+					}
+				}
+			}
 			continue
-		} // counted separately with release custody
+		}
 		r := obligation.Result
 		attempt := MaintenanceAttempt{Execution: r.Execution, Machine: r.Machine, Session: r.Session, State: "release_pending"}
 		if j := q.s.Jobs[r.ID]; j != nil {
@@ -243,7 +244,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	sort.Slice(out.PendingReleases, func(i, j int) bool { return releaseKey(out.PendingReleases[i]) < releaseKey(out.PendingReleases[j]) })
 	sort.Strings(out.PendingCleanup)
 	out.Healthy = out.Healthy && len(out.Workers) > 0 && out.Policy.MemoryBudget != nil
-	out.Quiescent = out.Healthy && q.maintenanceBlocked(host) && len(out.Attempts) == 0 && out.Preparations == 0 && out.Sidecars == 0 && len(out.PendingReleases) == 0 && len(out.PendingCleanup) == 0
+	out.Quiescent = out.Healthy && q.maintenanceBlocked(host) && len(obligations) == 0 && len(out.PendingCleanup) == 0
 	return out
 }
 func (a API) registerHostMaintenance(mux *http.ServeMux) {
@@ -259,4 +260,83 @@ func (a API) registerHostMaintenance(mux *http.ServeMux) {
 		status, err := a.Queue.ChangeHostMaintenance(r.PathValue("id"), request)
 		respond(w, status, err)
 	})
+}
+
+// Admission, stop and wait share hostObligations. Each adapter below uses the
+// work kind's existing stop channel; a deadline never discharges its custody.
+func (q *Queue) maintainHostMaintenance() {
+	for host, policy := range q.s.HostMaintenance {
+		if !q.maintenanceBlocked(host) {
+			continue
+		}
+		for _, p := range q.hostObligations(host) {
+			q.maintainHostObligation(p, policy.StopAt)
+		}
+	}
+}
+
+func boundStop(at **time.Time, deadline time.Time) {
+	if *at == nil || deadline.Before(**at) {
+		copy := deadline
+		*at = &copy
+	}
+}
+
+func (q *Queue) maintainHostObligation(p HostObligation, deadline *time.Time) {
+	switch {
+	case p.Call != nil:
+		c := q.obligationCall(p.Call)
+		if c == nil || deadline == nil {
+			return
+		}
+		boundStop(&c.StopAt, *deadline)
+		if expired(c.StopAt, q.clock.Now()) && c.Error == "" {
+			c.Error = maintenanceStopCause
+		}
+	case p.Engine != nil:
+		e := p.Engine
+		s := q.s.ModelSlots[slotKey(e.Machine, e.Model)]
+		if s == nil || s.Session != e.Session || s.Attempt != e.Attempt {
+			return
+		}
+		if s.State != "failed" && s.State != "unloading" && s.State != "unload_failed" && (s.State != "loading" || deadline != nil) {
+			s.State = "draining"
+		}
+		if deadline != nil {
+			boundStop(&s.StopAt, *deadline)
+			if expired(s.StopAt, q.clock.Now()) && s.State == "draining" {
+				s.State = "unloading"
+			}
+		}
+	case p.Preparation:
+		if deadline == nil {
+			return
+		}
+		r := HostRelease{Host: q.executionHost(p.Result.Machine), Job: p.Result.ID, Machine: p.Result.Machine, Session: p.Result.Session, Preparation: true, Until: *deadline}
+		if q.s.HostReleases == nil {
+			q.s.HostReleases = map[string]HostRelease{}
+		}
+		if old, ok := q.s.HostReleases[releaseKey(r)]; !ok || old.Until.IsZero() || deadline.Before(old.Until) {
+			q.s.HostReleases[releaseKey(r)] = r
+		}
+	default:
+		r := p.Result
+		j := q.retainedJob(r.ID)
+		if j == nil || j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session || j.State != "running" && j.State != "stopping" {
+			return
+		}
+		if !cancelled(j) && (deadline != nil || j.StartedAt == nil) {
+			for i := range j.Copies {
+				c := &j.Copies[i]
+				if c.Attempt == r.Attempt && c.Machine == r.Machine && c.Session == r.Session && c.StopCause == "" && j.State == "running" {
+					c.StopCause = maintenanceStopCause
+				}
+			}
+			q.stop(j, maintenanceStopCause)
+			if deadline != nil {
+				boundStop(&j.StopAt, *deadline)
+			}
+		}
+		q.retainRelease(j)
+	}
 }

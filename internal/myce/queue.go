@@ -507,6 +507,7 @@ func (q *Queue) stop(j *Job, why string) {
 	j.Reason = why
 }
 func (q *Queue) maintain() {
+	q.maintainHostMaintenance()
 	q.maintainSubmissions()
 	now := q.clock.Now()
 	for _, j := range q.s.Jobs {
@@ -762,6 +763,13 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			if localBlocked {
 				reply.Job = nil
 				return
+			}
+			for _, p := range q.hostObligations(hostID(&m)) {
+				if p.Preparation && p.Result.Machine == m.ID && p.Result.Session == m.Session {
+					if r, ok := q.s.HostReleases[releaseKey(HostRelease{Job: p.Result.ID, Machine: m.ID, Session: m.Session})]; ok && !r.Until.IsZero() {
+						boundStop(&reply.PreparationStopAt, r.Until)
+					}
+				}
 			}
 			reply.EnvironmentPlan = q.environmentPlan(&m)
 			reply.ModelPlan = q.modelPlan(m.ID)

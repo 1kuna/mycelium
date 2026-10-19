@@ -143,13 +143,14 @@ func (q *Queue) ReadHostObservation(ctx context.Context, host string) (HostQueue
 }
 
 func (q *Queue) hostObservationReleasePending(p HostObligation, revision HostRevision) bool {
-	machine, session := p.Result.Machine, p.Result.Session
-	if p.Engine != nil {
-		machine, session = p.Engine.Machine, p.Engine.Session
-	}
+	machine, session := obligationSession(p)
 	m := q.s.Machines[machine]
 	if m == nil || m.Session != session || m.Gone || m.Leaving || m.HostRevision != revision {
 		return true
+	}
+	if p.Call != nil {
+		c := q.obligationCall(p.Call)
+		return c == nil || c.Error != "" || c.StopAt != nil
 	}
 	if p.Engine != nil {
 		for _, slot := range q.s.ModelSlots {
@@ -290,7 +291,7 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 			placement.Unfenced += q.Placement.Unfenced
 		}
 		for _, p := range q.Pending {
-			if p.Engine == nil && !p.Preparation && p.Result.Attempt > 0 {
+			if p.Call == nil && p.Engine == nil && !p.Preparation && p.Result.Attempt > 0 {
 				attempts = append(attempts, HostEnvelopeAttempt{p.Result.ID, p.Result.Machine, p.Result.Session, p.Result.Attempt, "pending"})
 			}
 		}

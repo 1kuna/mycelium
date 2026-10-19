@@ -120,8 +120,15 @@ block new placement, preparation and Started authorization across the host.
 Drain lets already-authorized attempts finish. An assigned attempt that has not
 passed Started is withdrawn through the existing stop channel; it retains its
 preparation/create custody until exact cleanup. `disable --stop` additionally
-stops active attempts through existing events/checkin. Admission acceptance is
-not evidence of physical release. Resume restores eligibility transactionally.
+stops every kind of host work through the same obligation enumeration used by
+wait: batch attempts and their sidecars, exact model calls and engines, and
+session-owned environment builds and model preparations. They share a persisted
+stop deadline of two minutes, which repeated stop requests cannot extend.
+Engine unload is forced at that deadline even with in-flight calls. Drain and
+disable without stop let existing preparations finish while admitting no new
+ones. Admission acceptance or deadline expiry is not evidence of physical
+release; wait still requires exact cleanup. Resume restores eligibility
+transactionally.
 
 Queue-requested stops carry `planned_host_maintenance` on the exact copy. They
 requeue the same job without consuming production infrastructure retries or

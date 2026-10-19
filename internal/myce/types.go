@@ -342,22 +342,23 @@ type Checkin struct {
 	Running         *Execution    `json:"running,omitempty"`
 }
 type Reply struct {
-	HostMaintenance  string              `json:"host_maintenance,omitempty"`
-	HostMemoryBudget *HostMemoryBudget   `json:"host_memory_budget,omitempty"`
-	FileCheckpoints  bool                `json:"file_checkpoints,omitempty"`
-	AdmissionBlocked bool                `json:"admission_blocked,omitempty"`
-	EnvironmentPlan  []EnvironmentRecipe `json:"environment_plan,omitempty"`
-	CopyPlan         []CopyTask          `json:"copy_plan,omitempty"`
-	CacheUsage       []CopyTask          `json:"cache_usage,omitempty"`
-	CachePins        []string            `json:"cache_pins,omitempty"`
-	ModelPlan        []ModelSlot         `json:"model_plan,omitempty"`
-	Hold             bool                `json:"hold"`
-	CheckpointRoot   string              `json:"checkpoint_root"`
-	Job              *Job                `json:"job,omitempty"`
-	Stop             bool                `json:"stop"`
-	Kill             bool                `json:"kill"`
-	Leave            bool                `json:"leave"`
-	GraceSeconds     float64             `json:"grace_seconds"`
+	PreparationStopAt *time.Time          `json:"preparation_stop_at,omitempty"`
+	HostMaintenance   string              `json:"host_maintenance,omitempty"`
+	HostMemoryBudget  *HostMemoryBudget   `json:"host_memory_budget,omitempty"`
+	FileCheckpoints   bool                `json:"file_checkpoints,omitempty"`
+	AdmissionBlocked  bool                `json:"admission_blocked,omitempty"`
+	EnvironmentPlan   []EnvironmentRecipe `json:"environment_plan,omitempty"`
+	CopyPlan          []CopyTask          `json:"copy_plan,omitempty"`
+	CacheUsage        []CopyTask          `json:"cache_usage,omitempty"`
+	CachePins         []string            `json:"cache_pins,omitempty"`
+	ModelPlan         []ModelSlot         `json:"model_plan,omitempty"`
+	Hold              bool                `json:"hold"`
+	CheckpointRoot    string              `json:"checkpoint_root"`
+	Job               *Job                `json:"job,omitempty"`
+	Stop              bool                `json:"stop"`
+	Kill              bool                `json:"kill"`
+	Leave             bool                `json:"leave"`
+	GraceSeconds      float64             `json:"grace_seconds"`
 }
 type Result struct {
 	PoliteStop           bool         `json:"polite_stop,omitempty"`
