@@ -869,14 +869,6 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 		if !m.Leaving {
 			j := q.pick(&m)
-			if j != nil {
-				for _, c := range q.calls {
-					if c.Machine == "" && c.Error == "" && q.callCanUse(&m, c) && q.before(callJob(c), j, &m) {
-						j = nil
-						break
-					}
-				}
-			}
 			if j != nil && len(j.Spec.Needs.Platform.Preferred) > 0 && !contains(j.Spec.Needs.Platform.Preferred, m.GPU) {
 				for _, other := range q.s.Machines {
 					if !contains(j.Spec.Needs.Platform.Preferred, other.GPU) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) || affinity(j, other) < affinity(j, &m) {

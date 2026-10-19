@@ -181,18 +181,57 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 	return ""
 }
 
-// candidate is shared by dispatch and the status projection. Exclusions only
-// remove jobs already listed in the projection; they never change dispatch.
+// batchCanUse includes memory that the existing release planner can reclaim.
+// This lets a batch's fair turn precede an idle resident model, without admitting
+// the batch until the worker has acknowledged the release.
+func (q *Queue) batchCanUse(j *Job, m *Machine) bool {
+	if j.State != "queued" || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) || q.capReason(j) != "" {
+		return false
+	}
+	memory := q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
+	if release, ok := q.s.BatchReleases[m.ID]; ok && release.Session == m.Session && q.clock.Now().Before(release.Until) {
+		memory += release.MemoryGB
+	}
+	// Status may project a running batch's memory as already free. Never
+	// count that reservation a second time beyond the device's capacity.
+	if m.TotalMemoryGB > 0 {
+		memory = min(memory, m.TotalMemoryGB)
+	}
+	if !fitsWithoutHostMemory(j, m, memory) {
+		return false
+	}
+	if hostFits(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) {
+		return true
+	}
+	_, _, ok := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority, j.Spec)
+	return ok
+}
+
+// candidate is the device-aware planner for batch dispatch, model admission and
+// status. Exclusions enumerate later candidates without changing the competing
+// projects used to calculate their deficits.
 func (q *Queue) candidate(m *Machine, excluded map[string]bool) *Job {
 	// Fair score is constant within a project on this worker. Compare each
 	// project's best ordinary candidate instead of rescanning for every queued job.
 	byProject := map[string]*Job{}
 	for _, j := range q.s.Jobs {
-		if !excluded[j.ID] && j.State == "queued" && q.placementAllowed(j, m) && q.checkpointReady(j, m) && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" {
+		if !excluded[j.ID] && q.batchCanUse(j, m) {
 			old := byProject[j.Spec.Project]
 			if old == nil || q.before(j, old, m) {
 				byProject[j.Spec.Project] = j
 			}
+		}
+	}
+	for _, c := range q.calls {
+		if excluded[c.ID] || !q.callCanUse(m, c) {
+			continue
+		}
+		j := callJob(c)
+		j.State = "queued"
+		j.Spec.Name = "model call: " + c.Model
+		old := byProject[j.Spec.Project]
+		if old == nil || q.before(j, old, m) {
+			byProject[j.Spec.Project] = j
 		}
 	}
 	projects := make([]string, 0, len(byProject))
@@ -212,28 +251,19 @@ func (q *Queue) candidate(m *Machine, excluded map[string]bool) *Job {
 }
 func (q *Queue) pick(m *Machine) *Job {
 	best := q.candidate(m, nil)
-	if best != nil && !environmentReady(best, m) {
+	if best != nil && (q.calls[best.ID] != nil || !fits(best, m, m.FreeMemoryGB) || !environmentReady(best, m)) {
 		return nil
 	}
 	return best
 }
 
-// projectionCandidate also includes model calls that dispatch permits on this
-// device; a waiting call must not disappear from a command's next-in-line reason.
-func (q *Queue) projectionCandidate(m *Machine, excluded map[string]bool) *Job {
-	best := q.candidate(m, excluded)
-	for _, c := range q.calls {
-		if excluded[c.ID] || !q.callCanUse(m, c) {
-			continue
-		}
-		j := callJob(c)
-		j.State = "queued"
-		j.Spec.Name = "model call: " + c.Model
-		if best == nil || q.before(j, best, m) {
-			best = j
-		}
+func (q *Queue) plannerMachines() []*Machine {
+	machines := make([]*Machine, 0, len(q.s.Machines))
+	for _, m := range q.s.Machines {
+		machines = append(machines, m)
 	}
-	return best
+	slices.SortFunc(machines, func(a, b *Machine) int { return strings.Compare(a.ID, b.ID) })
+	return machines
 }
 
 // queueProjection uses the dispatch comparator on each eligible machine with
@@ -242,7 +272,7 @@ func (q *Queue) projectionCandidate(m *Machine, excluded map[string]bool) *Job {
 func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 	order, reasons := map[string]int{}, map[string]string{}
 	machines := make([]*Machine, 0, len(q.s.Machines))
-	for _, m := range q.s.Machines {
+	for _, m := range q.plannerMachines() {
 		copy := *m // Projection changes only this scalar memory value; inventory stays read-only.
 		for _, r := range q.s.Jobs {
 			if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") {
@@ -251,7 +281,6 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		}
 		machines = append(machines, &copy)
 	}
-	slices.SortFunc(machines, func(a, b *Machine) int { return strings.Compare(a.ID, b.ID) })
 	for _, j := range q.s.Jobs {
 		if j.State != "queued" {
 			continue
@@ -263,7 +292,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		var best *Job
 		var target *Machine
 		for _, m := range machines {
-			winner := q.projectionCandidate(m, excluded)
+			winner := q.candidate(m, excluded)
 			if winner != nil && (best == nil || q.before(winner, best, m)) {
 				best, target = winner, m
 			}
@@ -274,7 +303,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		order[best.ID] = n
 		excluded[best.ID] = true
 		// Explain the first competing job, not a separate UI ordering heuristic.
-		winner := q.projectionCandidate(target, nil)
+		winner := q.candidate(target, nil)
 		base := "waiting for a worker to pull this job"
 		live := q.s.Machines[target.ID]
 		busy := false
@@ -344,7 +373,7 @@ func (q *Queue) waitReason(j *Job) string {
 func (q *Queue) fairScore(j *Job, m *Machine) float64 {
 	projects := map[string]bool{j.Spec.Project: true}
 	for _, r := range q.s.Jobs {
-		if r.State == "queued" && q.comparePriority(r.Spec, j.Spec) == 0 && fairResourceFamily(r.Spec) == fairResourceFamily(j.Spec) && q.capReason(r) == "" && (m.ID == "" || q.placementAllowed(r, m) && q.checkpointReady(r, m) && fits(r, m, m.FreeMemoryGB)) {
+		if r.State == "queued" && q.comparePriority(r.Spec, j.Spec) == 0 && fairResourceFamily(r.Spec) == fairResourceFamily(j.Spec) && q.capReason(r) == "" && (m.ID == "" || q.batchCanUse(r, m)) {
 			projects[r.Spec.Project] = true
 		}
 	}

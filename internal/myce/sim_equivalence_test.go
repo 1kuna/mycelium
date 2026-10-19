@@ -57,7 +57,7 @@ func TestSimSchedulingScanEquivalence(t *testing.T) {
 		}
 		var original *Job
 		for _, j := range q.s.Jobs {
-			if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" && (original == nil || q.before(j, original, m)) {
+			if j.State == "queued" && fits(j, m, q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)) && q.capReason(j) == "" && (original == nil || q.before(j, original, m)) {
 				original = j
 			}
 		}
@@ -65,9 +65,11 @@ func TestSimSchedulingScanEquivalence(t *testing.T) {
 		if got == nil || original == nil || got.ID != original.ID {
 			t.Fatalf("candidate mismatch at trial %d", trial)
 		}
+		// The unified device planner replaces the old batch-vs-call scan. With
+		// no queued calls, its batch winner must preserve that scan's answers.
 		for _, priority := range []string{"production", "deadline", "experiment"} {
 			c := &ModelCall{ID: "call", Project: "b", Priority: priority, Queued: clock.Now()}
-			if q.batchBeforeCall(c, m) != q.originalBatchBeforeCall(c, m) {
+			if (got != nil && q.before(got, callJob(c), m)) != q.originalBatchBeforeCall(c, m) {
 				t.Fatalf("call precedence mismatch at trial %d %s", trial, priority)
 			}
 		}

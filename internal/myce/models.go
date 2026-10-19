@@ -406,27 +406,42 @@ func (q *Queue) maintainModels() {
 	if q.networkQuiet {
 		return
 	}
-	pending := []*ModelCall{}
+	// Recompute the device winners after each admission or preparation. A call
+	// can only use machines on which the shared planner gives it the next turn.
+	// Trying a loading/blocked call once still permits backfill on other resources.
+	attempted := map[string]bool{}
 	for _, c := range q.calls {
-		if c.Machine == "" && c.Error == "" && q.capReason(callJob(c)) == "" {
-			pending = append(pending, c)
+		if _, ok := q.model(c.Model); !ok && c.Machine == "" && c.Error == "" {
+			c.Error = "unknown model"
 		}
 	}
-	sort.Slice(pending, func(i, j int) bool { return q.before(callJob(pending[i]), callJob(pending[j]), &Machine{}) })
-	for _, c := range pending {
-		if q.capReason(callJob(c)) != "" {
-			continue
+	for {
+		var c *ModelCall
+		for _, m := range q.plannerMachines() {
+			winner := q.candidate(m, attempted)
+			if winner == nil || q.calls[winner.ID] == nil {
+				continue
+			}
+			if c == nil || q.before(winner, callJob(c), m) {
+				c = q.calls[winner.ID]
+			}
 		}
+		if c == nil {
+			break
+		}
+		machines := []*Machine{}
+		for _, m := range q.plannerMachines() {
+			if winner := q.candidate(m, attempted); winner != nil && winner.ID == c.ID {
+				machines = append(machines, m)
+			}
+		}
+		attempted[c.ID] = true
 		model, ok := q.model(c.Model)
 		if !ok {
 			c.Error = "unknown model"
 			continue
 		}
 		// Ready affinity precedes loading a second copy.
-		machines := []*Machine{}
-		for _, m := range q.s.Machines {
-			machines = append(machines, m)
-		}
 		sort.Slice(machines, func(i, j int) bool {
 			a, b := q.loadSeconds(c.Model, machines[i]), q.loadSeconds(c.Model, machines[j])
 			if a != b {
@@ -443,7 +458,7 @@ func (q *Queue) maintainModels() {
 				continue
 			}
 			s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
-			if s != nil && s.State == "ready" && (model.MaxInFlight == 0 || s.InFlight < model.MaxInFlight) && !q.batchBeforeCall(c, m) {
+			if s != nil && s.State == "ready" && (model.MaxInFlight == 0 || s.InFlight < model.MaxInFlight) {
 				c.Machine = m.ID
 				if c.Priority == "production" {
 					s.ProductionUsed = true
@@ -467,7 +482,7 @@ func (q *Queue) maintainModels() {
 		eligible := []*Machine{}
 		loading := false
 		for _, m := range machines {
-			if !q.placementAllowed(callJob(c), m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || q.callExcludes(c, m.ID) || m.ModelURL == "" || !q.modelFitsMachine(model, m) || q.unreported[m.ID] || q.batchBeforeCall(c, m) {
+			if !q.placementAllowed(callJob(c), m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || q.callExcludes(c, m.ID) || m.ModelURL == "" || !q.modelFitsMachine(model, m) || q.unreported[m.ID] {
 				continue
 			}
 			if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
@@ -552,19 +567,15 @@ func (q *Queue) maintainModels() {
 
 	}
 
-	waiting := []*Job{}
-	for _, j := range q.s.Jobs {
-		if j.State == "queued" && q.capReason(j) == "" {
-			waiting = append(waiting, j)
-		}
-	}
-	sort.Slice(waiting, func(i, j int) bool { return q.before(waiting[i], waiting[j], &Machine{}) })
-	// Each worker runs one batch command; a release can cover only one waiting job.
+	// Release room only for the shared planner's batch winner on each device.
 	planned := map[string]bool{}
-	for _, j := range waiting {
-		if !q.checkpointReady(j, &Machine{}) {
+	handled := map[string]bool{}
+	for _, m := range q.plannerMachines() {
+		j := q.candidate(m, nil)
+		if j == nil || q.calls[j.ID] != nil || handled[j.ID] {
 			continue
 		}
+		handled[j.ID] = true
 		if machine := q.makeBatchRoom(j, planned); machine != "" {
 			planned[machine] = true
 		}
@@ -610,18 +621,6 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 	}
 	_, _, hostOK := q.hostReleases(m, model.MemoryGB, model.HostMemoryGB, c.Priority, callJob(c).Spec)
 	return possible >= model.MemoryGB && hostOK
-}
-func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
-	call := callJob(c)
-	for _, j := range q.s.Jobs {
-		if j.State != "queued" || q.comparePriority(j.Spec, callJob(c).Spec) > 0 || q.capReason(j) != "" || !q.placementAllowed(j, m) || !fits(j, m, q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)) {
-			continue
-		}
-		if q.before(j, call, m) {
-			return true
-		}
-	}
-	return false
 }
 
 // Idle cache residency must not outrank runnable same-tier demand. Reuse this
@@ -1140,6 +1139,9 @@ func (q *Queue) makeBatchRoom(j *Job, planned map[string]bool) string {
 	var best *plan
 	for _, m := range q.s.Machines {
 		if !q.placementAllowed(j, m) || q.unreported[m.ID] || planned[m.ID] {
+			continue
+		}
+		if winner := q.candidate(m, nil); winner == nil || winner.ID != j.ID {
 			continue
 		}
 		p := &plan{machine: m.ID}
