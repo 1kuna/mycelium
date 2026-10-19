@@ -3,36 +3,24 @@ package myce
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-// InstallFlags is the saved half of the CLI's presence-based upgrade overlay.
-// Identity fields without flags stay in the original ServiceConfig.
+// InstallFlags uses the same table as parsing, overlay and validation.
 func (c ServiceConfig) InstallFlags() map[string]string {
-	values := map[string]any{
-		"allow-deviceless": c.AllowDeviceless, "device": c.Device, "docker-host": c.DockerEndpoint,
-		"host-state-dir": c.HostStateDir, "joining-file": c.JoiningFile, "nas": c.NAS, "queue": c.Queue, "listen": c.Listen, "name": c.Name,
-		"gpu": c.Detection.Platform, "memory-mode": c.Detection.MemoryMode, "memory-gb": c.Detection.MemoryGB, "reserve-memory-gb": c.Detection.ReserveGB,
-		"host-memory-budget-gb": c.HostMemoryBudgetGB, "memory-ceiling-slack-gb": c.MemoryCeilingSlackGB, "memory-swap-max-bytes": c.MemorySwapMaxBytes,
-		"host-id": c.HostID, "reserve-host-memory-gb": c.ReserveHostMemoryGB, "state-dir": c.State, "checkpoint-root": c.Checkpoints,
-		"model-root": c.ModelRoot, "environment-root": c.EnvironmentRoot, "model-cache": c.ModelCache, "model-cache-bytes": c.ModelCacheBytes,
-		"environment-cache": c.EnvironmentCache, "environment-cache-bytes": c.EnvironmentCacheBytes, "heartbeat": c.Heartbeat, "start-disabled": c.StartDisabled,
-		"require-memory-ceilings": c.RequireMemoryCeilings, "require-mounted-nas": c.RequireMountedNAS, "db": c.DB, "project-config": c.ProjectConfig, "host-config": c.HostConfig,
-		"log-retention": c.LogRetention, "upload-spool-dir": c.UploadSpoolDir, "upload-spool-bytes": c.UploadSpoolBytes, "restart-grace": c.RestartGrace,
-		"production-loss-timeout": c.ProductionLossTimeout, "deadline-loss-timeout": c.DeadlineLossTimeout, "experiment-loss-timeout": c.ExperimentLossTimeout,
-		"checkpoints": c.Checkpoints, "environment-file": c.EnvironmentFile, "private-devices": c.PrivateDevices, "no-new-privileges": c.NoNewPrivileges,
-		"nice": c.Nice, "cpu-quota": c.CPUQuota, "memory-max": c.MemoryMax, "tasks-max": c.TasksMax, "model-config": c.ModelCatalog, "environment-config": c.EnvironmentCatalog,
-	}
-	if c.ContainerRetention != nil {
-		values["container-retention"] = *c.ContainerRetention
-	}
-	out := make(map[string]string, len(values))
-	for name, value := range values {
-		out[name] = fmt.Sprint(value)
-	}
+	hadRetention := c.ContainerRetention != nil
+	f := flag.NewFlagSet("saved-install", flag.ContinueOnError)
+	RegisterInstallFlags(f, &c)
+	out := map[string]string{}
+	f.VisitAll(func(v *flag.Flag) {
+		if v.Name != "container-retention" || hadRetention {
+			out[v.Name] = v.Value.String()
+		}
+	})
 	return out
 }
 
@@ -114,33 +102,31 @@ func (f installFiles) check(op, path string) error {
 type installedFile struct {
 	path, backup string
 	existed      bool
+	data         []byte
+	mode         os.FileMode
 }
 type installTransaction struct {
 	files     installFiles
 	published []installedFile
+	originals map[string]installedFile
+	manager   installManager
+	units     []installUnit
 }
 
 func (tx *installTransaction) put(path string, data []byte, mode os.FileMode) error {
-	old := installedFile{path: path}
-	if st, err := os.Lstat(path); err == nil {
-		if !st.Mode().IsRegular() {
-			return errors.New("refusing non-regular installed artifact")
-		}
-		old.existed = true
-		previous, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
+	old, ok := tx.originals[path]
+	if !ok {
+		return errors.New("artifact missing from install snapshot")
+	}
+	if old.existed {
 		trash := filepath.Join(filepath.Dir(path), ".Trash")
-		if err = os.MkdirAll(trash, 0700); err != nil {
+		if err := os.MkdirAll(trash, 0700); err != nil {
 			return err
 		}
 		old.backup = filepath.Join(trash, ID()+"-"+filepath.Base(path))
-		if err = writeInstallFile(old.backup, previous, st.Mode().Perm(), installFiles{}, nil); err != nil {
+		if err := writeInstallFile(old.backup, old.data, old.mode, installFiles{}, nil); err != nil {
 			return err
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
 	}
 	// Register immediately after rename, including failures syncing its directory.
 	return writeInstallFile(path, data, mode, tx.files, func() { tx.published = append(tx.published, old) })
@@ -185,22 +171,32 @@ func writeInstallFile(path string, data []byte, mode os.FileMode, files installF
 	}
 	return syncWorkerDir(filepath.Dir(path))
 }
-func (tx *installTransaction) restore() error {
+func (tx *installTransaction) restoreFiles() error {
 	var result error
 	for i := len(tx.published) - 1; i >= 0; i-- {
 		p := tx.published[i]
-		if p.existed {
-			data, err := os.ReadFile(p.backup)
-			if err == nil {
-				var st os.FileInfo
-				st, err = os.Stat(p.backup)
+		err := tx.files.check("restore", p.path)
+		if err == nil {
+			if p.existed {
+				err = writeInstallFile(p.path, p.data, p.mode, installFiles{before: func(op, path string) error { return tx.files.check("restore-"+op, path) }}, nil)
+			} else {
+				err = tx.files.check("restore-remove", p.path)
 				if err == nil {
-					err = writeInstallFile(p.path, data, st.Mode().Perm(), installFiles{}, nil)
+					err = os.Remove(p.path)
+				}
+				if errors.Is(err, os.ErrNotExist) {
+					err = nil
+				}
+				if err == nil {
+					err = tx.files.check("restore-directory-fsync", p.path)
+				}
+				if err == nil {
+					err = syncWorkerDir(filepath.Dir(p.path))
 				}
 			}
-			result = errors.Join(result, err)
-		} else {
-			result = errors.Join(result, os.Remove(p.path), syncWorkerDir(filepath.Dir(p.path)))
+		}
+		if err != nil {
+			result = errors.Join(result, fmt.Errorf("restore %s: %w", filepath.Base(p.path), err))
 		}
 	}
 	return result

@@ -226,6 +226,10 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 			}}
 			manager := func(_ context.Context, name string, args ...string) ([]byte, error) {
 				call := strings.Join(args, " ")
+				if call == "--user is-active --quiet myce-worker.service" || call == "--user is-active --quiet myce-host-reconcile.service" {
+					return nil, inactiveInstallUnit{}
+				}
+
 				if failure == "reload" && strings.Contains(call, "daemon-reload") || failure == "preactivation" && strings.Contains(call, "--property=DropInPaths") || failure == "enable" && call == "--user enable myce-worker.service" {
 					fired = true
 					return nil, injected

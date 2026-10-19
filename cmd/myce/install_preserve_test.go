@@ -239,3 +239,53 @@ func TestInstallProductionServiceEntryStaysClosed(t *testing.T) {
 		t.Fatal("service entry opened host", err)
 	}
 }
+
+func TestInstallExplicitEmptyPaths(t *testing.T) {
+	for _, name := range []string{"checkpoint-root", "checkpoints", "model-root", "environment-root", "model-cache", "environment-cache", "db", "upload-spool-dir", "project-config", "host-config", "model-config", "environment-config"} {
+		t.Run(name, func(t *testing.T) {
+			c, probe := savedInstallFixture(t)
+			if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config, "--" + name + "="}, probe, c.NAS); err != nil {
+				t.Fatal(err)
+			}
+			got, err := myce.ReadServiceConfig(c.Config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.InstallFlags()[name] != "" {
+				t.Fatal("explicit empty path was ignored")
+			}
+		})
+	}
+}
+
+func TestInstallOmittedEmptyEnvironmentRoot(t *testing.T) {
+	c, probe := savedInstallFixture(t)
+	c.EnvironmentRoot = ""
+	data, _ := json.Marshal(c)
+	if err := os.WriteFile(c.Config, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config}, probe, c.NAS); err != nil {
+		t.Fatal(err)
+	}
+	got, err := myce.ReadServiceConfig(c.Config)
+	if err != nil || !reflect.DeepEqual(c, got) {
+		t.Fatal("omitted flag changed saved empty root", err)
+	}
+}
+
+func TestInstallFreshEmptyRequiredValuesAreUsageErrors(t *testing.T) {
+	for _, name := range []string{"nas", "queue", "name", "state-dir", "host-state-dir", "config"} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) {
+				t.Fatal("invalid value reached a service command")
+				return nil, nil
+			}}
+			err := setupCommandWithProbe([]string{"install", "queue", "--dry-run", "--" + name + "="}, probe, home)
+			if err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+				t.Fatal("empty required value was not a usage error", err)
+			}
+		})
+	}
+}
