@@ -120,7 +120,16 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 			}
 		}
 		if verdictRequested && op == "status" && (expectation == "closed" || expectation == "ready") {
-			envelope.ApplyRestVerdict(expectation, clock.Now())
+			// Successful/unsatisfied observations already have their verdict.
+			// Only early errors need evaluation here, after recording their cause.
+			if envelope.HostRestVerdict == nil {
+				now := clock.Now()
+				envelope.FinishObservation(now)
+				envelope.ApplyRestVerdict(expectation, now)
+			}
+			if retErr == nil && envelope.Verdict != "PASS" {
+				retErr = waitError(1, "host expectation not satisfied")
+			}
 		}
 		if jsonOutput {
 			if err := json.NewEncoder(out).Encode(envelope); err != nil {
@@ -250,6 +259,7 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 			return myce.ErrHostChild
 		}
 		envelope = *r.Envelope
+		envelope.HostRestVerdict = nil
 		envelope.Command = op
 		envelope.Accepted = accepted
 		if v.Privileged || observe != nil {
@@ -284,8 +294,9 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 				return myce.ErrHostRevision
 			}
 		}
-		envelope.FinishObservation(clock.Now())
-		if ctx.Err() != nil || !clock.Now().Before(deadline) {
+		now := clock.Now()
+		envelope.FinishObservation(now)
+		if ctx.Err() != nil || !now.Before(deadline) {
 			return myce.ErrHostDeadline
 		}
 		satisfied := true
@@ -295,16 +306,12 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 		if *expect == "ready" {
 			satisfied = envelope.Ready != nil && *envelope.Ready
 		}
-		if *expect == "closed" {
-			envelope.ApplyRestVerdict(*expect, clock.Now())
+		if *expect == "closed" || verdictRequested {
+			envelope.ApplyRestVerdict(*expect, now)
 			satisfied = envelope.Verdict == "PASS"
 			if !verdictRequested {
 				envelope.HostRestVerdict = nil
 			}
-		}
-		if verdictRequested {
-			envelope.ApplyRestVerdict(*expect, clock.Now())
-			satisfied = envelope.Verdict == "PASS"
 		}
 		if satisfied {
 			return nil
@@ -312,6 +319,8 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 		if !*wait && !*waitReleased {
 			return waitError(1, "host expectation not satisfied")
 		}
+		// A further poll (or an error while waiting) is a new evaluation.
+		envelope.HostRestVerdict = nil
 		if err := pause(ctx, min(25*time.Millisecond, deadline.Sub(clock.Now()))); err != nil {
 			return myce.ErrHostDeadline
 		}

@@ -154,7 +154,7 @@ func (e *HostEnvelope) ApplyRestVerdict(expect string, now time.Time) {
 		if partialFresh && e.RestEvidence.ReadyViolation {
 			add("FAIL", "required_worker_unhealthy")
 		}
-		if e.Ready == nil || !*e.Ready {
+		if e.Ready == nil || !*e.Ready || !source("required_workers") {
 			add("UNKNOWN", "required_workers_not_ready")
 		}
 		checkCount(e.Counts.Unsettled, "release_pending")
