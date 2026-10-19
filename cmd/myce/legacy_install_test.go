@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -21,17 +20,17 @@ import (
 	"mycelium/internal/myce"
 )
 
-type rcFixtureExit int
+type installFixtureExit int
 
-func (e rcFixtureExit) Error() string { return "inactive synthetic unit" }
-func (e rcFixtureExit) ExitCode() int { return int(e) }
+func (e installFixtureExit) Error() string { return "inactive synthetic unit" }
+func (e installFixtureExit) ExitCode() int { return int(e) }
 
-type rcFixtureTransport struct {
+type installFixtureTransport struct {
 	target string
 	base   http.RoundTripper
 }
 
-func (x rcFixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+func (x installFixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	u, _ := url.Parse(x.target)
 	r.URL.Scheme = u.Scheme
@@ -45,23 +44,56 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	home := filepath.Join(root, "home")
-	generator := filepath.Join("..", "..", "internal", "myce", "testdata", "generate-release-fixtures.py")
-	cmd := exec.Command("python3.14", generator, "--scratch", filepath.Join(root, "rc-source"), "--output", filepath.Join(root, "fixtures"), "--install-home", home)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("real RC writers: %v %s", err, out)
-	}
 	t.Setenv("HOME", home)
 	t.Setenv("MYCE_TOKEN", "")
 	t.Setenv("MYCE_HOST_STATE_DIR", filepath.Join(home, ".local/share/myce"))
 	t.Setenv("MYCE_QUEUE", "http://ambient.invalid")
 	t.Setenv("DOCKER_HOST", "unix:///ambient.sock")
-	configs := []myce.ServiceConfig{}
-	for _, role := range []string{"queue", "worker-gpu0", "worker-gpu1"} {
-		c, e := myce.ReadServiceConfig(filepath.Join(home, ".local/share/mycelium", role, "config.json"))
-		if e != nil {
-			t.Fatal(e)
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	environment := filepath.Join(home, "private-reference")
+	if err := os.WriteFile(environment, []byte("MYCE_TOKEN=synthetic-fresh-install\nMYCE_QUEUE=http://fixture-queue.invalid\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var configs []myce.ServiceConfig
+	for i, instance := range []string{"", "gpu0", "gpu1"} {
+		role := "worker"
+		if i == 0 {
+			role = "queue"
+		}
+		c, err := myce.PlanInstall(role, home, "", home, "http://fixture-queue.invalid", fmt.Sprintf("fixture-%d", i), myce.Detection{OS: "linux", Arch: runtime.GOARCH, Platform: "fake", MemoryMode: "fixed", MemoryGB: 8})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.EnvironmentFile, c.HostID = environment, "fixture-host"
+		c.DockerEndpoint = "unix:///var/run/docker.sock"
+		if role == "worker" {
+			c.AllowDeviceless = true
+			if err := c.WorkerInstance(instance); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(c.Config), 0700); err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(c.Config, data, 0600); err != nil {
+			t.Fatal(err)
 		}
 		configs = append(configs, c)
+	}
+	// Any unmarked non-empty root suffices; payload contents are never read.
+	for _, dir := range []string{configs[0].State, configs[1].State, configs[2].State, configs[0].HostStateDir} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "arbitrary"), []byte("surviving data"), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var calls []string
 	probe := myce.MachineProbe{OS: "linux", Arch: runtime.GOARCH, Command: func(_ context.Context, n string, args ...string) ([]byte, error) {
@@ -71,7 +103,7 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 			return []byte("disabled"), nil
 		}
 		if n == "systemctl" && strings.Contains(call, "is-active") {
-			return nil, rcFixtureExit(3)
+			return nil, installFixtureExit(3)
 		}
 		return nil, nil
 	}}
@@ -81,7 +113,7 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		calls = nil
 		err := setupCommandWithProbe([]string{"install", c.Role, "--config", c.Config}, probe, home)
 		if err == nil || !strings.Contains(err.Error(), "legacy_state_present") {
-			t.Fatal("install accepted RC state", err)
+			t.Fatal("install accepted unmarked state", err)
 		}
 		after, _ := os.ReadFile(c.Config)
 		if !bytes.Equal(before, after) {
@@ -142,17 +174,17 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		want := c
 		want.Version = 1
 		if !reflect.DeepEqual(want, got) {
-			t.Fatal("WP7 overlay changed omitted RC config values")
+			t.Fatal("overlay changed omitted current config values")
 		}
 		unit, e := os.ReadFile(c.Service)
 		if e != nil || string(unit) != got.ServiceText() {
-			t.Fatal("RC unit was not replaced", e)
+			t.Fatal("current unit was not published", e)
 		}
 		if c.Role == "worker" && !bytes.Contains(unit, []byte("_host-start-check")) {
 			t.Fatal("template instance missing current fence")
 		}
 	}
-	// The RC had no endpoint field. Once an explicit endpoint is provisioned,
+	// Once an explicit endpoint is provisioned,
 	// the same overlay must retain it on the next omitted-flag invocation.
 	endpoint := "unix:///run/fixture-pinned.sock"
 	args := []string{"install", "worker", "--config", configs[1].Config, "--docker-host", endpoint}
@@ -193,7 +225,7 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 	server := httptest.NewServer(myce.API{Queue: q, Token: "synthetic-fresh-install"}.Handler())
 	defer server.Close()
 	savedTransport := http.DefaultTransport
-	http.DefaultTransport = rcFixtureTransport{server.URL, savedTransport}
+	http.DefaultTransport = installFixtureTransport{server.URL, savedTransport}
 	defer func() { http.DefaultTransport = savedTransport }()
 	resolver := myce.LocalHostIdentityResolver()
 	resolver.OS = "linux"
@@ -259,7 +291,7 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 	client := myce.Client{URL: server.URL, Token: "synthetic-fresh-install"}
 	var snapshot myce.Snapshot
 	if e = client.Call(context.Background(), "GET", "/api/status", nil, &snapshot); e != nil || len(snapshot.Jobs) != 0 {
-		t.Fatal("fresh queue retained RC jobs", e)
+		t.Fatal("fresh queue contains jobs", e)
 	}
 	var job myce.Job
 	if e = client.Call(context.Background(), "POST", "/api/jobs", spec, &job); e != nil {
@@ -290,9 +322,9 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		t.Fatal("OPEN did not admit fresh job", reply, e)
 	}
 	if !reflect.DeepEqual(archived, archiveHashes()) {
-		t.Fatal("fresh install/open modified archived RC state")
+		t.Fatal("fresh install/open modified archived unmarked state")
 	}
-	t.Log("real RC PlanInstall/Install/registerHost layout archived by operator; queue/NAS/name/Docker/environment reference preserved; work admitted only after explicit open using status desired.revision")
+	t.Log("current config preserved through archive/fresh install; work admitted only after explicit open")
 }
 
 func TestQueueStartupRefusalNoWrites(t *testing.T) {
@@ -306,11 +338,7 @@ func TestQueueStartupRefusalNoWrites(t *testing.T) {
 			if err := os.Mkdir(roots[refused], 0700); err != nil {
 				t.Fatal(err)
 			}
-			old, err := os.ReadFile("../../internal/myce/testdata/release-7285a88/host/control-generation.json")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = os.WriteFile(filepath.Join(roots[refused], "arbitrary"), old, 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(roots[refused], "arbitrary"), []byte("surviving data"), 0600); err != nil {
 				t.Fatal(err)
 			}
 			snapshot := func() map[string]string {
@@ -336,7 +364,7 @@ func TestQueueStartupRefusalNoWrites(t *testing.T) {
 			}
 			before := snapshot()
 			t.Setenv("MYCE_TOKEN", "synthetic-fixture-token")
-			err = run([]string{"queue", "--db", filepath.Join(roots["queue"], "queue.db"), "--host-state-dir", roots["host"], "--upload-spool-dir", roots["upload-spool"], "--file-store", roots["file-store"], "--identity-dir", roots["identity"], "--listen", "127.0.0.1:0", "--discovery=false"})
+			err := run([]string{"queue", "--db", filepath.Join(roots["queue"], "queue.db"), "--host-state-dir", roots["host"], "--upload-spool-dir", roots["upload-spool"], "--file-store", roots["file-store"], "--identity-dir", roots["identity"], "--listen", "127.0.0.1:0", "--discovery=false"})
 			expected := "legacy_state_present: stop the old services, archive " + roots[refused] + ", then do a fresh install (preserve config and secret references)"
 			if err == nil || err.Error() != expected {
 				t.Fatalf("refusal: %v; want %s", err, expected)

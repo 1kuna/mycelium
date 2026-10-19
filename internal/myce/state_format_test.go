@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,41 +10,13 @@ import (
 	"testing"
 )
 
-// Every single file here is emitted by an actual 7285a88 writer. The interrupted
-// temp snapshot has the original state writer's bytes, just its pre-rename name.
-func rcSingleFiles(t *testing.T) map[string][]byte {
-	t.Helper()
-	out := map[string][]byte{}
-	for _, fixture := range []string{"release-7285a88", "release-7285a88-partials"} {
-		base := filepath.Join("testdata", fixture)
-		err := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				return nil
-			}
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			rel, err := filepath.Rel(base, path)
-			if err != nil {
-				return err
-			}
-			out[rel] = data
-			return nil
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	out["state.json.tmp"] = out["workers/one/state.json"]
-	return out
+// Root admission depends only on the marker, never on payload formats.
+func refusedStateFiles() map[string][]byte {
+	return map[string][]byte{"arbitrary": []byte("surviving data"), FormatMarker: []byte("v2\n")}
 }
 
 func TestStateRootFormats(t *testing.T) {
-	files := rcSingleFiles(t)
+	files := refusedStateFiles()
 	// Default and explicitly configured roots, including independent caches and
 	// queue data locations. All use exactly the same gate, regardless of contents.
 	for _, relative := range []string{
@@ -92,7 +63,7 @@ func TestStateRootFormats(t *testing.T) {
 					if err := os.MkdirAll(root, 0700); err != nil {
 						t.Fatal(err)
 					}
-					// Flatten the filename: in particular, no DB accompanies the WAL/SHM.
+					// Refuse before inspecting the payload.
 					if err := os.WriteFile(filepath.Join(root, filepath.Base(name)), data, 0600); err != nil {
 						t.Fatal(err)
 					}
@@ -131,7 +102,7 @@ func TestStateRootInvalidMarker(t *testing.T) {
 
 func TestStateStartupRefusalNoWrites(t *testing.T) {
 	for _, entry := range []string{"queue", "worker", "host-init", "host-control", "install", "benchmark", "docker-reconcile"} {
-		for name, data := range rcSingleFiles(t) {
+		for name, data := range refusedStateFiles() {
 			t.Run(entry+"/"+name, func(t *testing.T) {
 				parent := t.TempDir()
 				root := filepath.Join(parent, "old-state")
