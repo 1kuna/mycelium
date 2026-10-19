@@ -92,7 +92,7 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 	unknownCapacity := []string{}
 	knownCapacity := false
 	for _, m := range machines {
-		if m.Gone || m.Leaving || !machineAllowed(j.Spec.AllowedMachines, m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
+		if m.Gone || m.Leaving || !machineAllowed(j.Spec.AllowedMachines, m.ID) || !environmentCanRun(j, m) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
 		}
 		if reason := capabilityUnavailableReason(m); reason != "" {
