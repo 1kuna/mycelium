@@ -19,6 +19,10 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 				q.models.Wait = time.Hour // isolate maintenance from the ordinary load timeout
 				m.ModelConfigHash = modelConfigHash(q.models)
 				m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
+				m.EnvironmentBuilder = true
+				if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"pending": {"fake": binaryRecipe(t, "fake")}}}); err != nil {
+					t.Fatal(err)
+				}
 				check(t, q, m, nil)
 				if err := q.SetLossTimeouts(time.Hour, time.Hour, time.Hour); err != nil {
 					t.Fatal(err)
@@ -98,6 +102,15 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 				deadline := clock.Now().Add(StopGrace)
 				if action.stop && (status.Policy.StopAt == nil || !status.Policy.StopAt.Equal(deadline)) {
 					t.Fatal("missing shared deadline", status.Policy)
+				}
+				// Offer real backlog for every admission channel. Queued demand is
+				// deliberately still present when the final wait becomes quiescent.
+				submit(t, q, spec("experiment"))
+				envJob := spec("experiment")
+				envJob.Environment.Name = "pending"
+				submit(t, q, envJob)
+				if err := q.SyncModel(SyncRequest{Model: "test", To: m.ID}); err != nil {
+					t.Fatal(err)
 				}
 				reply := pulse()
 				if !reply.AdmissionBlocked || reply.Job != nil || len(reply.CopyPlan) != 0 || len(reply.EnvironmentPlan) != 0 {
