@@ -47,9 +47,21 @@ func jobClass(s Spec) string {
 	}
 	return "experiment"
 }
+
+// Empty projects are allowed for internal scheduling demands and unscoped models;
+// entry points that require a project check that separately.
+func validateProjectIdentifier(project string) error {
+	if strings.Contains(project, "/") {
+		return errors.New("project cannot contain slash")
+	}
+	return nil
+}
 func normalizeJobClass(s *Spec) error {
-	if strings.Contains(s.Project, "/") || strings.Contains(s.Class, "/") {
-		return errors.New("project and class cannot contain slash")
+	if err := validateProjectIdentifier(s.Project); err != nil {
+		return err
+	}
+	if strings.Contains(s.Class, "/") {
+		return errors.New("class cannot contain slash")
 	}
 	if s.Priority != "" && legacyRank(s.Priority) == 3 {
 		return errors.New("priority must be production, deadline or experiment")
@@ -146,7 +158,11 @@ func (q *Queue) priorityMatch(s Spec) PriorityMatch {
 			}
 		}
 	}
-	panic("validated priority policy has no catchall")
+	// Older persisted identities may predate admission validation. Keep them in
+	// the final catchall tier rather than panicking during status or scheduling.
+	p := q.effectivePriorityPolicy()
+	i := len(p.Tiers) - 1
+	return PriorityMatch{p.Tiers[i].Name, i, "*/*", q.policyRevision()}
 }
 
 // comparePriority is the only scheduling rank comparator. Reliability and

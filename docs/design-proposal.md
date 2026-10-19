@@ -78,6 +78,10 @@ legacy priority normalizes at admission, and conflicting declarations fail.
 Project/class identifiers cannot contain `/`. Status shows current tier,
 selector and policy revision. Policy changes rerank existing jobs on subsequent
 planning decisions without changing keyed replay or legacy reliability behavior.
+An already-assigned attempt is treated like a running attempt: a policy change
+alone does not revoke its assignment or prevent it from starting, even if a
+higher-tier job is now waiting. Policy changes apply to future placement
+decisions; reclaiming already-assigned attempts belongs to P3 preemption.
 P2 generalized fairness and P3 expanded preemption/retry semantics remain later
 slices; current eligibility and stop/retry rules still apply. See
 [the policy guide](guide-priority-policy.md) for format and API details.

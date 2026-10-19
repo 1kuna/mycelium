@@ -73,6 +73,9 @@ func ReadProjectPolicies(path string) (map[string]ProjectPolicy, error) {
 }
 func validateProjectPolicies(p map[string]ProjectPolicy) error {
 	for name, v := range p {
+		if err := validateProjectIdentifier(name); err != nil {
+			return err
+		}
 		if v.DefaultCallPriority != "" && v.DefaultCallPriority != "experiment" && v.DefaultCallPriority != "production" {
 			return errors.New("default_call_priority must be experiment or production")
 		}
@@ -82,7 +85,7 @@ func validateProjectPolicies(p map[string]ProjectPolicy) error {
 				return errors.New("project allowed_machines must contain nonempty machine names")
 			}
 		}
-		if name == "" || strings.Contains(name, "/") || !validMemoryValue(v.Weight) || v.Weight <= 0 || v.MaxConcurrentExperiments < 0 || !validMemoryValue(v.MaxMemoryShare) || v.MaxMemoryShare > 1 {
+		if name == "" || !validMemoryValue(v.Weight) || v.Weight <= 0 || v.MaxConcurrentExperiments < 0 || !validMemoryValue(v.MaxMemoryShare) || v.MaxMemoryShare > 1 {
 			return errors.New("project requires positive finite weight, nonnegative experiment cap, and memory share in [0,1]")
 		}
 	}

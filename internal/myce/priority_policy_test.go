@@ -316,3 +316,108 @@ func TestPriorityPolicyCASIncludesExistingProjectSettings(t *testing.T) {
 		t.Fatalf("legacy settings write bypassed CAS: %v", err)
 	}
 }
+
+func TestPriorityPolicyRejectsSlashProject(t *testing.T) {
+	q, _, _ := modelFixture(t)
+	const project = "team/subproject"
+	t.Run("submit", func(t *testing.T) {
+		s := spec("experiment")
+		s.Project = project
+		if _, err := q.Submit(s); err == nil {
+			t.Fatal("slash project accepted")
+		}
+	})
+	for _, defaults := range []bool{false, true} {
+		name := "generic route"
+		if defaults {
+			name = "entry default"
+		}
+		t.Run(name, func(t *testing.T) {
+			c := &ModelCall{Model: "test", Project: project, Priority: "experiment"}
+			if defaults {
+				c.Project = ""
+			}
+			if err := q.callDefaults(c, Model{Project: project}, nil, defaults); err == nil {
+				t.Fatal("slash project accepted")
+			}
+		})
+	}
+	t.Run("call admission", func(t *testing.T) {
+		if err := q.addCall(&ModelCall{Model: "test", Project: project, Priority: "experiment"}); err == nil {
+			t.Fatal("slash project accepted")
+		}
+	})
+	t.Run("model config", func(t *testing.T) {
+		config := q.models
+		config.Models = append([]Model(nil), config.Models...)
+		config.Models[0].Project = project
+		if err := validateModels(config); err == nil {
+			t.Fatal("slash project accepted")
+		}
+	})
+	t.Run("pin", func(t *testing.T) {
+		if err := q.Pin(ModelPin{Project: project, Model: "test", Machine: "one"}); err == nil {
+			t.Fatal("slash project accepted")
+		}
+	})
+	t.Run("legacy identity", func(t *testing.T) {
+		got := q.priorityMatch(Spec{Project: project, Class: "experiment"})
+		if got.Tier != "experiment" || got.Selector != "*/*" {
+			t.Fatalf("legacy identity did not fall back safely: %+v", got)
+		}
+	})
+	t.Run("project settings", func(t *testing.T) {
+		if err := q.ConfigureProjects(map[string]ProjectPolicy{project: {Weight: 1}}); err == nil {
+			t.Fatal("slash project accepted")
+		}
+	})
+	t.Run("priority policy", func(t *testing.T) {
+		p := defaultPriorityPolicy()
+		p.Projects = map[string]ProjectPolicy{project: {Weight: 1}}
+		if _, err := q.SetPriorityPolicy(0, p); err == nil {
+			t.Fatal("slash project accepted")
+		}
+	})
+	if _, err := q.Snapshot(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPriorityPolicyChangePreservesAssignedAttempt(t *testing.T) {
+	q, _ := fixture(t)
+	policy := PriorityPolicy{Version: 1, Tiers: []PriorityTier{{Name: "top", Selectors: []string{"alpha/production"}}, {Name: "rest", Selectors: []string{"*/*"}}}}
+	if _, err := q.SetPriorityPolicy(0, policy); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("production")
+	s.Project = "alpha"
+	alpha := submit(t, q, s)
+	assigned := check(t, q, machine("one", "fake"), nil).Job
+	if assigned == nil || assigned.ID != alpha.ID || assigned.StartedAt != nil || assigned.PriorityPolicy.Revision != 1 {
+		t.Fatalf("expected unstarted revision-1 assignment: %+v", assigned)
+	}
+	s.Project = "beta"
+	waiting := submit(t, q, s)
+	policy.Tiers[0].Selectors = []string{"beta/production"}
+	if _, err := q.SetPriorityPolicy(1, policy); err != nil {
+		t.Fatal(err)
+	}
+	if q.comparePriority(waiting.Spec, assigned.Spec) >= 0 {
+		t.Fatal("waiting job must now outrank assigned attempt")
+	}
+	if err := q.Started(result(assigned, true)); err != nil {
+		t.Fatalf("policy change rejected assigned attempt: %v", err)
+	}
+	started := q.s.Jobs[assigned.ID]
+	if started.State != "running" || started.StartedAt == nil || started.Attempt != assigned.Attempt || started.Session != assigned.Session || started.Machine != assigned.Machine {
+		t.Fatalf("assigned attempt did not start: %+v", started)
+	}
+	if got := q.s.Jobs[waiting.ID]; got.State != "queued" {
+		t.Fatalf("higher-tier job should still wait: %+v", got)
+	}
+	// Future placement uses the new policy.
+	next := check(t, q, machine("two", "fake"), nil).Job
+	if next == nil || next.ID != waiting.ID || next.PriorityPolicy.Revision != 2 {
+		t.Fatalf("future placement did not use new policy: %+v", next)
+	}
+}

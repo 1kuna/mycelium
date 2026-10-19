@@ -122,6 +122,9 @@ func validateModels(c ModelConfig) error {
 		if m.LocalSource != "" && (!localName(m.LocalSource) || m.FileStore || m.DirectNAS || m.Path != "" || len(m.Files) == 0) {
 			return errors.New("local_source requires a named approval and files; omit path, file_store and direct_nas")
 		}
+		if err := validateProjectIdentifier(m.Project); err != nil {
+			return err
+		}
 		if strings.TrimSpace(m.Project) != m.Project {
 			return errors.New("model project must not contain surrounding whitespace")
 		}
@@ -684,6 +687,9 @@ func (q *Queue) modelPlan(machine string) []ModelSlot {
 	return out
 }
 func (q *Queue) addCall(c *ModelCall) error {
+	if err := validateProjectIdentifier(c.Project); err != nil {
+		return err
+	}
 	return q.updateScoped(nil, true, func() error {
 		if _, ok := q.model(c.Model); !ok {
 			return errors.New("unknown model")
