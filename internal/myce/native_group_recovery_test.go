@@ -162,7 +162,7 @@ func nativePortHandoff(t *testing.T, collisions int) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/workers/launch" {
 			call := n.Add(1)
-			if call >= 3 && call <= int32(2*collisions+1) && call%2 == 1 {
+			if call >= 3 && call <= int32(3*collisions) && call%3 == 0 {
 				b, _ := os.ReadFile(filepath.Join(stateDir, "state.json"))
 				var st workerState
 				_ = json.Unmarshal(b, &st)
@@ -177,7 +177,11 @@ func nativePortHandoff(t *testing.T, collisions int) {
 					}
 					member := v.Members[0]
 					birth, e := processBirth(member.PID)
-					if e != nil || custody.Groups[st.PID][member.PID] != birth || birth == "" || custody.Cgroup != filepath.Join(ceilings.root, "attempt-"+st.Identity) {
+					owned := false
+					for _, births := range custody.Groups {
+						owned = owned || births[member.PID] == birth
+					}
+					if e != nil || !owned || birth == "" || custody.Cgroup != filepath.Join(ceilings.root, "attempt-"+st.Identity) {
 						t.Error("member reached exec gate without durable birth/group/cgroup custody", e)
 					}
 					out, e := exec.Command("ps", "-p", strconv.Itoa(v.Members[0].PID), "-o", "command=").Output()

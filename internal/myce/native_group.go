@@ -19,7 +19,7 @@ import (
 
 var errNativePortCollision = errors.New("native sidecar address already in use")
 
-const nativeBindAttempts = 3
+const nativeBindAttempts = 3 // Whole-group preparation attempts, including the first.
 
 // The anchor preserves the existing attempt PGID/recovery contract. All members
 // inherit its cgroup and join its process group before their exec gate opens.
@@ -47,6 +47,7 @@ type nativeGroup struct {
 	releases               []func()
 	memory                 *memoryAttempt
 	custody                workerState
+	supervisor             *exec.Cmd
 }
 
 func (g *nativeGroup) started() bool {
@@ -95,7 +96,7 @@ func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) 
 	g.cancel()
 	if kill {
 		if !p.killed {
-			_ = signalWorkerGroup(p.cmd.Process.Pid, syscall.SIGKILL)
+			_ = signalWorkerGroup(g.supervisor.Process.Pid, syscall.SIGKILL)
 			p.killed = true
 		}
 		return
@@ -109,25 +110,15 @@ func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) 
 		if g.main != nil {
 			_ = syscall.Kill(g.main.PID, syscall.SIGTERM)
 		} else {
-			_ = signalWorkerGroup(p.cmd.Process.Pid, syscall.SIGTERM)
+			_ = signalWorkerGroup(g.supervisor.Process.Pid, syscall.SIGTERM)
 		}
 	}
 }
 
 func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory *memoryAttempt, env map[string]string, mainEnvironment string, releases ...func()) (*process, error) {
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-	cmd := exec.Command("sh", "-c", `trap '' TERM; while read line; do :; done`, "myce-supervisor-"+identity)
-	cmd.Stdin = reader
-	cmd.Env = environmentList(env)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	logName := identity + ".log"
 	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, os.O_EXCL)
 	if err != nil {
-		writer.Close()
 		return nil, err
 	}
 	if j.Spec.Logs == "none" {
@@ -135,70 +126,23 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	}
 	s.state.Job = &j
 	s.state.Identity = identity
-	s.state.PID = 0
-	s.state.LaunchPending = true
 	s.state.Log = logName
 	s.state.Offset = 0
 	s.state.Pending = 0
 	s.state.Result = nil
 	s.state.OperatorStopped = false
-	custody := workerState{Identity: identity, Groups: map[int]map[int]string{}}
+	p := &process{job: j, done: make(chan workerFinish, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	g := &nativeGroup{p: p, worker: w, dir: s.dir, identity: identity, session: s.state.Session, ctx: ctx, cancel: cancel, memory: memory, custody: workerState{Identity: identity, Groups: map[int]map[int]string{}}}
+	p.native = g
 	if memory != nil {
-		custody.Cgroup = memory.path
+		g.custody.Cgroup = memory.path
 	}
-	if err = s.save(); err == nil {
-		err = saveWorkerJSON(s.dir, "attempt-"+identity+".json", custody)
-	}
-	if err == nil {
-		err = w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(j.Attempt)})
-	}
-	if err == nil {
-		err = cmd.Start()
-	}
+	writer, err := g.startSupervisor(s, env)
 	if err != nil {
-		writer.Close()
+		cancel()
 		output.Close()
 		return nil, err
-	}
-	abort := func(e error) (*process, error) {
-		_ = signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL)
-		writer.Close()
-		_ = cmd.Wait()
-		output.Close()
-		groupErr := waitWorkerGroup(cmd.Process.Pid, w.Clock)
-		if groupErr != nil {
-			return nil, errors.Join(e, fmt.Errorf("%w: %v", errWorkerReleasePending, groupErr))
-		}
-		return nil, e
-	}
-	custody.PID = cmd.Process.Pid
-	custody.Birth, err = processBirth(custody.PID)
-	if err != nil {
-		return abort(err)
-	}
-	custody.Groups[custody.PID] = map[int]string{custody.PID: custody.Birth}
-	if err = saveWorkerJSON(s.dir, "attempt-"+identity+".json", custody); err != nil {
-		return abort(err)
-	}
-	if err = memory.attach(cmd.Process.Pid); err != nil {
-		return abort(err)
-	}
-	s.state.PID = cmd.Process.Pid
-	s.state.LaunchPending = false
-	if err = s.save(); err != nil {
-		return abort(err)
-	}
-	p := &process{job: j, cmd: cmd, done: make(chan workerFinish, 1)}
-	ctx, cancel := context.WithCancel(context.Background())
-	g := &nativeGroup{p: p, worker: w, dir: s.dir, identity: identity, session: s.state.Session, ctx: ctx, cancel: cancel, memory: memory, custody: custody}
-	p.native = g
-	for _, side := range j.Spec.Run.Sidecars {
-		g.members = append(g.members, &nativeMember{Name: side.Name, Phase: "intent", MemoryGB: side.MemoryGB})
-	}
-	g.members = append(g.members, &nativeMember{Name: "main", Phase: "intent"})
-	if err = g.save(); err != nil {
-		cancel()
-		return abort(err)
 	}
 	if w.control != nil {
 		w.control.set(p)
@@ -210,7 +154,28 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 				defer release()
 			}
 		}
-		runErr, stage := g.run(j, env, mainEnvironment, output)
+		var runErr error
+		var stage bool
+		for groupAttempt := 0; groupAttempt < nativeBindAttempts; groupAttempt++ {
+			runErr, stage = g.run(j, env, mainEnvironment, output)
+			if !errors.Is(runErr, errNativePortCollision) || groupAttempt+1 == nativeBindAttempts {
+				break
+			}
+			// No advertised endpoint may change while an old consumer survives.
+			// Keep custody until the entire old group is verified empty.
+			if err := g.cleanupProcesses(writer); err != nil {
+				runErr = errors.Join(runErr, err)
+				break
+			}
+			if err := memory.failure(); err != nil {
+				runErr = err
+				break
+			}
+			writer, runErr = g.startSupervisor(nil, env)
+			if runErr != nil {
+				break
+			}
+		}
 		defer func() {
 			for _, release := range g.releases {
 				release()
@@ -220,19 +185,9 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		infrastructure, forced, polite := p.stopped || p.killed, p.killed, p.polite
 		stage = stage || g.stageFailure
 		p.mu.Unlock()
-		_ = signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL)
-		writer.Close()
-		for _, m := range g.members {
-			if m.done != nil {
-				<-m.done
-				m.Phase = "exited"
-				code := m.cmd.ProcessState.ExitCode()
-				m.ExitCode = &code
-			}
-		}
-		_ = cmd.Wait()
+		groupErr := g.cleanupProcesses(writer)
 		oom := memory.failure()
-		cleanup := errors.Join(waitWorkerGroup(cmd.Process.Pid, w.Clock), memory.cleanup(w.Clock), g.save())
+		cleanup := errors.Join(groupErr, memory.cleanup(w.Clock), g.save())
 		persist := errors.Join(syncCommandOutput(output), output.Close())
 		r := Result{Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && cleanup == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
 		if runErr != nil {
@@ -273,6 +228,111 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		p.done <- workerFinish{result: r, err: saveErr}
 	}()
 	return p, nil
+}
+
+// Start a new anchor only after the previous group has been verified empty.
+// Persist intent and kernel birth custody before permitting any member exec.
+// Only the initial launch updates worker state; later groups remain in the same
+// durable attempt custody so the worker loop retains sole ownership of state.
+func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*os.File, error) {
+	g.p.mu.Lock()
+	defer g.p.mu.Unlock()
+	if err := g.ctx.Err(); err != nil {
+		return nil, err
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	cmd := exec.Command("sh", "-c", `trap '' TERM; while read line; do :; done`, "myce-supervisor-"+g.identity)
+	cmd.Stdin = reader
+	cmd.Env = environmentList(env)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if s != nil {
+		s.state.PID = 0
+		s.state.LaunchPending = true
+		err = s.save()
+	}
+	if err == nil {
+		err = saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody)
+	}
+	if err == nil {
+		err = g.worker.authorizeLaunch(HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: g.p.job.ID, Attempt: strconv.Itoa(g.p.job.Attempt)})
+	}
+	if err == nil {
+		err = cmd.Start()
+	}
+	if err != nil {
+		writer.Close()
+		return nil, err
+	}
+	abort := func(e error) (*os.File, error) {
+		_ = signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL)
+		writer.Close()
+		_ = cmd.Wait()
+		if groupErr := waitWorkerGroup(cmd.Process.Pid, g.worker.Clock); groupErr != nil {
+			return nil, errors.Join(e, fmt.Errorf("%w: %v", errWorkerReleasePending, groupErr))
+		}
+		return nil, e
+	}
+	birth, err := processBirth(cmd.Process.Pid)
+	if err != nil {
+		return abort(err)
+	}
+	if s != nil {
+		g.custody.PID = cmd.Process.Pid
+		g.custody.Birth = birth
+	}
+	g.custody.Groups[cmd.Process.Pid] = map[int]string{cmd.Process.Pid: birth}
+	if err = saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody); err != nil {
+		return abort(err)
+	}
+	if err = g.memory.attach(cmd.Process.Pid); err != nil {
+		return abort(err)
+	}
+	if s != nil {
+		s.state.PID = cmd.Process.Pid
+		s.state.LaunchPending = false
+		if err = s.save(); err != nil {
+			return abort(err)
+		}
+		g.p.cmd = cmd
+	}
+	g.supervisor = cmd
+	g.members = nil
+	for _, side := range g.p.job.Spec.Run.Sidecars {
+		g.members = append(g.members, &nativeMember{Name: side.Name, Phase: "intent", MemoryGB: side.MemoryGB})
+	}
+	g.members = append(g.members, &nativeMember{Name: "main", Phase: "intent"})
+	if err = g.save(); err != nil {
+		return abort(err)
+	}
+	return writer, nil
+}
+
+func (g *nativeGroup) cleanupProcesses(writer *os.File) error {
+	// Retain the cgroup reservation, but kill and verify its entire subtree,
+	// including descendants that left the process group, before relaunching.
+	cleanup := errors.Join(g.memory.stop(g.worker.Clock), cleanupAttemptGroups(workerState{Groups: g.custody.Groups}, g.worker.Clock))
+	if writer != nil {
+		writer.Close()
+	}
+	if cleanup != nil {
+		return cleanup
+	}
+	for _, m := range g.members {
+		if m.done != nil {
+			<-m.done
+			m.Phase = "exited"
+			code := m.cmd.ProcessState.ExitCode()
+			m.ExitCode = &code
+		}
+	}
+	if g.supervisor != nil {
+		_ = g.supervisor.Wait()
+	}
+	return g.save()
 }
 
 func environmentList(env map[string]string) []string {
@@ -319,7 +379,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	cmd.Env = environmentList(env)
 	cmd.Stdout = output
 	cmd.Stderr = output
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: g.p.cmd.Process.Pid}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: g.supervisor.Process.Pid}
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		return err
@@ -342,7 +402,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	if err != nil {
 		return err
 	}
-	g.custody.Groups[g.p.cmd.Process.Pid][m.PID] = m.Birth
+	g.custody.Groups[g.supervisor.Process.Pid][m.PID] = m.Birth
 	if err = g.save(); err != nil {
 		return err
 	}
@@ -436,95 +496,62 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 			g.p.mu.Unlock()
 			return err, !stopped
 		}
-		for bindAttempt := 0; bindAttempt < nativeBindAttempts; bindAttempt++ {
-			if bindAttempt > 0 {
-				l, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(*side.Port)))
-				if err != nil {
-					if errors.Is(err, syscall.EADDRINUSE) {
-						if bindAttempt+1 == nativeBindAttempts {
-							return errNativePortCollision, false
-						}
-						continue
-					}
-					return err, true
+		replace := replacer()
+		memberEnv := maps.Clone(env)
+		// Helpers inherit main's environment, but not main's authored env variables.
+		for k := range j.Spec.Run.Env {
+			delete(memberEnv, k)
+			if value, ok := os.LookupEnv(k); ok {
+				memberEnv[k] = value
+			}
+		}
+		port := ""
+		if l := reservations[side.Name]; l != nil {
+			port = strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+			l.Close()
+			delete(reservations, side.Name)
+			memberEnv["MYCE_SIDECAR_PORT"] = port
+			memberEnv["MYCE_SIDECAR_URL"] = "http://127.0.0.1:" + port
+		}
+		r := strings.NewReplacer("{port}", port)
+		for k, v := range side.Env {
+			memberEnv[k] = r.Replace(replace.Replace(v))
+		}
+		if root := roots[side.Name]; root != "" && side.Environment != "" {
+			if mainEnvironment != "" {
+				prefix := filepath.Join(mainEnvironment, "venv", "bin") + string(os.PathListSeparator) + filepath.Join(mainEnvironment, "bin") + string(os.PathListSeparator)
+				memberEnv["PATH"] = strings.TrimPrefix(memberEnv["PATH"], prefix)
+			}
+			bindEnvironment(memberEnv, root)
+		}
+		// Reserved env was validated; defensive stripping also covers direct starts.
+		delete(memberEnv, "MYCE_TOKEN")
+		reference := side.Environment
+		if reference == "" {
+			reference = j.Spec.Environment.Name
+		}
+		er := executionReplacer(j.Spec.Run.Workdir, roots[side.Name], reference, machineTarget(&g.worker.Machine))
+		argv := expandArgs(expandArgs(expandArgs(side.Command, replace), r), er)
+		for k, v := range memberEnv {
+			memberEnv[k] = er.Replace(v)
+		}
+		if err := g.launch(g.members[i], argv, memberEnv, j.Spec.Run.Workdir, output); err != nil {
+			return err, !errors.Is(err, context.Canceled) && !errors.Is(err, errWorkerStartAuthorization)
+		}
+		if side.Readiness != nil {
+			g.members[i].Phase = "waiting_ready"
+			if err := g.save(); err != nil {
+				return err, true
+			}
+			if err := g.waitReady(g.members[i], port, *side.Readiness); err != nil {
+				if errors.Is(err, errNativePortCollision) {
+					return err, false
 				}
-				reservations[side.Name] = l
-				setPort(side, l)
+				g.p.mu.Lock()
+				stopped := g.p.stopped || g.p.killed
+				g.p.mu.Unlock()
+				return err, !errors.Is(err, context.Canceled) && !stopped
 			}
-			replace := replacer()
-			memberEnv := maps.Clone(env)
-			// Helpers inherit main's environment, but not main's authored env variables.
-			for k := range j.Spec.Run.Env {
-				delete(memberEnv, k)
-				if value, ok := os.LookupEnv(k); ok {
-					memberEnv[k] = value
-				}
-			}
-			port := ""
-			if l := reservations[side.Name]; l != nil {
-				port = strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
-				l.Close()
-				delete(reservations, side.Name)
-				memberEnv["MYCE_SIDECAR_PORT"] = port
-				memberEnv["MYCE_SIDECAR_URL"] = "http://127.0.0.1:" + port
-			}
-			r := strings.NewReplacer("{port}", port)
-			for k, v := range side.Env {
-				memberEnv[k] = r.Replace(replace.Replace(v))
-			}
-			if root := roots[side.Name]; root != "" && side.Environment != "" {
-				if mainEnvironment != "" {
-					prefix := filepath.Join(mainEnvironment, "venv", "bin") + string(os.PathListSeparator) + filepath.Join(mainEnvironment, "bin") + string(os.PathListSeparator)
-					memberEnv["PATH"] = strings.TrimPrefix(memberEnv["PATH"], prefix)
-				}
-				bindEnvironment(memberEnv, root)
-			}
-			// Reserved env was validated; defensive stripping also covers direct starts.
-			delete(memberEnv, "MYCE_TOKEN")
-			reference := side.Environment
-			if reference == "" {
-				reference = j.Spec.Environment.Name
-			}
-			er := executionReplacer(j.Spec.Run.Workdir, roots[side.Name], reference, machineTarget(&g.worker.Machine))
-			argv := expandArgs(expandArgs(expandArgs(side.Command, replace), r), er)
-			for k, v := range memberEnv {
-				memberEnv[k] = er.Replace(v)
-			}
-			if err := g.launch(g.members[i], argv, memberEnv, j.Spec.Run.Workdir, output); err != nil {
-				return err, !errors.Is(err, context.Canceled) && !errors.Is(err, errWorkerStartAuthorization)
-			}
-			if side.Readiness != nil {
-				g.members[i].Phase = "waiting_ready"
-				if err := g.save(); err != nil {
-					return err, true
-				}
-				if err := g.waitReady(g.members[i], port, *side.Readiness); err != nil {
-					if errors.Is(err, errNativePortCollision) {
-						// Only this member is retried. Previous forked descendants stay
-						// in durable attempt custody until whole-group teardown.
-						m := g.members[i]
-						select {
-						case <-m.done: // Already reaped; its PID may have been reused.
-						default:
-							_ = syscall.Kill(m.PID, syscall.SIGKILL)
-						}
-						<-m.done
-						if bindAttempt+1 == nativeBindAttempts {
-							return errNativePortCollision, false
-						}
-						g.p.mu.Lock()
-						m.done = nil
-						m.err = nil
-						g.p.mu.Unlock()
-						continue
-					}
-					g.p.mu.Lock()
-					stopped := g.p.stopped || g.p.killed
-					g.p.mu.Unlock()
-					return err, !errors.Is(err, context.Canceled) && !stopped
-				}
-			}
-			break
 		}
 	}
 	if err := g.memberFailure(); err != nil {
@@ -576,7 +603,7 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 		if err := g.memberFailure(); err != nil {
 			// A failed helper plus a foreign listener on its reserved port is
 			// positive handoff-collision evidence, independent of exit codes/logs.
-			if port != "" && errors.Is(verifyNativeListener(port, g.p.cmd.Process.Pid), errNativeForeignListener) {
+			if port != "" && errors.Is(verifyNativeListener(port, g.supervisor.Process.Pid), errNativeForeignListener) {
 				return errNativePortCollision
 			}
 			return err
@@ -592,7 +619,7 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
-				if err = verifyNativeListener(port, g.p.cmd.Process.Pid); err != nil {
+				if err = verifyNativeListener(port, g.supervisor.Process.Pid); err != nil {
 					if errors.Is(err, errNativeForeignListener) {
 						return errNativePortCollision
 					}
