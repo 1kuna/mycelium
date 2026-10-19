@@ -136,7 +136,7 @@ func TestHostLocalStatusUsesReadOnlyChildAndNeverWrites(t *testing.T) {
 		}
 		return []byte("test-manager"), nil
 	}}, &out, r, func(ctx context.Context, s myce.HostChildLaunch) ([]byte, error) {
-		if s.Request.Operation != "status" && s.Request.Operation != "inspect-exclusion" {
+		if s.Request.Operation != "status" && s.Request.Operation != "inspect-exclusion" && s.Request.Operation != "resolve" {
 			t.Fatal("status mutation child")
 		}
 		worker := r
@@ -164,14 +164,14 @@ func TestHostLocalAllMutationsEnterChildAndFailClosed(t *testing.T) {
 			r, a, c := localIdentityFixture(t)
 			calls := 0
 			var out bytes.Buffer
-			e := hostLocalCommandWithIdentity([]string{op, "--local", "--worker-user", "worker", "--config", c.Config}, myce.MachineProbe{OS: "linux", Command: func(context.Context, string, ...string) ([]byte, error) { t.Fatal("root mutation"); return nil, nil }}, &out, r, func(_ context.Context, s myce.HostChildLaunch) ([]byte, error) {
+			e := hostLocalCommandWithIdentity([]string{op, "--local", "--worker-user", "worker", "--config", c.Config, "--expect-revision", "1"}, myce.MachineProbe{OS: "linux", Command: func(context.Context, string, ...string) ([]byte, error) { t.Fatal("root mutation"); return nil, nil }}, &out, r, func(_ context.Context, s myce.HostChildLaunch) ([]byte, error) {
 				calls++
 				if !reflect.DeepEqual(s.Account, a) || !reflect.DeepEqual(s.Env, myce.WorkerChildEnvironment(a)) || s.Request.Operation != op || s.Request.StateDir != "" {
 					t.Fatal("wrong child selection")
 				}
 				return nil, errors.New("child failed")
 			})
-			if !errors.Is(e, myce.ErrHostChild) || calls != 1 || out.Len() != 0 {
+			if !errors.Is(e, myce.ErrHostChild) || calls != 1 || op == "reconcile" && out.Len() != 0 || op != "reconcile" && !strings.Contains(out.String(), "UNKNOWN") {
 				t.Fatal(e, calls, out.String())
 			}
 		})
@@ -222,7 +222,7 @@ func TestHostLocalUnsafePathsWithRealValidation(t *testing.T) {
 				}
 				return response.Bytes(), nil
 			})
-			if !errors.Is(e, myce.ErrHostTarget) || calls != 1 || out.Len() != 0 || strings.Contains(e.Error(), config) {
+			if !errors.Is(e, myce.ErrHostTarget) || calls != 1 || !strings.Contains(out.String(), "UNKNOWN") || strings.Contains(out.String(), config) || strings.Contains(e.Error(), config) {
 				t.Fatal(e, calls, out.String())
 			}
 		})

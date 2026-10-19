@@ -11,6 +11,7 @@ import (
 // supplies Reconcile/Settled; S08 can use the same boundary for its envelope.
 // Every callback runs in the dropped child (or in-process for the worker/dev).
 type HostMutationExecutor struct {
+	Observe   func(context.Context, HostIntent) HostExclusionReport
 	Probe     MachineProbe
 	Clock     Clock
 	Reconcile func(context.Context, HostInvocation) error
@@ -84,13 +85,13 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 			args = append(args, "kill", "--kill-whom=all", "--signal=SIGKILL", m.Unit)
 		}
 		if m.Operation == "unit-start" {
-			e = hostDispatch(v.StateDir, m.Expected, func() error { _, err := x.Probe.Command(ctx, "systemctl", args...); return err })
+			e = hostDispatchContext(ctx, v.StateDir, m.Expected, func() error { _, err := x.Probe.Command(ctx, "systemctl", args...); return err })
 		} else {
 			_, e = x.Probe.Command(ctx, "systemctl", args...)
 		}
 		return result, e
 	}
-	h := HostControl{ContainerRetention: v.Config.ContainerRetention, DockerEndpoint: v.Config.DockerEndpoint, Clock: x.Clock, Dir: v.StateDir, Docker: true, Timeout: m.Timeout, Expected: m.Expected, CloseExpected: m.CloseExpected, Settled: x.Settled}
+	h := HostControl{Observe: x.Observe, ContainerRetention: v.Config.ContainerRetention, DockerEndpoint: v.Config.DockerEndpoint, Clock: x.Clock, FreshClose: m.Operation == "close", Dir: v.StateDir, Docker: true, Timeout: m.Timeout, Expected: m.Expected, CloseExpected: m.CloseExpected, Settled: x.Settled}
 	h.Prepare = func() error {
 		workers, err := HostWorkers(v.StateDir)
 		if err != nil {
@@ -143,10 +144,14 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 	switch m.Operation {
 	case "close":
 		r, e := h.Disable(ctx, m.Reason, m.Grace)
-		if !r.cleanupComplete && e != nil {
-			return result, e
+		result = HostMutationResult{HostRevision: r.HostRevision, Stopped: r.Stopped, CleanupConfirmed: r.Confirmed, Exclusion: r.Exclusion}
+		if r.cleanupComplete {
+			return result, nil
 		}
-		return HostMutationResult{HostRevision: r.HostRevision, Stopped: r.Stopped, CleanupConfirmed: r.Confirmed, Exclusion: r.Exclusion}, nil
+		if r.Revision > 0 {
+			result.Partial = e != nil
+		}
+		return result, e
 	case "open":
 		if e := h.Prepare(); e != nil {
 			return result, e
@@ -169,6 +174,9 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 		if s.Revision != expectedRevision || s.Desired != "open" {
 			return result, ErrHostRevision
 		}
+		result.HostRevision = s.HostRevision
+		result.Desired = s.Desired
+		result.Partial = true
 		units, e := WorkerUnits(v.StateDir, "")
 		if e != nil {
 			return result, e
@@ -181,7 +189,7 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 				if !ValidWorkerUnit(u) {
 					return result, ErrHostIdentity
 				}
-				if e := hostDispatch(v.StateDir, s.HostRevision, func() error { _, e := x.Probe.Command(ctx, "systemctl", "--user", "start", "--no-block", u); return e }); e != nil {
+				if e := hostDispatchContext(ctx, v.StateDir, s.HostRevision, func() error { _, e := x.Probe.Command(ctx, "systemctl", "--user", "start", "--no-block", u); return e }); e != nil {
 					return result, e
 				}
 			}
@@ -190,7 +198,7 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 			if x.Probe.Command == nil {
 				return result, ErrHostChild
 			}
-			if e := hostDispatch(v.StateDir, s.HostRevision, func() error {
+			if e := hostDispatchContext(ctx, v.StateDir, s.HostRevision, func() error {
 				_, err := x.Probe.Command(ctx, "launchctl", "bootstrap", "gui/"+strconv.FormatUint(uint64(v.Account.UID), 10), v.Config.Service)
 				return err
 			}); e != nil {

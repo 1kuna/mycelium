@@ -52,7 +52,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce queue|join|leave|disable|enable|submit|status|logs|wait|cancel|resolve-docker|dev")
+		return errors.New("usage: myce queue|join|leave|host|submit|status|logs|wait|cancel|resolve-docker|dev")
 	}
 	if args[0] == "_host-start-check" {
 		f := flag.NewFlagSet("_host-start-check", flag.ContinueOnError)
@@ -94,7 +94,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if args[0] == "disable" || args[0] == "enable" {
-		return hostCommand(args, probe, os.Stdout)
+		return errors.New("retired host control; use myce host close|open --local")
 	}
 	if args[0] == "sim" {
 		return simCommand(args[1:], os.Stdout)

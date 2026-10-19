@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,8 @@ const hostStateFile = "host-state.json"
 const hostStateVersion = 1
 
 var ErrHostState = errors.New("host state unavailable")
+var ErrHostStateUninitialized = errors.New("state_uninitialized")
+var ErrHostStateCorrupt = errors.New("state_corrupt")
 var ErrHostRevision = errors.New("stale host revision")
 
 func legacyHostStateError() error {
@@ -178,13 +181,13 @@ func ReadHostIntent(dir string) (HostIntent, error) {
 		if len(registries) > 0 {
 			return s, legacyHostStateError()
 		}
-		return s, fmt.Errorf("%w: this host has no Mycelium host state yet; provision it with `myce host open` (coming in #80 S08) or `myce dev`", ErrHostState)
+		return s, fmt.Errorf("%w: this host has no Mycelium host state yet; provision it with `myce host open` or `myce dev`", errors.Join(ErrHostState, ErrHostStateUninitialized))
 	}
 	if err != nil {
 		return s, errors.Join(ErrHostState, err)
 	}
 	if err = json.Unmarshal(b, &s); err != nil {
-		return HostIntent{}, fmt.Errorf("%w: corrupt host state: %w", ErrHostState, err)
+		return HostIntent{}, errors.Join(ErrHostState, ErrHostStateCorrupt)
 	}
 	if err = validateHostIntent(s); err != nil {
 		return HostIntent{}, err
@@ -286,11 +289,16 @@ type hostIntentChange struct {
 	Grace         time.Duration
 	// S05 supplies durable previous-close settlement. Called outside intake.lock;
 	// the expected revision is checked again before committing open.
-	Settled  func(HostIntent) error
-	boundary func(string) error
+	FreshClose bool
+	Settled    func(HostIntent) error
+	boundary   func(string) error
 }
 
 func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, error) {
+	return changeHostIntentContext(context.Background(), dir, clock, c)
+}
+
+func changeHostIntentContext(ctx context.Context, dir string, clock Clock, c hostIntentChange) (HostIntent, error) {
 	var zero HostIntent
 	if clock == nil || (c.Desired != "closed" && c.Desired != "open") || c.Grace < 0 || c.Grace > time.Minute {
 		return zero, errors.New("invalid host intent")
@@ -316,7 +324,7 @@ func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, 
 			}
 		}
 	}
-	unlock, err := hostOperationLock(dir, "intake.lock", true)
+	unlock, err := hostOperationLockContext(ctx, dir, "intake.lock")
 	if err != nil {
 		return zero, err
 	}
@@ -337,7 +345,7 @@ func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, 
 	for _, observed := range s.QueueObserved {
 		highest = max(highest, observed.Revision)
 	}
-	if s.Desired == c.Desired && !(c.Desired == "closed" && highest > s.Revision) {
+	if s.Desired == c.Desired && !c.FreshClose && !(c.Desired == "closed" && highest > s.Revision) {
 		return s, nil
 	} // Repeated close never renews stop grace.
 	if highest == ^uint64(0) {
@@ -347,6 +355,10 @@ func changeHostIntent(dir string, clock Clock, c hostIntentChange) (HostIntent, 
 	s.Desired, s.Reason, s.AcceptedAt, s.Observed = c.Desired, c.Reason, clock.Now(), nil
 	if c.Desired == "closed" {
 		deadline := s.AcceptedAt.Add(c.Grace)
+		// A fresh close changes identity, never extends an existing stop budget.
+		if s.StopDeadline != nil && s.StopDeadline.Before(deadline) {
+			deadline = *s.StopDeadline
+		}
 		s.StopDeadline = &deadline
 		s.PreviousClose = s.Revision
 		s.LastClose = &HostClose{HostRevision: s.HostRevision, Settlement: "pending"}
@@ -453,11 +465,15 @@ func hostLaunchGate(dir string, expected ...HostRevision) (func(), error) {
 // A native create/start or local admission is short and serializes with intent.
 // Callers must never pass network I/O to this helper.
 func hostDispatch(dir string, revision HostRevision, action func() error) error {
+	return hostDispatchContext(context.Background(), dir, revision, action)
+}
+
+func hostDispatchContext(ctx context.Context, dir string, revision HostRevision, action func() error) error {
 	dir, err := hostRoot(dir)
 	if err != nil {
 		return err
 	}
-	unlock, err := hostOperationLock(dir, "intake.lock", true)
+	unlock, err := hostOperationLockContext(ctx, dir, "intake.lock")
 	if err != nil {
 		return err
 	}
