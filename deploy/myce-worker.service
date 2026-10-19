@@ -1,17 +1,16 @@
+# Generic worker template; provision a versioned config with myce install.
+# Install as the worker, initially CLOSED. Never run this binary as root.
 [Unit]
-Description=Mycelium v2 plain-command worker
+Description=Mycelium worker
 After=network-online.target
 
 [Service]
-Type=simple
-ExecCondition=%h/.local/bin/myce _host-start-check --host-state-dir %h/.local/share/myce
-WorkingDirectory=%h/.local/share/myce
-EnvironmentFile=%h/.config/myce/worker.env
-ExecStart=%h/.local/bin/myce join --state-dir %h/.local/share/myce/worker --name REPLACE_WORKER_NAME --gpu REPLACE_GPU --memory-gb REPLACE_BUDGET_GB --reserve-memory-gb REPLACE_RESERVE_GB --heartbeat 1s --checkpoint-root REPLACE_CHECKPOINT_ROOT
+ExecCondition=REPLACE_WORKER_BINARY _host-start-check --host-state-dir REPLACE_HOST_STATE_DIR
+ExecStart=:REPLACE_WORKER_BINARY service --config REPLACE_CONFIG
+EnvironmentFile=REPLACE_GPU_ENVIRONMENT_FILE
 Restart=on-failure
-RestartSec=5
+RestartSec=3
 UMask=0077
-# Stop every native descendant, including detached sessions.
 Delegate=memory
 KillMode=control-group
 SendSIGKILL=yes
