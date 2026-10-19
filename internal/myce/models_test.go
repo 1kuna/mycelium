@@ -148,8 +148,8 @@ func TestModelLossAndFreshSession(t *testing.T) {
 	check(t, q, other, nil)
 	clock.Advance(LossAfter)
 	check(t, q, other, nil)
-	if !q.s.Machines[m.ID].Gone || len(q.s.ModelSlots) != 0 {
-		t.Fatal("lost worker still has model")
+	if !q.s.Machines[m.ID].Gone || q.s.ModelSlots[slotKey(m.ID, "test")] == nil {
+		t.Fatal("lost worker released unknown engine custody")
 	}
 	q.finishCall(c.ID)
 	m.Session = "new"
@@ -454,8 +454,8 @@ func TestModelLostWorkerRetriesInFlightCall(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("lost request was not cancelled")
 	}
-	if !q.s.Machines[m.ID].Gone || q.s.ModelSlots[slotKey(m.ID, "test")] != nil {
-		t.Fatal("lost inventory remained")
+	if !q.s.Machines[m.ID].Gone || q.s.ModelSlots[slotKey(m.ID, "test")] == nil {
+		t.Fatal("loss erased pending engine custody")
 	}
 }
 

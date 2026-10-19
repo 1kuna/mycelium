@@ -183,3 +183,27 @@ to its freshness bound is fresh; just past it, missing time or a future timestam
 makes evidence absent. Default collection/queue freshness is 10 seconds.
 Collection or fence error gives UNKNOWN with `collection_failed`. Printed verdict
 and exit status use that same result; a timeout is non-PASS, never release proof.
+
+## Queue host maintenance status
+
+`myce host status HOST` prints authenticated `GET /api/hosts/HOST/maintenance`.
+`POST` to the same endpoint accepts `action` (`drain`, `disable`, `resume`,
+`budget`), optional `stop` (disable only) and `memory_budget_gb` (positive, only
+while drained/disabled). Host identity is the physical `host_id`, never a device
+or session selector. Job/project placement restrictions still apply.
+
+The reply has `host`, durable `policy` (`mode`: enabled/drained/disabled,
+`memory_budget`, `updated_at`), `local_fence`, `workers` (machine/device report
+and `fresh`), exact `attempts`, `preparations`, `sidecars`, `pending_releases`,
+`pending_cleanup`, `memory_in_use_gb`, `memory_debt_gb`, `healthy` and `quiescent`.
+Workers and releases retain missing/unreported members. `healthy` needs all known
+workers fresh with consistent budget and usable memory reports. `quiescent`
+additionally needs drained/disabled policy and every work/cleanup count zero.
+Sidecars are conservatively counted until their exact attempt is released.
+Plain status exits nonzero when worker health is incomplete; mutations exit
+zero on durable acceptance. Queue maintenance status has no privileged
+local-exclusion verdict.
+
+The optional wait reads this status until quiescent or the injected deadline.
+Timeout and queue outage fail without changing policy or release custody.
+`host status --local` continues to print the old local envelope until S6.

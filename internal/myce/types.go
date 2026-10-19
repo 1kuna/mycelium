@@ -203,6 +203,7 @@ func rank(p string) int {
 }
 
 type Copy struct {
+	StopCause   string              `json:"stop_cause,omitempty"`
 	Extension   *ExtensionSelection `json:"extension,omitempty"`
 	LossCharged bool                `json:"loss_charged,omitempty"`
 	Recoverable bool                `json:"recoverable"`
@@ -266,6 +267,8 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	queueMemoryPolicy bool // Worker-only: allowance came from the authenticated queue.
+
 	HostRevision                HostRevision        `json:"host_revision"`
 	HostBoot                    string              `json:"host_boot_id,omitempty"`
 	Capabilities                []string            `json:"capabilities,omitempty"`
@@ -279,7 +282,7 @@ type Machine struct {
 	HostMemoryPolicyMismatch    bool                `json:"host_memory_policy_mismatch,omitempty"`
 	EffectiveHostMemoryBudgetGB float64             `json:"effective_host_memory_budget_gb,omitempty"`
 	HostMemoryInUseGB           float64             `json:"host_memory_in_use_gb,omitempty"`
-	hostBudgetGB                float64             // Effective shared-host budget, rebuilt from worker reports.
+	hostBudgetGB                float64             // Effective shared-host queue allowance; compared against every device report.
 	modelReservationDebtGB      float64             // Reservation deficit hidden by clamping scheduler free GPU memory to zero.
 	hostReservationDebtGB       float64             // Same deficit for the shared host allowance.
 	MemoryEnforcement           string              `json:"memory_enforcement,omitempty"`
@@ -339,6 +342,7 @@ type Checkin struct {
 	Running         *Execution    `json:"running,omitempty"`
 }
 type Reply struct {
+	HostMemoryBudget *HostMemoryBudget   `json:"host_memory_budget,omitempty"`
 	FileCheckpoints  bool                `json:"file_checkpoints,omitempty"`
 	AdmissionBlocked bool                `json:"admission_blocked,omitempty"`
 	EnvironmentPlan  []EnvironmentRecipe `json:"environment_plan,omitempty"`

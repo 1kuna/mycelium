@@ -155,13 +155,22 @@ func TestHostMemoryAllowanceSerializesAndRefusesPolicyMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range snap.Machines {
-		if m.HostMemoryAllowanceBytes != 2<<30 || m.HostMemoryQualification != "UNQUALIFIED" || m.HostMemoryBudgetStatus() != "host allowance policy mismatch" {
+		if m.HostMemoryAllowanceBytes != 4<<30 || m.HostMemoryQualification != "UNQUALIFIED" || m.HostMemoryBudgetStatus() != "host allowance policy mismatch" {
 			t.Fatal("missing effective bytes/mismatch", m)
 		}
 	}
 	a.HostMemoryBudgetGB = 2
+	if check(t, q, a, nil).Job != nil {
+		t.Fatal("matching reports rewrote durable allowance")
+	}
+	maintenanceChange(t, q, "drain", false)
+	value := 2.0
+	if _, err := q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "budget", MemoryBudgetGB: &value}); err != nil {
+		t.Fatal(err)
+	}
+	maintenanceChange(t, q, "resume", false)
 	if check(t, q, a, nil).Job == nil {
-		t.Fatal("consistent policy stayed fenced")
+		t.Fatal("accepted queue policy stayed fenced")
 	}
 }
 

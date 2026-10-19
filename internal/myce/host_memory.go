@@ -64,6 +64,14 @@ func (q *Queue) refreshHostMemory() {
 				m.hostBudgetGB = other.HostMemoryBudgetGB
 			}
 		}
+		if policy, ok := q.s.HostMaintenance[hostID(m)]; ok && policy.MemoryBudget != nil {
+			m.hostBudgetGB = policy.MemoryBudget.GiB
+			for _, other := range q.s.Machines {
+				if hostID(other) == hostID(m) && other.HostMemoryBudgetGB != m.hostBudgetGB {
+					m.HostMemoryPolicyMismatch = true
+				}
+			}
+		}
 		allowance, _ := hostMemoryAllowance(m.hostBudgetGB)
 		m.HostMemoryAllowanceBytes = allowance.Bytes
 		m.HostMemoryQualification = ""

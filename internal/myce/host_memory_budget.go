@@ -88,6 +88,9 @@ func SetHostMemoryBudget(dir string, gib float64) (HostMemoryBudget, error) {
 }
 
 func (w *Worker) refreshHostMemoryBudget() error {
+	if w.Machine.queueMemoryPolicy {
+		return nil
+	}
 	budget, _, err := EffectiveHostMemoryBudget(w.HostStateDir, w.Machine.HostMemoryBudgetGB)
 	if err != nil {
 		return err
@@ -97,6 +100,13 @@ func (w *Worker) refreshHostMemoryBudget() error {
 }
 
 func (w Worker) checkHostMemoryBudget(gpu, host float64) error {
+	if w.Machine.queueMemoryPolicy {
+		budget, err := hostMemoryAllowance(w.Machine.HostMemoryBudgetGB)
+		if err != nil || budget.Bytes > 0 && (host <= 0 || hostNeed(&w.Machine, gpu, host) > budget.GiB) {
+			return fmt.Errorf("%w: allocation exceeds queue host allowance", errWorkerMemory)
+		}
+		return nil
+	}
 	if w.HostStateDir == "" {
 		return nil
 	}
