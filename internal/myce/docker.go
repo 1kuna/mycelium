@@ -1043,6 +1043,13 @@ func ReconcileDockerAttempt(ctx context.Context, hostDir, dir, identity string) 
 			return err
 		}
 	}
+	roots, err := (Worker{StateDir: dir, HostStateDir: hostDir}).StateRoots()
+	if err != nil {
+		return err
+	}
+	if err := CheckStateRoots(roots...); err != nil {
+		return err
+	}
 	unlock, err := hostOperationLockContext(ctx, hostDir, "reconcile.lock")
 	if err != nil {
 		return err
@@ -1052,7 +1059,7 @@ func ReconcileDockerAttempt(ctx context.Context, hostDir, dir, identity string) 
 	if err != nil || intent.Desired != "closed" {
 		return errors.New("Docker reconciliation requires a closed host")
 	}
-	store, err := (Worker{StateDir: dir}).openStore()
+	store, err := (Worker{StateDir: dir, HostStateDir: hostDir}).openStore()
 	if err != nil {
 		return err
 	}

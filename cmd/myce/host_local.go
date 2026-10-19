@@ -23,8 +23,8 @@ func hostMutationExecutor(probe myce.MachineProbe) myce.HostMutationExecutor {
 			if err != nil {
 				return myce.Client{}, err
 			}
-			return myce.HostQueueClient(workers, os.Getenv("MYCE_TOKEN"))(endpoint)
-		})
+			return myce.HostQueueClient(append(workers, myce.HostWorker{Config: v.ConfigPath, Queue: v.Config.Queue}), os.Getenv("MYCE_TOKEN"))(endpoint)
+		}, v.Config.Queue)
 	}}
 }
 

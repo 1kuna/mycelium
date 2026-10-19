@@ -69,7 +69,7 @@ func TestHostReconcileRotatedWorkerSessionSettles(t *testing.T) {
 		t.Run(stringBool(recovery), func(t *testing.T) {
 			q, clock := fixture(t)
 			hostDir := readyTestHost(t, t.TempDir())
-			spool := t.TempDir()
+			spool := newTestStateRoot(t)
 			var unregistered atomic.Bool
 			api := API{Queue: q, Token: "test"}.Handler()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

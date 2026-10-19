@@ -168,7 +168,7 @@ func TestDiskPressureEvictsUntilFree(t *testing.T) {
 			}
 			used += st.Size()
 		}
-		return 8 - used, e
+		return 8 + int64(len(stateFormat)) - used, e
 	}
 	if _, e := c.Prepare(context.Background(), b); e != nil {
 		t.Fatal("disk-space eviction failed", e)

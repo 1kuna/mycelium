@@ -212,7 +212,7 @@ func TestEnvironmentWorkerBuildAndExecute(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	w := Worker{StateDir: t.TempDir(), Client: Client{URL: server, Token: "test"}, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "env-worker", GPU: "fake", FreeMemoryGB: 64}, Interval: 10 * time.Millisecond}
+	w := Worker{StateDir: newTestStateRoot(t), Client: Client{URL: server, Token: "test"}, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "env-worker", GPU: "fake", FreeMemoryGB: 64}, Interval: 10 * time.Millisecond}
 	go func() { done <- w.Run(ctx) }()
 	deadline := time.Now().Add(10 * time.Second)
 	for {

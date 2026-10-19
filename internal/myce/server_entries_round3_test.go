@@ -5,7 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -117,7 +117,7 @@ func TestEntryGenericHeadersBeforeSpooling(t *testing.T) {
 		read, spooled := false, false
 		body := entryProbeReader(func([]byte) (int, error) {
 			read = true
-			files, err := os.ReadDir(dir)
+			files, err := filepath.Glob(filepath.Join(dir, "myce-model-request-*"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -129,7 +129,7 @@ func TestEntryGenericHeadersBeforeSpooling(t *testing.T) {
 		r.Header.Set("Authorization", "Bearer test")
 		w := httptest.NewRecorder()
 		(API{Queue: q, Token: "test"}).Handler().ServeHTTP(w, r)
-		files, err := os.ReadDir(dir)
+		files, err := filepath.Glob(filepath.Join(dir, "myce-model-request-*"))
 		if w.Code != 400 || read || spooled || err != nil || len(files) != 0 || q.uploadSpool.used != 0 {
 			t.Fatalf("status=%d read=%t spooled=%t files=%d err=%v", w.Code, read, spooled, len(files), err)
 		}

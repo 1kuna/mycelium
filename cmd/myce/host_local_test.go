@@ -79,7 +79,7 @@ func localIdentityFixture(t *testing.T) (myce.HostIdentityResolver, myce.WorkerA
 	}
 	dir := filepath.Join(home, "host")
 	spool := filepath.Join(home, "spool")
-	if e = os.Mkdir(spool, 0700); e != nil {
+	if e = myce.PrepareStateRoots(spool); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = myce.InitializeHostIntent(dir, "test-host", myce.RealClock{}); e != nil {

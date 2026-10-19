@@ -272,7 +272,7 @@ func (c *EnvironmentCache) init() error {
 			c.initErr = errors.New("environment cache root is required")
 			return
 		}
-		if e := os.MkdirAll(c.Root, 0700); e != nil {
+		if e := PrepareStateRoots(c.Root, c.HostStateDir); e != nil {
 			c.initErr = e
 			return
 		}
@@ -690,7 +690,7 @@ func relocateEnvironment(from, to string) error {
 	})
 }
 func (c *EnvironmentCache) cleanupBuild(path string) error {
-	if err := requireStateMarker(filepath.Join(path, "build-state.json"), c.Root); err != nil {
+	if err := CheckStateRoots(c.Root); err != nil {
 		return err
 	}
 	b, e := os.ReadFile(filepath.Join(path, "build-state.json"))

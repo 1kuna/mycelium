@@ -76,7 +76,7 @@ func TestHostRevisionDisableWaitsForNonSystemdLaunch(t *testing.T) {
 		}
 	}()
 	pauses := 0
-	spool := t.TempDir()
+	spool := newTestStateRoot(t)
 	if err = saveWorkerJSON(spool, "state.json", workerState{Session: "session"}); err != nil {
 		t.Fatal(err)
 	}

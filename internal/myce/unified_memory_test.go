@@ -165,7 +165,7 @@ func TestUnifiedProbeFailureStatusAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	w := Worker{StateDir: t.TempDir(), Client: Client{URL: server.URL, Token: "test"}, Machine: machine("unified", "fake"), MemorySource: source, MemoryMeasured: true, Interval: time.Millisecond}
+	w := Worker{StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, Machine: machine("unified", "fake"), MemorySource: source, MemoryMeasured: true, Interval: time.Millisecond}
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	t.Cleanup(func() {
@@ -241,7 +241,7 @@ func TestUnifiedOSRecheckedBeforeCommandAndModelLoad(t *testing.T) {
 	q, _ := fixture(t)
 	j := submit(t, q, spec("production"))
 	j.Attempt = 1
-	w := Worker{StateDir: t.TempDir(), Machine: machine("unified", "fake"), MemorySource: source, MemoryMeasured: true}
+	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("unified", "fake"), MemorySource: source, MemoryMeasured: true}
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)

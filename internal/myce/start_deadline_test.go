@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -166,28 +167,41 @@ func TestProductionStartDeadlineRestart(t *testing.T) {
 }
 
 func TestProductionStartDeadlinePermit(t *testing.T) {
-	q, c := fixture(t)
-	j := submit(t, q, spec("production"))
-	assigned := check(t, q, machine("b70", "xpu"), nil).Job
-	if assigned == nil {
-		t.Fatal("not assigned")
+	for _, timely := range []bool{true, false} {
+		t.Run(fmt.Sprintf("timely=%t", timely), func(t *testing.T) {
+			q, c := fixture(t)
+			j := submit(t, q, spec("production"))
+			assigned := check(t, q, machine("b70", "xpu"), nil).Job
+			if assigned == nil {
+				t.Fatal("not assigned")
+			}
+			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+			defer server.Close()
+			var permit map[string]any
+			client := Client{URL: server.URL, Token: "test"}
+			if timely {
+				if err := client.Call(context.Background(), "POST", "/api/workers/started", result(assigned, true), &permit); err != nil {
+					t.Fatalf("in-time permit: %v", err)
+				}
+				if permit["start_gate"] != startGateProtocol {
+					t.Fatalf("permit: %+v", permit)
+				}
+			}
+			c.Advance(ProductionStartTimeout)
+			if err := client.Call(context.Background(), "POST", "/api/workers/started", result(assigned, true), &permit); err == nil {
+				t.Fatal("late or duplicate permit granted")
+			}
+			if timely {
+				// A duplicate cannot revoke an already durable successful start.
+				got := job(t, q, j.ID)
+				if got.State != "running" || got.StartedAt == nil {
+					t.Fatal("duplicate revoked the valid start", got)
+				}
+			} else {
+				requireState(t, q, j.ID, "failed")
+			}
+		})
 	}
-	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	defer server.Close()
-	var permit map[string]any
-	client := Client{URL: server.URL, Token: "test"}
-	if err := client.Call(context.Background(), "POST", "/api/workers/started", result(assigned, true), &permit); err != nil {
-		t.Fatalf("in-time permit: %v", err)
-	}
-	if permit["start_gate"] != startGateProtocol {
-		t.Fatalf("permit: %+v", permit)
-	}
-	c.Advance(ProductionStartTimeout)
-	err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/workers/started", result(assigned, true), &permit)
-	if err == nil {
-		t.Fatal("late permit granted")
-	}
-	requireState(t, q, j.ID, "failed")
 }
 
 func TestProductionStartDeadlineWorkerPreparationCannotLaunchLate(t *testing.T) {
@@ -203,7 +217,7 @@ func TestProductionStartDeadlineWorkerPreparationCannotLaunchLate(t *testing.T) 
 	prepared := t.TempDir()
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	w := Worker{StateDir: t.TempDir(), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}, checkpointPrepare: func(Job) (string, error) { c.Advance(ProductionStartTimeout); return prepared, nil }}
+	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}, checkpointPrepare: func(Job) (string, error) { c.Advance(ProductionStartTimeout); return prepared, nil }}
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
@@ -312,7 +326,7 @@ func TestProductionStartDeadlineRequiresSuccessfulExec(t *testing.T) {
 	assigned := check(t, q, machine("b70", "xpu"), nil).Job
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	w := Worker{StateDir: t.TempDir(), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}}
+	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}}
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
@@ -523,7 +537,7 @@ func TestProductionStartDeadlineExecErrorPreservesUnknownRelease(t *testing.T) {
 	assigned := check(t, q, machine("b70", "xpu"), nil).Job
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	w := Worker{StateDir: t.TempDir(), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}}
+	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}}
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)

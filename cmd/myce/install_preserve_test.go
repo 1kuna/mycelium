@@ -16,7 +16,7 @@ import (
 
 func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myce.MachineProbe) {
 	t.Helper()
-	home := t.TempDir()
+	home := currentTestStateRoot(t)
 	role := "queue"
 	if len(roles) > 0 {
 		role = roles[0]
@@ -330,7 +330,7 @@ func TestInstallOmittedEmptyEnvironmentRoot(t *testing.T) {
 func TestInstallFreshEmptyRequiredValuesAreUsageErrors(t *testing.T) {
 	for _, name := range []string{"nas", "queue", "name", "state-dir", "host-state-dir", "config", "environment-file"} {
 		t.Run(name, func(t *testing.T) {
-			home := t.TempDir()
+			home := currentTestStateRoot(t)
 			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) {
 				t.Fatal("invalid value reached a service command")
 				return nil, nil

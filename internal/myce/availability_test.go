@@ -275,7 +275,7 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 			s.IdleSeconds = 0
 		}
 		return s
-	}, Clock: clock, Interval: time.Millisecond, Machine: machine("daily", "fake"), StateDir: t.TempDir(), HostStateDir: readyTestHost(t, t.TempDir(), "daily-host"), Client: Client{URL: server.URL, Token: "test"}}
+	}, Clock: clock, Interval: time.Millisecond, Machine: machine("daily", "fake"), StateDir: newTestStateRoot(t), HostStateDir: readyTestHost(t, t.TempDir(), "daily-host"), Client: Client{URL: server.URL, Token: "test"}}
 	go func() { done <- w.Run(ctx) }()
 	defer func() {
 		cancel()

@@ -15,7 +15,7 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 	for _, mode := range []string{"default-empty", "default-cached", "enabled"} {
 		t.Run(mode, func(t *testing.T) {
 			q, _ := fixture(t)
-			root := t.TempDir()
+			root := newTestStateRoot(t)
 			cache := filepath.Join(root, "capability-profile.json")
 			original := []byte(`{"benchmark":{"state":"partial"}}`)
 			if mode == "default-cached" {
@@ -92,7 +92,8 @@ func TestPlacementWithoutBenchmark(t *testing.T) {
 		q, clock := fixture(t)
 		m := machine("dedicated", "fake")
 		if profile {
-			m.CapabilityProfile = &CapabilityProfile{LogicalCPUs: 8}
+			// Hardware facts remain required even when throughput is unmeasured.
+			m.CapabilityProfile.LogicalCPUs = 8
 		}
 		check(t, q, m, nil)
 		j := submit(t, q, spec("experiment"))

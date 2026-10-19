@@ -374,7 +374,7 @@ func cancellationPreparingWorker(t *testing.T, q *Queue, c Clock, m Machine, id 
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	t.Cleanup(server.Close)
 	prepared := t.TempDir()
-	return Worker{StateDir: t.TempDir(), Machine: m, Clock: c, Client: Client{URL: server.URL, Token: "test"}, checkpointPrepare: func(Job) (string, error) {
+	return Worker{StateDir: newTestStateRoot(t), Machine: m, Clock: c, Client: Client{URL: server.URL, Token: "test"}, checkpointPrepare: func(Job) (string, error) {
 		if a := cancelAck(t, q, id); a.State != "stopping" || ackRelease(a) != "pending" {
 			t.Fatal("preparing cancellation", a)
 		}

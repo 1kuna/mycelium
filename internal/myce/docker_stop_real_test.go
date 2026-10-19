@@ -36,7 +36,7 @@ func TestDockerRealSidecarStopProtocol(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
-			w := Worker{Machine: machine("isolated-stop-test", "fake"), StateDir: t.TempDir(), HostStateDir: readyTestHost(t, t.TempDir()), Clock: RealClock{}, HostMemorySource: func(context.Context) (float64, error) { return 8, nil }}
+			w := Worker{Machine: machine("isolated-stop-test", "fake"), StateDir: newTestStateRoot(t), HostStateDir: readyTestHost(t, t.TempDir()), Clock: RealClock{}, HostMemorySource: func(context.Context) (float64, error) { return 8, nil }}
 			s, err := w.openStore()
 			if err != nil {
 				t.Fatal(err)

@@ -120,7 +120,7 @@ func TestWorkerRechecksMemoryBeforeCommand(t *testing.T) {
 	j := submit(t, q, spec("production"))
 	j.Attempt = 1
 	var calls atomic.Int32
-	w := Worker{StateDir: t.TempDir(), Machine: machine("memory", "fake"), MemorySource: func(context.Context) (float64, error) { calls.Add(1); return 2, nil }}
+	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("memory", "fake"), MemorySource: func(context.Context) (float64, error) { calls.Add(1); return 2, nil }}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)

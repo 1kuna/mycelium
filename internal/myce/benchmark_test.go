@@ -98,7 +98,7 @@ func TestBenchmarkSerialPersistenceAndHardwareInvalidation(t *testing.T) {
 func TestBenchmarkDailyOwnerReturnCancelsMeasurement(t *testing.T) {
 	var active atomic.Bool
 	measured := []string{}
-	c := BenchmarkConfig{Clock: RealClock{}, StateDir: t.TempDir(), Machine: Machine{GPU: "fake"}, DailyUse: true, OwnerSignals: func(context.Context) OwnerSignals {
+	c := BenchmarkConfig{Clock: RealClock{}, StateDir: newTestStateRoot(t), Machine: Machine{GPU: "fake"}, DailyUse: true, OwnerSignals: func(context.Context) OwnerSignals {
 		s := idleSignals()
 		if active.Load() {
 			s.IdleSeconds = 0
@@ -126,7 +126,7 @@ func TestBenchmarkDailyOwnerReturnCancelsMeasurement(t *testing.T) {
 
 func TestBenchmarkDailyActiveNeverMeasures(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	c := BenchmarkConfig{Clock: RealClock{}, StateDir: t.TempDir(), Machine: Machine{GPU: "fake"}, DailyUse: true, OwnerSignals: func(context.Context) OwnerSignals {
+	c := BenchmarkConfig{Clock: RealClock{}, StateDir: newTestStateRoot(t), Machine: Machine{GPU: "fake"}, DailyUse: true, OwnerSignals: func(context.Context) OwnerSignals {
 		cancel()
 		s := idleSignals()
 		s.IdleSeconds = 0
@@ -283,7 +283,7 @@ func TestBenchmarkCoreRealFileStore(t *testing.T) {
 	}
 	api := httptest.NewServer(API{Queue: q, Token: "test-token"}.Handler())
 	defer api.Close()
-	c := BenchmarkConfig{Clock: RealClock{}, StateDir: t.TempDir(), Client: Client{URL: api.URL, Token: "test-token"}}
+	c := BenchmarkConfig{Clock: RealClock{}, StateDir: newTestStateRoot(t), Client: Client{URL: api.URL, Token: "test-token"}}
 	for _, r := range []string{"cpu", "memory", "disk", "network"} {
 		measured, err := measureResource(context.Background(), c, nil, "", r)
 		if err != nil || len(measured) != 1 || !validRate(measured[0].Rate) {

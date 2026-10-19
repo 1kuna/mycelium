@@ -37,7 +37,7 @@ func (q *Queue) ConfigureUploadSpool(dir string, budget int64) error {
 	if dir == "" {
 		dir = q.uploadSpool.defaultDir
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := PrepareStateRoots(dir); err != nil {
 		return err
 	}
 	if err := os.Chmod(dir, 0700); err != nil {

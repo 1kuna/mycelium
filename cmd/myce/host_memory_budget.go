@@ -10,8 +10,8 @@ import (
 )
 
 func hostMemoryBudgetCommand(args []string) error {
-	if len(args) == 0 || (args[0] != "configure" && args[0] != "show" && args[0] != "import") {
-		return errors.New("usage: myce host-memory-budget configure GiB|import|show [--host-state-dir DIR] [--config PATH]; changes require CLOSED")
+	if len(args) == 0 || (args[0] != "configure" && args[0] != "show") {
+		return errors.New("usage: myce host-memory-budget configure GiB|show [--host-state-dir DIR] [--config PATH]; changes require CLOSED")
 	}
 	action := args[0]
 	args = args[1:]
@@ -63,8 +63,6 @@ func hostMemoryBudgetCommand(args []string) error {
 	switch action {
 	case "configure":
 		budget, err = myce.SetHostMemoryBudget(*dir, value)
-	case "import":
-		budget, err = myce.ImportHostMemoryBudget(*dir)
 	case "show":
 		budget, source, err = myce.EffectiveHostMemoryBudget(*dir, fallback)
 	}

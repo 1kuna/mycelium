@@ -143,11 +143,17 @@ func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
 	entries, _ := os.ReadDir(cache.Root)
 	var total int64
 	for _, entry := range entries {
+		if entry.Name() == FormatMarker {
+			continue // The cache limit covers payloads, not its fixed format metadata.
+		}
 		info, _ := entry.Info()
 		total += info.Size()
 	}
 	if total > 8 {
 		t.Fatal("cache exceeds bound", total)
+	}
+	if marker, err := os.ReadFile(filepath.Join(cache.Root, FormatMarker)); err != nil || string(marker) != stateFormat {
+		t.Fatal("cache eviction lost the format marker", err)
 	}
 	if err := q.files.verify(context.Background(), refs[0]); err != nil {
 		t.Fatal("authoritative copy evicted", err)
@@ -264,7 +270,7 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 	start := func(name string) (context.CancelFunc, chan error, string) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
-		root := t.TempDir()
+		root := newTestStateRoot(t)
 		worker := Worker{Client: c, StateDir: root, Interval: 20 * time.Millisecond, Clock: RealClock{}, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: name, HostID: name, Session: name, GPU: "fake", FreeMemoryGB: 8}, HostStateDir: readyTestHost(t, filepath.Join(root, "host"), name), HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
 		go func() { done <- worker.Run(ctx) }()
 		return cancel, done, root
@@ -474,7 +480,7 @@ func TestStoredExtensionInputAndOutput(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	defer cancel()
-	state := t.TempDir()
+	state := newTestStateRoot(t)
 	w := Worker{Client: c, ExtensionRoot: root, StateDir: state, Clock: RealClock{}, Interval: 20 * time.Millisecond, HostStateDir: readyTestHost(t, filepath.Join(state, "host"), "extension"), HostMemorySource: func(context.Context) (float64, error) { return 16, nil }, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "extension", HostID: "extension", GPU: "fake", FreeMemoryGB: 8, ExtensionReports: reports}}
 	go func() { done <- w.Run(ctx) }()
 	await(t, func() bool {

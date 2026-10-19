@@ -48,7 +48,7 @@ func TestPreDeployFullSystem(t *testing.T) {
 		}
 	}()
 	t.Cleanup(func() { close(clockStop); <-clockDone })
-	base := t.TempDir()
+	base := newTestStateRoot(t)
 	nas := filepath.Join(base, "nas")
 	must := func(err error) {
 		t.Helper()
@@ -595,7 +595,7 @@ func (e *auditedModelEngine) Load(ctx context.Context, m Model) error {
 // Extends the full-system scenario with controlled mid-copy faults. Every phase
 // uses the actual worker loop, HTTP API, SQLite restart, files and command runner.
 func TestPreDeployModelCopyFaults(t *testing.T) {
-	base := t.TempDir()
+	base := newTestStateRoot(t)
 	nas, state := filepath.Join(base, "nas"), filepath.Join(base, "worker")
 	cache := filepath.Join(state, "model-cache")
 	must := func(err error) {
@@ -906,7 +906,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 // Environment restart fault extends the acceptance suite with real binary
 // builder process groups, HTTP, SQLite, worker cache and command execution.
 func TestPreDeployEnvironmentBuildRestart(t *testing.T) {
-	base := t.TempDir()
+	base := newTestStateRoot(t)
 	nas := filepath.Join(base, "nas")
 	if e := os.Mkdir(nas, 0700); e != nil {
 		t.Fatal(e)

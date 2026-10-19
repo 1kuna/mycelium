@@ -443,7 +443,7 @@ type reconcileStopHook struct{ stop func() }
 func (s reconcileStopHook) Stop(context.Context, time.Duration) error { s.stop(); return nil }
 func (s reconcileStopHook) Empty(context.Context) (bool, error)       { return true, nil }
 func TestHostReconcileReadsFinalCustodyAfterStop(t *testing.T) {
-	dir, spool := t.TempDir(), t.TempDir()
+	dir, spool := newTestStateRoot(t), t.TempDir()
 	clock := &fakeClock{now: time.Unix(1000, 0)}
 	testHostOpen(t, dir, clock)
 	if err := AdoptHostWorker(dir, HostWorker{State: spool, Host: "test-host", Name: "one", Queue: "queue"}); err != nil {
@@ -487,7 +487,7 @@ func TestHostReconcileWorkerHeartbeatIndependentOfOtherQueue(t *testing.T) {
 }
 
 func TestHostReconcileFinalCustodyFailureCannotConfirm(t *testing.T) {
-	dir, spool := t.TempDir(), t.TempDir()
+	dir, spool := newTestStateRoot(t), t.TempDir()
 	clock := &fakeClock{now: time.Unix(1000, 0)}
 	testHostOpen(t, dir, clock)
 	if err := AdoptHostWorker(dir, HostWorker{State: spool, Host: "test-host", Name: "one", Queue: "queue"}); err != nil {
@@ -543,7 +543,7 @@ func TestHostReconcileOpenPreservesWorkerLeave(t *testing.T) {
 
 func TestHostReconcileCancelledSavedResultAfterConfirmedCleanup(t *testing.T) {
 	q, clock := fixture(t)
-	dir, spool := t.TempDir(), t.TempDir()
+	dir, spool := newTestStateRoot(t), t.TempDir()
 	s := testHostOpen(t, dir, clock)
 	m := machine("one", "fake")
 	m.HostID = s.Host

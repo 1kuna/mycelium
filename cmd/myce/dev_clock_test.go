@@ -16,7 +16,7 @@ import (
 )
 
 func TestDevClockSubmissionExpiryEndToEnd(t *testing.T) {
-	root := t.TempDir()
+	root := currentTestStateRoot(t)
 	binary := filepath.Join(root, "myce")
 	if output, err := exec.Command("go", "build", "-race", "-o", binary, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v %s", err, output)
@@ -115,7 +115,7 @@ func TestDevClockSubmissionExpiryEndToEnd(t *testing.T) {
 }
 
 func TestDevClockCLIProductionIsolation(t *testing.T) {
-	root := t.TempDir()
+	root := currentTestStateRoot(t)
 	q, err := myce.Open(filepath.Join(root, "queue.db"), filepath.Join(root, "checkpoints"), myce.RealClock{})
 	if err != nil {
 		t.Fatal(err)

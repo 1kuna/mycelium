@@ -289,7 +289,7 @@ func TestHostRestFreshnessAndRevision(t *testing.T) {
 	}
 	for _, kind := range []string{"revision", "boot"} {
 		t.Run(kind, func(t *testing.T) {
-			root := t.TempDir()
+			root := newTestStateRoot(t)
 			dir := filepath.Join(root, "host")
 			clock := &envelopeClock{RealClock{}.Now().UTC()}
 			s, err := InitializeHostIntent(dir, "fixture-host", clock)
@@ -430,7 +430,7 @@ func TestHostRestCollectorEvidence(t *testing.T) {
 		{"queue-rebooted", "UNKNOWN", func(q *HostQueueObservation) { q.Boot = "previous-boot" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := newTestStateRoot(t)
 			dir := filepath.Join(root, "host")
 			clock := &envelopeClock{RealClock{}.Now().UTC()}
 			s, err := InitializeHostIntent(dir, "fixture-host", clock)
@@ -478,7 +478,7 @@ func TestHostRestCollectorEvidence(t *testing.T) {
 func TestHostRestRequiredHeartbeatExpiresDuringCollection(t *testing.T) {
 	for _, healthy := range []bool{true, false} {
 		t.Run(fmt.Sprintf("healthy=%v", healthy), func(t *testing.T) {
-			root := t.TempDir()
+			root := newTestStateRoot(t)
 			dir := filepath.Join(root, "host")
 			clock := &envelopeClock{time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 			s, err := InitializeHostIntent(dir, "fixture-host", clock)

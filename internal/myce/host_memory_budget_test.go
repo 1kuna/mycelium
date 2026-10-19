@@ -74,45 +74,16 @@ func TestHostMemoryAllowanceClosedReconfiguration(t *testing.T) {
 	}
 }
 
-func TestHostMemoryAllowanceMigrationAndValidation(t *testing.T) {
+func TestHostMemoryAllowanceValidation(t *testing.T) {
 	dir := readyTestHost(t, t.TempDir())
 	fallback, _, err := EffectiveHostMemoryBudget(dir, 3)
-	if err == nil || fallback.Bytes != 3<<30 || fallback.Qualification != "UNQUALIFIED" {
-		t.Fatal("conservative install input", fallback, err)
+	if err == nil || fallback.Bytes != 3<<30 {
+		t.Fatal(fallback, err)
 	}
 	for _, bad := range []float64{-1, math.NaN(), math.Inf(1)} {
 		if _, _, err := EffectiveHostMemoryBudget(dir, bad); err == nil {
 			t.Fatal("invalid fallback accepted")
 		}
-	}
-	original := []byte(`{"gib":3,"generation":19}`)
-	path := filepath.Join(dir, "host-memory-budget.json")
-	if err := os.WriteFile(path, original, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := EffectiveHostMemoryBudget(dir, 27); err == nil {
-		t.Fatal("old independent protocol remained active")
-	}
-	if _, err := ImportHostMemoryBudget(dir); err == nil {
-		t.Fatal("import while open accepted")
-	}
-	if err := closeTestHost(dir); err != nil {
-		t.Fatal(err)
-	}
-	budget, err := ImportHostMemoryBudget(dir)
-	if err != nil || budget.Bytes != 3<<30 || budget.Qualification != "UNQUALIFIED" {
-		t.Fatal("conservative input changed", budget, err)
-	}
-	if _, err := ImportHostMemoryBudget(dir); err == nil {
-		t.Fatal("repeated import overwrote host policy")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(data, original) {
-		t.Fatal("migration source altered", err)
-	}
-	effective, _, err := EffectiveHostMemoryBudget(dir, 27)
-	if err != nil || effective != budget {
-		t.Fatal("old file overrode imported policy", effective, err)
 	}
 	s, err := ReadHostIntent(dir)
 	if err != nil {

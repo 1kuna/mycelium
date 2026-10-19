@@ -84,7 +84,7 @@ func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *Capabilit
 	if c.OwnerSignals == nil {
 		c.OwnerSignals = LocalOwnerSignals
 	}
-	if err := os.MkdirAll(c.StateDir, 0700); err != nil {
+	if err := PrepareStateRoots(c.StateDir, c.HostStateDir); err != nil {
 		return err
 	}
 	lockDir := c.HostStateDir

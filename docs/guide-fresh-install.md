@@ -5,14 +5,14 @@ in-place converter, recovery journal, or `myce host convert` command. The RC
 installation's queued work was canary/test work, and is not imported. Production
 that runs outside the queue stays under its existing owner's control.
 
-Queue startup checks the persisted `queue.data` schema marker through read-only
-SQLite access. Worker startup checks the small leading `schema_version` marker
-in `state.json`, `operator-stop.json`, engine/attempt records, and saved
-environment-build records. Host control checks old marker names
-and registry headers. No legacy jobs, reports, receipts, or process records are
-decoded or adopted. Refusal returns `legacy_state_present`, names the archive
-paths, and instructs a fresh install. It does not archive, modify, or delete the
-old state, including SQLite WAL files.
+Every current state root carries `.myce-format` containing `v3` followed by a
+newline. Queue, worker, host-control and install startup check all roots before
+any filesystem writes. An absent or empty root is fresh: its marker is written
+first, fsynced, and its directory synced. A non-empty root without that exact
+marker is refused with `legacy_state_present`, naming the root and instructing
+a fresh install. No legacy contents are inspected, decoded, modified or deleted;
+this also covers orphan WAL/side files, worker results and memory-budget files.
+Pre-marker development states are refused too; they need no migration.
 
 The operator must first stop the old queue, workers, and their controllers, and
 prevent their old service definitions from restarting during the archive/install
@@ -31,7 +31,7 @@ active lookup paths, preserving their contents:
 An uninstanced worker uses `~/.local/share/mycelium/worker/state/`. Saved
 `state_dir`, `db`, `host_state_dir`, `model_cache`, and `environment_cache`
 values select the actual paths; archive any separately configured old data/cache
-roots as well. A queue refusal names both its database and containing directory.
+roots as well. A queue refusal names the directory containing its database.
 Keep checkpoints and unique evidence separately; a fresh queue does not adopt
 old checkpoints or attempts. Do not remove any archive as part of this procedure.
 
@@ -59,6 +59,14 @@ data prevents that empty-install confirmation. This is a statement about prior
 Mycelium custody, not a privileged physical-exclusion PASS. Native exclusion and
 readiness still require their normal observations. Both the unit condition and
 service entry stay fenced while CLOSED.
+
+Before the first open, `myce host close --local --config <worker-config>`
+reconciles the installed queue even while the CLOSED worker units have never
+started. `myce host status --local --config <worker-config> --expect closed
+--verdict --json` can then report PASS when native exclusion passes and the
+reachable queue acknowledges the close with zero copies, attempts or custody.
+No worker session is invented; an unreachable queue or surviving custody still
+prevents confirmation and open.
 
 Read `myce host status --local --config <worker-config> --json`. Require
 `desired.state == "closed"` and `host_settlement == "confirmed"`. A separately

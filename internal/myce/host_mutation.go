@@ -23,6 +23,10 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 	if v.Privileged || !validHostMutation(m) {
 		return result, ErrHostChild
 	}
+	roots := append([]string{v.StateDir}, v.Config.StateRoots()...)
+	if err := CheckStateRoots(roots...); err != nil {
+		return result, err
+	}
 	if m.Operation == "resolve-docker" {
 		allowed := m.SpoolDir != "" && m.SpoolDir == v.Config.State
 		workers, e := HostWorkers(v.StateDir)
@@ -145,7 +149,13 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 	case "close":
 		r, e := h.Disable(ctx, m.Reason, m.Grace)
 		result = HostMutationResult{HostRevision: r.HostRevision, Stopped: r.Stopped, CleanupConfirmed: r.Confirmed, Exclusion: r.Exclusion}
-		if r.cleanupComplete {
+		// Closing must fence the configured queue even when no worker has
+		// ever run. Reconciliation asks for exact obligations and cannot
+		// discharge a missing session; only an empty queue ack settles empty custody.
+		if e == nil && x.Reconcile != nil {
+			e = x.Reconcile(ctx, v)
+		}
+		if r.cleanupComplete && e == nil {
 			return result, nil
 		}
 		if r.Revision > 0 {

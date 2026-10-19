@@ -15,6 +15,9 @@ import (
 
 func testHostOpen(t *testing.T, dir string, clock Clock, host ...string) HostIntent {
 	t.Helper()
+	if err := PrepareStateRoots(dir); err != nil {
+		t.Fatal(err)
+	}
 	identity := "test-host"
 	if len(host) > 0 {
 		identity = host[0]
@@ -141,7 +144,7 @@ func TestHostRevisionMissingCorruptUnsupportedAndMixed(t *testing.T) {
 	}
 	dir := t.TempDir()
 	testHostOpen(t, dir, RealClock{})
-	os.WriteFile(filepath.Join(dir, "DISABLED"), []byte(`{}`), 0600)
+	os.Remove(filepath.Join(dir, FormatMarker))
 	if _, err := ReadHostIntent(dir); !errors.Is(err, ErrHostState) {
 		t.Fatal(err)
 	}

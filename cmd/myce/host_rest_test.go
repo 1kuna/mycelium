@@ -19,7 +19,7 @@ import (
 
 func TestHostRestDevExpectations(t *testing.T) {
 	r, c := envelopeFixture(t)
-	root := filepath.Dir(c.Config)
+	root := filepath.Join(filepath.Dir(c.Config), "dev-state")
 	c.HostStateDir = filepath.Join(root, "dev-host")
 	d, err := myce.StartDev(myce.DevConfig{HostStateDir: c.HostStateDir, HostID: c.HostID, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "fixture-token", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
 	if err != nil {

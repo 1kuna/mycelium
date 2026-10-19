@@ -36,7 +36,7 @@ func TestDisableDetachedMarkerHelper(t *testing.T) {
 
 func testDisableDetachedGroup(t *testing.T, helper bool) {
 	t.Helper()
-	root, state := t.TempDir(), t.TempDir()
+	root, state := newTestStateRoot(t), newTestStateRoot(t)
 	identity := ID()
 	cmd := exec.Command("sleep", "60")
 	if helper {
@@ -120,7 +120,7 @@ func requireNativeMarkerDisableReport(t *testing.T, h HostControl, r DisableRepo
 }
 
 func TestDisableRefusesActiveLegacySpool(t *testing.T) {
-	root, state := t.TempDir(), t.TempDir()
+	root, state := newTestStateRoot(t), newTestStateRoot(t)
 	store, err := (Worker{StateDir: state}).openStore()
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +158,7 @@ func TestHostPSDeadlineIncludesInheritedOutputPipe(t *testing.T) {
 }
 
 func TestDisableRejectsRecordWithoutIdentityEvenWhenPIDIsGone(t *testing.T) {
-	root, state := t.TempDir(), t.TempDir()
+	root, state := newTestStateRoot(t), newTestStateRoot(t)
 	if err := saveWorkerJSON(root, "worker-test.json", HostWorker{State: state}); err != nil {
 		t.Fatal(err)
 	}

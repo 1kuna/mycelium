@@ -53,7 +53,7 @@ id=$(./myce submit job.yaml)
 ```
 
 Stop dev with Ctrl-C. It plans a leave for each worker, stops resumable jobs,
-and waits for non-resumable commands to finish. The queue database (`myce.db`)
+and waits for non-resumable commands to finish. The queue database (`myce-state/myce.db`)
 and checkpoint folders (`checkpoints/`) persist for the next run. Local worker
 spools persist beside the database under `workers/`.
 
@@ -110,7 +110,7 @@ after it exits. Wait exits `0` for all success, `1` for failed/cancelled jobs,
 It retries queue/network outages. See [agent waiting](docs/START-HERE.md#waiting-for-long-jobs-agents).
 
 ```sh
-myce queue --listen 127.0.0.1:7331 --db myce.db --checkpoints /shared/checkpoints
+myce queue --listen 127.0.0.1:7331 --db myce-state/myce.db --checkpoints /shared/checkpoints
 myce join --name laptop --gpu fake --memory-gb 16 --reserve-memory-gb 2 --heartbeat 1s
 myce leave --name laptop              # asks wait/stop for non-resumable jobs
 myce leave --name laptop --now         # signals every job; keeps checkpoint grace

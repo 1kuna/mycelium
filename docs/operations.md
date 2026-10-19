@@ -967,13 +967,11 @@ cannot supply an active runtime allowance before that explicit configuration.
 # After closing the host, preserve its conservative existing input:
 myce host-memory-budget configure <EXISTING_CONSERVATIVE_GIB> --host-state-dir <HOST_STATE_DIR>
 myce host-memory-budget show --host-state-dir <HOST_STATE_DIR>
-# Alternatively, explicitly import the former shared file's value once:
-myce host-memory-budget import --host-state-dir <HOST_STATE_DIR>
 ```
 
 The existing host controller serializes the CLOSED check and atomic allowance
-write in `host-state.json`. The former file remains intact as inert input after
-import; its generation is never an admission authority. Reports that disagree
+write in `host-state.json`. RC roots must be archived before a fresh install;
+there is no memory-budget file converter. Reports that disagree
 on the allowance fence further admission until they agree. Aggregate charges
 include both devices, model residency, preparation, sidecars and retained
 unconfirmed releases, including slack. Status shows effective bytes and
@@ -1147,7 +1145,7 @@ certified by the native cgroup or inspected automatically; use the managed batch
 adapter and its custody/label contract for qualified container work.
 
 Preserve the conservative existing value as UNQUALIFIED input during explicit
-CLOSED configuration/import. Do not raise or lower it during an owner switch.
+CLOSED configuration. Do not raise or lower it during an owner switch.
 Native capacity requires separately authorized simultaneous-envelope and
 headroom measurement; laptop fixture values do not qualify native admission.
 

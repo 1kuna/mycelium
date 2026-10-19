@@ -31,6 +31,25 @@ for kind, dev, native, idle in (("release-7285a88", "", "", ""), ("release-7285a
     subprocess.run(["go", "test", "-C", str(args.scratch), "./internal/myce", "-run", "^TestWriteWP8ReleaseFixture$", "-count=1"], env=env, check=True)
 (args.output / "writers.json").write_text(json.dumps({"commit": subprocess.check_output(["git", "-C", str(repo), "rev-parse", "7285a88"], text=True).strip(), "sha256": writers}, indent=2) + "\n")
 
+# Snapshot live WAL/SHM and standalone memory policy using the actual RC writers.
+(args.scratch / "internal/myce/wp8_partials_test.go").write_bytes((Path(__file__).parent / "release-partials-writer_test.go.txt").read_bytes())
+env = dict(os.environ, WP8_REVIEW_PARTIALS=str((args.output / "release-7285a88-partials").resolve()))
+subprocess.run(["go", "test", "-C", str(args.scratch), "./internal/myce", "-run", "^TestWriteReviewPartialArtifacts$", "-count=1"], env=env, check=True)
+partial_root = args.output / "release-7285a88-partials"
+partial_writers = {
+    name: hashlib.sha256(subprocess.check_output(["git", "-C", str(repo), "show", "7285a88:internal/myce/" + name])).hexdigest()
+    for name in ("queue.go", "host_memory_budget.go")
+}
+(args.output / "release-partials-provenance.json").write_text(json.dumps({
+    "commit": subprocess.check_output(["git", "-C", str(repo), "rev-parse", "7285a88"], text=True).strip(),
+    "generator": "generate-release-fixtures.py",
+    "test": "release-partials-writer_test.go.txt",
+    "test_sha256": hashlib.sha256((Path(__file__).parent / "release-partials-writer_test.go.txt").read_bytes()).hexdigest(),
+    "writers_sha256": partial_writers,
+    "files_sha256": {str(path.relative_to(partial_root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                     for path in sorted(partial_root.rglob("*")) if path.is_file()},
+}, indent=2) + "\n")
+
 if args.install_home:
     args.install_home.mkdir(parents=True, exist_ok=False)
     binary = args.output / "synthetic-executable"

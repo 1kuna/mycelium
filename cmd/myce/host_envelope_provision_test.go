@@ -19,7 +19,7 @@ import (
 )
 
 func TestHostEnvelopeDevProvisioning(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
+	root, err := filepath.EvalSymlinks(currentTestStateRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

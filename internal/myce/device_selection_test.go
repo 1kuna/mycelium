@@ -158,7 +158,15 @@ func TestDeviceSelectionDockerEnvironment(t *testing.T) {
 					t.Fatal(err)
 				}
 				t.Cleanup(p.docker.close)
-				await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
+				await(t, func() bool {
+					select {
+					case result := <-p.done:
+						t.Fatalf("Docker exited before running: %+v", result)
+					default:
+					}
+					_, err := os.Stat(filepath.Join(root, "running"))
+					return err == nil
+				})
 				data, err := os.ReadFile(filepath.Join(root, "calls"))
 				if err != nil {
 					t.Fatal(err)
@@ -196,7 +204,15 @@ func TestDeviceSelectionDockerSidecarEnvironment(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(p.docker.close)
-			await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
+			await(t, func() bool {
+				select {
+				case result := <-p.done:
+					t.Fatalf("Docker exited before running: %+v", result)
+				default:
+				}
+				_, err := os.Stat(filepath.Join(root, "running"))
+				return err == nil
+			})
 			p.stop(c.Now(), 0, true)
 			<-p.done
 			data, err := os.ReadFile(filepath.Join(root, "calls"))
