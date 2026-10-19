@@ -265,3 +265,123 @@ func TestHostRestVerdictAndExitUseOneInstant(t *testing.T) {
 		}
 	}
 }
+
+func TestHostRestCollectionErrorMatrix(t *testing.T) {
+	steps := []string{"identity_resolve", "status", "status_missing", "exclusion", "final_resolve", "final_fence", "final_deadline", "wait_pause"}
+	for _, step := range steps {
+		for _, expect := range []string{"closed", "ready"} {
+			for _, jsonOutput := range []bool{false, true} {
+				t.Run(step+"/"+expect+"/json="+strconv.FormatBool(jsonOutput), func(t *testing.T) {
+					r, _, c := localIdentityFixture(t)
+					clock := &waitClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+					at := clock.Now()
+					revision := myce.HostRevision{Revision: 1, Operation: "fixture-operation"}
+					host, boot, state := "fixture-host", "fixture-boot", "closed"
+					if expect == "ready" {
+						state = "open"
+					}
+					zero, yes := 0, true
+					e := myce.UnknownHostEnvelope("status", clock)
+					e.Host, e.Boot, e.Operation = &host, &boot, &revision.Operation
+					e.Desired = myce.HostEnvelopeState{State: &state, Revision: &revision.Revision}
+					e.Observed = e.Desired
+					e.QueueRevision, e.Ready = &revision.Revision, &yes
+					e.Settlement = "confirmed"
+					e.LastClose = &myce.HostClose{HostRevision: revision, Settlement: "confirmed", SettledAt: &at}
+					for key := range e.Sources {
+						e.Sources[key] = &at
+					}
+					e.Sources["required_workers"] = &at
+					e.RestEvidence = myce.HostRestEvidence{QueueReachable: &yes, QueueAt: &at, UnfencedQueued: &zero}
+					e.Counts = myce.HostEnvelopeCounts{Active: &zero, Preparing: &zero, Stopping: &zero, Unsettled: &zero, Queued: &zero, FencedQueued: &zero, UnresolvedPlacement: &zero}
+					injected := false
+					if step == "identity_resolve" {
+						r.Lookup = func(string) (myce.WorkerAccount, error) {
+							injected = true
+							return myce.WorkerAccount{}, myce.ErrHostIdentity
+						}
+					}
+					if step == "wait_pause" {
+						// A fresh proven violation must still become UNKNOWN when a later
+						// collection step errors, rather than preserving an earlier verdict.
+						one, no := 1, false
+						e.Counts.Active, e.Ready = &one, &no
+						e.RestEvidence.WorkerHealth = []myce.HostRestWorkerHealth{{At: &at, MaxAge: myce.HostObservationWindow, Value: &no}}
+					}
+					launch := func(_ context.Context, s myce.HostChildLaunch) ([]byte, error) {
+						result := myce.HostMutationResult{HostRevision: revision}
+						switch s.Request.Operation {
+						case "status":
+							if step == "status" {
+								injected = true
+								return nil, myce.ErrHostChild
+							}
+							if step == "status_missing" {
+								injected = true
+							} else {
+								result.Envelope = &e
+							}
+						case "resolve":
+							if step == "final_resolve" {
+								injected = true
+								return nil, myce.ErrHostChild
+							}
+							if step == "final_fence" {
+								injected = true
+								result.Revision++
+							}
+							if step == "final_deadline" {
+								injected = true
+								clock.advance(30 * time.Second)
+							}
+						default:
+							t.Fatal("unexpected operation", s.Request.Operation)
+						}
+						return json.Marshal(struct {
+							Version   int                     `json:"version"`
+							Operation string                  `json:"operation"`
+							Result    myce.HostMutationResult `json:"result"`
+						}{1, s.Request.Operation, result})
+					}
+					observe := func(context.Context, myce.HostInvocation) (myce.HostExclusionReport, error) {
+						if step == "exclusion" {
+							injected = true
+							return myce.HostExclusionReport{}, myce.ErrHostChild
+						}
+						return myce.HostExclusionReport{HostRevision: revision, Boot: boot, At: at, Verdict: "PASS", RestartSafe: &yes, Units: []myce.ExclusionUnit{{Unit: "myce-worker.service", Populated: new(bool)}}, RunningContainers: &zero, GPUHolders: &zero, PendingOperations: &zero, Sources: e.Sources}, nil
+					}
+					pause := func(context.Context, time.Duration) error {
+						if step != "wait_pause" {
+							t.Fatal("unexpected pause")
+						}
+						injected = true
+						return myce.ErrHostDeadline
+					}
+					args := []string{"status", "--local", "--worker-user", "worker", "--config", c.Config, "--expect", expect, "--verdict"}
+					if step == "wait_pause" {
+						args = append(args, "--wait")
+					}
+					if jsonOutput {
+						args = append(args, "--json")
+					}
+					var out bytes.Buffer
+					err := hostEnvelopeCommandWithTiming(args, myce.MachineProbe{}, &out, r, launch, nil, observe, clock, pause)
+					if !injected {
+						t.Fatal("error injection was not reached")
+					}
+					if exitCode(err) == 0 {
+						t.Fatal("collection error exited zero", out.String())
+					}
+					if jsonOutput {
+						got := validateEnvelopeOutput(t, out.Bytes())
+						if got.Verdict != "UNKNOWN" || !slices.Contains(got.Reasons, "collection_failed") {
+							t.Fatalf("got %+v exit=%d", got.HostRestVerdict, exitCode(err))
+						}
+					} else if !strings.Contains(out.String(), expect+": UNKNOWN (") || !strings.Contains(out.String(), "collection_failed") {
+						t.Fatalf("output=%q exit=%d", out.String(), exitCode(err))
+					}
+				})
+			}
+		}
+	}
+}

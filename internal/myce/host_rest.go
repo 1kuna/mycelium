@@ -19,13 +19,169 @@ type HostRestVerdict struct {
 // Typed observation facts survive the dropped-child boundary. Diagnostics and
 // human hold messages are not inputs to the rest decision.
 type HostRestEvidence struct {
-	QueueReachable   *bool      `json:"queue_reachable"`
-	MemoryAllowance  *int64     `json:"memory_allowance_bytes"`
-	QueueAt          *time.Time `json:"queue_observed_at"`
-	ReadyViolation   bool       `json:"required_worker_unhealthy"`
-	OpenAdmission    bool       `json:"queue_admission_open"`
-	ClosedViolations []string   `json:"closed_violations"`
-	UnfencedQueued   *int       `json:"unfenced_queued_jobs"`
+	QueueReachable   *bool                              `json:"queue_reachable"`
+	MemoryAllowance  *int64                             `json:"memory_allowance_bytes"`
+	QueueAt          *time.Time                         `json:"queue_observed_at"`
+	WorkerHealth     []HostRestWorkerHealth             `json:"worker_health,omitempty"`
+	QueueFacts       []HostRestItem[HostRestQueueFacts] `json:"queue_facts,omitempty"`
+	CollectionFailed bool                               `json:"collection_failed,omitempty"`
+	UnfencedQueued   *int                               `json:"unfenced_queued_jobs"`
+}
+
+// HostRestItem binds a fact to its own observation time and freshness bound.
+// Positive and negative facts use the same representation and normalization.
+type HostRestItem[T any] struct {
+	At     *time.Time    `json:"observed_at"`
+	MaxAge time.Duration `json:"max_age_ns"`
+	Value  *T            `json:"value"`
+}
+
+type HostRestWorkerHealth = HostRestItem[bool]
+
+type HostRestQueueFacts struct {
+	OpenAdmission    bool     `json:"admission_open"`
+	ClosedViolations []string `json:"closed_violations"`
+}
+
+// normalizedHostRestEvidence is deliberately private: the verdict evaluator can
+// only receive evidence that has passed the single normalization boundary.
+type normalizedHostRestEvidence struct {
+	ObservationFresh           bool
+	Host, Operation, Boot      *string
+	Desired, Observed          HostEnvelopeState
+	QueueRevision              *uint64
+	Counts                     HostEnvelopeCounts
+	Ready                      *bool
+	LocalExclusion, Settlement string
+	LastClose                  *normalizedRestClose
+	Errors                     []ExclusionError
+	QueueReachable             *bool
+	MemoryAllowance            *int64
+	UnfencedQueued             *int
+	CollectionFailed           bool
+	workerHealth               []*bool
+	queueFacts                 []*HostRestQueueFacts
+}
+
+type normalizedRestClose struct {
+	Revision              uint64
+	Operation, Settlement string
+}
+
+func normalizeRestItem[T any](item HostRestItem[T], now time.Time) *T {
+	if item.At == nil || item.At.IsZero() || item.At.After(now) || item.MaxAge <= 0 || now.Sub(*item.At) > item.MaxAge {
+		return nil
+	}
+	return item.Value
+}
+
+// normalizeHostRestEvidence maps ALL inputs at one instant, before any verdict
+// rule. Expired (including future-dated) facts are absent regardless of sign.
+// The input and its wire timestamps are never mutated by verdict evaluation.
+func normalizeHostRestEvidence(input HostEnvelope, now time.Time) (HostEnvelope, normalizedHostRestEvidence) {
+	e := input
+	e.Sources = make(map[string]*time.Time, len(input.Sources))
+	n := normalizedHostRestEvidence{}
+	sources := map[string]bool{}
+	for name, at := range input.Sources {
+		value := normalizeRestItem(HostRestItem[bool]{at, HostObservationWindow, hostPtr(true)}, now)
+		sources[name] = value != nil
+		if value != nil {
+			e.Sources[name] = at
+		} else {
+			e.Sources[name] = nil
+		}
+	}
+	// observed_at remains the public completion time. Preserve the original
+	// observation time separately so repeated projections never renew evidence.
+	if _, recorded := input.Sources["observation"]; !recorded {
+		at := input.At
+		sources["observation"] = normalizeRestItem(HostRestItem[bool]{&at, HostObservationWindow, hostPtr(true)}, now) != nil
+		if sources["observation"] {
+			e.Sources["observation"] = &at
+		} else {
+			e.Sources["observation"] = nil
+		}
+	}
+	for _, item := range input.RestEvidence.QueueFacts {
+		facts := normalizeRestItem(item, now)
+		n.queueFacts = append(n.queueFacts, facts)
+		if facts == nil {
+			sources["queue"] = false
+			e.Sources["queue"] = nil
+		}
+	}
+	if !sources["local_intent"] {
+		e.Host, e.Operation, e.Boot = nil, nil, nil
+		e.Desired = HostEnvelopeState{}
+		e.LastClose = nil
+		e.Settlement = "unknown"
+		e.RestEvidence.MemoryAllowance = nil
+	}
+	if !sources["observed_state"] {
+		e.Observed = HostEnvelopeState{State: hostPtr("unknown")}
+	}
+	if !sources["queue"] {
+		e.QueueRevision = nil
+		e.Ready = nil
+		e.Counts.Active, e.Counts.Preparing, e.Counts.Stopping, e.Counts.Unsettled = nil, nil, nil, nil
+		e.Counts.Queued, e.Counts.FencedQueued, e.Counts.UnresolvedPlacement = nil, nil, nil
+		e.RestEvidence.UnfencedQueued = nil
+		e.Attempts = nil
+	}
+	if !sources["required_workers"] || !sources["local_intent"] {
+		e.Ready = nil
+	}
+	for _, health := range input.RestEvidence.WorkerHealth {
+		value := normalizeRestItem(health, now)
+		n.workerHealth = append(n.workerHealth, value)
+		if value == nil {
+			e.Ready = nil
+		}
+	}
+	// Partial queue facts have their own timestamp, independent of a complete
+	// acknowledgement. They may prove a violation when another queue is absent.
+	if normalizeRestItem(HostRestItem[bool]{input.RestEvidence.QueueAt, HostObservationWindow, hostPtr(true)}, now) == nil {
+		e.RestEvidence.QueueReachable = nil
+	}
+	reportAt, hasReport := input.Sources["exclusion_report"]
+	reportFresh := !hasReport || reportAt != nil && sources["exclusion_report"]
+	localComplete := reportFresh
+	for _, name := range []string{"local_intent", "cgroups", "docker", "gpu_holders"} {
+		localComplete = localComplete && sources[name]
+	}
+	if !localComplete {
+		e.LocalExclusion = "UNKNOWN"
+		e.RestartSafe = nil
+	}
+	if !sources["cgroups"] || !reportFresh {
+		e.Units = nil
+	}
+	if !sources["docker"] || !reportFresh {
+		e.Counts.Containers, e.Counts.PendingDaemon = nil, nil
+	}
+	if !sources["gpu_holders"] || !reportFresh {
+		e.Counts.GPUHolders = nil
+	}
+	e.Errors = []ExclusionError{}
+	for _, failure := range input.Errors {
+		// Contrary facts belong to their source, never to the evaluation timestamp.
+		if !failure.Contrary || reportFresh && sources[failure.Component] {
+			e.Errors = append(e.Errors, failure)
+		}
+	}
+	n.ObservationFresh = sources["observation"]
+	n.Host, n.Operation, n.Boot = e.Host, e.Operation, e.Boot
+	n.Desired, n.Observed = e.Desired, e.Observed
+	n.QueueRevision, n.Counts, n.Ready = e.QueueRevision, e.Counts, e.Ready
+	n.LocalExclusion, n.Settlement, n.Errors = e.LocalExclusion, e.Settlement, e.Errors
+	n.QueueReachable, n.MemoryAllowance = e.RestEvidence.QueueReachable, e.RestEvidence.MemoryAllowance
+	n.UnfencedQueued, n.CollectionFailed = e.RestEvidence.UnfencedQueued, e.RestEvidence.CollectionFailed
+	if e.LastClose != nil {
+		n.LastClose = &normalizedRestClose{e.LastClose.Revision, e.LastClose.Operation, e.LastClose.Settlement}
+	}
+	e.At = now.UTC()
+	return e, n
 }
 
 type HostPlacementObservation struct {
@@ -94,10 +250,26 @@ func (q *Queue) hostPlacementObservation(host string) *HostPlacementObservation 
 	return out
 }
 
-// ApplyRestVerdict is a pure product decision over one fenced observation. It
-// never collects, mutates host state, or substitutes elapsed time for release.
+// ApplyRestVerdict is the normalization/evaluation adapter. All rules live in
+// restVerdict, which cannot access a clock or perform collection.
 func (e *HostEnvelope) ApplyRestVerdict(expect string, now time.Time) {
-	r := &HostRestVerdict{Expectation: expect, Verdict: "PASS", Reasons: []string{}, QueueReachable: e.RestEvidence.QueueReachable, MemoryAllowance: e.RestEvidence.MemoryAllowance}
+	projection, n := normalizeHostRestEvidence(*e, now)
+	*e = projection
+	e.HostRestVerdict = restVerdict(n, expect)
+}
+
+// restVerdict is a pure function of normalized evidence and expectation.
+func restVerdict(n normalizedHostRestEvidence, expect string) *HostRestVerdict {
+	e := &n
+	partial := []string{}
+	openAdmission := false
+	for _, facts := range n.queueFacts {
+		if facts != nil {
+			openAdmission = openAdmission || facts.OpenAdmission
+			partial = append(partial, facts.ClosedViolations...)
+		}
+	}
+	r := &HostRestVerdict{Expectation: expect, Verdict: "PASS", Reasons: []string{}, QueueReachable: e.QueueReachable, MemoryAllowance: e.MemoryAllowance}
 	add := func(severity, code string) {
 		if !slices.Contains(r.Reasons, code) {
 			r.Reasons = append(r.Reasons, code)
@@ -106,11 +278,10 @@ func (e *HostEnvelope) ApplyRestVerdict(expect string, now time.Time) {
 			r.Verdict = severity
 		}
 	}
-	source := func(name string) bool { at := e.Sources[name]; return at != nil && freshHostSource(*at, now) }
-	if !freshHostSource(e.At, now) {
+	if !n.ObservationFresh {
 		add("UNKNOWN", "observation_stale")
 	}
-	if e.Host == nil || e.Operation == nil || e.Boot == nil || e.Desired.Revision == nil || !source("local_intent") {
+	if e.Host == nil || e.Operation == nil || e.Boot == nil || e.Desired.Revision == nil {
 		add("UNKNOWN", "host_identity_unknown")
 	}
 	wanted := "closed"
@@ -127,16 +298,16 @@ func (e *HostEnvelope) ApplyRestVerdict(expect string, now time.Time) {
 	} else if *e.Observed.State != wanted || e.Desired.Revision != nil && *e.Observed.Revision != *e.Desired.Revision {
 		add("FAIL", "observed_state_mismatch")
 	}
-	if !source("queue") || e.QueueRevision == nil {
+	if e.QueueRevision == nil || e.Desired.Revision == nil {
 		add("UNKNOWN", "queue_acknowledgement_unknown")
-	} else if e.Desired.Revision == nil || *e.QueueRevision != *e.Desired.Revision {
+	} else if *e.QueueRevision != *e.Desired.Revision {
 		add("FAIL", "queue_revision_mismatch")
 	}
 	if r.QueueReachable == nil || !*r.QueueReachable {
 		add("UNKNOWN", "queue_unreachable")
 	}
 	checkCount := func(n *int, code string) {
-		if n == nil || !source("queue") {
+		if n == nil {
 			add("UNKNOWN", code+"_unknown")
 		} else if *n > 0 {
 			if code == "release_pending" {
@@ -146,31 +317,28 @@ func (e *HostEnvelope) ApplyRestVerdict(expect string, now time.Time) {
 			}
 		}
 	}
-	partialFresh := e.RestEvidence.QueueAt != nil && freshHostSource(*e.RestEvidence.QueueAt, now)
+
 	if expect == "ready" {
-		if partialFresh && slices.Contains(e.RestEvidence.ClosedViolations, "release_pending") {
+		if slices.Contains(partial, "release_pending") {
 			add("UNKNOWN", "release_pending")
 		}
-		if partialFresh && e.RestEvidence.ReadyViolation {
-			add("FAIL", "required_worker_unhealthy")
+		for _, health := range n.workerHealth {
+			if health != nil && !*health {
+				add("FAIL", "required_worker_unhealthy")
+			}
 		}
-		if e.Ready == nil || !*e.Ready || !source("required_workers") {
+		if e.Ready == nil || !*e.Ready {
 			add("UNKNOWN", "required_workers_not_ready")
 		}
 		checkCount(e.Counts.Unsettled, "release_pending")
 	} else {
-		if partialFresh && e.RestEvidence.OpenAdmission {
+		if openAdmission {
 			add("FAIL", "queue_admission_open")
 		}
 		switch e.LocalExclusion {
 		case "FAIL":
 			add("FAIL", "local_exclusion_failed")
 		case "PASS":
-			for _, name := range []string{"cgroups", "docker", "gpu_holders"} {
-				if !source(name) {
-					add("UNKNOWN", "local_evidence_unknown")
-				}
-			}
 		default:
 			add("UNKNOWN", "local_exclusion_unknown")
 		}
@@ -189,26 +357,24 @@ func (e *HostEnvelope) ApplyRestVerdict(expect string, now time.Time) {
 		checkCount(e.Counts.Preparing, "preparing_attempts")
 		checkCount(e.Counts.Stopping, "stopping_attempts")
 		checkCount(e.Counts.Unsettled, "release_pending")
-		if partialFresh {
-			for _, code := range e.RestEvidence.ClosedViolations {
-				if code == "release_pending" {
-					add("UNKNOWN", code)
-				} else {
-					add("FAIL", code)
-				}
+		for _, code := range partial {
+			if code == "release_pending" {
+				add("UNKNOWN", code)
+			} else {
+				add("FAIL", code)
 			}
 		}
-		if e.Counts.Queued == nil || e.Counts.FencedQueued == nil || e.RestEvidence.UnfencedQueued == nil || !source("queue") {
+		if e.Counts.Queued == nil || e.Counts.FencedQueued == nil || e.UnfencedQueued == nil {
 			add("UNKNOWN", "placement_unknown")
 		} else {
-			if *e.RestEvidence.UnfencedQueued > 0 {
+			if *e.UnfencedQueued > 0 {
 				add("FAIL", "eligible_unfenced_work")
 			}
 			if *e.Counts.FencedQueued > 0 {
 				add("PASS", "queued_work_fenced")
 			}
 		}
-		if e.Counts.UnresolvedPlacement == nil || !source("queue") || *e.Counts.UnresolvedPlacement > 0 {
+		if e.Counts.UnresolvedPlacement == nil || *e.Counts.UnresolvedPlacement > 0 {
 			add("UNKNOWN", "placement_unknown")
 		}
 	}
@@ -220,6 +386,10 @@ func (e *HostEnvelope) ApplyRestVerdict(expect string, now time.Time) {
 			add("UNKNOWN", "collection_fence_changed")
 		}
 	}
+	if e.CollectionFailed {
+		add("UNKNOWN", "collection_failed")
+		r.Verdict = "UNKNOWN"
+	}
 	sort.Strings(r.Reasons)
-	e.HostRestVerdict = r
+	return r
 }

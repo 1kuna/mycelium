@@ -446,6 +446,12 @@ func TestHostEnvelopeReadyRequiredWorkers(t *testing.T) {
 				observation.Pending = []HostObligation{{Result: Result{Machine: "required-a", Session: "session", Execution: Execution{ID: "job", Attempt: 1}}}}
 			}
 			e, err := HostSnapshot(context.Background(), v, clock)
+			if mode == "stale" {
+				if err != nil || e.Ready != nil {
+					t.Fatal("expired heartbeat must be absent", e.Ready, err)
+				}
+				return
+			}
 			if err != nil || e.Ready == nil || *e.Ready != (mode == "ready") {
 				t.Fatal(mode, e, err)
 			}
