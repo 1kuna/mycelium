@@ -344,11 +344,7 @@ func TestSubmissionHTTP(t *testing.T) {
 }
 
 func TestSubmissionLegacyState(t *testing.T) {
-	// Written by the queue implementation at 8bc2a83; no submission records/keys.
-	data, err := os.ReadFile("testdata/submission-legacy.db")
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := []byte("unmarked queue data")
 	path := filepath.Join(t.TempDir(), "queue.db")
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)

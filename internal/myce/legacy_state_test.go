@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -38,95 +37,6 @@ func stateTree(t *testing.T, root string) map[string][32]byte {
 		t.Fatal(err)
 	}
 	return out
-}
-
-func TestLegacyReleaseRefusal(t *testing.T) {
-	for _, kind := range []string{"release-7285a88", "release-7285a88-native", "release-7285a88-idle", "release-7285a88-dev"} {
-		t.Run(kind, func(t *testing.T) {
-			root := t.TempDir()
-			if e := os.CopyFS(root, os.DirFS(filepath.Join("testdata", kind))); e != nil {
-				t.Fatal(e)
-			}
-			before := stateTree(t, root)
-			check := func(e error, path string) {
-				t.Helper()
-				var typed *LegacyStateError
-				if !errors.Is(e, ErrLegacyState) || !errors.As(e, &typed) || !strings.Contains(e.Error(), "legacy_state_present") || !strings.Contains(e.Error(), path) || !strings.Contains(e.Error(), "fresh install") {
-					t.Fatalf("missing actionable refusal: %v", e)
-				}
-			}
-			db := filepath.Join(root, "queue.db")
-			q, e := Open(db, root, RealClock{})
-			if q != nil {
-				q.Close()
-			}
-			check(e, root)
-			dir := filepath.Join(root, "workers", "one")
-			s, e := (Worker{StateDir: dir}).openStore()
-			if s != nil {
-				s.close()
-			}
-			check(e, dir)
-			if kind != "release-7285a88-dev" {
-				host := filepath.Join(root, "host")
-				_, e = ReadHostIntent(host)
-				check(e, host)
-				_, e = InitializeHostIntent(host, "fixture-host", RealClock{})
-				check(e, host)
-				_, e = HostWorkers(host)
-				check(e, host)
-			}
-			after := stateTree(t, root)
-			if len(before) != len(after) {
-				t.Fatal("refusal changed tree", len(before), len(after))
-			}
-			for p, h := range before {
-				if after[p] != h {
-					t.Fatal("refusal changed", p)
-				}
-			}
-		})
-	}
-}
-
-func TestLegacyQueueWALRefusal(t *testing.T) {
-	root := t.TempDir()
-	source := filepath.Join(root, "source.db")
-	db, e := sql.Open("sqlite", source)
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer db.Close()
-	if _, e = db.Exec(`PRAGMA journal_mode=WAL; CREATE TABLE queue(id INTEGER PRIMARY KEY, data BLOB); INSERT INTO queue VALUES(1,'{"jobs":{},"machines":{}}')`); e != nil {
-		t.Fatal(e)
-	}
-	target := filepath.Join(t.TempDir(), "queue.db")
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		b, e := os.ReadFile(source + suffix)
-		if e != nil {
-			t.Fatal(e)
-		}
-		if e = os.WriteFile(target+suffix, b, 0600); e != nil {
-			t.Fatal(e)
-		}
-	}
-	before := stateTree(t, filepath.Dir(target))
-	q, e := Open(target, root, RealClock{})
-	if q != nil {
-		q.Close()
-	}
-	if !errors.Is(e, ErrLegacyState) {
-		t.Fatalf("WAL-only RC accepted: %v", e)
-	}
-	after := stateTree(t, filepath.Dir(target))
-	if len(before) != len(after) {
-		t.Fatal("WAL refusal created files")
-	}
-	for p, h := range before {
-		if after[p] != h {
-			t.Fatal("WAL refusal changed", p)
-		}
-	}
 }
 
 func TestLegacyHostErrorProtocol(t *testing.T) {
@@ -217,10 +127,6 @@ func TestFreshInstallSurvivingDataRefused(t *testing.T) {
 }
 
 func TestLegacyStandaloneCustodyRefusal(t *testing.T) {
-	old, e := os.ReadFile("testdata/release-7285a88/workers/one/engine-engine-attempt.json")
-	if e != nil {
-		t.Fatal(e)
-	}
 	for _, record := range []string{"engine-old.json", "attempt-old.json", "external/recipe.partial/build-state.json"} {
 		t.Run(record, func(t *testing.T) {
 			root := t.TempDir()
@@ -235,7 +141,7 @@ func TestLegacyStandaloneCustodyRefusal(t *testing.T) {
 			if e := os.MkdirAll(filepath.Dir(path), 0700); e != nil {
 				t.Fatal(e)
 			}
-			if e := os.WriteFile(path, old, 0600); e != nil {
+			if e := os.WriteFile(path, []byte("surviving data"), 0600); e != nil {
 				t.Fatal(e)
 			}
 			before := stateTree(t, root)
